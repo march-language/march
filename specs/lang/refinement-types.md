@@ -3032,8 +3032,11 @@ span, a callee and a verdict; it does **not** record which parameter is to
 blame, and there is no truthful way to recover that after the fact, since an
 argument is an arbitrary expression over several parameters. So the tool does
 not attribute anything. It hypothesises a refinement onto the signature,
-re-runs the *real* checker over the function, and keeps the candidate only if
-the ledger's debt actually shrank and no new violation appeared.
+re-runs the *real* checker over the function **and every caller of it in the
+unit**, and keeps the candidate only if, site by site, it proves at least one
+obligation, breaks none, and creates no violation. A candidate that would turn a
+caller's call into a violation is reported as `refused (caller-violation)` with
+that call, not proposed.
 
 Two consequences follow, both intentional:
 
@@ -3058,6 +3061,65 @@ will not invent one it did not prove.
 
 See [docs/tooling.md](https://github.com/march-language/march/blob/main/docs/tooling.md)
 for the full command surface, including `--apply` and the editor code action.
+
+### Module-wide inference: `march --refine-infer`
+
+`--refine-infer` runs the same assume-and-re-check loop over every function in
+user code and every kind of refinement the checker can verify:
+
+| Kind | Example proposal |
+|---|---|
+| scalar parameter / return | `b : {Int \| _ != 0}`, `: {Int \| _ > 0}` |
+| relational | `i : {Int \| _ < n}` (a demand a callee makes, re-spelled in the caller) |
+| element parameter / return | `xs : List({Int \| _ > 0})`, `: (List({Int \| _ > 0}), Int)` |
+| abstract | `pred : a -> Bool[p]` with `: List(a[p])`, `Option(a[p])`, or `partition`'s `(List(a[p]), List({a \| !p(_)}))` |
+| fold accumulator | `fn (acc : {Int \| _ > 0}, x) -> …` |
+
+Candidates are mined from the program first — the predicate a skipped
+obligation asks for, refinements already written in signatures the function can
+see, comparisons in its body — and only then taken from the fixed grammar; at
+most 12 per slot, weakest first by implication. The search is a fixpoint over the
+call graph, callees first: returns and abstract refinements (which cost no
+caller anything) are tried before preconditions (which move the obligation to
+the callers), and a return that holds only through its tail call tries the
+callee's return too. A return is proposed only when the checker proves it **and**
+some caller gets something from it.
+
+```
+$ march --check --refine-infer app.march
+inferred refinements: 2 proposed, 1 refused; user skips 3 -> 1 (58 probes, 2 rounds)
+  pos_only (app.march:4)  return/elem : List({Int | _ > 0})  [element-return, closes 1]
+  total (app.march:6)  param xs/elem : List({Int | _ > 0})  [element-param, closes 1]
+  go: refused (caller-violation) param n : _ > 0
+    would break the call at app.march:9:21
+```
+
+`--refine-infer-diff` prints the edits as a diff; `--refine-infer-apply` writes
+them (through the same splicer the editor's code action uses), then re-checks the
+program and, if the result is not exactly the predicted one, reverts every edit
+and exits 3 — a mismatch is a bug in the tool, never something to reconcile by
+hand. A second run after applying proposes nothing. `forge refine --infer
+[--apply] [--diff]` runs it over the whole project as one checked unit, so a
+caller in another file counts (a project that does not check as a unit is tried
+one file at a time); `--apply-public` and `--allow-caller-violations` pass
+through, and `--fixpoint` is now the same thing. `--refine-infer-json` emits the same as JSON (version 1). With `--refine-report`,
+the report also prints the ledger as it will be once the proposals are applied
+(`refinement obligations (user code, if applied): …`), and for a `cap verified`
+module how many of its errors they close. In the editor, the code actions "Infer
+refinements for `f`" and "Infer refinements in this file" run the same inference
+and apply the same bytes; a precondition that adds unproven obligations at its
+callers is marked as needing confirmation. `--refine-infer-kinds
+k1,k4` restricts the kinds, `--refine-infer-budget N` caps the probes (default
+3000), and `--allow-caller-violations` accepts a refused precondition. A
+proposal on a public function with no caller in the unit is marked: its real
+callers are elsewhere. Nothing is proposed for a program that does not check.
+
+Like the per-function tool it cannot exceed the checker: a contract the checker
+does not prove is never proposed, however natural (a relational element return
+built by `List.filter` with a captured bound, an `Option` return through a local
+`fn`, a post that holds only via a callee's post). The v1 limits are a one-
+argument container's element slots, an Int-literal initial value for a fold
+accumulator, and mutually recursive functions (reported `scc-unsupported`).
 
 ---
 

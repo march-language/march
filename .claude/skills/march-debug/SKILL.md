@@ -244,6 +244,30 @@ scripts/compile-time-bench.sh          # cold / warm / edit scenarios over a cor
 A/B against a compiler built from the base commit means anything; check the load
 average first.
 
+## An unproven refinement obligation (`refinement_unverified`, `cap verified` error)
+
+First command: `march --check --refine-report FILE`. It prints the user-code ledger (proved,
+violated, trusted, skipped) and each skip's reason (`solver-undecided`,
+`unconstrained-subject`, `partial-conjunct`, …).
+
+Then let the checker propose the missing contract rather than writing one by hand:
+`march --check --refine-infer FILE` (dry run), or `forge refine --infer --diff` for a project.
+The project form checks every file as one unit, so a caller in another file counts. Apply with
+`--refine-infer-apply` / `forge refine --infer --apply`.
+
+- **No proposal:** the reason is in the output.
+  - `refused (caller-violation)`: the contract would break a caller.
+  - `external-callers`: a public function with no caller in the unit; add `--apply-public`.
+  - `scc-unsupported`: mutually recursive functions.
+  - Otherwise, no candidate the checker proves closes the site.
+- **A skip no proposal can close is a checker gap.** Check `specs/todos/` for its reason before
+  filing a new one.
+- **`--refine-infer-apply` exit 3** ("the re-check did not match the prediction") is an
+  inference bug and every edit has been reverted. Reduce it to a small fixture and add it to
+  the `infer-apply` group of `test/test_refinecheck.ml`. Probe/real divergences seen so far:
+  - global checker tables a probe forgot to patch;
+  - a pass that re-registers the witness module.
+
 ## Prove a refactor changed no behaviour
 
 Record a baseline on the base commit, check on yours. **Prove the oracle goes

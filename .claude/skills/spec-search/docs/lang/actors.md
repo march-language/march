@@ -5,30 +5,122 @@ nav_order: 9
 permalink: /docs/actors/
 ---
 
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Actors
 
-March's concurrency model is built on **actors** and **tasks**. Actors are isolated processes that communicate exclusively through message passing — no shared mutable state. Tasks are lightweight one-off computations that run concurrently and return a value.
+An actor is a process with its own state and its own mailbox. Other code reaches it
+only by sending messages; nothing shares its state. Each message runs one handler,
+which returns the actor's next state. March's concurrency model is built on actors
+and on **tasks**, which are lightweight one-off computations that run concurrently
+and return a value.
 
-**Compiled-actor status:** the core actor message plane runs both in the tree-walking interpreter and in ahead-of-time-compiled (native) binaries. In the compiled runtime, both actors and tasks run on an M:N green-thread scheduler (`runtime/march_scheduler.c`) — multiple OS threads, each running many lightweight green threads, with work-stealing across threads. Actor declarations lower to TIR (`lib/tir/lower_actor.ml`) and emit LLVM IR that calls the public C API (`march_spawn`/`march_send`/`march_kill`/`march_is_alive`, `runtime/march_runtime.c`); each actor runs as its own green thread. Actors park cooperatively when their mailbox is empty; tasks park when awaiting a result.
+Both run on the same M:N green-thread scheduler: a few OS threads, each running many
+green threads, with work-stealing between them. An actor parks when its mailbox is
+empty and a task parks while it waits for a result, so spawning hundreds of thousands
+of either is routine. The same programs run under the tree-walking interpreter and
+as compiled native binaries, and this page notes the few places where the two differ.
 
-**What is byte-identical interpreted vs compiled, and what is NOT.** The **live-message plane** — `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill` — produces identical observable output on both backends for a program whose output does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled — see the [operational reference](core-march.md) §4.10.5). Three *other* planes **diverge compiled** and are documented interpreter-first below, each a filed open finding (`specs/todos/`):
+Around the core (`spawn`, `send`, handlers) the chapter covers the things a real
+program needs: stopping an actor cleanly, hearing that one died, finding an actor by
+name, surviving a supervisor restart, bounding a mailbox, and reading an actor's
+state while it runs.
 
-- **Capabilities / dead-`send`** (`get_cap`, `send_checked`, plain `send` to a *dead* pid): compiled `send_checked` performs no epoch validation and returns an uninterned garbage atom for every cap; a plain `send` to a dead pid returns `Some` compiled but `None` interpreted. See [`core-march.md`](core-march.md) §4.10.6.
-- **`Actor.call` timeout**: the `timeout_ms` argument is accepted for API compatibility but **not enforced** in the compiled runtime (`runtime/march_runtime.c:1809–1810`) — a `call` cannot actually time out compiled.
-- **Supervision / external state inspection**: `get_actor_field`/`pid_of_int` (the only surface way to reach a supervised child) **SIGSEGV compiled** (`examples/supervision_strategies.march` exits 139), and the compiled supervisor does not run its children's `init` at `spawn`. See [`core-march.md`](core-march.md) §4.10.7.
+## On this page
 
-The rest of this tutorial marks each interp-only surface where it appears. For the typing side (actor declaration, `spawn`/`Pid` typing, message-payload typing) see the [typing reference](core-march-types.md) §2.6; for the scheduler and lowering internals, see the implementation reference (`specs/impl/index.md`).
+**Start here**
+
+- [Choosing a concurrency primitive](#choosing-a-concurrency-primitive)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+
+**The core**
+
+- [Defining an Actor](#defining-an-actor) and [parameterised `init`](#parameterised-init)
+- [Spawning Actors](#spawning-actors)
+- [Sending Messages](#sending-messages)
+- [Receiving Messages Inside a Handler](#receiving-messages-inside-a-handler)
+- [Stash and Become](#stash-and-become-multi-step-protocols-without-selective-receive)
+- [Actor Identity: `self()`](#actor-identity-self)
+- [Synchronous Request-Reply via `Actor.call`](#synchronous-request-reply-via-actorcall) and [by reply address](#request-reply-by-reply-address)
+- [Actor State with Records](#actor-state-with-records)
+- [A Complete Actor Example](#a-complete-actor-example)
+
+**Lifecycle and failure**
+
+- [Checking if an Actor is Alive](#checking-if-an-actor-is-alive)
+- [Stopping an Actor](#stopping-an-actor): [`Actor.stop`](#graceful-stop-actorstop) and [`on_stop`](#on_stop-the-terminate-callback)
+- [Monitoring Actor Death](#monitoring-actor-death) and [why there are no links](#why-there-are-no-links)
+- [Named Actors](#named-actors) and [introspection as a capability](#introspection-is-a-capability)
+- [Capability-Based Messaging](#capability-based-messaging)
+
+**Load and observation**
+
+- [Mailbox Limits and Backpressure](#mailbox-limits-and-backpressure)
+- [Scheduler Observability](#scheduler-observability) and [`Actor.inspect_state`](#reading-an-actors-state-actorinspect_state)
+
+**Beyond one actor**
+
+- [Tasks: Lightweight Concurrent Computations](#tasks-lightweight-concurrent-computations)
+- [Running Until Idle](#running-until-idle)
+- [App Entry Point](#app-entry-point)
+
+**Reference**
+
+- [Builtins Reference](#builtins-reference)
+- [Interpreted vs compiled](#interpreted-vs-compiled)
+- [See also](#see-also)
+
+## Choosing a concurrency primitive
+
+March gives you several concurrency tools, and they all run on the **same M:N green-thread scheduler**; the choice is about the *shape of the problem*, not about performance tiers. One way to keep them straight:
+
+> **Actors** = identity + state + mailbox. **Tasks** = structured fork/join. **Flow** = bounded streaming. **`pmap`** = data-parallel collections. **Session channels** = a typed two-party conversation.
+
+Pick by what you need:
+
+| If you need… | Reach for | Why |
+|---|---|---|
+| A long-lived stateful entity many parties talk to (counter, connection, cache) | **actor** (`spawn` / `send`) | Identity + private state + a mailbox; persists across messages and restarts |
+| To fan out independent work and collect *all* the results | **`Task.async`** + **`Task.await_many`** | Structured fork/join; you await every task |
+| The *first* result and want to cancel the losers | **`Task.race`** / **`Task.any`** | Returns as soon as one finishes (`any` = first success; `race` = first to settle) |
+| Fork tasks that are guaranteed to be cleaned up when the block exits | **`Task.scope`** | Structured concurrency: no task outlives its scope |
+| To transform a whole list across cores, identical result to `map` | **`List.pmap`** / **`pmap_n`** | Data-parallel; `pmap_n` bounds concurrency for expensive items |
+| A multi-stage stream where one stage can fall behind a fast producer | **`Flow`** | Backpressure: the consumer's demand caps how far the producer runs ahead |
+| A strict two-party protocol with a message *order* the compiler should enforce | **session channels** (`Chan.*`) | Linear, typed conversation; wrong-order/use-after-close are compile errors |
+| Raw, un-managed green-thread spawn (you handle joining yourself) | **`task_spawn`** | The low-level primitive `Task.*` is built on; prefer `Task.*` |
+
+Rules of thumb:
+
+- **Default to `Task.async` / `await_many`** for "do these N things concurrently, give me the answers." It is the simplest structured option.
+- **Default to an actor** the moment there is *mutable state with an identity*: something that several callers update over time.
+- **Choose `Flow` over an unbounded `Task.async_stream`** when a fast producer could overwhelm a slow downstream stage and pile up in-flight work. See [Flow & Backpressure]({{ site.baseurl }}/docs/flow/).
+- **Choose `pmap` over hand-wired tasks** when the input is a list, items are independent, and you want the order-preserving, threshold-managed convenience. See [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/).
+- **Choose session channels over a bare actor** when two parties run a fixed protocol and ordering correctness matters. See [Session Types]({{ site.baseurl }}/docs/session-types/).
+
+## How it fits with the rest of March
+
+| Concept | Where actors meet it | Chapter |
+|---|---|---|
+| **Supervision** | A supervisor restarts crashed children, re-supplies their `init` arguments, and stops them in reverse order on teardown. Restarts are why Pids are not stable and names are. | [Supervision](supervision.md) |
+| **Capabilities** | Looking an actor up by name or integer needs `Cap(Actor.Introspect)`; reading its state needs `Cap(Actor.Debug)`. A spawned actor's handlers count against `main`'s grant. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
+| **Linear types** | A linear value moves on `send`; the receiver becomes its sole owner. Native arrays are copy-on-write, so nothing is unsendable. | [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
+| **Session types** | For a two-party conversation with an enforced order, a session channel replaces an ad-hoc message protocol; an actor can host one endpoint. | [Session Types]({{ site.baseurl }}/docs/session-types/) |
+| **Observing a running node** | `Scheduler` and `Actor.top_by_mailbox` answer "is the system behind?" from inside; the observe socket and `forge top` answer it from outside. | [Observe]({{ site.baseurl }}/docs/observe/) |
+| **Hot code reload** | A deploy migrates actor state in place; `on_stop` under a reload is the one registered when the actor was spawned. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) |
+| **Clustering** | A `Pid` is local; `GlobalPid` and `Node.send` carry messages across nodes, with the same `Down` shape for remote monitors. | [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) |
+| **Overload and resilience** | Mailbox limits, load shedding, deadlines and restart backoff, used together. | [Overload & Resilience]({{ site.baseurl }}/docs/overload-resilience/) |
 
 ---
 
 ## Defining an Actor
 
 An actor declaration has three parts:
-- `state { ... }` — the state record type
-- `init { ... }` — the initial state value
-- `on Msg(...) do ... end` — message handlers, each returning the new state
+- `state { ... }`: the state record type
+- `init { ... }`: the initial state value
+- `on Msg(...) do ... end`: message handlers, each returning the new state
+
+and, optionally, `on_stop do ... end`: a terminate callback run on a graceful stop
+(see [Stopping an Actor](#stopping-an-actor)).
 
 ```march
 actor Counter do
@@ -49,7 +141,43 @@ actor Counter do
 end
 ```
 
-Inside a handler, `state` refers to the current state record. Each handler must return the new state (same type as `state`). The typechecker enforces exactly this: the `init` block must produce the declared state record, and every handler body is checked to *return* the state type — see the [typing reference](core-march-types.md) §2.6.1 for the precise checks the actor declaration performs (state-record construction, duplicate-handler rejection, message-constructor registration, `init`/handler conformance).
+Inside a handler, `state` refers to the current state record. Each handler must return the new state (same type as `state`). The typechecker enforces exactly this: the `init` block must produce the declared state record, and every handler body is checked to *return* the state type; see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6.1 for the precise checks the actor declaration performs (state-record construction, duplicate-handler rejection, message-constructor registration, `init`/handler conformance).
+
+### Parameterised `init`
+
+`init` may take a parameter list, supplied at `spawn`. Every parameter carries a
+type annotation, and the parameters are in scope in the init expression only
+(not in handlers; put what a handler needs into the state):
+
+```march
+actor Counter do
+  state { value : Int, label : String }
+  init(start : Int, label : String) { value: start, label: label }
+
+  on Increment(n : Int) do
+    { state with value: state.value + n }
+  end
+end
+
+fn main() do
+  let c = spawn(Counter, 41, "answer")   -- start = 41, label = "answer"
+  send(c, Increment(1))
+end
+```
+
+`spawn(Counter, 41, "answer")` checks each argument against the matching
+parameter. Supplying the wrong number of arguments is an error that names the
+actor's `init` signature; `spawn(Counter)` on an actor whose `init` takes
+parameters is rejected, as is `spawn(Plain, 1)` on an actor whose `init` takes
+none. `init()` is the zero-parameter spelling of the bare `init { ... }` form.
+The design rationale is decision D24 of the distributed-deploys plan: an actor
+that needs a value to start with (a database handle, an `Env` of capabilities)
+receives it as a value at spawn time, rather than as a first message that would
+leave the actor with an "uninitialised" state every handler has to cope with.
+
+A supervised child can be given its `init` arguments in the supervisor's
+`supervise` block, and a restart re-supplies them; see
+[Supervision](supervision.md#declaring-a-supervisor).
 
 ---
 
@@ -64,13 +192,13 @@ fn main() do
 end
 ```
 
-`spawn(Name)` requires a **literal actor name** written directly — a computed
+`spawn(Name)` requires a **literal actor name** written directly; a computed
 actor expression (from an `if`, `match`, or function call) is rejected at
 compile time, because March resolves which actor to spawn statically from its
 name. The typing account (including the subtlety that the resulting `Pid`'s type
 parameter is a fresh variable, *not* the actor's state type) is in the
-[typing reference](core-march-types.md) §2.6.2–§2.6.3; the runtime side (registering
-an `actor_inst`, returning a `VPid`) is in [`core-march.md`](core-march.md) §4.10.1.
+[typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6.2–§2.6.3; the runtime side (registering
+an `actor_inst`, returning a `VPid`) is in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.1.
 
 ---
 
@@ -86,18 +214,8 @@ send(counter, Reset())
 
 The message is the constructor applied to its arguments. The actor handles it according to its `on` clause.
 
-**Message names share one flat global constructor namespace.** A handler `on Msg(…)`
-registers `Msg` as an ordinary constructor — there is no per-actor message namespace,
-exactly analogous to the [no-per-module-type-namespace design point](core-march-types.md)
-(§2.5). So a message name that collides with a constructor another type (including a
-stdlib type) already declares is ambiguous: writing `send(counter, Ping(…))` when the
-stdlib also declares a `Ping` constructor is rejected (`Constructor \`Ping\` is defined by
-multiple types … Use a qualified form to disambiguate`). Pick message names unlikely to
-collide (e.g. `Increment`, `Poke`), or qualify. Two consequences of this design — the
-compiled wrong-actor-`send` misroute and the payload-typing rule — are documented in the
-[typing reference](core-march-types.md) §2.6.4.
-
-`send` returns `Some(())` if the actor is alive, or `None` if the actor is dead:
+`send` returns `Some(())` if the actor is alive, or `None` if the actor is dead, on
+both backends alike:
 
 ```march
 match send(counter, Increment(1)) do
@@ -106,18 +224,78 @@ match send(counter, Increment(1)) do
 end
 ```
 
-> **Interp-vs-compiled note.** The dead-actor drop (`None`) is the *interpreter's*
-> behavior; the compiled backend returns `Some` for a `send` to a dead pid (a filed
-> divergence — [`core-march.md`](core-march.md) §4.10.6). A `send` to a *live* actor
-> agrees on both backends. See §4.10.2 for the async-enqueue operational rule.
+See §4.10.2 in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) for the async-enqueue operational rule.
+
+**Anything can be sent.** A linear value moves on send, and everything else is
+immutable or copy-on-write, so there is nothing a message may not carry. A `RingBuf`
+is `always_linear`: putting one in a message is its one consuming use, the sender
+cannot touch it afterwards, and the receiver is its sole owner (the same for
+`spawn(Recent, rb)`). A native array (`NativeIntArr` and the other `NativeArray`
+backing types) is a copy-on-write value: the first write to a shared array copies it,
+so the sender and the actor each see only their own writes. Ordinary data is
+immutable. Until 2026-10-06 these six types sat in a `non_sendable_types` denylist
+that rejected them in message payloads; that list is empty now and stays in
+`lib/typecheck/typecheck_exhaustive.ml` only as the enforcement point for the rule in
+`memory-model.md`: a builtin type that writes memory another reference could observe
+must be linear or copy-on-write before it may exist at all. (The check still runs at
+the moment a message constructor is *applied*, for any future entry; see the
+`ci_is_actor_msg` field in `typecheck.ml`'s `ctor_info`.)
+
+```march
+let rb = RingBuf.make(8)
+send(worker, Take(rb))     -- consumes rb; the worker now owns the buffer
+```
+
+**Message names share one flat global constructor namespace.** A handler `on Msg(…)`
+registers `Msg` as an ordinary constructor; there is no per-actor message namespace,
+exactly analogous to the [no-per-module-type-namespace design point](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md)
+(§2.5). So a message name that collides with a constructor another type (including a
+stdlib type) already declares is ambiguous: writing `send(counter, Ping(…))` when the
+stdlib also declares a `Ping` constructor is rejected (`Constructor \`Ping\` is defined by
+multiple types … Use a qualified form to disambiguate`). Pick message names unlikely to
+collide (e.g. `Increment`, `Poke`). Two actors that both declare a handler of the same
+name are the sharp case: a bare name resolves to only one of them, and no qualified
+spelling selects an actor's message today, so rename one of the handlers.
+
+**A `send` is checked against the target, one side only.** When the pid's type shows
+its actor's state, a message of an actor with a different state is a compile error
+(`send_wrong_actor`): `send(b, Poke(1))`, with `Poke` a handler of an actor `A` and `b`
+spawned from `B`, is rejected. A pid's type is `Pid(state)`, and the state is a
+structural record, so the check cannot tell apart two actors whose states have the same
+shape; such a message still compiles and is dropped by the target at run time, on both
+backends. The details, and the payload-typing rule, are in the
+[typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6.4.
+
+**An actor declared in a nested module** is spawned and messaged from the parent by
+qualified name, the way a nested variant's constructors are:
+
+```march
+mod Inner do
+  actor Box do
+    state { n : Int }
+    init  { n: 0 }
+    on Set(k : Int) do { n: k } end
+  end
+end
+
+fn main(...) do
+  let p = spawn(Inner.Box)
+  send(p, Inner.Set(1))               -- qualified: resolves
+  let m : Inner.Box.Msg = Inner.Set(2)
+  send(p, m)
+end
+```
+
+The bare `Set` is visible only inside `Inner`. It is not exported to the parent,
+so the parent's own bare constructors of the same name keep their meaning.
 
 ---
 
 ## Receiving Messages Inside a Handler
 
-`receive()` blocks until the next message arrives in the actor's mailbox. Use it when a handler needs to wait for a sub-message before continuing:
+`receive()` blocks until the next message arrives in the actor's mailbox. Use it when a handler needs to wait for a sub-message before continuing.
 
-Every message you `send` — including the follow-up a handler `receive()`s — must be a
+Every message you `send` (including the follow-up a handler `receive()`s) must be a
 **declared handler message**: the `Followup` message below is a valid constructor only
 because the actor declares an `on Followup(n)` handler. (A message name with no matching
 handler is not a registered constructor and is rejected at compile time.)
@@ -149,65 +327,85 @@ fn main() do
 end
 ```
 
-**Blocking semantics:** If the mailbox is empty when `receive()` is called, the actor parks (interpreter: re-queues the triggering message and retries the handler on a later pass; compiled: green thread parks). It resumes automatically once a message is delivered. `run_until_idle()` returns as soon as all actors are either idle or waiting — no deadlock. See [`core-march.md`](core-march.md) §4.10.3 for the pop-or-`BlockedOnReceive` rule.
+**Blocking semantics:** If the mailbox is empty when `receive()` is called, the actor parks (interpreter: re-queues the triggering message and retries the handler on a later pass; compiled: green thread parks). It resumes automatically once a message is delivered. `run_until_idle()` returns as soon as all actors are either idle or waiting: no deadlock. See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.3 for the pop-or-`BlockedOnReceive` rule.
 
-**Once-per-handler limitation:** only the *first* `receive()` in a handler body is safe to block on — if a handler calls `receive()` twice and the second one blocks (empty mailbox), the message the first `receive()` already popped is lost (the scheduler's re-queue only restores the outer triggering message). A handler needing multiple messages should recurse, with each `receive()` the first operation in its own handler body. The example above `receive()`s exactly once, on an already-queued message, so it neither blocks nor trips this limitation. (This is what the golden witness `g36_actor_receive` pins.)
+**Once-per-handler limitation:** only the *first* `receive()` in a handler body is safe to block on: if a handler calls `receive()` twice and the second one blocks (empty mailbox), the message the first `receive()` already popped is lost (the scheduler's re-queue only restores the outer triggering message). A handler needing multiple messages should recurse, with each `receive()` the first operation in its own handler body. The example above `receive()`s exactly once, on an already-queued message, so it neither blocks nor trips this limitation. (This is what the golden witness `g36_actor_receive` pins.)
 
 Messages are always delivered in FIFO order, so `receive()` pops the oldest queued message.
 
 ---
 
-## Checking if an Actor is Alive
+## Stash and Become: multi-step protocols without selective receive
+
+`receive()` always pops the *oldest* message, and only the first `receive()` in a
+handler may block, so there is no way to say "wait for *this particular* message next"
+(Erlang's selective receive). What an actor does have is its own state, and that is
+enough for the two jobs selective receive is used for, the same way Akka's
+`stash`/`become` cover them:
+
+- **become**: a `mode` field that the handlers dispatch on;
+- **stash**: a list in state holding the work that cannot be served yet, replayed
+  through the same serving code when the mode changes.
+
+A session that must be told it is connected before it may serve queries:
 
 ```march
-let alive = is_alive(counter)
-println("alive: " ++ bool_to_string(alive))
-```
+type Mode = Connecting | Ready
 
----
+actor Session do
+  state { mode : Mode, stash : List(String), served : String }
+  init  { mode: Connecting, stash: Nil, served: "" }
 
-## Stopping an Actor
-
-```march
-kill(counter)
-```
-
-After `kill`, `is_alive(counter)` returns `false` and further `send`s return `None`
-(interpreted — see the dead-`send` note above). `is_alive` is a pure registry lookup and
-is the one lifecycle observation that is **byte-identical interpreted vs compiled** (the
-golden witness `g37_actor_lifecycle` pins `spawn → is_alive true → kill → is_alive false`).
-The operational rules for `kill`/`is_alive` are in [`core-march.md`](core-march.md) §4.10.6.
-
----
-
-## Capability-Based Messaging
-
-For supervision-safe message delivery, use capabilities (`Cap`). A capability encodes the actor's identity and current *epoch* — it becomes stale (and is rejected) if the actor restarts:
-
-```march
--- Obtain a capability for a live actor
-match get_cap(pid) do
-  None      -> println("actor is dead")
-  Some(cap) ->
-    -- send_checked validates the epoch before delivering
-    match send_checked(cap, Increment(1)) do
-      :ok    -> println("delivered")
-      _      -> println("actor dead or cap stale")   -- :error or, compiled, a garbage atom
+  on Query(q : String) do
+    match state.mode do
+      Ready      -> serve(state, q)
+      Connecting -> { state with stash: Cons(q, state.stash) }   -- stash it
     end
+  end
+
+  on Connected() do
+    -- become Ready, then unstash: the stash is newest-first, so reverse it
+    -- and push each stashed query through the same serving code.
+    let ready = { state with mode: Ready, stash: Nil }
+    List.fold_left(List.reverse(state.stash), ready, fn (st, q) -> serve(st, q))
+  end
+end
+
+fn serve(st, q) do
+  { mode: st.mode, stash: st.stash, served: st.served ++ q ++ ";" }
 end
 ```
 
-Use capabilities when you hold a reference across an actor restart boundary and need to know whether the message was delivered to the *current* incarnation of the actor. Under a supervisor, a restarted actor gets a fresh epoch, invalidating caps from before the restart.
+Sending `Query("a")`, `Query("b")`, `Connected()`, `Query("c")` serves `a;b;c;`: the
+stash drains in arrival order *before* anything queued behind the transition is looked
+at. Draining inline is what gives that order. The other unstash shape, re-sending each
+stashed message to `self()`, is simpler when the stashed thing really is a whole message,
+but a re-sent message lands behind whatever is already queued, so here it would serve
+`c;a;b;`. Pick by whether arrival order matters to the protocol.
 
-> **Interpreter-only.** The epoch-`Cap` validation plane described here is the
-> **interpreter's** semantics. Compiled, `send_checked` performs *no* epoch validation and
-> returns an uninterned garbage atom for every cap — matching neither `:ok` nor `:error`
-> (hence the `_` catch-all above rather than a `:error` arm) — and `get_cap` does not gate
-> on liveness. The entire capability mechanism is therefore non-functional in compiled
-> binaries today; it is a filed open finding ([`core-march.md`](core-march.md) §4.10.6, and
-> `specs/todos/`). Two of the underlying builtins, `revoke_cap` and `is_cap_valid`, are
-> additionally not registered in the typechecker, so they are not surface-callable at all.
-> Use plain `send`/`is_alive` if you need behavior that agrees on both backends.
+The full example is `test/native/actor_stash_become.march`, run on both backends.
+
+---
+
+## Actor Identity: `self()`
+
+Inside a handler, `self()` returns the current actor's `Pid`. Useful for passing yourself as a reply address:
+
+```march
+on Request(question : String, caller) do
+  let answer = compute_answer(question)
+  send(caller, Answer(answer, self()))
+  state
+end
+```
+
+`self()` typechecks as this actor's own `Pid[state]`, the same type `spawn` produces
+for it, so `is_alive(self())` and a message field explicitly annotated `: Pid` both
+unify cleanly. One gap is still open: a bare `Pid` annotation with no type parameter
+can resolve against the unrelated `GlobalPid.Pid` record type sharing the same bare
+name in the flat global namespace, rather than the parametric actor `Pid(a)` that
+`spawn`/`self()` actually produce. Leaving `caller` and reply payloads unannotated, as
+above, sidesteps that one.
 
 ---
 
@@ -247,16 +445,16 @@ fn main() do
 end
 ```
 
-This program prints `count = 1` compiled. `Actor.call(pid, sentinel, timeout_ms)`
+This program prints `count = 1` on both backends. `Actor.call(pid, sentinel, timeout_ms)`
 reads the tag from the zero-arg `sentinel`, builds an augmented message (same tag,
 with the caller in field 0), and routes it to the handler at that tag. That handler
 receives the caller as its first argument and must call `Actor.reply(reply_to, result)`
 to unblock the caller. `Actor.call` returns `Ok(result)`, or `Err(reason)` if no reply
-arrives.
+arrives before `timeout_ms` (a value `<= 0` means wait indefinitely).
 
 Two consequences of the tag-selects-the-handler rule:
 
-- **The call handler must be declared FIRST** in the actor, so it sits at tag 0 — the
+- **The call handler must be declared FIRST** in the actor, so it sits at tag 0: the
   sentinel `GetReq` has tag 0, and that is the handler the call routes to.
 - **The sentinel must have a name distinct from the handler** (`GetReq` vs `GetCount`)
   to avoid a constructor-name clash.
@@ -264,17 +462,95 @@ Two consequences of the tag-selects-the-handler rule:
 There is no `Call` wrapper constructor, and the call handler takes exactly one argument
 (the reply channel).
 
-> **Two caveats.** (1) The `timeout_ms` argument is accepted for API compatibility but is
-> **not enforced in the compiled runtime** (`runtime/march_runtime.c:1809–1810`) — a `call`
-> that blocks indefinitely will not be interrupted by its stated timeout compiled (a filed
-> open finding, `specs/todos/`). (2) The **interpreter dispatches `Actor.call`
-> differently**: it wraps the message as `Call(ref, msg)` and delivers it to a two-argument
-> handler matching `on Call(ref, msg)` (`lib/eval/eval.ml`), rather than tag-routing a
-> zero-arg sentinel to a one-argument handler. The compiled-canonical example above
-> therefore returns `Err("no reply …")` under the interpreter — this interpreter/compiled
-> `Actor.call` dispatch-form divergence is a filed open finding (`specs/todos/`).
+**The timeout is a deadline on both backends, but only the compiled one stops waiting.** Compiled, the caller's green thread parks on
+the scheduler with a deadline (`march_actor_call`, `runtime/march_runtime.c`) rather
+than busy-polling, and wakes on reply delivery or at the deadline. Every reply is
+wrapped in an envelope carrying the correlation id issued for that specific call, and
+the receive loop discards an envelope whose id does not match, so a late reply from a
+timed-out first call can never be misdelivered as the answer to a second, unrelated
+call (`march_actor_call_unwrap`). The interpreter dispatches `Actor.call` the same
+way: it tag-routes the sentinel to the handler at the same ctor index and binds the
+caller as the handler's single argument (`lib/eval/eval.ml` `actor_call`). Both are
+pinned by `test/native/actor_counter` and `test/native/actor_call_timeout`. (See
+[Interpreted vs compiled](#interpreted-vs-compiled) for the history.)
 
-`Actor.cast(pid, msg)` is fire-and-forget — equivalent to `send` but goes through the `Actor` module.
+The interpreter cannot preempt a running handler, so it runs the handler to completion
+first and then compares the reply's timestamp with the deadline. A reply that arrived
+late is discarded and the call returns `Err`, exactly as compiled, but the caller is
+not released early: a handler that takes ten seconds blocks an `Actor.call` made with
+`timeout_ms = 1` for ten seconds under the interpreter, and for about one millisecond
+compiled (`lib/eval/eval_builtins.ml` `actor_call`; the result is pinned by
+`test/native/actor_call_late_reply`, elapsed time is not).
+
+**Calling from inside a handler.** A handler may itself `Actor.call` another actor. While
+it waits, the calling actor handles nothing else: messages sent to it in the meantime
+stay in its mailbox, in arrival order, and are handled after the current handler returns.
+Only the reply ends the wait (both backends; pinned by
+`test/native/actor_call_in_handler_keeps_messages`).
+
+`Actor.cast(pid, msg)` is fire-and-forget: equivalent to `send` but goes through the `Actor` module.
+Both `Actor.cast` and `Actor.call`'s message payloads are checked for non-sendable types
+identically to `send`; see the note under [Sending Messages](#sending-messages).
+
+### Request-reply by reply address
+
+A lower-level request-reply pattern needs no `Actor.call` at all: the requester puts
+its own `Pid` (from [`self()`](#actor-identity-self)) in the message, and the handler
+replies with a plain `send` to that address. It is built entirely from `send`, so it
+behaves identically on both backends, and it is the right choice when a handler needs
+to reply to more than one caller, or reply asynchronously outside the call/timeout
+protocol:
+
+```march
+on Ask(question : String, reply_to) do
+  send(reply_to, Answer(compute_answer(question)))
+  state
+end
+```
+
+The requester must itself be an actor: it handles the `Answer(...)` reply in its own
+`on Answer(...)` clause. `Actor.call` covers the common single-request/single-reply
+case; reach for this pattern when you need more flexibility than a one-shot call.
+
+---
+
+## Actor State with Records
+
+Complex state uses record types. Functional update with `{ state with field: new_value }` is the canonical way to update state:
+
+```march
+actor WebServer do
+  state {
+    request_count : Int,
+    error_count   : Int,
+    last_path     : String
+  }
+  init {
+    request_count: 0,
+    error_count:   0,
+    last_path:     ""
+  }
+
+  on Req(path : String, status : Int) do
+    let rc = state.request_count + 1
+    let ec = if status >= 400 do state.error_count + 1 else state.error_count end
+    { state with
+        request_count: rc,
+        error_count:   ec,
+        last_path:     path }
+  end
+
+  on Stats() do
+    println("requests: " ++ int_to_string(state.request_count))
+    println("errors: "   ++ int_to_string(state.error_count))
+    state
+  end
+end
+```
+
+(This example uses the message name `Req` rather than `Request`: `Request` collides with the
+stdlib `Http.Request` constructor in the flat global namespace; see the note under *Sending
+Messages*.)
 
 ---
 
@@ -282,6 +558,7 @@ There is no `Call` wrapper constructor, and the call handler takes exactly one a
 
 ```march
 mod ActorDemo do
+  needs IO.Console
 
   actor Counter do
     state { value : Int }
@@ -309,7 +586,7 @@ mod ActorDemo do
     end
   end
 
-  fn main() do
+  fn main(_c : Cap(IO.Console)) do
     let counter = spawn(Counter)
     let logger  = spawn(Logger)
 
@@ -334,52 +611,452 @@ end
 ```
 
 (This example uses the message name `Poke` rather than `Ping`: `Ping` collides with a
-stdlib constructor in the flat global namespace — see the note under *Sending Messages*.
+stdlib constructor in the flat global namespace; see the note under *Sending Messages*.
 Interpreted, it prints `logger alive: false`, `message dropped — actor is dead`, then
 `[Counter] poke from main, value = 15` and `[Counter] poke from after kill, value = 15`.
-It uses only the live-message + `kill`/`is_alive` plane, so it is byte-identical compiled.)
+It uses only the live-message + `kill`/`is_alive` plane, so compiled output is an exact byte match.)
 
 ---
 
-## Actor State with Records
-
-Complex state uses record types. Functional update with `{ state with field: new_value }` is the canonical way to update state:
+## Checking if an Actor is Alive
 
 ```march
-actor WebServer do
-  state {
-    request_count : Int,
-    error_count   : Int,
-    last_path     : String
-  }
-  init {
-    request_count: 0,
-    error_count:   0,
-    last_path:     ""
-  }
+let alive = is_alive(counter)
+println("alive: " ++ bool_to_string(alive))
+```
 
-  on Request(path : String, status : Int) do
-    let rc = state.request_count + 1
-    let ec = if status >= 400 do state.error_count + 1 else state.error_count end
-    { state with
-        request_count: rc,
-        error_count:   ec,
-        last_path:     path }
+---
+
+## Stopping an Actor
+
+```march
+kill(counter)
+```
+
+After `kill`, `is_alive(counter)` returns `false` and further `send`s return `None`, on
+both backends. `is_alive` is a pure registry lookup and
+is the one lifecycle observation that is **an exact byte match interpreted vs compiled** (the
+golden witness `g37_actor_lifecycle` pins `spawn → is_alive true → kill → is_alive false`).
+The operational rules for `kill`/`is_alive` are in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6.
+
+### Graceful stop: `Actor.stop`
+
+`kill` is immediate and drops whatever is queued. `Actor.stop(pid, timeout_ms)` is the
+lossless form: the actor accepts no new messages (a `send` to it returns `None`), works
+off the messages already queued, and then dies a **Normal** death, which no restart type
+restarts. `stop` is synchronous: it returns once the actor is dead, or once `timeout_ms`
+has passed and the actor has been killed. A negative timeout waits indefinitely; `0`
+discards the queue as soon as the in-flight handler returns. It returns `false` for an
+actor that was already dead or already stopping.
+
+Stopping a supervisor stops its children first, in **reverse declaration order**, each
+with its own `shutdown` budget from the child spec (`W w shutdown 5000`, `shutdown
+infinity`, `shutdown brutal`; default 5 seconds), and detaches each child before stopping
+it so the teardown runs no restart strategy.
+
+An actor may stop itself from a handler (`Actor.stop(self, 1000)`): the handler finishes,
+its returned state is installed, the rest of the queue drains, and the actor dies.
+
+### `on_stop`: the terminate callback
+{: #on_stop-the-terminate-callback}
+
+An actor can run code of its own at shutdown (flush a buffer, checkpoint state, hand
+unfinished work back to a queue) by declaring one `on_stop` block among its handlers:
+
+```march
+type StoreState = { saved : Int }   -- the Store actor's state record
+
+actor Batcher do
+  state { buf : List(String), store : Option(Pid(StoreState)) }
+  init  { buf: [], store: None }
+
+  on UseStore(s : Pid(StoreState)) do
+    { state with store: Some(s) }
   end
 
-  on Stats() do
-    println("requests: " ++ int_to_string(state.request_count))
-    println("errors: "   ++ int_to_string(state.error_count))
-    state
+  on Append(s : String) do
+    { state with buf: Cons(s, state.buf) }
+  end
+
+  -- Hand whatever was batched to the store before dying.
+  on_stop do
+    match state.store do
+      Some(store) -> send(store, Save(List.reverse(state.buf)))
+      None        -> None
+    end
   end
 end
 ```
+
+The Store's Pid arrives in a message and is kept in state: a handler has no
+capability in scope, so it cannot look an actor up by name with
+`Actor.whereis`, which takes a `Cap(Actor.Introspect)`.
+
+Inside `on_stop`, `state` is the **final** state (after the drain) and `self` is the
+actor's own Pid, exactly as in a handler; there are no message parameters, and the
+block's value is discarded (a dying actor has no next state). The semantics follow
+OTP's `terminate/2`:
+
+1. **It runs on a graceful stop:** `Actor.stop` on the actor, a self-stop, or its
+   supervisor's teardown with a non-`brutal` `shutdown`. It runs on the actor's own
+   thread, after the drain and before the Normal death, so it has finished by the
+   time `Actor.stop` returns.
+2. **It may send messages**, and may block on a reply (`Actor.call`), within the budget
+   below. The actor itself is draining, so messages sent *to* it are refused.
+3. **A failure inside it is logged and the shutdown continues.** A panic in `on_stop`
+   prints `march: actor on_stop callback failed (the actor still stops): panic: ...`
+   to stderr and the actor dies Normal as if `on_stop` had returned: it is not a crash,
+   so no supervisor restarts it, and a tree teardown proceeds to the next child.
+4. **It does not run on the brutal path.** `kill(pid)`, a crash, and a child spec's
+   `shutdown brutal` end the actor without running it. That is what brutal means.
+5. **It is bounded by the stop timeout.** The `timeout_ms` of `Actor.stop` (or the
+   child spec's `shutdown` budget) covers the drain and `on_stop` together; if
+   `on_stop` has not finished when it runs out, the actor is killed there. A stop
+   whose deadline has already passed after the drain skips `on_stop` entirely.
+
+Both backends implement the same rules, and each is pinned compiled and interpreted by
+`test/native/actor_on_stop*.march`. Limits to know:
+
+- A **self-stop** has no outside waiter to enforce the deadline, so it bounds the drain
+  but cannot cut a blocked `on_stop` short.
+- The interpreter cannot preempt running code, so there the deadline binds only an
+  `on_stop` that *blocks* (a `receive()` it cannot satisfy waits out the deadline and
+  the actor is killed); a compute loop in `on_stop` runs to completion.
+- Under `--hot-reload`, the callback registered is the one from the code the actor was
+  spawned with; draining across a reload is still open
+  (`specs/todos/2026-08-12-graceful-shutdown-and-drain.md`).
+
+---
+
+## Monitoring Actor Death
+
+`monitor(watcher, target)` delivers a control-plane `Down(ref, target_pid, reason)`
+message to `watcher` when `target` terminates. The local reasons are `Normal`,
+`Killed`, and `Crash(message)`. Match the three fields in a handler rather than
+treating a monitor as a count of dead actors:
+
+```march
+actor Watcher do
+  state { seen : Int }
+  init  { seen: 0 }
+
+  on CheckDown() do
+    match receive() do
+      Down(_, target, Normal) ->
+        println("stopped " ++ to_string(target))
+        state
+      Down(_, target, Killed) ->
+        println("killed " ++ to_string(target))
+        state
+      Down(_, _, Crash(error)) ->
+        println("crashed " ++ error)
+        state
+      _ ->
+        println("unexpected monitor message")
+        state
+    end
+  end
+end
+```
+
+Monitor `Down` messages are control-plane delivery: they bypass the target
+watcher's mailbox limit, so a full bounded mailbox cannot lose the death
+notification. Local monitoring has the same payload and reason vocabulary on
+the interpreted and compiled backends; the distributed monitor protocol uses
+the same `Down(ref, target_pid, reason)` shape (and additionally has `NodeDown`).
+
+### Why there are no links
+
+March's fault model is **monitors plus supervisors**, not BEAM's links and exit
+signals. A monitor is one-directional and observational: the watcher receives
+`Down(ref, pid, reason)` where the reason is `Normal`, `Killed`, or `Crash(msg)`, and
+determines for itself what to do. Failure propagates *downward* through supervision
+trees, never sideways between actor peers.
+
+This is the same choice Akka made in dropping links for DeathWatch plus
+supervision strategies. A reason-carrying `Down` gives a watcher everything a
+link's exit signal would have told it, without the bidirectional coupling, and
+without needing a `trap_exit` escape hatch to make that coupling survivable.
+
+One asymmetric edge remains: `task_spawn_link` links a plain task to an actor,
+and if the task's thunk raises, the linked actor is crashed: a task-to-actor
+propagation path, not an actor-to-actor one. It is a narrower primitive than a
+BEAM link (a task cannot itself be linked to or crashed by anything), so it
+does not reopen the sideways-coupling problem this section argues against.
+
+---
+
+## Named Actors
+
+A Pid is not stable. When a supervisor restarts a crashed child, the replacement gets a
+*new* Pid, and everyone still holding the old one is talking to a corpse. The named
+registry hands out a stable string name instead:
+
+```march
+mod Main do
+  needs IO
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Bump() do { n: state.n + 1 } end
+  end
+
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
+    let pid = spawn(Counter)
+    println("registered: " ++ bool_to_string(Actor.register(pid, "counter")))
+    println("names: " ++ int_to_string(List.length(Actor.registered(c))))
+
+    -- Resolve the name once, then reuse the Pid for the whole burst.
+    match Actor.whereis(c, "counter") do
+      None -> println("counter is unavailable right now — retry")
+      Some(here) ->
+        let _ = send(here, Bump())
+        let _ = send(here, Bump())
+        println("sent")
+    end
+
+    println("unregistered: " ++ bool_to_string(Actor.unregister("counter")))
+  end
+end
+```
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `Actor.register(pid, name)` | `Bool` | Bind `name` to `pid`. `false` if `pid` is already dead, or if `name` is currently held by a *live* actor. |
+| `Actor.unregister(name)` | `Bool` | Release the name. `false` if it was not registered. |
+| `Actor.whereis(c, name)` | `Option(Pid)` | The actor currently holding `name`. `c : Cap(Actor.Introspect)`. |
+| `Actor.registered(c)` | `List(String)` | Every name currently bound; order unspecified. |
+
+A name is released automatically when its actor dies, so a name never resolves to a dead
+Pid and you do not have to unregister from a crash path.
+
+`whereis` returns an `Option` because a name can be *momentarily* unresolvable. While a
+supervised child is being respawned (in particular while it waits out its restart backoff)
+the old actor is gone and its replacement does not exist yet. `None` there is the accurate
+signal that the service is mid-restart, not that the name was never registered; retry
+rather than treating it as a permanent error.
+
+Names survive supervisor restarts, on **both** backends: the crashing child's names are
+brought forward and re-established on its replacement, so a holder outside the supervision
+tree keeps reaching whichever incarnation is current without at any point learning the new Pid.
+**Hold names, not Pids, across a restart boundary.** This includes a live sibling killed by
+a `one_for_all` / `rest_for_one` batch restart, not only the child that actually crashed.
+If a *different* live actor claims the name during the restart window, the carried-forward
+registration is dropped for that name rather than stolen back. Unsupervised actors are
+unaffected; their names are simply dropped on death.
+
+On a hot path, resolve a name **once and cache the Pid** instead of calling `whereis` per
+message. Concurrent lookups of the *same* name all bump the refcount on the one stored
+value, and that contention, not the registry's table lock, is what bounds same-name
+resolution; `send` itself takes no registry lock. Re-resolve when a send fails or a monitor
+fires, not on every message.
+
+### Introspection is a capability
+
+A Pid is an unforgeable reference: code that was never handed one cannot message the
+actor behind it. Four operations would break that, since each turns something anyone
+can write down (an integer, a name, nothing at all) into a Pid: `Actor.pid_from_int`,
+`Actor.whereis`, `Actor.list` and `Actor.registered`. They take a
+`Cap(Actor.Introspect)`, a proof capability that only `Actor.introspect(io : Cap(IO))`
+mints. Mint it once in `main`, which holds the root capability, and forward it to the
+code that needs it:
+
+```march
+mod Main do
+  needs IO
+  needs Actor.Introspect
+
+  fn child_of(c : Cap(Actor.Introspect), sup, field : String) do
+    match get_actor_field(sup, field) do
+      Some(n) -> Actor.pid_from_int(c, n)
+      None    -> Actor.pid_from_int(c, -1)
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
+    let sup = spawn(Sup)
+    send(child_of(c, sup, "worker"), Work())
+  end
+end
+```
+
+A function that forwards the cap through its signature declares `needs Actor.Introspect`,
+as with any proof capability declared elsewhere. `Actor.register` and `Actor.unregister`
+stay unprivileged: registering a Pid you hold is not authority; resolving a name you were
+never handed is. The raw builtins behind these wrappers (`pid_of_int`,
+`actor_pid_indices`, `actor_whereis`, `actor_registered`) are internal to the standard
+library; a program that calls one is rejected at typecheck time with the wrapper to use:
+
+```
+`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)
+```
+
+Because `Actor.introspect` takes `Cap(IO)`, a role body or hook under a narrower grant
+(say `Cap(IO.NetConnect)`) cannot mint the cap itself; the composition root does, and
+hands it down. Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) are not
+covered: unforgeability is a process property first.
+
+---
+
+## Capability-Based Messaging
+
+For supervision-safe message delivery, use capabilities (`Cap`). A capability encodes the actor's identity and current *epoch*: it becomes stale (and is rejected) if the actor restarts:
+
+```march
+-- Obtain a capability for a live actor
+match get_cap(pid) do
+  None      -> println("actor is dead")
+  Some(cap) ->
+    -- send_checked validates the epoch before delivering
+    match send_checked(cap, Increment(1)) do
+      :ok    -> println("delivered")
+      :error -> println("actor dead or cap stale")
+    end
+end
+```
+
+Use capabilities when you hold a reference across an actor restart boundary and need to know whether the message was delivered to the *current* incarnation of the actor. Under a supervisor, a restarted actor gets a fresh epoch, invalidating caps from before the restart.
+
+A cap holds no reference on its actor, so `get_cap` and `send_checked` validate against
+the actor's runtime metadata (its terminal flag and epoch), never the actor record
+itself. Compiled `get_cap` gates on liveness (niche `None` for a dead/unknown pid) and
+compiled `send_checked` returns the same `:ok`/`:error` atoms as the interpreter after
+checking revocation, epoch match, and liveness (`march_send_checked`/`march_get_cap`,
+`runtime/march_runtime.c`), and returns `:ok` only when the underlying send actually
+accepted the message (an actor that dies or starts draining between the check and the
+enqueue gives `:error`). `revoke_cap` and `is_cap_valid` are registered in the
+typechecker (`lib/typecheck/typecheck_builtins.ml`) and surface-callable on both
+backends; `test/native/cap_epoch_plane` pins the plane. See
+[`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6 for the full
+epoch-invalidation model, and [Interpreted vs compiled](#interpreted-vs-compiled) for
+the history.
+
+---
+
+## Mailbox Limits and Backpressure
+
+By default an actor's mailbox is unbounded; a producer that outruns its consumer grows
+the mailbox without limit. `Actor.set_queue_limit(pid, limit, policy)` bounds it:
+
+```march
+Actor.set_queue_limit(pid, 1000, 3)   -- cap at 1000, block_sender policy
+```
+
+Or declare the bound with the actor, so every spawn gets it and no caller has
+to remember the call:
+
+```march
+actor Worker do
+  state { n : Int }
+  init  { n: 0 }
+  mailbox 1000 drop_old        -- after init, before any supervise block
+  on Work() do ... end
+end
+```
+
+`mailbox N policy` takes the policy by name (`drop_new`, `drop_old` or
+`block_sender`) and lowers to `Actor.set_queue_limit(pid, N, policy)` right
+after each `spawn(Worker)`. `block_sender` is compiled-only there too: under the
+interpreter the spawn fails with the same message the call does.
+
+`policy` is one of:
+
+| Value | Policy | Behavior when the mailbox is full |
+|-------|--------|------------------------------------|
+| `0` | unbounded (default) | never rejects |
+| `1` | `drop_new` | the incoming message is discarded |
+| `2` | `drop_old` | the oldest queued message is evicted to make room |
+| `3` | `block_sender` | the sender parks until space frees up (compiled backend only; the interpreter refuses it at the call rather than silently running unbounded) |
+
+Dropped messages (policies `1`/`2`) are counted in `Scheduler.dropped_messages()`. The
+interpreter's single-threaded eager scheduler cannot park a sender without deadlocking, so
+it does not implement policy `3`: `Actor.set_queue_limit(pid, n, 3)` and a `mailbox N
+block_sender` declaration both fail under the interpreter with an error naming the
+alternatives, rather than silently running unbounded (`lib/eval/eval_builtins.ml`,
+`actor_set_mailbox_limit`; resolved 2026-09-14).
+
+Under a drop policy, a dropped `Actor.call` request or its reply is impossible to tell from
+a lost reply at the caller; both surface as a timeout `Err` from `Actor.call`. Callers
+that rely on `Actor.call` against a bounded actor should prefer the `block_sender` policy
+(`3`) instead, so no request or reply is silently dropped at any point.
+
+---
+
+## Scheduler Observability
+
+The `Scheduler` module exposes runtime counters for load-shedding decisions: a
+supervisor or ingress actor can poll them to decide when to shed:
+
+```march
+if Scheduler.live_procs() > 10000 do
+  println("shedding: too many live actors")
+else
+  dispatch_work()
+end
+```
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `Scheduler.live_procs()` | `Int` | Green-thread processes currently alive (actors + tasks + main) |
+| `Scheduler.total_spawned()` | `Int` | Processes spawned over the whole program lifetime |
+| `Scheduler.runq_depth()` | `Int` | Cross-thread global run-queue depth (instantaneous) |
+| `Scheduler.dropped_messages()` | `Int` | Messages dropped by bounded-mailbox overflow policies |
+| `Scheduler.stat(i)` | `Int` | Raw stat by index (`0`=live procs, `1`=total spawned, `2`=runq depth, `3`=stack-alloc failures, `4`=dropped messages, `5`=stacks recycled, `6`=pending timers; unknown index reads `0`) |
+| `Actor.top_by_mailbox(c, n)` | `List((Pid, Int))` | The `n` deepest mailboxes right now, deepest first, as `(pid, depth)` pairs; `c : Cap(Actor.Introspect)` |
+| `Actor.over_mailbox(c, t)` | `List((Pid, Int))` | Every actor whose mailbox is deeper than `t`, in spawn order: the growing-mailbox alarm, polled |
+
+The interpreted backend reports the subset that is meaningful without the C scheduler
+(live actor count); everything else reads `0` on both backends rather than erroring.
+
+`Scheduler` answers "is the system behind?". "*Which* actor is behind?" is
+`Actor.top_by_mailbox(c, n)` and `Actor.over_mailbox(c, threshold)`, built on
+`Actor.list(c)` and `mailbox_backlog` (`c` from `Actor.introspect`, see
+[Introspection is a capability](#introspection-is-a-capability)). The depth they rank by
+is the actor's waiting work: `mailbox_backlog(pid)` is `mailbox_size(pid)` plus the
+messages an `Actor.call` the actor is blocked in has set aside until its reply. An actor
+stuck in a slow call with work piling up reads `0` by `mailbox_size`, and it is the one
+these should find. Both are snapshots (an actor can die or drain between the walk and
+your reaction) and cost one pass over every live actor, so poll them from a timer, not a
+hot path. There is no push-style alarm that fires when a queue crosses a threshold, and no
+tracing; see `specs/todos/2026-08-12-per-actor-introspection-and-alarms.md`. From outside
+the process, the [observe socket]({{ site.baseurl }}/docs/observe/) answers the same
+questions and more.
+
+### Reading an actor's state: `Actor.inspect_state`
+{: #reading-an-actors-state-actorinspect_state}
+
+`Actor.inspect_state(d, pid, timeout_ms)` asks a running actor for its state, like
+Erlang's `sys:get_state`. `d` is a `Cap(Actor.Debug)`, minted from `Cap(IO)` by
+`Actor.debug(io)`; it is a separate cap from `Actor.Introspect` because it reads the
+actor's data, not just its counters.
+
+```march
+let d = Actor.debug(io)
+match Actor.inspect_state(d, counter, 100) do
+  Ok(s) -> println(s)            -- { count: 3, tags: [a, b], best: Some(3) }
+  Err(InspectTimeout) -> println("busy")
+  Err(InspectDead) -> println("gone")
+  Err(InspectSelf) -> println("asked itself")
+  Err(InspectFailed(why)) -> println(why)
+end
+```
+
+The text lists the state fields in declaration order, each printed by its own `Show`,
+and is the same on both backends. A field whose type holds functions (or a type variable
+or session channel) has no `Show` and prints as `<opaque>`. The request is answered between messages, skips the
+mailbox limit (a full mailbox still answers), and does not count as a message in the
+actor's counters. It fails without disturbing the actor: `InspectTimeout` when the actor
+does not answer in time or is inside a nested `receive`, `InspectDead`, `InspectSelf`
+(an actor cannot wait on itself), and `InspectFailed` when a field's `Show` panics.
 
 ---
 
 ## Tasks: Lightweight Concurrent Computations
 
-Tasks are a simpler alternative to actors when you just need to run a function concurrently and collect its result. Use the `Task` module:
+Tasks are the simpler alternative to actors when you need to run a function concurrently and collect its result. Use the `Task` module:
 
 ```march
 -- Spawn a task and await its result
@@ -403,7 +1080,7 @@ Tasks run on the same M:N green-thread pool as actors. Spawning 250,000+ tasks i
 
 See the [Task module docs](/docs/stdlib/Task.html) for the full API including `Task.race`, `Task.any`, `Task.scope`, and `Task.all_settled`.
 
-To run a transformation over a whole collection in parallel without wiring up tasks by hand, use the data-parallel `List` operations (`pmap`, `pmap_n`, `pfilter`, `preduce`) — see [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/).
+To run a transformation over a whole collection in parallel without wiring up tasks by hand, use the data-parallel `List` operations (`pmap`, `pmap_n`, `pfilter`, `preduce`); see [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/).
 
 ---
 
@@ -424,21 +1101,22 @@ fn main() do
 end
 ```
 
-In long-running applications, the scheduler runs automatically — you do not call `run_until_idle()`. `run_until_idle()` drains the scheduler to a fixed point (every mailbox empty); its operational rule is in [`core-march.md`](core-march.md) §4.10.4, and the determinism property it enables — interleaving-free output byte-identical interpreted vs compiled — is §4.10.5.
+**What it guarantees (compiled).** `run_until_idle()` returns only when every
+other process is quiescent at once:
+- none is runnable or running;
+- none holds a deliverable message;
+- none is parked on a timer wake that is still live;
+- no message was sent and no process was spawned while that was being checked.
 
----
+So a message chain between actors (a ping-pong, a pipeline) runs to its end
+before `run_until_idle()` returns. It does **not** wait for:
+- a message scheduled with `send_after` that has not yet been delivered;
+- work in other OS processes or on other nodes.
 
-## Actor Identity: `self()`
+(Until 2026-09-28 the check was not a consistent snapshot, and a busy
+ping-pong could return early about once in a hundred runs at 14 schedulers.)
 
-Inside a handler, `self()` returns the current actor's `Pid`. Useful for passing yourself as a reply address:
-
-```march
-on Request(question : String, caller : Pid) do
-  let answer = compute_answer(question)
-  send(caller, Answer(answer, self()))
-  state
-end
-```
+In long-running applications, the scheduler runs automatically; you do not call `run_until_idle()`. `run_until_idle()` drains the scheduler to a fixed point (every mailbox empty); its operational rule is in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.4, and the determinism property it enables (interleaving-free output, an exact byte match interpreted vs compiled) is §4.10.5.
 
 ---
 
@@ -460,79 +1138,157 @@ mod MyService do
 end
 ```
 
-The `app` declaration integrates with the supervision system. See [Supervision](supervision.md) for the tutorial, and [`core-march.md`](core-march.md) §4.10.7 for the operational rules of `one_for_one` restart and epoch invalidation.
+The `app` declaration integrates with the supervision system. See [Supervision](supervision.md) for the tutorial, and [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.7 for the operational rules of restart and epoch invalidation.
 
-> **Supervision observation is interp-only compiled today.** The `one_for_one` restart
-> semantics are correct interpreted, but the only surface way to reach a supervised child
-> — reading its pid out of the supervisor state via `get_actor_field(sup, …)` +
-> `pid_of_int(…)` — **SIGSEGVs compiled** (`examples/supervision_strategies.march` exits
-> 139), and the compiled supervisor does not even run its children's `init` at
-> `spawn(Sup)`. Both are filed open findings (`specs/todos/`). Supervised-actor programs
-> run correctly under the interpreter; treat compiled supervision as not-yet-observable.
+**How this relates to the `supervise` block.** These are two spellings of the same idea.
+The `supervise do strategy one_for_one … Child field end` block you put *inside an
+ordinary actor* (see [Supervision](supervision.md#declaring-a-supervisor)) declares
+that actor's supervised children with a small DSL. An `app` body instead evaluates to a
+`Supervisor.Spec` **value**: `Supervisor.spec(:one_for_one, [worker(Worker), …])` is the
+value-level counterpart of that block, and it defines the application's single top-level
+supervisor. The two surfaces spell the strategy differently: a bare `one_for_one` in
+the `supervise` block versus the atom `:one_for_one` passed to `Supervisor.spec`. Reach
+for `supervise` to give an actor children; reach for `app` to declare the root of a
+long-running application. The `app` / `Supervisor.spec` / `worker` DSL is
+interpreter-only (see [App-Level Entry Point](supervision.md#app-level-entry-point));
+compiled programs use `supervise`.
 
----
-
-## Choosing a concurrency primitive
-
-March gives you several concurrency tools, and they all run on the **same M:N green-thread scheduler** — the choice is about *shape of problem*, not about performance tiers. One mental model to keep them straight:
-
-> **Actors** = identity + state + mailbox. **Tasks** = structured fork/join. **Flow** = bounded streaming. **`pmap`** = data-parallel collections. **Session channels** = a typed two-party conversation.
-
-Pick by what you need:
-
-| If you need… | Reach for | Why |
-|---|---|---|
-| A long-lived stateful entity many parties talk to (counter, connection, cache) | **actor** (`spawn` / `send`) | Identity + private state + a mailbox; survives across messages and restarts |
-| To fan out independent work and collect *all* the results | **`Task.async`** + **`Task.await_many`** | Structured fork/join; you await every task |
-| The *first* result and want to cancel the losers | **`Task.race`** / **`Task.any`** | Returns as soon as one finishes (`any` = first success; `race` = first to settle) |
-| Fork tasks that are guaranteed to be cleaned up when the block exits | **`Task.scope`** | Structured concurrency — no task outlives its scope |
-| To transform a whole list across cores, identical result to `map` | **`List.pmap`** / **`pmap_n`** | Data-parallel; `pmap_n` bounds concurrency for expensive items |
-| A multi-stage stream where one stage can fall behind a fast producer | **`Flow`** | Backpressure — the consumer's demand caps how far the producer runs ahead |
-| A strict two-party protocol whose message *order* the compiler should enforce | **session channels** (`Chan.*`) | Linear, typed conversation; wrong-order/use-after-close are compile errors |
-| Raw, un-managed green-thread spawn (you handle joining yourself) | **`task_spawn`** | The low-level primitive `Task.*` is built on — prefer `Task.*` |
-
-Rules of thumb:
-
-- **Default to `Task.async` / `await_many`** for "do these N things concurrently, give me the answers." It's the simplest structured option.
-- **Default to an actor** the moment there's *mutable state with an identity* — something that several callers update over time.
-- **Choose `Flow` over an unbounded `Task.async_stream`** when a fast producer could overwhelm a slow downstream stage and pile up in-flight work. See [Flow & Backpressure]({{ site.baseurl }}/docs/flow/).
-- **Choose `pmap` over hand-wired tasks** when the input is a list, items are independent, and you want the order-preserving, threshold-managed convenience. See [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/).
-- **Choose session channels over a bare actor** when two parties run a fixed protocol and ordering correctness matters. See [Session Types]({{ site.baseurl }}/docs/session-types/).
+Supervision observation is an exact match on both backends: the compiled supervisor runs
+each declared child's `init` at `spawn(Sup)`, and `get_actor_field(sup, …)` +
+`Actor.pid_from_int(c, …)` (the surface way to read a supervised child's pid out of the
+supervisor state; `c` is the `Cap(Actor.Introspect)` minted by `Actor.introspect`)
+resolve correctly compiled (a real shape-registry lookup and a safe dead-actor fallback,
+respectively, in `runtime/march_extras.c`/`runtime/march_runtime.c`).
+`examples/supervision_strategies.march` runs clean (exit 0) compiled, exercising all
+three restart strategies (`one_for_one`/`one_for_all`/`rest_for_one`).
 
 ---
 
 ## Builtins Reference
 
-Backends: **both** = byte-identical interpreted vs compiled (the live-message plane);
-**interp-only** = correct interpreted, but diverges or crashes compiled (a filed finding).
+Backends: **both** = an exact byte match interpreted vs compiled. This covers every
+builtin below, including the capability and supervision-observation plane that used to
+diverge or crash compiled (see [Interpreted vs compiled](#interpreted-vs-compiled)).
 
 | Builtin | Signature | Backends | Description |
 |---------|-----------|----------|-------------|
 | `spawn(Actor)` | `→ Pid` | both | Start a new actor (literal actor name only) |
-| `send(pid, msg)` | `→ Option(())` | both (live) | Send a message; `None` if actor is dead **interpreted** — compiled returns `Some` for a dead pid (§4.10.6 finding) |
+| `send(pid, msg)` | `→ Option(())` | both | Send a message; `None` if actor is dead |
 | `receive()` | `→ Msg` | both | Pop the next mailbox message (only the first `receive()` per handler may block) |
-| `kill(pid)` | `→ ()` | both | Stop an actor |
-| `is_alive(pid)` | `→ Bool` | both | Check if actor is running (registry lookup, safe compiled) |
+| `kill(pid)` | `→ ()` | both | Stop an actor immediately (queue dropped, `on_stop` not run) |
+| `Actor.stop(pid, timeout_ms)` | `→ Bool` | both | Graceful stop: refuse new messages, drain, run `on_stop`, die Normal; see [Stopping an Actor](#stopping-an-actor) |
+| `Actor.is_draining(pid)` | `→ Bool` | both | Stopping but not yet dead |
+| `is_alive(pid)` | `→ Bool` | both | Check if actor is running (registry lookup) |
+| `monitor(watcher, target)` | `→ Int` | both | Deliver `Down(ref, target_pid, reason)` on target exit; local reasons are `Normal`, `Killed`, and `Crash(String)` |
 | `self()` | `→ Pid` | both | Current actor's Pid |
 | `run_until_idle()` | `→ ()` | both | Drain the scheduler to a fixed point (interpreter / tests) |
-| `get_cap(pid)` | `→ Option(Cap(Msg))` | interp-only | Obtain an epoch-tagged capability (compiled `get_cap` does not gate on liveness) |
-| `send_checked(cap, msg)` | `→ :ok \| :error` | interp-only | Epoch-validated send; **non-functional compiled** — returns a garbage atom for every cap (§4.10.6 finding) |
-| `pid_of_int(n)` | `→ Pid` | interp-only | Convert Int to Pid — **SIGSEGVs compiled** (unsafe int→ptr cast, §4.10.7 finding) |
-| `get_actor_field(pid, name)` | `→ Option(a)` | interp-only | Read an actor's state field — **crashes compiled** (hard stub returns `None`, then a deref SIGSEGVs, §4.10.7 finding) |
+| `get_cap(pid)` | `→ Option(Cap(Msg))` | both | Obtain an epoch-tagged capability; `None` for a dead/unknown pid |
+| `send_checked(cap, msg)` | `→ :ok \| :error` | both | Epoch-validated send; checks revocation, epoch match, and liveness (payload is checked for non-sendable types at construction, same rule as `send`) |
+| `revoke_cap(cap)` | `→ Atom` | both | Revoke a capability; a later `send_checked` on it returns `:error` |
+| `is_cap_valid(cap)` | `→ Bool` | both | Boolean form of the epoch/revocation/liveness check |
+| `Actor.pid_from_int(c, n)` | `→ Pid` | both | Convert Int to Pid; `c : Cap(Actor.Introspect)` from `Actor.introspect(io)` (an unknown index resolves to a safe already-dead sentinel; the raw `pid_of_int` builtin is stdlib-internal) |
+| `pid_to_int(pid)` | `→ Int` | both | The inverse: a Pid's spawn index, the `N` in its `Pid(N)` display (what `GlobalPid.make` takes for a local actor) |
+| `Actor.inspect_state(d, pid, timeout_ms)` | `→ Result(String, InspectError)` | both | The actor's state as text; `d : Cap(Actor.Debug)` from `Actor.debug(io)`; see [Reading an actor's state](#reading-an-actors-state-actorinspect_state) |
+| `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |
+| `Actor.set_queue_limit(pid, limit, policy)` | `→ ()` | both (policy `3` is compiled-only; interpreted treats it as unbounded) | Bound an actor's mailbox; see [Mailbox Limits and Backpressure](#mailbox-limits-and-backpressure) |
+| `Actor.send_after(pid, msg, delay_ms)` | `→ TimerRef` | both | Schedule `msg` for delivery to `pid` after `delay_ms`. Built on the same timer heap that backs `Actor.call`'s timeout and supervisor restart backoff. A pending timer does not keep `run_until_idle()` waiting. |
+| `Actor.cancel_timer(ref)` | `→ ()` | both | Cancel a pending `send_after` timer. Safe to call at any time, including after the timer already fired or was already cancelled (both are no-ops). |
 
 ---
 
-## Next Steps
+## Interpreted vs compiled
 
-The concurrency and distribution docs form a journey — actors are the foundation; each step below builds on them:
+The core actor message plane runs both in the tree-walking interpreter and in
+ahead-of-time-compiled (native) binaries. In the compiled runtime, both actors and
+tasks run on an M:N green-thread scheduler (`runtime/march_scheduler.c`): multiple OS
+threads, each running many lightweight green threads, with work-stealing across
+threads. Actor declarations lower to TIR (`lib/tir/lower_actor.ml`) and emit LLVM IR
+that calls the public C API (`march_spawn`/`march_send`/`march_kill`/`march_is_alive`,
+`runtime/march_runtime.c`); each actor runs as its own green thread. Actors park
+cooperatively when their mailbox is empty; tasks park when awaiting a result.
 
-- [Supervision Trees]({{ site.baseurl }}/docs/supervision/) — fault-tolerant hierarchies with automatic restart, ending in a capstone crash-tolerant job processor.
-- [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/) — `pmap` / `pmap_n` for data-parallel work on the same scheduler.
-- [Flow & Backpressure]({{ site.baseurl }}/docs/flow/) — bounded streaming pipelines when a fast producer outruns a slow consumer.
-- [Session Types]({{ site.baseurl }}/docs/session-types/) — typed two-party protocols whose message order the compiler enforces.
-- [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) — take a supervised actor app from one node to a cluster with cross-node calls.
-- [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) — deploy new code to a running server without restarting; actors migrate their state on the fly.
-- [Linear Types]({{ site.baseurl }}/docs/linear-types/) — how linear types interact with message passing.
-- [Task stdlib]({{ site.baseurl }}/docs/stdlib/Task.html) — full Task API reference.
+**What matches exactly.** The **live-message plane** (`spawn` / `send` (to a live
+actor) / `receive` / `run_until_idle` / `is_alive` / `kill`) produces identical
+observable output on both backends for a program with output that does not depend on
+scheduler interleaving; this is mechanically pinned by the golden conformance corpus
+(`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled; see the
+[operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.5).
+The **`Actor.call` plane** is backend-identical: both backends tag-route the zero-arg
+sentinel positionally to the handler at its ctor index, and both report a reply later
+than `timeout_ms` as `Err` (compiled via a deadline-bounded park in `march_actor_call`,
+`runtime/march_runtime.c`, which also stops the caller waiting at the deadline; the
+interpreter returns only after the handler has finished; `timeout_ms <= 0` means wait
+indefinitely); pinned by `test/native/actor_counter` and
+`test/native/actor_call_timeout`. The **capability / dead-`send` plane** (`get_cap`,
+`send_checked`, `revoke_cap`, `is_cap_valid`, plain `send` to a *dead* pid) is an exact
+byte match (`core-march.md` §4.10.6), and so is the **supervision / external state
+inspection plane** (`get_actor_field`/`pid_of_int` and the full compiled supervision
+plane: spawn-time child `init`, crash isolation, all three restart strategies;
+`core-march.md` §4.10.7).
+
+**Where the backends still differ**, each noted where it appears on this page:
+
+- the interpreter cannot park a sender, so mailbox policy `3` (`block_sender`) is
+  compiled-only and refused by the interpreter;
+- the interpreter cannot preempt running code, so an `on_stop` compute loop runs to
+  completion there, and an `Actor.call` returns `Err` for a late reply only after the
+  slow handler has finished instead of at `timeout_ms`;
+- the `app` / `Supervisor.spec` / `worker` DSL is interpreter-only; compiled programs
+  use `supervise`;
+- `Scheduler` counters other than the live actor count read `0` under the interpreter.
+
+**History.** Each of these used to diverge and is now closed; the findings are in the
+`specs/todos/` ledger.
+
+- *2026-07-08*: `get_actor_field`/`pid_of_int` and the compiled supervision plane
+  stopped being stubs; `examples/supervision_strategies.march` runs clean compiled.
+- *2026-07-13*: `Actor.call` became backend-identical. The compiled runtime enforces
+  `timeout_ms` with a deadline-bounded park instead of busy-polling, and
+  correlation-checked replies (actor-system hardening, task 4) wrap every reply in an
+  envelope carrying the id issued for that `march_actor_call` invocation, so a late
+  reply from a timed-out call is discarded (`march_actor_call_unwrap`). The interpreter
+  dispatches by tag the same way (`lib/eval/eval.ml` `actor_call`); the historical
+  interp-only `on Call(ref, msg)` two-argument form is retired.
+- *2026-07-18*: compiled `get_cap` builds the real epoch cap (niche `None` for a
+  dead/unknown pid), `send_checked`/`revoke_cap` return the same `:ok`/`:error` atoms
+  as the interpreter, and `send` to a dead pid returns `None` on both backends.
+- *2026-07-22*: `Actor.call`'s reply value was briefly corrupted compiled: a scalar
+  reply (`value=5`) came back as its raw tagged bit pattern (`value=11`) because
+  `int_to_string`/`bool_to_string`/`float_to_string` had no dedicated
+  argument-coercion arm in `lib/tir/llvm_emit.ml`'s `EApp` emission, so a
+  generically-extracted `Result` payload reached the C call still tagged. Fixed by
+  adding the missing coercion arms (mirroring the existing `int_not`/bitwise-op
+  pattern); `test/native/actor_counter` matches its golden on both backends. The same
+  day `self()` started typechecking as the actor's own `Pid[state]` rather than plain
+  `Int`, which had produced a confusing `expected Pid but got Int`.
+- *2026-09-22*: until then, compiled `is_cap_valid`/`send_checked` on a cap whose actor
+  had been *killed* intermittently answered `true`/`:ok` (about one run in five),
+  because they read the actor record's alive word after it could already be freed and
+  reused. Fixed; `test/native/cap_epoch_plane` now runs the program 51 times per test
+  run so a flake of that shape fails.
+
+For the typing side (actor declaration, `spawn`/`Pid` typing, message-payload typing)
+see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6;
+for the scheduler and lowering internals, see the implementation reference
+(`specs/impl/index.md`).
+
+---
+
+## See also
+
+The concurrency and distribution docs form a journey: actors are the foundation, and each step below builds on them.
+
+- [Supervision Trees]({{ site.baseurl }}/docs/supervision/): fault-tolerant hierarchies with automatic restart, ending in a capstone crash-tolerant job processor.
+- [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/): `pmap` / `pmap_n` for data-parallel work on the same scheduler.
+- [Flow & Backpressure]({{ site.baseurl }}/docs/flow/): bounded streaming pipelines when a fast producer outruns a slow consumer.
+- [Session Types]({{ site.baseurl }}/docs/session-types/): typed two-party protocols with a message order the compiler enforces.
+- [Choreography]({{ site.baseurl }}/docs/choreography/): one protocol, many roles, each role its own program, optionally hosted in an actor.
+- [Clustering & RPC]({{ site.baseurl }}/docs/clustering/): take a supervised actor app from one node to a cluster with cross-node calls.
+- [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/): deploy new code to a running server without restarting; actors migrate their state on the fly.
+- [Observing a running node]({{ site.baseurl }}/docs/observe/): mailboxes, crashes and scheduler load from outside the process.
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/): `Actor.Introspect`, `Actor.Debug`, and the grant that bounds what a spawned actor may do.
+- [Linear Types]({{ site.baseurl }}/docs/linear-types/): how linear types interact with message passing.
+- [Task stdlib]({{ site.baseurl }}/docs/stdlib/Task.html): full Task API reference.
+- [Overload & Resilience]({{ site.baseurl }}/docs/overload-resilience/): the practical guide to mailbox limits, load shedding, deadlines, and restart backoff working together.

@@ -81,6 +81,31 @@ class march_server =
            shells out.  The edit goes back through workspace/applyEdit so it
            lands in the user's BUFFER; writing the file underneath an editor
            with unsaved changes would lose their work. *)
+        if command = "march.inferRefinements" then
+          let file, fn =
+            match args with
+            | [ `String file; `String fn ] -> (Some file, Some fn)
+            | [ `String file ] -> (Some file, None)
+            | _ -> (None, None)
+          in
+          match file with
+          | None ->
+            Lwt.return
+              (`Assoc
+                [ ("status", `String "error"); ("kind", `String "inferRefinements");
+                  ("message", `String "march.inferRefinements expects [file] or [file, function]") ])
+          | Some file -> (
+            let payload, edit = Refine_command.run_infer ~file ?fn () in
+            match edit with
+            | None -> Lwt.return payload
+            | Some we ->
+              Lwt.bind
+                (notify_back#send_request
+                   (Lsp.Server_request.WorkspaceApplyEdit
+                      (Lsp.Types.ApplyWorkspaceEditParams.create ~edit:we ~label:"Infer refinements" ()))
+                   (fun _ -> Lwt.return ()))
+                (fun _ -> Lwt.return payload))
+        else
         if command = "march.suggestRefinement"
            || command = "march.suggestPostcondition" then
           match args with
@@ -313,7 +338,8 @@ class march_server =
                   ~commands:[ "march.runTest"; "march.debugTest";
                               "march.run";     "march.debug";
                               "march.suggestRefinement";
-                              "march.suggestPostcondition" ] ());
+                              "march.suggestPostcondition";
+                              "march.inferRefinements" ] ());
         (* Auto-close HTML tags inside ~H sigils when the user types '>'. *)
         ServerCapabilities.documentOnTypeFormattingProvider =
           Some (Lsp.Types.DocumentOnTypeFormattingOptions.create

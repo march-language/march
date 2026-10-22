@@ -243,7 +243,7 @@ type t = {
 - `get h n`: Retrieve entry at index n (0=most recent); returns None if out of bounds
 - `length h`: Total recorded entries
 
-**Ring Buffer**: Holds up to 100 entries with index 0 always pointing to most recent.
+**Ring Buffer**: Stores up to 100 entries with index 0 always pointing to most recent.
 
 ## Terminal UI (TUI) Rendering
 
@@ -556,7 +556,7 @@ let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
 
 ### REPL Tests (`test/test_compiler.ml`)
 
-> **Note.** `test/test_march.ml` no longer exists — the suite was split into per-area files run via the `run_*.ml` drivers; REPL/parity tests now live in `test/test_compiler.ml`. Line ranges below are historical.
+> **Note.** `test/test_march.ml` no longer exists; the suite was split into per-area files run via the `run_*.ml` drivers; REPL/parity tests now live in `test/test_compiler.ml`. Line ranges below are historical.
 
 **Multiline Completion**:
 - `test_do_end_depth()`: do/end nesting
@@ -604,6 +604,8 @@ let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
 | `MARCH_HISTORY_FILE` | Path to persistent history | `~/.march_history` |
 | `MARCH_HISTORY_SIZE` | Max history entries | 1000 |
 | `MARCH_REPL_INTERP` | Force interpreter (disable JIT) | (unset) |
+| `MARCH_JIT_BACKEND` | REPL JIT backend: `orc` (in-process LLVM ORC) or `clang` (subprocess clang + dlopen). Unset auto-detects: ORC when libLLVM is found, else clang. | (auto) |
+| `MARCH_LLVM_LIB` | Explicit path to `libLLVM.{dylib,so}` for the ORC backend, overriding the built-in search paths | (unset) |
 | `MARCH_DEBUG_TRACE_SIZE` | Trace buffer capacity (debug mode) | 100,000 |
 
 ## Prompt Format

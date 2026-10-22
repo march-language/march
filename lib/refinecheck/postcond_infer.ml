@@ -119,36 +119,7 @@ let fn_calls (name : string) (fd : A.fn_def) : bool =
    context-bearing decls at each level — the postcondition analogue of
    [Precond_infer.prune].  The callers are the point: they are where the debt a
    postcondition discharges actually lives. *)
-let rec prune_with_callers (path : string list) (name : string)
-    (decls : A.decl list) : (A.fn_def * (A.fn_def -> A.decl list)) option =
-  match path with
-  | [] ->
-    let ctx = PI.context_decls decls in
-    let callers =
-      List.filter
-        (function
-          | A.DFn (fd, _) -> fd.A.fn_name.A.txt <> name && fn_calls name fd
-          | _ -> false)
-        decls
-    in
-    let rec find = function
-      | [] -> None
-      | A.DFn (fd, sp) :: _ when fd.A.fn_name.A.txt = name ->
-        Some (fd, fun fd' -> ctx @ (A.DFn (fd', sp) :: callers))
-      | _ :: tl -> find tl
-    in
-    find decls
-  | m :: rest ->
-    let rec find = function
-      | [] -> None
-      | A.DMod (n, vis, inner, sp) :: _ when n.A.txt = m ->
-        (match prune_with_callers rest name inner with
-         | None -> None
-         | Some (fd, mk) ->
-           Some (fd, fun fd' -> PI.context_decls decls @ [ A.DMod (n, vis, mk fd', sp) ]))
-      | _ :: tl -> find tl
-    in
-    find decls
+let prune_with_callers = PI.prune_with_callers
 
 (* ── Probing ──────────────────────────────────────────────────────────────── *)
 
@@ -161,11 +132,11 @@ let rec prune_with_callers (path : string list) (name : string)
    entry, the obligation is never recorded, and zero debt looks exactly like a
    discharged one.  The tree being walked is pruned for cost; the signature
    table has to be complete for correctness. *)
-let walk_debt ~root ~defs (decls : A.decl list) : PI.debt =
+let walk_ledger ~root ~defs (decls : A.decl list) : Ledger_diff.snapshot =
   Ob.reset ();
   let errctx = Err.create () in
   (try RC.visit_decls ~root errctx defs RC.rctx0 decls with _ -> ());
-  PI.count_debt ()
+  Ledger_diff.snapshot ()
 
 (* A copy of [defs] in which [qualified]'s entry carries the hypothesised
    postcondition.  Overwriting one entry rather than re-collecting the module
@@ -252,8 +223,8 @@ let infer_fn ~root ~defs ~(decls : A.decl list) ~(path : string list)
           in
           if callers = 0 then mk ~base ~after:0 ~callers:0 No_callers
           else begin
-            let base_debt = walk_debt ~root ~defs tree in
-            if base_debt.PI.d_total = 0 then
+            let base_debt = walk_ledger ~root ~defs tree in
+            if Ledger_diff.debt base_debt = 0 then
               mk ~base ~after:0 ~callers No_debt
             else begin
               let queries = ref 0 in
@@ -269,12 +240,13 @@ let infer_fn ~root ~defs ~(decls : A.decl list) ~(path : string list)
                        debt it would appear to remove. *)
                     if post_holds ~root hyp then begin
                       let d =
-                        walk_debt ~root
+                        walk_ledger ~root
                           ~defs:(defs_with_post defs ~qualified hyp)
                           (rebuild hyp)
                       in
-                      if d.PI.d_total < base_debt.PI.d_total
-                         && d.PI.d_violated <= base_debt.PI.d_violated
+                      (* USEFUL, per site: it closes a caller obligation and
+                         opens none ([Precond_infer.admissible]). *)
+                      if PI.admissible (Ledger_diff.diff ~before:base_debt ~after:d)
                       then best := Some (cand, d)
                     end
                   end)
@@ -282,15 +254,15 @@ let infer_fn ~root ~defs ~(decls : A.decl list) ~(path : string list)
               match !best with
               | None ->
                 Some { rs_fn = qualified; rs_span = span; rs_status = No_candidate;
-                       rs_base = base; rs_pred = ""; rs_debt_before = base_debt.PI.d_total;
-                       rs_debt_after = base_debt.PI.d_total; rs_callers = callers;
+                       rs_base = base; rs_pred = ""; rs_debt_before = Ledger_diff.debt base_debt;
+                       rs_debt_after = Ledger_diff.debt base_debt; rs_callers = callers;
                        rs_queries = !queries }
               | Some (cand, d) ->
                 Some { rs_fn = qualified; rs_span = span;
-                       rs_status = (if d.PI.d_total = 0 then Solved else Partial);
+                       rs_status = (if Ledger_diff.debt d = 0 then Solved else Partial);
                        rs_base = base; rs_pred = cand.PI.c_text;
-                       rs_debt_before = base_debt.PI.d_total;
-                       rs_debt_after = d.PI.d_total; rs_callers = callers;
+                       rs_debt_before = Ledger_diff.debt base_debt;
+                       rs_debt_after = Ledger_diff.debt d; rs_callers = callers;
                        rs_queries = !queries }
             end
           end))

@@ -5,23 +5,111 @@ nav_order: 10
 permalink: /docs/supervision/
 ---
 
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Supervision Trees
 
-Supervision trees are how March programs achieve fault tolerance. When an actor crashes, its supervisor automatically restarts it according to a configurable policy.
+A supervisor is an actor that watches other actors and restarts them when they
+crash. You declare which children it starts, which strategy decides who else is
+restarted when one of them dies, and how many restarts it tolerates before it gives
+up and crashes itself, handing the fault to *its* supervisor. The result is a tree in
+which a failure is contained to the one thing that broke, and recovery is automatic.
+
+This is how March programs achieve fault tolerance. Instead of wrapping every
+operation in defensive error handling, a worker does its job and crashes on an
+unexpected error; its supervisor brings it back with fresh state. You write the happy
+path once, and the supervisor handles "something went wrong" uniformly, every time.
+
+The page covers the `supervise` block and everything that hangs off it: restart types
+and strategies, the restart budget and backoff, graceful stops, nested trees, the
+`app` entry point, and a capstone that grows one worker into a crash-tolerant,
+backpressured pool.
+
+## On this page
+
+**Start here**
+
+- [When to use a supervisor](#when-to-use-a-supervisor)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [The Idea](#the-idea)
+- [Declaring a Supervisor](#declaring-a-supervisor) and [children with `init` arguments](#children-with-init-arguments)
+- [A Full Supervision Example](#a-full-supervision-example)
+
+**What happens when a child dies**
+
+- [Restart types](#restart-types)
+- [Restart Strategies](#restart-strategies): [`one_for_one`](#one_for_one), [`one_for_all`](#one_for_all), [`rest_for_one`](#rest_for_one), [compared](#supervision-strategies-compared)
+- [Escalation: Max Restarts Budget](#escalation-max-restarts-budget)
+- [Restart Backoff](#restart-backoff)
+
+**Stopping and structure**
+
+- [Stopping gracefully](#stopping-gracefully) and [stopping a tree](#stopping-a-tree)
+- [Nested Supervision Trees](#nested-supervision-trees)
+- [App-Level Entry Point](#app-level-entry-point)
+
+**Putting it to work**
+
+- [Strategies for Supervision Design](#strategies-for-supervision-design)
+- [Capstone: a crash-tolerant job processor](#capstone-a-crash-tolerant-job-processor)
+- [See also](#see-also)
+
+## When to use a supervisor
+
+Put an actor under a supervisor when it is **long-lived** and a crash should not take
+it away for good: a connection holder, a cache, a worker in a pool, a service other
+actors find by name. The supervisor restarts it with fresh state from `init`, under a
+budget that turns a crash loop into an escalation instead of a storm.
+
+| Situation | What to reach for |
+|---|---|
+| Independent workers; one crash should not touch the others | `strategy one_for_one` |
+| Children that share state and must restart together | `strategy one_for_all` |
+| A pipeline where later children depend on earlier ones | `strategy rest_for_one` |
+| A worker that finishes its job and is stopped on purpose | `restart transient`, so `kill()` retires it |
+| A one-shot helper that should never come back | `restart temporary` |
+| A child that needs a value to start with (a database handle) | `Worker w(db)` in the block; a restart re-supplies it |
+| Shut down in order, letting in-flight work finish | `Actor.stop` on the supervisor; per-child `shutdown` budgets |
+| The root of a long-running application | `app` with `Supervisor.spec` (interpreter) or a top-level actor with `supervise` (compiled) |
+
+A supervisor is not the tool for a one-off computation (use a task), for a transient
+fault you can handle locally (handle it), or for a child whose state must survive a
+crash (persist it outside the actor, or hand it in through `init` arguments).
+
+## How it fits with the rest of March
+
+| Concept | Where supervision meets it | Chapter |
+|---|---|---|
+| **Actors** | A supervisor is an actor whose state fields hold its children's Pids. A restarted child has a new Pid and a new capability epoch; names survive the restart, so hold names across a restart boundary. | [Actors]({{ site.baseurl }}/docs/actors/) |
+| **Hot code reload** | An actor killed at a hard drain deadline is restarted by its supervisor on the new code; `on_stop` under a reload is the one registered when the actor was spawned. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/#drains) |
+| **Observing a running node** | `TREE` shows the tree, `ACTOR <pid>` a supervisor's strategy and restarts held, and `forge diagnose`'s `crash.loop` fires on three crashes under one supervisor. | [Observe]({{ site.baseurl }}/docs/observe/) |
+| **Overload and resilience** | Mailbox limits, load shedding and restart backoff working together. | [Overload & Resilience]({{ site.baseurl }}/docs/overload-resilience/) |
+| **Parallel collections and Flow** | A supervised pool gives throughput; `pmap_n` and `Flow` bound how much work is in flight. | [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/), [Flow]({{ site.baseurl }}/docs/flow/) |
+| **Clustering and topology** | A supervised app is what a topology places on nodes and what a cluster deploy restarts pool by pool. | [Clustering]({{ site.baseurl }}/docs/clustering/), [Topology]({{ site.baseurl }}/docs/topology/) |
 
 ---
 
 ## The Idea
 
-In Erlang/OTP (which March's actor model draws from), the approach to failures is "let it crash." Instead of defensive error handling everywhere, you structure your system so that:
+Most languages push you toward *defensive* error handling: wrap anything that might go
+wrong in a try/catch, check every return value, anticipate every failure mode up front.
+It works, but it is a lot of code, and it is easy to miss a case.
 
-1. Worker actors do their job and crash on unexpected errors
-2. Supervisor actors watch workers and restart them
+Supervision trees are built on a different instinct, sometimes called **"let it
+crash"** (the idea comes from Erlang/OTP, which March's actor model draws from). It
+sounds backwards at first: is crashing not bad? The observation behind it is that most
+failures are **transient**: a stale cache entry, a flaky connection, one bad message
+that corrupted a bit of local state. For that kind of bug, the cheapest reliable fix
+is not to carefully detect and repair the corruption; it is to throw the whole thing
+away and start over with fresh state. So instead of handling every error everywhere,
+you structure your system so that:
+
+1. Worker actors do their job, and crash on unexpected errors instead of trying to handle them
+2. Supervisor actors watch workers and restart them with clean state when they crash
 3. Supervisors can themselves be supervised
 
-The result is a tree of processes where failures are isolated and recovery is automatic.
+The result is a tree of processes where failures are isolated to the one thing that
+broke, and recovery is automatic.
 
 ---
 
@@ -44,11 +132,179 @@ end
 ```
 
 The `supervise` block:
-- `strategy` — restart policy (see below)
-- `max_restarts N within S` — if more than N restarts occur in S seconds, the supervisor itself crashes (escalates to its own supervisor)
-- Each line `ActorName field_name` — a child to supervise, with `field_name` being the state field that stores its current `Pid`
+- `strategy`: restart policy (see [Restart Strategies](#restart-strategies))
+- `max_restarts N within S`: if more than N restarts occur in S seconds, the supervisor itself crashes (escalates to its own supervisor)
+- `backoff base <ms> cap <ms> jitter <n>%` (optional): tunes the delay between repeated restarts of the same child; see [Restart backoff](#restart-backoff)
+- Each line `ActorName field_name`: a child to supervise, with `field_name` being the state field that stores its current `Pid`, optionally followed by `restart <type>` (see [Restart types](#restart-types)) and/or `shutdown <ms> | infinity | brutal` (see [Stopping a tree](#stopping-a-tree))
+- `ActorName field_name(arg, ...)`: the same, for a child whose `init` takes parameters (see [Parameterised `init`](actors.md#parameterised-init)). The arguments are evaluated once, when the supervisor spawns, and may use the supervisor's own `init` parameters.
 
 When the supervisor starts (via `spawn(AppSupervisor)`), it automatically spawns all listed children.
+
+### Children with `init` arguments
+
+```march
+actor Worker do
+  state { db : Pid(Db), count : Int }
+  init(db : Pid(Db)) { db: db, count: 0 }
+  ...
+end
+
+actor Pool do
+  state { w : Int, db : Pid(Db) }
+  init(db : Pid(Db)) { w: 0, db: db }
+
+  supervise do
+    strategy one_for_one
+    max_restarts 5 within 30
+    Worker w(db)          -- the child's init argument, from the supervisor's own
+  end
+end
+
+let pool = spawn(Pool, spawn(Db))
+```
+
+The argument list is checked against the child's `init` signature exactly as
+`spawn(Worker, db)` would be. A restart of the child **re-supplies the same
+values** the first spawn received: the supervisor keeps the evaluated arguments
+beside the child's slot (compiled, as the environment of the respawn closure it
+registers with the runtime; interpreted, on the child's instance), so a
+replacement never re-evaluates the expression and never starts without its
+argument. Everything else about the replacement is as for any restart: fresh
+state from `init`, a new `Pid`, the old capabilities stale.
+
+---
+
+## A Full Supervision Example
+
+(Originally adapted from `examples/supervision_basic.march`, since removed
+as a redundant example; this inline copy is now the canonical source and is
+verified directly against the compiler.)
+
+```march
+mod BasicSupervision do
+  needs IO
+  needs IO.Console
+
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Inc() do
+      let n = state.count + 1
+      println("[Counter] count -> " ++ int_to_string(n))
+      { count: n }
+    end
+  end
+
+  actor Logger do
+    state { entries : Int }
+    init  { entries: 0 }
+
+    on Log(msg : String) do
+      let n = state.entries + 1
+      println("[Logger] #" ++ int_to_string(n) ++ ": " ++ msg)
+      { entries: n }
+    end
+  end
+
+  actor AppSupervisor do
+    state { counter : Int, logger : Int }
+    init  { counter: 0, logger: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 30
+      Counter counter
+      Logger  logger
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
+    -- Spawn supervisor: it auto-starts Counter and Logger
+    let sup = spawn(AppSupervisor)
+
+    -- Get child PIDs from supervisor state
+    let c1_int = match get_actor_field(sup, "counter") do
+                   None    -> -1
+                   Some(n) -> n
+                 end
+    let c1 = Actor.pid_from_int(c, c1_int)
+
+    println("Counter alive: " ++ bool_to_string(is_alive(c1)))
+
+    -- Use the children
+    send(c1, Inc())
+    send(c1, Inc())
+    run_until_idle()
+
+    -- Crash the Counter
+    kill(c1)
+    println("Counter alive after kill: " ++ bool_to_string(is_alive(c1)))
+
+    -- Supervisor restarts it with a new PID
+    let c2_int = match get_actor_field(sup, "counter") do
+                   None    -> -1
+                   Some(n) -> n
+                 end
+    let c2 = Actor.pid_from_int(c, c2_int)
+    println("New counter PID: " ++ int_to_string(c2_int))
+    println("New counter alive: " ++ bool_to_string(is_alive(c2)))
+
+    -- Restarted counter has fresh state (count = 0)
+    send(c2, Inc())
+    run_until_idle()
+  end
+
+end
+```
+
+Reading a child's Pid out of the supervisor's state takes a `Cap(Actor.Introspect)`,
+minted once in `main` by `Actor.introspect(io)`; see
+[Introspection is a capability](actors.md#introspection-is-a-capability).
+
+---
+
+## Restart types
+
+By default every child is `permanent`: it comes back whether it crashed or was
+deliberately stopped with `kill()`. A trailing `restart` modifier changes that
+per child:
+
+```march
+supervise do
+  strategy one_for_one
+  max_restarts 5 within 60
+  Counter counter                      -- permanent (the default)
+  Job     job     restart transient    -- crash restarts it; kill() retires it
+  Reaper  reaper  restart temporary    -- never restarted
+end
+```
+
+| Restart type | Child crashed | `kill(child)` | Child returned normally |
+|---|---|---|---|
+| `permanent` (default) | restarted | restarted | not restarted |
+| `transient` | restarted | **not restarted** | not restarted |
+| `temporary` | not restarted | not restarted | not restarted |
+
+`transient` is the job-worker case: a worker that finishes its assignment and
+is stopped on purpose stays stopped, while one that dies badly is brought back.
+
+A death that does not restart also spends **none** of the supervisor's
+`max_restarts` budget, so retiring children can never escalate a healthy
+supervisor. Under `one_for_all` and `rest_for_one`, a `temporary` child caught
+in a batch restart is stopped with its siblings and simply not brought back;
+its state field keeps the dead child's `Pid`, since only an actual respawn
+rewrites it.
+
+> **Coming from Erlang/OTP?** March's `permanent` is *not* OTP's. OTP restarts a
+> permanent child even when it exits normally; March never restarts a child that
+> returned normally, under any restart type. March's `permanent` is therefore
+> closest to OTP's `transient`, with `kill()` counting as an abnormal exit, and
+> March's `transient` differs from `permanent` exactly in that `kill()` retires
+> it. This was a deliberate choice: the normal-exit behaviour predates restart
+> types, and changing it would silently alter every `supervise` block already
+> written.
 
 ---
 
@@ -90,7 +346,7 @@ Use `one_for_all` when children are tightly coupled and must be in sync.
 
 ### `rest_for_one`
 
-When a child crashes, it and all children **started after it** are restarted. Children started before it are left alone.
+When a child crashes, it and all children **started after it** are restarted. Children started before it are left as they were.
 
 ```march
 supervise do
@@ -106,86 +362,16 @@ end
 
 Use `rest_for_one` when later children depend on earlier ones.
 
----
+### Supervision Strategies Compared
 
-## A Full Supervision Example
+```
+Worker crashes:     W1  W2  W3
+                    ↑
+                  crash
 
-Adapted from `examples/supervision_basic.march`:
-
-```march
-mod BasicSupervision do
-
-  actor Counter do
-    state { count : Int }
-    init  { count: 0 }
-
-    on Inc() do
-      let n = state.count + 1
-      println("[Counter] count -> " ++ int_to_string(n))
-      { count: n }
-    end
-  end
-
-  actor Logger do
-    state { entries : Int }
-    init  { entries: 0 }
-
-    on Log(msg : String) do
-      let n = state.entries + 1
-      println("[Logger] #" ++ int_to_string(n) ++ ": " ++ msg)
-      { entries: n }
-    end
-  end
-
-  actor AppSupervisor do
-    state { counter : Int, logger : Int }
-    init  { counter: 0, logger: 0 }
-
-    supervise do
-      strategy one_for_one
-      max_restarts 5 within 30
-      Counter counter
-      Logger  logger
-    end
-  end
-
-  fn main() do
-    -- Spawn supervisor: it auto-starts Counter and Logger
-    let sup = spawn(AppSupervisor)
-
-    -- Get child PIDs from supervisor state
-    let c1_int = match get_actor_field(sup, "counter") do
-                   None    -> -1
-                   Some(n) -> n
-                 end
-    let c1 = pid_of_int(c1_int)
-
-    println("Counter alive: " ++ bool_to_string(is_alive(c1)))
-
-    -- Use the children
-    send(c1, Inc())
-    send(c1, Inc())
-    run_until_idle()
-
-    -- Crash the Counter
-    kill(c1)
-    println("Counter alive after kill: " ++ bool_to_string(is_alive(c1)))
-
-    -- Supervisor restarts it with a new PID
-    let c2_int = match get_actor_field(sup, "counter") do
-                   None    -> -1
-                   Some(n) -> n
-                 end
-    let c2 = pid_of_int(c2_int)
-    println("New counter PID: " ++ int_to_string(c2_int))
-    println("New counter alive: " ++ bool_to_string(is_alive(c2)))
-
-    -- Restarted counter has fresh state (count = 0)
-    send(c2, Inc())
-    run_until_idle()
-  end
-
-end
+one_for_one:        ↻   ok  ok    (only W1 restarts)
+one_for_all:        ↻   ↻   ↻     (all restart)
+rest_for_one:       ↻   ↻   ok    (W1 and later restart)
 ```
 
 ---
@@ -206,17 +392,130 @@ This prevents restart storms from grinding the system to a halt. The escalation 
 
 ---
 
-## Supervision Strategies Compared
+## Restart Backoff
 
-```
-Worker crashes:     W1  W2  W3
-                    ↑
-                  crash
+When the same child crashes repeatedly, the supervisor waits a little longer
+before each restart so a crash loop cannot burn a core. A child's **first**
+crash restarts immediately (zero added delay), so a single crash-and-recover
+cycle is unaffected. Only a **repeat** crash of the same child slot (its
+`crash_streak` exceeds 1) is delayed: the delay is
+`min(cap, base << min(streak - 1, 7))`, with ±`jitter`% on top so that
+siblings crashing together do not retry in lockstep. The streak resets to 0
+once the child completes a full `max_restarts ... within N` window without
+crashing again; a healed child goes back to immediate-restart behavior on its
+next isolated crash.
 
-one_for_one:        ↻   ok  ok    (only W1 restarts)
-one_for_all:        ↻   ↻   ↻     (all restart)
-rest_for_one:       ↻   ↻   ok    (W1 and later restart)
+The curve is tunable per supervisor with an optional `backoff` clause:
+
+```march
+supervise do
+  strategy one_for_one
+  max_restarts 5 within 60
+  backoff base 25 cap 5000 jitter 25%   -- these are the defaults
+  Worker w
+end
 ```
+
+- `base <ms>`: the unit of the curve. The delay before the *second*
+  consecutive restart is `2 × base`, and each further consecutive crash
+  doubles it, up to `base << 7` (seven doublings) at the eighth consecutive
+  crash and beyond. Must be greater than 0.
+- `cap <ms>`: a ceiling the doubling saturates at. Must be at least `base`
+  (the parser rejects a smaller one).
+- `jitter <n>%`: each delay is spread by ±n% of itself (0 to 100). `jitter 0%`
+  disables it and makes the delays exactly reproducible, which is what you
+  want in a test.
+
+All three are optional individually (`backoff base 100` keeps the default cap
+and jitter), and omitting the clause entirely gives the values shown above.
+With the defaults the delays run 50, 100, 200, 400, 800, 1600, then 3200ms
+pre-jitter: `25 << 7 = 3200` is the true default ceiling, so the default
+`cap 5000` is never reached; ±25% jitter on top gives an observed max of
+~4000ms. (A traced run with `backoff base 10 cap 45 jitter 0%` prints delays
+0, 20, 40, 45, 45, … for streaks 1, 2, 3, 4, 5, ….) The delay is applied by
+the compiled runtime (`runtime/march_runtime.c`, `march_supervisor_notify`);
+the interpreter restarts without delay.
+
+For the batch strategies (`one_for_all`/`rest_for_one`), a pending delayed
+restart absorbs any further crashes among covered children that arrive
+before it fires, instead of scheduling a second overlapping restart; the
+restart's child range widens (never narrows) to cover every sibling that
+crashed during the pending window.
+
+Set `MARCH_SUP_TRACE=1` to print each restart decision to stderr:
+`march: supervisor backoff child=<idx> streak=<n> delay_ms=<ms>`, plus a
+` (batch restart already pending, skipped)` suffix when a crash was absorbed
+into an already-pending batch restart instead of scheduling its own.
+
+`MARCH_SUP_TEST_STALL_MS=<ms>` is a test seam for this exact race: it makes a
+synchronous batch restart pause (yielding, so other actors keep running)
+between claiming its in-flight marker and running the strategy, so a test can
+land a sibling's crash inside that window by construction instead of by luck.
+It is read once, does nothing when unset, and exists for the runtime's own
+regression suite; leave it unset in production.
+
+---
+
+## Stopping gracefully
+
+`kill(pid)` is immediate: whatever was queued in the actor's mailbox is
+discarded. That is the wrong tool for a deploy, which needs the opposite:
+stop accepting new work, let the in-flight work finish, *then* exit.
+
+`Actor.stop(pid, timeout_ms)` does that:
+
+```march
+let stopped = Actor.stop(worker, 5000)
+```
+
+1. The actor is marked **draining**: `send` to it returns `None`, so no new
+   work is accepted.
+2. It works off the messages already in its mailbox.
+3. It runs its `on_stop` block, if it declares one.
+4. It dies a **normal** death, which no restart type restarts, so a stopped
+   child does not fight its supervisor.
+
+`stop` returns only once the actor has actually stopped, so a shutdown
+sequence can be written as straight-line code. It returns `false` if the actor
+was already dead or already stopping. `timeout_ms` bounds the drain: a negative
+value waits indefinitely, and `0` discards the queue as soon as the in-flight
+message returns. `Actor.is_draining(pid)` distinguishes "shutting down" from
+"dead", which `is_alive` alone cannot.
+
+An actor that needs to flush a buffer, checkpoint state, or hand unfinished work
+back to a queue at shutdown declares an `on_stop` block; it runs after the drain
+and before the normal death, on every graceful stop but never on `kill`. See
+[`on_stop`: the terminate callback](actors.md#on_stop-the-terminate-callback).
+
+### Stopping a tree
+
+Stopping a supervisor stops its children first, in **reverse declaration
+order** (the mirror of the order they were started in), each with its own
+`shutdown` budget:
+
+```march
+supervise do
+  strategy one_for_one
+  max_restarts 5 within 60
+  Db      db                      -- stopped last  (5s default)
+  Cache   cache shutdown 1000     -- stopped second (1s)
+  Api     api   shutdown infinity -- stopped first  (waits as long as it takes)
+end
+```
+
+`shutdown` takes a millisecond budget, `infinity`, or `brutal` (die at once,
+mailbox discarded, what `kill` does). A child that has not finished when its
+budget runs out is killed. The default is 5 seconds; `kill` never consults this
+field, so it changes nothing for code that does not call `stop`.
+
+Children are detached from the supervisor before being stopped, so an orderly
+teardown does not trigger a restart; otherwise the children would come back
+and the tree would never go down.
+
+**Still open:** draining across a hot code reload. A deploy's own drains are
+described under [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/#drains);
+the `on_stop` that runs under a reload is the one registered when the actor was
+spawned (`specs/todos/2026-08-12-graceful-shutdown-and-drain.md`).
 
 ---
 
@@ -261,13 +560,14 @@ actor DbSupervisor do
 end
 ```
 
-A crash in the Web tier doesn't affect the DB tier. A crash in the DB tier escalates to TopSupervisor.
+A crash in the Web tier does not affect the DB tier. A crash in the DB tier escalates to TopSupervisor.
 
 ---
 
 ## App-Level Entry Point
 
-The `app` declaration is a shorthand for defining the top-level supervisor:
+The `app` declaration is a shorthand for defining the **top-level** supervisor of a
+long-running application:
 
 ```march
 mod MyService do
@@ -283,32 +583,51 @@ mod MyService do
 end
 ```
 
+This is the value-level counterpart of the [`supervise` block](#declaring-a-supervisor)
+used everywhere else on this page: the `app` body evaluates to a `Supervisor.Spec`, where
+`Supervisor.spec(:one_for_one, [worker(Worker), …])` states the same thing as a
+`supervise` block with `strategy one_for_one` and a `Worker …` child line inside an actor.
+The differences are scope and spelling: `app` defines the *single application root* (not
+an inner actor's children), and the strategy is passed as the atom `:one_for_one` rather
+than the bare `one_for_one` keyword the block DSL uses. Use `supervise` to give an actor
+children; use `app` for the application's root supervisor. See
+[Actors → App Entry Point](actors.md#app-entry-point) for the same note from the actor side.
+
+**Interpreter-only.** This value-level DSL (`app`, `Supervisor.spec`, `worker`,
+`dynamic_supervisor`) runs under `march run` and `march test`; the compiled
+backend rejects a call to any of them with a positioned error rather than the
+former link-time `Undefined symbols: _worker`. Compiled programs declare children
+in a `supervise do … end` block.
+
 ---
 
 ## Strategies for Supervision Design
 
-**Start with `one_for_one`** — it's the most common and most isolated strategy.
+**Start with `one_for_one`**: it is the most common and most isolated strategy.
 
-**Use `one_for_all` when children share state** — for example, a group of actors that all read from a shared config loaded at startup. If one crashes, the shared state might be stale and all should reload.
+**Use `one_for_all` when children share state**: for example, a group of actors that all read from a shared config loaded at startup. If one crashes, the shared state might be stale and all should reload.
 
-**Use `rest_for_one` for pipelines** — if actor B depends on actor A having started first, use `rest_for_one` so a crash in A also restarts B.
+**Use `rest_for_one` for pipelines**: if actor B depends on actor A having started first, use `rest_for_one` so a crash in A also restarts B.
 
-**Keep supervisors thin** — a supervisor's job is supervision, not business logic. Don't add handlers to a supervisor actor beyond what's needed to manage children.
+**Keep supervisors thin**: a supervisor's job is supervision, not business logic. Do not add handlers to a supervisor actor beyond what is needed to manage children.
 
-**Budget restarts conservatively** — `max_restarts 3 within 5` is aggressive; `max_restarts 10 within 60` is more lenient. Match the budget to how often legitimate transient failures are expected.
+**Budget restarts conservatively**: `max_restarts 3 within 5` is aggressive; `max_restarts 10 within 60` is more lenient. Match the budget to how often legitimate transient failures are expected.
+
+**Hold names, not Pids, across a restart.** A restarted child has a new Pid; a name registered with `Actor.register` is carried forward to the replacement. See [Named Actors](actors.md#named-actors).
 
 ---
 
 ## Capstone: a crash-tolerant job processor
 
-Let's build something real by layering the pieces one at a time — each step adds exactly one capability, and you can stop at whichever level your problem needs.
+The pieces are layered one at a time; each step adds exactly one capability, and you can stop at whichever level your problem needs.
 
-### Step 1 — one worker
+### Step 1: one worker
 
-Start with a single actor that processes jobs. On a bad job it just crashes; we'll make that survivable in the next step.
+Start with a single actor that processes jobs. On a bad job it crashes; the next step makes that survivable.
 
 ```march
 mod JobProcessorV1 do
+  needs IO.Console
 
   actor Worker do
     state { done : Int }
@@ -321,7 +640,7 @@ mod JobProcessorV1 do
     end
   end
 
-  fn main() do
+  fn main(_c : Cap(IO.Console)) do
     let w = spawn(Worker)
     send(w, Process(1))
     send(w, Process(2))
@@ -331,14 +650,16 @@ mod JobProcessorV1 do
 end
 ```
 
-That's the whole job processor — but if `Process` ever crashes, the worker is gone and every later job is dropped.
+That is the whole job processor, but if `Process` crashes at any point, the worker is gone and every later job is dropped.
 
-### Step 2 — put it under a supervisor (crash recovery)
+### Step 2: put it under a supervisor (crash recovery)
 
 Wrap the worker in a `one_for_one` supervisor. Now a crash is *recovered from*: the supervisor restarts the worker (with fresh state) instead of losing it.
 
 ```march
 mod JobProcessorV2 do
+  needs IO
+  needs IO.Console
 
   actor Worker do
     state { done : Int }
@@ -361,13 +682,14 @@ mod JobProcessorV2 do
     end
   end
 
-  fn main() do
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
     let sup = spawn(JobSupervisor)
     let w_int = match get_actor_field(sup, "worker") do
                   None    -> -1
                   Some(n) -> n
                 end
-    let w = pid_of_int(w_int)
+    let w = Actor.pid_from_int(c, w_int)
     send(w, Process(1))
     run_until_idle()
 
@@ -378,7 +700,7 @@ mod JobProcessorV2 do
                    Some(n) -> n
                  end
     println("worker restarted, alive: "
-            ++ bool_to_string(is_alive(pid_of_int(w2_int))))
+            ++ bool_to_string(is_alive(Actor.pid_from_int(c, w2_int))))
     run_until_idle()
   end
 
@@ -387,9 +709,11 @@ end
 
 `one_for_one` is the right strategy here: one worker, independent of anything else, restarted on its own. See [Restart Strategies](#restart-strategies) for when to escalate to `one_for_all` or `rest_for_one`.
 
-### Step 3 — fan out to N workers
+### Step 3: fan out to N workers
 
-One worker is a bottleneck. Spawn a pool and spread jobs across it. Each worker is the same supervised actor; we just spawn several and round-robin work to them. The data-parallel shortcut for "run this over a whole list across the pool" is [`List.pmap`]({{ site.baseurl }}/docs/parallel-collections/) — same scheduler, order-preserving results:
+One worker is a bottleneck. Spawn a pool and spread jobs across it. Each worker is the same supervised actor; spawn several and round-robin work to them. This step and the next borrow tools from other pages; you do not need to have read them first.
+
+The data-parallel shortcut for "run this over a whole list across the pool" is [`List.pmap`]({{ site.baseurl }}/docs/parallel-collections/); same scheduler, order-preserving results:
 
 ```march
 -- Dispatch a batch of jobs across N workers, in parallel.
@@ -399,11 +723,11 @@ fn dispatch_all(jobs : List(Int)) do
 end
 ```
 
-Under a supervisor you'd list several `Worker` children (`Worker w1`, `Worker w2`, …, each its own state field) so a crash in one doesn't disturb the others — that's exactly what `one_for_one` gives a pool.
+Under a supervisor you would list several `Worker` children (`Worker w1`, `Worker w2`, …, each its own state field) so a crash in one does not disturb the others; that is exactly what `one_for_one` gives a pool.
 
-### Step 4 — add backpressure so a fast producer can't flood the pool
+### Step 4: add backpressure so a fast producer can't flood the pool
 
-The missing piece: if jobs arrive faster than the pool drains them, an unbounded queue grows until memory runs out. Put a [`Flow`]({{ site.baseurl }}/docs/flow/) pipeline in front so the *consumer* (the pool) sets the pace — the producer only runs as far ahead as there's capacity:
+**Backpressure** means the slow stage sets the pace, instead of letting a fast stage pile up work faster than it can be handled. If jobs arrive faster than the pool drains them, an unbounded queue grows until memory runs out. Put a [`Flow`]({{ site.baseurl }}/docs/flow/) pipeline in front so the *consumer* (the pool) sets the pace; the producer only runs as far ahead as there is capacity:
 
 ```march
 fn process_stream(jobs : List(Int)) do
@@ -414,16 +738,19 @@ fn process_stream(jobs : List(Int)) do
 end
 ```
 
-If you'd rather bound concurrency on a plain list without a pipeline, [`List.pmap_n(jobs, handle_job, 4)`]({{ site.baseurl }}/docs/parallel-collections/) caps in-flight work the same way. Either way, the chain is now complete: **one worker → supervised (survives crashes) → a pool (throughput) → backpressured (bounded memory under load).** That progression — start simple, add exactly the resilience you need — is the heart of how March systems are built.
+To bound concurrency on a plain list without a pipeline, [`List.pmap_n(jobs, handle_job, 4)`]({{ site.baseurl }}/docs/parallel-collections/) caps in-flight work the same way. Either way, the chain is now complete: **one worker → supervised (persists through crashes) → a pool (throughput) → backpressured (bounded memory under load).** That progression (start simple, add exactly the resilience you need) is how March systems are built.
 
-> **What runs where.** The plain actor/supervisor programs (Steps 1–2) execute in the interpreter via `run_until_idle()`. The `Flow` / `pmap` stages (Steps 3–4) produce identical *results* in the interpreter but only parallelise when **compiled** — see [Parallel Collections → Interpreter vs. compiled]({{ site.baseurl }}/docs/parallel-collections/) and [Flow & Backpressure]({{ site.baseurl }}/docs/flow/).
+> **What runs where.** The plain actor/supervisor programs (Steps 1–2) execute in the interpreter via `run_until_idle()`. The `Flow` / `pmap` stages (Steps 3–4) produce identical *results* in the interpreter but only parallelise when **compiled**; see [Parallel Collections → Interpreter vs. compiled]({{ site.baseurl }}/docs/parallel-collections/) and [Flow & Backpressure]({{ site.baseurl }}/docs/flow/).
 
 ---
 
-## Next Steps
+## See also
 
-- [Actors]({{ site.baseurl }}/docs/actors/) — the actor model basics and the concurrency decision guide.
-- [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/) — `pmap` / `pmap_n` for fanning work across a pool.
-- [Flow & Backpressure]({{ site.baseurl }}/docs/flow/) — bounded streaming so a fast producer can't flood your workers.
-- [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) — take a supervised app from one node to a cluster.
-- [Linear Types]({{ site.baseurl }}/docs/linear-types/) — how linear types support safe actor messaging.
+- [Actors]({{ site.baseurl }}/docs/actors/): the actor model basics, `on_stop`, named actors, and the concurrency decision guide.
+- [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/): drains, and what a supervisor does when an actor is killed at a hard deadline.
+- [Observing a running node]({{ site.baseurl }}/docs/observe/): `TREE`, the crash ring, and the `crash.loop` finding.
+- [Overload & Resilience]({{ site.baseurl }}/docs/overload-resilience/): mailbox limits, load shedding, deadlines and restart backoff together.
+- [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/): `pmap` / `pmap_n` for fanning work across a pool.
+- [Flow & Backpressure]({{ site.baseurl }}/docs/flow/): bounded streaming so a fast producer cannot flood your workers.
+- [Clustering & RPC]({{ site.baseurl }}/docs/clustering/): take a supervised app from one node to a cluster.
+- [Linear Types]({{ site.baseurl }}/docs/linear-types/): how linear types support safe actor messaging.
