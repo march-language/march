@@ -966,6 +966,10 @@ stdlib_membership: coverage audit (user + stdlib): 180 enforced, 0 inert (warned
 stdlib_membership: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_merkle: coverage audit (user + stdlib): 180 enforced, 0 inert (warned), 0 unenforced
 stdlib_merkle: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_ml_dsa: coverage audit (user + stdlib): 180 enforced, 0 inert (warned), 0 unenforced
+stdlib_ml_dsa: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_ml_kem: coverage audit (user + stdlib): 180 enforced, 0 inert (warned), 0 unenforced
+stdlib_ml_kem: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_msgpack: coverage audit (user + stdlib): 180 enforced, 0 inert (warned), 0 unenforced
 stdlib_msgpack: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_native_array: coverage audit (user + stdlib): 180 enforced, 0 inert (warned), 0 unenforced

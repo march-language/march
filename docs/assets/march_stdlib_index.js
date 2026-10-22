@@ -718,6 +718,25 @@ window.marchModuleIndex = {
     "String"
    ]
   },
+  "MlDsa": {
+   "file": "ml_dsa.march",
+   "unavailable": null,
+   "uses": [
+    "Bytes",
+    "Crypto",
+    "IO",
+    "List"
+   ]
+  },
+  "MlKem": {
+   "file": "ml_kem.march",
+   "unavailable": null,
+   "uses": [
+    "Bytes",
+    "Crypto",
+    "IO"
+   ]
+  },
   "Msgpack": {
    "file": "msgpack.march",
    "unavailable": "it needs 63-bit integers (the browser REPL's Int is 32-bit)",
@@ -1217,7 +1236,8 @@ window.marchModuleIndex = {
     "HttpTransport",
     "IO",
     "Result",
-    "Socket"
+    "Socket",
+    "String"
    ]
   },
   "Toml": {

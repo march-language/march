@@ -127,6 +127,9 @@ let stdlib_file_list = [
   "sorted_set.march";
   "range.march";
   "crypto.march";
+  (* post-quantum KEM / signatures over runtime/pqc.c; need Crypto.random_bytes *)
+  "ml_kem.march";
+  "ml_dsa.march";
   "base64.march";
   "native_array.march";
   "simd.march";

@@ -76,6 +76,39 @@ git log is authoritative for exact commits.
   `refinement_unchecked` and ignored. A relation does not flow through a
   polymorphic call (a recorded skip). See "Relational element refinements" in the
   refinement types reference.
+- **`march --refine-infer` proposes every refinement the checker can verify,
+  module-wide.** Beyond the sign contracts `--refine-suggest-all` proposes, it
+  finds element refinements (`xs : List({Int | _ > 0})`, element and tuple
+  returns), relational preconditions (`i : {Int | _ < n}`, taken from the demand a
+  callee makes), abstract refinements for `filter`-shaped helpers
+  (`pred : a -> Bool[p]` with `List(a[p])`, `Option(a[p])` or `partition`'s pair)
+  and fold accumulator invariants. Candidates are mined from the program, every
+  proposal is proved by the real checker and must help some caller, and a
+  precondition that would break an existing caller is refused with that call.
+  `--refine-infer-json` emits JSON v1. `--refine-infer-apply` writes the
+  proposals, re-checks, and reverts everything (exit 3) if the result differs
+  from the prediction; `--refine-infer-diff` previews them; `forge refine --infer
+  [--diff|--apply]` runs it over the whole project as one checked unit, so a caller
+  in another file counts, passes `--apply-public` / `--allow-caller-violations`
+  through, and names every file it could not infer for (`--fixpoint` is now an
+  alias). The editor offers
+  "Infer refinements for `f`" / "in this file" with identical edits, and
+  `--refine-report --refine-infer` adds the if-applied ledger line.
+- **TLS uses post-quantum key exchange by default.** Every client and server context
+  offers the hybrid X25519MLKEM768 first (classical X25519 / P-256 / P-384 / P-521 after
+  it), so sessions with a peer that supports it are safe from record-now, decrypt-later
+  attacks. Needs OpenSSL 3.5+ linked; an older OpenSSL keeps its default groups and
+  handshakes still succeed. New: `Tls.negotiated_group(conn)`, `Tls.is_post_quantum(conn)`,
+  `Tls.post_quantum_available()`, and `Tls.set_groups(ctx, groups)` to override the list
+  (e.g. require post-quantum).
+- **Post-quantum cryptography: `MlKem` (ML-KEM-768, FIPS 203) and `MlDsa` (ML-DSA-65,
+  FIPS 204).** `MlKem.keypair()`, `encapsulate(pk)` -> `(ciphertext, shared_secret)` and
+  `decapsulate(sk, ct)` give two parties a 32-byte secret no quantum computer is known to
+  recover; `MlDsa.keypair()`, `sign(sk, msg)` (hedged), `sign_deterministic` and
+  `verify(pk, msg, sig)` sign and check. Seeded variants (`keypair_from_seed`,
+  `encapsulate_with_coins`) reproduce published vectors. Backed by the vendored, portable-C
+  mlkem-native / mldsa-native (no OpenSSL needed); the compiled and interpreted backends run
+  the same code, and the outputs match OpenSSL's byte for byte.
 - `march --compile --static` builds a self-contained executable: on Linux a fully
   static binary that runs in a `scratch` image (musl hosts such as Alpine; refused on
   glibc), on macOS one that loads nothing outside `/usr/lib` and `/System`. A missing
@@ -235,6 +268,17 @@ git log is authoritative for exact commits.
   an `accumulator-step-unproved` skip. `NativeArray`'s and `Seq`'s folds stay
   skips, as do `SortedSet.fold` and `OrderedMap.fold` for now (their record-typed
   collection parameter is not yet seen through).
+- **Refinements: `Hamt.fold`, `Enum.scan` and `Queue` now carry what the checker
+  can prove through them.** Their signatures were unannotated, so no demand
+  could pass through them; they now declare the types they already had.
+  `need_nn(Hamt.fold(h, 0, fn acc -> fn _k -> fn _v -> acc + 1))` and
+  `sum_nn(Enum.scan(ys, 0, fn acc -> fn _x -> acc + 1))` are proved as
+  accumulator invariants, and a queue built from a refined list keeps its
+  elements' refinement through `to_list`, `peek_front`, `peek_back`,
+  `push_back` and `push_front` (`sum_pos(Queue.to_list(Queue.from_list(pos)))`
+  is proved). Each was a skip before (an error under `cap verified`). Not yet:
+  a parameter typed `Queue.Queue({Int | _ > 0})` or `Deque.Deque(…)` gives no
+  element fact.
 
 ### Changed
 
@@ -265,6 +309,13 @@ git log is authoritative for exact commits.
   0)}` lent `two(y, 1) == (y > 0)` at a call; which argument the body's `a` names
   differs between the interpreter (the first) and compiled code (the last), so both
   are now declined (`abstract-refinement-uninstantiated`, or no postcondition fact).
+- **`--refine-suggest-all` no longer proposes a precondition that breaks a caller.** The
+  suggester re-checked only the target function, so for `go(n : Int) = need_pos(n)` with
+  `caller() = go(0 - 5)` it proposed `n : {Int | _ > 0}` and reported "discharges all", although
+  applying it turns `caller` into a refinement violation. Probes now include every caller in the
+  unit; such a proposal is reported as `refused (caller-violation)` with the call it would break.
+  A hypothesis is also judged site by site (it must prove something, break nothing and create no
+  violation), and one that makes the parameters unsatisfiable is rejected.
 - The in-browser REPL (stdlib "Try it" pages, playground, landing page) now runs a
   pasted doc transcript one `march> ` line at a time and ignores the expected-output
   lines between them. Pasting a transcript whole used to evaluate it as one block and

@@ -158,6 +158,7 @@ let builtin_names : StringSet.t =
       "tls_connect"; "tls_accept"; "tls_close"; "tls_read"; "tls_read_timeout"; "tls_write";
       "tls_client_ctx"; "tls_server_ctx"; "tls_ctx_free";
       "tls_negotiated_alpn"; "tls_peer_cn";
+      "tls_ctx_set_groups"; "tls_negotiated_group"; "tls_pq_available";
       (* Actor builtins *)
       "actor_call"; "actor_cast"; "actor_reply"; "actor_reply_retain"; "self"; "receive";
       (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-
@@ -289,6 +290,8 @@ let builtin_names : StringSet.t =
          The other two were missing the same way. *)
       "hmac_sha256_bytes"; "stdlib_hmac_sha256"; "md5";
       "ed25519_seed_keypair"; "ed25519_sign"; "ed25519_verify"; "x25519";
+      "mlkem768_keypair"; "mlkem768_encaps"; "mlkem768_decaps";
+      "mldsa65_keypair"; "mldsa65_sign"; "mldsa65_verify";
       "sha256"; "sha512";
       "base64_encode"; "base64_decode";
       "random_bytes";

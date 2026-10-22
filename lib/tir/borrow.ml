@@ -306,6 +306,8 @@ let extern_borrow_table : (string * bool list) list = [
      read the table and key.  specs/progress/2026-10-01-session-node-vault-tables-leak.md *)
   ("vault_reap",           [true; true]);
   ("vault_close",          [true]);
+  (* march_tls_ctx_set_groups only reads the group list (OpenSSL copies it). *)
+  ("tls_ctx_set_groups",   [false; true]);
   ("string_byte_at",       [true; false]);
   ("string_grapheme_count",[true]);
   ("string_is_empty",      [true]);
@@ -351,6 +353,12 @@ let extern_borrow_table : (string * bool list) list = [
   ("ed25519_sign",         [true; true]);
   ("ed25519_verify",       [true; true; true]);
   ("x25519",               [true; true]);
+  ("mlkem768_keypair",     [true]);
+  ("mlkem768_encaps",      [true; true]);
+  ("mlkem768_decaps",      [true; true]);
+  ("mldsa65_keypair",      [true]);
+  ("mldsa65_sign",         [true; true; true]);
+  ("mldsa65_verify",       [true; true; true]);
   ("base64_encode",        [true]);
   ("stdlib_base64_encode", [true]);
   ("base64_decode",        [true]);

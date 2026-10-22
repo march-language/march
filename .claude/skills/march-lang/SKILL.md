@@ -409,6 +409,12 @@ forge search sort --rebuild                    # force index rebuild
 forge search map --limit 5
 forge search --callers List.map                # reverse reference: who calls/uses it
 
+# Refinement contracts (see "Getting refinements inferred" below)
+forge refine --infer --diff      # propose every contract the checker can verify, as a diff
+forge refine --infer --apply     # write them, then re-check (reverts everything on a mismatch)
+forge refine --infer --apply --apply-public   # also public fns with no caller in the project
+forge refine NAME [--apply]      # one function's parameter refinements (older, per-function)
+
 # Benchmarks
 forge bench                      # compile and run benchmarks under bench/
 
@@ -425,6 +431,41 @@ forge clean --all                # remove entire .march/
 forge publish --dry-run
 forge publish --old-source ./v1  # semver check
 ```
+
+---
+
+### Getting refinements inferred
+
+When `--check` hints `refinement_unverified` (an obligation the checker could not
+prove) or `cap verified` turns those into errors, let the checker propose the
+contract instead of guessing one. Every proposal is one the real checker proves, and it
+must close a site without opening another:
+
+```bash
+march --check --refine-report app.march        # what is unproven, and why (skip reasons)
+march --check --refine-infer app.march         # proposals, refusals, notes (dry run)
+march --check --refine-infer-diff app.march    # the edits as a diff, nothing written
+march --check --refine-infer-apply app.march   # write them, re-check, exit 3 + revert on mismatch
+march --check --refine-infer-json app.march    # JSON v1, with byte-range edits
+```
+
+- **Kinds it proposes:**
+  - scalar and relational preconditions (`b : {Int | _ != 0}`, `i : {Int | _ < n}`);
+  - returns;
+  - element slots (`List({Int | _ > 0})`);
+  - abstract filters (`pred : a -> Bool[p]` with `List(a[p])`);
+  - fold accumulators.
+- **Multi-file projects:** use `forge refine --infer`, which checks the whole project as one
+  unit. A single-file `march` run only sees callers in the modules the entry names.
+- **`refused (caller-violation)`:** the precondition would break an existing caller. Fix the
+  caller, or pass `--allow-caller-violations`.
+- **`external-callers`:** a public function with no caller in the unit. Apply it with
+  `--apply-public` (forge or march) only for an API whose real callers you control.
+- **Exit 3 from `--refine-infer-apply` is a tool bug**, never yours to reconcile: every edit has
+  already been reverted. Report it with the file.
+- **Limits:** nothing is proposed for a program that does not typecheck. A contract the checker
+  cannot prove is never proposed.
+- Full reference: `specs/lang/refinement-types.md`, section "Module-wide inference".
 
 ---
 
@@ -498,7 +539,7 @@ references inside interface method signatures and impl headers are not tracked
 
 ## 5. Stdlib Manifest
 
-133 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
+135 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
 below (use `forge search` to discover the rest):
 
 ### Auto-imported (Prelude)
@@ -1179,7 +1220,7 @@ lib/tir/                    typed IR (lower/mono/defun/perceus/borrow/fusion/llv
 lib/jit/                    REPL JIT
 lib/errors/errors.ml        diagnostics
 lib/search/search.ml        Hoogle-style search
-stdlib/                     133 March stdlib modules
+stdlib/                     135 March stdlib modules
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool
 lsp/                        LSP server

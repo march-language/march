@@ -367,6 +367,64 @@ mod Tls do
     match conn do | TlsConn(h) -> tls_peer_cn(h) end
   end
 
+  -- ── Key exchange (post-quantum) ───────────────────────────────────────
+
+  doc """
+  Whether this program's OpenSSL supports the hybrid post-quantum key
+  exchange X25519MLKEM768 (OpenSSL 3.5 or later). When it does, every
+  context from `client_ctx` / `server_ctx` offers it first, ahead of the
+  classical X25519, P-256, P-384 and P-521, so a session with a peer that also
+  supports it is protected against an attacker who records it now and breaks
+  it later with a quantum computer. When it does not, contexts keep the
+  library's own default groups. Always false in the interpreter, which has no
+  real TLS.
+  """
+  fn post_quantum_available() : Bool do
+    tls_pq_available()
+  end
+
+  doc """
+  Replace the key-exchange groups a context offers, in preference order, by
+  their OpenSSL names, e.g. `["X25519MLKEM768"]` to require post-quantum key
+  exchange, or `["X25519", "P-256"]` for a classical-only peer. Applies to
+  connections made from the context afterwards. `Err(TlsContextError(msg))`
+  for an empty list or a group the linked OpenSSL does not know; the context
+  is then unchanged.
+
+      match Tls.set_groups(ctx, ["X25519MLKEM768"]) do
+        Ok(_) -> connect_pq_only(ctx)
+        Err(e) -> println(Tls.error_to_string(e))
+      end
+  """
+  fn set_groups(ctx, groups : List(String)) do
+    match ctx do
+    | TlsCtx(h) ->
+      match tls_ctx_set_groups(h, String.join(groups, ":")) do
+      Err(msg) -> Err(TlsContextError(msg))
+      Ok(_)    -> Ok(())
+      end
+    end
+  end
+
+  doc """
+  The key-exchange group the handshake agreed on, as OpenSSL names it:
+  `Some("X25519MLKEM768")` for the hybrid post-quantum group,
+  `Some("x25519")`, `Some("secp256r1")`, ...; `None` if unavailable.
+  """
+  fn negotiated_group(conn) do
+    match conn do | TlsConn(h) -> tls_negotiated_group(h) end
+  end
+
+  doc """
+  Whether a connection's key exchange was post-quantum (an ML-KEM group).
+  """
+  fn is_post_quantum(conn) : Bool do
+    match negotiated_group(conn) do
+    Some(g) -> String.contains(String.to_uppercase(g), "MLKEM")
+    None -> false
+    end
+  end
+
   -- ── High-level helpers ────────────────────────────────────────────────
 
   doc """

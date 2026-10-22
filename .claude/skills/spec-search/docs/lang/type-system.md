@@ -1,8 +1,15 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+---
+layout: docs
+title: Type System
+nav_order: 5.1
+permalink: /docs/types/
+---
+
+> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 > This chapter is the **tutorial-register companion** to
-> [`core-march-types.md`](core-march-types.md), which has the FORMAL typing
+> [`core-march-types.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md), which has the FORMAL typing
 > rules (the `Γ ⊢ e : τ` judgment, cited arm-for-arm against
-> `lib/typecheck/typecheck.ml`) for the core fragment — literals, `let`,
+> `lib/typecheck/typecheck.ml`) for the core fragment: literals, `let`,
 > lambda/application, `if`, ADT constructors and `match`, tuples/records,
 > atoms, guards, and interface-constraint discharge (`Num`/`Eq`/`Ord`/`Show`).
 > Where this chapter and `core-march-types.md` cover the same ground, this
@@ -13,18 +20,87 @@
 
 March uses Hindley-Milner type inference with bidirectional checking at function boundaries. You get the convenience of inferred types with the safety of static checking.
 
+> **New here? Read the first part.** Everything before [Dependent Types](#dependent-types) (ADTs, records, `Option`, `Result`, tuples, lists), plus [Opaque Types](#opaque-types), is the everyday type system and all you need to start writing March. [Dependent Types](#dependent-types), the safety-tool matrix, and the inference deep-dive are **advanced; come back to them later**, once the basics feel natural.
+
 ---
 
 ## Primitive Types
 
 | Type | Description | Literals |
 |------|-------------|---------|
-| `Int` | 64-bit signed integer | `42`, `-7`, `0` |
+| `Int` | 63-bit signed integer, wraps on overflow ([below](#int-width-and-overflow)) | `42`, `-7`, `0` |
 | `Float` | 64-bit IEEE 754 | `3.14`, `-0.5`, `1.0e10` |
 | `Bool` | Boolean | `true`, `false` |
 | `String` | UTF-8 string | `"hello"` |
 | `Char` | Unicode scalar value | (accessed via String operations) |
 | `()` | Unit (no value) | `()` |
+
+### Int width and overflow
+
+`Int` is a **63-bit two's-complement** integer: every `Int` value lies in
+**[-2^62, 2^62 - 1]**, i.e. `-4611686018427387904` to `4611686018427387903`
+(`int_min_value()` / `int_max_value()`). Both backends, the interpreter and
+the compiled (LLVM) code, give the same answer for every operation below.
+
+- **Overflow wraps.** `+`, `-`, `*`, unary `-`, `/`, `int_div`, `int_abs`,
+  `int_pow` and `int_shl` reduce their result modulo 2^63 back into the range.
+  Nothing traps on overflow: `int_max_value() + 1 == int_min_value()`,
+  `-int_min_value() == int_min_value()`, `int_abs(int_min_value()) ==
+  int_min_value()` and `int_min_value() / -1 == int_min_value()`.
+- **Bitwise operators see 63 bits.** `int_and`/`int_or`/`int_xor`/`int_not`
+  act on the 63-bit two's-complement pattern; `int_popcount(-1) == 63`.
+  `int_shr` is an *arithmetic* (sign-propagating) shift: `int_shr(-8, 1) ==
+  -4`. `int_shl` and `int_shr` panic (`int_shl: shift out of range`) for a
+  count outside `[0, 62]`.
+- **Division** truncates toward zero and panics on a zero divisor
+  (`division by zero` / `modulo by zero`); `int_pow` panics on a negative
+  exponent.
+- **Literals** must fit the range: a literal above `4611686018427387903` is
+  a compile error. A negative literal is the negation of a positive one, so
+  `int_min_value()` has no literal spelling; write `int_min_value()` or
+  `-4611686018427387903 - 1`.
+- **Parsing** with `string_to_int` returns `None` outside the range.
+
+Why 63 bits: a polymorphic slot (a `List(Int)` cell, a tuple or record field, a
+closure argument, an actor message) stores an `Int` as a tagged word,
+`(n << 1) | 1`, which has room for exactly 63 bits; the interpreter's OCaml
+`int` is 63-bit too. Compiled code keeps a monomorphic `Int` in a full 64-bit
+register (and in `NativeArray`'s unboxed `Int` storage) for speed; the
+operations listed above leave their result in the full register and the
+reduction to 63 bits happens where the value is *observed* (a comparison, a
+call into the runtime, a store into a list or array, printing), so a value
+reads back the same whether it travelled through a register or a list.
+Use `Float` (or a bignum library) for wider arithmetic.
+
+#### Int on the JavaScript target
+
+`--target js` implements a **subset** of the rules above. There an `Int` is a
+JS number (an IEEE-754 double), which holds integers exactly only within
+**±(2^53 - 1)** (`-9007199254740991` to `9007199254740991`). Inside that
+range every operation listed above gives the same answer as the interpreter
+and native code, including division (truncating), `int_shr` (arithmetic) and
+`int_popcount` (of the 63-bit pattern). Outside it, the JS target departs
+from the 63-bit rules instead of wrapping:
+
+- **`+`, `-`, `*`, unary `-` and `int_pow` round** to the nearest double:
+  `9007199254740991 + 2` gives `9007199254740992`, not `9007199254740993`.
+  Nothing wraps modulo 2^63 and nothing traps.
+- **The bitwise and checked builtins throw.** `int_and`, `int_or`,
+  `int_xor`, `int_not`, `int_shl`, `int_shr`, `int_popcount`, `int_div`,
+  `int_mod`, `int_div_euclid` and `int_mod_euclid` raise a JS `RangeError`
+  when an argument or the result lies outside ±(2^53 - 1), rather than
+  return a rounded value. Within the range they are exact on every bit, not
+  only the low 32 that JS's own `&`, `|` and `>>` see.
+- **`/` and `%` by zero give `NaN`** instead of panicking (`int_div` and
+  `int_mod` still panic).
+- **`int_max_value()` and `int_min_value()` do not compile** for the JS
+  target: ±2^62 has no exact JS number.
+
+Code that must agree with native builds keeps its `Int` values within
+±(2^53 - 1) (stdlib `Random` uses a 32-bit core for this reason), or builds
+a native or wasm target. The decision to treat the JS target as a subset
+rather than emulate 63 bits with `BigInt` is recorded in
+`specs/progress/2026-09-30-js-backend-int-63-bit-semantics.md`.
 
 ---
 
@@ -101,7 +177,7 @@ let moved = { p with x: 5.0 }
 let dist = p.x +. p.y
 ```
 
-Records and variants can be combined — a variant constructor can carry a record:
+Records and variants can be combined; a variant constructor can carry a record:
 
 ```march
 type Config =
@@ -113,22 +189,26 @@ type Config =
 
 ## Working with Records
 
-Update fields with `{ base with field: value }` — this creates a new record; the original is unchanged:
+Update fields with `{ base with field: value }`: this creates a new record; the original is unchanged:
 
 ```march
-let p2 = { p with x: 5.0 }       -- new Point, y unchanged
-let u2 = { u with active: false } -- deactivate user
+let p2 = { p with x: 5.0 }  -- new Point, y unchanged
+let u2 = { u with age: 31 } -- new User, name/email unchanged
 ```
 
-**Record patterns are not yet supported by the parser** (`{ x, y } -> ...` in
-a `match` is a parse error) — use field access in a guard instead. See
-[Pattern Matching](pattern-matching.md#record-patterns) for the workaround.
+Records can also be destructured with a record pattern (`{ x, y } -> ...` in
+a `match`, a `let`/`let?`, or a function parameter). In a `match` arm or a
+`let` binding the field list is open (`{ x }` matches any record with an `x`
+field, whatever else it has), while a record pattern written directly as a
+function parameter is closed and must name every field. See
+[Pattern Matching](pattern-matching.md#record-patterns) for the syntax,
+punning rules, and why the parameter position differs.
 
 ---
 
 ## Atoms
 
-An atom is a named constant whose value is its own name. Atoms are written with a leading colon:
+An atom is a named constant with a value that is its own name. Atoms are written with a leading colon:
 
 ```march
 :ok
@@ -137,24 +217,40 @@ An atom is a named constant whose value is its own name. Atoms are written with 
 :one_for_one
 ```
 
-Atoms are commonly used as tags in sum types, supervision strategies, HTTP methods, and protocol states:
+Atoms are commonly used as tags in supervision strategies, HTTP methods, and
+protocol states: an `Atom`-typed value that stores one of a few expected
+names:
 
 ```march
-type Status = :ok | :error | :pending
-
-match status do
-  :ok      -> "success"
-  :error   -> "failure"
-  :pending -> "in progress"
+fn describe(status : Atom) : String do
+  match status do
+    :ok      -> "success"
+    :error   -> "failure"
+    :pending -> "in progress"
+    _        -> "unknown"
+  end
 end
 ```
 
-All atom literals share the single type `Atom` — `:ok` and `:oke` (a typo)
+All atom literals share the single type `Atom`: `:ok` and `:oke` (a typo)
 both typecheck fine as `Atom`, so a misspelled atom is **not** caught at the
 type level (unlike a misspelled ADT constructor, which is a compile error).
 See `core-march-types.md` §2.2 (P-Atom) for the formal rule: an atom pattern's
 type is the bare, tag-erased `Atom` regardless of the atom's name or payload
 arity.
+
+The grammar also accepts atoms as variant-constructor names in a `type`
+declaration (`type Status = :ok | :error | :pending`, parsed the same as
+`:ok(String)`-style payload variants); but, verified live 2026-07-22, this
+does not build a nominal sum type the way an `UPPER_IDENT`-constructor
+`type` does: a binding annotated `: Status` cannot be constructed or matched
+with `:ok`-style syntax (`` expected `Status` but got `Atom` ``), because
+`:ok` in expression/pattern position always denotes the one ambient `Atom`
+type, and match exhaustiveness against such a `type` declaration is not
+enforced: a `match` over an atom value still needs its own `_` catch-all
+regardless of what `type` declarations exist. Prefer plain ADTs
+(capitalized constructors) when you want an actual closed, exhaustively-
+checked sum type; reserve atoms for open-ended tags as shown above.
 
 ---
 
@@ -185,9 +281,44 @@ end
 The compiler infers type parameter instantiations at call sites:
 
 ```march
-map_option(Some(42), fn x -> x * 2)  -- Option(Int)
-map_option(Some("hi"), String.length) -- Option(Int)
+map_option(Some(42), fn x -> x * 2)     -- Option(Int)
+map_option(Some("hi"), String.byte_size) -- Option(Int) — there is no `String.length`
 ```
+
+### A signature's type variables must stay generic
+
+A type variable in a signature means "for all": the body may not fix it. This
+is an error, because `bad` promises any `List(a)` and returns a `List(Int)`:
+
+```march
+fn bad(xs : List(a)) : List(a) do [0 - 5] end
+```
+
+The error (code `annotated_tyvar_fixed`) points at the variable in the
+signature and names the type the body gave it:
+
+```
+The type variable `a` in `bad`'s signature is not generic: the body fixes it
+to `Int`, so every caller gets `Int` in its place.
+    hint: write `Int` in place of `a` if that is what you mean, or make the
+    body generic in `a`.
+```
+
+Making two of the signature's variables the same type is an error too, as in
+`fn second(x : a, y : b) : a do y end` (the body returns `y`, so `b` must be
+`a`). That signature promises callers two independent types, and they get only
+one.
+
+The rule covers only type variables you wrote in a function's parameter or
+return annotations (or its bounds); an unannotated parameter's type is the
+body's to decide, and type variables in a local `let x : a = …` or a lambda
+annotation are not checked. The check is skipped when the function's body
+already has a type error, since that error is the one to fix first, including
+the `curried_lambda_over_tuple` error for `fn (k, v) -> …` passed where a
+callback over a pair is expected, which names that mistake directly.
+
+Until 2026-10-11 this was a warning, and before 2026-09-22 the body fixed the
+variable silently.
 
 ---
 
@@ -202,7 +333,7 @@ type DB   = Map(String, List(Int))
 ```
 
 A type alias expands to its definition, so a value declared as the alias can be
-used where the underlying type is expected — e.g. a `Name` flows into a function
+used where the underlying type is expected, e.g. a `Name` flows into a function
 taking a `String`. The reverse is not always accepted: passing a bare `String`
 where the alias `Name` is expected can be rejected, so don't rely on aliases
 being freely interchangeable in both directions. Use aliases for readability,
@@ -240,7 +371,7 @@ From `Option` module:
 
 ```march
 Option.map(Some(5), fn x -> x + 1)  -- Some(6)
-Option.and_then(opt, fn x -> ...)   -- flatMap
+Option.flat_map(opt, fn x -> ...)   -- flatMap (not `and_then` — no such function)
 Option.unwrap_or_else(opt, fn () -> compute_default())
 Option.is_some(opt)
 Option.is_none(opt)
@@ -261,7 +392,7 @@ Functions that can fail return `Result`:
 ```march
 fn parse_int(s : String) : Result(Int, String) do
   -- returns Ok(n) or Err("not a valid integer")
-  parse_int_builtin(s)
+  Option.to_result(string_to_int(s), "not a valid integer")
 end
 ```
 
@@ -290,8 +421,8 @@ Stdlib helpers:
 
 ```march
 Result.map(Ok(5), fn x -> x + 1)     -- Ok(6)
-Result.map_err(Err("x"), String.upcase)
-Result.and_then(res, fn v -> ...)      -- flatMap
+Result.map_err(Err("x"), String.to_uppercase)
+Result.flat_map(res, fn v -> ...)      -- flatMap (not `and_then` — no such function)
 Result.unwrap(Ok(42))                  -- 42
 Result.unwrap_or(Err("e"), 0)          -- 0
 Result.is_ok(res)
@@ -306,9 +437,8 @@ Result.is_err(res)
 
 ```march
 fn load_config(path : String) : Result(Config, String) do
-  let? raw  = File.read(path)         -- unwrap or propagate Err
-  let? text = Utf8.decode(raw)        -- unwrap or propagate Err
-  let? cfg  = Config.parse(text)      -- unwrap or propagate Err
+  let? raw = File.read(path)          -- unwrap or propagate Err
+  let? cfg = parse_config(raw)        -- unwrap or propagate Err (your own parser)
   Ok(cfg)
 end
 ```
@@ -323,11 +453,11 @@ end
 ```
 
 **There is no postfix `?` unwrap operator on arbitrary expressions** (e.g.
-`f()?`) — only the `let?` binding form above exists. A bare `?` in expression
+`f()?`); only the `let?` binding form above exists. A bare `?` in expression
 position is a distinct, unrelated feature (a typed hole for
 incomplete-program tooling), not an unwrap shorthand; see
-[`let-propagation.md`](let-propagation.md) §12 for the full list of
-deliberately out-of-scope `let?`-adjacent forms, including postfix `?`.
+[`let-propagation.md`](https://github.com/march-language/march/blob/main/specs/lang/let-propagation.md) §12 for the full list of
+intentionally out-of-scope `let?`-adjacent forms, including postfix `?`.
 
 `let?` only works with `Result(a, e)`. For `Option(a)`, use `match` or the
 `with` construct (or convert first with `Option.to_result`).
@@ -391,6 +521,20 @@ fn compose(f : b -> c, g : a -> b) : a -> c do
 end
 ```
 
+`Int -> Int -> Int` is also the type of a two-argument function
+`fn add(a : Int, b : Int)`: the type does not record how many arguments a
+function takes at once. Calls do, because March has no partial application.
+So a callee that applies its parameter one argument at a time (`let g = f(x)`
+then `g(y)`, as `Map.insert` does with its comparator) needs a curried
+function, and a callee that calls `f(x, y)` (as `List.fold_left` does) needs a
+two-argument one. Passing a named function or a lambda of the other shape is
+the `callback_arity_mismatch` error, which suggests the curried wrapper
+`fn a -> fn b -> add(a, b)`. The check sees a function passed directly to a
+known function's or a let-bound lambda's parameter, including through a
+`let h = add` alias; such an alias is also called like `add` itself, so
+`h(1)` is an `arity_mismatch`. A function value stored in a record or list,
+or returned from a function, and applied later is not checked.
+
 ---
 
 ## Qualified Types
@@ -398,21 +542,21 @@ end
 Types from modules are accessed with `.`:
 
 ```march
-Http.Request
-Map.Entry(String, Int)
+Http.Request(String)  -- Request is generic over its body type
+Http.Method
 ```
 
 ---
 
 ## Dependent Types
 
-A **dependent type** is a type that depends on a *value* — not just on other
+A **dependent type** is a type that depends on a *value*, not just on other
 types. March has two flavours, each with different trade-offs.
 
-### Refinement Types — value predicates
+### Refinement Types: value predicates
 
 A **refinement type** `{T | predicate}` constrains what values a type can hold.
-The predicate is checked by an SMT solver (Z3) at compile time — so a whole
+The predicate is checked by an SMT solver (Z3) at compile time, so a whole
 class of bugs (negative sizes, out-of-bounds indices, division by zero) becomes
 a compile error instead of a runtime panic.
 
@@ -428,7 +572,7 @@ chunks([1,2,3,4,5], 2)   -- ok
 ```
 
 Checking follows **definite-failure semantics**: a diagnostic is emitted only
-when the predicate can *never* hold — never for unknown or possibly-valid
+when the predicate can *never* hold, never for unknown or possibly-valid
 values. This means no false positives, but also no proof obligation: if the
 solver can't decide, it stays silent.
 
@@ -438,7 +582,7 @@ fn f(n : Int) : Int do
 end
 ```
 
-Refinements support **path sensitivity** — a guard you write becomes an
+Refinements support **path sensitivity**: a guard you write becomes an
 assumption the solver can use:
 
 ```march
@@ -451,8 +595,8 @@ fn safe_chunks(xs : List(a), n : Int) : List(List(a)) do
 end
 ```
 
-For predicates over data structures, define a **`@[measure]`** — a total,
-terminating function the solver axiomatises structurally:
+For predicates over data structures, define a **`@[measure]`**: a total,
+terminating function the solver axiomatises by structure:
 
 ```march
 @[measure]
@@ -469,7 +613,7 @@ fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do ... end
 See the [Refinement Types guide](refinement-types.md) for the full syntax,
 measure soundness gate, `--no-measure-axioms` flag, and limitations.
 
-### Type-Level Naturals — dimension constraints
+### Type-Level Naturals: dimension constraints
 
 `Nat` in a type parameter threads a *compile-time* natural number through the
 type, making shape mismatches impossible to express:
@@ -489,7 +633,7 @@ Arithmetic on naturals is supported at the type level:
 type Doubled(n, a) = Array(n * 2, a)
 ```
 
-This is resolved entirely during type inference — no Z3 involved. It is
+This is resolved entirely during type inference; no Z3 involved. It is
 appropriate for **structural shape constraints** (array lengths, matrix
 dimensions) where the relationship is fixed at the call site. Refinements are
 appropriate for **value-range constraints** (non-negative, bounded, non-zero)
@@ -524,7 +668,7 @@ mod Token do
 end
 ```
 
-Outside `Token`, callers can use `Token` as a type but cannot construct or pattern-match it directly — only through the module's public API.
+Outside `Token`, callers can use `Token` as a type but cannot construct or pattern-match it directly, only through the module's public API.
 
 For completely hidden types, use `ptype`:
 
@@ -539,19 +683,26 @@ ptype Internal = Foo | Bar(Int)
 
 | Operator | Types | Description |
 |----------|-------|-------------|
-| `+` `-` `*` `/` `%` | `Int` | Integer arithmetic |
-| `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (dot suffix required) |
+| `+` `-` `*` `/` | any `Num` (`Int` or `Float`) | Arithmetic: polymorphic, works on either |
+| `%` | `Int` | Integer modulo (monomorphic, `Int` only) |
+| `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (monomorphic, `Float` only) |
 | `==` `!=` | any `Eq` | Equality / inequality |
-| `<` `>` `<=` `>=` | any `Ord` | Ordering |
+| `<` `>` `<=` `>=` | any `Ord` (`Int`, `Float`, `String`) | Ordering |
 | `&&` `\|\|` `!` | `Bool` | Boolean and / or / not |
 | `++` | `String` | String concatenation |
 | `\|>` | any | Pipe: `x \|> f` is `f(x)` |
 
-**Float operators require the dot suffix.** Mixing `Int` operators with `Float` values is a type error:
+**`+` `-` `*` `/` are `Num`-polymorphic: they work on both `Int` and `Float`
+without a dot suffix.** The dot-suffixed forms (`+.` etc.) are the
+*monomorphic* Float-only versions, useful when you want to pin a type down;
+they reject an `Int` operand rather than converting it. `%` has no dot form
+and is `Int`-only in both directions:
 
 ```march
-let a = 1.5 +. 2.5   -- Float: correct
-let b = 1.5 + 2.5    -- type error: + is Int-only
+let a = 1.5 +. 2.5   -- Float: correct (monomorphic +.)
+let b = 1.5 + 2.5    -- Float: also correct — + is Num-polymorphic, not Int-only
+let c = 1 +. 2       -- type error: +. is Float-only, rejects Int operands
+let d = 1.5 % 2.0     -- type error: % is Int-only, rejects Float operands
 ```
 
 The pipe operator chains transformations left-to-right:
@@ -560,7 +711,7 @@ The pipe operator chains transformations left-to-right:
 [1, 2, 3, 4, 5]
   |> List.filter(fn x -> x % 2 == 0)
   |> List.map(fn x -> x * x)
-  |> List.fold_left(0, fn acc x -> acc + x)
+  |> List.fold_left(0, fn (acc, x) -> acc + x)
 -- evaluates to 20
 ```
 
@@ -577,7 +728,7 @@ guarantee:
 | A value stays in a numeric/logical range (`>= 0`, `!= 0`, `< len`) | Refinement `{T \| pred}` | SMT solver (Z3), compile time | Per value |
 | A dimension/length matches across values | Type-level natural `Vector(n, a)` | Type inference, compile time | Per value |
 | A value can only be built through a vetted constructor | Smart-constructor / opaque `ptype` | Type checker (private constructor) | Per value |
-| Validate data whose shape isn't known until runtime | Runtime validator returning `Result` | Your code, run time | Per value |
+| Validate data with a shape that isn't known until runtime | Runtime validator returning `Result` | Your code, run time | Per value |
 | A resource is used the right number of times | `linear` (exactly once) / `affine` (at most once) | Type checker, compile time | Per value |
 | A resource is used in the right order (open → read → close) | Typestate (`always_linear type` + `transitions`) | Type checker, compile time | Per value |
 | Code may only touch resources it was granted | Capability `needs` / `Cap(X)` | Type checker (transitive), compile time | Per module / call |
@@ -587,7 +738,7 @@ guarantee:
 
 **Refinement vs. smart-constructor.** A refinement `{Int | _ > 0}` checks a
 *predicate the solver can read* every time the value flows into a refined
-position — great for arithmetic ranges and bounds. A smart-constructor (`ptype`
+position, great for arithmetic ranges and bounds. A smart-constructor (`ptype`
 with a private constructor) enforces an invariant the solver *can't* express
 (`Email` is well-formed, `Sanitized` has been escaped): the only way to get the
 type is to go through the function that establishes the invariant. Use a
@@ -596,9 +747,9 @@ structural or semantic.
 
 **Refinement vs. runtime validator.** They live at different boundaries:
 **refine internals, validate untrusted input at the edge.** A refinement is a
-*static* contract between functions you control — it disappears at runtime. A
+*static* contract between functions you control; it disappears at runtime. A
 runtime validator returning `Result` is for data crossing a trust boundary (a
-request body, a file, a CLI argument) where you genuinely don't know the value
+request body, a file, a CLI argument) where you truly don't know the value
 until it arrives. Validate once at the edge, then carry the proof inward as a
 smart-constructor or a refined type.
 
@@ -615,22 +766,22 @@ verify against your code).**
 
 | | What March does | Examples |
 |---|---|---|
-| **Inferred** (you write nothing) | Reconstructed from the code | Types of `let` locals; lambda parameter types; generic instantiation at call sites |
+| **Inferred** (you write no annotation) | Reconstructed from the code | Types of `let` locals; lambda parameter types; generic instantiation at call sites |
 | **Optional** (write for docs/clarity) | Inferred, but you may pin it | Function parameter and return signatures |
 | **NOT inferred** (you declare, compiler verifies) | A claim the compiler checks but won't guess | Interface constraints (`when Ord(a)`); refinement predicates (`{Int \| _ >= 0}`); capabilities (`needs IO.FileRead`) |
 
-The asymmetry is deliberate. A *fact* like "this local is an `Int`" the compiler
+The imbalance is intentional. A *fact* like "this local is an `Int`" the compiler
 can simply read off the expression. A *claim* like "this argument is always
-positive" or "this module may read files" is a contract you're asserting — the
-compiler can't invent the contract for you, but once you state it, it holds you
+positive" or "this module may read files" is a contract you're asserting: the
+compiler can't invent the contract for you, but once you state it, it commits you
 (and your callers) to it.
 
 ---
 
 ## What the Type System Buys at Runtime
 
-The static guarantees aren't just for catching bugs — they let the compiler
-*delete* runtime machinery that dynamic languages pay for on every call:
+The static guarantees aren't just for catching bugs: they let the compiler
+*delete* runtime apparatus that dynamic languages pay for on every call:
 
 - **Whole-program monomorphization → no dynamic dispatch.** Generic code is
   specialized to concrete types, so interface calls become direct calls with no
@@ -642,7 +793,7 @@ The static guarantees aren't just for catching bugs — they let the compiler
   after construction, so there's no GC write barrier on the common path. (See
   [memory model](memory-model.md).)
 - **Linear / affine → static free.** Values with statically known lifetimes get a
-  compiler-inserted `free` at last use — no reference-count bookkeeping at all.
+  compiler-inserted `free` at last use, no reference-count bookkeeping at all.
   (See [memory model](memory-model.md).)
 
 ---
@@ -668,7 +819,7 @@ Types
 
 ## Next Steps
 
-- [Pattern Matching](pattern-matching.md) — destructuring all these types
-- [Linear Types](linear-types.md) — ownership and resource safety
-- [Refinement Types](refinement-types.md) — types that carry a predicate (`{Int | _ >= 0}`), checked by an SMT solver
-- [Interfaces](interfaces.md) — ad-hoc polymorphism with `interface`/`impl`
+- [Pattern Matching](pattern-matching.md): destructuring all these types
+- [Linear Types](linear-types.md): ownership and resource safety
+- [Refinement Types](refinement-types.md): types that carry a predicate (`{Int | _ >= 0}`), checked by an SMT solver
+- [Interfaces](interfaces.md): ad-hoc polymorphism with `interface`/`impl`

@@ -1,15 +1,15 @@
 # March Scheduler
 
 **Last Updated:** 2026-04-15
-**Status:** Implemented — C runtime scheduler with signal-based preemption and
+**Status:** Implemented: C runtime scheduler with signal-based preemption and
 cancellation tokens; interpreter layer wired via `task_*` builtins and
 `VCancelToken` value type; `Task` stdlib module complete.
 
 **Key files:**
-- `runtime/march_scheduler.{h,c}` — M:N green-thread scheduler, preemption daemon, cancel tokens
-- `lib/eval/eval.ml` — interpreter task builtins (`task_spawn`, `task_await`, `VCancelToken`, …)
-- `stdlib/task.march` — `Task.async/await/race/any/all_settled/scope`
-- `test/stdlib/test_task.march` — 24 task tests
+- `runtime/march_scheduler.{h,c}`: M:N green-thread scheduler, preemption daemon, cancel tokens
+- `lib/eval/eval.ml`: interpreter task builtins (`task_spawn`, `task_await`, `VCancelToken`, …)
+- `stdlib/task.march`: `Task.async/await/race/any/all_settled/scope`
+- `test/stdlib/test_task.march`: 24 task tests
 
 ---
 
@@ -17,13 +17,13 @@ cancellation tokens; interpreter layer wired via `task_*` builtins and
 
 The March scheduler implements a two-tier concurrency model:
 
-1. **Cooperative scheduling with signal-based preemption** — each green thread
+1. **Cooperative scheduling with signal-based preemption**: each green thread
    gets a budget of `MARCH_SCHED_REDUCTIONS` (4 000) reductions per quantum.
    A daemon OS thread sends `SIGUSR1` every `MARCH_QUANTUM_US` (1 000 µs) to
    each worker thread, zeroing `march_tls_reductions` and forcing a yield at
-   the next reduction check — preventing any single green thread from starving
+   the next reduction check, preventing any single green thread from starving
    the scheduler indefinitely.
-2. **M:N work-stealing thread pool** — 4 OS threads by default, each with a
+2. **M:N work-stealing thread pool**: 4 OS threads by default, each with a
    local deque; idle threads steal from peers (Chase-Lev).
 
 This matches the Erlang/BEAM model at the cooperative level while exploiting
@@ -111,7 +111,7 @@ type task_entry = {
 ```
 
 Tasks execute **eagerly at spawn time** (single-threaded cooperative scheduler
-— no actual parallelism in the interpreter). `task_await` checks `te_cancelled`
+with no actual parallelism in the interpreter). `task_await` checks `te_cancelled`
 before returning the result.
 
 ### Task builtins
@@ -127,7 +127,7 @@ before returning the result.
 | `task_spawn_with_cancel` | `(Int → a) → CancelToken → Task(a)` | Spawn; skip if pre-cancelled |
 | `task_cancel_by_id` | `Task(a) → Unit` | Cancel a task by handle |
 
-`task_cancel_token_new` is a zero-arg builtin — declared as `Mono (TCon ("CancelToken", [])))`
+`task_cancel_token_new` is a zero-arg builtin, declared as `Mono (TCon ("CancelToken", [])))`
 in the typecheck environment (not `TArrow (t_unit, ...)`) because `infer_app`
 returns the type as-is for zero-arg calls.
 
@@ -170,10 +170,10 @@ Task.await(t)    -- Err("cancelled")
 
 ## 6. Known limitations (Phase 1 interpreter)
 
-- **No actual parallelism** — tasks run eagerly and synchronously at spawn
+- **No actual parallelism**: tasks run eagerly and synchronously at spawn
   time; `Task.race` returns the first task in list order deterministically.
-- **`Task.scope` is a pass-through** — task cancellation on scope exit requires
+- **`Task.scope` is a pass-through**: task cancellation on scope exit requires
   the multi-core runtime (Phase 2+) to inject a shared cancel token into the
   dynamic binding so `Task.async` picks it up automatically.
-- **`await_ms` timeout not enforced** — `Task.await_ms(t, timeout_ms)` accepts
+- **`await_ms` timeout not enforced**: `Task.await_ms(t, timeout_ms)` accepts
   the timeout for API compatibility but ignores it; enforcement requires Phase 2+.
