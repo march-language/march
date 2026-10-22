@@ -5090,6 +5090,75 @@ let test_letfn_two_distinct_errors_both_report () =
   Alcotest.(check int) "distinct Bool/Int error still reported"
     1 (count_errors_matching ctx "expected `Bool` but got `Int`.")
 
+(* ── duplicate_binder (2026-10-21) ──────────────────────────────────────
+   One parameter list, or one pattern, may bind each name only once.  Before
+   the rule the two backends disagreed about which argument a doubled name
+   was (`fn (a, a) -> a` applied to (1, 2): interpreter 1, compiled 2), so
+   the typechecker rejects the program instead of picking one.  Curried
+   lambdas are separate scopes and keep shadowing; `_` is exempt; the
+   alternatives of an or-pattern each bind the same names by design. *)
+
+(* The [duplicate_binder] diagnostics, as (line, col) of their spans. *)
+let duplicate_binder_sites ctx =
+  List.filter_map (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.code = March_errors.Errors.Code.duplicate_binder
+      then Some (d.span.March_ast.Ast.start_line, d.span.March_ast.Ast.start_col)
+      else None)
+    (March_errors.Errors.sorted ctx)
+
+let dup_wrap body = Printf.sprintf {|mod M do
+  needs IO.Console
+  type P = Pair(Int, Int)
+%s
+  fn main(_cap_console : Cap(IO.Console)) do () end
+end|} body
+
+let test_duplicate_binder_rejects () =
+  let case label body expected =
+    let ctx = typecheck (dup_wrap body) in
+    Alcotest.(check (list (pair int int))) label expected (duplicate_binder_sites ctx)
+  in
+  (* Each site is the SECOND binder: line 4 is the first line of [body]. *)
+  case "lambda parameter list"
+    "  fn f() do\n    let h = fn (a, a) -> a\n    h(1, 2)\n  end" [ (5, 19) ];
+  case "named fn parameter list"
+    "  fn two(a : Int, a : Int) : Int do a end" [ (4, 18) ];
+  case "multi-clause fn head"
+    "  fn pick(0, a, a) : Int do a end\n  fn pick(_, a, b) : Int do a + b end"
+    [ (4, 16) ];
+  case "tuple pattern in match"
+    "  fn f() do\n    match (1, 2) do\n      (a, a) -> a\n    end\n  end" [ (6, 10) ];
+  case "tuple pattern in let"
+    "  fn f() do\n    let (b, b) = (3, 4)\n    b\n  end" [ (5, 12) ];
+  case "constructor pattern"
+    "  fn f() do\n    match Pair(5, 6) do\n      Pair(x, x) -> x\n    end\n  end"
+    [ (6, 14) ];
+  case "as-pattern rebinding an inner name"
+    "  fn f() do\n    match Pair(5, 6) do\n      Pair(x, _) as x -> 0\n    end\n  end"
+    [ (6, 20) ];
+  case "local named fn"
+    "  fn f() do\n    fn g(a, a) do a end\n    g(1, 2)\n  end" [ (5, 12) ];
+  case "three binders: each repeat reported"
+    "  fn f() do\n    let h = fn (a, a, a) -> a\n    h(1, 2, 3)\n  end"
+    [ (5, 19); (5, 22) ]
+
+let test_duplicate_binder_accepts () =
+  let case label body =
+    let ctx = typecheck (dup_wrap body) in
+    Alcotest.(check (list (pair int int))) label [] (duplicate_binder_sites ctx);
+    Alcotest.(check bool) (label ^ ": no errors") false (has_errors ctx)
+  in
+  case "curried lambdas shadow"
+    "  fn f() : Int do\n    let g = fn a -> fn a -> a\n    let g1 = g(1)\n    g1(2)\n  end";
+  case "inner lambda shadows an outer parameter"
+    "  fn f(a : Int, b : Int) : Int do\n    let h = fn a -> a + b\n    h(a)\n  end";
+  case "match arm shadows a parameter"
+    "  fn f(a : Int) : Int do\n    match a do\n      a -> a\n    end\n  end";
+  case "wildcards repeat"
+    "  fn f() : Int do\n    let h = fn (_, _) -> 0\n    match (1, 2) do\n      (_, _) -> h(1, 2)\n    end\n  end";
+  case "or-pattern alternatives bind the same name"
+    "  fn f() : Int do\n    match (1, 0) do\n      (a, 0) | (0, a) -> a\n      _ -> 9\n    end\n  end"
+
 (* A tuple is Eq when every component is (2026-10-06): no impl can be written
    for every arity, and both backends compare tuples component-wise. *)
 let test_tuple_eq_structural_accepts () =
@@ -18821,6 +18890,10 @@ let compiler_suites =
       ( "letfn_ret_annot", [
           Alcotest.test_case "finding 13: mismatch reported exactly once"    `Quick test_letfn_ret_annot_mismatch_single_diagnostic;
           Alcotest.test_case "finding 13: two distinct errors both report"   `Quick test_letfn_two_distinct_errors_both_report;
+        ] );
+      ( "duplicate_binder", [
+          Alcotest.test_case "a name bound twice in one binding is rejected" `Quick test_duplicate_binder_rejects;
+          Alcotest.test_case "shadowing, wildcards and or-patterns accepted" `Quick test_duplicate_binder_accepts;
         ] );
       ( "generic_when_constraints", [
           Alcotest.test_case "finding 15: unsatisfied generic bound rejects"  `Quick test_generic_when_constraint_unsatisfied_rejects;

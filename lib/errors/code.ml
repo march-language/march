@@ -45,6 +45,7 @@ let curried_lambda_over_tuple = "curried_lambda_over_tuple"
 let deterministic_violation = "deterministic_violation"
 let division_by_zero = "division_by_zero"
 let duplicate_actor = "duplicate_actor"
+let duplicate_binder = "duplicate_binder"
 let duplicate_constructor = "duplicate_constructor"
 let duplicate_field = "duplicate_field"
 let duplicate_handler = "duplicate_handler"
@@ -218,6 +219,7 @@ let all = [
   deterministic_violation;
   division_by_zero;
   duplicate_actor;
+  duplicate_binder;
   duplicate_constructor;
   duplicate_field;
   duplicate_handler;

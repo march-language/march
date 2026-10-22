@@ -1,0 +1,66 @@
+---
+layout: docs
+title: "duplicate_binder"
+permalink: /docs/errors/duplicate_binder/
+---
+
+# `duplicate_binder`: a name is bound twice in one parameter list or pattern
+
+One parameter list, or one pattern, binds the same name twice. The second
+binding is underlined, and a label points at the first.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.Console
+  fn main(_console : Cap(IO.Console)) do
+    let pick = fn (a, a) -> a
+    println(int_to_string(pick(1, 2)))
+  end
+end
+```
+
+The same rule covers a named function's parameters (`fn two(a, a)`), each head
+of a multi-clause function (`fn pick(0, a, a)`), and every pattern: a tuple
+(`(a, a) -> …`, `let (b, b) = …`), a constructor (`Pair(x, x)`), a record, and
+an `as` alias that repeats an inner name (`Pair(x, _) as x`).
+
+## The fix
+
+Give each binder its own name, or write `_` for a value you don't use:
+
+```march
+mod Main do
+  needs IO.Console
+  fn main(_console : Cap(IO.Console)) do
+    let pick = fn (_, b) -> b
+    println(int_to_string(pick(1, 2)))
+  end
+end
+```
+
+A repeated name in a pattern does not mean "these two values are equal". To
+match only equal values, bind two names and compare them in a guard:
+`(a, b) when a == b -> …`.
+
+## What stays legal
+
+Only a repeat inside ONE binding position is an error. A name bound in an
+inner scope still shadows the outer one:
+
+- curried lambdas: `fn a -> fn a -> a` (the inner `a` wins);
+- a lambda or a match arm rebinding an enclosing name: `fn f(a) do match a + 1 do a -> a end end`;
+- `_`, which binds nothing, any number of times: `fn (_, _) -> 0`;
+- the alternatives of an or-pattern, which must each bind the same names:
+  `(a, 0) | (0, a) -> a`.
+
+## Why the rule exists
+
+A doubled binder has no single meaning, and before this rule the two backends
+picked different ones: `fn (a, a) -> a` applied to `(1, 2)` returned `1`
+interpreted and `2` compiled. ML-family languages reject such non-linear
+patterns for the same reason; March does too, so no program can depend on
+either answer.
+
+See also: [the language reference](../pattern-matching.md).

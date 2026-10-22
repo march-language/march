@@ -1,0 +1,7 @@
+mod Main do
+  needs IO.Console
+  fn main(_console : Cap(IO.Console)) do
+    let pick = fn (a, a) -> a
+    println(int_to_string(pick(1, 2)))
+  end
+end

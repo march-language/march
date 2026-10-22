@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: `a` is bound twice
+mod Main do
+  needs IO.Console
+  fn main(_console : Cap(IO.Console)) do
+    let r = match (1, 2) do
+      (a, a) -> a
+    end
+    println(int_to_string(r))
+  end
+end
