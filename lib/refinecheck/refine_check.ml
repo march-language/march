@@ -840,6 +840,11 @@ let instantiate_entry ~(mode : [ `Stable | `Any ]) ~(formals : string list) ~(ar
               (match mode, List.find_opt (fun (_, a) -> not (stable a)) sub with
                | `Stable, Some (n, _) ->
                  raise (Stuck (Printf.sprintf "the argument for `%s` is not a variable or a literal" n))
+               | _ when not (List.exists (fun (_, a) -> expr_mentions own a) sub) ->
+                 (* No actual mentions a binder of the relation: substitute
+                    in place, so a diagnostic keeps the declared binders
+                    (`y > x + 100`, review minor). *)
+                 { r with rel_pred = subst_params sub r.rel_pred }
                | _ ->
                  let fresh j = "$s" ^ string_of_int j in
                  let ren = List.map (fun (j, b, _) -> (b, A.EVar { A.txt = fresh j; A.span = A.dummy_span })) r.rel_args in
@@ -1609,6 +1614,20 @@ let slot_is_exact (sl : abstract_slot) : bool =
   | A.EApp (A.EVar { A.txt; _ }, [ A.EVar _ ], _) -> txt = sl.sl_abs
   | _ -> false
 
+(* A binder spelled twice in one parameter list (`fn (x, x) -> …`, `fn k ->
+   fn k -> …`, `fn two(a : Int, a : Int)`), other than `_`: no positional
+   substitution can say which actual the body's [x] means — the interpreter
+   binds an uncurried lambda's FIRST `x`, compiled code the last, and a
+   curried chain's inner one shadows (review C3) — so every reading over such
+   a list declines. *)
+let duplicate_binder (xs : string list) : string option =
+  let rec go seen = function
+    | [] -> None
+    | "_" :: rest -> go seen rest
+    | x :: rest -> if List.mem x seen then Some x else go (x :: seen) rest
+  in
+  go [] xs
+
 (* A named callable as an abstract refinement's instantiation (phase 3), and
    a helper call inside a lambda body (leftovers phase A): its proved return
    `{Bool | _ == e}` (either orientation) over its parameters, as
@@ -1641,7 +1660,7 @@ let named_predicate_n (sig_of : string -> fn_sig option) (g : string)
       ; refined
       ; _
       }
-    when ret_sort = Some bool_sort && ns <> [] ->
+    when ret_sort = Some bool_sort && ns <> [] && duplicate_binder ns = None ->
     let pres =
       List.filter_map
         (fun (rp : rparam) ->
@@ -1803,6 +1822,10 @@ let inline_bool_body ~(named : string -> (string list * A.expr * A.expr list) op
            let zs = List.map (fun (p : A.param) -> p.A.param_name.A.txt) prms in
            if List.length zs <> List.length args then
              Error (Printf.sprintf "calls `%s` with the wrong number of arguments" g)
+           else if duplicate_binder zs <> None then
+             Error
+               (Printf.sprintf "calls `%s`, a `let`-bound lambda that binds `%s` twice" g
+                  (Option.get (duplicate_binder zs)))
            else if Refine_scope.expr_mentions_free g lam then
              Error (Printf.sprintf "calls `%s`, a `let`-bound lambda that names itself" g)
            else if depth >= inline_depth_max then
@@ -2469,7 +2492,12 @@ let entry_implies (cx : call_ctx) errctx ~(span : A.span) ~(callee : string) ~(s
                  check_call cx ~span:xsp ~callee:x ~subject:Element_domain ~goal_scope_facts:true ~verdict_out:out
                    sg (List.map (fun (j, _, _) -> cvar j) named) (List.hd sg.refined);
                  !out = Some Obligation.Proved
-               | [] -> true))
+               | [] ->
+                 (* A relation over no slot cannot be checked here: never
+                    owed-and-forgotten (review C1; no constructor builds one). *)
+                 record_elem_skip errctx ~span:xsp ~callee ~predicate:(pred_str r.rel_pred)
+                   ~what:"the relation names no element slot";
+                 false))
           want.rels
       in
       List.for_all Fun.id (slot_oks @ rel_oks)
@@ -2550,6 +2578,9 @@ let instantiate_abstract_n ~(named : string -> (string list * A.expr * A.expr li
     ~(local_lambda : string -> A.expr option) (fd : A.fn_def) (p : string) (n : int)
     (args : A.expr list) : (string list * A.expr, string) result =
   let read ys body =
+    match duplicate_binder ys with
+    | Some x -> Error (Printf.sprintf "the lambda passed for `%s` binds `%s` twice" p x)
+    | None ->
     match inline_bool_body ~named ~local_lambda ~binders:ys body with
     | Error w -> Error (Printf.sprintf "the lambda passed for `%s` %s" p w)
     | Ok (r, obs) ->
@@ -2662,15 +2693,55 @@ let instantiate_nary_entry ~(insts : (string * (string list * A.expr)) list)
         | s -> s)
       e.slots
   in
+  (* A relation that is exactly `p($s0, $s1)` over synthetic binders (the
+     sugar's expansion, [Refine_abstract.expand_markers]) takes the binders
+     of the callable it is instantiated from, so a diagnostic reads `k > v`,
+     never `$s0 > $s1` (review minor).  The reading [q] is over [ys] alone
+     ([instantiate_abstract_n]'s capture decline), so the renamed relation is
+     [q] itself and nothing can be captured. *)
+  let source_binders (r : rel) : rel option =
+    let synthetic b = String.length b > 0 && b.[0] = '$' in
+    let plain y = y <> "_" && not (synthetic y) in
+    match r.rel_pred with
+    | A.EApp (A.EVar { A.txt = p; _ }, args, _) ->
+      (match List.assoc_opt p insts with
+       | Some (ys, q)
+         when List.length ys = List.length args
+              && List.for_all plain ys
+              && duplicate_binder ys = None
+              && List.for_all (fun (_, b, _) -> synthetic b) r.rel_args ->
+         let arg_names = List.map (function A.EVar { A.txt; _ } -> Some txt | _ -> None) args in
+         if List.exists Option.is_none arg_names then None
+         else
+           let ren = List.combine (List.map Option.get arg_names) ys in
+           if
+             List.length (List.sort_uniq compare (List.map fst ren)) <> List.length ren
+             || List.exists (fun (_, b, _) -> not (List.mem_assoc b ren)) r.rel_args
+           then None
+           else
+             Some
+               { rel_args = List.map (fun (j, b, m) -> (j, List.assoc b ren, m)) r.rel_args
+               ; rel_pred = q }
+       | _ -> None)
+    | _ -> None
+  in
   let rels =
     List.map
       (fun (r : rel) ->
-        let pred = inst r.rel_pred in
-        let rel_args =
+        let r, pred =
+          match source_binders r with Some r' -> (r', r'.rel_pred) | None -> (r, inst r.rel_pred)
+        in
+        let named =
           List.filter_map
             (fun (j, b, m) -> if expr_mentions [ b ] pred then Some (j, b, mk j m) else None)
             r.rel_args
         in
+        (* A predicate that names NO slot any more (`fn (_k, _v) -> false`)
+           still holds of every entry: it keeps its original slots, never
+           an empty list, which [normalize_entry] would drop.  On the want
+           side the call then owes it; on the have side it is the (sound)
+           fact it is (review C1). *)
+        let rel_args = if named = [] then List.map (fun (j, b, m) -> (j, b, mk j m)) r.rel_args else named in
         { rel_args; rel_pred = pred })
       e.rels
   in
@@ -2757,7 +2828,25 @@ let abstract_flow_n ?component ?(call : A.expr option) ~root defs (ctx : rctx) p
                      | Error j ->
                        uninst
                          (Printf.sprintf "the element type of slot %d of `%s`'s result is not known here" j g)
+                     | Ok produced when entry_mentions nary produced ->
+                       (* An application [subst_abstract_n] did not reach (under
+                          an `if`, a `match`): it would be read in the caller's
+                          namespace (review I3; arity 1 declines the same shape
+                          in [abstract_slot_of_ty]). *)
+                       uninst
+                         (Printf.sprintf "`%s`'s element return applies `%s` where it is not instantiated" g
+                            (String.concat "`, `" nary))
                      | Ok produced ->
+                       (* Review C4: the declared entry is in the CALLEE's
+                          namespace (`{y | p(x, y) && y > n}` names its [n]),
+                          moved to this call's actuals exactly as a relational
+                          element return is ([lend_entry]'s [`Stable] rule); one
+                          that cannot move declines.  Arity 1 requires the slot
+                          closed over its binder ([abstract_slot_of_ty]). *)
+                       match instantiate_entry ~mode:`Stable ~formals:(sig_of_fn fd).param_names ~args produced with
+                       | Error why ->
+                         uninst (Printf.sprintf "`%s`'s element return cannot be read at this call: %s" g why)
+                       | Ok produced ->
                        (* §4.2 step 4, the conjunction with the argument's own
                           entry: only through one argument that is the single
                           source of every type-variable slot, slot for slot.
@@ -2810,9 +2899,25 @@ let abstract_flow_n ?component ?(call : A.expr option) ~root defs (ctx : rctx) p
                          | Some i -> Option.bind (List.nth_opt args i) (container_entry_of_expr ctx defs cb ce)
                          | None -> None
                        in
+                       (* Only the slots whose type variable passed the
+                          parametric gate carry the input's fact (review minor:
+                          the gate above is on [p]'s positive bases, and a
+                          slot outside them, `w` in `Tri(k[p], v[p], w)`, was
+                          never checked). *)
+                       let gated_slot j =
+                         let rec strip (t : A.ty) = match unlinear t with A.TyRefine (b, _, _) -> strip b | t -> t in
+                         match strip rt with
+                         | A.TyCon (_, targs) ->
+                           (match Option.map strip (List.nth_opt targs j) with
+                            | Some (A.TyVar { A.txt; _ }) -> List.mem txt bases || parametric_ok ctx g [ txt ]
+                            | _ -> false)
+                         | _ -> false
+                       in
                        let produced =
                          match arg_entry with
-                         | Some ae when ae.cont = produced.cont -> entry_meet { ae with rels = [] } produced
+                         | Some ae when ae.cont = produced.cont ->
+                           let slots = List.mapi (fun j s -> if gated_slot j then s else None) ae.slots in
+                           entry_meet { ae with slots; rels = [] } produced
                          | _ -> produced
                        in
                        let declined_input =
@@ -2915,7 +3020,18 @@ let abstract_param_entry_n (ctx : rctx) defs (cb : cbenv) (lets : launder) (g : 
                  let markers = elem_markers_of_expr a in
                  let marker j = Option.join (List.nth_opt markers j) in
                  match instantiate_nary_entry ~insts ~tyvar ~marker ent with
-                 | Ok e -> Ok e
+                 | Ok e when entry_mentions nary e ->
+                   Error
+                     (Printf.sprintf "the parameter's element type applies `%s` where it is not instantiated"
+                        (String.concat "`, `" nary))
+                 | Ok e ->
+                   (* Review C4: the parameter's entry names the CALLEE's
+                      parameters (`{y | p(x, y) && y > n}`): read at this
+                      call's actuals, as [check_arg_elements]' ordinary arm
+                      reads a declared slot ([`Any]: a demand, used once). *)
+                   Result.map_error
+                     (fun why -> Printf.sprintf "the parameter cannot be read at this call: %s" why)
+                     (instantiate_entry ~mode:`Any ~formals:(sig_of_fn fd).param_names ~args e)
                  | Error j ->
                    Error
                      (Printf.sprintf "the element type of slot %d of the argument passed to `%s` is not known here" j g)))
@@ -6417,6 +6533,7 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear ctor_field_names;
   Hashtbl.clear ctor_param_fields;
   Hashtbl.clear ctor_field_params;
+  Hashtbl.clear ctor_field_joint;
   Hashtbl.clear axiom_measures;
   Hashtbl.clear measure_base_cases;
   Hashtbl.clear measure_scalar_field_dep;
@@ -7294,6 +7411,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset ctor_field_names;
   Hashtbl.reset ctor_param_fields;
   Hashtbl.reset ctor_field_params;
+  Hashtbl.reset ctor_field_joint;
   Hashtbl.reset ctor_hidden_params;
   Hashtbl.reset axiom_measures;
   Hashtbl.reset measure_base_cases;

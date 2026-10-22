@@ -43,10 +43,15 @@ git log is authoritative for exact commits.
   `Assoc({x : k | true}, {y : v | p(x, y)})` (both spellings are accepted; with a
   one-argument `p`, `Assoc(k[p], k[p])` is still two separate slot facts).
   The body proves the return (`keep(k, v)` is `p(k, v)`); at a call `p` is what the
-  passed lambda, `let`-bound lambda, named predicate or callback computes, so
+  passed lambda, `let`-bound lambda, named predicate, or a callback parameter that
+  itself defines a two-argument `p` computes, so
   `need_pos(filt(a, fn (_k, v) -> v > 0))` and
   `need_arel(filt(a, fn (k, v) -> v > k))` are proved and a weaker lambda is an
-  `abstract-refinement-too-weak` skip. A parameter can carry the relation too.
+  `abstract-refinement-too-weak` skip. A parameter can carry the relation too, read
+  at the call's actuals when it also names another parameter of the callee. A
+  callback chain ending in a concrete `{Bool | _ == e}` is not a contract (nothing
+  checks the callable passed for it yet), and a lambda that binds one name twice
+  (`fn (x, x) -> …`, `fn k -> fn k -> …`) instantiates nothing.
   Malformed signatures are `abstract_refinement_misuse` errors: `p` applied to
   only some of the callback's arguments, `p` on a single slot (`Assoc(k, v[p])`,
   fix `Assoc(k[p], v[p])`; this includes `List(Int[p])` under
@@ -254,6 +259,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a lambda or helper that binds one name twice is no longer read as a
+  predicate.** `let h = fn (a, a) -> a > 0` then `List.filter(xs, fn y -> h(y, 1))`
+  was read as `y > 0`, and a function `two(a : Int, a : Int) : {Bool | _ == (a >
+  0)}` lent `two(y, 1) == (y > 0)` at a call; which argument the body's `a` names
+  differs between the interpreter (the first) and compiled code (the last), so both
+  are now declined (`abstract-refinement-uninstantiated`, or no postcondition fact).
 - The in-browser REPL (stdlib "Try it" pages, playground, landing page) now runs a
   pasted doc transcript one `march> ` line at a time and ignores the expected-output
   lines between them. Pasting a transcript whole used to evaluate it as one block and

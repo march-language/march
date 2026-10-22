@@ -873,16 +873,27 @@ let dom_binder (dom : A.ty) : string option =
   | A.TyRefine (_, Some n, _) when n.A.txt <> "_" -> Some n.A.txt
   | _ -> None
 
-(* A callback CHAIN `D1 -> … -> Dn -> {Bool | _ == e}` (n ≥ 2, multi-arg
-   design §5.3) as an n-parameter signature `[$cb_arg; $cb_arg2; …]`: the
-   domains its parameters, each domain binder renamed to its position's
-   name in [e] (and in a later domain's refinement), [e] the result's
-   definition.  ONLY this final-codomain shape — a definer of a current
-   abstract refinement, or a predicate contract — so no other chain gains
-   an obligation or a fact; every other chain keeps the one-parameter
+(* A callback CHAIN `D1 -> … -> Dn -> {Bool | _ == p(x1, …, xn)}` (n ≥ 2,
+   multi-arg design §5.3 shape (i)) as an n-parameter signature `[$cb_arg;
+   $cb_arg2; …]`: the domains its parameters, each domain binder renamed to
+   its position's name in the result's definition (and in a later domain's
+   refinement).  ONLY a DEFINER of a current abstract refinement [p]
+   ([current_abstracts]), applied to the chain's own binders in order, so no
+   other chain gains a fact; every other chain keeps the one-parameter
    signature below.  A call through it with all n arguments, `keep(k, v)`,
-   reflects to `keep$ret == e[k, v]` ([postcond_of]); a call with fewer has
-   no actual for a parameter [e] names, so it gets no fact. *)
+   reflects to `keep$ret == $abs_p(k, v)` ([postcond_of]); a call with fewer
+   gets no fact ([postcond_of_declared]'s arity rule).
+
+   Review C2 (2026-10-21, a controller ruling): the design's shape (ii), a
+   CONCRETE predicate contract (`{Bool | _ == (x > 0)}`), is no longer an
+   n-parameter signature.  It gave the body the fact `keep$ret == (k > 0)`,
+   and no pass site obliged the callable passed for it (a chain's codomain
+   is an arrow, which [check_pass_sites] owes nothing for): `h(fn (_a, _b)
+   -> true, 0 - 5, 1)` was proved.  The fact for a definer is sound for the
+   opposite reason: [p] is uninterpreted in the body and instantiated at each
+   call from the very callable passed.  The pass-site obligation `q ⇔ e`
+   that would bring shape (ii) back is filed
+   (specs/todos/2026-10-21-chain-predicate-contract-pass-site.md). *)
 let chain_sig_of_ty (t : A.ty) : fn_sig option =
   let rec doms (t : A.ty) acc =
     match t with A.TyArrow (d, c) -> doms c (d :: acc) | c -> (List.rev acc, c)
@@ -895,7 +906,22 @@ let chain_sig_of_ty (t : A.ty) : fn_sig option =
        when List.length ds >= 2 && is_bool_base base ->
        let bn = binder_name b in
        let is_b = function A.EVar { A.txt; _ } -> txt = bn || txt = "_" | _ -> false in
-       if not (is_b l || is_b r) then None
+       let e = if is_b l then Some r else if is_b r then Some l else None in
+       (* Shape (i) only: `p(x1, …, xn)`, [p] a current abstract refinement,
+          its arguments the chain's own domain binders, in order. *)
+       let definer =
+         match e with
+         | Some (A.EApp (A.EVar { A.txt = p; _ }, args, _)) when List.mem p !current_abstracts ->
+           List.length args = List.length ds
+           && List.for_all2
+                (fun a d ->
+                  match a, dom_binder d with
+                  | A.EVar { A.txt; _ }, Some x -> txt = x && x <> bn
+                  | _ -> false)
+                args ds
+         | _ -> false
+       in
+       if not definer then None
        else
          let names =
            List.mapi
@@ -1627,6 +1653,10 @@ let rec normalize_entry (e : entry) : entry =
           let idxs = List.sort_uniq compare (List.map (fun (j, _, _) -> j) r.rel_args) in
           let is_true = match r.rel_pred with A.ELit (A.LitBool true, _) -> true | _ -> false in
           let scalar j = match slot_at j with Some (None | Some (Refined _)) -> true | _ -> false in
+          (* [idxs = []] is never built (review C1): every constructor keeps
+             at least the slots a relation was declared over, even when its
+             instantiated predicate names none of them; dropping such a
+             relation here would be sound on a have side only. *)
           if is_true || idxs = [] || not (List.for_all scalar idxs) then None
           else
             match idxs, r.rel_args with
@@ -1803,9 +1833,13 @@ let rec elem_app (cname : A.name) (args : A.ty list) : entry option * (A.span * 
   let n = Array.length slots in
   let issues = ref [] in
   let warn sp text = issues := (sp, "This relation is not checked: " ^ text) :: !issues in
-  let binder_at j =
-    match slots.(j) with Some (Refined (b, _, _)) when b <> "_" -> Some b | _ -> None
-  in
+  (* Every slot's binder and sort marker as READ, before the loop below
+     empties a slot whose conjuncts all became relations: two slots naming
+     each other (`Assoc({x : Int | x < y}, {y : Int | y > x})`) would
+     otherwise find the first slot already emptied (review I1). *)
+  let read_binders = Array.map (function Some (Refined (b, _, _)) when b <> "_" -> Some b | _ -> None) slots in
+  let read_markers = Array.map (function Some (Refined (_, _, m)) -> m | _ -> None) slots in
+  let binder_at j = read_binders.(j) in
   let binders = List.init n (fun j -> (j, binder_at j)) |> List.filter_map (fun (j, b) -> Option.map (fun b -> (j, b)) b) in
   let base_is_container (j : int) : string option =
     let rec base (t : A.ty) =
@@ -1860,9 +1894,7 @@ let rec elem_app (cname : A.name) (args : A.ty list) : entry option * (A.span * 
               (match entry_shaped ~name_of c related with
                | Error why -> warn sp why
                | Ok () ->
-                 let marker j =
-                   match slots.(j) with Some (Refined (_, _, m)) -> m | _ -> None
-                 in
+                 let marker j = read_markers.(j) in
                  rels :=
                    { rel_args = List.map (fun j -> (j, (if j = i then b else Option.get (binder_at j)), (if j = i then srt else marker j))) related
                    ; rel_pred }

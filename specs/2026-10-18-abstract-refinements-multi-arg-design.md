@@ -1,8 +1,16 @@
 # Design: abstract refinements over several arguments, and the relational element fact they need (`Map.filter`)
 
 **Date:** 2026-10-18
-**Status:** design. Phase 0 (no vacuous hidden-field construction) landed 2026-10-18
-(`specs/progress/2026-10-18-hidden-field-element-refinements.md`); phases 1-4 are not built. Probed on `ba8db5805` (0.6.0 + docs),
+**Status:** built. Phase 0 (no vacuous hidden-field construction) landed 2026-10-18
+(`specs/progress/2026-10-18-hidden-field-element-refinements.md`); phases 1a, 1b, 2, 3
+and 4 landed 2026-10-21 (`specs/progress/2026-10-21-abstract-multiarg-phase1a.md` …
+`-phase4.md`), followed by a soundness review's fixes
+(`specs/progress/2026-10-21-abstract-multiarg-review-fixes.md`). Deviations from this
+design, each recorded in those notes: no relation flows through a parametric call
+(only slot facts are conjoined, §4.2 step 4); a chain callback whose codomain is a
+concrete `{Bool | _ == e}` (§5.3 shape (ii)) carries no fact, only a definer chain does
+(`specs/todos/2026-10-21-chain-predicate-contract-pass-site.md`); a lambda binding one
+name twice instantiates nothing. Probed on `ba8db5805` (0.6.0 + docs),
 compiler `_build/default/bin/main.exe` built 2026-10-18, z3 4.16.0 (CI has 4.8.12).
 **Closes, when phase 4 lands:** the `Map.filter` bullet of
 `specs/todos/2026-09-20-abstract-refinements-multi-arg-callbacks.md` (its gate,

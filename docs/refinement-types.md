@@ -2167,7 +2167,11 @@ assumed per entry:
   (`{xs : List(Int) | true}`), a slot inside a nested container naming an
   outer binder (`Assoc({x : Int | true}, List({y : Int | y > x}))`), and a
   constructor that holds some of the related values directly and others
-  inside a nested container (`type Mix(k, v) = MX(k, List(v))`).
+  inside a nested container (`type Mix(k, v) = MX(k, List(v))`), and one that
+  holds them inside another type where they are not one entry (`type Two(k, v)
+  = Two((List(k), List(v)))`; `Map`'s `HamtMap(HEntry(k, v))`, one type
+  application of both, counts as entry-shaped). Two slots may name each other
+  (`Assoc({x : Int | x < y}, {y : Int | y > x})`): each is one relation.
 - A relation over type-variable slots, and a relation between two different
   entries (sortedness), cannot be written.
 
@@ -2619,11 +2623,23 @@ a combinator that calls its callback `keep(k, v)`, a curried one `fn k -> fn v
 parameter's `p` and for `Map.filter`'s assumed return, below; see "Not yet"),
 either bound by `let`, a function
 with a proved `{Bool | _ == e}` return over two parameters (`fn above(k : Int,
-v : Int) : {Bool | _ == (v > k)}`), and a callback parameter whose chain type
-ends in `{Bool | _ == e}`. Anything else is `abstract-refinement-uninstantiated`,
-naming why. A parameter may carry `p` too (`need(a : Assoc({x : k | true}, {y
-: v | p(x, y)}), keep : …)`): the argument's entries must then meet the
-instantiated relation. The input's own slot facts carry over, as for one
+v : Int) : {Bool | _ == (v > k)}`), and a callback parameter that itself
+defines a two-argument abstract refinement of the enclosing function (`keep :
+k -> v -> Bool[q]`, passing its `q` on). A lambda that binds one name twice
+(`fn (x, x) -> …`, `fn k -> fn k -> …`) instantiates nothing: which argument
+its `x` names is not the same in the interpreter and in compiled code.
+Anything else is `abstract-refinement-uninstantiated`, naming why. A chain
+ending in a concrete contract, `kk : ({x : Int | true}) -> ({y : Int | true})
+-> {Bool | _ == (y > x)}`, is not a contract yet: nothing checks the callable
+passed for `kk` against it, so inside the function `kk(k, v)` gives no fact
+and `filt(a, kk)` instantiates nothing (a one-argument codomain contract is
+checked at each call, as above). A parameter may carry `p` too (`need(a :
+Assoc({x : k | true}, {y : v | p(x, y)}), keep : …)`): the argument's entries
+must then meet the instantiated relation. A slot that also names another
+parameter of the callee (`{y : Int | p(x, y) && y > n}`) is read at the call's
+argument for it, on a return and on a parameter alike. A callable that makes
+the relation constant still binds it: `fn (_k, _v) -> false` passed for such a
+parameter is a violation for any non-empty argument. The input's own slot facts carry over, as for one
 argument (`a : Assoc(Int, {Int | _ > 0})` through `filt(a, fn (_k, v) -> v <
 100)` meets `_ > 0 && _ < 100`), but the input's *relations* do not: the
 result's entries are not the input's, and a function generic in `k` and `v`
@@ -2636,7 +2652,10 @@ is `p(y, x)`); an occurrence names distinct binders of sibling slots (a single
 slot, `Assoc(k, v[p])` or `Assoc(k, {v | p(_)})`, is an error whose fix is
 `Assoc(k[p], v[p])`, and so is marking a number of slots other than two); each argument has one type across
 the definer and every occurrence; the container is entry-shaped (every
-constructor holds one `k` and one `v`, or neither); and one `p` has one arity.
+constructor holds one `k` and one `v`, or neither; inside another type only
+as one type application of both, as `Map`'s `HamtMap(HEntry(k, v))`, see
+[relational element refinements](#relational-element-refinements)); and one
+`p` has one arity.
 
 Not yet: inside a body, a callback called in two steps (`let g = keep(k)` then
 `g(v)`) gives `g(v)` no fact, so a combinator written that way does not prove

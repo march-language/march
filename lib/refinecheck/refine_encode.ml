@@ -1479,6 +1479,13 @@ let ctor_hidden_params : (string, int list) Hashtbl.t = Hashtbl.create 32
    multi-arg design, phase 0). *)
 let ctor_field_params : (string, ((int * string) list * string) list) Hashtbl.t = Hashtbl.create 32
 
+(* constructor -> per declared field, the type parameters (by index) that are
+   DIRECT arguments of the field's own type application (`HEntry(k, v)` in
+   `HamtMap(HEntry(k, v))`: [Some [0; 1]]); [None] for a field that is no type
+   application (a tuple, an arrow, a bare variable).  Read by [entry_shaped]'s
+   opaque case only (review I2). *)
+let ctor_field_joint : (string, int list option list) Hashtbl.t = Hashtbl.create 32
+
 (* Source-ish rendering of a declared field type, for [ctor_field_params]'
    messages only. *)
 let rec field_ty_text (t : A.ty) : string =
@@ -1609,7 +1616,36 @@ let rec entry_shaped ?(depth = 0) ~(name_of : int -> string) (c : string) (s : i
     let opaque =
       List.for_all (fun k -> List.for_all (function Param _ | Within _ -> false | Self | Other -> true) (roles k)) ctors
     in
-    if opaque then Ok ()
+    if opaque then
+      (* Vacuous only where the hidden entries are JOINT: every field that
+         hides a related slot is one type application naming all of them
+         directly (`HamtMap(HEntry(k, v))`).  `Two((List(k), List(v)))` hides
+         its keys and values in two separate lists, so an entry pairs
+         nothing (review I2, a ruling). *)
+      let joint_ok (k : string) : (unit, string) result =
+        let hid = Option.value ~default:[] (Hashtbl.find_opt ctor_field_params k) in
+        let joint = Option.value ~default:[] (Hashtbl.find_opt ctor_field_joint k) in
+        let bad =
+          List.find_mapi
+            (fun i (ps, fty) ->
+              match List.find_opt (fun (j, _) -> List.mem j s) ps with
+              | None -> None
+              | Some (j, _) ->
+                (match Option.join (List.nth_opt joint i) with
+                 | Some ds when List.for_all (fun j' -> List.mem j' ds) s -> None
+                 | _ -> Some (j, fty)))
+            hid
+        in
+        match bad with
+        | None -> Ok ()
+        | Some (j, fty) ->
+          Error
+            (Printf.sprintf
+               "`%s`'s constructor `%s` holds the value for %s inside `%s`, which is not one entry of \
+                the related slots, so a relation between them has no entries to hold of"
+               c k (quote j) fty)
+      in
+      List.fold_left (fun acc k -> match acc with Error _ -> acc | Ok () -> joint_ok k) (Ok ()) ctors
     else if depth > 8 then Error (Printf.sprintf "`%s`'s nesting is too deep to read its entries" c)
     else
       let check_ctor (k : string) : (unit, string) result =
@@ -2023,6 +2059,19 @@ let rec register_field_sorts_once (decls : A.decl list) : unit =
             set_ctor_fields (adt_sort_name tname.A.txt) v.A.var_name.A.txt
               (List.map (smt_sort_of_field ~pnames) v.A.var_args);
             Hashtbl.replace ctor_param_fields v.A.var_name.A.txt (List.map role_of v.A.var_args);
+            Hashtbl.replace ctor_field_joint v.A.var_name.A.txt
+              (List.map
+                 (fun (t : A.ty) ->
+                   match t with
+                   | A.TyCon (_, args) ->
+                     Some
+                       (List.filter_map
+                          (function
+                            | A.TyVar n -> List.find_index (( = ) n.A.txt) pnames
+                            | _ -> None)
+                          args)
+                   | _ -> None)
+                 v.A.var_args);
             Hashtbl.replace ctor_field_params v.A.var_name.A.txt
               (List.map
                  (fun (t : A.ty) ->
