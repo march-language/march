@@ -494,7 +494,9 @@ git log is authoritative for exact commits.
   forms under Syntax, and a Limitations list of the known gaps (for example `Map`'s
   other functions and `HashMap.filter` carry no element fact yet). The skip-reason table
   now lists all sixteen reasons, and the page says that `fn (a, a) -> …` is a
-  `duplicate_binder` type error.
+  `duplicate_binder` type error. The relational element refinements section and the
+  two-argument abstract refinements part are rewritten around one running example, with
+  checked examples for building, matching and projecting an entry.
 
 ## [0.6.0] - 2026-10-17
 

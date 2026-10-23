@@ -2177,78 +2177,247 @@ fact from it.
 
 ### Relational element refinements
 
-Inside one type application, a slot's predicate can name the binder of a
-**sibling** slot. The result is a relation between the components of every
-**entry** of the container:
+An element refinement such as `List({Int | _ > 0})` says something about each
+element on its own. Some facts are about two values at once. Take a list of
+key/value pairs where every value must exceed its key. No refinement on the
+keys alone, or on the values alone, can say that. It is a fact about the key
+and the value of the same pair.
+
+The running example on this page is an association list:
 
 ```march
 type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
-
--- every entry's value exceeds its key
-fn need_arel(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do … end
 ```
 
-A slot sees the binders of all its siblings, in any order. A sibling binder
-shadows a value parameter of the same name: in
-`fn f(x : Int, a : Assoc({x : Int | true}, {y : Int | y > x}))` the `x` in
-`y > x` is the key, not the parameter. Conjuncts of a slot predicate that name
-no sibling (`y > 0` in `{y : Int | y > 0 && y > x}`) stay an ordinary slot fact,
-so a predicate over one slot is always an ordinary element refinement.
+To state the fact, give each slot a binder and let one slot's predicate name
+the other's:
 
-An entry of an ADT container is one constructor occurrence's values for the
-related slots: the `k` and `v` fields of one `ACons`. A relation is checked and
-assumed per entry:
+```march
+Assoc({x : Int | true}, {y : Int | y > x})   -- every value exceeds its key
+```
 
-- **Constructing** an entry owes the relation once, over the constructor's
-  fields: `need_arel(ACons(1, 2, ANil))` is proved, and
-  `need_arel(ACons(5, 2, ANil))` is a violation ("the entry (5, 2) passed to
-  `need_arel` does not satisfy precondition `y > x`"). A constructor holding
-  none of the related slots (`ANil`) owes nothing. A constructor whose only
-  field is another container holding all the related slots
-  (`type Outer(k, v) = O(Assoc(k, v))`) passes the relation to that container.
-- **Matching** an entry gives its binders the relation: in
-  `match a do ACons(k, v, _) -> need_gt(k, v)`, with
-  `need_gt(k : Int, v : {Int | _ > k})`, the call is proved. The binders must
-  be direct pattern variables of one constructor occurrence;
-  `ACons(k, _, ACons(_, v, _))` relates nothing.
-- **Projecting**: a value whose declared entry carries a relation meets a
-  demand on fewer slots when the relation implies it.
-  `a : Assoc({x : Int | x > 0}, {y : Int | y > x})` meets
-  `Assoc(Int, {Int | _ > 0})`, and meets a relational demand spelled with
-  other binders (`Assoc({a : Int | true}, {b : Int | b > a})`).
-  `Assoc({x : Int | true}, {y : Int | y > x})` does not meet
-  `Assoc(Int, {Int | _ > 0})`: the violation's example is `x = -1, y = 0`.
-- A proved annotated `let`, a proved declared return, and the recursive call of
-  the function being checked carry the relation like any element refinement,
-  so a recursive `bump` that returns `ACons(k, v + 1, bump(t))` keeps
-  `Assoc({x : Int | true}, {y : Int | y > x})`.
+`x` names the key and `y` names the value. `true` means the key on its own is
+unconstrained. `y > x` is the relation.
+
+**An entry** is the values of one constructor occurrence for the related slots:
+the `k` and `v` fields of one `ACons`. The relation must hold of every entry.
+
+```
+ACons(1, 5, ACons(2, 9, ANil))
+      ^  ^        ^  ^
+      entry (1, 5)   entry (2, 9)
+```
+
+Both entries have a value above its key, so this value satisfies the relation.
+`ANil` holds no key and no value, so it is no entry and owes nothing.
+
+The checker uses a relation in three ways.
+
+**Building a value owes the relation, once per entry.** Each `ACons` you write
+is checked over its own two fields:
+
+```march
+mod Build do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn need_up(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+  fn ok() : Int do need_up(ACons(1, 5, ACons(2, 9, ANil))) end    -- proved
+  fn bad() : Int do need_up(ACons(1, 5, ACons(7, 3, ANil))) end   -- violation
+end
+```
+
+The violation names the entry that breaks it:
+
+```
+refinement violation: the entry (7, 3) passed to `need_up` does not satisfy precondition `y > x`
+```
+
+**Matching an entry gives you the relation.** Bind the key and the value from
+the same constructor pattern, and the checker knows they are related:
+
+```march
+mod Match do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn need_gt(k : Int, v : {Int | _ > k}) : Int do v - k end
+
+  fn first_gap(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    match a do
+      ANil -> 0
+      ACons(k, v, _) -> need_gt(k, v)                 -- proved
+    end
+  end
+
+  fn mixed(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    match a do
+      ACons(k, _, ACons(_, v, _)) -> need_gt(k, v)    -- skip: no fact the checker derived constrains `v`
+      _ -> 0
+    end
+  end
+end
+```
+
+In `mixed`, `k` is the first entry's key and `v` is the second entry's value.
+They are not one entry, so nothing relates them. The binders must be direct
+pattern variables of one constructor occurrence.
+
+**Passing to a weaker demand works when the relation implies it.** A function
+may ask for less than a value promises. Then the checker asks whether every
+entry that satisfies the promise also satisfies the demand. This is called
+projection.
+
+```march
+mod Project do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn need_pos_vals(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end
+
+  fn pos_up(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do
+    need_pos_vals(a)   -- proved
+  end
+
+  fn up(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    need_pos_vals(a)   -- violation (e.g. x = -1, y = 0)
+  end
+end
+```
+
+`need_pos_vals` asks only that every value be positive. In `pos_up`, every key
+is positive and every value exceeds its key. So every value is positive, and
+the call is proved. In `up`, keys may be negative. The entry `(-1, 0)` has a
+value above its key, but the value is not positive. The checker reports that
+entry:
+
+```
+refinement violation: an element of the container passed as `a` does not satisfy the expected element refinement `_ > 0` (e.g. x = -1, y = 0)
+```
+
+**The binder names are local to each type.** A demand may spell the same
+relation with other names. Only the meaning is compared:
+
+```march
+mod Rename do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn need_up(_a : Assoc({a : Int | true}, {b : Int | b > a})) : Int do 0 end
+
+  fn renamed(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    need_up(a)   -- proved: `b > a` is `y > x`
+  end
+end
+```
+
+A relation also travels the way any element refinement does. A proved
+annotated `let`, a proved declared return, and the recursive call of the
+function being checked all carry it:
+
+```march
+mod Bump do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn need_up(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+  fn bump(a : Assoc({x : Int | true}, {y : Int | y > x})) : Assoc({x : Int | true}, {y : Int | y > x}) do
+    match a do
+      ANil -> ANil
+      ACons(k, v, t) -> ACons(k, v + 1, bump(t))   -- proved: the recursive call keeps it
+    end
+  end
+
+  fn use_bump(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    need_up(bump(a))                               -- proved
+  end
+end
+```
+
+**Details.**
+
+- A slot sees the binders of all its siblings, in any order.
+- A sibling binder shadows a value parameter of the same name. In
+  `fn f(x : Int, a : Assoc({x : Int | true}, {y : Int | y > x}))`, the `x` in
+  `y > x` is the key, not the parameter.
+- A slot predicate is split at its top-level `&&`. A conjunct that names no
+  sibling stays an ordinary slot fact. So `y > 0` in
+  `{y : Int | y > 0 && y > x}` is a fact about each value, and a predicate over
+  one slot is always an ordinary element refinement.
+- Two slots may name each other, as in
+  `Assoc({x : Int | x < y}, {y : Int | y > x})`. Each slot's predicate is one
+  relation.
+- A constructor whose only field is another container holding all the
+  related slots passes the relation to that container. With
+  `type Outer(k, v) = O(Assoc(k, v))`, a relation on `Outer` is checked on the
+  inner `Assoc`'s entries.
+- You cannot write a relation over type-variable slots, or a relation between
+  two different entries, such as "the keys are sorted".
 
 **What is not checked.**
 
-- **A relation does not flow through a polymorphic call.** A function
-  parametric in `k` and `v` carries each slot's fact to its result, but it may
-  pair the key of one entry with the value of another, so the result does not
-  carry the relation. `need_arel(rev(a))` for a generic
-  `rev : Assoc(k, v) -> Assoc(k, v)` is a recorded skip, and a demanded relation
-  traced into such a call is a `parametric-source-unproved` skip ("a relation
-  between `k` and `v` cannot be traced through separate sources", or "is not
-  preserved through `rev`").
-- **The container must be entry-shaped for the related slots:** every
-  constructor holds one value for each of them, or none of them. Otherwise the
-  checker warns `refinement_unchecked` ("This relation is not checked: `Two`'s
-  constructor `K` carries a value for `x` without one for `y`, …") and the
-  relation is treated as not written: never assumed, never owed. The same
-  warning covers a relation over a slot whose type is itself a container
-  (`{xs : List(Int) | true}`), a slot inside a nested container naming an
-  outer binder (`Assoc({x : Int | true}, List({y : Int | y > x}))`), and a
-  constructor that holds some of the related values directly and others
-  inside a nested container (`type Mix(k, v) = MX(k, List(v))`), and one that
-  holds them inside another type where they are not one entry (`type Two(k, v)
-  = Two((List(k), List(v)))`; `Map`'s `HamtMap(HEntry(k, v))`, one type
-  application of both, counts as entry-shaped). Two slots may name each other
-  (`Assoc({x : Int | x < y}, {y : Int | y > x})`): each is one relation.
-- A relation over type-variable slots, and a relation between two different
-  entries (sortedness), cannot be written.
+- **A relation is lost through a polymorphic call.** `need_up(shift(a))` is a
+  skip even when `a` carries the relation. A function generic in `k` and `v`
+  keeps each slot's own facts, but it may pair the key of one entry with the
+  value of another. This `shift` does exactly that:
+
+  ```march
+  mod Shift do
+    type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+    fn need_up(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+    fn shift(a : Assoc(k, v)) : Assoc(k, v) do
+      match a do
+        ACons(k1, _, ACons(_, v2, rest)) -> ACons(k1, v2, rest)
+        _ -> a
+      end
+    end
+
+    fn t() : Int do need_up(shift(ACons(5, 6, ACons(0, 1, ANil)))) end   -- skip
+  end
+  ```
+
+  The input's entries `(5, 6)` and `(0, 1)` both satisfy `y > x`. The result
+  `ACons(5, 1, ANil)` has the entry `(5, 1)`, which does not. So the call is a
+  `parametric-source-unproved` skip: "a relation between `k` and `v` is not
+  preserved through `shift`: a function parametric in them may pair the
+  components of different entries". A generic reverse is treated the same
+  way. To carry a relation through a combinator, give it a
+  [two-argument abstract refinement](#two-arguments-a-relation-between-sibling-slots).
+- **A relation on a type that is not entry-shaped is ignored, with a
+  warning.** Every constructor must hold one value for each related slot, or
+  none of them. Take
+
+  ```march
+  mod Shape do
+    type Two(k, v) = K(k) | V(v)
+
+    fn need_two(_t : Two({x : Int | true}, {y : Int | y > x})) : Int do 0 end   -- warning: refinement_unchecked
+
+    fn go() : Int do need_two(V(0 - 5)) end   -- no obligation
+  end
+  ```
+
+  `V(-5)` holds a value and no key, so it sits in no entry, and `y > x` has no
+  `x` to compare with. A relation such as
+  `Two({x : Int | true}, {y : Int | y > x})` is therefore treated as not
+  written: never assumed and never owed. The checker warns
+  `refinement_unchecked`:
+
+  ```
+  This relation is not checked: `Two`'s constructor `K` carries a value for `x` without one for `y`, so a relation between them has no entries to hold of
+  ```
+
+  The same warning covers these shapes:
+
+  - a slot whose type is itself a container, such as `{xs : List(Int) | true}`;
+  - a slot inside a nested container naming an outer binder, such as
+    `Assoc({x : Int | true}, List({y : Int | y > x}))`;
+  - a constructor holding some related values directly and others inside a
+    nested container, such as `type Mix(k, v) = MX(k, List(v))`;
+  - a constructor holding them inside another type where they are not one
+    entry, such as `type Pairs(k, v) = Pairs((List(k), List(v)))`.
+
+  One type application of both slots counts as entry-shaped: `Map`'s
+  `HamtMap(HEntry(k, v))` is fine.
 
 ### Through a polymorphic call
 
@@ -2677,68 +2846,103 @@ that is read from the definer in the same signature: with a one-argument `p`
 A domain may name its binder in the chain as for one argument
 (`({x : Int | x > 0}) -> v -> Bool[p]`); two domains may not share one.
 
-The return says: every entry `(x, y)` of the result satisfies `p(x, y)`. Inside
-`filt`, `p` is an uninterpreted function of two arguments and `keep(k, v)` is
-`p(k, v)`, so the body proves its return. At a call `p` is what the passed
-callable computes, and the produced relation is compared with the demand
-(projected onto one slot where the demand is about one slot):
+**What the return means.** `Assoc(k[p], v[p])` says every entry `(x, y)` of
+the result satisfies `p(x, y)`. Inside `filt`, `p` is an uninterpreted function
+of two arguments, and `keep(k, v)` is `p(k, v)`. So the guard `if keep(k, v)`
+is exactly what the body needs to prove its return.
+
+**At a call, `p` is what the passed callable computes.** The checker compares
+the relation it produces with the demand. A demand about one slot is met by
+[projection](#relational-element-refinements), as for a written relation:
 
 ```march
-fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end
-fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+mod Filt do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
 
-need_pos(filt(a, fn (_k, v) -> v > 0))           -- proved
-need_arel(filt(a, fn (k, v) -> v > k))           -- proved: the relation itself
-need_pos(filt(a, fn (k, v) -> k > 0 && v > k))   -- proved: projected onto the values
-need_pos(filt(a, fn (k, v) -> v > k))            -- skip: too weak (a negative key)
-need_pos(filt(a, fn (_k, v) -> v >= 0))          -- skip: too weak
+  fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do
+    match a do
+      ANil -> ANil
+      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end
+    end
+  end
+
+  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end
+  fn need_up(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+  fn t1(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (_k, v) -> v > 0)) end          -- proved
+  fn t2(a : Assoc(Int, Int)) : Int do need_up(filt(a, fn (k, v) -> v > k)) end            -- proved: the relation itself
+  fn t3(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (k, v) -> k > 0 && v > k)) end  -- proved: projected onto the values
+  fn t4(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (k, v) -> v > k)) end           -- skip: too weak (a negative key)
+  fn t5(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (_k, v) -> v >= 0)) end         -- skip: too weak
+end
 ```
 
-What instantiates a two-argument `p`: an uncurried lambda `fn (k, v) -> …` for
-a combinator that calls its callback `keep(k, v)`, a curried one `fn k -> fn v
--> …` for one that calls it in two steps (today that counts only for a
-parameter's `p` and for `Map.filter`'s assumed return, below; see "Not yet"),
-either bound by `let`, a function
-with a proved `{Bool | _ == e}` return over two parameters (`fn above(k : Int,
-v : Int) : {Bool | _ == (v > k)}`), and a callback parameter that itself
-defines a two-argument abstract refinement of the enclosing function (`keep :
-k -> v -> Bool[q]`, passing its `q` on). A lambda that binds one name twice in
-one parameter list, `fn (x, x) -> …`, is no longer a program at all: since
-2026-10-22 the typechecker rejects it as
-[`duplicate_binder`]({{ site.baseurl }}/docs/errors/duplicate_binder/) (as it
-does `fn two(a : Int, a : Int)` and a pattern such as `(a, a)`), before the
-interpreter and compiled code could disagree about which argument `x` names.
-A curried chain that reuses a name, `fn k -> fn k -> …`, is ordinary shadowing
-and still typechecks, but it instantiates nothing: the call is an
-`abstract-refinement-uninstantiated` skip ("the lambda passed for `p` binds
-`k` twice"). Anything else is `abstract-refinement-uninstantiated`, naming why. A chain
-ending in a concrete contract, `kk : ({x : Int | true}) -> ({y : Int | true})
--> {Bool | _ == (y > x)}`, is not a contract yet: nothing checks the callable
-passed for `kk` against it, so inside the function `kk(k, v)` gives no fact
-and `filt(a, kk)` instantiates nothing (a one-argument codomain contract is
-checked at each call, as above). A parameter may carry `p` too (`need(a :
-Assoc({x : k | true}, {y : v | p(x, y)}), keep : …)`): the argument's entries
-must then meet the instantiated relation. A slot that also names another
-parameter of the callee (`{y : Int | p(x, y) && y > n}`) is read at the call's
-argument for it, on a return and on a parameter alike. A callable that makes
-the relation constant still binds it: `fn (_k, _v) -> false` passed for such a
-parameter is a violation for any non-empty argument. The input's own slot facts carry over, as for one
-argument (`a : Assoc(Int, {Int | _ > 0})` through `filt(a, fn (_k, v) -> v <
-100)` meets `_ > 0 && _ < 100`), but the input's *relations* do not: the
-result's entries are not the input's, and a function generic in `k` and `v`
-may pair the key of one entry with the value of another.
+The two skips are `abstract-refinement-too-weak`, for example
+"`fn (k, v) -> v > k` does not imply `_ > 0`". In `t4`, an entry such as `(-1, 0)` passes the
+filter, and its value is not positive.
 
-The signature is checked (each an error, `abstract_refinement_misuse`, with
-the fix in the message): the definer applies `p` to every binder of its chain,
-once each, in order (`p(y)` under a two-argument callback is an error, and so
-is `p(y, x)`); an occurrence names distinct binders of sibling slots (a single
-slot, `Assoc(k, v[p])` or `Assoc(k, {v | p(_)})`, is an error whose fix is
-`Assoc(k[p], v[p])`, and so is marking a number of slots other than two); each argument has one type across
-the definer and every occurrence; the container is entry-shaped (every
-constructor holds one `k` and one `v`, or neither; inside another type only
-as one type application of both, as `Map`'s `HamtMap(HEntry(k, v))`, see
-[relational element refinements](#relational-element-refinements)); and one
-`p` has one arity.
+**What may be passed for a two-argument `p`:**
+
+- an uncurried lambda `fn (k, v) -> …`, for a combinator that calls its
+  callback as `keep(k, v)`;
+- a curried lambda `fn k -> fn v -> …`, for a combinator that calls it in two
+  steps (today that counts only for a parameter's `p` and for `Map.filter`'s
+  assumed return, below; see "Not yet");
+- either of those bound by `let`;
+- a function with a proved `{Bool | _ == e}` return over two parameters, such
+  as `fn above(k : Int, v : Int) : {Bool | _ == (v > k)}`;
+- a callback parameter that itself defines a two-argument abstract refinement
+  of the enclosing function (`keep : k -> v -> Bool[q]`, passing its `q` on).
+
+Anything else is `abstract-refinement-uninstantiated`, and the message says
+why. Two cases are worth knowing:
+
+- **A name bound twice.** `fn (x, x) -> …` is not a program at all. Since
+  2026-10-22 the typechecker rejects it as
+  [`duplicate_binder`]({{ site.baseurl }}/docs/errors/duplicate_binder/), as it
+  does `fn two(a : Int, a : Int)` and a pattern such as `(a, a)`. Before that,
+  the interpreter and compiled code disagreed about which argument `x` named.
+  A curried chain that reuses a name, `fn k -> fn k -> …`, is ordinary
+  shadowing and still typechecks. It instantiates nothing: the call is an
+  `abstract-refinement-uninstantiated` skip ("the lambda passed for `p` binds
+  `k` twice").
+- **A chain ending in a concrete contract.** With
+  `kk : ({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (y > x)}`,
+  nothing checks the callable passed for `kk` against that contract. So inside
+  the function `kk(k, v)` gives no fact, and `filt(a, kk)` instantiates
+  nothing. (A one-argument codomain contract is checked at each call, as
+  above.)
+
+**A parameter may carry `p` too.** In `need(a : Assoc({x : k | true}, {y : v |
+p(x, y)}), keep : …)`, the argument's entries must meet the relation the passed
+`keep` computes. A callable that makes the relation constant still binds it:
+`fn (_k, _v) -> false` passed there is a violation for any non-empty argument.
+
+**A slot may also name another parameter of the callee.** In
+`{y : Int | p(x, y) && y > n}`, `n` is read at the call's argument for it. This
+holds on a return and on a parameter alike.
+
+**The input's slot facts carry over; its relations do not.** With
+`a : Assoc(Int, {Int | _ > 0})`, the result of `filt(a, fn (_k, v) -> v < 100)`
+meets `_ > 0 && _ < 100`, as for one argument. A relation on `a` is not
+carried: the result's entries are not the input's, and a function generic in
+`k` and `v` may pair the key of one entry with the value of another (see
+[`shift`](#relational-element-refinements)).
+
+**The signature is checked.** Each of these is an `abstract_refinement_misuse`
+error, with the fix in the message:
+
+- The definer applies `p` to every binder of its chain, once each, in order.
+  `p(y)` under a two-argument callback is an error, and so is `p(y, x)`.
+- An occurrence names distinct binders of sibling slots. A single slot,
+  `Assoc(k, v[p])` or `Assoc(k, {v | p(_)})`, is an error whose fix is
+  `Assoc(k[p], v[p])`. So is marking a number of slots other than two.
+- Each argument has one type across the definer and every occurrence.
+- The container is entry-shaped: every constructor holds one `k` and one `v`,
+  or neither. Inside another type, they count only as one type application of
+  both, as in `Map`'s `HamtMap(HEntry(k, v))`; see
+  [relational element refinements](#relational-element-refinements).
+- One `p` has one arity.
 
 Not yet: inside a body, a callback called in two steps (`let g = keep(k)` then
 `g(v)`) gives `g(v)` no fact, so a combinator written that way does not prove
@@ -2755,12 +2959,20 @@ fn filter(m : Map(k, v), pred : k -> v -> Bool[p], cmp : k -> k -> Bool)
 ```
 
 ```march
-fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
-fn need_rel(_m : Map({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+mod MapFilter do
+  fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+  fn need_rel(_m : Map({x : Int | true}, {y : Int | y > x})) : Int do 0 end
 
-need_vals(Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp))   -- proved
-need_rel(Map.filter(n, fn k -> fn v -> v > k, Map.int_cmp))     -- proved
-need_vals(Map.filter(m, fn _k -> fn v -> v >= 0, Map.str_cmp))  -- skip: too weak
+  fn t1(m : Map(String, Int)) : Int do
+    need_vals(Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp))    -- proved
+  end
+  fn t2(n : Map(Int, Int)) : Int do
+    need_rel(Map.filter(n, fn k -> fn v -> v > k, Map.int_cmp))      -- proved
+  end
+  fn t3(m : Map(String, Int)) : Int do
+    need_vals(Map.filter(m, fn _k -> fn v -> v >= 0, Map.str_cmp))   -- skip: too weak
+  end
+end
 ```
 
 `Map`'s body goes through `entries(m)` (a list of tuples) and calls `pred` in
