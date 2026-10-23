@@ -239,8 +239,8 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   let m = mentions_str is_str in
   match t with
   | Smt.App (f, [ _ ]) when f = strlen_fn -> false
-  (* Bool-valued; its argument's sort is [abstract_preamble]'s concern. *)
-  | Smt.App (f, [ _ ]) when is_abs_sym f -> false
+  (* Bool-valued; its arguments' sorts are [abstract_preamble]'s concern. *)
+  | Smt.App (f, _) when is_abs_sym f -> false
   | Smt.Const c -> is_str c
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
   (* A datatype tester ranges over an ADT sort, never over `Str`; it only
@@ -276,8 +276,8 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> true
   | Smt.App (f, [ a ]) when f = strlen_fn ->
     (match a with Smt.Const c -> is_str c | _ -> false)
-  (* Declared at its argument's own sort by [abstract_preamble]. *)
-  | Smt.App (f, [ _ ]) when is_abs_sym f -> true
+  (* Declared at its arguments' own sorts by [abstract_preamble]. *)
+  | Smt.App (f, _) when is_abs_sym f -> true
   | Smt.App (_, args) -> List.for_all int_side args
   (* A constructor field may be a `Str` constant (a `String` payload) as
      readily as an Int term; each argument is checked on its own. *)
@@ -324,11 +324,12 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   (* An Int whose operand is a set term. *)
   | Smt.SetCard (_, a) -> w a
 
-(* Every abstract-refinement application in [t], with its argument. *)
-let rec abs_apps (t : Smt.term) : (string * Smt.term) list =
+(* Every abstract-refinement application in [t], with its arguments (one
+   per position: an arity-n `p` is n-ary, multi-arg design §3a). *)
+let rec abs_apps (t : Smt.term) : (string * Smt.term list) list =
   let m = abs_apps in
   match t with
-  | Smt.App (f, [ a ]) when is_abs_sym f -> (f, a) :: m a
+  | Smt.App (f, args) when is_abs_sym f -> (f, args) :: List.concat_map m args
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.concat_map m args
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) -> m a
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ | Smt.SetEmpty _ -> []
@@ -350,22 +351,31 @@ let rec abs_apps (t : Smt.term) : (string * Smt.term) list =
    LAST to a preamble, so a `$Str` or datatype argument sort is already
    declared.  [""] for a query that mentions none, so every other query keeps
    its exact text and cache key. *)
+let abs_sorts (vc : Smt.vc) : (string * Smt.sort list) list =
+  let sort_of (a : Smt.term) =
+    match a with
+    | Smt.Const c -> (match List.assoc_opt c vc.Smt.decls with Some s -> s | None -> Smt.SInt)
+    | _ -> Smt.SInt
+  in
+  List.map (fun (f, args) -> (f, List.map sort_of args)) (List.concat_map abs_apps (vc.Smt.goal :: vc.Smt.assumptions))
+
+(* Does [vc] apply one abstract symbol at two different sort tuples (or
+   arities)?  Such a query cannot be declared ([abstract_preamble] declares
+   one signature per symbol) and is refused as [sort_conflict]; W3 makes it
+   unreachable from a well-formed signature. *)
+let abs_sort_conflict (vc : Smt.vc) : bool =
+  let ds = abs_sorts vc in
+  List.exists (fun (f, ss) -> List.exists (fun (f', ss') -> f = f' && ss <> ss') ds) ds
+
 let abstract_preamble (vc : Smt.vc) : string =
-  let seen : (string * Smt.sort) list ref = ref [] in
+  let seen : (string * Smt.sort list) list ref = ref [] in
   List.iter
-    (fun (f, a) ->
-      if not (List.mem_assoc f !seen) then begin
-        let s =
-          match a with
-          | Smt.Const c -> (match List.assoc_opt c vc.Smt.decls with Some s -> s | None -> Smt.SInt)
-          | _ -> Smt.SInt
-        in
-        seen := (f, s) :: !seen
-      end)
-    (List.concat_map abs_apps (vc.Smt.goal :: vc.Smt.assumptions));
+    (fun (f, ss) -> if not (List.mem_assoc f !seen) then seen := (f, ss) :: !seen)
+    (abs_sorts vc);
   String.concat ""
     (List.rev_map
-       (fun (f, s) -> Printf.sprintf "(declare-fun %s (%s) Bool)\n" f (Smt.string_of_sort s))
+       (fun (f, ss) ->
+         Printf.sprintf "(declare-fun %s (%s) Bool)\n" f (String.concat " " (List.map Smt.string_of_sort ss)))
        !seen)
 
 (* ── Float: the IEEE rewrite and its well-sortedness guard ─────────────────
@@ -471,7 +481,7 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
   | Smt.Ite (_, a, b) -> w a && w b
   (* An abstract refinement is the one uninterpreted function declared at
      `Bool` ([abstract_preamble]). *)
-  | Smt.App (f, [ _ ]) when is_abs_sym f -> true
+  | Smt.App (f, _) when is_abs_sym f -> true
   (* Nothing else in this checker declares an uninterpreted function at `Bool`
      (measures and selectors return Int or a datatype), so an application in
      Boolean position is a sort error just as arithmetic and literals are. *)
@@ -1469,6 +1479,13 @@ let ctor_hidden_params : (string, int list) Hashtbl.t = Hashtbl.create 32
    multi-arg design, phase 0). *)
 let ctor_field_params : (string, ((int * string) list * string) list) Hashtbl.t = Hashtbl.create 32
 
+(* constructor -> per declared field, the type parameters (by index) that are
+   DIRECT arguments of the field's own type application (`HEntry(k, v)` in
+   `HamtMap(HEntry(k, v))`: [Some [0; 1]]); [None] for a field that is no type
+   application (a tuple, an arrow, a bare variable).  Read by [entry_shaped]'s
+   opaque case only (review I2). *)
+let ctor_field_joint : (string, int list option list) Hashtbl.t = Hashtbl.create 32
+
 (* Source-ish rendering of a declared field type, for [ctor_field_params]'
    messages only. *)
 let rec field_ty_text (t : A.ty) : string =
@@ -1489,6 +1506,7 @@ let sort_of_ctor (ctor : string) : string option =
   Hashtbl.fold
     (fun sort ctors acc -> if acc = None && List.mem ctor ctors then Some sort else acc)
     adt_ctors None
+
 
 
 
@@ -1563,6 +1581,145 @@ let adt_canonical : (string, string) Hashtbl.t = Hashtbl.create 8
 let adt_sort_name (march_name : string) : string =
   let bare = "M_" ^ march_name in
   match Hashtbl.find_opt adt_canonical bare with Some key -> key | None -> bare
+
+(* W4, ENTRY SHAPE (multi-arg design 2026-10-18 §1.4, §2.2): can a relation
+   between the slots [s] of container [c] hold "per entry"?  An entry is one
+   constructor occurrence's values for those slots, so every constructor must
+   hold, for each slot of [s], the same number of [Param] fields, and that
+   number 0 or 1 (`Assoc`'s `ACons(k, v, …)` and `ANil`).  `type Two(k, v) =
+   K(k) | V(v)` is not entry-shaped: `V(0 - 5)` is in no entry, yet
+   projecting `x > 0 && y > x` onto `v` would claim `-5 > 0`.
+
+   - a [Within (c', m)] field holding EVERY slot of [s] (and no [Param] field
+     of the constructor holding one) puts the entries in the nested container,
+     which must be entry-shaped for the mapped slots in turn; a [Within] field
+     holding only some of them, or beside a [Param] field holding another, is
+     not an entry (leftovers phase E's rule: a [Within] field is never paired
+     with a direct field position-by-position);
+   - a field that HIDES one of the slots ([ctor_field_params]: inside a
+     function, tuple or other type) holds values in no entry;
+   - an OPAQUE container (no constructor has a [Param] or [Within] field at
+     all: stdlib `Map`'s `HamtMap(HEntry(k, v))`) is entry-shaped vacuously:
+     its entries are abstract, never constructed or destructed by the
+     checker (its constructions are phase 0's recorded skip).
+
+   [name_of j]: how slot [j] is named in a message (the relation's binder).
+   [Error why] completes "This relation is not checked: …". *)
+let rec entry_shaped ?(depth = 0) ~(name_of : int -> string) (c : string) (s : int list)
+  : (unit, string) result =
+  let key = adt_sort_name c in
+  let quote j = "`" ^ name_of j ^ "`" in
+  match Hashtbl.find_opt adt_ctors key with
+  | None | Some [] -> Error (Printf.sprintf "`%s` is not a container the checker models" c)
+  | Some ctors ->
+    let roles k = Option.value ~default:[] (Hashtbl.find_opt ctor_param_fields k) in
+    let opaque =
+      List.for_all (fun k -> List.for_all (function Param _ | Within _ -> false | Self | Other -> true) (roles k)) ctors
+    in
+    if opaque then
+      (* Vacuous only where the hidden entries are JOINT: every field that
+         hides a related slot is one type application naming all of them
+         directly (`HamtMap(HEntry(k, v))`).  `Two((List(k), List(v)))` hides
+         its keys and values in two separate lists, so an entry pairs
+         nothing (review I2, a ruling). *)
+      let joint_ok (k : string) : (unit, string) result =
+        let hid = Option.value ~default:[] (Hashtbl.find_opt ctor_field_params k) in
+        let joint = Option.value ~default:[] (Hashtbl.find_opt ctor_field_joint k) in
+        let bad =
+          List.find_mapi
+            (fun i (ps, fty) ->
+              match List.find_opt (fun (j, _) -> List.mem j s) ps with
+              | None -> None
+              | Some (j, _) ->
+                (match Option.join (List.nth_opt joint i) with
+                 | Some ds when List.for_all (fun j' -> List.mem j' ds) s -> None
+                 | _ -> Some (j, fty)))
+            hid
+        in
+        match bad with
+        | None -> Ok ()
+        | Some (j, fty) ->
+          Error
+            (Printf.sprintf
+               "`%s`'s constructor `%s` holds the value for %s inside `%s`, which is not one entry of \
+                the related slots, so a relation between them has no entries to hold of"
+               c k (quote j) fty)
+      in
+      List.fold_left (fun acc k -> match acc with Error _ -> acc | Ok () -> joint_ok k) (Ok ()) ctors
+    else if depth > 8 then Error (Printf.sprintf "`%s`'s nesting is too deep to read its entries" c)
+    else
+      let check_ctor (k : string) : (unit, string) result =
+        let rs = roles k in
+        let hid = Option.value ~default:[] (Hashtbl.find_opt ctor_field_params k) in
+        match List.find_opt (fun (ps, _) -> List.exists (fun (j, _) -> List.mem j s) ps) hid with
+        | Some (ps, fty) ->
+          let j = fst (List.find (fun (j, _) -> List.mem j s) ps) in
+          Error
+            (Printf.sprintf
+               "`%s`'s constructor `%s` holds the value for %s inside `%s`, which is in no entry, so a \
+                relation between the slots has no entries to hold of"
+               c k (quote j) fty)
+        | None ->
+          let count j = List.length (List.filter (function Param i -> i = j | _ -> false) rs) in
+          let counts = List.map (fun j -> (j, count j)) s in
+          let withins =
+            List.filter_map
+              (function
+                | Within (c', m) when List.exists (function Some j -> List.mem j s | None -> false) m ->
+                  Some (c', m)
+                | _ -> None)
+              rs
+          in
+          if withins <> [] then
+            if List.exists (fun (_, n) -> n > 0) counts then
+              Error
+                (Printf.sprintf
+                   "`%s`'s constructor `%s` holds some of the related values directly and others inside \
+                    a nested container, so a relation between them has no entries to hold of"
+                   c k)
+            else
+              List.fold_left
+                (fun acc (c', m) ->
+                  match acc with
+                  | Error _ -> acc
+                  | Ok () ->
+                    let at j = List.find_index (( = ) (Some j)) m in
+                    if List.exists (fun j -> at j = None) s then
+                      Error
+                        (Printf.sprintf
+                           "`%s`'s constructor `%s` holds only some of the related values inside `%s`, \
+                            so a relation between them has no entries to hold of"
+                           c k c')
+                    else
+                      let s' = List.map (fun j -> Option.get (at j)) s in
+                      let name_of' k' =
+                        match List.nth_opt m k' with Some (Some j) -> name_of j | _ -> string_of_int k'
+                      in
+                      entry_shaped ~depth:(depth + 1) ~name_of:name_of' c' s')
+                (Ok ()) withins
+          else
+            match counts with
+            | [] -> Ok ()
+            | (j0, n0) :: _ ->
+              (match List.find_opt (fun (_, n) -> n > 1) counts with
+               | Some (j, _) ->
+                 Error
+                   (Printf.sprintf
+                      "`%s`'s constructor `%s` holds more than one value for %s, so it is not one \
+                       entry"
+                      c k (quote j))
+               | None ->
+                 (match List.find_opt (fun (_, n) -> n <> n0) counts with
+                  | Some (j, _) ->
+                    let with_, without = if n0 = 1 then (j0, j) else (j, j0) in
+                    Error
+                      (Printf.sprintf
+                         "`%s`'s constructor `%s` carries a value for %s without one for %s, so a \
+                          relation between them has no entries to hold of"
+                         c k (quote with_) (quote without))
+                  | None -> Ok ()))
+      in
+      List.fold_left (fun acc k -> match acc with Error _ -> acc | Ok () -> check_ctor k) (Ok ()) ctors
 
 (* Finalize the bare-name -> qualified-key resolution once [register_adt_names]
    (pass 1) has seen every declaration.  Must run before [register_field_sorts]
@@ -1902,6 +2059,19 @@ let rec register_field_sorts_once (decls : A.decl list) : unit =
             set_ctor_fields (adt_sort_name tname.A.txt) v.A.var_name.A.txt
               (List.map (smt_sort_of_field ~pnames) v.A.var_args);
             Hashtbl.replace ctor_param_fields v.A.var_name.A.txt (List.map role_of v.A.var_args);
+            Hashtbl.replace ctor_field_joint v.A.var_name.A.txt
+              (List.map
+                 (fun (t : A.ty) ->
+                   match t with
+                   | A.TyCon (_, args) ->
+                     Some
+                       (List.filter_map
+                          (function
+                            | A.TyVar n -> List.find_index (( = ) n.A.txt) pnames
+                            | _ -> None)
+                          args)
+                   | _ -> None)
+                 v.A.var_args);
             Hashtbl.replace ctor_field_params v.A.var_name.A.txt
               (List.map
                  (fun (t : A.ty) ->
@@ -3250,7 +3420,7 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       IBool
     | Smt.App (f, [ a ]) when f = strlen_fn ->
       unify (infer a) (INamed (str_sort, [])); IInt
-    | Smt.App (f, [ a ]) when is_abs_sym f -> ignore (infer a); IBool
+    | Smt.App (f, args) when is_abs_sym f -> List.iter (fun a -> ignore (infer a)) args; IBool
     | Smt.App (m, [ a ]) when is_list_structure_measure m ->
       let params, it = fresh_instance list_adt in
       unify (infer a) it;

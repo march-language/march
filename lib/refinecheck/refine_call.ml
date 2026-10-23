@@ -692,7 +692,7 @@ type call_ctx = {
 }
 
 let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
-    ?(goal_scope_facts = false)
+    ?(goal_scope_facts = false) ?(entry_label : string option)
     ?(verdict_out : Obligation.verdict option ref option)
     (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
   (* Destructured to the names the body has always used: this is a signature
@@ -2879,6 +2879,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           - discharge(goal=G) Verified  => G always holds        => pass
           - else discharge(goal=¬G) Verified => G never holds     => violation
           - otherwise (G depends on unknowns / solver unsure)     => skip *)
+       (* One abstract symbol at two sort tuples cannot be declared (multi-arg
+          design §3a): refused, like any other sort conflict. *)
+       if abs_sort_conflict vc then note (Obligation.Skipped Obligation.Sort_conflict)
+       else
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved
         | first ->
@@ -2967,6 +2971,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                   is the synthetic `$elem`, which names nothing the user
                   wrote. *)
                | Argument, Some "$elem" -> Printf.sprintf "an element passed to `%s`" callee
+               (* A RELATION obligation on one constructed entry
+                  ([Refine_check.check_elements]' [ECon] arm): the
+                  parameters are the entry's fields, named in the label. *)
+               | Argument, _ when entry_label <> None -> Option.get entry_label
                | Argument, Some pname when pname <> "" ->
                  Printf.sprintf "argument `%s` of `%s`" pname callee
                | Argument, _ -> Printf.sprintf "argument %d of `%s`" (rp.idx + 1) callee

@@ -509,6 +509,12 @@ let rec show_ty = function
   | TyCon (n, args) ->
     Printf.sprintf "%s(%s)" n.txt (String.concat ", " (List.map show_ty args))
   | TyVar n -> n.txt
+  (* A definer the parser made from `D -> Bool[p]` (multi-arg design
+     2026-10-18 §9 phase 3): its domains carry synthetic binders `$x…` (which
+     cannot be lexed, so only the parser makes them) and print as written. *)
+  | TyArrow (TyRefine (d, Some { txt; _ }, ELit (LitBool true, _)), b)
+    when String.length txt >= 2 && String.sub txt 0 2 = "$x" ->
+    show_ty (TyArrow (d, b))
   | TyArrow (a, b) -> Printf.sprintf "%s -> %s" (show_ty a) (show_ty b)
   | TyTuple ts -> Printf.sprintf "(%s)" (String.concat ", " (List.map show_ty ts))
   | TyRecord flds ->
@@ -524,6 +530,11 @@ let rec show_ty = function
   (* The abstract-refinement shorthand `T[p]`: the parser marks it with the
      binder `_`, which a user cannot write, so it prints back as written. *)
   | TyRefine (base, Some { txt = "_"; _ }, EApp (EVar p, [ EVar { txt = "_"; _ } ], _)) ->
+    Printf.sprintf "%s[%s]" (show_ty base) p.txt
+  (* The definer's codomain: the same marker on `{Bool | _ == p(…)}`, which
+     only the parser's `D -> Bool[p]` rewrite produces. *)
+  | TyRefine (base, Some { txt = "_"; _ },
+              EApp (EVar { txt = "=="; _ }, [ EVar { txt = "_"; _ }; EApp (EVar p, _, _) ], _)) ->
     Printf.sprintf "%s[%s]" (show_ty base) p.txt
   | TyRefine (base, None, _) -> Printf.sprintf "{ %s | ... }" (show_ty base)
   | TyRefine (base, Some v, _) ->

@@ -242,6 +242,33 @@ val register_field_sorts : A.decl list -> unit
     breaks the correspondence while leaving every other test green. *)
 val ty_has_refinement : A.ty -> bool
 
+(** {1 Element entries}
+
+    A container's element facts (multi-arg design 2026-10-18 §2.2, R1): one
+    slot per type parameter, plus relations between scalar slots.  Exposed
+    for [test_refinecheck]'s [element-entries] group, which unit-tests the
+    normal form on hand-built entries (phase 1a builds no relation, so no
+    program reaches it yet). *)
+
+type elem =
+  | Refined of (string * A.expr * string option)
+  | Container of entry
+
+and entry = { cont : string; slots : elem option list; rels : rel list }
+
+and rel = { rel_args : (int * string * string option) list; rel_pred : A.expr }
+
+(** (I1)-(I3): a one-slot relation is conjoined into its slot (the slot's
+    fact first), a [true] relation drops, a relation over a nested-container
+    slot drops, relation sort markers follow the slot's.  The identity on an
+    entry without relations. *)
+val normalize_entry : entry -> entry
+
+(** The conjunction of two facts about one container: slots pairwise, the
+    first argument's (incoming) fact first; relations concatenated;
+    normalised.  Entries that do not line up keep the first. *)
+val entry_meet : entry -> entry -> entry
+
 (** {1 Not API — declared only because they are dead}
 
     These three have no caller anywhere: not in this module, not outside it.

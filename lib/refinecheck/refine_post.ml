@@ -882,6 +882,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
          (* Last: an abstract symbol's argument sort is declared above. *)
          ^ abstract_preamble vc
        in
+       (* One abstract symbol at two sort tuples cannot be declared (multi-arg
+          design §3a): refused, like any other sort conflict. *)
+       if abs_sort_conflict vc then (note (Obligation.Skipped Obligation.Sort_conflict); false)
+       else
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved; true
         | first ->

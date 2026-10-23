@@ -542,6 +542,22 @@ let type_arg_subject (site : site) : A.ty =
     (match List.find_opt (ty_holds_pred_at site.span) ts with Some c -> c | None -> site.origin_ty)
   | _ -> site.origin_ty
 
+(* [Refine_post.callback_sig_of_ty] of the site's arrow, read under the
+   site's function's abstract refinements, as the checker reads it
+   ([cb_add_param] inside that function's walk): a callback CHAIN is a
+   signature only as a definer of one of them (review C2, 2026-10-21).  A
+   block-level `fn`'s site is read under none, the conservative answer the
+   [Type_arg] rule below gives it too. *)
+let site_callback_sig (site : site) : Refine_post.fn_sig option =
+  let saved = !Refine_post.current_abstracts in
+  Refine_post.current_abstracts :=
+    (match site.origin_fn, site.fn_origin with
+     | _, Some Local_fn -> []
+     | Some fd, _ -> Refine_abstract.names ~is_known:Refine_post.known_predicate_fn fd
+     | None, _ -> []);
+  Fun.protect ~finally:(fun () -> Refine_post.current_abstracts := saved)
+    (fun () -> Refine_post.callback_sig_of_ty site.origin_ty)
+
 let classify (site : site) : disposition =
   match site.origin with
   (* Rule 2, tried FIRST: a `sig` / `extern` / `interface` entry's WHOLE
@@ -556,6 +572,15 @@ let classify (site : site) : disposition =
   | Iface_method name ->
     inert_signature_verdict "warn_iface_method_refinement"
       (Printf.sprintf "the interface signature of `%s`" name) site
+  (* A RELATION between element slots that is not well-formed (multi-arg
+     design §1.4, W2/W4) is dropped by [Refine_scope.elem_app], so it is
+     neither assumed nor obliged anywhere; [Refine_check.warn_predicate_ty]
+     warns `refinement_unchecked` at exactly this predicate.  A well-formed
+     relation is one contract site like a slot, enforced by the rule below. *)
+  | (Param _ | Return _ | Let_annot _ | Field _)
+    when site.position = Type_arg
+         && List.exists (fun (sp, _) -> sp = site.span) (Refine_post.relation_issues_deep site.origin_ty) ->
+    Inert_warned "refinement_unchecked: this relation between element slots is not checked, and the warning fires at it"
   (* Container subtyping (2026-09-13): a refinement one layer down inside a
      `List(…)` / `Option(…)` type argument, at a parameter, return, `let`
      annotation or field, IS enforced — every value flowing into the
@@ -599,7 +624,7 @@ let classify (site : site) : disposition =
      never a declared arrow type. *)
   | (Param _ | Lambda_param _)
     when site.position = Arrow_domain
-         && Refine_post.callback_sig_of_ty site.origin_ty <> None ->
+         && site_callback_sig site <> None ->
     Enforced
   (* Arrow CODOMAIN at a function or lambda parameter (P3 design §1b/§1c):
      the codomain refinement is the callback's postcondition inside the
@@ -607,7 +632,7 @@ let classify (site : site) : disposition =
      callable passed at the pass site ([check_pass_sites]'s covariant half). *)
   | (Param _ | Lambda_param _)
     when site.position = Arrow_codomain
-         && (match Refine_post.callback_sig_of_ty site.origin_ty with
+         && (match site_callback_sig site with
              | Some { ret = Some _; _ } -> true
              | _ -> false) ->
     Enforced

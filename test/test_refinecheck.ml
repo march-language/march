@@ -22431,16 +22431,32 @@ end|});
   fn f(xs : List(a), k : a -> {Bool | p(_)}) : List(a) do xs end
 end|} "f"));
 
-    (* Curried: the inner arrow is rewritten, nothing instantiates it, nothing
-       is proved — pinned as SAFE, not as a feature. *)
-    gated "a curried Bool[p] proves nothing and violates nothing" (fun () ->
-        let p, v, _, _ =
-          typed_ledger {|mod C do
+    (* Curried (rewritten by multi-arg phase 3): `Int -> Int -> Bool[p]`
+       defines a `p` of two arguments, so `List(Int[p])` marks ONE slot of
+       it — a hard error (W2, decision D3) naming the sugar fix.  It was
+       pinned here as "proves nothing, violates nothing" while the inner
+       arrow alone was the definer; that program is now rejected. *)
+    Alcotest.test_case "a curried Bool[p] on one slot is a W2 error naming the fix" `Quick (fun () ->
+        let src = {|mod C do
   fn need(xs : List(Int[p]), k : Int -> Int -> Bool[p]) : Int do 0 end
   fn go(ys : List(Int)) : Int do need(ys, fn a -> fn b -> a > 0) end
-end|}
+end|} in
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx (March_desugar.Desugar.desugar_module (parse src));
+        let msgs =
+          List.filter_map
+            (fun (d : March_errors.Errors.diagnostic) ->
+              if d.March_errors.Errors.code = March_errors.Errors.Code.abstract_refinement_misuse
+              then Some d.March_errors.Errors.message
+              else None)
+            ctx.March_errors.Errors.diagnostics
         in
-        Alcotest.(check (pair int int)) "nothing proved, nothing violated" (0, 0) (p, v));
+        let t = String.concat "\n" msgs in
+        Alcotest.(check int) ("one misuse error: " ^ t) 1 (List.length msgs);
+        Alcotest.(check bool) ("single slot: " ^ t) true
+          (Astring_contains.contains t "takes 2 arguments, so it relates 2 slots of one type application");
+        Alcotest.(check bool) ("fix: " ^ t) true
+          (Astring_contains.contains t "mark every slot it relates, `T(Int[p], Int[p])`"));
 
     (* Diagnostics and hovers print types with [show_ty]: the shorthand prints
        back as written, the spelled-out form is not prettified into it. *)
@@ -22457,6 +22473,84 @@ end|}
           (first_param_ty "mod P1 do\n  fn f(xs : List(a[p]), k : a -> Bool[p]) : Int do 0 end\nend\n");
         Alcotest.(check string) "spelled out" "List({ a | ... })"
           (first_param_ty "mod P2 do\n  fn f(xs : List({a | p(_)}), k : a -> Bool[p]) : Int do 0 end\nend\n")) ]
+
+(* ── Element entries (multi-arg design 2026-10-18 §2.2-§2.3, phase 1a) ────
+   The entry record's normal form (I1) and its conjunction, unit-tested on
+   hand-built entries: phase 1a constructs no relation anywhere, so nothing
+   else exercises them until 1b. *)
+let element_entries_suite =
+  let module RC = March_refinecheck.Refine_check in
+  let module A = March_ast.Ast in
+  let sp = A.dummy_span in
+  let v x = A.EVar { A.txt = x; A.span = sp } in
+  let i n = A.ELit (A.LitInt n, sp) in
+  let op o a b = A.EApp (v o, [ a; b ], sp) in
+  let tt = A.ELit (A.LitBool true, sp) in
+  let rec show (e : A.expr) =
+    match e with
+    | A.EVar n -> n.A.txt
+    | A.ELit (A.LitInt n, _) -> string_of_int n
+    | A.ELit (A.LitBool b, _) -> string_of_bool b
+    | A.EApp (A.EVar f, [ a; b ], _) -> Printf.sprintf "(%s %s %s)" (show a) f.A.txt (show b)
+    | e -> A.show_expr e
+  in
+  let rec show_slot = function
+    | None -> "-"
+    | Some (RC.Refined (b, p, s)) ->
+      Printf.sprintf "{%s%s | %s}" b (match s with Some s -> " : " ^ s | None -> "") (show p)
+    | Some (RC.Container e) -> show_entry e
+  and show_entry (e : RC.entry) =
+    Printf.sprintf "%s(%s)%s" e.RC.cont (String.concat ", " (List.map show_slot e.RC.slots))
+      (String.concat ""
+         (List.map
+            (fun (r : RC.rel) ->
+              Printf.sprintf " rel[%s | %s]"
+                (String.concat "," (List.map (fun (j, b, _) -> Printf.sprintf "%d:%s" j b) r.RC.rel_args))
+                (show r.RC.rel_pred))
+            e.RC.rels))
+  in
+  let entry cont slots rels = { RC.cont; slots; rels } in
+  let rel args p = { RC.rel_args = args; rel_pred = p } in
+  let pos b = Some (RC.Refined (b, op ">" (v b) (i 0), None)) in
+  let check msg want got = Alcotest.(check string) msg want (show_entry got) in
+  [ Alcotest.test_case "normalize: rel-free entry is unchanged" `Quick (fun () ->
+        let e = entry "Assoc" [ None; pos "y" ] [] in
+        check "identity" "Assoc(-, {y | (y > 0)})" (RC.normalize_entry e));
+    Alcotest.test_case "normalize (I1): a one-slot rel folds into its slot, incoming first" `Quick (fun () ->
+        let e = entry "Assoc" [ None; pos "y" ] [ rel [ (1, "z", None) ] (op "<" (v "z") (i 10)) ] in
+        check "folded" "Assoc(-, {y | ((y > 0) && (y < 10))})" (RC.normalize_entry e));
+    Alcotest.test_case "normalize (I1): a one-slot rel fills an empty slot" `Quick (fun () ->
+        let e = entry "Assoc" [ None; pos "y" ] [ rel [ (0, "k", None) ] (op ">" (v "k") (i 3)) ] in
+        check "filled" "Assoc({k | (k > 3)}, {y | (y > 0)})" (RC.normalize_entry e));
+    Alcotest.test_case "normalize (I1): a `true` rel drops" `Quick (fun () ->
+        let e = entry "Assoc" [ None; pos "y" ] [ rel [ (0, "x", None); (1, "y", None) ] tt ] in
+        check "dropped" "Assoc(-, {y | (y > 0)})" (RC.normalize_entry e));
+    Alcotest.test_case "normalize: a two-slot rel stays a rel" `Quick (fun () ->
+        let e = entry "Assoc" [ None; None ] [ rel [ (0, "x", None); (1, "y", None) ] (op ">" (v "y") (v "x")) ] in
+        check "kept" "Assoc(-, -) rel[0:x,1:y | (y > x)]" (RC.normalize_entry e));
+    Alcotest.test_case "normalize (I1): folding avoids capturing the slot binder" `Quick (fun () ->
+        (* The rel's predicate names an outer `y` that is NOT the slot. *)
+        let e = entry "Assoc" [ None; pos "y" ] [ rel [ (1, "z", None) ] (op "<" (v "z") (v "y")) ] in
+        check "fresh binder" "Assoc(-, {$r | (($r > 0) && ($r < y))})" (RC.normalize_entry e));
+    Alcotest.test_case "normalize (I2): a one-slot rel on a nested container slot drops" `Quick (fun () ->
+        let inner = entry "List" [ pos "e" ] [] in
+        let e = entry "Assoc" [ Some (RC.Container inner); None ] [ rel [ (0, "l", None) ] (op ">" (v "l") (i 0)) ] in
+        check "dropped" "Assoc(List({e | (e > 0)}), -)" (RC.normalize_entry e));
+    Alcotest.test_case "entry_meet: slots pairwise, incoming first, binder aligned" `Quick (fun () ->
+        let a = entry "Assoc" [ None; pos "y" ] [] in
+        let b = entry "Assoc" [ pos "k"; Some (RC.Refined ("w", op "<" (v "w") (i 9), None)) ] [] in
+        check "met" "Assoc({k | (k > 0)}, {y | ((y > 0) && (y < 9))})" (RC.entry_meet a b));
+    Alcotest.test_case "entry_meet: rels concatenate, incoming first, and normalise" `Quick (fun () ->
+        let r1 = rel [ (0, "x", None); (1, "y", None) ] (op ">" (v "y") (v "x")) in
+        let r2 = rel [ (0, "p", None); (1, "q", None) ] (op "!=" (v "q") (v "p")) in
+        let a = entry "Assoc" [ None; None ] [ r1 ] in
+        let b = entry "Assoc" [ None; None ] [ r2; rel [ (1, "z", None) ] (op "<" (v "z") (i 5)) ] in
+        check "met" "Assoc(-, {z | (z < 5)}) rel[0:x,1:y | (y > x)] rel[0:p,1:q | (q != p)]"
+          (RC.entry_meet a b));
+    Alcotest.test_case "entry_meet: nested containers meet slot by slot" `Quick (fun () ->
+        let a = entry "List" [ Some (RC.Container (entry "List" [ pos "e" ] [])) ] [] in
+        let b = entry "List" [ Some (RC.Container (entry "List" [ Some (RC.Refined ("f", op "<" (v "f") (i 7), None)) ] [])) ] [] in
+        check "met" "List(List({e | ((e > 0) && (e < 7))}))" (RC.entry_meet a b)) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
@@ -24505,6 +24599,1436 @@ let infer_cli_suite =
           first)
   ]
 
+(* Multi-arg design (specs/2026-10-18-abstract-refinements-multi-arg-design.md)
+   phase 1b: RELATIONAL element refinements.  A slot predicate naming a
+   sibling slot's binder (`Assoc({x : Int | true}, {y : Int | y > x})`) is a
+   relation over the entry's components: obliged per construction (one
+   obligation per relation), assumed per entry (projection by fresh slot
+   constants, and a path fact over a `match`'s binders).  Before phase 1b the
+   sibling name was FREE: r1/r2/r5 were undecided, r3/r4 false violations. *)
+let relational_elements_suite =
+  let assoc =
+    "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n\
+    \  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end\n\
+    \  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n\
+    \  fn need_gt(k : Int, v : {Int | _ > k}) : Int do k + v end\n"
+  in
+  let m ?(verified = false) name body =
+    "mod " ^ name ^ " do\n" ^ (if verified then "  cap verified\n" else "") ^ assoc ^ body ^ "end\n"
+  in
+  (* A typed check: (diagnostics, obligations as (callee, verdict, reason, predicate)). *)
+  let run src =
+    March_refinecheck.Obligation.reset ();
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    let obs =
+      List.map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          ( o.callee, verdict_name o.verdict
+          , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+          , o.predicate ))
+        (March_refinecheck.Obligation.all ())
+    in
+    (ctx.March_errors.Errors.diagnostics, obs)
+  in
+  let details src =
+    ignore (run src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r ->
+          Some (o.March_refinecheck.Obligation.callee, March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let of_sev sev ds =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.severity = sev then Some d.March_errors.Errors.message else None)
+      ds
+  in
+  let errors src = of_sev March_errors.Errors.Error (fst (run src)) in
+  let warnings src =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.severity = March_errors.Errors.Warning
+           && d.March_errors.Errors.code = March_errors.Errors.Code.refinement_unchecked
+        then Some d.March_errors.Errors.message
+        else None)
+      (fst (run src))
+  in
+  (* Element SUBTYPING records under the subject (`a`, `mk(…)`), a literal
+     or a skip under the callee: the verdicts of every name in [callees]. *)
+  let verdicts src (callees : string list) =
+    List.filter_map (fun (c, v, _, _) -> if List.mem c callees then Some v else None) (snd (run src))
+  in
+  let all_proved name vs =
+    Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+    Alcotest.(check (list string)) name (List.map (fun _ -> "proved") vs) vs
+  in
+  let some_violated name vs =
+    Alcotest.(check bool) (name ^ ": violated") true (List.mem "violated" vs)
+  in
+  let not_proved name vs =
+    Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+    Alcotest.(check bool) (name ^ ": not all proved") true (List.exists (( <> ) "proved") vs)
+  in
+  let has needle hay = Astring_contains.contains hay needle in
+  let r5 =
+    "  fn r5(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do\n\
+    \    match a do\n\
+    \      ACons(k, v, _) -> need_gt(k, v)\n\
+    \      ANil -> 0\n\
+    \    end\n\
+    \  end\n"
+  in
+  [ gated "r1: a literal entry meeting the relation is proved" (fun () ->
+        let _, obs = run (m "R1" "  fn r1() : Int do need_arel(ACons(1, 2, ANil)) end\n") in
+        all_proved "need_arel" (List.filter_map (fun (c, v, _, _) -> if c = "need_arel" then Some v else None) obs);
+        Alcotest.(check bool) "the relation is its own obligation" true
+          (List.exists (fun (c, v, _, p) -> c = "need_arel" && v = "proved" && p = "y > x") obs));
+    gated "r2: a literal entry breaking the relation is a violation naming both fields" (fun () ->
+        let src = m "R2" "  fn r2() : Int do need_arel(ACons(5, 2, ANil)) end\n" in
+        some_violated "need_arel" (verdicts src [ "need_arel" ]);
+        let t = String.concat "\n" (errors src) in
+        Alcotest.(check bool) ("names the entry: " ^ t) true (has "the entry (5, 2)" t);
+        Alcotest.(check bool) "names the relation" true (has "y > x" t));
+    gated "r3: a relation projects onto one slot (was a false violation)" (fun () ->
+        all_proved "need_pos"
+          (verdicts
+             (m "R3" "  fn r3(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do need_pos(a) end\n")
+             [ "need_pos"; "a" ]));
+    gated "r4: an alpha-renamed relational demand is implied (was a false violation)" (fun () ->
+        all_proved "need_arel2"
+          (verdicts
+             (m "R4"
+                "  fn need_arel2(_a : Assoc({a : Int | true}, {b : Int | b > a})) : Int do 0 end\n\
+                \  fn r4(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do need_arel2(a) end\n")
+             [ "need_arel2"; "a" ]));
+    gated "r4' control: the same-name spelling is still proved" (fun () ->
+        all_proved "need_arel"
+          (verdicts
+             (m "R4P" "  fn r4p(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do need_arel(a) end\n")
+             [ "need_arel"; "a" ]));
+    gated "r5: match binders of one entry carry the relation as a path fact" (fun () ->
+        all_proved "need_gt" (verdicts (m "R5" r5) [ "need_gt" ]));
+    gated "r5 control: binders from two different entries carry no relation" (fun () ->
+        not_proved "need_gt"
+          (verdicts
+             (m "R5C"
+                "  fn r5c(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do\n\
+                \    match a do\n\
+                \      ACons(k, _, ACons(_, v, _)) -> need_gt(k, v)\n\
+                \      _ -> 0\n\
+                \    end\n\
+                \  end\n")
+             [ "need_gt" ]));
+    gated "r6: a weaker relation is still a violation" (fun () ->
+        some_violated "need_arel"
+          (verdicts
+             (m "R6" "  fn r6(a : Assoc({x : Int | true}, {y : Int | y >= x})) : Int do need_arel(a) end\n")
+             [ "need_arel"; "a" ]));
+    gated "proj_insufficient: a relation alone does not imply a positive value slot" (fun () ->
+        some_violated "need_pos"
+          (verdicts
+             (m "PI" "  fn pi(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_pos(a) end\n")
+             [ "need_pos"; "a" ]));
+    gated "two_not_entry_shaped: warned, neither assumed nor obliged" (fun () ->
+        let src =
+          m "TW"
+            "  type Two(k, v) = K(k) | V(v)\n\
+            \  fn need_tv(_t : Two(Int, {Int | _ > 0})) : Int do 0 end\n\
+            \  fn want_rel(_t : Two({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n\
+            \  fn have(t : Two({x : Int | x > 0}, {y : Int | y > x})) : Int do need_tv(t) end\n\
+            \  fn lit() : Int do want_rel(V(0 - 5)) end\n"
+        in
+        let ws = warnings src in
+        Alcotest.(check bool) ("warned: " ^ String.concat " | " ws) true
+          (List.exists (fun w -> has "This relation is not checked" w && has "`K`" w) ws);
+        not_proved "need_tv" (verdicts src [ "need_tv"; "t" ]);
+        Alcotest.(check bool) "want_rel owes no relation" false
+          (List.exists (fun (c, _, _, p) -> c = "want_rel" && p = "y > x") (snd (run src))));
+    gated "two_not_entry_shaped (Within): a Param slot related to a nested-list slot is warned" (fun () ->
+        let ws =
+          warnings
+            (m "TM"
+               "  type Mix(k, v) = MX(k, List(v))\n\
+               \  fn need_m(_t : Mix({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n")
+        in
+        Alcotest.(check bool) ("warned: " ^ String.concat " | " ws) true
+          (List.exists (fun w -> has "This relation is not checked" w) ws));
+    gated "nested_slot_rel: a relation naming a nested-container slot is warned and unchecked" (fun () ->
+        let src =
+          m "NS"
+            "  type P2(a, b) = P2(a, b)\n\
+            \  fn need_n(_p : P2({xs : List(Int) | true}, {y : Int | y > len(xs)})) : Int do 0 end\n\
+            \  fn go() : Int do need_n(P2([], 0 - 1)) end\n"
+        in
+        let ws = warnings src in
+        Alcotest.(check bool) ("warned: " ^ String.concat " | " ws) true
+          (List.exists (fun w -> has "This relation is not checked" w) ws);
+        Alcotest.(check bool) "no violation" false (List.mem "violated" (verdicts src [ "need_n" ])));
+    gated "nested_slot_rel: a slot inside a nested container naming an outer sibling is warned" (fun () ->
+        let ws =
+          warnings (m "NS2" "  fn need_l(_a : Assoc({x : Int | true}, List({y : Int | y > x}))) : Int do 0 end\n")
+        in
+        Alcotest.(check bool) ("warned: " ^ String.concat " | " ws) true
+          (List.exists (fun w -> has "This relation is not checked" w) ws));
+    (* Ruling (progress note): a function parametric in `k` and `v` may pair
+       the components of DIFFERENT entries (`shift` below), so parametricity
+       preserves slot facts but not relations.  The design's "reverse keeps
+       the relation" row would prove `shift`'s result too, falsely. *)
+    gated "rel_through_reverse: a parametric callee does not carry the relation (shift is why)" (fun () ->
+        let src =
+          m "RV"
+            "  fn rev_onto(a : Assoc(k, v), acc : Assoc(k, v)) : Assoc(k, v) do\n\
+            \    match a do\n\
+            \      ANil -> acc\n\
+            \      ACons(k, v, t) -> rev_onto(t, ACons(k, v, acc))\n\
+            \    end\n\
+            \  end\n\
+            \  fn shift(a : Assoc(k, v)) : Assoc(k, v) do\n\
+            \    match a do\n\
+            \      ACons(k1, _, ACons(k2, v2, t)) -> ACons(k1, v2, shift(ACons(k2, v2, t)))\n\
+            \      _ -> ANil\n\
+            \    end\n\
+            \  end\n\
+            \  fn use_rev(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_arel(rev_onto(a, ANil)) end\n\
+            \  fn use_shift(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_arel(shift(a)) end\n\
+            \  fn use_lit() : Int do need_arel(shift(ACons(5, 6, ACons(0, 1, ANil)))) end\n"
+        in
+        let _, obs = run src in
+        let callers =
+          List.filter (fun (c, _, _, _) -> List.mem c [ "need_arel"; "rev_onto(…)"; "shift(…)" ]) obs
+        in
+        (* Each of the three demands is a skip (a `true` slot goal may still
+           prove, recorded under the subject); the RELATION is never proved. *)
+        Alcotest.(check int) "three skips" 3
+          (List.length (List.filter (fun (_, v, _, _) -> v = "skipped") callers));
+        Alcotest.(check bool) "the relation is never proved" false
+          (List.exists (fun (_, v, _, p) -> v = "proved" && p = "y > x") callers));
+    gated "rel_two_sources: a relation across two sources is a parametric-source skip" (fun () ->
+        let src =
+          m "TS"
+            "  fn zipkv(ks : Assoc(k, w), vs : Assoc(w2, v)) : Assoc(k, v) do\n\
+            \    match ks do\n\
+            \      ANil -> ANil\n\
+            \      ACons(k, _, kt) ->\n\
+            \        match vs do\n\
+            \          ANil -> ANil\n\
+            \          ACons(_, v, vt) -> ACons(k, v, zipkv(kt, vt))\n\
+            \        end\n\
+            \    end\n\
+            \  end\n\
+            \  fn go(ks : Assoc(Int, Int), vs : Assoc(Int, Int)) : Int do need_arel(zipkv(ks, vs)) end\n"
+        in
+        let _, obs = run src in
+        Alcotest.(check (list (pair string string))) "the demand"
+          [ ("skipped", "parametric-source-unproved") ]
+          (List.filter_map (fun (c, v, r, _) -> if c = "need_arel" then Some (v, r) else None) obs);
+        Alcotest.(check bool) "names the separate sources" true
+          (List.exists
+             (fun (c, d) -> c = "need_arel" && has "cannot be traced through separate sources" d)
+             (details src)));
+    gated "sibling_shadows_param: the sibling binder is meant, not the parameter" (fun () ->
+        some_violated "need_pos"
+          (verdicts
+             (m "SP"
+                "  fn f(x : {Int | _ > 100}, a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do\n\
+                \    x + need_pos(a)\n\
+                \  end\n")
+             [ "need_pos"; "a" ]));
+    gated "unary_rel_is_slot: a binder-named one-slot predicate is the plain unary slot" (fun () ->
+        let go name ty = snd (run (m name ("  fn f(a : " ^ ty ^ ") : Int do need_pos(a) end\n"))) in
+        let named = go "U1" "Assoc({x : Int | x > 0}, {y : Int | y > 0})" in
+        let plain = go "U2" "Assoc({Int | _ > 0}, {Int | _ > 0})" in
+        Alcotest.(check (list (pair string string))) "ledger"
+          (List.map (fun (c, v, _, p) -> (c, v ^ " " ^ p)) plain)
+          (List.map (fun (c, v, _, p) -> (c, v ^ " " ^ p)) named);
+        Alcotest.(check (list (pair string string))) "proved" [ ("a", "proved _ > 0") ]
+          (List.map (fun (c, v, _, p) -> (c, v ^ " " ^ p)) named));
+    gated "a relation through a Within field is the nested container's own" (fun () ->
+        let src =
+          m "WI"
+            "  type Outer(k, v) = O(Assoc(k, v))\n\
+            \  fn need_o(_o : Outer({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n\
+            \  fn ok() : Int do need_o(O(ACons(1, 2, ANil))) end\n\
+            \  fn bad() : Int do need_o(O(ACons(5, 2, ANil))) end\n"
+        in
+        let vs = verdicts src [ "need_o" ] in
+        Alcotest.(check bool) "proved" true (List.mem "proved" vs);
+        some_violated "need_o" vs);
+    gated "an annotated let admits the relation into the container env" (fun () ->
+        all_proved "need_arel"
+          (verdicts
+             (m "LT"
+                "  fn go() : Int do\n\
+                \    let b : Assoc({x : Int | true}, {y : Int | y > x}) = ACons(1, 2, ANil)\n\
+                \    need_arel(b)\n\
+                \  end\n")
+             [ "need_arel"; "b" ]));
+    gated "a proved relational return is a fact at its call; a violated one is not" (fun () ->
+        let src =
+          m "DR"
+            "  fn mk() : Assoc({x : Int | true}, {y : Int | y > x}) do ACons(1, 2, ANil) end\n\
+            \  fn mk_bad() : Assoc({x : Int | true}, {y : Int | y > x}) do ACons(5, 2, ANil) end\n\
+            \  fn ok() : Int do need_arel(mk()) end\n\
+            \  fn bad() : Int do need_arel(mk_bad()) end\n"
+        in
+        let _, obs = run src in
+        let of_c c = List.filter_map (fun (c', v, _, _) -> if c' = c then Some v else None) obs in
+        some_violated "return of mk_bad" (of_c "return of mk_bad");
+        all_proved "mk() into need_arel" (of_c "mk(…)");
+        Alcotest.(check bool) "mk_bad() into need_arel is not proved" false
+          (List.mem "proved" (of_c "mk_bad(…)" @ of_c "need_arel")));
+    gated "a recursive map keeping the relation is proved by the self-call hypothesis" (fun () ->
+        let src =
+          m "RC"
+            "  fn bump(a : Assoc({x : Int | true}, {y : Int | y > x})) : Assoc({x : Int | true}, {y : Int | y > x}) do\n\
+            \    match a do\n\
+            \      ANil -> ANil\n\
+            \      ACons(k, v, t) -> ACons(k, v + 1, bump(t))\n\
+            \    end\n\
+            \  end\n\
+            \  fn bump_bad(a : Assoc({x : Int | true}, {y : Int | y > x})) : Assoc({x : Int | true}, {y : Int | y > x}) do\n\
+            \    match a do\n\
+            \      ANil -> ANil\n\
+            \      ACons(k, v, t) -> ACons(k, v - 1, bump_bad(t))\n\
+            \    end\n\
+            \  end\n"
+        in
+        let _, obs = run src in
+        let of_c c = List.filter_map (fun (c', v, _, _) -> if c' = c then Some v else None) obs in
+        all_proved "return of bump" (of_c "return of bump");
+        not_proved "return of bump_bad" (of_c "return of bump_bad"));
+    gated "a slot conjunct naming no sibling stays the slot's own fact" (fun () ->
+        let src =
+          m "CJ"
+            "  fn f(a : Assoc({x : Int | true}, {y : Int | y > 0 && y > x})) : Int do need_pos(a) end\n\
+            \  fn g(a : Assoc({x : Int | true}, {y : Int | y > 0 && y > x})) : Int do need_arel(a) end\n"
+        in
+        all_proved "need_pos / need_arel" (verdicts src [ "need_pos"; "need_arel"; "a" ]));
+    gated "a relation demanded through a one-source parametric call names the cause" (fun () ->
+        let src =
+          m "SS"
+            "  fn shift(a : Assoc(k, v)) : Assoc(k, v) do\n\
+            \    match a do\n\
+            \      ACons(k1, _, ACons(k2, v2, t)) -> ACons(k1, v2, shift(ACons(k2, v2, t)))\n\
+            \      _ -> ANil\n\
+            \    end\n\
+            \  end\n\
+            \  fn use_lit() : Int do need_arel(shift(ACons(5, 6, ACons(0, 1, ANil)))) end\n"
+        in
+        Alcotest.(check bool) "not preserved through `shift`" true
+          (List.exists
+             (fun (c, d) -> c = "need_arel" && has "is not preserved through `shift`" d)
+             (details src)));
+    gated "a callable passed for a relational codomain owes the relation at each tail" (fun () ->
+        let src =
+          m "PS"
+            "  fn apply(f : Int -> Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n\
+            \  fn ok() : Int do apply(fn n -> ACons(n, n + 1, ANil)) end\n\
+            \  fn bad() : Int do apply(fn n -> ACons(n, n, ANil)) end\n"
+        in
+        let vs = verdicts src [ "return of <lambda>" ] in
+        Alcotest.(check bool) ("proved: " ^ String.concat "," vs) true (List.mem "proved" vs);
+        some_violated "return of <lambda>" vs);
+    gated "audit: a well-formed relation is Enforced, a dropped one Inert_warned" (fun () ->
+        let src =
+          m "AU"
+            "  type Two(k, v) = K(k) | V(v)\n\
+            \  fn need_tw(_t : Two({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n"
+        in
+        let dm = March_desugar.Desugar.desugar_module (parse src) in
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx dm;
+        let of_pred fn_ p =
+          List.filter_map
+            (fun (st : RAudit.site) ->
+              match st.RAudit.origin with
+              | RAudit.Param (f, _) when f = fn_ && st.RAudit.predicate = p -> Some (disposition_tag (RAudit.classify st))
+              | _ -> None)
+            (RAudit.sites dm.March_ast.Ast.mod_decls)
+        in
+        Alcotest.(check (list string)) "need_arel's relation" [ "Enforced" ] (of_pred "need_arel" "y > x");
+        Alcotest.(check (list string)) "need_tw's relation" [ "Inert_warned" ] (of_pred "need_tw" "y > x"));
+    gated "cap verified: r1, r3 and r5 leave nothing unverified" (fun () ->
+        let src =
+          m ~verified:true "CV"
+            ("  fn r1() : Int do need_arel(ACons(1, 2, ANil)) end\n\
+             \  fn r3(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do need_pos(a) end\n"
+            ^ r5)
+        in
+        Alcotest.(check (list string)) "no errors" [] (errors src));
+    gated "cap verified control: an unrefined source into a relational demand is an error" (fun () ->
+        let t =
+          String.concat "\n"
+            (errors (m ~verified:true "CV2" "  fn f(a : Assoc(Int, Int)) : Int do need_arel(a) end\n"))
+        in
+        Alcotest.(check bool) ("error: " ^ t) true (has "cannot verify" t)) ]
+
+(* ── Two-argument abstract refinements (multi-arg design 2026-10-18 §3-§5,
+   phase 2, long form) ────────────────────────────────────────────────────
+   A definer on a curried callback chain, `keep : ({x : k | true}) -> ({y : v |
+   true}) -> {Bool | _ == p(x, y)}`, and its occurrence as a relation over two
+   sibling slots, `Assoc({x : k | true}, {y : v | p(x, y)})`. *)
+let abstract_multiarg_suite =
+  let chain = "({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}" in
+  let filt_ret = "Assoc({x : k | true}, {y : v | p(x, y)})" in
+  let prelude =
+    "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n\
+    \  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end\n\
+    \  fn need_key(_a : Assoc({Int | _ > 0}, Int)) : Int do 0 end\n\
+    \  fn need_band(_a : Assoc(Int, {Int | _ > 0 && _ < 100})) : Int do 0 end\n\
+    \  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n"
+    ^ "  fn filt(a : Assoc(k, v), keep : " ^ chain ^ ") : " ^ filt_ret ^ " do\n\
+      \    match a do\n\
+      \      ANil -> ANil\n\
+      \      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end\n\
+      \    end\n\
+      \  end\n"
+  in
+  let m ?(verified = false) name body =
+    "mod " ^ name ^ " do\n" ^ (if verified then "  cap verified\n" else "") ^ prelude ^ body ^ "end\n"
+  in
+  let run src =
+    March_refinecheck.Obligation.reset ();
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    let obs =
+      List.map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          ( o.callee, verdict_name o.verdict
+          , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+          , (match o.verdict with Skipped r -> reason_detail r | _ -> "") ))
+        (March_refinecheck.Obligation.all ())
+    in
+    (ctx.March_errors.Errors.diagnostics, obs)
+  in
+  let of_sev sev ds =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.severity = sev then Some d.March_errors.Errors.message else None)
+      ds
+  in
+  let errors src = of_sev March_errors.Errors.Error (fst (run src)) in
+  let misuse src =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.code = March_errors.Errors.Code.abstract_refinement_misuse
+        then Some d.March_errors.Errors.message
+        else None)
+      (fst (run src))
+  in
+  let has needle hay = Astring_contains.contains hay needle in
+  (* (verdict, reason) of every obligation recorded under [callee]. *)
+  let at callee src =
+    List.filter_map (fun (c, v, r, _) -> if c = callee then Some (v, r) else None) (snd (run src))
+  in
+  let details callee src =
+    List.filter_map (fun (c, _, _, d) -> if c = callee then Some d else None) (snd (run src))
+  in
+  let ps = Alcotest.(list (pair string string)) in
+  let proved = [ ("proved", "") ] in
+  let weak = [ ("skipped", "abstract-refinement-too-weak") ] in
+  let uninst = [ ("skipped", "abstract-refinement-uninstantiated") ] in
+  let all_proved name vs =
+    Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+    Alcotest.check ps name (List.map (fun _ -> ("proved", "")) vs) vs
+  in
+  let not_proved name vs =
+    Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+    Alcotest.(check bool) (name ^ ": not all proved") true (List.exists (fun (v, _) -> v <> "proved") vs)
+  in
+  let a = "a : Assoc(Int, Int)" in
+  let call ?(params = a) demand arg = Printf.sprintf "  fn go(%s) : Int do %s(filt(a, %s)) end\n" params demand arg in
+  let filt2 =
+    "  fn filt2(a : Assoc(k, v), keep : " ^ chain ^ ") : " ^ filt_ret ^ " do\n\
+    \    match a do\n\
+    \      ANil -> ANil\n\
+    \      ACons(k, v, t) ->\n\
+    \        let g = keep(k)\n\
+    \        if g(v) do ACons(k, v, filt2(t, keep)) else filt2(t, keep) end\n\
+    \    end\n\
+    \  end\n"
+  in
+  let need_neg =
+    "  fn need_neg(_a : " ^ filt_ret ^ ", keep : " ^ chain ^ ") : Int do 0 end\n"
+  in
+  [ Alcotest.test_case "s1: a two-argument definer declares p, with no unknown-predicate warning" `Quick (fun () ->
+        let src = m "S1" "" in
+        Alcotest.check
+          Alcotest.(list (pair string (list string)))
+          "roles" [ ("p", [ "+"; "D=" ]) ] (abstract_roles src "filt");
+        let ws = of_sev March_errors.Errors.Warning (fst (run src)) in
+        Alcotest.(check (list string)) "no unknown-predicate warning" []
+          (List.filter (has "`p` is not a measure") ws));
+    Alcotest.test_case "W1 (s5): p applied to one of a two-argument chain's binders is an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W1"
+                  "  fn s5(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(y)}) : Assoc(k, {v | p(_)}) do a end\n"))
+        in
+        Alcotest.(check bool) ("arity: " ^ t) true (has "`p` is applied to 1 of the callback's 2 arguments" t);
+        Alcotest.(check bool) ("fix: " ^ t) true (has "write `p(x, y)`" t));
+    Alcotest.test_case "W1: the chain's binders out of order is an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W1B"
+                  ("  fn sw(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(y, x)}) : "
+                  ^ filt_ret ^ " do a end\n")))
+        in
+        Alcotest.(check bool) ("order: " ^ t) true (has "write `p(x, y)`" t));
+    Alcotest.test_case "W2: a two-argument p on a single slot is an error naming the relation" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse (m "W2" ("  fn one(a : Assoc(k, v), keep : " ^ chain ^ ") : Assoc(k, {v | p(_)}) do a end\n")))
+        in
+        Alcotest.(check bool) ("single slot: " ^ t) true (has "relates 2 slots of one type application" t);
+        (* Phase 3: the fix is the occurrence sugar (it was the long form
+           while the sugar did not exist). *)
+        Alcotest.(check bool) ("fix: " ^ t) true (has "Assoc(k[p], v[p])" t));
+    Alcotest.test_case "W2: arguments that are not distinct sibling binders are an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W2B"
+                  ("  fn dup(a : Assoc(k, v), keep : " ^ chain
+                 ^ ") : Assoc({x : k | true}, {y : v | p(y, y)}) do a end\n")))
+        in
+        Alcotest.(check bool) ("siblings: " ^ t) true (has "distinct binders of sibling slots" t));
+    Alcotest.test_case "W3: one position at two types is an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W3"
+                  ("  fn st(a : Assoc(k, v), keep : ({x : Int | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}) : "
+                  ^ filt_ret ^ " do a end\n")))
+        in
+        Alcotest.(check bool) ("sorts: " ^ t) true (has "argument 1 of `p` is used at more than one type" t));
+    Alcotest.test_case "W4: a container that is not entry-shaped is an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W4"
+                  ("  type Two(k, v) = K(k) | V(v)\n\
+                   \  fn tw(t : Two(k, v), keep : " ^ chain
+                 ^ ") : Two({x : k | true}, {y : v | p(x, y)}) do t end\n")))
+        in
+        Alcotest.(check bool) ("shape: " ^ t) true (has "has no entries to hold of" t));
+    Alcotest.test_case "W5: one p at two arities is an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W5"
+                  ("  fn mx(a : Assoc(k, v), keep : " ^ chain
+                 ^ ", one : ({z : k | true}) -> {Bool | _ == p(z)}) : " ^ filt_ret ^ " do a end\n")))
+        in
+        Alcotest.(check bool) ("arity: " ^ t) true (has "is used with 1 and 2 arguments" t));
+    Alcotest.test_case "the well-formed definer has no misuse error" `Quick (fun () ->
+        Alcotest.(check (list string)) "no misuse" [] (misuse (m "WF" "")));
+    gated "a1: filt's own body proves its relational return" (fun () ->
+        all_proved "return of filt" (at "return of filt" (m "A1" "")));
+    gated "a1-bad: returning the input does not prove the relation" (fun () ->
+        not_proved "return of bad"
+          (at "return of bad"
+             (m "A1B" ("  fn bad(a : Assoc(k, v), keep : " ^ chain ^ ") : " ^ filt_ret ^ " do a end\n"))));
+    gated "partial_call_no_fact: a two-step call `keep(k)` then `g(v)` proves nothing" (fun () ->
+        not_proved "return of filt2" (at "return of filt2" (m "PC" filt2)));
+    gated "a2: a value demand through filt is proved" (fun () ->
+        Alcotest.check ps "need_pos" proved (at "need_pos" (m "A2" (call "need_pos" "fn (_k, v) -> v > 0"))));
+    gated "curried_lambda: a curried lambda instantiates a negative occurrence" (fun () ->
+        let src =
+          m "CL"
+            (need_neg
+            ^ "  fn ok() : Int do need_neg(ACons(1, 2, ANil), fn _k -> fn v -> v > 0) end\n\
+               \  fn no() : Int do need_neg(ACons(1, 0, ANil), fn _k -> fn v -> v > 0) end\n")
+        in
+        let vs = at "need_neg" src in
+        Alcotest.(check bool) "proved" true (List.mem ("proved", "") vs);
+        Alcotest.(check bool) "violated" true (List.mem ("violated", "") vs));
+    gated "curried_lambda: through a two-step callee the return lends nothing (§5.6)" (fun () ->
+        let src = m "CL2" (filt2 ^ "  fn go(a : Assoc(Int, Int)) : Int do need_pos(filt2(a, fn _k -> fn v -> v > 0)) end\n") in
+        Alcotest.check ps "need_pos" uninst (at "need_pos" src);
+        Alcotest.(check bool) "names the unproved body" true
+          (List.exists (has "`filt2`'s own body is not proved") (details "need_pos" src)));
+    gated "key_projection: a key demand is proved" (fun () ->
+        Alcotest.check ps "need_key" proved (at "need_key" (m "KP" (call "need_key" "fn (k, _v) -> k > 0"))));
+    gated "rel_demand: a relational demand is proved" (fun () ->
+        Alcotest.check ps "need_arel" proved (at "need_arel" (m "RD" (call "need_arel" "fn (k, v) -> v > k"))));
+    gated "projection_fresh_k (m5): k > 0 && v > k proves v > 0" (fun () ->
+        Alcotest.check ps "need_pos" proved
+          (at "need_pos" (m "PF" (call "need_pos" "fn (k, v) -> k > 0 && v > k"))));
+    gated "projection_too_weak (m6): v > k alone is too weak for v > 0" (fun () ->
+        Alcotest.check ps "need_pos" weak (at "need_pos" (m "PW" (call "need_pos" "fn (k, v) -> v > k"))));
+    gated "too_weak (m4): the detail names the lambda" (fun () ->
+        let src = m "TW" (call "need_pos" "fn (_k, v) -> v >= 0") in
+        Alcotest.check ps "need_pos" weak (at "need_pos" src);
+        let d = String.concat "\n" (details "need_pos" src) in
+        Alcotest.(check bool) ("lambda: " ^ d) true (has "fn (_k, v) -> v >= 0" d));
+    gated "capture (m7): a lambda naming an outer value is uninstantiated" (fun () ->
+        Alcotest.check ps "need_pos" uninst
+          (at "need_pos" (m "CP" (call ~params:"a : Assoc(Int, Int), now : Int" "need_pos" "fn (_k, v) -> v > now"))));
+    gated "opaque: a callback with no contract is uninstantiated" (fun () ->
+        Alcotest.check ps "need_pos" uninst
+          (at "need_pos" (m "OP" (call ~params:"a : Assoc(Int, Int), kk : Int -> Int -> Bool" "need_pos" "kk"))));
+    gated "wrong_arity_lambda: a one-parameter lambda is uninstantiated" (fun () ->
+        let src = m "WA" (call "need_pos" "fn v -> v > 0") in
+        Alcotest.check ps "need_pos" uninst (at "need_pos" src));
+    gated "named2: a proved two-parameter predicate instantiates p; an unproved one does not" (fun () ->
+        let src =
+          m "N2"
+            "  fn above(k : Int, v : Int) : {Bool | _ == (v > k)} do v > k end\n\
+            \  fn lies(k : Int, v : Int) : {Bool | _ == (v > k)} do v >= k end\n\
+            \  fn go(a : Assoc(Int, Int)) : Int do need_arel(filt(a, above)) end\n\
+            \  fn go2(a : Assoc(Int, Int)) : Int do need_arel(filt(a, lies)) + 0 end\n"
+        in
+        Alcotest.check ps "need_arel" (proved @ uninst) (at "need_arel" src));
+    (* Review C2 (2026-10-21, a controller ruling): a CONCRETE chain contract
+       (`{Bool | _ == (y > x)}`) is no longer an n-parameter signature, since
+       no pass site obliges the callable passed for it; so `kk` carries no
+       proved contract and the call is uninstantiated.  It was "proved" in
+       phase 2.  The pass-site obligation that would restore it is
+       specs/todos/2026-10-21-chain-predicate-contract-pass-site.md. *)
+    gated "cb_passthrough: a concrete chain-typed callback passed on is uninstantiated (review C2)" (fun () ->
+        let src =
+          m "CB"
+            "  fn go(a : Assoc(Int, Int), kk : ({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (y > x)}) : Int do\n\
+            \    need_arel(filt(a, kk))\n\
+            \  end\n"
+        in
+        Alcotest.check ps "need_arel" uninst (at "need_arel" src);
+        Alcotest.(check bool) "names the missing contract" true
+          (List.exists (has "`kk`, passed for `p`, has no proved") (details "need_arel" src)));
+    gated "let_lambda: a let-bound lambda instantiates p; rebinding retires it" (fun () ->
+        let src =
+          m "LL"
+            "  fn go(a : Assoc(Int, Int)) : Int do\n\
+            \    let kk = fn (k, v) -> v > k\n\
+            \    need_arel(filt(a, kk))\n\
+            \  end\n\
+            \  fn go2(a : Assoc(Int, Int), other : Int -> Int -> Bool) : Int do\n\
+            \    let kk = fn (k, v) -> v > k\n\
+            \    let kk = other\n\
+            \    need_arel(filt(a, kk))\n\
+            \  end\n"
+        in
+        Alcotest.check ps "need_arel" (proved @ uninst) (at "need_arel" src));
+    gated "conjunction: the input's slot fact joins the lambda's" (fun () ->
+        Alcotest.check ps "need_band" proved
+          (at "need_band"
+             (m "CJ" (call ~params:"a : Assoc(Int, {Int | _ > 0})" "need_band" "fn (_k, v) -> v < 100"))));
+    gated "conjunction control: an unrefined input lends nothing" (fun () ->
+        Alcotest.check ps "need_band" weak (at "need_band" (m "CJC" (call "need_band" "fn (_k, v) -> v < 100"))));
+    gated "conjunction_drops_input_rel: the input's relation is not carried" (fun () ->
+        let params = "a : Assoc({x : Int | true}, {y : Int | y > x && y > 0})" in
+        Alcotest.check ps "need_arel" weak
+          (at "need_arel" (m "CR" (call ~params "need_arel" "fn (_k, v) -> v < 100")));
+        (* Control: the same input's SLOT fact is carried. *)
+        Alcotest.check ps "need_band" proved
+          (at "need_band" (m "CR2" (call ~params "need_band" "fn (_k, v) -> v < 100"))));
+    gated "negative_occurrence: refined proved, literal violated, unrefined skipped, opaque uninstantiated" (fun () ->
+        let src =
+          m "NO"
+            (need_neg
+            ^ "  fn r(b : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_neg(b, fn (k, v) -> v > k) end\n\
+               \  fn l() : Int do need_neg(ACons(5, 2, ANil), fn (k, v) -> v > k) end\n\
+               \  fn u(b : Assoc(Int, Int)) : Int do need_neg(b, fn (k, v) -> v > k) end\n\
+               \  fn o(b : Assoc({x : Int | true}, {y : Int | y > x}), kk : Int -> Int -> Bool) : Int do need_neg(b, kk) end\n")
+        in
+        (* Element subtyping records under the subject (`b`), a literal or a
+           skip under the callee. *)
+        let obs = at "need_neg" src @ at "b" src in
+        let vs = List.map fst obs and rs = List.map snd obs in
+        Alcotest.(check bool) ("proved: " ^ String.concat "," vs) true (List.mem "proved" vs);
+        Alcotest.(check bool) "violated" true (List.mem "violated" vs);
+        Alcotest.(check bool) "skipped" true (List.mem "skipped" vs);
+        Alcotest.(check bool) "uninstantiated" true (List.mem "abstract-refinement-uninstantiated" rs));
+    gated "cache: two lambdas differing only in the relation keep their own verdicts" (fun () ->
+        let two first second =
+          m "CA"
+            (Printf.sprintf
+               "  fn go(a : Assoc(Int, Int)) : Int do need_arel(filt(a, fn (k, v) -> %s)) + need_arel(filt(a, fn (k, v) -> %s)) end\n"
+               first second)
+        in
+        Alcotest.check ps "> then >=" (proved @ weak) (at "need_arel" (two "v > k" "v >= k"));
+        Alcotest.check ps ">= then >" (weak @ proved) (at "need_arel" (two "v >= k" "v > k")));
+    gated "a4 / cap verified: no definer obligation; a proved demand is no error" (fun () ->
+        let src =
+          m ~verified:true "A4"
+            ("  fn count(_a : Assoc(k, v), _keep : " ^ chain ^ ") : Int do 0 end\n\
+              \  fn gc(a : Assoc(Int, Int)) : Int do count(a, fn (k, v) -> v > k) end\n"
+            ^ call "need_pos" "fn (_k, v) -> v > 0")
+        in
+        Alcotest.(check (list string)) "no errors" [] (errors src));
+    gated "cap verified: a too-weak demand is an error" (fun () ->
+        let t = String.concat "\n" (errors (m ~verified:true "A4W" (call "need_pos" "fn (_k, v) -> v >= 0"))) in
+        Alcotest.(check bool) ("error: " ^ t) true (has "cannot verify" t)) ]
+
+(* ── The two-argument sugar (multi-arg design 2026-10-18 §1.1, §1.2, §9
+   phase 3) ────────────────────────────────────────────────────────────────
+   `keep : k -> v -> Bool[p]` is the chain definer
+   `({$x2 : k | true}) -> ({$x : v | true}) -> {Bool | _ == p($x2, $x)}`
+   (the parser extends a marked definer outward), and `Assoc(k[p], v[p])` of a
+   two-argument `p` is the long-form relation
+   `Assoc({$s0 : k | true}, {$s1 : v | p($s0, $s1)})`
+   ([Refine_abstract.expand_markers], run before every signature read). *)
+let abstract_multiarg_sugar_suite =
+  let module RA = March_refinecheck.Refine_abstract in
+  let prelude =
+    "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n\
+    \  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end\n\
+    \  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n"
+  in
+  let body =
+    " do\n\
+    \    match a do\n\
+    \      ANil -> ANil\n\
+    \      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end\n\
+    \    end\n\
+    \  end\n"
+  in
+  let long_chain = "({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}" in
+  let long_ret = "Assoc({x : k | true}, {y : v | p(x, y)})" in
+  let sugar_chain = "k -> v -> Bool[p]" in
+  let sugar_ret = "Assoc(k[p], v[p])" in
+  let filt chain ret = "  fn filt(a : Assoc(k, v), keep : " ^ chain ^ ") : " ^ ret ^ body in
+  let m name decls = "mod " ^ name ^ " do\n" ^ prelude ^ decls ^ "end\n" in
+  let run src =
+    March_refinecheck.Obligation.reset ();
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    let obs =
+      List.map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> ""))
+        (March_refinecheck.Obligation.all ())
+    in
+    (ctx.March_errors.Errors.diagnostics, obs)
+  in
+  let misuse src =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.code = March_errors.Errors.Code.abstract_refinement_misuse
+        then Some d.March_errors.Errors.message
+        else None)
+      (fst (run src))
+  in
+  let has needle hay = Astring_contains.contains hay needle in
+  let at callee src = List.filter_map (fun (c, v, r) -> if c = callee then Some (v, r) else None) (snd (run src)) in
+  let ps = Alcotest.(list (pair string string)) in
+  let rs = Alcotest.(list (pair string (list string))) in
+  (* The AR-phase-4 role summary ([abstract_roles]) of the signature every
+     reader sees, i.e. after the occurrence sugar is expanded. *)
+  let roles src name =
+    let fd = RA.expand_markers_fn (fd_of src name) in
+    List.map
+      (fun (p, occs) ->
+        ( p
+        , List.sort compare
+            (List.map
+               (fun (o : RA.occurrence) ->
+                 match o.RA.occ_role with
+                 | RA.Definer -> if o.RA.occ_arg = o.RA.occ_binder && o.RA.occ_arg <> "_" then "D=" else "D"
+                 | RA.Positive -> "+"
+                 | RA.Negative -> "-")
+               occs) ))
+      (RA.collect ~is_known:(fun _ -> false) fd)
+  in
+  let definer_args src name =
+    List.concat_map
+      (fun (_, occs) ->
+        List.filter_map
+          (fun (o : RA.occurrence) -> if o.RA.occ_role = RA.Definer then Some o.RA.occ_args else None)
+          occs)
+      (RA.collect ~is_known:(fun _ -> false) (fd_of src name))
+  in
+  let parse_error src =
+    try ignore (parse src); "" with March_errors.Errors.ParseError (msg, _, _) -> msg
+  in
+  let first_param_ty src name =
+    match (fd_of src name).March_ast.Ast.fn_clauses with
+    | c :: _ ->
+      (match c.March_ast.Ast.fc_params with
+       | _ :: March_ast.Ast.FPNamed { March_ast.Ast.param_ty = Some t; _ } :: _ -> t
+       | _ -> Alcotest.fail "no typed second parameter")
+    | [] -> Alcotest.fail "no clause"
+  in
+  [ Alcotest.test_case "s3: the sugar declares the same roles as the s1 long form, D= included" `Quick (fun () ->
+        let long = m "L" (filt long_chain long_ret) and short = m "S" (filt sugar_chain sugar_ret) in
+        Alcotest.check rs "long form" [ ("p", [ "+"; "D=" ]) ] (roles long "filt");
+        Alcotest.check rs "sugar = long form" (roles long "filt") (roles short "filt"));
+    Alcotest.test_case "the chain binds $x2 then $x; a named domain keeps its binder" `Quick (fun () ->
+        Alcotest.(check (list (list string))) "unnamed" [ [ "$x2"; "$x" ] ]
+          (definer_args (m "B1" (filt sugar_chain sugar_ret)) "filt");
+        Alcotest.(check (list (list string))) "named first" [ [ "x"; "$x" ] ]
+          (definer_args (m "B2" (filt "({x : k | true}) -> v -> Bool[p]" sugar_ret)) "filt");
+        Alcotest.(check (list (list string))) "three" [ [ "$x3"; "$x2"; "$x" ] ]
+          (definer_args
+             (m "B3" "  fn f(a : Assoc(k, v), keep : k -> v -> k -> Bool[p]) : Int do 0 end\n")
+             "f"));
+    Alcotest.test_case "the expansion is the long form: $s0 / $s1, the relation on the last slot" `Quick (fun () ->
+        let fd = RA.expand_markers_fn (fd_of (m "E" (filt sugar_chain sugar_ret)) "filt") in
+        let open March_ast.Ast in
+        match fd.fn_ret_ty with
+        | Some
+            (TyCon
+              ( _
+              , [ TyRefine (TyVar { txt = "k"; _ }, Some { txt = s0; _ }, ELit (LitBool true, _))
+                ; TyRefine (TyVar { txt = "v"; _ }, Some { txt = s1; _ },
+                            EApp (EVar { txt = "p"; _ }, [ EVar { txt = a0; _ }; EVar { txt = a1; _ } ], _)) ] )) ->
+          Alcotest.(check (list string)) "binders" [ "$s0"; "$s1"; "$s0"; "$s1" ] [ s0; s1; a0; a1 ]
+        | _ -> Alcotest.fail "Assoc(k[p], v[p]) did not expand to the long form");
+    Alcotest.test_case "W2: Assoc(k, v[p]) of a two-argument p is an error naming the sugar fix" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse (m "W2S" ("  fn one(a : Assoc(k, v), keep : " ^ sugar_chain ^ ") : Assoc(k, v[p]) do a end\n")))
+        in
+        Alcotest.(check bool) ("single slot: " ^ t) true (has "relates 2 slots of one type application" t);
+        Alcotest.(check bool) ("fix: " ^ t) true (has "mark every slot it relates, `Assoc(k[p], v[p])`" t));
+    Alcotest.test_case "W2: three marked slots of a two-argument p are an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W2T"
+                  "  type Tri(a, b, c) = Tri(a, b, c)\n\
+                   \  fn tri(t : Tri(k, v, v), keep : k -> v -> Bool[p]) : Tri(k[p], v[p], v[p]) do t end\n"))
+        in
+        Alcotest.(check bool) ("count: " ^ t) true (has "mark every slot it relates, `Tri(k[p], v[p], v)`" t));
+    Alcotest.test_case "the sugar has no misuse error" `Quick (fun () ->
+        Alcotest.(check (list string)) "no misuse" [] (misuse (m "WF" (filt sugar_chain sugar_ret))));
+    (* Control: an arity-1 `p` marking two slots is not touched (two unary
+       facts, AR phase 4's meaning). *)
+    Alcotest.test_case "control: Assoc(k[p], k[p]) of a one-argument p keeps two unary facts" `Quick (fun () ->
+        let src = m "A1" "  fn two(a : Assoc(k, k), keep : k -> Bool[p]) : Assoc(k[p], k[p]) do a end\n" in
+        let fd = fd_of src "two" in
+        Alcotest.(check bool) "expansion is the identity" true (RA.expand_markers_fn fd == fd);
+        Alcotest.check rs "two positive occurrences" [ ("p", [ "+"; "+"; "D=" ]) ] (roles src "two");
+        Alcotest.(check (list string)) "no misuse" [] (misuse src));
+    Alcotest.test_case "s2: a tuple domain is ONE tuple argument; the message writes the chain" `Quick (fun () ->
+        let msg = parse_error "mod T do\n  fn f(xs : List(a), k : (a, a) -> Bool[p]) : List(a[p]) do xs end\nend\n" in
+        Alcotest.(check bool) ("one argument: " ^ msg) true (has "is ONE tuple argument" msg);
+        Alcotest.(check bool) ("fix: " ^ msg) true (has "write `a -> a -> Bool[p]`" msg));
+    Alcotest.test_case "a chain naming one binder twice is a parse error" `Quick (fun () ->
+        let msg =
+          parse_error "mod T do\n  fn f(xs : List(Int), k : ({x : Int | x > 0}) -> ({x : Int | true}) -> Bool[p]) : Int do 0 end\nend\n"
+        in
+        Alcotest.(check bool) ("duplicate: " ^ msg) true (has "`x` names two of them" msg));
+    Alcotest.test_case "show_ty: the chain prints as k -> v -> Bool[p], and round-trips" `Quick (fun () ->
+        let shown chain = March_ast.Ast.show_ty (first_param_ty (m "P" ("  fn f(a : Assoc(k, v), keep : " ^ chain ^ ") : Int do 0 end\n")) "f") in
+        Alcotest.(check string) "two" "k -> v -> Bool[p]" (shown "k -> v -> Bool[p]");
+        Alcotest.(check string) "one" "v -> Bool[p]" (shown "v -> Bool[p]");
+        Alcotest.(check string) "round-trip" "k -> v -> Bool[p]" (shown (shown "k -> v -> Bool[p]"));
+        Alcotest.(check string) "long form is not prettified"
+          "{ x : k | ... } -> { y : v | ... } -> { Bool | ... }" (shown long_chain));
+    gated "a1 through sugar: filt's return is proved, as in the long form" (fun () ->
+        let long = at "return of filt" (m "AL" (filt long_chain long_ret))
+        and short = at "return of filt" (m "AS" (filt sugar_chain sugar_ret)) in
+        Alcotest.(check bool) "has obligations" true (short <> []);
+        Alcotest.check ps "all proved" (List.map (fun _ -> ("proved", "")) short) short;
+        Alcotest.check ps "same as the long form" long short);
+    gated "a1-bad through sugar: returning the input does not prove" (fun () ->
+        let vs =
+          at "return of bad"
+            (m "AB" (filt sugar_chain sugar_ret ^ "  fn bad(a : Assoc(k, v), keep : " ^ sugar_chain ^ ") : " ^ sugar_ret ^ " do a end\n"))
+        in
+        Alcotest.(check bool) "has obligations" true (vs <> []);
+        Alcotest.(check bool) "not all proved" true (List.exists (fun (v, _) -> v <> "proved") vs));
+    gated "a2 / rel through sugar: the demands are proved, as in the long form" (fun () ->
+        let calls =
+          "  fn go(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (_k, v) -> v > 0)) end\n\
+          \  fn go2(a : Assoc(Int, Int)) : Int do need_arel(filt(a, fn (k, v) -> v > k)) end\n\
+          \  fn go3(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (_k, v) -> v >= 0)) end\n"
+        in
+        let short = m "DS" (filt sugar_chain sugar_ret ^ calls) and long = m "DL" (filt long_chain long_ret ^ calls) in
+        Alcotest.check ps "need_pos" [ ("proved", ""); ("skipped", "abstract-refinement-too-weak") ] (at "need_pos" short);
+        Alcotest.check ps "need_arel" [ ("proved", "") ] (at "need_arel" short);
+        Alcotest.check ps "need_pos = long form" (at "need_pos" long) (at "need_pos" short);
+        Alcotest.check ps "need_arel = long form" (at "need_arel" long) (at "need_arel" short)) ]
+
+(* ── `Map.filter`: an ASSUMED two-argument element return (multi-arg design
+   2026-10-18 §7.2, §9 "Phase 4") ──────────────────────────────────────────
+   `Map.filter(m, pred : k -> v -> Bool[p], cmp) : {Map(k[p], v[p]) | …}` is
+   `@[assume]`: its entry is taken on trust (one `trusted` postcondition at
+   the definition), gated on P1 only, and instantiated at each call like a
+   proved one.  Each case runs against the REAL `stdlib/map.march` (loaded
+   from `stdlib/` relative to the cwd), so it is RED on a base whose stdlib
+   lacks the signature.  Rows m1-m12 are the design's §0 table. *)
+let abstract_map_suite =
+  let load_mod name =
+    let m, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (m.March_ast.Ast.mod_name, March_ast.Ast.Public, m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods = List.map load_mod [ "list.march"; "map.march" ] in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  let user_file (o : March_refinecheck.Obligation.t) =
+    let f = o.March_refinecheck.Obligation.span.March_ast.Ast.file in
+    f = "" || f = "<unknown>"
+  in
+  let open March_refinecheck.Obligation in
+  (* Typecheck and refine-check [src] beside the stdlib modules: the user
+     module's diagnostics (errors and warnings), and every obligation. *)
+  let run (src : string) =
+    reset ();
+    let m = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let m = { m with March_ast.Ast.mod_decls = mods @ prelude_decls @ m.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module m in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx m;
+    let diags sev =
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+          let f = d.March_errors.Errors.span.March_ast.Ast.file in
+          if d.March_errors.Errors.severity = sev && (f = "" || f = "<unknown>")
+          then Some d.March_errors.Errors.message
+          else None)
+        ctx.March_errors.Errors.diagnostics
+    in
+    (diags March_errors.Errors.Error, diags March_errors.Errors.Warning, all (), paths)
+  in
+  let user obs = List.filter user_file obs in
+  (* (verdict, reason slug, reason detail) of every user obligation on [callee]. *)
+  let of_callee c obs =
+    List.filter_map
+      (fun o ->
+        if o.callee = c then
+          Some
+            ( verdict_name o.verdict
+            , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+            , match o.verdict with Skipped r -> reason_detail r | _ -> "" )
+        else None)
+      (user obs)
+  in
+  let slugs c obs = List.map (fun (v, r, _) -> (v, r)) (of_callee c obs) in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, t, s) o ->
+        match o.verdict with
+        | Proved -> (p + 1, v, t, s)
+        | Violated -> (p, v + 1, t, s)
+        | Trusted -> (p, v, t + 1, s)
+        | Skipped _ -> (p, v, t, s + 1))
+      (0, 0, 0, 0) (user obs)
+  in
+  let ps = Alcotest.(list (pair string string)) in
+  let q4 = Alcotest.(pair (pair int int) (pair int int)) in
+  let q4v (a, b, c, d) = ((a, b), (c, d)) in
+  let proved = ("proved", "") in
+  let weak = ("skipped", "abstract-refinement-too-weak") in
+  let uninst = ("skipped", "abstract-refinement-uninstantiated") in
+  let has sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let m ?(verified = false) name body =
+    "mod " ^ name ^ " do\n" ^ (if verified then "  cap verified\n" else "") ^ body ^ "end\n"
+  in
+  let needs =
+    {|  fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+  fn need_ivals(_m : Map(Int, {Int | _ > 0})) : Int do 0 end
+  fn need_keys(_m : Map({Int | _ > 0}, String)) : Int do 0 end
+  fn need_rel(_m : Map({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+  fn need_band(_m : Map(String, {Int | _ > 0 && _ < 100})) : Int do 0 end
+|}
+  in
+  let row name ~demand ~body ~want =
+    gated name (fun () ->
+        let errs, _, obs, _ = run (m "M" (needs ^ body)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check ps demand want (slugs demand obs))
+  in
+  [ row "m1: a value filter proves a value demand" ~demand:"need_vals" ~want:[ proved ]
+      ~body:"  fn go(m : Map(String, Int)) : Int do need_vals(Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp)) end\n";
+    row "m2: a key filter proves a key demand" ~demand:"need_keys" ~want:[ proved ]
+      ~body:"  fn go(m : Map(Int, String)) : Int do need_keys(Map.filter(m, fn k -> fn _v -> k > 0, Map.int_cmp)) end\n";
+    row "m3: a relational filter proves a relational demand" ~demand:"need_rel" ~want:[ proved ]
+      ~body:"  fn go(m : Map(Int, Int)) : Int do need_rel(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n";
+    gated "m4: a weaker filter is too-weak, naming the lambda" (fun () ->
+        let _, _, obs, _ =
+          run
+            (m "M"
+               (needs
+               ^ "  fn go(m : Map(String, Int)) : Int do need_vals(Map.filter(m, fn _k -> fn v -> v >= 0, Map.str_cmp)) end\n"))
+        in
+        Alcotest.check ps "need_vals" [ weak ] (slugs "need_vals" obs);
+        let d = String.concat "" (List.map (fun (_, _, d) -> d) (of_callee "need_vals" obs)) in
+        Alcotest.(check bool) ("detail: " ^ d) true (has "fn _k -> fn v -> v >= 0" d && has "_ > 0" d));
+    row "m5: a projection onto the value, through a fresh key" ~demand:"need_ivals" ~want:[ proved ]
+      ~body:
+        "  fn go(m : Map(Int, Int)) : Int do need_ivals(Map.filter(m, fn k -> fn v -> k > 0 && v > k, Map.int_cmp)) end\n";
+    row "m6: `v > k` alone does not make the value positive" ~demand:"need_ivals" ~want:[ weak ]
+      ~body:"  fn go(m : Map(Int, Int)) : Int do need_ivals(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n";
+    row "m7: a lambda capturing `now` is uninstantiated" ~demand:"need_vals" ~want:[ uninst ]
+      ~body:
+        "  fn go(m : Map(String, Int), now : Int) : Int do need_vals(Map.filter(m, fn _k -> fn v -> v > now, Map.str_cmp)) end\n";
+    row "m8: through a `let`" ~demand:"need_vals" ~want:[ proved ]
+      ~body:
+        "  fn go(m : Map(String, Int)) : Int do\n\
+        \    let m2 = Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp)\n\
+        \    need_vals(m2)\n\
+        \  end\n";
+    (* A variable argument's subtyping obligation is labelled by the variable. *)
+    row "m9: a refined parameter (unchanged)" ~demand:"m" ~want:[ proved ]
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(m) end\n";
+    row "m10 control: Map.insert carries no element fact (out of scope)" ~demand:"need_vals"
+      ~want:[ ("skipped", "parametric-source-unproved") ]
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(Map.insert(m, \"b\", 5, Map.str_cmp)) end\n";
+    gated "the input's own facts are not conjoined through an assumed callee, and the detail says so" (fun () ->
+        let _, _, obs, _ =
+          run
+            (m "M"
+               (needs
+               ^ "  fn go(m : Map(String, {Int | _ > 0})) : Int do need_band(Map.filter(m, fn _k -> fn v -> v < 100, Map.str_cmp)) end\n"))
+        in
+        Alcotest.check ps "need_band" [ weak ] (slugs "need_band" obs);
+        let d = String.concat "" (List.map (fun (_, _, d) -> d) (of_callee "need_band" obs)) in
+        Alcotest.(check bool) ("detail: " ^ d) true
+          (has "`m`'s own element facts are not carried through `Map.filter`" d));
+    gated "m12: cap verified, a filter with no demand files nothing and errs nothing" (fun () ->
+        let errs, _, obs, _ =
+          run
+            (m ~verified:true "V"
+               "  fn go(m : Map(Int, Int)) : Int do Map.size(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n\
+               \  fn live(m : Map(String, Int), now : Int) : Int do Map.size(Map.filter(m, fn _a -> fn until -> until > now, Map.str_cmp)) end\n")
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check q4 "user obligations" ((0, 0), (0, 0)) (q4v (triple obs)));
+    gated "cap verified: proved Map.filter demands leave nothing unverified" (fun () ->
+        let errs, _, _, _ =
+          run
+            (m ~verified:true "V2"
+               (needs
+               ^ "  fn go(m : Map(Int, Int)) : Int do need_rel(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n"))
+        in
+        Alcotest.(check (list string)) "no errors" [] errs);
+    gated "cap verified control: a too-weak Map.filter demand is an error" (fun () ->
+        let errs, _, _, _ =
+          run
+            (m ~verified:true "V3"
+               (needs
+               ^ "  fn go(m : Map(Int, Int)) : Int do need_ivals(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n"))
+        in
+        let t = String.concat "\n" errs in
+        Alcotest.(check bool) ("error: " ^ t) true (has "abstract-refinement-too-weak" t));
+    gated "assumed_counted: one trusted entry at Map.filter's definition, its body not walked" (fun () ->
+        let _, _, obs, paths = run (m "C" needs) in
+        let path = List.find (fun p -> Filename.basename p = "map.march") paths in
+        let at_filter =
+          List.filter
+            (fun o -> o.span.March_ast.Ast.file = path && o.callee = "filter" && o.kind = Postcondition)
+            obs
+        in
+        let shown = List.map (fun o -> (verdict_name o.verdict, o.predicate)) at_filter in
+        Alcotest.check ps "Map.filter's postconditions"
+          [ ("trusted", "subset(keys(_), keys(m))"); ("trusted", "p($s0, $s1)") ]
+          shown;
+        Alcotest.(check int) "no element obligation from Map.filter's body" 0
+          (List.length
+             (List.filter (fun o -> o.span.March_ast.Ast.file = path && o.callee = "return of filter") obs)));
+    (* The assumed gate is P1, not nothing: an assumed element return whose
+       type variables the inferred type does not keep generic (an
+       unannotated parameter) is not instantiated. *)
+    gated "an assumed callee failing P1 is uninstantiated, naming parametricity" (fun () ->
+        let _, _, obs, _ =
+          run
+            (m "P"
+               (needs
+               ^ "  @[assume]\n\
+                 \  fn afilt(m, pred : k -> v -> Bool[p]) : Map(k[p], v[p]) do m end\n\
+                 \  fn go(m : Map(String, Int)) : Int do need_vals(afilt(m, fn _k -> fn v -> v > 0)) end\n"))
+        in
+        Alcotest.check ps "need_vals" [ uninst ] (slugs "need_vals" obs);
+        let d = String.concat "" (List.map (fun (_, _, d) -> d) (of_callee "need_vals" obs)) in
+        Alcotest.(check bool) ("detail: " ^ d) true (has "is not known to be parametric" d));
+    gated "control: the same signature without @[assume] and an unproved body carries nothing" (fun () ->
+        let _, _, obs, _ =
+          run
+            (m "P2"
+               (needs
+               ^ "  fn bfilt(m : Map(k, v), pred : k -> v -> Bool[p]) : Map(k[p], v[p]) do m end\n\
+                 \  fn go(m : Map(String, Int)) : Int do need_vals(bfilt(m, fn _k -> fn v -> v > 0)) end\n"))
+        in
+        Alcotest.check ps "need_vals" [ uninst ] (slugs "need_vals" obs);
+        let d = String.concat "" (List.map (fun (_, _, d) -> d) (of_callee "need_vals" obs)) in
+        Alcotest.(check bool) ("detail: " ^ d) true (has "own body is not proved" d));
+    gated "an assumed closed element return is a fact at a call (declared_elem_return)" (fun () ->
+        let _, warns, obs, _ =
+          run
+            (m "D"
+               (needs
+               ^ "  @[assume]\n\
+                 \  fn pos_map() : Map(String, {Int | _ > 0}) do Map.empty() end\n\
+                 \  fn go() : Int do need_vals(pos_map()) end\n"))
+        in
+        (* The argument's subtyping obligation is labelled by the call. *)
+        Alcotest.check ps "pos_map(…) into need_vals" [ proved ] (slugs "pos_map(…)" obs);
+        Alcotest.check q4 "user obligations: the demand, and one trusted entry" ((1, 0), (1, 0))
+          (q4v (triple obs));
+        Alcotest.(check bool) "no `@[assume] has no effect` warning" false
+          (List.exists (has "has no effect") warns));
+    gated "control: the same closed return without @[assume] is not a fact" (fun () ->
+        let _, _, obs, _ =
+          run
+            (m "D2"
+               (needs
+               ^ "  fn pos_map() : Map(String, {Int | _ > 0}) do Map.empty() end\n\
+                 \  fn go() : Int do need_vals(pos_map()) end\n"))
+        in
+        let vs = slugs "pos_map(…)" obs @ slugs "need_vals" obs in
+        Alcotest.(check bool) "the demand is recorded" true (vs <> []);
+        Alcotest.(check bool) "the demand is not proved" false (List.mem proved vs)) ]
+
+(* ── Multi-arg review fixes (specs/progress/2026-10-21-abstract-multiarg-review-fixes.md) ──
+   The whole-branch soundness review of the two-argument abstract
+   refinements (phases 1a-4): each finding's repro, as the reviewer ran it,
+   with the control the reviewer named. *)
+let abstract_multiarg_review_suite =
+  let assoc = "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n" in
+  let filt =
+    "  fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do\n\
+    \    match a do\n\
+    \      ANil -> ANil\n\
+    \      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end\n\
+    \    end\n\
+    \  end\n"
+  in
+  let consume =
+    "  fn need_pos1(x : {Int | _ > 0}) : Int do x end\n\
+    \  fn consume(a : Assoc(k[p], v[p]), keep : k -> v -> Bool[p]) : Int do\n\
+    \    match a do\n\
+    \      ANil -> 0\n\
+    \      ACons(k, v, _) -> if keep(k, v) do 0 else need_pos1(0 - 1) end\n\
+    \    end\n\
+    \  end\n"
+  in
+  let m ?(verified = false) name body =
+    "mod " ^ name ^ " do\n" ^ (if verified then "  cap verified\n" else "") ^ body ^ "end\n"
+  in
+  let run src =
+    March_refinecheck.Obligation.reset ();
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    let obs =
+      List.map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          ( o.callee, verdict_name o.verdict
+          , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+          , (match o.verdict with Skipped r -> reason_detail r | _ -> "") ))
+        (March_refinecheck.Obligation.all ())
+    in
+    (ctx.March_errors.Errors.diagnostics, obs)
+  in
+  let has needle hay = Astring_contains.contains hay needle in
+  let at callee src =
+    List.filter_map (fun (c, v, r, _) -> if c = callee then Some (v, r) else None) (snd (run src))
+  in
+  let details callee src =
+    List.filter_map (fun (c, _, _, d) -> if c = callee then Some d else None) (snd (run src))
+  in
+  let msgs ?code sev src =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.severity = sev
+           && (match code with None -> true | Some c -> d.March_errors.Errors.code = c)
+        then Some d.March_errors.Errors.message
+        else None)
+      (fst (run src))
+  in
+  let ps = Alcotest.(list (pair string string)) in
+  let proved = [ ("proved", "") ] in
+  let violated = [ ("violated", "") ] in
+  let weak = [ ("skipped", "abstract-refinement-too-weak") ] in
+  let uninst = [ ("skipped", "abstract-refinement-uninstantiated") ] in
+  let not_proved name vs =
+    Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+    Alcotest.(check bool) (name ^ ": nothing proved") false (List.mem ("proved", "") vs)
+  in
+  (* The real stdlib `Map` beside the user module (the abstract-map harness). *)
+  let load_mod name =
+    let md, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (md.March_ast.Ast.mod_name, March_ast.Ast.Public, md.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods = List.map load_mod [ "list.march"; "map.march" ] in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  let run_std (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let md = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let md = { md with March_ast.Ast.mod_decls = mods @ prelude_decls @ md.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module md in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx md;
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        let f = o.span.March_ast.Ast.file in
+        if f = "" || f = "<unknown>" then
+          Some
+            ( o.callee, verdict_name o.verdict
+            , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+            , match o.verdict with Skipped r -> reason_detail r | _ -> "" )
+        else None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let std_at callee obs = List.filter_map (fun (c, v, r, _) -> if c = callee then Some (v, r) else None) obs in
+  [ (* C1: a relation whose instantiated predicate names no slot. *)
+    gated "C1 f1v: `fn (_k, _v) -> false` at a parameter still owes the relation" (fun () ->
+        let src =
+          m ~verified:true "F1V"
+            (assoc ^ consume ^ "  fn main() : Int do consume(ACons(1, 2, ANil), fn (_k, _v) -> false) end\n")
+        in
+        Alcotest.check ps "consume" violated (at "consume" src));
+    gated "C1 control f1d: `fn (k, _v) -> k > k` is violated" (fun () ->
+        let src =
+          m ~verified:true "F1D"
+            (assoc ^ consume ^ "  fn main() : Int do consume(ACons(1, 2, ANil), fn (k, _v) -> k > k) end\n")
+        in
+        Alcotest.check ps "consume" violated (at "consume" src));
+    gated "C1 have side: `filt(a, fn (_k, _v) -> false)` lends `false` (proved); `true` lends nothing" (fun () ->
+        let need = "  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end\n" in
+        let go lam = Printf.sprintf "  fn go(a : Assoc(Int, Int)) : Int do need_pos(filt(a, %s)) end\n" lam in
+        Alcotest.check ps "false" proved (at "need_pos" (m "F1H" (assoc ^ need ^ filt ^ go "fn (_k, _v) -> false")));
+        not_proved "true" (at "need_pos" (m "F1T" (assoc ^ need ^ filt ^ go "fn (_k, _v) -> true"))));
+    (* C2: a concrete chain contract is a one-parameter callback again. *)
+    gated "C2 f2: a concrete `{Bool | _ == e}` chain codomain gives the body no fact" (fun () ->
+        let src =
+          m ~verified:true "F2"
+            "  fn need_pos(x : {Int | _ > 0}) : Int do x end\n\
+            \  fn h(keep : ({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (x > 0)}, k : Int, v : Int) : Int do\n\
+            \    if keep(k, v) do need_pos(k) else 0 end\n\
+            \  end\n\
+            \  fn main() : Int do h(fn (_a, _b) -> true, 0 - 5, 1) end\n"
+        in
+        not_proved "need_pos" (at "need_pos" src));
+    gated "C2 control f2c: a one-argument codomain contract is obliged at the pass site" (fun () ->
+        let src =
+          m ~verified:true "F2C"
+            "  fn need_pos(x : {Int | _ > 0}) : Int do x end\n\
+            \  fn h(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, k : Int) : Int do\n\
+            \    if keep(k) do need_pos(k) else 0 end\n\
+            \  end\n\
+            \  fn main() : Int do h(fn _a -> true, 0 - 5) end\n"
+        in
+        Alcotest.check ps "need_pos" proved (at "need_pos" src);
+        not_proved "<lambda>" (at "<lambda>" src));
+    gated "C2 control: a definer chain (shape i) still gives its own body the fact" (fun () ->
+        let vs = at "return of filt" (m "F2D" (assoc ^ filt)) in
+        Alcotest.(check bool) "has obligations" true (vs <> []);
+        Alcotest.check ps "return of filt" (List.map (fun _ -> ("proved", "")) vs) vs);
+    Alcotest.test_case "C2 audit: a concrete chain codomain is unenforced; a definer chain is enforced" `Quick (fun () ->
+        let disp src =
+          let md = March_desugar.Desugar.desugar_module (parse src) in
+          let ctx = March_errors.Errors.create () in
+          March_refinecheck.Refine_check.check_module ctx md;
+          List.filter_map
+            (fun (s : RAudit.site) ->
+              if s.RAudit.position = RAudit.Arrow_codomain then Some (disposition_tag (RAudit.classify s)) else None)
+            (RAudit.sites md.March_ast.Ast.mod_decls)
+        in
+        Alcotest.(check (list string)) "shape (ii)" [ "Unenforced" ]
+          (disp
+             (m "F2A"
+                "  fn h(keep : ({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (x > 0)}, k : Int, v : Int) : Int do\n\
+                \    if keep(k, v) do 1 else 0 end\n\
+                \  end\n"));
+        Alcotest.(check (list string)) "shape (i)" [ "Enforced" ] (disp (m "F2B" (assoc ^ filt))));
+    (* C3: duplicate binders. *)
+    gated "C3 d2: `fn (x, x) -> x > 0` is uninstantiated, naming the duplicate" (fun () ->
+        let need = "  fn need_keys(_a : Assoc({Int | _ > 0}, Int)) : Int do 0 end\n" in
+        let go lam = Printf.sprintf "  fn go(a : Assoc(Int, Int)) : Int do need_keys(filt(a, %s)) end\n" lam in
+        let src = m "D2" (assoc ^ need ^ filt ^ go "fn (x, x) -> x > 0") in
+        Alcotest.check ps "need_keys" uninst (at "need_keys" src);
+        let d = String.concat "\n" (details "need_keys" src) in
+        Alcotest.(check bool) ("detail: " ^ d) true (has "binds `x` twice" d);
+        (* Control: distinct binders. *)
+        Alcotest.check ps "control" proved (at "need_keys" (m "D2C" (assoc ^ need ^ filt ^ go "fn (x, y) -> x > 0"))));
+    gated "C3 d2': a curried `fn k -> fn k -> k > 0` is uninstantiated" (fun () ->
+        let need = "  fn need_neg(_a : Assoc(k[p], v[p]), keep : k -> v -> Bool[p]) : Int do 0 end\n" in
+        let src =
+          m "D2K" (assoc ^ need ^ "  fn go() : Int do need_neg(ACons(5, 0 - 1, ANil), fn k -> fn k -> k > 0) end\n")
+        in
+        Alcotest.check ps "need_neg" uninst (at "need_neg" src));
+    gated "C3 d1: the real Map.filter with `fn k -> fn k -> k > 0` is uninstantiated" (fun () ->
+        let mk lam =
+          m "D1"
+            ("  fn need_keys(_m : Map({Int | _ > 0}, Int)) : Int do 0 end\n\
+             \  fn go(m : Map(Int, Int)) : Int do need_keys(Map.filter(m, " ^ lam ^ ", Map.int_cmp)) end\n")
+        in
+        let obs = run_std (mk "fn k -> fn k -> k > 0") in
+        Alcotest.check ps "need_keys" uninst (std_at "need_keys" obs);
+        Alcotest.(check bool) "names the duplicate" true
+          (List.exists (fun (c, _, _, d) -> c = "need_keys" && has "binds `k` twice" d) obs);
+        Alcotest.check ps "control" proved (std_at "need_keys" (run_std (mk "fn k -> fn _v -> k > 0"))));
+    gated "C3 arity 1: a helper binding one name twice is not inlined" (fun () ->
+        let pre =
+          "  fn need_lpos(_xs : List({Int | _ > 0})) : Int do 0 end\n\
+          \  fn need_ipos(x : {Int | _ > 0}) : Int do x end\n\
+          \  fn filt1(xs : List(a), keep : a -> Bool[p]) : List(a[p]) do\n\
+          \    match xs do\n\
+          \      Nil -> Nil\n\
+          \      Cons(h, t) -> if keep(h) do Cons(h, filt1(t, keep)) else filt1(t, keep) end\n\
+          \    end\n\
+          \  end\n\
+          \  fn two(a : Int, a : Int) : {Bool | _ == (a > 0)} do a > 0 end\n"
+        in
+        let let_h binders =
+          Printf.sprintf
+            "  fn go(xs : List(Int)) : Int do\n    let h = fn (%s) -> a > 0\n    need_lpos(filt1(xs, fn y -> h(y, 1)))\n  end\n"
+            binders
+        in
+        Alcotest.check ps "let-bound (a, a)" uninst (at "need_lpos" (m "DA" (pre ^ let_h "a, a")));
+        Alcotest.check ps "control (a, b)" proved (at "need_lpos" (m "DB" (pre ^ let_h "a, b")));
+        Alcotest.check ps "named two(a, a)" uninst
+          (at "need_lpos" (m "DN" (pre ^ "  fn go(xs : List(Int)) : Int do need_lpos(filt1(xs, fn y -> two(y, 1))) end\n")));
+        (* The postcondition `two(y, 1) == (y > 0)` is not a fact either. *)
+        not_proved "postcondition"
+          (at "need_ipos"
+             (m "DP" (pre ^ "  fn go(y : Int) : Int do if two(y, 1) do need_ipos(y) else 1 end end\n"))));
+    (* C4: a callee parameter inside an abstract slot predicate. *)
+    gated "C4 n1: a callee parameter in the return relation is read at the call's actuals" (fun () ->
+        let pre =
+          assoc
+          ^ "  fn need_big(_a : Assoc(Int, {Int | _ > 100})) : Int do 0 end\n\
+             \  fn filtn(a : Assoc(Int, Int), n : Int, keep : Int -> Int -> Bool[p])\n\
+             \      : Assoc({x : Int | true}, {y : Int | p(x, y) && y > n}) do\n\
+             \    match a do\n\
+             \      ANil -> ANil\n\
+             \      ACons(k, v, t) ->\n\
+             \        if keep(k, v) do\n\
+             \          if v > n do ACons(k, v, filtn(t, n, keep)) else filtn(t, n, keep) end\n\
+             \        else filtn(t, n, keep) end\n\
+             \    end\n\
+             \  end\n"
+        in
+        let go x =
+          Printf.sprintf
+            "  fn go(a : Assoc(Int, Int), %s : {Int | _ > 1000}) : Int do need_big(filtn(a, 0, fn (_k, _v) -> true)) end\n"
+            x
+        in
+        Alcotest.check ps "n1 (caller has an `n`)" weak (at "need_big" (m "N1" (pre ^ go "n")));
+        Alcotest.check ps "n1b (control: caller has `m`)" weak (at "need_big" (m "N1B" (pre ^ go "m")));
+        (* The actual moves the fact the right way too. *)
+        Alcotest.check ps "filtn(a, 200, …)" proved
+          (at "need_big"
+             (m "N1C" (pre ^ "  fn go(a : Assoc(Int, Int)) : Int do need_big(filtn(a, 200, fn (_k, _v) -> true)) end\n"))));
+    gated "C4 n3: a callee parameter in a parameter's relation is read at the call's actuals" (fun () ->
+        let pre =
+          assoc
+          ^ "  fn need_big(x : {Int | _ > 100}) : Int do x end\n\
+             \  fn consume(a : Assoc({x : Int | true}, {y : Int | p(x, y) && y > n}), n : Int, keep : Int -> Int -> Bool[p]) : Int do\n\
+             \    match a do\n\
+             \      ANil -> 0\n\
+             \      ACons(_k, v, _) -> if n >= 100 do need_big(v) else 0 end\n\
+             \    end\n\
+             \  end\n"
+        in
+        let go x =
+          Printf.sprintf
+            "  fn go(%s : {Int | _ == 0}) : Int do consume(ACons(1, 5, ANil), 100, fn (_k, _v) -> true) end\n" x
+        in
+        Alcotest.check ps "n3 (caller has an `n`)" violated (at "consume" (m "N3" (pre ^ go "n")));
+        Alcotest.check ps "n3b (control: caller has `m`)" violated (at "consume" (m "N3B" (pre ^ go "m")));
+        Alcotest.check ps "a satisfying entry" proved
+          (at "consume"
+             (m "N3C"
+                (pre ^ "  fn go() : Int do consume(ACons(1, 500, ANil), 100, fn (_k, _v) -> true) end\n"))));
+    (* I1: two slots naming each other. *)
+    Alcotest.test_case "I1 c1: slots naming each other do not crash" `Quick (fun () ->
+        let pre =
+          assoc ^ "  fn need(_a : Assoc({x : Int | x < y}, {y : Int | y > x})) : Int do 0 end\n"
+        in
+        let ok = m "C1" (pre ^ "  fn main() : Int do need(ACons(1, 2, ANil)) end\n") in
+        let bad = m "C1B" (pre ^ "  fn main() : Int do need(ACons(2, 1, ANil)) end\n") in
+        let vs = at "need" ok in
+        if z3_available () then begin
+          Alcotest.(check bool) "has obligations" true (vs <> []);
+          Alcotest.check ps "(1, 2)" (List.map (fun _ -> ("proved", "")) vs) vs;
+          Alcotest.(check bool) "(2, 1) violated" true (List.mem ("violated", "") (at "need" bad))
+        end);
+    (* I2: a vacuously opaque container hiding its parameters in a tuple. *)
+    gated "I2 o1: a relation on a tuple-hiding container is unchecked and proves nothing" (fun () ->
+        let src =
+          m "O1"
+            "  type Two(k, v) = Two((List(k), List(v)))\n\
+            \  fn need_pos(_t : Two(Int, {Int | _ > 0})) : Int do 0 end\n\
+            \  fn f(t : Two({x : Int | x > 0}, {y : Int | y > x})) : Int do need_pos(t) end\n\
+            \  @[assume]\n\
+            \  fn mk() : Two({x : Int | x > 0}, {y : Int | y > x}) do Two(([], [0 - 5])) end\n\
+            \  fn g() : Int do need_pos(mk()) end\n"
+        in
+        let ws = msgs ~code:March_errors.Errors.Code.refinement_unchecked March_errors.Errors.Warning src in
+        Alcotest.(check bool) ("warned: " ^ String.concat " | " ws) true
+          (List.exists (has "This relation is not checked") ws);
+        let _, obs = run src in
+        Alcotest.(check (list string)) "nothing proved" []
+          (List.filter_map (fun (c, v, _, _) -> if v = "proved" then Some c else None) obs));
+    (* Minor: diagnostics render the source binders, never `$s0`. *)
+    gated "minor f1b / n4: a relation's diagnostic names the source binders" (fun () ->
+        let f1b =
+          m "F1B" (assoc ^ consume ^ "  fn main() : Int do consume(ACons(1, 2, ANil), fn (k, v) -> k > v) end\n")
+        in
+        let e = String.concat "\n" (msgs March_errors.Errors.Error f1b) in
+        Alcotest.(check bool) ("f1b names k > v: " ^ e) true (has "`k > v`" e);
+        Alcotest.(check bool) ("f1b has no $s: " ^ e) false (has "$s" e);
+        let n4 =
+          m "N4"
+            (assoc
+            ^ "  fn need(_a : Assoc({x : Int | true}, {y : Int | y > x + n}), n : Int) : Int do 0 end\n\
+               \  fn go() : Int do need(ACons(1, 5, ANil), 100) end\n")
+        in
+        let e = String.concat "\n" (msgs March_errors.Errors.Error n4) in
+        Alcotest.(check bool) ("n4 names y > x + 100: " ^ e) true (has "`y > x + 100`" e);
+        Alcotest.(check bool) ("n4 has no $s: " ^ e) false (has "$s" e));
+    (* Minor: the input conjunction only through slots that passed the gate. *)
+    gated "minor h1: an input slot fact is carried only through a parametric slot" (fun () ->
+        let tri bound =
+          m "H1"
+            ("  type Tri(a, b, c) = TNil | TCons(a, b, c, Tri(a, b, c))\n\
+              \  fn need_w(_t : Tri(Int, Int, {Int | _ > 0})) : Int do 0 end\n\
+              \  fn filt3" ^ bound ^ "(t : Tri(k, v, w), keep : k -> v -> Bool[p]) : Tri(k[p], v[p], w) do\n\
+              \    match t do\n\
+              \      TNil -> TNil\n\
+              \      TCons(k, v, w, rest) -> if keep(k, v) do TCons(k, v, w, filt3(rest, keep)) else filt3(rest, keep) end\n\
+              \    end\n\
+              \  end\n\
+              \  fn go(t : Tri(Int, Int, {Int | _ > 0})) : Int do need_w(filt3(t, fn (_k, v) -> v > 0)) end\n")
+        in
+        not_proved "bounded w" (at "need_w" (tri "[w : Eq]"));
+        (* Control: an unbounded `w` is parametric, and the demand is proved
+           (it records under the subject `filt3(…)`). *)
+        let vs = List.map (fun (c, v, _, _) -> (c, v)) (snd (run (tri ""))) in
+        Alcotest.(check bool) "control: unbounded w has a filt3(…) obligation" true (List.mem_assoc "filt3(…)" vs);
+        Alcotest.(check (list (pair string string))) "control: unbounded w, all proved"
+          (List.map (fun (c, _) -> (c, "proved")) vs) vs) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -24658,5 +26182,11 @@ let () =
       ("infer-apply", infer_apply_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
+      ("element-entries", element_entries_suite);
+      ("relational-elements", relational_elements_suite);
+      ("abstract-multiarg", abstract_multiarg_suite);
+      ("abstract-multiarg-sugar", abstract_multiarg_sugar_suite);
+      ("abstract-map", abstract_map_suite);
+      ("abstract-multiarg-review", abstract_multiarg_review_suite);
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

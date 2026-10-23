@@ -302,7 +302,16 @@ let postcond_of_declared ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig
     match resolve_call_arity ctx defs fname (List.length args) with
     | Some (Some sg) -> Some (Some sg)
     | Some None -> Some None
-    | None -> (match List.assoc_opt fname cb with Some sg -> Some (Some sg) | None -> None)
+    | None ->
+      (match List.assoc_opt fname cb with
+       (* A callback CHAIN's signature ([chain_sig_of_ty], a definer of
+          several arguments) gives a fact to a FULL call only: a partial
+          call `keep(k)` is a function value, and gets none, whichever
+          binders the definition names (review C2's minor). *)
+       | Some sg when List.length sg.param_names >= 2 && List.length sg.param_names <> List.length args ->
+         Some None
+       | Some sg -> Some (Some sg)
+       | None -> None)
   in
   match resolved with
   (* A BUILTIN resolves to nothing at all — it has no [fn_def] — so its
@@ -334,7 +343,12 @@ let postcond_of_declared ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig
                  | "_", _ | _, None -> None
                  | n, Some a -> Some (n, a))
           in
-          if List.for_all (fun p -> List.mem_assoc p env) ps then
+          (* A formal spelled twice (`fn two(a : Int, a : Int)`) has no one
+             actual: the interpreter binds the first, compiled code the last
+             (review C3), so the positional substitution means nothing. *)
+          let twice p = List.length (List.filter (( = ) p) sg.param_names) > 1 in
+          if List.exists twice ps then None
+          else if List.for_all (fun p -> List.mem_assoc p env) ps then
             Some (b, subst_params env p, srt)
           else None)
      | _ -> None)

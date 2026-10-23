@@ -208,26 +208,47 @@ let fmt_lit = function
    Assigned once [expr_inline] is in scope, at the bottom of this module. *)
 let fmt_pred_ref : (expr -> string) ref = ref (fun _ -> "...")
 
+(* The abstract-refinement DEFINER `D1 -> … -> Dn -> Bool[p]`, as the parser
+   rewrites it (Parser.abstract_definer_arrow): each domain carries a binder
+   (a synthetic `$x…` when the user wrote none), and the codomain is `{Bool |
+   _ == p(x1, …, xn)}` over exactly those binders, MARKED with the binder `_`.
+   Returns the domains and `p`.  An unmarked codomain is a user's spelled-out
+   long form and is printed as written: printed as the shorthand under an
+   outer arrow (`Int -> ({x : a | true}) -> {Bool | _ == p(x)}`) it would
+   re-parse as a definer of two arguments. *)
+let definer_chain (t : ty) : (ty list * string) option =
+  let rec go doms t =
+    match t with
+    | TyArrow (dom, cod) -> go (dom :: doms) cod
+    | TyRefine (TyCon ({ txt = "Bool"; _ }, []), m,
+                EApp (EVar { txt = "=="; _ }, [ EVar { txt = "_"; _ }; EApp (EVar p, args, _) ], _)) ->
+      let doms = List.rev doms in
+      let marked = match m with Some { txt = "_"; _ } -> true | _ -> false in
+      let binder d = match d with TyRefine (_, Some { txt; _ }, _) -> Some txt | _ -> None in
+      let arg a = match a with EVar { txt; _ } -> Some txt | _ -> None in
+      if doms <> [] && marked
+         && List.length args = List.length doms
+         && List.map binder doms = List.map arg args
+      then Some (doms, p.txt)
+      else None
+    | _ -> None
+  in
+  match t with TyArrow _ -> go [] t | _ -> None
+
 let rec fmt_ty = function
   | TyCon ({ txt; _ }, [])   -> txt
   | TyCon ({ txt; _ }, args) -> Printf.sprintf "%s(%s)" txt (fmt_tys args)
   | TyVar { txt; _ }         -> txt
-  (* The abstract-refinement DEFINER `D -> Bool[p]`.  The parser rewrites it to
-     `({x : D | true}) -> {Bool | _ == p(x)}` (a synthetic binder `$x` when the
-     domain has none, the user's binder otherwise; Parser.abstract_definer_arrow),
-     so print that exact shape back as the shorthand: it re-parses to the same
-     tree, whereas the expanded form with `$x` cannot even be lexed. *)
-  | TyArrow (dom, TyRefine (TyCon ({ txt = "Bool"; _ }, []), None,
-                            EApp (EVar { txt = "=="; _ },
-                                  [ EVar { txt = "_"; _ };
-                                    EApp (EVar p, [ EVar { txt = x; _ } ], _) ], _)))
-    when (match dom with
-        | TyRefine (_, Some { txt = bx; _ }, _) -> bx = x
-        | _ -> false) ->
-    let dom_s = match dom with
-      | TyRefine (d, Some { txt = "$x"; _ }, ELit (LitBool true, _)) -> fmt_ty_atom d
+  (* The abstract-refinement DEFINER (see [definer_chain]): print the
+     shorthand back, which re-parses to the same tree, whereas the expanded
+     form with `$x` cannot even be lexed. *)
+  | TyArrow _ as t when definer_chain t <> None ->
+    let doms, p = Option.get (definer_chain t) in
+    let dom_s d = match d with
+      | TyRefine (d, Some { txt; _ }, ELit (LitBool true, _))
+        when String.length txt >= 2 && String.sub txt 0 2 = "$x" -> fmt_ty_atom d
       | d -> Printf.sprintf "(%s)" (fmt_ty d) in
-    Printf.sprintf "%s -> Bool[%s]" dom_s p.txt
+    Printf.sprintf "%s -> Bool[%s]" (String.concat " -> " (List.map dom_s doms)) p
   | TyArrow (a, b)           -> Printf.sprintf "%s -> %s" (fmt_ty_atom a) (fmt_ty b)
   | TyTuple tys              -> Printf.sprintf "(%s)" (fmt_tys tys)
   | TyRecord flds            ->

@@ -1572,7 +1572,10 @@ element sets are stated rather than proved: every public `Set` operation
 `difference`, `contains`, `is_subset`, `is_empty`, `eq`, `to_list`,
 `from_list`) and the key-affecting `Map` operations (`empty`, `singleton`,
 `insert`, `remove`, `get`, `contains_key`, `is_empty`, `keys`, `map_values`,
-`filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`:
+`filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`.
+`Map.filter` also assumes an entry fact, `Map(k[p], v[p])`: every entry of its
+result satisfies `pred` (see [two-argument abstract
+refinements](#abstract-refinements-filter-keeps-what-its-predicate-says)).
 
 ```march
 @[assume]
@@ -2097,6 +2100,81 @@ unless no value of it could work (`need_ge(below(n), n)` against
 like a name the slot mentions (`Cons(n, _)` over `List({Int | _ < n})`) gets no
 fact from it.
 
+### Relational element refinements
+
+Inside one type application, a slot's predicate can name the binder of a
+**sibling** slot. The result is a relation between the components of every
+**entry** of the container:
+
+```march
+type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+-- every entry's value exceeds its key
+fn need_arel(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do … end
+```
+
+A slot sees the binders of all its siblings, in any order. A sibling binder
+shadows a value parameter of the same name: in
+`fn f(x : Int, a : Assoc({x : Int | true}, {y : Int | y > x}))` the `x` in
+`y > x` is the key, not the parameter. Conjuncts of a slot predicate that name
+no sibling (`y > 0` in `{y : Int | y > 0 && y > x}`) stay an ordinary slot fact,
+so a predicate over one slot is always an ordinary element refinement.
+
+An entry of an ADT container is one constructor occurrence's values for the
+related slots: the `k` and `v` fields of one `ACons`. A relation is checked and
+assumed per entry:
+
+- **Constructing** an entry owes the relation once, over the constructor's
+  fields: `need_arel(ACons(1, 2, ANil))` is proved, and
+  `need_arel(ACons(5, 2, ANil))` is a violation ("the entry (5, 2) passed to
+  `need_arel` does not satisfy precondition `y > x`"). A constructor holding
+  none of the related slots (`ANil`) owes nothing. A constructor whose only
+  field is another container holding all the related slots
+  (`type Outer(k, v) = O(Assoc(k, v))`) passes the relation to that container.
+- **Matching** an entry gives its binders the relation: in
+  `match a do ACons(k, v, _) -> need_gt(k, v)`, with
+  `need_gt(k : Int, v : {Int | _ > k})`, the call is proved. The binders must
+  be direct pattern variables of one constructor occurrence;
+  `ACons(k, _, ACons(_, v, _))` relates nothing.
+- **Projecting**: a value whose declared entry carries a relation meets a
+  demand on fewer slots when the relation implies it.
+  `a : Assoc({x : Int | x > 0}, {y : Int | y > x})` meets
+  `Assoc(Int, {Int | _ > 0})`, and meets a relational demand spelled with
+  other binders (`Assoc({a : Int | true}, {b : Int | b > a})`).
+  `Assoc({x : Int | true}, {y : Int | y > x})` does not meet
+  `Assoc(Int, {Int | _ > 0})`: the violation's example is `x = -1, y = 0`.
+- A proved annotated `let`, a proved declared return, and the recursive call of
+  the function being checked carry the relation like any element refinement,
+  so a recursive `bump` that returns `ACons(k, v + 1, bump(t))` keeps
+  `Assoc({x : Int | true}, {y : Int | y > x})`.
+
+**What is not checked.**
+
+- **A relation does not flow through a polymorphic call.** A function
+  parametric in `k` and `v` carries each slot's fact to its result, but it may
+  pair the key of one entry with the value of another, so the result does not
+  carry the relation. `need_arel(rev(a))` for a generic
+  `rev : Assoc(k, v) -> Assoc(k, v)` is a recorded skip, and a demanded relation
+  traced into such a call is a `parametric-source-unproved` skip ("a relation
+  between `k` and `v` cannot be traced through separate sources", or "is not
+  preserved through `rev`").
+- **The container must be entry-shaped for the related slots:** every
+  constructor holds one value for each of them, or none of them. Otherwise the
+  checker warns `refinement_unchecked` ("This relation is not checked: `Two`'s
+  constructor `K` carries a value for `x` without one for `y`, …") and the
+  relation is treated as not written: never assumed, never owed. The same
+  warning covers a relation over a slot whose type is itself a container
+  (`{xs : List(Int) | true}`), a slot inside a nested container naming an
+  outer binder (`Assoc({x : Int | true}, List({y : Int | y > x}))`), and a
+  constructor that holds some of the related values directly and others
+  inside a nested container (`type Mix(k, v) = MX(k, List(v))`), and one that
+  holds them inside another type where they are not one entry (`type Two(k, v)
+  = Two((List(k), List(v)))`; `Map`'s `HamtMap(HEntry(k, v))`, one type
+  application of both, counts as entry-shaped). Two slots may name each other
+  (`Assoc({x : Int | x < y}, {y : Int | y > x})`): each is one relation.
+- A relation over type-variable slots, and a relation between two different
+  entries (sortedness), cannot be written.
+
 ### Through a polymorphic call
 
 A function that is generic in its element type cannot invent an element, so its
@@ -2301,10 +2379,12 @@ fn filter(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)})
 - `D -> Bool[p]`, a callback's result, is the *definer*
   `({x : D | true}) -> {Bool | _ == p(x)}`. A domain that already names its
   argument keeps the name (`({v : Int | v > 0}) -> Bool[p]`); a domain refined
-  over `_` must name it, and a callback of several arguments (`(a, a) -> Bool[p]`)
-  cannot define one. Both are parse errors that say so.
-- A curried callback (`a -> b -> Bool[p]`) is not modelled: it instantiates
-  nothing and proves nothing.
+  over `_` must name it. Both are parse errors that say so.
+- On a curried callback, `k -> v -> Bool[p]` defines a `p` of two arguments,
+  `({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}`, and is used
+  as a relation between two sibling slots (**Two arguments**, below). A tuple
+  domain `(a, a) -> Bool[p]` is ONE argument, a tuple, so it defines nothing over
+  the tuple's parts: a parse error that writes the curried chain for you.
 
 So
 with `sum_pos(xs : List({Int | _ > 0}))`:
@@ -2486,6 +2566,135 @@ accumulator: a top-level `partition_go` whose `yes : List(a[p])` and
 `no : List({a | !p(_)})` parameters are checked at every push, so both halves
 are proved on its definition side.
 
+**Two arguments: a relation between sibling slots.** A callback of two arguments defines a `p` of two. In March a two-argument
+callback is a curried chain `D1 -> D2 -> Bool`, whichever way the combinator
+calls it (a tuple domain `(D1, D2) -> Bool` is ONE argument, a tuple). The
+definer applies `p` to both domain binders, in order, and an occurrence relates
+two sibling slots of one type application, as a
+[relational element refinement](#relational-element-refinements) does. The
+shorthand marks every slot `p` relates, in slot order:
+
+```march
+type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do
+  match a do
+    ANil -> ANil
+    ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end
+  end
+end
+```
+
+and means exactly the spelled-out form, which is also accepted:
+
+```march
+fn filt(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)})
+    : Assoc({x : k | true}, {y : v | p(x, y)}) do
+  …
+end
+```
+
+`Assoc(k[p], v[p])` is the relation only because `p` takes two arguments, and
+that is read from the definer in the same signature: with a one-argument `p`
+(`keep : k -> Bool[p]`), `Assoc(k[p], k[p])` is two separate facts, one per slot.
+A domain may name its binder in the chain as for one argument
+(`({x : Int | x > 0}) -> v -> Bool[p]`); two domains may not share one.
+
+The return says: every entry `(x, y)` of the result satisfies `p(x, y)`. Inside
+`filt`, `p` is an uninterpreted function of two arguments and `keep(k, v)` is
+`p(k, v)`, so the body proves its return. At a call `p` is what the passed
+callable computes, and the produced relation is compared with the demand
+(projected onto one slot where the demand is about one slot):
+
+```march
+fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end
+fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+need_pos(filt(a, fn (_k, v) -> v > 0))           -- proved
+need_arel(filt(a, fn (k, v) -> v > k))           -- proved: the relation itself
+need_pos(filt(a, fn (k, v) -> k > 0 && v > k))   -- proved: projected onto the values
+need_pos(filt(a, fn (k, v) -> v > k))            -- skip: too weak (a negative key)
+need_pos(filt(a, fn (_k, v) -> v >= 0))          -- skip: too weak
+```
+
+What instantiates a two-argument `p`: an uncurried lambda `fn (k, v) -> …` for
+a combinator that calls its callback `keep(k, v)`, a curried one `fn k -> fn v
+-> …` for one that calls it in two steps (today that counts only for a
+parameter's `p` and for `Map.filter`'s assumed return, below; see "Not yet"),
+either bound by `let`, a function
+with a proved `{Bool | _ == e}` return over two parameters (`fn above(k : Int,
+v : Int) : {Bool | _ == (v > k)}`), and a callback parameter that itself
+defines a two-argument abstract refinement of the enclosing function (`keep :
+k -> v -> Bool[q]`, passing its `q` on). A lambda that binds one name twice
+(`fn (x, x) -> …`, `fn k -> fn k -> …`) instantiates nothing: which argument
+its `x` names is not the same in the interpreter and in compiled code.
+Anything else is `abstract-refinement-uninstantiated`, naming why. A chain
+ending in a concrete contract, `kk : ({x : Int | true}) -> ({y : Int | true})
+-> {Bool | _ == (y > x)}`, is not a contract yet: nothing checks the callable
+passed for `kk` against it, so inside the function `kk(k, v)` gives no fact
+and `filt(a, kk)` instantiates nothing (a one-argument codomain contract is
+checked at each call, as above). A parameter may carry `p` too (`need(a :
+Assoc({x : k | true}, {y : v | p(x, y)}), keep : …)`): the argument's entries
+must then meet the instantiated relation. A slot that also names another
+parameter of the callee (`{y : Int | p(x, y) && y > n}`) is read at the call's
+argument for it, on a return and on a parameter alike. A callable that makes
+the relation constant still binds it: `fn (_k, _v) -> false` passed for such a
+parameter is a violation for any non-empty argument. The input's own slot facts carry over, as for one
+argument (`a : Assoc(Int, {Int | _ > 0})` through `filt(a, fn (_k, v) -> v <
+100)` meets `_ > 0 && _ < 100`), but the input's *relations* do not: the
+result's entries are not the input's, and a function generic in `k` and `v`
+may pair the key of one entry with the value of another.
+
+The signature is checked (each an error, `abstract_refinement_misuse`, with
+the fix in the message): the definer applies `p` to every binder of its chain,
+once each, in order (`p(y)` under a two-argument callback is an error, and so
+is `p(y, x)`); an occurrence names distinct binders of sibling slots (a single
+slot, `Assoc(k, v[p])` or `Assoc(k, {v | p(_)})`, is an error whose fix is
+`Assoc(k[p], v[p])`, and so is marking a number of slots other than two); each argument has one type across
+the definer and every occurrence; the container is entry-shaped (every
+constructor holds one `k` and one `v`, or neither; inside another type only
+as one type application of both, as `Map`'s `HamtMap(HEntry(k, v))`, see
+[relational element refinements](#relational-element-refinements)); and one
+`p` has one arity.
+
+Not yet: inside a body, a callback called in two steps (`let g = keep(k)` then
+`g(v)`) gives `g(v)` no fact, so a combinator written that way does not prove
+its relational return, and its calls instantiate nothing. (`keep(k)(v)` is not
+March syntax.)
+
+**`Map.filter` carries it, assumed.** Its callback is curried and decides on a
+key and a value together:
+
+```march
+@[assume]
+fn filter(m : Map(k, v), pred : k -> v -> Bool[p], cmp : k -> k -> Bool)
+    : {Map(k[p], v[p]) | subset(keys(_), keys(m))} do … end
+```
+
+```march
+fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+fn need_rel(_m : Map({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+need_vals(Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp))   -- proved
+need_rel(Map.filter(n, fn k -> fn v -> v > k, Map.int_cmp))     -- proved
+need_vals(Map.filter(m, fn _k -> fn v -> v >= 0, Map.str_cmp))  -- skip: too weak
+```
+
+`Map`'s body goes through `entries(m)` (a list of tuples) and calls `pred` in
+two steps, so the checker cannot prove the entry fact; it is `@[assume]`d like
+every other `Map` contract. `@[assume]` on a function whose return has an
+element entry (slots, relations or abstract applications) assumes that entry:
+the body is not checked against it, the definition counts one `trusted`
+postcondition per entry in `--refine-report`, and it is accepted under
+`cap verified`. At a call the assumed entry is instantiated like a proved one,
+with one difference: an assumed callee is asked only that its type variables
+are generic in its inferred type (the parameters must be annotated), and the
+input's own element facts are not conjoined (`m : Map(String, {Int | _ > 0})`
+through `Map.filter(m, fn _k -> fn v -> v < 100, …)` does not meet `_ > 0 && _ <
+100`, and the too-weak detail says so). The property test in
+`test/stdlib/test_map.march` checks the fact at run time. `HashMap.filter`,
+`OrderedMap.filter` and a `List((k, v))` of pairs do not carry it yet.
+
 What it does not do (reason `abstract-refinement-uninstantiated` where a
 demand meets one of these):
 
@@ -2509,8 +2718,10 @@ demand meets one of these):
   good as the obligation at each place `keep_pos` is called, and passing a
   callable whose return is not known to meet it is a skip there today, not a
   violation.
-- **One argument only.** `Map.filter`'s `(k, v) -> Bool` would need a
-  two-argument `p(k, v)`. (A fold's accumulator invariant needs no abstract
+- **`Map`'s other functions carry no element fact.** `Map.insert`,
+  `Map.remove`, `Map.get`, `Map.merge` and `Map.map_values` keep nothing of a
+  refined input (`Map.insert(pos_map, "b", 5, cmp)` into a positive-value
+  demand is a skip). (A fold's accumulator invariant needs no abstract
   refinement at all; see [Folds](#folds-an-accumulator-invariant).)
 - **Not every combinator.** `drop_while` (`List`, `Enum`) keeps no element
   fact: its result starts at the first element that FAILS `pred`, so nothing
@@ -2742,7 +2953,8 @@ refinement instead (`xs : List({Int | _ > 0})`), and `x` gets it.
   `List.find`, `List.take_while`, `Option.filter`, `List.partition` (per
   component), `Prelude.filter` (the bare `filter`), `Enum.filter`,
   `Enum.find`, `Enum.take_while`, `Iterable.filter`, `Iterable.find`,
-  `Range.filter` and `Deque.filter`. Each is instantiated from a lambda
+  `Range.filter`, `Deque.filter` and, over a key and a value together and
+  assumed rather than proved, `Map.filter`. Each is instantiated from a lambda
   (whose body may combine `&&`/`||`/`not`/`if` and calls to proved helpers),
   a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
@@ -2780,9 +2992,11 @@ refinement instead (`xs : List({Int | _ > 0})`), and `x` gets it.
   tail is `go(t)` is a skip. A local returning a tuple of element-refined
   containers has every component of every tail checked, but lends nothing at
   its calls.
-- **A predicate relating elements to each other** (sortedness, distinctness)
-  cannot be written; see [Set Refinements](#set-refinements) for what a
-  predicate can say about a collection's elements as a set.
+- **A predicate relating different elements to each other** (sortedness,
+  distinctness) cannot be written. A relation between the components of ONE
+  entry can ([Relational element refinements](#relational-element-refinements));
+  see [Set Refinements](#set-refinements) for what a predicate can say about a
+  collection's elements as a set.
 - **A parameter inside another container is followed one level, and only
   as a bare argument.** A constructor field `C(…)` of another registered
   container (`List`, `Option`, `Result`, or a variant type of the program)

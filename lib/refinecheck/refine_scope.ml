@@ -307,8 +307,13 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
   (* An abstract refinement of the function being checked: uninterpreted
      (design 2026-09-20 §2a).  Only inside its declaring definition —
      [current_abstracts] is empty everywhere else. *)
-  | A.EApp (A.EVar { A.txt = p; _ }, [ a ], _) when List.mem p !current_abstracts ->
-    Result.map (fun t -> Smt.App (abs_sym p, [ t ])) (r a)
+  | A.EApp (A.EVar { A.txt = p; _ }, (_ :: _ as args), _) when List.mem p !current_abstracts ->
+    (* n-ary (multi-arg design §3a): one argument per position. *)
+    let rec all = function
+      | [] -> Ok []
+      | a :: rest -> (match r a with Ok t -> Result.map (fun ts -> t :: ts) (all rest) | Error e -> Error e)
+    in
+    Result.map (fun ts -> Smt.App (abs_sym p, ts)) (all args)
   | A.EApp (A.EVar { A.txt = m0; _ }, [ a ], _)
     when is_measure_app m0 && (vocab || not (is_builtin_set_measure (measure_name m0))) ->
     (* One normalization point for BOTH sides: a path condition and a predicate
@@ -714,6 +719,25 @@ let is_ret_suffix (s : string) : bool =
    Anything else prints as "k = v". *)
 let render_model_entry (k, v) : string =
   let v' = pretty_smt_value v in
+  (* A fresh entry constant of element subtyping (`$elem_<j>_<binder>`,
+     [Refine_check.entry_implies]): the binder the declarations spell for
+     slot [j], or the slot's position. *)
+  let elem_const =
+    let pre = "$elem_" in
+    let lp = String.length pre in
+    if String.length k > lp && String.sub k 0 lp = pre then
+      let rest = String.sub k lp (String.length k - lp) in
+      match String.index_opt rest '_' with
+      | Some i when i > 0 && String.for_all (fun c -> c >= '0' && c <= '9') (String.sub rest 0 i) ->
+        Some (String.sub rest (i + 1) (String.length rest - i - 1))
+      | None when rest <> "" && String.for_all (fun c -> c >= '0' && c <= '9') rest ->
+        Some (Printf.sprintf "(slot %d)" (int_of_string rest + 1))
+      | _ -> None
+    else None
+  in
+  match elem_const with
+  | Some name -> Printf.sprintf "%s = %s" name v'
+  | None ->
   match String.index_opt k '$' with
   | Some i ->
     let head = String.sub k 0 i in
@@ -849,7 +873,100 @@ let dom_binder (dom : A.ty) : string option =
   | A.TyRefine (_, Some n, _) when n.A.txt <> "_" -> Some n.A.txt
   | _ -> None
 
+(* A callback CHAIN `D1 -> … -> Dn -> {Bool | _ == p(x1, …, xn)}` (n ≥ 2,
+   multi-arg design §5.3 shape (i)) as an n-parameter signature `[$cb_arg;
+   $cb_arg2; …]`: the domains its parameters, each domain binder renamed to
+   its position's name in the result's definition (and in a later domain's
+   refinement).  ONLY a DEFINER of a current abstract refinement [p]
+   ([current_abstracts]), applied to the chain's own binders in order, so no
+   other chain gains a fact; every other chain keeps the one-parameter
+   signature below.  A call through it with all n arguments, `keep(k, v)`,
+   reflects to `keep$ret == $abs_p(k, v)` ([postcond_of]); a call with fewer
+   gets no fact ([postcond_of_declared]'s arity rule).
+
+   Review C2 (2026-10-21, a controller ruling): the design's shape (ii), a
+   CONCRETE predicate contract (`{Bool | _ == (x > 0)}`), is no longer an
+   n-parameter signature.  It gave the body the fact `keep$ret == (k > 0)`,
+   and no pass site obliged the callable passed for it (a chain's codomain
+   is an arrow, which [check_pass_sites] owes nothing for): `h(fn (_a, _b)
+   -> true, 0 - 5, 1)` was proved.  The fact for a definer is sound for the
+   opposite reason: [p] is uninterpreted in the body and instantiated at each
+   call from the very callable passed.  The pass-site obligation `q ⇔ e`
+   that would bring shape (ii) back is filed
+   (specs/todos/2026-10-21-chain-predicate-contract-pass-site.md). *)
+let chain_sig_of_ty (t : A.ty) : fn_sig option =
+  let rec doms (t : A.ty) acc =
+    match t with A.TyArrow (d, c) -> doms c (d :: acc) | c -> (List.rev acc, c)
+  in
+  match t with
+  | A.TyArrow _ ->
+    let ds, cod = doms t [] in
+    (match unlinear cod with
+     | A.TyRefine (base, b, (A.EApp (A.EVar { A.txt = "=="; _ }, [ l; r ], _) as pred))
+       when List.length ds >= 2 && is_bool_base base ->
+       let bn = binder_name b in
+       let is_b = function A.EVar { A.txt; _ } -> txt = bn || txt = "_" | _ -> false in
+       let e = if is_b l then Some r else if is_b r then Some l else None in
+       (* Shape (i) only: `p(x1, …, xn)`, [p] a current abstract refinement,
+          its arguments the chain's own domain binders, in order. *)
+       let definer =
+         match e with
+         | Some (A.EApp (A.EVar { A.txt = p; _ }, args, _)) when List.mem p !current_abstracts ->
+           List.length args = List.length ds
+           && List.for_all2
+                (fun a d ->
+                  match a, dom_binder d with
+                  | A.EVar { A.txt; _ }, Some x -> txt = x && x <> bn
+                  | _ -> false)
+                args ds
+         | _ -> false
+       in
+       if not definer then None
+       else
+         let names =
+           List.mapi
+             (fun i _ -> if i = 0 then callback_param_name else callback_param_name ^ string_of_int (i + 1))
+             ds
+         in
+         let env =
+           List.concat
+             (List.map2
+                (fun d n ->
+                  match dom_binder d with
+                  | Some x when x <> bn -> [ (x, A.EVar { A.txt = n; A.span = A.dummy_span }) ]
+                  | _ -> [])
+                ds names)
+         in
+         let refined =
+           List.concat
+             (List.mapi
+                (fun i d ->
+                  match refined_param_ty (Some d) with
+                  | Some (binder, p, sort) ->
+                    let env' = List.filter (fun (x, _) -> x <> binder) env in
+                    [ { idx = i; binder; pred = subst_params env' p; sort } ]
+                  | None -> [])
+                ds)
+         in
+         let sort_at i = List.find_map (fun (rp : rparam) -> if rp.idx = i then Some rp.sort else None) refined in
+         Some
+           { param_names = names
+           ; param_str = List.mapi (fun i _ -> sort_at i = Some (Some str_sort)) ds
+           ; param_scalar =
+               List.mapi (fun i _ -> match sort_at i with Some s -> scalar_sort_or_int s | None -> Smt.SInt) ds
+           ; param_tys = List.map (fun d -> Some d) ds
+           ; refined
+           ; ret = Some (bn, subst_params env pred)
+           ; ret_sort = Some bool_sort
+           ; ret_ty = Some cod
+           }
+     | _ -> None)
+  | _ -> None
+
 let callback_sig_of_ty (t : A.ty) : fn_sig option =
+  match chain_sig_of_ty t with
+  | Some sg -> Some sg
+  | None ->
   match t with
   | A.TyArrow (dom, cod) ->
     (* The CODOMAIN's refinement is the callback's postcondition (P3 design
@@ -1469,21 +1586,138 @@ let cb_add_fnparam (cb : cbenv) : A.fn_param -> cbenv = function
    that parameter, a nested container carrying its own slots
    (`List(List({Int | p}))`, P3 design §2b), or nothing.  A container entry
    is the container's bare type name plus its slots; [elem_refinement]
-   returns one only when some slot is non-empty. *)
-type elem = Refined of (string * A.expr * string option) | Container of string * elem option list
+   returns one only when some slot is non-empty.
 
-type contenv = (string * (string * elem option list)) list
+   [rels] (multi-arg design 2026-10-18 §2.2, R1): RELATIONS between scalar
+   slots, each holding of every entry's components jointly (`Assoc({x : Int
+   | true}, {y : Int | y > x})`).  Phase 1a is the inert migration: no
+   constructor builds one, so every [rels] is [[]]; the type is here so every
+   reader of an entry is a site the compiler enumerates. *)
+type elem =
+  | Refined of (string * A.expr * string option)
+  | Container of entry
+
+and entry = { cont : string; slots : elem option list; rels : rel list }
+
+(* [rel_args]: (slot index, binder, sort marker), at least two distinct
+   slots once normalised ([normalize_entry]); [rel_pred] is over those
+   binders. *)
+and rel = { rel_args : (int * string * string option) list; rel_pred : A.expr }
+
+type contenv = (string * entry) list
+
+(* Today's (container, slots) pair as an entry: no relation. *)
+let entry_of_slots (cont : string) (slots : elem option list) : entry = { cont; slots; rels = [] }
+
+(* [p] conjoined with [q] at one binder, [p]'s first (AR design §3.4: the
+   incoming fact first, for stable rendering).  [q]'s binder is renamed to
+   [p]'s, unless [q] mentions [p]'s binder as an outer name: then both move
+   to the first `$r`, `$r1`, … neither mentions (deterministic, no counter). *)
+let conj_refined ((b, p, s) : string * A.expr * string option) ((b', q, s') : string * A.expr * string option)
+  : string * A.expr * string option =
+  let sp = A.dummy_span in
+  let ev x = A.EVar { A.txt = x; A.span = sp } in
+  let rn from x e = if from = x then e else subst_params [ (from, ev x) ] e in
+  let b, p =
+    if b = b' || not (expr_mentions [ b ] q) then (b, p)
+    else
+      let rec fresh k =
+        let x = if k = 0 then "$r" else Printf.sprintf "$r%d" k in
+        if expr_mentions [ x ] p || expr_mentions [ x ] q then fresh (k + 1) else x
+      in
+      let x = fresh 0 in
+      (x, rn b x p)
+  in
+  let sort = match s with Some _ -> s | None -> s' in
+  (b, A.EApp (ev "&&", [ p; rn b' b q ], sp), sort)
+
+(* The normal form every entry is built in (§2.2):
+   (I1) a relation over ONE slot is conjoined into that slot (its binders
+        renamed to the slot's), and a literally `true` relation drops, so a
+        fact over one slot is always a slot fact;
+   (I2) a relation over a nested-container slot drops (no scalar stand-in);
+   (I3) a relation's sort markers come from the slot's declared base.
+   With [rels = []] it is the identity on the slots (nested entries included),
+   which is what keeps phase 1a byte-identical. *)
+let rec normalize_entry (e : entry) : entry =
+  let slots =
+    List.map (function Some (Container inner) -> Some (Container (normalize_entry inner)) | s -> s) e.slots
+  in
+  if e.rels = [] then { e with slots }
+  else
+    let slots = Array.of_list slots in
+    let slot_at j = if j >= 0 && j < Array.length slots then Some slots.(j) else None in
+    let rels =
+      List.filter_map
+        (fun (r : rel) ->
+          let idxs = List.sort_uniq compare (List.map (fun (j, _, _) -> j) r.rel_args) in
+          let is_true = match r.rel_pred with A.ELit (A.LitBool true, _) -> true | _ -> false in
+          let scalar j = match slot_at j with Some (None | Some (Refined _)) -> true | _ -> false in
+          (* [idxs = []] is never built (review C1): every constructor keeps
+             at least the slots a relation was declared over, even when its
+             instantiated predicate names none of them; dropping such a
+             relation here would be sound on a have side only. *)
+          if is_true || idxs = [] || not (List.for_all scalar idxs) then None
+          else
+            match idxs, r.rel_args with
+            | [ j ], (_, b0, s0) :: rest ->
+              (* Every binder of the one slot spelled as the first. *)
+              let pred =
+                List.fold_left
+                  (fun p (_, b, _) ->
+                    if b = b0 then p else subst_params [ (b, A.EVar { A.txt = b0; A.span = A.dummy_span }) ] p)
+                  r.rel_pred rest
+              in
+              slots.(j) <-
+                (match slots.(j) with
+                 | Some (Refined have) -> Some (Refined (conj_refined have (b0, pred, s0)))
+                 | _ -> Some (Refined (b0, pred, s0)));
+              None
+            | _ ->
+              let rel_args =
+                List.map
+                  (fun (j, b, s) ->
+                    match slot_at j with Some (Some (Refined (_, _, (Some _ as s')))) -> (j, b, s') | _ -> (j, b, s))
+                  r.rel_args
+              in
+              Some { r with rel_args })
+        e.rels
+    in
+    { e with slots = Array.to_list slots; rels }
+
+(* The conjunction of two facts about one container (§2.3, AR §3.4): slots
+   pairwise, [a]'s (the incoming fact) first; relations concatenated, [a]'s
+   first; normalised.  Two entries that do not line up (another container, a
+   different slot count, a scalar against a nested slot) keep [a]'s side:
+   a lost assumption, sound for the have side this is used on. *)
+let rec entry_meet (a : entry) (b : entry) : entry =
+  if a.cont <> b.cont || List.length a.slots <> List.length b.slots then a
+  else
+    let slot x y =
+      match x, y with
+      | None, s | s, None -> s
+      | Some (Refined p), Some (Refined q) -> Some (Refined (conj_refined p q))
+      | Some (Container ea), Some (Container eb) -> Some (Container (entry_meet ea eb))
+      | s, Some _ -> s
+    in
+    normalize_entry { a with slots = List.map2 slot a.slots b.slots; rels = a.rels @ b.rels }
 
 (* Does any element predicate of [entry] mention one of [names] (other than
-   that slot's own binder)?  Over-approximate exactly as [expr_mentions]. *)
-let rec elem_entry_mentions (names : string list) ((_, slots) : string * elem option list) : bool =
+   that slot's own binder, or a relation's own binders)?  Over-approximate
+   exactly as [expr_mentions]. *)
+let rec elem_entry_mentions (names : string list) (e : entry) : bool =
   names <> []
-  && List.exists
-       (function
-         | None -> false
-         | Some (Refined (b, p, _)) -> expr_mentions (List.filter (( <> ) b) names) p
-         | Some (Container (c, inner)) -> elem_entry_mentions names (c, inner))
-       slots
+  && (List.exists
+        (function
+          | None -> false
+          | Some (Refined (b, p, _)) -> expr_mentions (List.filter (( <> ) b) names) p
+          | Some (Container inner) -> elem_entry_mentions names inner)
+        e.slots
+     || List.exists
+          (fun (r : rel) ->
+            let own = List.map (fun (_, b, _) -> b) r.rel_args in
+            expr_mentions (List.filter (fun n -> not (List.mem n own)) names) r.rel_pred)
+          e.rels)
 
 (* Retires an entry by its KEY and also any entry one of whose slot
    predicates MENTIONS a rebound name — the same rule as [scope_shadow].
@@ -1519,33 +1753,213 @@ let abstract_tyvar_slot (arg : A.ty) : (string * A.expr * string option) option 
   | A.TyRefine (A.TyVar _, binder, pred)
     when !current_abstracts <> []
          && List.exists (fun (n, _, _) -> List.mem n !current_abstracts)
-              (Refine_abstract.applications pred) ->
+              (Refine_abstract.applications_n pred) ->
     Some (binder_name binder, pred, None)
   | _ -> None
 
-let rec elem_refinement (t : A.ty option) : (string * elem option list) option =
+(* The binders an application of a current abstract refinement names, over
+   every slot predicate of one type application (multi-arg design §5.2): a
+   type-variable slot `{x : k | true}` whose binder a sibling's `p(x, y)`
+   names is a slot of the relation, inside the declaring definition only. *)
+let abstract_rel_binders (args : A.ty list) : string list =
+  if !current_abstracts = [] then []
+  else
+    List.concat_map
+      (fun (t : A.ty) ->
+        match unlinear t with
+        | A.TyRefine (_, _, pred) ->
+          List.concat_map
+            (fun (n, xs, _) ->
+              if List.mem n !current_abstracts && List.length xs >= 2 then List.filter_map Fun.id xs else [])
+            (Refine_abstract.applications_n pred)
+        | _ -> [])
+      args
+
+(* The span of a slot predicate, for a declaration warning; [fallback] (the
+   container name's) for a shape with no span of its own. *)
+let pred_span (fallback : A.span) (e : A.expr) : A.span =
+  match e with
+  | A.EApp (_, _, sp) | A.ELit (_, sp) | A.EIf (_, _, _, sp) | A.ECon (_, _, sp) | A.EField (_, _, sp) -> sp
+  | A.EVar n -> n.A.span
+  | _ -> fallback
+
+(* One container application's entry and the RELATION issues found at this
+   application (not inside its arguments; each nested application reports its
+   own when the declaration walk reaches it).
+
+   Relations (multi-arg design 2026-10-18 §1.3, phase 1b): inside one type
+   application a slot predicate sees the binders of ALL sibling slots, in any
+   order, and a sibling binder shadows a value parameter of the same name.
+   Each top-level conjunct of slot [i]'s predicate that names a sibling
+   binder goes into one relation over [i] and those siblings; the other
+   conjuncts stay slot [i]'s fact (a slot left with none is empty, its sort
+   marker kept in the relation).  A relation is kept only when it is
+   well-formed for a CONCRETE relation (§1.4); otherwise it is dropped (never
+   assumed, never obliged) and an issue says why, for [warn_predicate_ty]:
+
+   - W2: every related slot is a scalar (its base is no container type);
+   - W4: the container is entry-shaped for the related slots ([entry_shaped]);
+   - a sibling binder spelled on two other slots is ambiguous;
+   - a slot INSIDE a nested container naming a sibling binder (`Assoc({x :
+     Int | true}, List({y : Int | y > x}))`) relates values across nesting
+     levels: the nested slot is dropped (I2, §8).
+
+   Without a sibling-binder reference this is exactly the pre-1b reading:
+   the same slots, [rels = []]. *)
+let rec elem_app (cname : A.name) (args : A.ty list) : entry option * (A.span * string) list =
+  let c = cname.A.txt in
+  let rel_binders = abstract_rel_binders args in
+  (* A type-variable slot admitted only because a sibling's abstract
+     relation names its binder (§5.2); a literally-`true` one is emptied
+     once the relations are read. *)
+  let via_rel = ref [] in
+  let read (i : int) (arg : A.ty) : elem option =
+    match refined_param_ty (Some arg) with
+    | Some r -> Some (Refined r)
+    | None ->
+      match abstract_tyvar_slot arg with
+      | Some r -> Some (Refined r)
+      | None ->
+        (match unlinear arg with
+         | A.TyRefine (A.TyVar _, Some { A.txt = b; _ }, pred) when b <> "_" && List.mem b rel_binders ->
+           via_rel := i :: !via_rel;
+           Some (Refined (b, pred, None))
+         | _ ->
+           (match elem_refinement (Some arg) with
+            | Some inner -> Some (Container inner)
+            | None -> None))
+  in
+  let slots = Array.of_list (List.mapi read args) in
+  let n = Array.length slots in
+  let issues = ref [] in
+  let warn sp text = issues := (sp, "This relation is not checked: " ^ text) :: !issues in
+  (* Every slot's binder and sort marker as READ, before the loop below
+     empties a slot whose conjuncts all became relations: two slots naming
+     each other (`Assoc({x : Int | x < y}, {y : Int | y > x})`) would
+     otherwise find the first slot already emptied (review I1). *)
+  let read_binders = Array.map (function Some (Refined (b, _, _)) when b <> "_" -> Some b | _ -> None) slots in
+  let read_markers = Array.map (function Some (Refined (_, _, m)) -> m | _ -> None) slots in
+  let binder_at j = read_binders.(j) in
+  let binders = List.init n (fun j -> (j, binder_at j)) |> List.filter_map (fun (j, b) -> Option.map (fun b -> (j, b)) b) in
+  let base_is_container (j : int) : string option =
+    let rec base (t : A.ty) =
+      match unlinear t with A.TyRefine (b, _, _) -> base b | t -> t
+    in
+    match List.nth_opt args j with
+    | Some t ->
+      (match base t with
+       | A.TyCon ({ A.txt = bc; _ }, _) when is_container_type bc -> Some bc
+       | _ -> None)
+    | None -> None
+  in
+  let rels = ref [] in
+  for i = 0 to n - 1 do
+    match slots.(i) with
+    | Some (Refined (b, p, srt)) ->
+      (* The sibling binders slot [i] can see: every other slot's, except one
+         its own binder shadows. *)
+      let sibs = List.filter (fun (j, bj) -> j <> i && bj <> b) binders in
+      let names_of q = List.filter (fun (_, bj) -> expr_mentions [ bj ] q) sibs in
+      let cs = conjuncts_of p in
+      let rel_cs, own_cs = List.partition (fun q -> names_of q <> []) cs in
+      if rel_cs <> [] then begin
+        let conj = function
+          | [] -> A.ELit (A.LitBool true, A.dummy_span)
+          | q :: qs -> List.fold_left (fun a q -> A.EApp (A.EVar { A.txt = "&&"; A.span = A.dummy_span }, [ a; q ], A.dummy_span)) q qs
+        in
+        let rel_pred = conj rel_cs in
+        let sp = pred_span cname.A.span (List.hd rel_cs) in
+        let named = List.concat_map names_of rel_cs in
+        let js = List.sort_uniq compare (List.map fst named) in
+        let related = List.sort_uniq compare (i :: js) in
+        let name_of j = if j = i then (if b = "_" then "_" else b) else Option.value ~default:"_" (binder_at j) in
+        let dup =
+          List.find_opt
+            (fun (_, bj) -> List.length (List.filter (fun (_, bk) -> bk = bj) sibs) > 1)
+            named
+        in
+        (match dup with
+         | Some (_, bj) ->
+           warn sp
+             (Printf.sprintf "`%s` names two sibling slots of this `%s`, so the relation does not say which" bj c)
+         | None ->
+           (match List.find_map (fun j -> Option.map (fun bc -> (j, bc)) (base_is_container j)) related with
+            | Some (j, bc) ->
+              warn sp
+                (Printf.sprintf
+                   "`%s` is a `%s` slot, and a relation between element slots relates scalar slots \
+                    (Int, Bool, String, Float, a record or a type variable), not a nested container"
+                   (name_of j) bc)
+            | None ->
+              (match entry_shaped ~name_of c related with
+               | Error why -> warn sp why
+               | Ok () ->
+                 let marker j = read_markers.(j) in
+                 rels :=
+                   { rel_args = List.map (fun j -> (j, (if j = i then b else Option.get (binder_at j)), (if j = i then srt else marker j))) related
+                   ; rel_pred }
+                   :: !rels)));
+        slots.(i) <- (if own_cs = [] then None else Some (Refined (b, conj own_cs, srt)))
+      end
+    | _ -> ()
+  done;
+  (* A nested slot naming one of this application's binders: across nesting
+     levels, dropped. *)
+  Array.iteri
+    (fun i s ->
+      match s with
+      | Some (Container inner) ->
+        let sibs = List.filter_map (fun (j, b) -> if j <> i then Some b else None) binders in
+        if elem_entry_mentions sibs inner then begin
+          warn cname.A.span
+            (Printf.sprintf
+               "a slot inside the nested `%s` names a binder of this `%s`, and a relation relates \
+                slots of one type application, not values across nesting levels"
+               inner.cont c);
+          slots.(i) <- None
+        end
+      | _ -> ())
+    slots;
+  List.iter
+    (fun i ->
+      match slots.(i) with
+      | Some (Refined (_, A.ELit (A.LitBool true, _), _)) -> slots.(i) <- None
+      | _ -> ())
+    !via_rel;
+  let slots = Array.to_list slots and rels = List.rev !rels in
+  ( (if List.exists Option.is_some slots || rels <> [] then Some (normalize_entry { cont = c; slots; rels })
+     else None)
+  , List.rev !issues )
+
+and elem_refinement (t : A.ty option) : entry option =
   match Option.map unlinear t with
   (* A refinement on the CONTAINER itself (`{List({Int | p}) | len(_) > 0}`)
      is a fact about the container, carried by [scope]; the element slots are
      those of its base. *)
   | Some (A.TyRefine (base, _, _)) -> elem_refinement (Some base)
-  | Some (A.TyCon ({ A.txt = c; _ }, args)) when args <> [] && is_container_type c ->
-    let slots =
-      List.map
-        (fun arg ->
-          match refined_param_ty (Some arg) with
-          | Some r -> Some (Refined r)
-          | None ->
-            match abstract_tyvar_slot arg with
-            | Some r -> Some (Refined r)
-            | None ->
-            (match elem_refinement (Some arg) with
-             | Some (c', slots') -> Some (Container (c', slots'))
-             | None -> None))
-        args
-    in
-    if List.exists Option.is_some slots then Some (c, slots) else None
+  | Some (A.TyCon (cn, args)) when args <> [] && is_container_type cn.A.txt -> fst (elem_app cn args)
   | _ -> None
+
+(* The relation issues of the application at the top of [t] (see [elem_app]),
+   for the declaration walk ([Refine_check.warn_predicate_ty]), which reaches
+   every nested application itself. *)
+let relation_issues (t : A.ty) : (A.span * string) list =
+  match unlinear t with
+  | A.TyCon (cn, args) when args <> [] && is_container_type cn.A.txt -> snd (elem_app cn args)
+  | _ -> []
+
+(* Every relation issue anywhere in [t] (the audit asks whether ITS site's
+   predicate was dropped). *)
+let rec relation_issues_deep (t : A.ty) : (A.span * string) list =
+  let here = relation_issues t in
+  here
+  @
+  match t with
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> relation_issues_deep b
+  | A.TyCon (_, ts) | A.TyTuple ts -> List.concat_map relation_issues_deep ts
+  | A.TyArrow (a, b) -> relation_issues_deep a @ relation_issues_deep b
+  | A.TyRecord fs -> List.concat_map (fun (_, t) -> relation_issues_deep t) fs
+  | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> []
 
 (* A function's element RETURN (leftovers design 2026-10-18 §5.1): today's
    container return, or a TUPLE of them, one entry per component (`None`: that
@@ -1554,8 +1968,8 @@ let rec elem_refinement (t : A.ty option) : (string * elem option list) option =
    [None] for that component (out of scope).  Read under whatever
    [current_abstracts] the caller set, exactly as [elem_refinement]. *)
 type ret_elems =
-  | Single of (string * elem option list)
-  | Tuple of (string * elem option list) option list
+  | Single of entry
+  | Tuple of entry option list
 
 let ret_elems_of_ty (t : A.ty option) : ret_elems option =
   let rec strip (t : A.ty) = match unlinear t with A.TyRefine (b, _, _) -> strip b | t -> t in
@@ -1566,7 +1980,7 @@ let ret_elems_of_ty (t : A.ty option) : ret_elems option =
   | _ -> Option.map (fun e -> Single e) (elem_refinement t)
 
 (* Every entry of a [ret_elems] (never empty: a [Tuple] has at least one). *)
-let ret_entries : ret_elems -> (string * elem option list) list = function
+let ret_entries : ret_elems -> entry list = function
   | Single e -> [ e ]
   | Tuple comps -> List.filter_map Fun.id comps
 

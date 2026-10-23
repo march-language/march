@@ -21,6 +21,61 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinements: `Map.filter` keeps what its predicate says.** `Map.filter(m, pred,
+  cmp)` is now `pred : k -> v -> Bool[p]` returning `{Map(k[p], v[p]) | subset(keys(_),
+  keys(m))}`, so `need_vals(Map.filter(m, fn _k -> fn v -> v > 0, cmp))` against
+  `Map(String, {Int | _ > 0})` is proved, as are a key demand and a relation between
+  key and value (`fn k -> fn v -> v > k` into `Map({x : Int | true}, {y : Int | y >
+  x})`); a weaker lambda is an `abstract-refinement-too-weak` skip. The entry fact is
+  ASSUMED, like every other `Map` contract: `@[assume]` on a function whose return
+  has element refinements now assumes them (one `trusted` postcondition per entry in
+  `--refine-report`, accepted under `cap verified`), and a property test in
+  `test/stdlib/test_map.march` checks it at run time. The input map's own element
+  facts are not carried through, and `Map`'s other functions (`insert`, `remove`,
+  `get`, `merge`, `map_values`), `HashMap.filter` and `OrderedMap.filter` carry no
+  element fact yet.
+- **Refinements: two-argument abstract refinements.** A callback of two arguments
+  can define an abstract refinement `p` of two, and the return can relate two
+  sibling slots through it:
+  `fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p])`, the
+  shorthand for
+  `keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}` returning
+  `Assoc({x : k | true}, {y : v | p(x, y)})` (both spellings are accepted; with a
+  one-argument `p`, `Assoc(k[p], k[p])` is still two separate slot facts).
+  The body proves the return (`keep(k, v)` is `p(k, v)`); at a call `p` is what the
+  passed lambda, `let`-bound lambda, named predicate, or a callback parameter that
+  itself defines a two-argument `p` computes, so
+  `need_pos(filt(a, fn (_k, v) -> v > 0))` and
+  `need_arel(filt(a, fn (k, v) -> v > k))` are proved and a weaker lambda is an
+  `abstract-refinement-too-weak` skip. A parameter can carry the relation too, read
+  at the call's actuals when it also names another parameter of the callee. A
+  callback chain ending in a concrete `{Bool | _ == e}` is not a contract (nothing
+  checks the callable passed for it yet), and a lambda that binds one name twice
+  (`fn (x, x) -> …`, `fn k -> fn k -> …`) instantiates nothing.
+  Malformed signatures are `abstract_refinement_misuse` errors: `p` applied to
+  only some of the callback's arguments, `p` on a single slot (`Assoc(k, v[p])`,
+  fix `Assoc(k[p], v[p])`; this includes `List(Int[p])` under
+  `Int -> Int -> Bool[p]`, which used to apply `p` to the last argument only and
+  was silently inert), one argument at two types, a container that is not
+  entry-shaped, or one `p` at two arities. `(a, a) -> Bool[p]` stays a parse
+  error, whose message now says the tuple is ONE argument and writes
+  `a -> a -> Bool[p]`. See "Two arguments" under abstract refinements in the
+  refinement types reference.
+- **Refinements: relational element refinements.** A slot predicate may name a
+  sibling slot's binder, relating the two components of every entry:
+  `Assoc({x : Int | true}, {y : Int | y > x})` reads "each entry's value exceeds
+  its key". A construction owes the relation once per entry
+  (`need_arel(ACons(5, 2, ANil))` is a violation naming the entry `(5, 2)`), a
+  `match` gives its binders the relation (`ACons(k, v, _) -> need_gt(k, v)` is
+  proved), and a declared relation implies a demand on fewer slots
+  (`Assoc({x : Int | x > 0}, {y : Int | y > x})` meets `Assoc(Int, {Int | _ > 0})`).
+  Before, the sibling name was a free variable, which gave false violations
+  (that projection, with `x = -1`) and undecided skips. A relation the checker
+  cannot hold per entry (a constructor carrying one of the related values without
+  the other, a container-typed slot, a slot inside a nested container) is warned
+  `refinement_unchecked` and ignored. A relation does not flow through a
+  polymorphic call (a recorded skip). See "Relational element refinements" in the
+  refinement types reference.
 - **`march --refine-infer` proposes every refinement the checker can verify,
   module-wide.** Beyond the sign contracts `--refine-suggest-all` proposes, it
   finds element refinements (`xs : List({Int | _ > 0})`, element and tuple
@@ -257,6 +312,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a lambda or helper that binds one name twice is no longer read as a
+  predicate.** `let h = fn (a, a) -> a > 0` then `List.filter(xs, fn y -> h(y, 1))`
+  was read as `y > 0`, and a function `two(a : Int, a : Int) : {Bool | _ == (a >
+  0)}` lent `two(y, 1) == (y > 0)` at a call; which argument the body's `a` names
+  differs between the interpreter (the first) and compiled code (the last), so both
+  are now declined (`abstract-refinement-uninstantiated`, or no postcondition fact).
 - **`--refine-suggest-all` no longer proposes a precondition that breaks a caller.** The
   suggester re-checked only the target function, so for `go(n : Int) = need_pos(n)` with
   `caller() = go(0 - 5)` it proposed `n : {Int | _ > 0}` and reported "discharges all", although

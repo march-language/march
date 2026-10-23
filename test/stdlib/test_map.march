@@ -11,6 +11,13 @@ pfn str_cmp(a : String) : String -> Bool do
   fn b -> a < b
 end
 
+-- `v > k + t` for an entry `(k, v)`: Map.filter's witness predicate.
+pfn above(kv : (Int, Int), t : Int) : Bool do
+  match kv do
+    (k, v) -> v > k + t
+  end
+end
+
 describe "empty and is_empty" do
   test "empty map is empty" do
     let m = Map.empty()
@@ -361,6 +368,21 @@ describe "assumed keys contracts (runtime witnesses)" do
             && same_keys(Map.map_values(ma, fn v -> v + 1), a)
             && List.all(Map.keys(Map.filter(ma, fn k -> fn _v -> k % 2 == 0, int_cmp)), fn k -> List.member(a, k))
             && same_keys(Map.merge(ma, mb, int_cmp), List.append(a, b))
+      end
+    )
+  end
+
+  -- The runtime witness for Map.filter's ASSUMED element fact
+  -- (`{Map(k[p], v[p]) | ...}`, multi-arg design 2026-10-18 §7.2): the
+  -- refinement checker takes on faith that every entry of the result
+  -- satisfies `pred`, so this property is what checks it.  A threshold
+  -- family relating key and value, over random entries.
+  test "every entry Map.filter keeps satisfies pred (the assumed entry fact)" do
+    Check.all(Gen.tuple2(Gen.list(Gen.tuple2(Gen.int(-20, 20), Gen.int(-20, 20))), Gen.int(-10, 10)), fn pair ->
+      match pair do
+        (pairs, t) ->
+          let kept = Map.filter(Map.from_list(pairs, int_cmp), fn k -> fn v -> v > k + t, int_cmp)
+          List.all(Map.to_list(kept), fn kv -> above(kv, t))
       end
     )
   end
