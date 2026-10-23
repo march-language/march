@@ -85,7 +85,7 @@ trying to do, and the table after it goes from a task to the command.
 | Find a function by name, type or docstring | `forge search "map"`, `forge search --type "List(a) -> (a -> b) -> List(b)"` |
 | Understand what the compiler did to a function | `forge query fn Name`, `forge query origin`, `forge query why-miss` |
 | Add a dependency, or see what it would newly be allowed to do | `forge add`, `forge audit`, `forge outdated` |
-| Get a refinement contract proposed | `forge refine fn_name` |
+| Get refinement contracts proposed, or written | `forge refine --infer --diff`, `forge refine --infer --apply`; one function: `forge refine fn_name` |
 | See what a binary may do, or run it in a sandbox | `forge cap inspect`, `forge cap run` |
 | Rename or move a declaration across the project | `forge refactor rename`, `forge refactor move` |
 | Build for Linux from a Mac | `forge build --target linux/amd64` |
@@ -100,7 +100,7 @@ trying to do, and the table after it goes from a task to the command.
 | Concept | The tooling for it | Chapter |
 |---|---|---|
 | **Capabilities** | `forge cap query` and `inspect`, `forge cap run`, `forge audit`, and the `needs` lines `forge fix` inserts. | [Capabilities]({{ site.baseurl }}/docs/capabilities/), [Capability Audit](capability-audit.md), [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) |
-| **Refinement types** | `forge refine` proposes a contract; `--refine-report` and `--refine-audit` say what was checked. | [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) |
+| **Refinement types** | `forge refine --infer` proposes and writes every contract the checker can verify; `--refine-report` and `--refine-audit` say what was checked. | [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) |
 | **Hot code reload and topology** | `forge deploy hot`, `forge deploy --env`, `forge host init`, `forge topology`. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/), [Topology](topology.md) |
 | **Observing a running node** | `forge status`, `diagnose`, `top`, `observe`, `shell`. | [Observe](observe.md) |
 | **Memory model** | `forge query repr`, `forge phases`, the GC trace viewer, and the editor's reuse hints. | [Memory Model]({{ site.baseurl }}/docs/memory-model/) |
@@ -691,8 +691,12 @@ sqlite3 ~/.claude/skills/spec-search/spec-search.db "SELECT * FROM meta;"
 
 ## forge refine: Suggest a refinement type
 
-`forge refine <fn>` proposes the parameter refinement that discharges the
-refinement obligations a function's body leaves unproven. If `n` is passed to a
+`forge refine --infer` proposes every refinement contract the checker can verify,
+across the whole project, and with `--apply` writes them (see
+[Infer every contract](#infer-every-contract-forge-refine---infer) below).
+`forge refine <fn>` is the older, per-function form: it proposes the parameter
+refinement that discharges the refinement obligations a function's body leaves
+unproven. If `n` is passed to a
 callee declaring `{Int | _ > 0}`, the contract `n` itself has to carry is the
 thing the tool works out for you:
 
@@ -700,13 +704,11 @@ thing the tool works out for you:
 forge refine split           # one function (bare or qualified name)
 forge refine split --apply   # write the annotation into the source
 forge refine --all           # sweep every function in the project
-forge refine --all --apply --fixpoint   # …and keep going until nothing changes
 ```
 
 A contract only becomes visible to a *caller* once the callee bears it, so one
-`--apply` pass propagates exactly one call hop. `--fixpoint` repeats until a round
-applies no change (bounded at 10 rounds; hitting the bound is reported as such, not
-mistaken for convergence).
+`--all --apply` pass propagates exactly one call hop. Pass `--infer` to search to
+a fixpoint instead (`--fixpoint` is now an alias of `--infer`).
 
 ```
 lib/text.march:10  split
@@ -755,6 +757,70 @@ functions happen to be visited first.
 In an editor, the same inference is available as the **"Suggest a refinement
 type for `f`"** code action on a function's name; accepting it applies the
 identical edit.
+
+### Infer every contract: `forge refine --infer`
+
+```sh
+forge refine --infer                    # dry run: what it would propose, refuse, and why
+forge refine --infer --diff             # the edits as a diff; nothing is written
+forge refine --infer --apply            # write them, then re-check the project
+forge refine --infer --apply --apply-public            # also public fns with no caller in the project
+forge refine --infer --allow-caller-violations         # accept a precondition that breaks a caller
+```
+
+`--infer` covers every kind of refinement the checker can verify:
+- scalar and relational preconditions (`b : {Int | _ != 0}`, `i : {Int | _ < n}`);
+- return contracts;
+- element contracts (`xs : List({Int | _ > 0})`, element and tuple returns);
+- abstract refinements for `filter`-shaped helpers (`pred : a -> Bool[p]` with `List(a[p])`);
+- fold accumulator invariants.
+
+It searches to a fixpoint over the call graph in one run, callees first. Returns go before
+preconditions: a proved return costs no caller anything, while a precondition moves the
+obligation to every caller.
+
+```
+inferred refinements: 2 proposed, 0 refused; user skips 2 -> 0 (101 probes, 2 rounds)
+  positives (lib/scores.march:8)  return/elem : List({Int | _ > 0})  [element-return, closes 1]
+  report (lib/scores.march:12)  param n : {Int | _ > 0}  [precondition, closes 1]
+applied 2 proposal(s) to 1 file(s); the re-check matches the prediction
+```
+
+What each outcome means:
+
+- **Proposed.** The real checker proves the contract, it closes at least one unproven
+  obligation, and it opens none and creates no violation.
+- **`refused (caller-violation)`.** A precondition that would turn an existing call into a
+  violation. The call is named so you can fix it, or pass `--allow-caller-violations` to
+  accept the contract anyway; a contract no value satisfies is still rejected.
+- **`external callers`.** A precondition on a public function with no caller in the project
+  is shown but not written: in a library, its real callers are elsewhere. `--apply-public`
+  writes it too.
+- **No inference for a file.** The file is named, with the compiler's reason: it does not
+  typecheck, or the `march` on `PATH` is too old to know `--refine-infer`. Nothing is
+  proposed for a program that does not typecheck.
+
+The project is checked as **one unit**, so a caller in another file counts. If the project
+does not check as a unit, each file is tried on its own.
+
+**`--apply` cannot leave a half-applied project.** After writing, it re-checks and compares
+the result with what it predicted. On any difference it puts every file back and exits
+with status 3. That is a bug in the inference, never something to reconcile by hand; please
+report it with the file. A second run after a successful `--apply` proposes nothing.
+
+The same inference is available from the compiler and the editor:
+- `march --check --refine-infer FILE`, with `--refine-infer-diff` and
+  `--refine-infer-apply`;
+- `--refine-infer-json` emits JSON (version 1, with byte-range edits);
+- `--refine-infer-kinds k1,k4` restricts the kinds;
+- `--refine-infer-budget N` caps the probes (default 3000);
+- `--refine-report --refine-infer` adds a line showing the ledger as it will be once the
+  proposals are applied;
+- in the editor, the code actions **"Infer refinements for `f`"** and **"Infer refinements
+  in this file"** apply the same bytes.
+
+See [Refinement Types]({{ site.baseurl }}/docs/refinement-types/), section "Module-wide
+inference".
 
 ---
 
