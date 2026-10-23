@@ -487,6 +487,15 @@ git log is authoritative for exact commits.
   security fixes, the `send_wrong_actor` check and the RFC 3986 `Uri` changes. The
   landing page and the toolchain examples now name v0.6.0.
 
+- **The refinement-types page makes the October features easy to find.** It has a dated
+  "What's new" box, contents entries for relational element refinements, one- and
+  two-argument abstract refinements, fold accumulator invariants and module-wide
+  inference (`march --refine-infer` / `forge refine --infer`), a table of the new surface
+  forms under Syntax, and a Limitations list of the known gaps (for example `Map`'s
+  other functions and `HashMap.filter` carry no element fact yet). The skip-reason table
+  now lists all sixteen reasons, and the page says that `fn (a, a) -> …` is a
+  `duplicate_binder` type error.
+
 ## [0.6.0] - 2026-10-17
 
 ### Highlights

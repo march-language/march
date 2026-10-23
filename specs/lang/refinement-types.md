@@ -28,6 +28,35 @@ silence into an error for a module that wants a guarantee.
 > `PATH`. Without it, the predicates type-check as their base type and no
 > refinement diagnostics are produced (the build still succeeds).
 
+> **What's new (October 2026).** Refinements now reach inside containers,
+> callbacks and folds further than before:
+>
+> - **2026-10-18. Fold accumulator invariants.** A demand on a fold's result is
+>   checked as the invariant its accumulator keeps, and an annotated accumulator
+>   `fn (acc : {Int | _ > 0}, x) -> …` states one yourself; see
+>   [Folds](#folds-an-accumulator-invariant) and
+>   [An annotated accumulator](#an-annotated-accumulator).
+> - **2026-10-21. Relational element refinements.** One slot of a type
+>   application can name a sibling slot's binder, so
+>   `Assoc({x : Int | true}, {y : Int | y > x})` says every entry's value exceeds
+>   its key; see [Relational element refinements](#relational-element-refinements).
+> - **2026-10-21. Two-argument abstract refinements.** `keep : k -> v -> Bool[p]`
+>   with a `Map(k[p], v[p])` return carries a relation decided by the callback,
+>   and `Map.filter` now carries that entry fact (assumed, with a runtime
+>   property test); see [Two arguments](#two-arguments-a-relation-between-sibling-slots).
+> - **2026-10-21. More stdlib functions carry element facts.** `Hamt.fold` and
+>   `Enum.scan` carry the fold invariant, and `Queue`'s functions pass element
+>   refinements through; see [which stdlib folds carry it](#folds-an-accumulator-invariant).
+> - **2026-10-21. Module-wide inference.** `march --refine-infer` and
+>   `forge refine --infer` propose every kind of refinement the checker can
+>   verify; see [Module-wide inference](#module-wide-inference-march---refine-infer-and-forge-refine---infer).
+> - **2026-10-22. A name bound twice is a type error.** `fn (a, a) -> …` and a
+>   pattern such as `(a, a)` are rejected as
+>   [`duplicate_binder`]({{ site.baseurl }}/docs/errors/duplicate_binder/).
+>
+> The gaps these features still have are listed under
+> [Limitations](#open-gaps-in-element-and-abstract-refinements).
+
 ## On this page
 
 **Start here**
@@ -53,11 +82,17 @@ silence into an error for a module that wants a guarantee.
 - [Float Refinements](#float-refinements)
 - [Constructor Tags: Refining over ADT Variants](#constructor-tags-refining-over-adt-variants)
 - [Element Refinements: Refining What a Container Holds](#element-refinements-refining-what-a-container-holds)
+  - [Relational element refinements](#relational-element-refinements): a relation between sibling slots
+  - [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says): `filter` keeps what its predicate says
+    - [Two arguments](#two-arguments-a-relation-between-sibling-slots): `k -> v -> Bool[p]`, `Map(k[p], v[p])`
+  - [Folds: an accumulator invariant](#folds-an-accumulator-invariant)
+    - [An annotated accumulator](#an-annotated-accumulator)
 
 **Finding out what was actually checked**
 
 - [Counting the obligations: `--refine-report`](#counting-the-obligations---refine-report)
 - [Getting a contract proposed for you: `forge refine`](#getting-a-contract-proposed-for-you-forge-refine)
+  - [Module-wide inference: `march --refine-infer` and `forge refine --infer`](#module-wide-inference-march---refine-infer-and-forge-refine---infer)
 - [Coverage audit: does the checker even look at this refinement?](#coverage-audit-does-the-checker-even-look-at-this-refinement)
 - [Promoting a skip: a demonstrated precondition failure](#promoting-a-skip-a-demonstrated-precondition-failure)
 - [The `--no-measure-axioms` Flag](#the---no-measure-axioms-flag)
@@ -70,6 +105,7 @@ silence into an error for a module that wants a guarantee.
 **Limits and status**
 
 - [Limitations](#limitations)
+  - [Open gaps in element and abstract refinements](#open-gaps-in-element-and-abstract-refinements)
 - [Conformance status](#conformance-status)
 - [See also](#see-also)
 
@@ -222,6 +258,45 @@ comparisons, which is every ordinary refinement. A division in a bare
 `Int`-valued position, such as a call's argument `f(n / d)`, is translated only
 when its divisor is a non-zero literal or is syntactically positive
 (`len(xs) + 1`).
+
+### Refinements inside containers, callbacks and folds
+
+A refinement may also sit inside a type argument, on a callback, or on a fold's
+accumulator. These forms each have a section of their own further down:
+
+| Form | Meaning | Section |
+|---|---|---|
+| `List({Int \| _ > 0})` | every element satisfies the predicate | [Element refinements](#element-refinements-refining-what-a-container-holds) |
+| `Assoc({x : k \| true}, {y : v \| y > x})` | a slot names a sibling slot's binder: every entry `(x, y)` satisfies `y > x` | [Relational element refinements](#relational-element-refinements) |
+| `pred : a -> Bool[p]` returning `List(a[p])` | `p` is whatever `pred` returns; every element of the result satisfies it | [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says) |
+| `keep : k -> v -> Bool[p]` returning `Map(k[p], v[p])` | a two-argument `p`: every entry `(k, v)` of the result satisfies `keep(k, v)` | [Two arguments](#two-arguments-a-relation-between-sibling-slots) |
+| `fn (acc : {Int \| _ > 0}, x) -> …` passed to a fold | the accumulator invariant, checked at the initial value and at every step, then a fact of the fold's result | [An annotated accumulator](#an-annotated-accumulator) |
+| `@[assume]` on a function whose return has an element entry | the entry (slots, relations, abstract applications) is assumed, not proved, and counted as `trusted` | [`Map.filter` carries it, assumed](#two-arguments-a-relation-between-sibling-slots) |
+
+```march
+type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+fn need_pos(k : {Int | _ > 0}) : Int do k end
+fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end
+fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+
+fn rel_ok() : Int do need_arel(ACons(1, 2, ANil)) end     -- proved
+fn rel_bad() : Int do need_arel(ACons(5, 2, ANil)) end    -- violation: the entry (5, 2)
+
+fn kept(ys : List(Int)) : Int do
+  sum_pos(List.filter(ys, fn y -> y > 0))                  -- proved
+end
+
+fn vals(m : Map(String, Int)) : Int do
+  need_vals(Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp))   -- proved (assumed entry fact)
+end
+
+fn counted(ys : List(Int)) : Int do
+  let s = List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)
+  need_pos(s)                                              -- proved: the annotation holds
+end
+```
 
 ---
 
@@ -2566,7 +2641,9 @@ accumulator: a top-level `partition_go` whose `yes : List(a[p])` and
 `no : List({a | !p(_)})` parameters are checked at every push, so both halves
 are proved on its definition side.
 
-**Two arguments: a relation between sibling slots.** A callback of two arguments defines a `p` of two. In March a two-argument
+#### Two arguments: a relation between sibling slots
+
+A callback of two arguments defines a `p` of two. In March a two-argument
 callback is a curried chain `D1 -> D2 -> Bool`, whichever way the combinator
 calls it (a tuple domain `(D1, D2) -> Bool` is ONE argument, a tuple). The
 definer applies `p` to both domain binders, in order, and an occurrence relates
@@ -2625,10 +2702,16 @@ either bound by `let`, a function
 with a proved `{Bool | _ == e}` return over two parameters (`fn above(k : Int,
 v : Int) : {Bool | _ == (v > k)}`), and a callback parameter that itself
 defines a two-argument abstract refinement of the enclosing function (`keep :
-k -> v -> Bool[q]`, passing its `q` on). A lambda that binds one name twice
-(`fn (x, x) -> …`, `fn k -> fn k -> …`) instantiates nothing: which argument
-its `x` names is not the same in the interpreter and in compiled code.
-Anything else is `abstract-refinement-uninstantiated`, naming why. A chain
+k -> v -> Bool[q]`, passing its `q` on). A lambda that binds one name twice in
+one parameter list, `fn (x, x) -> …`, is no longer a program at all: since
+2026-10-22 the typechecker rejects it as
+[`duplicate_binder`]({{ site.baseurl }}/docs/errors/duplicate_binder/) (as it
+does `fn two(a : Int, a : Int)` and a pattern such as `(a, a)`), before the
+interpreter and compiled code could disagree about which argument `x` names.
+A curried chain that reuses a name, `fn k -> fn k -> …`, is ordinary shadowing
+and still typechecks, but it instantiates nothing: the call is an
+`abstract-refinement-uninstantiated` skip ("the lambda passed for `p` binds
+`k` twice"). Anything else is `abstract-refinement-uninstantiated`, naming why. A chain
 ending in a concrete contract, `kk : ({x : Int | true}) -> ({y : Int | true})
 -> {Bool | _ == (y > x)}`, is not a contract yet: nothing checks the callable
 passed for `kk` against it, so inside the function `kk(k, v)` gives no fact
@@ -2695,8 +2778,11 @@ through `Map.filter(m, fn _k -> fn v -> v < 100, …)` does not meet `_ > 0 && _
 `test/stdlib/test_map.march` checks the fact at run time. `HashMap.filter`,
 `OrderedMap.filter` and a `List((k, v))` of pairs do not carry it yet.
 
-What it does not do (reason `abstract-refinement-uninstantiated` where a
-demand meets one of these):
+#### What abstract refinements do not do
+
+For one argument and two alike (reason `abstract-refinement-uninstantiated`
+where a demand meets one of these; the two-argument gaps are also collected
+under [Limitations](#open-gaps-in-element-and-abstract-refinements)):
 
 - **A predicate with no proved `{Bool | _ == …}` contract** instantiates
   nothing, by name or called inside a lambda: no contract is inferred from a
@@ -3077,7 +3163,7 @@ moment the measure alias stops working, which is exactly what the unit-global
 glob-import bug did to every March program, invisibly, while `t118` still exited
 0 (a skip and a proof are both exit 0; only the count tells them apart).
 
-Each skip is attributed to one of eleven reasons:
+Each skip is attributed to one of sixteen reasons:
 
 | Reason | What happened |
 |---|---|
@@ -3091,6 +3177,11 @@ Each skip is attributed to one of eleven reasons:
 | `opaque-application` | the goal names a function the checker has no meaning for, so it cannot reason through it |
 | `nonlinear-goal` | the goal multiplies two non-constant terms (`y * y + 1`, `x * k`), and the solver, which is incomplete on non-linear integer arithmetic, settled it neither way |
 | `parametric-source-unproved` | a polymorphic call's result meets an element demand only if every source of the demanded type variable does, and the source the message names did not |
+| `accumulator-base-unproved` | a fold's initial value (or, for a `reduce`, the list's elements) was not proved to meet the demand or the annotated accumulator; see [Folds](#folds-an-accumulator-invariant) |
+| `accumulator-step-unproved` | a fold's step, assuming the invariant of its accumulator parameters, was not proved to keep it (or the rule declined that step; the message says why) |
+| `abstract-refinement-too-weak` | the predicate instantiated from the passed callable does not imply the demand; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says) |
+| `abstract-refinement-uninstantiated` | the abstract refinement could not be instantiated from what was passed (a callable with no proved contract, a lambda body the reader does not translate, a name bound twice, …); the message names why |
+| `refuted-unconfirmed` | the solver refuted the goal on some path, but no concrete input was found on which the function returns a violating value (Tier 2 induction), so nothing is reported |
 | `solver-undecided` | the solver proved neither the predicate nor its negation |
 
 `unconstrained-subject`, `partial-conjunct`, `opaque-application`, and
@@ -3283,10 +3374,18 @@ The grammar is finite by design (sign and non-zero contracts on `Int`/`Float`,
 parameter in the same signature). It will miss contracts it cannot spell; it
 will not invent one it did not prove.
 
-See [docs/tooling.md](https://github.com/march-language/march/blob/main/docs/tooling.md)
-for the full command surface, including `--apply` and the editor code action.
+See [`forge refine` in the Tooling guide](../../docs/tooling.md#forge-refine-suggest-a-refinement-type)
+for the per-function command surface, including `--apply`, `--all`, `--budget`
+and the editor code action.
 
-### Module-wide inference: `march --refine-infer`
+`forge refine <fn>` proposes a parameter contract for one function (a return
+contract with `--postconditions`) from a fixed grammar. To propose **every** kind of refinement the checker can verify, over
+the whole module or project at once (returns, element and abstract
+refinements, fold accumulators), use `march --check --refine-infer FILE` or
+`forge refine --infer`, with `--diff` to preview the edits and `--apply` to
+write them; see the next subsection.
+
+### Module-wide inference: `march --refine-infer` and `forge refine --infer`
 
 `--refine-infer` runs the same assume-and-re-check loop over every function in
 user code and every kind of refinement the checker can verify:
@@ -4219,7 +4318,10 @@ edges:
   [String Refinements](#string-refinements)). Over a **variant**
   (multi-constructor) ADT the checker reasons about the constructor tag only
   (`is_Some(_)`), never the payload: `{Option(Int) | is_Some(_)}` is checkable,
-  a predicate about the `Int` inside is not. **Sets of elements** are
+  a predicate about the `Int` inside is not. (A refinement on the payload's
+  *type*, `Option({Int | _ > 0})`, is an
+  [element refinement](#element-refinements-refining-what-a-container-holds)
+  and is checked.) **Sets of elements** are
   supported through the set vocabulary (`elts`, `keys`, `member`, `subset`,
   …; see [Set Refinements](#set-refinements)), with cardinality through
   ground facts only and list structure only inside a proof by recursion.
@@ -4569,6 +4671,46 @@ edges:
   compiles), but it tells you the refinement it's attached to is not actually
   checked, so you can annotate the function `@[measure]` or switch to a
   supported predicate.
+
+### Open gaps in element and abstract refinements
+
+The October 2026 features stop at these edges, each a recorded skip
+(never a violation, an error under `cap verified`). Each has an open item in
+`specs/todos/` except the polymorphic-call relation, which is a design ruling:
+
+- **`Map`'s other functions carry no element fact.** `Map.insert`,
+  `Map.remove`, `Map.get`, `Map.merge` and `Map.map_values` keep nothing of a
+  refined input, so `Map.insert(pos_map, "b", 5, cmp)` into a positive-value
+  demand is a skip. Only `Map.filter` carries an entry fact. (Todo: Map element
+  flow through combinators.)
+- **`HashMap.filter` and `OrderedMap.filter` carry no entry fact yet**, unlike
+  `Map.filter`. (Todos: HashMap filter two-argument abstract, OrderedMap filter
+  two-argument abstract.)
+- **A list of pairs is not modelled.** A tuple element is not a container
+  application, so `List((k, v))` has no element slots and no relation over its
+  components; this is also why `Map.filter`'s entry fact is assumed rather
+  than proved. (Todo: tuple elements, list of pairs, abstract.)
+- **A concrete chain contract carries no fact.** A curried callback typed
+  `({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (y > x)}` gives
+  `kk(k, v)` no fact inside the function, and nothing checks the callable
+  passed for it; only a chain whose codomain applies an abstract `p` is read.
+  See [Two arguments](#two-arguments-a-relation-between-sibling-slots). (Todo:
+  chain predicate contract pass site.)
+- **A callback called in two steps gives no fact.** Inside a body,
+  `let g = keep(k)` then `if g(v)` establishes nothing, so a combinator
+  written that way does not prove its relational return. (Todo: abstract
+  curried two-step call, no fact.)
+- **A relation does not flow through a polymorphic call.** A function generic
+  in `k` and `v` keeps each slot's fact but may pair one entry's key with
+  another entry's value (a `shift` returning `ACons(k1, v2, …)` is the
+  counterexample), so `need_arel(rev(a))` is a recorded skip. Carry a relation through a combinator with a two-argument abstract
+  refinement instead. (No todo: a ruling, recorded in the progress note for
+  phase 1b of the multi-argument abstract refinements.)
+- **A module-qualified container parameter gives no element fact.**
+  `q : Queue.Queue({Int | _ > 0})` (or `Deque.Deque(…)`) makes
+  `sum_pos(Queue.to_list(q))` a `parametric-source-unproved` skip, while the
+  same shape over a type declared in the module under check proves. (Todo:
+  refine qualified container param entry.)
 
 ---
 
