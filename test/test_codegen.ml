@@ -13108,6 +13108,43 @@ let test_compiled_no_opt_prunes_unreachable () =
       true
       (run_out = "hi\nEXIT:0")
 
+(** duplicate_binder (2026-10-21): a name bound twice in ONE parameter list or
+    pattern is now a typecheck error, because the backends disagreed about it
+    (`fn (a, a) -> a` at (1, 2): interpreter 1, compiled 2).  What stays legal
+    is shadowing ACROSS scopes, and both backends must agree on it: a curried
+    lambda's inner binder, a lambda parameter shadowing an enclosing one, a
+    match arm rebinding a parameter, and an or-pattern's alternatives binding
+    the same name. *)
+let test_shadowing_across_scopes_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_shadow_scopes"
+    ~src:"mod ShadowScopes do\n\
+         \  needs IO.Console\n\
+         \  fn rebind(a : Int) : Int do\n\
+         \    match a + 1 do\n\
+         \      a -> a * 10\n\
+         \    end\n\
+         \  end\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \    let g = fn a -> fn a -> a\n\
+         \    let g1 = g(1)\n\
+         \    println(int_to_string(g1(2)))\n\
+         \    let b = 5\n\
+         \    let h = fn b -> b + 100\n\
+         \    println(int_to_string(h(7) + b))\n\
+         \    println(int_to_string(rebind(3)))\n\
+         \    let w = fn (_, _) -> 9\n\
+         \    println(int_to_string(w(1, 2)))\n\
+         \    let r = match (0, 4) do\n\
+         \      (a, 0) | (0, a) -> a\n\
+         \      _ -> 99\n\
+         \    end\n\
+         \    println(int_to_string(r))\n\
+         \  end\n\
+          end\n"
+    ~expected:"2\n112\n40\n9\n4"
+    ()
+
 (** String.from_codepoint/to_codepoints must be usable COMPILED (2026-07-14,
     restored 2026-07-24 from lost commit 4a1c2ee3).  They were interpreter-only
     builtin wrappers: string_from_codepoint / string_to_codepoints exist in
@@ -18213,6 +18250,10 @@ let codegen_suites =
             test_string_codepoint_parity;
           Alcotest.test_case "string_to_codepoints/string_from_codepoint builtins link and match interp" `Quick
             test_compiled_string_codepoint_builtin_parity;
+        ] );
+      ( "duplicate_binder", [
+          Alcotest.test_case "shadowing across scopes: interp and compiled agree" `Quick
+            test_shadowing_across_scopes_parity;
         ] );
       ( "unix_time_ms", [
           Alcotest.test_case "unix_time_ms builtin links and matches interp" `Quick

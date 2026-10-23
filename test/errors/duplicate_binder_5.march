@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: `x` is bound twice
+mod Main do
+  needs IO.Console
+  type P = Pair(Int, Int)
+  fn main(_console : Cap(IO.Console)) do
+    let r = match Pair(5, 6) do
+      Pair(x, x) -> x
+    end
+    println(int_to_string(r))
+  end
+end

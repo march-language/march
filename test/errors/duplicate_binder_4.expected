@@ -1,0 +1,18 @@
+exit: 1
+-- ERROR ---------------- errors/duplicate_binder_4.march
+
+`a` is bound twice in the same parameter list or pattern. [duplicate_binder]
+
+6 |       (a, a) -> a
+              ^
+
+    A parameter list or a pattern binds each name once, so there is no single value this name could refer to.
+    Rename one of them, or write `_` for an argument you don't use. To require two values to be equal, bind two names and compare them in a `when` guard: `(a, a2) when a == a2 -> …`.
+
+    first bound here:
+
+6 |       (a, a) -> a
+           ^
+    run `march --explain duplicate_binder`
+
+

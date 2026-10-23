@@ -227,6 +227,15 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- A parameter list or pattern that binds the same name twice is now a compile
+  error (`duplicate_binder`): `fn (a, a) -> …`, `fn two(a, a)`, a multi-head clause
+  such as `fn pick(0, a, a)`, and patterns like `(a, a)` or `Pair(x, x)`. Such
+  programs used to be accepted, and the interpreter and compiled code disagreed
+  about which value the name meant (`fn (a, a) -> a` applied to `(1, 2)` gave `1`
+  interpreted and `2` compiled). Rename one binder or use `_`; to match equal values,
+  bind two names and compare them in a `when` guard. Shadowing across scopes
+  (`fn a -> fn a -> a`, a match arm rebinding a parameter) is unchanged.
+  `march --explain duplicate_binder` has the details.
 - A compiled program that uses `Compress.Zstd` or `Compress.Brotli` on a build host
   without that library now fails to compile with a message naming the package to
   install, instead of building a binary whose codec returns `Err("... not available")`

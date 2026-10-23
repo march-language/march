@@ -625,6 +625,98 @@ let with_wildcards f =
   let r = Fun.protect ~finally:(fun () -> wildcard_sink := saved) f in
   (r, !log)
 
+(* ── duplicate_binder: one binding position binds each name once ──────
+   A parameter list or a pattern that binds one name twice has no single
+   meaning: the interpreter's environment kept the FIRST binding and compiled
+   code the LAST (`fn (a, a) -> a` at (1, 2) gave 1 and 2), and multi-clause
+   heads and constructor patterns diverged the other way round.  ML-family
+   languages reject such non-linear patterns; so does March.  Curried lambdas
+   and nested patterns in another arm or lambda are separate scopes and keep
+   ordinary shadowing.  `_` binds nothing.  See
+   specs/progress/2026-10-21-duplicate-binder-rejected.md. *)
+
+(** The names a pattern binds, in source order, `_` excluded.  An or-pattern's
+    alternatives bind the same names (checked in [infer_pattern]), so its
+    first alternative stands for the whole. *)
+let rec pattern_binders (p : Ast.pattern) : Ast.name list =
+  match p with
+  | Ast.PatWild _ | Ast.PatLit _ -> []
+  | Ast.PatVar n -> if n.txt = "_" then [] else [n]
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+    List.concat_map pattern_binders ps
+  | Ast.PatRecord (flds, _) -> List.concat_map (fun (_, p) -> pattern_binders p) flds
+  | Ast.PatAs (inner, n, _) ->
+    pattern_binders inner @ (if n.txt = "_" then [] else [n])
+  | Ast.PatOr (alts, _) ->
+    (match alts with a :: _ -> pattern_binders a | [] -> [])
+
+(** Report each name that a LATER group binds again after an earlier group
+    bound it.  The groups are the parts of ONE binding position: the elements
+    of a tuple or constructor pattern, or the parameters of one list.  A
+    repeat inside a single group is that group's own report (the recursive
+    [infer_pattern] call on it), so every repeat is reported exactly once, at
+    the binding that repeats it, with a label at the first. *)
+let report_duplicate_binders env (groups : Ast.name list list) =
+  let seen : (string, Ast.name) Hashtbl.t = Hashtbl.create 8 in
+  List.iter (fun group ->
+      let here : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+      List.iter (fun (n : Ast.name) ->
+          if not (Hashtbl.mem here n.txt) then begin
+            Hashtbl.replace here n.txt ();
+            match Hashtbl.find_opt seen n.txt with
+            | Some first ->
+              Err.report env.errors
+                { Err.severity = Err.Error; span = n.span;
+                  message =
+                    Printf.sprintf
+                      "`%s` is bound twice in the same parameter list or pattern."
+                      n.txt;
+                  labels = [ { Err.lbl_span = first.span;
+                               lbl_message = "first bound here" } ];
+                  notes =
+                    [ "A parameter list or a pattern binds each name once, so \
+                       there is no single value this name could refer to.";
+                      Printf.sprintf
+                        "Rename one of them, or write `_` for an argument \
+                         you don't use. To require two values to be equal, \
+                         bind two names and compare them in a `when` guard: \
+                         `(%s, %s2) when %s == %s2 -> …`."
+                        n.txt n.txt n.txt n.txt ];
+                  code = Err.Code.duplicate_binder;
+                  fix = None }
+            | None -> ()
+          end) group;
+      List.iter (fun (n : Ast.name) ->
+          if not (Hashtbl.mem seen n.txt) then Hashtbl.replace seen n.txt n)
+        group)
+    groups
+
+(** One parameter list, as [report_duplicate_binders] groups. *)
+let report_duplicate_params env (params : Ast.param list) =
+  report_duplicate_binders env
+    (List.map (fun (p : Ast.param) ->
+         if p.param_name.txt = "_" then [] else [p.param_name]) params)
+
+let report_duplicate_fn_params env (params : Ast.fn_param list) =
+  report_duplicate_binders env
+    (List.map (function
+         | Ast.FPNamed p | Ast.FPDefault (p, _) ->
+           if p.param_name.txt = "_" then [] else [p.param_name]
+         | Ast.FPPat pat -> pattern_binders pat) params)
+
+(** The local check at one pattern node: its immediate sub-patterns are the
+    groups.  An or-pattern's alternatives are not groups (they bind the same
+    names on purpose); each is checked on its own by the recursion. *)
+let report_duplicate_pattern_binders env (pat : Ast.pattern) =
+  match pat with
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+    report_duplicate_binders env (List.map pattern_binders ps)
+  | Ast.PatRecord (flds, _) ->
+    report_duplicate_binders env (List.map (fun (_, p) -> pattern_binders p) flds)
+  | Ast.PatAs (inner, n, _) ->
+    if n.txt <> "_" then report_duplicate_binders env [pattern_binders inner; [n]]
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ | Ast.PatOr _ -> ()
+
 (** Infer the type that a pattern *expects*, and return the list of
     (name, scheme) bindings it introduces.
 
@@ -633,6 +725,7 @@ let with_wildcards f =
     when [DType] declarations populate the type registry. *)
 let rec infer_pattern ?expected env (pat : Ast.pattern)
     : (string * scheme) list * ty =
+  report_duplicate_pattern_binders env pat;
   match pat with
   | Ast.PatWild sp ->
     let t = fresh_var env.level in
@@ -3489,6 +3582,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 
   (* Lambda in check mode: peel arrow types one-by-one *)
   | Ast.ELam (params, body, lsp), _ ->
+    report_duplicate_params env params;
     let env0 = env in
     (* Must-use for the parameters bound on the way down, once the body has
        been checked in the innermost env.  Not in the fallback arm below: that
@@ -4320,6 +4414,7 @@ and check_spawn_args env ~site_span ~spelling (actor_name : string)
 
 (* Bind lambda parameters into the environment, returning (types, env). *)
 and bind_lam_params env params =
+  report_duplicate_params env params;
   List.fold_right
     (fun p (tys, env) ->
        let t = fresh_var env.level in
@@ -4713,6 +4808,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       in
 
       (* Bind parameters *)
+      report_duplicate_fn_params env' clause.fc_params;
       let param_tys, body_env =
         List.fold_right (fun fp (tys, env) ->
             match fp with
@@ -6340,6 +6436,7 @@ let rec check_decl env (d : Ast.decl) : env =
           (p.param_name.txt, t)) actor.actor_init_params
     in
     Hashtbl.replace env.actor_init_sigs name.txt init_sig;
+    report_duplicate_params env actor.actor_init_params;
     let init_env =
       List.fold_left2
         (fun e (p : Ast.param) (_, t) -> bind_lam_param e p.param_name.span p (Some t))
@@ -6387,6 +6484,7 @@ let rec check_decl env (d : Ast.decl) : env =
            (finding L6: a linear value sent as a message is a zero-copy move)
            enforced the sender's half and dropped the receiver's.  See
            specs/todos/2026-09-11-linear-actor-handler-parameter-untracked.md. *)
+        report_duplicate_params env h.ah_params;
         let handler_env =
           List.fold_left
             (fun e (p : Ast.param) -> bind_lam_param e p.Ast.param_name.Ast.span p None)
