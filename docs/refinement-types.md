@@ -2890,13 +2890,31 @@ A too-weak skip prints the lambda and what it was read as:
 `fn y -> is_pos(y) || y < 100` (read as `y > 0 || y < 100`) does not imply `_ > 0`
 ```
 
-The body may mention nothing but the lambda's parameter. A lambda that uses
-one of the caller's variables is declined. So is a `let`-bound lambda that
-captures one:
+The body may also mention the caller's own local variables (its parameters,
+`let`s, lambda parameters and `match` binders). The element fact then names
+that variable, and it is read in the caller's scope, where the variable's own
+refinement can discharge the demand. This is how a `List.filter` with a captured
+bound proves a relational return:
 
 ```march
-fn y -> gt(y, k)   -- declined: `k` is the caller's variable
+fn small(xs : List(Int), n : Int) : List({Int | _ < n}) do
+  List.filter(xs, fn y -> y < n)       -- proved; `small(ys, 10)` is `List({Int | _ < 10})`
+end
+fn g(xs : List(Int), k : {Int | _ <= 10}) : Int do
+  sum_lt10(List.filter(xs, fn y -> y < k))   -- proved from `k <= 10`
+end
+fn h(xs : List(Int), k : Int) : Int do
+  sum_lt10(List.filter(xs, fn y -> gt(y, k)))   -- skip: nothing bounds `k`
+end
 ```
+
+A captured variable must be one the call can see and that nothing rebinds on
+the way to the use. A module-level name is declined, and the message names it.
+A `let`-bound lambda, or a `let`-bound result, whose captured variable is
+rebound before the call or the use is forgotten, so the call is a skip. A
+`let`-bound lambda that captures a variable is still declined when it is
+*called inside* the lambda body (`fn y -> f(y) && y > 0`), and so is a capture
+the reader would only introduce by inlining.
 
 Calls to `let`-bound lambdas are inlined at most four deep. `f4` calling `f3`
 calling `f2` calling `f1` is read. One level more is declined, and the message
@@ -3654,15 +3672,18 @@ xs : List({Int | _ > 0})           -- do this instead: then `x` gets it
   inner parameters only while its result is checked against a demand on the
   call; inside its body otherwise, only the outer parameter gets one.
 - **A local `fn` with a container return lends it only when the entry names
-  nothing but the `fn`'s own parameters, and the `fn` does not recurse into it.**
-  Its tails are checked like a top-level function's, and a proved one is a fact
-  at its later calls in the block (read at each call's arguments), but a return
-  naming a captured variable (`List({Int | _ < k})` with `k` from outside)
-  lends nothing, and a recursive call inside the local carries nothing (no
-  structural self-call hypothesis), so `fn go(xs) : List({Int | _ > 0})` whose
-  tail is `go(t)` is a skip. A local returning a tuple of element-refined
-  containers has every component of every tail checked, but lends nothing at
-  its calls.
+  nothing but the `fn`'s own parameters.** Its tails are checked like a
+  top-level function's, and a proved one is a fact at its later calls in the
+  block (read at each call's arguments), but a return naming a captured
+  variable (`List({Int | _ < k})` with `k` from outside) lends nothing. A
+  recursive call inside the local carries the declared return when one of its
+  arguments is a structural part of the matching parameter (`go(t, i + 1)`
+  after `Cons(h, t)` of `lst`), the rule a top-level function gets, and only
+  once the local's return is proved with it. So `find_index`'s shape, a local
+  `go(lst, i : {Int | _ >= 0}) : Option({Int | _ >= 0})`, proves, and so does
+  a `match` on its result. A non-structural self-call (`go(lst, i + 1)`)
+  carries nothing. A local returning a tuple of element-refined containers has
+  every component of every tail checked, but lends nothing at its calls.
 - **A predicate relating different elements to each other** (sortedness,
   distinctness) cannot be written. A relation between the components of ONE
   entry can ([Relational element refinements](#relational-element-refinements));
@@ -3686,13 +3707,14 @@ xs : List({Int | _ > 0})           -- do this instead: then `x` gets it
   no element fact at its call sites, and a `match` binder at that field gets
   none. Element refinements say nothing about order or size: a `Dq(a[p])`
   with its two lists swapped is still one.
-- **A parameter typed with a module-qualified container is not yet a
-  source.** `q : Queue.Queue({Int | _ > 0})` (or `Deque.Deque(...)`) gives
-  `sum_pos(Queue.to_list(q))` no element fact (a `parametric-source-unproved`
-  skip), although the same shape over a type declared in the module under
-  check (`q : Lk({Int | _ > 0})`) proves. A queue built in the same function
-  does carry it: `sum_pos(Queue.to_list(Queue.push_back(Queue.from_list(pos), 3)))`
-  and `one_pos(Queue.peek_front(Queue.from_list(pos)))` are proved.
+- **A module-qualified container spelling is read only when it is certain.**
+  `q : Queue.Queue({Int | _ > 0})` and `d : Deque.Deque({Int | _ > 0})` are
+  element sources like a container declared in the module under check, so
+  `sum_pos(Queue.to_list(q))` and `sum_pos(Deque.to_list(d))` are proved, and
+  so is a user combinator returning `Deque.Deque(a[p])`. The qualified name
+  `M.T` is resolved only when exactly one module declares a type `T` and `M`
+  names that module. When two modules declare `T`, `M.T` stays unknown and
+  the call is a skip.
 
 ---
 
@@ -4085,11 +4107,9 @@ its real callers are elsewhere. Nothing is proposed for a program that does
 not check.
 
 **It cannot exceed the checker.** Like the per-function tool, it never
-proposes a contract the checker does not prove, however natural. Three
-examples it misses today:
+proposes a contract the checker does not prove, however natural. Examples it
+misses today:
 
-- a relational element return built by `List.filter` with a captured bound;
-- an `Option` return through a local `fn`;
 - a return that holds only through a callee's return.
 
 The v1 limits are:
@@ -5330,7 +5350,7 @@ edges:
 
 The October 2026 features stop at these edges. Each one is a recorded skip:
 never a violation, and an error under `cap verified`. Each has an open item in
-`specs/todos/`, except the generic-function one, which is a design ruling.
+`specs/todos/`, except the two marked as design rulings.
 
 - **`Map`'s other functions carry no element fact.** Inserting into, removing
   from, looking up in, merging or mapping over a refined `Map` keeps nothing.
@@ -5358,11 +5378,12 @@ never a violation, and an error under `cap verified`. Each has an open item in
   relation through a combinator, give it a two-argument abstract refinement.
   (No todo: a ruling, recorded in the progress note for phase 1b of the
   multi-argument abstract refinements.)
-- **A container parameter spelled with its module name gives no element
-  fact.** This covers `Queue.Queue` and `Deque.Deque`, for example. It is a
-  `parametric-source-unproved` skip. The same shape over a type declared in
-  the module under check proves. (Todo: refine qualified container
-  param entry.)
+- **A container named with a module qualifier is unknown when its bare
+  name is ambiguous.** If two modules each declare `Bx`, a parameter typed
+  `A.Bx({Int | _ > 0})` gives no element fact, and the call is a skip. A
+  qualifier on a uniquely declared container, such as `Queue.Queue` or
+  `Deque.Deque`, is read. (No todo: a ruling, recorded in the progress note
+  for the `Deque.to_list` element fact.)
 
 ```march
 Map.insert(pos_map, "b", 5, cmp)        -- into a positive-value demand: skip
@@ -5370,7 +5391,7 @@ List((k, v))                            -- a list of pairs: no slots
 kk : ({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (y > x)}   -- no fact
 let g = keep(k)                         -- then `if g(v)`: no fact
 need_up(shift(a))                       -- the relation is lost: skip
-q : Queue.Queue({Int | _ > 0})          -- `sum_pos(Queue.to_list(q))`: skip
+b : A.Bx({Int | _ > 0})                 -- two modules declare `Bx`: skip
 ```
 
 ---

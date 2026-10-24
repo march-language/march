@@ -627,7 +627,7 @@ let rec container_paths (v : string) (t : A.ty) : (string * int) list list optio
         | a :: _ when List.mem j hidden && List.mem v (ty_vars [] a) -> None
         | a :: rest ->
           (match container_paths v a, go (j + 1) rest with
-           | Some ps, Some qs -> Some (List.map (fun p -> (c.A.txt, j) :: p) ps @ qs)
+           | Some ps, Some qs -> Some (List.map (fun p -> (canonical_type_name c.A.txt, j) :: p) ps @ qs)
            | _ -> None)
       in
       go 0 args

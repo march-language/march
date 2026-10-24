@@ -941,6 +941,20 @@ let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
          && match List.assoc_opt n cb with Some sg' -> sg' == sg | None -> false)
        definers
 
+(* The structural self-call hypothesis of a LOCAL `fn` with a declared
+   container return (O1, 2026-10-24; design 2026-10-18 element-flow
+   follow-ups G3-3, "the same structural rule plus scoping"): while
+   [visit_local_fn] walks the local's body, a call whose [cbenv] entry IS
+   the local's signature (physically, so a shadowing rebinding of the name
+   is never a self-call) with some argument a structural subvariable of its
+   parameter ([structural_subvars], ambiguous names removed) carries the
+   declared entry — closed, or relational over the local's own formals and
+   read at the self-call's actuals ([lend_entry]).  Set only for a walk
+   whose verdict a scratch walk under the same hypothesis already PROVED
+   (the top-level [gating_elem_returns] discipline), so a proof from an
+   unproved hypothesis is never recorded. *)
+let local_elem_hyp : (fn_sig * (string, unit) Hashtbl.t list * entry * string list) option ref = ref None
+
 let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
   : entry option =
   match e with
@@ -954,7 +968,20 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
       | Some (`Container entry) -> Some entry
       | _ -> declared_elem_return ~args ctx cb fname
     in
+    let local_hyp =
+      match !local_elem_hyp with
+      | Some (lsg, sets, entry, formals)
+        when (match List.assoc_opt fname cb with Some s -> s == lsg | None -> false)
+             && List.length sets = List.length args
+             && List.exists2
+                  (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
+                  args sets ->
+        Some (if entry_is_closed entry then Some entry else lend_entry ~formals ~args entry)
+      | _ -> None
+    in
     (match !elem_ret_hyp with
+     | _ when local_hyp <> None ->
+       (match Option.get local_hyp with Some e -> Some e | None -> other ())
      | Some (self, sets, Single entry, definers, formals)
        when hyp_applies ctx cb fname args (self, sets, definers) ->
        (* A closed hypothesis is the entry itself (unchanged); a relational
@@ -1584,7 +1611,11 @@ let abstract_slot_of_ty ~(abs : string list) (t : A.ty) : (abstract_slot, string
                  (Error
                     (Printf.sprintf "its element refinement `%s` mentions a name other than its binder"
                        (pred_str s)))
-             else Some (Ok { sl_container = c; sl_binder = bn; sl_pred = s; sl_abs = p; sl_base })))
+             else
+               Some
+                 (Ok
+                    { sl_container = canonical_type_name c; sl_binder = bn; sl_pred = s; sl_abs = p
+                    ; sl_base })))
      | _ -> None)
   | _ -> None
 
@@ -1951,7 +1982,48 @@ let definer_domain (fd : A.fn_def) (p : string) : (string * A.expr) option =
         | _ -> None)
      | _ -> None)
 
-let instantiate_abstract ~(named : string -> (string list * A.expr * A.expr list) option)
+(* The value names a predicate mentions: every [EVar] outside an
+   application head, other than [binder], `_` and the set literal — the
+   names [classify_pred binder [] e] objects to, for a decline's wording and
+   for the capture rule below. *)
+let pred_value_names (binder : string) (e : A.expr) : string list =
+  let acc = ref [] in
+  let rec go (e : A.expr) =
+    match e with
+    | A.EVar { A.txt; _ } ->
+      if txt <> binder && txt <> "_" && txt <> Refine_encode.set_empty_literal && not (List.mem txt !acc)
+      then acc := txt :: !acc
+    | A.EApp (A.EVar _, args, _) -> List.iter go args
+    | A.EApp (f, args, _) -> go f; List.iter go args
+    | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.iter go es
+    | A.EField (r, _, _) | A.EAnnot (r, _, _) -> go r
+    | _ -> ()
+  in
+  go (Refine_encode.mark_set_empty e);
+  List.rev !acc
+
+(* R2's [~stable] at a call walked under [ctx]: a name some enclosing binder
+   binds (every binder is immutable). *)
+let stable_local (ctx : rctx) (n : string) : bool = List.mem n ctx.locals
+
+(* [~stable]: the names a lambda may CAPTURE (R2, 2026-10-24).  A reading
+   [q] that mentions a name other than the lambda's parameter is admitted
+   when every such name is written FREE in the lambda itself (not introduced
+   by the reader) and [stable] holds of it at the call: an immutable local
+   binding of the enclosing scope (a parameter, `let`, lambda parameter or
+   arm binder; March has no mutable bindings), so the value the closure
+   captured is the value the name denotes wherever the instantiated entry is
+   read.  That entry is then RELATIONAL over the caller's scope, exactly as a
+   lent `List({Int | _ < n})` is, and its free names are kept as they are:
+   nothing substitutes into [q] (the callee's slot is closed over its binder,
+   [abstract_slot_of_ty]), so no callee formal can capture them.  Rebinding a
+   captured name between the lambda and a use is retired by the channels the
+   reading comes through ([lets]: a `let`-bound lambda, or a `let`-bound
+   call re-read at its use, retires when any name it mentions rebinds), and
+   a return demand naming a rebound parameter is declined before it gets
+   here.  Default: nothing is stable (the pre-R2 closedness rule). *)
+let instantiate_abstract ?(stable : string -> bool = fun _ -> false)
+    ~(named : string -> (string list * A.expr * A.expr list) option)
     ~(local_lambda : string -> A.expr option)
     ~(discharge : y:string -> fact:A.expr -> A.expr -> bool) (fd : A.fn_def) (p : string)
     (args : A.expr list) : (string * A.expr, string) result =
@@ -2012,13 +2084,21 @@ let instantiate_abstract ~(named : string -> (string list * A.expr * A.expr list
       (match inline_bool_body ~named ~local_lambda ~binders:[ y ] body with
        | Error w -> Error (Printf.sprintf "the lambda passed for `%s` %s" p w)
        | Ok (r, obs) ->
-         if classify_pred y [] r <> Closed then
-           Error
-             (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
-         else
-           (match undischarged y obs with
-            | None -> Ok (y, r)
-            | Some o -> Error (Printf.sprintf "the lambda passed for `%s` %s" p (pre_error o))))
+         let caps = pred_value_names y r in
+         let other () =
+           Error (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
+         in
+         (match List.find_opt (fun n -> not (stable n && Refine_scope.expr_mentions_free n lam)) caps with
+          | Some n when Refine_scope.expr_mentions_free n lam ->
+            Error
+              (Printf.sprintf "the lambda passed for `%s` captures `%s`, which is not a local binding of this call"
+                 p n)
+          | Some _ -> other ()
+          | None when classify_pred y caps r = Unusable -> other ()
+          | None ->
+            (match undischarged y obs with
+             | None -> Ok (y, r)
+             | Some o -> Error (Printf.sprintf "the lambda passed for `%s` %s" p (pre_error o)))))
     | A.ELam _ ->
       Error (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
     | _ -> Error (Printf.sprintf "the argument passed for `%s` is not a lambda" p)
@@ -2115,7 +2195,7 @@ let abstract_flow ?component ~root defs (ctx : rctx) path lets sc re (cb : cbenv
                in
                let discharge = scratch_implies ~root defs ctx path lets sc re cb ~span ~callee esort in
                (match
-                  instantiate_abstract ~named:(named_predicate_n (callee_sig ctx defs cb))
+                  instantiate_abstract ~stable:(stable_local ctx) ~named:(named_predicate_n (callee_sig ctx defs cb))
                     ~local_lambda:(local_lambda_of lets) ~discharge fd p args
                 with
                 | Error w -> uninst w
@@ -2166,7 +2246,13 @@ let abstract_flow ?component ~root defs (ctx : rctx) path lets sc re (cb : cbenv
                       (fun () ->
                         Obligation.with_scratch (fun () ->
                             strict_verified := false;
-                            check_call cx ~span ~callee ~subject:Element_domain ~verdict_out:out sg
+                            (* [~goal_scope_facts] for a reading that
+                               CAPTURES (R2): [$elem]'s fact (`y < k`) is
+                               then in the caller's namespace, and `k`'s own
+                               scope fact is what discharges the demand.  A
+                               closed reading keeps the pre-R2 query. *)
+                            check_call cx ~span ~callee ~subject:Element_domain
+                              ~goal_scope_facts:(pred_value_names y q <> []) ~verdict_out:out sg
                               [ A.EVar { A.txt = "$elem"; A.span = span } ] rp));
                     match !out with
                     | Some Obligation.Proved -> Some `Proved
@@ -4082,7 +4168,7 @@ let abstract_param_entry ~root (ctx : rctx) defs path sc re (cb : cbenv) (lets :
             | None -> false
           in
           Result.bind
-            (instantiate_abstract ~named:(named_predicate_n (callee_sig ctx defs cb))
+            (instantiate_abstract ~stable:(stable_local ctx) ~named:(named_predicate_n (callee_sig ctx defs cb))
                ~local_lambda:(local_lambda_of lets) ~discharge fd p args) (fun (y, q) ->
               let body = instantiate_slot sl (y, q) in
               (* The demand's element sort is the ARGUMENT's: unlike a result
@@ -5454,24 +5540,74 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         unproved element argument at that self-call clears the verdict
         ([local_elem_self], the induction gate). *)
      let label = Printf.sprintf "return of %s" n.A.txt in
-     let verdict = ref true in
-     let ts =
-       elem_return_tails errctx ~label ~fname:n.A.txt ~span:sp ~verdict
-         ~pnames:(List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps)
-         path body er
+     let pnames = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+     (* One walk of the body with its tails armed, into [errctx], under the
+        self-call hypothesis [hyp] ([local_elem_hyp]); its verdict. *)
+     let walk errctx hyp =
+       let verdict = ref true in
+       let ts = elem_return_tails errctx ~label ~fname:n.A.txt ~span:sp ~verdict ~pnames path body er in
+       let remaining = ref (List.map (fun (_, t, _) -> t) ts) in
+       let saved_self = !local_elem_self and saved_hyp = !local_elem_hyp in
+       ret_elem_demand := Some (label, er, sp, remaining, verdict);
+       local_elem_self := Some (sg, verdict);
+       local_elem_hyp := hyp;
+       Fun.protect
+         ~finally:(fun () ->
+           ret_elem_demand := None;
+           local_elem_self := saved_self;
+           local_elem_hyp := saved_hyp)
+         (fun () ->
+           visit ~root errctx defs ctx path lets sc re cb ce body;
+           check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~label ~fname:n.A.txt ~span:sp
+             ~verdict er ts remaining);
+       !verdict
      in
-     let remaining = ref (List.map (fun (_, t, _) -> t) ts) in
-     let saved_self = !local_elem_self in
-     ret_elem_demand := Some (label, er, sp, remaining, verdict);
-     local_elem_self := Some (sg, verdict);
-     Fun.protect
-       ~finally:(fun () ->
-         ret_elem_demand := None;
-         local_elem_self := saved_self)
-       (fun () ->
-         visit ~root errctx defs ctx path lets sc re cb ce body;
-         check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~label ~fname:n.A.txt ~span:sp
-           ~verdict er ts remaining);
+     (* O1 (2026-10-24): a RECURSIVE local gets the structural self-call
+        hypothesis ([local_elem_hyp]) — the top-level rule, scoped to this
+        signature — for an entry it could lend at all (the registration
+        test below), when the local declares no abstract refinement of its
+        own.  The hypothesis is gated as a top-level function's is: a
+        scratch walk under it (fresh error context, scratch ledger, every
+        verdict cell restored) must prove the return first; only then is
+        the recorded walk made under it.  Otherwise the walk is the
+        pre-O1 one, and a self-call tail carries nothing. *)
+     let lendable (e : entry) =
+       (entry_is_closed e || entry_movable ~formals:pnames e) && not (entry_mentions !current_abstracts e)
+     in
+     let hyp =
+       match er with
+       | Single e
+         when lendable e
+              && Refine_abstract.names ~is_known:known_predicate_fn fd = []
+              && Refine_scope.expr_mentions_free n.A.txt body ->
+         let rebound = ambiguous_names pnames body in
+         let sets =
+           List.map
+             (fun pn ->
+               let set = structural_subvars ~params:pnames pn body in
+               List.iter (Hashtbl.remove set) rebound;
+               set)
+             pnames
+         in
+         let gate_hyp = Some (sg, sets, e, pnames) in
+         let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
+         let saved_last = !last_elem_return_proved and saved_locals = !local_elem_ret_proved in
+         let proved =
+           Fun.protect
+             ~finally:(fun () ->
+               strict_verified := saved_strict;
+               unverified_hinted := saved_hinted;
+               last_elem_return_proved := saved_last;
+               local_elem_ret_proved := saved_locals)
+             (fun () ->
+               Obligation.with_scratch (fun () ->
+                   strict_verified := false;
+                   walk (Err.create ()) gate_hyp))
+         in
+         if proved then gate_hyp else None
+       | _ -> None
+     in
+     let verdict = ref (walk errctx hyp) in
      (* A TUPLE return (leftovers phase C) is checked the same way, tail by
         tail through [check_ret_shape], but lends nothing:
         [declared_tuple_return] never reads a [cbenv] entry, and a local's
@@ -5481,11 +5617,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         captured variable is [Unusable] over them and still lends nothing
         (G3-5). *)
      (match er with
-      | Single e
-        when !verdict
-             && (entry_is_closed e
-                 || entry_movable ~formals:(List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps) e)
-             && not (entry_mentions !current_abstracts e) ->
+      | Single e when !verdict && lendable e ->
         local_elem_ret_proved := sg :: !local_elem_ret_proved
       | _ -> ()));
   entry
