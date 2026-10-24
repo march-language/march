@@ -718,19 +718,18 @@ let classify (site : site) : disposition =
       (* [Refine_post.return_refinement_checked] is [check_fn_post_verdict]'s
          own routing: a `{List(_) | …}` return whose predicate has no
          `elts`/`keys` goes to Tier 2 (not the direct path), and Tier 2 checks
-         only a constructor-literal body or a match on a parameter with a
-         DECLARED ADT type — [post_induction_shape] alone accepts the
-         signature whatever the body is. *)
+         every body of a signature [post_induction_shape] accepts (since
+         2026-10-24; before, only a constructor literal or a parameter
+         match).  A signature it declines files a recorded skip. *)
       if Refine_post.return_refinement_checked fd then Enforced
       else
         Unenforced
           "the return refinement is routed to no path that checks it: it matches \
            neither return_refine_ext's direct bases (Int, Bool, Float, String, a \
            registered record, or a List predicate using elts/keys) nor a Tier 2 \
-           induction shape check_post_induction actually checks (a single \
-           guardless clause returning a non-record ADT with a usable predicate \
-           and a measure declared over it, whose body is a constructor literal \
-           or a match on a parameter of declared ADT type) -- sensitive to \
+           signature check_post_induction accepts (a single guardless clause \
+           returning a non-record ADT with a usable predicate and a measure \
+           declared over it); it files a recorded skip -- sensitive to \
            --no-measure-axioms, which empties measure_preamble_sorts"))
   | Let_annot _ -> (
     match Refine_post.refined_scope_ty (Some site.origin_ty) with
