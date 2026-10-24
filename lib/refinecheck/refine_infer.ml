@@ -212,7 +212,7 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
     List.iter
       (fun (pred, v) ->
         match v with
-        | IO.Reject (("not-true" | "opens-site" | "unsatisfiable") as r, d) -> rejected := (s, pred, r, d) :: !rejected
+        | IO.Reject (("not-true" | "opens-site" | "unsatisfiable" | "vacuous-branch") as r, d) -> rejected := (s, pred, r, d) :: !rejected
         | IO.Reject ("budget", _) -> note s.IS.fn "budget-exhausted"
         | IO.Refuse rf -> refused := (s, pred, rf) :: !refused
         | _ -> ())
