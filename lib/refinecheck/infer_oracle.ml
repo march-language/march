@@ -49,6 +49,12 @@ let prepare ~(root : string) ~(decls : A.decl list) (s : IS.slot) : ctx option =
   | None -> None
   | Some (fd0, rebuild) ->
     let defs = RC.collect_all_defs decls in
+    (* Gated as a real check gates them ([Refine_check.check_module]): only
+       a proved or assumed return is a fact, here as in the walk.  The
+       probe's pruned tree holds the target and its callers, not its
+       callees, so the walk's own gate ([PI.walk_ledger]) never sees a
+       callee; this is where an unproved callee return is withdrawn. *)
+    (try RC.gate_unverified_posts ~root (March_errors.Errors.create ()) defs decls with _ -> ());
     let base = PI.walk_ledger ~root ~defs (rebuild fd0) in
     let in_body (sp : A.span) =
       List.exists (fun (c : A.fn_clause) -> IV.within c.A.fc_span sp) fd0.A.fn_clauses
@@ -175,8 +181,14 @@ let precondition ?(allow_caller_violations = false) ?subject ~(root : string) (c
   else if not (PI.satisfiable ~root hyp) then Reject ("unsatisfiable", "the parameters admit no value")
   else accept_genuine ~root ?subject cx hyp ~closes:(LD.closed delta) ~new_skipped:(LD.new_skipped delta)
 
+(* TRUE: the return verifies with the unit's proved contracts lent to its
+   tail calls ([RC.post_holds_lent]), its own excluded. *)
+let return_holds ~(root : string) (cx : ctx) (hyp : A.fn_def) : bool =
+  try RC.post_holds_lent ~root (March_errors.Errors.create ()) ~defs:cx.defs ~qualified:cx.qualified hyp
+  with _ -> false
+
 let return_ ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
-  if not (PO.post_holds ~root hyp) then Reject ("not-true", "the checker does not prove this return")
+  if not (return_holds ~root cx hyp) then Reject ("not-true", "the checker does not prove this return")
   else
     let after = PI.walk_ledger ~root ~defs:(PO.defs_with_post cx.defs ~qualified:cx.qualified hyp) (cx.rebuild hyp) in
     let delta = LD.diff ~before:cx.base ~after in
@@ -351,7 +363,7 @@ let holds ~(root : string) ~(decls : A.decl list) (s : IS.slot) (c : IV.cand) : 
     try
       with_hyp_def cx hyp @@ fun () ->
       match s.IS.path with
-      | IS.Return -> PO.post_holds ~root hyp
+      | IS.Return -> return_holds ~root cx hyp
       | p when IS.root p = IS.Return ->
         with_elem_table (fun () -> elem_ret_holds ~root ~defs:(defs_with cx hyp) (cx.rebuild hyp) ~fn:cx.qualified)
       | _ -> false

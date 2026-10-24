@@ -425,7 +425,9 @@ let ret_instance (sg : fn_sig) (args : A.expr list) : (string * A.expr * string 
         List.mapi (fun i n -> (n, List.nth_opt args i)) sg.param_names
         |> List.filter_map (function "_", _ | _, None -> None | n, Some a -> Some (n, a))
       in
-      if List.for_all (fun q -> List.mem_assoc q env) ps then Some (b, subst_params env p, sg.ret_sort)
+      if List.for_all (fun q -> List.mem_assoc q env) ps then
+        let b, p = binder_apart b p in
+        Some (b, subst_params env p, sg.ret_sort)
       else None)
 
 (* The conjuncts of a predicate, so one untranslatable conjunct of a callee's
@@ -443,6 +445,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(list_ret = false)
     ?(demand : (A.expr -> [ `Na | `Proved | `Unproved of Obligation.reason ]) option)
     ?(shown : A.expr option)
+    ?(ret_scalar : Smt.sort option)
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
@@ -694,6 +697,54 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     smt_of ~resolve_var:var_const ~resolve_measure ~resolve_measure_app
       ~resolve_field:scope_field_resolver ~resolve_str_lit:str_lit_const e
   in
+  (* ── A CALL tail at a scalar return (C1, demand chains 2026-10-24) ──────
+     `fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end`: the tail is a
+     fresh constant carrying the callee's contract, conjunct by conjunct,
+     exactly as an argument `need_pos(a(x))` carries it at a call site
+     ([Refine_resolve.reflect_scalar]).  [post_lookup] answers only PROVED
+     (or `@[assume]`d) contracts: the [gate_unverified_posts] fixpoint admits
+     a contract once it is proved, so a function whose tail calls itself, or
+     a member of a cycle, never sees its own unproved return.  A relational
+     contract arrives already instantiated at the actuals in this body's
+     namespace ([postcond_of]); a conjunct naming something this query cannot
+     reflect (a nested call) is dropped, which only loses the proof.  Only at
+     the return's own scalar sort ([ret_scalar]): a contract at any other
+     sort says nothing about this value. *)
+  let call_post_ctr = ref 0 in
+  let scalar_call (e : A.expr) : Smt.term option =
+    match e, ret_scalar with
+    | A.EApp (A.EVar { A.txt = f; _ }, cargs, _), Some srt
+      when (not (List.mem f predicate_operators)) && not (is_measure_app f) -> (
+      match !post_lookup f cargs with
+      | Some (b, q, m) when scalar_sort_of_marker m = Some srt ->
+        (* `f$ret<N>`, the spelling a counterexample renders as "f() can
+           return v" ([render_model_entry]); N skips any name already
+           declared in this query. *)
+        let rec fresh () =
+          incr call_post_ctr;
+          let nm = Printf.sprintf "%s$ret%d" f !call_post_ctr in
+          if List.exists (fun (n, _) -> n = nm) !decls then fresh () else nm
+        in
+        let nm = fresh () in
+        let c = Smt.Const nm in
+        decls := (nm, srt) :: !decls;
+        let rv n = if n = b || n = "_" then Some c else var_const n in
+        (* A measure of the returned scalar means nothing; refuse it rather
+           than mint a `m$_` shared with any other spelling of `_`. *)
+        let rm mm n = if n = b || n = "_" then None else resolve_measure mm n in
+        List.iter
+          (fun conj ->
+            match
+              smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app
+                ~resolve_field:scope_field_resolver ~resolve_str_lit:str_lit_const conj
+            with
+            | Some t -> assume := t :: !assume
+            | None -> ())
+          (pred_conjuncts q);
+        Some c
+      | _ -> None)
+    | _ -> None
+  in
   let tail_term_opt =
     match record_sort with
     | Some sort_name ->
@@ -721,7 +772,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        | A.ELit (A.LitString s, _) -> str_lit_const s
        | A.EVar { A.txt = x; _ } when is_str_scope x -> uses_string := true; Some (Smt.Const x)
        | _ -> scalar tail_e)
-    | None -> scalar tail_e
+    | None -> (match scalar tail_e with Some t -> Some t | None -> scalar_call tail_e)
   in
   match tail_term_opt with
   | None ->
@@ -2087,6 +2138,10 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
             (fun e ->
               !tail_demand ~path ~bound ~params:c.A.fc_params ~sc (binder, ret_pred, marker) e)
       in
+      (* A plain scalar return's own sort, for a call tail ([check_post]). *)
+      let ret_scalar =
+        if record_sort <> None || string_ret || list_ret then None else scalar_sort_of_marker marker
+      in
       (* Fold (not List.for_all): every tail must be checked so every
          diagnostic is emitted — short-circuiting would hide errors. *)
       let fn_params =
@@ -2096,7 +2151,7 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
       && List.fold_left
            (fun acc ((p, e, _, shown) as t) ->
              check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env ~string_ret
-               ~list_ret ?demand:(demand t) ~shown ~fn_name:(Some fd.A.fn_name.A.txt) ~emit
+               ~list_ret ?demand:(demand t) ~shown ?ret_scalar ~fn_name:(Some fd.A.fn_name.A.txt) ~emit
                ~record:emit ~fn_params sc binder ret_pred (p, e)
              && acc)
            true ts
