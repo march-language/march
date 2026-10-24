@@ -261,6 +261,19 @@ let scope_facts (sc : scope)
     List.exists (fun (_, (_, _, sort)) -> sort = Some str_sort) sc
   in
   let dropped = ref false in
+  (* A name an entry's predicate mentions that is no entry of its own (an
+     unrefined sibling parameter, `k : {Int | _ > x}` beside `x : Int`)
+     still needs a declaration, at the scalar default: left undeclared, z3
+     rejected the query (`unknown constant x`) and the obligation was a
+     silent skip.  A name a later producer declares at another sort is a
+     two-sort declaration, which [check_post] turns into a recorded
+     `sort-conflict` skip (demand chains, 2026-10-24). *)
+  let free_decls = ref [] in
+  let free_const n =
+    if (not (List.mem_assoc n sc)) && not (List.mem_assoc n !free_decls) then
+      free_decls := (n, Smt.SInt) :: !free_decls;
+    Some (Smt.Const n)
+  in
   let loaded ds asm has_rec = function
     | Some qa -> (ds, qa :: asm, has_rec)
     | None -> dropped := true; (ds, asm, has_rec)
@@ -277,7 +290,7 @@ let scope_facts (sc : scope)
       | _ when scalar_sort_of_marker sort <> None ->
         let s = scalar_sort_or_int sort in
         let c = Smt.Const name in
-        let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
+        let rv n = if n = b || n = "_" then Some c else free_const n in
         let ds = (name, s) :: ds in
         loaded ds asm has_rec (smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q)
       | None -> (ds, asm, has_rec)
@@ -330,7 +343,7 @@ let scope_facts (sc : scope)
       | Some sort_name ->
         let c = Smt.Const name in
         let ds = (name, adt_sort sort_name) :: ds in
-        let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
+        let rv n = if n = b || n = "_" then Some c else free_const n in
         let rf = make_field_resolver b sort_name c in
         let rma m arg =
           if is_axiom_measure m then Some (Smt.App (m, [ arg ])) else None
@@ -344,7 +357,7 @@ let scope_facts (sc : scope)
          | None -> dropped := true; (ds, asm, has_rec)))
     ([], [], false) sc
   in
-  (ds, asm, has_rec, has_string, not !dropped)
+  (List.rev_append !free_decls ds, asm, has_rec, has_string, not !dropped)
 
 (* Check one return-position tail against the declared return refinement.
 

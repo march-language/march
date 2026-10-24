@@ -24361,12 +24361,14 @@ let infer_fixpoint_suite =
           (fun r ->
             let fns = List.map (fun (p : RI.proposal) -> p.RI.slot.IS.fn) r.RI.proposals in
             Alcotest.(check (list string)) "order" [ "abs1"; "h" ] fns));
-    gated "C1: the chain is tried and the gap recorded (not-true at b)" (fun () ->
+    gated "C1: the chain proposes a's and b's returns (the checker proves b from a since 2026-10-24)" (fun () ->
+        (* Until specs/progress/2026-10-24-refine-demand-chains.md this pinned
+           the gap: b's return not proposed, a not-true rejection at b. *)
         infer_run
           (m "C1" "  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn go() : Int do need_pos(b(3)) end\n")
           (fun r ->
-            Alcotest.(check bool) "b's return not proposed" false (List.mem_assoc "b" (props r));
-            Alcotest.(check bool) "rejection recorded for b" true
+            Alcotest.check sp "a and b" [ ("a", "{Int | _ > 0}"); ("b", "{Int | _ > 0}") ] (List.sort compare (props r));
+            Alcotest.(check bool) "no not-true rejection for b" false
               (List.exists (fun ((s : IS.slot), _, reason, _) -> s.IS.fn = "b" && reason = "not-true") r.RI.rejected)));
     gated "G1: nothing proposed" (fun () ->
         infer_run
@@ -26252,6 +26254,21 @@ let demand_chains_suite =
         (* A caller `x` passed to the formal `x`: no capture to begin with. *)
         Alcotest.check vs "need_pos(inc(x)), x >= 0" [ "proved" ]
           (at "need_pos" (m (inc ^ "  fn go(x : {Int | _ >= 0}) : Int do need_pos(inc(x)) end\n"))));
+    gated "a parameter fact naming an unrefined sibling declares it (no malformed query)" (fun () ->
+        (* `k : {Int | _ > x}` beside an unrefined `x`, under a return that
+           does not mention `x`: the post engine's scope facts left `x`
+           undeclared, z3 rejected the query (`unknown constant x`) and the
+           return was a silent skip.  It is a real violation (f(-5, -4)
+           returns -4).  Found by the G1 inference fixture below (its
+           `need_gt` return probes).  Base: skipped:solver-undecided, with 4
+           queries rejected by z3. *)
+        let before = !March_refine.Solver.malformed_count in
+        let src = m "  fn f(x : Int, k : {Int | _ > x}) : {Int | _ > 0} do k end\n" in
+        Alcotest.check vs "f" [ "violated" ] (post "f" src);
+        Alcotest.(check int) "no query rejected by z3" before !March_refine.Solver.malformed_count;
+        (* Control: the sibling refined, the same return proves. *)
+        Alcotest.check vs "x : {_ >= 0}" [ "proved" ]
+          (post "f" (m "  fn f(x : {Int | _ >= 0}, k : {Int | _ > x}) : {Int | _ > 0} do k end\n")));
     (* ── Inference: the shapes with their return annotations stripped ── *)
     gated "infer C1: the demand chain proposes both returns" (fun () ->
         (* Base: nothing proposed (the chain was rejected at `b`: its TRUE
