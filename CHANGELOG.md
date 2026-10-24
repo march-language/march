@@ -312,6 +312,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a module-qualified container keeps its element fact.** `d :
+  Deque.Deque({Int | _ > 0})` and `q : Queue.Queue({Int | _ > 0})` were no element
+  source, so `sum_pos(Deque.to_list(d))` and `sum_pos(Queue.to_list(q))` were
+  `parametric-source-unproved` skips, and so was `sum_pos(Deque.to_list(dfilter(d,
+  fn y -> y > 0)))` for a user `dfilter : … -> Deque.Deque(a[p])`. A qualified name
+  `M.T` now resolves to its declaration when exactly one module declares `T` and `M`
+  names it; all three are proved. An ambiguous `T` is still unknown (a skip).
 - **Refinements: a recursive local `fn` proves its element return through its own
   self-call.** `find_index`'s shape, a local `go(lst, i : {Int | _ >= 0}) :
   Option({Int | _ >= 0})` whose tails are `None`, `Some(i)` and `go(t, i + 1)`, was

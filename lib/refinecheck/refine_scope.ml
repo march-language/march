@@ -1807,7 +1807,9 @@ let pred_span (fallback : A.span) (e : A.expr) : A.span =
    Without a sibling-binder reference this is exactly the pre-1b reading:
    the same slots, [rels = []]. *)
 let rec elem_app (cname : A.name) (args : A.ty list) : entry option * (A.span * string) list =
-  let c = cname.A.txt in
+  (* The entry's container is the declaration's own spelling, so a
+     qualified `Deque.Deque({…})` and the callee's `Deque(a)` agree. *)
+  let c = canonical_type_name cname.A.txt in
   let rel_binders = abstract_rel_binders args in
   (* A type-variable slot admitted only because a sibling's abstract
      relation names its binder (§5.2); a literally-`true` one is emptied

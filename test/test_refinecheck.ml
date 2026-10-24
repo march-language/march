@@ -23912,13 +23912,15 @@ let stdlib_refine_sweep_suite =
         let _, obs = run (go "xs : List(Int)" "sum_pos(Queue.to_list(Queue.from_list(xs)))") in
         Alcotest.(check bool) "sum_pos not proved" false
           (List.exists (fun (c, v, _) -> c = "sum_pos" && v = "proved") (user obs)));
-    (* Pinned gap, NOT a claim: a parameter typed with a module-qualified
-       container (`q : Queue.Queue({Int | _ > 0})`, and likewise
-       `Deque.Deque(...)`) gets no container entry, so its elements are not a
-       known source.  Filed:
-       specs/todos/2026-10-21-refine-qualified-container-param-entry.md. *)
-    skip_with "a Queue.Queue-typed parameter" "q : Queue.Queue({Int | _ > 0})"
-      "sum_pos(Queue.to_list(q))" "parametric-source-unproved" ]
+    (* Was a pinned skip (todo 2026-10-21-refine-qualified-container-param-
+       entry) until the Deque gap (2026-10-24): a module-qualified container
+       spelling resolves to its unique declaration, so the parameter has a
+       container entry and its elements are a known source. *)
+    proof "a Queue.Queue-typed parameter" "q : Queue.Queue({Int | _ > 0})" "sum_pos(Queue.to_list(q))";
+    gated "Queue control: a Queue.Queue parameter of non-negatives is not proved" (fun () ->
+        let _, obs = run (go "q : Queue.Queue({Int | _ >= 0})" "sum_pos(Queue.to_list(q))") in
+        Alcotest.(check bool) "sum_pos not proved" false
+          (List.exists (fun (c, v, _) -> c = "sum_pos" && v = "proved") (user obs))) ]
 
 
 
@@ -26388,6 +26390,54 @@ let gap_o1_local_option_suite =
         let obs = gap_run src in
         gap_not_proved "return of go" (gap_at "return of go" obs)) ]
 
+(* Deque (specs/progress/2026-10-24-refine-deque-to-list-element-fact): a
+   `Deque(a[p])` / `Deque({Int | …})` element fact survives `Deque.to_list`. *)
+let gap_deque_to_list_suite =
+  let m body = "mod DQ do\n  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n" ^ body ^ "end\n" in
+  let dfilter = "  fn dfilter(d : Deque.Deque(a), pred : a -> Bool[p]) : Deque.Deque(a[p]) do Deque.filter(d, pred) end\n" in
+  [ gated "Deque: the todo's program, `to_list(dfilter(d, fn y -> y > 0))`" (fun () ->
+        let obs =
+          gap_run (m (dfilter ^ "  fn go(d : Deque.Deque(Int)) : Int do sum_pos(Deque.to_list(dfilter(d, fn y -> y > 0))) end\n"))
+        in
+        Alcotest.check gap_ps "sum_pos" gap_proved (gap_at "sum_pos" obs @ gap_at "Deque.to_list(…)" obs));
+    gated "Deque: a refined deque parameter's elements reach `to_list`'s result" (fun () ->
+        let obs = gap_run (m "  fn go(d : Deque.Deque({Int | _ > 0})) : Int do sum_pos(Deque.to_list(d)) end\n") in
+        Alcotest.check gap_ps "sum_pos" gap_proved (gap_at "sum_pos" obs @ gap_at "Deque.to_list(…)" obs));
+    gated "Deque: `let ys = Deque.to_list(d)` carries the fact to a later use" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn go(d : Deque.Deque({Int | _ > 0})) : Int do\n    let ys = Deque.to_list(d)\n    sum_pos(ys)\n  end\n")
+        in
+        (* Recorded under its subject, `ys`. *)
+        Alcotest.check gap_ps "sum_pos(ys)" gap_proved (gap_at "sum_pos" obs @ gap_at "ys" obs));
+    gated "Deque control: an unrefined deque stays a skip" (fun () ->
+        let obs = gap_run (m "  fn go(d : Deque.Deque(Int)) : Int do sum_pos(Deque.to_list(d)) end\n") in
+        let vs = gap_at "sum_pos" obs @ gap_at "Deque.to_list(…)" obs in
+        gap_not_proved "sum_pos" vs;
+        Alcotest.(check bool) "a skip, not a violation" false (List.mem_assoc "violated" vs));
+    gated "Deque control: a too-weak element fact is not proved" (fun () ->
+        let obs = gap_run (m "  fn go(d : Deque.Deque({Int | _ >= 0})) : Int do sum_pos(Deque.to_list(d)) end\n") in
+        gap_not_proved "sum_pos" (gap_at "sum_pos" obs @ gap_at "Deque.to_list(…)" obs));
+    gated "Deque control: an ambiguous qualified name stays unknown (a skip, not a guess)" (fun () ->
+        (* Two modules declare `Bx`, so `A.Bx` is not resolved to either. *)
+        let box name =
+          Printf.sprintf
+            "  mod %s do\n    type Bx(a) = Bx(List(a))\n    fn items(b : Bx(a)) : List(a) do\n      match b do\n      Bx(xs) -> xs\n      end\n    end\n  end\n"
+            name
+        in
+        let obs = gap_run (m (box "A" ^ box "B" ^ "  fn go(b : A.Bx({Int | _ > 0})) : Int do sum_pos(A.items(b)) end\n")) in
+        let vs = gap_at "sum_pos" obs @ gap_at "A.items(…)" obs in
+        gap_not_proved "sum_pos" vs;
+        Alcotest.(check bool) "a skip, not a violation" false (List.mem_assoc "violated" vs);
+        (* Control: one declarant, qualified from outside its module, proves. *)
+        let one = gap_run (m (box "A" ^ "  fn go(b : A.Bx({Int | _ > 0})) : Int do sum_pos(A.items(b)) end\n")) in
+        Alcotest.check gap_ps "one declarant" gap_proved (gap_at "sum_pos" one @ gap_at "A.items(…)" one));
+    gated "Deque control: a too-weak filter is not proved" (fun () ->
+        let obs =
+          gap_run (m (dfilter ^ "  fn go(d : Deque.Deque(Int)) : Int do sum_pos(Deque.to_list(dfilter(d, fn y -> y >= 0))) end\n"))
+        in
+        gap_not_proved "sum_pos" (gap_at "sum_pos" obs @ gap_at "Deque.to_list(…)" obs)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -26549,6 +26599,7 @@ let () =
       ("abstract-map", abstract_map_suite);
       ("abstract-multiarg-review", abstract_multiarg_review_suite);
       ("gap-r2-capture", gap_r2_capture_suite);
+      ("gap-deque-to-list", gap_deque_to_list_suite);
       ("gap-o1-local-option", gap_o1_local_option_suite);
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

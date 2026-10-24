@@ -86,8 +86,9 @@ hypothesis, lends nothing (G3-3)" now asserts that `keep(t)` proves and `keep(ys
 (the lifted ruling); `infer-elements` "O1: … rejected as not-true" now asserts the
 `_ >= 0` element return of `fidx` is proposed.
 
-`scripts/run-tests.sh refinecheck`: green after the two edits (1608 tests; the run before
-the `infer-elements` edit failed only that case).
+`scripts/run-tests.sh refinecheck` on this commit before the `infer-elements` edit: 1608
+tests, the only failure that case; after the edit that group passes. The whole suite is
+green on the branch tip (1616 tests, see the Deque note).
 
 ## Oracle
 

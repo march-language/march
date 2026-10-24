@@ -1611,7 +1611,11 @@ let abstract_slot_of_ty ~(abs : string list) (t : A.ty) : (abstract_slot, string
                  (Error
                     (Printf.sprintf "its element refinement `%s` mentions a name other than its binder"
                        (pred_str s)))
-             else Some (Ok { sl_container = c; sl_binder = bn; sl_pred = s; sl_abs = p; sl_base })))
+             else
+               Some
+                 (Ok
+                    { sl_container = canonical_type_name c; sl_binder = bn; sl_pred = s; sl_abs = p
+                    ; sl_base })))
      | _ -> None)
   | _ -> None
 

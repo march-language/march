@@ -3674,13 +3674,14 @@ xs : List({Int | _ > 0})           -- do this instead: then `x` gets it
   no element fact at its call sites, and a `match` binder at that field gets
   none. Element refinements say nothing about order or size: a `Dq(a[p])`
   with its two lists swapped is still one.
-- **A parameter typed with a module-qualified container is not yet a
-  source.** `q : Queue.Queue({Int | _ > 0})` (or `Deque.Deque(...)`) gives
-  `sum_pos(Queue.to_list(q))` no element fact (a `parametric-source-unproved`
-  skip), although the same shape over a type declared in the module under
-  check (`q : Lk({Int | _ > 0})`) proves. A queue built in the same function
-  does carry it: `sum_pos(Queue.to_list(Queue.push_back(Queue.from_list(pos), 3)))`
-  and `one_pos(Queue.peek_front(Queue.from_list(pos)))` are proved.
+- **A module-qualified container spelling is read only when it is certain.**
+  `q : Queue.Queue({Int | _ > 0})` and `d : Deque.Deque({Int | _ > 0})` are
+  element sources like a container declared in the module under check, so
+  `sum_pos(Queue.to_list(q))` and `sum_pos(Deque.to_list(d))` are proved, and
+  so is a user combinator returning `Deque.Deque(a[p])`. The qualified name
+  `M.T` is resolved only when exactly one module declares a type `T` and `M`
+  names that module. When two modules declare `T`, `M.T` stays unknown and
+  the call is a skip.
 
 ---
 
@@ -5316,7 +5317,7 @@ edges:
 
 The October 2026 features stop at these edges. Each one is a recorded skip:
 never a violation, and an error under `cap verified`. Each has an open item in
-`specs/todos/`, except the generic-function one, which is a design ruling.
+`specs/todos/`, except the two marked as design rulings.
 
 - **`Map`'s other functions carry no element fact.** Inserting into, removing
   from, looking up in, merging or mapping over a refined `Map` keeps nothing.
@@ -5344,11 +5345,12 @@ never a violation, and an error under `cap verified`. Each has an open item in
   relation through a combinator, give it a two-argument abstract refinement.
   (No todo: a ruling, recorded in the progress note for phase 1b of the
   multi-argument abstract refinements.)
-- **A container parameter spelled with its module name gives no element
-  fact.** This covers `Queue.Queue` and `Deque.Deque`, for example. It is a
-  `parametric-source-unproved` skip. The same shape over a type declared in
-  the module under check proves. (Todo: refine qualified container
-  param entry.)
+- **A container named with a module qualifier is unknown when its bare
+  name is ambiguous.** If two modules each declare `Bx`, a parameter typed
+  `A.Bx({Int | _ > 0})` gives no element fact, and the call is a skip. A
+  qualifier on a uniquely declared container, such as `Queue.Queue` or
+  `Deque.Deque`, is read. (No todo: a ruling, recorded in the progress note
+  for the `Deque.to_list` element fact.)
 
 ```march
 Map.insert(pos_map, "b", 5, cmp)        -- into a positive-value demand: skip
@@ -5356,7 +5358,7 @@ List((k, v))                            -- a list of pairs: no slots
 kk : ({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (y > x)}   -- no fact
 let g = keep(k)                         -- then `if g(v)`: no fact
 need_up(shift(a))                       -- the relation is lost: skip
-q : Queue.Queue({Int | _ > 0})          -- `sum_pos(Queue.to_list(q))`: skip
+b : A.Bx({Int | _ > 0})                 -- two modules declare `Bx`: skip
 ```
 
 ---
