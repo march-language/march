@@ -1581,7 +1581,8 @@ let adt_canonical : (string, string) Hashtbl.t = Hashtbl.create 8
 (* A MODULE-QUALIFIED spelling of a registered variant type (`Deque.Deque`
    in a user's annotation, beside the `Deque` its own module writes), as the
    bare name its declaration is filed under (Deque gap, 2026-10-24; todo
-   2026-10-21-refine-qualified-container-param-entry).  Only when the
+   2026-10-21-refine-qualified-container-param-entry, now in specs/progress/ as
+   2026-10-24-refine-qualified-container-param-entry.md).  Only when the
    resolution is certain: exactly ONE module path declares that bare name
    anywhere ([adt_decl_paths]) and the qualifier is that path or a suffix of
    it (`Dk.Dk` written inside `PQual` for `PQual.Dk`).  Anything else — an
