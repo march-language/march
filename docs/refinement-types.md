@@ -3639,15 +3639,18 @@ xs : List({Int | _ > 0})           -- do this instead: then `x` gets it
   inner parameters only while its result is checked against a demand on the
   call; inside its body otherwise, only the outer parameter gets one.
 - **A local `fn` with a container return lends it only when the entry names
-  nothing but the `fn`'s own parameters, and the `fn` does not recurse into it.**
-  Its tails are checked like a top-level function's, and a proved one is a fact
-  at its later calls in the block (read at each call's arguments), but a return
-  naming a captured variable (`List({Int | _ < k})` with `k` from outside)
-  lends nothing, and a recursive call inside the local carries nothing (no
-  structural self-call hypothesis), so `fn go(xs) : List({Int | _ > 0})` whose
-  tail is `go(t)` is a skip. A local returning a tuple of element-refined
-  containers has every component of every tail checked, but lends nothing at
-  its calls.
+  nothing but the `fn`'s own parameters.** Its tails are checked like a
+  top-level function's, and a proved one is a fact at its later calls in the
+  block (read at each call's arguments), but a return naming a captured
+  variable (`List({Int | _ < k})` with `k` from outside) lends nothing. A
+  recursive call inside the local carries the declared return when one of its
+  arguments is a structural part of the matching parameter (`go(t, i + 1)`
+  after `Cons(h, t)` of `lst`), the rule a top-level function gets, and only
+  once the local's return is proved with it. So `find_index`'s shape, a local
+  `go(lst, i : {Int | _ >= 0}) : Option({Int | _ >= 0})`, proves, and so does
+  a `match` on its result. A non-structural self-call (`go(lst, i + 1)`)
+  carries nothing. A local returning a tuple of element-refined containers has
+  every component of every tail checked, but lends nothing at its calls.
 - **A predicate relating different elements to each other** (sortedness,
   distinctness) cannot be written. A relation between the components of ONE
   entry can ([Relational element refinements](#relational-element-refinements));
@@ -4073,7 +4076,6 @@ not check.
 proposes a contract the checker does not prove, however natural. Examples it
 misses today:
 
-- an `Option` return through a local `fn`;
 - a return that holds only through a callee's return.
 
 The v1 limits are:

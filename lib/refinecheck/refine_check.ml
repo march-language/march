@@ -941,6 +941,20 @@ let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
          && match List.assoc_opt n cb with Some sg' -> sg' == sg | None -> false)
        definers
 
+(* The structural self-call hypothesis of a LOCAL `fn` with a declared
+   container return (O1, 2026-10-24; design 2026-10-18 element-flow
+   follow-ups G3-3, "the same structural rule plus scoping"): while
+   [visit_local_fn] walks the local's body, a call whose [cbenv] entry IS
+   the local's signature (physically, so a shadowing rebinding of the name
+   is never a self-call) with some argument a structural subvariable of its
+   parameter ([structural_subvars], ambiguous names removed) carries the
+   declared entry — closed, or relational over the local's own formals and
+   read at the self-call's actuals ([lend_entry]).  Set only for a walk
+   whose verdict a scratch walk under the same hypothesis already PROVED
+   (the top-level [gating_elem_returns] discipline), so a proof from an
+   unproved hypothesis is never recorded. *)
+let local_elem_hyp : (fn_sig * (string, unit) Hashtbl.t list * entry * string list) option ref = ref None
+
 let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
   : entry option =
   match e with
@@ -954,7 +968,20 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
       | Some (`Container entry) -> Some entry
       | _ -> declared_elem_return ~args ctx cb fname
     in
+    let local_hyp =
+      match !local_elem_hyp with
+      | Some (lsg, sets, entry, formals)
+        when (match List.assoc_opt fname cb with Some s -> s == lsg | None -> false)
+             && List.length sets = List.length args
+             && List.exists2
+                  (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
+                  args sets ->
+        Some (if entry_is_closed entry then Some entry else lend_entry ~formals ~args entry)
+      | _ -> None
+    in
     (match !elem_ret_hyp with
+     | _ when local_hyp <> None ->
+       (match Option.get local_hyp with Some e -> Some e | None -> other ())
      | Some (self, sets, Single entry, definers, formals)
        when hyp_applies ctx cb fname args (self, sets, definers) ->
        (* A closed hypothesis is the entry itself (unchanged); a relational
@@ -5509,24 +5536,74 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         unproved element argument at that self-call clears the verdict
         ([local_elem_self], the induction gate). *)
      let label = Printf.sprintf "return of %s" n.A.txt in
-     let verdict = ref true in
-     let ts =
-       elem_return_tails errctx ~label ~fname:n.A.txt ~span:sp ~verdict
-         ~pnames:(List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps)
-         path body er
+     let pnames = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+     (* One walk of the body with its tails armed, into [errctx], under the
+        self-call hypothesis [hyp] ([local_elem_hyp]); its verdict. *)
+     let walk errctx hyp =
+       let verdict = ref true in
+       let ts = elem_return_tails errctx ~label ~fname:n.A.txt ~span:sp ~verdict ~pnames path body er in
+       let remaining = ref (List.map (fun (_, t, _) -> t) ts) in
+       let saved_self = !local_elem_self and saved_hyp = !local_elem_hyp in
+       ret_elem_demand := Some (label, er, sp, remaining, verdict);
+       local_elem_self := Some (sg, verdict);
+       local_elem_hyp := hyp;
+       Fun.protect
+         ~finally:(fun () ->
+           ret_elem_demand := None;
+           local_elem_self := saved_self;
+           local_elem_hyp := saved_hyp)
+         (fun () ->
+           visit ~root errctx defs ctx path lets sc re cb ce body;
+           check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~label ~fname:n.A.txt ~span:sp
+             ~verdict er ts remaining);
+       !verdict
      in
-     let remaining = ref (List.map (fun (_, t, _) -> t) ts) in
-     let saved_self = !local_elem_self in
-     ret_elem_demand := Some (label, er, sp, remaining, verdict);
-     local_elem_self := Some (sg, verdict);
-     Fun.protect
-       ~finally:(fun () ->
-         ret_elem_demand := None;
-         local_elem_self := saved_self)
-       (fun () ->
-         visit ~root errctx defs ctx path lets sc re cb ce body;
-         check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~label ~fname:n.A.txt ~span:sp
-           ~verdict er ts remaining);
+     (* O1 (2026-10-24): a RECURSIVE local gets the structural self-call
+        hypothesis ([local_elem_hyp]) — the top-level rule, scoped to this
+        signature — for an entry it could lend at all (the registration
+        test below), when the local declares no abstract refinement of its
+        own.  The hypothesis is gated as a top-level function's is: a
+        scratch walk under it (fresh error context, scratch ledger, every
+        verdict cell restored) must prove the return first; only then is
+        the recorded walk made under it.  Otherwise the walk is the
+        pre-O1 one, and a self-call tail carries nothing. *)
+     let lendable (e : entry) =
+       (entry_is_closed e || entry_movable ~formals:pnames e) && not (entry_mentions !current_abstracts e)
+     in
+     let hyp =
+       match er with
+       | Single e
+         when lendable e
+              && Refine_abstract.names ~is_known:known_predicate_fn fd = []
+              && Refine_scope.expr_mentions_free n.A.txt body ->
+         let rebound = ambiguous_names pnames body in
+         let sets =
+           List.map
+             (fun pn ->
+               let set = structural_subvars ~params:pnames pn body in
+               List.iter (Hashtbl.remove set) rebound;
+               set)
+             pnames
+         in
+         let gate_hyp = Some (sg, sets, e, pnames) in
+         let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
+         let saved_last = !last_elem_return_proved and saved_locals = !local_elem_ret_proved in
+         let proved =
+           Fun.protect
+             ~finally:(fun () ->
+               strict_verified := saved_strict;
+               unverified_hinted := saved_hinted;
+               last_elem_return_proved := saved_last;
+               local_elem_ret_proved := saved_locals)
+             (fun () ->
+               Obligation.with_scratch (fun () ->
+                   strict_verified := false;
+                   walk (Err.create ()) gate_hyp))
+         in
+         if proved then gate_hyp else None
+       | _ -> None
+     in
+     let verdict = ref (walk errctx hyp) in
      (* A TUPLE return (leftovers phase C) is checked the same way, tail by
         tail through [check_ret_shape], but lends nothing:
         [declared_tuple_return] never reads a [cbenv] entry, and a local's
@@ -5536,11 +5613,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         captured variable is [Unusable] over them and still lends nothing
         (G3-5). *)
      (match er with
-      | Single e
-        when !verdict
-             && (entry_is_closed e
-                 || entry_movable ~formals:(List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps) e)
-             && not (entry_mentions !current_abstracts e) ->
+      | Single e when !verdict && lendable e ->
         local_elem_ret_proved := sg :: !local_elem_ret_proved
       | _ -> ()));
   entry

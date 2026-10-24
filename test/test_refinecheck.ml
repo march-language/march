@@ -17348,16 +17348,21 @@ let elemflow_local_fn_suite =
         Alcotest.check vs "control: the tail ys proves" [ "proved" ] (of_callee "ys" src3);
         Alcotest.check vs "control: lent" [ "proved" ] (of_callee "mk(…)" src3));
 
-    gated "a recursive local: no self-call hypothesis, lends nothing (G3-3)" (fun () ->
+    (* Was G3-3 ("no self-call hypothesis, lends nothing") until O1
+       (2026-10-24) gave a local the structural self-call hypothesis:
+       `keep(t)` is structural in `xs`, so it carries the declared entry. *)
+    gated "a recursive local: the structural self-call hypothesis proves and lends (O1)" (fun () ->
         let src =
           m "  fn go(ys : List(Int)) : Int do\n\
             \    fn keep(xs : List(Int)) : List({Int | _ > 0}) do\n\
             \      match xs do\n        Nil -> []\n        Cons(h, t) -> keep(t)\n      end\n    end\n\
             \    sum_pos(keep(ys))\n  end\n"
         in
-        (* `[]` has no element to check; keep(t) carries nothing. *)
-        Alcotest.check vs "keep(t) skips" [ "skipped" ] (of_callee "return of keep" src);
-        Alcotest.check vs "sum_pos(keep(ys)) skips" [ "skipped" ] (of_callee "sum_pos" src));
+        (* `[]` has no element to check; the tail keep(t) is proved under its
+           subject, and the local lends at `keep(ys)`. *)
+        Alcotest.check vs "no return-of-keep skip" [] (of_callee "return of keep" src);
+        Alcotest.check vs "keep(t) and keep(ys) prove" [ "proved"; "proved" ] (of_callee "keep(…)" src);
+        Alcotest.check vs "nothing under sum_pos" [] (of_callee "sum_pos" src));
 
     gated "a recursive local with an unproved element argument at its self-call (the induction gate)"
       (fun () ->
@@ -24228,15 +24233,15 @@ let infer_elements_suite =
           (fun fx ->
             Alcotest.(check (option string)) "best" (Some "_ < n")
               (best_text fx ~fn:"small" ~path:(IS.Elem IS.Return))));
-    gated "O1: an Option return through a local fn is rejected as not-true" (fun () ->
+    (* Was "rejected as not-true" until the checker proved O1 (2026-10-24,
+       a recursive local's structural self-call hypothesis): now proposed. *)
+    gated "O1: an Option return through a local fn is proposed" (fun () ->
         with_infer_fixture ~stdlib:true
           (m "O1"
              "  fn fidx(xs : List(Int), pred : Int -> Bool) : Option(Int) do\n    fn go(lst : List(Int), i : {Int | _ >= 0}) : Option({Int | _ >= 0}) do\n      match lst do\n      Nil -> None\n      Cons(h, t) -> if pred(h) do Some(i) else go(t, i + 1) end\n      end\n    end\n    go(xs, 0)\n  end\n  fn user(xs : List(Int)) : Int do\n    match fidx(xs, fn y -> y > 0) do\n    Some(i) -> need_nn(i)\n    None -> 0\n    end\n  end\n")
           (fun fx ->
-            let best, vs = run_best fx ~fn:"fidx" ~path:(IS.Elem IS.Return) in
-            Alcotest.(check bool) "no proposal" true (best = None);
-            Alcotest.(check bool) "a not-true rejection" true
-              (List.exists (function IO.Reject ("not-true", _) -> true | _ -> false) vs)))
+            Alcotest.(check (option string)) "best" (Some "_ >= 0")
+              (best_text fx ~fn:"fidx" ~path:(IS.Elem IS.Return))))
   ]
 
 
@@ -26269,6 +26274,120 @@ let gap_r2_capture_suite =
         let d = String.concat " | " (gap_details "sum_lt10" obs) in
         Alcotest.(check bool) ("names `limit`: " ^ d) true (Astring_contains.contains d "`limit`")) ]
 
+(* O1 (specs/progress/2026-10-24-refine-local-fn-option-return): a
+   RECURSIVE local `fn` with an `Option({Int | _ >= 0})` return (the
+   find_index shape) is proved through its `Some(i)` tails and its structural
+   self-call, and lent once proved. *)
+let gap_o1_local_option_suite =
+  let m body = "mod O1 do\n  fn need_nn(k : {Int | _ >= 0}) : Int do k end\n" ^ body ^ "end\n" in
+  let fidx ?(some = "Some(i)") ?(next = "go(t, i + 1)") () =
+    Printf.sprintf
+      "  fn fidx(xs : List(Int), pred : Int -> Bool) : Option({Int | _ >= 0}) do\n\
+      \    fn go(lst : List(Int), i : {Int | _ >= 0}) : Option({Int | _ >= 0}) do\n\
+      \      match lst do\n\
+      \        Nil -> None\n\
+      \        Cons(h, t) -> if pred(h) do %s else %s end\n\
+      \      end\n\
+      \    end\n\
+      \    go(xs, 0)\n\
+      \  end\n\
+      \  fn user(xs : List(Int)) : Int do\n\
+      \    match fidx(xs, fn y -> y > 3) do\n\
+      \      Some(i) -> need_nn(i)\n\
+      \      None -> 0\n\
+      \    end\n\
+      \  end\n"
+      some next
+  in
+  let all_proved name vs =
+    Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+    Alcotest.check gap_ps name (List.map (fun _ -> ("proved", "")) vs) vs
+  in
+  [ gated "O1: the find_index shape proves `go`, `fidx` and the `Some(i)` use" (fun () ->
+        let obs = gap_run (m (fidx ())) in
+        (* `Some(i)` under `return of go`; the self-call tail and `fidx`'s
+           tail `go(xs, 0)` under their subject `go(…)`; `go`'s `i >= 0`
+           twice. *)
+        all_proved "return of go" (gap_at "return of go" obs);
+        Alcotest.check gap_ps "the two `go(…)` tails" [ ("proved", ""); ("proved", "") ] (gap_at "go(…)" obs);
+        all_proved "every obligation" (List.map (fun (_, v, r, _) -> (v, r)) obs);
+        Alcotest.check gap_ps "need_nn" gap_proved (gap_at "need_nn" obs));
+    gated "O1 control: a `Some(-1)` tail is a violation, and nothing is lent" (fun () ->
+        let obs = gap_run (m (fidx ~some:"Some(0 - 1)" ())) in
+        let go = gap_at "return of go" obs in
+        Alcotest.(check bool) "return of go: violated" true (List.mem ("violated", "") go);
+        (* The gate failed, so the self-call tail carries nothing: no proof
+           recorded from the unproved hypothesis. *)
+        Alcotest.(check int) "return of go: only `None` owes nothing; nothing proved" 0
+          (List.length (List.filter (fun v -> v = ("proved", "")) go));
+        gap_not_proved "return of fidx" (gap_at "return of fidx" obs);
+        gap_not_proved "need_nn" (gap_at "need_nn" obs));
+    gated "O1 control: an unproved local return (`Some(h)`) is not lent" (fun () ->
+        let obs = gap_run (m (fidx ~some:"Some(h)" ())) in
+        gap_not_proved "return of go" (gap_at "return of go" obs);
+        Alcotest.(check bool) "return of go: a skip, not a violation" false
+          (List.mem ("violated", "") (gap_at "return of go" obs));
+        gap_not_proved "return of fidx" (gap_at "return of fidx" obs);
+        gap_not_proved "need_nn" (gap_at "need_nn" obs));
+    gated "O1 control: a non-structural self-call carries nothing" (fun () ->
+        (* `go(lst, i + 1)` recurses on the same list: no structural argument. *)
+        let obs = gap_run (m (fidx ~next:"go(lst, i + 1)" ())) in
+        Alcotest.(check bool) "return of go: the self-call tail skips" true
+          (List.mem_assoc "skipped" (gap_at "return of go" obs));
+        gap_not_proved "need_nn" (gap_at "need_nn" obs));
+    gated "O1 control: a self-call whose element argument is unproved breaks the induction" (fun () ->
+        let src =
+          m
+            "  fn keep(xs : List(Int)) : List({Int | _ >= 0}) do\n\
+            \    fn go(lst : List(Int), acc : List({Int | _ >= 0})) : List({Int | _ >= 0}) do\n\
+            \      match lst do\n\
+            \        Nil -> acc\n\
+            \        Cons(h, t) -> go(t, Cons(h, acc))\n\
+            \      end\n\
+            \    end\n\
+            \    go(xs, Nil)\n\
+            \  end\n"
+        in
+        let obs = gap_run src in
+        Alcotest.(check bool) "return of go: the self-call tail skips" true
+          (List.mem_assoc "skipped" (gap_at "return of go" obs));
+        gap_not_proved "return of keep" (gap_at "return of keep" obs));
+    gated "O1: a recursive local's List return proves through its self-call" (fun () ->
+        let src =
+          m
+            "  fn sum_nn(xs : List({Int | _ >= 0})) : Int do 0 end\n\
+            \  fn f(xs : List(Int)) : Int do\n\
+            \    fn keep(lst : List(Int)) : List({Int | _ >= 0}) do\n\
+            \      match lst do\n\
+            \        Nil -> Nil\n\
+            \        Cons(h, t) -> if h >= 0 do Cons(h, keep(t)) else keep(t) end\n\
+            \      end\n\
+            \    end\n\
+            \    sum_nn(keep(xs))\n\
+            \  end\n"
+        in
+        let obs = gap_run src in
+        all_proved "return of keep" (gap_at "return of keep" obs);
+        all_proved "sum_nn" (gap_at "sum_nn" obs @ gap_at "keep(…)" obs));
+    gated "O1 control: a local rebinding its own name is not a self-call" (fun () ->
+        (* Inside `go`, `go` is rebound to an unrefined lambda before the
+           tail: that call is not the local's, so it carries nothing. *)
+        let src =
+          m
+            "  fn fidx(xs : List(Int)) : Option({Int | _ >= 0}) do\n\
+            \    fn go(lst : List(Int), i : {Int | _ >= 0}) : Option({Int | _ >= 0}) do\n\
+            \      let go = fn (l, j) -> if j > 100 do Some(0 - 5) else None end\n\
+            \      match lst do\n\
+            \        Nil -> None\n\
+            \        Cons(_, t) -> go(t, i)\n\
+            \      end\n\
+            \    end\n\
+            \    go(xs, 0)\n\
+            \  end\n"
+        in
+        let obs = gap_run src in
+        gap_not_proved "return of go" (gap_at "return of go" obs)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -26430,5 +26549,6 @@ let () =
       ("abstract-map", abstract_map_suite);
       ("abstract-multiarg-review", abstract_multiarg_review_suite);
       ("gap-r2-capture", gap_r2_capture_suite);
+      ("gap-o1-local-option", gap_o1_local_option_suite);
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

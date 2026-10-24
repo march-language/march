@@ -312,6 +312,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a recursive local `fn` proves its element return through its own
+  self-call.** `find_index`'s shape, a local `go(lst, i : {Int | _ >= 0}) :
+  Option({Int | _ >= 0})` whose tails are `None`, `Some(i)` and `go(t, i + 1)`, was
+  three `unreflectable-subject` skips (`return of go`, `return of` the enclosing
+  function, and the `Some(i) -> need_nn(i)` use). A self-call with a structural
+  argument (`t` from `Cons(h, t)` of `lst`) now carries the declared return, the rule
+  a top-level function already had, and only after the local's return is proved with
+  it, so a `Some(0 - 1)` tail is still a violation and lends nothing. The same holds
+  for a recursive local returning `List({…})`. `--refine-infer` now proposes the
+  `Option` return.
 - **Refinements: a `List.filter` lambda may capture the caller's variables.**
   `fn small(xs : List(Int), n : Int) : List({Int | _ < n}) do List.filter(xs, fn y
   -> y < n) end` was an `abstract-refinement-uninstantiated` skip at its return, and
