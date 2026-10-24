@@ -312,6 +312,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`--refine-infer` no longer proposes a precondition that only makes the demanding
+  branch dead.** In `if j >= n do v else Array.set(v, j, …) end`, `n : {Int | _ <= j}`
+  "proved" the `Array.set` index by making the `else` unreachable. A precondition
+  whose closed sites are closed only that way is now rejected as `vacuous-branch`
+  (printed by `--refine-infer`, `rejected[].reason` in `--refine-infer-json`). A
+  precondition that genuinely proves a site still counts every site it closes. On
+  `test/native` the one accepted proposal (this one) is gone. A plain `--check` is
+  unchanged.
 - **Refinements: a lambda or helper that binds one name twice is no longer read as a
   predicate.** `let h = fn (a, a) -> a > 0` then `List.filter(xs, fn y -> h(y, 1))`
   was read as `y > 0`, and a function `two(a : Int, a : Int) : {Bool | _ == (a >

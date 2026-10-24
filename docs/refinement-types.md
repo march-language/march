@@ -3973,6 +3973,29 @@ the callers. A return that holds only through its tail call tries the
 callee's return too. A return is proposed only when the checker proves it,
 **and** some caller gets something from it.
 
+**A precondition must prove a site, not delete it.** Take this function:
+
+```march
+pfn set_n(j : Int, n : Int, v) do
+  if j >= n do v else set_n(j + 37, n, Array.set(v, j, 0 - j)) end
+end
+```
+
+`n : {Int | _ <= j}` closes the `Array.set` index obligation only because the
+`else` can no longer run. So for each site a precondition closes, the checker
+also asks whether any execution still reaches it. A site that is reachable
+without the precondition and dead with it does not count for the proposal. If
+no other site is left, or too few to pay for the obligations the precondition
+adds at its callers, the candidate is rejected as `vacuous-branch`:
+
+```
+  set_n: rejected (vacuous-branch) param n : _ <= j
+    closes `Array.set` at array_trie_drop_leak_probe.march:46:26 only by making its branch unreachable
+```
+
+A precondition that proves a real site, and as a result also makes a branch
+dead, is still proposed. The dead branch's site still counts in its total.
+
 ```
 $ march --check --refine-infer app.march
 inferred refinements: 2 proposed, 1 refused; user skips 3 -> 1 (58 probes, 2 rounds)

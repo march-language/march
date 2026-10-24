@@ -278,7 +278,8 @@ once per round (`cmd_refine.ml:442-500`), so R rounds today cost R × T_check be
 ```
 
 `reason` is a closed set: `not-true`, `not-useful`, `opens-site`, `caller-violation`,
-`unsatisfiable`, `handled-case`, `unannotated-signature`, `scc-unsupported`, `budget`. Every array
+`unsatisfiable`, `handled-case`, `unannotated-signature`, `scc-unsupported`, `budget`, and (added
+2026-10-23) `vacuous-branch`. Every array
 is sorted by `(file, line, col, slot, kind, predicate)`, so the output diffs stably in review.
 
 ### 4.3 `--apply`

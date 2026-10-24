@@ -24405,7 +24405,7 @@ let infer_fixpoint_suite =
           (m "J3" "  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\n  fn sum_lt(k : Int, xs : List({Int | _ < k})) : Int do 0 end\n  fn small(xs : List(Int), n : Int) : List(Int) do List.filter(xs, fn y -> y < n) end\n  fn go2(ys : List(Int)) : Int do sum_lt(10, small(ys, 10)) end\n")
           (fun r ->
             let j = March_refinecheck.Infer_json.to_string r in
-            let closed = [ "not-true"; "not-useful"; "opens-site"; "caller-violation"; "unsatisfiable"; "handled-case"; "unannotated-signature"; "scc-unsupported"; "budget" ] in
+            let closed = [ "not-true"; "not-useful"; "opens-site"; "caller-violation"; "unsatisfiable"; "handled-case"; "unannotated-signature"; "scc-unsupported"; "budget"; "vacuous-branch" ] in
             let re = Str.regexp "\"reason\": \"\\([^\"]*\\)\"" in
             let rec all i acc = match Str.search_forward re j i with
               | exception Not_found -> acc
@@ -24413,6 +24413,76 @@ let infer_fixpoint_suite =
             let reasons = all 0 [] in
             Alcotest.(check bool) "some reasons" true (reasons <> []);
             List.iter (fun x -> Alcotest.(check bool) ("closed: " ^ x) true (List.mem x closed)) reasons))
+  ]
+
+
+(* A precondition that closes a site only by making the site's branch
+   unreachable is no contract (specs/progress/2026-10-23-refine-infer-vacuous-branch-preconditions.md).
+   [put]'s `_ < len(xs)` keeps the demand out of reach of any precondition
+   on [j], and [xs] is unannotated (no slot), as `v` is in the real fixture:
+   only a hypothesis that kills the `else` closes it. *)
+let infer_vacuous_suite =
+  let pre = "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n  fn put(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : List(Int) do xs end\n" in
+  let m name body = "mod " ^ name ^ " do\n" ^ pre ^ body ^ "end\n" in
+  let sp = Alcotest.(list (pair string string)) in
+  let vacuous_on fn (r : RI.result) =
+    List.exists (fun ((s : IS.slot), _, reason, _) -> s.IS.fn = fn && reason = "vacuous-branch") r.RI.rejected
+  in
+  let only fn r = List.filter (fun (f, _) -> f = fn) (props r) in
+  [ gated "the set_n shape: `n <= j` kills the demanding branch, rejected as vacuous-branch" (fun () ->
+        infer_run
+          (m "VB" "  pfn set_n(j : Int, n : Int, xs) do\n    if j >= n do xs\n    else set_n(j + 37, n, put(xs, j)) end\n  end\n")
+          (fun r ->
+            Alcotest.check sp "set_n gets nothing" [] (only "set_n" r);
+            Alcotest.(check bool) "rejected (vacuous-branch)" true (vacuous_on "set_n" r)));
+    gated "control: an unguarded demand still gets `n : {Int | _ > 0}`" (fun () ->
+        infer_run (m "VC" "  fn go(n : Int) : Int do need_pos(n) end\n")
+          (fun r ->
+            Alcotest.check sp "proposed" [ ("go", "{Int | _ > 0}") ] (only "go" r);
+            Alcotest.(check bool) "no vacuous rejection" false (vacuous_on "go" r)));
+    gated "control: a guarded demand needs no precondition, and none is rejected as vacuous" (fun () ->
+        infer_run (m "VG" "  fn g(n : Int) : Int do if n > 0 do need_pos(n) else 0 end end\n")
+          (fun r ->
+            Alcotest.check sp "nothing" [] (only "g" r);
+            Alcotest.(check bool) "no vacuous rejection" false (vacuous_on "g" r)));
+    gated "control: closing sites in both live branches is accepted" (fun () ->
+        infer_run (m "VD" "  fn d(b : Bool, n : Int) : Int do if b do need_pos(n) else need_pos(n + 1) end end\n")
+          (fun r -> Alcotest.check sp "proposed" [ ("d", "{Int | _ > 0}") ] (only "d" r)));
+    gated "a genuine close alongside a vacuous one: accepted, and ranked on both" (fun () ->
+        (* `_ > 0` proves `need_pos(n)` and kills the `else`; `_ >= 0` proves
+           only the `else` (n == 0 reaches it).  Admissible on the genuine
+           close, `_ > 0` wins on all its closes. *)
+        infer_run (m "VM" "  pfn e(n : Int) : Int do\n    let a = need_pos(n)\n    if n > 0 do a else need_pos(n + 5) end\n  end\n")
+          (fun r ->
+            Alcotest.check sp "proposed" [ ("e", "{Int | _ > 0}") ] (only "e" r);
+            match List.find_opt (fun (p : RI.proposal) -> p.RI.slot.IS.fn = "e") r.RI.proposals with
+            | Some p -> Alcotest.(check int) "closes both" 2 (List.length p.RI.closes)
+            | None -> Alcotest.fail "no proposal for e"));
+    gated "the probe itself: the else site is live without `n > 0`, dead with it; the genuine site live" (fun () ->
+        with_infer_fixture (m "VP" "  pfn e(n : Int) : Int do\n    let a = need_pos(n)\n    if n > 0 do a else need_pos(n + 5) end\n  end\n")
+          (fun fx ->
+            let module A = March_ast.Ast in
+            let module RC = March_refinecheck.Refine_check in
+            let decls = fx.fx_m.A.mod_decls in
+            let site line =
+              match List.find_opt (fun o -> o.Ob.callee = "need_pos" && o.Ob.span.A.start_line = line) (Ob.all ()) with
+              | Some o -> o.Ob.span
+              | None -> Alcotest.failf "no need_pos site on line %d" line
+            in
+            let genuine = site 5 and dead = site 6 in
+            match PI.prune_with_callers [] "e" decls with
+            | None -> Alcotest.fail "prune"
+            | Some (fd0, rebuild) ->
+              let defs = RC.collect_all_defs decls in
+              let probe defs fd = PI.unreachable_sites ~root:fx.fx_root ~defs ~tree:rebuild ~subject:"n" fd [ genuine; dead ] in
+              Alcotest.(check int) "both live without a hypothesis" 0 (List.length (probe defs fd0));
+              let s =
+                List.find (fun (s : IS.slot) -> s.IS.fn = "e" && s.IS.path = IS.Param "n") (IS.enumerate ~is_user:(fun _ -> true) decls)
+              in
+              let hyp = IS.install { s with IS.fd = fd0 } ~mk:(fun sp -> PI.bin sp ">" (PI.hole sp) (PI.ilit sp 0)) in
+              let defs' = Hashtbl.copy defs in
+              Hashtbl.replace defs' "e" (RC.entry_of_sig (RC.sig_of_fn hyp));
+              Alcotest.(check bool) "only the else site is dead under `n > 0`" true (probe defs' hyp = [ dead ])))
   ]
 
 
@@ -24591,6 +24661,15 @@ let infer_cli_suite =
     gated "--refine-infer proposes E1's element precondition" (fun () ->
         let _, out = run_cli "--check --refine-infer" "mod E1 do\n  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn total(xs : List(Int)) : Int do sum_pos(xs) end\nend\n" in
         Alcotest.(check bool) "annotation printed" true (Astring_contains.contains out "List({Int | _ > 0})"));
+    gated "array_trie_drop_leak_probe: set_n's `n <= j` is no longer proposed (vacuous-branch)" (fun () ->
+        let src = In_channel.with_open_bin (audit_path "test/native/array_trie_drop_leak_probe.march") In_channel.input_all in
+        let code, out = run_cli "--check --refine-infer" src in
+        Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+        Alcotest.(check bool) ("not proposed: " ^ out) false (Astring_contains.contains out "{Int | _ <= j}");
+        Alcotest.(check bool) ("reported: " ^ out) true (Astring_contains.contains out "set_n: rejected (vacuous-branch) param n : _ <= j");
+        let _, json = run_cli "--check --refine-infer-json" src in
+        Alcotest.(check bool) ("JSON reason: " ^ json) true
+          (Astring_contains.contains json "\"predicate\": \"_ <= j\", \"reason\": \"vacuous-branch\""));
     gated "--refine-suggest-all --refine-suggest-json for S1 is byte-identical to the pinned golden" (fun () ->
         let _, out = run_cli "--check --refine-suggest-all --refine-suggest-json" "mod S1 do\n  fn need_nz(n : {Int | _ != 0}) : Int do n end\n  fn safe(a : Int, b : Int) : Int do a + need_nz(b) end\nend\n" in
         let first = List.hd (String.split_on_char '\n' out) in
@@ -26178,6 +26257,7 @@ let () =
       ("infer-accumulator", infer_accumulator_suite);
       ("infer-override", infer_override_suite);
       ("infer-fixpoint", infer_fixpoint_suite);
+      ("infer-vacuous", infer_vacuous_suite);
       ("infer-cli", infer_cli_suite);
       ("infer-apply", infer_apply_suite);
       ("fold-invariants-3", fold_invariants_3_suite);

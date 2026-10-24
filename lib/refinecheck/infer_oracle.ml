@@ -33,6 +33,9 @@ type ctx = {
   defs : (string, RC.fn_sig option) Hashtbl.t;
   base : LD.snapshot;
   in_body : A.span -> bool;
+  reach0 : (A.span, bool) Hashtbl.t;
+    (* site -> unreachable under the UNHYPOTHESISED signature; filled lazily
+       by [vacuous_closes], one walk for every site it is first asked about. *)
 }
 
 let split_qualified (q : string) : string list * string =
@@ -50,14 +53,97 @@ let prepare ~(root : string) ~(decls : A.decl list) (s : IS.slot) : ctx option =
     let in_body (sp : A.span) =
       List.exists (fun (c : A.fn_clause) -> IV.within c.A.fc_span sp) fd0.A.fn_clauses
     in
-    Some { qualified = s.IS.fn; fd0; rebuild; defs; base; in_body }
+    Some { qualified = s.IS.fn; fd0; rebuild; defs; base; in_body; reach0 = Hashtbl.create 8 }
 
 let defs_with (cx : ctx) (hyp : A.fn_def) =
   let d = Hashtbl.copy cx.defs in
   Hashtbl.replace d cx.qualified (RC.entry_of_sig (RC.sig_of_fn hyp));
   d
 
-let precondition ?(allow_caller_violations = false) ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
+(* The checker reads a callee's DEFINITION (not only its signature) from
+   [Refine_param.fn_defs_tbl], registered once by [check_module] from the
+   unhypothesised function — that is where a caller finds a proved element
+   return ([Refine_check.declared_elem_return]).  A probe puts the hypothesis
+   there for its duration. *)
+let with_hyp_def (cx : ctx) (hyp : A.fn_def) (f : unit -> 'a) : 'a =
+  let key = cx.qualified in
+  let saved = Hashtbl.find_opt Refine_param.fn_defs_tbl key in
+  let saved_abs = Hashtbl.find_opt RC.abstracts_tbl key in
+  (match saved with
+   | Some (prefix, _) -> Hashtbl.replace Refine_param.fn_defs_tbl key (prefix, hyp)
+   | None -> ());
+  (* [callee_abstracts] memoises a function's abstract names from the
+     definition table: withdraw the memo so the hypothesis is read. *)
+  Hashtbl.remove RC.abstracts_tbl key;
+  Fun.protect
+    ~finally:(fun () ->
+      (match saved with
+       | Some v -> Hashtbl.replace Refine_param.fn_defs_tbl key v
+       | None -> ());
+      match saved_abs with
+      | Some v -> Hashtbl.replace RC.abstracts_tbl key v
+      | None -> Hashtbl.remove RC.abstracts_tbl key)
+    f
+
+(* ── Vacuous closes (specs/progress/2026-10-23-refine-infer-vacuous-branch-preconditions.md) ──
+   A site in the body that the hypothesis closes only because the site is
+   unreachable under it — reachable without the hypothesis, dead with it —
+   was not discharged; its branch was deleted.  Such a close does not count:
+   a precondition must be admissible on its GENUINE closes alone, or it is
+   rejected as [vacuous-branch].  A site already unreachable without the
+   hypothesis is not this problem and counts as before.
+
+   Cost: one walk under the hypothesis per candidate that is otherwise
+   accepted (all its closed sites at once), plus one walk per slot without it,
+   cached in [cx.reach0] (later candidates' sites are usually already there). *)
+let vacuous_closes ~(root : string) ?subject (cx : ctx) (hyp : A.fn_def) (closes : LD.key list) : LD.key list =
+  let sites = List.sort_uniq compare (List.filter_map (fun (k : LD.key) -> if cx.in_body k.LD.span then Some k.LD.span else None) closes) in
+  if sites = [] then []
+  else begin
+    let missing = List.filter (fun sp -> not (Hashtbl.mem cx.reach0 sp)) sites in
+    if missing <> [] then begin
+      (* Ask once for every unsettled body site of the base ledger too: the
+         next candidate's closes are drawn from the same set. *)
+      let pending =
+        List.sort_uniq compare
+          (missing
+           @ List.filter_map
+               (fun ((k : LD.key), v) ->
+                 if cx.in_body k.LD.span && (not (LD.settled v)) && not (Hashtbl.mem cx.reach0 k.LD.span) then Some k.LD.span
+                 else None)
+               cx.base)
+      in
+      let dead =
+        with_hyp_def cx cx.fd0 @@ fun () ->
+        PI.unreachable_sites ~root ~defs:cx.defs ~tree:cx.rebuild ?subject cx.fd0 pending
+      in
+      List.iter (fun sp -> Hashtbl.replace cx.reach0 sp (List.mem sp dead)) pending
+    end;
+    let live0 = List.filter (fun sp -> not (Hashtbl.find cx.reach0 sp)) sites in
+    let dead = PI.unreachable_sites ~root ~defs:(defs_with cx hyp) ~tree:cx.rebuild ?subject hyp live0 in
+    List.filter (fun (k : LD.key) -> List.mem k.LD.span dead) closes
+  end
+
+let vacuous_detail (vac : LD.key list) =
+  match vac with
+  | k :: _ ->
+    Printf.sprintf "closes `%s` at %s:%d:%d only by making its branch unreachable" k.LD.callee
+      k.LD.span.A.file k.LD.span.A.start_line k.LD.span.A.start_col
+  | [] -> ""
+
+(* Admissible on its GENUINE closes alone — at least one, and enough to pay
+   for the new skips — or [vacuous-branch].  Once admissible, the proposal
+   keeps every close (a dead site does become settled) and is ranked on all
+   of them, so `_ > 0` still beats `_ >= 0` when it proves the body's
+   `need_pos(n)` and, as a consequence, kills a branch that handled `n <= 0`. *)
+let accept_genuine ~root ?subject (cx : ctx) (hyp : A.fn_def) ~closes ~new_skipped : verdict =
+  let vac = vacuous_closes ~root ?subject cx hyp closes in
+  let genuine = List.filter (fun k -> not (List.memq k vac)) closes in
+  if vac <> [] && (genuine = [] || List.length genuine < List.length new_skipped) then
+    Reject ("vacuous-branch", vacuous_detail vac)
+  else Accept { closes; new_skipped }
+
+let precondition ?(allow_caller_violations = false) ?subject ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
   let after = PI.walk_ledger ~root ~defs:(defs_with cx hyp) (cx.rebuild hyp) in
   let delta = LD.diff ~before:cx.base ~after in
   let caller_viol =
@@ -71,17 +157,23 @@ let precondition ?(allow_caller_violations = false) ~(root : string) (cx : ctx) 
   if caller_viol <> [] then
     if not (PI.admissible without_callers) then Reject ("not-useful", "creates violations and closes nothing in the body")
     else if not (PI.satisfiable ~root hyp) then Reject ("unsatisfiable", "the parameters admit no value")
-    else if allow_caller_violations then
-      (* D2's override: admissible but for the callers it breaks. *)
-      Accept { closes = LD.closed without_callers; new_skipped = LD.new_skipped without_callers }
     else
-      Refuse
-        { PI.rf_reason = "caller-violation";
-          rf_sites = List.sort_uniq compare (List.map (fun (k : LD.key) -> k.LD.span) caller_viol) }
+      (* Vacuity before the refusal: a refusal tells the author to fix a
+         caller, which is wrong advice for a contract that is no contract. *)
+      match
+        accept_genuine ~root ?subject cx hyp ~closes:(LD.closed without_callers)
+          ~new_skipped:(LD.new_skipped without_callers)
+      with
+      | Reject _ as r -> r
+      | v when allow_caller_violations -> v (* D2's override: admissible but for the callers it breaks. *)
+      | _ ->
+        Refuse
+          { PI.rf_reason = "caller-violation";
+            rf_sites = List.sort_uniq compare (List.map (fun (k : LD.key) -> k.LD.span) caller_viol) }
   else if LD.opened delta <> [] then Reject ("opens-site", "a previously proved obligation is no longer proved")
   else if not (PI.admissible delta) then Reject ("not-useful", "closes no site")
   else if not (PI.satisfiable ~root hyp) then Reject ("unsatisfiable", "the parameters admit no value")
-  else Accept { closes = LD.closed delta; new_skipped = LD.new_skipped delta }
+  else accept_genuine ~root ?subject cx hyp ~closes:(LD.closed delta) ~new_skipped:(LD.new_skipped delta)
 
 let return_ ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
   if not (PO.post_holds ~root hyp) then Reject ("not-true", "the checker does not prove this return")
@@ -146,31 +238,6 @@ let accumulator ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
   else if not (PI.admissible delta) then Reject ("not-useful", "closes no site")
   else Accept { closes = LD.closed delta; new_skipped = LD.new_skipped delta }
 
-(* The checker reads a callee's DEFINITION (not only its signature) from
-   [Refine_param.fn_defs_tbl], registered once by [check_module] from the
-   unhypothesised function — that is where a caller finds a proved element
-   return ([Refine_check.declared_elem_return]).  A probe puts the hypothesis
-   there for its duration. *)
-let with_hyp_def (cx : ctx) (hyp : A.fn_def) (f : unit -> 'a) : 'a =
-  let key = cx.qualified in
-  let saved = Hashtbl.find_opt Refine_param.fn_defs_tbl key in
-  let saved_abs = Hashtbl.find_opt RC.abstracts_tbl key in
-  (match saved with
-   | Some (prefix, _) -> Hashtbl.replace Refine_param.fn_defs_tbl key (prefix, hyp)
-   | None -> ());
-  (* [callee_abstracts] memoises a function's abstract names from the
-     definition table: withdraw the memo so the hypothesis is read. *)
-  Hashtbl.remove RC.abstracts_tbl key;
-  Fun.protect
-    ~finally:(fun () ->
-      (match saved with
-       | Some v -> Hashtbl.replace Refine_param.fn_defs_tbl key v
-       | None -> ());
-      match saved_abs with
-      | Some v -> Hashtbl.replace RC.abstracts_tbl key v
-      | None -> Hashtbl.remove RC.abstracts_tbl key)
-    f
-
 (* A probe that raises costs that candidate, never the command. *)
 let probe ?allow_caller_violations ~(root : string) (cx : ctx) (s : IS.slot) (c : IV.cand) : verdict =
   try
@@ -179,11 +246,11 @@ let probe ?allow_caller_violations ~(root : string) (cx : ctx) (s : IS.slot) (c 
     with_hyp_def cx hyp @@ fun () ->
     match s.IS.path with
     | IS.Return -> return_ ~root cx hyp
-    | IS.Param _ -> precondition ?allow_caller_violations ~root cx hyp
+    | IS.Param x -> precondition ?allow_caller_violations ~subject:x ~root cx hyp
     | IS.Lambda_param _ -> accumulator ~root cx hyp
     | p -> (
       match IS.root p with
-      | IS.Param _ -> precondition ?allow_caller_violations ~root cx hyp
+      | IS.Param x -> precondition ?allow_caller_violations ~subject:x ~root cx hyp
       | IS.Return -> elem_return ~root cx hyp
       | _ -> Reject ("not-useful", "kind not implemented"))
   with e -> Reject ("not-true", "probe raised: " ^ Printexc.to_string e)

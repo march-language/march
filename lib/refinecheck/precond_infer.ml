@@ -624,6 +624,152 @@ let satisfiable ?(root = Sys.getcwd ()) (fd : A.fn_def) : bool =
   let snap = walk_ledger ~root ~defs decls in
   not (List.exists (fun ((k : Ledger_diff.key), v) -> k.Ledger_diff.callee = never && v = Ob.Proved) snap)
 
+(* ── Is a site still reachable? (the vacuous-branch probe) ────────────────
+   A precondition can close a site without satisfying its demand: `n <= j`
+   makes the `else` of `if j >= n do v else Array.set(v, j, …) end` dead, so
+   the `Array.set` obligation is proved vacuously (path ∧ hypothesis ⊢
+   false).  That is admissible by the ledger and satisfiable, and it is not a
+   contract (specs/progress/2026-10-23-refine-infer-vacuous-branch-preconditions.md).
+
+   Asked of the REAL checker, the way [satisfiable] asks: at each site, put a
+   call demanding [false] just before the site's expression.  Its query is
+   built by the same [check_call] from the same path context the site's own
+   obligation saw, plus the parameters' refinements, so it is proved exactly
+   when the site's path condition is inconsistent with what is in scope —
+   i.e. when no execution reaches the site.
+
+   The demand's subject is one Int parameter ([subject] when it is one, else
+   the first): every path condition is translated into the query whatever the
+   subject, together with the scope facts of the names the conditions
+   mention, and the subject's own refinement is loaded through it.  A site
+   with no Int parameter to name, or whose span no instrumentable expression
+   covers (a clause guard, a `let` itself), is reported REACHABLE — the
+   pre-fix behaviour, never a false rejection. *)
+let reach_never = "__refine_reach_never__"
+
+let reach_never_decl : A.decl Lazy.t =
+  lazy
+    (match
+       (March_parser.Parse.module_of_lexbuf
+          (Lexing.from_string
+             (Printf.sprintf "mod ReachProbe do\n  fn %s(x : {Int | _ < 0 && _ > 0}) : Int do x end\nend\n" reach_never)))
+         .A.mod_decls
+     with
+     | [ (A.DFn _ as d) ] | [ A.DMod (_, _, [ (A.DFn _ as d) ], _) ] -> d
+     | _ -> failwith "reach probe callee did not parse")
+
+let span_contains (o : A.span) (s : A.span) =
+  s.A.file = o.A.file
+  && (s.A.start_line, s.A.start_col) >= (o.A.start_line, o.A.start_col)
+  && (s.A.end_line, s.A.end_col) <= (o.A.end_line, o.A.end_col)
+
+(* One-level pre-order map, the forms [check_call]'s walk carries a path
+   through.  A form not listed is a leaf here: a site inside it is
+   instrumented at the leaf, under a weaker path (reported reachable more
+   often, never less). *)
+let rec instrument_at (site : A.span) (mk : A.expr -> A.expr option) (e : A.expr) : A.expr * bool =
+  let sp = March_typecheck.Typecheck_types.span_of_expr e in
+  let is_probe = match e with A.EApp (A.EVar { A.txt; _ }, _, _) -> txt = reach_never | _ -> false in
+  (* An earlier site's probe call carries that site's span: never descend into it. *)
+  if is_probe || not (span_contains sp site) then (e, false)
+  else begin
+    let hit = ref false in
+    let go x = let x', h = instrument_at site mk x in if h then hit := true; x' in
+    let e' =
+      match e with
+      | A.EApp (h, xs, sp) -> A.EApp (go h, List.map go xs, sp)
+      | A.EBlock (es, sp) -> A.EBlock (List.map go es, sp)
+      | A.ELet (b, sp) -> A.ELet ({ b with A.bind_expr = go b.A.bind_expr }, sp)
+      | A.EIf (c, t, f, sp) -> A.EIf (go c, go t, go f, sp)
+      | A.EMatch (sc, brs, sp) ->
+        A.EMatch (go sc, List.map (fun (br : A.branch) -> { br with A.branch_body = go br.A.branch_body }) brs, sp)
+      | A.ETuple (es, sp) -> A.ETuple (List.map go es, sp)
+      | A.ELam (ps, b, sp) -> A.ELam (ps, go b, sp)
+      | A.EPipe (a, b, sp) -> A.EPipe (go a, go b, sp)
+      | A.EAnnot (x, t, sp) -> A.EAnnot (go x, t, sp)
+      | other -> other
+    in
+    if !hit then (e', true)
+    else
+      match mk e with
+      | Some w -> (w, true)
+      | None -> (e, false)
+  end
+
+(* [sites] of [fd] that no execution reaches under [fd]'s own signature.
+   [tree] rebuilds the probe's decl tree around a version of the function (the
+   oracle's pruned tree: the target and its callers); [defs] is the signature
+   table the probe walks under.  One walk for all the sites. *)
+let unreachable_sites ~root ~defs ~(tree : A.fn_def -> A.decl list) ?subject (fd : A.fn_def)
+    (sites : A.span list) : A.span list =
+  let int_params =
+    match fd.A.fn_clauses with
+    | c :: _ ->
+      let rec base = function A.TyRefine (t, _, _) -> base t | t -> t in
+      List.filter_map
+        (function
+          | A.FPNamed { A.param_name; param_ty = Some t; _ }
+          | A.FPDefault ({ A.param_name; param_ty = Some t; _ }, _)
+            when kind_of_ty (base t) = KInt -> Some param_name
+          | _ -> None)
+        c.A.fc_params
+    | [] -> []
+  in
+  let subj =
+    match List.find_opt (fun (n : A.name) -> Some n.A.txt = subject) int_params with
+    | Some n -> Some n
+    | None -> (match int_params with n :: _ -> Some n | [] -> None)
+  in
+  let sites = List.sort_uniq compare sites in
+  match subj with
+  | None -> []
+  | Some _ when sites = [] -> []
+  | Some n ->
+    let call_at (site : A.span) =
+      A.EApp
+        ( A.EVar { A.txt = reach_never; A.span = site },
+          [ A.EVar { A.txt = n.A.txt; A.span = n.A.span } ],
+          site )
+    in
+    let mk site (e : A.expr) =
+      match e with
+      | A.ELet _ | A.ELetQ _ | A.ELetFn _ | A.ELetStar _ -> None
+      | _ -> Some (A.EBlock ([ call_at site; e ], March_typecheck.Typecheck_types.span_of_expr e))
+    in
+    let placed = ref [] in
+    let body0 = List.map (fun (c : A.fn_clause) -> c.A.fc_body) fd.A.fn_clauses in
+    let bodies =
+      List.fold_left
+        (fun bodies site ->
+          let hit = ref false in
+          let bodies =
+            List.map
+              (fun b -> if !hit then b else let b', h = instrument_at site (mk site) b in if h then hit := true; b')
+              bodies
+          in
+          if !hit then placed := site :: !placed;
+          bodies)
+        body0 sites
+    in
+    if !placed = [] then []
+    else
+      let probe =
+        { fd with
+          A.fn_clauses = List.map2 (fun (c : A.fn_clause) b -> { c with A.fc_body = b }) fd.A.fn_clauses bodies }
+      in
+      let never_d = Lazy.force reach_never_decl in
+      let decls = never_d :: tree probe in
+      let defs = Hashtbl.copy defs in
+      Hashtbl.iter (fun k v -> Hashtbl.replace defs k v) (RC.collect_all_defs [ never_d ]);
+      Ob.with_scratch @@ fun () ->
+      let snap = walk_ledger ~root ~defs decls in
+      List.filter
+        (fun site ->
+          List.exists
+            (fun ((k : Ledger_diff.key), v) -> k.Ledger_diff.callee = reach_never && k.Ledger_diff.span = site && v = Ob.Proved)
+            snap)
+        !placed
+
 let infer_fn ?(allow_caller_violations = false) ~root ~defs ~(decls : A.decl list)
     ~(path : string list) ~(budget : int ref) (fn_name : string) : t option =
   let qualified = String.concat "." (path @ [ fn_name ]) in

@@ -793,6 +793,10 @@ What each outcome means:
 - **`refused (caller-violation)`.** A precondition that would turn an existing call into a
   violation. The call is named so you can fix it, or pass `--allow-caller-violations` to
   accept the contract anyway; a contract no value satisfies is still rejected.
+- **`rejected (vacuous-branch)`.** A precondition that closes its sites only by making
+  their branch unreachable, as `n : {Int | _ <= j}` does for the `else` of
+  `if j >= n do v else Array.set(v, j, …) end`. It is not a contract, so it is not
+  proposed. The line names the site.
 - **`external callers`.** A precondition on a public function with no caller in the project
   is shown but not written: in a library, its real callers are elsewhere. `--apply-public`
   writes it too.

@@ -1049,6 +1049,13 @@ let print_refine_infer ~filename ~user_files desugared =
                   Printf.sprintf "\n    would break the call at %s:%d:%d" sp.March_ast.Ast.file sp.March_ast.Ast.start_line sp.March_ast.Ast.start_col)
                 rf.March_refinecheck.Precond_infer.rf_sites)))
       r.RI.refused;
+    (* Of the rejections, only a vacuous branch is printed: the candidate
+       looked like a proposal (admissible, satisfiable) and was not one. *)
+    List.iter
+      (fun ((s : IS.slot), pred, reason, detail) ->
+        if reason = "vacuous-branch" then
+          Printf.printf "  %s: rejected (%s) %s : %s\n    %s\n" s.IS.fn reason (IJ.path_text s.IS.path) pred detail)
+      r.RI.rejected;
     List.iter (fun (fn, n) -> Printf.printf "  %s: %s\n" fn n) r.RI.notes;
     (* `--refine-report --refine-infer` (design §4.5): the ledger as it will be
        once the proposals are applied, in the report's own words. *)
