@@ -1951,7 +1951,48 @@ let definer_domain (fd : A.fn_def) (p : string) : (string * A.expr) option =
         | _ -> None)
      | _ -> None)
 
-let instantiate_abstract ~(named : string -> (string list * A.expr * A.expr list) option)
+(* The value names a predicate mentions: every [EVar] outside an
+   application head, other than [binder], `_` and the set literal — the
+   names [classify_pred binder [] e] objects to, for a decline's wording and
+   for the capture rule below. *)
+let pred_value_names (binder : string) (e : A.expr) : string list =
+  let acc = ref [] in
+  let rec go (e : A.expr) =
+    match e with
+    | A.EVar { A.txt; _ } ->
+      if txt <> binder && txt <> "_" && txt <> Refine_encode.set_empty_literal && not (List.mem txt !acc)
+      then acc := txt :: !acc
+    | A.EApp (A.EVar _, args, _) -> List.iter go args
+    | A.EApp (f, args, _) -> go f; List.iter go args
+    | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.iter go es
+    | A.EField (r, _, _) | A.EAnnot (r, _, _) -> go r
+    | _ -> ()
+  in
+  go (Refine_encode.mark_set_empty e);
+  List.rev !acc
+
+(* R2's [~stable] at a call walked under [ctx]: a name some enclosing binder
+   binds (every binder is immutable). *)
+let stable_local (ctx : rctx) (n : string) : bool = List.mem n ctx.locals
+
+(* [~stable]: the names a lambda may CAPTURE (R2, 2026-10-24).  A reading
+   [q] that mentions a name other than the lambda's parameter is admitted
+   when every such name is written FREE in the lambda itself (not introduced
+   by the reader) and [stable] holds of it at the call: an immutable local
+   binding of the enclosing scope (a parameter, `let`, lambda parameter or
+   arm binder; March has no mutable bindings), so the value the closure
+   captured is the value the name denotes wherever the instantiated entry is
+   read.  That entry is then RELATIONAL over the caller's scope, exactly as a
+   lent `List({Int | _ < n})` is, and its free names are kept as they are:
+   nothing substitutes into [q] (the callee's slot is closed over its binder,
+   [abstract_slot_of_ty]), so no callee formal can capture them.  Rebinding a
+   captured name between the lambda and a use is retired by the channels the
+   reading comes through ([lets]: a `let`-bound lambda, or a `let`-bound
+   call re-read at its use, retires when any name it mentions rebinds), and
+   a return demand naming a rebound parameter is declined before it gets
+   here.  Default: nothing is stable (the pre-R2 closedness rule). *)
+let instantiate_abstract ?(stable : string -> bool = fun _ -> false)
+    ~(named : string -> (string list * A.expr * A.expr list) option)
     ~(local_lambda : string -> A.expr option)
     ~(discharge : y:string -> fact:A.expr -> A.expr -> bool) (fd : A.fn_def) (p : string)
     (args : A.expr list) : (string * A.expr, string) result =
@@ -2012,13 +2053,21 @@ let instantiate_abstract ~(named : string -> (string list * A.expr * A.expr list
       (match inline_bool_body ~named ~local_lambda ~binders:[ y ] body with
        | Error w -> Error (Printf.sprintf "the lambda passed for `%s` %s" p w)
        | Ok (r, obs) ->
-         if classify_pred y [] r <> Closed then
-           Error
-             (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
-         else
-           (match undischarged y obs with
-            | None -> Ok (y, r)
-            | Some o -> Error (Printf.sprintf "the lambda passed for `%s` %s" p (pre_error o))))
+         let caps = pred_value_names y r in
+         let other () =
+           Error (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
+         in
+         (match List.find_opt (fun n -> not (stable n && Refine_scope.expr_mentions_free n lam)) caps with
+          | Some n when Refine_scope.expr_mentions_free n lam ->
+            Error
+              (Printf.sprintf "the lambda passed for `%s` captures `%s`, which is not a local binding of this call"
+                 p n)
+          | Some _ -> other ()
+          | None when classify_pred y caps r = Unusable -> other ()
+          | None ->
+            (match undischarged y obs with
+             | None -> Ok (y, r)
+             | Some o -> Error (Printf.sprintf "the lambda passed for `%s` %s" p (pre_error o)))))
     | A.ELam _ ->
       Error (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
     | _ -> Error (Printf.sprintf "the argument passed for `%s` is not a lambda" p)
@@ -2115,7 +2164,7 @@ let abstract_flow ?component ~root defs (ctx : rctx) path lets sc re (cb : cbenv
                in
                let discharge = scratch_implies ~root defs ctx path lets sc re cb ~span ~callee esort in
                (match
-                  instantiate_abstract ~named:(named_predicate_n (callee_sig ctx defs cb))
+                  instantiate_abstract ~stable:(stable_local ctx) ~named:(named_predicate_n (callee_sig ctx defs cb))
                     ~local_lambda:(local_lambda_of lets) ~discharge fd p args
                 with
                 | Error w -> uninst w
@@ -2166,7 +2215,13 @@ let abstract_flow ?component ~root defs (ctx : rctx) path lets sc re (cb : cbenv
                       (fun () ->
                         Obligation.with_scratch (fun () ->
                             strict_verified := false;
-                            check_call cx ~span ~callee ~subject:Element_domain ~verdict_out:out sg
+                            (* [~goal_scope_facts] for a reading that
+                               CAPTURES (R2): [$elem]'s fact (`y < k`) is
+                               then in the caller's namespace, and `k`'s own
+                               scope fact is what discharges the demand.  A
+                               closed reading keeps the pre-R2 query. *)
+                            check_call cx ~span ~callee ~subject:Element_domain
+                              ~goal_scope_facts:(pred_value_names y q <> []) ~verdict_out:out sg
                               [ A.EVar { A.txt = "$elem"; A.span = span } ] rp));
                     match !out with
                     | Some Obligation.Proved -> Some `Proved
@@ -4082,7 +4137,7 @@ let abstract_param_entry ~root (ctx : rctx) defs path sc re (cb : cbenv) (lets :
             | None -> false
           in
           Result.bind
-            (instantiate_abstract ~named:(named_predicate_n (callee_sig ctx defs cb))
+            (instantiate_abstract ~stable:(stable_local ctx) ~named:(named_predicate_n (callee_sig ctx defs cb))
                ~local_lambda:(local_lambda_of lets) ~discharge fd p args) (fun (y, q) ->
               let body = instantiate_slot sl (y, q) in
               (* The demand's element sort is the ARGUMENT's: unlike a result

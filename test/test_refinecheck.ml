@@ -20574,14 +20574,16 @@ end|}
         Alcotest.(check (list string)) "reason" [ "abstract-refinement-uninstantiated" ]
           (List.filter_map (fun (c, _, r) -> if c = "sum_pos" then Some r else None) obs));
 
-    (* A lambda mentioning an outer name is declined, not mis-instantiated. *)
-    gated "a capturing lambda is uninstantiated" (fun () ->
+    (* A lambda mentioning an outer name: since R2 (2026-10-24) a stable
+       local capture instantiates `y > m` over the caller's `m`, which
+       nothing constrains, so the demand is undecided (never proved). *)
+    gated "a capturing lambda over an unconstrained local is undecided" (fun () ->
         let obs =
           typed_obligations
             ("mod NC do\n" ^ ar2_filt
            ^ "  fn go(ys : List(Int), m : Int) : Int do sum_pos(filt(ys, fn y -> y > m)) end\nend\n")
         in
-        Alcotest.(check (list string)) "reason" [ "abstract-refinement-uninstantiated" ]
+        Alcotest.(check (list string)) "reason" [ "solver-undecided" ]
           (List.filter_map (fun (c, _, r) -> if c = "sum_pos" then Some r else None) obs));
 
     (* n6 at the call site: a callee whose body does not prove lends nothing. *)
@@ -20791,8 +20793,10 @@ end|}
         Alcotest.(check bool) "not proved" false
           (List.mem ("proved", "")
              (sumpos "  fn go(ys : List(Int), h : ({x : Int | true}) -> Bool) : Int do\n    let f = fn y -> y > 0\n    let f = h\n    sum_pos(filt(ys, f))\n  end\n")));
-    gated "a let-bound lambda that captures is uninstantiated" (fun () ->
-        Alcotest.check ps "uninstantiated" uninst
+    (* R2 (2026-10-24): the capture `m` is a stable local, so `y > m` is
+       instantiated; `m` is unconstrained, so the demand is undecided. *)
+    gated "a let-bound lambda that captures an unconstrained local is undecided" (fun () ->
+        Alcotest.check ps "undecided" [ ("skipped", "solver-undecided") ]
           (sumpos "  fn go(ys : List(Int), m : Int) : Int do\n    let f = fn y -> y > m\n    sum_pos(filt(ys, f))\n  end\n"));
     (* A local lambda shadows a top-level predicate of the same name. *)
     gated "a let-bound lambda shadows a named predicate" (fun () ->
@@ -20869,9 +20873,14 @@ let abstract_leftovers_a_suite =
         Alcotest.check ps "L3c too weak (admits 0)" weak (slugs (go "fn y -> not(is_neg(y))")));
     gated "A7 (L5c): actuals are substituted in order" (fun () ->
         Alcotest.check ps "too weak" weak (slugs (go "fn y -> gt(0, y)")));
-    gated "A8 (L5k, C1): a captured caller parameter declines" (fun () ->
-        Alcotest.check ps "uninstantiated" uninst
-          (slugs "  fn go(ys : List(Int), k : Int) : Int do sum_pos(filt(ys, fn y -> gt(y, k))) end\n"));
+    (* R2 (2026-10-24): a captured caller parameter is a stable local, so
+       `gt(y, k)` reads `y > k`; `k` is unconstrained (undecided), and a
+       `k >= 0` makes it proved. *)
+    gated "A8 (L5k, C1): a captured caller parameter is read over the caller's name" (fun () ->
+        Alcotest.check ps "undecided" [ ("skipped", "solver-undecided") ]
+          (slugs "  fn go(ys : List(Int), k : Int) : Int do sum_pos(filt(ys, fn y -> gt(y, k))) end\n");
+        Alcotest.check ps "proved" proved
+          (slugs "  fn go(ys : List(Int), k : {Int | _ >= 0}) : Int do sum_pos(filt(ys, fn y -> gt(y, k))) end\n"));
     gated "A9 (L8, L9): a let-bound lambda and a callback inside &&" (fun () ->
         Alcotest.check ps "L8 proved" proved
           (slugs
@@ -24211,14 +24220,14 @@ let infer_elements_suite =
           (fun fx ->
             Alcotest.(check (option string)) "best" (Some "_ > 0")
               (best_text fx ~fn:"split" ~path:(IS.Elem (IS.Tuple (0, IS.Return))))));
-    gated "R2: a relational filter return is rejected as not-true" (fun () ->
+    (* Was "rejected as not-true" until the checker proved R2 (2026-10-24,
+       a stable capture in `List.filter`'s lambda): now proposed. *)
+    gated "R2: a relational filter return is proposed" (fun () ->
         with_infer_fixture ~stdlib:true
           (m "R2" "  fn sum_lt(k : Int, xs : List({Int | _ < k})) : Int do 0 end\n  fn small(xs : List(Int), n : Int) : List(Int) do List.filter(xs, fn y -> y < n) end\n  fn go(ys : List(Int)) : Int do sum_lt(10, small(ys, 10)) end\n")
           (fun fx ->
-            let best, vs = run_best fx ~fn:"small" ~path:(IS.Elem IS.Return) in
-            Alcotest.(check bool) "no proposal" true (best = None);
-            Alcotest.(check bool) "a not-true rejection" true
-              (List.exists (function IO.Reject ("not-true", _) -> true | _ -> false) vs)));
+            Alcotest.(check (option string)) "best" (Some "_ < n")
+              (best_text fx ~fn:"small" ~path:(IS.Elem IS.Return))));
     gated "O1: an Option return through a local fn is rejected as not-true" (fun () ->
         with_infer_fixture ~stdlib:true
           (m "O1"
@@ -26108,6 +26117,158 @@ let abstract_multiarg_review_suite =
         Alcotest.(check (list (pair string string))) "control: unbounded w, all proved"
           (List.map (fun (c, _) -> (c, "proved")) vs) vs) ]
 
+(* ── Element-gap harness (specs/progress/2026-10-24-refine-*.md) ──────────
+   The user module checked beside the real stdlib (`list.march`,
+   `deque.march`, the prelude), typed, as the driver does.  Each obligation
+   whose span is in the user module (no file) as (callee, verdict, reason,
+   detail). *)
+let gap_std =
+  lazy
+    (let load name =
+       let md, path = load_stdlib_march name in
+       ( March_ast.Ast.DMod
+           (md.March_ast.Ast.mod_name, March_ast.Ast.Public, md.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+         path )
+     in
+     let mods = List.map load [ "list.march"; "deque.march" ] in
+     let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+     (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+
+let gap_run (src : string) : (string * string * string * string) list =
+  March_refinecheck.Obligation.reset ();
+  let md = March_desugar.Desugar.desugar_module (parse src) in
+  let mods, prelude_decls, paths = Lazy.force gap_std in
+  let md = { md with March_ast.Ast.mod_decls = mods @ prelude_decls @ md.March_ast.Ast.mod_decls } in
+  let _tc, type_map = March_typecheck.Typecheck.check_module md in
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx md;
+  List.filter_map
+    (fun (o : March_refinecheck.Obligation.t) ->
+      let open March_refinecheck.Obligation in
+      let f = o.span.March_ast.Ast.file in
+      if f = "" || f = "<unknown>" then
+        Some
+          ( o.callee, verdict_name o.verdict
+          , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+          , match o.verdict with Skipped r -> reason_detail r | _ -> "" )
+      else None)
+    (March_refinecheck.Obligation.all ())
+
+let gap_at callee obs = List.filter_map (fun (c, v, r, _) -> if c = callee then Some (v, r) else None) obs
+let gap_details callee obs = List.filter_map (fun (c, _, _, d) -> if c = callee then Some d else None) obs
+let gap_ps = Alcotest.(list (pair string string))
+let gap_proved = [ ("proved", "") ]
+
+(* Has obligations at [callee], none of them proved. *)
+let gap_not_proved name vs =
+  Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+  Alcotest.(check bool) (name ^ ": nothing proved") false (List.mem ("proved", "") vs)
+
+(* R2 (specs/todos → progress 2026-10-24-refine-relational-filter-capture):
+   an abstract refinement instantiated from a lambda that CAPTURES a stable
+   local of the call (`List.filter(xs, fn y -> y < n)`) gives a relational
+   element fact over the caller's scope. *)
+let gap_r2_capture_suite =
+  let m body = "mod R2 do\n  fn sum_lt10(xs : List({Int | _ < 10})) : Int do List.length(xs) end\n" ^ body ^ "end\n" in
+  let small lam =
+    Printf.sprintf "  fn small(xs : List(Int), n : Int) : List({Int | _ < n}) do List.filter(xs, %s) end\n" lam
+  in
+  let go = "  fn go(ys : List(Int)) : Int do sum_lt10(small(ys, 10)) end\n" in
+  (* A user combinator with a parameter `n` of its own (the C4 collision). *)
+  let keep =
+    "  fn keep(xs : List(a), n : Int, f : a -> Bool[p]) : List(a[p]) do\n\
+    \    match xs do\n\
+    \      Nil -> Nil\n\
+    \      Cons(h, t) -> if f(h) do Cons(h, keep(t, n, f)) else keep(t, n, f) end\n\
+    \    end\n\
+    \  end\n"
+  in
+  [ gated "R2: `small`'s return is proved and lent at `small(ys, 10)`" (fun () ->
+        let obs = gap_run (m (small "fn y -> y < n" ^ go)) in
+        Alcotest.check gap_ps "return of small" gap_proved (gap_at "return of small" obs);
+        Alcotest.check gap_ps "small(ys, 10)" gap_proved (gap_at "small(…)" obs));
+    gated "R2 control: a too-weak lambda (`y <= n`) is not proved, nor lent" (fun () ->
+        let obs = gap_run (m (small "fn y -> y <= n" ^ go)) in
+        (* `n` is unconstrained, so a model picking it is no definite
+           failure (phase 4's free-name rule): undecided, not too-weak. *)
+        Alcotest.check gap_ps "return of small" [ ("skipped", "solver-undecided") ]
+          (gap_at "return of small" obs);
+        gap_not_proved "small(ys, 10)" (gap_at "small(…)" obs @ gap_at "sum_lt10" obs));
+    gated "R2 at a caller: a refined capture discharges the demand; a weaker one does not" (fun () ->
+        let src b =
+          m (Printf.sprintf "  fn g(xs : List(Int), k : {Int | _ <= %d}) : Int do sum_lt10(List.filter(xs, fn y -> y < k)) end\n" b)
+        in
+        Alcotest.check gap_ps "k <= 10" gap_proved (gap_at "sum_lt10" (gap_run (src 10)));
+        Alcotest.check gap_ps "k <= 11" [ ("skipped", "abstract-refinement-too-weak") ]
+          (gap_at "sum_lt10" (gap_run (src 11))));
+    gated "R2 control: a capture shadowed in the definer's body is not the return's `n`" (fun () ->
+        (* Read naively, `y < n` (the inner `n = 5`) would imply `_ < n`. *)
+        let obs =
+          gap_run
+            (m "  fn small(xs : List(Int), n : Int) : List({Int | _ < n}) do\n    let n = 5\n    List.filter(xs, fn y -> y < n)\n  end\n")
+        in
+        gap_not_proved "return of small" (gap_at "return of small" obs));
+    gated "R2 control: a let-bound lambda whose capture is rebound before the call" (fun () ->
+        (* `f`'s `k` is the parameter (<= 100); the call site's `k` is 5. *)
+        let obs =
+          gap_run
+            (m "  fn g(xs : List(Int), k : {Int | _ <= 100}) : Int do\n    let f = fn y -> y < k\n    let k = 5\n    sum_lt10(List.filter(xs, f))\n  end\n")
+        in
+        Alcotest.check gap_ps "sum_lt10" [ ("skipped", "abstract-refinement-uninstantiated") ]
+          (gap_at "sum_lt10" obs));
+    gated "R2 control: a let-bound result whose capture is rebound before the use" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn g(xs : List(Int), k : {Int | _ <= 100}) : Int do\n    let ys = List.filter(xs, fn y -> y < k)\n    let k = 5\n    sum_lt10(ys)\n  end\n")
+        in
+        gap_not_proved "sum_lt10" (gap_at "sum_lt10" obs);
+        (* Control: without the rebinding a `k <= 10` capture is proved. *)
+        let ok =
+          gap_run
+            (m "  fn g(xs : List(Int), k : {Int | _ <= 10}) : Int do\n    let ys = List.filter(xs, fn y -> y < k)\n    sum_lt10(ys)\n  end\n")
+        in
+        Alcotest.check gap_ps "unrebound" gap_proved (gap_at "sum_lt10" ok));
+    gated "R2 collision: the callee's own `n` is not the caller's captured `n`" (fun () ->
+        (* `keep`'s formal `n` is 0 here; the lambda's `n` is the caller's
+           (<= 1000), so `y < n` does not give `_ < 10`. *)
+        let src bound actual =
+          m
+            (keep
+            ^ Printf.sprintf
+                "  fn g(ys : List(Int), n : {Int | _ <= %d}) : Int do sum_lt10(keep(ys, %d, fn y -> y < n)) end\n"
+                bound actual)
+        in
+        Alcotest.check gap_ps "caller n <= 1000, keep's n = 0" [ ("skipped", "abstract-refinement-too-weak") ]
+          (gap_at "sum_lt10" (gap_run (src 1000 0)));
+        Alcotest.check gap_ps "caller n <= 10, keep's n = 1000" gap_proved
+          (gap_at "sum_lt10" (gap_run (src 10 1000))));
+    gated "R2 collision: a helper's formals are substituted simultaneously around a capture" (fun () ->
+        (* `lt(n, y)` is `n < y`; called as `lt(y, n)` it must read `y < n`
+           (sequential substitution would give `n < n` or `y < y`). *)
+        let src lam =
+          m
+            ("  fn lt(n : Int, y : Int) : {Bool | _ == (n < y)} do n < y end\n"
+            ^ Printf.sprintf "  fn g(xs : List(Int), n : {Int | _ <= 10}) : Int do sum_lt10(List.filter(xs, %s)) end\n" lam)
+        in
+        Alcotest.check gap_ps "lt(y, n)" gap_proved (gap_at "sum_lt10" (gap_run (src "fn y -> lt(y, n)")));
+        Alcotest.check gap_ps "lt(n, y)" [ ("skipped", "abstract-refinement-too-weak") ]
+          (gap_at "sum_lt10" (gap_run (src "fn y -> lt(n, y)"))));
+    gated "R2 control: a capture introduced by an unread `let` in the lambda declines" (fun () ->
+        let obs =
+          gap_run (m "  fn g(xs : List(Int), k : {Int | _ <= 10}) : Int do sum_lt10(List.filter(xs, fn y ->\n      let k = 100\n      y < k)) end\n")
+        in
+        gap_not_proved "sum_lt10" (gap_at "sum_lt10" obs));
+    gated "R2 control: a module-level name is not a local of the call, and is named" (fun () ->
+        let obs =
+          gap_run
+            ("mod R2 do\n  let limit = 5\n  fn sum_lt10(xs : List({Int | _ < 10})) : Int do List.length(xs) end\n\
+             \  fn g(xs : List(Int)) : Int do sum_lt10(List.filter(xs, fn y -> y < limit)) end\nend\n")
+        in
+        Alcotest.check gap_ps "sum_lt10" [ ("skipped", "abstract-refinement-uninstantiated") ]
+          (gap_at "sum_lt10" obs);
+        let d = String.concat " | " (gap_details "sum_lt10" obs) in
+        Alcotest.(check bool) ("names `limit`: " ^ d) true (Astring_contains.contains d "`limit`")) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -26268,5 +26429,6 @@ let () =
       ("abstract-multiarg-sugar", abstract_multiarg_sugar_suite);
       ("abstract-map", abstract_map_suite);
       ("abstract-multiarg-review", abstract_multiarg_review_suite);
+      ("gap-r2-capture", gap_r2_capture_suite);
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

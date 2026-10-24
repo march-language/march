@@ -2857,13 +2857,31 @@ A too-weak skip prints the lambda and what it was read as:
 `fn y -> is_pos(y) || y < 100` (read as `y > 0 || y < 100`) does not imply `_ > 0`
 ```
 
-The body may mention nothing but the lambda's parameter. A lambda that uses
-one of the caller's variables is declined. So is a `let`-bound lambda that
-captures one:
+The body may also mention the caller's own local variables (its parameters,
+`let`s, lambda parameters and `match` binders). The element fact then names
+that variable, and it is read in the caller's scope, where the variable's own
+refinement can discharge the demand. This is how a `List.filter` with a captured
+bound proves a relational return:
 
 ```march
-fn y -> gt(y, k)   -- declined: `k` is the caller's variable
+fn small(xs : List(Int), n : Int) : List({Int | _ < n}) do
+  List.filter(xs, fn y -> y < n)       -- proved; `small(ys, 10)` is `List({Int | _ < 10})`
+end
+fn g(xs : List(Int), k : {Int | _ <= 10}) : Int do
+  sum_lt10(List.filter(xs, fn y -> y < k))   -- proved from `k <= 10`
+end
+fn h(xs : List(Int), k : Int) : Int do
+  sum_lt10(List.filter(xs, fn y -> gt(y, k)))   -- skip: nothing bounds `k`
+end
 ```
+
+A captured variable must be one the call can see and that nothing rebinds on
+the way to the use. A module-level name is declined, and the message names it.
+A `let`-bound lambda, or a `let`-bound result, whose captured variable is
+rebound before the call or the use is forgotten, so the call is a skip. A
+`let`-bound lambda that captures a variable is still declined when it is
+*called inside* the lambda body (`fn y -> f(y) && y > 0`), and so is a capture
+the reader would only introduce by inlining.
 
 Calls to `let`-bound lambdas are inlined at most four deep. `f4` calling `f3`
 calling `f2` calling `f1` is read. One level more is declined, and the message
@@ -4052,10 +4070,9 @@ its real callers are elsewhere. Nothing is proposed for a program that does
 not check.
 
 **It cannot exceed the checker.** Like the per-function tool, it never
-proposes a contract the checker does not prove, however natural. Three
-examples it misses today:
+proposes a contract the checker does not prove, however natural. Examples it
+misses today:
 
-- a relational element return built by `List.filter` with a captured bound;
 - an `Option` return through a local `fn`;
 - a return that holds only through a callee's return.
 

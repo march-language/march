@@ -312,6 +312,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a `List.filter` lambda may capture the caller's variables.**
+  `fn small(xs : List(Int), n : Int) : List({Int | _ < n}) do List.filter(xs, fn y
+  -> y < n) end` was an `abstract-refinement-uninstantiated` skip at its return, and
+  `small(ys, 10)` an `unreflectable-subject` skip at the call. Both are proved now,
+  and so is `sum_lt10(List.filter(xs, fn y -> y < k))` with `k : {Int | _ <= 10}`.
+  An abstract refinement's lambda may mention a local of the call (a parameter,
+  `let`, lambda parameter or `match` binder); the element fact names it and is
+  read in the caller's scope. A module-level name is still declined, and so is a
+  `let`-bound lambda or result whose captured variable is rebound before its use.
+  A capture over an unconstrained variable (`fn y -> y > m`, `m : Int`) is now a
+  `solver-undecided` skip instead of `abstract-refinement-uninstantiated`.
+  `--refine-infer` now proposes the `small` return.
 - **`--refine-infer` no longer proposes a precondition that only makes the demanding
   branch dead.** In `if j >= n do v else Array.set(v, j, …) end`, `n : {Int | _ <= j}`
   "proved" the `Array.set` index by making the `else` unreachable. A precondition
