@@ -255,7 +255,7 @@ let tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list * A
    member(1, elts(_))}`, whose promise does not translate because of `len`,
    so `elts(xs) = {}` — an input the contract forbids — was reported as the
    counterexample to a return of `xs`. *)
-let scope_facts (sc : scope)
+let scope_facts ?(env : (string * Smt.sort) list = []) (sc : scope)
     : (string * Smt.sort) list * Smt.term list * bool * bool * bool =
   let has_string =
     List.exists (fun (_, (_, _, sort)) -> sort = Some str_sort) sc
@@ -263,7 +263,8 @@ let scope_facts (sc : scope)
   let dropped = ref false in
   (* A name an entry's predicate mentions that is no entry of its own (an
      unrefined sibling parameter, `k : {Int | _ > x}` beside `x : Int`)
-     still needs a declaration, at the scalar default: left undeclared, z3
+     still needs a declaration, at its declared scalar sort ([env], the
+     clause's parameter sorts) or the Int default: left undeclared, z3
      rejected the query (`unknown constant x`) and the obligation was a
      silent skip.  A name a later producer declares at another sort is a
      two-sort declaration, which [check_post] turns into a recorded
@@ -271,7 +272,7 @@ let scope_facts (sc : scope)
   let free_decls = ref [] in
   let free_const n =
     if (not (List.mem_assoc n sc)) && not (List.mem_assoc n !free_decls) then
-      free_decls := (n, Smt.SInt) :: !free_decls;
+      free_decls := (n, Option.value (List.assoc_opt n env) ~default:Smt.SInt) :: !free_decls;
     Some (Smt.Const n)
   in
   let loaded ds asm has_rec = function
@@ -543,7 +544,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
          | None -> false)
   in
   let base_decls, base_assume, scope_has_record, scope_has_string, scope_complete =
-    scope_facts sc
+    scope_facts ~env:scalar_env sc
   in
   let decls = ref base_decls and assume = ref base_assume in
   (* String literals, for a String RETURN ([string_ret]): the tail `"a"` and

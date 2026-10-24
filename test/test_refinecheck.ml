@@ -26266,6 +26266,15 @@ let demand_chains_suite =
         let src = m "  fn f(x : Int, k : {Int | _ > x}) : {Int | _ > 0} do k end\n" in
         Alcotest.check vs "f" [ "violated" ] (post "f" src);
         Alcotest.(check int) "no query rejected by z3" before !March_refine.Solver.malformed_count;
+        (* A Float sibling is declared at its own sort (`Float64`), so the
+           fact `k > x` stays well-sorted in the query rather than being
+           dropped by the float gate.  A pin, not a RED: with `x` free the
+           fact decides nothing about `k > 0.0` either way, and the base
+           verdict was the same skip. *)
+        let before = !March_refine.Solver.malformed_count in
+        Alcotest.check vs "Float sibling" [ "skipped:solver-undecided" ]
+          (post "f" (m "  fn f(x : Float, k : {Float | _ > x}) : {Float | _ > 0.0} do k end\n"));
+        Alcotest.(check int) "Float sibling: no query rejected by z3" before !March_refine.Solver.malformed_count;
         (* Control: the sibling refined, the same return proves. *)
         Alcotest.check vs "x : {_ >= 0}" [ "proved" ]
           (post "f" (m "  fn f(x : {Int | _ >= 0}, k : {Int | _ > x}) : {Int | _ > 0} do k end\n")));
