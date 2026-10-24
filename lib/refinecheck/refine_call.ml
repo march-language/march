@@ -1485,7 +1485,16 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        desynchronises it and silently switches refinement checking off for the
        rest of the compilation.  Returning [None] instead drops the sub-term and
        with it the fact, which only loses a proof. *)
+    (* Forward cell for [load_scalar_name_fact] (defined below, it needs the
+       path resolvers): a caller name a caller-namespace fact mentions carries
+       its OWN scope fact too.  `need_pos(inc(n))` lends `inc`'s `_ > x` as
+       `inc$ret > n`, and without `n >= 0` beside it that fact connected to
+       nothing (G1, demand chains 2026-10-24).  A scope fact is a hypothesis
+       of this point of the walk, so loading one more is sound; the table
+       inside the loader stops a cycle of facts naming each other. *)
+    let load_name_fact_ref : (string -> unit) ref = ref (fun _ -> ()) in
     let foreign_var name =
+      !load_name_fact_ref name;
       if Hashtbl.mem str_names name then None
       (* A caller `String` (design B3): pinned into the `Str` sort like any
          other string name, so every later producer agrees, and dropped here
@@ -2504,6 +2513,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | _ -> ()
       end
     in
+    load_name_fact_ref := load_scalar_name_fact;
     List.iter (fun (cond, _) -> List.iter load_scalar_name_fact (guard_names cond)) path;
     (* [~goal_scope_facts]: the GOAL is in the caller's namespace (an element
        demand moved there by [Refine_check.instantiate_entry], `_ < k` for
