@@ -501,9 +501,11 @@ Counterexamples come from the two sites that emit diagnostics: the
 **definition** (return contracts over `Int`/`Bool`/`Float`/records) and the
 **call site** (preconditions of any checkable type, `List` and `String`
 included). A return refinement over a collection takes the Tier 2 structural
-induction path instead, which emits no diagnostic either way (see
-[Limitations](#limitations)), so a broken `{List(Int) | len(_) > 0}` return is
-caught where the value is *used*, not where it is produced.
+induction path instead (see [Limitations](#limitations)). It reports a
+contract it can show never holds only once the interpreter reproduces the
+failure, and then with the failing call (`but f([]) returns [].`); a contract
+it can neither prove nor refute is a recorded skip, which `cap verified` makes
+an error.
 
 ---
 
@@ -5160,9 +5162,24 @@ edges:
     application**: `fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1}
     do Node(t, x, Leaf) end`. No induction is needed here (there is no recursive
     call to hypothesise over), just one unfolding of the measure's recursion
-    equation. Both shapes **record their verdict in the obligation ledger**, so
-    `--refine-report` distinguishes "attempted and proved" from "never looked
-    at"; neither emits a diagnostic;
+    equation;
+  - **any other single-clause, unguarded body**: a bare parameter, a `let`,
+    an `if`, a call, a `match` on something other than a declared-ADT
+    parameter. Each return position is checked on its own, with **no**
+    induction hypothesis (a self-call there is an unknown value), under the
+    path conditions that reach it. `fn f(xs : List(Int)) : {List(Int) |
+    len(_) == len(xs)} do xs end` is proved, and the same contract with
+    `+ 5` is reported. Until 2026-10-24 these bodies filed **no obligation at
+    all**, so a false length contract on one passed in silence;
+  - every shape **records its verdict in the obligation ledger** (one
+    postcondition per function), so `--refine-report` distinguishes "attempted
+    and proved" from "never looked at". A refutation is reported only when the
+    interpreter reproduces it; an unproved contract is a recorded skip, an
+    error under `cap verified` (since 2026-10-24; Tier 2 skips used to pass
+    `cap verified` unreported). A return refinement Tier 2 does not model at
+    all (several clauses, a guard, which desugar rewrites over fresh argument
+    names, or a return type no measure describes) is also a recorded skip,
+    never silence;
   - a return refinement over a **variant ADT** (`{Tree | …}`, `{List(Int) | …}`)
     with a predicate that mentions a **`@[measure]`**, or, over a `List`, the
     built-in **`len`** and **`elts`**, which follow the list's `Cons` cells
@@ -5183,7 +5200,7 @@ edges:
   - an accumulator parameter that *grows*: the induction is on the matched
     parameter only, so the hypothesis is universally quantified over the rest.
 
-  **What is not, and stays silent:**
+  **What is not proved (each is a recorded skip):**
   - **mutual recursion.** The hypothesis is created only for a call to the
     function's *own* name, so two functions that call each other prove no property.
   - **a recursive call inside a lambda, or behind a nested `match`.** Only the

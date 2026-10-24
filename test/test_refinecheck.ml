@@ -246,13 +246,12 @@ let skip_reasons src =
     (March_refinecheck.Obligation.all ())
 
 (* Same shape as [skip_reasons], but the DETAIL text ([reason_detail], the
-   payload-bearing sentence) rather than the slug. Needed for Tier 2's
+   payload-bearing sentence) rather than the slug. Written for Tier 2's
    constructor-literal postcondition shape ([check_post_induction]), which
-   records a ledger entry but emits NO diagnostic even under `cap verified`
-   (`refine_post.ml`'s `Shape 1` comment: "Tier 2 stays verdict-only... it
-   emits no diagnostic either way") -- so [refine_error_text_d] sees nothing
-   to assert on and only the ledger's own [reason_detail] can confirm what a
-   Tier 2 skip actually names. *)
+   then emitted NO diagnostic for a skip even under `cap verified`, so only
+   the ledger's own [reason_detail] could confirm what a Tier 2 skip names.
+   (Since 2026-10-24 `cap verified` escalates a Tier 2 skip, via
+   [Refine_post.record_tier2]; the ledger is still the direct view.) *)
 let skip_reason_details src =
   March_refinecheck.Obligation.reset ();
   ignore (has_refine_error_d src);
@@ -5424,10 +5423,10 @@ end|} in
           (contains text "has no SMT translation"));
 
     (* Same shape, Tier 2's constructor-literal postcondition (`check_tail`'s
-       `A.ECon _` arm, `refine_post.ml`'s "Shape 1"). Tier 2 is verdict-only
-       -- it emits NO diagnostic even under `cap verified` -- so this asserts
-       against the LEDGER's own [reason_detail] via [skip_reason_details],
-       not [refine_error_text_d]. *)
+       `A.ECon _` arm, `refine_post.ml`'s "Shape 1"). Asserted against the
+       LEDGER's own [reason_detail] via [skip_reason_details]: written when
+       Tier 2 emitted no diagnostic for a skip even under `cap verified`
+       (it escalates since 2026-10-24, [Refine_post.record_tier2]). *)
     gated "a Tier-2 constructor-literal postcondition whose tail fails to reflect blames the \
            subject, not the (reflectable) measure predicate"
       (fun () ->
@@ -13170,7 +13169,10 @@ let audit_classify_suite =
       {|mod M do
           fn f() : {List(Int) | member(1, elts(_))} do [1] end
         end|};
-    check_unenforced "a Tier 2 match on an unannotated parameter is Unenforced"
+    (* Unenforced until 2026-10-24: Tier 2 filed nothing for it.  It is now
+       checked tail by tail with no induction hypothesis (Shape 3) and files
+       an obligation (`len-return-obliged`), so the audit calls it Enforced. *)
+    check_enforced "a Tier 2 match on an unannotated parameter is Enforced (Shape 3)"
       {|mod M do
           type Tree = Leaf | Node(Tree, Int, Tree)
           @[measure]
@@ -26439,6 +26441,148 @@ let gap_deque_to_list_suite =
           gap_run (m (dfilter ^ "  fn go(d : Deque.Deque(Int)) : Int do sum_pos(Deque.to_list(dfilter(d, fn y -> y >= 0))) end\n"))
         in
         gap_not_proved "sum_pos" (gap_at "sum_pos" obs @ gap_at "Deque.to_list(…)" obs)) ]
+(* ── A length-only contract on a LIST return is obliged at every tail ─────
+   `fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs) + 5} do xs end`
+   used to pass in silence: a `{List(_) | …}` return with no `elts` goes to
+   Tier 2 ([Refine_post.check_post_induction]), which checked only a
+   constructor-literal body or one `match` on a parameter and fell through
+   to `false` for everything else, filing NO obligation (2026-10-24 stdlib
+   audit, p5).  Every body shape now proves, violates, or records a skip
+   with a named reason, and `cap verified` turns a Tier 2 skip into an
+   error.  Each case asserts the verdict of ONE function, by callee. *)
+let len_return_obliged_suite =
+  let obligations src =
+    March_refinecheck.Obligation.reset ();
+    let text = refine_error_text_d src in
+    let obs =
+      List.map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          ( o.callee
+          , verdict_name o.verdict
+          , match o.verdict with Skipped r -> reason_name r | _ -> "" ))
+        (March_refinecheck.Obligation.all ())
+    in
+    (obs, text)
+  in
+  (* The postcondition obligation(s) recorded for [f]: exactly the
+     (verdict, reason) list, so "nothing filed" is the empty list. *)
+  let posts_of obs f = List.filter_map (fun (c, v, r) -> if c = f then Some (v, r) else None) obs in
+  let m body = "mod LRO do\n" ^ body ^ "\n  fn main() : Int do 0 end\nend" in
+  let verdict name src f expected =
+    gated name (fun () ->
+        let obs, _ = obligations (m src) in
+        Alcotest.(check (list (pair string string))) (f ^ " verdict") expected (posts_of obs f))
+  in
+  let id_fn = "  fn id(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do xs end\n" in
+  [ (* THE BUG.  Ruling: a VIOLATION, not a skip — the negated goal
+       `len(xs) != len(xs) + 5` is valid, so the contract can never hold, and
+       the interpreter reproduces it ([settle_refutation]). *)
+    gated "a false len contract on a bare-parameter body is a violation" (fun () ->
+        let obs, text =
+          obligations (m "  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs) + 5} do xs end")
+        in
+        Alcotest.(check (list (pair string string))) "f verdict" [ ("violated", "") ] (posts_of obs "f");
+        Alcotest.(check bool) "reported" true (contains text "`f` does not satisfy its return type constraint"));
+    verdict "a true len contract on a bare-parameter body is proved"
+      "  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do xs end" "f" [ ("proved", "") ];
+    verdict "let body: a true len contract is proved"
+      "  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do\n    let ys = xs\n    ys\n  end"
+      "f" [ ("proved", "") ];
+    verdict "let body: a false len contract is a violation"
+      "  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs) + 1} do\n    let ys = xs\n    ys\n  end"
+      "f" [ ("violated", "") ];
+    verdict "if/else body: a true len contract is proved"
+      "  fn f(xs : List(Int), b : Bool) : {List(Int) | len(_) == len(xs)} do\n    if b do xs else xs end\n  end"
+      "f" [ ("proved", "") ];
+    verdict "if/else body: one false branch is a violation"
+      "  fn f(xs : List(Int), n : Int) : {List(Int) | len(_) == len(xs)} do\n\
+      \    if n > 0 do xs else Cons(n, xs) end\n  end"
+      "f" [ ("violated", "") ];
+    verdict "if/else body: a path condition is used (len(xs) > 0 guard)"
+      "  fn f(xs : List(Int)) : {List(Int) | len(_) > 0} do\n\
+      \    if len(xs) > 0 do xs else Cons(1, xs) end\n  end"
+      "f" [ ("proved", "") ];
+    verdict "call body: a proved callee contract carries the proof"
+      (id_fn ^ "  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do id(xs) end")
+      "f" [ ("proved", "") ];
+    verdict "call body: a false contract through a proved callee is a violation"
+      (id_fn ^ "  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs) + 5} do id(xs) end")
+      "f" [ ("violated", "") ];
+    verdict "call body: a callee with no contract is a recorded unreflectable-subject skip"
+      "  fn g(xs : List(Int)) : List(Int) do xs end\n\
+      \  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do g(xs) end"
+      "f" [ ("skipped", "unreflectable-subject") ];
+    verdict "constructor body: Cons(h, t) has length 1 + len(t)"
+      "  fn f(h : Int, t : List(Int)) : {List(Int) | len(_) == len(t) + 1} do Cons(h, t) end"
+      "f" [ ("proved", "") ];
+    verdict "constructor body: [] has length 0"
+      "  fn f(xs : List(Int)) : {List(Int) | len(_) == 0} do [] end" "f" [ ("proved", "") ];
+    verdict "constructor body: a false length of [] is a violation"
+      "  fn f(xs : List(Int)) : {List(Int) | len(_) == 1} do [] end" "f" [ ("violated", "") ];
+    verdict "nested match on a non-parameter: tails are checked without an IH"
+      "  fn g(xs : List(Int)) : List(Int) do xs end\n\
+      \  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do\n\
+      \    match g(xs) do\n      Nil -> xs\n      Cons(_, _) -> xs\n    end\n  end"
+      "f" [ ("proved", "") ];
+    verdict "nested match on a non-parameter: a false tail is a violation"
+      "  fn g(xs : List(Int)) : List(Int) do xs end\n\
+      \  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs) + 2} do\n\
+      \    match g(xs) do\n      Nil -> xs\n      Cons(_, _) -> xs\n    end\n  end"
+      "f" [ ("violated", "") ];
+    verdict "mixed elts && len: a true contract is proved"
+      "  fn f(xs : List(Int)) : {List(Int) | elts(_) == elts(xs) && len(_) == len(xs)} do xs end"
+      "f" [ ("proved", "") ];
+    verdict "mixed elts && len: a false len conjunct is a violation"
+      "  fn f(xs : List(Int)) : {List(Int) | elts(_) == elts(xs) && len(_) == len(xs) + 5} do xs end"
+      "f" [ ("violated", "") ];
+    (* Desugar turns a guarded head into a match over FRESH argument names,
+       so the predicate's `xs` names no parameter any more: an
+       unreflectable predicate, recorded, where it used to be silence. *)
+    verdict "a guarded clause is a recorded skip, never silence"
+      "  fn f(xs : List(Int), n : Int) : {List(Int) | len(_) == len(xs)} when n > 0 do xs end"
+      "f" [ ("skipped", "unreflectable-predicate") ];
+    (* `cap verified`: an unproved Tier 2 postcondition is an ERROR. *)
+    gated "cap verified: a skipped len return contract is an error" (fun () ->
+        let obs, text =
+          obligations
+            ("mod LRO do\n  cap verified\n  fn g(xs : List(Int)) : List(Int) do xs end\n\
+             \  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do g(xs) end\n\
+             \  fn main() : Int do 0 end\nend")
+        in
+        Alcotest.(check (list (pair string string))) "f verdict"
+          [ ("skipped", "unreflectable-subject") ] (posts_of obs "f");
+        Alcotest.(check bool) "cap verified error" true
+          (contains text "`cap verified` module: cannot verify return type constraint `len(_) == len(xs)` on `f`"));
+    gated "cap verified: a skipped single-match (Shape 2) len contract is an error too" (fun () ->
+        let _, text =
+          obligations
+            ("mod LRO do\n  cap verified\n  fn g(xs : List(Int)) : List(Int) do xs end\n\
+             \  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do\n\
+             \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> Cons(h, g(t))\n    end\n  end\n\
+             \  fn main() : Int do 0 end\nend")
+        in
+        Alcotest.(check bool) "cap verified error" true
+          (contains text "`cap verified` module: cannot verify return type constraint `len(_) == len(xs)` on `f`"));
+    gated "cap verified: a proved len contract raises no error" (fun () ->
+        let _, text =
+          obligations
+            ("mod LRO do\n  cap verified\n\
+             \  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do xs end\n\
+             \  fn main() : Int do 0 end\nend")
+        in
+        Alcotest.(check string) "no error" "" text);
+    (* Controls: the single match on a parameter is unchanged. *)
+    verdict "control: single match on a parameter, true contract proved"
+      "  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do\n\
+      \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> Cons(h, t)\n    end\n  end"
+      "f" [ ("proved", "") ];
+    verdict "control: single match on a parameter, false contract violated"
+      "  fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs) + 5} do\n\
+      \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> Cons(h, t)\n    end\n  end"
+      "f" [ ("violated", "") ];
+    verdict "control: an unrefined List return files nothing"
+      "  fn f(xs : List(Int)) : List(Int) do xs end" "f" [] ]
 (* ── Demand chains (specs/progress/2026-10-24-refine-demand-chains.md) ─────
    C1: a return refinement whose tail is a call to a function with a PROVED
    (or `@[assume]`d) return is proved from that return, as a call site's
@@ -26809,4 +26953,5 @@ let () =
       ("gap-deque-to-list", gap_deque_to_list_suite);
       ("gap-o1-local-option", gap_o1_local_option_suite);
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
+      ("len-return-obliged", len_return_obliged_suite);
       ("z3-well-formed", z3_wellformed_suite) ]
