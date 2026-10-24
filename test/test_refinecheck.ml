@@ -24363,12 +24363,14 @@ let infer_fixpoint_suite =
           (fun r ->
             let fns = List.map (fun (p : RI.proposal) -> p.RI.slot.IS.fn) r.RI.proposals in
             Alcotest.(check (list string)) "order" [ "abs1"; "h" ] fns));
-    gated "C1: the chain is tried and the gap recorded (not-true at b)" (fun () ->
+    gated "C1: the chain proposes a's and b's returns (the checker proves b from a since 2026-10-24)" (fun () ->
+        (* Until specs/progress/2026-10-24-refine-demand-chains.md this pinned
+           the gap: b's return not proposed, a not-true rejection at b. *)
         infer_run
           (m "C1" "  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn go() : Int do need_pos(b(3)) end\n")
           (fun r ->
-            Alcotest.(check bool) "b's return not proposed" false (List.mem_assoc "b" (props r));
-            Alcotest.(check bool) "rejection recorded for b" true
+            Alcotest.check sp "a and b" [ ("a", "{Int | _ > 0}"); ("b", "{Int | _ > 0}") ] (List.sort compare (props r));
+            Alcotest.(check bool) "no not-true rejection for b" false
               (List.exists (fun ((s : IS.slot), _, reason, _) -> s.IS.fn = "b" && reason = "not-true") r.RI.rejected)));
     gated "G1: nothing proposed" (fun () ->
         infer_run
@@ -26252,6 +26254,210 @@ let len_return_obliged_suite =
       "f" [ ("violated", "") ];
     verdict "control: an unrefined List return files nothing"
       "  fn f(xs : List(Int)) : List(Int) do xs end" "f" [] ]
+(* ── Demand chains (specs/progress/2026-10-24-refine-demand-chains.md) ─────
+   C1: a return refinement whose tail is a call to a function with a PROVED
+   (or `@[assume]`d) return is proved from that return, as a call site's
+   argument already was.  Never from an unproved one, so a self-recursive or
+   mutually recursive function cannot lean on its own contract.
+   G1: a relational scalar return (`_ > x`) lent at a call is instantiated
+   at the actuals, and the caller-scope facts of the names it then mentions
+   (`n >= 0`) reach the query.  A named return binder is renamed apart
+   first, so an actual named like it cannot be captured.  Each case's base
+   verdict (1686cb24d) is in its comment. *)
+let demand_chains_suite =
+  let pre = "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n  fn need_neg(k : {Int | _ < 0}) : Int do k end\n" in
+  let m body = "mod DC do\n" ^ pre ^ body ^ "end\n" in
+  (* Every obligation as "verdict" or "skipped:reason" for one callee and
+     kind, in record order. *)
+  let at ?(kind = Ob.Precondition) callee src =
+    Ob.reset ();
+    ignore (has_refine_error_typed src);
+    List.filter_map
+      (fun (o : Ob.t) ->
+        if o.Ob.callee = callee && o.Ob.kind = kind then
+          Some
+            (match o.Ob.verdict with
+             | Ob.Skipped r -> "skipped:" ^ Ob.reason_name r
+             | v -> Ob.verdict_name v)
+        else None)
+      (Ob.all ())
+  in
+  let post = at ~kind:Ob.Postcondition in
+  let vs = Alcotest.(list string) in
+  let a_pos = "  fn a(x : {Int | _ > 0}) : {Int | _ > 0} do x + 1 end\n" in
+  let inc = "  fn inc(x : Int) : {Int | _ > x} do x + 1 end\n" in
+  [ (* ── C1 ── *)
+    gated "C1: a tail call to a proved return proves the caller's return" (fun () ->
+        (* Base: b skipped:unreflectable-subject, need_pos(b(3)) skipped. *)
+        let src = m (a_pos ^ "  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n  fn main() : Int do need_pos(b(3)) end\n") in
+        Alcotest.check vs "a" [ "proved" ] (post "a" src);
+        Alcotest.check vs "b" [ "proved" ] (post "b" src);
+        Alcotest.check vs "need_pos(b(3))" [ "proved" ] (at "need_pos" src));
+    gated "C1: two hops (c calls b calls a), declared callers-first" (fun () ->
+        (* Base: b and c skipped:unreflectable-subject.  Declared c, b, a so
+           the gate's rounds, not source order, carry the proofs. *)
+        let src =
+          m ("  fn c(x : {Int | _ > 0}) : {Int | _ > 0} do b(x) end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" ^ a_pos
+             ^ "  fn main() : Int do need_pos(c(3)) end\n")
+        in
+        Alcotest.check vs "b" [ "proved" ] (post "b" src);
+        Alcotest.check vs "c" [ "proved" ] (post "c" src);
+        Alcotest.check vs "need_pos(c(3))" [ "proved" ] (at "need_pos" src));
+    gated "C1 control: a weaker proved callee return does not prove the caller's" (fun () ->
+        (* Base: b skipped:unreflectable-subject.  Now the fact `_ >= 0` is
+           used and does not imply `_ > 0`: undecided, never proved. *)
+        let src = m "  fn a(x : {Int | _ > 0}) : {Int | _ >= 0} do x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
+        Alcotest.check vs "a" [ "proved" ] (post "a" src);
+        Alcotest.check vs "b" [ "skipped:solver-undecided" ] (post "b" src));
+    gated "C1 control: an UNPROVED callee return is not lent" (fun () ->
+        (* Base: the same.  `a`'s `_ > 0` fails at x = 0, so it does not
+           travel, and `b` (correct: its own x is positive) keeps the
+           opaque-tail skip. *)
+        let src = m "  fn a(x : Int) : {Int | _ > 0} do x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
+        Alcotest.(check bool) "a not proved" false (List.mem "proved" (post "a" src));
+        Alcotest.check vs "b" [ "skipped:unreflectable-subject" ] (post "b" src));
+    gated "C1 reject control: a proved callee return that contradicts the caller's is a violation" (fun () ->
+        (* Base: b skipped:unreflectable-subject. *)
+        let src = m "  fn a(x : {Int | _ > 0}) : {Int | _ < 0} do 0 - x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
+        Alcotest.check vs "a" [ "proved" ] (post "a" src);
+        Alcotest.check vs "b" [ "violated" ] (post "b" src));
+    gated "C1: an @[assume]d callee return is lent" (fun () ->
+        (* Base: b skipped:unreflectable-subject. *)
+        let src = m "  @[assume]\n  fn a(x : Int) : {Int | _ > 0} do x * x + 1 end\n  fn b(x : Int) : {Int | _ > 0} do a(x) end\n" in
+        Alcotest.check vs "a" [ "trusted" ] (post "a" src);
+        Alcotest.check vs "b" [ "proved" ] (post "b" src));
+    gated "C1 recursion control: a self-recursive tail never uses its own unproved return" (fun () ->
+        (* Base: the same, both. *)
+        Alcotest.check vs "f(x) = f(x)" [ "skipped:unreflectable-subject" ]
+          (post "f" (m "  fn f(x : {Int | _ > 0}) : {Int | _ > 0} do f(x) end\n"));
+        (* A base case that proves on its own does not let the recursive
+           tail assume the contract either: the `1` tail proves, the
+           `f(n - 1)` tail stays unproved, so the return is. *)
+        Alcotest.check vs "if n == 0 do 1 else f(n - 1)" [ "proved"; "skipped:unreflectable-subject" ]
+          (post "f" (m "  fn f(n : {Int | _ >= 0}) : {Int | _ > 0} do if n == 0 do 1 else f(n - 1) end end\n")));
+    gated "C1 mutual-recursion control: neither member proves from the other's unproved return" (fun () ->
+        (* Base: the same. *)
+        let src = m "  fn f(x : {Int | _ > 0}) : {Int | _ > 0} do g(x) end\n  fn g(x : {Int | _ > 0}) : {Int | _ > 0} do f(x) end\n" in
+        Alcotest.check vs "f" [ "skipped:unreflectable-subject" ] (post "f" src);
+        Alcotest.check vs "g" [ "skipped:unreflectable-subject" ] (post "g" src));
+    (* ── G1 ── *)
+    gated "G1: a relational return at the actuals, with the actual's own fact, discharges the demand" (fun () ->
+        (* Base: skipped:solver-undecided (both forms). *)
+        Alcotest.check vs "need_pos(inc(n)), n >= 0" [ "proved" ]
+          (at "need_pos" (m (inc ^ "  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n")));
+        Alcotest.check vs "let r = inc(n); need_pos(r)" [ "proved" ]
+          (at "need_pos" (m (inc ^ "  fn go(n : {Int | _ >= 0}) : Int do\n    let r = inc(n)\n    need_pos(r)\n  end\n")));
+        (* …and at a return tail (C1 and G1 together).  Base:
+           skipped:unreflectable-subject. *)
+        Alcotest.check vs "h(n) : {_ > 0} = inc(n)" [ "proved" ]
+          (post "h" (m (inc ^ "  fn h(n : {Int | _ >= 0}) : {Int | _ > 0} do inc(n) end\n"))));
+    gated "G1 controls: an unconstrained actual is a skip; a contradicted demand a violation" (fun () ->
+        (* Base: skipped:solver-undecided. *)
+        Alcotest.check vs "need_pos(inc(n)), n unrefined" [ "skipped:solver-undecided" ]
+          (at "need_pos" (m (inc ^ "  fn go(n : Int) : Int do need_pos(inc(n)) end\n")));
+        (* inc(n) > n >= 0 never meets `_ < 0`.  Base: skipped:solver-undecided. *)
+        Alcotest.check vs "need_neg(inc(n)), n >= 0" [ "violated" ]
+          (at "need_neg" (m (inc ^ "  fn go(n : {Int | _ >= 0}) : Int do need_neg(inc(n)) end\n"))));
+    gated "G1: an actual the contract cannot reflect (an opaque call) declines, never proves" (fun () ->
+        (* `inc(h(n)) > h(n)` names a call the query cannot reflect, so the
+           fact is dropped whole: undecided.  Also with a PROVED `h`: the
+           nested call is not a stable actual.  Base: the same. *)
+        Alcotest.check vs "inc(h(n)), h unrefined" [ "skipped:solver-undecided" ]
+          (at "need_pos" (m (inc ^ "  fn h(y : Int) : Int do y end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(h(n))) end\n")));
+        Alcotest.check vs "inc(h(n)), h : {_ >= 0} proved" [ "skipped:solver-undecided" ]
+          (at "need_pos" (m (inc ^ "  fn h(y : {Int | _ >= 0}) : {Int | _ >= 0} do y end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(h(n))) end\n"))));
+    gated "G1: two parameters, substituted simultaneously" (fun () ->
+        let add = "  fn add(x : Int, y : Int) : {Int | _ == x + y} do x + y end\n  fn sub(x : Int, y : Int) : {Int | _ == x - y} do x - y end\n" in
+        (* Base: skipped:solver-undecided. *)
+        Alcotest.check vs "need_pos(add(a, b)), a > 0, b >= 0" [ "proved" ]
+          (at "need_pos" (m (add ^ "  fn go(a : {Int | _ > 0}, b : {Int | _ >= 0}) : Int do need_pos(add(a, b)) end\n")));
+        (* The caller's own `x` and `y`, crossed: `sub(y, x)` is `y - x`, so
+           > 10 here.  A sequential substitution would read `x - x` or
+           `y - y` (0, a violation).  Base: skipped:solver-undecided. *)
+        Alcotest.check vs "need_pos(sub(y, x)), y > 10, x < 0" [ "proved" ]
+          (at "need_pos" (m (add ^ "  fn go(y : {Int | _ > 10}, x : {Int | _ < 0}) : Int do need_pos(sub(y, x)) end\n")));
+        (* Control: `a - b` with only a > 0, b >= 0 is undecided. *)
+        Alcotest.check vs "need_pos(sub(a, b)): undecided" [ "skipped:solver-undecided" ]
+          (at "need_pos" (m (add ^ "  fn go(a : {Int | _ > 0}, b : {Int | _ >= 0}) : Int do need_pos(sub(a, b)) end\n"))));
+    gated "G1 capture: a caller variable named like the callee's return binder is not captured" (fun () ->
+        let incr = "  fn inc(x : Int) : {r : Int | r > x} do x + 1 end\n" in
+        (* `inc(r)` lent `r > x` at x := r read `r > r` with both r the
+           result: a false assumption that "proved" anything.  Base: PROVED
+           (unsound: inc(5) = 6). *)
+        Alcotest.check vs "need_neg(inc(r)), r unrefined" [ "skipped:solver-undecided" ]
+          (at "need_neg" (m (incr ^ "  fn go(r : Int) : Int do need_neg(inc(r)) end\n")));
+        (* Base: proved (unsound). *)
+        Alcotest.check vs "need_neg(inc(r)), r >= 0" [ "violated" ]
+          (at "need_neg" (m (incr ^ "  fn go(r : {Int | _ >= 0}) : Int do need_neg(inc(r)) end\n")));
+        (* Base: skipped:solver-undecided. *)
+        Alcotest.check vs "need_pos(inc(r)), r >= 0" [ "proved" ]
+          (at "need_pos" (m (incr ^ "  fn go(r : {Int | _ >= 0}) : Int do need_pos(inc(r)) end\n")));
+        (* The same capture at a return tail.  Base: skipped:unreflectable-subject. *)
+        Alcotest.check vs "b(r) : {_ < 0} = inc(r), r >= 0" [ "violated" ]
+          (post "b" (m (incr ^ "  fn b(r : {Int | _ >= 0}) : {Int | _ < 0} do inc(r) end\n")));
+        (* A caller `x` passed to the formal `x`: no capture to begin with. *)
+        Alcotest.check vs "need_pos(inc(x)), x >= 0" [ "proved" ]
+          (at "need_pos" (m (inc ^ "  fn go(x : {Int | _ >= 0}) : Int do need_pos(inc(x)) end\n"))));
+    gated "a parameter fact naming an unrefined sibling declares it (no malformed query)" (fun () ->
+        (* `k : {Int | _ > x}` beside an unrefined `x`, under a return that
+           does not mention `x`: the post engine's scope facts left `x`
+           undeclared, z3 rejected the query (`unknown constant x`) and the
+           return was a silent skip.  It is a real violation (f(-5, -4)
+           returns -4).  Found by the G1 inference fixture below (its
+           `need_gt` return probes).  Base: skipped:solver-undecided, with 4
+           queries rejected by z3. *)
+        let before = !March_refine.Solver.malformed_count in
+        let src = m "  fn f(x : Int, k : {Int | _ > x}) : {Int | _ > 0} do k end\n" in
+        Alcotest.check vs "f" [ "violated" ] (post "f" src);
+        Alcotest.(check int) "no query rejected by z3" before !March_refine.Solver.malformed_count;
+        (* A Float sibling is declared at its own sort (`Float64`), so the
+           fact `k > x` stays well-sorted in the query rather than being
+           dropped by the float gate.  A pin, not a RED: with `x` free the
+           fact decides nothing about `k > 0.0` either way, and the base
+           verdict was the same skip. *)
+        let before = !March_refine.Solver.malformed_count in
+        Alcotest.check vs "Float sibling" [ "skipped:solver-undecided" ]
+          (post "f" (m "  fn f(x : Float, k : {Float | _ > x}) : {Float | _ > 0.0} do k end\n"));
+        Alcotest.(check int) "Float sibling: no query rejected by z3" before !March_refine.Solver.malformed_count;
+        (* Control: the sibling refined, the same return proves. *)
+        Alcotest.check vs "x : {_ >= 0}" [ "proved" ]
+          (post "f" (m "  fn f(x : {Int | _ >= 0}, k : {Int | _ > x}) : {Int | _ > 0} do k end\n")));
+    (* ── Inference: the shapes with their return annotations stripped ── *)
+    gated "infer C1: the demand chain proposes both returns" (fun () ->
+        (* Base: nothing proposed (the chain was rejected at `b`: its TRUE
+           test saw no callee contract). *)
+        let sp = Alcotest.(list (pair string string)) in
+        infer_run
+          (m "  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn main() : Int do need_pos(b(3)) end\n")
+          (fun r ->
+            Alcotest.check sp "a and b" [ ("a", "{Int | _ > 0}"); ("b", "{Int | _ > 0}") ]
+              (List.sort compare (props r))));
+    gated "infer C1 control: a self-recursive tail gets no return from its own hypothesis" (fun () ->
+        (* Base: the same. *)
+        infer_run (m "  fn f(x : {Int | _ > 0}) : Int do f(x) end\n  fn main() : Int do need_pos(f(2)) end\n")
+          (fun r ->
+            Alcotest.(check (list string)) "nothing for f" []
+              (List.filter_map (fun (f, a) -> if f = "f" then Some a else None) (props r))));
+    gated "infer G1: a relational return in the unit's vocabulary is proposed" (fun () ->
+        (* `_ > x` is only a candidate when the unit spells it (a House
+           predicate, here `need_gt`'s); the fixed grammar has no relational
+           return.  Base: nothing proposed (not USEFUL: `n >= 0` never
+           reached the lent fact). *)
+        let sp = Alcotest.(list (pair string string)) in
+        let src =
+          m ("  fn need_gt(x : Int, k : {Int | _ > x}) : Int do k end\n  fn inc(x : Int) : Int do x + 1 end\n"
+             ^ "  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n")
+        in
+        infer_run src (fun r ->
+            Alcotest.check sp "inc" [ ("inc", "{Int | _ > x}") ]
+              (List.filter (fun (f, _) -> f = "inc") (props r)));
+        (* Control: with `n` unrefined `_ > x` closes nothing, so it is not
+           proposed.  Base: the same. *)
+        infer_run
+          (m ("  fn need_gt(x : Int, k : {Int | _ > x}) : Int do k end\n  fn inc(x : Int) : Int do x + 1 end\n"
+              ^ "  fn go(n : Int) : Int do need_pos(inc(n)) end\n"))
+          (fun r ->
+            Alcotest.check sp "nothing for inc" [] (List.filter (fun (f, _) -> f = "inc") (props r)))) ]
 
 let () =
   Alcotest.run "march-refinecheck"
@@ -26405,6 +26611,7 @@ let () =
       ("infer-vacuous", infer_vacuous_suite);
       ("infer-cli", infer_cli_suite);
       ("infer-apply", infer_apply_suite);
+      ("demand-chains", demand_chains_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("element-entries", element_entries_suite);

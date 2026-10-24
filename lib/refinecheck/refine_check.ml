@@ -6121,6 +6121,25 @@ let tail_demand_impl ~root (ctx : rctx) defs : Refine_post.tail_demand =
 
 let () = Refine_post.tail_demand_of := tail_demand_impl
 
+(* Would [fd]'s return verify, with every OTHER contract of [defs] lent to
+   it?  The inference oracle's TRUE test (demand chains, 2026-10-24): the
+   same check [gate_unverified_posts] makes, under a lookup in which the
+   function's own key ([qualified]) has no return, so its tail calls to
+   itself never see the hypothesis.  [defs] must already be gated (only
+   proved or assumed returns), as the oracle's [prepare] leaves it. *)
+let post_holds_lent ~root errctx ~(defs : (string, fn_sig option) Hashtbl.t) ~(qualified : string)
+    (fd : A.fn_def) : bool =
+  let d = Hashtbl.copy defs in
+  (match Hashtbl.find_opt d qualified with
+   | Some (Some sg) -> Hashtbl.replace d qualified (Some { sg with ret = None })
+   | _ -> ());
+  let modpath =
+    match String.rindex_opt qualified '.' with Some i -> String.sub qualified 0 i | None -> ""
+  in
+  let ctx = { rctx0 with modpath } in
+  with_tail_demand (tail_demand_impl ~root ctx d) (fun () ->
+      with_post_lookup (postcond_of ctx d) (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd))
+
 (* [assume_params:false] walks the body with the parameter refinements erased,
    so none of them can discharge anything.  Used for an `impl` method whose
    contract [collect_all_defs] could not adopt unambiguously: with no caller

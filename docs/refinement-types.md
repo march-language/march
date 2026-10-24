@@ -1048,6 +1048,39 @@ A partially substituted predicate is never used: mixing the callee's and the
 caller's namespaces is exactly how a false positive would arise here, so the
 checker abandons the whole instantiation rather than guess at part of it.
 
+The instantiated contract brings the caller's own facts about the names it
+now mentions with it, so a relational return composes with the caller's
+refinements:
+
+```march
+fn inc(x : Int) : {Int | _ > x} do x + 1 end
+fn need_pos(k : {Int | _ > 0}) : Int do k end
+
+fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end   -- proved: inc(n) > n >= 0
+```
+
+A named return binder (`{r : Int | r > x}`) is renamed apart before the
+arguments go in, so a caller variable that happens to be called `r` stays
+the caller's `r`. An argument the checker cannot reflect (a call to a
+function, say) drops the instantiated fact, and the obligation is skipped
+rather than proved.
+
+**A return whose tail is a call uses the callee's return too.** The function's
+own postcondition is checked with the tail call standing for a value that
+satisfies the callee's proved (or `@[assume]`d) return, instantiated at the
+call's arguments, exactly as a call site's argument is:
+
+```march
+fn a(x : {Int | _ > 0}) : {Int | _ > 0} do x + 1 end
+fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end      -- proved from a's return
+fn c(x : {Int | _ > 0}) : {Int | _ > 0} do b(x) end      -- and so on, in any order
+```
+
+A function never uses its own unproved return this way: a self-recursive tail
+(`f(n - 1)`), or two functions that return each other's calls, stay skipped
+(`unreflectable-subject`). Only a bare call tail is read like this; a `let`
+bound to the call and then returned (`let r = a(x)` then `r`) is not yet.
+
 **Only *proven* postconditions propagate.** A declared return refinement
 becomes an assumption at call sites only when the definition side actually
 *proved* it: every return path of every clause discharged as verified. A
