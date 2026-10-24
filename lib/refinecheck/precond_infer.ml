@@ -472,6 +472,15 @@ let walk_ledger ~root ~defs (decls : A.decl list) : Ledger_diff.snapshot =
      a skip, and the applied program's re-check disagrees. *)
   Witness.wall_budget := Witness.initial_wall_budget;
   let errctx = Err.create () in
+  (* The same postcondition gate a real check runs before its walk
+     ([Refine_check.check_module]): a declared return travels to callers, and
+     reaches a return tail that calls it, only once proved.  Without it a
+     probe lent every declared return, proved or not, so a self-recursive
+     `f(x) = f(x)` "proved" its own contract and the prediction disagreed
+     with the re-check (demand chains, 2026-10-24).  On a copy: the caller's
+     table is reused across probes. *)
+  let defs = Hashtbl.copy defs in
+  (try RC.gate_unverified_posts ~root errctx defs decls with _ -> ());
   (try RC.visit_decls ~root errctx defs RC.rctx0 decls
    with _ -> ());
   (* Division safety is a SEPARATE pass — [Refine_check.visit_decls] never

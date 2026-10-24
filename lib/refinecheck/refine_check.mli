@@ -211,6 +211,12 @@ val check_fn_post : root:string -> Err.ctx -> A.fn_def -> unit
 val check_fn_post_verdict :
   root:string -> Err.ctx -> ?emit:bool -> A.fn_def -> bool
 
+(** [check_fn_post_verdict ~emit:false] with every other contract in the
+    (already gated) table lent to the function's tail calls, and none of its
+    own: the inference oracle's TRUE test for a return. *)
+val post_holds_lent :
+  root:string -> Err.ctx -> defs:(string, fn_sig option) Hashtbl.t -> qualified:string -> A.fn_def -> bool
+
 (** Drop the postconditions that did not verify, so no later obligation may
     rest on an unproven premise. *)
 val gate_unverified_posts :

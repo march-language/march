@@ -341,6 +341,23 @@ git log is authoritative for exact commits.
   A capture over an unconstrained variable (`fn y -> y > m`, `m : Int`) is now a
   `solver-undecided` skip instead of `abstract-refinement-uninstantiated`.
   `--refine-infer` now proposes the `small` return.
+- **Refinements: return contracts compose through calls.** A return whose tail is a
+  call now uses the callee's proved (or `@[assume]`d) return:
+  `fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end` proves from `a`'s
+  `{Int | _ > 0}`, through any number of hops. It was an `unreflectable-subject` skip
+  before. A function never uses its own unproved return this way, so self-recursive and
+  mutually recursive tails stay skipped. A relational return lent at a call
+  (`inc(x) : {Int | _ > x}`) now brings the caller's facts about its arguments with it,
+  so `need_pos(inc(n))` with `n : {Int | _ >= 0}` is proved (it was
+  `solver-undecided`). **Soundness:** a named return binder (`{r : Int | r > x}`) is now
+  renamed apart before the arguments are substituted. Before, `inc(r)` with a caller
+  variable `r` read `r > r`, and that false assumption "proved" any demand on the call.
+  `--refine-infer` now proposes returns along such a chain (`a` and `b` both get
+  `{Int | _ > 0}`). Its probes also lend only proved returns, as the real check does,
+  so `--refine-infer-apply` no longer fails its re-check ("did not match the
+  prediction") on a program with an unproved declared return. A parameter refinement that
+  names an unrefined sibling (`k : {Int | _ > x}`) no longer sends z3 a malformed query
+  when a return is checked. That return used to be skipped silently; it is now decided.
 - **`--refine-infer` no longer proposes a precondition that only makes the demanding
   branch dead.** In `if j >= n do v else Array.set(v, j, …) end`, `n : {Int | _ <= j}`
   "proved" the `Array.set` index by making the `else` unreachable. A precondition
