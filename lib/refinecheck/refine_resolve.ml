@@ -291,6 +291,17 @@ let annotated_acc_fact (args : A.expr list) : (string * A.expr * string option) 
 
    The third component of the result is the returned value's SMT sort ([None]
    for Int); see [fn_sig.ret_sort] for why every consumer must branch on it. *)
+(* A relational return's NAMED binder renamed to `_` before the actuals go
+   in.  Every consumer reads both the binder and `_` as the returned value,
+   so an actual that is a caller variable spelled like the binder (`inc(r)`
+   against `{r : Int | r > x}`) would otherwise become the returned value
+   too: `r > r`, a false assumption that proved anything (demand chains,
+   2026-10-24).  `_` is no March variable, so no actual can mention it.  The
+   element path ([Refine_check.instantiate_entry]) applies the same rule. *)
+let binder_apart (b : string) (p : A.expr) : string * A.expr =
+  if b = "_" then (b, p)
+  else ("_", subst_params [ (b, A.EVar { A.txt = "_"; A.span = A.dummy_span }) ] p)
+
 let postcond_of_declared ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t)
     (fname : string) (args : A.expr list) : (string * A.expr * string option) option =
   (* A callee the callee ENV knows — a refined callback parameter with a
@@ -349,6 +360,7 @@ let postcond_of_declared ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig
           let twice p = List.length (List.filter (( = ) p) sg.param_names) > 1 in
           if List.exists twice ps then None
           else if List.for_all (fun p -> List.mem_assoc p env) ps then
+            let b, p = binder_apart b p in
             Some (b, subst_params env p, srt)
           else None)
      | _ -> None)
