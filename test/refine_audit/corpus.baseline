@@ -678,6 +678,8 @@ native_string_pattern_literal_leak_probe: coverage audit (user + stdlib): 180 en
 native_string_pattern_literal_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_search_edge_cases: coverage audit (user + stdlib): 180 enforced, 0 inert (warned), 0 unenforced
 native_string_search_edge_cases: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_string_slice_clamp: coverage audit (user + stdlib): 180 enforced, 0 inert (warned), 0 unenforced
+native_string_slice_clamp: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_to_float_option: coverage audit (user + stdlib): 180 enforced, 0 inert (warned), 0 unenforced
 native_string_to_float_option: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_concurrent_child_crash: coverage audit (user + stdlib): 180 enforced, 0 inert (warned), 0 unenforced

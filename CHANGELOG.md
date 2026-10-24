@@ -312,6 +312,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`String.slice` with a negative start no longer reads out of bounds in wasm-compiled programs.**
+  The wasm runtime's `march_string_slice` did not clamp a negative `start` and read before
+  the string's buffer; it now clamps exactly like the native runtime and the interpreter
+  (negative start -> 0, start past the end -> empty, negative length -> 0, over-long length
+  stops at the end).
+
 - **Refinements: return contracts compose through calls.** A return whose tail is a
   call now uses the callee's proved (or `@[assume]`d) return:
   `fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end` proves from `a`'s

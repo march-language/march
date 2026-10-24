@@ -4958,6 +4958,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/uuid_v7_dns_parity.expected
                native_uuid_v7_dns_parity_interp.out)))
 
+; string_slice clamping (negative start, start past the end, negative / over-long
+; len) on BOTH backends against one golden.  runtime/march_runtime_wasm.c once
+; skipped the negative-start clamp and read before the buffer; the wasm runtime
+; cannot be built in CI's test jobs, so this pins the native + interpreter
+; semantics the wasm copy must match.
+(rule
+ (targets native_string_slice_clamp native_string_slice_clamp.out
+          native_string_slice_clamp_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/string_slice_clamp.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (with-stdout-to native_string_slice_clamp_interp.out
+     (run %{exe:../bin/main.exe} native/string_slice_clamp.march))
+    (run %{exe:../bin/main.exe} --compile -o native_string_slice_clamp
+         native/string_slice_clamp.march)
+    (with-stdout-to native_string_slice_clamp.out
+         (system "./native_string_slice_clamp"))))))
+
+(rule
+ (alias runtest)
+ (deps native_string_slice_clamp.out native/string_slice_clamp.expected)
+ (action (diff native/string_slice_clamp.expected
+               native_string_slice_clamp.out)))
+
+(rule
+ (alias runtest)
+ (deps native_string_slice_clamp_interp.out
+       native/string_slice_clamp.expected)
+ (action (diff native/string_slice_clamp.expected
+               native_string_slice_clamp_interp.out)))
+
 ; __try_call, __try_call_val, http_fetch, http_fetch_available and the twelve
 ; Logger v2 logger_* builtins compiled only because the runtime defined C
 ; functions of exactly those names, reached through mangle_extern's identity
