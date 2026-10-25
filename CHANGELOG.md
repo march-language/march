@@ -332,6 +332,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a `let`-bound list literal keeps its length.** `let t = [1, 2, 3]`
+  then `List.head(t)` or `Stats.mean(t)` was an `unconstrained-subject` skip while
+  `List.head([1, 2, 3])` proved; the binding now records `len(t) == 3` (any
+  Cons/Nil chain ending in `Nil`, `[]` included), retired when `t` is rebound. This
+  was half the user-code skips in a 67-program corpus sweep
+  (`examples/stats_basic.march`).
 - **`String.slice` with a negative start no longer reads out of bounds in wasm-compiled programs.**
   The wasm runtime's `march_string_slice` did not clamp a negative `start` and read before
   the string's buffer; it now clamps exactly like the native runtime and the interpreter

@@ -27001,6 +27001,73 @@ let infer_vocab_oct_suite =
                 "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn mfilt(m : Map(k, v), keep : k -> v -> Bool, cmp : k -> k -> Bool) : Map(k, v) do Map.filter(m, keep, cmp) end\n  fn go(m : Map(String, Int)) : Int do need_posmap(mfilt(m, fn _k -> fn v -> v > 0, Map.str_cmp)) end\n")))
   ]
 
+(* L1 (specs/progress/2026-10-26-refine-let-literal-length): a `let` bound to
+   an expression of exactly-known length (a list literal, `[]`, a Cons/Nil
+   chain) carries `len(n) == k` as a scope fact, the same entry a parameter
+   `n : {List(_) | len(_) == k}` would carry, retired on rebinding. *)
+let gap_let_literal_len_suite =
+  let m body =
+    "mod LL do\n  fn need_len3(xs : {List(Int) | len(_) == 3}) : Int do 0 end\n\
+    \  fn need_z(xs : {List(Int) | len(_) == 0}) : Int do 0 end\n\
+    \  fn mk() : List(Int) do Nil end\n" ^ body ^ "end\n"
+  in
+  [ gated "L1: `let t = [1, 2, 3]` then `List.head(t)` / `need_len3(t)` proves" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn v1() : Int do\n    let t = [1, 2, 3]\n    List.head(t)\n  end\n\
+                \  fn v2() : Int do\n    let t = [1, 2, 3]\n    need_len3(t)\n  end\n")
+        in
+        Alcotest.check gap_ps "List.head" gap_proved (gap_at "List.head" obs);
+        Alcotest.check gap_ps "need_len3" gap_proved (gap_at "need_len3" obs));
+    gated "L1: a let-bound FLOAT literal (the stats_basic `let temps = [..]` shape)" (fun () ->
+        let obs = gap_run (m "  fn v() : Float do\n    let temps = [1.5, 2.0]\n    List.head(temps)\n  end\n") in
+        Alcotest.check gap_ps "List.head" gap_proved (gap_at "List.head" obs));
+    gated "L1: an empty literal `[]` / `Nil` is length 0: proves `len == 0`, violates `len > 0`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn v1() : Int do\n    let t = []\n    need_z(t)\n  end\n\
+                \  fn v2() : Int do\n    let t = Nil\n    List.head(t)\n  end\n")
+        in
+        Alcotest.check gap_ps "need_z" gap_proved (gap_at "need_z" obs);
+        Alcotest.check gap_ps "List.head" [ ("violated", "") ] (gap_at "List.head" obs));
+    gated "L1: a nested literal counts its OUTER cells" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn need_len2(xs : {List(List(Int)) | len(_) == 2}) : Int do 0 end\n\
+                \  fn v() : Int do\n    let t = [[1, 2, 3], [4]]\n    need_len2(t)\n  end\n\
+                \  fn w() : Int do\n    let t = [[1, 2], [3]]\n    need_len3(List.head(t))\n  end\n")
+        in
+        Alcotest.check gap_ps "need_len2" gap_proved (gap_at "need_len2" obs);
+        (* The inner list's length is not the outer's: `List.head(t)` is a
+           call with no length contract, so need_len3 is not proved. *)
+        gap_not_proved "need_len3" (gap_at "need_len3" obs));
+    gated "L1 control: a rebinding retires the fact (a literal rebinding gives its OWN length)" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn v1() : Int do\n    let t = [1, 2, 3]\n    let t = mk()\n    need_len3(t)\n  end\n\
+                \  fn v2() : Int do\n    let t = [1, 2, 3]\n    let t = [1]\n    need_len3(t)\n  end\n")
+        in
+        (* `mk()`: unconstrained.  `[1]`: a violation — had the old fact
+           survived, `len == 3 && len == 1` would prove anything. *)
+        Alcotest.check gap_ps "need_len3"
+          [ ("skipped", "unconstrained-subject"); ("violated", "") ]
+          (gap_at "need_len3" obs));
+    gated "L1 control: a match-arm binder shadows the let" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn v(o : Option(List(Int))) : Int do\n    let t = [1, 2, 3]\n    match o do\n\
+                \      Some(t) -> need_len3(t)\n      None -> 0\n    end\n  end\n")
+        in
+        gap_not_proved "need_len3" (gap_at "need_len3" obs));
+    gated "L1 name capture: the callee's parameter `t` is not the caller's `t`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn need_same(t : List(Int), ys : {List(Int) | len(_) == len(t)}) : Int do 0 end\n\
+                \  fn v() : Int do\n    let t = [1, 2, 3]\n    need_same([9], t)\n  end\n\
+                \  fn w() : Int do\n    let t = [1, 2, 3]\n    need_same([7, 8, 9], t)\n  end\n")
+        in
+        Alcotest.check gap_ps "need_same" [ ("violated", ""); ("proved", "") ] (gap_at "need_same" obs)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -27168,4 +27235,5 @@ let () =
       ("gap-o1-local-option", gap_o1_local_option_suite);
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("len-return-obliged", len_return_obliged_suite);
+      ("gap-let-literal-len", gap_let_literal_len_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

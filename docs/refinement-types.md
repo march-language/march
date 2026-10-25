@@ -1263,6 +1263,21 @@ head([1, 2])        -- silent
 fn f(ys : List(Int)) : Int do head(ys) end   -- skipped: length unknown
 ```
 
+**A `let`-bound list of known length keeps its length** (since 2026-10-26).
+`let t = [1, 2, 3]` records `len(t) == 3`, the same fact a parameter
+`t : {List(Int) | len(_) == 3}` carries, so `head(t)` and `Stats.mean(t)` are
+checked exactly as `head([1, 2, 3])` is. This covers any constructor chain
+ending in `Nil`: a literal, `[]`, `Cons(1, Nil)`, and a nested literal, which
+counts its outer cells. Rebinding `t`, by a `let` or a `match` arm, retires
+the fact:
+
+```march
+let t = [1, 2, 3]
+head(t)             -- proved
+let t = []
+head(t)             -- reported: `len(_) > 0` cannot hold
+```
+
 Thirteen stdlib functions that panic on an empty argument carry this contract:
 `List.head`/`tail`/`last`/`minimum_int`/`maximum_int`, the `prelude` `head`/`tail`,
 `Stats.mean`/`min_val`/`max_val`, `Gen.element`/`one_of`, and `Random.choice`. Each

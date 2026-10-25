@@ -2115,6 +2115,24 @@ let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
 let self_mentioning (pat : A.pattern) (pred : A.expr) : bool =
   expr_mentions (pat_binders pat) pred
 
+(* `len(_) == k` for a Cons/Nil chain ending in `Nil` (k cells); [None]
+   for any other expression.  Only a constructor chain counts: a bare `let ys = xs`
+   is an alias, not a length fact, and is left to the other channels. *)
+let list_len_pred ~(span : A.span) (e : A.expr) : A.expr option =
+  let v x = A.EVar { A.txt = x; A.span = span } in
+  let app f args = A.EApp (v f, args, span) in
+  let lit k = A.ELit (A.LitInt k, span) in
+  let rec go k e =
+    match e with
+    | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (lit k)
+    | A.ECon ({ A.txt = "Cons"; _ }, [ _; tl ], _) -> go (k + 1) tl
+    | _ -> None
+  in
+  match e with
+  | A.ECon ({ A.txt = ("Nil" | "Cons"); _ }, _, _) ->
+    Option.map (fun rhs -> app "==" [ app "len" [ v "_" ]; rhs ]) (go 0 e)
+  | _ -> None
+
 (* [postcond] resolves a callee name AND the call's actual arguments to the
    callee's return refinement, already instantiated in the CALLER's namespace.
    An explicit annotation always wins; only an UNANNOTATED `let` whose RHS is a
@@ -2212,7 +2230,28 @@ let scope_add_binding
                && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, Some (meas_sort_prefix ^ srt))) :: sc
         | Some _ | None -> sc)
-     | _ -> sc)
+     (* A list of EXACTLY-KNOWN length — a literal `[a, b, c]`, `[]`, or any
+        Cons/Nil chain ending in `Nil` ([list_len]) — files `len(_) == k`,
+        the very entry a parameter `n : {List(_) | len(_) == k}` gets from
+        [refined_scope_ty], so [load_scope_measure_facts] reads it with no
+        new consumer.  The direct call `List.head([1, 2, 3])` already reflects
+        the literal's length at the argument; this makes `let t = [1, 2, 3]`
+        then `List.head(t)` agree with it (2026-10-24 stdlib audit, row 2).
+
+        Sound by construction: the length of a Cons/Nil chain is the number
+        of its cells whatever the heads are, and the predicate names nothing
+        but `_`, so no rebinding can make it stale except one of [n] itself,
+        which [scope_shadow] above (and at every later binder) retires.
+        Declined when a user `@[measure]` took the name `len` (then `len` is
+        not list length) or `List` is not a registered datatype. *)
+     | rhs ->
+       (match list_len_pred ~span:n.A.span rhs with
+        | Some pred
+          when (not (is_axiom_measure "len"))
+               && Hashtbl.mem adt_ctors (adt_sort_name "List")
+               && not (self_mentioning b.A.bind_pat pred) ->
+          (n.A.txt, ("_", pred, Some (meas_sort_name "List"))) :: sc
+        | _ -> sc))
   | _ -> sc
 
 (* =================================================================
