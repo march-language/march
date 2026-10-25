@@ -359,6 +359,35 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
         note_verdicts s (List.map (fun v -> ("p", v)) verdicts);
         false)
   in
+  (* K5 relational element refinements: a whole two-slot container type a
+     caller demands (Demand source only). *)
+  let try_rel ~round (s : IS.slot) : bool =
+    match current_slot s with
+    | None -> false
+    | Some s -> (
+      match IS.rel_demands ~unit_decls:!decls s with
+      | [] -> false
+      | tys -> (
+        let per_fn = ref (min !budget 12) in
+        let used0 = !per_fn in
+        let best, verdicts = IO.best_whole ~allow_caller_violations ~root ~decls:!decls s tys ~budget:per_fn in
+        budget := !budget - (used0 - !per_fn);
+        let text t = Option.value (IS.render IS.Return t) ~default:"" in
+        match best with
+        | Some (t, v) ->
+          let ann = text t in
+          let p = proposal_of ~round ~s ~pred:ann ~annotation:ann ~source:IV.Demand ~depends:[] ~v in
+          if withheld p then false
+          else begin
+            install s (IS.install_ty s t);
+            if IO.is_return s then Hashtbl.replace Refine_param.elem_ret_proved s.IS.fn ();
+            ignore (commit p);
+            true
+          end
+        | None ->
+          note_verdicts s (List.map (fun (t, v) -> (text t, v)) verdicts);
+          false))
+  in
   let rec loop round =
     if round > rounds || !budget <= 0 then round - 1
     else begin
@@ -387,11 +416,22 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
       let k6s = by_order (List.filter is_k6 slots) in
       let demands = by_order (List.filter (fun s -> (not (is_k6 s)) && (not (is_k7 s)) && not (IO.is_return s)) slots) in
       let accs = List.filter is_k7 slots in
+      let rels =
+        if not (List.mem IS.K5 kinds) then []
+        else
+          by_order
+            (List.concat_map
+               (fun ((_, (fd : A.fn_def)) as pf) ->
+                 if is_target fd.A.fn_name.A.span then IS.rel_slots ~fn:(PI.qualified_of pf) fd else [])
+               (PI.enum_fns [] !decls))
+      in
       let accepted = ref false in
       let go f ss = List.iter (fun s -> if f s then accepted := true) ss in
       go (try_slot ~round ~ledger ~depth:0) facts;
       go (try_k6 ~round) k6s;
+      go (try_rel ~round) (List.filter IO.is_return rels);
       go (try_slot ~round ~ledger ~depth:0) demands;
+      go (try_rel ~round) (List.filter (fun s -> not (IO.is_return s)) rels);
       go (try_slot ~round ~ledger ~depth:0) accs;
       (* An SCC of size > 1 whose members got nothing. *)
       List.iter

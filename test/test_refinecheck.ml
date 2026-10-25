@@ -26815,6 +26815,9 @@ let infer_vocab_oct_suite =
   let assoc =
     "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n  fn need_apos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end\n"
   in
+  let rel =
+    "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n"
+  in
   let filt_body name =
     Printf.sprintf
       "  fn %s(a : Assoc(k, v), keep : k -> v -> Bool) : Assoc(k, v) do\n    match a do\n      ANil -> ANil\n      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, %s(t, keep)) else %s(t, keep) end\n    end\n  end\n"
@@ -26910,6 +26913,30 @@ let infer_vocab_oct_suite =
             Alcotest.(check bool) ("written: " ^ contents ()) true
               (Astring_contains.contains (contents ())
                  "fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p])")));
+    (* 3. Relational element refinements, Demand-driven: a caller's
+       relational parameter type is proposed whole. *)
+    gated "relational element return: mk proposes Assoc({x : Int | true}, {y : Int | y > x})" (fun () ->
+        infer_run (m "RE" (rel ^ "  fn mk(n : Int) : Assoc(Int, Int) do ACons(n, n + 1, ANil) end\n  fn go(n : Int) : Int do need_arel(mk(n)) end\n"))
+          (fun r -> Alcotest.check sp "mk" [ ("mk", "Assoc({x : Int | true}, {y : Int | y > x})") ] (props r)));
+    gated "relational element return control: a body breaking the relation is not proposed" (fun () ->
+        infer_run (m "RB" (rel ^ "  fn mk(n : Int) : Assoc(Int, Int) do ACons(n, n, ANil) end\n  fn go(n : Int) : Int do need_arel(mk(n)) end\n"))
+          (fun r -> Alcotest.check sp "none" [] (props r)));
+    gated "relational element parameter: a body demand proposes the relation on the parameter" (fun () ->
+        infer_run (m "RP" (rel ^ "  pfn f(a : Assoc(Int, Int)) : Int do need_arel(a) end\n  fn main() : Int do f(ACons(1, 2, ANil)) end\n"))
+          (fun r -> Alcotest.check sp "f" [ ("f", "Assoc({x : Int | true}, {y : Int | y > x})") ] (props r)));
+    gated "relational element parameter control: a violating caller refuses it" (fun () ->
+        infer_run (m "RV" (rel ^ "  pfn f(a : Assoc(Int, Int)) : Int do need_arel(a) end\n  fn main() : Int do f(ACons(5, 2, ANil)) end\n"))
+          (fun r ->
+            Alcotest.check sp "none" [] (props r);
+            Alcotest.(check bool) "refused" true
+              (List.exists (fun ((s : IS.slot), _, (rf : PI.refusal)) -> s.IS.fn = "f" && rf.PI.rf_reason = "caller-violation") r.RI.refused)));
+    gated "relational element apply: the written return re-checks as predicted" (fun () ->
+        let src = m "RA" (rel ^ "  fn mk(n : Int) : Assoc(Int, Int) do ACons(n, n + 1, ANil) end\n  pfn go(n : Int) : Int do need_arel(mk(n)) end\n  fn main() : Int do go(1) end\n") in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ()) "fn mk(n : Int) : Assoc({x : Int | true}, {y : Int | y > x})")));
     gated "K6 one-argument apply: a rediscovered filter re-checks as predicted (was exit 3)" (fun () ->
         (* The accepted K6 proposal was installed without marking its element
            return proved, so the prediction read the definer's own recursive

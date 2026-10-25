@@ -373,6 +373,119 @@ let enumerate ~(is_user : A.span -> bool) (decls : A.decl list) : slot list =
          let fn = PI.qualified_of pf in
          slots_of_fn ~fn fd @ k6_slots ~fn fd @ k7_slots ~unit_decls:decls ~fn fd)
 
+(* ── K5 relational element refinements (multi-arg phase 1b, 2026-10-21) ──
+   A two-argument container whose slots relate, `Assoc({x : Int | true},
+   {y : Int | y > x})`, is proposed only where a caller DEMANDS it (the
+   Demand source, nothing else): a call `g(…, f(…), …)` anywhere in the unit
+   whose parameter at that position has a relational type passes its type to
+   [f]'s return; a call `g(…, x, …)` in [f]'s body does the same for [f]'s
+   parameter [x].  The candidate is that parameter type, written whole, when
+   its refinement-free spelling is the slot's own type.  The oracle decides. *)
+
+let rec strip (t : A.ty) : A.ty =
+  match t with
+  | A.TyRefine (b, _, _) -> strip b
+  | A.TyCon (n, args) -> A.TyCon (n, List.map strip args)
+  | A.TyTuple ts -> A.TyTuple (List.map strip ts)
+  | A.TyArrow (a, b) -> A.TyArrow (strip a, strip b)
+  | A.TyLinear (l, t) -> A.TyLinear (l, strip t)
+  | t -> t
+
+let rec mentions (n : string) (e : A.expr) : bool =
+  match e with
+  | A.EVar { A.txt; _ } -> txt = n
+  | A.EApp (f, xs, _) -> mentions n f || List.exists (mentions n) xs
+  | A.ETuple (xs, _) -> List.exists (mentions n) xs
+  | A.EField (r, _, _) -> mentions n r
+  | _ -> false
+
+(* Some slot's predicate names a sibling slot's binder. *)
+let relational (t : A.ty) : bool =
+  match t with
+  | A.TyCon (_, args) when List.length args >= 2 ->
+    let binders = List.filter_map (function A.TyRefine (_, Some n, _) -> Some n.A.txt | _ -> None) args in
+    List.exists
+      (function
+        | A.TyRefine (_, own, pred) ->
+          List.exists
+            (fun b -> (match own with Some n -> n.A.txt <> b | None -> true) && mentions b pred)
+            binders
+        | _ -> false)
+      args
+  | _ -> false
+
+(* A root whose type is a registered container of several arguments, none
+   refined: the only kind of root a relation is proposed for. *)
+let rel_slots ~(fn : string) (fd : A.fn_def) : slot list =
+  let ok (t : A.ty) =
+    match t with
+    | A.TyCon ({ A.txt = c; _ }, args) ->
+      List.length args >= 2 && is_container c && List.for_all (fun a -> strip a = a) args
+    | _ -> false
+  in
+  if excluded fd then []
+  else
+    match first_clause fd with
+    | None -> []
+    | Some c ->
+      List.filter_map (fun (n, t) -> if ok t then Some { fn; fd; path = Param n; base = t; kinds = [ K5 ] } else None) (PI.named_params c)
+      @ (match fd.A.fn_ret_ty with Some t when ok t -> [ { fn; fd; path = Return; base = t; kinds = [ K5 ] } ] | _ -> [])
+
+let same_ty (a : A.ty) (b : A.ty) = render Return (strip a) = render Return (strip b) && render Return a <> None
+
+let rel_demands ~(unit_decls : A.decl list) (s : slot) : A.ty list =
+  let out = ref [] in
+  let fname = s.fd.A.fn_name.A.txt in
+  let last q = match List.rev (String.split_on_char '.' q) with x :: _ -> x | [] -> q in
+  let is_target (e : A.expr) =
+    match root s.path, e with
+    | Return, A.EApp (A.EVar { A.txt; _ }, _, _) -> last txt = fname
+    | Param x, A.EVar { A.txt; _ } -> txt = x
+    | _ -> false
+  in
+  let visit (e : A.expr) =
+    match e with
+    | A.EApp (A.EVar { A.txt = g; _ }, args, _) -> (
+      match find_fn unit_decls g with
+      | Some { A.fn_clauses = c :: _; _ } ->
+        let ps = PI.named_params c in
+        if List.length ps = List.length args then
+          List.iter2
+            (fun (_, t) a ->
+              if is_target a && relational t && same_ty t s.base && not (List.mem t !out) then out := !out @ [ t ])
+            ps args
+      | _ -> ())
+    | _ -> ()
+  in
+  let bodies =
+    match root s.path with
+    | Param _ -> List.map (fun (c : A.fn_clause) -> c.A.fc_body) s.fd.A.fn_clauses
+    | _ ->
+      List.concat_map (fun (_, (fd : A.fn_def)) -> List.map (fun (c : A.fn_clause) -> c.A.fc_body) fd.A.fn_clauses)
+        (PI.enum_fns [] unit_decls)
+  in
+  List.iter (iter_expr visit) bodies;
+  !out
+
+(* [s.fd] with the whole root type replaced by [t]. *)
+let install_ty (s : slot) (t : A.ty) : A.fn_def =
+  let fd = s.fd in
+  match root s.path with
+  | Return -> { fd with A.fn_ret_ty = Some t }
+  | Param x ->
+    let upd (p : A.param) = if p.A.param_name.A.txt <> x then p else { p with A.param_ty = Some t } in
+    { fd with
+      A.fn_clauses =
+        List.map
+          (fun (c : A.fn_clause) ->
+            { c with
+              A.fc_params =
+                List.map
+                  (function A.FPNamed p -> A.FPNamed (upd p) | A.FPDefault (p, e) -> A.FPDefault (upd p, e) | o -> o)
+                  c.A.fc_params })
+          fd.A.fn_clauses }
+  | _ -> fd
+
 (* Functions with a parameter that has no annotation: no base to refine
    (reported `unannotated-signature`, §1.1). *)
 let unannotated (decls : A.decl list) : (string * A.span) list =

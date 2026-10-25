@@ -61,6 +61,22 @@ let prepare ~(root : string) ~(decls : A.decl list) (s : IS.slot) : ctx option =
     in
     Some { qualified = s.IS.fn; fd0; rebuild; defs; base; in_body; reach0 = Hashtbl.create 8 }
 
+(* The site diff the oracle judges by.  A relational demand on a call whose
+   subject the checker cannot read is recorded as ONE skip, the goal `true`
+   of the relation's free slot (`{x : Int | true}`).  Any refinement of that
+   slot gives the slot an entry, which closes that `true` goal, while the
+   relation itself (`y > x`) then appears at the same call as a NEW skip.
+   Such a close is no work: a `true` goal closed at a call that gains an
+   unsettled obligation does not count (2026-10-25: `Assoc({Int | _ != 0},
+   Int)` was proposed for a parameter passed to a relational demand, net
+   0).  The relation proved in full closes it with nothing new unsettled. *)
+let diff ~before ~after =
+  let d = LD.diff ~before ~after in
+  let unsettled_at sp =
+    List.exists (fun ((k : LD.key), c) -> k.LD.span = sp && (c = LD.New_skip || c = LD.New_violated)) d
+  in
+  List.filter (fun ((k : LD.key), c) -> not (c = LD.Closed && k.LD.predicate = "true" && unsettled_at k.LD.span)) d
+
 let defs_with (cx : ctx) (hyp : A.fn_def) =
   let d = Hashtbl.copy cx.defs in
   Hashtbl.replace d cx.qualified (RC.entry_of_sig (RC.sig_of_fn hyp));
@@ -151,7 +167,7 @@ let accept_genuine ~root ?subject (cx : ctx) (hyp : A.fn_def) ~closes ~new_skipp
 
 let precondition ?(allow_caller_violations = false) ?subject ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
   let after = PI.walk_ledger ~root ~defs:(defs_with cx hyp) (cx.rebuild hyp) in
-  let delta = LD.diff ~before:cx.base ~after in
+  let delta = diff ~before:cx.base ~after in
   let caller_viol =
     List.filter (fun (k : LD.key) -> not (cx.in_body k.LD.span)) (LD.new_violated delta)
   in
@@ -191,7 +207,7 @@ let return_ ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
   if not (return_holds ~root cx hyp) then Reject ("not-true", "the checker does not prove this return")
   else
     let after = PI.walk_ledger ~root ~defs:(PO.defs_with_post cx.defs ~qualified:cx.qualified hyp) (cx.rebuild hyp) in
-    let delta = LD.diff ~before:cx.base ~after in
+    let delta = diff ~before:cx.base ~after in
     if LD.opened delta <> [] then Reject ("opens-site", "a previously proved obligation is no longer proved")
     else if not (PI.admissible delta) then Reject ("not-useful", "closes no caller site")
     else Accept { closes = LD.closed delta; new_skipped = LD.new_skipped delta }
@@ -222,7 +238,7 @@ let elem_return ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
     Reject ("not-true", "the checker does not prove this element return")
   else
     let after = PI.walk_ledger ~root ~defs tree in
-    let delta = LD.diff ~before:cx.base ~after in
+    let delta = diff ~before:cx.base ~after in
     if LD.opened delta <> [] then Reject ("opens-site", "a previously proved obligation is no longer proved")
     else if not (PI.admissible delta) then Reject ("not-useful", "closes no caller site")
     else Accept { closes = LD.closed delta; new_skipped = LD.new_skipped delta }
@@ -243,7 +259,7 @@ let accumulator ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
         | _ -> false)
       after
   in
-  let delta = LD.diff ~before:cx.base ~after in
+  let delta = diff ~before:cx.base ~after in
   if acc_skip then Reject ("not-true", "the accumulator invariant's base or step is not proved")
   else if LD.new_violated delta <> [] then Reject ("not-true", "creates a violation")
   else if LD.opened delta <> [] then Reject ("opens-site", "a previously proved obligation is no longer proved")
@@ -349,6 +365,49 @@ let best_k6 ~(root : string) ~(decls : A.decl list) (s : IS.slot) ~(budget : int
         go best (v :: verdicts) tl
     in
     go None [] (IS.k6_shapes s)
+
+(* ── K5 relational element refinements (whole-type candidates) ─────────── *)
+
+(* One whole root type per candidate ([IS.rel_demands]): a return is the K4
+   judgment (TRUE through the element-return gate, USEFUL at a caller); a
+   parameter is the precondition judgment (closes a body site, no caller
+   violation, satisfiable, not vacuous). *)
+let best_whole ?allow_caller_violations ~(root : string) ~(decls : A.decl list) (s : IS.slot) (tys : A.ty list)
+    ~(budget : int ref) : (A.ty * verdict) option * (A.ty * verdict) list =
+  Obligation.with_scratch @@ fun () ->
+  match prepare ~root ~decls s with
+  | None -> (None, [])
+  | Some cx ->
+    let s = { s with IS.fd = cx.fd0 } in
+    let score = function
+      | Accept { closes; new_skipped } ->
+        if is_return s then List.length closes else List.length closes - List.length new_skipped
+      | _ -> min_int
+    in
+    let rec go best verdicts = function
+      | [] -> (best, List.rev verdicts)
+      | t :: _ when !budget <= 0 -> (best, List.rev ((t, Reject ("budget", "probe budget exhausted")) :: verdicts))
+      | t :: tl ->
+        decr budget;
+        let hyp = IS.install_ty s t in
+        let v =
+          try
+            with_hyp_def cx hyp @@ fun () ->
+            match s.IS.path with
+            | IS.Return -> elem_return ~root cx hyp
+            | IS.Param x -> precondition ?allow_caller_violations ~subject:x ~root cx hyp
+            | _ -> Reject ("not-useful", "kind not implemented")
+          with e -> Reject ("not-true", "probe raised: " ^ Printexc.to_string e)
+        in
+        let best =
+          match v, best with
+          | Accept _, None -> Some (t, v)
+          | Accept _, Some (_, bv) when score v > score bv -> Some (t, v)
+          | _ -> best
+        in
+        go best ((t, v) :: verdicts) tl
+    in
+    go None [] tys
 
 (* TRUE only (no USEFUL): does the checker prove [c] at return slot [s]?  The
    demand-chain step of the fixpoint (design §3.3) asks this of a callee link

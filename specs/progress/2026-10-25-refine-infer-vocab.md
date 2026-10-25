@@ -90,3 +90,53 @@ its input) is not proposed; a caller with no demand gets nothing for `filt`; a `
 combinator passing its callback to `Map.filter` is not proposed, because the checker does
 not prove the hand-annotated version either (`abstract-refinement-uninstantiated` at its
 own return; filed as `specs/todos/2026-10-25-refine-map-filter-two-arg-passthrough.md`).
+
+## 3. Relational element refinements (Demand-driven only)
+
+`Infer_slot.rel_slots` / `rel_demands`, `Infer_oracle.best_whole`, `Refine_infer`'s
+`try_rel`. A root (parameter or return) whose type is a registered container of several
+arguments, none refined, is a K5 slot. Its candidates come from the Demand source alone:
+- for a return, every call `g(…, f(…), …)` in the unit;
+- for a parameter `x`, every call `g(…, x, …)` in the function's body.
+
+When `g`'s parameter at that position has a relational type (a slot predicate naming a
+sibling binder) whose refinement-free spelling is the slot's own type, that type is the
+candidate, written whole. A return is judged as an element return (TRUE through the
+element-return gate, USEFUL at a caller). A parameter is judged as a precondition
+(closes a body site, no caller violation, satisfiable, not vacuous). Returns run in the
+F-phase after K6, parameters in the D-phase. The budget is 12 probes per root. JSON
+`kind` is `element-return` / `element-param`, and `slot` is the root (`return`,
+`param a`).
+
+Proposed: `mk(n : Int) : Assoc({x : Int | true}, {y : Int | y > x})` for `ACons(n, n +
+1, ANil)` under `need_arel(mk(n))`, and `f(a : Assoc({x : Int | true}, {y : Int | y >
+x}))` for `f(a) = need_arel(a)`.
+
+**Bug found (introduced by item 4 on this branch, fixed here).** With per-argument slots,
+the House predicate `true` (from the relation's free slot `{x : Int | true}`) became a
+candidate. `Assoc({Int | true}, Int)` (and, once `true` was filtered,
+`Assoc({Int | _ != 0}, Int)`) was then proposed for both `mk` and `f`. A relational
+demand on a call whose subject the checker cannot read is recorded as one skip: the goal
+`true` of the relation's free slot. Giving that slot any refinement creates an entry,
+which closes the `true` goal, and the relation then appears at the same call as a new
+skip (net 0, admissible). Two guards:
+- `Infer_vocab.admissible_text`: a candidate must mention `_`.
+- `Infer_oracle.diff`, the diff every verdict reads: a closed `true` goal at a call that
+  gains an unsettled obligation does not count.
+
+The whole relation still closes the goal, because nothing new is left unsettled at that
+call.
+
+Tests (`infer-vocab-oct` rows 14-18). RED on the item-2 commit: `mk` and `f` each
+proposed `Assoc({Int | true}, Int)`, the relation was never proposed, the violating
+caller was not refused, and the apply case wrote nothing. Controls:
+- `mk` with body `ACons(n, n, ANil)` gets nothing;
+- `f` with a caller passing `ACons(5, 2, ANil)` is refused `caller-violation`.
+
+Ruling: only the Demand-driven case. A `bump`-shaped function, `Assoc(Int, Int) ->
+Assoc(Int, Int)` keeping `y > x`, needs the relation on the parameter AND the return at
+once. A joint probe would need a K6-like two-edit proposal and its own admissibility
+(caller burden plus return TRUE). It is not done: `test/native` has no two-slot
+container type with a relation at all (grep), so the case is rare. Filed:
+`specs/todos/2026-10-25-refine-infer-joint-relational-param-return.md`. Cost if wrong:
+`bump`-shaped contracts are not found; the user writes both annotations.

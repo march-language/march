@@ -107,6 +107,11 @@ let rec sorted_for (k : PI.kind) (e : A.expr) : bool =
 let admissible_text (s : IS.slot) (c : PI.candidate) : bool =
   let e = c.PI.c_pred A.dummy_span in
   let allowed = "_" :: scope_names s in
+  (* A predicate that does not mention the value (`true`, the House
+     predicate of a relation's free slot `{x : Int | true}`) says nothing
+     about it; installed it can still "close" a slot's `true` sub-goal at a
+     caller, which is no contract. *)
+  List.mem "_" (names_of [] e) &&
   (List.mem IS.K6 s.IS.kinds || sorted_for (PI.kind_of_ty s.IS.base) e) &&
   List.for_all (fun n -> List.mem n allowed) (names_of [] e)
   && List.for_all

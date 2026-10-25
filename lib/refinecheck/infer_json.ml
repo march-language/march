@@ -35,6 +35,9 @@ let rec path_text = function
 let kind_text (s : IS.slot) : string =
   if List.mem IS.K6 s.IS.kinds then "abstract"
   else if List.mem IS.K7 s.IS.kinds then "accumulator"
+  else if List.mem IS.K5 s.IS.kinds && s.IS.kinds = [ IS.K5 ] && not (IS.scalar s.IS.base) then
+    (* a whole relational container type (Refine_infer's [try_rel]) *)
+    match s.IS.path with IS.Param _ -> "element-param" | _ -> "element-return"
   else
     match s.IS.path with
     | IS.Param _ -> "precondition"
