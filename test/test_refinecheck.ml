@@ -26799,6 +26799,19 @@ let infer_vocab_oct_suite =
   let pre = "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n" in
   let m name body = "mod " ^ name ^ " do\n" ^ pre ^ body ^ "end\n" in
   let sp = Alcotest.(list (pair string string)) in
+  (* Through the real driver (the whole stdlib, so `Map`/`Deque` are known):
+     the (fn, annotation) pairs of the JSON proposals. *)
+  let cli_props src =
+    let _, j = run_cli "--check --refine-infer-json" src in
+    let re = Str.regexp "\"fn\": \"\\([^\"]*\\)\", \"file\": \"[^\"]*\", \"line\": [0-9]+, \"col\": [0-9]+, \"slot\": \"[^\"]*\", \"base\": \"[^\"]*\", \"predicate\": \"[^\"]*\", \"annotation\": \"\\([^\"]*\\)\"" in
+    let rec all i acc =
+      match Str.search_forward re j i with
+      | exception Not_found -> List.rev acc
+      | k -> all (k + 1) ((Str.matched_group 1 j, Str.matched_group 2 j) :: acc)
+    in
+    if not (Astring_contains.contains j "\"version\": 1") then Alcotest.failf "no JSON: %s" j;
+    all 0 []
+  in
   let mined_texts src ~fn =
     let dm = March_desugar.Desugar.desugar_module (parse src) in
     let decls = dm.March_ast.Ast.mod_decls in
@@ -26834,7 +26847,40 @@ let infer_vocab_oct_suite =
             Alcotest.(check bool) ("written: " ^ contents ()) true
               (Astring_contains.contains (contents ()) "fn inc(x : Int) : {Int | _ > x}");
             let _, rep = run_cli_in dir "--check --refine-report" in
-            Alcotest.(check bool) ("no user skips: " ^ rep) true (Astring_contains.contains rep "0 violated, 0 trusted, 0 skipped")))
+            Alcotest.(check bool) ("no user skips: " ^ rep) true (Astring_contains.contains rep "0 violated, 0 trusted, 0 skipped")));
+    (* 4. Map / Deque element slots.  A container of several type arguments
+       has one slot per argument ([IS.Arg]); `Map.filter`'s entry fact
+       (2026-10-24) proves them. *)
+    gated "Map value slot: a filtering wrapper proposes Map(String, {Int | _ > 0})" (fun () ->
+        Alcotest.check sp "pos_vals" [ ("pos_vals", "Map(String, {Int | _ > 0})") ] (cli_props
+          (m "MV"
+             "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn pos_vals(m : Map(String, Int)) : Map(String, Int) do Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp) end\n  fn go(m : Map(String, Int)) : Int do need_posmap(pos_vals(m)) end\n")
+          ));
+    gated "Map key slot: a key filter proposes Map({Int | _ > 0}, String)" (fun () ->
+        Alcotest.check sp "pos_keys" [ ("pos_keys", "Map({Int | _ > 0}, String)") ] (cli_props
+          (m "MK"
+             "  fn need_poskeys(_m : Map({Int | _ > 0}, String)) : Int do 0 end\n  fn pos_keys(m : Map(Int, String)) : Map(Int, String) do Map.filter(m, fn k -> fn _v -> k > 0, Map.int_cmp) end\n  fn go(m : Map(Int, String)) : Int do need_poskeys(pos_keys(m)) end\n")
+          ));
+    gated "Map control: a wrapper that returns its input unchanged proposes nothing" (fun () ->
+        Alcotest.check sp "none" [] (cli_props
+          (m "MC"
+             "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn same(m : Map(String, Int)) : Map(String, Int) do m end\n  fn go(m : Map(String, Int)) : Int do need_posmap(same(m)) end\n")
+          ));
+    gated "Map apply: the written return re-checks exactly as predicted" (fun () ->
+        let src =
+          m "MA"
+            "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn pos_vals(m : Map(String, Int)) : Map(String, Int) do Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp) end\n  pfn go(m : Map(String, Int)) : Int do need_posmap(pos_vals(m)) end\n  fn main() : Int do go(Map.empty()) end\n"
+        in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ()) "fn pos_vals(m : Map(String, Int)) : Map(String, {Int | _ > 0})")));
+    gated "Deque element slot (pinned: already proposed on the base)" (fun () ->
+        Alcotest.check sp "pos_d" [ ("pos_d", "Deque.Deque({Int | _ > 0})") ] (cli_props
+          (m "DQ"
+             "  fn need_posd(_d : Deque.Deque({Int | _ > 0})) : Int do 0 end\n  fn pos_d(d : Deque.Deque(Int)) : Deque.Deque(Int) do Deque.filter(d, fn v -> v > 0) end\n  fn go(d : Deque.Deque(Int)) : Int do need_posd(pos_d(d)) end\n")
+          ))
   ]
 
 let () =

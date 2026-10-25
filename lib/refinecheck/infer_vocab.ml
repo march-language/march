@@ -174,7 +174,7 @@ let flip = function "<" -> ">" | "<=" -> ">=" | ">" -> "<" | ">=" -> "<=" | op -
 let body (s : IS.slot) : string list =
   let params = match s.IS.fd.A.fn_clauses with c :: _ -> List.map fst (PI.named_params c) | [] -> [] in
   let binders = ref [] in
-  let elem = match s.IS.path with IS.Elem _ -> true | _ -> false in
+  let elem = match s.IS.path with IS.Elem _ | IS.Arg _ -> true | _ -> false in
   let rec lam_params (e : A.expr) =
     match e with
     | A.ELam (ps, b, _) -> List.iter (fun (p : A.param) -> binders := p.A.param_name.A.txt :: !binders) ps; lam_params b

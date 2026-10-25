@@ -39,3 +39,23 @@ vocabulary for `x + 1` was `_ > 0; _ != 0; _ >= 0; _ <= 0; _ < 0`; `add` propose
 (expected `{Int | _ == x + y}`); the apply case wrote nothing. The control (`dec(x) =
 x - 1` into `need_pos(dec(n))`, nothing proposed) passed before and after. With the
 candidates but before the order fix, `inc` proposed `{Int | _ == x + 1}`.
+
+## 4. `Map` / `Deque` element slots
+
+`Infer_slot` gives a container of several type arguments one slot per argument
+(`Arg (i, p)`, JSON `return/elem.0`, `return/elem.1`); a one-argument container keeps
+`Elem` (`return/elem`), so every existing slot name and test is unchanged. The walker,
+the renderer and the installer (`steps`/`refine_at`) know the new step; the Body source
+treats an `Arg` slot as an element slot (its binder is a lambda parameter).
+`Map(k, v)` is a registered container, and `Map.filter` lends its entry fact
+(2026-10-24), so a wrapper is proposed `Map(String, {Int | _ > 0})` (value slot) or
+`Map({Int | _ > 0}, String)` (key slot).
+
+`Deque.Deque(a)` element slots needed nothing: since #1022 (qualified container types)
+the one-argument path already proposes `Deque.Deque({Int | _ > 0})` on the base. That
+row is pinned, not RED.
+
+Tests (`infer-vocab-oct` rows 5-9, through the real driver so the whole stdlib is
+loaded). RED on the base: `pos_vals` and `pos_keys` proposed `[]`, and the apply case
+wrote nothing. Controls: a wrapper returning its input unchanged proposes nothing
+(passed before and after); the Deque pin passed before and after.

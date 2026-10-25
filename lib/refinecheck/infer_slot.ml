@@ -17,6 +17,9 @@ type path =
   | Param of string
   | Return
   | Elem of path
+  | Arg of int * path
+    (* slot [i] of a container of several type arguments (`Map(k, v)`, a
+       user `Assoc(k, v)`); a one-argument container keeps [Elem]. *)
   | Tuple of int * path
   | Lambda_param of { line : int; col : int; param : string }
 
@@ -35,7 +38,7 @@ let kind_name = function
 
 let rec root = function
   | (Param _ | Return | Lambda_param _) as r -> r
-  | Elem p | Tuple (_, p) -> root p
+  | Elem p | Arg (_, p) | Tuple (_, p) -> root p
 
 let is_container (name : string) : bool =
   name = "List" || name = "Option" || Refine_scope.is_container_type name
@@ -70,6 +73,17 @@ let rec walk ~fn ~fd ~elem_kind ~rel (p : path) (t : A.ty) : slot list =
           [ mk (Elem p) e (elem_kind :: (if rel then [ K5 ] else [])) ]
         | _ -> walk ~fn ~fd ~elem_kind ~rel (Elem p) e)
       args
+  | A.TyCon ({ A.txt = c; _ }, args) when List.length args >= 2 && is_container c ->
+    List.concat
+      (List.mapi
+         (fun i e ->
+           let here = Arg (i, p) in
+           match e with
+           | A.TyRefine _ -> []
+           | _ when scalar e || (match e with A.TyVar _ -> true | _ -> false) ->
+             [ mk here e (elem_kind :: (if rel then [ K5 ] else [])) ]
+           | _ -> walk ~fn ~fd ~elem_kind ~rel here e)
+         args)
   | _ -> []
 
 let root_slots ~fn ~fd ~rel ~scalar_kind ~elem_kind (p : path) (t : A.ty) : slot list =
@@ -118,7 +132,10 @@ let rec render ?(at : (path * string) option) (here : path) (t : A.ty) : string 
     | A.TyCon (n, args) ->
       Option.map
         (fun ps -> Printf.sprintf "%s(%s)" n.A.txt (String.concat ", " ps))
-        (all (List.map (render ?at (Elem here)) args))
+        (all
+           (match args with
+            | [ a ] -> [ render ?at (Elem here) a ]
+            | _ -> List.mapi (fun i a -> render ?at (Arg (i, here)) a) args))
     | A.TyTuple ts ->
       Option.map
         (fun ps -> Printf.sprintf "(%s)" (String.concat ", " ps))
@@ -356,13 +373,15 @@ let unannotated (decls : A.decl list) : (string * A.span) list =
 let rec steps = function
   | Param _ | Return | Lambda_param _ -> []
   | Elem p -> steps p @ [ `Elem ]
+  | Arg (i, p) -> steps p @ [ `Arg i ]
   | Tuple (i, p) -> steps p @ [ `Tuple i ]
 
-let rec refine_at (st : [ `Elem | `Tuple of int ] list) ~(mk : A.span -> A.expr) ~(sp : A.span) (t : A.ty) : A.ty =
+let rec refine_at (st : [ `Elem | `Arg of int | `Tuple of int ] list) ~(mk : A.span -> A.expr) ~(sp : A.span) (t : A.ty) : A.ty =
   match st, t with
   | [], _ -> A.TyRefine (t, None, mk sp)
   | _, A.TyLinear (l, t) -> A.TyLinear (l, refine_at st ~mk ~sp t)
   | `Elem :: rest, A.TyCon (n, [ e ]) -> A.TyCon (n, [ refine_at rest ~mk ~sp e ])
+  | `Arg i :: rest, A.TyCon (n, args) -> A.TyCon (n, List.mapi (fun j t -> if j = i then refine_at rest ~mk ~sp t else t) args)
   | `Tuple i :: rest, A.TyTuple ts -> A.TyTuple (List.mapi (fun j t -> if j = i then refine_at rest ~mk ~sp t else t) ts)
   | _ -> t
 

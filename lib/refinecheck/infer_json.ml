@@ -28,6 +28,7 @@ let rec path_text = function
   | IS.Param x -> "param " ^ x
   | IS.Return -> "return"
   | IS.Elem p -> path_text p ^ "/elem"
+  | IS.Arg (i, p) -> Printf.sprintf "%s/elem.%d" (path_text p) i
   | IS.Tuple (i, p) -> Printf.sprintf "%s/tuple.%d" (path_text p) i
   | IS.Lambda_param { line; col; param } -> Printf.sprintf "lambda@%d:%d/param %s" line col param
 
