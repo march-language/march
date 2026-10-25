@@ -168,9 +168,17 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
      | Some (prefix, _) -> Hashtbl.replace Refine_param.fn_defs_tbl s.IS.fn (prefix, hyp)
      | None -> ());
     Hashtbl.remove RC.abstracts_tbl s.IS.fn;
+    (* An accepted element return, or a K6 slot (a callback PARAMETER whose
+       proposal includes the element return the oracle proved), is a proved
+       element return from here on.  The K6 arm was unreachable behind the
+       [IS.Param _] case until 2026-10-25: a definer's own (any arity)
+       recursive calls and its callers then read "`f`'s own body is not
+       proved", and the prediction disagreed with the re-check. *)
+    if List.mem IS.K6 s.IS.kinds then Hashtbl.replace Refine_param.elem_ret_proved s.IS.fn ()
+    else
     match s.IS.path with
     | IS.Return | IS.Param _ | IS.Lambda_param _ -> ()
-    | p -> if IS.root p = IS.Return || List.mem IS.K6 s.IS.kinds then Hashtbl.replace Refine_param.elem_ret_proved s.IS.fn ()
+    | p -> if IS.root p = IS.Return then Hashtbl.replace Refine_param.elem_ret_proved s.IS.fn ()
   in
   let current_slot (s : IS.slot) =
     match find_fd !decls s.IS.fn with Some fd -> Some { s with IS.fd = fd } | None -> None

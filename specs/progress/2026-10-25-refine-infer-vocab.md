@@ -59,3 +59,34 @@ Tests (`infer-vocab-oct` rows 5-9, through the real driver so the whole stdlib i
 loaded). RED on the base: `pos_vals` and `pos_keys` proposed `[]`, and the apply case
 wrote nothing. Controls: a wrapper returning its input unchanged proposes nothing
 (passed before and after); the Deque pin passed before and after.
+
+## 2. Two-argument abstract refinements (K6)
+
+`Infer_slot.k6_callback_vars` accepts a curried `keep : k -> v -> Bool` (distinct type
+variables) as well as `f : a -> Bool`. `k6_returns` then offers, for a registered
+two-argument container whose arguments are exactly `k, v` in order, `T(k[p], v[p])`
+(the multi-arg sugar, phase 3). One-argument callbacks now also cover every registered
+one-argument container (`Deque.Deque(a[p])`), not only `List`/`Option`. The graft parses
+the re-spelled signature as before and then runs `Refine_abstract.expand_markers_fn` on
+it, because `check_module` expands the occurrence sugar in a pre-pass the inference
+never sees. TRUE and USEFUL are the existing K6 judgment (`k6_verdict`).
+
+**Bug found and fixed: every K6 apply reverted (exit 3).** `Refine_infer.run`'s
+`install` marked an accepted proposal's element return as proved in
+`Refine_param.elem_ret_proved` only for a non-`Param` path; a K6 slot IS a parameter
+path (the callback), so its arm was unreachable. The final prediction then read the
+definer's own recursive calls and its callers as `abstract-refinement-uninstantiated`
+("`filt`'s own body is not proved"): for a rediscovered one-argument `filter`, "predicted
+3 skipped, got 0", every edit reverted. Main has this bug (reproduced with the base
+compiler: `user skips 1 -> 3`, "if applied: 3 skipped"); the K6 unit tests never applied
+a proposal. The K6 install now marks the table.
+
+Tests (`infer-vocab-oct` rows 10-16). RED on the base: the `Assoc` `filt` proposed `None`
+(expected `k -> v -> Bool[p]` / `Assoc(k[p], v[p])`); the apply case wrote nothing;
+`dfilt` over `Deque.Deque(a)` proposed `[]`. After the candidates and before the install
+fix, the `Assoc` apply exited 3 ("predicted 3 skipped / 0 violated, got 0 skipped"); the
+one-argument apply row exits 3 on the base compiler. Controls: a1-bad (the body returns
+its input) is not proposed; a caller with no demand gets nothing for `filt`; a `Map(k, v)`
+combinator passing its callback to `Map.filter` is not proposed, because the checker does
+not prove the hand-annotated version either (`abstract-refinement-uninstantiated` at its
+own return; filed as `specs/todos/2026-10-25-refine-map-filter-two-arg-passthrough.md`).

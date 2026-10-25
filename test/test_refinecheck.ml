@@ -26812,6 +26812,14 @@ let infer_vocab_oct_suite =
     if not (Astring_contains.contains j "\"version\": 1") then Alcotest.failf "no JSON: %s" j;
     all 0 []
   in
+  let assoc =
+    "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n  fn need_apos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end\n"
+  in
+  let filt_body name =
+    Printf.sprintf
+      "  fn %s(a : Assoc(k, v), keep : k -> v -> Bool) : Assoc(k, v) do\n    match a do\n      ANil -> ANil\n      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, %s(t, keep)) else %s(t, keep) end\n    end\n  end\n"
+      name name name
+  in
   let mined_texts src ~fn =
     let dm = March_desugar.Desugar.desugar_module (parse src) in
     let decls = dm.March_ast.Ast.mod_decls in
@@ -26880,7 +26888,54 @@ let infer_vocab_oct_suite =
         Alcotest.check sp "pos_d" [ ("pos_d", "Deque.Deque({Int | _ > 0})") ] (cli_props
           (m "DQ"
              "  fn need_posd(_d : Deque.Deque({Int | _ > 0})) : Int do 0 end\n  fn pos_d(d : Deque.Deque(Int)) : Deque.Deque(Int) do Deque.filter(d, fn v -> v > 0) end\n  fn go(d : Deque.Deque(Int)) : Int do need_posd(pos_d(d)) end\n")
-          ))
+          ));
+    (* 2. Two-argument abstract refinements (K6): `keep : k -> v -> Bool`
+       over a two-argument container whose body filters entries. *)
+    gated "K6 two-argument: filt over Assoc(k, v) proposes k -> v -> Bool[p] / Assoc(k[p], v[p])" (fun () ->
+        with_infer_fixture (m "KA" (assoc ^ filt_body "filt" ^ "  fn go(a : Assoc(Int, Int)) : Int do need_apos(filt(a, fn (_k, v) -> v > 0)) end\n")) (fun fx ->
+            Alcotest.(check (option (pair string string))) "proposal" (Some ("k -> v -> Bool[p]", "Assoc(k[p], v[p])"))
+              (k6_best fx ~fn:"filt")));
+    gated "K6 two-argument control (a1-bad): a body returning its input is not proposed" (fun () ->
+        with_infer_fixture
+          (m "KB" (assoc ^ "  fn bad(a : Assoc(k, v), keep : k -> v -> Bool) : Assoc(k, v) do a end\n  fn go(a : Assoc(Int, Int)) : Int do need_apos(bad(a, fn (_k, v) -> v > 0)) end\n"))
+          (fun fx -> Alcotest.(check (option (pair string string))) "proposal" None (k6_best fx ~fn:"bad")));
+    gated "K6 two-argument control: a relation-blind caller (no demand) proposes nothing" (fun () ->
+        infer_run (m "KN" (assoc ^ filt_body "filt" ^ "  fn go(a : Assoc(Int, Int)) : Int do need_pos(1) end\n"))
+          (fun r -> Alcotest.check sp "none" [] (List.filter (fun (f, _) -> f = "filt") (props r))));
+    gated "K6 two-argument apply: both annotations written, re-check as predicted" (fun () ->
+        let src = m "KP" (assoc ^ filt_body "filt" ^ "  pfn go(a : Assoc(Int, Int)) : Int do need_apos(filt(a, fn (_k, v) -> v > 0)) end\n  fn main() : Int do go(ANil) end\n") in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ())
+                 "fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p])")));
+    gated "K6 one-argument apply: a rediscovered filter re-checks as predicted (was exit 3)" (fun () ->
+        (* The accepted K6 proposal was installed without marking its element
+           return proved, so the prediction read the definer's own recursive
+           calls and its caller as `abstract-refinement-uninstantiated`
+           ("predicted 3 skipped, got 0"): every K6 apply reverted. *)
+        let src =
+          "mod K1 do\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n  fn filt(xs : List(a), pred : a -> Bool) : List(a) do\n    match xs do\n      Nil -> Nil\n      Cons(h, t) -> if pred(h) do Cons(h, filt(t, pred)) else filt(t, pred) end\n    end\n  end\n  pfn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n  fn main() : Int do go([1]) end\nend\n"
+        in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ()) "fn filt(xs : List(a), pred : a -> Bool[p]) : List(a[p])")));
+    gated "K6 over Deque.Deque(a): a passing wrapper proposes a -> Bool[p] / Deque.Deque(a[p])" (fun () ->
+        Alcotest.check sp "dfilt" [ ("dfilt", "a -> Bool[p] / Deque.Deque(a[p])") ]
+          (cli_props
+             (m "KD"
+                "  fn need_posd(_d : Deque.Deque({Int | _ > 0})) : Int do 0 end\n  fn dfilt(d : Deque.Deque(a), pred : a -> Bool) : Deque.Deque(a) do Deque.filter(d, pred) end\n  fn go(d : Deque.Deque(Int)) : Int do need_posd(dfilt(d, fn v -> v > 0)) end\n")));
+    gated "K6 over Map(k, v) passing its callback to Map.filter: not proposed (the checker does not prove it)" (fun () ->
+        (* Pins a checker gap (specs/todos/2026-10-25-refine-map-filter-two-arg-passthrough.md):
+           the hand-annotated `mfilt` is `abstract-refinement-uninstantiated`
+           at its own return, so the oracle must reject it. *)
+        Alcotest.check sp "none" []
+          (cli_props
+             (m "KM"
+                "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn mfilt(m : Map(k, v), keep : k -> v -> Bool, cmp : k -> k -> Bool) : Map(k, v) do Map.filter(m, keep, cmp) end\n  fn go(m : Map(String, Int)) : Int do need_posmap(mfilt(m, fn _k -> fn v -> v > 0, Map.str_cmp)) end\n")))
   ]
 
 let () =

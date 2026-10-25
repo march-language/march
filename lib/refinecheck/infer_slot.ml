@@ -171,38 +171,55 @@ let respell (s : slot) ~(pred : string) : string option =
 
 (* ── K6: joint abstract-refinement candidates (design §1.2 row K6) ──────── *)
 
-(* A one-argument, uncurried callback parameter `f : a -> Bool` ([a] a type
-   variable) whose [a] appears in an element slot of the return: the shape of
-   `filter`, `find`, `take_while`, `partition`.  The body is not inspected —
-   the oracle decides; this only decides whether probes are spent. *)
-let k6_callback (t : A.ty) : string option =
+(* A callback parameter whose codomain is an unrefined `Bool` and whose
+   domains are distinct type variables: `f : a -> Bool` (the shape of
+   `filter`, `find`, `take_while`, `partition`) or, since the two-argument
+   abstract refinements (2026-10-21), the curried `keep : k -> v -> Bool` (an
+   `Assoc(k, v)`/`Map(k, v)` filter).  The body is not inspected — the oracle
+   decides; this only decides whether probes are spent.  Returns the domain
+   variables in order. *)
+let k6_callback_vars (t : A.ty) : string list option =
   match t with
-  | A.TyArrow (A.TyVar a, A.TyCon ({ A.txt = "Bool"; _ }, [])) -> Some a.A.txt
+  | A.TyArrow (A.TyVar a, A.TyCon ({ A.txt = "Bool"; _ }, [])) -> Some [ a.A.txt ]
+  | A.TyArrow (A.TyVar k, A.TyArrow (A.TyVar v, A.TyCon ({ A.txt = "Bool"; _ }, []))) when k.A.txt <> v.A.txt ->
+    Some [ k.A.txt; v.A.txt ]
   | _ -> None
 
 type k6_shape = { k6_param : string; k6_callback : string; k6_return : string }
 
-let k6_returns (a : string) (ret : A.ty) : string list =
-  let is_a = function A.TyVar v -> v.A.txt = a | _ -> false in
-  let pa = Printf.sprintf "%s[p]" a and np = Printf.sprintf "{%s | !p(_)}" a in
-  match ret with
-  | A.TyCon ({ A.txt = "List"; _ }, [ e ]) when is_a e -> [ Printf.sprintf "List(%s)" pa ]
-  | A.TyCon ({ A.txt = "Option"; _ }, [ e ]) when is_a e -> [ Printf.sprintf "Option(%s)" pa ]
-  | A.TyTuple [ A.TyCon ({ A.txt = "List"; _ }, [ e1 ]); A.TyCon ({ A.txt = "List"; _ }, [ e2 ]) ]
-    when is_a e1 && is_a e2 ->
-    [ Printf.sprintf "(List(%s), List(%s))" pa np;
-      Printf.sprintf "(List(%s), List(%s))" pa a;
-      Printf.sprintf "(List(%s), List(%s))" a np ]
+(* The return re-spelled with the abstract refinement, per domain shape.
+   One variable [a]: `List(a[p])`, `Option(a[p])`, any other registered
+   one-argument container `T(a[p])` (`Deque.Deque`), and the partition
+   2-tuples.  Two variables [k; v]: a registered two-argument container whose
+   arguments are exactly `k, v` in order, `T(k[p], v[p])` (the multi-arg
+   sugar, phase 3). *)
+let k6_returns (vars : string list) (ret : A.ty) : string list =
+  let is_var a = function A.TyVar v -> v.A.txt = a | _ -> false in
+  match vars with
+  | [ a ] -> (
+    let pa = Printf.sprintf "%s[p]" a and np = Printf.sprintf "{%s | !p(_)}" a in
+    match ret with
+    | A.TyCon ({ A.txt = c; _ }, [ e ]) when is_var a e && is_container c -> [ Printf.sprintf "%s(%s)" c pa ]
+    | A.TyTuple [ A.TyCon ({ A.txt = "List"; _ }, [ e1 ]); A.TyCon ({ A.txt = "List"; _ }, [ e2 ]) ]
+      when is_var a e1 && is_var a e2 ->
+      [ Printf.sprintf "(List(%s), List(%s))" pa np;
+        Printf.sprintf "(List(%s), List(%s))" pa a;
+        Printf.sprintf "(List(%s), List(%s))" a np ]
+    | _ -> [])
+  | [ k; v ] -> (
+    match ret with
+    | A.TyCon ({ A.txt = c; _ }, [ e1; e2 ]) when is_var k e1 && is_var v e2 && is_container c ->
+      [ Printf.sprintf "%s(%s[p], %s[p])" c k v ]
+    | _ -> [])
   | _ -> []
 
 let k6_shapes (s : slot) : k6_shape list =
   match s.path, s.fd.A.fn_ret_ty with
   | Param f, Some ret -> (
-    match k6_callback s.base with
-    | Some a ->
-      List.map
-        (fun r -> { k6_param = f; k6_callback = Printf.sprintf "%s -> Bool[p]" a; k6_return = r })
-        (k6_returns a ret)
+    match k6_callback_vars s.base with
+    | Some vars ->
+      let cb = String.concat " -> " vars ^ " -> Bool[p]" in
+      List.map (fun r -> { k6_param = f; k6_callback = cb; k6_return = r }) (k6_returns vars ret)
     | None -> [])
   | _ -> []
 
@@ -211,8 +228,8 @@ let k6_slots ~(fn : string) (fd : A.fn_def) : slot list =
   | Some c, Some ret when not (excluded fd) ->
     List.filter_map
       (fun (n, t) ->
-        match k6_callback t with
-        | Some a when k6_returns a ret <> [] -> Some { fn; fd; path = Param n; base = t; kinds = [ K6 ] }
+        match k6_callback_vars t with
+        | Some vars when k6_returns vars ret <> [] -> Some { fn; fd; path = Param n; base = t; kinds = [ K6 ] }
         | _ -> None)
       (PI.named_params c)
   | _ -> []
@@ -250,6 +267,10 @@ end
       | m -> (
         match m.A.mod_decls with
         | [ A.DFn (g, _) ] -> (
+          (* The occurrence sugar `T(k[p], v[p])` of a two-argument definer
+             is expanded to its long form by [Refine_check.check_module]'s
+             pre-pass; a grafted signature must be expanded the same way. *)
+          let g = Refine_abstract.expand_markers_fn g in
           match first_clause g with
           | None -> None
           | Some gc ->
