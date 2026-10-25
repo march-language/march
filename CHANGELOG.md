@@ -312,6 +312,52 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`String.slice` with a negative start no longer reads out of bounds in wasm-compiled programs.**
+  The wasm runtime's `march_string_slice` did not clamp a negative `start` and read before
+  the string's buffer; it now clamps exactly like the native runtime and the interpreter
+  (negative start -> 0, start past the end -> empty, negative length -> 0, over-long length
+  stops at the end).
+
+- **Refinements: a module-qualified container keeps its element fact.** `d :
+  Deque.Deque({Int | _ > 0})` and `q : Queue.Queue({Int | _ > 0})` were no element
+  source, so `sum_pos(Deque.to_list(d))` and `sum_pos(Queue.to_list(q))` were
+  `parametric-source-unproved` skips, and so was `sum_pos(Deque.to_list(dfilter(d,
+  fn y -> y > 0)))` for a user `dfilter : … -> Deque.Deque(a[p])`. A qualified name
+  `M.T` now resolves to its declaration when exactly one module declares `T` and `M`
+  names it; all three are proved. An ambiguous `T` is still unknown (a skip).
+- **Refinements: a recursive local `fn` proves its element return through its own
+  self-call.** `find_index`'s shape, a local `go(lst, i : {Int | _ >= 0}) :
+  Option({Int | _ >= 0})` whose tails are `None`, `Some(i)` and `go(t, i + 1)`, was
+  three `unreflectable-subject` skips (`return of go`, `return of` the enclosing
+  function, and the `Some(i) -> need_nn(i)` use). A self-call with a structural
+  argument (`t` from `Cons(h, t)` of `lst`) now carries the declared return, the rule
+  a top-level function already had, and only after the local's return is proved with
+  it, so a `Some(0 - 1)` tail is still a violation and lends nothing. The same holds
+  for a recursive local returning `List({…})`. `--refine-infer` now proposes the
+  `Option` return.
+- **Refinements: a `List.filter` lambda may capture the caller's variables.**
+  `fn small(xs : List(Int), n : Int) : List({Int | _ < n}) do List.filter(xs, fn y
+  -> y < n) end` was an `abstract-refinement-uninstantiated` skip at its return, and
+  `small(ys, 10)` an `unreflectable-subject` skip at the call. Both are proved now,
+  and so is `sum_lt10(List.filter(xs, fn y -> y < k))` with `k : {Int | _ <= 10}`.
+  An abstract refinement's lambda may mention a local of the call (a parameter,
+  `let`, lambda parameter or `match` binder); the element fact names it and is
+  read in the caller's scope. A module-level name is still declined, and so is a
+  `let`-bound lambda or result whose captured variable is rebound before its use.
+  A capture over an unconstrained variable (`fn y -> y > m`, `m : Int`) is now a
+  `solver-undecided` skip instead of `abstract-refinement-uninstantiated`.
+  `--refine-infer` now proposes the `small` return.
+- **Refinements: a length contract on a list return is now checked whatever the body
+  looks like.** `fn f(xs : List(Int)) : {List(Int) | len(_) == len(xs) + 5} do xs end`
+  used to pass with no error and no obligation in `--refine-report`: only a body that
+  was a constructor or one `match` on a parameter was checked. A bare variable, a
+  `let`, an `if`, a call or a `match` on anything else is now checked tail by tail, so
+  that false contract is reported (`but f([]) returns [].`) and the true
+  `len(_) == len(xs)` is proved. A mixed `elts(_) == elts(xs) && len(_) == len(xs)`
+  contract now proves too, where it used to be undecided. A list or datatype return
+  contract the checker cannot prove is a recorded skip, and inside `cap verified` it is
+  now an error (it used to pass silently there). A refined return the checker does not
+  model at all, such as a guarded clause, is a recorded skip instead of nothing.
 - **Refinements: return contracts compose through calls.** A return whose tail is a
   call now uses the callee's proved (or `@[assume]`d) return:
   `fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end` proves from `a`'s

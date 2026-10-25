@@ -1,0 +1,30 @@
+-- string_slice clamping, interpreter vs compiled, one golden.
+--
+-- The wasm runtime (runtime/march_runtime_wasm.c) once failed to clamp a
+-- negative `start` and read before the string's buffer.  CI cannot build that
+-- C file here, so this fixture pins the semantics wasm must match: native
+-- (runtime/march_runtime.c) and the interpreter (eval_builtins.ml) agree.
+--   negative start -> 0      start past the end -> end (empty result)
+--   negative len   -> 0      len past the end   -> stops at the end
+-- Offsets are BYTES ("é" is 2 bytes).
+mod Main do
+  needs IO.Console
+  pfn emit(label : String, s : String) : Unit do
+    println(label ++ "=[" ++ s ++ "]")
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    let s = "hello"
+    emit("neg_start", string_slice(s, -1, 3))
+    emit("neg_start_far", string_slice(s, -1000, 2))
+    emit("neg_start_long", string_slice(s, -3, 100))
+    emit("past_end", string_slice(s, 9, 2))
+    emit("at_end", string_slice(s, 5, 2))
+    emit("neg_len", string_slice(s, 1, -4))
+    emit("zero_len", string_slice(s, 1, 0))
+    emit("long_len", string_slice(s, 2, 1000))
+    emit("mid", string_slice(s, 1, 3))
+    emit("empty_src", string_slice("", -2, 5))
+    println(int_to_string(string_byte_length(string_slice("é", 0, 1))))
+  end
+end

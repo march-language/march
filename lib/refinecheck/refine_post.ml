@@ -878,6 +878,21 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
       then Some (Smt.App (strlen_fn, [ tail_term ]))
       (* `elts(_)` over a list return IS the tail's set term. *)
       else if list_ret && m = elts_measure && (name = binder || name = "_") then Some tail_term
+      (* …and `len(_)` (a mixed `elts && len` contract) is the TAIL's length,
+         not a fresh unconstrained constant: a returned name's own `len`
+         constant, `1 + len(t)` per `Cons`, 0 for `Nil`, a call's proved
+         contract.  Anything else keeps the fresh constant (weaker). *)
+      else if list_ret && m = "len" && (name = binder || name = "_") then
+        let rec len_of (e : A.expr) : Smt.term option =
+          match e with
+          | A.EVar { A.txt = x; _ } -> resolve_measure "len" x
+          | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (Smt.IntLit 0)
+          | A.ECon ({ A.txt = "Cons"; _ }, [ _; t ], _) ->
+            Option.map (fun l -> Smt.Add (Smt.IntLit 1, l)) (len_of t)
+          | A.EApp (A.EVar { A.txt = f; _ }, cargs, _) -> measure_of_call "len" f cargs
+          | _ -> None
+        in
+        (match len_of tail_e with Some _ as r -> r | None -> resolve_measure m name)
       else resolve_measure m name
     in
     (match
@@ -1094,7 +1109,14 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
    Everything outside a narrow, recognised shape returns false (= not proven =
    skipped): several clauses, a clause guard, a catch-all arm, a nested pattern,
    a binder that shadows a parameter, a sort we cannot pin down.  Skipping costs
-   completeness; guessing would cost correctness. *)
+   completeness; guessing would cost correctness.
+
+   Superseded in part since this was written: a refutation the interpreter
+   reproduces IS reported ([settle_refutation]); every shape records its
+   verdict; a body outside Shapes 1-2 is checked tail by tail without an IH
+   (Shape 3); a declined signature records a named skip; and [record_tier2]
+   escalates a skip under `cap verified` (2026-10-24).  A skip still emits
+   nothing outside `cap verified`. *)
 
 (* The SMT sort of a DECLARED March type; None when the checker has no model. *)
 let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
@@ -1274,10 +1296,10 @@ let rec inline_lets (e : A.expr) : A.expr option =
 let induction_body (e : A.expr) : A.expr =
   match inline_lets e with Some b -> b | None -> e
 
-(* Does [check_post_induction] reach a body shape it checks (Shape 1 or
-   Shape 2), rather than its final `| _ -> false`?  Solver-free, for
-   [Refine_audit]: [post_induction_shape] alone accepts the signature
-   whatever the body is. *)
+(* Does [check_post_induction] reach a body shape it checks BY INDUCTION
+   (Shape 1 or Shape 2), rather than Shape 3's induction-free tail walk?
+   Solver-free.  Gates the `elts` path's induction attempt only; what the
+   audit asks ("is it checked at all") is [return_refinement_checked]. *)
 let post_induction_checks (fd : A.fn_def) : bool =
   match post_induction_shape fd with
   | None -> false
@@ -1288,12 +1310,67 @@ let post_induction_checks (fd : A.fn_def) : bool =
       induction_match_adt c sv.A.txt <> None
     | _ -> false)
 
+(* Record one Tier 2 postcondition verdict, exactly as [check_post]'s [note]
+   does for the direct path: `@[trusted]` accepts a skip, and `cap verified`
+   escalates one to an error.  Tier 2 used to record its ledger entry and
+   stop there, so an unproved list/ADT contract inside `cap verified`
+   compiled in silence (2026-10-24).  Gated on [record], which the caller
+   threads from [emit], so the propagation pre-pass neither counts nor
+   reports. *)
+let record_tier2 ~record errctx (fd : A.fn_def) (pred : A.expr) (v : Obligation.verdict) : unit =
+  if record then begin
+    let v = match v with Obligation.Skipped _ when !trusted_fn -> Obligation.Trusted | _ -> v in
+    Obligation.record
+      { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
+      ; predicate = pred_str pred; verdict = v; kind = Obligation.Postcondition; inst = None };
+    match v with
+    | Obligation.Skipped r when !strict_verified ->
+      Err.error ~code:Err.Code.refinement_unverified errctx ~span:fd.A.fn_name.A.span
+        (Printf.sprintf
+           "`cap verified` module: cannot verify return type constraint `%s` on `%s` (%s: %s)\n%s"
+           (pred_str pred) fd.A.fn_name.A.txt (Obligation.reason_name r)
+           (Obligation.reason_detail r)
+           "note: strengthen the return expression so the checker can see it satisfies this \
+            contract, rewrite the predicate into the fragment the checker supports, or remove \
+            `cap verified` from this module — it asks for every obligation to be discharged")
+    | _ -> ()
+  end
+
+(* Why [post_induction_shape] declined a REFINED return, as a recorded skip
+   reason: a return refinement no path checks must still file an obligation
+   (2026-10-24), or `--refine-report` cannot tell it from no contract. *)
+let tier2_declined_reason (fd : A.fn_def) (pred : A.expr) : Obligation.reason =
+  let self = fd.A.fn_name.A.txt in
+  match fd.A.fn_clauses with
+  | [] | _ :: _ :: _ ->
+    Obligation.Unreflectable_subject
+      (Printf.sprintf
+         "the return expression of `%s` (a definition of %d clauses; the induction path models one)"
+         self (List.length fd.A.fn_clauses))
+  | [ c ] when c.A.fc_guard <> None ->
+    Obligation.Unreflectable_subject
+      (Printf.sprintf "the return expression of `%s` (a guarded clause; the induction path models none)" self)
+  | [ c ] -> (
+    let binder = match fd.A.fn_ret_ty with Some (A.TyRefine (_, b, _)) -> binder_name b | _ -> "_" in
+    match classify_pred binder (List.map param_name_of c.A.fc_params) pred with
+    | Unusable -> Obligation.Unreflectable_predicate (pred_str pred, None)
+    | Closed | Relational _ ->
+      Obligation.Unreflectable_subject
+        (Printf.sprintf
+           "the return expression of `%s` (its return type has no measure or datatype the checker declares)"
+           self))
+
 let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_def) : bool =
   let self = fd.A.fn_name.A.txt in
   let dummy_span = fd.A.fn_name.A.span in
   let evar x = A.EVar { A.txt = x; A.span = dummy_span } in
   match post_induction_shape fd with
-  | None -> false
+  | None ->
+    (match Option.map unlinear fd.A.fn_ret_ty with
+     | Some (A.TyRefine (_, _, pred)) ->
+       record_tier2 ~record errctx fd pred (Obligation.Skipped (tier2_declined_reason fd pred))
+     | _ -> ());
+    false
   | Some (ret_adt, binder, params, pred, c, ps) ->
       (* The positive-goal models of every tail [check_tail] REFUTED, as
          candidate counterexamples for [settle_refutation]. *)
@@ -1752,6 +1829,59 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                     end
                     else Some (Obligation.Skipped Obligation.Solver_undecided))
       in
+      (* ── Shape 3: any other body, tail by tail, with NO induction ─────────
+         A bare parameter, a `let`, an `if`, a call, a match on something
+         that is not a declared-ADT parameter: each return position is
+         checked by [check_tail] with no [mctx], so no induction hypothesis
+         can ever be assumed (a self-call is an unconstrained constant) and
+         no pattern equation is asserted (an inner match's binders are free
+         constants: weaker, never wrong).  Before 2026-10-24 every such body
+         fell through to `false` and filed NOTHING, so `fn f(xs) : {List(Int)
+         | len(_) == len(xs) + 5} do xs end` passed in silence.  A tail under
+         an inner binder that reuses a parameter's name is renamed apart
+         ([inner_name]), as [check_fn_post_verdict] does; one the renaming
+         cannot complete is a recorded skip.  ONE obligation per function,
+         like Shape 2: proved iff every tail is. *)
+      let shape3 (body : A.expr) : bool =
+        let verdicts =
+          List.map
+            (fun (path, t, bound) ->
+              let clash = List.sort_uniq compare (List.filter (fun n -> List.mem n params) bound) in
+              let env = List.map (fun n -> (n, inner_name n)) clash in
+              match rename_free_checked env t with
+              | _, false ->
+                Obligation.Skipped
+                  (Obligation.Unreflectable_subject
+                     (Printf.sprintf
+                        "the return expression of `%s` under an inner binding that rebinds `%s`" self
+                        (String.concat "`, `" clash)))
+              | t', true -> (
+                match check_tail ~mctx:None ~pat:None ~refute:record (rename_path clash path, t') with
+                | Some v -> v
+                | None ->
+                  let rendered = pred_str t in
+                  Obligation.Skipped
+                    (Obligation.Unreflectable_subject
+                       (if rendered <> "<predicate>" then
+                          Printf.sprintf "the return expression `%s`" rendered
+                        else Printf.sprintf "the return expression of `%s`" self))))
+            (tails_bound [] [] body)
+        in
+        let ok = verdicts <> [] && List.for_all (fun v -> v = Obligation.Proved) verdicts in
+        let v =
+          if ok then Obligation.Proved
+          else if not record then Obligation.Skipped Obligation.Solver_undecided
+          else if List.mem Obligation.Violated verdicts then settle_refutation ()
+          else
+            match List.find_opt (fun v -> v <> Obligation.Proved) verdicts with
+            | Some v -> v
+            | None ->
+              Obligation.Skipped
+                (Obligation.Unreflectable_subject (Printf.sprintf "the return expression of `%s`" self))
+        in
+        record_tier2 ~record errctx fd pred v;
+        ok
+      in
       (match induction_body c.A.fc_body with
       (* ── Shape 1: a constructor-literal body ───────────────────────────────
          The simplest possible case, and one that needs no induction at all:
@@ -1800,16 +1930,10 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
             Obligation.Skipped (Obligation.Unreflectable_subject body_display)
         in
         let v = if record && v = Obligation.Violated then settle_refutation () else v in
-        if record then
-          Obligation.record
-            { Obligation.span = fd.A.fn_name.A.span
-            ; callee = self
-            ; predicate = pred_str pred
-            ; verdict = v
-            ; kind = Obligation.Postcondition; inst = None };
+        record_tier2 ~record errctx fd pred v;
         v = Obligation.Proved
       (* ── Shape 2: one clause whose whole body matches on a parameter ─────── *)
-      | A.EMatch (A.EVar sv, branches, _) when List.mem sv.A.txt params -> (
+      | A.EMatch (A.EVar sv, branches, _) as mbody when List.mem sv.A.txt params -> (
         let mparam = sv.A.txt in
         let mparam_idx =
           let rec ix i = function
@@ -1819,7 +1943,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
           ix 0 params
         in
         match induction_match_adt c mparam with
-        | None -> false
+        | None -> shape3 mbody
         | Some madt ->
           begin
             (* Structurally smaller variables, computed over the WHOLE clause
@@ -1956,16 +2080,11 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                   | Some v -> v
                   | None -> unbuilt ()
               in
-              Obligation.record
-                { Obligation.span = fd.A.fn_name.A.span
-                ; callee = self
-                ; predicate = pred_str pred
-                ; verdict = v
-                ; kind = Obligation.Postcondition; inst = None }
+              record_tier2 ~record errctx fd pred v
             end;
             ok
           end)
-      | _ -> false)
+      | body -> shape3 body)
 
 (* =================================================================
    §18 Function-level postcondition entry points and gating
@@ -2012,15 +2131,19 @@ let assumed_return (fd : A.fn_def) : A.expr option =
    file an obligation or produce a verdict — rather than fall through to a
    path that silently files nothing?  The same routing, solver-free, so
    [Refine_audit] cannot report Enforced for a contract the checker never
-   looks at (a `{List(Int) | len(_) > 0}` return with no list measure, or a
-   Tier 2 match on an unannotated parameter). *)
+   looks at.  Since 2026-10-24 Tier 2 checks EVERY body of a signature
+   [post_induction_shape] accepts (Shape 3 walks the tails a constructor
+   literal or a parameter match does not cover), so only a signature it
+   declines -- several clauses, a guard, an unusable predicate, a return
+   type with no declared measure -- is unchecked, and that one now files a
+   recorded skip instead of nothing. *)
 let return_refinement_checked (fd : A.fn_def) : bool =
   (is_assumed fd && assumed_return fd <> None)
   ||
   match return_refine_ext fd with
-  | None -> post_induction_checks fd
+  | None -> post_induction_shape fd <> None
   | Some (_, ret_pred, Some marker) when is_meas_sort marker && not (pred_mentions_elts ret_pred) ->
-    post_induction_checks fd
+    post_induction_shape fd <> None
   | Some _ -> true
 
 let rec check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =

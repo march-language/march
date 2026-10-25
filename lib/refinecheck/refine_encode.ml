@@ -1578,8 +1578,30 @@ let adt_decl_paths : (string, (string * string) list) Hashtbl.t = Hashtbl.create
    no colliding declarations, i.e. unchanged status quo. *)
 let adt_canonical : (string, string) Hashtbl.t = Hashtbl.create 8
 
+(* A MODULE-QUALIFIED spelling of a registered variant type (`Deque.Deque`
+   in a user's annotation, beside the `Deque` its own module writes), as the
+   bare name its declaration is filed under (Deque gap, 2026-10-24; todo
+   2026-10-21-refine-qualified-container-param-entry, now in specs/progress/ as
+   2026-10-24-refine-qualified-container-param-entry.md).  Only when the
+   resolution is certain: exactly ONE module path declares that bare name
+   anywhere ([adt_decl_paths]) and the qualifier is that path or a suffix of
+   it (`Dk.Dk` written inside `PQual` for `PQual.Dk`).  Anything else — an
+   ambiguous bare name, a qualifier naming another module, an unregistered
+   type — is returned unchanged, i.e. stays unknown, as before. *)
+let canonical_type_name (name : string) : string =
+  match String.rindex_opt name '.' with
+  | None -> name
+  | Some i ->
+    let q = String.sub name 0 i and t = String.sub name (i + 1) (String.length name - i - 1) in
+    (match Hashtbl.find_opt adt_decl_paths ("M_" ^ t) with
+     | Some entries ->
+       (match List.sort_uniq compare (List.map fst entries) with
+        | [ path ] when path = q || String.ends_with ~suffix:("." ^ q) path -> t
+        | _ -> name)
+     | None -> name)
+
 let adt_sort_name (march_name : string) : string =
-  let bare = "M_" ^ march_name in
+  let bare = "M_" ^ canonical_type_name march_name in
   match Hashtbl.find_opt adt_canonical bare with Some key -> key | None -> bare
 
 (* W4, ENTRY SHAPE (multi-arg design 2026-10-18 §1.4, §2.2): can a relation
