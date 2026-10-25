@@ -107,6 +107,11 @@ let rec sorted_for (k : PI.kind) (e : A.expr) : bool =
 let admissible_text (s : IS.slot) (c : PI.candidate) : bool =
   let e = c.PI.c_pred A.dummy_span in
   let allowed = "_" :: scope_names s in
+  (* A predicate that does not mention the value (`true`, the House
+     predicate of a relation's free slot `{x : Int | true}`) says nothing
+     about it; installed it can still "close" a slot's `true` sub-goal at a
+     caller, which is no contract. *)
+  List.mem "_" (names_of [] e) &&
   (List.mem IS.K6 s.IS.kinds || sorted_for (PI.kind_of_ty s.IS.base) e) &&
   List.for_all (fun n -> List.mem n allowed) (names_of [] e)
   && List.for_all
@@ -174,7 +179,7 @@ let flip = function "<" -> ">" | "<=" -> ">=" | ">" -> "<" | ">=" -> "<=" | op -
 let body (s : IS.slot) : string list =
   let params = match s.IS.fd.A.fn_clauses with c :: _ -> List.map fst (PI.named_params c) | [] -> [] in
   let binders = ref [] in
-  let elem = match s.IS.path with IS.Elem _ -> true | _ -> false in
+  let elem = match s.IS.path with IS.Elem _ | IS.Arg _ -> true | _ -> false in
   let rec lam_params (e : A.expr) =
     match e with
     | A.ELam (ps, b, _) -> List.iter (fun (p : A.param) -> binders := p.A.param_name.A.txt :: !binders) ps; lam_params b
@@ -220,6 +225,105 @@ let body (s : IS.slot) : string list =
   List.iter (fun (c : A.fn_clause) -> walk c.A.fc_body) s.IS.fd.A.fn_clauses;
   List.rev !out
 
+(* Relational scalar returns (the G1 shape, checked since 2026-10-24): for a
+   scalar return slot, `_ OP x` over a parameter [x] of the return's own sort,
+   read off the body's TAILS — never the whole cross product of parameters
+   and operators.  A tail
+     `x`              gives `_ >= x`, `_ <= x`, `_ == x`;
+     `x + c` (c > 0)  gives `_ > x`, `_ >= x`, `_ == x + c`;
+     `x - c` (c > 0)  gives `_ < x`, `_ <= x`, `_ == x - c`;
+     `x + y`, `x - y` gives `_ == x + y`, `_ == x - y` (both parameters).
+   Inequalities first, then equalities; at most [rel_return_cap].  Only for a
+   function with an in-unit caller: a return is USEFUL only where a caller's
+   site closes, so without one every probe would be wasted. *)
+let rel_return_cap = 4
+
+(* A demand a return could meet: an unsettled obligation in the body of a
+   function that calls [s]'s function (by name, over-approximate).  A return
+   is USEFUL only by closing such a site, so without one every probe is
+   wasted.  Measured on `test/native` (2026-10-25): without this gate the
+   relational returns and the per-argument `Result(a, e)` return slots cost
+   +0.4x aggregate time and proposed nothing. *)
+let caller_has_skip (s : IS.slot) ~(ledger : Ob.t list) ~(unit_decls : A.decl list) : bool =
+  (* Spans first, bodies last: the unit includes the stdlib, and walking
+     every body for a call (as [PI.fn_calls] does) per slot cost seconds per
+     file; only a function that holds a skip is walked. *)
+  let skips = List.filter (fun (o : Ob.t) -> match o.Ob.verdict with Ob.Skipped _ -> true | _ -> false) ledger in
+  skips <> []
+  &&
+  let name = s.IS.fd.A.fn_name.A.txt in
+  List.exists
+    (fun (_, (g : A.fn_def)) ->
+      g != s.IS.fd
+      && List.exists
+           (fun (o : Ob.t) -> List.exists (fun (c : A.fn_clause) -> within c.A.fc_span o.Ob.span) g.A.fn_clauses)
+           skips
+      && PI.fn_calls name g)
+    (PI.enum_fns [] unit_decls)
+
+(* A skip in [s]'s own body: the only place a precondition can close one. *)
+let body_has_skip (s : IS.slot) ~(ledger : Ob.t list) : bool =
+  List.exists
+    (fun (o : Ob.t) ->
+      match o.Ob.verdict with
+      | Ob.Skipped _ -> List.exists (fun (c : A.fn_clause) -> within c.A.fc_span o.Ob.span) s.IS.fd.A.fn_clauses
+      | _ -> false)
+    ledger
+
+let rel_returns (s : IS.slot) ~(ledger : Ob.t list) ~(unit_decls : A.decl list) : string list =
+  match s.IS.path, s.IS.fd.A.fn_clauses with
+  | IS.Return, c :: _ when (match PI.kind_of_ty s.IS.base with PI.KInt | PI.KFloat -> true | _ -> false) ->
+    let k = PI.kind_of_ty s.IS.base in
+    let same = List.filter_map (fun (n, t) -> if PI.kind_of_ty t = k then Some n else None) (PI.named_params c) in
+    if same = [] || not (caller_has_skip s ~ledger ~unit_decls) then []
+    else begin
+      let rec tails (e : A.expr) : A.expr list =
+        match e with
+        | A.EBlock (es, _) -> (match List.rev es with x :: _ -> tails x | [] -> [])
+        | A.EIf (_, t, f, _) -> tails t @ tails f
+        | A.EMatch (_, brs, _) -> List.concat_map (fun (br : A.branch) -> tails br.A.branch_body) brs
+        | A.EAnnot (x, _, _) -> tails x
+        | e -> [ e ]
+      in
+      let param = function A.EVar { A.txt; _ } when List.mem txt same -> Some txt | _ -> None in
+      let pos_lit = function
+        | A.ELit (A.LitInt n, _) when n > 0 -> true
+        | A.ELit (A.LitFloat f, _) when f > 0.0 -> true
+        | _ -> false
+      in
+      let ineq = ref [] and eq = ref [] in
+      let add r t = if not (List.mem t !r) then r := !r @ [ t ] in
+      let lit e = Refine_scope.pred_str e in
+      List.iter
+        (fun (t : A.expr) ->
+          match t with
+          | A.EVar _ -> (
+            match param t with
+            | Some x -> add ineq (Printf.sprintf "_ >= %s" x); add ineq (Printf.sprintf "_ <= %s" x); add eq (Printf.sprintf "_ == %s" x)
+            | None -> ())
+          | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> (
+            match param a, param b with
+            | Some x, Some y -> add eq (Printf.sprintf "_ == %s + %s" x y)
+            | Some x, None when pos_lit b ->
+              add ineq (Printf.sprintf "_ > %s" x); add ineq (Printf.sprintf "_ >= %s" x);
+              add eq (Printf.sprintf "_ == %s + %s" x (lit b))
+            | None, Some x when pos_lit a ->
+              add ineq (Printf.sprintf "_ > %s" x); add ineq (Printf.sprintf "_ >= %s" x);
+              add eq (Printf.sprintf "_ == %s + %s" x (lit a))
+            | _ -> ())
+          | A.EApp (A.EVar { A.txt = "-"; _ }, [ a; b ], _) -> (
+            match param a, param b with
+            | Some x, Some y -> add eq (Printf.sprintf "_ == %s - %s" x y)
+            | Some x, None when pos_lit b ->
+              add ineq (Printf.sprintf "_ < %s" x); add ineq (Printf.sprintf "_ <= %s" x);
+              add eq (Printf.sprintf "_ == %s - %s" x (lit b))
+            | _ -> ())
+          | _ -> ())
+        (List.concat_map (fun (c : A.fn_clause) -> tails c.A.fc_body) s.IS.fd.A.fn_clauses);
+      List.filteri (fun i _ -> i < rel_return_cap) (!ineq @ !eq)
+    end
+  | _ -> []
+
 let fixed (s : IS.slot) : PI.candidate list =
   let measurable =
     match s.IS.fd.A.fn_clauses with
@@ -261,7 +365,15 @@ let mine_full (s : IS.slot) ~(ledger : Ob.t list) ~(unit_decls : A.decl list) : 
       (List.filter (fun c -> admissible_text s c.c) all)
   in
   let n = List.length uniq in
-  if n > cap then (List.filteri (fun i _ -> i < cap) uniq, true) else (uniq, false)
+  let kept, truncated = if n > cap then (List.filteri (fun i _ -> i < cap) uniq, true) else (uniq, false) in
+  (* The relational returns have their own allowance on top of the cap, so
+     they never displace a candidate the other sources supplied. *)
+  let rel =
+    List.filter
+      (fun c -> admissible_text s c.c && not (List.exists (fun k -> k.c.PI.c_text = c.c.PI.c_text) kept))
+      (of_texts Body (rel_returns s ~ledger ~unit_decls))
+  in
+  (kept @ rel, truncated)
 
 let mine s ~ledger ~unit_decls = fst (mine_full s ~ledger ~unit_decls)
 
@@ -275,16 +387,20 @@ let implies_cache : (string, bool) Hashtbl.t = Hashtbl.create 64
 let implies ~(root : string) ~(scope : (string * A.ty) list) ~(base : A.ty) (c1 : string) (c2 : string) : bool =
   let ty_s t = Option.value (IS.render IS.Return t) ~default:"Int" in
   let base_s = ty_s base in
-  let extra = String.concat "" (List.map (fun (n, t) -> Printf.sprintf ", %s : %s" n (ty_s t)) scope) in
-  let args = String.concat "" (List.map (fun (n, _) -> ", " ^ n) scope) in
+  (* The scope names come BEFORE `v`: a refinement may name only an earlier
+     parameter (a later one leaves `v` an unconstrained subject, and every
+     relational implication was then "not proved", so relational candidates
+     were never ordered; found 2026-10-25). *)
+  let extra = String.concat "" (List.map (fun (n, t) -> Printf.sprintf "%s : %s, " n (ty_s t)) scope) in
+  let args = String.concat "" (List.map (fun (n, _) -> n ^ ", ") scope) in
   let key = String.concat "\x00" [ base_s; extra; c1; c2 ] in
   match Hashtbl.find_opt implies_cache key with
   | Some b -> b
   | None ->
     let src =
       Printf.sprintf
-        "mod InferImp do\n  fn __infer_imp_need__(v : {%s | %s}%s) : Int do 0 end\n  fn __infer_imp_probe__(v : {%s | %s}%s) : Int do __infer_imp_need__(v%s) end\nend\n"
-        base_s c2 extra base_s c1 extra args
+        "mod InferImp do\n  fn __infer_imp_need__(%s__infer_imp_v__ : {%s | %s}) : Int do 0 end\n  fn __infer_imp_probe__(%s__infer_imp_v__ : {%s | %s}) : Int do __infer_imp_need__(%s__infer_imp_v__) end\nend\n"
+        extra base_s c2 extra base_s c1 args
     in
     let b =
       match March_parser.Parse.module_of_lexbuf (Lexing.from_string src) with

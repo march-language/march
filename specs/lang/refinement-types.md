@@ -4009,19 +4009,28 @@ user code. It covers every kind of refinement the checker can verify:
 | Kind | Example proposal |
 |---|---|
 | scalar parameter / return | `b : {Int \| _ != 0}`, `: {Int \| _ > 0}` |
-| relational | `i : {Int \| _ < n}` (a demand a callee makes, re-spelled in the caller) |
-| element parameter / return | `xs : List({Int \| _ > 0})`, `: (List({Int \| _ > 0}), Int)` |
-| abstract | `pred : a -> Bool[p]` with `: List(a[p])`, `Option(a[p])`, or `partition`'s `(List(a[p]), List({a \| !p(_)}))` |
-| fold accumulator | `fn (acc : {Int \| _ > 0}, x) -> …` |
+| relational | `i : {Int \| _ < n}` (a demand a callee makes, re-spelled in the caller); a return over a parameter, `inc(x : Int) : {Int \| _ > x}` |
+| element parameter / return | `xs : List({Int \| _ > 0})`, `: (List({Int \| _ > 0}), Int)`, each slot of a `Map` (`: Map(String, {Int \| _ > 0})`), `Deque.Deque({Int \| _ > 0})` |
+| relational element | `: Assoc({x : Int \| true}, {y : Int \| y > x})`, when a caller demands exactly that type |
+| abstract | `pred : a -> Bool[p]` with `: List(a[p])`, `Option(a[p])`, `Deque.Deque(a[p])`, or `partition`'s `(List(a[p]), List({a \| !p(_)}))`; two arguments, `keep : k -> v -> Bool[p]` with `: Assoc(k[p], v[p])` |
+| fold accumulator | `fn (acc : {Int \| _ > 0}, x) -> …`, a `fold_right` step's `fn (x, acc : …)`, any literal or `Int`/`Float` parameter as the initial value |
 
 **Where candidates come from.** The program is mined first:
 
 - the predicate a skipped obligation asks for;
 - refinements already written in signatures the function can see;
-- comparisons in its body.
+- comparisons in its body, and, for a scalar return, the relation its tail
+  has to a parameter: a tail `x + 1` offers `_ > x`, `_ >= x` and
+  `_ == x + 1`, a tail `x - 1` offers `_ < x`, `_ <= x` and `_ == x - 1`,
+  and a tail `x + y` offers `_ == x + y` (at most four, and only when the
+  function has a caller in the unit).
 
 Only then are candidates taken from the fixed grammar. Each slot gets at most
-12, weakest first by implication.
+12, weakest first by implication (the relational returns come on top). A
+predicate that does not mention the value (`true`) is never a candidate. A
+relation between two slots of a container (`Assoc({x : Int | true}, {y : Int |
+y > x})`) is offered only when a caller passes the function's result, or the
+function passes its parameter, to a parameter declared with exactly that type.
 
 **The search order.** The search is a fixpoint over the call graph, callees
 first. Returns and abstract refinements are tried before preconditions,
@@ -4112,12 +4121,18 @@ not check.
 proposes a contract the checker does not prove, however natural. Examples it
 misses today:
 
-- a return that holds only through a callee's return.
+- a return that holds only through a `let`-bound call tail (`let r = a(x)`
+  then `r`; a direct tail `a(x)` is proposed);
+- a `Map(k, v)` combinator that passes its two-argument callback on to
+  `Map.filter` (the checker does not prove that return yet);
+- a relation kept from a parameter to the return (`bump(a)` keeping `y > x`
+  needs both annotations at once; one root at a time is tried).
 
-The v1 limits are:
+The limits are:
 
-- a one-argument container's element slots only;
-- an `Int` literal as a fold accumulator's initial value;
+- a fold accumulator's initial value must be a literal, a difference of two
+  literals, or an `Int`/`Float` parameter, and a curried step
+  (`fn acc -> fn x -> …`) is not annotated;
 - no mutually recursive functions, which are reported `scc-unsupported`.
 
 ---

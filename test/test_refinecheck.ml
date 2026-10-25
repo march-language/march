@@ -26788,6 +26788,219 @@ let demand_chains_suite =
           (fun r ->
             Alcotest.check sp "nothing for inc" [] (List.filter (fun (f, _) -> f = "inc") (props r)))) ]
 
+
+(* ── inference vocabulary, October 2026 (specs/progress/2026-10-25-refine-infer-vocab.md) ──
+   The refinement shapes the checker gained in October, as inference
+   candidates: relational scalar returns (G1), two-argument abstract
+   refinements, relational element refinements, `Map`/`Deque` element and
+   abstract slots.  Each row asserts the proposed annotation text; each has
+   a control that must not be proposed. *)
+let infer_vocab_oct_suite =
+  let pre = "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n" in
+  let m name body = "mod " ^ name ^ " do\n" ^ pre ^ body ^ "end\n" in
+  let sp = Alcotest.(list (pair string string)) in
+  (* Through the real driver (the whole stdlib, so `Map`/`Deque` are known):
+     the (fn, annotation) pairs of the JSON proposals. *)
+  let cli_props src =
+    let _, j = run_cli "--check --refine-infer-json" src in
+    let re = Str.regexp "\"fn\": \"\\([^\"]*\\)\", \"file\": \"[^\"]*\", \"line\": [0-9]+, \"col\": [0-9]+, \"slot\": \"[^\"]*\", \"base\": \"[^\"]*\", \"predicate\": \"[^\"]*\", \"annotation\": \"\\([^\"]*\\)\"" in
+    let rec all i acc =
+      match Str.search_forward re j i with
+      | exception Not_found -> List.rev acc
+      | k -> all (k + 1) ((Str.matched_group 1 j, Str.matched_group 2 j) :: acc)
+    in
+    if not (Astring_contains.contains j "\"version\": 1") then Alcotest.failf "no JSON: %s" j;
+    all 0 []
+  in
+  let assoc =
+    "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n  fn need_apos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end\n"
+  in
+  let rel =
+    "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n"
+  in
+  let fold ?(private_ = false) callee init lam use step ~params =
+    Printf.sprintf "  %s go(%s) : Int do\n    List.%s(ys, %s, fn %s ->\n      let _u = %s\n      %s)\n  end\n"
+      (if private_ then "pfn" else "fn") params callee init lam use step
+  in
+  let filt_body name =
+    Printf.sprintf
+      "  fn %s(a : Assoc(k, v), keep : k -> v -> Bool) : Assoc(k, v) do\n    match a do\n      ANil -> ANil\n      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, %s(t, keep)) else %s(t, keep) end\n    end\n  end\n"
+      name name name
+  in
+  let mined_texts src ~fn =
+    with_infer_fixture src (fun fx ->
+        let decls = fx.fx_m.March_ast.Ast.mod_decls in
+        match List.find_opt (fun (s : IS.slot) -> s.IS.fn = fn && s.IS.path = IS.Return) (IS.enumerate ~is_user:(fun _ -> true) decls) with
+        | None -> Alcotest.failf "no return slot for %s" fn
+        | Some s -> List.map (fun c -> c.IV.c.PI.c_text) (IV.mine s ~ledger:(Ob.all ()) ~unit_decls:decls))
+  in
+  [ (* 1. Relational scalar returns (G1). *)
+    gated "G1 relational return: inc(x) = x + 1 proposes {Int | _ > x}" (fun () ->
+        infer_run
+          (m "GR" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n")
+          (fun r -> Alcotest.check sp "inc" [ ("inc", "{Int | _ > x}") ] (props r)));
+    gated "G1 vocabulary: x + 1 mines _ > x, x - 1 does not; no caller skip, no candidates" (fun () ->
+        let go f = "  fn go(n : {Int | _ >= 0}) : Int do need_pos(" ^ f ^ "(n)) end\n" in
+        let inc = mined_texts (m "GV" ("  fn inc(x : Int) : Int do x + 1 end\n" ^ go "inc")) ~fn:"inc" in
+        Alcotest.(check bool) ("inc mines _ > x: " ^ String.concat "; " inc) true (List.mem "_ > x" inc);
+        Alcotest.(check bool) "inc mines _ == x + 1" true (List.mem "_ == x + 1" inc);
+        let dec = mined_texts (m "GV" ("  fn dec(x : Int) : Int do x - 1 end\n" ^ go "dec")) ~fn:"dec" in
+        Alcotest.(check bool) ("dec does not mine _ > x: " ^ String.concat "; " dec) false (List.mem "_ > x" dec);
+        Alcotest.(check bool) "dec mines _ < x" true (List.mem "_ < x" dec);
+        (* The cost gate: a caller with nothing unsettled offers no relational
+           return (it could close nothing). *)
+        let quiet = mined_texts (m "GV" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : Int) : Int do inc(n) end\n") ~fn:"inc" in
+        Alcotest.(check bool) ("no caller skip: " ^ String.concat "; " quiet) false (List.mem "_ > x" quiet));
+    gated "G1 control: dec(x) = x - 1 proposes nothing for need_pos(dec(n))" (fun () ->
+        infer_run
+          (m "GD" "  fn dec(x : Int) : Int do x - 1 end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(dec(n)) end\n")
+          (fun r -> Alcotest.check sp "none" [] (props r)));
+    gated "G1 relational return: a two-parameter sum proposes _ == x + y only from the tail's shape" (fun () ->
+        infer_run
+          (m "GS" "  fn add(x : Int, y : Int) : Int do x + y end\n  fn go(a : {Int | _ > 0}, b : {Int | _ > 0}) : Int do need_pos(add(a, b)) end\n")
+          (fun r -> Alcotest.check sp "add" [ ("add", "{Int | _ == x + y}") ] (props r)));
+    gated "G1 apply: the written return re-checks exactly as predicted" (fun () ->
+        let src = m "GA" "  fn inc(x : Int) : Int do x + 1 end\n  pfn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n  fn main() : Int do go(3) end\n" in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ()) "fn inc(x : Int) : {Int | _ > x}");
+            let _, rep = run_cli_in dir "--check --refine-report" in
+            Alcotest.(check bool) ("no user skips: " ^ rep) true (Astring_contains.contains rep "0 violated, 0 trusted, 0 skipped")));
+    (* 4. Map / Deque element slots.  A container of several type arguments
+       has one slot per argument ([IS.Arg]); `Map.filter`'s entry fact
+       (2026-10-24) proves them. *)
+    gated "Map value slot: a filtering wrapper proposes Map(String, {Int | _ > 0})" (fun () ->
+        Alcotest.check sp "pos_vals" [ ("pos_vals", "Map(String, {Int | _ > 0})") ] (cli_props
+          (m "MV"
+             "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn pos_vals(m : Map(String, Int)) : Map(String, Int) do Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp) end\n  fn go(m : Map(String, Int)) : Int do need_posmap(pos_vals(m)) end\n")
+          ));
+    gated "Map key slot: a key filter proposes Map({Int | _ > 0}, String)" (fun () ->
+        Alcotest.check sp "pos_keys" [ ("pos_keys", "Map({Int | _ > 0}, String)") ] (cli_props
+          (m "MK"
+             "  fn need_poskeys(_m : Map({Int | _ > 0}, String)) : Int do 0 end\n  fn pos_keys(m : Map(Int, String)) : Map(Int, String) do Map.filter(m, fn k -> fn _v -> k > 0, Map.int_cmp) end\n  fn go(m : Map(Int, String)) : Int do need_poskeys(pos_keys(m)) end\n")
+          ));
+    gated "Map control: a wrapper that returns its input unchanged proposes nothing" (fun () ->
+        Alcotest.check sp "none" [] (cli_props
+          (m "MC"
+             "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn same(m : Map(String, Int)) : Map(String, Int) do m end\n  fn go(m : Map(String, Int)) : Int do need_posmap(same(m)) end\n")
+          ));
+    gated "Map apply: the written return re-checks exactly as predicted" (fun () ->
+        let src =
+          m "MA"
+            "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn pos_vals(m : Map(String, Int)) : Map(String, Int) do Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp) end\n  pfn go(m : Map(String, Int)) : Int do need_posmap(pos_vals(m)) end\n  fn main() : Int do go(Map.empty()) end\n"
+        in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ()) "fn pos_vals(m : Map(String, Int)) : Map(String, {Int | _ > 0})")));
+    gated "Deque element slot (pinned: already proposed on the base)" (fun () ->
+        Alcotest.check sp "pos_d" [ ("pos_d", "Deque.Deque({Int | _ > 0})") ] (cli_props
+          (m "DQ"
+             "  fn need_posd(_d : Deque.Deque({Int | _ > 0})) : Int do 0 end\n  fn pos_d(d : Deque.Deque(Int)) : Deque.Deque(Int) do Deque.filter(d, fn v -> v > 0) end\n  fn go(d : Deque.Deque(Int)) : Int do need_posd(pos_d(d)) end\n")
+          ));
+    (* 2. Two-argument abstract refinements (K6): `keep : k -> v -> Bool`
+       over a two-argument container whose body filters entries. *)
+    gated "K6 two-argument: filt over Assoc(k, v) proposes k -> v -> Bool[p] / Assoc(k[p], v[p])" (fun () ->
+        with_infer_fixture (m "KA" (assoc ^ filt_body "filt" ^ "  fn go(a : Assoc(Int, Int)) : Int do need_apos(filt(a, fn (_k, v) -> v > 0)) end\n")) (fun fx ->
+            Alcotest.(check (option (pair string string))) "proposal" (Some ("k -> v -> Bool[p]", "Assoc(k[p], v[p])"))
+              (k6_best fx ~fn:"filt")));
+    gated "K6 two-argument control (a1-bad): a body returning its input is not proposed" (fun () ->
+        with_infer_fixture
+          (m "KB" (assoc ^ "  fn bad(a : Assoc(k, v), keep : k -> v -> Bool) : Assoc(k, v) do a end\n  fn go(a : Assoc(Int, Int)) : Int do need_apos(bad(a, fn (_k, v) -> v > 0)) end\n"))
+          (fun fx -> Alcotest.(check (option (pair string string))) "proposal" None (k6_best fx ~fn:"bad")));
+    gated "K6 two-argument control: a relation-blind caller (no demand) proposes nothing" (fun () ->
+        infer_run (m "KN" (assoc ^ filt_body "filt" ^ "  fn go(a : Assoc(Int, Int)) : Int do need_pos(1) end\n"))
+          (fun r -> Alcotest.check sp "none" [] (List.filter (fun (f, _) -> f = "filt") (props r))));
+    gated "K6 two-argument apply: both annotations written, re-check as predicted" (fun () ->
+        let src = m "KP" (assoc ^ filt_body "filt" ^ "  pfn go(a : Assoc(Int, Int)) : Int do need_apos(filt(a, fn (_k, v) -> v > 0)) end\n  fn main() : Int do go(ANil) end\n") in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ())
+                 "fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p])")));
+    (* 3. Relational element refinements, Demand-driven: a caller's
+       relational parameter type is proposed whole. *)
+    gated "relational element return: mk proposes Assoc({x : Int | true}, {y : Int | y > x})" (fun () ->
+        infer_run (m "RE" (rel ^ "  fn mk(n : Int) : Assoc(Int, Int) do ACons(n, n + 1, ANil) end\n  fn go(n : Int) : Int do need_arel(mk(n)) end\n"))
+          (fun r -> Alcotest.check sp "mk" [ ("mk", "Assoc({x : Int | true}, {y : Int | y > x})") ] (props r)));
+    gated "relational element return control: a body breaking the relation is not proposed" (fun () ->
+        infer_run (m "RB" (rel ^ "  fn mk(n : Int) : Assoc(Int, Int) do ACons(n, n, ANil) end\n  fn go(n : Int) : Int do need_arel(mk(n)) end\n"))
+          (fun r -> Alcotest.check sp "none" [] (props r)));
+    gated "relational element parameter: a body demand proposes the relation on the parameter" (fun () ->
+        infer_run (m "RP" (rel ^ "  pfn f(a : Assoc(Int, Int)) : Int do need_arel(a) end\n  fn main() : Int do f(ACons(1, 2, ANil)) end\n"))
+          (fun r -> Alcotest.check sp "f" [ ("f", "Assoc({x : Int | true}, {y : Int | y > x})") ] (props r)));
+    gated "relational element parameter control: a violating caller refuses it" (fun () ->
+        infer_run (m "RV" (rel ^ "  pfn f(a : Assoc(Int, Int)) : Int do need_arel(a) end\n  fn main() : Int do f(ACons(5, 2, ANil)) end\n"))
+          (fun r ->
+            Alcotest.check sp "none" [] (props r);
+            Alcotest.(check bool) "refused" true
+              (List.exists (fun ((s : IS.slot), _, (rf : PI.refusal)) -> s.IS.fn = "f" && rf.PI.rf_reason = "caller-violation") r.RI.refused)));
+    gated "relational element apply: the written return re-checks as predicted" (fun () ->
+        let src = m "RA" (rel ^ "  fn mk(n : Int) : Assoc(Int, Int) do ACons(n, n + 1, ANil) end\n  pfn go(n : Int) : Int do need_arel(mk(n)) end\n  fn main() : Int do go(1) end\n") in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ()) "fn mk(n : Int) : Assoc({x : Int | true}, {y : Int | y > x})")));
+    (* 5. Fold accumulators (K7): the checker's annotated-accumulator rule
+       takes any initial value and a fold_right step's second-position
+       accumulator; v1's K7 read the base only from an Int literal and only
+       looked at the first lambda parameter. *)
+    gated "K7: a parameter initial value proposes the accumulator annotation" (fun () ->
+        infer_run ~stdlib:true (m "K7P" (fold "fold_left" "n" "(acc, _x)" "need_pos(acc)" "acc + 1" ~params:"ys : List(Int), n : {Int | _ > 0}"))
+          (fun r -> Alcotest.check sp "go" [ ("go", "{Int | _ > 0}") ] (props r)));
+    gated "K7: a fold_right step's second-position accumulator is proposed" (fun () ->
+        infer_run ~stdlib:true (m "K7R" (fold "fold_right" "1" "(_x, acc)" "need_pos(acc)" "acc + 1" ~params:"ys : List(Int)"))
+          (fun r -> Alcotest.check sp "go" [ ("go", "{Int | _ > 0}") ] (props r)));
+    gated "K7: a negated-literal initial value is proposed" (fun () ->
+        infer_run ~stdlib:true
+          (m "K7N" ("  fn need_neg(k : {Int | _ < 0}) : Int do k end\n" ^ fold "fold_left" "0 - 1" "(acc, _x)" "need_neg(acc)" "acc - 1" ~params:"ys : List(Int)"))
+          (fun r -> Alcotest.check sp "go" [ ("go", "{Int | _ < 0}") ] (props r)));
+    gated "K7 control: a parameter initial value with a breaking step proposes nothing" (fun () ->
+        infer_run ~stdlib:true (m "K7C" (fold "fold_left" "n" "(acc, _x)" "need_pos(acc)" "acc - 1" ~params:"ys : List(Int), n : {Int | _ > 0}"))
+          (fun r -> Alcotest.check sp "none" [] (List.filter (fun (_, a) -> a = "{Int | _ > 0}") (props r))));
+    gated "K7 control: an unconstrained parameter initial value proposes nothing" (fun () ->
+        infer_run ~stdlib:true (m "K7U" (fold "fold_left" "n" "(acc, _x)" "need_pos(acc)" "acc + 1" ~params:"ys : List(Int), n : Int"))
+          (fun r -> Alcotest.check sp "no accumulator" [] (List.filter (fun (_, a) -> a = "{Int | _ > 0}") (props r))));
+    gated "K7 apply: a fold_right accumulator is written and re-checks as predicted" (fun () ->
+        let src = m "K7A" (fold ~private_:true "fold_right" "1" "(_x, acc)" "need_pos(acc)" "acc + 1" ~params:"ys : List(Int)" ^ "  fn main() : Int do go([1]) end\n") in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ()) "fn (_x, acc : {Int | _ > 0}) ->")));
+    gated "K6 one-argument apply: a rediscovered filter re-checks as predicted (was exit 3)" (fun () ->
+        (* The accepted K6 proposal was installed without marking its element
+           return proved, so the prediction read the definer's own recursive
+           calls and its caller as `abstract-refinement-uninstantiated`
+           ("predicted 3 skipped, got 0"): every K6 apply reverted. *)
+        let src =
+          "mod K1 do\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n  fn filt(xs : List(a), pred : a -> Bool) : List(a) do\n    match xs do\n      Nil -> Nil\n      Cons(h, t) -> if pred(h) do Cons(h, filt(t, pred)) else filt(t, pred) end\n    end\n  end\n  pfn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n  fn main() : Int do go([1]) end\nend\n"
+        in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ()) "fn filt(xs : List(a), pred : a -> Bool[p]) : List(a[p])")));
+    gated "K6 over Deque.Deque(a): a passing wrapper proposes a -> Bool[p] / Deque.Deque(a[p])" (fun () ->
+        Alcotest.check sp "dfilt" [ ("dfilt", "a -> Bool[p] / Deque.Deque(a[p])") ]
+          (cli_props
+             (m "KD"
+                "  fn need_posd(_d : Deque.Deque({Int | _ > 0})) : Int do 0 end\n  fn dfilt(d : Deque.Deque(a), pred : a -> Bool) : Deque.Deque(a) do Deque.filter(d, pred) end\n  fn go(d : Deque.Deque(Int)) : Int do need_posd(dfilt(d, fn v -> v > 0)) end\n")));
+    gated "K6 over Map(k, v) passing its callback to Map.filter: not proposed (the checker does not prove it)" (fun () ->
+        (* Pins a checker gap (specs/todos/2026-10-25-refine-map-filter-two-arg-passthrough.md):
+           the hand-annotated `mfilt` is `abstract-refinement-uninstantiated`
+           at its own return, so the oracle must reject it. *)
+        Alcotest.check sp "none" []
+          (cli_props
+             (m "KM"
+                "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn mfilt(m : Map(k, v), keep : k -> v -> Bool, cmp : k -> k -> Bool) : Map(k, v) do Map.filter(m, keep, cmp) end\n  fn go(m : Map(String, Int)) : Int do need_posmap(mfilt(m, fn _k -> fn v -> v > 0, Map.str_cmp)) end\n")))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -26941,6 +27154,7 @@ let () =
       ("infer-cli", infer_cli_suite);
       ("infer-apply", infer_apply_suite);
       ("demand-chains", demand_chains_suite);
+      ("infer-vocab-oct", infer_vocab_oct_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("element-entries", element_entries_suite);

@@ -21,6 +21,26 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinements: `--refine-infer` / `forge refine --infer` propose this month's
+  shapes.** Inference now proposes the contracts the checker learned to prove in
+  October:
+  - a return relating the result to a parameter (`inc(x : Int) : {Int | _ > x}`, read
+    off the body's tail);
+  - two-argument abstract refinements (`keep : k -> v -> Bool[p]` with
+    `Assoc(k[p], v[p])`);
+  - a relation between two container slots that a caller demands
+    (`Assoc({x : Int | true}, {y : Int | y > x})`);
+  - each key and value slot of a `Map` (`Map(String, {Int | _ > 0})`);
+  - `Deque.Deque(a[p])` for a filtering wrapper;
+  - fold accumulators with a parameter or `0 - 1` initial value, or in a `fold_right`
+    step.
+
+  Fixed on the way, all inside inference:
+  - every applied abstract (`Bool[p]`) proposal failed its own re-check and was
+    reverted (exit 3);
+  - relational candidates were never ordered weakest-first;
+  - a slot's trivial `true` goal could make a vacuous proposal look useful.
+  Plain `--check` is unchanged.
 - **Refinements: `Map.filter` keeps what its predicate says.** `Map.filter(m, pred,
   cmp)` is now `pred : k -> v -> Bool[p]` returning `{Map(k[p], v[p]) | subset(keys(_),
   keys(m))}`, so `need_vals(Map.filter(m, fn _k -> fn v -> v > 0, cmp))` against

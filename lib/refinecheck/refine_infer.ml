@@ -168,16 +168,24 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
      | Some (prefix, _) -> Hashtbl.replace Refine_param.fn_defs_tbl s.IS.fn (prefix, hyp)
      | None -> ());
     Hashtbl.remove RC.abstracts_tbl s.IS.fn;
+    (* An accepted element return, or a K6 slot (a callback PARAMETER whose
+       proposal includes the element return the oracle proved), is a proved
+       element return from here on.  The K6 arm was unreachable behind the
+       [IS.Param _] case until 2026-10-25: a definer's own (any arity)
+       recursive calls and its callers then read "`f`'s own body is not
+       proved", and the prediction disagreed with the re-check. *)
+    if List.mem IS.K6 s.IS.kinds then Hashtbl.replace Refine_param.elem_ret_proved s.IS.fn ()
+    else
     match s.IS.path with
     | IS.Return | IS.Param _ | IS.Lambda_param _ -> ()
-    | p -> if IS.root p = IS.Return || List.mem IS.K6 s.IS.kinds then Hashtbl.replace Refine_param.elem_ret_proved s.IS.fn ()
+    | p -> if IS.root p = IS.Return then Hashtbl.replace Refine_param.elem_ret_proved s.IS.fn ()
   in
   let current_slot (s : IS.slot) =
     match find_fd !decls s.IS.fn with Some fd -> Some { s with IS.fd = fd } | None -> None
   in
   let annotation_of (s : IS.slot) (pred : string) =
     match s.IS.path with
-    | IS.Lambda_param _ -> Printf.sprintf "{Int | %s}" pred
+    | IS.Lambda_param _ -> Printf.sprintf "{%s | %s}" (Option.value (IS.render IS.Return s.IS.base) ~default:"Int") pred
     | _ -> Option.value (IS.respell s ~pred) ~default:pred
   in
   (* [applicable] (the driver's, under --refine-infer-apply/-diff) withholds a
@@ -220,18 +228,28 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
   in
   (* One ordinary slot (K1-K5, K7): best candidate, or a chain for a return. *)
   let try_slot ~round ~ledger ~depth (s : IS.slot) : bool =
+    (* A slot of a container of several arguments (`Arg`, 2026-10-25) is
+       tried only where a demand could make it USEFUL: a skip at a caller
+       for a return, a skip in the body for a parameter. *)
+    let rec has_arg = function IS.Arg _ -> true | IS.Elem p | IS.Tuple (_, p) -> has_arg p | _ -> false in
+    let demanded (s : IS.slot) =
+      (not (has_arg s.IS.path))
+      || (if IO.is_return s then IV.caller_has_skip s ~ledger ~unit_decls:!decls else IV.body_has_skip s ~ledger)
+    in
     match current_slot s with
+    | Some s when not (demanded s) -> false
     | None -> false
     | Some s ->
       let cands, truncated = IV.mine_full s ~ledger ~unit_decls:!decls in
       if truncated then note s.IS.fn "vocabulary-truncated";
-      let cands = IV.order ~root ~scope:(IO.scope_types s) ~base:s.IS.base cands in
+      (* Not ordered here: [IO.best_for_slot ~order:true] orders only the
+         candidates that tie for the best score (see there). *)
       let per_fn = ref (min !budget (if IO.is_return s then 60 else 200)) in
       let used0 = !per_fn in
       (* [~allow_caller_violations] (D2's override): a candidate refused only
          for the callers it would break is taken as if admissible — still
          only if some value satisfies it. *)
-      let best, verdicts = IO.best_for_slot ~allow_caller_violations ~root ~decls:!decls s cands ~budget:per_fn in
+      let best, verdicts = IO.best_for_slot ~order:true ~allow_caller_violations ~root ~decls:!decls s cands ~budget:per_fn in
       budget := !budget - (used0 - !per_fn);
       let pairs = List.mapi (fun i v -> ((match List.nth_opt cands i with Some c -> c.IV.c.PI.c_text | None -> ""), v)) verdicts in
       match best with
@@ -351,6 +369,35 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
         note_verdicts s (List.map (fun v -> ("p", v)) verdicts);
         false)
   in
+  (* K5 relational element refinements: a whole two-slot container type a
+     caller demands (Demand source only). *)
+  let try_rel ~round (s : IS.slot) : bool =
+    match current_slot s with
+    | None -> false
+    | Some s -> (
+      match IS.rel_demands ~unit_decls:!decls s with
+      | [] -> false
+      | tys -> (
+        let per_fn = ref (min !budget 12) in
+        let used0 = !per_fn in
+        let best, verdicts = IO.best_whole ~allow_caller_violations ~root ~decls:!decls s tys ~budget:per_fn in
+        budget := !budget - (used0 - !per_fn);
+        let text t = Option.value (IS.render IS.Return t) ~default:"" in
+        match best with
+        | Some (t, v) ->
+          let ann = text t in
+          let p = proposal_of ~round ~s ~pred:ann ~annotation:ann ~source:IV.Demand ~depends:[] ~v in
+          if withheld p then false
+          else begin
+            install s (IS.install_ty s t);
+            if IO.is_return s then Hashtbl.replace Refine_param.elem_ret_proved s.IS.fn ();
+            ignore (commit p);
+            true
+          end
+        | None ->
+          note_verdicts s (List.map (fun (t, v) -> (text t, v)) verdicts);
+          false))
+  in
   let rec loop round =
     if round > rounds || !budget <= 0 then round - 1
     else begin
@@ -379,11 +426,22 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
       let k6s = by_order (List.filter is_k6 slots) in
       let demands = by_order (List.filter (fun s -> (not (is_k6 s)) && (not (is_k7 s)) && not (IO.is_return s)) slots) in
       let accs = List.filter is_k7 slots in
+      let rels =
+        if not (List.mem IS.K5 kinds) then []
+        else
+          by_order
+            (List.concat_map
+               (fun ((_, (fd : A.fn_def)) as pf) ->
+                 if is_target fd.A.fn_name.A.span then IS.rel_slots ~fn:(PI.qualified_of pf) fd else [])
+               (PI.enum_fns [] !decls))
+      in
       let accepted = ref false in
       let go f ss = List.iter (fun s -> if f s then accepted := true) ss in
       go (try_slot ~round ~ledger ~depth:0) facts;
       go (try_k6 ~round) k6s;
+      go (try_rel ~round) (List.filter IO.is_return rels);
       go (try_slot ~round ~ledger ~depth:0) demands;
+      go (try_rel ~round) (List.filter (fun s -> not (IO.is_return s)) rels);
       go (try_slot ~round ~ledger ~depth:0) accs;
       (* An SCC of size > 1 whose members got nothing. *)
       List.iter

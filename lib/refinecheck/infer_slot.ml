@@ -17,6 +17,9 @@ type path =
   | Param of string
   | Return
   | Elem of path
+  | Arg of int * path
+    (* slot [i] of a container of several type arguments (`Map(k, v)`, a
+       user `Assoc(k, v)`); a one-argument container keeps [Elem]. *)
   | Tuple of int * path
   | Lambda_param of { line : int; col : int; param : string }
 
@@ -35,7 +38,7 @@ let kind_name = function
 
 let rec root = function
   | (Param _ | Return | Lambda_param _) as r -> r
-  | Elem p | Tuple (_, p) -> root p
+  | Elem p | Arg (_, p) | Tuple (_, p) -> root p
 
 let is_container (name : string) : bool =
   name = "List" || name = "Option" || Refine_scope.is_container_type name
@@ -70,6 +73,17 @@ let rec walk ~fn ~fd ~elem_kind ~rel (p : path) (t : A.ty) : slot list =
           [ mk (Elem p) e (elem_kind :: (if rel then [ K5 ] else [])) ]
         | _ -> walk ~fn ~fd ~elem_kind ~rel (Elem p) e)
       args
+  | A.TyCon ({ A.txt = c; _ }, args) when List.length args >= 2 && is_container c ->
+    List.concat
+      (List.mapi
+         (fun i e ->
+           let here = Arg (i, p) in
+           match e with
+           | A.TyRefine _ -> []
+           | _ when scalar e || (match e with A.TyVar _ -> true | _ -> false) ->
+             [ mk here e (elem_kind :: (if rel then [ K5 ] else [])) ]
+           | _ -> walk ~fn ~fd ~elem_kind ~rel here e)
+         args)
   | _ -> []
 
 let root_slots ~fn ~fd ~rel ~scalar_kind ~elem_kind (p : path) (t : A.ty) : slot list =
@@ -118,7 +132,10 @@ let rec render ?(at : (path * string) option) (here : path) (t : A.ty) : string 
     | A.TyCon (n, args) ->
       Option.map
         (fun ps -> Printf.sprintf "%s(%s)" n.A.txt (String.concat ", " ps))
-        (all (List.map (render ?at (Elem here)) args))
+        (all
+           (match args with
+            | [ a ] -> [ render ?at (Elem here) a ]
+            | _ -> List.mapi (fun i a -> render ?at (Arg (i, here)) a) args))
     | A.TyTuple ts ->
       Option.map
         (fun ps -> Printf.sprintf "(%s)" (String.concat ", " ps))
@@ -154,38 +171,55 @@ let respell (s : slot) ~(pred : string) : string option =
 
 (* ── K6: joint abstract-refinement candidates (design §1.2 row K6) ──────── *)
 
-(* A one-argument, uncurried callback parameter `f : a -> Bool` ([a] a type
-   variable) whose [a] appears in an element slot of the return: the shape of
-   `filter`, `find`, `take_while`, `partition`.  The body is not inspected —
-   the oracle decides; this only decides whether probes are spent. *)
-let k6_callback (t : A.ty) : string option =
+(* A callback parameter whose codomain is an unrefined `Bool` and whose
+   domains are distinct type variables: `f : a -> Bool` (the shape of
+   `filter`, `find`, `take_while`, `partition`) or, since the two-argument
+   abstract refinements (2026-10-21), the curried `keep : k -> v -> Bool` (an
+   `Assoc(k, v)`/`Map(k, v)` filter).  The body is not inspected — the oracle
+   decides; this only decides whether probes are spent.  Returns the domain
+   variables in order. *)
+let k6_callback_vars (t : A.ty) : string list option =
   match t with
-  | A.TyArrow (A.TyVar a, A.TyCon ({ A.txt = "Bool"; _ }, [])) -> Some a.A.txt
+  | A.TyArrow (A.TyVar a, A.TyCon ({ A.txt = "Bool"; _ }, [])) -> Some [ a.A.txt ]
+  | A.TyArrow (A.TyVar k, A.TyArrow (A.TyVar v, A.TyCon ({ A.txt = "Bool"; _ }, []))) when k.A.txt <> v.A.txt ->
+    Some [ k.A.txt; v.A.txt ]
   | _ -> None
 
 type k6_shape = { k6_param : string; k6_callback : string; k6_return : string }
 
-let k6_returns (a : string) (ret : A.ty) : string list =
-  let is_a = function A.TyVar v -> v.A.txt = a | _ -> false in
-  let pa = Printf.sprintf "%s[p]" a and np = Printf.sprintf "{%s | !p(_)}" a in
-  match ret with
-  | A.TyCon ({ A.txt = "List"; _ }, [ e ]) when is_a e -> [ Printf.sprintf "List(%s)" pa ]
-  | A.TyCon ({ A.txt = "Option"; _ }, [ e ]) when is_a e -> [ Printf.sprintf "Option(%s)" pa ]
-  | A.TyTuple [ A.TyCon ({ A.txt = "List"; _ }, [ e1 ]); A.TyCon ({ A.txt = "List"; _ }, [ e2 ]) ]
-    when is_a e1 && is_a e2 ->
-    [ Printf.sprintf "(List(%s), List(%s))" pa np;
-      Printf.sprintf "(List(%s), List(%s))" pa a;
-      Printf.sprintf "(List(%s), List(%s))" a np ]
+(* The return re-spelled with the abstract refinement, per domain shape.
+   One variable [a]: `List(a[p])`, `Option(a[p])`, any other registered
+   one-argument container `T(a[p])` (`Deque.Deque`), and the partition
+   2-tuples.  Two variables [k; v]: a registered two-argument container whose
+   arguments are exactly `k, v` in order, `T(k[p], v[p])` (the multi-arg
+   sugar, phase 3). *)
+let k6_returns (vars : string list) (ret : A.ty) : string list =
+  let is_var a = function A.TyVar v -> v.A.txt = a | _ -> false in
+  match vars with
+  | [ a ] -> (
+    let pa = Printf.sprintf "%s[p]" a and np = Printf.sprintf "{%s | !p(_)}" a in
+    match ret with
+    | A.TyCon ({ A.txt = c; _ }, [ e ]) when is_var a e && is_container c -> [ Printf.sprintf "%s(%s)" c pa ]
+    | A.TyTuple [ A.TyCon ({ A.txt = "List"; _ }, [ e1 ]); A.TyCon ({ A.txt = "List"; _ }, [ e2 ]) ]
+      when is_var a e1 && is_var a e2 ->
+      [ Printf.sprintf "(List(%s), List(%s))" pa np;
+        Printf.sprintf "(List(%s), List(%s))" pa a;
+        Printf.sprintf "(List(%s), List(%s))" a np ]
+    | _ -> [])
+  | [ k; v ] -> (
+    match ret with
+    | A.TyCon ({ A.txt = c; _ }, [ e1; e2 ]) when is_var k e1 && is_var v e2 && is_container c ->
+      [ Printf.sprintf "%s(%s[p], %s[p])" c k v ]
+    | _ -> [])
   | _ -> []
 
 let k6_shapes (s : slot) : k6_shape list =
   match s.path, s.fd.A.fn_ret_ty with
   | Param f, Some ret -> (
-    match k6_callback s.base with
-    | Some a ->
-      List.map
-        (fun r -> { k6_param = f; k6_callback = Printf.sprintf "%s -> Bool[p]" a; k6_return = r })
-        (k6_returns a ret)
+    match k6_callback_vars s.base with
+    | Some vars ->
+      let cb = String.concat " -> " vars ^ " -> Bool[p]" in
+      List.map (fun r -> { k6_param = f; k6_callback = cb; k6_return = r }) (k6_returns vars ret)
     | None -> [])
   | _ -> []
 
@@ -194,8 +228,8 @@ let k6_slots ~(fn : string) (fd : A.fn_def) : slot list =
   | Some c, Some ret when not (excluded fd) ->
     List.filter_map
       (fun (n, t) ->
-        match k6_callback t with
-        | Some a when k6_returns a ret <> [] -> Some { fn; fd; path = Param n; base = t; kinds = [ K6 ] }
+        match k6_callback_vars t with
+        | Some vars when k6_returns vars ret <> [] -> Some { fn; fd; path = Param n; base = t; kinds = [ K6 ] }
         | _ -> None)
       (PI.named_params c)
   | _ -> []
@@ -233,6 +267,10 @@ end
       | m -> (
         match m.A.mod_decls with
         | [ A.DFn (g, _) ] -> (
+          (* The occurrence sugar `T(k[p], v[p])` of a two-argument definer
+             is expanded to its long form by [Refine_check.check_module]'s
+             pre-pass; a grafted signature must be expanded the same way. *)
+          let g = Refine_abstract.expand_markers_fn g in
           match first_clause g with
           | None -> None
           | Some gc ->
@@ -290,38 +328,68 @@ let find_fn (unit_decls : A.decl list) (name : string) : A.fn_def option =
     (PI.enum_fns [] unit_decls)
 
 (* A fold-shaped call: the callee returns a bare type variable [b]; one
-   argument is a lambda whose FIRST parameter is unannotated and sits at a
-   callback position whose domain is [b]; and the argument at the [b]-typed
-   parameter is an Int literal (v1 reads the accumulator's base type from
-   it). *)
+   argument is a parenthesised lambda whose parameters number the callback's
+   domains, exactly one of which is [b] — the accumulator, FIRST for a
+   `fold_left` step (`b -> a -> b`), second for a `fold_right` one (`a -> b
+   -> b`) — and that parameter is unannotated.  The accumulator's base type
+   is read from the argument at the [b]-typed parameter (the initial value):
+   an Int or Float literal, a difference of two such literals (`0 - 1`), or
+   a parameter of the enclosing function declared Int or Float (refined or
+   not).  The checker's annotated-accumulator rule
+   (specs/progress/2026-10-18-fold-invariants-phase4.md) has the same shape;
+   since 2026-10-25 this also covers the non-literal initial values and the
+   second-position accumulator, which v1 skipped. *)
 let k7_slots ~(unit_decls : A.decl list) ~(fn : string) (fd : A.fn_def) : slot list =
   let out = ref [] in
+  let own = match first_clause fd with Some c -> PI.named_params c | None -> [] in
+  let rec unrefine = function A.TyRefine (b, _, _) -> unrefine b | A.TyLinear (_, t) -> unrefine t | t -> t in
+  let num name = A.TyCon ({ A.txt = name; A.span = A.dummy_span }, []) in
+  let rec init_base (e : A.expr) : A.ty option =
+    match e with
+    | A.ELit (A.LitInt _, _) -> Some (num "Int")
+    | A.ELit (A.LitFloat _, _) -> Some (num "Float")
+    | A.EApp (A.EVar { A.txt = "-"; _ }, [ (A.ELit _ as a); (A.ELit _ as b) ], _) -> (
+      match init_base a, init_base b with Some x, Some y when x = y -> Some x | _ -> None)
+    | A.EVar { A.txt; _ } -> (
+      match Option.map unrefine (List.assoc_opt txt own) with
+      | Some (A.TyCon ({ A.txt = n; _ }, [])) when n = "Int" || n = "Float" -> Some (num n)
+      | _ -> None)
+    | _ -> None
+  in
+  let rec domains = function A.TyArrow (d, r) -> d :: domains r | _ -> [] in
   let visit (e : A.expr) =
     match e with
     | A.EApp (A.EVar { A.txt = callee; _ }, args, _) -> (
       match find_fn unit_decls callee with
       | Some ({ A.fn_ret_ty = Some (A.TyVar b); A.fn_clauses = c :: _; _ }) ->
         let ps = PI.named_params c in
-        if List.length ps = List.length args then
-          let init_ok =
-            List.exists2
-              (fun (_, t) a ->
-                match t, a with A.TyVar v, A.ELit (A.LitInt _, _) -> v.A.txt = b.A.txt | _ -> false)
-              ps args
+        if List.length ps = List.length args then begin
+          let is_b = function A.TyVar v -> v.A.txt = b.A.txt | _ -> false in
+          let base =
+            List.fold_left2
+              (fun acc (_, t) a -> match acc with Some _ -> acc | None -> if is_b t then init_base a else None)
+              None ps args
           in
           List.iter2
             (fun (_, t) a ->
-              match t, a with
-              | A.TyArrow (A.TyVar d, _), A.ELam ((p0 : A.param) :: _ :: _, _, sp)
-                when init_ok && d.A.txt = b.A.txt && p0.A.param_ty = None ->
-                out :=
-                  { fn; fd;
-                    path = Lambda_param { line = sp.A.start_line; col = sp.A.start_col; param = p0.A.param_name.A.txt };
-                    base = A.TyCon ({ A.txt = "Int"; A.span = A.dummy_span }, []);
-                    kinds = [ K7 ] }
-                  :: !out
+              match t, a, base with
+              | A.TyArrow _, A.ELam (lps, _, sp), Some base ->
+                let ds = domains t in
+                if List.length lps = List.length ds && List.length (List.filter is_b ds) = 1 then
+                  List.iteri
+                    (fun i d ->
+                      let (p : A.param) = List.nth lps i in
+                      if is_b d && p.A.param_ty = None then
+                        out :=
+                          { fn; fd;
+                            path = Lambda_param { line = sp.A.start_line; col = sp.A.start_col; param = p.A.param_name.A.txt };
+                            base;
+                            kinds = [ K7 ] }
+                          :: !out)
+                    ds
               | _ -> ())
             ps args
+        end
       | _ -> ())
     | _ -> ()
   in
@@ -334,6 +402,140 @@ let enumerate ~(is_user : A.span -> bool) (decls : A.decl list) : slot list =
   |> List.concat_map (fun ((_, fd) as pf) ->
          let fn = PI.qualified_of pf in
          slots_of_fn ~fn fd @ k6_slots ~fn fd @ k7_slots ~unit_decls:decls ~fn fd)
+
+(* ── K5 relational element refinements (multi-arg phase 1b, 2026-10-21) ──
+   A two-argument container whose slots relate, `Assoc({x : Int | true},
+   {y : Int | y > x})`, is proposed only where a caller DEMANDS it (the
+   Demand source, nothing else): a call `g(…, f(…), …)` anywhere in the unit
+   whose parameter at that position has a relational type passes its type to
+   [f]'s return; a call `g(…, x, …)` in [f]'s body does the same for [f]'s
+   parameter [x].  The candidate is that parameter type, written whole, when
+   its refinement-free spelling is the slot's own type.  The oracle decides. *)
+
+let rec strip (t : A.ty) : A.ty =
+  match t with
+  | A.TyRefine (b, _, _) -> strip b
+  | A.TyCon (n, args) -> A.TyCon (n, List.map strip args)
+  | A.TyTuple ts -> A.TyTuple (List.map strip ts)
+  | A.TyArrow (a, b) -> A.TyArrow (strip a, strip b)
+  | A.TyLinear (l, t) -> A.TyLinear (l, strip t)
+  | t -> t
+
+let rec mentions (n : string) (e : A.expr) : bool =
+  match e with
+  | A.EVar { A.txt; _ } -> txt = n
+  | A.EApp (f, xs, _) -> mentions n f || List.exists (mentions n) xs
+  | A.ETuple (xs, _) -> List.exists (mentions n) xs
+  | A.EField (r, _, _) -> mentions n r
+  | _ -> false
+
+(* Some slot's predicate names a sibling slot's binder. *)
+let relational (t : A.ty) : bool =
+  match t with
+  | A.TyCon (_, args) when List.length args >= 2 ->
+    let binders = List.filter_map (function A.TyRefine (_, Some n, _) -> Some n.A.txt | _ -> None) args in
+    List.exists
+      (function
+        | A.TyRefine (_, own, pred) ->
+          List.exists
+            (fun b -> (match own with Some n -> n.A.txt <> b | None -> true) && mentions b pred)
+            binders
+        | _ -> false)
+      args
+  | _ -> false
+
+(* A root whose type is a registered container of several arguments, none
+   refined: the only kind of root a relation is proposed for. *)
+let rel_slots ~(fn : string) (fd : A.fn_def) : slot list =
+  let ok (t : A.ty) =
+    match t with
+    | A.TyCon ({ A.txt = c; _ }, args) ->
+      List.length args >= 2 && is_container c && List.for_all (fun a -> strip a = a) args
+    | _ -> false
+  in
+  if excluded fd then []
+  else
+    match first_clause fd with
+    | None -> []
+    | Some c ->
+      List.filter_map (fun (n, t) -> if ok t then Some { fn; fd; path = Param n; base = t; kinds = [ K5 ] } else None) (PI.named_params c)
+      @ (match fd.A.fn_ret_ty with Some t when ok t -> [ { fn; fd; path = Return; base = t; kinds = [ K5 ] } ] | _ -> [])
+
+let same_ty (a : A.ty) (b : A.ty) = render Return (strip a) = render Return (strip b) && render Return a <> None
+
+(* The unit's functions with a relational parameter, by bare and qualified
+   name: one pass over the signatures.  Usually empty, and then no body is
+   walked at all (walking every body of the unit — the stdlib included —
+   with a lookup per call cost ~45 s on one `test/native` file). *)
+let relational_params (unit_decls : A.decl list) : (string, (string * A.ty) list) Hashtbl.t =
+  let t = Hashtbl.create 8 in
+  List.iter
+    (fun ((_, (fd : A.fn_def)) as pf) ->
+      match first_clause fd with
+      | Some c ->
+        let ps = PI.named_params c in
+        if List.exists (fun (_, ty) -> relational ty) ps then begin
+          Hashtbl.replace t (PI.qualified_of pf) ps;
+          if not (Hashtbl.mem t fd.A.fn_name.A.txt) then Hashtbl.replace t fd.A.fn_name.A.txt ps
+        end
+      | None -> ())
+    (PI.enum_fns [] unit_decls);
+  t
+
+let rel_demands ~(unit_decls : A.decl list) (s : slot) : A.ty list =
+  let rel = relational_params unit_decls in
+  if Hashtbl.length rel = 0 then []
+  else begin
+    let out = ref [] in
+    let fname = s.fd.A.fn_name.A.txt in
+    let last q = match List.rev (String.split_on_char '.' q) with x :: _ -> x | [] -> q in
+    let is_target (e : A.expr) =
+      match root s.path, e with
+      | Return, A.EApp (A.EVar { A.txt; _ }, _, _) -> last txt = fname
+      | Param x, A.EVar { A.txt; _ } -> txt = x
+      | _ -> false
+    in
+    let visit (e : A.expr) =
+      match e with
+      | A.EApp (A.EVar { A.txt = g; _ }, args, _) -> (
+        match Hashtbl.find_opt rel g with
+        | Some ps when List.length ps = List.length args ->
+          List.iter2
+            (fun (_, t) a ->
+              if is_target a && relational t && same_ty t s.base && not (List.mem t !out) then out := !out @ [ t ])
+            ps args
+        | _ -> ())
+      | _ -> ()
+    in
+    let bodies =
+      match root s.path with
+      | Param _ -> List.map (fun (c : A.fn_clause) -> c.A.fc_body) s.fd.A.fn_clauses
+      | _ ->
+        List.concat_map (fun (_, (fd : A.fn_def)) -> List.map (fun (c : A.fn_clause) -> c.A.fc_body) fd.A.fn_clauses)
+          (PI.enum_fns [] unit_decls)
+    in
+    List.iter (iter_expr visit) bodies;
+    !out
+  end
+
+(* [s.fd] with the whole root type replaced by [t]. *)
+let install_ty (s : slot) (t : A.ty) : A.fn_def =
+  let fd = s.fd in
+  match root s.path with
+  | Return -> { fd with A.fn_ret_ty = Some t }
+  | Param x ->
+    let upd (p : A.param) = if p.A.param_name.A.txt <> x then p else { p with A.param_ty = Some t } in
+    { fd with
+      A.fn_clauses =
+        List.map
+          (fun (c : A.fn_clause) ->
+            { c with
+              A.fc_params =
+                List.map
+                  (function A.FPNamed p -> A.FPNamed (upd p) | A.FPDefault (p, e) -> A.FPDefault (upd p, e) | o -> o)
+                  c.A.fc_params })
+          fd.A.fn_clauses }
+  | _ -> fd
 
 (* Functions with a parameter that has no annotation: no base to refine
    (reported `unannotated-signature`, §1.1). *)
@@ -356,13 +558,15 @@ let unannotated (decls : A.decl list) : (string * A.span) list =
 let rec steps = function
   | Param _ | Return | Lambda_param _ -> []
   | Elem p -> steps p @ [ `Elem ]
+  | Arg (i, p) -> steps p @ [ `Arg i ]
   | Tuple (i, p) -> steps p @ [ `Tuple i ]
 
-let rec refine_at (st : [ `Elem | `Tuple of int ] list) ~(mk : A.span -> A.expr) ~(sp : A.span) (t : A.ty) : A.ty =
+let rec refine_at (st : [ `Elem | `Arg of int | `Tuple of int ] list) ~(mk : A.span -> A.expr) ~(sp : A.span) (t : A.ty) : A.ty =
   match st, t with
   | [], _ -> A.TyRefine (t, None, mk sp)
   | _, A.TyLinear (l, t) -> A.TyLinear (l, refine_at st ~mk ~sp t)
   | `Elem :: rest, A.TyCon (n, [ e ]) -> A.TyCon (n, [ refine_at rest ~mk ~sp e ])
+  | `Arg i :: rest, A.TyCon (n, args) -> A.TyCon (n, List.mapi (fun j t -> if j = i then refine_at rest ~mk ~sp t else t) args)
   | `Tuple i :: rest, A.TyTuple ts -> A.TyTuple (List.mapi (fun j t -> if j = i then refine_at rest ~mk ~sp t else t) ts)
   | _ -> t
 

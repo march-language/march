@@ -28,12 +28,16 @@ let rec path_text = function
   | IS.Param x -> "param " ^ x
   | IS.Return -> "return"
   | IS.Elem p -> path_text p ^ "/elem"
+  | IS.Arg (i, p) -> Printf.sprintf "%s/elem.%d" (path_text p) i
   | IS.Tuple (i, p) -> Printf.sprintf "%s/tuple.%d" (path_text p) i
   | IS.Lambda_param { line; col; param } -> Printf.sprintf "lambda@%d:%d/param %s" line col param
 
 let kind_text (s : IS.slot) : string =
   if List.mem IS.K6 s.IS.kinds then "abstract"
   else if List.mem IS.K7 s.IS.kinds then "accumulator"
+  else if List.mem IS.K5 s.IS.kinds && s.IS.kinds = [ IS.K5 ] && not (IS.scalar s.IS.base) then
+    (* a whole relational container type (Refine_infer's [try_rel]) *)
+    match s.IS.path with IS.Param _ -> "element-param" | _ -> "element-return"
   else
     match s.IS.path with
     | IS.Param _ -> "precondition"
