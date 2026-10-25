@@ -328,38 +328,68 @@ let find_fn (unit_decls : A.decl list) (name : string) : A.fn_def option =
     (PI.enum_fns [] unit_decls)
 
 (* A fold-shaped call: the callee returns a bare type variable [b]; one
-   argument is a lambda whose FIRST parameter is unannotated and sits at a
-   callback position whose domain is [b]; and the argument at the [b]-typed
-   parameter is an Int literal (v1 reads the accumulator's base type from
-   it). *)
+   argument is a parenthesised lambda whose parameters number the callback's
+   domains, exactly one of which is [b] — the accumulator, FIRST for a
+   `fold_left` step (`b -> a -> b`), second for a `fold_right` one (`a -> b
+   -> b`) — and that parameter is unannotated.  The accumulator's base type
+   is read from the argument at the [b]-typed parameter (the initial value):
+   an Int or Float literal, a difference of two such literals (`0 - 1`), or
+   a parameter of the enclosing function declared Int or Float (refined or
+   not).  The checker's annotated-accumulator rule
+   (specs/progress/2026-10-18-fold-invariants-phase4.md) has the same shape;
+   since 2026-10-25 this also covers the non-literal initial values and the
+   second-position accumulator, which v1 skipped. *)
 let k7_slots ~(unit_decls : A.decl list) ~(fn : string) (fd : A.fn_def) : slot list =
   let out = ref [] in
+  let own = match first_clause fd with Some c -> PI.named_params c | None -> [] in
+  let rec unrefine = function A.TyRefine (b, _, _) -> unrefine b | A.TyLinear (_, t) -> unrefine t | t -> t in
+  let num name = A.TyCon ({ A.txt = name; A.span = A.dummy_span }, []) in
+  let rec init_base (e : A.expr) : A.ty option =
+    match e with
+    | A.ELit (A.LitInt _, _) -> Some (num "Int")
+    | A.ELit (A.LitFloat _, _) -> Some (num "Float")
+    | A.EApp (A.EVar { A.txt = "-"; _ }, [ (A.ELit _ as a); (A.ELit _ as b) ], _) -> (
+      match init_base a, init_base b with Some x, Some y when x = y -> Some x | _ -> None)
+    | A.EVar { A.txt; _ } -> (
+      match Option.map unrefine (List.assoc_opt txt own) with
+      | Some (A.TyCon ({ A.txt = n; _ }, [])) when n = "Int" || n = "Float" -> Some (num n)
+      | _ -> None)
+    | _ -> None
+  in
+  let rec domains = function A.TyArrow (d, r) -> d :: domains r | _ -> [] in
   let visit (e : A.expr) =
     match e with
     | A.EApp (A.EVar { A.txt = callee; _ }, args, _) -> (
       match find_fn unit_decls callee with
       | Some ({ A.fn_ret_ty = Some (A.TyVar b); A.fn_clauses = c :: _; _ }) ->
         let ps = PI.named_params c in
-        if List.length ps = List.length args then
-          let init_ok =
-            List.exists2
-              (fun (_, t) a ->
-                match t, a with A.TyVar v, A.ELit (A.LitInt _, _) -> v.A.txt = b.A.txt | _ -> false)
-              ps args
+        if List.length ps = List.length args then begin
+          let is_b = function A.TyVar v -> v.A.txt = b.A.txt | _ -> false in
+          let base =
+            List.fold_left2
+              (fun acc (_, t) a -> match acc with Some _ -> acc | None -> if is_b t then init_base a else None)
+              None ps args
           in
           List.iter2
             (fun (_, t) a ->
-              match t, a with
-              | A.TyArrow (A.TyVar d, _), A.ELam ((p0 : A.param) :: _ :: _, _, sp)
-                when init_ok && d.A.txt = b.A.txt && p0.A.param_ty = None ->
-                out :=
-                  { fn; fd;
-                    path = Lambda_param { line = sp.A.start_line; col = sp.A.start_col; param = p0.A.param_name.A.txt };
-                    base = A.TyCon ({ A.txt = "Int"; A.span = A.dummy_span }, []);
-                    kinds = [ K7 ] }
-                  :: !out
+              match t, a, base with
+              | A.TyArrow _, A.ELam (lps, _, sp), Some base ->
+                let ds = domains t in
+                if List.length lps = List.length ds && List.length (List.filter is_b ds) = 1 then
+                  List.iteri
+                    (fun i d ->
+                      let (p : A.param) = List.nth lps i in
+                      if is_b d && p.A.param_ty = None then
+                        out :=
+                          { fn; fd;
+                            path = Lambda_param { line = sp.A.start_line; col = sp.A.start_col; param = p.A.param_name.A.txt };
+                            base;
+                            kinds = [ K7 ] }
+                          :: !out)
+                    ds
               | _ -> ())
             ps args
+        end
       | _ -> ())
     | _ -> ()
   in

@@ -185,7 +185,7 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
   in
   let annotation_of (s : IS.slot) (pred : string) =
     match s.IS.path with
-    | IS.Lambda_param _ -> Printf.sprintf "{Int | %s}" pred
+    | IS.Lambda_param _ -> Printf.sprintf "{%s | %s}" (Option.value (IS.render IS.Return s.IS.base) ~default:"Int") pred
     | _ -> Option.value (IS.respell s ~pred) ~default:pred
   in
   (* [applicable] (the driver's, under --refine-infer-apply/-diff) withholds a

@@ -26818,6 +26818,10 @@ let infer_vocab_oct_suite =
   let rel =
     "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n"
   in
+  let fold ?(private_ = false) callee init lam use step ~params =
+    Printf.sprintf "  %s go(%s) : Int do\n    List.%s(ys, %s, fn %s ->\n      let _u = %s\n      %s)\n  end\n"
+      (if private_ then "pfn" else "fn") params callee init lam use step
+  in
   let filt_body name =
     Printf.sprintf
       "  fn %s(a : Assoc(k, v), keep : k -> v -> Bool) : Assoc(k, v) do\n    match a do\n      ANil -> ANil\n      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, %s(t, keep)) else %s(t, keep) end\n    end\n  end\n"
@@ -26937,6 +26941,33 @@ let infer_vocab_oct_suite =
             Alcotest.(check int) ("exit 0: " ^ out) 0 code;
             Alcotest.(check bool) ("written: " ^ contents ()) true
               (Astring_contains.contains (contents ()) "fn mk(n : Int) : Assoc({x : Int | true}, {y : Int | y > x})")));
+    (* 5. Fold accumulators (K7): the checker's annotated-accumulator rule
+       takes any initial value and a fold_right step's second-position
+       accumulator; v1's K7 read the base only from an Int literal and only
+       looked at the first lambda parameter. *)
+    gated "K7: a parameter initial value proposes the accumulator annotation" (fun () ->
+        infer_run ~stdlib:true (m "K7P" (fold "fold_left" "n" "(acc, _x)" "need_pos(acc)" "acc + 1" ~params:"ys : List(Int), n : {Int | _ > 0}"))
+          (fun r -> Alcotest.check sp "go" [ ("go", "{Int | _ > 0}") ] (props r)));
+    gated "K7: a fold_right step's second-position accumulator is proposed" (fun () ->
+        infer_run ~stdlib:true (m "K7R" (fold "fold_right" "1" "(_x, acc)" "need_pos(acc)" "acc + 1" ~params:"ys : List(Int)"))
+          (fun r -> Alcotest.check sp "go" [ ("go", "{Int | _ > 0}") ] (props r)));
+    gated "K7: a negated-literal initial value is proposed" (fun () ->
+        infer_run ~stdlib:true
+          (m "K7N" ("  fn need_neg(k : {Int | _ < 0}) : Int do k end\n" ^ fold "fold_left" "0 - 1" "(acc, _x)" "need_neg(acc)" "acc - 1" ~params:"ys : List(Int)"))
+          (fun r -> Alcotest.check sp "go" [ ("go", "{Int | _ < 0}") ] (props r)));
+    gated "K7 control: a parameter initial value with a breaking step proposes nothing" (fun () ->
+        infer_run ~stdlib:true (m "K7C" (fold "fold_left" "n" "(acc, _x)" "need_pos(acc)" "acc - 1" ~params:"ys : List(Int), n : {Int | _ > 0}"))
+          (fun r -> Alcotest.check sp "none" [] (List.filter (fun (_, a) -> a = "{Int | _ > 0}") (props r))));
+    gated "K7 control: an unconstrained parameter initial value proposes nothing" (fun () ->
+        infer_run ~stdlib:true (m "K7U" (fold "fold_left" "n" "(acc, _x)" "need_pos(acc)" "acc + 1" ~params:"ys : List(Int), n : Int"))
+          (fun r -> Alcotest.check sp "no accumulator" [] (List.filter (fun (_, a) -> a = "{Int | _ > 0}") (props r))));
+    gated "K7 apply: a fold_right accumulator is written and re-checks as predicted" (fun () ->
+        let src = m "K7A" (fold ~private_:true "fold_right" "1" "(_x, acc)" "need_pos(acc)" "acc + 1" ~params:"ys : List(Int)" ^ "  fn main() : Int do go([1]) end\n") in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ()) "fn (_x, acc : {Int | _ > 0}) ->")));
     gated "K6 one-argument apply: a rediscovered filter re-checks as predicted (was exit 3)" (fun () ->
         (* The accepted K6 proposal was installed without marking its element
            return proved, so the prediction read the definer's own recursive

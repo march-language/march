@@ -140,3 +140,33 @@ once. A joint probe would need a K6-like two-edit proposal and its own admissibi
 container type with a relation at all (grep), so the case is rare. Filed:
 `specs/todos/2026-10-25-refine-infer-joint-relational-param-return.md`. Cost if wrong:
 `bump`-shaped contracts are not found; the user writes both annotations.
+
+## 5. Fold accumulators (K7)
+
+Checked first, as the brief asks: K7 did NOT cover the annotated-accumulator shapes the
+checker proves (`specs/progress/2026-10-18-fold-invariants-phase4.md`). Each of these was
+proved hand-annotated (`--check --refine-report`: 2 or 3 proved, 0 skipped) and got
+nothing stripped (`--refine-infer`: 0 proposed):
+- a parameter initial value (`List.fold_left(ys, n, fn (acc, _x) -> …)`, `n : {Int | _ > 0}`);
+- a `fold_right` step, whose accumulator is the SECOND lambda parameter (`fn (_x, acc)`);
+- a negated literal (`0 - 1`, with `need_neg`).
+
+The cause: v1 read the base type only from an Int literal argument, and only looked at
+the first lambda parameter.
+
+`Infer_slot.k7_slots` now:
+- takes the accumulator at whichever callback domain is the callee's return variable `b`
+  (exactly one), when the lambda's parameter count equals the chain's;
+- reads the base from the initial value. That may be an Int or Float literal, a
+  difference of two literals of one sort, or a parameter of the enclosing function
+  declared `Int`/`Float` (refined or not).
+
+The annotation text uses that base (`{Float | …}` for a Float accumulator). Curried steps
+(`Enum.fold`'s `fn acc -> fn x -> …`) stay out, because the checker declines their
+outer lambda too.
+
+Tests (`infer-vocab-oct` rows 19-24). RED on the item-3 commit: the parameter-init,
+`fold_right` and `0 - 1` rows proposed `[]`, and the `fold_right` apply wrote nothing.
+Controls, unchanged before and after:
+- a parameter init with a breaking step (`acc - 1`) proposes nothing;
+- an unrefined parameter init (`n : Int`, base unproved) proposes nothing.
