@@ -10959,6 +10959,66 @@ let test_compiled_file_dir_err_are_real_fileerrors () =
         interp_line compiled_line)
       (List.combine cases interp_lines) compiled_lines
 
+(* ── Harness: parallel_cases bodies may assert concurrently ────────────────
+   Every Alcotest assertion with a message prints through ONE shared Format
+   formatter; on OCaml 5.5.1 two domains doing it at once raise
+   "Format: Unsynchronized access to formatter" out of a body (CI run
+   40142534056, adversarial-regressions case 33). Test_helpers.Alcotest
+   serialises that printing. This drives the racy path hard: 8 bodies on 8
+   domains, each asserting in a tight loop through every printing assertion,
+   several rounds. Without the lock it fails on 5.5.1 within the first
+   round (see specs/progress/2026-10-25-test-parallel-format-race.md). *)
+let test_harness_parallel_asserts_no_format_race () =
+  for _round = 1 to 4 do
+    let body () =
+      for i = 1 to 250 do
+        Alcotest.(check int) "harness: concurrent check" i i;
+        Alcotest.check' Alcotest.bool ~msg:"harness: concurrent check'"
+          ~expected:true ~actual:true;
+        Alcotest.check_raises "harness: concurrent check_raises" Exit
+          (fun () -> raise Exit);
+        Alcotest.match_raises "harness: concurrent match_raises"
+          (fun e -> e = Not_found) (fun () -> raise Not_found)
+      done
+    in
+    let cases =
+      parallel_cases ~jobs:8
+        (List.init 8 (fun i -> (Printf.sprintf "body %d" i, `Quick, body)))
+    in
+    List.iter (fun (_, _, run) -> run ()) cases
+  done
+
+(* A failing assertion inside a batch body still fails with its own message,
+   reported at the caller's line rather than inside the Test_helpers shadow
+   (which the real check's own callsite guess would name). *)
+let test_harness_parallel_failure_keeps_message () =
+  let cases =
+    parallel_cases ~jobs:4
+      (List.init 4 (fun i ->
+         (Printf.sprintf "body %d" i, `Quick, fun () ->
+            (* Not a tail call: a tail-called check's frame-2 guess (the
+               shadow's, like alcotest's own) lands on whoever ran the body. *)
+            Alcotest.(check int) "harness: deliberate mismatch" 1 (if i = 2 then 2 else 1);
+            ignore (Sys.opaque_identity i))))
+  in
+  List.iteri (fun i (_, _, run) ->
+    match run () with
+    | () -> if i = 2 then Alcotest.fail "body 2 should have failed"
+    | exception e ->
+      (* alcotest registers a Printexc printer for its Check_error. *)
+      let msg = Printexc.to_string e in
+      let has sub =
+        let n = String.length sub and m = String.length msg in
+        let rec go k = k + n <= m && (String.sub msg k n = sub || go (k + 1)) in
+        go 0
+      in
+      if i <> 2 then Alcotest.failf "body %d failed unexpectedly: %s" i msg;
+      if not (has "harness: deliberate mismatch") then
+        Alcotest.failf "failure lost its message: %s" msg;
+      if not (has "test_stdlib_suite.ml") then
+        Alcotest.failf "failure location is not the caller's line: %s" msg)
+    cases
+
 (* Regression (P0, perceus.ml same_arity): the FBIP arity check compared a
    TCon's TYPE-PARAMETER count against the new constructor's FIELD count.  A
    dead binding's dec carries its raw declared type, so a dead 1-field
@@ -15356,6 +15416,12 @@ let stdlib_suites =
          run_stdlib's wall time (CI audit, 2026-10-07). [serial] keeps
          inline the cases that run forge in-process (global compiler state)
          or that time an HTTP server and would flake under parallel load. *)
+      ("test-harness", [
+        Alcotest.test_case "parallel_cases: bodies assert concurrently without a Format race" `Quick
+          test_harness_parallel_asserts_no_format_race;
+        Alcotest.test_case "parallel_cases: a failing body keeps its message and caller location" `Quick
+          test_harness_parallel_failure_keeps_message;
+      ]);
       ("adversarial-regressions", parallel_slow
          ~serial:[
            "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call";
