@@ -26828,24 +26828,29 @@ let infer_vocab_oct_suite =
       name name name
   in
   let mined_texts src ~fn =
-    let dm = March_desugar.Desugar.desugar_module (parse src) in
-    let decls = dm.March_ast.Ast.mod_decls in
-    match List.find_opt (fun (s : IS.slot) -> s.IS.fn = fn && s.IS.path = IS.Return) (IS.enumerate ~is_user:(fun _ -> true) decls) with
-    | None -> Alcotest.failf "no return slot for %s" fn
-    | Some s -> List.map (fun c -> c.IV.c.PI.c_text) (IV.mine s ~ledger:[] ~unit_decls:decls)
+    with_infer_fixture src (fun fx ->
+        let decls = fx.fx_m.March_ast.Ast.mod_decls in
+        match List.find_opt (fun (s : IS.slot) -> s.IS.fn = fn && s.IS.path = IS.Return) (IS.enumerate ~is_user:(fun _ -> true) decls) with
+        | None -> Alcotest.failf "no return slot for %s" fn
+        | Some s -> List.map (fun c -> c.IV.c.PI.c_text) (IV.mine s ~ledger:(Ob.all ()) ~unit_decls:decls))
   in
   [ (* 1. Relational scalar returns (G1). *)
     gated "G1 relational return: inc(x) = x + 1 proposes {Int | _ > x}" (fun () ->
         infer_run
           (m "GR" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n")
           (fun r -> Alcotest.check sp "inc" [ ("inc", "{Int | _ > x}") ] (props r)));
-    Alcotest.test_case "G1 vocabulary: x + 1 mines _ > x, x - 1 does not" `Quick (fun () ->
-        let inc = mined_texts (m "GV" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : Int) : Int do inc(n) end\n") ~fn:"inc" in
+    gated "G1 vocabulary: x + 1 mines _ > x, x - 1 does not; no caller skip, no candidates" (fun () ->
+        let go f = "  fn go(n : {Int | _ >= 0}) : Int do need_pos(" ^ f ^ "(n)) end\n" in
+        let inc = mined_texts (m "GV" ("  fn inc(x : Int) : Int do x + 1 end\n" ^ go "inc")) ~fn:"inc" in
         Alcotest.(check bool) ("inc mines _ > x: " ^ String.concat "; " inc) true (List.mem "_ > x" inc);
         Alcotest.(check bool) "inc mines _ == x + 1" true (List.mem "_ == x + 1" inc);
-        let dec = mined_texts (m "GV" "  fn dec(x : Int) : Int do x - 1 end\n  fn go(n : Int) : Int do dec(n) end\n") ~fn:"dec" in
+        let dec = mined_texts (m "GV" ("  fn dec(x : Int) : Int do x - 1 end\n" ^ go "dec")) ~fn:"dec" in
         Alcotest.(check bool) ("dec does not mine _ > x: " ^ String.concat "; " dec) false (List.mem "_ > x" dec);
-        Alcotest.(check bool) "dec mines _ < x" true (List.mem "_ < x" dec));
+        Alcotest.(check bool) "dec mines _ < x" true (List.mem "_ < x" dec);
+        (* The cost gate: a caller with nothing unsettled offers no relational
+           return (it could close nothing). *)
+        let quiet = mined_texts (m "GV" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : Int) : Int do inc(n) end\n") ~fn:"inc" in
+        Alcotest.(check bool) ("no caller skip: " ^ String.concat "; " quiet) false (List.mem "_ > x" quiet));
     gated "G1 control: dec(x) = x - 1 proposes nothing for need_pos(dec(n))" (fun () ->
         infer_run
           (m "GD" "  fn dec(x : Int) : Int do x - 1 end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(dec(n)) end\n")

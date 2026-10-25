@@ -301,7 +301,15 @@ let is_return (s : IS.slot) = match IS.root s.IS.path with IS.Return -> true | _
    (closes − new skips), a return the most closed caller sites — ties to the
    earlier (weaker, higher-rank) candidate (design §1.4).  An exhausted budget
    is recorded as [Reject ("budget", _)], never folded into "no candidate". *)
-let best_for_slot ?allow_caller_violations ~(root : string) ~(decls : A.decl list) (s : IS.slot) (cands : IV.cand list)
+(* [~order:true]: the candidates arrive in mining order (Demand, House,
+   Body, Fixed) and only those that tie for the best score are put in
+   implication order, weakest first, to break the tie — the same pick as
+   ordering every candidate first, at a fraction of the cost.  The
+   implication order asks the checker one query per pair, and since the
+   relational pairs are real queries (2026-10-25) ordering a slot's whole
+   list up front cost up to ~45 s on one `test/native` file, mostly for
+   candidates that were then rejected anyway. *)
+let best_for_slot ?(order = false) ?allow_caller_violations ~(root : string) ~(decls : A.decl list) (s : IS.slot) (cands : IV.cand list)
     ~(budget : int ref) : (IV.cand * verdict) option * verdict list =
   Obligation.with_scratch @@ fun () ->
   match prepare ~root ~decls s with
@@ -312,21 +320,30 @@ let best_for_slot ?allow_caller_violations ~(root : string) ~(decls : A.decl lis
         if is_return s then List.length closes else List.length closes - List.length new_skipped
       | _ -> min_int
     in
-    let rec go best verdicts = function
-      | [] -> (best, List.rev verdicts)
-      | _ :: _ when !budget <= 0 -> (best, List.rev (Reject ("budget", "probe budget exhausted") :: verdicts))
+    let pick (accepted : (IV.cand * verdict) list) =
+      match accepted with
+      | [] -> None
+      | _ when not order ->
+        List.fold_left
+          (fun best (c, v) -> match best with None -> Some (c, v) | Some (_, bv) when score v > score bv -> Some (c, v) | _ -> best)
+          None accepted
+      | _ -> (
+        let top = List.fold_left (fun m (_, v) -> max m (score v)) min_int accepted in
+        let tied = List.filter (fun (_, v) -> score v = top) accepted in
+        match IV.order ~root ~scope:(scope_types s) ~base:s.IS.base (List.map fst tied) with
+        | c :: _ -> List.find_opt (fun (c', _) -> c' == c) tied
+        | [] -> None)
+    in
+    let rec go accepted verdicts = function
+      | [] -> (pick (List.rev accepted), List.rev verdicts)
+      | _ :: _ when !budget <= 0 -> (pick (List.rev accepted), List.rev (Reject ("budget", "probe budget exhausted") :: verdicts))
       | c :: tl ->
         decr budget;
         let v = probe ?allow_caller_violations ~root cx s c in
-        let best =
-          match v, best with
-          | Accept _, None -> Some (c, v)
-          | Accept _, Some (_, bv) when score v > score bv -> Some (c, v)
-          | _ -> best
-        in
-        go best (v :: verdicts) tl
+        let accepted = match v with Accept _ -> (c, v) :: accepted | _ -> accepted in
+        go accepted (v :: verdicts) tl
     in
-    go None [] cands
+    go [] [] cands
 
 (* ── K6: joint abstract-refinement candidates (design §1.2, §2) ──────────── *)
 

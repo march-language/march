@@ -238,15 +238,44 @@ let body (s : IS.slot) : string list =
    site closes, so without one every probe would be wasted. *)
 let rel_return_cap = 4
 
-let rel_returns (s : IS.slot) ~(unit_decls : A.decl list) : string list =
+(* A demand a return could meet: an unsettled obligation in the body of a
+   function that calls [s]'s function (by name, over-approximate).  A return
+   is USEFUL only by closing such a site, so without one every probe is
+   wasted.  Measured on `test/native` (2026-10-25): without this gate the
+   relational returns and the per-argument `Result(a, e)` return slots cost
+   +0.4x aggregate time and proposed nothing. *)
+let caller_has_skip (s : IS.slot) ~(ledger : Ob.t list) ~(unit_decls : A.decl list) : bool =
+  (* Spans first, bodies last: the unit includes the stdlib, and walking
+     every body for a call (as [PI.fn_calls] does) per slot cost seconds per
+     file; only a function that holds a skip is walked. *)
+  let skips = List.filter (fun (o : Ob.t) -> match o.Ob.verdict with Ob.Skipped _ -> true | _ -> false) ledger in
+  skips <> []
+  &&
+  let name = s.IS.fd.A.fn_name.A.txt in
+  List.exists
+    (fun (_, (g : A.fn_def)) ->
+      g != s.IS.fd
+      && List.exists
+           (fun (o : Ob.t) -> List.exists (fun (c : A.fn_clause) -> within c.A.fc_span o.Ob.span) g.A.fn_clauses)
+           skips
+      && PI.fn_calls name g)
+    (PI.enum_fns [] unit_decls)
+
+(* A skip in [s]'s own body: the only place a precondition can close one. *)
+let body_has_skip (s : IS.slot) ~(ledger : Ob.t list) : bool =
+  List.exists
+    (fun (o : Ob.t) ->
+      match o.Ob.verdict with
+      | Ob.Skipped _ -> List.exists (fun (c : A.fn_clause) -> within c.A.fc_span o.Ob.span) s.IS.fd.A.fn_clauses
+      | _ -> false)
+    ledger
+
+let rel_returns (s : IS.slot) ~(ledger : Ob.t list) ~(unit_decls : A.decl list) : string list =
   match s.IS.path, s.IS.fd.A.fn_clauses with
   | IS.Return, c :: _ when (match PI.kind_of_ty s.IS.base with PI.KInt | PI.KFloat -> true | _ -> false) ->
     let k = PI.kind_of_ty s.IS.base in
     let same = List.filter_map (fun (n, t) -> if PI.kind_of_ty t = k then Some n else None) (PI.named_params c) in
-    let path, name =
-      match List.rev (String.split_on_char '.' s.IS.fn) with n :: rp -> (List.rev rp, n) | [] -> ([], s.IS.fn)
-    in
-    if same = [] || not (PI.has_in_unit_callers path name unit_decls) then []
+    if same = [] || not (caller_has_skip s ~ledger ~unit_decls) then []
     else begin
       let rec tails (e : A.expr) : A.expr list =
         match e with
@@ -342,7 +371,7 @@ let mine_full (s : IS.slot) ~(ledger : Ob.t list) ~(unit_decls : A.decl list) : 
   let rel =
     List.filter
       (fun c -> admissible_text s c.c && not (List.exists (fun k -> k.c.PI.c_text = c.c.PI.c_text) kept))
-      (of_texts Body (rel_returns s ~unit_decls))
+      (of_texts Body (rel_returns s ~ledger ~unit_decls))
   in
   (kept @ rel, truncated)
 

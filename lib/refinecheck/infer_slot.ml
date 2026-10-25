@@ -463,39 +463,60 @@ let rel_slots ~(fn : string) (fd : A.fn_def) : slot list =
 
 let same_ty (a : A.ty) (b : A.ty) = render Return (strip a) = render Return (strip b) && render Return a <> None
 
-let rel_demands ~(unit_decls : A.decl list) (s : slot) : A.ty list =
-  let out = ref [] in
-  let fname = s.fd.A.fn_name.A.txt in
-  let last q = match List.rev (String.split_on_char '.' q) with x :: _ -> x | [] -> q in
-  let is_target (e : A.expr) =
-    match root s.path, e with
-    | Return, A.EApp (A.EVar { A.txt; _ }, _, _) -> last txt = fname
-    | Param x, A.EVar { A.txt; _ } -> txt = x
-    | _ -> false
-  in
-  let visit (e : A.expr) =
-    match e with
-    | A.EApp (A.EVar { A.txt = g; _ }, args, _) -> (
-      match find_fn unit_decls g with
-      | Some { A.fn_clauses = c :: _; _ } ->
+(* The unit's functions with a relational parameter, by bare and qualified
+   name: one pass over the signatures.  Usually empty, and then no body is
+   walked at all (walking every body of the unit — the stdlib included —
+   with a lookup per call cost ~45 s on one `test/native` file). *)
+let relational_params (unit_decls : A.decl list) : (string, (string * A.ty) list) Hashtbl.t =
+  let t = Hashtbl.create 8 in
+  List.iter
+    (fun ((_, (fd : A.fn_def)) as pf) ->
+      match first_clause fd with
+      | Some c ->
         let ps = PI.named_params c in
-        if List.length ps = List.length args then
+        if List.exists (fun (_, ty) -> relational ty) ps then begin
+          Hashtbl.replace t (PI.qualified_of pf) ps;
+          if not (Hashtbl.mem t fd.A.fn_name.A.txt) then Hashtbl.replace t fd.A.fn_name.A.txt ps
+        end
+      | None -> ())
+    (PI.enum_fns [] unit_decls);
+  t
+
+let rel_demands ~(unit_decls : A.decl list) (s : slot) : A.ty list =
+  let rel = relational_params unit_decls in
+  if Hashtbl.length rel = 0 then []
+  else begin
+    let out = ref [] in
+    let fname = s.fd.A.fn_name.A.txt in
+    let last q = match List.rev (String.split_on_char '.' q) with x :: _ -> x | [] -> q in
+    let is_target (e : A.expr) =
+      match root s.path, e with
+      | Return, A.EApp (A.EVar { A.txt; _ }, _, _) -> last txt = fname
+      | Param x, A.EVar { A.txt; _ } -> txt = x
+      | _ -> false
+    in
+    let visit (e : A.expr) =
+      match e with
+      | A.EApp (A.EVar { A.txt = g; _ }, args, _) -> (
+        match Hashtbl.find_opt rel g with
+        | Some ps when List.length ps = List.length args ->
           List.iter2
             (fun (_, t) a ->
               if is_target a && relational t && same_ty t s.base && not (List.mem t !out) then out := !out @ [ t ])
             ps args
-      | _ -> ())
-    | _ -> ()
-  in
-  let bodies =
-    match root s.path with
-    | Param _ -> List.map (fun (c : A.fn_clause) -> c.A.fc_body) s.fd.A.fn_clauses
-    | _ ->
-      List.concat_map (fun (_, (fd : A.fn_def)) -> List.map (fun (c : A.fn_clause) -> c.A.fc_body) fd.A.fn_clauses)
-        (PI.enum_fns [] unit_decls)
-  in
-  List.iter (iter_expr visit) bodies;
-  !out
+        | _ -> ())
+      | _ -> ()
+    in
+    let bodies =
+      match root s.path with
+      | Param _ -> List.map (fun (c : A.fn_clause) -> c.A.fc_body) s.fd.A.fn_clauses
+      | _ ->
+        List.concat_map (fun (_, (fd : A.fn_def)) -> List.map (fun (c : A.fn_clause) -> c.A.fc_body) fd.A.fn_clauses)
+          (PI.enum_fns [] unit_decls)
+    in
+    List.iter (iter_expr visit) bodies;
+    !out
+  end
 
 (* [s.fd] with the whole root type replaced by [t]. *)
 let install_ty (s : slot) (t : A.ty) : A.fn_def =

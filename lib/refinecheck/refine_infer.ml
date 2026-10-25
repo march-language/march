@@ -228,18 +228,28 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
   in
   (* One ordinary slot (K1-K5, K7): best candidate, or a chain for a return. *)
   let try_slot ~round ~ledger ~depth (s : IS.slot) : bool =
+    (* A slot of a container of several arguments (`Arg`, 2026-10-25) is
+       tried only where a demand could make it USEFUL: a skip at a caller
+       for a return, a skip in the body for a parameter. *)
+    let rec has_arg = function IS.Arg _ -> true | IS.Elem p | IS.Tuple (_, p) -> has_arg p | _ -> false in
+    let demanded (s : IS.slot) =
+      (not (has_arg s.IS.path))
+      || (if IO.is_return s then IV.caller_has_skip s ~ledger ~unit_decls:!decls else IV.body_has_skip s ~ledger)
+    in
     match current_slot s with
+    | Some s when not (demanded s) -> false
     | None -> false
     | Some s ->
       let cands, truncated = IV.mine_full s ~ledger ~unit_decls:!decls in
       if truncated then note s.IS.fn "vocabulary-truncated";
-      let cands = IV.order ~root ~scope:(IO.scope_types s) ~base:s.IS.base cands in
+      (* Not ordered here: [IO.best_for_slot ~order:true] orders only the
+         candidates that tie for the best score (see there). *)
       let per_fn = ref (min !budget (if IO.is_return s then 60 else 200)) in
       let used0 = !per_fn in
       (* [~allow_caller_violations] (D2's override): a candidate refused only
          for the callers it would break is taken as if admissible — still
          only if some value satisfies it. *)
-      let best, verdicts = IO.best_for_slot ~allow_caller_violations ~root ~decls:!decls s cands ~budget:per_fn in
+      let best, verdicts = IO.best_for_slot ~order:true ~allow_caller_violations ~root ~decls:!decls s cands ~budget:per_fn in
       budget := !budget - (used0 - !per_fn);
       let pairs = List.mapi (fun i v -> ((match List.nth_opt cands i with Some c -> c.IV.c.PI.c_text | None -> ""), v)) verdicts in
       match best with

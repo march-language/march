@@ -170,3 +170,45 @@ Tests (`infer-vocab-oct` rows 19-24). RED on the item-3 commit: the parameter-in
 Controls, unchanged before and after:
 - a parameter init with a breaking step (`acc - 1`) proposes nothing;
 - an unrefined parameter init (`n : Int`, base unproved) proposes nothing.
+
+## Cost: what the first re-measure showed, and the three fixes
+
+The first `test/native` run of the branch (items 1-5, ungated) accepted nothing new and
+cost more than main:
+
+| Run | median | p90 | aggregate |
+|---|---|---|---|
+| main | 1.38× | 1.83× | 1.73× |
+| branch, items 1-5 only | 1.39× | 4.86× | 2.17× |
+
+The increase came in quanta of about 8 s per file (up to +47 s on
+`node_send_loopback.march`), with the same probe count. A `--refine-infer-kinds` bisection
+put all of it in K5, and the causes were:
+
+1. **`rel_demands` walked every body in the unit**, the stdlib included, with a function
+   lookup per call. This ran for every two-argument-container root, and every
+   `Result(a, e)` return is one. It now collects the unit's functions with a relational
+   parameter first (one pass over signatures). That set is usually empty, and then no
+   body is walked. This fix alone removed the regression.
+2. **The per-argument slots are demand-gated** (`Refine_infer.try_slot`). An `Arg` return
+   slot is tried only when a function that calls it has an unsettled obligation
+   (`Infer_vocab.caller_has_skip`, spans first, bodies last). An `Arg` parameter slot
+   needs a skip in its own body. The relational returns (item 1) use the same caller gate
+   in place of "has an in-unit caller".
+3. **The implication order is applied lazily** (`Infer_oracle.best_for_slot ~order:true`).
+   Candidates are probed in mining order (Demand, House, Body, Fixed). Only the
+   candidates that tie for the best score are put in implication order, weakest first, to
+   break the tie. Since the order fix in item 1, relational pairs are real solver queries,
+   so ordering a slot's whole list up front had become the expensive part.
+
+Ruling: lazy ordering picks the same candidate as ordering everything first, except in
+two cases:
+- a third, non-admissible candidate would have changed the relative order of two tied
+  ones through transitivity;
+- the global budget runs out mid-slot, which now drops the lowest-RANK candidates
+  instead of the strongest.
+
+Why: the order exists only to break ties among admissible candidates, and with
+relational queries it cost more than all the probes. Cost if wrong: on a tie involving
+such a transitive chain, a stronger candidate could be proposed where a weaker one was;
+both are proved.
