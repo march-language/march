@@ -212,3 +212,143 @@ Why: the order exists only to break ties among admissible candidates, and with
 relational queries it cost more than all the probes. Cost if wrong: on a tie involving
 such a transitive chain, a stronger candidate could be proposed where a weaker one was;
 both are proved.
+
+## Evaluation over `test/native` (417 files)
+
+The protocol is the evaluation note's. Each file gets a cold `--check` and a cold
+`--check --refine-infer-json`, each in a fresh cwd and `HOME`, 4 files in parallel, with
+z3 on `PATH`. The stdlib is the worktree's (`MARCH_STDLIB`). The compilers are copies of
+`_build/default/bin/main.exe`: main at `bf49708ec`, and this branch at `e21defcfb`. Main
+was measured twice:
+- once while the refine-oracle baseline ran beside it (load 8-10);
+- once alone, right before the branch's final run (load 3-8).
+
+Both main runs gave identical counts and ratios within 0.01. The table uses the second
+run. Raw outputs are kept outside the repo.
+
+| Metric | pre-#1020 baseline (2026-10-21/23 notes) | main `bf49708ec` | this branch |
+|---|---|---|---|
+| Files that check | 416 / 416 | 417 / 417 | 417 / 417 |
+| User skips before → after | 13 → 13 | 13 → 13 (5 files) | 13 → 13 |
+| Violations before → after | 0 → 0 | 0 → 0 | 0 → 0 |
+| Accepted, by kind | 1 precondition (`set_n` `n : {Int \| _ <= j}`, vacuous) | **0** | **0** |
+| Refused | 11 (2026-10-21) / 6 (2026-10-23) caller-violation | 0 | 0 |
+| Rejected: not-true / vacuous-branch | 3683 (2026-10-21) / 0 | 3625 / 5 | 3666 / 5 |
+| not-true detail: return / element return / accumulator | 3099 / 391 / 193 | 3049 / 383 / 193 | 3060 / 381 / 225 |
+| Notes: scc-unsupported / vocabulary-truncated | 16 / 2 | 16 / 2 | 16 / 2 |
+| Probes | 11 778 | 11 467 | 11 474 |
+| Infer ÷ check, median / p90 / aggregate | 1.38× / 1.69× / 1.49× (2026-10-23) | 1.38× / 1.83× / 1.73× | 1.38× / 1.81× / 1.74× |
+| Max ratio | 23.7× | 15.1× (`nativearr_fold_sum_fusion`) | 15.9× (same file) |
+| Prediction mismatches | 0 of 1 | 0 (nothing to apply) | 0 (nothing to apply) |
+
+Main versus the pre-#1020 baseline: the one accepted proposal is gone. `set_n`'s
+`n <= j` is now `vacuous-branch` (2026-10-23). There are 5 `vacuous-branch` rejections
+in all, in `array_trie_drop_leak_probe` and `float_generic_field_abi`. The aggregate ratio is higher (1.49× → 1.73×). The median is
+unchanged, so the growth is in the tail, and it was there before this branch.
+
+This branch versus main: **nothing new is accepted on `test/native`.**
+- The 13 user skips there are not of the shapes this branch adds. They are in 5 files,
+  and no caller of a relational, Map, Deque or two-argument
+  combinator is involved.
+- The new candidates that were probed were all rejected `not-true`:
+  - 25 return candidates: relational `_ >= acc`/`_ == n`, and fixed signs on `unwrap`
+    that the `true` filter un-truncated;
+  - 32 accumulator candidates on the new accumulator slots: `Float` and parameter
+    initial values, and `fold_right` steps (`_ > 0.0`, `_ < 0`, and similar).
+- 16 `true` candidates (always useless) are no longer probed.
+
+Cost is at main's: median 1.38×, p90 1.81×, aggregate 1.74× against 1.73×. Before the cost
+fixes above it was p90 4.86×.
+
+The shapes this branch adds are proposed, and re-check as predicted, on the unit and
+apply fixtures (`infer-vocab-oct`). Every applied fixture re-checks exactly as predicted:
+the item 1, 2, 3, 4 and 5 apply rows and the one-argument K6 row.
+
+### Newly accepted proposals
+
+On `test/native`: none. On the fixtures, each is a contract a caller in the fixture
+needs, and the checker proves it. Judgment on each:
+- `inc(x : Int) : {Int | _ > x}`: real. It is the weakest relational return that closes
+  `need_pos(inc(n))`, and it is preferred over `_ == x + 1`.
+- `add(x, y) : {Int | _ == x + y}`: real, but exact: it restates the body. `_ > x` is not
+  a candidate here, because the tail `x + y` has no literal offset, so the equality is
+  the only relational fact offered.
+- `filt : k -> v -> Bool[p]` / `Assoc(k[p], v[p])`: real. It is the multi-arg `filt`
+  contract.
+- `dfilt : a -> Bool[p]` / `Deque.Deque(a[p])`: real.
+- `pos_vals : Map(String, {Int | _ > 0})` and `pos_keys : Map({Int | _ > 0}, String)`:
+  real.
+- `mk : Assoc({x : Int | true}, {y : Int | y > x})`: real.
+- `f(a : Assoc({x : Int | true}, {y : Int | y > x}))`: real. It is a precondition the
+  body needs, and a violating caller refuses it.
+- `fn (acc : {Int | _ > 0}, _x)` with a parameter init, `fn (_x, acc : {Int | _ > 0})`
+  in `fold_right`, and `fn (acc : {Int | _ < 0}, _x)` with `0 - 1`: real invariants.
+
+Vacuous or odd, all found and stopped before the final run: `Assoc({Int | true}, Int)`
+and `Assoc({Int | _ != 0}, Int)` (item 3), both from the per-argument slots of item 4.
+
+## Verification
+
+- `scripts/run-tests.sh refinecheck` (z3 on `PATH`): `Test Successful … 1685 tests run`,
+  "All suites passed". `infer-vocab-oct` has 28 cases, every one watched failing on the
+  commit before its item, or a control or pin that passed before and after.
+- `scripts/refine-oracle.sh` (private `HOME`): **IDENTICAL**, 8750 lines over 552
+  fixtures, against a baseline of `lib/refinecheck` at `origin/main` in the same `_build`.
+  The first baseline (7873 lines, taken before any edit) could not be compared. A
+  `scripts/run-tests.sh` run in between staged `_build/default/stdlib`. That moved 1017
+  lines of non-refinement stdlib diagnostics (`stdlib_internal`, `cap_needs`) and **no**
+  refinement line, the same staging effect as in the demand-chains note. Plain `--check`
+  never runs the inference modules, so the oracle cannot see this branch's code; it pins
+  only that nothing else moved.
+- `scripts/check-docs.sh`: `doc-lint passed`, with the generated chapters matching.
+- Full `scripts/run-tests.sh`: "All suites passed", exit 0 (load 4-5).
+
+## Rulings
+
+- Ruling: relational return candidates come from the body's tails only (`x`, `x ± c`,
+  `x ± y`), at most 4, inequalities first — why: the full family (5 operators × every
+  same-sort parameter) is mostly not TRUE and each probe walks the callers — cost if
+  wrong: a relational return whose tail is not one of these shapes (`max`-like `if`
+  tails are covered, `2 * x` is not) is not found.
+- Ruling: the relational returns have their own allowance on top of the 12-candidate cap
+  — why: never displace a candidate main already probed — cost if wrong: up to 4 more
+  probes per return slot that has a caller with an unsettled obligation.
+- Ruling: the implication probe declares the scope parameters before the subject — why: a
+  refinement may only name an earlier parameter; otherwise every relational implication
+  was unprovable — cost if wrong: none found; non-relational queries do not mention the
+  scope.
+- Ruling: K6's one-argument returns extend to every registered one-argument container,
+  and two-argument callbacks to registered two-argument containers whose arguments are
+  exactly `k, v` in order — why: the checker's W4 (`entry_shaped`) and the oracle decide
+  the rest — cost if wrong: a few wasted probes on a container whose sugar the checker
+  rejects (the graft then fails or the oracle rejects).
+- Ruling: the K6 install marks the element return proved — why: the oracle proved it
+  (`k6_verdict` is the element-return gate), and without it every applied K6 proposal
+  failed its re-check — cost if wrong: none; the same mark was already intended (the
+  unreachable `|| K6` arm).
+- Ruling: relational element refinements are Demand-driven only, one root at a time —
+  why: the only candidate that can be USEFUL is the type a caller demands; a joint
+  parameter+return probe (`bump`) needs new admissibility rules — cost if wrong: `bump`
+  shapes are not found (todo filed).
+- Ruling: a candidate must mention `_`, and a closed `true` goal at a call that gains an
+  unsettled obligation does not count — why: both made vacuous proposals look useful —
+  cost if wrong: a slot whose only demand is a bare `true` gets nothing, which is right.
+- Ruling: per-argument (`Arg`) slots and relational returns are demand-gated; other slots
+  are not — why: keep this branch's cost at main's without changing which existing
+  candidates are probed — cost if wrong: an `Arg` slot whose caller's skip lies in a
+  function that calls it only through a qualified name not matched by `fn_calls`'s bare
+  name is not tried.
+- Ruling: K7 reads the accumulator's base from literals, a literal difference, or an
+  `Int`/`Float` parameter; not from arbitrary expressions — why: the base must be known
+  without the type map, and these are the shapes the checker's rule documents — cost if
+  wrong: a fold whose initial value is a call or a field is not tried.
+- Ruling: `Deque.Deque` element slots needed nothing (already proposed since #1022) — the
+  row is pinned, not RED.
+
+## Not done (todos filed)
+
+- `specs/todos/2026-10-25-refine-map-filter-two-arg-passthrough.md`: the checker does not
+  prove a `Map(k, v)` combinator that passes its two-argument callback to `Map.filter`, so
+  inference correctly does not propose it.
+- `specs/todos/2026-10-25-refine-infer-joint-relational-param-return.md`: the joint
+  parameter+return relation (`bump`).

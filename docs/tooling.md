@@ -770,10 +770,12 @@ forge refine --infer --allow-caller-violations         # accept a precondition t
 
 `--infer` covers every kind of refinement the checker can verify:
 - scalar and relational preconditions (`b : {Int | _ != 0}`, `i : {Int | _ < n}`);
-- return contracts;
-- element contracts (`xs : List({Int | _ > 0})`, element and tuple returns);
-- abstract refinements for `filter`-shaped helpers (`pred : a -> Bool[p]` with `List(a[p])`);
-- fold accumulator invariants.
+- return contracts, including one relating the result to a parameter (`inc(x : Int) : {Int | _ > x}`);
+- element contracts (`xs : List({Int | _ > 0})`, element and tuple returns, each slot of a `Map`,
+  `Deque.Deque`), and a relation between two slots a caller demands (`Assoc({x : Int | true}, {y : Int | y > x})`);
+- abstract refinements for `filter`-shaped helpers (`pred : a -> Bool[p]` with `List(a[p])`, and
+  two-argument `keep : k -> v -> Bool[p]` with `Assoc(k[p], v[p])`);
+- fold accumulator invariants (`fold_left` and `fold_right` steps).
 
 It searches to a fixpoint over the call graph in one run, callees first. Returns go before
 preconditions: a proved return costs no caller anything, while a precondition moves the
