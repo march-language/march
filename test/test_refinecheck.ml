@@ -26788,6 +26788,55 @@ let demand_chains_suite =
           (fun r ->
             Alcotest.check sp "nothing for inc" [] (List.filter (fun (f, _) -> f = "inc") (props r)))) ]
 
+
+(* ── inference vocabulary, October 2026 (specs/progress/2026-10-25-refine-infer-vocab.md) ──
+   The refinement shapes the checker gained in October, as inference
+   candidates: relational scalar returns (G1), two-argument abstract
+   refinements, relational element refinements, `Map`/`Deque` element and
+   abstract slots.  Each row asserts the proposed annotation text; each has
+   a control that must not be proposed. *)
+let infer_vocab_oct_suite =
+  let pre = "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n" in
+  let m name body = "mod " ^ name ^ " do\n" ^ pre ^ body ^ "end\n" in
+  let sp = Alcotest.(list (pair string string)) in
+  let mined_texts src ~fn =
+    let dm = March_desugar.Desugar.desugar_module (parse src) in
+    let decls = dm.March_ast.Ast.mod_decls in
+    match List.find_opt (fun (s : IS.slot) -> s.IS.fn = fn && s.IS.path = IS.Return) (IS.enumerate ~is_user:(fun _ -> true) decls) with
+    | None -> Alcotest.failf "no return slot for %s" fn
+    | Some s -> List.map (fun c -> c.IV.c.PI.c_text) (IV.mine s ~ledger:[] ~unit_decls:decls)
+  in
+  [ (* 1. Relational scalar returns (G1). *)
+    gated "G1 relational return: inc(x) = x + 1 proposes {Int | _ > x}" (fun () ->
+        infer_run
+          (m "GR" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n")
+          (fun r -> Alcotest.check sp "inc" [ ("inc", "{Int | _ > x}") ] (props r)));
+    Alcotest.test_case "G1 vocabulary: x + 1 mines _ > x, x - 1 does not" `Quick (fun () ->
+        let inc = mined_texts (m "GV" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : Int) : Int do inc(n) end\n") ~fn:"inc" in
+        Alcotest.(check bool) ("inc mines _ > x: " ^ String.concat "; " inc) true (List.mem "_ > x" inc);
+        Alcotest.(check bool) "inc mines _ == x + 1" true (List.mem "_ == x + 1" inc);
+        let dec = mined_texts (m "GV" "  fn dec(x : Int) : Int do x - 1 end\n  fn go(n : Int) : Int do dec(n) end\n") ~fn:"dec" in
+        Alcotest.(check bool) ("dec does not mine _ > x: " ^ String.concat "; " dec) false (List.mem "_ > x" dec);
+        Alcotest.(check bool) "dec mines _ < x" true (List.mem "_ < x" dec));
+    gated "G1 control: dec(x) = x - 1 proposes nothing for need_pos(dec(n))" (fun () ->
+        infer_run
+          (m "GD" "  fn dec(x : Int) : Int do x - 1 end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(dec(n)) end\n")
+          (fun r -> Alcotest.check sp "none" [] (props r)));
+    gated "G1 relational return: a two-parameter sum proposes _ == x + y only from the tail's shape" (fun () ->
+        infer_run
+          (m "GS" "  fn add(x : Int, y : Int) : Int do x + y end\n  fn go(a : {Int | _ > 0}, b : {Int | _ > 0}) : Int do need_pos(add(a, b)) end\n")
+          (fun r -> Alcotest.check sp "add" [ ("add", "{Int | _ == x + y}") ] (props r)));
+    gated "G1 apply: the written return re-checks exactly as predicted" (fun () ->
+        let src = m "GA" "  fn inc(x : Int) : Int do x + 1 end\n  pfn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n  fn main() : Int do go(3) end\n" in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ()) "fn inc(x : Int) : {Int | _ > x}");
+            let _, rep = run_cli_in dir "--check --refine-report" in
+            Alcotest.(check bool) ("no user skips: " ^ rep) true (Astring_contains.contains rep "0 violated, 0 trusted, 0 skipped")))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -26941,6 +26990,7 @@ let () =
       ("infer-cli", infer_cli_suite);
       ("infer-apply", infer_apply_suite);
       ("demand-chains", demand_chains_suite);
+      ("infer-vocab-oct", infer_vocab_oct_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("element-entries", element_entries_suite);
