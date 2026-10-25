@@ -1278,6 +1278,17 @@ let t = []
 head(t)             -- reported: `len(_) > 0` cannot hold
 ```
 
+**`Cons(h, t)` is one longer than `t`** (since 2026-10-26). `len`'s own
+defining equations, `len(Nil) == 0` and `len(Cons(h, t)) == len(t) + 1`, are
+used wherever a constructor meets a length demand: at a call argument
+(`head(Cons(x, t))` proves for any `t`), at a `let` (`let ys = Cons(x, t)`
+records `len(ys) == len(t) + 1`), and in a `Cons(h, t) ->` arm on a variable
+`xs`, which knows `len(xs) == len(t) + 1`. The last is what proves
+`List.nth`'s own recursive call `nth(t, n - 1)` from `n < len(xs)`. The tail's
+own facts compose (`t : {List(Int) | len(_) == 1}` gives `Cons(x, t)` length
+2). A self-rebinding `let t = Cons(x, t)` records nothing, and rebinding `t`
+later retires the fact.
+
 Thirteen stdlib functions that panic on an empty argument carry this contract:
 `List.head`/`tail`/`last`/`minimum_int`/`maximum_int`, the `prelude` `head`/`tail`,
 `Stats.mean`/`min_val`/`max_val`, `Gen.element`/`one_of`, and `Random.choice`. Each

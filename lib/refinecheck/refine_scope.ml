@@ -2115,8 +2115,9 @@ let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
 let self_mentioning (pat : A.pattern) (pred : A.expr) : bool =
   expr_mentions (pat_binders pat) pred
 
-(* `len(_) == k` for a Cons/Nil chain ending in `Nil` (k cells); [None]
-   for any other expression.  Only a constructor chain counts: a bare `let ys = xs`
+(* `len(_) == k` for a Cons/Nil chain ending in `Nil` (k cells), or
+   `len(_) == len(t) + k` for one ending in a variable `t`; [None] for any
+   other expression.  Only a constructor chain counts: a bare `let ys = xs`
    is an alias, not a length fact, and is left to the other channels. *)
 let list_len_pred ~(span : A.span) (e : A.expr) : A.expr option =
   let v x = A.EVar { A.txt = x; A.span = span } in
@@ -2126,6 +2127,8 @@ let list_len_pred ~(span : A.span) (e : A.expr) : A.expr option =
     match e with
     | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (lit k)
     | A.ECon ({ A.txt = "Cons"; _ }, [ _; tl ], _) -> go (k + 1) tl
+    | A.EVar { A.txt = t; _ } when k > 0 && t <> "_" ->
+      Some (app "+" [ app "len" [ v t ]; lit k ])
     | _ -> None
   in
   match e with
@@ -2244,6 +2247,12 @@ let scope_add_binding
         which [scope_shadow] above (and at every later binder) retires.
         Declined when a user `@[measure]` took the name `len` (then `len` is
         not list length) or `List` is not a registered datatype. *)
+     (* The same for a chain ending in a NAME, `Cons(h, t)`: `len(_) ==
+        len(t) + 1`, the measure's own defining equation (gap L2).  That
+        predicate mentions `t`, so it takes [self_mentioning]'s guard like
+        every relational entry above (`let t = Cons(x, t)` is about the NEW
+        `t`: declined), and [scope_shadow] retires it when `t` is rebound
+        later. *)
      | rhs ->
        (match list_len_pred ~span:n.A.span rhs with
         | Some pred

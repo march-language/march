@@ -2129,6 +2129,21 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            Some (Smt.IsCtor (ctor, t))
          | None -> None)
     in
+    (* The list length of a Cons/Nil chain whose innermost tail is a caller
+       NAME or a call with a proved `len` postcondition: `k + len$t`.  [None]
+       for any other tail. *)
+    let rec cons_len_term (a : A.expr) : Smt.term option =
+      match a with
+      | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (Smt.IntLit 0)
+      | A.ECon ({ A.txt = "Cons"; _ }, [ _; tl ], _) ->
+        Option.map (fun t -> Smt.Add (t, Smt.IntLit 1)) (cons_len_term tl)
+      | A.EVar { A.txt = x; _ } when (not (is_recvar x)) && not (Hashtbl.mem str_names x) ->
+        load_scope_measure_facts x;
+        measure_of_var "len" x
+      | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) when set_of_call_available fname cargs ->
+        set_of_call "len" fname cargs
+      | _ -> None
+    in
     let resolve_measure m name =
       (* `len` OVERLOAD RESOLUTION.  The string meaning is taken only when the
          subject's DECLARED base type is String — the refinement's own base type
@@ -2231,6 +2246,17 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _)
                    when is_call_measure m && set_of_call_available fname cargs ->
                    set_of_call m fname cargs
+                 (* `Cons(h, t)` with a non-literal tail: `len`'s own
+                    defining equation, `len(Cons(h, t)) == len(t) + 1`,
+                    unfolded down the chain to a tail it can name.  Sound
+                    because it IS the measure's definition; the tail's own
+                    caller-scope promise is loaded exactly as for a bare
+                    name above. *)
+                 | A.ECon ({ A.txt = "Cons"; _ }, [ _; _ ], _)
+                   when m = "len" && is_call_measure m ->
+                   (match cons_len_term a with
+                    | Some t -> Some t
+                    | None -> if is_self name then measure_of_var m self_dt_sym else None)
                  (* A non-variable, non-literal actual (a call, a field…): no
                     symbol to share with the caller's facts.  For the binder
                     spellings keep the fresh non-negative constant — it is what

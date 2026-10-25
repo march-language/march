@@ -5077,6 +5077,39 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
             (tester, false) :: p
           | _ -> p
         in
+        (* List-length narrowing, the arithmetic half of the tag narrowing
+           above.  Inside `Cons(h, t) ->` on a variable `xs`, `len(xs) ==
+           len(t) + 1` — `len`'s own defining equation, so sound for any
+           list — and likewise `Cons(_, Cons(_, r))` gives `len(r) + 2`,
+           `Cons(_, Nil)` gives `1`.  This is what `List.nth`'s recursive
+           call `nth(t, n - 1)` needs from `n < len(xs)` (gap L2).  The same
+           guards as the tester: a bare-variable scrutinee the arm does not
+           rebind, and the constructor the built-in `List`'s (a user ADT's
+           own `Cons` is not list length).  A wildcard tail gives no
+           equation (the tag fact already says `len(xs) > 0`).  [path_shadow]
+           retires it if `xs` or the tail binder is rebound inside the arm. *)
+        let p =
+          match subj, br.A.branch_pat with
+          | A.EVar s, (A.PatCon ({ A.txt = "Cons"; _ }, [ _; _ ]) as pat)
+            when sort_of_ctor "Cons" = Some (adt_sort_name "List")
+                 && (not (is_axiom_measure "len"))
+                 && not (List.mem s.A.txt binders) ->
+            let sp = s.A.span in
+            let v x = A.EVar { A.txt = x; A.span = sp } in
+            let app f args = A.EApp (v f, args, sp) in
+            let lit k = A.ELit (A.LitInt k, sp) in
+            let rec tail k (q : A.pattern) =
+              match q with
+              | A.PatCon ({ A.txt = "Cons"; _ }, [ _; tl ]) -> tail (k + 1) tl
+              | A.PatCon ({ A.txt = "Nil"; _ }, []) -> Some (lit k)
+              | A.PatVar t when t.A.txt <> s.A.txt -> Some (app "+" [ app "len" [ v t.A.txt ]; lit k ])
+              | _ -> None
+            in
+            (match tail 0 pat with
+             | Some rhs -> (app "==" [ app "len" [ v s.A.txt ]; rhs ], false) :: p
+             | None -> p)
+          | _ -> p
+        in
         (* A Bool-literal arm — `match cond do true -> … false -> … end`.
            This is the same branch on the same Bool as an [A.EIf], so it earns
            the same fact, and it is recorded in the same (condition, negated)

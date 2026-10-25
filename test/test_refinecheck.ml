@@ -27068,6 +27068,107 @@ let gap_let_literal_len_suite =
         in
         Alcotest.check gap_ps "need_same" [ ("violated", ""); ("proved", "") ] (gap_at "need_same" obs)) ]
 
+(* L2 (specs/progress/2026-10-26-refine-cons-length-equation): `len`'s own
+   defining equations, `len(Nil) == 0` and `len(Cons(h, t)) == 1 + len(t)`,
+   at a call argument, a `let`, and a `Cons(h, t)` match arm on a variable
+   (the `List.nth` recursive call). *)
+let gap_cons_len_suite =
+  let m body =
+    "mod CL do\n  fn need_len2(xs : {List(Int) | len(_) == 2}) : Int do 0 end\n\
+    \  fn need_ne(xs : {List(Int) | len(_) > 0}) : Int do 0 end\n" ^ body ^ "end\n"
+  in
+  let mynth ?(tail = "t") ?(idx = "n - 1") () =
+    Printf.sprintf
+      "  fn mynth(xs : List(Int), n : {Int | _ >= 0 && _ < len(xs)}) : Int do\n\
+      \    match xs do\n\
+      \      Nil -> 0\n\
+      \      Cons(h, t) -> if n == 0 do h else mynth(%s, %s) end\n\
+      \    end\n\
+      \  end\n"
+      tail idx
+  in
+  [ gated "L2: `need_len2(Cons(1, Cons(2, Nil)))` proves; `need_ne(Nil)` is a violation" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a1() : Int do need_len2(Cons(1, Cons(2, Nil))) end\n  fn a3() : Int do need_ne(Nil) end\n")
+        in
+        Alcotest.check gap_ps "need_len2" gap_proved (gap_at "need_len2" obs);
+        Alcotest.check gap_ps "need_ne" [ ("violated", "") ] (gap_at "need_ne" obs));
+    gated "L2: `need_ne(Cons(x, t))` proves for an arbitrary tail" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a2(x : Int, t : List(Int)) : Int do need_ne(Cons(x, t)) end\n\
+                \  fn a5(x : Int, t : List(Int)) : Int do need_ne(Cons(x, Cons(x, t))) end\n")
+        in
+        Alcotest.check gap_ps "need_ne" [ ("proved", ""); ("proved", "") ] (gap_at "need_ne" obs));
+    gated "L2: the tail's own length fact composes (`t : len == 1` gives `len(Cons(x, t)) == 2`)" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn ok(x : Int, t : {List(Int) | len(_) == 1}) : Int do need_len2(Cons(x, t)) end\n\
+                \  fn bad(x : Int, t : {List(Int) | len(_) == 2}) : Int do need_len2(Cons(x, t)) end\n\
+                \  fn unk(x : Int, t : List(Int)) : Int do need_len2(Cons(x, t)) end\n")
+        in
+        (match gap_at "need_len2" obs with
+         | [ a; b; c ] ->
+           Alcotest.check gap_ps "ok" gap_proved [ a ];
+           Alcotest.check gap_ps "bad" [ ("violated", "") ] [ b ];
+           Alcotest.(check bool) "unk: not proved" false (c = ("proved", ""))
+         | vs -> Alcotest.failf "expected 3 need_len2 obligations, got %d" (List.length vs)));
+    gated "L2: `let ys = Cons(x, t)` carries `len(ys) == 1 + len(t)`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a4(x : Int, t : List(Int)) : Int do\n    let ys = Cons(x, t)\n    need_ne(ys)\n  end\n\
+                \  fn a6(x : Int, t : {List(Int) | len(_) == 1}) : Int do\n    let ys = Cons(x, t)\n    need_len2(ys)\n  end\n")
+        in
+        Alcotest.check gap_ps "need_ne" gap_proved (gap_at "need_ne" obs);
+        Alcotest.check gap_ps "need_len2" gap_proved (gap_at "need_len2" obs));
+    gated "L2 control: a self-rebinding `let t = Cons(x, t)` is not about the new `t`" (fun () ->
+        (* Filed naively, `len(t) == 1 + len(t)` is a contradiction that
+           proves anything, including a demand for length 2. *)
+        let obs =
+          gap_run
+            (m "  fn a(x : Int, t : List(Int)) : Int do\n    let t = Cons(x, t)\n    need_len2(t)\n  end\n")
+        in
+        gap_not_proved "need_len2" (gap_at "need_len2" obs));
+    gated "L2 control: a tail rebound after the `let` retires the fact" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(x : Int, t : {List(Int) | len(_) == 1}) : Int do\n    let ys = Cons(x, t)\n    let t = [1, 2, 3]\n    need_len2(ys)\n  end\n")
+        in
+        (* `len(ys) == 1 + len(t)` read against the NEW `t` (3) would be a
+           violation; retired, it is a skip. *)
+        gap_not_proved "need_len2" (gap_at "need_len2" obs);
+        Alcotest.(check bool) "not a violation" false (List.mem ("violated", "") (gap_at "need_len2" obs)));
+    gated "L2 name capture: the callee's parameter `t` is not the caller's tail `t`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn need_succ(t : List(Int), ys : {List(Int) | len(_) == len(t) + 1}) : Int do 0 end\n\
+                \  fn good(x : Int, t : List(Int)) : Int do need_succ(t, Cons(x, t)) end\n\
+                \  fn bad(x : Int, t : {List(Int) | len(_) == 1}) : Int do need_succ(Nil, Cons(x, t)) end\n")
+        in
+        Alcotest.check gap_ps "need_succ" [ ("proved", ""); ("violated", "") ] (gap_at "need_succ" obs));
+    gated "L2: the `List.nth` recursive call `nth(t, n - 1)` under `Cons(h, t)` proves" (fun () ->
+        let obs = gap_run (m (mynth ())) in
+        Alcotest.check gap_ps "mynth" gap_proved (gap_at "mynth" obs));
+    gated "L2 control: the arm fact is about `t`, not the scrutinee (`mynth(xs, n - 1)`, `mynth(t, n)`)" (fun () ->
+        (* `mynth(xs, n - 1)` still proves (`n - 1 < n < len(xs)`); `mynth(t,
+           n)` does not (`n < len(xs)` gives only `n <= len(t)`). *)
+        Alcotest.check gap_ps "xs, n - 1" gap_proved (gap_at "mynth" (gap_run (m (mynth ~tail:"xs" ()))));
+        gap_not_proved "t, n" (gap_at "mynth" (gap_run (m (mynth ~idx:"n" ())))));
+    gated "L2 control: a tail binder rebound inside the arm retires the arm's equation" (fun () ->
+        let src =
+          m
+            "  fn f(xs : List(Int), n : {Int | _ >= 0 && _ < len(xs)}) : Int do\n\
+            \    match xs do\n\
+            \      Nil -> 0\n\
+            \      Cons(h, t) ->\n\
+            \        let t = [1]\n\
+            \        if n == 0 do h else f(t, n - 1) end\n\
+            \    end\n\
+            \  end\n"
+        in
+        gap_not_proved "f" (gap_at "f" (gap_run src))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -27236,4 +27337,5 @@ let () =
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("len-return-obliged", len_return_obliged_suite);
       ("gap-let-literal-len", gap_let_literal_len_suite);
+      ("gap-cons-len", gap_cons_len_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

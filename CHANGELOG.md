@@ -338,6 +338,11 @@ git log is authoritative for exact commits.
   Cons/Nil chain ending in `Nil`, `[]` included), retired when `t` is rebound. This
   was half the user-code skips in a 67-program corpus sweep
   (`examples/stats_basic.march`).
+- **Refinements: `Cons(h, t)` is known to be one longer than `t`.** `need_ne(Cons(x,
+  t))`, `let ys = Cons(x, t)` then `need_ne(ys)`, and `List.nth`'s own recursive call
+  `nth(t, n - 1)` inside a `Cons(h, t)` arm were skipped; `len`'s defining equation
+  now applies at call arguments, `let`s and `match` arms, and all three prove. The
+  one skip inside `stdlib/list.march` is gone.
 - **`String.slice` with a negative start no longer reads out of bounds in wasm-compiled programs.**
   The wasm runtime's `march_string_slice` did not clamp a negative `start` and read before
   the string's buffer; it now clamps exactly like the native runtime and the interpreter
