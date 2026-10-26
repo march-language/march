@@ -542,6 +542,20 @@ corpus brackets it from both sides (`accept/t118`, `reject/t117`), because an
 accept-only witness exits 0 either way and so cannot tell a working guard from a
 contract that checks no property.
 
+**The alias also applies to an argument and a `let`** (since 2026-10-26), not
+only to a guard. `need_nn(List.length(xs))` is checked as `need_nn` of
+`len(xs)`, so it proves, and `need_pos(List.length(xs))` proves exactly when
+`xs` is known non-empty (`xs : {List(Int) | len(_) > 0}`, a guard, a literal);
+otherwise it is a skip. Arithmetic over it reflects too
+(`List.length(xs) + 1`). `let n = List.length(xs)` records `n == len(xs)`, so
+
+```march
+let n = List.length(xs)
+if i >= 0 && i < n do List.nth(xs, i) else 0 end   -- proved
+```
+
+and rebinding `xs` or `n` before the use retires the fact.
+
 The alias is intentionally narrow, because attaching `len`'s meaning to the wrong
 function would manufacture false positives:
 
@@ -1263,6 +1277,32 @@ head([1, 2])        -- silent
 fn f(ys : List(Int)) : Int do head(ys) end   -- skipped: length unknown
 ```
 
+**A `let`-bound list of known length keeps its length** (since 2026-10-26).
+`let t = [1, 2, 3]` records `len(t) == 3`, the same fact a parameter
+`t : {List(Int) | len(_) == 3}` carries, so `head(t)` and `Stats.mean(t)` are
+checked exactly as `head([1, 2, 3])` is. This covers any constructor chain
+ending in `Nil`: a literal, `[]`, `Cons(1, Nil)`, and a nested literal, which
+counts its outer cells. Rebinding `t`, by a `let` or a `match` arm, retires
+the fact:
+
+```march
+let t = [1, 2, 3]
+head(t)             -- proved
+let t = []
+head(t)             -- reported: `len(_) > 0` cannot hold
+```
+
+**`Cons(h, t)` is one longer than `t`** (since 2026-10-26). `len`'s own
+defining equations, `len(Nil) == 0` and `len(Cons(h, t)) == len(t) + 1`, are
+used wherever a constructor meets a length demand: at a call argument
+(`head(Cons(x, t))` proves for any `t`), at a `let` (`let ys = Cons(x, t)`
+records `len(ys) == len(t) + 1`), and in a `Cons(h, t) ->` arm on a variable
+`xs`, which knows `len(xs) == len(t) + 1`. The last is what proves
+`List.nth`'s own recursive call `nth(t, n - 1)` from `n < len(xs)`. The tail's
+own facts compose (`t : {List(Int) | len(_) == 1}` gives `Cons(x, t)` length
+2). A self-rebinding `let t = Cons(x, t)` records nothing, and rebinding `t`
+later retires the fact.
+
 Thirteen stdlib functions that panic on an empty argument carry this contract:
 `List.head`/`tail`/`last`/`minimum_int`/`maximum_int`, the `prelude` `head`/`tail`,
 `Stats.mean`/`min_val`/`max_val`, `Gen.element`/`one_of`, and `Random.choice`. Each
@@ -1864,6 +1904,11 @@ renders its model as a set literal: `Set.insert() can return {4}`,
   such as "this list has no duplicates" (`card(elts(xs)) == len(xs)` after
   `List.dedup`), is not provable, and a permutation contract still writes
   both halves: `{List(Int) | elts(_) == elts(xs) && len(_) == len(xs)}`.
+  Once proved, a caller gets both halves (since 2026-10-26): every conjunct of
+  a proved return is lent on its own, so `f(xs)` meets a `len(_) == len(xs)`
+  demand and a `subset(elts(_), elts(xs))` demand alike. Before, a call site
+  asking about one measure dropped the whole conjunction and got neither half.
+  A return whose proof fails lends nothing, not even a true conjunct.
 - **List structure is followed only inside a proof by recursion.** A
   contract on a function that recurses over a list (see "Proved list
   contracts" above) is proved through its `Cons` cells. Everywhere else `elts`

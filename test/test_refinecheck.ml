@@ -27001,6 +27001,333 @@ let infer_vocab_oct_suite =
                 "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn mfilt(m : Map(k, v), keep : k -> v -> Bool, cmp : k -> k -> Bool) : Map(k, v) do Map.filter(m, keep, cmp) end\n  fn go(m : Map(String, Int)) : Int do need_posmap(mfilt(m, fn _k -> fn v -> v > 0, Map.str_cmp)) end\n")))
   ]
 
+(* L1 (specs/progress/2026-10-26-refine-let-literal-length): a `let` bound to
+   an expression of exactly-known length (a list literal, `[]`, a Cons/Nil
+   chain) carries `len(n) == k` as a scope fact, the same entry a parameter
+   `n : {List(_) | len(_) == k}` would carry, retired on rebinding. *)
+let gap_let_literal_len_suite =
+  let m body =
+    "mod LL do\n  fn need_len3(xs : {List(Int) | len(_) == 3}) : Int do 0 end\n\
+    \  fn need_z(xs : {List(Int) | len(_) == 0}) : Int do 0 end\n\
+    \  fn mk() : List(Int) do Nil end\n" ^ body ^ "end\n"
+  in
+  [ gated "L1: `let t = [1, 2, 3]` then `List.head(t)` / `need_len3(t)` proves" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn v1() : Int do\n    let t = [1, 2, 3]\n    List.head(t)\n  end\n\
+                \  fn v2() : Int do\n    let t = [1, 2, 3]\n    need_len3(t)\n  end\n")
+        in
+        Alcotest.check gap_ps "List.head" gap_proved (gap_at "List.head" obs);
+        Alcotest.check gap_ps "need_len3" gap_proved (gap_at "need_len3" obs));
+    gated "L1: a let-bound FLOAT literal (the stats_basic `let temps = [..]` shape)" (fun () ->
+        let obs = gap_run (m "  fn v() : Float do\n    let temps = [1.5, 2.0]\n    List.head(temps)\n  end\n") in
+        Alcotest.check gap_ps "List.head" gap_proved (gap_at "List.head" obs));
+    gated "L1: an empty literal `[]` / `Nil` is length 0: proves `len == 0`, violates `len > 0`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn v1() : Int do\n    let t = []\n    need_z(t)\n  end\n\
+                \  fn v2() : Int do\n    let t = Nil\n    List.head(t)\n  end\n")
+        in
+        Alcotest.check gap_ps "need_z" gap_proved (gap_at "need_z" obs);
+        Alcotest.check gap_ps "List.head" [ ("violated", "") ] (gap_at "List.head" obs));
+    gated "L1: a nested literal counts its OUTER cells" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn need_len2(xs : {List(List(Int)) | len(_) == 2}) : Int do 0 end\n\
+                \  fn v() : Int do\n    let t = [[1, 2, 3], [4]]\n    need_len2(t)\n  end\n\
+                \  fn w() : Int do\n    let t = [[1, 2], [3]]\n    need_len3(List.head(t))\n  end\n")
+        in
+        Alcotest.check gap_ps "need_len2" gap_proved (gap_at "need_len2" obs);
+        (* The inner list's length is not the outer's: `List.head(t)` is a
+           call with no length contract, so need_len3 is not proved. *)
+        gap_not_proved "need_len3" (gap_at "need_len3" obs));
+    gated "L1 control: a rebinding retires the fact (a literal rebinding gives its OWN length)" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn v1() : Int do\n    let t = [1, 2, 3]\n    let t = mk()\n    need_len3(t)\n  end\n\
+                \  fn v2() : Int do\n    let t = [1, 2, 3]\n    let t = [1]\n    need_len3(t)\n  end\n")
+        in
+        (* `mk()`: unconstrained.  `[1]`: a violation — had the old fact
+           survived, `len == 3 && len == 1` would prove anything. *)
+        Alcotest.check gap_ps "need_len3"
+          [ ("skipped", "unconstrained-subject"); ("violated", "") ]
+          (gap_at "need_len3" obs));
+    gated "L1 control: a match-arm binder shadows the let" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn v(o : Option(List(Int))) : Int do\n    let t = [1, 2, 3]\n    match o do\n\
+                \      Some(t) -> need_len3(t)\n      None -> 0\n    end\n  end\n")
+        in
+        gap_not_proved "need_len3" (gap_at "need_len3" obs));
+    gated "L1 name capture: the callee's parameter `t` is not the caller's `t`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn need_same(t : List(Int), ys : {List(Int) | len(_) == len(t)}) : Int do 0 end\n\
+                \  fn v() : Int do\n    let t = [1, 2, 3]\n    need_same([9], t)\n  end\n\
+                \  fn w() : Int do\n    let t = [1, 2, 3]\n    need_same([7, 8, 9], t)\n  end\n")
+        in
+        Alcotest.check gap_ps "need_same" [ ("violated", ""); ("proved", "") ] (gap_at "need_same" obs)) ]
+
+(* L2 (specs/progress/2026-10-26-refine-cons-length-equation): `len`'s own
+   defining equations, `len(Nil) == 0` and `len(Cons(h, t)) == 1 + len(t)`,
+   at a call argument, a `let`, and a `Cons(h, t)` match arm on a variable
+   (the `List.nth` recursive call). *)
+let gap_cons_len_suite =
+  let m body =
+    "mod CL do\n  fn need_len2(xs : {List(Int) | len(_) == 2}) : Int do 0 end\n\
+    \  fn need_ne(xs : {List(Int) | len(_) > 0}) : Int do 0 end\n" ^ body ^ "end\n"
+  in
+  let mynth ?(tail = "t") ?(idx = "n - 1") () =
+    Printf.sprintf
+      "  fn mynth(xs : List(Int), n : {Int | _ >= 0 && _ < len(xs)}) : Int do\n\
+      \    match xs do\n\
+      \      Nil -> 0\n\
+      \      Cons(h, t) -> if n == 0 do h else mynth(%s, %s) end\n\
+      \    end\n\
+      \  end\n"
+      tail idx
+  in
+  [ gated "L2: `need_len2(Cons(1, Cons(2, Nil)))` proves; `need_ne(Nil)` is a violation" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a1() : Int do need_len2(Cons(1, Cons(2, Nil))) end\n  fn a3() : Int do need_ne(Nil) end\n")
+        in
+        Alcotest.check gap_ps "need_len2" gap_proved (gap_at "need_len2" obs);
+        Alcotest.check gap_ps "need_ne" [ ("violated", "") ] (gap_at "need_ne" obs));
+    gated "L2: `need_ne(Cons(x, t))` proves for an arbitrary tail" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a2(x : Int, t : List(Int)) : Int do need_ne(Cons(x, t)) end\n\
+                \  fn a5(x : Int, t : List(Int)) : Int do need_ne(Cons(x, Cons(x, t))) end\n")
+        in
+        Alcotest.check gap_ps "need_ne" [ ("proved", ""); ("proved", "") ] (gap_at "need_ne" obs));
+    gated "L2: the tail's own length fact composes (`t : len == 1` gives `len(Cons(x, t)) == 2`)" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn ok(x : Int, t : {List(Int) | len(_) == 1}) : Int do need_len2(Cons(x, t)) end\n\
+                \  fn bad(x : Int, t : {List(Int) | len(_) == 2}) : Int do need_len2(Cons(x, t)) end\n\
+                \  fn unk(x : Int, t : List(Int)) : Int do need_len2(Cons(x, t)) end\n")
+        in
+        (match gap_at "need_len2" obs with
+         | [ a; b; c ] ->
+           Alcotest.check gap_ps "ok" gap_proved [ a ];
+           Alcotest.check gap_ps "bad" [ ("violated", "") ] [ b ];
+           Alcotest.(check bool) "unk: not proved" false (c = ("proved", ""))
+         | vs -> Alcotest.failf "expected 3 need_len2 obligations, got %d" (List.length vs)));
+    gated "L2: `let ys = Cons(x, t)` carries `len(ys) == 1 + len(t)`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a4(x : Int, t : List(Int)) : Int do\n    let ys = Cons(x, t)\n    need_ne(ys)\n  end\n\
+                \  fn a6(x : Int, t : {List(Int) | len(_) == 1}) : Int do\n    let ys = Cons(x, t)\n    need_len2(ys)\n  end\n")
+        in
+        Alcotest.check gap_ps "need_ne" gap_proved (gap_at "need_ne" obs);
+        Alcotest.check gap_ps "need_len2" gap_proved (gap_at "need_len2" obs));
+    gated "L2 control: a self-rebinding `let t = Cons(x, t)` is not about the new `t`" (fun () ->
+        (* Filed naively, `len(t) == 1 + len(t)` is a contradiction that
+           proves anything, including a demand for length 2. *)
+        let obs =
+          gap_run
+            (m "  fn a(x : Int, t : List(Int)) : Int do\n    let t = Cons(x, t)\n    need_len2(t)\n  end\n")
+        in
+        gap_not_proved "need_len2" (gap_at "need_len2" obs));
+    gated "L2 control: a tail rebound after the `let` retires the fact" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(x : Int, t : {List(Int) | len(_) == 1}) : Int do\n    let ys = Cons(x, t)\n    let t = [1, 2, 3]\n    need_len2(ys)\n  end\n")
+        in
+        (* `len(ys) == 1 + len(t)` read against the NEW `t` (3) would be a
+           violation; retired, it is a skip. *)
+        gap_not_proved "need_len2" (gap_at "need_len2" obs);
+        Alcotest.(check bool) "not a violation" false (List.mem ("violated", "") (gap_at "need_len2" obs)));
+    gated "L2 name capture: the callee's parameter `t` is not the caller's tail `t`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn need_succ(t : List(Int), ys : {List(Int) | len(_) == len(t) + 1}) : Int do 0 end\n\
+                \  fn good(x : Int, t : List(Int)) : Int do need_succ(t, Cons(x, t)) end\n\
+                \  fn bad(x : Int, t : {List(Int) | len(_) == 1}) : Int do need_succ(Nil, Cons(x, t)) end\n")
+        in
+        Alcotest.check gap_ps "need_succ" [ ("proved", ""); ("violated", "") ] (gap_at "need_succ" obs));
+    gated "L2: the `List.nth` recursive call `nth(t, n - 1)` under `Cons(h, t)` proves" (fun () ->
+        let obs = gap_run (m (mynth ())) in
+        Alcotest.check gap_ps "mynth" gap_proved (gap_at "mynth" obs));
+    gated "L2 control: the arm fact is about `t`, not the scrutinee (`mynth(xs, n - 1)`, `mynth(t, n)`)" (fun () ->
+        (* `mynth(xs, n - 1)` still proves (`n - 1 < n < len(xs)`); `mynth(t,
+           n)` does not (`n < len(xs)` gives only `n <= len(t)`). *)
+        Alcotest.check gap_ps "xs, n - 1" gap_proved (gap_at "mynth" (gap_run (m (mynth ~tail:"xs" ()))));
+        gap_not_proved "t, n" (gap_at "mynth" (gap_run (m (mynth ~idx:"n" ())))));
+    gated "L2 control: a tail binder rebound inside the arm retires the arm's equation" (fun () ->
+        let src =
+          m
+            "  fn f(xs : List(Int), n : {Int | _ >= 0 && _ < len(xs)}) : Int do\n\
+            \    match xs do\n\
+            \      Nil -> 0\n\
+            \      Cons(h, t) ->\n\
+            \        let t = [1]\n\
+            \        if n == 0 do h else f(t, n - 1) end\n\
+            \    end\n\
+            \  end\n"
+        in
+        gap_not_proved "f" (gap_at "f" (gap_run src))) ]
+
+(* L3 (specs/progress/2026-10-26-refine-lend-every-conjunct): a proved
+   `{List(a) | elts(_) … && len(_) …}` return lends BOTH halves at a call
+   site, not only the measure the goal happens to ask about. *)
+let gap_lend_conjuncts_suite =
+  let m body =
+    "mod LC do\n  fn need_len_eq(xs : List(Int), ys : {List(Int) | len(_) == len(xs)}) : Int do 0 end\n\
+    \  fn need_sub(xs : List(Int), ys : {List(Int) | subset(elts(_), elts(xs))}) : Int do 0 end\n\
+    \  fn need_ne(ys : {List(Int) | len(_) > 0}) : Int do 0 end\n" ^ body ^ "end\n"
+  in
+  (* `cp` copies its list: both halves hold.  `dr` drops every element:
+     `elts(_) ⊆ elts(xs)` holds, `len(_) == len(xs)` does not. *)
+  let cp =
+    "  fn cp(xs : List(a)) : {List(a) | subset(elts(_), elts(xs)) && len(_) == len(xs)} do\n\
+    \    match xs do\n\
+    \      Nil -> Nil\n\
+    \      Cons(h, t) -> Cons(h, cp(t))\n\
+    \    end\n\
+    \  end\n"
+  in
+  let dr =
+    "  fn cp(xs : List(a)) : {List(a) | subset(elts(_), elts(xs)) && len(_) == len(xs)} do\n\
+    \    match xs do\n\
+    \      Nil -> Nil\n\
+    \      Cons(_, t) -> cp(t)\n\
+    \    end\n\
+    \  end\n"
+  in
+  [ gated "L3: `need_len_eq(xs, cp(xs))` gets the `len` half; `need_sub` still gets `elts`" (fun () ->
+        let obs =
+          gap_run
+            (m (cp ^ "  fn u1(xs : List(Int)) : Int do need_len_eq(xs, cp(xs)) end\n\
+                     \  fn u2(xs : List(Int)) : Int do need_sub(xs, cp(xs)) end\n\
+                     \  fn u3(xs : {List(Int) | len(_) > 0}) : Int do need_ne(cp(xs)) end\n"))
+        in
+        Alcotest.check gap_ps "post of cp" [ ("proved", "") ] (List.sort_uniq compare (gap_at "cp" obs));
+        Alcotest.check gap_ps "need_len_eq" gap_proved (gap_at "need_len_eq" obs);
+        Alcotest.check gap_ps "need_sub" gap_proved (gap_at "need_sub" obs);
+        Alcotest.check gap_ps "need_ne" gap_proved (gap_at "need_ne" obs));
+    gated "L3: a let-bound result carries both halves too" (fun () ->
+        let obs =
+          gap_run (m (cp ^ "  fn u(xs : List(Int)) : Int do\n    let ys = cp(xs)\n    need_len_eq(xs, ys)\n  end\n"))
+        in
+        Alcotest.check gap_ps "need_len_eq" gap_proved (gap_at "need_len_eq" obs));
+    gated "L3 control: the `len` half NOT proved (a body that drops elements) lends nothing" (fun () ->
+        let obs =
+          gap_run
+            (m (dr ^ "  fn u1(xs : List(Int)) : Int do need_len_eq(xs, cp(xs)) end\n\
+                     \  fn u2(xs : List(Int)) : Int do need_sub(xs, cp(xs)) end\n"))
+        in
+        gap_not_proved "cp" (gap_at "cp" obs);
+        gap_not_proved "need_len_eq" (gap_at "need_len_eq" obs);
+        (* The whole post is unproved, so not even the true `elts` half is lent. *)
+        gap_not_proved "need_sub" (gap_at "need_sub" obs));
+    gated "L3 name capture: the callee's `xs` is the actual, not a caller `xs`" (fun () ->
+        (* `cp(ys)` is as long as `ys`, not as the caller's `xs`. *)
+        let obs =
+          gap_run
+            (m (cp ^ "  fn u(xs : List(Int), ys : List(Int)) : Int do need_len_eq(xs, cp(ys)) end\n\
+                     \  fn w(xs : List(Int), ys : List(Int)) : Int do need_len_eq(ys, cp(ys)) end\n"))
+        in
+        (match gap_at "need_len_eq" obs with
+         | [ u; w ] ->
+           Alcotest.(check bool) "u: not proved" false (u = ("proved", ""));
+           Alcotest.check gap_ps "w" gap_proved [ w ]
+         | vs -> Alcotest.failf "expected 2 need_len_eq obligations, got %d" (List.length vs))) ]
+
+(* L4 (specs/progress/2026-10-26-refine-list-length-argument): the
+   `List.length` alias of the `len` measure applies to a call ARGUMENT and to
+   a `let` RHS, not only to a guard. *)
+let gap_list_length_arg_suite =
+  let m body =
+    "mod LA do\n  fn need_nn(n : {Int | _ >= 0}) : Int do n end\n\
+    \  fn need_pos(n : {Int | _ > 0}) : Int do n end\n\
+    \  fn need_lt(i : Int, n : {Int | _ > i}) : Int do n end\n" ^ body ^ "end\n"
+  in
+  [ gated "L4: `need_nn(List.length(xs))` proves" (fun () ->
+        let obs = gap_run (m "  fn a(xs : List(Int)) : Int do need_nn(List.length(xs)) end\n") in
+        Alcotest.check gap_ps "need_nn" gap_proved (gap_at "need_nn" obs));
+    gated "L4: `need_pos(List.length(xs))` skips without a fact, proves under `len(_) > 0`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(xs : List(Int)) : Int do need_pos(List.length(xs)) end\n\
+                \  fn b(xs : {List(Int) | len(_) > 0}) : Int do need_pos(List.length(xs)) end\n")
+        in
+        (match gap_at "need_pos" obs with
+         | [ (va, _); b ] ->
+           Alcotest.(check string) "a: a skip" "skipped" va;
+           Alcotest.check gap_ps "b" gap_proved [ b ]
+         | vs -> Alcotest.failf "expected 2 need_pos obligations, got %d" (List.length vs)));
+    gated "L4: a literal, a let-bound literal and a Cons argument of `List.length`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a() : Int do need_pos(List.length([1, 2])) end\n\
+                \  fn b() : Int do\n    let t = [1]\n    need_pos(List.length(t))\n  end\n\
+                \  fn c(x : Int, t : List(Int)) : Int do need_pos(List.length(Cons(x, t))) end\n\
+                \  fn d() : Int do need_pos(List.length([])) end\n")
+        in
+        Alcotest.check gap_ps "need_pos" [ ("proved", ""); ("proved", ""); ("proved", ""); ("violated", "") ]
+          (gap_at "need_pos" obs));
+    gated "L4: arithmetic over `List.length` reflects too (`List.length(xs) + 1`; `- 1` does not prove)" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(xs : List(Int)) : Int do need_pos(List.length(xs) + 1) end\n\
+                \  fn b(xs : List(Int)) : Int do need_nn(List.length(xs) - 1) end\n")
+        in
+        Alcotest.check gap_ps "need_pos" gap_proved (gap_at "need_pos" obs);
+        gap_not_proved "need_nn" (gap_at "need_nn" obs));
+    gated "L4: `let n = List.length(xs)` then `List.nth(xs, i)` under `i >= 0 && i < n`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(xs : List(Int), i : Int) : Int do\n    let n = List.length(xs)\n\
+                \    if i >= 0 && i < n do List.nth(xs, i) else 0 end\n  end\n\
+                \  fn b(xs : List(Int), i : Int) : Int do\n    let n = List.length(xs)\n\
+                \    if i < n do need_lt(i, List.length(xs)) else 0 end\n  end\n\
+                \  fn c(xs : List(Int)) : Int do\n    let n = List.length(xs)\n    need_nn(n)\n  end\n")
+        in
+        Alcotest.check gap_ps "List.nth" gap_proved (gap_at "List.nth" obs);
+        Alcotest.check gap_ps "need_lt" gap_proved (gap_at "need_lt" obs);
+        Alcotest.check gap_ps "need_nn" gap_proved (gap_at "need_nn" obs));
+    gated "L4 control: the list rebound after `let n = List.length(xs)` retires `n == len(xs)`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(xs : List(Int), ys : List(Int), i : Int) : Int do\n    let n = List.length(xs)\n\
+                \    let xs = ys\n    if i >= 0 && i < n do List.nth(xs, i) else 0 end\n  end\n")
+        in
+        gap_not_proved "List.nth" (gap_at "List.nth" obs));
+    gated "L4 control: `n` rebound after the `let` is not the length" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(xs : List(Int), i : Int, k : Int) : Int do\n    let n = List.length(xs)\n\
+                \    let n = k\n    if i >= 0 && i < n do List.nth(xs, i) else 0 end\n  end\n")
+        in
+        gap_not_proved "List.nth" (gap_at "List.nth" obs));
+    gated "L4 name capture: the callee's parameter `xs` is not the caller's `xs`" (fun () ->
+        (* `need_le(xs, n : {Int | _ <= len(xs)})`: the callee's `xs` is the
+           actual `ys`, so `List.length(xs)` of the CALLER's `xs` proves only
+           when the two are the same list. *)
+        let obs =
+          gap_run
+            (m "  fn need_le(xs : List(Int), n : {Int | _ <= len(xs)}) : Int do n end\n\
+                \  fn a(xs : List(Int), ys : List(Int)) : Int do need_le(ys, List.length(xs)) end\n\
+                \  fn b(xs : List(Int), ys : List(Int)) : Int do need_le(xs, List.length(xs)) end\n")
+        in
+        (match gap_at "need_le" obs with
+         | [ a; b ] ->
+           Alcotest.(check bool) "a: not proved" false (a = ("proved", ""));
+           Alcotest.check gap_ps "b" gap_proved [ b ]
+         | vs -> Alcotest.failf "expected 2 need_le obligations, got %d" (List.length vs)));
+    gated "L4 control: a user `List.length` withdraws the alias at an argument too" (fun () ->
+        (* A program defining its own `List.length` (one that lies) must not
+           get `len`'s meaning for it. *)
+        let obs =
+          gap_run
+            "mod LW do\n  mod List do\n    fn length(xs : List(Int)) : Int do 0 - 1 end\n  end\n\
+             \  fn need_nn(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn a(xs : List(Int)) : Int do need_nn(List.length(xs)) end\nend\n"
+        in
+        gap_not_proved "need_nn" (gap_at "need_nn" obs)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -27168,4 +27495,8 @@ let () =
       ("gap-o1-local-option", gap_o1_local_option_suite);
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("len-return-obliged", len_return_obliged_suite);
+      ("gap-let-literal-len", gap_let_literal_len_suite);
+      ("gap-cons-len", gap_cons_len_suite);
+      ("gap-lend-conjuncts", gap_lend_conjuncts_suite);
+      ("gap-list-length-arg", gap_list_length_arg_suite);
       ("z3-well-formed", z3_wellformed_suite) ]
