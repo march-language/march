@@ -1,5 +1,12 @@
 mod TestHashMap do
 
+-- `v > k + t` for an entry `(k, v)`: HashMap.filter's witness predicate.
+pfn above(kv : (Int, Int), t : Int) : Bool do
+  match kv do
+    (k, v) -> v > k + t
+  end
+end
+
 describe "new and is_empty" do
   test "new() produces an empty map" do
     let m = HashMap.new()
@@ -237,6 +244,32 @@ describe "filter" do
     assert HashMap.has(m2, "a") == false
     assert HashMap.has(m2, "b")
     assert HashMap.has(m2, "c")
+  end
+
+  -- The runtime witness for HashMap.filter's ASSUMED element fact
+  -- (`HashMap(k[p], v[p])`, the Map.filter recipe of multi-arg design
+  -- 2026-10-18 §7.2): the refinement checker takes on faith that every entry
+  -- of the result satisfies `pred`, so this property is what checks it.  A
+  -- threshold family relating key and value, over random entries.
+  test "every entry HashMap.filter keeps satisfies pred (the assumed entry fact)" do
+    Check.all(Gen.tuple2(Gen.list(Gen.tuple2(Gen.int(-20, 20), Gen.int(-20, 20))), Gen.int(-10, 10)), fn pair ->
+      match pair do
+        (pairs, t) ->
+          let kept = HashMap.filter(HashMap.from_list(pairs), fn k -> fn v -> v > k + t)
+          List.all(HashMap.to_list(kept), fn kv -> above(kv, t))
+      end
+    )
+  end
+
+  test "HashMap.filter keeps every entry that satisfies pred" do
+    Check.all(Gen.tuple2(Gen.list(Gen.tuple2(Gen.int(-20, 20), Gen.int(-20, 20))), Gen.int(-10, 10)), fn pair ->
+      match pair do
+        (pairs, t) ->
+          let m = HashMap.from_list(pairs)
+          let kept = HashMap.filter(m, fn k -> fn v -> v > k + t)
+          List.all(HashMap.to_list(m), fn kv -> above(kv, t) == List.member(HashMap.to_list(kept), kv))
+      end
+    )
   end
 end
 

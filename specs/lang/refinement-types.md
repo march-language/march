@@ -3117,8 +3117,8 @@ positive.
 - an uncurried lambda, for a combinator that calls its callback with both
   arguments at once;
 - a curried lambda, for a combinator that calls it in two steps (today that
-  counts only for a parameter's `p` and for `Map.filter`'s assumed return,
-  below; see "Not yet");
+  counts only for a parameter's `p` and for the assumed returns of `Map.filter`
+  and `HashMap.filter`, below; see "Not yet");
 - either of those bound by `let`;
 - a function with a proved Bool contract over two parameters;
 - a callback parameter that itself defines a two-argument abstract refinement
@@ -3272,8 +3272,18 @@ Map.filter(m, fn _k -> fn v -> v < 100, Map.str_cmp)   -- does not meet `_ > 0 &
 ```
 
 The property test in `test/stdlib/test_map.march` checks the fact at run time.
-`HashMap.filter`, `OrderedMap.filter` and a list of pairs do not carry it yet;
-see [Limitations](#open-gaps-in-element-and-abstract-refinements).
+
+`HashMap.filter` carries the same assumed entry fact, with no comparator and
+no key-set contract:
+
+```march
+@[assume]
+fn filter(m : HashMap(k, v), pred : k -> v -> Bool[p]) : HashMap(k[p], v[p]) do … end
+```
+
+Its property test is in `test/stdlib/test_hash_map.march`. `OrderedMap.filter`
+and a list of pairs do not carry it yet; see
+[Limitations](#open-gaps-in-element-and-abstract-refinements).
 
 #### What abstract refinements do not do
 
@@ -3645,9 +3655,9 @@ xs : List({Int | _ > 0})           -- do this instead: then `x` gets it
   component), `Prelude.filter` (the bare `filter`), `Enum.filter`,
   `Enum.find`, `Enum.take_while`, `Iterable.filter`, `Iterable.find`,
   `Range.filter`, `Deque.filter` and, over a key and a value together and
-  assumed rather than proved, `Map.filter`. Each is instantiated from a lambda
-  (whose body may combine `&&`/`||`/`not`/`if` and calls to proved helpers),
-  a named predicate with a proved contract, a callback parameter or a
+  assumed rather than proved, `Map.filter` and `HashMap.filter`. Each is
+  instantiated from a lambda (whose body may combine `&&`/`||`/`not`/`if` and
+  calls to proved helpers), a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
 - **A scalar demand is traced only when it is closed.** `need_pos(Option.unwrap_or(o, 1))`
   is checked through `unwrap_or`'s sources (the elements of `o` and the
@@ -5388,9 +5398,8 @@ never a violation, and an error under `cap verified`. Each has an open item in
   from, looking up in, merging or mapping over a refined `Map` keeps nothing.
   Only `Map.filter` carries an entry fact. (Todo: Map element flow through
   combinators.)
-- **`HashMap.filter` and `OrderedMap.filter` carry no entry fact yet**, unlike
-  `Map.filter`. (Todos: HashMap filter two-argument abstract, and OrderedMap
-  filter two-argument abstract.)
+- **`OrderedMap.filter` carries no entry fact yet**, unlike `Map.filter` and
+  `HashMap.filter`. (Todo: OrderedMap filter two-argument abstract.)
 - **A list of pairs is not modelled.** A tuple element is not a container
   type, so a list of pairs has no element slots, and no relation over its
   parts. This is also why `Map.filter`'s entry fact is assumed rather than

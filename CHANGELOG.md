@@ -41,6 +41,13 @@ git log is authoritative for exact commits.
   - relational candidates were never ordered weakest-first;
   - a slot's trivial `true` goal could make a vacuous proposal look useful.
   Plain `--check` is unchanged.
+- **Refinements: `HashMap.filter` keeps what its predicate says.** It is now
+  `@[assume] fn filter(m : HashMap(k, v), pred : k -> v -> Bool[p]) : HashMap(k[p],
+  v[p])`, the `Map.filter` recipe: `need_vals(HashMap.filter(m, fn _k -> fn v -> v >
+  0))` against `HashMap(String, {Int | _ > 0})` is proved, as are key demands and a
+  key/value relation; a weaker lambda is an `abstract-refinement-too-weak` skip. The
+  entry fact is assumed (one `trusted` postcondition), and property tests in
+  `test/stdlib/test_hash_map.march` check it at run time.
 - **Refinements: `Map.filter` keeps what its predicate says.** `Map.filter(m, pred,
   cmp)` is now `pred : k -> v -> Bool[p]` returning `{Map(k[p], v[p]) | subset(keys(_),
   keys(m))}`, so `need_vals(Map.filter(m, fn _k -> fn v -> v > 0, cmp))` against

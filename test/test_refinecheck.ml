@@ -27001,6 +27001,165 @@ let infer_vocab_oct_suite =
                 "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn mfilt(m : Map(k, v), keep : k -> v -> Bool, cmp : k -> k -> Bool) : Map(k, v) do Map.filter(m, keep, cmp) end\n  fn go(m : Map(String, Int)) : Int do need_posmap(mfilt(m, fn _k -> fn v -> v > 0, Map.str_cmp)) end\n")))
   ]
 
+(* ── Container gaps (specs/progress/2026-10-26-...): a shared harness ───────
+   Typecheck and refine-check a user module beside REAL stdlib modules
+   (loaded from `stdlib/` relative to the cwd) and the prelude, the
+   abstract-map harness shape, so a proof row is RED on a stdlib without
+   the signature it relies on. *)
+let container_gap_harness (files : string list) =
+  let load_mod name =
+    let md, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (md.March_ast.Ast.mod_name, March_ast.Ast.Public, md.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods = List.map load_mod files in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  let open March_refinecheck.Obligation in
+  let user_file (o : March_refinecheck.Obligation.t) =
+    let f = o.span.March_ast.Ast.file in
+    f = "" || f = "<unknown>"
+  in
+  let run (src : string) =
+    reset ();
+    let md = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let md = { md with March_ast.Ast.mod_decls = mods @ prelude_decls @ md.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module md in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx md;
+    let diags sev =
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+          let f = d.March_errors.Errors.span.March_ast.Ast.file in
+          if d.March_errors.Errors.severity = sev && (f = "" || f = "<unknown>")
+          then Some d.March_errors.Errors.message
+          else None)
+        ctx.March_errors.Errors.diagnostics
+    in
+    (diags March_errors.Errors.Error, diags March_errors.Errors.Warning, all (), paths)
+  in
+  let of_callee c obs =
+    List.filter_map
+      (fun o ->
+        if o.callee = c && user_file o then
+          Some
+            ( verdict_name o.verdict
+            , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+            , match o.verdict with Skipped r -> reason_detail r | _ -> "" )
+        else None)
+      obs
+  in
+  let slugs c obs = List.map (fun (v, r, _) -> (v, r)) (of_callee c obs) in
+  let detail c obs = String.concat "" (List.map (fun (_, _, d) -> d) (of_callee c obs)) in
+  (run, slugs, detail)
+
+let cg_has sub s =
+  let n = String.length sub and k = String.length s in
+  let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+  go 0
+
+let cg_mod ?(verified = false) name body =
+  "mod " ^ name ^ " do\n" ^ (if verified then "  cap verified\n" else "") ^ body ^ "end\n"
+
+let cg_ps = Alcotest.(list (pair string string))
+let cg_proved = ("proved", "")
+let cg_weak = ("skipped", "abstract-refinement-too-weak")
+let cg_uninst = ("skipped", "abstract-refinement-uninstantiated")
+
+(* ── `HashMap.filter`: the `Map.filter` recipe (an ASSUMED two-argument
+   entry, `HashMap(k[p], v[p])`), rows m1-m8 of the multi-arg design §0 over
+   `HashMap` (specs/progress/2026-10-26-hashmap-filter-entry-fact.md). *)
+let hashmap_filter_suite =
+  let run, slugs, detail = container_gap_harness [ "list.march"; "hash_map.march" ] in
+  let needs =
+    {|  fn need_vals(_m : HashMap(String, {Int | _ > 0})) : Int do 0 end
+  fn need_ivals(_m : HashMap(Int, {Int | _ > 0})) : Int do 0 end
+  fn need_keys(_m : HashMap({Int | _ > 0}, String)) : Int do 0 end
+  fn need_rel(_m : HashMap({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+|}
+  in
+  let row name ~demand ~body ~want =
+    gated name (fun () ->
+        let errs, _, obs, _ = run (cg_mod "H" (needs ^ body)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check cg_ps demand want (slugs demand obs))
+  in
+  [ row "h-m1: a value filter proves a value demand" ~demand:"need_vals" ~want:[ cg_proved ]
+      ~body:"  fn go(m : HashMap(String, Int)) : Int do need_vals(HashMap.filter(m, fn _k -> fn v -> v > 0)) end\n";
+    row "h-m2: a key filter proves a key demand" ~demand:"need_keys" ~want:[ cg_proved ]
+      ~body:"  fn go(m : HashMap(Int, String)) : Int do need_keys(HashMap.filter(m, fn k -> fn _v -> k > 0)) end\n";
+    row "h-m3: a relational filter proves a relational demand" ~demand:"need_rel" ~want:[ cg_proved ]
+      ~body:"  fn go(m : HashMap(Int, Int)) : Int do need_rel(HashMap.filter(m, fn k -> fn v -> v > k)) end\n";
+    gated "h-m4: a weaker filter is too-weak, naming the lambda" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "H"
+               (needs
+               ^ "  fn go(m : HashMap(String, Int)) : Int do need_vals(HashMap.filter(m, fn _k -> fn v -> v >= 0)) end\n"))
+        in
+        Alcotest.check cg_ps "need_vals" [ cg_weak ] (slugs "need_vals" obs);
+        let d = detail "need_vals" obs in
+        Alcotest.(check bool) ("detail: " ^ d) true (cg_has "fn _k -> fn v -> v >= 0" d && cg_has "_ > 0" d));
+    row "h-m5: a projection onto the value, through a fresh key" ~demand:"need_ivals" ~want:[ cg_proved ]
+      ~body:"  fn go(m : HashMap(Int, Int)) : Int do need_ivals(HashMap.filter(m, fn k -> fn v -> k > 0 && v > k)) end\n";
+    row "h-m6: `v > k` alone does not make the value positive" ~demand:"need_ivals" ~want:[ cg_weak ]
+      ~body:"  fn go(m : HashMap(Int, Int)) : Int do need_ivals(HashMap.filter(m, fn k -> fn v -> v > k)) end\n";
+    row "h-m7: a lambda capturing `now` is uninstantiated" ~demand:"need_vals" ~want:[ cg_uninst ]
+      ~body:
+        "  fn go(m : HashMap(String, Int), now : Int) : Int do need_vals(HashMap.filter(m, fn _k -> fn v -> v > now)) end\n";
+    row "h-m8: through a `let`" ~demand:"need_vals" ~want:[ cg_proved ]
+      ~body:
+        "  fn go(m : HashMap(String, Int)) : Int do\n\
+        \    let m2 = HashMap.filter(m, fn _k -> fn v -> v > 0)\n\
+        \    need_vals(m2)\n\
+        \  end\n";
+    (* Name capture: the caller's own `pred`/`m` and lambda binders named
+       like the callee's parameters and the other slot change nothing. *)
+    row "h-capture: caller names `m`/`pred`, binders `m`/`k`, like the callee's" ~demand:"need_rel" ~want:[ cg_proved ]
+      ~body:
+        "  fn go(pred : HashMap(Int, Int), m : Int) : Int do need_rel(HashMap.filter(pred, fn m -> fn k -> k > m)) end\n";
+    row "h-capture control: the swapped relation is too-weak" ~demand:"need_rel" ~want:[ cg_weak ]
+      ~body:
+        "  fn go(pred : HashMap(Int, Int), m : Int) : Int do need_rel(HashMap.filter(pred, fn m -> fn k -> m > k)) end\n";
+    row "h-m9: a refined parameter (unchanged)" ~demand:"m" ~want:[ cg_proved ]
+      ~body:"  fn go(m : HashMap(String, {Int | _ > 0})) : Int do need_vals(m) end\n";
+    gated "h: cap verified control: a too-weak HashMap.filter demand is an error" (fun () ->
+        let errs, _, _, _ =
+          run
+            (cg_mod ~verified:true "HV"
+               (needs
+               ^ "  fn go(m : HashMap(Int, Int)) : Int do need_ivals(HashMap.filter(m, fn k -> fn v -> v > k)) end\n"))
+        in
+        let t = String.concat "\n" errs in
+        Alcotest.(check bool) ("error: " ^ t) true (cg_has "abstract-refinement-too-weak" t));
+    gated "h: cap verified: a proved HashMap.filter demand leaves nothing unverified" (fun () ->
+        let errs, _, _, _ =
+          run
+            (cg_mod ~verified:true "HV2"
+               (needs
+               ^ "  fn go(m : HashMap(Int, Int)) : Int do need_rel(HashMap.filter(m, fn k -> fn v -> v > k)) end\n"))
+        in
+        Alcotest.(check (list string)) "no errors" [] errs);
+    gated "h: one trusted entry at HashMap.filter's definition, its body not walked" (fun () ->
+        let _, _, obs, paths = run (cg_mod "HC" needs) in
+        let path = List.find (fun p -> Filename.basename p = "hash_map.march") paths in
+        let open March_refinecheck.Obligation in
+        let at_filter =
+          List.filter
+            (fun o -> o.span.March_ast.Ast.file = path && o.callee = "filter" && o.kind = Postcondition)
+            obs
+        in
+        Alcotest.check cg_ps "HashMap.filter's postconditions" [ ("trusted", "p($s0, $s1)") ]
+          (List.map (fun o -> (verdict_name o.verdict, o.predicate)) at_filter);
+        Alcotest.(check int) "no element obligation from HashMap.filter's body" 0
+          (List.length
+             (List.filter (fun o -> o.span.March_ast.Ast.file = path && o.callee = "return of filter") obs))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -27168,4 +27327,5 @@ let () =
       ("gap-o1-local-option", gap_o1_local_option_suite);
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("len-return-obliged", len_return_obliged_suite);
+      ("hashmap-filter", hashmap_filter_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

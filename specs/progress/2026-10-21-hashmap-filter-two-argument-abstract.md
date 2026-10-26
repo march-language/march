@@ -20,3 +20,7 @@ Recipe (what phase 4 did for `Map.filter`):
   `stdlib/hash_map.march`; run the full `scripts/run-tests.sh` (stdlib ratchet) before
   trusting `--check`, since a wrong stdlib annotation can typecheck to an internal
   error `--check` does not print.
+
+**Closed 2026-10-26** by the recipe above, as written: see
+`specs/progress/2026-10-26-hashmap-filter-entry-fact.md`. `HashMap` has no key-set
+measure, so the return carries the entry only (no container predicate to keep).
