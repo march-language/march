@@ -21,6 +21,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinements: a return that is a `let`-bound call is proved from the callee's
+  return.** `let r = a(x)` then `r` (or `r + 1`) now proves `b`'s `{Int | _ > 0}`
+  when `a`'s return is proved or `@[assume]`d, as the bare tail `a(x)` already did.
+  Chains of such `let`s work. An unproved return, the function's own, or a cycle's
+  is never used, and a binding is dropped when its name or a name its call mentions
+  is rebound before the return.
 - **Refinements: `--refine-infer` / `forge refine --infer` propose this month's
   shapes.** Inference now proposes the contracts the checker learned to prove in
   October:

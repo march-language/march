@@ -1078,8 +1078,20 @@ fn c(x : {Int | _ > 0}) : {Int | _ > 0} do b(x) end      -- and so on, in any or
 
 A function never uses its own unproved return this way: a self-recursive tail
 (`f(n - 1)`), or two functions that return each other's calls, stay skipped
-(`unreflectable-subject`). Only a bare call tail is read like this; a `let`
-bound to the call and then returned (`let r = a(x)` then `r`) is not yet.
+(`unreflectable-subject`). A `let` bound to the call and then returned is
+read the same way (since 2026-10-26), also through a chain of them and inside a
+larger tail:
+
+```march
+fn b(x : {Int | _ > 0}) : {Int | _ > 0} do
+  let r = a(x)
+  r                     -- proved from a's return (`r + 1` too)
+end
+```
+
+The binding is forgotten when its name, or a name its call mentions, is bound
+again before the return (a later `let`, a `match` arm's pattern), so the call
+is read at the arguments it really had.
 
 **Only *proven* postconditions propagate.** A declared return refinement
 becomes an assumption at call sites only when the definition side actually
@@ -4121,8 +4133,6 @@ not check.
 proposes a contract the checker does not prove, however natural. Examples it
 misses today:
 
-- a return that holds only through a `let`-bound call tail (`let r = a(x)`
-  then `r`; a direct tail `a(x)` is proposed);
 - a `Map(k, v)` combinator that passes its two-argument callback on to
   `Map.filter` (the checker does not prove that return yet);
 - a relation kept from a parameter to the return (`bump(a)` keeping `y > x`
