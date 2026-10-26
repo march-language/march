@@ -27169,6 +27169,72 @@ let gap_cons_len_suite =
         in
         gap_not_proved "f" (gap_at "f" (gap_run src))) ]
 
+(* L3 (specs/progress/2026-10-26-refine-lend-every-conjunct): a proved
+   `{List(a) | elts(_) … && len(_) …}` return lends BOTH halves at a call
+   site, not only the measure the goal happens to ask about. *)
+let gap_lend_conjuncts_suite =
+  let m body =
+    "mod LC do\n  fn need_len_eq(xs : List(Int), ys : {List(Int) | len(_) == len(xs)}) : Int do 0 end\n\
+    \  fn need_sub(xs : List(Int), ys : {List(Int) | subset(elts(_), elts(xs))}) : Int do 0 end\n\
+    \  fn need_ne(ys : {List(Int) | len(_) > 0}) : Int do 0 end\n" ^ body ^ "end\n"
+  in
+  (* `cp` copies its list: both halves hold.  `dr` drops every element:
+     `elts(_) ⊆ elts(xs)` holds, `len(_) == len(xs)` does not. *)
+  let cp =
+    "  fn cp(xs : List(a)) : {List(a) | subset(elts(_), elts(xs)) && len(_) == len(xs)} do\n\
+    \    match xs do\n\
+    \      Nil -> Nil\n\
+    \      Cons(h, t) -> Cons(h, cp(t))\n\
+    \    end\n\
+    \  end\n"
+  in
+  let dr =
+    "  fn cp(xs : List(a)) : {List(a) | subset(elts(_), elts(xs)) && len(_) == len(xs)} do\n\
+    \    match xs do\n\
+    \      Nil -> Nil\n\
+    \      Cons(_, t) -> cp(t)\n\
+    \    end\n\
+    \  end\n"
+  in
+  [ gated "L3: `need_len_eq(xs, cp(xs))` gets the `len` half; `need_sub` still gets `elts`" (fun () ->
+        let obs =
+          gap_run
+            (m (cp ^ "  fn u1(xs : List(Int)) : Int do need_len_eq(xs, cp(xs)) end\n\
+                     \  fn u2(xs : List(Int)) : Int do need_sub(xs, cp(xs)) end\n\
+                     \  fn u3(xs : {List(Int) | len(_) > 0}) : Int do need_ne(cp(xs)) end\n"))
+        in
+        Alcotest.check gap_ps "post of cp" [ ("proved", "") ] (List.sort_uniq compare (gap_at "cp" obs));
+        Alcotest.check gap_ps "need_len_eq" gap_proved (gap_at "need_len_eq" obs);
+        Alcotest.check gap_ps "need_sub" gap_proved (gap_at "need_sub" obs);
+        Alcotest.check gap_ps "need_ne" gap_proved (gap_at "need_ne" obs));
+    gated "L3: a let-bound result carries both halves too" (fun () ->
+        let obs =
+          gap_run (m (cp ^ "  fn u(xs : List(Int)) : Int do\n    let ys = cp(xs)\n    need_len_eq(xs, ys)\n  end\n"))
+        in
+        Alcotest.check gap_ps "need_len_eq" gap_proved (gap_at "need_len_eq" obs));
+    gated "L3 control: the `len` half NOT proved (a body that drops elements) lends nothing" (fun () ->
+        let obs =
+          gap_run
+            (m (dr ^ "  fn u1(xs : List(Int)) : Int do need_len_eq(xs, cp(xs)) end\n\
+                     \  fn u2(xs : List(Int)) : Int do need_sub(xs, cp(xs)) end\n"))
+        in
+        gap_not_proved "cp" (gap_at "cp" obs);
+        gap_not_proved "need_len_eq" (gap_at "need_len_eq" obs);
+        (* The whole post is unproved, so not even the true `elts` half is lent. *)
+        gap_not_proved "need_sub" (gap_at "need_sub" obs));
+    gated "L3 name capture: the callee's `xs` is the actual, not a caller `xs`" (fun () ->
+        (* `cp(ys)` is as long as `ys`, not as the caller's `xs`. *)
+        let obs =
+          gap_run
+            (m (cp ^ "  fn u(xs : List(Int), ys : List(Int)) : Int do need_len_eq(xs, cp(ys)) end\n\
+                     \  fn w(xs : List(Int), ys : List(Int)) : Int do need_len_eq(ys, cp(ys)) end\n"))
+        in
+        (match gap_at "need_len_eq" obs with
+         | [ u; w ] ->
+           Alcotest.(check bool) "u: not proved" false (u = ("proved", ""));
+           Alcotest.check gap_ps "w" gap_proved [ w ]
+         | vs -> Alcotest.failf "expected 2 need_len_eq obligations, got %d" (List.length vs))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -27338,4 +27404,5 @@ let () =
       ("len-return-obliged", len_return_obliged_suite);
       ("gap-let-literal-len", gap_let_literal_len_suite);
       ("gap-cons-len", gap_cons_len_suite);
+      ("gap-lend-conjuncts", gap_lend_conjuncts_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

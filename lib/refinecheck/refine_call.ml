@@ -1612,10 +1612,23 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           end
         in
         let rmc m f cargs' = if is_call_measure m then set_of_call m f cargs' else None in
-        (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_str_lit:str_lit_const
-                 ~resolve_measure_call:rmc q with
-         | Some qa -> push_user qa
-         | None -> ());
+        (* Conjunct by conjunct (gap L3).  [rm] answers only the REQUESTED
+           measure of the binder, so a `len` request against `elts(_) ==
+           elts(xs) && len(_) == len(xs)` cannot translate the `elts` half,
+           and translating the conjunction whole dropped the `len` half with
+           it: the callee proved both, the caller got neither.  Every
+           conjunct of a proved (or assumed) postcondition holds on its own,
+           so each one that translates is an assumption; one that does not is
+           dropped alone.  (A conjunct reflected alone carries its own
+           division definedness side condition — [smt_of]'s `defined(p) && p`
+           — which held, since the whole conjunction evaluated to `true`.) *)
+        List.iter
+          (fun qc ->
+            match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_str_lit:str_lit_const
+                    ~resolve_measure_call:rmc qc with
+            | Some qa -> push_user qa
+            | None -> ())
+          (conjuncts_of q);
         Some c
     in
     (* Whether [set_of_call] would find a contract: a call whose callee has

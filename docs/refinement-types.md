@@ -1890,6 +1890,11 @@ renders its model as a set literal: `Set.insert() can return {4}`,
   such as "this list has no duplicates" (`card(elts(xs)) == len(xs)` after
   `List.dedup`), is not provable, and a permutation contract still writes
   both halves: `{List(Int) | elts(_) == elts(xs) && len(_) == len(xs)}`.
+  Once proved, a caller gets both halves (since 2026-10-26): every conjunct of
+  a proved return is lent on its own, so `f(xs)` meets a `len(_) == len(xs)`
+  demand and a `subset(elts(_), elts(xs))` demand alike. Before, a call site
+  asking about one measure dropped the whole conjunction and got neither half.
+  A return whose proof fails lends nothing, not even a true conjunct.
 - **List structure is followed only inside a proof by recursion.** A
   contract on a function that recurses over a list (see "Proved list
   contracts" above) is proved through its `Cons` cells. Everywhere else `elts`

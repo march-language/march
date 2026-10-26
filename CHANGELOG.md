@@ -343,6 +343,10 @@ git log is authoritative for exact commits.
   `nth(t, n - 1)` inside a `Cons(h, t)` arm were skipped; `len`'s defining equation
   now applies at call arguments, `let`s and `match` arms, and all three prove. The
   one skip inside `stdlib/list.march` is gone.
+- **Refinements: an `elts && len` list return is lent whole.** A function proved to
+  return `{List(a) | subset(elts(_), elts(xs)) && len(_) == len(xs)}` gave a direct
+  caller neither half: the call site translated the conjunction for one measure and
+  dropped all of it. Each proved conjunct is now lent on its own.
 - **`String.slice` with a negative start no longer reads out of bounds in wasm-compiled programs.**
   The wasm runtime's `march_string_slice` did not clamp a negative `start` and read before
   the string's buffer; it now clamps exactly like the native runtime and the interpreter
