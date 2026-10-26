@@ -41,7 +41,8 @@ the prelude). RED with the test written and the stdlib not yet edited:
 | 3 | h-m4 `v >= 0` → too-weak, detail names the lambda and `_ > 0` | `[too-weak]` → `[unreflectable-subject]` | too-weak |
 | 4 | h-m5 `k > 0 && v > k` → `need_ivals` (projection) | `[proved]` → `[unreflectable-subject]` | proved |
 | 5 | h-m6 `v > k` → `need_ivals` | `[too-weak]` → same | too-weak |
-| 6 | h-m7 captures `now` | `[uninstantiated]` → same | uninstantiated |
+| 6 | h-m7 captures `now` | `[uninstantiated]` → same | uninstantiated; after merging #1028 (the n-ary capture rule) `solver-undecided`, as abstract-map m7 |
+| 6b | h-m7b captures `now : {Int \| _ >= 0}` (added with the #1028 merge, mirroring abstract-map m7b) | — | proved |
 | 7 | h-m8 through a `let` | `[proved]` → same | proved |
 | 8 | name capture: caller params `pred : HashMap(…)`, `m : Int`; lambda `fn m -> fn k -> k > m` | `[proved]` → same | proved |
 | 9 | capture control: `fn m -> fn k -> m > k` | `[too-weak]` → same | too-weak |

@@ -27734,7 +27734,6 @@ let cg_mod ?(verified = false) name body =
 let cg_ps = Alcotest.(list (pair string string))
 let cg_proved = ("proved", "")
 let cg_weak = ("skipped", "abstract-refinement-too-weak")
-let cg_uninst = ("skipped", "abstract-refinement-uninstantiated")
 
 (* ── `HashMap.filter`: the `Map.filter` recipe (an ASSUMED two-argument
    entry, `HashMap(k[p], v[p])`), rows m1-m8 of the multi-arg design §0 over
@@ -27774,9 +27773,14 @@ let hashmap_filter_suite =
       ~body:"  fn go(m : HashMap(Int, Int)) : Int do need_ivals(HashMap.filter(m, fn k -> fn v -> k > 0 && v > k)) end\n";
     row "h-m6: `v > k` alone does not make the value positive" ~demand:"need_ivals" ~want:[ cg_weak ]
       ~body:"  fn go(m : HashMap(Int, Int)) : Int do need_ivals(HashMap.filter(m, fn k -> fn v -> v > k)) end\n";
-    row "h-m7: a lambda capturing `now` is uninstantiated" ~demand:"need_vals" ~want:[ cg_uninst ]
+    (* As abstract-map m7/m7b since the n-ary capture rule (#1028). *)
+    row "h-m7: a lambda capturing an unconstrained `now` is undecided" ~demand:"need_vals"
+      ~want:[ ("skipped", "solver-undecided") ]
       ~body:
         "  fn go(m : HashMap(String, Int), now : Int) : Int do need_vals(HashMap.filter(m, fn _k -> fn v -> v > now)) end\n";
+    row "h-m7b: a lambda capturing `now >= 0` proves" ~demand:"need_vals" ~want:[ cg_proved ]
+      ~body:
+        "  fn go(m : HashMap(String, Int), now : {Int | _ >= 0}) : Int do need_vals(HashMap.filter(m, fn _k -> fn v -> v > now)) end\n";
     row "h-m8: through a `let`" ~demand:"need_vals" ~want:[ cg_proved ]
       ~body:
         "  fn go(m : HashMap(String, Int)) : Int do\n\
