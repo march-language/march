@@ -347,6 +347,11 @@ git log is authoritative for exact commits.
   return `{List(a) | subset(elts(_), elts(xs)) && len(_) == len(xs)}` gave a direct
   caller neither half: the call site translated the conjunction for one measure and
   dropped all of it. Each proved conjunct is now lent on its own.
+- **Refinements: `List.length(e)` as an argument or a `let` means `len(e)`.** The
+  `len` alias worked in guards only, so `need_nn(List.length(xs))` was
+  `unreflectable-subject`, and `let n = List.length(xs)` then `if i >= 0 && i < n do
+  List.nth(xs, i)` was a `partial-conjunct` skip. Both prove now, under the alias's
+  existing gate (the stdlib's own `List.length`, not withdrawn).
 - **`String.slice` with a negative start no longer reads out of bounds in wasm-compiled programs.**
   The wasm runtime's `march_string_slice` did not clamp a negative `start` and read before
   the string's buffer; it now clamps exactly like the native runtime and the interpreter

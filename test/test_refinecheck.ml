@@ -27235,6 +27235,99 @@ let gap_lend_conjuncts_suite =
            Alcotest.check gap_ps "w" gap_proved [ w ]
          | vs -> Alcotest.failf "expected 2 need_len_eq obligations, got %d" (List.length vs))) ]
 
+(* L4 (specs/progress/2026-10-26-refine-list-length-argument): the
+   `List.length` alias of the `len` measure applies to a call ARGUMENT and to
+   a `let` RHS, not only to a guard. *)
+let gap_list_length_arg_suite =
+  let m body =
+    "mod LA do\n  fn need_nn(n : {Int | _ >= 0}) : Int do n end\n\
+    \  fn need_pos(n : {Int | _ > 0}) : Int do n end\n\
+    \  fn need_lt(i : Int, n : {Int | _ > i}) : Int do n end\n" ^ body ^ "end\n"
+  in
+  [ gated "L4: `need_nn(List.length(xs))` proves" (fun () ->
+        let obs = gap_run (m "  fn a(xs : List(Int)) : Int do need_nn(List.length(xs)) end\n") in
+        Alcotest.check gap_ps "need_nn" gap_proved (gap_at "need_nn" obs));
+    gated "L4: `need_pos(List.length(xs))` skips without a fact, proves under `len(_) > 0`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(xs : List(Int)) : Int do need_pos(List.length(xs)) end\n\
+                \  fn b(xs : {List(Int) | len(_) > 0}) : Int do need_pos(List.length(xs)) end\n")
+        in
+        (match gap_at "need_pos" obs with
+         | [ (va, _); b ] ->
+           Alcotest.(check string) "a: a skip" "skipped" va;
+           Alcotest.check gap_ps "b" gap_proved [ b ]
+         | vs -> Alcotest.failf "expected 2 need_pos obligations, got %d" (List.length vs)));
+    gated "L4: a literal, a let-bound literal and a Cons argument of `List.length`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a() : Int do need_pos(List.length([1, 2])) end\n\
+                \  fn b() : Int do\n    let t = [1]\n    need_pos(List.length(t))\n  end\n\
+                \  fn c(x : Int, t : List(Int)) : Int do need_pos(List.length(Cons(x, t))) end\n\
+                \  fn d() : Int do need_pos(List.length([])) end\n")
+        in
+        Alcotest.check gap_ps "need_pos" [ ("proved", ""); ("proved", ""); ("proved", ""); ("violated", "") ]
+          (gap_at "need_pos" obs));
+    gated "L4: arithmetic over `List.length` reflects too (`List.length(xs) + 1`; `- 1` does not prove)" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(xs : List(Int)) : Int do need_pos(List.length(xs) + 1) end\n\
+                \  fn b(xs : List(Int)) : Int do need_nn(List.length(xs) - 1) end\n")
+        in
+        Alcotest.check gap_ps "need_pos" gap_proved (gap_at "need_pos" obs);
+        gap_not_proved "need_nn" (gap_at "need_nn" obs));
+    gated "L4: `let n = List.length(xs)` then `List.nth(xs, i)` under `i >= 0 && i < n`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(xs : List(Int), i : Int) : Int do\n    let n = List.length(xs)\n\
+                \    if i >= 0 && i < n do List.nth(xs, i) else 0 end\n  end\n\
+                \  fn b(xs : List(Int), i : Int) : Int do\n    let n = List.length(xs)\n\
+                \    if i < n do need_lt(i, List.length(xs)) else 0 end\n  end\n\
+                \  fn c(xs : List(Int)) : Int do\n    let n = List.length(xs)\n    need_nn(n)\n  end\n")
+        in
+        Alcotest.check gap_ps "List.nth" gap_proved (gap_at "List.nth" obs);
+        Alcotest.check gap_ps "need_lt" gap_proved (gap_at "need_lt" obs);
+        Alcotest.check gap_ps "need_nn" gap_proved (gap_at "need_nn" obs));
+    gated "L4 control: the list rebound after `let n = List.length(xs)` retires `n == len(xs)`" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(xs : List(Int), ys : List(Int), i : Int) : Int do\n    let n = List.length(xs)\n\
+                \    let xs = ys\n    if i >= 0 && i < n do List.nth(xs, i) else 0 end\n  end\n")
+        in
+        gap_not_proved "List.nth" (gap_at "List.nth" obs));
+    gated "L4 control: `n` rebound after the `let` is not the length" (fun () ->
+        let obs =
+          gap_run
+            (m "  fn a(xs : List(Int), i : Int, k : Int) : Int do\n    let n = List.length(xs)\n\
+                \    let n = k\n    if i >= 0 && i < n do List.nth(xs, i) else 0 end\n  end\n")
+        in
+        gap_not_proved "List.nth" (gap_at "List.nth" obs));
+    gated "L4 name capture: the callee's parameter `xs` is not the caller's `xs`" (fun () ->
+        (* `need_le(xs, n : {Int | _ <= len(xs)})`: the callee's `xs` is the
+           actual `ys`, so `List.length(xs)` of the CALLER's `xs` proves only
+           when the two are the same list. *)
+        let obs =
+          gap_run
+            (m "  fn need_le(xs : List(Int), n : {Int | _ <= len(xs)}) : Int do n end\n\
+                \  fn a(xs : List(Int), ys : List(Int)) : Int do need_le(ys, List.length(xs)) end\n\
+                \  fn b(xs : List(Int), ys : List(Int)) : Int do need_le(xs, List.length(xs)) end\n")
+        in
+        (match gap_at "need_le" obs with
+         | [ a; b ] ->
+           Alcotest.(check bool) "a: not proved" false (a = ("proved", ""));
+           Alcotest.check gap_ps "b" gap_proved [ b ]
+         | vs -> Alcotest.failf "expected 2 need_le obligations, got %d" (List.length vs)));
+    gated "L4 control: a user `List.length` withdraws the alias at an argument too" (fun () ->
+        (* A program defining its own `List.length` (one that lies) must not
+           get `len`'s meaning for it. *)
+        let obs =
+          gap_run
+            "mod LW do\n  mod List do\n    fn length(xs : List(Int)) : Int do 0 - 1 end\n  end\n\
+             \  fn need_nn(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn a(xs : List(Int)) : Int do need_nn(List.length(xs)) end\nend\n"
+        in
+        gap_not_proved "need_nn" (gap_at "need_nn" obs)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -27405,4 +27498,5 @@ let () =
       ("gap-let-literal-len", gap_let_literal_len_suite);
       ("gap-cons-len", gap_cons_len_suite);
       ("gap-lend-conjuncts", gap_lend_conjuncts_suite);
+      ("gap-list-length-arg", gap_list_length_arg_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

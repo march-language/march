@@ -1635,6 +1635,31 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        none keeps the fallback below (a fresh non-negative length), so the
        skip it produces stays the same undecided one it always was. *)
     let set_of_call_available fname cargs = postcond fname cargs <> None in
+    (* The list length of a CALLER list expression: a Cons/Nil chain whose
+       innermost tail is `Nil`, a caller NAME (its scope facts loaded first,
+       as for a bare-name actual), or a call with a proved `len` post —
+       `k + len$t`.  [None] for anything else.  Used for a `Cons` actual
+       (gap L2) and for the argument of `List.length(e)` in actual position
+       (gap L4, [reflect_scalar]'s `List.length` arm). *)
+    let rec cons_len_term (a : A.expr) : Smt.term option =
+      match a with
+      | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (Smt.IntLit 0)
+      | A.ECon ({ A.txt = "Cons"; _ }, [ _; tl ], _) ->
+        Option.map (fun t -> Smt.Add (t, Smt.IntLit 1)) (cons_len_term tl)
+      | A.EVar { A.txt = x; _ } when (not (is_recvar x)) && not (Hashtbl.mem str_names x) ->
+        !load_scope_measure_facts_ref x;
+        measure_of_var "len" x
+      | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) when set_of_call_available fname cargs ->
+        set_of_call "len" fname cargs
+      | _ -> None
+    in
+    (* `List.length(e)`'s argument [e] is a CALLER expression, so its length
+       is [cons_len_term]'s, never the callee-side resolution — a caller `xs`
+       is `len$xs` even when the callee also has a parameter `xs`.  Only
+       sound for `len` while the builtin `len` means list length. *)
+    let foreign_len (a : A.expr) : Smt.term option =
+      if is_call_measure "len" then cons_len_term a else None
+    in
     (* A measure over a nested call inside a scalar callee's contract. *)
     let rmc_scalar m f cargs = if is_call_measure m then set_of_call m f cargs else None in
     let self_dt_sym = "$self" in
@@ -1696,7 +1721,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           (absorb
              (reflect_cached "$self" (fun () ->
                   reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
-                    ~foreign_field:arg_resolve_field
+                    ~foreign_field:arg_resolve_field ~foreign_len
                     ~sort:self_scalar sc self_actual)))
       else
         match actual_of_name name with
@@ -1704,7 +1729,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           absorb
             (reflect_cached name (fun () ->
                  reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
-                   ~foreign_field:arg_resolve_field
+                   ~foreign_field:arg_resolve_field ~foreign_len
                    ~sort:(scalar_of_name name) sc a))
         | None ->
           (* a caller-scope variable from the path context *)
@@ -2141,21 +2166,6 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
            Some (Smt.IsCtor (ctor, t))
          | None -> None)
-    in
-    (* The list length of a Cons/Nil chain whose innermost tail is a caller
-       NAME or a call with a proved `len` postcondition: `k + len$t`.  [None]
-       for any other tail. *)
-    let rec cons_len_term (a : A.expr) : Smt.term option =
-      match a with
-      | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (Smt.IntLit 0)
-      | A.ECon ({ A.txt = "Cons"; _ }, [ _; tl ], _) ->
-        Option.map (fun t -> Smt.Add (t, Smt.IntLit 1)) (cons_len_term tl)
-      | A.EVar { A.txt = x; _ } when (not (is_recvar x)) && not (Hashtbl.mem str_names x) ->
-        load_scope_measure_facts x;
-        measure_of_var "len" x
-      | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) when set_of_call_available fname cargs ->
-        set_of_call "len" fname cargs
-      | _ -> None
     in
     let resolve_measure m name =
       (* `len` OVERLOAD RESOLUTION.  The string meaning is taken only when the

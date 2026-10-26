@@ -2150,6 +2150,18 @@ let scope_add_binding
   | A.PatVar n, Some r -> (n.A.txt, r) :: sc
   | A.PatVar n, None ->
     (match b.A.bind_expr with
+     (* `let n = List.length(xs)` (gap L4): `n == len(xs)`, an Int entry the
+        scalar consumers read through their measure resolver onto the very
+        `len$xs` a `List.nth(xs, i)` goal uses, so `if i < n` bounds the
+        index.  The `len` alias's own gate (the stdlib's `List.length`, not
+        withdrawn).  It mentions `xs`, so [scope_shadow] retires it when `xs`
+        is rebound, and [self_mentioning] declines `let xs = List.length(xs)`. *)
+     | A.EApp (A.EVar { A.txt = "List.length"; _ }, [ (A.EVar _ as arg) ], _)
+       when measure_alias "List.length" = Some "len" && not (is_axiom_measure "len") ->
+       let sp = n.A.span in
+       let v x = A.EVar { A.txt = x; A.span = sp } in
+       let pred = A.EApp (v "==", [ v "_"; A.EApp (v "len", [ arg ], sp) ], sp) in
+       if self_mentioning b.A.bind_pat pred then sc else (n.A.txt, ("_", pred, None)) :: sc
      | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
        (* An INT-sorted postcondition seeds the refined-local scope: [scope]
           entries with sort [None] are declared `Int` by [scope_facts] and

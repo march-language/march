@@ -542,6 +542,20 @@ corpus brackets it from both sides (`accept/t118`, `reject/t117`), because an
 accept-only witness exits 0 either way and so cannot tell a working guard from a
 contract that checks no property.
 
+**The alias also applies to an argument and a `let`** (since 2026-10-26), not
+only to a guard. `need_nn(List.length(xs))` is checked as `need_nn` of
+`len(xs)`, so it proves, and `need_pos(List.length(xs))` proves exactly when
+`xs` is known non-empty (`xs : {List(Int) | len(_) > 0}`, a guard, a literal);
+otherwise it is a skip. Arithmetic over it reflects too
+(`List.length(xs) + 1`). `let n = List.length(xs)` records `n == len(xs)`, so
+
+```march
+let n = List.length(xs)
+if i >= 0 && i < n do List.nth(xs, i) else 0 end   -- proved
+```
+
+and rebinding `xs` or `n` before the use retires the fact.
+
 The alias is intentionally narrow, because attaching `len`'s meaning to the wrong
 function would manufacture false positives:
 
