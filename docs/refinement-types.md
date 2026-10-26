@@ -3573,6 +3573,9 @@ need_pos(Enum.fold(pos, 1, fn a -> fn x -> a + x))   -- proved: `x` comes from p
 - `List.fold_left`, `List.fold_right` and the prelude's `fold_left`;
 - `Enum.fold`, `Iterable.fold`, `Enum.reduce` and `Range.reduce`;
 - `Map.fold`, `Set.fold` and `HashMap.fold`;
+- `SortedSet.fold` and `OrderedMap.fold`, whose collection parameter is a
+  record (`{cmp: …, tree: …}`): the parametricity check matches a declared
+  record field by field;
 - `Array.fold_left`, `RRB.fold`, `RRB.fold_left`, `Deque.fold_left` and
   `Deque.fold_right`;
 - `Hamt.fold`, whose callback is curried.
@@ -3608,10 +3611,7 @@ These folds do **not** carry it, and a demand through them stays a skip:
 - the `NativeArray` folds, such as `fold_int`: the body is one builtin, which
   the checks cannot see through;
 - `Seq.fold`, `Seq.fold_while` and the folds built on them, `JsonStream.fold`
-  and `Flow.reduce`: the accumulator travels through a closure stored in data;
-- for now, `SortedSet.fold` and `OrderedMap.fold`: they are annotated, but
-  their collection parameter is a record type, which the parametricity check
-  does not yet walk.
+  and `Flow.reduce`: the accumulator travels through a closure stored in data.
 
 None of these is `@[assume]`d. Parametricity is checked, never taken on trust.
 

@@ -21,3 +21,5 @@ A lost proof, never a false one. Fix: an `align` case for `A.TyRecord` against `
 perturbation row (a record parameter whose field type variable is unified with the return
 variable must still be rejected). Pinned as skips in `test/test_refinecheck.ml` group
 `fold-invariants-3`; flip those pins to proofs when this lands.
+
+**Closed 2026-10-26**: see `specs/progress/2026-10-26-refine-p1-record-parameter.md`.

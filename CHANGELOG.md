@@ -55,6 +55,12 @@ git log is authoritative for exact commits.
   - relational candidates were never ordered weakest-first;
   - a slot's trivial `true` goal could make a vacuous proposal look useful.
   Plain `--check` is unchanged.
+- **Refinements: `SortedSet.fold` and `OrderedMap.fold` carry accumulator invariants.**
+  The parametricity check now matches a record-typed parameter (`{cmp: …, tree: …}`)
+  field by field, so `need_nn(OrderedMap.fold(m, 0, fn (a, _k, _v) -> a + 1))` is proved
+  (it was a `parametric-source-unproved` skip), as is a user fold over a record
+  parameter. `OrderedMap.filter` still carries no entry fact: its public type is an
+  anonymous record, which has no element slots.
 - **Refinements: `Map`'s own functions keep a refined map's facts.** `Map.insert`,
   `get`, `get_or`, `remove`, `keys`, `values`, `merge`, `map_values` and `singleton`
   are annotated with their generic types, and an opaque container (`ptype` /

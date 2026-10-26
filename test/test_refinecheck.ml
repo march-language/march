@@ -23774,16 +23774,17 @@ let fold_invariants_3_suite =
     (* Seq: church-encoded, `b` flows through a closure stored in data. *)
     skip_pin "Seq.fold" "xs : List(Int)" "Seq.fold(Seq.from_list(xs), 0, fn (a, _x) -> a + 1)"
       "unreflectable-subject";
-    (* SortedSet / OrderedMap are annotated, but their collection parameter is
-       a RECORD type, which P1's `align` does not walk, so `b` is not shown
-       generic (a lost proof, never a false one).  Filed:
-       specs/todos/2026-10-18-refine-p1-record-typed-parameter.md. *)
-    skip_pin "SortedSet.fold" "xs : List(Int)"
-      "SortedSet.fold(SortedSet.from_list(xs, icmp), 0, fn (a, _x) -> a + 1)"
-      "parametric-source-unproved";
-    skip_pin "OrderedMap.fold" "xs : List((Int, Int))"
-      "OrderedMap.fold(OrderedMap.from_list(xs, icmp), 0, fn (a, _k, _v) -> a + 1)"
-      "parametric-source-unproved" ]
+    (* SortedSet / OrderedMap: their collection parameter is a RECORD type;
+       pinned skips (parametric-source-unproved) until P1's `align` walked
+       records (specs/progress/2026-10-26-refine-p1-record-parameter.md). *)
+    proof "SortedSet.fold" "xs : List(Int)"
+      "SortedSet.fold(SortedSet.from_list(xs, icmp), 0, fn (a, _x) -> a + 1)";
+    control "SortedSet.fold" "xs : List(Int)"
+      "SortedSet.fold(SortedSet.from_list(xs, icmp), 0, fn (a, _x) -> a - 1)";
+    proof "OrderedMap.fold" "xs : List((Int, Int))"
+      "OrderedMap.fold(OrderedMap.from_list(xs, icmp), 0, fn (a, _k, _v) -> a + 1)";
+    control "OrderedMap.fold" "xs : List((Int, Int))"
+      "OrderedMap.fold(OrderedMap.from_list(xs, icmp), 0, fn (a, _k, _v) -> a - 1)" ]
 
 (* The 2026-10-21 stdlib sweep (specs/progress/2026-10-21-stdlib-refinement-sweep.md):
    stdlib signatures that now carry what the 2026-10-18 refinement features
@@ -28024,6 +28025,123 @@ let map_flow_suite =
         in
         Alcotest.(check bool) "an error" true (errs <> [])) ]
 
+(* ── P1 through a record-typed parameter
+   (specs/progress/2026-10-18-refine-p1-record-typed-parameter.md, closed by
+   specs/progress/2026-10-26-refine-p1-record-parameter.md): `Refine_param.align`
+   walks a declared record against the inferred one, fields by name, so a
+   collection parameter typed `{cmp: …, tree: Tree(a)}` no longer makes
+   `generic_in_inferred` answer no. *)
+let p1_record_suite =
+  let run, slugs, _detail = container_gap_harness [ "list.march"; "sorted_set.march"; "ordered_map.march" ] in
+  let pre =
+    "  fn need_nn(k : {Int | _ >= 0}) : Int do k end\n\
+    \  fn icmp(a : Int, b : Int) : Int do a - b end\n"
+  in
+  let q3 = Alcotest.(triple int int int) in
+  let triple c obs =
+    List.fold_left
+      (fun (p, v, s) (verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) (slugs c obs)
+  in
+  let case name ~body ~want =
+    gated name (fun () ->
+        let errs, _, obs, _ = run (cg_mod "PR" (pre ^ body)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check q3 "need_nn" want (triple "need_nn" obs))
+  in
+  let step = ("skipped", "accumulator-step-unproved") in
+  [ case "user fold over a record parameter proves (was a skip)"
+      ~body:
+        "  fn rf(s : {t: List(a)}, acc : b, f : b -> a -> b) : b do List.fold_left(s.t, acc, f) end\n\
+        \  fn go(xs : List(Int)) : Int do need_nn(rf({t: xs}, 0, fn (a, _x) -> a + 1)) end\n"
+      ~want:(1, 0, 0);
+    case "the tuple twin proves (unchanged)"
+      ~body:
+        "  fn tf(s : (List(a), Int), acc : b, f : b -> a -> b) : b do\n\
+        \    match s do\n\
+        \      (t, _) -> List.fold_left(t, acc, f)\n\
+        \    end\n\
+        \  end\n\
+        \  fn go(xs : List(Int)) : Int do need_nn(tf((xs, 0), 0, fn (a, _x) -> a + 1)) end\n"
+      ~want:(1, 0, 0);
+    (* P1 perturbation: the record's field variable is unified with the
+       return variable (the body returns an element as the accumulator), so
+       `b` is not generic and nothing is carried. *)
+    gated "P1 perturbation: a record field variable unified with the return is rejected" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "PR"
+               (pre
+               ^ "  fn bad(s : {t: List(a)}, acc : b, _f : b -> a -> b) : b do\n\
+                 \    match s.t do\n\
+                 \      Cons(x, _) -> x\n\
+                 \      Nil -> acc\n\
+                 \    end\n\
+                 \  end\n\
+                 \  fn go(xs : List(Int)) : Int do need_nn(bad({t: [0 - 5]}, 0, fn (a, _x) -> a + 1)) end\n"))
+        in
+        let vs = slugs "need_nn" obs in
+        Alcotest.(check bool) "recorded" true (vs <> []);
+        Alcotest.(check bool) "not proved" false (List.mem cg_proved vs));
+    gated "rf control: a decreasing step is a step skip, not a violation" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "PR"
+               (pre
+               ^ "  fn rf2(s : {t: List(a)}, acc : b, f : b -> a -> b) : b do List.fold_left(s.t, acc, f) end\n\
+                 \  fn go(xs : List(Int)) : Int do need_nn(rf2({t: xs}, 0, fn (a, _x) -> a - 1)) end\n"))
+        in
+        Alcotest.check cg_ps "a decreasing step is a step skip, not a violation" [ step ] (slugs "need_nn" obs));
+    case "SortedSet.fold: a demand through the fold proves (was parametric-source-unproved)"
+      ~body:"  fn go(xs : List(Int)) : Int do need_nn(SortedSet.fold(SortedSet.from_list(xs, icmp), 0, fn (a, _x) -> a + 1)) end\n"
+      ~want:(1, 0, 0);
+    gated "SortedSet.fold control: a decreasing step is a step skip" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "PR"
+               (pre
+               ^ "  fn go(xs : List(Int)) : Int do need_nn(SortedSet.fold(SortedSet.from_list(xs, icmp), 0, fn (a, _x) -> a - 1)) end\n"))
+        in
+        Alcotest.check cg_ps "need_nn" [ step ] (slugs "need_nn" obs));
+    case "OrderedMap.fold: a demand through the fold proves (was parametric-source-unproved)"
+      ~body:
+        "  fn go(xs : List((Int, Int))) : Int do need_nn(OrderedMap.fold(OrderedMap.from_list(xs, icmp), 0, fn (a, _k, _v) -> a + 1)) end\n"
+      ~want:(1, 0, 0);
+    gated "OrderedMap.fold control: a decreasing step is a step skip" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "PR"
+               (pre
+               ^ "  fn go(xs : List((Int, Int))) : Int do need_nn(OrderedMap.fold(OrderedMap.from_list(xs, icmp), 0, fn (a, _k, _v) -> a - 1)) end\n"))
+        in
+        Alcotest.check cg_ps "need_nn" [ step ] (slugs "need_nn" obs));
+    (* Name capture: the caller's own names coincide with the callee's
+       parameters and the record field. *)
+    case "capture: caller names `acc`/`s`/`t` like the callee's binders"
+      ~body:
+        "  fn rf3(s : {t: List(a)}, acc : b, f : b -> a -> b) : b do List.fold_left(s.t, acc, f) end\n\
+        \  fn go(t : List(Int), acc : Int) : Int do need_nn(rf3({t: t}, 0, fn (s, _x) -> s + 1)) end\n"
+      ~want:(1, 0, 0);
+    (* OrderedMap.filter is not carried: its public type is a record (no
+       element slots through a record), so there is no `k[p]`/`v[p]` to
+       declare or demand.  Pinned: filed in the ordered-map todo. *)
+    gated "OrderedMap.filter keeps no entry fact (filed)" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "PR"
+               (pre
+               ^ "  fn need_posl(_xs : List({Int | _ > 0})) : Int do 0 end\n\
+                 \  fn go(xs : List((Int, Int))) : Int do need_posl(OrderedMap.values(OrderedMap.filter(OrderedMap.from_list(xs, icmp), fn (_k, v) -> v > 0))) end\n"))
+        in
+        let vs = slugs "need_posl" obs in
+        Alcotest.(check bool) "recorded" true (vs <> []);
+        Alcotest.(check bool) "not proved" false (List.mem cg_proved vs)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -28200,4 +28318,5 @@ let () =
       ("gap-list-length-arg", gap_list_length_arg_suite);
       ("hashmap-filter", hashmap_filter_suite);
       ("map-flow", map_flow_suite);
+      ("p1-record", p1_record_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

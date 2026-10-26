@@ -487,6 +487,15 @@ let rec align (found : (string * T.ty) list ref) (d : A.ty) (t : T.ty) : bool =
     when List.length ds = List.length ts ->
     List.for_all2 (align found) ds ts
   | A.TyArrow (da, db), T.TArrow (ta, tb) -> align found da ta && align found db tb
+  (* A record (P1 record-typed parameter, 2026-10-26): fields matched by
+     name, the same set on both sides.  Anything else keeps answering no. *)
+  | A.TyRecord dfs, T.TRecord tfs when List.length dfs = List.length tfs ->
+    List.for_all
+      (fun ((n : A.name), dt) ->
+        match List.assoc_opt n.A.txt tfs with
+        | Some tt -> align found dt tt
+        | None -> false)
+      dfs
   | _ -> ty_vars [] d = []
 
 let unbound_id (t : T.ty) : int option =
