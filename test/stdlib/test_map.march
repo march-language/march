@@ -312,6 +312,90 @@ pfn count_distinct_keys(xs : List(Int)) : Int do
   go(xs, Nil)
 end
 
+-- ── Runtime witnesses for the element flow through Map's own functions
+-- (specs/progress/2026-10-26-map-element-flow.md).  The refinement checker
+-- carries a refined map's key and value facts through `insert`, `get`,
+-- `get_or`, `remove`, `values`, `merge`, `map_values` and `singleton` by
+-- parametricity: every value of the result is one of the sources' values.
+-- These properties check exactly that inclusion at run time, over random
+-- entries (an Int value list stands in for "the facts the sources carry").
+
+pfn vals_of(pairs : List((Int, Int))) : List(Int) do
+  List.map(pairs, fn kv -> Tuple.second(kv))
+end
+
+pfn keys_of(pairs : List((Int, Int))) : List(Int) do
+  List.map(pairs, fn kv -> Tuple.first(kv))
+end
+
+-- Every element of `xs` is in `allowed`.
+pfn all_in(xs : List(Int), allowed : List(Int)) : Bool do
+  List.all(xs, fn x -> List.member(allowed, x))
+end
+
+pfn entries_gen() do
+  Gen.list(Gen.tuple2(Gen.int(-20, 20), Gen.int(-20, 20)))
+end
+
+describe "element flow through Map's functions (runtime witnesses)" do
+  test "insert: values come from the map or the inserted value; keys likewise" do
+    Check.all(Gen.tuple2(entries_gen(), Gen.tuple2(Gen.int(-20, 20), Gen.int(-20, 20))), fn pair ->
+      match pair do
+        (pairs, kx) ->
+          let m = Map.from_list(pairs, int_cmp)
+          let k = Tuple.first(kx)
+          let x = Tuple.second(kx)
+          let r = Map.insert(m, k, x, int_cmp)
+          all_in(Map.values(r), Cons(x, Map.values(m))) && all_in(Map.keys(r), Cons(k, Map.keys(m)))
+      end
+    )
+  end
+
+  test "get / get_or: the result is one of the map's values (or the default)" do
+    Check.all(Gen.tuple2(entries_gen(), Gen.int(-20, 20)), fn pair ->
+      match pair do
+        (pairs, k) ->
+          let m = Map.from_list(pairs, int_cmp)
+          let got = match Map.get(m, k, int_cmp) do
+            Some(v) -> List.member(Map.values(m), v)
+            None -> true
+          end
+          got && List.member(Cons(99, Map.values(m)), Map.get_or(m, k, 99, int_cmp))
+      end
+    )
+  end
+
+  test "remove / values / merge: values come from the inputs" do
+    Check.all(Gen.tuple2(entries_gen(), entries_gen()), fn pair ->
+      match pair do
+        (a, b) ->
+          let ma = Map.from_list(a, int_cmp)
+          let mb = Map.from_list(b, int_cmp)
+          let k = match a do
+            Cons(kv, _) -> Tuple.first(kv)
+            Nil -> 0
+          end
+          all_in(Map.values(Map.remove(ma, k, int_cmp)), Map.values(ma))
+            && all_in(Map.values(ma), vals_of(a))
+            && all_in(Map.values(Map.merge(ma, mb, int_cmp)), List.append(Map.values(ma), Map.values(mb)))
+            && all_in(Map.keys(Map.merge(ma, mb, int_cmp)), List.append(keys_of(a), keys_of(b)))
+      end
+    )
+  end
+
+  test "map_values: every value is f of an input value; singleton holds its value" do
+    Check.all(Gen.tuple2(entries_gen(), Gen.int(-20, 20)), fn pair ->
+      match pair do
+        (pairs, x) ->
+          let m = Map.from_list(pairs, int_cmp)
+          let f = fn v -> v * v + 1
+          all_in(Map.values(Map.map_values(m, f)), List.map(Map.values(m), f))
+            && Map.values(Map.singleton(x, x)) == [x]
+      end
+    )
+  end
+end
+
 describe "assumed card contract (runtime witness)" do
   test "size is the number of distinct keys: size(m) == card(keys(m))" do
     Check.all(Gen.tuple2(Gen.list(Gen.int(0, 30)), Gen.int(0, 30)), fn pair ->

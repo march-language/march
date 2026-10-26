@@ -662,8 +662,17 @@ mod HashMap do
       march> let fm = HashMap.from_list([("a", 1), ("b", 20), ("c", 30)])
       march> List.sort_by(HashMap.keys(HashMap.filter(fm, fn k -> fn v -> v > 10)), fn (x, y) -> x < y)
       ["b", "c"]
+
+  The refinement checker ASSUMES that every entry of the result satisfies
+  `pred` (an abstract refinement of two arguments, `k -> v -> Bool[p]`): a
+  caller demanding `HashMap(String, {Int | _ > 0})` of
+  `HashMap.filter(m, fn _k -> fn v -> v > 0)` gets it. The body goes
+  through `entries` (a list of tuples) and a curried call, which the checker
+  cannot see into, so the fact is taken on faith and witnessed by a property
+  test in test/stdlib/test_hash_map.march. See docs/refinement-types.md.
   """
-  fn filter(m, pred) do
+  @[assume]
+  fn filter(m : HashMap(k, v), pred : k -> v -> Bool[p]) : HashMap(k[p], v[p]) do
     fn go(lst, acc) do
       match lst do
       Nil -> acc

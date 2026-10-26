@@ -55,6 +55,29 @@ git log is authoritative for exact commits.
   - relational candidates were never ordered weakest-first;
   - a slot's trivial `true` goal could make a vacuous proposal look useful.
   Plain `--check` is unchanged.
+- **Refinements: `SortedSet.fold` and `OrderedMap.fold` carry accumulator invariants.**
+  The parametricity check now matches a record-typed parameter (`{cmp: …, tree: …}`)
+  field by field, so `need_nn(OrderedMap.fold(m, 0, fn (a, _k, _v) -> a + 1))` is proved
+  (it was a `parametric-source-unproved` skip), as is a user fold over a record
+  parameter. `OrderedMap.filter` still carries no entry fact: its public type is an
+  anonymous record, which has no element slots.
+- **Refinements: `Map`'s own functions keep a refined map's facts.** `Map.insert`,
+  `get`, `get_or`, `remove`, `keys`, `values`, `merge`, `map_values` and `singleton`
+  are annotated with their generic types, and an opaque container (`ptype` /
+  `opaque type`) whose representation hides its parameters now counts as a source for
+  the parametric element rule. So `need_vals(Map.insert(m, "b", 5, cmp))` with `m :
+  Map(String, {Int | _ > 0})` is proved, `Map.insert(m, "b", 0, cmp)` is a skip, and
+  `one_pos(Map.get(m, "a", cmp))` is proved. Nothing new is assumed: the bodies are
+  checked parametric. A too-weak declared map through these functions is now reported
+  like a too-weak list through `List.reverse` (a violation). `Map.empty()` is not a
+  source yet.
+- **Refinements: `HashMap.filter` keeps what its predicate says.** It is now
+  `@[assume] fn filter(m : HashMap(k, v), pred : k -> v -> Bool[p]) : HashMap(k[p],
+  v[p])`, the `Map.filter` recipe: `need_vals(HashMap.filter(m, fn _k -> fn v -> v >
+  0))` against `HashMap(String, {Int | _ > 0})` is proved, as are key demands and a
+  key/value relation; a weaker lambda is an `abstract-refinement-too-weak` skip. The
+  entry fact is assumed (one `trusted` postcondition), and property tests in
+  `test/stdlib/test_hash_map.march` check it at run time.
 - **Refinements: `Map.filter` keeps what its predicate says.** `Map.filter(m, pred,
   cmp)` is now `pred : k -> v -> Bool[p]` returning `{Map(k[p], v[p]) | subset(keys(_),
   keys(m))}`, so `need_vals(Map.filter(m, fn _k -> fn v -> v > 0, cmp))` against
@@ -346,6 +369,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a value-creating function used as a value no longer counts as
+  parametric (a false proof).** The check that a generic function cannot make a value
+  of its type variable looked only at what it CALLS, so a function that creates one
+  (an interface method `fn dflt : Int -> t`, a decoder, an extern) went unnoticed when
+  it was passed as an argument, `let`-bound, or stored in a record. For example,
+  `fn sneak(xs : List(v), _d : v) : List(v) do Cons(apply1(dflt, 1), xs) end` was proved
+  to keep a `List({Int | _ > 0})` positive while running it put `-5` in the list. Every
+  name a body mentions is now checked. No standard-library or test-corpus proof was
+  lost.
 - **Refinements: a `let`-bound list literal keeps its length.** `let t = [1, 2, 3]`
   then `List.head(t)` or `Stats.mean(t)` was an `unconstrained-subject` skip while
   `List.head([1, 2, 3])` proved; the binding now records `len(t) == 3` (any

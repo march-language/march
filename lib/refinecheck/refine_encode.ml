@@ -1465,6 +1465,22 @@ let ctor_param_fields : (string, field_role list) Hashtbl.t = Hashtbl.create 32
    treat slot [j] as covering them (2026-09-18 plan). *)
 let ctor_hidden_params : (string, int list) Hashtbl.t = Hashtbl.create 32
 
+(* Variant types (keyed by [adt_sort_name]) declared OPAQUE: `ptype`, or a
+   variant type every constructor of which is private (`opaque type`,
+   `alwayslinear opaque type`).  [Refine_param.container_paths] reads it for
+   the opaque-container source rule (container-gap batch 2026-10-26, gap 2):
+   such a type's hidden parameters are still sources of a parametric callee,
+   because no construction can establish a slot fact on a hidden field
+   (phase 0: a hidden-field construction is a recorded skip), so every slot
+   fact a value of it carries came from a declared parameter, an assumed
+   return or a parametric call, each of which means EVERY value of that
+   parameter in it.  Keyed by the DECLARATION's qualified key
+   ([adt_sort_name_at path name]), never the bare name: a user's plain `type
+   Set(k, v)` must not inherit the stdlib `ptype Set`'s status (soundness
+   review, 2026-10-26).  Read through [is_opaque_container]. *)
+let opaque_containers : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+
 (* Per constructor, per field (in declaration order): the container's type
    parameters the field HIDES, as (index, name), and the field type rendered
    for a message.  A [Param] field and an identity self-reference hide
@@ -1603,6 +1619,16 @@ let canonical_type_name (name : string) : string =
 let adt_sort_name (march_name : string) : string =
   let bare = "M_" ^ canonical_type_name march_name in
   match Hashtbl.find_opt adt_canonical bare with Some key -> key | None -> bare
+
+(* Is the type a reference to [name] resolves to opaque?  Only when EVERY
+   declaration of that bare name is ([adt_decl_paths]): the checker's bare
+   resolution may pick either of two colliding declarations, so one plain
+   `type` of the name withdraws the status from all of them (a lost proof,
+   never a false one). *)
+let is_opaque_container (name : string) : bool =
+  match Hashtbl.find_opt adt_decl_paths ("M_" ^ canonical_type_name name) with
+  | Some (_ :: _ as entries) -> List.for_all (fun (_, key) -> Hashtbl.mem opaque_containers key) entries
+  | _ -> false
 
 (* W4, ENTRY SHAPE (multi-arg design 2026-10-18 §1.4, §2.2): can a relation
    between the slots [s] of container [c] hold "per entry"?  An entry is one
@@ -1992,11 +2018,13 @@ let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
     decls
 
 (* Pass 2: register each constructor's field sorts (needs all names from pass 1). *)
-let rec register_field_sorts_once (decls : A.decl list) : unit =
+let rec register_field_sorts_once ?(path : string = "") (decls : A.decl list) : unit =
   List.iter
     (function
-      | A.DType (_, tname, tparams, A.TDVariant variants, _)
-      | A.DAlwaysLinearType (_, tname, tparams, A.TDVariant variants, _) ->
+      | A.DType (vis, tname, tparams, A.TDVariant variants, _)
+      | A.DAlwaysLinearType (vis, tname, tparams, A.TDVariant variants, _) ->
+        if vis = A.Private || List.for_all (fun (v : A.variant) -> v.A.var_vis = A.Private) variants then
+          Hashtbl.replace opaque_containers (adt_sort_name_at path tname.A.txt) ();
         let pnames = List.map (fun (p : A.name) -> p.A.txt) tparams in
         let rec tvars acc (t : A.ty) =
           match t with
@@ -2120,7 +2148,8 @@ let rec register_field_sorts_once (decls : A.decl list) : unit =
           (List.map (fun (f : A.field) -> smt_sort_of_field f.A.fld_ty) ad.A.actor_state);
         Hashtbl.replace ctor_field_names ctor
           (List.map (fun (f : A.field) -> f.A.fld_name.A.txt) ad.A.actor_state)
-      | A.DMod (_, _, ds, _) -> register_field_sorts_once ds
+      | A.DMod (n, _, ds, _) ->
+        register_field_sorts_once ~path:(if path = "" then n.A.txt else path ^ "." ^ n.A.txt) ds
       | _ -> ())
     decls
 

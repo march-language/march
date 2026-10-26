@@ -364,13 +364,21 @@ let rec expr_binders (acc : string list) (e : A.expr) : string list =
     go (n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps @ acc) body
   | A.ELetQ (p, a, b, _) | A.ELetStar (p, a, b, _) -> go (go (pat_binders p @ acc) a) b
 
-(* Every named call head (`f(…)`) in a body.  A head that is not a bare name
-   is a call through a local value — see [expr_binders]. *)
-let rec call_heads (acc : string list) (e : A.expr) : string list =
-  let go = call_heads in
+(* Every name a body REFERENCES, wherever it occurs: a call head (`f(…)`),
+   and equally a name used as a value — passed as an argument (`apply1(dflt,
+   1)`, `Map.map_values(m, dflt_of)`), `let`-bound (`let g = dflt`), stored in
+   a record or tuple (`{g: dflt}`), or piped to.  Until the 2026-10-26
+   soundness review only call heads were collected, so a value-creating
+   function used as a value went unnoticed and its caller counted as
+   parametric: a false proof.  A local ([expr_binders]) is harmless only
+   because its own definition is part of the same walk: `let g = dflt`
+   records `dflt` here, and a parameter's value comes from the caller, which
+   the source analysis constrains. *)
+let rec value_refs (acc : string list) (e : A.expr) : string list =
+  let go = value_refs in
   match e with
-  | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ -> acc
-  | A.EApp (A.EVar n, args, _) -> List.fold_left go (n.A.txt :: acc) args
+  | A.EVar n -> n.A.txt :: acc
+  | A.ELit _ | A.EHole _ | A.EResultRef _ -> acc
   | A.EApp (f, args, _) -> List.fold_left go (go acc f) args
   | A.ECon (_, args, _) | A.ETuple (args, _) | A.EAtom (_, args, _) | A.EBlock (args, _) ->
     List.fold_left go acc args
@@ -440,7 +448,7 @@ let compute_safety () : unit =
             List.concat_map fnparam_binders c.A.fc_params |> fun ps -> expr_binders ps c.A.fc_body
           in
           let heads =
-            call_heads (match c.A.fc_guard with Some g -> call_heads [] g | None -> []) c.A.fc_body
+            value_refs (match c.A.fc_guard with Some g -> value_refs [] g | None -> []) c.A.fc_body
           in
           List.iter
             (fun h ->
@@ -487,6 +495,15 @@ let rec align (found : (string * T.ty) list ref) (d : A.ty) (t : T.ty) : bool =
     when List.length ds = List.length ts ->
     List.for_all2 (align found) ds ts
   | A.TyArrow (da, db), T.TArrow (ta, tb) -> align found da ta && align found db tb
+  (* A record (P1 record-typed parameter, 2026-10-26): fields matched by
+     name, the same set on both sides.  Anything else keeps answering no. *)
+  | A.TyRecord dfs, T.TRecord tfs when List.length dfs = List.length tfs ->
+    List.for_all
+      (fun ((n : A.name), dt) ->
+        match List.assoc_opt n.A.txt tfs with
+        | Some tt -> align found dt tt
+        | None -> false)
+      dfs
   | _ -> ty_vars [] d = []
 
 let unbound_id (t : T.ty) : int option =
@@ -620,8 +637,16 @@ let rec container_paths (v : string) (t : A.ty) : (string * int) list list optio
     | A.TyVar w when w.A.txt = v -> Some [ [] ]
     | A.TyCon (c, args) when is_container_type c.A.txt ->
       (* Slot [j] covers every value of parameter [j] only if that parameter
-         appears nowhere but in direct fields ([ctor_hidden_params]). *)
-      let hidden = Option.value ~default:[] (Hashtbl.find_opt ctor_hidden_params (adt_sort_name c.A.txt)) in
+         appears nowhere but in direct fields ([ctor_hidden_params]) — or the
+         type is opaque ([opaque_containers], the opaque-container source
+         rule): a hidden-field construction establishes no slot fact (phase
+         0), so an opaque type's slot facts come only from declarations,
+         assumed returns and parametric calls, and each covers every value of
+         [j] in it. *)
+      let hidden =
+        if is_opaque_container c.A.txt then []
+        else Option.value ~default:[] (Hashtbl.find_opt ctor_hidden_params (adt_sort_name c.A.txt))
+      in
       let rec go j = function
         | [] -> Some []
         | a :: _ when List.mem j hidden && List.mem v (ty_vars [] a) -> None

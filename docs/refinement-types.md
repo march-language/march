@@ -1737,6 +1737,8 @@ element sets are stated rather than proved: every public `Set` operation
 `Map.filter` also assumes an entry fact, `Map(k[p], v[p])`: every entry of its
 result satisfies `pred` (see [two-argument abstract
 refinements](#abstract-refinements-filter-keeps-what-its-predicate-says)).
+The element facts of `Map`'s other functions are not assumed; they are checked
+by parametricity (see [`Map`'s own functions](#maps-own-functions)).
 
 ```march
 @[assume]
@@ -2576,7 +2578,9 @@ that the signature tells the truth about the callee:
   typechecker's own builtin table. An interface method counts even when its
   result is one of its arguments' types (`fn norm : t -> t`) and even when the
   module has a single `impl` of it: that `impl` is written at one type and may
-  return any value of it.
+  return any value of it. Such a function counts wherever its name appears, not
+  only where it is called: passed as an argument (`apply1(dflt, 1)`), bound by
+  `let` (`let g = dflt`), stored in a record or tuple, or piped to.
 - **A callee with a bound on the variable carries nothing.**
 
 When any of these fails, the call's element obligation is a recorded skip:
@@ -3174,8 +3178,8 @@ positive.
 - an uncurried lambda, for a combinator that calls its callback with both
   arguments at once;
 - a curried lambda, for a combinator that calls it in two steps (today that
-  counts only for a parameter's `p` and for `Map.filter`'s assumed return,
-  below; see "Not yet");
+  counts only for a parameter's `p` and for the assumed returns of `Map.filter`
+  and `HashMap.filter`, below; see "Not yet");
 - either of those bound by `let`;
 - a function with a proved Bool contract over two parameters;
 - a callback parameter that itself defines a two-argument abstract refinement
@@ -3336,8 +3340,61 @@ Map.filter(m, fn _k -> fn v -> v < 100, Map.str_cmp)   -- does not meet `_ > 0 &
 ```
 
 The property test in `test/stdlib/test_map.march` checks the fact at run time.
-`HashMap.filter`, `OrderedMap.filter` and a list of pairs do not carry it yet;
-see [Limitations](#open-gaps-in-element-and-abstract-refinements).
+
+`HashMap.filter` carries the same assumed entry fact, with no comparator and
+no key-set contract:
+
+```march
+@[assume]
+fn filter(m : HashMap(k, v), pred : k -> v -> Bool[p]) : HashMap(k[p], v[p]) do … end
+```
+
+Its property test is in `test/stdlib/test_hash_map.march`. `OrderedMap.filter`
+and a list of pairs do not carry it yet; see
+[Limitations](#open-gaps-in-element-and-abstract-refinements).
+
+#### `Map`'s own functions
+
+`Map.insert`, `get`, `get_or`, `remove`, `keys`, `values`, `merge`,
+`map_values` and `singleton` carry a refined map's key and value facts. This
+is not assumed: each is annotated with its generic type, and the parametric
+element rule (the one `List.reverse` uses) checks that its body cannot make a
+`k` or a `v`. So every value of the result entered through an argument, and a
+demand on the result is checked against each one.
+
+```march
+mod MapFlow do
+  fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+  fn one_pos(_o : Option({Int | _ > 0})) : Int do 0 end
+
+  fn t1(m : Map(String, {Int | _ > 0})) : Int do
+    need_vals(Map.insert(m, "b", 5, Map.str_cmp))   -- proved: m's values, and 5
+  end
+  fn t2(m : Map(String, {Int | _ > 0})) : Int do
+    need_vals(Map.insert(m, "b", 0, Map.str_cmp))   -- skip: 0 is not positive
+  end
+  fn t3(m : Map(String, {Int | _ > 0})) : Int do
+    one_pos(Map.get(m, "a", Map.str_cmp))           -- proved
+  end
+  fn t4(m : Map(String, Int)) : Int do
+    need_vals(Map.map_values(m, fn v -> v * v + 1)) -- proved: from the lambda
+  end
+end
+```
+
+`Map`'s representation hides both parameters: its values sit in a trie of
+lists of pairs, not in fields the checker models. A type like that is a source
+only when it is declared opaque (`ptype` or `opaque type`), and only when no other
+declaration of the same name is a plain `type`. No construction of
+such a value establishes an element fact (it is a recorded skip), so its facts
+come only from declarations, assumed returns and these parametric calls. A
+plain `type` with the same hidden shape stays a skip.
+
+These do not carry it: `Map.empty()` (no parameter shows `k` and `v` are
+generic, so it is not a source and `Map.insert(Map.empty(), …)` is a skip),
+the functions over lists of pairs (`from_list`, `to_list`, `entries`), and the
+unannotated `merge_with`. `HashMap`'s and `Set`'s functions other than the
+filters are not annotated yet.
 
 #### What abstract refinements do not do
 
@@ -3382,15 +3439,11 @@ also collected under
   a callable whose return is not known to meet it is a skip there, not a
   violation.
 
-- **`Map`'s other functions carry no element fact.** `Map.insert`,
-  `Map.remove`, `Map.get`, `Map.merge` and `Map.map_values` keep nothing of a
-  refined input. Inserting into a map of positive values, for a demand on
-  positive values, is a skip. A fold's accumulator invariant needs no abstract
-  refinement at all; see [Folds](#folds-an-accumulator-invariant).
-
-  ```march
-  need_vals(Map.insert(pos_map, "b", 5, cmp))   -- skip
-  ```
+- **`Map.filter` does not keep its input's facts.** `Map`'s other functions
+  carry them by parametricity (see [`Map`'s own functions](#maps-own-functions)),
+  but an assumed callee is never conjoined with its input. A fold's
+  accumulator invariant needs no abstract refinement at all; see
+  [Folds](#folds-an-accumulator-invariant).
 
 - **Not every combinator carries `p`.**
   - `drop_while` (`List`, `Enum`) keeps no element fact. Its result starts at
@@ -3523,6 +3576,9 @@ need_pos(Enum.fold(pos, 1, fn a -> fn x -> a + x))   -- proved: `x` comes from p
 - `List.fold_left`, `List.fold_right` and the prelude's `fold_left`;
 - `Enum.fold`, `Iterable.fold`, `Enum.reduce` and `Range.reduce`;
 - `Map.fold`, `Set.fold` and `HashMap.fold`;
+- `SortedSet.fold` and `OrderedMap.fold`, whose collection parameter is a
+  record (`{cmp: …, tree: …}`): the parametricity check matches a declared
+  record field by field;
 - `Array.fold_left`, `RRB.fold`, `RRB.fold_left`, `Deque.fold_left` and
   `Deque.fold_right`;
 - `Hamt.fold`, whose callback is curried.
@@ -3558,10 +3614,7 @@ These folds do **not** carry it, and a demand through them stays a skip:
 - the `NativeArray` folds, such as `fold_int`: the body is one builtin, which
   the checks cannot see through;
 - `Seq.fold`, `Seq.fold_while` and the folds built on them, `JsonStream.fold`
-  and `Flow.reduce`: the accumulator travels through a closure stored in data;
-- for now, `SortedSet.fold` and `OrderedMap.fold`: they are annotated, but
-  their collection parameter is a record type, which the parametricity check
-  does not yet walk.
+  and `Flow.reduce`: the accumulator travels through a closure stored in data.
 
 None of these is `@[assume]`d. Parametricity is checked, never taken on trust.
 
@@ -3709,9 +3762,9 @@ xs : List({Int | _ > 0})           -- do this instead: then `x` gets it
   component), `Prelude.filter` (the bare `filter`), `Enum.filter`,
   `Enum.find`, `Enum.take_while`, `Iterable.filter`, `Iterable.find`,
   `Range.filter`, `Deque.filter` and, over a key and a value together and
-  assumed rather than proved, `Map.filter`. Each is instantiated from a lambda
-  (whose body may combine `&&`/`||`/`not`/`if` and calls to proved helpers),
-  a named predicate with a proved contract, a callback parameter or a
+  assumed rather than proved, `Map.filter` and `HashMap.filter`. Each is
+  instantiated from a lambda (whose body may combine `&&`/`||`/`not`/`if` and
+  calls to proved helpers), a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
 - **A scalar demand is traced only when it is closed.** `need_pos(Option.unwrap_or(o, 1))`
   is checked through `unwrap_or`'s sources (the elements of `o` and the
@@ -5444,13 +5497,12 @@ The October 2026 features stop at these edges. Each one is a recorded skip:
 never a violation, and an error under `cap verified`. Each has an open item in
 `specs/todos/`, except the two marked as design rulings.
 
-- **`Map`'s other functions carry no element fact.** Inserting into, removing
-  from, looking up in, merging or mapping over a refined `Map` keeps nothing.
-  Only `Map.filter` carries an entry fact. (Todo: Map element flow through
-  combinators.)
-- **`HashMap.filter` and `OrderedMap.filter` carry no entry fact yet**, unlike
-  `Map.filter`. (Todos: HashMap filter two-argument abstract, and OrderedMap
-  filter two-argument abstract.)
+- **Some `Map` functions, and `HashMap`'s and `Set`'s, carry no element
+  fact.** `Map.empty()`, the list-of-pairs functions and `merge_with` are not
+  sources; `HashMap` and `Set` functions other than the filters are not
+  annotated. (Todo: Map element flow, the remainder.)
+- **`OrderedMap.filter` carries no entry fact yet**, unlike `Map.filter` and
+  `HashMap.filter`. (Todo: OrderedMap filter two-argument abstract.)
 - **A list of pairs is not modelled.** A tuple element is not a container
   type, so a list of pairs has no element slots, and no relation over its
   parts. This is also why `Map.filter`'s entry fact is assumed rather than
@@ -5478,7 +5530,7 @@ never a violation, and an error under `cap verified`. Each has an open item in
   for the `Deque.to_list` element fact.)
 
 ```march
-Map.insert(pos_map, "b", 5, cmp)        -- into a positive-value demand: skip
+Map.insert(Map.empty(), "b", 5, cmp)    -- into a positive-value demand: skip
 List((k, v))                            -- a list of pairs: no slots
 kk : ({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (y > x)}   -- no fact
 let g = keep(k)                         -- then `if g(v)`: no fact

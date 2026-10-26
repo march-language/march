@@ -7735,6 +7735,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset ctor_field_params;
   Hashtbl.reset ctor_field_joint;
   Hashtbl.reset ctor_hidden_params;
+  Hashtbl.reset opaque_containers;
   Hashtbl.reset axiom_measures;
   Hashtbl.reset measure_base_cases;
   Hashtbl.reset measure_scalar_field_dep;
