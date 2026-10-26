@@ -364,13 +364,21 @@ let rec expr_binders (acc : string list) (e : A.expr) : string list =
     go (n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps @ acc) body
   | A.ELetQ (p, a, b, _) | A.ELetStar (p, a, b, _) -> go (go (pat_binders p @ acc) a) b
 
-(* Every named call head (`f(…)`) in a body.  A head that is not a bare name
-   is a call through a local value — see [expr_binders]. *)
-let rec call_heads (acc : string list) (e : A.expr) : string list =
-  let go = call_heads in
+(* Every name a body REFERENCES, wherever it occurs: a call head (`f(…)`),
+   and equally a name used as a value — passed as an argument (`apply1(dflt,
+   1)`, `Map.map_values(m, dflt_of)`), `let`-bound (`let g = dflt`), stored in
+   a record or tuple (`{g: dflt}`), or piped to.  Until the 2026-10-26
+   soundness review only call heads were collected, so a value-creating
+   function used as a value went unnoticed and its caller counted as
+   parametric: a false proof.  A local ([expr_binders]) is harmless only
+   because its own definition is part of the same walk: `let g = dflt`
+   records `dflt` here, and a parameter's value comes from the caller, which
+   the source analysis constrains. *)
+let rec value_refs (acc : string list) (e : A.expr) : string list =
+  let go = value_refs in
   match e with
-  | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ -> acc
-  | A.EApp (A.EVar n, args, _) -> List.fold_left go (n.A.txt :: acc) args
+  | A.EVar n -> n.A.txt :: acc
+  | A.ELit _ | A.EHole _ | A.EResultRef _ -> acc
   | A.EApp (f, args, _) -> List.fold_left go (go acc f) args
   | A.ECon (_, args, _) | A.ETuple (args, _) | A.EAtom (_, args, _) | A.EBlock (args, _) ->
     List.fold_left go acc args
@@ -440,7 +448,7 @@ let compute_safety () : unit =
             List.concat_map fnparam_binders c.A.fc_params |> fun ps -> expr_binders ps c.A.fc_body
           in
           let heads =
-            call_heads (match c.A.fc_guard with Some g -> call_heads [] g | None -> []) c.A.fc_body
+            value_refs (match c.A.fc_guard with Some g -> value_refs [] g | None -> []) c.A.fc_body
           in
           List.iter
             (fun h ->

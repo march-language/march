@@ -2578,7 +2578,9 @@ that the signature tells the truth about the callee:
   typechecker's own builtin table. An interface method counts even when its
   result is one of its arguments' types (`fn norm : t -> t`) and even when the
   module has a single `impl` of it: that `impl` is written at one type and may
-  return any value of it.
+  return any value of it. Such a function counts wherever its name appears, not
+  only where it is called: passed as an argument (`apply1(dflt, 1)`), bound by
+  `let` (`let g = dflt`), stored in a record or tuple, or piped to.
 - **A callee with a bound on the variable carries nothing.**
 
 When any of these fails, the call's element obligation is a recorded skip:

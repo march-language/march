@@ -369,6 +369,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a value-creating function used as a value no longer counts as
+  parametric (a false proof).** The check that a generic function cannot make a value
+  of its type variable looked only at what it CALLS, so a function that creates one
+  (an interface method `fn dflt : Int -> t`, a decoder, an extern) went unnoticed when
+  it was passed as an argument, `let`-bound, or stored in a record. For example,
+  `fn sneak(xs : List(v), _d : v) : List(v) do Cons(apply1(dflt, 1), xs) end` was proved
+  to keep a `List({Int | _ > 0})` positive while running it put `-5` in the list. Every
+  name a body mentions is now checked. No standard-library or test-corpus proof was
+  lost.
 - **Refinements: a `let`-bound list literal keeps its length.** `let t = [1, 2, 3]`
   then `List.head(t)` or `Stats.mean(t)` was an `unconstrained-subject` skip while
   `List.head([1, 2, 3])` proved; the binding now records `len(t) == 3` (any

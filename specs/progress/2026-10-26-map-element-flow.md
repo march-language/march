@@ -64,6 +64,18 @@ on an opaque container's value can only come from:
 - the parametric rule itself: by parametricity every value of `v` in the result is a
   value of `v` in a source, so a deep fact of every source is a deep fact of the result.
 
+That last step rests on P2 (`parametric_safe`) being right that the body cannot create a
+`v`. **Correction (2026-10-26 soundness review):** it was not. `compute_safety` classified
+only call heads (`f(…)`) and treated every local name as harmless, so a value-creating
+function used as a VALUE (`let g = dflt`, `{g: dflt}`, `apply1(dflt, 1)`,
+`Map.map_values(m, dflt_of)`) was missed, and this rule then proved
+`need_vals(sneak(m, 1))` for a `sneak` that inserts `dflt(1) = -5` (run: prints `-5`).
+The same hole already gave a false proof on main without any `Map` involved
+(`Cons(apply1(dflt, 1), xs)` into a `List({Int | _ > 0})`). Fixed in its own commit by
+classifying every name a body references
+(`specs/progress/2026-10-26-refine-p2-value-references.md`); the opaque rule here is
+unchanged.
+
 `ptype` constructors are **not** private in practice: `Map.HamtMap(Map.HLeaf(…))` from
 another module typechecks (measured). The argument above does not rely on visibility,
 and two tests pin that such a construction never becomes a proved source.

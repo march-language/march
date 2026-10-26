@@ -28142,6 +28142,122 @@ let p1_record_suite =
         Alcotest.(check bool) "recorded" true (vs <> []);
         Alcotest.(check bool) "not proved" false (List.mem cg_proved vs)) ]
 
+(* ── P2 sees every reference, not only call heads (soundness review of the
+   container-gap batch; specs/progress/2026-10-26-refine-p2-value-references.md).
+   `compute_safety` used to classify only `f(…)` heads, and any locally bound
+   name as harmless, so a function that CREATES a type-variable value went
+   unnoticed when it was used as a VALUE: `let`-bound, stored in a record,
+   passed as an argument.  The body counted as parametric and a demand
+   through it was proved, a false proof (each shape below printed -5 at run
+   time).  `dflt` is an interface method `Int -> t` whose `Int` impl returns
+   `0 - 5`. *)
+let p2_value_refs_suite =
+  let run, slugs, _detail = container_gap_harness [ "list.march"; "option.march"; "map.march" ] in
+  let pre =
+    "  interface Dflt(t) do\n\
+    \    fn dflt : Int -> t\n\
+    \  end\n\
+    \  impl Dflt(Int) do\n\
+    \    fn dflt(_n) do 0 - 5 end\n\
+    \  end\n\
+    \  fn apply1(f : Int -> b, n : Int) : b do f(n) end\n\
+    \  fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n\
+    \  fn list_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n\
+    \  fn need_pos(x : {Int | _ > 0}) : Int do x end\n"
+  in
+  (* Every user obligation on the demand, whichever label it carries (the
+     demand's callee, or the argument call for a forward-rule subtyping). *)
+  let demand obs = slugs "need_vals" obs @ slugs "list_pos" obs @ slugs "need_pos" obs @ slugs "sneak(…)" obs in
+  let unsound name ~body =
+    gated name (fun () ->
+        let _, _, obs, _ = run (cg_mod "PV" (pre ^ body)) in
+        let vs = demand obs in
+        Alcotest.(check bool) "recorded" true (vs <> []);
+        Alcotest.(check bool) "not proved" false (List.mem cg_proved vs))
+  in
+  let sound name ~body =
+    gated name (fun () ->
+        let errs, _, obs, _ = run (cg_mod "PV" (pre ^ body)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        let vs = demand obs in
+        Alcotest.(check bool) "recorded" true (vs <> []);
+        Alcotest.(check bool) ("all proved: " ^ String.concat "," (List.map snd vs)) true
+          (List.for_all (( = ) cg_proved) vs))
+  in
+  let go_map = "  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(sneak(m, 1)) end\n" in
+  [ unsound "b_alias: `let g = dflt`, then g(1) into Map.insert"
+      ~body:
+        ("  fn sneak(m : Map(String, v), _d : v) : Map(String, v) do\n\
+          \    let g = dflt\n\
+          \    Map.insert(m, \"z\", g(1), Map.str_cmp)\n\
+          \  end\n" ^ go_map);
+    unsound "g_record: `r = {g: dflt}`, then r.g(1)"
+      ~body:
+        ("  fn sneak(m : Map(String, v), _d : v) : Map(String, v) do\n\
+          \    let r = {g: dflt}\n\
+          \    Map.insert(m, \"z\", r.g(1), Map.str_cmp)\n\
+          \  end\n" ^ go_map);
+    unsound "e_map_values_val: Map.map_values(m, dflt_of), dflt_of calling dflt"
+      ~body:
+        ("  fn dflt_of(_x : a) : b do dflt(1) end\n\
+          \  fn sneak(m : Map(String, v), _d : v) : Map(String, v) do Map.map_values(m, dflt_of) end\n" ^ go_map);
+    unsound "p2_mapval: apply1(dflt, 1) into Map.insert"
+      ~body:
+        ("  fn sneak(m : Map(String, v), _d : v) : Map(String, v) do\n\
+          \    Map.insert(m, \"z\", apply1(dflt, 1), Map.str_cmp)\n\
+          \  end\n" ^ go_map);
+    (* The shape main already proves falsely: no Map involved. *)
+    unsound "p2_listval: Cons(apply1(dflt, 1), xs) into a List({Int | _ > 0})"
+      ~body:
+        "  fn sneak(xs : List(v), _d : v) : List(v) do Cons(apply1(dflt, 1), xs) end\n\
+        \  fn go(xs : List({Int | _ > 0})) : Int do list_pos(sneak(xs, 1)) end\n";
+    (* p1_ifaceval: the scalar demand entry point, same hole. *)
+    unsound "scalar: a bare type-variable return through apply1(dflt, 1)"
+      ~body:
+        "  fn pick(o : Option(a), d : a) : a do\n\
+        \    match o do\n\
+        \      Some(_) -> apply1(dflt, 1)\n\
+        \      None -> d\n\
+        \    end\n\
+        \  end\n\
+        \  fn go(o : Option({Int | _ > 0})) : Int do need_pos(pick(o, 1)) end\n";
+    unsound "a tuple holding dflt"
+      ~body:
+        ("  fn sneak(m : Map(String, v), _d : v) : Map(String, v) do\n\
+          \    let t = (dflt, 0)\n\
+          \    match t do\n\
+          \      (g, _) -> Map.insert(m, \"z\", g(1), Map.str_cmp)\n\
+          \    end\n\
+          \  end\n" ^ go_map);
+    (* Controls: legitimate parametric code still proves. *)
+    sound "control: the callback parameter `f` passed on as a value"
+      ~body:
+        "  fn sneak(xs : List(a), f : a -> b) : List(b) do List.map(xs, f) end\n\
+        \  fn go(xs : List(Int)) : Int do list_pos(sneak(xs, fn x -> x * x + 1)) end\n";
+    sound "control: `let g = f` of a callback parameter"
+      ~body:
+        "  fn sneak(xs : List(a), f : a -> b) : List(b) do\n\
+        \    let g = f\n\
+        \    List.map(xs, g)\n\
+        \  end\n\
+        \  fn go(xs : List(Int)) : Int do list_pos(sneak(xs, fn x -> x * x + 1)) end\n";
+    sound "control: map_values inside a generic wrapper, with the parameter passed on"
+      ~body:
+        "  fn sneak(m : Map(String, v), f : v -> w) : Map(String, w) do Map.map_values(m, f) end\n\
+        \  fn go(m : Map(String, Int)) : Int do need_vals(sneak(m, fn x -> x * x + 1)) end\n";
+    sound "control: a concrete top-level function passed as a value"
+      ~body:
+        "  fn len_of(xs : List(Int)) : Int do List.length(xs) end\n\
+        \  fn sneak(xs : List(v), ys : List(List(Int))) : List(v) do\n\
+        \    let _ns = List.map(ys, len_of)\n\
+        \    xs\n\
+        \  end\n\
+        \  fn go(xs : List({Int | _ > 0})) : Int do list_pos(sneak(xs, [])) end\n";
+    sound "control: Map.insert of the map's own get_or (no creation)"
+      ~body:
+        "  fn sneak(m : Map(String, v), d : v) : Map(String, v) do Map.insert(m, \"z\", Map.get_or(m, \"a\", d, Map.str_cmp), Map.str_cmp) end\n\
+        \  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(sneak(m, 1)) end\n" ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -28319,4 +28435,5 @@ let () =
       ("hashmap-filter", hashmap_filter_suite);
       ("map-flow", map_flow_suite);
       ("p1-record", p1_record_suite);
+      ("p2-value-refs", p2_value_refs_suite);
       ("z3-well-formed", z3_wellformed_suite) ]
