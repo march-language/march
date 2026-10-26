@@ -3384,7 +3384,8 @@ end
 
 `Map`'s representation hides both parameters: its values sit in a trie of
 lists of pairs, not in fields the checker models. A type like that is a source
-only when it is declared opaque (`ptype` or `opaque type`). No construction of
+only when it is declared opaque (`ptype` or `opaque type`), and only when no other
+declaration of the same name is a plain `type`. No construction of
 such a value establishes an element fact (it is a recorded skip), so its facts
 come only from declarations, assumed returns and these parametric calls. A
 plain `type` with the same hidden shape stays a skip.

@@ -87,6 +87,21 @@ written for, and the restriction keeps the change minimal while another builder 
 `lib/refinecheck`. — Cost if wrong: a lost proof for a user hidden-shape `type` (pinned
 as a skip by a control).
 
+**Correction (2026-10-26 soundness review, minor):** `opaque_containers` was keyed by the
+bare sort name, so a user's plain `type Set(k, v) = MkSet(List((k, v)))` (or one named
+`HEntry` or `Vec`) inherited the stdlib `ptype`'s status and `need_w(same(w))` proved,
+while the same shape named `Wrap` skipped. Not a false proof in itself (the user type's
+constructions are still phase-0 skips), but the restriction above did not hold. The table
+is now keyed by the declaration's qualified key (`adt_sort_name_at path name`, with
+`register_field_sorts_once` threading the module path as `register_adt_names` does), and
+`is_opaque_container` answers yes only when EVERY declaration of the bare name is opaque.
+New group `opaque-by-decl` (6 cases): RED `3 failures! … 6 tests run` (`Set`, `HEntry`,
+`Vec` proved; `Wrap` and both controls passed); GREEN after. Controls: stdlib `Map` beside
+those modules is still a source, and a user `ptype` is one.
+Refine oracle against the baseline at `63379fa9b` (identical at the P2 fix): `REFINEMENT
+DIAGNOSTICS IDENTICAL (8738 lines over 552 fixtures)`; the review's `g/sp_{Set,HEntry,Vec}`
+now skip like `sp_Wrap`.
+
 **Ruling: a too-weak declared map is a violation through these functions.** —
 `need_vals(Map.remove(m, "a", cmp))` with `m : Map(String, {Int | _ >= 0})` now reports
 `refinement violation … (e.g. (elem) = 0)`, exactly what `list_pos(List.reverse(xs))`

@@ -644,7 +644,7 @@ let rec container_paths (v : string) (t : A.ty) : (string * int) list list optio
          assumed returns and parametric calls, and each covers every value of
          [j] in it. *)
       let hidden =
-        if Hashtbl.mem opaque_containers (adt_sort_name c.A.txt) then []
+        if is_opaque_container c.A.txt then []
         else Option.value ~default:[] (Hashtbl.find_opt ctor_hidden_params (adt_sort_name c.A.txt))
       in
       let rec go j = function

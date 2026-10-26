@@ -28258,6 +28258,57 @@ let p2_value_refs_suite =
         "  fn sneak(m : Map(String, v), d : v) : Map(String, v) do Map.insert(m, \"z\", Map.get_or(m, \"a\", d, Map.str_cmp), Map.str_cmp) end\n\
         \  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(sneak(m, 1)) end\n" ]
 
+(* ── Opaque status belongs to a DECLARATION, not a bare name (soundness
+   review of the container-gap batch, minor).  `opaque_containers` was keyed
+   by the bare sort name, so a user's plain `type Set(k, v) = MkSet(List((k,
+   v)))` inherited the stdlib `ptype Set`'s status and became a source,
+   while the same shape named `Wrap` stayed a skip.  The stdlib files that
+   declare the colliding names are loaded beside the user module. *)
+let opaque_by_decl_suite =
+  let run, slugs, _detail =
+    container_gap_harness [ "list.march"; "option.march"; "map.march"; "set.march"; "array.march"; "rrb_vec.march" ]
+  in
+  let shape name =
+    Printf.sprintf
+      "  type %s(k, v) = Mk%s(List((k, v)))\n\
+      \  fn need_w(_w : %s(String, {Int | _ > 0})) : Int do 0 end\n\
+      \  fn same(w : %s(k, v)) : %s(k, v) do w end\n\
+      \  fn go(w : %s(String, {Int | _ > 0})) : Int do need_w(same(w)) end\n"
+      name name name name name name
+  in
+  let not_source name =
+    gated (Printf.sprintf "a plain user `type %s` with hidden fields is not a source" name) (fun () ->
+        let _, _, obs, _ = run (cg_mod "OP" (shape name)) in
+        let vs = slugs "need_w" obs @ slugs "same(…)" obs in
+        Alcotest.(check bool) "recorded" true (vs <> []);
+        Alcotest.(check bool) "not proved" false (List.mem cg_proved vs))
+  in
+  [ not_source "Wrap";
+    not_source "Set";
+    not_source "HEntry";
+    not_source "Vec";
+    (* Controls: the stdlib's own opaque types are still sources beside the
+       user module (no collision), and a user `ptype` of the colliding name
+       is one too. *)
+    gated "control: stdlib Map stays a source" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "OP"
+               "  fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n\
+               \  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(Map.insert(m, \"b\", 5, Map.str_cmp)) end\n")
+        in
+        Alcotest.check cg_ps "need_vals" [ cg_proved ] (slugs "need_vals" obs));
+    gated "control: a user `ptype` with hidden fields is a source" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "OP"
+               "  ptype PW(k, v) = MkPW(List((k, v)))\n\
+               \  fn need_w(_w : PW(String, {Int | _ > 0})) : Int do 0 end\n\
+               \  fn same(w : PW(k, v)) : PW(k, v) do w end\n\
+               \  fn go(w : PW(String, {Int | _ > 0})) : Int do need_w(same(w)) end\n")
+        in
+        Alcotest.check cg_ps "same(w)" [ cg_proved ] (slugs "same(…)" obs)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -28436,4 +28487,5 @@ let () =
       ("map-flow", map_flow_suite);
       ("p1-record", p1_record_suite);
       ("p2-value-refs", p2_value_refs_suite);
+      ("opaque-by-decl", opaque_by_decl_suite);
       ("z3-well-formed", z3_wellformed_suite) ]
