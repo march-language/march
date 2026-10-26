@@ -21,6 +21,20 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinements: a definer passed through to `Map.filter` proves its return.**
+  `fn mfilt(m, keep : k -> v -> Bool[p], cmp) : Map(k[p], v[p]) do Map.filter(m, keep,
+  cmp) end` is proved, and so are its callers' demands. The callee's `p` and the
+  caller's `p` were confused because they are spelled the same.
+- **Refinements: a two-argument lambda may capture the caller's variables.**
+  `filt(a, fn (k, v) -> v > k + n)` gives a relation over the caller's `n`, read with
+  `n`'s own refinement, as a one-argument lambda already could. A captured name that
+  equals a parameter of the callee, or a slot binder, stays the caller's.
+- **Refinements: a return that is a `let`-bound call is proved from the callee's
+  return.** `let r = a(x)` then `r` (or `r + 1`) now proves `b`'s `{Int | _ > 0}`
+  when `a`'s return is proved or `@[assume]`d, as the bare tail `a(x)` already did.
+  Chains of such `let`s work. An unproved return, the function's own, or a cycle's
+  is never used, and a binding is dropped when its name or a name its call mentions
+  is rebound before the return.
 - **Refinements: `--refine-infer` / `forge refine --infer` propose this month's
   shapes.** Inference now proposes the contracts the checker learned to prove in
   October:
@@ -332,6 +346,26 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a `let`-bound list literal keeps its length.** `let t = [1, 2, 3]`
+  then `List.head(t)` or `Stats.mean(t)` was an `unconstrained-subject` skip while
+  `List.head([1, 2, 3])` proved; the binding now records `len(t) == 3` (any
+  Cons/Nil chain ending in `Nil`, `[]` included), retired when `t` is rebound. This
+  was half the user-code skips in a 67-program corpus sweep
+  (`examples/stats_basic.march`).
+- **Refinements: `Cons(h, t)` is known to be one longer than `t`.** `need_ne(Cons(x,
+  t))`, `let ys = Cons(x, t)` then `need_ne(ys)`, and `List.nth`'s own recursive call
+  `nth(t, n - 1)` inside a `Cons(h, t)` arm were skipped; `len`'s defining equation
+  now applies at call arguments, `let`s and `match` arms, and all three prove. The
+  one skip inside `stdlib/list.march` is gone.
+- **Refinements: an `elts && len` list return is lent whole.** A function proved to
+  return `{List(a) | subset(elts(_), elts(xs)) && len(_) == len(xs)}` gave a direct
+  caller neither half: the call site translated the conjunction for one measure and
+  dropped all of it. Each proved conjunct is now lent on its own.
+- **Refinements: `List.length(e)` as an argument or a `let` means `len(e)`.** The
+  `len` alias worked in guards only, so `need_nn(List.length(xs))` was
+  `unreflectable-subject`, and `let n = List.length(xs)` then `if i >= 0 && i < n do
+  List.nth(xs, i)` was a `partial-conjunct` skip. Both prove now, under the alias's
+  existing gate (the stdlib's own `List.length`, not withdrawn).
 - **`String.slice` with a negative start no longer reads out of bounds in wasm-compiled programs.**
   The wasm runtime's `march_string_slice` did not clamp a negative `start` and read before
   the string's buffer; it now clamps exactly like the native runtime and the interpreter
