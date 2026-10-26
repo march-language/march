@@ -542,6 +542,20 @@ corpus brackets it from both sides (`accept/t118`, `reject/t117`), because an
 accept-only witness exits 0 either way and so cannot tell a working guard from a
 contract that checks no property.
 
+**The alias also applies to an argument and a `let`** (since 2026-10-26), not
+only to a guard. `need_nn(List.length(xs))` is checked as `need_nn` of
+`len(xs)`, so it proves, and `need_pos(List.length(xs))` proves exactly when
+`xs` is known non-empty (`xs : {List(Int) | len(_) > 0}`, a guard, a literal);
+otherwise it is a skip. Arithmetic over it reflects too
+(`List.length(xs) + 1`). `let n = List.length(xs)` records `n == len(xs)`, so
+
+```march
+let n = List.length(xs)
+if i >= 0 && i < n do List.nth(xs, i) else 0 end   -- proved
+```
+
+and rebinding `xs` or `n` before the use retires the fact.
+
 The alias is intentionally narrow, because attaching `len`'s meaning to the wrong
 function would manufacture false positives:
 
@@ -1078,8 +1092,20 @@ fn c(x : {Int | _ > 0}) : {Int | _ > 0} do b(x) end      -- and so on, in any or
 
 A function never uses its own unproved return this way: a self-recursive tail
 (`f(n - 1)`), or two functions that return each other's calls, stay skipped
-(`unreflectable-subject`). Only a bare call tail is read like this; a `let`
-bound to the call and then returned (`let r = a(x)` then `r`) is not yet.
+(`unreflectable-subject`). A `let` bound to the call and then returned is
+read the same way (since 2026-10-26), also through a chain of them and inside a
+larger tail:
+
+```march
+fn b(x : {Int | _ > 0}) : {Int | _ > 0} do
+  let r = a(x)
+  r                     -- proved from a's return (`r + 1` too)
+end
+```
+
+The binding is forgotten when its name, or a name its call mentions, is bound
+again before the return (a later `let`, a `match` arm's pattern), so the call
+is read at the arguments it really had.
 
 **Only *proven* postconditions propagate.** A declared return refinement
 becomes an assumption at call sites only when the definition side actually
@@ -1262,6 +1288,32 @@ head([])            -- reported: `len(_) > 0` cannot hold
 head([1, 2])        -- silent
 fn f(ys : List(Int)) : Int do head(ys) end   -- skipped: length unknown
 ```
+
+**A `let`-bound list of known length keeps its length** (since 2026-10-26).
+`let t = [1, 2, 3]` records `len(t) == 3`, the same fact a parameter
+`t : {List(Int) | len(_) == 3}` carries, so `head(t)` and `Stats.mean(t)` are
+checked exactly as `head([1, 2, 3])` is. This covers any constructor chain
+ending in `Nil`: a literal, `[]`, `Cons(1, Nil)`, and a nested literal, which
+counts its outer cells. Rebinding `t`, by a `let` or a `match` arm, retires
+the fact:
+
+```march
+let t = [1, 2, 3]
+head(t)             -- proved
+let t = []
+head(t)             -- reported: `len(_) > 0` cannot hold
+```
+
+**`Cons(h, t)` is one longer than `t`** (since 2026-10-26). `len`'s own
+defining equations, `len(Nil) == 0` and `len(Cons(h, t)) == len(t) + 1`, are
+used wherever a constructor meets a length demand: at a call argument
+(`head(Cons(x, t))` proves for any `t`), at a `let` (`let ys = Cons(x, t)`
+records `len(ys) == len(t) + 1`), and in a `Cons(h, t) ->` arm on a variable
+`xs`, which knows `len(xs) == len(t) + 1`. The last is what proves
+`List.nth`'s own recursive call `nth(t, n - 1)` from `n < len(xs)`. The tail's
+own facts compose (`t : {List(Int) | len(_) == 1}` gives `Cons(x, t)` length
+2). A self-rebinding `let t = Cons(x, t)` records nothing, and rebinding `t`
+later retires the fact.
 
 Thirteen stdlib functions that panic on an empty argument carry this contract:
 `List.head`/`tail`/`last`/`minimum_int`/`maximum_int`, the `prelude` `head`/`tail`,
@@ -1864,6 +1916,11 @@ renders its model as a set literal: `Set.insert() can return {4}`,
   such as "this list has no duplicates" (`card(elts(xs)) == len(xs)` after
   `List.dedup`), is not provable, and a permutation contract still writes
   both halves: `{List(Int) | elts(_) == elts(xs) && len(_) == len(xs)}`.
+  Once proved, a caller gets both halves (since 2026-10-26): every conjunct of
+  a proved return is lent on its own, so `f(xs)` meets a `len(_) == len(xs)`
+  demand and a `subset(elts(_), elts(xs))` demand alike. Before, a call site
+  asking about one measure dropped the whole conjunction and got neither half.
+  A return whose proof fails lends nothing, not even a true conjunct.
 - **List structure is followed only inside a proof by recursion.** A
   contract on a function that recurses over a list (see "Proved list
   contracts" above) is proved through its `Cons` cells. Everywhere else `elts`
@@ -3124,6 +3181,13 @@ positive.
 - a callback parameter that itself defines a two-argument abstract refinement
   of the enclosing function, passing its own `p` on.
 
+A lambda may capture the caller's own variables, under the rule for one
+argument ([captured variables](#abstract-refinements-filter-keeps-what-its-predicate-says)):
+`filt(a, fn (k, v) -> v > k + n)` gives `y > x + n`, read with `n`'s own
+refinement. A captured name that is also a parameter of the callee (a slot
+`{y : v | p(x, y) && y > n}` of a callee with its own `n`) or a slot binder
+stays the caller's (since 2026-10-26).
+
 ```march
 fn (k, v) -> v > k                                       -- uncurried lambda
 fn k -> fn v -> v > k                                    -- curried lambda
@@ -4131,10 +4195,6 @@ not check.
 proposes a contract the checker does not prove, however natural. Examples it
 misses today:
 
-- a return that holds only through a `let`-bound call tail (`let r = a(x)`
-  then `r`; a direct tail `a(x)` is proposed);
-- a `Map(k, v)` combinator that passes its two-argument callback on to
-  `Map.filter` (the checker does not prove that return yet);
 - a relation kept from a parameter to the return (`bump(a)` keeping `y > x`
   needs both annotations at once; one root at a time is tried).
 

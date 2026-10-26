@@ -599,6 +599,10 @@ let rec reflect_scalar
     ?(foreign_measure_call : (string -> string -> A.expr list -> Smt.term option) option)
     ?(foreign_field :
         (string -> string -> (Smt.term * (string * Smt.sort) list) option) option)
+    (* The caller's list-length term for a list expression (`len$xs`, a
+       literal's count, `len$t + 1` for `Cons(h, t)`), for `List.length(e)` in
+       actual position — see that arm below.  Unset: no such reflection. *)
+    ?(foreign_len : (A.expr -> Smt.term option) option)
     ?(sort : Smt.sort = Smt.SInt) (sc : scope) (actual : A.expr)
   : (Smt.term * (string * Smt.sort) list * Smt.term list) option =
   let foreign_var = Option.value foreign_var ~default:(fun _ -> None) in
@@ -684,9 +688,9 @@ let rec reflect_scalar
      `float-sort-gate`). *)
   | A.EApp (A.EVar { A.txt = ("+" | "-") as op; _ }, [ a; b ], _) when sort = Smt.SInt ->
     (match
-       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ~sort sc
+       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len ~sort sc
          a,
-       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ~sort sc
+       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len ~sort sc
          b
      with
      | Some (ta, da, aa), Some (tb, db, ab) ->
@@ -697,7 +701,7 @@ let rec reflect_scalar
     (match a, b with
      | A.ELit (A.LitInt k, _), e | e, A.ELit (A.LitInt k, _) ->
        (match
-          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field
+          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len
             ~sort sc e
         with
         | Some (te, de, ae) -> Some (Smt.MulLit (k, te), de, ae)
@@ -713,13 +717,25 @@ let rec reflect_scalar
         reported. *)
      | _ ->
        (match
-          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field
+          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len
             ~sort sc a,
-          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field
+          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len
             ~sort sc b
         with
         | Some (ta, da, aa), Some (tb, db, ab) -> Some (Smt.Mul (ta, tb), da @ db, aa @ ab)
         | _ -> plain actual))
+  (* `List.length(e)` as an ACTUAL (gap L4): the `len` measure alias a guard
+     already gets ([measure_alias]), applied at an argument, so
+     `need_nn(List.length(xs))` reflects to `len$xs` — the symbol a guard on
+     `List.length(xs)` and a `len(xs)` promise both use.  Same gate as the
+     guard (the stdlib's own `List.length`, alias not withdrawn), Int sort
+     only.  `List.length` has no postcondition, so a [None] from the caller
+     costs nothing: [plain] is what the call arm below would reach too. *)
+  | A.EApp (A.EVar { A.txt = "List.length"; _ }, [ a ], _)
+    when sort = Smt.SInt && measure_alias "List.length" = Some "len" && foreign_len <> None ->
+    (match (Option.get foreign_len) a with
+     | Some t -> Some (t, [], [])
+     | None -> plain actual)
   (* A direct named call: stand its result up as a fresh constant carrying the
      callee's declared postcondition.  `.` is a legal SMT-LIB simple-symbol
      character, so a qualified name needs no mangling. *)

@@ -133,6 +133,52 @@ let rec tails_bound (path : (A.expr * bool) list) (bound : string list) (e : A.e
   | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> [ (path, e, pat_binders p @ bound) ]
   | _ -> [ (path, e, bound) ]
 
+(* ── `let r = f(args)` ahead of a return tail (C1's let form, 2026-10-26) ──
+   Per tail, in [tails_bound]'s order, the block `let`s of a plain name to a
+   direct call that are still in force at the tail, innermost first.  A
+   binding is RETIRED when its name, or any name its call mentions, is bound
+   again before the tail (a later `let`, a local `fn`, a `match` arm's
+   pattern, a `let?`/`let*` pattern), so the call's arguments denote at the
+   tail exactly what they denoted at the `let`.  A call that mentions its own
+   name (`let x = inc(x)`) is never recorded: its argument is the OUTER
+   binding.  [check_post] reads the name as a fresh value carrying the
+   callee's PROVED return ([post_lookup]); nothing here assumes anything. *)
+let rec tails_let_calls (lets : (string * A.expr) list) (e : A.expr) : (string * A.expr) list list =
+  let retire ns lets =
+    if ns = [] then lets
+    else List.filter (fun (n, rhs) -> not (List.mem n ns) && not (Refine_scope.expr_mentions ns rhs)) lets
+  in
+  match e with
+  | A.EBlock (es, _) ->
+    (match List.rev es with
+     | last :: _ ->
+       let lets =
+         List.fold_left
+           (fun lets e ->
+             match e with
+             | A.ELet (b, _) ->
+               let lets = retire (pat_binders b.A.bind_pat) lets in
+               (match b.A.bind_pat, b.A.bind_expr with
+                | A.PatVar n, (A.EApp (A.EVar { A.txt = f; _ }, _, _) as rhs)
+                  when (not (List.mem f predicate_operators))
+                       && not (Refine_scope.expr_mentions [ n.A.txt ] rhs) ->
+                  (n.A.txt, rhs) :: lets
+                | _ -> lets)
+             | A.ELetFn (n, _, _, _, _) -> retire [ n.A.txt ] lets
+             | _ -> lets)
+           lets es
+       in
+       tails_let_calls lets last
+     | [] -> [ lets ])
+  | A.EIf (_, t, el, _) -> tails_let_calls lets t @ tails_let_calls lets el
+  | A.ECond (arms, _) -> List.concat_map (fun (_, b) -> tails_let_calls lets b) arms
+  | A.EMatch (_, branches, _) ->
+    List.concat_map
+      (fun (br : A.branch) -> tails_let_calls (retire (pat_binders br.A.branch_pat) lets) br.A.branch_body)
+      branches
+  | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> [ retire (pat_binders p) lets ]
+  | _ -> [ lets ]
+
 (* ── A tail's inner binders, apart from the names its checker already knows ─
    A tail is checked in an env built ABOVE it (a clause's parameters, a
    lambda's), but its path conditions were collected on the way DOWN, under
@@ -460,6 +506,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(demand : (A.expr -> [ `Na | `Proved | `Unproved of Obligation.reason ]) option)
     ?(shown : A.expr option)
     ?(ret_scalar : Smt.sort option)
+    ?(let_calls : (string * A.expr) list = [])
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
@@ -656,6 +703,73 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
       if is_nonneg_measure m then assume := Smt.Ge (Smt.Const nm, Smt.IntLit 0) :: !assume;
       Some (Smt.Const nm)
     end
+  in
+  (* C1's let form ([tails_let_calls]): a body name bound by `let r =
+     f(args)` and still in force at this tail is a fresh `f$let<N>` carrying
+     [f]'s PROVED (or `@[assume]`d) return, instantiated at [args] in this
+     body's namespace and read conjunct by conjunct, exactly as [scalar_call]
+     reads a bare call tail.  [post_lookup] answers only proved contracts and
+     the [gate_unverified_posts] fixpoint admits one only once it is proved,
+     so neither a self-call nor a cycle sees its own unproved return.  No
+     contract (or one at a non-scalar sort): the name stays the plain
+     unconstrained constant it always was.  Memoised, so every mention (the
+     tail, a path condition, a chained `let`'s argument) is one constant;
+     [let_in_progress] stops a cycle, which [tails_let_calls] already rules
+     out.  Shadows [var_const] for everything below. *)
+  let plain_var_const = var_const in
+  let let_memo : (string, Smt.term option) Hashtbl.t = Hashtbl.create 4 in
+  let let_in_progress = ref [] in
+  let let_ret_ctr = ref 0 in
+  let rec var_const name =
+    if is_str_scope name then plain_var_const name
+    else
+      match let_call_const name with
+      | Some t -> Some t
+      | None -> plain_var_const name
+  and let_call_const name : Smt.term option =
+    match List.assoc_opt name let_calls with
+    | None -> None
+    | Some _ when List.mem name !let_in_progress -> None
+    | Some rhs ->
+      (match Hashtbl.find_opt let_memo name with
+       | Some t -> t
+       | None ->
+         let_in_progress := name :: !let_in_progress;
+         let t =
+           match rhs with
+           | A.EApp (A.EVar { A.txt = f; _ }, cargs, _) when not (is_measure_app f) -> (
+             match !post_lookup f cargs with
+             | Some (b, q, m) -> (
+               match scalar_sort_of_marker m with
+               | Some srt ->
+                 let rec fresh () =
+                   incr let_ret_ctr;
+                   let nm = Printf.sprintf "%s$let%d" f !let_ret_ctr in
+                   if List.exists (fun (n, _) -> n = nm) !decls then fresh () else nm
+                 in
+                 let nm = fresh () in
+                 let c = Smt.Const nm in
+                 decls := (nm, srt) :: !decls;
+                 let rv n = if n = b || n = "_" then Some c else var_const n in
+                 (* A measure of the returned scalar means nothing. *)
+                 let rm mm n = if n = b || n = "_" then None else resolve_measure mm n in
+                 List.iter
+                   (fun conj ->
+                     match
+                       smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app
+                         ~resolve_str_lit:str_lit_const conj
+                     with
+                     | Some t -> assume := t :: !assume
+                     | None -> ())
+                   (pred_conjuncts q);
+                 Some c
+               | None -> None)
+             | None -> None)
+           | _ -> None
+         in
+         let_in_progress := List.filter (fun n -> n <> name) !let_in_progress;
+         Hashtbl.replace let_memo name t;
+         t)
   in
   (* A built-in list measure of a CALL: a constant carrying the callee's
      proved contract, conjunct by conjunct; a nested call in that contract
@@ -2248,11 +2362,29 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
          parameters' facts from [sc] and the return predicate over the
          parameters, so an inner `n` must not be the same SMT name. *)
       let pnames = List.concat_map fnparam_binders c.A.fc_params in
+      let tails = tails_bound base [] c.A.fc_body in
+      (* C1's let form: the `let r = f(args)` bindings in force at each tail
+         (same walk, same order), moved by the tail's own clash renaming so a
+         binding named like a parameter, or a call over an inner binding
+         that shadows one, means what it means in the renamed tail.  An
+         incomplete renaming drops the binding (a lost proof only). *)
+      let lcs =
+        let l = tails_let_calls [] c.A.fc_body in
+        if List.length l = List.length tails then l else List.map (fun _ -> []) tails
+      in
       let ts =
-        List.map
-          (fun (p, e, bound) ->
+        List.map2
+          (fun (p, e, bound) lc ->
             let clash = List.sort_uniq compare (List.filter (fun n -> List.mem n pnames) bound) in
             let env = List.map (fun n -> (n, inner_name n)) clash in
+            let let_calls =
+              List.filter_map
+                (fun (n, rhs) ->
+                  match rename_free_checked env rhs with
+                  | rhs', true -> Some ((match List.assoc_opt n env with Some n' -> n' | None -> n), rhs')
+                  | _, false -> None)
+                lc
+            in
             let e', complete = rename_free_checked env e in
             (* The hook declines a tail mentioning a [bound] name it would read
                in the parameters' env; a renamed-apart one is in no env, so
@@ -2261,11 +2393,12 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
             ( rename_path clash p
             , e'
             , (if complete then Some (List.filter (fun n -> not (List.mem n clash)) bound) else None)
-            , e ))
-          (tails_bound base [] c.A.fc_body)
+            , e
+            , let_calls ))
+          tails lcs
       in
       (* Only a plain scalar return reaches the scalar demand entry point. *)
-      let demand (path, _, bound, _) =
+      let demand (path, _, bound, _, _) =
         match bound with
         | None -> None
         | Some bound ->
@@ -2286,9 +2419,9 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
       in
       ts <> []
       && List.fold_left
-           (fun acc ((p, e, _, shown) as t) ->
+           (fun acc ((p, e, _, shown, let_calls) as t) ->
              check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env ~string_ret
-               ~list_ret ?demand:(demand t) ~shown ?ret_scalar ~fn_name:(Some fd.A.fn_name.A.txt) ~emit
+               ~list_ret ?demand:(demand t) ~shown ?ret_scalar ~let_calls ~fn_name:(Some fd.A.fn_name.A.txt) ~emit
                ~record:emit ~fn_params sc binder ret_pred (p, e)
              && acc)
            true ts

@@ -2115,6 +2115,27 @@ let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
 let self_mentioning (pat : A.pattern) (pred : A.expr) : bool =
   expr_mentions (pat_binders pat) pred
 
+(* `len(_) == k` for a Cons/Nil chain ending in `Nil` (k cells), or
+   `len(_) == len(t) + k` for one ending in a variable `t`; [None] for any
+   other expression.  Only a constructor chain counts: a bare `let ys = xs`
+   is an alias, not a length fact, and is left to the other channels. *)
+let list_len_pred ~(span : A.span) (e : A.expr) : A.expr option =
+  let v x = A.EVar { A.txt = x; A.span = span } in
+  let app f args = A.EApp (v f, args, span) in
+  let lit k = A.ELit (A.LitInt k, span) in
+  let rec go k e =
+    match e with
+    | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (lit k)
+    | A.ECon ({ A.txt = "Cons"; _ }, [ _; tl ], _) -> go (k + 1) tl
+    | A.EVar { A.txt = t; _ } when k > 0 && t <> "_" ->
+      Some (app "+" [ app "len" [ v t ]; lit k ])
+    | _ -> None
+  in
+  match e with
+  | A.ECon ({ A.txt = ("Nil" | "Cons"); _ }, _, _) ->
+    Option.map (fun rhs -> app "==" [ app "len" [ v "_" ]; rhs ]) (go 0 e)
+  | _ -> None
+
 (* [postcond] resolves a callee name AND the call's actual arguments to the
    callee's return refinement, already instantiated in the CALLER's namespace.
    An explicit annotation always wins; only an UNANNOTATED `let` whose RHS is a
@@ -2129,6 +2150,18 @@ let scope_add_binding
   | A.PatVar n, Some r -> (n.A.txt, r) :: sc
   | A.PatVar n, None ->
     (match b.A.bind_expr with
+     (* `let n = List.length(xs)` (gap L4): `n == len(xs)`, an Int entry the
+        scalar consumers read through their measure resolver onto the very
+        `len$xs` a `List.nth(xs, i)` goal uses, so `if i < n` bounds the
+        index.  The `len` alias's own gate (the stdlib's `List.length`, not
+        withdrawn).  It mentions `xs`, so [scope_shadow] retires it when `xs`
+        is rebound, and [self_mentioning] declines `let xs = List.length(xs)`. *)
+     | A.EApp (A.EVar { A.txt = "List.length"; _ }, [ (A.EVar _ as arg) ], _)
+       when measure_alias "List.length" = Some "len" && not (is_axiom_measure "len") ->
+       let sp = n.A.span in
+       let v x = A.EVar { A.txt = x; A.span = sp } in
+       let pred = A.EApp (v "==", [ v "_"; A.EApp (v "len", [ arg ], sp) ], sp) in
+       if self_mentioning b.A.bind_pat pred then sc else (n.A.txt, ("_", pred, None)) :: sc
      | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
        (* An INT-sorted postcondition seeds the refined-local scope: [scope]
           entries with sort [None] are declared `Int` by [scope_facts] and
@@ -2212,7 +2245,34 @@ let scope_add_binding
                && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, Some (meas_sort_prefix ^ srt))) :: sc
         | Some _ | None -> sc)
-     | _ -> sc)
+     (* A list of EXACTLY-KNOWN length — a literal `[a, b, c]`, `[]`, or any
+        Cons/Nil chain ending in `Nil` ([list_len]) — files `len(_) == k`,
+        the very entry a parameter `n : {List(_) | len(_) == k}` gets from
+        [refined_scope_ty], so [load_scope_measure_facts] reads it with no
+        new consumer.  The direct call `List.head([1, 2, 3])` already reflects
+        the literal's length at the argument; this makes `let t = [1, 2, 3]`
+        then `List.head(t)` agree with it (2026-10-24 stdlib audit, row 2).
+
+        Sound by construction: the length of a Cons/Nil chain is the number
+        of its cells whatever the heads are, and the predicate names nothing
+        but `_`, so no rebinding can make it stale except one of [n] itself,
+        which [scope_shadow] above (and at every later binder) retires.
+        Declined when a user `@[measure]` took the name `len` (then `len` is
+        not list length) or `List` is not a registered datatype. *)
+     (* The same for a chain ending in a NAME, `Cons(h, t)`: `len(_) ==
+        len(t) + 1`, the measure's own defining equation (gap L2).  That
+        predicate mentions `t`, so it takes [self_mentioning]'s guard like
+        every relational entry above (`let t = Cons(x, t)` is about the NEW
+        `t`: declined), and [scope_shadow] retires it when `t` is rebound
+        later. *)
+     | rhs ->
+       (match list_len_pred ~span:n.A.span rhs with
+        | Some pred
+          when (not (is_axiom_measure "len"))
+               && Hashtbl.mem adt_ctors (adt_sort_name "List")
+               && not (self_mentioning b.A.bind_pat pred) ->
+          (n.A.txt, ("_", pred, Some (meas_sort_name "List"))) :: sc
+        | _ -> sc))
   | _ -> sc
 
 (* =================================================================

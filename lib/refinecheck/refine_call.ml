@@ -1612,16 +1612,54 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           end
         in
         let rmc m f cargs' = if is_call_measure m then set_of_call m f cargs' else None in
-        (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_str_lit:str_lit_const
-                 ~resolve_measure_call:rmc q with
-         | Some qa -> push_user qa
-         | None -> ());
+        (* Conjunct by conjunct (gap L3).  [rm] answers only the REQUESTED
+           measure of the binder, so a `len` request against `elts(_) ==
+           elts(xs) && len(_) == len(xs)` cannot translate the `elts` half,
+           and translating the conjunction whole dropped the `len` half with
+           it: the callee proved both, the caller got neither.  Every
+           conjunct of a proved (or assumed) postcondition holds on its own,
+           so each one that translates is an assumption; one that does not is
+           dropped alone.  (A conjunct reflected alone carries its own
+           division definedness side condition — [smt_of]'s `defined(p) && p`
+           — which held, since the whole conjunction evaluated to `true`.) *)
+        List.iter
+          (fun qc ->
+            match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_str_lit:str_lit_const
+                    ~resolve_measure_call:rmc qc with
+            | Some qa -> push_user qa
+            | None -> ())
+          (conjuncts_of q);
         Some c
     in
     (* Whether [set_of_call] would find a contract: a call whose callee has
        none keeps the fallback below (a fresh non-negative length), so the
        skip it produces stays the same undecided one it always was. *)
     let set_of_call_available fname cargs = postcond fname cargs <> None in
+    (* The list length of a CALLER list expression: a Cons/Nil chain whose
+       innermost tail is `Nil`, a caller NAME (its scope facts loaded first,
+       as for a bare-name actual), or a call with a proved `len` post —
+       `k + len$t`.  [None] for anything else.  Used for a `Cons` actual
+       (gap L2) and for the argument of `List.length(e)` in actual position
+       (gap L4, [reflect_scalar]'s `List.length` arm). *)
+    let rec cons_len_term (a : A.expr) : Smt.term option =
+      match a with
+      | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (Smt.IntLit 0)
+      | A.ECon ({ A.txt = "Cons"; _ }, [ _; tl ], _) ->
+        Option.map (fun t -> Smt.Add (t, Smt.IntLit 1)) (cons_len_term tl)
+      | A.EVar { A.txt = x; _ } when (not (is_recvar x)) && not (Hashtbl.mem str_names x) ->
+        !load_scope_measure_facts_ref x;
+        measure_of_var "len" x
+      | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) when set_of_call_available fname cargs ->
+        set_of_call "len" fname cargs
+      | _ -> None
+    in
+    (* `List.length(e)`'s argument [e] is a CALLER expression, so its length
+       is [cons_len_term]'s, never the callee-side resolution — a caller `xs`
+       is `len$xs` even when the callee also has a parameter `xs`.  Only
+       sound for `len` while the builtin `len` means list length. *)
+    let foreign_len (a : A.expr) : Smt.term option =
+      if is_call_measure "len" then cons_len_term a else None
+    in
     (* A measure over a nested call inside a scalar callee's contract. *)
     let rmc_scalar m f cargs = if is_call_measure m then set_of_call m f cargs else None in
     let self_dt_sym = "$self" in
@@ -1683,7 +1721,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           (absorb
              (reflect_cached "$self" (fun () ->
                   reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
-                    ~foreign_field:arg_resolve_field
+                    ~foreign_field:arg_resolve_field ~foreign_len
                     ~sort:self_scalar sc self_actual)))
       else
         match actual_of_name name with
@@ -1691,7 +1729,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           absorb
             (reflect_cached name (fun () ->
                  reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
-                   ~foreign_field:arg_resolve_field
+                   ~foreign_field:arg_resolve_field ~foreign_len
                    ~sort:(scalar_of_name name) sc a))
         | None ->
           (* a caller-scope variable from the path context *)
@@ -2231,6 +2269,17 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _)
                    when is_call_measure m && set_of_call_available fname cargs ->
                    set_of_call m fname cargs
+                 (* `Cons(h, t)` with a non-literal tail: `len`'s own
+                    defining equation, `len(Cons(h, t)) == len(t) + 1`,
+                    unfolded down the chain to a tail it can name.  Sound
+                    because it IS the measure's definition; the tail's own
+                    caller-scope promise is loaded exactly as for a bare
+                    name above. *)
+                 | A.ECon ({ A.txt = "Cons"; _ }, [ _; _ ], _)
+                   when m = "len" && is_call_measure m ->
+                   (match cons_len_term a with
+                    | Some t -> Some t
+                    | None -> if is_self name then measure_of_var m self_dt_sym else None)
                  (* A non-variable, non-literal actual (a call, a field…): no
                     symbol to share with the caller's facts.  For the binder
                     spellings keep the fresh non-negative constant — it is what
