@@ -3136,6 +3136,13 @@ positive.
 - a callback parameter that itself defines a two-argument abstract refinement
   of the enclosing function, passing its own `p` on.
 
+A lambda may capture the caller's own variables, under the rule for one
+argument ([captured variables](#abstract-refinements-filter-keeps-what-its-predicate-says)):
+`filt(a, fn (k, v) -> v > k + n)` gives `y > x + n`, read with `n`'s own
+refinement. A captured name that is also a parameter of the callee (a slot
+`{y : v | p(x, y) && y > n}` of a callee with its own `n`) or a slot binder
+stays the caller's (since 2026-10-26).
+
 ```march
 fn (k, v) -> v > k                                       -- uncurried lambda
 fn k -> fn v -> v > k                                    -- curried lambda

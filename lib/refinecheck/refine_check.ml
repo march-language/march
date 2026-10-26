@@ -2660,17 +2660,95 @@ let elem_markers_of_expr (a : A.expr) : string option option list =
    relies on whose precondition would need discharging over several
    parameters declines too (no scratch discharge over several fresh
    values). *)
-let instantiate_abstract_n ~(named : string -> (string list * A.expr * A.expr list) option)
+let cap_prefix = "$cap$"
+
+(* The placeholder a captured caller name [c] travels as, between the
+   abstract's application and the substitution of the callee's formals. *)
+let cap_name (c : string) : string = cap_prefix ^ c
+
+let cap_of (v : string) : string option =
+  let k = String.length cap_prefix in
+  if String.length v > k && String.sub v 0 k = cap_prefix then Some (String.sub v k (String.length v - k))
+  else None
+
+(* The captured caller names still in [e] (as their placeholders). *)
+let entry_caps (e : entry) : string list =
+  let acc = ref [] in
+  let rec go (x : A.expr) =
+    match x with
+    | A.EVar { A.txt; _ } ->
+      (match cap_of txt with Some c when not (List.mem c !acc) -> acc := c :: !acc | _ -> ())
+    | A.EApp (f, args, _) -> go f; List.iter go args
+    | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.iter go es
+    | A.EField (r, _, _) | A.EAnnot (r, _, _) -> go r
+    | _ -> ()
+  in
+  let rec ent (e : entry) =
+    List.iter
+      (function Some (Refined (_, q, _)) -> go q | Some (Container inner) -> ent inner | None -> ())
+      e.slots;
+    List.iter (fun (r : rel) -> go r.rel_pred) e.rels
+  in
+  ent e;
+  List.rev !acc
+
+(* [instantiate_entry] for an entry instantiated from a reading that
+   CAPTURES caller names (each as [cap_name c]): every placeholder is one
+   more formal whose actual is the caller's own variable [c], so the callee's
+   formals and the captures are substituted together, simultaneously, and
+   [instantiate_entry]'s binder renaming (a slot binder to `_`, a relation's
+   binders to `$s<j>` when an actual mentions them) keeps a caller `y` apart
+   from a slot binder `y`.  A caller name equal to a formal (`n`) is
+   therefore never read as the formal: the formal's occurrences came from the
+   declaration, the capture's from the lambda (review C4).  The formals and
+   actuals must line up one to one (a defaulted or missing actual would shift
+   the appended positions), else a capture declines. *)
+let instantiate_entry_caps ~(mode : [ `Stable | `Any ]) ~(formals : string list) ~(args : A.expr list)
+    (e : entry) : (entry, string) result =
+  match entry_caps e with
+  | [] -> instantiate_entry ~mode ~formals ~args e
+  | caps when List.length formals <> List.length args ->
+    Error
+      (Printf.sprintf "it captures `%s`, and the call's arguments do not line up with the parameters"
+         (List.hd caps))
+  | caps ->
+    let formals = formals @ List.map cap_name caps in
+    let args = args @ List.map (fun c -> A.EVar { A.txt = c; A.span = A.dummy_span }) caps in
+    Result.bind (instantiate_entry ~mode ~formals ~args e) (fun e' ->
+        match entry_caps e' with
+        | [] -> Ok e'
+        | c :: _ -> Error (Printf.sprintf "its capture of `%s` cannot be read at this call" c))
+
+let instantiate_abstract_n ?(stable : string -> bool = fun _ -> false)
+    ~(named : string -> (string list * A.expr * A.expr list) option)
     ~(local_lambda : string -> A.expr option) (fd : A.fn_def) (p : string) (n : int)
     (args : A.expr list) : (string list * A.expr, string) result =
-  let read ys body =
+  (* [lam]: the lambda as written, for R2's free-in-the-lambda test; [None]
+     for a callable passed by name (no capture). *)
+  let read ?lam ys body =
     match duplicate_binder ys with
     | Some x -> Error (Printf.sprintf "the lambda passed for `%s` binds `%s` twice" p x)
     | None ->
     match inline_bool_body ~named ~local_lambda ~binders:ys body with
     | Error w -> Error (Printf.sprintf "the lambda passed for `%s` %s" p w)
     | Ok (r, obs) ->
-      if classify_pred "$no_binder" ys r = Unusable then
+      (* R2's rule at arity n: a name of the reading other than the
+         parameters is a CAPTURE when it is written free in the lambda and
+         [stable] (an enclosing immutable binder).  It is renamed to its
+         placeholder, which no formal, binder or March variable can spell,
+         and [instantiate_entry_caps] substitutes it back. *)
+      let caps = List.filter (fun c -> not (List.mem c ys)) (pred_value_names "$no_binder" r) in
+      let captured c =
+        match lam with Some l -> stable c && Refine_scope.expr_mentions_free c l | None -> false
+      in
+      match List.find_opt (fun c -> not (captured c)) caps with
+      | Some c when (match lam with Some l -> Refine_scope.expr_mentions_free c l | None -> false) ->
+        Error
+          (Printf.sprintf "the lambda passed for `%s` captures `%s`, which is not a local binding of this call" p c)
+      | Some _ -> Error (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameters" p)
+      | None ->
+      let r = subst_params (List.map (fun c -> (c, A.EVar { A.txt = cap_name c; A.span = A.dummy_span })) caps) r in
+      if classify_pred "$no_binder" (ys @ List.map cap_name caps) r = Unusable then
         Error (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameters" p)
       else
         (match obs with
@@ -2690,7 +2768,7 @@ let instantiate_abstract_n ~(named : string -> (string list * A.expr * A.expr li
   let of_lambda (lam : A.expr) =
     match lam with
     | A.ELam (ps, body, _) when List.length ps = n ->
-      read (List.map (fun (prm : A.param) -> prm.A.param_name.A.txt) ps) body
+      read ~lam (List.map (fun (prm : A.param) -> prm.A.param_name.A.txt) ps) body
     | A.ELam ([ _ ], _, _) ->
       (* A curried chain: peel one-parameter lambdas whose body is exactly
          the next lambda. *)
@@ -2701,7 +2779,7 @@ let instantiate_abstract_n ~(named : string -> (string list * A.expr * A.expr li
         | body when k = 0 -> Some (List.rev acc, body)
         | _ -> None
       in
-      (match peel [] n lam with Some (ys, body) -> read ys body | None -> wrong ())
+      (match peel [] n lam with Some (ys, body) -> read ~lam ys body | None -> wrong ())
     | A.ELam _ -> wrong ()
     | _ -> Error (Printf.sprintf "the argument passed for `%s` is not a lambda" p)
   in
@@ -2887,7 +2965,10 @@ let abstract_flow_n ?component ?(call : A.expr option) ~root defs (ctx : rctx) p
                    | [] -> Ok (List.rev acc)
                    | p :: rest ->
                      let n = Option.value ~default:2 (Refine_abstract.arity_of ~is_known fd p) in
-                     (match instantiate_abstract_n ~named ~local_lambda:(local_lambda_of lets) fd p n args with
+                     (match
+                        instantiate_abstract_n ~stable:(stable_local ctx) ~named ~local_lambda:(local_lambda_of lets)
+                          fd p n args
+                      with
                       | Ok yq -> inst_all ((p, yq) :: acc) rest
                       | Error w -> Error w)
                  in
@@ -2929,7 +3010,7 @@ let abstract_flow_n ?component ?(call : A.expr option) ~root defs (ctx : rctx) p
                           element return is ([lend_entry]'s [`Stable] rule); one
                           that cannot move declines.  Arity 1 requires the slot
                           closed over its binder ([abstract_slot_of_ty]). *)
-                       match instantiate_entry ~mode:`Stable ~formals:(sig_of_fn fd).param_names ~args produced with
+                       match instantiate_entry_caps ~mode:`Stable ~formals:(sig_of_fn fd).param_names ~args produced with
                        | Error why ->
                          uninst (Printf.sprintf "`%s`'s element return cannot be read at this call: %s" g why)
                        | Ok produced ->
@@ -3095,7 +3176,10 @@ let abstract_param_entry_n (ctx : rctx) defs (cb : cbenv) (lets : launder) (g : 
             | [] -> Ok (List.rev acc)
             | p :: rest ->
               let n = Option.value ~default:2 (Refine_abstract.arity_of ~is_known fd p) in
-              (match instantiate_abstract_n ~named ~local_lambda:(local_lambda_of lets) fd p n args with
+              (match
+                 instantiate_abstract_n ~stable:(stable_local ctx) ~named ~local_lambda:(local_lambda_of lets) fd p
+                   n args
+               with
                | Ok yq -> inst_all ((p, yq) :: acc) rest
                | Error w -> Error w)
           in
@@ -3117,7 +3201,7 @@ let abstract_param_entry_n (ctx : rctx) defs (cb : cbenv) (lets : launder) (g : 
                       reads a declared slot ([`Any]: a demand, used once). *)
                    Result.map_error
                      (fun why -> Printf.sprintf "the parameter cannot be read at this call: %s" why)
-                     (instantiate_entry ~mode:`Any ~formals:(sig_of_fn fd).param_names ~args e)
+                     (instantiate_entry_caps ~mode:`Any ~formals:(sig_of_fn fd).param_names ~args e)
                  | Error j ->
                    Error
                      (Printf.sprintf "the element type of slot %d of the argument passed to `%s` is not known here" j g)))

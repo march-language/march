@@ -25273,9 +25273,16 @@ let abstract_multiarg_suite =
         Alcotest.check ps "need_pos" weak (at "need_pos" src);
         let d = String.concat "\n" (details "need_pos" src) in
         Alcotest.(check bool) ("lambda: " ^ d) true (has "fn (_k, v) -> v >= 0" d));
-    gated "capture (m7): a lambda naming an outer value is uninstantiated" (fun () ->
-        Alcotest.check ps "need_pos" uninst
-          (at "need_pos" (m "CP" (call ~params:"a : Assoc(Int, Int), now : Int" "need_pos" "fn (_k, v) -> v > now"))));
+    (* Until specs/progress/2026-10-26-refine-nary-lambda-capture.md this was
+       uninstantiated (the n-ary capture decline).  `now` is a parameter, so
+       the capture instantiates `p`; nothing bounds it, so the demand is
+       undecided.  A positive `now` proves. *)
+    gated "capture (m7): a lambda naming an unconstrained outer value is undecided" (fun () ->
+        Alcotest.check ps "need_pos" [ ("skipped", "solver-undecided") ]
+          (at "need_pos" (m "CP" (call ~params:"a : Assoc(Int, Int), now : Int" "need_pos" "fn (_k, v) -> v > now")));
+        Alcotest.check ps "need_pos, now >= 0" proved
+          (at "need_pos"
+             (m "CPP" (call ~params:"a : Assoc(Int, Int), now : {Int | _ >= 0}" "need_pos" "fn (_k, v) -> v > now"))));
     gated "opaque: a callback with no contract is uninstantiated" (fun () ->
         Alcotest.check ps "need_pos" uninst
           (at "need_pos" (m "OP" (call ~params:"a : Assoc(Int, Int), kk : Int -> Int -> Bool" "need_pos" "kk"))));
@@ -25676,9 +25683,16 @@ let abstract_map_suite =
         "  fn go(m : Map(Int, Int)) : Int do need_ivals(Map.filter(m, fn k -> fn v -> k > 0 && v > k, Map.int_cmp)) end\n";
     row "m6: `v > k` alone does not make the value positive" ~demand:"need_ivals" ~want:[ weak ]
       ~body:"  fn go(m : Map(Int, Int)) : Int do need_ivals(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n";
-    row "m7: a lambda capturing `now` is uninstantiated" ~demand:"need_vals" ~want:[ uninst ]
+    (* Uninstantiated until the n-ary capture rule
+       (specs/progress/2026-10-26-refine-nary-lambda-capture.md): `now` is
+       unbounded, so the demand is undecided; a bounded `now` proves. *)
+    row "m7: a lambda capturing an unconstrained `now` is undecided" ~demand:"need_vals"
+      ~want:[ ("skipped", "solver-undecided") ]
       ~body:
         "  fn go(m : Map(String, Int), now : Int) : Int do need_vals(Map.filter(m, fn _k -> fn v -> v > now, Map.str_cmp)) end\n";
+    row "m7b: a lambda capturing `now >= 0` proves" ~demand:"need_vals" ~want:[ proved ]
+      ~body:
+        "  fn go(m : Map(String, Int), now : {Int | _ >= 0}) : Int do need_vals(Map.filter(m, fn _k -> fn v -> v > now, Map.str_cmp)) end\n";
     row "m8: through a `let`" ~demand:"need_vals" ~want:[ proved ]
       ~body:
         "  fn go(m : Map(String, Int)) : Int do\n\
@@ -27103,6 +27117,115 @@ let gap_let_call_tail_suite =
           (post "b"
              (m (inc ^ "  fn b(x : {Int | _ > 0}, o : Option(Int)) : {Int | _ > 0} do\n    let r = inc(x)\n    match o do\n      Some(x) -> r\n      None -> 1\n    end\n  end\n")))) ]
 
+(* ── Two-argument lambdas capture caller names (specs/progress/2026-10-26-refine-nary-lambda-capture.md) ──
+   R2's capture rule (a name written free in the lambda that an enclosing
+   binder binds) for the arity-n path.  The callee's formals are substituted
+   AFTER the abstract is applied (review C4), so each captured name is renamed
+   apart (`$cap$n`) before, and substituted back to the caller's own `n`
+   together with the formals, simultaneously.  Slot and relation binders are
+   renamed apart by [instantiate_entry] as for any actual. *)
+let gap_nary_capture_suite =
+  let assoc = "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n" in
+  (* Explicit slot binders `x`, `y`, so a caller name `y` meets a binder. *)
+  let chain = "({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}" in
+  let filt =
+    "  fn filt(a : Assoc(k, v), keep : " ^ chain ^ ") : Assoc({x : k | true}, {y : v | p(x, y)}) do\n\
+    \    match a do\n\
+    \      ANil -> ANil\n\
+    \      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end\n\
+    \    end\n\
+    \  end\n"
+  in
+  (* A combinator with a parameter `n` of its own (the C4 collision). *)
+  let filtn =
+    "  fn filtn(a : Assoc(Int, Int), n : Int, keep : Int -> Int -> Bool[p])\n\
+    \      : Assoc({x : Int | true}, {y : Int | p(x, y) && y > n}) do\n\
+    \    match a do\n\
+    \      ANil -> ANil\n\
+    \      ACons(k, v, t) ->\n\
+    \        if keep(k, v) do\n\
+    \          if v > n do ACons(k, v, filtn(t, n, keep)) else filtn(t, n, keep) end\n\
+    \        else filtn(t, n, keep) end\n\
+    \    end\n\
+    \  end\n"
+  in
+  let need =
+    "  fn need_far(_a : Assoc({x : Int | true}, {y : Int | y > x + 5})) : Int do 0 end\n\
+    \  fn need_big(_a : Assoc(Int, {Int | _ > 1000})) : Int do 0 end\n\
+    \  fn need_rel(_a : Assoc({x : Int | true}, {y : Int | p(x, y)}), keep : Int -> Int -> Bool[p]) : Int do 0 end\n\
+    \  fn need_reln(_a : Assoc({x : Int | true}, {y : Int | p(x, y) && y > n}), n : Int, keep : Int -> Int -> Bool[p]) : Int do 0 end\n"
+  in
+  let m body = "mod NC do\n" ^ assoc ^ filt ^ filtn ^ need ^ body ^ "end\n" in
+  let at c src = gap_at c (gap_run (m src)) in
+  let weak = [ ("skipped", "abstract-refinement-too-weak") ] in
+  [ gated "filt(a, fn (k, v) -> v > k + n) proves a relation over the caller's n" (fun () ->
+        Alcotest.check gap_ps "uncurried" gap_proved
+          (at "need_far" "  fn go(a : Assoc(Int, Int), n : {Int | _ >= 10}) : Int do need_far(filt(a, fn (k, v) -> v > k + n)) end\n");
+        Alcotest.check gap_ps "curried" gap_proved
+          (at "need_far" "  fn go(a : Assoc(Int, Int), n : {Int | _ >= 10}) : Int do need_far(filt(a, fn k -> fn v -> v > k + n)) end\n");
+        (* A `let`-bound capture, not rebound. *)
+        Alcotest.check gap_ps "let n = 6" gap_proved
+          (at "need_far" "  fn go(a : Assoc(Int, Int)) : Int do\n    let n = 6\n    need_far(filt(a, fn (k, v) -> v > k + n))\n  end\n"));
+    gated "too weak: the caller's n does not give the demand" (fun () ->
+        Alcotest.check gap_ps "n >= 0" weak
+          (at "need_far" "  fn go(a : Assoc(Int, Int), n : {Int | _ >= 0}) : Int do need_far(filt(a, fn (k, v) -> v > k + n)) end\n");
+        gap_not_proved "n unrefined"
+          (at "need_far" "  fn go(a : Assoc(Int, Int), n : Int) : Int do need_far(filt(a, fn (k, v) -> v > k + n)) end\n"));
+    gated "C4: a captured name equal to a callee parameter is the caller's" (fun () ->
+        (* filtn(a, 1000, …) with the caller's n >= 0: the entry is
+           `y > x + n && y > 1000`, which does not give `y > x + 5`.  Reading
+           the lambda's n as filtn's own (1000) would prove it. *)
+        gap_not_proved "caller n >= 0, filtn n = 1000"
+          (at "need_far"
+             "  fn go(a : Assoc(Int, Int), n : {Int | _ >= 0}) : Int do need_far(filtn(a, 1000, fn (k, v) -> v > k + n)) end\n");
+        (* …and the right way round: the caller's n >= 10, filtn's 0. *)
+        Alcotest.check gap_ps "caller n >= 10, filtn n = 0" gap_proved
+          (at "need_far"
+             "  fn go(a : Assoc(Int, Int), n : {Int | _ >= 10}) : Int do need_far(filtn(a, 0, fn (k, v) -> v > k + n)) end\n"));
+    gated "capture: a caller name equal to a slot binder is not the binder" (fun () ->
+        (* `fn (k, v) -> v > y` over the caller's unrefined y: captured by
+           filt's slot binder `y` it would read `y > y`, false, which
+           implies any demand (proved when the captures are renamed back
+           without [instantiate_entry]'s binder renaming). *)
+        Alcotest.check gap_ps "caller y unrefined" [ ("skipped", "solver-undecided") ]
+          (at "need_big" "  fn go(a : Assoc(Int, Int), y : Int) : Int do need_big(filt(a, fn (k, v) -> v > y)) end\n");
+        Alcotest.check gap_ps "control: caller y > 1000" gap_proved
+          (at "need_big" "  fn go(a : Assoc(Int, Int), y : {Int | _ > 1000}) : Int do need_big(filt(a, fn (k, v) -> v > y)) end\n"));
+    gated "rebound and shadowed controls" (fun () ->
+        (* A let-bound lambda whose capture is rebound before the use. *)
+        gap_not_proved "let f = …n…; let n = 0"
+          (at "need_far"
+             "  fn go(a : Assoc(Int, Int), n : {Int | _ >= 10}) : Int do\n    let f = fn (k, v) -> v > k + n\n    let n = 0\n    need_far(filt(a, f))\n  end\n");
+        (* A local shadowing the refined parameter: the lambda captures the
+           local (-100). *)
+        gap_not_proved "let n = 0 - 100"
+          (at "need_far"
+             "  fn go(a : Assoc(Int, Int), n : {Int | _ >= 10}) : Int do\n    let n = 0 - 100\n    need_far(filt(a, fn (k, v) -> v > k + n))\n  end\n");
+        (* A name the lambda binds itself is no capture. *)
+        gap_not_proved "let inside the lambda"
+          (at "need_far"
+             "  fn go(a : Assoc(Int, Int), n : {Int | _ >= 10}) : Int do need_far(filt(a, fn (k, v) ->\n    let n = 0\n    v > k + n)) end\n"));
+    gated "a parameter-slot demand reads the capture at the call" (fun () ->
+        (* Recorded under the argument's name, `a`. *)
+        Alcotest.check gap_ps "n <= 20" gap_proved
+          (at "a"
+             "  fn go(a : Assoc({x : Int | true}, {y : Int | y > x + 20}), n : {Int | _ <= 20}) : Int do need_rel(a, fn (k, v) -> v > k + n) end\n");
+        gap_not_proved "n <= 30"
+          (at "a"
+             "  fn go(a : Assoc({x : Int | true}, {y : Int | y > x + 20}), n : {Int | _ <= 30}) : Int do need_rel(a, fn (k, v) -> v > k + n) end\n");
+        (* C4 on the parameter side: need_reln's own n is 0, the caller's
+           n >= 1000.  The slot fact `y > 0` (callee n := 0) is proved and
+           the relation `y > x + n` over the CALLER's n is violated (x = 0,
+           y = 2).  Read as the callee's n the relation would be `y > x`,
+           which `a` satisfies.  The same with the caller's name `m`. *)
+        let c4 x =
+          Printf.sprintf
+            "  fn go(a : Assoc({x : Int | _ >= 0}, {y : Int | y > x + 1}), %s : {Int | _ >= 1000}) : Int do need_reln(a, 0, fn (k, v) -> v > k + %s) end\n"
+            x x
+        in
+        Alcotest.check gap_ps "C4 parameter side, caller n" [ ("proved", ""); ("violated", "") ] (at "a" (c4 "n"));
+        Alcotest.check gap_ps "C4 parameter side, caller m" [ ("proved", ""); ("violated", "") ] (at "a" (c4 "m"))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -27269,6 +27392,7 @@ let () =
       ("gap-deque-to-list", gap_deque_to_list_suite);
       ("gap-o1-local-option", gap_o1_local_option_suite);
       ("gap-let-call-tail", gap_let_call_tail_suite);
+      ("gap-nary-capture", gap_nary_capture_suite);
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("len-return-obliged", len_return_obliged_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

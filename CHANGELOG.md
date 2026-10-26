@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinements: a two-argument lambda may capture the caller's variables.**
+  `filt(a, fn (k, v) -> v > k + n)` gives a relation over the caller's `n`, read with
+  `n`'s own refinement, as a one-argument lambda already could. A captured name that
+  equals a parameter of the callee, or a slot binder, stays the caller's.
 - **Refinements: a return that is a `let`-bound call is proved from the callee's
   return.** `let r = a(x)` then `r` (or `r + 1`) now proves `b`'s `{Int | _ > 0}`
   when `a`'s return is proved or `@[assume]`d, as the bare tail `a(x)` already did.
