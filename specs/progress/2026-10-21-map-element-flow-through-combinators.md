@@ -28,3 +28,12 @@ functions are the only producers of its values", so a `Map` function generic in
 map's entries plus the inserted key/value, each obliged against the demand; remove /
 get / merge / map_values similarly), with P1 on annotated parameters and the same
 runtime property witnesses `Map.filter` has in `test/stdlib/test_map.march`.
+
+**Closed 2026-10-26** (`m10` proves, `m11` is a skip, not a violation): see
+`specs/progress/2026-10-26-map-element-flow.md`. The opaque-container source rule
+landed as a checker change in `Refine_param.container_paths` (a `ptype`/`opaque type`'s
+hidden parameters are sources), and `insert`, `get`, `get_or`, `remove`, `keys`,
+`values`, `merge`, `map_values` and `singleton` got honest generic annotations; the
+element facts are checked by parametricity, not assumed. The remainder (`Map.empty()`,
+`merge_with`, the list-of-pairs functions, and `HashMap`/`Set`) is
+`specs/todos/2026-10-26-map-element-flow-remainder.md`.

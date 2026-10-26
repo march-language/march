@@ -1465,6 +1465,18 @@ let ctor_param_fields : (string, field_role list) Hashtbl.t = Hashtbl.create 32
    treat slot [j] as covering them (2026-09-18 plan). *)
 let ctor_hidden_params : (string, int list) Hashtbl.t = Hashtbl.create 32
 
+(* Variant types (keyed by [adt_sort_name]) declared OPAQUE: `ptype`, or a
+   variant type every constructor of which is private (`opaque type`,
+   `alwayslinear opaque type`).  [Refine_param.container_paths] reads it for
+   the opaque-container source rule (container-gap batch 2026-10-26, gap 2):
+   such a type's hidden parameters are still sources of a parametric callee,
+   because no construction can establish a slot fact on a hidden field
+   (phase 0: a hidden-field construction is a recorded skip), so every slot
+   fact a value of it carries came from a declared parameter, an assumed
+   return or a parametric call, each of which means EVERY value of that
+   parameter in it. *)
+let opaque_containers : (string, unit) Hashtbl.t = Hashtbl.create 16
+
 (* Per constructor, per field (in declaration order): the container's type
    parameters the field HIDES, as (index, name), and the field type rendered
    for a message.  A [Param] field and an identity self-reference hide
@@ -1995,8 +2007,10 @@ let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
 let rec register_field_sorts_once (decls : A.decl list) : unit =
   List.iter
     (function
-      | A.DType (_, tname, tparams, A.TDVariant variants, _)
-      | A.DAlwaysLinearType (_, tname, tparams, A.TDVariant variants, _) ->
+      | A.DType (vis, tname, tparams, A.TDVariant variants, _)
+      | A.DAlwaysLinearType (vis, tname, tparams, A.TDVariant variants, _) ->
+        if vis = A.Private || List.for_all (fun (v : A.variant) -> v.A.var_vis = A.Private) variants then
+          Hashtbl.replace opaque_containers (adt_sort_name tname.A.txt) ();
         let pnames = List.map (fun (p : A.name) -> p.A.txt) tparams in
         let rec tvars acc (t : A.ty) =
           match t with

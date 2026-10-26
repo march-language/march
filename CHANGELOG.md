@@ -55,6 +55,16 @@ git log is authoritative for exact commits.
   - relational candidates were never ordered weakest-first;
   - a slot's trivial `true` goal could make a vacuous proposal look useful.
   Plain `--check` is unchanged.
+- **Refinements: `Map`'s own functions keep a refined map's facts.** `Map.insert`,
+  `get`, `get_or`, `remove`, `keys`, `values`, `merge`, `map_values` and `singleton`
+  are annotated with their generic types, and an opaque container (`ptype` /
+  `opaque type`) whose representation hides its parameters now counts as a source for
+  the parametric element rule. So `need_vals(Map.insert(m, "b", 5, cmp))` with `m :
+  Map(String, {Int | _ > 0})` is proved, `Map.insert(m, "b", 0, cmp)` is a skip, and
+  `one_pos(Map.get(m, "a", cmp))` is proved. Nothing new is assumed: the bodies are
+  checked parametric. A too-weak declared map through these functions is now reported
+  like a too-weak list through `List.reverse` (a violation). `Map.empty()` is not a
+  source yet.
 - **Refinements: `HashMap.filter` keeps what its predicate says.** It is now
   `@[assume] fn filter(m : HashMap(k, v), pred : k -> v -> Bool[p]) : HashMap(k[p],
   v[p])`, the `Map.filter` recipe: `need_vals(HashMap.filter(m, fn _k -> fn v -> v >

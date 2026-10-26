@@ -21,6 +21,14 @@
 -- treats two `==`-different keys as equal, e.g. case-insensitively, does not
 -- merge them).
 --
+-- Element refinements: `get`, `get_or`, `insert`, `remove`, `keys`, `values`,
+-- `map_values`, `merge` and `singleton` are annotated with their generic types,
+-- so the refinement checker carries a refined map's key and value facts through
+-- them by PARAMETRICITY (checked, not assumed): `Map.insert(m, k, v, cmp)` with
+-- `m : Map(String, {Int | _ > 0})` meets `Map(String, {Int | _ > 0})` when `v`
+-- is positive. Their key-set contracts stay assumed, as below. See
+-- docs/refinement-types.md, "Map's own functions".
+--
 -- Iteration order is hash-traversal order (not sorted by key).
 -- Use to_list then sort externally if sorted order is needed.
 --
@@ -452,9 +460,9 @@ mod Map do
   type. See docs/refinement-types.md, "Set Refinements".
   """
   @[assume]
-  fn singleton(k, v) : {Map(k, v) | keys(_) == singleton(k)} do
-    let h = key_hash(k)
-    HamtMap(HLeaf(h, k, v))
+  fn singleton(key : k, val : v) : {Map(k, v) | keys(_) == singleton(key)} do
+    let h = key_hash(key)
+    HamtMap(HLeaf(h, key, val))
   end
 
   -- ── Default comparators ───────────────────────────────────────────────────
@@ -585,7 +593,7 @@ mod Map do
   type. See docs/refinement-types.md, "Set Refinements".
   """
   @[assume]
-  fn get(m, key, cmp) : {Option(v) | is_Some(_) == member(key, keys(m))} do
+  fn get(m : Map(k, v), key : k, cmp : k -> k -> Bool) : {Option(v) | is_Some(_) == member(key, keys(m))} do
     match m do
     HamtMap(node) -> do
       let h = key_hash(key)
@@ -606,7 +614,7 @@ mod Map do
       march> Map.get_or(Map.singleton("a", 1), "z", 0, fn a -> fn b -> a < b)
       0
   """
-  fn get_or(m, key, default, cmp) do
+  fn get_or(m : Map(k, v), key : k, default : v, cmp : k -> k -> Bool) : v do
     match get(m, key, cmp) do
     Some(v) -> v
     None    -> default
@@ -659,7 +667,7 @@ mod Map do
   type. See docs/refinement-types.md, "Set Refinements".
   """
   @[assume]
-  fn insert(m, key, val, cmp) : {Map(k, v) | keys(_) == union(keys(m), singleton(key))} do
+  fn insert(m : Map(k, v), key : k, val : v, cmp : k -> k -> Bool) : {Map(k, v) | keys(_) == union(keys(m), singleton(key))} do
     match m do
     HamtMap(node) -> do
       let h = key_hash(key)
@@ -688,7 +696,7 @@ mod Map do
   type. See docs/refinement-types.md, "Set Refinements".
   """
   @[assume]
-  fn remove(m, key, cmp) : {Map(k, v) | keys(_) == diff(keys(m), singleton(key))} do
+  fn remove(m : Map(k, v), key : k, cmp : k -> k -> Bool) : {Map(k, v) | keys(_) == diff(keys(m), singleton(key))} do
     match m do
     HamtMap(node) -> do
       let h = key_hash(key)
@@ -736,7 +744,7 @@ mod Map do
   type. See docs/refinement-types.md, "Set Refinements".
   """
   @[assume]
-  fn keys(m) : {List(k) | elts(_) == keys(m)} do
+  fn keys(m : Map(k, v)) : {List(k) | elts(_) == keys(m)} do
     let pairs = fold(m, Nil, fn (acc, k, _v) -> Cons(k, acc))
     lst_rev(pairs)
   end
@@ -750,7 +758,7 @@ mod Map do
       march> List.sort_by(Map.values(Map.from_list([("b", 2), ("a", 1)], fn a -> fn b -> a < b)), fn (x, y) -> x < y)
       [1, 2]
   """
-  fn values(m) do
+  fn values(m : Map(k, v)) : List(v) do
     let vals = fold(m, Nil, fn (acc, _k, v) -> Cons(v, acc))
     lst_rev(vals)
   end
@@ -829,7 +837,7 @@ mod Map do
   type. See docs/refinement-types.md, "Set Refinements".
   """
   @[assume]
-  fn map_values(m, f) : {Map(k, w) | keys(_) == keys(m)} do
+  fn map_values(m : Map(k, v), f : v -> w) : {Map(k, w) | keys(_) == keys(m)} do
     fn go(node) do
       match node do
       HEmpty -> HEmpty
@@ -922,7 +930,7 @@ mod Map do
   type. See docs/refinement-types.md, "Set Refinements".
   """
   @[assume]
-  fn merge(a, b, cmp) : {Map(k, v) | keys(_) == union(keys(a), keys(b))} do
+  fn merge(a : Map(k, v), b : Map(k, v), cmp : k -> k -> Bool) : {Map(k, v) | keys(_) == union(keys(a), keys(b))} do
     fn go(lst, acc) do
       match lst do
       Nil -> acc

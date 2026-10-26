@@ -25702,8 +25702,10 @@ let abstract_map_suite =
     (* A variable argument's subtyping obligation is labelled by the variable. *)
     row "m9: a refined parameter (unchanged)" ~demand:"m" ~want:[ proved ]
       ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(m) end\n";
-    row "m10 control: Map.insert carries no element fact (out of scope)" ~demand:"need_vals"
-      ~want:[ ("skipped", "parametric-source-unproved") ]
+    (* Was a pinned skip (out of scope in phase 4); proved since the
+       opaque-container source rule (specs/progress/2026-10-26-map-element-flow.md). *)
+    row "m10: Map.insert carries the map's and the value's facts" ~demand:"need_vals"
+      ~want:[ proved ]
       ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(Map.insert(m, \"b\", 5, Map.str_cmp)) end\n";
     gated "the input's own facts are not conjoined through an assumed callee, and the detail says so" (fun () ->
         let _, _, obs, _ =
@@ -27829,6 +27831,199 @@ let hashmap_filter_suite =
           (List.length
              (List.filter (fun o -> o.span.March_ast.Ast.file = path && o.callee = "return of filter") obs))) ]
 
+(* ── `Map`'s own functions carry their arguments' element facts: the
+   opaque-container source rule (design 2026-10-18 multi-arg §8, rows
+   m10/m11; specs/progress/2026-10-26-map-element-flow.md).  A demand on the
+   result of a `Map` function generic in `k`/`v`, with annotated parameters
+   (P1) and a parametric body (P2), is discharged against every source of
+   the demanded variable: the argument maps' slots and the bare key/value
+   arguments.  Nothing is assumed. *)
+let map_flow_suite =
+  let run, slugs, detail = container_gap_harness [ "list.march"; "option.march"; "map.march" ] in
+  let needs =
+    {|  fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+  fn need_keys(_m : Map({Int | _ > 0}, String)) : Int do 0 end
+  fn need_rel(_m : Map({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+  fn one_pos(_o : Option({Int | _ > 0})) : Int do 0 end
+  fn list_pos(_xs : List({Int | _ > 0})) : Int do 0 end
+  fn need_pos(x : {Int | _ > 0}) : Int do x end
+|}
+  in
+  let errs_of src = let e, _, _, _ = run src in e in
+  let row name ~demand ~body ~want =
+    gated name (fun () ->
+        let errs, _, obs, _ = run (cg_mod "MF" (needs ^ body)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check cg_ps demand want (slugs demand obs))
+  in
+  (* A skip, never a violation: the rule's sources are sub-steps (design §4.3). *)
+  let not_proved name ~demand ~body =
+    gated name (fun () ->
+        let _, _, obs, _ = run (cg_mod "MF" (needs ^ body)) in
+        let vs = slugs demand obs in
+        Alcotest.(check bool) ("recorded: " ^ demand) true (vs <> []);
+        Alcotest.(check bool) "not proved" false (List.mem cg_proved vs);
+        Alcotest.(check bool) "not a violation" false (List.exists (fun (v, _) -> v = "violated") vs))
+  in
+  ignore errs_of;
+  ignore detail;
+  [ row "m10: insert of a positive value into a positive map" ~demand:"need_vals" ~want:[ cg_proved ]
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(Map.insert(m, \"b\", 5, Map.str_cmp)) end\n";
+    not_proved "m11: insert of 0 is not proved (and not a violation)" ~demand:"need_vals"
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(Map.insert(m, \"b\", 0, Map.str_cmp)) end\n";
+    not_proved "control: insert into an unrefined map" ~demand:"need_vals"
+      ~body:"  fn go(m : Map(String, Int)) : Int do need_vals(Map.insert(m, \"b\", 5, Map.str_cmp)) end\n";
+    row "insert: a refined parameter as the value" ~demand:"need_vals" ~want:[ cg_proved ]
+      ~body:
+        "  fn go(m : Map(String, {Int | _ > 0}), x : {Int | _ > 0}) : Int do need_vals(Map.insert(m, \"b\", x, Map.str_cmp)) end\n";
+    (* Name capture: the caller's names coincide with insert's parameters
+       (`m`, `key`, `val`), bound to different things. *)
+    row "insert capture: caller params named val/m/key" ~demand:"need_vals" ~want:[ cg_proved ]
+      ~body:
+        "  fn go(val : Map(String, {Int | _ > 0}), m : {Int | _ > 0}, key : String) : Int do need_vals(Map.insert(val, key, m, Map.str_cmp)) end\n";
+    not_proved "insert capture control: `val` the map is refined, `m` the value is not" ~demand:"need_vals"
+      ~body:
+        "  fn go(val : Map(String, {Int | _ > 0}), m : Int, key : String) : Int do need_vals(Map.insert(val, key, m, Map.str_cmp)) end\n";
+    row "insert: a key demand" ~demand:"need_keys" ~want:[ cg_proved ]
+      ~body:"  fn go(m : Map({Int | _ > 0}, String)) : Int do need_keys(Map.insert(m, 3, \"x\", Map.int_cmp)) end\n";
+    not_proved "insert: key 0 into a positive-key map" ~demand:"need_keys"
+      ~body:"  fn go(m : Map({Int | _ > 0}, String)) : Int do need_keys(Map.insert(m, 0, \"x\", Map.int_cmp)) end\n";
+    gated "insert: a relation is not carried (a skip naming the pairing)" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "MF"
+               (needs
+               ^ "  fn go(m : Map({x : Int | true}, {y : Int | y > x})) : Int do need_rel(Map.insert(m, 1, 2, Map.int_cmp)) end\n"))
+        in
+        Alcotest.check cg_ps "need_rel" [ ("skipped", "parametric-source-unproved") ] (slugs "need_rel" obs));
+    row "insert chained twice" ~demand:"need_vals" ~want:[ cg_proved ]
+      ~body:
+        "  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(Map.insert(Map.insert(m, \"a\", 1, Map.str_cmp), \"b\", 2, Map.str_cmp)) end\n";
+    row "get: the value of a positive map (the forward rule; labelled by the call)" ~demand:"Map.get(…)" ~want:[ cg_proved ]
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do one_pos(Map.get(m, \"a\", Map.str_cmp)) end\n";
+    not_proved "get control: an unrefined map" ~demand:"one_pos"
+      ~body:"  fn go(m : Map(String, Int)) : Int do one_pos(Map.get(m, \"a\", Map.str_cmp)) end\n";
+    row "get through a match on the result" ~demand:"need_pos" ~want:[ cg_proved ]
+      ~body:
+        "  fn go(m : Map(String, {Int | _ > 0})) : Int do\n\
+        \    match Map.get(m, \"a\", Map.str_cmp) do\n\
+        \      Some(v) -> need_pos(v)\n\
+        \      None -> 1\n\
+        \    end\n\
+        \  end\n";
+    row "get_or: the map's values and a positive default" ~demand:"need_pos" ~want:[ cg_proved ]
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_pos(Map.get_or(m, \"a\", 1, Map.str_cmp)) end\n";
+    not_proved "get_or control: default 0" ~demand:"need_pos"
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_pos(Map.get_or(m, \"a\", 0, Map.str_cmp)) end\n";
+    row "remove keeps the rest's facts" ~demand:"Map.remove(…)" ~want:[ cg_proved ]
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(Map.remove(m, \"a\", Map.str_cmp)) end\n";
+    not_proved "remove control: an unrefined map" ~demand:"need_vals"
+      ~body:"  fn go(m : Map(String, Int)) : Int do need_vals(Map.remove(m, \"a\", Map.str_cmp)) end\n";
+    row "merge of two positive maps" ~demand:"Map.merge(…)" ~want:[ cg_proved ]
+      ~body:
+        "  fn go(a : Map(String, {Int | _ > 0}), b : Map(String, {Int | _ > 0})) : Int do need_vals(Map.merge(a, b, Map.str_cmp)) end\n";
+    not_proved "merge control: one side unrefined" ~demand:"need_vals"
+      ~body:
+        "  fn go(a : Map(String, {Int | _ > 0}), b : Map(String, Int)) : Int do need_vals(Map.merge(a, b, Map.str_cmp)) end\n";
+    row "map_values with a positive-making lambda" ~demand:"need_vals" ~want:[ cg_proved ]
+      ~body:"  fn go(m : Map(String, Int)) : Int do need_vals(Map.map_values(m, fn v -> v * v + 1)) end\n";
+    not_proved "map_values control: a lambda that can return 0" ~demand:"need_vals"
+      ~body:"  fn go(m : Map(String, Int)) : Int do need_vals(Map.map_values(m, fn v -> v * v)) end\n";
+    row "values of a positive map" ~demand:"Map.values(…)" ~want:[ cg_proved ]
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do list_pos(Map.values(m)) end\n";
+    not_proved "values control: an unrefined map" ~demand:"list_pos"
+      ~body:"  fn go(m : Map(String, Int)) : Int do list_pos(Map.values(m)) end\n";
+    row "singleton of a positive value" ~demand:"need_vals" ~want:[ cg_proved ]
+      ~body:"  fn go() : Int do need_vals(Map.singleton(\"a\", 3)) end\n";
+    not_proved "singleton control: of 0" ~demand:"need_vals"
+      ~body:"  fn go() : Int do need_vals(Map.singleton(\"a\", 0)) end\n";
+    (* A lost proof, pinned: `empty()` has no parameter to witness `k`/`v`,
+       so P1 does not hold of it and the source `Map.empty()` is unproved. *)
+    row "insert into empty stays a skip (empty() has no P1 witness)" ~demand:"need_vals"
+      ~want:[ ("skipped", "parametric-source-unproved") ]
+      ~body:"  fn go() : Int do need_vals(Map.insert(Map.empty(), \"a\", 3, Map.str_cmp)) end\n";
+    not_proved "insert into empty control: of 0 - 3" ~demand:"need_vals"
+      ~body:"  fn go() : Int do need_vals(Map.insert(Map.empty(), \"a\", 0 - 3, Map.str_cmp)) end\n";
+    (* The opaque rule is for opaque containers only: a user type with the
+       same hidden shape keeps its skip. *)
+    gated "control: a user (non-opaque) hidden-field container is not a source" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "MF"
+               (needs
+               ^ "  type Wrap(k, v) = Wrap(List((k, v)))\n\
+                 \  fn need_w(_w : Wrap(String, {Int | _ > 0})) : Int do 0 end\n\
+                 \  fn same(w : Wrap(k, v)) : Wrap(k, v) do w end\n\
+                 \  fn go(w : Wrap(String, {Int | _ > 0})) : Int do need_w(same(w)) end\n"))
+        in
+        Alcotest.check cg_ps "need_w" [ ("skipped", "parametric-source-unproved") ] (slugs "need_w" obs));
+    gated "control: the same shape declared `ptype` is a source" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "MF"
+               (needs
+               ^ "  ptype PWrap(k, v) = PWrap(List((k, v)))\n\
+                 \  fn need_w(_w : PWrap(String, {Int | _ > 0})) : Int do 0 end\n\
+                 \  fn same(w : PWrap(k, v)) : PWrap(k, v) do w end\n\
+                 \  fn go(w : PWrap(String, {Int | _ > 0})) : Int do need_w(same(w)) end\n"))
+        in
+        Alcotest.check cg_ps "same(w) into need_w" [ cg_proved ] (slugs "same(…)" obs));
+    (* P2 still gates: an opaque-container function whose body can make a
+       `v` (here, a cast through an untyped builtin is not available, so a
+       body that does not depend on its argument is used: P1 fails for the
+       mismatched variable) carries nothing. *)
+    gated "control: a ptype function failing P1 carries nothing" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "MF"
+               (needs
+               ^ "  ptype PBox(v) = PBox(List((Int, v)))\n\
+                 \  fn need_b(_b : PBox({Int | _ > 0})) : Int do 0 end\n\
+                 \  fn bad(_b : PBox(v)) : PBox(v) do PBox([(1, 0 - 5)]) end\n\
+                 \  fn go(b : PBox({Int | _ > 0})) : Int do need_b(bad(b)) end\n"))
+        in
+        let vs = slugs "need_b" obs in
+        Alcotest.(check bool) "recorded" true (vs <> []);
+        Alcotest.(check bool) "not proved" false (List.mem cg_proved vs));
+    (* Soundness: `ptype` constructors are reachable from outside the module
+       today, but a hidden-field construction establishes no slot fact (phase
+       0), so a map built from `Map.HamtMap(…)` is never a proved source. *)
+    not_proved "soundness: a map built by its constructor is not a source" ~demand:"need_vals"
+      ~body:
+        "  fn go() : Int do need_vals(Map.insert(Map.HamtMap(Map.HLeaf(0, \"z\", 0 - 5)), \"a\", 3, Map.str_cmp)) end\n";
+    not_proved "soundness: nor through an unproved declared return" ~demand:"need_vals"
+      ~body:
+        "  fn mkm() : Map(String, {Int | _ > 0}) do Map.HamtMap(Map.HLeaf(0, \"z\", 0 - 5)) end\n\
+        \  fn go() : Int do need_vals(Map.insert(mkm(), \"a\", 3, Map.str_cmp)) end\n";
+    (* A too-weak declared map is a violation through `remove`, exactly as a
+       too-weak list is through `List.reverse` (the forward rule's subtyping). *)
+    gated "a too-weak declared map through remove is a violation, as List.reverse" (fun () ->
+        let _, _, obs, _ =
+          run
+            (cg_mod "MF"
+               (needs
+               ^ "  fn go(m : Map(String, {Int | _ >= 0})) : Int do need_vals(Map.remove(m, \"a\", Map.str_cmp)) end\n\
+                 \  fn go2(xs : List({Int | _ >= 0})) : Int do list_pos(List.reverse(xs)) end\n"))
+        in
+        Alcotest.check cg_ps "Map.remove" [ ("violated", "") ] (slugs "Map.remove(…)" obs);
+        Alcotest.check cg_ps "List.reverse" [ ("violated", "") ] (slugs "List.reverse(…)" obs));
+    gated "cap verified: m10 leaves nothing unverified" (fun () ->
+        let errs, _, _, _ =
+          run
+            (cg_mod ~verified:true "MV"
+               (needs
+               ^ "  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(Map.insert(m, \"b\", 5, Map.str_cmp)) end\n"))
+        in
+        Alcotest.(check (list string)) "no errors" [] errs);
+    gated "cap verified control: m11 is an error" (fun () ->
+        let errs, _, _, _ =
+          run
+            (cg_mod ~verified:true "MV2"
+               (needs
+               ^ "  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(Map.insert(m, \"b\", 0, Map.str_cmp)) end\n"))
+        in
+        Alcotest.(check bool) "an error" true (errs <> [])) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -28004,4 +28199,5 @@ let () =
       ("gap-lend-conjuncts", gap_lend_conjuncts_suite);
       ("gap-list-length-arg", gap_list_length_arg_suite);
       ("hashmap-filter", hashmap_filter_suite);
+      ("map-flow", map_flow_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

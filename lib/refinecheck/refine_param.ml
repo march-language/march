@@ -620,8 +620,16 @@ let rec container_paths (v : string) (t : A.ty) : (string * int) list list optio
     | A.TyVar w when w.A.txt = v -> Some [ [] ]
     | A.TyCon (c, args) when is_container_type c.A.txt ->
       (* Slot [j] covers every value of parameter [j] only if that parameter
-         appears nowhere but in direct fields ([ctor_hidden_params]). *)
-      let hidden = Option.value ~default:[] (Hashtbl.find_opt ctor_hidden_params (adt_sort_name c.A.txt)) in
+         appears nowhere but in direct fields ([ctor_hidden_params]) — or the
+         type is opaque ([opaque_containers], the opaque-container source
+         rule): a hidden-field construction establishes no slot fact (phase
+         0), so an opaque type's slot facts come only from declarations,
+         assumed returns and parametric calls, and each covers every value of
+         [j] in it. *)
+      let hidden =
+        if Hashtbl.mem opaque_containers (adt_sort_name c.A.txt) then []
+        else Option.value ~default:[] (Hashtbl.find_opt ctor_hidden_params (adt_sort_name c.A.txt))
+      in
       let rec go j = function
         | [] -> Some []
         | a :: _ when List.mem j hidden && List.mem v (ty_vars [] a) -> None
