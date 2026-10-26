@@ -4140,8 +4140,6 @@ not check.
 proposes a contract the checker does not prove, however natural. Examples it
 misses today:
 
-- a `Map(k, v)` combinator that passes its two-argument callback on to
-  `Map.filter` (the checker does not prove that return yet);
 - a relation kept from a parameter to the return (`bump(a)` keeping `y > x`
   needs both annotations at once; one root at a time is tried).
 

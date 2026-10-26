@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinements: a definer passed through to `Map.filter` proves its return.**
+  `fn mfilt(m, keep : k -> v -> Bool[p], cmp) : Map(k[p], v[p]) do Map.filter(m, keep,
+  cmp) end` is proved, and so are its callers' demands. The callee's `p` and the
+  caller's `p` were confused because they are spelled the same.
 - **Refinements: a two-argument lambda may capture the caller's variables.**
   `filt(a, fn (k, v) -> v > k + n)` gives a relation over the caller's `n`, read with
   `n`'s own refinement, as a one-argument lambda already could. A captured name that

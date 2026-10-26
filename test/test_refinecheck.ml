@@ -27005,11 +27005,13 @@ let infer_vocab_oct_suite =
           (cli_props
              (m "KD"
                 "  fn need_posd(_d : Deque.Deque({Int | _ > 0})) : Int do 0 end\n  fn dfilt(d : Deque.Deque(a), pred : a -> Bool) : Deque.Deque(a) do Deque.filter(d, pred) end\n  fn go(d : Deque.Deque(Int)) : Int do need_posd(dfilt(d, fn v -> v > 0)) end\n")));
-    gated "K6 over Map(k, v) passing its callback to Map.filter: not proposed (the checker does not prove it)" (fun () ->
-        (* Pins a checker gap (specs/todos/2026-10-25-refine-map-filter-two-arg-passthrough.md):
-           the hand-annotated `mfilt` is `abstract-refinement-uninstantiated`
-           at its own return, so the oracle must reject it. *)
-        Alcotest.check sp "none" []
+    gated "K6 over Map(k, v) passing its callback to Map.filter: proposed" (fun () ->
+        (* Pinned the checker gap until
+           specs/progress/2026-10-26-refine-map-filter-passthrough.md: the
+           hand-annotated `mfilt` was `abstract-refinement-uninstantiated` at
+           its own return (the callee's and the caller's `p` confused), so
+           the oracle rejected it.  It is proved now, and proposed. *)
+        Alcotest.check sp "mfilt" [ ("mfilt", "k -> v -> Bool[p] / Map(k[p], v[p])") ]
           (cli_props
              (m "KM"
                 "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n  fn mfilt(m : Map(k, v), keep : k -> v -> Bool, cmp : k -> k -> Bool) : Map(k, v) do Map.filter(m, keep, cmp) end\n  fn go(m : Map(String, Int)) : Int do need_posmap(mfilt(m, fn _k -> fn v -> v > 0, Map.str_cmp)) end\n")))
@@ -27226,6 +27228,118 @@ let gap_nary_capture_suite =
         Alcotest.check gap_ps "C4 parameter side, caller n" [ ("proved", ""); ("violated", "") ] (at "a" (c4 "n"));
         Alcotest.check gap_ps "C4 parameter side, caller m" [ ("proved", ""); ("violated", "") ] (at "a" (c4 "m"))) ]
 
+(* ── A definer passed through to `Map.filter` (specs/progress/2026-10-26-refine-map-filter-passthrough.md) ──
+   `fn mfilt(m, keep : k -> v -> Bool[p], cmp) : Map(k[p], v[p]) do
+   Map.filter(m, keep, cmp) end` instantiates `Map.filter`'s `p` from the
+   definer `keep`, whose reading is mfilt's own uninterpreted `p(k, v)`.  The
+   two abstracts share the spelling `p`; the reading's applications are kept
+   apart from the callee's while the callee's are substituted (and while the
+   "not instantiated" guard looks for leftovers), then given back. *)
+let gap_map_std =
+  lazy
+    (let load name =
+       let md, path = load_stdlib_march name in
+       ( March_ast.Ast.DMod
+           (md.March_ast.Ast.mod_name, March_ast.Ast.Public, md.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+         path )
+     in
+     let mods = List.map load [ "list.march"; "map.march" ] in
+     let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+     (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+
+let gap_map_passthrough_suite =
+  let run (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let md = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force gap_map_std in
+    let md = { md with March_ast.Ast.mod_decls = mods @ prelude_decls @ md.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module md in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx md;
+    let errs =
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+          let f = d.March_errors.Errors.span.March_ast.Ast.file in
+          if d.March_errors.Errors.severity = March_errors.Errors.Error && (f = "" || f = "<unknown>")
+          then Some d.March_errors.Errors.message
+          else None)
+        ctx.March_errors.Errors.diagnostics
+    in
+    ( errs
+    , List.filter_map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          let f = o.span.March_ast.Ast.file in
+          if f = "" || f = "<unknown>" then
+            Some
+              ( o.callee, verdict_name o.verdict
+              , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+              , match o.verdict with Skipped r -> reason_detail r | _ -> "" )
+          else None)
+        (March_refinecheck.Obligation.all ()) )
+  in
+  let need = "  fn need_posmap(_m : Map(String, {Int | _ > 0})) : Int do 0 end\n" in
+  let m body = "mod MP do\n" ^ need ^ body ^ "end\n" in
+  let mfilt ?(p = "p") body =
+    Printf.sprintf
+      "  fn mfilt(m : Map(k, v), keep : k -> v -> Bool[%s], cmp : k -> k -> Bool) : Map(k[%s], v[%s]) do\n    %s\n  end\n"
+      p p p body
+  in
+  let go = "  fn go(m : Map(String, Int)) : Int do need_posmap(mfilt(m, fn _k -> fn v -> v > 0, Map.str_cmp)) end\n" in
+  let check src f =
+    let errs, obs = run (m src) in
+    Alcotest.(check (list string)) "no errors" [] errs;
+    f obs
+  in
+  [ gated "mfilt passing its definer to Map.filter proves its return and the caller's demand" (fun () ->
+        check (mfilt "Map.filter(m, keep, cmp)" ^ go) (fun obs ->
+            Alcotest.check gap_ps "return of mfilt" gap_proved (gap_at "return of mfilt" obs);
+            Alcotest.check gap_ps "need_posmap" gap_proved (gap_at "need_posmap" obs));
+        (* The same with the abstract spelled `q` (no shared name): proved
+           on the base as well. *)
+        check (mfilt ~p:"q" "Map.filter(m, keep, cmp)" ^ go) (fun obs ->
+            Alcotest.check gap_ps "return of mfilt (q)" gap_proved (gap_at "return of mfilt" obs)));
+    gated "control: a different callable passed to Map.filter" (fun () ->
+        check
+          ("  fn mfilt(m : Map(k, v), keep : k -> v -> Bool[p], other : k -> v -> Bool[q], cmp : k -> k -> Bool) : Map(k[p], v[p]) do\n\
+           \    Map.filter(m, other, cmp)\n\
+           \  end\n")
+          (fun obs -> gap_not_proved "other for keep" (gap_at "return of mfilt" obs));
+        check (mfilt "Map.filter(m, fn _k -> fn _v -> true, cmp)") (fun obs ->
+            gap_not_proved "a constant-true lambda" (gap_at "return of mfilt" obs)));
+    gated "control: returning the input unchanged" (fun () ->
+        check (mfilt "m") (fun obs -> gap_not_proved "m" (gap_at "return of mfilt" obs)));
+    gated "two abstracts crossed: each reading keeps its own name" (fun () ->
+        (* filt2's `p := g's p` and `q := f's q`, in that order: substituting
+           sequentially would rewrite the `q` the first reading brought in. *)
+        let src =
+          "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n\
+          \  @[assume]\n\
+          \  fn filt2(a : Assoc(k, v), keep : k -> v -> Bool[p], keep2 : k -> v -> Bool[q]) : Assoc({x : k | true}, {y : v | p(x, y) && q(x, y)}) do\n\
+          \    match a do\n\
+          \      ANil -> ANil\n\
+          \      ACons(k, v, t) -> if keep(k, v) do (if keep2(k, v) do ACons(k, v, filt2(t, keep, keep2)) else filt2(t, keep, keep2) end) else filt2(t, keep, keep2) end\n\
+          \    end\n\
+          \  end\n\
+          \  fn cross(a : Assoc(k, v), f : k -> v -> Bool[q], g : k -> v -> Bool[p]) : Assoc(k[q], v[q]) do filt2(a, g, f) end\n\
+          \  fn cross2(a : Assoc(k, v), f : k -> v -> Bool[q], g : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do filt2(a, g, f) end\n"
+        in
+        check src (fun obs ->
+            Alcotest.check gap_ps "return of cross" gap_proved (gap_at "return of cross" obs);
+            Alcotest.check gap_ps "return of cross2" gap_proved (gap_at "return of cross2" obs));
+        (* Control: the readings swapped (`filt2(a, f, g)` gives `q && p` too,
+           so it still proves); a single wrong one does not. *)
+        check
+          ("  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n\
+           \  fn filt1(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do\n\
+           \    match a do\n\
+           \      ANil -> ANil\n\
+           \      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt1(t, keep)) else filt1(t, keep) end\n\
+           \    end\n\
+           \  end\n\
+           \  fn wrong(a : Assoc(k, v), f : k -> v -> Bool[q], g : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do filt1(a, f) end\n")
+          (fun obs -> gap_not_proved "wrong" (gap_at "return of wrong" obs))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -27393,6 +27507,7 @@ let () =
       ("gap-o1-local-option", gap_o1_local_option_suite);
       ("gap-let-call-tail", gap_let_call_tail_suite);
       ("gap-nary-capture", gap_nary_capture_suite);
+      ("gap-map-passthrough", gap_map_passthrough_suite);
       ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("len-return-obliged", len_return_obliged_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

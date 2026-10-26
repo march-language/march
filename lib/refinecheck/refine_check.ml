@@ -2834,8 +2834,60 @@ let nary_source_str (fd : A.fn_def) (p : string) (args : A.expr list) (ys, q) : 
    names, then normalised (I1: a relation over one slot becomes that slot's
    fact, §3b).  [markers j]: slot [j]'s sort marker when its base is a type
    variable (from the caller); [Error j] when it is needed and unknown. *)
+let own_prefix = "$own$"
+
+(* Rename the applications of the CALLER's abstract refinements
+   ([current_abstracts]) in [e]: [to_own] to a placeholder, [of_own] back.
+   A definer passed through (`Map.filter(m, keep, cmp)` inside `fn mfilt(…,
+   keep : k -> v -> Bool[p], …)`) reads as the caller's own `p(k, v)`; when
+   the callee's abstract is spelled `p` as well, the callee's substitution
+   and the "not instantiated" guard ([entry_mentions]) cannot tell the two
+   apart.  A placeholder no March name can spell keeps them apart until the
+   callee's are gone. *)
+let rec rename_heads (f : string -> string option) (e : A.expr) : A.expr =
+  let go = rename_heads f in
+  match e with
+  | A.EApp (A.EVar ({ A.txt; _ } as n), args, sp) ->
+    let n = match f txt with Some t -> { n with A.txt = t } | None -> n in
+    A.EApp (A.EVar n, List.map go args, sp)
+  | A.EApp (g, args, sp) -> A.EApp (go g, List.map go args, sp)
+  | A.ETuple (es, sp) -> A.ETuple (List.map go es, sp)
+  | A.ECon (c, es, sp) -> A.ECon (c, List.map go es, sp)
+  | A.EAtom (a, es, sp) -> A.EAtom (a, List.map go es, sp)
+  | A.EAnnot (x, t, sp) -> A.EAnnot (go x, t, sp)
+  | A.EField (r, n, sp) -> A.EField (go r, n, sp)
+  | e -> e
+
+let to_own (e : A.expr) : A.expr =
+  let own = !current_abstracts in
+  if own = [] then e else rename_heads (fun t -> if List.mem t own then Some (own_prefix ^ t) else None) e
+
+let of_own_entry (e : entry) : entry =
+  let k = String.length own_prefix in
+  let back =
+    rename_heads (fun t ->
+        if String.length t > k && String.sub t 0 k = own_prefix then Some (String.sub t k (String.length t - k))
+        else None)
+  in
+  let rec ent (e : entry) =
+    { e with
+      slots =
+        List.map
+          (function
+            | Some (Refined (b, q, m)) -> Some (Refined (b, back q, m))
+            | Some (Container inner) -> Some (Container (ent inner))
+            | None -> None)
+          e.slots
+    ; rels = List.map (fun (r : rel) -> { r with rel_pred = back r.rel_pred }) e.rels }
+  in
+  ent e
+
+(* The result keeps the caller's own abstract applications as placeholders
+   ([to_own]); the caller checks [entry_mentions] on it and then gives them
+   back with [of_own_entry]. *)
 let instantiate_nary_entry ~(insts : (string * (string list * A.expr)) list)
     ~(tyvar : int -> bool) ~(marker : int -> string option option) (e : entry) : (entry, int) result =
+  let insts = List.map (fun (p, (ys, q)) -> (p, (ys, to_own q))) insts in
   let inst (q : A.expr) =
     List.fold_left
       (fun q (p, yq) -> Refine_abstract.subst_abstract_n ~subst:subst_params p yq q)
@@ -3004,6 +3056,7 @@ let abstract_flow_n ?component ?(call : A.expr option) ~root defs (ctx : rctx) p
                          (Printf.sprintf "`%s`'s element return applies `%s` where it is not instantiated" g
                             (String.concat "`, `" nary))
                      | Ok produced ->
+                       let produced = of_own_entry produced in
                        (* Review C4: the declared entry is in the CALLEE's
                           namespace (`{y | p(x, y) && y > n}` names its [n]),
                           moved to this call's actuals exactly as a relational
@@ -3195,6 +3248,7 @@ let abstract_param_entry_n (ctx : rctx) defs (cb : cbenv) (lets : launder) (g : 
                      (Printf.sprintf "the parameter's element type applies `%s` where it is not instantiated"
                         (String.concat "`, `" nary))
                  | Ok e ->
+                   let e = of_own_entry e in
                    (* Review C4: the parameter's entry names the CALLEE's
                       parameters (`{y | p(x, y) && y > n}`): read at this
                       call's actuals, as [check_arg_elements]' ordinary arm
