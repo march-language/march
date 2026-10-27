@@ -386,6 +386,12 @@ git log is authoritative for exact commits.
   `Range.new` and `Range.new_step` return that refined type, so
   `Range.to_list(Range.new_step(3, 0, -1))` is proved.
 
+- **`Control.chunks` with a size of 0 or less no longer hangs.** `Control.chunks(hex, 0)`
+  never advanced its offset and a negative size walked it backwards, both forever.
+  `size` is now `{Int | _ > 0}` (as `List.chunks` already was), and a size the checker
+  cannot see panics with `Control.chunks: size must be positive`. This includes an
+  empty artifact with a size of 0, which used to come back as one empty chunk.
+
 - **Refinements: a value-creating function used as a value no longer counts as
   parametric (a false proof).** The check that a generic function cannot make a value
   of its type variable looked only at what it CALLS, so a function that creates one

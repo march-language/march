@@ -96,3 +96,37 @@ result): `(1, 0, 0)` -> `(2, 0, 0)` and `(0, 0, 1)` -> `(1, 0, 1)`. Range.filter
 definition side is `(8, 0, 0)` -> `(9, 0, 0)` (its `to_list(r)` call). Each has a
 comment. The refine-audit baselines gain 11 enforced sites (9 parameters, 2
 returns) per fixture; `stdlib_range`'s user code goes 7 -> 18; nothing is unenforced.
+
+## s3. `Control.chunks("abcdef", 0)` looped
+
+**Cause.** `chunks` returns one last chunk when `byte_size(hex) <= size`; otherwise
+`chunks_from(hex, size, off + size, n)` advances `off` by `size`. A size of 0 never
+moves `off`, and a negative size walks it backwards, so `off + size >= n` never holds.
+The probe `Control.chunks("abcdef", 0)` ran until killed (10 s) both interpreted and
+compiled. There was no precondition.
+
+**Fix.** `size : {Int | _ > 0}`, as `List.chunks` already has, and
+`if size <= 0 do panic("Control.chunks: size must be positive")` before anything
+else. Convention ruling: Control's *parsers* return `Result` for bad input documents,
+but `chunks` takes a size the program chooses (a protocol constant), returns a plain
+`List`, and has one caller (`test/session/control_peers.march`, which passes 4 and
+16 through an unrefined `size : Int` parameter, so its obligation is a silent skip
+and the runtime guard is what protects it). A `Result` would push error handling into
+that caller for a programming error, so a panic. Behaviour change: an empty artifact
+with size 0 used to give one empty last chunk (`0 <= 0`); it now panics too, since
+the precondition does not depend on the artifact.
+
+**Tests.** `test/stdlib/test_control.march` (`chunks` group): a size of 1, and sizes
+0 and -2 (through `chunk_size`, which hides them from the checker) give
+`"panic: Control.chunks: size must be positive"`. The comparison goes through a
+`String` helper (`chunks_err`) rather than `Result(List(CtlChunk), String) ==`,
+which does not typecheck (`CtlChunk` has no `Eq`; the file's older tests compare
+such values too, which the untyped stdlib_march evaluator allows and `march test`
+rejects). RED: on the pre-fix stdlib the stdlib_march `control` group failed
+(`FAIL: "chunks a size that is not positive panics instead of hanging"`) rather than
+hang. Refinecheck good/bad literal pair (RED with `control.march` reverted). Native
+golden `s3` lines (0 and -2).
+
+**Found, not fixed:** `List.chunks(xs, 0)` has the precondition but no runtime guard
+and hangs on a size the checker cannot see (killed at 10 s both modes). Filed as
+`specs/todos/2026-10-27-list-chunks-zero-size-hang.md`; it is not one of s1-s4.

@@ -40,5 +40,8 @@ mod Main do
     println("s1 bad:  " ++ show(__try_call_val(fn _ -> List.range_step(5, 0, zero))))
     println("s2 good: " ++ ints(Range.to_list({start: 2, stop: 7, step: 2})) ++ " " ++ ints(Range.to_list(Range.new_step(3, 0, -1))))
     println("s2 bad:  " ++ show(__try_call_val(fn _ -> Range.to_list({start: 5, stop: 0, step: zero}))))
+    println("s3 good: " ++ string_join(List.map(Control.chunks("abcdef", 4), fn c -> c.data), ","))
+    println("s3 bad:  " ++ show_n(__try_call_val(fn _ -> List.length(Control.chunks("abcdef", zero)))))
+    println("s3 neg:  " ++ show_n(__try_call_val(fn _ -> List.length(Control.chunks("abcdef", hidden_int("-2"))))))
   end
 end

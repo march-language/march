@@ -28327,6 +28327,10 @@ let stdlib_step_guard_suite =
           (* Two: new_step's own `step : {Int | _ != 0}` on -1, and
              to_list's `v.step != 0` on new_step's result. *)
           Alcotest.(check (triple int int int)) "2 proved, 0 violated, 0 skipped" (2, 0, 0) ledger) ]
+  @ step_guard_cases ~what:"Control.chunks"
+      ~good:"mod SG3 do\n  fn go() : Int do List.length(Control.chunks(\"abcdef\", 4)) end\nend\n"
+      ~bad:"mod SG3 do\n  fn go() : Int do List.length(Control.chunks(\"abcdef\", 0)) end\nend\n"
+      ~message:"argument `size` of `Control.chunks` does not satisfy precondition `_ > 0`"
 
 let opaque_by_decl_suite =
   let run, slugs, _detail =
