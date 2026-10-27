@@ -345,6 +345,14 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Refinements: the `@[measure]` termination check now covers mutual recursion.** Two
+  measures that call each other in a cycle, `ma(Z) -> mb(Z) -> ma(Z) + 1`, were accepted,
+  because only a measure's calls to itself were checked. They are now `invalid_measure`
+  unless every call in the cycle passes a component of a parameter of one type, or of
+  types defined in terms of each other.
+  `--termination-report` gains a certificate column (`cert=structural` or
+  `cert=unproved:<reason>`), and it lists a function that calls a value of a non-positive
+  type such as `type Fix = Fix(Fix -> Int)`.
 - A parameter list or pattern that binds the same name twice is now a compile
   error (`duplicate_binder`): `fn (a, a) -> …`, `fn two(a, a)`, a multi-head clause
   such as `fn pick(0, a, a)`, and patterns like `(a, a)` or `Pair(x, x)`. Such

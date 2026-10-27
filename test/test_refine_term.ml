@@ -225,3 +225,364 @@ let report_suite =
         Alcotest.(check bool) "len2 row" true (has "term\tA\tstructural\t");
         Alcotest.(check bool) "summary" true (has "by class: ?=1 A=1"));
   ]
+
+(* ── Phase 1 (group `termination-structural`) ─────────────────────────────
+
+   The structural certificate of §3.3 and strict positivity (§3.6).  Each
+   certificate rule has a REJECT control: a program the rule alone keeps
+   from being certified.  Fixtures are typechecked first, exactly as the
+   driver does, so a merged multi-head function's [__argN] has its type in
+   the [type_map] and a function value's static type is known. *)
+
+let analyze_typed src =
+  let d = desugar src in
+  let _errs, type_map = March_typecheck.Typecheck.check_module d in
+  RT.analyze ~type_map ~file_mod:d.March_ast.Ast.mod_name.March_ast.Ast.txt
+    d.March_ast.Ast.mod_decls
+
+let cert_of src name =
+  match row_of (analyze_typed (m src)) name with
+  | Some r -> r.RT.r_cert
+  | None -> "<no row>"
+
+let check_cert name src want =
+  Alcotest.(check string) (name ^ " certificate") want (cert_of src name)
+
+let nil_not_smaller = {|
+  fn f(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + f(Nil)
+    end
+  end
+|}
+
+(* A genuine divergence that trust-by-name would certify: position 0 receives
+   `t`, which here is ys's tail (bound by the inner match), and the sizes
+   cycle (|xs|, |ys|) -> (|ys| - 1, |xs| + 1) -> (|xs|, |ys|).  `copy([1],
+   [1, 2])` never returns.  `t` is ALSO xs's component (outer match), so a
+   by-name set without [structural_subvars]' fixpoint trusts it. *)
+let copy_shadow = {|
+  fn copy(xs : List(Int), ys : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(h, t) ->
+        match ys do
+          Nil -> h
+          Cons(_, t) -> 1 + copy(t, Cons(0, xs))
+        end
+    end
+  end
+|}
+
+let mutual_nat = {|
+  type Nat = Z | S(Nat)
+  fn even(n : Nat) : Bool do
+    match n do
+      Z -> true
+      S(m) -> odd(m)
+    end
+  end
+  fn odd(n : Nat) : Bool do
+    match n do
+      Z -> false
+      S(m) -> even(m)
+    end
+  end
+|}
+
+(* The multi-head spelling: desugar merges the heads into one clause whose
+   parameter is an unannotated [__arg0]; its ADT comes from the type_map. *)
+let mutual_nat_heads = {|
+  type Nat = Z | S(Nat)
+  fn even(Z) do true end
+  fn even(S(m)) do odd(m) end
+  fn odd(Z) do false end
+  fn odd(S(m)) do even(m) end
+|}
+
+(* Members matching on types of DIFFERENT families: a tree through a
+   `List(Tree)` of children (the stdlib's `Map.node_fold` shape).  `Tree`
+   mentions `List`, but `List`'s definition never mentions `Tree`, so they are
+   not one mutually-defined family.  This terminates, but the phase-1 rule asks
+   for one type family across the SCC (§3.3), so it stays unproved: the
+   conservative direction. *)
+let mutual_two_adts = {|
+  type Tree = Node(Int, List(Tree))
+  fn tsize(t : Tree) : Int do
+    match t do
+      Node(_, cs) -> 1 + csize(cs)
+    end
+  end
+  fn csize(cs : List(Tree)) : Int do
+    match cs do
+      Nil -> 0
+      Cons(t, rest) -> tsize(t) + csize(rest)
+    end
+  end
+|}
+
+(* One mutually-defined family (each type mentions the other): certified.
+   The measure group `mutual-mc` relies on exactly this shape. *)
+let mutual_family = {|
+  type RTree = RNode(Int, RForest)
+  type RForest = FEmpty | FCons(RTree, RForest)
+  fn tsize(t : RTree) : Int do
+    match t do
+      RNode(_, f) -> 1 + fsize(f)
+    end
+  end
+  fn fsize(f : RForest) : Int do
+    match f do
+      FEmpty -> 0
+      FCons(t, rest) -> tsize(t) + fsize(rest)
+    end
+  end
+|}
+
+(* A mutual SCC whose edge passes a NULLARY constructor, never a component. *)
+let mutual_nullary = {|
+  type Nat = Z | S(Nat)
+  fn pa(n : Nat) : Int do
+    match n do
+      Z -> pb(Z)
+      S(m) -> pa(m)
+    end
+  end
+  fn pb(n : Nat) : Int do
+    match n do
+      Z -> pa(Z)
+      S(m) -> pb(m)
+    end
+  end
+|}
+
+(* Lambda edge, diverging: walk([1]) -> apply1([1], λ) -> walk([1]) -> …  Without
+   lambda edges `walk` has no recursion at all, so it would be "terminating". *)
+let lambda_diverges = {|
+  fn apply1(x : List(Int), f : List(Int) -> Int) : Int do f(x) end
+  fn walk(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) ->
+        let k = fn y -> walk(y)
+        apply1(xs, k)
+    end
+  end
+|}
+
+(* The control: the same lambda edge on a component is checked like any other. *)
+let lambda_structural = {|
+  fn apply1(x : List(Int), f : List(Int) -> Int) : Int do f(x) end
+  fn walk(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) ->
+        let k = fn y -> walk(t)
+        apply1(t, k)
+    end
+  end
+|}
+
+(* t11c: no syntactic recursion anywhere, yet `omega()` never returns. *)
+let omega = {|
+  type Fix = Fix(Fix -> Int)
+  fn w(f : Fix) : Int do
+    match f do
+      Fix(g) -> g(f)
+    end
+  end
+  fn omega() : Int do w(Fix(w)) end
+|}
+
+let positive = {|
+  type T = T(Int -> Int)
+  fn u(t : T) : Int do
+    match t do
+      T(g) -> g(1)
+    end
+  end
+|}
+
+(* Non-positivity through a mutual pair of types and through a generic type's
+   negative parameter: the same omega, one indirection away. *)
+let nonpos_mutual = {|
+  type A = MkA(B -> Int)
+  type B = MkB(A)
+  fn w2(b : B) : Int do
+    match b do
+      MkB(a) ->
+        match a do
+          MkA(g) -> g(b)
+        end
+    end
+  end
+|}
+
+let nonpos_generic = {|
+  type Box(a) = Box(a -> Int)
+  type F = F(Box(F))
+  fn w3(f : F) : Int do
+    match f do
+      F(bx) ->
+        match bx do
+          Box(g) -> g(f)
+        end
+    end
+  end
+|}
+
+(* A structural SCC that also calls a function value of a non-positive type
+   is not certified: positivity is part of the certificate. *)
+let structural_nonpos = {|
+  type Fix = Fix(Fix -> Int)
+  fn r(xs : List(Fix)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(h, t) ->
+        match h do
+          Fix(g) -> g(h) + r(t)
+        end
+    end
+  end
+|}
+
+let nonpos_names src =
+  let d = desugar (m src) in
+  RT.nonpositive_types d.March_ast.Ast.mod_decls |> List.sort compare
+
+(* c4 (§0.3): a mutual measure cycle `ma(Z) -> mb(Z) -> ma(Z) + 1`.  The
+   `@[measure]` gate looked at self-calls only (F5). *)
+let c4 = {|
+  type Nat = Z | S(Nat)
+  @[measure]
+  fn ma(n : Nat) : Int do
+    match n do
+      Z -> mb(Z)
+      S(k) -> 1 + ma(k)
+    end
+  end
+  @[measure]
+  @[no_warn_recursion]
+  fn mb(n : Nat) : Int do
+    match n do
+      Z -> ma(Z) + 1
+      S(k) -> mb(k)
+    end
+  end
+|}
+
+let c4_control = {|
+  type Nat = Z | S(Nat)
+  @[measure]
+  fn ma(n : Nat) : Int do
+    match n do
+      Z -> 0
+      S(k) -> 1 + mb(k)
+    end
+  end
+  @[measure]
+  fn mb(n : Nat) : Int do
+    match n do
+      Z -> 0
+      S(k) -> 1 + ma(k)
+    end
+  end
+|}
+
+(* c5 = the gate's m1/m3 row: a measure recursing on its own parameter. *)
+let c5 = {|
+  type Nat = Z | S(Nat)
+  @[measure]
+  fn bad(n : Nat) : Int do
+    match n do
+      Z -> 0
+      S(k) -> 1 + bad(n)
+    end
+  end
+|}
+
+let measure_errors src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (desugar (m src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error
+         && d.March_errors.Errors.code = March_errors.Errors.Code.invalid_measure
+      then Some d.March_errors.Errors.message
+      else None)
+    ctx.March_errors.Errors.diagnostics
+  |> List.sort compare
+
+let structural_suite =
+  [ case "t7 len2: certified structural" (fun () -> check_cert "len2" t7 "structural");
+    case "nil_not_smaller: f(Nil) is not a component" (fun () ->
+        check_cert "f" nil_not_smaller "unproved:no-structural-arg";
+        (* The stack pass accepts it (F2: a nullary constructor is
+           "structurally minimal"); termination must not. *)
+        Alcotest.(check bool) "stack pass: a warning, not an error" true
+          (List.exists (fun w -> contains w "`f`") (tail_warnings nil_not_smaller)));
+    case "copy_shadow: a component name rebound by an inner match is not trusted" (fun () ->
+        check_cert "copy" copy_shadow "unproved:no-structural-arg");
+    case "mutual_nat: even/odd on Nat certified as one SCC" (fun () ->
+        check_cert "even" mutual_nat "structural";
+        check_cert "odd" mutual_nat "structural");
+    case "mutual_nat: the multi-head spelling (unannotated __arg0)" (fun () ->
+        check_cert "even" mutual_nat_heads "structural";
+        check_cert "odd" mutual_nat_heads "structural");
+    case "mutual_two_adts: members matching types of different families are not certified" (fun () ->
+        check_cert "tsize" mutual_two_adts "unproved:not-same-family";
+        check_cert "csize" mutual_two_adts "unproved:not-same-family");
+    case "mutual_family: one mutually-defined family (RTree/RForest) is certified" (fun () ->
+        check_cert "tsize" mutual_family "structural";
+        check_cert "fsize" mutual_family "structural");
+    case "mutual_nullary: an edge passing a nullary constructor is not certified" (fun () ->
+        check_cert "pa" mutual_nullary "unproved:no-structural-arg");
+    case "t11: a reference edge is not certified" (fun () ->
+        check_cert "h" t11 "unproved:reference");
+    case "t11b: a lambda edge with an unrelated argument is not certified" (fun () ->
+        check_cert "viafold" t11b "unproved:no-structural-arg");
+    case "lambda edge: a diverging recursion through a callback is not certified" (fun () ->
+        check_cert "walk" lambda_diverges "unproved:no-structural-arg");
+    case "lambda edge: on a component it is certified (control)" (fun () ->
+        check_cert "walk" lambda_structural "structural");
+    case "t9b: grow is not certified, though the stack pass calls it structural" (fun () ->
+        check_cert "grow" t9b "unproved:no-structural-arg");
+    case "t1 spin / t4 down: no structural certificate for Int recursion" (fun () ->
+        check_cert "spin" t1 "unproved:no-structural-arg";
+        check_cert "down" t4 "unproved:no-structural-arg");
+    case "t11c omega: `w` calls a value of the non-positive `Fix`" (fun () ->
+        Alcotest.(check (list string)) "non-positive types" [ "Fix" ] (nonpos_names omega);
+        check_cert "w" omega "unproved:non-positive");
+    case "positivity control: `T(Int -> Int)` is positive and blocks nothing" (fun () ->
+        Alcotest.(check (list string)) "non-positive types" [] (nonpos_names positive);
+        Alcotest.(check bool) "u has no row" true (row_of (analyze_typed (m positive)) "u" = None));
+    case "non-positive through a mutual pair of types" (fun () ->
+        Alcotest.(check (list string)) "non-positive types" [ "A"; "B" ] (nonpos_names nonpos_mutual);
+        check_cert "w2" nonpos_mutual "unproved:non-positive");
+    case "non-positive through a generic type's negative parameter" (fun () ->
+        Alcotest.(check (list string)) "non-positive types" [ "F" ] (nonpos_names nonpos_generic);
+        check_cert "w3" nonpos_generic "unproved:non-positive");
+    case "a structural SCC calling a non-positive function value is not certified" (fun () ->
+        check_cert "r" structural_nonpos "unproved:non-positive");
+    case "c4: a mutual measure cycle is invalid_measure" (fun () ->
+        let errs = measure_errors c4 in
+        Alcotest.(check int) "two invalid_measure errors" 2 (List.length errs);
+        Alcotest.(check bool) "ma named, structural wording" true
+          (List.exists (fun e -> contains e "`ma`" && contains e "is not structurally recursive") errs);
+        Alcotest.(check bool) "mb named, structural wording" true
+          (List.exists (fun e -> contains e "`mb`" && contains e "is not structurally recursive") errs));
+    case "c4 control: a structural mutual measure pair passes the gate" (fun () ->
+        Alcotest.(check (list string)) "no invalid_measure" [] (measure_errors c4_control));
+    case "c5: a measure recursing on its own parameter is unchanged" (fun () ->
+        Alcotest.(check (list string)) "one error, today's wording"
+          [ "@[measure] `bad` is not structurally recursive (every recursive call must be on a \
+             component of the matched parameter)" ]
+          (measure_errors c5));
+    case "report: the certificate column and its summary" (fun () ->
+        let lines = RT.report_lines (analyze_typed (m (t1 ^ t7))) in
+        let has s = List.exists (fun l -> contains l s) lines in
+        Alcotest.(check bool) "spin unproved" true (has "\tspin\ttop\tscc=1\tcert=unproved:no-structural-arg");
+        Alcotest.(check bool) "len2 certified" true (has "\tlen2\ttop\tscc=1\tcert=structural");
+        Alcotest.(check bool) "summary" true (has "certificate: 1 structural, 1 unproved"));
+  ]

@@ -1649,7 +1649,9 @@ mathematical function: the solver trusts it, so a broken one would let it
 - is **non-total**: a non-exhaustive `match` on its parameter, or a `/` / `%`
   that could divide by zero,
 - is **not recursive over the structure**: a recursive call with an argument that isn't a
-  component of the matched parameter,
+  component of the matched parameter. This covers the measure's whole call cycle, not only its
+  calls to itself: two measures calling each other must form a cycle with a
+  [structural certificate](#the-structural-certificate), or both are rejected,
 - does **not take exactly one parameter**, the value it measures: a predicate can
   only apply a measure to one argument, so a zero-argument or multi-parameter
   `@[measure]` could never be translated and the annotation would only silence
@@ -4065,11 +4067,13 @@ assumption, the induction hypothesis
 
 ```
 $ march --check --termination-report prog.march
-termination report: 3 recursive units
-term	C	int-dec	prog.march:2:5	down	top	scc=1
-term	A	structural	prog.march:5:5	len2	top	scc=1
-term	?	none	prog.march:11:5	spin	top	scc=1
-  by class: ?=1 A=1 C=1
+termination report: 3 recursive units, 1 calling a non-positive function value
+term	C	int-dec	prog.march:2:5	down	top	scc=1	cert=unproved:no-structural-arg
+term	A	structural	prog.march:5:5	len2	top	scc=1	cert=structural
+term	?	none	prog.march:11:5	spin	top	scc=1	cert=unproved:no-structural-arg
+term	F	value	prog.march:14:5	w	top	scc=1	cert=unproved:non-positive
+  by class: ?=1 A=1 C=1 F=1
+  certificate: 1 structural, 3 unproved
 ```
 
 There is one line per recursive *unit* of your code. A unit is a top-level function, a
@@ -4101,6 +4105,45 @@ The classification is syntactic and changes no verdict. In particular, an `Int`
 argument like `n - 0`, `n / 1` or `n - (0 - 1)` is **not** a metric. The tail-call
 check still calls such a call "structurally recursive", because that check is about
 stack depth, not termination.
+
+### The structural certificate
+
+The last column is a **certificate**: whether the checker can prove that the unit's
+cycle terminates. For now the only proof is structural, and an unproved unit is
+reported, never warned about. `cert=structural` holds for a cycle when:
+
+- each member matches on a parameter, and every call in the cycle passes a *pattern
+  component* of the caller's matched parameter, as a bare variable, at the callee's
+  position. Arithmetic (`n - 1`), a nullary constructor (`f(Nil)`) and the parameter
+  itself never count;
+- a component name is trusted only if every binding of that name in the body is
+  structural. `Cons(_, t)` of a *second* list reusing the outer `t` spoils it;
+- in a cycle of several functions, every member matches on a parameter of one type
+  **family**: the same type (`even`/`odd` on `Nat`), or types defined in terms of each
+  other (a `Tree` holding a `Forest` that holds `Tree`s). A tree recursing through a
+  `List(Tree)` of children is not certified yet, because `List` is not defined in terms of
+  `Tree`;
+- no member names a member of its own cycle as a value (`apply(f, x)` inside `f`):
+  the arguments of such a call are unknown;
+- no member calls a function value whose type mentions a **non-positive** type.
+
+A type is non-positive when it occurs to the left of an arrow inside its own
+definition, directly (`type Fix = Fix(Fix -> Int)`), through a type it is mutually
+defined with, or through a generic type that uses its parameter on the left of an
+arrow. Such a type lets a program loop with no recursion in sight:
+
+```march
+type Fix = Fix(Fix -> Int)
+fn w(f : Fix) : Int do match f do Fix(g) -> g(f) end end
+fn omega() : Int do w(Fix(w)) end    -- never returns
+```
+
+`w` is listed with `cert=unproved:non-positive` although it is not recursive.
+`type T = T(Int -> Int)` is positive and blocks nothing.
+
+The reasons are `no-structural-arg`, `not-same-family`, `reference` and `non-positive`.
+`Int` recursion (`down(n - 1)`) is always `unproved` today; a metric for it is the
+next step of the design.
 
 ---
 

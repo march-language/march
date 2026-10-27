@@ -7889,13 +7889,34 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     (* M-b soundness gate: a `@[measure]` must be a total, terminating, pure
        function, else its axioms would be unsound.  Emit a hard error per
        violation (filtered to user files by the caller, like every diagnostic). *)
+    (* Termination is a property of the measure's whole call-graph SCC, not of
+       its self-calls alone (termination design §6, phase 1): `ma(Z) -> mb(Z)
+       -> ma(Z) + 1` is a cycle no self-call shows (c4).  So a measure whose
+       SCC [Refine_term] does not certify structural also fails the gate, with
+       the self-call rule's own wording; the self-call rule is kept, so the
+       union is never weaker than before.  The graph is built only when there
+       is a measure to gate. *)
+    let term =
+      lazy (Refine_term.analyze ?type_map ~file_mod:m.A.mod_name.A.txt m.A.mod_decls)
+    in
+    let not_structural =
+      "is not structurally recursive (every recursive call must be on a component of \
+       the matched parameter)"
+    in
     List.iter
       (fun (_name, fd) ->
+        let msgs = measure_gate_errors fd in
+        let msgs =
+          if (not (List.mem not_structural msgs))
+             && Refine_term.uncertified (Lazy.force term) fd.A.fn_name.A.span
+          then msgs @ [ not_structural ]
+          else msgs
+        in
         List.iter
           (fun msg ->
             Err.error ~code:Err.Code.invalid_measure errctx ~span:fd.A.fn_name.A.span
               (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
-          (measure_gate_errors fd))
+          msgs)
       mfns;
     (* Scalar-field measure notice.  A measure reading a scalar constructor
        field (`Array.length` reading `PVec`'s count) is axiomatised correctly;
