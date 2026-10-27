@@ -692,3 +692,15 @@ Open for the user, each with a recommendation, in the order they block:
 
   Each is a behaviour change (a hang becomes a panic or a refinement error). That is why this is yours, and why it is not part of the termination PRs.
 - **D6. Unknown attributes are accepted silently (t14).** `@[decrease(n)]` would be ignored, and the checker would look as if it had found no metric. **Recommended:** in phase 2, warn on any `fn` attribute name not in the compiler's list (a new `unknown_attribute` warning with a did-you-mean). The alternative is to warn only on near-misses of `decreases`/`diverges`.
+
+---
+
+## Decisions settled by the user (2026-10-27)
+
+D1-D6 accepted as recommended:
+- **D1.** The induction hypothesis is gated on a termination certificate. It is never used as an unchecked partial-correctness assumption.
+- **D2.** Warnings are off by default. Warn only on `@[decreases]` or where the hypothesis would have closed a proof. `cap verified` escalates the termination obligations a proof relied on. `cap total` is opt-in.
+- **D3.** The metric is an attribute with an expression: `@[decreases(e, ...)]`.
+- **D4.** `@[diverges]`, inferred upward through callers, with no burden on them.
+- **D5.** The four stdlib hangs (s1-s4) get preconditions plus runtime guards, one PR each.
+- **D6.** Unknown attribute names warn.
