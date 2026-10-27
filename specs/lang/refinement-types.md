@@ -4055,6 +4055,55 @@ undischarged postcondition; see below.
 
 ---
 
+## Termination: `--termination-report`
+
+The refinement checker never assumes a recursive function's return refinement
+before that return is proved, because a function that never returns would make
+any return refinement "provable". Termination checking is what will allow that
+assumption, the induction hypothesis
+(`specs/2026-10-26-termination-checking-design.md`). The first step is a report:
+
+```
+$ march --check --termination-report prog.march
+termination report: 3 recursive units
+term	C	int-dec	prog.march:2:5	down	top	scc=1
+term	A	structural	prog.march:5:5	len2	top	scc=1
+term	?	none	prog.march:11:5	spin	top	scc=1
+  by class: ?=1 A=1 C=1
+```
+
+There is one line per recursive *unit* of your code. A unit is a top-level function, a
+local `fn` (named `outer/inner`), or an actor handler, and it is recursive when it sits in a
+cycle of the call graph. The graph has three kinds of edge:
+
+- a direct call;
+- a call inside a lambda or a `let*` continuation;
+- a function named as a value (`apply(f, x)` inside `f`).
+
+So recursion that runs only through a callback still counts.
+
+The second and third columns classify how the unit recurses:
+
+| Class | Shape | Meaning |
+| --- | --- | --- |
+| A | `structural` | some argument is a pattern component of the matched parameter at every recursive call |
+| B | `int-dec` / `int-asc` | an `Int` parameter moves by a positive literal (`n - 1`, `n / 2`, `i + 1`) at every call, and the parameter appears in an ordering comparison or a refinement |
+| C | `int-dec` / `int-asc` | the same metric, but nothing bounds it: `if n == 0 do … else down(n - 1)` loops on `down(-1)` |
+| D | `lex` | no single position falls, but some position falls at every call with the earlier ones unchanged (Ackermann) |
+| F | `lambda` / `ref` | recursion through a lambda or a function value |
+| `E?` | `none` | no syntactic metric, and the name looks like an event loop (`loop`, `serve`, `recv`, …) |
+| `?` | `none` | no syntactic metric |
+
+`mutual` after the shape means the unit shares its cycle with other functions; `scc=`
+gives the cycle's size.
+
+The classification is syntactic and changes no verdict. In particular, an `Int`
+argument like `n - 0`, `n / 1` or `n - (0 - 1)` is **not** a metric. The tail-call
+check still calls such a call "structurally recursive", because that check is about
+stack depth, not termination.
+
+---
+
 ## Getting a contract proposed for you: `forge refine`
 
 `--refine-report` tells you an obligation went unproven; it does not tell you

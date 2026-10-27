@@ -21,6 +21,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`march --check --termination-report FILE`** prints one line per recursive function
+  in your code, with how it recurses: structurally on a component, on an `Int` metric
+  that a guard bounds (`fib`) or does not (`down(n - 1)` with an `n == 0` exit),
+  lexicographically, through a lambda or a function value, or with no metric at all
+  (`spin(n)`). It is a report only and changes no verdict. It is the first step of
+  termination checking (`specs/2026-10-26-termination-checking-design.md`).
 - **Refinements: a definer passed through to `Map.filter` proves its return.**
   `fn mfilt(m, keep : k -> v -> Bool[p], cmp) : Map(k[p], v[p]) do Map.filter(m, keep,
   cmp) end` is proved, and so are its callers' demands. The callee's `p` and the

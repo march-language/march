@@ -687,6 +687,21 @@ let print_refine_report ~filename ~user_files () =
   print_block "user code" user_obligations;
   print_block "user + stdlib" all_obligations
 
+(* --termination-report: Refine_term's per-unit rows for user code, over the
+   same desugared, stdlib-prepended module the refinement checker sees, so a
+   call into a nested module resolves under its qualified spelling.  Units
+   are filtered with the [is_user_span] test of [print_refine_report]. *)
+let print_termination_report ~filename ~user_files ~type_map (m : March_ast.Ast.module_) =
+  let is_user_span (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || f = "" || f = "<unknown>" || List.mem f user_files
+  in
+  let t =
+    March_refinecheck.Refine_term.analyze ~type_map
+      ~file_mod:m.March_ast.Ast.mod_name.March_ast.Ast.txt m.March_ast.Ast.mod_decls
+  in
+  List.iter prerr_endline (March_refinecheck.Refine_term.report_lines ~is_user:is_user_span t)
+
 (* --refine-report-sites: the ledger's skips, one line each, most useful when
    deciding which incompleteness to work on next.  Same user-code/whole-ledger
    split and the same [is_user_span] test as [print_refine_report]; the
@@ -2215,6 +2230,8 @@ let run_test_cmd args =
       errors desugared;
     if !refine_report then print_refine_report ~filename ~user_files ();
     if !refine_report_sites then print_refine_report_sites ~filename ~user_files ();
+    if !termination_report then
+      print_termination_report ~filename ~user_files ~type_map desugared;
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
@@ -2917,6 +2934,7 @@ let compile filename =
        beats a cache hit on the run that asked for the diagnostic. *)
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
+      || !termination_report
       || !report_contracts
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
@@ -3473,6 +3491,8 @@ let compile filename =
     errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
   if !refine_report_sites then print_refine_report_sites ~filename ~user_files ();
+  if !termination_report then
+    print_termination_report ~filename ~user_files ~type_map desugared;
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
@@ -6748,6 +6768,8 @@ let () =
      "<globs>  Comma-separated module/function globs (e.g. 'Dsp.*,Audio.mix') that --report-contracts considers in scope even without in-place reuse");
     ("--refine-report", Arg.Set refine_report,
      " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
+    ("--termination-report", Arg.Set termination_report,
+     " Print one line per recursive function of user code with its termination class (structural, Int metric, lexicographic, through a function value, none); changes no verdict");
     ("--refine-report-sites", Arg.Set refine_report_sites,
      " Print one line per skipped refinement obligation: file:line:col, reason, callee, predicate");
     ("--refine-audit", Arg.Set refine_audit,
