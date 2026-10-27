@@ -662,13 +662,8 @@ let print_refine_report ~filename ~user_files () =
   in
   (* A postcondition (a function's own return type) and a precondition (a
      callee's declared param type, checked at the call site) are the same
-     kind of obligation to the headline totals — a proved postcondition IS a
-     proved obligation — but naming the split is cheap and answers "did my
-     return types get checked at all", which the headline alone cannot. *)
-  let count_kind kind obligations =
-    List.length
-      (List.filter (fun (o : March_refinecheck.Obligation.t) -> o.kind = kind) obligations)
-  in
+     kind of obligation to the headline totals; the `by kind:` line
+     ([Obligation.by_kind_line]) names the split. *)
   let print_block label obligations =
     let proved, violated, trusted, skips = summarize obligations in
     let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
@@ -677,10 +672,7 @@ let print_refine_report ~filename ~user_files () =
     List.iter
       (fun (name, n) -> Printf.eprintf "  skipped (%s): %d\n" name n)
       (List.sort compare skips);
-    Printf.eprintf "  by kind: %d precondition, %d postcondition, %d division\n"
-      (count_kind March_refinecheck.Obligation.Precondition obligations)
-      (count_kind March_refinecheck.Obligation.Postcondition obligations)
-      (count_kind March_refinecheck.Obligation.Division obligations)
+    prerr_endline (March_refinecheck.Obligation.by_kind_line obligations)
   in
   let all_obligations = March_refinecheck.Obligation.all () in
   let user_obligations = List.filter (fun (o : March_refinecheck.Obligation.t) -> is_user_span o.span) all_obligations in
@@ -723,6 +715,7 @@ let print_refine_report_sites ~filename ~user_files () =
           | March_refinecheck.Obligation.Precondition -> "precondition"
           | March_refinecheck.Obligation.Postcondition -> "postcondition"
           | March_refinecheck.Obligation.Division -> "division"
+          | March_refinecheck.Obligation.Termination -> "termination"
         in
         Printf.eprintf "skip\t%s\t%s:%d:%d\t%s\t%s\t%s\t%s\n"
           (if is_user_span span then "user" else "stdlib")
