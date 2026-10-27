@@ -392,6 +392,14 @@ git log is authoritative for exact commits.
   cannot see panics with `Control.chunks: size must be positive`. This includes an
   empty artifact with a size of 0, which used to come back as one empty chunk.
 
+- **`Duration.format` of the smallest Int no longer recurses forever.** A negative
+  duration was formatted as `"-" ++ format(Duration(-ms))`, and `-ms` of the smallest
+  Int is itself, so it looped interpreted and overflowed the stack (SIGBUS) compiled.
+  It now splits the value into seconds and milliseconds before negating, so every
+  Int formats exactly: `Duration.milliseconds(-4611686018427387904)` is
+  `"-7625142226 weeks, 1 day, 15 hours, 36 minutes, 27 seconds, 904 milliseconds"`.
+  Output for every other value is unchanged.
+
 - **Refinements: a value-creating function used as a value no longer counts as
   parametric (a false proof).** The check that a generic function cannot make a value
   of its type variable looked only at what it CALLS, so a function that creates one

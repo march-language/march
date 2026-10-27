@@ -12,7 +12,8 @@
 --   :ms  :s  :m  :h  :d  :w
 --
 -- Negative durations are supported (e.g. for countdown timers).
--- Duration.format/1 handles negatives by prepending "-".
+-- Duration.format/1 handles negatives by prepending "-" (the smallest Int
+-- included: its magnitude is formatted without negating it).
 --
 -- doc: try
 
@@ -216,59 +217,66 @@ mod Duration do
 
   Units shown (from largest to smallest): weeks, days, hours, minutes,
   seconds, milliseconds.  Zero-valued units are omitted.  Singular forms
-  are used when the count is 1.
+  are used when the count is 1.  A negative duration is `-` followed by
+  its magnitude; this holds for every Int, the smallest included.
   """
   fn format(d) do
     match d do
     Duration(ms) ->
-      if ms < 0 do "-" ++ format(Duration(-ms))
-      else if ms == 0 do "0 milliseconds"
-      else
-        let total_s  = ms / 1000
-        let rem_ms   = ms % 1000
-        let total_m  = total_s / 60
-        let rem_s    = total_s % 60
-        let total_h  = total_m / 60
-        let rem_m    = total_m % 60
-        let total_d  = total_h / 24
-        let rem_h    = total_h % 24
-        let weeks_   = total_d / 7
-        let days_    = total_d % 7
-
-        fn plural(n, singular, pl) do
-          if n == 1 do int_to_string(n) ++ " " ++ singular
-          else int_to_string(n) ++ " " ++ pl end
-        end
-
-        -- Build list of non-zero parts
-        fn add_part(n, s, p, acc) do
-          if n == 0 do acc
-          else Cons(plural(n, s, p), acc) end
-        end
-
-        let parts =
-          add_part(rem_ms,  "millisecond",  "milliseconds",
-          add_part(rem_s,   "second",       "seconds",
-          add_part(rem_m,   "minute",       "minutes",
-          add_part(rem_h,   "hour",         "hours",
-          add_part(days_,   "day",          "days",
-          add_part(weeks_,  "week",         "weeks",
-          Nil))))))
-
-        fn rev_and_join(lst) do
-          fn rev(xs, acc) do
-            match xs do
-            Nil -> acc
-            Cons(h, t) -> rev(t, Cons(h, acc))
-            end
-          end
-          string_join(rev(lst, Nil), ", ")
-        end
-
-        rev_and_join(parts)
-      end
-      end
+      if ms == 0 do "0 milliseconds"
+      -- A negative duration is split into whole seconds and milliseconds
+      -- BEFORE negating: `-ms` overflows when ms is the smallest Int (it
+      -- negates to itself, so `format(Duration(-ms))` recursed forever), but
+      -- both parts of the split are safe to negate (`/` and `%` truncate
+      -- toward zero, so both are <= 0 here).
+      else if ms < 0 do "-" ++ format_parts(0 - ms / 1000, 0 - ms % 1000)
+      else format_parts(ms / 1000, ms % 1000) end end
     end
+  end
+
+  -- Formats a non-negative, non-zero magnitude given as whole seconds plus
+  -- the remaining milliseconds (0..999).
+  pfn format_parts(total_s, rem_ms) do
+    let total_m  = total_s / 60
+    let rem_s    = total_s % 60
+    let total_h  = total_m / 60
+    let rem_m    = total_m % 60
+    let total_d  = total_h / 24
+    let rem_h    = total_h % 24
+    let weeks_   = total_d / 7
+    let days_    = total_d % 7
+
+    fn plural(n, singular, pl) do
+      if n == 1 do int_to_string(n) ++ " " ++ singular
+      else int_to_string(n) ++ " " ++ pl end
+    end
+
+    -- Build list of non-zero parts
+    fn add_part(n, s, p, acc) do
+      if n == 0 do acc
+      else Cons(plural(n, s, p), acc) end
+    end
+
+    let parts =
+      add_part(rem_ms,  "millisecond",  "milliseconds",
+      add_part(rem_s,   "second",       "seconds",
+      add_part(rem_m,   "minute",       "minutes",
+      add_part(rem_h,   "hour",         "hours",
+      add_part(days_,   "day",          "days",
+      add_part(weeks_,  "week",         "weeks",
+      Nil))))))
+
+    fn rev_and_join(lst) do
+      fn rev(xs, acc) do
+        match xs do
+        Nil -> acc
+        Cons(h, t) -> rev(t, Cons(h, acc))
+        end
+      end
+      string_join(rev(lst, Nil), ", ")
+    end
+
+    rev_and_join(parts)
   end
 
 end

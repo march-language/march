@@ -130,3 +130,56 @@ golden `s3` lines (0 and -2).
 **Found, not fixed:** `List.chunks(xs, 0)` has the precondition but no runtime guard
 and hangs on a size the checker cannot see (killed at 10 s both modes). Filed as
 `specs/todos/2026-10-27-list-chunks-zero-size-hang.md`; it is not one of s1-s4.
+
+## s4. `Duration.format(Duration(min_int))` looped / overflowed the stack
+
+**Cause.** `format` handled a negative duration as `"-" ++ format(Duration(-ms))`. For
+the smallest Int (-4611686018427387904, 63-bit on both backends) `-ms` wraps to the
+same value, so `format` called itself with an identical argument forever. The probe
+ran until killed (10 s) interpreted; compiled it overflowed the stack (the `++` keeps
+the call out of tail position): `march: fatal SIGBUS ... fault in its stack guard
+page (overflow)`.
+Not an `abs`-style helper; the negation is inline.
+
+**Fix (arithmetic, no guard).** Split before negating:
+`"-" ++ format_parts(0 - ms / 1000, 0 - ms % 1000)`. `/` and `%` truncate toward zero
+on both backends (probed: `-7 / 2 == -3`, `-7 % 2 == -1`, interpreted and compiled),
+so for `ms < 0` both parts are in range and `<= 0`, and their negations are exact:
+`min_int / 1000 = -4611686018427387`, `min_int % 1000 = -904`. The unit breakdown
+moved into `pfn format_parts(total_s, rem_ms)`, unchanged otherwise. `format` is now
+total, so it gets no precondition and no panic; there is no refinecheck case for it.
+Output is unchanged for every other value (the negation of a non-min negative `ms`
+splits into the same seconds and milliseconds). Checked by a scratch program that
+ran the old `format` (copied from the base commit) and the new one on 16,000 values
+from -3.9e15 to 3.9e15, interpreted and compiled: 0 mismatches.
+
+**Tests.** `test/stdlib/test_duration.march` (new, registered, `duration.march`
+added to the `test_stdlib_march.ml` load list): the doc examples and other good paths
+(-1 ms, -1001 ms, -3 weeks, a value with every unit), `format(-x) == "-" ++
+format(x)` as an example and as a `Check.all` property over `1..10^12`, the smallest
+Int
+(`"-7625142226 weeks, 1 day, 15 hours, 36 minutes, 27 seconds, 904 milliseconds"`,
+checked against Python's `divmod`) and the largest (`... 903 milliseconds`). RED: the
+file hung (killed at 20 s) on the min_int test. The audit baselines do not change:
+`format` gained no refinement. Native golden `s4` lines (min and
+max, parsed at run time through `hidden_int`), compiled and interpreted.
+
+No doctest for the smallest Int: `duration.march` is a `-- doc: try` module, and its
+examples must stay in 32-bit range for the browser REPL.
+
+## Verification across the four
+
+- `scripts/refine-oracle.sh` (baseline recorded on the unmodified stdlib, private HOME,
+  then `check` after s4): 2325 differing lines over 553 fixtures, all explained.
+  Every fixture's stdlib-wide ledger goes from 136 to 145 proved, with 0 violated and
+  the skipped count unchanged: the 9 new stdlib obligations are the seven internal
+  `to_list(r)`/`reduce(r, …)` calls in Range (preconditions) and the `new`/`new_step`
+  returns (postconditions), all proved. Seven `test/native` fixtures that build a
+  range with `Range.new` gain one proved user-code obligation; `stdlib_range` goes
+  10 -> 19 proved. `stdlib_duration` loses a standalone-check `non_tail_recursion`
+  ERROR on the old `"-" ++ format(Duration(-ms))` line (the same self-call that
+  diverged), and its unrelated `non_exhaustive_match` warning moves from line 40 to 41.
+  The new `native_stdlib_step_guards` fixture adds its own lines (6 proved, 4
+  skipped: the `hidden_int` arguments, by design). No new violation anywhere.
+- `scripts/run-tests.sh` (full) and `scripts/check-docs.sh` pass; the TIR snapshot
+  suite passes.

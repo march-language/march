@@ -43,5 +43,8 @@ mod Main do
     println("s3 good: " ++ string_join(List.map(Control.chunks("abcdef", 4), fn c -> c.data), ","))
     println("s3 bad:  " ++ show_n(__try_call_val(fn _ -> List.length(Control.chunks("abcdef", zero)))))
     println("s3 neg:  " ++ show_n(__try_call_val(fn _ -> List.length(Control.chunks("abcdef", hidden_int("-2"))))))
+    println("s4 good: " ++ Duration.format(Duration.seconds(-70)))
+    println("s4 min:  " ++ Duration.format(Duration.milliseconds(hidden_int("-4611686018427387904"))))
+    println("s4 max:  " ++ Duration.format(Duration.milliseconds(hidden_int("4611686018427387903"))))
   end
 end
