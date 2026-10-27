@@ -1,0 +1,10 @@
+mod Main do
+  @[decreases(n)]
+  fn down(n : Int) : Int do
+    if n == 0 do 0 else down(n - 1) end
+  end
+
+  fn main() do
+    down(3)
+  end
+end

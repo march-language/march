@@ -1,0 +1,13 @@
+mod Main do
+  @[decreases(xs)]
+  fn count(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + count(t)
+    end
+  end
+
+  fn main() do
+    count([1, 2, 3])
+  end
+end

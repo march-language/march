@@ -28442,6 +28442,7 @@ let () =
       ("wrapper-contracts", wrapper_contracts_suite);
       ("termination-report", Test_refine_term.report_suite);
       ("termination-structural", Test_refine_term.structural_suite);
+      ("termination-metric", Test_refine_term.metric_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("callback-binder", callback_binder_suite);
       ("abstract-pass-sites", abstract_pass_sites_suite);

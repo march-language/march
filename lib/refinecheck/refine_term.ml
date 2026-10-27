@@ -71,6 +71,11 @@ type edge = {
   e_args : A.expr list;  (** [] for a [Reference] edge *)
   e_span : A.span;
   e_owner : owner;
+  e_shadowed : string list;
+      (** the owner clause's parameters REBOUND by an inner binder at this
+          call (a `let`, arm, lambda or local `fn` binder of the same name).
+          A metric over such a name would read the inner value, not the
+          entry value, so the edge cannot be obliged (phase 2). *)
 }
 
 type unit_ = {
@@ -83,6 +88,7 @@ type unit_ = {
   u_param_spans : A.span option list;  (** where the typechecker recorded each parameter's type *)
   u_clauses : owner list;
   u_attrs : string list;
+  u_decreases : A.expr list option;  (** the [@[decreases(e, ...)]] payload, if written *)
 }
 
 type graph = {
@@ -91,6 +97,10 @@ type graph = {
   out : edge list array;  (** edges by source *)
   scc_of : int array;  (** unit id -> SCC index *)
   sccs : int list array;  (** SCC index -> member ids *)
+  trusted : (int * string) list;
+      (** (unit, callee name) of every call to a name that is no unit of the
+          graph and no local value: a builtin or an [extern], trusted to
+          terminate (§3.6, decision 10) and counted by the report. *)
   fv_calls : (int * A.expr) list;
       (** (unit, callee expression) of every call through a FUNCTION VALUE: a
           callee bound by a parameter, [let], arm or lambda binder, or any
@@ -106,9 +116,14 @@ let rec pat_vars (p : A.pattern) : string list =
   | A.PatRecord (fs, _) -> List.concat_map (fun (_, p) -> pat_vars p) fs
   | A.PatWild _ | A.PatLit _ -> []
 
-type binding = Fn of int | Var
+(* [Param]: a parameter of the unit whose body is being walked.  It resolves
+   like [Var]; it differs only in telling the edge which of the owner's
+   parameters still hold their ENTRY value ([e_shadowed]). *)
+type binding = Fn of int | Var | Param
 
 let bind_vars env names = List.fold_left (fun env n -> SM.add n Var env) env names
+
+let bind_params env names = List.fold_left (fun env n -> SM.add n Param env) env names
 
 let clause_params (c : A.fn_clause) : string option list * A.ty option list =
   List.split
@@ -142,12 +157,14 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
   let n_units = ref 0 in
   let edges = ref [] in
   let fv_calls = ref [] in
-  let new_unit ~name ~span ~kind ~params ~tys ~pspans ~clauses ~attrs =
+  let trusted = ref [] in
+  let new_unit ?decreases ~name ~span ~kind ~params ~tys ~pspans ~clauses ~attrs () =
     let id = !n_units in
     incr n_units;
     units :=
       { u_id = id; u_name = name; u_span = span; u_kind = kind; u_params = params;
-        u_param_tys = tys; u_param_spans = pspans; u_clauses = clauses; u_attrs = attrs }
+        u_param_tys = tys; u_param_spans = pspans; u_clauses = clauses; u_attrs = attrs;
+        u_decreases = decreases }
       :: !units;
     id
   in
@@ -183,6 +200,7 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
               ~params ~tys
               ~pspans:(match def.A.fn_clauses with c :: _ -> clause_param_spans c | [] -> [])
               ~clauses ~attrs:def.A.fn_attrs
+              ?decreases:(List.assoc_opt "decreases" def.A.fn_attr_args) ()
           in
           List.iter (fun p -> Hashtbl.replace globals (p ^ def.A.fn_name.A.txt) id) prefixes;
           pending := `Fn (id, def, mod_path) :: !pending
@@ -197,7 +215,7 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
                   ~span:h.A.ah_msg.A.span ~kind:Handler ~params ~tys
                   ~pspans:(List.map (fun (p : A.param) -> Some p.A.param_name.A.span) h.A.ah_params)
                   ~clauses:[ { o_params = params; o_body = h.A.ah_body } ]
-                  ~attrs:[]
+                  ~attrs:[] ()
               in
               pending := `Handler (id, h, mod_path) :: !pending)
             (A.actor_body_handlers actor)
@@ -208,9 +226,16 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
   register "" decls;
   let unit_name = Hashtbl.create 64 in
   (* Pass 2: walk bodies. *)
-  let add_edge ~src ~dst ~kind ~args ~span ~owner =
-    edges := { e_src = src; e_dst = dst; e_kind = kind; e_args = args; e_span = span; e_owner = owner }
-             :: !edges
+  let add_edge ~env ~src ~dst ~kind ~args ~span ~owner =
+    let shadowed =
+      List.filter
+        (fun p -> SM.find_opt p env <> Some Param)
+        (List.filter_map Fun.id owner.o_params)
+    in
+    edges :=
+      { e_src = src; e_dst = dst; e_kind = kind; e_args = args; e_span = span; e_owner = owner;
+        e_shadowed = shadowed }
+      :: !edges
   in
   (* The module path of the body being walked.  A name is resolved
      LEXICALLY: a local binder first, then the enclosing module's own
@@ -233,13 +258,16 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
   let resolve env n =
     match SM.find_opt n env with
     | Some (Fn id) -> Some id
-    | Some Var -> None
+    | Some (Var | Param) -> None
     | None ->
       List.fold_left
         (fun acc p -> match acc with Some _ -> acc | None -> Hashtbl.find_opt globals (p ^ n))
         None (candidates !cur_path)
   in
-  let is_var env n = match SM.find_opt n env with Some Var -> true | _ -> false in
+  let is_var env n = match SM.find_opt n env with Some (Var | Param) -> true | _ -> false in
+  (* An identifier, not an operator: `+` and `==` are builtins too, but
+     counting them would drown the report's trusted count. *)
+  let is_ident n = n <> "" && (match n.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) in
   (* [walk ~src ~owner ~lam env e]: edges out of unit [src] found in [e].
      [lam]: [e] sits inside a lambda or a [let*] continuation of [src]. *)
   let rec walk ~src ~owner ~lam env (e : A.expr) : unit =
@@ -249,10 +277,11 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
       | A.EVar n -> (
         match resolve env n.A.txt with
         | Some dst ->
-          add_edge ~src ~dst ~kind:(if lam then Lambda else Direct) ~args ~span ~owner;
+          add_edge ~env ~src ~dst ~kind:(if lam then Lambda else Direct) ~args ~span ~owner;
           List.iter w args
         | None ->
-          if is_var env n.A.txt then fv_calls := (src, head) :: !fv_calls;
+          if is_var env n.A.txt then fv_calls := (src, head) :: !fv_calls
+          else if is_ident n.A.txt then trusted := (src, n.A.txt) :: !trusted;
           List.iter w args)
       | f ->
         fv_calls := (src, f) :: !fv_calls;
@@ -265,7 +294,7 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
     | A.EPipe (l, A.EApp (f, args, _), sp) -> call f (l :: args) sp
     | A.EVar n -> (
       match resolve env n.A.txt with
-      | Some dst -> add_edge ~src ~dst ~kind:Reference ~args:[] ~span:n.A.span ~owner
+      | Some dst -> add_edge ~env ~src ~dst ~kind:Reference ~args:[] ~span:n.A.span ~owner
       | None -> ())
     | A.EBlock (es, _) -> ignore (List.fold_left (fun env ex -> block_item ~src ~owner ~lam env ex) env es)
     | A.ELet (b, _) -> w b.A.bind_expr
@@ -303,11 +332,11 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
       let id =
         new_unit ~name:(parent ^ "/" ^ n.A.txt) ~span:n.A.span ~kind:Local ~params ~tys
           ~pspans:(List.map (fun (p : A.param) -> Some p.A.param_name.A.span) ps)
-          ~clauses:[ lowner ] ~attrs:[]
+          ~clauses:[ lowner ] ~attrs:[] ()
       in
       Hashtbl.replace unit_name id (parent ^ "/" ^ n.A.txt);
       let env = SM.add n.A.txt (Fn id) env in
-      let inner = bind_vars env (List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps) in
+      let inner = bind_params env (List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps) in
       walk ~src:id ~owner:lowner ~lam:false inner body;
       env
     | _ ->
@@ -324,7 +353,9 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
         List.iter
           (fun (c : A.fn_clause) ->
             let owner = { o_params = fst (clause_params c); o_body = c.A.fc_body } in
-            let env = bind_vars SM.empty (clause_binders c) in
+            let env =
+              bind_params (bind_vars SM.empty (clause_binders c)) (List.filter_map Fun.id owner.o_params)
+            in
             Option.iter (walk ~src:id ~owner ~lam:false env) c.A.fc_guard;
             walk ~src:id ~owner ~lam:false env c.A.fc_body)
           def.A.fn_clauses
@@ -332,7 +363,7 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
         cur_path := path;
         let params = List.map (fun (p : A.param) -> p.A.param_name.A.txt) h.A.ah_params in
         let owner = { o_params = List.map Option.some params; o_body = h.A.ah_body } in
-        walk ~src:id ~owner ~lam:false (bind_vars SM.empty params) h.A.ah_body)
+        walk ~src:id ~owner ~lam:false (bind_params SM.empty params) h.A.ah_body)
     (List.rev !pending);
   let units = Array.of_list (List.rev !units) in
   let n = Array.length units in
@@ -376,7 +407,7 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
   let sccs = Array.of_list (List.rev !sccs) in
   let scc_of = Array.make n 0 in
   Array.iteri (fun i ms -> List.iter (fun v -> scc_of.(v) <- i) ms) sccs;
-  { units; edges; out; scc_of; sccs; fv_calls = List.rev !fv_calls }
+  { units; edges; out; scc_of; sccs; trusted = List.rev !trusted; fv_calls = List.rev !fv_calls }
 
 (** Intra-SCC edges out of [u]. *)
 let intra g (u : int) : edge list =
@@ -818,6 +849,274 @@ let certify ?type_map g ~(nonpos_call : int -> bool) ~(same_family : string -> s
       else Unproved "not-same-family"
   end
 
+(* ── Metrics and SMT obligations (§3.3-§3.5), phase 2 ──────────────────── *)
+
+(* What a parameter position holds, for the metric fragment (§2.1): an Int,
+   a Float, another type (by name), or unknown (no declaration and no type
+   recorded).  An unknown is treated as an Int by the fragment check and
+   left to the solver, which declares it `Int`. *)
+type pkind = PInt | PFloat | POther of string | PUnknown
+
+let param_kind ?type_map (u : unit_) (i : int) : pkind =
+  let of_name n = match bare n with "Int" -> PInt | "Float" -> PFloat | n -> POther n in
+  let rec of_ty (t : A.ty) =
+    match t with
+    | A.TyCon (n, _) -> of_name n.A.txt
+    | A.TyRefine (t, _, _) | A.TyLinear (_, t) -> of_ty t
+    | A.TyArrow _ -> POther "function"
+    | A.TyTuple _ -> POther "tuple"
+    | A.TyRecord _ -> POther "record"
+    | _ -> PUnknown
+  in
+  match List.nth_opt u.u_param_tys i with
+  | Some (Some t) -> of_ty t
+  | _ -> (
+    match (type_map, List.nth_opt u.u_param_spans i) with
+    | Some tm, Some (Some sp) -> (
+      match Hashtbl.find_opt tm sp with
+      | Some t -> (
+        match March_typecheck.Typecheck.repr t with
+        | March_typecheck.Typecheck.TCon (n, _) -> of_name n
+        | _ -> PUnknown)
+      | None -> PUnknown)
+    | _ -> PUnknown)
+
+let rec free_names (e : A.expr) : string list =
+  match e with
+  | A.EVar n -> [ n.A.txt ]
+  (* An application's head names a function, operator or measure. *)
+  | A.EApp (A.EVar _, args, _) -> List.concat_map free_names args
+  | _ -> List.concat_map free_names (Refine_encode.children e)
+
+(** Check one written metric against the fragment of §2.1: Int expressions
+    over the unit's parameters, Int literals, [+ - *], [/] by a positive
+    literal, and measures (the built-in [len] and every [@[measure]]) applied
+    to parameters.  A bare non-Int parameter is not a metric (a structural
+    component is written as a measure).  Returns one message per offence,
+    each with the span to report it at. *)
+let metric_errors ?type_map ~(is_measure : string -> bool) (u : unit_) (es : A.expr list) :
+    (A.span * string) list =
+  let errs = ref [] in
+  let err sp msg = errs := (sp, msg) :: !errs in
+  let pos name = List.find_index (fun p -> p = Some name) u.u_params in
+  let span_of (e : A.expr) =
+    match e with
+    | A.EVar n -> n.A.span
+    | A.ELit (_, sp) | A.EApp (_, _, sp) -> sp
+    | _ -> u.u_span
+  in
+  let rec go (e : A.expr) =
+    match e with
+    | A.ELit (A.LitInt _, _) -> ()
+    | A.ELit (_, sp) -> err sp "a metric component is an Int expression; this literal is not an Int"
+    | A.EVar n -> (
+      match pos n.A.txt with
+      | None ->
+        err n.A.span
+          (Printf.sprintf
+             "`%s` is not a parameter of `%s`: a metric may name only the function's own parameters"
+             n.A.txt u.u_name)
+      | Some i -> (
+        match param_kind ?type_map u i with
+        | PInt | PUnknown -> ()
+        | PFloat ->
+          err n.A.span
+            (Printf.sprintf "`%s` is a Float: a metric component must be an Int expression" n.A.txt)
+        | POther t ->
+          err n.A.span
+            (Printf.sprintf
+               "`%s` is a `%s`, not an Int: a metric component must be an Int expression. To \
+                measure a data structure, apply a measure to it, such as `len(%s)` or a \
+                `@[measure]` like `size(%s)`"
+               n.A.txt t n.A.txt n.A.txt)))
+    | A.EApp (A.EVar { A.txt = "+" | "-" | "*"; _ }, [ a; b ], _) -> go a; go b
+    | A.EApp (A.EVar { A.txt = "-" | "neg"; _ }, [ a ], _) -> go a
+    | A.EApp (A.EVar { A.txt = "/"; _ }, [ a; b ], sp) -> (
+      go a;
+      match b with
+      | A.ELit (A.LitInt k, _) when k > 0 -> ()
+      | _ -> err sp "a metric may divide only by a positive Int literal")
+    | A.EApp (A.EVar m, args, sp) when is_measure m.A.txt ->
+      List.iter
+        (fun a ->
+          match a with
+          | A.EVar n when pos n.A.txt <> None -> ()
+          | _ ->
+            err sp
+              (Printf.sprintf "the measure `%s` must be applied to a parameter of `%s`" m.A.txt
+                 u.u_name))
+        args
+    | _ ->
+      err (span_of e)
+        "this is outside the metric fragment: a metric is built from parameters, Int literals, \
+         `+ - *`, `/` by a positive literal, and measures such as `len`"
+  in
+  List.iter go es;
+  List.rev !errs
+
+(** The DEFAULT metric (§3.5, step 3): the first Int parameter, as a
+    1-tuple.  [None] when the unit has no parameter known to be an Int. *)
+let default_metric ?type_map (u : unit_) : A.expr list option =
+  let rec find i = function
+    | [] -> None
+    | Some p :: rest ->
+      if param_kind ?type_map u i = PInt then Some [ A.EVar { A.txt = p; A.span = u.u_span } ]
+      else find (i + 1) rest
+    | None :: rest -> find (i + 1) rest
+  in
+  find 0 u.u_params
+
+(** One termination obligation: the intra-SCC call [ms_edge], phrased as a
+    call to a synthetic signature (§3.4).  [Refine_check.visit] discharges
+    it through [check_call] when it reaches the call's span, with the path
+    and scope facts that reach the call. *)
+type metric_site = {
+  ms_edge : edge;
+  ms_sig : Refine_encode.fn_sig;
+  ms_args : A.expr list;
+  ms_rp : Refine_encode.rparam;
+  ms_caller_metric : A.expr list;  (** over the caller's parameters, for messages *)
+}
+
+(** What phase 2 decided before the walk, per SCC. *)
+type status =
+  | St_structural  (** the phase-1 certificate; no query *)
+  | St_pending  (** metric obligations filed; decided after the walk *)
+  | St_unproved of string  (** no metric can be checked; the reason *)
+  | St_undemanded  (** not demanded (§9): no annotation, not reported *)
+
+type plan = {
+  pl_status : status array;  (** by SCC *)
+  pl_metric : A.expr list option array;  (** by unit: the metric checked *)
+  pl_sites : (A.span, metric_site) Hashtbl.t;  (** by call span *)
+  pl_invalid : (A.span * string) list;  (** [invalid_decreases] *)
+  pl_no_effect : int list;  (** annotated units that are not recursive *)
+}
+
+let mk_name txt span : A.name = { A.txt; A.span }
+
+(** The lexicographic decrease of §3.3 over component lists of one length:
+    [(x1, …) <lex (y1, …) := (0 <= x1 && x1 < y1) || (x1 == y1 && (x2, …) <lex (y2, …))]. *)
+let lex_formula ~(span : A.span) (xs : A.expr list) (ys : A.expr list) : A.expr =
+  let op o a b = A.EApp (A.EVar (mk_name o span), [ a; b ], span) in
+  let zero = A.ELit (A.LitInt 0, span) in
+  let step x y = op "&&" (op "<=" zero x) (op "<" x y) in
+  let rec go xs ys =
+    match (xs, ys) with
+    | [ x ], [ y ] -> step x y
+    | x :: xr, y :: yr -> op "||" (step x y) (op "&&" (op "==" x y) (go xr yr))
+    | _ -> A.ELit (A.LitBool false, span)
+  in
+  go xs ys
+
+(* The synthetic signature `$decreases_g` for the edge [e] (§3.4).  Its one
+   refined parameter is a dummy subject `$t` (actual `0`); the predicate is
+   the lex formula of the callee's metric at the call's arguments against
+   the caller's metric at entry.  Fixed names, no counter, so the VC cache
+   keys on the metric alone (§6).  Names in the predicate:
+   - `$c_x`: a CALLER-scope name `x` (a parameter the caller's metric reads,
+     or a variable of an inlined argument), whose actual is `x` itself;
+   - `$g_p`: the callee's parameter `p`, whose actual is the call's argument,
+     for an argument that is a bare name (it keeps the callee's declared
+     type, so a String's `len` is its byte length) or anything else not
+     inlined;
+   - an argument of plain Int arithmetic (`n - 1`, `n / 2`) is INLINED into
+     the callee's metric over `$c_` names, because the predicate encoder
+     reads `/` and `%` by a literal and an actual's reflection does not.
+   [None] when an argument a metric reads is missing (an arity mismatch). *)
+let decreases_site ?(is_rec_call : A.span -> bool = fun _ -> false) g
+    ~(caller_metric : A.expr list) ~(callee_metric : A.expr list) (e : edge) : metric_site option =
+  let span = e.e_span in
+  let caller = g.units.(e.e_src) and callee = g.units.(e.e_dst) in
+  let is_str ty =
+    let rec go (t : A.ty) =
+      match t with
+      | A.TyCon (n, _) -> bare n.A.txt = "String"
+      | A.TyRefine (t, _, _) | A.TyLinear (_, t) -> go t
+      | _ -> false
+    in
+    match ty with Some t -> go t | None -> false
+  in
+  let var n = A.EVar (mk_name n span) in
+  (* An argument that itself holds a recursive call of this SCC
+     (`ack(m - 1, ack(m, n - 1))`) has no contract to reflect it by before
+     phase 3, and an unreflectable actual would leave the whole obligation
+     unchecked.  It is passed as a fresh name no binder holds, which the
+     checker reads as an arbitrary value: an over-approximation, so a proof
+     still holds of the real argument. *)
+  let rec has_rec_call (a : A.expr) =
+    (match a with A.EApp (_, _, sp) -> is_rec_call sp | _ -> false)
+    || List.exists has_rec_call (Refine_encode.children a)
+  in
+  let rec arith (a : A.expr) =
+    match a with
+    | A.EVar _ | A.ELit (A.LitInt _, _) -> true
+    | A.EApp (A.EVar { A.txt = "+" | "-" | "*" | "/" | "%"; _ }, [ x; y ], _) -> arith x && arith y
+    | A.EApp (A.EVar { A.txt = "-" | "neg"; _ }, [ x ], _) -> arith x
+    | _ -> false
+  in
+  (* Caller-scope names, by first use: (name, formal, declared type). *)
+  let cnames = ref [] in
+  let cformal ?ty x =
+    (if not (List.exists (fun (n, _, _) -> n = x) !cnames) then
+       let ty =
+         match ty with
+         | Some t -> t
+         | None -> (
+           match List.find_index (fun p -> p = Some x) e.e_owner.o_params with
+           | Some i -> Option.join (List.nth_opt caller.u_param_tys i)
+           | None -> None)
+       in
+       cnames := !cnames @ [ (x, "$c_" ^ x, ty) ]);
+    var ("$c_" ^ x)
+  in
+  let rename_caller (a : A.expr) =
+    Refine_encode.subst_params (List.map (fun x -> (x, cformal x)) (List.sort_uniq compare (free_names a))) a
+  in
+  let used = List.concat_map free_names callee_metric in
+  let gformals = ref [] and genv = ref [] and missing = ref false in
+  List.iteri
+    (fun i p ->
+      match p with
+      | Some p when List.mem p used -> (
+        let ty = Option.join (List.nth_opt callee.u_param_tys i) in
+        match List.nth_opt e.e_args i with
+        | None -> missing := true
+        | Some a when has_rec_call a ->
+          gformals := !gformals @ [ ("$g_" ^ p, var ("$opq_" ^ p), ty) ];
+          genv := (p, var ("$g_" ^ p)) :: !genv
+        | Some (A.EVar _ as a) ->
+          gformals := !gformals @ [ ("$g_" ^ p, a, ty) ];
+          genv := (p, var ("$g_" ^ p)) :: !genv
+        | Some a when arith a -> genv := (p, rename_caller a) :: !genv
+        | Some a ->
+          gformals := !gformals @ [ ("$g_" ^ p, a, ty) ];
+          genv := (p, var ("$g_" ^ p)) :: !genv)
+      | _ -> ())
+    callee.u_params;
+  if !missing then None
+  else begin
+    let xs = List.map (Refine_encode.subst_params !genv) callee_metric in
+    let ys = List.map rename_caller caller_metric in
+    let pred = lex_formula ~span xs ys in
+    let formals =
+      List.map (fun (f, a, ty) -> (f, a, ty)) !gformals
+      @ List.map (fun (x, f, ty) -> (f, var x, ty)) !cnames
+    in
+    let sg : Refine_encode.fn_sig =
+      { Refine_encode.param_names = "$t" :: List.map (fun (f, _, _) -> f) formals;
+        param_str = false :: List.map (fun (_, _, ty) -> is_str ty) formals;
+        param_scalar = March_refine.Smt.SInt :: List.map (fun _ -> March_refine.Smt.SInt) formals;
+        param_tys = None :: List.map (fun (_, _, ty) -> ty) formals;
+        refined = [ { Refine_encode.idx = 0; binder = "$t"; pred; sort = None } ];
+        ret = None; ret_sort = None; ret_ty = None }
+    in
+    let args = A.ELit (A.LitInt 0, span) :: List.map (fun (_, a, _) -> a) formals in
+    Some
+      { ms_edge = e; ms_sig = sg; ms_args = args; ms_rp = List.hd sg.Refine_encode.refined;
+        ms_caller_metric = caller_metric }
+  end
+
 (* ── Entry points ─────────────────────────────────────────────────────── *)
 
 type t = {
@@ -894,6 +1193,187 @@ let analyze ?(type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option
 
 let rows (t : t) = t.rows
 
+(** Phase 2's plan (§3.5), decided before the refinement walk.  An SCC is
+    planned when it is DEMANDED (§9): a member carries [@[decreases]], or
+    [demanded] accepts a member (the driver passes "user code, under
+    [--termination-report]").  A planned SCC is, in order:
+    - [St_structural] when the phase-1 certificate holds (no query);
+    - [St_unproved] when no metric can be checked (a reference edge, a call
+      of a non-positive function value, an invalid or missing metric, an
+      edge whose caller metric names a shadowed parameter);
+    - otherwise [St_pending], with one obligation per intra-SCC call over
+      the written metrics (only those, when any member has one) or else the
+      first Int parameter of each member.
+    Every written metric is checked against the fragment whether or not its
+    unit is recursive; one written on a non-recursive unit is listed in
+    [pl_no_effect]. *)
+let plan_metrics ?type_map ~(is_measure : string -> bool) ~(demanded : unit_ -> bool) (t : t) :
+    plan =
+  let g = t.graph in
+  let status = Array.make (Array.length g.sccs) St_undemanded in
+  let metric = Array.make (Array.length g.units) None in
+  let sites = Hashtbl.create 16 in
+  let invalid = ref [] and no_effect = ref [] in
+  let bad = Hashtbl.create 4 in
+  Array.iter
+    (fun u ->
+      match u.u_decreases with
+      | Some es ->
+        let errs = metric_errors ?type_map ~is_measure u es in
+        if errs <> [] then Hashtbl.replace bad u.u_id ();
+        invalid := !invalid @ errs;
+        if not (is_recursive g u.u_id) then no_effect := u.u_id :: !no_effect
+      | None -> ())
+    g.units;
+  Array.iteri
+    (fun si members ->
+      let annotated = List.filter (fun u -> g.units.(u).u_decreases <> None) members in
+      if List.exists (is_recursive g) members
+         && (annotated <> [] || List.exists (fun u -> demanded g.units.(u)) members)
+      then
+        status.(si) <-
+          (match t.certs.(si) with
+           | Structural -> St_structural
+           | Unproved (("reference" | "non-positive") as r) -> St_unproved r
+           | Unproved _ -> (
+             if List.exists (Hashtbl.mem bad) annotated then St_unproved "invalid-decreases"
+             else
+               let lens =
+                 List.sort_uniq compare
+                   (List.filter_map (fun u -> Option.map List.length g.units.(u).u_decreases) annotated)
+               in
+               match lens with
+               | _ :: _ :: _ ->
+                 (* One tuple length per SCC (§3.3); Dafny pads instead (§10). *)
+                 let names =
+                   String.concat ", "
+                     (List.map
+                        (fun u ->
+                          Printf.sprintf "`%s` has %d" g.units.(u).u_name
+                            (List.length (Option.get g.units.(u).u_decreases)))
+                        annotated)
+                 in
+                 List.iter
+                   (fun u ->
+                     invalid :=
+                       !invalid
+                       @ [ ( g.units.(u).u_span,
+                             Printf.sprintf
+                               "the functions of one recursive cycle need metrics with the same \
+                                number of components: %s"
+                               names ) ])
+                   annotated;
+                 St_unproved "invalid-decreases"
+               | _ -> (
+                 let k = match lens with [ k ] -> k | _ -> 1 in
+                 let chosen =
+                   List.map
+                     (fun u ->
+                       let un = g.units.(u) in
+                       match un.u_decreases with
+                       | Some es -> (u, Ok es)
+                       | None -> (
+                         match default_metric ?type_map un with
+                         | Some m when k = 1 -> (u, Ok m)
+                         | Some _ -> (u, Error ("unannotated:" ^ un.u_name))
+                         | None -> (u, Error "no-int-parameter")))
+                     members
+                 in
+                 match List.find_map (function _, Error r -> Some r | _ -> None) chosen with
+                 | Some r -> St_unproved r
+                 | None ->
+                   List.iter (function u, Ok m -> metric.(u) <- Some m | _ -> ()) chosen;
+                   let es =
+                     List.filter (fun e -> e.e_kind <> Reference) (List.concat_map (intra g) members)
+                   in
+                   let fail = ref None in
+                   List.iter
+                     (fun e ->
+                       if !fail = None then begin
+                         let mf = Option.get metric.(e.e_src) and mg = Option.get metric.(e.e_dst) in
+                         let fresh n =
+                           (not (List.mem n e.e_shadowed)) && List.mem (Some n) e.e_owner.o_params
+                         in
+                         if not (List.for_all fresh (List.concat_map free_names mf)) then
+                           fail := Some "shadowed"
+                         else
+                           match
+                             decreases_site
+                               ~is_rec_call:(fun sp -> List.exists (fun e' -> e'.e_span = sp) es)
+                               g ~caller_metric:mf ~callee_metric:mg e
+                           with
+                           | Some site -> Hashtbl.replace sites e.e_span site
+                           | None -> fail := Some "arity"
+                       end)
+                     es;
+                   (match !fail with Some r -> St_unproved r | None -> St_pending)))))
+    g.sccs;
+  { pl_status = status; pl_metric = metric; pl_sites = sites; pl_invalid = !invalid;
+    pl_no_effect = List.rev !no_effect }
+
+(** After the walk: the certificate of every planned SCC, from the verdicts
+    the walk recorded at each obligation's call span.  An SCC is [metric]
+    when every one of its obligations was reached and proved, [trusted] when
+    each was proved or trusted (an [@[assume]] / [@[trusted]] function) and
+    one was trusted, else [unproved:not-decreasing].  A site the walk never
+    reached counts as unproved: absence of a proof is not a proof.  The
+    second array holds, for an unproved pending SCC, its first failing site
+    and the weakest verdict recorded there ([None]: never reached). *)
+let finish (t : t) (pl : plan) ~(verdicts : A.span -> Obligation.verdict list) :
+    string array * (metric_site * Obligation.verdict option) option array =
+  let g = t.graph in
+  let n = Array.length g.sccs in
+  let certs = Array.make n "" and fails = Array.make n None in
+  for si = 0 to n - 1 do
+    match pl.pl_status.(si) with
+    | St_undemanded -> ()
+    | St_structural -> certs.(si) <- "structural"
+    | St_unproved r -> certs.(si) <- "unproved:" ^ r
+    | St_pending ->
+      let ss =
+        Hashtbl.fold
+          (fun _ site acc -> if g.scc_of.(site.ms_edge.e_src) = si then site :: acc else acc)
+          pl.pl_sites []
+        |> List.sort (fun a b -> compare a.ms_edge.e_span b.ms_edge.e_span)
+      in
+      let weakest site =
+        let rank = function
+          | Obligation.Violated -> 0 | Obligation.Skipped _ -> 1 | Obligation.Trusted -> 2
+          | Obligation.Proved -> 3
+        in
+        List.fold_left
+          (fun acc v -> match acc with Some a when rank a <= rank v -> acc | _ -> Some v)
+          None (verdicts site.ms_edge.e_span)
+      in
+      let judged = List.map (fun s -> (s, weakest s)) ss in
+      let ok = function Some (Obligation.Proved | Obligation.Trusted) -> true | _ -> false in
+      (match List.find_opt (fun (_, v) -> not (ok v)) judged with
+       | Some (s, v) ->
+         certs.(si) <- "unproved:not-decreasing";
+         fails.(si) <- Some (s, v)
+       | None ->
+         certs.(si) <-
+           (if List.exists (fun (_, v) -> v = Some Obligation.Trusted) judged then "trusted"
+            else "metric"))
+  done;
+  (certs, fails)
+
+(** Set by the driver under [--termination-report]: every SCC of user code is
+    demanded (§9), not only an annotated one.  Off by default (decision D2). *)
+let check_all = ref false
+
+(** The last module's phase-2 certificates, by declaring span, for the
+    report: what [Refine_check.check_module] decided.  Reset per module. *)
+let last_certs : (A.span, string) Hashtbl.t = Hashtbl.create 16
+
+(** Callees trusted to terminate (builtins and externs, §3.6), distinct,
+    over the units [is_user] accepts. *)
+let trusted_callees ?(is_user : A.span -> bool = fun _ -> true) (t : t) : string list =
+  List.sort_uniq compare
+    (List.filter_map
+       (fun (u, name) -> if is_user t.graph.units.(u).u_span then Some name else None)
+       t.graph.trusted)
+
 (** Is the declaration named at [span] a recursive unit whose SCC is NOT
     certified structural, or a unit that calls a non-positive function
     value?  [false] for a unit not in the graph and for a plain
@@ -940,6 +1420,15 @@ let report_lines ?(is_user : A.span -> bool = fun _ -> true) (t : t) : string li
     | 0 -> ""
     | k -> Printf.sprintf ", %d calling a non-positive function value" k
   in
+  (* A phase-2 certificate, when the refinement walk decided one. *)
+  let rows =
+    List.map
+      (fun r ->
+        match Hashtbl.find_opt last_certs r.r_span with
+        | Some c -> { r with r_cert = c }
+        | None -> r)
+      rows
+  in
   let line r =
     Printf.sprintf "term\t%s\t%s%s\t%s\t%s\t%s\tscc=%d\tcert=%s" r.r_class r.r_shape
       (if r.r_mutual then " mutual" else "")
@@ -952,9 +1441,18 @@ let report_lines ?(is_user : A.span -> bool = fun _ -> true) (t : t) : string li
            (fun (c, n) -> Printf.sprintf "%s=%d" c n)
            (List.sort compare (Hashtbl.fold (fun c n acc -> (c, n) :: acc) classes [])))
   in
-  let certified = List.length (List.filter (fun r -> r.r_cert = "structural") rows) in
+  let count c = List.length (List.filter (fun r -> r.r_cert = c) rows) in
+  let structural = count "structural" and metric = count "metric" and trusted_c = count "trusted" in
   let cert_line =
-    Printf.sprintf "  certificate: %d structural, %d unproved" certified
-      (List.length rows - certified)
+    Printf.sprintf "  certificate: %d structural, %d metric, %d trusted, %d unproved" structural metric
+      trusted_c
+      (List.length rows - structural - metric - trusted_c)
   in
-  (header :: List.map line rows) @ [ summary; cert_line ]
+  (* Builtins and externs are trusted to terminate (§3.6, decision 10). *)
+  let callees = trusted_callees ~is_user t in
+  let trusted_line =
+    Printf.sprintf "  trusted: %d builtin or extern callee%s%s" (List.length callees)
+      (if List.length callees = 1 then "" else "s")
+      (if callees = [] then "" else ": " ^ String.concat ", " callees)
+  in
+  (header :: List.map line rows) @ [ summary; cert_line; trusted_line ]

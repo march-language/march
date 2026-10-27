@@ -2215,6 +2215,9 @@ let run_test_cmd args =
        taught the flag) but is dead code from the CLI's point of view; see
        task-3-review.md finding 3. *)
     let audit_result = ref [] in
+    (* --termination-report demands every recursive SCC of user code (design
+       §9); otherwise only an `@[decreases]` one is checked (D2). *)
+    March_refinecheck.Refine_term.check_all := !termination_report;
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
       ~stdlib_files:(stdlib_span_files stdlib_decls)
       ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
@@ -3476,6 +3479,9 @@ let compile filename =
   let typed_ok = not (March_errors.Errors.has_errors errors) in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   let audit_result = ref [] in
+  (* --termination-report demands every recursive SCC of user code (design
+     §9); otherwise only an `@[decreases]` one is checked (D2). *)
+  March_refinecheck.Refine_term.check_all := !termination_report;
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
     ~stdlib_files:(stdlib_span_files stdlib_decls)
     ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)

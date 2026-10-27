@@ -584,5 +584,392 @@ let structural_suite =
         let has s = List.exists (fun l -> contains l s) lines in
         Alcotest.(check bool) "spin unproved" true (has "\tspin\ttop\tscc=1\tcert=unproved:no-structural-arg");
         Alcotest.(check bool) "len2 certified" true (has "\tlen2\ttop\tscc=1\tcert=structural");
-        Alcotest.(check bool) "summary" true (has "certificate: 1 structural, 1 unproved"));
+        Alcotest.(check bool) "summary" true (has "certificate: 1 structural, 0 metric, 0 trusted, 1 unproved"));
+  ]
+
+(* ── Phase 2: metrics, `@[decreases]`, SMT obligations (group
+   `termination-metric`) ────────────────────────────────────────────────
+
+   Each fixture is desugared and typechecked, then checked by
+   [Refine_check.check_module] exactly as the driver does; the verdicts are
+   read back as the certificate [Refine_term.last_certs] holds for a unit,
+   the [Termination] ledger entries, and the diagnostics.  [~all] is
+   `--termination-report`'s demand-everything mode; without it only an
+   `@[decreases]` SCC is checked (decision D2).  These need z3. *)
+
+module Ob = March_refinecheck.Obligation
+module E = March_errors.Errors
+
+let z3_available () =
+  match March_refine.Solver.create () with
+  | None -> false
+  | Some s ->
+    March_refine.Solver.close s;
+    true
+
+let zcase name f = Alcotest.test_case name `Quick (fun () -> if z3_available () then f () else Alcotest.skip ())
+
+type run = {
+  certs : (string * string) list;  (** unit name -> phase-2 certificate *)
+  terms : Ob.t list;  (** the Termination obligations *)
+  diags : E.diagnostic list;
+}
+
+let run ?(all = false) src : run =
+  let d = desugar src in
+  let _errs, type_map = March_typecheck.Typecheck.check_module d in
+  let ctx = E.create () in
+  Ob.reset ();
+  RT.check_all := all;
+  Fun.protect
+    ~finally:(fun () -> RT.check_all := false)
+    (fun () -> March_refinecheck.Refine_check.check_module ~type_map ctx d);
+  let t = RT.analyze ~type_map ~file_mod:d.March_ast.Ast.mod_name.March_ast.Ast.txt d.March_ast.Ast.mod_decls in
+  let certs =
+    Array.to_list t.RT.graph.RT.units
+    |> List.filter_map (fun (u : RT.unit_) ->
+           Option.map (fun c -> (u.RT.u_name, c)) (Hashtbl.find_opt RT.last_certs u.RT.u_span))
+  in
+  { certs; terms = List.filter (fun (o : Ob.t) -> o.Ob.kind = Ob.Termination) (Ob.all ());
+    diags = ctx.E.diagnostics }
+
+let mcert r name = Option.value ~default:"<none>" (List.assoc_opt name r.certs)
+
+let check_mcert r name want = Alcotest.(check string) (name ^ " certificate") want (mcert r name)
+
+let diags_with code r = List.filter (fun (d : E.diagnostic) -> d.E.code = code) r.diags
+
+let n_with code r = List.length (diags_with code r)
+
+let verdicts r = List.map (fun (o : Ob.t) -> Ob.verdict_name o.Ob.verdict) r.terms
+
+let fib = t5
+
+let down_le = {|
+  fn down_le(n : Int) : Int do if n <= 0 do 0 else down_le(n - 1) end end
+|}
+
+let down_ann = {|
+  @[decreases(n)]
+  fn down(n : Int) : Int do if n == 0 do 0 else down(n - 1) end end
+|}
+
+let evod_refined = {|
+  fn ev(n : {Int | _ >= 0}) : Bool do if n == 0 do true else od(n - 1) end end
+  fn od(n : {Int | _ >= 0}) : Bool do if n == 0 do false else ev(n - 1) end end
+|}
+
+let ack_le = {|
+  @[decreases(m, n)]
+  fn ack(m : Int, n : Int) : Int do
+    if m <= 0 do n + 1
+    else if n <= 0 do ack(m - 1, 1)
+    else ack(m - 1, ack(m, n - 1)) end end
+  end
+|}
+
+let ack_eq = {|
+  @[decreases(m, n)]
+  fn ack(m : Int, n : Int) : Int do
+    if m == 0 do n + 1
+    else if n == 0 do ack(m - 1, 1)
+    else ack(m - 1, ack(m, n - 1)) end end
+  end
+|}
+
+(* `f(2, 2) -> f(3, 1) -> f(2, 2)`: diverges.  The second component falls at
+   the first edge only while the first RISES, which is no lexicographic
+   decrease; the REJECT control of the lex formula's `x1 == y1` guard. *)
+let lex_diverging = {|
+  @[decreases(m, n)]
+  fn f(m : Int, n : Int) : Int do
+    if m <= 0 || n <= 0 do 0 else f(m + 1, n - 1) + f(m - 1, n + 1) end
+  end
+|}
+
+(* A recursive call in a match-arm guard: the refinement walk never visits
+   a guard, so the obligation is never discharged.  A site that is never
+   reached is unproved, never proved by default. *)
+let guard_call = {|
+  @[decreases(n)]
+  fn q(n : Int) : Int do
+    match n do
+      k when k > 0 && q(k - 1) > 0 -> 1
+      _ -> 0
+    end
+  end
+|}
+
+let up_ge = {|
+  @[decreases(100 - n)]
+  fn up(n : Int) : Int do if n >= 100 do 0 else up(n + 1) end end
+|}
+
+let up_eq = {|
+  @[decreases(100 - n)]
+  fn up(n : Int) : Int do if n == 100 do 0 else up(n + 1) end end
+|}
+
+(* A recursion whose metric parameter is rebound before the call: the call
+   passes the entry `n` plus 4, so `f` never stops, though `n - 1 < n` holds
+   of the INNER `n`.  The REJECT control of the shadowing rule. *)
+let shadowed = {|
+  @[decreases(n)]
+  fn f(n : Int) : Int do
+    if n <= 0 do 0
+    else
+      let n = n + 5
+      f(n - 1)
+    end
+  end
+|}
+
+(* The nested call's result is the argument at the decreasing position: an
+   arbitrary value, so nothing is proved (the REJECT control of the opaque
+   nested-call argument). *)
+let nested_arg = {|
+  @[decreases(n)]
+  fn h(n : Int) : Int do if n <= 0 do 0 else h(h(n - 1)) end end
+|}
+
+let positive_metric = {|
+  type T = T(Int -> Int)
+  fn u(t : T, n : Int) : Int do
+    if n <= 0 do 0
+    else
+      match t do
+        T(g) -> g(n) + u(t, n - 1)
+      end
+    end
+  end
+|}
+
+let verified_annotated = {|
+  cap verified
+  @[decreases(n)]
+  fn down(n : Int) : Int do if n == 0 do 0 else down(n - 1) end end
+|}
+
+let verified_unannotated = {|
+  cap verified
+  fn down(n : Int) : Int do if n == 0 do 0 else down(n - 1) end end
+|}
+
+let invalid_local = {|
+  @[decreases(k)]
+  fn f(n : Int) : Int do
+    let k = n
+    if n <= 0 do 0 else f(n - 1) end
+  end
+|}
+
+let invalid_float = {|
+  @[decreases(x)]
+  fn f(x : Float, n : Int) : Int do if n <= 0 do 0 else f(x, n - 1) end end
+|}
+
+let invalid_adt = {|
+  @[decreases(xs)]
+  fn f(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + f(t)
+    end
+  end
+|}
+
+let len_metric = {|
+  @[decreases(len(xs) - i)]
+  fn scan(xs : List(Int), i : {Int | _ >= 0}, acc : Int) : Int do
+    if i >= List.length(xs) do acc else scan(xs, i + 1, acc + 1) end
+  end
+|}
+
+let lengths_differ = {|
+  @[decreases(n, 0)]
+  fn ev(n : Int) : Bool do if n <= 0 do true else od(n - 1) end end
+  @[decreases(n)]
+  fn od(n : Int) : Bool do if n <= 0 do false else ev(n - 1) end end
+|}
+
+let non_recursive = {|
+  @[decreases(n)]
+  fn f(n : Int) : Int do n + 1 end
+|}
+
+let typo = {|
+  @[decrease(n)]
+  fn f(n : Int) : Int do if n <= 0 do 0 else f(n - 1) end end
+  @[trusted]
+  @[no_alloc(warn)]
+  fn g(n : Int) : Int do n end
+|}
+
+let cache_src metric = Printf.sprintf {|
+  @[decreases(%s)]
+  fn d(n : Int) : Int do if n <= 0 do 0 else d(n - 1) end end
+|} metric
+
+let parse_attrs src =
+  match (parse (m src)).March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DMod (_, _, [ March_ast.Ast.DFn (fd, _) ], _) ] | [ March_ast.Ast.DFn (fd, _) ] ->
+    (fd.March_ast.Ast.fn_attrs, List.map (fun (n, es) -> (n, List.length es)) fd.March_ast.Ast.fn_attr_args)
+  | _ -> ([ "<shape>" ], [])
+
+let parse_error src =
+  match parse (m src) with
+  | _ -> "<parsed>"
+  | exception E.ParseError (msg, _, _) -> msg
+
+let metric_suite =
+  [ zcase "t5 fib: certified by the default metric `n`, 2 termination obligations proved" (fun () ->
+        let r = run ~all:true (m fib) in
+        check_mcert r "fib" "metric";
+        Alcotest.(check (list string)) "two proved" [ "proved"; "proved" ] (verdicts r));
+    zcase "t4 down: unproved, the ledger skip names the model n = -1" (fun () ->
+        let r = run ~all:true (m t4) in
+        check_mcert r "down" "unproved:not-decreasing";
+        match r.terms with
+        | [ o ] ->
+          Alcotest.(check string) "callee" "down" o.Ob.callee;
+          (match o.Ob.verdict with
+           | Ob.Skipped (Ob.Not_decreasing cx) ->
+             Alcotest.(check bool) ("model " ^ cx) true (contains cx "n = -1")
+           | v -> Alcotest.failf "expected a not-decreasing skip, got %s" (Ob.verdict_name v))
+        | os -> Alcotest.failf "expected one termination obligation, got %d" (List.length os));
+    zcase "t4 down, unannotated: no termination_unproved (D2)" (fun () ->
+        let r = run ~all:true (m t4) in
+        Alcotest.(check int) "no warning" 0 (n_with E.Code.termination_unproved r));
+    zcase "t4 down, annotated: termination_unproved warning with the witness" (fun () ->
+        let r = run (m down_ann) in
+        match diags_with E.Code.termination_unproved r with
+        | [ d ] ->
+          Alcotest.(check bool) "a warning" true (d.E.severity = E.Warning);
+          Alcotest.(check bool) d.E.message true
+            (contains d.E.message "`down(n - 1)` is not shown to decrease `n`: e.g. n = -1")
+        | ds -> Alcotest.failf "expected one termination_unproved, got %d" (List.length ds));
+    zcase "down_le: a `<= 0` exit is certified" (fun () ->
+        check_mcert (run ~all:true (m down_le)) "down_le" "metric");
+    zcase "t3 ev/od: refined `{Int | _ >= 0}` certified as one SCC; unrefined unproved" (fun () ->
+        let r = run ~all:true (m evod_refined) in
+        check_mcert r "ev" "metric";
+        check_mcert r "od" "metric";
+        Alcotest.(check (list string)) "both edges obliged" [ "proved"; "proved" ] (verdicts r);
+        let r = run ~all:true (m t3) in
+        check_mcert r "ev" "unproved:not-decreasing";
+        check_mcert r "od" "unproved:not-decreasing");
+    zcase "t8 ack: `@[decreases(m, n)]` with `<= 0` exits certified; with `== 0` exits unproved" (fun () ->
+        check_mcert (run (m ack_le)) "ack" "metric";
+        check_mcert (run (m ack_eq)) "ack" "unproved:not-decreasing");
+    zcase "lex: a later component falling while an earlier one rises is no decrease" (fun () ->
+        check_mcert (run (m lex_diverging)) "f" "unproved:not-decreasing");
+    zcase "t9 / t9b: bits certified; bits1, same, grow refuted" (fun () ->
+        check_mcert (run ~all:true (m t9)) "bits" "metric";
+        let r = run ~all:true (m t9b) in
+        List.iter (fun n -> check_mcert r n "unproved:not-decreasing") [ "bits1"; "same"; "grow" ];
+        List.iter
+          (fun (o : Ob.t) ->
+            match o.Ob.verdict with
+            | Ob.Skipped (Ob.Not_decreasing cx) ->
+              Alcotest.(check bool) (o.Ob.callee ^ " refuted with a model: " ^ cx) true (contains cx "n = ")
+            | v -> Alcotest.failf "%s: expected not-decreasing, got %s" o.Ob.callee (Ob.verdict_name v))
+          r.terms);
+    zcase "t2 up: `@[decreases(100 - n)]` certified with guard `n >= 100`, unproved with `== 100`" (fun () ->
+        check_mcert (run (m up_ge)) "up" "metric";
+        check_mcert (run (m up_eq)) "up" "unproved:not-decreasing");
+    zcase "a `len` metric over a list and an index" (fun () ->
+        check_mcert (run (m len_metric)) "scan" "metric");
+    zcase "shadowing: a metric parameter rebound before the call is not trusted" (fun () ->
+        let r = run (m shadowed) in
+        check_mcert r "f" "unproved:shadowed";
+        Alcotest.(check int) "warned" 1 (n_with E.Code.termination_unproved r));
+    zcase "a call the walk never reaches (a match-arm guard) is unproved" (fun () ->
+        let r = run (m guard_call) in
+        check_mcert r "q" "unproved:not-decreasing";
+        match diags_with E.Code.termination_unproved r with
+        | [ d ] ->
+          Alcotest.(check bool) d.E.message true (contains d.E.message "the checker did not reach this call")
+        | ds -> Alcotest.failf "expected one termination_unproved, got %d" (List.length ds));
+    zcase "a nested recursive call's result is an arbitrary value" (fun () ->
+        check_mcert (run (m nested_arg)) "h" "unproved:not-decreasing");
+    case "parser: p18 parses, `@[no_alloc(warn)]` unchanged, `@[foo(1 + 2)]` names `foo`" (fun () ->
+        Alcotest.(check (pair (list string) (list (pair string int))))
+          "decreases(m, n)" ([ "decreases" ], [ ("decreases", 2) ])
+          (parse_attrs "@[decreases(m, n)]\nfn ack(m : Int, n : Int) : Int do 0 end");
+        Alcotest.(check (pair (list string) (list (pair string int))))
+          "decreases(len(xs) - i)" ([ "decreases" ], [ ("decreases", 1) ])
+          (parse_attrs "@[decreases(len(xs) - i)]\nfn s(xs : List(Int), i : Int) : Int do 0 end");
+        Alcotest.(check (pair (list string) (list (pair string int))))
+          "no_alloc(warn)" ([ "no_alloc:warn" ], [])
+          (parse_attrs "@[no_alloc(warn)]\nfn f(n : Int) : Int do n end");
+        Alcotest.(check (pair (list string) (list (pair string int))))
+          "no_alloc(transient)" ([ "no_alloc:transient" ], [])
+          (parse_attrs "@[no_alloc(transient)]\nfn f(n : Int) : Int do n end");
+        let msg = parse_error "@[foo(1 + 2)]\nfn f(n : Int) : Int do n end" in
+        Alcotest.(check bool) ("names foo: " ^ msg) true (contains msg "`@[foo(...)]`"));
+    zcase "invalid_decreases: a local, a Float, a bare ADT parameter, one error each" (fun () ->
+        List.iter
+          (fun (label, src, frag) ->
+            let ds = diags_with E.Code.invalid_decreases (run (m src)) in
+            Alcotest.(check int) (label ^ ": one error") 1 (List.length ds);
+            Alcotest.(check bool) (label ^ ": " ^ (List.hd ds).E.message) true
+              (contains (List.hd ds).E.message frag))
+          [ ("local", invalid_local, "`k` is not a parameter of `f`");
+            ("float", invalid_float, "`x` is a Float");
+            ("adt", invalid_adt, "`xs` is a `List`, not an Int") ]);
+    zcase "invalid_decreases: metrics of different lengths in one cycle" (fun () ->
+        let r = run (m lengths_differ) in
+        Alcotest.(check int) "one per annotated member" 2 (n_with E.Code.invalid_decreases r);
+        check_mcert r "ev" "unproved:invalid-decreases";
+        Alcotest.(check int) "no termination_unproved on top" 0 (n_with E.Code.termination_unproved r));
+    zcase "`@[decreases]` on a non-recursive function has no effect" (fun () ->
+        Alcotest.(check int) "attribute_no_effect" 1 (n_with E.Code.attribute_no_effect (run (m non_recursive))));
+    zcase "t11c omega: `w` unproved; a positive `T(Int -> Int)` does not block a metric" (fun () ->
+        check_cert "w" omega "unproved:non-positive";
+        check_mcert (run ~all:true (m positive_metric)) "u" "metric");
+    zcase "cap_verified_annotated: annotated + unproved is an error; unannotated is silent" (fun () ->
+        let r = run (m verified_annotated) in
+        (match diags_with E.Code.termination_unproved r with
+         | [ d ] -> Alcotest.(check bool) "an error" true (d.E.severity = E.Error)
+         | ds -> Alcotest.failf "expected one termination_unproved, got %d" (List.length ds));
+        let r = run (m verified_unannotated) in
+        Alcotest.(check int) "unannotated: nothing" 0 (n_with E.Code.termination_unproved r);
+        Alcotest.(check int) "unannotated: no obligation" 0 (List.length r.terms));
+    zcase "kind_counted: `by kind:` prints the termination count, and only when there is one" (fun () ->
+        let r = run ~all:true (m fib) in
+        Alcotest.(check string) "with" "  by kind: 0 precondition, 0 postcondition, 0 division, 2 termination"
+          (Ob.by_kind_line r.terms);
+        Alcotest.(check string) "without" "  by kind: 0 precondition, 0 postcondition, 0 division"
+          (Ob.by_kind_line []));
+    zcase "cache: `@[decreases(n)]` and `@[decreases(n - 2)]` keep independent verdicts" (fun () ->
+        for _ = 1 to 2 do
+          check_mcert (run (m (cache_src "n"))) "d" "metric";
+          check_mcert (run (m (cache_src "n - 2"))) "d" "unproved:not-decreasing"
+        done);
+    zcase "default off (D2): an unannotated module files no termination obligation" (fun () ->
+        let r = run (m (fib ^ t4)) in
+        Alcotest.(check int) "no obligation" 0 (List.length r.terms);
+        Alcotest.(check (list (pair string string))) "no certificate" [] r.certs);
+    zcase "D6: an unknown attribute warns with a did-you-mean; known ones do not" (fun () ->
+        match diags_with E.Code.unknown_attribute (run (m typo)) with
+        | [ d ] -> Alcotest.(check bool) d.E.message true (contains d.E.message "did you mean `@[decreases]`?")
+        | ds -> Alcotest.failf "expected one unknown_attribute, got %d" (List.length ds));
+    zcase "report: metric certificates and the trusted builtin callees" (fun () ->
+        let src =
+          m
+            ("extern \"rt\" : Cap(Ffi) do\n    fn ext_tick(n : Int) : Int = \"ffi_tick\"\n  end\n"
+           ^ "  fn ticks(n : Int) : Int do if n <= 0 do 0 else ext_tick(n) + string_length(int_to_string(n)) + ticks(n - 1) end end\n"
+           ^ fib ^ t4)
+        in
+        ignore (run ~all:true src);
+        let d = desugar src in
+        let t = RT.analyze ~file_mod:d.March_ast.Ast.mod_name.March_ast.Ast.txt d.March_ast.Ast.mod_decls in
+        let lines = RT.report_lines t in
+        let has s = List.exists (fun l -> contains l s) lines in
+        Alcotest.(check bool) "fib metric" true (has "\tfib\ttop\tscc=1\tcert=metric");
+        Alcotest.(check bool) "down unproved" true (has "\tdown\ttop\tscc=1\tcert=unproved:not-decreasing");
+        Alcotest.(check bool) ("summary: " ^ String.concat " | " lines) true
+          (has "certificate: 0 structural, 2 metric, 0 trusted, 1 unproved");
+        Alcotest.(check bool) ("trusted: " ^ String.concat " | " lines) true
+          (has "trusted: 3 builtin or extern callees: ext_tick, int_to_string, string_length"));
   ]

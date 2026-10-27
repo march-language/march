@@ -4642,6 +4642,16 @@ let check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~(label : string
         then verdict := false)
     ts
 
+(* Termination obligations (termination design §3.4, phase 2), by the span
+   of the recursive call they belong to: [check_module] fills it from
+   [Refine_term.plan_metrics] before the walk, and [visit] discharges each one
+   when it reaches that call, with the path and scope facts that reach it.
+   The verdicts are collected per span ([term_verdicts]: a call the walk
+   visits twice must prove both times).  Empty outside [check_module]'s walk. *)
+let term_sites : (A.span, Refine_term.metric_site) Hashtbl.t ref = ref (Hashtbl.create 1)
+
+let term_verdicts : (A.span, Obligation.verdict list) Hashtbl.t = Hashtbl.create 16
+
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) (e : A.expr) : unit =
   let go = visit ~root errctx defs ctx path lets sc re cb ce in
@@ -4654,6 +4664,18 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
    | _ -> ());
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
+    (match Hashtbl.find_opt !term_sites sp with
+     | Some site ->
+       let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
+       let out = ref None in
+       check_call cx ~span:sp ~callee:fname ~subject:Decreases ~kind:Obligation.Termination
+         ~verdict_out:out site.Refine_term.ms_sig site.Refine_term.ms_args site.Refine_term.ms_rp;
+       (match !out with
+        | Some v ->
+          Hashtbl.replace term_verdicts sp
+            (v :: Option.value ~default:[] (Hashtbl.find_opt term_verdicts sp))
+        | None -> ())
+     | None -> ());
     let resolved = resolve_call_arity ctx defs fname (List.length args) in
     let callee =
       match resolved with Some (Some sg) -> Some sg | _ -> List.assoc_opt fname cb
@@ -7656,6 +7678,153 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
    foreign and the alias stays enabled.  So the default is safe in the sense
    that no non-stdlib definition can ever be mistaken for the stdlib's, not in
    the sense that it turns the feature off. *)
+(* ── Unknown attribute names (termination design D6) ─────────────────────
+   An attribute the compiler does not know is otherwise accepted in silence,
+   so `@[decrease(n)]` would look like a metric that found nothing.  These are
+   every `fn` attribute some pass reads (the name before a `:` payload). *)
+let known_fn_attributes =
+  [ "assume"; "decreases"; "measure"; "no_alloc"; "no_warn_recursion"; "trusted";
+    "trusted_linear"; "vectorize" ]
+
+(* Levenshtein distance, for the did-you-mean. *)
+let edit_distance (a : string) (b : string) : int =
+  let la = String.length a and lb = String.length b in
+  let d = Array.make_matrix (la + 1) (lb + 1) 0 in
+  for i = 0 to la do d.(i).(0) <- i done;
+  for j = 0 to lb do d.(0).(j) <- j done;
+  for i = 1 to la do
+    for j = 1 to lb do
+      let c = if a.[i - 1] = b.[j - 1] then 0 else 1 in
+      d.(i).(j) <- min (min (d.(i - 1).(j) + 1) (d.(i).(j - 1) + 1)) (d.(i - 1).(j - 1) + c)
+    done
+  done;
+  d.(la).(lb)
+
+let warn_unknown_attributes errctx (decls : A.decl list) : unit =
+  let check (fd : A.fn_def) =
+    List.iter
+      (fun a ->
+        let name = match String.index_opt a ':' with Some i -> String.sub a 0 i | None -> a in
+        if not (List.mem name known_fn_attributes) then begin
+          let near =
+            List.filter (fun k -> edit_distance k name <= 2) known_fn_attributes
+            |> List.sort (fun x y -> compare (edit_distance x name) (edit_distance y name))
+          in
+          Err.warning ~code:Err.Code.unknown_attribute errctx ~span:fd.A.fn_name.A.span
+            (Printf.sprintf "unknown attribute `@[%s]` on `%s`: it is ignored.%s" name
+               fd.A.fn_name.A.txt
+               (match near with
+                | k :: _ -> Printf.sprintf "\nnote: did you mean `@[%s]`?" k
+                | [] ->
+                  Printf.sprintf "\nnote: the function attributes are %s."
+                    (String.concat ", " (List.map (Printf.sprintf "`@[%s]`") known_fn_attributes))))
+        end)
+      fd.A.fn_attrs
+  in
+  let rec go decls =
+    List.iter
+      (function
+        | A.DFn (fd, _) -> check fd
+        | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> go ds
+        | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> check fd) idf.A.impl_methods
+        | _ -> ())
+      decls
+  in
+  go decls
+
+(* ── Termination, phase 2: the messages ─────────────────────────────────── *)
+
+(* Whether the function declared at a span sits in a `cap verified` decl list
+   (the rule [visit_decls] applies: each list decides for itself, a
+   `describe` block inherits). *)
+let verified_fn_spans (decls : A.decl list) : (A.span, bool) Hashtbl.t =
+  let tbl = Hashtbl.create 64 in
+  let rec go v decls =
+    List.iter
+      (function
+        | A.DFn (fd, _) -> Hashtbl.replace tbl fd.A.fn_name.A.span v
+        | A.DMod (_, _, ds, _) -> go (decls_declare_verified ds) ds
+        | A.DDescribe (_, ds, _) -> go v ds
+        | _ -> ())
+      decls
+  in
+  go (decls_declare_verified decls) decls;
+  tbl
+
+let metric_str (m : A.expr list) : string =
+  match m with
+  | [ e ] -> pred_str e
+  | es -> "(" ^ String.concat ", " (List.map pred_str es) ^ ")"
+
+(* `termination_unproved` (§3.4) for each ANNOTATED SCC the certificate did
+   not prove (decision D2: never for an unannotated one): a warning, or an
+   error under `cap verified`, the one escalation phase 2 has (an annotated
+   `@[decreases]` that fails, §6). *)
+let report_termination errctx (t : Refine_term.t) (pl : Refine_term.plan) (certs : string array)
+    fails ~(verified : A.span -> bool) : unit =
+  let g = t.Refine_term.graph in
+  Array.iteri
+    (fun si members ->
+      let annotated =
+        List.filter (fun u -> g.Refine_term.units.(u).Refine_term.u_decreases <> None) members
+      in
+      let cert = certs.(si) in
+      if annotated <> [] && String.length cert > 9 && String.sub cert 0 9 = "unproved:"
+         && cert <> "unproved:invalid-decreases"
+      then begin
+        let un = g.Refine_term.units.(List.hd annotated) in
+        let name = un.Refine_term.u_name in
+        let strict = List.exists (fun u -> verified g.Refine_term.units.(u).Refine_term.u_span) annotated in
+        let emit span text =
+          let text =
+            text
+            ^ "\nnote: a metric must stay at least 0 and fall at every recursive call (left to \
+               right, for several components). Guard the recursion (an exit such as `n <= 0`), \
+               refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall."
+          in
+          if strict then Err.error ~code:Err.Code.termination_unproved errctx ~span text
+          else Err.warning ~code:Err.Code.termination_unproved errctx ~span text
+        in
+        match fails.(si) with
+        | Some ((site : Refine_term.metric_site), v) ->
+          let e = site.Refine_term.ms_edge in
+          let callee = g.Refine_term.units.(e.Refine_term.e_dst).Refine_term.u_name in
+          let call = pred_str (A.EApp (A.EVar { A.txt = callee; A.span = e.Refine_term.e_span }, e.Refine_term.e_args, e.Refine_term.e_span)) in
+          let why =
+            match v with
+            | Some (Obligation.Skipped (Obligation.Not_decreasing cx)) when cx <> "" -> ": e.g. " ^ cx
+            | None -> " (the checker did not reach this call)"
+            | _ -> ""
+          in
+          emit e.Refine_term.e_span
+            (Printf.sprintf
+               "`%s` is not shown to terminate: the recursive call `%s` is not shown to decrease \
+                `%s`%s"
+               name call (metric_str site.Refine_term.ms_caller_metric) why)
+        | None ->
+          let r = String.sub cert 9 (String.length cert - 9) in
+          let why =
+            match String.index_opt r ':' with
+            | Some i when String.sub r 0 i = "unannotated" ->
+              Printf.sprintf
+                "`%s`, in the same recursive cycle, has no `@[decreases]` with as many components"
+                (String.sub r (i + 1) (String.length r - i - 1))
+            | _ -> (
+              match r with
+              | "reference" -> "it is passed as a function value inside its own recursion, so no metric can be checked there"
+              | "non-positive" -> "it calls a function value of a type that is not strictly positive"
+              | "no-int-parameter" -> "a function in its recursive cycle has no Int parameter to measure"
+              | "shadowed" ->
+                "a recursive call sits under a binding that reuses a parameter the metric names, so \
+                 the metric would read the inner value"
+              | r -> r)
+          in
+          emit un.Refine_term.u_span
+            (Printf.sprintf "`%s` is not shown to terminate: %s" name why)
+      end)
+    g.Refine_term.sccs;
+  ignore pl
+
 let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     ?(stdlib_files : string list = [])
     ?(audit : ((Refine_audit.site * Refine_audit.disposition) list -> unit) option)
@@ -7865,6 +8034,12 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         | c :: _ when measure_body_nonneg name known c.A.fc_body -> name :: known
         | _ -> known)
       [] mfns;
+  (* The termination graph, built at most once per module: for the measure
+     gate below and for phase 2's metric plan (before the walk). *)
+  let term =
+    lazy (Refine_term.analyze ?type_map ~file_mod:m.A.mod_name.A.txt m.A.mod_decls)
+  in
+  warn_unknown_attributes errctx m.A.mod_decls;
   if measure_axioms then begin
     (* Measure symbols are not module-qualified, so two `@[measure]`s with one
        name (a user's and a stdlib module's) would each emit a `declare-fun`
@@ -7896,9 +8071,6 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
        the self-call rule's own wording; the self-call rule is kept, so the
        union is never weaker than before.  The graph is built only when there
        is a measure to gate. *)
-    let term =
-      lazy (Refine_term.analyze ?type_map ~file_mod:m.A.mod_name.A.txt m.A.mod_decls)
-    in
     let not_structural =
       "is not structurally recursive (every recursive call must be on a component of \
        the matched parameter)"
@@ -7962,9 +8134,69 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   gate_unverified_posts ~root errctx defs m.A.mod_decls;
   ret_elem_demand := None;
   gate_elem_returns ~root defs m.A.mod_decls;
+  (* Termination, phase 2 (design §3.3-§3.5, §9): plan the metric
+     obligations of every DEMANDED recursive SCC (one carrying
+     `@[decreases]`, or user code under `--termination-report`) before the
+     walk, which discharges them at their calls ([term_sites]); decide the
+     certificates after it.  Report-only (D2): nothing here feeds the
+     induction hypothesis, and no SCC is planned in a module with no
+     annotation unless the report asked for it. *)
+  Hashtbl.reset Refine_term.last_certs;
+  Hashtbl.reset term_verdicts;
+  let rec has_decreases decls =
+    List.exists
+      (function
+        | A.DFn (fd, _) -> List.mem_assoc "decreases" fd.A.fn_attr_args
+        | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> has_decreases ds
+        | _ -> false)
+      decls
+  in
+  let term_plan =
+    if !Refine_term.check_all || has_decreases m.A.mod_decls then begin
+      let t = Lazy.force term in
+      let pl =
+        Refine_term.plan_metrics ?type_map ~is_measure
+          ~demanded:(fun u ->
+            !Refine_term.check_all && not (is_stdlib_source_file u.Refine_term.u_span.A.file))
+          t
+      in
+      List.iter
+        (fun (span, msg) ->
+          Err.error ~code:Err.Code.invalid_decreases errctx ~span ("@[decreases]: " ^ msg))
+        pl.Refine_term.pl_invalid;
+      List.iter
+        (fun u ->
+          let un = t.Refine_term.graph.Refine_term.units.(u) in
+          Err.warning ~code:Err.Code.attribute_no_effect errctx ~span:un.Refine_term.u_span
+            (Printf.sprintf
+               "`@[decreases]` on `%s` has no effect: `%s` is not recursive, so there is no                 recursive call for the metric to decrease at."
+               un.Refine_term.u_name un.Refine_term.u_name))
+        pl.Refine_term.pl_no_effect;
+      term_sites := pl.Refine_term.pl_sites;
+      Some (t, pl)
+    end
+    else None
+  in
   (* Always walk: a function may have a refined *return* (postcondition) even
      with no refined parameters, so it won't appear in [defs]. *)
-  visit_decls ~root errctx defs rctx0 m.A.mod_decls;
+  Fun.protect ~finally:(fun () -> term_sites := Hashtbl.create 1) (fun () ->
+      visit_decls ~root errctx defs rctx0 m.A.mod_decls);
+  (match term_plan with
+   | None -> ()
+   | Some (t, pl) ->
+     let certs, fails =
+       Refine_term.finish t pl ~verdicts:(fun sp ->
+           Option.value ~default:[] (Hashtbl.find_opt term_verdicts sp))
+     in
+     let g = t.Refine_term.graph in
+     Array.iter
+       (fun (u : Refine_term.unit_) ->
+         let c = certs.(g.Refine_term.scc_of.(u.Refine_term.u_id)) in
+         if c <> "" then Hashtbl.replace Refine_term.last_certs u.Refine_term.u_span c)
+       g.Refine_term.units;
+     let vtbl = verified_fn_spans m.A.mod_decls in
+     report_termination errctx t pl certs fails ~verified:(fun sp ->
+         Option.value ~default:false (Hashtbl.find_opt vtbl sp)));
   (* Vocabulary warning: runs last so [registered_measures] (set at the top of
      this function) is already populated — otherwise a user `@[measure]`
      would look unrecognized and warn spuriously. *)

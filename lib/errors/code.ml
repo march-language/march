@@ -60,6 +60,7 @@ let field_access_non_record = "field_access_non_record"
 let import_cap_missing = "import_cap_missing"
 let internal_error = "internal_error"
 let invalid_cap_scope = "invalid_cap_scope"
+let invalid_decreases = "invalid_decreases"
 let invalid_measure = "invalid_measure"
 let invalid_type_bound = "invalid_type_bound"
 let io_not_allowed = "io_not_allowed"
@@ -161,6 +162,7 @@ let syntax_error = "syntax_error"
 let template_fragment_position = "template_fragment_position"
 let template_unsafe_interpolation = "template_unsafe_interpolation"
 let template_unterminated = "template_unterminated"
+let termination_unproved = "termination_unproved"
 let then_keyword = "then_keyword"
 let transition_via_mismatch = "transition_via_mismatch"
 let trusted_linear_invalid = "trusted_linear_invalid"
@@ -171,6 +173,7 @@ let typed_hole = "typed_hole"
 let unbound_variable = "unbound_variable"
 let undeclared_requirement = "undeclared_requirement"
 let undeclared_transition = "undeclared_transition"
+let unknown_attribute = "unknown_attribute"
 let unknown_capability = "unknown_capability"
 let unknown_constructor = "unknown_constructor"
 let unknown_derive = "unknown_derive"
@@ -234,6 +237,7 @@ let all = [
   import_cap_missing;
   internal_error;
   invalid_cap_scope;
+  invalid_decreases;
   invalid_measure;
   invalid_type_bound;
   io_not_allowed;
@@ -335,6 +339,7 @@ let all = [
   template_fragment_position;
   template_unsafe_interpolation;
   template_unterminated;
+  termination_unproved;
   then_keyword;
   transition_via_mismatch;
   trusted_linear_invalid;
@@ -345,6 +350,7 @@ let all = [
   unbound_variable;
   undeclared_requirement;
   undeclared_transition;
+  unknown_attribute;
   unknown_capability;
   unknown_constructor;
   unknown_derive;

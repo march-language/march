@@ -27,6 +27,19 @@ git log is authoritative for exact commits.
   lexicographically, through a lambda or a function value, or with no metric at all
   (`spin(n)`). It is a report only and changes no verdict. It is the first step of
   termination checking (`specs/2026-10-26-termination-checking-design.md`).
+- **`@[decreases(e, ...)]`: a termination metric for a recursive function.** The checker
+  proves with the solver that the metric stays at least 0 and falls at every recursive
+  call (several components are compared left to right, as for Ackermann's
+  `@[decreases(m, n)]`). An annotated function whose metric is not shown to fall gets a
+  `termination_unproved` warning with a counterexample (`down(n - 1)` with an `n == 0`
+  exit: `e.g. n = -1`), an error in a `cap verified` module. Unannotated recursion is
+  never warned about; `--termination-report` checks it too, with the first `Int`
+  parameter as the default metric (`fib` is `cert=metric`). A metric outside the
+  fragment (a local, a `Float`, a bare list) is an `invalid_decreases` error.
+  `--refine-report`'s `by kind:` line counts `termination` obligations when there are
+  any. Nothing uses a proved metric yet.
+- **An unknown function attribute is warned about** (`unknown_attribute`), with a
+  did-you-mean: `@[decrease(n)]` used to be ignored in silence.
 - **Refinements: a definer passed through to `Map.filter` proves its return.**
   `fn mfilt(m, keep : k -> v -> Bool[p], cmp) : Map(k[p], v[p]) do Map.filter(m, keep,
   cmp) end` is proved, and so are its callers' demands. The callee's `p` and the

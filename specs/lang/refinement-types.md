@@ -4073,7 +4073,8 @@ term	A	structural	prog.march:5:5	len2	top	scc=1	cert=structural
 term	?	none	prog.march:11:5	spin	top	scc=1	cert=unproved:no-structural-arg
 term	F	value	prog.march:14:5	w	top	scc=1	cert=unproved:non-positive
   by class: ?=1 A=1 C=1 F=1
-  certificate: 1 structural, 3 unproved
+  certificate: 1 structural, 0 metric, 0 trusted, 3 unproved
+  trusted: 0 builtin or extern callees
 ```
 
 There is one line per recursive *unit* of your code. A unit is a top-level function, a
@@ -4142,8 +4143,129 @@ fn omega() : Int do w(Fix(w)) end    -- never returns
 `type T = T(Int -> Int)` is positive and blocks nothing.
 
 The reasons are `no-structural-arg`, `not-same-family`, `reference` and `non-positive`.
-`Int` recursion (`down(n - 1)`) is always `unproved` today; a metric for it is the
-next step of the design.
+`Int` recursion (`down(n - 1)`) is the job of a metric, below.
+
+### Metrics and `@[decreases]`
+
+A cycle that is not structural can still be shown to terminate by a **metric**: a
+number, computed from the parameters, that stays at least 0 and falls at every
+recursive call. The checker proves this with the solver at each recursive call,
+using the same facts it uses for a precondition there: the guards on the way to
+the call and the parameters' refinements.
+
+Without an annotation, the metric is the function's first `Int` parameter.
+This `fib` needs nothing written:
+
+```march
+fn fib(n : Int) : Int do
+  if n < 2 do n else fib(n - 1) + fib(n - 2) end
+end
+```
+
+At each call, `n >= 2` holds, so `n - 1` and `n - 2` are at least 0 and below `n`.
+
+Where the first `Int` parameter is not the right measure, write one with
+`@[decreases(...)]`:
+
+```march
+@[decreases(100 - n)]
+fn up(n : Int) : Int do
+  if n >= 100 do 0 else up(n + 1) end
+end
+```
+
+A metric may use the function's parameters, `Int` literals, `+`, `-`, `*`, `/`
+by a positive literal, and measures such as `len`. A list or another data type is
+not a number by itself, so measure it:
+
+```march
+@[decreases(len(xs) - i)]
+fn scan(xs : List(Int), i : {Int | _ >= 0}, acc : Int) : Int do
+  if i >= List.length(xs) do acc else scan(xs, i + 1, acc + 1) end
+end
+```
+
+Several metrics, separated by commas, are compared left to right: a call is fine
+if the first one falls (and stays at least 0), or the first stays equal and the
+rest fall by the same rule. That covers Ackermann's function:
+
+```march
+@[decreases(m, n)]
+fn ack(m : Int, n : Int) : Int do
+  if m <= 0 do n + 1
+  else if n <= 0 do ack(m - 1, 1)
+  else ack(m - 1, ack(m, n - 1)) end end
+end
+```
+
+In a cycle of several functions, each function has its own metric, all of the
+same length, and every call in the cycle must decrease from the caller's metric to
+the callee's. When one function of a cycle carries `@[decreases]`, the others
+either carry one too or use their first `Int` parameter (only when the metrics
+have one component).
+
+The order the checker tries is fixed: the structural certificate first; then the
+written `@[decreases]`, if there is one, and only that; then the first `Int`
+parameter.
+
+A metric must really stay at least 0. This loops on `down(-1)`, and is not proved:
+
+```march
+@[decreases(n)]
+fn down(n : Int) : Int do
+  if n == 0 do 0 else down(n - 1) end
+end
+```
+
+```
+warning: `down` is not shown to terminate: the recursive call `down(n - 1)`
+is not shown to decrease `n`: e.g. n = -1 [termination_unproved]
+```
+
+The fix is an exit that covers negative numbers (`if n <= 0`), or a parameter
+refined to `{Int | _ >= 0}`.
+
+**When you are told.** Termination is reported, not enforced:
+
+- `termination_unproved` is a warning, and only for a function that carries
+  `@[decreases]`. Unannotated recursion is listed by `--termination-report` but
+  never warned about.
+- In a `cap verified` module, `termination_unproved` on an annotated function is
+  an error.
+- A metric outside the fragment above, naming something that is not a parameter,
+  or with a different length from the rest of its cycle, is an `invalid_decreases`
+  error. `@[decreases]` on a function that is not recursive is an
+  `attribute_no_effect` warning.
+
+Under `--termination-report`, every recursive unit of your code gets its metric
+checked: `cert=metric` when every call proves, `cert=trusted` when an
+`@[assume]` or `@[trusted]` function accepted an unproved one, and
+`cert=unproved:not-decreasing` otherwise. Other reasons are `invalid-decreases`,
+`no-int-parameter` (a function of the cycle has no `Int` parameter),
+`unannotated:<name>` (a function of an annotated cycle has no metric of the right
+length) and `shadowed` (a recursive call sits under a binding that reuses a name
+the metric reads, so the metric would read the inner value). `--refine-report`
+counts the checks as `termination` in its `by kind:` line. Calls to builtins and
+`extern` functions are assumed to terminate; the report's `trusted:` line lists
+them.
+
+Nothing uses a proved metric yet: a recursive function's return refinement is
+still never assumed at its own recursive calls.
+
+### Attribute names are checked
+
+A function attribute the compiler does not know is ignored, so a misspelling
+would silently do nothing. The checker warns about it (`unknown_attribute`),
+with a suggestion when the name is close to a known one:
+
+```
+warning: unknown attribute `@[decrease]` on `f`: it is ignored.
+note: did you mean `@[decreases]`?
+```
+
+The function attributes are `@[assume]`, `@[decreases]`, `@[measure]`,
+`@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`, `@[trusted_linear]` and
+`@[vectorize]`.
 
 ---
 

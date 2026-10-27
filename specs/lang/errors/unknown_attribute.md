@@ -1,0 +1,54 @@
+---
+layout: docs
+title: "unknown_attribute"
+permalink: /docs/errors/unknown_attribute/
+---
+
+# `unknown_attribute`: a function attribute the compiler does not know
+
+An attribute the compiler does not know is ignored. That is how a misspelt
+`@[decrease(n)]` would look as if it worked while doing nothing, so the checker
+warns, and suggests the closest known name.
+
+## A program that triggers it
+
+```march
+mod Main do
+  @[decrease(n)]
+  fn down(n : Int) : Int do
+    if n <= 0 do 0 else down(n - 1) end
+  end
+
+  fn main() do
+    down(3)
+  end
+end
+```
+
+## The fix
+
+Spell the attribute as the compiler knows it:
+
+```march
+mod Main do
+  @[decreases(n)]
+  fn down(n : Int) : Int do
+    if n <= 0 do 0 else down(n - 1) end
+  end
+
+  fn main() do
+    down(3)
+  end
+end
+```
+
+The function attributes are `@[assume]`, `@[decreases]`, `@[measure]`,
+`@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`, `@[trusted_linear]` and
+`@[vectorize]`.
+
+## Why the rule exists
+
+An attribute that silently does nothing is the failure mode the compiler tries
+hardest to avoid: the program looks checked when it is not.
+
+See also: [the language reference](../refinement-types.md).
