@@ -199,7 +199,7 @@ let dispatch_fn ~actor ?(decls = []) (routes : (string * ty) list) : decl =
   DFn
     ( { fn_name = n "dispatch"; fn_vis = Public; fn_doc = None; fn_attrs = [];
         fn_ret_ty = Some (tycon "Result" [ tycon "Bool" []; tycon "String" [] ]);
-        fn_bounds = [];
+        fn_bounds = []; fn_attr_args = [];
         fn_clauses =
           [ { fc_params =
                 [ FPNamed { param_name = n "pid"; param_ty = None; param_lin = Unrestricted };

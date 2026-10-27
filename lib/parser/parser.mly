@@ -27,6 +27,11 @@
 
   (** Raise [ParseError] from an `error` production.  [pos] is the position
       the message is about; [Parse] renders the diagnostic there. *)
+  (* The expression payloads of a declaration's attributes: only
+     `@[decreases(e, ...)]` carries one (termination design §2.1). *)
+  let attr_args_of (attrs : (string * expr list) list) : (string * expr list) list =
+    List.filter (fun (_, args) -> args <> []) attrs
+
   let error_raise ?code ?fix msg hint pos =
     (* The code and fix ride [Errors.parse_error_extra] (see its comment):
        set on EVERY raise so a production without them cannot inherit a
@@ -296,7 +301,7 @@
           | rest' -> (ret_acc, clauses_acc, rest')
         in
         let (final_ret, all_clauses, rest') = collect_same ret clauses rest in
-        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_attrs = def.fn_attrs; fn_ret_ty = final_ret; fn_clauses = all_clauses; fn_bounds = def.fn_bounds }, span) :: acc) rest'
+        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_attrs = def.fn_attrs; fn_ret_ty = final_ret; fn_clauses = all_clauses; fn_bounds = def.fn_bounds; fn_attr_args = def.fn_attr_args }, span) :: acc) rest'
       | d :: rest -> go (d :: acc) rest
     in
     let grouped = go [] decls in
@@ -511,18 +516,34 @@ decl_list_r:
 
 (* ---- Declarations ---- *)
 
+(* An attribute is its name (or `name:value` for a one-identifier payload)
+   plus, for `@[decreases(e, ...)]` only, its expression payload.  The
+   bracketed payload is parsed as an expression list (termination design
+   §2.1): a single bare identifier keeps today's `name:value` string, so
+   `@[no_alloc(warn)]` and friends are unchanged; `decreases` always keeps
+   its expressions (and the plain name `decreases`); any other attribute
+   with a non-identifier payload is a parse error naming it. *)
 fn_attr:
-  | AT; LBRACKET; name = LOWER_IDENT; RBRACKET { name }
-  | AT; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN { name ^ ":" ^ value }
-  | AT; LBRACKET; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN; RBRACKET
-      { name ^ ":" ^ value }
+  | AT; LBRACKET; name = LOWER_IDENT; RBRACKET { (name, []) }
+  | AT; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN { (name ^ ":" ^ value, []) }
+  | AT; LBRACKET; name = LOWER_IDENT; LPAREN; args = separated_nonempty_list(COMMA, expr); RPAREN; RBRACKET
+      { if name = "decreases" then (name, args)
+        else
+          match args with
+          | [ EVar v ] when not (String.contains v.txt '.') -> (name ^ ":" ^ v.txt, [])
+          | _ ->
+            error_raise
+              (Printf.sprintf
+                 "`@[%s(...)]` takes a single name as its argument. Only \
+                  `@[decreases(...)]` takes expressions." name)
+              None $startpos(args) }
   (* `transient` is a KEYWORD (a supervisor restart type), so it never reaches
      the LOWER_IDENT rules above.  @[no_alloc(transient)] is the one attribute
      payload that collides with one; spell it out rather than un-reserving the
      keyword, which would change supervisor child specs. *)
-  | AT; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN { name ^ ":transient" }
+  | AT; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN { (name ^ ":transient", []) }
   | AT; LBRACKET; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN; RBRACKET
-      { name ^ ":transient" }
+      { (name ^ ":transient", []) }
 
 decl:
   (* `module Name do` (D4): the token filter mints MODULE_KW for `module`
@@ -575,8 +596,9 @@ decl:
      declaration, and on a documented function that line sits between the
      `doc` and the `fn` — unparseable.  Attribute validation is the same as
      the attributes-only rule below; see it for the payload check. *)
-  | DOC; s = STRING; attrs = nonempty_list(fn_attr); d = fn_decl
-    { List.iter (fun a ->
+  | DOC; s = STRING; attrs_args = nonempty_list(fn_attr); d = fn_decl
+    { let attrs = List.map fst attrs_args in
+      List.iter (fun a ->
           if String.length a > 9 && String.sub a 0 9 = "no_alloc:"
              && a <> "no_alloc:warn" && a <> "no_alloc:assume"
              && a <> "no_alloc:transient" then
@@ -584,12 +606,14 @@ decl:
               (Printf.sprintf
                  "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, `@[no_alloc(transient)]`, and `@[no_alloc(assume)]`."
                  (String.sub a 9 (String.length a - 9)))
-              None $startpos(attrs)) attrs;
+              None $startpos(attrs_args)) attrs;
       match d with
-      | DFn (def, span) -> DFn ({ def with fn_doc = Some s; fn_attrs = attrs }, span)
+      | DFn (def, span) ->
+        DFn ({ def with fn_doc = Some s; fn_attrs = attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
-  | attrs = nonempty_list(fn_attr); d = fn_decl
-    { (* @[no_alloc] takes exactly three payloads; anything else is a typo, not
+  | attrs_args = nonempty_list(fn_attr); d = fn_decl
+    { let attrs = List.map fst attrs_args in
+      (* @[no_alloc] takes exactly three payloads; anything else is a typo, not
          a silently-ignored attribute (see lib/tir/alloc_contract.ml). *)
       List.iter (fun a ->
           if String.length a > 9 && String.sub a 0 9 = "no_alloc:"
@@ -599,12 +623,12 @@ decl:
               (Printf.sprintf
                  "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, `@[no_alloc(transient)]`, and `@[no_alloc(assume)]`."
                  (String.sub a 9 (String.length a - 9)))
-              None $startpos(attrs)) attrs;
+              None $startpos(attrs_args)) attrs;
       match d with
-      | DFn (def, span) -> DFn ({ def with fn_attrs = attrs }, span)
+      | DFn (def, span) -> DFn ({ def with fn_attrs = attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
   | attrs = nonempty_list(fn_attr); d = protocol_decl
-    { (* The one protocol attribute is `@[endpoints]`: generate typed session
+    { let attrs = List.map fst attrs in (* The one protocol attribute is `@[endpoints]`: generate typed session
          endpoints over the `Session` capability for every role
          (lib/desugar/desugar_endpoints.ml).  Anything else is rejected here
          rather than ignored, for the same reason `@[no_alloc]` is checked on
@@ -621,7 +645,7 @@ decl:
         DProtocol (name, { pdef with proto_attrs = attrs }, span)
       | d -> d }
   | attrs = nonempty_list(fn_attr); d = actor_decl
-    { if List.exists (fun a -> a = "no_alloc"
+    { let attrs = List.map fst attrs in if List.exists (fun a -> a = "no_alloc"
                         || (String.length a > 9 && String.sub a 0 9 = "no_alloc:")) attrs then
         error_raise "`@[no_alloc]` only applies to `fn` and `pfn` declarations, not to actors." None $startpos(attrs);
       let compat = List.fold_left (fun acc a ->
@@ -640,7 +664,7 @@ decl:
         DActor (vis, name, { adef with actor_invariant = Some inv }, span)
       | d -> d }
   | AT; INVARIANT; LPAREN; inv = expr; RPAREN; attrs = nonempty_list(fn_attr); d = actor_decl
-    { if List.exists (fun a -> a = "no_alloc"
+    { let attrs = List.map fst attrs in if List.exists (fun a -> a = "no_alloc"
                         || (String.length a > 9 && String.sub a 0 9 = "no_alloc:")) attrs then
         error_raise "`@[no_alloc]` only applies to `fn` and `pfn` declarations, not to actors." None $startpos(attrs);
       let compat = List.fold_left (fun acc a ->
@@ -710,7 +734,7 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = [] },
+             fn_bounds = []; fn_attr_args = [] },
            mk_span ($loc)) }
   | FN; name = fn_decl_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
@@ -727,7 +751,7 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = bounds },
+             fn_bounds = bounds; fn_attr_args = [] },
            mk_span ($loc)) }
   | PFN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
@@ -742,7 +766,7 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = [] },
+             fn_bounds = []; fn_attr_args = [] },
            mk_span ($loc)) }
   | PFN; name = fn_decl_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
@@ -759,7 +783,7 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = bounds },
+             fn_bounds = bounds; fn_attr_args = [] },
            mk_span ($loc)) }
   | FN; _n = fn_decl_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
     { error_raise

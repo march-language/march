@@ -1,4 +1,4 @@
-# Grammar corpus index (p01–p43 parse, 17 reject: r02/r07/r08 retired 2026-07-24; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15; leading-`|` arm-separator and single-line cond-form parser fixes added p27–p28; as-patterns became reachable and retired r08 (2026-07-24), added p29; record patterns became reachable and retired r02/r07 (2026-07-24), added p30–p31; or-patterns added p32; the `(`-led-statement fix added p33; its literal-operand follow-up added p34; `let*` generalized bind added p35/r16; a `doc` string alongside function attributes added p36; protocol message labels added p38/r17; protocol role grants added p39; multi-step `choose` branches added p40–p41; the abstract-refinement shorthand `T[p]` added p42/r18–r19; its two-argument form added p43/r20)
+# Grammar corpus index (p01–p44 parse, 17 reject: r02/r07/r08 retired 2026-07-24; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15; leading-`|` arm-separator and single-line cond-form parser fixes added p27–p28; as-patterns became reachable and retired r08 (2026-07-24), added p29; record patterns became reachable and retired r02/r07 (2026-07-24), added p30–p31; or-patterns added p32; the `(`-led-statement fix added p33; its literal-operand follow-up added p34; `let*` generalized bind added p35/r16; a `doc` string alongside function attributes added p36; protocol message labels added p38/r17; protocol role grants added p39; multi-step `choose` branches added p40–p41; the abstract-refinement shorthand `T[p]` added p42/r18–r19; its two-argument form added p43/r20; the `@[decreases(e, ...)]` expression payload added p44)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 60/60, 43 parse, 17
+Exit 0 iff every program behaves as declared (currently 61/61, 44 parse, 17
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -103,6 +103,7 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`reject/r18_abstract_refinement_sugar_two_names.march`](reject/r18_abstract_refinement_sugar_two_names.march) | §6 `ty_post`: `T[p]` takes exactly one name | `List(a[p, q])`: after `a[p` the rule needs `]`. Captured live: `I got stuck here`. |
 | [`reject/r19_bool_sugar_several_argument_callback.march`](reject/r19_bool_sugar_several_argument_callback.march) | §6 `ty`: `D -> Bool[p]` over a tuple domain (multi-arg design 2026-10-18 §1.1, s2) | `(a, a) -> Bool[p]`: a tuple domain is ONE argument, so the arrow action rejects it with a dedicated message naming the curried chain. Captured live: `` is ONE tuple argument, so `Bool[p]` over it cannot relate its parts. A callback of 2 arguments is curried: write `a -> a -> Bool[p]`. `` |
 | [`parse/p43_abstract_refinement_two_argument_sugar.march`](parse/p43_abstract_refinement_two_argument_sugar.march) | §6 `ty`: the two-argument definer `k -> v -> Bool[p]` and the occurrence sugar `Assoc(k[p], v[p])` (multi-arg design 2026-10-18 §1.1, §1.2, phase 3) | The arrow action extends a definer it made outward, so the curried chain defines a `p` of two arguments (`({x : k \| true}) -> ({y : v \| true}) -> {Bool \| _ == p(x, y)}`); `Assoc(k[p], v[p])` marks the two slots it relates (`Refine_abstract.expand_markers`). Semantic actions only: menhir still reports 7 conflicts. `--check` exit 0; `filt`'s relational return is proved. |
+| [`parse/p44_decreases_attribute.march`](parse/p44_decreases_attribute.march) | §8.2 `fn_attr`: the bracketed payload is `separated_nonempty_list(COMMA, expr)` (termination design 2026-10-26 §2.1, phase 2) | `@[decreases(m, n)]` and `@[decreases(len(xs) - i)]` keep their expressions in `fn_attr_args`; a one-identifier payload (`@[no_alloc(warn)]`) keeps its `name:value` string; any other attribute with a non-identifier payload is a parse error naming it. Menhir still reports 7 conflicts. `--check` exit 0; `ack` and `scan` are certified by their metrics. |
 | [`reject/r20_bool_sugar_two_argument_single_slot.march`](reject/r20_bool_sugar_two_argument_single_slot.march) | §6 `ty`: a two-argument `p` marking ONE slot (W2, decision D3) | `Assoc(k, v[p])` under `keep : k -> v -> Bool[p]`: parses, then the refinement checker's W2 rejects it (`abstract_refinement_misuse`), naming the sugar fix. Captured live: `` not one slot: mark every slot it relates, `Assoc(k[p], v[p])` `` |
 
 Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
@@ -139,7 +140,7 @@ p29 and retired r08; the same pass, closing the record-pattern
 reachability gap, added p30/p31 and retired r02/r07; the same pass, adding
 or-patterns, added p32 (the binding-rejection witness is a type error, not a
 parse error, so it lives in `specs/lang/types/reject/t82` instead):
-60 programs total (43 `parse/`, 17 `reject/`). See
+61 programs total (44 `parse/`, 17 `reject/`). See
 `specs/plans/archive/2026-07-06-resolved-grammar-plan.md` for the task-by-task
 breakdown that built the first 27; the DSL-resolution pass and the
 `f(1)(2)` fix are tracked in their own commits rather than numbered plan

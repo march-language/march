@@ -12784,7 +12784,7 @@ module Audit_fixture = struct
         fn_attrs = [];
         fn_ret_ty = Some (refine_or_plain 5 int_ty);
         fn_clauses = [ f_clause ];
-        fn_bounds = [] }
+        fn_bounds = []; fn_attr_args = [] }
     in
     let top_let : A.binding =
       { A.bind_pat = A.PatVar (nm "top_let");
@@ -12833,7 +12833,7 @@ module Audit_fixture = struct
               fc_span = dummy;
               fc_params_span = dummy }
           ];
-        fn_bounds = [] }
+        fn_bounds = []; fn_attr_args = [] }
     in
     let impl_def : A.impl_def =
       { A.impl_iface = nm "Bumper";
@@ -13036,7 +13036,7 @@ let audit_stacked_refinement_suite =
             fn_attrs = [];
             fn_ret_ty = None;
             fn_clauses = [ clause ];
-            fn_bounds = [] }
+            fn_bounds = []; fn_attr_args = [] }
         in
         let labels = Audit_fixture.labels [ A.DFn (fd, dummy) ] in
         Alcotest.(check (list (triple string string (pair string int))))

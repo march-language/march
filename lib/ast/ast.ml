@@ -252,6 +252,10 @@ and fn_def = {
   fn_ret_ty : ty option;        (** Return type (need only appear on one clause) *)
   fn_clauses : fn_clause list;  (** One or more pattern-matching heads *)
   fn_bounds : (name * ty) list; (** Explicit type-variable bounds: [s : ConnState, ...] *)
+  fn_attr_args : (string * expr list) list;
+      (** Expression payloads of attributes, by attribute name.  Only
+          [@[decreases(e, ...)]] has one (termination design §2.1); its name is
+          also in [fn_attrs] as plain ["decreases"]. *)
 }
 
 and fn_clause = {

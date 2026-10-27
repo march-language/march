@@ -1323,7 +1323,7 @@ let rec desugar_decl (d : decl) : decl =
       fn_doc     = None;
       fn_attrs   = [];
       fn_ret_ty  = None;
-      fn_bounds  = [];
+      fn_bounds  = []; fn_attr_args = [];
       fn_clauses = [{
         fc_params = [];
         fc_guard  = None;
@@ -1387,7 +1387,7 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
                    fc_span = m.md_name.span;
                    fc_params_span = m.md_name.span;
                  }];
-                 fn_bounds = [];
+                 fn_bounds = []; fn_attr_args = [];
                } in
                Some (m.md_name, fn_def)
          ) iface.iface_methods
@@ -1548,7 +1548,7 @@ let gen_island_bridges (sp : span) : decl list =
       fn_doc    = None;
       fn_attrs  = [];
       fn_ret_ty = None;
-      fn_bounds = [];
+      fn_bounds = []; fn_attr_args = [];
       fn_clauses = [{
         fc_params = List.map (fun p ->
           FPNamed { param_name = mk_name p; param_ty = None; param_lin = Unrestricted }

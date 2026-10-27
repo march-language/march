@@ -979,7 +979,7 @@ let callback_sig_of_ty (t : A.ty) : fn_sig option =
       | A.TyRefine _ ->
         let stand_in =
           { A.fn_name = { A.txt = callback_param_name; A.span = A.dummy_span }; fn_vis = A.Private
-          ; fn_doc = None; fn_attrs = []; fn_ret_ty = Some cod; fn_clauses = []; fn_bounds = [] }
+          ; fn_doc = None; fn_attrs = []; fn_ret_ty = Some cod; fn_clauses = []; fn_bounds = []; fn_attr_args = [] }
         in
         (match return_refine_sorted stand_in with
          | Some (b, p, srt) -> (Some (b, p), srt)
@@ -2353,7 +2353,7 @@ let local_fn_def (n : A.name) (ps : A.param list) (ret_ty : A.ty option) (body :
   ; fn_clauses =
       [ { A.fc_params = List.map (fun p -> A.FPNamed p) ps; fc_guard = None; fc_body = body
         ; fc_span = sp; fc_params_span = sp } ]
-  ; fn_bounds = [] }
+  ; fn_bounds = []; fn_attr_args = [] }
 
 (* Record the signature when EITHER side carries a refinement: a function with
    only a refined *return* must be resolvable so its postcondition reaches call

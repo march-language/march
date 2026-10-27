@@ -38,7 +38,7 @@ let mk_fn_def name params body : fn_def =
     fn_doc     = None;
     fn_attrs   = [];
     fn_ret_ty  = None;
-    fn_bounds  = [];
+    fn_bounds  = []; fn_attr_args = [];
     fn_clauses = [{
       fc_params = List.map (fun p ->
         FPNamed { param_name = mk_name p; param_ty = None; param_lin = Unrestricted }
@@ -221,6 +221,7 @@ let respan_fn_def (fd : fn_def) : fn_def =
     fn_name    = respan_name fd.fn_name;
     fn_ret_ty  = Option.map respan_ty fd.fn_ret_ty;
     fn_bounds  = List.map (fun (n, t) -> (respan_name n, respan_ty t)) fd.fn_bounds;
+    fn_attr_args = fd.fn_attr_args;
     fn_clauses = List.map (fun c ->
         { fc_params = List.map respan_fn_param c.fc_params;
           fc_guard  = Option.map respan_expr c.fc_guard;

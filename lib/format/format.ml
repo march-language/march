@@ -1279,7 +1279,22 @@ and emit_fn ctx fn =
      as one `fn` declaration per clause, and the attribute binds to the
      declaration in the grammar (`nonempty_list(fn_attr); fn_decl`). *)
   let emit_attrs () =
-    List.iter (fun a -> line ctx (Printf.sprintf "@[%s]" a)) fn.fn_attrs
+    List.iter
+      (fun a ->
+        let text =
+          match List.assoc_opt a fn.fn_attr_args with
+          (* `@[decreases(e, ...)]`: the payload is expressions, kept apart
+             from the name (termination design §2.1). *)
+          | Some args -> Printf.sprintf "%s(%s)" a (String.concat ", " (List.map expr_inline args))
+          | None -> (
+            (* A one-identifier payload is stored `name:value`; it is
+               written `name(value)`. *)
+            match String.index_opt a ':' with
+            | Some i -> Printf.sprintf "%s(%s)" (String.sub a 0 i) (String.sub a (i + 1) (String.length a - i - 1))
+            | None -> a)
+        in
+        line ctx (Printf.sprintf "@[%s]" text))
+      fn.fn_attrs
   in
   match fn.fn_clauses with
   | [] -> ()
