@@ -22300,15 +22300,21 @@ let abstract_leftovers_d_suite =
         in
         Alcotest.(check (list string)) "no errors" [] errs;
         Alcotest.check ps "the demand" [ proved ] (of_callee "sum_pos" obs);
-        Alcotest.check t3 "user module" (1, 0, 0) (triple obs);
-        Alcotest.check t3 "Range.filter's own definition side (with filter_list)" (8, 0, 0)
+        (* Two: the demand, and Range.filter's `v.step != 0` precondition on
+           Range.new's result (D5 s2). *)
+        Alcotest.check t3 "user module" (2, 0, 0) (triple obs);
+        (* Nine since D5 s2: the ninth is filter's own `to_list(r)` call,
+           discharged by filter's `v.step != 0` precondition. *)
+        Alcotest.check t3 "Range.filter's own definition side (with filter_list)" (9, 0, 0)
           (triple (List.hd defs)));
     gated "Range.filter: a weaker lambda is too-weak, not proved" (fun () ->
         let _, obs, _ =
           run (m "RW" (sums ^ "  fn go(n : Int) : Int do sum_pos(Range.filter(Range.new(0, n), fn y -> y >= 0)) end\n"))
         in
         Alcotest.check ps "the demand" [ weak ] (of_callee "sum_pos" obs);
-        Alcotest.check t3 "user module" (0, 0, 1) (triple obs));
+        (* The proved one is Range.filter's `v.step != 0` on Range.new's
+           result (D5 s2); the demand is the skip. *)
+        Alcotest.check t3 "user module" (1, 0, 1) (triple obs));
     gated "Range.filter: a wrong delegation is not proved" (fun () ->
         let _, obs, _ =
           run
@@ -28303,6 +28309,24 @@ let stdlib_step_guard_suite =
     ~good:"mod SG1 do\n  fn go() : List(Int) do List.range_step(0, 10, 3) end\nend\n"
     ~bad:"mod SG1 do\n  fn go() : List(Int) do List.range_step(5, 0, 0) end\nend\n"
     ~message:"argument `step` of `List.range_step` does not satisfy precondition `_ != 0`"
+  @ step_guard_cases ~what:"Range.to_list"
+      ~good:"mod SG2 do\n  fn go() : List(Int) do Range.to_list({start: 0, stop: 10, step: 3}) end\nend\n"
+      ~bad:"mod SG2 do\n  fn go() : List(Int) do Range.to_list({start: 5, stop: 0, step: 0}) end\nend\n"
+      ~message:"argument `r` of `Range.to_list` does not satisfy precondition `v.step != 0`"
+  @ [ (* Range.new / new_step return `{v : IntRange | v.step != 0}`, so the
+         usual construction proves the walk's precondition with no literal
+         in sight.  new_step's guard is a `let _ =` statement because a
+         return contract cannot be proved through a `panic` arm; were it an
+         `if` around the result again, this call would be a skip. *)
+      gated "Range.to_list: a range built by new_step proves" (fun () ->
+          let rc, all, ledger =
+            step_guard_ledger
+              "mod SG2b do\n  fn go() : List(Int) do Range.to_list(Range.new_step(3, 0, -1)) end\nend\n"
+          in
+          Alcotest.(check int) ("exit 0: " ^ all) 0 rc;
+          (* Two: new_step's own `step : {Int | _ != 0}` on -1, and
+             to_list's `v.step != 0` on new_step's result. *)
+          Alcotest.(check (triple int int int)) "2 proved, 0 violated, 0 skipped" (2, 0, 0) ledger) ]
 
 let opaque_by_decl_suite =
   let run, slugs, _detail =

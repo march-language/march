@@ -46,3 +46,53 @@ from `__try_call_val`. RED: the new test hung and was killed at 20 s. The
 renumbering after it, and `__panic_site` line numbers shifted by 4. `range_step_go`
 is unchanged. `metrics/trmc_modulo_cons`: perceus `dec` 53 -> 55, the two `dec_rc`
 of the guard's Bool temporary, one per arm.
+
+## s2. `Range.to_list({start: 5, stop: 0, step: 0})` looped
+
+**Cause.** `Range.new_step` checks `step != 0`, but a range is a plain record, so a
+literal (or any computed record) bypasses it. `to_list`'s `go` takes the `else`
+branch for a zero step, `i <= r.stop` is false when `start > stop`, and
+`go(i + 0, Cons(i, acc))` loops, growing `acc`. `Range.each` has its own copy of
+the walk and the same hang. `map`, `filter`, `reduce`, `reverse`, `all`, `any` and
+`sum` reach it through `to_list`.
+
+**Fix.**
+- A named record type, `type IntRange = { start : Int, stop : Int, step : Int }`, so
+  a refinement can read `step`. The precondition `{v : {start: Int, ...} | v.step != 0}`
+  on an anonymous record type raised no obligation at all (probed: 0 obligations), so
+  the name is needed. Records are structural, so every existing literal and
+  annotation still fits. The name avoids `Rng`: `Random.Rng` is a different record,
+  and reusing a type name gives `sort-conflict` skips (probed).
+- `to_list`, `each`, and the seven functions that go through `to_list` take
+  `r : {v : IntRange | v.step != 0}`, so their internal `to_list(r)` calls prove
+  rather than adding stdlib skips, and a literal bad range is caught at whichever
+  entry point the caller uses.
+- `to_list` and `each` panic on a zero step (`Range.to_list: step must be non-zero`,
+  `Range.each: step must be non-zero`), matching `Range.new_step`'s convention.
+- `new` and `new_step` return `{v : IntRange | v.step != 0}`. `new_step`'s guard became
+  a `let _ = if step == 0 do panic(…) else () end` statement before the literal: with
+  the old `if … do panic(…) else {…} end` the return contract was an
+  `unreflectable-subject` skip (probed), so `to_list(new_step(…))` could not prove.
+  Runtime behaviour is unchanged.
+- Not changed: `size`, `contains`, `is_empty`, `first` and `last` divide by the step;
+  on a zero step they fail with a division by zero rather than hang, so they are out
+  of D5's scope and keep their plain record type.
+
+Behaviour change: a zero-step range with `start <= stop` used to give `[]` from
+`to_list` (and do nothing in `each`); it now panics.
+
+**Tests.** `test/stdlib/test_range.march` (new, registered in
+`test/test_stdlib_march.ml`, with `range.march` added to its load list): good paths
+for `to_list` and every function built on it, `each`'s visiting order, and the two
+panics. RED: the `to_list` panic test and the `each` panic test each hung (killed at
+20 s). Refinecheck: the good/bad literal pair for `Range.to_list`, plus
+`to_list(new_step(3, 0, -1))` pinned as 2 proved (new_step's own precondition and
+to_list's); all three RED with `range.march` reverted. Native golden `s2` lines.
+
+**Existing tests whose pinned counts moved.** `abstract-leftovers-d` (#17, #18) pins
+ledger triples for `sum_pos(Range.filter(Range.new(0, n), …))`: the user module now
+has one more proved obligation (Range.filter's `v.step != 0` on `Range.new`'s
+result): `(1, 0, 0)` -> `(2, 0, 0)` and `(0, 0, 1)` -> `(1, 0, 1)`. Range.filter's own
+definition side is `(8, 0, 0)` -> `(9, 0, 0)` (its `to_list(r)` call). Each has a
+comment. The refine-audit baselines gain 11 enforced sites (9 parameters, 2
+returns) per fixture; `stdlib_range`'s user code goes 7 -> 18; nothing is unenforced.

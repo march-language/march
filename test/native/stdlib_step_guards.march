@@ -38,5 +38,7 @@ mod Main do
     let zero = hidden_int("0")
     println("s1 good: " ++ ints(List.range_step(0, 10, 3)) ++ " " ++ ints(List.range_step(5, 0, -2)))
     println("s1 bad:  " ++ show(__try_call_val(fn _ -> List.range_step(5, 0, zero))))
+    println("s2 good: " ++ ints(Range.to_list({start: 2, stop: 7, step: 2})) ++ " " ++ ints(Range.to_list(Range.new_step(3, 0, -1))))
+    println("s2 bad:  " ++ show(__try_call_val(fn _ -> Range.to_list({start: 5, stop: 0, step: zero}))))
   end
 end

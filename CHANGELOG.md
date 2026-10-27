@@ -375,6 +375,17 @@ git log is authoritative for exact commits.
   refinement error, and a zero the checker cannot see panics with
   `List.range_step: step must be non-zero`, as `Range.new_step` already did.
 
+- **`Range.to_list` and `Range.each` with a zero step no longer hang.** A range is a
+  plain record, so `{start: 5, stop: 0, step: 0}` bypassed `Range.new_step`'s check and
+  the walk never advanced. Every Range function that walks a range (`to_list`, `each`,
+  `map`, `filter`, `reduce`, `reverse`, `all`, `any`, `sum`) now takes
+  `{v : IntRange | v.step != 0}` (`Range.IntRange` is the new name for the
+  `{start, stop, step}` record; records are structural, so literals still fit), and
+  `to_list`/`each` panic with `Range.to_list: step must be non-zero` /
+  `Range.each: step must be non-zero` for a zero the checker cannot see.
+  `Range.new` and `Range.new_step` return that refined type, so
+  `Range.to_list(Range.new_step(3, 0, -1))` is proved.
+
 - **Refinements: a value-creating function used as a value no longer counts as
   parametric (a false proof).** The check that a generic function cannot make a value
   of its type variable looked only at what it CALLS, so a function that creates one
