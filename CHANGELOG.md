@@ -369,6 +369,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`List.range_step` with a zero step no longer hangs.** `List.range_step(5, 0, 0)`
+  recursed on the same value forever (interpreted and compiled); with `start <= stop`
+  it returned `[]`. `step` is now `{Int | _ != 0}`, so a literal zero is a compile-time
+  refinement error, and a zero the checker cannot see panics with
+  `List.range_step: step must be non-zero`, as `Range.new_step` already did.
+
 - **Refinements: a value-creating function used as a value no longer counts as
   parametric (a false proof).** The check that a generic function cannot make a value
   of its type variable looked only at what it CALLS, so a function that creates one

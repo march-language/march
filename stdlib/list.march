@@ -80,8 +80,8 @@ mod List do
   Returns [start, start+step, start+2*step, ...], stopping before `stop`.
   A positive `step` counts up while the value is `< stop`; a negative `step`
   counts down while it is `> stop`. Returns [] when `start` is already past
-  `stop` in the direction of `step`. A `step` of 0 returns [] when
-  `start <= stop` and never terminates when `start > stop`.
+  `stop` in the direction of `step`. Panics if `step` is zero (also a
+  refinement precondition), as `Range.new_step` does.
 
   ## Examples
 
@@ -92,8 +92,12 @@ mod List do
       march> List.range_step(0, 5, -1)
       []
   """
-  fn range_step(start : Int, stop : Int, step : Int) : List(Int) do
-    range_step_go(start, stop, step)
+  fn range_step(start : Int, stop : Int, step : {Int | _ != 0}) : List(Int) do
+    -- A zero step would never advance: the walk recursed on the same `i`
+    -- forever once `start > stop`.  The guard is for callers the checker
+    -- cannot see (a computed or unrefined step).
+    if step == 0 do panic("List.range_step: step must be non-zero")
+    else range_step_go(start, stop, step) end
   end
 
   -- range_step's walk.  Natural style on purpose: TRMC makes it a single

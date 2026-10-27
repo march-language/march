@@ -118,7 +118,7 @@ List.empty()                         -- []
 List.singleton(42)                   -- [42]
 List.repeat("hi", 3)                 -- ["hi", "hi", "hi"]
 List.range(0, 5)                     -- [0, 1, 2, 3, 4]
-List.range_step(0, 10, 2)            -- [0, 2, 4, 6, 8]
+List.range_step(0, 10, 2)            -- [0, 2, 4, 6, 8]  (step : {Int | _ != 0}; panics on 0)
 
 -- Access
 List.head([1, 2, 3])                 -- 1  (panics if empty)

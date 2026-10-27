@@ -1,0 +1,2 @@
+s1 good: [0, 3, 6, 9] [5, 3, 1]
+s1 bad:  Err(panic: List.range_step: step must be non-zero)

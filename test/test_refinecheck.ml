@@ -28264,6 +28264,46 @@ let p2_value_refs_suite =
    v)))` inherited the stdlib `ptype Set`'s status and became a source,
    while the same shape named `Wrap` stayed a skip.  The stdlib files that
    declare the colliding names are loaded beside the user module. *)
+(* ── Stdlib step/size preconditions (termination design D5, s1-s4) ─────────
+   A zero step or a non-positive size made these stdlib walks recurse on the
+   same value forever.  Each now carries a refinement precondition (and a
+   runtime guard, tested in test/stdlib/ and test/native/stdlib_step_guards).
+   These cases run the REAL driver with the real stdlib prepended, not a
+   restated signature: a signature that drifts, or a precondition that is
+   deleted, turns the "violated" case green-to-red here.  The good call is
+   pinned as PROVED in the user-code ledger, not merely silent: silence would
+   also hold if the obligation were never raised. *)
+let step_guard_ledger (src : string) : int * string * (int * int * int) =
+  let rc, out, err, path = run_march_capturing [ "--check"; "--refine-report" ] src in
+  Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ()) (fun () ->
+    let all = out ^ err in
+    let re =
+      Str.regexp
+        "refinement obligations (user code): \\([0-9]+\\) proved, \\([0-9]+\\) violated, [0-9]+ trusted, \\([0-9]+\\) skipped"
+    in
+    match Str.search_forward re all 0 with
+    | exception Not_found -> Alcotest.fail ("no user-code ledger line: " ^ all)
+    | _ ->
+      let g i = int_of_string (Str.matched_group i all) in
+      (rc, all, (g 1, g 2, g 3)))
+
+let step_guard_cases ~what ~good ~bad ~message =
+  [ gated (what ^ ": a good literal call proves") (fun () ->
+        let rc, all, ledger = step_guard_ledger good in
+        Alcotest.(check int) ("exit 0: " ^ all) 0 rc;
+        Alcotest.(check (triple int int int)) "1 proved, 0 violated, 0 skipped" (1, 0, 0) ledger);
+    gated (what ^ ": a bad literal call is a refinement violation") (fun () ->
+        let rc, all, (_, violated, _) = step_guard_ledger bad in
+        Alcotest.(check int) "exit 1" 1 rc;
+        Alcotest.(check int) "1 violated" 1 violated;
+        Alcotest.(check bool) ("names the precondition: " ^ all) true (contains all message)) ]
+
+let stdlib_step_guard_suite =
+  step_guard_cases ~what:"List.range_step"
+    ~good:"mod SG1 do\n  fn go() : List(Int) do List.range_step(0, 10, 3) end\nend\n"
+    ~bad:"mod SG1 do\n  fn go() : List(Int) do List.range_step(5, 0, 0) end\nend\n"
+    ~message:"argument `step` of `List.range_step` does not satisfy precondition `_ != 0`"
+
 let opaque_by_decl_suite =
   let run, slugs, _detail =
     container_gap_harness [ "list.march"; "option.march"; "map.march"; "set.march"; "array.march"; "rrb_vec.march" ]
@@ -28488,4 +28528,5 @@ let () =
       ("p1-record", p1_record_suite);
       ("p2-value-refs", p2_value_refs_suite);
       ("opaque-by-decl", opaque_by_decl_suite);
+      ("stdlib-step-guards", stdlib_step_guard_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

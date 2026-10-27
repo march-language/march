@@ -1,0 +1,42 @@
+-- Four stdlib walks that never terminated on a bad argument (termination
+-- design D5, probes s1-s4), run on both backends against one golden:
+--   s1 List.range_step with step 0     looped (start > stop)
+--   s2 Range.to_list with step 0       looped
+--   s3 Control.chunks with size <= 0   looped
+--   s4 Duration.format(min_int)        looped interpreted, SIGBUS compiled
+-- s1-s3 now carry a refinement precondition, so the bad value is passed
+-- through `hidden_int` to reach the runtime guard; s4's arithmetic is fixed.
+mod Main do
+  needs IO.Console
+
+  pfn hidden_int(s : String) : Int do
+    match string_to_int(s) do
+    Some(n) -> n
+    None -> 1
+    end
+  end
+
+  pfn ints(xs : List(Int)) : String do
+    "[" ++ string_join(List.map(xs, fn x -> int_to_string(x)), ", ") ++ "]"
+  end
+
+  pfn show(r : Result(List(Int), String)) : String do
+    match r do
+    Ok(xs) -> "Ok(" ++ ints(xs) ++ ")"
+    Err(m) -> "Err(" ++ m ++ ")"
+    end
+  end
+
+  pfn show_n(r : Result(Int, String)) : String do
+    match r do
+    Ok(n) -> "Ok(" ++ int_to_string(n) ++ ")"
+    Err(m) -> "Err(" ++ m ++ ")"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let zero = hidden_int("0")
+    println("s1 good: " ++ ints(List.range_step(0, 10, 3)) ++ " " ++ ints(List.range_step(5, 0, -2)))
+    println("s1 bad:  " ++ show(__try_call_val(fn _ -> List.range_step(5, 0, zero))))
+  end
+end

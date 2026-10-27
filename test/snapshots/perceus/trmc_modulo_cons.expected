@@ -11,11 +11,11 @@ fn List.maximum_int(xs : List(Int)) : Int =
 case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
-__panic_site("stdlib/list.march", 1183);
+__panic_site("stdlib/list.march", 1187);
 panic("List.maximum_int: empty list")
-  Cons($f489, $f490) -> dec_rc xs;
-let t : '_ = $f490 in
-let h : '_ = $f489 in
+  Cons($f490, $f491) -> dec_rc xs;
+let t : '_ = $f491 in
+let h : '_ = $f490 in
 call_ptr go(t, h)
   _ -> dec_rc xs;
 dec_rc go;
@@ -27,11 +27,11 @@ fn List.minimum_int(xs : List(Int)) : Int =
 case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
-__panic_site("stdlib/list.march", 1162);
+__panic_site("stdlib/list.march", 1166);
 panic("List.minimum_int: empty list")
-  Cons($f476, $f477) -> dec_rc xs;
-let t : '_ = $f477 in
-let h : '_ = $f476 in
+  Cons($f477, $f478) -> dec_rc xs;
+let t : '_ = $f478 in
+let h : '_ = $f477 in
 call_ptr go(t, h)
   _ -> dec_rc xs;
 dec_rc go;
@@ -51,20 +51,26 @@ call_ptr go($t17, $t18)
 
 ## List.range_step
 fn List.range_step(start : Int, stop : Int, step : Int) : List(Int) =
-  List.range_step_go(start, stop, step)
+  let $t19 : '_ = ==(step, 0) in
+case $t19 of
+  True() -> dec_rc $t19;
+__panic_site("stdlib/list.march", 99);
+panic("List.range_step: step must be non-zero")
+  _ -> dec_rc $t19;
+List.range_step_go(start, stop, step)
 
 ## List.range_step_go
 fn List.range_step_go(i : Int, stop : Int, step : Int) : List(Int) =
-  let $t20 : '_ = let $t19 : '_ = >(step, 0) in
-case $t19 of
-  True() -> dec_rc $t19;
->=(i, stop)
-  _ -> dec_rc $t19;
-<=(i, stop) in
+  let $t21 : '_ = let $t20 : '_ = >(step, 0) in
 case $t20 of
   True() -> dec_rc $t20;
-alloc Nil()
+>=(i, stop)
   _ -> dec_rc $t20;
+<=(i, stop) in
+case $t21 of
+  True() -> dec_rc $t21;
+alloc Nil()
+  _ -> dec_rc $t21;
 let next : '_ = +(i, step) in
 let $trmc7 : Cons = alloc_hole Cons(i, _) in
 List.range_step_go$dps(next, stop, step, $trmc7);
@@ -72,17 +78,17 @@ $trmc7
 
 ## List.range_step_go$dps
 fn List.range_step_go$dps(i : Int, stop : Int, step : Int, $dst : List(Int)) : Unit =
-  let $t20 : '_ = let $t19 : '_ = >(step, 0) in
-case $t19 of
-  True() -> dec_rc $t19;
->=(i, stop)
-  _ -> dec_rc $t19;
-<=(i, stop) in
+  let $t21 : '_ = let $t20 : '_ = >(step, 0) in
 case $t20 of
   True() -> dec_rc $t20;
+>=(i, stop)
+  _ -> dec_rc $t20;
+<=(i, stop) in
+case $t21 of
+  True() -> dec_rc $t21;
 let $trmc6 : List(Int) = alloc Nil() in
 $dst.1 <- $trmc6
-  _ -> dec_rc $t20;
+  _ -> dec_rc $t21;
 let next : '_ = +(i, step) in
 let $trmc5 : Cons = alloc_hole Cons(i, _) in
 $dst.1 <- $trmc5;
@@ -130,14 +136,14 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 m
-  Cons($f483, $f484) -> dec_rc lst;
-let r : '_ = $f484 in
-let x : '_ = $f483 in
-let $t482 : '_ = >(x, m) in
-case $t482 of
-  True() -> dec_rc $t482;
+  Cons($f484, $f485) -> dec_rc lst;
+let r : '_ = $f485 in
+let x : '_ = $f484 in
+let $t483 : '_ = >(x, m) in
+case $t483 of
+  True() -> dec_rc $t483;
 call_ptr go(r, x)
-  _ -> dec_rc $t482;
+  _ -> dec_rc $t483;
 dec_rc x;
 call_ptr go(r, m)
   _ -> dec_rc lst;
@@ -151,14 +157,14 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 m
-  Cons($f470, $f471) -> dec_rc lst;
-let r : '_ = $f471 in
-let x : '_ = $f470 in
-let $t469 : '_ = <(x, m) in
-case $t469 of
-  True() -> dec_rc $t469;
+  Cons($f471, $f472) -> dec_rc lst;
+let r : '_ = $f472 in
+let x : '_ = $f471 in
+let $t470 : '_ = <(x, m) in
+case $t470 of
+  True() -> dec_rc $t470;
 call_ptr go(r, x)
-  _ -> dec_rc $t469;
+  _ -> dec_rc $t470;
 dec_rc x;
 call_ptr go(r, m)
   _ -> dec_rc lst;
@@ -172,11 +178,11 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 acc
-  Cons($f463, $f464) -> dec_rc lst;
-let t : '_ = $f464 in
-let x : '_ = $f463 in
-let $t462 : '_ = *(acc, x) in
-call_ptr go(t, $t462)
+  Cons($f464, $f465) -> dec_rc lst;
+let t : '_ = $f465 in
+let x : '_ = $f464 in
+let $t463 : '_ = *(acc, x) in
+call_ptr go(t, $t463)
   _ -> dec_rc lst;
 dec_rc go;
 panic("non-exhaustive pattern match")
@@ -205,21 +211,21 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 acc
-  Cons($f456, $f457) -> dec_rc lst;
-let t : '_ = $f457 in
-let x : '_ = $f456 in
-let $t455 : '_ = +(acc, x) in
-call_ptr go(t, $t455)
+  Cons($f457, $f458) -> dec_rc lst;
+let t : '_ = $f458 in
+let x : '_ = $f457 in
+let $t456 : '_ = +(acc, x) in
+call_ptr go(t, $t456)
   _ -> dec_rc lst;
 dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t515 : String = let $t514 : List(Int) = let $t513 : List(Int) = List.range(1, 5) in
-bump($t513) in
-List.sum_int($t514) in
-let $rc_1 : () = println($t515) in
-dec_rc $t515;
+  let $t516 : String = let $t515 : List(Int) = let $t514 : List(Int) = List.range(1, 5) in
+bump($t514) in
+List.sum_int($t515) in
+let $rc_1 : () = println($t516) in
+dec_rc $t516;
 $rc_1
 
