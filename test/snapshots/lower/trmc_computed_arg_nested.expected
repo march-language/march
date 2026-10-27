@@ -38,8 +38,12 @@ alloc Cons(h, $t87)
 fn List.chunks(xs : List('a), size : Int) : List(List('a)) =
   let go : (List('a), List(List('a))) -> List(List('a)) = letrec [go] in
 go in
-let $t396 : '_ = alloc Nil() in
-go(xs, $t396)
+let $t396 : '_ = <=(size, 0) in
+case $t396 of
+  True() -> __panic_site("stdlib/list.march", 1017);
+panic("List.chunks: size must be positive")
+  _ -> let $t397 : '_ = alloc Nil() in
+go(xs, $t397)
 
 ## List.concat
 fn List.concat(xss : List(List('a))) : List('a) =
@@ -56,11 +60,11 @@ fn List.dedup(xs : List('a)) : List('a) =
 go in
 case xs of
   Nil() -> alloc Nil()
-  Cons($f507, $f508) -> let t : '_ = $f508 in
-let h : '_ = $f507 in
-let $t506 : '_ = let $t505 : '_ = alloc Nil() in
-alloc Cons(h, $t505) in
-go(t, h, $t506)
+  Cons($f508, $f509) -> let t : '_ = $f509 in
+let h : '_ = $f508 in
+let $t507 : '_ = let $t506 : '_ = alloc Nil() in
+alloc Cons(h, $t506) in
+go(t, h, $t507)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.drop
@@ -111,8 +115,8 @@ fn List.empty() : List('a) =
 fn List.enumerate(xs : List('a)) : List((Int, 'a)) =
   let go : (List('a), Int, List((Int, 'a))) -> List((Int, 'a)) = letrec [go] in
 go in
-let $t454 : '_ = alloc Nil() in
-go(xs, 0, $t454)
+let $t455 : '_ = alloc Nil() in
+go(xs, 0, $t455)
 
 ## List.filter
 fn List.filter(xs : List('a), pred : ('a) -> Bool) : List('a) =
@@ -262,28 +266,28 @@ fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1187);
+  Nil() -> __panic_site("stdlib/list.march", 1191);
 panic("List.maximum_int: empty list")
-  Cons($f489, $f490) -> let t : '_ = $f490 in
-let h : '_ = $f489 in
+  Cons($f490, $f491) -> let t : '_ = $f491 in
+let h : '_ = $f490 in
 go(t, h)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.member
 fn List.member(xs : List('a), x : 'a) : Bool =
-  let $t496 : ('_) -> '_ = letrec [$lam0_member] in
+  let $t497 : ('_) -> '_ = letrec [$lam0_member] in
 $lam0_member in
-List.any(xs, $t496)
+List.any(xs, $t497)
 
 ## List.minimum_int
 fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1166);
+  Nil() -> __panic_site("stdlib/list.march", 1170);
 panic("List.minimum_int: empty list")
-  Cons($f476, $f477) -> let t : '_ = $f477 in
-let h : '_ = $f476 in
+  Cons($f477, $f478) -> let t : '_ = $f478 in
+let h : '_ = $f477 in
 go(t, h)
   _ -> panic("non-exhaustive pattern match")
 
@@ -544,23 +548,23 @@ alloc Cons(h, $t346)
 fn List.unzip(pairs : List(('a, 'b))) : (List('a), List('b)) =
   let go : (List(('a, 'b)), List('a), List('b)) -> (List('a), List('b)) = letrec [go] in
 go in
-let $t443 : '_ = alloc Nil() in
 let $t444 : '_ = alloc Nil() in
-go(pairs, $t443, $t444)
+let $t445 : '_ = alloc Nil() in
+go(pairs, $t444, $t445)
 
 ## List.zip
 fn List.zip(xs : List('a), ys : List('b)) : List(('a, 'b)) =
   let go : (List('a), List('b), List(('a, 'b))) -> List(('a, 'b)) = letrec [go] in
 go in
-let $t411 : '_ = alloc Nil() in
-go(xs, ys, $t411)
+let $t412 : '_ = alloc Nil() in
+go(xs, ys, $t412)
 
 ## List.zip_with
 fn List.zip_with(xs : List('a), ys : List('b), f : ('a) -> ('b) -> 'c) : List('c) =
   let go : (List('a), List('b), List('c)) -> List('c) = letrec [go] in
 go in
-let $t426 : '_ = alloc Nil() in
-go(xs, ys, $t426)
+let $t427 : '_ = alloc Nil() in
+go(xs, ys, $t427)
 
 ## ascending
 fn ascending(a : Int, b : Int) : List(Int) =
@@ -573,12 +577,12 @@ alloc List.Cons(a, $t3)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t514 : String = let $t513 : List(Int) = ascending(0, 5) in
-List.sum_int($t513) in
-println($t514);
-let $t516 : String = let $t515 : List(Int) = squares(5) in
-List.sum_int($t515) in
-println($t516)
+  let $t515 : String = let $t514 : List(Int) = ascending(0, 5) in
+List.sum_int($t514) in
+println($t515);
+let $t517 : String = let $t516 : List(Int) = squares(5) in
+List.sum_int($t516) in
+println($t517)
 
 ## squares
 fn squares(n : Int) : List(Int) =

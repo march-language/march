@@ -5,6 +5,8 @@ s2 bad:  Err(panic: Range.to_list: step must be non-zero)
 s3 good: abcd,ef
 s3 bad:  Err(panic: Control.chunks: size must be positive)
 s3 neg:  Err(panic: Control.chunks: size must be positive)
+lc good: 3
+lc bad:  Err(panic: List.chunks: size must be positive)
 s4 good: -1 minute, 10 seconds
 s4 min:  -7625142226 weeks, 1 day, 15 hours, 36 minutes, 27 seconds, 904 milliseconds
 s4 max:  7625142226 weeks, 1 day, 15 hours, 36 minutes, 27 seconds, 903 milliseconds

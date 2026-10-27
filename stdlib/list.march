@@ -994,7 +994,7 @@ mod List do
   doc """
   Splits the list into consecutive chunks of `size` elements; the last
   chunk holds the remainder and may be shorter. Returns [] for an empty
-  list. `size` must be positive (`{Int | _ > 0}`).
+  list. `size` must be positive (`{Int | _ > 0}`); panics otherwise.
 
   ## Examples
 
@@ -1011,7 +1011,11 @@ mod List do
         go(rest, Cons(chunk, acc)) end
       end
     end
-    go(xs, Nil)
+    -- split_at(lst, 0) returns ([], lst), so a size <= 0 repeated the walk
+    -- on the same list forever.  The guard is for a size the checker
+    -- cannot see.
+    if size <= 0 do panic("List.chunks: size must be positive")
+    else go(xs, Nil) end
   end
 
   -- ---- Combining ----

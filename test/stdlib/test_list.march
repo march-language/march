@@ -478,6 +478,22 @@ describe "splitting" do
     assert (List.length(List.head(r)) == 2)
     assert (List.length(List.last(r)) == 1)
   end
+
+  test "chunks good paths are unchanged" do
+    assert (List.chunks([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]])
+    assert (List.chunks([1, 2], 5) == [[1, 2]])
+    assert (List.chunks([1, 2, 3], 1) == [[1], [2], [3]])
+    assert (List.chunks([], 3) == [])
+  end
+
+  -- A size of 0 used to hang: split_at(lst, 0) returns ([], lst), so the
+  -- walk repeated on the same list forever.  A negative size did the same.
+  test "chunks with a size that is not positive panics instead of hanging" do
+    let msg = "panic: List.chunks: size must be positive"
+    assert (__try_call_val(fn _ -> List.chunks([1, 2, 3], opaque_int("0"))) == Err(msg))
+    assert (__try_call_val(fn _ -> List.chunks([1, 2, 3], opaque_int("-2"))) == Err(msg))
+    assert (__try_call_val(fn _ -> List.chunks([], opaque_int("0"))) == Err(msg))
+  end
 end
 
 describe "combining" do

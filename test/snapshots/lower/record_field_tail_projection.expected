@@ -39,8 +39,12 @@ alloc Cons(h, $t97)
 fn List.chunks(xs : List('a), size : Int) : List(List('a)) =
   let go : (List('a), List(List('a))) -> List(List('a)) = letrec [go] in
 go in
-let $t406 : '_ = alloc Nil() in
-go(xs, $t406)
+let $t406 : '_ = <=(size, 0) in
+case $t406 of
+  True() -> __panic_site("stdlib/list.march", 1017);
+panic("List.chunks: size must be positive")
+  _ -> let $t407 : '_ = alloc Nil() in
+go(xs, $t407)
 
 ## List.concat
 fn List.concat(xss : List(List('a))) : List('a) =
@@ -57,11 +61,11 @@ fn List.dedup(xs : List('a)) : List('a) =
 go in
 case xs of
   Nil() -> alloc Nil()
-  Cons($f517, $f518) -> let t : '_ = $f518 in
-let h : '_ = $f517 in
-let $t516 : '_ = let $t515 : '_ = alloc Nil() in
-alloc Cons(h, $t515) in
-go(t, h, $t516)
+  Cons($f518, $f519) -> let t : '_ = $f519 in
+let h : '_ = $f518 in
+let $t517 : '_ = let $t516 : '_ = alloc Nil() in
+alloc Cons(h, $t516) in
+go(t, h, $t517)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.drop
@@ -112,8 +116,8 @@ fn List.empty() : List('a) =
 fn List.enumerate(xs : List('a)) : List((Int, 'a)) =
   let go : (List('a), Int, List((Int, 'a))) -> List((Int, 'a)) = letrec [go] in
 go in
-let $t464 : '_ = alloc Nil() in
-go(xs, 0, $t464)
+let $t465 : '_ = alloc Nil() in
+go(xs, 0, $t465)
 
 ## List.filter
 fn List.filter(xs : List('a), pred : ('a) -> Bool) : List('a) =
@@ -263,28 +267,28 @@ fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1187);
+  Nil() -> __panic_site("stdlib/list.march", 1191);
 panic("List.maximum_int: empty list")
-  Cons($f499, $f500) -> let t : '_ = $f500 in
-let h : '_ = $f499 in
+  Cons($f500, $f501) -> let t : '_ = $f501 in
+let h : '_ = $f500 in
 go(t, h)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.member
 fn List.member(xs : List('a), x : 'a) : Bool =
-  let $t506 : ('_) -> '_ = letrec [$lam0_member] in
+  let $t507 : ('_) -> '_ = letrec [$lam0_member] in
 $lam0_member in
-List.any(xs, $t506)
+List.any(xs, $t507)
 
 ## List.minimum_int
 fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1166);
+  Nil() -> __panic_site("stdlib/list.march", 1170);
 panic("List.minimum_int: empty list")
-  Cons($f486, $f487) -> let t : '_ = $f487 in
-let h : '_ = $f486 in
+  Cons($f487, $f488) -> let t : '_ = $f488 in
+let h : '_ = $f487 in
 go(t, h)
   _ -> panic("non-exhaustive pattern match")
 
@@ -545,23 +549,23 @@ alloc Cons(h, $t356)
 fn List.unzip(pairs : List(('a, 'b))) : (List('a), List('b)) =
   let go : (List(('a, 'b)), List('a), List('b)) -> (List('a), List('b)) = letrec [go] in
 go in
-let $t453 : '_ = alloc Nil() in
 let $t454 : '_ = alloc Nil() in
-go(pairs, $t453, $t454)
+let $t455 : '_ = alloc Nil() in
+go(pairs, $t454, $t455)
 
 ## List.zip
 fn List.zip(xs : List('a), ys : List('b)) : List(('a, 'b)) =
   let go : (List('a), List('b), List(('a, 'b))) -> List(('a, 'b)) = letrec [go] in
 go in
-let $t421 : '_ = alloc Nil() in
-go(xs, ys, $t421)
+let $t422 : '_ = alloc Nil() in
+go(xs, ys, $t422)
 
 ## List.zip_with
 fn List.zip_with(xs : List('a), ys : List('b), f : ('a) -> ('b) -> 'c) : List('c) =
   let go : (List('a), List('b), List('c)) -> List('c) = letrec [go] in
 go in
-let $t436 : '_ = alloc Nil() in
-go(xs, ys, $t436)
+let $t437 : '_ = alloc Nil() in
+go(xs, ys, $t437)
 
 ## closed
 fn closed(ms : List({ addr : String, node_id : String }), id : String) : List(String) =
@@ -600,8 +604,8 @@ let $t15 : String = let $t14 : String = int_to_string(0) in
 { node_id = $t13, addr = $t15 } in
 let $t17 : List({ addr : String, node_id : String }) = alloc List.Nil({ addr : String, node_id : String })() in
 alloc List.Cons($t16, $t17) in
-let $t525 : String = let $t524 : Int = let $t523 : List(String) = closed(ms, "n0") in
-List.length($t523) in
-int_to_string($t524) in
-println($t525)
+let $t526 : String = let $t525 : Int = let $t524 : List(String) = closed(ms, "n0") in
+List.length($t524) in
+int_to_string($t525) in
+println($t526)
 

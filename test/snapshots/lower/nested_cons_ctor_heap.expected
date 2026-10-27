@@ -39,8 +39,12 @@ alloc Cons(h, $t89)
 fn List.chunks(xs : List('a), size : Int) : List(List('a)) =
   let go : (List('a), List(List('a))) -> List(List('a)) = letrec [go] in
 go in
-let $t398 : '_ = alloc Nil() in
-go(xs, $t398)
+let $t398 : '_ = <=(size, 0) in
+case $t398 of
+  True() -> __panic_site("stdlib/list.march", 1017);
+panic("List.chunks: size must be positive")
+  _ -> let $t399 : '_ = alloc Nil() in
+go(xs, $t399)
 
 ## List.concat
 fn List.concat(xss : List(List('a))) : List('a) =
@@ -57,11 +61,11 @@ fn List.dedup(xs : List('a)) : List('a) =
 go in
 case xs of
   Nil() -> alloc Nil()
-  Cons($f509, $f510) -> let t : '_ = $f510 in
-let h : '_ = $f509 in
-let $t508 : '_ = let $t507 : '_ = alloc Nil() in
-alloc Cons(h, $t507) in
-go(t, h, $t508)
+  Cons($f510, $f511) -> let t : '_ = $f511 in
+let h : '_ = $f510 in
+let $t509 : '_ = let $t508 : '_ = alloc Nil() in
+alloc Cons(h, $t508) in
+go(t, h, $t509)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.drop
@@ -112,8 +116,8 @@ fn List.empty() : List('a) =
 fn List.enumerate(xs : List('a)) : List((Int, 'a)) =
   let go : (List('a), Int, List((Int, 'a))) -> List((Int, 'a)) = letrec [go] in
 go in
-let $t456 : '_ = alloc Nil() in
-go(xs, 0, $t456)
+let $t457 : '_ = alloc Nil() in
+go(xs, 0, $t457)
 
 ## List.filter
 fn List.filter(xs : List('a), pred : ('a) -> Bool) : List('a) =
@@ -263,28 +267,28 @@ fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1187);
+  Nil() -> __panic_site("stdlib/list.march", 1191);
 panic("List.maximum_int: empty list")
-  Cons($f491, $f492) -> let t : '_ = $f492 in
-let h : '_ = $f491 in
+  Cons($f492, $f493) -> let t : '_ = $f493 in
+let h : '_ = $f492 in
 go(t, h)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.member
 fn List.member(xs : List('a), x : 'a) : Bool =
-  let $t498 : ('_) -> '_ = letrec [$lam0_member] in
+  let $t499 : ('_) -> '_ = letrec [$lam0_member] in
 $lam0_member in
-List.any(xs, $t498)
+List.any(xs, $t499)
 
 ## List.minimum_int
 fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1166);
+  Nil() -> __panic_site("stdlib/list.march", 1170);
 panic("List.minimum_int: empty list")
-  Cons($f478, $f479) -> let t : '_ = $f479 in
-let h : '_ = $f478 in
+  Cons($f479, $f480) -> let t : '_ = $f480 in
+let h : '_ = $f479 in
 go(t, h)
   _ -> panic("non-exhaustive pattern match")
 
@@ -545,23 +549,23 @@ alloc Cons(h, $t348)
 fn List.unzip(pairs : List(('a, 'b))) : (List('a), List('b)) =
   let go : (List(('a, 'b)), List('a), List('b)) -> (List('a), List('b)) = letrec [go] in
 go in
-let $t445 : '_ = alloc Nil() in
 let $t446 : '_ = alloc Nil() in
-go(pairs, $t445, $t446)
+let $t447 : '_ = alloc Nil() in
+go(pairs, $t446, $t447)
 
 ## List.zip
 fn List.zip(xs : List('a), ys : List('b)) : List(('a, 'b)) =
   let go : (List('a), List('b), List(('a, 'b))) -> List(('a, 'b)) = letrec [go] in
 go in
-let $t413 : '_ = alloc Nil() in
-go(xs, ys, $t413)
+let $t414 : '_ = alloc Nil() in
+go(xs, ys, $t414)
 
 ## List.zip_with
 fn List.zip_with(xs : List('a), ys : List('b), f : ('a) -> ('b) -> 'c) : List('c) =
   let go : (List('a), List('b), List('c)) -> List('c) = letrec [go] in
 go in
-let $t428 : '_ = alloc Nil() in
-go(xs, ys, $t428)
+let $t429 : '_ = alloc Nil() in
+go(xs, ys, $t429)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
@@ -576,15 +580,15 @@ let $t8 : List(Row) = alloc List.Nil(Row)() in
 alloc List.Cons($t7, $t8) in
 alloc List.Cons($t4, $t9) in
 case rows of
-  Cons($f519, $f520) -> case $f519 of
-  Row($f521) -> let rest : List(Row) = $f520 in
-let fp : List(Int) = $f521 in
-let $t516 : String = let $t515 : Int = List.length(fp) in
-int_to_string($t515) in
-println($t516);
-let $t518 : String = let $t517 : Int = List.length(rest) in
-int_to_string($t517) in
-println($t518)
+  Cons($f520, $f521) -> case $f520 of
+  Row($f522) -> let rest : List(Row) = $f521 in
+let fp : List(Int) = $f522 in
+let $t517 : String = let $t516 : Int = List.length(fp) in
+int_to_string($t516) in
+println($t517);
+let $t519 : String = let $t518 : Int = List.length(rest) in
+int_to_string($t518) in
+println($t519)
   _ -> panic("non-exhaustive pattern match")
   Nil() -> println("empty")
   _ -> panic("non-exhaustive pattern match")

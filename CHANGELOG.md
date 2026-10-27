@@ -392,6 +392,11 @@ git log is authoritative for exact commits.
   cannot see panics with `Control.chunks: size must be positive`. This includes an
   empty artifact with a size of 0, which used to come back as one empty chunk.
 
+- **`List.chunks` with a size of 0 or less no longer hangs.** It already had
+  `size : {Int | _ > 0}`, so a literal 0 was a compile-time error, but a size the checker
+  could not see made `split_at(lst, 0)` return the same list forever. It now panics with
+  `List.chunks: size must be positive`, including on an empty list.
+
 - **`Duration.format` of the smallest Int no longer recurses forever.** A negative
   duration was formatted as `"-" ++ format(Duration(-ms))`, and `-ms` of the smallest
   Int is itself, so it looped interpreted and overflowed the stack (SIGBUS) compiled.
