@@ -89,6 +89,8 @@ type unit_ = {
   u_clauses : owner list;
   u_attrs : string list;
   u_decreases : A.expr list option;  (** the [@[decreases(e, ...)]] payload, if written *)
+  u_top : int;  (** the enclosing top-level unit (itself for a top-level unit or a handler) *)
+  u_ret : A.ty option;  (** the declared return type (phase 3 reads it for IH demand) *)
 }
 
 type graph = {
@@ -158,13 +160,16 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
   let edges = ref [] in
   let fv_calls = ref [] in
   let trusted = ref [] in
-  let new_unit ?decreases ~name ~span ~kind ~params ~tys ~pspans ~clauses ~attrs () =
+  let top_of : (int, int) Hashtbl.t = Hashtbl.create 64 in
+  let new_unit ?decreases ?top ?ret ~name ~span ~kind ~params ~tys ~pspans ~clauses ~attrs () =
     let id = !n_units in
     incr n_units;
+    let top = match top with Some t -> t | None -> id in
+    Hashtbl.replace top_of id top;
     units :=
       { u_id = id; u_name = name; u_span = span; u_kind = kind; u_params = params;
         u_param_tys = tys; u_param_spans = pspans; u_clauses = clauses; u_attrs = attrs;
-        u_decreases = decreases }
+        u_decreases = decreases; u_top = top; u_ret = ret }
       :: !units;
     id
   in
@@ -199,7 +204,7 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
             new_unit ~name:(mod_path ^ def.A.fn_name.A.txt) ~span:def.A.fn_name.A.span ~kind:Top
               ~params ~tys
               ~pspans:(match def.A.fn_clauses with c :: _ -> clause_param_spans c | [] -> [])
-              ~clauses ~attrs:def.A.fn_attrs
+              ~clauses ~attrs:def.A.fn_attrs ?ret:def.A.fn_ret_ty
               ?decreases:(List.assoc_opt "decreases" def.A.fn_attr_args) ()
           in
           List.iter (fun p -> Hashtbl.replace globals (p ^ def.A.fn_name.A.txt) id) prefixes;
@@ -324,13 +329,14 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
     | A.ELet (b, _) ->
       walk ~src ~owner ~lam env b.A.bind_expr;
       bind_vars env (pat_vars b.A.bind_pat)
-    | A.ELetFn (n, ps, _, body, _) ->
+    | A.ELetFn (n, ps, ret, body, _) ->
       let params = List.map (fun (p : A.param) -> Some p.A.param_name.A.txt) ps in
       let tys = List.map (fun (p : A.param) -> p.A.param_ty) ps in
       let lowner = { o_params = params; o_body = body } in
       let parent = try Hashtbl.find unit_name src with Not_found -> "?" in
       let id =
         new_unit ~name:(parent ^ "/" ^ n.A.txt) ~span:n.A.span ~kind:Local ~params ~tys
+          ~top:(Option.value ~default:src (Hashtbl.find_opt top_of src)) ?ret
           ~pspans:(List.map (fun (p : A.param) -> Some p.A.param_name.A.span) ps)
           ~clauses:[ lowner ] ~attrs:[] ()
       in
@@ -1357,6 +1363,32 @@ let finish (t : t) (pl : plan) ~(verdicts : A.span -> Obligation.verdict list) :
             else "metric"))
   done;
   (certs, fails)
+
+(** Phase 3 (§3.7, §4.2): every SCC reachable from SCC [si] through any
+    edge of any of its members, [si] itself excluded.  The induction
+    hypothesis is granted to [si] only when each reachable recursive SCC is
+    certified too ("may diverge" is inferred upward through callers). *)
+let reachable_sccs (g : graph) (si : int) : int list =
+  let seen = Hashtbl.create 16 in
+  let rec visit s =
+    List.iter
+      (fun u ->
+        List.iter
+          (fun e ->
+            let d = g.scc_of.(e.e_dst) in
+            if d <> si && not (Hashtbl.mem seen d) then begin
+              Hashtbl.replace seen d ();
+              visit d
+            end)
+          g.out.(u))
+      g.sccs.(s)
+  in
+  visit si;
+  List.sort compare (Hashtbl.fold (fun d () acc -> d :: acc) seen [])
+
+(** The unit declared at [span] (a declaring name's span), if any. *)
+let unit_at (g : graph) (span : A.span) : unit_ option =
+  Array.find_opt (fun u -> u.u_span = span) g.units
 
 (** Set by the driver under [--termination-report]: every SCC of user code is
     demanded (§9), not only an annotated one.  Off by default (decision D2). *)

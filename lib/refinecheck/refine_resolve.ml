@@ -302,6 +302,39 @@ let binder_apart (b : string) (p : A.expr) : string * A.expr =
   if b = "_" then (b, p)
   else ("_", subst_params [ (b, A.EVar { A.txt = "_"; A.span = A.dummy_span }) ] p)
 
+(* [sg]'s declared return instantiated at the call's actuals [args]: the
+   [postcond_of_declared] rule for a resolved callee, shared with the
+   induction hypothesis of termination phase 3 ([Refine_post.ih_at]), which
+   names its callee by the call's span rather than by resolution. *)
+let instantiate_ret (sg : fn_sig) (args : A.expr list) : (string * A.expr * string option) option =
+    (match sg.ret with
+     | Some (b, p) ->
+       let srt = sg.ret_sort in
+       (match classify_pred b sg.param_names p with
+        | Closed -> Some (b, p, srt)
+        | Unusable -> None
+        | Relational ps ->
+          (* Positional formal -> actual.  A formal recorded as "_" is a
+             pattern parameter with no usable name; it can never be a member of
+             [ps] (the classifier reads "_" as the binder), and mapping it would
+             be meaningless, so it is excluded here too. *)
+          let env =
+            List.mapi (fun i n -> (n, List.nth_opt args i)) sg.param_names
+            |> List.filter_map (function
+                 | "_", _ | _, None -> None
+                 | n, Some a -> Some (n, a))
+          in
+          (* A formal spelled twice (`fn two(a : Int, a : Int)`) has no one
+             actual: the interpreter binds the first, compiled code the last
+             (review C3), so the positional substitution means nothing. *)
+          let twice p = List.length (List.filter (( = ) p) sg.param_names) > 1 in
+          if List.exists twice ps then None
+          else if List.for_all (fun p -> List.mem_assoc p env) ps then
+            let b, p = binder_apart b p in
+            Some (b, subst_params env p, srt)
+          else None)
+     | _ -> None)
+
 let postcond_of_declared ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t)
     (fname : string) (args : A.expr list) : (string * A.expr * string option) option =
   (* A callee the callee ENV knows — a refined callback parameter with a
@@ -336,34 +369,7 @@ let postcond_of_declared ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig
     (match builtin_ret_refinement fname with
      | Some (b, p) -> Some (b, p, None)
      | None -> None)
-  | Some (Some sg) ->
-    (match sg.ret with
-     | Some (b, p) ->
-       let srt = sg.ret_sort in
-       (match classify_pred b sg.param_names p with
-        | Closed -> Some (b, p, srt)
-        | Unusable -> None
-        | Relational ps ->
-          (* Positional formal -> actual.  A formal recorded as "_" is a
-             pattern parameter with no usable name; it can never be a member of
-             [ps] (the classifier reads "_" as the binder), and mapping it would
-             be meaningless, so it is excluded here too. *)
-          let env =
-            List.mapi (fun i n -> (n, List.nth_opt args i)) sg.param_names
-            |> List.filter_map (function
-                 | "_", _ | _, None -> None
-                 | n, Some a -> Some (n, a))
-          in
-          (* A formal spelled twice (`fn two(a : Int, a : Int)`) has no one
-             actual: the interpreter binds the first, compiled code the last
-             (review C3), so the positional substitution means nothing. *)
-          let twice p = List.length (List.filter (( = ) p) sg.param_names) > 1 in
-          if List.exists twice ps then None
-          else if List.for_all (fun p -> List.mem_assoc p env) ps then
-            let b, p = binder_apart b p in
-            Some (b, subst_params env p, srt)
-          else None)
-     | _ -> None)
+  | Some (Some sg) -> instantiate_ret sg args
   | _ -> None
 
 (* A callee's proved declared return first; failing that, a proved annotated

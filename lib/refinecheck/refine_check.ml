@@ -928,13 +928,18 @@ let uniform_formals (fd : A.fn_def) : string list option =
    satisfy `true`, and the hypothesis read them as `p`; so did a swapped
    pair of definers, a name rebound to another lambda, and an alias, which
    is declined too). *)
-let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
+(* Termination phase 3 (§4.2): [?span], the call's span, also qualifies the
+   call when it is an eligible SELF-edge span of a certified SCC
+   ([Refine_post.ih_spans]: rule (a) held there), with no structural
+   argument.  The definer condition is unchanged either way. *)
+let hyp_applies ?span (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
     ((self, sets, definers) : string * (string, unit) Hashtbl.t list * (int * string * fn_sig) list) : bool =
   fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
   && List.length sets = List.length args
-  && List.exists2
-       (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
-       args sets
+  && (List.exists2
+        (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
+        args sets
+      || match span with Some sp -> Hashtbl.find_opt ih_spans sp = Some true | None -> false)
   && List.for_all
        (fun (i, n, sg) ->
          (match List.nth_opt args i with Some (A.EVar { A.txt = v; _ }) -> v = n | _ -> false)
@@ -960,7 +965,7 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
   match e with
   | A.EVar { A.txt = x; _ } -> List.assoc_opt x ce
   | A.EAnnot (e', _, _) -> container_entry_of_expr ctx defs cb ce e'
-  | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
+  | A.EApp (A.EVar { A.txt = fname; _ }, args, csp) ->
     let other () =
       match
         parametric_return ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx defs cb fname args
@@ -973,9 +978,12 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
       | Some (lsg, sets, entry, formals)
         when (match List.assoc_opt fname cb with Some s -> s == lsg | None -> false)
              && List.length sets = List.length args
-             && List.exists2
-                  (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
-                  args sets ->
+             && (List.exists2
+                   (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
+                   args sets
+                 (* Termination phase 3: an eligible self-edge span of a
+                    certified local SCC, as [hyp_applies] widens. *)
+                 || Hashtbl.find_opt ih_spans csp = Some true) ->
         Some (if entry_is_closed entry then Some entry else lend_entry ~formals ~args entry)
       | _ -> None
     in
@@ -983,7 +991,7 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
      | _ when local_hyp <> None ->
        (match Option.get local_hyp with Some e -> Some e | None -> other ())
      | Some (self, sets, Single entry, definers, formals)
-       when hyp_applies ctx cb fname args (self, sets, definers) ->
+       when hyp_applies ~span:csp ctx cb fname args (self, sets, definers) ->
        (* A closed hypothesis is the entry itself (unchanged); a relational
           one is read at THIS self-call's actuals (phase 4, §2.3), and one
           whose actuals do not move falls through to the other routes. *)
@@ -4652,6 +4660,20 @@ let term_sites : (A.span, Refine_term.metric_site) Hashtbl.t ref = ref (Hashtbl.
 
 let term_verdicts : (A.span, Obligation.verdict list) Hashtbl.t = Hashtbl.create 16
 
+(* Termination phase 3, rule (a): the call spans whose induction hypothesis
+   is under consideration ([ih_watch]), and those the scratch walk of
+   [ih_prepare] actually reached ([ih_reached]).  A call the walk never
+   visits (an arm guard) has no checked precondition, so it gets no IH. *)
+let ih_watch : (A.span, unit) Hashtbl.t = Hashtbl.create 16
+
+let ih_reached : (A.span, unit) Hashtbl.t = Hashtbl.create 16
+
+(* Set only for [ih_prepare]'s scratch walk, which needs the CALL
+   obligations (termination and preconditions) and nothing else: no
+   function's or local's return is checked, and no local is lent a return
+   (one fewer fact can only lose a precondition proof, never make one). *)
+let calls_only_walk : bool ref = ref false
+
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) (e : A.expr) : unit =
   let go = visit ~root errctx defs ctx path lets sc re cb ce in
@@ -4664,6 +4686,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
    | _ -> ());
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
+    if Hashtbl.mem ih_watch sp then Hashtbl.replace ih_reached sp ();
     (match Hashtbl.find_opt !term_sites sp with
      | Some site ->
        let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
@@ -5665,7 +5688,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let escapes = List.exists (name_escapes ~pass_checked n.A.txt) (body :: rest) in
   let proved =
     match ret_ty with
-    | Some (A.TyRefine _) ->
+    | Some (A.TyRefine _) when not !calls_only_walk ->
       (* A scalar return tail gets phase 2's scalar demand hook
          ([Refine_post.tail_demand]), as a top-level function's does: the
          hook's env is the local's own parameters (stripped when it
@@ -5705,7 +5728,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     cont_add_params ce
       (if escapes then List.map (fun (p : A.param) -> { p with A.param_ty = None }) ps else ps)
   in
-  (match ret_elems_of_ty ret_ty with
+  (match (if !calls_only_walk then None else ret_elems_of_ty ret_ty) with
    | None -> visit ~root errctx defs ctx path lets sc re cb ce body
    | Some er ->
      (* A declared CONTAINER return (design 2026-10-18 element-flow
@@ -6545,8 +6568,9 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
     (* Annotated-accumulator facts are read only by the walk that proved
        them ([Refine_resolve.annotated_acc_facts]). *)
     Hashtbl.reset annotated_acc_facts;
-    with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
-        with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
+    if not !calls_only_walk then
+      with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
+          with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
     let walked = if assume_params then fd else strip_param_refinements fd in
     last_elem_return_proved := ret_elems_of_ty fd.A.fn_ret_ty <> None;
     (* An ASSUMED element return (§7.2): one `trusted` postcondition per
@@ -6576,7 +6600,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         let label = Printf.sprintf "return of %s" fd.A.fn_name.A.txt in
         let demand =
           match ret_elems_of_ty fd.A.fn_ret_ty with
-          | Some _ when assumed_er <> None -> None
+          | Some _ when assumed_er <> None || !calls_only_walk -> None
           | Some er ->
             let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
             let ts =
@@ -7825,6 +7849,185 @@ let report_termination errctx (t : Refine_term.t) (pl : Refine_term.plan) (certs
     g.Refine_term.sccs;
   ignore pl
 
+(* ── Termination phase 3: the certificate that licenses the IH (§4.2) ─────
+   Called by [gate_unverified_posts_ih] once the IH-free rounds have stalled,
+   with the items still pending.  It decides, over the contracts proved so
+   far, which recursive SCCs may use the induction hypothesis, fills
+   [ih_spans] with their eligible call spans, and returns one group per SCC
+   that still has pending members.
+
+   An SCC [S] is ELIGIBLE (decision D1, §3.7, §4.4) when
+   - its certificate (phase 1 structural, or phase 2 metric with every
+     intra-SCC obligation proved) is [structural] or [metric] — never
+     [trusted], never [unproved:*];
+   - every recursive SCC reachable from it is certified too ("may diverge"
+     is inferred upward; no IH for an SCC whose proof crosses into an
+     uncertified one).
+   A call span of [S] is eligible (rule (a)) when it is an intra-SCC direct
+   or lambda edge that the scratch walk reached, and every precondition
+   obligation recorded there was PROVED (a callee with a refined parameter
+   must have one).
+
+   Demand (§9): the SCCs of the pending items, of every unit declaring an
+   element (container) return, and every recursive SCC reachable from them.
+   Nothing is planned, and nothing walked, when no recursive SCC is in
+   demand: a module with no pending recursive contract pays one graph scan.
+
+   The scratch walk covers only the top-level functions that hold a member
+   of a demanded SCC, into a throwaway error context and scratch ledger,
+   with every module-wide cell it can move saved and restored, so the real
+   walk afterwards starts exactly where it would have.  Its termination
+   obligations are discharged with the contracts proved so far: a callee's
+   proved post is a true partial-correctness fact (F11), and a callee whose
+   post was proved only by its own IH was itself certified, by this same
+   rule, earlier in the DAG of SCCs. *)
+let ih_prepare ~root ?type_map (term : Refine_term.t Lazy.t) defs (decls : A.decl list)
+    (pending : gate_item list) : ih_group list =
+  let t = Lazy.force term in
+  let g = t.Refine_term.graph in
+  let module RT = Refine_term in
+  let scc_of u = g.RT.scc_of.(u.RT.u_id) in
+  let recursive si = match g.RT.sccs.(si) with u :: _ -> RT.is_recursive g u | [] -> false in
+  let d0 = Hashtbl.create 8 in
+  List.iter
+    (fun (_, _, (fd : A.fn_def), _) ->
+      match RT.unit_at g fd.A.fn_name.A.span with
+      | Some u when recursive (scc_of u) -> Hashtbl.replace d0 (scc_of u) ()
+      | _ -> ())
+    pending;
+  Array.iter
+    (fun (u : RT.unit_) ->
+      if u.RT.u_kind <> RT.Handler && ret_elems_of_ty u.RT.u_ret <> None
+         && (not (List.mem "assume" u.RT.u_attrs)) && recursive (scc_of u)
+      then Hashtbl.replace d0 (scc_of u) ())
+    g.RT.units;
+  if Hashtbl.length d0 = 0 then []
+  else begin
+    let d0l = List.sort compare (Hashtbl.fold (fun s () acc -> s :: acc) d0 []) in
+    let reach = List.map (fun s -> (s, RT.reachable_sccs g s)) d0l in
+    let demand = Hashtbl.copy d0 in
+    List.iter (fun (_, rs) -> List.iter (fun r -> if recursive r then Hashtbl.replace demand r ()) rs) reach;
+    let pl =
+      RT.plan_metrics ?type_map ~is_measure
+        ~demanded:(fun u -> Hashtbl.mem demand (scc_of u))
+        t
+    in
+    (* The top-level functions to walk: the holders of a member of an IH SCC
+       (rule (a) needs its preconditions) or of a pending metric SCC. *)
+    let walk_tops = Hashtbl.create 8 in
+    Hashtbl.iter
+      (fun si () ->
+        if Hashtbl.mem d0 si || pl.RT.pl_status.(si) = RT.St_pending then
+          List.iter
+            (fun u -> Hashtbl.replace walk_tops g.RT.units.(g.RT.units.(u).RT.u_top).RT.u_span ())
+            g.RT.sccs.(si))
+      demand;
+    let watched =
+      List.concat_map
+        (fun si ->
+          List.concat_map
+            (fun u -> List.filter (fun e -> e.RT.e_kind <> RT.Reference) (RT.intra g u))
+            g.RT.sccs.(si))
+        d0l
+    in
+    let rec filter (ds : A.decl list) : A.decl list =
+      List.filter_map
+        (function
+          | A.DFn (fd, _) as d when Hashtbl.mem walk_tops fd.A.fn_name.A.span -> Some d
+          | A.DMod (n, v, ds, sp) -> Some (A.DMod (n, v, filter ds, sp))
+          | (A.DAlias _ | A.DUse _) as d -> Some d
+          | _ -> None)
+        ds
+    in
+    let pre_ok = Hashtbl.create 16 in
+    let saved_sites = !term_sites in
+    let saved_verdicts = Hashtbl.copy term_verdicts in
+    let saved_acc = Hashtbl.copy annotated_acc_facts in
+    let saved_ctr = !ret_ctr and saved_budget = !Witness.wall_budget in
+    let saved_mal = !March_refine.Solver.malformed_count
+    and saved_malm = !March_refine.Solver.malformed_messages in
+    let saved_promoted = !promoted_sites and saved_locals = !local_elem_ret_proved in
+    let saved_last = !last_elem_return_proved in
+    Hashtbl.reset term_verdicts;
+    Hashtbl.reset ih_watch;
+    Hashtbl.reset ih_reached;
+    List.iter (fun e -> Hashtbl.replace ih_watch e.RT.e_span ()) watched;
+    let verdicts =
+      Fun.protect
+        ~finally:(fun () ->
+          term_sites := saved_sites;
+          Hashtbl.reset term_verdicts;
+          Hashtbl.iter (Hashtbl.replace term_verdicts) saved_verdicts;
+          Hashtbl.reset annotated_acc_facts;
+          Hashtbl.iter (Hashtbl.replace annotated_acc_facts) saved_acc;
+          ret_ctr := saved_ctr;
+          Witness.wall_budget := saved_budget;
+          March_refine.Solver.malformed_count := saved_mal;
+          March_refine.Solver.malformed_messages := saved_malm;
+          promoted_sites := saved_promoted;
+          local_elem_ret_proved := saved_locals;
+          last_elem_return_proved := saved_last;
+          calls_only_walk := false;
+          Hashtbl.reset ih_watch)
+        (fun () ->
+          Obligation.with_scratch (fun () ->
+              term_sites := pl.RT.pl_sites;
+              (* No witness runs: rule (a) reads only whether an obligation
+                 was PROVED, which no witness decides, and a witness run
+                 against a diverging function burns its whole fuel. *)
+              Witness.wall_budget := 0;
+              calls_only_walk := true;
+              visit_decls ~root (Err.create ()) defs rctx0 (filter decls);
+              (* Rule (a)'s precondition half, read before the scratch
+                 ledger is thrown away. *)
+              List.iter
+                (fun (e : RT.edge) ->
+                  let obs =
+                    List.filter
+                      (fun (o : Obligation.t) -> o.Obligation.kind = Obligation.Precondition)
+                      (Obligation.obligations_at e.RT.e_span)
+                  in
+                  let callee_refined =
+                    List.exists
+                      (function Some ty -> ty_has_refinement ty | None -> false)
+                      g.RT.units.(e.RT.e_dst).RT.u_param_tys
+                  in
+                  if Hashtbl.mem ih_reached e.RT.e_span
+                     && List.for_all (fun (o : Obligation.t) -> o.Obligation.verdict = Obligation.Proved) obs
+                     && ((not callee_refined) || obs <> [])
+                  then Hashtbl.replace pre_ok e.RT.e_span ())
+                watched;
+              Hashtbl.copy term_verdicts))
+    in
+    let certs, _ =
+      RT.finish t pl ~verdicts:(fun sp -> Option.value ~default:[] (Hashtbl.find_opt verdicts sp))
+    in
+    let certified si = certs.(si) = "structural" || certs.(si) = "metric" in
+    List.filter_map
+      (fun (si, rs) ->
+        if certified si && List.for_all (fun r -> (not (recursive r)) || certified r) rs then begin
+          let at = Hashtbl.create 8 in
+          List.iter
+            (fun (e : RT.edge) ->
+              if g.RT.scc_of.(e.RT.e_src) = si && Hashtbl.mem pre_ok e.RT.e_span then begin
+                Hashtbl.replace ih_spans e.RT.e_span (e.RT.e_src = e.RT.e_dst);
+                Hashtbl.replace at e.RT.e_span g.RT.units.(e.RT.e_dst).RT.u_span
+              end)
+            watched;
+          let items =
+            List.filter
+              (fun (_, _, (fd : A.fn_def), _) ->
+                match RT.unit_at g fd.A.fn_name.A.span with
+                | Some u -> scc_of u = si
+                | None -> false)
+              pending
+          in
+          if items = [] then None else Some { ig_items = items; ig_at = at }
+        end
+        else None)
+      reach
+  end
+
 let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     ?(stdlib_files : string list = [])
     ?(audit : ((Refine_audit.site * Refine_audit.disposition) list -> unit) option)
@@ -8130,8 +8333,17 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   handler_sigs := collect_handler_sigs m.A.mod_decls;
   ctor_sigs := collect_ctor_sigs m.A.mod_decls;
   impl_sigs := collect_impl_sigs m.A.mod_decls;
-  (* Only POSITIVELY VERIFIED postconditions may be assumed at call sites. *)
-  gate_unverified_posts ~root errctx defs m.A.mod_decls;
+  (* Only POSITIVELY VERIFIED postconditions may be assumed at call sites.
+     Termination phase 3: once the IH-free rounds stall, [ih_prepare]
+     certifies the recursive SCCs the induction hypothesis may serve, and
+     the gate admits each one atomically.  [ih_spans] stays set for the
+     element-return gate and the walk (the self-call hypotheses read it),
+     and is cleared when this function returns. *)
+  Hashtbl.reset ih_spans;
+  Fun.protect ~finally:(fun () -> Hashtbl.reset ih_spans) @@ fun () ->
+  gate_unverified_posts_ih ~root
+    ~ih:(fun pending -> ih_prepare ~root ?type_map term defs m.A.mod_decls pending)
+    errctx defs m.A.mod_decls;
   ret_elem_demand := None;
   gate_elem_returns ~root defs m.A.mod_decls;
   (* Termination, phase 2 (design §3.3-§3.5, §9): plan the metric

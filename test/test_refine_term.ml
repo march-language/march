@@ -973,3 +973,278 @@ let metric_suite =
         Alcotest.(check bool) ("trusted: " ^ String.concat " | " lines) true
           (has "trusted: 3 builtin or extern callees: ext_tick, int_to_string, string_length"));
   ]
+
+(* Phase 3 ([ih_suite], group `termination-ih`): the induction hypothesis,
+   granted only behind a termination certificate (decision D1, §4.2).  Every
+   row asserts (kind, callee) -> verdict triples from the obligation ledger,
+   never an exit code.  The payoff rows (r1-r4, the widened element and local
+   hypotheses) were skips on the phase-2 compiler; the soundness rows (c1-c3,
+   pre_fails, scc_atomic, diverges_in_scc) must stay unproved, and each goes
+   RED under the perturbation named in the progress note. *)
+
+(* Every ledger verdict for obligations of [kind] whose callee is [callee]. *)
+let ledger ?(all = false) src : Ob.t list =
+  ignore (run ~all src);
+  Ob.all ()
+
+let vs kind callee (obs : Ob.t list) =
+  List.filter_map
+    (fun (o : Ob.t) ->
+      if o.Ob.kind = kind && o.Ob.callee = callee then Some (Ob.verdict_name o.Ob.verdict) else None)
+    obs
+
+let post = Ob.Postcondition
+
+let pre = Ob.Precondition
+
+let check_all_proved label kind callee obs =
+  let v = vs kind callee obs in
+  Alcotest.(check bool) (label ^ ": has obligations") true (v <> []);
+  Alcotest.(check (list string)) label (List.map (fun _ -> "proved") v) v
+
+(* Not proved, and never violated: the skip of today.  A postcondition is
+   recorded per tail, so a base tail (`0`) may prove; some tail must skip. *)
+let check_skip label kind callee obs =
+  let v = vs kind callee obs in
+  Alcotest.(check bool) (label ^ ": has obligations") true (v <> []);
+  Alcotest.(check bool) (label ^ ": some tail skipped, none violated; got " ^ String.concat "," v) true
+    (List.mem "skipped" v && not (List.mem "violated" v))
+
+let not_all_proved label kind callee obs =
+  let v = vs kind callee obs in
+  Alcotest.(check bool) (label ^ ": has obligations") true (v <> []);
+  Alcotest.(check bool) (label ^ ": not every tail proved; got " ^ String.concat "," v) false
+    (List.for_all (( = ) "proved") v)
+
+let r1 = {|
+  fn sum_to(n : {Int | _ >= 0}) : {Int | _ >= 0} do
+    if n == 0 do 0 else
+      let r = sum_to(n - 1)
+      n + r
+    end
+  end
+  fn need_nn(x : {Int | _ >= 0}) : Int do x end
+  fn caller(k : {Int | _ >= 0}) : Int do need_nn(sum_to(k)) end
+|}
+
+let r2 = {|
+  fn sum_to(n : {Int | _ >= 0}) : {Int | _ >= 0} do
+    if n == 0 do 0 else n + sum_to(n - 1) end
+  end
+  fn need_nn(x : {Int | _ >= 0}) : Int do x end
+  fn caller(k : {Int | _ >= 0}) : Int do need_nn(sum_to(k)) end
+|}
+
+let r3 = {|
+  fn sum_to(n : {Int | _ >= 0}) : {Int | _ >= n} do
+    if n == 0 do 0 else
+      let r = sum_to(n - 1)
+      n + r
+    end
+  end
+  fn need_ge(x : {Int | _ >= 10}) : Int do x end
+  fn caller() : Int do need_ge(sum_to(10)) end
+|}
+
+let r4 = {|
+  fn len2(xs : List(Int)) : {Int | _ >= 0} do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + len2(t)
+    end
+  end
+  fn need_nn(x : {Int | _ >= 0}) : Int do x end
+  fn caller(xs : List(Int)) : Int do need_nn(len2(xs)) end
+|}
+
+let c1 = {|
+  fn loopy(x : Int) : {Int | _ < 0} do loopy(x) end
+  fn need_pos(x : {Int | _ > 0}) : Int do x end
+  fn caller(k : Int) : Int do need_pos(loopy(k)) end
+|}
+
+(* c1's nested twin: rule (b) must not reflect an uncertified call either. *)
+let c1_nested = {|
+  fn loopy(x : Int) : {Int | _ < 0} do 0 + loopy(x) end
+  fn need_pos(x : {Int | _ > 0}) : Int do x end
+  fn caller(k : Int) : Int do need_pos(loopy(k)) end
+|}
+
+let c2 = {|
+  fn down(n : Int) : {Int | _ == 0} do if n == 0 do 0 else down(n - 1) end end
+  fn need_nn(x : {Int | _ >= 0}) : Int do x end
+  fn caller() : Int do need_nn(down(0 - 1) - 1) end
+|}
+
+let c3 = {|
+  fn loopy(x : Int) : {Int | _ > 0 && _ < 0} do loopy(x) end
+  fn need_neg(x : {Int | _ < 0}) : Int do x end
+  fn caller(k : Int) : Int do need_neg(loopy(k)) end
+|}
+
+let pre_fails = {|
+  fn f(n : {Int | _ >= 0}) : {Int | _ >= 0} do
+    if n == 0 do 0 else
+      let r = f(n - 2)
+      r + 1
+    end
+  end
+|}
+
+(* Rule (a)'s precondition half on its own: `f(n - 1, k - 1)` DECREASES
+   (`n`, the default metric), but breaks `k`'s precondition at k = 1, and
+   `f(1, 1)` really returns 0.  The hypothesis there would "prove" `_ > 0`. *)
+let pre_fails_k = {|
+  fn f(n : {Int | _ >= 0}, k : {Int | _ > 0}) : {Int | _ > 0} do
+    if n == 0 do k else
+      let r = f(n - 1, k - 1)
+      r
+    end
+  end
+  fn need_pos(x : {Int | _ > 0}) : Int do x end
+  fn caller() : Int do need_pos(f(1, 1)) end
+|}
+
+(* `od`'s contract is false (`od(0) = 1`), and under `od`'s hypothesis `ev`'s
+   would prove: admitting `ev` alone would lend `ev(1) >= 0` to the caller,
+   and `ev(1) = -1`. *)
+let atomic_false = {|
+  fn ev(n : {Int | _ >= 0}) : {Int | _ >= 0} do if n == 0 do 0 else 0 - od(n - 1) end end
+  fn od(n : {Int | _ >= 0}) : {Int | _ < 0} do if n == 0 do 1 else ev(n - 1) + 1 end end
+  fn need_nn(x : {Int | _ >= 0}) : Int do x end
+  fn caller() : Int do need_nn(ev(1)) end
+|}
+
+let atomic_true = {|
+  fn ev(n : {Int | _ >= 0}) : {Int | _ >= 0} do if n == 0 do 0 else od(n - 1) end end
+  fn od(n : {Int | _ >= 0}) : {Int | _ > 0} do if n == 0 do 1 else ev(n - 1) + 1 end end
+|}
+
+let elem_widened = {|
+  @[decreases(n)]
+  fn replicate(x : {Int | _ > 0}, n : {Int | _ >= 0}) : List({Int | _ > 0}) do
+    if n == 0 do Nil else Cons(x, replicate(x, n - 1)) end
+  end
+  fn keep(xs : List({Int | _ > 0})) : List({Int | _ > 0}) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> Cons(h, keep(t))
+    end
+  end
+|}
+
+(* The same shape whose metric does NOT decrease: `x` is the default metric
+   and is passed unchanged, so no certificate and no hypothesis. *)
+let elem_unwidened = {|
+  fn replicate(x : {Int | _ > 0}, n : {Int | _ >= 0}) : List({Int | _ > 0}) do
+    if n == 0 do Nil else Cons(x, replicate(x, n - 1)) end
+  end
+|}
+
+let local_src next = Printf.sprintf {|
+  fn need_nn(k : {Int | _ >= 0}) : Int do k end
+  fn last_hit(n : {Int | _ >= 0}, pred : Int -> Bool) : Option({Int | _ >= 0}) do
+    fn go(i : {Int | _ >= 0}) : Option({Int | _ >= 0}) do
+      if i == 0 do None else if pred(i) do Some(i) else %s end end
+    end
+    go(n)
+  end
+  fn user(n : {Int | _ >= 0}) : Int do
+    match last_hit(n, fn y -> y > 3) do
+      Some(i) -> need_nn(i)
+      None -> 0
+    end
+  end
+|} next
+
+let diverges_in_scc = {|
+  fn spin(n : Int) : Int do spin(n) end
+  fn f(n : {Int | _ >= 0}) : {Int | _ >= 0} do
+    if n == 0 do 0 else
+      let s = spin(n)
+      let r = f(n - 1)
+      r + 1
+    end
+  end
+|}
+
+(* Tier 2 (a datatype return, `len(_) == n`): the self-call `rep(n - 1)` is
+   not structural; the certified metric `n` widens [ih_arg].  `rep_bad`'s
+   `n` is unbounded (`rep_bad(-1)` diverges): no certificate, no hypothesis. *)
+let tier2_widened = {|
+  fn rep(n : {Int | _ >= 0}) : {List(Int) | len(_) == n} do
+    if n == 0 do Nil else Cons(0, rep(n - 1)) end
+  end
+  fn rep_bad(n : Int) : {List(Int) | len(_) == n} do
+    if n == 0 do Nil else Cons(0, rep_bad(n - 1)) end
+  end
+|}
+
+let ih_suite =
+  [ zcase "r2 / §4.3: nested `n + sum_to(n - 1)` proves, and so does its caller" (fun () ->
+        let obs = ledger (m r2) in
+        check_all_proved "sum_to post" post "sum_to" obs;
+        check_all_proved "sum_to pre" pre "sum_to" obs;
+        check_all_proved "need_nn" pre "need_nn" obs);
+    zcase "r1 / r3: the let form, `_ >= 0` and `_ >= n` with `need_ge(sum_to(10))`" (fun () ->
+        let obs = ledger (m r1) in
+        check_all_proved "r1 sum_to" post "sum_to" obs;
+        check_all_proved "r1 need_nn" pre "need_nn" obs;
+        let obs = ledger (m r3) in
+        check_all_proved "r3 sum_to" post "sum_to" obs;
+        check_all_proved "r3 need_ge" pre "need_ge" obs);
+    zcase "r4: structural `1 + len2(t)` (rule (b)) and its caller" (fun () ->
+        let obs = ledger (m r4) in
+        check_all_proved "len2" post "len2" obs;
+        check_all_proved "need_nn" pre "need_nn" obs);
+    zcase "c1 / c2 / c3: diverging functions get no hypothesis, nothing proved or violated" (fun () ->
+        List.iter
+          (fun (label, src, fn_, callee) ->
+            let obs = ledger (m src) in
+            check_skip (label ^ " post") post fn_ obs;
+            check_skip (label ^ " caller") pre callee obs)
+          [ ("c1", c1, "loopy", "need_pos"); ("c1 nested", c1_nested, "loopy", "need_pos");
+            ("c2", c2, "down", "need_nn"); ("c3", c3, "loopy", "need_neg") ]);
+    zcase "pre_fails: `f(n - 2)` breaks its precondition at n = 1, so no hypothesis" (fun () ->
+        let obs = ledger (m pre_fails) in
+        check_skip "f post" post "f" obs;
+        (* The call decreases, so only the precondition withholds the IH. *)
+        let obs = ledger (m pre_fails_k) in
+        not_all_proved "f(n, k) post" post "f" obs;
+        Alcotest.(check bool) "need_pos(f(1, 1)) not proved" false
+          (List.mem "proved" (vs pre "need_pos" obs)));
+    zcase "scc_atomic: one false member sinks both; both true admits both" (fun () ->
+        let obs = ledger (m atomic_false) in
+        not_all_proved "ev" post "ev" obs;
+        not_all_proved "od" post "od" obs;
+        check_skip "caller need_nn(ev(1))" pre "need_nn" obs;
+        let obs = ledger (m atomic_true) in
+        check_all_proved "ev" post "ev" obs;
+        check_all_proved "od" post "od" obs);
+    zcase "elem_widened: `Cons(x, replicate(x, n - 1))` proves; a structural one still does" (fun () ->
+        let obs = ledger (m elem_widened) in
+        check_all_proved "return of replicate" pre "return of replicate" obs;
+        check_all_proved "return of keep" pre "return of keep" obs;
+        let obs = ledger (m elem_unwidened) in
+        Alcotest.(check bool) "uncertified: not all proved" false
+          (List.for_all (( = ) "proved") (vs pre "return of replicate" obs)));
+    zcase "local_widened: a local `go(i - 1)` proves; an ascending `go(i + 1)` still skips" (fun () ->
+        let obs = ledger (m (local_src "go(i - 1)")) in
+        check_all_proved "return of go" pre "return of go" obs;
+        check_all_proved "need_nn" pre "need_nn" obs;
+        let obs = ledger (m (local_src "go(i + 1)")) in
+        Alcotest.(check bool) "ascending: return of go skips" true
+          (List.mem "skipped" (vs pre "return of go" obs));
+        Alcotest.(check bool) "ascending: need_nn not proved" false
+          (List.mem "proved" (vs pre "need_nn" obs)));
+    zcase "tier2_widened: `Cons(0, rep(n - 1))` proves `len(_) == n`; unbounded `n` still skips" (fun () ->
+        let obs = ledger (m tier2_widened) in
+        check_all_proved "rep" post "rep" obs;
+        check_skip "rep_bad" post "rep_bad" obs);
+    zcase "diverges_in_scc: calling an uncertified recursive function withholds the hypothesis" (fun () ->
+        let obs = ledger (m diverges_in_scc) in
+        check_skip "f post" post "f" obs);
+    zcase "the IH files no termination obligation in the ledger (D2: report-only)" (fun () ->
+        let r = run (m r2) in
+        Alcotest.(check int) "no termination obligation" 0 (List.length r.terms));
+  ]
