@@ -1873,15 +1873,45 @@ let test_term_action_diverges_inserts () =
   z3_or_skip ();
   ignore (round_trip "diverges (cap total)" term_total_caller ~title:"Mark `run` `@[diverges]`")
 
-(* Phase 5 fills the inference; the frame reads the compiler's
-   `note: try `@[decreases(e)]`.`, which no diagnostic carries yet. *)
+(* The action reads the compiler's `note: try `@[decreases(e)]`.`, which
+   phase 5's inference writes when it runs: under `--refine-infer` or
+   `--termination-report` ([Refine_term.infer]), never under a plain
+   `--check`. *)
+let with_infer f =
+  March_refinecheck.Refine_term.infer := true;
+  Fun.protect ~finally:(fun () -> March_refinecheck.Refine_term.infer := false) f
+
+let is_add_decreases (ca : Lsp.Types.CodeAction.t) =
+  String.length ca.title >= 15 && String.sub ca.title 0 15 = "Add `@[decrease"
+
 let test_term_action_decreases_frame () =
   z3_or_skip ();
   let acts = term_actions term_total_up in
-  Alcotest.(check bool) "no inferred metric offered yet" false
-    (List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
-         String.length ca.title >= 15 && String.sub ca.title 0 15 = "Add `@[decrease") acts);
+  Alcotest.(check bool) "a plain --check infers nothing, so no metric is offered" false
+    (List.exists is_add_decreases acts);
   ignore
     (round_trip "decreases frame" term_total_up
        ~edit_msg:(fun m -> m ^ " note: try `@[decreases(100 - n)]`.")
        ~title:"Add `@[decreases(100 - n)]` to `up`")
+
+(* Phase 5: the inferred metric, from the real diagnostic. *)
+let test_term_action_decreases_inferred () =
+  z3_or_skip ();
+  with_infer (fun () ->
+      ignore (round_trip "inferred (cap total)" term_total_up ~title:"Add `@[decreases(100 - n)]` to `up`"))
+
+(* An annotated metric that fails: the action REPLACES it. *)
+let term_up_wrong = {|mod M do
+  @[decreases(n)]
+  fn up(n : Int) : Int do if n >= 100 do 0 else up(n + 1) end end
+end
+|}
+
+let test_term_action_decreases_replaces () =
+  z3_or_skip ();
+  with_infer (fun () ->
+      let src' = round_trip "inferred (replaces)" term_up_wrong ~title:"Add `@[decreases(100 - n)]` to `up`" in
+      Alcotest.(check bool) ("the written metric is gone\n" ^ src') false
+        (let n = "@[decreases(n)]" in
+         let rec go i = i + String.length n <= String.length src' && (String.sub src' i (String.length n) = n || go (i + 1)) in
+         go 0))

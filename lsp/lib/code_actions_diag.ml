@@ -1135,9 +1135,11 @@ let code_actions_at (a : t) ~line ~character
      - "Mark `f` `@[diverges]`": insert the attribute on the enclosing
        function, or REPLACE its `@[decreases(...)]` (the two together are a
        `diverges_conflict`);
-     - "Add `@[decreases(e)]`": the frame for phase 5's inference.  The
-       compiler names a checked metric in a `note: try `@[decreases(e)]``;
-       until it infers one, no diagnostic carries the note.
+     - "Add `@[decreases(e)]`": phase 5's inference (§3.5).  When the
+       compiler infers a metric for a one-function cycle (under
+       `--refine-infer` or `--termination-report`, never a plain `--check`),
+       it names it in a `note: try `@[decreases(e)]``; the action inserts
+       it, or replaces a written `@[decreases(...)]` that failed.
      The third, `x == 0` -> `x <= 0`, is the diagnostic's own machine fix and
      comes through [fix_actions] below.  None is offered for an actor
      handler, which takes no attribute. *)

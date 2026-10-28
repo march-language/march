@@ -359,7 +359,9 @@ let () =
       "x == 0 -> x <= 0 round-trips",           `Quick, test_term_action_eq_zero;
       "@[diverges] replaces @[decreases]",      `Quick, test_term_action_diverges_replaces_decreases;
       "@[diverges] inserted under cap total",   `Quick, test_term_action_diverges_inserts;
-      "@[decreases(..)] frame (phase 5 fills)", `Quick, test_term_action_decreases_frame;
+      "@[decreases(..)] read from the note",    `Quick, test_term_action_decreases_frame;
+      "@[decreases(..)] inferred (cap total)",  `Quick, test_term_action_decreases_inferred;
+      "@[decreases(..)] replaces a failing one", `Quick, test_term_action_decreases_replaces;
     ];
     "P1.8: assign to _", [
       "action offered for unused binding",      `Quick, test_assign_to_underscore_offered;
