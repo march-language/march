@@ -18,7 +18,8 @@ It is a warning, and an error in a `cap verified` module. Recursion without
 In a `cap total` module every function must be shown to terminate, so there the
 diagnostic is an error for any function that is not: unproved recursion, and a
 function that calls one, or calls a `@[diverges]` function without being marked
-`@[diverges]` itself. An actor handler gets it as "handler `X` may not return".
+`@[diverges]` itself, or shares a recursive cycle with a `@[diverges]` function
+without being marked too (there, one mark does not cover the cycle). An actor handler gets it as "handler `X` may not return".
 `main` is exempt.
 
 ## A program that triggers it
@@ -56,9 +57,11 @@ mod Main do
 end
 ```
 
-`march --check-json` carries this rewrite as the diagnostic's machine fix, and
-the editor offers it as a quick fix, whenever the counterexample is negative and
-the exit is `x == 0`. The editor also offers to mark the function `@[diverges]`
+Whenever the counterexample is negative and the exit is `x == 0`, the diagnostic
+says so in a note, and the editor offers the rewrite as a quick fix. It is not a
+machine fix, so `forge fix` does not apply it: it changes what the program does,
+since a call that never returned now returns the base case, and only you can say
+that is what you meant. The editor also offers to mark the function `@[diverges]`
 (replacing its `@[decreases]`) when it is meant to run for ever.
 
 Refining the parameter to `{Int | _ >= 0}` works too: then every caller must

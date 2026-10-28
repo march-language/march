@@ -4503,7 +4503,8 @@ worked out for it, through the call graph, and the report lists such callers:
 
 A local `fn` cannot carry an attribute. It is covered when the function around
 it is marked. One mark on any function of a recursive cycle covers the whole
-cycle.
+cycle, except in a `cap total` module, where every function of the cycle must be
+marked (see "Requiring termination: `cap total`").
 
 `@[diverges]` cannot be combined with `@[decreases]`, which claims a metric that
 proves the function does terminate, or with `@[measure]`, since a measure is a
@@ -4559,6 +4560,9 @@ In a `cap total` module, `termination_unproved` is an error for:
 - a function that calls one, or calls an unresolved name;
 - a function that calls a `@[diverges]` function without being marked
   `@[diverges]` itself;
+- a function in a recursive cycle with a `@[diverges]` function, unless it is
+  marked `@[diverges]` too: under `cap total` one mark does not cover the
+  cycle, as Idris's `partial` covers only the function it is written on;
 - an actor handler that may not return.
 
 `main` and its local functions are exempt, and so is a function marked
@@ -4570,7 +4574,17 @@ A call through an interface (`show(x)` with `x` of a type variable) reaches
 every `impl` of the interface, and an `impl` that does not terminate is an error
 on its own method. The call itself is not: the `impl` is picked by a value at run
 time, so the caller terminates whenever the `impl` it is given does, as with any
-function passed as an argument.
+function passed as an argument. A call on a known type (`show(Box(1))`) names
+its `impl` where it is written, so an `impl` that may not terminate makes the
+caller an error too.
+
+Builtins that run an `impl` count as such calls: string interpolation
+(`"${e}"`) and `to_string` run `Show`, as does `println`; `==`, `!=`, `eq` run
+`Eq`; `<`, `<=`, `>`, `>=`, `compare` run `Ord`; `hash` runs `Hash`; `to_json`,
+`from_json` and `from_json_events` run the derived Json codecs; and `own` runs
+`Drop`. The same holds for the induction hypothesis: a function whose
+interpolation runs an `impl Show` that calls the function back gets no
+hypothesis unless that cycle is certified.
 
 ### Editor repairs
 
@@ -4578,8 +4592,11 @@ The editor offers quick fixes on a `termination_unproved` diagnostic that
 `march --check-json` reports:
 
 - **change `n == 0` to `n <= 0`**, when the counterexample is negative and the
-  exit is `n == 0` (the diagnostic's own machine fix, which `forge fix` applies
-  too);
+  exit is `n == 0`. The diagnostic says so in a note
+  (`note: the exit `n == 0` misses a negative `n`; `n <= 0` covers it.`), and the
+  editor offers the change only when asked: it changes what the program does (a
+  call that never returned now returns the base case), so it is not a machine
+  fix, `forge fix` never applies it, and it is not a preferred quick fix;
 - **mark the function `@[diverges]`**, replacing its `@[decreases(...)]` if it
   has one;
 - **add `@[decreases(e)]`**, when the compiler inferred a metric and checked it

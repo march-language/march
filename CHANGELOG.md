@@ -61,7 +61,9 @@ git log is authoritative for exact commits.
   accepted all together or not at all. A function that may never return
   (`fn loopy(x : Int) : {Int | _ < 0} do loopy(x) end`) gets no hypothesis, so its
   contract stays unproved. That includes a function that calls a diverging one through
-  an `alias`, a `use` or `import`, an interface method's `impl` or a top-level `let`
+  an `alias`, a `use` or `import`, an interface method's `impl` (including one a
+  builtin runs: string interpolation `"${e}"`, `to_string` and `println` run `Show`,
+  `to_json`/`from_json` the Json codecs, `own` the `Drop` impl) or a top-level `let`
   lambda, and one that calls a name the checker cannot resolve (listed on the
   `--termination-report`'s new `unresolved:` line). A `match` on a parameter after
   `let xs = Cons(0, xs)` (or any other rebinding of it) is not structural recursion. Data type returns (`{List(Int) | len(_) == n}`), element
@@ -397,11 +399,15 @@ git log is authoritative for exact commits.
   handler that may not return for a message (`handler Counter.Spin may not return`);
   `send(self(), …)` is not recursion. A module that declares the new `cap total` must
   prove every function terminates (`main` and `@[diverges]` functions exempt): anything
-  else is a `termination_unproved` error. The standard library's 23 event loops
+  else is a `termination_unproved` error, including a function in a recursive cycle with
+  a `@[diverges]` one that is not marked itself, and a call on a known type
+  (`"${Box(n)}"`, `show(Box(n))`) whose `impl` may not terminate. The standard library's 23 event loops
   (`ClusterNode`, `NetKernel`, `NodeCall`, `PeerReader`, `Csv`, `File`, `SessionNode`,
   `Topology`, …) carry `@[diverges]`, and a test keeps new ones from landing unmarked.
-  `termination_unproved` on an `n == 0` exit with a negative counterexample now carries
-  the `n <= 0` fix, and the editor offers it, plus "mark `@[diverges]`".
+  `termination_unproved` on an `n == 0` exit with a negative counterexample now notes
+  the `n <= 0` repair, which the editor offers when asked (it changes what the program
+  does, so it is not a machine fix and `forge fix` never applies it), plus "mark
+  `@[diverges]`".
 
 - **Refinements: the `@[measure]` termination check now covers mutual recursion.** Two
   measures that call each other in a cycle, `ma(Z) -> mb(Z) -> ma(Z) + 1`, were accepted,

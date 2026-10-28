@@ -36,7 +36,9 @@ annotation, or a `cap total` error that could be avoided.
 - **`cap total` cannot exempt a handler.** A handler takes no attribute, so a handler
   that blocks on purpose is always an error under `cap total`; move the blocking call out
   of the cap's module.
-- **`cap total` trusts interface dispatch.** A call through a dictionary (`show(x)` on a
+- **`cap total` trusts interface dispatch picked by a value.** (Since the final review,
+  a dispatch on a known type, `show(Box(n))` or `"${Box(n)}"`, carries its `impl`'s
+  divergence like any call.) A call through a dictionary (`show(x)` on a
   type variable) does not carry an `impl`'s divergence to the caller; the `impl` is
   judged as its own unit, and only when it is in a `cap total` module. An `impl` outside
   one that diverges (the prelude's `Show(List(a))` cycle is uncertified today: the
@@ -45,3 +47,18 @@ annotation, or a `cap total` error that could be avoided.
 - **Witness runs are not skipped for "may diverge" units** (§6's optional saving).
 - **The "add `@[decreases(e)]`" action is a frame.** `Refine_term.suggest_metric` infers
   nothing until phase 5; the LSP reads the compiler's `note: try `@[decreases(e)]`.`.
+- **A stdlib module's bare name can resolve to an entry file's top-level function.**
+  The graph resolves a bare name lexically, out to the top level, and an entry file's
+  top-level declarations sit at that top level. So `List`'s `impl Show.show`, calling
+  `show(h)` on an element, gets an edge to a user's top-level `fn show` (measured in the
+  final review: `test/native/set_ops_shared_comparator.march`'s `fn show(s : Set(Int))`
+  calls `to_string(Set.to_list(s))`, which reaches `List`'s `impl Show`, so `show` is
+  now a recursive unit, `cert=unproved:no-int-parameter`; at run time there is no such
+  cycle). Fail-closed (a certificate lost, never one gained); resolving the prepended
+  stdlib's names without the entry file's top level would close it.
+- **Dispatching builtins the interpreter probe cannot reach.** `test_refine_term.ml`'s
+  "dispatching builtins" case calls every interpreter builtin with a probe value, so a
+  builtin that dispatches only on a value of another shape (`own` takes a `Pid` first,
+  `from_json` decodes a Json value) is listed by hand in `Refine_term.runtime_dispatch`
+  and not checked by it. An actor's `inspect` answer runs `Show` on its state fields in
+  the actor, not in the caller, and is not modelled (as no cross-actor call is).

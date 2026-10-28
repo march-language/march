@@ -357,3 +357,152 @@ deleted for the oracle; `scripts/run-tests.sh` restages it, and the case passes.
   structural-and-Int tuples, descending bounds, a path-sensitive guard search, byte
   contracts and a String `len` mismatch in callee posts.
 - The stdlib proposals are reported above, not applied (brief).
+
+## Final review fixes
+
+A fresh final review of the whole branch found two holes and six minors, all confirmed
+and fixed here.
+
+### 1 (Critical): builtins that run a user `impl` were trusted
+
+`to_string`, string interpolation (`"${e}"` is parsed as `to_string(e)`) and `println`
+run the user's `impl Show` at run time, but their schemes (`to_string : a -> String`)
+carry no interface constraint, so `build_graph` resolved them `T_trusted` and added no
+edge. A diverging `impl Show` was invisible, the induction hypothesis was granted over
+it, and a false return refinement was proved (the review's reproducer: `3 proved, 0
+skipped`; on `main`, `1 proved, 2 skipped`; now `1 proved, 2 skipped` again, for the
+interpolation, the `to_string` and the `println` spellings alike).
+
+The fix is ONE list, `Refine_term.runtime_dispatch`, merged into `builtin_table`, with
+the source of each entry in its comment:
+
+| builtin | interface | dispatch on | where it dispatches |
+|---|---|---|---|
+| `to_string` (and so `"${e}"`) | Show | arg 0 | `show_dispatch` (eval_builtins.ml); `to_string` -> `show` redirect (lower_expr.ml, mono.ml, cap_passing.ml) |
+| `println` | Show | arg 0 | `show_dispatch` (eval_builtins.ml); `Prelude.println` is `print_line(show(x))` |
+| `to_json` | JsonTo | arg 0 | `impl_tbl` (eval_builtins.ml); derived impl (lower_expr.ml) |
+| `from_json`, `from_json_events` | JsonFrom, JsonFromEvents | every impl (result-typed) | `json_iface_of` (eval.ml), `impl_tbl` (eval_builtins.ml) |
+| `own` | Drop | arg 1 | `impl_tbl` (eval_builtins.ml); `Drop$T.drop` closure (lower_expr.ml) |
+
+The builtins whose scheme carries the constraint (`==`, `!=`, `<`, `<=`, `>`, `>=`, `eq`,
+`compare`, `show`, `hash`) were already dispatches and are not repeated. Audited as NOT
+dispatching: `print` and `html_escape_ctx` (structural repr), the prelude's
+`str`/`debug`/`inspect` (ordinary functions over `to_string`), HOF builtins (they call a
+function VALUE, already a function-value call).
+
+A single source shared with eval/codegen is not practical: the interpreter's dispatch is
+code (`show_dispatch` calls inside builtin closures), not a table. Instead a test keeps
+the list honest: `final 1 every interpreter builtin that runs an impl is listed`
+installs a probe `impl` of each of the 8 interfaces for a probe type in the
+interpreter's `impl_tbl`, calls every interpreter builtin of the typechecker's table
+(598) with the probe value in every argument position, and fails on any builtin that
+ran an `impl` it is not listed (by scheme or by `runtime_dispatch`) as reaching. It
+cannot reach a builtin that dispatches only after a value of another shape (`own`'s
+`Pid`, `from_json`'s Json); those two are hand-listed (filed).
+
+Also: a dispatch on a fully known static type (`"${Box(n)}"`, `show(Box(n))`) now
+carries its `impl`'s divergence for the report and `cap total` like any call
+(`e_dispatch` is now "picked by a value": a type variable or no type). Only a dictionary
+dispatch (`show(x)`, `x` of a type variable) keeps the "terminates modulo the `impl`"
+rule. Without this, `cap total` could not reject an interpolation of a known type whose
+`impl` lives outside the cap.
+
+RED (against the `e91660cdc` implementation, new tests) -> GREEN:
+
+| test | RED line |
+|---|---|
+| `final 1 interpolation` | `f not certified (got structural)` |
+| `final 1 to_string` | `f not certified (got structural)` |
+| `final 1 println` | `f not certified (got structural)` |
+| `final 1 to_string as a value` (`apply1(to_string, W(xs))`) | `f not certified (got structural)` |
+| `final 1 every interpreter builtin …` | `Received: ["println -> Show"; "to_json -> JsonTo"; "to_string -> Show"]` |
+| `final cap_total: interpolating a known type whose impl Show diverges` | `Expected ["f"] Received []` |
+| `final 1 ==` / `final 1 <` (impl Eq / impl Ord calling `f`) | GREEN before: the scheme constraint already made them dispatches; kept as regression rows |
+| controls: `final 1 interpolation control`, `final 1 to_string control`, `final cap_total control` | GREEN before and after |
+
+Certified counts (`--check --termination-report` over every `stdlib/*.march` and
+`test/native/*.march` file, 552 entries, `e91660cdc` vs this fix): 501 structural and
+263 metric certificates both times, no certificate lost in the stdlib. One new recursive
+unit in `test/native`: `set_ops_shared_comparator.march`'s top-level `fn show(s :
+Set(Int))`, `cert=unproved:no-int-parameter`. It is a FALSE cycle, not a real one: its
+`to_string(Set.to_list(s))` now reaches `List`'s `impl Show`, whose `show(h)` the graph
+resolves lexically to the entry file's top-level `show` (a pre-existing resolution
+imprecision, fail-closed, filed). Report-only changes: 59 files' `trusted:` lists lose
+`to_string` / `to_json` / `from_json`; three `SessionNode` handlers' "may not return"
+culprit is now `Option.impl Eq.eq` (a known-type dispatch) instead of
+`Msgpack.encode_val`, with the same 50 handler lines and 35 "may diverge" lines. No
+generic Show impl pulled a stdlib function into an uncertified cycle.
+
+### 2 (Important): `cap total` let an unmarked member of a marked cycle through
+
+`report_cap_total` ignored a `Marked` culprit in the unit's own SCC. Ruling (the
+brief's): under `cap total` every member of a cycle with a `@[diverges]` member must be
+marked itself, as Idris's `partial`; outside `cap total` one mark still covers its cycle
+for the report and the hypothesis. The error names each unmarked member: "`cyc_a` may
+not terminate: it is in a recursive cycle with `cyc_b`, which is marked `@[diverges]`;
+under `cap total` every function of that cycle must be marked too."
+
+RED: `final cap_total: an unmarked member …` `Expected ["cyc_a"] Received []`. Controls
+(both marked; no cap): no error, before and after. The phase-4 sweep still passes (the
+stdlib and test/native have no `cap total` module; the ratchet cases are green).
+
+### Minors
+
+- The `attribute_no_effect` text for a non-recursive `@[decreases]` had a 17-space run
+  (a string broken across lines without `\`). RED: the metric group's no-effect case,
+  `FAIL no run of spaces in: … so there is no                 recursive call …`. No golden
+  pinned it.
+- `lsp/lib/code_actions_diag.ml` `attr_region`: a raw newline byte in a char literal is
+  now `'\n'`.
+- **The `n == 0` -> `n <= 0` repair is no longer a machine fix.** It turned a hang into a
+  base-case return, and `forge fix` applies every machine fix. The convention for a
+  repair that must not be applied unasked is the one the `try `@[decreases(e)]`` note
+  already follows: a note in the message, and an LSP action built from it. The
+  diagnostic keeps its note (`the exit `n == 0` misses a negative `n`; `n <= 0` covers
+  it.`); the LSP offers "Change `n == 0` to `n <= 0`", not preferred, only when the guard
+  is written exactly once in the enclosing function. RED: `FAIL no machine fix on any
+  termination diagnostic` (the diagnostic carried `fix: replace … "n <= 0"`). The error
+  corpus' `termination_unproved_1` lost its `fix` block (`UPDATE_ERRORS=1`, reviewed).
+- The unreachable `diverges_conflicts` scan of impl methods' `@[diverges]` is removed
+  (the parser rejects an attribute in an `impl`); a comment says why there is no case.
+- `--refine-infer`'s line for a local `fn`'s metric no longer says "apply by hand":
+  `(not applied: a local `fn` cannot carry `@[decreases]`; this metric would certify it)`.
+- `code_actions_at` deduplicates diagnostics by (range, code, message), both the
+  client's context list and its union with the LSP's own. RED: `echoed diagnostic not
+  doubled`, `Expected 1 Received 3` (the client echoed the LSP's `;` diagnostic twice
+  with a different `source`).
+
+### Rulings
+
+- **Ruling: `own` counts as a `Drop` dispatch although the drop runs later.** — The graph
+  already counts a lambda's body as the caller's edges, deferred or not; this is the same
+  conservative reading. — Cost if wrong: a caller of `own` whose `Drop` impl is
+  uncertified loses its hypothesis.
+- **Ruling: a dispatch on a fully known type carries divergence.** — The `impl` is named
+  where the call is written; "picked by a value" holds only for a type variable. Needed
+  for `cap total` to reject `"${Box(n)}"` with a diverging `impl` outside the cap. —
+  Cost if wrong: report wording moves (the `SessionNode` culprits), and a `cap total`
+  caller of `x == y` on a type whose `Eq` impl is uncertified (the stdlib's `impl Eq`
+  for `List`/`Option` are, today) is an error.
+- **Ruling: the dispatch list is checked by an interpreter probe, not shared code.** —
+  The interpreter's dispatch is closures, not a table, and the compiled backend's
+  redirects are the same names. — Cost if wrong: a builtin that dispatches only on a
+  value the probe cannot build is missed; two are hand-listed and filed.
+- **Ruling: the `n <= 0` repair is a note plus an LSP action, never a machine fix.** —
+  It changes behaviour. — Cost if wrong: one more click in the editor; `forge fix` no
+  longer repairs it.
+
+### Oracles and suites
+
+- `scripts/refine-oracle.sh check` against a baseline recorded at `e91660cdc` (same
+  `_build`, `_build/default/stdlib` deleted first): `REFINEMENT DIAGNOSTICS IDENTICAL
+  (7861 lines over 552 fixtures)`. Expected: its corpus has no interpolation of a type
+  whose `Show` impl reaches back, no `cap total` and no `@[decreases]`, and it does not
+  run `--termination-report`; the fix's evidence is the RED rows above and the
+  reproducer. The oracle's ability to go red was shown in phase 5 (`oracle-demand-on`).
+- `scripts/ir-oracle.sh check`: `IR IDENTICAL across 497 programs` (4 skipped, as in the
+  baseline). Nothing here reaches codegen.
+- `scripts/check-docs.sh`: passed. `scripts/check-tree-sitter.sh`: ok (no grammar change).
+- Full `scripts/run-tests.sh` (load average 3-8): `All suites passed`, 13 suites, 6194
+  tests: `march-refinecheck` 1954 (13 new cases), `march-lsp` 395 (1 new), `errors`
+  300, `march-compiler` 1453, `march-codegen` 720, `march-stdlib` 899.
