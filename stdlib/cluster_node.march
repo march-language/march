@@ -2440,7 +2440,7 @@ mod ClusterNode do
   -- ends (None) or this task's epoch is draining at or after [not_before]:
   -- then Some((frame, rest)), the frame just read (not yet handled) and the
   -- bytes read past it.
-  pfn read_link(fd : Int, buf : List(Int), not_before : Int, on_frame : Int -> List(Int) -> ())
+  @[diverges] pfn read_link(fd : Int, buf : List(Int), not_before : Int, on_frame : Int -> List(Int) -> ())
       : Option((List(Int), List(Int))) do
     match NetKernel.recv_frame(fd, buf) do
       Err(_) -> None
@@ -2595,7 +2595,7 @@ mod ClusterNode do
     end
   end
 
-  pfn accept_loop(node, h : CnHandle, cfg : CnConfig, me : NodeIdentity.Identity, listen_fd : Int, meta : Vault(Int),
+  @[diverges] pfn accept_loop(node, h : CnHandle, cfg : CnConfig, me : NodeIdentity.Identity, listen_fd : Int, meta : Vault(Int),
                   not_before : Int) : Int do
     match tcp_accept(listen_fd) do
       Err(_) -> 0
@@ -2615,7 +2615,7 @@ mod ClusterNode do
     end
   end
 
-  pfn tick_loop(node, h : CnHandle, files : Option(CertFiles), tick_ms : Int, not_before : Int) : Int do
+  @[diverges] pfn tick_loop(node, h : CnHandle, files : Option(CertFiles), tick_ms : Int, not_before : Int) : Int do
     sleep_ms(tick_ms)
     if Vault.get(h.meta, "stopped") != None do
       0
@@ -2962,7 +2962,7 @@ mod ClusterNode do
   `Ok`. The same pid registering again is allowed. On `Ok` the caller owns
   the claim and must send the `Register` that releases it.
   """
-  fn reserve(names : Vault(GlobalPid.Pid), claims : Vault(Int), node_id : String, creation : Int,
+  @[diverges] fn reserve(names : Vault(GlobalPid.Pid), claims : Vault(Int), node_id : String, creation : Int,
              name : String, p : Int) : Result((), RegisterError) do
     let claimed = if Vault.put_new(claims, name, p) do Ok(true)
       else

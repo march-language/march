@@ -61,7 +61,7 @@ mod NodeCall do
   -- Read frames from [fd] until one decodes as a CallReply matching [correlation].
   -- Non-matching or malformed frames are skipped (they may be from a prior call
   -- or a different multiplexed stream). A socket error returns NoConnection.
-  pfn recv_reply(fd : Int, correlation : Int,
+  @[diverges] pfn recv_reply(fd : Int, correlation : Int,
                  buf : List(Int)) : Result(List(Int), CallError) do
     match NetKernel.recv_frame(fd, buf) do
       Err(_) -> Err(RemoteCall.NoConnection)
@@ -129,7 +129,7 @@ mod NodeCall do
 
       NodeCall.serve_loop(NodeRpc.empty(), fd)
   """
-  fn serve_loop(targets : Targets, fd : Int) : () do
+  @[diverges] fn serve_loop(targets : Targets, fd : Int) : () do
     match serve_one(targets, fd) do
       Err(_) -> ()
       Ok(_) -> serve_loop(targets, fd)

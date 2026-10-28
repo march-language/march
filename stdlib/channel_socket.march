@@ -334,7 +334,7 @@ mod ChannelSocket do
   end
 
   -- WebSocket read loop (requires actor runtime / WS runtime).
-  pfn ws_loop(ws_sock, active, routes, cfg) do
+  @[diverges] pfn ws_loop(ws_sock, active, routes, cfg) do
     match WebSocket.recv(ws_sock) do
     TextFrame(text) ->
       match parse_frame(text) do

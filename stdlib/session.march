@@ -637,7 +637,7 @@ mod Session do
     end
   end
 
-  pfn ip_drain(st : InProcessState) : () do
+  @[diverges] pfn ip_drain(st : InProcessState) : () do
     if ip_step(st) do ip_drain(st)
     else
       -- Stopped with deliveries nobody is waiting for: say so, since a

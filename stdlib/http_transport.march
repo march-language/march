@@ -182,7 +182,7 @@ mod HttpTransport do
   or `Err(RecvError(msg))`. Used by `stream_request_on` after the headers
   have been read.
   """
-  fn stream_chunked_body(fd, on_chunk, status_code, resp_headers) do
+  @[diverges] fn stream_chunked_body(fd, on_chunk, status_code, resp_headers) do
     match tcp_recv_chunked_frame(fd) do
     Err(msg) -> Err(RecvError(msg))
     Ok("") -> Ok((status_code, resp_headers, ()))

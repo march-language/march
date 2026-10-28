@@ -1829,4 +1829,8 @@ let diverges_suite =
         let r = run (m total_dispatch) in
         Alcotest.(check (list string)) "the impl and its callee, not `g`"
           [ "impl Show.show"; "spin" ] (error_names "termination_unproved" r));
+    case "ratchet: the standard library has no class-E unit without `@[diverges]`" (fun () ->
+        check_ratchet "stdlib" (unannotated_e ()) stdlib_e_allowed);
+    case "ratchet: neither has test/native" (fun () ->
+        check_ratchet "test/native" (unannotated_e ~native:true ()) native_e_allowed);
   ]

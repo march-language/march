@@ -51,7 +51,7 @@ mod Main do
   -- dispatch slot.
   fn tick(n : Int) : Int do if n > 1000000 do tick(n - 1) else n + 1 end end
 
-  fn spin(n : Int, b) : Int do
+  @[diverges] fn spin(n : Int, b) : Int do
     sleep_ms(20)
     send(b, Pulse())
     spin(tick(n), b)

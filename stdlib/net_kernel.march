@@ -117,7 +117,7 @@ mod NetKernel do
         Err(e) -> println("connection lost: " ++ e)
       end
   """
-  fn recv_frame(fd : Int, buf : List(Int)) : Result((List(Int), List(Int)), String) do
+  @[diverges] fn recv_frame(fd : Int, buf : List(Int)) : Result((List(Int), List(Int)), String) do
     match recv_frame_plain(fd, buf) do
       Err(e) -> Err(e)
       Ok((wire, rest)) ->
@@ -171,7 +171,7 @@ mod NetKernel do
   connection it is MAC-checked as in `recv_frame`. Blocks; `Err` on a read
   failure.
   """
-  fn recv_frame_exact(fd : Int) : Result(List(Int), String) do
+  @[diverges] fn recv_frame_exact(fd : Int) : Result(List(Int), String) do
     match recv_frame_exact_raw(fd) do
       Err(e) -> Err(e)
       Ok(wire) ->

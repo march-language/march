@@ -217,7 +217,7 @@ mod File do
   -- Low-level callbacks (side-effect iteration)
 
   -- Internal helper: recursively reads lines. Used by each_line.
-  pfn each_line_loop(fd, f) do
+  @[diverges] pfn each_line_loop(fd, f) do
     match file_read_line(fd) do
     None -> :ok
     Some(line) -> do
@@ -248,7 +248,7 @@ mod File do
   end
 
   -- Internal helper: recursively reads chunks. Used by each_chunk.
-  pfn each_chunk_loop(fd, size, f) do
+  @[diverges] pfn each_chunk_loop(fd, size, f) do
     match file_read_chunk(fd, size) do
     None -> :ok
     Some(chunk) -> do
