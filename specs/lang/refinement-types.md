@@ -4249,8 +4249,98 @@ counts the checks as `termination` in its `by kind:` line. Calls to builtins and
 `extern` functions are assumed to terminate; the report's `trusted:` line lists
 them.
 
-Nothing uses a proved metric yet: a recursive function's return refinement is
-still never assumed at its own recursive calls.
+### The induction hypothesis
+
+A proof of termination is what lets the checker assume a recursive function's
+own return refinement at its recursive calls. This assumption is the
+**induction hypothesis**. With it, `sum_to` proves:
+
+```march
+fn sum_to(n : {Int | _ >= 0}) : {Int | _ >= 0} do
+  if n == 0 do 0 else n + sum_to(n - 1) end
+end
+
+fn caller(k : {Int | _ >= 0}) : Int do need_nn(sum_to(k)) end
+```
+
+Here is the reasoning, step by step:
+
+1. The call `sum_to(n - 1)` meets its precondition, because `n - 1 >= 0` when
+   `n != 0`.
+2. The metric `n` falls at that call.
+3. So the checker may assume that the call's result is `>= 0`.
+4. `n + (something >= 0)` is `>= 0`, so the return refinement holds.
+5. Once proved, the contract is a fact at `caller`'s call too.
+
+The hypothesis is used only when all of these hold:
+
+- **The cycle is certified.** Its certificate is `structural` or `metric`.
+  A cycle that is `unproved` gets no hypothesis, and neither does one that is
+  `trusted`. Without this rule, a function that never returns would "prove"
+  any return refinement at all:
+
+  ```march
+  fn loopy(x : Int) : {Int | _ < 0} do loopy(x) end
+  ```
+
+  This function has no metric, so its return refinement is not proved. The
+  return stays a skip, and a call that depends on it is not reported as a
+  violation.
+- **Everything it calls is certified too.** If any recursive function the
+  cycle calls (directly or further down) is not certified, the hypothesis is
+  withheld. A call into a function that may never return could make the whole
+  cycle never return.
+- **The recursive call is checked.** The checker must have reached the call,
+  and proved every precondition there. A call that breaks a precondition gets
+  no hypothesis:
+
+  ```march
+  fn f(n : {Int | _ >= 0}, k : {Int | _ > 0}) : {Int | _ > 0} do
+    if n == 0 do k else f(n - 1, k - 1) end
+  end
+  ```
+
+  Here `f(n - 1, k - 1)` decreases `n`, but it breaks `k > 0` when `k = 1`.
+  So `f`'s return refinement is not proved, and that is correct: `f(1, 1)`
+  returns `0`.
+- **A cycle of several functions proves all together, or not at all.** Each
+  function's return refinement is checked assuming all the others at their
+  recursive calls. They are accepted only if every one of them proves.
+  If one is false, none is accepted, even those that would prove under the
+  false one's hypothesis.
+
+The hypothesis serves every kind of return refinement:
+
+- a number or `Bool` return (`{Int | _ >= 0}`);
+- a data type return (`{List(Int) | len(_) == n}`);
+- an element return (`List({Int | _ > 0})`), for a top-level function or a
+  local `fn`.
+
+A data type, element or local `fn` return uses the hypothesis only at a call
+to itself. In each case, structural recursion already had a hypothesis; a
+certified metric now gives one too:
+
+```march
+@[decreases(n)]
+fn replicate(x : {Int | _ > 0}, n : {Int | _ >= 0}) : List({Int | _ > 0}) do
+  if n == 0 do Nil else Cons(x, replicate(x, n - 1)) end
+end
+```
+
+Without `@[decreases(n)]`, the metric would be the first `Int` parameter, `x`.
+`x` does not change at the call, so the cycle would not be certified.
+
+A call can now sit inside arithmetic in a return expression, for example
+`n + sum_to(n - 1)` or `1 + len2(t)`. The call's proved contract is a fact
+there, just as it is for a call returned on its own or bound with `let`. This
+works for any function with a proved contract, recursive or not.
+
+The checker looks for a hypothesis only after the ordinary proof has failed.
+It then checks termination only for the cycles that could use one. These are
+cycles with a return refinement that is still unproved, or with an element
+return. A module with neither does no extra work. The termination checks made
+for the hypothesis are not added to the `--refine-report` totals.
+`--termination-report` and `@[decreases]` still list them, as before.
 
 ### Attribute names are checked
 
@@ -5548,9 +5638,11 @@ edges:
   - **a recursive call inside a lambda, or behind a nested `match`.** Only the
     top-level `match`'s pattern equation is supplied, so an arm with a tail that sits
     under a second `match` cannot see the inner scrutinee's shape.
-  - **non-structural recursion.** A recursive call on the whole parameter, on a
-    reconstructed value, or on anything `structural_subvars` does not certify as
-    a component gets **no** hypothesis. This is a correctness requirement, not a
+  - **non-structural recursion, unless its cycle is certified to terminate.** A
+    recursive call on the whole parameter, on a reconstructed value, or on anything
+    `structural_subvars` does not certify as a component gets **no** hypothesis,
+    unless a termination metric certifies the call (see "The induction
+    hypothesis" under Termination). This is a correctness requirement, not a
     completeness one: a proven postcondition is *added* to the assumption set
     that call-site checks prove `¬goal` against, and adding assumptions makes a
     violation easier to prove, so an unsound hypothesis would manufacture false

@@ -37,9 +37,23 @@ git log is authoritative for exact commits.
   parameter as the default metric (`fib` is `cert=metric`). A metric outside the
   fragment (a local, a `Float`, a bare list) is an `invalid_decreases` error.
   `--refine-report`'s `by kind:` line counts `termination` obligations when there are
-  any. Nothing uses a proved metric yet.
+  any. A proved metric licenses the induction hypothesis (next entry).
 - **An unknown function attribute is warned about** (`unknown_attribute`), with a
   did-you-mean: `@[decrease(n)]` used to be ignored in silence.
+- **Refinements: a recursive function's return refinement can now use itself at its
+  recursive calls (the induction hypothesis), when its recursion is proved to
+  terminate.** `fn sum_to(n : {Int | _ >= 0}) : {Int | _ >= 0}` with body
+  `if n == 0 do 0 else n + sum_to(n - 1) end` is proved, and so is a caller's
+  `need_nn(sum_to(k))`; both used to be skipped. The hypothesis needs a `structural` or
+  `metric` certificate for the cycle and for every recursive function it calls, and a
+  recursive call whose preconditions are all proved. A cycle of several functions is
+  accepted all together or not at all. A function that may never return
+  (`fn loopy(x : Int) : {Int | _ < 0} do loopy(x) end`) gets no hypothesis, so its
+  contract stays unproved. Data type returns (`{List(Int) | len(_) == n}`), element
+  returns (`List({Int | _ > 0})`) and a local `fn`'s element return use it at a call to
+  themselves. Separately, a call inside arithmetic in a return expression
+  (`1 + len2(t)`) now carries the callee's proved contract, as a bare call or a
+  `let`-bound one already did.
 - **Refinements: a definer passed through to `Map.filter` proves its return.**
   `fn mfilt(m, keep : k -> v -> Bool[p], cmp) : Map(k[p], v[p]) do Map.filter(m, keep,
   cmp) end` is proved, and so are its callers' demands. The callee's `p` and the
