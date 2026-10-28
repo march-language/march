@@ -1131,7 +1131,11 @@ let print_refine_infer ~filename ~user_files desugared =
             sp.March_ast.Ast.start_line (RI.attr_text d) d.RI.d_class (candidates d.RI.d_checked d.RI.d_total)
             (match d.RI.d_apply with
              | None -> ""
-             | Some "local" -> "  (apply by hand: a local `fn` takes no attribute)"
+             | Some "local" ->
+               (* Information, not an edit: no syntax puts an attribute on a
+                  local `fn`, so there is nothing to apply, by hand or not. *)
+               "  (not applied: a local `fn` cannot carry `@[decreases]`; this metric would \
+                certify it)"
              | Some "written" -> "  (apply by hand: it replaces the `@[decreases]` written there)"
              | Some why -> Printf.sprintf "  (%s)" why))
         r.RI.decreases;

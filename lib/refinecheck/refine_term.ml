@@ -77,8 +77,12 @@ type edge = {
           A metric over such a name would read the inner value, not the
           entry value, so the edge cannot be obliged (phase 2). *)
   e_dispatch : bool;
-      (** an interface dispatch: the callee is one of the [impl]s the
-          argument's type can reach, chosen by a dictionary at run time *)
+      (** an interface dispatch PICKED BY A VALUE: the callee is one of the
+          [impl]s the argument's type can reach, and that type is not known
+          here (a type variable, or no type at all), so the [impl] is chosen
+          by a dictionary at run time.  A dispatch on a fully known static
+          type is resolved where it is written, and is an ordinary edge with
+          this [false] (final review, termination phase 5). *)
 }
 
 type unit_ = {
@@ -233,11 +237,65 @@ let reach_fn (tbl : (string, tdecl) Hashtbl.t) : string -> string -> bool =
 module TT = March_typecheck.Typecheck_types
 module TB = March_typecheck.Typecheck_builtins
 
+(** Where a dispatching builtin reads the [impl] it runs from: the static
+    type of one argument (by position), or none of them ([from_json] picks
+    its decoder by its RESULT type, so every [impl] of the interface is
+    reachable). *)
+type dispatch_on = Arg of int | Any_impl
+
+(** Builtins that run a user [impl] at run time although their typechecker
+    scheme carries NO interface constraint, so [builtin_table] cannot see
+    it in the scheme.  Without this table each was trusted, so a diverging
+    [impl] it runs was invisible to the graph and the induction hypothesis
+    was granted over it (final review, termination phase 5).  The builtins
+    whose scheme does carry the constraint (`==`, `!=`, `<`, `<=`, `>`,
+    `>=`, [eq], [compare], [show], [hash] and their qualified forms) are
+    read from the scheme and are not repeated here.
+
+    The one list, with where each entry comes from:
+    - [to_string] -> Show: the interpreter's `to_string` builtin is
+      [show_dispatch] (lib/eval/eval_builtins.ml), and the compiled call is
+      routed to `Show$T.show` (lib/tir/lower_expr.ml, the `dispatch_name`
+      rewrite; lib/tir/mono.ml and lib/tir/cap_passing.ml repeat it).
+      String interpolation `"${e}"` is parsed as `to_string(e)`
+      (lib/parser/parser.mly [desugar_interp]), so this covers it too.
+    - [println] -> Show: the interpreter's `println` is [show_dispatch], and
+      the compiled one is `Prelude.println`, `print_line(show(x))`
+      (stdlib/prelude.march), which shadows the Mono builtin.
+    - [to_json] -> JsonTo, [from_json] -> JsonFrom, [from_json_events] ->
+      JsonFromEvents: the `impl_tbl` lookups of lib/eval/eval_builtins.ml
+      and the [json_iface_of] dispatch of lib/eval/eval.ml; the compiled
+      call is redirected to the derived impl (lib/tir/lower_expr.ml).
+    - [own] -> Drop, on its SECOND argument: lib/eval/eval_builtins.ml's
+      `own`, lowered to a `Drop$T.drop` closure (lib/tir/lower_expr.ml).
+      The drop runs later, when the actor dies, not inside the caller; it
+      is counted anyway, as a lambda's body is.
+
+    Not dispatching (checked when this list was written): [print] and
+    [html_escape_ctx] render with the structural repr ([value_display],
+    `march_value_to_string_repr`), never a Show impl; the prelude's [str],
+    [debug] and [inspect] are ordinary functions whose bodies call
+    [to_string], so they are covered through it.  A builtin that calls a
+    function VALUE it is passed (a sort's comparator) is a function-value
+    call, which the graph already treats as such.
+
+    test/test_refine_term.ml's "dispatching builtins" case calls every
+    interpreter builtin of the typechecker's table on a value whose type
+    has an [impl] of each interface, and fails if one runs an [impl] it is
+    not listed (here or by its scheme) as reaching. *)
+let runtime_dispatch : (string * (string list * dispatch_on)) list =
+  [ ("to_string", ([ "Show" ], Arg 0));
+    ("println", ([ "Show" ], Arg 0));
+    ("to_json", ([ "JsonTo" ], Arg 0));
+    ("from_json", ([ "JsonFrom" ], Any_impl));
+    ("from_json_events", ([ "JsonFromEvents" ], Any_impl));
+    ("own", ([ "Drop" ], Arg 1)) ]
+
 (** The typechecker's builtin table, each name with the interfaces its
-    scheme constrains (`==` -> [Eq], `show` -> [Show], `<` -> [Ord]).  A
-    builtin with no interface constraint is trusted to terminate (§3.6,
-    decision 10); one with a constraint dispatches to an [impl] the program
-    may declare, which is code like any other. *)
+    scheme constrains (`==` -> [Eq], `show` -> [Show], `<` -> [Ord]), plus
+    [runtime_dispatch]'s.  A builtin with no interface is trusted to
+    terminate (§3.6, decision 10); one with an interface dispatches to an
+    [impl] the program may declare, which is code like any other. *)
 let builtin_table : (string, string list) Hashtbl.t Lazy.t =
   lazy
     (let tbl = Hashtbl.create 512 in
@@ -255,7 +313,16 @@ let builtin_table : (string, string list) Hashtbl.t Lazy.t =
      List.iter
        (fun (n, _, _, _) -> if not (Hashtbl.mem tbl n) then Hashtbl.replace tbl n [])
        TB.variadic_builtins;
+     List.iter
+       (fun (n, (ifs, _)) ->
+         let prev = Option.value ~default:[] (Hashtbl.find_opt tbl n) in
+         Hashtbl.replace tbl n (List.sort_uniq compare (prev @ ifs)))
+       runtime_dispatch;
      tbl)
+
+(** The interfaces builtin [n] may run an [impl] of, by its scheme or by
+    [runtime_dispatch]; [None] for a name that is not a builtin. *)
+let builtin_dispatch (n : string) : string list option = Hashtbl.find_opt (Lazy.force builtin_table) n
 
 let dotted (path : A.name list) : string = String.concat "." (List.map (fun n -> n.A.txt) path)
 
@@ -273,7 +340,9 @@ type scope = {
 type target =
   | T_unit of int  (** a unit of the graph *)
   | T_value  (** a local value: a call through a function value *)
-  | T_impls of int list  (** an interface dispatch: these [impl] / default units *)
+  | T_impls of int list * bool
+      (** an interface dispatch: these [impl] / default units, and whether a
+          value picks among them ([e_dispatch]) *)
   | T_trusted  (** a builtin or an [extern] *)
   | T_unresolved  (** nothing the pass can name: may diverge (fail closed) *)
 
@@ -566,8 +635,10 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       r
   in
   (* The [impl] units an interface dispatch over [ifs] reaches, given the
-     dispatching argument [arg] (the first one, if any). *)
-  let dispatch ifs (arg : A.expr option) =
+     dispatching argument [arg] (the first one, if any), and whether the
+     [impl] is picked by a value: the argument's static type is unknown or
+     holds a type variable. *)
+  let dispatch ifs (arg : A.expr option) : int list * bool =
     let keys =
       match (type_map, arg) with
       | Some tm, Some a -> (
@@ -576,13 +647,14 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
         | None -> None)
       | _ -> None
     in
-    List.filter_map
-      (fun (i, k, id) ->
-        if List.mem i ifs
-           && (k = "*" || match keys with None -> true | Some ks -> SS.mem "*" ks || SS.mem k ks)
-        then Some id
-        else None)
-      impls
+    ( List.filter_map
+        (fun (i, k, id) ->
+          if List.mem i ifs
+             && (k = "*" || match keys with None -> true | Some ks -> SS.mem "*" ks || SS.mem k ks)
+          then Some id
+          else None)
+        impls,
+      match keys with None -> true | Some ks -> SS.mem "*" ks )
   in
   (* Inside a set-valued [@[measure]] body the typechecker binds the set
      vocabulary ([union], [singleton], ...: [Typecheck]'s [body_env] for such
@@ -598,7 +670,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     in
     List.mem "measure" def.A.fn_attrs && (match def.A.fn_ret_ty with Some t -> is_set t | None -> false)
   in
-  let resolve ?(arity = -1) ?arg env n : target =
+  let resolve ?(arity = -1) ?(args : A.expr list option) env n : target =
     match SM.find_opt n env with
     | Some (Fn id) -> T_unit id
     | Some (Var | Param) -> T_value
@@ -618,7 +690,18 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
           let user_ifs = Hashtbl.find_all iface_methods n in
           let builtin = Hashtbl.find_opt (Lazy.force builtin_table) n in
           let ifs = List.sort_uniq compare (user_ifs @ Option.value ~default:[] builtin) in
-          if ifs <> [] then T_impls (dispatch ifs arg)
+          (* The argument whose static type picks the impl: the first, or
+             the one [runtime_dispatch] names, or none (every impl). *)
+          let arg =
+            match args with
+            | None -> None
+            | Some args -> (
+              match (user_ifs, List.assoc_opt n runtime_dispatch) with
+              | [], Some (_, Any_impl) -> None
+              | [], Some (_, Arg i) -> List.nth_opt args i
+              | _ -> List.nth_opt args 0)
+          in
+          if ifs <> [] then (let ds, by_value = dispatch ifs arg in T_impls (ds, by_value))
           else if builtin <> None then T_trusted
           else T_unresolved
         end)
@@ -634,10 +717,10 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       match head with
       | A.EVar n ->
         let kind = if lam then Lambda else Direct in
-        (match resolve ~arity:(List.length args) ?arg:(List.nth_opt args 0) env n.A.txt with
+        (match resolve ~arity:(List.length args) ~args env n.A.txt with
          | T_unit dst -> add_edge ~env ~src ~dst ~kind ~args ~span ~owner ()
-         | T_impls ds ->
-           List.iter (fun dst -> add_edge ~dispatch:true ~env ~src ~dst ~kind ~args ~span ~owner ()) ds
+         | T_impls (ds, by_value) ->
+           List.iter (fun dst -> add_edge ~dispatch:by_value ~env ~src ~dst ~kind ~args ~span ~owner ()) ds
          | T_value -> fv_calls := (src, head) :: !fv_calls
          | T_trusted -> if is_ident n.A.txt then trusted := (src, n.A.txt) :: !trusted
          | T_unresolved -> unresolved := (src, n.A.txt) :: !unresolved);
@@ -657,7 +740,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       in
       match resolve env n.A.txt with
       | T_unit dst -> ref_edge dst
-      | T_impls ds -> List.iter (ref_edge ~dispatch:true) ds
+      | T_impls (ds, by_value) -> List.iter (ref_edge ~dispatch:by_value) ds
       | T_value | T_trusted -> ()
       | T_unresolved -> unresolved := (src, n.A.txt) :: !unresolved)
     | A.EBlock (es, _) -> ignore (List.fold_left (fun env ex -> block_item ~src ~owner ~lam env ex) env es)
@@ -1789,10 +1872,13 @@ let culprit_unit = function Marked u | Uncertified (u, _) | Unresolved_call (u, 
     may diverge when one of its members is marked [@[diverges]], when it is
     recursive and [cert_of si] is not a certificate ([structural], [metric]
     or [trusted]), when it calls an unresolved name, or when it reaches an
-    SCC that may diverge.  An interface dispatch ([e_dispatch]) does not
-    carry it: the [impl] is chosen by a dictionary, a value, so the caller
-    terminates modulo it, as modulo any function value (§3.6), and each
-    [impl] is a unit judged on its own.  (The induction hypothesis keeps
+    SCC that may diverge.  An interface dispatch picked by a value
+    ([e_dispatch]: `show(x)` with [x] of a type variable) does not carry
+    it: the [impl] is chosen by a dictionary, so the caller terminates
+    modulo it, as modulo any function value (§3.6), and each [impl] is a
+    unit judged on its own.  A dispatch on a known type (`"${Box(1)}"`,
+    `show(Box(1))`) names its [impl] where it is written, so it carries it
+    like any call.  (The induction hypothesis keeps
     phase 3's stricter rule, which follows every edge.)  Nothing is required of a caller (D4): this feeds
     the report and [cap total] only.  Tarjan numbers SCCs callees first, so
     one pass in index order sees every callee before its callers. *)

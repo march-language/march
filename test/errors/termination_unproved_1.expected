@@ -11,10 +11,3 @@ note: a metric must stay at least 0 and fall at every recursive call (left to ri
     run `march --explain termination_unproved`
 
 
-
-fix [termination_unproved]:
-@@ lines 4-4 @@
--    if n == 0 do 0 else down(n - 1) end
-+    if n <= 0 do 0 else down(n - 1) end
-
-after fix: exit 0

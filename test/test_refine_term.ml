@@ -959,7 +959,14 @@ let metric_suite =
         check_mcert r "ev" "unproved:invalid-decreases";
         Alcotest.(check int) "no termination_unproved on top" 0 (n_with E.Code.termination_unproved r));
     zcase "`@[decreases]` on a non-recursive function has no effect" (fun () ->
-        Alcotest.(check int) "attribute_no_effect" 1 (n_with E.Code.attribute_no_effect (run (m non_recursive))));
+        let r = run (m non_recursive) in
+        Alcotest.(check int) "attribute_no_effect" 1 (n_with E.Code.attribute_no_effect r);
+        (* final review: a string literal broken across lines without `\`
+           put a run of ~17 spaces into the message. *)
+        List.iter
+          (fun (d : E.diagnostic) ->
+            Alcotest.(check bool) ("no run of spaces in: " ^ d.E.message) false (contains d.E.message "  "))
+          (diags_with E.Code.attribute_no_effect r));
     zcase "t11c omega: `w` unproved; a positive `T(Int -> Int)` does not block a metric" (fun () ->
         check_cert "w" omega "unproved:non-positive";
         check_mcert (run ~all:true (m positive_metric)) "u" "metric");
@@ -1351,6 +1358,22 @@ let impl_ok = {|
   end
 |}
 
+(* Final review: builtins that run a Show / Eq / Ord impl at run time.  The
+   [W] impls of each interface call [f], or do not. *)
+let impl_eq_div = {|
+  type W = W(List(Int))
+  impl Eq(W) do
+    fn eq(a, b) do match a do W(ys) -> f(ys) == 0 end end
+  end
+|}
+
+let impl_ord_div = {|
+  type W = W(List(Int))
+  impl Ord(W) do
+    fn compare(a, b) do match a do W(ys) -> f(ys) end end
+  end
+|}
+
 (* The certificates that license the hypothesis ([ih_prepare]). *)
 let licensing = [ "structural"; "metric" ]
 
@@ -1482,6 +1505,85 @@ let binder_forms =
        end
      end|}) ]
 
+(* Final review 1: the builtins that run a user [impl] at run time.  Every
+   interpreter builtin of the typechecker's table is called with a value
+   whose type has an [impl] of each interface the interpreter dispatches
+   through ([impl_tbl], read by [show_dispatch], the comparison operators,
+   `eq` / `compare` / `hash`, the Json codecs and `own`), in every argument
+   position; a builtin that runs one must be listed as reaching it
+   ([Refine_term.builtin_dispatch]: its scheme's constraints plus
+   [runtime_dispatch]), or the termination graph trusts it and hides the
+   impl.  The interpreter is the reference here: the compiled backend's
+   redirects (lib/tir/lower_expr.ml's `to_string` -> `show`, the derived
+   Json and Drop impls) are the same names, as [runtime_dispatch]'s comment
+   records.  It cannot see a builtin that dispatches only on a value of
+   another shape (a [VPid] first, as `own` takes); those stay listed by
+   hand. *)
+let probe_dispatching_builtins () =
+  let module V = March_eval.Eval_types in
+  let module R = March_eval.Eval_runtime in
+  let module TT = March_typecheck.Typecheck_types in
+  let module TB = March_typecheck.Typecheck_builtins in
+  (* Linking [Eval] installs the apply hooks [show_dispatch] and the
+     comparison operators call an impl through. *)
+  ignore (Hashtbl.length March_eval.Eval.impl_tbl);
+  let ifaces = [ "Show"; "Eq"; "Ord"; "Hash"; "JsonTo"; "JsonFrom"; "JsonFromEvents"; "Drop" ] in
+  let fired = ref [] in
+  let result = function
+    | "Show" -> V.VString "probe"
+    | "Eq" -> V.VBool true
+    | "Ord" | "Hash" -> V.VInt 0
+    | _ -> V.VUnit
+  in
+  let saved_impls = Hashtbl.copy R.impl_tbl and saved_ctors = Hashtbl.copy R.ctor_type_tbl in
+  Fun.protect
+    ~finally:(fun () ->
+      Hashtbl.reset R.impl_tbl;
+      Hashtbl.iter (Hashtbl.replace R.impl_tbl) saved_impls;
+      Hashtbl.reset R.ctor_type_tbl;
+      Hashtbl.iter (Hashtbl.replace R.ctor_type_tbl) saved_ctors)
+    (fun () ->
+      Hashtbl.replace R.ctor_type_tbl "TermProbe" "TermProbe";
+      List.iter
+        (fun i ->
+          Hashtbl.replace R.impl_tbl (i, "TermProbe")
+            (V.VBuiltin ("probe_" ^ i, fun _ -> fired := i :: !fired; result i)))
+        ifaces;
+      let probe = V.VCon ("TermProbe", []) in
+      let rec arity (t : TT.ty) = match t with TT.TArrow (_, b) -> 1 + arity b | _ -> 0 in
+      let arity_of n =
+        match List.assoc_opt n (TB.builtin_bindings @ TB.builtin_interface_bindings) with
+        | Some (TT.Mono t) | Some (TT.Poly (_, _, t)) -> Some (arity t)
+        | None -> None
+      in
+      let missing = ref [] and seen = ref 0 in
+      List.iter
+        (fun (name, v) ->
+          match (v, arity_of name) with
+          | V.VBuiltin (_, f), Some k when k >= 1 ->
+            incr seen;
+            fired := [];
+            (try ignore (f (List.init k (fun _ -> probe))) with _ -> ());
+            let got = List.sort_uniq compare !fired in
+            let listed = Option.value ~default:[] (RT.builtin_dispatch name) in
+            List.iter
+              (fun i -> if not (List.mem i listed) then missing := Printf.sprintf "%s -> %s" name i :: !missing)
+              got
+          | _ -> ())
+        March_eval.Eval_builtins.base_env;
+      Alcotest.(check bool) (Printf.sprintf "probed builtins (%d)" !seen) true (!seen > 100);
+      Alcotest.(check (list string)) "builtins that run an impl but are not listed as reaching it" []
+        (List.sort_uniq compare !missing);
+      (* The listed ones this probe can reach do fire: the probe is live. *)
+      List.iter
+        (fun (name, want) ->
+          fired := [];
+          (match List.assoc_opt name March_eval.Eval_builtins.base_env with
+           | Some (V.VBuiltin (_, f)) -> (try ignore (f [ probe ]) with _ -> ())
+           | _ -> Alcotest.fail ("no interpreter builtin " ^ name));
+          Alcotest.(check bool) (name ^ " runs an impl " ^ want) true (List.mem want !fired))
+        [ ("to_string", "Show"); ("println", "Show"); ("show", "Show"); ("hash", "Hash"); ("to_json", "JsonTo") ])
+
 let review_suite =
   let reject ?uncert name src = zcase name (fun () -> check_reject ?uncert name src) in
   let control name ?cert src = zcase name (fun () -> check_control name ?cert src) in
@@ -1492,6 +1594,23 @@ let review_suite =
     reject ~uncert:"Other.g" "1a import: `g(xs)` through `import Other`" (rv_f ~pre:(other_div ^ "import Other") "g(xs)");
     reject "1b impl: `show(W(xs))` dispatches to an impl that calls f"
       (rv_f ~pre:impl_div "string_byte_length(show(W(xs)))");
+    reject "final 1 interpolation: `\"${W(xs)}\"` runs an impl Show that calls f"
+      (rv_f ~pre:impl_div "string_byte_length(\"v=${W(xs)}\")");
+    reject "final 1 to_string: `to_string(W(xs))` runs an impl Show that calls f"
+      (rv_f ~pre:impl_div "string_byte_length(to_string(W(xs)))");
+    reject "final 1 println: `println(W(xs))` runs an impl Show that calls f"
+      (rv_f ~pre:impl_div "match println(W(xs)) do _ -> 0 end");
+    reject "final 1 to_string as a value: `apply1(to_string, W(xs))`"
+      (rv_f ~pre:(impl_div ^ "fn apply1(g, x) do g(x) end") "string_byte_length(apply1(to_string, W(xs)))");
+    reject "final 1 ==: `W(xs) == W(xs)` runs an impl Eq that calls f"
+      (rv_f ~pre:impl_eq_div "if W(xs) == W(xs) do 0 else 0 end");
+    reject "final 1 <: `W(xs) < W(xs)` runs an impl Ord that calls f"
+      (rv_f ~pre:impl_ord_div "if W(xs) < W(xs) do 0 else 0 end");
+    control "final 1 interpolation control: a terminating impl Show still certifies"
+      (rv_f ~pre:impl_ok "string_byte_length(\"v=${W(xs)}\")");
+    control "final 1 to_string control" (rv_f ~pre:impl_ok "string_byte_length(to_string(W(xs)))");
+    case "final 1 every interpreter builtin that runs an impl is listed as reaching it"
+      probe_dispatching_builtins;
     reject "1c top-level let: `hook(xs)` with `let hook = fn ys -> f(ys)`"
       (rv_f ~pre:"let hook = fn ys -> f(ys)" "hook(xs)");
     reject "1 unresolved: a callee no declaration or builtin names" (rv_f "nowhere_g(xs)");
@@ -1634,6 +1753,30 @@ let total_dispatch = {|
     fn show(l) do match l do Loop(n) -> int_to_string(spin(n)) end end
   end
   fn g(x) do show(x) end
+|}
+
+(* Final review 1: `"${Box(n)}"` names `impl Show(Box)` where it is written
+   (a known type, not a dictionary), so a diverging impl reaches [f].  The
+   impl lives in a nested module without the cap, so only [f] is checked. *)
+let total_interp ?(show_body = "int_to_string(spin(n))") () = {|
+  cap total
+  mod Lib do
+    type Box = Box(Int)
+    fn spin(n : Int) : Int do spin(n) end
+    impl Show(Box) do
+      fn show(b) do match b do Box(n) -> |} ^ show_body ^ {| end end
+    end
+  end
+  fn f(n : Int) : Int do string_byte_length("v=${Lib.Box(n)}") end
+|}
+
+(* Final review 2: one mark in a cycle covers it outside `cap total`, not
+   under it. *)
+let total_cycle ?(cap = "cap total") ?(mark_a = false) () = cap ^ {|
+  |} ^ (if mark_a then "@[diverges]" else "") ^ {|
+  fn cyc_a(n : Int) : Int do if n <= 0 do 0 else cyc_b(n - 1) end end
+  @[diverges]
+  fn cyc_b(n : Int) : Int do cyc_a(n + 1) end
 |}
 
 let report_of ?(all = true) src =
@@ -1829,6 +1972,25 @@ let diverges_suite =
         let r = run (m total_dispatch) in
         Alcotest.(check (list string)) "the impl and its callee, not `g`"
           [ "impl Show.show"; "spin" ] (error_names "termination_unproved" r));
+    zcase "final cap_total: interpolating a known type whose impl Show diverges is an error" (fun () ->
+        let r = run (m (total_interp ())) in
+        Alcotest.(check (list string)) "f" [ "f" ] (error_names "termination_unproved" r));
+    zcase "final cap_total control: a terminating impl Show, no error" (fun () ->
+        let r = run (m (total_interp ~show_body:"int_to_string(n)" ())) in
+        Alcotest.(check (list string)) "none" [] (error_names "termination_unproved" r));
+    zcase "final cap_total: an unmarked member of a cycle with a `@[diverges]` member is an error" (fun () ->
+        let r = run (m (total_cycle ())) in
+        Alcotest.(check (list string)) "cyc_a" [ "cyc_a" ] (error_names "termination_unproved" r);
+        Alcotest.(check bool) "wording" true
+          (List.exists
+             (fun (d : E.diagnostic) ->
+               contains d.E.message "`cyc_a` may not terminate: it is in a recursive cycle with `cyc_b`")
+             r.diags));
+    zcase "final cap_total controls: both marked, or no cap, no error" (fun () ->
+        Alcotest.(check (list string)) "both marked" []
+          (error_names "termination_unproved" (run (m (total_cycle ~mark_a:true ()))));
+        Alcotest.(check (list string)) "no cap" []
+          (error_names "termination_unproved" (run (m (total_cycle ~cap:"" ())))));
     case "ratchet: the standard library has no class-E unit without `@[diverges]`" (fun () ->
         check_ratchet "stdlib" (unannotated_e ()) stdlib_e_allowed);
     case "ratchet: neither has test/native" (fun () ->
