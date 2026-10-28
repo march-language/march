@@ -409,7 +409,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT INIT_PAREN PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN AS USE NEEDS ROLE REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC CAP_VERIFIED
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS ROLE REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC CAP_VERIFIED CAP_TOTAL
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE SATISFY FOR IN OPAQUE GETS DSLASH
 %token RESOURCE
 %token APP ON_START ON_STOP
@@ -697,6 +697,7 @@ decl:
   | d = cap_deterministic_decl { d }
   | d = cap_no_alloc_decl      { d }
   | d = cap_verified_decl      { d }
+  | d = cap_total_decl         { d }
   | d = transitions_decl       { d }
   | d = app_decl          { d }
   | d = derive_decl    { d }
@@ -1394,6 +1395,12 @@ cap_no_alloc_decl:
 cap_verified_decl:
   | CAP_VERIFIED
     { DOpts (["verified"], mk_span ($loc)) }
+
+(** `cap total` (termination design §4.1, D2, phase 4): every function of the
+    decl list must be shown to terminate; `main` is exempt. *)
+cap_total_decl:
+  | CAP_TOTAL
+    { DOpts (["total"], mk_span ($loc)) }
 
 (** Compiler-enforced state-machine transitions:
     transitions Handle do
