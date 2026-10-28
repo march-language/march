@@ -28462,6 +28462,7 @@ let () =
       ("termination-ih", Test_refine_term.ih_suite);
       ("termination-review", Test_refine_term.review_suite);
       ("termination-diverges", Test_refine_term.diverges_suite);
+      ("termination-infer", Test_refine_term.infer_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("callback-binder", callback_binder_suite);
       ("abstract-pass-sites", abstract_pass_sites_suite);

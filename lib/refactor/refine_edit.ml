@@ -269,3 +269,35 @@ let splice_lambda_param ~(src : string) ~(line : int) ~(col : int) ~(param : str
             else scan (j + 1) depth false
         in
         scan (i + 1) 1 true
+
+(** [insert_fn_attribute ~src ~line ~col ~fn ~attr] places [attr] (e.g.
+    ["@[decreases(100 - n)]"]) before the `fn` / `pfn` keyword of the
+    declaration whose NAME [fn] starts at 1-based [line], 0-based [col] (its
+    parser span), on the same line, so no later line moves (termination
+    phase 5; the phase-4 sweep's placement).  Returns the insertion as a
+    byte range of the ORIGINAL text: [(ofs, ofs, attr ^ " ")].  [None] when
+    the name is not there or no keyword precedes it on that line. *)
+let insert_fn_attribute ~(src : string) ~(line : int) ~(col : int) ~(fn : string) ~(attr : string) :
+    (int * int * string) option =
+  let n = String.length src in
+  let rec line_start i l =
+    if l <= 1 then Some i
+    else match String.index_from_opt src i '\n' with Some j -> line_start (j + 1) (l - 1) | None -> None
+  in
+  match line_start 0 line with
+  | None -> None
+  | Some ls ->
+    let at = ls + col in
+    let fl = String.length fn in
+    if at + fl > n || String.sub src at fl <> fn then None
+    else
+      (* Back over blanks to the keyword. *)
+      let rec back i = if i > ls && (src.[i - 1] = ' ' || src.[i - 1] = '\t') then back (i - 1) else i in
+      let e = back at in
+      let kw_start k = e - k >= ls && (e - k = ls || not (is_word src.[e - k - 1])) in
+      let kw =
+        if e - 3 >= ls && String.sub src (e - 3) 3 = "pfn" && kw_start 3 then Some (e - 3)
+        else if e - 2 >= ls && String.sub src (e - 2) 2 = "fn" && kw_start 2 then Some (e - 2)
+        else None
+      in
+      Option.map (fun k -> (k, k, attr ^ " ")) kw

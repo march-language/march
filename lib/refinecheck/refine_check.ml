@@ -8103,6 +8103,53 @@ let report_cap_total errctx (t : Refine_term.t) (certs : string array) fails
             members)
     g.RT.sccs
 
+(* A SCRATCH walk that discharges the termination obligations [sites]
+   (phases 3 and 5): over [decls] (the caller filters it to the top-level
+   functions it needs), into a throwaway error context and scratch ledger,
+   with every module-wide cell the walk can move saved and restored, so the
+   real walk, or the next scratch walk, starts exactly where it would have.
+   No witness runs: termination reads only whether an obligation was
+   PROVED, which no witness decides, and a witness run against a diverging
+   function burns its whole fuel.  No return is checked
+   ([calls_only_walk]).  [after] runs inside the scratch ledger, before it
+   is thrown away.  Returns the verdicts recorded at each obligation's call
+   span. *)
+let term_scratch_walk ~root defs (decls : A.decl list)
+    ~(sites : (A.span, Refine_term.metric_site) Hashtbl.t) ~(after : unit -> unit) :
+    (A.span, Obligation.verdict list) Hashtbl.t =
+  let saved_sites = !term_sites in
+  let saved_verdicts = Hashtbl.copy term_verdicts in
+  let saved_acc = Hashtbl.copy annotated_acc_facts in
+  let saved_ctr = !ret_ctr and saved_budget = !Witness.wall_budget in
+  let saved_mal = !March_refine.Solver.malformed_count
+  and saved_malm = !March_refine.Solver.malformed_messages in
+  let saved_promoted = !promoted_sites and saved_locals = !local_elem_ret_proved in
+  let saved_last = !last_elem_return_proved in
+  Hashtbl.reset term_verdicts;
+  Fun.protect
+    ~finally:(fun () ->
+      term_sites := saved_sites;
+      Hashtbl.reset term_verdicts;
+      Hashtbl.iter (Hashtbl.replace term_verdicts) saved_verdicts;
+      Hashtbl.reset annotated_acc_facts;
+      Hashtbl.iter (Hashtbl.replace annotated_acc_facts) saved_acc;
+      ret_ctr := saved_ctr;
+      Witness.wall_budget := saved_budget;
+      March_refine.Solver.malformed_count := saved_mal;
+      March_refine.Solver.malformed_messages := saved_malm;
+      promoted_sites := saved_promoted;
+      local_elem_ret_proved := saved_locals;
+      last_elem_return_proved := saved_last;
+      calls_only_walk := false)
+    (fun () ->
+      Obligation.with_scratch (fun () ->
+          term_sites := sites;
+          Witness.wall_budget := 0;
+          calls_only_walk := true;
+          visit_decls ~root (Err.create ()) defs rctx0 decls;
+          after ();
+          Hashtbl.copy term_verdicts))
+
 (* ── Termination phase 3: the certificate that licenses the IH (§4.2) ─────
    Called by [gate_unverified_posts_ih] once the IH-free rounds have stalled,
    with the items still pending.  It decides, over the contracts proved so
@@ -8194,44 +8241,14 @@ let ih_prepare ~root ?type_map (term : Refine_term.t Lazy.t) defs (decls : A.dec
         ds
     in
     let pre_ok = Hashtbl.create 16 in
-    let saved_sites = !term_sites in
-    let saved_verdicts = Hashtbl.copy term_verdicts in
-    let saved_acc = Hashtbl.copy annotated_acc_facts in
-    let saved_ctr = !ret_ctr and saved_budget = !Witness.wall_budget in
-    let saved_mal = !March_refine.Solver.malformed_count
-    and saved_malm = !March_refine.Solver.malformed_messages in
-    let saved_promoted = !promoted_sites and saved_locals = !local_elem_ret_proved in
-    let saved_last = !last_elem_return_proved in
-    Hashtbl.reset term_verdicts;
     Hashtbl.reset ih_watch;
     Hashtbl.reset ih_reached;
     List.iter (fun e -> Hashtbl.replace ih_watch e.RT.e_span ()) watched;
     let verdicts =
       Fun.protect
-        ~finally:(fun () ->
-          term_sites := saved_sites;
-          Hashtbl.reset term_verdicts;
-          Hashtbl.iter (Hashtbl.replace term_verdicts) saved_verdicts;
-          Hashtbl.reset annotated_acc_facts;
-          Hashtbl.iter (Hashtbl.replace annotated_acc_facts) saved_acc;
-          ret_ctr := saved_ctr;
-          Witness.wall_budget := saved_budget;
-          March_refine.Solver.malformed_count := saved_mal;
-          March_refine.Solver.malformed_messages := saved_malm;
-          promoted_sites := saved_promoted;
-          local_elem_ret_proved := saved_locals;
-          last_elem_return_proved := saved_last;
-          calls_only_walk := false;
-          Hashtbl.reset ih_watch)
+        ~finally:(fun () -> Hashtbl.reset ih_watch)
         (fun () ->
-          Obligation.with_scratch (fun () ->
-              term_sites := pl.RT.pl_sites;
-              (* No witness runs: rule (a) reads only whether an obligation
-                 was PROVED, which no witness decides, and a witness run
-                 against a diverging function burns its whole fuel. *)
-              Witness.wall_budget := 0;
-              calls_only_walk := true;
-              visit_decls ~root (Err.create ()) defs rctx0 (filter decls);
+          term_scratch_walk ~root defs (filter decls) ~sites:pl.RT.pl_sites ~after:(fun () ->
               (* Rule (a)'s precondition half, read before the scratch
                  ledger is thrown away. *)
               List.iter
@@ -8250,8 +8267,7 @@ let ih_prepare ~root ?type_map (term : Refine_term.t Lazy.t) defs (decls : A.dec
                      && List.for_all (fun (o : Obligation.t) -> o.Obligation.verdict = Obligation.Proved) obs
                      && ((not callee_refined) || obs <> [])
                   then Hashtbl.replace pre_ok e.RT.e_span ())
-                watched;
-              Hashtbl.copy term_verdicts))
+                watched))
     in
     let certs, _ =
       RT.finish t pl ~verdicts:(fun sp -> Option.value ~default:[] (Hashtbl.find_opt verdicts sp))
@@ -8288,6 +8304,106 @@ let ih_prepare ~root ?type_map (term : Refine_term.t Lazy.t) defs (decls : A.dec
         else None)
       reach
   end
+
+(* ── Termination phase 5: metric inference (§3.5) ─────────────────────────
+   For each target SCC (one the plan left uncertified for a reason a metric
+   could fix), the candidates of [Refine_term.candidates], at most
+   [Refine_term.max_candidates] of them, are checked in rounds: round [k]
+   plans the [k]-th candidate of every target still open, through
+   [Refine_term.plan_metrics ~override] (so each is obliged exactly as a
+   written `@[decreases]` would be, one obligation per intra-SCC edge),
+   discharges the obligations in one scratch walk of the top-level functions
+   holding those SCCs, and decides each SCC by [Refine_term.finish].  A
+   candidate is accepted only when its certificate is [metric]: every
+   obligation reached and PROVED.  Nothing is trusted, and nothing feeds the
+   induction hypothesis or any verdict: the result is a proposal. *)
+let inferable_cert (c : string) : bool =
+  let pre = "unproved:" in
+  let n = String.length pre in
+  String.length c > n
+  && String.sub c 0 n = pre
+  && not
+       (List.mem (String.sub c n (String.length c - n))
+          [ "reference"; "non-positive"; "unresolved"; "invalid-decreases" ])
+
+let infer_metrics ~root ?type_map (t : Refine_term.t) defs (decls : A.decl list) ~(targets : int list)
+    ~(tried : int -> A.expr list option) : (int * (Refine_term.candidate option * int * int)) list =
+  let module RT = Refine_term in
+  let g = t.RT.graph in
+  let cands = List.map (fun si -> (si, RT.candidates ?type_map ~is_measure ~tried t si)) targets in
+  let found = Hashtbl.create 8 and checked = Hashtbl.create 8 in
+  let rec filter tops (ds : A.decl list) : A.decl list =
+    List.filter_map
+      (function
+        | A.DFn (fd, _) as d when Hashtbl.mem tops fd.A.fn_name.A.span -> Some d
+        | A.DMod (n, v, ds, sp) -> Some (A.DMod (n, v, filter tops ds, sp))
+        | (A.DAlias _ | A.DUse _) as d -> Some d
+        | _ -> None)
+      ds
+  in
+  for k = 0 to RT.max_candidates - 1 do
+    let round =
+      List.filter_map
+        (fun (si, (cs, _)) ->
+          if Hashtbl.mem found si then None else Option.map (fun c -> (si, c)) (List.nth_opt cs k))
+        cands
+    in
+    if round <> [] then begin
+      let pl =
+        RT.plan_metrics ?type_map ~override:(fun si -> List.assoc_opt si round) ~is_measure
+          ~demanded:(fun _ -> false) t
+      in
+      let in_round si = List.mem_assoc si round in
+      let sites = Hashtbl.create 16 in
+      Hashtbl.iter
+        (fun sp (site : RT.metric_site) ->
+          if in_round g.RT.scc_of.(site.RT.ms_edge.RT.e_src) then Hashtbl.replace sites sp site)
+        pl.RT.pl_sites;
+      let tops = Hashtbl.create 8 in
+      List.iter
+        (fun (si, _) ->
+          if pl.RT.pl_status.(si) = RT.St_pending then
+            List.iter
+              (fun u -> Hashtbl.replace tops g.RT.units.(g.RT.units.(u).RT.u_top).RT.u_span ())
+              g.RT.sccs.(si))
+        round;
+      let verdicts =
+        if Hashtbl.length tops = 0 then Hashtbl.create 1
+        else term_scratch_walk ~root defs (filter tops decls) ~sites ~after:ignore
+      in
+      let certs, _ =
+        RT.finish t pl ~verdicts:(fun sp -> Option.value ~default:[] (Hashtbl.find_opt verdicts sp))
+      in
+      List.iter
+        (fun (si, c) ->
+          Hashtbl.replace checked si (k + 1);
+          if certs.(si) = "metric" then Hashtbl.replace found si c)
+        round
+    end
+  done;
+  List.map
+    (fun (si, (_, total)) ->
+      (si, (Hashtbl.find_opt found si, Option.value ~default:0 (Hashtbl.find_opt checked si), total)))
+    cands
+
+(* Record [infer_metrics]' results in [Refine_term.last_inferred], by each
+   member's declaring span. *)
+let record_inferred (t : Refine_term.t) res =
+  let module RT = Refine_term in
+  let g = t.RT.graph in
+  List.iter
+    (fun (si, (c, checked, total)) ->
+      List.iter
+        (fun u ->
+          let un = g.RT.units.(u) in
+          let m = Option.bind c (List.assoc_opt u) in
+          Hashtbl.replace RT.last_inferred un.RT.u_span
+            { RT.inf_metric = Option.map (List.map pred_str) m; inf_checked = checked; inf_total = total };
+          match m with
+          | Some es -> Hashtbl.replace RT.last_inferred_exprs un.RT.u_span es
+          | None -> ())
+        g.RT.sccs.(si))
+    res
 
 let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     ?(stdlib_files : string list = [])
@@ -8617,6 +8733,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      induction hypothesis, and no SCC is planned in a module with no
      annotation unless the report asked for it. *)
   Hashtbl.reset Refine_term.last_certs;
+  Hashtbl.reset Refine_term.last_inferred;
+  Hashtbl.reset Refine_term.last_inferred_exprs;
   Hashtbl.reset term_verdicts;
   let rec has_decreases decls =
     List.exists
@@ -8629,7 +8747,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   let total_tbl = cap_unit_spans "total" m.A.mod_decls in
   let has_total = Hashtbl.fold (fun _ v acc -> v || acc) total_tbl false in
   let term_plan =
-    if !Refine_term.check_all || has_decreases m.A.mod_decls || has_total then begin
+    if !Refine_term.check_all || has_decreases m.A.mod_decls || has_total
+       || !Refine_term.infer_demand <> None
+    then begin
       let t = Lazy.force term in
       let g = t.Refine_term.graph in
       let in_total (u : Refine_term.unit_) =
@@ -8644,7 +8764,10 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         Array.to_list g.Refine_term.units
         |> List.filter (fun (u : Refine_term.unit_) ->
                (!Refine_term.check_all && not (is_stdlib_source_file u.Refine_term.u_span.A.file))
-               || in_total u)
+               || in_total u
+               || match !Refine_term.infer_demand with
+                  | Some f -> f u.Refine_term.u_span
+                  | None -> false)
       in
       let demand = Hashtbl.create 64 in
       List.iter
@@ -8695,6 +8818,29 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
          let c = certs.(g.Refine_term.scc_of.(u.Refine_term.u_id)) in
          if c <> "" then Hashtbl.replace Refine_term.last_certs u.Refine_term.u_span c)
        g.Refine_term.units;
+     (* Phase 5 (§3.5): only under `--refine-infer` or `--termination-report`
+        ([Refine_term.infer]); a plain `--check` never infers.  Targets: an
+        SCC left uncertified for a reason a metric could fix, with a member in
+        user code (or, under `--refine-infer`, one its demand accepts).
+        Before [report_termination], whose note names the metric found. *)
+     if !Refine_term.infer then begin
+       let target (u : Refine_term.unit_) =
+         match !Refine_term.infer_demand with
+         | Some f -> f u.Refine_term.u_span
+         | None -> not (is_stdlib_source_file u.Refine_term.u_span.A.file)
+       in
+       let targets =
+         List.filter
+           (fun si ->
+             inferable_cert certs.(si)
+             && List.exists (fun u -> target g.Refine_term.units.(u)) g.Refine_term.sccs.(si))
+           (List.init (Array.length certs) Fun.id)
+       in
+       if targets <> [] then
+         record_inferred t
+           (infer_metrics ~root ?type_map t defs m.A.mod_decls ~targets
+              ~tried:(fun u -> pl.Refine_term.pl_metric.(u)))
+     end;
      let vtbl = verified_fn_spans m.A.mod_decls in
      let reported =
        report_termination errctx t certs fails ~strict:(fun sp ->

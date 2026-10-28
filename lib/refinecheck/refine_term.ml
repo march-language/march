@@ -1569,9 +1569,15 @@ let rows (t : t) = t.rows
       first Int parameter of each member.
     Every written metric is checked against the fragment whether or not its
     unit is recursive; one written on a non-recursive unit is listed in
-    [pl_no_effect]. *)
-let plan_metrics ?type_map ~(is_measure : string -> bool) ~(demanded : unit_ -> bool) (t : t) :
-    plan =
+    [pl_no_effect].
+
+    [override] (phase 5's inference, §3.5): for an SCC it answers, the
+    metrics to check instead of the written or default ones, one per member
+    (a member it leaves out makes the SCC [St_unproved "arity"]).  Such an
+    SCC is planned whether or not it is demanded, and is obliged exactly as a
+    written metric is: one obligation per intra-SCC direct or lambda edge. *)
+let plan_metrics ?type_map ?(override : int -> (int * A.expr list) list option = fun _ -> None)
+    ~(is_measure : string -> bool) ~(demanded : unit_ -> bool) (t : t) : plan =
   let g = t.graph in
   let status = Array.make (Array.length g.sccs) St_undemanded in
   let metric = Array.make (Array.length g.units) None in
@@ -1589,17 +1595,57 @@ let plan_metrics ?type_map ~(is_measure : string -> bool) ~(demanded : unit_ -> 
         if not (is_recursive g u.u_id) then no_effect := u.u_id :: !no_effect
       | None -> ())
     g.units;
+  (* File one obligation per intra-SCC direct or lambda edge of [members]
+     over the metrics [chosen] gives each member (or the first reason one
+     has none). *)
+  let file_metrics members chosen =
+    match List.find_map (function _, Error r -> Some r | _ -> None) chosen with
+    | Some r -> St_unproved r
+    | None ->
+      List.iter (function u, Ok m -> metric.(u) <- Some m | _ -> ()) chosen;
+      let es =
+        List.filter (fun e -> e.e_kind <> Reference) (List.concat_map (intra g) members)
+      in
+      let fail = ref None in
+      List.iter
+        (fun e ->
+          if !fail = None then begin
+            let mf = Option.get metric.(e.e_src) and mg = Option.get metric.(e.e_dst) in
+            let fresh n =
+              (not (List.mem n e.e_shadowed)) && List.mem (Some n) e.e_owner.o_params
+            in
+            if not (List.for_all fresh (List.concat_map free_names mf)) then
+              fail := Some "shadowed"
+            else
+              match
+                decreases_site
+                  ~is_rec_call:(fun sp -> List.exists (fun e' -> e'.e_span = sp) es)
+                  g ~caller_metric:mf ~callee_metric:mg e
+              with
+              | Some site -> Hashtbl.replace sites e.e_span site
+              | None -> fail := Some "arity"
+          end)
+        es;
+      (match !fail with Some r -> St_unproved r | None -> St_pending)
+  in
   Array.iteri
     (fun si members ->
       let annotated = List.filter (fun u -> g.units.(u).u_decreases <> None) members in
+      let ov = override si in
       if List.exists (is_recursive g) members
-         && (annotated <> [] || List.exists (fun u -> demanded g.units.(u)) members)
+         && (ov <> None || annotated <> [] || List.exists (fun u -> demanded g.units.(u)) members)
       then
         status.(si) <-
           (match t.certs.(si) with
            | Structural -> St_structural
            | Diverges -> St_diverges
            | Unproved (("reference" | "non-positive" | "unresolved") as r) -> St_unproved r
+           | Unproved _ when ov <> None ->
+             let ms = Option.get ov in
+             file_metrics members
+               (List.map
+                  (fun u -> match List.assoc_opt u ms with Some m -> (u, Ok m) | None -> (u, Error "arity"))
+                  members)
            | Unproved _ -> (
              if List.exists (Hashtbl.mem bad) annotated then St_unproved "invalid-decreases"
              else
@@ -1644,34 +1690,7 @@ let plan_metrics ?type_map ~(is_measure : string -> bool) ~(demanded : unit_ -> 
                          | None -> (u, Error "no-int-parameter")))
                      members
                  in
-                 match List.find_map (function _, Error r -> Some r | _ -> None) chosen with
-                 | Some r -> St_unproved r
-                 | None ->
-                   List.iter (function u, Ok m -> metric.(u) <- Some m | _ -> ()) chosen;
-                   let es =
-                     List.filter (fun e -> e.e_kind <> Reference) (List.concat_map (intra g) members)
-                   in
-                   let fail = ref None in
-                   List.iter
-                     (fun e ->
-                       if !fail = None then begin
-                         let mf = Option.get metric.(e.e_src) and mg = Option.get metric.(e.e_dst) in
-                         let fresh n =
-                           (not (List.mem n e.e_shadowed)) && List.mem (Some n) e.e_owner.o_params
-                         in
-                         if not (List.for_all fresh (List.concat_map free_names mf)) then
-                           fail := Some "shadowed"
-                         else
-                           match
-                             decreases_site
-                               ~is_rec_call:(fun sp -> List.exists (fun e' -> e'.e_span = sp) es)
-                               g ~caller_metric:mf ~callee_metric:mg e
-                           with
-                           | Some site -> Hashtbl.replace sites e.e_span site
-                           | None -> fail := Some "arity"
-                       end)
-                     es;
-                   (match !fail with Some r -> St_unproved r | None -> St_pending)))))
+                 file_metrics members chosen))))
     g.sccs;
   { pl_status = status; pl_metric = metric; pl_sites = sites; pl_invalid = !invalid;
     pl_no_effect = List.rev !no_effect }
@@ -1847,10 +1866,286 @@ let culprit_text (g : graph) (u : int) (c : culprit) : string =
 let unit_at (g : graph) (span : A.span) : unit_ option =
   Array.find_opt (fun u -> u.u_span = span) g.units
 
-(** The frame for phase 5's inference (§3.5, the LSP "add `@[decreases]`"
-    action): a metric for SCC [si] of [t] whose every obligation was
-    checked and proved.  Phase 4 infers none. *)
-let suggest_metric : (t -> int -> A.expr list option) ref = ref (fun _ _ -> None)
+(* ── Inference (§3.5), phase 5 ────────────────────────────────────────── *)
+
+(** At most this many candidate metrics are checked per SCC (§3.5). *)
+let max_candidates = 8
+
+(* A candidate component, over parameter POSITIONS so one shape serves every
+   member of a mutual SCC:
+   - [SInt i]: the Int parameter at position [i];
+   - [SGuard (i, b, one)]: [b - p_i] (plus 1 when [one]), for an Int
+     parameter passed as [p_i + k] and compared with [b]; [b] names
+     positions as [$pos<k>];
+   - [SLen i]: [len(p_i)] for a [List] parameter. *)
+type shape = SInt of int | SGuard of int * A.expr * bool | SLen of int
+
+let shape_pos = function SInt i | SGuard (i, _, _) | SLen i -> i
+
+(* A printed form, for deduplication and comparison with what phase 2
+   tried: spans play no part. *)
+let rec expr_key (e : A.expr) : string =
+  match e with
+  | A.EVar n -> n.A.txt
+  | A.ELit (A.LitInt k, _) -> string_of_int k
+  | A.EApp (A.EVar f, args, _) -> f.A.txt ^ "(" ^ String.concat "," (List.map expr_key args) ^ ")"
+  | _ -> "?"
+
+let metric_key (m : A.expr list) = String.concat ";" (List.map expr_key m)
+
+let pos_var k = "$pos" ^ string_of_int k
+
+(** One candidate: a metric for every member of the SCC. *)
+type candidate = (int * A.expr list) list
+
+(** The candidates of §3.5 for SCC [si], in order, each fully instantiated
+    for every member and inside the metric fragment of §2.1:
+    1. each Int parameter, in parameter order;
+    2. [b - i] (or [b - i + 1]) for an Int parameter [i] passed as [i + k]
+       (k a positive literal) at some intra-SCC call, and a comparison of [i]
+       with [b] in the body, where [b] is a literal or built from parameters
+       passed UNCHANGED (as themselves, at their own position) by every
+       intra-SCC call: [i < b] / [i >= b] give [b - i], [i <= b] / [i > b]
+       give [b - i + 1]; and [len(x) - i] for such an [i] and a [List] or
+       [String] parameter [x] passed unchanged, with or without a comparison
+       (a scanner whose exit tests a byte, not [i]);
+    3. [len(x)] for a [List] parameter [x] (a helper's proved post, such as
+       [split_at]'s, is what makes it fall);
+    4. 2-tuples of the above, in parameter order (the first component's
+       position before the second's).
+    A candidate equal to the metric phase 2 already checked ([tried]) is
+    dropped.  Shapes come from the first member and are instantiated by
+    position; a member lacking a position of the right kind drops the
+    candidate.  Returns at most [max_candidates] and how many there were in
+    all.  Nothing here is trusted: each one is checked by the caller exactly
+    as a written [@[decreases]] would be. *)
+let candidates ?type_map ~(is_measure : string -> bool) ~(tried : int -> A.expr list option) (t : t)
+    (si : int) : candidate list * int =
+  let g = t.graph in
+  let members = List.sort compare g.sccs.(si) in
+  match members with
+  | [] -> ([], 0)
+  | h :: _ ->
+    let hu = g.units.(h) in
+    let edges = List.filter (fun e -> e.e_kind <> Reference) (List.concat_map (intra g) members) in
+    let positions = List.mapi (fun i p -> (i, p)) hu.u_params in
+    let ints = List.filter_map (fun (i, p) -> match p with Some _ when param_kind ?type_map hu i = PInt -> Some i | _ -> None) positions in
+    let lists =
+      List.filter_map
+        (fun (i, p) -> match p with Some _ when param_kind ?type_map hu i = POther "List" -> Some i | _ -> None)
+        positions
+    in
+    (* Positions every intra-SCC call passes unchanged. *)
+    let unchanged k =
+      List.for_all
+        (fun e ->
+          match (List.nth_opt e.e_args k, List.nth_opt g.units.(e.e_src).u_params k) with
+          | Some (A.EVar n), Some (Some p) -> n.A.txt = p
+          | _ -> false)
+        edges
+    in
+    let incremented i =
+      List.exists
+        (fun e ->
+          e.e_src = h
+          &&
+          match (List.nth_opt e.e_args i, List.nth_opt hu.u_params i) with
+          | Some (A.EApp (A.EVar { A.txt = "+"; _ }, [ A.EVar x; A.ELit (A.LitInt k, _) ], _)), Some (Some p)
+          | Some (A.EApp (A.EVar { A.txt = "+"; _ }, [ A.ELit (A.LitInt k, _); A.EVar x ], _)), Some (Some p) ->
+            x.A.txt = p && k > 0
+          | _ -> false)
+        edges
+    in
+    (* [b] over positions: literals, unchanged parameters, [+ - *], [/] by a
+       positive literal and measures of unchanged parameters. *)
+    let rec bound ~(pos_of : string -> int option) ~(avoid : int) (e : A.expr) : A.expr option =
+      match e with
+      | A.ELit (A.LitInt _, _) -> Some e
+      | A.EVar n -> (
+        match pos_of n.A.txt with
+        | Some k when k <> avoid && unchanged k -> Some (A.EVar { n with A.txt = pos_var k })
+        | _ -> None)
+      | A.EApp ((A.EVar { A.txt = "+" | "-" | "*"; _ } as f), [ a; b ], sp) -> (
+        match (bound ~pos_of ~avoid a, bound ~pos_of ~avoid b) with
+        | Some a, Some b -> Some (A.EApp (f, [ a; b ], sp))
+        | _ -> None)
+      | A.EApp ((A.EVar { A.txt = "/"; _ } as f), [ a; (A.ELit (A.LitInt k, _) as b) ], sp) when k > 0 ->
+        Option.map (fun a -> A.EApp (f, [ a; b ], sp)) (bound ~pos_of ~avoid a)
+      | A.EApp ((A.EVar m as f), [ A.EVar x ], sp) when is_measure m.A.txt -> (
+        match pos_of x.A.txt with
+        | Some k when k <> avoid && unchanged k -> Some (A.EApp (f, [ A.EVar { x with A.txt = pos_var k } ], sp))
+        | _ -> None)
+      | _ -> None
+    in
+    let guards =
+      List.concat_map
+        (fun (o : owner) ->
+          let pos_of n = List.find_index (fun p -> p = Some n) o.o_params in
+          let found = ref [] in
+          let rec walk (e : A.expr) =
+            (match e with
+             | A.EApp (A.EVar { A.txt = ("<" | "<=" | ">" | ">=") as op; _ }, [ a; b ], _) ->
+               let try_side (i_side : A.expr) (other : A.expr) (op : string) =
+                 match i_side with
+                 | A.EVar x -> (
+                   match pos_of x.A.txt with
+                   | Some i when List.mem i ints && incremented i -> (
+                     match bound ~pos_of ~avoid:i other with
+                     | Some b -> found := SGuard (i, b, op = "<=" || op = ">") :: !found
+                     | None -> ())
+                   | _ -> ())
+                 | _ -> ()
+               in
+               let flip = function "<" -> ">" | "<=" -> ">=" | ">" -> "<" | _ -> "<=" in
+               try_side a b op;
+               try_side b a (flip op)
+             | _ -> ());
+            List.iter walk (Refine_encode.children e)
+          in
+          walk o.o_body;
+          List.rev !found)
+        hu.u_clauses
+    in
+    (* A scanner (§8 phase 5, `scanner`): an index climbing through a list or
+       string passed unchanged is bounded by its length even when the exit
+       tests something else (a byte), so `len(x) - i` is a candidate too. *)
+    let scans =
+      List.concat_map
+        (fun i ->
+          if not (incremented i) then []
+          else
+            List.filter_map
+              (fun (k, p) ->
+                match p with
+                | Some _ when k <> i && unchanged k
+                              && (match param_kind ?type_map hu k with
+                                  | POther ("List" | "String") -> true
+                                  | _ -> false) ->
+                  let sp = hu.u_span in
+                  Some
+                    (SGuard
+                       (i, A.EApp (A.EVar { A.txt = "len"; A.span = sp }, [ A.EVar { A.txt = pos_var k; A.span = sp } ], sp), false))
+                | _ -> None)
+              positions)
+        ints
+    in
+    let singles =
+      List.map (fun i -> SInt i) ints
+      @ List.fold_left
+          (fun acc s ->
+            let k = function SGuard (i, b, one) -> (i, expr_key b, one) | _ -> (-1, "", false) in
+            if List.exists (fun s' -> k s' = k s) acc then acc else acc @ [ s ])
+          [] (guards @ scans)
+      @ List.map (fun i -> SLen i) lists
+    in
+    let pairs =
+      List.concat_map
+        (fun a -> List.filter_map (fun b -> if shape_pos a < shape_pos b then Some [ a; b ] else None) singles)
+        singles
+    in
+    let shapes = List.map (fun s -> [ s ]) singles @ pairs in
+    (* Instantiate a component for member [u], by position. *)
+    let inst (u : unit_) (s : shape) : A.expr option =
+      let sp = u.u_span in
+      let var k = match List.nth_opt u.u_params k with Some (Some p) -> Some (A.EVar { A.txt = p; A.span = sp }) | _ -> None in
+      let op o a b = A.EApp (A.EVar { A.txt = o; A.span = sp }, [ a; b ], sp) in
+      match s with
+      | SInt i -> if param_kind ?type_map u i = PInt then var i else None
+      | SLen i ->
+        if param_kind ?type_map u i = POther "List" then
+          Option.map (fun x -> A.EApp (A.EVar { A.txt = "len"; A.span = sp }, [ x ], sp)) (var i)
+        else None
+      | SGuard (i, b, one) -> (
+        if param_kind ?type_map u i <> PInt then None
+        else
+          let ok = ref true in
+          let rec rn (e : A.expr) =
+            match e with
+            | A.EVar n when String.length n.A.txt > 4 && String.sub n.A.txt 0 4 = "$pos" -> (
+              match var (int_of_string (String.sub n.A.txt 4 (String.length n.A.txt - 4))) with
+              | Some v -> v
+              | None -> ok := false; e)
+            | A.EApp (f, args, _) -> A.EApp (f, List.map rn args, sp)
+            | e -> e
+          in
+          let b = rn b in
+          match var i with
+          | Some x when !ok ->
+            let d = op "-" b x in
+            Some (if one then op "+" d (A.ELit (A.LitInt 1, sp)) else d)
+          | _ -> None)
+    in
+    let seen = Hashtbl.create 16 in
+    let cands =
+      List.filter_map
+        (fun comps ->
+          let per =
+            List.map
+              (fun u ->
+                let un = g.units.(u) in
+                let es = List.map (inst un) comps in
+                if List.for_all Option.is_some es then
+                  let es = List.map Option.get es in
+                  if metric_errors ?type_map ~is_measure un es = [] then Some (u, es) else None
+                else None)
+              members
+          in
+          if not (List.for_all Option.is_some per) then None
+          else
+            let c = List.map Option.get per in
+            let key = String.concat "|" (List.map (fun (u, es) -> string_of_int u ^ ":" ^ metric_key es) c) in
+            let same_as_tried =
+              List.for_all
+                (fun (u, es) -> match tried u with Some m -> metric_key m = metric_key es | None -> false)
+                c
+            in
+            if same_as_tried || Hashtbl.mem seen key then None
+            else begin
+              Hashtbl.replace seen key ();
+              Some c
+            end)
+        shapes
+    in
+    (List.filteri (fun i _ -> i < max_candidates) cands, List.length cands)
+
+(** What inference found for one SCC (phase 5): the candidate that proved,
+    if any, as text per member ([pred_str] is [Refine_check]'s), how many
+    candidates were checked, and how many there were. *)
+type inferred = {
+  inf_metric : string list option;  (** this member's components, if a candidate proved *)
+  inf_checked : int;
+  inf_total : int;
+}
+
+(** Set by the driver under [--refine-infer] and [--termination-report]: an
+    SCC the plan leaves uncertified is searched for a metric (§3.5) after
+    the walk.  Off by default, so a plain [--check] never infers. *)
+let infer = ref false
+
+(** The last module's inference results, by each member's declaring span.
+    Filled by [Refine_check.check_module] when [infer] is set; reset per
+    module. *)
+let last_inferred : (A.span, inferred) Hashtbl.t = Hashtbl.create 16
+
+(** The same, as expressions: a member's components when a candidate
+    proved. *)
+let last_inferred_exprs : (A.span, A.expr list) Hashtbl.t = Hashtbl.create 16
+
+(** Set by [Refine_infer] (`--refine-infer`): demand, and infer for, every
+    SCC with a member whose span it accepts, as [--termination-report] does
+    for user code.  [None] otherwise. *)
+let infer_demand : (A.span -> bool) option ref = ref None
+
+(** The inferred metric for SCC [si], for the [termination_unproved] note
+    ("note: try `@[decreases(e)]`.") that the LSP turns into the "add
+    `@[decreases(e)]`" action.  Only for an SCC of ONE top-level function:
+    the note names one attribute, and a local `fn` takes none. *)
+let suggest_metric : (t -> int -> A.expr list option) ref =
+  ref (fun t si ->
+      match t.graph.sccs.(si) with
+      | [ u ] when t.graph.units.(u).u_kind = Top ->
+        Hashtbl.find_opt last_inferred_exprs t.graph.units.(u).u_span
+      | _ -> None)
 
 (** Set by the driver under [--termination-report]: every SCC of user code is
     demanded (§9), not only an annotated one.  Off by default (decision D2). *)
@@ -2016,8 +2311,39 @@ let report_lines ?(is_user : A.span -> bool = fun _ -> true) (t : t) : string li
       (if List.length unres = 1 then "" else "s")
       (if unres = [] then "" else ": " ^ String.concat ", " unres)
   in
+  (* Phase 5 (§3.5): what inference found for each uncertified unit, when
+     the walk searched (under the report, or `--refine-infer`). *)
+  let infer_rows =
+    List.filter_map (fun r -> Option.map (fun i -> (r, i)) (Hashtbl.find_opt last_inferred r.r_span)) rows
+  in
+  let infer_lines =
+    List.map
+      (fun (r, i) ->
+        let tried =
+          Printf.sprintf "%d of %d candidate%s checked%s" i.inf_checked i.inf_total
+            (if i.inf_total = 1 then "" else "s")
+            (if i.inf_total > max_candidates then
+               Printf.sprintf "; the cap of %d was reached" max_candidates
+             else "")
+        in
+        Printf.sprintf "infer	%s	%s	%s	%s" (span_str r.r_span) r.r_name
+          (match i.inf_metric with
+           | Some es -> Printf.sprintf "@[decreases(%s)]" (String.concat ", " es)
+           | None -> "none")
+          tried)
+      infer_rows
+  in
+  let infer_line =
+    if infer_rows = [] then []
+    else
+      let n = List.length (List.filter (fun (_, i) -> i.inf_metric <> None) infer_rows) in
+      [ Printf.sprintf "  inferred: %d of %d uncertified unit%s" n (List.length infer_rows)
+          (if List.length infer_rows = 1 then "" else "s") ]
+  in
   (header :: List.map line rows)
+  @ infer_lines
   @ handler_lines
   @ [ summary; cert_line ]
+  @ infer_line
   @ through_line
   @ [ trusted_line; unresolved_line ]

@@ -1834,3 +1834,349 @@ let diverges_suite =
     case "ratchet: neither has test/native" (fun () ->
         check_ratchet "test/native" (unannotated_e ~native:true ()) native_e_allowed);
   ]
+
+(* ── Phase 5 ([infer_suite], group `termination-infer`): metric inference
+   (§3.5).  An SCC the plan leaves uncertified is searched for a metric
+   among at most 8 candidates (each Int parameter; `b - i` for a guarded
+   counter; `len(x)`; 2-tuples), each checked through every phase-2
+   obligation exactly as a written `@[decreases]` would be.  Inference runs
+   only with [Refine_term.infer] set (the driver sets it under
+   `--refine-infer` and `--termination-report`); [infer_run] sets it and
+   reads [Refine_term.last_inferred] back by unit name.  The REJECT
+   controls: a diverging function never gets a metric, and a candidate that
+   does not decrease is never proposed. *)
+
+module RI = March_refinecheck.Refine_infer
+
+let infer_run ?(all = true) ?demand ?(extra : (March_ast.Ast.decl * string) list = []) src =
+  RT.infer := true;
+  RT.infer_demand := demand;
+  Fun.protect
+    ~finally:(fun () ->
+      RT.infer := false;
+      RT.infer_demand := None)
+    (fun () ->
+      let d = desugar src in
+      let d = { d with March_ast.Ast.mod_decls = List.map fst extra @ d.March_ast.Ast.mod_decls } in
+      let _errs, type_map = March_typecheck.Typecheck.check_module d in
+      let ctx = E.create () in
+      Ob.reset ();
+      RT.check_all := all;
+      Fun.protect
+        ~finally:(fun () -> RT.check_all := false)
+        (fun () ->
+          March_refinecheck.Refine_check.check_module ~stdlib_files:(List.map snd extra) ~type_map ctx d);
+      let t = RT.analyze ~type_map ~file_mod:d.March_ast.Ast.mod_name.March_ast.Ast.txt d.March_ast.Ast.mod_decls in
+      let inferred =
+        Array.to_list t.RT.graph.RT.units
+        |> List.filter_map (fun (u : RT.unit_) ->
+               Option.map (fun i -> (u.RT.u_name, i)) (Hashtbl.find_opt RT.last_inferred u.RT.u_span))
+      in
+      (inferred, ctx.E.diagnostics, RT.report_lines t))
+
+(* The metric inferred for [name]: its components joined by ", ", "none"
+   when the search found nothing, "<not searched>" when it never ran. *)
+let inferred_of (inferred, _, _) name =
+  match List.assoc_opt name inferred with
+  | Some { RT.inf_metric = Some es; _ } -> String.concat ", " es
+  | Some { RT.inf_metric = None; _ } -> "none"
+  | None -> "<not searched>"
+
+let check_inferred r name want = Alcotest.(check string) (name ^ " inferred") want (inferred_of r name)
+
+let checked_of (inferred, _, _) name =
+  match List.assoc_opt name inferred with
+  | Some i -> (i.RT.inf_checked, i.RT.inf_total)
+  | None -> (-1, -1)
+
+(* t2, guarded: an ascending counter with a `>=` exit. *)
+let inf_up = {|
+  fn up(n : Int) : Int do if n >= 100 do 0 else up(n + 1) end end
+|}
+
+(* t2 as in §0.1: an `== 100` exit diverges from 101 up.  No inequality
+   guard, so no `b - i` candidate; nothing may be proposed. *)
+let inf_up_eq = {|
+  fn up(n : Int) : Int do if n == 100 do 0 else up(n + 1) end end
+|}
+
+(* A guarded counter that ALSO steps back: `100 - n` is generated (n is
+   passed as n + 2, compared with 100) and must fail (`up2(n - 1)` raises
+   it); `up2(99)` reaches `up2(98)`, `up2(97)`, ... for ever. *)
+let inf_up_back = {|
+  fn up2(n : Int) : Int do if n >= 100 do 0 else up2(n + 2) - up2(n - 1) end end
+|}
+
+(* A bound passed unchanged: `hi - i` over two parameters. *)
+let inf_scan = {|
+  fn count_to(i : Int, hi : Int) : Int do if i >= hi do 0 else 1 + count_to(i + 1, hi) end end
+|}
+
+(* t8, `<= 0` exits: neither parameter alone falls, the pair (m, n) does. *)
+let inf_ack = {|
+  fn ack(m : Int, n : Int) : Int do
+    if m <= 0 do n + 1
+    else if n <= 0 do ack(m - 1, 1)
+    else ack(m - 1, ack(m, n - 1)) end end
+  end
+|}
+
+(* A mutual counter: one shape, instantiated for both members. *)
+let inf_mutual = {|
+  fn ping(n : Int) : Int do if n >= 10 do 0 else pong(n + 1) end end
+  fn pong(k : Int) : Int do if k >= 10 do 1 else ping(k + 1) end end
+|}
+
+(* `List.chunks`' `go` (class G): a local loop whose list falls only
+   through the helper's proved post.  (The stdlib's own `go` destructures
+   `split_at`'s TUPLE, and no component of a tuple return carries a measure
+   fact through `let (chunk, rest) = ...` today: filed in
+   specs/todos/2026-10-28-termination-infer-gaps.md.) *)
+let inf_chunks = {|
+  fn pop_front(xs : {List(Int) | len(_) > 0}) : {List(Int) | len(_) < len(xs)} do
+    match xs do
+      Cons(_, t) -> t
+      Nil -> xs
+    end
+  end
+  fn chunks(xs : List(Int), size : {Int | _ > 0}) : List(List(Int)) do
+    fn go(lst : List(Int), acc : List(List(Int))) : List(List(Int)) do
+      match lst do
+        Nil -> acc
+        Cons(h, _) ->
+          let rest = pop_front(lst)
+          go(rest, Cons(Cons(h, Nil), acc))
+      end
+    end
+    go(xs, Nil)
+  end
+|}
+
+(* The same helper as a single-list post, and a top-level loop over it:
+   applicable, so `--refine-infer` writes it. *)
+let inf_pop = {|
+  fn pop_front(xs : {List(Int) | len(_) > 0}) : {List(Int) | len(_) < len(xs)} do
+    match xs do
+      Cons(_, t) -> t
+      Nil -> xs
+    end
+  end
+  fn walk(lst : List(Int), acc : Int) : Int do
+    match lst do
+      Nil -> acc
+      Cons(_, _) -> walk(pop_front(lst), acc + 1)
+    end
+  end
+|}
+
+(* `Json.skip_ws`' shape: the exit compares a BYTE, not `i`, with anything,
+   and nothing says `string_byte_at(s, i) == 32` implies `i` is in range. *)
+let inf_skip_ws = {|
+  fn skip_ws(s : String, i : Int) : Int do
+    let c = string_byte_at(s, i)
+    if c == 32 || c == 9 || c == 10 || c == 13 do skip_ws(s, i + 1)
+    else i end
+  end
+|}
+
+(* The same scanner over a reader WITH a contract (assumed, as a builtin's
+   would be): a non-negative item means `i` is inside `s`, so the scanner
+   candidate `len(s) - i` proves.  Over a byte LIST: a String's `len` in a
+   callee's return refinement does not meet the String length the metric
+   reads (filed in specs/todos/2026-10-28-termination-infer-gaps.md). *)
+let inf_skip_ws_contract = {|
+  @[assume]
+  fn byte_at(s : List(Int), i : Int) : {Int | _ < 0 || (i >= 0 && i < len(s))} do 0 - 1 end
+  fn skip_ws(s : List(Int), i : Int) : Int do
+    let c = byte_at(s, i)
+    if c == 32 || c == 9 || c == 10 || c == 13 do skip_ws(s, i + 1)
+    else i end
+  end
+|}
+
+(* A refined return that only the induction hypothesis proves, and only
+   once the cycle is certified: the metric closes the return and the
+   caller's precondition, so `--refine-infer-apply`'s prediction must
+   count the hypothesis (a ledger without it would predict two skips). *)
+let inf_ih = {|
+  @[no_warn_recursion]
+  fn up_sum(n : Int) : {Int | _ >= 0} do if n >= 100 do 0 else 1 + up_sum(n + 1) end end
+  fn need_nn(x : {Int | _ >= 0}) : Int do x end
+  fn main() : Int do need_nn(up_sum(3)) end
+|}
+
+(* Ten Int parameters, only the LAST falls: its candidate is the ninth
+   (the first parameter, the default, is not tried again), past the cap.
+   Nine parameters: the eighth, inside it. *)
+let inf_cap n =
+  let ps = List.init n (fun i -> Printf.sprintf "p%d" i) in
+  let last = List.nth ps (n - 1) in
+  Printf.sprintf "  fn f(%s) : Int do if %s <= 0 do 0 else f(%s) end end"
+    (String.concat ", " (List.map (fun p -> p ^ " : Int") ps))
+    last
+    (String.concat ", " (List.map (fun p -> if p = last then p ^ " - 1" else p) ps))
+
+(* The stdlib JSON module, for `json.skip_ws` itself. *)
+let stdlib_file name : March_ast.Ast.decl * string =
+  let path =
+    List.find Sys.file_exists [ "stdlib/" ^ name; "../../../stdlib/" ^ name; "../../stdlib/" ^ name ]
+  in
+  let lm = parse_file path in
+  (March_ast.Ast.DMod (lm.March_ast.Ast.mod_name, March_ast.Ast.Public, lm.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span), path)
+
+(* `--refine-infer` on [src] as the driver runs it: check the module, then
+   [Refine_infer.run] with only the metric kind; returns the result. *)
+let refine_infer src =
+  RT.infer := true;
+  Fun.protect
+    ~finally:(fun () -> RT.infer := false)
+    (fun () ->
+      let d = desugar src in
+      let _errs, type_map = March_typecheck.Typecheck.check_module d in
+      Ob.reset ();
+      March_refinecheck.Refine_check.check_module ~type_map (E.create ()) d;
+      RI.run ~kinds:[] ~is_user:(fun _ -> true) d)
+
+(* Write every applicable proposal of [r] into [src] (the driver's edit),
+   then check the result as `--check` does. *)
+let apply_decreases src (r : RI.result) =
+  let src' =
+    List.fold_left
+      (fun s (d : RI.dproposal) ->
+        if d.RI.d_apply <> None then s
+        else
+          let sp = d.RI.d_span in
+          match
+            March_refactor.Refine_edit.insert_fn_attribute ~src:s ~line:sp.March_ast.Ast.start_line
+              ~col:sp.March_ast.Ast.start_col ~fn:d.RI.d_fn ~attr:(RI.attr_text d)
+          with
+          | Some (a, b, t) -> String.sub s 0 a ^ t ^ String.sub s b (String.length s - b)
+          | None -> Alcotest.fail ("no edit for " ^ d.RI.d_fn))
+      src
+      (* right to left, so an earlier edit never moves a later one *)
+      (List.sort (fun (a : RI.dproposal) b -> compare b.RI.d_span a.RI.d_span) r.RI.decreases)
+  in
+  (src', run src')
+
+let infer_suite =
+  [ zcase "t2 guarded: `100 - n` inferred for `n >= 100` / `up(n + 1)`" (fun () ->
+        let r = infer_run (m inf_up) in
+        check_inferred r "up" "100 - n";
+        Alcotest.(check (pair int int)) "1 of 1 candidate" (1, 1) (checked_of r "up"));
+    zcase "guard over parameters: `hi - i`, `hi` passed unchanged" (fun () ->
+        check_inferred (infer_run (m inf_scan)) "count_to" "hi - i");
+    zcase "t8 ack: the 2-tuple `(m, n)`" (fun () -> check_inferred (infer_run (m inf_ack)) "ack" "m, n");
+    zcase "mutual: one shape for both members" (fun () ->
+        let r = infer_run (m inf_mutual) in
+        check_inferred r "ping" "10 - n";
+        check_inferred r "pong" "10 - k");
+    zcase "chunks: `List.chunks`' `go` (class G) gets `len(lst)` through `split_at`'s post" (fun () ->
+        check_inferred (infer_run (m inf_chunks)) "chunks/go" "len(lst)");
+    zcase "chunks: a top-level loop through `pop_front`'s post gets `len(lst)`" (fun () ->
+        check_inferred (infer_run (m inf_pop)) "walk" "len(lst)");
+    zcase "scanner: `json.skip_ws(s, i + 1)` has no builtin contract: unproved, named" (fun () ->
+        let ((_, _, lines) as r) = infer_run (m inf_skip_ws) in
+        check_inferred r "skip_ws" "none";
+        Alcotest.(check (pair int int)) "the scanner candidate was checked" (1, 1) (checked_of r "skip_ws");
+        Alcotest.(check bool) ("named in the report: " ^ String.concat " | " lines) true
+          (List.exists (fun l -> contains l "\tskip_ws\tnone\t1 of 1 candidate checked") lines));
+    zcase "scanner: with a contract on the byte reader, `len(s) - i` is inferred" (fun () ->
+        check_inferred (infer_run (m inf_skip_ws_contract)) "skip_ws" "len(s) - i");
+    zcase "scanner: the stdlib's own `Json.skip_ws`" (fun () ->
+        let ((json_decl, path) as json) = stdlib_file "json.march" in
+        ignore json_decl;
+        let r = infer_run ~all:false ~demand:(fun sp -> sp.March_ast.Ast.file = path) ~extra:[ json ] (m "") in
+        check_inferred r "Json.skip_ws" "none");
+    zcase "cap: past 8 candidates the search stops, unproved, and says so" (fun () ->
+        let ((_, _, lines) as r) = infer_run (m (inf_cap 10)) in
+        check_inferred r "f" "none";
+        Alcotest.(check int) "8 checked" 8 (fst (checked_of r "f"));
+        Alcotest.(check bool) "more than 8 generated" true (snd (checked_of r "f") > 8);
+        Alcotest.(check bool) ("named: " ^ String.concat " | " lines) true
+          (List.exists (fun l -> contains l "\tf\tnone\t8 of " && contains l "the cap of 8 was reached") lines));
+    zcase "cap control: the eighth candidate is checked" (fun () ->
+        let r = infer_run (m (inf_cap 9)) in
+        check_inferred r "f" "p8";
+        Alcotest.(check int) "8 checked" 8 (fst (checked_of r "f")));
+    zcase "REJECT: a diverging function never gets a metric" (fun () ->
+        List.iter
+          (fun (src, name) -> check_inferred (infer_run (m src)) name "none")
+          [ (t1, "spin"); (inf_up_eq, "up"); (t4, "down"); (t9b, "grow"); (lex_diverging, "f") ]);
+    zcase "REJECT: a candidate that does not decrease is not proposed" (fun () ->
+        let r = infer_run (m inf_up_back) in
+        check_inferred r "up2" "none";
+        Alcotest.(check (pair int int)) "the guard candidate was checked" (1, 1) (checked_of r "up2"));
+    zcase "proposal_checked REJECT: `--refine-infer` proposes nothing for a function that can loop" (fun () ->
+        List.iter
+          (fun (label, src) ->
+            let r = refine_infer (m src) in
+            Alcotest.(check (list string)) (label ^ ": no proposal") []
+              (List.map (fun (d : RI.dproposal) -> d.RI.d_fn ^ " " ^ RI.attr_text d) r.RI.decreases);
+            Alcotest.(check bool) (label ^ ": listed as not inferred") true (r.RI.decreases_none <> []))
+          [ ("up back", inf_up_back); ("spin", t1); ("up ==", inf_up_eq); ("down", t4) ]);
+    zcase "proposal_checked: every proposal proves when written, and only those are made" (fun () ->
+        List.iter
+          (fun (label, src, want) ->
+            let r = refine_infer (m src) in
+            let got =
+              List.sort compare
+                (List.map (fun (d : RI.dproposal) -> d.RI.d_fn ^ " " ^ RI.attr_text d) r.RI.decreases)
+            in
+            Alcotest.(check (list string)) (label ^ ": proposals") want got;
+            List.iter
+              (fun (d : RI.dproposal) ->
+                Alcotest.(check (option string)) (label ^ ": " ^ d.RI.d_fn ^ " applicable") None d.RI.d_apply)
+              r.RI.decreases;
+            if r.RI.decreases <> [] then begin
+              let src', run' = apply_decreases (m src) r in
+              List.iter
+                (fun (d : RI.dproposal) -> check_mcert run' d.RI.d_fn "metric")
+                r.RI.decreases;
+              Alcotest.(check bool) (label ^ ": every obligation proved\n" ^ src') true
+                (verdicts run' <> [] && List.for_all (fun v -> v = "proved") (verdicts run'));
+              Alcotest.(check int) (label ^ ": no termination_unproved") 0 (n_with "termination_unproved" run')
+            end)
+          [ ("up", inf_up, [ "up @[decreases(100 - n)]" ]);
+            ("ack", inf_ack, [ "ack @[decreases(m, n)]" ]);
+            ("mutual", inf_mutual, [ "ping @[decreases(10 - n)]"; "pong @[decreases(10 - k)]" ]);
+            ("pop", inf_pop, [ "walk @[decreases(len(lst))]" ]);
+            ("spin", t1, []);
+            ("up ==", inf_up_eq, []);
+            ("up back", inf_up_back, []);
+            ("down", t4, []) ]);
+    zcase "proposal_checked: a metric that licenses the induction hypothesis is in the prediction" (fun () ->
+        let r = refine_infer (m inf_ih) in
+        Alcotest.(check (list string)) "the proposal" [ "up_sum @[decreases(100 - n)]" ]
+          (List.map (fun (d : RI.dproposal) -> d.RI.d_fn ^ " " ^ RI.attr_text d) r.RI.decreases);
+        Alcotest.(check (pair int int)) "predicted (skipped, violated) once written" (0, 0) r.RI.after_counts;
+        let src', _ = apply_decreases (m inf_ih) r in
+        let skipped =
+          List.length (List.filter (fun (o : Ob.t) -> match o.Ob.verdict with Ob.Skipped _ -> true | _ -> false) (Ob.all ()))
+        in
+        Alcotest.(check int) ("the written program has no skip\n" ^ src') 0 skipped);
+    zcase "proposal_checked: a local `fn`'s metric is shown, never written" (fun () ->
+        let r = refine_infer (m inf_chunks) in
+        match List.find_opt (fun (d : RI.dproposal) -> d.RI.d_fn = "chunks/go") r.RI.decreases with
+        | Some d -> Alcotest.(check (option string)) "not applied" (Some "local") d.RI.d_apply
+        | None -> Alcotest.fail "no proposal for chunks/go");
+    zcase "report: `infer` lines and the count" (fun () ->
+        let _, _, lines = infer_run (m (inf_up ^ inf_skip_ws)) in
+        Alcotest.(check bool) ("lines: " ^ String.concat " | " lines) true
+          (List.exists (fun l -> contains l "\tup\t@[decreases(100 - n)]\t1 of 1 candidate checked") lines
+           && List.exists (fun l -> contains l "inferred: 1 of 2 uncertified units") lines));
+    zcase "default off: without the infer flag nothing is searched (D2, §9)" (fun () ->
+        ignore (run ~all:true (m inf_up));
+        Alcotest.(check int) "nothing recorded" 0 (Hashtbl.length RT.last_inferred);
+        ignore (run (m inf_up));
+        Alcotest.(check int) "nothing recorded, no report" 0 (Hashtbl.length RT.last_inferred));
+    zcase "note: an annotated `@[decreases]` that fails names the metric found" (fun () ->
+        let _, diags, _ = infer_run ~all:false (m ("  @[decreases(n)]\n" ^ inf_up)) in
+        Alcotest.(check bool) "the note" true
+          (List.exists
+             (fun (d : E.diagnostic) ->
+               d.E.code = "termination_unproved" && contains d.E.message "note: try `@[decreases(100 - n)]`.")
+             diags);
+        let r = run (m ("  @[decreases(n)]\n" ^ inf_up)) in
+        Alcotest.(check bool) "no note without the flag" false
+          (List.exists (fun (d : E.diagnostic) -> contains d.E.message "note: try") r.diags));
+  ]
