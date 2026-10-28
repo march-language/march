@@ -1125,7 +1125,152 @@ let code_actions_at (a : t) ~line ~character
               | _ -> None)
            | _ -> None)
         | _ -> None)
-      a.diagnostics
+      (* The client's context diagnostics too: a compiler diagnostic the
+         LSP does not compute itself (the refinement checker's, run by
+         `march --check-json`) still carries its fix in [data]. *)
+      (a.diagnostics @ List.filter (fun d -> not (List.mem d a.diagnostics)) diagnostics)
+  in
+  (* ---- Termination (termination design §6, phase 4) ----
+     Two of the three repairs of a `termination_unproved` diagnostic:
+     - "Mark `f` `@[diverges]`": insert the attribute on the enclosing
+       function, or REPLACE its `@[decreases(...)]` (the two together are a
+       `diverges_conflict`);
+     - "Add `@[decreases(e)]`": the frame for phase 5's inference.  The
+       compiler names a checked metric in a `note: try `@[decreases(e)]``;
+       until it infers one, no diagnostic carries the note.
+     The third, `x == 0` -> `x <= 0`, is the diagnostic's own machine fix and
+     comes through [fix_actions] below.  None is offered for an actor
+     handler, which takes no attribute. *)
+  let termination_actions =
+    let uri = DocumentUri.of_path a.filename in
+    let src = a.src in
+    let on_diag (d : Diagnostic.t) =
+      let r = d.range in
+      (line > r.start.line || (line = r.start.line && character >= r.start.character))
+      && (line < r.end_.line || (line = r.end_.line && character <= r.end_.character))
+    in
+    let msg (d : Diagnostic.t) =
+      match d.message with `String m -> m | `MarkupContent mc -> mc.MarkupContent.value
+    in
+    let find_sub hay needle from =
+      let n = String.length needle and h = String.length hay in
+      let rec go i = if i + n > h then None else if String.sub hay i n = needle then Some i else go (i + 1) in
+      go from
+    in
+    (* The innermost `fn` declaration (any `mod` depth) whose span holds
+       line [l] (1-indexed). *)
+    let rec enclosing l (ds : Ast.decl list) : Ast.span option =
+      List.find_map
+        (fun (dcl : Ast.decl) ->
+          match dcl with
+          | Ast.DFn (_, sp) when sp.Ast.start_line <= l && l <= sp.Ast.end_line -> Some sp
+          | Ast.DMod (_, _, inner, sp) when sp.Ast.start_line <= l && l <= sp.Ast.end_line ->
+            enclosing l inner
+          | _ -> None)
+        ds
+    in
+    (* The attribute text ahead of the declaration at [sp]: the part of its
+       own line before it, and every directly preceding line that starts
+       with `@[` — as (byte offset of the region, the region). *)
+    let attr_region (sp : Ast.span) =
+      let decl_ofs = offset_of_pos src (sp.Ast.start_line - 1) sp.Ast.start_col in
+      let line_start i =
+        let rec back j = if j > 0 && src.[j - 1] <> '
+' then back (j - 1) else j in
+        back i
+      in
+      let rec grow start =
+        if start = 0 then start
+        else
+          let prev = line_start (start - 1) in
+          let txt = String.trim (String.sub src prev (start - 1 - prev)) in
+          if String.length txt >= 2 && String.sub txt 0 2 = "@[" then grow prev else start
+      in
+      let start = grow (line_start decl_ofs) in
+      (start, String.sub src start (decl_ofs - start))
+    in
+    let range_of_ofs a_ b_ =
+      let pos o =
+        let l = ref 0 and c = ref 0 in
+        for i = 0 to o - 1 do
+          if src.[i] = '\n' then begin incr l; c := 0 end else incr c
+        done;
+        Position.create ~line:!l ~character:!c
+      in
+      Range.create ~start:(pos a_) ~end_:(pos b_)
+    in
+    (* Replace the `@[decreases(...)]` of the declaration at [sp] by [text],
+       or insert [text] on its own line above it. *)
+    let attr_edit (sp : Ast.span) text =
+      let start, region = attr_region sp in
+      match find_sub region "@[decreases(" 0 with
+      | Some i ->
+        (* The attribute's closing `)]`, matching parentheses. *)
+        let rec close j depth =
+          if j >= String.length region then None
+          else
+            match region.[j] with
+            | '(' -> close (j + 1) (depth + 1)
+            | ')' when depth = 1 ->
+              if j + 1 < String.length region && region.[j + 1] = ']' then Some (j + 2) else None
+            | ')' -> close (j + 1) (depth - 1)
+            | _ -> close (j + 1) depth
+        in
+        Option.map
+          (fun e -> (TextEdit.create ~range:(range_of_ofs (start + i) (start + e)) ~newText:text, true))
+          (close (i + String.length "@[decreases") 0)
+      | None ->
+        let pos = Position.create ~line:(sp.Ast.start_line - 1) ~character:sp.Ast.start_col in
+        let indent = String.make sp.Ast.start_col ' ' in
+        Some (TextEdit.create ~range:(Range.create ~start:pos ~end_:pos) ~newText:(text ^ "\n" ^ indent), false)
+    in
+    let fn_name_at (sp : Ast.span) =
+      let ofs = offset_of_pos src (sp.Ast.start_line - 1) sp.Ast.start_col in
+      let skip_kw i =
+        if i + 3 <= String.length src && String.sub src i 3 = "fn " then i + 3
+        else if i + 4 <= String.length src && String.sub src i 4 = "pfn " then i + 4
+        else i
+      in
+      let i = skip_kw ofs in
+      let rec ident j = if j < String.length src && (match src.[j] with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false) then ident (j + 1) else j in
+      String.sub src i (ident i - i)
+    in
+    List.concat_map
+      (fun (d : Diagnostic.t) ->
+        match d.code with
+        | Some (`String "termination_unproved") when on_diag d -> (
+          match enclosing (d.range.start.line + 1) a.decls with
+          | None -> []
+          | Some sp ->
+            let name = fn_name_at sp in
+            let mk title (te, _) =
+              CodeAction.create ~title ~kind:CodeActionKind.QuickFix ~diagnostics:[ d ]
+                ~edit:(WorkspaceEdit.create ~changes:[ (uri, [ te ]) ] ()) ()
+            in
+            let diverges =
+              match attr_edit sp "@[diverges]" with
+              | Some ((_, true) as e) ->
+                [ mk (Printf.sprintf "Replace `@[decreases]` on `%s` with `@[diverges]`" name) e ]
+              | Some e -> [ mk (Printf.sprintf "Mark `%s` `@[diverges]`" name) e ]
+              | None -> []
+            in
+            let decreases =
+              let m = msg d in
+              match find_sub m "try `@[decreases(" 0 with
+              | Some i -> (
+                let from = i + String.length "try `" in
+                match find_sub m ")]`" from with
+                | Some j -> (
+                  let attr = String.sub m from (j + 2 - from) in
+                  match attr_edit sp attr with
+                  | Some e -> [ mk (Printf.sprintf "Add `%s` to `%s`" attr name) e ]
+                  | None -> [])
+                | None -> [])
+              | None -> []
+            in
+            decreases @ diverges)
+        | _ -> [])
+      diagnostics
   in
   make_linear_actions @ exhaustion_actions @ annotation_actions
   @ batch_annotation_action @ unused_binding_actions @ unused_import_actions
@@ -1138,5 +1283,6 @@ let code_actions_at (a : t) ~line ~character
   @ parallelize_actions
   @ no_alloc_actions
   @ refine_actions
+  @ termination_actions
   @ fix_actions
 

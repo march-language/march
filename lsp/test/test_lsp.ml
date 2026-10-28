@@ -355,6 +355,12 @@ let () =
       "unreachable after panic: warning emitted", `Quick, test_unreachable_code_after_panic_warning;
       "unused_fns field populated correctly",     `Quick, test_unused_fns_field_populated;
     ];
+    "termination code actions", [
+      "x == 0 -> x <= 0 round-trips",           `Quick, test_term_action_eq_zero;
+      "@[diverges] replaces @[decreases]",      `Quick, test_term_action_diverges_replaces_decreases;
+      "@[diverges] inserted under cap total",   `Quick, test_term_action_diverges_inserts;
+      "@[decreases(..)] frame (phase 5 fills)", `Quick, test_term_action_decreases_frame;
+    ];
     "P1.8: assign to _", [
       "action offered for unused binding",      `Quick, test_assign_to_underscore_offered;
       "edit replaces name with _",              `Quick, test_assign_to_underscore_edit_replaces_name;
