@@ -775,7 +775,12 @@ forge refine --infer --allow-caller-violations         # accept a precondition t
   `Deque.Deque`), and a relation between two slots a caller demands (`Assoc({x : Int | true}, {y : Int | y > x})`);
 - abstract refinements for `filter`-shaped helpers (`pred : a -> Bool[p]` with `List(a[p])`, and
   two-argument `keep : k -> v -> Bool[p]` with `Assoc(k[p], v[p])`);
-- fold accumulator invariants (`fold_left` and `fold_right` steps).
+- fold accumulator invariants (`fold_left` and `fold_right` steps);
+- termination metrics: `@[decreases(100 - n)]` for a recursive function the checker
+  could not show to terminate, chosen from at most 8 candidates (each `Int` parameter,
+  `b - i` for a counter climbing to a bound, `len(xs)`, and pairs of those), each
+  checked at every recursive call. A metric for a local `fn` is shown but not written,
+  since a local `fn` takes no attribute.
 
 It searches to a fixpoint over the call graph in one run, callees first. Returns go before
 preconditions: a proved return costs no caller anything, while a precondition moves the
@@ -785,8 +790,14 @@ obligation to every caller.
 inferred refinements: 2 proposed, 0 refused; user skips 2 -> 0 (101 probes, 2 rounds)
   positives (lib/scores.march:8)  return/elem : List({Int | _ > 0})  [element-return, closes 1]
   report (lib/scores.march:12)  param n : {Int | _ > 0}  [precondition, closes 1]
-applied 2 proposal(s) to 1 file(s); the re-check matches the prediction
+inferred metrics: 1 proposed, 0 not inferred
+  up (lib/scores.march:20)  @[decreases(100 - n)]  [termination, class B, 1 of 1 candidate checked]
+applied 3 proposal(s) to 1 file(s); the re-check matches the prediction
 ```
+
+A metric is written in front of the function's `fn`, on the same line
+(`@[decreases(100 - n)] fn up(n : Int) : Int do`). A function no candidate works
+for is listed as `no metric inferred`, with how many candidates were checked.
 
 What each outcome means:
 
@@ -818,7 +829,8 @@ The same inference is available from the compiler and the editor:
 - `march --check --refine-infer FILE`, with `--refine-infer-diff` and
   `--refine-infer-apply`;
 - `--refine-infer-json` emits JSON (version 1, with byte-range edits);
-- `--refine-infer-kinds k1,k4` restricts the kinds;
+- `--refine-infer-kinds k1,k4` restricts the kinds (`decreases` names the termination
+  metrics);
 - `--refine-infer-budget N` caps the probes (default 3000);
 - `--refine-report --refine-infer` adds a line showing the ledger as it will be once the
   proposals are applied;

@@ -4222,7 +4222,8 @@ have one component).
 
 The order the checker tries is fixed: the structural certificate first; then the
 written `@[decreases]`, if there is one, and only that; then the first `Int`
-parameter.
+parameter. When none of these works, `--refine-infer` can search for a metric to
+write (see "Inferring a metric" below).
 
 A metric must really stay at least 0. This loops on `down(-1)`, and is not proved:
 
@@ -4265,6 +4266,98 @@ counts the checks as `termination` in its `by kind:` line. Calls to builtins and
 `extern` functions are assumed to terminate; the report's `trusted:` line lists
 them. A name the checker cannot resolve is never assumed to terminate; the
 `unresolved:` line lists it.
+
+### Inferring a metric
+
+When neither the structural certificate nor the first `Int` parameter works,
+`march --refine-infer` (and `forge refine --infer`) search for a metric and
+propose it as an `@[decreases(...)]` to add. `--termination-report` runs the
+same search and lists what it found. A plain `--check` never searches.
+
+For each cycle the checker could not certify, it tries at most 8 candidate
+metrics, in this order:
+
+1. each `Int` parameter, in parameter order;
+2. `b - i`, for an `Int` parameter `i` that some recursive call passes as
+   `i + 1` (or `i + k`), when the body compares `i` with `b` and `b` is a
+   literal or built from parameters every recursive call passes unchanged
+   (`i >= b` or `i < b` gives `b - i`; `i > b` or `i <= b` gives `b - i + 1`),
+   and `len(x) - i` for such an `i` and a list or string `x` passed unchanged;
+3. `len(x)`, for a `List` parameter `x`;
+4. pairs of the above, in parameter order, compared left to right.
+
+The metric phase 2 already tried (the first `Int` parameter, or your own
+`@[decreases]`) is not tried again. Each candidate is checked exactly as if you
+had written it: every recursive call of the cycle must prove that it decreases.
+A candidate is proposed only if all of them prove; nothing is assumed.
+
+```march
+fn up(n : Int) : Int do
+  if n >= 100 do 0 else up(n + 1) end
+end
+
+pfn count_to(i : Int, hi : Int, acc : Int) : Int do
+  if i >= hi do acc else count_to(i + 1, hi, acc + 1) end
+end
+```
+
+```
+$ march --check --refine-infer up.march
+inferred refinements: 0 proposed, 0 refused; user skips 0 -> 0 (47 probes, 1 rounds)
+inferred metrics: 2 proposed, 0 not inferred
+  up (up.march:1)  @[decreases(100 - n)]  [termination, class B, 1 of 1 candidate checked]
+  count_to (up.march:5)  @[decreases(hi - i)]  [termination, class B, 3 of 8 candidates checked]
+```
+
+`--refine-infer-apply` writes each attribute in front of its function's `fn`, on
+the same line, then re-checks the module. A proposal is written only when that
+re-check certifies its cycle. A cycle of several functions gets one attribute
+per function, and is written whole or not at all. A written metric can also give
+a refined return its induction hypothesis (below): `--refine-report
+--refine-infer` counts the obligations that closes, from the same re-check.
+
+A list falls through a helper's proved return. Here `len(lst)` is inferred,
+because `pop_front` promises a shorter list:
+
+```march
+fn pop_front(xs : {List(Int) | len(_) > 0}) : {List(Int) | len(_) < len(xs)} do
+  match xs do
+    Cons(_, t) -> t
+    Nil -> xs
+  end
+end
+
+fn walk(lst : List(Int), acc : Int) : Int do
+  match lst do
+    Nil -> acc
+    Cons(_, _) -> walk(pop_front(lst), acc + 1)
+  end
+end
+```
+
+Some proposals are shown but not written:
+
+- a metric for a local `fn` (`chunks/go`), since a local `fn` takes no
+  attribute;
+- a metric that would replace a `@[decreases]` you wrote. The editor offers that
+  replacement as a quick fix (below).
+
+A function the search cannot help is listed as `no metric inferred`, with how
+many candidates were checked. When there were more than 8, the line says the cap
+was reached. A function that really can loop never gets a proposal: `up` with an
+`n == 100` exit loops from 101, and none of its candidates proves. The search
+also cannot see through a byte test. `Json.skip_ws(s, i + 1)` stops when
+`string_byte_at(s, i)` is not a space. The search tries `len(s) - i` (an index
+climbing through a string it passes unchanged), but nothing tells the checker that
+a space means `i` is still inside `s`, so no metric is inferred for it.
+
+Under `--termination-report`, each searched unit gets a line:
+
+```
+infer	up.march:1:5	up	@[decreases(100 - n)]	1 of 1 candidate checked
+infer	scan.march:4:5	skip_ws	none	1 of 1 candidate checked
+  inferred: 1 of 2 uncertified units
+```
 
 ### The induction hypothesis
 
@@ -4489,8 +4582,12 @@ The editor offers quick fixes on a `termination_unproved` diagnostic that
   too);
 - **mark the function `@[diverges]`**, replacing its `@[decreases(...)]` if it
   has one;
-- **add `@[decreases(e)]`**, once the compiler infers a metric that it has
-  checked. No metric is inferred yet, so this one is not offered today.
+- **add `@[decreases(e)]`**, when the compiler inferred a metric and checked it
+  (see "Inferring a metric"). The diagnostic then ends with
+  `note: try `@[decreases(e)]`.`, and the fix inserts the attribute, or replaces
+  a `@[decreases(...)]` that failed. Inference runs only under `--refine-infer`
+  or `--termination-report`, and only for a cycle of one top-level function, so
+  a diagnostic from a plain `--check` has no such note.
 
 ---
 
@@ -4570,6 +4667,7 @@ user code. It covers every kind of refinement the checker can verify:
 | relational element | `: Assoc({x : Int \| true}, {y : Int \| y > x})`, when a caller demands exactly that type |
 | abstract | `pred : a -> Bool[p]` with `: List(a[p])`, `Option(a[p])`, `Deque.Deque(a[p])`, or `partition`'s `(List(a[p]), List({a \| !p(_)}))`; two arguments, `keep : k -> v -> Bool[p]` with `: Assoc(k[p], v[p])` |
 | fold accumulator | `fn (acc : {Int \| _ > 0}, x) -> …`, a `fold_right` step's `fn (x, acc : …)`, any literal or `Int`/`Float` parameter as the initial value |
+| termination metric | `@[decreases(100 - n)]` on a recursive function nothing certified (see "Inferring a metric") |
 
 **Where candidates come from.** The program is mined first:
 
@@ -4657,6 +4755,8 @@ forge refine --infer --apply    # write them, then re-check
   the proposals are applied. For a `cap verified` module, it also says how
   many of the module's errors they close.
 - `--refine-infer-kinds` restricts the kinds, as in `--refine-infer-kinds k1,k4`.
+  The kind `decreases` names the termination metrics; a list without it infers
+  none.
 - `--refine-infer-budget N` caps the probes. The default is 3000.
 - `--allow-caller-violations` accepts a refused precondition.
 
