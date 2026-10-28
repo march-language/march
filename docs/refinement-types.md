@@ -4107,7 +4107,8 @@ The second and third columns classify how the unit recurses:
 | C | `int-dec` / `int-asc` | the same metric, but nothing bounds it: `if n == 0 do … else down(n - 1)` loops on `down(-1)` |
 | D | `lex` | no single position falls, but some position falls at every call with the earlier ones unchanged (Ackermann) |
 | F | `lambda` / `ref` | recursion through a lambda or a function value |
-| `E?` | `none` | no syntactic metric, and the name looks like an event loop (`loop`, `serve`, `recv`, …) |
+| E | `diverges` | marked `@[diverges]` (itself, a function in its cycle, or the function enclosing a local `fn`): not claimed to terminate |
+| `E?` | `none` | no syntactic metric, and the cycle waits on something outside the program: it reaches a builtin that receives a message, accepts a connection, reads a socket, a file or a process, reads the clock, or reads a `Vault` another task writes |
 | `?` | `none` | no syntactic metric |
 
 `mutual` after the shape means the unit shares its cycle with other functions; `scc=`
@@ -4371,9 +4372,125 @@ warning: unknown attribute `@[decrease]` on `f`: it is ignored.
 note: did you mean `@[decreases]`?
 ```
 
-The function attributes are `@[assume]`, `@[decreases]`, `@[measure]`,
-`@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`, `@[trusted_linear]` and
-`@[vectorize]`.
+The function attributes are `@[assume]`, `@[decreases]`, `@[diverges]`,
+`@[measure]`, `@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`,
+`@[trusted_linear]` and `@[vectorize]`.
+
+### Functions meant to run for ever: `@[diverges]`
+
+Some functions are not supposed to end: a server's accept loop, a reader that
+waits for the next frame, a ticker that runs until the program stops. Mark one
+`@[diverges]`:
+
+```march
+@[diverges]
+fn accept_loop(listen_fd : Int) : Int do
+  match tcp_accept(listen_fd) do
+    Err(_) -> 0
+    Ok(fd) ->
+      handle(fd)
+      accept_loop(listen_fd)
+  end
+end
+```
+
+The attribute says the function is not claimed to terminate. The checker then:
+
+- files no termination obligation for it;
+- never assumes its return refinement at its own recursive calls (the induction
+  hypothesis), nor at the recursive calls of any cycle that reaches it;
+- lists it in `--termination-report` with `cert=diverges`, under class E.
+
+Callers do not have to repeat the attribute. That a caller *may* diverge is
+worked out for it, through the call graph, and the report lists such callers:
+
+```
+  may diverge through @[diverges]: 2 units: main, serve_all
+```
+
+A local `fn` cannot carry an attribute. It is covered when the function around
+it is marked. One mark on any function of a recursive cycle covers the whole
+cycle.
+
+`@[diverges]` cannot be combined with `@[decreases]`, which claims a metric that
+proves the function does terminate, or with `@[measure]`, since a measure is a
+logical definition and must terminate. A measure that calls a `@[diverges]`
+function, directly or through other calls, is rejected too. Each of these is a
+`diverges_conflict` error.
+
+The standard library marks its event loops this way: the cluster's accept,
+tick and link-reading loops, the frame readers of `NetKernel`, `NodeCall`,
+`NodeSend` and `PeerReader`, the `Csv` and `File` row and line readers, the
+`Session` and `SessionNode` drain and heartbeat loops, and the `Topology`
+placement loop. A test checks that no event loop in the standard library is left
+unmarked, except a short, explained list of loops that do end (a retry with a
+counter, a poll with a deadline) and of loops inside local functions.
+
+### Actor handlers
+
+An actor handler runs once per message, so it must return for each one. Its own
+body is not a loop: `send(self(), Again(k + 1))` puts a message in the mailbox
+and returns, so it is not a recursive call. A handler may still call a function
+that does not return. `--termination-report` then says so:
+
+```
+handler	prog.march:7:7	Counter.Spin	may not return: it reaches `spin`, whose recursion is not shown to terminate
+```
+
+This is a report line, never a warning, except in a `cap total` module.
+
+### Requiring termination: `cap total`
+
+By default termination is only reported. A module that wants every function
+proved to terminate declares `cap total`:
+
+```march
+mod Counting do
+  cap total
+
+  fn countdown(n : Int) : Int do
+    if n <= 0 do 0 else countdown(n - 1) end
+  end
+
+  @[diverges]
+  fn serve(n : Int) : Int do serve(n + 1) end
+
+  fn main() do serve(0) end
+end
+```
+
+In a `cap total` module, `termination_unproved` is an error for:
+
+- a recursive function whose cycle has no certificate (structural, a proved
+  metric, or `@[trusted]`);
+- a function that calls one, or calls an unresolved name;
+- a function that calls a `@[diverges]` function without being marked
+  `@[diverges]` itself;
+- an actor handler that may not return.
+
+`main` and its local functions are exempt, and so is a function marked
+`@[diverges]`, which says plainly that it may run for ever. Like `cap verified`,
+the cap covers the declarations of its own module; a nested `mod` declares its
+own.
+
+A call through an interface (`show(x)` with `x` of a type variable) reaches
+every `impl` of the interface, and an `impl` that does not terminate is an error
+on its own method. The call itself is not: the `impl` is picked by a value at run
+time, so the caller terminates whenever the `impl` it is given does, as with any
+function passed as an argument.
+
+### Editor repairs
+
+The editor offers quick fixes on a `termination_unproved` diagnostic that
+`march --check-json` reports:
+
+- **change `n == 0` to `n <= 0`**, when the counterexample is negative and the
+  exit is `n == 0` (the diagnostic's own machine fix, which `forge fix` applies
+  too);
+- **mark the function `@[diverges]`**, replacing its `@[decreases(...)]` if it
+  has one;
+- **add `@[decreases(e)]`**, once the compiler infers a metric that it has
+  checked. No metric is inferred yet, so this one is not offered today.
 
 ---
 

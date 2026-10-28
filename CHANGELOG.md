@@ -376,6 +376,22 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Termination: `@[diverges]`, actor handlers and `cap total`.** Mark a function meant
+  to run for ever `@[diverges]` (an accept loop, a frame reader, a ticker): it files no
+  termination obligation, never gets the induction hypothesis, and neither does a cycle
+  that reaches it; `--termination-report` lists it as `cert=diverges` and lists the
+  callers that may diverge through it, which do not have to repeat the attribute.
+  `@[diverges]` together with `@[decreases]` or `@[measure]`, or a measure calling a
+  `@[diverges]` function, is a `diverges_conflict` error. The report also names an actor
+  handler that may not return for a message (`handler Counter.Spin may not return`);
+  `send(self(), …)` is not recursion. A module that declares the new `cap total` must
+  prove every function terminates (`main` and `@[diverges]` functions exempt): anything
+  else is a `termination_unproved` error. The standard library's 23 event loops
+  (`ClusterNode`, `NetKernel`, `NodeCall`, `PeerReader`, `Csv`, `File`, `SessionNode`,
+  `Topology`, …) carry `@[diverges]`, and a test keeps new ones from landing unmarked.
+  `termination_unproved` on an `n == 0` exit with a negative counterexample now carries
+  the `n <= 0` fix, and the editor offers it, plus "mark `@[diverges]`".
+
 - **Refinements: the `@[measure]` termination check now covers mutual recursion.** Two
   measures that call each other in a cycle, `ma(Z) -> mb(Z) -> ma(Z) + 1`, were accepted,
   because only a measure's calls to itself were checked. They are now `invalid_measure`
