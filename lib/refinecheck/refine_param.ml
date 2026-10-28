@@ -213,7 +213,8 @@ let elem_ret_assumed : (string, unit) Hashtbl.t = Hashtbl.create 16
    self-call's OWN actuals ([Refine_check.lend_entry]), so `clamp(t, n)`
    carries `_ <= n`; a closed entry ignores it. *)
 let elem_ret_hyp
-  : (string * (string, unit) Hashtbl.t list * ret_elems * (int * string * fn_sig) list * string list)
+  : ((string * A.span) * (string, unit) Hashtbl.t list * ret_elems * (int * string * fn_sig) list
+    * string list)
     option ref =
   ref None
 

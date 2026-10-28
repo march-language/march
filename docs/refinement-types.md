@@ -4075,17 +4075,28 @@ term	F	value	prog.march:14:5	w	top	scc=1	cert=unproved:non-positive
   by class: ?=1 A=1 C=1 F=1
   certificate: 1 structural, 0 metric, 0 trusted, 3 unproved
   trusted: 0 builtin or extern callees
+  unresolved: 0 callees
 ```
 
 There is one line per recursive *unit* of your code. A unit is a top-level function, a
-local `fn` (named `outer/inner`), or an actor handler, and it is recursive when it sits in a
-cycle of the call graph. The graph has three kinds of edge:
+local `fn` (named `outer/inner`), an actor handler, an `impl` method (`impl Show.show`), an
+interface's default method, or a top-level `let` (a lambda's body runs at each call). A unit
+is recursive when it sits in a cycle of the call graph. The graph has three kinds of edge:
 
 - a direct call;
 - a call inside a lambda or a `let*` continuation;
 - a function named as a value (`apply(f, x)` inside `f`).
 
 So recursion that runs only through a callback still counts.
+
+Every callee name is resolved the way the checker resolves a call: a local binder
+first, then the enclosing module and its `use` / `import`s, out to the top level, then
+an `alias`ed module (`alias Other as Z` makes `Z.g` reach `Other.g`). A call to an
+interface method (`show(x)`), or to a builtin an interface constrains (`==`, `<`),
+reaches every `impl` of that interface the argument's type can dispatch to. A builtin
+or an `extern` is assumed to terminate. Any other name is **unresolved**: it may
+diverge, so its cycle is not certified (`cert=unproved:unresolved`) and the report's
+`unresolved:` line lists it.
 
 The second and third columns classify how the unit recurses:
 
@@ -4116,7 +4127,10 @@ reported, never warned about. `cert=structural` holds for a cycle when:
 - each member matches on a parameter, and every call in the cycle passes a *pattern
   component* of the caller's matched parameter, as a bare variable, at the callee's
   position. Arithmetic (`n - 1`), a nullary constructor (`f(Nil)`) and the parameter
-  itself never count;
+  itself never count. The match must be on the parameter's own value: after
+  `let xs = Cons(0, xs)` (or an arm, lambda, `let?` or local `fn` binding `xs`),
+  `match xs` is a match on something else, and its components are not smaller than
+  the argument;
 - a component name is trusted only if every binding of that name in the body is
   structural. `Cons(_, t)` of a *second* list reusing the outer `t` spoils it;
 - in a cycle of several functions, every member matches on a parameter of one type
@@ -4142,7 +4156,8 @@ fn omega() : Int do w(Fix(w)) end    -- never returns
 `w` is listed with `cert=unproved:non-positive` although it is not recursive.
 `type T = T(Int -> Int)` is positive and blocks nothing.
 
-The reasons are `no-structural-arg`, `not-same-family`, `reference` and `non-positive`.
+The reasons are `no-structural-arg`, `not-same-family`, `reference`, `non-positive` and
+`unresolved` (a member calls a name the checker cannot resolve, above).
 `Int` recursion (`down(n - 1)`) is the job of a metric, below.
 
 ### Metrics and `@[decreases]`
@@ -4247,7 +4262,8 @@ length) and `shadowed` (a recursive call sits under a binding that reuses a name
 the metric reads, so the metric would read the inner value). `--refine-report`
 counts the checks as `termination` in its `by kind:` line. Calls to builtins and
 `extern` functions are assumed to terminate; the report's `trusted:` line lists
-them.
+them. A name the checker cannot resolve is never assumed to terminate; the
+`unresolved:` line lists it.
 
 ### The induction hypothesis
 
@@ -4287,9 +4303,11 @@ The hypothesis is used only when all of these hold:
   return stays a skip, and a call that depends on it is not reported as a
   violation.
 - **Everything it calls is certified too.** If any recursive function the
-  cycle calls (directly or further down) is not certified, the hypothesis is
-  withheld. A call into a function that may never return could make the whole
-  cycle never return.
+  cycle calls (directly or further down) is not certified, or anything it calls
+  is unresolved, the hypothesis is withheld. A call into a function that may
+  never return could make the whole cycle never return. This includes a call
+  through an `alias`, a `use` or `import`, an interface method's `impl`, and a
+  top-level `let` lambda.
 - **The recursive call is checked.** The checker must have reached the call,
   and proved every precondition there. A call that breaks a precondition gets
   no hypothesis:

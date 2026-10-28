@@ -26,3 +26,15 @@ checker say "proved" wrongly.
 - **No RED control for the resolution-agreement check.** The IH at a span is used only
   when the checker's own name resolution reaches the member the termination graph
   names. No fixture is known where the two disagree; the check is defence in depth.
+- **A call through a function value is trusted (review fixes, 2026-10-27).** `g(x)` with
+  `g` a parameter has no name to resolve; only a non-positive type blocks it (§3.6). An
+  SCC whose member calls a passed-in function value gets the IH even when a caller passes
+  a diverging one. Closing it needs the value's provenance (the callers' reference edges)
+  attached to the parameter, or withholding the IH from any SCC that calls a function
+  value.
+- **Interface dispatch on a type variable reaches every impl.** `x < y` in a generalised
+  local `fn` reaches every `Ord` impl, so `bigint`'s `compare_digits/cmp_lists/go` lost its
+  structural certificate, and the generic `Eq` / `Show` / `Ord` impls in the stdlib form
+  uncertified cycles. Any SCC reaching them gets no IH. Instance-level dispatch (the impl
+  the call's type actually selects) would recover them.
+

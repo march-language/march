@@ -330,3 +330,186 @@ in question.
 
 - Everything in `specs/todos/2026-10-27-termination-ih-gaps.md`.
 - Phase 4 (`@[diverges]`, `cap total`, handlers, LSP actions) and phase 5 (inference).
+
+## Review fixes
+
+A fresh review found two soundness holes. Each was confirmed on the branch at
+`b9aa806cd` with `--check --refine-report --termination-report`: every reproducer printed
+`3 proved, 0 skipped`, so a diverging `f`'s false `_ < 0` return was "proved" (the base
+build `c918d14ca` printed `1 proved, 2 skipped`). After the fix, every reproducer prints
+`1 proved, 0 violated, 0 trusted, 2 skipped`.
+
+### Hole 1: the call graph trusted every name it could not resolve
+
+`build_graph` knew only `DFn`, `DActor` and `DMod`. Any other name became a "trusted
+builtin". That dropped the edges of calls through `alias`, `use` and `import`, of
+interface methods (an `impl` body was never a unit), and of top-level `let` lambdas.
+
+The fix:
+- **Resolution.** A name resolves the way `Refine_resolve.resolve_call_gen` does. A local
+  binder comes first. Then, at each enclosing module, its declarations and then its own
+  `use` / `import` imports, out to the top level. Last, an `alias`-qualified name. `f$k`
+  (a default-argument arity variant) is tried after `f`.
+- **New units.** `impl` methods (`impl Show.show`), interface default methods
+  (`default Eqx.neqx`) and top-level `let`s are now units.
+- **Interface dispatch.** An interface method, or a builtin whose typechecker scheme carries
+  a `CInterface` constraint (`==`, `<`, `show`), gets an edge to every `impl` of that
+  interface that the first argument's static type can reach. The reach is computed from
+  the type's constructors, closed under the type definitions; a type variable, or no
+  recorded type, reaches every impl.
+- **Trust.** A name is trusted only if it is in the typechecker's builtin table
+  (`builtin_bindings`, `builtin_interface_bindings`, `variadic_builtins`) with no interface
+  constraint, or is an `extern`. Two scoped additions: inside a set-valued `@[measure]`,
+  the set vocabulary the typechecker binds there is trusted; in an actor handler, `state`
+  is a local.
+- **Fail closed.** Anything else is UNRESOLVED (`graph.unresolved`, and the report's new
+  `unresolved:` line). The unit's SCC is `unproved:unresolved`; it is passed straight
+  through as `St_unproved`, never given a metric. `ih_prepare` withholds the hypothesis
+  from any SCC that calls an unresolved name, or that reaches an SCC (recursive or not)
+  that does.
+
+### Hole 2: a rebound parameter still counted as structural
+
+`structural_subvars` treated `match param` as structural wherever the NAME appeared. Its
+pass is now a scoped walk. `param` is live only where it still holds its entry value, and
+each binder form retires it for its scope:
+- a block `let` or local `fn` name, for the rest of the block;
+- an arm pattern, for the arm's guard and body;
+- a lambda or local `fn` parameter, for the body;
+- a `let?` / `let*` pattern, for the continuation.
+
+Component names already had the "bound exactly once" count, so they need no scoping.
+Every user of `structural_subvars` gets the fix:
+- the certificate;
+- the `@[measure]` gate (`measure_gate_errors`);
+- Tier 2's `ih_arg`;
+- the element-return and local `fn` hypotheses.
+
+### Defence in depth
+
+`ih_spans` now maps a call span to `(is_self, callee declaring span)`. A new helper,
+`Refine_post.ih_self_edge sp ~callee`, is the only reader, and each consumer passes the
+callee it resolved itself:
+- `hyp_applies` (the element return): `elem_ret_hyp`'s self is now `(name, span)`;
+- `local_elem_hyp`: it now carries the local's name span;
+- Tier 2: `fd.fn_name.span`.
+
+A graph/checker resolution mismatch therefore withholds the hypothesis. `ih_at` already
+had this check. There is still no natural fixture for a mismatch, so this row has no RED
+test, as before.
+
+### Tests (group `termination-review`, 18 cases), RED at `b9aa806cd` → GREEN
+
+RED was taken with the new tests built against the unfixed library in a scratch
+worktree.
+
+| Test | RED line at `b9aa806cd` |
+|---|---|
+| 1a alias / use / use-star / import (4 rows) | `f's \`_ < 0\`: not every tail proved; got proved,proved` |
+| 1b impl | `f not certified (got structural)` |
+| 1c top-level let | `f not certified (got structural)` |
+| 1 unresolved callee | `f not certified (got structural)` |
+| 2 let rebind, 2 arm rebind | `f not certified (got structural)` |
+| 2 measure (`sz2` after `let xs = Cons(0, xs)`) | `invalid_measure, structural wording: Expected true, Received false` |
+| 2 every binder form (let, arm, lambda, local fn param, `let?`) | `let: no component — Expected [], Received ["t"]` |
+
+The positive controls passed at `b9aa806cd` and still pass. Each one has a terminating
+callee, which must still certify AND prove:
+- alias, use, use-star and import, with a structural `Other.g`;
+- a non-recursive `impl Show(W)`;
+- a non-recursive `let hook`;
+- a rebind after the structural match (`let xs = t` then `f(t)`).
+
+Before the change, the alias, use, impl and let controls were "certified" only because
+their callee was trusted by name. Now each is certified through a resolved edge.
+
+The REJECT rows assert two things: the certificate does not license the hypothesis
+(`structural` / `metric`), and the false contract is not proved (`f`'s post and
+`need_neg(f(..))`). The unit whose certificate is checked depends on the hole:
+- 1b, 1c and the hole-2 rows check `f`, because the divergence joins `f`'s SCC;
+- 1a checks `Other.g`, an SCC of its own that `f` reaches (ruling below).
+
+Two existing fixtures changed because the unit tests prepend no stdlib, so an undeclared
+`List.*` call is now unresolved:
+- `t11b` declares a stand-in `List.fold_left`;
+- the `len` metric row loads the real `stdlib/list.march`. `List.length`'s `len` alias
+  must be the stdlib's own.
+
+Both were green at `b9aa806cd` after the change.
+
+### Cost: the sweep (`--check --termination-report` per file, private HOME, dedup by site)
+
+| | stdlib before | stdlib after | test/native before | test/native after |
+|---|---|---|---|---|
+| recursive units | 763 | 784 | 523 | 524 |
+| `structural` | 435 | 434 | 67 | 67 |
+| `metric` | 12 | 12 | 251 | 251 |
+| `unproved:no-int-parameter` | 113 | 134 | 12 | 13 |
+| `unproved:not-decreasing` | 201 | 201 | 193 | 193 |
+| `unproved:reference` | 2 | 3 | 0 | 0 |
+| `unproved:unresolved` | — | 0 | — | 0 |
+
+What the after column contains:
+- **The 21 new stdlib rows** are `impl` methods that are now units: the generic
+  `Eq` / `Show` / `Ord` impls in prelude, list, option, result and msgpack, plus `bigint`'s.
+  They are recursive through dispatch on a type variable, and uncertified.
+- **One structural certificate is lost**: `bigint`'s `compare_digits/cmp_lists/go`.
+  - The local `go` is generalised, so its `x < y` dispatches on a type variable.
+  - That reaches `impl Ord(BigInt).compare`, which reaches `compare_digits` again.
+  - `vector_clock`'s `compare` joins the `Ord` cycle as a reference.
+- **The one new native row** is `default Eqx.neqx`.
+- **Unresolved names:** none in the stdlib. In test/native there are 16: the `Js.Dom.*` /
+  `Js.Canvas.*` externs of the JS-target fixtures, which are not loaded for a native
+  check, and `LazyNicheProbe.first_or`, a sibling fixture's module. None of them sits in a
+  recursive unit's SCC.
+- **The trusted lists** are now builtins and externs only: 619 distinct names over the
+  stdlib (622 before), 191 over native (215 before).
+
+### Oracles (baselines at `b9aa806cd`, same `_build`, `_build/default/stdlib` removed)
+
+- `scripts/refine-oracle.sh check`: `REFINEMENT DIAGNOSTICS IDENTICAL (7861 lines over 552
+  fixtures)`. The stdlib's measures do not rebind their parameter, and no corpus fixture
+  reaches a divergence through an alias, impl or let. Its ability to go red was proved
+  in phase 1 (an always-`true` `uncertified` turns stdlib measure lines red); this pass
+  did not re-run that perturbation.
+- `scripts/ir-oracle.sh check`: `IR IDENTICAL across 497 programs`. Nothing here reaches
+  codegen.
+
+### Rulings
+
+- **Ruling: in 1a, `f`'s own certificate stays `structural`; the hypothesis is withheld by
+  the reachable-SCC rule.**
+  - Why: `f`'s recursion is `f(t)`. The certificate states "this SCC terminates if its
+    callees do", and the diverging `Other.g` is its own SCC. The dropped edge fooled rule
+    (b) (every reachable SCC certified), not the SCC certificate.
+  - Cost if wrong: a reader of the report might take `cert=structural` to mean "terminates
+    unconditionally". The IH never does.
+- **Ruling: interface dispatch over-approximates by type, not by instance.**
+  - Why: the graph has no dictionary information. A type variable, or a site with no
+    recorded type, reaches every impl of the interface.
+  - Cost if wrong: only lost certificates and hypotheses (the `bigint` row). It never
+    gains one.
+- **Ruling: function values stay trusted, except for non-positive types (§3.6, unchanged).**
+  - Why: a call through a parameter (`g(x)` with `g` passed in) has no name to resolve.
+    The value comes from a caller, whose reference edge puts the passed function in the
+    caller's reachable set. It is not in the callee's.
+  - Cost if wrong: an SCC that calls a passed-in diverging function value can still get
+    the hypothesis. This is filed in the gaps todo.
+- **Ruling: unresolved means `unproved`, also for a `@[measure]`.**
+  - Why: a measure whose SCC calls an unresolved name fails the measure gate, with the
+    existing "not structurally recursive" wording.
+  - Cost if wrong: the wording is imprecise. The set-valued measure vocabulary is the one
+    case the suite caught (`set-refinements` row 34), and it is trusted now.
+
+### Suites
+
+- `termination-*` 94/94, including `termination-review` 18/18.
+- The full `scripts/run-tests.sh` (load average 2-7) printed `All suites passed`: 13 suites,
+  6140 tests. Among them:
+  - `march-refinecheck`: 1908;
+  - `march-compiler`: 1453;
+  - `march-codegen`: 720;
+  - `march-stdlib`: 899;
+  - `errors`: 299.
+- `scripts/check-docs.sh`: passed.
+

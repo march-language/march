@@ -100,9 +100,15 @@ type graph = {
   scc_of : int array;  (** unit id -> SCC index *)
   sccs : int list array;  (** SCC index -> member ids *)
   trusted : (int * string) list;
-      (** (unit, callee name) of every call to a name that is no unit of the
-          graph and no local value: a builtin or an [extern], trusted to
+      (** (unit, callee name) of every call to a builtin of the typechecker's
+          table (with no interface constraint) or an [extern]: trusted to
           terminate (§3.6, decision 10) and counted by the report. *)
+  unresolved : (int * string) list;
+      (** (unit, name) of every callee or referenced name the pass cannot
+          resolve to a unit, a local value, an interface dispatch, a builtin
+          or an [extern].  It may diverge: its unit's SCC is not certified
+          ([Unproved "unresolved"]) and no SCC reaching it gets the induction
+          hypothesis ([calls_unresolved]).  Fail closed (review fixes). *)
   fv_calls : (int * A.expr) list;
       (** (unit, callee expression) of every call through a FUNCTION VALUE: a
           callee bound by a parameter, [let], arm or lambda binder, or any
@@ -151,15 +157,181 @@ let clause_binders (c : A.fn_clause) : string list =
       | A.FPPat p -> pat_vars p)
     c.A.fc_params
 
+(* ── Type helpers (shared by the graph's dispatch and §3.6 positivity) ── *)
+
+(* The last dotted segment: types are compared by their bare name, since a
+   declaration says `Fix` and a use may say `M.Fix`.  Merging two same-named
+   types only ever makes MORE types non-positive, the safe direction. *)
+let bare (n : string) : string =
+  match String.rindex_opt n '.' with
+  | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+  | None -> n
+
+type tdecl = { t_params : string list; t_fields : A.ty list }
+
+let collect_types (decls : A.decl list) : (string, tdecl) Hashtbl.t =
+  let tbl = Hashtbl.create 64 in
+  let add name params (td : A.type_def) =
+    let fields =
+      match td with
+      | A.TDVariant vs -> List.concat_map (fun (v : A.variant) -> v.A.var_args) vs
+      | A.TDRecord fs -> List.map (fun (f : A.field) -> f.A.fld_ty) fs
+      | A.TDAlias t -> [ t ]
+    in
+    let prev = match Hashtbl.find_opt tbl name with Some p -> p.t_fields | None -> [] in
+    Hashtbl.replace tbl name
+      { t_params = List.map (fun (n : A.name) -> n.A.txt) params; t_fields = prev @ fields }
+  in
+  let rec go decls =
+    List.iter
+      (function
+        | A.DType (_, n, ps, td, _) | A.DAlwaysLinearType (_, n, ps, td, _) -> add n.A.txt ps td
+        | A.DMod (_, _, inner, _) -> go inner
+        | _ -> ())
+      decls
+  in
+  go decls;
+  tbl
+
+let rec ty_cons (t : A.ty) : string list =
+  match t with
+  | A.TyCon (n, args) -> bare n.A.txt :: List.concat_map ty_cons args
+  | A.TyArrow (a, b) -> ty_cons a @ ty_cons b
+  | A.TyTuple ts -> List.concat_map ty_cons ts
+  | A.TyRecord fs -> List.concat_map (fun (_, t) -> ty_cons t) fs
+  | A.TyLinear (_, t) | A.TyRefine (t, _, _) -> ty_cons t
+  | A.TyVar _ | A.TyNat _ | A.TyNatOp _ | A.TyChan _ -> []
+
+(** [reaches c t]: type [c]'s definition mentions [t], directly or through
+    the definitions of the types it mentions (or [c = t]). *)
+let reach_fn (tbl : (string, tdecl) Hashtbl.t) : string -> string -> bool =
+  let reach = Hashtbl.create 64 in
+  Hashtbl.iter
+    (fun n d -> Hashtbl.replace reach n (SS.of_list (List.concat_map ty_cons d.t_fields)))
+    tbl;
+  (* Transitive closure, to a fixpoint. *)
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    Hashtbl.iter
+      (fun n s ->
+        let s' =
+          SS.fold
+            (fun m acc -> match Hashtbl.find_opt reach m with Some r -> SS.union acc r | None -> acc)
+            s s
+        in
+        if not (SS.equal s s') then (Hashtbl.replace reach n s'; changed := true))
+      (Hashtbl.copy reach)
+  done;
+  fun c t -> c = t || (match Hashtbl.find_opt reach c with Some r -> SS.mem t r | None -> false)
+
+(* ── Callee resolution: builtins, externs, interface dispatch ───────────── *)
+
+module TT = March_typecheck.Typecheck_types
+module TB = March_typecheck.Typecheck_builtins
+
+(** The typechecker's builtin table, each name with the interfaces its
+    scheme constrains (`==` -> [Eq], `show` -> [Show], `<` -> [Ord]).  A
+    builtin with no interface constraint is trusted to terminate (§3.6,
+    decision 10); one with a constraint dispatches to an [impl] the program
+    may declare, which is code like any other. *)
+let builtin_table : (string, string list) Hashtbl.t Lazy.t =
+  lazy
+    (let tbl = Hashtbl.create 512 in
+     List.iter
+       (fun (n, (s : TT.scheme)) ->
+         let ifs =
+           match s with
+           | TT.Poly (_, cs, _) ->
+             List.filter_map (function TT.CInterface (i, _) -> Some (bare i) | _ -> None) cs
+           | TT.Mono _ -> []
+         in
+         let prev = Option.value ~default:[] (Hashtbl.find_opt tbl n) in
+         Hashtbl.replace tbl n (List.sort_uniq compare (prev @ ifs)))
+       (TB.builtin_bindings @ TB.builtin_interface_bindings);
+     List.iter
+       (fun (n, _, _, _) -> if not (Hashtbl.mem tbl n) then Hashtbl.replace tbl n [])
+       TB.variadic_builtins;
+     tbl)
+
+let dotted (path : A.name list) : string = String.concat "." (List.map (fun n -> n.A.txt) path)
+
+(* The scope a body is resolved in: its module path ("A.B."), and the
+   [alias] / [use] / [import] declarations visible there (an inner module
+   inherits its enclosing ones), with the module path that owns each [use]
+   ([Refine_resolve.rctx]'s discipline, so both passes resolve alike). *)
+type scope = {
+  sc_path : string;
+  sc_aliases : (string * string) list;  (** short name -> original dotted path *)
+  sc_uses : (string * A.use_selector * string) list;  (** module, selector, owning path *)
+}
+
+(* What a callee name denotes. *)
+type target =
+  | T_unit of int  (** a unit of the graph *)
+  | T_value  (** a local value: a call through a function value *)
+  | T_impls of int list  (** an interface dispatch: these [impl] / default units *)
+  | T_trusted  (** a builtin or an [extern] *)
+  | T_unresolved  (** nothing the pass can name: may diverge (fail closed) *)
+
+(* The dispatch key of an [impl]'s type: its head constructor, a tuple by
+   arity, or ["*"] (a type variable or anything else: every type). *)
+let impl_key (t : A.ty) : string =
+  let rec go (t : A.ty) =
+    match t with
+    | A.TyCon (n, _) -> bare n.A.txt
+    | A.TyTuple ts -> Printf.sprintf "$Tuple%d" (List.length ts)
+    | A.TyRefine (t, _, _) | A.TyLinear (_, t) -> go t
+    | _ -> "*"
+  in
+  go t
+
+(* The dispatch keys a value of static type [t] may reach: every head
+   constructor in it, closed under the type definitions ([reaches]: a
+   derived or structural impl of a record shows its fields), and ["*"] for a
+   type variable, whose instantiation is unknown here. *)
+let ty_keys ~(reaches_any : string -> string list) (t : March_typecheck.Typecheck.ty) : SS.t =
+  let module T = March_typecheck.Typecheck in
+  let acc = ref SS.empty in
+  let add k = acc := SS.add k !acc in
+  let rec go (t : T.ty) =
+    match T.repr t with
+    | T.TCon (n, args) ->
+      add (bare n);
+      List.iter add (reaches_any (bare n));
+      List.iter go args
+    | T.TTuple ts ->
+      add (Printf.sprintf "$Tuple%d" (List.length ts));
+      List.iter go ts
+    | T.TArrow (a, b) -> go a; go b
+    | T.TRecord fs -> List.iter (fun (_, t) -> go t) fs
+    | T.TLin (_, t) -> go t
+    | T.TVar _ -> add "*"
+    | _ -> ()
+  in
+  go t;
+  !acc
+
 (** Build the graph over [decls].  [file_mod] is the name the file declares
     (the module's [mod_name]); see the module comment for why both naming
-    conventions are registered. *)
-let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
+    conventions are registered.
+
+    Every callee name is resolved, never guessed (review fixes, phase 3): a
+    unit of the graph (a [fn], an actor handler, a local [fn], an [impl]
+    method, an interface's default method, a top-level [let]), reached
+    lexically or through [alias] / [use] / [import]; an interface dispatch
+    (an interface method, or a builtin whose scheme an interface constrains,
+    such as [==]) to every [impl] of that interface the argument's static
+    type can reach ([type_map]; all of them without one); a builtin of the
+    typechecker's table or an [extern], trusted; and otherwise UNRESOLVED,
+    which certifies nothing and withholds the hypothesis ([unresolved]). *)
+let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let units = ref [] in
   let n_units = ref 0 in
   let edges = ref [] in
   let fv_calls = ref [] in
   let trusted = ref [] in
+  let unresolved = ref [] in
   let top_of : (int, int) Hashtbl.t = Hashtbl.create 64 in
   let new_unit ?decreases ?top ?ret ~name ~span ~kind ~params ~tys ~pspans ~clauses ~attrs () =
     let id = !n_units in
@@ -174,10 +346,27 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
     id
   in
   let globals : (string, int) Hashtbl.t = Hashtbl.create 256 in
+  let externs_tbl : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  (* (interface, dispatch key, unit) of every [impl] method and every
+     interface default method (key ["*"]). *)
+  let impls = ref [] in
+  (* Method name (bare, and qualified [I.m]) -> the user interfaces declaring it. *)
+  let iface_methods : (string, string) Hashtbl.t = Hashtbl.create 16 in
   (* Pass 1: register every top-level fn (any depth of [mod]) so forward and
      cross-module references resolve.  Bodies are walked in pass 2. *)
   let pending = ref [] in
-  let rec register mod_path (decls : A.decl list) =
+  let rec register (scope : scope) mod_path (decls : A.decl list) =
+    let scope =
+      List.fold_left
+        (fun sc d ->
+          match d with
+          | A.DAlias (ad, _) ->
+            { sc with sc_aliases = (ad.A.alias_name.A.txt, dotted ad.A.alias_path) :: sc.sc_aliases }
+          | A.DUse (ud, _) ->
+            { sc with sc_uses = (dotted ud.A.use_path, ud.A.use_sel, mod_path) :: sc.sc_uses }
+          | _ -> sc)
+        { scope with sc_path = mod_path } decls
+    in
     let externs =
       List.fold_left
         (fun acc d ->
@@ -188,27 +377,50 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
         SS.empty decls
     in
     let prefixes = [ mod_path; file_mod ^ "." ^ mod_path ] in
+    SS.iter (fun n -> List.iter (fun p -> Hashtbl.replace externs_tbl (p ^ n) ()) prefixes) externs;
+    let fn_unit ~name (def : A.fn_def) =
+      let params, tys =
+        match def.A.fn_clauses with c :: _ -> clause_params c | [] -> ([], [])
+      in
+      let clauses =
+        List.map
+          (fun (c : A.fn_clause) -> { o_params = fst (clause_params c); o_body = c.A.fc_body })
+          def.A.fn_clauses
+      in
+      let id =
+        new_unit ~name ~span:def.A.fn_name.A.span ~kind:Top ~params ~tys
+          ~pspans:(match def.A.fn_clauses with c :: _ -> clause_param_spans c | [] -> [])
+          ~clauses ~attrs:def.A.fn_attrs ?ret:def.A.fn_ret_ty
+          ?decreases:(List.assoc_opt "decreases" def.A.fn_attr_args) ()
+      in
+      pending := `Fn (id, def, scope) :: !pending;
+      id
+    in
+    (* A bare expression as a unit: a lambda's parameters and body, or
+       (any other expression) no parameters and the expression itself. *)
+    let expr_unit ~name ~span (e : A.expr) =
+      let params, tys, pspans, body =
+        match e with
+        | A.ELam (ps, body, _) ->
+          ( List.map (fun (p : A.param) -> Some p.A.param_name.A.txt) ps,
+            List.map (fun (p : A.param) -> p.A.param_ty) ps,
+            List.map (fun (p : A.param) -> Some p.A.param_name.A.span) ps,
+            body )
+        | e -> ([], [], [], e)
+      in
+      let owner = { o_params = params; o_body = body } in
+      let id =
+        new_unit ~name ~span ~kind:Top ~params ~tys ~pspans ~clauses:[ owner ] ~attrs:[] ()
+      in
+      pending := `Expr (id, owner, scope) :: !pending;
+      id
+    in
     List.iter
       (fun d ->
         match d with
         | A.DFn (def, _) when not (SS.mem def.A.fn_name.A.txt externs) ->
-          let params, tys =
-            match def.A.fn_clauses with c :: _ -> clause_params c | [] -> ([], [])
-          in
-          let clauses =
-            List.map
-              (fun (c : A.fn_clause) -> { o_params = fst (clause_params c); o_body = c.A.fc_body })
-              def.A.fn_clauses
-          in
-          let id =
-            new_unit ~name:(mod_path ^ def.A.fn_name.A.txt) ~span:def.A.fn_name.A.span ~kind:Top
-              ~params ~tys
-              ~pspans:(match def.A.fn_clauses with c :: _ -> clause_param_spans c | [] -> [])
-              ~clauses ~attrs:def.A.fn_attrs ?ret:def.A.fn_ret_ty
-              ?decreases:(List.assoc_opt "decreases" def.A.fn_attr_args) ()
-          in
-          List.iter (fun p -> Hashtbl.replace globals (p ^ def.A.fn_name.A.txt) id) prefixes;
-          pending := `Fn (id, def, mod_path) :: !pending
+          let id = fn_unit ~name:(mod_path ^ def.A.fn_name.A.txt) def in
+          List.iter (fun p -> Hashtbl.replace globals (p ^ def.A.fn_name.A.txt) id) prefixes
         | A.DActor (_, name, actor, _) ->
           List.iter
             (fun (h : A.actor_handler) ->
@@ -222,13 +434,56 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
                   ~clauses:[ { o_params = params; o_body = h.A.ah_body } ]
                   ~attrs:[] ()
               in
-              pending := `Handler (id, h, mod_path) :: !pending)
+              pending := `Handler (id, h, scope) :: !pending)
             (A.actor_body_handlers actor)
-        | A.DMod (name, _, inner, _) -> register (mod_path ^ name.A.txt ^ ".") inner
+        | A.DImpl (idf, _) ->
+          (* An [impl] method is reached only by dispatch (never by bare
+             name), so it is a unit with no [globals] entry. *)
+          let iface = bare idf.A.impl_iface.A.txt in
+          let key = impl_key idf.A.impl_ty in
+          List.iter
+            (fun ((mn : A.name), (fd : A.fn_def)) ->
+              let id = fn_unit ~name:(Printf.sprintf "%simpl %s.%s" mod_path iface mn.A.txt) fd in
+              impls := (iface, key, id) :: !impls)
+            idf.A.impl_methods
+        | A.DInterface (idf, _) ->
+          let iface = bare idf.A.iface_name.A.txt in
+          List.iter
+            (fun (md : A.method_decl) ->
+              let m = md.A.md_name.A.txt in
+              Hashtbl.add iface_methods m iface;
+              Hashtbl.add iface_methods (iface ^ "." ^ m) iface;
+              match md.A.md_default with
+              | Some e ->
+                let id =
+                  expr_unit ~name:(Printf.sprintf "%sdefault %s.%s" mod_path iface m)
+                    ~span:md.A.md_name.A.span e
+                in
+                impls := (iface, "*", id) :: !impls
+              | None -> ())
+            idf.A.iface_methods
+        | A.DLet (_, b, _) ->
+          (* A top-level [let]: a value (a lambda's body runs at each call). *)
+          let rec names (p : A.pattern) : A.name list =
+            match p with
+            | A.PatVar n -> [ n ]
+            | A.PatAs (p, n, _) -> n :: names p
+            | A.PatCon (_, ps) | A.PatAtom (_, ps, _) | A.PatTuple (ps, _) | A.PatOr (ps, _) ->
+              List.concat_map names ps
+            | A.PatRecord (fs, _) -> List.concat_map (fun (_, p) -> names p) fs
+            | A.PatWild _ | A.PatLit _ -> []
+          in
+          List.iter
+            (fun (n : A.name) ->
+              let id = expr_unit ~name:(mod_path ^ n.A.txt) ~span:n.A.span b.A.bind_expr in
+              List.iter (fun p -> Hashtbl.replace globals (p ^ n.A.txt) id) prefixes)
+            (names b.A.bind_pat)
+        | A.DMod (name, _, inner, _) -> register scope (mod_path ^ name.A.txt ^ ".") inner
         | _ -> ())
       decls
   in
-  register "" decls;
+  register { sc_path = ""; sc_aliases = []; sc_uses = [] } "" decls;
+  let impls = List.rev !impls in
   let unit_name = Hashtbl.create 64 in
   (* Pass 2: walk bodies. *)
   let add_edge ~env ~src ~dst ~kind ~args ~span ~owner =
@@ -242,15 +497,15 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
         e_shadowed = shadowed }
       :: !edges
   in
-  (* The module path of the body being walked.  A name is resolved
-     LEXICALLY: a local binder first, then the enclosing module's own
-     declarations, then each outer module's, out to the top level.  The
-     stdlib that the driver prepends keeps bare intra-module calls inside
-     its [DMod]s (List's own `fold_left(t, ..)`), so resolving a bare name
-     at the top level first would tie `List.fold_left` to an entry file's
-     unrelated top-level `fold_left` (measured: `Deque.fold_left` came out
-     as a two-member SCC with it). *)
-  let cur_path = ref "" in
+  (* The scope of the body being walked.  A name is resolved LEXICALLY: a
+     local binder first, then the enclosing module's own declarations and
+     its own [use]s, then each outer module's, out to the top level; then an
+     [alias]-qualified name.  The stdlib that the driver prepends keeps bare
+     intra-module calls inside its [DMod]s (List's own `fold_left(t, ..)`),
+     so resolving a bare name at the top level first would tie
+     `List.fold_left` to an entry file's unrelated top-level `fold_left`
+     (measured: `Deque.fold_left` came out as a two-member SCC with it). *)
+  let cur = ref { sc_path = ""; sc_aliases = []; sc_uses = [] } in
   let candidates path =
     (* "A.B." -> ["A.B."; "A."; ""] *)
     let segs = String.split_on_char '.' path |> List.filter (( <> ) "") in
@@ -260,16 +515,111 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
     in
     prefixes segs
   in
-  let resolve env n =
-    match SM.find_opt n env with
-    | Some (Fn id) -> Some id
-    | Some (Var | Param) -> None
-    | None ->
-      List.fold_left
-        (fun acc p -> match acc with Some _ -> acc | None -> Hashtbl.find_opt globals (p ^ n))
-        None (candidates !cur_path)
+  (* A dotted or bare name looked up in [tbl] relative to each enclosing module. *)
+  let lexical_abs tbl q =
+    List.find_map (fun p -> Hashtbl.find_opt tbl (p ^ q)) (candidates !cur.sc_path)
   in
-  let is_var env n = match SM.find_opt n env with Some (Var | Param) -> true | _ -> false in
+  let imported sel n =
+    match sel with
+    | A.UseAll -> true
+    | A.UseNames ns -> List.exists (fun (m : A.name) -> m.A.txt = n) ns
+    | A.UseExcept ns -> not (List.exists (fun (m : A.name) -> m.A.txt = n) ns)
+    | A.UseSingle -> false
+  in
+  let lookup tbl n =
+    let use_at p =
+      if String.contains n '.' then None
+      else
+        List.find_map
+          (fun (m, sel, owner) ->
+            if owner = p && imported sel n then lexical_abs tbl (m ^ "." ^ n) else None)
+          !cur.sc_uses
+    in
+    match
+      List.find_map
+        (fun p -> match Hashtbl.find_opt tbl (p ^ n) with Some r -> Some r | None -> use_at p)
+        (candidates !cur.sc_path)
+    with
+    | Some r -> Some r
+    | None -> (
+      match String.index_opt n '.' with
+      | Some i -> (
+        let head = String.sub n 0 i and rest = String.sub n (i + 1) (String.length n - i - 1) in
+        match List.assoc_opt head !cur.sc_aliases with
+        | Some orig -> lexical_abs tbl (orig ^ "." ^ rest)
+        | None -> None)
+      | None -> None)
+  in
+  let module T = March_typecheck.Typecheck in
+  let type_tbl = collect_types decls in
+  let reaches = reach_fn type_tbl in
+  let reach_memo = Hashtbl.create 32 in
+  let reaches_any c =
+    match Hashtbl.find_opt reach_memo c with
+    | Some r -> r
+    | None ->
+      let r = Hashtbl.fold (fun t _ acc -> if t <> c && reaches c t then t :: acc else acc) type_tbl [] in
+      Hashtbl.replace reach_memo c r;
+      r
+  in
+  (* The [impl] units an interface dispatch over [ifs] reaches, given the
+     dispatching argument [arg] (the first one, if any). *)
+  let dispatch ifs (arg : A.expr option) =
+    let keys =
+      match (type_map, arg) with
+      | Some tm, Some a -> (
+        match Hashtbl.find_opt tm (T.span_of_expr a) with
+        | Some ty -> Some (ty_keys ~reaches_any ty)
+        | None -> None)
+      | _ -> None
+    in
+    List.filter_map
+      (fun (i, k, id) ->
+        if List.mem i ifs
+           && (k = "*" || match keys with None -> true | Some ks -> SS.mem "*" ks || SS.mem k ks)
+        then Some id
+        else None)
+      impls
+  in
+  (* Inside a set-valued [@[measure]] body the typechecker binds the set
+     vocabulary ([union], [singleton], ...: [Typecheck]'s [body_env] for such
+     a measure), total logical operations with no runtime body. *)
+  let set_measure = ref false in
+  let set_measure_vocab = [ "union"; "inter"; "diff"; "singleton"; "member"; "subset"; "empty" ] in
+  let is_set_measure (def : A.fn_def) =
+    let rec is_set (t : A.ty) =
+      match t with
+      | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> is_set b
+      | A.TyCon ({ A.txt = "Set"; _ }, [ _ ]) -> true
+      | _ -> false
+    in
+    List.mem "measure" def.A.fn_attrs && (match def.A.fn_ret_ty with Some t -> is_set t | None -> false)
+  in
+  let resolve ?(arity = -1) ?arg env n : target =
+    match SM.find_opt n env with
+    | Some (Fn id) -> T_unit id
+    | Some (Var | Param) -> T_value
+    | None -> (
+      let found =
+        match lookup globals n with
+        | Some id -> Some id
+        | None when arity >= 0 -> lookup globals (Printf.sprintf "%s$%d" n arity)
+        | None -> None
+      in
+      match found with
+      | Some id -> T_unit id
+      | None ->
+        if lookup externs_tbl n <> None then T_trusted
+        else if !set_measure && List.mem n set_measure_vocab then T_trusted
+        else begin
+          let user_ifs = Hashtbl.find_all iface_methods n in
+          let builtin = Hashtbl.find_opt (Lazy.force builtin_table) n in
+          let ifs = List.sort_uniq compare (user_ifs @ Option.value ~default:[] builtin) in
+          if ifs <> [] then T_impls (dispatch ifs arg)
+          else if builtin <> None then T_trusted
+          else T_unresolved
+        end)
+  in
   (* An identifier, not an operator: `+` and `==` are builtins too, but
      counting them would drown the report's trusted count. *)
   let is_ident n = n <> "" && (match n.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) in
@@ -279,15 +629,15 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
     let w = walk ~src ~owner ~lam env in
     let call head args span =
       match head with
-      | A.EVar n -> (
-        match resolve env n.A.txt with
-        | Some dst ->
-          add_edge ~env ~src ~dst ~kind:(if lam then Lambda else Direct) ~args ~span ~owner;
-          List.iter w args
-        | None ->
-          if is_var env n.A.txt then fv_calls := (src, head) :: !fv_calls
-          else if is_ident n.A.txt then trusted := (src, n.A.txt) :: !trusted;
-          List.iter w args)
+      | A.EVar n ->
+        let kind = if lam then Lambda else Direct in
+        (match resolve ~arity:(List.length args) ?arg:(List.nth_opt args 0) env n.A.txt with
+         | T_unit dst -> add_edge ~env ~src ~dst ~kind ~args ~span ~owner
+         | T_impls ds -> List.iter (fun dst -> add_edge ~env ~src ~dst ~kind ~args ~span ~owner) ds
+         | T_value -> fv_calls := (src, head) :: !fv_calls
+         | T_trusted -> if is_ident n.A.txt then trusted := (src, n.A.txt) :: !trusted
+         | T_unresolved -> unresolved := (src, n.A.txt) :: !unresolved);
+        List.iter w args
       | f ->
         fv_calls := (src, f) :: !fv_calls;
         w f;
@@ -298,9 +648,12 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
     | A.EPipe (l, A.EVar n, sp) -> call (A.EVar n) [ l ] sp
     | A.EPipe (l, A.EApp (f, args, _), sp) -> call f (l :: args) sp
     | A.EVar n -> (
+      let ref_edge dst = add_edge ~env ~src ~dst ~kind:Reference ~args:[] ~span:n.A.span ~owner in
       match resolve env n.A.txt with
-      | Some dst -> add_edge ~env ~src ~dst ~kind:Reference ~args:[] ~span:n.A.span ~owner
-      | None -> ())
+      | T_unit dst -> ref_edge dst
+      | T_impls ds -> List.iter ref_edge ds
+      | T_value | T_trusted -> ()
+      | T_unresolved -> unresolved := (src, n.A.txt) :: !unresolved)
     | A.EBlock (es, _) -> ignore (List.fold_left (fun env ex -> block_item ~src ~owner ~lam env ex) env es)
     | A.ELet (b, _) -> w b.A.bind_expr
     | A.ELetFn _ -> ignore (block_item ~src ~owner ~lam env e)
@@ -354,8 +707,9 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
     !units;
   List.iter
     (function
-      | `Fn (id, (def : A.fn_def), path) ->
-        cur_path := path;
+      | `Fn (id, (def : A.fn_def), scope) ->
+        cur := scope;
+        set_measure := is_set_measure def;
         List.iter
           (fun (c : A.fn_clause) ->
             let owner = { o_params = fst (clause_params c); o_body = c.A.fc_body } in
@@ -365,11 +719,20 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
             Option.iter (walk ~src:id ~owner ~lam:false env) c.A.fc_guard;
             walk ~src:id ~owner ~lam:false env c.A.fc_body)
           def.A.fn_clauses
-      | `Handler (id, (h : A.actor_handler), path) ->
-        cur_path := path;
+      | `Handler (id, (h : A.actor_handler), scope) ->
+        cur := scope;
+        set_measure := false;
         let params = List.map (fun (p : A.param) -> p.A.param_name.A.txt) h.A.ah_params in
         let owner = { o_params = List.map Option.some params; o_body = h.A.ah_body } in
-        walk ~src:id ~owner ~lam:false (bind_params SM.empty params) h.A.ah_body)
+        (* A handler body also sees the actor's [state] (the typechecker's
+           [handler_env]): a local value, never a callee to resolve. *)
+        walk ~src:id ~owner ~lam:false (bind_params (bind_vars SM.empty [ "state" ]) params) h.A.ah_body
+      | `Expr (id, (owner : owner), scope) ->
+        cur := scope;
+        set_measure := false;
+        walk ~src:id ~owner ~lam:false
+          (bind_params SM.empty (List.filter_map Fun.id owner.o_params))
+          owner.o_body)
     (List.rev !pending);
   let units = Array.of_list (List.rev !units) in
   let n = Array.length units in
@@ -413,7 +776,8 @@ let build_graph ~(file_mod : string) (decls : A.decl list) : graph =
   let sccs = Array.of_list (List.rev !sccs) in
   let scc_of = Array.make n 0 in
   Array.iteri (fun i ms -> List.iter (fun v -> scc_of.(v) <- i) ms) sccs;
-  { units; edges; out; scc_of; sccs; trusted = List.rev !trusted; fv_calls = List.rev !fv_calls }
+  { units; edges; out; scc_of; sccs; trusted = List.rev !trusted;
+    unresolved = List.rev !unresolved; fv_calls = List.rev !fv_calls }
 
 (** Intra-SCC edges out of [u]. *)
 let intra g (u : int) : edge list =
@@ -605,72 +969,6 @@ let classify g (u : unit_) : row =
 
 (* ── Strict positivity (§3.6), phase 1 ─────────────────────────────────── *)
 
-(* The last dotted segment: types are compared by their bare name, since a
-   declaration says `Fix` and a use may say `M.Fix`.  Merging two same-named
-   types only ever makes MORE types non-positive, the safe direction. *)
-let bare (n : string) : string =
-  match String.rindex_opt n '.' with
-  | Some i -> String.sub n (i + 1) (String.length n - i - 1)
-  | None -> n
-
-type tdecl = { t_params : string list; t_fields : A.ty list }
-
-let collect_types (decls : A.decl list) : (string, tdecl) Hashtbl.t =
-  let tbl = Hashtbl.create 64 in
-  let add name params (td : A.type_def) =
-    let fields =
-      match td with
-      | A.TDVariant vs -> List.concat_map (fun (v : A.variant) -> v.A.var_args) vs
-      | A.TDRecord fs -> List.map (fun (f : A.field) -> f.A.fld_ty) fs
-      | A.TDAlias t -> [ t ]
-    in
-    let prev = match Hashtbl.find_opt tbl name with Some p -> p.t_fields | None -> [] in
-    Hashtbl.replace tbl name
-      { t_params = List.map (fun (n : A.name) -> n.A.txt) params; t_fields = prev @ fields }
-  in
-  let rec go decls =
-    List.iter
-      (function
-        | A.DType (_, n, ps, td, _) | A.DAlwaysLinearType (_, n, ps, td, _) -> add n.A.txt ps td
-        | A.DMod (_, _, inner, _) -> go inner
-        | _ -> ())
-      decls
-  in
-  go decls;
-  tbl
-
-let rec ty_cons (t : A.ty) : string list =
-  match t with
-  | A.TyCon (n, args) -> bare n.A.txt :: List.concat_map ty_cons args
-  | A.TyArrow (a, b) -> ty_cons a @ ty_cons b
-  | A.TyTuple ts -> List.concat_map ty_cons ts
-  | A.TyRecord fs -> List.concat_map (fun (_, t) -> ty_cons t) fs
-  | A.TyLinear (_, t) | A.TyRefine (t, _, _) -> ty_cons t
-  | A.TyVar _ | A.TyNat _ | A.TyNatOp _ | A.TyChan _ -> []
-
-(** [reaches c t]: type [c]'s definition mentions [t], directly or through
-    the definitions of the types it mentions (or [c = t]). *)
-let reach_fn (tbl : (string, tdecl) Hashtbl.t) : string -> string -> bool =
-  let reach = Hashtbl.create 64 in
-  Hashtbl.iter
-    (fun n d -> Hashtbl.replace reach n (SS.of_list (List.concat_map ty_cons d.t_fields)))
-    tbl;
-  (* Transitive closure, to a fixpoint. *)
-  let changed = ref true in
-  while !changed do
-    changed := false;
-    Hashtbl.iter
-      (fun n s ->
-        let s' =
-          SS.fold
-            (fun m acc -> match Hashtbl.find_opt reach m with Some r -> SS.union acc r | None -> acc)
-            s s
-        in
-        if not (SS.equal s s') then (Hashtbl.replace reach n s'; changed := true))
-      (Hashtbl.copy reach)
-  done;
-  fun c t -> c = t || (match Hashtbl.find_opt reach c with Some r -> SS.mem t r | None -> false)
-
 (** The declared types that are not strictly positive: [T] is non-positive
     if some type [X] mutually reachable with [T] (or [T] itself) has a field
     in which, to the LEFT of an arrow, there is a type that reaches [T].  A
@@ -770,6 +1068,7 @@ let certify ?type_map g ~(nonpos_call : int -> bool) ~(same_family : string -> s
   let es = List.concat_map (intra g) members in
   if List.exists (fun e -> e.e_kind = Reference) es then Unproved "reference"
   else if List.exists nonpos_call members then Unproved "non-positive"
+  else if List.exists (fun u -> List.mem_assoc u g.unresolved) members then Unproved "unresolved"
   else begin
     (* [structural_subvars] per (clause, parameter), memoised: the shared
        structural certificate (F6), with its by-name fixpoint. *)
@@ -1133,7 +1432,7 @@ type t = {
 
 let analyze ?(type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option)
     ~(file_mod : string) (decls : A.decl list) : t =
-  let graph = build_graph ~file_mod decls in
+  let graph = build_graph ?type_map ~file_mod decls in
   let nonpos = nonpositive_types decls in
   (* Type names whose mention means "may hold a non-positive type": the
      non-positive ones and every type that reaches one. *)
@@ -1240,7 +1539,7 @@ let plan_metrics ?type_map ~(is_measure : string -> bool) ~(demanded : unit_ -> 
         status.(si) <-
           (match t.certs.(si) with
            | Structural -> St_structural
-           | Unproved (("reference" | "non-positive") as r) -> St_unproved r
+           | Unproved (("reference" | "non-positive" | "unresolved") as r) -> St_unproved r
            | Unproved _ -> (
              if List.exists (Hashtbl.mem bad) annotated then St_unproved "invalid-decreases"
              else
@@ -1386,6 +1685,13 @@ let reachable_sccs (g : graph) (si : int) : int list =
   visit si;
   List.sort compare (Hashtbl.fold (fun d () acc -> d :: acc) seen [])
 
+(** Does a member of SCC [si] call or name something the graph could not
+    resolve ([graph.unresolved])?  Such an SCC may diverge whatever its own
+    certificate says, so the induction hypothesis is withheld from every SCC
+    that reaches it (review fixes, phase 3). *)
+let calls_unresolved (g : graph) (si : int) : bool =
+  List.exists (fun u -> List.mem_assoc u g.unresolved) g.sccs.(si)
+
 (** The unit declared at [span] (a declaring name's span), if any. *)
 let unit_at (g : graph) (span : A.span) : unit_ option =
   Array.find_opt (fun u -> u.u_span = span) g.units
@@ -1405,6 +1711,14 @@ let trusted_callees ?(is_user : A.span -> bool = fun _ -> true) (t : t) : string
     (List.filter_map
        (fun (u, name) -> if is_user t.graph.units.(u).u_span then Some name else None)
        t.graph.trusted)
+
+(** Names the graph could not resolve ([graph.unresolved]), distinct, over
+    the units [is_user] accepts. *)
+let unresolved_callees ?(is_user : A.span -> bool = fun _ -> true) (t : t) : string list =
+  List.sort_uniq compare
+    (List.filter_map
+       (fun (u, name) -> if is_user t.graph.units.(u).u_span then Some name else None)
+       t.graph.unresolved)
 
 (** Is the declaration named at [span] a recursive unit whose SCC is NOT
     certified structural, or a unit that calls a non-positive function
@@ -1487,4 +1801,10 @@ let report_lines ?(is_user : A.span -> bool = fun _ -> true) (t : t) : string li
       (if List.length callees = 1 then "" else "s")
       (if callees = [] then "" else ": " ^ String.concat ", " callees)
   in
-  (header :: List.map line rows) @ [ summary; cert_line; trusted_line ]
+  let unres = unresolved_callees ~is_user t in
+  let unresolved_line =
+    Printf.sprintf "  unresolved: %d callee%s%s" (List.length unres)
+      (if List.length unres = 1 then "" else "s")
+      (if unres = [] then "" else ": " ^ String.concat ", " unres)
+  in
+  (header :: List.map line rows) @ [ summary; cert_line; trusted_line; unresolved_line ]

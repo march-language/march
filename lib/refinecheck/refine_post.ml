@@ -466,7 +466,18 @@ let with_post_lookup lookup (f : unit -> 'a) : 'a =
 let ih_at : (A.span -> string -> A.expr list -> (string * A.expr * string option) option) ref =
   ref (fun _ _ _ -> None)
 
-let ih_spans : (A.span, bool) Hashtbl.t = Hashtbl.create 16
+let ih_spans : (A.span, bool * A.span) Hashtbl.t = Hashtbl.create 16
+
+(* An eligible SELF-edge span whose graph callee is the unit declared at
+   [callee] (its declaring name's span).  Every [ih_spans] consumer names
+   the callee IT resolved the call to, so a graph/checker resolution
+   mismatch (the graph tying the call to another declaration of the name)
+   withholds the hypothesis instead of lending a contract across it
+   (review fixes, defence in depth). *)
+let ih_self_edge (sp : A.span) ~(callee : A.span) : bool =
+  match Hashtbl.find_opt ih_spans sp with
+  | Some (true, c) -> c = callee
+  | _ -> false
 
 (* The contract a call carries inside a postcondition check: the induction
    hypothesis at an eligible span, else the proved contract ([post_lookup]). *)
@@ -1798,7 +1809,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                      a certified SCC ([ih_spans]: rule (a) held there) carries
                      the hypothesis with no structural argument and no
                      matched parameter. *)
-                  | _ when Hashtbl.find_opt ih_spans csp = Some true -> Some ()
+                  | _ when ih_self_edge csp ~callee:fd.A.fn_name.A.span -> Some ()
                   | _ -> None
                 in
                 (match ih_arg with

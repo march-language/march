@@ -105,7 +105,18 @@ let t11 = {|
   fn h(x : Int) : Int do apply2(h, x) end
 |}
 
+(* [List.fold_left] stands in for the stdlib's (the unit tests prepend no
+   stdlib): an undeclared name is UNRESOLVED, which would certify nothing
+   for a different reason than the one under test. *)
 let t11b = {|
+  mod List do
+    fn fold_left(xs, acc, f) do
+      match xs do
+        Nil -> acc
+        Cons(h, t) -> fold_left(t, f(acc, h), f)
+      end
+    end
+  end
   fn viafold(n : Int) : Int do List.fold_left([n], 0, fn (acc, x) -> acc + viafold(x)) end
 |}
 
@@ -615,15 +626,40 @@ type run = {
   diags : E.diagnostic list;
 }
 
-let run ?(all = false) src : run =
+(* The real `stdlib/list.march`, as the sibling [DMod] the driver prepends,
+   for a fixture that calls `List.length`: the unit tests prepend no stdlib,
+   and an undeclared callee is UNRESOLVED (review fixes), which certifies
+   nothing. *)
+let stdlib_list : (March_ast.Ast.decl * string) Lazy.t =
+  lazy
+    (let path =
+       List.find Sys.file_exists [ "stdlib/list.march"; "../../../stdlib/list.march"; "../../stdlib/list.march" ]
+     in
+     let ic = open_in_bin path in
+     let src = really_input_string ic (in_channel_length ic) in
+     close_in ic;
+     let lexbuf = Lexing.from_string src in
+     lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+     let lm = March_desugar.Desugar.desugar_module (March_parser.Parse.module_of_lexbuf lexbuf) in
+     ( March_ast.Ast.DMod
+         (lm.March_ast.Ast.mod_name, March_ast.Ast.Public, lm.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+       path ))
+
+let run ?(all = false) ?(with_list = false) src : run =
   let d = desugar src in
+  let d, stdlib_files =
+    if with_list then
+      let lm, path = Lazy.force stdlib_list in
+      ({ d with March_ast.Ast.mod_decls = lm :: d.March_ast.Ast.mod_decls }, [ path ])
+    else (d, [])
+  in
   let _errs, type_map = March_typecheck.Typecheck.check_module d in
   let ctx = E.create () in
   Ob.reset ();
   RT.check_all := all;
   Fun.protect
     ~finally:(fun () -> RT.check_all := false)
-    (fun () -> March_refinecheck.Refine_check.check_module ~type_map ctx d);
+    (fun () -> March_refinecheck.Refine_check.check_module ~stdlib_files ~type_map ctx d);
   let t = RT.analyze ~type_map ~file_mod:d.March_ast.Ast.mod_name.March_ast.Ast.txt d.March_ast.Ast.mod_decls in
   let certs =
     Array.to_list t.RT.graph.RT.units
@@ -878,7 +914,7 @@ let metric_suite =
         check_mcert (run (m up_ge)) "up" "metric";
         check_mcert (run (m up_eq)) "up" "unproved:not-decreasing");
     zcase "a `len` metric over a list and an index" (fun () ->
-        check_mcert (run (m len_metric)) "scan" "metric");
+        check_mcert (run ~with_list:true (m len_metric)) "scan" "metric");
     zcase "shadowing: a metric parameter rebound before the call is not trusted" (fun () ->
         let r = run (m shadowed) in
         check_mcert r "f" "unproved:shadowed";
@@ -1247,4 +1283,243 @@ let ih_suite =
     zcase "the IH files no termination obligation in the ledger (D2: report-only)" (fun () ->
         let r = run (m r2) in
         Alcotest.(check int) "no termination obligation" 0 (List.length r.terms));
+  ]
+
+(* ── Review fixes (group `termination-review`) ────────────────────────────
+   Two soundness holes a fresh review found in phases 1-3
+   (specs/progress/2026-10-27-termination-phase3.md, "Review fixes"), each
+   confirmed to diverge at runtime while the branch proved its false
+   `_ < 0` return:
+
+   - hole 1: the call graph trusted every name it could not resolve as a
+     builtin, so a call through `alias` / `use` / `import`, an interface
+     method (an `impl` body was never a unit) or a top-level `let` lambda
+     dropped its edge, and the diverging callee fooled both the SCC
+     certificate and the "every reachable recursive SCC is certified" rule;
+   - hole 2: [structural_subvars] read a `match` on the parameter's NAME as
+     structural after the name had been rebound (`let xs = Cons(0, xs)`).
+
+   Every REJECT row asserts the certificate is not one that licenses the
+   induction hypothesis AND that the false refinement is not proved; every
+   control asserts the terminating twin still certifies and still proves. *)
+
+(* [f] calls [call] once per step, a value it then cancels, so [f]'s `_ < 0`
+   return is true exactly when [f] terminates. *)
+let rv_f ?(pre = "") ?(arg = "Cons(1, Nil)") (call : string) =
+  pre ^ {|
+  @[no_warn_recursion]
+  fn f(xs : List(Int)) : {Int | _ < 0} do
+    match xs do
+      Nil -> 0 - 1
+      Cons(_, t) ->
+        let k = |} ^ call ^ {|
+        f(t) + k - k
+    end
+  end
+  fn need_neg(x : {Int | _ < 0}) : Int do x end
+  fn caller() : Int do need_neg(f(|} ^ arg ^ {|)) end
+|}
+
+let other_div = {|
+  mod Other do
+    fn g(xs : List(Int)) : Int do g(xs) end
+  end
+|}
+
+let other_ok = {|
+  mod Other do
+    fn g(xs : List(Int)) : Int do
+      match xs do
+        Nil -> 0
+        Cons(_, t) -> g(t)
+      end
+    end
+  end
+|}
+
+let impl_div = {|
+  type W = W(List(Int))
+  impl Show(W) do
+    fn show(w) do match w do W(ys) -> int_to_string(f(ys)) end end
+  end
+|}
+
+let impl_ok = {|
+  type W = W(List(Int))
+  impl Show(W) do
+    fn show(w) do match w do W(_) -> "w" end end
+  end
+|}
+
+(* The certificates that license the hypothesis ([ih_prepare]). *)
+let licensing = [ "structural"; "metric" ]
+
+(* [uncert]: the unit whose certificate must not license the hypothesis.
+   [f] itself when the diverging callee joins [f]'s SCC (an impl, a let);
+   the callee when it is an SCC of its own that [f] reaches (a cross-module
+   `g`): [f]'s own recursion `f(t)` IS structural, and what must fail is the
+   "every reachable SCC is certified" rule that the dropped edge fooled. *)
+let check_reject ?(uncert = "f") label src =
+  let r = run ~all:true (m src) in
+  let obs = Ob.all () in
+  let c = mcert r uncert in
+  Alcotest.(check bool) (label ^ ": " ^ uncert ^ " not certified (got " ^ c ^ ")") false
+    (List.mem c licensing);
+  not_all_proved (label ^ ": f's `_ < 0`") post "f" obs;
+  Alcotest.(check bool) (label ^ ": need_neg(f(..)) not proved") false
+    (List.mem "proved" (vs pre "need_neg" obs))
+
+let check_control label ?(cert = "structural") src =
+  let r = run ~all:true (m src) in
+  let obs = Ob.all () in
+  check_mcert r "f" cert;
+  check_all_proved (label ^ ": f's `_ < 0`") post "f" obs;
+  check_all_proved (label ^ ": need_neg(f(..))") pre "need_neg" obs
+
+(* Hole 2's let and arm rebinds: [f] matches a list one longer than its
+   parameter, so `f(t)` is `f` of the parameter itself. *)
+let rebind_let = {|
+  @[no_warn_recursion]
+  fn f(xs : List(Int)) : {Int | _ < 0} do
+    let xs = Cons(0, xs)
+    match xs do
+      Nil -> 0 - 1
+      Cons(_, t) -> f(t)
+    end
+  end
+  fn need_neg(x : {Int | _ < 0}) : Int do x end
+  fn caller() : Int do need_neg(f(Nil)) end
+|}
+
+let rebind_arm = {|
+  @[no_warn_recursion]
+  fn f(xs : List(Int)) : {Int | _ < 0} do
+    match Cons(0, xs) do
+      xs ->
+        match xs do
+          Nil -> 0 - 1
+          Cons(_, t) -> f(t)
+        end
+    end
+  end
+  fn need_neg(x : {Int | _ < 0}) : Int do x end
+  fn caller() : Int do need_neg(f(Nil)) end
+|}
+
+(* The control: a rebind AFTER the structural match leaves `t` a component. *)
+let rebind_after = {|
+  @[no_warn_recursion]
+  fn f(xs : List(Int)) : {Int | _ < 0} do
+    match xs do
+      Nil -> 0 - 1
+      Cons(_, t) ->
+        let xs = t
+        f(t)
+    end
+  end
+  fn need_neg(x : {Int | _ < 0}) : Int do x end
+  fn caller() : Int do need_neg(f(Nil)) end
+|}
+
+let rebind_measure = {|
+  @[measure]
+  fn sz2(xs : List(Int)) : Int do
+    let xs = Cons(0, xs)
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + sz2(t)
+    end
+  end
+|}
+
+(* [structural_subvars] of [f]'s first parameter over its first clause. *)
+let subvars src =
+  let d = desugar (m src) in
+  let fd =
+    List.find_map
+      (function
+        | March_ast.Ast.DFn (fd, _) when fd.March_ast.Ast.fn_name.March_ast.Ast.txt = "f" -> Some fd
+        | _ -> None)
+      d.March_ast.Ast.mod_decls
+    |> Option.get
+  in
+  let c = List.hd fd.March_ast.Ast.fn_clauses in
+  let set = March_refinecheck.Refine_encode.structural_subvars ~params:[ "xs" ] "xs" c.March_ast.Ast.fc_body in
+  List.sort compare (Hashtbl.fold (fun k () acc -> k :: acc) set [])
+
+(* One body per binder form, each rebinding `xs` before matching it. *)
+let binder_forms =
+  let arms = {|
+         Nil -> 0
+         Cons(_, t) -> f(t)
+       end|} in
+  [ ("let", {|fn f(xs : List(Int)) : Int do
+       let xs = Cons(0, xs)
+       match xs do|} ^ arms ^ {|
+     end|});
+    ("arm", {|fn f(xs : List(Int)) : Int do
+       match Cons(0, xs) do
+         xs ->
+           match xs do|} ^ arms ^ {|
+       end
+     end|});
+    ("lambda", {|fn f(xs : List(Int)) : Int do
+       let h = fn xs ->
+         match xs do|} ^ arms ^ {|
+       h(Cons(0, xs))
+     end|});
+    ("local fn param", {|fn f(xs : List(Int)) : Int do
+       fn go(xs : List(Int)) : Int do
+         match xs do|} ^ arms ^ {|
+       end
+       go(Cons(0, xs))
+     end|});
+    ("let?", {|fn f(xs : List(Int)) : Result(Int, Int) do
+       let? xs = Ok(Cons(0, xs))
+       match xs do
+         Nil -> Ok(0)
+         Cons(_, t) -> f(t)
+       end
+     end|}) ]
+
+let review_suite =
+  let reject ?uncert name src = zcase name (fun () -> check_reject ?uncert name src) in
+  let control name ?cert src = zcase name (fun () -> check_control name ?cert src) in
+  [ reject ~uncert:"Other.g" "1a alias: `Z.g(xs)` through `alias Other as Z`, g diverging"
+      (rv_f ~pre:(other_div ^ "alias Other as Z") "Z.g(xs)");
+    reject ~uncert:"Other.g" "1a use: `g(xs)` through `use Other.{g}`" (rv_f ~pre:(other_div ^ "use Other.{g}") "g(xs)");
+    reject ~uncert:"Other.g" "1a use-star: `g(xs)` through `use Other.*`" (rv_f ~pre:(other_div ^ "use Other.*") "g(xs)");
+    reject ~uncert:"Other.g" "1a import: `g(xs)` through `import Other`" (rv_f ~pre:(other_div ^ "import Other") "g(xs)");
+    reject "1b impl: `show(W(xs))` dispatches to an impl that calls f"
+      (rv_f ~pre:impl_div "string_byte_length(show(W(xs)))");
+    reject "1c top-level let: `hook(xs)` with `let hook = fn ys -> f(ys)`"
+      (rv_f ~pre:"let hook = fn ys -> f(ys)" "hook(xs)");
+    reject "1 unresolved: a callee no declaration or builtin names" (rv_f "nowhere_g(xs)");
+    control "1a alias control: a terminating `Z.g` still certifies"
+      (rv_f ~pre:(other_ok ^ "alias Other as Z") "Z.g(xs)");
+    control "1a use control" (rv_f ~pre:(other_ok ^ "use Other.{g}") "g(xs)");
+    control "1a use-star control" (rv_f ~pre:(other_ok ^ "use Other.*") "g(xs)");
+    control "1a import control" (rv_f ~pre:(other_ok ^ "import Other") "g(xs)");
+    control "1b impl control: a non-recursive impl still certifies"
+      (rv_f ~pre:impl_ok "string_byte_length(show(W(xs)))");
+    control "1c let control: a non-recursive top-level let still certifies"
+      (rv_f ~pre:"let hook = fn ys -> 0" "hook(xs)");
+    reject "2 let rebind: `let xs = Cons(0, xs)` before `match xs`" rebind_let;
+    reject "2 arm rebind: `match Cons(0, xs) do xs -> match xs ...`" rebind_arm;
+    control "2 control: a rebind after the structural match" rebind_after;
+    case "2 measure: a measure matching a rebound parameter fails the gate" (fun () ->
+        let errs = measure_errors rebind_measure in
+        Alcotest.(check bool) "invalid_measure, structural wording" true
+          (List.exists (fun e -> contains e "`sz2`" && contains e "is not structurally recursive") errs));
+    case "2 every binder form retires the parameter for structural_subvars" (fun () ->
+        List.iter
+          (fun (form, src) -> Alcotest.(check (list string)) (form ^ ": no component") [] (subvars src))
+          binder_forms;
+        Alcotest.(check (list string)) "control: an unrebound match" [ "t" ]
+          (subvars ({|fn f(xs : List(Int)) : Int do
+       match xs do|} ^ {|
+         Nil -> 0
+         Cons(_, t) -> f(t)
+       end
+     end|})));
   ]

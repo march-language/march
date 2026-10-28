@@ -933,13 +933,14 @@ let uniform_formals (fd : A.fn_def) : string list option =
    ([Refine_post.ih_spans]: rule (a) held there), with no structural
    argument.  The definer condition is unchanged either way. *)
 let hyp_applies ?span (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
-    ((self, sets, definers) : string * (string, unit) Hashtbl.t list * (int * string * fn_sig) list) : bool =
+    (((self, self_span), sets, definers) :
+      (string * A.span) * (string, unit) Hashtbl.t list * (int * string * fn_sig) list) : bool =
   fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
   && List.length sets = List.length args
   && (List.exists2
         (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
         args sets
-      || match span with Some sp -> Hashtbl.find_opt ih_spans sp = Some true | None -> false)
+      || match span with Some sp -> ih_self_edge sp ~callee:self_span | None -> false)
   && List.for_all
        (fun (i, n, sg) ->
          (match List.nth_opt args i with Some (A.EVar { A.txt = v; _ }) -> v = n | _ -> false)
@@ -958,7 +959,8 @@ let hyp_applies ?span (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr 
    whose verdict a scratch walk under the same hypothesis already PROVED
    (the top-level [gating_elem_returns] discipline), so a proof from an
    unproved hypothesis is never recorded. *)
-let local_elem_hyp : (fn_sig * (string, unit) Hashtbl.t list * entry * string list) option ref = ref None
+let local_elem_hyp : (fn_sig * (string, unit) Hashtbl.t list * entry * string list * A.span) option ref =
+  ref None
 
 let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
   : entry option =
@@ -975,7 +977,7 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
     in
     let local_hyp =
       match !local_elem_hyp with
-      | Some (lsg, sets, entry, formals)
+      | Some (lsg, sets, entry, formals, lspan)
         when (match List.assoc_opt fname cb with Some s -> s == lsg | None -> false)
              && List.length sets = List.length args
              && (List.exists2
@@ -983,7 +985,7 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
                    args sets
                  (* Termination phase 3: an eligible self-edge span of a
                     certified local SCC, as [hyp_applies] widens. *)
-                 || Hashtbl.find_opt ih_spans csp = Some true) ->
+                 || ih_self_edge csp ~callee:lspan) ->
         Some (if entry_is_closed entry then Some entry else lend_entry ~formals ~args entry)
       | _ -> None
     in
@@ -5805,7 +5807,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                set)
              pnames
          in
-         let gate_hyp = Some (sg, sets, e, pnames) in
+         let gate_hyp = Some (sg, sets, e, pnames, n.A.span) in
          let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
          let saved_last = !last_elem_return_proved and saved_locals = !local_elem_ret_proved in
          let proved =
@@ -6665,7 +6667,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
             in
             if List.for_all usable (ret_entries er) && List.for_all Option.is_some definers then
               Some
-                ( fd.A.fn_name.A.txt, sets, er, List.filter_map Fun.id definers
+                ( (fd.A.fn_name.A.txt, fd.A.fn_name.A.span), sets, er, List.filter_map Fun.id definers
                 , Option.value ~default:[] formals )
             else None
           | _ -> None
@@ -7837,6 +7839,17 @@ let report_termination errctx (t : Refine_term.t) (pl : Refine_term.plan) (certs
               match r with
               | "reference" -> "it is passed as a function value inside its own recursion, so no metric can be checked there"
               | "non-positive" -> "it calls a function value of a type that is not strictly positive"
+              | "unresolved" ->
+                let names =
+                  List.sort_uniq compare
+                    (List.filter_map
+                       (fun (u, n) -> if List.mem u g.Refine_term.sccs.(si) then Some ("`" ^ n ^ "`") else None)
+                       g.Refine_term.unresolved)
+                in
+                Printf.sprintf
+                  "its recursive cycle calls %s, which the termination checker cannot resolve to a \
+                   function, an interface method, a builtin or an extern, so it may diverge"
+                  (String.concat ", " names)
               | "no-int-parameter" -> "a function in its recursive cycle has no Int parameter to measure"
               | "shadowed" ->
                 "a recursive call sits under a binding that reuses a parameter the metric names, so \
@@ -8003,14 +8016,19 @@ let ih_prepare ~root ?type_map (term : Refine_term.t Lazy.t) defs (decls : A.dec
       RT.finish t pl ~verdicts:(fun sp -> Option.value ~default:[] (Hashtbl.find_opt verdicts sp))
     in
     let certified si = certs.(si) = "structural" || certs.(si) = "metric" in
+    (* "May diverge" is inferred upward: an uncertified recursive SCC, or any
+       SCC (recursive or not) calling a name the graph could not resolve
+       ([Refine_term.calls_unresolved]: review fixes, fail closed). *)
+    let may_diverge r = (recursive r && not (certified r)) || RT.calls_unresolved g r in
     List.filter_map
       (fun (si, rs) ->
-        if certified si && List.for_all (fun r -> (not (recursive r)) || certified r) rs then begin
+        if certified si && (not (RT.calls_unresolved g si)) && not (List.exists may_diverge rs) then begin
           let at = Hashtbl.create 8 in
           List.iter
             (fun (e : RT.edge) ->
               if g.RT.scc_of.(e.RT.e_src) = si && Hashtbl.mem pre_ok e.RT.e_span then begin
-                Hashtbl.replace ih_spans e.RT.e_span (e.RT.e_src = e.RT.e_dst);
+                Hashtbl.replace ih_spans e.RT.e_span
+                  (e.RT.e_src = e.RT.e_dst, g.RT.units.(e.RT.e_dst).RT.u_span);
                 Hashtbl.replace at e.RT.e_span g.RT.units.(e.RT.e_dst).RT.u_span
               end)
             watched;

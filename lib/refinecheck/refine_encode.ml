@@ -4169,25 +4169,69 @@ let structural_subvars ?(params : string list = []) (param : string) (body : A.e
   let count n l = List.length (List.filter (( = ) n) l) in
   (* One pass: the structural set and the structural binder occurrences
      (duplicates kept), never admitting a name in [excluded]. *)
+  (* [live]: [param] still denotes its ENTRY value here.  Every binder form
+     that rebinds the name retires it for its scope — a block `let` (and a
+     local `fn` of that name) for the rest of the block, an arm pattern for
+     its guard and body, a lambda or local `fn` parameter for its body, a
+     `let?` / `let*` pattern for its continuation — the [e_shadowed]
+     discipline of [Refine_term].  Before 2026-10-27 a match on the NAME was
+     structural anywhere, so `let xs = Cons(0, xs)` then `match xs ...
+     Cons(_, t) -> f(t)` passed [f] its own argument as a "component" (the
+     termination review's hole 2: certified, and the IH proved a false
+     return of a function that diverges).  The component names need no such
+     scope: the occurrence count below already distrusts any name bound
+     twice. *)
   let pass (excluded : string list) =
     let set = Hashtbl.create 16 in
     let occ = ref [] in
-    let is_struct v = v = param || (Hashtbl.mem set v && not (List.mem v excluded)) in
-    iter_all
-      (fun e ->
-        match e with
-        | A.EMatch (A.EVar s, brs, _) when is_struct s.A.txt ->
-          List.iter
-            (fun (br : A.branch) ->
-              match br.A.branch_pat with
-              | A.PatCon (_, pats) ->
-                let vs = List.concat_map pat_vars pats in
-                occ := vs @ !occ;
-                List.iter (fun v -> Hashtbl.replace set v ()) vs
-              | _ -> ())
-            brs
-        | _ -> ())
-      body;
+    let is_struct ~live v = (live && v = param) || (Hashtbl.mem set v && not (List.mem v excluded)) in
+    let rebinds names = List.mem param names in
+    let pnames ps = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+    let rec go ~live (e : A.expr) =
+      (match e with
+       | A.EMatch (A.EVar s, brs, _) when is_struct ~live s.A.txt ->
+         List.iter
+           (fun (br : A.branch) ->
+             match br.A.branch_pat with
+             | A.PatCon (_, pats) ->
+               let vs = List.concat_map pat_vars pats in
+               occ := vs @ !occ;
+               List.iter (fun v -> Hashtbl.replace set v ()) vs
+             | _ -> ())
+           brs
+       | _ -> ());
+      match e with
+      | A.EBlock (es, _) ->
+        ignore
+          (List.fold_left
+             (fun live ex ->
+               match ex with
+               | A.ELet (b, _) ->
+                 go ~live b.A.bind_expr;
+                 live && not (rebinds (pat_vars b.A.bind_pat))
+               | A.ELetFn (n, ps, _, fb, _) ->
+                 go ~live:(live && not (rebinds (n.A.txt :: pnames ps))) fb;
+                 live && n.A.txt <> param
+               | ex ->
+                 go ~live ex;
+                 live)
+             live es)
+      | A.ELetFn (n, ps, _, fb, _) -> go ~live:(live && not (rebinds (n.A.txt :: pnames ps))) fb
+      | A.EMatch (sc, brs, _) ->
+        go ~live sc;
+        List.iter
+          (fun (br : A.branch) ->
+            let live = live && not (rebinds (pat_vars br.A.branch_pat)) in
+            Option.iter (go ~live) br.A.branch_guard;
+            go ~live br.A.branch_body)
+          brs
+      | A.ELam (ps, lb, _) -> go ~live:(live && not (rebinds (pnames ps))) lb
+      | A.ELetQ (p, r, c, _) | A.ELetStar (p, r, c, _) ->
+        go ~live r;
+        go ~live:(live && not (rebinds (pat_vars p))) c
+      | e -> List.iter (go ~live) (children e)
+    in
+    go ~live:true body;
     (set, !occ)
   in
   let rec fix excluded =

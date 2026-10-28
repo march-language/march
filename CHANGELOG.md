@@ -49,7 +49,11 @@ git log is authoritative for exact commits.
   recursive call whose preconditions are all proved. A cycle of several functions is
   accepted all together or not at all. A function that may never return
   (`fn loopy(x : Int) : {Int | _ < 0} do loopy(x) end`) gets no hypothesis, so its
-  contract stays unproved. Data type returns (`{List(Int) | len(_) == n}`), element
+  contract stays unproved. That includes a function that calls a diverging one through
+  an `alias`, a `use` or `import`, an interface method's `impl` or a top-level `let`
+  lambda, and one that calls a name the checker cannot resolve (listed on the
+  `--termination-report`'s new `unresolved:` line). A `match` on a parameter after
+  `let xs = Cons(0, xs)` (or any other rebinding of it) is not structural recursion. Data type returns (`{List(Int) | len(_) == n}`), element
   returns (`List({Int | _ > 0})`) and a local `fn`'s element return use it at a call to
   themselves. Separately, a call inside arithmetic in a return expression
   (`1 + len2(t)`) now carries the callee's proved contract, as a bare call or a
