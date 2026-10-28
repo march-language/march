@@ -25,6 +25,19 @@ let code_actions_at (a : t) ~line ~character
     ()
     : Lsp.Types.CodeAction.t list =
   let open Lsp.Types in
+  (* One diagnostic, one key: its range, code and message.  A client echoes
+     the diagnostics it was sent in the request context, and may add or drop
+     optional fields ([source], [tags], [relatedInformation], ...) on the
+     way, so structural equality would count the echo as a second
+     diagnostic and double every action read from it. *)
+  let diag_key (d : Diagnostic.t) = (d.range, d.code, d.message) in
+  let dedup_diags (ds : Diagnostic.t list) =
+    List.rev
+      (List.fold_left
+         (fun acc d -> if List.exists (fun e -> diag_key e = diag_key d) acc then acc else d :: acc)
+         [] ds)
+  in
+  let diagnostics = dedup_diags diagnostics in
   (* ---- Make-linear actions ---- *)
   let make_linear_actions =
     List.filter_map (fun (c : consumption) ->
@@ -1128,7 +1141,7 @@ let code_actions_at (a : t) ~line ~character
       (* The client's context diagnostics too: a compiler diagnostic the
          LSP does not compute itself (the refinement checker's, run by
          `march --check-json`) still carries its fix in [data]. *)
-      (a.diagnostics @ List.filter (fun d -> not (List.mem d a.diagnostics)) diagnostics)
+      (dedup_diags (a.diagnostics @ diagnostics))
   in
   (* ---- Termination (termination design §6, phase 4) ----
      Two of the three repairs of a `termination_unproved` diagnostic:
@@ -1177,8 +1190,7 @@ let code_actions_at (a : t) ~line ~character
     let attr_region (sp : Ast.span) =
       let decl_ofs = offset_of_pos src (sp.Ast.start_line - 1) sp.Ast.start_col in
       let line_start i =
-        let rec back j = if j > 0 && src.[j - 1] <> '
-' then back (j - 1) else j in
+        let rec back j = if j > 0 && src.[j - 1] <> '\n' then back (j - 1) else j in
         back i
       in
       let rec grow start =
@@ -1270,7 +1282,48 @@ let code_actions_at (a : t) ~line ~character
                 | None -> [])
               | None -> []
             in
-            decreases @ diverges)
+            (* "Change `n == 0` to `n <= 0`", read from the compiler's
+               `note: the exit `n == 0` misses a negative `n`; ...`.  Never
+               the diagnostic's machine fix, and never preferred: it changes
+               what the program does (a call that hung now returns the base
+               case), so neither `forge fix` nor an apply-preferred editor
+               setting may make it unasked.  Offered only when the guard is
+               written exactly once in the enclosing function. *)
+            let eq_zero =
+              let m = msg d in
+              let lead = "note: the exit `" in
+              match find_sub m lead 0 with
+              | None -> []
+              | Some i -> (
+                let from = i + String.length lead in
+                match find_sub m " == 0` misses" from with
+                | None -> []
+                | Some j ->
+                  let x = String.sub m from (j - from) in
+                  let so = offset_of_pos src (sp.Ast.start_line - 1) sp.Ast.start_col in
+                  let eo = min (String.length src) (offset_of_pos src (sp.Ast.end_line - 1) sp.Ast.end_col) in
+                  let is_id c = match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false in
+                  let hits needle =
+                    let n = String.length needle in
+                    let rec go k acc =
+                      match find_sub src needle k with
+                      | Some p when p + n <= eo ->
+                        let ok =
+                          (p = 0 || not (is_id src.[p - 1]))
+                          && (p + n >= String.length src || not (is_id src.[p + n]))
+                        in
+                        go (p + 1) (if ok then (p, p + n, needle) :: acc else acc)
+                      | _ -> acc
+                    in
+                    if so < 0 then [] else go so []
+                  in
+                  match hits (x ^ " == 0") @ hits ("0 == " ^ x) with
+                  | [ (p, q, old) ] ->
+                    [ mk (Printf.sprintf "Change `%s` to `%s <= 0`" old x)
+                        (TextEdit.create ~range:(range_of_ofs p q) ~newText:(x ^ " <= 0"), false) ]
+                  | _ -> [])
+            in
+            decreases @ eq_zero @ diverges)
         | _ -> [])
       diagnostics
   in

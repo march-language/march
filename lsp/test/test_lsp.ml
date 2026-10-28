@@ -327,6 +327,7 @@ let () =
       "then -> do",                    `Quick, test_fix_adapter_then_to_do;
       "not offered off the range",     `Quick, test_fix_adapter_not_offered_off_range;
       "`;` -> line break",             `Quick, test_fix_adapter_semicolon;
+      "echoed diagnostic not doubled", `Quick, test_fix_adapter_echoed_diag_not_doubled;
       "fn _ arity fix edits the lambda", `Quick, test_fix_adapter_lambda_arity_edits_the_lambda;
     ];
     "code actions: make-linear", [

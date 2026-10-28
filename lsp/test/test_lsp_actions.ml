@@ -292,6 +292,26 @@ end
   | other ->
     Alcotest.failf "expected one `;` quick fix, got %d" (List.length other)
 
+(* A client echoes the diagnostics it was sent, and may change optional
+   fields on the way: the echo is the same diagnostic (range, code, message),
+   so it must not double the action. *)
+let test_fix_adapter_echoed_diag_not_doubled () =
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 1; let y = 2
+    x + y
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src ";" in
+  let echoed =
+    List.map (fun (d : Lsp.Types.Diagnostic.t) -> { d with source = Some "echo-client" }) a.An.diagnostics
+  in
+  let acts = An.code_actions_at a ~line ~character:col ~diagnostics:(echoed @ echoed) () in
+  Alcotest.(check int) "one `;` quick fix" 1
+    (List.length (List.filter (fun (t, _) -> t = "Replace `;` with a line break") (fix_edits acts)))
+
 let test_fix_adapter_lambda_arity_edits_the_lambda () =
   let src = {|mod M do
   fn f() : Int do
@@ -1859,7 +1879,22 @@ end
 
 let test_term_action_eq_zero () =
   z3_or_skip ();
-  let src' = round_trip "x == 0" term_down_annotated ~title:"Replace `n == 0` with `n <= 0`" in
+  (* The repair changes behaviour (a hang becomes a base-case return), so it
+     is no machine fix -- `forge fix` applies every machine fix -- and the
+     LSP action built from the note is not a preferred one. *)
+  Alcotest.(check (list string)) "no machine fix on any termination diagnostic" []
+    (List.filter_map
+       (fun (e : March_errors.Errors.diagnostic) ->
+         match e.March_errors.Errors.fix with Some _ -> Some e.March_errors.Errors.message | None -> None)
+       (term_diags term_down_annotated));
+  (match
+     List.find_opt
+       (fun (ca : Lsp.Types.CodeAction.t) -> ca.title = "Change `n == 0` to `n <= 0`")
+       (term_actions term_down_annotated)
+   with
+   | Some ca -> Alcotest.(check bool) "not a preferred action" false (ca.isPreferred = Some true)
+   | None -> Alcotest.fail "no `Change `n == 0` to `n <= 0`` action");
+  let src' = round_trip "x == 0" term_down_annotated ~title:"Change `n == 0` to `n <= 0`" in
   Alcotest.(check bool) "the guard was rewritten" true
     (let n = "if n <= 0 do" in
      let rec go i = i + String.length n <= String.length src' && (String.sub src' i (String.length n) = n || go (i + 1)) in
