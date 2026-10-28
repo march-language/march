@@ -1523,3 +1523,310 @@ let review_suite =
        end
      end|})));
   ]
+
+(* Phase 4 ([diverges_suite], group `termination-diverges`): `@[diverges]`
+   (§2.2), actor handlers (§3.7), `cap total` (D2) and the class-E ratchet
+   over the standard library and test/native (§7).  Each rule has a REJECT
+   row (the thing the rule refuses) and an accepting control; the
+   perturbation that turns each REJECT row RED is named in
+   specs/progress/2026-10-27-termination-phase4.md. *)
+
+let div_t1 = {|
+  @[diverges]
+  fn spin(n : Int) : Int do spin(n) end
+|}
+
+(* A NON-recursive `@[diverges]` callee: certified `f` reaches it, so the
+   induction hypothesis is withheld (D4: "may diverge" is inferred upward). *)
+let div_ih marked = Printf.sprintf {|
+  %s
+  fn wait_for(n : Int) : Int do n end
+  fn f(n : {Int | _ >= 0}) : {Int | _ >= 0} do
+    if n == 0 do 0 else
+      let s = wait_for(n)
+      let r = f(n - 1)
+      r + 1
+    end
+  end
+|} (if marked then "@[diverges]" else "")
+
+let conflict_measure = {|
+  type Nat = Z | S(Nat)
+  @[diverges]
+  @[measure]
+  fn depth(n : Nat) : Int do
+    match n do
+      Z -> 0
+      S(m) -> 1 + depth(m)
+    end
+  end
+|}
+
+let conflict_decreases = {|
+  @[diverges]
+  @[decreases(n)]
+  fn down(n : Int) : Int do if n <= 0 do 0 else down(n - 1) end end
+|}
+
+let measure_calls marked = Printf.sprintf {|
+  type Nat = Z | S(Nat)
+  %s
+  fn base(n : Int) : Int do n end
+  @[measure]
+  fn depth(n : Nat) : Int do
+    match n do
+      Z -> base(0)
+      S(m) -> 1 + depth(m)
+    end
+  end
+|} (if marked then "@[diverges]" else "")
+
+(* t12: `Spin` calls an uncertified recursion; `Go` a certified one (a
+   `<= 0` exit); `Again` re-sends to itself, which is the mailbox, not a
+   call. *)
+let handlers = {|
+  fn spin(n : Int) : Int do spin(n) end
+  fn countdown(n : Int) : Int do if n <= 0 do 0 else countdown(n - 1) end end
+  actor Counter do
+    state { value : Int }
+    init { value: 0 }
+    on Spin(n) do { state with value: spin(n) } end
+    on Go(n) do { state with value: countdown(n) } end
+    on Again(k) do
+      send(self(), Again(k + 1))
+      state
+    end
+  end
+|}
+
+let total_src ?(cap = "cap total") () = cap ^ {|
+  fn countdown(n : Int) : Int do if n <= 0 do 0 else countdown(n - 1) end end
+  fn down(n : Int) : Int do if n == 0 do 0 else down(n - 1) end end
+  @[diverges]
+  fn serve(n : Int) : Int do serve(n + 1) end
+  fn run(n : Int) : Int do serve(n) end
+  fn uses(n : Int) : Int do countdown(n) + 1 end
+  @[diverges]
+  fn pump(n : Int) : Int do
+    fn go(k : Int) : Int do go(k + 1) end
+    go(n)
+  end
+  actor Box do
+    state { value : Int }
+    init { value: 0 }
+    on Tick(n) do { state with value: run(n) } end
+    on Calm(n) do { state with value: uses(n) } end
+  end
+  fn main() do
+    let _ = serve(0)
+    main()
+  end
+|}
+
+(* `g`'s `show(x)` dispatches on a type variable, so it reaches every
+   `impl Show`, the diverging one included: `g` terminates modulo the
+   dictionary (§3.6); the impl is judged as its own unit. *)
+let total_dispatch = {|
+  cap total
+  type Loop = Loop(Int)
+  fn spin(n : Int) : Int do spin(n) end
+  impl Show(Loop) do
+    fn show(l) do match l do Loop(n) -> int_to_string(spin(n)) end end
+  end
+  fn g(x) do show(x) end
+|}
+
+let report_of ?(all = true) src =
+  ignore (run ~all src);
+  let d = desugar src in
+  RT.report_lines (RT.analyze ~file_mod:d.March_ast.Ast.mod_name.March_ast.Ast.txt d.March_ast.Ast.mod_decls)
+
+let error_names code r =
+  List.sort compare
+    (List.filter_map
+       (fun (d : E.diagnostic) ->
+         if d.E.code = code && d.E.severity = E.Error then
+           (* the name in the message's first backquotes *)
+           match String.index_opt d.E.message '`' with
+           | Some i -> (
+             match String.index_from_opt d.E.message (i + 1) '`' with
+             | Some j -> Some (String.sub d.E.message (i + 1) (j - i - 1))
+             | None -> None)
+           | None -> None
+         else None)
+       r.diags)
+
+(* ── The class-E ratchet (§7, §8 phase 4) ────────────────────────────────
+   Every recursive unit with no metric that reaches an external-event
+   builtin ([Refine_term.event_builtins]) is class E.  Over the whole
+   standard library (and, separately, test/native), each must be covered by
+   `@[diverges]` — itself, a member of its cycle, or the function enclosing
+   a local — or be on these lists, which name the units judged to
+   TERMINATE (or that cannot carry the attribute) and why.  The lists only
+   shrink: a new event loop without `@[diverges]` is RED, and so is an entry
+   that stops being class E (delete it). *)
+let stdlib_e_allowed = [
+  ("control.march", "await_state", "time-bounded poll: `left_ms` falls by `poll_ms` each round");
+  ("file.march", "with_lines/do_lines", "reads to EOF in a local fn (no attribute syntax); the enclosing function hands the lazy Seq on");
+  ("file.march", "with_chunks/do_chunks", "as with_lines/do_lines");
+  ("seq.march", "from_file_lines/do_lines", "as File.with_lines/do_lines; from_file_lines returns the Seq unrun");
+  ("seq.march", "from_file_chunks/do_chunks", "as from_file_lines/do_lines");
+  ("http_client.march", "reconnect_and_retry", "bounded retry: `retries_left` falls every round trip");
+  ("http_client.march", "transport_keepalive", "the other half of reconnect_and_retry's cycle");
+  ("http_transport.march", "stream_fixed_body", "bounded by `remaining`, which every non-empty chunk lowers");
+  ("http_transport.march", "tls_recv_all", "bounded by `remaining`, which every non-empty chunk lowers");
+  ("net_kernel.march", "recv_frame_plain", "recurses only while fewer than 4 header bytes are buffered, adding one or more");
+  ("net_kernel.march", "recv_exact_until", "bounded by `need` and by a deadline");
+  ("node_queue.march", "admit_waiting", "drains a finite deque, one entry per round");
+  ("node_queue.march", "drain", "drains a finite deque, one entry per round");
+  ("session_node.march", "accept_all", "each round removes the accepted role from `expected`");
+  ("session_node.march", "await_answer", "bounded by the `budget` Vault, lowered every poll");
+  ("session_node.march", "fill_roles", "retries bounded by the `budget` Vault; otherwise recurses on the rest of `roles`");
+  ("topology.march", "drain_wait", "bounded by the `hard_ms` deadline, which exits the process");
+  ("topology.march", "watchdog", "bounded by the `limit` deadline");
+]
+
+let native_e_allowed = [
+  ("actor_call_late_reply.march", "spin_until", "deadline on the clock");
+  ("timer_leak_probe.march", "spin_until", "deadline on the clock");
+  ("supervisor_concurrent_child_crash.march", "await_dequeued", "deadline on the clock");
+  ("supervisor_concurrent_child_crash.march", "await_restart", "deadline on the clock");
+  ("supervisor_respawn_names_before_activation.march", "resolve", "deadline on the clock");
+]
+
+let find_dir cands probe = List.find (fun d -> Sys.file_exists (Filename.concat d probe)) cands
+
+let parse_file path =
+  let ic = open_in_bin path in
+  let src = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  let lexbuf = Lexing.from_string src in
+  lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+  March_desugar.Desugar.desugar_module (March_parser.Parse.module_of_lexbuf lexbuf)
+
+let march_files dir =
+  Sys.readdir dir |> Array.to_list |> List.filter (fun f -> Filename.check_suffix f ".march")
+  |> List.sort compare |> List.map (Filename.concat dir)
+
+let as_mod ?wrap (lm : March_ast.Ast.module_) =
+  let module A = March_ast.Ast in
+  let d = A.DMod (lm.A.mod_name, A.Public, lm.A.mod_decls, A.dummy_span) in
+  match wrap with
+  | None -> d
+  | Some w -> A.DMod ({ A.txt = w; A.span = A.dummy_span }, A.Public, [ d ], A.dummy_span)
+
+let stdlib_mods = lazy (
+  let dir = find_dir [ "stdlib"; "../../../stdlib"; "../../stdlib" ] "list.march" in
+  List.map (fun p -> as_mod (parse_file p)) (march_files dir))
+
+(* The unannotated class-E units (file basename, unit name) of [files],
+   analysed with the whole standard library in scope (an event builtin is
+   usually reached through a stdlib wrapper: `Socket.recv`). *)
+let unannotated_e ?(native = false) () =
+  let module A = March_ast.Ast in
+  let extra, keep =
+    if native then begin
+      let dir = find_dir [ "test/native"; "../../../test/native"; "../../test/native"; "native" ] "timer_leak_probe.march" in
+      ( List.mapi (fun i p -> as_mod ~wrap:(Printf.sprintf "Native%d" i) (parse_file p)) (march_files dir),
+        fun f -> Filename.basename (Filename.dirname f) = "native" )
+    end
+    else ([], fun f -> Filename.basename (Filename.dirname f) = "stdlib")
+  in
+  let decls = Lazy.force stdlib_mods @ extra in
+  let t = RT.analyze ~file_mod:"Ratchet" decls in
+  List.filter_map
+    (fun (r : RT.row) ->
+      if r.RT.r_class = "E?" && keep r.RT.r_span.A.file then
+        (* `File.with_lines/do_lines` -> `with_lines/do_lines`: the rows
+           carry the module path the wrapping gave them. *)
+        let n = r.RT.r_name in
+        let head, tail =
+          match String.index_opt n '/' with
+          | Some i -> (String.sub n 0 i, String.sub n i (String.length n - i))
+          | None -> (n, "")
+        in
+        let head = match String.rindex_opt head '.' with Some i -> String.sub head (i + 1) (String.length head - i - 1) | None -> head in
+        Some (Filename.basename r.RT.r_span.A.file, head ^ tail)
+      else None)
+    (RT.rows t)
+  |> List.sort_uniq compare
+
+let check_ratchet label got allowed =
+  let allowed = List.sort_uniq compare (List.map (fun (f, n, _) -> (f, n)) allowed) in
+  let show l = String.concat ", " (List.map (fun (f, n) -> f ^ ":" ^ n) l) in
+  let missing = List.filter (fun x -> not (List.mem x allowed)) got in
+  let stale = List.filter (fun x -> not (List.mem x got)) allowed in
+  Alcotest.(check string) (label ^ ": class-E units without @[diverges] (annotate, or allow with a reason)") "" (show missing);
+  Alcotest.(check string) (label ^ ": allowed entries no longer class E (delete them)") "" (show stale)
+
+let diverges_suite =
+  [ zcase "t1: `@[diverges]` is listed `diverges`, files no obligation, and is a known attribute" (fun () ->
+        let r = run ~all:true (m div_t1) in
+        check_mcert r "spin" "diverges";
+        Alcotest.(check (list string)) "no termination obligation" [] (verdicts r);
+        Alcotest.(check int) "no unknown_attribute" 0 (n_with "unknown_attribute" r);
+        Alcotest.(check int) "no termination_unproved" 0 (n_with "termination_unproved" r);
+        let lines = report_of (m div_t1) in
+        Alcotest.(check bool) ("report row: " ^ String.concat " | " lines) true
+          (List.exists (fun l -> contains l "term\tE\tdiverges\t" && contains l "\tspin\ttop\tscc=1\tcert=diverges") lines);
+        Alcotest.(check bool) "certificate line counts it" true
+          (List.exists (fun l -> contains l "0 unproved, 1 diverges") lines));
+    zcase "t1: a non-recursive `@[diverges]` is listed too" (fun () ->
+        let lines = report_of (m (div_ih true)) in
+        Alcotest.(check bool) ("report: " ^ String.concat " | " lines) true
+          (List.exists (fun l -> contains l "\twait_for\ttop\tscc=1\tcert=diverges") lines
+           && List.exists (fun l -> contains l "1 more marked @[diverges]") lines
+           && List.exists (fun l -> contains l "may diverge through @[diverges]: 1 unit: f") lines));
+    zcase "IH: an SCC reaching a `@[diverges]` function gets no hypothesis; unmarked, it does" (fun () ->
+        check_skip "marked: f post" post "f" (ledger (m (div_ih true)));
+        check_all_proved "control: f post" post "f" (ledger (m (div_ih false))));
+    zcase "conflict: `@[diverges]` with `@[measure]`" (fun () ->
+        let r = run (m conflict_measure) in
+        Alcotest.(check int) "one diverges_conflict" 1 (n_with "diverges_conflict" r);
+        Alcotest.(check bool) "names both" true
+          (List.exists (fun (d : E.diagnostic) -> contains d.E.message "`@[measure]`") (diags_with "diverges_conflict" r));
+        Alcotest.(check int) "no structural-wording invalid_measure besides" 0 (n_with "invalid_measure" r));
+    zcase "conflict: `@[diverges]` with `@[decreases]`: no metric checked, nothing else said" (fun () ->
+        let r = run (m conflict_decreases) in
+        Alcotest.(check int) "one diverges_conflict" 1 (n_with "diverges_conflict" r);
+        Alcotest.(check bool) "names decreases" true
+          (List.exists (fun (d : E.diagnostic) -> contains d.E.message "`@[decreases]`") (diags_with "diverges_conflict" r));
+        List.iter
+          (fun c -> Alcotest.(check int) ("no " ^ c) 0 (n_with c r))
+          [ "invalid_decreases"; "termination_unproved"; "attribute_no_effect" ];
+        Alcotest.(check (list string)) "no obligation" [] (verdicts r);
+        check_mcert r "down" "diverges");
+    zcase "conflict: a measure calling a `@[diverges]` function; unmarked, none" (fun () ->
+        let r = run (m (measure_calls true)) in
+        Alcotest.(check int) "one diverges_conflict" 1 (n_with "diverges_conflict" r);
+        Alcotest.(check bool) "names the callee" true
+          (List.exists (fun (d : E.diagnostic) -> contains d.E.message "`depth` calls `base`") (diags_with "diverges_conflict" r));
+        Alcotest.(check int) "control: none" 0 (n_with "diverges_conflict" (run (m (measure_calls false)))));
+    zcase "t12 handlers: `Spin` may not return; `Go` and `Again` are clean; never a diagnostic" (fun () ->
+        let lines = report_of (m handlers) in
+        let hl = List.filter (fun l -> contains l "handler\t") lines in
+        Alcotest.(check int) ("one handler line: " ^ String.concat " | " hl) 1 (List.length hl);
+        Alcotest.(check bool) "Spin may not return" true
+          (List.exists
+             (fun l -> contains l "\tCounter.Spin\tmay not return: it reaches `spin`, whose recursion is not shown to terminate")
+             hl);
+        let r = run ~all:true (m handlers) in
+        Alcotest.(check int) "no termination_unproved" 0 (n_with "termination_unproved" r));
+    zcase "cap_total: unproved units are errors; `main`, `@[diverges]` and certified units are not" (fun () ->
+        let r = run (m (total_src ())) in
+        Alcotest.(check (list string)) "the errors"
+          [ "Box.Tick"; "down"; "run" ] (error_names "termination_unproved" r);
+        Alcotest.(check bool) "handler wording" true
+          (List.exists (fun (d : E.diagnostic) -> contains d.E.message "handler `Box.Tick` may not return: it reaches `serve`, which is marked `@[diverges]`")
+             r.diags));
+    zcase "cap_total control: without the cap, nothing (D2)" (fun () ->
+        let r = run (m (total_src ~cap:"" ())) in
+        Alcotest.(check int) "no termination_unproved" 0 (n_with "termination_unproved" r));
+    zcase "cap_total: a nested `mod` without the cap does not inherit it" (fun () ->
+        let r = run (m ("cap total\n  fn ok(n : Int) : Int do n end\n  mod Inner do\n    fn spin(n : Int) : Int do spin(n) end\n  end")) in
+        Alcotest.(check (list string)) "no error" [] (error_names "termination_unproved" r));
+    zcase "cap_total: an `impl` method is a unit; a dispatch to it does not carry its divergence" (fun () ->
+        let r = run (m total_dispatch) in
+        Alcotest.(check (list string)) "the impl and its callee, not `g`"
+          [ "impl Show.show"; "spin" ] (error_names "termination_unproved" r));
+  ]

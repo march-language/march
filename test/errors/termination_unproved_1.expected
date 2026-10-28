@@ -2,6 +2,7 @@ exit: 0
 -- WARNING ------------ errors/termination_unproved_1.march
 
 `down` is not shown to terminate: the recursive call `down(n - 1)` is not shown to decrease `n`: e.g. n = -1 [termination_unproved]
+note: the exit `n == 0` misses a negative `n`; `n <= 0` covers it.
 note: a metric must stay at least 0 and fall at every recursive call (left to right, for several components). Guard the recursion (an exit such as `n <= 0`), refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall.
 
 4 |     if n == 0 do 0 else down(n - 1) end
@@ -10,3 +11,10 @@ note: a metric must stay at least 0 and fall at every recursive call (left to ri
     run `march --explain termination_unproved`
 
 
+
+fix [termination_unproved]:
+@@ lines 4-4 @@
+-    if n == 0 do 0 else down(n - 1) end
++    if n <= 0 do 0 else down(n - 1) end
+
+after fix: exit 0

@@ -76,6 +76,9 @@ type edge = {
           call (a `let`, arm, lambda or local `fn` binder of the same name).
           A metric over such a name would read the inner value, not the
           entry value, so the edge cannot be obliged (phase 2). *)
+  e_dispatch : bool;
+      (** an interface dispatch: the callee is one of the [impl]s the
+          argument's type can reach, chosen by a dictionary at run time *)
 }
 
 type unit_ = {
@@ -486,7 +489,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let impls = List.rev !impls in
   let unit_name = Hashtbl.create 64 in
   (* Pass 2: walk bodies. *)
-  let add_edge ~env ~src ~dst ~kind ~args ~span ~owner =
+  let add_edge ?(dispatch = false) ~env ~src ~dst ~kind ~args ~span ~owner () =
     let shadowed =
       List.filter
         (fun p -> SM.find_opt p env <> Some Param)
@@ -494,7 +497,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     in
     edges :=
       { e_src = src; e_dst = dst; e_kind = kind; e_args = args; e_span = span; e_owner = owner;
-        e_shadowed = shadowed }
+        e_shadowed = shadowed; e_dispatch = dispatch }
       :: !edges
   in
   (* The scope of the body being walked.  A name is resolved LEXICALLY: a
@@ -632,8 +635,9 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       | A.EVar n ->
         let kind = if lam then Lambda else Direct in
         (match resolve ~arity:(List.length args) ?arg:(List.nth_opt args 0) env n.A.txt with
-         | T_unit dst -> add_edge ~env ~src ~dst ~kind ~args ~span ~owner
-         | T_impls ds -> List.iter (fun dst -> add_edge ~env ~src ~dst ~kind ~args ~span ~owner) ds
+         | T_unit dst -> add_edge ~env ~src ~dst ~kind ~args ~span ~owner ()
+         | T_impls ds ->
+           List.iter (fun dst -> add_edge ~dispatch:true ~env ~src ~dst ~kind ~args ~span ~owner ()) ds
          | T_value -> fv_calls := (src, head) :: !fv_calls
          | T_trusted -> if is_ident n.A.txt then trusted := (src, n.A.txt) :: !trusted
          | T_unresolved -> unresolved := (src, n.A.txt) :: !unresolved);
@@ -648,10 +652,12 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     | A.EPipe (l, A.EVar n, sp) -> call (A.EVar n) [ l ] sp
     | A.EPipe (l, A.EApp (f, args, _), sp) -> call f (l :: args) sp
     | A.EVar n -> (
-      let ref_edge dst = add_edge ~env ~src ~dst ~kind:Reference ~args:[] ~span:n.A.span ~owner in
+      let ref_edge ?dispatch dst =
+        add_edge ?dispatch ~env ~src ~dst ~kind:Reference ~args:[] ~span:n.A.span ~owner ()
+      in
       match resolve env n.A.txt with
       | T_unit dst -> ref_edge dst
-      | T_impls ds -> List.iter ref_edge ds
+      | T_impls ds -> List.iter (ref_edge ~dispatch:true) ds
       | T_value | T_trusted -> ()
       | T_unresolved -> unresolved := (src, n.A.txt) :: !unresolved)
     | A.EBlock (es, _) -> ignore (List.fold_left (fun env ex -> block_item ~src ~owner ~lam env ex) env es)
@@ -877,12 +883,44 @@ let bounded ~(body : A.expr) ~(p : string) ~(ty : A.ty option) : bool =
     body;
   !found
 
-let loopish = [ "loop"; "serve"; "recv"; "receive"; "accept"; "await"; "listen"; "heartbeat"; "poll"; "wait" ]
+(* Phase 4: the builtins whose result depends on an EXTERNAL EVENT rather
+   than on the program's own data: a message, a connection, bytes from a
+   socket, file or process, the clock, or state another task writes (a
+   [Vault]).  A recursion with no syntactic metric that reaches one of these
+   is an external-event loop (class E, §0.5): it ends when the event says so.
+   Replaces phase 0's name heuristic ([loop], [serve], [recv], …), which
+   flagged terminating loops (a BFS over a queue, a merge sort's passes) and
+   missed event loops named otherwise. *)
+let event_builtins =
+  [ "receive"; "sleep_ms"; "actor_call"; "task_await"; "task_await_unwrap"; "is_alive";
+    "tcp_accept"; "tcp_accept_timeout"; "tcp_recv_all"; "tcp_recv_chunk"; "tcp_recv_chunk_timeout";
+    "tcp_recv_chunked_frame"; "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers";
+    "tcp_recv_timeout"; "tls_accept"; "tls_read"; "tls_read_timeout"; "ws_recv"; "ws_select";
+    "file_read"; "file_read_line"; "file_read_chunk"; "csv_next_row"; "io_read_byte"; "io_read_line";
+    "process_read_line"; "process_wait_proc"; "http_server_wait"; "unix_time"; "unix_time_ms";
+    "sys_uptime_ms"; "vault_get"; "vault_ns_get"; "vault_put_new"; "mailbox_size"; "mailbox_backlog" ]
 
-let contains_sub (hay : string) (needle : string) : bool =
-  let n = String.length needle and h = String.length hay in
-  let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
-  at 0
+(** Is [u] marked [@[diverges]] (§2.2, phase 4)? *)
+let is_diverges (u : unit_) : bool = List.mem "diverges" u.u_attrs
+
+(** Units that reach an event builtin ([event_builtins]) through any chain of
+    edges, themselves included. *)
+let event_reach (g : graph) : bool array =
+  let n = Array.length g.units in
+  let ev = Array.make n false in
+  List.iter (fun (u, name) -> if List.mem name event_builtins then ev.(u) <- true) g.trusted;
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter
+      (fun e ->
+        if ev.(e.e_dst) && not ev.(e.e_src) then begin
+          ev.(e.e_src) <- true;
+          changed := true
+        end)
+      g.edges
+  done;
+  ev
 
 type row = {
   r_name : string;
@@ -890,7 +928,10 @@ type row = {
   r_kind : string;
   r_shape : string;  (** structural | int-dec | int-asc | lex | ref | lambda | none *)
   r_mutual : bool;
-  r_class : string;  (** A B C D F, or a heuristic [E?], or [?] *)
+  r_class : string;
+      (** A B C D F; [E] for a [@[diverges]] unit; [E?] for an unannotated
+          external-event loop (no metric, reaches an [event_builtins] call);
+          or [?] *)
   r_scc : int;  (** SCC size *)
   r_recursive : bool;
       (** false only for a non-recursive unit listed because it calls a
@@ -898,7 +939,7 @@ type row = {
   r_cert : string;  (** [structural], or [unproved:<reason>] (phase 1) *)
 }
 
-let classify g (u : unit_) : row =
+let classify ?(event : int -> bool = fun _ -> false) g (u : unit_) : row =
   let es = intra g u.u_id in
   let mutual = List.length g.sccs.(g.scc_of.(u.u_id)) > 1 in
   let kind = match u.u_kind with Top -> "top" | Local -> "local" | Handler -> "handler" in
@@ -907,7 +948,12 @@ let classify g (u : unit_) : row =
       r_class = cls; r_scc = List.length g.sccs.(g.scc_of.(u.u_id)); r_recursive = true;
       r_cert = "" }
   in
-  if List.exists (fun e -> e.e_kind = Reference) es then mk "ref" "F"
+  (* Covered by [@[diverges]]: the unit, a member of its cycle (one mark
+     declares the whole cycle), or the top-level function enclosing a local
+     (a local [fn] cannot carry an attribute). *)
+  if List.exists (fun v -> is_diverges g.units.(v)) (u.u_top :: g.sccs.(g.scc_of.(u.u_id))) then
+    mk "diverges" "E"
+  else if List.exists (fun e -> e.e_kind = Reference) es then mk "ref" "F"
   else if List.exists (fun e -> e.e_kind = Lambda) es then mk "lambda" "F"
   else begin
     let shapes =
@@ -957,14 +1003,8 @@ let classify g (u : unit_) : row =
         | Some i -> mk "int-asc" (int_class i)
         | None ->
           if lex then mk "lex" "D"
-          else
-            let callees =
-              List.map (fun e -> g.units.(e.e_dst).u_name) g.out.(u.u_id)
-            in
-            let names = String.lowercase_ascii u.u_name :: List.map String.lowercase_ascii callees in
-            if List.exists (fun w -> List.exists (fun n -> contains_sub n w) names) loopish
-            then mk "none" "E?"
-            else mk "none" "?"))
+          else if List.exists event g.sccs.(g.scc_of.(u.u_id)) then mk "none" "E?"
+          else mk "none" "?"))
   end
 
 (* ── Strict positivity (§3.6), phase 1 ─────────────────────────────────── *)
@@ -1033,9 +1073,14 @@ let nonpositive_types (decls : A.decl list) : SS.t =
 
 (* ── The structural certificate (§3.3), phase 1 ────────────────────────── *)
 
-type cert = Structural | Unproved of string
+(* [Diverges] (phase 4): a member is marked [@[diverges]]; no obligation is
+   filed and no hypothesis given, and the report lists it as [diverges]. *)
+type cert = Structural | Unproved of string | Diverges
 
-let cert_name = function Structural -> "structural" | Unproved r -> "unproved:" ^ r
+let cert_name = function
+  | Structural -> "structural"
+  | Unproved r -> "unproved:" ^ r
+  | Diverges -> "diverges"
 
 (* The ADT a parameter position holds: its declared head constructor, else
    the typechecker's (a merged multi-head function's [__arg0] is unannotated). *)
@@ -1066,7 +1111,8 @@ let certify ?type_map g ~(nonpos_call : int -> bool) ~(same_family : string -> s
     (scc : int list) : cert =
   let members = scc in
   let es = List.concat_map (intra g) members in
-  if List.exists (fun e -> e.e_kind = Reference) es then Unproved "reference"
+  if List.exists (fun u -> is_diverges g.units.(u)) members then Diverges
+  else if List.exists (fun e -> e.e_kind = Reference) es then Unproved "reference"
   else if List.exists nonpos_call members then Unproved "non-positive"
   else if List.exists (fun u -> List.mem_assoc u g.unresolved) members then Unproved "unresolved"
   else begin
@@ -1288,6 +1334,7 @@ type status =
   | St_structural  (** the phase-1 certificate; no query *)
   | St_pending  (** metric obligations filed; decided after the walk *)
   | St_unproved of string  (** no metric can be checked; the reason *)
+  | St_diverges  (** a member is [@[diverges]]: nothing filed (phase 4) *)
   | St_undemanded  (** not demanded (§9): no annotation, not reported *)
 
 type plan = {
@@ -1483,10 +1530,21 @@ let analyze ?(type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option
   in
   let cert_of u = cert_name certs.(graph.scc_of.(u)) in
   let kind_name u = match u.u_kind with Top -> "top" | Local -> "local" | Handler -> "handler" in
+  let ev = event_reach graph in
+  let event u = ev.(u) in
   let rows =
     Array.to_list graph.units
     |> List.filter_map (fun u ->
-           if is_recursive graph u.u_id then Some { (classify graph u) with r_cert = cert_of u.u_id }
+           if is_recursive graph u.u_id then
+             Some { (classify ~event graph u) with r_cert = cert_of u.u_id }
+           else if is_diverges u then
+             (* Listed though not recursive (§2.2): "not claimed to terminate"
+                is about its callees, a callback, or a loop the graph does
+                not see. *)
+             Some
+               { r_name = u.u_name; r_span = u.u_span; r_kind = kind_name u; r_shape = "diverges";
+                 r_mutual = false; r_class = "E"; r_scc = 1; r_recursive = false;
+                 r_cert = cert_name Diverges }
            else if nonpos_call u.u_id then
              Some
                { r_name = u.u_name; r_span = u.u_span; r_kind = kind_name u; r_shape = "value";
@@ -1523,6 +1581,7 @@ let plan_metrics ?type_map ~(is_measure : string -> bool) ~(demanded : unit_ -> 
   Array.iter
     (fun u ->
       match u.u_decreases with
+      | Some _ when is_diverges u -> ()  (* [diverges_conflict], not a metric error *)
       | Some es ->
         let errs = metric_errors ?type_map ~is_measure u es in
         if errs <> [] then Hashtbl.replace bad u.u_id ();
@@ -1539,6 +1598,7 @@ let plan_metrics ?type_map ~(is_measure : string -> bool) ~(demanded : unit_ -> 
         status.(si) <-
           (match t.certs.(si) with
            | Structural -> St_structural
+           | Diverges -> St_diverges
            | Unproved (("reference" | "non-positive" | "unresolved") as r) -> St_unproved r
            | Unproved _ -> (
              if List.exists (Hashtbl.mem bad) annotated then St_unproved "invalid-decreases"
@@ -1633,6 +1693,7 @@ let finish (t : t) (pl : plan) ~(verdicts : A.span -> Obligation.verdict list) :
     match pl.pl_status.(si) with
     | St_undemanded -> ()
     | St_structural -> certs.(si) <- "structural"
+    | St_diverges -> certs.(si) <- "diverges"
     | St_unproved r -> certs.(si) <- "unproved:" ^ r
     | St_pending ->
       let ss =
@@ -1692,9 +1753,104 @@ let reachable_sccs (g : graph) (si : int) : int list =
 let calls_unresolved (g : graph) (si : int) : bool =
   List.exists (fun u -> List.mem_assoc u g.unresolved) g.sccs.(si)
 
+(** Is any member of SCC [si] marked [@[diverges]]? *)
+let scc_diverges (g : graph) (si : int) : bool =
+  List.exists (fun u -> is_diverges g.units.(u)) g.sccs.(si)
+
+(** Why a unit may not terminate (phase 4, §2.2, §3.7, D4): the unit the
+    divergence comes from, which may be the unit itself.
+    - [Marked u]: [u] is marked [@[diverges]];
+    - [Uncertified (u, cert)]: [u]'s recursion is not certified;
+    - [Unresolved_call (u, name)]: [u] calls a name the graph cannot resolve. *)
+type culprit = Marked of int | Uncertified of int * string | Unresolved_call of int * string
+
+let culprit_unit = function Marked u | Uncertified (u, _) | Unresolved_call (u, _) -> u
+
+(** "May diverge", inferred UPWARD through the call graph, by SCC.  An SCC
+    may diverge when one of its members is marked [@[diverges]], when it is
+    recursive and [cert_of si] is not a certificate ([structural], [metric]
+    or [trusted]), when it calls an unresolved name, or when it reaches an
+    SCC that may diverge.  An interface dispatch ([e_dispatch]) does not
+    carry it: the [impl] is chosen by a dictionary, a value, so the caller
+    terminates modulo it, as modulo any function value (§3.6), and each
+    [impl] is a unit judged on its own.  (The induction hypothesis keeps
+    phase 3's stricter rule, which follows every edge.)  Nothing is required of a caller (D4): this feeds
+    the report and [cap total] only.  Tarjan numbers SCCs callees first, so
+    one pass in index order sees every callee before its callers. *)
+let divergence (g : graph) ~(cert_of : int -> string) : culprit option array =
+  let n = Array.length g.sccs in
+  let res = Array.make n None in
+  let certified si = List.mem (cert_of si) [ "structural"; "metric"; "trusted" ] in
+  for si = 0 to n - 1 do
+    let members = g.sccs.(si) in
+    let own =
+      match List.find_opt (fun u -> is_diverges g.units.(u)) members with
+      | Some u -> Some (Marked u)
+      | None ->
+        let recursive = match members with u :: _ -> is_recursive g u | [] -> false in
+        if recursive && not (certified si) then Some (Uncertified (List.hd members, cert_of si))
+        else
+          match List.find_opt (fun (u, _) -> List.mem u members) g.unresolved with
+          | Some (u, name) -> Some (Unresolved_call (u, name))
+          | None -> None
+    in
+    res.(si) <-
+      (match own with
+       | Some c -> Some c
+       | None -> (
+         (* A [@[diverges]] culprit is preferred, so the report can say
+            "through `@[diverges]`" whenever that is one of the reasons. *)
+         let cs =
+           List.concat_map
+             (fun u ->
+               List.filter_map
+                 (fun e ->
+                   let d = g.scc_of.(e.e_dst) in
+                   if d <> si && not e.e_dispatch then res.(d) else None)
+                 g.out.(u))
+             members
+         in
+         match List.find_opt (function Marked _ -> true | _ -> false) cs with
+         | Some c -> Some c
+         | None -> ( match cs with c :: _ -> Some c | [] -> None)))
+  done;
+  res
+
+type divergence_note = {
+  dv_text : string;  (** [culprit_text] *)
+  dv_through_marked : bool;  (** the culprit is ANOTHER SCC's [@[diverges]] member *)
+}
+
+(** The last module's "may diverge" verdicts for the report, by declaring
+    span: the reason, worded.  Filled by [Refine_check.check_module] when it
+    decided certificates; reset per module. *)
+let last_divergence : (A.span, divergence_note) Hashtbl.t = Hashtbl.create 16
+
+(** [c] worded for unit [u] ("it reaches `serve`, which is marked …"). *)
+let culprit_text (g : graph) (u : int) (c : culprit) : string =
+  let cu = culprit_unit c in
+  let own = g.scc_of.(cu) = g.scc_of.(u) in
+  let name = g.units.(cu).u_name in
+  match c with
+  | Marked _ when own -> "it is marked `@[diverges]`"
+  | Marked _ -> Printf.sprintf "it reaches `%s`, which is marked `@[diverges]`" name
+  | Uncertified (_, cert) ->
+    let why = if cert = "" then "" else Printf.sprintf " (%s)" cert in
+    if own then Printf.sprintf "its recursion is not shown to terminate%s" why
+    else Printf.sprintf "it reaches `%s`, whose recursion is not shown to terminate%s" name why
+  | Unresolved_call (_, callee) ->
+    Printf.sprintf "%s `%s`, which the termination checker cannot resolve"
+      (if own then "it calls" else Printf.sprintf "it reaches `%s`, which calls" name)
+      callee
+
 (** The unit declared at [span] (a declaring name's span), if any. *)
 let unit_at (g : graph) (span : A.span) : unit_ option =
   Array.find_opt (fun u -> u.u_span = span) g.units
+
+(** The frame for phase 5's inference (§3.5, the LSP "add `@[decreases]`"
+    action): a metric for SCC [si] of [t] whose every obligation was
+    checked and proved.  Phase 4 infers none. *)
+let suggest_metric : (t -> int -> A.expr list option) ref = ref (fun _ _ -> None)
 
 (** Set by the driver under [--termination-report]: every SCC of user code is
     demanded (§9), not only an annotated one.  Off by default (decision D2). *)
@@ -1759,12 +1915,16 @@ let report_lines ?(is_user : A.span -> bool = fun _ -> true) (t : t) : string li
         (1 + Option.value ~default:0 (Hashtbl.find_opt classes r.r_class)))
     rows;
   let recursive = List.filter (fun r -> r.r_recursive) rows in
+  let marked_only = List.filter (fun r -> (not r.r_recursive) && r.r_shape = "diverges") rows in
   let header =
     Printf.sprintf "termination report: %d recursive units" (List.length recursive)
+    ^ (match List.length rows - List.length recursive - List.length marked_only with
+       | 0 -> ""
+       | k -> Printf.sprintf ", %d calling a non-positive function value" k)
     ^
-    match List.length rows - List.length recursive with
+    match List.length marked_only with
     | 0 -> ""
-    | k -> Printf.sprintf ", %d calling a non-positive function value" k
+    | k -> Printf.sprintf ", %d more marked @[diverges]" k
   in
   (* A phase-2 certificate, when the refinement walk decided one. *)
   let rows =
@@ -1789,10 +1949,59 @@ let report_lines ?(is_user : A.span -> bool = fun _ -> true) (t : t) : string li
   in
   let count c = List.length (List.filter (fun r -> r.r_cert = c) rows) in
   let structural = count "structural" and metric = count "metric" and trusted_c = count "trusted" in
+  let diverges = count "diverges" in
   let cert_line =
-    Printf.sprintf "  certificate: %d structural, %d metric, %d trusted, %d unproved" structural metric
-      trusted_c
-      (List.length rows - structural - metric - trusted_c)
+    Printf.sprintf "  certificate: %d structural, %d metric, %d trusted, %d unproved%s" structural
+      metric trusted_c
+      (List.length rows - structural - metric - trusted_c - diverges)
+      (if diverges = 0 then "" else Printf.sprintf ", %d diverges" diverges)
+  in
+  (* Phase 4: an actor handler terminates per message (§3.7); one that may
+     not, and the callers that may diverge only through a [@[diverges]]
+     function (D4: nothing is required of them). *)
+  let g = t.graph in
+  let user_units =
+    let seen_u = Hashtbl.create 16 in
+    List.filter
+      (fun u ->
+        is_user u.u_span
+        &&
+        let k = span_str u.u_span in
+        if Hashtbl.mem seen_u k then false
+        else begin
+          Hashtbl.replace seen_u k ();
+          true
+        end)
+      (Array.to_list g.units)
+  in
+  let handler_lines =
+    List.filter_map
+      (fun u ->
+        match (u.u_kind, Hashtbl.find_opt last_divergence u.u_span) with
+        | Handler, Some dv ->
+          Some
+            (Printf.sprintf "handler\t%s\t%s\tmay not return: %s" (span_str u.u_span) u.u_name
+               dv.dv_text)
+        | _ -> None)
+      user_units
+  in
+  let through =
+    List.sort_uniq compare
+      (List.filter_map
+         (fun u ->
+           if u.u_kind = Handler || is_diverges u then None
+           else
+             match Hashtbl.find_opt last_divergence u.u_span with
+             | Some { dv_through_marked = true; _ } -> Some u.u_name
+             | _ -> None)
+         user_units)
+  in
+  let through_line =
+    if through = [] then []
+    else
+      [ Printf.sprintf "  may diverge through @[diverges]: %d unit%s: %s" (List.length through)
+          (if List.length through = 1 then "" else "s")
+          (String.concat ", " through) ]
   in
   (* Builtins and externs are trusted to terminate (§3.6, decision 10). *)
   let callees = trusted_callees ~is_user t in
@@ -1807,4 +2016,8 @@ let report_lines ?(is_user : A.span -> bool = fun _ -> true) (t : t) : string li
       (if List.length unres = 1 then "" else "s")
       (if unres = [] then "" else ": " ^ String.concat ", " unres)
   in
-  (header :: List.map line rows) @ [ summary; cert_line; trusted_line; unresolved_line ]
+  (header :: List.map line rows)
+  @ handler_lines
+  @ [ summary; cert_line ]
+  @ through_line
+  @ [ trusted_line; unresolved_line ]

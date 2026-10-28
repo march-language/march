@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/diverges_conflict_1.march","start_line":4,"start_col":5,"end_line":4,"end_col":9,"message":"`down` is marked `@[diverges]` and `@[decreases]`: `@[diverges]` says the function is not claimed to terminate, and a metric claims that it does.\nnote: remove one of them.","code":"diverges_conflict","fix":null,"labels":[],"notes":[]}

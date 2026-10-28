@@ -15,6 +15,12 @@ not, and gives a value of the parameters it could not rule out.
 It is a warning, and an error in a `cap verified` module. Recursion without
 `@[decreases]` is never warned about; `--termination-report` lists it.
 
+In a `cap total` module every function must be shown to terminate, so there the
+diagnostic is an error for any function that is not: unproved recursion, and a
+function that calls one, or calls a `@[diverges]` function without being marked
+`@[diverges]` itself. An actor handler gets it as "handler `X` may not return".
+`main` is exempt.
+
 ## A program that triggers it
 
 ```march
@@ -50,6 +56,11 @@ mod Main do
 end
 ```
 
+`march --check-json` carries this rewrite as the diagnostic's machine fix, and
+the editor offers it as a quick fix, whenever the counterexample is negative and
+the exit is `x == 0`. The editor also offers to mark the function `@[diverges]`
+(replacing its `@[decreases]`) when it is meant to run for ever.
+
 Refining the parameter to `{Int | _ >= 0}` works too: then every caller must
 pass a value that is at least 0, and the recursive call `down(n - 1)` is checked
 to pass one.
@@ -63,4 +74,5 @@ proof is what will let the refinement checker assume a recursive function's
 return refinement at its own recursive calls (the termination design,
 `specs/2026-10-26-termination-checking-design.md`).
 
-See also: [the language reference](../refinement-types.md), `invalid_decreases`.
+See also: [the language reference](../refinement-types.md), `invalid_decreases`,
+`diverges_conflict`.

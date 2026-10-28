@@ -43,6 +43,7 @@ let codec_missing = "codec_missing"
 let constructor_arity = "constructor_arity"
 let curried_lambda_over_tuple = "curried_lambda_over_tuple"
 let deterministic_violation = "deterministic_violation"
+let diverges_conflict = "diverges_conflict"
 let division_by_zero = "division_by_zero"
 let duplicate_actor = "duplicate_actor"
 let duplicate_binder = "duplicate_binder"
@@ -220,6 +221,7 @@ let all = [
   constructor_arity;
   curried_lambda_over_tuple;
   deterministic_violation;
+  diverges_conflict;
   division_by_zero;
   duplicate_actor;
   duplicate_binder;
