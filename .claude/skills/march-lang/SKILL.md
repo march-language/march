@@ -922,7 +922,8 @@ Directly callable without module qualification (built into the evaluator).
 | `int_abs(n)` | Absolute value |
 | `int_pow(base, exp)` | Power |
 | `int_div(a, b)` / `int_mod(a, b)` | Division / modulo |
-| `int_div_euclid(a, b)` / `int_mod_euclid(a, b)` | Euclidean |
+| `int_div_euclid(a, b)` / `int_mod_euclid(a, b)` | Euclidean (remainder never negative) |
+| `int_div_floor(a, b)` / `int_mod_floor(a, b)` | Floor: rounds toward -inf, remainder takes the divisor's sign. Use to split a timestamp/index into units + leftover in `[0, b)` |
 | `int_and(a, b)` / `int_or` / `int_xor` / `int_not` | Bitwise |
 | `int_shl(n, k)` / `int_shr` | Bit shifts |
 | `int_popcount(n)` | Count set bits |
