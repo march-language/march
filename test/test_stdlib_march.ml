@@ -502,6 +502,10 @@ let () =
       Alcotest.test_case "DateTime module"
         `Quick (run_stdlib_test "test_datetime.march" "TestDateTime");
     ]);
+    ("int_floor", [
+      Alcotest.test_case "int_div_floor / int_mod_floor"
+        `Quick (run_stdlib_test "test_int_floor.march" "TestIntFloor");
+    ]);
     ("hash_map", [
       Alcotest.test_case "HashMap module"
         `Quick (run_stdlib_test "test_hash_map.march" "TestHashMap");

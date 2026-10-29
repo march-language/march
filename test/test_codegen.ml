@@ -13285,6 +13285,31 @@ let test_compiled_int_mod_euclid_parity () =
     ~expected:"[1, 2, 2, 1]"
     ()
 
+(** int_div_floor / int_mod_floor: compiled output must match the interpreter
+    in all four sign quadrants, and the INLINE path (a positive literal divisor:
+    sdiv + srem + select) must agree with the HELPER path (a divisor held in a
+    variable, which calls march_checked_ifloordiv/ifloormod).  Both appear in
+    each row, so a wrong inline correction shows up as two differing columns.
+    The negative-divisor rows are where floor and Euclidean division differ. *)
+let test_compiled_int_floor_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_div_floor"
+    ~src:"mod IntFloorParity do\n\
+    \  needs IO.Console\n\
+         \  fn vd(a : Int, b : Int) : Int do int_div_floor(a, b) end\n\
+         \  fn vm(a : Int, b : Int) : Int do int_mod_floor(a, b) end\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \    println([int_div_floor(23, 7), vd(23, 7), int_div_floor(-23, 7), vd(-23, 7), \
+                        int_div_floor(23, -7), int_div_floor(-23, -7), int_div_floor(7, -2)])\n\
+         \    println([int_mod_floor(23, 7), vm(23, 7), int_mod_floor(-23, 7), vm(-23, 7), \
+                        int_mod_floor(23, -7), int_mod_floor(-23, -7), int_mod_floor(7, -2)])\n\
+         \    println([int_div_floor(-1, 86400), vd(-1, 86400), int_mod_floor(-1, 86400), vm(-1, 86400), \
+                        int_div_floor(-86400, 86400), int_div_floor(-86401, 86400)])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[3, 3, -4, -4, -4, 3, -4]\n[2, 2, 5, 5, -5, -2, -1]\n[-1, -1, 86399, 86399, -1, -2]"
+    ()
+
 (** March Int is 63-bit and wraps modulo 2^63 on BOTH backends
     (specs/lang/type-system.md, "Int width and overflow").  Pre-fix the
     compiled backend did 64-bit i64 arithmetic in registers, so
@@ -14715,6 +14740,8 @@ declare i64    @march_checked_idiv(i64 %a, i64 %b)
 declare i64    @march_checked_imod(i64 %a, i64 %b)
 declare i64    @march_checked_emod(i64 %a, i64 %b)
 declare i64    @march_checked_ediv(i64 %a, i64 %b)
+declare i64    @march_checked_ifloordiv(i64 %a, i64 %b)
+declare i64    @march_checked_ifloormod(i64 %a, i64 %b)
 ; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
 declare i64    @march_checked_div_op(i64 %a, i64 %b)
 declare i64    @march_checked_mod_op(i64 %a, i64 %b)
@@ -15320,7 +15347,7 @@ let test_builtin_group_total () =
          (fun c -> March_tir.Llvm_emit.builtin_group c = g)
          March_tir.Builtin_name.all)
   in
-  Alcotest.(check int) "arith" 22 (count March_tir.Llvm_emit.Bg_arith);
+  Alcotest.(check int) "arith" 24 (count March_tir.Llvm_emit.Bg_arith);
   Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
   Alcotest.(check int) "record" 18 (count March_tir.Llvm_emit.Bg_record)
 
@@ -15335,7 +15362,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 65
+  Alcotest.(check int) "constructor count" 67
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)
@@ -18150,6 +18177,8 @@ let codegen_suites =
             test_compiled_no_opt_prunes_unreachable;
           Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick
             test_compiled_int_div_euclid_parity;
+          Alcotest.test_case "compiled int_div_floor/int_mod_floor parity (inline vs helper)" `Quick
+            test_compiled_int_floor_parity;
           Alcotest.test_case "compiled int_mod_euclid parity (negative divisor)" `Quick
             test_compiled_int_mod_euclid_parity;
           Alcotest.test_case "compiled Int is 63-bit and wraps (overflow edge parity)" `Quick

@@ -58,6 +58,40 @@ describe "DateTime" do
       end
     end
 
+    -- Timestamps before the epoch exercise the floor (not truncating) split
+    -- into days and seconds: truncation would put -1 in day 0.
+    test "one second before the epoch is 1969-12-31 23:59:59" do
+      match DateTime.from_timestamp(-1) do
+      DateTime(Date(y, m, d), Time(h, mn, s)) -> do
+        assert (y == 1969)
+        assert (m == 12)
+        assert (d == 31)
+        assert (h == 23)
+        assert (mn == 59)
+        assert (s == 59)
+      end
+      end
+    end
+
+    test "exactly one day before the epoch is midnight 1969-12-31" do
+      match DateTime.from_timestamp(-86400) do
+      DateTime(Date(y, m, d), Time(h, mn, s)) -> do
+        assert (y == 1969)
+        assert (m == 12)
+        assert (d == 31)
+        assert (h == 0)
+        assert (mn == 0)
+        assert (s == 0)
+      end
+      end
+    end
+
+    test "to_timestamp roundtrips negative timestamps" do
+      assert (DateTime.to_timestamp(DateTime.from_timestamp(-1)) == -1)
+      assert (DateTime.to_timestamp(DateTime.from_timestamp(-86401)) == -86401)
+      assert (DateTime.to_timestamp(DateTime.from_timestamp(-1000000007)) == -1000000007)
+    end
+
     test "one hour" do
       let dt = DateTime.from_timestamp(3600)
       match dt do

@@ -35,10 +35,12 @@ type t =
   | Int_abs
   | Int_div
   | Int_div_euclid
+  | Int_div_floor
   | Int_max_value
   | Int_min_value
   | Int_mod
   | Int_mod_euclid
+  | Int_mod_floor
   | Int_not
   | Int_popcount
   | Int_pow
@@ -109,6 +111,8 @@ let to_string = function
   | Int_min_value -> "int_min_value"
   | Int_mod -> "int_mod"
   | Int_mod_euclid -> "int_mod_euclid"
+  | Int_mod_floor -> "int_mod_floor"
+  | Int_div_floor -> "int_div_floor"
   | Int_not -> "int_not"
   | Int_popcount -> "int_popcount"
   | Int_pow -> "int_pow"
@@ -160,6 +164,7 @@ let all =
     Float_to_string; Get_work_pool; Html_auto_escape; Html_escape_ctx;
     String_concat_n;
     Int_abs; Int_div; Int_div_euclid; Int_max_value; Int_min_value;
+    Int_div_floor; Int_mod_floor;
     Int_mod; Int_mod_euclid; Int_not; Int_popcount; Int_pow;
     Int_to_string; Mpst_send; Negate; Not; Pmap_threshold; Receive;
     Record_from_list; Record_get; Record_has_key; Record_put;

@@ -60,6 +60,7 @@ let rec fold_expr : ('a -> Tir.expr -> 'a) -> 'a -> Tir.expr -> 'a =
 (** Builtins that directly surface a panic/abort. *)
 let direct_panic_builtins : StringSet.t = StringSet.of_list [
   "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+  "int_div_floor"; "int_mod_floor";
   "/"; "%";
   "panic"; "panic_"; "todo_"; "unreachable_";
 ]

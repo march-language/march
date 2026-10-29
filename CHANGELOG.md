@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`int_div_floor(a, b)` and `int_mod_floor(a, b)`: floor division and modulo.** The
+  quotient rounds toward negative infinity and the remainder takes the divisor's sign, so
+  `int_div_floor(-1, 86400)` is `-1` and `int_mod_floor(-1, 86400)` is `86399` (truncating
+  `/` gives `0` and `-1`). A zero divisor panics like the other division builtins. In
+  compiled code a positive literal divisor is emitted inline, not as a runtime call, so
+  LLVM can strength-reduce it. `DateTime.from_timestamp` now uses them (design:
+  `specs/2026-10-29-floor-division-and-const-divisors-design.md`).
+
 - **`march --check --termination-report FILE`** prints one line per recursive function
   in your code, with how it recurses: structurally on a component, on an `Int` metric
   that a guard bounds (`fib`) or does not (`down(n - 1)` with an `n == 0` exit),

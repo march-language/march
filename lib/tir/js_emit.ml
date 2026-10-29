@@ -671,6 +671,7 @@ and emit_val_impl ctx expr =
           | "int_and" | "int_or" | "int_xor" | "int_not"
           | "int_shl" | "int_shr" | "int_popcount"
           | "int_mod" | "int_div" | "int_mod_euclid" | "int_div_euclid"
+          | "int_mod_floor" | "int_div_floor"
             -> true | _ -> false) ->
         let rt = "march_" ^ n in
         use_runtime ctx rt;
@@ -1451,7 +1452,8 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
   Hashtbl.replace ctx.runtime_uses "march_string_byte_length" ();
   let int_rt_builtins2 =   (* two-argument runtime-backed int builtins *)
     [ "int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr";
-      "int_mod"; "int_div"; "int_mod_euclid"; "int_div_euclid" ] in
+      "int_mod"; "int_div"; "int_mod_euclid"; "int_div_euclid";
+      "int_mod_floor"; "int_div_floor" ] in
   let int_rt_builtins1 = [ "int_not"; "int_popcount" ] in
   List.iter (fun n -> Hashtbl.replace ctx.runtime_uses ("march_" ^ n) ())
     (int_rt_builtins2 @ int_rt_builtins1);

@@ -21,18 +21,6 @@ mod DateTime do
 
   -- ── Private helpers ───────────────────────────────────────────────────────
 
-  -- Floor division (rounds toward negative infinity).
-  pfn floor_div(a, b) do
-    let q = int_div(a, b)
-    let r = a - q * b
-    if r < 0 do q - 1 else q end
-  end
-
-  -- Floor modulo (always non-negative when b > 0).
-  pfn floor_mod(a, b) do
-    a - floor_div(a, b) * b
-  end
-
   -- Is the given year a leap year in the proleptic Gregorian calendar?
   pfn is_leap(y) do
     if int_mod(y, 400) == 0 do true
@@ -171,8 +159,8 @@ mod DateTime do
       DateTime(Date(1970, 1, 2), Time(0, 0, 0))
   """
   fn from_timestamp(ts) do
-    let days = floor_div(ts, 86400)
-    let secs = floor_mod(ts, 86400)
+    let days = int_div_floor(ts, 86400)
+    let secs = int_mod_floor(ts, 86400)
     let hour = int_div(secs, 3600)
     let min  = int_div(int_mod(secs, 3600), 60)
     let sec  = int_mod(secs, 60)
