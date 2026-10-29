@@ -673,6 +673,7 @@ window.marchModuleIndex = {
    "file": "list.march",
    "unavailable": null,
    "uses": [
+    "Range",
     "Result",
     "String",
     "Tuple"
