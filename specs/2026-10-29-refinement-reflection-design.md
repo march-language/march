@@ -1,7 +1,7 @@
 # Design: refinement reflection, lemmas, and unfolding
 
 **Date:** 2026-10-29
-**Status:** design, revised after a fresh-context review (§12). Nothing built. Phases 0-3 below, one PR each; later phases listed. §2.6 records a deviation from D1 that awaits the user's approval.
+**Status:** design, revised after a fresh-context review (§12). Nothing built. Phases 0-3 below, one PR each; later phases listed.
 **Base commit:** `7df0dc808` (origin/main, "browser: regenerate the in-browser REPL and live compiler").
 **Probe environment:** compiler `_build/default/bin/main.exe` built from that commit with
 `dune build --root . bin/main.exe`; z3 4.16.0 on PATH (CI has 4.8.12); macOS (Darwin 25.6),
@@ -207,8 +207,8 @@ review measured that.
 | of which divide by a non-literal (need a proved `Division`) | 8 | 1 |
 | of which mention `Float` in the signature | 18 | 21 |
 
-With the §2.6 stdlib allowlist empty (no stdlib callee counts as reflected), the review measured
-test/native at 382.
+If no stdlib callee counted as reflected, the review measured test/native at 382; with the stdlib
+reflected (§2.6), the 384 above is the figure.
 
 The first blocking reason of the rest:
 
@@ -526,7 +526,6 @@ Reflection is automatic (D1). A function `f` is **reflected** when all of these 
 | R8 | every parameter sort and the result sort are encodable (§3.2), every parameter refinement translates (it becomes the unfolding guard), and the result is not `Unit` | §3.2 |
 | R9 | `f` is not marked `@[opaque]`, `@[assume]` or `@[trusted]` (§2.5), recursive or not | attributes |
 | R11 | `f`'s name is not predicate vocabulary (`len`, `elts`, `keys`, the set operators, `is_<Ctor>`). In a predicate such a name always means the builtin, so a user `len` cannot be reflected under it (I3) | the vocabulary tables (`refine_encode.ml:1040-1052`, `:1358`) |
-| R10 | **(option S1 only, a deviation from D1 awaiting approval, §2.6)** in the stdlib, `f` is on the reflection allowlist. Checked last | a list in `refine_reflect.ml` |
 
 R1-R9 and R11 form a greatest fixpoint over the call graph: start with every unit that passes the local
 tests, and drop any unit with a dropped callee, until nothing changes. A mutual SCC is
@@ -630,65 +629,41 @@ Rules:
   checker to trust has a body the checker has not verified to match it, and unfolding the body
   next to the trusted contract could contradict it.
 
-### 2.6 The standard library: a deviation from D1, awaiting the user's approval
+### 2.6 The standard library
 
-**This section deviates from D1.** D1 says reflection is automatic for every qualifying function,
-with no opt-in. The design below keeps an allowlist for `stdlib/`, which is an opt-in for the
-stdlib's 817 reflectable functions. It is written as a **deviation that needs the user's
-approval**. Both options are specified fully below, so either can be built; phase 1 builds the
-switch between them (one constant in `refine_reflect.ml`), and phase 3 is written so it works
-under either.
+The stdlib is reflected automatically, under exactly the same rules as user code (D1, and the
+D1 clarification of 2026-10-29 in §11.1). So are libraries reached through `MARCH_LIB_PATH`.
+There is no list of stdlib functions to opt in.
 
-For user code, and for libraries reached through `MARCH_LIB_PATH`, D1 holds from phase 1 under
-both options.
-
-#### Option S1 (proposed): a stdlib allowlist
-
-- **Rule R10:** a stdlib function is reflected only if R1-R9 and R11 hold **and** it is on the
-  allowlist, a list of qualified names in `refine_reflect.ml`.
-- The list is empty in phases 1-2. Phase 3 puts D18's set on it: `List.append`, `List.reverse`,
-  `List.take`, `List.drop` and their helpers. Later PRs widen it (Q2).
-- The two stdlib `@[measure]`s are reflected regardless: the attribute asserts reflection (§5).
-- R10 is checked **last**. A stdlib function that fails an earlier rule reports that rule, so
-  `List.map` reports R7 (function value), and only a function that passes everything else
-  reports R10:
+- **From phase 1**, every stdlib function that passes R1-R9 and R11 is reflected. Probe (d)
+  counts 817 of them. `--reflect-report`, run on a stdlib file, lists them with their status.
+- **The opt-out is `@[opaque]`**, function by function (§2.5). Phase 1 marks a stdlib function
+  `@[opaque]` only with a stated reason (its body is expected to change for performance, or its
+  unfolding measurably slows checking), and the phase-1 progress note lists every function so
+  marked, with the reason. None is known today.
+- **The two stdlib `@[measure]`s** stay measures (§5): the attribute asserts reflection and keeps
+  their axiom-tier encoding.
+- **A stdlib function that is not reflected** reports its first blocker like any other:
 
   ```
-  `List.sum_int` is not reflected: it is not on the stdlib reflection list (R10). [refinement_unchecked]
+  `List.map` is not reflected, so this refinement is not checked: it calls `f`, a function value (R7). [refinement_unchecked]
   ```
 
-Why I propose it, and how strong each reason is:
-- **Interface.** A stdlib body edit would change user proofs (§7). The list makes each stdlib
-  body a deliberate promise. The review notes this applies equally to `MARCH_LIB_PATH`
-  libraries, which D1 reflects automatically; that is true, and is why `@[opaque]` exists. The
-  stdlib differs in one way: users cannot pin its version independently of the compiler.
-- **Cost.** Every program checks the stdlib's 220 obligations. Under S2, stdlib obligations whose
-  frontier holds a stdlib call would start running stage 2 in every program. §8's bounds (the
-  frontier, the two stages) limit this, but they are unmeasured on real proofs until phase 1.
-  This is the weaker reason: the review is right that the bounds already make the cost small.
-- **D18** names five functions for the first release, which reads most naturally if the stdlib
-  is not reflected wholesale.
+- **Cost.** Stdlib obligations whose frontier holds a reflected stdlib call run stage 2 from
+  phase 1, in every program. §8 bounds this, and §6.3's budget applies from phase 1.
+- **Interface.** A stdlib body edit can now change user proofs (§7). The D17 hashes, the `uses:`
+  note and the monotone gate over the corpus make every such change visible in the PR that makes
+  it.
 
-#### Option S2 (D1 as written): the stdlib reflected automatically
+#### Considered and rejected: a stdlib allowlist
 
-- No R10. A stdlib function is reflected under exactly R1-R9 and R11, like user code.
-- Phase 1 reflects the stdlib's 817 functions (probe (d)). `--reflect-report` run on each stdlib
-  file lists them.
-- `@[opaque]` is the stdlib's opt-out, function by function. Phase 1 marks `@[opaque]` every
-  stdlib function whose body is expected to change for performance reasons (none are known;
-  the progress note lists any added).
-- Phase 3 is unchanged except that it adds no allowlist entries: it ships the lifts and the
-  lemmas.
-- The `std_not_allowlisted` test becomes `std_auto`: `List.sum_int` in a predicate **is**
-  reflected, `List.map` still reports R7.
-- The cost rows of §6.3 then apply from phase 1 to every corpus fixture that calls a reflected
-  stdlib function, not only from phase 3.
-
-#### What the user decides
-
-S1 or S2. Until the user approves S1, S1 is built behind the switch, and the phase-1 progress
-note reports the monotone gate and timing under **both** settings, so the cost argument is
-measured rather than assumed.
+An earlier revision proposed reflecting stdlib functions only from a hand-kept list (empty at
+first, then D18's five). Its main argument was interface stability: a stdlib body would become a
+promise to user proofs only when someone chose to make it one, and users cannot pin the stdlib's
+version apart from the compiler's. Its cost argument was weaker, since the frontier and the
+two-stage discharge already bound the cost. The user decided on 2026-10-29 that the stdlib is
+included in D1: it is reflected automatically, and `@[opaque]` is the per-function answer to the
+interface concern.
 
 ---
 
@@ -1179,7 +1154,7 @@ no longer the only way into the logic.
 |---|---|---|---|
 | **A. An alias that errors** | `@[measure]` means `@[reflect]` (§3.8): the function must be reflected, else `invalid_measure` naming the first blocker. It also keeps the legacy axiom encoding where it applies (§5.3) | measures that pass today's gate but fail R1-R9 become errors: F7's `noisy`/`boom`/`spin`/`show` shapes. The in-tree count of such measures is to be listed in phase 1 (the two stdlib ones pass) | **recommended** |
 | B. A deprecated alias with a warning | as A, plus `deprecated_attribute` pointing at `@[reflect]` | as A, plus a warning on 2 stdlib and 117+ test programs | alternative, once `@[reflect]` has a release behind it |
-| C. Removal | `@[measure]` becomes `unknown_attribute` | every measure loses its guarantee; `pvec_length` and `sorted_set_elts` keep working only if they pass R1-R10 without the attribute, and the stdlib allowlist would have to name them | rejected for v1 |
+| C. Removal | `@[measure]` becomes `unknown_attribute` | every measure loses its guarantee; `pvec_length` and `sorted_set_elts` keep working only if they pass R1-R9 and R11 without the attribute, and they lose the axiom tier | rejected for v1 |
 
 **Why A.** Today's `@[measure]` is the one way a user says "this must reach the logic, fail
 loudly if it can't". D1 removes the need to opt in, but not the need to **insist**: a refactor that
@@ -1271,7 +1246,7 @@ Interleaved A/B, five runs, median, load average recorded, `.march/cas/vc` clear
 | default `--check` on `stdlib/list.march` and `stdlib/json.march` | **≤ 105%** |
 | the corpus sweep's total wall time | **≤ 110%** |
 | any single fixture | **≤ 150%**, and no fixture that finished under the 3 s per-query timeout before may hit it after |
-| phase 3 (stdlib allowlist on): every corpus fixture that calls a D18 function | ≤ 120% |
+| from phase 1: every corpus fixture that calls a reflected stdlib function | ≤ 120% |
 | LSP: re-analysis of one edited file that uses a reflected function, warm process | ≤ 120% of today's re-analysis latency, median of 20 edits; no single edit over 1.5 s added |
 
 ---
@@ -1348,13 +1323,15 @@ From §0.10:
 - **With the two-stage discharge**, stage 2 can run only on a non-proved obligation. In the
   corpus that is at most **18 user-code queries in all 417 programs**, plus the stdlib's **40**
   skips per program.
-- **The stdlib's 40 run in every program**, so they matter most. With the allowlist empty
-  (phases 1-2), their frontiers hold no reflected function and stage 2 never starts for them:
-  zero added cost. From phase 3, only those whose frontier holds a D18 function run stage 2.
-  Under option S2 they can start in phase 1; the phase-1 note measures both.
+- **The stdlib's 40 run in every program**, so they matter most. The stdlib is reflected from
+  phase 1 (§2.6), so any of the 40 whose frontier holds a reflected stdlib call runs stage 2 in
+  every program, from phase 1. That is at most 40 extra queries per program, each under stage 2's
+  1 s timeout and the in-process negative cache (§4.4). The phase-1 progress note measures the
+  real number and its time over the corpus.
 - So the default-mode cost in phases 1-2 is the reflectability analysis (a linear pass over
   TERM's graph, which is already built when a module has a measure or a demanded SCC) plus
-  stage 2 on user code's own skips. The ≤ 105% budget of §6.3 is expected to hold; phase 1
+  stage 2 on user code's own skips and on those of the 40 stdlib skips whose frontier holds a
+  reflected call. The ≤ 105% budget of §6.3 is expected to hold; phase 1
   measures it.
 
 Three loads the first draft missed (review I10), and what bounds each:
@@ -1382,7 +1359,7 @@ Three loads the first draft missed (review I10), and what bounds each:
 | **32 unfoldings per query** | a hard cap; past it, `reflect-budget` |
 | **Quantifier-free unfoldings** | every added assertion is ground, so no matching loop can start. The only quantifiers are the axiom-tier measures, as today |
 | **`@[opaque]`** | removes one function from every frontier |
-| **The stdlib allowlist** (§2.6) | the stdlib adds nothing to any frontier until phase 3, then five functions |
+| **`@[opaque]` on the stdlib** (§2.6) | a stdlib function that proves costly is taken out of every frontier, with its reason in the phase-1 note |
 
 ---
 
@@ -1447,7 +1424,7 @@ Where it runs (D16):
   `forge/lib/cmd_test.ml`) runs it over the project's reflected functions.
 - **Always in CI**: a test group `reflect-parity` in `test/test_refinecheck.ml` runs it over the
   phase fixtures, and a sweep step runs it over every reflected function of the corpus
-  (`test/native`, plus the stdlib allowlist). Any mismatch is RED.
+  (`test/native` and the stdlib). Any mismatch is RED.
 
 The net also covers the axiom tier: the same comparison runs for every `@[measure]`, which
 nothing checks today.
@@ -1481,7 +1458,7 @@ nothing checks today.
 ## 10. Phases
 
 D20's first step ("probes, then single unfolding, then lemmas") is phases 0, 1 and 2 here, in
-that order. Phase 3 is D18's stdlib release. Phases 4-7 are D20's "later".
+that order. D18's functions are reflected from phase 1, like the rest of the stdlib (§2.6); phase 3 is the release that makes them provable about, with lifts, lemmas and the manifest. Phases 4-7 are D20's "later".
 
 Conventions, as in TERM §8:
 - `test_refinecheck.exe` green at every step;
@@ -1552,8 +1529,9 @@ Conventions, as in TERM §8:
 - `@[opaque]` (parser, `grammar.js`, `known_fn_attributes`), `reflect_conflict`.
 - §7.1's D17 lines, §7.2's LSP invalidation and `logic_hash` column.
 - §9.2's parity check: the `reflect-parity` group and `forge test --reflection-parity`.
-- The §2.6 switch: S1 (allowlist, empty) by default until the user decides; the progress note
-  reports the gate and timing under S1 and S2.
+- The stdlib reflected under the same rules (§2.6). Any stdlib function marked `@[opaque]` is
+  listed in the progress note with its reason. The note reports the monotone gate and timing over
+  the whole corpus, stdlib included.
 - The review's fixes that land here: domain-guarded unfoldings (C1); R5 on
   `nonexhaustive_match_spans` and per-arm implications with no default (C2); the two equalities
   and the total-`eq` condition (C3, C4); resolved-identity callees and R11 (I3); the injective
@@ -1652,7 +1630,9 @@ example; `@[lemma]` in `known_fn_attributes`; the error pages seeded.
 ### Phase 3: the stdlib `List` set (D18)
 
 **Scope.**
-- Allowlist: `List.append`, `List.reverse`, `List.take`, `List.drop`, and the helpers they call.
+- No reflection change: `List.append`, `List.reverse`, `List.take` and `List.drop` are already
+  reflected from phase 1 (§2.6). This phase ships what makes them **useful**: the lifts, the
+  lemmas and the manifest below.
 - **`reverse` and `take` lift their local `go`** into private top-level functions,
   `pfn reverse_onto(xs, acc)` and `pfn take_onto(xs, k, acc)`. A local is reflected (R1), but a
   lemma about it cannot be stated outside the function, and `reverse(reverse(xs)) == xs` needs
@@ -1691,14 +1671,14 @@ says") and the subset-of-`elts` contract, which cover the element facts users as
 | `std_reverse_reverse` | `List.reverse_reverse(xs)` then `need_eq(List.reverse(List.reverse(xs)), xs)` | proved | the accumulator lemma chain |
 | `std_take_drop` | `List.take_drop(xs, n)` then `need_eq(List.append(List.take(xs, n), List.drop(xs, n)), xs)` | proved | — |
 | `std_len_take` | `n >= 0`, `len(xs) >= n`: `need_len(List.take(xs, n), n)` after `List.len_take(xs, n)` | proved | Int and list together |
-| `std_not_allowlisted` (S1) | `List.sum_int(xs)` in a predicate; and `List.map(xs, f)` in a predicate | `sum_int`: `refinement_unchecked` naming "not on the stdlib reflection list (R10)"; `map`: the R7 message (function value), because R10 is checked last. Under S2 this row is `std_auto`: `sum_int` reflected, `map` R7 | rule order |
+| `std_auto` | `need_eq(List.sum_int(Cons(2, Nil)), 2)`; and `List.map(xs, f)` in a predicate | `sum_int` is reflected with no annotation and the call proves; `map` reports R7 (a function value) | the stdlib is reflected automatically |
 | `std_filter_len` | `need_le(List.filter(xs, p), len(xs))` | proved through the new contract | the substitute |
 | `std_filter_not_reflected` | `{Unit \| List.filter(xs, p) == xs}` | `refinement_unchecked` (R7) | D10 |
 | `std_lift_ir` | `--emit-llvm` of the corpus | `ir-oracle` changes only on fixtures reaching `reverse`/`take`; the normalising diff on those is empty | pure refactor |
-| `std_parity` | the allowlisted functions | 0 mismatches | §9.2 |
+| `std_parity` | every reflected stdlib function | 0 mismatches | §9.2 |
 
 **Oracle gate:** monotone. Expected: new proofs only at sites that call a D18 function in the
-frontier; the phase-3 timing row of §6.3.
+frontier, now that the shipped lemmas are callable; the reflected-stdlib timing row of §6.3, unchanged from phase 1 apart from the lemma manifest.
 **Done means:** the table green; the reference's "Lemmas" section gains the stdlib list with each
 statement; the stdlib API docs regenerate.
 
@@ -1724,7 +1704,7 @@ measure tests).
 
 Specialise per call site, as defunctionalisation does: a call `g(xs, fn x -> e)` where the
 lambda is closed over reflectable terms gets a specialised logic function `g$k` with `e`
-inlined. Then `List.filter` is reflected (and, under S1, joins the allowlist). Its own soundness table covers captures,
+inlined. Then `List.filter` is reflected. Its own soundness table covers captures,
 partial application, recursion through the value, and the parity net per specialisation.
 
 ### Phase 6: Int overflow (D8)
@@ -1765,13 +1745,17 @@ checked before it is offered, as TERM phase 5 does for metrics.
 - **D18:** the first release reflects stdlib `List` append, reverse, filter, take and drop. Filter takes a function value, so square this with D10: either a first-order specialisation, or move filter to the later phase. Rule on it and say why.
 - **D19:** `--refine-infer` proposes lemma calls only in a later phase.
 - **D20:** phase 1 covers probes, then single unfolding, then lemmas. Repeated unfolding, function values and overflow come later.
+- **D1 clarification (2026-10-29): the stdlib is included.** The stdlib is reflected automatically under exactly the same rules as user code. There is no opt-in list of stdlib functions; `@[opaque]` is the per-function opt-out.
 
 ### 11.2 How this design applies them (my rulings, each revisitable)
 
-1. **D1:** automatic for user code and `MARCH_LIB_PATH` libraries from phase 1; the stdlib by
-   an allowlist, written as a **deviation from D1 awaiting the user's approval**, with the
-   automatic alternative (S2) fully specified (§2.6). Visibility through the named blocker, `--reflect-report` and the `uses:`
-   note (§2.4). `@[opaque]` is the opt-out (§2.5).
+1. **D1:** automatic for user code, `MARCH_LIB_PATH` libraries and the stdlib alike, from
+   phase 1 (§2.6, and the D1 clarification above). Visibility through the named blocker,
+   `--reflect-report` and the `uses:` note (§2.4). `@[opaque]` is the opt-out (§2.5). D1's
+   "every function" is read as every function with a fixed first-order definition: `impl`
+   methods, actor handlers, `extern`s, `main`, lemmas and locals that capture variables have no
+   such definition, so R1 leaves them out; `@[assume]` and `@[trusted]` functions have an
+   unverified body, so R9 does.
 2. **D2:** option A, `@[measure]` an exact synonym of `@[reflect]` that errors when the
    function is not reflectable (§5.2). Existing in-fragment measures keep their quantified axioms
    (the axiom tier, §5.3), so D2 moves no existing proof.
@@ -1815,7 +1799,7 @@ one held, and none was rejected. One line per finding:
 | C2. R5 blind to guarded non-exhaustiveness | R5 reads `nonexhaustive_match_spans`; `term_of_body` uses one implication per arm and never a default; an interpreter failure in the parity net is RED. Probe r2 re-run: no diagnostic, run panics. REJECT `sound_guarded` | §0.12 r2, F20, R5, §3.4, §9.1, §9.2, phase 0 `report_guarded`, phase 1 `parity` |
 | C3. `==` on `List(a)` broken under both readings | Chose **separate equalities**: logical `=` in predicates (keeps every lemma in §4.6 and phase 3 provable), program `==` in bodies (opaque per D7); lemma facts instantiated from the proved SMT term; g3 keeps its verdict with a `predicate_eq_structural` warning. REJECT `sound_eq_float` with a NaN case and a positive control | §0.7, F8, §3.3, §3.5, §6.2, §9.1, phase 1 `eq_handwritten`, §11.2 #6 |
 | C4. D7 exception admitted an effectful or partial `eq` | The exception applies only when every reachable `impl Eq` passes R2-R7; otherwise `==` blocks. REJECT `sound_eq_effect` | R6, §2.3, §3.5, §9.1, phase 0 `report_eq_effect` |
-| I1. Stdlib allowlist contradicts D1 | Per the user: kept, written up as a **deviation awaiting approval** (option S1), with the automatic alternative (S2) specified fully and a build-time switch; R10 is checked last; `std_not_allowlisted` now uses `List.sum_int` for the R10 message and `List.map` for the R7 one | §2.6, R10, §8.1, phase 1 scope, phase 3 table, §11.2 #1 |
+| I1. Stdlib list contradicts D1 | Resolved by the user's D1 clarification: the stdlib is reflected automatically under the same rules, with `@[opaque]` as the per-function opt-out; the list idea is kept only as a "considered and rejected" note. Test `std_auto` | §2.6, §8.1, §6.3, phase 1 scope, phase 3, §11.1, §11.2 #1 |
 | I2. Calling a lemma cost a function its reflection | Lemma calls are `()` in `term_of_body`; R6 admits lemma callees. Test `lemma_in_body` | R6, §3.4, phase 1 table |
 | I3. Builtins matched by spelling | Callees matched by resolved identity; new R11 bars predicate-vocabulary names. Probe r3 re-run: user `len` prints 7, predicate `len(_) == 1` proved. REJECT `sound_shadow` | §0.12 r3, F21, R6, R11, §3.4, §9.1, phase 0 `report_shadow`, phase 0 todo |
 | I4. Symbol naming not injective | Mangling `\|r:<origin>:<path>.<name>[/<local>#<line>:<col>]@<instance>\|`, quoted; a duplicate-definition internal error. REJECT `sound_mangle` | §3.1, §9.1 |
@@ -1853,10 +1837,12 @@ The decisions above do not settle these. Each has a recommendation.
   encoding. **Recommended:** keep the axiom tier until phase 4 can run the measure test groups and
   the corpus with measures unfolded at fuel 2, under the monotone gate. Move only if nothing goes
   from proved to skipped and timing is within budget. Until then the two tiers coexist (§5.3).
-- **Q2. When does the stdlib allowlist widen, and by what rule?** **Recommended:** one PR per
-  module, each with its lemmas and the parity net, starting with the pure data modules (`Option`,
-  `Result`, `Map`'s first-order functions). Never "everything reflectable at once": probe (d)'s
-  count makes that a cost experiment on every user program.
+- **Q2. In what order are stdlib lemmas added after phase 3?** Phase 3 ships `List`'s. Every
+  other reflected stdlib function is already usable in predicates, but proofs about recursive
+  ones need lemmas. **Recommended:** one PR per module, ordered by how often user predicates in
+  the corpus mention the module (measured by `--refine-report-sites=all`), each with its
+  manifest entries and the parity net; `Option`, `Result` and the first-order parts of `Map`
+  first.
 - **Q3. Should `@[reflect]` (bare) exist?** It asserts reflection, which D1 makes automatic, and
   `@[measure]` already does the same under option A. **Recommended:** yes, as the canonical
   spelling, because `@[reflect(fuel: N)]` needs the name anyway and a non-measure function
