@@ -54,7 +54,23 @@ the compiled (LLVM) code, give the same answer for every operation below.
   count outside `[0, 62]`.
 - **Division** truncates toward zero and panics on a zero divisor
   (`division by zero` / `modulo by zero`); `int_pow` panics on a negative
-  exponent.
+  exponent. Three families differ only when an operand is negative:
+
+  | Operation | Quotient rounds | Remainder takes the sign of | `-7 ÷ 2` | `7 ÷ -2` |
+  |---|---|---|---|---|
+  | `/` `%`, `int_div` `int_mod` | toward zero | the dividend | `-3`, `-1` | `-3`, `1` |
+  | `int_div_floor` `int_mod_floor` | toward negative infinity | the divisor | `-4`, `1` | `-4`, `-1` |
+  | `int_div_euclid` `int_mod_euclid` | so the remainder is never negative | never negative | `-4`, `1` | `-3`, `1` |
+
+  Each pair satisfies `a == div(a, b) * b + mod(a, b)`. Use the floor pair
+  when you split a value into whole units and a leftover, and the leftover
+  must land in `[0, b)` however far below zero `a` is: a Unix timestamp
+  into days and seconds (`DateTime.from_timestamp` does this), an index
+  into a ring buffer, a coordinate into a grid cell. Truncating division
+  puts `-1` second in day 0; floor division puts it in day -1 at second
+  86399. All three families panic on a zero divisor. A literal positive or
+  negative divisor other than `0` or `-1` lets the compiled backend emit
+  `int_div_floor` / `int_mod_floor` inline instead of calling the runtime.
 - **Literals** must fit the range: a literal above `4611686018427387903` is
   a compile error. A negative literal is the negation of a positive one, so
   `int_min_value()` has no literal spelling; write `int_min_value()` or
