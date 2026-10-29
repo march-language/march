@@ -1456,7 +1456,7 @@ let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
     fn_name = { txt = "main"; span = s };
     fn_vis = March_ast.Ast.Public;
     fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-    fn_clauses = [clause]; fn_bounds = [] } in
+    fn_clauses = [clause]; fn_bounds = []; fn_attr_args = [] } in
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
     mod_decls = [March_ast.Ast.DFn (fn_def, s)] }
 
@@ -1471,7 +1471,7 @@ let make_stdlib_module stdlib_decls (e : March_ast.Ast.expr) : March_ast.Ast.mod
   let main_def = March_ast.Ast.{
     fn_name = { txt = "main"; span = s };
     fn_vis = March_ast.Ast.Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-    fn_clauses = [clause]; fn_bounds = [] } in
+    fn_clauses = [clause]; fn_bounds = []; fn_attr_args = [] } in
   { March_ast.Ast.mod_name = { txt = "Main"; span = s };
     mod_decls = stdlib_decls @ [March_ast.Ast.DFn (main_def, s)] }
 

@@ -103,6 +103,10 @@ let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to 
 let emit_core_ast_file : string option ref = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
 let refine_report  = ref false   (* --refine-report: print obligation-ledger proved/violated/skipped counts *)
+(* --termination-report: one line per recursive unit with its termination
+   class (Refine_term, specs/2026-10-26-termination-checking-design.md).
+   Report-only: nothing else reads the analysis. *)
+let termination_report = ref false
 (* --refine-report-sites: one line per SKIPPED obligation — file:line:col, the
    reason slug, the callee and predicate, and the reason's detail sentence.
    [refine_report]'s per-reason counts answer "how many", which is the wrong

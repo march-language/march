@@ -275,6 +275,10 @@ val prepare_rename_at :
   t -> line:int -> character:int -> Lsp.Types.Range.t option
 val signature_help_at :
   t -> line:int -> character:int -> (string * string list * int) option
+
+(** A compiler diagnostic as the LSP publishes it ([None] for another
+    file's), its [Errors.fix_kind] carried in [data]. *)
+val diag_to_lsp : filename:string -> Err.diagnostic -> Lsp.Types.Diagnostic.t option
 val code_actions_at :
   Analysis_util.t ->
   line:int ->

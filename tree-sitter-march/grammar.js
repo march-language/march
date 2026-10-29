@@ -545,7 +545,7 @@ module.exports = grammar({
       seq('proof', 'cap', field('name', $.type_identifier),
           optional(seq('with', field('dictionary', $.type_identifier)))),
       seq('cap', field('name', choice(
-        'no_panic', 'pure', 'no_extern', 'deterministic', 'no_alloc', 'verified',
+        'no_panic', 'pure', 'no_extern', 'deterministic', 'no_alloc', 'verified', 'total',
       ))),
     ),
 

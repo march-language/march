@@ -928,13 +928,19 @@ let uniform_formals (fd : A.fn_def) : string list option =
    satisfy `true`, and the hypothesis read them as `p`; so did a swapped
    pair of definers, a name rebound to another lambda, and an alias, which
    is declined too). *)
-let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
-    ((self, sets, definers) : string * (string, unit) Hashtbl.t list * (int * string * fn_sig) list) : bool =
+(* Termination phase 3 (§4.2): [?span], the call's span, also qualifies the
+   call when it is an eligible SELF-edge span of a certified SCC
+   ([Refine_post.ih_spans]: rule (a) held there), with no structural
+   argument.  The definer condition is unchanged either way. *)
+let hyp_applies ?span (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
+    (((self, self_span), sets, definers) :
+      (string * A.span) * (string, unit) Hashtbl.t list * (int * string * fn_sig) list) : bool =
   fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
   && List.length sets = List.length args
-  && List.exists2
-       (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
-       args sets
+  && (List.exists2
+        (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
+        args sets
+      || match span with Some sp -> ih_self_edge sp ~callee:self_span | None -> false)
   && List.for_all
        (fun (i, n, sg) ->
          (match List.nth_opt args i with Some (A.EVar { A.txt = v; _ }) -> v = n | _ -> false)
@@ -953,14 +959,15 @@ let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
    whose verdict a scratch walk under the same hypothesis already PROVED
    (the top-level [gating_elem_returns] discipline), so a proof from an
    unproved hypothesis is never recorded. *)
-let local_elem_hyp : (fn_sig * (string, unit) Hashtbl.t list * entry * string list) option ref = ref None
+let local_elem_hyp : (fn_sig * (string, unit) Hashtbl.t list * entry * string list * A.span) option ref =
+  ref None
 
 let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
   : entry option =
   match e with
   | A.EVar { A.txt = x; _ } -> List.assoc_opt x ce
   | A.EAnnot (e', _, _) -> container_entry_of_expr ctx defs cb ce e'
-  | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
+  | A.EApp (A.EVar { A.txt = fname; _ }, args, csp) ->
     let other () =
       match
         parametric_return ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx defs cb fname args
@@ -970,12 +977,15 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
     in
     let local_hyp =
       match !local_elem_hyp with
-      | Some (lsg, sets, entry, formals)
+      | Some (lsg, sets, entry, formals, lspan)
         when (match List.assoc_opt fname cb with Some s -> s == lsg | None -> false)
              && List.length sets = List.length args
-             && List.exists2
-                  (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
-                  args sets ->
+             && (List.exists2
+                   (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
+                   args sets
+                 (* Termination phase 3: an eligible self-edge span of a
+                    certified local SCC, as [hyp_applies] widens. *)
+                 || ih_self_edge csp ~callee:lspan) ->
         Some (if entry_is_closed entry then Some entry else lend_entry ~formals ~args entry)
       | _ -> None
     in
@@ -983,7 +993,7 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
      | _ when local_hyp <> None ->
        (match Option.get local_hyp with Some e -> Some e | None -> other ())
      | Some (self, sets, Single entry, definers, formals)
-       when hyp_applies ctx cb fname args (self, sets, definers) ->
+       when hyp_applies ~span:csp ctx cb fname args (self, sets, definers) ->
        (* A closed hypothesis is the entry itself (unchanged); a relational
           one is read at THIS self-call's actuals (phase 4, §2.3), and one
           whose actuals do not move falls through to the other routes. *)
@@ -4642,6 +4652,30 @@ let check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~(label : string
         then verdict := false)
     ts
 
+(* Termination obligations (termination design §3.4, phase 2), by the span
+   of the recursive call they belong to: [check_module] fills it from
+   [Refine_term.plan_metrics] before the walk, and [visit] discharges each one
+   when it reaches that call, with the path and scope facts that reach it.
+   The verdicts are collected per span ([term_verdicts]: a call the walk
+   visits twice must prove both times).  Empty outside [check_module]'s walk. *)
+let term_sites : (A.span, Refine_term.metric_site) Hashtbl.t ref = ref (Hashtbl.create 1)
+
+let term_verdicts : (A.span, Obligation.verdict list) Hashtbl.t = Hashtbl.create 16
+
+(* Termination phase 3, rule (a): the call spans whose induction hypothesis
+   is under consideration ([ih_watch]), and those the scratch walk of
+   [ih_prepare] actually reached ([ih_reached]).  A call the walk never
+   visits (an arm guard) has no checked precondition, so it gets no IH. *)
+let ih_watch : (A.span, unit) Hashtbl.t = Hashtbl.create 16
+
+let ih_reached : (A.span, unit) Hashtbl.t = Hashtbl.create 16
+
+(* Set only for [ih_prepare]'s scratch walk, which needs the CALL
+   obligations (termination and preconditions) and nothing else: no
+   function's or local's return is checked, and no local is lent a return
+   (one fewer fact can only lose a precondition proof, never make one). *)
+let calls_only_walk : bool ref = ref false
+
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) (e : A.expr) : unit =
   let go = visit ~root errctx defs ctx path lets sc re cb ce in
@@ -4654,6 +4688,19 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
    | _ -> ());
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
+    if Hashtbl.mem ih_watch sp then Hashtbl.replace ih_reached sp ();
+    (match Hashtbl.find_opt !term_sites sp with
+     | Some site ->
+       let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
+       let out = ref None in
+       check_call cx ~span:sp ~callee:fname ~subject:Decreases ~kind:Obligation.Termination
+         ~verdict_out:out site.Refine_term.ms_sig site.Refine_term.ms_args site.Refine_term.ms_rp;
+       (match !out with
+        | Some v ->
+          Hashtbl.replace term_verdicts sp
+            (v :: Option.value ~default:[] (Hashtbl.find_opt term_verdicts sp))
+        | None -> ())
+     | None -> ());
     let resolved = resolve_call_arity ctx defs fname (List.length args) in
     let callee =
       match resolved with Some (Some sg) -> Some sg | _ -> List.assoc_opt fname cb
@@ -5643,7 +5690,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let escapes = List.exists (name_escapes ~pass_checked n.A.txt) (body :: rest) in
   let proved =
     match ret_ty with
-    | Some (A.TyRefine _) ->
+    | Some (A.TyRefine _) when not !calls_only_walk ->
       (* A scalar return tail gets phase 2's scalar demand hook
          ([Refine_post.tail_demand]), as a top-level function's does: the
          hook's env is the local's own parameters (stripped when it
@@ -5683,7 +5730,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     cont_add_params ce
       (if escapes then List.map (fun (p : A.param) -> { p with A.param_ty = None }) ps else ps)
   in
-  (match ret_elems_of_ty ret_ty with
+  (match (if !calls_only_walk then None else ret_elems_of_ty ret_ty) with
    | None -> visit ~root errctx defs ctx path lets sc re cb ce body
    | Some er ->
      (* A declared CONTAINER return (design 2026-10-18 element-flow
@@ -5760,7 +5807,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                set)
              pnames
          in
-         let gate_hyp = Some (sg, sets, e, pnames) in
+         let gate_hyp = Some (sg, sets, e, pnames, n.A.span) in
          let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
          let saved_last = !last_elem_return_proved and saved_locals = !local_elem_ret_proved in
          let proved =
@@ -6523,8 +6570,9 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
     (* Annotated-accumulator facts are read only by the walk that proved
        them ([Refine_resolve.annotated_acc_facts]). *)
     Hashtbl.reset annotated_acc_facts;
-    with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
-        with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
+    if not !calls_only_walk then
+      with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
+          with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
     let walked = if assume_params then fd else strip_param_refinements fd in
     last_elem_return_proved := ret_elems_of_ty fd.A.fn_ret_ty <> None;
     (* An ASSUMED element return (§7.2): one `trusted` postcondition per
@@ -6554,7 +6602,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         let label = Printf.sprintf "return of %s" fd.A.fn_name.A.txt in
         let demand =
           match ret_elems_of_ty fd.A.fn_ret_ty with
-          | Some _ when assumed_er <> None -> None
+          | Some _ when assumed_er <> None || !calls_only_walk -> None
           | Some er ->
             let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
             let ts =
@@ -6619,7 +6667,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
             in
             if List.for_all usable (ret_entries er) && List.for_all Option.is_some definers then
               Some
-                ( fd.A.fn_name.A.txt, sets, er, List.filter_map Fun.id definers
+                ( (fd.A.fn_name.A.txt, fd.A.fn_name.A.span), sets, er, List.filter_map Fun.id definers
                 , Option.value ~default:[] formals )
             else None
           | _ -> None
@@ -7656,6 +7704,717 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
    foreign and the alias stays enabled.  So the default is safe in the sense
    that no non-stdlib definition can ever be mistaken for the stdlib's, not in
    the sense that it turns the feature off. *)
+(* ── Unknown attribute names (termination design D6) ─────────────────────
+   An attribute the compiler does not know is otherwise accepted in silence,
+   so `@[decrease(n)]` would look like a metric that found nothing.  These are
+   every `fn` attribute some pass reads (the name before a `:` payload). *)
+let known_fn_attributes =
+  [ "assume"; "decreases"; "diverges"; "measure"; "no_alloc"; "no_warn_recursion"; "trusted";
+    "trusted_linear"; "vectorize" ]
+
+(* Levenshtein distance, for the did-you-mean. *)
+let edit_distance (a : string) (b : string) : int =
+  let la = String.length a and lb = String.length b in
+  let d = Array.make_matrix (la + 1) (lb + 1) 0 in
+  for i = 0 to la do d.(i).(0) <- i done;
+  for j = 0 to lb do d.(0).(j) <- j done;
+  for i = 1 to la do
+    for j = 1 to lb do
+      let c = if a.[i - 1] = b.[j - 1] then 0 else 1 in
+      d.(i).(j) <- min (min (d.(i - 1).(j) + 1) (d.(i).(j - 1) + 1)) (d.(i - 1).(j - 1) + c)
+    done
+  done;
+  d.(la).(lb)
+
+let warn_unknown_attributes errctx (decls : A.decl list) : unit =
+  let check (fd : A.fn_def) =
+    List.iter
+      (fun a ->
+        let name = match String.index_opt a ':' with Some i -> String.sub a 0 i | None -> a in
+        if not (List.mem name known_fn_attributes) then begin
+          let near =
+            List.filter (fun k -> edit_distance k name <= 2) known_fn_attributes
+            |> List.sort (fun x y -> compare (edit_distance x name) (edit_distance y name))
+          in
+          Err.warning ~code:Err.Code.unknown_attribute errctx ~span:fd.A.fn_name.A.span
+            (Printf.sprintf "unknown attribute `@[%s]` on `%s`: it is ignored.%s" name
+               fd.A.fn_name.A.txt
+               (match near with
+                | k :: _ -> Printf.sprintf "\nnote: did you mean `@[%s]`?" k
+                | [] ->
+                  Printf.sprintf "\nnote: the function attributes are %s."
+                    (String.concat ", " (List.map (Printf.sprintf "`@[%s]`") known_fn_attributes))))
+        end)
+      fd.A.fn_attrs
+  in
+  let rec go decls =
+    List.iter
+      (function
+        | A.DFn (fd, _) -> check fd
+        | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> go ds
+        | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> check fd) idf.A.impl_methods
+        | _ -> ())
+      decls
+  in
+  go decls
+
+(* ── Termination, phase 4: `@[diverges]` conflicts (§2.2) ────────────────
+   `@[diverges]` says "not claimed to terminate", so it contradicts an
+   attribute that claims or needs termination on the same function:
+   `@[decreases]` (a metric to check) and `@[measure]` (a logical function,
+   which must terminate to be a consistent axiom, F5).  A measure that
+   reaches a `@[diverges]` function through any chain of calls is the same
+   contradiction one step removed.  Syntactic over the attributes, plus the
+   termination graph when some measure and some `@[diverges]` coexist. *)
+let diverges_conflicts errctx (term : Refine_term.t Lazy.t) (decls : A.decl list)
+    (measures : (string * A.fn_def) list) : unit =
+  let any_diverges = ref false in
+  let rec go decls =
+    List.iter
+      (function
+        | A.DFn (fd, _) ->
+          if List.mem "diverges" fd.A.fn_attrs then begin
+            any_diverges := true;
+            let with_ =
+              (if List.mem "measure" fd.A.fn_attrs then [ "`@[measure]`" ] else [])
+              @ if List.mem_assoc "decreases" fd.A.fn_attr_args then [ "`@[decreases]`" ] else []
+            in
+            if with_ <> [] then
+              Err.error ~code:Err.Code.diverges_conflict errctx ~span:fd.A.fn_name.A.span
+                (Printf.sprintf
+                   "`%s` is marked `@[diverges]` and %s: `@[diverges]` says the function is not \
+                    claimed to terminate, %s.\nnote: remove one of them."
+                   fd.A.fn_name.A.txt (String.concat " and " with_)
+                   (if List.mem "measure" fd.A.fn_attrs then
+                      "and a measure is evaluated in the logic, where it must terminate"
+                    else "and a metric claims that it does"))
+          end
+        | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> go ds
+        (* No [DImpl] case: the parser rejects an attribute on an impl
+           method, so no impl method can carry `@[diverges]`. *)
+        | _ -> ())
+      decls
+  in
+  go decls;
+  if !any_diverges && measures <> [] then begin
+    let t = Lazy.force term in
+    let g = t.Refine_term.graph in
+    List.iter
+      (fun (name, (fd : A.fn_def)) ->
+        if not (List.mem "diverges" fd.A.fn_attrs) then
+          match Refine_term.unit_at g fd.A.fn_name.A.span with
+          | None -> ()
+          | Some u -> (
+            let si = g.Refine_term.scc_of.(u.Refine_term.u_id) in
+            let marked =
+              List.find_map
+                (fun r ->
+                  List.find_opt
+                    (fun v -> Refine_term.is_diverges g.Refine_term.units.(v))
+                    g.Refine_term.sccs.(r))
+                (si :: Refine_term.reachable_sccs g si)
+            in
+            match marked with
+            | Some v ->
+              Err.error ~code:Err.Code.diverges_conflict errctx ~span:fd.A.fn_name.A.span
+                (Printf.sprintf
+                   "@[measure] `%s` calls `%s`, which is marked `@[diverges]`: a measure is \
+                    evaluated in the logic and must terminate, so it cannot depend on a function \
+                    that is not claimed to."
+                   name g.Refine_term.units.(v).Refine_term.u_name)
+            | None -> ()))
+      measures
+  end
+
+(* ── Termination, phase 2: the messages ─────────────────────────────────── *)
+
+(* Whether the function declared at a span sits in a `cap verified` decl list
+   (the rule [visit_decls] applies: each list decides for itself, a
+   `describe` block inherits). *)
+let verified_fn_spans (decls : A.decl list) : (A.span, bool) Hashtbl.t =
+  let tbl = Hashtbl.create 64 in
+  let rec go v decls =
+    List.iter
+      (function
+        | A.DFn (fd, _) -> Hashtbl.replace tbl fd.A.fn_name.A.span v
+        | A.DMod (_, _, ds, _) -> go (decls_declare_verified ds) ds
+        | A.DDescribe (_, ds, _) -> go v ds
+        | _ -> ())
+      decls
+  in
+  go (decls_declare_verified decls) decls;
+  tbl
+
+(* Whether the unit declared at a span (a function, an `impl` method, an
+   actor handler) sits in a decl list declaring `cap <opt>`, by the same
+   rule: each list decides for itself, a `describe` block inherits. *)
+let cap_unit_spans (opt : string) (decls : A.decl list) : (A.span, bool) Hashtbl.t =
+  let tbl = Hashtbl.create 64 in
+  let declares ds = List.exists (function A.DOpts (opts, _) -> List.mem opt opts | _ -> false) ds in
+  let rec go v decls =
+    List.iter
+      (function
+        | A.DFn (fd, _) -> Hashtbl.replace tbl fd.A.fn_name.A.span v
+        | A.DImpl (idf, _) ->
+          List.iter (fun (_, (fd : A.fn_def)) -> Hashtbl.replace tbl fd.A.fn_name.A.span v) idf.A.impl_methods
+        | A.DActor (_, _, actor, _) ->
+          List.iter
+            (fun (h : A.actor_handler) -> Hashtbl.replace tbl h.A.ah_msg.A.span v)
+            (A.actor_body_handlers actor)
+        | A.DMod (_, _, ds, _) -> go (declares ds) ds
+        | A.DDescribe (_, ds, _) -> go v ds
+        | _ -> ())
+      decls
+  in
+  go (declares decls) decls;
+  tbl
+
+let metric_str (m : A.expr list) : string =
+  match m with
+  | [ e ] -> pred_str e
+  | es -> "(" ^ String.concat ", " (List.map pred_str es) ^ ")"
+
+(* Phase 4 (§6, the LSP row): the exit guard `x == 0` of a metric `x` whose
+   counterexample is negative is the classic `down` mistake; `x <= 0` is the
+   usual repair.  The guard is searched in the failing caller's own clauses:
+   an `if` whose condition is exactly `x == 0` (or `0 == x`).
+
+   The repair is a NOTE, never the diagnostic's machine fix: it changes what
+   the program does (a call that hung returns the base case instead), so
+   `forge fix` must not apply it unasked.  The LSP offers it as an explicit,
+   non-preferred quick fix read from the note (code_actions_diag.ml), the
+   convention the `try `@[decreases(e)]`` note follows. *)
+let eq_zero_exit (u : Refine_term.unit_) (x : string) : A.span option =
+  let found = ref None in
+  let is_x = function A.EVar n -> n.A.txt = x | _ -> false in
+  let is_zero = function A.ELit (A.LitInt 0, _) -> true | _ -> false in
+  List.iter
+    (fun (o : Refine_term.owner) ->
+      Refine_encode.iter_all
+        (fun e ->
+          match e with
+          | A.EIf ((A.EApp (A.EVar { A.txt = "=="; _ }, [ a; b ], sp) as _c), _, _, _)
+            when !found = None && ((is_x a && is_zero b) || (is_zero a && is_x b)) ->
+            found := Some sp
+          | _ -> ())
+        o.Refine_term.o_body)
+    u.Refine_term.u_clauses;
+  !found
+
+(* The witness names [x] with a negative value ("n = -1", "m = 0, n = -3"). *)
+let model_negative (cx : string) (x : string) : bool =
+  let pre = x ^ " = -" in
+  List.exists
+    (fun part ->
+      let part = String.trim part in
+      String.length part > String.length pre && String.sub part 0 (String.length pre) = pre)
+    (String.split_on_char ',' cx)
+
+(* The `termination_unproved` text for SCC [si], whose certificate [cert] is
+   `unproved:*`: the span to report at, and the message (with the `x == 0` ->
+   `x <= 0` note when it applies). *)
+let unproved_text (t : Refine_term.t) (certs : string array) fails (si : int) : A.span * string =
+  let g = t.Refine_term.graph in
+  let members = g.Refine_term.sccs.(si) in
+  let annotated =
+    List.filter (fun u -> g.Refine_term.units.(u).Refine_term.u_decreases <> None) members
+  in
+  let un = g.Refine_term.units.(match annotated with u :: _ -> u | [] -> List.hd members) in
+  let name = un.Refine_term.u_name in
+  let cert = certs.(si) in
+  let note =
+    "\nnote: a metric must stay at least 0 and fall at every recursive call (left to \
+     right, for several components). Guard the recursion (an exit such as `n <= 0`), \
+     refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall."
+    ^
+    (* Phase 5 fills [suggest_metric]; the LSP offers the note as an action. *)
+    match !Refine_term.suggest_metric t si with
+    | Some es -> Printf.sprintf "\nnote: try `@[decreases(%s)]`." (String.concat ", " (List.map pred_str es))
+    | None -> ""
+  in
+  match fails.(si) with
+  | Some ((site : Refine_term.metric_site), v) ->
+    let e = site.Refine_term.ms_edge in
+    let callee = g.Refine_term.units.(e.Refine_term.e_dst).Refine_term.u_name in
+    let call =
+      pred_str
+        (A.EApp (A.EVar { A.txt = callee; A.span = e.Refine_term.e_span }, e.Refine_term.e_args,
+                 e.Refine_term.e_span))
+    in
+    let cx =
+      match v with
+      | Some (Obligation.Skipped (Obligation.Not_decreasing cx)) when cx <> "" -> Some cx
+      | _ -> None
+    in
+    let why =
+      match (v, cx) with
+      | _, Some cx -> ": e.g. " ^ cx
+      | None, _ -> " (the checker did not reach this call)"
+      | _ -> ""
+    in
+    let fix_note =
+      match (site.Refine_term.ms_caller_metric, cx) with
+      | [ A.EVar x ], Some cx when model_negative cx x.A.txt -> (
+        match eq_zero_exit g.Refine_term.units.(e.Refine_term.e_src) x.A.txt with
+        | Some _ ->
+          Printf.sprintf "\nnote: the exit `%s == 0` misses a negative `%s`; `%s <= 0` covers it."
+            x.A.txt x.A.txt x.A.txt
+        | None -> "")
+      | _ -> ""
+    in
+    ( e.Refine_term.e_span,
+      Printf.sprintf
+        "`%s` is not shown to terminate: the recursive call `%s` is not shown to decrease `%s`%s%s%s"
+        name call (metric_str site.Refine_term.ms_caller_metric) why fix_note note )
+  | None ->
+    let r = if String.length cert > 9 then String.sub cert 9 (String.length cert - 9) else cert in
+    let why =
+      match String.index_opt r ':' with
+      | Some i when String.sub r 0 i = "unannotated" ->
+        Printf.sprintf
+          "`%s`, in the same recursive cycle, has no `@[decreases]` with as many components"
+          (String.sub r (i + 1) (String.length r - i - 1))
+      | _ -> (
+        match r with
+        | "reference" ->
+          "it is passed as a function value inside its own recursion, so no metric can be checked there"
+        | "non-positive" -> "it calls a function value of a type that is not strictly positive"
+        | "unresolved" ->
+          let names =
+            List.sort_uniq compare
+              (List.filter_map
+                 (fun (u, n) -> if List.mem u members then Some ("`" ^ n ^ "`") else None)
+                 g.Refine_term.unresolved)
+          in
+          Printf.sprintf
+            "its recursive cycle calls %s, which the termination checker cannot resolve to a \
+             function, an interface method, a builtin or an extern, so it may diverge"
+            (String.concat ", " names)
+        | "no-int-parameter" -> "a function in its recursive cycle has no Int parameter to measure"
+        | "no-structural-arg" | "not-same-family" ->
+          "no argument shrinks structurally at every recursive call, and no Int metric was checked"
+        | "shadowed" ->
+          "a recursive call sits under a binding that reuses a parameter the metric names, so \
+           the metric would read the inner value"
+        | "" -> "its recursion was not checked"
+        | r -> r)
+    in
+    (un.Refine_term.u_span, Printf.sprintf "`%s` is not shown to terminate: %s%s" name why note)
+
+(* `termination_unproved` (§3.4) for each ANNOTATED SCC the certificate did
+   not prove (decision D2: never for an unannotated one): a warning, or an
+   error under `cap verified` or `cap total` ([strict]), the one escalation
+   phase 2 has (an annotated `@[decreases]` that fails, §6).  Returns the
+   SCCs it reported, so the `cap total` pass does not repeat them. *)
+let report_termination errctx (t : Refine_term.t) (certs : string array) fails
+    ~(strict : A.span -> bool) : int list =
+  let g = t.Refine_term.graph in
+  let reported = ref [] in
+  Array.iteri
+    (fun si members ->
+      let annotated =
+        List.filter (fun u -> g.Refine_term.units.(u).Refine_term.u_decreases <> None) members
+      in
+      let cert = certs.(si) in
+      if annotated <> [] && String.length cert > 9 && String.sub cert 0 9 = "unproved:"
+         && cert <> "unproved:invalid-decreases"
+      then begin
+        reported := si :: !reported;
+        let strict = List.exists (fun u -> strict g.Refine_term.units.(u).Refine_term.u_span) annotated in
+        let span, text = unproved_text t certs fails si in
+        if strict then Err.error ~code:Err.Code.termination_unproved errctx ~span text
+        else Err.warning ~code:Err.Code.termination_unproved errctx ~span text
+      end
+      else if annotated <> [] && cert = "diverges" then
+        (* A `@[decreases]` on a member of a cycle that a SIBLING marks
+           `@[diverges]` (the same function is a [diverges_conflict]). *)
+        List.iter
+          (fun u ->
+            let un = g.Refine_term.units.(u) in
+            if not (Refine_term.is_diverges un) then
+              match List.find_opt (fun v -> Refine_term.is_diverges g.Refine_term.units.(v)) members with
+              | Some v ->
+                Err.warning ~code:Err.Code.attribute_no_effect errctx ~span:un.Refine_term.u_span
+                  (Printf.sprintf
+                     "`@[decreases]` on `%s` has no effect: its recursive cycle includes `%s`, \
+                      which is marked `@[diverges]`, so no metric is checked."
+                     un.Refine_term.u_name g.Refine_term.units.(v).Refine_term.u_name)
+              | None -> ())
+          annotated)
+    g.Refine_term.sccs;
+  !reported
+
+(* `cap total` (§4.1, D2, phase 4): every unit of a `cap total` decl list
+   must be shown to terminate, `main` (and its local functions) exempt
+   (§3.7).  A unit marked `@[diverges]` declares that it may not, which
+   `cap total` accepts, as Idris's `partial` does under `%default total`;
+   a unit that reaches one, or shares a recursive cycle with one, is an
+   error until it is marked too (the burden D4 lifts everywhere else).  An
+   actor handler must return per message.  [total u] says whether unit [u] is in such a list; [reported]
+   are the SCCs [report_termination] already worded. *)
+let report_cap_total errctx (t : Refine_term.t) (certs : string array) fails
+    (dv : Refine_term.culprit option array) ~(total : Refine_term.unit_ -> bool) ~(reported : int list)
+    : unit =
+  let module RT = Refine_term in
+  let g = t.RT.graph in
+  let exempt (u : RT.unit_) =
+    let top = g.RT.units.(u.RT.u_top) in
+    top.RT.u_name = "main" || RT.is_diverges u || RT.is_diverges top
+  in
+  let note =
+    "\nnote: `cap total` asks every function of this module to terminate (`main` is exempt). \
+     Mark a function meant to run for ever `@[diverges]`."
+  in
+  Array.iteri
+    (fun si members ->
+      let members = List.filter (fun u -> total g.RT.units.(u) && not (exempt g.RT.units.(u))) members in
+      match (members, dv.(si)) with
+      | [], _ | _, None -> ()
+      | _ :: _, Some c ->
+        let cu = RT.culprit_unit c in
+        if g.RT.scc_of.(cu) = si then begin
+          match c with
+          | RT.Marked v ->
+            (* A sibling in the cycle is marked, and [members] are the ones
+               that are not: under `cap total` each member of such a cycle
+               must say so itself (Idris's `partial`).  Outside the cap one
+               mark covers its cycle, for the report and the hypothesis. *)
+            List.iter
+              (fun u ->
+                let un = g.RT.units.(u) in
+                Err.error ~code:Err.Code.termination_unproved errctx ~span:un.RT.u_span
+                  (Printf.sprintf
+                     "`%s` may not terminate: it is in a recursive cycle with `%s`, which is \
+                      marked `@[diverges]`; under `cap total` every function of that cycle must \
+                      be marked too."
+                     un.RT.u_name g.RT.units.(v).RT.u_name
+                  ^ note))
+              members
+          | RT.Uncertified _ when List.mem si reported -> ()
+          | RT.Uncertified _ ->
+            let span, text = unproved_text t certs fails si in
+            Err.error ~code:Err.Code.termination_unproved errctx ~span (text ^ note)
+          | RT.Unresolved_call _ ->
+            let un = g.RT.units.(List.hd members) in
+            Err.error ~code:Err.Code.termination_unproved errctx ~span:un.RT.u_span
+              (Printf.sprintf "`%s` is not shown to terminate: %s.%s" un.RT.u_name
+                 (RT.culprit_text g un.RT.u_id c) note)
+        end
+        else
+          List.iter
+            (fun u ->
+              let un = g.RT.units.(u) in
+              let text =
+                if un.RT.u_kind = RT.Handler then
+                  Printf.sprintf "handler `%s` may not return: %s." un.RT.u_name (RT.culprit_text g u c)
+                else Printf.sprintf "`%s` may not terminate: %s." un.RT.u_name (RT.culprit_text g u c)
+              in
+              Err.error ~code:Err.Code.termination_unproved errctx ~span:un.RT.u_span (text ^ note))
+            members)
+    g.RT.sccs
+
+(* A SCRATCH walk that discharges the termination obligations [sites]
+   (phases 3 and 5): over [decls] (the caller filters it to the top-level
+   functions it needs), into a throwaway error context and scratch ledger,
+   with every module-wide cell the walk can move saved and restored, so the
+   real walk, or the next scratch walk, starts exactly where it would have.
+   No witness runs: termination reads only whether an obligation was
+   PROVED, which no witness decides, and a witness run against a diverging
+   function burns its whole fuel.  No return is checked
+   ([calls_only_walk]).  [after] runs inside the scratch ledger, before it
+   is thrown away.  Returns the verdicts recorded at each obligation's call
+   span. *)
+let term_scratch_walk ~root defs (decls : A.decl list)
+    ~(sites : (A.span, Refine_term.metric_site) Hashtbl.t) ~(after : unit -> unit) :
+    (A.span, Obligation.verdict list) Hashtbl.t =
+  let saved_sites = !term_sites in
+  let saved_verdicts = Hashtbl.copy term_verdicts in
+  let saved_acc = Hashtbl.copy annotated_acc_facts in
+  let saved_ctr = !ret_ctr and saved_budget = !Witness.wall_budget in
+  let saved_mal = !March_refine.Solver.malformed_count
+  and saved_malm = !March_refine.Solver.malformed_messages in
+  let saved_promoted = !promoted_sites and saved_locals = !local_elem_ret_proved in
+  let saved_last = !last_elem_return_proved in
+  Hashtbl.reset term_verdicts;
+  Fun.protect
+    ~finally:(fun () ->
+      term_sites := saved_sites;
+      Hashtbl.reset term_verdicts;
+      Hashtbl.iter (Hashtbl.replace term_verdicts) saved_verdicts;
+      Hashtbl.reset annotated_acc_facts;
+      Hashtbl.iter (Hashtbl.replace annotated_acc_facts) saved_acc;
+      ret_ctr := saved_ctr;
+      Witness.wall_budget := saved_budget;
+      March_refine.Solver.malformed_count := saved_mal;
+      March_refine.Solver.malformed_messages := saved_malm;
+      promoted_sites := saved_promoted;
+      local_elem_ret_proved := saved_locals;
+      last_elem_return_proved := saved_last;
+      calls_only_walk := false)
+    (fun () ->
+      Obligation.with_scratch (fun () ->
+          term_sites := sites;
+          Witness.wall_budget := 0;
+          calls_only_walk := true;
+          visit_decls ~root (Err.create ()) defs rctx0 decls;
+          after ();
+          Hashtbl.copy term_verdicts))
+
+(* ── Termination phase 3: the certificate that licenses the IH (§4.2) ─────
+   Called by [gate_unverified_posts_ih] once the IH-free rounds have stalled,
+   with the items still pending.  It decides, over the contracts proved so
+   far, which recursive SCCs may use the induction hypothesis, fills
+   [ih_spans] with their eligible call spans, and returns one group per SCC
+   that still has pending members.
+
+   An SCC [S] is ELIGIBLE (decision D1, §3.7, §4.4) when
+   - its certificate (phase 1 structural, or phase 2 metric with every
+     intra-SCC obligation proved) is [structural] or [metric] — never
+     [trusted], never [unproved:*];
+   - every recursive SCC reachable from it is certified too ("may diverge"
+     is inferred upward; no IH for an SCC whose proof crosses into an
+     uncertified one).
+   A call span of [S] is eligible (rule (a)) when it is an intra-SCC direct
+   or lambda edge that the scratch walk reached, and every precondition
+   obligation recorded there was PROVED (a callee with a refined parameter
+   must have one).
+
+   Demand (§9): the SCCs of the pending items, of every unit declaring an
+   element (container) return, and every recursive SCC reachable from them.
+   Nothing is planned, and nothing walked, when no recursive SCC is in
+   demand: a module with no pending recursive contract pays one graph scan.
+
+   The scratch walk covers only the top-level functions that hold a member
+   of a demanded SCC, into a throwaway error context and scratch ledger,
+   with every module-wide cell it can move saved and restored, so the real
+   walk afterwards starts exactly where it would have.  Its termination
+   obligations are discharged with the contracts proved so far: a callee's
+   proved post is a true partial-correctness fact (F11), and a callee whose
+   post was proved only by its own IH was itself certified, by this same
+   rule, earlier in the DAG of SCCs. *)
+let ih_prepare ~root ?type_map (term : Refine_term.t Lazy.t) defs (decls : A.decl list)
+    (pending : gate_item list) : ih_group list =
+  let t = Lazy.force term in
+  let g = t.Refine_term.graph in
+  let module RT = Refine_term in
+  let scc_of u = g.RT.scc_of.(u.RT.u_id) in
+  let recursive si = match g.RT.sccs.(si) with u :: _ -> RT.is_recursive g u | [] -> false in
+  let d0 = Hashtbl.create 8 in
+  List.iter
+    (fun (_, _, (fd : A.fn_def), _) ->
+      match RT.unit_at g fd.A.fn_name.A.span with
+      | Some u when recursive (scc_of u) -> Hashtbl.replace d0 (scc_of u) ()
+      | _ -> ())
+    pending;
+  Array.iter
+    (fun (u : RT.unit_) ->
+      if u.RT.u_kind <> RT.Handler && ret_elems_of_ty u.RT.u_ret <> None
+         && (not (List.mem "assume" u.RT.u_attrs)) && recursive (scc_of u)
+      then Hashtbl.replace d0 (scc_of u) ())
+    g.RT.units;
+  if Hashtbl.length d0 = 0 then []
+  else begin
+    let d0l = List.sort compare (Hashtbl.fold (fun s () acc -> s :: acc) d0 []) in
+    let reach = List.map (fun s -> (s, RT.reachable_sccs g s)) d0l in
+    let demand = Hashtbl.copy d0 in
+    List.iter (fun (_, rs) -> List.iter (fun r -> if recursive r then Hashtbl.replace demand r ()) rs) reach;
+    let pl =
+      RT.plan_metrics ?type_map ~is_measure
+        ~demanded:(fun u -> Hashtbl.mem demand (scc_of u))
+        t
+    in
+    (* The top-level functions to walk: the holders of a member of an IH SCC
+       (rule (a) needs its preconditions) or of a pending metric SCC. *)
+    let walk_tops = Hashtbl.create 8 in
+    Hashtbl.iter
+      (fun si () ->
+        if Hashtbl.mem d0 si || pl.RT.pl_status.(si) = RT.St_pending then
+          List.iter
+            (fun u -> Hashtbl.replace walk_tops g.RT.units.(g.RT.units.(u).RT.u_top).RT.u_span ())
+            g.RT.sccs.(si))
+      demand;
+    let watched =
+      List.concat_map
+        (fun si ->
+          List.concat_map
+            (fun u -> List.filter (fun e -> e.RT.e_kind <> RT.Reference) (RT.intra g u))
+            g.RT.sccs.(si))
+        d0l
+    in
+    let rec filter (ds : A.decl list) : A.decl list =
+      List.filter_map
+        (function
+          | A.DFn (fd, _) as d when Hashtbl.mem walk_tops fd.A.fn_name.A.span -> Some d
+          | A.DMod (n, v, ds, sp) -> Some (A.DMod (n, v, filter ds, sp))
+          | (A.DAlias _ | A.DUse _) as d -> Some d
+          | _ -> None)
+        ds
+    in
+    let pre_ok = Hashtbl.create 16 in
+    Hashtbl.reset ih_watch;
+    Hashtbl.reset ih_reached;
+    List.iter (fun e -> Hashtbl.replace ih_watch e.RT.e_span ()) watched;
+    let verdicts =
+      Fun.protect
+        ~finally:(fun () -> Hashtbl.reset ih_watch)
+        (fun () ->
+          term_scratch_walk ~root defs (filter decls) ~sites:pl.RT.pl_sites ~after:(fun () ->
+              (* Rule (a)'s precondition half, read before the scratch
+                 ledger is thrown away. *)
+              List.iter
+                (fun (e : RT.edge) ->
+                  let obs =
+                    List.filter
+                      (fun (o : Obligation.t) -> o.Obligation.kind = Obligation.Precondition)
+                      (Obligation.obligations_at e.RT.e_span)
+                  in
+                  let callee_refined =
+                    List.exists
+                      (function Some ty -> ty_has_refinement ty | None -> false)
+                      g.RT.units.(e.RT.e_dst).RT.u_param_tys
+                  in
+                  if Hashtbl.mem ih_reached e.RT.e_span
+                     && List.for_all (fun (o : Obligation.t) -> o.Obligation.verdict = Obligation.Proved) obs
+                     && ((not callee_refined) || obs <> [])
+                  then Hashtbl.replace pre_ok e.RT.e_span ())
+                watched))
+    in
+    let certs, _ =
+      RT.finish t pl ~verdicts:(fun sp -> Option.value ~default:[] (Hashtbl.find_opt verdicts sp))
+    in
+    let certified si = certs.(si) = "structural" || certs.(si) = "metric" in
+    (* "May diverge" is inferred upward: an uncertified recursive SCC, or any
+       SCC (recursive or not) calling a name the graph could not resolve
+       ([Refine_term.calls_unresolved]: review fixes, fail closed). *)
+    let may_diverge r =
+      (recursive r && not (certified r)) || RT.calls_unresolved g r || RT.scc_diverges g r
+    in
+    List.filter_map
+      (fun (si, rs) ->
+        if certified si && (not (RT.calls_unresolved g si)) && not (List.exists may_diverge rs) then begin
+          let at = Hashtbl.create 8 in
+          List.iter
+            (fun (e : RT.edge) ->
+              if g.RT.scc_of.(e.RT.e_src) = si && Hashtbl.mem pre_ok e.RT.e_span then begin
+                Hashtbl.replace ih_spans e.RT.e_span
+                  (e.RT.e_src = e.RT.e_dst, g.RT.units.(e.RT.e_dst).RT.u_span);
+                Hashtbl.replace at e.RT.e_span g.RT.units.(e.RT.e_dst).RT.u_span
+              end)
+            watched;
+          let items =
+            List.filter
+              (fun (_, _, (fd : A.fn_def), _) ->
+                match RT.unit_at g fd.A.fn_name.A.span with
+                | Some u -> scc_of u = si
+                | None -> false)
+              pending
+          in
+          if items = [] then None else Some { ig_items = items; ig_at = at }
+        end
+        else None)
+      reach
+  end
+
+(* ── Termination phase 5: metric inference (§3.5) ─────────────────────────
+   For each target SCC (one the plan left uncertified for a reason a metric
+   could fix), the candidates of [Refine_term.candidates], at most
+   [Refine_term.max_candidates] of them, are checked in rounds: round [k]
+   plans the [k]-th candidate of every target still open, through
+   [Refine_term.plan_metrics ~override] (so each is obliged exactly as a
+   written `@[decreases]` would be, one obligation per intra-SCC edge),
+   discharges the obligations in one scratch walk of the top-level functions
+   holding those SCCs, and decides each SCC by [Refine_term.finish].  A
+   candidate is accepted only when its certificate is [metric]: every
+   obligation reached and PROVED.  Nothing is trusted, and nothing feeds the
+   induction hypothesis or any verdict: the result is a proposal. *)
+let inferable_cert (c : string) : bool =
+  let pre = "unproved:" in
+  let n = String.length pre in
+  String.length c > n
+  && String.sub c 0 n = pre
+  && not
+       (List.mem (String.sub c n (String.length c - n))
+          [ "reference"; "non-positive"; "unresolved"; "invalid-decreases" ])
+
+let infer_metrics ~root ?type_map (t : Refine_term.t) defs (decls : A.decl list) ~(targets : int list)
+    ~(tried : int -> A.expr list option) : (int * (Refine_term.candidate option * int * int)) list =
+  let module RT = Refine_term in
+  let g = t.RT.graph in
+  let cands = List.map (fun si -> (si, RT.candidates ?type_map ~is_measure ~tried t si)) targets in
+  let found = Hashtbl.create 8 and checked = Hashtbl.create 8 in
+  let rec filter tops (ds : A.decl list) : A.decl list =
+    List.filter_map
+      (function
+        | A.DFn (fd, _) as d when Hashtbl.mem tops fd.A.fn_name.A.span -> Some d
+        | A.DMod (n, v, ds, sp) -> Some (A.DMod (n, v, filter tops ds, sp))
+        | (A.DAlias _ | A.DUse _) as d -> Some d
+        | _ -> None)
+      ds
+  in
+  for k = 0 to RT.max_candidates - 1 do
+    let round =
+      List.filter_map
+        (fun (si, (cs, _)) ->
+          if Hashtbl.mem found si then None else Option.map (fun c -> (si, c)) (List.nth_opt cs k))
+        cands
+    in
+    if round <> [] then begin
+      let pl =
+        RT.plan_metrics ?type_map ~override:(fun si -> List.assoc_opt si round) ~is_measure
+          ~demanded:(fun _ -> false) t
+      in
+      let in_round si = List.mem_assoc si round in
+      let sites = Hashtbl.create 16 in
+      Hashtbl.iter
+        (fun sp (site : RT.metric_site) ->
+          if in_round g.RT.scc_of.(site.RT.ms_edge.RT.e_src) then Hashtbl.replace sites sp site)
+        pl.RT.pl_sites;
+      let tops = Hashtbl.create 8 in
+      List.iter
+        (fun (si, _) ->
+          if pl.RT.pl_status.(si) = RT.St_pending then
+            List.iter
+              (fun u -> Hashtbl.replace tops g.RT.units.(g.RT.units.(u).RT.u_top).RT.u_span ())
+              g.RT.sccs.(si))
+        round;
+      let verdicts =
+        if Hashtbl.length tops = 0 then Hashtbl.create 1
+        else term_scratch_walk ~root defs (filter tops decls) ~sites ~after:ignore
+      in
+      let certs, _ =
+        RT.finish t pl ~verdicts:(fun sp -> Option.value ~default:[] (Hashtbl.find_opt verdicts sp))
+      in
+      List.iter
+        (fun (si, c) ->
+          Hashtbl.replace checked si (k + 1);
+          if certs.(si) = "metric" then Hashtbl.replace found si c)
+        round
+    end
+  done;
+  List.map
+    (fun (si, (_, total)) ->
+      (si, (Hashtbl.find_opt found si, Option.value ~default:0 (Hashtbl.find_opt checked si), total)))
+    cands
+
+(* Record [infer_metrics]' results in [Refine_term.last_inferred], by each
+   member's declaring span. *)
+let record_inferred (t : Refine_term.t) res =
+  let module RT = Refine_term in
+  let g = t.RT.graph in
+  List.iter
+    (fun (si, (c, checked, total)) ->
+      List.iter
+        (fun u ->
+          let un = g.RT.units.(u) in
+          let m = Option.bind c (List.assoc_opt u) in
+          Hashtbl.replace RT.last_inferred un.RT.u_span
+            { RT.inf_metric = Option.map (List.map pred_str) m; inf_checked = checked; inf_total = total };
+          match m with
+          | Some es -> Hashtbl.replace RT.last_inferred_exprs un.RT.u_span es
+          | None -> ())
+        g.RT.sccs.(si))
+    res
+
 let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     ?(stdlib_files : string list = [])
     ?(audit : ((Refine_audit.site * Refine_audit.disposition) list -> unit) option)
@@ -7865,6 +8624,13 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         | c :: _ when measure_body_nonneg name known c.A.fc_body -> name :: known
         | _ -> known)
       [] mfns;
+  (* The termination graph, built at most once per module: for the measure
+     gate below and for phase 2's metric plan (before the walk). *)
+  let term =
+    lazy (Refine_term.analyze ?type_map ~file_mod:m.A.mod_name.A.txt m.A.mod_decls)
+  in
+  warn_unknown_attributes errctx m.A.mod_decls;
+  diverges_conflicts errctx term m.A.mod_decls all_mfns;
   if measure_axioms then begin
     (* Measure symbols are not module-qualified, so two `@[measure]`s with one
        name (a user's and a stdlib module's) would each emit a `declare-fun`
@@ -7889,13 +8655,32 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     (* M-b soundness gate: a `@[measure]` must be a total, terminating, pure
        function, else its axioms would be unsound.  Emit a hard error per
        violation (filtered to user files by the caller, like every diagnostic). *)
+    (* Termination is a property of the measure's whole call-graph SCC, not of
+       its self-calls alone (termination design §6, phase 1): `ma(Z) -> mb(Z)
+       -> ma(Z) + 1` is a cycle no self-call shows (c4).  So a measure whose
+       SCC [Refine_term] does not certify structural also fails the gate, with
+       the self-call rule's own wording; the self-call rule is kept, so the
+       union is never weaker than before.  The graph is built only when there
+       is a measure to gate. *)
+    let not_structural =
+      "is not structurally recursive (every recursive call must be on a component of \
+       the matched parameter)"
+    in
     List.iter
       (fun (_name, fd) ->
+        let msgs = measure_gate_errors fd in
+        let msgs =
+          if (not (List.mem not_structural msgs))
+             && (not (List.mem "diverges" fd.A.fn_attrs))  (* [diverges_conflict] says it *)
+             && Refine_term.uncertified (Lazy.force term) fd.A.fn_name.A.span
+          then msgs @ [ not_structural ]
+          else msgs
+        in
         List.iter
           (fun msg ->
             Err.error ~code:Err.Code.invalid_measure errctx ~span:fd.A.fn_name.A.span
               (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
-          (measure_gate_errors fd))
+          msgs)
       mfns;
     (* Scalar-field measure notice.  A measure reading a scalar constructor
        field (`Array.length` reading `PVec`'s count) is axiomatised correctly;
@@ -7937,13 +8722,163 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   handler_sigs := collect_handler_sigs m.A.mod_decls;
   ctor_sigs := collect_ctor_sigs m.A.mod_decls;
   impl_sigs := collect_impl_sigs m.A.mod_decls;
-  (* Only POSITIVELY VERIFIED postconditions may be assumed at call sites. *)
-  gate_unverified_posts ~root errctx defs m.A.mod_decls;
+  (* Only POSITIVELY VERIFIED postconditions may be assumed at call sites.
+     Termination phase 3: once the IH-free rounds stall, [ih_prepare]
+     certifies the recursive SCCs the induction hypothesis may serve, and
+     the gate admits each one atomically.  [ih_spans] stays set for the
+     element-return gate and the walk (the self-call hypotheses read it),
+     and is cleared when this function returns. *)
+  Hashtbl.reset ih_spans;
+  Fun.protect ~finally:(fun () -> Hashtbl.reset ih_spans) @@ fun () ->
+  gate_unverified_posts_ih ~root
+    ~ih:(fun pending -> ih_prepare ~root ?type_map term defs m.A.mod_decls pending)
+    errctx defs m.A.mod_decls;
   ret_elem_demand := None;
   gate_elem_returns ~root defs m.A.mod_decls;
+  (* Termination, phase 2 (design §3.3-§3.5, §9): plan the metric
+     obligations of every DEMANDED recursive SCC (one carrying
+     `@[decreases]`, or user code under `--termination-report`) before the
+     walk, which discharges them at their calls ([term_sites]); decide the
+     certificates after it.  Report-only (D2): nothing here feeds the
+     induction hypothesis, and no SCC is planned in a module with no
+     annotation unless the report asked for it. *)
+  Hashtbl.reset Refine_term.last_certs;
+  Hashtbl.reset Refine_term.last_inferred;
+  Hashtbl.reset Refine_term.last_inferred_exprs;
+  Hashtbl.reset term_verdicts;
+  let rec has_decreases decls =
+    List.exists
+      (function
+        | A.DFn (fd, _) -> List.mem_assoc "decreases" fd.A.fn_attr_args
+        | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> has_decreases ds
+        | _ -> false)
+      decls
+  in
+  let total_tbl = cap_unit_spans "total" m.A.mod_decls in
+  let has_total = Hashtbl.fold (fun _ v acc -> v || acc) total_tbl false in
+  let term_plan =
+    if !Refine_term.check_all || has_decreases m.A.mod_decls || has_total
+       || !Refine_term.infer_demand <> None
+    then begin
+      let t = Lazy.force term in
+      let g = t.Refine_term.graph in
+      let in_total (u : Refine_term.unit_) =
+        let top = g.Refine_term.units.(u.Refine_term.u_top) in
+        Option.value ~default:false (Hashtbl.find_opt total_tbl u.Refine_term.u_span)
+        || Option.value ~default:false (Hashtbl.find_opt total_tbl top.Refine_term.u_span)
+      in
+      (* Demand (§9): user code under the report, every unit of a `cap total`
+         list, and (phase 4) every SCC either reaches, whose certificate the
+         "may diverge" inference reads. *)
+      let roots =
+        Array.to_list g.Refine_term.units
+        |> List.filter (fun (u : Refine_term.unit_) ->
+               (!Refine_term.check_all && not (is_stdlib_source_file u.Refine_term.u_span.A.file))
+               || in_total u
+               || match !Refine_term.infer_demand with
+                  | Some f -> f u.Refine_term.u_span
+                  | None -> false)
+      in
+      let demand = Hashtbl.create 64 in
+      List.iter
+        (fun (u : Refine_term.unit_) ->
+          let si = g.Refine_term.scc_of.(u.Refine_term.u_id) in
+          if not (Hashtbl.mem demand si) then begin
+            Hashtbl.replace demand si ();
+            List.iter (fun r -> Hashtbl.replace demand r ()) (Refine_term.reachable_sccs g si)
+          end)
+        roots;
+      let pl =
+        Refine_term.plan_metrics ?type_map ~is_measure
+          ~demanded:(fun u -> Hashtbl.mem demand g.Refine_term.scc_of.(u.Refine_term.u_id))
+          t
+      in
+      List.iter
+        (fun (span, msg) ->
+          Err.error ~code:Err.Code.invalid_decreases errctx ~span ("@[decreases]: " ^ msg))
+        pl.Refine_term.pl_invalid;
+      List.iter
+        (fun u ->
+          let un = t.Refine_term.graph.Refine_term.units.(u) in
+          Err.warning ~code:Err.Code.attribute_no_effect errctx ~span:un.Refine_term.u_span
+            (Printf.sprintf
+               "`@[decreases]` on `%s` has no effect: `%s` is not recursive, so there is no \
+                recursive call for the metric to decrease at."
+               un.Refine_term.u_name un.Refine_term.u_name))
+        pl.Refine_term.pl_no_effect;
+      term_sites := pl.Refine_term.pl_sites;
+      Some (t, pl, in_total)
+    end
+    else None
+  in
   (* Always walk: a function may have a refined *return* (postcondition) even
      with no refined parameters, so it won't appear in [defs]. *)
-  visit_decls ~root errctx defs rctx0 m.A.mod_decls;
+  Fun.protect ~finally:(fun () -> term_sites := Hashtbl.create 1) (fun () ->
+      visit_decls ~root errctx defs rctx0 m.A.mod_decls);
+  Hashtbl.reset Refine_term.last_divergence;
+  (match term_plan with
+   | None -> ()
+   | Some (t, pl, in_total) ->
+     let certs, fails =
+       Refine_term.finish t pl ~verdicts:(fun sp ->
+           Option.value ~default:[] (Hashtbl.find_opt term_verdicts sp))
+     in
+     let g = t.Refine_term.graph in
+     Array.iter
+       (fun (u : Refine_term.unit_) ->
+         let c = certs.(g.Refine_term.scc_of.(u.Refine_term.u_id)) in
+         if c <> "" then Hashtbl.replace Refine_term.last_certs u.Refine_term.u_span c)
+       g.Refine_term.units;
+     (* Phase 5 (§3.5): only under `--refine-infer` or `--termination-report`
+        ([Refine_term.infer]); a plain `--check` never infers.  Targets: an
+        SCC left uncertified for a reason a metric could fix, with a member in
+        user code (or, under `--refine-infer`, one its demand accepts).
+        Before [report_termination], whose note names the metric found. *)
+     if !Refine_term.infer then begin
+       let target (u : Refine_term.unit_) =
+         match !Refine_term.infer_demand with
+         | Some f -> f u.Refine_term.u_span
+         | None -> not (is_stdlib_source_file u.Refine_term.u_span.A.file)
+       in
+       let targets =
+         List.filter
+           (fun si ->
+             inferable_cert certs.(si)
+             && List.exists (fun u -> target g.Refine_term.units.(u)) g.Refine_term.sccs.(si))
+           (List.init (Array.length certs) Fun.id)
+       in
+       if targets <> [] then
+         record_inferred t
+           (infer_metrics ~root ?type_map t defs m.A.mod_decls ~targets
+              ~tried:(fun u -> pl.Refine_term.pl_metric.(u)))
+     end;
+     let vtbl = verified_fn_spans m.A.mod_decls in
+     let reported =
+       report_termination errctx t certs fails ~strict:(fun sp ->
+           Option.value ~default:false (Hashtbl.find_opt vtbl sp)
+           || Option.value ~default:false (Hashtbl.find_opt total_tbl sp))
+     in
+     (* Phase 4: "may diverge", inferred upward (D4), for the report and
+        `cap total`.  An SCC the plan did not reach keeps its phase-1
+        certificate. *)
+     let cert_of si =
+       if certs.(si) <> "" then certs.(si) else Refine_term.cert_name t.Refine_term.certs.(si)
+     in
+     let dv = Refine_term.divergence g ~cert_of in
+     Array.iter
+       (fun (u : Refine_term.unit_) ->
+         match dv.(g.Refine_term.scc_of.(u.Refine_term.u_id)) with
+         | Some c ->
+           let cu = Refine_term.culprit_unit c in
+           Hashtbl.replace Refine_term.last_divergence u.Refine_term.u_span
+             { Refine_term.dv_text = Refine_term.culprit_text g u.Refine_term.u_id c;
+               dv_through_marked =
+                 (match c with
+                  | Refine_term.Marked _ -> g.Refine_term.scc_of.(cu) <> g.Refine_term.scc_of.(u.Refine_term.u_id)
+                  | _ -> false) }
+         | None -> ())
+       g.Refine_term.units;
+     if has_total then report_cap_total errctx t certs fails dv ~total:in_total ~reported);
   (* Vocabulary warning: runs last so [registered_measures] (set at the top of
      this function) is already populated — otherwise a user `@[measure]`
      would look unrecognized and warn spuriously. *)

@@ -2883,18 +2883,28 @@ end|}));
        is never consulted.  The behaviour is unchanged — and it is SILENCE,
        because the recursive tail `countdown(n - 1)` is not reflectable, so the
        postcondition is not proven and does not propagate.  Pinned so a future
-       widening of Tier 2 onto Int returns cannot change it unnoticed. *)
-    gated "a closed Int postcondition on a recursive function is unaffected"
+       widening of Tier 2 onto Int returns cannot change it unnoticed.
+
+       Termination phase 3 (specs/progress/2026-10-27-termination-phase3.md)
+       changed it deliberately: `countdown`'s `<= 0` exit makes `n` a proved
+       metric, so the induction hypothesis proves `_ >= 0`, and
+       `needsneg(countdown(5))` is a REAL violation (`countdown(5)` is 0).
+       With an `== 0` exit `countdown(-1)` diverges: no certificate, and the
+       old silence. *)
+    gated "a closed Int postcondition on a recursive function: proved only when it terminates"
       (fun () ->
-        Alcotest.(check bool) "no error" false
-          (has_refine_error
-             {|mod M do
+        let src exit_ =
+          Printf.sprintf
+            {|mod M do
   fn countdown(n : Int) : {Int | _ >= 0} do
-    if n <= 0 do 0 else countdown(n - 1) end
+    if n %s 0 do 0 else countdown(n - 1) end
   end
   fn needsneg(k : {Int | _ < 0}) : Int do k end
   fn probe() : Int do needsneg(countdown(5)) end
-end|}));
+end|} exit_
+        in
+        Alcotest.(check bool) "`<= 0` exit: certified, a real violation" true (has_refine_error (src "<="));
+        Alcotest.(check bool) "`== 0` exit: diverges on -1, silence" false (has_refine_error (src "==")));
 
     (* A CLOSED postcondition over an ADT return, by contrast, IS newly proven
        by the induction (the base case gives size >= 1 outright, the step needs
@@ -12784,7 +12794,7 @@ module Audit_fixture = struct
         fn_attrs = [];
         fn_ret_ty = Some (refine_or_plain 5 int_ty);
         fn_clauses = [ f_clause ];
-        fn_bounds = [] }
+        fn_bounds = []; fn_attr_args = [] }
     in
     let top_let : A.binding =
       { A.bind_pat = A.PatVar (nm "top_let");
@@ -12833,7 +12843,7 @@ module Audit_fixture = struct
               fc_span = dummy;
               fc_params_span = dummy }
           ];
-        fn_bounds = [] }
+        fn_bounds = []; fn_attr_args = [] }
     in
     let impl_def : A.impl_def =
       { A.impl_iface = nm "Bumper";
@@ -13036,7 +13046,7 @@ let audit_stacked_refinement_suite =
             fn_attrs = [];
             fn_ret_ty = None;
             fn_clauses = [ clause ];
-            fn_bounds = [] }
+            fn_bounds = []; fn_attr_args = [] }
         in
         let labels = Audit_fixture.labels [ A.DFn (fd, dummy) ] in
         Alcotest.(check (list (triple string string (pair string int))))
@@ -26678,8 +26688,14 @@ let demand_chains_suite =
           (post "f" (m "  fn f(x : {Int | _ > 0}) : {Int | _ > 0} do f(x) end\n"));
         (* A base case that proves on its own does not let the recursive
            tail assume the contract either: the `1` tail proves, the
-           `f(n - 1)` tail stays unproved, so the return is. *)
-        Alcotest.check vs "if n == 0 do 1 else f(n - 1)" [ "proved"; "skipped:unreflectable-subject" ]
+           `f(n - 1)` tail stays unproved, so the return is.  Unless the
+           recursion is CERTIFIED to terminate (termination phase 3): with
+           `n : {Int | _ >= 0}` the metric `n` proves, so the induction
+           hypothesis proves the tail; with a plain `Int`, `f(-1)` diverges
+           and the old skip stays. *)
+        Alcotest.check vs "if n == 0 do 1 else f(n - 1), n : Int" [ "proved"; "skipped:unreflectable-subject" ]
+          (post "f" (m "  fn f(n : Int) : {Int | _ > 0} do if n == 0 do 1 else f(n - 1) end end\n"));
+        Alcotest.check vs "the same, n : {Int | _ >= 0} (certified)" [ "proved"; "proved" ]
           (post "f" (m "  fn f(n : {Int | _ >= 0}) : {Int | _ > 0} do if n == 0 do 1 else f(n - 1) end end\n")));
     gated "C1 mutual-recursion control: neither member proves from the other's unproved return" (fun () ->
         (* Base: the same. *)
@@ -28440,6 +28456,13 @@ let () =
       ("caller-sorts", caller_sorts_suite);
       ("array-contract-followups", array_followups_suite);
       ("wrapper-contracts", wrapper_contracts_suite);
+      ("termination-report", Test_refine_term.report_suite);
+      ("termination-structural", Test_refine_term.structural_suite);
+      ("termination-metric", Test_refine_term.metric_suite);
+      ("termination-ih", Test_refine_term.ih_suite);
+      ("termination-review", Test_refine_term.review_suite);
+      ("termination-diverges", Test_refine_term.diverges_suite);
+      ("termination-infer", Test_refine_term.infer_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("callback-binder", callback_binder_suite);
       ("abstract-pass-sites", abstract_pass_sites_suite);

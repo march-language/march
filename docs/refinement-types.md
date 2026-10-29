@@ -1649,7 +1649,9 @@ mathematical function: the solver trusts it, so a broken one would let it
 - is **non-total**: a non-exhaustive `match` on its parameter, or a `/` / `%`
   that could divide by zero,
 - is **not recursive over the structure**: a recursive call with an argument that isn't a
-  component of the matched parameter,
+  component of the matched parameter. This covers the measure's whole call cycle, not only its
+  calls to itself: two measures calling each other must form a cycle with a
+  [structural certificate](#the-structural-certificate), or both are rejected,
 - does **not take exactly one parameter**, the value it measures: a predicate can
   only apply a measure to one argument, so a zero-argument or multi-parameter
   `@[measure]` could never be translated and the annotation would only silence
@@ -4055,6 +4057,557 @@ undischarged postcondition; see below.
 
 ---
 
+## Termination: `--termination-report`
+
+The refinement checker never assumes a recursive function's return refinement
+before that return is proved, because a function that never returns would make
+any return refinement "provable". Termination checking is what will allow that
+assumption, the induction hypothesis
+(`specs/2026-10-26-termination-checking-design.md`). The first step is a report:
+
+```
+$ march --check --termination-report prog.march
+termination report: 3 recursive units, 1 calling a non-positive function value
+term	C	int-dec	prog.march:2:5	down	top	scc=1	cert=unproved:no-structural-arg
+term	A	structural	prog.march:5:5	len2	top	scc=1	cert=structural
+term	?	none	prog.march:11:5	spin	top	scc=1	cert=unproved:no-structural-arg
+term	F	value	prog.march:14:5	w	top	scc=1	cert=unproved:non-positive
+  by class: ?=1 A=1 C=1 F=1
+  certificate: 1 structural, 0 metric, 0 trusted, 3 unproved
+  trusted: 0 builtin or extern callees
+  unresolved: 0 callees
+```
+
+There is one line per recursive *unit* of your code. A unit is a top-level function, a
+local `fn` (named `outer/inner`), an actor handler, an `impl` method (`impl Show.show`), an
+interface's default method, or a top-level `let` (a lambda's body runs at each call). A unit
+is recursive when it sits in a cycle of the call graph. The graph has three kinds of edge:
+
+- a direct call;
+- a call inside a lambda or a `let*` continuation;
+- a function named as a value (`apply(f, x)` inside `f`).
+
+So recursion that runs only through a callback still counts.
+
+Every callee name is resolved the way the checker resolves a call: a local binder
+first, then the enclosing module and its `use` / `import`s, out to the top level, then
+an `alias`ed module (`alias Other as Z` makes `Z.g` reach `Other.g`). A call to an
+interface method (`show(x)`), or to a builtin an interface constrains (`==`, `<`),
+reaches every `impl` of that interface the argument's type can dispatch to. A builtin
+or an `extern` is assumed to terminate. Any other name is **unresolved**: it may
+diverge, so its cycle is not certified (`cert=unproved:unresolved`) and the report's
+`unresolved:` line lists it.
+
+The second and third columns classify how the unit recurses:
+
+| Class | Shape | Meaning |
+| --- | --- | --- |
+| A | `structural` | some argument is a pattern component of the matched parameter at every recursive call |
+| B | `int-dec` / `int-asc` | an `Int` parameter moves by a positive literal (`n - 1`, `n / 2`, `i + 1`) at every call, and the parameter appears in an ordering comparison or a refinement |
+| C | `int-dec` / `int-asc` | the same metric, but nothing bounds it: `if n == 0 do … else down(n - 1)` loops on `down(-1)` |
+| D | `lex` | no single position falls, but some position falls at every call with the earlier ones unchanged (Ackermann) |
+| F | `lambda` / `ref` | recursion through a lambda or a function value |
+| E | `diverges` | marked `@[diverges]` (itself, a function in its cycle, or the function enclosing a local `fn`): not claimed to terminate |
+| `E?` | `none` | no syntactic metric, and the cycle waits on something outside the program: it reaches a builtin that receives a message, accepts a connection, reads a socket, a file or a process, reads the clock, or reads a `Vault` another task writes |
+| `?` | `none` | no syntactic metric |
+
+`mutual` after the shape means the unit shares its cycle with other functions; `scc=`
+gives the cycle's size.
+
+The classification is syntactic and changes no verdict. In particular, an `Int`
+argument like `n - 0`, `n / 1` or `n - (0 - 1)` is **not** a metric. The tail-call
+check still calls such a call "structurally recursive", because that check is about
+stack depth, not termination.
+
+### The structural certificate
+
+The last column is a **certificate**: whether the checker can prove that the unit's
+cycle terminates. For now the only proof is structural, and an unproved unit is
+reported, never warned about. `cert=structural` holds for a cycle when:
+
+- each member matches on a parameter, and every call in the cycle passes a *pattern
+  component* of the caller's matched parameter, as a bare variable, at the callee's
+  position. Arithmetic (`n - 1`), a nullary constructor (`f(Nil)`) and the parameter
+  itself never count. The match must be on the parameter's own value: after
+  `let xs = Cons(0, xs)` (or an arm, lambda, `let?` or local `fn` binding `xs`),
+  `match xs` is a match on something else, and its components are not smaller than
+  the argument;
+- a component name is trusted only if every binding of that name in the body is
+  structural. `Cons(_, t)` of a *second* list reusing the outer `t` spoils it;
+- in a cycle of several functions, every member matches on a parameter of one type
+  **family**: the same type (`even`/`odd` on `Nat`), or types defined in terms of each
+  other (a `Tree` holding a `Forest` that holds `Tree`s). A tree recursing through a
+  `List(Tree)` of children is not certified yet, because `List` is not defined in terms of
+  `Tree`;
+- no member names a member of its own cycle as a value (`apply(f, x)` inside `f`):
+  the arguments of such a call are unknown;
+- no member calls a function value whose type mentions a **non-positive** type.
+
+A type is non-positive when it occurs to the left of an arrow inside its own
+definition, directly (`type Fix = Fix(Fix -> Int)`), through a type it is mutually
+defined with, or through a generic type that uses its parameter on the left of an
+arrow. Such a type lets a program loop with no recursion in sight:
+
+```march
+type Fix = Fix(Fix -> Int)
+fn w(f : Fix) : Int do match f do Fix(g) -> g(f) end end
+fn omega() : Int do w(Fix(w)) end    -- never returns
+```
+
+`w` is listed with `cert=unproved:non-positive` although it is not recursive.
+`type T = T(Int -> Int)` is positive and blocks nothing.
+
+The reasons are `no-structural-arg`, `not-same-family`, `reference`, `non-positive` and
+`unresolved` (a member calls a name the checker cannot resolve, above).
+`Int` recursion (`down(n - 1)`) is the job of a metric, below.
+
+### Metrics and `@[decreases]`
+
+A cycle that is not structural can still be shown to terminate by a **metric**: a
+number, computed from the parameters, that stays at least 0 and falls at every
+recursive call. The checker proves this with the solver at each recursive call,
+using the same facts it uses for a precondition there: the guards on the way to
+the call and the parameters' refinements.
+
+Without an annotation, the metric is the function's first `Int` parameter.
+This `fib` needs nothing written:
+
+```march
+fn fib(n : Int) : Int do
+  if n < 2 do n else fib(n - 1) + fib(n - 2) end
+end
+```
+
+At each call, `n >= 2` holds, so `n - 1` and `n - 2` are at least 0 and below `n`.
+
+Where the first `Int` parameter is not the right measure, write one with
+`@[decreases(...)]`:
+
+```march
+@[decreases(100 - n)]
+fn up(n : Int) : Int do
+  if n >= 100 do 0 else up(n + 1) end
+end
+```
+
+A metric may use the function's parameters, `Int` literals, `+`, `-`, `*`, `/`
+by a positive literal, and measures such as `len`. A list or another data type is
+not a number by itself, so measure it:
+
+```march
+@[decreases(len(xs) - i)]
+fn scan(xs : List(Int), i : {Int | _ >= 0}, acc : Int) : Int do
+  if i >= List.length(xs) do acc else scan(xs, i + 1, acc + 1) end
+end
+```
+
+Several metrics, separated by commas, are compared left to right: a call is fine
+if the first one falls (and stays at least 0), or the first stays equal and the
+rest fall by the same rule. That covers Ackermann's function:
+
+```march
+@[decreases(m, n)]
+fn ack(m : Int, n : Int) : Int do
+  if m <= 0 do n + 1
+  else if n <= 0 do ack(m - 1, 1)
+  else ack(m - 1, ack(m, n - 1)) end end
+end
+```
+
+In a cycle of several functions, each function has its own metric, all of the
+same length, and every call in the cycle must decrease from the caller's metric to
+the callee's. When one function of a cycle carries `@[decreases]`, the others
+either carry one too or use their first `Int` parameter (only when the metrics
+have one component).
+
+The order the checker tries is fixed: the structural certificate first; then the
+written `@[decreases]`, if there is one, and only that; then the first `Int`
+parameter. When none of these works, `--refine-infer` can search for a metric to
+write (see "Inferring a metric" below).
+
+A metric must really stay at least 0. This loops on `down(-1)`, and is not proved:
+
+```march
+@[decreases(n)]
+fn down(n : Int) : Int do
+  if n == 0 do 0 else down(n - 1) end
+end
+```
+
+```
+warning: `down` is not shown to terminate: the recursive call `down(n - 1)`
+is not shown to decrease `n`: e.g. n = -1 [termination_unproved]
+```
+
+The fix is an exit that covers negative numbers (`if n <= 0`), or a parameter
+refined to `{Int | _ >= 0}`.
+
+**When you are told.** Termination is reported, not enforced:
+
+- `termination_unproved` is a warning, and only for a function that carries
+  `@[decreases]`. Unannotated recursion is listed by `--termination-report` but
+  never warned about.
+- In a `cap verified` module, `termination_unproved` on an annotated function is
+  an error.
+- A metric outside the fragment above, naming something that is not a parameter,
+  or with a different length from the rest of its cycle, is an `invalid_decreases`
+  error. `@[decreases]` on a function that is not recursive is an
+  `attribute_no_effect` warning.
+
+Under `--termination-report`, every recursive unit of your code gets its metric
+checked: `cert=metric` when every call proves, `cert=trusted` when an
+`@[assume]` or `@[trusted]` function accepted an unproved one, and
+`cert=unproved:not-decreasing` otherwise. Other reasons are `invalid-decreases`,
+`no-int-parameter` (a function of the cycle has no `Int` parameter),
+`unannotated:<name>` (a function of an annotated cycle has no metric of the right
+length) and `shadowed` (a recursive call sits under a binding that reuses a name
+the metric reads, so the metric would read the inner value). `--refine-report`
+counts the checks as `termination` in its `by kind:` line. Calls to builtins and
+`extern` functions are assumed to terminate; the report's `trusted:` line lists
+them. A name the checker cannot resolve is never assumed to terminate; the
+`unresolved:` line lists it.
+
+### Inferring a metric
+
+When neither the structural certificate nor the first `Int` parameter works,
+`march --refine-infer` (and `forge refine --infer`) search for a metric and
+propose it as an `@[decreases(...)]` to add. `--termination-report` runs the
+same search and lists what it found. A plain `--check` never searches.
+
+For each cycle the checker could not certify, it tries at most 8 candidate
+metrics, in this order:
+
+1. each `Int` parameter, in parameter order;
+2. `b - i`, for an `Int` parameter `i` that some recursive call passes as
+   `i + 1` (or `i + k`), when the body compares `i` with `b` and `b` is a
+   literal or built from parameters every recursive call passes unchanged
+   (`i >= b` or `i < b` gives `b - i`; `i > b` or `i <= b` gives `b - i + 1`),
+   and `len(x) - i` for such an `i` and a list or string `x` passed unchanged;
+3. `len(x)`, for a `List` parameter `x`;
+4. pairs of the above, in parameter order, compared left to right.
+
+The metric phase 2 already tried (the first `Int` parameter, or your own
+`@[decreases]`) is not tried again. Each candidate is checked exactly as if you
+had written it: every recursive call of the cycle must prove that it decreases.
+A candidate is proposed only if all of them prove; nothing is assumed.
+
+```march
+fn up(n : Int) : Int do
+  if n >= 100 do 0 else up(n + 1) end
+end
+
+pfn count_to(i : Int, hi : Int, acc : Int) : Int do
+  if i >= hi do acc else count_to(i + 1, hi, acc + 1) end
+end
+```
+
+```
+$ march --check --refine-infer up.march
+inferred refinements: 0 proposed, 0 refused; user skips 0 -> 0 (47 probes, 1 rounds)
+inferred metrics: 2 proposed, 0 not inferred
+  up (up.march:1)  @[decreases(100 - n)]  [termination, class B, 1 of 1 candidate checked]
+  count_to (up.march:5)  @[decreases(hi - i)]  [termination, class B, 3 of 8 candidates checked]
+```
+
+`--refine-infer-apply` writes each attribute in front of its function's `fn`, on
+the same line, then re-checks the module. A proposal is written only when that
+re-check certifies its cycle. A cycle of several functions gets one attribute
+per function, and is written whole or not at all. A written metric can also give
+a refined return its induction hypothesis (below): `--refine-report
+--refine-infer` counts the obligations that closes, from the same re-check.
+
+A list falls through a helper's proved return. Here `len(lst)` is inferred,
+because `pop_front` promises a shorter list:
+
+```march
+fn pop_front(xs : {List(Int) | len(_) > 0}) : {List(Int) | len(_) < len(xs)} do
+  match xs do
+    Cons(_, t) -> t
+    Nil -> xs
+  end
+end
+
+fn walk(lst : List(Int), acc : Int) : Int do
+  match lst do
+    Nil -> acc
+    Cons(_, _) -> walk(pop_front(lst), acc + 1)
+  end
+end
+```
+
+Some proposals are shown but not written:
+
+- a metric for a local `fn` (`chunks/go`), since a local `fn` takes no
+  attribute;
+- a metric that would replace a `@[decreases]` you wrote. The editor offers that
+  replacement as a quick fix (below).
+
+A function the search cannot help is listed as `no metric inferred`, with how
+many candidates were checked. When there were more than 8, the line says the cap
+was reached. A function that really can loop never gets a proposal: `up` with an
+`n == 100` exit loops from 101, and none of its candidates proves. The search
+also cannot see through a byte test. `Json.skip_ws(s, i + 1)` stops when
+`string_byte_at(s, i)` is not a space. The search tries `len(s) - i` (an index
+climbing through a string it passes unchanged), but nothing tells the checker that
+a space means `i` is still inside `s`, so no metric is inferred for it.
+
+Under `--termination-report`, each searched unit gets a line:
+
+```
+infer	up.march:1:5	up	@[decreases(100 - n)]	1 of 1 candidate checked
+infer	scan.march:4:5	skip_ws	none	1 of 1 candidate checked
+  inferred: 1 of 2 uncertified units
+```
+
+### The induction hypothesis
+
+A proof of termination is what lets the checker assume a recursive function's
+own return refinement at its recursive calls. This assumption is the
+**induction hypothesis**. With it, `sum_to` proves:
+
+```march
+fn sum_to(n : {Int | _ >= 0}) : {Int | _ >= 0} do
+  if n == 0 do 0 else n + sum_to(n - 1) end
+end
+
+fn caller(k : {Int | _ >= 0}) : Int do need_nn(sum_to(k)) end
+```
+
+Here is the reasoning, step by step:
+
+1. The call `sum_to(n - 1)` meets its precondition, because `n - 1 >= 0` when
+   `n != 0`.
+2. The metric `n` falls at that call.
+3. So the checker may assume that the call's result is `>= 0`.
+4. `n + (something >= 0)` is `>= 0`, so the return refinement holds.
+5. Once proved, the contract is a fact at `caller`'s call too.
+
+The hypothesis is used only when all of these hold:
+
+- **The cycle is certified.** Its certificate is `structural` or `metric`.
+  A cycle that is `unproved` gets no hypothesis, and neither does one that is
+  `trusted`. Without this rule, a function that never returns would "prove"
+  any return refinement at all:
+
+  ```march
+  fn loopy(x : Int) : {Int | _ < 0} do loopy(x) end
+  ```
+
+  This function has no metric, so its return refinement is not proved. The
+  return stays a skip, and a call that depends on it is not reported as a
+  violation.
+- **Everything it calls is certified too.** If any recursive function the
+  cycle calls (directly or further down) is not certified, or anything it calls
+  is unresolved, the hypothesis is withheld. A call into a function that may
+  never return could make the whole cycle never return. This includes a call
+  through an `alias`, a `use` or `import`, an interface method's `impl`, and a
+  top-level `let` lambda.
+- **The recursive call is checked.** The checker must have reached the call,
+  and proved every precondition there. A call that breaks a precondition gets
+  no hypothesis:
+
+  ```march
+  fn f(n : {Int | _ >= 0}, k : {Int | _ > 0}) : {Int | _ > 0} do
+    if n == 0 do k else f(n - 1, k - 1) end
+  end
+  ```
+
+  Here `f(n - 1, k - 1)` decreases `n`, but it breaks `k > 0` when `k = 1`.
+  So `f`'s return refinement is not proved, and that is correct: `f(1, 1)`
+  returns `0`.
+- **A cycle of several functions proves all together, or not at all.** Each
+  function's return refinement is checked assuming all the others at their
+  recursive calls. They are accepted only if every one of them proves.
+  If one is false, none is accepted, even those that would prove under the
+  false one's hypothesis.
+
+The hypothesis serves every kind of return refinement:
+
+- a number or `Bool` return (`{Int | _ >= 0}`);
+- a data type return (`{List(Int) | len(_) == n}`);
+- an element return (`List({Int | _ > 0})`), for a top-level function or a
+  local `fn`.
+
+A data type, element or local `fn` return uses the hypothesis only at a call
+to itself. In each case, structural recursion already had a hypothesis; a
+certified metric now gives one too:
+
+```march
+@[decreases(n)]
+fn replicate(x : {Int | _ > 0}, n : {Int | _ >= 0}) : List({Int | _ > 0}) do
+  if n == 0 do Nil else Cons(x, replicate(x, n - 1)) end
+end
+```
+
+Without `@[decreases(n)]`, the metric would be the first `Int` parameter, `x`.
+`x` does not change at the call, so the cycle would not be certified.
+
+A call can now sit inside arithmetic in a return expression, for example
+`n + sum_to(n - 1)` or `1 + len2(t)`. The call's proved contract is a fact
+there, just as it is for a call returned on its own or bound with `let`. This
+works for any function with a proved contract, recursive or not.
+
+The checker looks for a hypothesis only after the ordinary proof has failed.
+It then checks termination only for the cycles that could use one. These are
+cycles with a return refinement that is still unproved, or with an element
+return. A module with neither does no extra work. The termination checks made
+for the hypothesis are not added to the `--refine-report` totals.
+`--termination-report` and `@[decreases]` still list them, as before.
+
+### Attribute names are checked
+
+A function attribute the compiler does not know is ignored, so a misspelling
+would silently do nothing. The checker warns about it (`unknown_attribute`),
+with a suggestion when the name is close to a known one:
+
+```
+warning: unknown attribute `@[decrease]` on `f`: it is ignored.
+note: did you mean `@[decreases]`?
+```
+
+The function attributes are `@[assume]`, `@[decreases]`, `@[diverges]`,
+`@[measure]`, `@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`,
+`@[trusted_linear]` and `@[vectorize]`.
+
+### Functions meant to run for ever: `@[diverges]`
+
+Some functions are not supposed to end: a server's accept loop, a reader that
+waits for the next frame, a ticker that runs until the program stops. Mark one
+`@[diverges]`:
+
+```march
+@[diverges]
+fn accept_loop(listen_fd : Int) : Int do
+  match tcp_accept(listen_fd) do
+    Err(_) -> 0
+    Ok(fd) ->
+      handle(fd)
+      accept_loop(listen_fd)
+  end
+end
+```
+
+The attribute says the function is not claimed to terminate. The checker then:
+
+- files no termination obligation for it;
+- never assumes its return refinement at its own recursive calls (the induction
+  hypothesis), nor at the recursive calls of any cycle that reaches it;
+- lists it in `--termination-report` with `cert=diverges`, under class E.
+
+Callers do not have to repeat the attribute. That a caller *may* diverge is
+worked out for it, through the call graph, and the report lists such callers:
+
+```
+  may diverge through @[diverges]: 2 units: main, serve_all
+```
+
+A local `fn` cannot carry an attribute. It is covered when the function around
+it is marked. One mark on any function of a recursive cycle covers the whole
+cycle, except in a `cap total` module, where every function of the cycle must be
+marked (see "Requiring termination: `cap total`").
+
+`@[diverges]` cannot be combined with `@[decreases]`, which claims a metric that
+proves the function does terminate, or with `@[measure]`, since a measure is a
+logical definition and must terminate. A measure that calls a `@[diverges]`
+function, directly or through other calls, is rejected too. Each of these is a
+`diverges_conflict` error.
+
+The standard library marks its event loops this way: the cluster's accept,
+tick and link-reading loops, the frame readers of `NetKernel`, `NodeCall`,
+`NodeSend` and `PeerReader`, the `Csv` and `File` row and line readers, the
+`Session` and `SessionNode` drain and heartbeat loops, and the `Topology`
+placement loop. A test checks that no event loop in the standard library is left
+unmarked, except a short, explained list of loops that do end (a retry with a
+counter, a poll with a deadline) and of loops inside local functions.
+
+### Actor handlers
+
+An actor handler runs once per message, so it must return for each one. Its own
+body is not a loop: `send(self(), Again(k + 1))` puts a message in the mailbox
+and returns, so it is not a recursive call. A handler may still call a function
+that does not return. `--termination-report` then says so:
+
+```
+handler	prog.march:7:7	Counter.Spin	may not return: it reaches `spin`, whose recursion is not shown to terminate
+```
+
+This is a report line, never a warning, except in a `cap total` module.
+
+### Requiring termination: `cap total`
+
+By default termination is only reported. A module that wants every function
+proved to terminate declares `cap total`:
+
+```march
+mod Counting do
+  cap total
+
+  fn countdown(n : Int) : Int do
+    if n <= 0 do 0 else countdown(n - 1) end
+  end
+
+  @[diverges]
+  fn serve(n : Int) : Int do serve(n + 1) end
+
+  fn main() do serve(0) end
+end
+```
+
+In a `cap total` module, `termination_unproved` is an error for:
+
+- a recursive function whose cycle has no certificate (structural, a proved
+  metric, or `@[trusted]`);
+- a function that calls one, or calls an unresolved name;
+- a function that calls a `@[diverges]` function without being marked
+  `@[diverges]` itself;
+- a function in a recursive cycle with a `@[diverges]` function, unless it is
+  marked `@[diverges]` too: under `cap total` one mark does not cover the
+  cycle, as Idris's `partial` covers only the function it is written on;
+- an actor handler that may not return.
+
+`main` and its local functions are exempt, and so is a function marked
+`@[diverges]`, which says plainly that it may run for ever. Like `cap verified`,
+the cap covers the declarations of its own module; a nested `mod` declares its
+own.
+
+A call through an interface (`show(x)` with `x` of a type variable) reaches
+every `impl` of the interface, and an `impl` that does not terminate is an error
+on its own method. The call itself is not: the `impl` is picked by a value at run
+time, so the caller terminates whenever the `impl` it is given does, as with any
+function passed as an argument. A call on a known type (`show(Box(1))`) names
+its `impl` where it is written, so an `impl` that may not terminate makes the
+caller an error too.
+
+Builtins that run an `impl` count as such calls: string interpolation
+(`"${e}"`) and `to_string` run `Show`, as does `println`; `==`, `!=`, `eq` run
+`Eq`; `<`, `<=`, `>`, `>=`, `compare` run `Ord`; `hash` runs `Hash`; `to_json`,
+`from_json` and `from_json_events` run the derived Json codecs; and `own` runs
+`Drop`. The same holds for the induction hypothesis: a function whose
+interpolation runs an `impl Show` that calls the function back gets no
+hypothesis unless that cycle is certified.
+
+### Editor repairs
+
+The editor offers quick fixes on a `termination_unproved` diagnostic that
+`march --check-json` reports:
+
+- **change `n == 0` to `n <= 0`**, when the counterexample is negative and the
+  exit is `n == 0`. The diagnostic says so in a note
+  (`note: the exit `n == 0` misses a negative `n`; `n <= 0` covers it.`), and the
+  editor offers the change only when asked: it changes what the program does (a
+  call that never returned now returns the base case), so it is not a machine
+  fix, `forge fix` never applies it, and it is not a preferred quick fix;
+- **mark the function `@[diverges]`**, replacing its `@[decreases(...)]` if it
+  has one;
+- **add `@[decreases(e)]`**, when the compiler inferred a metric and checked it
+  (see "Inferring a metric"). The diagnostic then ends with
+  `note: try `@[decreases(e)]`.`, and the fix inserts the attribute, or replaces
+  a `@[decreases(...)]` that failed. Inference runs only under `--refine-infer`
+  or `--termination-report`, and only for a cycle of one top-level function, so
+  a diagnostic from a plain `--check` has no such note.
+
+---
+
 ## Getting a contract proposed for you: `forge refine`
 
 `--refine-report` tells you an obligation went unproven; it does not tell you
@@ -4131,6 +4684,7 @@ user code. It covers every kind of refinement the checker can verify:
 | relational element | `: Assoc({x : Int \| true}, {y : Int \| y > x})`, when a caller demands exactly that type |
 | abstract | `pred : a -> Bool[p]` with `: List(a[p])`, `Option(a[p])`, `Deque.Deque(a[p])`, or `partition`'s `(List(a[p]), List({a \| !p(_)}))`; two arguments, `keep : k -> v -> Bool[p]` with `: Assoc(k[p], v[p])` |
 | fold accumulator | `fn (acc : {Int \| _ > 0}, x) -> …`, a `fold_right` step's `fn (x, acc : …)`, any literal or `Int`/`Float` parameter as the initial value |
+| termination metric | `@[decreases(100 - n)]` on a recursive function nothing certified (see "Inferring a metric") |
 
 **Where candidates come from.** The program is mined first:
 
@@ -4218,6 +4772,8 @@ forge refine --infer --apply    # write them, then re-check
   the proposals are applied. For a `cap verified` module, it also says how
   many of the module's errors they close.
 - `--refine-infer-kinds` restricts the kinds, as in `--refine-infer-kinds k1,k4`.
+  The kind `decreases` names the termination metrics; a list without it infers
+  none.
 - `--refine-infer-budget N` caps the probes. The default is 3000.
 - `--allow-caller-violations` accepts a refused precondition.
 
@@ -5334,9 +5890,11 @@ edges:
   - **a recursive call inside a lambda, or behind a nested `match`.** Only the
     top-level `match`'s pattern equation is supplied, so an arm with a tail that sits
     under a second `match` cannot see the inner scrutinee's shape.
-  - **non-structural recursion.** A recursive call on the whole parameter, on a
-    reconstructed value, or on anything `structural_subvars` does not certify as
-    a component gets **no** hypothesis. This is a correctness requirement, not a
+  - **non-structural recursion, unless its cycle is certified to terminate.** A
+    recursive call on the whole parameter, on a reconstructed value, or on anything
+    `structural_subvars` does not certify as a component gets **no** hypothesis,
+    unless a termination metric certifies the call (see "The induction
+    hypothesis" under Termination). This is a correctness requirement, not a
     completeness one: a proven postcondition is *added* to the assumption set
     that call-site checks prove `¬goal` against, and adding assumptions makes a
     violation easier to prove, so an unsound hypothesis would manufacture false

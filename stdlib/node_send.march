@@ -221,7 +221,7 @@ mod NodeSend do
   skipped and lost (they belong to another consumer of this connection).
   Blocks; `Err` on a read failure.
   """
-  fn recv_failure(fd : Int, buf : List(Int)) : Result((Int, String), String) do
+  @[diverges] fn recv_failure(fd : Int, buf : List(Int)) : Result((Int, String), String) do
     match NetKernel.recv_frame(fd, buf) do
       Err(e) -> Err(e)
       Ok(fr) ->

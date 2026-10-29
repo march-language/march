@@ -462,7 +462,7 @@ let param ?(lin = Unrestricted) name ty = FPNamed { param_name = n name; param_t
 let fn ?(linear = []) ?(vis = Public) name params ret body : decl =
   DFn
     ( { fn_name = n name; fn_vis = vis; fn_doc = None; fn_attrs = []; fn_ret_ty = Some ret;
-        fn_bounds = [];
+        fn_bounds = []; fn_attr_args = [];
         fn_clauses =
           [ { fc_params =
                 List.map (fun (p, t) -> param ~lin:(if List.mem p linear then Linear else Unrestricted) p t) params;

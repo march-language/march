@@ -29,7 +29,7 @@ mod Csv do
   ptype CsvRow = CsvEof | Row(List(String))
 
   -- Internal streaming loop: call callback(fields) for each row.
-  pfn each_row_loop(handle, callback) do
+  @[diverges] pfn each_row_loop(handle, callback) do
     match csv_next_row(handle) do
     CsvEof -> :ok
     Row(fields) -> do
@@ -70,7 +70,7 @@ mod Csv do
   end
 
   -- Internal accumulator loop for read_all.
-  pfn collect_loop(handle, acc) do
+  @[diverges] pfn collect_loop(handle, acc) do
     match csv_next_row(handle) do
     CsvEof -> List.reverse(acc)
     Row(fields) -> collect_loop(handle, Cons(fields, acc))
@@ -101,7 +101,7 @@ mod Csv do
   end
 
   -- Internal loop for each_row_with_header: calls callback(header, fields) per row.
-  pfn with_header_loop(handle, header, callback) do
+  @[diverges] pfn with_header_loop(handle, header, callback) do
     match csv_next_row(handle) do
     CsvEof -> :ok
     Row(fields) -> do

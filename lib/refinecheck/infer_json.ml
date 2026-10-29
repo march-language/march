@@ -65,6 +65,7 @@ let in_body (s : IS.slot) (sp : A.span) =
   List.exists (fun (c : A.fn_clause) -> Infer_vocab.within c.A.fc_span sp) s.IS.fd.A.fn_clauses
 
 let to_string ?(edit_of : RI.proposal -> (string * int * int * string) option = fun _ -> None)
+    ?(dedit_of : RI.dproposal -> (string * int * int * string) option = fun _ -> None)
     (r : RI.result) : string =
   let violations snap = List.length (List.filter (fun (_, v) -> v = Obligation.Violated) snap) in
   let proposals =
@@ -115,9 +116,39 @@ let to_string ?(edit_of : RI.proposal -> (string * int * int * string) option = 
     |> List.map (fun (fn, n) -> Printf.sprintf "{\"fn\": %s, \"note\": %s}" (str fn) (str n))
   in
   let budget_ex = List.sort_uniq compare (List.filter_map (fun (fn, n) -> if n = "budget-exhausted" then Some (str fn) else None) r.RI.notes) in
+  (* Termination phase 5: present only when there is something to say, so a
+     program with no uncertified recursion keeps its v1 output byte for byte. *)
+  let decreases =
+    if r.RI.decreases = [] && r.RI.decreases_none = [] then ""
+    else
+      let edit_json = function
+        | Some (file, start, stop, text) ->
+          Printf.sprintf "{\"file\": %s, \"start\": %d, \"end\": %d, \"text\": %s}" (str file) start stop (str text)
+        | None -> "null"
+      in
+      let dp (d : RI.dproposal) =
+        let f, l, c = pos d.RI.d_span in
+        Printf.sprintf
+          "{\"kind\": \"decreases\", \"fn\": %s, \"file\": %s, \"line\": %d, \"col\": %d, \"annotation\": %s, \"class\": %s, \"checked\": %d, \"candidates\": %d, \"cycle\": %s, \"not_applied\": %s, \"edit\": %s}"
+          (str d.RI.d_fn) (str f) l c (str (RI.attr_text d)) (str d.RI.d_class) d.RI.d_checked d.RI.d_total
+          (arr (List.map str d.RI.d_scc))
+          (match d.RI.d_apply with Some w -> str w | None -> "null")
+          (edit_json (dedit_of d))
+      in
+      let dn (n : RI.dnone) =
+        let f, l, c = pos n.RI.n_span in
+        Printf.sprintf
+          "{\"fn\": %s, \"file\": %s, \"line\": %d, \"col\": %d, \"class\": %s, \"checked\": %d, \"candidates\": %d}"
+          (str n.RI.n_fn) (str f) l c (str n.RI.n_class) n.RI.n_checked n.RI.n_total
+      in
+      let by_pos sp_of xs = List.sort (fun a b -> compare (pos (sp_of a)) (pos (sp_of b))) xs in
+      Printf.sprintf ", \"decreases\": %s, \"decreases_none\": %s"
+        (arr (List.map dp (by_pos (fun (d : RI.dproposal) -> d.RI.d_span) r.RI.decreases)))
+        (arr (List.map dn (by_pos (fun (n : RI.dnone) -> n.RI.n_span) r.RI.decreases_none)))
+  in
   Printf.sprintf
-    "{\"version\": 1, \"summary\": {\"user_skips_before\": %d, \"user_skips_after\": %d, \"violations_before\": %d, \"violations_after\": %d, \"accepted\": %d, \"rejected\": %d, \"refused\": %d, \"probes\": %d, \"rounds\": %d, \"budget_exhausted\": %s}, \"proposals\": %s, \"rejected\": %s, \"refused\": %s, \"notes\": %s}"
+    "{\"version\": 1, \"summary\": {\"user_skips_before\": %d, \"user_skips_after\": %d, \"violations_before\": %d, \"violations_after\": %d, \"accepted\": %d, \"rejected\": %d, \"refused\": %d, \"probes\": %d, \"rounds\": %d, \"budget_exhausted\": %s}, \"proposals\": %s, \"rejected\": %s, \"refused\": %s, \"notes\": %s%s}"
     (LD.debt r.RI.before - violations r.RI.before) (LD.debt r.RI.after - violations r.RI.after)
     (violations r.RI.before) (violations r.RI.after)
     (List.length r.RI.proposals) (List.length r.RI.rejected) (List.length r.RI.refused) r.RI.probes r.RI.rounds
-    (arr budget_ex) (arr (List.map proposal proposals)) (arr rejected) (arr refused) (arr notes)
+    (arr budget_ex) (arr (List.map proposal proposals)) (arr rejected) (arr refused) (arr notes) decreases

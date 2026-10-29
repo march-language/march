@@ -63,7 +63,7 @@ mod PeerReader do
       PeerReader.serve(fd, Nil, fn (tag, frame) ->
         if tag == 8 do handle_fire(frame) else Ok(true) end)
   """
-  fn serve(fd : Int, buf : List(Int), on_frame : Int -> List(Int) -> Result(Bool, String)) : Result((), String) do
+  @[diverges] fn serve(fd : Int, buf : List(Int), on_frame : Int -> List(Int) -> Result(Bool, String)) : Result((), String) do
     match NetKernel.recv_frame(fd, buf) do
       Err(e) -> Err(e)
       Ok(fr) ->

@@ -1,0 +1,1 @@
+{"severity":"warning","file":"errors/unknown_attribute_1.march","start_line":3,"start_col":5,"end_line":3,"end_col":9,"message":"unknown attribute `@[decrease]` on `down`: it is ignored.\nnote: did you mean `@[decreases]`?","code":"unknown_attribute","fix":null,"labels":[],"notes":[]}

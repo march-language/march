@@ -439,6 +439,51 @@ let with_post_lookup lookup (f : unit -> 'a) : 'a =
   post_lookup := lookup;
   Fun.protect ~finally:(fun () -> post_lookup := saved) f
 
+(* ── The induction hypothesis (termination design §4.2, phase 3) ─────────
+   A recursive call's own contract, assumed at that call while its function
+   is being gated, is the induction hypothesis.  Decision D1: it is granted
+   ONLY behind a termination certificate, and only at a call that passed
+   rule (a) — the call is an intra-SCC edge of a certified SCC whose every
+   reachable recursive SCC is certified too, the walk reached it, and every
+   precondition obligation filed there was proved ([Refine_check]'s
+   [ih_prepare] decides all of it, before the gate's IH rounds).
+
+   Two channels, both keyed by the CALL's span (never by name: a name could
+   be resolved differently by the termination graph and by this checker,
+   and an IH read across that mismatch would lend one function's contract
+   to another's call):
+   - [ih_at]: the scalar/datatype return hypothesis, installed only while
+     [gate_unverified_posts] checks one certified SCC's pending members
+     together ([rounds]' atomic admission).  It answers the callee member's
+     DECLARED (still unproved) contract, instantiated at the call's actuals;
+   - [ih_spans]: every eligible span of the module, with whether its edge is
+     a self-edge.  The self-call hypotheses that pre-date this design (Tier 2
+     [ih_arg], the element return's [hyp_applies], a local `fn`'s
+     [local_elem_hyp]) widen "a structural argument" to "or an eligible
+     self-edge span".  Set by [Refine_check.check_module] and cleared when it
+     returns, so no other entry point (the inference probes) ever sees a
+     stale certificate. *)
+let ih_at : (A.span -> string -> A.expr list -> (string * A.expr * string option) option) ref =
+  ref (fun _ _ _ -> None)
+
+let ih_spans : (A.span, bool * A.span) Hashtbl.t = Hashtbl.create 16
+
+(* An eligible SELF-edge span whose graph callee is the unit declared at
+   [callee] (its declaring name's span).  Every [ih_spans] consumer names
+   the callee IT resolved the call to, so a graph/checker resolution
+   mismatch (the graph tying the call to another declaration of the name)
+   withholds the hypothesis instead of lending a contract across it
+   (review fixes, defence in depth). *)
+let ih_self_edge (sp : A.span) ~(callee : A.span) : bool =
+  match Hashtbl.find_opt ih_spans sp with
+  | Some (true, c) -> c = callee
+  | _ -> false
+
+(* The contract a call carries inside a postcondition check: the induction
+   hypothesis at an eligible span, else the proved contract ([post_lookup]). *)
+let call_post (sp : A.span) (f : string) (args : A.expr list) =
+  match !ih_at sp f args with Some r -> Some r | None -> !post_lookup f args
+
 (* ── A scalar demand at a return tail (design 2026-10-18 element-flow
    follow-ups, phase 2; the hook specs/2026-10-18-fold-accumulator-invariants-design.md
    §3.1 builds on) ────────────────────────────────────────────────────────
@@ -737,8 +782,8 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
          let_in_progress := name :: !let_in_progress;
          let t =
            match rhs with
-           | A.EApp (A.EVar { A.txt = f; _ }, cargs, _) when not (is_measure_app f) -> (
-             match !post_lookup f cargs with
+           | A.EApp (A.EVar { A.txt = f; _ }, cargs, csp) when not (is_measure_app f) -> (
+             match call_post csp f cargs with
              | Some (b, q, m) -> (
                match scalar_sort_of_marker m with
                | Some srt ->
@@ -841,9 +886,9 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
   let call_post_ctr = ref 0 in
   let scalar_call (e : A.expr) : Smt.term option =
     match e, ret_scalar with
-    | A.EApp (A.EVar { A.txt = f; _ }, cargs, _), Some srt
+    | A.EApp (A.EVar { A.txt = f; _ }, cargs, csp), Some srt
       when (not (List.mem f predicate_operators)) && not (is_measure_app f) -> (
-      match !post_lookup f cargs with
+      match call_post csp f cargs with
       | Some (b, q, m) when scalar_sort_of_marker m = Some srt ->
         (* `f$ret<N>`, the spelling a counterexample renders as "f() can
            return v" ([render_model_entry]); N skips any name already
@@ -873,6 +918,83 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
       | _ -> None)
     | _ -> None
   in
+  (* ── Rule (b): a call NESTED in a scalar tail (termination design §4.2,
+     F8) ─────────────────────────────────────────────────────────────────
+     `n + sum_to(n - 1)`: the tail is not a bare call, so [scalar_call] does
+     not apply, and [scalar] has no arm for a call.  Each call sub-term
+     whose contract [call_post] answers becomes a fresh `f$ret<N>` carrying
+     that contract conjunct by conjunct, exactly as [scalar_call] reads a
+     bare tail.  Tried only after [scalar] and [scalar_call] both failed, so
+     no tail that reflected before changes its query.
+     Sound for the reason [scalar_call] is: March is call-by-value with
+     strict `&&`/`||` (F11) and [smt_of] has no conditional, so every call
+     under these operators WAS evaluated when the tail's value exists, and
+     its result satisfies its proved (or IH-certified) contract.  Each
+     occurrence is its own constant: two calls of one function need not
+     return the same value.  Only strict operators and call arguments are
+     descended into; a measure, a tester or anything else is left whole. *)
+  let strict_ops =
+    [ "+"; "-"; "*"; "/"; "%"; "negate"; "not"; "&&"; "||"; "=="; "!="; "<"; "<="; ">"; ">=" ]
+  in
+  let scalar_nested (e : A.expr) : Smt.term option =
+    match ret_scalar with
+    | None -> None
+    | Some _ ->
+      let minted : (string, Smt.term) Hashtbl.t = Hashtbl.create 4 in
+      let rv n = match Hashtbl.find_opt minted n with Some c -> Some c | None -> var_const n in
+      let staged_decls = ref [] and staged_assume = ref [] in
+      let rec rw (e : A.expr) : A.expr =
+        match e with
+        | A.EApp ((A.EVar { A.txt = f; _ } as fv), cargs, sp) when List.mem f strict_ops ->
+          A.EApp (fv, List.map rw cargs, sp)
+        | A.EApp ((A.EVar { A.txt = f; _ } as fv), (_ :: _ as cargs), csp)
+          when (not (is_predicate_operator f)) && (not (is_measure_app f))
+               && ctor_of_tester f = None && not (List.mem f !current_abstracts) -> (
+          let cargs = List.map rw cargs in
+          match call_post csp f cargs with
+          | Some (b, q, m) -> (
+            match scalar_sort_of_marker m with
+            | Some srt ->
+              let rec fresh () =
+                incr call_post_ctr;
+                let nm = Printf.sprintf "%s$ret%d" f !call_post_ctr in
+                if List.exists (fun (n, _) -> n = nm) (!decls @ !staged_decls) then fresh () else nm
+              in
+              let nm = fresh () in
+              let c = Smt.Const nm in
+              staged_decls := (nm, srt) :: !staged_decls;
+              Hashtbl.replace minted nm c;
+              let rv' n = if n = b || n = "_" then Some c else rv n in
+              let rm mm n = if n = b || n = "_" then None else resolve_measure mm n in
+              List.iter
+                (fun conj ->
+                  match
+                    smt_of ~resolve_var:rv' ~resolve_measure:rm ~resolve_measure_app
+                      ~resolve_field:scope_field_resolver ~resolve_str_lit:str_lit_const conj
+                  with
+                  | Some t -> staged_assume := t :: !staged_assume
+                  | None -> ())
+                (pred_conjuncts q);
+              A.EVar { A.txt = nm; A.span = csp }
+            | None -> A.EApp (fv, cargs, csp))
+          | None -> A.EApp (fv, cargs, csp))
+        | _ -> e
+      in
+      let e' = rw e in
+      if Hashtbl.length minted = 0 then None
+      else
+        match
+          smt_of ~resolve_var:rv ~resolve_measure ~resolve_measure_app
+            ~resolve_field:scope_field_resolver ~resolve_str_lit:str_lit_const e'
+        with
+        | Some t ->
+          (* Commit the minted constants only for a tail that now reflects:
+             a failed attempt leaves the query exactly as it was. *)
+          decls := !staged_decls @ !decls;
+          assume := !staged_assume @ !assume;
+          Some t
+        | None -> None
+  in
   let tail_term_opt =
     match record_sort with
     | Some sort_name ->
@@ -900,7 +1022,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        | A.ELit (A.LitString s, _) -> str_lit_const s
        | A.EVar { A.txt = x; _ } when is_str_scope x -> uses_string := true; Some (Smt.Const x)
        | _ -> scalar tail_e)
-    | None -> (match scalar tail_e with Some t -> Some t | None -> scalar_call tail_e)
+    | None ->
+      (match scalar tail_e with
+       | Some t -> Some t
+       | None -> (match scalar_call tail_e with Some t -> Some t | None -> scalar_nested tail_e))
   in
   match tail_term_opt with
   | None ->
@@ -1668,18 +1793,24 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                  nothing, which is exactly the skip we want.  With no [mctx]
                  there is no matched parameter and hence nothing that could be
                  structurally smaller, so no IH is ever available. *)
-              | A.EApp (A.EVar { A.txt = f; _ }, args, _) when f = self && d = ret_adt ->
+              | A.EApp (A.EVar { A.txt = f; _ }, args, csp) when f = self && d = ret_adt ->
                 incr ctr;
                 let nm = Printf.sprintf "$t2rec%d" !ctr in
                 Hashtbl.replace decls nm (adt_sort ret_adt);
                 let cst = Smt.Const nm in
                 let ih_arg =
                   match mctx with
-                  | None -> None
-                  | Some (_, _, mparam_idx, sset) -> (
-                    match List.nth_opt args mparam_idx with
-                    | Some (A.EVar v) when Hashtbl.mem sset v.A.txt -> Some v
-                    | _ -> None)
+                  | Some (_, _, mparam_idx, sset)
+                    when (match List.nth_opt args mparam_idx with
+                          | Some (A.EVar v) -> Hashtbl.mem sset v.A.txt
+                          | _ -> false) ->
+                    Some ()
+                  (* Termination phase 3 (§4.2): an eligible SELF-edge span of
+                     a certified SCC ([ih_spans]: rule (a) held there) carries
+                     the hypothesis with no structural argument and no
+                     matched parameter. *)
+                  | _ when ih_self_edge csp ~callee:fd.A.fn_name.A.span -> Some ()
+                  | _ -> None
                 in
                 (match ih_arg with
                  | Some _ ->
@@ -2466,9 +2597,22 @@ let check_fn_post ~root errctx (fd : A.fn_def) : unit =
    before it is proved, cycles included (neither side of a mutual dependency
    can be proved from the other's unproven contract).  A later round
    re-checks only a function that calls a name proved in the round before. *)
-let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t)
-    (decls : A.decl list) : unit =
+(* A pending refined return: its [defs] key, module path, definition and
+   declared signature. *)
+type gate_item = string * string * A.fn_def * fn_sig
+
+(* One certified SCC's induction hypothesis (termination phase 3, §4.2): its
+   members still pending after the IH-free rounds, and its eligible call
+   spans, each with the declaring-name span of the member it calls. *)
+type ih_group = { ig_items : gate_item list; ig_at : (A.span, A.span) Hashtbl.t }
+
+let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) option) errctx
+    (defs : (string, fn_sig option) Hashtbl.t) (decls : A.decl list) : unit =
   let pending = ref [] in
+  (* The cleared signature [defs] holds for each pending key, so the IH can
+     check that this checker's own name resolution reaches the very member
+     the termination graph says the call reaches (physical identity). *)
+  let cleared : (string, fn_sig) Hashtbl.t = Hashtbl.create 16 in
   let rec collect prefix decls =
     List.iter
       (function
@@ -2484,7 +2628,9 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
              (* Keep the entry (it must still shadow an outer same-named
                 function for [resolve_call]); drop the postcondition until it
                 is proved. *)
-             Hashtbl.replace defs key (Some { sg with ret = None });
+             let c = { sg with ret = None } in
+             Hashtbl.replace defs key (Some c);
+             Hashtbl.replace cleared key c;
              pending := (key, prefix, fd, sg) :: !pending
            | _ -> ())
         | A.DMod (name, _, ds, _) ->
@@ -2513,33 +2659,109 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
     | _ -> acc
   in
   let short key = match String.rindex_opt key '.' with Some i -> String.sub key (i + 1) (String.length key - i - 1) | None -> key in
-  let check (key, prefix, fd, sg) =
+  (* The module path of the item being checked, for the IH's resolution
+     check ([check_group]). *)
+  let checking_prefix = ref "" in
+  let verdict (_, prefix, fd, _) =
     let ctx = { rctx0 with modpath = prefix } in
     let lookup = postcond_of ctx defs in
-    if
-      with_tail_demand (!tail_demand_of ~root ctx defs) (fun () ->
-          with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd))
-    then begin
+    checking_prefix := prefix;
+    with_tail_demand (!tail_demand_of ~root ctx defs) (fun () ->
+        with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd))
+  in
+  let check ((key, _, _, sg) as item) =
+    if verdict item then begin
       Hashtbl.replace defs key (Some sg);
       true
     end
     else false
   in
-  let rec rounds (todo : (string * string * A.fn_def * fn_sig) list) (fresh : string list option) =
-    let eligible (_, _, (fd : A.fn_def), _) =
-      match fresh with
-      | None -> true
-      | Some names ->
-        let called =
-          List.concat_map (fun (c : A.fn_clause) -> calls_of [] c.A.fc_body) fd.A.fn_clauses
-        in
-        List.exists (fun n -> List.mem n names || List.mem (short n) names) called
-    in
-    let proved, rest =
-      List.partition (fun item -> eligible item && check item) todo
-    in
-    if proved <> [] && rest <> [] then
-      rounds rest (Some (List.concat_map (fun (k, _, _, _) -> [ k; short k ]) proved))
+  let eligible fresh (_, _, (fd : A.fn_def), _) =
+    match fresh with
+    | None -> true
+    | Some names ->
+      let called =
+        List.concat_map (fun (c : A.fn_clause) -> calls_of [] c.A.fc_body) fd.A.fn_clauses
+      in
+      List.exists (fun n -> List.mem n names || List.mem (short n) names) called
   in
-  rounds (List.rev !pending) None
+  let names_of proved = List.concat_map (fun (k, _, _, _) -> [ k; short k ]) proved in
+  (* Returns what is still unproved when no round makes progress. *)
+  let rec rounds (todo : gate_item list) (fresh : string list option) : gate_item list =
+    let proved, rest =
+      List.partition (fun item -> eligible fresh item && check item) todo
+    in
+    if proved <> [] && rest <> [] then rounds rest (Some (names_of proved)) else rest
+  in
+  let rest = rounds (List.rev !pending) None in
+  (* ── Termination phase 3: the IH rounds (§4.2) ──────────────────────────
+     Only after the IH-free fixpoint has stalled, so a contract that proves
+     without the hypothesis is admitted exactly as before.  [ih] decides the
+     certified SCCs over the contracts proved so far ([Refine_check]'s
+     [ih_prepare]) and returns one group per SCC.  A group is admitted
+     ATOMICALLY: every pending member is checked with every member's
+     hypothesis at the group's eligible spans, and all are admitted iff all
+     prove.  A group that fails is retried only when a contract it calls is
+     proved later; an ordinary item is retried as before. *)
+  match ih with
+  | None -> ()
+  | Some ih ->
+    (* Called even with nothing pending: the element-return gate and the
+       walk read the [ih_spans] it fills. *)
+    let groups = ih rest in
+    let in_group (k, _, _, _) =
+      List.exists (fun g -> List.exists (fun (k', _, _, _) -> k' = k) g.ig_items) groups
+    in
+    let check_group (g : ih_group) (items : gate_item list) =
+      let lookup sp f args =
+        match Hashtbl.find_opt g.ig_at sp with
+        | None -> None
+        | Some callee_span -> (
+          match
+            List.find_opt (fun (_, _, (fd : A.fn_def), _) -> fd.A.fn_name.A.span = callee_span) items
+          with
+          | None -> None
+          | Some (key, _, _, sg) ->
+            (* The call must also resolve, by this checker's own rule from the
+               module of the function being checked, to that member's
+               (cleared) entry: the graph and the checker agree on the callee. *)
+            let agrees =
+              match
+                resolve_call_arity { rctx0 with modpath = !checking_prefix } defs f (List.length args)
+              with
+              | Some (Some found) -> (
+                match Hashtbl.find_opt cleared key with Some c -> found == c | None -> false)
+              | _ -> false
+            in
+            if agrees then instantiate_ret sg args else None)
+      in
+      let saved = !ih_at in
+      ih_at := lookup;
+      (* No member is admitted until every member has proved: a member
+         admitted early would lend its contract, through the ordinary
+         lookup, to a sibling's call that is not an eligible span. *)
+      Fun.protect ~finally:(fun () -> ih_at := saved) (fun () -> List.for_all verdict items)
+    in
+    let rec ih_rounds (todo : gate_item list) (fresh : string list option) =
+      let admitted = ref [] in
+      List.iter
+        (fun g ->
+          let items = List.filter (fun (k, _, _, _) -> List.exists (fun (k', _, _, _) -> k' = k) todo) g.ig_items in
+          if items <> [] && List.exists (eligible fresh) items && check_group g items then begin
+            List.iter (fun (k, _, _, sg) -> Hashtbl.replace defs k (Some sg)) items;
+            admitted := items @ !admitted
+          end)
+        groups;
+      let todo = List.filter (fun (k, _, _, _) -> not (List.exists (fun (k', _, _, _) -> k' = k) !admitted)) todo in
+      let proved, rest =
+        List.partition (fun item -> (not (in_group item)) && eligible (Some (names_of !admitted)) item && check item) todo
+      in
+      let progress = !admitted @ proved in
+      if progress <> [] && rest <> [] then ih_rounds rest (Some (names_of progress))
+    in
+    if rest <> [] then ih_rounds rest None
+
+(* The IH-free gate: what every caller outside [Refine_check.check_module]
+   (the inference probes) runs. *)
+let gate_unverified_posts ~root errctx defs decls = gate_unverified_posts_ih ~root errctx defs decls
 

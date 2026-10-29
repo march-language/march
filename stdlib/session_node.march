@@ -712,7 +712,7 @@ mod SessionNode do
   -- `check_waiting` below may run a crash branch and drain again: the
   -- recursion is bounded by the protocol's nesting of crash branches.
   @[no_warn_recursion]
-  pfn drain(p : Party, ep : Int) : Int do
+  @[diverges] pfn drain(p : Party, ep : Int) : Int do
     let want = Vault.get_or(p.waiting, ekey(ep), 0)
     match Vault.get(p.handlers, ekey(ep)) do
       None -> ep
@@ -1443,7 +1443,7 @@ mod SessionNode do
     (interval, if interval > 0 do timeout / interval else 0 end)
   end
 
-  pfn heartbeat(p : Party, l : Link, interval : Int, limit : Int) : Int do
+  @[diverges] pfn heartbeat(p : Party, l : Link, interval : Int, limit : Int) : Int do
     sleep_ms(interval)
     if Vault.get(p.meta, "link_done" ++ rkey(l.role)) != None || Vault.get(p.meta, "open") == None do 0
     else
@@ -1468,7 +1468,7 @@ mod SessionNode do
   -- second (the actor keeps only the newest asker, see `AwaitOutcome`), so a
   -- dead endpoint actor is noticed: `Actor.call` does not return early when
   -- its target dies.
-  pfn await_outcome(p : Party) : List((Int, String)) do
+  @[diverges] pfn await_outcome(p : Party) : List((Int, String)) do
     match Actor.call(p.ep, OutcomeReq, 1000) do
       Ok(failed) -> failed
       Err(_) ->

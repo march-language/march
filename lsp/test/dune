@@ -16,6 +16,8 @@
   march_typecheck
   march_errors
   march_lsp_lib
+  march_refinecheck
+  march_refine
   linol.lsp
   alcotest
   str))

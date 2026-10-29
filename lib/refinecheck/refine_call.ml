@@ -613,6 +613,15 @@ type check_subject =
      constraint is that return refinement — the same definite-failure rule.
      P3 design §1c, 2026-09-13. *)
   | Callback_codomain
+  (* A recursive call's TERMINATION METRIC (termination design §3.4): the
+     obligation is phrased as a call to a synthetic signature whose one
+     refined parameter states "the callee's metric at these arguments is
+     lexicographically below the caller's at entry, with a `0 <=` component"
+     ([Refine_term.decreases_sig]).  It is filed with kind [Termination], never
+     reported as a violation, and raises no diagnostic of its own: the
+     termination pass words `termination_unproved` itself, for an annotated
+     unit only (decision D2).  A failure is [Skipped (Not_decreasing cx)]. *)
+  | Decreases
 
 (* Span of an expression, for pointing a diagnostic at ONE argument instead of
    the whole call. [refinecheck] does not depend on [march_typecheck], so this
@@ -692,6 +701,7 @@ type call_ctx = {
 }
 
 let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
+    ?(kind = Obligation.Precondition)
     ?(goal_scope_facts = false) ?(entry_label : string option)
     ?(verdict_out : Obligation.verdict option ref option)
     (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
@@ -725,6 +735,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     | Callback_domain -> "expected function type's domain"
     | Element_domain -> "container's elements"
     | Callback_codomain -> "passed function's return"
+    | Decreases -> "recursive call's metric"
   in
   let obligation_noun =
     match subject with
@@ -733,6 +744,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     | Callback_domain -> "its parameter refinement"
     | Element_domain -> "the expected element refinement"
     | Callback_codomain -> "the expected codomain refinement"
+    | Decreases -> "the termination metric"
   in
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
   (* A CALLER-scope name whose declared type is a record (see [recenv]).  Such a
@@ -777,6 +789,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        diagnostic is a second thing to be confused by. *)
     let verdict, cause =
       match verdict with
+      | Obligation.Skipped _ when subject = Decreases -> (verdict, None)
       | Obligation.Skipped r ->
         (* The obligation's own SUBJECT — the actual passed at [rp.idx].  Read
            here rather than taken from the enclosing [self_actual] because
@@ -828,7 +841,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     in
     Obligation.record
       { Obligation.span; callee; predicate = pred_str rp.pred; verdict
-      ; kind = Obligation.Precondition; inst };
+      ; kind; inst };
     Option.iter (fun r -> r := Some verdict) verdict_out;
     (* …except inside a `cap verified` module, where a skip is the very thing
        the user asked to be told about (see [strict_verified]).  `Proved` and
@@ -836,6 +849,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        [Skipped] that was just turned into [Trusted] above no longer matches
        here, which is how `@[trusted]` suppresses the escalation. *)
     match verdict with
+    (* A termination obligation words no diagnostic here (see [Decreases]). *)
+    | _ when subject = Decreases -> ()
     | Obligation.Skipped r when !strict_verified ->
       (* The remedy depends on the reason.  The generic advice below is worse
          than useless for a withdrawn alias — "guard the call" is what the
@@ -880,6 +895,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               the expected element refinement, build the container from \
               elements the checker can see, or remove `cap verified` from this \
               module — it asks for every obligation to be discharged"
+           | Decreases -> ""
            | Callback_codomain ->
              "note: declare (and prove) a return refinement on the passed function \
               that implies the expected codomain, weaken the expected codomain, or \
@@ -928,12 +944,14 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                   throttle exists for. *)
                | Obligation.Nonlinear_goal
                | Obligation.Refuted_unconfirmed
+               | Obligation.Not_decreasing _
                | Obligation.Solver_undecided
                | Obligation.Sort_conflict
                | Obligation.Float_sort_gate -> not !unverified_hinted) ->
       (match r with
        | Obligation.Nonlinear_goal
        | Obligation.Refuted_unconfirmed
+       | Obligation.Not_decreasing _
        | Obligation.Solver_undecided
        | Obligation.Sort_conflict
        | Obligation.Float_sort_gate -> unverified_hinted := true
@@ -964,6 +982,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             obligation_noun (pred_str rp.pred) callee (Obligation.reason_detail r)
         | Obligation.Nonlinear_goal
         | Obligation.Refuted_unconfirmed
+        | Obligation.Not_decreasing _
         | Obligation.Solver_undecided
         | Obligation.Sort_conflict
         | Obligation.Float_sort_gate
@@ -2944,6 +2963,19 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        else
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved
+        (* A termination metric is proved or not; there is no "definite
+           failure" to look for, no witness to run and no diagnosis to give
+           (see [Decreases]).  The model, minus the synthetic `$` names, is
+           the counterexample `termination_unproved` quotes. *)
+        | first when subject = Decreases ->
+          let model =
+            List.filter
+              (fun (k, _) -> String.length k = 0 || k.[0] <> '$')
+              (visible_model (model_of first))
+          in
+          note
+            (Obligation.Skipped
+               (Obligation.Not_decreasing (String.concat ", " (List.map render_model_entry model))))
         | first ->
           (* A pass-site obligation ([Callback_domain]) is the one case where
              "G can fail" IS the definite failure: its subject `$cb_x` ranges
@@ -3045,6 +3077,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  Printf.sprintf "an element of the container passed as `%s`" callee
                | Callback_codomain, _ ->
                  Printf.sprintf "the return of `%s`, passed where a refined codomain is expected," callee
+               | Decreases, _ -> Printf.sprintf "the recursive call to `%s`" callee
              in
              (* Point at the offending argument itself. The call span covers the
                 whole expression, which on a multi-argument call underlines
@@ -3114,6 +3147,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                          element only if its own element refinement implies it — refine \
                          the container's declared element type, or weaken the expected one"
                         (pred_str rp.pred)
+                    | Decreases -> ""
                     | Callback_codomain ->
                       Printf.sprintf
                         "note: a function is passed where its result must satisfy `%s` only \

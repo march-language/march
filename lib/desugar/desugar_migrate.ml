@@ -73,7 +73,7 @@ let wrapper (def : fn_def) (sp : span) : decl option =
                  [ { fc_params = [ param "m" old_ty; param "none" new_ty ];
                      fc_guard = None; fc_body = body; fc_span = sp;
                      fc_params_span = sp } ];
-               fn_bounds = [] },
+               fn_bounds = []; fn_attr_args = [] },
              sp ))
     | _ -> None
 

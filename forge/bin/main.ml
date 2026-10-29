@@ -417,7 +417,8 @@ let refine_cmd =
                  propagate up the call graph; postconditions propagate down.") in
   let infer =
     Arg.(value & flag & info ["infer"]
-           ~doc:"Propose every refinement the checker can verify, module-wide (march --refine-infer); \
+           ~doc:"Propose every refinement the checker can verify, module-wide (march --refine-infer), \
+                 and an @[decreases(...)] metric for recursion it cannot show to terminate; \
                  with --apply, write them and re-check") in
   let diff =
     Arg.(value & flag & info ["diff"] ~doc:"With --infer: print the edits as a diff without writing") in

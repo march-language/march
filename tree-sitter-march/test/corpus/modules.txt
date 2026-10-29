@@ -129,6 +129,7 @@ cap no_extern
 cap deterministic
 cap no_alloc
 cap verified
+cap total
 proof cap Sorted
 end
 --------------------------------------------------------------------------------
@@ -151,6 +152,7 @@ end
         (module_path
           (type_identifier)
           (type_identifier))))
+    (capability_declaration)
     (capability_declaration)
     (capability_declaration)
     (capability_declaration)

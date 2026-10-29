@@ -4479,6 +4479,10 @@
                   {
                     "type": "STRING",
                     "value": "verified"
+                  },
+                  {
+                    "type": "STRING",
+                    "value": "total"
                   }
                 ]
               }

@@ -662,13 +662,8 @@ let print_refine_report ~filename ~user_files () =
   in
   (* A postcondition (a function's own return type) and a precondition (a
      callee's declared param type, checked at the call site) are the same
-     kind of obligation to the headline totals — a proved postcondition IS a
-     proved obligation — but naming the split is cheap and answers "did my
-     return types get checked at all", which the headline alone cannot. *)
-  let count_kind kind obligations =
-    List.length
-      (List.filter (fun (o : March_refinecheck.Obligation.t) -> o.kind = kind) obligations)
-  in
+     kind of obligation to the headline totals; the `by kind:` line
+     ([Obligation.by_kind_line]) names the split. *)
   let print_block label obligations =
     let proved, violated, trusted, skips = summarize obligations in
     let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
@@ -677,15 +672,27 @@ let print_refine_report ~filename ~user_files () =
     List.iter
       (fun (name, n) -> Printf.eprintf "  skipped (%s): %d\n" name n)
       (List.sort compare skips);
-    Printf.eprintf "  by kind: %d precondition, %d postcondition, %d division\n"
-      (count_kind March_refinecheck.Obligation.Precondition obligations)
-      (count_kind March_refinecheck.Obligation.Postcondition obligations)
-      (count_kind March_refinecheck.Obligation.Division obligations)
+    prerr_endline (March_refinecheck.Obligation.by_kind_line obligations)
   in
   let all_obligations = March_refinecheck.Obligation.all () in
   let user_obligations = List.filter (fun (o : March_refinecheck.Obligation.t) -> is_user_span o.span) all_obligations in
   print_block "user code" user_obligations;
   print_block "user + stdlib" all_obligations
+
+(* --termination-report: Refine_term's per-unit rows for user code, over the
+   same desugared, stdlib-prepended module the refinement checker sees, so a
+   call into a nested module resolves under its qualified spelling.  Units
+   are filtered with the [is_user_span] test of [print_refine_report]. *)
+let print_termination_report ~filename ~user_files ~type_map (m : March_ast.Ast.module_) =
+  let is_user_span (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || f = "" || f = "<unknown>" || List.mem f user_files
+  in
+  let t =
+    March_refinecheck.Refine_term.analyze ~type_map
+      ~file_mod:m.March_ast.Ast.mod_name.March_ast.Ast.txt m.March_ast.Ast.mod_decls
+  in
+  List.iter prerr_endline (March_refinecheck.Refine_term.report_lines ~is_user:is_user_span t)
 
 (* --refine-report-sites: the ledger's skips, one line each, most useful when
    deciding which incompleteness to work on next.  Same user-code/whole-ledger
@@ -708,6 +715,7 @@ let print_refine_report_sites ~filename ~user_files () =
           | March_refinecheck.Obligation.Precondition -> "precondition"
           | March_refinecheck.Obligation.Postcondition -> "postcondition"
           | March_refinecheck.Obligation.Division -> "division"
+          | March_refinecheck.Obligation.Termination -> "termination"
         in
         Printf.eprintf "skip\t%s\t%s:%d:%d\t%s\t%s\t%s\t%s\n"
           (if is_user_span span then "user" else "stdlib")
@@ -900,6 +908,20 @@ let infer_edit_range (src : string) (p : March_refinecheck.Refine_infer.proposal
     while !suf < la - !pre && !suf < lb - !pre && src.[la - 1 - !suf] = dst.[lb - 1 - !suf] do incr suf done;
     Some (!pre, la - !suf, String.sub dst !pre (lb - !suf - !pre))
 
+(* A metric proposal's edit (termination phase 5): `@[decreases(e)] ` before
+   the declaration's `fn` keyword, on its own line, as an insertion range of
+   the ORIGINAL file. *)
+let decreases_edit_range (src : string) (d : March_refinecheck.Refine_infer.dproposal) : (int * int * string) option =
+  let module RI = March_refinecheck.Refine_infer in
+  let sp = d.RI.d_span in
+  let name =
+    match String.rindex_opt d.RI.d_fn '.' with
+    | Some i -> String.sub d.RI.d_fn (i + 1) (String.length d.RI.d_fn - i - 1)
+    | None -> d.RI.d_fn
+  in
+  March_refactor.Refine_edit.insert_fn_attribute ~src ~line:sp.March_ast.Ast.start_line
+    ~col:sp.March_ast.Ast.start_col ~fn:name ~attr:(RI.attr_text d)
+
 let proposal_file (p : March_refinecheck.Refine_infer.proposal) =
   p.March_refinecheck.Refine_infer.slot.March_refinecheck.Infer_slot.fd.March_ast.Ast.fn_name.March_ast.Ast.span.March_ast.Ast.file
 
@@ -951,6 +973,19 @@ let apply_refine_infer ~filename (r : March_refinecheck.Refine_infer.result) =
          | Some e -> Hashtbl.replace by_file file (src, e :: (match Hashtbl.find_opt by_file file with Some (_, es) -> es | None -> []))
          | None -> ()))
     r.RI.proposals;
+  List.iter
+    (fun (d : RI.dproposal) ->
+      if d.RI.d_apply = None then begin
+        let file = d.RI.d_span.March_ast.Ast.file in
+        match read_file_opt file with
+        | None -> ()
+        | Some src -> (
+          match decreases_edit_range src d with
+          | Some e ->
+            Hashtbl.replace by_file file (src, e :: (match Hashtbl.find_opt by_file file with Some (_, es) -> es | None -> []))
+          | None -> ())
+      end)
+    r.RI.decreases;
   let changed =
     Hashtbl.fold
       (fun f (src, es) acc ->
@@ -964,7 +999,9 @@ let apply_refine_infer ~filename (r : March_refinecheck.Refine_infer.result) =
       by_file []
     |> List.sort compare
   in
-  let applied = List.length r.RI.proposals in
+  let applied =
+    List.length r.RI.proposals + List.length (List.filter (fun (d : RI.dproposal) -> d.RI.d_apply = None) r.RI.decreases)
+  in
   if !refine_infer_diff then List.iter (fun (f, a, b) -> print_region_diff f a b) changed;
   if !refine_infer_apply && changed <> [] then begin
     List.iter (fun (f, _, s) -> write f s) changed;
@@ -1011,11 +1048,22 @@ let print_refine_infer ~filename ~user_files desugared =
         (fun k -> List.find_opt (fun x -> IS.kind_name x = String.trim k) RI.all_kinds)
         (String.split_on_char ',' ks)
   in
+  (* `decreases` names the termination metrics of phase 5 among the kinds. *)
+  let decreases =
+    match !refine_infer_kinds with
+    | None -> true
+    | Some ks -> List.exists (fun k -> String.trim k = "decreases") (String.split_on_char ',' ks)
+  in
+  let applicable_decreases (d : RI.dproposal) =
+    match read_file_opt d.RI.d_span.March_ast.Ast.file with
+    | None -> Some "apply-by-hand"
+    | Some src -> ( match decreases_edit_range src d with Some _ -> None | None -> Some "apply-by-hand")
+  in
   let r =
     RI.run ~root:(Sys.getcwd ()) ~kinds ~budget:!refine_infer_budget
-      ~allow_caller_violations:!allow_caller_violations ~stdlib:!refine_infer_stdlib
+      ~allow_caller_violations:!allow_caller_violations ~stdlib:!refine_infer_stdlib ~decreases
       ?applicable:(if !refine_infer_apply || !refine_infer_diff then Some infer_applicable else None)
-      ~is_user desugared
+      ~applicable_decreases ~is_user desugared
   in
   (* JSON `edit`: the same splice `--refine-infer-apply` performs, as the
      minimal byte range against the ORIGINAL file (so every edit is
@@ -1026,7 +1074,15 @@ let print_refine_infer ~filename ~user_files desugared =
     | None -> None
     | Some src -> Option.map (fun (a, b, t) -> (file, a, b, t)) (infer_edit_range src p)
   in
-  if !refine_infer_json then print_endline (IJ.to_string ~edit_of r)
+  let dedit_of (d : RI.dproposal) =
+    if d.RI.d_apply <> None then None
+    else
+      let file = d.RI.d_span.March_ast.Ast.file in
+      match read_file_opt file with
+      | None -> None
+      | Some src -> Option.map (fun (a, b, t) -> (file, a, b, t)) (decreases_edit_range src d)
+  in
+  if !refine_infer_json then print_endline (IJ.to_string ~edit_of ~dedit_of r)
   else begin
     let skips snap = List.length (List.filter (fun (_, v) -> match v with March_refinecheck.Obligation.Skipped _ -> true | _ -> false) snap) in
     Printf.printf "inferred refinements: %d proposed, %d refused; user skips %d -> %d (%d probes, %d rounds)\n"
@@ -1057,6 +1113,38 @@ let print_refine_infer ~filename ~user_files desugared =
           Printf.printf "  %s: rejected (%s) %s : %s\n    %s\n" s.IS.fn reason (IJ.path_text s.IS.path) pred detail)
       r.RI.rejected;
     List.iter (fun (fn, n) -> Printf.printf "  %s: %s\n" fn n) r.RI.notes;
+    (* Termination phase 5 (§3.5): the metrics inferred for uncertified
+       recursion, and the units none was found for. *)
+    if r.RI.decreases <> [] || r.RI.decreases_none <> [] then begin
+      let candidates n t =
+        Printf.sprintf "%d of %d candidate%s checked%s" n t (if t = 1 then "" else "s")
+          (if t > March_refinecheck.Refine_term.max_candidates then
+             Printf.sprintf ": the cap of %d was reached" March_refinecheck.Refine_term.max_candidates
+           else "")
+      in
+      Printf.printf "inferred metrics: %d proposed, %d not inferred\n" (List.length r.RI.decreases)
+        (List.length r.RI.decreases_none);
+      List.iter
+        (fun (d : RI.dproposal) ->
+          let sp = d.RI.d_span in
+          Printf.printf "  %s (%s:%d)  %s  [termination, class %s, %s]%s\n" d.RI.d_fn sp.March_ast.Ast.file
+            sp.March_ast.Ast.start_line (RI.attr_text d) d.RI.d_class (candidates d.RI.d_checked d.RI.d_total)
+            (match d.RI.d_apply with
+             | None -> ""
+             | Some "local" ->
+               (* Information, not an edit: no syntax puts an attribute on a
+                  local `fn`, so there is nothing to apply, by hand or not. *)
+               "  (not applied: a local `fn` cannot carry `@[decreases]`; this metric would \
+                certify it)"
+             | Some "written" -> "  (apply by hand: it replaces the `@[decreases]` written there)"
+             | Some why -> Printf.sprintf "  (%s)" why))
+        r.RI.decreases;
+      List.iter
+        (fun (n : RI.dnone) ->
+          Printf.printf "  %s (%s:%d): no metric inferred, class %s (%s)\n" n.RI.n_fn n.RI.n_span.March_ast.Ast.file
+            n.RI.n_span.March_ast.Ast.start_line n.RI.n_class (candidates n.RI.n_checked n.RI.n_total))
+        r.RI.decreases_none
+    end;
     (* `--refine-report --refine-infer` (design §4.5): the ledger as it will be
        once the proposals are applied, in the report's own words. *)
     if !refine_report then begin
@@ -2207,6 +2295,13 @@ let run_test_cmd args =
        taught the flag) but is dead code from the CLI's point of view; see
        task-3-review.md finding 3. *)
     let audit_result = ref [] in
+    (* --termination-report demands every recursive SCC of user code (design
+       §9); otherwise only an `@[decreases]` one is checked (D2). *)
+    March_refinecheck.Refine_term.check_all := !termination_report;
+    (* Phase 5: metric inference (§3.5) only under the report or
+       --refine-infer; a plain --check never infers. *)
+    March_refinecheck.Refine_term.infer :=
+      !termination_report || !refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff;
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
       ~stdlib_files:(stdlib_span_files stdlib_decls)
       ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
@@ -2215,6 +2310,8 @@ let run_test_cmd args =
       errors desugared;
     if !refine_report then print_refine_report ~filename ~user_files ();
     if !refine_report_sites then print_refine_report_sites ~filename ~user_files ();
+    if !termination_report then
+      print_termination_report ~filename ~user_files ~type_map desugared;
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
@@ -2917,6 +3014,7 @@ let compile filename =
        beats a cache hit on the run that asked for the diagnostic. *)
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
+      || !termination_report
       || !report_contracts
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
@@ -3465,6 +3563,13 @@ let compile filename =
   let typed_ok = not (March_errors.Errors.has_errors errors) in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   let audit_result = ref [] in
+  (* --termination-report demands every recursive SCC of user code (design
+     §9); otherwise only an `@[decreases]` one is checked (D2). *)
+  March_refinecheck.Refine_term.check_all := !termination_report;
+  (* Phase 5: metric inference (§3.5) only under the report or
+     --refine-infer; a plain --check never infers. *)
+  March_refinecheck.Refine_term.infer :=
+    !termination_report || !refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff;
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
     ~stdlib_files:(stdlib_span_files stdlib_decls)
     ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
@@ -3473,6 +3578,8 @@ let compile filename =
     errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
   if !refine_report_sites then print_refine_report_sites ~filename ~user_files ();
+  if !termination_report then
+    print_termination_report ~filename ~user_files ~type_map desugared;
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
@@ -6748,6 +6855,8 @@ let () =
      "<globs>  Comma-separated module/function globs (e.g. 'Dsp.*,Audio.mix') that --report-contracts considers in scope even without in-place reuse");
     ("--refine-report", Arg.Set refine_report,
      " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
+    ("--termination-report", Arg.Set termination_report,
+     " Print one line per recursive function of user code with its termination class (structural, Int metric, lexicographic, through a function value, none) and the metric inference finds for an uncertified one; changes no verdict");
     ("--refine-report-sites", Arg.Set refine_report_sites,
      " Print one line per skipped refinement obligation: file:line:col, reason, callee, predicate");
     ("--refine-audit", Arg.Set refine_audit,
@@ -6763,10 +6872,10 @@ let () =
     ("--refine-suggest-post-all", Arg.Set refine_suggest_post_all,
      " Propose return refinements for every function in user code whose callers have unproven obligations");
     ("--refine-infer", Arg.Set refine_infer,
-     " Propose every refinement the checker can verify (scalar, element, relational, abstract, accumulator), module-wide");
+     " Propose every refinement the checker can verify (scalar, element, relational, abstract, accumulator, termination metric), module-wide");
     ("--refine-infer-json", Arg.Set refine_infer_json, " Emit --refine-infer results as JSON v1 on stdout");
     ("--refine-infer-kinds", Arg.String (fun s -> refine_infer_kinds := Some s),
-     "<k1,..,k7>  Restrict --refine-infer to these candidate kinds");
+     "<k1,..,k7,decreases>  Restrict --refine-infer to these candidate kinds (decreases: termination metrics)");
     ("--refine-infer-budget", Arg.Set_int refine_infer_budget, "<N>  Global probe budget for --refine-infer (default 3000)");
     ("--refine-infer-stdlib", Arg.Set refine_infer_stdlib, " Let --refine-infer also target stdlib functions");
     ("--allow-caller-violations", Arg.Set allow_caller_violations,

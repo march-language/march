@@ -131,6 +131,12 @@ type reason =
      ([Refine_post.check_post_induction]), whose refutations carry no
      diagnostic of their own. *)
   | Refuted_unconfirmed
+  (* A TERMINATION obligation ([Termination]) the solver did not prove: the
+     recursive call is not shown to decrease the metric (termination design
+     §3.4).  The payload is the counterexample the solver gave, rendered
+     (`n = -1`), or "" when it gave none.  Never a [Violated]: recursion not
+     shown to decrease is not a runtime contract failure. *)
+  | Not_decreasing of string
   (* A call to a combinator with an abstract refinement (design 2026-09-20
      §3.3): the predicate instantiated from the passed lambda does not imply
      the demand.  Never a violation — whether a weaker predicate ever admits a
@@ -177,8 +183,14 @@ type verdict = Proved | Violated | Trusted | Skipped of reason
    [Division] is its own kind rather than a [Precondition] with a synthetic
    callee because both `cap verified` escalation and `--refine-report` branch
    on kind; folding it into [Precondition] would silently change what those
-   two do for every module that already contains a division. *)
-type kind = Precondition | Postcondition | Division
+   two do for every module that already contains a division.
+
+   [Termination]: a recursive call's metric checked to decrease (termination
+   design §3.4), [callee] naming the CALLED function.  Its own kind for the
+   [Division] reason verbatim: `cap verified` escalates only the termination
+   obligations of an annotated function (decision D2), and folding them into
+   [Precondition] would change both consumers for every recursive module. *)
+type kind = Precondition | Postcondition | Division | Termination
 
 type t =
   { span : March_ast.Ast.span
@@ -321,6 +333,7 @@ let reason_name = function
   | Accumulator_base_unproved _ -> "accumulator-base-unproved"
   | Accumulator_step_unproved _ -> "accumulator-step-unproved"
   | Refuted_unconfirmed -> "refuted-unconfirmed"
+  | Not_decreasing _ -> "not-decreasing"
   | Abstract_too_weak _ -> "abstract-refinement-too-weak"
   | Abstract_uninstantiated _ -> "abstract-refinement-uninstantiated"
 
@@ -366,6 +379,8 @@ let reason_detail = function
   | Refuted_unconfirmed ->
     "the solver refuted the predicate on some path, but no concrete input was \
      found on which the function returns a value violating it"
+  | Not_decreasing "" -> "the recursive call is not shown to decrease the metric"
+  | Not_decreasing cx -> Printf.sprintf "the recursive call is not shown to decrease the metric: e.g. %s" cx
   | Abstract_too_weak what -> what
   | Abstract_uninstantiated what -> what
 
@@ -398,3 +413,15 @@ let summary () =
         Hashtbl.replace skips name (1 + Option.value ~default:0 (Hashtbl.find_opt skips name)))
     !log;
   (!proved, !violated, Hashtbl.fold (fun name n acc -> (name, n) :: acc) skips [])
+
+(* The `by kind:` line of `--refine-report` (bin/main.ml), here so it can be
+   tested.  The termination count (termination design §6) is printed only
+   when there is one: such obligations exist only for an `@[decreases]`
+   function or under `--termination-report`, so every other report keeps the
+   exact line it always had. *)
+let by_kind_line (os : t list) : string =
+  let count k = List.length (List.filter (fun o -> o.kind = k) os) in
+  let termination = count Termination in
+  Printf.sprintf "  by kind: %d precondition, %d postcondition, %d division%s" (count Precondition)
+    (count Postcondition) (count Division)
+    (if termination > 0 then Printf.sprintf ", %d termination" termination else "")

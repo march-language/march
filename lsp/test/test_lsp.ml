@@ -327,6 +327,7 @@ let () =
       "then -> do",                    `Quick, test_fix_adapter_then_to_do;
       "not offered off the range",     `Quick, test_fix_adapter_not_offered_off_range;
       "`;` -> line break",             `Quick, test_fix_adapter_semicolon;
+      "echoed diagnostic not doubled", `Quick, test_fix_adapter_echoed_diag_not_doubled;
       "fn _ arity fix edits the lambda", `Quick, test_fix_adapter_lambda_arity_edits_the_lambda;
     ];
     "code actions: make-linear", [
@@ -354,6 +355,14 @@ let () =
       "used private fn: no warning",              `Quick, test_used_private_fn_no_warning;
       "unreachable after panic: warning emitted", `Quick, test_unreachable_code_after_panic_warning;
       "unused_fns field populated correctly",     `Quick, test_unused_fns_field_populated;
+    ];
+    "termination code actions", [
+      "x == 0 -> x <= 0 round-trips",           `Quick, test_term_action_eq_zero;
+      "@[diverges] replaces @[decreases]",      `Quick, test_term_action_diverges_replaces_decreases;
+      "@[diverges] inserted under cap total",   `Quick, test_term_action_diverges_inserts;
+      "@[decreases(..)] read from the note",    `Quick, test_term_action_decreases_frame;
+      "@[decreases(..)] inferred (cap total)",  `Quick, test_term_action_decreases_inferred;
+      "@[decreases(..)] replaces a failing one", `Quick, test_term_action_decreases_replaces;
     ];
     "P1.8: assign to _", [
       "action offered for unused binding",      `Quick, test_assign_to_underscore_offered;

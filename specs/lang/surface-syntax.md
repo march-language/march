@@ -778,9 +778,12 @@ pfn priv_fn() do ... end      -- private
 doc "Returns the length of a list."
 fn length(xs) do ... end
 
-@[deprecated]
-fn old_api() do ... end
+@[decreases(len(xs) - i)]   -- a termination metric (refinement-types.md)
+fn scan(xs, i) do ... end
 ```
+
+An attribute name the compiler does not know is warned about
+(`unknown_attribute`), not silently ignored.
 
 ### Allocation contracts
 

@@ -21,6 +21,56 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`march --check --termination-report FILE`** prints one line per recursive function
+  in your code, with how it recurses: structurally on a component, on an `Int` metric
+  that a guard bounds (`fib`) or does not (`down(n - 1)` with an `n == 0` exit),
+  lexicographically, through a lambda or a function value, or with no metric at all
+  (`spin(n)`). It is a report only and changes no verdict. It is the first step of
+  termination checking (`specs/2026-10-26-termination-checking-design.md`).
+- **`@[decreases(e, ...)]`: a termination metric for a recursive function.** The checker
+  proves with the solver that the metric stays at least 0 and falls at every recursive
+  call (several components are compared left to right, as for Ackermann's
+  `@[decreases(m, n)]`). An annotated function whose metric is not shown to fall gets a
+  `termination_unproved` warning with a counterexample (`down(n - 1)` with an `n == 0`
+  exit: `e.g. n = -1`), an error in a `cap verified` module. Unannotated recursion is
+  never warned about; `--termination-report` checks it too, with the first `Int`
+  parameter as the default metric (`fib` is `cert=metric`). A metric outside the
+  fragment (a local, a `Float`, a bare list) is an `invalid_decreases` error.
+  `--refine-report`'s `by kind:` line counts `termination` obligations when there are
+  any. A proved metric licenses the induction hypothesis (next entry).
+- **`march --refine-infer` (and `forge refine --infer`) now also proposes
+  `@[decreases(...)]`** for a recursive function the checker could not show to
+  terminate. It tries at most 8 candidate metrics per cycle (each `Int` parameter,
+  `b - i` for a counter climbing to a bound, `len(xs)`, and pairs of those), and
+  proposes one only when every recursive call proves it decreases:
+  `fn up(n : Int) : Int do if n >= 100 do 0 else up(n + 1) end end` gets
+  `@[decreases(100 - n)]`. `--refine-infer-apply` writes the attribute in front of the
+  `fn` and re-checks; a metric for a local `fn` is shown but not written.
+  `--termination-report` lists what the search found (`infer` lines), and an editor
+  quick fix adds the metric a `termination_unproved` diagnostic names. A plain
+  `--check` never searches.
+- **An unknown function attribute is warned about** (`unknown_attribute`), with a
+  did-you-mean: `@[decrease(n)]` used to be ignored in silence.
+- **Refinements: a recursive function's return refinement can now use itself at its
+  recursive calls (the induction hypothesis), when its recursion is proved to
+  terminate.** `fn sum_to(n : {Int | _ >= 0}) : {Int | _ >= 0}` with body
+  `if n == 0 do 0 else n + sum_to(n - 1) end` is proved, and so is a caller's
+  `need_nn(sum_to(k))`; both used to be skipped. The hypothesis needs a `structural` or
+  `metric` certificate for the cycle and for every recursive function it calls, and a
+  recursive call whose preconditions are all proved. A cycle of several functions is
+  accepted all together or not at all. A function that may never return
+  (`fn loopy(x : Int) : {Int | _ < 0} do loopy(x) end`) gets no hypothesis, so its
+  contract stays unproved. That includes a function that calls a diverging one through
+  an `alias`, a `use` or `import`, an interface method's `impl` (including one a
+  builtin runs: string interpolation `"${e}"`, `to_string` and `println` run `Show`,
+  `to_json`/`from_json` the Json codecs, `own` the `Drop` impl) or a top-level `let`
+  lambda, and one that calls a name the checker cannot resolve (listed on the
+  `--termination-report`'s new `unresolved:` line). A `match` on a parameter after
+  `let xs = Cons(0, xs)` (or any other rebinding of it) is not structural recursion. Data type returns (`{List(Int) | len(_) == n}`), element
+  returns (`List({Int | _ > 0})`) and a local `fn`'s element return use it at a call to
+  themselves. Separately, a call inside arithmetic in a return expression
+  (`1 + len2(t)`) now carries the callee's proved contract, as a bare call or a
+  `let`-bound one already did.
 - **Refinements: a definer passed through to `Map.filter` proves its return.**
   `fn mfilt(m, keep : k -> v -> Bool[p], cmp) : Map(k[p], v[p]) do Map.filter(m, keep,
   cmp) end` is proved, and so are its callers' demands. The callee's `p` and the
@@ -339,6 +389,34 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Termination: `@[diverges]`, actor handlers and `cap total`.** Mark a function meant
+  to run for ever `@[diverges]` (an accept loop, a frame reader, a ticker): it files no
+  termination obligation, never gets the induction hypothesis, and neither does a cycle
+  that reaches it; `--termination-report` lists it as `cert=diverges` and lists the
+  callers that may diverge through it, which do not have to repeat the attribute.
+  `@[diverges]` together with `@[decreases]` or `@[measure]`, or a measure calling a
+  `@[diverges]` function, is a `diverges_conflict` error. The report also names an actor
+  handler that may not return for a message (`handler Counter.Spin may not return`);
+  `send(self(), …)` is not recursion. A module that declares the new `cap total` must
+  prove every function terminates (`main` and `@[diverges]` functions exempt): anything
+  else is a `termination_unproved` error, including a function in a recursive cycle with
+  a `@[diverges]` one that is not marked itself, and a call on a known type
+  (`"${Box(n)}"`, `show(Box(n))`) whose `impl` may not terminate. The standard library's 23 event loops
+  (`ClusterNode`, `NetKernel`, `NodeCall`, `PeerReader`, `Csv`, `File`, `SessionNode`,
+  `Topology`, …) carry `@[diverges]`, and a test keeps new ones from landing unmarked.
+  `termination_unproved` on an `n == 0` exit with a negative counterexample now notes
+  the `n <= 0` repair, which the editor offers when asked (it changes what the program
+  does, so it is not a machine fix and `forge fix` never applies it), plus "mark
+  `@[diverges]`".
+
+- **Refinements: the `@[measure]` termination check now covers mutual recursion.** Two
+  measures that call each other in a cycle, `ma(Z) -> mb(Z) -> ma(Z) + 1`, were accepted,
+  because only a measure's calls to itself were checked. They are now `invalid_measure`
+  unless every call in the cycle passes a component of a parameter of one type, or of
+  types defined in terms of each other.
+  `--termination-report` gains a certificate column (`cert=structural` or
+  `cert=unproved:<reason>`), and it lists a function that calls a value of a non-positive
+  type such as `type Fix = Fix(Fix -> Int)`.
 - A parameter list or pattern that binds the same name twice is now a compile
   error (`duplicate_binder`): `fn (a, a) -> …`, `fn two(a, a)`, a multi-head clause
   such as `fn pick(0, a, a)`, and patterns like `(a, a)` or `Pair(x, x)`. Such

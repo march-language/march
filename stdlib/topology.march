@@ -411,7 +411,7 @@ mod Topology do
     ()
   end
 
-  pfn place_loop(node : Cap(ClusterNode.Live), st : TopoState) : Int do
+  @[diverges] pfn place_loop(node : Cap(ClusterNode.Live), st : TopoState) : Int do
     sleep_ms(tick_ms())
     if Vault.get(st.meta, "closing") != None do 0
     else if Vault.get(st.meta, "stopped") != None do 0
@@ -1164,7 +1164,7 @@ mod Topology do
     supervise_wait(st)
   end
 
-  pfn supervise_wait(st : TopoState) : () do
+  @[diverges] pfn supervise_wait(st : TopoState) : () do
     if Vault.get(st.meta, "stopped") != None do ()
     else
       sleep_ms(250)

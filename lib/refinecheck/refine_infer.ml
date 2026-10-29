@@ -36,7 +36,33 @@ type proposal = {
   external_callers : bool;
 }
 
+(** A metric inferred for one function of an uncertified recursive SCC
+    (termination phase 5, §3.5): `@[decreases(d_metric)]`, checked through
+    every phase-2 obligation of the SCC, then confirmed by a real re-check
+    with every applied one written. *)
+type dproposal = {
+  d_fn : string;  (** the unit's display name ([Inner.f], [f/go]) *)
+  d_span : A.span;  (** its declaring name *)
+  d_metric : string list;  (** the components, as March source *)
+  d_exprs : A.expr list;  (** the same, as written into the tree for the re-check *)
+  d_class : string;  (** §0.5 class of the unit, without the [?] *)
+  d_checked : int;  (** candidates checked, this one included *)
+  d_total : int;  (** candidates generated (at most 8 are checked) *)
+  d_scc : string list;  (** the other members, each with its own proposal *)
+  d_apply : string option;
+      (** [None]: written by [--refine-infer-apply]; else why not: [local] (a
+          local `fn` takes no attribute), [written] (it would replace a
+          `@[decreases]` the user wrote), [apply-by-hand] (no textual edit).
+          A proposal the re-check with it written did not certify is dropped
+          (its SCC is listed in [decreases_none]). *)
+}
+
+(** An uncertified SCC member for which no candidate proved. *)
+type dnone = { n_fn : string; n_span : A.span; n_class : string; n_checked : int; n_total : int }
+
 type result = {
+  decreases : dproposal list;
+  decreases_none : dnone list;
   proposals : proposal list;
   rejected : (IS.slot * string * string * string) list;   (* slot, pred, reason, detail *)
   refused : (IS.slot * string * PI.refusal) list;          (* slot, pred, refusal *)
@@ -130,9 +156,162 @@ let tail_callee (fd : A.fn_def) : string option =
 
 (* ── The run ─────────────────────────────────────────────────────────────── *)
 
+let attr_text (d : dproposal) = Printf.sprintf "@[decreases(%s)]" (String.concat ", " d.d_metric)
+
+(* Termination phase 5: with [Refine_term.infer] on and every SCC holding a
+   [is_target] unit demanded, one real [Refine_check.check_module] of the
+   hypothesis tree [decls] searches each uncertified SCC (§3.5); its
+   results ([Refine_term.last_inferred]) become proposals.  Each applicable
+   one is then written into the tree and the module checked again, with
+   inference off: a proposal stands only if that re-check certifies its SCC
+   [metric], and the re-check's user ledger is the prediction
+   [--refine-infer-apply] compares against.  Returns the proposals, the
+   SCCs with none, and that ledger (when anything was written). *)
+let infer_decreases ~root ~(is_target : A.span -> bool) ~(is_user : A.span -> bool)
+    ~(applicable : dproposal -> string option) (m : A.module_) (decls : A.decl list) :
+    dproposal list * dnone list * (LD.snapshot * (int * int)) option =
+  let module RT = Refine_term in
+  let type_map = !Refine_encode.call_type_map in
+  let stdlib_files = !RC.stdlib_source_files in
+  let saved_infer = !RT.infer and saved_demand = !RT.infer_demand in
+  let check ~infer decls =
+    RT.infer := infer;
+    RT.infer_demand := (if infer then Some is_target else None);
+    Fun.protect
+      ~finally:(fun () ->
+        RT.infer := saved_infer;
+        RT.infer_demand := saved_demand)
+      (fun () ->
+        RC.check_module ~root ~stdlib_files ?type_map (March_errors.Errors.create ())
+          { m with A.mod_decls = decls })
+  in
+  let t = RT.analyze ?type_map ~file_mod:m.A.mod_name.A.txt decls in
+  let g = t.RT.graph in
+  (* Nothing to search (no target cycle a metric could certify): no check. *)
+  let searchable (u : RT.unit_) =
+    is_target u.RT.u_span && RT.is_recursive g u.RT.u_id
+    && (match t.RT.certs.(g.RT.scc_of.(u.RT.u_id)) with
+        | RT.Structural | RT.Diverges | RT.Unproved ("reference" | "non-positive" | "unresolved") -> false
+        | RT.Unproved _ -> true)
+  in
+  if not (Array.exists searchable g.RT.units) then ([], [], None)
+  else
+  Fun.protect ~finally:(fun () -> Witness.set_module m) @@ fun () ->
+  check ~infer:true decls;
+  let class_of (u : RT.unit_) =
+    match List.find_opt (fun (r : RT.row) -> r.RT.r_span = u.RT.u_span) (RT.rows t) with
+    | Some r ->
+      let c = r.RT.r_class in
+      if String.length c > 1 && c.[String.length c - 1] = '?' then String.sub c 0 (String.length c - 1) else c
+    | None -> "?"
+  in
+  let seen = Hashtbl.create 16 in
+  let props = ref [] and nones = ref [] in
+  Array.iter
+    (fun (u : RT.unit_) ->
+      let key = (u.RT.u_span.A.file, u.RT.u_span.A.start_line, u.RT.u_span.A.start_col) in
+      if is_target u.RT.u_span && not (Hashtbl.mem seen key) then begin
+        Hashtbl.replace seen key ();
+        match Hashtbl.find_opt RT.last_inferred u.RT.u_span with
+        | None -> ()
+        | Some i -> (
+          let si = g.RT.scc_of.(u.RT.u_id) in
+          let members = g.RT.sccs.(si) in
+          match i.RT.inf_metric with
+          | None ->
+            nones :=
+              { n_fn = u.RT.u_name; n_span = u.RT.u_span; n_class = class_of u; n_checked = i.RT.inf_checked;
+                n_total = i.RT.inf_total }
+              :: !nones
+          | Some es ->
+            let why =
+              if List.exists (fun v -> g.RT.units.(v).RT.u_kind <> RT.Top) members then Some "local"
+              else if List.exists (fun v -> g.RT.units.(v).RT.u_decreases <> None) members then Some "written"
+              else None
+            in
+            props :=
+              { d_fn = u.RT.u_name; d_span = u.RT.u_span; d_metric = es;
+                d_exprs = Option.value ~default:[] (Hashtbl.find_opt RT.last_inferred_exprs u.RT.u_span);
+                d_class = class_of u;
+                d_checked = i.RT.inf_checked; d_total = i.RT.inf_total;
+                d_scc = List.filter_map (fun v -> if v = u.RT.u_id then None else Some g.RT.units.(v).RT.u_name) members;
+                d_apply = why }
+              :: !props)
+      end)
+    g.RT.units;
+  let props = List.rev !props and nones = List.rev !nones in
+  (* A cycle is written whole or not at all: every member's edit must be
+     possible. *)
+  let props = List.map (fun d -> match d.d_apply with None -> { d with d_apply = applicable d } | Some _ -> d) props in
+  let scc_of_prop (d : dproposal) = List.sort compare (d.d_fn :: d.d_scc) in
+  let blocked = List.filter_map (fun d -> if d.d_apply <> None then Some (scc_of_prop d) else None) props in
+  let props =
+    List.map
+      (fun d -> if d.d_apply = None && List.mem (scc_of_prop d) blocked then { d with d_apply = Some "apply-by-hand" } else d)
+      props
+  in
+  (* Write the applicable ones into the tree; confirm by a real re-check. *)
+  let install (ps : dproposal list) =
+    List.fold_left
+      (fun decls (d : dproposal) ->
+        match
+          List.find_opt (fun ((_, fd) : string list * A.fn_def) -> fd.A.fn_name.A.span = d.d_span) (PI.enum_fns [] decls)
+        with
+        | None -> decls
+        | Some ((_, fd) as pf) ->
+          let es = d.d_exprs in
+          if es = [] then decls
+          else
+            let fd' =
+              { fd with
+                A.fn_attrs = (if List.mem "decreases" fd.A.fn_attrs then fd.A.fn_attrs else fd.A.fn_attrs @ [ "decreases" ]);
+                fn_attr_args = ("decreases", es) :: List.remove_assoc "decreases" fd.A.fn_attr_args }
+            in
+            replace_fn [] (PI.qualified_of pf) fd' decls)
+      decls ps
+  in
+  let rec confirm ps tries =
+    if ps = [] then ([], None)
+    else begin
+      check ~infer:false (install ps);
+      let bad =
+        List.filter (fun (d : dproposal) -> Hashtbl.find_opt RT.last_certs d.d_span <> Some "metric") ps
+      in
+      if bad = [] || tries = 0 then begin
+        let obs = Ob.all () in
+        let counts =
+          List.fold_left
+            (fun (sk, vi) (o : Ob.t) ->
+              if not (is_user o.Ob.span) then (sk, vi)
+              else match o.Ob.verdict with Ob.Skipped _ -> (sk + 1, vi) | Ob.Violated -> (sk, vi + 1) | _ -> (sk, vi))
+            (0, 0) obs
+        in
+        if bad = [] then (ps, Some (LD.snapshot ~is_user (), counts)) else ([], None)
+      end
+      else
+        let bad_sccs = List.map scc_of_prop bad in
+        confirm (List.filter (fun d -> not (List.mem (scc_of_prop d) bad_sccs)) ps) (tries - 1)
+    end
+  in
+  let applied = List.filter (fun d -> d.d_apply = None) props in
+  let kept, ledger = confirm applied 3 in
+  (* A proposal the real re-check did not certify is not offered at all: the
+     SCC is listed as having none. *)
+  let unconfirmed = List.filter (fun d -> d.d_apply = None && not (List.memq d kept)) props in
+  let props = List.filter (fun d -> not (List.memq d unconfirmed)) props in
+  let nones =
+    nones
+    @ List.map
+        (fun d -> { n_fn = d.d_fn; n_span = d.d_span; n_class = d.d_class; n_checked = d.d_checked; n_total = d.d_total })
+        unconfirmed
+  in
+  (props, nones, ledger)
+
 let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
     ?(rounds = default_rounds) ?(allow_caller_violations = false) ?(stdlib = false)
+    ?(decreases = true)
     ?(applicable : proposal -> accepted:proposal list -> string option = fun _ ~accepted:_ -> None)
+    ?(applicable_decreases : dproposal -> string option = fun _ -> None)
     ~(is_user : A.span -> bool) (m : A.module_) : result =
   let is_target sp = stdlib || is_user sp in
   Ob.with_scratch @@ fun () ->
@@ -462,6 +641,15 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
         else match o.Ob.verdict with Ob.Skipped _ -> (sk + 1, vi) | Ob.Violated -> (sk, vi + 1) | _ -> (sk, vi))
       (0, 0) after_obs
   in
+  (* Termination phase 5, last: a metric costs no caller anything, and the
+     search reads the contracts proved above. *)
+  let dprops, dnones, dledger =
+    if decreases then infer_decreases ~root ~is_target ~is_user ~applicable:applicable_decreases m !decls
+    else ([], [], None)
+  in
+  let after, after_counts =
+    match dledger with Some (snap, counts) -> (snap, counts) | None -> (after, after_counts)
+  in
   (* A refusal found again in a later round is the same refusal. *)
   let dedupe_refused rs =
     let seen = Hashtbl.create 16 in
@@ -471,7 +659,9 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
         if Hashtbl.mem seen k then false else (Hashtbl.replace seen k (); true))
       rs
   in
-  { proposals = List.rev !proposals;
+  { decreases = dprops;
+    decreases_none = dnones;
+    proposals = List.rev !proposals;
     rejected = List.rev !rejected;
     refused = dedupe_refused (List.rev !refused);
     notes = List.rev !notes;
