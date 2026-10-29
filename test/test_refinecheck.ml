@@ -16748,6 +16748,238 @@ let elemflow_namespace_suite =
              (m "  fn hof(n : Int, g : (Int) -> List({Int | _ < 5})) : Int do 0 end\n\
                  \  fn go() : Int do hof(10, fn y -> [50]) end\n"))) ]
 
+(* ── Constructors whose only refinements are ELEMENT slots
+   (specs/progress/2026-10-18-record-element-slot-refinements-unchecked.md) ──
+   `type Box = { n : Int, xs : List({Int | _ > 0}) }` carries no scalar
+   refinement, so [Refine_scope.collect_ctor_sigs] never registered it and a
+   construction filed ZERO obligations: `{ n: 10, xs: [0 - 5] }` was accepted,
+   even under `cap verified`.  Every case's result on the unfixed checker is
+   in its comment.  Verdicts are asserted per obligation (callee, verdict,
+   predicate or skip detail), never through an exit code. *)
+let element_only_ctor_suite =
+  let obs src =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed src);
+    List.map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        ( o.callee
+        , verdict_name o.verdict
+        , match o.verdict with Skipped r -> reason_detail r | _ -> o.predicate ))
+      (March_refinecheck.Obligation.all ())
+  in
+  let mentions sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let show os =
+    String.concat "; " (List.map (fun (c, v, p) -> Printf.sprintf "%s %s %s" c v p) os)
+  in
+  (* Some obligation of [callee] has [verdict] and its predicate (or skip
+     detail) mentions [about]; and NO obligation of [callee] has a verdict
+     outside [allowed]. *)
+  let expect ?(allowed = []) name ~callee ~verdict ~about src =
+    let os = List.filter (fun (c, _, _) -> c = callee) (obs src) in
+    Alcotest.(check bool)
+      (Printf.sprintf "%s: a %s obligation on %s about %S [%s]" name verdict callee about (show os))
+      true
+      (List.exists (fun (_, v, p) -> v = verdict && mentions about p) os);
+    let allowed = verdict :: allowed in
+    Alcotest.(check bool)
+      (Printf.sprintf "%s: no other verdict on %s [%s]" name callee (show os))
+      true
+      (List.for_all (fun (_, v, _) -> List.mem v allowed) os)
+  in
+  let typed_error_text src =
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc_errors, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    String.concat "\n"
+      (List.filter_map
+         (fun (d : March_errors.Errors.diagnostic) ->
+           if d.March_errors.Errors.severity = March_errors.Errors.Error then
+             Some d.March_errors.Errors.message
+           else None)
+         ctx.March_errors.Errors.diagnostics)
+  in
+  let box = "  type Box = { n : Int, xs : List({Int | _ > 0}) }\n" in
+  [ gated "P4v: an element-only record built with a bad element is violated" (fun () ->
+        (* The todo's program verbatim.  Unfixed: no obligation at all. *)
+        expect "P4v" ~callee:"Box" ~verdict:"violated" ~about:"_ > 0"
+          ("mod P4v do\n" ^ box ^ "  fn go() : Box do\n    { n: 10, xs: [0 - 5] }\n  end\nend\n"));
+
+    gated "an element-only record built with good elements is proved" (fun () ->
+        (* Unfixed: no obligation at all. *)
+        expect "good Box" ~callee:"Box" ~verdict:"proved" ~about:"_ > 0"
+          ("mod P4g do\n" ^ box ^ "  fn go() : Box do { n: 10, xs: [1, 2] } end\nend\n"));
+
+    gated "an update of an element-only record's container field is obliged" (fun () ->
+        (* Unfixed: no obligation at all. *)
+        expect "update" ~callee:"Box" ~verdict:"violated" ~about:"_ > 0"
+          ("mod P4u do\n" ^ box ^ "  fn mk(b : Box) : Box do { b with xs: [0 - 1] } end\nend\n"));
+
+    gated "a variant constructor with an element-only argument is obliged" (fun () ->
+        (* Unfixed: no obligation at all, for either. *)
+        let ty = "  type W = W(List({Int | _ > 0})) | Z\n" in
+        expect "W bad" ~callee:"W" ~verdict:"violated" ~about:"_ > 0"
+          ("mod P4w do\n" ^ ty ^ "  fn bad() : W do W([0 - 5]) end\nend\n");
+        expect "W good" ~callee:"W" ~verdict:"proved" ~about:"_ > 0"
+          ("mod P4wg do\n" ^ ty ^ "  fn good() : W do W([1, 2]) end\nend\n");
+        (* A positional argument's slot naming a free `n` is never read in
+           the constructing scope, where `n > 1000` would "prove" `[500]`. *)
+        expect "W open slot" ~callee:"W" ~verdict:"skipped" ~about:"names a variable it does not bind"
+          "mod P4wn do\n\
+          \  type W = W(List({Int | _ < n})) | Z\n\
+          \  fn go(n : Int) : W do if n > 1000 do W([500]) else Z end end\nend\n");
+
+    gated "element-only Option and nested-List fields are obliged" (fun () ->
+        (* Unfixed: no obligation at all, for any of the four. *)
+        let o = "  type O = { o : Option({Int | _ > 0}) }\n" in
+        let l = "  type N = { ll : List(List({Int | _ > 0})) }\n" in
+        expect "Option bad" ~callee:"O" ~verdict:"violated" ~about:"_ > 0"
+          ("mod P4o do\n" ^ o ^ "  fn bo() : O do { o: Some(0 - 1) } end\nend\n");
+        expect "Option good" ~callee:"O" ~verdict:"proved" ~about:"_ > 0"
+          ("mod P4og do\n" ^ o ^ "  fn go() : O do { o: Some(3) } end\nend\n");
+        expect "nested bad" ~callee:"N" ~verdict:"violated" ~about:"_ > 0" ~allowed:[ "proved" ]
+          ("mod P4n do\n" ^ l ^ "  fn bn() : N do { ll: [[1], [0 - 2]] } end\nend\n");
+        expect "nested good" ~callee:"N" ~verdict:"proved" ~about:"_ > 0"
+          ("mod P4ng do\n" ^ l ^ "  fn gn() : N do { ll: [[1], [2]] } end\nend\n"));
+
+    gated "an element-only Map field is obliged" (fun () ->
+        (* `Map` is a container only beside its stdlib declaration, so this
+           case checks with map.march (and list.march, the prelude) loaded,
+           as [Map element flow]'s suite does.  Unfixed: no obligation. *)
+        let with_map src =
+          let load name =
+            let m, path = load_stdlib_march name in
+            ( March_ast.Ast.DMod
+                (m.March_ast.Ast.mod_name, March_ast.Ast.Public, m.March_ast.Ast.mod_decls,
+                 March_ast.Ast.dummy_span),
+              path )
+          in
+          let mods = List.map load [ "list.march"; "map.march" ] in
+          let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+          let m = March_desugar.Desugar.desugar_module (parse src) in
+          let m =
+            { m with March_ast.Ast.mod_decls = List.map fst mods @ prelude_decls @ m.March_ast.Ast.mod_decls }
+          in
+          March_refinecheck.Obligation.reset ();
+          let _tc, type_map = March_typecheck.Typecheck.check_module m in
+          let ctx = March_errors.Errors.create () in
+          March_refinecheck.Refine_check.check_module ~type_map
+            ~stdlib_files:(prelude_path :: List.map snd mods) ctx m;
+          List.filter_map
+            (fun (o : March_refinecheck.Obligation.t) ->
+              let open March_refinecheck.Obligation in
+              if o.callee = "M" then
+                Some
+                  ( verdict_name o.verdict
+                  , match o.verdict with Skipped r -> reason_detail r | _ -> o.predicate )
+              else None)
+            (March_refinecheck.Obligation.all ())
+        in
+        let mty = "  type M = { m : Map(String, {Int | _ > 0}) }\n" in
+        let check name ~want ~about src =
+          let os = with_map src in
+          let shown = String.concat "; " (List.map (fun (v, p) -> v ^ " " ^ p) os) in
+          Alcotest.(check bool) (Printf.sprintf "%s: %s on M about %S [%s]" name want about shown) true
+            (os <> [] && List.for_all (fun (v, p) -> v = want && mentions about p) os)
+        in
+        (* `Map.singleton` is generic, so its value slot is traced to the
+           argument `0 - 1`, which the checker reports as able to fail the
+           demand: a recorded skip (an error under `cap verified`), never a
+           proof.  The element-flow rule for a generic call decides that, not
+           this fix; what this fix adds is that the field is obliged at all. *)
+        check "Map bad" ~want:"skipped" ~about:"can fail it"
+          ("mod P4m do\n" ^ mty ^ "  fn bm() : M do { m: Map.singleton(\"a\", 0 - 1) } end\nend\n");
+        check "Map good" ~want:"proved" ~about:"_ > 0"
+          ("mod P4mg do\n" ^ mty ^ "  fn gm() : M do { m: Map.singleton(\"a\", 7) } end\nend\n"));
+
+    gated "an element-only field slot naming another field is a recorded skip" (fun () ->
+        (* The §1.2 rule of the 2026-10-18 element-flow design, now reached
+           without a scalar sibling: `_ < n` names the record's own `n` (10),
+           never the caller's guarded `n > 1000`.  Unfixed: no obligation at
+           all (the scalar-sibling twin in [elemflow_namespace_suite] was
+           already a skip). *)
+        expect "sibling" ~callee:"Box" ~verdict:"skipped" ~about:"names another field"
+          "mod P4s do\n\
+          \  type Box = { n : Int, xs : List({Int | _ < n}) }\n\
+          \  fn go(n : Int) : Box do\n\
+          \    if n > 1000 do { n: 10, xs: [500] } else { n: 10, xs: [1] } end\n\
+          \  end\nend\n");
+
+    gated "cap verified: the bad element-only construction is an error" (fun () ->
+        (* Unfixed: no error (the module compiled). *)
+        let msg =
+          typed_error_text
+            ("mod P4vCv do\n  cap verified\n" ^ box
+           ^ "  fn go() : Box do\n    { n: 10, xs: [0 - 5] }\n  end\nend\n")
+        in
+        Alcotest.(check bool) (Printf.sprintf "an error naming the element refinement [%s]" msg) true
+          (mentions "_ > 0" msg);
+        let ok =
+          typed_error_text
+            ("mod P4gCv do\n  cap verified\n" ^ box ^ "  fn go() : Box do { n: 10, xs: [1, 2] } end\nend\n")
+        in
+        Alcotest.(check string) "control: the good construction is accepted" "" ok);
+    gated "an actor message with an element-only parameter is obliged" (fun () ->
+        (* The sibling hole in [collect_handler_sigs]: the handler body
+           ASSUMED `xs`'s elements (`need(h)` proved) while `Push([0 - 1])`
+           filed nothing.  Unfixed: only the body's `need` obligation. *)
+        let actor = "  fn need(k : {Int | _ > 0}) : Int do k end\n\
+                     \  actor Acc do\n    state { n : Int }\n    init { n: 0 }\n\
+                     \    on Push(xs : List({Int | _ > 0})) do\n\
+                     \      match xs do\n        Cons(h, _) -> { state with n: need(h) }\n        Nil -> state\n      end\n\
+                     \    end\n  end\n" in
+        expect "Push bad" ~callee:"Push" ~verdict:"violated" ~about:"_ > 0"
+          ("mod P4h do\n" ^ actor ^ "  fn mk() do Push([0 - 1]) end\nend\n");
+        expect "Push good" ~callee:"Push" ~verdict:"proved" ~about:"_ > 0"
+          ("mod P4hg do\n" ^ actor ^ "  fn mk() do Push([3]) end\nend\n"));
+
+    gated "an element-only actor state literal is obliged, shape clash or not" (fun () ->
+        (* Unfixed: no obligation for either `init`.  With the shape shared
+           by `Other`, the literal names no constructor through its field
+           set, so only the actor's own state check can oblige it; with a
+           unique shape, it must be obliged exactly once. *)
+        let st = "  actor Acc do\n    state { xs : List({Int | _ > 0}) }\n    init { xs: [0 - 1] }\n\
+                  \    on Add(k : Int) do\n      state\n    end\n  end\n" in
+        let viol src = List.filter (fun (c, v, _) -> c = "Acc" && v = "violated") (obs src) in
+        let clash = viol ("mod P4ac do\n  type Other = { xs : List(Int) }\n" ^ st ^ "end\n") in
+        Alcotest.(check int) (Printf.sprintf "clash: one violation [%s]" (show clash)) 1 (List.length clash);
+        let uniq = viol ("mod P4au do\n" ^ st ^ "end\n") in
+        Alcotest.(check int) (Printf.sprintf "unique: one violation [%s]" (show uniq)) 1 (List.length uniq));
+
+    gated "an unenforced message's body does not assume its element refinements" (fun () ->
+        (* Two actors both handle `Push`, so the name is withdrawn and no
+           construction is obliged; the bodies must then assume nothing.
+           Unfixed: both `need(h)` obligations proved from the unchecked
+           element facts. *)
+        let actor name =
+          "  actor " ^ name ^ " do\n    state { n : Int }\n    init { n: 0 }\n\
+           \    on Push(xs : List({Int | _ > 0})) do\n\
+           \      match xs do\n        Cons(h, _) -> { state with n: need(h) }\n        Nil -> state\n      end\n\
+           \    end\n  end\n"
+        in
+        let os =
+          List.filter (fun (c, _, _) -> c = "need")
+            (obs ("mod P4hc do\n  fn need(k : {Int | _ > 0}) : Int do k end\n" ^ actor "A1" ^ actor "A2" ^ "end\n"))
+        in
+        Alcotest.(check bool) (Printf.sprintf "need obligations exist, none proved [%s]" (show os)) true
+          (os <> [] && List.for_all (fun (_, v, _) -> v <> "proved") os));
+
+    (* --refine-audit agrees: a variant argument's element slot is now an
+       enforced site, as a record field's already was.  Unfixed: Unenforced
+       ("the refinement sits inside a type constructor's argument …"). *)
+    check_enforced "audit: a variant argument's element slot is Enforced"
+      "mod P4wa do\n  type W = W(List({Int | _ > 0})) | Z\nend\n";
+    check_enforced "audit: an actor handler parameter's element slot is Enforced"
+      "mod P4ha do\n  actor Acc do\n    state { n : Int }\n    init { n: 0 }\n\
+       \    on Push(xs : List({Int | _ > 0})) do\n      state\n    end\n  end\nend\n";
+    check_enforced "audit: an element-only record field's slot is Enforced (unchanged)"
+      "mod P4ra do\n  type Box = { n : Int, xs : List({Int | _ > 0}) }\nend\n" ]
+
 (* ── Domain facts for every parameter of a multi-parameter lambda (design
    specs/2026-10-18-element-flow-followups-design.md, phase 1, §4) ────────
    `zipw(xs, ys, fn (x, y) -> …)` with `f : a -> b -> c`: every `a` the
@@ -28502,6 +28734,7 @@ let () =
       ("callback-elements", callback_elements_suite);
       ("demand-flow", demand_flow_suite);
       ("elemflow-namespace", elemflow_namespace_suite);
+      ("element-only-ctor", element_only_ctor_suite);
       ("elemflow-multiparam", elemflow_multiparam_suite);
       ("elemflow-scalar-demand", elemflow_scalar_demand_suite);
       ("elemflow-local-fn", elemflow_local_fn_suite);

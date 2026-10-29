@@ -455,6 +455,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A record or variant whose only refinements are on container elements is now
+  checked when it is built.** With `type Box = { n : Int, xs : List({Int | _ > 0}) }`,
+  `{ n: 10, xs: [0 - 5] }` was accepted with no obligation at all, even under
+  `cap verified`, because a constructor was only checked when some field had a
+  refinement of its own (`n : {Int | _ > 0}`). A record literal, a `{ r with … }`
+  update and a variant application such as `W([0 - 5])` for
+  `type W = W(List({Int | _ > 0}))` now check every element slot (`List`, `Option`,
+  `Map` values, nested lists). A bad element is a refinement violation, or a recorded
+  skip (an error under `cap verified`) where the checker cannot decide it, such as a
+  value passed through a generic call like `Map.singleton`. A slot that names another
+  field (`xs : List({Int | _ < n})`) stays a recorded skip. The same holds for an
+  actor message: `on Push(xs : List({Int | _ > 0}))` let the handler body rely on
+  `xs`'s elements while `Push([0 - 1])` was never checked; that construction is now
+  a violation. An actor `init` state literal whose field set another record shares
+  now has its element slots checked as well.
+
 - **`List.range_step` with a zero step no longer hangs.** `List.range_step(5, 0, 0)`
   recursed on the same value forever (interpreted and compiled); with `start <= stop`
   it returned `[]`. `step` is now `{Int | _ != 0}`, so a literal zero is a compile-time

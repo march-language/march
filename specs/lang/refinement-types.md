@@ -2199,7 +2199,11 @@ This works for `List`, `Option`, `Result`, and every user variant type
 
 **Where a container value owes the element obligation:** at a call argument, a
 function's return (every tail, with the facts of the block's `let`s in scope),
-an annotated `let`, and a record field. A literal is checked element by
+an annotated `let`, and a record field or variant constructor argument (a
+literal, a `{ r with … }` update, or `W(xs)`), whether or not any other field
+carries a refinement of its own, and an actor message's argument
+(`Push(xs)` for `on Push(xs : List({Int | _ > 0}))`), which the handler body
+then assumes. A literal is checked element by
 element. A value whose element refinement is known must *imply* the expected one
 (`List({Int | _ > 1})` passes where `List({Int | _ > 0})` is expected; the
 reverse is reported with a witness element). A value's element refinement is
@@ -2225,8 +2229,10 @@ binding it names: after `let n = 0`, `xs`'s elements are no longer known to be
 `< n`, and a return tail under a binding that rebinds `n` is a recorded skip
 rather than checked against the local. A lambda whose parameter is spelled like
 a name the demand mentions is not read as that name. On a record field
-(`xs : List({Int | _ < n})` naming the sibling field `n`) or on an expected
-function codomain, such a refinement is a recorded skip, never checked.
+(`xs : List({Int | _ < n})` naming the sibling field `n`), on a variant
+constructor argument (`W(List({Int | _ < n}))`, where `n` is bound by nothing)
+or on an expected function codomain, such a refinement is a recorded skip,
+never checked.
 
 The same holds for a **return**. A call to a function whose container return
 names a parameter and was proved at its definition carries that return at the
