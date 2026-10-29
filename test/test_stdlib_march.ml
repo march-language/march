@@ -201,6 +201,10 @@ let all_stdlib_decls =
     "native_array.march";
     "task.march";
     "shell_render.march";
+    (* For test_range.march; Range defines no constructors. *)
+    "range.march";
+    (* For test_duration.march; its one constructor, Duration, is unique. *)
+    "duration.march";
     (* Loaded last: datetime.march's Date/Time/Tz constructors must not steal
        bare-name lookups from modules loaded before it. *)
     "datetime.march";
@@ -709,6 +713,14 @@ let () =
     ("list", [
       Alcotest.test_case "List module"
         `Quick (run_stdlib_test "test_list.march" "TestList");
+    ]);
+    ("range", [
+      Alcotest.test_case "Range module"
+        `Quick (run_stdlib_test "test_range.march" "TestRange");
+    ]);
+    ("duration", [
+      Alcotest.test_case "Duration module"
+        `Quick (run_stdlib_test "test_duration.march" "TestDuration");
     ]);
     ("work_dispatch", [
       Alcotest.test_case "WorkDispatch module"

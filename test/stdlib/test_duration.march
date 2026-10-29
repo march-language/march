@@ -1,0 +1,46 @@
+-- Tests for the Duration stdlib module
+-- Run with: dune exec march -- test test/stdlib/test_duration.march
+
+mod TestDuration do
+
+describe "format" do
+  test "good paths are unchanged" do
+    assert (Duration.format(Duration.seconds(90)) == "1 minute, 30 seconds")
+    assert (Duration.format(Duration.hours(2)) == "2 hours")
+    assert (Duration.format(Duration.milliseconds(500)) == "500 milliseconds")
+    assert (Duration.format(Duration.milliseconds(0)) == "0 milliseconds")
+    assert (Duration.format(Duration.seconds(-70)) == "-1 minute, 10 seconds")
+    assert (Duration.format(Duration.milliseconds(-1)) == "-1 millisecond")
+    assert (Duration.format(Duration.milliseconds(-1001)) == "-1 second, 1 millisecond")
+    assert (Duration.format(Duration.weeks(-3)) == "-3 weeks")
+  end
+
+  test "a negative duration formats as the negation of its magnitude" do
+    let ms = 694861001
+    let pos = Duration.format(Duration.milliseconds(ms))
+    assert (pos == "1 week, 1 day, 1 hour, 1 minute, 1 second, 1 millisecond")
+    assert (Duration.format(Duration.milliseconds(0 - ms)) == "-" ++ pos)
+  end
+
+  test "format(-x) is - followed by format(x)" do
+    Check.all(Gen.int(1, 1000000000000), fn x ->
+      Duration.format(Duration.milliseconds(0 - x)) == "-" ++ Duration.format(Duration.milliseconds(x))
+    )
+  end
+
+  -- `format(Duration(-ms))` on the smallest Int negated it to itself, so
+  -- format recursed with the same argument forever: a hang interpreted and a
+  -- stack overflow (SIGBUS) compiled.  It now prints the exact magnitude.
+  test "the smallest Int formats instead of recursing forever" do
+    let min_int = 0 - 4611686018427387903 - 1
+    assert (Duration.format(Duration.milliseconds(min_int))
+      == "-7625142226 weeks, 1 day, 15 hours, 36 minutes, 27 seconds, 904 milliseconds")
+  end
+
+  test "the largest Int formats" do
+    assert (Duration.format(Duration.milliseconds(4611686018427387903))
+      == "7625142226 weeks, 1 day, 15 hours, 36 minutes, 27 seconds, 903 milliseconds")
+  end
+end
+
+end

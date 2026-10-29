@@ -1,0 +1,53 @@
+-- Four stdlib walks that never terminated on a bad argument (termination
+-- design D5, probes s1-s4), run on both backends against one golden:
+--   s1 List.range_step with step 0     looped (start > stop)
+--   s2 Range.to_list with step 0       looped
+--   s3 Control.chunks with size <= 0   looped
+--   s4 Duration.format(min_int)        looped interpreted, SIGBUS compiled
+--   lc List.chunks with size <= 0      looped (found alongside s3)
+-- s1-s3 now carry a refinement precondition, so the bad value is passed
+-- through `hidden_int` to reach the runtime guard; s4's arithmetic is fixed.
+mod Main do
+  needs IO.Console
+
+  pfn hidden_int(s : String) : Int do
+    match string_to_int(s) do
+    Some(n) -> n
+    None -> 1
+    end
+  end
+
+  pfn ints(xs : List(Int)) : String do
+    "[" ++ string_join(List.map(xs, fn x -> int_to_string(x)), ", ") ++ "]"
+  end
+
+  pfn show(r : Result(List(Int), String)) : String do
+    match r do
+    Ok(xs) -> "Ok(" ++ ints(xs) ++ ")"
+    Err(m) -> "Err(" ++ m ++ ")"
+    end
+  end
+
+  pfn show_n(r : Result(Int, String)) : String do
+    match r do
+    Ok(n) -> "Ok(" ++ int_to_string(n) ++ ")"
+    Err(m) -> "Err(" ++ m ++ ")"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let zero = hidden_int("0")
+    println("s1 good: " ++ ints(List.range_step(0, 10, 3)) ++ " " ++ ints(List.range_step(5, 0, -2)))
+    println("s1 bad:  " ++ show(__try_call_val(fn _ -> List.range_step(5, 0, zero))))
+    println("s2 good: " ++ ints(Range.to_list({start: 2, stop: 7, step: 2})) ++ " " ++ ints(Range.to_list(Range.new_step(3, 0, -1))))
+    println("s2 bad:  " ++ show(__try_call_val(fn _ -> Range.to_list({start: 5, stop: 0, step: zero}))))
+    println("s3 good: " ++ string_join(List.map(Control.chunks("abcdef", 4), fn c -> c.data), ","))
+    println("s3 bad:  " ++ show_n(__try_call_val(fn _ -> List.length(Control.chunks("abcdef", zero)))))
+    println("s3 neg:  " ++ show_n(__try_call_val(fn _ -> List.length(Control.chunks("abcdef", hidden_int("-2"))))))
+    println("lc good: " ++ int_to_string(List.length(List.chunks([1, 2, 3, 4, 5], 2))))
+    println("lc bad:  " ++ show_n(__try_call_val(fn _ -> List.length(List.chunks([1, 2, 3], zero)))))
+    println("s4 good: " ++ Duration.format(Duration.seconds(-70)))
+    println("s4 min:  " ++ Duration.format(Duration.milliseconds(hidden_int("-4611686018427387904"))))
+    println("s4 max:  " ++ Duration.format(Duration.milliseconds(hidden_int("4611686018427387903"))))
+  end
+end

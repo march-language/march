@@ -3,11 +3,19 @@
 -- A range is a record {start: Int, stop: Int, step: Int}.
 -- Ranges are half-open: [start, stop) when step > 0,
 --                       (stop, start] when step < 0.
--- step must be non-zero; new/2 defaults to step = 1.
+-- step must be non-zero; new/2 defaults to step = 1.  Every function that
+-- walks a range (to_list, each, and the ones built on to_list) takes it
+-- refined as `{v : IntRange | v.step != 0}` and panics on a zero step,
+-- which would otherwise never advance.
 --
 -- doc: try
 
 mod Range do
+
+  -- The record every function here takes. Records are structural, so a plain
+  -- `{start: ..., stop: ..., step: ...}` literal is one; the name exists so a
+  -- refinement can read its `step`.
+  type IntRange = { start : Int, stop : Int, step : Int }
 
   -- ---- Construction ----
 
@@ -22,7 +30,7 @@ mod Range do
       march> Range.to_list(Range.new(3, 3))
       []
   """
-  fn new(start : Int, stop : Int) : {start: Int, stop: Int, step: Int} do
+  fn new(start : Int, stop : Int) : {v : IntRange | v.step != 0} do
     {start: start, stop: stop, step: 1}
   end
 
@@ -40,18 +48,20 @@ mod Range do
       march> Range.to_list(Range.new_step(0, 5, -1))
       []
   """
-  fn new_step(start : Int, stop : Int, step : {Int | _ != 0}) : {start: Int, stop: Int, step: Int} do
-    if step == 0 do
-      panic("Range.new_step: step must be non-zero")
-    else
-      {start: start, stop: stop, step: step}
-    end
+  fn new_step(start : Int, stop : Int, step : {Int | _ != 0}) : {v : IntRange | v.step != 0} do
+    -- The guard is a statement, not an `if` around the result: the checker
+    -- cannot prove a return contract through a `panic` arm, and this way
+    -- `v.step != 0` is proved from the precondition, so a caller's
+    -- `to_list(new_step(…))` is proved too.
+    let _ = if step == 0 do panic("Range.new_step: step must be non-zero") else () end
+    {start: start, stop: stop, step: step}
   end
 
   -- ---- Conversion ----
 
   doc """
   Converts the range to a list of integers, in iteration order. O(n).
+  Panics if the step is zero (also a refinement precondition).
 
   ## Examples
 
@@ -60,7 +70,7 @@ mod Range do
       march> Range.to_list(Range.new_step(3, 0, -1))
       [3, 2, 1]
   """
-  fn to_list(r : {start: Int, stop: Int, step: Int}) : List(Int) do
+  fn to_list(r : {v : IntRange | v.step != 0}) : List(Int) do
     fn go(i : Int, acc : List(Int)) : List(Int) do
       if r.step > 0 do
         if i >= r.stop do List.reverse(acc) else go(i + r.step, Cons(i, acc)) end
@@ -68,7 +78,10 @@ mod Range do
         if i <= r.stop do List.reverse(acc) else go(i + r.step, Cons(i, acc)) end
       end
     end
-    go(r.start, Nil)
+    -- A zero step never advances `i`: the walk used to cons forever when
+    -- start > stop.  The guard is for a record the checker cannot see.
+    if r.step == 0 do panic("Range.to_list: step must be non-zero")
+    else go(r.start, Nil) end
   end
 
   -- ---- Queries ----
@@ -158,7 +171,7 @@ mod Range do
       march> Range.map(Range.new(1, 1), fn x -> x * x)
       []
   """
-  fn map(r : {start: Int, stop: Int, step: Int}, f : Int -> b) : List(b) do
+  fn map(r : {v : IntRange | v.step != 0}, f : Int -> b) : List(b) do
     List.map(to_list(r), f)
   end
 
@@ -172,7 +185,7 @@ mod Range do
       march> Range.filter(Range.new(0, 10), fn x -> x % 4 == 0)
       [0, 4, 8]
   """
-  fn filter(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool[p]) : List(Int[p]) do
+  fn filter(r : {v : IntRange | v.step != 0}, f : Int -> Bool[p]) : List(Int[p]) do
     filter_list(to_list(r), f)
   end
 
@@ -191,13 +204,14 @@ mod Range do
 
   doc """
   Calls `f` on each element in iteration order, for side effects. Returns `()`.
+  Panics if the step is zero (also a refinement precondition).
 
   ## Examples
 
       Range.each(Range.new(0, 3), fn i -> println(int_to_string(i)))
       -- prints 0, 1 and 2 on separate lines
   """
-  fn each(r : {start: Int, stop: Int, step: Int}, f : Int -> Unit) : Unit do
+  fn each(r : {v : IntRange | v.step != 0}, f : Int -> Unit) : Unit do
     fn go(i : Int) : Unit do
       if r.step > 0 do
         if i >= r.stop do
@@ -215,7 +229,8 @@ mod Range do
         end
       end
     end
-    go(r.start)
+    if r.step == 0 do panic("Range.each: step must be non-zero")
+    else go(r.start) end
   end
 
   doc """
@@ -228,7 +243,7 @@ mod Range do
       march> Range.reduce(Range.new_step(3, 0, -1), [], fn (acc, x) -> Cons(x, acc))
       [1, 2, 3]
   """
-  fn reduce(r : {start: Int, stop: Int, step: Int}, acc : b, f : b -> Int -> b) : b do
+  fn reduce(r : {v : IntRange | v.step != 0}, acc : b, f : b -> Int -> b) : b do
     List.fold_left(to_list(r), acc, fn (a, x) -> f(a, x))
   end
 
@@ -246,7 +261,7 @@ mod Range do
       march> Range.to_list(Range.reverse(Range.new(2, 2)))
       []
   """
-  fn reverse(r : {start: Int, stop: Int, step: Int}) : {start: Int, stop: Int, step: Int} do
+  fn reverse(r : {v : IntRange | v.step != 0}) : {start: Int, stop: Int, step: Int} do
     let lst = to_list(r)
     match lst do
     Nil -> r
@@ -303,7 +318,7 @@ mod Range do
       march> Range.all(Range.new(0, 0), fn x -> x > 100)
       true
   """
-  fn all(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool) : Bool do
+  fn all(r : {v : IntRange | v.step != 0}, f : Int -> Bool) : Bool do
     List.all(to_list(r), f)
   end
 
@@ -317,7 +332,7 @@ mod Range do
       march> Range.any(Range.new(1, 5), fn x -> x == 5)
       false
   """
-  fn any(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool) : Bool do
+  fn any(r : {v : IntRange | v.step != 0}, f : Int -> Bool) : Bool do
     List.any(to_list(r), f)
   end
 
@@ -333,7 +348,7 @@ mod Range do
       march> Range.sum(Range.new(5, 5))
       0
   """
-  fn sum(r : {start: Int, stop: Int, step: Int}) : Int do
+  fn sum(r : {v : IntRange | v.step != 0}) : Int do
     reduce(r, 0, fn (acc, x) -> acc + x)
   end
 

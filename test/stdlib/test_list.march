@@ -11,6 +11,15 @@ pfn three() : List(Int) do
   Cons(10, Cons(20, Cons(30, Nil)))
 end
 
+-- A zero the refinement checker cannot see through, so a call passing it
+-- reaches the runtime guard instead of being rejected at compile time.
+pfn opaque_int(s : String) : Int do
+  match string_to_int(s) do
+  Some(n) -> n
+  None    -> 1
+  end
+end
+
 describe "construction" do
   test "empty returns empty list" do
     assert List.is_empty(List.empty())
@@ -58,6 +67,23 @@ describe "construction" do
     let r = List.range_step(5, 0, -1)
     assert (List.length(r) == 5)
     assert (List.head(r) == 5)
+  end
+
+  test "range_step good paths are unchanged" do
+    assert (List.range_step(0, 10, 3) == [0, 3, 6, 9])
+    assert (List.range_step(5, 0, -2) == [5, 3, 1])
+    assert (List.range_step(0, 5, -1) == [])
+    assert (List.range_step(5, 0, 1) == [])
+    assert (List.range_step(3, 3, 1) == [])
+  end
+
+  -- A zero step used to hang when start > stop (the walk recursed on the
+  -- same `i` forever) and return [] otherwise; it now panics either way.
+  test "range_step with a zero step panics instead of hanging" do
+    let msg = "panic: List.range_step: step must be non-zero"
+    let zero = opaque_int("0")
+    assert (__try_call_val(fn _ -> List.range_step(5, 0, zero)) == Err(msg))
+    assert (__try_call_val(fn _ -> List.range_step(0, 5, zero)) == Err(msg))
   end
 end
 
@@ -451,6 +477,22 @@ describe "splitting" do
     assert (List.length(r) == 3)
     assert (List.length(List.head(r)) == 2)
     assert (List.length(List.last(r)) == 1)
+  end
+
+  test "chunks good paths are unchanged" do
+    assert (List.chunks([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]])
+    assert (List.chunks([1, 2], 5) == [[1, 2]])
+    assert (List.chunks([1, 2, 3], 1) == [[1], [2], [3]])
+    assert (List.chunks([], 3) == [])
+  end
+
+  -- A size of 0 used to hang: split_at(lst, 0) returns ([], lst), so the
+  -- walk repeated on the same list forever.  A negative size did the same.
+  test "chunks with a size that is not positive panics instead of hanging" do
+    let msg = "panic: List.chunks: size must be positive"
+    assert (__try_call_val(fn _ -> List.chunks([1, 2, 3], opaque_int("0"))) == Err(msg))
+    assert (__try_call_val(fn _ -> List.chunks([1, 2, 3], opaque_int("-2"))) == Err(msg))
+    assert (__try_call_val(fn _ -> List.chunks([], opaque_int("0"))) == Err(msg))
   end
 end
 

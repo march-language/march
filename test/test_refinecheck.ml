@@ -22310,15 +22310,21 @@ let abstract_leftovers_d_suite =
         in
         Alcotest.(check (list string)) "no errors" [] errs;
         Alcotest.check ps "the demand" [ proved ] (of_callee "sum_pos" obs);
-        Alcotest.check t3 "user module" (1, 0, 0) (triple obs);
-        Alcotest.check t3 "Range.filter's own definition side (with filter_list)" (8, 0, 0)
+        (* Two: the demand, and Range.filter's `v.step != 0` precondition on
+           Range.new's result (D5 s2). *)
+        Alcotest.check t3 "user module" (2, 0, 0) (triple obs);
+        (* Nine since D5 s2: the ninth is filter's own `to_list(r)` call,
+           discharged by filter's `v.step != 0` precondition. *)
+        Alcotest.check t3 "Range.filter's own definition side (with filter_list)" (9, 0, 0)
           (triple (List.hd defs)));
     gated "Range.filter: a weaker lambda is too-weak, not proved" (fun () ->
         let _, obs, _ =
           run (m "RW" (sums ^ "  fn go(n : Int) : Int do sum_pos(Range.filter(Range.new(0, n), fn y -> y >= 0)) end\n"))
         in
         Alcotest.check ps "the demand" [ weak ] (of_callee "sum_pos" obs);
-        Alcotest.check t3 "user module" (0, 0, 1) (triple obs));
+        (* The proved one is Range.filter's `v.step != 0` on Range.new's
+           result (D5 s2); the demand is the skip. *)
+        Alcotest.check t3 "user module" (1, 0, 1) (triple obs));
     gated "Range.filter: a wrong delegation is not proved" (fun () ->
         let _, obs, _ =
           run
@@ -28280,6 +28286,68 @@ let p2_value_refs_suite =
    v)))` inherited the stdlib `ptype Set`'s status and became a source,
    while the same shape named `Wrap` stayed a skip.  The stdlib files that
    declare the colliding names are loaded beside the user module. *)
+(* ── Stdlib step/size preconditions (termination design D5, s1-s4) ─────────
+   A zero step or a non-positive size made these stdlib walks recurse on the
+   same value forever.  Each now carries a refinement precondition (and a
+   runtime guard, tested in test/stdlib/ and test/native/stdlib_step_guards).
+   These cases run the REAL driver with the real stdlib prepended, not a
+   restated signature: a signature that drifts, or a precondition that is
+   deleted, turns the "violated" case green-to-red here.  The good call is
+   pinned as PROVED in the user-code ledger, not merely silent: silence would
+   also hold if the obligation were never raised. *)
+let step_guard_ledger (src : string) : int * string * (int * int * int) =
+  let rc, out, err, path = run_march_capturing [ "--check"; "--refine-report" ] src in
+  Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ()) (fun () ->
+    let all = out ^ err in
+    let re =
+      Str.regexp
+        "refinement obligations (user code): \\([0-9]+\\) proved, \\([0-9]+\\) violated, [0-9]+ trusted, \\([0-9]+\\) skipped"
+    in
+    match Str.search_forward re all 0 with
+    | exception Not_found -> Alcotest.fail ("no user-code ledger line: " ^ all)
+    | _ ->
+      let g i = int_of_string (Str.matched_group i all) in
+      (rc, all, (g 1, g 2, g 3)))
+
+let step_guard_cases ~what ~good ~bad ~message =
+  [ gated (what ^ ": a good literal call proves") (fun () ->
+        let rc, all, ledger = step_guard_ledger good in
+        Alcotest.(check int) ("exit 0: " ^ all) 0 rc;
+        Alcotest.(check (triple int int int)) "1 proved, 0 violated, 0 skipped" (1, 0, 0) ledger);
+    gated (what ^ ": a bad literal call is a refinement violation") (fun () ->
+        let rc, all, (_, violated, _) = step_guard_ledger bad in
+        Alcotest.(check int) "exit 1" 1 rc;
+        Alcotest.(check int) "1 violated" 1 violated;
+        Alcotest.(check bool) ("names the precondition: " ^ all) true (contains all message)) ]
+
+let stdlib_step_guard_suite =
+  step_guard_cases ~what:"List.range_step"
+    ~good:"mod SG1 do\n  fn go() : List(Int) do List.range_step(0, 10, 3) end\nend\n"
+    ~bad:"mod SG1 do\n  fn go() : List(Int) do List.range_step(5, 0, 0) end\nend\n"
+    ~message:"argument `step` of `List.range_step` does not satisfy precondition `_ != 0`"
+  @ step_guard_cases ~what:"Range.to_list"
+      ~good:"mod SG2 do\n  fn go() : List(Int) do Range.to_list({start: 0, stop: 10, step: 3}) end\nend\n"
+      ~bad:"mod SG2 do\n  fn go() : List(Int) do Range.to_list({start: 5, stop: 0, step: 0}) end\nend\n"
+      ~message:"argument `r` of `Range.to_list` does not satisfy precondition `v.step != 0`"
+  @ [ (* Range.new / new_step return `{v : IntRange | v.step != 0}`, so the
+         usual construction proves the walk's precondition with no literal
+         in sight.  new_step's guard is a `let _ =` statement because a
+         return contract cannot be proved through a `panic` arm; were it an
+         `if` around the result again, this call would be a skip. *)
+      gated "Range.to_list: a range built by new_step proves" (fun () ->
+          let rc, all, ledger =
+            step_guard_ledger
+              "mod SG2b do\n  fn go() : List(Int) do Range.to_list(Range.new_step(3, 0, -1)) end\nend\n"
+          in
+          Alcotest.(check int) ("exit 0: " ^ all) 0 rc;
+          (* Two: new_step's own `step : {Int | _ != 0}` on -1, and
+             to_list's `v.step != 0` on new_step's result. *)
+          Alcotest.(check (triple int int int)) "2 proved, 0 violated, 0 skipped" (2, 0, 0) ledger) ]
+  @ step_guard_cases ~what:"Control.chunks"
+      ~good:"mod SG3 do\n  fn go() : Int do List.length(Control.chunks(\"abcdef\", 4)) end\nend\n"
+      ~bad:"mod SG3 do\n  fn go() : Int do List.length(Control.chunks(\"abcdef\", 0)) end\nend\n"
+      ~message:"argument `size` of `Control.chunks` does not satisfy precondition `_ > 0`"
+
 let opaque_by_decl_suite =
   let run, slugs, _detail =
     container_gap_harness [ "list.march"; "option.march"; "map.march"; "set.march"; "array.march"; "rrb_vec.march" ]
@@ -28511,4 +28579,5 @@ let () =
       ("p1-record", p1_record_suite);
       ("p2-value-refs", p2_value_refs_suite);
       ("opaque-by-decl", opaque_by_decl_suite);
+      ("stdlib-step-guards", stdlib_step_guard_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

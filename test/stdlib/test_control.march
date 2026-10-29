@@ -9,6 +9,22 @@ mod TestControl do
 
   -- ── fixtures ─────────────────────────────────────────────────────────────
 
+  -- A chunk size the refinement checker cannot see through.
+  pfn chunk_size(s : String) : Int do
+    match string_to_int(s) do
+    Some(n) -> n
+    None -> 1
+    end
+  end
+
+  -- The panic message of `Control.chunks(hex, size)`, or "no panic".
+  pfn chunks_err(hex : String, size : Int) : String do
+    match __try_call_val(fn _ -> List.length(Control.chunks(hex, size))) do
+    Ok(_) -> "no panic"
+    Err(m) -> m
+    end
+  end
+
   fn release_text() do
     "release v1\n"
     ++ "seq      42\n"
@@ -861,6 +877,19 @@ mod TestControl do
       assert (List.map(cs, fn c -> c.last) == [false, false, true])
       assert (Control.chunks("", 4) == [{ offset: 0, data: "", last: true }])
       assert (Control.chunks("0123", 4) == [{ offset: 0, data: "0123", last: true }])
+      assert (List.map(Control.chunks("abcdef", 1), fn c -> c.data) == ["a", "b", "c", "d", "e", "f"])
+    end
+
+    -- A size of 0 used to hang (chunks_from advanced `off` by `size`, so
+    -- it never moved) and a negative size walked `off` backwards forever.
+    -- `chunk_size` hides the value from the refinement checker, which
+    -- rejects a literal 0 or -1 at compile time; the runtime guard is what
+    -- such a computed size reaches.
+    test "a size that is not positive panics instead of hanging" do
+      let msg = "panic: Control.chunks: size must be positive"
+      assert (chunks_err("abcdef", chunk_size("0")) == msg)
+      assert (chunks_err("abcdef", chunk_size("-2")) == msg)
+      assert (chunks_err("", chunk_size("0")) == msg)
     end
   end
 

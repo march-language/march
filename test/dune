@@ -9118,6 +9118,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/try_call_err_message.expected interp_try_call_err_message.out)))
 
+; ── stdlib walks that hung on a bad step/size (termination design D5) ──────
+; List.range_step / Range.to_list with step 0, Control.chunks with size <= 0
+; and Duration.format(min_int) never terminated; the golden pins the runtime
+; guard's panic (and Duration's exact output) on both backends.
+(rule
+ (targets native_stdlib_step_guards native_stdlib_step_guards.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/stdlib_step_guards.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_stdlib_step_guards
+        native/stdlib_step_guards.march)
+   (with-stdout-to native_stdlib_step_guards.out
+        (system "./native_stdlib_step_guards")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/stdlib_step_guards.expected native_stdlib_step_guards.out)))
+
+(rule
+ (targets interp_stdlib_step_guards.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/stdlib_step_guards.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_stdlib_step_guards.out
+   (run %{exe:../bin/main.exe} native/stdlib_step_guards.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/stdlib_step_guards.expected interp_stdlib_step_guards.out)))
+
 ; ── A nested actor's message constructors sent qualified from the parent ──
 (rule
  (targets native_nested_actor_msg_from_parent native_nested_actor_msg_from_parent.out)

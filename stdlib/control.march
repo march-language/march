@@ -1965,7 +1965,7 @@ mod Control do
   doc """
   Split [hex] (an artifact as hex) into chunks of [size] hex characters, offsets counted in
   characters; an artifact of at most [size] characters (including an empty one) is one last
-  chunk.
+  chunk. Panics if [size] is not positive (also a refinement precondition).
 
   ## Examples
 
@@ -1976,10 +1976,17 @@ mod Control do
       march> List.map(Control.chunks("", 4), fn c -> c.last)
       [true]
   """
-  fn chunks(hex : String, size : Int) : List(CtlChunk) do
-    let n = String.byte_size(hex)
-    if n <= size do [{ offset: 0, data: hex, last: true }]
-    else chunks_from(hex, size, 0, n) end
+  fn chunks(hex : String, size : {Int | _ > 0}) : List(CtlChunk) do
+    -- chunks_from advances `off` by `size`: 0 never moves it, and a negative
+    -- size walks it backwards, so either recursed forever.  The guard is for
+    -- a size the checker cannot see.
+    if size <= 0 do panic("Control.chunks: size must be positive")
+    else do
+      let n = String.byte_size(hex)
+      if n <= size do [{ offset: 0, data: hex, last: true }]
+      else chunks_from(hex, size, 0, n) end
+    end
+    end
   end
 
   pfn chunks_from(hex : String, size : Int, off : Int, n : Int) : List(CtlChunk) do
