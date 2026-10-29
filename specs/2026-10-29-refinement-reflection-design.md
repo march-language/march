@@ -1,7 +1,7 @@
 # Design: refinement reflection, lemmas, and unfolding
 
 **Date:** 2026-10-29
-**Status:** design. Nothing built. Phases 0-3 below, one PR each; later phases listed.
+**Status:** design, revised after a fresh-context review (§12). Nothing built. Phases 0-3 below, one PR each; later phases listed. §2.6 records a deviation from D1 that awaits the user's approval.
 **Base commit:** `7df0dc808` (origin/main, "browser: regenerate the in-browser REPL and live compiler").
 **Probe environment:** compiler `_build/default/bin/main.exe` built from that commit with
 `dune build --root . bin/main.exe`; z3 4.16.0 on PATH (CI has 4.8.12); macOS (Darwin 25.6),
@@ -162,8 +162,10 @@ let key_of_vc ?(preamble = "") (vc : Smt.vc) : string =
   March_cas.Blake3.hash_string (preamble ^ "\n" ^ Smt.assertion_block vc)
 ```
 
-A body edit that keeps the contract creates no new key, because no VC contains the body.
-A caller's VC contains only the callee's contract.
+The e1 edit happens to produce identical SMT text, so it shows only that a **caller's** VC holds
+the callee's contract, never its body. A semantic edit of a body does change that function's
+**own** postcondition VC: the review re-ran e1 with `rev`'s body changed and measured
+`vc entries: 274, new: 1` (the new key is `rev`'s own post). No caller key changed in either run.
 
 ### 0.5 Probe (d): which functions D1 would reflect
 
@@ -172,7 +174,7 @@ files, plus `--check --termination-report` for the certificates, then a script o
 (the D6 / D10 / D11 rules approximated, below). The script is a measurement; nothing in the
 compiler trusts it.
 
-A top-level `fn` (any `mod` depth; impl methods, handlers and externs excluded) counts as
+A top-level `fn` (any `mod` depth; impl methods, handlers, externs and `main` excluded) counts as
 reflectable when:
 - it has none of `@[diverges]`, `@[trusted]`, `@[assume]`;
 - no parameter has a function type, the body has no lambda, no call through a variable, and
@@ -188,43 +190,64 @@ reflectable when:
 Divisions are counted, not excluded: D6 needs each `/` by a non-literal to have its
 `Division` obligation proved, and the script cannot see that.
 
+The script is deterministic: the fixpoint iterates in sorted order, and each unreflected
+function's blocker is chosen **after** the fixpoint (a builtin or unresolved callee first, else the
+first callee, in sorted order, that did not survive). Three runs under `PYTHONHASHSEED=1`, `2`
+and `3` give the same MD5 of the whole output (`5dc60888620bd8d1cb498a6cf79eacf3`). The first
+version iterated a Python set, so its breakdown (not its totals) moved with the hash seed; the
+review measured that.
+
 | | stdlib (135 files) | test/native (417 files) |
 |---|---|---|
 | top-level functions | 3,947 | 2,186 |
-| **reflectable under D1** | **817 (20.7%)** | **386 (17.7%)** |
+| **reflectable under D1** | **817 (20.7%)** | **384 (17.6%)** |
 | of which recursive (certified) | 164 | 63 |
-| of which non-recursive | 653 (103 take no arguments) | 323 (78 take no arguments) |
+| of which non-recursive | 653 (103 take no arguments) | 321 (76 take no arguments) |
 | of which take 2 or more parameters | 295 | 102 |
 | of which divide by a non-literal (need a proved `Division`) | 8 | 1 |
+| of which mention `Float` in the signature | 18 | 21 |
+
+With the §2.6 stdlib allowlist empty (no stdlib callee counts as reflected), the review measured
+test/native at 382.
 
 The first blocking reason of the rest:
 
 | Reason | stdlib | test/native |
 |---|---|---|
-| calls a builtin with no z3 meaning, or an unresolved name | 1,120 | 571 |
-| calls a function that is itself not reflectable | 767 | 299 |
-| contains a lambda | 361 | 309 |
-| calls through a variable | 338 | 214 |
+| calls a builtin with no z3 meaning, or an unresolved name | 1,225 | 452 |
+| it is `main` | — | 417 |
+| calls a function that is itself not reflectable | 662 | 218 |
+| contains a lambda | 361 | 212 |
+| calls through a variable | 338 | 197 |
 | a recursive unit without a `structural`/`metric` certificate | 190 | 174 |
 | a parameter of function type | 136 | 48 |
-| names a function as a value | 117 | 28 |
+| names a function as a value | 117 | 15 |
 | `@[diverges]` / `@[trusted]` / `@[assume]` | 57 | 3 |
-| `spawn` / `send` | 40 | 153 |
-| non-exhaustive match | 4 | 1 |
+| `spawn` / `send` | 40 | 65 |
+| non-exhaustive match (unguarded only, see below) | 4 | 1 |
 
-The builtins that block most often: `++` (329), `int_to_string` (135), `panic` (78),
-`string_concat_n` (55), `string_concat3` (38), `string_byte_at` (32), `get_actor_field` (30),
-`println` (29), `string_slice` (27), `string_length` (17).
+The builtins that block most often: `++` (295), `int_to_string` (110), `panic` (79),
+`string_concat3` (68), `bool_to_string` (36), `string_byte_at` (32), `*.` (31),
+`get_actor_field` (30), `string_concat_n` (29), `+.` (28), `int_and` (28).
 
 D18's functions come out as expected: `List.append`, `List.reverse`, `List.take` and
 `List.drop` are reflectable; `List.filter` is not (a function-typed parameter and a call through
-it). Of `List`'s functions, 12 are reflectable in all.
+it). Of `List`'s functions, 22 are reflectable in all (among them `sum_int`, `zip`, `split_at`,
+`nth_opt`).
 
-Accuracy: the rules are approximated on the desugared AST. The callee resolution is lexical
-and module-qualified, but does not follow `use`/`alias` imports, so some "unresolved" callees
-are really stdlib functions (an undercount of reflectable functions). Effects are only caught as
-calls or as `spawn`/`send` nodes. Treat the counts as ±10%. The script is
-`refl/reflectable.py` in the session scratch area.
+Accuracy, and what the script does not see:
+- Callee resolution is lexical and module-qualified, but does not follow `use`/`alias` imports,
+  so some "unresolved" callees are really stdlib functions (an undercount).
+- Effects are caught only as calls or as `spawn`/`send` nodes.
+- Comparisons and `==` are counted as encodable whatever their type, so Float and user-`Ord`
+  comparisons are over-counted.
+- R1's "no captured variables" is not checked for local functions.
+- A guarded match that can fall through (C2 of the review) is invisible to it, as it is to
+  today's `non_exhaustive_match` diagnostic; the review found 2 such functions.
+- The 103 + 76 zero-argument functions include constants that are already folded today.
+
+Treat the totals as ±10%. The breakdown is exact for the script, not for the compiler. The script
+is `refl/reflectable.py` in the session scratch area.
 
 ### 0.6 Probe (f): builtins with a z3 meaning today
 
@@ -270,9 +293,11 @@ fn need(p : {P | _ == P(1, 2)}) : Int do 0 end
 | g3 | hand-written `Eq` above; `need(P(1, 3))` | **`refinement_violated`**: "argument `p` of `need` does not satisfy precondition `_ == P(1, 2)`" |
 | g4 | interpreted: `println(if P(1, 3) == P(1, 2) do "eq" else "ne" end)` | prints **`eq`** |
 
-So g3 is a **false violation today**. The predicate's `==` is z3 datatype equality, while the
-program's `==` runs the user's `eq`. D7 fixes this for reflection; phase 0 files it as a bug of
-its own.
+So in g3 the predicate's `==` is z3 datatype equality, while the program's `==` runs the
+user's `eq`. The checker is consistent with what the predicate means (structural equality), but
+the user who wrote `_ == P(1, 2)` with their `Eq` in mind gets a violation for a value their `==`
+accepts, and nothing explains it. §3.5 keeps the meaning, documents it and warns; phase 0 files
+the missing warning.
 
 ### 0.8 Probe (h): a `Unit` return refinement today
 
@@ -364,7 +389,9 @@ obligations and are not used here.)
   certificate (`refine_check.ml`, beside the call at `:8671`), but a callee in a different SCC
   is still not examined. Harmless today only because such an arm fails to translate (F4), so
   the measure falls back to an uninterpreted symbol.
-- **F8. Predicate `==` is z3 equality, whatever the type's `Eq`.** g3 is a false violation.
+- **F8. Predicate `==` is z3 equality, whatever the type's `Eq`** (g3). A scalar `Float` `==` is
+  the exception: it becomes IEEE `fp.eq` (`refine_encode.ml:404`). Nothing warns a user whose
+  type has a hand-written `Eq`.
 - **F9. The VC cache key is the SMT text** (`vc_cache.ml:6-7`): BLAKE3 of the preamble and the
   assertion block. `unknown` is never cached (`refine.ml:153-170`). Entries live under
   `<project>/.march/cas/vc`. So the cache is correct for any encoding that puts what a proof
@@ -411,6 +438,28 @@ obligations and are not used here.)
 - **F18. Compiled `Int` is 63-bit and wraps; the checker's Int is mathematical.** The
   reference says the checker's arithmetic is over unbounded integers; the runtime normalises
   to 63 bits. Any fact about `n + 1 > n` is true in the logic and false at the maximum `Int`.
+
+- **F19. A metric certificate can hold only on a refined domain** (probe r1). The certificate is
+  computed under the parameter refinements, so it says nothing about arguments outside them.
+- **F20. A guarded match draws no `non_exhaustive_match` warning**, even when it can fall through
+  (probe r2). `typecheck_exhaustive.ml:719-739` records it in `nonexhaustive_match_spans`
+  instead, and the program panics at run time.
+- **F21. Predicate vocabulary wins over a user function of the same name** (probe r3): with a
+  user `fn len(xs) = 7`, the predicate `len(_) == 1` still means the builtin `$len`.
+- **F22. There are no refutable `let` patterns.** `let Cons(h, _) = xs` is a `syntax_error`
+  (probe r4), so R5 has only `match` and multi-head clauses to cover.
+
+### 0.12 Probes from the review, re-run on `7df0dc808`
+
+The review supplied these programs; each was re-run here with the same script and a fresh HOME.
+
+| Row | Program | Measured |
+|---|---|---|
+| r1 | `fn p(n : {Int \| _ >= 0}) : Bool do if n >= 0 do true else not p(n) end end`, and the same with `@[decreases(n)]` (`q`), and `cnt(n : {Int \| _ >= 0})` counting down | `--termination-report`: `p … cert=metric`, `q … cert=metric`, `cnt … cert=metric` (`certificate: 0 structural, 3 metric, 0 trusted, 0 unproved`) |
+| r2 | `fn guarded(xs : List(Int)) : Int do match xs do Cons(h, _) when h > 0 -> h  Nil -> 0 end end`; `main` prints `guarded(Cons(0 - 1, Nil))` | `--check`: no diagnostic, exit 0. Interpreted: `panic: match failure — Non-exhaustive pattern match: no branch matched the value [-1].` |
+| r3 | `fn len(xs : List(Int)) : Int do 7 end`; `need(xs : {List(Int) \| len(_) == 1})` on `Cons(1, Nil)`; `main` prints `len(Cons(1, Nil))` | `--check`: `1 proved`. Interpreted: prints `7` |
+| r4 | `let Cons(h, _) = xs` in a function body | `-- ERROR … I got stuck here: [syntax_error]`, pointing at `Cons` |
+
 
 ---
 
@@ -468,17 +517,18 @@ Reflection is automatic (D1). A function `f` is **reflected** when all of these 
 | # | Condition | Source of truth |
 |---|---|---|
 | R1 | `f` is a top-level `fn` or a local `fn` with no captured variables. Not an `impl` method, actor handler, `extern`, `main`, or lemma | the TERM unit table (`Refine_term`, `u_top`) |
-| R2 | `f` terminates: its SCC certificate is `structural` or `metric`. Not `trusted`, not `diverges`, not `unproved` (D6). A non-recursive unit passes R2 by itself; its callees answer for themselves under R6 | `Refine_term.finish` |
+| R2 | `f` terminates: its SCC certificate is `structural` or `metric`. Not `trusted`, not `diverges`, not `unproved` (D6). A non-recursive unit passes R2 by itself; its callees answer for themselves under R6. A `metric` certificate holds only on the refined domain, so every unfolding is guarded by the parameter refinements (§3.6, C1) | `Refine_term.finish` |
 | R3 | `f` has no effect: no `spawn`, `send`, `receive`, `dbg`, actor field access, and no effectful callee (R6 makes every builtin outside the table of §2.3 a blocker) | the body walk |
 | R4 | `f` cannot fail: no `panic`/`todo`/`unreachable`/`exit` (R6), no runtime `assert`, and every `/` or `%` has its `Division` obligation **proved** (D6) | the obligation ledger, read per span (`Obligation.by_span`) |
-| R5 | every `match` in `f` covers all cases, including refutable `let` patterns and multi-head clauses after desugaring (D6) | the typechecker's `non_exhaustive_match` result, keyed by span |
-| R6 | every callee is reflected, a constructor, or a builtin with a z3 meaning (§2.3) (D11). Interface dispatch counts as a call to every reachable `impl` (TERM phase 3's dispatch edges), so `show`, interpolation, `compare` and a user `<` block. `==` is the D7 exception (§3.5) | the TERM call graph, its dispatch edges |
+| R5 | every `match` in `f` covers all cases, including multi-head clauses after desugaring and **guarded** matches whose guardless arms do not cover (D6) | the typechecker's `nonexhaustive_match_spans` (`typecheck_exhaustive.ml:719-739`), which records guarded matches too; **not** the `non_exhaustive_match` warning, which a match with any `when` guard never emits (C2) |
+| R6 | every callee is reflected, a lemma (translated as `()`, §3.4, I2), a constructor, or a builtin with a z3 meaning (§2.3) (D11). A callee is matched by its **resolved identity** (the typechecker's binding, `Builtin_name` for builtins), never by its spelling (I3). Interface dispatch counts as a call to every reachable `impl` (TERM phase 3's dispatch edges), so `show`, interpolation, `compare` and a user `<` block. `==` is the D7 exception, and only when every reachable `eq` is itself total and pure (§3.5) | the TERM call graph, its dispatch edges |
 | R7 | `f` is first-order: no parameter of function type, no lambda, no call through a variable, no function named as a value (D10) | the TERM graph's lambda and reference edges, plus a parameter-type check |
-| R8 | every parameter sort and the result sort are encodable (§3.2), and the result is not `Unit` | §3.2 |
-| R9 | `f` is not marked `@[opaque]`, `@[assume]` or `@[trusted]` (§2.5) | attributes |
-| R10 | in the stdlib, `f` is on the reflection allowlist (§2.6) | a list in `refine_reflect.ml` |
+| R8 | every parameter sort and the result sort are encodable (§3.2), every parameter refinement translates (it becomes the unfolding guard), and the result is not `Unit` | §3.2 |
+| R9 | `f` is not marked `@[opaque]`, `@[assume]` or `@[trusted]` (§2.5), recursive or not | attributes |
+| R11 | `f`'s name is not predicate vocabulary (`len`, `elts`, `keys`, the set operators, `is_<Ctor>`). In a predicate such a name always means the builtin, so a user `len` cannot be reflected under it (I3) | the vocabulary tables (`refine_encode.ml:1040-1052`, `:1358`) |
+| R10 | **(option S1 only, a deviation from D1 awaiting approval, §2.6)** in the stdlib, `f` is on the reflection allowlist. Checked last | a list in `refine_reflect.ml` |
 
-R1-R9 form a greatest fixpoint over the call graph: start with every unit that passes the local
+R1-R9 and R11 form a greatest fixpoint over the call graph: start with every unit that passes the local
 tests, and drop any unit with a dropped callee, until nothing changes. A mutual SCC is
 reflected as a whole or not at all.
 
@@ -510,10 +560,12 @@ Phase 1 uses exactly today's vocabulary (§0.6), with these rulings:
 |---|---|
 | `+ - * negate`, comparisons on `Int`, `&& \|\| not`, Bool and Int literals | yes |
 | `/ %` | yes, when the `Division` obligation at that span is proved (R4). Encoded with today's truncation `Ite` (`refine_scope.ml:225`) |
-| `==`, `!=` | yes, per §3.5 (z3 equality or an opaque symbol) |
+| `==`, `!=` | yes, per §3.5: SMT `=` for fully derived, Float-free types; otherwise the opaque `eq$T`, and only if every reachable `eq` passes R2-R7 |
 | `List.length`, `len` on `List` | yes (`$len`) |
 | `string_byte_length`, `String.byte_size` | yes (`$strlen`, D9) |
-| any other `String` or `Float` operation, `Float` comparison included | **no** (D9): the function is not reflected |
+| `Float` arithmetic and comparison (`+. -. *. /.`, `<.` and friends, `==` at `Float`) | yes, as **opaque** symbols (D9): one uninterpreted, total function per operator. Never the FloatingPoint theory inside a reflected body, so NaN and signed zero can never be reasoned about wrongly |
+| `String` literals | yes: each distinct literal is a fresh `$Str` constant, all literals in a query are asserted pairwise `distinct`, and `$strlen` of each is fixed to its byte length |
+| any other `String` or `Float` builtin (`string_slice`, `float_to_int`, `int_to_float`, …) | **no** (D9): the function is not reflected |
 | set vocabulary | only inside a function whose result is a `Set` (a set-valued measure today) |
 | constructors, tuples, record construction, field access, record update | yes: datatype constructors and selectors (§3.2) |
 | `is_<Ctor>` | yes |
@@ -578,23 +630,65 @@ Rules:
   checker to trust has a body the checker has not verified to match it, and unfolding the body
   next to the trusted contract could contradict it.
 
-### 2.6 The standard library
+### 2.6 The standard library: a deviation from D1, awaiting the user's approval
 
-D1 says every qualifying function is reflected. For user code, and for libraries reached through
-`MARCH_LIB_PATH`, that holds from phase 1.
+**This section deviates from D1.** D1 says reflection is automatic for every qualifying function,
+with no opt-in. The design below keeps an allowlist for `stdlib/`, which is an opt-in for the
+stdlib's 817 reflectable functions. It is written as a **deviation that needs the user's
+approval**. Both options are specified fully below, so either can be built; phase 1 builds the
+switch between them (one constant in `refine_reflect.ml`), and phase 3 is written so it works
+under either.
 
-For `stdlib/`, my ruling is an **allowlist**, empty in phases 1-2, holding D18's set from phase
-3, widened only by later PRs. Reasons:
-- **Cost.** Every program checks the stdlib. Probe (d) counts 817 reflectable
-  stdlib functions. Reflecting them all at once multiplies the frontier of every VC that calls
-  any of them, before §8's bounds have been measured on real proofs.
-- **Interface.** A stdlib body edit would change user proofs (§7). The allowlist makes each
-  stdlib function's body a deliberate public promise.
-- **D18 asks for a first release of five functions,** which only makes sense if the stdlib is not
-  reflected wholesale.
+For user code, and for libraries reached through `MARCH_LIB_PATH`, D1 holds from phase 1 under
+both options.
 
-The two stdlib `@[measure]`s stay measures (§5), so they are reflected regardless of the list.
-Widening the list is open question Q2.
+#### Option S1 (proposed): a stdlib allowlist
+
+- **Rule R10:** a stdlib function is reflected only if R1-R9 and R11 hold **and** it is on the
+  allowlist, a list of qualified names in `refine_reflect.ml`.
+- The list is empty in phases 1-2. Phase 3 puts D18's set on it: `List.append`, `List.reverse`,
+  `List.take`, `List.drop` and their helpers. Later PRs widen it (Q2).
+- The two stdlib `@[measure]`s are reflected regardless: the attribute asserts reflection (§5).
+- R10 is checked **last**. A stdlib function that fails an earlier rule reports that rule, so
+  `List.map` reports R7 (function value), and only a function that passes everything else
+  reports R10:
+
+  ```
+  `List.sum_int` is not reflected: it is not on the stdlib reflection list (R10). [refinement_unchecked]
+  ```
+
+Why I propose it, and how strong each reason is:
+- **Interface.** A stdlib body edit would change user proofs (§7). The list makes each stdlib
+  body a deliberate promise. The review notes this applies equally to `MARCH_LIB_PATH`
+  libraries, which D1 reflects automatically; that is true, and is why `@[opaque]` exists. The
+  stdlib differs in one way: users cannot pin its version independently of the compiler.
+- **Cost.** Every program checks the stdlib's 220 obligations. Under S2, stdlib obligations whose
+  frontier holds a stdlib call would start running stage 2 in every program. §8's bounds (the
+  frontier, the two stages) limit this, but they are unmeasured on real proofs until phase 1.
+  This is the weaker reason: the review is right that the bounds already make the cost small.
+- **D18** names five functions for the first release, which reads most naturally if the stdlib
+  is not reflected wholesale.
+
+#### Option S2 (D1 as written): the stdlib reflected automatically
+
+- No R10. A stdlib function is reflected under exactly R1-R9 and R11, like user code.
+- Phase 1 reflects the stdlib's 817 functions (probe (d)). `--reflect-report` run on each stdlib
+  file lists them.
+- `@[opaque]` is the stdlib's opt-out, function by function. Phase 1 marks `@[opaque]` every
+  stdlib function whose body is expected to change for performance reasons (none are known;
+  the progress note lists any added).
+- Phase 3 is unchanged except that it adds no allowlist entries: it ships the lifts and the
+  lemmas.
+- The `std_not_allowlisted` test becomes `std_auto`: `List.sum_int` in a predicate **is**
+  reflected, `List.map` still reports R7.
+- The cost rows of §6.3 then apply from phase 1 to every corpus fixture that calls a reflected
+  stdlib function, not only from phase 3.
+
+#### What the user decides
+
+S1 or S2. Until the user approves S1, S1 is built behind the switch, and the phase-1 progress
+note reports the monotone gate and timing under **both** settings, so the cost argument is
+measured rather than assumed.
 
 ---
 
@@ -605,15 +699,36 @@ Widening the list is open question Q2.
 Each reflected function `f` gets one z3 symbol per sort instance:
 
 ```
-(declare-fun List.append$r@Int (List@Int List@Int) List@Int)
+(declare-fun |r:std:List.append@Int| (List@Int List@Int) List@Int)
 ```
 
-- The name is the qualified March name plus `$r`. The suffix keeps it apart from measure
-  symbols, which use the bare name (F3).
-- `@<sorts>` names the instance when `f` is polymorphic (§3.3), exactly as
-  `measure_instance_name` does today (`refine_encode.ml:3296`).
-- The name is a fixed string, so the VC cache and the determinism oracle see no counter.
-- A `@[measure]` keeps its existing symbol (§5).
+The symbol must be **injective**: two different definitions must never share a symbol, or one
+symbol gets two definitions and the query proves anything (I4). The mangling is:
+
+```
+|r:<origin>:<module path>.<name>[/<local>#<line>:<col>]@<instance>|
+```
+
+- `r:` marks a reflected symbol. Measure symbols keep their bare names (F3), so the two can
+  never collide.
+- `<origin>` is `std` for `stdlib/`, `lib:<package>` for a `MARCH_LIB_PATH` library, and `user`
+  for the entry program's own modules. A user `mod List` therefore never meets `std:List`.
+- `<module path>` is the full nested path (`Outer.Inner`), as TERM's lexical resolution prints it.
+- A local function adds `/<local>` **and** its declaration position. TERM already names locals
+  `f/go`; the position keeps apart two `go`s declared one after the other in the same function
+  (the second shadows the first).
+- `@<instance>` is the sort instance (§3.3), spelled as `measure_instance_name` does
+  (`refine_encode.ml:3296`).
+- The whole name is an SMT quoted symbol (`|…|`), so `/`, `:`, `#`, `.` and `@` are legal. A `|`
+  or `\` cannot occur in a March identifier or path.
+- The name is a fixed string, with no counter, so the VC cache and the determinism oracle see the
+  same text in every run.
+- A `@[measure]` in the axiom tier keeps its existing symbol (§5).
+
+The rest of this document writes `f$r` (`cat$r`, `rev$r`) as shorthand for the mangled name.
+
+Phase 1 adds a check, at symbol creation, that no symbol is declared twice with different
+definitions; a duplicate is an internal error.
 
 ### 3.2 Sorts
 
@@ -661,8 +776,8 @@ This is sound because `Elem` has no axioms:
   model of the separate one (take `Elem` to be the disjoint union).
 
 The cost of a single `Elem` is precision, never soundness: two calls at different instances
-cannot share an unfolding. Equality on `Elem` is opaque (§3.5), because the instance's `Eq` is
-unknown.
+cannot share an unfolding. A **body's** `==` on `Elem` is opaque (§3.5), because the instance's
+`Eq` is unknown; a **predicate's** `==` on `Elem` is logical equality.
 
 ### 3.4 Translating a body
 
@@ -671,34 +786,75 @@ new translator, not `smt_of_axiom_body` (F4):
 
 | March | z3 |
 |---|---|
-| `match x do C1(a) -> e1 … end` | per arm, a guard `((_ is C1) x)` and the arm body with `a := (C1_0 x)` (selectors, as `measure_definition` does at `:2945-2957`) |
-| a match arm guard `when g` | the arm's guard becomes `is_C1(x) && g`, and later arms get `not g` for that constructor |
+| `match x do C1(a) -> e1 … end` | one **implication per arm**: arm `i`'s condition is "`x` matches arm `i`'s pattern, and matches no earlier arm" (constructor testers, with selectors `a := (C1_0 x)`). There is **never** a final unconditional `else`: unlike `measure_definition` (`:2959-2968`), which makes the last arm the default, an input that matches no arm gets no equation at all |
+| a match arm guard `when g` | arm `i`'s condition gains `g`; a later arm's condition gains "not (earlier pattern and earlier guard)". Coverage is R5's job, which for a guarded match reads `nonexhaustive_match_spans` (C2) |
 | `if c do e1 else e2 end` | `ite` |
 | `let x = e1` then `e2` | substitution (an SMT `let` when `e1` is used more than once) |
 | a call of a reflected `g` | `(g$r args)`: **not** unfolded at translation time |
+| a call of a lemma (a proof step inside a reflected function, D5) | `()`: the call is erased before the body is translated, exactly as §4.5 erases it before code generation (I2). Its arguments must still be reflectable terms |
 | constructor, tuple, record, field access, record update | datatype constructor and selector terms |
-| arithmetic, comparison, Bool operators, `len` | today's `smt_of_r_marked` (`refine_scope.ml:260`) translation, so the two translators agree |
+| arithmetic, comparison, Bool operators, `len` | today's `smt_of_r_marked` (`refine_scope.ml:260`) translation, so the two translators agree, but dispatched on the callee's **resolved identity**. A user function spelled `len` is a call of that user function (and blocks under R11), never `$len` |
 | `==` | §3.5 |
 
 Totality makes the result a total term: the arms of an exhaustive match cover every
 constructor (R5), and every callee is total (R6).
 
-### 3.5 `==` (D7)
+### 3.5 `==`: logical equality in predicates, program equality in bodies (D7)
 
-`a == b` at type `T` translates to:
-- **z3 `=`** when `T` is `Int`, `Bool`, `String`, or an ADT or record whose `Eq` is **derived all
-  the way down**: derived for `T`, and for every type reachable through its fields;
-- **an opaque symbol** `eq$T(a, b)` (Bool-valued, uninterpreted, one per sort) otherwise: when
-  any type in `T`'s structure has a hand-written `impl Eq`, when `T` contains `Float`, or when
-  `T` is a type variable.
+Two different equalities meet here, and the design keeps them apart.
 
-`!=` is `not` of the same. The opaque symbol is consistent with any `eq` the user wrote, so it
-can never contradict the program. It is also never reflexive in the logic, which costs proofs on
-those types and is the point.
+**In a predicate, `==` is logical equality.** A predicate is a specification. `a == b` in a
+predicate means "the same value": SMT `=` at the value's sort, for every type, including a type
+variable (`Elem`), an ADT with a hand-written `Eq`, and a `Float` or `String` inside a datatype.
+The one exception is today's: a predicate comparing two **scalar** `Float` terms keeps the
+IEEE `fp.eq` the Float refinements use (`refine_encode.ml:404`).
 
-The same rule fixes F8 for ordinary predicates: phase 1 routes predicate `==` through it, so
-g3 becomes a skip, not a violation. That is a verdict change on purpose; §6 lists it as an
-allowed category.
+**In a reflected body, `==` is the program's equality**, the one the program runs. D7 decides its
+translation at type `T`:
+- **SMT `=`** when `T` is `Int`, `Bool`, `String`, or an ADT or record whose `Eq` is **derived all
+  the way down** (derived for `T` and for every type reachable through its fields) and that
+  contains no `Float`;
+- otherwise **an opaque symbol** `eq$T(a, b)`: Bool-valued, uninterpreted, one per sort. That is
+  the case when any type in `T`'s structure has a hand-written `impl Eq`, when `T` is or contains
+  `Float` (D9: IEEE `==` is not reflexive on NaN), or when `T` is a type variable.
+
+`!=` is `not` of the same (the built-in `Eq` interface has only `eq`,
+`typecheck_builtins.ml:502-504`, so there is no separate `ne` to disagree with).
+
+**The opaque case is allowed only for a total `eq`** (C4). The D7 exception to R6 applies only
+when every `impl Eq` reachable from `T` (by TERM's dispatch edges) itself passes R2-R7: it
+terminates, has no effect, cannot fail, and is first-order. Then `eq$T` is an unknown but
+**total, deterministic** function, which is what an uninterpreted symbol claims. If any
+reachable `eq` prints, panics, loops or calls a function value, `==` at `T` is a blocker like
+any other non-reflected callee, and the function is not reflected.
+
+**Why this reading (C3).** The two readings the review weighed:
+- *Opaque `==` on `List(a)` in predicates.* Then no generic equational lemma can be stated:
+  `cat_nil`, `cat_assoc`, `rev_cat`, `rev_rev` (§4.6) and phase 3's `append_assoc`,
+  `reverse_reverse`, `take_drop` would all be unprovable.
+- *z3 `=` everywhere, predicates and bodies alike.* Then a body's `==` on `List(Float)` would be
+  reflexive in the logic and not at run time (`[NaN] == [NaN]` is false), so a reflected
+  `same(a, b) = a == b` could be "proved" true where the program says false.
+
+Separating the two keeps every lemma provable (they are predicate statements about values) and
+keeps every reflected body faithful (it uses the program's `==`). LH draws the same line: a
+specification's `==` is the logic's equality.
+
+**Lemma facts are instantiated, never re-translated.** A polymorphic lemma is proved once, at
+`Elem`, with logical `=`. At a call, its post is the **proved SMT term** with `Elem` replaced by
+the call's sorts. It is not rebuilt from the source predicate at the call site, so a scalar
+`Float` instance cannot silently turn a proved `=` into `fp.eq`.
+
+**What this means for g3.** Today's predicate `==` is already logical equality (F8); g3 is that
+meaning meeting a user's `Eq`. The design keeps the meaning, states it in the reference, and adds
+a warning, `predicate_eq_structural`, at a predicate that uses `==` at a type with a hand-written
+`Eq`:
+
+```
+`==` in a refinement means structural equality; `P` has a hand-written `Eq`, which this predicate does not use. [predicate_eq_structural]
+```
+
+So g3 stays a violation, with the warning explaining it. No predicate verdict changes.
 
 ### 3.6 Unfolding once per call site (D12)
 
@@ -710,11 +866,23 @@ For a call term `f$r(t1, …, tn)` in a query, one unfolding adds the **guarded 
 (assert (=> ((_ is Cons) xs) (= (cat$r xs ys) (Cons (Cons_0 xs) (cat$r (Cons_1 xs) ys)))))
 ```
 
+- **Each equation is guarded by the callee's domain** (C1). If `f`'s parameters carry
+  refinements, their conjunction `pre_f(t1, …, tn)` is added to every arm's guard:
+
+  ```
+  (assert (=> (and pre_f ((_ is Cons) xs)) (= (f$r xs) …)))
+  ```
+
+  A metric certificate proves termination only for arguments that satisfy the refinements, so
+  outside them the definition says nothing. A parameter refinement that does not translate makes
+  `f` unreflectable (R8).
 - Each assertion is a ground instance of the definition. None is quantified, and none uses
   `define-fun-rec` (D12).
 - The new term `cat$r (Cons_1 xs) ys` is **not** unfolded again in phases 1-3.
-- **Why this is sound:** `f` is total (R2-R5), so `∀x. f$r(x) = body(x)` is true of the
-  program, and every unfolding is an instance of a true formula. Adding true facts can never
+- **Why this is sound:** `f` is total on its domain (R2-R5), so
+  `∀x. pre_f(x) ⇒ (f$r(x) = body(x))` is true of the program, and every guarded unfolding is an
+  instance of that true formula. For an input that matches no arm (impossible under R5) or lies
+  outside `pre_f`, nothing is asserted. Adding true facts can never
   produce a false proof, however many are added.
 
 ### 3.7 Which calls are unfolded: the frontier
@@ -766,14 +934,17 @@ depth `d` produces call terms at depth `d + 1`.
 - Every unfolding past depth 0 already needs a decided guard, so a proof that needs a third
   step is exactly the place where an explicit `assert` or lemma call documents the reasoning.
 
-**The per-function override is `@[reflect(fuel: N)]`**, `0 <= N <= 8`.
+**The per-function override is `@[reflect(fuel: N)]`**, `1 <= N <= 8`.
 - D1 makes reflection automatic, so `@[reflect]` never turns reflection **on**. It is an
   **assertion**: "this function must be reflected". On a function that fails §2.1, any
   `@[reflect…]` is an error (`invalid_reflect`) naming the blocker, like `@[measure]` today.
 - `@[reflect(fuel: N)]` sets the fuel for chains through this function's terms. A bare
   `@[reflect]` asserts reflection with the default fuel.
-- The fuel of an obligation's chain is the maximum of the defaults and overrides of the
-  functions on it, capped at 8.
+- Fuel is read **per term**, from the function the term applies: a term `g$r(…)` at depth `d`
+  may be unfolded only while `d < fuel(g)`, where `fuel(g)` is `g`'s override if it has one, else
+  the default. So an override can **lower** fuel as well as raise it: `@[reflect(fuel: 1)]` makes
+  `g` single-unfolding everywhere. `fuel: 0` is not allowed; `@[opaque]` is how a function is
+  kept out of the logic.
 - `fuel: N` is a labelled payload, which no grammar accepts today (F15). Phase 4 adds a
   production `LOWER_IDENT COLON INT` inside a bracketed attribute payload, only for `reflect`,
   and the matching `grammar.js` alternative. An `INT` cannot start a type, so the menhir
@@ -781,12 +952,14 @@ depth `d` produces call terms at depth `d + 1`.
 
 ### 3.9 Running out (D15)
 
-- **Fuel.** If unfolding stops with an undecided or over-fuel term on which the proof might
-  depend, and the query is not proved, the obligation is skipped with the new reason
-  **`reflect-fuel`**: "the proof may need more unfolding of `f`; add a lemma call or `assert`, or
+- **Fuel.** The reason **`reflect-fuel`** is given, operationally, when stage 2 did not prove
+  the query **and** the final frontier holds at least one reflected call term that was **not**
+  unfolded: in phases 1-3, any term at depth 1; from phase 4, a term over its function's fuel or
+  with an undecided guard. Otherwise the stage-1 reason stands. The message: "the proof may need more unfolding of `f`; add a lemma call or `assert`, or
   raise `@[reflect(fuel: N)]`".
 - **Budget.** A hard cap of **32 unfoldings per query** (§8). Past it, the remaining frontier is
-  dropped and an unproved query skips **`reflect-budget`**.
+  dropped and an unproved query skips **`reflect-budget`** (this takes precedence over
+  `reflect-fuel`).
 - **Time.** A z3 timeout is today's `solver-undecided`.
 - Under `cap verified`, each of these is an error, through the existing escalation of every
   skip. Nothing new is needed there.
@@ -822,7 +995,7 @@ end
 | # | Rule | Why |
 |---|---|---|
 | L1 | the result type is `{Unit \| P}` | the post is the theorem |
-| L2 | the body passes R3, R4, R5 and R7 (no effects, no failure path, exhaustive matches, first-order) | a lemma never runs, so a `panic` arm would "prove" anything on that path (h1's `bogus` is the control) |
+| L2 | the body passes R3, R4, R5 and R7 (no effects, no failure path, exhaustive matches, first-order), except that `assert` is allowed: in a lemma it is a static obligation, never a runtime check (§4.3, I5) | a lemma never runs, so a `panic` arm would "prove" anything on that path (h1's `bogus` is the control) |
 | L3 | every callee is a reflected function, another lemma, a constructor, or an R6 builtin | as R6 |
 | L4 | if the lemma is recursive, its SCC is certified `structural` or `metric` (not `trusted`, not `diverges`) | D3: the recursive call is used as the IH |
 | L5 | it is not used as a value, not `@[opaque]`/`@[reflect]`/`@[measure]`/`@[diverges]`/`@[trusted]`/`@[assume]` | a lemma has no runtime existence |
@@ -837,9 +1010,15 @@ end
 - **The IH.** The lemma's recursive call gets its own post as a fact exactly when TERM phase 3's
   `ih_spans` admits that call span: certified SCC, the call reached, its preconditions proved
   (rule (a)). Nothing new is built; a lemma is a recursive function with a Unit return.
-- **`assert e` inside a lemma** is a **static** obligation of a new kind, `Assertion`: proved,
-  then assumed for the rest of the block. It never runs, because the lemma never runs. An
-  unproved one is a skip, so the lemma's post is then likely unproved too.
+- **`assert e` inside a lemma** is a **static** obligation of a new kind, `Assertion`. It never
+  runs, because the lemma never runs, so its fact is assumed **only if it is proved** (I5):
+  - proved: `e` is a fact for the rest of the block;
+  - skipped, unknown or refuted: `e` is **not** assumed. The skip is reported, and the lemma's post
+    is checked without it.
+
+  This differs from `assert` in ordinary code, where today's path assumes `e` after every `assert`
+  (a5), soundly, because the runtime check aborts when `e` is false. A lemma has no runtime check,
+  so `@[lemma] fn l(n : Int) : {Unit | false} do assert false  () end` must not prove.
 - **An unproved lemma** draws a warning, **`lemma_unproved`**, at the lemma (an error under
   `cap verified`). A refuted post is today's `refinement_violated`.
 
@@ -848,7 +1027,9 @@ end
 At a call `l(a1, …, an)` anywhere (D5):
 - the preconditions are checked as for any call;
 - if `l` is admitted **and** every precondition obligation at that call is proved, the fact
-  `P[params := args]` is added to the facts of everything after the call in its block;
+  `P[params := args]` (instantiated from the proved SMT term, §3.5) is added to the facts of
+  everything after the call **in its own block**. It does not leak out of an enclosing `if` or
+  `match` branch;
 - if a precondition is not proved, the fact is withheld and the call draws
   **`lemma_unproved_call`** (a warning; an error under `cap verified`). A refuted precondition is
   `refinement_violated` as usual. There is no runtime fallback, so the fact must never be
@@ -856,29 +1037,64 @@ At a call `l(a1, …, an)` anywhere (D5):
 
 Every obligation is then discharged in **two stages**:
 1. **Stage 1** is today's query, byte for byte: no unfoldings, no `r = f$r(x)` call-result facts,
-  no reflected subjects. Its VC text, and so its cache key, is today's (F9). Two things may still
-  appear in it, both absent from today's code: lemma facts (only after a lemma call), and §3.5's
-  opaque `eq$T` (only where `==` meets a hand-written `Eq`, the deliberate D7 fix).
+  no reflected subjects. Its VC text, and so its cache key, is today's (F9). The one new thing
+  that may appear in it is a lemma fact, which exists only after a lemma call, and no corpus
+  program has one.
 2. **Stage 2** runs only when stage 1 did not prove the goal (skipped, unknown, or refuted) and
-  the frontier (§3.7) holds at least one reflected call. It is stage 1 plus the unfoldings.
-   - unsat: **proved**. The unfoldings are named (`:named u1 …`) and the unsat core
-     (`:produce-unsat-cores`) gives the `uses:` list of §2.4;
-   - sat: the model goes through the witness interpreter as today. A refutation is reported only
-     if stage 2 also refutes; a stage-1 refutation that stage 2 proves was spurious (it came from
-     a call result the logic knew nothing about);
-   - unknown: the stage-1 verdict stands.
+  the frontier (§3.7) holds at least one reflected call in the **unfolding tier**. A call of an
+  axiom-tier measure does not count: its axioms are already in stage 1, so a stage-2 query would
+  be identical (I10). Stage 2 is stage 1 plus the unfoldings and connecting facts.
+   - **unsat: proved.** Every unfolding and every connecting fact is named (`:named u1 …`,
+     `:named c1 …`), and the unsat core (`:produce-unsat-cores`) gives the `uses:` list of §2.4.
+     Naming the call-result facts matters: `let a = f(x)`, `let b = f(x)`, `need(a == b)` is
+     proved by congruence alone, with no unfolding in the core, and must still list `f` (I8);
+   - **sat:** the model goes through the witness interpreter as today; a refutation is reported
+     only if stage 2 also refutes;
+   - **unknown:** the stage-1 verdict stands.
+3. **A stage-1 refutation followed by a stage-2 proof** (I7):
+   - if the witness interpreter **confirmed** the stage-1 model (the program really fails on it),
+     stage 2's unsat means the unfoldings contradict a real run. That is an encoding bug: the
+     checker reports the internal error **`reflect_inconsistent`** (RED in CI, a compiler-bug
+     message to users) and keeps the confirmed violation;
+   - if the model was **not** confirmed, the refutation came from a call result the logic knew
+     nothing about, and stage 2's proof stands. The monotone gate lists it as withdrawn (§6.2).
+
+**Stage 2's cost controls** (I10):
+- its own per-query timeout, **1 s** (stage 1 keeps 3 s);
+- an **in-process** negative cache of stage-2 `unknown`s, keyed by the VC text, the z3 version
+  and the timeout. It lives as long as one `march` run or one LSP process and is never written to
+  disk, so F9's rule (no persisted `unknown`) still holds, while an LSP re-analysis does not pay
+  the same timeout on every keystroke.
+
+**The cache stores the core** (I8). `vc_cache.ml` today stores `unsat` or `sat` with a model. A
+stage-2 entry also stores its core (`unsat` then a `core` line naming the assertions), so a
+warm-cache proof prints the same `uses:` as a cold one. z3 4.8.12 (CI) and 4.16 may return
+different but equally valid cores; golden tests therefore assert that `uses:` **contains** the
+expected definitions, not that it equals them.
 
 Stage 2 can only add proofs. It cannot turn a stage-1 proof into anything else, because a
 stage-1 proof never reaches stage 2.
 
 ### 4.5 Erasure (D5)
 
-After the refinement check and before both lowering and interpretation, a new AST pass
-(`lib/refinecheck/lemma_erase.ml`) removes:
+Erasure is a **front-end pass**, not part of the refinement check (I6). It runs right after
+typechecking, on every path that turns source into something that runs:
+- `--compile` and `--emit-llvm` (before `March_tir.Lower`);
+- the interpreter (before `March_eval.Eval.run_module`);
+- the REPL JIT (`lib/jit/`) and the in-browser compiler (`docs/assets/march_compile.js`, built by
+  `scripts/build-browser-repl.sh`);
+- `forge test`, `forge run` and doctests.
+
+It depends only on the `@[lemma]` attribute, never on a proof verdict, on z3 being installed, or
+on the early source CAS. A warm CAS hit returns an artifact that was built from erased code, so
+cold and warm builds emit the same IR. The pass (`lib/desugar/lemma_erase.ml`, beside the other
+AST rewrites, so every driver that desugars also erases) removes:
 - every call to a lemma, replacing it by `()`;
 - every lemma declaration.
 
-The interpreter is erased too, so the two backends keep agreeing and no lemma body ever runs.
+The refinement checker reads the **un-erased** typed AST (it needs the lemma calls); every
+backend consumes only the erased one. So no lemma body, and no static `assert` inside one, ever
+runs, whether or not the lemma was proved, and whether or not the check ran at all. An unproved lemma simply gives no facts (§4.3).
 
 Erasure is behaviour-preserving only if the erased argument expressions have no effect and
 always finish. So every argument of a lemma call must be a **reflectable term**: variables,
@@ -999,7 +1215,7 @@ unfolding can match the axioms' depth).
 
 ### 5.4 Keeping today's measure uses proving
 
-- The two stdlib measures pass R1-R9: `pvec_length` is a non-recursive field read;
+- The two stdlib measures pass R1-R9 and R11: `pvec_length` is a non-recursive field read;
   `sorted_set_elts` is structural and calls only the set vocabulary, which R6 admits for a
   set-valued function. Both stay in the axiom tier.
 - `test/errors/non_tail_recursion_1.march` and `specs/lang/types/reject/t109_…` use a structural
@@ -1035,10 +1251,10 @@ baseline against the current compiler, across the whole corpus (`test/native/*.m
 | Move | Gate |
 |---|---|
 | proved → proved, skip → skip, violated → violated | silent |
-| **proved → skipped, unknown or violated** | **RED**, with one exemption: a site whose VC contains `==` on a type §3.5 makes opaque. Each exempt line is printed under `D7 fixes:` and must be listed in the progress note |
+| **proved → skipped, unknown or violated** | **RED**, no exemptions. §3.5 changes no predicate's meaning, so nothing is expected here |
 | skipped → proved | listed under `new proofs`. Each must be explained in the progress note (which definition or lemma it used: the `uses:` column) |
 | skipped → violated, or a new site that is violated | listed under `new violations`. **A new violation is a finding**: either a real bug in the corpus (file it, and leave the fixture as it is) or a checker bug (fix it before merging) |
-| violated → proved or skipped | listed under `withdrawn violations`. Each must be explained: a spurious refutation (stage 2 proved it) or a D7 fix |
+| violated → proved or skipped | listed under `withdrawn violations`. Each must be explained: a stage-1 refutation that the witness interpreter did **not** confirm and stage 2 proved (§4.4). A confirmed refutation that stage 2 proves is never withdrawn; it is an internal error |
 | a site that disappears or appears | RED unless explained (a lemma call adds sites; erasure removes none, because the check runs before erasure) |
 
 The mode is proved able to go RED before it is trusted (the `CLAUDE.md` oracle rule): a
@@ -1056,6 +1272,7 @@ Interleaved A/B, five runs, median, load average recorded, `.march/cas/vc` clear
 | the corpus sweep's total wall time | **≤ 110%** |
 | any single fixture | **≤ 150%**, and no fixture that finished under the 3 s per-query timeout before may hit it after |
 | phase 3 (stdlib allowlist on): every corpus fixture that calls a D18 function | ≤ 120% |
+| LSP: re-analysis of one edited file that uses a reflected function, warm process | ≤ 120% of today's re-analysis latency, median of 20 edits; no single edit over 1.5 s added |
 
 ---
 
@@ -1077,9 +1294,13 @@ is visible and how nothing stale survives it.
   ; reflect cat$r@Int blake3=4c1f…
   ```
 
-  The hash is BLAKE3 of the function's canonical desugared body and of its R1-R9 status. So:
+  The hash is BLAKE3 of the function's canonical desugared body, of its R1-R11 status, and of the
+  **`Eq` derivation status** (derived all the way down, hand-written, Float) of every type at
+  which its body uses `==` (I8). So:
   - a definition the encoding drops (an over-budget term) still keys the proof;
   - a callee that stops being reflected changes the key even if no unfolding text changes;
+  - changing a type's `derive Eq` to a hand-written `impl Eq` changes the key of every proof
+    whose definitions use `==` at that type;
   - the key states its dependencies, which `scripts/refine-oracle.sh` and humans can read.
 - Stage-1 keys are unchanged (they mention no definition).
 
@@ -1087,16 +1308,24 @@ is visible and how nothing stale survives it.
 
 - **`--check` and `--compile`.** The early source CAS keys on every input byte (F10), so any body
   edit re-runs the whole check.
-- **The LSP.** A file is re-checked against its dependencies' declarations (F10). Phase 1 adds the
-  dependencies' reflected **bodies** to what invalidates a file's analysis: the dependency
-  environment key gains the D17 body hashes of the reflected functions the file's last check
-  used. Without this, editing `lib/util.march`'s `is_small` would leave `app.march`'s squiggle
-  stale.
+- **The LSP.** A file is re-checked against its dependencies' declarations (F10). Phase 1 adds
+  to the dependency key (I8):
+  - the D17 hash of **every reflected function in the frontier** of any stage-2 query the file's
+    last check ran, whether or not it reached the unsat core. Keying on the core would miss a
+    definition that a cold run needed and a warm run did not;
+  - for every lemma of a dependency file that the file calls: its post hash, its body hash and
+    whether it was **admitted** (proved). A dependency lemma that stops proving must re-check its
+    callers.
+
+  Without this, editing `lib/util.march`'s `is_small` would leave `app.march`'s squiggle stale.
 - **Hot code reload and `--dump-impl-hashes`.** HCR admits a body-only patch when `sig_hash` is
   unchanged (F11). A patch that changes a reflected function's body can invalidate the deployed
-  callers' proofs. Phase 1 adds a fourth column, `logic_hash` (the D17 hash, or `-` for an
-  unreflected function), to `--dump-impl-hashes`. Whether HCR must then refuse or re-check is
-  open question Q4.
+  callers' proofs, silently, even under `cap verified`. Phase 1 therefore does two things (I9):
+  - adds a fourth column, `logic_hash` (the D17 hash, or `-` for an unreflected function), to
+    `--dump-impl-hashes`;
+  - makes HCR admission treat a changed `logic_hash` **exactly like a changed `sig_hash`**: the
+    patch is refused with "the body of `f` is part of its callers' proofs; redeploy, or mark it
+    `@[opaque]`". This is the conservative rule, and it stays until Q4 settles a re-check path.
 
 ### 7.3 What a user sees
 
@@ -1122,10 +1351,26 @@ From §0.10:
 - **The stdlib's 40 run in every program**, so they matter most. With the allowlist empty
   (phases 1-2), their frontiers hold no reflected function and stage 2 never starts for them:
   zero added cost. From phase 3, only those whose frontier holds a D18 function run stage 2.
+  Under option S2 they can start in phase 1; the phase-1 note measures both.
 - So the default-mode cost in phases 1-2 is the reflectability analysis (a linear pass over
   TERM's graph, which is already built when a module has a measure or a demanded SCC) plus
   stage 2 on user code's own skips. The ≤ 105% budget of §6.3 is expected to hold; phase 1
   measures it.
+
+Three loads the first draft missed (review I10), and what bounds each:
+- **Phase 3's stdlib lemmas are stdlib obligations, so they would be proved in every program.**
+  Ten lemmas, each needing stage 2 and its `assert`s, would join the 220 obligations checked per
+  program. Rule: a stdlib lemma is **proved where the stdlib is checked on its own** (the
+  `march --check stdlib/list.march` row of the stdlib CI suite and the oracle sweep), and a
+  checked-in manifest, `stdlib/.lemmas.verified`, records `(lemma, post hash, body hash)` for
+  each proved one. In a user program, a stdlib lemma whose hashes match the manifest is admitted
+  without re-proof; one whose hashes do not match is re-proved (and the manifest is stale, which
+  a CI check catches). The manifest is written by a script, never by hand.
+- **`unknown` is never cached** (F9), so a stage-2 timeout would be paid on every `--check` and
+  every LSP re-analysis. Stage 2's own 1 s timeout and the in-process negative cache (§4.4) bound
+  it to once per process.
+- **An axiom-tier call** (`Array.length` aliased to `pvec_length`) would have triggered a
+  stage-2 query identical to stage 1. Axiom-tier calls do not trigger stage 2 (§4.4).
 
 ### 8.2 The bounds
 
@@ -1150,7 +1395,9 @@ From §0.10:
 | a **diverging function** | `spin(n) = spin(n) + 1` as an equation gives `0 = 1`, which proves anything | R2: only `structural`/`metric` certificates; TERM certifies nothing that diverges (its own REJECT controls) | `sound_diverge`: `fn spin(n : Int) : Int do spin(n) + 1 end` and `need_false(x : {Int \| spin(0) == spin(0) + 1})`, called as `need_false(0)`: `spin` is not reflected, the predicate is `refinement_unchecked`, the call is skipped, never proved. `@[measure]` on `spin`: `invalid_measure` (1) |
 | a **partial function** | a value asserted for an input the program never returns from | R4, R5 | `sound_partial`: `hd` with a missing `Nil` arm, and `safe(n) = if n > 0 do n else panic("") end`: neither reflected; `{Unit \| hd(Nil) == 0}` unchecked (1) |
 | an **effectful function** | a predicate claiming a value for an action | R3, R6 | `sound_effect`: `noisy(n) = println("hi"); n`: not reflected; c3b's measures become `invalid_measure` (1) |
-| a **hand-written Eq through `==`** | g3: z3 equality where the program runs `eq` | §3.5 | `sound_eq`: g3 becomes a skip, not a violation; `same(a : P, b : P) : Bool = a == b` is reflected with `eq$P`, and `{Unit \| same(P(1, 3), P(1, 2)) == false}` must **not** prove (at run time `same` is `true`). Control: with `derive Eq`, the same lemma proves (1) |
+| a **hand-written Eq through `==`** | a body's `==` translated as z3 equality where the program runs `eq` | §3.5: opaque `eq$T` in bodies | `sound_eq`: `same(a : P, b : P) : Bool = a == b` (g3's `P`) is reflected with `eq$P`, and `{Unit \| same(P(1, 3), P(1, 2)) == false}` must **not** prove (at run time `same` is `true`). Control: with `derive Eq`, the same lemma proves. **Transitive:** `type Q = Q(P)` with `derive Eq for Q` and `P` hand-written: `same_q(Q(P(1, 3)), Q(P(1, 2))) == false` must not prove either. g3 itself stays a violation and gains `predicate_eq_structural` (1) |
+| an **effectful, partial or diverging `eq`** (C4) | `same(a, b) = a == b` reflected while `eq` prints, panics or loops; erasing `lemma(same(p, q))` would drop the effect, and `r = same$r(p, q)` asserts a determinism the program lacks | §3.5: the D7 exception only for an `eq` passing R2-R7 | `sound_eq_effect`: three `impl Eq`s, one calling `println`, one `panic`, one recursing on itself with no metric; `same` over each is **not reflected** (`R6: == at P dispatches to impl Eq(P).eq, which calls println`), and `lemma(same(p, q))` is `lemma_argument_impure` (1) |
+| **`==` on a polymorphic container in a lemma** (C3) | a lemma proved with logical `=` at `Elem`, then combined with a body's program `==` at `List(Float)` | §3.5: predicates logical, bodies program; lemma facts instantiated from the proved term | `sound_eq_float`: `same(a : List(Float), b : List(Float)) : Bool = a == b`; after `rev_rev(xs)`, `need_true(same(rev(rev(xs)), xs))` must **not** prove (`xs = [NaN]` makes it false at run time). And `@[lemma] fn idl(x : a) : {Unit \| ident(x) == x}` called at a `Float` `x`, then `need_feq(ident(x), x)` with `need_feq(a : Float, b : {Float \| _ == a})`: must **not** prove (scalar `fp.eq` is false on NaN). Control: `rev_rev(xs)` then `need_eq(rev(rev(xs)), xs)` with `need_eq(a, b : {List(Float) \| _ == a})`, a predicate `==` inside a datatype, **proves** (2) |
 | a **function value in the body** | no fixed definition to unfold | R7 | `sound_fnvalue`: `apply(f, x) = f(x)`, `twice(x) = List.map([x], fn y -> y + 1)`: not reflected (1) |
 | a **lemma's IH without a certificate** | `bad(n) : {Unit \| false} = bad(n)` proves `false` if its self-call is assumed | L4, and TERM's `ih_spans` | `sound_lemma_ih`: that `bad` is `invalid_lemma`; `bad2(n) : {Unit \| n < 0}` recursing on `n - 1` with exit `n == 0` (unproved, witness `n = -1`) is `invalid_lemma`; with exit `n <= 0` and post `{Unit \| n <= 0 \|\| n > 0}` it proves (2) |
 | a **lemma proved through a failure path** | h1's `bogus`: a `panic` arm makes the post vacuous, and the lemma never runs to catch it | L2 | `sound_lemma_panic`: `@[lemma] fn bogus(n : Int) : {Unit \| n == n + 1} do panic("x") end` is `invalid_lemma` (2) |
@@ -1158,6 +1405,14 @@ From §0.10:
 | a **stale cache after a body edit** | a warm VC cache answering for the old body | §7.1 | `sound_cache`: `inc(n) = n + 1`, caller `need(inc(1))` with `{_ == 2}` proved; edit `inc` to `n + 2` with the same project cache; the call must be **violated**; and a body edit that changes only reflectability (adding a `println` to a callee) must change the D17 line (1) |
 | **Int overflow** (D8) | `{Unit \| inc(n) > n}` is true in the logic and false at the maximum `Int` (F18) | out of scope by D8; documented in the reference; a todo files the overflow phase (§10.3) | `known_overflow`: from phase 2 on, that lemma **proves**, and the test asserts it, labelled as a known gap, so the overflow phase must flip it on purpose (2) |
 | **builtins that run user impls** | `to_string`, interpolation, `show`, `compare`, `<` on a user `Ord`, `hash`: a "builtin" whose meaning is user code | R6 counts them as calls, through TERM's dispatch edges; none is in the R6 table | `sound_dispatch`: `f(x : T) = string_byte_length("${x}")`, `g(x : T) = show(x)`, `h(a : T, b : T) = compare(a, b)` with a user `impl` each: none reflected (1) |
+| a **call outside the refined domain** (C1) | `p(n : {Int \| _ >= 0}) = if n >= 0 do true else not p(n) end` is certified `metric` (probe r1). Unguarded, the frontier term `p(0 - 1)` unfolds to `p$r(-1) = not p$r(-1)`, a contradiction | §3.6: every equation is guarded by `pre_f(args)` | `sound_domain`: `@[lemma] fn bad(n : Int) : {Unit \| p(0 - 1) \|\| n == n + 1} do () end` must **not** prove (`lemma_unproved`). Control: `@[lemma] fn ok() : {Unit \| p(1)} do () end` proves (2) |
+| a **guarded match that can fall through** (C2) | `match xs do Cons(h, _) when h > 0 -> h  Nil -> 0 end` has no `non_exhaustive_match` warning (probe r2), yet panics on `[-1]`. A last-arm default would assert `guarded$r([-1]) = 0` | R5 reads `nonexhaustive_match_spans`; §3.4 never makes the last arm a default | `sound_guarded`: `guarded` is not reflected (`R5: a guarded match may not match`); with a final `_ -> 0` arm it is reflected, and `need_eq(guarded(Cons(0 - 1, Nil)), 0)` proves. And `lemma(guarded(Cons(0 - 1, Nil)))` is `lemma_argument_impure` (1) |
+| a **user function spelled like a builtin** (I3) | a user `fn len(xs) = 7` makes `len([1])` 7 at run time while the predicate `len(_) == 1` means `$len` (probe r3). A reflected `g(xs) = len(xs)` translated by spelling would get `g$r = $len` | R6 by resolved identity; R11 | `sound_shadow`: with that `len`, `g(xs) = len(xs)` is **not reflected** (`R6: calls len, which is not reflected (R11: its name is predicate vocabulary)`); `need_eq(g(Cons(1, Nil)), 1)` must not prove; the predicate `len(_) == 1` keeps today's meaning (1) |
+| **two definitions, one symbol** (I4) | a collision gives one z3 symbol two definitions, which proves anything | §3.1 mangling, and the duplicate-definition internal error | `sound_mangle`: `f` and `g` each define a local `go` with different bodies (`go(n) = n + 1` and `go(n) = n + 2`); `{Unit \| f(0) == 1}` and `{Unit \| g(0) == 2}` both prove, and `{Unit \| f(0) == g(0)}` must **not**. `h` declares two `go`s in sequence: the same. A user `mod List` whose `append` drops its second argument: `need_eq(List.append(xs, Nil), xs)` inside the user module refers to the user function, and stdlib `List.append` facts never mention it (1) |
+| an **unproved static assert** (I5) | `assert false` in a lemma, assumed afterwards, proves any post | §4.3: a lemma `assert` is assumed only when proved | `sound_assert_false`: `@[lemma] fn l(n : Int) : {Unit \| false} do assert false  () end` must **not** prove: `Assertion` skip, then `lemma_unproved` (2) |
+| **erasure skipped on some path** (I6) | a warm CAS hit, the JIT or the browser compiler running a lemma body | §4.5: erasure is a front-end pass independent of the check `sound_erase_paths`: a fixture with a lemma and lemma calls. On `--compile`, the interpreter, the REPL JIT and the browser-compiler smoke (`scripts/browser-repl-smoke.js`), the lemma's symbol is absent (`--dump-tir`, or the JIT's symbol table), and the program's output equals the lemma-free program's. With z3 removed from PATH, the same holds. `scripts/determinism-oracle.sh` on the fixture: cold and warm `.ll` identical (2) |
+| **encoding contradicts a real run** (I7) | a confirmed stage-1 counterexample "withdrawn" by a stage-2 proof | §4.4: `reflect_inconsistent` | `sound_inconsistent`: a deliberately broken `term_of_body` (swapped arms, a test-only switch) on a fixture with a confirmed violation: `reflect_inconsistent`, verdict stays violated (1) |
+| a **stale `uses:`, LSP or HCR result** (I8, I9) | warm cache without a core; LSP keyed on the core; a body-only hot patch | §4.4 core in the cache; §7.2 LSP keys; §7.2 HCR refusal | `sound_uses_warm`: the same fixture's `uses:` cold and warm are equal; the congruence fixture (`let a = f(x)`, `let b = f(x)`, `need(a == b)`) lists `f`; `sound_hcr`: a body-only patch to a reflected function is refused; to an `@[opaque]` one, admitted (1) |
 
 ### 9.2 The safety net: the logic against the interpreter (D16)
 
@@ -1177,6 +1432,15 @@ that no rule in §9.1 notices. The net is a parity check:
 - unsat: agreement. sat: **an encoding mismatch**, reported with `f`, `x`, the interpreter's `v`
   and the logic's value from the model. That is a compiler bug, never a user error.
 - A timeout or the step cap is reported as "not compared", never as agreement.
+- **An interpreter failure on a reflected function is RED, not "not compared"** (C2). R2-R5 say a
+  reflected function always returns a value, so a `panic`, a match failure, or running out of
+  the interpreter's fuel on an input inside `pre_f` means R5 (or R2) admitted something it should
+  not have. It is reported as a reflectability bug, with the input.
+- **Boundary inputs** (D8). Besides the random draws, every `Int` parameter also takes `0`, `±1`,
+  the maximum and minimum 63-bit `Int`, and their neighbours. A mismatch on one of those, where
+  the interpreter's answer wrapped, is reported as **overflow-sensitive**, not as an encoding bug:
+  D8 says the logic's `Int` is unbounded. `--reflect-report` marks such functions `overflow?`, so
+  the overflow phase has its list.
 
 Where it runs (D16):
 - **Opt-in in `forge test`**: `forge test --reflection-parity` (beside `--skip-properties` in
@@ -1191,12 +1455,23 @@ nothing checks today.
 ### 9.3 Deliberately not claimed
 
 - **Int overflow** (D8). The logic's `Int` is unbounded. A reflected function that overflows at
-  run time has a definition that disagrees with the program at those inputs. The parity check
-  draws inputs well inside 63 bits, so it does not catch this either. The overflow phase decides
+  run time has a definition that disagrees with the program at those inputs. Under D1 this now
+  reaches ordinary arithmetic (hashes, checksums) that nobody annotated. The parity check's
+  boundary inputs (§9.2) **detect** such functions and `--reflect-report` marks them `overflow?`,
+  but nothing **prevents** a proof that relies on unbounded arithmetic. The overflow phase decides
   the fix.
 - **Float and String content** (D9). Both are opaque, so nothing is claimed beyond length.
 - **Stack depth.** A reflected function may still overflow the stack at run time. Its definition
   is still its mathematical meaning.
+- **Liquid Haskell features left out of scope** (review minors), each stated so their absence is
+  not mistaken for support:
+  - **abstract-refinement parameters on reflected functions.** A reflected function's
+    `List(a[p])` element refinement is not part of its definition; the definition is over
+    `List(Elem)`, and the abstract refinement stays a contract, as today;
+  - **reflection of `impl` methods** (R1). A method reaches the logic only through D7's opaque
+    `eq$T`, and only for `Eq`;
+  - **quantified or existential postconditions.** A lemma's post is a quantifier-free predicate
+    over its parameters, as every refinement is today.
 - **The interpreter itself.** D16 compares against the interpreter. A bug shared by the
   interpreter and the compiled code is outside this net; `scripts/triage.sh`'s interpreted-versus-
   compiled comparison is the net for that.
@@ -1231,8 +1506,8 @@ Conventions, as in TERM §8:
 - `scripts/refine-oracle.sh monotone` (§6.2), proved able to go RED.
 - The §0 probes as fixtures under `test/refine/reflect/` (accept side: today's verdicts pinned).
 - Todos filed, one file each: F5 (Bool measures never discharge), F6 (list-returning measure
-  silently ignored), F7 (the measure gate does not follow callees), F8/g3 (predicate `==`
-  ignores a hand-written `Eq`: a false violation), and the Int-overflow todo for D8.
+  silently ignored), F7 (the measure gate does not follow callees), F8/g3 (no warning when a predicate's
+  structural `==` meets a hand-written `Eq`; phase 1 adds `predicate_eq_structural`), F21 (a user function named like predicate vocabulary is silently ignored by predicates), and the Int-overflow todo for D8.
 
 **RED tests** (group `reflect-report`):
 
@@ -1242,6 +1517,11 @@ Conventions, as in TERM §8:
 | `report_effect` | `noisy(n) = println("hi"); n` | `no R3:calls println` | R3/R6 |
 | `report_diverge` | `spin(n) = spin(n)` | `no R2:unproved` | R2 |
 | `report_trusted_cert` | `@[decreases(n)] @[trusted]` recursion whose metric fails | `no R2:trusted` | D6 excludes trusted |
+| `report_trusted_nonrec` | `@[trusted] fn k(n : Int) : {Int \| _ > 0} do n end` (non-recursive) | `no R9:@[trusted]` | R9 applies with no recursion |
+| `report_guarded` | the review's `guarded` (probe r2) | `no R5:guarded match may not match` | C2 |
+| `report_domain` | the review's `p` (probe r1) | `reflected unfold`, with `guard: n >= 0` in the row | C1: reflected, but guarded |
+| `report_shadow` | probe r3's user `len`, and `g(xs) = len(xs)` | `len`: `no R11`; `g`: `no R6:calls len` | I3 |
+| `report_eq_effect` | `same` over an `impl Eq` that prints | `no R6:== at P dispatches to impl Eq(P).eq, which calls println` | C4 |
 | `report_partial` | `hd` without `Nil`; `safe` with `panic` | `no R5:non-exhaustive`, `no R4:calls panic` | R4, R5 |
 | `report_div` | `half(n) = n / 2`; `ratio(a, b) = a / b` | `half` reflected; `ratio` `no R4:division by b not proved` | R4 reads the ledger |
 | `report_fnvalue` | `apply(f, x)`, `twice` with a lambda, `h` passing `h` | `no R7:…` each | R7 |
@@ -1264,13 +1544,23 @@ Conventions, as in TERM §8:
   subject facts, the predicate translator's reflected-call arm.
 - §4.4's two-stage discharge for every obligation kind (`refine_call.ml` `check_call`,
   `refine_post.ml` `check_post`), the unsat-core `uses:` note.
-- §3.5's `==` rule, for reflected bodies **and** for predicates (fixes g3).
+- §3.5's `==` rules: program equality in bodies (with the C4 totality condition), logical
+  equality in predicates, lemma facts instantiated from the proved term, and the
+  `predicate_eq_structural` warning (g3).
 - §5: `@[measure]` as option A; F2's shape error removed; F5 fixed (Bool sort); the gate becomes
   R1-R9.
 - `@[opaque]` (parser, `grammar.js`, `known_fn_attributes`), `reflect_conflict`.
 - §7.1's D17 lines, §7.2's LSP invalidation and `logic_hash` column.
 - §9.2's parity check: the `reflect-parity` group and `forge test --reflection-parity`.
-- Stdlib allowlist empty.
+- The §2.6 switch: S1 (allowlist, empty) by default until the user decides; the progress note
+  reports the gate and timing under S1 and S2.
+- The review's fixes that land here: domain-guarded unfoldings (C1); R5 on
+  `nonexhaustive_match_spans` and per-arm implications with no default (C2); the two equalities
+  and the total-`eq` condition (C3, C4); resolved-identity callees and R11 (I3); the injective
+  mangling and the duplicate-definition check (I4); `reflect_inconsistent` (I7); the core in the
+  cache, named call-result facts, the LSP frontier and lemma keys, the Eq status in the D17 hash
+  (I8); the HCR refusal (I9); axiom-tier calls skip stage 2, the 1 s stage-2 timeout and the
+  in-process negative cache (I10).
 
 **Files:** `lib/refinecheck/refine_reflect.ml`, `refine_encode.ml` (sorts, gate, shape error,
 Bool sort), `refine_scope.ml` (predicate arm, `==`), `refine_call.ml`, `refine_post.ml`,
@@ -1278,7 +1568,9 @@ Bool sort), `refine_scope.ml` (predicate arm, `==`), `refine_call.ml`, `refine_p
 `reflect-budget`, the `uses` field), `lib/refine/refine.ml` (named assertions, unsat core),
 `lib/refine/smt.ml` (comment lines in the assertion block), `lib/cas/hash.ml`,
 `lsp/lib/analysis.ml`, `forge/lib/cmd_test.ml`, `lib/parser/parser.mly`,
-`tree-sitter-march/grammar.js`, `bin/main.ml`.
+`tree-sitter-march/grammar.js`, `bin/main.ml`, `lib/refine/vc_cache.ml` (the core line),
+`lib/typecheck/typecheck_exhaustive.ml` (exports `nonexhaustive_match_spans`),
+`lib/tir/hcr_abi.ml` (the `logic_hash` admission rule).
 
 **RED tests** (group `reflect-unfold`):
 
@@ -1295,19 +1587,21 @@ Bool sort), `refine_scope.ml` (predicate arm, `==`), `refine_call.ml`, `refine_p
 | `bool_measure` | c2b's `pos_nat`: `needp(S(Z))`, `needp(Z)` | proved; violated | F5 fixed |
 | `measure_alias_ok` | b1 and b2 with `@[measure]` | no error | F2 lifted |
 | `measure_alias_err` | c3b's three measures, h2's two | `invalid_measure` each, naming the callee | gate follows callees |
-| `measure_tier` | c4's `sz` | proved / violated exactly as before; VC text unchanged | axiom tier kept |
-| `eq_handwritten` | g3 | **skip** (was violated) | §3.5 |
+| `measure_tier` | c4's `sz` | proved / violated exactly as before; VC text unchanged; **no stage-2 query is issued** for its calls (counted with a debug counter) | axiom tier kept; I10 |
+| `lemma_in_body` | `fn safe_len(xs : List(Int)) : Int do len_cat(xs, Nil)  List.length(xs) end` (calls a lemma, D5), after phase 2 | reflected; `need_eq(safe_len(Cons(1, Nil)), 1)` proves as without the lemma call | I2: lemma calls are `()` in `term_of_body` |
+| `stage2_timeout` | a stage-2 query that takes over 1 s | skip `solver-undecided` after ≤ 1 s; a second check in the same LSP process issues no query | I10 |
+| `eq_handwritten` | g3 | still **violated**, now with `predicate_eq_structural` | §3.5: the predicate means structural equality |
 | `eq_derived` | g2 | unchanged: 1 proved, 1 violated | control |
 | `opaque` | `@[opaque] fn inc`; `need(inc(1))` | skip `unreflectable-subject` as today | opt-out |
 | `opaque_conflict` | `@[opaque] @[measure]` | `reflect_conflict` | — |
 | `two_stage_identical` | every a1-c4 fixture | stage-1 VC text byte-identical to the baseline's (dump compared) | stage 1 is today |
 | `spurious_refutation` | a caller whose stage-1 model gave a fresh call result a bad value, and the unfolding fixes it | proved, listed as a withdrawn violation if it was one | stage 2 before reporting |
 | §9.1 rows marked (1) | — | as stated there | soundness |
-| `parity` | every fixture's reflected functions | 0 mismatches; a deliberately broken `term_of_body` (arms swapped) gives a mismatch | the net goes RED |
-| `budget` | a function with 40 distinct calls in one predicate | skip `reflect-budget` | the cap |
-| `lsp_invalidate` | edit `is_small` in a dependency file | the dependent's diagnostic updates | §7.2 |
+| `parity` | every fixture's reflected functions | 0 mismatches; a deliberately broken `term_of_body` (arms swapped) gives a mismatch; a deliberately broken R5 (guarded matches allowed) makes `guarded` panic in the interpreter and the net reports it RED, not "not compared"; `h(n) = n + 1` at the maximum `Int` is reported `overflow?`, not as a mismatch | the net goes RED (C2, D8) |
+| `budget` | `need(x : {Int \| _ == s40(0)})` where `s40(n) = f1(n) + … + f40(n)` and each `fi(n) = n`, called as `need(0)`: proving it needs 41 unfoldings | skip `reflect-budget`; with 20 terms, proved | the cap |
+| `lsp_invalidate` | `app.march` calls `need_small(n)` under `if is_small(n)`; `is_small` lives in `util.march`. Edit it from `n < 10` to `n < 20` | before: proved (no diagnostic); after: `need_small` skipped (`refinement_unverified`), with no edit to `app.march`. Then a dependency lemma that stops proving: its caller's fact is withdrawn | §7.2, I8 |
 
-**Oracle gate:** monotone (§6.2). Expected: no proved-to-skipped line except D7 fixes; new
+**Oracle gate:** monotone (§6.2). Expected: no proved-to-skipped line at all; new
 proofs only at sites whose frontier holds a reflected user function; no new violation unless it is
 a finding; the timing budget of §6.3.
 **Done means:** the RED table green; the monotone gate's three lists in the progress note with
@@ -1319,12 +1613,15 @@ in it.
 
 **Scope.** §4: `@[lemma]`, L1-L5 and `invalid_lemma`; closed `{Unit | P}` posts for lemmas;
 the IH through `ih_spans`; static `assert` in lemmas (`Obligation.Assertion`); lemma-call facts
-and `lemma_unproved_call`; `lemma_unproved`; erasure (`lemma_erase.ml`, wired before
-`March_tir.Lower` and before `March_eval.Eval.run_module` in `bin/main.ml`) and
-`lemma_argument_impure`; LSP: lemma calls in hover, the `uses:` note.
+and `lemma_unproved_call`, with branch-local scope; `lemma_unproved`; a lemma `assert`
+assumed only when proved (I5); erasure as a front-end pass on every path, independent of the
+check and of z3 (§4.5, I6), and `lemma_argument_impure`; LSP: lemma calls in hover, the `uses:`
+note, dependency-lemma admission in the LSP key.
 
-**Files:** `refine_check.ml`, `refine_post.ml`, `obligation.ml`, `lib/refinecheck/lemma_erase.ml`
-(new), `bin/main.ml`, `lsp/lib/analysis.ml`, `test/errors/`, `specs/lang/errors/`.
+**Files:** `refine_check.ml`, `refine_post.ml`, `obligation.ml`, `lib/desugar/lemma_erase.ml`
+(new), `bin/main.ml`, `lib/jit/` (the REPL driver), `scripts/build-browser-repl.sh` and the
+browser compiler entry, `forge/lib/cmd_test.ml`, `lsp/lib/analysis.ml`, `test/errors/`,
+`specs/lang/errors/`.
 
 **RED tests** (group `reflect-lemma`):
 
@@ -1335,7 +1632,11 @@ and `lemma_unproved_call`; `lemma_unproved`; erasure (`lemma_erase.ml`, wired be
 | `cat_assoc`, `rev_cat`, `rev_rev` | §4.6 | all proved | lemmas calling lemmas, `assert` steps |
 | `rev_rev_short` | `rev_rev` without the five `assert`s | `lemma_unproved` (skip `reflect-fuel`) | single unfolding |
 | `pre_lemma` | `dbl(n) = n + n`; `@[lemma] fn nn(n : {Int \| _ >= 0}) : {Unit \| dbl(n) >= 0} do () end`; called with `k` unknown, then under `if k >= 0` | first: `lemma_unproved_call`, fact withheld (a following `need_nn(dbl(k))` skips); second: proved | hypotheses must be proved |
-| `assert_static` | an unprovable `assert` in a lemma | `Assertion` skip; post unproved | static assert |
+| `assert_static` | `@[lemma] fn l(xs : List(Int)) : {Unit \| cat(xs, Nil) == xs} do assert cat(xs, Nil) == xs  () end` (no recursion, so the assert is unprovable) | `Assertion` skip, and the post is **unproved**: removing the assert gives the same verdict, adding `cat_nil(xs)` before it makes both prove | static assert is not assumed (I5) |
+| `lemma_scope` | `if c do cat_nil(xs) else () end`, then `need_eq(cat(xs, Nil), xs)` after the `if` | skip: the lemma fact does not leak out of the branch; inside the branch, proved | §4.4 scope |
+| `ih_pre_unproved` | `@[lemma] fn l(n : {Int \| _ >= 0}) : {Unit \| dbl(n) >= 0}` recursing as `l(n - 2)` under `n != 0` | the recursive call's precondition fails at `n = 1`, so no IH; `lemma_unproved` | TERM rule (a) for lemmas |
+| `l3_callee` | `@[lemma]` whose body calls `noisy(0)` | `invalid_lemma` (L3) | L3 |
+| `stdlib_lemma_manifest` | (phase 3) a user program calling `List.len_append`; then the same with `stdlib/.lemmas.verified` edited to a wrong hash | first: admitted with no stage-2 query for the lemma; second: re-proved, and the manifest CI check fails | I10 |
 | `assert_runtime` | the same `assert` in `main` | unchanged runtime assert, assumed after | D4 outside lemmas |
 | `not_unit` | `@[lemma] fn l(x : Int) : Int` | `invalid_lemma` (L1) | — |
 | `lemma_as_value` | `let f = cat_nil` | `invalid_lemma` (L5) | — |
@@ -1356,11 +1657,15 @@ example; `@[lemma]` in `known_fn_attributes`; the error pages seeded.
   `pfn reverse_onto(xs, acc)` and `pfn take_onto(xs, k, acc)`. A local is reflected (R1), but a
   lemma about it cannot be stated outside the function, and `reverse(reverse(xs)) == xs` needs
   the accumulator lemma `reverse_onto(xs, acc) == append(reverse(xs), acc)`. The lift is a pure
-  refactor: same TRMC and inlining decisions, checked by `ir-oracle` modulo the two symbol
-  names, and by the `bench/list_ops.march` benchmark compiled at `--opt 2`.
+  refactor: same TRMC and inlining decisions. `ir-oracle` compares hashes and cannot ignore a
+  rename, so it is expected to report exactly the fixtures that reach `reverse` or `take` as
+  changed; those are checked by a one-off normalising diff (rename `reverse/go` and `take/go`'s
+  emitted symbols to the new names in the baseline `.ll`, then compare the text), and by the `bench/list_ops.march` benchmark compiled at `--opt 2`.
 - Lemmas shipped in `stdlib/list.march` (erased, so free at run time): `append_nil`,
   `append_assoc`, `len_append`, `reverse_onto_append`, `reverse_append`, `reverse_reverse`,
   `len_reverse`, `len_take`, `len_drop`, `take_drop` (`append(take(xs, n), drop(xs, n)) == xs`).
+- The stdlib lemma manifest, `stdlib/.lemmas.verified`, its generating script and its CI
+  staleness check (§8.1, I10), so user programs admit the shipped lemmas without re-proving them.
 - **`filter` is not in this phase** (the D18 ruling below).
 - A cheap substitute for `filter`'s most-wanted fact: a proved postcondition
   `len(_) <= len(xs)` added to its contract. Tier 2's structural IH proves it today; it is a
@@ -1386,10 +1691,10 @@ says") and the subset-of-`elts` contract, which cover the element facts users as
 | `std_reverse_reverse` | `List.reverse_reverse(xs)` then `need_eq(List.reverse(List.reverse(xs)), xs)` | proved | the accumulator lemma chain |
 | `std_take_drop` | `List.take_drop(xs, n)` then `need_eq(List.append(List.take(xs, n), List.drop(xs, n)), xs)` | proved | — |
 | `std_len_take` | `n >= 0`, `len(xs) >= n`: `need_len(List.take(xs, n), n)` after `List.len_take(xs, n)` | proved | Int and list together |
-| `std_not_allowlisted` | `List.map` in a predicate | `refinement_unchecked` naming "not on the stdlib reflection list" | allowlist |
+| `std_not_allowlisted` (S1) | `List.sum_int(xs)` in a predicate; and `List.map(xs, f)` in a predicate | `sum_int`: `refinement_unchecked` naming "not on the stdlib reflection list (R10)"; `map`: the R7 message (function value), because R10 is checked last. Under S2 this row is `std_auto`: `sum_int` reflected, `map` R7 | rule order |
 | `std_filter_len` | `need_le(List.filter(xs, p), len(xs))` | proved through the new contract | the substitute |
 | `std_filter_not_reflected` | `{Unit \| List.filter(xs, p) == xs}` | `refinement_unchecked` (R7) | D10 |
-| `std_lift_ir` | `--emit-llvm` of the corpus | `ir-oracle` IDENTICAL modulo `reverse_onto`/`take_onto` | pure refactor |
+| `std_lift_ir` | `--emit-llvm` of the corpus | `ir-oracle` changes only on fixtures reaching `reverse`/`take`; the normalising diff on those is empty | pure refactor |
 | `std_parity` | the allowlisted functions | 0 mismatches | §9.2 |
 
 **Oracle gate:** monotone. Expected: new proofs only at sites that call a D18 function in the
@@ -1419,7 +1724,7 @@ measure tests).
 
 Specialise per call site, as defunctionalisation does: a call `g(xs, fn x -> e)` where the
 lambda is closed over reflectable terms gets a specialised logic function `g$k` with `e`
-inlined. Then `List.filter` joins the allowlist. Its own soundness table covers captures,
+inlined. Then `List.filter` is reflected (and, under S1, joins the allowlist). Its own soundness table covers captures,
 partial application, recursion through the value, and the parity net per specialisation.
 
 ### Phase 6: Int overflow (D8)
@@ -1464,7 +1769,8 @@ checked before it is offered, as TERM phase 5 does for metrics.
 ### 11.2 How this design applies them (my rulings, each revisitable)
 
 1. **D1:** automatic for user code and `MARCH_LIB_PATH` libraries from phase 1; the stdlib by
-   an allowlist (§2.6). Visibility through the named blocker, `--reflect-report` and the `uses:`
+   an allowlist, written as a **deviation from D1 awaiting the user's approval**, with the
+   automatic alternative (S2) fully specified (§2.6). Visibility through the named blocker, `--reflect-report` and the `uses:`
    note (§2.4). `@[opaque]` is the opt-out (§2.5).
 2. **D2:** option A, `@[measure]` an exact synonym of `@[reflect]` that errors when the
    function is not reflectable (§5.2). Existing in-fragment measures keep their quantified axioms
@@ -1476,16 +1782,70 @@ checked before it is offered, as TERM phase 5 does for metrics.
 5. **Two-stage discharge** (§4.4): stage 1 is today's query, so the monotone gate's
    proved-to-skipped rule holds by construction, and the cost falls only on today's non-proved
    share.
-6. **§3.5 applies to predicates too,** fixing g3's false violation in phase 1.
+6. **§3.5 separates the two equalities (C3):** logical `=` in predicates (so generic lemmas are
+   provable), program `==` in bodies (opaque where D7 says, and only for a total `eq`, C4). g3
+   keeps its verdict and gains a warning.
 7. **A lemma call whose precondition is unproved gives no fact** (§4.4), because erasure leaves
    no runtime check behind.
 8. **Lemma-call arguments must be reflectable terms** (§4.5), so erasure removes no effect.
-9. **`assert` inside a lemma is static** (`Obligation.Assertion`); outside a lemma it is today's
-   runtime `assert`.
+9. **`assert` inside a lemma is static** (`Obligation.Assertion`) and is assumed only when
+   proved; outside a lemma it is today's runtime `assert`.
+10. **Unfoldings are guarded by the callee's parameter refinements** (§3.6), because a metric
+    certificate holds only on that domain.
+11. **A match translates to one implication per arm, never a default arm** (§3.4), and R5 reads
+    the guarded-match spans.
+12. **Callees are matched by resolved identity, and predicate vocabulary cannot be a reflected
+    user function's name** (R6, R11).
+13. **Erasure is a front-end pass**, independent of the refinement check and of z3 (§4.5).
+14. **A confirmed refutation that stage 2 proves is an internal error**, never a withdrawal
+    (§4.4).
+15. **Phase 1 refuses a hot patch whose `logic_hash` changed** (§7.2).
 
 ---
 
-## 12. New open questions
+## 12. Review fixes
+
+A fresh-context review of commit `a6d66d22a` found four critical holes (C1-C4), ten important
+issues (I1-I10) and a set of minors. Every C and I item's probe or argument was checked; each
+one held, and none was rejected. One line per finding:
+
+| Finding | What changed | Where |
+|---|---|---|
+| C1. Reflection ignored the refined domain | Every guarded equation also carries `pre_f(args)`; an untranslatable parameter refinement blocks reflection (R8). Probe r1 re-run: `p` is `cert=metric`. REJECT `sound_domain` | §0.12 r1, F19, R2, R8, §3.6, §9.1, phase 0 `report_domain` |
+| C2. R5 blind to guarded non-exhaustiveness | R5 reads `nonexhaustive_match_spans`; `term_of_body` uses one implication per arm and never a default; an interpreter failure in the parity net is RED. Probe r2 re-run: no diagnostic, run panics. REJECT `sound_guarded` | §0.12 r2, F20, R5, §3.4, §9.1, §9.2, phase 0 `report_guarded`, phase 1 `parity` |
+| C3. `==` on `List(a)` broken under both readings | Chose **separate equalities**: logical `=` in predicates (keeps every lemma in §4.6 and phase 3 provable), program `==` in bodies (opaque per D7); lemma facts instantiated from the proved SMT term; g3 keeps its verdict with a `predicate_eq_structural` warning. REJECT `sound_eq_float` with a NaN case and a positive control | §0.7, F8, §3.3, §3.5, §6.2, §9.1, phase 1 `eq_handwritten`, §11.2 #6 |
+| C4. D7 exception admitted an effectful or partial `eq` | The exception applies only when every reachable `impl Eq` passes R2-R7; otherwise `==` blocks. REJECT `sound_eq_effect` | R6, §2.3, §3.5, §9.1, phase 0 `report_eq_effect` |
+| I1. Stdlib allowlist contradicts D1 | Per the user: kept, written up as a **deviation awaiting approval** (option S1), with the automatic alternative (S2) specified fully and a build-time switch; R10 is checked last; `std_not_allowlisted` now uses `List.sum_int` for the R10 message and `List.map` for the R7 one | §2.6, R10, §8.1, phase 1 scope, phase 3 table, §11.2 #1 |
+| I2. Calling a lemma cost a function its reflection | Lemma calls are `()` in `term_of_body`; R6 admits lemma callees. Test `lemma_in_body` | R6, §3.4, phase 1 table |
+| I3. Builtins matched by spelling | Callees matched by resolved identity; new R11 bars predicate-vocabulary names. Probe r3 re-run: user `len` prints 7, predicate `len(_) == 1` proved. REJECT `sound_shadow` | §0.12 r3, F21, R6, R11, §3.4, §9.1, phase 0 `report_shadow`, phase 0 todo |
+| I4. Symbol naming not injective | Mangling `\|r:<origin>:<path>.<name>[/<local>#<line>:<col>]@<instance>\|`, quoted; a duplicate-definition internal error. REJECT `sound_mangle` | §3.1, §9.1 |
+| I5. Unproved static `assert` could be assumed | A lemma `assert` is assumed only when proved; L2 allows `assert` explicitly. REJECT `sound_assert_false`; `assert_static` now shows the post depends on it | L2, §4.3, §9.1, phase 2 table |
+| I6. Erasure tied to the check | Erasure is a front-end pass on every path (compile, interpreter, JIT, browser compiler, forge test, doctests), independent of the check, z3 and the CAS. REJECT `sound_erase_paths` with a determinism-oracle row | §4.5, §9.1, phase 2 scope and files |
+| I7. Confirmed refutation "withdrawn" by stage 2 | Now the internal error `reflect_inconsistent`; only an unconfirmed refutation can be withdrawn. REJECT `sound_inconsistent` | §4.4, §6.2, §9.1 |
+| I8. `uses:`, cache and LSP keys | The cache stores the unsat core; call-result facts are named; the LSP keys on the stage-2 frontier and on dependency lemmas' admission; the D17 hash includes the Eq status of types under `==`; golden `uses:` tests assert containment (z3 4.8.12 vs 4.16). REJECT `sound_uses_warm`; `lsp_invalidate` asserts before and after | §4.4, §7.1, §7.2, §9.1, phase 1 table |
+| I9. HCR open while phase 1 ships | Phase 1 refuses a hot patch whose `logic_hash` changed, like a `sig_hash` change; Q4 now asks only whether to replace refusal by re-check. REJECT `sound_hcr` | §7.2, §9.1, Q4 |
+| I10. Three missed cost loads | Stdlib lemmas admitted from a checked-in manifest instead of re-proved per program; stage 2 gets a 1 s timeout and an in-process negative cache; axiom-tier calls do not trigger stage 2; an LSP latency row. Tests `measure_tier`, `stage2_timeout`, `stdlib_lemma_manifest` | §4.4, §6.3, §8.1, phase 1-3 tables |
+| Minor: breakdown not reproducible | `reflectable.py` made deterministic (sorted fixpoint, blocker chosen after it); three hash seeds give one MD5; tables re-measured (native 384, was 386, now excluding `main`) | §0.5 |
+| Minor: §0.4 overclaim | Reworded: callers' VCs hold no body; a function's own post VC does change on a semantic edit (review: 274, 1 new) | §0.4 |
+| Minor: counting method | `main` excluded; Float-in-signature counted (18, 21); captures, guarded matches and folded constants listed as unseen | §0.5 |
+| Minor: Float contradictory | One rule: Float operations and `==` are opaque symbols in bodies; Float-containing types never get z3 `=` in bodies | §2.3, §3.5 |
+| Minor: String literals | Distinct `$Str` constants, pairwise `distinct`, `$strlen` fixed | §2.3 |
+| Minor: fuel could not be lowered | Fuel is read per term from its function; `1 <= N <= 8`; `fuel: 0` is `@[opaque]`'s job | §3.8 |
+| Minor: ir-oracle "modulo names" | `ir-oracle` expected to flag the renamed fixtures; a one-off normalising diff checks them | phase 3 scope, `std_lift_ir` |
+| Minor: vague rows | `reflect-fuel` given an operational definition; `budget`, `lsp_invalidate`, `assert_static` made concrete | §3.9, phase 1-2 tables |
+| Minor: missing REJECT controls | `report_trusted_nonrec` (R9), `lemma_scope`, `ih_pre_unproved`, transitive D7 in `sound_eq`, `l3_callee` (L3) | phase 0-2 tables, §9.1 |
+| Minor: D8 under D1 | The parity net draws boundary `Int`s and reports `overflow?`; §9.3 says detection, not prevention | §9.2, §9.3 |
+| Minor: LH gaps | Abstract-refinement parameters, `impl` method reflection and quantified posts listed as out of scope | §9.3 |
+| Minor: refutable `let` patterns | Removed from R5; probe r4 shows they are a syntax error | §0.12 r4, F22, R5 |
+
+No minor was left unfixed. The review's "not checked" list is unchanged in scope: TERM's
+dispatch edges for `==`, `show` and interpolation are taken from its phase-3 note (F12); the
+z3-version core difference is handled by the containment rule above; and the built-in `Eq` has no
+separately overridable `ne` (`typecheck_builtins.ml:502-504`), so `!=` is `not eq`.
+
+---
+
+## 13. New open questions
 
 The decisions above do not settle these. Each has a recommendation.
 
@@ -1502,12 +1862,12 @@ The decisions above do not settle these. Each has a recommendation.
   spelling, because `@[reflect(fuel: N)]` needs the name anyway and a non-measure function
   (`is_small`) reads oddly as `@[measure]`. Revisit option B (deprecate `@[measure]`) once
   `@[reflect]` has shipped in a release.
-- **Q4. Hot code reload of a reflected body.** A body-only patch keeps `sig_hash` (F11) but may
-  break callers' proofs. **Recommended:** `forge deploy --hot` re-runs `--check` over the whole
+- **Q4. Hot code reload of a reflected body.** Phase 1 refuses such a patch (§7.2). The open
+  question is only whether to replace the refusal with a re-check. **Recommended:** `forge deploy --hot` re-runs `--check` over the whole
   program when any changed function's `logic_hash` differs, and refuses the patch on a new
   violation or a lost proof. A patch to an `@[opaque]` function needs no re-check.
-- **Q5. `==` on a type variable.** §3.5 makes it opaque, which blocks lemmas about generic
-  membership (`List.member`). **Recommended:** later, allow z3 equality on `Elem` inside a generic
+- **Q5. A body's `==` on a type variable.** §3.5 makes it opaque in bodies, which blocks
+  reflecting generic membership (`List.member`); predicates are unaffected. **Recommended:** later, allow z3 equality on `Elem` inside a generic
   function with an obligation at each instantiation that the instance's `Eq` is fully derived.
   Not in v1.
 - **Q6. Should `assert` in ordinary code also be proved statically when it can be?**
