@@ -793,6 +793,8 @@ let builtin_bindings : (string * scheme) list =
     ("int_mod",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
     ("int_div_euclid",  Mono (TArrow (t_int,   TArrow (t_int, t_int))));
     ("int_mod_euclid",  Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_div_floor",   Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_mod_floor",   Mono (TArrow (t_int,   TArrow (t_int, t_int))));
     ("int_to_float",    Mono (TArrow (t_int,   t_float)));
     ("int_max_value",   Mono (TArrow (t_unit,  t_int)));
     ("int_min_value",   Mono (TArrow (t_unit,  t_int)));

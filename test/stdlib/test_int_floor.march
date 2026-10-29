@@ -1,0 +1,72 @@
+-- Tests for the int_div_floor / int_mod_floor builtins
+-- Run with: dune exec march -- test test/stdlib/test_int_floor.march
+--
+-- Every row is checked twice: once with a literal divisor (the compiled
+-- backend emits that inline) and once through a function parameter (the
+-- runtime helper), so a wrong inline correction shows as a disagreement.
+
+mod TestIntFloor do
+
+pfn vdiv(a : Int, b : Int) : Int do int_div_floor(a, b) end
+pfn vmod(a : Int, b : Int) : Int do int_mod_floor(a, b) end
+
+describe "int_div_floor" do
+
+  test "rounds toward negative infinity" do
+    assert (int_div_floor(7, 2) == 3)
+    assert (int_div_floor(-7, 2) == -4)
+    assert (int_div_floor(7, -2) == -4)
+    assert (int_div_floor(-7, -2) == 3)
+  end
+
+  test "exact quotients are unchanged in every quadrant" do
+    assert (int_div_floor(-8, 2) == -4)
+    assert (int_div_floor(8, -2) == -4)
+    assert (int_div_floor(-8, -2) == 4)
+    assert (int_div_floor(0, 5) == 0)
+  end
+
+  test "literal and variable divisors agree" do
+    assert (int_div_floor(23, 7) == vdiv(23, 7))
+    assert (int_div_floor(-23, 7) == vdiv(-23, 7))
+    assert (int_div_floor(-1, 86400) == vdiv(-1, 86400))
+    assert (int_div_floor(-86400, 86400) == vdiv(-86400, 86400))
+    assert (int_div_floor(-86401, 86400) == vdiv(-86401, 86400))
+  end
+
+  test "divisor 1" do
+    assert (int_div_floor(-5, 1) == -5)
+    assert (int_div_floor(5, 1) == 5)
+  end
+
+  test "differs from truncating division only for opposite signs" do
+    assert (-7 / 2 == -3)
+    assert (int_div_floor(-7, 2) == -4)
+  end
+
+end
+
+describe "int_mod_floor" do
+
+  test "takes the sign of the divisor" do
+    assert (int_mod_floor(7, 3) == 1)
+    assert (int_mod_floor(-7, 3) == 2)
+    assert (int_mod_floor(7, -3) == -2)
+    assert (int_mod_floor(-7, -3) == -1)
+  end
+
+  test "literal and variable divisors agree" do
+    assert (int_mod_floor(23, 7) == vmod(23, 7))
+    assert (int_mod_floor(-23, 7) == vmod(-23, 7))
+    assert (int_mod_floor(-1, 86400) == vmod(-1, 86400))
+    assert (int_mod_floor(-1, 86400) == 86399)
+  end
+
+  test "a == div * b + mod" do
+    assert (int_div_floor(-23, 7) * 7 + int_mod_floor(-23, 7) == -23)
+    assert (vdiv(23, -7) * -7 + vmod(23, -7) == 23)
+  end
+
+end
+
+end

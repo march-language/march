@@ -88,7 +88,8 @@ from the 63-bit rules instead of wrapping:
   Nothing wraps modulo 2^63 and nothing traps.
 - **The bitwise and checked builtins throw.** `int_and`, `int_or`,
   `int_xor`, `int_not`, `int_shl`, `int_shr`, `int_popcount`, `int_div`,
-  `int_mod`, `int_div_euclid` and `int_mod_euclid` raise a JS `RangeError`
+  `int_mod`, `int_div_euclid`, `int_mod_euclid`, `int_div_floor` and
+  `int_mod_floor` raise a JS `RangeError`
   when an argument or the result lies outside ±(2^53 - 1), rather than
   return a rounded value. Within the range they are exact on every bit, not
   only the low 32 that JS's own `&`, `|` and `>>` see.

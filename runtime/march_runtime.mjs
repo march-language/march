@@ -355,6 +355,21 @@ export function march_int_div_euclid(a, b) {
   return q;
 }
 
+export function march_int_div_floor(a, b) {
+  if (b === 0) throw new Error("int_div_floor: division by zero");
+  __int_check(a, "int_div_floor"); __int_check(b, "int_div_floor");
+  const q = (a - a % b) / b;
+  const r = a - q * b;
+  return (r !== 0 && ((r < 0) !== (b < 0))) ? q - 1 : q;
+}
+
+export function march_int_mod_floor(a, b) {
+  if (b === 0) throw new Error("int_mod_floor: division by zero");
+  __int_check(a, "int_mod_floor"); __int_check(b, "int_mod_floor");
+  const r = a % b;
+  return (r !== 0 && ((r < 0) !== (b < 0))) ? r + b : r;
+}
+
 /** Float → Int rounding, half AWAY FROM ZERO (mirrors OCaml Float.round;
  * JS Math.round rounds half toward +inf, so Math.round(-2.5) would differ). */
 export function march_float_round(f) {

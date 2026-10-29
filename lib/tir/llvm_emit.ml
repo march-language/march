@@ -320,6 +320,55 @@ let is_float_arith name = List.mem name ["+."; "-."; "*."; "/."]
 
 let is_int_bitwise name = List.mem name ["int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr"]
 
+(* The integer division builtins ([int_div], [int_mod], their [_euclid] and
+   [_floor] variants) lower here, for both the [EApp] and [ECallPtr] arms.
+
+   Route through a checked runtime helper so a zero divisor traps via
+   march_panic (matching the interpreter) instead of executing a raw
+   sdiv/srem, which is undefined for a 0 divisor.
+
+   Exception: [int_div_floor] / [int_mod_floor] by a literal other than 0 or -1
+   cannot trap, so they are emitted inline and LLVM strength-reduces the
+   [sdiv]/[srem] by the constant.  The floor correction is one compare and one
+   select: the truncated remainder has the sign of the dividend, so the quotient
+   is one too high exactly when the remainder's sign is opposite the divisor's
+   ([r < 0] for [n > 0], [r > 0] for [n < 0]).  [-1] stays on the helper
+   because [sdiv] by -1 overflows at INT64_MIN. *)
+let emit_checked_int_div ctx (name : string) (va : string) (b : Tir.atom)
+    (vb : string) : string =
+  let r = fresh ctx "ar" in
+  (match name, b with
+   | ("int_div_floor" | "int_mod_floor"), Tir.ALit (March_ast.Ast.LitInt n)
+     when n <> 0 && n <> -1 ->
+     let q   = fresh ctx "fq" in
+     let rem = fresh ctx "fr" in
+     let c   = fresh ctx "fc" in
+     emit ctx (Printf.sprintf "%s = sdiv i64 %s, %s" q va vb);
+     emit ctx (Printf.sprintf "%s = srem i64 %s, %s" rem va vb);
+     emit ctx (Printf.sprintf "%s = icmp %s i64 %s, 0" c
+                 (if n > 0 then "slt" else "sgt") rem);
+     if name = "int_div_floor" then begin
+       let qm1 = fresh ctx "fm" in
+       emit ctx (Printf.sprintf "%s = sub i64 %s, 1" qm1 q);
+       emit ctx (Printf.sprintf "%s = select i1 %s, i64 %s, i64 %s" r c qm1 q)
+     end else begin
+       let rn = fresh ctx "fm" in
+       emit ctx (Printf.sprintf "%s = add i64 %s, %s" rn rem vb);
+       emit ctx (Printf.sprintf "%s = select i1 %s, i64 %s, i64 %s" r c rn rem)
+     end
+   | _ ->
+     let helper = match name with
+       | "int_mod"        -> "march_checked_imod"
+       | "int_div"        -> "march_checked_idiv"
+       | "int_mod_euclid" -> "march_checked_emod"
+       | "int_div_euclid" -> "march_checked_ediv"
+       | "int_mod_floor"  -> "march_checked_ifloormod"
+       | "int_div_floor"  -> "march_checked_ifloordiv"
+       | _                -> assert false
+     in
+     emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb));
+  r
+
 (* True when [name] is a user-defined top-level function whose bare name also
    names one of [emit_expr]'s codegen-dispatched builtins.  See the
    "User top-level fn shadowing a codegen-dispatched builtin name" arm. *)
@@ -981,6 +1030,7 @@ let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.Float_nan | Builtin_name.Float_neg_infinity
   | Builtin_name.Int_abs | Builtin_name.Int_div
   | Builtin_name.Int_div_euclid | Builtin_name.Int_max_value
+  | Builtin_name.Int_div_floor | Builtin_name.Int_mod_floor
   | Builtin_name.Int_min_value | Builtin_name.Int_mod
   | Builtin_name.Int_mod_euclid | Builtin_name.Int_not
   | Builtin_name.Int_popcount | Builtin_name.Int_pow
@@ -1783,21 +1833,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, [a; b])
     when Builtin_name.(is Int_mod f.Tir.v_name || is Int_div f.Tir.v_name
                        || is Int_mod_euclid f.Tir.v_name
-                       || is Int_div_euclid f.Tir.v_name) ->
+                       || is Int_div_euclid f.Tir.v_name
+                       || is Int_mod_floor f.Tir.v_name
+                       || is Int_div_floor f.Tir.v_name) ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
-    let r  = fresh ctx "ar" in
-    (* Route through a checked runtime helper so a zero divisor traps via
-       march_panic (matching the interpreter) instead of executing a raw
-       sdiv/srem/urem, which is undefined for a 0 divisor. *)
-    let helper = match f.Tir.v_name with
-      | "int_mod"        -> "march_checked_imod"
-      | "int_div"        -> "march_checked_idiv"
-      | "int_mod_euclid" -> "march_checked_emod"
-      | "int_div_euclid" -> "march_checked_ediv"
-      | _                -> assert false
-    in
-    emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
+    let r  = emit_checked_int_div ctx f.Tir.v_name va b vb in
     (* Quotients leave the 63-bit Int range only for -2^62 / -1 (= 2^62,
        which reads back as -2^62 at its first observation); remainders never
        do.  See [Llvm_ctx.emit_wrap_int63]. *)
@@ -2435,19 +2476,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.ECallPtr (Tir.AVar f, [a; b])
     when Builtin_name.(is Int_mod f.Tir.v_name || is Int_div f.Tir.v_name
                        || is Int_mod_euclid f.Tir.v_name
-                       || is Int_div_euclid f.Tir.v_name) ->
+                       || is Int_div_euclid f.Tir.v_name
+                       || is Int_mod_floor f.Tir.v_name
+                       || is Int_div_floor f.Tir.v_name) ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
-    let r  = fresh ctx "ar" in
-    (* Same checked-helper routing as the EApp form above. *)
-    let helper = match f.Tir.v_name with
-      | "int_mod"        -> "march_checked_imod"
-      | "int_div"        -> "march_checked_idiv"
-      | "int_mod_euclid" -> "march_checked_emod"
-      | "int_div_euclid" -> "march_checked_ediv"
-      | _                -> assert false
-    in
-    emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
+    (* Same lowering as the EApp form above. *)
+    let r  = emit_checked_int_div ctx f.Tir.v_name va b vb in
     ("i64", r)
 
   (* ── Indirect call through closure ────────────────────────────────── *)

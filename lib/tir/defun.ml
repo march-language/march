@@ -151,6 +151,7 @@ let builtin_names : StringSet.t =
       (* Integer builtins *)
       "int_abs"; "int_pow"; "int_max_value"; "int_min_value";
       "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+      "int_div_floor"; "int_mod_floor";
       (* Float builtins *)
       "float_to_int"; "float_from_string"; "float_is_nan"; "float_is_infinite";
       "float_infinity"; "float_neg_infinity"; "float_nan"; "float_epsilon";

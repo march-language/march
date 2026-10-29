@@ -22,7 +22,8 @@ module Smt = March_refine.Smt
 module Refine = March_refine.Refine
 module Err = March_errors.Errors
 
-let div_ops = [ "/"; "%"; "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid" ]
+let div_ops = [ "/"; "%"; "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+                "int_div_floor"; "int_mod_floor" ]
 
 (* ── Syntactic non-zero check (no Z3) ──────────────────────────────────── *)
 

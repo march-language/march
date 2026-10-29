@@ -189,6 +189,7 @@ let rec describe = function
    Classification is by what the runtime does; unclear ⇒ allocating. *)
 let named_builtin_allocates : Builtin_name.t -> bool = function
   | Builtin_name.Int_abs | Builtin_name.Int_div | Builtin_name.Int_div_euclid
+  | Builtin_name.Int_div_floor | Builtin_name.Int_mod_floor
   | Builtin_name.Int_max_value | Builtin_name.Int_min_value | Builtin_name.Int_mod
   | Builtin_name.Int_mod_euclid | Builtin_name.Int_not | Builtin_name.Int_popcount
   | Builtin_name.Int_pow | Builtin_name.Negate | Builtin_name.Not
@@ -602,6 +603,7 @@ let named_builtin_retains : Builtin_name.t -> bool = function
   | Builtin_name.Int_to_string | Builtin_name.To_string
   | Builtin_name.Html_auto_escape | Builtin_name.Html_escape_ctx
   | Builtin_name.Int_abs | Builtin_name.Int_div | Builtin_name.Int_div_euclid
+  | Builtin_name.Int_div_floor | Builtin_name.Int_mod_floor
   | Builtin_name.Int_max_value | Builtin_name.Int_min_value | Builtin_name.Int_mod
   | Builtin_name.Int_mod_euclid | Builtin_name.Int_not | Builtin_name.Int_popcount
   | Builtin_name.Int_pow | Builtin_name.Negate | Builtin_name.Not

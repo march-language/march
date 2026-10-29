@@ -50,6 +50,7 @@ let impure_builtins = [
      "division by zero" / "modulo by zero"); "/" also covers float division,
      which traps on 0.0 via march_checked_fdiv — so it is impure too. *)
   "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+  "int_div_floor"; "int_mod_floor";
   "/"; "%";
 ]
 

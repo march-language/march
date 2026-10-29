@@ -1356,6 +1356,8 @@ let runtime_only_declares : (string * string) list = [
   ("march_checked_imod", "declare i64    @march_checked_imod(i64 %a, i64 %b)");
   ("march_checked_emod", "declare i64    @march_checked_emod(i64 %a, i64 %b)");
   ("march_checked_ediv", "declare i64    @march_checked_ediv(i64 %a, i64 %b)");
+  ("march_checked_ifloordiv", "declare i64    @march_checked_ifloordiv(i64 %a, i64 %b)");
+  ("march_checked_ifloormod", "declare i64    @march_checked_ifloormod(i64 %a, i64 %b)");
   ("march_checked_div_op", "declare i64    @march_checked_div_op(i64 %a, i64 %b)");
   ("march_checked_mod_op", "declare i64    @march_checked_mod_op(i64 %a, i64 %b)");
   ("march_checked_shl", "declare i64    @march_checked_shl(i64 %a, i64 %n)");
@@ -1507,6 +1509,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_checked_imod";
   PDeclare "march_checked_emod";
   PDeclare "march_checked_ediv";
+  PDeclare "march_checked_ifloordiv";
+  PDeclare "march_checked_ifloormod";
   PComment "; Operator forms of / and % — bare \"division by zero\" / \"modulo by zero\" messages";
   PDeclare "march_checked_div_op";
   PDeclare "march_checked_mod_op";

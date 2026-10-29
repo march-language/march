@@ -2670,6 +2670,25 @@ int64_t march_checked_ediv(int64_t a, int64_t b) {
     return q;
 }
 
+/* Floor division / modulo (int_div_floor / int_mod_floor): the quotient rounds
+ * toward -infinity and the remainder takes the DIVISOR's sign. Mirrors eval.ml:
+ *   q = a / b; r = a - q*b; if r != 0 && (r < 0) != (b < 0) then q - 1 else q
+ * For b > 0 this equals the Euclidean pair; they differ only for b < 0. */
+int64_t march_checked_ifloordiv(int64_t a, int64_t b) {
+    if (b == 0) return march_div_by_zero("int_div_floor");
+    int64_t q = a / b;
+    int64_t r = a - q * b;
+    if (r != 0 && ((r < 0) != (b < 0))) return q - 1;
+    return q;
+}
+
+int64_t march_checked_ifloormod(int64_t a, int64_t b) {
+    if (b == 0) return march_div_by_zero("int_mod_floor");
+    int64_t r = a % b;
+    if (r != 0 && ((r < 0) != (b < 0))) return r + b;
+    return r;
+}
+
 /* The `/` and `%` infix operators (is_int_arith in llvm_emit.ml) lower to these
  * instead of march_checked_idiv/imod because the interpreter raises the BARE
  * messages "division by zero" / "modulo by zero" for the operator forms — with

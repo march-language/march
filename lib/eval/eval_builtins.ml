@@ -1014,6 +1014,21 @@ let base_env : env =
             let r = a mod b in
             VInt (if r < 0 then r + abs b else r)
         | _ -> eval_error "int_mod_euclid: expected two ints"))
+  ; ("int_div_floor", VBuiltin ("int_div_floor", function
+        | [VInt a; VInt b] ->
+          if b = 0 then eval_error "int_div_floor: division by zero"
+          else
+            let q = a / b in
+            let r = a - q * b in
+            VInt (if r <> 0 && ((r < 0) <> (b < 0)) then q - 1 else q)
+        | _ -> eval_error "int_div_floor: expected two ints"))
+  ; ("int_mod_floor", VBuiltin ("int_mod_floor", function
+        | [VInt a; VInt b] ->
+          if b = 0 then eval_error "int_mod_floor: division by zero"
+          else
+            let r = a mod b in
+            VInt (if r <> 0 && ((r < 0) <> (b < 0)) then r + b else r)
+        | _ -> eval_error "int_mod_floor: expected two ints"))
   ; ("int_to_float", VBuiltin ("int_to_float", function
         | [VInt n] -> VFloat (float_of_int n)
         | _ -> eval_error "int_to_float: expected int"))
