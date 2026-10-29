@@ -4444,9 +4444,16 @@ let check_field_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cb
               scope it would mean the caller's `n`: a recorded skip, never
               read (design 2026-10-18 element-flow follow-ups §1.2). *)
            | Some er when not (entry_is_closed er) ->
+             let what =
+               (* A variant's positional `$i` has no sibling field to name:
+                  the free name is simply unbound in the constructor. *)
+               if String.length pn > 0 && pn.[0] = '$' then
+                 Printf.sprintf "the element refinement of argument %s of the constructor names a variable it does not bind"
+                   (String.sub pn 1 (String.length pn - 1))
+               else Printf.sprintf "the element refinement of field `%s` names another field" pn
+             in
              record_elem_skip errctx ~span:(arg_span span e) ~callee
-               ~predicate:(first_slot_pred er.slots)
-               ~what:(Printf.sprintf "the element refinement of field `%s` names another field" pn)
+               ~predicate:(first_slot_pred er.slots) ~what
            | Some er ->
              ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er e)
            | None -> ())
@@ -4789,13 +4796,29 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   | A.ECon (c, args, sp) ->
     let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
     (match handler_sig_of_ctor c.A.txt with
-     | Some sg -> List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined
+     | Some sg ->
+       List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined;
+       (* …and its container parameters' ELEMENT refinements, read at this
+          construction's arguments exactly as a call's are (the handler body
+          assumes them; see [Refine_scope.collect_handler_sigs]). *)
+       check_arg_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:c.A.txt sg args
      | None ->
        (* …and a VARIANT constructor with a refined argument, the same way
           ([Refine_scope.collect_ctor_sigs]; the two tables never share a
           name, each having withdrawn it on the clash). *)
        (match Hashtbl.find_opt !ctor_sigs.by_ctor (bare_ctor c.A.txt) with
-        | Some sg -> List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined
+        | Some sg ->
+          List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined;
+          (* …and its container-typed arguments' ELEMENT refinements
+             (`W(List({Int | _ > 0}))`), exactly as a record literal's
+             fields: [ctor_sig_of_fields] named the positions `$0`, `$1`, …,
+             so the arguments are paired with them by position.  A
+             positional argument has no sibling name a slot could mean, so
+             an open slot here is a free name and takes the same recorded
+             skip. *)
+          if List.length args = List.length sg.param_names then
+            check_field_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:c.A.txt
+              sg (List.combine sg.param_names args) ~only:None
         | None -> ()));
     List.iter go args
   | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
@@ -6804,8 +6827,19 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
       match actor_sig, e with
       | Some sg, A.ERecord (fields, sp) ->
         let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets = []; sc = []; re = state_re; binds = ctx.binds; demand = None } in
-        check_ctor_fields cx ~span:sp ~callee:aname.A.txt sg
-          (List.map (fun ((n : A.name), v) -> (n.A.txt, v)) fields) ~only:None
+        let fs = List.map (fun ((n : A.name), v) -> (n.A.txt, v)) fields in
+        check_ctor_fields cx ~span:sp ~callee:aname.A.txt sg fs ~only:None;
+        (* The ELEMENT slots of the state's fields too — but only when the
+           literal's field set does not already name this actor through
+           [by_fields]: then [visit]'s [ERecord] arm checks them, and a second
+           check here would file every element obligation twice.  Without
+           this, a state literal whose shape another record shares (`type
+           Other = { xs : List(Int) }`) obliged no element at all. *)
+        if Hashtbl.find_opt !ctor_sigs.by_fields (List.sort compare (List.map fst fs))
+           <> Some aname.A.txt
+        then
+          check_field_elements ~root errctx defs ctx path [] [] state_re [] [] ~span:sp
+            ~callee:aname.A.txt sg fs ~only:None
       | _ -> ()
     in
     check_state_literal ~path:[] ad.A.actor_init;
@@ -6856,7 +6890,12 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         (* (2): a fresh state literal at a tail is a construction of THIS
            actor's state, whatever other record shares its field set. *)
         List.iter (fun (p, t) -> check_state_literal ~path:p t) (tails path h.A.ah_body);
-        visit ~root errctx defs ctx path [] sc re cb (cont_of_fnparams ps) h.A.ah_body)
+        (* The parameters' ELEMENT refinements are assumed under the same
+           rule as their scalar ones: only when the message is enforced.
+           [strip_params_refinements] erases only an outermost refinement,
+           so the element facts are withheld here instead. *)
+        visit ~root errctx defs ctx path [] sc re cb (if enforced then cont_of_fnparams ps else [])
+          h.A.ah_body)
       ad.A.actor_handlers;
     (* The @invariant predicate is evaluated at run time like any other
        expression, so obligations inside it count. *)

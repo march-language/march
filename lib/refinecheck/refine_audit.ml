@@ -577,7 +577,7 @@ let classify (site : site) : disposition =
      neither assumed nor obliged anywhere; [Refine_check.warn_predicate_ty]
      warns `refinement_unchecked` at exactly this predicate.  A well-formed
      relation is one contract site like a slot, enforced by the rule below. *)
-  | (Param _ | Return _ | Let_annot _ | Field _)
+  | (Param _ | Return _ | Let_annot _ | Field _ | Variant_arg _ | Actor_handler_param _)
     when site.position = Type_arg
          && List.exists (fun (sp, _) -> sp = site.span) (Refine_post.relation_issues_deep site.origin_ty) ->
     Inert_warned "refinement_unchecked: this relation between element slots is not checked, and the warning fires at it"
@@ -593,8 +593,13 @@ let classify (site : site) : disposition =
      only inside that function's own walk ([Refine_scope.abstract_tyvar_slot]):
      it is proved there, and instantiated at every call by
      [Refine_check.abstract_flow].  So ask [elem_refinement] under that
-     function's abstract refinements, exactly as the checker does. *)
-  | (Param _ | Return _ | Let_annot _ | Field _)
+     function's abstract refinements, exactly as the checker does.
+     A variant constructor's argument joined the list on 2026-10-29: its
+     element slots are obliged at every `W(xs)` since then ([visit]'s [ECon]
+     arm, [Refine_check.check_field_elements]), as a record field's are; an
+     actor handler's parameter likewise, at every construction of its
+     message ([Refine_check.check_arg_elements]). *)
+  | (Param _ | Return _ | Let_annot _ | Field _ | Variant_arg _ | Actor_handler_param _)
     when site.position = Type_arg
          && (let saved = !Refine_post.current_abstracts in
              Refine_post.current_abstracts :=

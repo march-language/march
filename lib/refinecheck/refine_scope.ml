@@ -2530,7 +2530,12 @@ let collect_handler_sigs (decls : A.decl list) : (string, fn_sig) Hashtbl.t =
   let out = Hashtbl.create 16 in
   Hashtbl.iter
     (fun n sg ->
-      if Hashtbl.find_opt count n = Some 1 && not (Hashtbl.mem ctors n) && sg.refined <> [] then
+      (* An ELEMENT-only parameter (`on Push(xs : List({Int | _ > 0}))`)
+         counts too (2026-10-29): the handler body assumes it through its
+         [contenv], so leaving the message unregistered was
+         assume-without-check, the same hole [collect_ctor_sigs] had. *)
+      if Hashtbl.find_opt count n = Some 1 && not (Hashtbl.mem ctors n)
+         && (sg.refined <> [] || has_elem_param sg) then
         Hashtbl.replace out n sg)
     handlers;
   out
@@ -2581,7 +2586,8 @@ let ctor_sig_of_fields (ctor : A.name) (fields : (string * A.ty) list) : fn_sig 
 
 type ctor_sigs = {
   by_ctor : (string, fn_sig) Hashtbl.t;
-      (* constructor name -> signature; only REFINED, unambiguous ones *)
+      (* constructor name -> signature; only unambiguous ones with a scalar
+         or an element refinement on some field *)
   by_fields : (string list, string) Hashtbl.t;
       (* sorted field-name set -> the unique record/actor constructor with
          exactly those fields, for typing a bare literal `{ v: 0 }`; absent
@@ -2620,10 +2626,20 @@ let collect_ctor_sigs (decls : A.decl list) : ctor_sigs =
       decls
   in
   go decls;
+  (* A constructor is enforced when a field carries a SCALAR refinement
+     ([refined]) or a container field carries an ELEMENT refinement
+     ([has_elem_param]: `xs : List({Int | _ > 0})`).  Before 2026-10-29 only
+     the first counted, so `type Box = { n : Int, xs : List({Int | _ > 0}) }`
+     was never registered and `{ n: 10, xs: [0 - 5] }` filed no obligation at
+     all, even under `cap verified`; [Refine_check.check_field_elements] only
+     runs for a registered constructor.  An element-only signature has an
+     empty [refined], so [field_facts] (the assumption side) adds nothing for
+     it: registering it only adds obligations. *)
   let by_ctor = Hashtbl.create 32 in
   Hashtbl.iter
     (fun n sg ->
-      if Hashtbl.find_opt count n = Some 1 && sg.refined <> [] then Hashtbl.replace by_ctor n sg)
+      if Hashtbl.find_opt count n = Some 1 && (sg.refined <> [] || has_elem_param sg) then
+        Hashtbl.replace by_ctor n sg)
     all;
   let by_fields = Hashtbl.create 32 in
   Hashtbl.iter
