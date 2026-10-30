@@ -9464,6 +9464,12 @@ let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
        | None -> ());
       seen := !seen @ [site]) own
 
+(** The [nonexhaustive_match_spans] of the last [check_module_core] run,
+    guarded matches included (see [check_exhaustiveness]).  Read only by
+    [--reflect-report]'s R5 (lib/refinecheck/refine_reflect.ml): the driver's
+    [--check] path keeps no env to read them from. *)
+let last_nonexhaustive_match_spans : Ast.span list ref = ref []
+
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
   (* `from_json` return-type dispatch is recorded per call-site span by
@@ -9866,6 +9872,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   (* Pass 3: tail-call enforcement *)
   check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
+  last_nonexhaustive_match_spans := !(final_env.nonexhaustive_match_spans);
   (errors, type_map, { final_env with record_names_snapshot = record_names_dump ();
                                       json_derive_sites })
 

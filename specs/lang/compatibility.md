@@ -1,0 +1,151 @@
+---
+layout: docs
+title: Compatibility & Deprecation
+nav_order: 20
+permalink: /docs/compatibility/
+---
+
+> Part of the March Language Reference; see [specs/lang/index.md](index.md).
+
+# Compatibility & Deprecation
+
+This page says what stays the same when you move from one March release to a later one, and
+how something is retired when it has to change. It is the policy for March **1.0 and every
+1.x release after it**. Parts of it rely on things that don't exist yet; those are marked
+**planned**.
+
+**Status.** Two parts are decided by the project owner: the control-plane promise
+(2026-10-30) and the `Int` overflow change (2026-09-29). The rest is the promise proposed in
+the road-to-1.0 plan (`specs/plans/2026-09-28-road-to-1.0.md`), and its details can still
+change before 1.0 is tagged.
+
+## Today (0.x)
+
+March is at 0.x. **Nothing on this page binds a 0.x release.** A minor release (0.6 to 0.7)
+can and does break programs. Each release that breaks something says so in the
+[CHANGELOG](../../CHANGELOG.md) and, for larger changes, in an upgrading guide
+([Upgrading to 0.6.0]({{ site.baseurl }}/docs/upgrading-to-0-6-0/), for example).
+
+Several breaking changes are deliberately being made **before** 1.0, so that 1.0 doesn't
+freeze the old behaviour:
+
+- `Int` overflow will stop the program instead of wrapping (decided 2026-09-29, being
+  implemented), with explicit `wrapping_*` operations for code that wants wrapping.
+- The layout of short strings will be tuned and then frozen.
+- Per-function capability bounds (`fn f() needs IO.Console do`) and capability bounds on
+  `interface` methods will be added.
+- Standard-library modules will be marked stable or experimental (below).
+
+## What a 1.x release promises
+
+Version numbers follow [semantic versioning](https://semver.org/): a 1.x release never
+intentionally breaks what this section lists, and a change that would is saved for 2.0.
+`march` and `forge` share one version number and ship together.
+
+### 1. The language
+
+**A program that compiles with 1.x compiles with every later 1.x, and means the same
+thing**: it prints the same output and returns the same results. This covers the syntax,
+the type system, capabilities, refinement types and the standard library's stable tier, as
+described in this reference. The compiled program and the interpreter must agree; a
+difference between them is a bug.
+
+Three kinds of change are allowed in a 1.x release anyway, because refusing them would be
+worse:
+
+- **Fixing a soundness bug.** If the compiler accepted a program it should have rejected
+  (for example, one that reaches a capability outside its grant, or breaks a proved
+  refinement), a later 1.x may reject it. Where possible it warns for one release first.
+- **New warnings**, and changes to the wording of any diagnostic. Diagnostic codes (the
+  `[cap_needs]` slugs) stay stable; their text doesn't.
+- **Behaviour the reference calls unspecified**, such as the order of messages from two
+  different actors.
+
+### 2. The standard library (stable tier)
+
+A module in the **stable** tier keeps every public function, type and constructor, with the
+same meaning, for all of 1.x. New functions and types may be added. A module in the
+**experimental** tier can change or disappear in any minor release.
+
+**Planned:** the tiers don't exist yet. Every standard-library module will be marked stable
+or experimental before 1.0. Until it is marked, nothing in the standard library carries the
+stable promise.
+
+### 3. `forge.toml` and `forge.lock`
+
+A 1.x forge reads any `forge.toml` and `forge.lock` that an earlier 1.x forge wrote, and
+builds the same dependency versions from them. The lockfile records its own format number
+(`version = 2` under `[lockfile]` today; forge still reads format 1). A later 1.x may write
+a newer lockfile format, but only together with the ability to read the older ones.
+`forge.caps.lock`, the capability baseline written by `forge audit`, is covered the same
+way.
+
+For packages in the March ecosystem: forge's check that a package's version number matches
+its API changes (a removed function needs a major version, an added one a minor version) is
+skipped for packages below 1.0.0 (`forge/lib/resolver_api_surface.ml`). It applies once a
+package reaches 1.0.0.
+
+### 4. The cluster control plane
+
+Decided 2026-10-30: the control plane that runs `forge deploy` on a cluster is part of 1.0
+and stable. Across all of 1.x:
+
+- **The release file format** stays readable. A release starts with a format line,
+  `release v1` today (`stdlib/control.march`); a node refuses a version it doesn't know
+  rather than guessing.
+- **The control API**, the requests forge sends to the cluster's leader (deploy a release,
+  ask for its status, read the audit log), keeps its meaning.
+- **The messages between nodes** (the `Ctl` protocol between the leader and each node's
+  agent, generated into every node from `lib/desugar/control_wiring.march`) stay
+  compatible, so a 1.x leader can drive any 1.x agent, older or newer.
+
+**Planned:** a mixed-version lab scenario (an old agent with a new leader, and the reverse)
+run on every release candidate, and a format version on every change to these three.
+Neither exists yet.
+
+## What is not promised
+
+- **0.x releases.**
+- **Experimental standard-library modules**, once the tiers exist.
+- **Compiler internals**: the IR, the build cache and its formats, the `--emit-*` and
+  `--dump-*` outputs, and the C runtime's internal functions.
+- **The hot-reload ABI.** A hot patch built by one March version may not load into a node
+  built by another; when the ABI changes, the node needs a full restart.
+- **Binary compatibility.** Object files and shared libraries from different March versions
+  can't be mixed. Rebuild with the new compiler.
+- **Speed.** Performance is covered by its own
+  [claim]({{ site.baseurl }}/docs/claim-performance/), not by this policy.
+- **Platforms below tier 1** (see [Supported Platforms]({{ site.baseurl }}/docs/platforms/)),
+  and the browser playground.
+
+**Not decided yet:** whether the command-line flags of `march` and `forge` are covered, and
+which ones.
+
+## How something is deprecated
+
+**Planned:** a `@[deprecated("use X instead")]` attribute. It doesn't exist yet; the parser
+does not accept it today. Once it does:
+
+1. A deprecated function, type or module still works, and every use of it gets a warning
+   naming the replacement. `forge fix` applies the replacement when it can.
+2. The deprecation is listed under `### Deprecated` in the CHANGELOG for the release that
+   makes it.
+3. A deprecated part of the **stable** tier is removed only in the next major version
+   (2.0). A deprecated part of the **experimental** tier may be removed in any later minor
+   release, but not in the same release that deprecates it.
+
+Until the attribute exists, a deprecation is announced only in the CHANGELOG and the
+upgrading guide for that release.
+
+## Stability tiers
+
+**Planned.** Two tiers, marked on each standard-library module:
+
+| Tier | Promise |
+|---|---|
+| Stable | Covered by "What a 1.x release promises" above. Changes only by addition; removal only after deprecation, in 2.0. |
+| Experimental | No promise. May change or be removed in any minor release. Using it is fine; pinning a March version is wise. |
+
+How a module is marked (an attribute on the module, or a list in the standard library) is
+not decided. Whether using an experimental module from a stable one is allowed is not
+decided either.

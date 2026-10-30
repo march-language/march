@@ -28758,6 +28758,7 @@ let () =
       ("array-contract-followups", array_followups_suite);
       ("wrapper-contracts", wrapper_contracts_suite);
       ("termination-report", Test_refine_term.report_suite);
+      ("reflect-report", Test_refine_reflect.suite @ Test_refine_reflect.fixture_suite);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);
       ("termination-ih", Test_refine_term.ih_suite);
