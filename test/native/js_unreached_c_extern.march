@@ -1,8 +1,24 @@
--- A C-backed extern that main never reaches doesn't fail a JS build (a
--- library may carry a native backend beside its JS one).
+-- C-backed externs that main never reaches don't fail a JS build, whether the
+-- function calling them is private, public, or another module's own `main`
+-- (a game's desktop main and its SDL backend sit beside the browser entry,
+-- unreached by it).
 mod JsUnreachedCExtern do
   needs IO.Console
   needs IO.Foreign
+
+  mod Desktop do
+    needs IO.Console
+    needs IO.Foreign
+
+    extern "other_c_shim" : Cap(IO.Foreign) do
+      fn c_open() : Int = "other_c_shim_open"
+    end
+
+    fn shared(x : Int) : Int do x + 1 end
+
+    fn main(_c : Cap(IO.Console)) : Unit do println(int_to_string(c_open())) end
+  end
+
 
   extern "some_c_shim" : Cap(IO.Foreign) do
     fn c_only(x : Int) : Int = "some_c_shim_c_only"
@@ -10,7 +26,9 @@ mod JsUnreachedCExtern do
 
   pfn native_path(x : Int) : Int do c_only(x) end
 
+  fn desktop_main(x : Int) : Int do native_path(x) + c_only(x) end
+
   fn main(_c : Cap(IO.Console)) : Unit do
-    println("ok")
+    println(if Desktop.shared(1) == 2 do "ok" else "bad" end)
   end
 end

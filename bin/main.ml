@@ -4658,6 +4658,15 @@ let compile filename =
         (* JS target: skip LLVM/clang entirely *)
         if target = March_tir.Llvm_emit.Js then begin
           let tir_for_js = if !opt_enabled then March_tir.Opt.run tir else tir in
+          (* Emit only what the entry's own `main` reaches.  The default DCE
+             roots every `*.main`, so a library module's main (a game's
+             desktop entry beside its browser one) kept its C-backed externs
+             alive and failed the JS build. *)
+          let tir_for_js =
+            if List.exists (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name = "main")
+                 tir_for_js.March_tir.Tir.tm_fns
+            then March_tir.Dce.prune_unreachable ~roots:[ "main" ] tir_for_js
+            else tir_for_js in
           (* Collect source lines from user AST for source map generation.
              user_ast = desugared before stdlib injection, so only user functions. *)
           let rec collect_fn_lines prefix = function

@@ -471,6 +471,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A JS build ignores another module's `main`.** `--target js` now emits only what the
+  entry's own `main` reaches, so a library module with its own `main` (a game's desktop
+  entry beside its browser one) no longer fails the build with "extern ... cannot be
+  called on the JavaScript target".
 - **A module with JS-module externs compiles natively.** An `extern "./x.mjs"` block gave
   its functions native symbols like `./x.mjs_fn`, so any native build that loaded the
   module (say, a library's browser backend) failed in clang even when nothing called them.

@@ -26,3 +26,7 @@ Landed 2026-10-30 on `claude/js-browser-target`, driven by compiling Eclipse
   --target js entry`.
 - **Native symbols for JS-module externs** (`lower_decls.ml`): sanitized to C
   identifiers. Test: `native_js_module_extern_native`.
+- **JS emit prunes to the bare `main`** (`bin/main.ml`, `Dce.prune_unreachable
+  ~roots:["main"]`): the default roots include every `*.main`, which kept a
+  library module's desktop main and its C externs. Test:
+  `js_unreached_c_extern` (now with a nested module's `main`).
