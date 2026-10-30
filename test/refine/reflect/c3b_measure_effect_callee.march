@@ -1,0 +1,45 @@
+mod C3b do
+  needs IO.Console
+
+  fn noisy(n : Int) : Int do
+    println("hi")
+    n
+  end
+
+  fn boom(n : Int) : Int do
+    panic("no")
+  end
+
+  fn spin(n : Int) : Int do spin(n) end
+
+  @[measure]
+  fn sz(xs : List(Int)) : Int do
+    match xs do
+      Nil -> noisy(0)
+      Cons(_, t) -> 1 + sz(t)
+    end
+  end
+
+  @[measure]
+  fn sz2(xs : List(Int)) : Int do
+    match xs do
+      Nil -> boom(0)
+      Cons(_, t) -> 1 + sz2(t)
+    end
+  end
+
+  @[measure]
+  fn sz3(xs : List(Int)) : Int do
+    match xs do
+      Nil -> spin(0)
+      Cons(_, t) -> 1 + sz3(t)
+    end
+  end
+
+  fn need(xs : {List(Int) | sz(_) == 1}) : Int do 0 end
+
+  fn main() : Unit do
+    let _ = need(Cons(1, Nil))
+    ()
+  end
+end

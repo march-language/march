@@ -1,0 +1,7 @@
+skip	user	c2c_bool_measure_eq.march:13:2	float-sort-gate	postcondition	needq	pos_nat(n) || _ == 0
+skip	user	c2c_bool_measure_eq.march:16:12	sort-conflict	precondition	needp	pos_nat(_) == true
+skip	user	c2c_bool_measure_eq.march:17:12	sort-conflict	precondition	needp	pos_nat(_) == true
+reflect	c2c_bool_measure_eq.march:5:5	pos_nat	reflected	unfold
+reflect	c2c_bool_measure_eq.march:12:5	needp	reflected	unfold (guard: pos_nat(n) == true)
+reflect	c2c_bool_measure_eq.march:13:5	needq	reflected	unfold
+reflect	c2c_bool_measure_eq.march:15:5	main	no	R1:is `main` (c2c_bool_measure_eq.march:15:5)

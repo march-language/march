@@ -1,0 +1,5 @@
+skip	user	a3_revrev.march:16:5	unreflectable-subject	postcondition	revrev	_ == xs
+reflect	a3_revrev.march:2:5	cat	reflected	unfold
+reflect	a3_revrev.march:9:5	rev	reflected	unfold
+reflect	a3_revrev.march:16:5	revrev	reflected	unfold
+reflect	a3_revrev.march:20:5	main	no	R1:is `main` (a3_revrev.march:20:5)

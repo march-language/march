@@ -373,6 +373,7 @@ val panic_surface_suggestion : string -> string
 val check_no_panic_module : Err.ctx -> env -> Ast.decl list -> unit
 val check_decl : env -> Ast.decl -> env
 val render_cap_chain : string list -> string
+val last_nonexhaustive_match_spans : Ast.span list ref
 val check_module_core :
   ?errors:Err.ctx ->
   ?seed_env:env -> Ast.module_ -> Err.ctx * (Ast.span, ty) Hashtbl.t * env

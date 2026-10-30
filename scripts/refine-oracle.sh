@@ -19,6 +19,24 @@
 #
 #   scripts/refine-oracle.sh baseline /tmp/refine-base-<slug>   # record
 #   scripts/refine-oracle.sh check    /tmp/refine-base-<slug>   # compare
+#   scripts/refine-oracle.sh monotone /tmp/refine-base-<slug>   # the §6.2 gate
+#
+# MONOTONE (specs/2026-10-29-refinement-reflection-design.md §6.2).  When the
+# compiler has `--refine-report-sites=all` (§6.1), `baseline` also records
+# every obligation's verdict by site (sites.txt), from the SAME sweep: the
+# site rows are split off the `--refine-report` output, so refine.txt is what
+# it always was.  `monotone` re-sweeps and compares sites.txt site by site,
+# keyed by (fixture, file:line:col, kind, callee, predicate):
+#   proved -> skip / violated / trusted      RED, no exemptions
+#   a site that appears or disappears         RED (explain it, or it is a bug)
+#   trusted -> anything else                  RED
+#   skip -> proved                            listed: new proofs
+#   skip -> violated, a new violated site     listed: new violations (a finding)
+#   violated -> proved / skip                 listed: withdrawn violations
+# Each listed move must be explained in the progress note.  Exit 1 on RED.
+# The gate was proved able to go RED (specs/progress/2026-10-29-reflection-
+# phase0.md): a compiler whose every query is undecided prints proved->skip
+# lines, and one asserting an unconditional `false` prints new proofs.
 #
 # Suffix <slug> with your worktree name: /tmp is shared across every march
 # worktree on this box, and a collided baseline presents as an inexplicable
@@ -44,7 +62,7 @@ set -uo pipefail
 # tail of it to the variable's value.  (Both this plan's draft AND the
 # ir-oracle draft had exactly that bug: MODE came out as "baseline <dir>}" and
 # every invocation died with "unknown mode" before touching a fixture.)
-USAGE='usage: refine-oracle.sh baseline|check <dir>'
+USAGE='usage: refine-oracle.sh baseline|check|monotone <dir>'
 MODE="${1:?$USAGE}"
 DIR="${2:?$USAGE}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -52,6 +70,17 @@ EXE="$ROOT/_build/default/bin/main.exe"
 OUT="$DIR/refine.txt"
 
 [ -x "$EXE" ] || { echo "FATAL: $EXE not built. Run: dune build --root . bin/main.exe"; exit 2; }
+case "$MODE" in baseline|check|monotone) ;; *) echo "unknown mode: $MODE"; exit 2 ;; esac
+
+# Does this compiler list every verdict (§6.1)?  A baseline taken on a
+# compiler that predates the flag records refine.txt only.
+SITES_FLAG=""
+if "$EXE" --help 2>&1 | grep -q -- '--refine-report-sites=all'; then
+  SITES_FLAG="--refine-report-sites=all"
+fi
+if [ "$MODE" = monotone ] && [ -z "$SITES_FLAG" ]; then
+  echo "FATAL: $EXE has no --refine-report-sites=all; monotone needs it"; exit 2
+fi
 
 rm -rf "$ROOT/.march/cas/artifacts-v2" "$ROOT/.march/cas/vc"
 mkdir -p "$DIR"
@@ -74,13 +103,21 @@ for f in "$ROOT"/test/native/*.march "$ROOT"/stdlib/*.march; do
   # compiler reaches prelude.march as either the staged `_build/default/bin/
   # ../stdlib/…` copy or the source tree, and which spelling appears is not a
   # property of the checker.
-  "$EXE" --check --refine-report "$f" 2>&1 \
+  "$EXE" --check --refine-report $SITES_FLAG "$f" 2>&1 \
     | sed "s|$ROOT/||g" \
     | sed -E 's#[A-Za-z0-9_./-]*stdlib/#stdlib/#g' \
     | sed "s|^|$tag: |" >> "$DIR/run.tmp"
   n=$((n+1))
 done
 
+# Split the §6.1 site rows off: what remains is exactly the `--refine-report`
+# output the baseline/check modes have always pinned.
+SITE_RE='^[^ ]*: (proved|skip|violated|trusted)	(user|stdlib)	'
+if [ -n "$SITES_FLAG" ]; then
+  grep -E "$SITE_RE" "$DIR/run.tmp" | sort > "$DIR/sites.sorted"
+  grep -v -E "$SITE_RE" "$DIR/run.tmp" > "$DIR/run.rest"
+  mv "$DIR/run.rest" "$DIR/run.tmp"
+fi
 # Sorting makes the manifest insensitive to nothing that matters (every line
 # carries its fixture tag) and immune to interleaving.
 sort "$DIR/run.tmp" > "$DIR/run.sorted"
@@ -98,6 +135,87 @@ case "$MODE" in
   baseline)
     cp "$DIR/run.sorted" "$OUT"
     echo "baseline recorded: $OUT ($lines lines over $n fixtures)"
+    if [ -n "$SITES_FLAG" ]; then
+      cp "$DIR/sites.sorted" "$DIR/sites.txt"
+      echo "site verdicts recorded: $DIR/sites.txt ($(wc -l < "$DIR/sites.txt" | tr -d ' ') sites)"
+    fi
+    ;;
+  monotone)
+    [ -f "$DIR/sites.txt" ] || { echo "FATAL: no site baseline at $DIR/sites.txt (take one with a compiler that has --refine-report-sites=all)"; exit 2; }
+    nsites=$(wc -l < "$DIR/sites.sorted" | tr -d ' ')
+    if [ "$nsites" -lt 50 ]; then
+      echo "FATAL: only $nsites site rows: the listing is not being exercised"; exit 2
+    fi
+    python3 -I - "$DIR/sites.txt" "$DIR/sites.sorted" > "$DIR/monotone.txt" <<'PY'
+import sys
+from collections import defaultdict
+
+def load(path):
+    d = defaultdict(list)
+    for line in open(path, encoding="utf-8", errors="replace"):
+        line = line.rstrip("\n")
+        tag, _, rest = line.partition(": ")
+        f = rest.split("\t")
+        verdict, loc = f[0], f[2]
+        # A skip carries its reason before the kind.
+        tail = f[4:] if verdict == "skip" else f[3:]
+        kind, callee, pred = (tail + ["", "", ""])[:3]
+        d[(tag, loc, kind, callee, "\t".join(tail[2:]))].append(
+            verdict + ("(" + f[3] + ")" if verdict == "skip" else ""))
+    return d
+
+old, new = load(sys.argv[1]), load(sys.argv[2])
+red, proofs, viol, withdrawn = [], [], [], []
+cls = lambda v: v.split("(")[0]
+for key in sorted(set(old) | set(new)):
+    o, n = sorted(old.get(key, [])), sorted(new.get(key, []))
+    oc, nc = [cls(v) for v in o], [cls(v) for v in n]
+    if oc == nc:
+        continue
+    # Pair verdicts that did not move, then pair the rest in order.
+    ro, rn = list(oc), list(nc)
+    for v in list(ro):
+        if v in rn:
+            ro.remove(v); rn.remove(v)
+    desc = "%s %s %s %s %s" % key
+    while ro and rn:
+        a, b = ro.pop(0), rn.pop(0)
+        move = "%s -> %s\t%s" % (a, b, desc)
+        if a == "proved" or a == "trusted":
+            red.append(move)
+        elif a == "skip" and b == "proved":
+            proofs.append(move)
+        elif a == "skip" and b == "violated":
+            viol.append(move)
+        elif a == "violated":
+            withdrawn.append(move)
+        else:
+            red.append(move)
+    for a in ro:
+        red.append("disappeared (%s)\t%s" % (a, desc))
+    for b in rn:
+        red.append("appeared (%s)\t%s" % (b, desc))
+        if b == "violated":
+            viol.append("new site, violated\t%s" % desc)
+
+def block(title, xs):
+    print("%s: %d" % (title, len(xs)))
+    for x in xs:
+        print("  " + x)
+block("RED", red)
+block("new proofs", proofs)
+block("new violations", viol)
+block("withdrawn violations", withdrawn)
+sys.exit(1 if red else 0)
+PY
+    rc=$?
+    head -60 "$DIR/monotone.txt"
+    if [ $rc -ne 0 ]; then
+      echo "MONOTONE: RED over $nsites sites ($n fixtures) (full listing: $DIR/monotone.txt)"
+      exit 1
+    fi
+    echo "MONOTONE: GREEN over $nsites sites ($n fixtures); every listed move needs an explanation"
+    exit 0
     ;;
   check)
     [ -f "$OUT" ] || { echo "FATAL: no baseline at $OUT"; exit 2; }

@@ -1,0 +1,6 @@
+skip	user	h2_measure_show.march:31:12	solver-undecided	precondition	need	sz(_) == 1
+reflect	h2_measure_show.march:5:7	impl Show.show	no	R1:is an `impl` method (h2_measure_show.march:5:7)
+reflect	h2_measure_show.march:13:5	sz	no	R6:dispatches to impl Show(T).show (via show) (h2_measure_show.march:16:39)
+reflect	h2_measure_show.march:21:5	sz2	no	R6:dispatches to impl Show(T).show (via to_string) (h2_measure_show.march:24:39)
+reflect	h2_measure_show.march:28:5	need	reflected	unfold (guard: sz(xs) == 1)
+reflect	h2_measure_show.march:30:5	main	no	R1:is `main` (h2_measure_show.march:30:5)

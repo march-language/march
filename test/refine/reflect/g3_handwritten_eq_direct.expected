@@ -1,0 +1,4 @@
+violated	user	g3_handwritten_eq_direct.march:17:12	precondition	need	_ == P(1, 2)
+reflect	g3_handwritten_eq_direct.march:7:7	impl Eq.eq	no	R1:is an `impl` method (g3_handwritten_eq_direct.march:7:7)
+reflect	g3_handwritten_eq_direct.march:14:5	need	no	R8:the refinement of p uses == at P, which has a hand-written Eq (g3_handwritten_eq_direct.march:14:5)
+reflect	g3_handwritten_eq_direct.march:16:5	main	no	R1:is `main` (g3_handwritten_eq_direct.march:16:5)

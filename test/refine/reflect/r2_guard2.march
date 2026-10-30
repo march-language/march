@@ -1,0 +1,13 @@
+mod Guard2 do
+  needs IO
+  fn guarded(xs : List(Int)) : Int do
+    match xs do
+      Cons(h, _) when h > 0 -> h
+      Nil -> 0
+    end
+  end
+
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(guarded(Cons(0 - 1, Nil))))
+  end
+end
