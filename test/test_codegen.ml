@@ -15006,6 +15006,7 @@ declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body
 declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline, ptr %release)
 declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
 declare void @march_http_server_wait(i64 %handle)
+declare void @march_http_server_bind_host(ptr %host)
 declare void @march_ws_handshake(i64 %fd, ptr %key)
 declare ptr  @march_ws_recv(i64 %fd)
 declare void @march_ws_send(i64 %fd, ptr %frame)
