@@ -183,14 +183,15 @@ let test_orc_fn_after_let_lambda () =
    is normalised in [Llvm_repl.emit_store_to_slot] before the C side prints
    it or a later fragment reads it.  Both overflow sums would print as the
    raw 64-bit value (9223372036854775806 / -9223372036854775808) if that
-   normalisation went missing. *)
+   normalisation went missing.  The bare producer is int_wrapping_add: since
+   2026-10-30 a plain `+` that overflows panics. *)
 let test_orc_lazy_int_normalisation () =
   check_session "orc lazy int normalisation"
     [ "let mx = 4611686018427387903";
-      "mx + mx";
-      "let y = mx + mx + 2";
+      "int_wrapping_add(mx, mx)";
+      "let y = int_wrapping_add(int_wrapping_add(mx, mx), 2)";
       "y";
-      "fn big(x) do x + x end";
+      "fn big(x) do int_wrapping_add(x, x) end";
       "big(mx) == -2";
       ":quit" ]
     [ "val mx = 4611686018427387903";

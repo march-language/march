@@ -21,6 +21,7 @@ suite unsharded. Be most careful with macOS: 5 slots for the whole org.
 | [`ci.yml`](ci.yml) | every PR and push to `main`, **except Markdown-only changes** | The merge gate: tests, corpora, sanitizers, property/oracle checks. |
 | [`doc-lint.yml`](doc-lint.yml) | every PR and push to `main` | Seconds-long doc and source-level checks, including on Markdown-only changes. |
 | [`nightly.yml`](nightly.yml) | 00:00 UTC; manual | Publishes a `nightly-YYYYMMDD` prerelease when `main` is green and has moved. |
+| [`perf-ab.yml`](perf-ab.yml) | 03:00 UTC; manual | Same-box performance A/B of the last release tag against `main` (`scripts/perf-ab.sh`); uploads the table. A report: red only on an invalid comparison, a failed self-test, or a regression when dispatched with `fail_on_regression`. |
 | [`release.yml`](release.yml) | push of a `v*` tag; manual | Builds and publishes a versioned release. Run manually with a `tag` to rebuild an existing release's archives and replace them. |
 | [`build.yml`](build.yml) | called by nightly/release | Builds the three distributable archives. Not triggered on its own. |
 | [`gen-stdlib-docs.yml`](gen-stdlib-docs.yml) | push to `main` touching `stdlib/**` | Regenerates the committed stdlib API pages and search index. |
@@ -118,6 +119,19 @@ the tests quarantined out of `runtest` (run informationally by the nightly), and
    `nightly-manifest.json`, moves the `nightly` tag) → `prune` (keeps the last 30).
 
 Every job checks out the commit `gate` picked.
+
+## `perf-ab.yml`
+
+One Linux job runs `scripts/perf-ab.sh` with the newest `v*` tag as A and
+`main`'s HEAD as B (or any two refs, or a self-test, when dispatched) and puts
+the table in the job summary and the `perf-ab` artifact
+(`table.md`, `results.json` with every sample). It never runs per PR: timing
+wants a quiet runner and the org's runner slots are shared. Absolute
+milliseconds from a hosted VM mean nothing; the ratios are sound because both
+arms are interleaved on the same VM. A red run means the comparison itself is
+broken (a build failed, a benchmark crashed, the two arms printed different
+answers); a regression only turns it red when dispatched with
+`fail_on_regression`. Design: `specs/2026-10-30-perf-ab-runner-design.md`.
 
 ## `build.yml` and `release.yml`
 

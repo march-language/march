@@ -124,7 +124,7 @@ let builtin_names : StringSet.t =
       (* IOList builtins *)
       "iolist_hash_fnv1a";
       (* HTTP server spawn/wait builtins *)
-      "http_server_spawn_n"; "http_server_wait";
+      "http_server_spawn_n"; "http_server_wait"; "http_server_bind_host";
       (* Char/byte conversion builtins *)
       "byte_to_char"; "char_is_alphanumeric"; "char_is_whitespace";
       (* Char builtins *)
@@ -150,6 +150,7 @@ let builtin_names : StringSet.t =
       "__try_call"; "__try_call_val";
       (* Integer builtins *)
       "int_abs"; "int_pow"; "int_max_value"; "int_min_value";
+      "int_wrapping_add"; "int_wrapping_sub"; "int_wrapping_mul";
       "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
       "int_div_floor"; "int_mod_floor";
       (* Float builtins *)

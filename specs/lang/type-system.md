@@ -28,7 +28,7 @@ March uses Hindley-Milner type inference with bidirectional checking at function
 
 | Type | Description | Literals |
 |------|-------------|---------|
-| `Int` | 63-bit signed integer, wraps on overflow ([below](#int-width-and-overflow)) | `42`, `-7`, `0` |
+| `Int` | 63-bit signed integer; `+ - *` panic on overflow ([below](#int-width-and-overflow)) | `42`, `-7`, `0` |
 | `Float` | 64-bit IEEE 754 | `3.14`, `-0.5`, `1.0e10` |
 | `Bool` | Boolean | `true`, `false` |
 | `String` | UTF-8 string | `"hello"` |
@@ -42,11 +42,26 @@ March uses Hindley-Milner type inference with bidirectional checking at function
 (`int_min_value()` / `int_max_value()`). Both backends, the interpreter and
 the compiled (LLVM) code, give the same answer for every operation below.
 
-- **Overflow wraps.** `+`, `-`, `*`, unary `-`, `/`, `int_div`, `int_abs`,
-  `int_pow` and `int_shl` reduce their result modulo 2^63 back into the range.
-  Nothing traps on overflow: `int_max_value() + 1 == int_min_value()`,
-  `-int_min_value() == int_min_value()`, `int_abs(int_min_value()) ==
-  int_min_value()` and `int_min_value() / -1 == int_min_value()`.
+- **`+`, `-`, `*` and unary `-` panic on overflow.** A result outside the
+  range is a runtime panic, not a wrapped value: `int_max_value() + 1`
+  panics with `attempt to add with overflow`, and `-`, `*` and negation
+  with `attempt to subtract with overflow`, `attempt to multiply with
+  overflow` and `attempt to negate with overflow`
+  (`-int_min_value()` panics). The message is the same on every backend;
+  compiled code also records the enclosing function's source location as
+  the panic site, the way it does for `panic`. A literal expression that
+  overflows (`4611686018427387903 + 1`) is not folded at compile time; it
+  panics when it runs. This makes `x + 1 > x` true for every `x` the
+  program reaches, which is what the refinement checker assumes.
+- **Wrapping is explicit.** `int_wrapping_add`, `int_wrapping_sub` and
+  `int_wrapping_mul` reduce their result modulo 2^63 back into the range:
+  `int_wrapping_add(int_max_value(), 1) == int_min_value()`. Use them for
+  hashes, checksums and random-number mixing, where overflow is the point.
+  A derived `Hash` combines field hashes with them.
+- **Some builtins still wrap.** `/`, `int_div`, `int_abs`, `int_pow` and
+  `int_shl` reduce an out-of-range result modulo 2^63:
+  `int_abs(int_min_value()) == int_min_value()` and
+  `int_min_value() / -1 == int_min_value()`.
 - **Bitwise operators see 63 bits.** `int_and`/`int_or`/`int_xor`/`int_not`
   act on the 63-bit two's-complement pattern; `int_popcount(-1) == 63`.
   `int_shr` is an *arithmetic* (sign-propagating) shift: `int_shr(-8, 1) ==
@@ -81,12 +96,14 @@ Why 63 bits: a polymorphic slot (a `List(Int)` cell, a tuple or record field, a
 closure argument, an actor message) stores an `Int` as a tagged word,
 `(n << 1) | 1`, which has room for exactly 63 bits; the interpreter's OCaml
 `int` is 63-bit too. Compiled code keeps a monomorphic `Int` in a full 64-bit
-register (and in `NativeArray`'s unboxed `Int` storage) for speed; the
-operations listed above leave their result in the full register and the
-reduction to 63 bits happens where the value is *observed* (a comparison, a
-call into the runtime, a store into a list or array, printing), so a value
-reads back the same whether it travelled through a register or a list.
-Use `Float` (or a bignum library) for wider arithmetic.
+register (and in `NativeArray`'s unboxed `Int` storage) for speed. A checked
+`+ - *` tests its result against the 63-bit range directly (one
+overflow-flag test on operands pre-shifted by one bit), so its result is
+always in range; the operations that wrap leave their result in the full
+register and the reduction to 63 bits happens where the value is *observed*
+(a comparison, a call into the runtime, a store into a list or array,
+printing), so a value reads back the same whether it travelled through a
+register or a list. Use `Float` (or a bignum library) for wider arithmetic.
 
 #### Int on the JavaScript target
 
@@ -100,11 +117,14 @@ from the 63-bit rules instead of wrapping:
 
 - **`+`, `-`, `*`, unary `-` and `int_pow` round** to the nearest double:
   `9007199254740991 + 2` gives `9007199254740992`, not `9007199254740993`.
-  Nothing wraps modulo 2^63 and nothing traps.
+  The overflow panic of `+ - *` and negation checks the *rounded* result
+  against ±2^62, so it fires with the same message as native code when the
+  operands are exact (`2^61 + 2^61` panics), but a result within a rounding
+  step of ±2^62 can be judged either way.
 - **The bitwise and checked builtins throw.** `int_and`, `int_or`,
   `int_xor`, `int_not`, `int_shl`, `int_shr`, `int_popcount`, `int_div`,
-  `int_mod`, `int_div_euclid`, `int_mod_euclid`, `int_div_floor` and
-  `int_mod_floor` raise a JS `RangeError`
+  `int_mod`, `int_div_euclid`, `int_mod_euclid`, `int_div_floor`,
+  `int_mod_floor` and `int_wrapping_add`/`_sub`/`_mul` raise a JS `RangeError`
   when an argument or the result lies outside ±(2^53 - 1), rather than
   return a rounded value. Within the range they are exact on every bit, not
   only the low 32 that JS's own `&`, `|` and `>>` see.

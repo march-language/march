@@ -431,7 +431,9 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         (match fields with
          | [] -> ELit (LitInt 0, dummy_span)
          | fields ->
-           (* Combine field hashes: fold over fields, mixing with prime *)
+           (* Combine field hashes: fold over fields, mixing with prime.
+              Modulo 2^63 (int_wrapping_add/mul): a field hash may be any Int,
+              and `*`/`+` panic on overflow. *)
            let hash_field fld =
              (* Use the polymorphic hash for each field's value.
                 Note: field values may be any type — hash is safe here since
@@ -445,8 +447,8 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
             | [f] -> hash_field f
             | f :: rest ->
               List.fold_left (fun acc fld ->
-                  EApp (EVar (mk_name "+"),
-                        [EApp (EVar (mk_name "*"), [acc; ELit (LitInt 31, dummy_span)], dummy_span);
+                  EApp (EVar (mk_name "int_wrapping_add"),
+                        [EApp (EVar (mk_name "int_wrapping_mul"), [acc; ELit (LitInt 31, dummy_span)], dummy_span);
                          hash_field fld],
                         dummy_span)
                 ) (hash_field f) rest))

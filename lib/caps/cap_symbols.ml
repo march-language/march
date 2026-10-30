@@ -80,6 +80,7 @@ let table : (string * string) list = [
   ("march_http_server_listen",     "IO.NetListen");
   ("march_http_server_spawn_n",    "IO.NetListen");
   ("march_http_server_wait",       "IO.NetListen");
+  ("march_http_server_bind_host",  "IO.NetListen");
   (* IO.Process *)
   ("march_process_env",            "IO.Process");
   ("march_process_set_env",        "IO.Process");

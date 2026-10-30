@@ -44,6 +44,9 @@ type t =
   | Int_not
   | Int_popcount
   | Int_pow
+  | Int_wrapping_add
+  | Int_wrapping_mul
+  | Int_wrapping_sub
   | Int_to_string
   | Mpst_send
   | Negate
@@ -116,6 +119,9 @@ let to_string = function
   | Int_not -> "int_not"
   | Int_popcount -> "int_popcount"
   | Int_pow -> "int_pow"
+  | Int_wrapping_add -> "int_wrapping_add"
+  | Int_wrapping_mul -> "int_wrapping_mul"
+  | Int_wrapping_sub -> "int_wrapping_sub"
   | Int_to_string -> "int_to_string"
   | Mpst_send -> "mpst_send"
   | Negate -> "negate"
@@ -166,6 +172,7 @@ let all =
     Int_abs; Int_div; Int_div_euclid; Int_max_value; Int_min_value;
     Int_div_floor; Int_mod_floor;
     Int_mod; Int_mod_euclid; Int_not; Int_popcount; Int_pow;
+    Int_wrapping_add; Int_wrapping_mul; Int_wrapping_sub;
     Int_to_string; Mpst_send; Negate; Not; Pmap_threshold; Receive;
     Record_from_list; Record_get; Record_has_key; Record_put;
     Remote_ref_hashes; Send; Signal_raise_self; Signal_unwatch;

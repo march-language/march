@@ -19,6 +19,22 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Int `+`, `-`, `*` and unary `-` panic on overflow instead of wrapping.** A result
+  outside the 63-bit range [-2^62, 2^62) is now a runtime panic, `attempt to add with
+  overflow` (or `subtract`/`multiply`/`negate`), with the same message in the
+  interpreter, compiled code and `--target js`. Before, `int_max_value() + 1` was
+  `int_min_value()`. A program that relied on wrapping (a hash, checksum or random-number
+  mixer) must switch to the new `int_wrapping_add` / `int_wrapping_sub` /
+  `int_wrapping_mul`. Derived `Hash` instances, the SIMD vector `Hash` impls and
+  `Msgpack`'s int64 decoder already use them, so their results are unchanged. `/`,
+  `int_abs`, `int_pow` and `int_shl` still wrap. The trap closes the refinement checker's
+  overflow hole: it reasons about unbounded integers, so `x + 1 > x` "proved" even
+  where `x + 1` wrapped negative. Measured cost, compiled `--opt 2`: see
+  `specs/progress/2026-10-30-int-overflow-trap.md` (design decision 2026-09-29,
+  `specs/plans/2026-09-28-road-to-1.0.md`).
+
 ### Added
 
 - **The JS target (`--target js`) runs real programs: tail calls, native arrays,
@@ -35,7 +51,11 @@ git log is authoritative for exact commits.
   `docs/specs/2026-06-21-march-js-backend-design.md`.
 - **`--js-int-check`** (forge: `MARCH_JS_INT_CHECK=1 forge build --target js`) makes an
   Int `+ - *` result or literal outside ±(2^53 − 1) throw on the JS target, naming the
-  function, to find code that needs more than 53 bits. Release builds are unchanged.
+  function, to find code that needs more than 53 bits. Without it, Int `+ - *` keep the
+  63-bit overflow check every backend has.
+- **`int_wrapping_add(a, b)`, `int_wrapping_sub(a, b)`, `int_wrapping_mul(a, b)`:**
+  explicit modulo-2^63 Int arithmetic, for code where overflow is intended (hashes,
+  checksums, RNGs). `int_wrapping_add(int_max_value(), 1) == int_min_value()`.
 - **`march --check --reflect-report`: which functions a predicate will be able to use.**
   One line per function of your code: `reflected`, or `no` with the first rule that
   blocks it and where (`R3:calls println (app.march:14:5)`, `R6:calls mid, which is not

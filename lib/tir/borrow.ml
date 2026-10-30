@@ -277,6 +277,9 @@ let extern_borrow_table : (string * bool list) list = [
      and every send leaked its payload String — one per Postgres message
      depot sends (five per parameterized query). *)
   ("tcp_send_all",         [false; true]);
+    (* march_http_server_bind_host copies the host's bytes into a stack
+       buffer for inet_pton and keeps nothing. *)
+  ("http_server_bind_host", [true]);
   (* ── Vault (march_extras.c), audited 2026-10-01: every one copies its
      table/name/key into C (vault_key_cstr) and takes its OWN reference to a
      stored value (march_incrc), never storing or releasing the caller's.

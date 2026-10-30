@@ -495,6 +495,47 @@ export function march_int_mod_floor(a, b) {
   return (r !== 0 && ((r < 0) !== (b < 0))) ? r + b : r;
 }
 
+/* Int `+ - *` and negation panic when the result leaves the 63-bit range
+ * [-2^62, 2^62) (specs/lang/type-system.md, "Int width and overflow"), with
+ * the interpreter's and native code's message. js_emit wraps each Int op as
+ * march_int_ovf(a OP b, code). Within the target's exact range, ±(2^53 - 1),
+ * nothing can overflow; the check is against the ROUNDED double, so past it
+ * (outside the documented subset) a result within a rounding step of ±2^62
+ * can be misjudged either way. */
+const __OVF_MSGS = [
+  "attempt to add with overflow", "attempt to subtract with overflow",
+  "attempt to multiply with overflow", "attempt to negate with overflow",
+];
+const __INT63_LIMIT = 4611686018427387904;   // 2^62
+export function march_int_ovf(r, op) {
+  if (r >= __INT63_LIMIT || r < -__INT63_LIMIT) throw new Error(__OVF_MSGS[op]);
+  return r;
+}
+
+/** int_wrapping_add/sub/mul: modulo-2^63 arithmetic, for hashes and
+ * checksums. Exact within ±(2^53 - 1); a wrapped result outside it throws a
+ * RangeError like the other checked Int builtins. */
+export function march_int_wrapping_add(a, b) {
+  __int_check(a, "int_wrapping_add"); __int_check(b, "int_wrapping_add");
+  const r = a + b;
+  if (Number.isSafeInteger(r)) return r;
+  return __int_result(BigInt.asIntN(63, BigInt(a) + BigInt(b)), "int_wrapping_add");
+}
+
+export function march_int_wrapping_sub(a, b) {
+  __int_check(a, "int_wrapping_sub"); __int_check(b, "int_wrapping_sub");
+  const r = a - b;
+  if (Number.isSafeInteger(r)) return r;
+  return __int_result(BigInt.asIntN(63, BigInt(a) - BigInt(b)), "int_wrapping_sub");
+}
+
+export function march_int_wrapping_mul(a, b) {
+  __int_check(a, "int_wrapping_mul"); __int_check(b, "int_wrapping_mul");
+  const r = a * b;
+  if (Number.isSafeInteger(r)) return r;
+  return __int_result(BigInt.asIntN(63, BigInt(a) * BigInt(b)), "int_wrapping_mul");
+}
+
 /** Float → Int rounding, half AWAY FROM ZERO (mirrors OCaml Float.round;
  * JS Math.round rounds half toward +inf, so Math.round(-2.5) would differ). */
 export function march_float_round(f) {
