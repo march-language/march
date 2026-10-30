@@ -25,7 +25,7 @@ Landed 2026-10-30 on `claude/js-browser-target`, driven by compiling Eclipse
   `js_argv`, `js_unreached_c_extern`, forge `js_entrypoint picks the
   --target js entry`.
 - **Native symbols for JS-module externs** (`lower_decls.ml`): sanitized to C
-  identifiers. Test: `native_js_module_extern_native`.
+  identifiers. Test: `native_extern_js_module_native`.
 - **JS emit prunes to the bare `main`** (`bin/main.ml`, `Dce.prune_unreachable
   ~roots:["main"]`): the default roots include every `*.main`, which kept a
   library module's desktop main and its C externs. Test:

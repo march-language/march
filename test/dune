@@ -14844,22 +14844,22 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_bundle.expected js_bundle.out)))
 
-; js_module_extern_native — a module declaring JS-module externs ("./x.mjs")
+; extern_js_module_native — a module declaring JS-module externs ("./x.mjs")
 ; compiles natively when nothing native calls them (valid C symbol names).
 (rule
- (targets native_js_module_extern_native native_js_module_extern_native.out)
+ (targets native_extern_js_module_native native_extern_js_module_native.out)
  (deps (file %{exe:../bin/main.exe})
        (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
-       (file native/js_module_extern_native.march))
+       (file native/extern_js_module_native.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_js_module_extern_native native/js_module_extern_native.march)
-   (with-stdout-to native_js_module_extern_native.out (system "./native_js_module_extern_native")))))
+   (run %{exe:../bin/main.exe} --compile -o native_extern_js_module_native native/extern_js_module_native.march)
+   (with-stdout-to native_extern_js_module_native.out (system "./native_extern_js_module_native")))))
 
 (rule
  (alias runtest)
- (action (diff native/js_module_extern_native.expected native_js_module_extern_native.out)))
+ (action (diff native/extern_js_module_native.expected native_extern_js_module_native.out)))
 
 ; js_tuple_let_match — a let bound to a match on a tuple keeps its branch's value (the non-exhaustive default was emitted after it).
 (rule
