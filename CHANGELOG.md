@@ -775,6 +775,21 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **What March 1.0 will promise, in writing.** New pages: [Compatibility &
+  Deprecation](docs/compatibility.md) (what a 1.x release keeps working, including the
+  cluster control plane's release format and messages; `@[deprecated]` and stdlib
+  stability tiers are marked as planned), [Supported Platforms](docs/platforms.md)
+  (tier 1: darwin-arm64, linux-x86_64, linux-aarch64; Intel macOS is tier 2; Windows,
+  WASM and JS are tier 3), and one claim page each for
+  [deploys](docs/claim-deploys.md), [capabilities](docs/claim-capabilities.md),
+  [performance](docs/claim-performance.md) and
+  [refinement types](docs/claim-refinements.md), each with its assumptions, what it does
+  not claim, and which CI checks defend it and which are still planned. A new
+  [Capability Threat Model](docs/capability-threat-model.md) replaces three pages that
+  disagreed: `docs/capability-audit.md` no longer says an undeclared builtin call is only a
+  warning (it has been an error since 2026-08-06), and the provable-sandbox design notes
+  that per-function grants were removed on 2026-08-13.
+
 - **Every public stdlib function is documented, and about 1,500 doc examples have a Try it
   button.** 468 undocumented public functions now have docs, and 1,240 more functions gained
   `march>` examples that are checked natively and in the browser REPL. 87 modules (was 32)
