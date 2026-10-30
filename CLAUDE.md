@@ -86,6 +86,19 @@ dune exec march -- file.march   # run the compiler
 
 ### Parallel-agent / reliable test invocation
 
+**Run only what your change can reach.** `scripts/affected.sh` maps the files changed since the
+merge-base with `origin/main` (committed, uncommitted and untracked) to the suites, dune aliases,
+oracles and checks that cover them, and `--run` runs that plan (`-q` unless `--full`). A path
+with no rule selects everything, so an unknown change is never under-tested. It is for the edit
+loop; the full suite still runs before merge. `scripts/test-affected.sh` pins its mapping (CI:
+doc-lint); when you add a suite or a lib directory, add its rule there too.
+
+```bash
+scripts/affected.sh                    # print the plan and why each file selected what
+scripts/affected.sh --run              # run it
+scripts/affected.sh --run --no-oracles # suites and checks only
+```
+
 `dune runtest` uses a per-project RPC daemon. Stale zombie dune processes from prior sessions block new runs and prevent log files from updating. Use one of:
 
 ```bash
@@ -209,6 +222,23 @@ scripts/refine-oracle.sh baseline|check <dir>   # refinement diagnostics over ~2
 scripts/types-oracle.sh  baseline|check <dir>   # two-tier: core-AST inference results + diagnostic text
 scripts/determinism-oracle.sh [--corpus small|all] [--self-test]  # same source, cold/warm HOME × two cwds: .ll + --dump-impl-hashes identical
 ```
+
+The ir and refine oracles fan out over `MARCH_ORACLE_JOBS` processes (default: CPU count;
+types-oracle uses 8) under a private `HOME`, so they finish in minutes, not most of an hour.
+refine and types run each fixture from its own fresh cwd: the compile CAS and the VC cache
+live under `<cwd>/.march/cas`, and a warm VC cache replays a stored z3 counterexample, which
+changes diagnostic text. For the usual question ("did my branch move anything since it forked"),
+skip the manual baseline dance:
+
+```
+scripts/oracle-base.sh ir refine       # baseline at merge-base(HEAD, origin/main), cached; then check this tree
+scripts/oracle-base.sh all --base REF  # ir + refine + types against another base
+```
+
+It exports the base commit with `git archive`, builds it, records the baseline with THIS tree's
+oracle script, and caches only the manifests under `~/.cache/march-oracle-base/<sha>-<script-hash>/`.
+Later runs on the same base only do the check. Editing an oracle script invalidates its cache
+entry. A fixture your branch adds or edits shows up as a change; that is expected.
 
 What they do **not** cover, which matters when choosing one:
 - `ir-oracle` is blind to `lib/eval/` (the interpreter is never emitted as IR) and

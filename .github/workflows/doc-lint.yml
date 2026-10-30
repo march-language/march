@@ -33,6 +33,12 @@ jobs:
       - name: Test the test runner's failure attribution
         run: scripts/test-run-tests.sh
 
+      # scripts/affected.sh picks which suites a local change runs. A rule that
+      # selects too little is a silent hole, so its path -> plan mapping is pinned
+      # (pure text, no build).
+      - name: Test the affected-suite selector
+        run: scripts/test-affected.sh
+
       # docs/pagefind/ is a COMMITTED build artifact — march-lang.org is served by
       # GitHub's own Jekyll over docs/, which has no post-build hook, so the search index
       # can only reach production by being in git. It is BOT-OWNED: sync-docs-search-index.yml
