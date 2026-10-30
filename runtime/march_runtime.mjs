@@ -47,9 +47,100 @@ export function march_int_pow(base, exp) {
 
 /* march_unix_time is defined below in the System section. */
 
-/** String byte length (UTF-8 bytes, matching the native backend) */
+/* ── Byte strings ────────────────────────────────────────────────────
+ * A March String is a byte sequence; on this target it is carried in a JS
+ * string so that text stays ordinary JS text:
+ *   - a code unit below 0x80 is that ASCII byte;
+ *   - U+F780..U+F7FF is the single byte 0x80..0xFF (a byte that isn't part of
+ *     valid UTF-8, e.g. from a binary file);
+ *   - any other character stands for its UTF-8 bytes.
+ * march_bytes_to_string builds this canonical form from raw bytes (valid
+ * UTF-8 runs decode to text, other bytes use the U+F7xx range), so a slice of
+ * binary data that holds a name compares equal to the literal name.
+ * Byte-indexed operations (byte_length, byte_at, slice, index_of) see the
+ * bytes: directly when every code unit is one byte, else through a byte view
+ * cached per string, so byte access is O(1) after one O(n) pass. */
+const MARCH_RAW_BASE = 0xF700;
+
+function march_unit_is_byte(c) { return c < 0x80 || (c >= 0xF780 && c <= 0xF7FF); }
+
+function march_encode_bytes(s) {
+  const out = new Uint8Array(s.length * 3);
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    let c = s.charCodeAt(i);
+    if (c < 0x80) out[n++] = c;
+    else if (c >= 0xF780 && c <= 0xF7FF) out[n++] = c - MARCH_RAW_BASE;
+    else {
+      if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+        const d = s.charCodeAt(i + 1);
+        if (d >= 0xDC00 && d <= 0xDFFF) { c = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00); i++; }
+      }
+      if (c < 0x800) { out[n++] = 0xC0 | (c >> 6); out[n++] = 0x80 | (c & 63); }
+      else if (c < 0x10000) { out[n++] = 0xE0 | (c >> 12); out[n++] = 0x80 | ((c >> 6) & 63); out[n++] = 0x80 | (c & 63); }
+      else { out[n++] = 0xF0 | (c >> 18); out[n++] = 0x80 | ((c >> 12) & 63); out[n++] = 0x80 | ((c >> 6) & 63); out[n++] = 0x80 | (c & 63); }
+    }
+  }
+  return out.subarray(0, n);
+}
+
+// The last few strings' byte views (null: every code unit is one byte).
+const march_view_cache = [];
+function march_byte_view(s) {
+  if (s.length < 32) {
+    for (let i = 0; i < s.length; i++) if (!march_unit_is_byte(s.charCodeAt(i))) return march_encode_bytes(s);
+    return null;
+  }
+  for (const e of march_view_cache) if (e.s === s) return e.v;
+  let v = null;
+  for (let i = 0; i < s.length; i++) if (!march_unit_is_byte(s.charCodeAt(i))) { v = march_encode_bytes(s); break; }
+  march_view_cache.unshift({ s, v });
+  if (march_view_cache.length > 4) march_view_cache.pop();
+  return v;
+}
+
+function march_utf8_seq(b, i, n) {
+  const c = b[i];
+  let len, cp;
+  if (c >= 0xC2 && c <= 0xDF) { len = 2; cp = c & 31; }
+  else if (c >= 0xE0 && c <= 0xEF) { len = 3; cp = c & 15; }
+  else if (c >= 0xF0 && c <= 0xF4) { len = 4; cp = c & 7; }
+  else return null;
+  if (i + len > n) return null;
+  for (let k = 1; k < len; k++) { const d = b[i + k]; if ((d & 0xC0) !== 0x80) return null; cp = (cp << 6) | (d & 63); }
+  if ((len === 3 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF))) || (len === 4 && (cp < 0x10000 || cp > 0x10FFFF))) return null;
+  return { len, cp };
+}
+
+/** Raw bytes (a Uint8Array) to a March String in canonical form. */
+export function march_bytes_to_string(b) {
+  const n = b.length;
+  const parts = [];
+  let run = [];
+  const flush = () => { if (run.length) { parts.push(String.fromCharCode.apply(null, run)); run = []; } };
+  for (let i = 0; i < n; ) {
+    const c = b[i];
+    if (c < 0x80) { run.push(c); i++; }
+    else {
+      const q = march_utf8_seq(b, i, n);
+      if (q) { if (q.cp >= 0x10000) { const v = q.cp - 0x10000; run.push(0xD800 + (v >> 10), 0xDC00 + (v & 1023)); } else run.push(q.cp); i += q.len; }
+      else { run.push(MARCH_RAW_BASE + c); i++; }
+    }
+    if (run.length >= 8192) flush();
+  }
+  flush();
+  return parts.join("");
+}
+
+/* Byte offset <-> code-unit index, for strings that need a view. */
+function march_unit_index_to_byte(s, u) {
+  return u === 0 ? 0 : march_encode_bytes(s.slice(0, u)).length;
+}
+
+/** String byte length (bytes, matching the native backend) */
 export function march_string_byte_length(s) {
-  return new TextEncoder().encode(s).length;
+  const v = march_byte_view(s);
+  return v ? v.length : s.length;
 }
 
 /** String grapheme count (user-visible characters) */
@@ -108,31 +199,26 @@ export function march_string_contains(s, sub) { return s.includes(sub); }
 export function march_string_starts_with(s, pre) { return s.startsWith(pre); }
 export function march_string_ends_with(s, suf) { return s.endsWith(suf); }
 
-/* Mirrors march_string_slice in runtime/march_runtime.c.
- *
- * The third argument is a LENGTH, not an end index — this used to call
- * s.slice(start, len) directly, so every slice with a non-zero start returned
- * the wrong text (string_slice("abcdefgh", 5, 3) gave "" here and "fgh"
- * natively).  Clamping is spelled out rather than left to s.slice because JS
- * treats a negative index as an offset from the end, where C clamps to 0. */
+/* Mirrors march_string_slice in runtime/march_runtime.c: a slice of [len]
+ * BYTES from byte [start], clamped (C clamps a negative index to 0, where JS
+ * would count from the end). */
 export function march_string_slice(s, start, len) {
-  const slen = s.length;
+  const v = march_byte_view(s);
+  const slen = v ? v.length : s.length;
   if (start < 0) start = 0;
   if (start > slen) start = slen;
   if (len < 0) len = 0;
   if (start + len > slen) len = slen - start;
-  return s.slice(start, start + len);
+  return v ? march_bytes_to_string(v.subarray(start, start + len)) : s.slice(start, start + len);
 }
 
-/* Mirrors march_string_byte_at: byte value 0..255, or -1 out of range.
- *
- * CAVEAT: JS strings are UTF-16 code units, not bytes, so this indexes code
- * units and agrees with the C version only for ASCII.  That is the same
- * pre-existing representational split that march_string_byte_length and
- * march_string_slice already have on this backend, not a new one. */
+/* Mirrors march_string_byte_at: byte value 0..255, or -1 out of range. */
 export function march_string_byte_at(s, i) {
+  const v = march_byte_view(s);
+  if (v) return i < 0 || i >= v.length ? -1 : v[i];
   if (i < 0 || i >= s.length) return -1;
-  return s.charCodeAt(i);
+  const c = s.charCodeAt(i);
+  return c < 0x80 ? c : c - MARCH_RAW_BASE;
 }
 
 /** List(Int) of Unicode code points (mirrors `string_to_codepoints`).
@@ -185,22 +271,30 @@ export function march_string_pad_right(s, n, c) {
   return s.padEnd(n, c);
 }
 
+/* index_of results are BYTE offsets, as natively. */
 export function march_string_index_of(s, sub) {
   const i = s.indexOf(sub);
-  return i < 0 ? { $: "None" } : { $: "Some", _0: i };
+  return i < 0 ? { $: "None" } : { $: "Some", _0: march_byte_view(s) ? march_unit_index_to_byte(s, i) : i };
 }
 
 export function march_string_index_of_from(s, sub, start) {
+  const v = march_byte_view(s);
+  const slen = v ? v.length : s.length;
   if (start < 0) start = 0;
-  if (start > s.length) return { $: "None" };
+  if (start > slen) return { $: "None" };
   if (sub.length === 0) return { $: "Some", _0: start };
-  const i = s.indexOf(sub, start);
-  return i < 0 ? { $: "None" } : { $: "Some", _0: i };
+  if (!v) {
+    const i = s.indexOf(sub, start);
+    return i < 0 ? { $: "None" } : { $: "Some", _0: i };
+  }
+  const head = march_bytes_to_string(v.subarray(0, start));
+  const i = s.indexOf(sub, head.length);
+  return i < 0 ? { $: "None" } : { $: "Some", _0: march_unit_index_to_byte(s, i) };
 }
 
 export function march_string_last_index_of(s, sub) {
   const i = s.lastIndexOf(sub);
-  return i < 0 ? { $: "None" } : { $: "Some", _0: i };
+  return i < 0 ? { $: "None" } : { $: "Some", _0: march_byte_view(s) ? march_unit_index_to_byte(s, i) : i };
 }
 
 /* ── Char operations ───────────────────────────────────────────────── */
@@ -495,8 +589,5 @@ export function march_native_int_arr_set(a, i, v) { march_native_arr_check("nati
 /* NativeU8Arr -> Bytes: a byte string (one code unit per byte, see "Byte
  * strings" in the JS backend design doc) in the Bytes constructor. */
 export function march_u8_arr_to_bytes(a) {
-  let s = "";
-  for (let i = 0; i < a.length; i += 8192)
-    s += String.fromCharCode.apply(null, a.subarray(i, i + 8192));
-  return { $: "Bytes", _0: s };
+  return { $: "Bytes", _0: march_bytes_to_string(a) };
 }

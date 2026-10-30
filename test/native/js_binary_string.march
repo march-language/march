@@ -1,0 +1,42 @@
+-- Byte strings on the JS target: a String's bytes are what native has, whether
+-- it holds text or binary data (a byte >= 0x80 that isn't part of valid UTF-8
+-- is carried as U+F780 + (b - 0x80)). byte_at, byte_length and slice agree with
+-- each other and with native, and byte access is O(1) even on a 3 MB string.
+-- Expected output is what the native target prints for the same bytes.
+mod JsBinaryString do
+  needs IO.Console
+  needs IO.Foreign
+
+  extern "./js_binary_string_helper.mjs" : Cap(IO.Foreign) do
+    fn allBytes() : String
+    fn bigBinary(n : Int) : String
+    fn nowMs() : Int
+  end
+
+  pfn mismatches(s : String, i : Int, acc : Int) : Int do
+    if i == 256 do acc else mismatches(s, i + 1, if string_byte_at(s, i) == i do acc else acc + 1 end) end
+  end
+
+  pfn sum_bytes(s : String, i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc else sum_bytes(s, i + 1, n, acc + string_byte_at(s, i)) end
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+    let s = allBytes()
+    println(int_to_string(string_byte_length(s)) ++ " " ++ int_to_string(mismatches(s, 0, 0)))
+    let tail = String.slice(s, 250, 6)
+    println(int_to_string(string_byte_length(tail)) ++ " " ++ int_to_string(string_byte_at(tail, 0)) ++ " " ++ int_to_string(string_byte_at(tail, 5)))
+    let t = "AB" ++ s
+    println(int_to_string(string_byte_length(t)) ++ " " ++ int_to_string(string_byte_at(t, 2)) ++ " " ++ int_to_string(string_byte_at(t, 257)))
+    println(int_to_string(string_byte_length("é")) ++ " " ++ int_to_string(string_byte_at("é", 0)) ++ " " ++ int_to_string(string_byte_at("é", 1)))
+    println(int_to_string(string_byte_length("héllo")) ++ " " ++ bool_to_string(String.slice("héllo", 0, 3) == "hé"))
+    let e = Bytes.to_string(Bytes.from_u8_arr(NativeArray.set_u8(NativeArray.set_u8(NativeArray.make_u8(2, 0), 0, 195), 1, 169)))
+    println(bool_to_string(e == "é"))
+    let n = 3000000
+    let big = bigBinary(n)
+    let t0 = nowMs()
+    let total = sum_bytes(big, 0, n, 0)
+    let t1 = nowMs()
+    println(int_to_string(string_byte_length(big)) ++ " " ++ int_to_string(total) ++ " fast " ++ bool_to_string(t1 - t0 < 1000))
+  end
+end

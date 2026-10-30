@@ -14732,3 +14732,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_native_arrays.out (run node js_native_arrays.mjs))))
 
 (rule (alias runtest) (action (diff native/js_native_arrays.expected js_native_arrays.out)))
+
+(rule
+ (targets js_binary_string_helper.mjs)
+ (deps (file native/js_binary_string_helper.mjs))
+ (action (copy native/js_binary_string_helper.mjs js_binary_string_helper.mjs)))
+
+; js_binary_string — byte strings: binary data round-trips; byte_at/byte_length/slice agree with native and are O(1) on 3 MB.
+(rule
+ (targets js_binary_string.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_binary_string.march) march_runtime.mjs js_binary_string_helper.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime 
+              -o js_binary_string.mjs native/js_binary_string.march)))
+
+(rule
+ (targets js_binary_string.out)
+ (deps js_binary_string.mjs march_runtime.mjs js_binary_string_helper.mjs)
+ (action (with-stdout-to js_binary_string.out (run node js_binary_string.mjs))))
+
+(rule (alias runtest) (action (diff native/js_binary_string.expected js_binary_string.out)))
