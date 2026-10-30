@@ -115,6 +115,14 @@ let termination_report = ref false
    and reading them out of the hint text is not a substitute — the hints are
    throttled per module, so most skips never print one. *)
 let refine_report_sites = ref false
+(* --refine-report-sites=all: one line per obligation of ANY verdict (proved,
+   skip, violated, trusted), the listing `scripts/refine-oracle.sh monotone`
+   compares (reflection design §6.1).  The bare flag's output is unchanged. *)
+let refine_report_sites_all = ref false
+(* --reflect-report: one row per user function, reflected or the first R-rule
+   blocking it (lib/refinecheck/refine_reflect.ml, reflection design §2.4).
+   Report-only: nothing else reads the analysis. *)
+let reflect_report = ref false
 (* --refine-audit: print every declared refinement occurrence the checker
    never enforces (Unenforced) or only warns about (Inert_warned), plus a
    three-bucket summary. Read-only: changes no verdict, emits no diagnostic.

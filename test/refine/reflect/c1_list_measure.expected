@@ -1,0 +1,4 @@
+skip	user	c1_list_measure.march:10:5	unreflectable-subject	postcondition	law	len(rev1(xs)) == len(xs)
+reflect	c1_list_measure.march:3:5	rev1	reflected	unfold
+reflect	c1_list_measure.march:10:5	law	no	R8:returns Unit (c1_list_measure.march:10:5)
+reflect	c1_list_measure.march:14:5	main	no	R1:is `main` (c1_list_measure.march:14:5)

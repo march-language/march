@@ -1,0 +1,5 @@
+skip	user	c3_measure_effect_callee.march:18:12	solver-undecided	precondition	need	sz(_) == 1
+reflect	c3_measure_effect_callee.march:2:5	noisy	no	R3:calls println (c3_measure_effect_callee.march:3:4)
+reflect	c3_measure_effect_callee.march:8:5	sz	no	R6:calls noisy, which is not reflected (c3_measure_effect_callee.march:10:13)
+reflect	c3_measure_effect_callee.march:15:5	need	reflected	unfold (guard: sz(xs) == 1)
+reflect	c3_measure_effect_callee.march:17:5	main	no	R1:is `main` (c3_measure_effect_callee.march:17:5)

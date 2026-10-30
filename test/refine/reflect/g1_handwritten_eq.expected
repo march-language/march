@@ -1,0 +1,4 @@
+skip	user	g1_handwritten_eq.march:17:14	sort-conflict	precondition	need	_ == P(1, 2)
+reflect	g1_handwritten_eq.march:5:7	impl Eq.eq	no	R1:is an `impl` method (g1_handwritten_eq.march:5:7)
+reflect	g1_handwritten_eq.march:12:5	need	reflected	unfold (guard: p == P(1, 2))
+reflect	g1_handwritten_eq.march:14:5	main	no	R1:is `main` (g1_handwritten_eq.march:14:5)

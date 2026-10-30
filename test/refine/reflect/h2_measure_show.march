@@ -1,0 +1,34 @@
+mod H2 do
+  type T = T(Int)
+
+  impl Show(T) do
+    fn show(t : T) : String do
+      match t do
+        T(n) -> int_to_string(n)
+      end
+    end
+  end
+
+  @[measure]
+  fn sz(xs : List(T)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(h, t) -> string_byte_length(show(h)) + sz(t)
+    end
+  end
+
+  @[measure]
+  fn sz2(xs : List(T)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(h, t) -> string_byte_length("${h}") + sz2(t)
+    end
+  end
+
+  fn need(xs : {List(T) | sz(_) == 1}) : Int do 0 end
+
+  fn main() : Unit do
+    let _ = need(Cons(T(5), Nil))
+    ()
+  end
+end

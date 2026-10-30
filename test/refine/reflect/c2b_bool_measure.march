@@ -1,0 +1,30 @@
+mod C2b do
+  @[measure]
+  fn even_len(xs : List(Int)) : Bool do
+    match xs do
+      Nil -> true
+      Cons(_, t) -> not even_len(t)
+    end
+  end
+
+  type Nat = Z | S(Nat)
+
+  @[measure]
+  fn pos_nat(n : Nat) : Bool do
+    match n do
+      Z -> false
+      S(_) -> true
+    end
+  end
+
+  fn need(xs : {List(Int) | even_len(_)}) : Int do 0 end
+  fn needp(n : {Nat | pos_nat(_)}) : Int do 0 end
+
+  fn main() : Unit do
+    let _ = need(Cons(1, Cons(2, Nil)))
+    let _ = need(Cons(1, Nil))
+    let _ = needp(S(Z))
+    let _ = needp(Z)
+    ()
+  end
+end

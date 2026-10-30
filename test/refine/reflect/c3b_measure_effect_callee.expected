@@ -1,0 +1,10 @@
+skip	user	c3b_measure_effect_callee.march:13:28	not-decreasing	termination	spin	0 <= $g_n && $g_n < $c_n
+skip	user	c3b_measure_effect_callee.march:42:12	solver-undecided	precondition	need	sz(_) == 1
+reflect	c3b_measure_effect_callee.march:4:5	noisy	no	R3:calls println (c3b_measure_effect_callee.march:5:4)
+reflect	c3b_measure_effect_callee.march:9:5	boom	no	R4:calls panic (c3b_measure_effect_callee.march:10:4)
+reflect	c3b_measure_effect_callee.march:13:5	spin	no	R2:unproved:not-decreasing (c3b_measure_effect_callee.march:13:5)
+reflect	c3b_measure_effect_callee.march:16:5	sz	no	R6:calls noisy, which is not reflected (c3b_measure_effect_callee.march:18:13)
+reflect	c3b_measure_effect_callee.march:24:5	sz2	no	R6:calls boom, which is not reflected (c3b_measure_effect_callee.march:26:13)
+reflect	c3b_measure_effect_callee.march:32:5	sz3	no	R6:calls spin, which is not reflected (c3b_measure_effect_callee.march:34:13)
+reflect	c3b_measure_effect_callee.march:39:5	need	reflected	unfold (guard: sz(xs) == 1)
+reflect	c3b_measure_effect_callee.march:41:5	main	no	R1:is `main` (c3b_measure_effect_callee.march:41:5)

@@ -1,0 +1,15 @@
+mod H3 do
+  fn size_x() : Int do 128 end
+  fn two_x() : Int do 2 * size_x() end
+  fn inc(n : Int) : Int do n + 1 end
+
+  fn idx(i : {Int | _ >= 0 && _ < two_x()}) : Int do i end
+  fn idx2(i : {Int | _ < inc(3)}) : Int do i end
+
+  fn main() : Unit do
+    let _ = idx(255)
+    let _ = idx(256)
+    let _ = idx2(3)
+    ()
+  end
+end

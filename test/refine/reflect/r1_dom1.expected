@@ -1,0 +1,14 @@
+proved	user	r1_dom1.march:3:31	termination	p	0 <= $g_n && $g_n < $c_n
+proved	user	r1_dom1.march:3:31	precondition	p	_ >= 0
+proved	user	r1_dom1.march:8:31	termination	q	0 <= $g_n && $g_n < $c_n
+proved	user	r1_dom1.march:8:31	precondition	q	_ >= 0
+proved	user	r1_dom1.march:12:28	termination	cnt	0 <= $c_n - 1 && $c_n - 1 < $c_n
+proved	user	r1_dom1.march:12:28	precondition	cnt	_ >= 0
+proved	user	r1_dom1.march:23:12	precondition	p	_ >= 0
+proved	user	r1_dom1.march:24:12	precondition	q	_ >= 0
+proved	user	r1_dom1.march:25:12	precondition	cnt	_ >= 0
+reflect	r1_dom1.march:2:5	p	no	R7:names not as a value (r1_dom1.march:3:27)
+reflect	r1_dom1.march:7:5	q	no	R7:names not as a value (r1_dom1.march:8:27)
+reflect	r1_dom1.march:11:5	cnt	reflected	unfold (guard: n >= 0)
+reflect	r1_dom1.march:15:5	guarded	no	R5:guarded match may not match (r1_dom1.march:16:10)
+reflect	r1_dom1.march:22:5	main	no	R1:is `main` (r1_dom1.march:22:5)

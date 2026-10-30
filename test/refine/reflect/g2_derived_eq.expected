@@ -1,0 +1,4 @@
+proved	user	g2_derived_eq.march:8:12	precondition	need	_ == P(1, 2)
+violated	user	g2_derived_eq.march:9:12	precondition	need	_ == P(1, 2)
+reflect	g2_derived_eq.march:5:5	need	reflected	unfold (guard: p == P(1, 2))
+reflect	g2_derived_eq.march:7:5	main	no	R1:is `main` (g2_derived_eq.march:7:5)
