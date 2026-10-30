@@ -18138,7 +18138,7 @@ let elemflow_relational_return_suite =
         let ex =
           "  fn need_lt5(xs : List({Int | _ < 5})) : Int do 0 end\n\
           \  fn need_lt4(xs : List({Int | _ < 4})) : Int do 0 end\n\
-          \  fn small(k : Int) : Bool do k < 5 end\n"
+          \  @[opaque]\n  fn small(k : Int) : Bool do k < 5 end\n"
         in
         let l3x body = l3 (m (ex ^ body)) in
         Alcotest.check t3 "if small(k): need_lt5(below(k)) skipped" (2, 0, 1)
@@ -18193,7 +18193,7 @@ let elemflow_relational_return_suite =
         let ex =
           "  fn need_lt5(xs : List({Int | _ < 5})) : Int do 0 end\n\
           \  fn n5(x : {Int | _ < 5}) : Int do 0 end\n\
-          \  fn small(k : Int) : Bool do k < 5 end\n"
+          \  @[opaque]\n  fn small(k : Int) : Bool do k < 5 end\n"
         in
         let l3x body = l3 (m (ex ^ body)) in
         (* A comparison is read through [lets]: `if ok` is `if k < 5`.
@@ -18225,7 +18225,7 @@ let elemflow_relational_return_suite =
            query only knows `m > 0`, so the model `m = 1` is no
            counterexample. *)
         Alcotest.check t3 "need_lt(below(k), m), m = two100(k): skipped" (3, 0, 1)
-          (l3x "  fn two100(x : Int) : {Int | _ > 0} do 200 end\n\
+          (l3x "  @[opaque]\n  fn two100(x : Int) : {Int | _ > 0} do 200 end\n\
                 \  fn g(k : {Int | _ <= 100}) : Int do\n    let m = two100(k)\n    need_lt(below(k), m)\n  end\n");
         (* A binder destructured from an unpinned local is opaque too: `j`
            IS `k`, but the query does not know it. *)
@@ -24446,7 +24446,7 @@ let infer_vocab_suite =
           (fun fx -> Alcotest.(check (option string)) "best" (Some "_ <= n") (best_text fx ~fn:"g" ~path:(IS.Param "i"))));
     gated "oracle: a return takes the candidate that closes the most callers" (fun () ->
         with_infer_fixture
-          "mod K2 do\n  fn need_nz(n : {Int | _ != 0}) : Int do n end\n  fn need_pos(n : {Int | _ > 0}) : Int do n end\n  fn f(x : Int) : Int do 5 end\n  fn c1() : Int do need_nz(f(1)) end\n  fn c2() : Int do need_pos(f(1)) end\n  fn c3() : Int do need_pos(f(2)) end\n  fn c4() : Int do need_pos(f(3)) end\nend\n"
+          "mod K2 do\n  fn need_nz(n : {Int | _ != 0}) : Int do n end\n  fn need_pos(n : {Int | _ > 0}) : Int do n end\n  @[opaque]\n  fn f(x : Int) : Int do 5 end\n  fn c1() : Int do need_nz(f(1)) end\n  fn c2() : Int do need_pos(f(1)) end\n  fn c3() : Int do need_pos(f(2)) end\n  fn c4() : Int do need_pos(f(3)) end\nend\n"
           (fun fx -> Alcotest.(check (option string)) "best" (Some "_ > 0") (best_text fx ~fn:"f" ~path:IS.Return)));
     gated "oracle: an exhausted budget is reported, not folded into no-candidate" (fun () ->
         with_infer_fixture
@@ -24624,7 +24624,7 @@ let infer_fixpoint_suite =
             Alcotest.(check int) "no user skips after" 0 (March_refinecheck.Ledger_diff.debt r.RI.after)));
     gated "a fact (return) is proposed before a demand (precondition) in a round" (fun () ->
         infer_run
-          (m "FD" "  fn abs1(n : Int) : Int do if n > 0 do n else 1 end end\n  fn g(n : Int) : Int do need_pos(abs1(n)) end\n  fn h(k : Int) : Int do need_pos(k) end\n")
+          (m "FD" "  @[opaque]\n  fn abs1(n : Int) : Int do if n > 0 do n else 1 end end\n  fn g(n : Int) : Int do need_pos(abs1(n)) end\n  fn h(k : Int) : Int do need_pos(k) end\n")
           (fun r ->
             let fns = List.map (fun (p : RI.proposal) -> p.RI.slot.IS.fn) r.RI.proposals in
             Alcotest.(check (list string)) "order" [ "abs1"; "h" ] fns));
@@ -26963,9 +26963,12 @@ let demand_chains_suite =
            fact is dropped whole: undecided.  Also with a PROVED `h`: the
            nested call is not a stable actual.  Base: the same. *)
         Alcotest.check vs "inc(h(n)), h unrefined" [ "skipped:solver-undecided" ]
-          (at "need_pos" (m (inc ^ "  fn h(y : Int) : Int do y end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(h(n))) end\n")));
-        Alcotest.check vs "inc(h(n)), h : {_ >= 0} proved" [ "skipped:solver-undecided" ]
-          (at "need_pos" (m (inc ^ "  fn h(y : {Int | _ >= 0}) : {Int | _ >= 0} do y end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(h(n))) end\n"))));
+          (at "need_pos" (m (inc ^ "  @[opaque]\n  fn h(y : Int) : Int do y end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(h(n))) end\n")));
+        (* Reflection (phase 1a, 2026-10-30): `inc` is reflected, so stage 2
+           unfolds `inc(h(n)) = h(n) + 1` over `h`'s proved `_ >= 0`: proved,
+           through the body rather than the contract. *)
+        Alcotest.check vs "inc(h(n)), h : {_ >= 0} proved" [ "proved" ]
+          (at "need_pos" (m (inc ^ "  @[opaque]\n  fn h(y : {Int | _ >= 0}) : {Int | _ >= 0} do y end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(h(n))) end\n"))));
     gated "G1: two parameters, substituted simultaneously" (fun () ->
         let add = "  fn add(x : Int, y : Int) : {Int | _ == x + y} do x + y end\n  fn sub(x : Int, y : Int) : {Int | _ == x - y} do x - y end\n" in
         (* Base: skipped:solver-undecided. *)
@@ -27045,7 +27048,7 @@ let demand_chains_suite =
            reached the lent fact). *)
         let sp = Alcotest.(list (pair string string)) in
         let src =
-          m ("  fn need_gt(x : Int, k : {Int | _ > x}) : Int do k end\n  fn inc(x : Int) : Int do x + 1 end\n"
+          m ("  fn need_gt(x : Int, k : {Int | _ > x}) : Int do k end\n  @[opaque]\n  fn inc(x : Int) : Int do x + 1 end\n"
              ^ "  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n")
         in
         infer_run src (fun r ->
@@ -27108,30 +27111,30 @@ let infer_vocab_oct_suite =
   [ (* 1. Relational scalar returns (G1). *)
     gated "G1 relational return: inc(x) = x + 1 proposes {Int | _ > x}" (fun () ->
         infer_run
-          (m "GR" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n")
+          (m "GR" "  @[opaque]\n  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n")
           (fun r -> Alcotest.check sp "inc" [ ("inc", "{Int | _ > x}") ] (props r)));
     gated "G1 vocabulary: x + 1 mines _ > x, x - 1 does not; no caller skip, no candidates" (fun () ->
         let go f = "  fn go(n : {Int | _ >= 0}) : Int do need_pos(" ^ f ^ "(n)) end\n" in
-        let inc = mined_texts (m "GV" ("  fn inc(x : Int) : Int do x + 1 end\n" ^ go "inc")) ~fn:"inc" in
+        let inc = mined_texts (m "GV" ("  @[opaque]\n  fn inc(x : Int) : Int do x + 1 end\n" ^ go "inc")) ~fn:"inc" in
         Alcotest.(check bool) ("inc mines _ > x: " ^ String.concat "; " inc) true (List.mem "_ > x" inc);
         Alcotest.(check bool) "inc mines _ == x + 1" true (List.mem "_ == x + 1" inc);
-        let dec = mined_texts (m "GV" ("  fn dec(x : Int) : Int do x - 1 end\n" ^ go "dec")) ~fn:"dec" in
+        let dec = mined_texts (m "GV" ("  @[opaque]\n  fn dec(x : Int) : Int do x - 1 end\n" ^ go "dec")) ~fn:"dec" in
         Alcotest.(check bool) ("dec does not mine _ > x: " ^ String.concat "; " dec) false (List.mem "_ > x" dec);
         Alcotest.(check bool) "dec mines _ < x" true (List.mem "_ < x" dec);
         (* The cost gate: a caller with nothing unsettled offers no relational
            return (it could close nothing). *)
-        let quiet = mined_texts (m "GV" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : Int) : Int do inc(n) end\n") ~fn:"inc" in
+        let quiet = mined_texts (m "GV" "  @[opaque]\n  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : Int) : Int do inc(n) end\n") ~fn:"inc" in
         Alcotest.(check bool) ("no caller skip: " ^ String.concat "; " quiet) false (List.mem "_ > x" quiet));
     gated "G1 control: dec(x) = x - 1 proposes nothing for need_pos(dec(n))" (fun () ->
         infer_run
-          (m "GD" "  fn dec(x : Int) : Int do x - 1 end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(dec(n)) end\n")
+          (m "GD" "  @[opaque]\n  fn dec(x : Int) : Int do x - 1 end\n  fn go(n : {Int | _ >= 0}) : Int do need_pos(dec(n)) end\n")
           (fun r -> Alcotest.check sp "none" [] (props r)));
     gated "G1 relational return: a two-parameter sum proposes _ == x + y only from the tail's shape" (fun () ->
         infer_run
-          (m "GS" "  fn add(x : Int, y : Int) : Int do x + y end\n  fn go(a : {Int | _ > 0}, b : {Int | _ > 0}) : Int do need_pos(add(a, b)) end\n")
+          (m "GS" "  @[opaque]\n  fn add(x : Int, y : Int) : Int do x + y end\n  fn go(a : {Int | _ > 0}, b : {Int | _ > 0}) : Int do need_pos(add(a, b)) end\n")
           (fun r -> Alcotest.check sp "add" [ ("add", "{Int | _ == x + y}") ] (props r)));
     gated "G1 apply: the written return re-checks exactly as predicted" (fun () ->
-        let src = m "GA" "  fn inc(x : Int) : Int do x + 1 end\n  pfn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n  fn main() : Int do go(3) end\n" in
+        let src = m "GA" "  @[opaque]\n  fn inc(x : Int) : Int do x + 1 end\n  pfn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end\n  fn main() : Int do go(3) end\n" in
         with_src_dir src (fun dir contents ->
             let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
             Alcotest.(check int) ("exit 0: " ^ out) 0 code;
@@ -28759,6 +28762,7 @@ let () =
       ("wrapper-contracts", wrapper_contracts_suite);
       ("termination-report", Test_refine_term.report_suite);
       ("reflect-report", Test_refine_reflect.suite @ Test_refine_reflect.fixture_suite);
+      ("reflect-unfold", Test_refine_unfold.suite @ Test_refine_unfold.soundness @ Test_refine_unfold.identical);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);
       ("termination-ih", Test_refine_term.ih_suite);
