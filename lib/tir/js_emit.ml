@@ -50,7 +50,7 @@ type ctx = {
   local_fns    : (string, unit) Hashtbl.t;
   (* ELetRec-local function names seen during emission — legitimate bare-call
      targets that are not in fn_names *)
-  unmapped     : (string, unit) Hashtbl.t;
+  unmapped     : (string, string) Hashtbl.t;
   (* direct-call names that resolve to nothing (not a user fn, local fn,
      extern, or mapped builtin): emitting them would produce a runtime
      ReferenceError, so emit_module raises Js_emit_error instead *)
@@ -788,7 +788,7 @@ and emit_val_impl ctx expr =
            if not (Hashtbl.mem ctx.fn_names name)
               && not (Hashtbl.mem ctx.local_fns name)
               && not (Hashtbl.mem ctx.param_names name)
-           then Hashtbl.replace ctx.unmapped name ();
+           then (if not (Hashtbl.mem ctx.unmapped name) then Hashtbl.replace ctx.unmapped name ctx.cur_loc);
            let is_async_callee = Hashtbl.mem ctx.async_fns name in
            if is_async_callee then emit ctx "(await ";
            emit ctx (mangle name ^ "(");
@@ -1582,7 +1582,7 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
      ReferenceError at runtime; fail the compile with a diagnostic instead. *)
   let unmapped_names =
     List.sort String.compare
-      (Hashtbl.fold (fun k () acc -> k :: acc) ctx.unmapped []) in
+      (Hashtbl.fold (fun k _ acc -> k :: acc) ctx.unmapped []) in
   let unmapped_msgs = List.map (fun name ->
     match name with
     | "int_max_value" | "int_min_value" ->
@@ -1602,11 +1602,14 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
         name
     | _ ->
       Printf.sprintf
-        "error: builtin `%s` has no JavaScript-target implementation.\n\
+        "error: builtin `%s` has no JavaScript-target implementation%s.\n\
          The compiled call would throw ReferenceError at runtime. Add a\n\
          mapping in lib/tir/js_emit.ml (+ runtime/march_runtime.mjs if it\n\
          needs a helper), or build a native/wasm target."
         name
+        (match Hashtbl.find_opt ctx.unmapped name with
+         | Some loc when loc <> "" -> " (called from " ^ loc ^ ")"
+         | _ -> "")
   ) unmapped_names in
   if extern_msgs <> [] || unmapped_msgs <> [] then
     raise (Js_emit_error (extern_msgs @ unmapped_msgs));
