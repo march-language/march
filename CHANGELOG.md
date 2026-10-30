@@ -455,6 +455,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Every `march --compile` on a musl host (Alpine) failed since 2026-10-12: the
+  runtime's scheduler included `<execinfo.h>`, which musl does not have. It is now
+  guarded as the rest of the runtime guards it (no symbolised fatal-fault frames on
+  musl).
 - **A record or variant whose only refinements are on container elements is now
   checked when it is built.** With `type Box = { n : Int, xs : List({Int | _ > 0}) }`,
   `{ n: 10, xs: [0 - 5] }` was accepted with no obligation at all, even under
