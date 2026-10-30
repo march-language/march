@@ -243,6 +243,25 @@ Integer division and modulo emit through shim helpers that reproduce March's
 semantics (truncation toward zero, sign of modulo) rather than relying on raw
 JS `/` and `%`.
 
+### Int on the JS target (as built)
+
+`Int` is a double: exact within ±(2^53 − 1). Bitwise helpers (`int_and`,
+`int_shl`, …) throw when an operand is out of that range. Plain `+ - *` do
+not: a product of two 32-bit values (up to 2^64) silently rounds, and so does
+a constant the compiler folded to more than 53 bits.
+
+`--js-int-check` (from forge: `MARCH_JS_INT_CHECK=1 forge build --target js`) is for
+finding such code: every Int `+ - *` is emitted as `march_ck_int(...)`, which
+throws `RangeError: Int overflow on the JS target in <fn> (<file>:<line>): a op b`
+when the result is outside the exact range, and an Int literal beyond it throws
+`Int literal … is not exact`. The location is the enclosing function's
+definition (TIR carries no expression positions). Release builds without the
+flag are unchanged.
+
+The fix belongs at the source: compute wide products in 16-bit halves (Herald's
+`Herald.Bits.mul_mod_pow2` does `(a * b) mod 2^k` for 32-bit operands), so
+native and JS give the same answer.
+
 ## Byte Strings
 
 A March `String` is a byte sequence; natively it may hold binary data (a file

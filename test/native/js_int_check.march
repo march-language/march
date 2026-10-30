@@ -1,0 +1,15 @@
+-- --js-int-check: an Int + - * result outside ±(2^53 - 1) throws on the JS
+-- target, naming the enclosing function, so code that needs more than 53 bits
+-- can be found. Without the flag the rounded double is printed (js_int_check);
+-- with it, main's multiply throws (js_int_check_c). The operands are parsed at
+-- runtime so the product isn't constant-folded (folded literals have their own
+-- check: js_int_check_lit).
+mod JsIntCheck do
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let a = unwrap_or(string_to_int("1804289383"), 0)
+    let b = unwrap_or(string_to_int("1103515245"), 0)
+    println(int_to_string(a * b))
+  end
+end

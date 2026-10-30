@@ -65,6 +65,11 @@ type ctx = {
   (* monotonic counter minting the $sN suffix for shadowing rebindings *)
   mutable tco : tco option;
   (* tail-call loop target of the function being emitted (see [tco]) *)
+  mutable int_check : bool;
+  (* --js-int-check: integer + - * results are range-checked (see march_ck_int) *)
+  mutable src_file : string;
+  mutable cur_loc : string;
+  (* "Fn.name (file.march:LINE)" of the function being emitted, for diagnostics *)
 }
 
 let create_ctx ?(fn_lines=[]) () = {
@@ -85,6 +90,9 @@ let create_ctx ?(fn_lines=[]) () = {
   name_env     = Hashtbl.create 16;
   shadow_ctr   = 0;
   tco          = None;
+  int_check    = false;
+  src_file     = "";
+  cur_loc      = "";
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -158,6 +166,12 @@ let js_string_lit s =
 let emit_literal ctx lit =
   let open March_ast.Ast in
   match lit with
+  | LitInt n when ctx.int_check && (n > 9007199254740991 || n < -9007199254740991) ->
+    (* --js-int-check: a literal (often a constant-folded product) that a
+       double can't hold exactly would silently round. *)
+    use_runtime ctx "march_ck_lit";
+    emit ctx (Printf.sprintf "march_ck_lit(%s, %s)"
+      (js_string_lit (string_of_int n)) (js_string_lit ctx.cur_loc))
   | LitInt n    -> emit ctx (string_of_int n)
   | LitFloat f  ->
     let s = string_of_float f in
@@ -585,6 +599,22 @@ and emit_val_impl ctx expr =
          emit ctx "(("; emit_atom ctx a; emit ctx " - ";
          emit_atom ctx a; emit ctx " % "; emit_atom ctx b; emit ctx ") / ";
          emit_atom ctx b; emit ctx ")"
+       (* --js-int-check: an Int + - * whose result leaves the doubles' exact
+          range throws, naming the enclosing function (TIR has no expression
+          positions). Operands are atoms, so evaluating them twice is free. *)
+       | ("+" | "-" | "*"), [a; b]
+         when ctx.int_check
+              && (match name with
+                  | "add_int" | "sub_int" | "mul_int" -> true
+                  | "+" | "-" | "*" ->
+                    (match atom_ty a, atom_ty b with
+                     | Tir.TInt, _ | _, Tir.TInt -> true | _ -> false)
+                  | _ -> false) ->
+         use_runtime ctx "march_ck_int";
+         emit ctx "march_ck_int(("; emit_atom ctx a; emit ctx (" " ^ op ^ " ");
+         emit_atom ctx b; emit ctx "), "; emit_atom ctx a;
+         emit ctx (", " ^ js_string_lit op ^ ", "); emit_atom ctx b;
+         emit ctx (", " ^ js_string_lit ctx.cur_loc ^ ")")
        | _ ->
          emit ctx "(";
          emit_atom ctx (List.nth args 0);
@@ -1164,6 +1194,7 @@ and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
 and emit_fn_header ctx (fn : Tir.fn_def) (param_js : string list) =
   let fname = mangle fn.Tir.fn_name in
   let is_async = Hashtbl.mem ctx.async_fns fn.Tir.fn_name in
+  set_loc ctx fn;
   (match Hashtbl.find_opt ctx.fn_lines fn.Tir.fn_name with
    | Some src_line when src_line > 0 ->
      ctx.segments := (ctx.line, src_line - 1) :: !(ctx.segments)
@@ -1171,6 +1202,13 @@ and emit_fn_header ctx (fn : Tir.fn_def) (param_js : string list) =
   emit_indent ctx;
   if is_async then emit ctx "async ";
   emit ctx ("function " ^ fname ^ "(" ^ String.concat ", " param_js ^ ") {\n")
+
+and set_loc ctx (fn : Tir.fn_def) =
+  ctx.cur_loc <-
+    (match Hashtbl.find_opt ctx.fn_lines fn.Tir.fn_name with
+     | Some l when l > 0 ->
+       Printf.sprintf "%s (%s:%d)" fn.Tir.fn_name (Filename.basename ctx.src_file) l
+     | _ -> fn.Tir.fn_name)
 
 (* A function body in its own name scope.  With [slots], the params arrive in
    $tco_aN and are bound to fresh consts first, so each loop iteration (and any
@@ -1257,6 +1295,7 @@ and emit_mutual_group ctx (group : Tir.fn_def list) =
       emitl ctx "switch ($tco_tag) {";
       List.iteri (fun i fn ->
         emitl ctx (Printf.sprintf "case %d: {" i);
+        set_loc ctx fn;
         with_indent ctx (fun () ->
           emit_fn_body ctx fn.Tir.fn_params ~slots:true fn.Tir.fn_body;
           emitl ctx "return undefined;");
@@ -1493,8 +1532,10 @@ exception Js_emit_error of string list
     [fn_lines] maps TIR function names to 1-indexed source lines (from the AST).
     [source_file] is the path to the originating .march file (for source maps).
     Raises [Js_emit_error] when used C-backed externs are present (Chunk C). *)
-let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string * string option =
+let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir_module) : string * string option =
   let ctx = create_ctx ~fn_lines () in
+  ctx.int_check <- int_check;
+  ctx.src_file <- source_file;
   (* Pre-register all user-defined function names so emit_atom emits $clo versions *)
   List.iter (fun fn -> Hashtbl.replace ctx.fn_names fn.Tir.fn_name ()) m.Tir.tm_fns;
   (* Register externs separately for lazy tracking (not in fn_names to avoid

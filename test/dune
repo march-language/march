@@ -14752,3 +14752,50 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_binary_string.out (run node js_binary_string.mjs))))
 
 (rule (alias runtest) (action (diff native/js_binary_string.expected js_binary_string.out)))
+
+; js_int_check — without --js-int-check, a product beyond 2^53 prints the rounded double (release output unchanged).
+(rule
+ (targets js_int_check.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_int_check.march) march_runtime.mjs )
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime 
+              -o js_int_check.mjs native/js_int_check.march)))
+
+(rule
+ (targets js_int_check.out)
+ (deps js_int_check.mjs march_runtime.mjs )
+ (action (with-stdout-to js_int_check.out (run node js_int_check.mjs))))
+
+(rule (alias runtest) (action (diff native/js_int_check.expected js_int_check.out)))
+
+; js_int_check_c — --js-int-check throws on an Int result/literal beyond ±(2^53 - 1), naming the function
+(rule
+ (targets js_int_check_c.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_int_check.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime --js-int-check
+              -o js_int_check_c.mjs native/js_int_check.march)))
+
+(rule
+ (targets js_int_check_c.out)
+ (deps js_int_check_c.mjs march_runtime.mjs)
+ (action (with-stdout-to js_int_check_c.out
+   (system "node js_int_check_c.mjs 2>&1 | grep '^RangeError: ' | sed 's/^RangeError: //' | head -1; true"))))
+
+(rule (alias runtest) (action (diff native/js_int_check_c.expected js_int_check_c.out)))
+
+; js_int_check_lit — --js-int-check throws on an Int result/literal beyond ±(2^53 - 1), naming the function
+(rule
+ (targets js_int_check_lit.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_int_check_lit.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime --js-int-check
+              -o js_int_check_lit.mjs native/js_int_check_lit.march)))
+
+(rule
+ (targets js_int_check_lit.out)
+ (deps js_int_check_lit.mjs march_runtime.mjs)
+ (action (with-stdout-to js_int_check_lit.out
+   (system "node js_int_check_lit.mjs 2>&1 | grep '^RangeError: ' | sed 's/^RangeError: //' | head -1; true"))))
+
+(rule (alias runtest) (action (diff native/js_int_check_lit.expected js_int_check_lit.out)))

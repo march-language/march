@@ -591,3 +591,15 @@ export function march_native_int_arr_set(a, i, v) { march_native_arr_check("nati
 export function march_u8_arr_to_bytes(a) {
   return { $: "Bytes", _0: march_bytes_to_string(a) };
 }
+
+/* --js-int-check: [r] is the double result of [a op b]; throw when it is
+ * outside the doubles' exact integer range, where it has silently rounded. */
+export function march_ck_int(r, a, op, b, loc) {
+  if (Number.isSafeInteger(r)) return r;
+  throw new RangeError(`Int overflow on the JS target in ${loc}: ${a} ${op} ${b}`);
+}
+
+/* --js-int-check: an Int literal outside the doubles' exact range. */
+export function march_ck_lit(text, loc) {
+  throw new RangeError(`Int literal ${text} is not exact on the JS target in ${loc}`);
+}

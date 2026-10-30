@@ -1,0 +1,9 @@
+-- --js-int-check: an Int literal a double can't hold exactly (here a product
+-- the compiler folds to 1991060840532143835) throws instead of rounding.
+mod JsIntCheckLit do
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(int_to_string(1804289383 * 1103515245))
+  end
+end

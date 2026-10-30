@@ -4548,7 +4548,7 @@ let compile filename =
             collect_fn_lines "" user_ast.March_ast.Ast.mod_decls
           in
           let (js, map_opt) =
-            (try March_tir.Js_emit.emit_module ~source_file:filename ~fn_lines tir_for_js
+            (try March_tir.Js_emit.emit_module ~source_file:filename ~fn_lines ~int_check:!js_int_check tir_for_js
              with March_tir.Js_emit.Js_emit_error msgs ->
                List.iter (fun msg -> Printf.eprintf "%s\n" msg) msgs;
                exit 1)
@@ -6903,6 +6903,7 @@ let () =
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
     ("--debug-tui", Arg.Set debug_tui_mode, " Enable time-travel debugger (TUI mode)");
     ("--fmt",       Arg.Set do_fmt,         " Format source file in-place before compiling");
+    ("--js-int-check", Arg.Set js_int_check, " (JS) Throw when an Int + - * result leaves ±(2^53 - 1), naming the function (finds code that needs more than 53 bits)");
     ("--no-copy-runtime", Arg.Set no_copy_runtime, " (JS) Skip auto-copy of march_runtime.mjs / march_dom.mjs (for build tools that manage them)");
     ("--check-migration", Arg.Set check_migration,
      " Verify migrate_state soundness via SMT (requires --prior-schema and --new-schema)");
