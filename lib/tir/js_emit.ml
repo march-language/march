@@ -248,6 +248,8 @@ let emit_atom ctx = function
       emit ctx (n ^ "$clo")
     end else if Hashtbl.mem ctx.fn_names v.Tir.v_name
        && not (Hashtbl.mem ctx.param_names v.Tir.v_name)
+       (* a let-bound local of the same name shadows the function *)
+       && not (Hashtbl.mem ctx.name_env v.Tir.v_name)
     then emit ctx (n ^ "$clo")
     (* Local binding: honour any active shadow-rename. *)
     else emit ctx (js_local ctx v.Tir.v_name)
