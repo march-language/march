@@ -726,6 +726,103 @@ let print_refine_report_sites ~filename ~user_files () =
       | _ -> ())
     (March_refinecheck.Obligation.all ())
 
+(* --refine-report-sites=all (reflection design §6.1): one line per
+   obligation of any verdict, so a run can be compared site by site against a
+   baseline (`scripts/refine-oracle.sh monotone`).  A skip keeps the bare
+   flag's columns (reason slug before kind); the other verdicts have no
+   reason column:
+     proved|violated|trusted <TAB> user|stdlib <TAB> file:line:col <TAB> kind <TAB> callee <TAB> predicate *)
+let print_refine_report_sites_all ~filename ~user_files () =
+  let module O = March_refinecheck.Obligation in
+  let is_user_span (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || f = "" || f = "<unknown>" || List.mem f user_files
+  in
+  List.iter
+    (fun (o : O.t) ->
+      let span = o.span in
+      let kind =
+        match o.kind with
+        | O.Precondition -> "precondition"
+        | O.Postcondition -> "postcondition"
+        | O.Division -> "division"
+        | O.Termination -> "termination"
+      in
+      let slice = if is_user_span span then "user" else "stdlib" in
+      let loc =
+        Printf.sprintf "%s:%d:%d" span.March_ast.Ast.file span.March_ast.Ast.start_line
+          span.March_ast.Ast.start_col
+      in
+      match o.verdict with
+      | O.Skipped r ->
+        Printf.eprintf "skip\t%s\t%s\t%s\t%s\t%s\t%s\n" slice loc (O.reason_name r) kind o.callee
+          o.predicate
+      | v ->
+        Printf.eprintf "%s\t%s\t%s\t%s\t%s\t%s\n" (O.verdict_name v) slice loc kind o.callee
+          o.predicate)
+    (O.all ())
+
+(* --reflect-report (reflection design §2.4, phase 0): which user functions
+   would be reflected, and the first R-rule blocking each one that is not
+   (lib/refinecheck/refine_reflect.ml).  Run AFTER [Division_safety], whose
+   [Division] verdicts R4 reads from the ledger.  Inert: nothing else reads
+   the analysis. *)
+let print_reflect_report ~filename ~user_files ~type_map ~(recheck : unit -> unit)
+    (m : March_ast.Ast.module_) =
+  let module RR = March_refinecheck.Refine_reflect in
+  let module RT = March_refinecheck.Refine_term in
+  (* R2 needs a certificate for every recursive SCC of user code, which the
+     refinement walk decides only for DEMANDED SCCs.  Demanding them in the
+     real check (as --termination-report does) would file termination
+     obligations into the ledger this run also reports, so the demand runs
+     here instead: the same check again, with every user SCC demanded,
+     against a scratch ledger and a throwaway diagnostic context.  The real
+     ledger is restored by [with_scratch]; only the certificates are kept. *)
+  let certs =
+    if !RT.check_all then Hashtbl.copy RT.last_certs
+    else begin
+      let saved = Hashtbl.copy RT.last_certs in
+      RT.check_all := true;
+      Fun.protect
+        ~finally:(fun () ->
+          RT.check_all := false;
+          Hashtbl.reset RT.last_certs;
+          Hashtbl.iter (Hashtbl.replace RT.last_certs) saved)
+        (fun () ->
+          March_refinecheck.Obligation.with_scratch (fun () ->
+              recheck ();
+              Hashtbl.copy RT.last_certs))
+    end
+  in
+  let module O = March_refinecheck.Obligation in
+  let module RE = March_refinecheck.Refine_encode in
+  let is_user_span (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || f = "" || f = "<unknown>" || List.mem f user_files
+  in
+  let t =
+    March_refinecheck.Refine_term.analyze ~type_map
+      ~file_mod:m.March_ast.Ast.mod_name.March_ast.Ast.txt m.March_ast.Ast.mod_decls
+  in
+  let ne = Hashtbl.create 64 in
+  List.iter (fun sp -> Hashtbl.replace ne sp ()) !March_typecheck.Typecheck.last_nonexhaustive_match_spans;
+  let inputs =
+    { RR.certs = Hashtbl.find_opt certs;
+      nonexhaustive = Hashtbl.mem ne;
+      division =
+        (fun sp ->
+          match List.filter (fun (o : O.t) -> o.O.kind = O.Division) (O.obligations_at sp) with
+          | [] -> None
+          | os ->
+            if List.for_all (fun (o : O.t) -> o.O.verdict = O.Proved) os then Some O.Proved
+            else Some (List.hd os).O.verdict);
+      type_map = Some type_map;
+      vocab = (fun s -> s = "len" || List.mem s RE.set_vocabulary || RE.ctor_of_tester s <> None);
+      pred_fn = (fun s -> s = "len" || RE.known_predicate_fn s) }
+  in
+  List.iter prerr_endline
+    (RR.report_lines ~is_user:is_user_span (RR.analyze inputs t m.March_ast.Ast.mod_decls))
+
 (* --refine-audit: every declared refinement occurrence
    ([March_refinecheck.Refine_audit.sites]), classified
    ([March_refinecheck.Refine_audit.classify]) against what the checker
@@ -2309,12 +2406,24 @@ let run_test_cmd args =
       ~type_map
       errors desugared;
     if !refine_report then print_refine_report ~filename ~user_files ();
-    if !refine_report_sites then print_refine_report_sites ~filename ~user_files ();
+    if !refine_report_sites && not !refine_report_sites_all then
+      print_refine_report_sites ~filename ~user_files ();
     if !termination_report then
       print_termination_report ~filename ~user_files ~type_map desugared;
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
+    (* After [Division_safety]: its [Division] obligations are part of the
+       listing (and what R4 reads). *)
+    if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
+    if !reflect_report then
+      print_reflect_report ~filename ~user_files ~type_map
+        ~recheck:(fun () ->
+          March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
+            ~stdlib_files:(stdlib_span_files stdlib_decls)
+            ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls ~type_map
+            (March_errors.Errors.create ()) desugared)
+        desugared;
     (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
        refinement contract are admitted when their call site's PRECONDITION was
        actually discharged, rather than banned by name.  It must run here, after
@@ -3014,7 +3123,7 @@ let compile filename =
        beats a cache hit on the run that asked for the diagnostic. *)
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
-      || !termination_report
+      || !termination_report || !reflect_report || !refine_report_sites_all
       || !report_contracts
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
@@ -3577,12 +3686,22 @@ let compile filename =
     ~type_map
     errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
-  if !refine_report_sites then print_refine_report_sites ~filename ~user_files ();
+  if !refine_report_sites && not !refine_report_sites_all then
+    print_refine_report_sites ~filename ~user_files ();
   if !termination_report then
     print_termination_report ~filename ~user_files ~type_map desugared;
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
+  if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
+  if !reflect_report then
+    print_reflect_report ~filename ~user_files ~type_map
+      ~recheck:(fun () ->
+        March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
+          ~stdlib_files:(stdlib_span_files stdlib_decls)
+          ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls ~type_map
+          (March_errors.Errors.create ()) desugared)
+      desugared;
   (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
      refinement contract are admitted when their call site's PRECONDITION was
      actually discharged, rather than banned by name.  It must run here, after
@@ -6859,6 +6978,10 @@ let () =
      " Print one line per recursive function of user code with its termination class (structural, Int metric, lexicographic, through a function value, none) and the metric inference finds for an uncertified one; changes no verdict");
     ("--refine-report-sites", Arg.Set refine_report_sites,
      " Print one line per skipped refinement obligation: file:line:col, reason, callee, predicate");
+    ("--refine-report-sites=all", Arg.Set refine_report_sites_all,
+     " Print one line per refinement obligation of any verdict (proved, skip, violated, trusted): file:line:col, kind, callee, predicate");
+    ("--reflect-report", Arg.Set reflect_report,
+     " Print one line per user function: reflected (its body usable in predicates, from phase 1 of reflection) or the first rule that blocks it; changes no verdict");
     ("--refine-audit", Arg.Set refine_audit,
      " Print every declared refinement the checker never enforces or only warns about, plus bucket counts (user code and user+stdlib); changes no verdict");
     ("--refine-suggest", Arg.String (fun s -> refine_suggest_target := Some s),

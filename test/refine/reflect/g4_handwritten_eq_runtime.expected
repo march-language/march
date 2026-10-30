@@ -1,0 +1,2 @@
+reflect	g4_handwritten_eq_runtime.march:7:7	impl Eq.eq	no	R1:is an `impl` method (g4_handwritten_eq_runtime.march:7:7)
+reflect	g4_handwritten_eq_runtime.march:14:5	main	no	R1:is `main` (g4_handwritten_eq_runtime.march:14:5)

@@ -1,0 +1,17 @@
+mod G4 do
+  needs IO.Console
+
+  type P = P(Int, Int)
+
+  impl Eq(P) do
+    fn eq(a : P, b : P) : Bool do
+      match (a, b) do
+        (P(x, _), P(y, _)) -> x == y
+      end
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(if P(1, 3) == P(1, 2) do "eq" else "ne" end)
+  end
+end
