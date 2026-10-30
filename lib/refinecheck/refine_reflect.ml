@@ -422,7 +422,7 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
             if List.mem nm table_ops then ()
             else if List.mem nm div_ops then begin
               match s.RT.s_args with
-              | [ _; A.ELit (A.LitInt k, _) ] when k <> 0 -> ()
+              | [ _; d ] when Refine_encode.nonzero_int_literal d <> None -> ()
               | [ _; A.ELit (A.LitInt 0, _) ] -> add 4 "divides by zero" sp
               | [ _; d ] -> (
                 match inp.division sp with
@@ -1019,8 +1019,8 @@ and builtin c env nm args =
   | "*", [ a; A.ELit (A.LitInt k, _) ] -> Smt.MulLit (k, v a)
   | "*", [ a; b ] -> Smt.Mul (v a, v b)
   | "negate", [ a ] when is_int_ty (ty_of a) -> Smt.Neg (v a)
-  | (("/" | "%") as op), [ a; A.ELit (A.LitInt k, _) ] when k <> 0 ->
-    Refine_scope.truncating_division ~op ~nonneg_dividend:false (v a) (`Lit k)
+  | (("/" | "%") as op), [ a; d ] when RE.nonzero_int_literal d <> None ->
+    Refine_scope.truncating_division ~op ~nonneg_dividend:false (v a) (`Lit (Option.get (RE.nonzero_int_literal d)))
   | "&&", [ a; b ] -> Smt.And (v a, v b)
   | "||", [ a; b ] -> Smt.Or (v a, v b)
   | "not", [ a ] -> Smt.Not (v a)

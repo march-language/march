@@ -14668,7 +14668,7 @@ let const_fn_suite =
         Alcotest.(check bool) "says the annotation is unnecessary" true
           (contains text "needs no annotation"));
 
-    Alcotest.test_case "@[measure] on a two-parameter function is an error" `Quick
+    Alcotest.test_case "@[measure] on a two-parameter function is accepted (F2 lifted)" `Quick
       (fun () ->
         let src =
           "mod M do\n\
@@ -14677,9 +14677,11 @@ let const_fn_suite =
           \  fn depth_at(t : Tree, k : Int) : Int do k end\n\
            end\n"
         in
+        (* Reflection phase 1a (option A, F2 lifted): a two-parameter
+           measure is reflected like any function; this one is total and
+           pure, so there is no error. *)
         let text = refine_error_text_d src in
-        Alcotest.(check bool) "is an error" true (contains text "@[measure] `depth_at`");
-        Alcotest.(check bool) "names the requirement" true (contains text "takes 2 parameters"));
+        Alcotest.(check bool) "is not an error" false (contains text "@[measure] `depth_at`"));
 
     (* The P1b fixtures measure over an UNDECLARED `Tree(a)`: symbolic
        fallback is a translation, and the gate must leave it alone. *)

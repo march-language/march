@@ -123,6 +123,15 @@ the two-stage discharge, the two equalities, the measure merge and `@[opaque]`
     `test/` or `examples/` matched `-name '*.march'`, and parsing it shifted tree-sitter's batch
     state so a known failure parsed "clean": the gate went red for a reason unrelated to the grammar.
 
+12. **A measure whose sort the encoding cannot model is not an error.** The final full run found
+    three suites (`measures-p1b`, `const-fn-predicate`) pinning a `@[measure]` over an undeclared
+    `Tree(a)` that falls back to symbolic reasoning; under option A it was `invalid_measure` (R8).
+    The reference has always said such a measure is not an error, so the gate ignores an R8
+    blocker, in both tiers. Same run: a `/ -2` divisor (`negate(2)`) was R4 in the analysis while the
+    gate and predicate translator treat it as the literal it is; R4 and `term_of_body` now use
+    `Refine_encode.nonzero_int_literal` too (`gate-mb`). And `const-fn-predicate`'s "two-parameter
+    `@[measure]` is an error" is now "accepted (F2 lifted)", as the design says.
+
 ## Tests
 
 Group `reflect-unfold` (`test/test_refine_unfold.ml`, 36 cases, all through the real driver,
@@ -205,3 +214,12 @@ five: a deviation from §6.3's protocol for the sweep row only.
 - CI's z3 4.8.12 was not run. Its unsat cores may differ from 4.16's; the `uses:` tests assert
   containment of one function, which both versions should give.
 - Each commit was not built on its own; the branch head is.
+- The oracles and timings above were measured on `07b186292`, before ruling 12's fix. That fix only
+  removes errors (R8) and admits `/ -k` divisors into reflection; the monotone and IR oracles were
+  not re-run after it.
+
+## Final test runs (branch head)
+
+`scripts/run-tests.sh` on `07b186292`: every suite green except `test_refinecheck` (6 failures, ruling
+12); after the fix, `scripts/run-tests.sh refinecheck`: 2,039 tests green. `run_errors`: 301 green.
+`scripts/check-docs.sh` and `scripts/check-tree-sitter.sh`: green.

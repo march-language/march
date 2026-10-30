@@ -8800,11 +8800,14 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
                fd.A.fn_name.A.txt fd.A.fn_name.A.txt (blocker_text txt))
         | _ -> ())
     (opaque_fns m.A.mod_decls);
-  (* An unfolding-tier measure must be reflected (§5.2, option A). *)
+  (* An unfolding-tier measure must be reflected (§5.2, option A).  A sort
+     the encoding cannot model (R8: an undeclared or unencodable type) is
+     not an error, as it never was: the measure is simply not reflected. *)
   List.iter
     (fun (name, (fd : A.fn_def)) ->
       if not (List.mem "opaque" fd.A.fn_attrs) then
         match reflect_blocker fd with
+        | Some (8, _) -> ()
         | Some (k, txt) ->
           let why =
             if k = 2 && Refine_term.uncertified (Lazy.force term) fd.A.fn_name.A.span then
@@ -8869,6 +8872,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
           else
             match reflect_blocker fd with
             | Some (2, _) when Refine_term.uncertified (Lazy.force term) fd.A.fn_name.A.span -> [ not_structural ]
+            (* A sort outside the encoding (an undeclared type) falls back to
+               symbolic reasoning, as before: not an error. *)
+            | Some (8, _) -> msgs
             | Some (_, txt) -> [ "is not reflected: it " ^ blocker_text txt ]
             | None -> msgs
         in
