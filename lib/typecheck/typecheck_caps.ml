@@ -276,6 +276,19 @@ let rec literal_path_uses (acc : (string * string * Ast.span) list)
   | Ast.ELam (_, b, _) | Ast.ELetFn (_, _, _, b, _) -> literal_path_uses acc b
   | _ -> acc
 
+(* Check 2's "declared but no function requires" warning, shared by
+   [check_module_needs] and [check_deferred_imports]. *)
+let warn_unused_needs (env : env) (mod_name : string) (need : string) (need_sp : Ast.span) : unit =
+  Err.warning_with_fix ~code:Err.Code.unused_needs env.errors ~span:need_sp
+    ~fix:(Err.FDelete {
+      start_line = need_sp.March_ast.Ast.start_line;
+      end_line   = need_sp.March_ast.Ast.end_line })
+    (render_parts [
+      MPText "module "; MPCode mod_name; MPText " declares ";
+      MPCode ("needs " ^ need); MPText " but no function requires ";
+      MPCode ("Cap(" ^ need ^ ")"); MPText " or a sub-capability.";
+      MPBreak; MPText "help: remove the unused capability declaration." ])
+
 let check_module_needs (env : env) (mod_name : Ast.name)
     ~(cap_qname_prefix : string) (decls : Ast.decl list) =
   (* [cap_qname_prefix] carries no trailing dot (e.g. "", "Lib", "Lib.Sub").
@@ -1366,6 +1379,15 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       decls
     |> List.sort_uniq String.compare)
   in
+  (* Same condition Check 4 below uses to defer an import. *)
+  let has_deferred_import =
+    List.exists (function
+      | Ast.DUse (ud, _) ->
+        not (List.mem_assoc
+               (String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path))
+               env.module_caps)
+      | _ -> false) decls
+  in
   List.iter (fun need ->
     let need_sp =
       let rec find_span = function
@@ -1385,15 +1407,16 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               || List.exists (fun cap_path -> cap_subsumes need cap_path)
                    (Lazy.force own_transitive_caps) in
     if not used then
-      Err.warning_with_fix ~code:Err.Code.unused_needs env.errors ~span:need_sp
-        ~fix:(Err.FDelete {
-          start_line = need_sp.March_ast.Ast.start_line;
-          end_line   = need_sp.March_ast.Ast.end_line })
-        (render_parts [
-          MPText "module "; MPCode mod_name.txt; MPText " declares ";
-          MPCode ("needs " ^ need); MPText " but no function requires ";
-          cap need; MPText " or a sub-capability.";
-          MPBreak; MPText "help: remove the unused capability declaration." ])
+      (* A deferred Check-4 import (an importee not analysed yet) will require
+         the importee's whole declared set (fail-closed, see
+         [check_deferred_imports]), possibly including this very [needs]:
+         reporting it unused now would contradict that error, and the autofix
+         would re-break the build.  Hold the verdict until the deferred imports
+         are resolved. *)
+      if has_deferred_import then
+        env.deferred_unused_needs :=
+          (mod_name.txt, need, need_sp) :: !(env.deferred_unused_needs)
+      else warn_unused_needs env mod_name.txt need need_sp
   ) (List.filter (fun need -> not (List.mem need unknown_needs)) declared_needs);
   (* Check 3 (hint): Cap(IO) root — suggest narrowing.  Not on `main`: the
      reference calls `fn main(cap : Cap(IO))` the entry-point convention, so
@@ -2351,4 +2374,20 @@ let check_deferred_imports (env : env) : unit =
               MPBreak; MPText "help: add "; MPCode ("needs " ^ req_cap);
               MPText " to the module body." ])
       ) req_caps
-  ) pending
+  ) pending;
+  (* Check 2's held-back verdicts: a [needs] is unused only if no deferred
+     import of its module requires it. *)
+  let held = List.rev !(env.deferred_unused_needs) in
+  env.deferred_unused_needs := [];
+  List.iter (fun (importer, need, need_sp) ->
+    let required =
+      List.exists (fun (imp, _, imported, _) ->
+        imp = importer &&
+        (match List.assoc_opt imported env.module_caps with
+         | Some req_caps ->
+           List.exists (fun c -> cap_subsumes need c || cap_subsumes c need) req_caps
+         | None -> false))
+        pending
+    in
+    if not required then warn_unused_needs env importer need need_sp
+  ) held
