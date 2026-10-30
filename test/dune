@@ -14843,3 +14843,20 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (system "rm -rf js_bundle_out && mkdir js_bundle_out && %{exe:../bin/main.exe} --target js -o js_bundle_out/js_bundle.mjs native/js_bundle.march 2>/dev/null && cd js_bundle_out && node js_bundle.mjs && echo \"files: $(find . -name '*.mjs' | sort | sed 's|^\\./||' | tr '\\n' ' ' | sed 's/ $//')\""))))
 
 (rule (alias runtest) (action (diff native/js_bundle.expected js_bundle.out)))
+
+; js_module_extern_native — a module declaring JS-module externs ("./x.mjs")
+; compiles natively when nothing native calls them (valid C symbol names).
+(rule
+ (targets native_js_module_extern_native native_js_module_extern_native.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/js_module_extern_native.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_js_module_extern_native native/js_module_extern_native.march)
+   (with-stdout-to native_js_module_extern_native.out (system "./native_js_module_extern_native")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/js_module_extern_native.expected native_js_module_extern_native.out)))

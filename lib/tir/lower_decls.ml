@@ -344,9 +344,15 @@ let lower_extern_fns (edef : Ast.extern_def) (ext_fns : Ast.extern_fn list) : Ti
   List.map (fun (ef : Ast.extern_fn) ->
       let params = List.map (fun (_, t) -> Lower_types.lower_ty t) ef.ef_params in
       let ret = Lower_types.lower_ty ef.ef_ret_ty in
+      (* A JS module specifier ("./x.mjs", "npm:...") isn't a C identifier;
+         its externs still get a valid native symbol, so a module carrying a
+         browser backend compiles natively as long as nothing native calls
+         one (a call is then an undefined-symbol link error, not bad IR). *)
+      let c_ident s = String.map (fun c ->
+          match c with 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' -> c | _ -> '_') s in
       let c_name = match ef.ef_symbol with
-        | Some s -> s
-        | None   -> edef.Ast.ext_lib_name ^ "_" ^ ef.ef_name.txt in
+        | Some s -> c_ident s
+        | None   -> c_ident edef.Ast.ext_lib_name ^ "_" ^ ef.ef_name.txt in
       let js_sym = match ef.ef_symbol with
         | Some s -> s
         | None   -> ef.ef_name.txt in
