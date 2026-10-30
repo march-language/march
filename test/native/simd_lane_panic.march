@@ -6,7 +6,7 @@
 -- refinement type on Simd.extract_i32x4's index (`{Int | 0 <= _ && _ < 4}`)
 -- is NOT a backstop: an obligation the checker cannot decide is reported as
 -- a HINT and Skipped, not rejected. `lane()` below is deliberately opaque
--- to the checker, so this compiles and reaches run time with index 6.
+-- to the checker (`@[opaque]`), so this compiles and reaches run time with index 6.
 --
 -- Asserted against the COMPILED binary's stderr; the interpreter raises its
 -- own error for the same call ("simd_i32x4_extract: lane 6 out of range
@@ -18,7 +18,7 @@
 mod SimdLanePanic do
   needs IO.Console
 
-  pfn lane(n : Int) : Int do n + 5 end
+  @[opaque] pfn lane(n : Int) : Int do n + 5 end -- reflected, `lane(1) == 6` is a violation
 
   fn main(_cap_console : Cap(IO.Console)) : () do
     let v = Simd.make_i32x4(1, 2, 3, 4)

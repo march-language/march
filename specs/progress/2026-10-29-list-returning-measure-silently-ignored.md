@@ -12,3 +12,5 @@ Fact F6 of `specs/2026-10-29-refinement-reflection-design.md` (§0.3 row c1; pin
 - Fixed by phase 1 of the reflection design: a list result has a datatype sort (§3.2), and under D2 a
   `@[measure]` that is not reflectable is an error (§5.2). A smaller interim fix is an
   `invalid_measure` for a result sort the axiom tier cannot encode.
+
+**Closed 2026-10-30** by reflection phase 1a (`specs/progress/2026-10-30-reflection-phase1a.md`).

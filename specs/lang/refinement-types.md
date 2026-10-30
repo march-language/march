@@ -1192,15 +1192,120 @@ was a live false positive until 2026-07-31; see item 6 in
 
 ## Measures: Refining over Data Structures
 
-A **measure** is a function from a value to an `Int` (or `Bool`) that you can
-mention in predicates. The built-in `len` measures a list:
+A predicate can call your own functions. The checker knows what such a call
+means because it **reflects** the function: it reads the function's body and
+uses it as the function's meaning in the logic. The built-in `len` is one such
+function over lists:
 
 ```march
 fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do ... end
 ```
 
-You can define your own with the `@[measure]` attribute, for example the size
-of a tree:
+### Reflection: your functions in predicates
+
+A function is reflected automatically when all of these hold. There is nothing
+to annotate.
+
+- It **terminates**, with a structural certificate: every recursive call is on
+  a part of the value it matched on. (A function that terminates only by a
+  numeric measure is not reflected yet.)
+- It has **no effects**: no printing, no actors, no `dbg`.
+- It **cannot fail**: no `panic`, `todo` or runtime `assert`, and no `/` or
+  `%` except by a non-zero literal.
+- Every `match` in it **covers every case**, guarded arms included.
+- It calls only reflected functions, constructors, and the arithmetic,
+  comparison and Boolean operators.
+- It takes no function as a parameter and makes no lambda.
+- Its parameters and result are `Int`, `Bool`, data types (lists, options,
+  your own types) or type variables, and it does not return `Unit`.
+- It is not marked `@[opaque]`, `@[assume]` or `@[trusted]`, and its name is not
+  one predicates already give a meaning (`len`, the set words, `is_<Ctor>`).
+
+The standard library is reflected under the same rules.
+
+Here `is_small` is reflected, so the path fact `is_small(n)` tells the checker
+`n < 10`:
+
+```march
+fn is_small(n : Int) : Bool do n < 10 end
+
+fn need_small(n : {Int | _ < 10}) : Int do n end
+
+fn f(n : Int) : Int do
+  if is_small(n) do need_small(n) else 0 end   -- proved
+end
+```
+
+A reflected call may appear in a predicate, as an argument, or as the value of
+a `let`:
+
+```march
+fn inc(n : Int) : Int do n + 1 end
+
+fn idx(i : {Int | _ < inc(3)}) : Int do i end
+fn need(x : {Int | _ == 2}) : Int do x end
+
+idx(3)            -- proved
+idx(4)            -- rejected: 4 < inc(3) is false
+need(inc(1))      -- proved
+let r = inc(1)
+need(r)           -- proved
+```
+
+Functions with several parameters, and functions that return a list or a
+`Bool`, are reflected like any other.
+
+**One step at a time.** The checker uses each reflected call's definition
+**once**, at the arguments it sees. It does not then expand the calls that
+definition produces. So `cat(Nil, ys) == ys` is proved, because one step of
+`cat` gives `ys`. But `len(cat([1], [2])) == 2` is not: one step gives
+`Cons(1, cat(Nil, [2]))`, and the inner call is not expanded. Such an
+obligation is reported as unverified with the reason `reflect-fuel`. An
+`assert` of the intermediate fact is the way through today.
+
+**A call outside the function's domain says nothing.** When a reflected
+function has refined parameters, its definition is used only where the
+arguments satisfy them. For `fn pos(n : {Int | _ >= 0}) : Int do n end`, the
+checker knows `pos(1) == 1` but nothing about `pos(0 - 1)`.
+
+**Equality in a predicate is structural.** `a == b` in a predicate means "the
+same value", for every type. A type with a hand-written `Eq` (one that, say,
+compares only some fields) still gets structural equality in a predicate, and
+the checker warns about it (`predicate_eq_structural`). Inside a reflected
+body, `==` is the program's own `==`: structural for `Int`, `Bool`, `String`
+and types whose `Eq` is derived all the way down, and an unknown function
+otherwise (a hand-written `Eq`, anything holding a `Float`, a type variable).
+An `Eq` that prints, panics or loops stops the function from being reflected.
+
+**`Int` is mathematical.** The checker reasons about `Int` as the unbounded
+integers. Compiled code uses 63-bit integers, which wrap around. So a fact such
+as `inc(n) > n` holds in the logic but not at the largest `Int`. Overflow is not
+checked yet.
+
+**Seeing what is reflected.** `march --check --reflect-report file.march`
+prints one row per function: `reflected`, or the first rule that blocks it.
+When a predicate calls a function that exists but is not reflected, the
+warning names the reason:
+
+```
+`rev` is not reflected, so this refinement is not checked: it calls println (line 14). [refinement_unchecked]
+```
+
+`--refine-report-sites=all` marks a proof that used a definition with the
+functions it used, for example `uses: is_small`.
+
+**Opting out.** `@[opaque]` keeps a function's body out of the logic, so
+callers see only its declared contract. Use it when a body is expected to
+change and callers' proofs should not depend on it, or when unfolding it slows
+checking. `@[opaque]` on a function that would not be reflected anyway draws
+an `attribute_no_effect` warning.
+
+### `@[measure]`: insisting on reflection
+
+`@[measure]` says "this function must be reflected". If it is not, the
+compiler reports `invalid_measure` and names the first reason. So a later edit
+that adds a `println` to a measure is an error, not a quiet loss of every proof
+that used it:
 
 ```march
 type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
@@ -1216,12 +1321,15 @@ end
 fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do ... end
 ```
 
-The solver reasons about measures **by structure**: from the recursion
-equations above it computes `size(Node(Leaf, x, Leaf)) = 1`, so an out-of-bounds
-index into a literal tree is caught, and `size(t) >= 0` is known for any `t`.
-Measures may call **other measures** and be **mutually recursive** (e.g. a
-`Tree`/`Forest` pair), and the built-in `List` is modelled too, so a user
-`length` measure over `List(a)` reasons by structure just like `size`.
+A measure of one data-type parameter with an `Int` or set result, like `size`,
+is also given its recursion equations as quantified axioms, as before. The
+solver then reasons about it **by structure** to any depth: it computes
+`size(Node(Leaf, x, Leaf)) = 1`, so an out-of-bounds index into a literal tree
+is caught, and `size(t) >= 0` is known for any `t`. Such measures may call
+other measures and be mutually recursive (a `Tree`/`Forest` pair), and the
+built-in `List` is modelled too. Any other `@[measure]` (several parameters, a
+`Bool` or list result) is reflected like an ordinary function, one step at a
+time. `@[opaque]` together with `@[measure]` is the error `reflect_conflict`.
 
 ### Constant functions as bounds
 
@@ -1642,23 +1750,23 @@ and cheap. The consequence worth spelling out clearly:
 
 A `@[measure]` is a *promise* that the function is a **total, terminating, pure**
 mathematical function: the solver trusts it, so a broken one would let it
-"prove" anything. March enforces the promise as a **hard compile error**. A
-`@[measure]` is rejected if it:
+"prove" anything. March enforces the promise as a **hard compile error**. The
+rule is the reflection rule above, and it follows calls: a measure that calls a
+function that prints, panics or loops is rejected, naming that function. In
+particular a `@[measure]` is rejected if it:
 
-- has an **effect** (`spawn`, `send`, `dbg`, `assert`),
-- can **diverge or abort** (`panic`, `todo`, `exit`),
-- is **non-total**: a non-exhaustive `match` on its parameter, or a `/` / `%`
-  that could divide by zero,
+- has an **effect** (`spawn`, `send`, `dbg`, `assert`), directly or through a
+  function it calls,
+- can **diverge or abort** (`panic`, `todo`, `exit`), directly or through a
+  function it calls,
+- is **non-total**: a non-exhaustive `match`, or a `/` / `%` that could divide
+  by zero,
 - is **not recursive over the structure**: a recursive call with an argument that isn't a
   component of the matched parameter. This covers the measure's whole call cycle, not only its
   calls to itself: two measures calling each other must form a cycle with a
   [structural certificate](#the-structural-certificate), or both are rejected,
-- does **not take exactly one parameter**, the value it measures: a predicate can
-  only apply a measure to one argument, so a zero-argument or multi-parameter
-  `@[measure]` could never be translated and the annotation would only silence
-  the vocabulary warning while every call site went unverified. A zero-argument
-  constant needs no annotation (see [Constant functions as
-  bounds](#constant-functions-as-bounds)).
+- takes **no parameters**. A zero-argument constant needs no annotation (see
+  [Constant functions as bounds](#constant-functions-as-bounds)).
 
 A measure that is sound but outside what the encoding can model (see
 limitations) isn't an error: it simply falls back to weaker, symbolic
@@ -4617,13 +4725,12 @@ The editor offers quick fixes on a `termination_unproved` diagnostic that
 
 ## Which functions are reflected: `--reflect-report`
 
-Today a predicate can use a function only if it is a measure or a constant
-function; any other function's body never reaches the solver. *Reflection* will
-make a function's body usable in predicates, automatically, for every function
-that terminates, has no effects, cannot fail, and calls only such functions
-(`specs/2026-10-29-refinement-reflection-design.md`). Before any proof uses it,
-`--reflect-report` shows which functions qualify, and for each one that does not,
-the first rule that stops it. For this program:
+A predicate can use a function whose body is *reflected*: automatically, every
+function that terminates, has no effects, cannot fail, and calls only such
+functions (see [Reflection](#reflection-your-functions-in-predicates) and
+`specs/2026-10-29-refinement-reflection-design.md`). `--reflect-report` shows
+which functions qualify, and for each one that does not, the first rule that
+stops it. For this program:
 
 ```march
 mod Prog do

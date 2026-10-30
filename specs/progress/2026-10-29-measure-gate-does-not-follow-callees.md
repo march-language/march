@@ -15,3 +15,5 @@ Fact F7 of `specs/2026-10-29-refinement-reflection-design.md` (§0.3 rows c3b an
 - Fixed by phase 1 of the reflection design: D2 makes `@[measure]` assert reflection, so the gate
   becomes the R1-R11 fixpoint of `lib/refinecheck/refine_reflect.ml`, which follows callees and
   dispatch edges (`--reflect-report` already shows the blocker for each of these).
+
+**Closed 2026-10-30** by reflection phase 1a (`specs/progress/2026-10-30-reflection-phase1a.md`).

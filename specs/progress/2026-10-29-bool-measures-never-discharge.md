@@ -12,3 +12,5 @@ Fact F5 of `specs/2026-10-29-refinement-reflection-design.md` (§0.3 rows c2, c2
 - Fixed by phase 1 of the reflection design (§3.2: a reflected function's `Bool` result has sort
   `Bool`, and D2 merges `@[measure]` into reflection). Until then the reference should not promise
   Bool measures.
+
+**Closed 2026-10-30** by reflection phase 1a (`specs/progress/2026-10-30-reflection-phase1a.md`).
