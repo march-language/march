@@ -342,6 +342,8 @@ native_js_self_tail_call_rc_drop: coverage audit (user + stdlib): 198 enforced, 
 native_js_self_tail_call_rc_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_tail_loop: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_tail_loop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_tuple_let_match: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_tuple_let_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_unmapped_builtin: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_unmapped_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_unreached_c_extern: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced

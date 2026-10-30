@@ -471,6 +471,9 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`let x = match t do (a, _) -> a end` on a tuple works on the JS target.** The
+  compiler's non-exhaustive default was emitted after the tuple's one branch and
+  overwrote `x` with a "non-exhaustive pattern match" throw.
 - **A JS build ignores another module's `main`.** `--target js` now emits only what the
   entry's own `main` reaches, so a library module with its own `main` (a game's desktop
   entry beside its browser one) no longer fails the build with "extern ... cannot be

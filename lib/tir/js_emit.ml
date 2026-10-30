@@ -1055,14 +1055,18 @@ and emit_case_impl ctx result_var expr =
          | None -> emit_stmts ctx br.Tir.br_body);
         unbind_br_vars ctx binds
       ) branches;
-      (match default with
-       | Some d ->
+      (* A tuple's one branch always matches (it only destructures), so the
+         default — the compiler's non-exhaustive throw — is reachable only
+         when there is no branch.  Emitted after a branch in assignment mode
+         it overwrote the branch's result with the throw. *)
+      (match default, branches with
+       | Some d, [] ->
          (match result_var with
           | Some rv ->
             emit_indent ctx; emit ctx (rv ^ " = ");
             emit_val ctx d; emit ctx ";\n"
           | None -> emit_stmts ctx d)
-       | None -> ())
+       | _ -> ())
     end else
     (* Also take the literal if/else path when the scrutinee's static type is
        ERASED (a TVar-typed tuple-field / ctor-payload binder — e.g. the `n` in a

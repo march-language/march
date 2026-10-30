@@ -1,0 +1,25 @@
+-- `let x = match (a, b) do (p, _) -> p end` on the JS target: the tuple case
+-- destructures its one branch; the compiler's non-exhaustive default must not
+-- also be emitted after it (it overwrote the result with a throw).
+mod JsTupleLetMatch do
+  needs IO.Console
+
+  type Fight = { hp : Int, shake : Int }
+
+  pfn take_shake(f : Fight) : (Fight, Int) do ({ f with shake: 0 }, f.shake) end
+
+  pfn step(f : Fight) : Int do
+    let stepped = take_shake(f)
+    let f2 = match stepped do
+      (ff, _) -> ff
+    end
+    let shake = match stepped do
+      (_, n) -> n
+    end
+    f2.hp + shake
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(int_to_string(step({ hp: 40, shake: 2 })))
+  end
+end
