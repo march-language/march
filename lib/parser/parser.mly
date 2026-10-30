@@ -544,6 +544,10 @@ fn_attr:
   | AT; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN { (name ^ ":transient", []) }
   | AT; LBRACKET; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN; RBRACKET
       { (name ^ ":transient", []) }
+  (* `opaque` is a KEYWORD too (`opaque type`), so `@[opaque]` (reflection
+     design §2.5: keep a function's body out of the logic) needs its own
+     production, exactly like `transient` above. *)
+  | AT; LBRACKET; OPAQUE; RBRACKET { ("opaque", []) }
 
 decl:
   (* `module Name do` (D4): the token filter mints MODULE_KW for `module`
