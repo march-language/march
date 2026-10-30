@@ -486,6 +486,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`println` and `print` write a string's bytes on the JS target.** Under Node a string
+  holding binary data (raw bytes) printed each byte's UTF-8 encoding; it now writes the
+  bytes, as natively. `march_string_bytes(s)` (exported by `march_runtime.mjs`) gives an
+  extern a String's bytes as a `Uint8Array`.
 - **Matching a tuple of strings against literals works on the JS target.** A tuple
   field's type is erased there, so `match (model, view) do ("bulwark", 0) -> … end`
   switched on the string's (absent) constructor tag and never matched.

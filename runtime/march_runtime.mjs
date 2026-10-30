@@ -3,10 +3,28 @@
  * Provides builtins that don't inline directly to JS primitives.
  */
 
-/** process.stdout.write without newline (mirrors march's `print` builtin) */
-export function march_print(s) {
-  process.stdout.write(String(s));
+/* print / println: the string's bytes (see "Byte strings"). Under Node a
+ * string holding raw bytes (U+F780..U+F7FF) is written as those bytes, as
+ * the native target writes them; anything else is ordinary text. */
+function march_has_raw(s) {
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); if (c >= 0xF780 && c <= 0xF7FF) return true; }
+  return false;
 }
+function march_write(s, nl) {
+  s = String(s);
+  if (typeof process !== "undefined" && process.stdout && process.stdout.write) {
+    if (march_has_raw(s)) {
+      const b = march_encode_bytes(s);
+      process.stdout.write(nl ? Buffer.concat([Buffer.from(b), Buffer.from("\n")]) : Buffer.from(b));
+    } else process.stdout.write(nl ? s + "\n" : s);
+  } else console.log(s);
+}
+
+/** process.stdout.write without newline (mirrors march's `print` builtin) */
+export function march_print(s) { march_write(s, false); }
+
+/** println: the string and a newline */
+export function march_println(s) { march_write(s, true); }
 
 /** Float → string mirroring the interpreter's OCaml `string_of_float`
  *  (`%.12g` + a trailing '.' on bare integers): 1.0 -> "1.", 1.5 -> "1.5",
@@ -111,6 +129,9 @@ function march_utf8_seq(b, i, n) {
   if ((len === 3 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF))) || (len === 4 && (cp < 0x10000 || cp > 0x10FFFF))) return null;
   return { len, cp };
 }
+
+/** A March String's bytes, as a Uint8Array (the inverse of march_bytes_to_string). */
+export function march_string_bytes(s) { return march_encode_bytes(s); }
 
 /** Raw bytes (a Uint8Array) to a March String in canonical form. */
 export function march_bytes_to_string(b) {

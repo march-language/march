@@ -666,7 +666,8 @@ and emit_val_impl ctx expr =
       | "string_is_empty", [a] ->
         emit ctx "("; emit_atom ctx a; emit ctx " === \"\")"
       | ("println" | "print_line"), [a] ->
-        emit ctx "console.log("; emit_atom ctx a; emit ctx ")"
+        use_runtime ctx "march_println";
+        emit ctx "march_println("; emit_atom ctx a; emit ctx ")"
       | "print", [a] ->
         use_runtime ctx "march_print";
         emit ctx "march_print("; emit_atom ctx a; emit ctx ")"

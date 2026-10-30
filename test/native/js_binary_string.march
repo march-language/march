@@ -41,6 +41,8 @@ mod JsBinaryString do
         println(int_to_string(string_byte_length(hs)) ++ " " ++ int_to_string(string_byte_at(hs, 2)) ++ " " ++ bool_to_string(String.slice(hs, 0, 2) == "é"))
       Err(err) -> println(err)
     end
+    -- println writes a string's bytes, raw ones included (byte 200 here), as natively
+    println(Bytes.to_string(Bytes.from_list([72, 200, 105])))
     let n = 3000000
     let big = bigBinary(n)
     let t0 = nowMs()
