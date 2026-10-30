@@ -14687,3 +14687,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/file_handle_leak_probe.expected native_file_handle_leak_probe.out)))
+
+; js_tail_loop — self tail calls (incl. the Perceus ESeq shape) run in constant stack; closures built in the loop keep each iteration's values.
+(rule
+ (targets js_tail_loop.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_tail_loop.march) march_runtime.mjs )
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime 
+              -o js_tail_loop.mjs native/js_tail_loop.march)))
+
+(rule
+ (targets js_tail_loop.out)
+ (deps js_tail_loop.mjs march_runtime.mjs )
+ (action (with-stdout-to js_tail_loop.out (run node js_tail_loop.mjs))))
+
+(rule (alias runtest) (action (diff native/js_tail_loop.expected js_tail_loop.out)))
+
+; js_mutual_tail — mutual tail calls run in constant stack via the $mutco dispatcher.
+(rule
+ (targets js_mutual_tail.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_mutual_tail.march) march_runtime.mjs )
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime 
+              -o js_mutual_tail.mjs native/js_mutual_tail.march)))
+
+(rule
+ (targets js_mutual_tail.out)
+ (deps js_mutual_tail.mjs march_runtime.mjs )
+ (action (with-stdout-to js_mutual_tail.out (run node js_mutual_tail.mjs))))
+
+(rule (alias runtest) (action (diff native/js_mutual_tail.expected js_mutual_tail.out)))

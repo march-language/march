@@ -15,6 +15,17 @@
 
 (* ── Context ─────────────────────────────────────────────────────── *)
 
+(* Tail-call loop state for the function (or mutual-TCO group) currently
+   being emitted.  A tail call to a member is emitted as an assignment to the
+   $tco_aN parameter slots (and $tco_tag for a group) followed by
+   `continue __tco`, so self and mutual tail recursion run in constant stack.
+   None outside such a function and inside any nested JS function (an IIFE or
+   an ELetRec fn), where `continue __tco` would not reach the loop. *)
+type tco = {
+  tco_members : (string * int * Tir.var list) list;  (* name, tag, params *)
+  tco_mutual  : bool;
+}
+
 type ctx = {
   buf          : Buffer.t;
   mutable indent : int;
@@ -52,6 +63,8 @@ type ctx = {
      pushed/popped around each ELet body. *)
   mutable shadow_ctr : int;
   (* monotonic counter minting the $sN suffix for shadowing rebindings *)
+  mutable tco : tco option;
+  (* tail-call loop target of the function being emitted (see [tco]) *)
 }
 
 let create_ctx ?(fn_lines=[]) () = {
@@ -71,6 +84,7 @@ let create_ctx ?(fn_lines=[]) () = {
   unmapped     = Hashtbl.create 4;
   name_env     = Hashtbl.create 16;
   shadow_ctr   = 0;
+  tco          = None;
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -814,7 +828,10 @@ and emit_val_impl ctx expr =
     if has_async then emit ctx "(await (async () => {\n"
     else emit ctx "(() => {\n";
     ctx.indent <- ctx.indent + 1;
+    let saved_tco = ctx.tco in
+    ctx.tco <- None;
     emit_stmts ctx expr;
+    ctx.tco <- saved_tco;
     ctx.indent <- ctx.indent - 1;
     if has_async then (emit_indent ctx; emit ctx "})())")
     else (emit_indent ctx; emit ctx "})()")
@@ -849,6 +866,16 @@ and emit_val_impl ctx expr =
 
 and emit_stmts_impl ctx expr =
   match expr with
+
+  | Tir.EApp (f, args) when tco_member ctx f.Tir.v_name args <> None ->
+    emit_tail_jump ctx f.Tir.v_name args
+
+  | Tir.ELet (tmp, Tir.EApp (f, args), body)
+    when tco_member ctx f.Tir.v_name args <> None
+         && Llvm_tco.is_trivial_dec_chain_returning tmp.Tir.v_name body ->
+    (* Perceus's post-call DecRC wrapper around a tail call: the DecRCs are
+       no-ops in JS, so the call is the tail. *)
+    emit_tail_jump ctx f.Tir.v_name args
 
   | Tir.ELet (v, (Tir.ECase _ as case_expr), rest) ->
     (* let v = match ... — emit switch that assigns to v.
@@ -959,11 +986,7 @@ and emit_case_impl ctx result_var expr =
         emit ctx (v ^ " = ");
         emit_val ctx body;
         emit ctx ";\n"
-      | None ->
-        emit_indent ctx;
-        emit ctx "return ";
-        emit_val ctx body;
-        emit ctx ";\n"
+      | None -> emit_stmts ctx body
     in
     (* Tuples can appear as TTuple or as TCon("$TupleN", ...) or detected
        by the branch tag starting with "$Tuple". Use branch tags as the
@@ -1105,54 +1128,146 @@ and emit_case_impl ctx result_var expr =
 (* ── Function definition emission ───────────────────────────────── *)
 
 and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
+  let self_loop = Llvm_tco.has_self_tail_call fn.Tir.fn_name fn.Tir.fn_body in
+  let params = fn.Tir.fn_params in
+  let slot i = Printf.sprintf "$tco_a%d" i in
+  emit_fn_header ctx fn
+    (if self_loop then List.mapi (fun i _ -> slot i) params
+     else List.map (fun p -> mangle p.Tir.v_name) params);
+  let saved_tco = ctx.tco in
+  if self_loop then begin
+    ctx.tco <- Some { tco_members = [ (fn.Tir.fn_name, 0, params) ];
+                      tco_mutual = false };
+    with_indent ctx (fun () ->
+      emitl ctx "__tco: for (;;) {";
+      with_indent ctx (fun () ->
+        emit_fn_body ctx params ~slots:true fn.Tir.fn_body;
+        emitl ctx "return undefined;");
+      emitl ctx "}")
+  end else begin
+    ctx.tco <- None;
+    with_indent ctx (fun () -> emit_fn_body ctx params ~slots:false fn.Tir.fn_body)
+  end;
+  ctx.tco <- saved_tco;
+  emit_indent ctx;
+  emit ctx "}\n";
+  emit_clo_wrapper ctx fn
+
+(* `[async] function NAME(P0, P1, ...) {` with a source-map segment. *)
+and emit_fn_header ctx (fn : Tir.fn_def) (param_js : string list) =
   let fname = mangle fn.Tir.fn_name in
   let is_async = Hashtbl.mem ctx.async_fns fn.Tir.fn_name in
-  (* Record source map segment: current output line → source line for this fn *)
   (match Hashtbl.find_opt ctx.fn_lines fn.Tir.fn_name with
    | Some src_line when src_line > 0 ->
      ctx.segments := (ctx.line, src_line - 1) :: !(ctx.segments)
    | _ -> ());
   emit_indent ctx;
   if is_async then emit ctx "async ";
-  emit ctx ("function " ^ fname ^ "(");
-  List.iteri (fun i p ->
-    if i > 0 then emit ctx ", ";
-    emit ctx (mangle p.Tir.v_name)) fn.Tir.fn_params;
-  emit ctx ") {\n";
+  emit ctx ("function " ^ fname ^ "(" ^ String.concat ", " param_js ^ ") {\n")
+
+(* A function body in its own name scope.  With [slots], the params arrive in
+   $tco_aN and are bound to fresh consts first, so each loop iteration (and any
+   closure it builds) sees its own values. *)
+and emit_fn_body ctx (params : Tir.var list) ~slots body =
   (* Register params so emit_atom won't add $clo suffix to param variables
      that happen to share a name with a module-level function. *)
   Hashtbl.clear ctx.param_names;
-  List.iter (fun p -> Hashtbl.replace ctx.param_names p.Tir.v_name ()) fn.Tir.fn_params;
+  List.iter (fun p -> Hashtbl.replace ctx.param_names p.Tir.v_name ()) params;
   (* Seed the shadow-rename scope with the params (identity mapping) and, for
      a nested (ELetRec) fn, SAVE the enclosing fn's local scope so it can be
      restored — a nested fn's body reaches outer values via $fv closure fields,
      never by their source names, so it only needs its own params in scope. *)
   let saved_names = Hashtbl.copy ctx.name_env in
   Hashtbl.clear ctx.name_env;
-  List.iter (fun p ->
-    Hashtbl.replace ctx.name_env p.Tir.v_name (mangle p.Tir.v_name))
-    fn.Tir.fn_params;
-  with_indent ctx (fun () -> emit_stmts ctx fn.Tir.fn_body);
+  List.iteri (fun i p ->
+    Hashtbl.replace ctx.name_env p.Tir.v_name (mangle p.Tir.v_name);
+    if slots then
+      emitl ctx (Printf.sprintf "const %s = $tco_a%d;" (mangle p.Tir.v_name) i))
+    params;
+  emit_stmts ctx body;
   Hashtbl.clear ctx.name_env;
   Hashtbl.iter (fun k v -> Hashtbl.replace ctx.name_env k v) saved_names;
-  Hashtbl.clear ctx.param_names;
+  Hashtbl.clear ctx.param_names
+
+(* Closure-protocol wrapper: allows this function to be used as a first-class
+   value via ECallPtr dispatch (f._0(f, args)).
+   $_ is the closure self-pointer (unused since top-level fns have no free vars).
+   Async fns get an async arrow so the $clo call also propagates the Promise. *)
+and emit_clo_wrapper ctx (fn : Tir.fn_def) =
+  let fname = mangle fn.Tir.fn_name in
+  let ps = List.map (fun p -> mangle p.Tir.v_name) fn.Tir.fn_params in
   emit_indent ctx;
-  emit ctx "}\n";
-  (* Closure-protocol wrapper: allows this function to be used as a first-class
-     value via ECallPtr dispatch (f._0(f, args)).
-     $_ is the closure self-pointer (unused since top-level fns have no free vars).
-     Async fns get an async arrow so the $clo call also propagates the Promise. *)
-  emit_indent ctx;
-  if is_async then
+  if Hashtbl.mem ctx.async_fns fn.Tir.fn_name then
     emit ctx ("const " ^ fname ^ "$clo = { _0: async ($_")
   else
     emit ctx ("const " ^ fname ^ "$clo = { _0: ($_");
-  List.iter (fun p -> emit ctx (", " ^ mangle p.Tir.v_name)) fn.Tir.fn_params;
-  emit ctx (") => " ^ fname ^ "(");
-  List.iteri (fun i p ->
-    if i > 0 then emit ctx ", ";
-    emit ctx (mangle p.Tir.v_name)) fn.Tir.fn_params;
-  emit ctx ") };\n\n"
+  List.iter (fun p -> emit ctx (", " ^ p)) ps;
+  emit ctx (") => " ^ fname ^ "(" ^ String.concat ", " ps ^ ") };\n\n")
+
+(* The loop member a call to [name] with [args] jumps to, if any. *)
+and tco_member ctx name args =
+  match ctx.tco with
+  | None -> None
+  | Some t ->
+    List.find_opt (fun (n, _, ps) ->
+      String.equal n name && List.length ps = List.length args) t.tco_members
+
+(* A tail call to a loop member: rebind the parameter slots and loop.  Args are
+   atoms naming consts (never the slots), so assigning in order is safe. *)
+and emit_tail_jump ctx name args =
+  match ctx.tco, tco_member ctx name args with
+  | Some t, Some (_, tag, _) ->
+    emitl ctx "{";
+    with_indent ctx (fun () ->
+      if t.tco_mutual then emitl ctx (Printf.sprintf "$tco_tag = %d;" tag);
+      List.iteri (fun i a ->
+        emit_indent ctx;
+        emit ctx (Printf.sprintf "$tco_a%d = " i);
+        emit_atom ctx a;
+        emit ctx ";\n") args;
+      emitl ctx "continue __tco;");
+    emitl ctx "}"
+  | _ -> failwith "emit_tail_jump: not a loop member"
+
+(* A mutual-TCO group: one dispatcher looping over a switch on $tco_tag (one
+   case per member, its body emitted with tail calls to any member as jumps),
+   plus a wrapper per member that enters the dispatcher at its tag. *)
+and emit_mutual_group ctx (group : Tir.fn_def list) =
+  let disp = "$mutco_" ^ mangle (List.hd group).Tir.fn_name in
+  let is_async = List.exists (fun fn -> Hashtbl.mem ctx.async_fns fn.Tir.fn_name) group in
+  let width = List.fold_left (fun m fn -> max m (List.length fn.Tir.fn_params)) 0 group in
+  let slots = List.init width (fun i -> Printf.sprintf "$tco_a%d" i) in
+  emit_indent ctx;
+  if is_async then emit ctx "async ";
+  emit ctx ("function " ^ disp ^ "(" ^ String.concat ", " ("$tco_tag" :: slots) ^ ") {\n");
+  let saved_tco = ctx.tco in
+  ctx.tco <- Some {
+    tco_members = List.mapi (fun i fn -> (fn.Tir.fn_name, i, fn.Tir.fn_params)) group;
+    tco_mutual = true };
+  with_indent ctx (fun () ->
+    emitl ctx "__tco: for (;;) {";
+    with_indent ctx (fun () ->
+      emitl ctx "switch ($tco_tag) {";
+      List.iteri (fun i fn ->
+        emitl ctx (Printf.sprintf "case %d: {" i);
+        with_indent ctx (fun () ->
+          emit_fn_body ctx fn.Tir.fn_params ~slots:true fn.Tir.fn_body;
+          emitl ctx "return undefined;");
+        emitl ctx "}") group;
+      emitl ctx "}";
+      emitl ctx "throw new Error(\"mutual-TCO dispatch: bad tag\");");
+    emitl ctx "}");
+  ctx.tco <- saved_tco;
+  emitl ctx "}";
+  List.iteri (fun i fn ->
+    let ps = List.map (fun p -> mangle p.Tir.v_name) fn.Tir.fn_params in
+    let pad = List.init (width - List.length ps) (fun _ -> "undefined") in
+    emit_fn_header ctx fn ps;
+    with_indent ctx (fun () ->
+      emitl ctx ("return " ^ disp ^ "(" ^
+                 String.concat ", " (string_of_int i :: ps @ pad) ^ ");"));
+    emitl ctx "}";
+    emit_clo_wrapper ctx fn) group
 
 (* ── Structural equality ─────────────────────────────────────────── *)
 
@@ -1386,7 +1501,16 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
   compute_async_fns ctx m.Tir.tm_fns;
   (* Top-level functions — populates used_externs via call-site tracking
      and records (output_line, source_line) segments for source maps *)
-  List.iter (emit_fn_decl ctx) m.Tir.tm_fns;
+  let groups =
+    List.filter (fun g -> List.length g >= 2) (Llvm_tco.tarjan_sccs m.Tir.tm_fns) in
+  let in_group name = List.exists (List.mem name) groups in
+  List.iter (fun g ->
+    emit_mutual_group ctx
+      (List.filter_map (fun n ->
+         List.find_opt (fun fn -> String.equal fn.Tir.fn_name n) m.Tir.tm_fns) g))
+    groups;
+  List.iter (fun fn -> if not (in_group fn.Tir.fn_name) then emit_fn_decl ctx fn)
+    m.Tir.tm_fns;
   let fns_js = Buffer.contents ctx.buf in
   let raw_segments = !(ctx.segments) in
   (* Emit extern bridges only for externs actually referenced in the emitted code *)

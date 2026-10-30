@@ -1,0 +1,29 @@
+-- Self tail calls must run in constant stack on the JS target: Herald's
+-- per-pixel loops recurse once per pixel (230,400 per 640x360 frame). Without
+-- a loop rewrite in js_emit these overflow with "Maximum call stack size
+-- exceeded". The second function has the Perceus ESeq(call, EDecRC...) shape
+-- (an unused heap binding dropped after the recursive call).
+mod JsTailLoop do
+  needs IO.Console
+  type Item = { v : Int }
+
+  pfn count(n : Int, acc : Int) : Int do
+    if n == 0 do acc else count(n - 1, acc + n) end
+  end
+
+  pfn walk(n : Int, _it : Item, acc : Int) : Int do
+    if n == 0 do acc else walk(n - 1, { v: n }, acc + 1) end
+  end
+
+  -- A closure built inside the loop must see that iteration's values, not
+  -- the last one's (loop parameters are rebound, never mutated in place).
+  pfn adders(n : Int, acc : List(Int -> Int)) : List(Int -> Int) do
+    if n == 0 do acc else adders(n - 1, Cons(fn (x) -> x + n, acc)) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(int_to_string(count(10000000, 0)))
+    println(int_to_string(walk(10000000, { v: 0 }, 0)))
+    println(int_to_string(List.fold_left(List.map(adders(3, Nil), fn (f) -> f(10)), 0, fn (a, b) -> a + b)))
+  end
+end

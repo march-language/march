@@ -320,10 +320,14 @@ native_js_let_shadowing: coverage audit (user + stdlib): 198 enforced, 0 inert (
 native_js_let_shadowing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_match_stmt_fallthrough: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_match_stmt_fallthrough: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_mutual_tail: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_mutual_tail: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_random_determinism: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_random_determinism: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_self_tail_call_rc_drop: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_self_tail_call_rc_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_tail_loop: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_tail_loop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_unmapped_builtin: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_unmapped_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_known_call_generic_lambda_float: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
