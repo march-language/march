@@ -984,13 +984,23 @@ let base_env : env =
 
     (* ---- Int primitives ---- *)
   ; ("int_abs", VBuiltin ("int_abs", function
-        | [VInt n] -> VInt (if n < 0 then int_neg n else n)
+        (* abs(-2^62) is -2^62, as compiled: int_abs wraps, `-` does not. *)
+        | [VInt n] -> VInt (if n < 0 then int_wrapping_sub 0 n else n)
         | _ -> eval_error "int_abs: expected int"))
+  ; ("int_wrapping_add", VBuiltin ("int_wrapping_add", function
+        | [VInt a; VInt b] -> VInt (int_wrapping_add a b)
+        | _ -> eval_error "int_wrapping_add: expected two ints"))
+  ; ("int_wrapping_sub", VBuiltin ("int_wrapping_sub", function
+        | [VInt a; VInt b] -> VInt (int_wrapping_sub a b)
+        | _ -> eval_error "int_wrapping_sub: expected two ints"))
+  ; ("int_wrapping_mul", VBuiltin ("int_wrapping_mul", function
+        | [VInt a; VInt b] -> VInt (int_wrapping_mul a b)
+        | _ -> eval_error "int_wrapping_mul: expected two ints"))
   ; ("int_pow", VBuiltin ("int_pow", function
         | [VInt base; VInt exp] ->
           if exp < 0 then eval_error "int_pow: negative exponent"
           else
-            let rec go acc b e = if e = 0 then acc else go (int_mul acc b) b (e - 1)
+            let rec go acc b e = if e = 0 then acc else go (int_wrapping_mul acc b) b (e - 1)
             in VInt (go 1 base exp)
         | _ -> eval_error "int_pow: expected two ints"))
   ; ("int_div", VBuiltin ("int_div", function

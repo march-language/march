@@ -696,24 +696,40 @@ let int_overflow op =
     "%s: this result does not fit the browser REPL's %d-bit Int; native March uses 63-bit Int"
     op Sys.int_size
 
+(** `+ - *` and negation on Int panic when the result leaves the range
+    (specs/lang/type-system.md, "Int width and overflow"), with the message
+    the compiled ([march_int_overflow]) and JS backends raise.  On a native
+    host the range is OCaml's own 63-bit [int], so the host overflow test is
+    the March one; on a narrow host it reports the host limit instead. *)
+let arith_overflow op verb =
+  if narrow_int then int_overflow op
+  else eval_error "attempt to %s with overflow" verb
+
 let int_add a b =
   let r = a + b in
-  if narrow_int && (a >= 0) = (b >= 0) && (r >= 0) <> (a >= 0)
-  then int_overflow "+" else r
+  if (a >= 0) = (b >= 0) && (r >= 0) <> (a >= 0)
+  then arith_overflow "+" "add" else r
 
 let int_sub a b =
   let r = a - b in
-  if narrow_int && (a >= 0) <> (b >= 0) && (r >= 0) <> (a >= 0)
-  then int_overflow "-" else r
+  if (a >= 0) <> (b >= 0) && (r >= 0) <> (a >= 0)
+  then arith_overflow "-" "subtract" else r
 
 let int_mul a b =
   let r = a * b in
-  if narrow_int && a <> 0
+  if a <> 0
      && (r / a <> b || (a = -1 && b = min_int) || (b = -1 && a = min_int))
-  then int_overflow "*" else r
+  then arith_overflow "*" "multiply" else r
 
 let int_neg a =
-  if narrow_int && a = min_int then int_overflow "negate" else ~- a
+  if a = min_int then arith_overflow "negate" "negate" else ~- a
+
+(** The explicit wrapping forms (int_wrapping_add/sub/mul): modulo 2^63 on a
+    native host, which is OCaml's own [int] arithmetic.  A narrow host cannot
+    represent the 63-bit result, so there they keep the host-limit check. *)
+let int_wrapping_add a b = if narrow_int then int_add a b else a + b
+let int_wrapping_sub a b = if narrow_int then int_sub a b else a - b
+let int_wrapping_mul a b = if narrow_int then int_mul a b else a * b
 
 (** [Float.to_int], raising [int_overflow op] when [f] is outside the host Int
     range on a narrow host. *)
