@@ -21,6 +21,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **The JS target (`--target js`) runs real programs: tail calls, native arrays,
+  binary strings.** Self and mutual tail calls compile to loops, so deep recursion no
+  longer overflows the stack. `NativeI32Arr`/`NativeU8Arr`/`NativeIntArr` are typed
+  arrays with the native wrap and bounds behaviour (`set` updates in place, since RC
+  is erased on JS). A `String` holding binary data keeps its exact bytes, and
+  `byte_at`/`byte_length`/`slice`/`index_of` agree with native in O(1) per byte
+  (`march_bytes_to_string` builds such strings from JS externs). `process_argv` returns
+  Node's arguments. `march --target js -o dir/x.mjs` copies every module the output
+  imports, including relative-path extern modules, into `dir/`. forge.toml
+  `[package] js_entrypoint` names a separate entry file for `--target js` builds. See
+  "Byte Strings" and "Int on the JS target" in
+  `docs/specs/2026-06-21-march-js-backend-design.md`.
+- **`--js-int-check`** (forge: `MARCH_JS_INT_CHECK=1 forge build --target js`) makes an
+  Int `+ - *` result or literal outside ±(2^53 − 1) throw on the JS target, naming the
+  function, to find code that needs more than 53 bits. Release builds are unchanged.
+
 - **`int_div_floor(a, b)` and `int_mod_floor(a, b)`: floor division and modulo.** The
   quotient rounds toward negative infinity and the remainder takes the divisor's sign, so
   `int_div_floor(-1, 86400)` is `-1` and `int_mod_floor(-1, 86400)` is `86399` (truncating
@@ -454,6 +470,10 @@ git log is authoritative for exact commits.
   inferred, so well-typed callers are unaffected and nothing runs differently.
 
 ### Fixed
+
+- **A module with JS-module externs compiles natively.** An `extern "./x.mjs"` block gave
+  its functions native symbols like `./x.mjs_fn`, so any native build that loaded the
+  module (say, a library's browser backend) failed in clang even when nothing called them.
 
 - **A record or variant whose only refinements are on container elements is now
   checked when it is built.** With `type Box = { n : Int, xs : List({Int | _ > 0}) }`,
