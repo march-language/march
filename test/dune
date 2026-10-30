@@ -14717,3 +14717,18 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_mutual_tail.out (run node js_mutual_tail.mjs))))
 
 (rule (alias runtest) (action (diff native/js_mutual_tail.expected js_mutual_tail.out)))
+
+; js_native_arrays — NativeArray as typed arrays: native wrap semantics, u8_arr_to_bytes.
+(rule
+ (targets js_native_arrays.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_native_arrays.march) march_runtime.mjs )
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime 
+              -o js_native_arrays.mjs native/js_native_arrays.march)))
+
+(rule
+ (targets js_native_arrays.out)
+ (deps js_native_arrays.mjs march_runtime.mjs )
+ (action (with-stdout-to js_native_arrays.out (run node js_native_arrays.mjs))))
+
+(rule (alias runtest) (action (diff native/js_native_arrays.expected js_native_arrays.out)))

@@ -322,6 +322,8 @@ native_js_match_stmt_fallthrough: coverage audit (user + stdlib): 198 enforced, 
 native_js_match_stmt_fallthrough: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_mutual_tail: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_mutual_tail: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_native_arrays: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_native_arrays: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_random_determinism: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_random_determinism: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_self_tail_call_rc_drop: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced

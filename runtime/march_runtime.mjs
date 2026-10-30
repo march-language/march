@@ -459,3 +459,44 @@ export function march_deep_eq(a, b) {
   }
   return true;
 }
+
+/* ── Native arrays ─────────────────────────────────────────────────
+ * NativeI32Arr is an Int32Array, NativeU8Arr a Uint8Array and NativeIntArr a
+ * Float64Array (Int's representation). Stores wrap exactly as the native
+ * runtime's (typed-array conversion is ToInt32 / ToUint8: mod 2^32 / 2^8),
+ * reads of i32 are sign-extended, and an out-of-bounds index fails with the
+ * native message.
+ *
+ * set mutates in place and returns the same array. The native runtime copies
+ * when the array is shared (rc > 1), but RC is erased on this target, so a
+ * program that keeps using an array after `set` on it sees the new value here.
+ * Thread arrays linearly (the usual NativeArray style) and both agree. */
+function march_native_arr_check(fn, a, i) {
+  if (i < 0 || i >= a.length || !Number.isInteger(i))
+    throw new RangeError(`march: runtime error: ${fn}: index ${i} out of bounds (len=${a.length})`);
+}
+function march_native_arr_fill(a, fill) { if (fill !== 0) a.fill(fill); return a; }
+
+export function march_native_i32_arr_make(n, fill) { return march_native_arr_fill(new Int32Array(n), fill); }
+export function march_native_i32_arr_length(a) { return a.length; }
+export function march_native_i32_arr_get(a, i) { march_native_arr_check("native_i32_arr_get", a, i); return a[i]; }
+export function march_native_i32_arr_set(a, i, v) { march_native_arr_check("native_i32_arr_set", a, i); a[i] = v; return a; }
+
+export function march_native_u8_arr_make(n, fill) { return march_native_arr_fill(new Uint8Array(n), fill); }
+export function march_native_u8_arr_length(a) { return a.length; }
+export function march_native_u8_arr_get(a, i) { march_native_arr_check("native_u8_arr_get", a, i); return a[i]; }
+export function march_native_u8_arr_set(a, i, v) { march_native_arr_check("native_u8_arr_set", a, i); a[i] = v; return a; }
+
+export function march_native_int_arr_make(n, fill) { return march_native_arr_fill(new Float64Array(n), fill); }
+export function march_native_int_arr_length(a) { return a.length; }
+export function march_native_int_arr_get(a, i) { march_native_arr_check("native_int_arr_get", a, i); return a[i]; }
+export function march_native_int_arr_set(a, i, v) { march_native_arr_check("native_int_arr_set", a, i); a[i] = v; return a; }
+
+/* NativeU8Arr -> Bytes: a byte string (one code unit per byte, see "Byte
+ * strings" in the JS backend design doc) in the Bytes constructor. */
+export function march_u8_arr_to_bytes(a) {
+  let s = "";
+  for (let i = 0; i < a.length; i += 8192)
+    s += String.fromCharCode.apply(null, a.subarray(i, i + 8192));
+  return { $: "Bytes", _0: s };
+}
