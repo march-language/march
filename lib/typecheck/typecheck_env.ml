@@ -283,6 +283,13 @@ type env = {
       [Typecheck_caps.check_deferred_imports] resolves them against the final
       [module_caps] once the whole module run is done.  Shared (mutable)
       across all env copies, same as [import_tracker]. *)
+  deferred_unused_needs : (string * string * Ast.span) list ref;
+  (** Check-2 "declared but unused" verdicts held back because the module
+      also has a deferred Check-4 import (above), whose fail-closed answer
+      may require the very [needs] Check 2 would call unused.  Each row is
+      (module name, the [needs] path, its declaration span);
+      [check_deferred_imports] reports only the ones no deferred import of
+      that module requires. *)
   local_fns : unit StrMap.t;
   (** Function names DEFINED by the module currently being checked (set from
       the pass-1 / DMod forward-reference prebind).  A bulk import
@@ -750,6 +757,7 @@ let make_env errors type_map = {
   import_tracker = ref [];
   import_idx = make_import_index ();
   deferred_check4 = ref [];
+  deferred_unused_needs = ref [];
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
   qual_fn_arities = StrMap.empty;

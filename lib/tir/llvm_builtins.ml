@@ -680,6 +680,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)" };
   { march_name = "http_server_wait"; c_name = Some "march_http_server_wait"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_http_server_wait(i64 %handle)" };
+  { march_name = "http_server_bind_host"; c_name = Some "march_http_server_bind_host"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_http_server_bind_host(ptr %host)" };
   { march_name = "ws_handshake"; c_name = Some "march_ws_handshake"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = false; declare_sig = Some "declare void @march_ws_handshake(i64 %fd, ptr %key)" };
   { march_name = "ws_recv"; c_name = Some "march_ws_recv"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
@@ -1777,6 +1779,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_http_server_listen";
   PDeclare "march_http_server_spawn_n";
   PDeclare "march_http_server_wait";
+  PDeclare "march_http_server_bind_host";
   PDeclare "march_ws_handshake";
   PDeclare "march_ws_recv";
   PDeclare "march_ws_send";

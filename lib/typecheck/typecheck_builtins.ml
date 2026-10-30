@@ -283,6 +283,7 @@ let builtin_cap_table : (string * string) list = [
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
+  ("http_server_bind_host", "IO.NetListen");
   (* IO.Process *)
   ("process_env",           "IO.Process");
   ("process_set_env",       "IO.Process");
@@ -1251,6 +1252,8 @@ let builtin_bindings : (string * scheme) list =
     (* http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline_fn) -> Int (pid) *)
     ("http_server_spawn_n",     poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (TArrow (a, a), t_int)))))));
     ("http_server_wait",        Mono (TArrow (t_int, t_unit)));
+    (* http_server_bind_host(host) -> Unit: the IPv4 address later listens bind to *)
+    ("http_server_bind_host",   Mono (TArrow (t_string, t_unit)));
     (* WebSocket builtins — WsFrame and SelectResult declared in websocket.march *)
     ("ws_recv",   Mono (TArrow (t_int, TCon ("WsFrame", []))));
     ("ws_send",   Mono (TArrow (t_int, TArrow (TCon ("WsFrame", []), t_unit))));

@@ -44,6 +44,10 @@ let try_call_thunk (thunk : value) : value =
   | Invalid_argument m -> err ("invalid argument: " ^ m)
   | exn                -> err (Printexc.to_string exn)
 
+(* The IPv4 address HTTP servers and tcp_listen bind to: any address until
+   http_server_bind_host sets it (mirrors march_http_bind_addr in the C runtime). *)
+let http_bind_addr = ref Unix.inet_addr_any
+
 let base_env : env =
   (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
      surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
@@ -2072,7 +2076,7 @@ let base_env : env =
              let open Unix in
              let sock = socket PF_INET SOCK_STREAM 0 in
              setsockopt sock SO_REUSEADDR true;
-             bind sock (ADDR_INET (inet_addr_any, port));
+             bind sock (ADDR_INET (!http_bind_addr, port));
              listen sock 1024;
              VCon ("Ok", [VInt (Obj.magic sock : int)])
            with Unix.Unix_error (err, _, _) ->
@@ -3031,7 +3035,7 @@ let base_env : env =
         let open Unix in
         let server_sock = socket PF_INET SOCK_STREAM 0 in
         setsockopt server_sock SO_REUSEADDR true;
-        bind server_sock (ADDR_INET (inet_addr_any, port));
+        bind server_sock (ADDR_INET (!http_bind_addr, port));
         listen server_sock 128;
         Printf.eprintf "march: HTTP server listening on port %d\n%!" port;
         (try Eval_prim.with_shutdown_consumer (fun () -> run_http_event_loop server_sock pipeline_fn)
@@ -3059,7 +3063,7 @@ let base_env : env =
         let open Unix in
         let server_sock = socket PF_INET SOCK_STREAM 0 in
         setsockopt server_sock SO_REUSEADDR true;
-        bind server_sock (ADDR_INET (inet_addr_any, port));
+        bind server_sock (ADDR_INET (!http_bind_addr, port));
         listen server_sock 128;
         let (read_fd, write_fd) = pipe () in
         (match fork () with
@@ -3091,6 +3095,15 @@ let base_env : env =
       | _ -> eval_error "http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline)"))
 
   (* http_server_wait(pid) — waitpid for the spawned server child *)
+  (* http_server_bind_host(host) — later listens bind to this IPv4 address *)
+  ; ("http_server_bind_host", VBuiltin ("http_server_bind_host", function
+      | [VString host] ->
+        let bad () = eval_error "bind_host: not an IPv4 address: %s" host in
+        let a = (try Unix.inet_addr_of_string host with Failure _ -> bad ()) in
+        if Unix.domain_of_sockaddr (Unix.ADDR_INET (a, 0)) <> Unix.PF_INET then bad ();
+        http_bind_addr := a;
+        VUnit
+      | _ -> eval_error "http_server_bind_host(host)"))
   ; ("http_server_wait", VBuiltin ("http_server_wait", function
       | [VInt pid] ->
         (try ignore (Unix.waitpid [] pid) with _ -> ());

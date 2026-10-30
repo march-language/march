@@ -11861,6 +11861,32 @@ let test_check4_cyclic_import_importee_later () =
   Alcotest.(check bool) "importee AFTER, pure reference: error (fail-closed, whole set)"
     true (has_cap_needs_error (src ~importee_later:true pure))
 
+(* The fail-closed deferred Check 4 above and Check 2 ("declared but no
+   function requires") must not contradict each other.  Importee declared
+   later, pure reference only: Check 4 requires the importee's whole set, so
+   the importer adds [needs IO.Console] — and Check 2 used to call that
+   [needs] unused (its own functions demand nothing), with an autofix that
+   deletes it and re-breaks the build.  Hit by a test module importing
+   Bastion's IslandSocket for its pure registry functions. *)
+let test_check4_deferred_needs_not_unused () =
+  let beta = {|mod CapOrdProbeBeta do
+    needs IO.Console
+    import CapOrdProbeAlpha
+    fn capordprobebeta_pure(x : Int) : Int do x * 2 end
+    fn capordprobebeta_noisy(m : String) : Unit do print(m) end
+  end|} in
+  let alpha = {|mod CapOrdProbeAlpha do
+    needs IO.Console
+    import CapOrdProbeBeta
+    fn alpha_uses(x : Int) : Int do capordprobebeta_pure(x) end
+  end|} in
+  let src = Printf.sprintf "mod CapOrdRoot do\n  %s\n  %s\n  fn main() : Int do 0 end\nend" alpha beta in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "importee AFTER, pure reference, needs declared: no Check 4 error"
+    false (has_message_containing ctx "which requires");
+  Alcotest.(check bool) "importee AFTER, pure reference, needs declared: not reported unused"
+    false (has_message_containing ctx "but no function requires")
+
 (* ── Closing the [record_fn_caps] coverage gap (2026-08-06) ──────────────
    Until this fix [record_fn_caps] recorded an own(...) entry for [DFn]s,
    actor handlers and [DExtern]s only.  Module-level [DLet] bodies, interface
@@ -18704,6 +18730,7 @@ let compiler_suites =
           Alcotest.test_case "a pure sibling does not inherit the module's caps"     `Quick test_transitive_cap_pure_sibling_unaffected;
           Alcotest.test_case "a cap propagates through a function passed as a value" `Quick test_transitive_cap_through_value_reference;
           Alcotest.test_case "mutually recursive functions reach a fixpoint"         `Quick test_transitive_cap_mutual_recursion_fixpoint;
+          Alcotest.test_case "deferred Check 4 needs are not reported unused"   `Quick test_check4_deferred_needs_not_unused;
           Alcotest.test_case "a dotted nested-module reference resolves"             `Quick test_transitive_cap_nested_module_dotted_refs;
           Alcotest.test_case "a param shadowing a sibling fn fabricates no edge"     `Quick test_transitive_cap_param_shadowing_sibling_fn;
           Alcotest.test_case "union over a module's functions matches module level"  `Quick test_transitive_cap_union_matches_module_level;

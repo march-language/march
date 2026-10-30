@@ -124,7 +124,7 @@ let builtin_names : StringSet.t =
       (* IOList builtins *)
       "iolist_hash_fnv1a";
       (* HTTP server spawn/wait builtins *)
-      "http_server_spawn_n"; "http_server_wait";
+      "http_server_spawn_n"; "http_server_wait"; "http_server_bind_host";
       (* Char/byte conversion builtins *)
       "byte_to_char"; "char_is_alphanumeric"; "char_is_whitespace";
       (* Char builtins *)
