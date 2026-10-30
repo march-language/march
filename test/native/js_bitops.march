@@ -1,0 +1,16 @@
+-- Bitwise ops on the JS target take JS's int32 operators when both operands
+-- fit in int32 and the exact helper otherwise; both must agree with native at
+-- the boundary (±2^31), for negatives, and for wide values (2^40).
+mod JsBitops do
+  needs IO.Console
+
+  pfn row(a : Int, b : Int) : String do
+    String.join([int_to_string(int_and(a, b)), int_to_string(int_or(a, b)), int_to_string(int_xor(a, b)),
+                 int_to_string(int_shr(a, int_and(b, 31))), int_to_string(int_shr(a, 40))], " ")
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let vals = [0, 1, 0 - 1, 255, 2147483647, 0 - 2147483648, 2147483648, 4294967295, 1099511627776, 0 - 1099511627777, 16777619]
+    List.each(vals, fn a -> List.each(vals, fn b -> println(row(a, b))))
+  end
+end

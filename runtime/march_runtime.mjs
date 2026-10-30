@@ -596,26 +596,27 @@ export function march_deep_eq(a, b) {
  * when the array is shared (rc > 1), but RC is erased on this target, so a
  * program that keeps using an array after `set` on it sees the new value here.
  * Thread arrays linearly (the usual NativeArray style) and both agree. */
-function march_native_arr_check(fn, a, i) {
-  if (i < 0 || i >= a.length || !Number.isInteger(i))
-    throw new RangeError(`march: runtime error: ${fn}: index ${i} out of bounds (len=${a.length})`);
+function march_native_arr_oob(fn, a, i) {
+  throw new RangeError(`march: runtime error: ${fn}: index ${i} out of bounds (len=${a.length})`);
 }
 function march_native_arr_fill(a, fill) { if (fill !== 0) a.fill(fill); return a; }
 
+// The bounds test stays inline and tiny (an integer in [0, length)); the
+// error path is out of line so V8 inlines the accessors.
 export function march_native_i32_arr_make(n, fill) { return march_native_arr_fill(new Int32Array(n), fill); }
 export function march_native_i32_arr_length(a) { return a.length; }
-export function march_native_i32_arr_get(a, i) { march_native_arr_check("native_i32_arr_get", a, i); return a[i]; }
-export function march_native_i32_arr_set(a, i, v) { march_native_arr_check("native_i32_arr_set", a, i); a[i] = v; return a; }
+export function march_native_i32_arr_get(a, i) { if (!(i >= 0 && i < a.length && i === Math.floor(i))) march_native_arr_oob("native_i32_arr_get", a, i); return a[i]; }
+export function march_native_i32_arr_set(a, i, v) { if (!(i >= 0 && i < a.length && i === Math.floor(i))) march_native_arr_oob("native_i32_arr_set", a, i); a[i] = v; return a; }
 
 export function march_native_u8_arr_make(n, fill) { return march_native_arr_fill(new Uint8Array(n), fill); }
 export function march_native_u8_arr_length(a) { return a.length; }
-export function march_native_u8_arr_get(a, i) { march_native_arr_check("native_u8_arr_get", a, i); return a[i]; }
-export function march_native_u8_arr_set(a, i, v) { march_native_arr_check("native_u8_arr_set", a, i); a[i] = v; return a; }
+export function march_native_u8_arr_get(a, i) { if (!(i >= 0 && i < a.length && i === Math.floor(i))) march_native_arr_oob("native_u8_arr_get", a, i); return a[i]; }
+export function march_native_u8_arr_set(a, i, v) { if (!(i >= 0 && i < a.length && i === Math.floor(i))) march_native_arr_oob("native_u8_arr_set", a, i); a[i] = v; return a; }
 
 export function march_native_int_arr_make(n, fill) { return march_native_arr_fill(new Float64Array(n), fill); }
 export function march_native_int_arr_length(a) { return a.length; }
-export function march_native_int_arr_get(a, i) { march_native_arr_check("native_int_arr_get", a, i); return a[i]; }
-export function march_native_int_arr_set(a, i, v) { march_native_arr_check("native_int_arr_set", a, i); a[i] = v; return a; }
+export function march_native_int_arr_get(a, i) { if (!(i >= 0 && i < a.length && i === Math.floor(i))) march_native_arr_oob("native_int_arr_get", a, i); return a[i]; }
+export function march_native_int_arr_set(a, i, v) { if (!(i >= 0 && i < a.length && i === Math.floor(i))) march_native_arr_oob("native_int_arr_set", a, i); a[i] = v; return a; }
 
 /* NativeU8Arr -> Bytes: a byte string (one code unit per byte, see "Byte
  * strings" in the JS backend design doc) in the Bytes constructor. */

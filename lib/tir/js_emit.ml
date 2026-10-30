@@ -697,6 +697,24 @@ and emit_val_impl ctx expr =
         emit ctx (Printf.sprintf "(!__eq_%s(" ty);
         emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx "))"
       (* Runtime-delegated builtins *)
+      (* Bitwise ops on values that fit in int32 (pixels, flags, masks — the
+         common case) inline to JS's own operators, which agree with the
+         63-bit semantics there; anything wider falls back to the exact,
+         checked runtime helper. Operands are atoms, so repeating them is free. *)
+      | ("int_and" | "int_or" | "int_xor" as n), [a; b] ->
+        let rt = "march_" ^ n in
+        let op = match n with "int_and" -> "&" | "int_or" -> "|" | _ -> "^" in
+        use_runtime ctx rt;
+        emit ctx "(("; emit_atom ctx a; emit ctx " | 0) === "; emit_atom ctx a;
+        emit ctx " && ("; emit_atom ctx b; emit ctx " | 0) === "; emit_atom ctx b;
+        emit ctx " ? ("; emit_atom ctx a; emit ctx (" " ^ op ^ " "); emit_atom ctx b;
+        emit ctx (") : " ^ rt ^ "("); emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx "))"
+      | "int_shr", [a; b] ->
+        use_runtime ctx "march_int_shr";
+        emit ctx "(("; emit_atom ctx a; emit ctx " | 0) === "; emit_atom ctx a;
+        emit ctx " && "; emit_atom ctx b; emit ctx " >= 0 && "; emit_atom ctx b;
+        emit ctx " < 32 ? ("; emit_atom ctx a; emit ctx " >> "; emit_atom ctx b;
+        emit ctx ") : march_int_shr("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx "))"
       | n, _ when (match n with
           | "string_to_int" | "string_to_float" | "string_to_lowercase"
           | "string_to_uppercase" | "string_trim" | "string_trim_start"
