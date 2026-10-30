@@ -471,6 +471,9 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Matching a tuple of strings against literals works on the JS target.** A tuple
+  field's type is erased there, so `match (model, view) do ("bulwark", 0) -> … end`
+  switched on the string's (absent) constructor tag and never matched.
 - **On the JS target a `let` local named like a module function is the local.** It was
   emitted as that function's closure (`{ o with x: px }` stored a closure when the module
   also had `fn px`).
