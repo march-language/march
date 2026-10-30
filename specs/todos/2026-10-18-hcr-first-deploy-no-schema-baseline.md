@@ -39,3 +39,24 @@ Options (owner decision):
 2 is the minimum to stop the crash; 1 or 3 makes first deploys work. Test: the
 spawn-site scenario without its `base_so` step must deploy correctly (1, 3) or be
 refused (2).
+
+## Decision (owner, 2026-10-30)
+
+Option 3, the reload server keeps the schemas, with these details (also recorded in
+`specs/plans/2026-09-28-road-to-1.0.md`, "Open decisions" 12):
+
+- Every `--hot-reload` build embeds its `.schemas.json` and manifest as constant data in the
+  binary, in a deterministic encoding (it enters the CAS key and the determinism oracle).
+- A new read-only reload-socket verb `SCHEMAS`, protected like `ABI_QUERY` (owner-only socket,
+  peer-uid check, not signed), answers the newest ACTIVATED version per actor and names the
+  release it describes. The server records each activated patch's `.schemas.json` in its state
+  directory, pruned with the patch stack.
+- `forge deploy hot` asks the server first. When its local `.prev` disagrees, the server wins
+  and forge warns that the local baseline was stale.
+- A server built before this has no `SCHEMAS`: forge falls back to `.prev`; with none, it
+  refuses ("this server predates schema reporting: restart it on a current build or pass
+  --old-schemas"), never deploying without the migrate bit.
+
+Tests: `test/two_node/hcr_spawn_site_layout` without its `base_so` step deploys correctly; a
+deploy after another operator's deploy uses the server's baseline; an old server with no
+`.prev` is refused.
