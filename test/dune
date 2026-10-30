@@ -14799,3 +14799,47 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (system "node js_int_check_lit.mjs 2>&1 | grep '^RangeError: ' | sed 's/^RangeError: //' | head -1; true"))))
 
 (rule (alias runtest) (action (diff native/js_int_check_lit.expected js_int_check_lit.out)))
+
+; js_unreached_c_extern — a C-backed extern main never reaches doesn't fail a JS build.
+(rule
+ (targets js_unreached_c_extern.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_unreached_c_extern.march) march_runtime.mjs )
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime 
+              -o js_unreached_c_extern.mjs native/js_unreached_c_extern.march)))
+
+(rule
+ (targets js_unreached_c_extern.out)
+ (deps js_unreached_c_extern.mjs march_runtime.mjs )
+ (action (with-stdout-to js_unreached_c_extern.out (run node js_unreached_c_extern.mjs))))
+
+(rule (alias runtest) (action (diff native/js_unreached_c_extern.expected js_unreached_c_extern.out)))
+
+; js_argv — process_argv under Node is the arguments after the script.
+(rule
+ (targets js_argv.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_argv.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_argv.mjs native/js_argv.march)))
+
+(rule
+ (targets js_argv.out)
+ (deps js_argv.mjs march_runtime.mjs)
+ (action (with-stdout-to js_argv.out (run node js_argv.mjs one two))))
+
+(rule (alias runtest) (action (diff native/js_argv.expected js_argv.out)))
+
+; js_bundle — without --no-copy-runtime the output directory gets every module
+; the program imports (runtime, built-in canvas, a relative extern module in a
+; subdirectory and what it imports), so node can run it there.
+(rule
+ (targets js_bundle.out)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (glob_files ../runtime/*.mjs)
+       (file native/js_bundle.march) (file native/js_bundle_mods/greet.mjs))
+ (action
+  (with-stdout-to js_bundle.out
+   (system "rm -rf js_bundle_out && mkdir js_bundle_out && %{exe:../bin/main.exe} --target js -o js_bundle_out/js_bundle.mjs native/js_bundle.march 2>/dev/null && cd js_bundle_out && node js_bundle.mjs && echo \"files: $(find . -name '*.mjs' | sort | sed 's|^\\./||' | tr '\\n' ' ' | sed 's/ $//')\""))))
+
+(rule (alias runtest) (action (diff native/js_bundle.expected js_bundle.out)))

@@ -73,6 +73,8 @@ type project = {
   author        : string;
   root          : string;
   entrypoint    : string option;
+  js_entrypoint : string option;
+  (** [package] js_entrypoint: the entry file for [--target js] builds. *)
   march_req     : string option;  (** optional `march = "~> X.Y"` toolchain constraint *)
   license       : string option;  (** SPDX license id, e.g. "MIT" *)
   repository    : string option;  (** source repository URL *)
@@ -246,7 +248,7 @@ let parse_patches doc =
 let dep_table_keys = [ "git"; "path"; "registry"; "version"; "tag"; "branch"; "rev" ]
 
 let package_keys =
-  [ "name"; "version"; "type"; "description"; "author"; "entrypoint"; "march";
+  [ "name"; "version"; "type"; "description"; "author"; "entrypoint"; "js_entrypoint"; "march";
     "license"; "repository"; "homepage"; "pin_main" ]
 
 let known_keys_of_section (name : string) : string list option =
@@ -322,6 +324,7 @@ let load_from root =
   let description = Option.value ~default:""       (Toml.get_string pkg "description") in
   let author      = Option.value ~default:""       (Toml.get_string pkg "author") in
   let entrypoint  = Toml.get_string pkg "entrypoint" in
+  let js_entrypoint = Toml.get_string pkg "js_entrypoint" in
   let march_req   = Toml.get_string pkg "march" in
   let license     = Toml.get_string pkg "license" in
   let repository  = Toml.get_string pkg "repository" in
@@ -435,7 +438,7 @@ let load_from root =
   let contracts_no_alloc =
     Toml.get_string_list (Toml.get_section doc "contracts") "no_alloc" in
   { name; version; project_type = project_type_of_string type_str;
-    description; author; root; entrypoint; march_req; license; repository; homepage;
+    description; author; root; entrypoint; js_entrypoint; march_req; license; repository; homepage;
     pin_main; deps; dev_deps; dev_only_deps; test_deps; patches; archive_tasks; archive_deps;
     preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps; hot_reload;
     contracts_no_alloc }
@@ -444,15 +447,19 @@ let load_from root =
     of lib/<name>.march and src/<name>.march that exists. Every command that
     needs the entry calls this, so `forge build` and `forge deploy hot` can no
     longer disagree about which file it is (they did: build/check/run used
-    lib/, the hot-deploy paths src/). *)
-let entry (proj : project) : (string, string) result =
-  match proj.entrypoint with
-  | Some ep ->
+    lib/, the hot-deploy paths src/).  With [~js:true] (a [--target js]
+    build), [package] js_entrypoint wins when it is set. *)
+let entry ?(js = false) (proj : project) : (string, string) result =
+  let chosen = match proj.js_entrypoint with
+    | Some ep when js -> Some (ep, "js_entrypoint")
+    | _ -> Option.map (fun ep -> (ep, "entrypoint")) proj.entrypoint in
+  match chosen with
+  | Some (ep, key) ->
     let p = Filename.concat proj.root ep in
     if Sys.file_exists p then Ok p
     else
       Error (Printf.sprintf
-               "entry point not found: %s (set by [package] entrypoint in forge.toml)" p)
+               "entry point not found: %s (set by [package] %s in forge.toml)" p key)
   | None ->
     let candidates =
       List.map (fun dir ->

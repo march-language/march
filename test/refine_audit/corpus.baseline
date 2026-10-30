@@ -298,8 +298,12 @@ native_jp_dead_closure_release: coverage audit (user + stdlib): 198 enforced, 0 
 native_jp_dead_closure_release: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_jp_self_tail_loop: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_jp_self_tail_loop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_argv: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_argv: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_binary_string: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_binary_string: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_bundle: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_bundle: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_canvas_available: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_canvas_available: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_closure_reuse_apply_slot: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
@@ -338,6 +342,8 @@ native_js_tail_loop: coverage audit (user + stdlib): 198 enforced, 0 inert (warn
 native_js_tail_loop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_unmapped_builtin: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_unmapped_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_unreached_c_extern: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_unreached_c_extern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_known_call_generic_lambda_float: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_known_call_generic_lambda_float: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_lazy_niche: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced

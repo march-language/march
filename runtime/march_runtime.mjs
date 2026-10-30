@@ -603,3 +603,11 @@ export function march_ck_int(r, a, op, b, loc) {
 export function march_ck_lit(text, loc) {
   throw new RangeError(`Int literal ${text} is not exact on the JS target in ${loc}`);
 }
+
+/* process_argv: under Node, the arguments after the script; [] in a browser. */
+export function march_process_argv() {
+  const args = (typeof process !== "undefined" && process.argv) ? process.argv.slice(2) : [];
+  let list = { $: "Nil" };
+  for (let i = args.length - 1; i >= 0; i--) list = { $: "Cons", _0: args[i], _1: list };
+  return list;
+}

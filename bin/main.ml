@@ -3,6 +3,133 @@
 open Toolchain
 open Flags
 
+(* ── JS output bundling ─────────────────────────────────────────────
+
+   [march --target js -o out/x.mjs] leaves out/ runnable: every module the
+   output imports by a relative path is copied there at that path, then every
+   relative module those import, transitively.  A top-level [march_*.mjs] is
+   the runtime's own file; any other module is found next to the module that
+   imports it or — for the output's own imports, which come from externs
+   anywhere in the program — under the entry file's directory or a
+   MARCH_LIB_PATH root, searched for a directory holding that relative path.
+   march_runtime.mjs and march_dom.mjs are always copied, as before. *)
+
+let js_relative_imports (text : string) : string list =
+  let n = String.length text in
+  let found = ref [] in
+  let take i =
+    (* [i] is just past an opening quote: the specifier runs to the next one *)
+    match String.index_from_opt text i '"' with
+    | Some j ->
+      let spec = String.sub text i (j - i) in
+      let starts p = String.length spec > String.length p
+                     && String.sub spec 0 (String.length p) = p in
+      if starts "./" || starts "../" then found := spec :: !found
+    | None -> ()
+  in
+  List.iter (fun key ->
+    let kl = String.length key in
+    let i = ref 0 in
+    while !i + kl <= n do
+      if String.sub text !i kl = key then (take (!i + kl); i := !i + kl)
+      else incr i
+    done) [ "from \""; "import \"" ];
+  List.sort_uniq String.compare !found
+
+(* A relative path with "." and ".." resolved; None if it climbs out. *)
+let normalize_rel_path (p : string) : string option =
+  let rec go acc = function
+    | [] -> Some (List.rev acc)
+    | ("." | "") :: rest -> go acc rest
+    | ".." :: rest -> (match acc with _ :: a -> go a rest | [] -> None)
+    | x :: rest -> go (x :: acc) rest
+  in
+  Option.map (String.concat "/") (go [] (String.split_on_char '/' p))
+
+let rec find_under ~(depth : int) (dir : string) (rel : string) : string option =
+  let here = Filename.concat dir rel in
+  if Sys.file_exists here then Some here
+  else if depth = 0 then None
+  else
+    let entries = try Array.to_list (Sys.readdir dir) with Sys_error _ -> [] in
+    List.fold_left (fun acc d ->
+      match acc with
+      | Some _ -> acc
+      | None ->
+        let path = Filename.concat dir d in
+        if d <> "" && d.[0] <> '.' && d <> "_build" && d <> "node_modules"
+           && (try Sys.is_directory path with Sys_error _ -> false)
+        then find_under ~depth:(depth - 1) path rel else None)
+      None (List.sort String.compare entries)
+
+let read_whole_file (path : string) : string =
+  let ic = open_in_bin path in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic; s
+
+let bundle_js_modules ~(src_file : string) ~(out_bin : string) : unit =
+  let out_dir = Filename.dirname out_bin in
+  let roots =
+    Filename.dirname src_file
+    :: (match Sys.getenv_opt "MARCH_LIB_PATH" with
+        | Some p -> List.filter (fun d -> d <> "") (String.split_on_char ':' p)
+        | None -> []) in
+  let copied = Hashtbl.create 8 in
+  let rec mkdirs d =
+    if d <> "." && d <> "/" && d <> "" && not (Sys.file_exists d) then begin
+      mkdirs (Filename.dirname d);
+      (try Sys.mkdir d 0o755 with Sys_error _ -> ())
+    end in
+  (* [rel]: the module's path under out_dir.  [beside]: where its importer's
+     source sits, to look for it there first (None for the output's imports). *)
+  let rec copy_module ~(beside : string option) (rel : string) =
+    if not (Hashtbl.mem copied rel) then begin
+      Hashtbl.replace copied rel ();
+      let base = Filename.basename rel in
+      let runtime =
+        if Filename.dirname rel = "." && String.length base > 6
+           && String.sub base 0 6 = "march_"
+        then find_runtime_file base else None in
+      let src = match runtime, beside with
+        | Some _, _ -> runtime
+        | None, Some p when Sys.file_exists p -> Some p
+        | None, _ ->
+          List.fold_left (fun acc root ->
+            match acc with Some _ -> acc | None -> find_under ~depth:6 root rel)
+            None roots
+      in
+      match src with
+      | None ->
+        Printf.eprintf "march: warning: cannot find %s (imported by the JS output)\n" rel
+      | Some src ->
+        let dest = Filename.concat out_dir rel in
+        mkdirs (Filename.dirname dest);
+        let content = read_whole_file src in
+        if not (Sys.file_exists dest && read_whole_file dest = content) then begin
+          let oc = open_out_bin dest in
+          output_string oc content; close_out oc
+        end;
+        List.iter (fun spec ->
+          match normalize_rel_path (Filename.dirname rel ^ "/" ^ spec) with
+          | Some r ->
+            copy_module
+              ~beside:(Some (Filename.concat (Filename.dirname src) spec)) r
+          | None ->
+            Printf.eprintf
+              "march: warning: %s imports %s, outside the output directory\n" rel spec)
+          (js_relative_imports content)
+    end
+  in
+  copy_module ~beside:None "march_runtime.mjs";
+  copy_module ~beside:None "march_dom.mjs";
+  List.iter (fun spec ->
+    match normalize_rel_path spec with
+    | Some r -> copy_module ~beside:None r
+    | None ->
+      Printf.eprintf "march: warning: the JS output imports %s, outside its directory\n" spec)
+    (js_relative_imports (read_whole_file out_bin))
+
+
 (** The file tag of every span inside code the desugarer GENERATES — a
     `derive` expansion, an `@[endpoints]` module — after
     [Desugar_derive.respan_derived_decl].  Such a diagnostic is the user's:
@@ -4569,25 +4696,9 @@ let compile filename =
           let oc = open_out out_bin in
           output_string oc js;
           close_out oc;
-          (* Copy runtime .mjs files alongside the output so imports work,
-             unless --no-copy-runtime is given (e.g. when dune manages them) *)
-          if not !no_copy_runtime then begin
-            let out_dir = Filename.dirname out_bin in
-            let copy_runtime name =
-              let dest = Filename.concat out_dir name in
-              match find_runtime_file name with
-              | Some src ->
-                let ic = open_in src in
-                let content = really_input_string ic (in_channel_length ic) in
-                close_in ic;
-                let oc2 = open_out dest in
-                output_string oc2 content;
-                close_out oc2
-              | None -> Printf.eprintf "march: warning: cannot find %s\n" name
-            in
-            copy_runtime "march_runtime.mjs";
-            copy_runtime "march_dom.mjs"
-          end;
+          (* Put every module the output imports beside it, unless
+             --no-copy-runtime is given (e.g. when dune manages them). *)
+          if not !no_copy_runtime then bundle_js_modules ~src_file:filename ~out_bin;
           Printf.eprintf "compiled %s\n" out_bin
         end else begin
         (* CAS: check for a cached binary before running clang *)

@@ -977,7 +977,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
     in
     let files = find_march_files lib_dir @ gen_files in
     let has_entry = proj.Project.project_type <> Project.Lib
-                    && Result.is_ok (Project.entry proj) in
+                    && Result.is_ok (Project.entry ~js:(match target with Some ("js" | "javascript") -> true | _ -> false) proj) in
     if files = [] && not has_entry then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
@@ -1003,7 +1003,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
           Ok (Printf.sprintf "checked %d file(s) in %s" (List.length files) lib_dir)
         end
       | Project.App | Project.Tool ->
-        match Project.entry proj with
+        match Project.entry ~js:(match target with Some ("js" | "javascript") -> true | _ -> false) proj with
         | Error e -> Error e
         | Ok entry_path ->
         (* Check every lib/ file individually before compilation so that orphan

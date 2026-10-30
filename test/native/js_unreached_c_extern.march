@@ -1,0 +1,16 @@
+-- A C-backed extern that main never reaches doesn't fail a JS build (a
+-- library may carry a native backend beside its JS one).
+mod JsUnreachedCExtern do
+  needs IO.Console
+  needs IO.Foreign
+
+  extern "some_c_shim" : Cap(IO.Foreign) do
+    fn c_only(x : Int) : Int = "some_c_shim_c_only"
+  end
+
+  pfn native_path(x : Int) : Int do c_only(x) end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("ok")
+  end
+end

@@ -716,6 +716,7 @@ and emit_val_impl ctx expr =
           | "native_int_arr_make" | "native_int_arr_length"
           | "native_int_arr_get" | "native_int_arr_set"
           | "u8_arr_to_bytes"
+          | "process_argv"
           | "list_stable_sort_by" | "list_sort_by_int_key"
           (* Int builtins with 63-bit semantics — checked implementations in
              march_runtime.mjs (exact within ±2^53, throw beyond) *)
