@@ -1,0 +1,24 @@
+mod A3 do
+  fn cat(xs : List(Int), ys : List(Int)) : List(Int) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, cat(t, ys))
+    end
+  end
+
+  fn rev(xs : List(Int)) : List(Int) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> cat(rev(t), Cons(h, Nil))
+    end
+  end
+
+  fn revrev(xs : List(Int)) : {List(Int) | _ == xs} do
+    rev(rev(xs))
+  end
+
+  fn main() : Unit do
+    let _ = revrev(Cons(1, Nil))
+    ()
+  end
+end

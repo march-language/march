@@ -1326,7 +1326,7 @@
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))
- (modules test_refinecheck test_refine_term)
+ (modules test_refinecheck test_refine_term test_refine_reflect)
  ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
  ; because the question it asks — "does a guarded call still error?" — spans
@@ -1345,7 +1345,7 @@
  ; reason (and this test group always runs relative to the repo root, not
  ; the sandbox, per its own require_repo_root check).
  (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib)
-   (source_tree ../test/native) (source_tree refine_audit)))
+   (source_tree ../test/native) (source_tree refine_audit) (source_tree refine/reflect)))
 
 ; An (executable), NOT a (test): deliberately OUT of the `runtest` alias.
 ;

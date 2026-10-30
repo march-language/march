@@ -21,19 +21,20 @@ March can answer it by reading declarations, because March has declarations to
 read: every module states the capabilities it needs, and the compiler checks
 those declarations against what the code does.
 
-How strongly it checks depends on how the capability is obtained, and the
-difference matters enough to state up front:
+Every route a module can use to reach a capability must be covered by its
+`needs`, or the module does not compile: a capability passed as a value (a
+function taking `Cap(IO.FileWrite)`), a capability builtin called directly
+(`file_write(path, data)`, an error since 2026-08-06; it was only a warning
+before), and a standard-library wrapper such as `File.write` (caught by the
+[capability upper limit]({{ site.baseurl }}/docs/capabilities/#cap-strict),
+on by default). The one exception is an `extern` block: a module that calls C
+without declaring `needs IO.Foreign` gets a warning, not an error.
 
-- A capability passed as a value (a function taking `Cap(IO.FileWrite)`) **must**
-  be covered by a declared `needs`, or the module does not compile.
-- A capability builtin called directly (`file_write(path, data)`) produces a
-  **warning** when undeclared, not an error. The code still builds.
-
-So a package's declared capability set is a strong signal, checked by the
-compiler and impossible to drift silently for capability-passing code. It
-is not yet a hard lower bound for every code path. See
+So a package's declared capability set is checked by the compiler and cannot
+drift silently, except past an `extern` block. See
 [what this does not prove](#what-this-does-and-does-not-prove) for what follows
-from that.
+from that, and the [Capability Threat Model]({{ site.baseurl }}/docs/capability-threat-model/)
+for the whole system's guarantees and limits.
 
 Two commands use that.
 
@@ -166,10 +167,10 @@ a gate people learn to skip, and skipped gates are a step down from absent ones.
 
 `forge audit --inferred` runs `march caps` over each dependency to infer the
 capabilities its own code uses, instead of reading its `needs` declarations.
-It catches a capability builtin called directly with no matching `needs`,
-which the compiler only warns about. It does not see a capability reached
-through a stdlib or dependency *function*. It also needs every dependency to
-typecheck.
+It does not see a capability reached through a stdlib or dependency
+*function*. It also needs every dependency to typecheck. (It was written to
+catch a capability builtin called directly with no matching `needs`, which
+the compiler only warned about before 2026-08-06; that is now a compile error.)
 
 - **Toolchain check.** `march caps` first shipped in march 0.3.0 (nightly
   2026-08-05). Before analyzing anything, the audit checks that the toolchain's
@@ -224,20 +225,18 @@ into a settled one.
   is no fuzzy matching and no heuristic scoring to tune.
 - **Attribution is per-dependency.** You learn *which* package changed, not just
   that your application's total authority moved.
-- **Capability-passing code cannot under-declare.** Where a capability is
-  threaded as a `Cap(X)` value, an undeclared use is a compile error, so the
-  declaration is a true lower bound for that code.
+- **March code cannot under-declare.** An undeclared use of a capability,
+  whether through a `Cap(X)` value, a direct builtin call or a stdlib wrapper,
+  is a compile error (the wrapper case through the upper limit, on by
+  default), so the declaration covers everything the module's March code
+  reaches.
 
 ### It does not prove
 
-- **That a dependency declared everything it uses.** A module calling a
-  capability builtin directly (`file_write(…)` rather than receiving
-  `Cap(IO.FileWrite)`) gets a *warning* when it has not declared the
-  capability, and still compiles. A dependency that ignores that warning will
-  show a smaller capability set here than its behaviour justifies. The warning
-  is visible when you build, so this is obvious rather than silent, but `forge
-  audit` on its own will not catch it. Treat the declared set as a floor that
-  capability-passing code cannot go under, not as an upper limit on everything.
+- **That a dependency built with `--no-cap-strict` declared everything.**
+  With the upper limit turned off, a call through a stdlib wrapper is no
+  longer checked against `needs`. `forge audit` reads source, not build
+  flags, so it can't tell; `forge cap inspect --strict` on the binary can.
 - **What the code does with a capability.** `IO.Network` covers a telemetry ping
   and an exfiltration channel equally. The audit narrows *what is possible*; it
   does not characterise intent.
@@ -260,15 +259,16 @@ into a settled one.
 | Dependency update silently widens **declared** authority | **Yes**: this is the case it exists for |
 | A new transitive dependency arrives with capabilities | **Yes**: reported as an addition |
 | A dependency uses a `Cap(X)` value it did not declare | **Yes**: compile error, at build time |
-| A dependency calls a capability builtin it did not declare | **Partly**: compiler warning at build time, but it compiles, and the declared set stays understated |
+| A dependency calls a capability builtin it did not declare | **Yes**: compile error, at build time (a warning before 2026-08-06) |
+| A dependency calls C (`extern`) without declaring `IO.Foreign` | **Partly**: compiler warning at build time, and it compiles |
 | Baseline edited to hide a change | Partly: the edit is in your diff, reviewed like any other |
 | Effects through `extern` C, `dlopen`, or raw syscalls | **No**: reported as `IO.Foreign`, which constrains no behaviour |
 | A dependency that misuses a capability it validly possesses | **No**: out of scope for any capability system |
 
-For the row that is only partly covered, `forge cap inspect` on the built binary
-is the stronger check: it reads capability markers the compiler emitted and
-capability-bearing runtime symbols that persisted through dead-stripping, so a direct
-builtin call shows up there whether or not it was declared.
+For a binary built elsewhere, or with checks turned off, `forge cap inspect` on
+the built binary is the stronger check: it reads capability markers the compiler
+emitted and capability-bearing runtime symbols that persisted through
+dead-stripping, so a capability shows up there whether or not it was declared.
 
 ---
 
@@ -334,8 +334,7 @@ a capability it did not declare, including a dependency that never opted in.
 It is on by default; `--no-cap-strict` turns it off.
 See [capability upper limits]({{ site.baseurl }}/docs/capabilities/#cap-strict).
 
-The rows above marked "constrains no behaviour" (`IO.Foreign`, raw syscalls, an
-undeclared builtin call) are a limit of *reading a declaration or a symbol
+The rows above marked "constrains no behaviour" (`IO.Foreign`, raw syscalls) are a limit of *reading a declaration or a symbol
 table*, not a limit of what March can enforce. To turn the declared set into an
 actual OS-level confinement, one that bounds even `extern` C and raw syscalls
 because it confines the whole process, see [OS-level
@@ -353,6 +352,9 @@ enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcemen
   [OS-level enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement-sandboxing-the-compiled-binary)
   (`forge cap run`, `--cap-sandbox`) that turns a declared set into a real sandbox,
   and node-local hot-deploy admission control
+- [Capability Threat Model]({{ site.baseurl }}/docs/capability-threat-model/):
+  the one page that states what the capability system guarantees, assumes and
+  does not cover
 - [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/):
   how capabilities sit alongside the other safety axes
 - [FFI]({{ site.baseurl }}/docs/ffi/): the `extern` boundary, and why analysis

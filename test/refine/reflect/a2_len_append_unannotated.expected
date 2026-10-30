@@ -1,0 +1,4 @@
+skip	user	a2_len_append_unannotated.march:9:2	unreflectable-subject	postcondition	law	_ == len(xs) + len(ys)
+reflect	a2_len_append_unannotated.march:2:5	cat	reflected	unfold
+reflect	a2_len_append_unannotated.march:9:5	law	reflected	unfold
+reflect	a2_len_append_unannotated.march:13:5	main	no	R1:is `main` (a2_len_append_unannotated.march:13:5)
