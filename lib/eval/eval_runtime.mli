@@ -236,17 +236,26 @@ exception BlockedOnReceive
     message) and returns the builtin's [value]. *)
 
 (** [true] when the host [int] is narrower than March's 63-bit [Int] (the
-    js_of_ocaml browser REPL); then the helpers below raise on overflow instead
-    of wrapping. [false] on native builds, where they are the plain operators. *)
+    js_of_ocaml browser REPL); then the helpers below raise the host-limit
+    error on overflow. [false] on native builds. *)
 val narrow_int : bool
 
 (** Raise the "does not fit the browser REPL's Int" error for [op]. *)
 val int_overflow : string -> 'a
 
+(** Int `+ - *` and negation: raise "attempt to add with overflow" (etc.)
+    when the result leaves the 63-bit range (the host-limit error on a narrow
+    host). *)
 val int_add : int -> int -> int
 val int_sub : int -> int -> int
 val int_mul : int -> int -> int
 val int_neg : int -> int
+
+(** int_wrapping_add/sub/mul: modulo 2^63 (checked against the host limit on
+    a narrow host, which cannot hold the wrapped result). *)
+val int_wrapping_add : int -> int -> int
+val int_wrapping_sub : int -> int -> int
+val int_wrapping_mul : int -> int -> int
 
 (** [Float.to_int], raising [int_overflow op] when the float is out of the
     host Int range on a narrow host. *)

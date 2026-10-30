@@ -1308,12 +1308,14 @@ mod Simd do
     end
   end
 
+  -- The Hash impls combine lane hashes modulo 2^63 (int_wrapping_*): a
+  -- hash may be any Int, and `+`/`*` panic on overflow.
   impl Hash(F32x4) do
     fn hash(v) do
-      hash(simd_f32x4_extract(v, 0)) * 31
-        + hash(simd_f32x4_extract(v, 1)) * 17
-        + hash(simd_f32x4_extract(v, 2)) * 7
-        + hash(simd_f32x4_extract(v, 3))
+      let h0 = int_wrapping_mul(hash(simd_f32x4_extract(v, 0)), 31)
+      let h1 = int_wrapping_add(h0, int_wrapping_mul(hash(simd_f32x4_extract(v, 1)), 17))
+      let h2 = int_wrapping_add(h1, int_wrapping_mul(hash(simd_f32x4_extract(v, 2)), 7))
+      int_wrapping_add(h2, hash(simd_f32x4_extract(v, 3)))
     end
   end
 
@@ -1332,8 +1334,8 @@ mod Simd do
 
   impl Hash(F64x2) do
     fn hash(v) do
-      hash(simd_f64x2_extract(v, 0)) * 31
-        + hash(simd_f64x2_extract(v, 1))
+      let h0 = int_wrapping_mul(hash(simd_f64x2_extract(v, 0)), 31)
+      int_wrapping_add(h0, hash(simd_f64x2_extract(v, 1)))
     end
   end
 
@@ -1354,10 +1356,10 @@ mod Simd do
 
   impl Hash(I32x4) do
     fn hash(v) do
-      hash(simd_i32x4_extract(v, 0)) * 31
-        + hash(simd_i32x4_extract(v, 1)) * 17
-        + hash(simd_i32x4_extract(v, 2)) * 7
-        + hash(simd_i32x4_extract(v, 3))
+      let h0 = int_wrapping_mul(hash(simd_i32x4_extract(v, 0)), 31)
+      let h1 = int_wrapping_add(h0, int_wrapping_mul(hash(simd_i32x4_extract(v, 1)), 17))
+      let h2 = int_wrapping_add(h1, int_wrapping_mul(hash(simd_i32x4_extract(v, 2)), 7))
+      int_wrapping_add(h2, hash(simd_i32x4_extract(v, 3)))
     end
   end
 
@@ -1376,8 +1378,8 @@ mod Simd do
 
   impl Hash(I64x2) do
     fn hash(v) do
-      hash(simd_i64x2_extract(v, 0)) * 31
-        + hash(simd_i64x2_extract(v, 1))
+      let h0 = int_wrapping_mul(hash(simd_i64x2_extract(v, 0)), 31)
+      int_wrapping_add(h0, hash(simd_i64x2_extract(v, 1)))
     end
   end
 
@@ -1410,22 +1412,22 @@ mod Simd do
 
   impl Hash(U8x16) do
     fn hash(v) do
-      hash(simd_u8x16_extract(v, 0)) * 31
-        + hash(simd_u8x16_extract(v, 1)) * 17
-        + hash(simd_u8x16_extract(v, 2)) * 7
-        + hash(simd_u8x16_extract(v, 3)) * 3
-        + hash(simd_u8x16_extract(v, 4)) * 13
-        + hash(simd_u8x16_extract(v, 5)) * 11
-        + hash(simd_u8x16_extract(v, 6)) * 5
-        + hash(simd_u8x16_extract(v, 7)) * 19
-        + hash(simd_u8x16_extract(v, 8)) * 23
-        + hash(simd_u8x16_extract(v, 9)) * 29
-        + hash(simd_u8x16_extract(v, 10)) * 37
-        + hash(simd_u8x16_extract(v, 11)) * 41
-        + hash(simd_u8x16_extract(v, 12)) * 43
-        + hash(simd_u8x16_extract(v, 13)) * 47
-        + hash(simd_u8x16_extract(v, 14)) * 53
-        + hash(simd_u8x16_extract(v, 15))
+      let h0 = int_wrapping_mul(hash(simd_u8x16_extract(v, 0)), 31)
+      let h1 = int_wrapping_add(h0, int_wrapping_mul(hash(simd_u8x16_extract(v, 1)), 17))
+      let h2 = int_wrapping_add(h1, int_wrapping_mul(hash(simd_u8x16_extract(v, 2)), 7))
+      let h3 = int_wrapping_add(h2, int_wrapping_mul(hash(simd_u8x16_extract(v, 3)), 3))
+      let h4 = int_wrapping_add(h3, int_wrapping_mul(hash(simd_u8x16_extract(v, 4)), 13))
+      let h5 = int_wrapping_add(h4, int_wrapping_mul(hash(simd_u8x16_extract(v, 5)), 11))
+      let h6 = int_wrapping_add(h5, int_wrapping_mul(hash(simd_u8x16_extract(v, 6)), 5))
+      let h7 = int_wrapping_add(h6, int_wrapping_mul(hash(simd_u8x16_extract(v, 7)), 19))
+      let h8 = int_wrapping_add(h7, int_wrapping_mul(hash(simd_u8x16_extract(v, 8)), 23))
+      let h9 = int_wrapping_add(h8, int_wrapping_mul(hash(simd_u8x16_extract(v, 9)), 29))
+      let h10 = int_wrapping_add(h9, int_wrapping_mul(hash(simd_u8x16_extract(v, 10)), 37))
+      let h11 = int_wrapping_add(h10, int_wrapping_mul(hash(simd_u8x16_extract(v, 11)), 41))
+      let h12 = int_wrapping_add(h11, int_wrapping_mul(hash(simd_u8x16_extract(v, 12)), 43))
+      let h13 = int_wrapping_add(h12, int_wrapping_mul(hash(simd_u8x16_extract(v, 13)), 47))
+      let h14 = int_wrapping_add(h13, int_wrapping_mul(hash(simd_u8x16_extract(v, 14)), 53))
+      int_wrapping_add(h14, hash(simd_u8x16_extract(v, 15)))
     end
   end
 

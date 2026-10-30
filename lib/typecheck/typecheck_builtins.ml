@@ -789,6 +789,11 @@ let builtin_bindings : (string * scheme) list =
     (* Int primitives *)
     ("int_abs",         Mono (TArrow (t_int,   t_int)));
     ("int_pow",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    (* Modulo-2^63 arithmetic, for hashes and checksums: `+ - *` panic on
+       overflow (type-system.md, "Int width and overflow"). *)
+    ("int_wrapping_add", Mono (TArrow (t_int,  TArrow (t_int, t_int))));
+    ("int_wrapping_sub", Mono (TArrow (t_int,  TArrow (t_int, t_int))));
+    ("int_wrapping_mul", Mono (TArrow (t_int,  TArrow (t_int, t_int))));
     ("int_div",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
     ("int_mod",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
     ("int_div_euclid",  Mono (TArrow (t_int,   TArrow (t_int, t_int))));

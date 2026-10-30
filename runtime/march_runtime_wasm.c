@@ -574,6 +574,13 @@ void march_panic(void *s) {
     __builtin_trap();
 }
 
+/* Int `+ - *` overflow (march_runtime.c's march_int_overflow): a panic,
+ * which on wasm traps the instance. */
+void march_int_overflow(int64_t op, const char *file, int64_t line) {
+    (void)op; (void)file; (void)line;
+    __builtin_trap();
+}
+
 /* Diagnostics' panic-site record (march_runtime.c): the wasm runtime has no
  * crash observers, so the site lowering emits before a panic is dropped. */
 void *march_panic_site(void *file, int64_t line) {

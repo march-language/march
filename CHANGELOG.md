@@ -19,7 +19,27 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Int `+`, `-`, `*` and unary `-` panic on overflow instead of wrapping.** A result
+  outside the 63-bit range [-2^62, 2^62) is now a runtime panic, `attempt to add with
+  overflow` (or `subtract`/`multiply`/`negate`), with the same message in the
+  interpreter, compiled code and `--target js`. Before, `int_max_value() + 1` was
+  `int_min_value()`. A program that relied on wrapping (a hash, checksum or random-number
+  mixer) must switch to the new `int_wrapping_add` / `int_wrapping_sub` /
+  `int_wrapping_mul`. Derived `Hash` instances, the SIMD vector `Hash` impls and
+  `Msgpack`'s int64 decoder already use them, so their results are unchanged. `/`,
+  `int_abs`, `int_pow` and `int_shl` still wrap. The trap closes the refinement checker's
+  overflow hole: it reasons about unbounded integers, so `x + 1 > x` "proved" even
+  where `x + 1` wrapped negative. Measured cost, compiled `--opt 2`: see
+  `specs/progress/2026-10-30-int-overflow-trap.md` (design decision 2026-09-29,
+  `specs/plans/2026-09-28-road-to-1.0.md`).
+
 ### Added
+
+- **`int_wrapping_add(a, b)`, `int_wrapping_sub(a, b)`, `int_wrapping_mul(a, b)`:**
+  explicit modulo-2^63 Int arithmetic, for code where overflow is intended (hashes,
+  checksums, RNGs). `int_wrapping_add(int_max_value(), 1) == int_min_value()`.
 
 - **`int_div_floor(a, b)` and `int_mod_floor(a, b)`: floor division and modulo.** The
   quotient rounds toward negative infinity and the remainder takes the divisor's sign, so

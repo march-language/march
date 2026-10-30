@@ -1520,3 +1520,13 @@ back end's share of the stamped buckets and `back%w` its share of wall time. Bel
 unit-split/object-cache work is not where the time goes. Each baseline is a dated, frozen file
 (`specs/plans/incremental-codegen-cas-baseline.md`, then `-baseline-2.md`, …); do not
 hand-maintain numbers here.
+
+## bench/index_loop.march — Int overflow-trap cost (2026-10-30)
+
+A counted arithmetic loop (`i + 1`, `acc + (i % 1000) * 3 - (i % 7)`, 300M
+iterations) and an indexed NativeArray read loop (1M elements, 200 passes): the
+shape that pays one overflow check per `+ - *`. Run it (with `bench/fib.march`,
+whose `fib(n-1) + fib(n-2)` is the worst case) after any change to Int arithmetic
+codegen. First measurement, base vs trap, interleaved on a loaded box (minimum of
+15): fib 420 → 499 ms, index_loop 651 → 690 ms, list_ops 42 → 41 ms. Detail in
+`specs/progress/2026-10-30-int-overflow-trap.md`.

@@ -1365,6 +1365,10 @@ let runtime_only_declares : (string * string) list = [
   ("march_poly_eq", "declare i64  @march_poly_eq(ptr %a, ptr %b)");
   ("march_remote_init", "declare void @march_remote_init()");
   ("march_int_pow", "declare i64  @march_int_pow(i64 %base, i64 %exp)");
+  ("march_int_overflow", "declare void @march_int_overflow(i64 %op, ptr %file, i64 %line) cold noreturn");
+  ("llvm.sadd.with.overflow.i64", "declare {i64, i1} @llvm.sadd.with.overflow.i64(i64 %a, i64 %b)");
+  ("llvm.ssub.with.overflow.i64", "declare {i64, i1} @llvm.ssub.with.overflow.i64(i64 %a, i64 %b)");
+  ("llvm.smul.with.overflow.i64", "declare {i64, i1} @llvm.smul.with.overflow.i64(i64 %a, i64 %b)");
   ("llvm.ctpop.i64", "declare i64  @llvm.ctpop.i64(i64 %val)");
   ("llvm.abs.i64", "declare i64  @llvm.abs.i64(i64 %val, i1 %is_int_min_poison)");
   ("llvm.stacksave", "declare ptr  @llvm.stacksave()");
@@ -1684,7 +1688,11 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_remote_invoke_march";
   PComment "; Integer math helpers";
   PDeclare "march_int_pow";
+  PDeclare "march_int_overflow";
   PComment "; LLVM intrinsics";
+  PDeclare "llvm.sadd.with.overflow.i64";
+  PDeclare "llvm.ssub.with.overflow.i64";
+  PDeclare "llvm.smul.with.overflow.i64";
   PDeclare "llvm.ctpop.i64";
   PDeclare "llvm.abs.i64";
   PDeclare "llvm.stacksave";

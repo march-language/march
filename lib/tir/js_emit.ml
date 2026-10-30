@@ -571,6 +571,21 @@ and emit_val_impl ctx expr =
          emit ctx "(("; emit_atom ctx a; emit ctx " - ";
          emit_atom ctx a; emit ctx " % "; emit_atom ctx b; emit ctx ") / ";
          emit_atom ctx b; emit ctx ")"
+       (* Int `+ - *` panic when the result leaves the 63-bit range, as on
+          the other backends (march_int_ovf in march_runtime.mjs).  Only
+          when an operand is known to be Int: the symbolic forms are
+          Int-or-Float, and a Float result must never be range-checked. *)
+       | ("+" | "-" | "*"), [a; b]
+         when (match name with
+               | "add_int" | "sub_int" | "mul_int" -> true
+               | "+" | "-" | "*" ->
+                 (match atom_ty a, atom_ty b with
+                  | Tir.TInt, _ | _, Tir.TInt -> true | _ -> false)
+               | _ -> false) ->
+         use_runtime ctx "march_int_ovf";
+         emit ctx "march_int_ovf("; emit_atom ctx a;
+         emit ctx (" " ^ op ^ " "); emit_atom ctx b;
+         emit ctx (match op with "+" -> ", 0)" | "-" -> ", 1)" | _ -> ", 2)")
        | _ ->
          emit ctx "(";
          emit_atom ctx (List.nth args 0);
@@ -579,6 +594,10 @@ and emit_val_impl ctx expr =
          emit ctx ")")
     | _ ->
       begin match name, args with
+      | ("neg_int" | "negate" | "-"), [a]
+        when name = "neg_int" || atom_ty a = Tir.TInt ->
+        use_runtime ctx "march_int_ovf";
+        emit ctx "march_int_ovf(-("; emit_atom ctx a; emit ctx "), 3)"
       | ("neg_int" | "neg_float" | "negate" | "-" | "-."), [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
       | ("not_bool" | "not"),  [a] -> emit ctx "(!"; emit_atom ctx a; emit ctx ")"
       | "div_int", [a; b] ->
@@ -672,6 +691,7 @@ and emit_val_impl ctx expr =
           | "int_shl" | "int_shr" | "int_popcount"
           | "int_mod" | "int_div" | "int_mod_euclid" | "int_div_euclid"
           | "int_mod_floor" | "int_div_floor"
+          | "int_wrapping_add" | "int_wrapping_sub" | "int_wrapping_mul"
             -> true | _ -> false) ->
         let rt = "march_" ^ n in
         use_runtime ctx rt;
@@ -1355,7 +1375,7 @@ const float_to_int    = { _0: ($_, x) => Math.trunc(x) };
 const float_truncate  = { _0: ($_, x) => Math.trunc(x) };
 const string_is_empty = { _0: ($_, x) => x === "" };
 const not_bool        = { _0: ($_, x) => !x };
-const negate_int      = { _0: ($_, x) => -x };
+const negate_int      = { _0: ($_, x) => march_int_ovf(-x, 3) };
 const negate_float    = { _0: ($_, x) => -x };
 const float_abs       = { _0: ($_, x) => Math.abs(x) };
 const float_floor     = { _0: ($_, x) => Math.floor(x) };
@@ -1450,10 +1470,12 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
      whether the compiled code already uses them directly. *)
   Hashtbl.replace ctx.runtime_uses "march_float_to_string" ();
   Hashtbl.replace ctx.runtime_uses "march_string_byte_length" ();
+  Hashtbl.replace ctx.runtime_uses "march_int_ovf" ();   (* negate_int *)
   let int_rt_builtins2 =   (* two-argument runtime-backed int builtins *)
     [ "int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr";
       "int_mod"; "int_div"; "int_mod_euclid"; "int_div_euclid";
-      "int_mod_floor"; "int_div_floor" ] in
+      "int_mod_floor"; "int_div_floor";
+      "int_wrapping_add"; "int_wrapping_sub"; "int_wrapping_mul" ] in
   let int_rt_builtins1 = [ "int_not"; "int_popcount" ] in
   List.iter (fun n -> Hashtbl.replace ctx.runtime_uses ("march_" ^ n) ())
     (int_rt_builtins2 @ int_rt_builtins1);

@@ -29,6 +29,9 @@ type t =
   | Int_not
   | Int_popcount
   | Int_pow
+  | Int_wrapping_add
+  | Int_wrapping_mul
+  | Int_wrapping_sub
   | Int_to_string
   | Mpst_send
   | Negate
