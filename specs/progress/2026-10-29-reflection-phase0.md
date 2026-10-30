@@ -188,6 +188,19 @@ this branch's:
 - `--check --refine-report --refine-report-sites` over the same 553 fixtures, unsorted and
   byte for byte: identical (30,892 lines). The bare flag and `--refine-report` are unchanged.
 
+Re-run after the review fixes (`2eb8523cc`). The first baselines could not be reused: they were
+taken while `_build/default/stdlib` still held the copy staged before 45020b2e4 (see the trap under
+"The monotone gate goes RED"), so checking the fixed binary, which now reads the restaged stdlib,
+against them gave `DIAGNOSTICS CHANGED — 2293 differing lines` and `IR CHANGED`, every row a
+stdlib-content difference, not a compiler one. Fresh baselines were therefore recorded from origin/main
+`5d78b341b`, extracted with `git archive` into a scratch copy and built there (`dune build --root .
+bin/main.exe @bin/warm-cache`, which stages that commit's own stdlib and runtime), each run under its
+own private `HOME`:
+
+- `scripts/refine-oracle.sh check`: `REFINEMENT DIAGNOSTICS IDENTICAL (8791 lines over 553
+  fixtures)`.
+- `scripts/ir-oracle.sh check`: `IR IDENTICAL across 498 programs`.
+
 ## Probe (d) reproduced
 
 `--reflect-report` over every `stdlib/*.march` and `test/native/*.march` (one private HOME), counting
