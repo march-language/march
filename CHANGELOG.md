@@ -471,6 +471,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **On the JS target a `let` local named like a module function is the local.** It was
+  emitted as that function's closure (`{ o with x: px }` stored a closure when the module
+  also had `fn px`).
+- **Bytes built from byte values are those bytes on the JS target.** `Bytes.from_list` and
+  `Bytes.from_hex` with bytes ≥ 0x80 (via `byte_to_char`) gave each byte's UTF-8 encoding,
+  shifting every later byte offset (Herald's font data drew glyphs a pixel off).
 - **`let x = match t do (a, _) -> a end` on a tuple works on the JS target.** The
   compiler's non-exhaustive default was emitted after the tuple's one branch and
   overwrote `x` with a "non-exhaustive pattern match" throw.

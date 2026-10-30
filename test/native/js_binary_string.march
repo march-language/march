@@ -32,6 +32,15 @@ mod JsBinaryString do
     println(int_to_string(string_byte_length("héllo")) ++ " " ++ bool_to_string(String.slice("héllo", 0, 3) == "hé"))
     let e = Bytes.to_string(Bytes.from_u8_arr(NativeArray.set_u8(NativeArray.set_u8(NativeArray.make_u8(2, 0), 0, 195), 1, 169)))
     println(bool_to_string(e == "é"))
+    -- Bytes built from byte values (from_list, from_hex: byte_to_char) are bytes too
+    let fl = Bytes.to_string(Bytes.from_list([0, 200, 65]))
+    println(int_to_string(string_byte_length(fl)) ++ " " ++ int_to_string(string_byte_at(fl, 1)) ++ " " ++ int_to_string(string_byte_at(fl, 2)))
+    match Bytes.from_hex("c3a9ff41") do
+      Ok(b) ->
+        let hs = Bytes.to_string(b)
+        println(int_to_string(string_byte_length(hs)) ++ " " ++ int_to_string(string_byte_at(hs, 2)) ++ " " ++ bool_to_string(String.slice(hs, 0, 2) == "é"))
+      Err(err) -> println(err)
+    end
     let n = 3000000
     let big = bigBinary(n)
     let t0 = nowMs()

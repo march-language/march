@@ -177,8 +177,15 @@ export function march_string_chars(s) {
 
 export function march_string_from_chars(list) {
   let s = "";
-  while (list.$ === "Cons") { s += list._0; list = list._1; }
-  return s;
+  let raw = false;
+  while (list.$ === "Cons") {
+    const c = list._0;
+    if (!raw && c.length === 1) { const u = c.charCodeAt(0); raw = u >= 0xF780 && u <= 0xF7FF; }
+    s += c; list = list._1;
+  }
+  // Raw bytes (byte_to_char) may spell valid UTF-8: give the canonical form,
+  // so Bytes.to_string(from_list([195, 169])) is "é".
+  return raw ? march_bytes_to_string(march_encode_bytes(s)) : s;
 }
 
 export function march_string_concat3(a, b, c) {
@@ -303,8 +310,11 @@ export function march_char_from_int(n) {
   return String.fromCodePoint(n);
 }
 
+/* A Char holding one raw byte (Bytes.from_list, from_hex): bytes 0x80-0xFF
+ * use the byte-string range (see "Byte strings"), so the string they make
+ * has exactly those bytes rather than each one's UTF-8 encoding. */
 export function march_byte_to_char(n) {
-  return String.fromCharCode(n);
+  return n < 0x80 ? String.fromCharCode(n) : String.fromCharCode(MARCH_RAW_BASE + n);
 }
 
 export function march_char_to_int(c) {

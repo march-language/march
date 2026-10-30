@@ -186,6 +186,8 @@ native_erased_render_show: coverage audit (user + stdlib): 198 enforced, 0 inert
 native_erased_render_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_extern_js_module_native: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_extern_js_module_native: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_fatal_trap_report: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_fatal_trap_report: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_blocking: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
@@ -328,10 +330,10 @@ native_js_int_check_lit: coverage audit (user + stdlib): 198 enforced, 0 inert (
 native_js_int_check_lit: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_let_shadowing: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_let_shadowing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_local_shadows_fn: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_local_shadows_fn: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_match_stmt_fallthrough: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_match_stmt_fallthrough: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
-native_extern_js_module_native: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
-native_extern_js_module_native: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_mutual_tail: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_mutual_tail: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_native_arrays: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced

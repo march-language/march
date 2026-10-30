@@ -14875,3 +14875,18 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_tuple_let_match.out (run node js_tuple_let_match.mjs))))
 
 (rule (alias runtest) (action (diff native/js_tuple_let_match.expected js_tuple_let_match.out)))
+
+; js_local_shadows_fn — a let local named like a module function is the local, not the function's closure.
+(rule
+ (targets js_local_shadows_fn.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_local_shadows_fn.march) march_runtime.mjs )
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime 
+              -o js_local_shadows_fn.mjs native/js_local_shadows_fn.march)))
+
+(rule
+ (targets js_local_shadows_fn.out)
+ (deps js_local_shadows_fn.mjs march_runtime.mjs )
+ (action (with-stdout-to js_local_shadows_fn.out (run node js_local_shadows_fn.mjs))))
+
+(rule (alias runtest) (action (diff native/js_local_shadows_fn.expected js_local_shadows_fn.out)))
