@@ -478,7 +478,10 @@ git log is authoritative for exact commits.
 - **A module with JS-module externs compiles natively.** An `extern "./x.mjs"` block gave
   its functions native symbols like `./x.mjs_fn`, so any native build that loaded the
   module (say, a library's browser backend) failed in clang even when nothing called them.
-
+- Every `march --compile` on a musl host (Alpine) failed since 2026-10-12: the
+  runtime's scheduler included `<execinfo.h>`, which musl does not have. It is now
+  guarded as the rest of the runtime guards it (no symbolised fatal-fault frames on
+  musl).
 - **A record or variant whose only refinements are on container elements is now
   checked when it is built.** With `type Box = { n : Int, xs : List({Int | _ > 0}) }`,
   `{ n: 10, xs: [0 - 5] }` was accepted with no obligation at all, even under
