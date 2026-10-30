@@ -1,0 +1,8 @@
+proved	user	a1_append_len.march:2:5	postcondition	cat	len(_) == len(xs) + len(ys)
+proved	user	a1_append_len.march:9:5	postcondition	rev	len(_) == len(xs)
+proved	user	a1_append_len.march:20:12	precondition	need3	len(_) == 3
+proved	user	a1_append_len.march:21:12	precondition	need3	len(_) == 3
+reflect	a1_append_len.march:2:5	cat	reflected	unfold
+reflect	a1_append_len.march:9:5	rev	reflected	unfold
+reflect	a1_append_len.march:16:5	need3	reflected	unfold (guard: len(xs) == 3)
+reflect	a1_append_len.march:18:5	main	no	R1:is `main` (a1_append_len.march:18:5)

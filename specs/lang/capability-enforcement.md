@@ -183,6 +183,9 @@ It does **not** prove that the code actually *uses* only those capabilities, onl
 
 ## See also
 
+- [Capability Threat Model]({{ site.baseurl }}/docs/capability-threat-model/): what the
+  capability system as a whole guarantees, assumes and does not cover, including both
+  mechanisms on this page.
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/): where capabilities are
   defined and declared. This page enforces what that page declares.
 - [Capability Audit]({{ site.baseurl }}/docs/capability-audit/): `forge audit`

@@ -100,6 +100,26 @@ type unit_ = {
   u_ret : A.ty option;  (** the declared return type (phase 3 reads it for IH demand) *)
 }
 
+(** What one callee name, or one function name used as a value, resolved to:
+    the [sites] of [graph].  The reflection report ([Refine_reflect]) reads
+    them; nothing in the termination analysis does. *)
+type site_target =
+  | S_unit of int  (** a unit of the graph *)
+  | S_impls of int list  (** an interface dispatch to these [impl] / default units *)
+  | S_value  (** a local value: a call through a function value *)
+  | S_builtin  (** a builtin of the typechecker's table *)
+  | S_extern  (** an [extern] *)
+  | S_unresolved  (** nothing the pass can name *)
+
+type site = {
+  s_src : int;  (** the unit the site sits in *)
+  s_name : string;  (** the callee name as written ([""] for a non-name callee) *)
+  s_span : A.span;  (** the call expression's span, or the name's for a reference *)
+  s_call : bool;  (** a call ([true]) or a function name used as a value *)
+  s_args : A.expr list;
+  s_target : site_target;
+}
+
 type graph = {
   units : unit_ array;
   edges : edge list;  (** every edge, in walk order *)
@@ -120,6 +140,9 @@ type graph = {
       (** (unit, callee expression) of every call through a FUNCTION VALUE: a
           callee bound by a parameter, [let], arm or lambda binder, or any
           callee that is not a name at all.  Positivity (§3.6) reads these. *)
+  sites : site list;
+      (** every call and every function name used as a value, with what it
+          resolved to, in walk order.  Read only by [Refine_reflect]. *)
 }
 
 let rec pat_vars (p : A.pattern) : string list =
@@ -404,6 +427,11 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let fv_calls = ref [] in
   let trusted = ref [] in
   let unresolved = ref [] in
+  let sites = ref [] in
+  let site ~src ~name ~span ~call ~args target =
+    sites := { s_src = src; s_name = name; s_span = span; s_call = call; s_args = args; s_target = target }
+             :: !sites
+  in
   let top_of : (int, int) Hashtbl.t = Hashtbl.create 64 in
   let new_unit ?decreases ?top ?ret ~name ~span ~kind ~params ~tys ~pspans ~clauses ~attrs () =
     let id = !n_units in
@@ -717,15 +745,26 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       match head with
       | A.EVar n ->
         let kind = if lam then Lambda else Direct in
+        let site = site ~src ~name:n.A.txt ~span ~call:true ~args in
         (match resolve ~arity:(List.length args) ~args env n.A.txt with
-         | T_unit dst -> add_edge ~env ~src ~dst ~kind ~args ~span ~owner ()
+         | T_unit dst ->
+           site (S_unit dst);
+           add_edge ~env ~src ~dst ~kind ~args ~span ~owner ()
          | T_impls (ds, by_value) ->
+           site (S_impls ds);
            List.iter (fun dst -> add_edge ~dispatch:by_value ~env ~src ~dst ~kind ~args ~span ~owner ()) ds
-         | T_value -> fv_calls := (src, head) :: !fv_calls
-         | T_trusted -> if is_ident n.A.txt then trusted := (src, n.A.txt) :: !trusted
-         | T_unresolved -> unresolved := (src, n.A.txt) :: !unresolved);
+         | T_value ->
+           site S_value;
+           fv_calls := (src, head) :: !fv_calls
+         | T_trusted ->
+           site (if lookup externs_tbl n.A.txt <> None then S_extern else S_builtin);
+           if is_ident n.A.txt then trusted := (src, n.A.txt) :: !trusted
+         | T_unresolved ->
+           site S_unresolved;
+           unresolved := (src, n.A.txt) :: !unresolved);
         List.iter w args
       | f ->
+        site ~src ~name:"" ~span ~call:true ~args S_value;
         fv_calls := (src, f) :: !fv_calls;
         w f;
         List.iter w args
@@ -738,11 +777,17 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       let ref_edge ?dispatch dst =
         add_edge ?dispatch ~env ~src ~dst ~kind:Reference ~args:[] ~span:n.A.span ~owner ()
       in
+      let site = site ~src ~name:n.A.txt ~span:n.A.span ~call:false ~args:[] in
       match resolve env n.A.txt with
-      | T_unit dst -> ref_edge dst
-      | T_impls (ds, by_value) -> List.iter (ref_edge ~dispatch:by_value) ds
-      | T_value | T_trusted -> ()
-      | T_unresolved -> unresolved := (src, n.A.txt) :: !unresolved)
+      | T_unit dst -> site (S_unit dst); ref_edge dst
+      | T_impls (ds, by_value) -> site (S_impls ds); List.iter (ref_edge ~dispatch:by_value) ds
+      | T_value -> ()
+      | T_trusted ->
+        (* A builtin or extern named as a value; never a local (that is
+           [T_value]), never an operator. *)
+        if is_ident n.A.txt then
+          site (if lookup externs_tbl n.A.txt <> None then S_extern else S_builtin)
+      | T_unresolved -> site S_unresolved; unresolved := (src, n.A.txt) :: !unresolved)
     | A.EBlock (es, _) -> ignore (List.fold_left (fun env ex -> block_item ~src ~owner ~lam env ex) env es)
     | A.ELet (b, _) -> w b.A.bind_expr
     | A.ELetFn _ -> ignore (block_item ~src ~owner ~lam env e)
@@ -866,7 +911,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let scc_of = Array.make n 0 in
   Array.iteri (fun i ms -> List.iter (fun v -> scc_of.(v) <- i) ms) sccs;
   { units; edges; out; scc_of; sccs; trusted = List.rev !trusted;
-    unresolved = List.rev !unresolved; fv_calls = List.rev !fv_calls }
+    unresolved = List.rev !unresolved; fv_calls = List.rev !fv_calls; sites = List.rev !sites }
 
 (** Intra-SCC edges out of [u]. *)
 let intra g (u : int) : edge list =
