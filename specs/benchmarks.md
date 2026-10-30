@@ -225,6 +225,10 @@ cd /tmp/base && dune build --root . bin/main.exe && dune build --root . @install
 # has not changed underneath you.
 ```
 
+`scripts/perf-ab.sh [BASE [CAND]]` now does all of the above over a fixed set of 14
+benchmarks, with warmup, interleaving, a bootstrap CI and the exact allocation counters
+(`specs/2026-10-30-perf-ab-runner-design.md`); prefer it to the manual recipe.
+
 **One open lead — since RESOLVED, see Run 5 above.** `bench/rrb_bench.march`'s
 parallel arms measured ~22% *slower* than its sequential one here, tight enough
 to look structural, but on a 14-core box at load 15. It was filed as a lead
