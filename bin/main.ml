@@ -767,8 +767,33 @@ let print_refine_report_sites_all ~filename ~user_files () =
    (lib/refinecheck/refine_reflect.ml).  Run AFTER [Division_safety], whose
    [Division] verdicts R4 reads from the ledger.  Inert: nothing else reads
    the analysis. *)
-let print_reflect_report ~filename ~user_files ~type_map (m : March_ast.Ast.module_) =
+let print_reflect_report ~filename ~user_files ~type_map ~(recheck : unit -> unit)
+    (m : March_ast.Ast.module_) =
   let module RR = March_refinecheck.Refine_reflect in
+  let module RT = March_refinecheck.Refine_term in
+  (* R2 needs a certificate for every recursive SCC of user code, which the
+     refinement walk decides only for DEMANDED SCCs.  Demanding them in the
+     real check (as --termination-report does) would file termination
+     obligations into the ledger this run also reports, so the demand runs
+     here instead: the same check again, with every user SCC demanded,
+     against a scratch ledger and a throwaway diagnostic context.  The real
+     ledger is restored by [with_scratch]; only the certificates are kept. *)
+  let certs =
+    if !RT.check_all then Hashtbl.copy RT.last_certs
+    else begin
+      let saved = Hashtbl.copy RT.last_certs in
+      RT.check_all := true;
+      Fun.protect
+        ~finally:(fun () ->
+          RT.check_all := false;
+          Hashtbl.reset RT.last_certs;
+          Hashtbl.iter (Hashtbl.replace RT.last_certs) saved)
+        (fun () ->
+          March_refinecheck.Obligation.with_scratch (fun () ->
+              recheck ();
+              Hashtbl.copy RT.last_certs))
+    end
+  in
   let module O = March_refinecheck.Obligation in
   let module RE = March_refinecheck.Refine_encode in
   let is_user_span (span : March_ast.Ast.span) =
@@ -782,7 +807,7 @@ let print_reflect_report ~filename ~user_files ~type_map (m : March_ast.Ast.modu
   let ne = Hashtbl.create 64 in
   List.iter (fun sp -> Hashtbl.replace ne sp ()) !March_typecheck.Typecheck.last_nonexhaustive_match_spans;
   let inputs =
-    { RR.certs = Hashtbl.find_opt March_refinecheck.Refine_term.last_certs;
+    { RR.certs = Hashtbl.find_opt certs;
       nonexhaustive = Hashtbl.mem ne;
       division =
         (fun sp ->
@@ -2369,7 +2394,7 @@ let run_test_cmd args =
     let audit_result = ref [] in
     (* --termination-report demands every recursive SCC of user code (design
        §9); otherwise only an `@[decreases]` one is checked (D2). *)
-    March_refinecheck.Refine_term.check_all := !termination_report || !reflect_report;
+    March_refinecheck.Refine_term.check_all := !termination_report;
     (* Phase 5: metric inference (§3.5) only under the report or
        --refine-infer; a plain --check never infers. *)
     March_refinecheck.Refine_term.infer :=
@@ -2381,14 +2406,24 @@ let run_test_cmd args =
       ~type_map
       errors desugared;
     if !refine_report then print_refine_report ~filename ~user_files ();
-    if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ()
-    else if !refine_report_sites then print_refine_report_sites ~filename ~user_files ();
+    if !refine_report_sites && not !refine_report_sites_all then
+      print_refine_report_sites ~filename ~user_files ();
     if !termination_report then
       print_termination_report ~filename ~user_files ~type_map desugared;
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
-    if !reflect_report then print_reflect_report ~filename ~user_files ~type_map desugared;
+    (* After [Division_safety]: its [Division] obligations are part of the
+       listing (and what R4 reads). *)
+    if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
+    if !reflect_report then
+      print_reflect_report ~filename ~user_files ~type_map
+        ~recheck:(fun () ->
+          March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
+            ~stdlib_files:(stdlib_span_files stdlib_decls)
+            ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls ~type_map
+            (March_errors.Errors.create ()) desugared)
+        desugared;
     (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
        refinement contract are admitted when their call site's PRECONDITION was
        actually discharged, rather than banned by name.  It must run here, after
@@ -3639,7 +3674,7 @@ let compile filename =
   let audit_result = ref [] in
   (* --termination-report demands every recursive SCC of user code (design
      §9); otherwise only an `@[decreases]` one is checked (D2). *)
-  March_refinecheck.Refine_term.check_all := !termination_report || !reflect_report;
+  March_refinecheck.Refine_term.check_all := !termination_report;
   (* Phase 5: metric inference (§3.5) only under the report or
      --refine-infer; a plain --check never infers. *)
   March_refinecheck.Refine_term.infer :=
@@ -3651,14 +3686,22 @@ let compile filename =
     ~type_map
     errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
-  if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ()
-  else if !refine_report_sites then print_refine_report_sites ~filename ~user_files ();
+  if !refine_report_sites && not !refine_report_sites_all then
+    print_refine_report_sites ~filename ~user_files ();
   if !termination_report then
     print_termination_report ~filename ~user_files ~type_map desugared;
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
-  if !reflect_report then print_reflect_report ~filename ~user_files ~type_map desugared;
+  if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
+  if !reflect_report then
+    print_reflect_report ~filename ~user_files ~type_map
+      ~recheck:(fun () ->
+        March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
+          ~stdlib_files:(stdlib_span_files stdlib_decls)
+          ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls ~type_map
+          (March_errors.Errors.create ()) desugared)
+      desugared;
   (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
      refinement contract are admitted when their call site's PRECONDITION was
      actually discharged, rather than banned by name.  It must run here, after

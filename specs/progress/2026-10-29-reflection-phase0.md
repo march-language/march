@@ -12,8 +12,11 @@ phase 0; the design is on branch `claude/reflection-design`, PR #1036).
     method, interface default, top-level `let`); a local `fn` that reads a value bound by an enclosing
     unit is `R1:captures k`.
   - R2 reads `Refine_term.last_certs` (the refinement walk's certificate), else the phase-1
-    certificate; `structural` and `metric` pass. `--reflect-report` demands every user SCC, as
-    `--termination-report` does, so the two reports read the same certificates.
+    certificate; `structural` and `metric` pass. Certificates for undemanded SCCs come from a second
+    refinement check that `--reflect-report` runs on the side with every user SCC demanded (as
+    `--termination-report` demands them), under `Obligation.with_scratch` and a throwaway
+    diagnostic context, so the real ledger is untouched (review fix 3, below). With
+    `--termination-report` also given, the real check already demands them and is reused.
   - R3/R4/R6 classify every call SITE (new `Refine_term.graph.sites`: each callee name with what it
     resolved to and its span). Builtins are matched by resolved identity: a builtin, or a stdlib
     prelude function of the same name (`println` resolves to the prelude's). Effects are the
@@ -76,6 +79,48 @@ phase 0; the design is on branch `claude/reflection-design`, PR #1036).
   internals, SIMD vectors) have none (R8).
 - **The SCC rule exempts an `impl` method that passes R2-R7**: an `eq` in a recursive group with its
   caller does not drop the caller (it is what `==` needs, §3.5).
+
+## Review fixes (fresh-context review of this branch)
+
+Each fix landed test first; the new tests were run against the reviewed code (RED) and then the fix
+(GREEN). Group `reflect-report` is 28 cases.
+
+1. **`$len` by spelling (I3).** A callee whose `u_name` was `List.length` was taken as `$len` even
+   when it was a user `mod List do fn length …`, so `f(xs) = List.length(xs)` was falsely
+   `reflected`. Now the unit must live in the stdlib's `list.march` / `string.march`
+   (`Typecheck_builtins.file_is_stdlib`) AND the encoder's own ownership gate must agree
+   (`Refine_encode.list_length_is_stdlib` / `string_byte_size_is_stdlib`). RED: `f verdict` was
+   `reflected`; GREEN: `R6:calls List.length, which is not reflected`
+   (`report_len_shadow_module`, with a stdlib control that stays reflected).
+2. **`=all` missed every `Division` obligation.** It printed before `Division_safety.check_module`
+   filed them, so the monotone gate was blind to what R4 reads. It now prints after it, in both
+   pipelines (the bare flag stays where it was; `Division_safety` records only `proved` /
+   `violated`, never a skip, so its output cannot change). RED: no `proved … division` line in a
+   `cap no_panic` module; GREEN: one proved and one violated division line
+   (`sites_all: Division obligations are listed`). The monotone RED proof above predates this fix,
+   so its listings have no division sites.
+3. **`--reflect-report` changed the ledger it ran beside.** It used to set `Refine_term.check_all`
+   for the real check, which files termination obligations: `--refine-report` counts and `=all`
+   lines differed with the flag on, and the pinned fixtures carried those extra `termination` rows.
+   Now the real check is untouched (option (a)): `print_reflect_report` re-runs
+   `Refine_check.check_module` with `check_all` set, inside `Obligation.with_scratch`, into a
+   throwaway `Errors.ctx`, keeps only the certificates, and restores `last_certs`. RED:
+   `report_ledger`'s two listings differed; GREEN: identical `--refine-report
+   --refine-report-sites=all` output with and without the flag, and `cnt` still reflected on its
+   metric certificate. Fixtures regenerated: the `termination` rows of `c3b`, `h1` and `r1` (the
+   undemanded SCCs) are gone; `r1`'s `q` keeps its rows because `@[decreases]` demands it. Cost: one
+   more refinement check per run, only under the flag.
+4. **R8 accepted a guard that does not translate.** A parameter refinement with `==` whose operand
+   is the binder, at a type with a hand-written `impl Eq` (a derived impl has the synthetic
+   `"<none>"` interface span), is now `R8:the refinement of p uses == at P, which has a hand-written
+   Eq` (§3.5); `len(_) == 3` compares Ints and is unaffected, and a derived `Eq` keeps its guard.
+   RED: g1's `need` was `reflected unfold (guard: p == P(1, 2))`; GREEN: R8
+   (`report_eq_guard`; `g1`, `g3` fixtures regenerated). This is the §3.5 rule, not the encoder's
+   translation: a guard the encoder rejects for another reason is still only vocabulary-checked.
+
+Minor: a data type with a function-typed field, at any depth, has no sort (`report_fn_field`, RED
+then GREEN); a report that names an unsolved type variable says "a type variable" instead of its
+internal name (it printed `== at c3`); not covered by a test.
 
 ## RED perturbations (each rule's fixture)
 

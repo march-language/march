@@ -324,6 +324,74 @@ end
         reflected out "inc";
         blocked out "nothing" "R8:returns Unit";
         blocked out "idx2" "R8:the refinement of i does not translate (inc is not predicate vocabulary)");
+    gated "report_len_shadow_module: a user `List.length` is not `$len` (I3)" (fun () ->
+        let out =
+          run
+            {|mod Ls do
+  needs IO.Console
+  mod List do
+    fn length(xs : List(Int)) : Int do
+      println("boom")
+      0
+    end
+  end
+  fn f(xs : List(Int)) : Int do List.length(xs) end
+end
+|}
+        in
+        blocked out "f" "R6:calls List.length, which is not reflected");
+    gated "report_len_shadow_module control: the stdlib `List.length` is `$len`" (fun () ->
+        let out = run "mod Lc2 do\n  fn f(xs : List(Int)) : Int do List.length(xs) end\nend\n" in
+        reflected out "f");
+    gated "report_eq_guard: a guard `==` at a type with a hand-written Eq is R8 (§3.5)" (fun () ->
+        let out =
+          run
+            {|mod Eg do
+  type P = P(Int, Int)
+  impl Eq(P) do
+    fn eq(a : P, b : P) : Bool do
+      match (a, b) do
+        (P(x, _), P(y, _)) -> x == y
+      end
+    end
+  end
+  type Q = Q(Int, Int)
+  derive Eq for Q
+  fn need(p : {P | _ == P(1, 2)}) : Int do 0 end
+  fn needq(q : {Q | _ == Q(1, 2)}) : Int do 0 end
+end
+|}
+        in
+        blocked out "need" "R8:the refinement of p uses == at P, which has a hand-written Eq";
+        expect out "needq" ~verdict:"reflected" ~detail:"guard: q == Q(1, 2)");
+    gated "report_fn_field: a data type with a function-typed field has no sort (§3.2)" (fun () ->
+        let out =
+          run
+            "mod Ff do\n  type Box = Box(Int -> Int)\n  fn run(b : Box) : Int do 0 end\nend\n"
+        in
+        blocked out "run" "R8:parameter b has type Box, which has no sort");
+    gated "report_ledger: --reflect-report leaves the ledger as it was" (fun () ->
+        let src =
+          "mod Lg do\n  fn cnt(n : {Int | _ >= 0}) : Int do\n    if n == 0 do 0 else 1 + cnt(n - 1) end\n  end\n  fn pos(k : {Int | _ > 0}) : Int do k end\n  fn go() : Int do pos(3) + cnt(2) end\nend\n"
+        in
+        let without = run ~args:"--check --refine-report --refine-report-sites=all" src in
+        let with_ = run ~args:"--check --refine-report --refine-report-sites=all --reflect-report" src in
+        let strip s =
+          List.filter
+            (fun l -> not (String.length l >= 7 && (String.sub l 0 7 = "reflect" || String.sub l 0 3 = "  t" || String.sub l 0 3 = "  f")))
+            (lines s)
+        in
+        Alcotest.(check (list string)) "ledger unchanged" (strip without) (strip with_);
+        (* and R2 still sees the metric certificate *)
+        expect with_ "cnt" ~verdict:"reflected" ~detail:"guard: n >= 0");
+    gated "sites_all: Division obligations are listed (cap no_panic)" (fun () ->
+        let out =
+          run ~args:"--check --refine-report-sites=all"
+            "mod Dz do\n  cap no_panic\n  fn ok(n : Int, m : {Int | _ > 0}) : Int do n / m end\n  fn bad(n : Int, m : Int) : Int do n / m end\nend\n"
+        in
+        let div v = List.exists (fun l -> String.length l > 0 && contains l "\tdivision\t" && String.sub l 0 (String.length v) = v) (lines out) in
+        Alcotest.(check bool) ("a proved division line:\n" ^ out) true (div "proved\tuser");
+        Alcotest.(check bool) "a violated division line" true (div "violated\tuser"));
     gated "report: main is R1, and the summary counts rows" (fun () ->
         let out = run "mod Mn do\n  fn one() : Int do 1 end\n  fn main() : Int do one() end\nend\n" in
         reflected out "one";

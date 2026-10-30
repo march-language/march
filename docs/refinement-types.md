@@ -4683,8 +4683,10 @@ The rules, in the order the report checks them:
 A recursive group is reflected as a whole or not at all. A reflected function
 whose parameters are refined shows the guard each use will carry, for example
 `unfold (guard: n >= 0)`. Like `--termination-report`, the flag bypasses the
-compile cache and checks every recursive function of your code for termination.
-It changes no verdict: nothing uses reflection yet.
+compile cache. To read a termination certificate for every recursive function of
+your code it runs the refinement check a second time, on the side, so the
+obligations `--refine-report` counts are the same with or without it. It changes no
+verdict: nothing uses reflection yet.
 
 To compare runs obligation by obligation, `--refine-report-sites=all` prints one
 line per obligation of any verdict, not just the skipped ones:

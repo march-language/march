@@ -1,4 +1,3 @@
-skip	user	c3b_measure_effect_callee.march:13:28	not-decreasing	termination	spin	0 <= $g_n && $g_n < $c_n
 skip	user	c3b_measure_effect_callee.march:42:12	solver-undecided	precondition	need	sz(_) == 1
 reflect	c3b_measure_effect_callee.march:4:5	noisy	no	R3:calls println (c3b_measure_effect_callee.march:5:4)
 reflect	c3b_measure_effect_callee.march:9:5	boom	no	R4:calls panic (c3b_measure_effect_callee.march:10:4)

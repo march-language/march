@@ -71,10 +71,6 @@ let comparison_ops = [ "<"; "<="; ">"; ">=" ]
 let eq_ops = [ "=="; "!=" ]
 let div_ops = [ "/"; "%" ]
 
-(* The [len] spellings that are stdlib functions, matched by the unit they
-   resolve to (§2.3: `List.length`, `String.byte_size` are `$len`). *)
-let len_units = [ "List.length"; "String.byte_size" ]
-
 (* Set vocabulary, meaningful only inside a set-valued function. *)
 let set_ops = [ "union"; "inter"; "diff"; "singleton"; "member"; "subset"; "empty"; "card" ]
 
@@ -143,6 +139,10 @@ let ty_is_arrow (t : T.ty) =
 
 type origin = O_fn | O_impl of string | O_default | O_let | O_handler
 
+(* A type for report text: an unsolved variable reads as such, not as its
+   internal name. *)
+let pp_ty (t : T.ty) = match T.repr t with T.TVar _ -> "a type variable" | _ -> T.pp_ty t
+
 let span_str (s : A.span) = Printf.sprintf "%s:%d:%d" s.A.file s.A.start_line s.A.start_col
 
 let pos_lt (a : A.span) (b : A.span) = compare (a.A.start_line, a.A.start_col) (b.A.start_line, b.A.start_col) < 0
@@ -163,7 +163,44 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
   let emit owner rule text span = Hashtbl.add events owner { ev_rule = rule; ev_text = text; ev_span = span } in
   (* Declared data types: an ADT or record has a sort (§3.2). *)
   let adt_tbl = RT.collect_types decls in
-  let adts b = Hashtbl.mem adt_tbl b in
+  (* A declared data type has a sort unless a field, at any depth, holds a
+     function (§3.2). *)
+  let adt_memo = Hashtbl.create 64 in
+  let rec adts b =
+    match Hashtbl.find_opt adt_memo b with
+    | Some r -> r
+    | None -> (
+      match Hashtbl.find_opt adt_tbl b with
+      | None -> false
+      | Some d ->
+        Hashtbl.replace adt_memo b true;  (* a recursive type is assumed fine while visited *)
+        let rec ok (t : A.ty) =
+          match strip t with
+          | A.TyArrow _ -> false
+          | A.TyCon (n, args) ->
+            let h = RT.bare n.A.txt in
+            (not (Hashtbl.mem adt_tbl h) || adts h) && List.for_all ok args
+          | A.TyTuple ts -> List.for_all ok ts
+          | A.TyRecord fs -> List.for_all (fun (_, t) -> ok t) fs
+          | _ -> true
+        in
+        let r = List.for_all ok d.RT.t_fields in
+        Hashtbl.replace adt_memo b r;
+        r)
+  in
+  (* Types with a hand-written [impl Eq]: a derived impl's interface name has
+     the synthetic file "<none>" ([Desugar_derive.respan_derived_decl]). *)
+  let hand_eq = Hashtbl.create 16 in
+  let rec scan_eq ds =
+    List.iter
+      (function
+        | A.DImpl (idf, _) when RT.bare idf.A.impl_iface.A.txt = "Eq" && idf.A.impl_iface.A.span.A.file <> "<none>" -> (
+          match strip idf.A.impl_ty with A.TyCon (n, _) -> Hashtbl.replace hand_eq (RT.bare n.A.txt) () | _ -> ())
+        | A.DMod (_, _, inner, _) -> scan_eq inner
+        | _ -> ())
+      ds
+  in
+  scan_eq decls;
   let rec walk ~(owner : A.span) ~(local : bool) (env : bind SM.t) (e : A.expr) : unit =
     let w = walk ~owner ~local env in
     match e with
@@ -303,6 +340,22 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
   let impl_name (u : RT.unit_) =
     match origin_of u with O_impl s -> s | _ -> u.RT.u_name
   in
+  (* `$len` by resolved identity (I3): the unit must be the STDLIB's
+     `List.length` / `String.byte_size`, and the encoder's own gate must agree
+     that the spelling denotes it in this program ([Refine_encode]'s
+     [list_length_is_stdlib] &c).  A user `mod List do fn length …` is an
+     ordinary callee. *)
+  let is_len_unit v =
+    let u = unit_ v in
+    March_typecheck.Typecheck_builtins.file_is_stdlib u.RT.u_span.A.file
+    &&
+    match RT.bare u.RT.u_name, u.RT.u_name with
+    | "length", ("List.length" | "length") ->
+      !Refine_encode.list_length_is_stdlib && Filename.basename u.RT.u_span.A.file = "list.march"
+    | "byte_size", ("String.byte_size" | "byte_size") ->
+      !Refine_encode.string_byte_size_is_stdlib && Filename.basename u.RT.u_span.A.file = "string.march"
+    | _ -> false
+  in
   let ty_at sp = match inp.type_map with Some tm -> Hashtbl.find_opt tm sp | None -> None in
   let arg_ty (s : RT.site) = match s.RT.s_args with a :: _ -> ty_at (T.span_of_expr a) | [] -> None in
   let is_set_result (u : RT.unit_) =
@@ -357,7 +410,7 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
               sp
           | RT.S_extern -> add 6 (Printf.sprintf "calls the extern %s" nm) sp
           | RT.S_unresolved -> add 6 (Printf.sprintf "calls %s, which the checker cannot resolve" nm) sp
-          | RT.S_unit v when List.mem (unit_ v).RT.u_name len_units -> ()
+          | RT.S_unit v when is_len_unit v -> ()
           | RT.S_unit v when ident <> None && (is_effect nm || List.mem nm fail_builtins) -> ignore v
           | RT.S_unit v -> deps.(u.RT.u_id) <- (`Refl v, s) :: deps.(u.RT.u_id)
           | RT.S_impls ids when List.mem nm eq_ops ->
@@ -384,7 +437,7 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
               | Some ty -> (
                 match T.repr ty with
                 | T.TCon (("Int" | "Float"), []) -> ()
-                | _ -> add 6 (Printf.sprintf "calls %s at %s" nm (T.pp_ty ty)) sp)
+                | _ -> add 6 (Printf.sprintf "calls %s at %s" nm (pp_ty ty)) sp)
               | None -> add 6 (Printf.sprintf "calls %s at a type the checker did not record" nm) sp
             end
             else if List.mem nm set_ops && is_set_result u then ()
@@ -463,7 +516,36 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
           match !bad with
           | Some f ->
             add 8 (Printf.sprintf "the refinement of %s does not translate (%s is not predicate vocabulary)" nm f) sp
-          | None -> ())
+          | None ->
+            (* §3.5: a guard's `==` is structural; at a type with a
+               hand-written Eq the checker does not translate it the way
+               the program reads it (g1: the call site skips
+               `sort-conflict`), so it cannot be the unfolding guard. *)
+            (* `==` AT THE PARAMETER'S TYPE: one operand is the binder
+               itself (`_ == P(1, 2)`).  `len(_) == 3` compares Ints. *)
+            let rec binders (t : A.ty) =
+              match t with
+              | A.TyRefine (b, bn, pred) ->
+                ((match bn with Some n -> n.A.txt | None -> "_"), pred) :: binders b
+              | A.TyLinear (_, b) -> binders b
+              | _ -> []
+            in
+            let uses_eq = ref false in
+            List.iter
+              (fun (bn, pred) ->
+                Refine_encode.iter_all
+                  (function
+                    | A.EApp (A.EVar { A.txt = "==" | "!="; _ }, [ x; y ], _)
+                      when List.exists (function A.EVar v -> v.A.txt = bn | _ -> false) [ x; y ] ->
+                      uses_eq := true
+                    | _ -> ())
+                  pred)
+              (binders a);
+            if !uses_eq then
+              match List.find_opt (fun c -> Hashtbl.mem hand_eq c) (RT.ty_cons (strip a)) with
+              | Some c ->
+                add 8 (Printf.sprintf "the refinement of %s uses == at %s, which has a hand-written Eq" nm c) sp
+              | None -> ())
         | _ -> ())
       u.RT.u_params;
     let body_ty () =
@@ -551,7 +633,7 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
                     | Some b -> b.b_text
                     | None -> "is not total and pure"
                   in
-                  let at = match arg_ty s with Some t -> T.pp_ty t | None -> "?" in
+                  let at = match arg_ty s with Some t -> pp_ty t | None -> "?" in
                   Some
                     { ev_rule = 6;
                       ev_text = Printf.sprintf "%s at %s dispatches to %s, which %s" s.RT.s_name at

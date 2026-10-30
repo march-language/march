@@ -1,8 +1,6 @@
-proved	user	r1_dom1.march:3:31	termination	p	0 <= $g_n && $g_n < $c_n
 proved	user	r1_dom1.march:3:31	precondition	p	_ >= 0
 proved	user	r1_dom1.march:8:31	termination	q	0 <= $g_n && $g_n < $c_n
 proved	user	r1_dom1.march:8:31	precondition	q	_ >= 0
-proved	user	r1_dom1.march:12:28	termination	cnt	0 <= $c_n - 1 && $c_n - 1 < $c_n
 proved	user	r1_dom1.march:12:28	precondition	cnt	_ >= 0
 proved	user	r1_dom1.march:23:12	precondition	p	_ >= 0
 proved	user	r1_dom1.march:24:12	precondition	q	_ >= 0
