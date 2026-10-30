@@ -59,7 +59,7 @@ let rec float_const_of (e : A.expr) : float option =
   | A.EApp (A.EVar { A.txt = "*."; _ }, [ a; b ], _) -> bin (fun x y -> Some (x *. y)) a b
   | A.EApp (A.EVar { A.txt = "/."; _ }, [ a; b ], _) ->
     bin (fun x y -> if y = 0.0 then None else Some (x /. y)) a b
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) ->
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp ->
     Option.map (fun x -> -.x) (float_const_of a)
   | _ -> None
 
@@ -128,7 +128,7 @@ let float_lit_term (f : float) : Smt.term option =
 let int_lit_of (e : A.expr) : int option =
   match e with
   | A.ELit (A.LitInt n, _) -> Some n
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ A.ELit (A.LitInt n, _) ], _) -> Some (-n)
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ A.ELit (A.LitInt n, _) ], nsp) when !Reflect_state.negate_builtin_at nsp -> Some (-n)
   | _ -> None
 
 (* The syntactic identity a non-negativity fact is recorded under.  Only
@@ -295,7 +295,7 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
   | A.ELit (A.LitFloat _, _)
   | A.EApp (A.EVar { A.txt = "+." | "-." | "*." | "/."; _ }, [ _; _ ], _) ->
     (match float_const_of e with Some f -> (match float_lit_term f with Some t -> Ok t | None -> Error e) | None -> Error e)
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) when float_const_of a <> None ->
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp && float_const_of a <> None ->
     (match float_const_of e with Some f -> (match float_lit_term f with Some t -> Ok t | None -> Error e) | None -> Error e)
   (* A string literal reflects to its per-VC constant, when the caller supplies
      a table.  Callers that cannot model strings leave [resolve_str_lit] at its
@@ -410,7 +410,7 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
   | A.EApp (A.EVar { A.txt = "!="; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Ne (x, y)) a b
   | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Add (x, y)) a b
   | A.EApp (A.EVar { A.txt = "-"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Sub (x, y)) a b
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> Result.map (fun x -> Smt.Neg x) (r a)
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp -> Result.map (fun x -> Smt.Neg x) (r a)
   (* A literal factor still reflects as [MulLit], which keeps the query in
      LIA where z3 is complete and fast.  Two non-literal factors reflect as a
      general [Smt.Mul] rather than failing: refusing them was never a safety
@@ -448,18 +448,18 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
            (truncating_division ~op ~nonneg_dividend:(known_nonneg ~vocab nonneg a) x)
            divisor)
   (* A call of a REFLECTED function (reflection §3.7): its logic symbol,
-     resolved by identity ([Reflect_state.resolve]), never by a vocabulary
+     resolved by identity at its site ([Reflect_state.resolve_site]), never by a vocabulary
      spelling (those arms come first).  Stage 1 is today's translator, so
      there the arm only notes that stage 2 has a frontier and fails exactly
      as the fallback below does. *)
-  | A.EApp (A.EVar { A.txt = f; _ }, (_ :: _ as args), _)
-    when !Reflect_state.active && Reflect_state.resolve f <> None ->
+  | A.EApp (A.EVar _, (_ :: _ as args), csp)
+    when !Reflect_state.active && Reflect_state.resolve_site csp <> None ->
     if not !Reflect_state.arm_on then begin
       Reflect_state.frontier_seen := true;
       Error e
     end
     else
-      let sym = Option.get (Reflect_state.resolve f) in
+      let sym = Option.get (Reflect_state.resolve_site csp) in
       let arity = match Reflect_state.sig_of sym with Some s -> List.length s.Reflect_state.fs_params | None -> -1 in
       if List.length args <> arity then Error e
       else
@@ -557,7 +557,7 @@ let rec pred_str (e : A.expr) : string =
                                        | "+" | "-" | "*" | "/" | "%"); _ }, [ _; _ ], _) as a) ], _) ->
     "!(" ^ pred_str a ^ ")"
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> "-" ^ pred_str a
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp -> "-" ^ pred_str a
   (* Any other application of a plain IDENTIFIER — an unrecognised predicate
      such as `is_prime(_)`.  It reflects to nothing, so it is exactly the case
      `cap verified` reports, and rendering it `<predicate>` would name the

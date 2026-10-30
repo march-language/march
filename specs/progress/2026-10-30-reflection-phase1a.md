@@ -218,7 +218,66 @@ five: a deviation from §6.3's protocol for the sweep row only.
   removes errors (R8) and admits `/ -k` divisors into reflection; the monotone and IR oracles were
   not re-run after it.
 
-## Final test runs (branch head)
+## Review fixes (fresh-context review of `835ab1e6f`)
+
+Three ways to prove an obligation that is false at run time, each a REJECT row in `reflect-unfold`
+(group `review`), written first and run against a build of `835ab1e6f` (RED), then against the fix
+(GREEN). The probes are the reviewer's, with their interpreter output in each row's comment.
+
+| Row | `835ab1e6f` (RED) | Fix (GREEN) |
+|---|---|---|
+| C-1 `clo`: a parameter `inc`, a local lambda `inc`, a path condition `if inc(y) == 2` | `need2 at line 7 must NOT be proved` (`proved … uses: inc`; runs `51`) | not proved (4 sites) |
+| C-2 `nest2`: inside `B`, `A.f` is `Top.B.A.f` | `B.need2 at line 13 must NOT be proved` (runs `3`) | violated (3 sites) |
+| C-2 `nest3`: a predicate in `Inner` naming `f` | `Inner.needf at line 7 must NOT be proved` | `needf(2)` violated, `needf(3)` proved through `Inner.f` |
+| C-3 `neg`: user `negate`, `n / negate(2)` and `n / -2` | `needm12 at line 7 must NOT be proved` (runs `2 3`) | not proved |
+| C-3 `neg2`: `negate(n) = 0 * n` | `need_neg at line 8 must NOT be proved` (runs `0`); `h` reflected as dividing by -2, panics at run time | `need_neg(-12)` not proved; `h` is `no R4` |
+
+- **C-1, C-2: one resolution rule, by site.** `Reflect_state.resolve` (spelling: display name, then
+  the enclosing module's prefix) is gone. Every channel (the predicate translator's arm, path
+  conditions, `let` facts, the scalar and datatype subjects, `len` of a call) now asks
+  `Reflect_state.resolve_site span`: the termination graph's own lexical resolution of THAT
+  application node (locals, parameters and lambda binders shadow; nested modules innermost first;
+  `use` / `alias` honoured), the identity `term_of_body` already used. Calls inside a signature's
+  refinement predicates were not in the graph; `Refine_term.build_graph` now walks them too
+  (`graph.pred_sites`), in the function's scope with its parameters and the predicate's binder
+  shadowing, recording a resolution and no edge. A site the graph did not resolve to a reflected
+  unit (a `let` annotation, a lambda's type, a parameter, an unresolved name) is not unfolded.
+- **C-3: `negate` by identity.** `Reflect_state.negate_builtin_at` answers, per application node,
+  whether its `negate` is the builtin, from the same graph (`sites` and `pred_sites`); a node the
+  graph never saw counts as the builtin only when no `negate` is defined outside the stdlib nor in
+  that file. Every spelled `negate` arm checks it: `nonzero_int_literal` (R4, `term_of_body`, the
+  measure gate, the predicate translator's divisor), constant folding, `int_lit_of`,
+  `known_nonneg`'s literal, float folding, the predicate translator's `Neg`, and the witness
+  interpreter's evaluation. The predicate-side half (`need_neg(-12)` proved while the program
+  passes `0`) predates this branch; it is fixed by the same change. Under a user `negate`,
+  `needm12(-12)` may still prove: a predicate's `-12` is the user's `negate(12)` there too, exactly
+  as program code, so `0 == 0` holds and the row asserts the proof goes through the user's function.
+- **Constructor and sort lookups by name (audit).** `term_of_body` built constructor terms with
+  `Refine_encode.sort_of_ctor` (the FIRST datatype declaring the name), and testers and selectors
+  are keyed by the constructor name in SMT. With two datatypes declaring `None`/`Some` (the
+  reviewer's `ctor.march`) every probe was skipped before, but only because z3 rejected or the sort
+  resolution dropped the ill-sorted equation, not by rule. Now `term_of_body`, its patterns and the
+  unfolding guard decline when a constructor name belongs to more than one registered datatype,
+  and a signature declines when a type's short name has two declarations (`adt_decl_paths`); such a
+  function keeps an uninterpreted symbol. `ctor.march` re-run: all six sites skip.
+- **Honest rows.** `sound_eq_float` is renamed a control (no Float function is reflected in 1a);
+  `sound_domain`'s `need_t` row says it passes because `p` is metric-certified and not reflected;
+  `sound_mangle`'s two `not_proved` rows say they are `reflect-fuel`, the mangling being checked
+  by the symbol names.
+- **`R7:names not as a value`** in `c2b_bool_measure.expected` was the documented parser todo (`not
+  even_len(t)` at a block start parses as two statements, `not` and the call). The fixture now
+  writes `not(even_len(t))`, so it tests the recursive Bool measure it means: `even_len` is
+  `reflected`, its two calls `reflect-fuel`. `r1_dom1` keeps the spelling, since it is the spec's
+  probe r1 as written and the phase-0 note pins that reading.
+
+**Oracles were not re-run after these fixes** (coordinator's instruction): the monotone and IR
+results above are from `07b186292`.
+
+After the fixes (branch head): `dune build --root .` clean; `scripts/run-tests.sh refinecheck` 2,044
+tests green (`reflect-unfold` is 41 cases); `run_errors` 301 green; `check-docs.sh` and
+`check-tree-sitter.sh` green. The full `scripts/run-tests.sh` was not re-run after the fixes.
+
+## Final test runs (before the review fixes)
 
 `scripts/run-tests.sh` on `07b186292`: every suite green except `test_refinecheck` (6 failures, ruling
 12); after the fix, `scripts/run-tests.sh refinecheck`: 2,039 tests green. `run_errors`: 301 green.

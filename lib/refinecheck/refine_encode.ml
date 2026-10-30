@@ -1025,7 +1025,7 @@ let measure_name (m : string) : string =
 let nonzero_int_literal (d : A.expr) : int option =
   match d with
   | A.ELit (A.LitInt n, _) when n <> 0 -> Some n
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ A.ELit (A.LitInt n, _) ], _) when n <> 0 -> Some (-n)
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ A.ELit (A.LitInt n, _) ], nsp) when !Reflect_state.negate_builtin_at nsp && n <> 0 -> Some (-n)
   | _ -> None
 
 let is_measure_app (m : string) : bool = measure_alias m <> None || is_measure m
@@ -2254,7 +2254,7 @@ let rec fold_const_body (lookup : string -> (const_val, string) result) (e : A.e
   | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> int2 ( + ) a b
   | A.EApp (A.EVar { A.txt = "-"; _ }, [ a; b ], _) -> int2 ( - ) a b
   | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) -> int2 ( * ) a b
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) ->
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp ->
     (match go a with Ok (CInt x) -> Ok (CInt (-x)) | Error _ as err -> err | _ -> generic)
   | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> bool2 ( && ) a b
   | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> bool2 ( || ) a b

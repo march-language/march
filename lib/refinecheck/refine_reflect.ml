@@ -934,6 +934,15 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
 
 (* ── Sorts of a signature (§3.2, §3.3) ──────────────────────────────────── *)
 
+(* The one datatype a constructor NAME belongs to, or [Decline] when two
+   registered datatypes declare it (review audit): the SMT constructor,
+   tester and selectors are keyed by that name, so an ambiguous one could be
+   read at the wrong datatype.  Never guess. *)
+let unique_ctor_adt (c : string) : string =
+  match Hashtbl.fold (fun adt cs acc -> if List.mem c cs then adt :: acc else acc) RE.adt_ctors [] with
+  | [ adt ] -> adt
+  | _ -> raise Decline
+
 let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
   let short n = match String.rindex_opt n '.' with Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
   let rec go (t : T.ty) =
@@ -952,6 +961,11 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
           Smt.SParam i)
       | T.Link _ -> raise Decline)
     | T.TCon (n, args) ->
+      (* Two declared types of one short name (`A.T`, `B.T`): which one the
+         short name denotes is not decided here.  Decline. *)
+      (match Hashtbl.find_opt RE.adt_decl_paths ("M_" ^ short n) with
+       | Some (_ :: _ :: _) -> raise Decline
+       | _ -> ());
       let adt = RE.adt_sort_name (short n) in
       (match Hashtbl.find_opt RE.adt_ctors adt with
        | Some [ ctor ] when Hashtbl.mem RE.ctor_field_names ctor -> raise Decline (* a record *)
@@ -993,7 +1007,7 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
   | A.EIf (cnd, a, b, _) -> Smt.Ite (v cnd, v a, v b)
   | A.ECon (ctor, args, _) when Hashtbl.mem RE.ctor_field_sorts ctor.A.txt ->
     let ts = List.map v args in
-    (match RE.sort_of_ctor ctor.A.txt with Some adt -> RE.ctor_term adt ctor.A.txt ts | None -> raise Decline)
+    RE.ctor_term (unique_ctor_adt ctor.A.txt) ctor.A.txt ts
   | A.EApp (A.EVar f, args, sp) -> (
     let site = Hashtbl.find_opt c.c_sites sp in
     let nm = f.A.txt in
@@ -1097,6 +1111,7 @@ and pat (p : A.pattern) (s : Smt.term) : Smt.term list * (string * Smt.term) lis
   | A.PatLit (A.LitInt n, _) -> ([ Smt.Eq (s, Smt.IntLit n) ], [])
   | A.PatLit (A.LitBool b, _) -> ([ (if b then s else Smt.Not s) ], [])
   | A.PatCon (ctor, ps) when Hashtbl.mem RE.ctor_field_sorts ctor.A.txt ->
+    ignore (unique_ctor_adt ctor.A.txt);
     let n = List.length (Hashtbl.find RE.ctor_field_sorts ctor.A.txt) in
     if List.length ps <> n then raise Decline;
     let sub =
@@ -1141,7 +1156,7 @@ let pre_of (u : RT.unit_) (psorts : Smt.sort list) : Smt.term list =
                  Refine_scope.smt_of ~resolve_var:var ~resolve_measure:measure
                    ~resolve_tester:(fun ctor a ->
                      match a with
-                     | A.EVar x -> Option.map (fun t -> Smt.IsCtor (ctor, t)) (var x.A.txt)
+                     | A.EVar x -> ignore (unique_ctor_adt ctor); Option.map (fun t -> Smt.IsCtor (ctor, t)) (var x.A.txt)
                      | _ -> None)
                    pred
                with
@@ -1196,7 +1211,6 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   RS.reset ();
   Hashtbl.reset templates;
   Hashtbl.reset encoder_blocked;
-  Hashtbl.reset RS.prefix_of_span;
   install_errors := [];
   Hashtbl.reset RS.blocked_by_name;
   let g = t.RT.graph in
@@ -1227,11 +1241,6 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   let dup = ref [] in
   Array.iter
     (fun (u : RT.unit_) ->
-      let prefix =
-        let top = g.RT.units.(u.RT.u_top).RT.u_name in
-        match String.rindex_opt top '.' with Some i -> String.sub top 0 i | None -> ""
-      in
-      Hashtbl.replace RS.prefix_of_span u.RT.u_span prefix;
       if Hashtbl.mem refl_spans u.RT.u_span then begin
         let origin = origin_of_file ~user_files u.RT.u_span.A.file in
         let path = if u.RT.u_kind = RT.Local then u.RT.u_name ^ Printf.sprintf "#%d:%d" u.RT.u_span.A.start_line u.RT.u_span.A.start_col else u.RT.u_name in
@@ -1310,6 +1319,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
       c_eq_structural = structural_ty []; c_unit = g.RT.units }
   in
   (* Signatures and templates. *)
+  let axiom_tier = Hashtbl.create 8 in
   Array.iter
     (fun (u : RT.unit_) ->
       match sym_of.(u.RT.u_id) with
@@ -1329,9 +1339,9 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
           (* An axiom-tier measure (§5.3) keeps its own symbol in predicates:
              its calls never reach stage 2 (I10).  Its reflected symbol still
              serves a reflected body that calls it. *)
+          RS.register fs;
           if List.mem "measure" u.RT.u_attrs && List.mem (RT.bare u.RT.u_name) !RE.registered_measures then
-            Hashtbl.replace RS.syms sym fs
-          else RS.register fs ~file:u.RT.u_span.A.file;
+            Hashtbl.replace axiom_tier sym ();
           (* The body: a failure leaves the symbol uninterpreted, which is
              sound (no equation is asserted), only weaker. *)
           (try
@@ -1350,6 +1360,21 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
            with Decline | Not_found | Invalid_argument _ | Failure _ -> ())
         with Decline | Not_found | Invalid_argument _ -> ()))
     g.RT.units;
+  (* The one resolution rule (review C-1, C-2): a call site denotes a
+     reflected function exactly when the termination graph's lexical walk
+     resolved THAT site to that unit (program code), or resolved it in the
+     scope where the predicate is written (a signature's refinement).  An
+     axiom-tier measure is never a frontier call (I10). *)
+  let note sp v =
+    match sym_of.(v) with
+    | Some sym when Hashtbl.mem RS.syms sym && not (Hashtbl.mem axiom_tier sym) ->
+      Hashtbl.replace RS.call_sym sp sym
+    | _ -> ()
+  in
+  List.iter
+    (fun (s : RT.site) -> match s.RT.s_target with RT.S_unit v when s.RT.s_call -> note s.RT.s_span v | _ -> ())
+    g.RT.sites;
+  List.iter (fun (sp, tgt) -> match tgt with RT.S_unit v -> note sp v | _ -> ()) g.RT.pred_sites;
   RS.unfold_hook := unfold;
   March_refine.Refine.well_formed := declared_logic_symbols;
   RS.active := true;

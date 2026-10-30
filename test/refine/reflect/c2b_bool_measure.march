@@ -3,7 +3,7 @@ mod C2b do
   fn even_len(xs : List(Int)) : Bool do
     match xs do
       Nil -> true
-      Cons(_, t) -> not even_len(t)
+      Cons(_, t) -> not(even_len(t))
     end
   end
 

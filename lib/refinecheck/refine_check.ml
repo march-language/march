@@ -6022,7 +6022,7 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
           (* Reflection (§2.4): a reflected function IS predicate
              vocabulary; one that exists but is not reflected names its
              first blocker, which is what the user can act on. *)
-          | _ when !Reflect_state.active && Reflect_state.resolves_somewhere f -> ()
+          | _ when !Reflect_state.active && Reflect_state.resolve_site span <> None -> ()
           | _ when !Reflect_state.active && Hashtbl.mem Reflect_state.blocked_by_name f ->
             let why, at = Hashtbl.find Reflect_state.blocked_by_name f in
             Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
@@ -6586,11 +6586,6 @@ let assumed_elem_return (fd : A.fn_def) : ret_elems option =
   if is_assumed fd then ret_elems_of_ty fd.A.fn_ret_ty else None
 
 let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_def) : unit =
-  (* Reflection: a bare predicate spelling resolves in this function's own
-     module first ([Reflect_state.resolve]). *)
-  Reflect_state.cur_file := fd.A.fn_name.A.span.A.file;
-  Reflect_state.cur_prefix :=
-    Option.value ~default:"" (Hashtbl.find_opt Reflect_state.prefix_of_span fd.A.fn_name.A.span);
   let is_trusted = List.mem "trusted" fd.A.fn_attrs in
   (* `@[trusted]` outside `cap verified` changes no behaviour at all — [note]
      only consults [trusted_fn] inside the [strict_verified] escalation
@@ -8752,6 +8747,31 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      the timing budget, not a user setting). *)
   Reflect_state.reset ();
   Hashtbl.reset Reflect_state.hand_eq;
+  (* Which `negate` a site applies (review C-3).  A literal `-2` is
+     `negate(2)`, and a user `fn negate` in scope captures it, in program
+     code and in a predicate alike; the termination graph resolved every such
+     site.  A site it never saw (an annotation on a `let`, a lambda's type) is
+     the builtin only when no `negate` is defined outside the stdlib nor in
+     the site's own file. *)
+  (let g = (Lazy.force term).Refine_term.graph in
+   let tbl = Hashtbl.create 64 in
+   let builtin = function Refine_term.S_builtin | Refine_term.S_impls _ -> true | _ -> false in
+   List.iter
+     (fun (st : Refine_term.site) -> if st.Refine_term.s_name = "negate" then Hashtbl.replace tbl st.Refine_term.s_span (builtin st.Refine_term.s_target))
+     g.Refine_term.sites;
+   List.iter (fun (sp, t) -> Hashtbl.replace tbl sp (builtin t)) g.Refine_term.pred_sites;
+   let user_negate_files =
+     Array.fold_left
+       (fun acc (u : Refine_term.unit_) ->
+         if Refine_term.bare u.Refine_term.u_name = "negate" then u.Refine_term.u_span.A.file :: acc else acc)
+       [] g.Refine_term.units
+   in
+   let any_user = List.exists (fun f -> not (is_stdlib_source_file f)) user_negate_files in
+   Reflect_state.negate_builtin_at :=
+     fun sp ->
+       match Hashtbl.find_opt tbl sp with
+       | Some b -> b
+       | None -> (not any_user) && not (List.mem sp.A.file user_negate_files));
   if Sys.getenv_opt "MARCH_REFLECT" <> Some "0" then begin
     Refine_reflect.install ~user_files:[] ~type_map (Lazy.force term) m.A.mod_decls;
     List.iter

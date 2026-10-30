@@ -2075,9 +2075,9 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
          about this constant would be ill-sorted. *)
       (* Reflection stage 2 (§3.7): a reflected call at this datatype sort is
          its logic symbol over its reflected arguments. *)
-      | A.EApp (A.EVar { A.txt = fname; _ }, (_ :: _ as cargs), _)
-        when Reflect_state.stage2_call fname -> (
-        let sym = Option.get (Reflect_state.resolve fname) in
+      | A.EApp (A.EVar _, (_ :: _ as cargs), csp)
+        when Reflect_state.stage2_call_at csp -> (
+        let sym = Option.get (Reflect_state.resolve_site csp) in
         let fs = Option.get (Reflect_state.sig_of sym) in
         let rec elemize (s : Smt.sort) =
           match s with
@@ -2327,8 +2327,8 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                  (* Reflection stage 2: `len` of a REFLECTED call is the
                     list measure over its logic term, which its unfolding
                     and `$len`'s own equations then meet. *)
-                 | A.EApp (A.EVar { A.txt = fname; _ }, _ :: _, _)
-                   when m = "len" && Reflect_state.stage2_call fname ->
+                 | A.EApp (A.EVar _, _ :: _, csp)
+                   when m = "len" && Reflect_state.stage2_call_at csp ->
                    (match reflect_dt list_adt a with
                     | Some t -> Some (Smt.App (list_len_measure, [ t ]))
                     | None -> if is_self name then measure_of_var m self_dt_sym else None)
@@ -2691,7 +2691,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
           List.filter_map
             (fun (k, rhs) ->
               match rhs with
-              | A.EApp (A.EVar { A.txt = f; A.span = fsp }, _ :: _, _) when Reflect_state.resolve f <> None ->
+              | A.EApp (A.EVar { A.span = fsp; _ }, _ :: _, rsp) when Reflect_state.resolve_site rsp <> None ->
                 if not !Reflect_state.arm_on then (Reflect_state.frontier_seen := true; None)
                 else
                   Some

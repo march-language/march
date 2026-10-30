@@ -746,9 +746,9 @@ let rec reflect_scalar
      symbol applied to its reflected arguments, each at the sort of the
      parameter it fills (a type variable left open for [resolve_sorts]).
      Stage 1 never reaches this arm. *)
-  | A.EApp (A.EVar { A.txt = fname; _ }, (_ :: _ as cargs), _)
-    when Reflect_state.stage2_call fname ->
-    let sym = Option.get (Reflect_state.resolve fname) in
+  | A.EApp (A.EVar _, (_ :: _ as cargs), csp)
+    when Reflect_state.stage2_call_at csp ->
+    let sym = Option.get (Reflect_state.resolve_site csp) in
     let fs = Option.get (Reflect_state.sig_of sym) in
     let rec elemize (s : Smt.sort) =
       match s with

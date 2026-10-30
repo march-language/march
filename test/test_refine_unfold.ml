@@ -545,7 +545,11 @@ end
         let ctl = run ("mod Se2 do\n  type P = P(Int, Int)\n  derive Eq for P\n" ^ body) in
         expect ctl ~line:9 ~callee:"need_false" "proved";
         expect ctl ~line:10 ~callee:"need_false" "proved");
-    gated "sound_eq_float: a body's == at Float is opaque; the logic never assumes NaN == NaN" (fun () ->
+    gated "sound_eq_float (control only in 1a): no Float function is reflected, so same(x, x) at Float is never proved" (fun () ->
+        (* Phase 1a gives no Float-typed function a logic symbol (progress
+           note, ruling 5), so this row exercises the CONTROL, not the
+           opaque-`eq$Float` rule: it pins that NaN cannot be reasoned about
+           wrongly because nothing Float-shaped reaches the logic. *)
         let src =
           {|mod Sf do
   fn same(a : Float, b : Float) : Bool do a == b end
@@ -653,6 +657,9 @@ end
         in
         not_proved out ~line:7 ~callee:"need_neg";
         expect out ~line:8 ~callee:"need_one" "proved" ~uses:"pos";
+        (* `p` is metric-certified, which the 1a encoder does not unfold
+           (ruling 2): this row passes because `p` is not reflected, not
+           because of the guard.  The guard itself is exercised by `pos`. *)
         not_proved out ~line:9 ~callee:"need_t");
     gated "sound_guarded: a guarded match that can fall through is not reflected (C2)" (fun () ->
         let out =
@@ -726,6 +733,9 @@ end
             Out_channel.with_open_bin (Filename.concat dir "m.march") (fun oc -> output_string oc src);
             let lg = Filename.concat dir "z3.log" in
             let out = run_in ~env:("MARCH_REFINE_Z3_LOG=" ^ Filename.quote lg) ~dir "--check --refine-report-sites=all" "m.march" in
+            (* These two are not proved because `f/go` etc. are depth-1
+               calls (reflect-fuel), not because of the mangling; the
+               mangling is checked by the symbol names below. *)
             not_proved out ~line:17 ~callee:"need_eq";
             not_proved out ~line:18 ~callee:"need_eq";
             let log = In_channel.with_open_bin lg In_channel.input_all in
@@ -804,6 +814,130 @@ end
             expect before ~line:4 ~callee:"need" "proved";
             expect after ~line:4 ~callee:"need" "violated"));
   ]
+
+(* The phase-1a review's REJECT rows (specs/progress/2026-10-30-reflection-
+   phase1a.md, "Review fixes"): each program's obligation is false at run time
+   (the interpreter output is in the comment), so it must never be proved. *)
+let review =
+  [ gated "review C-1: a parameter or local named like a reflected function is not that function" (fun () ->
+        (* Interpreted: `51 51 51 11`. *)
+        let out = run {|mod CL do
+  needs IO.Console
+  fn inc(n : Int) : Int do n + 1 end
+  fn need2(x : {Int | _ == 2}) : Int do x end
+  fn a(inc : Int -> Int) : Int do
+    let r = inc(1)
+    need2(r)
+  end
+  fn b(inc : Int -> Int) : Int do need2(inc(1)) end
+  fn c() : Int do
+    let inc = fn x -> x + 50
+    let r = inc(1)
+    need2(r)
+  end
+  fn d(inc : Int -> Int, y : Int) : Int do
+    if inc(y) == 2 do need2(y + 1) else 0 end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("${a(fn x -> x + 50)} ${b(fn x -> x + 50)} ${c()} ${d(fn x -> 2, 10)}")
+  end
+end
+|} in
+        not_proved out ~line:7 ~callee:"need2";
+        not_proved out ~line:9 ~callee:"need2";
+        not_proved out ~line:13 ~callee:"need2";
+        not_proved out ~line:16 ~callee:"need2");
+    gated "review C-2: a qualified call in a nested module is the innermost module's function" (fun () ->
+        (* Interpreted: `3 3 0 3`: inside `B`, `A.f` is `Top.B.A.f`, n + 2. *)
+        let out = run {|mod Top do
+  needs IO.Console
+  mod A do
+    fn f(n : Int) : Int do n + 1 end
+  end
+  mod B do
+    mod A do
+      fn f(n : Int) : Int do n + 2 end
+    end
+    fn need2(x : {Int | _ == 2}) : Int do x end
+    fn a() : Int do
+      let r = A.f(1)
+      need2(r)
+    end
+    fn b() : Int do need2(A.f(1)) end
+    fn c(x : Int) : Int do
+      if A.f(x) == 2 do need2(x + 1) else 0 end
+    end
+    fn val() : Int do A.f(1) end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("${B.a()} ${B.b()} ${B.c(1)} ${B.val()}")
+  end
+end
+|} in
+        not_proved out ~line:13 ~callee:"B.need2";
+        not_proved out ~line:15 ~callee:"B.need2";
+        not_proved out ~line:17 ~callee:"B.need2");
+    gated "review C-2: a predicate in a nested module names that module's function" (fun () ->
+        (* Inside `Inner`, `f` is `Inner.f`, n + 2: `needf(2)` is false,
+           `needf(3)` holds. *)
+        let out = run {|mod Top do
+  needs IO.Console
+  fn f(n : Int) : Int do n + 1 end
+  mod Inner do
+    fn f(n : Int) : Int do n + 2 end
+    fn needf(x : {Int | _ == f(1)}) : Int do x end
+    fn a() : Int do needf(2) end
+    fn b() : Int do needf(3) end
+  end
+end
+|} in
+        not_proved out ~line:7 ~callee:"Inner.needf";
+        expect out ~line:8 ~callee:"Inner.needf" "proved");
+    gated "review C-3: a user negate captures a literal -2 and negate(2)" (fun () ->
+        (* Interpreted: `2 3 12`. *)
+        let out = run {|mod NG do
+  needs IO.Console
+  fn negate(n : Int) : Int do n + 10 end
+  fn h(n : Int) : Int do n / negate(2) end
+  fn k(n : Int) : Int do n / -2 end
+  fn needm12(x : {Int | _ == -12}) : Int do x end
+  fn a() : Int do needm12(h(24)) end
+  fn b() : Int do needm12(k(24)) end
+  fn main(_c : Cap(IO.Console)) do
+    println("${h(24)} ${k(24)} ${negate(2)}")
+  end
+end
+|} in
+        not_proved out ~line:7 ~callee:"needm12";
+        not_proved out ~line:8 ~callee:"needm12");
+    gated "review C-3: under a user negate, `-12` is not -12 and `n / -2` can divide by zero" (fun () ->
+        (* Interpreted: `c()` prints 0, then `h(24)` panics dividing by zero.
+           The predicate-side half predates reflection: `need_neg(-12)` was
+           proved with `-12` read as the builtin.  In the predicate, `-12` is
+           the user's `negate(12)` too (a predicate's names resolve where it
+           is written), so `needm12(-12)` (0 == 0) may prove, but only
+           through the user's function. *)
+        let out = run ~args:"--check --refine-report-sites=all --reflect-report" {|mod NG do
+  needs IO.Console
+  fn negate(n : Int) : Int do 0 * n end
+  fn h(n : Int) : Int do n / -2 end
+  fn needm12(x : {Int | _ == -12}) : Int do x end
+  fn c() : Int do needm12(-12) end
+  fn need_neg(x : {Int | _ < 0}) : Int do x end
+  fn d() : Int do need_neg(-12) end
+  fn main(_c : Cap(IO.Console)) do
+    println("${c()}")
+    println("${h(24)}")
+  end
+end
+|} in
+        not_proved out ~line:8 ~callee:"need_neg";
+        (match rows out ~line:6 ~callee:"needm12" with
+         | rs when List.exists (fun (v, _) -> v = "proved") rs ->
+           expect out ~line:6 ~callee:"needm12" "proved" ~uses:"negate"
+         | _ -> ());
+        if not (List.exists (fun l -> contains l "\th\tno\t") (lines out)) then
+          Alcotest.failf "h divides by a user negate: it must not be reflected:\n%s" out) ]
 
 (* `two_stage_identical` (§4.4, F9): stage 1 is today's query, byte for byte.
    Every query a reflection-off run sends to z3 is sent by a reflection-on run

@@ -143,6 +143,14 @@ type graph = {
   sites : site list;
       (** every call and every function name used as a value, with what it
           resolved to, in walk order.  Read only by [Refine_reflect]. *)
+  pred_sites : (A.span * site_target) list;
+      (** every call inside a refinement PREDICATE of a function's signature
+          (its parameter and return types, a local [fn]'s too), resolved in the
+          scope where the predicate is written: the function's module, its
+          parameters and the predicate's binder shadowing.  No edges: a
+          predicate is not a call.  Read by reflection (phase 1a review C-1,
+          C-2), so a predicate's callee is resolved exactly as program code
+          there would be. *)
 }
 
 let rec pat_vars (p : A.pattern) : string list =
@@ -428,6 +436,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let trusted = ref [] in
   let unresolved = ref [] in
   let sites = ref [] in
+  let pred_sites = ref [] in
   let site ~src ~name ~span ~call ~args target =
     sites := { s_src = src; s_name = name; s_span = span; s_call = call; s_args = args; s_target = target }
              :: !sites
@@ -739,6 +748,37 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let is_ident n = n <> "" && (match n.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) in
   (* [walk ~src ~owner ~lam env e]: edges out of unit [src] found in [e].
      [lam]: [e] sits inside a lambda or a [let*] continuation of [src]. *)
+  (* The calls in a type's refinement predicates (see [pred_sites]). *)
+  let site_of_target n = function
+    | T_unit dst -> S_unit dst
+    | T_impls (ds, _) -> S_impls ds
+    | T_value -> S_value
+    | T_trusted -> if lookup externs_tbl n <> None then S_extern else S_builtin
+    | T_unresolved -> S_unresolved
+  in
+  let rec pred_ty env (t : A.ty) : unit =
+    match t with
+    | A.TyRefine (b, binder, pred) ->
+      pred_ty env b;
+      let env' = bind_vars env [ (match binder with Some n -> n.A.txt | None -> "_") ] in
+      pred_expr env' pred
+    | A.TyCon (_, args) -> List.iter (pred_ty env) args
+    | A.TyArrow (a, b) -> pred_ty env a; pred_ty env b
+    | A.TyTuple ts -> List.iter (pred_ty env) ts
+    | A.TyRecord fs -> List.iter (fun (_, t) -> pred_ty env t) fs
+    | A.TyLinear (_, t) -> pred_ty env t
+    | _ -> ()
+  and pred_expr env (e : A.expr) : unit =
+    match e with
+    | A.EApp (A.EVar n, args, sp) ->
+      pred_sites := (sp, site_of_target n.A.txt (resolve ~arity:(List.length args) ~args env n.A.txt)) :: !pred_sites;
+      List.iter (pred_expr env) args
+    | e -> List.iter (pred_expr env) (Refine_encode.children e)
+  in
+  let pred_sig env (tys : A.ty option list) (ret : A.ty option) =
+    List.iter (Option.iter (pred_ty env)) tys;
+    Option.iter (pred_ty env) ret
+  in
   let rec walk ~src ~owner ~lam env (e : A.expr) : unit =
     let w = walk ~src ~owner ~lam env in
     let call head args span =
@@ -830,6 +870,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       Hashtbl.replace unit_name id (parent ^ "/" ^ n.A.txt);
       let env = SM.add n.A.txt (Fn id) env in
       let inner = bind_params env (List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps) in
+      pred_sig inner tys ret;
       walk ~src:id ~owner:lowner ~lam:false inner body;
       env
     | _ ->
@@ -850,6 +891,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
             let env =
               bind_params (bind_vars SM.empty (clause_binders c)) (List.filter_map Fun.id owner.o_params)
             in
+            pred_sig env (snd (clause_params c)) def.A.fn_ret_ty;
             Option.iter (walk ~src:id ~owner ~lam:false env) c.A.fc_guard;
             walk ~src:id ~owner ~lam:false env c.A.fc_body)
           def.A.fn_clauses
@@ -911,7 +953,8 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let scc_of = Array.make n 0 in
   Array.iteri (fun i ms -> List.iter (fun v -> scc_of.(v) <- i) ms) sccs;
   { units; edges; out; scc_of; sccs; trusted = List.rev !trusted;
-    unresolved = List.rev !unresolved; fv_calls = List.rev !fv_calls; sites = List.rev !sites }
+    unresolved = List.rev !unresolved; fv_calls = List.rev !fv_calls; sites = List.rev !sites;
+    pred_sites = List.rev !pred_sites }
 
 (** Intra-SCC edges out of [u]. *)
 let intra g (u : int) : edge list =

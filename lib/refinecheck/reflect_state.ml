@@ -46,16 +46,19 @@ let confirmed = ref false
 (** By base symbol. *)
 let syms : (string, fsig) Hashtbl.t = Hashtbl.create 64
 
-(** Spelling -> candidates (file of the definition, base symbol, module
-    prefix of the definition: [""] at the top of a file's module). *)
-let by_name : (string, (string * string) list) Hashtbl.t = Hashtbl.create 64
+(** Call SITE -> the reflected base symbol it denotes (phase 1a review,
+    C-1/C-2).  Keyed by the span of the application node: a call in program
+    code is resolved by the termination graph's lexical walk (locals,
+    parameters and lambda binders shadow; nested modules resolve innermost
+    first; [use] / [alias] honoured), and a call inside a signature's
+    refinement predicate is resolved by the same walk in the scope where the
+    predicate is written ([Refine_term.graph.pred_sites]).  A site that is not
+    here (a local value, a parameter, an unresolved name, a predicate the walk
+    never saw) is never unfolded: skip, never guess.  The ONE resolution rule
+    of every channel: predicates, path conditions, `let` facts, subjects. *)
+let call_sym : (March_ast.Ast.span, string) Hashtbl.t = Hashtbl.create 256
 
-(** The enclosing definition's file and module prefix (TERM's [u_name] up to
-    its last dot), set by the walk: how a bare predicate spelling is resolved
-    against its own module first. *)
-let cur_file = ref ""
-
-let cur_prefix = ref ""
+let resolve_site (sp : March_ast.Ast.span) : string option = Hashtbl.find_opt call_sym sp
 
 (** Instance symbol -> (argument sorts, result sort), filled by
     [resolve_sorts] when it renames a base symbol to an instance; read by the
@@ -95,11 +98,10 @@ let reset () =
   frontier_seen := false;
   confirmed := false;
   Hashtbl.reset syms;
-  Hashtbl.reset by_name;
+  Hashtbl.reset call_sym;
   Hashtbl.reset instances;
   Hashtbl.reset literal_owner;
-  cur_file := "";
-  cur_prefix := ""
+  ()
 
 let is_sym (f : string) = Hashtbl.mem syms f || f = eq_sym
 
@@ -109,30 +111,6 @@ let instance_name (base : string) (tag : string) : string =
   if n >= 2 && base.[n - 1] = '|' then String.sub base 0 (n - 1) ^ "@" ^ tag ^ "|" else base ^ "@" ^ tag
 
 let is_instance (f : string) = Hashtbl.mem instances f
-
-(** Resolve a predicate's callee spelling to a reflected base symbol (R6's
-    "resolved identity", I3): an exact display name first (preferring a
-    definition in the enclosing file when two share it), then a bare name
-    inside the enclosing module.  Ambiguity resolves to nothing, which keeps
-    the call untranslated: never a guess. *)
-let resolve (spelling : string) : string option =
-  let pick cands =
-    match cands with
-    | [ (_, s) ] -> Some s
-    | [] -> None
-    | _ -> (
-      match List.filter (fun (f, _) -> f = !cur_file) cands with
-      | [ (_, s) ] -> Some s
-      | _ -> None)
-  in
-  match Hashtbl.find_opt by_name spelling with
-  | Some c when pick c <> None -> pick c
-  | _ ->
-    if String.contains spelling '.' || !cur_prefix = "" then None
-    else
-      match Hashtbl.find_opt by_name (!cur_prefix ^ "." ^ spelling) with
-      | Some c -> pick c
-      | None -> None
 
 (** The signature of a base symbol, [eq_sym] included. *)
 let sig_of (f : string) : fsig option =
@@ -152,14 +130,8 @@ let literal_prefix = "$ru_"
 (** The function of the first call left unfolded in this stage-2 run. *)
 let fuel_fn = ref ""
 
-(** A definition's span -> the module prefix of its top-level unit. *)
-let prefix_of_span : (March_ast.Ast.span, string) Hashtbl.t = Hashtbl.create 64
-
-(** Register a reflected function's symbol under its display name. *)
-let register (fs : fsig) ~(file : string) : unit =
-  Hashtbl.replace syms fs.fs_sym fs;
-  let add k = Hashtbl.replace by_name k ((file, fs.fs_sym) :: Option.value ~default:[] (Hashtbl.find_opt by_name k)) in
-  if not (String.contains fs.fs_name '/') then add fs.fs_name
+(** Register a reflected function's symbol. *)
+let register (fs : fsig) : unit = Hashtbl.replace syms fs.fs_sym fs
 
 (** The function a stage-2 literal (as z3 prints it, unquoted) names. *)
 let literal_function (lit : string) : string option =
@@ -173,24 +145,24 @@ let literal_function (lit : string) : string option =
     blocker, §2.4): the text of the predicate warning. *)
 let blocked_by_name : (string, string * March_ast.Ast.span) Hashtbl.t = Hashtbl.create 64
 
-(** Some reflected function is spelled [f] (its display name, or its bare
-    name inside its module): the predicate warning's "is this reflected?". *)
-let resolves_somewhere (f : string) : bool =
-  Hashtbl.mem by_name f
-  || Hashtbl.fold (fun k _ acc -> acc || String.ends_with ~suffix:("." ^ f) k) by_name false
-
-(** At a call of [f] in a position stage 2 translates: is [f] reflected AND
-    is this stage 2?  In stage 1 a reflected [f] only records that stage 2
-    has a frontier. *)
-let stage2_call (f : string) : bool =
+(** At the call site [sp], in a position stage 2 translates: does it denote a
+    reflected function AND is this stage 2?  In stage 1 such a site only
+    records that stage 2 has a frontier. *)
+let stage2_call_at (sp : March_ast.Ast.span) : bool =
   !active
-  && resolve f <> None
+  && resolve_site sp <> None
   &&
   if !arm_on then true
   else begin
     frontier_seen := true;
     false
   end
+
+(** Is the `negate` applied at [sp] the builtin (phase 1a review C-3)?  A
+    literal `-2` is `negate(2)`, which a user `fn negate` captures.  Set per
+    module from the termination graph's resolution of that site; the default
+    (no module set up) is the builtin. *)
+let negate_builtin_at : (March_ast.Ast.span -> bool) ref = ref (fun _ -> true)
 
 (** Type names (bare) with a hand-written [impl Eq] (§3.5): the
     [predicate_eq_structural] warning reads it. *)
