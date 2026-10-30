@@ -447,6 +447,27 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
          Result.map
            (truncating_division ~op ~nonneg_dividend:(known_nonneg ~vocab nonneg a) x)
            divisor)
+  (* A call of a REFLECTED function (reflection §3.7): its logic symbol,
+     resolved by identity ([Reflect_state.resolve]), never by a vocabulary
+     spelling (those arms come first).  Stage 1 is today's translator, so
+     there the arm only notes that stage 2 has a frontier and fails exactly
+     as the fallback below does. *)
+  | A.EApp (A.EVar { A.txt = f; _ }, (_ :: _ as args), _)
+    when !Reflect_state.active && Reflect_state.resolve f <> None ->
+    if not !Reflect_state.arm_on then begin
+      Reflect_state.frontier_seen := true;
+      Error e
+    end
+    else
+      let sym = Option.get (Reflect_state.resolve f) in
+      let arity = match Reflect_state.sig_of sym with Some s -> List.length s.Reflect_state.fs_params | None -> -1 in
+      if List.length args <> arity then Error e
+      else
+        let rec all = function
+          | [] -> Ok []
+          | a :: rest -> (match r a with Ok t -> Result.map (fun ts -> t :: ts) (all rest) | Error e -> Error e)
+        in
+        Result.map (fun ts -> Smt.App (sym, ts)) (all args)
   | _ -> Error e
 
 (* Every predicate and guard is marked once, here at the entry, so the

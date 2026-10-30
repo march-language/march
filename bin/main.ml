@@ -758,8 +758,10 @@ let print_refine_report_sites_all ~filename ~user_files () =
         Printf.eprintf "skip\t%s\t%s\t%s\t%s\t%s\t%s\n" slice loc (O.reason_name r) kind o.callee
           o.predicate
       | v ->
-        Printf.eprintf "%s\t%s\t%s\t%s\t%s\t%s\n" (O.verdict_name v) slice loc kind o.callee
-          o.predicate)
+        (* A stage-2 proof (reflection §2.4) names the definitions it used. *)
+        let uses = match O.uses_of o with [] -> "" | us -> "\tuses: " ^ String.concat ", " us in
+        Printf.eprintf "%s\t%s\t%s\t%s\t%s\t%s%s\n" (O.verdict_name v) slice loc kind o.callee
+          o.predicate uses)
     (O.all ())
 
 (* --reflect-report (reflection design §2.4, phase 0): which user functions

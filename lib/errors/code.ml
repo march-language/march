@@ -110,6 +110,7 @@ let parse_error = "parse_error"
 let pid_serialize = "pid_serialize"
 let pipe_into_match = "pipe_into_match"
 let pipe_match_pattern = "pipe_match_pattern"
+let predicate_eq_structural = "predicate_eq_structural"
 let prelude_collision = "prelude_collision"
 let proof_cap_foreign = "proof_cap_foreign"
 let proof_cap_mint_private = "proof_cap_mint_private"
@@ -132,6 +133,8 @@ let refinement_ignored = "refinement_ignored"
 let refinement_unchecked = "refinement_unchecked"
 let refinement_unverified = "refinement_unverified"
 let refinement_violated = "refinement_violated"
+let reflect_conflict = "reflect_conflict"
+let reflect_inconsistent = "reflect_inconsistent"
 let remote_actor_unroutable = "remote_actor_unroutable"
 let reserved_type_name = "reserved_type_name"
 let return_refinement_violated = "return_refinement_violated"
@@ -288,6 +291,7 @@ let all = [
   pid_serialize;
   pipe_into_match;
   pipe_match_pattern;
+  predicate_eq_structural;
   prelude_collision;
   proof_cap_foreign;
   proof_cap_mint_private;
@@ -310,6 +314,8 @@ let all = [
   refinement_unchecked;
   refinement_unverified;
   refinement_violated;
+  reflect_conflict;
+  reflect_inconsistent;
   remote_actor_unroutable;
   reserved_type_name;
   return_refinement_violated;
