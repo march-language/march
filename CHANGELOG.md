@@ -21,6 +21,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`march --check --reflect-report`: which functions a predicate will be able to use.**
+  One line per function of your code: `reflected`, or `no` with the first rule that
+  blocks it and where (`R3:calls println (app.march:14:5)`, `R6:calls mid, which is not
+  reflected`, `R4:division by b not proved`, …). This is phase 0 of refinement reflection
+  (`specs/2026-10-29-refinement-reflection-design.md`): the report only, nothing uses
+  reflection yet and no verdict changes. See "Which functions are reflected" in the
+  refinement-types reference.
+- **`--refine-report-sites=all`: every refinement obligation, any verdict.** One line per
+  obligation (`proved`, `skip`, `violated`, `trusted`), with its site, kind, callee and
+  predicate. The bare `--refine-report-sites` still lists only skips, unchanged.
+- **`scripts/refine-oracle.sh monotone <dir>`.** A refinement-checker gate that allows
+  proofs to be gained but never lost: it compares every obligation's verdict, by site,
+  against a baseline over `test/native` and `stdlib`, fails on any proved obligation that
+  is no longer proved or any site that appears or disappears, and lists new proofs, new
+  violations and withdrawn violations for review.
+
 - **`int_div_floor(a, b)` and `int_mod_floor(a, b)`: floor division and modulo.** The
   quotient rounds toward negative infinity and the remainder takes the divisor's sign, so
   `int_div_floor(-1, 86400)` is `-1` and `int_mod_floor(-1, 86400)` is `86399` (truncating

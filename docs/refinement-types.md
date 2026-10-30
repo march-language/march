@@ -90,6 +90,7 @@ silence into an error for a module that wants a guarantee.
 **Finding out what was actually checked**
 
 - [Counting the obligations: `--refine-report`](#counting-the-obligations---refine-report)
+- [Which functions are reflected: `--reflect-report`](#which-functions-are-reflected---reflect-report)
 - [Getting a contract proposed for you: `forge refine`](#getting-a-contract-proposed-for-you-forge-refine)
   - [Module-wide inference: `march --refine-infer` and `forge refine --infer`](#module-wide-inference-march---refine-infer-and-forge-refine---infer)
 - [Coverage audit: does the checker even look at this refinement?](#coverage-audit-does-the-checker-even-look-at-this-refinement)
@@ -4611,6 +4612,87 @@ The editor offers quick fixes on a `termination_unproved` diagnostic that
   a `@[decreases(...)]` that failed. Inference runs only under `--refine-infer`
   or `--termination-report`, and only for a cycle of one top-level function, so
   a diagnostic from a plain `--check` has no such note.
+
+---
+
+## Which functions are reflected: `--reflect-report`
+
+Today a predicate can use a function only if it is a measure or a constant
+function; any other function's body never reaches the solver. *Reflection* will
+make a function's body usable in predicates, automatically, for every function
+that terminates, has no effects, cannot fail, and calls only such functions
+(`specs/2026-10-29-refinement-reflection-design.md`). Before any proof uses it,
+`--reflect-report` shows which functions qualify, and for each one that does not,
+the first rule that stops it. For this program:
+
+```march
+mod Prog do
+  needs IO.Console
+  fn noisy(n : Int) : Int do
+    println("hi")
+    n
+  end
+  fn mid(n : Int) : Int do noisy(n) + 1 end
+  fn half(n : Int) : Int do n / 2 end
+  fn ratio(a : Int, b : Int) : Int do a / b end
+end
+```
+
+the report is:
+
+```
+$ march --check --reflect-report prog.march
+reflect report: 4 functions, 1 reflected
+reflect	prog.march:3:5	noisy	no	R3:calls println (prog.march:4:4)
+reflect	prog.march:7:5	mid	no	R6:calls noisy, which is not reflected (prog.march:7:27)
+reflect	prog.march:8:5	half	reflected	unfold
+reflect	prog.march:9:5	ratio	no	R4:division by b not proved (prog.march:9:38)
+  top-level: 1 of 4 reflected
+  first blocker: R3=1 R4=1 R6=1
+```
+
+The rules, in the order the report checks them:
+
+- **R1**: a top-level `fn`, or a local `fn` that captures no variable (a local
+  is named `outer/go`). `main`, `impl` methods and actor handlers are not
+  reflected.
+- **R2**: it terminates. A recursive function needs a `structural` or `metric`
+  certificate, the same one `--termination-report` prints; `trusted`,
+  `diverges` and `unproved` do not count.
+- **R3**: no effect: no `spawn`, `send`, `dbg`, or effectful builtin such as
+  `println`.
+- **R4**: it cannot fail: no `panic`, no runtime `assert`, and every `/` or `%`
+  by something other than a non-zero literal has its division obligation
+  proved (in a `cap no_panic` module).
+- **R5**: every `match` covers all cases, including a guarded match whose
+  unguarded arms do not cover.
+- **R6**: every callee is itself reflected, or a builtin the solver understands
+  (`+`, `-`, `*`, comparisons on `Int` and `Float`, `&&`, `||`, `not`, the
+  length functions). `==` is allowed when every `Eq` it can reach is itself
+  total and pure. Any other interface call (`show`, string interpolation, a
+  user `compare`) blocks.
+- **R7**: no function values: no lambda, no function-typed parameter, no
+  function passed or stored as a value.
+- **R8**: every parameter and the result have a solver sort; a function
+  returning `Unit` is not reflected.
+- **R9**: not marked `@[trusted]`, `@[assume]` or `@[opaque]`.
+- **R11**: its name is not predicate vocabulary (`len`, `elts`, `keys`, the
+  set operators, `is_<Ctor>`): inside a predicate such a name always means the
+  built-in.
+
+A recursive group is reflected as a whole or not at all. A reflected function
+whose parameters are refined shows the guard each use will carry, for example
+`unfold (guard: n >= 0)`. Like `--termination-report`, the flag bypasses the
+compile cache and checks every recursive function of your code for termination.
+It changes no verdict: nothing uses reflection yet.
+
+To compare runs obligation by obligation, `--refine-report-sites=all` prints one
+line per obligation of any verdict, not just the skipped ones:
+
+```
+proved	user	prog.march:12:12	precondition	need	_ < 10
+skip	user	prog.march:13:12	unconstrained-subject	precondition	need	_ < 10
+```
 
 ---
 
