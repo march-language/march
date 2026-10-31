@@ -339,7 +339,9 @@ end
 end
 |}
         in
-        blocked out "f" "R6:calls List.length, which is not reflected");
+        (* Since the second review (C-A) a nested `mod List` makes the name
+           ambiguous with the stdlib's, which is the reason given now. *)
+        blocked out "f" "R6:calls List.length, a name more than one declaration could denote");
     gated "report_len_shadow_module control: the stdlib `List.length` is `$len`" (fun () ->
         let out = run "mod Lc2 do\n  fn f(xs : List(Int)) : Int do List.length(xs) end\nend\n" in
         reflected out "f");

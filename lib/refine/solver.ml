@@ -21,6 +21,20 @@ let find_z3 () : string option =
                  let p = Filename.concat dir "z3" in
                  if Sys.file_exists p then Some p else None))
 
+(* The options every solver process starts with, sent again after a (reset). *)
+let init_options (oc : out_channel) : unit =
+  (* print-success off: we only read explicit (check-sat)/(get-model) output *)
+  output_string oc "(set-option :print-success false)\n";
+  (* Scope declarations (declare-sort, declare-datatypes, declare-fun) inside
+     push/pop so they are undone by pop. Without this, Z3 keeps declarations
+     globally even after pop, causing "sort already declared" errors when the
+     same preamble is sent again in a subsequent query (e.g. across test
+     modules in the same process). *)
+  output_string oc "(set-option :global-decls false)\n";
+  (* Per-query wall-clock cap: a hard (e.g. quantified-datatype) query returns
+     `unknown` instead of looping — definite-failure then treats it as skip. *)
+  output_string oc "(set-option :timeout 3000)\n"
+
 let create () : t option =
   match find_z3 () with
   | None -> None
@@ -55,17 +69,7 @@ let create () : t option =
       Unix.close stdout_w;
       let oc = Unix.out_channel_of_descr stdin_w in
       let ic = Unix.in_channel_of_descr stdout_r in
-      (* print-success off: we only read explicit (check-sat)/(get-model) output *)
-      output_string oc "(set-option :print-success false)\n";
-      (* Scope declarations (declare-sort, declare-datatypes, declare-fun) inside
-         push/pop so they are undone by pop. Without this, Z3 keeps declarations
-         globally even after pop, causing "sort already declared" errors when the
-         same preamble is sent again in a subsequent query (e.g. across test
-         modules in the same process). *)
-      output_string oc "(set-option :global-decls false)\n";
-      (* Per-query wall-clock cap: a hard (e.g. quantified-datatype) query returns
-         `unknown` instead of looping — definite-failure then treats it as skip. *)
-      output_string oc "(set-option :timeout 3000)\n";
+      init_options oc;
       flush oc;
       Some { ic; oc; pid }
 
@@ -181,13 +185,49 @@ let rec read_verdict ?(errors = ref []) (ic : in_channel) ~(saw_error : bool) : 
   end
   else (line, saw_error)
 
-let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
+(* Reflection stage 2 (specs/2026-10-29-refinement-reflection-design.md
+   §4.4): a query whose unfoldings are guarded by assumption literals is
+   checked with `check-sat-assuming` under its own timeout, and on `unsat` the
+   literals in z3's unsat core are read back ([last_core]).  Unsat cores are
+   enabled once, lazily, before the first such query, so a run that never
+   reaches stage 2 sends exactly the option set it always did. *)
+let last_core : string list ref = ref []
+
+let cores_enabled : (t, unit) Hashtbl.t = Hashtbl.create 1
+
+let parse_core (s : string) : string list =
+  let s = String.trim s in
+  let s = if String.length s >= 2 && s.[0] = '(' then String.sub s 1 (String.length s - 2) else s in
+  String.split_on_char ' ' s
+  |> List.concat_map (String.split_on_char '\n')
+  |> List.map (fun w ->
+         let w = String.trim w in
+         if String.length w >= 2 && w.[0] = '|' then String.sub w 1 (String.length w - 2) else w)
+  |> List.filter (( <> ) "")
+
+let check ?(preamble = "") ?(assume : string list = []) ?(timeout_ms : int option) (t : t) (vc : Smt.vc) : result =
+  last_core := [];
+  if assume <> [] && not (Hashtbl.mem cores_enabled t) then begin
+    Hashtbl.replace cores_enabled t ();
+    (* z3 4.8 (CI's) refuses `:produce-unsat-cores` once the solver has been
+       used ("option value cannot be modified after initialization"); newer
+       z3 accepts it.  Every query is push/pop-scoped, so a (reset) loses
+       nothing: it returns z3 to its start state, where the option may be set,
+       and the start options are sent again. *)
+    output_string t.oc "(reset)\n";
+    init_options t.oc;
+    output_string t.oc "(set-option :produce-unsat-cores true)\n"
+  end;
   output_string t.oc "(push 1)\n";
   (* Measure-axiom preamble (datatype + uninterpreted-fn declarations + axioms);
      scoped inside the push so it never leaks across VCs. *)
   if preamble <> "" then (output_string t.oc preamble; output_string t.oc "\n");
   output_string t.oc (Smt.assertion_block vc);
-  output_string t.oc "(check-sat)\n";
+  (match timeout_ms with
+   | Some ms -> output_string t.oc (Printf.sprintf "(set-option :timeout %d)\n" ms)
+   | None -> ());
+  if assume = [] then output_string t.oc "(check-sat)\n"
+  else output_string t.oc (Printf.sprintf "(check-sat-assuming (%s))\n" (String.concat " " assume));
   flush t.oc;
   (match Sys.getenv_opt "MARCH_REFINE_Z3_LOG" with
    | Some path when path <> "" ->
@@ -209,6 +249,11 @@ let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
       Unknown
     else
       match verdict with
+      | "unsat" when assume <> [] ->
+          output_string t.oc "(get-unsat-core)\n";
+          flush t.oc;
+          last_core := parse_core (read_balanced t.ic);
+          Unsat
       | "unsat" -> Unsat
       | "unknown" -> Unknown
       | "sat" ->
@@ -220,6 +265,9 @@ let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
       | other -> failwith ("refine: unexpected z3 verdict: " ^ other)
   in
   output_string t.oc "(pop 1)\n";
+  (match timeout_ms with
+   | Some _ -> output_string t.oc "(set-option :timeout 3000)\n"
+   | None -> ());
   flush t.oc;
   (* [MARCH_REFINE_Z3_LOG=<file>]: append every query with the verdict z3
      gave it.  A debugging aid for comparing solver versions: piping z3's

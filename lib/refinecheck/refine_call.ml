@@ -700,7 +700,7 @@ type call_ctx = {
          unshadowed one.  [`Na] leaves the obligation's skip as it was. *)
 }
 
-let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
+let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     ?(kind = Obligation.Precondition)
     ?(goal_scope_facts = false) ?(entry_label : string option)
     ?(verdict_out : Obligation.verdict option ref option)
@@ -936,7 +936,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                   fact about THIS call site, not a message that repeats
                   verbatim everywhere — so it reports per-site like the other
                   named reasons above, not throttled. *)
-               | Obligation.Unreflectable_predicate _ -> true
+               | Obligation.Unreflectable_predicate _
+               | Obligation.Reflect_fuel _
+               | Obligation.Reflect_budget -> true
                (* Throttled with the residual family, not reported per site
                   with the diagnosed ones: the sentence is a fact about the
                   PREDICATE's shape, so it reads identically at every call
@@ -965,6 +967,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        | Obligation.Abstract_uninstantiated _
        | Obligation.Unreflectable_subject _
        | Obligation.Unreflectable_predicate _
+       | Obligation.Reflect_fuel _
+       | Obligation.Reflect_budget
        | Obligation.Alias_withdrawn _ -> ());
       let body =
         match r with
@@ -977,7 +981,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | Obligation.Abstract_too_weak _
         | Obligation.Abstract_uninstantiated _
         | Obligation.Unreflectable_subject _
-        | Obligation.Unreflectable_predicate _ ->
+        | Obligation.Unreflectable_predicate _
+        | Obligation.Reflect_fuel _
+        | Obligation.Reflect_budget ->
           Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
             obligation_noun (pred_str rp.pred) callee (Obligation.reason_detail r)
         | Obligation.Nonlinear_goal
@@ -1745,11 +1751,21 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       else
         match actual_of_name name with
         | Some a ->
+          (* Reflection stage 2: a parameter of datatype type is its datatype
+             sort, so it can meet a reflected call over the same value (the
+             Int default below is what stage 1 has always used). *)
+          let sort =
+            if not !Reflect_state.arm_on then scalar_of_name name
+            else
+              match Option.bind (List.assoc_opt name name_pos) (fun i -> List.nth_opt sg.param_tys i) with
+              | Some (Some ty) -> (match instance_sort_of_ty ty with Smt.SData (n, _) as s when n <> "Elem" -> s | _ -> scalar_of_name name)
+              | _ -> scalar_of_name name
+          in
           absorb
             (reflect_cached name (fun () ->
                  reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
                    ~foreign_field:arg_resolve_field ~foreign_len
-                   ~sort:(scalar_of_name name) sc a))
+                   ~sort sc a))
         | None ->
           (* a caller-scope variable from the path context *)
           if Hashtbl.mem str_names name then Some (Smt.Const name)
@@ -2057,6 +2073,31 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          The sort equality test is load-bearing: a postcondition about a value
          of some OTHER datatype says nothing about this one, and asserting it
          about this constant would be ill-sorted. *)
+      (* Reflection stage 2 (§3.7): a reflected call at this datatype sort is
+         its logic symbol over its reflected arguments. *)
+      | A.EApp (A.EVar _, (_ :: _ as cargs), csp)
+        when Reflect_state.stage2_call_at csp -> (
+        let sym = Option.get (Reflect_state.resolve_site csp) in
+        let fs = Option.get (Reflect_state.sig_of sym) in
+        let rec elemize (s : Smt.sort) =
+          match s with
+          | Smt.SParam _ -> Smt.sdata "Elem"
+          | Smt.SData (n, xs) -> Smt.SData (n, List.map elemize xs)
+          | s -> s
+        in
+        if List.length cargs <> List.length fs.Reflect_state.fs_params then None
+        else
+          let parts =
+            List.map2
+              (fun a p ->
+                match a, elemize p with
+                | A.EVar { A.txt = x; _ }, (Smt.SData ("Elem", []) as srt) ->
+                  decls := (x, srt) :: !decls; Some (Smt.Const x)
+                | _, srt -> reflect_field a srt)
+              cargs fs.Reflect_state.fs_params
+          in
+          if List.exists Option.is_none parts then None
+          else Some (Smt.App (sym, List.map Option.get parts)))
       | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) -> (
         match postcond fname cargs with
         | Some (b, q, Some srt) when srt = adt ->
@@ -2283,6 +2324,14 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  | A.EVar { A.txt = x; _ } ->
                    load_scope_measure_facts x;
                    measure_of_var m x
+                 (* Reflection stage 2: `len` of a REFLECTED call is the
+                    list measure over its logic term, which its unfolding
+                    and `$len`'s own equations then meet. *)
+                 | A.EApp (A.EVar _, _ :: _, csp)
+                   when m = "len" && Reflect_state.stage2_call_at csp ->
+                   (match reflect_dt list_adt a with
+                    | Some t -> Some (Smt.App (list_len_measure, [ t ]))
+                    | None -> if is_self name then measure_of_var m self_dt_sym else None)
                  (* The built-in `len` of a call: a constant carrying the
                     callee's proved postcondition, as for `elts`. *)
                  | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _)
@@ -2631,6 +2680,28 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        never reaches (review of 8e5c15c48). *)
     let path_incomplete = ref (path_is_opaque path) in
     let opaque_names = path_opaque_names path in
+    (* Reflection's call-result facts (§3.7): `let r = f(x)` with [f]
+       reflected gives `r == f(x)`, which stage 2 translates to
+       `r = f$r(x)`.  Stage 1 adds nothing (the query is today's) and only
+       notes that stage 2 has something to say. *)
+    let path =
+      if not !Reflect_state.active then path
+      else
+        let facts =
+          List.filter_map
+            (fun (k, rhs) ->
+              match rhs with
+              | A.EApp (A.EVar { A.span = fsp; _ }, _ :: _, rsp) when Reflect_state.resolve_site rsp <> None ->
+                if not !Reflect_state.arm_on then (Reflect_state.frontier_seen := true; None)
+                else
+                  Some
+                    ( A.EApp (A.EVar { A.txt = "=="; A.span = fsp }, [ A.EVar { A.txt = k; A.span = fsp }; rhs ], fsp),
+                      false )
+              | _ -> None)
+            lets
+        in
+        path @ facts
+    in
     List.iter
       (fun (cond, negated) ->
         if List.exists (fun x -> List.mem x opaque_names) (guard_names cond) then path_incomplete := true;
@@ -2828,6 +2899,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                Obligation.Unreflectable_predicate
                  (pred_str leaf, division_outside_fragment_hint leaf))))
      | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) ->
+       (if Sys.getenv_opt "MARCH_REFLECT_DEBUG" = Some "3" then prerr_endline ("SC1 " ^ Smt.render goal));
        note (Obligation.Skipped Obligation.Sort_conflict)
      | Some goal ->
        (* de-duplicate decls (a symbol may be requested twice) *)
@@ -2849,7 +2921,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            (fun (n, s) -> not (s = Smt.SInt && Hashtbl.mem str_names n))
            decls
        in
-       if sort_conflict decls then note (Obligation.Skipped Obligation.Sort_conflict)
+       if sort_conflict decls then begin
+         (if Sys.getenv_opt "MARCH_REFLECT_DEBUG" = Some "3" then prerr_endline ("SC2 " ^ String.concat "," (List.map (fun (n, s) -> n ^ ":" ^ Smt.string_of_sort s) decls)));
+         note (Obligation.Skipped Obligation.Sort_conflict) end
        else
        (* Drop ill-sorted assumptions.  Weakening the hypothesis set can only
           make BOTH discharges harder, so this can only turn a report into a
@@ -2876,7 +2950,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           instances, opaque payload constants — or skip on a contradiction; see
           [resolve_sorts].  Runs on the finished declaration list. *)
        match resolve_sorts decls goal assumptions with
-       | None -> note (Obligation.Skipped Obligation.Sort_conflict)
+       | None ->
+         (if Sys.getenv_opt "MARCH_REFLECT_DEBUG" = Some "3" then prerr_endline ("SC3 " ^ Smt.render goal ^ " | " ^ String.concat "," (List.map (fun (n, s) -> n ^ ":" ^ Smt.string_of_sort s) decls)));
+         note (Obligation.Skipped Obligation.Sort_conflict)
        | Some (decls, goal, assumptions, measure_instances) ->
        let assumptions = card_facts decls goal assumptions in
        let sort_of n = List.assoc_opt n decls in
@@ -3112,6 +3188,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                       ~binder:rp.binder ~arg ~model:(model_of first)
                   with
                   | Some entries ->
+                    (* The interpreter reproduced this violation: a stage-2
+                       proof of it would contradict a real run (I7). *)
+                    Reflect_state.confirmed := true;
                     (match Witness.render_entries entries with
                      | Some s -> Printf.sprintf " (e.g. %s)" s
                      | None -> fallback ())
@@ -3316,3 +3395,30 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                         | Some r -> r
                         | None -> Obligation.Solver_undecided)))))))
 
+
+(* Reflection's two-stage discharge (specs/2026-10-29-refinement-reflection-
+   design.md §4.4) around every precondition-shaped obligation: stage 1 is
+   [check_call_stage] exactly as it always ran; [Reflect_stage.two_stage]
+   decides whether a stage-2 run (reflected calls translated, unfoldings
+   added) replaces it.  [verdict_out] is filled from the stage that stands. *)
+let () =
+  Reflect_stage.register (fun () -> let v = !ret_ctr in fun () -> ret_ctr := v);
+  Reflect_stage.register (fun () -> let v = !unverified_hinted in fun () -> unverified_hinted := v);
+  Reflect_stage.register (fun () -> let v = !promoted_sites in fun () -> promoted_sites := v);
+  Reflect_stage.register (fun () -> let v = !Witness.wall_budget in fun () -> Witness.wall_budget := v)
+
+let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
+    ?(kind = Obligation.Precondition)
+    ?(goal_scope_facts = false) ?(entry_label : string option)
+    ?(verdict_out : Obligation.verdict option ref option)
+    (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
+  let out =
+    Reflect_stage.two_stage ~errctx:cx.errctx (fun () ->
+        let vo = ref None in
+        check_call_stage cx ~span ~callee ~subject ~kind ~goal_scope_facts ?entry_label ~verdict_out:vo sg
+          args rp;
+        !vo)
+  in
+  match verdict_out, out with
+  | Some r, Some v -> r := Some v
+  | _ -> ()

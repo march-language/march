@@ -37,6 +37,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinement predicates can use your own functions.** A function that terminates
+  structurally, has no effects, cannot fail and calls only such functions is *reflected*
+  automatically: its body becomes its meaning in the logic. `if is_small(n) do
+  need_small(n) end` now proves when `is_small(n)` is `n < 10`; a predicate may call a
+  reflected function (`{Int | _ < inc(3)}`), and so may an argument or a `let` (`need(inc(1))`).
+  Each call's definition is used once, at its arguments; an obligation that needs a second
+  step is reported unverified with the new reason `reflect-fuel` (`reflect-budget` when a
+  query has more than 32 reflected calls). A proof that used a definition says so in
+  `--refine-report-sites=all` (`uses: is_small`). The standard library is reflected under
+  the same rules. Phase 1a of `specs/2026-10-29-refinement-reflection-design.md`; see
+  "Reflection: your functions in predicates" in the refinement-types reference.
+- **`@[opaque]`** keeps a function's body out of the logic, so callers see only its
+  declared contract. With `@[measure]` it is the error `reflect_conflict`; on a function
+  that would not be reflected anyway it warns (`attribute_no_effect`).
+- **`predicate_eq_structural` warning.** `==` in a refinement is structural equality; a
+  predicate that uses it at a type with a hand-written `Eq` now says so.
 - **The JS target (`--target js`) runs real programs: tail calls, native arrays,
   binary strings.** Self and mutual tail calls compile to loops, so deep recursion no
   longer overflows the stack. `NativeI32Arr`/`NativeU8Arr`/`NativeIntArr` are typed
@@ -447,6 +463,13 @@ git log is authoritative for exact commits.
   element fact.
 
 ### Changed
+
+- **`@[measure]` now insists on reflection, and follows calls.** A `@[measure]` that is not
+  reflected is the error `invalid_measure`, naming the first reason, including through a
+  function it calls (a measure whose `Nil` arm calls a function that prints, panics or
+  loops was accepted before). Measures with several parameters, or with a `Bool` or list
+  result, are now accepted and reflected; one-parameter `Int` and set measures keep their
+  axioms exactly as before. A Bool measure discharges (it used to skip every use).
 
 - **Termination: `@[diverges]`, actor handlers and `cap total`.** Mark a function meant
   to run for ever `@[diverges]` (an accept loop, a frame reader, a ticker): it files no

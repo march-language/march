@@ -143,6 +143,24 @@ type graph = {
   sites : site list;
       (** every call and every function name used as a value, with what it
           resolved to, in walk order.  Read only by [Refine_reflect]. *)
+  pred_sites : (A.span * site_target) list;
+      (** every call inside a refinement PREDICATE of a function's signature
+          (its parameter and return types, a local [fn]'s too), resolved in the
+          scope where the predicate is written: the function's module, its
+          parameters and the predicate's binder shadowing.  No edges: a
+          predicate is not a call.  Read by reflection (phase 1a review C-1,
+          C-2), so a predicate's callee is resolved exactly as program code
+          there would be. *)
+  ambiguous : (A.span, unit) Hashtbl.t;
+      (** call sites (program code and predicates) whose name more than one
+          declaration could denote: a key two modules registered (an entry
+          module's nested `mod List` and the stdlib's `List`, a library `X`
+          and a nested `M.X`), or a lexical name that an [alias] or a [use]
+          in scope also supplies.  The walk above still picks one (its
+          long-standing behaviour); reflection treats such a site as
+          unresolved and never unfolds it (phase 1a review C-A, C-B), since
+          the interpreter and the compiled build need not agree with that
+          pick. *)
 }
 
 let rec pat_vars (p : A.pattern) : string list =
@@ -428,7 +446,13 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let trusted = ref [] in
   let unresolved = ref [] in
   let sites = ref [] in
+  let pred_sites = ref [] in
+  let ambiguous = Hashtbl.create 16 in
+  (* Set by [lookup] when the name it resolved could denote more than one
+     declaration (see [graph.ambiguous]); read and cleared at each site. *)
+  let ambig = ref false in
   let site ~src ~name ~span ~call ~args target =
+    if !ambig then Hashtbl.replace ambiguous span ();
     sites := { s_src = src; s_name = name; s_span = span; s_call = call; s_args = args; s_target = target }
              :: !sites
   in
@@ -446,6 +470,19 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     id
   in
   let globals : (string, int) Hashtbl.t = Hashtbl.create 256 in
+  (* Every declaration a key was registered for, by source position (file
+     basename, line, column): two positions under one key is an ambiguity
+     ([graph.ambiguous]).  [globals] keeps its last-wins entry. *)
+  let reg_pos : (string, (string * int * int) list) Hashtbl.t = Hashtbl.create 256 in
+  let register_key key (sp : A.span) id =
+    Hashtbl.replace globals key id;
+    let pos = (Filename.basename sp.A.file, sp.A.start_line, sp.A.start_col) in
+    let old = Option.value ~default:[] (Hashtbl.find_opt reg_pos key) in
+    if not (List.mem pos old) then Hashtbl.replace reg_pos key (pos :: old)
+  in
+  (* Every module path registered ("A.B."), so an [alias] name that is also a
+     module name in scope is seen. *)
+  let mod_paths : (string, unit) Hashtbl.t = Hashtbl.create 64 in
   let externs_tbl : (string, unit) Hashtbl.t = Hashtbl.create 64 in
   (* (interface, dispatch key, unit) of every [impl] method and every
      interface default method (key ["*"]). *)
@@ -520,7 +557,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
         match d with
         | A.DFn (def, _) when not (SS.mem def.A.fn_name.A.txt externs) ->
           let id = fn_unit ~name:(mod_path ^ def.A.fn_name.A.txt) def in
-          List.iter (fun p -> Hashtbl.replace globals (p ^ def.A.fn_name.A.txt) id) prefixes
+          List.iter (fun p -> register_key (p ^ def.A.fn_name.A.txt) def.A.fn_name.A.span id) prefixes
         | A.DActor (_, name, actor, _) ->
           List.iter
             (fun (h : A.actor_handler) ->
@@ -576,9 +613,11 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
           List.iter
             (fun (n : A.name) ->
               let id = expr_unit ~name:(mod_path ^ n.A.txt) ~span:n.A.span b.A.bind_expr in
-              List.iter (fun p -> Hashtbl.replace globals (p ^ n.A.txt) id) prefixes)
+              List.iter (fun p -> register_key (p ^ n.A.txt) n.A.span id) prefixes)
             (names b.A.bind_pat)
-        | A.DMod (name, _, inner, _) -> register scope (mod_path ^ name.A.txt ^ ".") inner
+        | A.DMod (name, _, inner, _) ->
+          List.iter (fun p -> Hashtbl.replace mod_paths (p ^ name.A.txt ^ ".") ()) prefixes;
+          register scope (mod_path ^ name.A.txt ^ ".") inner
         | _ -> ())
       decls
   in
@@ -626,7 +665,18 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     | A.UseExcept ns -> not (List.exists (fun (m : A.name) -> m.A.txt = n) ns)
     | A.UseSingle -> false
   in
-  let lookup tbl n =
+  let lookup ?(track = false) tbl n =
+    if track then begin
+      (* An alias whose name is also a module visible here: which one a
+         dotted name means is the typechecker's call, not ours. *)
+      (match String.index_opt n '.' with
+       | Some i ->
+         let head = String.sub n 0 i in
+         if List.mem_assoc head !cur.sc_aliases
+            && List.exists (fun p -> Hashtbl.mem mod_paths (p ^ head ^ ".")) (candidates !cur.sc_path)
+         then ambig := true
+       | None -> ())
+    end;
     let use_at p =
       if String.contains n '.' then None
       else
@@ -637,7 +687,17 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     in
     match
       List.find_map
-        (fun p -> match Hashtbl.find_opt tbl (p ^ n) with Some r -> Some r | None -> use_at p)
+        (fun p ->
+          match Hashtbl.find_opt tbl (p ^ n) with
+          | Some r ->
+            if track then begin
+              (* Two declarations under this key, or a [use] at the same
+                 level that also supplies the name. *)
+              (match Hashtbl.find_opt reg_pos (p ^ n) with Some (_ :: _ :: _) -> ambig := true | _ -> ());
+              (match use_at p with Some r' when r' <> r -> ambig := true | _ -> ())
+            end;
+            Some r
+          | None -> use_at p)
         (candidates !cur.sc_path)
     with
     | Some r -> Some r
@@ -704,9 +764,9 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     | Some (Var | Param) -> T_value
     | None -> (
       let found =
-        match lookup globals n with
+        match lookup ~track:true globals n with
         | Some id -> Some id
-        | None when arity >= 0 -> lookup globals (Printf.sprintf "%s$%d" n arity)
+        | None when arity >= 0 -> lookup ~track:true globals (Printf.sprintf "%s$%d" n arity)
         | None -> None
       in
       match found with
@@ -739,14 +799,50 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let is_ident n = n <> "" && (match n.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) in
   (* [walk ~src ~owner ~lam env e]: edges out of unit [src] found in [e].
      [lam]: [e] sits inside a lambda or a [let*] continuation of [src]. *)
+  (* The calls in a type's refinement predicates (see [pred_sites]). *)
+  let site_of_target n = function
+    | T_unit dst -> S_unit dst
+    | T_impls (ds, _) -> S_impls ds
+    | T_value -> S_value
+    | T_trusted -> if lookup externs_tbl n <> None then S_extern else S_builtin
+    | T_unresolved -> S_unresolved
+  in
+  let rec pred_ty env (t : A.ty) : unit =
+    match t with
+    | A.TyRefine (b, binder, pred) ->
+      pred_ty env b;
+      let env' = bind_vars env [ (match binder with Some n -> n.A.txt | None -> "_") ] in
+      pred_expr env' pred
+    | A.TyCon (_, args) -> List.iter (pred_ty env) args
+    | A.TyArrow (a, b) -> pred_ty env a; pred_ty env b
+    | A.TyTuple ts -> List.iter (pred_ty env) ts
+    | A.TyRecord fs -> List.iter (fun (_, t) -> pred_ty env t) fs
+    | A.TyLinear (_, t) -> pred_ty env t
+    | _ -> ()
+  and pred_expr env (e : A.expr) : unit =
+    match e with
+    | A.EApp (A.EVar n, args, sp) ->
+      ambig := false;
+      let t = resolve ~arity:(List.length args) ~args env n.A.txt in
+      if !ambig then Hashtbl.replace ambiguous sp ();
+      pred_sites := (sp, site_of_target n.A.txt t) :: !pred_sites;
+      List.iter (pred_expr env) args
+    | e -> List.iter (pred_expr env) (Refine_encode.children e)
+  in
+  let pred_sig env (tys : A.ty option list) (ret : A.ty option) =
+    List.iter (Option.iter (pred_ty env)) tys;
+    Option.iter (pred_ty env) ret
+  in
   let rec walk ~src ~owner ~lam env (e : A.expr) : unit =
     let w = walk ~src ~owner ~lam env in
     let call head args span =
       match head with
       | A.EVar n ->
         let kind = if lam then Lambda else Direct in
+        ambig := false;
+        let resolved = resolve ~arity:(List.length args) ~args env n.A.txt in
         let site = site ~src ~name:n.A.txt ~span ~call:true ~args in
-        (match resolve ~arity:(List.length args) ~args env n.A.txt with
+        (match resolved with
          | T_unit dst ->
            site (S_unit dst);
            add_edge ~env ~src ~dst ~kind ~args ~span ~owner ()
@@ -830,6 +926,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       Hashtbl.replace unit_name id (parent ^ "/" ^ n.A.txt);
       let env = SM.add n.A.txt (Fn id) env in
       let inner = bind_params env (List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps) in
+      pred_sig inner tys ret;
       walk ~src:id ~owner:lowner ~lam:false inner body;
       env
     | _ ->
@@ -850,6 +947,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
             let env =
               bind_params (bind_vars SM.empty (clause_binders c)) (List.filter_map Fun.id owner.o_params)
             in
+            pred_sig env (snd (clause_params c)) def.A.fn_ret_ty;
             Option.iter (walk ~src:id ~owner ~lam:false env) c.A.fc_guard;
             walk ~src:id ~owner ~lam:false env c.A.fc_body)
           def.A.fn_clauses
@@ -911,7 +1009,8 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let scc_of = Array.make n 0 in
   Array.iteri (fun i ms -> List.iter (fun v -> scc_of.(v) <- i) ms) sccs;
   { units; edges; out; scc_of; sccs; trusted = List.rev !trusted;
-    unresolved = List.rev !unresolved; fv_calls = List.rev !fv_calls; sites = List.rev !sites }
+    unresolved = List.rev !unresolved; fv_calls = List.rev !fv_calls; sites = List.rev !sites;
+    pred_sites = List.rev !pred_sites; ambiguous }
 
 (** Intra-SCC edges out of [u]. *)
 let intra g (u : int) : edge list =

@@ -742,6 +742,40 @@ let rec reflect_scalar
     (match (Option.get foreign_len) a with
      | Some t -> Some (t, [], [])
      | None -> plain actual)
+  (* Reflection stage 2 (§3.7): a call of a REFLECTED function is its logic
+     symbol applied to its reflected arguments, each at the sort of the
+     parameter it fills (a type variable left open for [resolve_sorts]).
+     Stage 1 never reaches this arm. *)
+  | A.EApp (A.EVar _, (_ :: _ as cargs), csp)
+    when Reflect_state.stage2_call_at csp ->
+    let sym = Option.get (Reflect_state.resolve_site csp) in
+    let fs = Option.get (Reflect_state.sig_of sym) in
+    let rec elemize (s : Smt.sort) =
+      match s with
+      | Smt.SParam _ -> Smt.sdata "Elem"
+      | Smt.SData (n, xs) -> Smt.SData (n, List.map elemize xs)
+      | Smt.SSet e -> Smt.SSet (elemize e)
+      | s -> s
+    in
+    if List.length cargs <> List.length fs.Reflect_state.fs_params then plain actual
+    else
+      let parts =
+        List.map2
+          (fun a p ->
+            match a with
+            | A.EVar { A.txt = x; _ } when not (List.mem_assoc x sc) -> Some (Smt.Const x, [ (x, elemize p) ], [])
+            | _ ->
+              reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len
+                ~sort:(elemize p) sc a)
+          cargs fs.Reflect_state.fs_params
+      in
+      if List.exists Option.is_none parts then plain actual
+      else
+        let parts = List.map Option.get parts in
+        Some
+          ( Smt.App (sym, List.map (fun (t, _, _) -> t) parts),
+            List.concat_map (fun (_, d, _) -> d) parts,
+            List.concat_map (fun (_, _, a) -> a) parts )
   (* A direct named call: stand its result up as a fresh constant carrying the
      callee's declared postcondition.  `.` is a legal SMT-LIB simple-symbol
      character, so a qualified name needs no mangling. *)

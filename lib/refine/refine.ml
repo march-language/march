@@ -40,8 +40,8 @@ let get_solver () : Solver.t option =
 (* One check against a live solver.  A broken pipe / EOF / garbage verdict all
    mean the z3 child is dead or wedged: reap it and clear the slot so the
    caller can respawn (supervised restart). *)
-let try_check ~preamble (s : Solver.t) (vc : Smt.vc) : Solver.result option =
-  try Some (Solver.check ~preamble s vc)
+let try_check ?(assume = []) ?timeout_ms ~preamble (s : Solver.t) (vc : Smt.vc) : Solver.result option =
+  try Some (Solver.check ~preamble ~assume ?timeout_ms s vc)
   with End_of_file | Sys_error _ | Failure _ | Unix.Unix_error (_, _, _) ->
     shared_solver := None;
     Solver.close s;
@@ -122,18 +122,70 @@ let rec ground_eval (t : Smt.term) : ground option =
 let ground_verified (vc : Smt.vc) : bool =
   ground_eval vc.Smt.goal = Some (GBool true)
 
+(* ── Reflection stage 2 (specs/2026-10-29-refinement-reflection-design.md §4.4)
+   A stage-2 query carries one Bool ASSUMPTION LITERAL per unfolding (a
+   declared constant named [stage2_literal_prefix]...), each unfolding
+   asserted as `lit => equation`.  It is checked with `check-sat-assuming`
+   over those literals, under its own 1 s timeout, and a proof's unsat core
+   (the literals it used) is left in [last_core] and cached beside the
+   verdict, so a warm proof reports the same `uses:` as a cold one.  An
+   `unknown` is remembered IN PROCESS only ([stage2_unknown]), keyed by the
+   VC text, z3's identity and the timeout: never written to disk, so the
+   rule that no `unknown` is persisted still holds, while a re-check in the
+   same process does not pay the same timeout twice. *)
+let stage2_literal_prefix = "|$ru_"
+
+let stage2_timeout_ms = 1000
+
+(** The literals of the last stage-2 proof ([[]] after any other discharge). *)
+let last_core : string list ref = ref []
+
+let stage2_queries = ref 0
+
+let stage2_unknown_hits = ref 0
+
+let stage2_unknown : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+let stage2_literals (vc : Smt.vc) : string list =
+  List.filter_map
+    (fun (n, s) -> if s = Smt.SBool && String.starts_with ~prefix:stage2_literal_prefix n then Some n else None)
+    vc.Smt.decls
+
+(* A query the caller knows z3 would reject (a reflected logic symbol that
+   reached a discharge path which never declares it): refused as [Unverified]
+   instead of being sent, so one such query never shows up as a malformed VC.
+   Set by [March_refinecheck.Refine_reflect]; the default admits everything. *)
+let well_formed : (string -> Smt.vc -> bool) ref = ref (fun _ _ -> true)
+
 let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
+  last_core := [];
   if ground_verified vc then Verified else
+  if not (!well_formed preamble vc) then Unverified else
+  let assume = stage2_literals vc in
+  let timeout_ms = if assume = [] then None else Some stage2_timeout_ms in
   let key = Vc_cache.key_of_vc ~preamble vc in
+  let neg_key =
+    if assume = [] then ""
+    else key ^ "/" ^ (match Solver.find_z3 () with Some p -> p | None -> "") ^ "/" ^ string_of_int stage2_timeout_ms
+  in
+  if assume <> [] && Hashtbl.mem stage2_unknown neg_key
+     && Sys.getenv_opt "MARCH_REFLECT_PERTURB" <> Some "no-negcache" then begin
+    incr stage2_unknown_hits;
+    Unverified
+  end else
   let result =
     match Vc_cache.lookup ~root key with
-    | Some r -> r
+    | Some r ->
+        (if assume <> [] && r = Solver.Unsat then
+           match Vc_cache.lookup_core ~root key with Some c -> last_core := c | None -> ());
+        r
     | None -> (
+        if assume <> [] then incr stage2_queries;
         let checked =
           match get_solver () with
           | None -> None (* z3 unavailable; do not cache *)
           | Some s -> (
-              match try_check ~preamble s vc with
+              match try_check ~assume ?timeout_ms ~preamble s vc with
               | Some r -> Some r
               | None -> (
                   (* Solver died mid-run: restart once.  If the replacement
@@ -142,7 +194,7 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
                   match get_solver () with
                   | None -> None
                   | Some s2 -> (
-                      match try_check ~preamble s2 vc with
+                      match try_check ~assume ?timeout_ms ~preamble s2 vc with
                       | Some r -> Some r
                       | None ->
                           shared_solver := Some None;
@@ -168,9 +220,14 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
                a quieter machine, a newer z3, or a fixed encoding.  Genuine
                verdicts (unsat / sat-with-model) are facts about fixed text and
                are still cached, so the hot path is unaffected. *)
+            if assume <> [] then Hashtbl.replace stage2_unknown neg_key ();
             Solver.Unknown
         | Some r ->
             Vc_cache.store ~root key r;
+            if assume <> [] && r = Solver.Unsat then begin
+              last_core := !Solver.last_core;
+              Vc_cache.store_core ~root key !last_core
+            end;
             r
         | None -> Solver.Unknown)
   in

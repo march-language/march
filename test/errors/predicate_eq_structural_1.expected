@@ -1,0 +1,11 @@
+exit: 0
+-- WARNING --------- errors/predicate_eq_structural_1.march
+
+`==` in a refinement means structural equality; `P` has a hand-written `Eq`, which this predicate does not use. [predicate_eq_structural]
+
+12 |   fn need(p : {P | _ == P(1, 2)}) : P do p end
+                        ^^^^^^^^^^^^
+
+    run `march --explain predicate_eq_structural`
+
+

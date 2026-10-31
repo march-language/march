@@ -13,3 +13,5 @@ Fact F8 of `specs/2026-10-29-refinement-reflection-design.md` (§0.7 rows g1-g4,
   type with a hand-written `Eq` in its structure ("`==` in a refinement means structural equality;
   `P` has a hand-written `Eq`, which this predicate does not use."), and states the meaning in
   `specs/lang/refinement-types.md`. No verdict changes.
+
+**Closed 2026-10-30** by reflection phase 1a (`specs/progress/2026-10-30-reflection-phase1a.md`).

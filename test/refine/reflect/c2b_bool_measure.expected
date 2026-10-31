@@ -1,9 +1,9 @@
-skip	user	c2b_bool_measure.march:24:12	float-sort-gate	precondition	need	even_len(_)
-skip	user	c2b_bool_measure.march:25:12	float-sort-gate	precondition	need	even_len(_)
-skip	user	c2b_bool_measure.march:26:12	float-sort-gate	precondition	needp	pos_nat(_)
-skip	user	c2b_bool_measure.march:27:12	float-sort-gate	precondition	needp	pos_nat(_)
-reflect	c2b_bool_measure.march:3:5	even_len	no	R7:names not as a value (c2b_bool_measure.march:6:20)
+skip	user	c2b_bool_measure.march:24:12	reflect-fuel	precondition	need	even_len(_)
+skip	user	c2b_bool_measure.march:25:12	reflect-fuel	precondition	need	even_len(_)
+proved	user	c2b_bool_measure.march:26:12	precondition	needp	pos_nat(_)	uses: pos_nat
+violated	user	c2b_bool_measure.march:27:12	precondition	needp	pos_nat(_)
+reflect	c2b_bool_measure.march:3:5	even_len	reflected	unfold
 reflect	c2b_bool_measure.march:13:5	pos_nat	reflected	unfold
-reflect	c2b_bool_measure.march:20:5	need	reflected	unfold (guard: even_len(xs))
-reflect	c2b_bool_measure.march:21:5	needp	reflected	unfold (guard: pos_nat(n))
+reflect	c2b_bool_measure.march:20:5	need	no	R8:the refinement of xs does not translate (even_len is not predicate vocabulary) (c2b_bool_measure.march:20:5)
+reflect	c2b_bool_measure.march:21:5	needp	no	R8:the refinement of n does not translate (pos_nat is not predicate vocabulary) (c2b_bool_measure.march:21:5)
 reflect	c2b_bool_measure.march:23:5	main	no	R1:is `main` (c2b_bool_measure.march:23:5)
