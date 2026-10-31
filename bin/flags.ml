@@ -27,7 +27,8 @@ let shell_inputs   : string option ref = ref None
    from the node's build (observe plan R5.4; Shell_ident.not_read_only). *)
 let shell_force = ref false
 (* --dump-impl-hashes: write <basename>.hashes beside the .ll, one line per
-   post-TIR definition `symbol<TAB>impl_hash<TAB>sig_hash`, sorted by symbol.
+   post-TIR definition `symbol<TAB>impl_hash<TAB>sig_hash<TAB>logic_hash`
+   (`-` for a function that is not reflected), sorted by symbol.
    Read-only view of the CAS hashing (Pipeline.hash_module); consumed by
    scripts/determinism-oracle.sh. *)
 let dump_impl_hashes = ref false
@@ -123,6 +124,18 @@ let refine_report_sites_all = ref false
    blocking it (lib/refinecheck/refine_reflect.ml, reflection design §2.4).
    Report-only: nothing else reads the analysis. *)
 let reflect_report = ref false
+(* --reflect-deps: after the check, one `reflect-def` line per reflected
+   function of user code with its D17 logic hash, and one `reflect-dep` line
+   per reflected function in the frontier of any stage-2 query the check ran
+   (reflection §7.2, I8).  The LSP keys a file's refinement diagnostics on
+   the `reflect-dep` lines (lsp/lib/refine_diag.ml).  Report-only. *)
+let reflect_deps = ref false
+(* --reflect-parity: the parity net (reflection §9.2, D16): each reflected
+   function of user code is evaluated by its logic definition and by the
+   interpreter on generated inputs, boundary Ints included
+   (lib/refinecheck/reflect_parity.ml).  Exit 1 on a mismatch or an
+   interpreter failure.  Changes no verdict. *)
+let reflect_parity = ref false
 (* --refine-audit: print every declared refinement occurrence the checker
    never enforces (Unenforced) or only warns about (Inert_warned), plus a
    three-bucket summary. Read-only: changes no verdict, emits no diagnostic.

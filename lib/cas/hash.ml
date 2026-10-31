@@ -53,3 +53,18 @@ let modes_string (bm : March_tir.Borrow.borrow_map) (fn_name : string) : string 
     compared with a type-only one from an older running build. *)
 let hcr_sig_hash ~(sig_hash : string) ~(modes : string) : string =
   Blake3.hash_string ("march-hcr-slot-sig-v1\000" ^ sig_hash ^ "\000" ^ modes)
+
+(** The slot ABI hash with the function's reflection logic hash folded in
+    (refinement reflection §7.2, I9): a hot patch that changes a reflected
+    function's body changes the logic hash, so its slot hash differs from
+    the running one and forge refuses it (the callers' proofs used the old
+    body).  For a function that is not reflected ([logic] [""] or ["-"])
+    this is exactly [hcr_sig_hash], so no other slot's hash moves and the
+    HCR ABI id needs no bump: a running process published the same hash for
+    it.  A reflected slot of a process built before this rule published the
+    plain hash, which no patch's can match: it is refused, the safe side. *)
+let hcr_slot_sig_hash ~(sig_hash : string) ~(modes : string) ~(logic : string) : string =
+  let base = hcr_sig_hash ~sig_hash ~modes in
+  (* Test-only: the RED control of the fold (sound_hcr). *)
+  if logic = "" || logic = "-" || Sys.getenv_opt "MARCH_REFLECT_PERTURB" = Some "hcr-no-logic" then base
+  else Blake3.hash_string ("march-hcr-slot-logic-v1\000" ^ base ^ "\000" ^ logic)

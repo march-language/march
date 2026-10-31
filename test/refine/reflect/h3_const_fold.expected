@@ -5,5 +5,5 @@ reflect	h3_const_fold.march:2:5	size_x	reflected	unfold
 reflect	h3_const_fold.march:3:5	two_x	reflected	unfold
 reflect	h3_const_fold.march:4:5	inc	reflected	unfold
 reflect	h3_const_fold.march:6:5	idx	reflected	unfold (guard: i >= 0 && i < two_x())
-reflect	h3_const_fold.march:7:5	idx2	no	R8:the refinement of i does not translate (inc is not predicate vocabulary) (h3_const_fold.march:7:5)
+reflect	h3_const_fold.march:7:5	idx2	reflected	unfold (guard: i < inc(3))
 reflect	h3_const_fold.march:9:5	main	no	R1:is `main` (h3_const_fold.march:9:5)

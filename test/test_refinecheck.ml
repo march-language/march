@@ -28765,6 +28765,7 @@ let () =
       ("termination-report", Test_refine_term.report_suite);
       ("reflect-report", Test_refine_reflect.suite @ Test_refine_reflect.fixture_suite);
       ("reflect-unfold", Test_refine_unfold.suite @ Test_refine_unfold.soundness @ Test_refine_unfold.review @ Test_refine_unfold.review2 @ Test_refine_unfold.review3 @ Test_refine_unfold.identical);
+      ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);
       ("termination-ih", Test_refine_term.ih_suite);

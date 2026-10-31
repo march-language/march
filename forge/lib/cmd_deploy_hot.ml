@@ -37,6 +37,12 @@ type fn_manifest = {
                              'o' owned ("-": not inferred); fn_sig_hash is
                              March_cas.Hash.hcr_sig_hash over tsig and these.
                              "" for a manifest from before 2026-10-13 *)
+  fn_logic     : string;  (* `logic=`: the D17 logic hash of a reflected
+                             function (refinement reflection §7.2, I9),
+                             folded into fn_sig_hash
+                             (March_cas.Hash.hcr_slot_sig_hash); "" when the
+                             function is not reflected or the manifest
+                             predates 2026-10-31 *)
 }
 
 (** One [ROLE <Proto.Role> caps=<csv> [via=<cap>:<frame>>...;...]] line
@@ -170,22 +176,22 @@ let parse_manifest path : (manifest, string) result =
              | Some f -> String.sub f (String.length p) (String.length f - String.length p)
              | None -> ""
            in
-           (callers, caps, has_caps, field "tsig=", field "modes=")
+           (callers, caps, has_caps, field "tsig=", field "modes=", field "logic=")
          in
          (match String.split_on_char ' ' line with
          | name :: impl_h :: sig_h :: tail when tail <> [] ->
-           let (callers, caps, has_caps, tsig, modes) = extract_from_tail tail in
+           let (callers, caps, has_caps, tsig, modes, logic) = extract_from_tail tail in
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
                     fn_callers = callers; fn_caps = caps; fn_has_caps = has_caps;
-                    fn_type_sig = tsig; fn_modes = modes } :: !fns
+                    fn_type_sig = tsig; fn_modes = modes; fn_logic = logic } :: !fns
          | [name; impl_h; sig_h] ->
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
                     fn_callers = []; fn_caps = []; fn_has_caps = false;
-                    fn_type_sig = ""; fn_modes = "" } :: !fns
+                    fn_type_sig = ""; fn_modes = ""; fn_logic = "" } :: !fns
          | [name; impl_h] ->
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = "";
                     fn_callers = []; fn_caps = []; fn_has_caps = false;
-                    fn_type_sig = ""; fn_modes = "" } :: !fns
+                    fn_type_sig = ""; fn_modes = ""; fn_logic = "" } :: !fns
          | _ -> ())  (* skip malformed lines *)
        end
      done with End_of_file -> ());
@@ -1083,7 +1089,7 @@ let running_modes ~(slot_sig : string) (fm : fn_manifest) : string option =
   else begin
     let matches modes =
       modes <> fm.fn_modes
-      && March_cas.Hash.hcr_sig_hash ~sig_hash:fm.fn_type_sig ~modes = slot_sig in
+      && March_cas.Hash.hcr_slot_sig_hash ~sig_hash:fm.fn_type_sig ~modes ~logic:fm.fn_logic = slot_sig in
     if matches "-" then Some "-"
     else if fm.fn_modes = "-" then None
     else
@@ -1130,6 +1136,63 @@ let mode_change_refusal (changes : (string * string list) list) : string =
      Deploy this build with a restart, or keep the mode (a parameter becomes owned when the body \
      stores it, returns it or passes it to an owning position)"
     (String.concat "; " (List.concat_map snd changes))
+
+(* ─── Reflected bodies (refinement reflection §7.2, I9, 2026-10-31) ───────
+
+   A reflected function's body is part of its callers' proofs: a caller's
+   precondition may have been discharged by unfolding it.  The compiler folds
+   the function's D17 logic hash into its slot sig_hash
+   (March_cas.Hash.hcr_slot_sig_hash) and writes it as `logic=` on the
+   manifest line, so a patch that changes the body of a reflected function
+   reaches this gate as a slot-hash change.  Refused outright, for the
+   mode-change reason: a caller frame already running was proved against the
+   old body and its next call reaches the new one.  The deploy has to be a
+   restart; a function whose body should be patchable is marked `@[opaque]`
+   (its body then keys no caller's proof, and it has no logic hash).
+
+   Which slot-hash changes are logic changes: with the running build's
+   manifest ([prior]) the two `logic=` fields are compared.  Without it, a
+   function that is reflected in the patch and whose slot hash differs for a
+   reason other than its borrow modes counts as one (its old body, or its
+   old reflectability, cannot be told apart from a type change: the
+   conservative side).  The one shape this misses is a function that WAS
+   reflected and is not in the patch, with no prior manifest: that reaches
+   the ordinary signature gate below. *)
+
+(** The functions of [to_activate] whose reflected logic changed against the
+    running version, each with the change in words. *)
+let logic_changes ~(prior : manifest option) ~(slot_of : string -> slot option)
+    ~(to_activate : fn_manifest list) : (string * string) list =
+  let norm l = if l = "" then "-" else l in
+  let prior_logic name =
+    match prior with
+    | None -> None
+    | Some p ->
+      Option.map (fun f -> norm f.fn_logic) (List.find_opt (fun f -> f.fn_name = name) p.functions)
+  in
+  List.filter_map (fun fm ->
+      match slot_of fm.fn_name with
+      | Some slot when slot.slot_sig_hash <> "" && fm.fn_sig_hash <> ""
+                       && slot.slot_sig_hash <> fm.fn_sig_hash
+                       && running_modes ~slot_sig:slot.slot_sig_hash fm = None ->
+        let now = norm fm.fn_logic in
+        let changed =
+          match prior_logic fm.fn_name with
+          | Some before -> before <> now
+          | None -> now <> "-"
+        in
+        if changed then
+          Some (fm.fn_name,
+                Printf.sprintf "the body of `%s` is part of its callers' proofs" fm.fn_name)
+        else None
+      | _ -> None)
+    to_activate
+
+(** The refusal for [logic_changes]' non-empty answer, in words. *)
+let logic_change_refusal (changes : (string * string) list) : string =
+  Printf.sprintf
+    "a hot deploy cannot change a reflected function: %s; redeploy, or mark it `@[opaque]`"
+    (String.concat "; " (List.map snd changes))
 
 (** Parse VERSIONS response. Returns list of (name, baseline, current_or_none). *)
 type version_entry = {
@@ -1546,6 +1609,20 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
           Printf.eprintf "error: deploy aborted, nothing was activated\n%!";
           Unix.close fd;
           raise (Failure (mode_change_refusal modes))
+        end;
+        (* A reflected function's body changed (same types): never a hot
+           deploy either (see [logic_changes]). *)
+        let logic =
+          let prior =
+            if old_manifest_path <> "" && Sys.file_exists old_manifest_path then
+              Result.to_option (parse_manifest old_manifest_path)
+            else None in
+          logic_changes ~prior ~slot_of:(Hashtbl.find_opt slot_map) ~to_activate in
+        if logic <> [] then begin
+          Printf.eprintf "error: %s\n" (logic_change_refusal logic);
+          Printf.eprintf "error: deploy aborted, nothing was activated\n%!";
+          Unix.close fd;
+          raise (Failure (logic_change_refusal logic))
         end;
         (* Phase 8 — coordinated upgrade gate.
            For each sig-changed function, check whether all server-recorded callers

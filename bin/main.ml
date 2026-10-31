@@ -952,6 +952,26 @@ let print_reflect_report ~filename ~user_files ~type_map ~(recheck : unit -> uni
   List.iter prerr_endline
     (RR.report_lines ~is_user:is_user_span (RR.analyze inputs t m.March_ast.Ast.mod_decls))
 
+(* --reflect-deps (reflection §7.2): the D17 hash of every reflected user
+   function, then of every reflected function in the frontier of a stage-2
+   query this check ran, each `<kind>\t<file>\t<name>\t<hash>`, sorted. *)
+let print_reflect_deps ~filename ~user_files () =
+  let module RS = March_refinecheck.Reflect_state in
+  let is_user f = f = filename || List.mem f user_files
+                  || not (March_typecheck.Typecheck_builtins.file_is_stdlib f) in
+  let row kind sym =
+    match Hashtbl.find_opt RS.sym_origin sym, Hashtbl.find_opt RS.logic_hash sym with
+    | Some (name, file), Some h -> Some (Printf.sprintf "%s\t%s\t%s\t%s" kind file name h)
+    | _ -> None
+  in
+  let defs =
+    Hashtbl.fold (fun sym (_, file) acc -> if is_user file then sym :: acc else acc) RS.sym_origin []
+    |> List.filter_map (row "reflect-def") |> List.sort_uniq compare in
+  let deps =
+    Hashtbl.fold (fun sym () acc -> sym :: acc) RS.check_frontier []
+    |> List.filter_map (row "reflect-dep") |> List.sort_uniq compare in
+  List.iter prerr_endline (defs @ deps)
+
 (* --refine-audit: every declared refinement occurrence
    ([March_refinecheck.Refine_audit.sites]), classified
    ([March_refinecheck.Refine_audit.classify]) against what the checker
@@ -1579,7 +1599,13 @@ let hr_abi_sigs ~(borrow_map : March_tir.Borrow.borrow_map)
     Hashtbl.iter (fun name s ->
         if s <> "" then begin
           let modes = March_cas.Hash.modes_string borrow_map name in
-          Hashtbl.replace t name (March_cas.Hash.hcr_sig_hash ~sig_hash:s ~modes, modes)
+          (* A reflected function's slot hash also covers its D17 logic
+             hash (reflection §7.2, I9): a patch to its body is a slot
+             change forge refuses (Cmd_deploy_hot.logic_changes). *)
+          let logic =
+            Option.value ~default:"-"
+              (March_refinecheck.Reflect_state.logic_hash_of_name name) in
+          Hashtbl.replace t name (March_cas.Hash.hcr_slot_sig_hash ~sig_hash:s ~modes ~logic, modes)
         end)
       type_sigs;
   t
@@ -2545,6 +2571,7 @@ let run_test_cmd args =
     (* After [Division_safety]: its [Division] obligations are part of the
        listing (and what R4 reads). *)
     if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
+    if !reflect_deps then print_reflect_deps ~filename ~user_files ();
     if !reflect_report then
       print_reflect_report ~filename ~user_files ~type_map
         ~recheck:(fun () ->
@@ -3005,7 +3032,8 @@ let emit_protocols () =
       E.emitted
 
 (* --dump-impl-hashes: one line per hashed post-TIR definition, sorted by
-   symbol, written to [basename ^ ".hashes"].  Reuses the hashed_def fields
+   symbol, written to [basename ^ ".hashes"]: symbol, impl_hash, sig_hash,
+   logic_hash (the last from the refinement check's reflection state).  Reuses the hashed_def fields
    the CAS already computed (hd_impl_hash is the transitive Merkle root that
    keys the artifact cache; hd_sig_hash the signature-only hash); it computes
    no new hash, so the dump is exactly what the cache key is built from.
@@ -3023,8 +3051,19 @@ let write_impl_hashes basename (h_sccs : March_cas.Pipeline.hashed_scc list) =
       | March_cas.Pipeline.HSingle { hs_hdef } -> [ hs_hdef ]
       | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> hg_hdefs) h_sccs
     |> List.map (fun (hd : March_cas.Cas.hashed_def) ->
-        Printf.sprintf "%s\t%s\t%s" (name_of hd)
-          hd.March_cas.Cas.hd_impl_hash hd.March_cas.Cas.hd_sig_hash)
+        (* Fourth column (reflection §7.2, I9): the D17 logic hash of the
+           function's reflected definition, `-` for an unreflected one (and
+           for a type).  A body edit to a reflected function changes it even
+           when sig_hash is unchanged; hot reload refuses such a patch. *)
+        let logic =
+          match hd.March_cas.Cas.hd_def with
+          | March_cas.Cas.FnDef fd ->
+            Option.value ~default:"-"
+              (March_refinecheck.Reflect_state.logic_hash_of_name fd.March_tir.Tir.fn_name)
+          | March_cas.Cas.TypeDef _ -> "-"
+        in
+        Printf.sprintf "%s\t%s\t%s\t%s" (name_of hd)
+          hd.March_cas.Cas.hd_impl_hash hd.March_cas.Cas.hd_sig_hash logic)
     |> List.sort compare in
   let path = basename ^ ".hashes" in
   let oc = open_out path in
@@ -3253,6 +3292,7 @@ let compile filename =
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
       || !termination_report || !reflect_report || !refine_report_sites_all
+      || !reflect_deps || !reflect_parity
       || !report_contracts
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
@@ -3823,6 +3863,7 @@ let compile filename =
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
   if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
+  if !reflect_deps then print_reflect_deps ~filename ~user_files ();
   if !reflect_report then
     print_reflect_report ~filename ~user_files ~type_map
       ~recheck:(fun () ->
@@ -6048,7 +6089,17 @@ let compile filename =
                   hashes differ only by a mode. *)
                let (sig_h, abi_fields) =
                  match Hashtbl.find_opt hr_abi name, Hashtbl.find_opt remote_sig_hashes name with
-                 | Some (h, modes), Some tsig -> (h, Printf.sprintf " tsig=%s modes=%s" tsig modes)
+                 | Some (h, modes), Some tsig ->
+                   (* `logic=` (reflection §7.2, I9): the function's D17
+                      logic hash, present only for a reflected function;
+                      sig_hash already folds it in
+                      (March_cas.Hash.hcr_slot_sig_hash), and forge reads
+                      it to name a refused body change. *)
+                   let logic =
+                     match March_refinecheck.Reflect_state.logic_hash_of_name name with
+                     | Some l -> " logic=" ^ l
+                     | None -> "" in
+                   (h, Printf.sprintf " tsig=%s modes=%s%s" tsig modes logic)
                  | _, ts -> (Option.value ~default:"" ts, "") in
                let callers_field =
                  match Hashtbl.find_opt callee_to_callers name with
@@ -7019,7 +7070,7 @@ let () =
     ("--shell-force", Arg.Set shell_force,
      " With --shell: run an input that reaches declarations differing from the node's build, if it is read-only (no capability beyond IO.Console/Clock/Random/FileRead, no send/spawn/kill/call/register/setter, no Actor.Debug, no closure from an earlier let); never when a type it reaches differs. The session is marked [skew] and the node audits the input with skew:1");
     ("--dump-impl-hashes", Arg.Set dump_impl_hashes,
-     " With --emit-llvm/--compile: write <file>.hashes (symbol, impl_hash, sig_hash per post-TIR def, sorted)");
+     " With --emit-llvm/--compile: write <file>.hashes (symbol, impl_hash, sig_hash, logic_hash per post-TIR def, sorted)");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
     ("--jit",        Arg.Set jit_mode,
      " Run the program through the in-process ORC JIT instead of the interpreter (experimental)");
@@ -7102,6 +7153,10 @@ let () =
      " Print one line per skipped refinement obligation: file:line:col, reason, callee, predicate");
     ("--refine-report-sites=all", Arg.Set refine_report_sites_all,
      " Print one line per refinement obligation of any verdict (proved, skip, violated, trusted): file:line:col, kind, callee, predicate");
+    ("--reflect-deps", Arg.Set reflect_deps,
+     " Print the D17 logic hash of every reflected user function (reflect-def) and of every reflected function a stage-2 query of the check unfolded (reflect-dep); changes no verdict");
+    ("--reflect-parity", Arg.Set reflect_parity,
+     " Compare each reflected user function's logic definition with the interpreter on generated inputs (boundary Ints included); exit 1 on a mismatch or an interpreter failure");
     ("--reflect-report", Arg.Set reflect_report,
      " Print one line per user function: reflected (its body usable in predicates, from phase 1 of reflection) or the first rule that blocks it; changes no verdict");
     ("--refine-audit", Arg.Set refine_audit,
