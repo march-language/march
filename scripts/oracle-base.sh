@@ -27,6 +27,10 @@
 # the base source export is deleted once the baselines are recorded.  The
 # check's work files go to _build/oracle-check/<oracle>/ in this tree.
 #
+# The refine entry also keeps sites.txt when the base compiler records it, so
+# the monotone gate can run against the cached base afterwards:
+#   scripts/refine-oracle.sh monotone _build/oracle-check/refine
+#
 # determinism-oracle.sh needs no baseline (it compares the compiler against
 # itself) and is not handled here; run it directly.
 #
@@ -68,7 +72,7 @@ echo "==> base: $BASE_REF -> merge-base $short"
 manifest_files() {
   case "$1" in
     ir) echo "ir.sha256" ;;
-    refine) echo "refine.txt" ;;
+    refine) echo "refine.txt sites.txt" ;;   # sites.txt only from a compiler with --refine-report-sites=all
     types) echo "core_ast.sha256 diagnostics.txt json_base" ;;
   esac
 }
@@ -132,7 +136,7 @@ if [ ${#need_record[@]} -gt 0 ]; then
       echo "FATAL: $o baseline failed at $short (log above)" >&2
       rm -rf "$d"; rm -rf "$src"; exit 2
     fi
-    for m in $(manifest_files "$o"); do cp -R "$d/raw/$m" "$d/$m"; done
+    for m in $(manifest_files "$o"); do [ -e "$d/raw/$m" ] && cp -R "$d/raw/$m" "$d/$m"; done
     rm -rf "$d/raw"
     echo "$BASE_SHA" > "$d/.complete"
   done
@@ -148,7 +152,7 @@ for o in "${ORACLES[@]}"; do
   d="$(entry_dir "$o")"
   w="$ROOT/_build/oracle-check/$o"
   rm -rf "$w"; mkdir -p "$w"
-  for m in $(manifest_files "$o"); do cp -R "$d/$m" "$w/$m"; done
+  for m in $(manifest_files "$o"); do [ -e "$d/$m" ] && cp -R "$d/$m" "$w/$m"; done
   echo ""
   echo "==> $o oracle: check against $short"
   st=0

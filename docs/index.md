@@ -296,6 +296,20 @@ end
 | [Examples](examples.md) | Runnable programs in `examples/`, one feature each |
 | Coming from [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md) | Mental-model maps for newcomers |
 
+### What 1.0 promises
+
+| Page | What it covers |
+|-------|---------------|
+| [Compatibility & Deprecation](compatibility.md) | What a 1.x release keeps working, how things are deprecated, stdlib stability tiers |
+| [Supported Platforms](platforms.md) | Tier 1 (darwin-arm64, linux-x86_64, linux-aarch64), tier 2 and tier 3, and what each means |
+| [Claim: Deploys & Distribution](claim-deploys.md) | Verified installs, pinned builds, deterministic output, static binaries, cluster deploys |
+| [Claim: Capabilities](claim-capabilities.md) | What `main`'s grant and `needs` guarantee; see also the [threat model](capability-threat-model.md) |
+| [Claim: Performance](claim-performance.md) | How speed is measured (same-machine A/B against the last release); targets still to be set |
+| [Claim: Refinement Types](claim-refinements.md) | What `cap verified` proves, and the trusted base it relies on |
+
+Each claim page states the guarantee, its assumptions, what is not claimed, and the CI check
+that defends it, including the checks that are still only planned.
+
 ### The language
 
 | Guide | What it covers |
@@ -318,6 +332,7 @@ end
 | [Linear Types](linear-types.md) | Ownership, linear and affine qualifiers, `LinearMap`, `RingBuf` |
 | [Refinement Types](refinement-types.md) | `{T \| pred}` predicates checked by Z3, `cap verified`, `cap no_panic` |
 | [Capability Enforcement](capability-enforcement.md) | Turning declared capabilities into an OS sandbox and a deploy gate |
+| [Capability Threat Model](capability-threat-model.md) | What the capability system guarantees, assumes and does not cover |
 | [Capability Audit](capability-audit.md) | `forge audit` on dependency updates; `forge cap inspect` on a binary |
 | [Memory Model](memory-model.md) | Perceus RC, FBIP in-place reuse, allocation-free code |
 

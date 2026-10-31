@@ -1,0 +1,113 @@
+# .github/workflows/perf-ab.yml
+#
+# Same-box A/B performance comparison: the compiler at the last release tag
+# (A) against main's HEAD (B), over the fixed benchmark set in
+# scripts/perf-ab.sh. Uploads the table and the raw samples; the table is also
+# the job summary. Design: specs/2026-10-30-perf-ab-runner-design.md.
+#
+# Not per-PR, on purpose. A timing comparison wants a runner doing nothing
+# else, and the org has 20 Linux slots shared by every CI run; a per-PR perf
+# job would both cost a slot per push and be measured on the busiest runners
+# of the day. Nightly at 03:00 UTC (after the 00:00 nightly build has
+# finished) plus manual dispatch for comparing any two refs.
+#
+# A hosted runner is a shared VM, so absolute times here mean nothing; the
+# ratios are still sound because both arms are interleaved on the same VM in
+# the same minutes (see the spec). The allocation counters are exact either
+# way.
+name: Perf A/B
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Baseline ref (A). Empty = newest v* tag reachable from the candidate."
+        type: string
+        default: ""
+      cand:
+        description: "Candidate ref (B)."
+        type: string
+        default: "HEAD"
+      runs:
+        description: "Timed rounds per arm."
+        type: string
+        default: "15"
+      metric:
+        description: "Time the verdict is on."
+        type: choice
+        options: [cpu, wall]
+        default: cpu
+      self_test:
+        description: "Run a self-test instead of a comparison (aa = HEAD vs itself, red = HEAD vs an injected slowdown)."
+        type: choice
+        options: [none, aa, red]
+        default: none
+      fail_on_regression:
+        description: "Fail the job when a benchmark regresses (otherwise only an invalid comparison fails it)."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-ab
+  cancel-in-progress: false
+
+jobs:
+  perf-ab:
+    runs-on: ubuntu-24.04
+    # Two compiler builds (~10 min each on a cold runner) plus ~5 min of
+    # measurement at 15 rounds.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The baseline is a tag and is built in its own worktree, so the
+          # history and tags must be present.
+          fetch-depth: 0
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Run perf A/B
+        env:
+          BASE: ${{ inputs.base }}
+          CAND: ${{ inputs.cand || 'HEAD' }}
+          RUNS: ${{ inputs.runs || '15' }}
+          METRIC: ${{ inputs.metric || 'cpu' }}
+          SELF_TEST: ${{ inputs.self_test || 'none' }}
+          FAIL_ON_REGRESSION: ${{ inputs.fail_on_regression || false }}
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          args=(--runs "$RUNS" --metric "$METRIC" --work "$RUNNER_TEMP/perf-ab" --out perf-ab-out)
+          if [ "$SELF_TEST" != none ]; then
+            args+=(--self-test "$SELF_TEST")
+          elif [ -n "$BASE" ]; then
+            args+=("$BASE" "$CAND")
+          else
+            args+=("$(git describe --tags --abbrev=0 --match 'v*' "$CAND")" "$CAND")
+          fi
+          set +e
+          scripts/perf-ab.sh "${args[@]}"
+          rc=$?
+          set -e
+          [ -f perf-ab-out/table.md ] && cat perf-ab-out/table.md >> "$GITHUB_STEP_SUMMARY"
+          # 2 = invalid comparison (build failed, a run crashed, outputs
+          # differ) and a failed self-test: always red. 1 = a regression:
+          # red only when asked, since the nightly is a report.
+          if [ "$SELF_TEST" != none ] || [ "$rc" = 2 ]; then exit "$rc"; fi
+          if [ "$rc" = 1 ] && [ "$FAIL_ON_REGRESSION" = true ]; then exit 1; fi
+          exit 0
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-ab
+          path: perf-ab-out/
+          if-no-files-found: warn

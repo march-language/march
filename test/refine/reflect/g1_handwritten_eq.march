@@ -1,0 +1,23 @@
+mod G1 do
+  type P = P(Int, Int)
+
+  impl Eq(P) do
+    fn eq(a : P, b : P) : Bool do
+      match (a, b) do
+        (P(x, _), P(y, _)) -> x == y
+      end
+    end
+  end
+
+  fn need(p : {P | _ == P(1, 2)}) : Int do 0 end
+
+  fn main() : Unit do
+    let q = P(1, 3)
+    if q == P(1, 2) do
+      let _ = need(q)
+      ()
+    else
+      ()
+    end
+  end
+end

@@ -222,15 +222,17 @@ mod Msgpack do
     if raw >= 2147483648 do raw - 4294967296 else raw end
   end
 
-  -- Reconstruct a signed int from 8 big-endian bytes (63-bit safe).
+  -- Reconstruct a signed int from 8 big-endian bytes.  An int64 outside
+  -- March's 63-bit Int keeps its low 63 bits: the top byte's term is
+  -- computed modulo 2^63 (int_wrapping_*), since `*`/`+` panic on overflow.
   pfn from_int64(b0, b1, b2, b3, b4, b5, b6, b7) do
     let hi_s = if b0 >= 128 do b0 - 256 else b0 end
-    let hi   = hi_s * 72057594037927936   -- 2^56
-             + b1   * 281474976710656     -- 2^48
+    let rest = b1   * 281474976710656     -- 2^48
              + b2   * 1099511627776       -- 2^40
              + b3   * 4294967296          -- 2^32
+    let hi   = int_wrapping_add(int_wrapping_mul(hi_s, 72057594037927936), rest)   -- 2^56
     let lo   = b4 * 16777216 + b5 * 65536 + b6 * 256 + b7
-    hi + lo
+    int_wrapping_add(hi, lo)
   end
 
   -- Pull n bytes from the head of bs; returns Ok((bytes, remaining)) or Err.

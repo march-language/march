@@ -1049,7 +1049,14 @@ fatal:
  * way to _exit, and the binary that trapped on CI is not kept, so names are
  * the only thing that survives the run.  Then _exit(128 + sig), for the same
  * reason the SIGSEGV path never re-raises (see its `fatal:` comment). */
+/* musl has no <execinfo.h>: there, the frames are written unsymbolised and
+ * MARCH_FATAL_BACKTRACE has no effect (the condition march_runtime.c uses
+ * for MARCH_HAVE_EXECINFO).  Unguarded, this include broke every compile
+ * on Alpine, caught by build.yml's --static scratch-container check. */
+#if !defined(__linux__) || defined(__GLIBC__)
+#define MARCH_SCHED_HAVE_EXECINFO 1
 #include <execinfo.h>
+#endif
 #if defined(__APPLE__)
 extern intptr_t _dyld_get_image_vmaddr_slide(uint32_t image_index);
 #endif
@@ -1162,8 +1169,10 @@ static void march_fatal_trap_handler(int sig, siginfo_t *info, void *uctx) {
     buf[at++] = '\n';
     ignored = write(2, buf, at);
     (void)ignored;
+#ifdef MARCH_SCHED_HAVE_EXECINFO
     if (g_fatal_backtrace_symbols && nf > 0)
         backtrace_symbols_fd(frames, nf, 2);
+#endif
     _exit(128 + sig);
 }
 

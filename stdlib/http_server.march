@@ -478,6 +478,15 @@ mod HttpServer do
     end
   end
 
+  doc """
+  Bind later servers to `host`, a dotted IPv4 address such as "127.0.0.1",
+  instead of every interface. Call it before `listen` or `spawn_n`; it panics
+  on anything that isn't an IPv4 address.
+  """
+  fn bind_host(host : String) : Unit do
+    http_server_bind_host(host)
+  end
+
   doc "Block until the server subprocess started by `spawn_n` (given its handle) exits."
   fn wait_for(handle) do
     http_server_wait(handle)

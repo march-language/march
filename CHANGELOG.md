@@ -19,7 +19,42 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Int `+`, `-`, `*` and unary `-` panic on overflow instead of wrapping.** A result
+  outside the 63-bit range [-2^62, 2^62) is now a runtime panic, `attempt to add with
+  overflow` (or `subtract`/`multiply`/`negate`), with the same message in the
+  interpreter, compiled code and `--target js`. Before, `int_max_value() + 1` was
+  `int_min_value()`. A program that relied on wrapping (a hash, checksum or random-number
+  mixer) must switch to the new `int_wrapping_add` / `int_wrapping_sub` /
+  `int_wrapping_mul`. Derived `Hash` instances, the SIMD vector `Hash` impls and
+  `Msgpack`'s int64 decoder already use them, so their results are unchanged. `/`,
+  `int_abs`, `int_pow` and `int_shl` still wrap. The trap closes the refinement checker's
+  overflow hole: it reasons about unbounded integers, so `x + 1 > x` "proved" even
+  where `x + 1` wrapped negative. Measured cost, compiled `--opt 2`: see
+  `specs/progress/2026-10-30-int-overflow-trap.md` (design decision 2026-09-29,
+  `specs/plans/2026-09-28-road-to-1.0.md`).
+
 ### Added
+
+- **`int_wrapping_add(a, b)`, `int_wrapping_sub(a, b)`, `int_wrapping_mul(a, b)`:**
+  explicit modulo-2^63 Int arithmetic, for code where overflow is intended (hashes,
+  checksums, RNGs). `int_wrapping_add(int_max_value(), 1) == int_min_value()`.
+- **`march --check --reflect-report`: which functions a predicate will be able to use.**
+  One line per function of your code: `reflected`, or `no` with the first rule that
+  blocks it and where (`R3:calls println (app.march:14:5)`, `R6:calls mid, which is not
+  reflected`, `R4:division by b not proved`, …). This is phase 0 of refinement reflection
+  (`specs/2026-10-29-refinement-reflection-design.md`): the report only, nothing uses
+  reflection yet and no verdict changes. See "Which functions are reflected" in the
+  refinement-types reference.
+- **`--refine-report-sites=all`: every refinement obligation, any verdict.** One line per
+  obligation (`proved`, `skip`, `violated`, `trusted`), with its site, kind, callee and
+  predicate. The bare `--refine-report-sites` still lists only skips, unchanged.
+- **`scripts/refine-oracle.sh monotone <dir>`.** A refinement-checker gate that allows
+  proofs to be gained but never lost: it compares every obligation's verdict, by site,
+  against a baseline over `test/native` and `stdlib`, fails on any proved obligation that
+  is no longer proved or any site that appears or disappears, and lists new proofs, new
+  violations and withdrawn violations for review.
 
 - **`int_div_floor(a, b)` and `int_mod_floor(a, b)`: floor division and modulo.** The
   quotient rounds toward negative infinity and the remainder takes the divisor's sign, so
@@ -455,6 +490,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Every `march --compile` on a musl host (Alpine) failed since 2026-10-12: the
+  runtime's scheduler included `<execinfo.h>`, which musl does not have. It is now
+  guarded as the rest of the runtime guards it (no symbolised fatal-fault frames on
+  musl).
 - **A record or variant whose only refinements are on container elements is now
   checked when it is built.** With `type Box = { n : Int, xs : List({Int | _ > 0}) }`,
   `{ n: 10, xs: [0 - 5] }` was accepted with no obligation at all, even under
@@ -770,6 +809,21 @@ git log is authoritative for exact commits.
   was proved against a caller's `k : {Int | _ > 0}`).
 
 ### Documentation
+
+- **What March 1.0 will promise, in writing.** New pages: [Compatibility &
+  Deprecation](docs/compatibility.md) (what a 1.x release keeps working, including the
+  cluster control plane's release format and messages; `@[deprecated]` and stdlib
+  stability tiers are marked as planned), [Supported Platforms](docs/platforms.md)
+  (tier 1: darwin-arm64, linux-x86_64, linux-aarch64; Intel macOS is tier 2; Windows,
+  WASM and JS are tier 3), and one claim page each for
+  [deploys](docs/claim-deploys.md), [capabilities](docs/claim-capabilities.md),
+  [performance](docs/claim-performance.md) and
+  [refinement types](docs/claim-refinements.md), each with its assumptions, what it does
+  not claim, and which CI checks defend it and which are still planned. A new
+  [Capability Threat Model](docs/capability-threat-model.md) replaces three pages that
+  disagreed: `docs/capability-audit.md` no longer says an undeclared builtin call is only a
+  warning (it has been an error since 2026-08-06), and the provable-sandbox design notes
+  that per-function grants were removed on 2026-08-13.
 
 - **Every public stdlib function is documented, and about 1,500 doc examples have a Try it
   button.** 468 undocumented public functions now have docs, and 1,240 more functions gained
