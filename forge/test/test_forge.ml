@@ -2816,6 +2816,56 @@ entrypoint = ".forge/generated/lib/genentry.march"
             once preprocessors run, got: %s" msg
        | Ok () -> ()))
 
+(** [js_entrypoint] picks the entry file for [--target js] builds, so an app
+    can have a browser main beside its native one; native builds keep
+    [lib/<name>.march].  Real compiles plus a node run, so [`Slow]. *)
+let test_js_entrypoint_selects_js_main () =
+ with_dev_march_on_path (fun () ->
+  let tmpdir = Filename.temp_dir "forge_js_entry_" "" in
+  let lib_dir = Filename.concat tmpdir "lib" in
+  Project.mkdir_p lib_dir;
+  let main_mod name text =
+    String.concat "\n"
+      [ "mod " ^ name ^ " do";
+        "  needs IO.Console";
+        "  fn main(_c : Cap(IO.Console)) : Unit do";
+        "    println(\"" ^ text ^ "\")";
+        "  end";
+        "end";
+        "" ] in
+  write_file (Filename.concat lib_dir "jsentry.march") (main_mod "Jsentry" "native main");
+  write_file (Filename.concat lib_dir "jsentry_web.march") (main_mod "JsentryWeb" "web main");
+  write_file (Filename.concat tmpdir "forge.toml")
+    {|[package]
+name = "jsentry"
+type = "app"
+js_entrypoint = "lib/jsentry_web.march"
+|};
+  let old_cwd = Sys.getcwd () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in
+        ())
+    (fun () ->
+       Unix.chdir tmpdir;
+       (match Cmd_build.build ~release:false ~target:"js" () with
+        | Error msg -> Alcotest.failf "js build failed: %s" msg
+        | Ok _ -> ());
+       let out =
+         let ic = Unix.open_process_in "node .march/build/debug/jsentry.mjs 2>&1" in
+         let l = try input_line ic with End_of_file -> "" in
+         ignore (Unix.close_process_in ic); l in
+       Alcotest.(check string) "the js build runs js_entrypoint's main" "web main" out;
+       (match Cmd_build.build ~release:false () with
+        | Error msg -> Alcotest.failf "native build failed: %s" msg
+        | Ok _ -> ());
+       let nat =
+         let ic = Unix.open_process_in "./.march/build/debug/jsentry 2>&1" in
+         let l = try input_line ic with End_of_file -> "" in
+         ignore (Unix.close_process_in ic); l in
+       Alcotest.(check string) "the native build keeps lib/<name>.march" "native main" nat))
+
 (** Regression: [Cmd_bench.run] compiled every [bench/*.march] with a
     hardcoded [~ffi_flags:""], so a benchmark calling an extern from the
     project's [[ffi] sources] failed to link while `forge build`/`run`/`test`
@@ -3397,6 +3447,8 @@ let () =
         test_compiled_project_build_generated_entrypoint;
       Alcotest.test_case "forge bench links the project's [ffi] C sources" `Slow
         test_bench_links_ffi_sources;
+      Alcotest.test_case "js_entrypoint picks the --target js entry" `Slow
+        test_js_entrypoint_selects_js_main;
     ];
     "shell", [
       Alcotest.test_case "--force passes --shell-force" `Quick test_shell_force_flag;

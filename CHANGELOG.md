@@ -37,6 +37,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **The JS target (`--target js`) runs real programs: tail calls, native arrays,
+  binary strings.** Self and mutual tail calls compile to loops, so deep recursion no
+  longer overflows the stack. `NativeI32Arr`/`NativeU8Arr`/`NativeIntArr` are typed
+  arrays with the native wrap and bounds behaviour (`set` updates in place, since RC
+  is erased on JS). A `String` holding binary data keeps its exact bytes, and
+  `byte_at`/`byte_length`/`slice`/`index_of` agree with native in O(1) per byte
+  (`march_bytes_to_string` builds such strings from JS externs). `process_argv` returns
+  Node's arguments. `march --target js -o dir/x.mjs` copies every module the output
+  imports, including relative-path extern modules, into `dir/`. forge.toml
+  `[package] js_entrypoint` names a separate entry file for `--target js` builds. See
+  "Byte Strings" and "Int on the JS target" in
+  `docs/specs/2026-06-21-march-js-backend-design.md`.
+- **`--js-int-check`** (forge: `MARCH_JS_INT_CHECK=1 forge build --target js`) makes an
+  Int `+ - *` result or literal outside ±(2^53 − 1) throw on the JS target, naming the
+  function, to find code that needs more than 53 bits. Without it, Int `+ - *` keep the
+  63-bit overflow check every backend has.
 - **`int_wrapping_add(a, b)`, `int_wrapping_sub(a, b)`, `int_wrapping_mul(a, b)`:**
   explicit modulo-2^63 Int arithmetic, for code where overflow is intended (hashes,
   checksums, RNGs). `int_wrapping_add(int_max_value(), 1) == int_min_value()`.
@@ -490,6 +506,29 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`println` and `print` write a string's bytes on the JS target.** Under Node a string
+  holding binary data (raw bytes) printed each byte's UTF-8 encoding; it now writes the
+  bytes, as natively. `march_string_bytes(s)` (exported by `march_runtime.mjs`) gives an
+  extern a String's bytes as a `Uint8Array`.
+- **Matching a tuple of strings against literals works on the JS target.** A tuple
+  field's type is erased there, so `match (model, view) do ("bulwark", 0) -> … end`
+  switched on the string's (absent) constructor tag and never matched.
+- **On the JS target a `let` local named like a module function is the local.** It was
+  emitted as that function's closure (`{ o with x: px }` stored a closure when the module
+  also had `fn px`).
+- **Bytes built from byte values are those bytes on the JS target.** `Bytes.from_list` and
+  `Bytes.from_hex` with bytes ≥ 0x80 (via `byte_to_char`) gave each byte's UTF-8 encoding,
+  shifting every later byte offset (Herald's font data drew glyphs a pixel off).
+- **`let x = match t do (a, _) -> a end` on a tuple works on the JS target.** The
+  compiler's non-exhaustive default was emitted after the tuple's one branch and
+  overwrote `x` with a "non-exhaustive pattern match" throw.
+- **A JS build ignores another module's `main`.** `--target js` now emits only what the
+  entry's own `main` reaches, so a library module with its own `main` (a game's desktop
+  entry beside its browser one) no longer fails the build with "extern ... cannot be
+  called on the JavaScript target".
+- **A module with JS-module externs compiles natively.** An `extern "./x.mjs"` block gave
+  its functions native symbols like `./x.mjs_fn`, so any native build that loaded the
+  module (say, a library's browser backend) failed in clang even when nothing called them.
 - Every `march --compile` on a musl host (Alpine) failed since 2026-10-12: the
   runtime's scheduler included `<execinfo.h>`, which musl does not have. It is now
   guarded as the rest of the runtime guards it (no symbolised fatal-fault frames on

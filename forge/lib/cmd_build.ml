@@ -669,7 +669,14 @@ let compile_flags ~ffi_flags ~release ~dump_phases ?target ?hcr ~pin_main () =
     | Some v when v <> "" -> " --pmap-threshold=" ^ v
     | _ -> ""
   in
-  opt_flag ^ pmap_flag ^ target_flag ^ pin_flag ^ dump_flag ^ hcr_flags ^ ffi_flags
+  (* MARCH_JS_INT_CHECK=1 with --target js range-checks Int + - * (the
+     compiler's --js-int-check), for finding code that needs more than 53 bits. *)
+  let int_check_flag =
+    match target, Sys.getenv_opt "MARCH_JS_INT_CHECK" with
+    | Some ("js" | "javascript"), Some v when v <> "" && v <> "0" -> " --js-int-check"
+    | _ -> ""
+  in
+  opt_flag ^ pmap_flag ^ target_flag ^ int_check_flag ^ pin_flag ^ dump_flag ^ hcr_flags ^ ffi_flags
 
 (** The shell command that compiles the entry file to [output]. [target] is
     passed as --target <t>; omitting it compiles to a native binary.
@@ -970,7 +977,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
     in
     let files = find_march_files lib_dir @ gen_files in
     let has_entry = proj.Project.project_type <> Project.Lib
-                    && Result.is_ok (Project.entry proj) in
+                    && Result.is_ok (Project.entry ~js:(match target with Some ("js" | "javascript") -> true | _ -> false) proj) in
     if files = [] && not has_entry then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
@@ -996,7 +1003,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
           Ok (Printf.sprintf "checked %d file(s) in %s" (List.length files) lib_dir)
         end
       | Project.App | Project.Tool ->
-        match Project.entry proj with
+        match Project.entry ~js:(match target with Some ("js" | "javascript") -> true | _ -> false) proj with
         | Error e -> Error e
         | Ok entry_path ->
         (* Check every lib/ file individually before compilation so that orphan

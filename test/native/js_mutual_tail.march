@@ -1,0 +1,17 @@
+-- Mutual tail calls must run in constant stack on the JS target.
+mod JsMutualTail do
+  needs IO.Console
+
+  pfn is_even(n : Int) : Bool do
+    if n == 0 do true else is_odd(n - 1) end
+  end
+
+  pfn is_odd(n : Int) : Bool do
+    if n == 0 do false else is_even(n - 1) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(bool_to_string(is_even(1000000)))
+    println(bool_to_string(is_odd(7)))
+  end
+end
