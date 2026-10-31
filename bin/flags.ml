@@ -208,6 +208,7 @@ let fast_math      = ref false
    switch for build paths that cannot pass a flag (forge, the IR oracle). *)
 let rc_trace       = ref false
 let pmap_threshold = ref 1024    (* --pmap-threshold: List.pmap sequential-fallback cutoff *)
+let js_int_check = ref false     (* --js-int-check: range-check Int + - * on the JS target *)
 let no_copy_runtime = ref false    (* --no-copy-runtime: skip auto-copy of march_runtime.mjs *)
 (* --hot-reload=<Prefix>: compile boundary modules (under <Prefix>) with the
    versioned dispatch table so their functions can be hot-swapped at runtime. *)

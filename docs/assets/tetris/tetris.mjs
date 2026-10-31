@@ -1,4 +1,4 @@
-import { march_float_round, march_float_to_string, march_int_and, march_int_div, march_int_div_euclid, march_int_div_floor, march_int_mod, march_int_mod_euclid, march_int_mod_floor, march_int_not, march_int_or, march_int_popcount, march_int_shl, march_int_shr, march_int_xor, march_string_byte_length, march_string_concat_n, march_string_join, march_string_split, march_string_to_int, march_unix_time, march_unix_time_ms } from "./march_runtime.mjs";
+import { march_float_round, march_float_to_string, march_int_and, march_int_div, march_int_div_euclid, march_int_div_floor, march_int_mod, march_int_mod_euclid, march_int_mod_floor, march_int_not, march_int_or, march_int_ovf, march_int_popcount, march_int_shl, march_int_shr, march_int_wrapping_add, march_int_wrapping_mul, march_int_wrapping_sub, march_int_xor, march_string_byte_length, march_string_concat_n, march_string_join, march_string_split, march_string_to_int, march_unix_time, march_unix_time_ms } from "./march_runtime.mjs";
 
 import { march_dom_set_timeout as dom_set_timeout, march_dom_prevent_default as dom_prevent_default, march_dom_event_key as dom_event_key, march_dom_add_event_listener as dom_add_event_listener, march_dom_set_style as dom_set_style, march_dom_class_add as dom_class_add, march_dom_set_attribute as dom_set_attribute, march_dom_get_attribute as dom_get_attribute, march_dom_set_text as dom_set_text, march_dom_append_child as dom_append_child, march_dom_create_element as dom_create_element, march_dom_body as dom_body, march_dom_get_element_by_id as dom_get_element_by_id } from "./march_dom.mjs";
 
@@ -10,7 +10,7 @@ const float_to_int    = { _0: ($_, x) => Math.trunc(x) };
 const float_truncate  = { _0: ($_, x) => Math.trunc(x) };
 const string_is_empty = { _0: ($_, x) => x === "" };
 const not_bool        = { _0: ($_, x) => !x };
-const negate_int      = { _0: ($_, x) => -x };
+const negate_int      = { _0: ($_, x) => march_int_ovf(-x, 3) };
 const negate_float    = { _0: ($_, x) => -x };
 const float_abs       = { _0: ($_, x) => Math.abs(x) };
 const float_floor     = { _0: ($_, x) => Math.floor(x) };
@@ -29,6 +29,9 @@ const int_mod_euclid = { _0: ($_, a, b) => march_int_mod_euclid(a, b) };
 const int_div_euclid = { _0: ($_, a, b) => march_int_div_euclid(a, b) };
 const int_mod_floor = { _0: ($_, a, b) => march_int_mod_floor(a, b) };
 const int_div_floor = { _0: ($_, a, b) => march_int_div_floor(a, b) };
+const int_wrapping_add = { _0: ($_, a, b) => march_int_wrapping_add(a, b) };
+const int_wrapping_sub = { _0: ($_, a, b) => march_int_wrapping_sub(a, b) };
+const int_wrapping_mul = { _0: ($_, a, b) => march_int_wrapping_mul(a, b) };
 const int_not = { _0: ($_, a) => march_int_not(a) };
 const int_popcount = { _0: ($_, a) => march_int_popcount(a) };
 const int_abs     = { _0: ($_, a) => Math.abs(a) };
@@ -5737,13 +5740,97 @@ function TetrisLogic$piece_cells(p) {
   switch (p.$) {
     case "I": {
       {
-        const $t44765 = { _0: 0, _1: 1 };
+        const $t44741 = { _0: 0, _1: 1 };
         {
-          const $t44766 = { _0: 1, _1: 1 };
+          const $t44742 = { _0: 1, _1: 1 };
           {
-            const $t44767 = { _0: 2, _1: 1 };
+            const $t44743 = { _0: 2, _1: 1 };
             {
-              const $t44768 = { _0: 3, _1: 1 };
+              const $t44744 = { _0: 3, _1: 1 };
+              {
+                const $t44745 = { $: "Nil" };
+                {
+                  const $t44746 = { $: "Cons", _0: $t44744, _1: $t44745 };
+                  {
+                    const $t44747 = { $: "Cons", _0: $t44743, _1: $t44746 };
+                    {
+                      const $t44748 = { $: "Cons", _0: $t44742, _1: $t44747 };
+                      return { $: "Cons", _0: $t44741, _1: $t44748 };
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      break;
+    }
+    case "O": {
+      {
+        const $t44749 = { _0: 1, _1: 1 };
+        {
+          const $t44750 = { _0: 2, _1: 1 };
+          {
+            const $t44751 = { _0: 1, _1: 2 };
+            {
+              const $t44752 = { _0: 2, _1: 2 };
+              {
+                const $t44753 = { $: "Nil" };
+                {
+                  const $t44754 = { $: "Cons", _0: $t44752, _1: $t44753 };
+                  {
+                    const $t44755 = { $: "Cons", _0: $t44751, _1: $t44754 };
+                    {
+                      const $t44756 = { $: "Cons", _0: $t44750, _1: $t44755 };
+                      return { $: "Cons", _0: $t44749, _1: $t44756 };
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      break;
+    }
+    case "T": {
+      {
+        const $t44757 = { _0: 1, _1: 1 };
+        {
+          const $t44758 = { _0: 0, _1: 2 };
+          {
+            const $t44759 = { _0: 1, _1: 2 };
+            {
+              const $t44760 = { _0: 2, _1: 2 };
+              {
+                const $t44761 = { $: "Nil" };
+                {
+                  const $t44762 = { $: "Cons", _0: $t44760, _1: $t44761 };
+                  {
+                    const $t44763 = { $: "Cons", _0: $t44759, _1: $t44762 };
+                    {
+                      const $t44764 = { $: "Cons", _0: $t44758, _1: $t44763 };
+                      return { $: "Cons", _0: $t44757, _1: $t44764 };
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      break;
+    }
+    case "S": {
+      {
+        const $t44765 = { _0: 1, _1: 1 };
+        {
+          const $t44766 = { _0: 2, _1: 1 };
+          {
+            const $t44767 = { _0: 0, _1: 2 };
+            {
+              const $t44768 = { _0: 1, _1: 2 };
               {
                 const $t44769 = { $: "Nil" };
                 {
@@ -5763,11 +5850,11 @@ function TetrisLogic$piece_cells(p) {
       }
       break;
     }
-    case "O": {
+    case "Z": {
       {
-        const $t44773 = { _0: 1, _1: 1 };
+        const $t44773 = { _0: 0, _1: 1 };
         {
-          const $t44774 = { _0: 2, _1: 1 };
+          const $t44774 = { _0: 1, _1: 1 };
           {
             const $t44775 = { _0: 1, _1: 2 };
             {
@@ -5791,9 +5878,9 @@ function TetrisLogic$piece_cells(p) {
       }
       break;
     }
-    case "T": {
+    case "J": {
       {
-        const $t44781 = { _0: 1, _1: 1 };
+        const $t44781 = { _0: 0, _1: 1 };
         {
           const $t44782 = { _0: 0, _1: 2 };
           {
@@ -5819,15 +5906,15 @@ function TetrisLogic$piece_cells(p) {
       }
       break;
     }
-    case "S": {
+    case "L": {
       {
-        const $t44789 = { _0: 1, _1: 1 };
+        const $t44789 = { _0: 2, _1: 1 };
         {
-          const $t44790 = { _0: 2, _1: 1 };
+          const $t44790 = { _0: 0, _1: 2 };
           {
-            const $t44791 = { _0: 0, _1: 2 };
+            const $t44791 = { _0: 1, _1: 2 };
             {
-              const $t44792 = { _0: 1, _1: 2 };
+              const $t44792 = { _0: 2, _1: 2 };
               {
                 const $t44793 = { $: "Nil" };
                 {
@@ -5837,90 +5924,6 @@ function TetrisLogic$piece_cells(p) {
                     {
                       const $t44796 = { $: "Cons", _0: $t44790, _1: $t44795 };
                       return { $: "Cons", _0: $t44789, _1: $t44796 };
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-      break;
-    }
-    case "Z": {
-      {
-        const $t44797 = { _0: 0, _1: 1 };
-        {
-          const $t44798 = { _0: 1, _1: 1 };
-          {
-            const $t44799 = { _0: 1, _1: 2 };
-            {
-              const $t44800 = { _0: 2, _1: 2 };
-              {
-                const $t44801 = { $: "Nil" };
-                {
-                  const $t44802 = { $: "Cons", _0: $t44800, _1: $t44801 };
-                  {
-                    const $t44803 = { $: "Cons", _0: $t44799, _1: $t44802 };
-                    {
-                      const $t44804 = { $: "Cons", _0: $t44798, _1: $t44803 };
-                      return { $: "Cons", _0: $t44797, _1: $t44804 };
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-      break;
-    }
-    case "J": {
-      {
-        const $t44805 = { _0: 0, _1: 1 };
-        {
-          const $t44806 = { _0: 0, _1: 2 };
-          {
-            const $t44807 = { _0: 1, _1: 2 };
-            {
-              const $t44808 = { _0: 2, _1: 2 };
-              {
-                const $t44809 = { $: "Nil" };
-                {
-                  const $t44810 = { $: "Cons", _0: $t44808, _1: $t44809 };
-                  {
-                    const $t44811 = { $: "Cons", _0: $t44807, _1: $t44810 };
-                    {
-                      const $t44812 = { $: "Cons", _0: $t44806, _1: $t44811 };
-                      return { $: "Cons", _0: $t44805, _1: $t44812 };
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-      break;
-    }
-    case "L": {
-      {
-        const $t44813 = { _0: 2, _1: 1 };
-        {
-          const $t44814 = { _0: 0, _1: 2 };
-          {
-            const $t44815 = { _0: 1, _1: 2 };
-            {
-              const $t44816 = { _0: 2, _1: 2 };
-              {
-                const $t44817 = { $: "Nil" };
-                {
-                  const $t44818 = { $: "Cons", _0: $t44816, _1: $t44817 };
-                  {
-                    const $t44819 = { $: "Cons", _0: $t44815, _1: $t44818 };
-                    {
-                      const $t44820 = { $: "Cons", _0: $t44814, _1: $t44819 };
-                      return { $: "Cons", _0: $t44813, _1: $t44820 };
                     }
                   }
                 }
@@ -5944,19 +5947,18 @@ function TetrisLogic$level_for_lines(total_lines) {
 const TetrisLogic$level_for_lines$clo = { _0: ($_, total_lines) => TetrisLogic$level_for_lines(total_lines) };
 
 function TetrisLogic$rotate_cell(c) {
-  const $f44830 = c._0;
-  const $f44831 = c._1;
+  const $f44806 = c._0;
+  const $f44807 = c._1;
   {
-    const y = $f44831;
+    const y = $f44807;
     {
-      const x = $f44830;
+      const x = $f44806;
       {
-        const $t44829 = (3 - y);
-        return { _0: $t44829, _1: x };
+        const $t44805 = march_int_ovf(3 - y, 1);
+        return { _0: $t44805, _1: x };
       }
     }
   }
-  return (() => { throw new Error("non-exhaustive pattern match"); })();
 }
 const TetrisLogic$rotate_cell$clo = { _0: ($_, c) => TetrisLogic$rotate_cell(c) };
 
@@ -5966,57 +5968,57 @@ function TetrisLogic$clear_lines(board) {
       {
         const go_i5226 = { $: "$Clo_go$0_List_range", _0: go$apply$0_List_range, _1: 0 };
         {
-          const $t658_i5228 = { $: "Nil" };
-          return go$apply$0_List_range(go_i5226, 19, $t658_i5228);
+          const $t635_i5228 = { $: "Nil" };
+          return go$apply$0_List_range(go_i5226, 19, $t635_i5228);
         }
       }
     })();
     {
-      const $t44879 = (() => {
+      const $t44855 = (() => {
         return { $: "$Clo_$lam0_TetrisLogic_clear_lines$0_TetrisLogic_clear_lines", _0: $lam0_TetrisLogic_clear_lines$apply$0_TetrisLogic_clear_lines, _1: board };
       })();
       {
-        const kept_rows = List$filter$List_Int$Fn_Int_Bool(rows, $t44879);
+        const kept_rows = List$filter$List_Int$Fn_Int_Bool(rows, $t44855);
         {
           const cleared = (() => {
             {
-              const $t44881 = (() => {
+              const $t44857 = (() => {
                 {
                   const go_i5223 = { $: "$Clo_go$0_List_length_List_Int", _0: go$apply$0_List_length_List_Int };
                   return go$apply$0_List_length_List_Int(go_i5223, kept_rows, 0);
                 }
               })();
-              return (20 - $t44881);
+              return march_int_ovf(20 - $t44857, 1);
             }
           })();
           {
-            const $t44883 = { $: "$Clo_$lam1_TetrisLogic_clear_lines$1_TetrisLogic_clear_lines", _0: $lam1_TetrisLogic_clear_lines$apply$1_TetrisLogic_clear_lines, _1: board };
+            const $t44859 = { $: "$Clo_$lam1_TetrisLogic_clear_lines$1_TetrisLogic_clear_lines", _0: $lam1_TetrisLogic_clear_lines$apply$1_TetrisLogic_clear_lines, _1: board };
             {
               const kept_cells = (() => {
                 {
-                  const f_i5220 = $t44883;
+                  const f_i5220 = $t44859;
                   {
-                    const $t750_i5221 = { $: "Nil" };
-                    return List$flat_map_go$List_Int$List_Int$Fn_Int_List_Int($t750_i5221, kept_rows, f_i5220);
+                    const $t727_i5221 = { $: "Nil" };
+                    return List$flat_map_go$List_Int$List_Int$Fn_Int_List_Int($t727_i5221, kept_rows, f_i5220);
                   }
                 }
               })();
               {
-                const $t44885 = (cleared * 10);
+                const $t44861 = march_int_ovf(cleared * 10, 2);
                 {
                   const blank_cells = (() => {
                     {
                       const go_i5217 = { $: "$Clo_go$0_List_repeat_Int_Int", _0: go$apply$0_List_repeat_Int_Int, _1: 0 };
                       {
-                        const $t653_i5218 = { $: "Nil" };
-                        return go$apply$0_List_repeat_Int_Int(go_i5217, $t44885, $t653_i5218);
+                        const $t630_i5218 = { $: "Nil" };
+                        return go$apply$0_List_repeat_Int_Int(go_i5217, $t44861, $t630_i5218);
                       }
                     }
                   })();
                   {
                     const new_board = (() => {
                       {
-                        const $t44886 = (() => {
+                        const $t44862 = (() => {
                           {
                             const xs_i13476 = blank_cells;
                             {
@@ -6027,12 +6029,12 @@ function TetrisLogic$clear_lines(board) {
                                   break;
                                 }
                                 case "Cons": {
-                                  const $f729_i13478 = xs_i13476._0;
-                                  const $f730_i13479 = xs_i13476._1;
+                                  const $f706_i13478 = xs_i13476._0;
+                                  const $f707_i13479 = xs_i13476._1;
                                   {
-                                    const t_i13480 = $f730_i13479;
+                                    const t_i13480 = $f707_i13479;
                                     {
-                                      const h_i13481 = $f729_i13478;
+                                      const h_i13481 = $f706_i13478;
                                       {
                                         const $trmc11_i13482 = { $: "Cons", _0: h_i13481, _1: null };
                                         List$append$dps$List_Int$List_Int$List_Int(t_i13480, kept_cells, $trmc11_i13482);
@@ -6049,7 +6051,7 @@ function TetrisLogic$clear_lines(board) {
                             }
                           }
                         })();
-                        return Array$from_list$List_Int($t44886);
+                        return Array$from_list$List_Int($t44862);
                       }
                     })();
                     return { _0: new_board, _1: cleared };
@@ -6067,31 +6069,31 @@ const TetrisLogic$clear_lines$clo = { _0: ($_, board) => TetrisLogic$clear_lines
 
 function int_list_to_string(xs) {
   {
-    const $t44888 = { $: "$Clo_$lam0_int_list_to_string$0_int_list_to_string", _0: $lam0_int_list_to_string$apply$0_int_list_to_string };
+    const $t44864 = { $: "$Clo_$lam0_int_list_to_string$0_int_list_to_string", _0: $lam0_int_list_to_string$apply$0_int_list_to_string };
     {
-      const $t44889 = (() => {
+      const $t44865 = (() => {
         {
           const xs_i13483 = xs;
           {
-            const f_i13484 = $t44888;
+            const f_i13484 = $t44864;
             switch (xs_i13483.$) {
               case "Nil": {
                 return { $: "Nil" };
                 break;
               }
               case "Cons": {
-                const $f737_i13485 = xs_i13483._0;
-                const $f738_i13486 = xs_i13483._1;
+                const $f714_i13485 = xs_i13483._0;
+                const $f715_i13486 = xs_i13483._1;
                 {
-                  const t_i13487 = $f738_i13486;
+                  const t_i13487 = $f715_i13486;
                   {
-                    const h_i13488 = $f737_i13485;
+                    const h_i13488 = $f714_i13485;
                     {
-                      const $t735_i13489 = (() => {
+                      const $t712_i13489 = (() => {
                         return f_i13484._0(f_i13484, h_i13488);
                       })();
                       {
-                        const $trmc15_i13490 = { $: "Cons", _0: $t735_i13489, _1: null };
+                        const $trmc15_i13490 = { $: "Cons", _0: $t712_i13489, _1: null };
                         List$map$dps$List_Int$Fn_Int_String$List_String(t_i13487, f_i13484, $trmc15_i13490);
                         return $trmc15_i13490;
                       }
@@ -6108,7 +6110,7 @@ function int_list_to_string(xs) {
         }
       })();
       {
-        const $rc_2402 = march_string_join($t44889, ",");
+        const $rc_2402 = march_string_join($t44865, ",");
         return $rc_2402;
       }
     }
@@ -6155,40 +6157,40 @@ const piece_to_string$clo = { _0: ($_, p) => piece_to_string(p) };
 
 function next_piece(rng) {
   {
-    const $t44912 = { $: "I" };
+    const $t44888 = { $: "I" };
     {
-      const $t44913 = { $: "O" };
+      const $t44889 = { $: "O" };
       {
-        const $t44914 = { $: "T" };
+        const $t44890 = { $: "T" };
         {
-          const $t44915 = { $: "S" };
+          const $t44891 = { $: "S" };
           {
-            const $t44916 = { $: "Z" };
+            const $t44892 = { $: "Z" };
             {
-              const $t44917 = { $: "J" };
+              const $t44893 = { $: "J" };
               {
-                const $t44918 = { $: "L" };
+                const $t44894 = { $: "L" };
                 {
-                  const $t44919 = { $: "Nil" };
+                  const $t44895 = { $: "Nil" };
                   {
-                    const $t44920 = { $: "Cons", _0: $t44918, _1: $t44919 };
+                    const $t44896 = { $: "Cons", _0: $t44894, _1: $t44895 };
                     {
-                      const $t44921 = { $: "Cons", _0: $t44917, _1: $t44920 };
+                      const $t44897 = { $: "Cons", _0: $t44893, _1: $t44896 };
                       {
-                        const $t44922 = { $: "Cons", _0: $t44916, _1: $t44921 };
+                        const $t44898 = { $: "Cons", _0: $t44892, _1: $t44897 };
                         {
-                          const $t44923 = { $: "Cons", _0: $t44915, _1: $t44922 };
+                          const $t44899 = { $: "Cons", _0: $t44891, _1: $t44898 };
                           {
-                            const $t44924 = { $: "Cons", _0: $t44914, _1: $t44923 };
+                            const $t44900 = { $: "Cons", _0: $t44890, _1: $t44899 };
                             {
-                              const $t44925 = { $: "Cons", _0: $t44913, _1: $t44924 };
+                              const $t44901 = { $: "Cons", _0: $t44889, _1: $t44900 };
                               {
-                                const pieces = { $: "Cons", _0: $t44912, _1: $t44925 };
+                                const pieces = { $: "Cons", _0: $t44888, _1: $t44901 };
                                 {
                                   const rng2 = (() => {
                                     {
-                                      const $t44894_i12256 = (rng * 16807);
-                                      return ($t44894_i12256 % 2147483647);
+                                      const $t44870_i12256 = march_int_ovf(rng * 16807, 2);
+                                      return ($t44870_i12256 % 2147483647);
                                     }
                                   })();
                                   {
@@ -6196,8 +6198,8 @@ function next_piece(rng) {
                                     {
                                       const result = (() => {
                                         {
-                                          const $t44926 = List$nth$List_Piece$Int(pieces, idx);
-                                          return { _0: $t44926, _1: rng2 };
+                                          const $t44902 = List$nth$List_Piece$Int(pieces, idx);
+                                          return { _0: $t44902, _1: rng2 };
                                         }
                                       })();
                                       return result;
@@ -6224,12 +6226,12 @@ const next_piece$clo = { _0: ($_, rng) => next_piece(rng) };
 
 function state_el() {
   {
-    const $t44927 = Js$Dom$find("game-state");
-    switch ($t44927.$) {
+    const $t44903 = Js$Dom$find("game-state");
+    switch ($t44903.$) {
       case "Some": {
-        const $f44928 = $t44927._0;
+        const $f44904 = $t44903._0;
         {
-          const el = $f44928;
+          const el = $f44904;
           return el;
         }
         break;
@@ -6249,21 +6251,21 @@ const state_el$clo = { _0: ($_) => state_el() };
 
 function get_int_attr(el, name, _default) {
   {
-    const $t44929 = Js$Dom$get_attr(el, name);
-    switch ($t44929.$) {
+    const $t44905 = Js$Dom$get_attr(el, name);
+    switch ($t44905.$) {
       case "Some": {
-        const $f44931 = $t44929._0;
+        const $f44907 = $t44905._0;
         {
-          const s = $f44931;
+          const s = $f44907;
           {
-            const $t44930 = (() => {
+            const $t44906 = (() => {
               {
                 const $rc_2404 = march_string_to_int(s);
                 return $rc_2404;
               }
             })();
             {
-              const $rc_2403 = Option$unwrap_or$Option_Int$Int($t44930, _default);
+              const $rc_2403 = Option$unwrap_or$Option_Int$Int($t44906, _default);
               return $rc_2403;
             }
           }
@@ -6284,12 +6286,12 @@ const get_int_attr$clo = { _0: ($_, el, name, _default) => get_int_attr(el, name
 
 function get_str_attr(el, name, _default) {
   {
-    const $t44932 = Js$Dom$get_attr(el, name);
-    switch ($t44932.$) {
+    const $t44908 = Js$Dom$get_attr(el, name);
+    switch ($t44908.$) {
       case "Some": {
-        const $f44933 = $t44932._0;
+        const $f44909 = $t44908._0;
         {
-          const s = $f44933;
+          const s = $f44909;
           return s;
         }
         break;
@@ -6306,13 +6308,15 @@ function get_str_attr(el, name, _default) {
 }
 const get_str_attr$clo = { _0: ($_, el, name, _default) => get_str_attr(el, name, _default) };
 
-function rotate_n(cells, n) {
-  if (n === 0) {
-    return cells;
-  } else {
-    return (() => {
+function rotate_n($tco_a0, $tco_a1) {
+  __tco: for (;;) {
+    const cells = $tco_a0;
+    const n = $tco_a1;
+    if (n === 0) {
+      return cells;
+    } else {
       {
-        const $t44934 = (() => {
+        const $t44910 = (() => {
           {
             const xs_i13491 = cells;
             {
@@ -6323,18 +6327,18 @@ function rotate_n(cells, n) {
                   break;
                 }
                 case "Cons": {
-                  const $f737_i13493 = xs_i13491._0;
-                  const $f738_i13494 = xs_i13491._1;
+                  const $f714_i13493 = xs_i13491._0;
+                  const $f715_i13494 = xs_i13491._1;
                   {
-                    const t_i13495 = $f738_i13494;
+                    const t_i13495 = $f715_i13494;
                     {
-                      const h_i13496 = $f737_i13493;
+                      const h_i13496 = $f714_i13493;
                       {
-                        const $t735_i13497 = (() => {
+                        const $t712_i13497 = (() => {
                           return f_i13492._0(f_i13492, h_i13496);
                         })();
                         {
-                          const $trmc15_i13498 = { $: "Cons", _0: $t735_i13497, _1: null };
+                          const $trmc15_i13498 = { $: "Cons", _0: $t712_i13497, _1: null };
                           List$map$dps$List_T_Int_Int$Fn_T_Int_Int_T_Int_Int$List_T_Int_Int(t_i13495, f_i13492, $trmc15_i13498);
                           return $trmc15_i13498;
                         }
@@ -6351,11 +6355,16 @@ function rotate_n(cells, n) {
           }
         })();
         {
-          const $t44935 = (n - 1);
-          return rotate_n($t44934, $t44935);
+          const $t44911 = march_int_ovf(n - 1, 1);
+          {
+            $tco_a0 = $t44910;
+            $tco_a1 = $t44911;
+            continue __tco;
+          }
         }
       }
-    })();
+    }
+    return undefined;
   }
 }
 const rotate_n$clo = { _0: ($_, cells, n) => rotate_n(cells, n) };
@@ -6366,22 +6375,21 @@ function spawn_piece(next, board, rng) {
     {
       const over = (() => {
         {
-          const $t44854_i5238 = { $: "$Clo_$lam0_TetrisLogic_collides$0_TetrisLogic_collides", _0: $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides, _1: board, _2: 3, _3: 0 };
-          return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(cells, $t44854_i5238);
+          const $t44830_i5238 = { $: "$Clo_$lam0_TetrisLogic_collides$0_TetrisLogic_collides", _0: $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides, _1: board, _2: 3, _3: 0 };
+          return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(cells, $t44830_i5238);
         }
       })();
       {
-        const $t44938 = next_piece(rng);
-        const $f44939 = $t44938._0;
-        const $f44940 = $t44938._1;
+        const $t44914 = next_piece(rng);
+        const $f44915 = $t44914._0;
+        const $f44916 = $t44914._1;
         {
-          const rng2 = $f44940;
+          const rng2 = $f44916;
           {
-            const next2 = $f44939;
+            const next2 = $f44915;
             return { _0: next, _1: 0, _2: 3, _3: 0, _4: next2, _5: rng2, _6: over };
           }
         }
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
       }
     }
   }
@@ -6390,16 +6398,16 @@ const spawn_piece$clo = { _0: ($_, next, board, rng) => spawn_piece(next, board,
 
 function set_text_if_found(id, text) {
   {
-    const $t44981 = Js$Dom$find(id);
-    switch ($t44981.$) {
+    const $t44957 = Js$Dom$find(id);
+    switch ($t44957.$) {
       case "None": {
         return {  };
         break;
       }
       case "Some": {
-        const $f44982 = $t44981._0;
+        const $f44958 = $t44957._0;
         {
-          const el = $f44982;
+          const el = $f44958;
           {
             const el_i12257 = el;
             {
@@ -6427,373 +6435,367 @@ function with_state(f) {
     {
       const over = (() => {
         {
-          const $t44983 = (() => {
+          const $t44959 = (() => {
             return get_str_attr(el, "data-over", "false");
           })();
           {
-            const $rc_2413 = ($t44983 === "true");
+            const $rc_2413 = ($t44959 === "true");
             return $rc_2413;
           }
         }
       })();
       if (over === true) {
-        return (() => {
-          return {  };
-        })();
+        return {  };
       } else if (over === false) {
-        return (() => {
-          {
-            const board = (() => {
+        {
+          const board = (() => {
+            {
+              const $t44960 = (() => {
+                return get_str_attr(el, "data-board", "");
+              })();
               {
-                const $t44984 = (() => {
-                  return get_str_attr(el, "data-board", "");
+                const $t44961 = (() => {
+                  {
+                    const $rc_2412 = (() => {
+                      {
+                        const $t44866_i5268 = march_string_split($t44960, ",");
+                        {
+                          const $t44869_i5269 = { $: "$Clo_$lam0_string_to_int_list$0_string_to_int_list", _0: $lam0_string_to_int_list$apply$0_string_to_int_list };
+                          return List$map$List_String$Fn_String_Int($t44866_i5268, $t44869_i5269);
+                        }
+                      }
+                    })();
+                    return $rc_2412;
+                  }
+                })();
+                return Array$from_list$List_Int($t44961);
+              }
+            }
+          })();
+          {
+            const piece = (() => {
+              {
+                const $t44962 = (() => {
+                  return get_str_attr(el, "data-piece", "I");
                 })();
                 {
-                  const $t44985 = (() => {
-                    {
-                      const $rc_2412 = (() => {
-                        {
-                          const $t44890_i5268 = march_string_split($t44984, ",");
-                          {
-                            const $t44893_i5269 = { $: "$Clo_$lam0_string_to_int_list$0_string_to_int_list", _0: $lam0_string_to_int_list$apply$0_string_to_int_list };
-                            return List$map$List_String$Fn_String_Int($t44890_i5268, $t44893_i5269);
-                          }
-                        }
-                      })();
-                      return $rc_2412;
-                    }
-                  })();
-                  return Array$from_list$List_Int($t44985);
+                  let $rc_2411;
+                  if ($t44962 === "I") {
+                    $rc_2411 = { $: "I" };
+                  } else if ($t44962 === "O") {
+                    $rc_2411 = { $: "O" };
+                  } else if ($t44962 === "T") {
+                    $rc_2411 = { $: "T" };
+                  } else if ($t44962 === "S") {
+                    $rc_2411 = { $: "S" };
+                  } else if ($t44962 === "Z") {
+                    $rc_2411 = { $: "Z" };
+                  } else if ($t44962 === "J") {
+                    $rc_2411 = { $: "J" };
+                  } else {
+                    $rc_2411 = { $: "L" };
+                  }
+                  return $rc_2411;
                 }
               }
             })();
             {
-              const piece = (() => {
-                {
-                  const $t44986 = (() => {
-                    return get_str_attr(el, "data-piece", "I");
-                  })();
-                  {
-                    let $rc_2411;
-                    if ($t44986 === "I") {
-                      $rc_2411 = { $: "I" };
-                    } else if ($t44986 === "O") {
-                      $rc_2411 = { $: "O" };
-                    } else if ($t44986 === "T") {
-                      $rc_2411 = { $: "T" };
-                    } else if ($t44986 === "S") {
-                      $rc_2411 = { $: "S" };
-                    } else if ($t44986 === "Z") {
-                      $rc_2411 = { $: "Z" };
-                    } else if ($t44986 === "J") {
-                      $rc_2411 = { $: "J" };
-                    } else {
-                      $rc_2411 = { $: "L" };
-                    }
-                    return $rc_2411;
-                  }
-                }
+              const rot = (() => {
+                return get_int_attr(el, "data-rot", 0);
               })();
               {
-                const rot = (() => {
-                  return get_int_attr(el, "data-rot", 0);
+                const x = (() => {
+                  return get_int_attr(el, "data-x", 3);
                 })();
                 {
-                  const x = (() => {
-                    return get_int_attr(el, "data-x", 3);
+                  const y = (() => {
+                    return get_int_attr(el, "data-y", 0);
                   })();
                   {
-                    const y = (() => {
-                      return get_int_attr(el, "data-y", 0);
-                    })();
-                    {
-                      const next = (() => {
-                        {
-                          const $t44987 = (() => {
-                            return get_str_attr(el, "data-next", "O");
-                          })();
-                          {
-                            let $rc_2410;
-                            if ($t44987 === "I") {
-                              $rc_2410 = { $: "I" };
-                            } else if ($t44987 === "O") {
-                              $rc_2410 = { $: "O" };
-                            } else if ($t44987 === "T") {
-                              $rc_2410 = { $: "T" };
-                            } else if ($t44987 === "S") {
-                              $rc_2410 = { $: "S" };
-                            } else if ($t44987 === "Z") {
-                              $rc_2410 = { $: "Z" };
-                            } else if ($t44987 === "J") {
-                              $rc_2410 = { $: "J" };
-                            } else {
-                              $rc_2410 = { $: "L" };
-                            }
-                            return $rc_2410;
-                          }
-                        }
-                      })();
+                    const next = (() => {
                       {
-                        const score = (() => {
-                          return get_int_attr(el, "data-score", 0);
+                        const $t44963 = (() => {
+                          return get_str_attr(el, "data-next", "O");
                         })();
                         {
-                          const lines = (() => {
-                            return get_int_attr(el, "data-lines", 0);
+                          let $rc_2410;
+                          if ($t44963 === "I") {
+                            $rc_2410 = { $: "I" };
+                          } else if ($t44963 === "O") {
+                            $rc_2410 = { $: "O" };
+                          } else if ($t44963 === "T") {
+                            $rc_2410 = { $: "T" };
+                          } else if ($t44963 === "S") {
+                            $rc_2410 = { $: "S" };
+                          } else if ($t44963 === "Z") {
+                            $rc_2410 = { $: "Z" };
+                          } else if ($t44963 === "J") {
+                            $rc_2410 = { $: "J" };
+                          } else {
+                            $rc_2410 = { $: "L" };
+                          }
+                          return $rc_2410;
+                        }
+                      }
+                    })();
+                    {
+                      const score = (() => {
+                        return get_int_attr(el, "data-score", 0);
+                      })();
+                      {
+                        const lines = (() => {
+                          return get_int_attr(el, "data-lines", 0);
+                        })();
+                        {
+                          const rng = (() => {
+                            return get_int_attr(el, "data-rng", 1);
                           })();
                           {
-                            const rng = (() => {
-                              return get_int_attr(el, "data-rng", 1);
+                            const seq = (() => {
+                              return get_int_attr(el, "data-seq", 0);
                             })();
                             {
-                              const seq = (() => {
-                                return get_int_attr(el, "data-seq", 0);
-                              })();
+                              const $t44964 = f._0(f, board, piece, rot, x, y, next, score, lines, rng);
+                              const $f44984 = $t44964._0;
+                              const $f44985 = $t44964._1;
+                              const $f44986 = $t44964._2;
+                              const $f44987 = $t44964._3;
+                              const $f44988 = $t44964._4;
+                              const $f44989 = $t44964._5;
+                              const $f44990 = $t44964._6;
+                              const $f44991 = $t44964._7;
+                              const $f44992 = $t44964._8;
+                              const $f44993 = $t44964._9;
                               {
-                                const $t44988 = f._0(f, board, piece, rot, x, y, next, score, lines, rng);
-                                const $f45008 = $t44988._0;
-                                const $f45009 = $t44988._1;
-                                const $f45010 = $t44988._2;
-                                const $f45011 = $t44988._3;
-                                const $f45012 = $t44988._4;
-                                const $f45013 = $t44988._5;
-                                const $f45014 = $t44988._6;
-                                const $f45015 = $t44988._7;
-                                const $f45016 = $t44988._8;
-                                const $f45017 = $t44988._9;
+                                const over2 = $f44993;
                                 {
-                                  const over2 = $f45017;
+                                  const rng2 = $f44992;
                                   {
-                                    const rng2 = $f45016;
+                                    const lines2 = $f44991;
                                     {
-                                      const lines2 = $f45015;
+                                      const score2 = $f44990;
                                       {
-                                        const score2 = $f45014;
+                                        const next2 = $f44989;
                                         {
-                                          const next2 = $f45013;
+                                          const y2 = $f44988;
                                           {
-                                            const y2 = $f45012;
+                                            const x2 = $f44987;
                                             {
-                                              const x2 = $f45011;
+                                              const rot2 = $f44986;
                                               {
-                                                const rot2 = $f45010;
+                                                const piece2 = $f44985;
                                                 {
-                                                  const piece2 = $f45009;
-                                                  {
-                                                    const board2 = $f45008;
-                                                    (() => {
-                                                      {
-                                                        const $t44946_i5263 = (() => {
-                                                          {
-                                                            const go_i13419 = { $: "$Clo_go$0_List_range", _0: go$apply$0_List_range, _1: 0 };
-                                                            {
-                                                              const $t658_i13421 = { $: "Nil" };
-                                                              return go$apply$0_List_range(go_i13419, 19, $t658_i13421);
-                                                            }
-                                                          }
-                                                        })();
+                                                  const board2 = $f44984;
+                                                  (() => {
+                                                    {
+                                                      const $t44922_i5263 = (() => {
                                                         {
-                                                          const $t44958_i5264 = { $: "$Clo_$lam0_render_board$0_render_board", _0: $lam0_render_board$apply$0_render_board, _1: board2 };
+                                                          const go_i13419 = { $: "$Clo_go$0_List_range", _0: go$apply$0_List_range, _1: 0 };
                                                           {
-                                                            const f_i13415 = $t44958_i5264;
+                                                            const $t635_i13421 = { $: "Nil" };
+                                                            return go$apply$0_List_range(go_i13419, 19, $t635_i13421);
+                                                          }
+                                                        }
+                                                      })();
+                                                      {
+                                                        const $t44934_i5264 = { $: "$Clo_$lam0_render_board$0_render_board", _0: $lam0_render_board$apply$0_render_board, _1: board2 };
+                                                        {
+                                                          const f_i13415 = $t44934_i5264;
+                                                          {
+                                                            const go_i13416 = { $: "$Clo_go$0_List_each_List_Int_Fn_Int_T_", _0: go$apply$0_List_each_List_Int_Fn_Int_T_, _1: f_i13415 };
+                                                            return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i13416, $t44922_i5263);
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  })();
+                                                  (() => {
+                                                    if (over2 === false) {
+                                                      {
+                                                        const base_cells_i5258 = TetrisLogic$piece_cells(piece2);
+                                                        {
+                                                          const rotated_i5259 = rotate_n(base_cells_i5258, rot2);
+                                                          {
+                                                            const $t44956_i5260 = { $: "$Clo_$lam0_render_falling$0_render_falling", _0: $lam0_render_falling$apply$0_render_falling, _1: x2, _2: y2, _3: piece2 };
                                                             {
-                                                              const go_i13416 = { $: "$Clo_go$0_List_each_List_Int_Fn_Int_T_", _0: go$apply$0_List_each_List_Int_Fn_Int_T_, _1: f_i13415 };
-                                                              return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i13416, $t44946_i5263);
+                                                              const f_i13412 = $t44956_i5260;
+                                                              {
+                                                                const go_i13413 = { $: "$Clo_go$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_", _0: go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_, _1: f_i13412 };
+                                                                return go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_(go_i13413, rotated_i5259);
+                                                              }
                                                             }
                                                           }
                                                         }
                                                       }
-                                                    })();
-                                                    (() => {
-                                                      if (over2 === false) {
-                                                        return (() => {
-                                                          {
-                                                            const base_cells_i5258 = TetrisLogic$piece_cells(piece2);
-                                                            {
-                                                              const rotated_i5259 = rotate_n(base_cells_i5258, rot2);
-                                                              {
-                                                                const $t44980_i5260 = { $: "$Clo_$lam0_render_falling$0_render_falling", _0: $lam0_render_falling$apply$0_render_falling, _1: x2, _2: y2, _3: piece2 };
-                                                                {
-                                                                  const f_i13412 = $t44980_i5260;
-                                                                  {
-                                                                    const go_i13413 = { $: "$Clo_go$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_", _0: go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_, _1: f_i13412 };
-                                                                    return go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_(go_i13413, rotated_i5259);
-                                                                  }
-                                                                }
-                                                              }
-                                                            }
-                                                          }
-                                                        })();
-                                                      } else if (over2 === true) {
-                                                        return {  };
-                                                      } else {
-                                                        return (() => { throw new Error("non-exhaustive pattern match"); })();
-                                                      }
-                                                    })();
-                                                    (() => {
-                                                      {
-                                                        const $t44990 = (() => {
-                                                          {
-                                                            const $t44989 = String(score2);
-                                                            {
-                                                              const $rc_2409 = ("Score: " + $t44989);
-                                                              return $rc_2409;
-                                                            }
-                                                          }
-                                                        })();
-                                                        return set_text_if_found("score", $t44990);
-                                                      }
-                                                    })();
-                                                    (() => {
-                                                      {
-                                                        const $t44993 = (() => {
-                                                          {
-                                                            const $t44992 = (() => {
-                                                              {
-                                                                const $t44991 = TetrisLogic$level_for_lines(lines2);
-                                                                return String($t44991);
-                                                              }
-                                                            })();
-                                                            {
-                                                              const $rc_2408 = ("Level: " + $t44992);
-                                                              return $rc_2408;
-                                                            }
-                                                          }
-                                                        })();
-                                                        return set_text_if_found("level", $t44993);
-                                                      }
-                                                    })();
-                                                    (() => {
-                                                      {
-                                                        const $t44995 = (() => {
-                                                          {
-                                                            const $t44994 = piece_to_string(next2);
-                                                            {
-                                                              const $rc_2407 = ("Next: " + $t44994);
-                                                              return $rc_2407;
-                                                            }
-                                                          }
-                                                        })();
-                                                        return set_text_if_found("next", $t44995);
-                                                      }
-                                                    })();
+                                                    } else if (over2 === true) {
+                                                      return {  };
+                                                    } else {
+                                                      return (() => { throw new Error("non-exhaustive pattern match"); })();
+                                                    }
+                                                  })();
+                                                  (() => {
                                                     {
-                                                      let game_over_text;
-                                                      if (over2 === true) {
-                                                        game_over_text = "Game Over — press R to restart";
-                                                      } else if (over2 === false) {
-                                                        game_over_text = "";
-                                                      } else {
-                                                        game_over_text = (() => { throw new Error("non-exhaustive pattern match"); })();
-                                                      }
-                                                      set_text_if_found("game-over", game_over_text);
-                                                      (() => {
+                                                      const $t44966 = (() => {
                                                         {
-                                                          const $t44997 = (() => {
+                                                          const $t44965 = String(score2);
+                                                          {
+                                                            const $rc_2409 = ("Score: " + $t44965);
+                                                            return $rc_2409;
+                                                          }
+                                                        }
+                                                      })();
+                                                      return set_text_if_found("score", $t44966);
+                                                    }
+                                                  })();
+                                                  (() => {
+                                                    {
+                                                      const $t44969 = (() => {
+                                                        {
+                                                          const $t44968 = (() => {
                                                             {
-                                                              const $t44996 = (() => {
+                                                              const $t44967 = TetrisLogic$level_for_lines(lines2);
+                                                              return String($t44967);
+                                                            }
+                                                          })();
+                                                          {
+                                                            const $rc_2408 = ("Level: " + $t44968);
+                                                            return $rc_2408;
+                                                          }
+                                                        }
+                                                      })();
+                                                      return set_text_if_found("level", $t44969);
+                                                    }
+                                                  })();
+                                                  (() => {
+                                                    {
+                                                      const $t44971 = (() => {
+                                                        {
+                                                          const $t44970 = piece_to_string(next2);
+                                                          {
+                                                            const $rc_2407 = ("Next: " + $t44970);
+                                                            return $rc_2407;
+                                                          }
+                                                        }
+                                                      })();
+                                                      return set_text_if_found("next", $t44971);
+                                                    }
+                                                  })();
+                                                  {
+                                                    let game_over_text;
+                                                    if (over2 === true) {
+                                                      game_over_text = "Game Over — press R to restart";
+                                                    } else if (over2 === false) {
+                                                      game_over_text = "";
+                                                    } else {
+                                                      game_over_text = (() => { throw new Error("non-exhaustive pattern match"); })();
+                                                    }
+                                                    set_text_if_found("game-over", game_over_text);
+                                                    (() => {
+                                                      {
+                                                        const $t44973 = (() => {
+                                                          {
+                                                            const $t44972 = (() => {
+                                                              {
+                                                                const $t8268_i5251 = { $: "Nil" };
                                                                 {
-                                                                  const $t8291_i5251 = { $: "Nil" };
+                                                                  const $t8270_i5252 = { $: "$Clo_$lam0_Array_to_list$0_Array_to_list_PVec_Int", _0: $lam0_Array_to_list$apply$0_Array_to_list_PVec_Int };
                                                                   {
-                                                                    const $t8293_i5252 = { $: "$Clo_$lam0_Array_to_list$0_Array_to_list_PVec_Int", _0: $lam0_Array_to_list$apply$0_Array_to_list_PVec_Int };
+                                                                    const rev_i5253 = Array$fold_left$PVec_Int$List_Int$Fn_List_Int_Int_List_Int(board2, $t8268_i5251, $t8270_i5252);
                                                                     {
-                                                                      const rev_i5253 = Array$fold_left$PVec_Int$List_Int$Fn_List_Int_Int_List_Int(board2, $t8291_i5251, $t8293_i5252);
+                                                                      const go_i13409 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
                                                                       {
-                                                                        const go_i13409 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
-                                                                        {
-                                                                          const $t7876_i13410 = { $: "Nil" };
-                                                                          return go$apply$0_Array_lst_rev_List_Int(go_i13409, rev_i5253, $t7876_i13410);
-                                                                        }
+                                                                        const $t7853_i13410 = { $: "Nil" };
+                                                                        return go$apply$0_Array_lst_rev_List_Int(go_i13409, rev_i5253, $t7853_i13410);
                                                                       }
                                                                     }
                                                                   }
                                                                 }
-                                                              })();
-                                                              return int_list_to_string($t44996);
-                                                            }
-                                                          })();
-                                                          return Js$Dom$set_attr(el, "data-board", $t44997);
-                                                        }
-                                                      })();
+                                                              }
+                                                            })();
+                                                            return int_list_to_string($t44972);
+                                                          }
+                                                        })();
+                                                        return Js$Dom$set_attr(el, "data-board", $t44973);
+                                                      }
+                                                    })();
+                                                    (() => {
+                                                      {
+                                                        const $t44974 = (() => {
+                                                          {
+                                                            const $rc_2406 = piece_to_string(piece2);
+                                                            return $rc_2406;
+                                                          }
+                                                        })();
+                                                        return Js$Dom$set_attr(el, "data-piece", $t44974);
+                                                      }
+                                                    })();
+                                                    (() => {
+                                                      {
+                                                        const $t44975 = String(rot2);
+                                                        return Js$Dom$set_attr(el, "data-rot", $t44975);
+                                                      }
+                                                    })();
+                                                    (() => {
+                                                      {
+                                                        const $t44976 = String(x2);
+                                                        return Js$Dom$set_attr(el, "data-x", $t44976);
+                                                      }
+                                                    })();
+                                                    (() => {
+                                                      {
+                                                        const $t44977 = String(y2);
+                                                        return Js$Dom$set_attr(el, "data-y", $t44977);
+                                                      }
+                                                    })();
+                                                    (() => {
+                                                      {
+                                                        const $t44978 = (() => {
+                                                          {
+                                                            const $rc_2405 = piece_to_string(next2);
+                                                            return $rc_2405;
+                                                          }
+                                                        })();
+                                                        return Js$Dom$set_attr(el, "data-next", $t44978);
+                                                      }
+                                                    })();
+                                                    (() => {
+                                                      {
+                                                        const $t44979 = String(score2);
+                                                        return Js$Dom$set_attr(el, "data-score", $t44979);
+                                                      }
+                                                    })();
+                                                    (() => {
+                                                      {
+                                                        const $t44980 = String(lines2);
+                                                        return Js$Dom$set_attr(el, "data-lines", $t44980);
+                                                      }
+                                                    })();
+                                                    (() => {
+                                                      {
+                                                        const $t44981 = String(rng2);
+                                                        return Js$Dom$set_attr(el, "data-rng", $t44981);
+                                                      }
+                                                    })();
+                                                    {
+                                                      let over2_s;
+                                                      if (over2 === true) {
+                                                        over2_s = "true";
+                                                      } else if (over2 === false) {
+                                                        over2_s = "false";
+                                                      } else {
+                                                        over2_s = (() => { throw new Error("non-exhaustive pattern match"); })();
+                                                      }
                                                       (() => {
-                                                        {
-                                                          const $t44998 = (() => {
-                                                            {
-                                                              const $rc_2406 = piece_to_string(piece2);
-                                                              return $rc_2406;
-                                                            }
-                                                          })();
-                                                          return Js$Dom$set_attr(el, "data-piece", $t44998);
-                                                        }
-                                                      })();
-                                                      (() => {
-                                                        {
-                                                          const $t44999 = String(rot2);
-                                                          return Js$Dom$set_attr(el, "data-rot", $t44999);
-                                                        }
-                                                      })();
-                                                      (() => {
-                                                        {
-                                                          const $t45000 = String(x2);
-                                                          return Js$Dom$set_attr(el, "data-x", $t45000);
-                                                        }
-                                                      })();
-                                                      (() => {
-                                                        {
-                                                          const $t45001 = String(y2);
-                                                          return Js$Dom$set_attr(el, "data-y", $t45001);
-                                                        }
-                                                      })();
-                                                      (() => {
-                                                        {
-                                                          const $t45002 = (() => {
-                                                            {
-                                                              const $rc_2405 = piece_to_string(next2);
-                                                              return $rc_2405;
-                                                            }
-                                                          })();
-                                                          return Js$Dom$set_attr(el, "data-next", $t45002);
-                                                        }
-                                                      })();
-                                                      (() => {
-                                                        {
-                                                          const $t45003 = String(score2);
-                                                          return Js$Dom$set_attr(el, "data-score", $t45003);
-                                                        }
-                                                      })();
-                                                      (() => {
-                                                        {
-                                                          const $t45004 = String(lines2);
-                                                          return Js$Dom$set_attr(el, "data-lines", $t45004);
-                                                        }
-                                                      })();
-                                                      (() => {
-                                                        {
-                                                          const $t45005 = String(rng2);
-                                                          return Js$Dom$set_attr(el, "data-rng", $t45005);
-                                                        }
+                                                        return Js$Dom$set_attr(el, "data-over", over2_s);
                                                       })();
                                                       {
-                                                        let over2_s;
-                                                        if (over2 === true) {
-                                                          over2_s = "true";
-                                                        } else if (over2 === false) {
-                                                          over2_s = "false";
-                                                        } else {
-                                                          over2_s = (() => { throw new Error("non-exhaustive pattern match"); })();
-                                                        }
-                                                        (() => {
-                                                          return Js$Dom$set_attr(el, "data-over", over2_s);
+                                                        const $t44983 = (() => {
+                                                          {
+                                                            const $t44982 = march_int_ovf(seq + 1, 0);
+                                                            return String($t44982);
+                                                          }
                                                         })();
-                                                        {
-                                                          const $t45007 = (() => {
-                                                            {
-                                                              const $t45006 = (seq + 1);
-                                                              return String($t45006);
-                                                            }
-                                                          })();
-                                                          return Js$Dom$set_attr(el, "data-seq", $t45007);
-                                                        }
+                                                        return Js$Dom$set_attr(el, "data-seq", $t44983);
                                                       }
                                                     }
                                                   }
@@ -6806,7 +6808,6 @@ function with_state(f) {
                                     }
                                   }
                                 }
-                                return (() => { throw new Error("non-exhaustive pattern match"); })();
                               }
                             }
                           }
@@ -6818,11 +6819,9 @@ function with_state(f) {
               }
             }
           }
-        })();
+        }
       } else {
-        return (() => {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
-        })();
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
       }
     }
   }
@@ -6831,106 +6830,106 @@ const with_state$clo = { _0: ($_, f) => with_state(f) };
 
 function lock_and_advance(board, piece, rot, x, y, next, score, lines, rng) {
   {
-    const $t45054 = TetrisLogic$piece_cells(piece);
+    const $t45030 = TetrisLogic$piece_cells(piece);
     {
-      const cells = rotate_n($t45054, rot);
+      const cells = rotate_n($t45030, rot);
       {
         const locked = (() => {
           {
-            let $t45055;
+            let $t45031;
             switch (piece.$) {
               case "I": {
-                $t45055 = 1;
+                $t45031 = 1;
                 break;
               }
               case "O": {
-                $t45055 = 2;
+                $t45031 = 2;
                 break;
               }
               case "T": {
-                $t45055 = 3;
+                $t45031 = 3;
                 break;
               }
               case "S": {
-                $t45055 = 4;
+                $t45031 = 4;
                 break;
               }
               case "Z": {
-                $t45055 = 5;
+                $t45031 = 5;
                 break;
               }
               case "J": {
-                $t45055 = 6;
+                $t45031 = 6;
                 break;
               }
               case "L": {
-                $t45055 = 7;
+                $t45031 = 7;
                 break;
               }
               default: {
-                $t45055 = (() => { throw new Error("non-exhaustive pattern match"); })();
+                $t45031 = (() => { throw new Error("non-exhaustive pattern match"); })();
                 break;
               }
             }
             {
-              const $t44864_i5276 = { $: "$Clo_$lam0_TetrisLogic_lock_piece$0_TetrisLogic_lock_piece", _0: $lam0_TetrisLogic_lock_piece$apply$0_TetrisLogic_lock_piece, _1: $t45055, _2: x, _3: y };
-              return List$fold_left$List_T_Int_Int$PVec_Int$Fn_PVec_Int_T_Int_Int_PVec_Int(cells, board, $t44864_i5276);
+              const $t44840_i5276 = { $: "$Clo_$lam0_TetrisLogic_lock_piece$0_TetrisLogic_lock_piece", _0: $lam0_TetrisLogic_lock_piece$apply$0_TetrisLogic_lock_piece, _1: $t45031, _2: x, _3: y };
+              return List$fold_left$List_T_Int_Int$PVec_Int$Fn_PVec_Int_T_Int_Int_PVec_Int(cells, board, $t44840_i5276);
             }
           }
         })();
         {
-          const $t45056 = TetrisLogic$clear_lines(locked);
-          const $f45090 = $t45056._0;
-          const $f45091 = $t45056._1;
+          const $t45032 = TetrisLogic$clear_lines(locked);
+          const $f45066 = $t45032._0;
+          const $f45067 = $t45032._1;
           {
-            const n = $f45091;
+            const n = $f45067;
             {
-              const cleared_board = $f45090;
+              const cleared_board = $f45066;
               {
                 const new_score = (() => {
                   {
-                    let $t45057;
+                    let $t45033;
                     if (n === 1) {
-                      $t45057 = 100;
+                      $t45033 = 100;
                     } else if (n === 2) {
-                      $t45057 = 300;
+                      $t45033 = 300;
                     } else if (n === 3) {
-                      $t45057 = 500;
+                      $t45033 = 500;
                     } else if (n === 4) {
-                      $t45057 = 800;
+                      $t45033 = 800;
                     } else {
-                      $t45057 = 0;
+                      $t45033 = 0;
                     }
-                    return (score + $t45057);
+                    return march_int_ovf(score + $t45033, 0);
                   }
                 })();
                 {
-                  const new_lines = (lines + n);
+                  const new_lines = march_int_ovf(lines + n, 0);
                   {
-                    const $t45058 = (() => {
+                    const $t45034 = (() => {
                       return spawn_piece(next, cleared_board, rng);
                     })();
-                    const $f45059 = $t45058._0;
-                    const $f45060 = $t45058._1;
-                    const $f45061 = $t45058._2;
-                    const $f45062 = $t45058._3;
-                    const $f45063 = $t45058._4;
-                    const $f45064 = $t45058._5;
-                    const $f45065 = $t45058._6;
+                    const $f45035 = $t45034._0;
+                    const $f45036 = $t45034._1;
+                    const $f45037 = $t45034._2;
+                    const $f45038 = $t45034._3;
+                    const $f45039 = $t45034._4;
+                    const $f45040 = $t45034._5;
+                    const $f45041 = $t45034._6;
                     {
-                      const over = $f45065;
+                      const over = $f45041;
                       {
-                        const rng2 = $f45064;
+                        const rng2 = $f45040;
                         {
-                          const next2 = $f45063;
+                          const next2 = $f45039;
                           {
-                            const y2 = $f45062;
+                            const y2 = $f45038;
                             {
-                              const x2 = $f45061;
+                              const x2 = $f45037;
                               {
-                                const rot2 = $f45060;
+                                const rot2 = $f45036;
                                 {
-                                  const piece2 = $f45059;
+                                  const piece2 = $f45035;
                                   return { _0: cleared_board, _1: piece2, _2: rot2, _3: x2, _4: y2, _5: next2, _6: new_score, _7: new_lines, _8: rng2, _9: over };
                                 }
                               }
@@ -6939,13 +6938,11 @@ function lock_and_advance(board, piece, rot, x, y, next, score, lines, rng) {
                         }
                       }
                     }
-                    return (() => { throw new Error("non-exhaustive pattern match"); })();
                   }
                 }
               }
             }
           }
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
         }
       }
     }
@@ -6955,14 +6952,14 @@ const lock_and_advance$clo = { _0: ($_, board, piece, rot, x, y, next, score, li
 
 function is_paused() {
   {
-    const $t45097 = (() => {
+    const $t45073 = (() => {
       {
-        const $t45096 = state_el();
-        return get_str_attr($t45096, "data-paused", "false");
+        const $t45072 = state_el();
+        return get_str_attr($t45072, "data-paused", "false");
       }
     })();
     {
-      const $rc_2414 = ($t45097 === "true");
+      const $rc_2414 = ($t45073 === "true");
       return $rc_2414;
     }
   }
@@ -7001,68 +6998,69 @@ function toggle_pause() {
     {
       const over = (() => {
         {
-          const $t45098 = (() => {
+          const $t45074 = (() => {
             return get_str_attr(el, "data-over", "false");
           })();
           {
-            const $rc_2415 = ($t45098 === "true");
+            const $rc_2415 = ($t45074 === "true");
             return $rc_2415;
           }
         }
       })();
       if (over === true) {
-        return (() => {
-          return {  };
-        })();
+        return {  };
       } else if (over === false) {
-        return (() => {
-          {
-            const $t45100 = (() => {
-              {
-                const $t45099 = is_paused();
-                return (!$t45099);
-              }
-            })();
-            return set_paused(el, $t45100);
-          }
-        })();
+        {
+          const $t45076 = (() => {
+            {
+              const $t45075 = is_paused();
+              return (!$t45075);
+            }
+          })();
+          return set_paused(el, $t45076);
+        }
       } else {
-        return (() => {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
-        })();
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
       }
     }
   }
 }
 const toggle_pause$clo = { _0: ($_) => toggle_pause() };
 
-function fall_from(board, cells, x, cur_y) {
-  {
-    const $t45127 = (() => {
-      {
-        const $t45126 = (cur_y + 1);
+function fall_from($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
+  __tco: for (;;) {
+    const board = $tco_a0;
+    const cells = $tco_a1;
+    const x = $tco_a2;
+    const cur_y = $tco_a3;
+    {
+      const $t45103 = (() => {
         {
-          const $t44854_i5284 = { $: "$Clo_$lam0_TetrisLogic_collides$0_TetrisLogic_collides", _0: $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides, _1: board, _2: x, _3: $t45126 };
-          return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(cells, $t44854_i5284);
+          const $t45102 = march_int_ovf(cur_y + 1, 0);
+          {
+            const $t44830_i5284 = { $: "$Clo_$lam0_TetrisLogic_collides$0_TetrisLogic_collides", _0: $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides, _1: board, _2: x, _3: $t45102 };
+            return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(cells, $t44830_i5284);
+          }
         }
-      }
-    })();
-    if ($t45127 === true) {
-      return (() => {
+      })();
+      if ($t45103 === true) {
         return cur_y;
-      })();
-    } else if ($t45127 === false) {
-      return (() => {
+      } else if ($t45103 === false) {
         {
-          const $t45128 = (cur_y + 1);
-          return fall_from(board, cells, x, $t45128);
+          const $t45104 = march_int_ovf(cur_y + 1, 0);
+          {
+            $tco_a0 = board;
+            $tco_a1 = cells;
+            $tco_a2 = x;
+            $tco_a3 = $t45104;
+            continue __tco;
+          }
         }
-      })();
-    } else {
-      return (() => {
+      } else {
         return (() => { throw new Error("non-exhaustive pattern match"); })();
-      })();
+      }
     }
+    return undefined;
   }
 }
 const fall_from$clo = { _0: ($_, board, cells, x, cur_y) => fall_from(board, cells, x, cur_y) };
@@ -7073,16 +7071,16 @@ function restart() {
     {
       const board = (() => {
         {
-          const $t44828_i5303 = (() => {
+          const $t44804_i5303 = (() => {
             {
               const go_i13440 = { $: "$Clo_go$0_List_repeat_Int_Int", _0: go$apply$0_List_repeat_Int_Int, _1: 0 };
               {
-                const $t653_i13441 = { $: "Nil" };
-                return go$apply$0_List_repeat_Int_Int(go_i13440, 200, $t653_i13441);
+                const $t630_i13441 = { $: "Nil" };
+                return go$apply$0_List_repeat_Int_Int(go_i13440, 200, $t630_i13441);
               }
             }
           })();
-          return Array$from_list$List_Int($t44828_i5303);
+          return Array$from_list$List_Int($t44804_i5303);
         }
       })();
       {
@@ -7090,30 +7088,30 @@ function restart() {
           {
             const raw_i12265 = (() => {
               {
-                const $t44898_i12264 = (() => {
+                const $t44874_i12264 = (() => {
                   {
-                    const $t44897_i12263 = (() => {
+                    const $t44873_i12263 = (() => {
                       {
-                        const $t44896_i12262 = (() => {
+                        const $t44872_i12262 = (() => {
                           {
-                            const $t44895_i12261 = {  };
+                            const $t44871_i12261 = {  };
                             return march_unix_time();
                           }
                         })();
-                        return ($t44896_i12262 * 1000000.);
+                        return ($t44872_i12262 * 1000000.);
                       }
                     })();
-                    return Math.trunc($t44897_i12263);
+                    return Math.trunc($t44873_i12263);
                   }
                 })();
-                return march_int_mod($t44898_i12264, 2147483646);
+                return march_int_mod($t44874_i12264, 2147483646);
               }
             })();
             {
-              const $t44899_i12266 = (raw_i12265 <= 0);
-              if ($t44899_i12266 === true) {
-                return (raw_i12265 + 2147483646);
-              } else if ($t44899_i12266 === false) {
+              const $t44875_i12266 = (raw_i12265 <= 0);
+              if ($t44875_i12266 === true) {
+                return march_int_ovf(raw_i12265 + 2147483646, 0);
+              } else if ($t44875_i12266 === false) {
                 return raw_i12265;
               } else {
                 return (() => { throw new Error("non-exhaustive pattern match"); })();
@@ -7122,54 +7120,54 @@ function restart() {
           }
         })();
         {
-          const $t45132 = next_piece(rng0);
-          const $f45178 = $t45132._0;
-          const $f45179 = $t45132._1;
+          const $t45108 = next_piece(rng0);
+          const $f45154 = $t45108._0;
+          const $f45155 = $t45108._1;
           {
-            const rng1 = $f45179;
+            const rng1 = $f45155;
             {
-              const first = $f45178;
+              const first = $f45154;
               {
-                const $t45133 = (() => {
+                const $t45109 = (() => {
                   return spawn_piece(first, board, rng1);
                 })();
-                const $f45147 = $t45133._0;
-                const $f45148 = $t45133._1;
-                const $f45149 = $t45133._2;
-                const $f45150 = $t45133._3;
-                const $f45151 = $t45133._4;
-                const $f45152 = $t45133._5;
-                const $f45153 = $t45133._6;
+                const $f45123 = $t45109._0;
+                const $f45124 = $t45109._1;
+                const $f45125 = $t45109._2;
+                const $f45126 = $t45109._3;
+                const $f45127 = $t45109._4;
+                const $f45128 = $t45109._5;
+                const $f45129 = $t45109._6;
                 {
-                  const rng2 = $f45152;
+                  const rng2 = $f45128;
                   {
-                    const next = $f45151;
+                    const next = $f45127;
                     {
-                      const y = $f45150;
+                      const y = $f45126;
                       {
-                        const x = $f45149;
+                        const x = $f45125;
                         {
-                          const rot = $f45148;
+                          const rot = $f45124;
                           {
-                            const piece = $f45147;
+                            const piece = $f45123;
                             (() => {
                               {
-                                const $t44946_i5298 = (() => {
+                                const $t44922_i5298 = (() => {
                                   {
                                     const go_i13435 = { $: "$Clo_go$0_List_range", _0: go$apply$0_List_range, _1: 0 };
                                     {
-                                      const $t658_i13437 = { $: "Nil" };
-                                      return go$apply$0_List_range(go_i13435, 19, $t658_i13437);
+                                      const $t635_i13437 = { $: "Nil" };
+                                      return go$apply$0_List_range(go_i13435, 19, $t635_i13437);
                                     }
                                   }
                                 })();
                                 {
-                                  const $t44958_i5299 = { $: "$Clo_$lam0_render_board$0_render_board", _0: $lam0_render_board$apply$0_render_board, _1: board };
+                                  const $t44934_i5299 = { $: "$Clo_$lam0_render_board$0_render_board", _0: $lam0_render_board$apply$0_render_board, _1: board };
                                   {
-                                    const f_i13431 = $t44958_i5299;
+                                    const f_i13431 = $t44934_i5299;
                                     {
                                       const go_i13432 = { $: "$Clo_go$0_List_each_List_Int_Fn_Int_T_", _0: go$apply$0_List_each_List_Int_Fn_Int_T_, _1: f_i13431 };
-                                      return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i13432, $t44946_i5298);
+                                      return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i13432, $t44922_i5298);
                                     }
                                   }
                                 }
@@ -7181,9 +7179,9 @@ function restart() {
                                 {
                                   const rotated_i5294 = rotate_n(base_cells_i5293, rot);
                                   {
-                                    const $t44980_i5295 = { $: "$Clo_$lam0_render_falling$0_render_falling", _0: $lam0_render_falling$apply$0_render_falling, _1: x, _2: y, _3: piece };
+                                    const $t44956_i5295 = { $: "$Clo_$lam0_render_falling$0_render_falling", _0: $lam0_render_falling$apply$0_render_falling, _1: x, _2: y, _3: piece };
                                     {
-                                      const f_i13428 = $t44980_i5295;
+                                      const f_i13428 = $t44956_i5295;
                                       {
                                         const go_i13429 = { $: "$Clo_go$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_", _0: go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_, _1: f_i13428 };
                                         return go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_(go_i13429, rotated_i5294);
@@ -7197,16 +7195,16 @@ function restart() {
                             set_text_if_found("level", "Level: 0");
                             (() => {
                               {
-                                const $t45135 = (() => {
+                                const $t45111 = (() => {
                                   {
-                                    const $t45134 = piece_to_string(next);
+                                    const $t45110 = piece_to_string(next);
                                     {
-                                      const $rc_2418 = ("Next: " + $t45134);
+                                      const $rc_2418 = ("Next: " + $t45110);
                                       return $rc_2418;
                                     }
                                   }
                                 })();
-                                return set_text_if_found("next", $t45135);
+                                return set_text_if_found("next", $t45111);
                               }
                             })();
                             set_text_if_found("game-over", "");
@@ -7215,70 +7213,70 @@ function restart() {
                             })();
                             (() => {
                               {
-                                const $t45137 = (() => {
+                                const $t45113 = (() => {
                                   {
-                                    const $t45136 = (() => {
+                                    const $t45112 = (() => {
                                       {
-                                        const $t8291_i5286 = { $: "Nil" };
+                                        const $t8268_i5286 = { $: "Nil" };
                                         {
-                                          const $t8293_i5287 = { $: "$Clo_$lam0_Array_to_list$0_Array_to_list_PVec_Int", _0: $lam0_Array_to_list$apply$0_Array_to_list_PVec_Int };
+                                          const $t8270_i5287 = { $: "$Clo_$lam0_Array_to_list$0_Array_to_list_PVec_Int", _0: $lam0_Array_to_list$apply$0_Array_to_list_PVec_Int };
                                           {
-                                            const rev_i5288 = Array$fold_left$PVec_Int$List_Int$Fn_List_Int_Int_List_Int(board, $t8291_i5286, $t8293_i5287);
+                                            const rev_i5288 = Array$fold_left$PVec_Int$List_Int$Fn_List_Int_Int_List_Int(board, $t8268_i5286, $t8270_i5287);
                                             {
                                               const go_i13425 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
                                               {
-                                                const $t7876_i13426 = { $: "Nil" };
-                                                return go$apply$0_Array_lst_rev_List_Int(go_i13425, rev_i5288, $t7876_i13426);
+                                                const $t7853_i13426 = { $: "Nil" };
+                                                return go$apply$0_Array_lst_rev_List_Int(go_i13425, rev_i5288, $t7853_i13426);
                                               }
                                             }
                                           }
                                         }
                                       }
                                     })();
-                                    return int_list_to_string($t45136);
+                                    return int_list_to_string($t45112);
                                   }
                                 })();
-                                return Js$Dom$set_attr(el, "data-board", $t45137);
+                                return Js$Dom$set_attr(el, "data-board", $t45113);
                               }
                             })();
                             (() => {
                               {
-                                const $t45138 = (() => {
+                                const $t45114 = (() => {
                                   {
                                     const $rc_2417 = piece_to_string(piece);
                                     return $rc_2417;
                                   }
                                 })();
-                                return Js$Dom$set_attr(el, "data-piece", $t45138);
+                                return Js$Dom$set_attr(el, "data-piece", $t45114);
                               }
                             })();
                             (() => {
                               {
-                                const $t45139 = String(rot);
-                                return Js$Dom$set_attr(el, "data-rot", $t45139);
+                                const $t45115 = String(rot);
+                                return Js$Dom$set_attr(el, "data-rot", $t45115);
                               }
                             })();
                             (() => {
                               {
-                                const $t45140 = String(x);
-                                return Js$Dom$set_attr(el, "data-x", $t45140);
+                                const $t45116 = String(x);
+                                return Js$Dom$set_attr(el, "data-x", $t45116);
                               }
                             })();
                             (() => {
                               {
-                                const $t45141 = String(y);
-                                return Js$Dom$set_attr(el, "data-y", $t45141);
+                                const $t45117 = String(y);
+                                return Js$Dom$set_attr(el, "data-y", $t45117);
                               }
                             })();
                             (() => {
                               {
-                                const $t45142 = (() => {
+                                const $t45118 = (() => {
                                   {
                                     const $rc_2416 = piece_to_string(next);
                                     return $rc_2416;
                                   }
                                 })();
-                                return Js$Dom$set_attr(el, "data-next", $t45142);
+                                return Js$Dom$set_attr(el, "data-next", $t45118);
                               }
                             })();
                             (() => {
@@ -7289,28 +7287,28 @@ function restart() {
                             })();
                             (() => {
                               {
-                                const $t45143 = String(rng2);
-                                return Js$Dom$set_attr(el, "data-rng", $t45143);
+                                const $t45119 = String(rng2);
+                                return Js$Dom$set_attr(el, "data-rng", $t45119);
                               }
                             })();
                             (() => {
                               return Js$Dom$set_attr(el, "data-over", "false");
                             })();
                             {
-                              const $t45146 = (() => {
+                              const $t45122 = (() => {
                                 {
-                                  const $t45145 = (() => {
+                                  const $t45121 = (() => {
                                     {
-                                      const $t45144 = (() => {
+                                      const $t45120 = (() => {
                                         return get_int_attr(el, "data-seq", 0);
                                       })();
-                                      return ($t45144 + 1);
+                                      return march_int_ovf($t45120 + 1, 0);
                                     }
                                   })();
-                                  return String($t45145);
+                                  return String($t45121);
                                 }
                               })();
-                              return Js$Dom$set_attr(el, "data-seq", $t45146);
+                              return Js$Dom$set_attr(el, "data-seq", $t45122);
                             }
                           }
                         }
@@ -7318,11 +7316,9 @@ function restart() {
                     }
                   }
                 }
-                return (() => { throw new Error("non-exhaustive pattern match"); })();
               }
             }
           }
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
         }
       }
     }
@@ -7332,16 +7328,16 @@ const restart$clo = { _0: ($_) => restart() };
 
 function restore_from_request() {
   {
-    const $t45184 = Js$Dom$find("restore-request");
-    switch ($t45184.$) {
+    const $t45160 = Js$Dom$find("restore-request");
+    switch ($t45160.$) {
       case "None": {
         return {  };
         break;
       }
       case "Some": {
-        const $f45200 = $t45184._0;
+        const $f45176 = $t45160._0;
         {
-          const req = $f45200;
+          const req = $f45176;
           {
             const el = state_el();
             {
@@ -7383,11 +7379,11 @@ function restore_from_request() {
                               {
                                 const over = (() => {
                                   {
-                                    const $t45185 = (() => {
+                                    const $t45161 = (() => {
                                       return get_str_attr(req, "data-over", "false");
                                     })();
                                     {
-                                      const $rc_2424 = ($t45185 === "true");
+                                      const $rc_2424 = ($t45161 === "true");
                                       return $rc_2424;
                                     }
                                   }
@@ -7395,9 +7391,9 @@ function restore_from_request() {
                                 {
                                   const paused = (() => {
                                     {
-                                      const $t45186 = get_str_attr(req, "data-paused", "false");
+                                      const $t45162 = get_str_attr(req, "data-paused", "false");
                                       {
-                                        const $rc_2423 = ($t45186 === "true");
+                                        const $rc_2423 = ($t45162 === "true");
                                         return $rc_2423;
                                       }
                                     }
@@ -7405,16 +7401,16 @@ function restore_from_request() {
                                   {
                                     const board = (() => {
                                       {
-                                        const $t45187 = (() => {
+                                        const $t45163 = (() => {
                                           {
-                                            const $t44890_i5318 = march_string_split(board_s, ",");
+                                            const $t44866_i5318 = march_string_split(board_s, ",");
                                             {
-                                              const $t44893_i5319 = { $: "$Clo_$lam0_string_to_int_list$0_string_to_int_list", _0: $lam0_string_to_int_list$apply$0_string_to_int_list };
-                                              return List$map$List_String$Fn_String_Int($t44890_i5318, $t44893_i5319);
+                                              const $t44869_i5319 = { $: "$Clo_$lam0_string_to_int_list$0_string_to_int_list", _0: $lam0_string_to_int_list$apply$0_string_to_int_list };
+                                              return List$map$List_String$Fn_String_Int($t44866_i5318, $t44869_i5319);
                                             }
                                           }
                                         })();
-                                        return Array$from_list$List_Int($t45187);
+                                        return Array$from_list$List_Int($t45163);
                                       }
                                     })();
                                     {
@@ -7453,22 +7449,22 @@ function restore_from_request() {
                                         }
                                         (() => {
                                           {
-                                            const $t44946_i5313 = (() => {
+                                            const $t44922_i5313 = (() => {
                                               {
                                                 const go_i13450 = { $: "$Clo_go$0_List_range", _0: go$apply$0_List_range, _1: 0 };
                                                 {
-                                                  const $t658_i13452 = { $: "Nil" };
-                                                  return go$apply$0_List_range(go_i13450, 19, $t658_i13452);
+                                                  const $t635_i13452 = { $: "Nil" };
+                                                  return go$apply$0_List_range(go_i13450, 19, $t635_i13452);
                                                 }
                                               }
                                             })();
                                             {
-                                              const $t44958_i5314 = { $: "$Clo_$lam0_render_board$0_render_board", _0: $lam0_render_board$apply$0_render_board, _1: board };
+                                              const $t44934_i5314 = { $: "$Clo_$lam0_render_board$0_render_board", _0: $lam0_render_board$apply$0_render_board, _1: board };
                                               {
-                                                const f_i13446 = $t44958_i5314;
+                                                const f_i13446 = $t44934_i5314;
                                                 {
                                                   const go_i13447 = { $: "$Clo_go$0_List_each_List_Int_Fn_Int_T_", _0: go$apply$0_List_each_List_Int_Fn_Int_T_, _1: f_i13446 };
-                                                  return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i13447, $t44946_i5313);
+                                                  return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i13447, $t44922_i5313);
                                                 }
                                               }
                                             }
@@ -7476,84 +7472,78 @@ function restore_from_request() {
                                         })();
                                         (() => {
                                           if (over === false) {
-                                            return (() => {
+                                            {
+                                              const base_cells_i5308 = TetrisLogic$piece_cells(piece);
                                               {
-                                                const base_cells_i5308 = TetrisLogic$piece_cells(piece);
+                                                const rotated_i5309 = rotate_n(base_cells_i5308, rot);
                                                 {
-                                                  const rotated_i5309 = rotate_n(base_cells_i5308, rot);
+                                                  const $t44956_i5310 = { $: "$Clo_$lam0_render_falling$0_render_falling", _0: $lam0_render_falling$apply$0_render_falling, _1: x, _2: y, _3: piece };
                                                   {
-                                                    const $t44980_i5310 = { $: "$Clo_$lam0_render_falling$0_render_falling", _0: $lam0_render_falling$apply$0_render_falling, _1: x, _2: y, _3: piece };
+                                                    const f_i13443 = $t44956_i5310;
                                                     {
-                                                      const f_i13443 = $t44980_i5310;
-                                                      {
-                                                        const go_i13444 = { $: "$Clo_go$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_", _0: go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_, _1: f_i13443 };
-                                                        return go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_(go_i13444, rotated_i5309);
-                                                      }
+                                                      const go_i13444 = { $: "$Clo_go$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_", _0: go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_, _1: f_i13443 };
+                                                      return go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_(go_i13444, rotated_i5309);
                                                     }
                                                   }
                                                 }
                                               }
-                                            })();
+                                            }
                                           } else if (over === true) {
-                                            return (() => {
-                                              return {  };
-                                            })();
+                                            return {  };
                                           } else {
-                                            return (() => {
-                                              return (() => { throw new Error("non-exhaustive pattern match"); })();
-                                            })();
+                                            return (() => { throw new Error("non-exhaustive pattern match"); })();
                                           }
                                         })();
                                         (() => {
                                           {
-                                            const $t45189 = (() => {
+                                            const $t45165 = (() => {
                                               {
-                                                const $t45188 = String(score);
+                                                const $t45164 = String(score);
                                                 {
-                                                  const $rc_2422 = ("Score: " + $t45188);
+                                                  const $rc_2422 = ("Score: " + $t45164);
                                                   return $rc_2422;
                                                 }
                                               }
                                             })();
-                                            return set_text_if_found("score", $t45189);
+                                            return set_text_if_found("score", $t45165);
                                           }
                                         })();
                                         (() => {
                                           {
-                                            const $t45192 = (() => {
+                                            const $t45168 = (() => {
                                               {
-                                                const $t45191 = (() => {
+                                                const $t45167 = (() => {
                                                   {
-                                                    const $t45190 = TetrisLogic$level_for_lines(lines);
-                                                    return String($t45190);
+                                                    const $t45166 = TetrisLogic$level_for_lines(lines);
+                                                    return String($t45166);
                                                   }
                                                 })();
                                                 {
-                                                  const $rc_2421 = ("Level: " + $t45191);
+                                                  const $rc_2421 = ("Level: " + $t45167);
                                                   return $rc_2421;
                                                 }
                                               }
                                             })();
-                                            return set_text_if_found("level", $t45192);
+                                            return set_text_if_found("level", $t45168);
                                           }
                                         })();
                                         (() => {
                                           {
-                                            const $t45194 = (() => {
+                                            const $t45170 = (() => {
                                               {
-                                                const $t45193 = (() => {
+                                                const $t45169 = (() => {
                                                   {
                                                     const $rc_2420 = piece_to_string(next);
                                                     return $rc_2420;
                                                   }
                                                 })();
                                                 {
-                                                  const $rc_2419 = ("Next: " + $t45193);
+                                                  const $rc_2419 = ("Next: " + $t45169);
                                                   return $rc_2419;
                                                 }
                                               }
                                             })();
-                                            return set_text_if_found("next", $t45194);
+                                            return set_text_if_found("next", $t45170);
                                           }
                                         })();
                                         {
@@ -7577,20 +7567,20 @@ function restore_from_request() {
                                           })();
                                           (() => {
                                             {
-                                              const $t45195 = String(rot);
-                                              return Js$Dom$set_attr(el, "data-rot", $t45195);
+                                              const $t45171 = String(rot);
+                                              return Js$Dom$set_attr(el, "data-rot", $t45171);
                                             }
                                           })();
                                           (() => {
                                             {
-                                              const $t45196 = String(x);
-                                              return Js$Dom$set_attr(el, "data-x", $t45196);
+                                              const $t45172 = String(x);
+                                              return Js$Dom$set_attr(el, "data-x", $t45172);
                                             }
                                           })();
                                           (() => {
                                             {
-                                              const $t45197 = String(y);
-                                              return Js$Dom$set_attr(el, "data-y", $t45197);
+                                              const $t45173 = String(y);
+                                              return Js$Dom$set_attr(el, "data-y", $t45173);
                                             }
                                           })();
                                           (() => {
@@ -7598,14 +7588,14 @@ function restore_from_request() {
                                           })();
                                           (() => {
                                             {
-                                              const $t45198 = String(score);
-                                              return Js$Dom$set_attr(el, "data-score", $t45198);
+                                              const $t45174 = String(score);
+                                              return Js$Dom$set_attr(el, "data-score", $t45174);
                                             }
                                           })();
                                           (() => {
                                             {
-                                              const $t45199 = String(lines);
-                                              return Js$Dom$set_attr(el, "data-lines", $t45199);
+                                              const $t45175 = String(lines);
+                                              return Js$Dom$set_attr(el, "data-lines", $t45175);
                                             }
                                           })();
                                           (() => {
@@ -7662,121 +7652,87 @@ function handle_key(ev) {
     })();
     (() => {
       {
-        let $t45212;
+        let $t45188;
         if (key === "ArrowLeft") {
-          $t45212 = true;
+          $t45188 = true;
         } else if (key === "ArrowRight") {
-          $t45212 = true;
+          $t45188 = true;
         } else if (key === "ArrowDown") {
-          $t45212 = true;
+          $t45188 = true;
         } else if (key === "ArrowUp") {
-          $t45212 = true;
+          $t45188 = true;
         } else if (key === " ") {
-          $t45212 = true;
+          $t45188 = true;
         } else {
-          $t45212 = false;
+          $t45188 = false;
         }
-        if ($t45212 === true) {
-          return (() => {
+        if ($t45188 === true) {
+          {
+            const ev_i12267 = ev;
             {
-              const ev_i12267 = ev;
-              {
-                const $rc_2356_i12268 = dom_prevent_default$clo._0(dom_prevent_default$clo, ev);
-                return $rc_2356_i12268;
-              }
+              const $rc_2356_i12268 = dom_prevent_default$clo._0(dom_prevent_default$clo, ev);
+              return $rc_2356_i12268;
             }
-          })();
-        } else if ($t45212 === false) {
-          return (() => {
-            return {  };
-          })();
+          }
+        } else if ($t45188 === false) {
+          return {  };
         } else {
-          return (() => {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
-          })();
+          return (() => { throw new Error("non-exhaustive pattern match"); })();
         }
       }
     })();
     if (key === "r") {
-      return (() => {
-        return restart();
-      })();
+      return restart();
     } else if (key === "R") {
-      return (() => {
-        return restart();
-      })();
+      return restart();
     } else if (key === "p") {
-      return (() => {
-        return toggle_pause();
-      })();
+      return toggle_pause();
     } else if (key === "P") {
-      return (() => {
-        return toggle_pause();
-      })();
+      return toggle_pause();
     } else {
-      return (() => {
+      {
+        const k = key;
         {
-          const k = key;
-          {
-            const $t45213 = is_paused();
-            if ($t45213 === true) {
-              return (() => {
-                return {  };
-              })();
-            } else if ($t45213 === false) {
-              return (() => {
-                if (k === "ArrowLeft") {
-                  return (() => {
-                    {
-                      const $t45214 = (-1);
-                      {
-                        const $t45120_i5330 = { $: "$Clo_$lam0_try_move$0_try_move", _0: $lam0_try_move$apply$0_try_move, _1: $t45214, _2: 0 };
-                        return with_state($t45120_i5330);
-                      }
-                    }
-                  })();
-                } else if (k === "ArrowRight") {
-                  return (() => {
-                    {
-                      const $t45120_i5333 = { $: "$Clo_$lam0_try_move$0_try_move", _0: $lam0_try_move$apply$0_try_move, _1: 1, _2: 0 };
-                      return with_state($t45120_i5333);
-                    }
-                  })();
-                } else if (k === "ArrowDown") {
-                  return (() => {
-                    {
-                      const $t45120_i5336 = { $: "$Clo_$lam0_try_move$0_try_move", _0: $lam0_try_move$apply$0_try_move, _1: 0, _2: 1 };
-                      return with_state($t45120_i5336);
-                    }
-                  })();
-                } else if (k === "ArrowUp") {
-                  return (() => {
-                    {
-                      const $t45125_i5337 = { $: "$Clo_$lam0_try_rotate$0_try_rotate", _0: $lam0_try_rotate$apply$0_try_rotate };
-                      return with_state($t45125_i5337);
-                    }
-                  })();
-                } else if (k === " ") {
-                  return (() => {
-                    {
-                      const $t45131_i5338 = { $: "$Clo_$lam0_hard_drop$0_hard_drop", _0: $lam0_hard_drop$apply$0_hard_drop };
-                      return with_state($t45131_i5338);
-                    }
-                  })();
-                } else {
-                  return (() => {
-                    return {  };
-                  })();
+          const $t45189 = is_paused();
+          if ($t45189 === true) {
+            return {  };
+          } else if ($t45189 === false) {
+            if (k === "ArrowLeft") {
+              {
+                const $t45190 = march_int_ovf(-(1), 3);
+                {
+                  const $t45096_i5330 = { $: "$Clo_$lam0_try_move$0_try_move", _0: $lam0_try_move$apply$0_try_move, _1: $t45190, _2: 0 };
+                  return with_state($t45096_i5330);
                 }
-              })();
+              }
+            } else if (k === "ArrowRight") {
+              {
+                const $t45096_i5333 = { $: "$Clo_$lam0_try_move$0_try_move", _0: $lam0_try_move$apply$0_try_move, _1: 1, _2: 0 };
+                return with_state($t45096_i5333);
+              }
+            } else if (k === "ArrowDown") {
+              {
+                const $t45096_i5336 = { $: "$Clo_$lam0_try_move$0_try_move", _0: $lam0_try_move$apply$0_try_move, _1: 0, _2: 1 };
+                return with_state($t45096_i5336);
+              }
+            } else if (k === "ArrowUp") {
+              {
+                const $t45101_i5337 = { $: "$Clo_$lam0_try_rotate$0_try_rotate", _0: $lam0_try_rotate$apply$0_try_rotate };
+                return with_state($t45101_i5337);
+              }
+            } else if (k === " ") {
+              {
+                const $t45107_i5338 = { $: "$Clo_$lam0_hard_drop$0_hard_drop", _0: $lam0_hard_drop$apply$0_hard_drop };
+                return with_state($t45107_i5338);
+              }
             } else {
-              return (() => {
-                return (() => { throw new Error("non-exhaustive pattern match"); })();
-              })();
+              return {  };
             }
+          } else {
+            return (() => { throw new Error("non-exhaustive pattern match"); })();
           }
         }
-      })();
+      }
     }
   }
 }
@@ -7784,34 +7740,34 @@ const handle_key$clo = { _0: ($_, ev) => handle_key(ev) };
 
 function main(_cap_clock, _cap_foreign) {
   {
-    const $t45233 = Js$Dom$find("board");
-    switch ($t45233.$) {
+    const $t45209 = Js$Dom$find("board");
+    switch ($t45209.$) {
       case "None": {
         return {  };
         break;
       }
       case "Some": {
-        const $f45241 = $t45233._0;
+        const $f45217 = $t45209._0;
         {
-          const board_el = $f45241;
+          const board_el = $f45217;
           (() => {
             {
-              const $t45202_i5347 = (() => {
+              const $t45178_i5347 = (() => {
                 {
                   const go_i13464 = { $: "$Clo_go$0_List_range", _0: go$apply$0_List_range, _1: 0 };
                   {
-                    const $t658_i13466 = { $: "Nil" };
-                    return go$apply$0_List_range(go_i13464, 19, $t658_i13466);
+                    const $t635_i13466 = { $: "Nil" };
+                    return go$apply$0_List_range(go_i13464, 19, $t635_i13466);
                   }
                 }
               })();
               {
-                const $t45211_i5348 = { $: "$Clo_$lam0_build_board_dom$0_build_board_dom", _0: $lam0_build_board_dom$apply$0_build_board_dom, _1: board_el };
+                const $t45187_i5348 = { $: "$Clo_$lam0_build_board_dom$0_build_board_dom", _0: $lam0_build_board_dom$apply$0_build_board_dom, _1: board_el };
                 {
-                  const f_i13460 = $t45211_i5348;
+                  const f_i13460 = $t45187_i5348;
                   {
                     const go_i13461 = { $: "$Clo_go$0_List_each_List_Int_Fn_Int_T_", _0: go$apply$0_List_each_List_Int_Fn_Int_T_, _1: f_i13460 };
-                    return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i13461, $t45202_i5347);
+                    return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i13461, $t45178_i5347);
                   }
                 }
               }
@@ -7820,10 +7776,10 @@ function main(_cap_clock, _cap_foreign) {
           restart();
           (() => {
             {
-              const $t45234 = dom_body();
+              const $t45210 = dom_body();
               {
-                const $t45236 = { $: "$Clo_$lam0_main$0_main", _0: $lam0_main$apply$0_main };
-                return Js$Dom$listen($t45234, "keydown", $t45236);
+                const $t45212 = { $: "$Clo_$lam0_main$0_main", _0: $lam0_main$apply$0_main };
+                return Js$Dom$listen($t45210, "keydown", $t45212);
               }
             }
           })();
@@ -7831,28 +7787,28 @@ function main(_cap_clock, _cap_foreign) {
             {
               const level_i5342 = (() => {
                 {
-                  const $t45109_i5341 = (() => {
+                  const $t45085_i5341 = (() => {
                     {
-                      const $t45108_i5340 = state_el();
-                      return get_int_attr($t45108_i5340, "data-lines", 0);
+                      const $t45084_i5340 = state_el();
+                      return get_int_attr($t45084_i5340, "data-lines", 0);
                     }
                   })();
-                  return TetrisLogic$level_for_lines($t45109_i5341);
+                  return TetrisLogic$level_for_lines($t45085_i5341);
                 }
               })();
               {
-                const $t45110_i5343 = (() => {
+                const $t45086_i5343 = (() => {
                   {
-                    const $t44822_i13457 = (() => {
+                    const $t44798_i13457 = (() => {
                       {
-                        const $t44821_i13456 = (level_i5342 * 40);
-                        return (500 - $t44821_i13456);
+                        const $t44797_i13456 = march_int_ovf(level_i5342 * 40, 2);
+                        return march_int_ovf(500 - $t44797_i13456, 1);
                       }
                     })();
                     {
-                      const $t2205_i5200_i13458 = ($t44822_i13457 > 100);
-                      if ($t2205_i5200_i13458 === true) {
-                        return $t44822_i13457;
+                      const $t2182_i5200_i13458 = ($t44798_i13457 > 100);
+                      if ($t2182_i5200_i13458 === true) {
+                        return $t44798_i13457;
                       } else {
                         return 100;
                       }
@@ -7860,26 +7816,26 @@ function main(_cap_clock, _cap_foreign) {
                   }
                 })();
                 {
-                  const $t45112_i5344 = { $: "$Clo_$lam0_schedule_tick$0_schedule_tick", _0: $lam0_schedule_tick$apply$0_schedule_tick };
-                  return Js$Dom$set_timeout($t45110_i5343, $t45112_i5344);
+                  const $t45088_i5344 = { $: "$Clo_$lam0_schedule_tick$0_schedule_tick", _0: $lam0_schedule_tick$apply$0_schedule_tick };
+                  return Js$Dom$set_timeout($t45086_i5343, $t45088_i5344);
                 }
               }
             }
           })();
           {
-            const $t45237 = Js$Dom$find("restore-trigger");
-            switch ($t45237.$) {
+            const $t45213 = Js$Dom$find("restore-trigger");
+            switch ($t45213.$) {
               case "None": {
                 return {  };
                 break;
               }
               case "Some": {
-                const $f45240 = $t45237._0;
+                const $f45216 = $t45213._0;
                 {
-                  const trigger = $f45240;
+                  const trigger = $f45216;
                   {
-                    const $t45239 = { $: "$Clo_$lam1_main$1_main", _0: $lam1_main$apply$1_main };
-                    return Js$Dom$listen(trigger, "click", $t45239);
+                    const $t45215 = { $: "$Clo_$lam1_main$1_main", _0: $lam1_main$apply$1_main };
+                    return Js$Dom$listen(trigger, "click", $t45215);
                   }
                 }
                 break;
@@ -7905,80 +7861,94 @@ function panic(msg) {
 }
 const panic$clo = { _0: ($_, msg) => panic(msg) };
 
-function List$all$List_Int$Fn_Int_Bool(xs, pred) {
-  switch (xs.$) {
-    case "Nil": {
-      return true;
-      break;
-    }
-    case "Cons": {
-      const $f893 = xs._0;
-      const $f894 = xs._1;
-      {
-        const t = $f894;
+function List$all$List_Int$Fn_Int_Bool($tco_a0, $tco_a1) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const pred = $tco_a1;
+    switch (xs.$) {
+      case "Nil": {
+        return true;
+        break;
+      }
+      case "Cons": {
+        const $f870 = xs._0;
+        const $f871 = xs._1;
         {
-          const h = (() => {
-            return $f893;
-          })();
+          const t = $f871;
           {
-            const $t892 = (() => {
-              return pred._0(pred, h);
+            const h = (() => {
+              return $f870;
             })();
-            if ($t892 === true) {
-              return List$all$List_Int$Fn_Int_Bool(t, pred);
-            } else {
-              return (() => {
-                return false;
+            {
+              const $t869 = (() => {
+                return pred._0(pred, h);
               })();
+              if ($t869 === true) {
+                {
+                  $tco_a0 = t;
+                  $tco_a1 = pred;
+                  continue __tco;
+                }
+              } else {
+                return false;
+              }
             }
           }
         }
+        break;
       }
-      break;
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
+    return undefined;
   }
 }
 const List$all$List_Int$Fn_Int_Bool$clo = { _0: ($_, xs, pred) => List$all$List_Int$Fn_Int_Bool(xs, pred) };
 
-function List$filter$List_Int$Fn_Int_Bool(xs, pred) {
-  switch (xs.$) {
-    case "Nil": {
-      return { $: "Nil" };
-      break;
-    }
-    case "Cons": {
-      const $f767 = xs._0;
-      const $f768 = xs._1;
-      {
-        const t = $f768;
+function List$filter$List_Int$Fn_Int_Bool($tco_a0, $tco_a1) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const pred = $tco_a1;
+    switch (xs.$) {
+      case "Nil": {
+        return { $: "Nil" };
+        break;
+      }
+      case "Cons": {
+        const $f744 = xs._0;
+        const $f745 = xs._1;
         {
-          const h = $f767;
+          const t = $f745;
           {
-            const $t765 = (() => {
-              return pred._0(pred, h);
-            })();
-            if ($t765 === true) {
-              return (() => {
+            const h = $f744;
+            {
+              const $t742 = (() => {
+                return pred._0(pred, h);
+              })();
+              if ($t742 === true) {
                 {
                   const $trmc24 = { $: "Cons", _0: h, _1: null };
                   List$filter$dps$List_Int$Fn_Int_Bool$List_Int(t, pred, $trmc24);
                   return $trmc24;
                 }
-              })();
-            } else {
-              return List$filter$List_Int$Fn_Int_Bool(t, pred);
+              } else {
+                {
+                  $tco_a0 = t;
+                  $tco_a1 = pred;
+                  continue __tco;
+                }
+              }
             }
           }
         }
+        break;
       }
-      break;
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
+    return undefined;
   }
 }
 const List$filter$List_Int$Fn_Int_Bool$clo = { _0: ($_, xs, pred) => List$filter$List_Int$Fn_Int_Bool(xs, pred) };
@@ -7986,10 +7956,10 @@ const List$filter$List_Int$Fn_Int_Bool$clo = { _0: ($_, xs, pred) => List$filter
 function Option$unwrap_or$Option_Int$Int(opt, _default) {
   switch (opt.$) {
     case "Some": {
-      const $f596 = opt._0;
+      const $f573 = opt._0;
       {
         const x = (() => {
-          return $f596;
+          return $f573;
         })();
         return x;
       }
@@ -8015,151 +7985,150 @@ function Array$from_list$List_Int(xs) {
       }
     })();
     {
-      const $t8398 = (n === 0);
-      if ($t8398 === true) {
-        return (() => {
+      const $t8375 = (n === 0);
+      if ($t8375 === true) {
+        {
+          const $t8059_i5654 = { $: "TrieEmpty" };
           {
-            const $t8082_i5654 = { $: "TrieEmpty" };
-            {
-              const $t8083_i5655 = { $: "Nil" };
-              return { $: "PVec", _0: 0, _1: 0, _2: $t8082_i5654, _3: $t8083_i5655 };
-            }
+            const $t8060_i5655 = { $: "Nil" };
+            return { $: "PVec", _0: 0, _1: 0, _2: $t8059_i5654, _3: $t8060_i5655 };
           }
-        })();
+        }
       } else {
-        return (() => {
+        {
+          const tail_len = (() => {
+            {
+              const $t8378 = (() => {
+                {
+                  const $t8377 = (() => {
+                    {
+                      const $t8376 = march_int_ovf(n - 1, 1);
+                      return (($t8376 - $t8376 % 32) / 32);
+                    }
+                  })();
+                  return march_int_ovf(32 * $t8377, 2);
+                }
+              })();
+              return march_int_ovf(n - $t8378, 1);
+            }
+          })();
           {
-            const tail_len = (() => {
+            const $p8400 = (() => {
               {
-                const $t8401 = (() => {
+                const $t8379 = march_int_ovf(n - tail_len, 1);
+                {
+                  const go_i5652 = { $: "$Clo_go$0_Array_lst_split_List_Int_Int", _0: go$apply$0_Array_lst_split_List_Int_Int };
                   {
-                    const $t8400 = (() => {
-                      {
-                        const $t8399 = (n - 1);
-                        return (($t8399 - $t8399 % 32) / 32);
-                      }
-                    })();
-                    return (32 * $t8400);
+                    const $t8287_i5653 = { $: "Nil" };
+                    return go$apply$0_Array_lst_split_List_Int_Int(go_i5652, xs, $t8379, $t8287_i5653);
                   }
-                })();
-                return (n - $t8401);
+                }
               }
             })();
             {
-              const $p8423 = (() => {
-                {
-                  const $t8402 = (n - tail_len);
-                  {
-                    const go_i5652 = { $: "$Clo_go$0_Array_lst_split_List_Int_Int", _0: go$apply$0_Array_lst_split_List_Int_Int };
-                    {
-                      const $t8310_i5653 = { $: "Nil" };
-                      return go$apply$0_Array_lst_split_List_Int_Int(go_i5652, xs, $t8402, $t8310_i5653);
-                    }
-                  }
-                }
-              })();
+              const front = $p8400._0;
               {
-                const front = $p8423._0;
+                const tail = $p8400._1;
                 {
-                  const tail = $p8423._1;
-                  {
-                    const $t8403 = (n === tail_len);
-                    if ($t8403 === true) {
-                      return (() => {
-                        {
-                          const $t8404 = { $: "TrieEmpty" };
+                  const $t8380 = (n === tail_len);
+                  if ($t8380 === true) {
+                    {
+                      const $t8381 = { $: "TrieEmpty" };
+                      {
+                        const $rc_2532 = { $: "PVec", _0: n, _1: 0, _2: $t8381, _3: tail };
+                        return $rc_2532;
+                      }
+                    }
+                  } else {
+                    {
+                      const up = { $: "$Clo_up$0_Array_from_list_List_Int", _0: up$apply$0_Array_from_list_List_Int };
+                      {
+                        const $p8399 = (() => {
                           {
-                            const $rc_2532 = { $: "PVec", _0: n, _1: 0, _2: $t8404, _3: tail };
-                            return $rc_2532;
-                          }
-                        }
-                      })();
-                    } else {
-                      return (() => {
-                        {
-                          const up = { $: "$Clo_up$0_Array_from_list_List_Int", _0: up$apply$0_Array_from_list_List_Int };
-                          {
-                            const $p8422 = (() => {
-                              {
-                                const $t8420 = { $: "$Clo_$lam0_Array_from_list$2_Array_from_list_List_Int", _0: $lam0_Array_from_list$apply$2_Array_from_list_List_Int };
+                            const $t8397 = { $: "$Clo_$lam0_Array_from_list$2_Array_from_list_List_Int", _0: $lam0_Array_from_list$apply$2_Array_from_list_List_Int };
+                            {
+                              const $t8398 = (() => {
                                 {
-                                  const $t8421 = (() => {
+                                  const wrap_i5646 = $t8397;
+                                  {
+                                    const chunk_i5647 = { $: "$Clo_chunk$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int", _0: chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int, _1: wrap_i5646 };
                                     {
-                                      const wrap_i5646 = $t8420;
+                                      const $t8307_i5648 = { $: "Nil" };
                                       {
-                                        const chunk_i5647 = { $: "$Clo_chunk$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int", _0: chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int, _1: wrap_i5646 };
-                                        {
-                                          const $t8330_i5648 = { $: "Nil" };
-                                          {
-                                            const $t8331_i5649 = { $: "Nil" };
-                                            return chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int(chunk_i5647, front, 0, $t8330_i5648, $t8331_i5649);
-                                          }
-                                        }
+                                        const $t8308_i5649 = { $: "Nil" };
+                                        return chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int(chunk_i5647, front, 0, $t8307_i5648, $t8308_i5649);
                                       }
                                     }
-                                  })();
-                                  return up$apply$0_Array_from_list_List_Int(up, $t8421, 0);
+                                  }
                                 }
-                              }
-                            })();
+                              })();
+                              return up$apply$0_Array_from_list_List_Int(up, $t8398, 0);
+                            }
+                          }
+                        })();
+                        {
+                          const root = $p8399._0;
+                          {
+                            const shift = $p8399._1;
                             {
-                              const root = $p8422._0;
-                              {
-                                const shift = $p8422._1;
-                                {
-                                  const $rc_2528 = { $: "PVec", _0: n, _1: shift, _2: root, _3: tail };
-                                  return $rc_2528;
-                                }
-                              }
+                              const $rc_2528 = { $: "PVec", _0: n, _1: shift, _2: root, _3: tail };
+                              return $rc_2528;
                             }
                           }
                         }
-                      })();
+                      }
                     }
                   }
                 }
               }
             }
           }
-        })();
+        }
       }
     }
   }
 }
 const Array$from_list$List_Int$clo = { _0: ($_, xs) => Array$from_list$List_Int(xs) };
 
-function List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(xs, pred) {
-  switch (xs.$) {
-    case "Nil": {
-      return false;
-      break;
-    }
-    case "Cons": {
-      const $f886 = xs._0;
-      const $f887 = xs._1;
-      {
-        const t = $f887;
+function List$any$List_T_Int_Int$Fn_T_Int_Int_Bool($tco_a0, $tco_a1) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const pred = $tco_a1;
+    switch (xs.$) {
+      case "Nil": {
+        return false;
+        break;
+      }
+      case "Cons": {
+        const $f863 = xs._0;
+        const $f864 = xs._1;
         {
-          const h = $f886;
+          const t = $f864;
           {
-            const $t885 = (() => {
-              return pred._0(pred, h);
-            })();
-            if ($t885 === true) {
-              return (() => {
-                return true;
+            const h = $f863;
+            {
+              const $t862 = (() => {
+                return pred._0(pred, h);
               })();
-            } else {
-              return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(t, pred);
+              if ($t862 === true) {
+                return true;
+              } else {
+                {
+                  $tco_a0 = t;
+                  $tco_a1 = pred;
+                  continue __tco;
+                }
+              }
             }
           }
         }
+        break;
       }
-      break;
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
+    return undefined;
   }
 }
 const List$any$List_T_Int_Int$Fn_T_Int_Int_Bool$clo = { _0: ($_, xs, pred) => List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(xs, pred) };
@@ -8167,65 +8136,57 @@ const List$any$List_T_Int_Int$Fn_T_Int_Int_Bool$clo = { _0: ($_, xs, pred) => Li
 function Array$get$PVec_Int$Int(v, idx) {
   switch (v.$) {
     case "PVec": {
-      const $f8137 = v._0;
-      const $f8138 = v._1;
-      const $f8139 = v._2;
-      const $f8140 = v._3;
+      const $f8114 = v._0;
+      const $f8115 = v._1;
+      const $f8116 = v._2;
+      const $f8117 = v._3;
       {
-        const tail = $f8140;
+        const tail = $f8117;
         {
-          const root = $f8139;
+          const root = $f8116;
           {
-            const shift = $f8138;
+            const shift = $f8115;
             {
-              const n = $f8137;
+              const n = $f8114;
               {
-                const $t8134 = (() => {
+                const $t8111 = (() => {
                   {
-                    const $t8132 = (idx < 0);
+                    const $t8109 = (idx < 0);
                     {
-                      const $t8133 = (idx >= n);
-                      return ($t8132 || $t8133);
+                      const $t8110 = (idx >= n);
+                      return ($t8109 || $t8110);
                     }
                   }
                 })();
-                if ($t8134 === true) {
-                  return (() => {
-                    undefined;
-                    return (() => { throw new Error("Array.get: index out of range"); })();
-                  })();
+                if ($t8111 === true) {
+                  undefined;
+                  return (() => { throw new Error("Array.get: index out of range"); })();
                 } else {
-                  return (() => {
-                    {
-                      const tail_len = (() => {
-                        {
-                          const go_i5659 = { $: "$Clo_go$0_Array_lst_len_List_Int", _0: go$apply$0_Array_lst_len_List_Int };
-                          return go$apply$0_Array_lst_len_List_Int(go_i5659, tail, 0);
-                        }
-                      })();
+                  {
+                    const tail_len = (() => {
                       {
-                        const tail_offset = (n - tail_len);
-                        {
-                          const $t8135 = (idx >= tail_offset);
-                          if ($t8135 === true) {
-                            return (() => {
-                              {
-                                const $t8136 = (idx - tail_offset);
-                                {
-                                  const $rc_2533 = Array$lst_nth$List_Int$Int(tail, $t8136);
-                                  return $rc_2533;
-                                }
-                              }
-                            })();
-                          } else {
-                            return (() => {
-                              return Array$trie_get$TrieNode_Int$Int$Int(root, idx, shift);
-                            })();
+                        const go_i5659 = { $: "$Clo_go$0_Array_lst_len_List_Int", _0: go$apply$0_Array_lst_len_List_Int };
+                        return go$apply$0_Array_lst_len_List_Int(go_i5659, tail, 0);
+                      }
+                    })();
+                    {
+                      const tail_offset = march_int_ovf(n - tail_len, 1);
+                      {
+                        const $t8112 = (idx >= tail_offset);
+                        if ($t8112 === true) {
+                          {
+                            const $t8113 = march_int_ovf(idx - tail_offset, 1);
+                            {
+                              const $rc_2533 = Array$lst_nth$List_Int$Int(tail, $t8113);
+                              return $rc_2533;
+                            }
                           }
+                        } else {
+                          return Array$trie_get$TrieNode_Int$Int$Int(root, idx, shift);
                         }
                       }
                     }
-                  })();
+                  }
                 }
               }
             }
@@ -8241,32 +8202,43 @@ function Array$get$PVec_Int$Int(v, idx) {
 }
 const Array$get$PVec_Int$Int$clo = { _0: ($_, v, idx) => Array$get$PVec_Int$Int(v, idx) };
 
-function List$fold_left$List_T_Int_Int$PVec_Int$Fn_PVec_Int_T_Int_Int_PVec_Int(xs, acc, f) {
-  switch (xs.$) {
-    case "Nil": {
-      return acc;
-      break;
-    }
-    case "Cons": {
-      const $f823 = xs._0;
-      const $f824 = xs._1;
-      {
-        const t = $f824;
+function List$fold_left$List_T_Int_Int$PVec_Int$Fn_PVec_Int_T_Int_Int_PVec_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const acc = $tco_a1;
+    const f = $tco_a2;
+    switch (xs.$) {
+      case "Nil": {
+        return acc;
+        break;
+      }
+      case "Cons": {
+        const $f800 = xs._0;
+        const $f801 = xs._1;
         {
-          const h = $f823;
+          const t = $f801;
           {
-            const $t822 = (() => {
-              return f._0(f, acc, h);
-            })();
-            return List$fold_left$List_T_Int_Int$PVec_Int$Fn_PVec_Int_T_Int_Int_PVec_Int(t, $t822, f);
+            const h = $f800;
+            {
+              const $t799 = (() => {
+                return f._0(f, acc, h);
+              })();
+              {
+                $tco_a0 = t;
+                $tco_a1 = $t799;
+                $tco_a2 = f;
+                continue __tco;
+              }
+            }
           }
         }
+        break;
       }
-      break;
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
+    return undefined;
   }
 }
 const List$fold_left$List_T_Int_Int$PVec_Int$Fn_PVec_Int_T_Int_Int_PVec_Int$clo = { _0: ($_, xs, acc, f) => List$fold_left$List_T_Int_Int$PVec_Int$Fn_PVec_Int_T_Int_Int_PVec_Int(xs, acc, f) };
@@ -8274,84 +8246,76 @@ const List$fold_left$List_T_Int_Int$PVec_Int$Fn_PVec_Int_T_Int_Int_PVec_Int$clo 
 function Array$set$PVec_Int$Int$Int(v, idx, val) {
   switch (v.$) {
     case "PVec": {
-      const $f8160 = v._0;
-      const $f8161 = v._1;
-      const $f8162 = v._2;
-      const $f8163 = v._3;
+      const $f8137 = v._0;
+      const $f8138 = v._1;
+      const $f8139 = v._2;
+      const $f8140 = v._3;
       {
-        const tail = $f8163;
+        const tail = $f8140;
         {
-          const root = $f8162;
+          const root = $f8139;
           {
-            const shift = $f8161;
+            const shift = $f8138;
             {
-              const n = $f8160;
+              const n = $f8137;
               {
-                const $t8155 = (() => {
+                const $t8132 = (() => {
                   {
-                    const $t8153 = (idx < 0);
+                    const $t8130 = (idx < 0);
                     {
-                      const $t8154 = (idx >= n);
-                      return ($t8153 || $t8154);
+                      const $t8131 = (idx >= n);
+                      return ($t8130 || $t8131);
                     }
                   }
                 })();
-                if ($t8155 === true) {
-                  return (() => {
-                    undefined;
-                    return (() => { throw new Error("Array.set: index out of range"); })();
-                  })();
+                if ($t8132 === true) {
+                  undefined;
+                  return (() => { throw new Error("Array.set: index out of range"); })();
                 } else {
-                  return (() => {
-                    {
-                      const tail_len = (() => {
-                        {
-                          const go_i5672 = { $: "$Clo_go$0_Array_lst_len_List_Int", _0: go$apply$0_Array_lst_len_List_Int };
-                          return go$apply$0_Array_lst_len_List_Int(go_i5672, tail, 0);
-                        }
-                      })();
+                  {
+                    const tail_len = (() => {
                       {
-                        const tail_offset = (n - tail_len);
-                        {
-                          const $t8156 = (idx >= tail_offset);
-                          if ($t8156 === true) {
-                            return (() => {
-                              {
-                                const $t8157 = (idx - tail_offset);
+                        const go_i5672 = { $: "$Clo_go$0_Array_lst_len_List_Int", _0: go$apply$0_Array_lst_len_List_Int };
+                        return go$apply$0_Array_lst_len_List_Int(go_i5672, tail, 0);
+                      }
+                    })();
+                    {
+                      const tail_offset = march_int_ovf(n - tail_len, 1);
+                      {
+                        const $t8133 = (idx >= tail_offset);
+                        if ($t8133 === true) {
+                          {
+                            const $t8134 = march_int_ovf(idx - tail_offset, 1);
+                            {
+                              const $t8135 = (() => {
                                 {
-                                  const $t8158 = (() => {
-                                    {
-                                      const rev_onto_i5668 = { $: "$Clo_rev_onto$0_Array_lst_set_List_Int_Int_Int", _0: rev_onto$apply$0_Array_lst_set_List_Int_Int_Int };
-                                      {
-                                        const go_i5669 = { $: "$Clo_go$1_Array_lst_set_List_Int_Int_Int", _0: go$apply$1_Array_lst_set_List_Int_Int_Int, _1: rev_onto_i5668, _2: val };
-                                        {
-                                          const $t7908_i5670 = { $: "Nil" };
-                                          return go$apply$1_Array_lst_set_List_Int_Int_Int(go_i5669, tail, $t8157, $t7908_i5670);
-                                        }
-                                      }
-                                    }
-                                  })();
-                                  return { $: "PVec", _0: n, _1: shift, _2: root, _3: $t8158 };
-                                }
-                              }
-                            })();
-                          } else {
-                            return (() => {
-                              {
-                                const $t8159 = (() => {
+                                  const rev_onto_i5668 = { $: "$Clo_rev_onto$0_Array_lst_set_List_Int_Int_Int", _0: rev_onto$apply$0_Array_lst_set_List_Int_Int_Int };
                                   {
-                                    const $t7992_i5664 = { $: "Nil" };
-                                    return Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$Int$Int(root, shift, $t7992_i5664, idx, val);
+                                    const go_i5669 = { $: "$Clo_go$1_Array_lst_set_List_Int_Int_Int", _0: go$apply$1_Array_lst_set_List_Int_Int_Int, _1: rev_onto_i5668, _2: val };
+                                    {
+                                      const $t7885_i5670 = { $: "Nil" };
+                                      return go$apply$1_Array_lst_set_List_Int_Int_Int(go_i5669, tail, $t8134, $t7885_i5670);
+                                    }
                                   }
-                                })();
-                                return { $: "PVec", _0: n, _1: shift, _2: $t8159, _3: tail };
+                                }
+                              })();
+                              return { $: "PVec", _0: n, _1: shift, _2: root, _3: $t8135 };
+                            }
+                          }
+                        } else {
+                          {
+                            const $t8136 = (() => {
+                              {
+                                const $t7969_i5664 = { $: "Nil" };
+                                return Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$Int$Int(root, shift, $t7969_i5664, idx, val);
                               }
                             })();
+                            return { $: "PVec", _0: n, _1: shift, _2: $t8136, _3: tail };
                           }
                         }
                       }
                     }
-                  })();
+                  }
                 }
               }
             }
@@ -8374,18 +8338,18 @@ function List$map$List_String$Fn_String_Int(xs, f) {
       break;
     }
     case "Cons": {
-      const $f737 = xs._0;
-      const $f738 = xs._1;
+      const $f714 = xs._0;
+      const $f715 = xs._1;
       {
-        const t = $f738;
+        const t = $f715;
         {
-          const h = $f737;
+          const h = $f714;
           {
-            const $t735 = (() => {
+            const $t712 = (() => {
               return f._0(f, h);
             })();
             {
-              const $trmc15 = { $: "Cons", _0: $t735, _1: null };
+              const $trmc15 = { $: "Cons", _0: $t712, _1: null };
               List$map$dps$List_String$Fn_String_Int$List_Int(t, f, $trmc15);
               return $trmc15;
             }
@@ -8401,424 +8365,527 @@ function List$map$List_String$Fn_String_Int(xs, f) {
 }
 const List$map$List_String$Fn_String_Int$clo = { _0: ($_, xs, f) => List$map$List_String$Fn_String_Int(xs, f) };
 
-function List$nth$List_Piece$Int(xs, n) {
-  switch (xs.$) {
-    case "Nil": {
-      undefined;
-      return (() => { throw new Error("List.nth: index out of bounds"); })();
-      break;
-    }
-    case "Cons": {
-      const $f699 = xs._0;
-      const $f700 = xs._1;
-      {
-        const t = $f700;
+function List$nth$List_Piece$Int($tco_a0, $tco_a1) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const n = $tco_a1;
+    switch (xs.$) {
+      case "Nil": {
+        undefined;
+        return (() => { throw new Error("List.nth: index out of bounds"); })();
+        break;
+      }
+      case "Cons": {
+        const $f676 = xs._0;
+        const $f677 = xs._1;
         {
-          const h = $f699;
+          const t = $f677;
           {
-            const $t697 = (n === 0);
-            if ($t697 === true) {
-              return (() => {
+            const h = $f676;
+            {
+              const $t674 = (n === 0);
+              if ($t674 === true) {
                 return h;
-              })();
-            } else {
-              return (() => {
+              } else {
                 {
-                  const $t698 = (n - 1);
-                  return List$nth$List_Piece$Int(t, $t698);
+                  const $t675 = march_int_ovf(n - 1, 1);
+                  {
+                    $tco_a0 = t;
+                    $tco_a1 = $t675;
+                    continue __tco;
+                  }
                 }
-              })();
+              }
             }
           }
         }
+        break;
       }
-      break;
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
+    return undefined;
   }
 }
 const List$nth$List_Piece$Int$clo = { _0: ($_, xs, n) => List$nth$List_Piece$Int(xs, n) };
 
-function List$map$dps$List_Int$Fn_Int_String$List_String(xs, f, $dst) {
-  switch (xs.$) {
-    case "Nil": {
-      {
-        const $trmc13 = { $: "Nil" };
-        return ($dst._1 = $trmc13, undefined);
-      }
-      break;
-    }
-    case "Cons": {
-      const $f737 = xs._0;
-      const $f738 = xs._1;
-      {
-        const t = $f738;
+function List$map$dps$List_Int$Fn_Int_String$List_String($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const f = $tco_a1;
+    const $dst = $tco_a2;
+    switch (xs.$) {
+      case "Nil": {
         {
-          const h = $f737;
+          const $trmc13 = { $: "Nil" };
+          return ($dst._1 = $trmc13, undefined);
+        }
+        break;
+      }
+      case "Cons": {
+        const $f714 = xs._0;
+        const $f715 = xs._1;
+        {
+          const t = $f715;
           {
-            const $t735 = (() => {
-              return f._0(f, h);
-            })();
+            const h = $f714;
             {
-              const $trmc14 = { $: "Cons", _0: $t735, _1: null };
-              ($dst._1 = $trmc14, undefined);
-              return List$map$dps$List_Int$Fn_Int_String$List_String(t, f, $trmc14);
+              const $t712 = (() => {
+                return f._0(f, h);
+              })();
+              {
+                const $trmc14 = { $: "Cons", _0: $t712, _1: null };
+                ($dst._1 = $trmc14, undefined);
+                {
+                  $tco_a0 = t;
+                  $tco_a1 = f;
+                  $tco_a2 = $trmc14;
+                  continue __tco;
+                }
+              }
             }
           }
         }
+        break;
       }
-      break;
-    }
-    default: {
-      {
-        const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
-        return ($dst._1 = $trmc12, undefined);
+      default: {
+        {
+          const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          return ($dst._1 = $trmc12, undefined);
+        }
       }
     }
+    return undefined;
   }
 }
 const List$map$dps$List_Int$Fn_Int_String$List_String$clo = { _0: ($_, xs, f, $dst) => List$map$dps$List_Int$Fn_Int_String$List_String(xs, f, $dst) };
 
-function List$map$dps$List_Int$Fn_Int_Int$List_Int(xs, f, $dst) {
-  switch (xs.$) {
-    case "Nil": {
-      {
-        const $trmc13 = { $: "Nil" };
-        return ($dst._1 = $trmc13, undefined);
-      }
-      break;
-    }
-    case "Cons": {
-      const $f737 = xs._0;
-      const $f738 = xs._1;
-      {
-        const t = $f738;
+function List$map$dps$List_Int$Fn_Int_Int$List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const f = $tco_a1;
+    const $dst = $tco_a2;
+    switch (xs.$) {
+      case "Nil": {
         {
-          const h = $f737;
+          const $trmc13 = { $: "Nil" };
+          return ($dst._1 = $trmc13, undefined);
+        }
+        break;
+      }
+      case "Cons": {
+        const $f714 = xs._0;
+        const $f715 = xs._1;
+        {
+          const t = $f715;
           {
-            const $t735 = (() => {
-              return f._0(f, h);
-            })();
+            const h = $f714;
             {
-              const $trmc14 = { $: "Cons", _0: $t735, _1: null };
-              ($dst._1 = $trmc14, undefined);
-              return List$map$dps$List_Int$Fn_Int_Int$List_Int(t, f, $trmc14);
+              const $t712 = (() => {
+                return f._0(f, h);
+              })();
+              {
+                const $trmc14 = { $: "Cons", _0: $t712, _1: null };
+                ($dst._1 = $trmc14, undefined);
+                {
+                  $tco_a0 = t;
+                  $tco_a1 = f;
+                  $tco_a2 = $trmc14;
+                  continue __tco;
+                }
+              }
             }
           }
         }
+        break;
       }
-      break;
-    }
-    default: {
-      {
-        const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
-        return ($dst._1 = $trmc12, undefined);
+      default: {
+        {
+          const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          return ($dst._1 = $trmc12, undefined);
+        }
       }
     }
+    return undefined;
   }
 }
 const List$map$dps$List_Int$Fn_Int_Int$List_Int$clo = { _0: ($_, xs, f, $dst) => List$map$dps$List_Int$Fn_Int_Int$List_Int(xs, f, $dst) };
 
-function List$append$dps$List_Int$List_Int$List_Int(xs, ys, $dst) {
-  switch (xs.$) {
-    case "Nil": {
-      return ($dst._1 = ys, undefined);
-      break;
-    }
-    case "Cons": {
-      const $f729 = xs._0;
-      const $f730 = xs._1;
-      {
-        const t = $f730;
+function List$append$dps$List_Int$List_Int$List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const ys = $tco_a1;
+    const $dst = $tco_a2;
+    switch (xs.$) {
+      case "Nil": {
+        return ($dst._1 = ys, undefined);
+        break;
+      }
+      case "Cons": {
+        const $f706 = xs._0;
+        const $f707 = xs._1;
         {
-          const h = $f729;
+          const t = $f707;
           {
-            const $trmc10 = { $: "Cons", _0: h, _1: null };
-            ($dst._1 = $trmc10, undefined);
-            return List$append$dps$List_Int$List_Int$List_Int(t, ys, $trmc10);
+            const h = $f706;
+            {
+              const $trmc10 = { $: "Cons", _0: h, _1: null };
+              ($dst._1 = $trmc10, undefined);
+              {
+                $tco_a0 = t;
+                $tco_a1 = ys;
+                $tco_a2 = $trmc10;
+                continue __tco;
+              }
+            }
           }
         }
+        break;
       }
-      break;
-    }
-    default: {
-      {
-        const $trmc8 = (() => { throw new Error("non-exhaustive pattern match"); })();
-        return ($dst._1 = $trmc8, undefined);
+      default: {
+        {
+          const $trmc8 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          return ($dst._1 = $trmc8, undefined);
+        }
       }
     }
+    return undefined;
   }
 }
 const List$append$dps$List_Int$List_Int$List_Int$clo = { _0: ($_, xs, ys, $dst) => List$append$dps$List_Int$List_Int$List_Int(xs, ys, $dst) };
 
-function List$filter$dps$List_Int$Fn_Int_Bool$List_Int(xs, pred, $dst) {
-  switch (xs.$) {
-    case "Nil": {
-      {
-        const $trmc22 = { $: "Nil" };
-        return ($dst._1 = $trmc22, undefined);
-      }
-      break;
-    }
-    case "Cons": {
-      const $f767 = xs._0;
-      const $f768 = xs._1;
-      {
-        const t = $f768;
+function List$filter$dps$List_Int$Fn_Int_Bool$List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const pred = $tco_a1;
+    const $dst = $tco_a2;
+    switch (xs.$) {
+      case "Nil": {
         {
-          const h = $f767;
+          const $trmc22 = { $: "Nil" };
+          return ($dst._1 = $trmc22, undefined);
+        }
+        break;
+      }
+      case "Cons": {
+        const $f744 = xs._0;
+        const $f745 = xs._1;
+        {
+          const t = $f745;
           {
-            const $t765 = (() => {
-              return pred._0(pred, h);
-            })();
-            if ($t765 === true) {
-              return (() => {
+            const h = $f744;
+            {
+              const $t742 = (() => {
+                return pred._0(pred, h);
+              })();
+              if ($t742 === true) {
                 {
                   const $trmc23 = { $: "Cons", _0: h, _1: null };
                   ($dst._1 = $trmc23, undefined);
-                  return List$filter$dps$List_Int$Fn_Int_Bool$List_Int(t, pred, $trmc23);
+                  {
+                    $tco_a0 = t;
+                    $tco_a1 = pred;
+                    $tco_a2 = $trmc23;
+                    continue __tco;
+                  }
                 }
-              })();
-            } else {
-              return List$filter$dps$List_Int$Fn_Int_Bool$List_Int(t, pred, $dst);
+              } else {
+                {
+                  $tco_a0 = t;
+                  $tco_a1 = pred;
+                  $tco_a2 = $dst;
+                  continue __tco;
+                }
+              }
             }
           }
         }
+        break;
       }
-      break;
-    }
-    default: {
-      {
-        const $trmc21 = (() => { throw new Error("non-exhaustive pattern match"); })();
-        return ($dst._1 = $trmc21, undefined);
+      default: {
+        {
+          const $trmc21 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          return ($dst._1 = $trmc21, undefined);
+        }
       }
     }
+    return undefined;
   }
 }
 const List$filter$dps$List_Int$Fn_Int_Bool$List_Int$clo = { _0: ($_, xs, pred, $dst) => List$filter$dps$List_Int$Fn_Int_Bool$List_Int(xs, pred, $dst) };
 
-function List$map$dps$List_T_Int_Int$Fn_T_Int_Int_T_Int_Int$List_T_Int_Int(xs, f, $dst) {
-  switch (xs.$) {
-    case "Nil": {
-      {
-        const $trmc13 = { $: "Nil" };
-        return ($dst._1 = $trmc13, undefined);
-      }
-      break;
-    }
-    case "Cons": {
-      const $f737 = xs._0;
-      const $f738 = xs._1;
-      {
-        const t = $f738;
+function List$map$dps$List_T_Int_Int$Fn_T_Int_Int_T_Int_Int$List_T_Int_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const f = $tco_a1;
+    const $dst = $tco_a2;
+    switch (xs.$) {
+      case "Nil": {
         {
-          const h = $f737;
+          const $trmc13 = { $: "Nil" };
+          return ($dst._1 = $trmc13, undefined);
+        }
+        break;
+      }
+      case "Cons": {
+        const $f714 = xs._0;
+        const $f715 = xs._1;
+        {
+          const t = $f715;
           {
-            const $t735 = (() => {
-              return f._0(f, h);
-            })();
+            const h = $f714;
             {
-              const $trmc14 = { $: "Cons", _0: $t735, _1: null };
-              ($dst._1 = $trmc14, undefined);
-              return List$map$dps$List_T_Int_Int$Fn_T_Int_Int_T_Int_Int$List_T_Int_Int(t, f, $trmc14);
+              const $t712 = (() => {
+                return f._0(f, h);
+              })();
+              {
+                const $trmc14 = { $: "Cons", _0: $t712, _1: null };
+                ($dst._1 = $trmc14, undefined);
+                {
+                  $tco_a0 = t;
+                  $tco_a1 = f;
+                  $tco_a2 = $trmc14;
+                  continue __tco;
+                }
+              }
             }
           }
         }
+        break;
       }
-      break;
-    }
-    default: {
-      {
-        const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
-        return ($dst._1 = $trmc12, undefined);
+      default: {
+        {
+          const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          return ($dst._1 = $trmc12, undefined);
+        }
       }
     }
+    return undefined;
   }
 }
 const List$map$dps$List_T_Int_Int$Fn_T_Int_Int_T_Int_Int$List_T_Int_Int$clo = { _0: ($_, xs, f, $dst) => List$map$dps$List_T_Int_Int$Fn_T_Int_Int_T_Int_Int$List_T_Int_Int(xs, f, $dst) };
 
-function Array$lst_nth$List_Int$Int(lst, n) {
-  switch (lst.$) {
-    case "Nil": {
-      undefined;
-      return (() => { throw new Error("Array: index out of bounds"); })();
-      break;
-    }
-    case "Cons": {
-      const $f7879 = lst._0;
-      const $f7880 = lst._1;
-      {
-        const t = $f7880;
+function Array$lst_nth$List_Int$Int($tco_a0, $tco_a1) {
+  __tco: for (;;) {
+    const lst = $tco_a0;
+    const n = $tco_a1;
+    switch (lst.$) {
+      case "Nil": {
+        undefined;
+        return (() => { throw new Error("Array: index out of bounds"); })();
+        break;
+      }
+      case "Cons": {
+        const $f7856 = lst._0;
+        const $f7857 = lst._1;
         {
-          const h = (() => {
-            return $f7879;
-          })();
+          const t = $f7857;
           {
-            const $t7877 = (n === 0);
-            if ($t7877 === true) {
-              return h;
-            } else {
-              return (() => {
+            const h = (() => {
+              return $f7856;
+            })();
+            {
+              const $t7854 = (n === 0);
+              if ($t7854 === true) {
+                return h;
+              } else {
                 {
-                  const $t7878 = (n - 1);
-                  return Array$lst_nth$List_Int$Int(t, $t7878);
+                  const $t7855 = march_int_ovf(n - 1, 1);
+                  {
+                    $tco_a0 = t;
+                    $tco_a1 = $t7855;
+                    continue __tco;
+                  }
                 }
-              })();
+              }
             }
           }
         }
+        break;
       }
-      break;
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
+    return undefined;
   }
 }
 const Array$lst_nth$List_Int$Int$clo = { _0: ($_, lst, n) => Array$lst_nth$List_Int$Int(lst, n) };
 
-function Array$trie_get$TrieNode_Int$Int$Int(node, idx, shift) {
-  switch (node.$) {
-    case "TrieEmpty": {
-      undefined;
-      return (() => { throw new Error("Array.get: missing node"); })();
-      break;
-    }
-    case "TrieLeaf": {
-      const $f7973 = node._0;
-      {
-        const values = $f7973;
-        {
-          const $t7970 = march_int_and(idx, 31);
-          {
-            const $rc_2597 = Array$lst_nth$List_Int$Int(values, $t7970);
-            return $rc_2597;
-          }
-        }
+function Array$trie_get$TrieNode_Int$Int$Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const node = $tco_a0;
+    const idx = $tco_a1;
+    const shift = $tco_a2;
+    switch (node.$) {
+      case "TrieEmpty": {
+        undefined;
+        return (() => { throw new Error("Array.get: missing node"); })();
+        break;
       }
-      break;
-    }
-    case "TrieBranch": {
-      const $f7974 = node._0;
-      {
-        const children = $f7974;
+      case "TrieLeaf": {
+        const $f7950 = node._0;
         {
-          const slot = (() => {
-            {
-              const $t7969_i7172 = march_int_shr(idx, shift);
-              return march_int_and($t7969_i7172, 31);
-            }
-          })();
+          const values = $f7950;
           {
-            const $t7971 = Array$lst_nth$List_TrieNode_Int$Int(children, slot);
+            const $t7947 = ((idx | 0) === idx && (31 | 0) === 31 ? (idx & 31) : march_int_and(idx, 31));
             {
-              const $t7972 = (shift - 5);
-              return Array$trie_get$TrieNode_Int$Int$Int($t7971, idx, $t7972);
+              const $rc_2597 = Array$lst_nth$List_Int$Int(values, $t7947);
+              return $rc_2597;
             }
           }
         }
+        break;
       }
-      break;
+      case "TrieBranch": {
+        const $f7951 = node._0;
+        {
+          const children = $f7951;
+          {
+            const slot = (() => {
+              {
+                const $t7946_i7172 = ((idx | 0) === idx && shift >= 0 && shift < 32 ? (idx >> shift) : march_int_shr(idx, shift));
+                return (($t7946_i7172 | 0) === $t7946_i7172 && (31 | 0) === 31 ? ($t7946_i7172 & 31) : march_int_and($t7946_i7172, 31));
+              }
+            })();
+            {
+              const $t7948 = Array$lst_nth$List_TrieNode_Int$Int(children, slot);
+              {
+                const $t7949 = march_int_ovf(shift - 5, 1);
+                {
+                  $tco_a0 = $t7948;
+                  $tco_a1 = idx;
+                  $tco_a2 = $t7949;
+                  continue __tco;
+                }
+              }
+            }
+          }
+        }
+        break;
+      }
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
+    return undefined;
   }
 }
 const Array$trie_get$TrieNode_Int$Int$Int$clo = { _0: ($_, node, idx, shift) => Array$trie_get$TrieNode_Int$Int$Int(node, idx, shift) };
 
-function List$flat_map_go$List_Int$List_Int$Fn_Int_List_Int(sub, lst, f) {
-  switch (sub.$) {
-    case "Cons": {
-      const $f759 = sub._0;
-      const $f760 = sub._1;
-      {
-        const rest = $f760;
+function List$flat_map_go$List_Int$List_Int$Fn_Int_List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const sub = $tco_a0;
+    const lst = $tco_a1;
+    const f = $tco_a2;
+    switch (sub.$) {
+      case "Cons": {
+        const $f736 = sub._0;
+        const $f737 = sub._1;
         {
-          const x = $f759;
+          const rest = $f737;
           {
-            const $trmc20 = { $: "Cons", _0: x, _1: null };
-            List$flat_map_go$dps$List_Int$List_Int$Fn_Int_List_Int$List_Int(rest, lst, f, $trmc20);
-            return $trmc20;
-          }
-        }
-      }
-      break;
-    }
-    case "Nil": {
-      switch (lst.$) {
-        case "Nil": {
-          return { $: "Nil" };
-          break;
-        }
-        case "Cons": {
-          const $f753 = lst._0;
-          const $f754 = lst._1;
-          {
-            const t = $f754;
+            const x = $f736;
             {
-              const h = $f753;
-              {
-                const $t752 = (() => {
-                  return f._0(f, h);
-                })();
-                return List$flat_map_go$List_Int$List_Int$Fn_Int_List_Int($t752, t, f);
-              }
+              const $trmc20 = { $: "Cons", _0: x, _1: null };
+              List$flat_map_go$dps$List_Int$List_Int$Fn_Int_List_Int$List_Int(rest, lst, f, $trmc20);
+              return $trmc20;
             }
           }
-          break;
         }
-        default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
-        }
+        break;
       }
-      break;
+      case "Nil": {
+        switch (lst.$) {
+          case "Nil": {
+            return { $: "Nil" };
+            break;
+          }
+          case "Cons": {
+            const $f730 = lst._0;
+            const $f731 = lst._1;
+            {
+              const t = $f731;
+              {
+                const h = $f730;
+                {
+                  const $t729 = (() => {
+                    return f._0(f, h);
+                  })();
+                  {
+                    $tco_a0 = $t729;
+                    $tco_a1 = t;
+                    $tco_a2 = f;
+                    continue __tco;
+                  }
+                }
+              }
+            }
+            break;
+          }
+          default: {
+            return (() => { throw new Error("non-exhaustive pattern match"); })();
+          }
+        }
+        break;
+      }
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
+    return undefined;
   }
 }
 const List$flat_map_go$List_Int$List_Int$Fn_Int_List_Int$clo = { _0: ($_, sub, lst, f) => List$flat_map_go$List_Int$List_Int$Fn_Int_List_Int(sub, lst, f) };
 
-function List$map$dps$List_String$Fn_String_Int$List_Int(xs, f, $dst) {
-  switch (xs.$) {
-    case "Nil": {
-      {
-        const $trmc13 = { $: "Nil" };
-        return ($dst._1 = $trmc13, undefined);
-      }
-      break;
-    }
-    case "Cons": {
-      const $f737 = xs._0;
-      const $f738 = xs._1;
-      {
-        const t = $f738;
+function List$map$dps$List_String$Fn_String_Int$List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const xs = $tco_a0;
+    const f = $tco_a1;
+    const $dst = $tco_a2;
+    switch (xs.$) {
+      case "Nil": {
         {
-          const h = $f737;
+          const $trmc13 = { $: "Nil" };
+          return ($dst._1 = $trmc13, undefined);
+        }
+        break;
+      }
+      case "Cons": {
+        const $f714 = xs._0;
+        const $f715 = xs._1;
+        {
+          const t = $f715;
           {
-            const $t735 = (() => {
-              return f._0(f, h);
-            })();
+            const h = $f714;
             {
-              const $trmc14 = { $: "Cons", _0: $t735, _1: null };
-              ($dst._1 = $trmc14, undefined);
-              return List$map$dps$List_String$Fn_String_Int$List_Int(t, f, $trmc14);
+              const $t712 = (() => {
+                return f._0(f, h);
+              })();
+              {
+                const $trmc14 = { $: "Cons", _0: $t712, _1: null };
+                ($dst._1 = $trmc14, undefined);
+                {
+                  $tco_a0 = t;
+                  $tco_a1 = f;
+                  $tco_a2 = $trmc14;
+                  continue __tco;
+                }
+              }
             }
           }
         }
+        break;
       }
-      break;
-    }
-    default: {
-      {
-        const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
-        return ($dst._1 = $trmc12, undefined);
+      default: {
+        {
+          const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          return ($dst._1 = $trmc12, undefined);
+        }
       }
     }
+    return undefined;
   }
 }
 const List$map$dps$List_String$Fn_String_Int$List_Int$clo = { _0: ($_, xs, f, $dst) => List$map$dps$List_String$Fn_String_Int$List_Int(xs, f, $dst) };
@@ -8826,14 +8893,14 @@ const List$map$dps$List_String$Fn_String_Int$List_Int$clo = { _0: ($_, xs, f, $d
 function Array$fold_left$PVec_Int$List_Int$Fn_List_Int_Int_List_Int(v, acc, f) {
   switch (v.$) {
     case "PVec": {
-      const $f8275 = v._0;
-      const $f8276 = v._1;
-      const $f8277 = v._2;
-      const $f8278 = v._3;
+      const $f8252 = v._0;
+      const $f8253 = v._1;
+      const $f8254 = v._2;
+      const $f8255 = v._3;
       {
-        const tail = $f8278;
+        const tail = $f8255;
         {
-          const root = $f8277;
+          const root = $f8254;
           {
             const acc2 = (() => {
               return Array$trie_fold$List_Int$TrieNode_Int$Fn_List_Int_Int_List_Int(acc, root, f);
@@ -8854,182 +8921,221 @@ function Array$fold_left$PVec_Int$List_Int$Fn_List_Int_Int_List_Int(v, acc, f) {
 }
 const Array$fold_left$PVec_Int$List_Int$Fn_List_Int_Int_List_Int$clo = { _0: ($_, v, acc, f) => Array$fold_left$PVec_Int$List_Int$Fn_List_Int_Int_List_Int(v, acc, f) };
 
-function Array$lst_nth$List_TrieNode_Int$Int(lst, n) {
-  switch (lst.$) {
-    case "Nil": {
-      undefined;
-      return (() => { throw new Error("Array: index out of bounds"); })();
-      break;
-    }
-    case "Cons": {
-      const $f7879 = lst._0;
-      const $f7880 = lst._1;
-      {
-        const t = $f7880;
+function Array$lst_nth$List_TrieNode_Int$Int($tco_a0, $tco_a1) {
+  __tco: for (;;) {
+    const lst = $tco_a0;
+    const n = $tco_a1;
+    switch (lst.$) {
+      case "Nil": {
+        undefined;
+        return (() => { throw new Error("Array: index out of bounds"); })();
+        break;
+      }
+      case "Cons": {
+        const $f7856 = lst._0;
+        const $f7857 = lst._1;
         {
-          const h = $f7879;
+          const t = $f7857;
           {
-            const $t7877 = (n === 0);
-            if ($t7877 === true) {
-              return (() => {
+            const h = $f7856;
+            {
+              const $t7854 = (n === 0);
+              if ($t7854 === true) {
                 return h;
-              })();
-            } else {
-              return (() => {
+              } else {
                 {
-                  const $t7878 = (n - 1);
-                  return Array$lst_nth$List_TrieNode_Int$Int(t, $t7878);
+                  const $t7855 = march_int_ovf(n - 1, 1);
+                  {
+                    $tco_a0 = t;
+                    $tco_a1 = $t7855;
+                    continue __tco;
+                  }
                 }
-              })();
+              }
             }
           }
         }
+        break;
       }
-      break;
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
+    return undefined;
   }
 }
 const Array$lst_nth$List_TrieNode_Int$Int$clo = { _0: ($_, lst, n) => Array$lst_nth$List_TrieNode_Int$Int(lst, n) };
 
-function Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$Int$Int(n, s, path, idx, val) {
-  switch (n.$) {
-    case "TrieEmpty": {
-      undefined;
-      return (() => { throw new Error("Array.set: missing node"); })();
-      break;
-    }
-    case "TrieLeaf": {
-      const $f7990 = n._0;
-      {
-        const values = $f7990;
+function Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$Int$Int($tco_a0, $tco_a1, $tco_a2, $tco_a3, $tco_a4) {
+  __tco: for (;;) {
+    const n = $tco_a0;
+    const s = $tco_a1;
+    const path = $tco_a2;
+    const idx = $tco_a3;
+    const val = $tco_a4;
+    switch (n.$) {
+      case "TrieEmpty": {
+        undefined;
+        return (() => { throw new Error("Array.set: missing node"); })();
+        break;
+      }
+      case "TrieLeaf": {
+        const $f7967 = n._0;
         {
-          const $t7986 = (() => {
-            {
-              const $t7984 = march_int_and(idx, 31);
+          const values = $f7967;
+          {
+            const $t7963 = (() => {
               {
-                const $t7985 = (() => {
-                  {
-                    const rev_onto_i7239 = { $: "$Clo_rev_onto$0_Array_lst_set_List_Int_Int_Int", _0: rev_onto$apply$0_Array_lst_set_List_Int_Int_Int };
+                const $t7961 = ((idx | 0) === idx && (31 | 0) === 31 ? (idx & 31) : march_int_and(idx, 31));
+                {
+                  const $t7962 = (() => {
                     {
-                      const go_i7240 = { $: "$Clo_go$1_Array_lst_set_List_Int_Int_Int", _0: go$apply$1_Array_lst_set_List_Int_Int_Int, _1: rev_onto_i7239, _2: val };
+                      const rev_onto_i7239 = { $: "$Clo_rev_onto$0_Array_lst_set_List_Int_Int_Int", _0: rev_onto$apply$0_Array_lst_set_List_Int_Int_Int };
                       {
-                        const $t7908_i7241 = { $: "Nil" };
-                        return go$apply$1_Array_lst_set_List_Int_Int_Int(go_i7240, values, $t7984, $t7908_i7241);
+                        const go_i7240 = { $: "$Clo_go$1_Array_lst_set_List_Int_Int_Int", _0: go$apply$1_Array_lst_set_List_Int_Int_Int, _1: rev_onto_i7239, _2: val };
+                        {
+                          const $t7885_i7241 = { $: "Nil" };
+                          return go$apply$1_Array_lst_set_List_Int_Int_Int(go_i7240, values, $t7961, $t7885_i7241);
+                        }
                       }
                     }
-                  }
-                })();
-                return { $: "TrieLeaf", _0: $t7985 };
+                  })();
+                  return { $: "TrieLeaf", _0: $t7962 };
+                }
               }
-            }
-          })();
-          {
-            const $rc_2617 = Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int($t7986, path);
-            return $rc_2617;
-          }
-        }
-      }
-      break;
-    }
-    case "TrieBranch": {
-      const $f7991 = n._0;
-      {
-        const children = $f7991;
-        {
-          const slot = (() => {
-            {
-              const $t7969_i7244 = march_int_shr(idx, s);
-              return march_int_and($t7969_i7244, 31);
-            }
-          })();
-          {
-            const child = (() => {
-              return Array$lst_nth$List_TrieNode_Int$Int(children, slot);
             })();
             {
-              const $t7987 = (s - 5);
+              const $rc_2617 = Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int($t7963, path);
+              return $rc_2617;
+            }
+          }
+        }
+        break;
+      }
+      case "TrieBranch": {
+        const $f7968 = n._0;
+        {
+          const children = $f7968;
+          {
+            const slot = (() => {
               {
-                const $t7988 = { _0: children, _1: slot };
+                const $t7946_i7244 = ((idx | 0) === idx && s >= 0 && s < 32 ? (idx >> s) : march_int_shr(idx, s));
+                return (($t7946_i7244 | 0) === $t7946_i7244 && (31 | 0) === 31 ? ($t7946_i7244 & 31) : march_int_and($t7946_i7244, 31));
+              }
+            })();
+            {
+              const child = (() => {
+                return Array$lst_nth$List_TrieNode_Int$Int(children, slot);
+              })();
+              {
+                const $t7964 = march_int_ovf(s - 5, 1);
                 {
-                  const $t7989 = { $: "Cons", _0: $t7988, _1: path };
-                  return Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$Int$Int(child, $t7987, $t7989, idx, val);
+                  const $t7965 = { _0: children, _1: slot };
+                  {
+                    const $t7966 = { $: "Cons", _0: $t7965, _1: path };
+                    {
+                      $tco_a0 = child;
+                      $tco_a1 = $t7964;
+                      $tco_a2 = $t7966;
+                      $tco_a3 = idx;
+                      $tco_a4 = val;
+                      continue __tco;
+                    }
+                  }
                 }
               }
             }
           }
         }
+        break;
       }
-      break;
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
+    return undefined;
   }
 }
 const Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$Int$Int$clo = { _0: ($_, n, s, path, idx, val) => Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$Int$Int(n, s, path, idx, val) };
 
-function List$flat_map_go$dps$List_Int$List_Int$Fn_Int_List_Int$List_Int(sub, lst, f, $dst) {
-  switch (sub.$) {
-    case "Cons": {
-      const $f759 = sub._0;
-      const $f760 = sub._1;
-      {
-        const rest = $f760;
+function List$flat_map_go$dps$List_Int$List_Int$Fn_Int_List_Int$List_Int($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
+  __tco: for (;;) {
+    const sub = $tco_a0;
+    const lst = $tco_a1;
+    const f = $tco_a2;
+    const $dst = $tco_a3;
+    switch (sub.$) {
+      case "Cons": {
+        const $f736 = sub._0;
+        const $f737 = sub._1;
         {
-          const x = $f759;
+          const rest = $f737;
           {
-            const $trmc17 = { $: "Cons", _0: x, _1: null };
-            ($dst._1 = $trmc17, undefined);
-            return List$flat_map_go$dps$List_Int$List_Int$Fn_Int_List_Int$List_Int(rest, lst, f, $trmc17);
-          }
-        }
-      }
-      break;
-    }
-    case "Nil": {
-      switch (lst.$) {
-        case "Nil": {
-          {
-            const $trmc19 = { $: "Nil" };
-            return ($dst._1 = $trmc19, undefined);
-          }
-          break;
-        }
-        case "Cons": {
-          const $f753 = lst._0;
-          const $f754 = lst._1;
-          {
-            const t = $f754;
+            const x = $f736;
             {
-              const h = $f753;
+              const $trmc17 = { $: "Cons", _0: x, _1: null };
+              ($dst._1 = $trmc17, undefined);
               {
-                const $t752 = (() => {
-                  return f._0(f, h);
-                })();
-                return List$flat_map_go$dps$List_Int$List_Int$Fn_Int_List_Int$List_Int($t752, t, f, $dst);
+                $tco_a0 = rest;
+                $tco_a1 = lst;
+                $tco_a2 = f;
+                $tco_a3 = $trmc17;
+                continue __tco;
               }
             }
           }
-          break;
         }
-        default: {
-          {
-            const $trmc18 = (() => { throw new Error("non-exhaustive pattern match"); })();
-            return ($dst._1 = $trmc18, undefined);
+        break;
+      }
+      case "Nil": {
+        switch (lst.$) {
+          case "Nil": {
+            {
+              const $trmc19 = { $: "Nil" };
+              return ($dst._1 = $trmc19, undefined);
+            }
+            break;
+          }
+          case "Cons": {
+            const $f730 = lst._0;
+            const $f731 = lst._1;
+            {
+              const t = $f731;
+              {
+                const h = $f730;
+                {
+                  const $t729 = (() => {
+                    return f._0(f, h);
+                  })();
+                  {
+                    $tco_a0 = $t729;
+                    $tco_a1 = t;
+                    $tco_a2 = f;
+                    $tco_a3 = $dst;
+                    continue __tco;
+                  }
+                }
+              }
+            }
+            break;
+          }
+          default: {
+            {
+              const $trmc18 = (() => { throw new Error("non-exhaustive pattern match"); })();
+              return ($dst._1 = $trmc18, undefined);
+            }
           }
         }
+        break;
       }
-      break;
-    }
-    default: {
-      {
-        const $trmc16 = (() => { throw new Error("non-exhaustive pattern match"); })();
-        return ($dst._1 = $trmc16, undefined);
+      default: {
+        {
+          const $trmc16 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          return ($dst._1 = $trmc16, undefined);
+        }
       }
     }
+    return undefined;
   }
 }
 const List$flat_map_go$dps$List_Int$List_Int$Fn_Int_List_Int$List_Int$clo = { _0: ($_, sub, lst, f, $dst) => List$flat_map_go$dps$List_Int$List_Int$Fn_Int_List_Int$List_Int(sub, lst, f, $dst) };
@@ -9041,9 +9147,9 @@ function Array$trie_fold$List_Int$TrieNode_Int$Fn_List_Int_Int_List_Int(acc, nod
       break;
     }
     case "TrieLeaf": {
-      const $f8080 = node._0;
+      const $f8057 = node._0;
       {
-        const values = $f8080;
+        const values = $f8057;
         {
           const go = { $: "$Clo_go$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int", _0: go$apply$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int, _1: f };
           return go$apply$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int(go, acc, values);
@@ -9052,9 +9158,9 @@ function Array$trie_fold$List_Int$TrieNode_Int$Fn_List_Int_Int_List_Int(acc, nod
       break;
     }
     case "TrieBranch": {
-      const $f8081 = node._0;
+      const $f8058 = node._0;
       {
-        const children = $f8081;
+        const children = $f8058;
         {
           const go = { $: "$Clo_go$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int", _0: go$apply$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int, _1: f };
           return go$apply$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int(go, acc, children);
@@ -9069,82 +9175,98 @@ function Array$trie_fold$List_Int$TrieNode_Int$Fn_List_Int_Int_List_Int(acc, nod
 }
 const Array$trie_fold$List_Int$TrieNode_Int$Fn_List_Int_Int_List_Int$clo = { _0: ($_, acc, node, f) => Array$trie_fold$List_Int$TrieNode_Int$Fn_List_Int_Int_List_Int(acc, node, f) };
 
-function Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int(nd, stk) {
-  switch (stk.$) {
-    case "Nil": {
-      return nd;
-      break;
-    }
-    case "Cons": {
-      const $f7978 = stk._0;
-      const $f7979 = stk._1;
-      {
-        const rest = $f7979;
+function Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int($tco_a0, $tco_a1) {
+  __tco: for (;;) {
+    const nd = $tco_a0;
+    const stk = $tco_a1;
+    switch (stk.$) {
+      case "Nil": {
+        return nd;
+        break;
+      }
+      case "Cons": {
+        const $f7955 = stk._0;
+        const $f7956 = stk._1;
         {
-          const frame = $f7978;
+          const rest = $f7956;
           {
-            const children = frame._0;
+            const frame = $f7955;
             {
-              const slot = frame._1;
+              const children = frame._0;
               {
-                const $t7976 = (() => {
-                  {
-                    const $t7975 = (() => {
-                      {
-                        const rev_onto_i7317 = { $: "$Clo_rev_onto$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int", _0: rev_onto$apply$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int };
+                const slot = frame._1;
+                {
+                  const $t7953 = (() => {
+                    {
+                      const $t7952 = (() => {
                         {
-                          const go_i7318 = { $: "$Clo_go$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int", _0: go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int, _1: nd, _2: rev_onto_i7317 };
+                          const rev_onto_i7317 = { $: "$Clo_rev_onto$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int", _0: rev_onto$apply$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int };
                           {
-                            const $t7968_i7319 = { $: "Nil" };
-                            return go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int(go_i7318, children, slot, $t7968_i7319);
+                            const go_i7318 = { $: "$Clo_go$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int", _0: go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int, _1: nd, _2: rev_onto_i7317 };
+                            {
+                              const $t7945_i7319 = { $: "Nil" };
+                              return go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int(go_i7318, children, slot, $t7945_i7319);
+                            }
                           }
                         }
-                      }
-                    })();
-                    return { $: "TrieBranch", _0: $t7975 };
+                      })();
+                      return { $: "TrieBranch", _0: $t7952 };
+                    }
+                  })();
+                  {
+                    $tco_a0 = $t7953;
+                    $tco_a1 = rest;
+                    continue __tco;
                   }
-                })();
-                return Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int($t7976, rest);
+                }
+              }
+            }
+          }
+        }
+        break;
+      }
+      default: {
+        return (() => { throw new Error("non-exhaustive pattern match"); })();
+      }
+    }
+    return undefined;
+  }
+}
+const Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int$clo = { _0: ($_, nd, stk) => Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int(nd, stk) };
+
+function go$apply$0_List_range($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const i = $tco_a1;
+    const acc = $tco_a2;
+    {
+      const go = (() => {
+        return $clo;
+      })();
+      {
+        const start = $clo._1;
+        {
+          const $t631 = (i < start);
+          if ($t631 === true) {
+            return acc;
+          } else {
+            {
+              const $t632 = march_int_ovf(i - 1, 1);
+              {
+                const $t633 = { $: "Cons", _0: i, _1: acc };
+                {
+                  $tco_a0 = go;
+                  $tco_a1 = $t632;
+                  $tco_a2 = $t633;
+                  continue __tco;
+                }
               }
             }
           }
         }
       }
-      break;
     }
-    default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
-    }
-  }
-}
-const Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int$clo = { _0: ($_, nd, stk) => Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int(nd, stk) };
-
-function go$apply$0_List_range($clo, i, acc) {
-  {
-    const go = (() => {
-      return $clo;
-    })();
-    {
-      const start = $clo._1;
-      {
-        const $t654 = (i < start);
-        if ($t654 === true) {
-          return (() => {
-            return acc;
-          })();
-        } else {
-          return (() => {
-            {
-              const $t655 = (i - 1);
-              {
-                const $t656 = { $: "Cons", _0: i, _1: acc };
-                return go$apply$0_List_range(go, $t655, $t656);
-              }
-            }
-          })();
-        }
-      }
-    }
+    return undefined;
   }
 }
 const go$apply$0_List_range$clo = { _0: ($_, $clo, i, acc) => go$apply$0_List_range($clo, i, acc) };
@@ -9156,61 +9278,59 @@ function $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides($clo, c) {
       const origin_x = $clo._2;
       {
         const origin_y = $clo._3;
-        const $f44848 = c._0;
-        const $f44849 = c._1;
+        const $f44824 = c._0;
+        const $f44825 = c._1;
         {
-          const dy = $f44849;
+          const dy = $f44825;
           {
-            const dx = $f44848;
+            const dx = $f44824;
             {
-              const x = (origin_x + dx);
+              const x = march_int_ovf(origin_x + dx, 0);
               {
-                const y = (origin_y + dy);
+                const y = march_int_ovf(origin_y + dy, 0);
                 {
-                  const $t44845 = (() => {
+                  const $t44821 = (() => {
                     {
-                      const $t44841_i8162 = (() => {
+                      const $t44817_i8162 = (() => {
                         {
-                          const $t44839_i8160 = (() => {
+                          const $t44815_i8160 = (() => {
                             {
-                              const $t44836_i8157 = (x >= 0);
+                              const $t44812_i8157 = (x >= 0);
                               {
-                                const $t44838_i8159 = (x < 10);
-                                return ($t44836_i8157 && $t44838_i8159);
+                                const $t44814_i8159 = (x < 10);
+                                return ($t44812_i8157 && $t44814_i8159);
                               }
                             }
                           })();
                           {
-                            const $t44840_i8161 = (y >= 0);
-                            return ($t44839_i8160 && $t44840_i8161);
+                            const $t44816_i8161 = (y >= 0);
+                            return ($t44815_i8160 && $t44816_i8161);
                           }
                         }
                       })();
                       {
-                        const $t44843_i8164 = (y < 20);
-                        return ($t44841_i8162 && $t44843_i8164);
+                        const $t44819_i8164 = (y < 20);
+                        return ($t44817_i8162 && $t44819_i8164);
                       }
                     }
                   })();
-                  if ($t44845 === false) {
+                  if ($t44821 === false) {
                     return true;
-                  } else if ($t44845 === true) {
-                    return (() => {
-                      {
-                        const $t44847 = (() => {
-                          {
-                            const $t44846 = (() => {
-                              {
-                                const $t44824_i8154 = (y * 10);
-                                return ($t44824_i8154 + x);
-                              }
-                            })();
-                            return Array$get$PVec_Int$Int(board, $t44846);
-                          }
-                        })();
-                        return ($t44847 !== 0);
-                      }
-                    })();
+                  } else if ($t44821 === true) {
+                    {
+                      const $t44823 = (() => {
+                        {
+                          const $t44822 = (() => {
+                            {
+                              const $t44800_i8154 = march_int_ovf(y * 10, 2);
+                              return march_int_ovf($t44800_i8154 + x, 0);
+                            }
+                          })();
+                          return Array$get$PVec_Int$Int(board, $t44822);
+                        }
+                      })();
+                      return ($t44823 !== 0);
+                    }
                   } else {
                     return (() => { throw new Error("non-exhaustive pattern match"); })();
                   }
@@ -9219,7 +9339,6 @@ function $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides($clo, c) {
             }
           }
         }
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
       }
     }
   }
@@ -9233,67 +9352,62 @@ function $lam0_TetrisLogic_lock_piece$apply$0_TetrisLogic_lock_piece($clo, b, c)
       const origin_x = $clo._2;
       {
         const origin_y = $clo._3;
-        const $f44858 = c._0;
-        const $f44859 = c._1;
+        const $f44834 = c._0;
+        const $f44835 = c._1;
         {
-          const dy = $f44859;
+          const dy = $f44835;
           {
-            const dx = $f44858;
+            const dx = $f44834;
             {
-              const x = (origin_x + dx);
+              const x = march_int_ovf(origin_x + dx, 0);
               {
-                const y = (origin_y + dy);
+                const y = march_int_ovf(origin_y + dy, 0);
                 {
-                  const $t44856 = (() => {
+                  const $t44832 = (() => {
                     {
-                      const $t44841_i8176 = (() => {
+                      const $t44817_i8176 = (() => {
                         {
-                          const $t44839_i8174 = (() => {
+                          const $t44815_i8174 = (() => {
                             {
-                              const $t44836_i8171 = (x >= 0);
+                              const $t44812_i8171 = (x >= 0);
                               {
-                                const $t44838_i8173 = (x < 10);
-                                return ($t44836_i8171 && $t44838_i8173);
+                                const $t44814_i8173 = (x < 10);
+                                return ($t44812_i8171 && $t44814_i8173);
                               }
                             }
                           })();
                           {
-                            const $t44840_i8175 = (y >= 0);
-                            return ($t44839_i8174 && $t44840_i8175);
+                            const $t44816_i8175 = (y >= 0);
+                            return ($t44815_i8174 && $t44816_i8175);
                           }
                         }
                       })();
                       {
-                        const $t44843_i8178 = (y < 20);
-                        return ($t44841_i8176 && $t44843_i8178);
+                        const $t44819_i8178 = (y < 20);
+                        return ($t44817_i8176 && $t44819_i8178);
                       }
                     }
                   })();
-                  if ($t44856 === true) {
-                    return (() => {
-                      {
-                        const $t44857 = (() => {
-                          {
-                            const $t44824_i8168 = (y * 10);
-                            return ($t44824_i8168 + x);
-                          }
-                        })();
-                        return Array$set$PVec_Int$Int$Int(b, $t44857, color_idx);
-                      }
-                    })();
-                  } else if ($t44856 === false) {
+                  if ($t44832 === true) {
+                    {
+                      const $t44833 = (() => {
+                        {
+                          const $t44800_i8168 = march_int_ovf(y * 10, 2);
+                          return march_int_ovf($t44800_i8168 + x, 0);
+                        }
+                      })();
+                      return Array$set$PVec_Int$Int$Int(b, $t44833, color_idx);
+                    }
+                  } else if ($t44832 === false) {
                     return b;
                   } else {
-                    return (() => {
-                      return (() => { throw new Error("non-exhaustive pattern match"); })();
-                    })();
+                    return (() => { throw new Error("non-exhaustive pattern match"); })();
                   }
                 }
               }
             }
           }
         }
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
       }
     }
   }
@@ -9306,18 +9420,18 @@ function $lam0_TetrisLogic_row_full$apply$0_TetrisLogic_row_full($clo, x) {
     {
       const y = $clo._2;
       {
-        const $t44869 = (() => {
+        const $t44845 = (() => {
           {
-            const $t44868 = (() => {
+            const $t44844 = (() => {
               {
-                const $t44824_i8182 = (y * 10);
-                return ($t44824_i8182 + x);
+                const $t44800_i8182 = march_int_ovf(y * 10, 2);
+                return march_int_ovf($t44800_i8182 + x, 0);
               }
             })();
-            return Array$get$PVec_Int$Int(board, $t44868);
+            return Array$get$PVec_Int$Int(board, $t44844);
           }
         })();
-        return ($t44869 !== 0);
+        return ($t44845 !== 0);
       }
     }
   }
@@ -9330,13 +9444,13 @@ function $lam0_TetrisLogic_row_cells$apply$0_TetrisLogic_row_cells($clo, x) {
     {
       const y = $clo._2;
       {
-        const $t44874 = (() => {
+        const $t44850 = (() => {
           {
-            const $t44824_i8186 = (y * 10);
-            return ($t44824_i8186 + x);
+            const $t44800_i8186 = march_int_ovf(y * 10, 2);
+            return march_int_ovf($t44800_i8186 + x, 0);
           }
         })();
-        return Array$get$PVec_Int$Int(board, $t44874);
+        return Array$get$PVec_Int$Int(board, $t44850);
       }
     }
   }
@@ -9347,27 +9461,27 @@ function $lam0_TetrisLogic_clear_lines$apply$0_TetrisLogic_clear_lines($clo, y) 
   {
     const board = $clo._1;
     {
-      const $t44878 = (() => {
+      const $t44854 = (() => {
         {
-          const $t44866_i13294 = (() => {
+          const $t44842_i13294 = (() => {
             {
               const go_i5207_i13291 = { $: "$Clo_go$0_List_range", _0: go$apply$0_List_range, _1: 0 };
               {
-                const $t658_i5209_i13293 = { $: "Nil" };
-                return go$apply$0_List_range(go_i5207_i13291, 9, $t658_i5209_i13293);
+                const $t635_i5209_i13293 = { $: "Nil" };
+                return go$apply$0_List_range(go_i5207_i13291, 9, $t635_i5209_i13293);
               }
             }
           })();
           {
-            const $t44870_i13295 = { $: "$Clo_$lam0_TetrisLogic_row_full$0_TetrisLogic_row_full", _0: $lam0_TetrisLogic_row_full$apply$0_TetrisLogic_row_full, _1: board, _2: y };
+            const $t44846_i13295 = { $: "$Clo_$lam0_TetrisLogic_row_full$0_TetrisLogic_row_full", _0: $lam0_TetrisLogic_row_full$apply$0_TetrisLogic_row_full, _1: board, _2: y };
             {
-              const $rc_2401_i13296 = List$all$List_Int$Fn_Int_Bool($t44866_i13294, $t44870_i13295);
+              const $rc_2401_i13296 = List$all$List_Int$Fn_Int_Bool($t44842_i13294, $t44846_i13295);
               return $rc_2401_i13296;
             }
           }
         }
       })();
-      return (!$t44878);
+      return (!$t44854);
     }
   }
 }
@@ -9377,39 +9491,39 @@ function $lam1_TetrisLogic_clear_lines$apply$1_TetrisLogic_clear_lines($clo, y) 
   {
     const board = $clo._1;
     {
-      const $t44872_i8190 = (() => {
+      const $t44848_i8190 = (() => {
         {
           const go_i13469 = { $: "$Clo_go$0_List_range", _0: go$apply$0_List_range, _1: 0 };
           {
-            const $t658_i13471 = { $: "Nil" };
-            return go$apply$0_List_range(go_i13469, 9, $t658_i13471);
+            const $t635_i13471 = { $: "Nil" };
+            return go$apply$0_List_range(go_i13469, 9, $t635_i13471);
           }
         }
       })();
       {
-        const $t44875_i8191 = { $: "$Clo_$lam0_TetrisLogic_row_cells$0_TetrisLogic_row_cells", _0: $lam0_TetrisLogic_row_cells$apply$0_TetrisLogic_row_cells, _1: board, _2: y };
+        const $t44851_i8191 = { $: "$Clo_$lam0_TetrisLogic_row_cells$0_TetrisLogic_row_cells", _0: $lam0_TetrisLogic_row_cells$apply$0_TetrisLogic_row_cells, _1: board, _2: y };
         {
-          const xs_i13499 = $t44872_i8190;
+          const xs_i13499 = $t44848_i8190;
           {
-            const f_i13500 = $t44875_i8191;
+            const f_i13500 = $t44851_i8191;
             switch (xs_i13499.$) {
               case "Nil": {
                 return { $: "Nil" };
                 break;
               }
               case "Cons": {
-                const $f737_i13501 = xs_i13499._0;
-                const $f738_i13502 = xs_i13499._1;
+                const $f714_i13501 = xs_i13499._0;
+                const $f715_i13502 = xs_i13499._1;
                 {
-                  const t_i13503 = $f738_i13502;
+                  const t_i13503 = $f715_i13502;
                   {
-                    const h_i13504 = $f737_i13501;
+                    const h_i13504 = $f714_i13501;
                     {
-                      const $t735_i13505 = (() => {
+                      const $t712_i13505 = (() => {
                         return f_i13500._0(f_i13500, h_i13504);
                       })();
                       {
-                        const $trmc15_i13506 = { $: "Cons", _0: $t735_i13505, _1: null };
+                        const $trmc15_i13506 = { $: "Cons", _0: $t712_i13505, _1: null };
                         List$map$dps$List_Int$Fn_Int_Int$List_Int(t_i13503, f_i13500, $trmc15_i13506);
                         return $trmc15_i13506;
                       }
@@ -9437,14 +9551,14 @@ const $lam0_int_list_to_string$apply$0_int_list_to_string$clo = { _0: ($_, $clo,
 
 function $lam0_string_to_int_list$apply$0_string_to_int_list($clo, x) {
   {
-    const $t44892 = (() => {
+    const $t44868 = (() => {
       {
         const $rc_3137 = march_string_to_int(x);
         return $rc_3137;
       }
     })();
     {
-      const $rc_3136 = Option$unwrap_or$Option_Int$Int($t44892, 0);
+      const $rc_3136 = Option$unwrap_or$Option_Int$Int($t44868, 0);
       return $rc_3136;
     }
   }
@@ -9455,24 +9569,24 @@ function $lam0_render_board$apply$0_render_board($clo, y) {
   {
     const board = $clo._1;
     {
-      const $t44949 = (() => {
+      const $t44925 = (() => {
         {
           const go_i8197 = { $: "$Clo_go$0_List_range", _0: go$apply$0_List_range, _1: 0 };
           {
-            const $t658_i8199 = { $: "Nil" };
-            return go$apply$0_List_range(go_i8197, 9, $t658_i8199);
+            const $t635_i8199 = { $: "Nil" };
+            return go$apply$0_List_range(go_i8197, 9, $t635_i8199);
           }
         }
       })();
       {
-        const $t44957 = (() => {
+        const $t44933 = (() => {
           return { $: "$Clo_$lam0__lam0_render_board$1_render_board", _0: $lam0__lam0_render_board$apply$1_render_board, _1: board, _2: y };
         })();
         {
-          const f_i8193 = $t44957;
+          const f_i8193 = $t44933;
           {
             const go_i8194 = { $: "$Clo_go$0_List_each_List_Int_Fn_Int_T_", _0: go$apply$0_List_each_List_Int_Fn_Int_T_, _1: f_i8193 };
-            return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i8194, $t44949);
+            return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i8194, $t44925);
           }
         }
       }
@@ -9489,8 +9603,8 @@ function $lam0__lam0_render_board$apply$1_render_board($clo, x) {
       {
         const idx = (() => {
           {
-            const $t44824_i8204 = (y * 10);
-            return ($t44824_i8204 + x);
+            const $t44800_i8204 = march_int_ovf(y * 10, 2);
+            return march_int_ovf($t44800_i8204 + x, 0);
           }
         })();
         {
@@ -9500,59 +9614,55 @@ function $lam0__lam0_render_board$apply$1_render_board($clo, x) {
           {
             const id = (() => {
               {
-                const $t44951 = String(x);
+                const $t44927 = String(x);
                 {
-                  const $t44952 = String(y);
+                  const $t44928 = String(y);
                   {
-                    const $rc_3138 = march_string_concat_n("cell-", $t44951, "-", $t44952);
+                    const $rc_3138 = march_string_concat_n("cell-", $t44927, "-", $t44928);
                     return $rc_3138;
                   }
                 }
               }
             })();
             {
-              const $t44953 = Js$Dom$find(id);
-              switch ($t44953.$) {
+              const $t44929 = Js$Dom$find(id);
+              switch ($t44929.$) {
                 case "None": {
                   return {  };
                   break;
                 }
                 case "Some": {
-                  const $f44956 = $t44953._0;
+                  const $f44932 = $t44929._0;
                   {
-                    const cell = $f44956;
+                    const cell = $f44932;
                     {
-                      const $t44954 = (v === 0);
-                      if ($t44954 === true) {
+                      const $t44930 = (v === 0);
+                      if ($t44930 === true) {
                         return Js$Dom$set_style(cell, "background", "");
-                      } else if ($t44954 === false) {
-                        return (() => {
-                          {
-                            let $t44955;
-                            if (v === 1) {
-                              $t44955 = "#00CED1";
-                            } else if (v === 2) {
-                              $t44955 = "#FFD700";
-                            } else if (v === 3) {
-                              $t44955 = "#9B59B6";
-                            } else if (v === 4) {
-                              $t44955 = "#2ECC71";
-                            } else if (v === 5) {
-                              $t44955 = "#E74C3C";
-                            } else if (v === 6) {
-                              $t44955 = "#3498DB";
-                            } else if (v === 7) {
-                              $t44955 = "#F39C12";
-                            } else {
-                              $t44955 = "";
-                            }
-                            return Js$Dom$set_style(cell, "background", $t44955);
+                      } else if ($t44930 === false) {
+                        {
+                          let $t44931;
+                          if (v === 1) {
+                            $t44931 = "#00CED1";
+                          } else if (v === 2) {
+                            $t44931 = "#FFD700";
+                          } else if (v === 3) {
+                            $t44931 = "#9B59B6";
+                          } else if (v === 4) {
+                            $t44931 = "#2ECC71";
+                          } else if (v === 5) {
+                            $t44931 = "#E74C3C";
+                          } else if (v === 6) {
+                            $t44931 = "#3498DB";
+                          } else if (v === 7) {
+                            $t44931 = "#F39C12";
+                          } else {
+                            $t44931 = "";
                           }
-                        })();
+                          return Js$Dom$set_style(cell, "background", $t44931);
+                        }
                       } else {
-                        return (() => {
-                          return (() => { throw new Error("non-exhaustive pattern match"); })();
-                        })();
+                        return (() => { throw new Error("non-exhaustive pattern match"); })();
                       }
                     }
                   }
@@ -9578,118 +9688,116 @@ function $lam0_render_falling$apply$0_render_falling($clo, c) {
       const oy = $clo._2;
       {
         const piece = $clo._3;
-        const $f44974 = c._0;
-        const $f44975 = c._1;
+        const $f44950 = c._0;
+        const $f44951 = c._1;
         {
-          const dy = $f44975;
+          const dy = $f44951;
           {
-            const dx = $f44974;
+            const dx = $f44950;
             {
-              const x = (ox + dx);
+              const x = march_int_ovf(ox + dx, 0);
               {
-                const y = (oy + dy);
+                const y = march_int_ovf(oy + dy, 0);
                 {
-                  const $t44968 = (() => {
+                  const $t44944 = (() => {
                     {
-                      const $t44965 = (() => {
+                      const $t44941 = (() => {
                         {
-                          const $t44963 = (() => {
+                          const $t44939 = (() => {
                             {
-                              const $t44960 = (x >= 0);
+                              const $t44936 = (x >= 0);
                               {
-                                const $t44962 = (x < 10);
-                                return ($t44960 && $t44962);
+                                const $t44938 = (x < 10);
+                                return ($t44936 && $t44938);
                               }
                             }
                           })();
                           {
-                            const $t44964 = (y >= 0);
-                            return ($t44963 && $t44964);
+                            const $t44940 = (y >= 0);
+                            return ($t44939 && $t44940);
                           }
                         }
                       })();
                       {
-                        const $t44967 = (y < 20);
-                        return ($t44965 && $t44967);
+                        const $t44943 = (y < 20);
+                        return ($t44941 && $t44943);
                       }
                     }
                   })();
-                  if ($t44968 === false) {
+                  if ($t44944 === false) {
                     return {  };
-                  } else if ($t44968 === true) {
-                    return (() => {
-                      {
-                        const id = (() => {
-                          {
-                            const $t44969 = String(x);
-                            {
-                              const $t44970 = String(y);
-                              {
-                                const $rc_3139 = march_string_concat_n("cell-", $t44969, "-", $t44970);
-                                return $rc_3139;
-                              }
-                            }
-                          }
-                        })();
+                  } else if ($t44944 === true) {
+                    {
+                      const id = (() => {
                         {
-                          const $t44971 = Js$Dom$find(id);
-                          switch ($t44971.$) {
-                            case "None": {
-                              return {  };
-                              break;
-                            }
-                            case "Some": {
-                              const $f44973 = $t44971._0;
-                              {
-                                const cell = $f44973;
-                                {
-                                  let $t44972;
-                                  switch (piece.$) {
-                                    case "I": {
-                                      $t44972 = "#00CED1";
-                                      break;
-                                    }
-                                    case "O": {
-                                      $t44972 = "#FFD700";
-                                      break;
-                                    }
-                                    case "T": {
-                                      $t44972 = "#9B59B6";
-                                      break;
-                                    }
-                                    case "S": {
-                                      $t44972 = "#2ECC71";
-                                      break;
-                                    }
-                                    case "Z": {
-                                      $t44972 = "#E74C3C";
-                                      break;
-                                    }
-                                    case "J": {
-                                      $t44972 = "#3498DB";
-                                      break;
-                                    }
-                                    case "L": {
-                                      $t44972 = "#F39C12";
-                                      break;
-                                    }
-                                    default: {
-                                      $t44972 = (() => { throw new Error("non-exhaustive pattern match"); })();
-                                      break;
-                                    }
-                                  }
-                                  return Js$Dom$set_style(cell, "background", $t44972);
-                                }
-                              }
-                              break;
-                            }
-                            default: {
-                              return (() => { throw new Error("non-exhaustive pattern match"); })();
+                          const $t44945 = String(x);
+                          {
+                            const $t44946 = String(y);
+                            {
+                              const $rc_3139 = march_string_concat_n("cell-", $t44945, "-", $t44946);
+                              return $rc_3139;
                             }
                           }
                         }
+                      })();
+                      {
+                        const $t44947 = Js$Dom$find(id);
+                        switch ($t44947.$) {
+                          case "None": {
+                            return {  };
+                            break;
+                          }
+                          case "Some": {
+                            const $f44949 = $t44947._0;
+                            {
+                              const cell = $f44949;
+                              {
+                                let $t44948;
+                                switch (piece.$) {
+                                  case "I": {
+                                    $t44948 = "#00CED1";
+                                    break;
+                                  }
+                                  case "O": {
+                                    $t44948 = "#FFD700";
+                                    break;
+                                  }
+                                  case "T": {
+                                    $t44948 = "#9B59B6";
+                                    break;
+                                  }
+                                  case "S": {
+                                    $t44948 = "#2ECC71";
+                                    break;
+                                  }
+                                  case "Z": {
+                                    $t44948 = "#E74C3C";
+                                    break;
+                                  }
+                                  case "J": {
+                                    $t44948 = "#3498DB";
+                                    break;
+                                  }
+                                  case "L": {
+                                    $t44948 = "#F39C12";
+                                    break;
+                                  }
+                                  default: {
+                                    $t44948 = (() => { throw new Error("non-exhaustive pattern match"); })();
+                                    break;
+                                  }
+                                }
+                                return Js$Dom$set_style(cell, "background", $t44948);
+                              }
+                            }
+                            break;
+                          }
+                          default: {
+                            return (() => { throw new Error("non-exhaustive pattern match"); })();
+                          }
+                        }
                       }
-                    })();
+                    }
                   } else {
                     return (() => { throw new Error("non-exhaustive pattern match"); })();
                   }
@@ -9698,7 +9806,6 @@ function $lam0_render_falling$apply$0_render_falling($clo, c) {
             }
           }
         }
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
       }
     }
   }
@@ -9707,37 +9814,31 @@ const $lam0_render_falling$apply$0_render_falling$clo = { _0: ($_, $clo, c) => $
 
 function $lam0_tick$apply$0_tick($clo, board, piece, rot, x, y, next, score, lines, rng) {
   {
-    const $t45103 = TetrisLogic$piece_cells(piece);
+    const $t45079 = TetrisLogic$piece_cells(piece);
     {
-      const cells = rotate_n($t45103, rot);
+      const cells = rotate_n($t45079, rot);
       {
-        const $t45105 = (() => {
+        const $t45081 = (() => {
           {
-            const $t45104 = (y + 1);
+            const $t45080 = march_int_ovf(y + 1, 0);
             {
-              const $t44854_i8209 = { $: "$Clo_$lam0_TetrisLogic_collides$0_TetrisLogic_collides", _0: $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides, _1: board, _2: x, _3: $t45104 };
-              return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(cells, $t44854_i8209);
+              const $t44830_i8209 = { $: "$Clo_$lam0_TetrisLogic_collides$0_TetrisLogic_collides", _0: $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides, _1: board, _2: x, _3: $t45080 };
+              return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(cells, $t44830_i8209);
             }
           }
         })();
-        if ($t45105 === true) {
-          return (() => {
-            {
-              const $rc_3140 = lock_and_advance(board, piece, rot, x, y, next, score, lines, rng);
-              return $rc_3140;
-            }
-          })();
-        } else if ($t45105 === false) {
-          return (() => {
-            {
-              const $t45106 = (y + 1);
-              return { _0: board, _1: piece, _2: rot, _3: x, _4: $t45106, _5: next, _6: score, _7: lines, _8: rng, _9: false };
-            }
-          })();
+        if ($t45081 === true) {
+          {
+            const $rc_3140 = lock_and_advance(board, piece, rot, x, y, next, score, lines, rng);
+            return $rc_3140;
+          }
+        } else if ($t45081 === false) {
+          {
+            const $t45082 = march_int_ovf(y + 1, 0);
+            return { _0: board, _1: piece, _2: rot, _3: x, _4: $t45082, _5: next, _6: score, _7: lines, _8: rng, _9: false };
+          }
         } else {
-          return (() => {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
-          })();
+          return (() => { throw new Error("non-exhaustive pattern match"); })();
         }
       }
     }
@@ -9748,16 +9849,14 @@ const $lam0_tick$apply$0_tick$clo = { _0: ($_, $clo, board, piece, rot, x, y, ne
 function $lam0_schedule_tick$apply$0_schedule_tick($clo, _) {
   (() => {
     {
-      const $t45101_i13298 = is_paused();
-      if ($t45101_i13298 === true) {
+      const $t45077_i13298 = is_paused();
+      if ($t45077_i13298 === true) {
         return {  };
-      } else if ($t45101_i13298 === false) {
-        return (() => {
-          {
-            const $t45107_i13299 = { $: "$Clo_$lam0_tick$0_tick", _0: $lam0_tick$apply$0_tick };
-            return with_state($t45107_i13299);
-          }
-        })();
+      } else if ($t45077_i13298 === false) {
+        {
+          const $t45083_i13299 = { $: "$Clo_$lam0_tick$0_tick", _0: $lam0_tick$apply$0_tick };
+          return with_state($t45083_i13299);
+        }
       } else {
         return (() => { throw new Error("non-exhaustive pattern match"); })();
       }
@@ -9766,28 +9865,28 @@ function $lam0_schedule_tick$apply$0_schedule_tick($clo, _) {
   {
     const level_i8212 = (() => {
       {
-        const $t45109_i8211 = (() => {
+        const $t45085_i8211 = (() => {
           {
-            const $t45108_i8210 = state_el();
-            return get_int_attr($t45108_i8210, "data-lines", 0);
+            const $t45084_i8210 = state_el();
+            return get_int_attr($t45084_i8210, "data-lines", 0);
           }
         })();
-        return TetrisLogic$level_for_lines($t45109_i8211);
+        return TetrisLogic$level_for_lines($t45085_i8211);
       }
     })();
     {
-      const $t45110_i8213 = (() => {
+      const $t45086_i8213 = (() => {
         {
-          const $t44822_i13474 = (() => {
+          const $t44798_i13474 = (() => {
             {
-              const $t44821_i13473 = (level_i8212 * 40);
-              return (500 - $t44821_i13473);
+              const $t44797_i13473 = march_int_ovf(level_i8212 * 40, 2);
+              return march_int_ovf(500 - $t44797_i13473, 1);
             }
           })();
           {
-            const $t2205_i5200_i13475 = ($t44822_i13474 > 100);
-            if ($t2205_i5200_i13475 === true) {
-              return $t44822_i13474;
+            const $t2182_i5200_i13475 = ($t44798_i13474 > 100);
+            if ($t2182_i5200_i13475 === true) {
+              return $t44798_i13474;
             } else {
               return 100;
             }
@@ -9795,8 +9894,8 @@ function $lam0_schedule_tick$apply$0_schedule_tick($clo, _) {
         }
       })();
       {
-        const $t45112_i8214 = { $: "$Clo_$lam0_schedule_tick$0_schedule_tick", _0: $lam0_schedule_tick$apply$0_schedule_tick };
-        return Js$Dom$set_timeout($t45110_i8213, $t45112_i8214);
+        const $t45088_i8214 = { $: "$Clo_$lam0_schedule_tick$0_schedule_tick", _0: $lam0_schedule_tick$apply$0_schedule_tick };
+        return Js$Dom$set_timeout($t45086_i8213, $t45088_i8214);
       }
     }
   }
@@ -9809,38 +9908,34 @@ function $lam0_try_move$apply$0_try_move($clo, board, piece, rot, x, y, next, sc
     {
       const dy = $clo._2;
       {
-        const $t45114 = TetrisLogic$piece_cells(piece);
+        const $t45090 = TetrisLogic$piece_cells(piece);
         {
-          const cells = rotate_n($t45114, rot);
+          const cells = rotate_n($t45090, rot);
           {
-            const $t45117 = (() => {
+            const $t45093 = (() => {
               {
-                const $t45115 = (x + dx);
+                const $t45091 = march_int_ovf(x + dx, 0);
                 {
-                  const $t45116 = (y + dy);
+                  const $t45092 = march_int_ovf(y + dy, 0);
                   {
-                    const $t44854_i8219 = { $: "$Clo_$lam0_TetrisLogic_collides$0_TetrisLogic_collides", _0: $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides, _1: board, _2: $t45115, _3: $t45116 };
-                    return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(cells, $t44854_i8219);
+                    const $t44830_i8219 = { $: "$Clo_$lam0_TetrisLogic_collides$0_TetrisLogic_collides", _0: $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides, _1: board, _2: $t45091, _3: $t45092 };
+                    return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(cells, $t44830_i8219);
                   }
                 }
               }
             })();
-            if ($t45117 === true) {
+            if ($t45093 === true) {
               return { _0: board, _1: piece, _2: rot, _3: x, _4: y, _5: next, _6: score, _7: lines, _8: rng, _9: false };
-            } else if ($t45117 === false) {
-              return (() => {
+            } else if ($t45093 === false) {
+              {
+                const $t45094 = march_int_ovf(x + dx, 0);
                 {
-                  const $t45118 = (x + dx);
-                  {
-                    const $t45119 = (y + dy);
-                    return { _0: board, _1: piece, _2: rot, _3: $t45118, _4: $t45119, _5: next, _6: score, _7: lines, _8: rng, _9: false };
-                  }
+                  const $t45095 = march_int_ovf(y + dy, 0);
+                  return { _0: board, _1: piece, _2: rot, _3: $t45094, _4: $t45095, _5: next, _6: score, _7: lines, _8: rng, _9: false };
                 }
-              })();
+              }
             } else {
-              return (() => {
-                return (() => { throw new Error("non-exhaustive pattern match"); })();
-              })();
+              return (() => { throw new Error("non-exhaustive pattern match"); })();
             }
           }
         }
@@ -9854,29 +9949,27 @@ function $lam0_try_rotate$apply$0_try_rotate($clo, board, piece, rot, x, y, next
   {
     const new_rot = (() => {
       {
-        const $t45122 = (rot + 1);
-        return ($t45122 % 4);
+        const $t45098 = march_int_ovf(rot + 1, 0);
+        return ($t45098 % 4);
       }
     })();
     {
-      const $t45123 = TetrisLogic$piece_cells(piece);
+      const $t45099 = TetrisLogic$piece_cells(piece);
       {
-        const cells = rotate_n($t45123, new_rot);
+        const cells = rotate_n($t45099, new_rot);
         {
-          const $t45124 = (() => {
+          const $t45100 = (() => {
             {
-              const $t44854_i8224 = { $: "$Clo_$lam0_TetrisLogic_collides$0_TetrisLogic_collides", _0: $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides, _1: board, _2: x, _3: y };
-              return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(cells, $t44854_i8224);
+              const $t44830_i8224 = { $: "$Clo_$lam0_TetrisLogic_collides$0_TetrisLogic_collides", _0: $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides, _1: board, _2: x, _3: y };
+              return List$any$List_T_Int_Int$Fn_T_Int_Int_Bool(cells, $t44830_i8224);
             }
           })();
-          if ($t45124 === true) {
+          if ($t45100 === true) {
             return { _0: board, _1: piece, _2: rot, _3: x, _4: y, _5: next, _6: score, _7: lines, _8: rng, _9: false };
-          } else if ($t45124 === false) {
+          } else if ($t45100 === false) {
             return { _0: board, _1: piece, _2: new_rot, _3: x, _4: y, _5: next, _6: score, _7: lines, _8: rng, _9: false };
           } else {
-            return (() => {
-              return (() => { throw new Error("non-exhaustive pattern match"); })();
-            })();
+            return (() => { throw new Error("non-exhaustive pattern match"); })();
           }
         }
       }
@@ -9887,9 +9980,9 @@ const $lam0_try_rotate$apply$0_try_rotate$clo = { _0: ($_, $clo, board, piece, r
 
 function $lam0_hard_drop$apply$0_hard_drop($clo, board, piece, rot, x, y, next, score, lines, rng) {
   {
-    const $t45130 = TetrisLogic$piece_cells(piece);
+    const $t45106 = TetrisLogic$piece_cells(piece);
     {
-      const cells = rotate_n($t45130, rot);
+      const cells = rotate_n($t45106, rot);
       {
         const final_y = (() => {
           return fall_from(board, cells, x, y);
@@ -9914,24 +10007,24 @@ function $lam0_build_board_dom$apply$0_build_board_dom($clo, y) {
       })();
       (() => {
         {
-          const $t45205 = (() => {
+          const $t45181 = (() => {
             {
               const go_i8230 = { $: "$Clo_go$0_List_range", _0: go$apply$0_List_range, _1: 0 };
               {
-                const $t658_i8232 = { $: "Nil" };
-                return go$apply$0_List_range(go_i8230, 9, $t658_i8232);
+                const $t635_i8232 = { $: "Nil" };
+                return go$apply$0_List_range(go_i8230, 9, $t635_i8232);
               }
             }
           })();
           {
-            const $t45210 = (() => {
+            const $t45186 = (() => {
               return { $: "$Clo_$lam0__lam0_build_board_dom$1_build_board_dom", _0: $lam0__lam0_build_board_dom$apply$1_build_board_dom, _1: row, _2: y };
             })();
             {
-              const f_i8226 = $t45210;
+              const f_i8226 = $t45186;
               {
                 const go_i8227 = { $: "$Clo_go$0_List_each_List_Int_Fn_Int_T_", _0: go$apply$0_List_each_List_Int_Fn_Int_T_, _1: f_i8226 };
-                return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i8227, $t45205);
+                return go$apply$0_List_each_List_Int_Fn_Int_T_(go_i8227, $t45181);
               }
             }
           }
@@ -9955,19 +10048,19 @@ function $lam0__lam0_build_board_dom$apply$1_build_board_dom($clo, x) {
         })();
         (() => {
           {
-            const $t45209 = (() => {
+            const $t45185 = (() => {
               {
-                const $t45207 = String(x);
+                const $t45183 = String(x);
                 {
-                  const $t45208 = String(y);
+                  const $t45184 = String(y);
                   {
-                    const $rc_3142 = march_string_concat_n("cell-", $t45207, "-", $t45208);
+                    const $rc_3142 = march_string_concat_n("cell-", $t45183, "-", $t45184);
                     return $rc_3142;
                   }
                 }
               }
             })();
-            return Js$Dom$set_attr(cell, "id", $t45209);
+            return Js$Dom$set_attr(cell, "id", $t45185);
           }
         })();
         return Js$Dom$append(row, cell);
@@ -9987,118 +10080,139 @@ function $lam1_main$apply$1_main($clo, _) {
 }
 const $lam1_main$apply$1_main$clo = { _0: ($_, $clo, _) => $lam1_main$apply$1_main($clo, _) };
 
-function go$apply$0_List_repeat_Int_Int($clo, i, acc) {
-  {
-    const go = (() => {
-      return $clo;
-    })();
+function go$apply$0_List_repeat_Int_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const i = $tco_a1;
+    const acc = $tco_a2;
     {
-      const x = $clo._1;
+      const go = (() => {
+        return $clo;
+      })();
       {
-        const $t650 = (i <= 0);
-        if ($t650 === true) {
-          return (() => {
+        const x = $clo._1;
+        {
+          const $t627 = (i <= 0);
+          if ($t627 === true) {
             return acc;
-          })();
-        } else {
-          return (() => {
+          } else {
             {
-              const $t651 = (i - 1);
+              const $t628 = march_int_ovf(i - 1, 1);
               {
-                const $t652 = { $: "Cons", _0: x, _1: acc };
-                return go$apply$0_List_repeat_Int_Int(go, $t651, $t652);
+                const $t629 = { $: "Cons", _0: x, _1: acc };
+                {
+                  $tco_a0 = go;
+                  $tco_a1 = $t628;
+                  $tco_a2 = $t629;
+                  continue __tco;
+                }
               }
             }
-          })();
+          }
         }
       }
     }
+    return undefined;
   }
 }
 const go$apply$0_List_repeat_Int_Int$clo = { _0: ($_, $clo, i, acc) => go$apply$0_List_repeat_Int_Int($clo, i, acc) };
 
-function go$apply$0_List_length_List_Int($clo, lst, acc) {
-  {
-    const go = $clo;
-    switch (lst.$) {
-      case "Nil": {
-        return acc;
-        break;
-      }
-      case "Cons": {
-        const $f714 = lst._0;
-        const $f715 = lst._1;
-        {
-          const t = $f715;
-          {
-            const $t713 = (acc + 1);
-            return go$apply$0_List_length_List_Int($clo, t, $t713);
-          }
+function go$apply$0_List_length_List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const lst = $tco_a1;
+    const acc = $tco_a2;
+    {
+      const go = $clo;
+      switch (lst.$) {
+        case "Nil": {
+          return acc;
+          break;
         }
-        break;
-      }
-      default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        case "Cons": {
+          const $f691 = lst._0;
+          const $f692 = lst._1;
+          {
+            const t = $f692;
+            {
+              const $t690 = march_int_ovf(acc + 1, 0);
+              {
+                $tco_a0 = $clo;
+                $tco_a1 = t;
+                $tco_a2 = $t690;
+                continue __tco;
+              }
+            }
+          }
+          break;
+        }
+        default: {
+          return (() => { throw new Error("non-exhaustive pattern match"); })();
+        }
       }
     }
+    return undefined;
   }
 }
 const go$apply$0_List_length_List_Int$clo = { _0: ($_, $clo, lst, acc) => go$apply$0_List_length_List_Int($clo, lst, acc) };
 
-function up$apply$0_Array_from_list_List_Int($clo, nodes, shift) {
-  {
-    const up = $clo;
+function up$apply$0_Array_from_list_List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const nodes = $tco_a1;
+    const shift = $tco_a2;
     {
-      const $t8406 = { $: "$Clo_$lam0_Array_from_list_up$1_Array_from_list_List_Int", _0: $lam0_Array_from_list_up$apply$1_Array_from_list_List_Int };
+      const up = $clo;
       {
-        const parents = (() => {
-          {
-            const wrap_i8460 = $t8406;
+        const $t8383 = { $: "$Clo_$lam0_Array_from_list_up$1_Array_from_list_List_Int", _0: $lam0_Array_from_list_up$apply$1_Array_from_list_List_Int };
+        {
+          const parents = (() => {
             {
-              const chunk_i8461 = { $: "$Clo_chunk$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int", _0: chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int, _1: wrap_i8460 };
+              const wrap_i8460 = $t8383;
               {
-                const $t8330_i8462 = { $: "Nil" };
+                const chunk_i8461 = { $: "$Clo_chunk$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int", _0: chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int, _1: wrap_i8460 };
                 {
-                  const $t8331_i8463 = { $: "Nil" };
-                  return chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int(chunk_i8461, nodes, 0, $t8330_i8462, $t8331_i8463);
+                  const $t8307_i8462 = { $: "Nil" };
+                  {
+                    const $t8308_i8463 = { $: "Nil" };
+                    return chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int(chunk_i8461, nodes, 0, $t8307_i8462, $t8308_i8463);
+                  }
                 }
               }
             }
-          }
-        })();
-        {
-          const $t8408 = (() => {
-            {
-              const $t8407 = (() => {
-                {
-                  const go_i8458 = { $: "$Clo_go$0_Array_lst_len_List_TrieNode_Int", _0: go$apply$0_Array_lst_len_List_TrieNode_Int };
-                  return go$apply$0_Array_lst_len_List_TrieNode_Int(go_i8458, parents, 0);
-                }
-              })();
-              return ($t8407 === 1);
-            }
           })();
-          if ($t8408 === true) {
-            return (() => {
+          {
+            const $t8385 = (() => {
+              {
+                const $t8384 = (() => {
+                  {
+                    const go_i8458 = { $: "$Clo_go$0_Array_lst_len_List_TrieNode_Int", _0: go$apply$0_Array_lst_len_List_TrieNode_Int };
+                    return go$apply$0_Array_lst_len_List_TrieNode_Int(go_i8458, parents, 0);
+                  }
+                })();
+                return ($t8384 === 1);
+              }
+            })();
+            if ($t8385 === true) {
               switch (parents.$) {
                 case "Cons": {
-                  const $f8412 = parents._0;
-                  const $f8413 = parents._1;
+                  const $f8389 = parents._0;
+                  const $f8390 = parents._1;
                   {
-                    const root = $f8412;
+                    const root = $f8389;
                     {
-                      const $t8409 = (shift + 5);
-                      return { _0: root, _1: $t8409 };
+                      const $t8386 = march_int_ovf(shift + 5, 0);
+                      return { _0: root, _1: $t8386 };
                     }
                   }
                   break;
                 }
                 case "Nil": {
                   {
-                    const $t8410 = { $: "TrieEmpty" };
+                    const $t8387 = { $: "TrieEmpty" };
                     {
-                      const $t8411 = (shift + 5);
-                      return { _0: $t8410, _1: $t8411 };
+                      const $t8388 = march_int_ovf(shift + 5, 0);
+                      return { _0: $t8387, _1: $t8388 };
                     }
                   }
                   break;
@@ -10107,18 +10221,22 @@ function up$apply$0_Array_from_list_List_Int($clo, nodes, shift) {
                   return (() => { throw new Error("non-exhaustive pattern match"); })();
                 }
               }
-            })();
-          } else {
-            return (() => {
+            } else {
               {
-                const $t8418 = (shift + 5);
-                return up$apply$0_Array_from_list_List_Int($clo, parents, $t8418);
+                const $t8395 = march_int_ovf(shift + 5, 0);
+                {
+                  $tco_a0 = $clo;
+                  $tco_a1 = parents;
+                  $tco_a2 = $t8395;
+                  continue __tco;
+                }
               }
-            })();
+            }
           }
         }
       }
     }
+    return undefined;
   }
 }
 const up$apply$0_Array_from_list_List_Int$clo = { _0: ($_, $clo, nodes, shift) => up$apply$0_Array_from_list_List_Int($clo, nodes, shift) };
@@ -10133,812 +10251,36 @@ function $lam0_Array_from_list$apply$2_Array_from_list_List_Int($clo, vs) {
 }
 const $lam0_Array_from_list$apply$2_Array_from_list_List_Int$clo = { _0: ($_, $clo, vs) => $lam0_Array_from_list$apply$2_Array_from_list_List_Int($clo, vs) };
 
-function go$apply$0_List_each_List_Int_Fn_Int_T_($clo, lst) {
-  {
-    const go = (() => {
-      return $clo;
-    })();
+function go$apply$0_List_each_List_Int_Fn_Int_T_($tco_a0, $tco_a1) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const lst = $tco_a1;
     {
-      const f = $clo._1;
-      switch (lst.$) {
-        case "Nil": {
-          return {  };
-          break;
-        }
-        case "Cons": {
-          const $f744 = lst._0;
-          const $f745 = lst._1;
-          {
-            const t = $f745;
-            {
-              const h = $f744;
-              {
-                const $p743 = (() => {
-                  return f._0(f, h);
-                })();
-                return go$apply$0_List_each_List_Int_Fn_Int_T_(go, t);
-              }
-            }
-          }
-          break;
-        }
-        default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
-        }
-      }
-    }
-  }
-}
-const go$apply$0_List_each_List_Int_Fn_Int_T_$clo = { _0: ($_, $clo, lst) => go$apply$0_List_each_List_Int_Fn_Int_T_($clo, lst) };
-
-function go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_($clo, lst) {
-  {
-    const go = (() => {
-      return $clo;
-    })();
-    {
-      const f = $clo._1;
-      switch (lst.$) {
-        case "Nil": {
-          return {  };
-          break;
-        }
-        case "Cons": {
-          const $f744 = lst._0;
-          const $f745 = lst._1;
-          {
-            const t = $f745;
-            {
-              const h = $f744;
-              {
-                const $p743 = (() => {
-                  return f._0(f, h);
-                })();
-                return go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_(go, t);
-              }
-            }
-          }
-          break;
-        }
-        default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
-        }
-      }
-    }
-  }
-}
-const go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_$clo = { _0: ($_, $clo, lst) => go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_($clo, lst) };
-
-function $lam0_Array_to_list$apply$0_Array_to_list_PVec_Int($clo, acc, x) {
-  return { $: "Cons", _0: x, _1: acc };
-}
-const $lam0_Array_to_list$apply$0_Array_to_list_PVec_Int$clo = { _0: ($_, $clo, acc, x) => $lam0_Array_to_list$apply$0_Array_to_list_PVec_Int($clo, acc, x) };
-
-function go$apply$0_Array_lst_len_List_TrieNode_Int($clo, xs, acc) {
-  {
-    const go = $clo;
-    switch (xs.$) {
-      case "Nil": {
-        return acc;
-        break;
-      }
-      case "Cons": {
-        const $f7910 = xs._0;
-        const $f7911 = xs._1;
-        {
-          const t = $f7911;
-          {
-            const $t7909 = (acc + 1);
-            return go$apply$0_Array_lst_len_List_TrieNode_Int($clo, t, $t7909);
-          }
-        }
-        break;
-      }
-      default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
-      }
-    }
-  }
-}
-const go$apply$0_Array_lst_len_List_TrieNode_Int$clo = { _0: ($_, $clo, xs, acc) => go$apply$0_Array_lst_len_List_TrieNode_Int($clo, xs, acc) };
-
-function chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int($clo, ys, i, cur, out) {
-  {
-    const chunk = (() => {
-      return $clo;
-    })();
-    {
-      const wrap = $clo._1;
-      switch (ys.$) {
-        case "Nil": {
-          switch (cur.$) {
-            case "Nil": {
-              {
-                const go_i8541 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
-                {
-                  const $t7876_i8542 = { $: "Nil" };
-                  return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8541, out, $t7876_i8542);
-                }
-              }
-              break;
-            }
-            default: {
-              {
-                const $t8312 = (() => {
-                  {
-                    const $t8311 = (() => {
-                      {
-                        const go_i8538 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
-                        {
-                          const $t7876_i8539 = { $: "Nil" };
-                          return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8538, cur, $t7876_i8539);
-                        }
-                      }
-                    })();
-                    return wrap._0(wrap, $t8311);
-                  }
-                })();
-                {
-                  const $t8313 = { $: "Cons", _0: $t8312, _1: out };
-                  {
-                    const go_i8535 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
-                    {
-                      const $t7876_i8536 = { $: "Nil" };
-                      return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8535, $t8313, $t7876_i8536);
-                    }
-                  }
-                }
-              }
-            }
-          }
-          break;
-        }
-        case "Cons": {
-          const $f8324 = ys._0;
-          const $f8325 = ys._1;
-          {
-            const t = $f8325;
-            {
-              const h = $f8324;
-              {
-                const $t8316 = (i === 31);
-                if ($t8316 === true) {
-                  return (() => {
-                    {
-                      const $t8317 = { $: "Nil" };
-                      {
-                        const $t8320 = (() => {
-                          {
-                            const $t8318 = { $: "Cons", _0: h, _1: cur };
-                            {
-                              const $t8319 = (() => {
-                                {
-                                  const go_i8544 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
-                                  {
-                                    const $t7876_i8545 = { $: "Nil" };
-                                    return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8544, $t8318, $t7876_i8545);
-                                  }
-                                }
-                              })();
-                              return wrap._0(wrap, $t8319);
-                            }
-                          }
-                        })();
-                        {
-                          const $t8321 = { $: "Cons", _0: $t8320, _1: out };
-                          return chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int(chunk, t, 0, $t8317, $t8321);
-                        }
-                      }
-                    }
-                  })();
-                } else {
-                  return (() => {
-                    {
-                      const $t8322 = (i + 1);
-                      {
-                        const $t8323 = { $: "Cons", _0: h, _1: cur };
-                        return chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int(chunk, t, $t8322, $t8323, out);
-                      }
-                    }
-                  })();
-                }
-              }
-            }
-          }
-          break;
-        }
-        default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
-        }
-      }
-    }
-  }
-}
-const chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int$clo = { _0: ($_, $clo, ys, i, cur, out) => chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int($clo, ys, i, cur, out) };
-
-function chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int($clo, ys, i, cur, out) {
-  {
-    const chunk = (() => {
-      return $clo;
-    })();
-    {
-      const wrap = $clo._1;
-      switch (ys.$) {
-        case "Nil": {
-          switch (cur.$) {
-            case "Nil": {
-              {
-                const go_i8553 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
-                {
-                  const $t7876_i8554 = { $: "Nil" };
-                  return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8553, out, $t7876_i8554);
-                }
-              }
-              break;
-            }
-            default: {
-              {
-                const $t8312 = (() => {
-                  {
-                    const $t8311 = (() => {
-                      {
-                        const go_i8550 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
-                        {
-                          const $t7876_i8551 = { $: "Nil" };
-                          return go$apply$0_Array_lst_rev_List_Int(go_i8550, cur, $t7876_i8551);
-                        }
-                      }
-                    })();
-                    return wrap._0(wrap, $t8311);
-                  }
-                })();
-                {
-                  const $t8313 = { $: "Cons", _0: $t8312, _1: out };
-                  {
-                    const go_i8547 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
-                    {
-                      const $t7876_i8548 = { $: "Nil" };
-                      return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8547, $t8313, $t7876_i8548);
-                    }
-                  }
-                }
-              }
-            }
-          }
-          break;
-        }
-        case "Cons": {
-          const $f8324 = ys._0;
-          const $f8325 = ys._1;
-          {
-            const t = $f8325;
-            {
-              const h = $f8324;
-              {
-                const $t8316 = (i === 31);
-                if ($t8316 === true) {
-                  return (() => {
-                    {
-                      const $t8317 = { $: "Nil" };
-                      {
-                        const $t8320 = (() => {
-                          {
-                            const $t8318 = { $: "Cons", _0: h, _1: cur };
-                            {
-                              const $t8319 = (() => {
-                                {
-                                  const go_i8556 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
-                                  {
-                                    const $t7876_i8557 = { $: "Nil" };
-                                    return go$apply$0_Array_lst_rev_List_Int(go_i8556, $t8318, $t7876_i8557);
-                                  }
-                                }
-                              })();
-                              return wrap._0(wrap, $t8319);
-                            }
-                          }
-                        })();
-                        {
-                          const $t8321 = { $: "Cons", _0: $t8320, _1: out };
-                          return chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int(chunk, t, 0, $t8317, $t8321);
-                        }
-                      }
-                    }
-                  })();
-                } else {
-                  return (() => {
-                    {
-                      const $t8322 = (i + 1);
-                      {
-                        const $t8323 = { $: "Cons", _0: h, _1: cur };
-                        return chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int(chunk, t, $t8322, $t8323, out);
-                      }
-                    }
-                  })();
-                }
-              }
-            }
-          }
-          break;
-        }
-        default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
-        }
-      }
-    }
-  }
-}
-const chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int$clo = { _0: ($_, $clo, ys, i, cur, out) => chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int($clo, ys, i, cur, out) };
-
-function go$apply$0_Array_lst_split_List_Int_Int($clo, ys, i, acc) {
-  {
-    const go = $clo;
-    {
-      const $t8298 = (i === 0);
-      if ($t8298 === true) {
-        return (() => {
-          {
-            const $t8299 = (() => {
-              {
-                const go_i8562 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
-                {
-                  const $t7876_i8563 = { $: "Nil" };
-                  return go$apply$0_Array_lst_rev_List_Int(go_i8562, acc, $t7876_i8563);
-                }
-              }
-            })();
-            return { _0: $t8299, _1: ys };
-          }
-        })();
-      } else {
-        return (() => {
-          switch (ys.$) {
-            case "Nil": {
-              {
-                const $t8300 = (() => {
-                  {
-                    const go_i8559 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
-                    {
-                      const $t7876_i8560 = { $: "Nil" };
-                      return go$apply$0_Array_lst_rev_List_Int(go_i8559, acc, $t7876_i8560);
-                    }
-                  }
-                })();
-                {
-                  const $t8301 = { $: "Nil" };
-                  return { _0: $t8300, _1: $t8301 };
-                }
-              }
-              break;
-            }
-            case "Cons": {
-              const $f8304 = ys._0;
-              const $f8305 = ys._1;
-              {
-                const t = $f8305;
-                {
-                  const h = $f8304;
-                  {
-                    const $t8302 = (i - 1);
-                    {
-                      const $t8303 = { $: "Cons", _0: h, _1: acc };
-                      return go$apply$0_Array_lst_split_List_Int_Int($clo, t, $t8302, $t8303);
-                    }
-                  }
-                }
-              }
-              break;
-            }
-            default: {
-              return (() => { throw new Error("non-exhaustive pattern match"); })();
-            }
-          }
-        })();
-      }
-    }
-  }
-}
-const go$apply$0_Array_lst_split_List_Int_Int$clo = { _0: ($_, $clo, ys, i, acc) => go$apply$0_Array_lst_split_List_Int_Int($clo, ys, i, acc) };
-
-function go$apply$0_Array_lst_len_List_Int($clo, xs, acc) {
-  {
-    const go = $clo;
-    switch (xs.$) {
-      case "Nil": {
-        return acc;
-        break;
-      }
-      case "Cons": {
-        const $f7910 = xs._0;
-        const $f7911 = xs._1;
-        {
-          const t = $f7911;
-          {
-            const $t7909 = (acc + 1);
-            return go$apply$0_Array_lst_len_List_Int($clo, t, $t7909);
-          }
-        }
-        break;
-      }
-      default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
-      }
-    }
-  }
-}
-const go$apply$0_Array_lst_len_List_Int$clo = { _0: ($_, $clo, xs, acc) => go$apply$0_Array_lst_len_List_Int($clo, xs, acc) };
-
-function rev_onto$apply$0_Array_lst_set_List_Int_Int_Int($clo, rev_xs, ys) {
-  {
-    const rev_onto = $clo;
-    switch (rev_xs.$) {
-      case "Nil": {
-        return ys;
-        break;
-      }
-      case "Cons": {
-        const $f7886 = rev_xs._0;
-        const $f7887 = rev_xs._1;
-        {
-          const rest = $f7887;
-          {
-            const a = $f7886;
-            {
-              const $t7885 = { $: "Cons", _0: a, _1: ys };
-              return rev_onto$apply$0_Array_lst_set_List_Int_Int_Int($clo, rest, $t7885);
-            }
-          }
-        }
-        break;
-      }
-      default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
-      }
-    }
-  }
-}
-const rev_onto$apply$0_Array_lst_set_List_Int_Int_Int$clo = { _0: ($_, $clo, rev_xs, ys) => rev_onto$apply$0_Array_lst_set_List_Int_Int_Int($clo, rev_xs, ys) };
-
-function go$apply$1_Array_lst_set_List_Int_Int_Int($clo, xs, i, acc) {
-  {
-    const go = (() => {
-      return $clo;
-    })();
-    {
-      const rev_onto = $clo._1;
+      const go = (() => {
+        return $clo;
+      })();
       {
-        const v = $clo._2;
-        {
-          const $t7892 = (i === 0);
-          if ($t7892 === true) {
-            return (() => {
-              switch (xs.$) {
-                case "Nil": {
-                  {
-                    const go_i8568 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
-                    {
-                      const $t7876_i8569 = { $: "Nil" };
-                      return go$apply$0_Array_lst_rev_List_Int(go_i8568, acc, $t7876_i8569);
-                    }
-                  }
-                  break;
-                }
-                case "Cons": {
-                  const $f7894 = xs._0;
-                  const $f7895 = xs._1;
-                  {
-                    const t = $f7895;
-                    {
-                      const $t7893 = { $: "Cons", _0: v, _1: t };
-                      return rev_onto._0(rev_onto, acc, $t7893);
-                    }
-                  }
-                  break;
-                }
-                default: {
-                  return (() => { throw new Error("non-exhaustive pattern match"); })();
-                }
-              }
-            })();
-          } else {
-            return (() => {
-              switch (xs.$) {
-                case "Nil": {
-                  {
-                    const go_i8565 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
-                    {
-                      const $t7876_i8566 = { $: "Nil" };
-                      return go$apply$0_Array_lst_rev_List_Int(go_i8565, acc, $t7876_i8566);
-                    }
-                  }
-                  break;
-                }
-                case "Cons": {
-                  const $f7902 = xs._0;
-                  const $f7903 = xs._1;
-                  {
-                    const t = $f7903;
-                    {
-                      const h = $f7902;
-                      {
-                        const $t7900 = (i - 1);
-                        {
-                          const $t7901 = { $: "Cons", _0: h, _1: acc };
-                          return go$apply$1_Array_lst_set_List_Int_Int_Int(go, t, $t7900, $t7901);
-                        }
-                      }
-                    }
-                  }
-                  break;
-                }
-                default: {
-                  return (() => { throw new Error("non-exhaustive pattern match"); })();
-                }
-              }
-            })();
-          }
-        }
-      }
-    }
-  }
-}
-const go$apply$1_Array_lst_set_List_Int_Int_Int$clo = { _0: ($_, $clo, xs, i, acc) => go$apply$1_Array_lst_set_List_Int_Int_Int($clo, xs, i, acc) };
-
-function go$apply$0_Array_lst_rev_List_Int($clo, xs, acc) {
-  {
-    const go = $clo;
-    switch (xs.$) {
-      case "Nil": {
-        return acc;
-        break;
-      }
-      case "Cons": {
-        const $f7870 = xs._0;
-        const $f7871 = xs._1;
-        {
-          const t = $f7871;
-          {
-            const h = $f7870;
-            {
-              const $t7869 = { $: "Cons", _0: h, _1: acc };
-              return go$apply$0_Array_lst_rev_List_Int($clo, t, $t7869);
-            }
-          }
-        }
-        break;
-      }
-      default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
-      }
-    }
-  }
-}
-const go$apply$0_Array_lst_rev_List_Int$clo = { _0: ($_, $clo, xs, acc) => go$apply$0_Array_lst_rev_List_Int($clo, xs, acc) };
-
-function go$apply$0_Array_fold_left_PVec_Int_List_Int_Fn_List_Int_Int_List_Int($clo, a, xs) {
-  {
-    const go = (() => {
-      return $clo;
-    })();
-    {
-      const f = $clo._1;
-      switch (xs.$) {
-        case "Nil": {
-          return a;
-          break;
-        }
-        case "Cons": {
-          const $f8269 = xs._0;
-          const $f8270 = xs._1;
-          {
-            const rest = $f8270;
-            {
-              const x = $f8269;
-              {
-                const $t8268 = (() => {
-                  return f._0(f, a, x);
-                })();
-                return go$apply$0_Array_fold_left_PVec_Int_List_Int_Fn_List_Int_Int_List_Int(go, $t8268, rest);
-              }
-            }
-          }
-          break;
-        }
-        default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
-        }
-      }
-    }
-  }
-}
-const go$apply$0_Array_fold_left_PVec_Int_List_Int_Fn_List_Int_Int_List_Int$clo = { _0: ($_, $clo, a, xs) => go$apply$0_Array_fold_left_PVec_Int_List_Int_Fn_List_Int_Int_List_Int($clo, a, xs) };
-
-function go$apply$0_Array_lst_rev_List_TrieNode_Int($clo, xs, acc) {
-  {
-    const go = $clo;
-    switch (xs.$) {
-      case "Nil": {
-        return acc;
-        break;
-      }
-      case "Cons": {
-        const $f7870 = xs._0;
-        const $f7871 = xs._1;
-        {
-          const t = $f7871;
-          {
-            const h = $f7870;
-            {
-              const $t7869 = { $: "Cons", _0: h, _1: acc };
-              return go$apply$0_Array_lst_rev_List_TrieNode_Int($clo, t, $t7869);
-            }
-          }
-        }
-        break;
-      }
-      default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
-      }
-    }
-  }
-}
-const go$apply$0_Array_lst_rev_List_TrieNode_Int$clo = { _0: ($_, $clo, xs, acc) => go$apply$0_Array_lst_rev_List_TrieNode_Int($clo, xs, acc) };
-
-function go$apply$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int($clo, a, vs) {
-  {
-    const go = (() => {
-      return $clo;
-    })();
-    {
-      const f = $clo._1;
-      switch (vs.$) {
-        case "Nil": {
-          return a;
-          break;
-        }
-        case "Cons": {
-          const $f8067 = vs._0;
-          const $f8068 = vs._1;
-          {
-            const rest = $f8068;
-            {
-              const v = $f8067;
-              {
-                const $t8066 = (() => {
-                  return f._0(f, a, v);
-                })();
-                return go$apply$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int(go, $t8066, rest);
-              }
-            }
-          }
-          break;
-        }
-        default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
-        }
-      }
-    }
-  }
-}
-const go$apply$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int$clo = { _0: ($_, $clo, a, vs) => go$apply$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int($clo, a, vs) };
-
-function go$apply$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int($clo, a, cs) {
-  {
-    const go = (() => {
-      return $clo;
-    })();
-    {
-      const f = $clo._1;
-      switch (cs.$) {
-        case "Nil": {
-          return a;
-          break;
-        }
-        case "Cons": {
-          const $f8074 = cs._0;
-          const $f8075 = cs._1;
-          {
-            const rest = $f8075;
-            {
-              const child = $f8074;
-              {
-                const $t8073 = (() => {
-                  return Array$trie_fold$List_Int$TrieNode_Int$Fn_List_Int_Int_List_Int(a, child, f);
-                })();
-                return go$apply$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int(go, $t8073, rest);
-              }
-            }
-          }
-          break;
-        }
-        default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
-        }
-      }
-    }
-  }
-}
-const go$apply$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int$clo = { _0: ($_, $clo, a, cs) => go$apply$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int($clo, a, cs) };
-
-function rev_onto$apply$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int($clo, rev_xs, ys) {
-  {
-    const rev_onto = $clo;
-    switch (rev_xs.$) {
-      case "Nil": {
-        return ys;
-        break;
-      }
-      case "Cons": {
-        const $f7952 = rev_xs._0;
-        const $f7953 = rev_xs._1;
-        {
-          const rest = $f7953;
-          {
-            const a = $f7952;
-            {
-              const $t7951 = { $: "Cons", _0: a, _1: ys };
-              return rev_onto$apply$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int($clo, rest, $t7951);
-            }
-          }
-        }
-        break;
-      }
-      default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
-      }
-    }
-  }
-}
-const rev_onto$apply$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int$clo = { _0: ($_, $clo, rev_xs, ys) => rev_onto$apply$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int($clo, rev_xs, ys) };
-
-function go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int($clo, xs, i, acc) {
-  {
-    const go = (() => {
-      return $clo;
-    })();
-    {
-      const node = $clo._1;
-      {
-        const rev_onto = $clo._2;
-        switch (xs.$) {
+        const f = $clo._1;
+        switch (lst.$) {
           case "Nil": {
-            {
-              const go_i8981 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
-              {
-                const $t7876_i8982 = { $: "Nil" };
-                return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8981, acc, $t7876_i8982);
-              }
-            }
+            return {  };
             break;
           }
           case "Cons": {
-            const $f7962 = xs._0;
-            const $f7963 = xs._1;
+            const $f721 = lst._0;
+            const $f722 = lst._1;
             {
-              const t = $f7963;
+              const t = $f722;
               {
-                const h = $f7962;
+                const h = $f721;
                 {
-                  const $t7958 = (i === 0);
-                  if ($t7958 === true) {
-                    return (() => {
-                      {
-                        const $t7959 = (() => {
-                          return { $: "Cons", _0: node, _1: t };
-                        })();
-                        return rev_onto._0(rev_onto, acc, $t7959);
-                      }
-                    })();
-                  } else {
-                    return (() => {
-                      {
-                        const $t7960 = (i - 1);
-                        {
-                          const $t7961 = { $: "Cons", _0: h, _1: acc };
-                          return go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int(go, t, $t7960, $t7961);
-                        }
-                      }
-                    })();
+                  const $p720 = (() => {
+                    return f._0(f, h);
+                  })();
+                  {
+                    $tco_a0 = go;
+                    $tco_a1 = t;
+                    continue __tco;
                   }
                 }
               }
@@ -10951,6 +10293,962 @@ function go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int($cl
         }
       }
     }
+    return undefined;
+  }
+}
+const go$apply$0_List_each_List_Int_Fn_Int_T_$clo = { _0: ($_, $clo, lst) => go$apply$0_List_each_List_Int_Fn_Int_T_($clo, lst) };
+
+function go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_($tco_a0, $tco_a1) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const lst = $tco_a1;
+    {
+      const go = (() => {
+        return $clo;
+      })();
+      {
+        const f = $clo._1;
+        switch (lst.$) {
+          case "Nil": {
+            return {  };
+            break;
+          }
+          case "Cons": {
+            const $f721 = lst._0;
+            const $f722 = lst._1;
+            {
+              const t = $f722;
+              {
+                const h = $f721;
+                {
+                  const $p720 = (() => {
+                    return f._0(f, h);
+                  })();
+                  {
+                    $tco_a0 = go;
+                    $tco_a1 = t;
+                    continue __tco;
+                  }
+                }
+              }
+            }
+            break;
+          }
+          default: {
+            return (() => { throw new Error("non-exhaustive pattern match"); })();
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_$clo = { _0: ($_, $clo, lst) => go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_($clo, lst) };
+
+function $lam0_Array_to_list$apply$0_Array_to_list_PVec_Int($clo, acc, x) {
+  return { $: "Cons", _0: x, _1: acc };
+}
+const $lam0_Array_to_list$apply$0_Array_to_list_PVec_Int$clo = { _0: ($_, $clo, acc, x) => $lam0_Array_to_list$apply$0_Array_to_list_PVec_Int($clo, acc, x) };
+
+function go$apply$0_Array_lst_len_List_TrieNode_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const xs = $tco_a1;
+    const acc = $tco_a2;
+    {
+      const go = $clo;
+      switch (xs.$) {
+        case "Nil": {
+          return acc;
+          break;
+        }
+        case "Cons": {
+          const $f7887 = xs._0;
+          const $f7888 = xs._1;
+          {
+            const t = $f7888;
+            {
+              const $t7886 = march_int_ovf(acc + 1, 0);
+              {
+                $tco_a0 = $clo;
+                $tco_a1 = t;
+                $tco_a2 = $t7886;
+                continue __tco;
+              }
+            }
+          }
+          break;
+        }
+        default: {
+          return (() => { throw new Error("non-exhaustive pattern match"); })();
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const go$apply$0_Array_lst_len_List_TrieNode_Int$clo = { _0: ($_, $clo, xs, acc) => go$apply$0_Array_lst_len_List_TrieNode_Int($clo, xs, acc) };
+
+function chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int($tco_a0, $tco_a1, $tco_a2, $tco_a3, $tco_a4) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const ys = $tco_a1;
+    const i = $tco_a2;
+    const cur = $tco_a3;
+    const out = $tco_a4;
+    {
+      const chunk = (() => {
+        return $clo;
+      })();
+      {
+        const wrap = $clo._1;
+        switch (ys.$) {
+          case "Nil": {
+            switch (cur.$) {
+              case "Nil": {
+                {
+                  const go_i8541 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
+                  {
+                    const $t7853_i8542 = { $: "Nil" };
+                    return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8541, out, $t7853_i8542);
+                  }
+                }
+                break;
+              }
+              default: {
+                {
+                  const $t8289 = (() => {
+                    {
+                      const $t8288 = (() => {
+                        {
+                          const go_i8538 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
+                          {
+                            const $t7853_i8539 = { $: "Nil" };
+                            return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8538, cur, $t7853_i8539);
+                          }
+                        }
+                      })();
+                      return wrap._0(wrap, $t8288);
+                    }
+                  })();
+                  {
+                    const $t8290 = { $: "Cons", _0: $t8289, _1: out };
+                    {
+                      const go_i8535 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
+                      {
+                        const $t7853_i8536 = { $: "Nil" };
+                        return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8535, $t8290, $t7853_i8536);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            break;
+          }
+          case "Cons": {
+            const $f8301 = ys._0;
+            const $f8302 = ys._1;
+            {
+              const t = $f8302;
+              {
+                const h = $f8301;
+                {
+                  const $t8293 = (i === 31);
+                  if ($t8293 === true) {
+                    {
+                      const $t8294 = { $: "Nil" };
+                      {
+                        const $t8297 = (() => {
+                          {
+                            const $t8295 = { $: "Cons", _0: h, _1: cur };
+                            {
+                              const $t8296 = (() => {
+                                {
+                                  const go_i8544 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
+                                  {
+                                    const $t7853_i8545 = { $: "Nil" };
+                                    return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8544, $t8295, $t7853_i8545);
+                                  }
+                                }
+                              })();
+                              return wrap._0(wrap, $t8296);
+                            }
+                          }
+                        })();
+                        {
+                          const $t8298 = { $: "Cons", _0: $t8297, _1: out };
+                          {
+                            $tco_a0 = chunk;
+                            $tco_a1 = t;
+                            $tco_a2 = 0;
+                            $tco_a3 = $t8294;
+                            $tco_a4 = $t8298;
+                            continue __tco;
+                          }
+                        }
+                      }
+                    }
+                  } else {
+                    {
+                      const $t8299 = march_int_ovf(i + 1, 0);
+                      {
+                        const $t8300 = { $: "Cons", _0: h, _1: cur };
+                        {
+                          $tco_a0 = chunk;
+                          $tco_a1 = t;
+                          $tco_a2 = $t8299;
+                          $tco_a3 = $t8300;
+                          $tco_a4 = out;
+                          continue __tco;
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            break;
+          }
+          default: {
+            return (() => { throw new Error("non-exhaustive pattern match"); })();
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int$clo = { _0: ($_, $clo, ys, i, cur, out) => chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_TrieNode_Int($clo, ys, i, cur, out) };
+
+function chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int($tco_a0, $tco_a1, $tco_a2, $tco_a3, $tco_a4) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const ys = $tco_a1;
+    const i = $tco_a2;
+    const cur = $tco_a3;
+    const out = $tco_a4;
+    {
+      const chunk = (() => {
+        return $clo;
+      })();
+      {
+        const wrap = $clo._1;
+        switch (ys.$) {
+          case "Nil": {
+            switch (cur.$) {
+              case "Nil": {
+                {
+                  const go_i8553 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
+                  {
+                    const $t7853_i8554 = { $: "Nil" };
+                    return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8553, out, $t7853_i8554);
+                  }
+                }
+                break;
+              }
+              default: {
+                {
+                  const $t8289 = (() => {
+                    {
+                      const $t8288 = (() => {
+                        {
+                          const go_i8550 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
+                          {
+                            const $t7853_i8551 = { $: "Nil" };
+                            return go$apply$0_Array_lst_rev_List_Int(go_i8550, cur, $t7853_i8551);
+                          }
+                        }
+                      })();
+                      return wrap._0(wrap, $t8288);
+                    }
+                  })();
+                  {
+                    const $t8290 = { $: "Cons", _0: $t8289, _1: out };
+                    {
+                      const go_i8547 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
+                      {
+                        const $t7853_i8548 = { $: "Nil" };
+                        return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8547, $t8290, $t7853_i8548);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            break;
+          }
+          case "Cons": {
+            const $f8301 = ys._0;
+            const $f8302 = ys._1;
+            {
+              const t = $f8302;
+              {
+                const h = $f8301;
+                {
+                  const $t8293 = (i === 31);
+                  if ($t8293 === true) {
+                    {
+                      const $t8294 = { $: "Nil" };
+                      {
+                        const $t8297 = (() => {
+                          {
+                            const $t8295 = { $: "Cons", _0: h, _1: cur };
+                            {
+                              const $t8296 = (() => {
+                                {
+                                  const go_i8556 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
+                                  {
+                                    const $t7853_i8557 = { $: "Nil" };
+                                    return go$apply$0_Array_lst_rev_List_Int(go_i8556, $t8295, $t7853_i8557);
+                                  }
+                                }
+                              })();
+                              return wrap._0(wrap, $t8296);
+                            }
+                          }
+                        })();
+                        {
+                          const $t8298 = { $: "Cons", _0: $t8297, _1: out };
+                          {
+                            $tco_a0 = chunk;
+                            $tco_a1 = t;
+                            $tco_a2 = 0;
+                            $tco_a3 = $t8294;
+                            $tco_a4 = $t8298;
+                            continue __tco;
+                          }
+                        }
+                      }
+                    }
+                  } else {
+                    {
+                      const $t8299 = march_int_ovf(i + 1, 0);
+                      {
+                        const $t8300 = { $: "Cons", _0: h, _1: cur };
+                        {
+                          $tco_a0 = chunk;
+                          $tco_a1 = t;
+                          $tco_a2 = $t8299;
+                          $tco_a3 = $t8300;
+                          $tco_a4 = out;
+                          continue __tco;
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            break;
+          }
+          default: {
+            return (() => { throw new Error("non-exhaustive pattern match"); })();
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int$clo = { _0: ($_, $clo, ys, i, cur, out) => chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int($clo, ys, i, cur, out) };
+
+function go$apply$0_Array_lst_split_List_Int_Int($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const ys = $tco_a1;
+    const i = $tco_a2;
+    const acc = $tco_a3;
+    {
+      const go = $clo;
+      {
+        const $t8275 = (i === 0);
+        if ($t8275 === true) {
+          {
+            const $t8276 = (() => {
+              {
+                const go_i8562 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
+                {
+                  const $t7853_i8563 = { $: "Nil" };
+                  return go$apply$0_Array_lst_rev_List_Int(go_i8562, acc, $t7853_i8563);
+                }
+              }
+            })();
+            return { _0: $t8276, _1: ys };
+          }
+        } else {
+          switch (ys.$) {
+            case "Nil": {
+              {
+                const $t8277 = (() => {
+                  {
+                    const go_i8559 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
+                    {
+                      const $t7853_i8560 = { $: "Nil" };
+                      return go$apply$0_Array_lst_rev_List_Int(go_i8559, acc, $t7853_i8560);
+                    }
+                  }
+                })();
+                {
+                  const $t8278 = { $: "Nil" };
+                  return { _0: $t8277, _1: $t8278 };
+                }
+              }
+              break;
+            }
+            case "Cons": {
+              const $f8281 = ys._0;
+              const $f8282 = ys._1;
+              {
+                const t = $f8282;
+                {
+                  const h = $f8281;
+                  {
+                    const $t8279 = march_int_ovf(i - 1, 1);
+                    {
+                      const $t8280 = { $: "Cons", _0: h, _1: acc };
+                      {
+                        $tco_a0 = $clo;
+                        $tco_a1 = t;
+                        $tco_a2 = $t8279;
+                        $tco_a3 = $t8280;
+                        continue __tco;
+                      }
+                    }
+                  }
+                }
+              }
+              break;
+            }
+            default: {
+              return (() => { throw new Error("non-exhaustive pattern match"); })();
+            }
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const go$apply$0_Array_lst_split_List_Int_Int$clo = { _0: ($_, $clo, ys, i, acc) => go$apply$0_Array_lst_split_List_Int_Int($clo, ys, i, acc) };
+
+function go$apply$0_Array_lst_len_List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const xs = $tco_a1;
+    const acc = $tco_a2;
+    {
+      const go = $clo;
+      switch (xs.$) {
+        case "Nil": {
+          return acc;
+          break;
+        }
+        case "Cons": {
+          const $f7887 = xs._0;
+          const $f7888 = xs._1;
+          {
+            const t = $f7888;
+            {
+              const $t7886 = march_int_ovf(acc + 1, 0);
+              {
+                $tco_a0 = $clo;
+                $tco_a1 = t;
+                $tco_a2 = $t7886;
+                continue __tco;
+              }
+            }
+          }
+          break;
+        }
+        default: {
+          return (() => { throw new Error("non-exhaustive pattern match"); })();
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const go$apply$0_Array_lst_len_List_Int$clo = { _0: ($_, $clo, xs, acc) => go$apply$0_Array_lst_len_List_Int($clo, xs, acc) };
+
+function rev_onto$apply$0_Array_lst_set_List_Int_Int_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const rev_xs = $tco_a1;
+    const ys = $tco_a2;
+    {
+      const rev_onto = $clo;
+      switch (rev_xs.$) {
+        case "Nil": {
+          return ys;
+          break;
+        }
+        case "Cons": {
+          const $f7863 = rev_xs._0;
+          const $f7864 = rev_xs._1;
+          {
+            const rest = $f7864;
+            {
+              const a = $f7863;
+              {
+                const $t7862 = { $: "Cons", _0: a, _1: ys };
+                {
+                  $tco_a0 = $clo;
+                  $tco_a1 = rest;
+                  $tco_a2 = $t7862;
+                  continue __tco;
+                }
+              }
+            }
+          }
+          break;
+        }
+        default: {
+          return (() => { throw new Error("non-exhaustive pattern match"); })();
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const rev_onto$apply$0_Array_lst_set_List_Int_Int_Int$clo = { _0: ($_, $clo, rev_xs, ys) => rev_onto$apply$0_Array_lst_set_List_Int_Int_Int($clo, rev_xs, ys) };
+
+function go$apply$1_Array_lst_set_List_Int_Int_Int($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const xs = $tco_a1;
+    const i = $tco_a2;
+    const acc = $tco_a3;
+    {
+      const go = (() => {
+        return $clo;
+      })();
+      {
+        const rev_onto = $clo._1;
+        {
+          const v = $clo._2;
+          {
+            const $t7869 = (i === 0);
+            if ($t7869 === true) {
+              switch (xs.$) {
+                case "Nil": {
+                  {
+                    const go_i8568 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
+                    {
+                      const $t7853_i8569 = { $: "Nil" };
+                      return go$apply$0_Array_lst_rev_List_Int(go_i8568, acc, $t7853_i8569);
+                    }
+                  }
+                  break;
+                }
+                case "Cons": {
+                  const $f7871 = xs._0;
+                  const $f7872 = xs._1;
+                  {
+                    const t = $f7872;
+                    {
+                      const $t7870 = { $: "Cons", _0: v, _1: t };
+                      return rev_onto._0(rev_onto, acc, $t7870);
+                    }
+                  }
+                  break;
+                }
+                default: {
+                  return (() => { throw new Error("non-exhaustive pattern match"); })();
+                }
+              }
+            } else {
+              switch (xs.$) {
+                case "Nil": {
+                  {
+                    const go_i8565 = { $: "$Clo_go$0_Array_lst_rev_List_Int", _0: go$apply$0_Array_lst_rev_List_Int };
+                    {
+                      const $t7853_i8566 = { $: "Nil" };
+                      return go$apply$0_Array_lst_rev_List_Int(go_i8565, acc, $t7853_i8566);
+                    }
+                  }
+                  break;
+                }
+                case "Cons": {
+                  const $f7879 = xs._0;
+                  const $f7880 = xs._1;
+                  {
+                    const t = $f7880;
+                    {
+                      const h = $f7879;
+                      {
+                        const $t7877 = march_int_ovf(i - 1, 1);
+                        {
+                          const $t7878 = { $: "Cons", _0: h, _1: acc };
+                          {
+                            $tco_a0 = go;
+                            $tco_a1 = t;
+                            $tco_a2 = $t7877;
+                            $tco_a3 = $t7878;
+                            continue __tco;
+                          }
+                        }
+                      }
+                    }
+                  }
+                  break;
+                }
+                default: {
+                  return (() => { throw new Error("non-exhaustive pattern match"); })();
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const go$apply$1_Array_lst_set_List_Int_Int_Int$clo = { _0: ($_, $clo, xs, i, acc) => go$apply$1_Array_lst_set_List_Int_Int_Int($clo, xs, i, acc) };
+
+function go$apply$0_Array_lst_rev_List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const xs = $tco_a1;
+    const acc = $tco_a2;
+    {
+      const go = $clo;
+      switch (xs.$) {
+        case "Nil": {
+          return acc;
+          break;
+        }
+        case "Cons": {
+          const $f7847 = xs._0;
+          const $f7848 = xs._1;
+          {
+            const t = $f7848;
+            {
+              const h = $f7847;
+              {
+                const $t7846 = { $: "Cons", _0: h, _1: acc };
+                {
+                  $tco_a0 = $clo;
+                  $tco_a1 = t;
+                  $tco_a2 = $t7846;
+                  continue __tco;
+                }
+              }
+            }
+          }
+          break;
+        }
+        default: {
+          return (() => { throw new Error("non-exhaustive pattern match"); })();
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const go$apply$0_Array_lst_rev_List_Int$clo = { _0: ($_, $clo, xs, acc) => go$apply$0_Array_lst_rev_List_Int($clo, xs, acc) };
+
+function go$apply$0_Array_fold_left_PVec_Int_List_Int_Fn_List_Int_Int_List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const a = $tco_a1;
+    const xs = $tco_a2;
+    {
+      const go = (() => {
+        return $clo;
+      })();
+      {
+        const f = $clo._1;
+        switch (xs.$) {
+          case "Nil": {
+            return a;
+            break;
+          }
+          case "Cons": {
+            const $f8246 = xs._0;
+            const $f8247 = xs._1;
+            {
+              const rest = $f8247;
+              {
+                const x = $f8246;
+                {
+                  const $t8245 = (() => {
+                    return f._0(f, a, x);
+                  })();
+                  {
+                    $tco_a0 = go;
+                    $tco_a1 = $t8245;
+                    $tco_a2 = rest;
+                    continue __tco;
+                  }
+                }
+              }
+            }
+            break;
+          }
+          default: {
+            return (() => { throw new Error("non-exhaustive pattern match"); })();
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const go$apply$0_Array_fold_left_PVec_Int_List_Int_Fn_List_Int_Int_List_Int$clo = { _0: ($_, $clo, a, xs) => go$apply$0_Array_fold_left_PVec_Int_List_Int_Fn_List_Int_Int_List_Int($clo, a, xs) };
+
+function go$apply$0_Array_lst_rev_List_TrieNode_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const xs = $tco_a1;
+    const acc = $tco_a2;
+    {
+      const go = $clo;
+      switch (xs.$) {
+        case "Nil": {
+          return acc;
+          break;
+        }
+        case "Cons": {
+          const $f7847 = xs._0;
+          const $f7848 = xs._1;
+          {
+            const t = $f7848;
+            {
+              const h = $f7847;
+              {
+                const $t7846 = { $: "Cons", _0: h, _1: acc };
+                {
+                  $tco_a0 = $clo;
+                  $tco_a1 = t;
+                  $tco_a2 = $t7846;
+                  continue __tco;
+                }
+              }
+            }
+          }
+          break;
+        }
+        default: {
+          return (() => { throw new Error("non-exhaustive pattern match"); })();
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const go$apply$0_Array_lst_rev_List_TrieNode_Int$clo = { _0: ($_, $clo, xs, acc) => go$apply$0_Array_lst_rev_List_TrieNode_Int($clo, xs, acc) };
+
+function go$apply$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const a = $tco_a1;
+    const vs = $tco_a2;
+    {
+      const go = (() => {
+        return $clo;
+      })();
+      {
+        const f = $clo._1;
+        switch (vs.$) {
+          case "Nil": {
+            return a;
+            break;
+          }
+          case "Cons": {
+            const $f8044 = vs._0;
+            const $f8045 = vs._1;
+            {
+              const rest = $f8045;
+              {
+                const v = $f8044;
+                {
+                  const $t8043 = (() => {
+                    return f._0(f, a, v);
+                  })();
+                  {
+                    $tco_a0 = go;
+                    $tco_a1 = $t8043;
+                    $tco_a2 = rest;
+                    continue __tco;
+                  }
+                }
+              }
+            }
+            break;
+          }
+          default: {
+            return (() => { throw new Error("non-exhaustive pattern match"); })();
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const go$apply$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int$clo = { _0: ($_, $clo, a, vs) => go$apply$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int($clo, a, vs) };
+
+function go$apply$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const a = $tco_a1;
+    const cs = $tco_a2;
+    {
+      const go = (() => {
+        return $clo;
+      })();
+      {
+        const f = $clo._1;
+        switch (cs.$) {
+          case "Nil": {
+            return a;
+            break;
+          }
+          case "Cons": {
+            const $f8051 = cs._0;
+            const $f8052 = cs._1;
+            {
+              const rest = $f8052;
+              {
+                const child = $f8051;
+                {
+                  const $t8050 = (() => {
+                    return Array$trie_fold$List_Int$TrieNode_Int$Fn_List_Int_Int_List_Int(a, child, f);
+                  })();
+                  {
+                    $tco_a0 = go;
+                    $tco_a1 = $t8050;
+                    $tco_a2 = rest;
+                    continue __tco;
+                  }
+                }
+              }
+            }
+            break;
+          }
+          default: {
+            return (() => { throw new Error("non-exhaustive pattern match"); })();
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const go$apply$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int$clo = { _0: ($_, $clo, a, cs) => go$apply$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_Int($clo, a, cs) };
+
+function rev_onto$apply$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int($tco_a0, $tco_a1, $tco_a2) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const rev_xs = $tco_a1;
+    const ys = $tco_a2;
+    {
+      const rev_onto = $clo;
+      switch (rev_xs.$) {
+        case "Nil": {
+          return ys;
+          break;
+        }
+        case "Cons": {
+          const $f7929 = rev_xs._0;
+          const $f7930 = rev_xs._1;
+          {
+            const rest = $f7930;
+            {
+              const a = $f7929;
+              {
+                const $t7928 = { $: "Cons", _0: a, _1: ys };
+                {
+                  $tco_a0 = $clo;
+                  $tco_a1 = rest;
+                  $tco_a2 = $t7928;
+                  continue __tco;
+                }
+              }
+            }
+          }
+          break;
+        }
+        default: {
+          return (() => { throw new Error("non-exhaustive pattern match"); })();
+        }
+      }
+    }
+    return undefined;
+  }
+}
+const rev_onto$apply$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int$clo = { _0: ($_, $clo, rev_xs, ys) => rev_onto$apply$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int($clo, rev_xs, ys) };
+
+function go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
+  __tco: for (;;) {
+    const $clo = $tco_a0;
+    const xs = $tco_a1;
+    const i = $tco_a2;
+    const acc = $tco_a3;
+    {
+      const go = (() => {
+        return $clo;
+      })();
+      {
+        const node = $clo._1;
+        {
+          const rev_onto = $clo._2;
+          switch (xs.$) {
+            case "Nil": {
+              {
+                const go_i8981 = { $: "$Clo_go$0_Array_lst_rev_List_TrieNode_Int", _0: go$apply$0_Array_lst_rev_List_TrieNode_Int };
+                {
+                  const $t7853_i8982 = { $: "Nil" };
+                  return go$apply$0_Array_lst_rev_List_TrieNode_Int(go_i8981, acc, $t7853_i8982);
+                }
+              }
+              break;
+            }
+            case "Cons": {
+              const $f7939 = xs._0;
+              const $f7940 = xs._1;
+              {
+                const t = $f7940;
+                {
+                  const h = $f7939;
+                  {
+                    const $t7935 = (i === 0);
+                    if ($t7935 === true) {
+                      {
+                        const $t7936 = (() => {
+                          return { $: "Cons", _0: node, _1: t };
+                        })();
+                        return rev_onto._0(rev_onto, acc, $t7936);
+                      }
+                    } else {
+                      {
+                        const $t7937 = march_int_ovf(i - 1, 1);
+                        {
+                          const $t7938 = { $: "Cons", _0: h, _1: acc };
+                          {
+                            $tco_a0 = go;
+                            $tco_a1 = t;
+                            $tco_a2 = $t7937;
+                            $tco_a3 = $t7938;
+                            continue __tco;
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              break;
+            }
+            default: {
+              return (() => { throw new Error("non-exhaustive pattern match"); })();
+            }
+          }
+        }
+      }
+    }
+    return undefined;
   }
 }
 const go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int$clo = { _0: ($_, $clo, xs, i, acc) => go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int($clo, xs, i, acc) };
