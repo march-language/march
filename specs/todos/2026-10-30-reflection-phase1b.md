@@ -31,3 +31,6 @@ Encoder gaps phase 1a left (each sound, each loses proofs):
   (congruence, I8), which over-approximates.
 - A predicate's bare spelling resolves in the enclosing function's module only for obligations
   checked inside [visit_fn]; the propagation pre-pass resolves exact display names only.
+- A constructor name two datatypes declare (a user `Some`/`None`) makes `term_of_body` decline every
+  function matching on it, stdlib `Option` ones included; resolve constructors by the scrutinee's
+  type instead (`review1a2/ctor2.march`).

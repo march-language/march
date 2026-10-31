@@ -50,7 +50,9 @@ let syms : (string, fsig) Hashtbl.t = Hashtbl.create 64
     C-1/C-2).  Keyed by the span of the application node: a call in program
     code is resolved by the termination graph's lexical walk (locals,
     parameters and lambda binders shadow; nested modules resolve innermost
-    first; [use] / [alias] honoured), and a call inside a signature's
+    first; a name that two declarations, or an [alias]/[use] and a module,
+    could supply is UNRESOLVED: [Refine_term.graph.ambiguous]), and a call
+    inside a signature's
     refinement predicate is resolved by the same walk in the scope where the
     predicate is written ([Refine_term.graph.pred_sites]).  A site that is not
     here (a local value, a parameter, an unresolved name, a predicate the walk

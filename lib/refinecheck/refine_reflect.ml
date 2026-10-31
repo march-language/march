@@ -1243,7 +1243,13 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     (fun (u : RT.unit_) ->
       if Hashtbl.mem refl_spans u.RT.u_span then begin
         let origin = origin_of_file ~user_files u.RT.u_span.A.file in
-        let path = if u.RT.u_kind = RT.Local then u.RT.u_name ^ Printf.sprintf "#%d:%d" u.RT.u_span.A.start_line u.RT.u_span.A.start_col else u.RT.u_name in
+        (* The display name is not unique on its own (an entry module's
+           nested `mod X` and a library `X` both print `X.g`, review C-A):
+           the declaration's position makes the symbol injective. *)
+        let path =
+          Printf.sprintf "%s#%s:%d:%d" u.RT.u_name (Filename.basename u.RT.u_span.A.file) u.RT.u_span.A.start_line
+            u.RT.u_span.A.start_col
+        in
         let sym = Printf.sprintf "|r:%s:%s|" origin path in
         (match Hashtbl.find_opt owners sym with
          | Some v when v <> u.RT.u_id -> dup := (sym, u) :: !dup
@@ -1255,8 +1261,11 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
      share a symbol.  Neither is reflected, and the collision is reported. *)
   List.iter
     (fun (sym, (u : RT.unit_)) ->
-      Array.iteri (fun i s -> if s = Some sym then sym_of.(i) <- None) sym_of;
-      install_errors := (u.RT.u_span, Printf.sprintf "internal error: the logic symbol %s would name two definitions" sym) :: !install_errors)
+      (* Defensive only: positions make this unreachable.  A collision
+         leaves both functions out of the logic; it is never an error, since
+         a valid program must not fail to check because of reflection. *)
+      ignore u;
+      Array.iteri (fun i s -> if s = Some sym then sym_of.(i) <- None) sym_of)
     !dup;
   (* Types whose program [==] is SMT [=] (§3.5). *)
   let tbl = RT.collect_types decls in
@@ -1366,6 +1375,8 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
      scope where the predicate is written (a signature's refinement).  An
      axiom-tier measure is never a frontier call (I10). *)
   let note sp v =
+    if Hashtbl.mem g.RT.ambiguous sp then ()
+    else
     match sym_of.(v) with
     | Some sym when Hashtbl.mem RS.syms sym && not (Hashtbl.mem axiom_tier sym) ->
       Hashtbl.replace RS.call_sym sp sym

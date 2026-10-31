@@ -52,6 +52,18 @@ let run ?(env = "") ?(args = "--check --refine-report-sites=all") src =
       Out_channel.with_open_bin f (fun oc -> output_string oc src);
       run_in ~env ~dir args "m.march")
 
+(* Check [src] with library modules: each (file, text) is written to a lib/
+   directory passed as MARCH_LIB_PATH. *)
+let run_lib ?(env = "") ~(lib : (string * string) list) src =
+  let dir = Filename.temp_dir "unfold_lib" "" in
+  Fun.protect ~finally:(fun () -> try remove_tree dir with _ -> ()) (fun () ->
+      let ld = Filename.concat dir "lib" in
+      Unix.mkdir ld 0o755;
+      List.iter (fun (f, t) -> Out_channel.with_open_bin (Filename.concat ld f) (fun oc -> output_string oc t)) lib;
+      let f = Filename.concat dir "m.march" in
+      Out_channel.with_open_bin f (fun oc -> output_string oc src);
+      run_in ~env:(env ^ " MARCH_LIB_PATH=" ^ Filename.quote ld) ~dir "--check --refine-report-sites=all" "m.march")
+
 let lines s = String.split_on_char '\n' s |> List.filter (( <> ) "")
 
 let contains hay needle =
@@ -61,19 +73,19 @@ let contains hay needle =
 
 (* The user obligation rows at source line [line] whose callee is [callee]:
    (verdict-or-"skip:<reason>", uses). *)
-let rows ?pred out ~line ~callee =
+let rows ?pred ?(file = "") out ~line ~callee =
   let keep l = match pred with None -> true | Some p -> contains l p in
   List.filter keep (lines out) |> fun ls ->
   List.filter_map
     (fun l ->
       match String.split_on_char '\t' l with
-      | "skip" :: "user" :: loc :: reason :: _kind :: c :: _ when c = callee ->
+      | "skip" :: ("user" | "stdlib") :: loc :: reason :: _kind :: c :: _ when c = callee ->
         (match String.split_on_char ':' loc with
-         | [ _; ln; _ ] when int_of_string_opt ln = Some line -> Some ("skip:" ^ reason, "")
+         | [ f; ln; _ ] when int_of_string_opt ln = Some line && contains f file -> Some ("skip:" ^ reason, "")
          | _ -> None)
-      | v :: "user" :: loc :: _kind :: c :: rest when c = callee && v <> "skip" ->
+      | v :: ("user" | "stdlib") :: loc :: _kind :: c :: rest when c = callee && v <> "skip" ->
         (match String.split_on_char ':' loc with
-         | [ _; ln; _ ] when int_of_string_opt ln = Some line ->
+         | [ f; ln; _ ] when int_of_string_opt ln = Some line && contains f file ->
            let uses = match List.rev rest with u :: _ when String.starts_with ~prefix:"uses: " u -> u | _ -> "" in
            Some (v, uses)
          | _ -> None)
@@ -94,8 +106,8 @@ let expect ?uses out ~line ~callee verdict =
           (String.concat "; " (List.map snd rs))
     | None -> ()
 
-let not_proved ?pred out ~line ~callee =
-  match rows ?pred out ~line ~callee with
+let not_proved ?pred ?file out ~line ~callee =
+  match rows ?pred ?file out ~line ~callee with
   | [] -> Alcotest.failf "no %s row at line %d in:\n%s" callee line out
   | rs ->
     if List.exists (fun (v, _) -> v = "proved") rs then
@@ -741,8 +753,8 @@ end
             let log = In_channel.with_open_bin lg In_channel.input_all in
             List.iter
               (fun sym -> if not (contains log sym) then Alcotest.failf "no symbol %s in the queries" sym)
-              [ "|r:user:f/go#3:"; "|r:user:g/go#7:"; "|r:user:h/go#11:"; "|r:user:h/go#13:" ]));
-    gated "sound_mangle: a user mod List never meets std List.append (I4)" (fun () ->
+              [ "|r:user:f/go#m.march:3:"; "|r:user:g/go#m.march:7:"; "|r:user:h/go#m.march:11:"; "|r:user:h/go#m.march:13:" ]));
+    gated "sound_mangle: a user mod List never meets std List.append, and is not unfolded (I4, review C-A)" (fun () ->
         let out =
           run
             {|mod Um do
@@ -754,7 +766,12 @@ end
 end
 |}
         in
-        expect out ~line:5 ~callee:"List.need_eq" "proved" ~uses:"List.append");
+        (* Review C-A: inside the entry module, `List.append` could be this
+           nested module's or the stdlib's (the interpreter and the compiled
+           build disagree on such names: specs/todos/2026-10-30-interpreter-
+           compiler-name-resolution-diverge.md), so it is ambiguous and never
+           unfolded.  Either way no stdlib fact is read for it. *)
+        not_proved out ~line:5 ~callee:"List.need_eq");
     gated "sound_inconsistent: a broken encoding against a confirmed violation is reflect_inconsistent (I7)" (fun () ->
         let src =
           {|mod Si do
@@ -938,6 +955,159 @@ end
          | _ -> ());
         if not (List.exists (fun l -> contains l "\th\tno\t") (lines out)) then
           Alcotest.failf "h divides by a user negate: it must not be reflected:\n%s" out) ]
+
+(* The second review's REJECT rows: a name two declarations could denote. *)
+let review2 =
+  [ gated "review C-A: a nested `mod List` and the stdlib `List` are ambiguous; neither is unfolded" (fun () ->
+        (* sl/: both backends print `3 3` for the library's call; slist2:
+           interpreted 42, compiled 3 for the entry's own. *)
+        let out = run_lib ~lib:[ ("y.march", {|mod Y do
+  fn need42(x : {Int | _ == 42}) : Int do x end
+  fn h() : Int do
+    let r = List.sum_int([1, 2])
+    need42(r)
+  end
+end
+|}) ] {|mod M do
+  needs IO.Console
+  mod List do
+    fn sum_int(xs : List(Int)) : Int do 42 end
+  end
+  fn need42(x : {Int | _ == 42}) : Int do x end
+  fn need3(x : {Int | _ == 3}) : Int do x end
+  fn a() : Int do
+    let r = List.sum_int([1, 2])
+    need42(r)
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("${List.sum_int([1, 2])} ${Y.h()}")
+  end
+end
+|} in
+        not_proved ~file:"y.march" out ~line:5 ~callee:"need42";
+        not_proved ~file:"m.march" out ~line:10 ~callee:"need42";
+        let out2 = run {|mod M do
+  needs IO.Console
+  mod List do
+    fn sum_int(xs : List(Int)) : Int do 42 end
+  end
+  fn need42(x : {Int | _ == 42}) : Int do x end
+  fn need3(x : {Int | _ == 3}) : Int do x end
+  fn a() : Int do
+    let r = List.sum_int([1, 2])
+    need42(r)
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("${List.sum_int([1, 2])}")
+  end
+end
+|} in
+        not_proved out2 ~line:10 ~callee:"need42");
+    gated "review C-A: a library `X` and a nested `M.X` are ambiguous; neither is unfolded" (fun () ->
+        (* ml/: both backends give `X.g(1) = 2` in the library. *)
+        let out = run_lib ~lib:[ ("x.march", {|mod X do
+  @[opaque]
+  fn g(n : Int) : Int do n + 1 end
+end
+|}); ("y.march", {|mod Y do
+  fn need51(x : {Int | _ == 51}) : Int do x end
+  fn h() : Int do
+    let r = X.g(1)
+    need51(r)
+  end
+end
+|}) ] {|mod M do
+  needs IO.Console
+  mod X do
+    fn g(n : Int) : Int do n + 50 end
+  end
+  fn need51(x : {Int | _ == 51}) : Int do x end
+  fn need2(x : {Int | _ == 2}) : Int do x end
+  fn a() : Int do
+    let r = X.g(1)
+    need51(r)
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("a() = ${a()}, X.g(1) = ${X.g(1)}, Y.h() = ${Y.h()}")
+  end
+end
+|} in
+        not_proved ~file:"y.march" out ~line:5 ~callee:"need51");
+    gated "review C-A: both `X.g`s reflectable: the program checks, no internal error" (fun () ->
+        let out = run_lib ~lib:[ ("x.march", {|mod X do
+  fn g(n : Int) : Int do n + 1 end
+end
+|}); ("y.march", {|mod Y do
+  fn need51(x : {Int | _ == 51}) : Int do x end
+  fn h() : Int do
+    let r = X.g(1)
+    need51(r)
+  end
+end
+|}) ] {|mod M do
+  needs IO.Console
+  mod X do
+    fn g(n : Int) : Int do n + 50 end
+  end
+  fn need51(x : {Int | _ == 51}) : Int do x end
+  fn need2(x : {Int | _ == 2}) : Int do x end
+  fn a() : Int do
+    let r = X.g(1)
+    need51(r)
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("a() = ${a()}, X.g(1) = ${X.g(1)}, Y.h() = ${Y.h()}")
+  end
+end
+|} in
+        if contains out "internal error" || has_code out "internal_error" then
+          Alcotest.failf "reflection must never fail a valid program:\n%s" out;
+        not_proved ~file:"y.march" out ~line:5 ~callee:"need51";
+        not_proved ~file:"m.march" out ~line:10 ~callee:"need51");
+    gated "review C-B: an alias that a nested module of the same name also supplies is not unfolded" (fun () ->
+        (* al1/m and m2: both backends give B.g(1) = 2 with `alias A as B`
+           after `mod B` (the second places it before; compiled 2,
+           interpreted 51). *)
+        let out = run_lib ~lib:[ ("a.march", {|mod A do
+  fn g(n : Int) : Int do n + 1 end
+end
+|}) ] {|mod M do
+  needs IO.Console
+  mod B do
+    fn g(n : Int) : Int do n + 50 end
+  end
+  alias A as B
+  fn need51(x : {Int | _ == 51}) : Int do x end
+  fn a() : Int do
+    let r = B.g(1)
+    need51(r)
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("a() = ${a()}, B.g(1) = ${B.g(1)}")
+  end
+end
+|} in
+        not_proved ~file:"m.march" out ~line:10 ~callee:"need51";
+        let out2 = run_lib ~lib:[ ("a.march", {|mod A do
+  fn g(n : Int) : Int do n + 1 end
+end
+|}) ] {|mod M do
+  needs IO.Console
+  alias A as B
+  mod B do
+    fn g(n : Int) : Int do n + 50 end
+  end
+  fn need51(x : {Int | _ == 51}) : Int do x end
+  fn a() : Int do
+    let r = B.g(1)
+    need51(r)
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("a() = ${a()}, B.g(1) = ${B.g(1)}")
+  end
+end
+|} in
+        not_proved ~file:"m.march" out2 ~line:10 ~callee:"need51") ]
 
 (* `two_stage_identical` (§4.4, F9): stage 1 is today's query, byte for byte.
    Every query a reflection-off run sends to z3 is sent by a reflection-on run

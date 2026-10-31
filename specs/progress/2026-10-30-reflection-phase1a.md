@@ -237,7 +237,8 @@ Three ways to prove an obligation that is false at run time, each a REJECT row i
   conditions, `let` facts, the scalar and datatype subjects, `len` of a call) now asks
   `Reflect_state.resolve_site span`: the termination graph's own lexical resolution of THAT
   application node (locals, parameters and lambda binders shadow; nested modules innermost first;
-  `use` / `alias` honoured), the identity `term_of_body` already used. Calls inside a signature's
+  and, since the second review, a name two declarations could supply is not resolved at all; see
+  below), the identity `term_of_body` already used. Calls inside a signature's
   refinement predicates were not in the graph; `Refine_term.build_graph` now walks them too
   (`graph.pred_sites`), in the function's scope with its parameters and the predicate's binder
   shadowing, recording a resolution and no edge. A site the graph did not resolve to a reflected
@@ -269,6 +270,47 @@ Three ways to prove an obligation that is false at run time, each a REJECT row i
   writes `not(even_len(t))`, so it tests the recursive Bool measure it means: `even_len` is
   `reflected`, its two calls `reflect-fuel`. `r1_dom1` keeps the spelling, since it is the spec's
   probe r1 as written and the phase-0 note pins that reading.
+
+### Second review (of `71f112f4a`): names two declarations could supply
+
+`resolve_site` was right, but the termination graph's name table under it was not. Each probe is a
+REJECT row in `reflect-unfold` (group `review2`), RED on a build of `71f112f4a`, GREEN on the fix:
+
+| Row | `71f112f4a` (RED) | Fix (GREEN) |
+|---|---|---|
+| C-A `sl/` (lib `Y` calls `List.sum_int`; entry `M` has a nested `mod List`) and `slist2` | `need42` in `y.march` proved (both backends print 3) | skip |
+| C-A `ml/` (lib `Y` calls `X.g`; lib `X` and nested `M.X`) | `need51` in `y.march` proved (both backends give 2) | skip |
+| C-A `ml/` with both `X.g` reflectable | `internal error: the logic symbol \|r:user:X.g\| would name two definitions`: a valid program failed to check | checks; both sites skip |
+| C-B `al1/m`, `al1/m2` (`alias A as B` beside a `mod B`) | `need51` proved (both backends give 2; m2 interpreted 51) | skip |
+| `sound_mangle`'s user `mod List` (an existing row) | asserted `proved … uses: List.append` | not proved: that call is ambiguous too (the old assertion pinned exactly the C-A shape) |
+
+- **Cause.** The entry module's declarations register at path `""` (and `M.`), so its nested
+  `mod List` writes the key `List.sum_int` that the stdlib's `List` also writes, and a library `X`
+  meets a nested `M.X` at `X.g`; `Hashtbl.replace` kept the last. `lookup` tried lexical module
+  paths before aliases, while the typechecker lets `alias` rebind the short name.
+- **Fix: ambiguity is unresolved.** `build_graph` now records every declaration position under
+  each key (`reg_pos`) and every module path. A lookup whose key has two declarations, whose level
+  also gets the name from a `use`, or whose dotted head is both an `alias` in scope and a visible
+  module sets an ambiguity flag; the site lands in `graph.ambiguous`, and reflection never
+  unfolds it (program code and predicates alike). The graph's own pick, and so every termination
+  certificate and the phase-0 report, is unchanged. No backend precedence is copied: the
+  interpreter and the compiled build disagree on these very shapes (filed `[P1]`,
+  `specs/todos/2026-10-30-interpreter-compiler-name-resolution-diverge.md`; it predates
+  reflection).
+- **Symbols carry the declaration's position**, `|r:user:X.g#x.march:2:5|`, so two definitions can
+  never share one; the duplicate guard drops both silently instead of reporting an internal error.
+- **`ctor2.march` (minor).** With a user `type Mb = Some(Int) | None`, the stdlib-`Option` function
+  `o` is not unfolded (`need(o(Some(99)))` skips); the control without the user type proves it
+  (`uses: o`). Cause confirmed: `term_of_body` declines a constructor name two datatypes declare.
+  Sound, an over-refusal; resolving constructors by the scrutinee's type is left for 1b (in the 1b
+  todo).
+- `ml/src/m.march` alone (no reference to `Y`) loads no `y.march` obligation, so the `ml/` row uses
+  `m5.march` as its entry.
+
+After the second fixes: `dune build --root .` clean; `scripts/run-tests.sh refinecheck` 2,048 tests
+green (`reflect-unfold` 45 cases); `run_errors` 301, `check-docs.sh`, `check-tree-sitter.sh` green.
+The coordinator's full `scripts/run-tests.sh` on `71f112f4a` passed every suite; it was not re-run
+after these fixes.
 
 **Oracles were not re-run after these fixes** (coordinator's instruction): the monotone and IR
 results above are from `07b186292`.
