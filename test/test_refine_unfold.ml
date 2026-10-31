@@ -128,7 +128,12 @@ let cat =
 |}
 
 let suite =
-  [ gated "guard_pred: a path fact unfolds (uses: is_small)" (fun () ->
+  [ Alcotest.test_case "counterexample text hides stage-2 assumption literals" `Quick (fun () ->
+        let cx = March_refinecheck.Refine_scope.format_cx in
+        Alcotest.(check string) "barred" " (e.g. n = -2)" (cx [ ("|$ru_0:L.f|", "true"); ("n", "-2") ]);
+        Alcotest.(check string) "bare" " (e.g. n = -2)" (cx [ ("$ru_3:g", "false"); ("n", "-2") ]);
+        Alcotest.(check string) "only literals" "" (cx [ ("|$ru_0:L.f|", "true") ]));
+    gated "guard_pred: a path fact unfolds (uses: is_small)" (fun () ->
         let out =
           run
             {|mod G do

@@ -782,8 +782,14 @@ let is_opaque_witness (v : string) : bool =
     let rest = String.sub v i (String.length v - i) in
     String.length rest > 5 && String.sub rest 0 5 = "!val!"
 
+(* A stage-2 unfolding's assumption literal (`|$ru_0:L.f|`, see
+   [Refine.stage2_literal_prefix]) is solver bookkeeping, not a program value. *)
+let is_stage2_literal (k : string) : bool =
+  let bare = String.sub Refine.stage2_literal_prefix 1 (String.length Refine.stage2_literal_prefix - 1) in
+  String.starts_with ~prefix:Refine.stage2_literal_prefix k || String.starts_with ~prefix:bare k
+
 let visible_model (model : (string * string) list) : (string * string) list =
-  List.filter (fun (_, v) -> not (is_opaque_witness v)) model
+  List.filter (fun (k, v) -> not (is_opaque_witness v || is_stage2_literal k)) model
 
 (* Inline counterexample suffix for call-site errors (e.g. precondition checks).
    Returns "" when the model is empty. *)
