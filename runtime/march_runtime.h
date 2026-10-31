@@ -172,6 +172,8 @@ void  march_print_stderr(void *s);
 void *march_io_read_line(void);
 int64_t march_io_read_byte(void);
 int64_t march_int_pow(int64_t base, int64_t exp);
+void    march_int_overflow(int64_t op, const char *file, int64_t line)
+            __attribute__((noreturn, cold));
 
 /* Panic/todo primitive variants (return ptr so they satisfy polymorphic `a`). */
 void *march_panic_ext(void *s);

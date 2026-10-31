@@ -1034,6 +1034,8 @@ let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.Int_min_value | Builtin_name.Int_mod
   | Builtin_name.Int_mod_euclid | Builtin_name.Int_not
   | Builtin_name.Int_popcount | Builtin_name.Int_pow
+  | Builtin_name.Int_wrapping_add | Builtin_name.Int_wrapping_mul
+  | Builtin_name.Int_wrapping_sub
   | Builtin_name.Int_to_string | Builtin_name.Negate | Builtin_name.Not
   | Builtin_name.To_string ->
     Bg_arith
@@ -1360,15 +1362,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Arithmetic builtins ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_arith f.Tir.v_name ->
-    (* `+ - *` are ring operations modulo 2^63: a bare (unnormalised)
-       operand gives the same bare result, so they read their operands
-       through [emit_atom_raw].  This is not only the saved shift pair --
-       with `fib(n-1) + fib(n-2)` the add must consume the call results
-       DIRECTLY for LLVM's accumulator TRE to recognise it
-       ([Llvm_ctx.emit_wrap_int63]).  `/` and `%` go through the checked C
-       helpers and keep normalised operands. *)
-    let emit_atom =
-      if List.mem f.Tir.v_name ["+"; "-"; "*"] then emit_atom_raw else emit_atom in
+    (* Every operand is read normalised: the overflow check of `+ - *`
+       ([Llvm_ctx.emit_checked_int_op]) needs in-range inputs, and `/` and
+       `%` go through the checked C helpers. *)
     Llvm_emit_arith.emit_int_arith ~emit_atom ctx f a b
 
   | Tir.EApp (f, [a; b]) when is_int_cmp f.Tir.v_name ->
@@ -1399,19 +1395,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Negate f.Tir.v_name ->
-    (* Negation is a ring operation: a bare operand is fine (see the `+` arm). *)
-    let (ty, va) = emit_atom_raw ctx a in
-    let r = fresh ctx "ar" in
+    let (ty, va) = emit_atom ctx a in
     if ty = "double" then begin
+      let r = fresh ctx "ar" in
       emit ctx (Printf.sprintf "%s = fneg double %s" r va);
       (ty, r)
-    end else begin
-      emit ctx (Printf.sprintf "%s = sub i64 0, %s" r va);
-      (* -(-2^62) = 2^62 leaves the 63-bit range; left bare, it normalises
-         to -2^62 at its first observation (lazy normalisation,
-         [Llvm_ctx.emit_wrap_int63]). *)
-      (ty, r)
-    end
+    end else
+      (* -(-2^62) = 2^62 leaves the 63-bit range: it panics, as `0 - x`
+         does ([Llvm_ctx.emit_checked_int_op]). *)
+      (ty, Llvm_ctx.emit_checked_int_op ctx "neg" va "")
 
   (* ── ~H sigil: html_auto_escape(v) ────────────────────────────────────
      The runtime `march_html_auto_escape` takes a single generic `ptr` and
@@ -1853,6 +1845,25 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     (* march_int_pow wraps mod 2^64; reduced mod 2^63 at its first
        observation that is the 63-bit wrapped power the interpreter
        computes ([Llvm_ctx.emit_wrap_int63]). *)
+    ("i64", r)
+
+  (* int_wrapping_{add,sub,mul}: the explicit modulo-2^63 forms for hashes
+     and checksums.  Ring operations, so they take bare operands and leave a
+     bare result, normalised at its first observation -- the lazy scheme
+     `+ - *` themselves used before they were checked
+     ([Llvm_ctx.emit_wrap_int63]). *)
+  | Tir.EApp (f, [a; b])
+    when Builtin_name.is Builtin_name.Int_wrapping_add f.Tir.v_name
+      || Builtin_name.is Builtin_name.Int_wrapping_sub f.Tir.v_name
+      || Builtin_name.is Builtin_name.Int_wrapping_mul f.Tir.v_name ->
+    let raw_i64 x = let (t, v) = emit_atom_raw ctx x in coerce ctx t v "i64" in
+    let va = raw_i64 a in
+    let vb = raw_i64 b in
+    let op = if Builtin_name.is Builtin_name.Int_wrapping_add f.Tir.v_name then "add"
+      else if Builtin_name.is Builtin_name.Int_wrapping_sub f.Tir.v_name then "sub"
+      else "mul" in
+    let r = fresh ctx "ar" in
+    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r op va vb);
     ("i64", r)
 
   | Tir.EApp (f, [a])

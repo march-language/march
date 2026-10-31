@@ -1278,9 +1278,12 @@ otherwise (a hand-written `Eq`, anything holding a `Float`, a type variable).
 An `Eq` that prints, panics or loops stops the function from being reflected.
 
 **`Int` is mathematical.** The checker reasons about `Int` as the unbounded
-integers. Compiled code uses 63-bit integers, which wrap around. So a fact such
-as `inc(n) > n` holds in the logic but not at the largest `Int`. Overflow is not
-checked yet.
+integers. At run time `Int` is 63 bits, and `+`, `-`, `*` and negation stop the
+program with a panic when the result does not fit. So a fact such as
+`inc(n) > n` holds wherever the program actually gets past the call; at the
+largest `Int` the call panics instead. The checker does not yet prove that no
+overflow happens: a reflected function counts as unable to fail even though its
+arithmetic can overflow.
 
 **Seeing what is reflected.** `march --check --reflect-report file.march`
 prints one row per function: `reflected`, or the first rule that blocks it.

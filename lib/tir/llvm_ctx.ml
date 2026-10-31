@@ -1016,6 +1016,57 @@ let intern_string_site ctx s =
     (Printf.sprintf "%s = internal global ptr null\n" cell);
   (bytes, cell)
 
+(** Checked 63-bit Int `+ - *` and negation (specs/lang/type-system.md, "Int
+    width and overflow"): a result outside [-2^62, 2^62) panics instead of
+    wrapping, with the message the interpreter and the JS backend raise.
+
+    [va] and [vb] must be NORMALISED (in range): read them through
+    [Llvm_emit.emit_atom], not [emit_atom_raw].  The check is the tagged-Int
+    trick: [2a + 2b] (and [2a * b]) overflows i64 exactly when [a + b]
+    ([a * b]) leaves the 63-bit range, so one [*.with.overflow] intrinsic on a
+    pre-shifted operand decides it, and the exact [ashr 1] of the i64 result
+    is the 63-bit answer.  The result is therefore always normalised; only
+    the operations that still wrap (shl, int_pow, int_abs, the -2^62 / -1
+    quotient) leave a bare value for lazy normalisation ([emit_wrap_int63]).
+
+    The overflow edge goes to a block that calls [march_int_overflow] (cold,
+    noreturn) with the op and the enclosing function's source site: TIR
+    carries no expression spans, so the site is the function's definition
+    ([Provenance.effective_span]), recorded the way [march_panic_site] records
+    a `panic` call's.  [op] is "+", "-", "*" or "neg" ([vb] ignored). *)
+let emit_checked_int_op ctx (op : string) (va : string) (vb : string) : string =
+  let shl1 v =
+    let s = fresh ctx "ovs" in
+    emit ctx (Printf.sprintf "%s = shl i64 %s, 1" s v); s in
+  let (intr, x, y, code) = match op with
+    | "+"   -> ("sadd", shl1 va, shl1 vb, 0)
+    | "-"   -> ("ssub", shl1 va, shl1 vb, 1)
+    | "*"   -> ("smul", shl1 va, vb, 2)
+    | "neg" -> ("ssub", "0", shl1 va, 3)
+    | s -> failwith ("emit_checked_int_op: " ^ s) in
+  let pair = fresh ctx "ovp" in
+  emit ctx (Printf.sprintf "%s = call {i64, i1} @llvm.%s.with.overflow.i64(i64 %s, i64 %s)"
+              pair intr x y);
+  let r2 = fresh ctx "ovr" in
+  emit ctx (Printf.sprintf "%s = extractvalue {i64, i1} %s, 0" r2 pair);
+  let o = fresh ctx "ovf" in
+  emit ctx (Printf.sprintf "%s = extractvalue {i64, i1} %s, 1" o pair);
+  let trap_lbl = fresh_block ctx "ovf_trap" in
+  let ok_lbl = fresh_block ctx "ovf_ok" in
+  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" o trap_lbl ok_lbl);
+  emit_label ctx trap_lbl;
+  let (file, line) = match Provenance.effective_span ctx.cur_emit_fn with
+    | Some sp -> (Provenance.display_file sp.March_ast.Ast.file, sp.March_ast.Ast.start_line)
+    | None -> ("", 0) in
+  let fname = if file = "" then "null" else intern_string ctx file in
+  emit ctx (Printf.sprintf "call void @march_int_overflow(i64 %d, ptr %s, i64 %d)"
+              code fname line);
+  emit_term ctx "unreachable";
+  emit_label ctx ok_lbl;
+  let r = fresh ctx "ov" in
+  emit ctx (Printf.sprintf "%s = ashr exact i64 %s, 1" r r2);
+  r
+
 (* One immortal, statically-initialised closure object per top-level function
    used as a first-class value.  The object march_alloc would build here is
    entirely compile-time constant — march_hdr {rc; tag; pad} (16 bytes, see

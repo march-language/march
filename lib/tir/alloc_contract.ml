@@ -193,6 +193,8 @@ let named_builtin_allocates : Builtin_name.t -> bool = function
   | Builtin_name.Int_max_value | Builtin_name.Int_min_value | Builtin_name.Int_mod
   | Builtin_name.Int_mod_euclid | Builtin_name.Int_not | Builtin_name.Int_popcount
   | Builtin_name.Int_pow | Builtin_name.Negate | Builtin_name.Not
+  | Builtin_name.Int_wrapping_add | Builtin_name.Int_wrapping_mul
+  | Builtin_name.Int_wrapping_sub
   | Builtin_name.Pmap_threshold | Builtin_name.Task_is_cancelled
   | Builtin_name.Task_reductions | Builtin_name.Signal_raise_self
   (* Inline IEEE-754 constants and `fcmp` predicates: no call, no heap. *)
@@ -607,6 +609,8 @@ let named_builtin_retains : Builtin_name.t -> bool = function
   | Builtin_name.Int_max_value | Builtin_name.Int_min_value | Builtin_name.Int_mod
   | Builtin_name.Int_mod_euclid | Builtin_name.Int_not | Builtin_name.Int_popcount
   | Builtin_name.Int_pow | Builtin_name.Negate | Builtin_name.Not
+  | Builtin_name.Int_wrapping_add | Builtin_name.Int_wrapping_mul
+  | Builtin_name.Int_wrapping_sub
   | Builtin_name.Pmap_threshold | Builtin_name.Task_is_cancelled
   | Builtin_name.Task_reductions | Builtin_name.Signal_raise_self
   | Builtin_name.Float_epsilon | Builtin_name.Float_infinity

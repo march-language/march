@@ -259,6 +259,7 @@ type env = {
   import_tracker : import_entry list ref;
   import_idx : import_index;
   deferred_check4 : (string * string list * string * Ast.span) list ref;
+  deferred_unused_needs : (string * string * Ast.span) list ref;
   local_fns : unit StrMap.t;
   fn_arities : (int * Ast.span) StrMap.t;
   qual_fn_arities : (int * Ast.span) StrMap.t;
