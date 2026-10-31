@@ -14840,7 +14840,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/js_bundle.march) (file native/js_bundle_mods/greet.mjs))
  (action
   (with-stdout-to js_bundle.out
-   (system "rm -rf js_bundle_out && mkdir js_bundle_out && %{exe:../bin/main.exe} --target js -o js_bundle_out/js_bundle.mjs native/js_bundle.march 2>/dev/null && cd js_bundle_out && node js_bundle.mjs && echo \"files: $(find . -name '*.mjs' | sort | sed 's|^\\./||' | tr '\\n' ' ' | sed 's/ $//')\""))))
+   (system "rm -rf js_bundle_out && mkdir js_bundle_out && %{exe:../bin/main.exe} --target js -o js_bundle_out/js_bundle.mjs native/js_bundle.march 2>/dev/null && cd js_bundle_out && node js_bundle.mjs && echo \"files: $(find . -name '*.mjs' | LC_ALL=C sort | sed 's|^\\./||' | tr '\\n' ' ' | sed 's/ $//')\""))))
 
 (rule (alias runtest) (action (diff native/js_bundle.expected js_bundle.out)))
 
