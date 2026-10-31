@@ -96,6 +96,9 @@ let gated : (string * string * compare_mode) list = [
   (* ── core compute / codegen ── *)
   "fib",              "102334155",    Exact;
   "list_ops",         "333333666666", Exact;
+  (* checked Int `+ - *` in counted loops: the cost the 2026-10-30
+     overflow trap adds per iteration. *)
+  "index_loop",       "548550000003", Exact;
   (* an unboxed P2(Int, Int) built in the arms of an `if`, 50M times: the
      struct-typed case join slot (specs/progress/2026-09-30-unbox-aware-case-
      join-slot.md). *)

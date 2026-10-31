@@ -4353,16 +4353,19 @@ let test_simplify_zero_div_lit () =
     (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 0)))
     (March_tir.Tir.show_expr (first_body m'))
 
+(* `x * 2` is NOT rewritten to `x + x` (2026-10-30): the two panic on
+   overflow with different messages, and the interpreter reports the
+   multiply ("attempt to multiply with overflow"). *)
 let test_simplify_strength_reduce () =
   let changed = ref false in
   let x = avar "x" March_tir.Tir.TInt in
   let m = mk_module [mk_fn "f" (app "*" [x; ilit 2])] in
   let m' = March_tir.Simplify.run ~changed m in
-  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check bool) "unchanged" false !changed;
   (match first_body m' with
-   | March_tir.Tir.ELet (_, March_tir.Tir.EApp (f, _), _) ->
-     Alcotest.(check string) "strength reduce to add" "+" f.March_tir.Tir.v_name
-   | _ -> Alcotest.fail "expected ELet wrapping EApp(+)")
+   | March_tir.Tir.EApp (f, _) ->
+     Alcotest.(check string) "x * 2 stays a multiply" "*" f.March_tir.Tir.v_name
+   | _ -> Alcotest.fail "expected EApp(*)")
 
 let test_simplify_float_add_zero () =
   let changed = ref false in
@@ -13310,8 +13313,11 @@ let test_compiled_int_floor_parity () =
     ~expected:"[3, 3, -4, -4, -4, 3, -4]\n[2, 2, 5, 5, -5, -2, -1]\n[-1, -1, 86399, 86399, -1, -2]"
     ()
 
-(** March Int is 63-bit and wraps modulo 2^63 on BOTH backends
-    (specs/lang/type-system.md, "Int width and overflow").  Pre-fix the
+(** March Int is 63-bit on BOTH backends, and the explicit wrapping forms
+    (int_wrapping_add/sub/mul) and the builtins that still wrap reduce
+    modulo 2^63 identically (specs/lang/type-system.md, "Int width and
+    overflow"; `+ - *` themselves panic on overflow since 2026-10-30, see
+    [test_compiled_int_overflow_trap_parity]).  Pre-fix the
     compiled backend did 64-bit i64 arithmetic in registers, so
     `max + max` printed 9223372036854775806 compiled and -2 interpreted, and
     the same value read back out of a List or a closure was 63-bit again
@@ -13336,13 +13342,13 @@ let test_compiled_int_overflow_parity () =
     \    let one = NativeArray.get_int(arr, 4)\n\
     \    let three = NativeArray.get_int(arr, 5)\n\
     \    let s62 = NativeArray.get_int(arr, 6)\n\
-    \    println([mx + mx, mx + one, mn - one, mx * three, 0 - mn, mn / m1, mn % m1])\n\
-    \    println([int_max_value(), int_min_value(), int_max_value() + one])\n\
+    \    println([int_wrapping_add(mx, mx), int_wrapping_add(mx, one), int_wrapping_sub(mn, one), int_wrapping_mul(mx, three), int_wrapping_sub(0, mn), mn / m1, mn % m1])\n\
+    \    println([int_max_value(), int_min_value(), int_wrapping_add(int_max_value(), one)])\n\
     \    println([int_div(mn, m1), int_abs(mn), int_pow(three, 40), int_pow(m1, 63)])\n\
     \    println([int_shl(one, s62), int_shl(mx, one), int_shr(m8, one), int_shr(mn, s62), int_shr(m8, 2)])\n\
     \    println([int_popcount(m1), int_popcount(mn), int_popcount(mx), int_not(mx), int_xor(mn, m1)])\n\
-    \    println(apply(fn y -> y + one, mx))\n\
-    \    println([mx + mx == m1 - one, mx + one < 0])\n\
+    \    println(apply(fn y -> int_wrapping_add(y, one), mx))\n\
+    \    println([int_wrapping_add(mx, mx) == m1 - one, int_wrapping_add(mx, one) < 0])\n\
     \  end\n\
      end\n"
     ~expected:"[-2, -4611686018427387904, 4611686018427387903, 4611686018427387901, \
@@ -13481,9 +13487,10 @@ let test_compiled_trmc_hole_fresh_after_churn () =
     ()
 
 (** Lazy normalisation (2026-10-02, specs/progress/2026-10-02-lazy-int63-
-    normalisation.md): compiled `+ - *` / negate leave their i64 result BARE
-    and a user function returns it bare; the 63-bit reduction happens where
-    the value is observed.  Every observation point that is reached through
+    normalisation.md): a wrapping op leaves its i64 result BARE and a user
+    function returns it bare; the 63-bit reduction happens where the value
+    is observed.  Since 2026-10-30 `+ - *` are checked and always in range,
+    so the bare producer here is int_wrapping_add.  Every observation point that is reached through
     a bare value is exercised here with an operand that actually overflows,
     so a missed point shows up as the raw 64-bit value: a caller's compare
     and int-literal match on a bare call result, the checked division
@@ -13497,9 +13504,9 @@ let test_compiled_int_overflow_lazy_norm_parity () =
     ~name:"march_int_overflow_lazy"
     ~src:"mod IntOverflowLazy do\n\
     \  needs IO.Console\n\
-    \  fn big(x : Int) : Int do x + x end\n\
-    \  fn big2(x : Int) : Int do x + x + 2 end\n\
-    \  fn pick(b : Bool, x : Int) : Int do if b do x + x else x - x end end\n\
+    \  fn big(x : Int) : Int do int_wrapping_add(x, x) end\n\
+    \  fn big2(x : Int) : Int do int_wrapping_add(int_wrapping_add(x, x), 2) end\n\
+    \  fn pick(b : Bool, x : Int) : Int do if b do int_wrapping_add(x, x) else x - x end end\n\
     \  fn main(_cap_console : Cap(IO.Console)) do\n\
     \    let arr = NativeArray.from_list_int([4611686018427387903, 1, 2, 0])\n\
     \    let mx = NativeArray.get_int(arr, 0)\n\
@@ -13517,8 +13524,8 @@ let test_compiled_int_overflow_lazy_norm_parity () =
     \    println([pick(true, mx) + one, pick(false, mx), big2(mx)])\n\
     \    let arr2 = NativeArray.set_int(arr, 3, big(mx))\n\
     \    println(NativeArray.get_int(arr2, 3))\n\
-    \    println(NativeArray.get_int(NativeArray.map_int(arr, fn x -> x + x), 0))\n\
-    \    println(Array.to_list(Array.sort_by_key(Array.from_list([mx, one]), fn x -> x + x)))\n\
+    \    println(NativeArray.get_int(NativeArray.map_int(arr, fn x -> int_wrapping_add(x, x)), 0))\n\
+    \    println(Array.to_list(Array.sort_by_key(Array.from_list([mx, one]), fn x -> int_wrapping_add(x, x))))\n\
     \    println([big(mx)])\n\
     \  end\n\
      end\n"
@@ -13532,6 +13539,130 @@ let test_compiled_int_overflow_lazy_norm_parity () =
                [4611686018427387903, 1]\n\
                [-2]"
     ()
+
+(** Int `+`, `-`, `*` and unary negation panic when the result leaves the
+    63-bit range [-2^62, 2^62) (decided 2026-09-29; specs/lang/type-system.md,
+    "Int width and overflow"), with the same message on both backends:
+    "attempt to add|subtract|multiply|negate with overflow".  Each row is one
+    boundary, caught with __try_call_val so the interpreter's line is the
+    reference; the in-range neighbours of every boundary must NOT panic.
+    Operands come out of a NativeIntArr so neither the TIR constant folder
+    nor LLVM can see them, except the `lit` row, which pins that the folder
+    leaves an overflowing literal sum to panic at run time; `x * 2` pins that
+    the simplifier no longer rewrites it to `x + x` (whose message differs);
+    the fold row runs `+` as a first-class value. *)
+let test_compiled_int_overflow_trap_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_overflow_trap"
+    ~src:"mod IntOverflowTrap do\n\
+    \  needs IO.Console\n\
+    \  fn show(r) : String do\n\
+    \    match r do\n\
+    \      Ok(v) -> int_to_string(v)\n\
+    \      Err(e) -> e\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let arr = NativeArray.from_list_int([4611686018427387903, -4611686018427387903, 1, 2, 2147483648, 3])\n\
+    \    let mx = NativeArray.get_int(arr, 0)\n\
+    \    let mn = NativeArray.get_int(arr, 1) - 1\n\
+    \    let one = NativeArray.get_int(arr, 2)\n\
+    \    let two = NativeArray.get_int(arr, 3)\n\
+    \    let p31 = NativeArray.get_int(arr, 4)\n\
+    \    let three = NativeArray.get_int(arr, 5)\n\
+    \    println(show(__try_call_val(fn _ -> mx + one)))\n\
+    \    println(show(__try_call_val(fn _ -> mx + 0)))\n\
+    \    println(show(__try_call_val(fn _ -> mn + (0 - one))))\n\
+    \    println(show(__try_call_val(fn _ -> mn + 0)))\n\
+    \    println(show(__try_call_val(fn _ -> mn - one)))\n\
+    \    println(show(__try_call_val(fn _ -> mx - (0 - one))))\n\
+    \    println(show(__try_call_val(fn _ -> (mx - one) - (0 - one))))\n\
+    \    println(show(__try_call_val(fn _ -> mx * two)))\n\
+    \    println(show(__try_call_val(fn _ -> mn * (0 - one))))\n\
+    \    println(show(__try_call_val(fn _ -> mn * one)))\n\
+    \    println(show(__try_call_val(fn _ -> p31 * p31)))\n\
+    \    println(show(__try_call_val(fn _ -> (0 - p31) * p31)))\n\
+    \    println(show(__try_call_val(fn _ -> p31 * (p31 * three))))\n\
+    \    println(show(__try_call_val(fn _ -> -mn)))\n\
+    \    println(show(__try_call_val(fn _ -> -mx)))\n\
+    \    println(show(__try_call_val(fn _ -> 4611686018427387903 + 1)))\n\
+    \    println(show(__try_call_val(fn _ -> List.fold_left([mx, one], 0, fn (a, b) -> a + b))))\n\
+    \    println(show(__try_call_val(fn _ -> int_wrapping_add(mx, one))))\n\
+    \    println(show(__try_call_val(fn _ -> int_wrapping_sub(mn, one))))\n\
+    \    println(show(__try_call_val(fn _ -> int_wrapping_mul(p31, p31))))\n\
+    \  end\n\
+     end\n"
+    ~expected:"attempt to add with overflow\n\
+               4611686018427387903\n\
+               attempt to add with overflow\n\
+               -4611686018427387904\n\
+               attempt to subtract with overflow\n\
+               attempt to subtract with overflow\n\
+               4611686018427387903\n\
+               attempt to multiply with overflow\n\
+               attempt to multiply with overflow\n\
+               -4611686018427387904\n\
+               attempt to multiply with overflow\n\
+               -4611686018427387904\n\
+               attempt to multiply with overflow\n\
+               attempt to negate with overflow\n\
+               -4611686018427387903\n\
+               attempt to add with overflow\n\
+               attempt to add with overflow\n\
+               -4611686018427387904\n\
+               4611686018427387903\n\
+               -4611686018427387904"
+    ()
+
+(** An overflow nobody catches ends the program like any panic, with its
+    message, on all three backends: the interpreter, compiled code (stderr
+    "panic: ..."), and --target js (an uncaught Error).  The JS operands are
+    powers of two, exact in a double, so the 63-bit boundary is reachable
+    there (2^61 + 2^61 = 2^62).  The JS half is skipped when node is absent. *)
+let test_int_overflow_uncaught_panic () =
+  List.iter (fun (name, expr, msg) ->
+    let src = Printf.sprintf
+      "mod OverflowUncaught do\n\
+      \  needs IO.Console\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \    let xs = [2305843009213693952, 2]\n\
+      \    let h = List.head(xs)\n\
+      \    println(\"before\")\n\
+      \    println(int_to_string(%s))\n\
+      \    println(\"after\")\n\
+      \  end\n\
+       end\n" expr in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let ok out = ir_contains out "before" && ir_contains out msg
+                 && not (ir_contains out "after") && ir_contains out "EXIT:1" in
+    let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1; echo EXIT:$?"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src_path)) in
+    Alcotest.(check bool) (name ^ ": interpreter panics with " ^ msg ^ " (got: " ^ interp_out ^ ")")
+      true (ok interp_out);
+    let bin = Filename.concat tmp (name ^ "bin") in
+    (match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+             ~main_exe ~bin ~src:src_path () with
+     | None -> ()
+     | Some bin ->
+       let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+       Alcotest.(check bool) (name ^ ": compiled panics with " ^ msg ^ " (got: " ^ run_out ^ ")")
+         true (ok run_out && ir_contains run_out ("panic: " ^ msg)));
+    if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+      print_endline "  SKIP: node not on PATH (JS Int overflow panic)"
+    else begin
+      let mjs = Filename.concat tmp (name ^ ".mjs") in
+      let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+          (Filename.quote project_root) (Filename.quote main_exe)
+          (Filename.quote mjs) (Filename.quote src_path)) in
+      if crc <> 0 then Alcotest.failf "%s: --target js compile failed (rc=%d):\n%s" name crc cout;
+      let (_, js_out) = run_capture (Printf.sprintf "node %s 2>&1; echo EXIT:$?"
+          (Filename.quote mjs)) in
+      Alcotest.(check bool) (name ^ ": JS throws " ^ msg ^ " (got: " ^ js_out ^ ")")
+        true (ok js_out && ir_contains js_out ("Error: " ^ msg))
+    end)
+    [ ("march_ovf_add", "h + h", "attempt to add with overflow");
+      ("march_ovf_mul", "h * 2", "attempt to multiply with overflow");
+      ("march_ovf_neg", "-(0 - h - h)", "attempt to negate with overflow") ]
 
 (** A shift count outside [0, 62] (and a negative int_pow exponent) panics
     on both backends with the interpreter's message.  Compiled, a non-literal
@@ -14915,7 +15046,11 @@ declare i64  @march_remote_check_march(ptr %impl_hash, ptr %sig_hash)
 declare ptr  @march_remote_invoke_march(ptr %impl_hash, ptr %args)
 ; Integer math helpers
 declare i64  @march_int_pow(i64 %base, i64 %exp)
+declare void @march_int_overflow(i64 %op, ptr %file, i64 %line) cold noreturn
 ; LLVM intrinsics
+declare {i64, i1} @llvm.sadd.with.overflow.i64(i64 %a, i64 %b)
+declare {i64, i1} @llvm.ssub.with.overflow.i64(i64 %a, i64 %b)
+declare {i64, i1} @llvm.smul.with.overflow.i64(i64 %a, i64 %b)
 declare i64  @llvm.ctpop.i64(i64 %val)
 declare i64  @llvm.abs.i64(i64 %val, i1 %is_int_min_poison)
 declare ptr  @llvm.stacksave()
@@ -15006,6 +15141,7 @@ declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body
 declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline, ptr %release)
 declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
 declare void @march_http_server_wait(i64 %handle)
+declare void @march_http_server_bind_host(ptr %host)
 declare void @march_ws_handshake(i64 %fd, ptr %key)
 declare ptr  @march_ws_recv(i64 %fd)
 declare void @march_ws_send(i64 %fd, ptr %frame)
@@ -15347,7 +15483,7 @@ let test_builtin_group_total () =
          (fun c -> March_tir.Llvm_emit.builtin_group c = g)
          March_tir.Builtin_name.all)
   in
-  Alcotest.(check int) "arith" 24 (count March_tir.Llvm_emit.Bg_arith);
+  Alcotest.(check int) "arith" 27 (count March_tir.Llvm_emit.Bg_arith);
   Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
   Alcotest.(check int) "record" 18 (count March_tir.Llvm_emit.Bg_record)
 
@@ -15362,7 +15498,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 67
+  Alcotest.(check int) "constructor count" 70
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)
@@ -17574,7 +17710,7 @@ let codegen_suites =
         Alcotest.test_case "div_one"           `Quick test_simplify_div_one;
         Alcotest.test_case "zero_div"          `Quick test_simplify_zero_div;
         Alcotest.test_case "zero_div_lit"      `Quick test_simplify_zero_div_lit;
-        Alcotest.test_case "strength_reduce"   `Quick test_simplify_strength_reduce;
+        Alcotest.test_case "no x*2 -> x+x"     `Quick test_simplify_strength_reduce;
         Alcotest.test_case "float_add_zero"    `Quick test_simplify_float_add_zero;
         Alcotest.test_case "bool_and_true"     `Quick test_simplify_bool_and_true;
         Alcotest.test_case "str_concat_empty_rhs" `Quick test_simplify_string_concat_empty_rhs;
@@ -18181,8 +18317,12 @@ let codegen_suites =
             test_compiled_int_floor_parity;
           Alcotest.test_case "compiled int_mod_euclid parity (negative divisor)" `Quick
             test_compiled_int_mod_euclid_parity;
-          Alcotest.test_case "compiled Int is 63-bit and wraps (overflow edge parity)" `Quick
+          Alcotest.test_case "compiled Int is 63-bit; int_wrapping_* wrap (overflow edge parity)" `Quick
             test_compiled_int_overflow_parity;
+          Alcotest.test_case "Int + - * and negation panic on overflow at every boundary (compiled = interpreter)" `Quick
+            test_compiled_int_overflow_trap_parity;
+          Alcotest.test_case "uncaught Int overflow panics with its message, exit 1 (interp, compiled, JS)" `Quick
+            test_int_overflow_uncaught_panic;
           Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
             test_js_int_subset_parity;
           Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick

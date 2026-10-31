@@ -921,6 +921,7 @@ Directly callable without module qualification (built into the evaluator).
 | `int_to_string(n)` | Convert Int to String |
 | `int_abs(n)` | Absolute value |
 | `int_pow(base, exp)` | Power |
+| `int_wrapping_add(a, b)` / `int_wrapping_sub` / `int_wrapping_mul` | Modulo-2^63 arithmetic for hashes/checksums/RNG mixing. Plain Int `+ - *` and unary `-` **panic** on overflow (`attempt to add with overflow`) |
 | `int_div(a, b)` / `int_mod(a, b)` | Division / modulo |
 | `int_div_euclid(a, b)` / `int_mod_euclid(a, b)` | Euclidean (remainder never negative) |
 | `int_div_floor(a, b)` / `int_mod_floor(a, b)` | Floor: rounds toward -inf, remainder takes the divisor's sign. Use to split a timestamp/index into units + leftover in `[0, b)` |

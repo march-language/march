@@ -2705,6 +2705,25 @@ int64_t march_checked_mod_op(int64_t a, int64_t b) {
     return a % b;
 }
 
+/* An Int `+ - *` or negation whose result left the 63-bit range
+ * (specs/lang/type-system.md, "Int width and overflow"): the cold edge of
+ * Llvm_ctx.emit_checked_int_op.  [op] is 0 add, 1 subtract, 2 multiply,
+ * 3 negate; the messages are the interpreter's (eval_runtime.ml's
+ * arith_overflow) byte for byte, since the oracle compares them.  [file] and
+ * [line] are the enclosing function's source site (a C string, or NULL),
+ * recorded the way march_panic_site records a `panic` call's. */
+void march_int_overflow(int64_t op, const char *file, int64_t line) {
+    static const char *const msgs[] = {
+        "attempt to add with overflow", "attempt to subtract with overflow",
+        "attempt to multiply with overflow", "attempt to negate with overflow",
+    };
+    const char *m = (op >= 0 && op < 4) ? msgs[op] : msgs[0];
+    if (file && line > 0)
+        march_panic_site(march_string_lit(file, (int64_t)strlen(file)), line);
+    march_panic(march_string_lit(m, (int64_t)strlen(m)));
+    abort();  /* march_panic does not return */
+}
+
 /* int_shl / int_shr with a count that is not a literal in [0, 62].  March Int
  * is 63-bit (specs/lang/type-system.md, "Int width and overflow"), so a count
  * outside [0, 62] panics with the interpreter's message instead of being a

@@ -5,11 +5,18 @@
 let int_ops = ["+"; "-"; "*"; "/"; "%"]
 let float_ops = ["+."; "-."; "*."; "/."]
 
+(* OCaml's [int] is March's 63-bit Int, so these are the runtime's overflow
+   tests.  An overflowing `+ - *` is left unfolded: it panics at run time
+   (specs/lang/type-system.md, "Int width and overflow"). *)
 let fold_int_op op a b =
   match op with
-  | "+" -> Some (a + b)
-  | "-" -> Some (a - b)
-  | "*" -> Some (a * b)
+  | "+" -> let r = a + b in
+    if (a >= 0) = (b >= 0) && (r >= 0) <> (a >= 0) then None else Some r
+  | "-" -> let r = a - b in
+    if (a >= 0) <> (b >= 0) && (r >= 0) <> (a >= 0) then None else Some r
+  | "*" -> let r = a * b in
+    if a <> 0 && (r / a <> b || (a = -1 && b = min_int) || (b = -1 && a = min_int))
+    then None else Some r
   | "/" -> if b = 0 then None else Some (a / b)
   | "%" -> if b = 0 then None else Some (a mod b)
   | _   -> None

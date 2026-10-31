@@ -680,6 +680,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)" };
   { march_name = "http_server_wait"; c_name = Some "march_http_server_wait"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_http_server_wait(i64 %handle)" };
+  { march_name = "http_server_bind_host"; c_name = Some "march_http_server_bind_host"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_http_server_bind_host(ptr %host)" };
   { march_name = "ws_handshake"; c_name = Some "march_ws_handshake"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = false; declare_sig = Some "declare void @march_ws_handshake(i64 %fd, ptr %key)" };
   { march_name = "ws_recv"; c_name = Some "march_ws_recv"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
@@ -1365,6 +1367,10 @@ let runtime_only_declares : (string * string) list = [
   ("march_poly_eq", "declare i64  @march_poly_eq(ptr %a, ptr %b)");
   ("march_remote_init", "declare void @march_remote_init()");
   ("march_int_pow", "declare i64  @march_int_pow(i64 %base, i64 %exp)");
+  ("march_int_overflow", "declare void @march_int_overflow(i64 %op, ptr %file, i64 %line) cold noreturn");
+  ("llvm.sadd.with.overflow.i64", "declare {i64, i1} @llvm.sadd.with.overflow.i64(i64 %a, i64 %b)");
+  ("llvm.ssub.with.overflow.i64", "declare {i64, i1} @llvm.ssub.with.overflow.i64(i64 %a, i64 %b)");
+  ("llvm.smul.with.overflow.i64", "declare {i64, i1} @llvm.smul.with.overflow.i64(i64 %a, i64 %b)");
   ("llvm.ctpop.i64", "declare i64  @llvm.ctpop.i64(i64 %val)");
   ("llvm.abs.i64", "declare i64  @llvm.abs.i64(i64 %val, i1 %is_int_min_poison)");
   ("llvm.stacksave", "declare ptr  @llvm.stacksave()");
@@ -1684,7 +1690,11 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_remote_invoke_march";
   PComment "; Integer math helpers";
   PDeclare "march_int_pow";
+  PDeclare "march_int_overflow";
   PComment "; LLVM intrinsics";
+  PDeclare "llvm.sadd.with.overflow.i64";
+  PDeclare "llvm.ssub.with.overflow.i64";
+  PDeclare "llvm.smul.with.overflow.i64";
   PDeclare "llvm.ctpop.i64";
   PDeclare "llvm.abs.i64";
   PDeclare "llvm.stacksave";
@@ -1777,6 +1787,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_http_server_listen";
   PDeclare "march_http_server_spawn_n";
   PDeclare "march_http_server_wait";
+  PDeclare "march_http_server_bind_host";
   PDeclare "march_ws_handshake";
   PDeclare "march_ws_recv";
   PDeclare "march_ws_send";

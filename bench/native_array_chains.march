@@ -54,19 +54,22 @@ pfn int_map3_fused(a) : Int do
 end
 
 -- ── Int: 3-deep map chain, heavier body ────────────────────────────────────
+-- The last link squares values near 10^13, which leaves the 63-bit range,
+-- so the links after the first compute modulo 2^63 (int_wrapping_*): plain
+-- `*` panics on overflow.
 
 pfn int_map3h_unfused(a) : Int do
   let r1 = NativeArray.map_int(a, fn x -> x * x * 3 + x * 7 - 5)
-  let r2 = NativeArray.map_int(r1, fn x -> x * 11 - x * x)
-  let r3 = NativeArray.map_int(r2, fn x -> x * x + 13)
+  let r2 = NativeArray.map_int(r1, fn x -> int_wrapping_sub(int_wrapping_mul(x, 11), int_wrapping_mul(x, x)))
+  let r3 = NativeArray.map_int(r2, fn x -> int_wrapping_add(int_wrapping_mul(x, x), 13))
   NativeArray.get_int(r3, 7)
 end
 
 pfn int_map3h_fused(a) : Int do
   let r = NativeArray.map_int(a, fn x ->
     let t1 = x * x * 3 + x * 7 - 5
-    let t2 = t1 * 11 - t1 * t1
-    t2 * t2 + 13)
+    let t2 = int_wrapping_sub(int_wrapping_mul(t1, 11), int_wrapping_mul(t1, t1))
+    int_wrapping_add(int_wrapping_mul(t2, t2), 13))
   NativeArray.get_int(r, 7)
 end
 
