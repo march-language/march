@@ -401,6 +401,11 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
             add 6 (Printf.sprintf "reads the top-level `let` %s, which is not reflected" nm) sp
           | _ -> add 7 (Printf.sprintf "names %s as a value" nm) sp
         end
+        else if Hashtbl.mem g.RT.ambiguous sp then
+          (* More than one declaration could be meant here (review C-A,
+             C-B; third review C1): a body that calls it has no single
+             definition, so the function is not reflected. *)
+          add 6 (Printf.sprintf "calls %s, a name more than one declaration could denote" nm) sp
         else
           match s.RT.s_target with
           | RT.S_value ->
@@ -988,6 +993,7 @@ type tctx = {
   c_len_unit : int -> bool;
   c_eq_structural : T.ty -> bool;  (** program [==] at this type is SMT [=] (§3.5) *)
   c_unit : RT.unit_ array;
+  c_ambiguous : A.span -> bool;  (** [Refine_term.graph.ambiguous] *)
 }
 
 let is_int_ty = function Some t -> (match T.repr t with T.TCon ("Int", []) -> true | _ -> false) | None -> false
@@ -1009,6 +1015,9 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
     let ts = List.map v args in
     RE.ctor_term (unique_ctor_adt ctor.A.txt) ctor.A.txt ts
   | A.EApp (A.EVar f, args, sp) -> (
+    (* The same rule as [note] (third review C1): an ambiguous site has no
+       single callee, in every branch below. *)
+    if c.c_ambiguous sp then raise Decline;
     let site = Hashtbl.find_opt c.c_sites sp in
     let nm = f.A.txt in
     let target = Option.map (fun (s : RT.site) -> s.RT.s_target) site in
@@ -1280,6 +1289,21 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
       ds
   in
   scan decls;
+  (* A bare type name declared more than once (an entry type and a
+     library's, M1): which one an [Eq] or a field type means is not decided
+     by the bare name, so neither counts as structural. *)
+  let decl_count = Hashtbl.create 64 in
+  let rec count ds =
+    List.iter
+      (function
+        | A.DType (_, n, _, _, _) | A.DAlwaysLinearType (_, n, _, _, _) ->
+          Hashtbl.replace decl_count n.A.txt (1 + Option.value ~default:0 (Hashtbl.find_opt decl_count n.A.txt))
+        | A.DMod (_, _, inner, _) -> count inner
+        | _ -> ())
+      ds
+  in
+  count decls;
+  let dup_type b = Option.value ~default:0 (Hashtbl.find_opt decl_count b) > 1 in
   Hashtbl.reset RS.hand_eq;
   Hashtbl.iter (fun k () -> Hashtbl.replace RS.hand_eq k ()) hand_eq;
   let rec structural_ty seen (t : T.ty) =
@@ -1287,7 +1311,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     | T.TCon (("Int" | "Bool" | "String"), []) -> true
     | T.TCon (n, args) ->
       let b = RT.bare n in
-      (not (Hashtbl.mem hand_eq b)) && b <> "Float"
+      (not (Hashtbl.mem hand_eq b)) && (not (dup_type b)) && b <> "Float"
       && List.for_all (structural_ty seen) args
       && (List.mem b seen
           ||
@@ -1304,6 +1328,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
        | "Float" -> false
        | _ ->
          (not (Hashtbl.mem hand_eq b))
+         && (not (dup_type b))
          && List.for_all (structural_aty seen) args
          && (List.mem b seen
              || match Hashtbl.find_opt tbl b with
@@ -1325,7 +1350,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   in
   let ctx =
     { c_sites = sites; c_sym_of_unit = (fun v -> sym_of.(v)); c_ty = ty_at; c_len_unit = len_unit;
-      c_eq_structural = structural_ty []; c_unit = g.RT.units }
+      c_eq_structural = structural_ty []; c_unit = g.RT.units; c_ambiguous = Hashtbl.mem g.RT.ambiguous }
   in
   (* Signatures and templates. *)
   let axiom_tier = Hashtbl.create 8 in

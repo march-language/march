@@ -17,10 +17,10 @@
     - stage 1 proved: stage 1 stands (stage 2 can only add facts, and a
       stage-1 proof is kept whatever stage 2 says, so no proof is ever lost);
     - stage 1 skipped, stage 2 proved or violated: stage 2 is better;
-    - stage 1 violated, stage 2 proved: a WITHDRAWN violation, unless the
-      witness interpreter confirmed the stage-1 violation, in which case the
-      unfoldings contradict a real run: [reflect_inconsistent] (I7), and the
-      violation stays;
+    - stage 1 violated, stage 2 proved: stage 1 stands (phase 1a never
+      withdraws a violation, third review I1); if the witness interpreter
+      confirmed it, the unfoldings contradict a real run:
+      [reflect_inconsistent] (I7);
     - any pair where stage 2 is worse keeps stage 1 for the whole check.
     Stage 2's records replace stage 1's only when some pair is better and none
     is worse.  When stage 1 stands, a skip stage 2 could not improve takes the
@@ -55,7 +55,13 @@ let compare_v ~confirmed (v1 : Obligation.verdict) (v2 : Obligation.verdict) : c
   | Skipped _, Skipped _ | Skipped _, Trusted | Trusted, Skipped _ -> Same
   | Proved, _ -> Worse
   | (Skipped _ | Trusted), (Proved | Violated) -> Better
-  | Violated, Proved -> if confirmed then Inconsistent else Better
+  (* Phase 1a (third review I1): a stage-1 violation is never withdrawn by
+     stage 2.  The witness rarely confirms a violation in a function with
+     parameters, so an encoding mistake would otherwise make an error vanish
+     silently; a confirmed one that stage 2 proves is still the internal
+     error.  Restored when stage 2 can show the path dead from path facts
+     alone. *)
+  | Violated, Proved -> if confirmed then Inconsistent else Worse
   | Violated, (Skipped _ | Trusted) -> Worse
 
 let key (o : Obligation.t) = (o.Obligation.span, o.Obligation.kind, o.Obligation.callee, o.Obligation.predicate)
@@ -134,6 +140,14 @@ let two_stage ?(ok : ('a -> bool) option) ~(errctx : Err.ctx) (run : unit -> 'a)
         Printf.eprintf "reflect-stage: s1=[%s] s2=[%s]\n%!" (String.concat "; " (List.map show o1))
           (String.concat "; " (List.map show o2))
       end;
+      (if Sys.getenv_opt "MARCH_REFLECT_DEBUG" <> None then
+         List.iter
+           (fun ((a : Obligation.t), (b : Obligation.t), _) ->
+             if a.Obligation.verdict = Obligation.Violated && b.Obligation.verdict = Obligation.Proved then
+               Printf.eprintf "reflect-disagree: %s:%d:%d %s: stage 1 violated, stage 2 proved; stage 1 kept\n%!"
+                 a.Obligation.span.March_ast.Ast.file a.Obligation.span.March_ast.Ast.start_line
+                 a.Obligation.span.March_ast.Ast.start_col a.Obligation.predicate)
+           verdicts);
       let inconsistent = List.filter (fun (_, _, c) -> c = Inconsistent) verdicts in
       (* A run that filed nothing (a pre-pass) is judged by its answer. *)
       let answer_better =

@@ -54,7 +54,7 @@ let run ?(env = "") ?(args = "--check --refine-report-sites=all") src =
 
 (* Check [src] with library modules: each (file, text) is written to a lib/
    directory passed as MARCH_LIB_PATH. *)
-let run_lib ?(env = "") ~(lib : (string * string) list) src =
+let run_lib ?(env = "") ?(args = "--check --refine-report-sites=all") ~(lib : (string * string) list) src =
   let dir = Filename.temp_dir "unfold_lib" "" in
   Fun.protect ~finally:(fun () -> try remove_tree dir with _ -> ()) (fun () ->
       let ld = Filename.concat dir "lib" in
@@ -62,7 +62,7 @@ let run_lib ?(env = "") ~(lib : (string * string) list) src =
       List.iter (fun (f, t) -> Out_channel.with_open_bin (Filename.concat ld f) (fun oc -> output_string oc t)) lib;
       let f = Filename.concat dir "m.march" in
       Out_channel.with_open_bin f (fun oc -> output_string oc src);
-      run_in ~env:(env ^ " MARCH_LIB_PATH=" ^ Filename.quote ld) ~dir "--check --refine-report-sites=all" "m.march")
+      run_in ~env:(env ^ " MARCH_LIB_PATH=" ^ Filename.quote ld) ~dir args "m.march")
 
 let lines s = String.split_on_char '\n' s |> List.filter (( <> ) "")
 
@@ -92,8 +92,8 @@ let rows ?pred ?(file = "") out ~line ~callee =
       | _ -> None)
     ls
 
-let expect ?uses out ~line ~callee verdict =
-  match rows out ~line ~callee with
+let expect ?uses ?file out ~line ~callee verdict =
+  match rows ?file out ~line ~callee with
   | [] -> Alcotest.failf "no %s row at line %d in:\n%s" callee line out
   | rs ->
     if not (List.exists (fun (v, _) -> v = verdict) rs) then
@@ -443,7 +443,7 @@ end
 |}
         in
         if not (has_code out "reflect_conflict") then Alcotest.failf "expected reflect_conflict:\n%s" out);
-    gated "spurious_refutation: a stage-1 violation on a path the logic rules out is withdrawn" (fun () ->
+    gated "spurious_refutation: a stage-1 violation stage 2 would prove is kept in 1a" (fun () ->
         let out =
           run
             {|mod Sp do
@@ -457,7 +457,11 @@ end
 end
 |}
         in
-        expect out ~line:6 ~callee:"need_small" "proved";
+        (* Phase 1a never withdraws a stage-1 violation (third review I1):
+           the call sits on a path the definition of `is_small` rules out, so
+           stage 2 proves it, but the violation and its error stay. *)
+        expect out ~line:6 ~callee:"need_small" "violated";
+        if not (has_code out "refinement_violated") then Alcotest.fail "the stage-1 error must stay";
         if has_code out "reflect_inconsistent" then Alcotest.fail "the stage-1 model was never confirmed");
     gated "budget: 40 reflected calls exceed the cap of 32 (reflect-budget); 20 prove" (fun () ->
         let fs = String.concat "" (List.init 40 (fun i -> Printf.sprintf "  fn f%d(n : Int) : Int do n end\n" (i + 1))) in
@@ -1108,6 +1112,89 @@ end
 end
 |} in
         not_proved ~file:"m.march" out2 ~line:10 ~callee:"need51") ]
+
+(* The third review's REJECT rows: a reflected WRAPPER around an ambiguous
+   name. *)
+let review3 =
+  [ gated "review3 C1: a wrapper around an ambiguous `X.g` is not reflected" (fun () ->
+        (* Interpreted: `Y.w(1) = 2, k(1) = 51`. *)
+        let out = run_lib ~lib:[ ("x.march", {|mod X do
+  fn g(n : Int) : Int do n + 1 end
+end
+|}); ("y.march", {|mod Y do
+  fn w(n : Int) : Int do X.g(n) end
+end
+|}) ] {|mod M do
+  needs IO.Console
+  mod X do
+    fn g(n : Int) : Int do n + 50 end
+  end
+  fn k(n : Int) : Int do M.X.g(n) end
+  fn need0(x : {Int | _ == 0}) : Int do x end
+  fn a() : Int do
+    let p = Y.w(1)
+    let q = k(1)
+    need0(p - q)
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("Y.w(1) = ${Y.w(1)}, k(1) = ${k(1)}, M.X.g(1) = ${M.X.g(1)}")
+  end
+end
+|} in
+        not_proved ~file:"m.march" out ~line:11 ~callee:"need0");
+    gated "review3 C1: a wrapper around an ambiguous `List.length` is not reflected" (fun () ->
+        (* Interpreted: `2`.  The graph's guess for this ambiguous
+           `List.length` happens to be the stdlib's, so the value proved
+           before the fix agreed with the run; what was wrong is that `Y.w`
+           was reflected at all.  The report row is the RED half. *)
+        let out = run_lib ~args:"--check --refine-report-sites=all --reflect-report" ~lib:[ ("y.march", {|mod Y do
+  fn w(xs : List(Int)) : Int do List.length(xs) end
+end
+|}) ] {|mod M do
+  needs IO.Console
+  mod List do
+    fn length(xs : List(Int)) : Int do 42 end
+  end
+  fn need2(x : {Int | _ == 2}) : Int do x end
+  fn need42(x : {Int | _ == 42}) : Int do x end
+  fn a() : Int do
+    let r = Y.w([1, 2])
+    need42(r)
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("${Y.w([1, 2])}")
+  end
+end
+|} in
+        not_proved ~file:"m.march" out ~line:10 ~callee:"need42";
+        if not (List.exists (fun l -> contains l "\tY.w\tno\tR6:calls List.length, a name more than one declaration could denote") (lines out))
+        then Alcotest.failf "Y.w must not be reflected (an ambiguous callee):\n%s" out);
+    gated "review3 C1/I1: a stage-1 violation stays violated, and an error" (fun () ->
+        (* Interpreted: `a(1) = 0` only because the else branch is not taken;
+           `need0(1)` is a definite violation wherever it runs. *)
+        let out = run_lib ~lib:[ ("x.march", {|mod X do
+  fn g(n : Int) : Int do n + 1 end
+end
+|}); ("y.march", {|mod Y do
+  fn w(n : Int) : Int do X.g(n) end
+end
+|}) ] {|mod M do
+  needs IO.Console
+  mod X do
+    fn g(n : Int) : Int do n + 50 end
+  end
+  fn k(n : Int) : Int do M.X.g(n) end
+  fn need0(x : {Int | _ == 0}) : Int do x end
+  fn a(z : Int) : Int do
+    if Y.w(z) == k(z) do 0 else need0(1) end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println("a(1) = ${a(1)}")
+  end
+end
+|} in
+        expect ~file:"m.march" out ~line:9 ~callee:"need0" "violated";
+        if not (has_code out "refinement_violated") then Alcotest.failf "the error must stay:\n%s" out) ]
 
 (* `two_stage_identical` (§4.4, F9): stage 1 is today's query, byte for byte.
    Every query a reflection-off run sends to z3 is sent by a reflection-on run

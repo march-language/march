@@ -51,7 +51,8 @@ let syms : (string, fsig) Hashtbl.t = Hashtbl.create 64
     code is resolved by the termination graph's lexical walk (locals,
     parameters and lambda binders shadow; nested modules resolve innermost
     first; a name that two declarations, or an [alias]/[use] and a module,
-    could supply is UNRESOLVED: [Refine_term.graph.ambiguous]), and a call
+    could supply is UNRESOLVED: [Refine_term.graph.ambiguous], and a function
+    whose BODY calls such a name is not reflected at all, R6), and a call
     inside a signature's
     refinement predicate is resolved by the same walk in the scope where the
     predicate is written ([Refine_term.graph.pred_sites]).  A site that is not

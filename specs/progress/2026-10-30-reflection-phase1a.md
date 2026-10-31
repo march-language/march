@@ -36,7 +36,7 @@ the two-stage discharge, the two equalities, the measure merge and `@[opaque]`
 - **Two-stage discharge (§4.4)** (`Reflect_stage.two_stage`, around `check_call` and `check_post`).
   Stage 1 is today's check. If it did not prove everything it filed and met a reflected call, its
   records and diagnostics are set aside and the check runs again with the arm on; stage 2's records
-  stand only when some obligation improved (skip → proved/violated, violated → proved) and none got
+  stand only when some obligation improved (skip → proved/violated; since the third review, never violated → proved) and none got
   worse; a run that files nothing (the propagation pre-pass) is judged by its answer. A stage-1
   violation the witness interpreter confirmed and stage 2 proves is `reflect_inconsistent` (I7) and
   stays violated. Counters the check advances (`ret_ctr`, the hint throttle, promoted sites, the
@@ -131,6 +131,15 @@ the two-stage discharge, the two equalities, the measure merge and `@[opaque]`
     gate and predicate translator treat it as the literal it is; R4 and `term_of_body` now use
     `Refine_encode.nonzero_int_literal` too (`gate-mb`). And `const-fn-predicate`'s "two-parameter
     `@[measure]` is an error" is now "accepted (F2 lifted)", as the design says.
+
+13. **A stage-1 violation is never withdrawn in phase 1a** (coordinator's ruling after the third
+    review, I1). Stage 2 proving an obligation stage 1 found violated keeps the violation and its
+    error, and `MARCH_REFLECT_DEBUG` prints a `reflect-disagree` line; a witness-confirmed one is
+    still `reflect_inconsistent`. Why: the witness rarely confirms a violation in a function with
+    parameters, so an encoding mistake (the third review's `lx/m9`) turned into a silently vanished
+    error. Cost if wrong: a few violations found on a model the program never reaches (the
+    `spurious_refutation` row: a call under `if n > 20` and `if is_small(n)`) stay reported. Restore
+    the withdrawal when stage 2 can show such a path dead from path facts alone.
 
 ## Tests
 
@@ -311,6 +320,37 @@ After the second fixes: `dune build --root .` clean; `scripts/run-tests.sh refin
 green (`reflect-unfold` 45 cases); `run_errors` 301, `check-docs.sh`, `check-tree-sitter.sh` green.
 The coordinator's full `scripts/run-tests.sh` on `71f112f4a` passed every suite; it was not re-run
 after these fixes.
+
+### Third review (of `0d526d1e2`): a reflected wrapper around an ambiguous name
+
+| Row | `0d526d1e2` (RED) | Fix (GREEN) |
+|---|---|---|
+| C1 `lx/m7` (lib `Y.w(n) = X.g(n)`, entry `k(n) = M.X.g(n)` with a nested `mod X`) | `need0(Y.w(1) - k(1))` proved (runs `2` and `51`) | skip |
+| C1 `ly/` (lib `Y.w(xs) = List.length(xs)`, entry nested `mod List`) | `Y.w` reported `reflected`; `need42` was already a skip (the graph's guess happened to be the stdlib `List.length`, which agrees with the run) | `Y.w` is `no R6:calls List.length, a name more than one declaration could denote`; skip |
+| C1/I1 `lx/m9` | stage 1 `violated`, stage 2 `proved`, withdrawn as Better | violated, error kept |
+| `spurious_refutation` (existing row) | asserted `proved` (withdrawn) | asserts `violated`, error kept (ruling 13) |
+
+- **C1.** `term_of_body` read callees from the raw site table and never consulted
+  `graph.ambiguous` (only the frontier's `note` did), so the graph's guess became a wrapper's
+  definition. Now an ambiguous call site in a body is an R6 blocker in the §2.1 analysis
+  (`calls X.g, a name more than one declaration could denote`), so the function, and through the
+  fixpoint every caller, is not reflected and the report says why; `tr_val` also declines on the
+  same predicate (`c_ambiguous`), in every branch, as a second guard. The `reflect_state.ml`
+  docstring now says so.
+- **I1.** Ruling 13 above.
+- **M1.** `install`'s hand-written-`Eq` set and type table are keyed by bare name over the whole
+  module (entry, libraries and stdlib alike); a bare type name declared more than once now counts
+  as non-structural, so a library type with a hand-written `Eq` can never lend its name to a
+  structural entry type (or the reverse). Not reproduced by the reviewer's `heq/m4.march`; fixed
+  because it was cheap.
+- **M2** (a qualified library constructor declines) is left as is: an over-refusal.
+
+`report_len_shadow_module` (phase 0) now names the new, more precise reason for its `f` (the user
+`mod List` makes `List.length` ambiguous). After the third fixes: `dune build --root .` clean;
+`scripts/run-tests.sh refinecheck` 2,051 tests with that one expectation failing, then the
+`reflect-report` group re-run green after the update (28); `reflect-unfold` 48 green; `run_errors`
+301, `check-docs.sh`, `check-tree-sitter.sh` green. The full refinecheck suite was not re-run after
+that one-line test update.
 
 **Oracles were not re-run after these fixes** (coordinator's instruction): the monotone and IR
 results above are from `07b186292`.
