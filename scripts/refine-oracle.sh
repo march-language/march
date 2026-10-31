@@ -13,9 +13,14 @@
 #                               --refine-report can print anything
 #   .march/cas/vc            -> verification conditions are reused, so a
 #                               checker that stopped checking still "proves"
-# Both are cleared ONCE here, before the sweep — never between fixtures (the
-# within-run warming is part of the recorded behaviour and is identical in the
-# baseline and the check run, which walk the corpus in the same order).
+# Both live under the compiler's cwd (<cwd>/.march/cas), so every fixture runs
+# from its own fresh directory under <dir>/cwd/: each one starts with both
+# caches cold, nothing warms across fixtures, and the fixtures can run in
+# parallel (MARCH_ORACLE_JOBS at once, default: CPU count) without one
+# fixture's cache hits depending on which others happened to finish first.
+# (Before 2026-10-30 the sweep was serial and shared one warming cache in the
+# repo root; a baseline recorded by that version is not comparable to this
+# one.  Re-record it.)
 #
 #   scripts/refine-oracle.sh baseline /tmp/refine-base-<slug>   # record
 #   scripts/refine-oracle.sh check    /tmp/refine-base-<slug>   # compare
@@ -51,8 +56,12 @@
 # 2026-08-26, 14 phantom `stdlib_prelude` lines.  The sweep therefore runs
 # under a private HOME inside <dir>, and paths are normalised below as well.
 #
-# Runtime is ~6 minutes over ~300 z3-backed fixtures.  Let it finish; a
-# half-run baseline is worse than none.
+# Serial, this took ~6 minutes; in parallel it is bounded by the slowest
+# fixtures.  Let it finish; a half-run baseline is worse than none.
+#
+# For the usual "did my branch move any diagnostic" question,
+# scripts/oracle-base.sh records the baseline from the merge-base once and
+# caches it by commit.
 #
 # See specs/plans/2026-08-19-compiler-file-decomposition.md (Phase 3, Task 3.1).
 set -uo pipefail
@@ -66,7 +75,7 @@ USAGE='usage: refine-oracle.sh baseline|check|monotone <dir>'
 MODE="${1:?$USAGE}"
 DIR="${2:?$USAGE}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-EXE="$ROOT/_build/default/bin/main.exe"
+EXE="${MARCH_ORACLE_EXE:-$ROOT/_build/default/bin/main.exe}"
 OUT="$DIR/refine.txt"
 
 [ -x "$EXE" ] || { echo "FATAL: $EXE not built. Run: dune build --root . bin/main.exe"; exit 2; }
@@ -82,20 +91,35 @@ if [ "$MODE" = monotone ] && [ -z "$SITES_FLAG" ]; then
   echo "FATAL: $EXE has no --refine-report-sites=all; monotone needs it"; exit 2
 fi
 
-rm -rf "$ROOT/.march/cas/artifacts-v2" "$ROOT/.march/cas/vc"
 mkdir -p "$DIR"
 # Private HOME: ~/.cache/march is shared across worktrees (see the note above).
 # Wiped per run so the stdlib blobs are always written by THIS worktree.
-rm -rf "$DIR/home"
-mkdir -p "$DIR/home"
+rm -rf "$DIR/home" "$DIR/cwd" "$DIR/parts"
+mkdir -p "$DIR/home/.cache" "$DIR/cwd" "$DIR/parts"
 export HOME="$DIR/home"
-: > "$DIR/run.tmp"
+# The stdlib is pinned to the source tree, as the RELATIVE path `stdlib`
+# through each cwd's symlink (see check_one).  Pinned, because a concurrent
+# `dune build` restages _build/default/stdlib, which the compiler would
+# otherwise read exe-relatively.  Relative, because the corpus includes
+# stdlib/prelude.march itself: unless the fixture path and the loaded prelude
+# are the same string, the checker sees two preludes and reports 11
+# overlapping_impl errors of the prelude against itself.
+JOBS="${MARCH_ORACLE_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}"
+export EXE ROOT DIR SITES_FLAG
 
-n=0
-for f in "$ROOT"/test/native/*.march "$ROOT"/stdlib/*.march; do
-  [ -e "$f" ] || continue
+check_one() {
+  f="$1"
   # Namespace by parent dir: basenames can collide across the two corpora.
   tag="$(basename "$(dirname "$f")")_$(basename "$f" .march)"
+  # Fresh every time, warm-up run included: a leftover .march/cas would be warm.
+  # Fresh cwd per fixture (cold .march/cas), but the compiler must still be
+  # handed the SAME relative path as from the repo root: rendered headers pad
+  # with dashes to the path's length, and derive-generated spans hash the path,
+  # so an absolute one makes the output depend on where the tree lives (a base
+  # export vs this worktree) even after the prefix is stripped.  Symlinking the
+  # corpus roots into the cwd gives the relative path without the shared cache.
+  rm -rf "$DIR/cwd/$tag"; mkdir -p "$DIR/cwd/$tag"
+  for t in test stdlib; do ln -s "$ROOT/$t" "$DIR/cwd/$tag/$t"; done
   # Normalise absolute paths so the manifest is machine- and worktree-
   # independent, then tag every line so a fixture that stops emitting shows up
   # as its lines disappearing rather than as a silent shift.
@@ -103,12 +127,30 @@ for f in "$ROOT"/test/native/*.march "$ROOT"/stdlib/*.march; do
   # compiler reaches prelude.march as either the staged `_build/default/bin/
   # ../stdlib/…` copy or the source tree, and which spelling appears is not a
   # property of the checker.
-  "$EXE" --check --refine-report $SITES_FLAG "$f" 2>&1 \
+  (cd "$DIR/cwd/$tag" && MARCH_STDLIB=stdlib "$EXE" --check --refine-report $SITES_FLAG "${f#$ROOT/}") 2>&1 \
+    | sed "s|$DIR/cwd/$tag/||g" \
     | sed "s|$ROOT/||g" \
     | sed -E 's#[A-Za-z0-9_./-]*stdlib/#stdlib/#g' \
-    | sed "s|^|$tag: |" >> "$DIR/run.tmp"
-  n=$((n+1))
-done
+    | sed "s|^|$tag: |" > "$DIR/parts/$tag"
+}
+export -f check_one
+
+ls "$ROOT"/test/native/*.march "$ROOT"/stdlib/*.march 2>/dev/null > "$DIR/fixtures.txt"
+n=$(wc -l < "$DIR/fixtures.txt" | tr -d ' ')
+# One serial run first so the private HOME's stdlib cache is written once
+# rather than raced by every worker.
+check_one "$(head -1 "$DIR/fixtures.txt")"
+start_s=$(date +%s)
+# NOT `xargs -I{}`: macOS xargs refuses a -I line over 255 bytes ("command
+# line cannot be assembled, too long"), stops, and leaves a partial corpus.
+# With -n 1 the path is appended as $1 instead.  Then demand one part per
+# fixture, so a worker or xargs that died early is an error, not a short report.
+tr '\n' '\0' < "$DIR/fixtures.txt" | xargs -0 -P "$JOBS" -n 1 bash -c 'check_one "$1"' _ \
+  || { echo "FATAL: xargs failed; the sweep is incomplete"; exit 2; }
+got=$(ls "$DIR/parts" | wc -l | tr -d ' ')
+[ "$got" -eq "$n" ] || { echo "FATAL: $got of $n fixtures produced a result"; exit 2; }
+cat "$DIR"/parts/* > "$DIR/run.tmp"
+echo "jobs=$JOBS elapsed=$(( $(date +%s) - start_s ))s"
 
 # Split the §6.1 site rows off: what remains is exactly the `--refine-report`
 # output the baseline/check modes have always pinned.
