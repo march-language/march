@@ -629,10 +629,14 @@ and emit_val_impl ctx expr =
                  (match atom_ty a, atom_ty b with
                   | Tir.TInt, _ | _, Tir.TInt -> true | _ -> false)
                | _ -> false) ->
+         (* The in-range test is inline (atoms: recomputing the result is a
+            single add or multiply that V8 shares); only an overflow calls the
+            runtime, which throws. *)
          use_runtime ctx "march_int_ovf";
-         emit ctx "march_int_ovf("; emit_atom ctx a;
-         emit ctx (" " ^ op ^ " "); emit_atom ctx b;
-         emit ctx (match op with "+" -> ", 0)" | "-" -> ", 1)" | _ -> ", 2)")
+         let r () = emit ctx "("; emit_atom ctx a; emit ctx (" " ^ op ^ " "); emit_atom ctx b; emit ctx ")" in
+         emit ctx "("; r (); emit ctx " < 4611686018427387904 && "; r ();
+         emit ctx " >= -4611686018427387904 ? "; r (); emit ctx " : march_int_ovf("; r ();
+         emit ctx (match op with "+" -> ", 0))" | "-" -> ", 1))" | _ -> ", 2))")
        | _ ->
          emit ctx "(";
          emit_atom ctx (List.nth args 0);
