@@ -849,6 +849,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **The compatibility policy now says the in-memory layout of values, strings
+  included, is not part of the 1.0 promise.** C code reaches strings only through
+  `march_ffi.h` (`march_slice`, `march_str_new`), and a check keeps that header from
+  exposing the string struct, so short strings can later be stored inline without
+  breaking anyone.
 - **What March 1.0 will promise, in writing.** New pages: [Compatibility &
   Deprecation](docs/compatibility.md) (what a 1.x release keeps working, including the
   cluster control plane's release format and messages; `@[deprecated]` and stdlib

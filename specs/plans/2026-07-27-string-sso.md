@@ -1,5 +1,18 @@
 # Small-String Optimization — Implementation Plan
 
+> **Status 2026-10-31: Task 1 only; not part of 1.0.** The encoding, its accessors and
+> `march_sso_selftest` landed (2026-07-27); Tasks 2-5 (routing every reader through the
+> accessors, the flip, the FFI boundary) were never done, so no string is created inline.
+> Measured 2026-10-31 (macOS arm64, `--opt 2`): a small string costs about 13 ns to allocate,
+> copy and free, which bounds what this plan can save at 2.3% of `bench/iolist_template`,
+> 7.9% of `bench/json_stream` and 1.6% of `bench/json_stream_strings`, before the branch every
+> reader would add. Only synthetic benches that chop strings into 1-7-byte pieces show more
+> (`string_slice_walk` at most 84%, `string_split_large` 56%), which is the allocation pattern
+> this plan's own warning describes. Decision: the string layout is internal at 1.0
+> (`specs/lang/compatibility.md`; `march_ffi.h` keeps String opaque, enforced by
+> `scripts/check-runtime-sources.sh` Check 5), this plan can land in any 1.x, and the slicing
+> allocations are attacked directly instead. See `specs/progress/2026-10-31-string-abi-internal.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Store strings of ≤7 bytes inline in the value itself, eliminating roughly half the string allocations in real workloads.
