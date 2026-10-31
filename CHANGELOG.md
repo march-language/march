@@ -448,6 +448,10 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **JS output computes compound values as statements.** A `let` bound to a match or a
+  let chain, and a match arm that binds, used to become an immediately invoked closure
+  per expression; they are now plain statements assigning the result. Herald's renderer
+  runs about 3× faster on the JS target (Eclipse: ~90 ms to ~29 ms a frame).
 - **Termination: `@[diverges]`, actor handlers and `cap total`.** Mark a function meant
   to run for ever `@[diverges]` (an accept loop, a frame reader, a ticker): it files no
   termination obligation, never gets the induction hypothesis, and neither does a cycle
