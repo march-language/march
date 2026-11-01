@@ -1,4 +1,4 @@
-`[P3]` Reflected arithmetic is over mathematical integers; compiled `Int` is 63-bit and wraps.
+`[P3]` Reflected arithmetic is over mathematical integers; runtime `Int` is 63-bit and its overflow is not ruled out.
 
 Decision D8 and fact F18 of `specs/2026-10-29-refinement-reflection-design.md` (§9.1 "Int overflow",
 §9.3, and phase 6 in §10).
@@ -13,3 +13,9 @@ Decision D8 and fact F18 of `specs/2026-10-29-refinement-reflection-design.md` (
   Bit operations (`int_and`, `int_shl`, …) can then join the R6 table (§2.3).
 - The D16 parity net marks a boundary-input mismatch `overflow?` rather than a mismatch (§9.2); that
   mark is what this phase retires.
+
+**Update 2026-10-30.** #1042 made `+ - *` and negation panic on overflow (both backends), with
+`int_wrapping_add/sub/mul` for intended wrap-around. A proved fact about a reflected function is now
+true wherever the program gets past the call, so the open part of this item is narrower: a reflected
+function is counted as unable to fail (R4) although its arithmetic can panic. Phase 6 adds the
+overflow obligation; the reference's "`Int` is mathematical" paragraph says this.

@@ -148,6 +148,15 @@ type reason =
      mentioning another name, or a callee whose own body is not proved to
      return elements satisfying it (§3.1).  Payload says which. *)
   | Abstract_uninstantiated of string
+  (* Reflection (specs/2026-10-29-refinement-reflection-design.md §3.9, D15):
+     stage 2 of the two-stage discharge ran and did not prove the goal.
+     [Reflect_fuel]: its query held a reflected call that unfolding PRODUCED
+     and did not unfold in turn (single unfolding, D12); the payload names
+     its function.  [Reflect_budget]: the query had more reflected calls than
+     the per-query cap of unfoldings (32), so some were dropped.  Budget takes
+     precedence over fuel. *)
+  | Reflect_fuel of string
+  | Reflect_budget
 
 (* [Trusted]: the obligation was [Skipped] for some ordinary reason, but the
    enclosing function carries `@[trusted]`, so under `cap verified` it is
@@ -235,7 +244,14 @@ let by_span : (March_ast.Ast.span, t list) Hashtbl.t = Hashtbl.create 64
    [Refine_check.check_module] calls [reset] at its top.  Leaking an entry
    across modules would let a later module read a `Proved` that was never
    established for it, which is strictly worse than reading nothing. *)
-let reset () = log := []; Hashtbl.reset by_span
+(* Reflection §2.4: the definitions a stage-2 proof used (its unsat core,
+   mapped from assumption literals to function names), by obligation.  Filled
+   by [record] from [March_refine.Refine.last_core], which the proving
+   discharge just set; printed as the `uses:` column of
+   `--refine-report-sites=all`. *)
+let uses_tbl : (March_ast.Ast.span * string * string, string list) Hashtbl.t = Hashtbl.create 16
+
+let reset () = log := []; Hashtbl.reset by_span; Hashtbl.reset uses_tbl
 
 (* Run [f] against a SCRATCH ledger+index, then put the real ones back.
 
@@ -271,11 +287,43 @@ let with_scratch (f : unit -> 'a) : 'a =
   | v -> restore (); v
   | exception e -> restore (); raise e
 
+let uses_key (o : t) = (o.span, o.callee, o.predicate)
+
+let uses_of (o : t) : string list = Option.value ~default:[] (Hashtbl.find_opt uses_tbl (uses_key o))
+
+let set_uses (o : t) (u : string list) : unit = if u <> [] then Hashtbl.replace uses_tbl (uses_key o) u
+
 let record (o : t) : unit =
+  (if o.verdict = Proved && !March_refine.Refine.last_core <> [] then
+     let names =
+       List.filter_map Reflect_state.literal_function !March_refine.Refine.last_core
+       |> List.sort_uniq compare
+     in
+     set_uses o names);
   log := o :: !log;
   Hashtbl.replace by_span o.span (o :: Option.value ~default:[] (Hashtbl.find_opt by_span o.span))
 
 let all () : t list = List.rev !log
+
+(* Undo every [record] since the ledger was [saved] (a physical suffix of it):
+   the two-stage discharge (reflection §4.4) runs an obligation twice and
+   keeps one stage's records.  Each removed record is the head of its span's
+   index entry, since records are pushed in order.  Returns the removed
+   records oldest first.  [uses_tbl] is left alone: the caller decides whose
+   `uses:` survive. *)
+let rollback_to (saved : t list) : t list =
+  let removed = ref [] in
+  while !log != saved && !log <> [] do
+    match !log with
+    | o :: rest ->
+      log := rest;
+      removed := o :: !removed;
+      (match Hashtbl.find_opt by_span o.span with
+       | Some (x :: xs) when x == o -> if xs = [] then Hashtbl.remove by_span o.span else Hashtbl.replace by_span o.span xs
+       | _ -> ())
+    | [] -> ()
+  done;
+  !removed
 
 (* Every obligation recorded at [span], in the order they were recorded.  One
    call site can raise several — one per refined parameter — so this is a list,
@@ -336,6 +384,8 @@ let reason_name = function
   | Not_decreasing _ -> "not-decreasing"
   | Abstract_too_weak _ -> "abstract-refinement-too-weak"
   | Abstract_uninstantiated _ -> "abstract-refinement-uninstantiated"
+  | Reflect_fuel _ -> "reflect-fuel"
+  | Reflect_budget -> "reflect-budget"
 
 (* One clause of plain English per reason, for the `cap verified` error text.
    [reason_name] alone is a debug-report slug; once a reason reaches a USER it
@@ -383,6 +433,14 @@ let reason_detail = function
   | Not_decreasing cx -> Printf.sprintf "the recursive call is not shown to decrease the metric: e.g. %s" cx
   | Abstract_too_weak what -> what
   | Abstract_uninstantiated what -> what
+  | Reflect_fuel f ->
+    Printf.sprintf
+      "the proof may need more unfolding of `%s`; add a lemma call or `assert`, or raise \
+       `@[reflect(fuel: N)]`"
+      f
+  | Reflect_budget ->
+    "the query has more reflected calls than the checker unfolds in one query (32); split the \
+     predicate or add an `assert`"
 
 (* Deliberately still a 3-tuple: (proved, violated, skips-by-reason).  Every
    existing caller destructures it that way, and [Trusted] does not belong in

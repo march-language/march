@@ -223,7 +223,21 @@ let smt_sort_of_marker (m : string option) : Smt.sort =
    so a path nobody anticipated costs a silent SKIP rather than an `(error …)`
    line on the shared solver channel. *)
 let sort_conflict (ds : (string * Smt.sort) list) : bool =
-  List.exists (fun (n, s) -> List.exists (fun (n', s') -> n = n' && s <> s') ds) ds
+  (* Reflection stage 2: a reflected call's argument is declared at its
+     parameter's sort with type variables open (`Elem`), which
+     [resolve_sorts] unifies with the concrete declaration of the same name;
+     only a clash that no instance reconciles is a conflict there.  Stage 1
+     keeps the exact rule. *)
+  let rec compatible a b =
+    a = b
+    ||
+    match a, b with
+    | Smt.SData ("Elem", []), _ | _, Smt.SData ("Elem", []) -> true
+    | Smt.SData (n, xs), Smt.SData (m, ys) -> n = m && List.length xs = List.length ys && List.for_all2 compatible xs ys
+    | _ -> false
+  in
+  let same = if !Reflect_state.arm_on then compatible else ( = ) in
+  List.exists (fun (n, s) -> List.exists (fun (n', s') -> n = n' && not (same s s')) ds) ds
 
 (* ── Well-sortedness guard ────────────────────────────────────────────────
    `$Str` is a sort apart, and the rest of the VC language is Int/Bool.  A term
@@ -482,6 +496,8 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
   (* An abstract refinement is the one uninterpreted function declared at
      `Bool` ([abstract_preamble]). *)
   | Smt.App (f, _) when is_abs_sym f -> true
+  (* A reflected Bool-valued function (reflection §3.2: Bool is a sort). *)
+  | Smt.App (f, _) when Reflect_state.returns_bool f -> true
   (* Nothing else in this checker declares an uninterpreted function at `Bool`
      (measures and selectors return Int or a datatype), so an application in
      Boolean position is a sort error just as arithmetic and literals are. *)
@@ -1009,7 +1025,7 @@ let measure_name (m : string) : string =
 let nonzero_int_literal (d : A.expr) : int option =
   match d with
   | A.ELit (A.LitInt n, _) when n <> 0 -> Some n
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ A.ELit (A.LitInt n, _) ], _) when n <> 0 -> Some (-n)
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ A.ELit (A.LitInt n, _) ], nsp) when !Reflect_state.negate_builtin_at nsp && n <> 0 -> Some (-n)
   | _ -> None
 
 let is_measure_app (m : string) : bool = measure_alias m <> None || is_measure m
@@ -2238,7 +2254,7 @@ let rec fold_const_body (lookup : string -> (const_val, string) result) (e : A.e
   | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> int2 ( + ) a b
   | A.EApp (A.EVar { A.txt = "-"; _ }, [ a; b ], _) -> int2 ( - ) a b
   | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) -> int2 ( * ) a b
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) ->
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp ->
     (match go a with Ok (CInt x) -> Ok (CInt (-x)) | Error _ as err -> err | _ -> generic)
   | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> bool2 ( && ) a b
   | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> bool2 ( || ) a b
@@ -3520,6 +3536,17 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
          unify (infer a) it;
          (match List.nth_opt (field_sorts ctor params) k with Some fs -> fs | None -> fresh ())
        | None -> ignore (infer a); fresh ())
+    (* A reflected function (reflection §3.1-§3.3): its arguments unify with
+       its signature at a fresh instance, one slot per type variable, after
+       the arguments ([rewrite] pops them in the same order). *)
+    | Smt.App (f, args) when Reflect_state.sig_of f <> None ->
+      let fs = Option.get (Reflect_state.sig_of f) in
+      let params = Array.init fs.Reflect_state.fs_nvars (fun _ -> fresh ()) in
+      if List.length args = List.length fs.Reflect_state.fs_params then
+        List.iter2 (fun p a -> let ta = infer a in unify (of_sort ~params p) ta) fs.Reflect_state.fs_params args
+      else begin List.iter (fun a -> ignore (infer a)) args; conflict := true end;
+      Array.iter slot params;
+      of_sort ~params fs.Reflect_state.fs_ret
     | Smt.App (_, args) -> List.iter (fun a -> ignore (infer a)) args; fresh ()
     | Smt.SetEmpty e -> let v = of_sort e in slot v; ISet v
     | Smt.SetSng (e, x) ->
@@ -3640,6 +3667,20 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
              instances := { mi_name = name; mi_measure = m; mi_adt = adt; mi_args = args } :: !instances;
            Smt.App (name, [ a' ])
          | _ -> Smt.App (m, [ a' ]))
+      | Smt.App (f, args) when Reflect_state.sig_of f <> None ->
+        let fs = Option.get (Reflect_state.sig_of f) in
+        let args' = List.map rewrite args in
+        let inst = List.init fs.Reflect_state.fs_nvars (fun _ -> to_sort (pop ())) in
+        let ps = List.map (Smt.instantiate inst) fs.Reflect_state.fs_params in
+        let ret = Smt.instantiate inst fs.Reflect_state.fs_ret in
+        (* One symbol per sort instance (§3.1); a monomorphic function keeps
+           its base name.  The name is a fixed string, so the VC text is the
+           same in every run. *)
+        let name =
+          if inst = [] then f else Reflect_state.instance_name f (String.concat "," (List.map Smt.set_elem_tag inst))
+        in
+        Hashtbl.replace Reflect_state.instances name (ps, ret);
+        Smt.App (name, args')
       | Smt.App (f, args) -> Smt.App (f, List.map rewrite args)
       | Smt.SetEmpty _ -> Smt.SetEmpty (to_sort (pop ()))
       | Smt.SetSng (_, x) -> let e = to_sort (pop ()) in Smt.SetSng (e, rewrite x)
@@ -3663,6 +3704,12 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
     | exception Exit -> None
     | goal', assumptions' ->
     let decls' = List.map (fun (n, _) -> (n, to_sort (sort_of_const n))) decls in
+    (* Stage 2 may declare one name at two sorts that unified to one: emit it
+       once (z3 rejects a second declaration). *)
+    let decls' =
+      if not !Reflect_state.arm_on then decls'
+      else List.fold_left (fun acc (n, s) -> if List.mem_assoc n acc then acc else acc @ [ (n, s) ]) [] decls'
+    in
     Some (decls', goal', assumptions', List.rev !instances)
   end
 
@@ -3734,7 +3781,24 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
     String.concat "" (List.map (fun mi -> list_measure_text mi.mi_name mi.mi_measure mi.mi_args) list_mis)
   in
   let msorts = msorts @ List.map (fun mi -> Smt.SData (list_adt, mi.mi_args)) list_mis in
-  let sorts = List.fold_left term_sorts (List.map snd decls @ msorts) (goal :: assumptions) in
+  (* Reflected logic symbols the query applies (reflection §3.1): their
+     argument and result sorts join the datatype closure, and each gets one
+     `declare-fun` after it.  Empty for every query without one, so no other
+     query's text moves. *)
+  let rapps =
+    let acc = ref [] in
+    let rec walk (t : Smt.term) =
+      (match t with
+       | Smt.App (f, _) when Reflect_state.is_instance f && not (List.mem_assoc f !acc) ->
+         acc := (f, Hashtbl.find Reflect_state.instances f) :: !acc
+       | _ -> ());
+      List.iter walk (Smt.children t)
+    in
+    List.iter walk (goal :: assumptions);
+    List.sort compare !acc
+  in
+  let rsorts = List.concat_map (fun (_, (ps, r)) -> r :: ps) rapps in
+  let sorts = List.fold_left term_sorts (List.map snd decls @ msorts @ rsorts) (goal :: assumptions) in
   let contains hay needle =
     let n = String.length needle and h = String.length hay in
     let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
@@ -3793,7 +3857,20 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
            symbols)
     end
   in
-  elem ^ (if dts = "" then "" else dts ^ "\n") ^ set_defs ^ ltext ^ mtext ^ axioms
+  let rdecls =
+    String.concat ""
+      (List.map
+         (fun (f, (ps, r)) ->
+           Printf.sprintf "(declare-fun %s (%s) %s)\n" f (String.concat " " (List.map Smt.string_of_sort ps))
+             (Smt.string_of_sort r))
+         rapps)
+  in
+  let elem =
+    if elem = "" && contains rdecls " Elem" && not (contains declared "(declare-sort Elem 0)") then
+      "(declare-sort Elem 0)\n"
+    else elem
+  in
+  elem ^ (if dts = "" then "" else dts ^ "\n") ^ set_defs ^ ltext ^ mtext ^ axioms ^ rdecls
 
 (* [resolve_sorts_exact], forgiving ASSUMPTIONS.  A contradiction that only an
    assumption brings in (a guard over a program function whose name happens to
@@ -3808,6 +3885,12 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
 let resolve_sorts (decls : (string * Smt.sort) list) (goal : Smt.term)
     (assumptions : Smt.term list)
     : ((string * Smt.sort) list * Smt.term * Smt.term list * measure_instance list) option =
+  (* Stage 2 of the two-stage discharge (reflection §4.4): the guarded
+     equations of every reflected call in the query, added before the sorts
+     are settled so their constructor instances resolve with the rest. *)
+  let decls, assumptions =
+    if !Reflect_state.arm_on then !Reflect_state.unfold_hook decls goal assumptions else (decls, assumptions)
+  in
   match resolve_sorts_exact decls goal assumptions with
   | Some r -> Some r
   | None ->

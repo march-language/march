@@ -198,6 +198,10 @@ def load(path):
         line = line.rstrip("\n")
         tag, _, rest = line.partition(": ")
         f = rest.split("\t")
+        # A stage-2 proof's `uses:` column (reflection §2.4) is not part of
+        # the site's identity.
+        if len(f) > 1 and f[-1].startswith("uses: "):
+            f = f[:-1]
         verdict, loc = f[0], f[2]
         # A skip carries its reason before the kind.
         tail = f[4:] if verdict == "skip" else f[3:]

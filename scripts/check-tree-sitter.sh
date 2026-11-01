@@ -61,7 +61,7 @@ build() {
 }
 
 corpus_files() {
-  (cd "$ROOT" && find stdlib test examples bench specs/lang -name '*.march' \
+  (cd "$ROOT" && find stdlib test examples bench specs/lang -type f -name '*.march' \
       -not -path 'specs/lang/grammar/reject/*' -not -path 'test/errors/*' | LC_ALL=C sort)
 }
 
