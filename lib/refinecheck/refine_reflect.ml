@@ -224,8 +224,11 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
     | A.EHole (_, sp) -> emit owner 4 "has a typed hole" sp
     | A.EMatch (s, brs, sp) ->
       if inp.nonexhaustive sp then begin
-        if List.exists (fun (b : A.branch) -> b.A.branch_guard <> None) brs then
-          emit owner 5 "guarded match may not match" sp
+        if List.exists (fun (b : A.branch) -> b.A.branch_guard <> None) brs then begin
+          (* Test-only: the parity net's C2 control admits a guarded match. *)
+          if Sys.getenv_opt "MARCH_REFLECT_PERTURB" <> Some "r5-guarded" then
+            emit owner 5 "guarded match may not match" sp
+        end
         else emit owner 5 "non-exhaustive match" sp
       end;
       w s;

@@ -972,6 +972,19 @@ let print_reflect_deps ~filename ~user_files () =
     |> List.filter_map (row "reflect-dep") |> List.sort_uniq compare in
   List.iter prerr_endline (defs @ deps)
 
+(* --reflect-parity (reflection §9.2, D16): the parity net over the
+   reflected functions of user code; its lines on stderr, exit 1 on RED (a
+   mismatch or an interpreter failure). *)
+let run_reflect_parity ~filename ~user_files () =
+  let is_user f = f = filename || List.mem f user_files
+                  || not (March_typecheck.Typecheck_builtins.file_is_stdlib f) in
+  let lines, red = March_refinecheck.Reflect_parity.run ~is_user () in
+  List.iter prerr_endline lines;
+  if red then begin
+    prerr_endline "parity: RED (a reflected function's logic definition disagrees with the program; this is a compiler bug)";
+    exit 1
+  end
+
 (* --refine-audit: every declared refinement occurrence
    ([March_refinecheck.Refine_audit.sites]), classified
    ([March_refinecheck.Refine_audit.classify]) against what the checker
@@ -2572,6 +2585,7 @@ let run_test_cmd args =
        listing (and what R4 reads). *)
     if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
     if !reflect_deps then print_reflect_deps ~filename ~user_files ();
+    if !reflect_parity then run_reflect_parity ~filename ~user_files ();
     if !reflect_report then
       print_reflect_report ~filename ~user_files ~type_map
         ~recheck:(fun () ->
@@ -3864,6 +3878,7 @@ let compile filename =
   March_refinecheck.Division_safety.check_module errors desugared;
   if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
   if !reflect_deps then print_reflect_deps ~filename ~user_files ();
+  if !reflect_parity then run_reflect_parity ~filename ~user_files ();
   if !reflect_report then
     print_reflect_report ~filename ~user_files ~type_map
       ~recheck:(fun () ->

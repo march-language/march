@@ -141,8 +141,49 @@ let project_env proj =
   let output = Filename.concat test_build_dir (proj.Project.name ^ "_test") in
   (lib_path_env, output, all_lib_paths, toolchain_pfx)
 
+(** [--reflection-parity] (refinement reflection §9.2, D16, opt-in): the
+    parity net over the project's reflected functions.  Each source file of
+    the project ([lib/] and [src/]) is checked with
+    `march --check --reflect-parity`, which compares every reflected
+    function's logic definition with the interpreter on generated inputs
+    (boundary Ints included) and exits 1 on a mismatch or an interpreter
+    failure.  The `parity` lines are printed as they come. *)
+let project_sources root =
+  List.concat_map
+    (fun d ->
+      let dir = Filename.concat root d in
+      if Sys.file_exists dir && Sys.is_directory dir then
+        let rec walk dir =
+          List.sort compare (Array.to_list (Sys.readdir dir))
+          |> List.concat_map (fun e ->
+                 let p = Filename.concat dir e in
+                 if Sys.is_directory p then walk p
+                 else if Filename.check_suffix e ".march" then [ p ]
+                 else [])
+        in
+        walk dir
+      else [])
+    [ "lib"; "src" ]
+
+let run_reflection_parity ~lib_path_env (files : string list) : (unit, string) result =
+  let red =
+    List.filter
+      (fun f ->
+        let cmd = Printf.sprintf "%smarch --check --reflect-parity %s 2>&1 | grep '^parity'"
+            lib_path_env (Filename.quote f) in
+        Printf.printf "reflection parity: %s\n%!" f;
+        (* grep's own status is not the compiler's: ask the compiler again
+           only for its exit code when the lines show RED. *)
+        ignore (Sys.command cmd);
+        Sys.command (Printf.sprintf "%smarch --check --reflect-parity %s >/dev/null 2>&1"
+                       lib_path_env (Filename.quote f)) <> 0)
+      files
+  in
+  if red = [] then Ok ()
+  else Error (Printf.sprintf "reflection parity RED in %s" (String.concat ", " red))
+
 (** Run forge test for a given list of test files (after directory expansion). *)
-let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(release=false) test_files =
+let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(release=false) ?(reflection_parity=false) test_files =
   (* coverage is only supported on the interpreter path *)
   let use_interp = coverage || Sys.getenv_opt "MARCH_TEST_INTERPRETER" = Some "1" in
   match Project.load () with
@@ -162,6 +203,13 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
     | Error e -> Error e
     | Ok () ->
     let (lib_path_env, output, all_lib_paths, toolchain_pfx) = project_env proj in
+    let with_parity r =
+      match r with
+      | Ok () when reflection_parity ->
+        run_reflection_parity ~lib_path_env (project_sources proj.Project.root)
+      | r -> r
+    in
+    with_parity @@
     if use_interp then
       (* Link the same FFI shims as the compiled path below (and `forge build`)
          so interpreter-mode tests that call into [[ffi]] code don't fail with
@@ -203,14 +251,14 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
         invoke_compiled ~verbose ~filter ~seed ~skip_properties ~release ~ffi_flags ~lib_path_env:lib_path_with_test ~output entry
     end
 
-let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(release=false) ?(files=[]) () =
+let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(release=false) ?(reflection_parity=false) ?(files=[]) () =
   if files <> [] then begin
     let expanded = expand_paths files in
     if expanded = [] then begin
       Printf.printf "no test files found\n%!";
       Ok ()
     end else
-      run_files ~verbose ~filter ~coverage ~seed ~skip_properties ~release expanded
+      run_files ~verbose ~filter ~coverage ~seed ~skip_properties ~release ~reflection_parity expanded
   end else
     match find_test_dir () with
     | None ->
@@ -224,5 +272,5 @@ let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_proper
           Printf.printf "no test files found under %s\n%!" test_dir;
           Ok ()
         end else
-          run_files ~verbose ~filter ~coverage ~seed ~release test_files
+          run_files ~verbose ~filter ~coverage ~seed ~release ~reflection_parity test_files
       end

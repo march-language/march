@@ -328,3 +328,105 @@ let hcr =
         if col d1 "inc" = col d2 "inc" then Alcotest.fail "the logic column must follow the body";
         Alcotest.(check string) "main is not reflected" "-" (col d1 "main");
         Alcotest.(check string) "an @[opaque] function is not reflected" "-" (col o1 "inc")) ]
+
+(* ── §9.2: the parity net (group reflect-parity) ───────────────────────── *)
+
+let parity_src = {|mod Par do
+  type Shape = Sq(Int) | Rect(Int, Int) | Dot
+  fn inc(n : Int) : Int do n + 1 end
+  fn absv(n : Int) : Int do if n < 0 do 0 - n else n end end
+  fn is_small(n : Int) : Bool do n < 10 end
+  fn sign(n : Int) : Int do
+    if n > 0 do 1 else if n < 0 do -1 else 0 end end
+  end
+  fn half(n : Int) : Int do n / 2 end
+  fn rem3(n : Int) : Int do n % 3 end
+  fn area(s : Shape) : Int do
+    match s do
+      Sq(a) -> a * a
+      Rect(w, h) -> w * h
+      Dot -> 0
+    end
+  end
+  fn len2(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + len2(t)
+    end
+  end
+  fn first_or(xs : List(Int), d : Int) : Int do
+    match xs do
+      Nil -> d
+      Cons(h, _) -> h
+    end
+  end
+  fn get_or(o : Option(Int), d : Int) : Int do
+    match o do
+      Some(x) -> x
+      None -> d
+    end
+  end
+  fn guarded(xs : List(Int)) : Int do
+    match xs do
+      Cons(h, _) when h > 0 -> h
+      Nil -> 0
+    end
+  end
+  fn pos_only(n : {Int | _ > 0}) : Int do n - 1 end
+end
+|}
+
+(* (status, detail) of [name]'s parity row. *)
+let parity_row out name =
+  List.find_map
+    (fun l ->
+      match String.split_on_char '\t' l with
+      | [ "parity"; _; n; st; d ] when n = name -> Some (st, d)
+      | _ -> None)
+    (lines out)
+
+let parity_status out name =
+  match parity_row out name with Some (st, _) -> st | None -> Alcotest.failf "no parity row for %s:\n%s" name out
+
+let summary out = List.find_opt (fun l -> String.starts_with ~prefix:"parity: " l) (lines out)
+
+let fixtures () =
+  match U.fixtures_dir () with
+  | None -> []
+  | Some d ->
+    Sys.readdir d |> Array.to_list |> List.filter (fun f -> Filename.check_suffix f ".march") |> List.sort compare
+    |> List.map (fun f -> (f, In_channel.with_open_bin (Filename.concat d f) In_channel.input_all))
+
+let parity =
+  [ gated "parity: 0 mismatches and 0 interpreter failures on every phase fixture and the parity program" (fun () ->
+        let compared = ref 0 in
+        List.iter
+          (fun (f, src) ->
+            let out = run ~args:"--check --reflect-parity" src in
+            (match summary out with
+             | None -> Alcotest.failf "%s: no parity summary:\n%s" f out
+             | Some s ->
+               if not (contains s " 0 mismatch, 0 interpreter failure") then Alcotest.failf "%s: %s\n%s" f s out);
+            List.iter (fun l -> if contains l "\tagree\t" then incr compared) (lines out))
+          (("parity_program", parity_src) :: fixtures ());
+        if !compared < 20 then Alcotest.failf "only %d functions compared: the net is vacuous" !compared);
+    gated "parity: boundary Ints are overflow?, never a mismatch (D8)" (fun () ->
+        let out = run ~args:"--check --reflect-parity" parity_src in
+        Alcotest.(check string) "inc at the maximum Int" "overflow?" (parity_status out "inc");
+        (match parity_row out "inc" with
+         | Some (_, d) -> if not (contains d "4611686018427387903") then Alcotest.failf "inc's overflow input: %s" d
+         | None -> ());
+        Alcotest.(check string) "half: the evaluator's own 63-bit limit is not overflow?" "agree" (parity_status out "half");
+        Alcotest.(check string) "area over a user type" "agree" (parity_status out "area");
+        Alcotest.(check string) "get_or over Option" "agree" (parity_status out "get_or");
+        Alcotest.(check string) "a refined parameter: only inputs inside pre_f" "agree" (parity_status out "pos_only");
+        if parity_row out "guarded" <> None then Alcotest.fail "guarded is R5-blocked, so it is not in the net");
+    gated "parity RED: an arms-swapped term_of_body is a mismatch" (fun () ->
+        let out = run ~env:"MARCH_REFLECT_PERTURB=swap-arms" ~args:"--check --reflect-parity" parity_src in
+        Alcotest.(check string) "absv" "MISMATCH" (parity_status out "absv");
+        Alcotest.(check string) "get_or" "MISMATCH" (parity_status out "get_or");
+        if not (contains out "parity: RED") then Alcotest.failf "the net must report RED:\n%s" out);
+    gated "parity RED: a guarded match R5 wrongly admits panics in the interpreter: RED, not not-compared" (fun () ->
+        let out = run ~env:"MARCH_REFLECT_PERTURB=r5-guarded" ~args:"--check --reflect-parity" parity_src in
+        Alcotest.(check string) "guarded" "INTERPRETER-FAILURE" (parity_status out "guarded");
+        if not (contains out "parity: RED") then Alcotest.failf "the net must report RED:\n%s" out) ]
