@@ -37,6 +37,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`String.fold_split` and `String.fold_split_ranges`: walk the fields of `split`
+  without building the list.** `fold_split` hands each field to a callback, one at a
+  time; `fold_split_ranges` hands over byte ranges and allocates nothing. On a
+  150,000-field buffer, `fold_split` uses 4 MB where `split` uses 25 MB, and
+  `fold_split_ranges` is also about 3x faster.
 - **The JS target (`--target js`) runs real programs: tail calls, native arrays,
   binary strings.** Self and mutual tail calls compile to loops, so deep recursion no
   longer overflows the stack. `NativeI32Arr`/`NativeU8Arr`/`NativeIntArr` are typed
@@ -506,6 +511,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- In the interpreter (and so in `march test` and the REPL), `String.split` with a
+  repeating multi-byte separator returned the wrong fields: `String.split(",,,,",
+  ",,")` gave `["", ",,"]` instead of `["", "", ""]`, which compiled code already
+  returned.
 - **`println` and `print` write a string's bytes on the JS target.** Under Node a string
   holding binary data (raw bytes) printed each byte's UTF-8 encoding; it now writes the
   bytes, as natively. `march_string_bytes(s)` (exported by `march_runtime.mjs`) gives an

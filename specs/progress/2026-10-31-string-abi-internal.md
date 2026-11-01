@@ -35,3 +35,28 @@ or its fields (red with a `march_string` line appended, green without). The inli
 land in any 1.x as a pure speedup. The slicing/splitting allocation cost is to be attacked
 directly; it needs its own design (a borrowed view has the same every-reader cost as the inline
 flip).
+
+## The slicing cost, attacked directly (decided 2026-10-31: allocation-free APIs)
+
+A borrowed-view string would have the same every-reader cost as the inline flip, so the
+allocation the synthetic benches show is addressed with APIs that don't need it:
+
+- `String.index_of_from` (search from a byte offset) already existed; the comment in
+  `bench/string_slice_walk.march` that said it was missing is corrected.
+- New `String.fold_split(s, sep, acc, f)`: `split`'s fields, one at a time, with no list.
+- New `String.fold_split_ranges(s, sep, acc, f)`: the fields' byte ranges, with no allocation.
+  Both give exactly `split`'s fields (property tests in `test/stdlib/test_string.march`).
+
+Measured (`bench/string_split_fold.march` against `bench/string_split_large.march`, same buffer
+and 60 iterations; compiled `--opt 2`, median user time of 7, maximum RSS): `split` 0.20 s and
+25 MB; `fold_split` 0.20 s and 4 MB; `fold_split_ranges` 0.06 s and 4 MB.
+
+**Found and fixed on the way:** the interpreter's `String.split` returned the wrong fields for a
+repeating multi-byte separator: `String.split(",,,,", ",,")` gave `["", ",,"]` (compiled code
+gave `["", "", ""]`). Its loop also matched inside the previous match, computed a negative
+length, and the exception ended the loop early. It now matches only at or after the previous
+match's end (`lib/eval/eval_builtins.ml`); pinned in `test/stdlib/test_string.march`.
+
+**Filed:** `MARCH_STRING_STATS` never counts string frees
+(`specs/todos/2026-10-31-string-stats-frees-never-counted.md`), so its `peak_live_bytes` is
+cumulative; the memory figures above are maximum RSS instead.
