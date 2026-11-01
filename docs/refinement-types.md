@@ -1303,6 +1303,56 @@ change and callers' proofs should not depend on it, or when unfolding it slows
 checking. `@[opaque]` on a function that would not be reflected anyway draws
 an `attribute_no_effect` warning.
 
+**A parameter refinement may call a reflected function.** The function is then
+reflected too, and its definition is used where the call in its refinement
+holds:
+
+```march
+fn is_small(n : Int) : Bool do n < 10 end
+fn f(n : {Int | is_small(_)}) : Int do n + 1 end
+fn need_eq(a : Int, b : {Int | _ == a}) : Int do b end
+
+fn g(n : Int) : Int do
+  if is_small(n) do need_eq(n + 1, f(n)) else 0 end   -- proved
+end
+```
+
+**A body is part of its callers' proofs.** When a caller's proof uses a
+reflected function's definition, an edit to that body can change the proof.
+Nothing stale survives such an edit:
+
+- Each reflected function has a **logic hash**: a hash of its source text, of
+  whether it is reflected, and of how `==` reads at each type its body
+  compares. A line inserted above the function does not change it; a body
+  edit, losing reflectability, or switching a type from `derive Eq` to a
+  hand-written `impl Eq` does. The solver cache key of every proof that used
+  the definition names this hash, so a cached answer never outlives the body.
+- `march --emit-llvm --dump-impl-hashes` writes a fourth column, the logic
+  hash, or `-` for a function that is not reflected.
+- **Hot code reload refuses a patch that changes a reflected function's
+  body**, even when its type is unchanged:
+  `the body of f is part of its callers' proofs; redeploy, or mark it @[opaque]`.
+  Deploy such a change with a restart. A function whose body you want to
+  hot-patch should be `@[opaque]`; its body then keys no caller's proof.
+- In the editor, with `MARCH_LSP_REFINE=1`, the language server shows
+  refinement diagnostics for saved files. Saving `util.march` re-checks every
+  open file whose proofs used a definition from it that changed, without an
+  edit to that file.
+
+**Checking the checker: `--reflection-parity`.** `forge test
+--reflection-parity` (or `march --check --reflect-parity file.march`) runs each
+reflected function both ways on generated inputs: by its logic definition and
+by the interpreter. The inputs include `0`, `1`, `-1`, the largest and smallest
+`Int` and their neighbours. Any disagreement, or a reflected function that
+panics on an input in its domain, fails the run: that is a compiler bug.
+A function whose arithmetic overflows at the boundary is reported `overflow?`,
+since the checker treats `Int` as unbounded (above). Example output:
+
+```
+parity  m.march  area  agree      100 inputs
+parity  m.march  inc   overflow?  attempt to add with overflow at (4611686018427387903)
+```
+
 ### `@[measure]`: insisting on reflection
 
 `@[measure]` says "this function must be reflected". If it is not, the

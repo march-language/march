@@ -37,6 +37,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`--reflection-parity`: check the refinement checker's reading of your functions.**
+  `forge test --reflection-parity` (or `march --check --reflect-parity`) runs every
+  reflected function both by its logic definition and in the interpreter, on generated
+  inputs including the largest and smallest `Int`; a disagreement or a panic inside the
+  function's domain fails the run, and boundary overflow is reported `overflow?`.
+- **Logic hashes in `--dump-impl-hashes`.** A fourth column gives each reflected
+  function's logic hash (`-` when not reflected); every solver query that used a
+  definition names the hash in its cache key. `--reflect-deps` prints the hashes, and the
+  language server (opt-in, `MARCH_LSP_REFINE=1`) uses them to re-check open files when a
+  definition they relied on changes in another file.
+- **A parameter refinement may call a reflected function** (`fn f(n : {Int | is_small(_)})`),
+  and the function is still reflected.
+
 - **Refinement predicates can use your own functions.** A function that terminates
   structurally, has no effects, cannot fail and calls only such functions is *reflected*
   automatically: its body becomes its meaning in the logic. `if is_small(n) do
@@ -464,6 +477,9 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Hot reload refuses a patch that changes a reflected function's body**: callers'
+  proofs may have used it. Redeploy with a restart, or mark the function `@[opaque]`.
+
 - **`@[measure]` now insists on reflection, and follows calls.** A `@[measure]` that is not
   reflected is the error `invalid_measure`, naming the first reason, including through a
   function it calls (a measure whose `Nil` arm calls a function that prints, panics or
@@ -528,6 +544,9 @@ git log is authoritative for exact commits.
   inferred, so well-typed callers are unaffected and nothing runs differently.
 
 ### Fixed
+
+- **A `refinement_unverified` hint re-labelled `reflect-fuel` or `reflect-budget` now
+  names that reason** instead of the first attempt's.
 
 - **`println` and `print` write a string's bytes on the JS target.** Under Node a string
   holding binary data (raw bytes) printed each byte's UTF-8 encoding; it now writes the
