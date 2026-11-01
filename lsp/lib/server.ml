@@ -13,6 +13,50 @@
 include Server_state
 
 (* ------------------------------------------------------------------ *)
+(* Refinement diagnostics (refinement reflection §7.2; Refine_diag)    *)
+(* ------------------------------------------------------------------ *)
+
+(* Opt-in (MARCH_LSP_REFINE=1): each check is a full `march --check` of the
+   saved file, seconds of work, so an editor turns it on deliberately. *)
+let refine_enabled () = Sys.getenv_opt "MARCH_LSP_REFINE" = Some "1"
+
+(* The refinement diagnostics last published per document URI. *)
+let refine_tbl : (string, Lsp.Types.Diagnostic.t list) Hashtbl.t = Hashtbl.create 16
+
+let refine_extra (uri_str : string) =
+  Option.value ~default:[] (Hashtbl.find_opt refine_tbl uri_str)
+
+(* One refinement run at a time: [Refine_diag]'s table is shared. *)
+let refine_lock = Lwt_mutex.create ()
+
+(* Re-check [path] (just opened, saved or changed on disk) and every open
+   document whose reflection dependency key it made stale, then republish
+   each one's diagnostics: the analysis's plus the refinement ones. *)
+let refresh_refinement ~notify_back (path : string) : unit Lwt.t =
+  if not (refine_enabled () && Filename.check_suffix path ".march") then Lwt.return_unit
+  else
+    Lwt_mutex.with_lock refine_lock (fun () ->
+        Lwt.bind (Lwt_preemptive.detach Refine_diag.on_change path) (fun dependents ->
+            let own = Refine_diag.canon path in
+            let results =
+              (own, Hashtbl.find Refine_diag.last own) :: dependents
+            in
+            Lwt_list.iter_s
+              (fun (file, (r : Refine_diag.result)) ->
+                let uri = Lsp.Types.DocumentUri.of_path file in
+                let uri_str = Lsp.Types.DocumentUri.to_string uri in
+                match Hashtbl.find_opt doc_cache uri_str with
+                | None -> Lwt.return_unit
+                | Some a ->
+                  let rd = List.map (fun d -> Pos.remap_diagnostic a.Analysis.doc (Refine_diag.to_lsp d)) r.Refine_diag.r_diags in
+                  Hashtbl.replace refine_tbl uri_str rd;
+                  notify_back#send_notification
+                    (Lsp.Server_notification.PublishDiagnostics
+                       (Lsp.Types.PublishDiagnosticsParams.create ~uri
+                          ~diagnostics:(List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics @ rd) ())))
+              results))
+
+(* ------------------------------------------------------------------ *)
 (* Server class                                                        *)
 (* ------------------------------------------------------------------ *)
 
@@ -392,7 +436,8 @@ class march_server =
                   twice. Only publish again when the TIR pass actually ran. *)
                if a2 != a then
                  notify_back#send_diagnostic
-                   (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics)
+                   (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics
+                             @ refine_extra uri_str)
                else Lwt.return_unit
              end else Lwt.return_unit
            end else Lwt.return_unit)
@@ -404,8 +449,11 @@ class march_server =
          topology documents that name this file's declarations. *)
       Lwt.bind
         (notify_back#send_diagnostic
-           (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics))
-        (fun () -> publish_topology_dependents ~notify_back path)
+           (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics
+                    @ refine_extra uri_str))
+        (fun () ->
+          Lwt.bind (publish_topology_dependents ~notify_back path) (fun () ->
+              refresh_refinement ~notify_back path))
 
     method on_notif_doc_did_close ~notify_back doc =
       let uri = doc.Lsp.Types.TextDocumentIdentifier.uri in
@@ -422,9 +470,12 @@ class march_server =
     (* A document was saved → its on-disk content changed, so the workspace
        index (built by reading files from disk) is stale. Clear it; the next
        workspace/symbol or cross-file references query rebuilds lazily. *)
-    method! on_notif_doc_did_save ~notify_back:_ _params =
+    method! on_notif_doc_did_save ~notify_back params =
       invalidate_workspace_index ();
-      Lwt.return_unit
+      (* The saved file's refinement check, and every open document whose
+         reflection dependency key the save made stale (Refine_diag). *)
+      refresh_refinement ~notify_back
+        (path_of_uri params.Lsp.Types.DidSaveTextDocumentParams.textDocument.Lsp.Types.TextDocumentIdentifier.uri)
 
     (* A file changed on disk outside the editor's open-document flow (e.g. a
        dependency edited in another window, or a build step). Clients that
@@ -436,6 +487,15 @@ class march_server =
        | Lsp.Client_notification.DidChangeWatchedFiles _ ->
          invalidate_workspace_index ();
          Typecheck_cache.clear_deps ();
+         (* A dependency changed on disk: its dependents' refinement
+            diagnostics may be stale (Refine_diag). *)
+         (match n with
+          | Lsp.Client_notification.DidChangeWatchedFiles p ->
+            Lwt.async (fun () ->
+                Lwt_list.iter_s
+                  (fun (e : Lsp.Types.FileEvent.t) -> refresh_refinement ~notify_back (path_of_uri e.Lsp.Types.FileEvent.uri))
+                  p.Lsp.Types.DidChangeWatchedFilesParams.changes)
+          | _ -> ());
          (* A `.march` file (or an overlay) changed on disk: every open
             topology document may resolve differently now. *)
          Lwt.async (fun () ->
@@ -490,7 +550,8 @@ class march_server =
                Lwt.bind
                  (Lwt.bind
                     (notify_back#send_diagnostic
-                       (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics))
+                       (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics
+                    @ refine_extra uri_str))
                     (fun () -> publish_topology_dependents ~notify_back path))
                  (fun () ->
                     if is_current versions uri_str v then begin
@@ -505,7 +566,8 @@ class march_server =
                            stacked twice in the editor. *)
                         if a2 != a then
                           notify_back#send_diagnostic
-                            (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics)
+                            (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics
+                             @ refine_extra uri_str)
                         else Lwt.return_unit
                       end else Lwt.return_unit
                     end else Lwt.return_unit)
