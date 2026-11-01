@@ -199,6 +199,12 @@ uint32_t march_dispatch_epoch(uint32_t name_id, uint32_t version);
 /* Pin the ring version the running proc's epoch selects (see above).  The
  * base binary and every .so call this at a boundary call. */
 void    *march_dispatch_enter_unit(uint32_t name_id, uint32_t *out_version);
+/* Generated service adapters may enter their request's epoch only when the
+ * complete ABI (including captured nominal layouts) matches. NULL leaves the
+ * frame stack unchanged. Never falls through to global latest. */
+void *march_dispatch_enter_work_compatible(uint32_t name_id,
+                                          const char *expected_sig_hash,
+                                          uint32_t *out_version);
 
 /* Frame context. An explicit epoch must already have a live holder. Zero
  * inherits the enclosing frame/proc, or pins current on a foreign thread.

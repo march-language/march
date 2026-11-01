@@ -184,6 +184,7 @@ type ctx = Llvm_ctx.ctx = {
   ctor_desc_inst_rows : Buffer.t;
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
+  hr_sig_hashes : (string, string) Hashtbl.t;
   compile_so : bool;
   atom_names : (int64, string) Hashtbl.t;
 }

@@ -830,6 +830,7 @@ void march_epoch_reset_for_test(void) {
  * dispatch table link on its own (test/test_dispatch.c) -- the same weak
  * discipline as march_signal_drain in march_scheduler.c. */
 __attribute__((weak)) uint32_t march_sched_current_epoch(void) { return 0; }
+__attribute__((weak)) uint32_t march_sched_work_epoch(void) { return 0; }
 
 /* Heap nodes, rather than pointers into C frames: longjmp and task reaping
  * may run after those stack frames have ceased to exist. */
@@ -920,6 +921,29 @@ void *march_dispatch_enter_unit(uint32_t name_id, uint32_t *out_version) {
     f->dispatch = 1;
     f->slot = name_id;
     f->version = version;
+    return fn;
+}
+
+void *march_dispatch_enter_work_compatible(uint32_t name_id,
+                                          const char *expected_sig_hash,
+                                          uint32_t *out_version) {
+    uint32_t epoch = march_sched_work_epoch();
+    if (!epoch || !expected_sig_hash || !expected_sig_hash[0]) return NULL;
+    /* The proc pins this epoch; retain it for the adapter even when an
+     * enclosing saved closure is running under an older epoch. */
+    march_frame_enter(epoch);
+    march_code_frame *f = march_frame_mark();
+    uint32_t version;
+    void *fn = march_dispatch_enter_gen(name_id, epoch, &version);
+    if (!fn) { march_frame_leave(); return NULL; }
+    /* The acquired reference prevents reuse of the ABI fields while checked. */
+    if (strcmp(g_slots[name_id].ring[version].sig_hash, expected_sig_hash) != 0) {
+        march_dispatch_leave(name_id, version);
+        march_frame_leave();
+        return NULL;
+    }
+    f->dispatch = 1; f->slot = name_id; f->version = version;
+    if (out_version) *out_version = version;
     return fn;
 }
 

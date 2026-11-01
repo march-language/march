@@ -748,6 +748,8 @@ march_proc  *march_sched_current(void);
 /* The running frame's routing epoch, else its proc epoch (0 if neither).
  * What march_dispatch_enter_unit resolves against. */
 uint32_t     march_sched_current_epoch(void);
+/* Unit epoch before saved closure frames; generated service entries only. */
+uint32_t     march_sched_work_epoch(void);
 /* The next proc the running proc spawns starts held (epoch_holds = 1); see
  * march_proc.hold_next_spawn.  The stdlib-only builtin epoch_hold_next_spawn. */
 void         march_sched_hold_next_spawn(void);

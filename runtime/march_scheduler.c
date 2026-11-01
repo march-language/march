@@ -1831,11 +1831,13 @@ void march_sched_hold_next_spawn(void) {
     if (p) atomic_store_explicit(&p->hold_next_spawn, 1, memory_order_relaxed);
 }
 
-uint32_t march_sched_current_epoch(void) {
-    uint32_t frame_epoch = march_frame_epoch();
-    if (frame_epoch) return frame_epoch;
+uint32_t march_sched_work_epoch(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     return p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
+}
+uint32_t march_sched_current_epoch(void) {
+    uint32_t frame_epoch = march_frame_epoch();
+    return frame_epoch ? frame_epoch : march_sched_work_epoch();
 }
 
 /* The epoch a new proc runs at: its spawner's (II.4.3: a task spawned by an

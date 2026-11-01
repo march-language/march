@@ -14796,6 +14796,7 @@ let golden_preamble_core : string = {|; Runtime declarations
 declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)
 declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)
 declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)
+declare ptr @march_dispatch_enter_work_compatible(i32 %name_id, ptr %expected_sig, ptr %out_version)
 declare void @march_dispatch_reserve_main()
 declare void @march_dispatch_leave_unit(i32, i32)
 declare void @march_dispatch_set_initial_on_stop(i32, ptr)

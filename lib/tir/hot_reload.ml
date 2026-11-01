@@ -188,11 +188,24 @@ let is_entry_file_slot (cfg : config) (n : string) : bool =
   && Hashtbl.mem entry_file_fns n
   && not (under_any cfg.excludes cfg.app_prefix)
 
+(* Only compiler-generated adapters may cross from a saved callback into the
+   actor/task's selected work epoch. Names alone never grant this authority. *)
+let work_entry_fns : (string, unit) Hashtbl.t = Hashtbl.create 16
+let reset_work_entries () = Hashtbl.reset work_entry_fns
+let note_work_entry name = Hashtbl.replace work_entry_fns name ()
+let is_work_entry name =
+  let base = match String.index_opt name '$' with
+    | Some i -> String.sub name 0 i | None -> name in
+  Hashtbl.mem work_entry_fns base
+let work_entry_source name file =
+  file = "<work-entry>"
+  || (file = "<topology>" && String.starts_with ~prefix:"__topology_entry_" name)
+
 (** Does a call to the module function [n] route through the dispatch
     table?  [needs_dispatch] by its module, or one of the entry file's own
     top-level fns (bare-named, so its module says nothing). *)
 let needs_dispatch_to (cfg : config) (n : string) : bool =
-  is_reloadable cfg (module_of_name n) || is_entry_file_slot cfg n
+  is_work_entry n || is_reloadable cfg (module_of_name n) || is_entry_file_slot cfg n
 
 (** THE slot predicate: does module function [n] get a hot-reload dispatch
     slot?  App code (under the prefix or an include), the entry file's own
@@ -201,7 +214,7 @@ let needs_dispatch_to (cfg : config) (n : string) : bool =
     [hr_names]) and the driver's slot-hash fold both go through it. *)
 let is_slot_fn (cfg : config) (n : string) : bool =
   not (is_program_entry n)
-  && (is_reloadable cfg (module_of_name n)
+  && (is_work_entry n || is_reloadable cfg (module_of_name n)
       || is_slot_actor_dispatch n
       || (String.ends_with ~suffix:Tir_names.actor_on_stop_suffix n
           && Hashtbl.mem user_actor_fns n && not (is_stdlib_actor_fn n))

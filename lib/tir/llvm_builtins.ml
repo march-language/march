@@ -1313,6 +1313,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_dispatch_set_initial_on_stop", "declare void @march_dispatch_set_initial_on_stop(i32, ptr)");
   ("march_dispatch_leave_unit", "declare void @march_dispatch_leave_unit(i32, i32)");
   ("march_dispatch_reserve_main", "declare void @march_dispatch_reserve_main()");
+  ("march_dispatch_enter_work_compatible", "declare ptr @march_dispatch_enter_work_compatible(i32 %name_id, ptr %expected_sig, ptr %out_version)");
   ("march_dispatch_enter_unit", "declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)");
   ("march_dispatch_leave", "declare void @march_dispatch_leave(i32 %name_id, i32 %version)");
   ("march_dispatch_publish", "declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)");
@@ -1448,6 +1449,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_dispatch_enter";
   PDeclare "march_dispatch_enter_gen";
   PDeclare "march_dispatch_enter_unit";
+  PDeclare "march_dispatch_enter_work_compatible";
   PDeclare "march_dispatch_reserve_main";
   PDeclare "march_dispatch_leave_unit";
   PDeclare "march_dispatch_set_initial_on_stop";

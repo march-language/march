@@ -1569,7 +1569,7 @@ let emit_module ~emit_expr
   (* Patch .so: hide all non-exported symbols so intra-.so PLT calls prefer the
      .so's own definitions over same-named symbols in the server binary.  This
      is the compile-time complement to RTLD_DEEPBIND (which is Linux-only). *)
-  let ctx = { ctx with Llvm_ctx.compile_so = not emit_main } in
+  let ctx = { ctx with Llvm_ctx.compile_so = not emit_main; hr_sig_hashes } in
   (* Phase 9: in .so patch mode WITH hot-reload enabled, emit the file-static
      epoch cell into the preamble.  Static (private) linkage keeps it out of
      the global symbol table so multiple deployed .so files don't collide.

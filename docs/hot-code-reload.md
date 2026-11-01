@@ -724,6 +724,14 @@ Current servers advertise `FRAME_PINS 1`: every active frame retains its routing
 including nested calls and baseline `main`; closures retain their creation epoch until
 released. New actor work uses the actor's current epoch after mailbox migration.
 
+Generated topology role offers enter the accepting actor or task's epoch before
+creating a new session endpoint. Their entry adapters check the captured environment's
+layout and parameter ownership before crossing versions. An incompatible environment
+is refused with a restart diagnostic. The check conservatively includes reachable
+nominal types, including types carried by handles, so some layout changes require a
+restart even when a more precise compatibility proof might permit them. An already-running
+session retains its epoch; ordinary saved closures and `offer_<Role>` callbacks retain their creation epoch.
+
 Forge permits signature changes only with this frame-pinning support. It records caller
 coverage and warns when callers remain on old versions. An older server requires a
 restart onto the current toolchain or an expand-contract rollout. A loop that never

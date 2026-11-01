@@ -406,7 +406,8 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
                      ~callee_module:(module_of_name resolved_name)
                    (* an entry-file top-level fn: bare-named, so its module
                       says nothing (Hot_reload.is_entry_file_slot) *)
-                   || Hot_reload.is_entry_file_slot cfg resolved_name)
+                   || Hot_reload.is_entry_file_slot cfg resolved_name
+                   || Hot_reload.is_work_entry resolved_name)
                (* A self-call stays direct: a running invocation finishes on
                   the version it started on, as a self-TAIL-call (a loop,
                   never a call) always did.  Dispatching it cost ~5 ns per
@@ -430,8 +431,17 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
          restores the enclosing context, and runtime catchers unwind both
          on panic/cancellation. Entry frames (including main) are pinned
          before user code runs, so the first call after a deploy is safe. *)
-      emit ctx (Printf.sprintf
-        "%s = call ptr @march_dispatch_enter_unit(i32 %s, ptr %s)" fp name_id vslot);
+      let work_entry = Hot_reload.is_work_entry resolved_name in
+      if work_entry then begin
+        let expected = match Hashtbl.find_opt ctx.hr_sig_hashes resolved_name with
+          | Some h when h <> "" -> Llvm_ctx.intern_string ctx h
+          | _ -> failwith ("missing work-entry ABI: " ^ resolved_name) in
+        emit ctx (Printf.sprintf
+          "%s = call ptr @march_dispatch_enter_work_compatible(i32 %s, ptr %s, ptr %s)"
+          fp name_id expected vslot)
+      end else
+        emit ctx (Printf.sprintf
+          "%s = call ptr @march_dispatch_enter_unit(i32 %s, ptr %s)" fp name_id vslot);
       (* Startup-warmup guard.  march_dispatch_enter returns NULL when the target
          slot has not been published yet (or the publish is not yet visible to
          this thread) — e.g. an HTTP worker thread serving a request during the
@@ -450,7 +460,16 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       (* Direct (baseline) path — table not ready. *)
       emit_label ctx blk_direct;
       let direct_r =
-        if ret_ty = "void" then begin
+        if work_entry then begin
+          let message = "hot reload: incompatible generated work entry " ^ resolved_name ^ "; restart required" in
+          let bytes = Llvm_ctx.intern_string ctx message in
+          let value = fresh ctx "hr_error" in
+          emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
+            value bytes (String.length message));
+          emit ctx (Printf.sprintf "call void @march_panic(ptr %s)" value);
+          emit ctx "unreachable";
+          None
+        end else if ret_ty = "void" then begin
           emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
           None
         end else begin
@@ -460,7 +479,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
           Some r
         end
       in
-      emit ctx (Printf.sprintf "br label %%%s" blk_cont);
+      if not work_entry then emit ctx (Printf.sprintf "br label %%%s" blk_cont);
       (* Dispatched path — pinned to a published version; must leave after. *)
       emit_label ctx blk_disp;
       let disp_r =
@@ -487,6 +506,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
           emit ctx (Printf.sprintf "%s = phi %s [ %s, %%%s ], [ %s, %%%s ]"
                       phi ret_ty rd blk_direct rs blk_disp);
           (ret_ty, phi)
+        | None, Some rs when work_entry -> (ret_ty, rs)
         | _ -> ("i64", "0")
       in
       result

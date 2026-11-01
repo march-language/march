@@ -320,6 +320,7 @@ type ctx = {
      Maps qualified fn name ("Math.add") → hex hash string. *)
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
+  hr_sig_hashes : (string, string) Hashtbl.t;
   (* When true, non-exported function definitions in the patch .so get hidden
      ELF visibility so intra-.so PLT calls resolve to the .so's own definitions
      instead of looking up the global symbol table.  Without this, a v2 patch's
@@ -464,6 +465,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   ctor_desc_inst_rows = Buffer.create 256;
   remote_impl_hashes = Hashtbl.create 0;
   remote_sig_hashes  = Hashtbl.create 0;
+  hr_sig_hashes = Hashtbl.create 0;
   compile_so = false;
   atom_names = Hashtbl.create 16;
 }

@@ -15,6 +15,20 @@ void march_frame_drop_closure(void *closure) {
 static void fresh(void *unused) {
     (void)unused;
     assert(march_sched_current_epoch() == 2);
+    /* A saved entry adapter may carry an old closure frame, but this new
+     * request belongs to epoch 2. Only its matching ABI may cross the boundary. */
+    march_frame_enter(1);
+    void *old_frame = march_frame_mark();
+    uint32_t entry_version;
+    assert(!march_dispatch_enter_work_compatible(1, "old ABI", &entry_version));
+    assert(march_frame_mark() == old_frame);
+    assert(march_sched_current_epoch() == 1);
+    int (*entry)(void) = march_dispatch_enter_work_compatible(1, "new ABI", &entry_version);
+    assert(entry && entry() == 22);
+    assert(march_sched_current_epoch() == 2);
+    march_dispatch_leave_unit(1, entry_version);
+    assert(march_frame_mark() == old_frame);
+    march_frame_leave();
     uint32_t v;
     int (*fn)(void) = march_dispatch_enter_unit(1, &v);
     assert(fn() == 22);
@@ -40,6 +54,10 @@ static void run(void *unused) {
     assert(march_epoch_reserve(2) == 0);
     assert(march_dispatch_publish_epoch(1, (void *)new_fn, "new", "new ABI", 0, 2) >= 0);
     march_epoch_advance(2);
+    /* Existing work must not jump to the globally current epoch. */
+    uint32_t rejected;
+    assert(!march_dispatch_enter_work_compatible(1, "new ABI", &rejected));
+    assert(march_frame_mark() == held_frame);
     march_sched_spawn_current(fresh, NULL);
     void *outer = march_frame_mark();
     march_frame_enter(2);

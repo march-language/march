@@ -154,8 +154,20 @@ let stream_shape =
            ("Stream_Run", "cluster_Prod"); ("Stream_Run", "cluster_Cons");
            (* access points, and the hosted (actor) forms of both *)
            ("Stream_Run", "offer_Prod"); ("Stream_Run", "initiate_Cons");
+           ("Stream_Run", "offer_work_Prod"); ("Stream_Run", "__offer_work_start_Prod");
            ("Stream_Run", "offer_hosted_Prod"); ("Stream_Run", "offer_hosted_Cons");
-           ("Stream_Run", "cluster_hosted_Prod"); ("Stream_Run", "cluster_hosted_Cons") ])
+           ("Stream_Run", "offer_work_hosted_Prod"); ("Stream_Run", "__offer_work_hosted_start_Prod");
+           ("Stream_Run", "cluster_hosted_Prod"); ("Stream_Run", "cluster_hosted_Cons") ];
+       let m = parse_and_desugar (wrap stream) in
+       let entries = List.concat_map (function
+         | DMod (name, _, ds, _) when name.txt = "Stream_Run" ->
+           List.filter_map (function
+             | DFn (f, _) when f.fn_name.span.file = "<work-entry>" -> Some f.fn_name.txt
+             | _ -> None) ds
+         | _ -> []) m.mod_decls in
+       Alcotest.(check (list string)) "only session-start adapters opt into new work"
+         [ "__offer_work_start_Prod"; "__offer_work_start_Cons";
+           "__offer_work_hosted_start_Prod"; "__offer_work_hosted_start_Cons" ] entries)
 
 let relay_shape =
   Alcotest.test_case "Relay: three roles, each with exactly its own send/recv" `Quick
@@ -1722,7 +1734,7 @@ let granted_body_type =
          (fun f ->
             Alcotest.(check string) (f ^ " body")
               (param_ty src "Stream_Run" "run_Cons" "body") (param_ty src "Stream_Run" f "body"))
-         [ "cluster_Cons"; "offer_Cons"; "initiate_Cons" ];
+         [ "cluster_Cons"; "offer_Cons"; "offer_work_Cons"; "__offer_work_start_Cons"; "initiate_Cons" ];
        (* the hosted fronts thread the grant through `start` *)
        Alcotest.(check string) "host_Cons start"
          (session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()") (param_ty src "Stream_Run" "host_Cons" "start");
@@ -1731,6 +1743,11 @@ let granted_body_type =
        Alcotest.(check string) "offer_hosted_Cons start"
          ("String -> " ^ session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()")
          (param_ty src "Stream_Run" "offer_hosted_Cons" "start");
+       List.iter (fun f ->
+         Alcotest.(check string) (f ^ " start grants")
+           (param_ty src "Stream_Run" "offer_hosted_Cons" "start")
+           (param_ty src "Stream_Run" f "start"))
+         [ "offer_work_hosted_Cons"; "__offer_work_hosted_start_Cons" ];
        Alcotest.(check string) "cluster_hosted_Cons start"
          ("String -> " ^ session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()")
          (param_ty src "Stream_Run" "cluster_hosted_Cons" "start");

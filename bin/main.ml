@@ -1572,16 +1572,30 @@ let hr_config () =
    flips a parameter between borrowed and owned is a signature change to
    forge's gate.  Empty without --hot-reload: nothing else reads it, and no
    other build's IR changes.  Returns (abi hash, modes) per function. *)
-let hr_abi_sigs ~(borrow_map : March_tir.Borrow.borrow_map)
+let hr_abi_sigs ~(tir : March_tir.Tir.tir_module) ~(borrow_map : March_tir.Borrow.borrow_map)
     (type_sigs : (string, string) Hashtbl.t) : (string, string * string) Hashtbl.t =
   let t = Hashtbl.create (Hashtbl.length type_sigs) in
+  let work_type_sigs = ref [] in
   if hr_config () <> None then
     Hashtbl.iter (fun name s ->
         if s <> "" then begin
-          let modes = March_cas.Hash.modes_string borrow_map name in
-          Hashtbl.replace t name (March_cas.Hash.hcr_sig_hash ~sig_hash:s ~modes, modes)
+          let s = if March_tir.Hot_reload.is_work_entry name then
+              match List.find_opt (fun fd -> fd.March_tir.Tir.fn_name = name) tir.tm_fns with
+              | Some fd -> Some (March_cas.Hash.work_entry_sig_hash ~type_defs:tir.tm_types fd ~sig_hash:s)
+              (* The pre-opt hash map also contains unused generated fronts.
+                 They have no emitted slot, and therefore no entry ABI. *)
+              | None -> None
+            else Some s in
+          Option.iter (fun s ->
+            if March_tir.Hot_reload.is_work_entry name then
+              work_type_sigs := (name, s) :: !work_type_sigs;
+            let modes = March_cas.Hash.modes_string borrow_map name in
+            Hashtbl.replace t name (March_cas.Hash.hcr_sig_hash ~sig_hash:s ~modes, modes)) s
         end)
       type_sigs;
+  (* Manifest tsig and the published ABI must use the same type-only input,
+     including captured layouts, so Forge can recognize borrow-only changes. *)
+  List.iter (fun (name, s) -> Hashtbl.replace type_sigs name s) !work_type_sigs;
   t
 
 let hr_sig_table (abi : (string, string * string) Hashtbl.t) : (string, string) Hashtbl.t =
@@ -4746,7 +4760,7 @@ let compile filename =
           exit 1
       end;
       let make_hcr_manifest hr_impl_hashes hr_abi remote_sig_hashes ch =
-        if !hot_reload_prefix = None then "" else begin
+        if not !compile_so && !hot_reload_prefix = None then "" else begin
           (* Per-fn OWN cap closures, keyed by qualified name ("Mod.fn").
              fn_own_capability_closures returns each function's own caps
              (body/sig/extern), WITHOUT the module-wide `needs` merge that
@@ -5229,7 +5243,7 @@ let compile filename =
          | Some cfg ->
            hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes;
            hr_store_sources ~cfg ~store ~decls:desugared.March_ast.Ast.mod_decls hr_impl_hashes);
-        let hr_abi = hr_abi_sigs ~borrow_map:pipe.March_tir.Contract_pipeline.borrow_map
+        let hr_abi = hr_abi_sigs ~tir ~borrow_map:pipe.March_tir.Contract_pipeline.borrow_map
             remote_sig_hashes in
         let hr_sig_hashes = hr_sig_table hr_abi in
         let hcr_manifest = make_hcr_manifest hr_impl_hashes hr_abi remote_sig_hashes in
@@ -6159,7 +6173,7 @@ let compile filename =
            sorted, from March_typecheck.Typecheck.role_capability_closures.
            forge's per-role widening gate compares it with the baseline, and
            ACTIVATE6 signs a root over it for the server's admission gate. *)
-        (if !hot_reload_prefix <> None then begin
+        (if !compile_so || !hot_reload_prefix <> None then begin
           let write_sidecar suffix contents =
             let oc = open_out (out_bin ^ suffix) in
             Fun.protect ~finally:(fun () -> close_out oc)
@@ -6233,7 +6247,7 @@ let compile filename =
         (match hr_config () with
          | None -> ()
          | Some cfg -> hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes);
-        let hr_abi = hr_abi_sigs ~borrow_map:pipe.March_tir.Contract_pipeline.borrow_map
+        let hr_abi = hr_abi_sigs ~tir ~borrow_map:pipe.March_tir.Contract_pipeline.borrow_map
                           remote_sig_hashes2 in
         let hr_sig_hashes = hr_sig_table hr_abi in
         let hcr_manifest = make_hcr_manifest hr_impl_hashes hr_abi remote_sig_hashes2 in

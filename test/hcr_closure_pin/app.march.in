@@ -5,9 +5,10 @@
 --
 -- The program serves N requests and deploys patch k at request every * k,
 -- in process (shim.c, what the reload server's ACTIVATE does).  It keeps one
--- closure in 97 that each version's Handler.mk built, and calls all of them
--- after the last deploy, when the ring (3 versions) has reclaimed the oldest
--- patches.  Then it checks the net heap objects, which a patch's closures
+-- closure in 97 that each version's Handler.mk built, calls each batch after
+-- the next deploy, and releases it before the following deploy. Escaping
+-- closures pin their creation epoch, so reclamation must wait for release.
+-- Then it checks the net heap objects, which a patch's closures
 -- leaked when the patch did not register its capture-release functions.
 -- specs/progress/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md
 -- specs/progress/2026-10-13-hcr-patch-closures-not-in-drop-table.md
@@ -20,6 +21,8 @@ mod App do
   extern "c" : Cap(Ffi) do
     fn hcrpin_deploy(k: Int): Int = "hcrpin_deploy"
     fn hcrpin_retained(): Int = "hcrpin_retained"
+    fn hcrpin_request_begin(): Int = "hcrpin_request_begin"
+    fn hcrpin_request_end(): Int = "hcrpin_request_end"
   end
 
   type PinConn = { path: String, headers: List(String), status: Int }
@@ -49,20 +52,36 @@ mod App do
     end
   end
 
-  pfn serve(i: Int, n: Int, every: Int, k: Int, acc: Int, kept: List(Int -> Int)): Int do
+  pfn serve(i: Int, n: Int, every: Int, k: Int, acc: Int, kept_sum: Int, kept: List(Int -> Int)): Int do
     if i == n do
-      println("kept closures sum=" ++ int_to_string(call_all(kept, 0)))
+      println("kept closures sum=" ++ int_to_string(call_all(kept, kept_sum)))
       acc
     else
-      let k2 = if i > 0 && i % every == 0 do
+      let deploying = i > 0 && i % every == 0
+      let k2 = if deploying do
         let e = hcrpin_deploy(k)
         println("deploy " ++ int_to_string(k) ++ " ok=" ++ (if e > 0 do "true" else "false" end))
         k + 1
       else k end
-      let f = Handler.mk(mk_conn(i))
-      let v = f(i)
-      let kept2 = if i % 97 == 0 do Cons(f, kept) else kept end
-      serve(i + 1, n, every, k2, acc + v % 1000, kept2)
+      -- Call the previous version's closures AFTER activation, then release
+      -- them so the next deploy can reclaim its slot. Baseline main and the
+      -- current version already occupy two of the three ring slots.
+      let sum2 = if deploying do call_all(kept, kept_sum) else kept_sum end
+      let previous = if deploying do Nil else kept end
+      -- An external request is fresh work; main itself stays at its baseline
+      -- epoch. Ordinary calls/tasks from main intentionally inherit that epoch.
+      let request_i = i + hcrpin_request_begin()
+      let f = Handler.mk(mk_conn(request_i))
+      let value = f(i)
+      let v = value + hcrpin_request_end()
+      -- After the first v2 deploy, the fresh request saw v2 but leaving its
+      -- frame must restore main's baseline v1 routing.
+      let _ = if i == every do
+        let baseline = Handler.mk(mk_conn(0))
+        println("baseline caller=" ++ int_to_string(baseline(1)))
+      else () end
+      let kept2 = if i % 97 == 0 do Cons(f, previous) else previous end
+      serve(i + 1, n, every, k2, acc + v % 1000, sum2, kept2)
     end
   end
 
@@ -70,7 +89,7 @@ mod App do
     let n = env_int("HCRPIN_N", 5000)
     let deploys = env_int("HCRPIN_DEPLOYS", 4)
     let before = live_allocs()
-    let total = serve(0, n, n / (deploys + 1), 1, 0, Nil)
+    let total = serve(0, n, n / (deploys + 1), 1, 0, 0, Nil)
     println("total=" ++ int_to_string(total))
     let delta = live_allocs() - before
     -- A clean run nets a handful of objects (the deploys' own); the leak was

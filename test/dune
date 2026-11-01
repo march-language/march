@@ -14277,14 +14277,15 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/observe_which_source.expected native_observe_which_source.out)))
 
-; ── HCR: a reclaimed version's closures, and a patch's closure drops ───────
+; ── HCR: old closures across deployment, epoch pins and capture drops ─────
 ; specs/progress/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md,
 ; specs/progress/2026-10-13-hcr-patch-closures-not-in-drop-table.md.
 ; hcr_closure_pin/run.sh builds a --hot-reload base and four --compile-so
 ; patches, deploys them in process (shim.c, ACTIVATE minus the socket) and
-; calls closures the first patch built after the 3-version ring reclaimed it
-; (SIGSEGV when the reclaim dlclosed the image), then checks the net heap
-; objects (thousands when a patch's closures leaked their captures).  The
+; calls each batch of old closures after the next deploy, then releases them
+; before ring reclamation (escaping closures pin their creation epoch). It
+; checks fresh requests, baseline routing, reclaimed images and net heap
+; objects (thousands when a patch's closures leaked their captures). The
 ; ASan leg of the same script runs in specs/lang/golden/sanitize.sh.
 (rule
  (targets hcr_closure_pin.out)
@@ -14299,6 +14300,17 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff hcr_closure_pin/expected hcr_closure_pin.out)))
+
+; A generated fresh-work entry must fail closed with a readable panic when
+; its captured-value ABI is incompatible, before making the indirect call.
+(rule
+ (alias runtest)
+ (deps hcr_work_entry_panic.py
+       (source_tree ../runtime) (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR %{workspace_root}/runtime
+   (setenv MARCH_STDLIB %{workspace_root}/stdlib
+    (run python3 %{dep:hcr_work_entry_panic.py} %{exe:../bin/main.exe})))))
 
 ; ── Signed debug verbs on the observe socket (observe R4b) ─────────────────
 ; specs/progress/2026-10-05-observe-r4b-signed-debug-verbs.md.

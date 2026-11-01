@@ -544,6 +544,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Generated topology offers select the accepting work's compatible version before
+  creating a session endpoint. Saved user closures and running sessions retain their
+  original versions; incompatible captured layouts produce a restart diagnostic.
+- `--compile-so` again writes and restores manifest/schema sidecars when used without
+  `--hot-reload`, including Forge's entry-file discovery builds.
 - Hot-deploy restart replay preserves complete migration chains and their helper
   versions, so baseline-initialized actors can cross multiple state changes safely.
   An invalid saved dependency refuses its batch and dependent suffix. Signed rollback
