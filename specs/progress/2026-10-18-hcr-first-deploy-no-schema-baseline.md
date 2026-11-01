@@ -1,5 +1,8 @@
 # `[P1]` `forge deploy hot`: the first deploy after a baseline cannot see an actor's state change
 
+Completed 2026-10-31. Implementation and verification:
+[activated schema baseline protocol](2026-10-31-hcr-schema-baseline-protocol.md).
+
 Filed 2026-10-18 while reproducing
 `specs/progress/2026-09-21-hcr-spawn-site-state-layout.md`.
 
@@ -60,3 +63,21 @@ Option 3, the reload server keeps the schemas, with these details (also recorded
 Tests: `test/two_node/hcr_spawn_site_layout` without its `base_so` step deploys correctly; a
 deploy after another operator's deploy uses the server's baseline; an old server with no
 `.prev` is refused.
+
+
+## Completion (2026-10-31)
+
+Implemented owner option 3: deterministic embedded metadata in base and patch
+artifacts; owner-only SCHEMAS reporting of activated per-actor schemas and release
+provenance; server-first Forge comparisons with explicit legacy fallback and
+refusal when neither server nor prior file supplies a known baseline. Staging,
+disconnection, failed activation, partial updates, replay verification, metadata
+pruning, and durable file/directory commit behavior have regression coverage.
+
+Compiled integration scenarios `hcr_spawn_site_layout` and `hcr_rollback` both
+passed on 2026-10-31. The first deploys without a separately compiled base `.so`;
+the rollback scenario checks signed forward/reverse deployments and schema
+provenance. The local run records are
+`/tmp/march-hcr-metadata-check/first-deploy.log` and `rollback4.log`.
+Runtime socket/replay modes and Forge protocol tests are documented in the linked
+implementation record. This closes the first-deploy schema-baseline issue.

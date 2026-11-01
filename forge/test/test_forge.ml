@@ -1890,6 +1890,34 @@ let test_parse_wait () =
     "waiting on 3 unit(s) pinned to epoch 5, hard deadline in 40s"
     (Cmd_deploy_hot.describe_wait (5, 3, 40000, false))
 
+let test_schema_response_validation () =
+  let open Cmd_deploy_hot in
+  let good = {|SCHEMAS {"version":1,"schemas":{"Counter":{"state_fields":[{"name":"x","ty":"Int"}]}},"releases":{"Counter":{"seq":0,"id":"-"}}}|} in
+  (match parse_schema_response good with
+   | Ok (Some json) -> Alcotest.(check int) "one actor" 1
+       (List.length (Schema_diff.parse_schemas_json json))
+   | _ -> Alcotest.fail "valid schema reply rejected");
+  List.iter (fun reply -> match parse_schema_response reply with
+      | Error _ -> () | _ -> Alcotest.failf "accepted malformed reply: %s" reply)
+    ["SCHEMAS {}"; "SCHEMAS {bad"; "SCHEMAS {\"version\":2,\"schemas\":{}}";
+     "SCHEMAS {\"version\":1,\"schemas\":{\"A\":{}}}"; "ERR read_failed"];
+  List.iter (fun reply -> Alcotest.(check bool) "legacy fallback only" true
+      (parse_schema_response reply = Ok None))
+    ["ERR unknown_command"; "ERR schemas_unavailable"]
+
+let test_compact_schema_baseline () =
+  let path = Filename.temp_file "server-schemas" ".json" in
+  let oc = open_out path in
+  output_string oc {|{"Counter":{"compat":"full","state_fields":[{"name":"value","ty":"Int"}],"handlers":[{"name":"Add","params":["Int"]}]}}|};
+  close_out oc;
+  let schemas = Fun.protect ~finally:(fun () -> Sys.remove path)
+      (fun () -> Schema_diff.parse_schemas_file path) in
+  Alcotest.(check (list string)) "compact server baseline preserves actors"
+    ["Counter"] (List.map fst schemas);
+  let counter = List.assoc "Counter" schemas in
+  Alcotest.(check (list string)) "compact baseline preserves fields" ["value"]
+    (List.map (fun (f : Schema_diff.field) -> f.name) counter.state_fields)
+
 let test_schema_handlers_and_message_diff () =
   let path = Filename.temp_file "schemas" ".json" in
   let oc = open_out path in
@@ -3396,6 +3424,8 @@ let () =
       Alcotest.test_case "SEQ: a signed line wrapped in a release" `Quick test_wrap_release;
       Alcotest.test_case "COMPACT: parsed and described" `Quick test_parse_compact;
       Alcotest.test_case "WAIT: parsed and described" `Quick test_parse_wait;
+      Alcotest.test_case "schema response validation" `Quick test_schema_response_validation;
+      Alcotest.test_case "compact server schema baseline" `Quick test_compact_schema_baseline;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;
       Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;

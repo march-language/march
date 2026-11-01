@@ -331,6 +331,16 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
              ) (List.combine param_llvm_tys arg_pairs)
            | _ -> arg_strs)
     in
+    if ctx.owned_closure <> None then begin
+      let modes = Clo_flags.borrowed_params resolved_name in
+      List.iteri (fun i (ty, value) ->
+        let borrowed = match modes with
+          | Some modes -> Option.value ~default:false (List.nth_opt modes i)
+          | None -> Borrow.is_borrowed Borrow.empty resolved_name i
+        in
+        if ty = "ptr" && not borrowed then Llvm_ctx.disown_closure_value ctx value
+      ) arg_pairs
+    end;
     let args_str = String.concat ", " arg_strs in
     let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with
       | Some c_name -> c_name
@@ -415,12 +425,11 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       let vslot = fresh ctx "hrver" in
       emit ctx (Printf.sprintf "%s = alloca i32" vslot);
       let fp = fresh ctx "hrfp" in
-      (* D33 (plan II.4.1): every boundary call, in the base binary and in
-         every .so alike, resolves against the RUNNING PROC's code epoch.
-         march_dispatch_enter_unit reads it and picks the newest live
-         version at or before it (current, for an unpinned proc).  The
-         per-.so @__march_hcr_epoch cell is still defined and still written
-         by __march_init, but nothing reads it any more. *)
+      (* The proc-owned frame stack preserves the caller's routing epoch.
+         enter_unit pins both that epoch and the selected version; leave
+         restores the enclosing context, and runtime catchers unwind both
+         on panic/cancellation. Entry frames (including main) are pinned
+         before user code runs, so the first call after a deploy is safe. *)
       emit ctx (Printf.sprintf
         "%s = call ptr @march_dispatch_enter_unit(i32 %s, ptr %s)" fp name_id vslot);
       (* Startup-warmup guard.  march_dispatch_enter returns NULL when the target
@@ -467,7 +476,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       let v = fresh ctx "hrv" in
       emit ctx (Printf.sprintf "%s = load i32, ptr %s" v vslot);
       emit ctx (Printf.sprintf
-        "call void @march_dispatch_leave(i32 %s, i32 %s)" name_id v);
+        "call void @march_dispatch_leave_unit(i32 %s, i32 %s)" name_id v);
       emit ctx (Printf.sprintf "br label %%%s" blk_cont);
       (* Continuation — merge the two call results. *)
       emit_label ctx blk_cont;
@@ -830,8 +839,10 @@ let emit_callptr_closure ~emit_atom ctx (fn_atom : Tir.atom)
            emit ctx (Printf.sprintf "%s = call ptr @march_clo_float_arg(ptr %s)" fa v');
            float_arg_boxes := fa :: !float_arg_boxes
          | _ -> ());
+        if pty = "ptr" then Llvm_ctx.disown_closure_value ctx v';
         pty ^ " " ^ v'
       ) (List.combine declared_param_llvm_tys orig_param_llvm_tys) args in
+    Llvm_ctx.disown_closure_value ctx clo_ptr;
     let all_arg_strs = Printf.sprintf "ptr %s" clo_ptr :: orig_arg_strs in
     (* Released unconditionally, even when the callee hands the same box back
        as its result: a callee whose param is erased took its own reference

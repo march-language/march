@@ -203,6 +203,8 @@ let is_slot_fn (cfg : config) (n : string) : bool =
   not (is_program_entry n)
   && (is_reloadable cfg (module_of_name n)
       || is_slot_actor_dispatch n
+      || (String.ends_with ~suffix:Tir_names.actor_on_stop_suffix n
+          && Hashtbl.mem user_actor_fns n && not (is_stdlib_actor_fn n))
       || is_entry_file_slot cfg n)
 
 (* ── NAME_ID interning ─────────────────────────────────────────────────────

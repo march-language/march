@@ -159,6 +159,7 @@ type ctx = Llvm_ctx.ctx = {
   var_llvm_ty : (string, string) Hashtbl.t;
   mutable tco_fn_name   : string option;
   mutable cur_emit_fn   : string;
+  mutable owned_closure : string option;
   mutable tco_loop_label : string;
   mutable tco_param_info : (string * string * string) list;
   mutable tco_stack_save : string;
@@ -395,15 +396,15 @@ let alloca_name = Llvm_ctx.alloca_name
      - the REPL/JIT, whose fragments are separate modules with their own ctx
        (a per-fragment global would give the same fn different pointers across
        fragments, and can collide in the ORC backend's shared JITDylib);
-     - hot-reload boundary functions, which must keep a per-materialization
-       object rather than a module-lifetime one.
-   Both fall back to the original fresh-march_alloc path. *)
-let static_closure_ok ctx (march_name : string) : bool =
-  (not ctx.repl)
-  && (match ctx.hr_config with
-      | None     -> true
-      | Some cfg ->
-        not (Hot_reload.needs_dispatch_to cfg march_name))
+     - hot-reload function values, which retain their creation epoch even if
+       their own body is unchanged. Runtime actor callbacks instead inherit
+       the actor-selected epoch and retain their static wrapper.
+   Ordinary hot-reload values use fresh epoch-pinned heap closures. *)
+let closure_epoch_needed ctx name =
+  ctx.hr_config <> None && not (clo_wrap_runtime_owned name)
+
+let static_closure_ok ctx name =
+  not ctx.repl && not (closure_epoch_needed ctx name)
 
 (* The LLVM symbol a top-level function value names: a user extern's C symbol
    ([ed_c_name], via [extern_map]) — the extern's March name is defined
@@ -532,7 +533,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
         (match wrap_kind with
          | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
          | `Define  ->
-           clo_wrap_define ~drop_clo:ctx.repl
+           clo_wrap_define ~drop_clo:(ctx.repl || closure_epoch_needed ctx v.Tir.v_name)
+             ~frame_epoch:(closure_epoch_needed ctx v.Tir.v_name)
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_tys))
              ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
              ~deep_drops:(List.map
@@ -551,6 +553,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
       let fp = fresh ctx "cwf" in
       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
       emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+      if closure_epoch_needed ctx v.Tir.v_name then
+        emit ctx (Printf.sprintf "call void @march_clo_capture_epoch(ptr %s)" hp);
       ("ptr", hp)
     end
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name
@@ -674,7 +678,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
         (match wrap_kind with
          | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_ltys
          | `Define  ->
-           clo_wrap_define ~drop_clo:ctx.repl
+           clo_wrap_define ~drop_clo:(ctx.repl || closure_epoch_needed ctx v.Tir.v_name)
+             ~frame_epoch:(closure_epoch_needed ctx v.Tir.v_name)
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_ltys))
              ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
              ~deep_drops
@@ -690,6 +695,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
       let fp = fresh ctx "cwf" in
       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
       emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+      if closure_epoch_needed ctx v.Tir.v_name then
+        emit ctx (Printf.sprintf "call void @march_clo_capture_epoch(ptr %s)" hp);
       ("ptr", hp)
     end
   (* ── AVar with no registered alloca slot ────────────────────────── *)
@@ -741,7 +748,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
             (match wrap_kind with
              | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
              | `Define  ->
-               clo_wrap_define ~drop_clo:ctx.repl
+               clo_wrap_define ~drop_clo:(ctx.repl || closure_epoch_needed ctx resolved)
+                 ~frame_epoch:(closure_epoch_needed ctx resolved)
                  ~borrowed:(clo_wrap_borrowed resolved (List.length param_tys))
                  ~own_float:(not (clo_wrap_runtime_owned resolved))
                  ~deep_drops:(List.map
@@ -759,6 +767,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
          let fp  = fresh ctx "cwf" in
          emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
          emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+         if closure_epoch_needed ctx resolved then
+           emit ctx (Printf.sprintf "call void @march_clo_capture_epoch(ptr %s)" hp);
          ("ptr", hp)
        end
      | _ ->
@@ -2620,8 +2630,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EIncRC atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then
+    if ty = "ptr" then begin
       emit ctx (Printf.sprintf "call void @march_incrc_local(ptr %s)" v);
+      Llvm_ctx.own_closure_alias ctx atom v
+    end;
     ("i64", "0")
 
   | Tir.EDecRC atom
@@ -2631,8 +2643,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for ctx atom "march_decrc_local") v);
+    if ty = "ptr" then begin
+      Llvm_ctx.disown_closure_value ctx v;
+      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for ctx atom "march_decrc_local") v)
+    end;
     ("i64", "0")
 
   | Tir.EAtomicIncRC atom
@@ -2642,8 +2656,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EAtomicIncRC atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then
+    if ty = "ptr" then begin
       emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" v);
+      Llvm_ctx.own_closure_alias ctx atom v
+    end;
     ("i64", "0")
 
   | Tir.EAtomicDecRC atom
@@ -2653,8 +2669,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EAtomicDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for ctx atom "march_decrc") v);
+    if ty = "ptr" then begin
+      Llvm_ctx.disown_closure_value ctx v;
+      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for ctx atom "march_decrc") v)
+    end;
     ("i64", "0")
 
   | Tir.EFree atom
@@ -2664,8 +2682,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EFree atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @march_free(ptr %s)" v);
+    if ty = "ptr" then begin
+      Llvm_ctx.disown_closure_value ctx v;
+      emit ctx (Printf.sprintf "call void @march_free(ptr %s)" v)
+    end;
     ("i64", "0")
 
   (* ── Tuples ────────────────────────────────────────────────────────── *)

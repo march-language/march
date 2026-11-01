@@ -44,6 +44,7 @@ static inline int64_t march_rc_peek(const void *p) {
 /* ── What the header pad word means ───────────────────────────────────
  *
  * `pad` is multiplexed, decided by SIGN and by tag:
+ *   MARCH_CLOSURE_TAG: uint32 creation epoch, independent of signed pad value.
  *   > 0   record shape id (march_record_shape_intern, tag 0 cells), or the
  *         SIMD lane kind (under MARCH_SIMD_TAG).
  *   == 0  nothing known.  march_alloc zeroes it, and every cell the C runtime
@@ -348,6 +349,12 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * made it look like an ADT cell, so march_decrc freed it shallowly and every
  * heap element leaked; march_run_resource_dtor now releases each slot. */
 #define MARCH_TYPED_ARR_TAG ((int32_t)-8)
+/* Hot-reload closure: pad stores its pinned creation epoch. */
+#define MARCH_CLOSURE_TAG ((int32_t)-9)
+void march_clo_capture_epoch(void *clo);
+void march_clo_forget_epoch(void *clo);
+void march_clo_frame_enter(void *clo);
+
 
 /* send_after(pid, msg, delay_ms) : TimerRef — schedule msg for delivery to
  * the actor `actor` after delay_ms milliseconds. RC contract matches
@@ -762,6 +769,7 @@ typedef struct {
     int         msgs_changed;
     void       *handle;
     int         ring_idx;
+    void      (*on_stop_fn)(void *);
 } march_hcr_unit;
 
 /* Why an activation could not proceed yet (MARCH_HCR_WAIT): the oldest

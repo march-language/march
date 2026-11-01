@@ -113,15 +113,31 @@ When you run `forge deploy hot`, the build tool:
    the server uses your public key to confirm the patch really came from you, the same
    idea as an SSH key) and sends it to the server
 5. The server activates the whole deploy as one step, tagged with a new **epoch**
-   number. Work that starts after that (a new task, session or actor, and `main`)
-   runs the new code at once; running actors move over at their own pace, as the
-   next section explains
+   number. Eligible new work runs the new code; running actors move over at their
+   own pace, as the next section explains. Active caller frames, including the
+   baseline `main`, retain their original routing epoch until they return
 
 Actors that have a state schema change are migrated in mailbox order: messages already queued when the deploy lands finish on the old code against the old state, then the actor runs `migrate_state` and handles everything after that on the new code. New code never sees an old-shaped state. See [Messages queued during a deploy](#messages-queued-during-a-deploy).
 
 Deploys are also **capability-gated**: each changed function brings its own IO capabilities, and both the deploy tool and the receiving node can refuse a patch that reaches for more authority than the running version (or the node's policy) allows. See [Capability-safe deploys](#capability-safe-deploys) below.
 
 ---
+
+## Schema baselines and rollback
+
+Every hot-reload base and patch embeds its actor schemas and manifest. Forge queries
+`SCHEMAS` on the running server before migration checks, so the first state-changing
+deploy does not require a local `.prev` file. The response describes the newest
+activated schema for each actor and its release; actors still draining may be older.
+A stale local baseline produces a warning and the server baseline wins. On legacy
+servers that cannot answer the query, supply `--old-schemas` or restart onto a fresh
+base. Malformed responses and connection failures abort the deploy.
+
+Rollback is another signed deploy with a higher release sequence. If the faulty patch
+changed state shape, the rollback needs an explicit reverse `migrate_state` that
+preserves newer state. Re-uploading the original artifact without that migration is
+refused. The rollback integration scenario verifies service continuity, restored
+behavior and increasing release counters; automatic rollback is not provided.
 
 ## Server setup
 
@@ -233,11 +249,11 @@ error: deploy aborted, nothing was activated: deploy this build with a restart
 
 A **toolchain upgrade that changes the hot-reload ABI** is a restart deploy too. Every
 binary and patch records an ABI id (`# hcr_abi` in the manifest, `HCR_INFO` on the
-server, `march-hcr-v4;triple=...;ptr=8` today). When the running server's id is older
+server, `march-hcr-v5;triple=...;ptr=8` today). When the running server's id is older
 than the patch's, `forge deploy hot` refuses before it uploads anything:
 
 ```
-error: the running server was built by an older March toolchain (HCR ABI march-hcr-v3;triple=...) than this patch (march-hcr-v4;triple=...). The hot-reload ABI changed in between (from march-hcr-v4, a boundary function's signature hash covers its parameters' borrow modes, so a v3 server's hashes cannot be checked against this patch's), so this server cannot take hot patches from this toolchain, and nothing was deployed. Restart the server once on a base build from this toolchain (a cold deploy); hot deploys work again after that
+error: the running server was built by an older March toolchain (HCR ABI march-hcr-v4;triple=...) than this patch (march-hcr-v5;triple=...). The hot-reload ABI changed in between (march-hcr-v5 adds per-frame routing and closure lifetime hooks required by this patch), so this server cannot take hot patches from this toolchain, and nothing was deployed. Restart the server once on a base build from this toolchain (a cold deploy); hot deploys work again after that
 ```
 
 The server repeats the check after it loads a patch (`ERR identity abi mismatch`), so an
@@ -703,30 +719,16 @@ Invariants can only reference the actor's own state fields. External function ca
 
 ## Deploying signature changes
 
-When a function's signature changes between deploys (for example, `B.foo` gains a new parameter), the server needs to know that every existing caller of the old signature is also being replaced in the same deploy batch. Otherwise old callers would pass the wrong number or type of arguments to new code.
+A running caller must keep calling versions compatible with its compiled arguments.
+Current servers advertise `FRAME_PINS 1`: every active frame retains its routing epoch,
+including nested calls and baseline `main`; closures retain their creation epoch until
+released. New actor work uses the actor's current epoch after mailbox migration.
 
-`forge deploy hot` enforces this automatically via the **coordinated upgrade gate**. The compiler records which boundary functions call each export in the `.hcr_manifest` sidecar (`callers:` field). The server stores this caller set per slot at activation time. On the next deploy, when it detects a `sig_hash` change for `B.foo`, it checks whether every server-recorded caller is included in the current deploy batch:
-
-- **All callers covered:** the deploy proceeds, and forge notes it:
-  ```
-  Coordinated upgrade: sig_hash changed, all callers covered.
-  ```
-
-- **A caller is missing:** the deploy is rejected, naming exactly which caller is uncovered:
-  ```
-  error: function signature changed but not all callers are in this deploy:
-
-    B.foo — uncovered caller(s):
-      A.Worker_dispatch
-
-  Include the missing modules in this deploy, or use expand-contract:
-    1. Add B.foo_v2 alongside B.foo, update callers, deploy together
-    2. In a later deploy, remove B.foo
-
-  error: deploy aborted
-  ```
-
-If neither module in a pair has been deployed with caller tracking enabled at any point (e.g. they were compiled separately before this feature existed), the gate conservatively allows the deploy: the caller set is empty, so there are no recorded callers to check.
+Forge permits signature changes only with this frame-pinning support. It records caller
+coverage and warns when callers remain on old versions. An older server requires a
+restart onto the current toolchain or an expand-contract rollout. A loop that never
+returns can retain old versions indefinitely and eventually exhaust version capacity;
+restart or refactor the loop to return to an actor mailbox between requests.
 
 ### Parameter borrow modes are part of the signature
 
@@ -750,11 +752,8 @@ error: a hot deploy cannot change a boundary function's parameter borrow mode: p
 error: deploy aborted, nothing was activated
 ```
 
-Unlike a type change, shipping every caller in the same deploy does not make it safe: a
-caller's call that is already running (a request loop on `main`, which always follows the
-newest code) keeps running the old code, and its next call reaches the new version with
-the old convention. Deploy such a change with a restart. A body-only change that keeps
-every mode deploys hot as before.
+Borrow-mode changes remain conservatively refused even with frame pinning. Deploy
+such a change with a restart; body-only changes that retain the modes can deploy hot.
 
 A server records the `sig_hash` of each version it activates (from the patch itself), so
 the check applies to every deploy, not only the first one after a restart.
@@ -763,13 +762,8 @@ the check applies to every deploy, not only the first one after a restart.
 
 ## Independent deploy pace (epoch-tagged dispatch)
 
-The coordinated upgrade gate above is a hard synchronization requirement: every caller
-of a changed signature has to be redeployed in the very same batch, or the deploy is
-blocked entirely. That is the right default, since it keeps a partial rollout from passing the
-wrong arguments to new code, but it is a real constraint. Sometimes
-`A` and `B` are owned by different people, or you would rather ship `B.foo` v2
-today and update `A` to match next sprint, without the two deploys being forced
-to happen together.
+Epoch routing lets callers and callees advance independently while retaining the
+versions needed by active frames and closures.
 
 **Epoch-tagged dispatch** is the alternative mechanism that makes that safe, and the
 idea is closer to keeping a small version history than to any kind of locking. Every
@@ -1124,9 +1118,9 @@ It holds every activated function's signed message and signature in activation o
 At start, before `march_reload_server_start` returns, the server replays it:
 
 - Each entry's **signature is verified again** from the stored signed line with the key baked into the binary.
-- An entry that fails (bad signature, artifact gone from the CAS, a function this binary does not have, a malformed line) is **skipped with an audit line** (`"type":"restore"`, `"result":"err_restore_sig"` and so on), never a crash.
-- An `ACTIVATE7` entry's artifact must **still hash to its signed digest** (`err_restore_digest` otherwise), and is loaded through the same verified copy as a live deploy, so bytes replaced in the CAS while the node was down are not replayed. An entry written before `ACTIVATE7` has no signed digest to check its bytes against: it is replayed only where such a line would still be accepted live (no release held, no `MARCH_HCR_REQUIRE_RELEASE`), and skipped otherwise (`err_restore_no_digest`); that function comes back on the base build until the next deploy.
-- Each function's newest valid entry is republished, deploy by deploy in the original order, so epochs keep their order. Superseded and broken entries are dropped from the rewritten file.
+- An invalid entry (bad signature, missing artifact, unknown function) is audited (`"type":"restore"`, `"result":"err_restore_sig"` and so on). Its **whole deploy batch and every later batch are refused**: a later migration may depend on the missing version. The server retains the verified prefix, or the base build if no complete batch precedes the failure. A malformed stack line prevents all replay because its batch dependencies cannot be established.
+- An `ACTIVATE7` entry's artifact must **still hash to its signed digest** (`err_restore_digest` otherwise), and is loaded through the same verified copy as a live deploy, so bytes replaced in the CAS while the node was down are not replayed. An entry written before `ACTIVATE7` has no signed digest to check its bytes against: it is replayed only where such a line would still be accepted live (no release held, no `MARCH_HCR_REQUIRE_RELEASE`), and refused otherwise (`err_restore_no_digest`), stopping replay at that batch.
+- Every complete deploy batch is republished in its original order, including signed migration flags and the helper functions that migrations may call. This preserves multi-hop state conversions for actors initialized by the base program after restart. Successfully replayed history remains in the rewritten stack; a refused suffix is removed. If bounded version or epoch capacity cannot retain that history, startup exits with an explicit full-release/restart diagnostic instead of dropping migrations or continuing on an incomplete chain.
 - A **different build** on the same socket (its baseline digest differs) does not replay the stack: patches of one build are not patches of another. The file is set aside as `state.base-changed`.
 - `MARCH_HCR_NO_REPLAY=1` starts from the base binary and sets the stack aside as `state.no-replay`: the escape hatch for a patch that breaks the boot.
 
@@ -1162,20 +1156,12 @@ JIT on top of it.
 
 These are still open:
 
-- **A signature change can reach a running old frame.** A deploy that changes a
-  function's signature is accepted when every recorded caller ships with it, but a caller
-  invocation that is already running (a request loop on `main`, or an actor loop that
-  never returns to its mailbox) keeps executing the old code and calls the new version.
-  Avoid signature changes to functions called from long-running loops, or restart for
-  them.
-  ([todo](https://github.com/march-language/march/blob/main/specs/todos/2026-10-13-hcr-coordinated-sig-change-running-caller-frame.md))
-- **An actor spawned by un-redeployed code may start with the old state layout**
-  (suspected from code reading, not reproduced).
-  ([todo](https://github.com/march-language/march/blob/main/specs/todos/2026-09-21-hcr-spawn-site-state-layout.md))
-- **`--hot-reload` with `--cap-sandbox`:** the reload server's listener races the
-  sandbox install, so whether it can listen depends on thread timing. No test combines
-  the two flags.
-  ([todo](https://github.com/march-language/march/blob/main/specs/todos/2026-09-30-hcr-reload-listener-races-cap-sandbox-install.md))
+- **Long-running frames retain old versions.** A `main` loop that never returns,
+  or an escaping closure, can prevent version reclamation. Baseline main keeps its
+  baseline routing epoch even when saved patches are restored on restart.
+- **Sandboxed reload writes need `IO.FileWrite`.** Without it, the compiler warns
+  and the sandbox rejects artifact and persistence writes. Read-only observation
+  remains available.
 - **Old patch images stay mapped.** A reclaimed version's `.so` is never unloaded, so a
   long-lived node keeps one mapped image per deploy until it restarts.
   ([todo](https://github.com/march-language/march/blob/main/specs/todos/2026-10-13-hcr-unload-unreachable-patch-images.md))

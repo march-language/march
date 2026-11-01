@@ -14777,14 +14777,15 @@ let test_module_qualified_pattern_qualifier_is_stdlib_type_compiled () =
 
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
-    These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
+    These four strings began as verbatim copies of llvm_emit.ml's deleted
     hand-written preamble blob (the [Buffer.add_string buf {| ... |}]
     literals that used to sit inside [emit_preamble], before Wave 3 Task 4
     replaced them with [Llvm_builtins.emit_preamble] generating the same
     text from the declarative builtin table). They are kept here ONLY as a
     regression golden — this test's entire job is to fail loudly the
     moment [Llvm_builtins]'s generated preamble stops matching this
-    literal byte-for-byte.
+    literal byte-for-byte. The HCR ABI v5 declaration additions are reflected
+    here intentionally; existing declaration order remains covered.
 
     DELETE THIS GOLDEN (and loosen the test) only when someone
     DELIBERATELY changes the preamble's content/order/whitespace — at that
@@ -14795,6 +14796,9 @@ let golden_preamble_core : string = {|; Runtime declarations
 declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)
 declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)
 declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)
+declare void @march_dispatch_reserve_main()
+declare void @march_dispatch_leave_unit(i32, i32)
+declare void @march_dispatch_set_initial_on_stop(i32, ptr)
 declare void @march_dispatch_leave(i32 %name_id, i32 %version)
 declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)
 declare i32  @march_dispatch_publish_epoch(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind, i32 %epoch)
@@ -14814,6 +14818,12 @@ declare void @march_decrc_local(ptr %p)
 declare i64  @march_decrc_local_freed(ptr %p)
 declare void @march_clo_param_own(ptr %p)
 declare void @march_clo_release(ptr %p)
+declare void @march_clo_capture_epoch(ptr %p)
+declare void @march_clo_forget_epoch(ptr %p)
+declare void @march_clo_frame_enter(ptr %p)
+declare void @march_frame_leave()
+declare void @march_frame_own_closure(ptr)
+declare void @march_frame_disown_closure(ptr)
 declare void @march_decrc_erased(ptr %p)
 declare void @march_decrc_erased_local(ptr %p)
 declare ptr  @march_clo_float_arg(ptr %p)

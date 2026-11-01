@@ -1240,7 +1240,7 @@ static inline void mbox_lock_release(march_proc *p) {
 uint32_t march_epoch_current(void);   /* march_dispatch.c (weak fallback below) */
 
 /* D29: the stamp a message sent from here carries -- the sending proc's code
- * epoch, or the current epoch when the sender is unpinned (main) or not a
+ * epoch, or the current epoch when the sender is a maintenance daemon or not a
  * proc at all (the event loop, a foreign thread). */
 _Atomic(uint32_t) march_sched_test_stamp = 0;
 
@@ -1248,8 +1248,7 @@ uint32_t march_sched_send_epoch(void) {
     uint32_t forced = atomic_load_explicit(&march_sched_test_stamp,
                                            memory_order_relaxed);
     if (forced) return forced;
-    march_proc *p = tl_sched ? tl_sched->current : NULL;
-    uint32_t e = p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
+    uint32_t e = march_sched_current_epoch();
     return e ? e : march_epoch_current();
 }
 
@@ -1597,11 +1596,7 @@ static void proc_trampoline(int arg_hi, int arg_lo) {
     /* Function returned — mark dead and hand control back to the scheduler.
      * This proc never resumes after this switch, so there is no matching
      * MARCH_ASAN_SWITCH_DONE call. */
-    march_reclaim_check_switch("proc exit");
-    atomic_store_explicit(&proc->status, PROC_DEAD, memory_order_release);
-    MARCH_ASAN_SWITCH_TO_SCHED(proc);
-    MARCH_TSAN_SWITCH_TO_SCHED(proc->owner_sched);
-    swapcontext(proc->ctx, &proc->owner_sched->sched_ctx);
+    march_sched_exit();
     /* If we ever return here the OS context is gone — abort defensively. */
     march_abort(__func__);
 }
@@ -1821,6 +1816,15 @@ int march_sched_num_schedulers(void) { return g_num_scheds; }
 __attribute__((weak)) uint32_t march_epoch_current(void) { return 1; }
 __attribute__((weak)) int      march_epoch_pin(uint32_t e) { (void)e; return 0; }
 __attribute__((weak)) void     march_epoch_unpin(uint32_t e) { (void)e; }
+__attribute__((weak)) uint32_t march_frame_epoch(void) { return 0; }
+__attribute__((weak)) void march_frame_clear(void **head) { (void)head; }
+__attribute__((weak)) void march_hcr_prune_migration_pins(void) {}
+__attribute__((weak)) void march_dispatch_release_main_reservation(void) {}
+static _Thread_local void *foreign_code_frames;
+__attribute__((noinline)) void **march_sched_frame_slot(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    return p ? &p->code_frames : &foreign_code_frames;
+}
 
 void march_sched_hold_next_spawn(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
@@ -1828,6 +1832,8 @@ void march_sched_hold_next_spawn(void) {
 }
 
 uint32_t march_sched_current_epoch(void) {
+    uint32_t frame_epoch = march_frame_epoch();
+    if (frame_epoch) return frame_epoch;
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     return p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
 }
@@ -1839,8 +1845,7 @@ uint32_t march_sched_current_epoch(void) {
  * activation advanced it between the load and the pin -- reload and retry. */
 static uint32_t spawn_code_epoch(int from_parent) {
     march_proc *parent = (from_parent && tl_sched) ? tl_sched->current : NULL;
-    uint32_t pe = parent
-        ? atomic_load_explicit(&parent->code_epoch, memory_order_relaxed) : 0;
+    uint32_t pe = parent ? march_sched_current_epoch() : 0;
     if (pe && march_epoch_pin(pe) == 0) return pe;
     for (;;) {
         uint32_t e = march_epoch_current();
@@ -1958,10 +1963,17 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
     makecontext(p->ctx, (void (*)(void))proc_trampoline, 2, arg_hi, arg_lo);
 
     /* After every failure return above: the pin is dropped only at the reap. */
-    /* follow_current: 1 = unpinned (main), 2 = the current epoch (a
-     * supervisor restart), 0 = inherit (everything else). */
-    atomic_init(&p->code_epoch,
-                follow_current == 1 ? 0u : spawn_code_epoch(follow_current == 0));
+    /* follow_current: 1 = unpinned maintenance, 2 = the current epoch (a
+     * supervisor restart), 3 = baseline main, 0 = inherit (everything else). */
+    uint32_t entry_epoch;
+    if (follow_current == 3) {
+        entry_epoch = 1; /* compiled main belongs to the baseline image */
+        if (march_epoch_pin(entry_epoch) != 0) {
+            fputs("march: baseline entry epoch unavailable after replay\n", stderr);
+            abort();
+        }
+    } else entry_epoch = follow_current == 1 ? 0u : spawn_code_epoch(follow_current == 0);
+    atomic_init(&p->code_epoch, entry_epoch);
     /* A spawn the spawner asked to start held (march_sched_hold_next_spawn):
      * the hold is on the child before it can run, so its spawn marker, if
      * any, is deferred like any other. */
@@ -2027,7 +2039,9 @@ march_proc *march_sched_spawn_daemon(void (*fn)(void *), void *arg) {
 
 march_proc *march_sched_spawn_main(void (*fn)(void *), void *arg,
                                    int sched_pinned) {
-    return sched_spawn_common(fn, arg, 0, sched_pinned, 1);
+    march_proc *p = sched_spawn_common(fn, arg, 0, sched_pinned, 3);
+    march_dispatch_release_main_reservation();
+    return p;
 }
 
 march_proc *march_sched_spawn_current(void (*fn)(void *), void *arg) {
@@ -2485,6 +2499,7 @@ static void sched_loop(march_scheduler *sched) {
         } else if (st == PROC_DEAD) {
             atomic_store_explicit(&p->hold_next_spawn, 0, memory_order_relaxed);
             registry_remove(p);
+            march_frame_clear(&p->code_frames);
             /* The epoch pin taken at spawn (or moved there by an advance):
              * dropped exactly once, here.  The PROC_DEAD release store
              * orders the proc's last code_epoch write before this read. */
@@ -2493,6 +2508,7 @@ static void sched_loop(march_scheduler *sched) {
                                                    memory_order_relaxed);
                 if (ce) march_epoch_unpin(ce);
             }
+            march_hcr_prune_migration_pins();
             atomic_fetch_sub_explicit(&g_live_procs, 1, memory_order_release);
             if (!p->is_daemon)
                 atomic_fetch_sub_explicit(&g_live_nondaemon, 1, memory_order_release);
@@ -3032,13 +3048,17 @@ void march_sched_tick(void) {
 void march_sched_exit(void) {
     if (!tl_sched || !tl_sched->current) return;
     march_proc *p = tl_sched->current;
+    /* Release abandoned frames on the proc, where destructor callbacks see
+     * its routing context and may safely yield. The proc pointer survives
+     * migration; owner_sched below is read after cleanup. */
+    march_frame_clear(&p->code_frames);
     march_reclaim_check_switch("march_sched_exit");
     atomic_store_explicit(&p->status, PROC_DEAD, memory_order_release);
     /* This proc never resumes after this switch, so there is no matching
      * MARCH_ASAN_SWITCH_DONE call. */
     MARCH_ASAN_SWITCH_TO_SCHED(p);
-    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
-    swapcontext(p->ctx, &tl_sched->sched_ctx);
+    MARCH_TSAN_SWITCH_TO_SCHED(p->owner_sched);
+    swapcontext(p->ctx, &p->owner_sched->sched_ctx);
     march_abort(__func__); /* Should never be reached. */
 }
 

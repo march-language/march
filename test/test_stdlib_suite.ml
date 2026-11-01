@@ -12088,10 +12088,10 @@ let test_hcr_migrate_msg_converts_real_old_message () =
           true (c "converted" > 0);
         Alcotest.(check int) "nothing dropped" 0 (c "dropped");
         Alcotest.(check int) "no marker live: Tally moved" 0 (c "markers_live");
-        (* The fully drained deploy: no epoch other than the current one may
-           still pin a unit. *)
+        (* Tally and feed have advanced; baseline main intentionally retains
+           its entry epoch until it returns. No other old pin may remain. *)
         let old = List.filter (fun (_, n, current) -> not current && n > 0) (R.pins_epochs pins) in
-        Alcotest.(check (list (pair int int))) "no old epoch still pinned" []
+        Alcotest.(check (list (pair int int))) "only baseline main retains the old epoch" [(1, 1)]
           (List.map (fun (e, n, _) -> (e, n)) old))
   | _ -> ()
 
@@ -12197,6 +12197,89 @@ let test_hcr_borrow_flip_refused_end_to_end () =
         Unix.sleepf 0.5;
         if not (alive ()) then
           Alcotest.failf "the server died after the deploys:\n%s" (read_file_contents log))
+  | _ -> ()
+
+(* A running old main and closure must retain the old call ABI, while an
+   actor past its marker uses the coordinated replacement and its on_stop. *)
+let frame_pin_src version =
+  let count = match version with
+    | 1 -> "fn count(x : Int) : Int do x + 100 end\nfn calc() : Int do count(1) end\n"
+    | 2 -> "fn count(x : Int, y : Int) : Int do x + y end\nfn calc() : Int do count(1, 200) end\n"
+    | _ -> "fn count(x : Int, y : Int) : Int do x + y + 100 end\nfn calc() : Int do count(1, 200) end\n" in
+  let state = match version with
+    | 1 -> "state { count : Int }\ninit { count: 0 }"
+    | 2 -> "state { count : Int, label : String }\ninit { count: 0, label: \"fresh\" }"
+    | _ -> "state { count : Int, label : String, extra : Int }\ninit { count: 0, label: \"fresh3\", extra: 0 }" in
+  let stop = match version with
+    | 1 -> "println(\"stop-old \" ++ int_to_string(state.count))"
+    | 2 -> "println(\"stop-new \" ++ state.label)"
+    | _ -> "println(\"stop-third \" ++ state.label ++ \":\" ++ int_to_string(state.extra))" in
+  let migration = match version with
+    | 1 -> ""
+    | 2 -> "fn probe_migrate_state(old : { count : Int }) : { count : Int, label : String } do { count: old.count, label: \"migrated\" } end\n"
+    | _ -> "fn probe_migrate_state(old : { count : Int, label : String }) : { count : Int, label : String, extra : Int } do { count: old.count, label: old.label ++ \"-v3\", extra: 42 } end\n" in
+  "mod Main do\nneeds IO\n" ^ count ^ "actor Probe do\n" ^ state
+  ^ "\non Tick() do\nprintln(\"fresh-\" ++ int_to_string(calc()))\nstate\nend\non_stop do\n"
+  ^ stop ^ "\nend\nend\n" ^ migration
+  ^ "fn main(_io : Cap(IO)) do\nlet a = spawn(Probe)\nprintln(\"frame-ready\")\n"
+  ^ "List.each(List.range(0, 200), fn _ ->\nif calc() != 101 do panic(\"old frame crossed ABI\") else () end\nsend(a, Tick())\nsleep_ms(50))\n"
+  ^ "let _ = Actor.stop(a, 1000)\nprintln(\"frame-done\")\nend\nend\n"
+
+let test_hcr_running_frame_signature_change () =
+  let module H = March_forge.Cmd_deploy_hot in
+  let pk, sk = March_ed25519.Ed25519.keygen () in
+  let pk_b64 = March_ed25519.Ed25519.pk_to_base64 pk in
+  let base = build_role_fixture ~tag:"framebase"
+      ~extra_args:("--hot-reload Main --signing-pubkey " ^ Filename.quote pk_b64)
+      (frame_pin_src 1) in
+  let patch = build_role_fixture ~tag:"framepatch"
+      ~extra_args:"--hot-reload Main --compile-so" (frame_pin_src 2) in
+  let third = build_role_fixture ~tag:"framepatch3"
+      ~extra_args:"--hot-reload Main --compile-so" (frame_pin_src 3) in
+  match base, patch, third with
+  | Some (dir, bin), Some (_, so_path), Some (_, third_path) ->
+    let manifest path = match H.parse_manifest (path ^ ".hcr_manifest") with
+      | Ok m -> m | Error e -> Alcotest.fail e in
+    let sock = Printf.sprintf "/tmp/march_frames_%d.sock" (Unix.getpid ()) in
+    let log = Filename.concat dir "server.log" in
+    let verify () =
+      let deadline = Unix.gettimeofday () +. 15. in
+      while Unix.gettimeofday () < deadline
+            && not (contains "frame-done" (read_file_contents log)) do Unix.sleepf 0.05 done;
+      let output = read_file_contents log in
+      Alcotest.(check bool) ("old frame survives: " ^ output) true (contains "frame-done" output);
+      Alcotest.(check bool) "old ABI never crosses" false (contains "old frame crossed ABI" output);
+      Alcotest.(check bool) "eligible actor calls newest ABI" true (contains "fresh-301" output);
+      Alcotest.(check bool) "new callback sees both migrations" true (contains "stop-third migrated-v3:42" output);
+      Alcotest.(check bool) "old callback never runs on new state" false (contains "stop-old" output)
+    in
+    with_reload_server ~dir ~bin ~sock ~extra_env:[||] (fun _pid ->
+      (match e2e_connect sock with
+       | None -> Alcotest.fail "frame test server did not listen"
+       | Some fd -> Unix.close fd);
+      let ready = Unix.gettimeofday () +. 5. in
+      while Unix.gettimeofday () < ready
+            && not (contains "frame-ready" (read_file_contents log)) do Unix.sleepf 0.01 done;
+      Alcotest.(check bool) "old frame entered before deploy" true
+        (contains "frame-ready" (read_file_contents log));
+      let deploy so_path =
+        match H.run ~tunnel:false ~ssh_host:"local" ~remote_socket:sock
+            ~signing_pubkey:pk_b64 ~sk ~manifest:(manifest so_path) ~so_path () with
+        | Ok _ -> ()
+        | Error e -> Alcotest.failf "coordinated frame deploy refused: %s\n%s" e (read_file_contents log)
+      in
+      deploy so_path;
+      let second = Unix.gettimeofday () +. 5. in
+      while Unix.gettimeofday () < second
+            && not (contains "fresh-201" (read_file_contents log)) do Unix.sleepf 0.01 done;
+      Alcotest.(check bool) "actor reached second version" true (contains "fresh-201" (read_file_contents log));
+      deploy third_path;
+      verify ());
+    (* The executable's main is still baseline code after persisted replay.
+       Its entry reservation must predate restoring the newer current epoch. *)
+    Out_channel.with_open_text log (fun _ -> ());
+    with_reload_server ~dir ~bin ~sock ~extra_env:[||] (fun _ -> verify ())
+
   | _ -> ()
 
 let test_hcr_manifest_actor_handler_caps_populated () =
@@ -15526,6 +15609,8 @@ let stdlib_suites =
           test_hcr_migrate_msg_converts_real_old_message;
         Alcotest.test_case "HCR: a patch that flips a parameter borrowed->owned is refused; body-only and unchanged builds deploy" `Slow
           test_hcr_borrow_flip_refused_end_to_end;
+        Alcotest.test_case "HCR: running frames retain old ABI; migrated actors and on_stop use replacement" `Slow
+          test_hcr_running_frame_signature_change;
         Alcotest.test_case "HCR manifest: disjoint fn caps stay separate, not the whole-artifact union (granularity revision)" `Slow
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow

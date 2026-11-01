@@ -35,3 +35,22 @@ per-frame version pin, the same machinery closures need for
 `specs/todos/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md`).
 Reproduce with `test_hcr_borrow_flip_refused_end_to_end`'s fixture
 (test/test_stdlib_suite.ml) and a retyped `count` instead of an owned one.
+
+## Completed 2026-10-31
+
+HCR ABI v5 gives active green-thread frames routing epochs and dispatch references.
+Nested calls and baseline main retain compatible versions; escaping closures retain
+their creation epoch, and panic/cancellation unwind their references. Startup reserves
+the baseline epoch before replay, so the original main still routes to its original ABI.
+Actors advance at mailbox markers and use current-version shutdown callbacks.
+
+The compiled `test_hcr_running_frame_signature_change` regression performs v1 → v2 →
+v3 → restart of the original executable. Main and its closure keep the old one-argument
+ABI, new actor work observes both upgrades, and shutdown sees `migrated-v3:42` after two
+state migrations. Runtime frame/replay/unwind and dispatch stress checks pass; the
+migration runner passes 102 checks. Closure tests cover captured/function-value calls,
+recursive panic, NULL optimized callbacks, deep tail loops and version pressure.
+
+Borrow-mode flips remain conservatively refused by the existing independent gate.
+A nonreturning frame or retained closure can prevent reclamation and exhaust bounded
+version capacity; a fresh base deployment is then required.

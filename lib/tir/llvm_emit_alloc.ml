@@ -404,6 +404,8 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
        end;
        ("ptr", ptr))
     in
+    if ctx.hr_config <> None && Tir_names.is_clo_struct alloc_type_name then
+      emit ctx (Printf.sprintf "call void @march_clo_capture_epoch(ptr %s)" (snd alloc_result));
     alloc_result
 
 
@@ -585,6 +587,10 @@ let emit_stack_alloc_uniform ~emit_atom ctx (args : Tir.atom list)
     RC=1, falling back to a fresh allocation. *)
 let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
   (args : Tir.atom list) : string * string =
+    if ctx.owned_closure <> None then begin
+      let (ty, value) = emit_atom ctx reuse_atom in
+      if ty = "ptr" then Llvm_ctx.disown_closure_value ctx value
+    end;
     (* Newtype fast path: no heap cell to reuse. Emit new payload directly.
        The old reuse_atom is a tagged scalar or pointer; release it via
        march_decrc (IS_HEAP_PTR guards make it a no-op on tagged scalars). *)
@@ -833,6 +839,8 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
        alloca/store/load slot. *)
     emit_label ctx reuse_lbl;
     release_orphans ctx (reuse_orphans ctx reuse_atom);
+    if ctx.hr_config <> None then
+      emit ctx (Printf.sprintf "call void @march_clo_forget_epoch(ptr %s)" rv);
     emit_store_tag ctx rv entry.ce_tag entry.ce_type_id;
     List.iteri (fun i (field_ty, v_coerced) ->
       emit_store_field ctx rv i field_ty v_coerced
@@ -862,12 +870,18 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
       | [] -> ()
       | fields -> emit_set_shape ctx result fields
     end;
+    if ctx.hr_config <> None && Tir_names.is_clo_struct reuse_type_name then
+      emit ctx (Printf.sprintf "call void @march_clo_capture_epoch(ptr %s)" result);
     ("ptr", result)
     end)
 
 (** Body of the non-constructor [EReuse] arm. *)
 let emit_reuse_uniform ~emit_atom ctx (reuse_atom : Tir.atom)
   (reuse_ty : Tir.ty) (args : Tir.atom list) : string * string =
+    if ctx.owned_closure <> None then begin
+      let (ty, value) = emit_atom ctx reuse_atom in
+      if ty = "ptr" then Llvm_ctx.disown_closure_value ctx value
+    end;
     (* Non-TCon reuse (e.g. reusing a dead cell as a join-point closure): same
        conditional logic without ctor-specific fields. *)
     let arg_vals_of () = List.map (fun atom ->
@@ -923,6 +937,8 @@ let emit_reuse_uniform ~emit_atom ctx (reuse_atom : Tir.atom)
                      is_unique reuse_lbl fresh_lbl);
     emit_label ctx reuse_lbl;
     release_orphans ctx (reuse_orphans ctx reuse_atom);
+    if ctx.hr_config <> None then
+      emit ctx (Printf.sprintf "call void @march_clo_forget_epoch(ptr %s)" rv);
     (* Write tag=0 to match the fresh-branch allocation (emit_heap_alloc below
        passes tag_int=0).  Without this, the reused cell would carry whatever
        tag was previously stored — semantically inconsistent with the
