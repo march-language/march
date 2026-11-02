@@ -61,7 +61,8 @@ program refuses to start if the sandbox can't be put in place.
 
 - The capability tests in the `run_compiler` suite (`test/test_cap_*.ml`: the upper limit,
   unforgeability, scopes, symbols, the sandbox profile, and `--cap-sandbox` running real
-  binaries), in the `test (ubuntu, compiler)` and `test (macos-15, all)` jobs.
+  binaries), in the `test (ubuntu, compiler)` job. `test (macos-26, all)` runs the ones
+  that link or sandbox a real binary, not the upper-limit and scope checks.
 - The capability programs in the static-semantics reject corpus (`specs/lang/types/reject/`),
   in the `conformance` job.
 

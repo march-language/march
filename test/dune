@@ -62,6 +62,11 @@
 ; They still run on Linux. The macOS runner has 3 cores and its `dune runtest`
 ; is CPU-bound, so these ~22 CPU-minutes were ~7 min of its wall time
 ; (2026-10-08). Same caution as above: a local run with it set skips them.
+; Since 2026-11-02 run_codegen and run_compiler also run only the OS- or
+; arm64-sensitive GROUPS named in run_codegen.ml / run_compiler.ml
+; (Test_helpers.keep_os_sensitive): ~10% and ~40% of their time. They had
+; grown to 40 and 35 min on the macOS runner, started late behind the
+; test/native compiles, and pushed the job past its 75 min step timeout.
 ; cap_strip / cap_markers shell out to the real compiler and inspect the
 ; linked binary, so main.exe AND the staged runtime tree must exist before
 ; this runner starts.  Without these deps the tests resolved nothing and

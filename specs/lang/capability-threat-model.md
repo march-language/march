@@ -221,8 +221,10 @@ The compile-time claim holds only if all of these are true:
 What runs in CI today:
 
 - The capability unit tests in the `run_compiler` suite (`test/test_cap_*.ml`, including
-  the ceiling, unforgeability and both sandbox tests), on Linux (`test (ubuntu, compiler)`)
-  and macOS (`test (macos-15, all)`).
+  the ceiling, unforgeability and both sandbox tests), on Linux (`test (ubuntu, compiler)`).
+  macOS (`test (macos-26, all)`) runs the ones whose result can depend on the OS
+  (both sandbox tests, stripping and markers in linked binaries), not the ceiling,
+  scope or unforgeability checks, which are compiler logic.
 - The capability rejects in the static-semantics corpus (`specs/lang/types/reject/`), run by
   the `conformance` job.
 - `--cap-sandbox` runs real compiled binaries and checks that withheld operations fail

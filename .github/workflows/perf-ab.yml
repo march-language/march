@@ -63,7 +63,7 @@ jobs:
     # measurement at 15 rounds.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The baseline is a tag and is built in its own worktree, so the
           # history and tags must be present.
@@ -106,7 +106,7 @@ jobs:
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: perf-ab
           path: perf-ab-out/
