@@ -311,7 +311,7 @@ end
         reflected out "rev2";
         blocked out "addk/go" "R1:captures k";
         blocked out "addk" "R6:calls addk/go, which is not reflected");
-    gated "report_sort: a Unit result and an untranslatable refinement are R8" (fun () ->
+    gated "report_sort: a Unit result is R8; a refinement calling a reflected function is not (phase 1b)" (fun () ->
         let out =
           run
             {|mod So do
@@ -323,7 +323,9 @@ end
         in
         reflected out "inc";
         blocked out "nothing" "R8:returns Unit";
-        blocked out "idx2" "R8:the refinement of i does not translate (inc is not predicate vocabulary)");
+        (* Phase 1b: `inc(3)` in the guard is resolved at its site to the
+           reflected `inc`, so the guard translates (it was R8 in 1a). *)
+        reflected out "idx2");
     gated "report_len_shadow_module: a user `List.length` is not `$len` (I3)" (fun () ->
         let out =
           run

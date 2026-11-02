@@ -541,7 +541,7 @@ let test_ping_closed_peer () =
 
 let test_drift () =
   let fm name h = { Cmd_deploy_hot.fn_name = name; fn_impl_hash = h; fn_sig_hash = ""; fn_callers = [];
-                    fn_caps = []; fn_has_caps = true; fn_type_sig = ""; fn_modes = "" } in
+                    fn_caps = []; fn_has_caps = true; fn_type_sig = ""; fn_modes = ""; fn_logic = "" } in
   let desired = { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None; slots = None;
                   functions = [ fm "App.f" "abc123"; fm "App.g" "zzz"; fm "App.new" "n" ]; roles = [] } in
   let slot name h = { Cmd_deploy_hot.ds_id = 0; ds_name = name; ds_impl_hash = h; ds_activated_at = 0L;
@@ -724,7 +724,7 @@ let test_upgrade_refused_with_restart_advice () =
 let abi_fn ~tsig ~modes =
   { Cmd_deploy_hot.fn_name = "App.count"; fn_impl_hash = "i";
     fn_sig_hash = March_cas.Hash.hcr_sig_hash ~sig_hash:tsig ~modes;
-    fn_callers = [ "App.serve" ]; fn_caps = []; fn_has_caps = true; fn_type_sig = tsig; fn_modes = modes }
+    fn_callers = [ "App.serve" ]; fn_caps = []; fn_has_caps = true; fn_type_sig = tsig; fn_modes = modes; fn_logic = "" }
 
 let abi_slot sig_h =
   { Cmd_deploy_hot.slot_id = 1; slot_name = "App.count"; slot_impl_hash = "old";
@@ -752,7 +752,7 @@ let test_borrow_mode_changes () =
     (changes ~running:(March_cas.Hash.hcr_sig_hash ~sig_hash:(String.make 64 'b') ~modes:"oo")
        (abi_fn ~tsig ~modes:"bo"));
   Alcotest.(check (list (pair string (list string)))) "a manifest without tsig=/modes=: unknown" []
-    (changes ~running:(h "oo") { (abi_fn ~tsig ~modes:"bo") with fn_type_sig = ""; fn_modes = "" });
+    (changes ~running:(h "oo") { (abi_fn ~tsig ~modes:"bo") with fn_type_sig = ""; fn_modes = ""; fn_logic = "" });
   let msg = Cmd_deploy_hot.mode_change_refusal (changes ~running:(h "ob") (abi_fn ~tsig ~modes:"oo")) in
   Alcotest.(check bool) msg true (contains msg "Deploy this build with a restart");
   (* the manifest fields *)
@@ -770,6 +770,76 @@ let test_borrow_mode_changes () =
        Alcotest.(check (list string)) "callers still read" [ "App.serve" ] f.fn_callers;
        Alcotest.(check string) "an older line has none" "" g.fn_modes
      | _ -> Alcotest.fail "two functions expected")
+  | Error e -> Alcotest.fail e
+
+(* ── reflected bodies in the slot sig_hash (refinement reflection I9, 2026-10-31) ── *)
+
+let test_logic_changes () =
+  let tsig = String.make 64 'a' in
+  let slot ~logic = March_cas.Hash.hcr_slot_sig_hash ~sig_hash:tsig ~modes:"o" ~logic in
+  let fm ~logic =
+    { (abi_fn ~tsig ~modes:"o") with fn_sig_hash = slot ~logic; fn_logic = logic } in
+  let manifest fns =
+    { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None;
+      stdlib_hash = None; slots = None; functions = fns; roles = [] } in
+  let changes ?prior ~running f =
+    Cmd_deploy_hot.logic_changes ~prior ~slot_of:(fun _ -> Some (abi_slot running)) ~to_activate:[ f ] in
+  let l1 = String.make 64 '1' and l2 = String.make 64 '2' in
+  Alcotest.(check bool) "an unreflected slot hash is unchanged" true
+    (slot ~logic:"-" = March_cas.Hash.hcr_sig_hash ~sig_hash:tsig ~modes:"o");
+  Alcotest.(check bool) "the logic hash is in a reflected slot hash" true (slot ~logic:l1 <> slot ~logic:l2);
+  (* a body-only patch to a reflected function: refused, with or without
+     the running build's manifest *)
+  Alcotest.(check int) "reflected body edit (no prior)" 1 (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:l2)));
+  Alcotest.(check int) "reflected body edit (prior)" 1
+    (List.length (changes ~prior:(manifest [ fm ~logic:l1 ]) ~running:(slot ~logic:l1) (fm ~logic:l2)));
+  (* reflected -> @[opaque] is a logic change too (the old callers' proofs) *)
+  Alcotest.(check int) "reflected -> opaque (prior)" 1
+    (List.length (changes ~prior:(manifest [ fm ~logic:l1 ]) ~running:(slot ~logic:l1) (fm ~logic:"")));
+  (* reflected -> unreflected (@[opaque], an effect, a callee that stopped
+     being reflected) with NO running manifest: the running slot hash is not
+     the plain hash of the patch's type and modes, which a type change in a
+     coordinated upgrade also gives -- the two cannot be told apart.  Not
+     refused (the patch build re-checks every caller against the new code,
+     and refusing broke coordinated type changes); a warning names it. *)
+  let unknowns ~running f =
+    Cmd_deploy_hot.logic_unknowns ~prior:None ~slot_of:(fun _ -> Some (abi_slot running)) ~to_activate:[ f ] in
+  Alcotest.(check int) "reflected -> unreflected (no prior): not refused" 0
+    (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:"")));
+  Alcotest.(check int) "reflected -> unreflected, `-` (no prior): not refused" 0
+    (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:"-")));
+  Alcotest.(check int) "reflected -> unreflected (no prior): warned" 1
+    (List.length (unknowns ~running:(slot ~logic:l1) (fm ~logic:"-")));
+  Alcotest.(check int) "a type change (no prior): warned the same way" 1
+    (List.length
+       (unknowns ~running:(March_cas.Hash.hcr_sig_hash ~sig_hash:(String.make 64 'b') ~modes:"o") (fm ~logic:"-")));
+  Alcotest.(check int) "an unchanged slot: no warning" 0
+    (List.length (unknowns ~running:(slot ~logic:"-") (fm ~logic:"-")));
+  Alcotest.(check int) "with the running manifest: no warning" 0
+    (List.length
+       (Cmd_deploy_hot.logic_unknowns ~prior:(Some (manifest [ fm ~logic:l1 ]))
+          ~slot_of:(fun _ -> Some (abi_slot (slot ~logic:l1))) ~to_activate:[ fm ~logic:"-" ]));
+  (* an @[opaque] function's body edit: same slot hash, nothing to say *)
+  Alcotest.(check int) "opaque body edit" 0 (List.length (changes ~running:(slot ~logic:"-") (fm ~logic:"")));
+  Alcotest.(check int) "unchanged reflected body" 0 (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:l1)));
+  (* a mode change stays the mode gate's business *)
+  Alcotest.(check int) "a mode change is not a logic change" 0
+    (List.length
+       (changes ~running:(March_cas.Hash.hcr_slot_sig_hash ~sig_hash:tsig ~modes:"b" ~logic:l1) (fm ~logic:l1)));
+  let msg = Cmd_deploy_hot.logic_change_refusal (changes ~running:(slot ~logic:l1) (fm ~logic:l2)) in
+  Alcotest.(check bool) msg true
+    (contains msg "the body of `App.count` is part of its callers' proofs; redeploy, or mark it `@[opaque]`");
+  (* the manifest field *)
+  let root = tmp_root () in
+  let path = Filename.concat root "m" in
+  write_file path (Printf.sprintf "# march-hcr-manifest v2\n# cas_hash cc\n\
+                                   App.count ii %s tsig=%s modes=o logic=%s caps=\nApp.old ii ss caps=\n"
+                     (slot ~logic:l1) tsig l1);
+  match Cmd_deploy_hot.parse_manifest path with
+  | Ok { functions = [ f; g ]; _ } ->
+    Alcotest.(check string) "logic=" l1 f.fn_logic;
+    Alcotest.(check string) "an older line has none" "" g.fn_logic
+  | Ok _ -> Alcotest.fail "two functions expected"
   | Error e -> Alcotest.fail e
 
 let () =
@@ -805,5 +875,6 @@ let () =
         Alcotest.test_case "deploy hot refuses another target before uploading" `Quick test_run_preflights_identity;
         Alcotest.test_case "a newer toolchain's patch into an older server: refused, restart once" `Quick test_upgrade_refused_with_restart_advice;
         Alcotest.test_case "a parameter borrow-mode change is recognised and named" `Quick test_borrow_mode_changes;
+        Alcotest.test_case "a reflected function's body change is refused (sound_hcr)" `Quick test_logic_changes;
       ]);
   ]

@@ -52,6 +52,25 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`--reflection-parity`: check the refinement checker's reading of your functions.**
+  `forge test --reflection-parity` (or `march --check --reflect-parity`) runs every
+  reflected function both by its logic definition and in the interpreter, on generated
+  inputs including the largest and smallest `Int`; a disagreement or a panic inside the
+  function's domain fails the run, and boundary overflow is reported `overflow?`. A
+  reflected function the net cannot compare is listed `not-compared` with the reason, and
+  a file whose ordinary check fails is reported as a check failure, not a parity failure.
+  A run that compared no input at all says `parity: NOTHING COMPARED`, and
+  `forge test --reflection-parity` fails on it.
+- **Logic hashes in `--dump-impl-hashes`.** A fourth column gives each reflected
+  function's logic hash (`-` when not reflected); every solver query that used a
+  definition names the hash in its cache key. `--reflect-deps` prints the hashes (and a
+  contract hash for every function a file reaches in other files), and the language
+  server (opt-in, `MARCH_LSP_REFINE=1`) uses them to re-check open files when a
+  definition, a refinement contract or the reflectability of a function they rely on
+  changes in another file.
+- **A parameter refinement may call a reflected function** (`fn f(n : {Int | is_small(_)})`),
+  and the function is still reflected.
+
 - **Hot deploys report their running schema baseline.** Hot-reload binaries embed
   deterministic schemas and manifests, and the owner-only `SCHEMAS` query reports
   each actor's latest activated schema and release. `forge deploy hot` uses that
@@ -495,6 +514,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Hot reload refuses a patch that changes a reflected function's body when a proof used
+  it**: a caller's precondition was discharged by unfolding that body. Redeploy with a
+  restart, or mark the function `@[opaque]`. A reflected function no proof unfolded can
+  still be hot-patched.
+
 - **`@[measure]` now insists on reflection, and follows calls.** A `@[measure]` that is not
   reflected is the error `invalid_measure`, naming the first reason, including through a
   function it calls (a measure whose `Nil` arm calls a function that prints, panics or
@@ -560,6 +584,8 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A `refinement_unverified` hint re-labelled `reflect-fuel` or `reflect-budget` now
+  names that reason** instead of the first attempt's.
 - **`cap no_panic` accepted a division by a `let` that rebinds its own name.** In
   `let d = d - 1` followed by `10 / d`, the checker read the binding as the equation
   `d = d - 1`, which no integer satisfies, so `d != 0` was vacuously proved and the
