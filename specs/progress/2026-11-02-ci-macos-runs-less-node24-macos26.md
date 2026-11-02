@@ -17,21 +17,24 @@ September to double its job-minutes on a 5-slot org-wide pool) fixes that.
 
 ## What changed
 
-- **Run less on macOS.** `MARCH_CI_SKIP_OS_INDEPENDENT=1` now also drops named
-  alcotest groups inside `run_codegen` and `run_compiler`, via
-  `Test_helpers.drop_os_independent` and the lists in `test/run_codegen.ml` and
-  `test/run_compiler.ml`. Chosen by measurement: both suites were run with
-  `clang` and `zig` shimmed to log which test case's output file was open
-  (`MARCH_TEST_JOBS=1`, cold CAS, private HOME). Dropped: groups that never
-  invoke the toolchain and cost real time (`llvm_ir_validity_gate`,
-  `check_diagnostic_determinism`; `endpoints`, `tcenv_cli_cache`, `cap_scope`,
-  `resolver`, `entry_mod_qual_erasure`), and `run_compiler` groups that compile
-  only as a vehicle for compiler or CAS logic (`alloc_contract`,
-  `topology_flag`, `cap_ceiling`, `cas_b7`, `cas_report_bypass`, `march_query`,
-  `post_tir_cache`). Locally that is ~30% of `run_codegen`'s time and ~60% of
-  `run_compiler`'s. Linking, sandbox, binary-inspection, race and every
-  compile-and-run group stay on macOS. It is a drop list, so a new group runs
-  on macOS by default, and a name matching no group fails the run.
+- **Run less on macOS.** Under `MARCH_CI_SKIP_OS_INDEPENDENT=1`, `run_codegen`
+  and `run_compiler` now run only the groups named in `test/run_codegen.ml` /
+  `test/run_compiler.ml` (`Test_helpers.keep_os_sensitive`; a name matching no
+  group fails the run). Kept: the REPL JIT, debug info, the RC trace runtime,
+  SIMD, struct/extern ABIs, float codegen, signals and the cross link (the
+  macOS runner is CI's only arm64 test host); linking, the sandbox, binary
+  contents, the concurrent-compile race, hot reload and sessions. That is
+  ~10% of `run_codegen`'s local time and ~40% of `run_compiler`'s.
+  Every `test/native` compile-and-run fixture still runs on macOS; those are
+  where macOS caught bugs Linux missed.
+
+  The first version of this PR was a drop list chosen by shimming `clang` and
+  `zig` to log which test case called them (`MARCH_TEST_JOBS=1`, cold CAS,
+  private HOME): ~30% of `run_codegen` and ~60% of `run_compiler`. A macOS
+  timeline then showed why that was not enough: the two suites started 29
+  and 40 min into the Test step, behind the `test/native` compiles, so even a
+  shorter tail ended near 55 min. Hence a keep list: a new group in these two
+  suites runs on Linux only until someone adds it.
 - **Node 24 actions.** checkout v7, upload-artifact v7, download-artifact v8,
   setup-node v7, cache v6, github-script v9, action-gh-release v3.
   `mlugg/setup-zig@v2` still declares node20 (no newer release); GitHub runs

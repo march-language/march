@@ -168,8 +168,8 @@ jobs:
             rest)        MARCH_CI_RUNTEST_SPLIT=1 dune runtest ;;
             # macOS skips the suites whose answer does not depend on the OS
             # (refinecheck, golden diagnostics, LSP; see "CI sharding" in
-            # test/dune) and the OS-independent groups listed in
-            # test/run_codegen.ml and test/run_compiler.ml: they run on the
+            # test/dune), and runs only the OS-sensitive groups listed in
+            # test/run_codegen.ml and test/run_compiler.ml: the rest run on the
             # ubuntu shards, and this runner's 3 cores are the bottleneck of
             # the slowest job in the workflow.
             all)         MARCH_CI_SKIP_OS_INDEPENDENT=1 dune runtest ;;
