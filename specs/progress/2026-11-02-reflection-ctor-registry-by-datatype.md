@@ -208,3 +208,25 @@ Verification after round 2: `scripts/run-tests.sh refinecheck` 2,108 tests green
 `refine-oracle.sh monotone` GREEN over 139,456 sites with 0 moves. The corpus (`test/native`,
 `stdlib`) has no site that depended on a conflated short name, so the conflation rule moved no
 oracle row; its cost shows only in `module-qualified-measure-and-sort`.
+
+## CI round 1 (PR #1056): conformance reject/t109
+
+`reject/t109_refine_induction_propagates.march` declares `type Tree`, and the stdlib's
+`OrderedMap` declares one too, so after review round 2 its constructors resolve nothing
+and the induction-proved postcondition no longer reaches `needEmpty`: the fixture's
+expected violation went silent (`dune build @types-check`, "rejected but message lacks
+refinement violation"). This is the accepted cost of round 2, not a new bug.
+
+- **Fix:** the fixture's type is renamed `ITree`, with a comment saying why; what it
+  tests (a proved postcondition propagating through structural induction) is unchanged.
+  `@types-check`: 492 passed, 0 failed.
+- **Tried and reverted: conflate only same-arity declarants.** `unify` equates two
+  `TCon`s only when the argument counts agree too, and an annotation must give a
+  parameterised type all its arguments (`type_arity`), so a user `type Tree` and
+  `OrderedMap.Tree(k, v)` really are two types to the typechecker. But narrowing
+  `ambiguous_adts` that way is unsound as things stand: `adt_sort_name`, `field_adt` and
+  the other bare-name lookups would then resolve `Tree` to a guessed preferred declarant
+  (possibly `OrderedMap`'s) and trust it, the exact shape of review round 1's C1. Doing
+  it safely means making every bare-name lookup pick the declarant by arity. That, or
+  the typechecker fix (todo `2026-11-02-typecheck-conflates-same-short-named-types`),
+  is the way to give same-named user types their proofs back.
