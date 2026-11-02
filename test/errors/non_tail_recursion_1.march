@@ -18,23 +18,28 @@
 -- safety property: accept/t97 (an UNPROVEN postcondition must not propagate
 -- at all -- this file's counterpart shows a PROVEN one propagating exactly
 -- as it should).
+-- The type is `ITree`, not `Tree`: stdlib `OrderedMap` declares a `Tree`
+-- too, and while the typechecker conflates same-short-named types the
+-- refinement checker resolves no constructor through such a name
+-- (specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md,
+-- review round 2; todo 2026-11-02-typecheck-conflates-same-short-named-types).
 mod M do
   needs IO.Console
-  type Tree = Leaf | Node(Tree, Int, Tree)
+  type ITree = Leaf | Node(ITree, Int, ITree)
   @[measure]
-  fn size(t : Tree) : Int do
+  fn size(t : ITree) : Int do
     match t do
       Leaf -> 0
       Node(l, _, r) -> 1 + size(l) + size(r)
     end
   end
-  fn ins(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+  fn ins(t : ITree, x : Int) : {ITree | size(_) == size(t) + 1} do
     match t do
       Leaf -> Node(Leaf, x, Leaf)
       Node(l, v, r) -> Node(ins(l, x), v, r)
     end
   end
-  fn needEmpty(t : {Tree | size(t) < 1}) : Int do 0 end
+  fn needEmpty(t : {ITree | size(t) < 1}) : Int do 0 end
   fn main() do
     println(int_to_string(needEmpty(ins(Leaf, 5))))
   end
