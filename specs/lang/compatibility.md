@@ -31,7 +31,6 @@ freeze the old behaviour:
 
 - `Int` overflow will stop the program instead of wrapping (decided 2026-09-29, being
   implemented), with explicit `wrapping_*` operations for code that wants wrapping.
-- The layout of short strings will be tuned and then frozen.
 - Per-function capability bounds (`fn f() needs IO.Console do`) and capability bounds on
   `interface` methods will be added.
 - Standard-library modules will be marked stable or experimental (below).
@@ -113,6 +112,13 @@ Neither exists yet.
   built by another; when the ABI changes, the node needs a full restart.
 - **Binary compatibility.** Object files and shared libraries from different March versions
   can't be mixed. Rebuild with the new compiler.
+- **The in-memory layout of values, strings included.** C code reaches March values only
+  through `runtime/march_ffi.h`: an opaque `march_value`, `march_slice` (a pointer and a
+  length) to read a String's bytes, and `march_str_new` to make one. The header never exposes
+  the string struct, and a check enforces that, so the representation can change within 1.x.
+  The one change already designed is storing strings of up to 7 bytes inside the value with no
+  allocation (`specs/plans/2026-07-27-string-sso.md`); it is not part of 1.0 (decided
+  2026-10-31, after measuring at most a 2-8% gain on templating and JSON workloads).
 - **Speed.** Performance is covered by its own
   [claim]({{ site.baseurl }}/docs/claim-performance/), not by this policy.
 - **Platforms below tier 1** (see [Supported Platforms]({{ site.baseurl }}/docs/platforms/)),

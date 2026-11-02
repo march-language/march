@@ -153,6 +153,7 @@ let gated : (string * string * compare_mode) list = [
   "string_slice_walk",  "checksum=27000000",  Exact;
   "string_small_churn", "checksum=17793810",  Exact;
   "string_split_large", "checksum=39000000",  Exact;
+  "string_split_fold",  "fold_split checksum=39000000\nfold_split_ranges checksum=39000000", Exact;
 
   (* ── timing-bearing: values checked, wall-clock masked ──
      IgnoreTiming does NOT compare `expected` at all: it requires every anchor
