@@ -17,15 +17,15 @@
 #      expand keeps Shop's fingerprint (`role_fingerprint`) at version 1's, so
 #      the host re-offers nothing: the offer version 1 opened stays open on
 #      version 1's fingerprint, and nothing on node-a chooses `later`. A
-#      session pins the epoch it FORMS in (plan 6.1), so one formed before
-#      the deploy finishes on version 1's code and one formed after it runs
-#      the expand's (Shop phase 2), on that same offer. Then the expand to
-#      node-b, whose version-2 Buyers form sessions with that offer (the
-#      compatibility table: Buyer accepts the previous fingerprint): "v2
-#      Buyer with an expand Shop". Until 2026-10-02 this read "v2 Buyer with
-#      a v1 Shop": the entry module's functions had no dispatch slots, so
-#      the old offer's handler called version 1's `shop` directly for ever,
-#      whatever epoch its session formed in.
+#      session retains its start closure's epoch. The hosting actor publishes
+#      a fresh start callback per offered fingerprint after its marker; the
+#      retained offer loads that callback before creating an Endpoint.
+#      New sessions therefore run expand code (Shop phase 2), while sessions
+#      already started keep their old closure. Then the expand to node-b,
+#      whose version-2 Buyers form sessions with that offer (the compatibility
+#      table accepts the previous fingerprint): "v2 Buyer with an expand Shop".
+#      The raw start callback has a stable session-id/abandonment/result ABI;
+#      protocol-specific endpoint values never cross this publication boundary.
 #   2. the contract to node-a, then node-b: the Shop re-offers under the new
 #      fingerprint and chooses `later`; every Buyer already handles it.
 #
