@@ -156,6 +156,10 @@ than the code uses. With no `MARCH_DEPLOY_POLICY` set, every signed patch is adm
 `--cap-sandbox` the OS sandbox installed at startup still applies to patched code, because
 it can't be loosened at run time.
 
+A sandboxed reload needs `IO.FileWrite` for CAS uploads, activation state, and audit
+writes. The compiler warns when the effective grant lacks it; it does not add a
+filesystem exception. Read-only reload and observe queries remain available.
+
 ## Foreign code (`IO.Foreign`)
 
 An `extern` block calls C, and the compiler's knowledge stops there. The rules:
@@ -207,9 +211,6 @@ The compile-time claim holds only if all of these are true:
 - **Path scopes.** `needs IO.FileWrite("/var/lib/app")` narrows the sandbox, but a few
   calls can bypass the compile-time scope check
   ([`specs/todos/2026-08-04-path-scope-followups.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-08-04-path-scope-followups.md)).
-- **The reload server under `--cap-sandbox`.** A deploy's own file writes happen under a
-  withheld `IO.FileWrite`
-  ([`specs/todos/2026-10-18-hcr-reload-writes-under-cap-sandbox.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-18-hcr-reload-writes-under-cap-sandbox.md)).
 - **Handles minted from a name.** `Vault.open(name)` and `Vault.whereis(name)` turn any
   string into a handle whose element type the caller chooses (`stdlib/vault.march`). This
   is a type-safety gap rather than an authority gap, but it is the same pattern a

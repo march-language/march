@@ -41,14 +41,23 @@ spreading.
   carry. Some changes (the runtime, a hook, the first deploy of a build) need a restart,
   which `forge deploy` plans as its own step.
 
+A first hot deploy uses the running server's embedded schema baseline. The owner-only
+`SCHEMAS` query identifies the activated schema and release for each actor; Forge prefers
+it over local `.prev` files. A server without schema reporting requires an explicit or
+saved baseline. Sandboxed reload writes require `IO.FileWrite`; compilation warns when
+it is absent. Storage is prepared before publication. An unexpected commit failure after
+publication is fatal, so the process never continues with acknowledged but undurable code.
+
 ## Not claimed
 
-- **Rollback.** A halted release is not undone. Rolling back is a new release of the
-  previous version, which only you can sign. An end-to-end tested rollback is planned.
-- **The first hot deploy onto a freshly built base**, when the actors' state changes: the
-  node does not yet know the old state layout, so it can run new handlers on old state
-  (`specs/todos/2026-10-18-hcr-first-deploy-no-schema-baseline.md`, P1, fix decided).
-- **Draining before reload.** A reload does not first wait for in-flight work to finish.
+- **Automatic rollback.** A halted release is not undone. Rolling back is a new signed
+  release of the previous behavior. State-layout changes require an explicit reverse
+  migration; rollback does not reverse external side effects.
+- **Unbounded retention of old code.** Running frames and escaping closures retain
+  their routing epochs. A nonreturning frame can prevent retirement and make a later
+  deploy wait for version capacity; it is never silently routed to an incompatible ABI.
+- **Unconditional lossless drain.** Epoch markers preserve normal pre-deploy work,
+  but configured soft/hard deadlines can discard incompatible messages or stop old work.
 - **Byte-identical release archives** across two independent builds of the same commit
   (the compiler's output is checked for determinism; the packaged toolchain is not).
 - **`--target linux/<arch>-musl`** cross-compilation to a static binary (not built yet).
@@ -71,7 +80,10 @@ spreading.
 - `cross-linux-oracle`: the golden corpus cross-compiled to linux/amd64 must give
   byte-identical output to the native build.
 - `two-node`: every two-process cluster scenario, with faults injected from outside,
-  including hot deploys and protocol changes, against per-node expected output.
+  including hot deploys and protocol changes, against per-node expected output. The
+  hot-deploy rollback scenario applies a faulty state-changing patch and a signed
+  reverse migration, checks uninterrupted work and increasing release counters, and
+  refuses rollback without the required reverse migration.
 - `sanitize-gate`: AddressSanitizer over the golden corpus and the two-node scenarios.
 
 **Planned, not built:**
@@ -83,5 +95,4 @@ spreading.
   containers) runs locally only. The plan is for its scenarios, including a mixed-version
   one (an old agent with a new leader, and the reverse), to run on every release candidate.
 - **Signed releases** (Sigstore), verified by `install.sh` and forge.
-- **A tested rollback** of a bad hot deploy.
 - **Test coverage on linux-aarch64.** CI builds that archive but runs no tests on it.

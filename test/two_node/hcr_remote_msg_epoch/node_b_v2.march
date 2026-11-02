@@ -2,8 +2,9 @@
 -- over node_b.march (see it for the design). node-b receives remote messages for its `Recv.Sink` actor
 -- through a ClusterNode route, and the patch CHANGES Sink's message type
 -- (`Note(Int)` becomes `Note(Int, Int)`) along with the route's decoder
--- (`Recv.deliver`). The route runs in the link's data-reader task, which was
--- spawned when the link formed, before the deploy. See scenario.sh.
+-- (`Recv.deliver`). A stable route forwards the wire delivery to Decoder;
+-- that actor selects its current epoch before interpreting the payload.
+-- See scenario.sh.
 mod RemoteEpochB do
   needs IO
   needs IO.Console
@@ -29,6 +30,17 @@ mod RemoteEpochB do
       on Note(v : Int, sender : Int) do
         println("node-b: version 2 sink got " ++ int_to_string(v) ++ " from a version-" ++ int_to_string(sender) ++ " sender")
         { n: state.n + 1 }
+      end
+    end
+
+    -- Route closures retain their creation epoch. Pass the stable wire
+    -- delivery through an actor turn before decoding its versioned payload.
+    actor Decoder do
+      state { decoded : Int }
+      init { decoded: 0 }
+      on Deliver(sink : Pid(SinkState), d : NodeSend.Delivery) do
+        let _ = deliver(sink, d)
+        { decoded: state.decoded + 1 }
       end
     end
 
@@ -60,8 +72,12 @@ mod RemoteEpochB do
       Err(e) -> panic(e)
       Ok(h) ->
         let sink = spawn(Recv.Sink)
+        let decoder = spawn(Recv.Decoder)
         let sp = pid_to_int(sink)
-        let _ = ClusterNode.route(h, sp, fn d -> Recv.deliver(sink, d))
+        let _ = ClusterNode.route(h, sp, fn d -> do
+          let _ = send(decoder, Recv.Deliver(sink, d))
+          Ok(())
+        end)
         match ClusterNode.register(h, "sink", sink) do
           Ok(_) -> ()
           Err(_) -> panic("node-b: could not register the sink")

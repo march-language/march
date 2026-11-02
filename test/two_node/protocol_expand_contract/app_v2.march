@@ -56,6 +56,31 @@ mod ProtocolSplit do
     end
   end
 
+  -- Publish whole session starts, not endpoint-typed bodies: the protocol
+  -- changes across builds, but this callback's wire/session ABI is stable.
+  pfn starts() : Vault(String -> (Int -> Bool) -> Result(Session.Outcome, SessionNode.RunError)) do
+    Vault.open("split_session_starts")
+  end
+
+  fn start_session(c : Cap(IO), h : Cap(ClusterNode.Live), sid : String, abandoned : Int -> Bool)
+      : Result(Session.Outcome, SessionNode.RunError) do
+    SessionNode.start_offered_role(c, h, "Order", Order_Msg.role_names(),
+      Order_Msg.role_Shop(), Order_Msg.peers_Shop(), sid, abandoned, fn _ -> (), fn s -> do
+        let _ = shop(s, Order_Shop.register(s, 0))
+        ()
+      end)
+  end
+
+  fn open_shop(h : Cap(ClusterNode.Live), fp : String) : Result(SessionNode.Offer, SessionNode.RunError) do
+    let callbacks = starts()
+    SessionNode.offer_work_role(h, "Order", fp, Order_Msg.role_names(), Order_Msg.compat_by_role(),
+      Order_Msg.role_Shop(), 64, fn (sid, abandoned) ->
+        match Vault.get(callbacks, fp) do
+          Some(start) -> start(sid, abandoned)
+          None -> panic("node-a: no session start for the offered fingerprint")
+        end)
+  end
+
   -- The Shop's access point, kept on the fingerprint the running code offers
   -- Shop under: `role_fingerprint`, which an expand build pins to the
   -- previous version for the chooser, so the expand re-offers nothing and the
@@ -63,11 +88,16 @@ mod ProtocolSplit do
   fn host_tick(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
     let v = offers()
     let fp = Order_Msg.role_fingerprint(Order_Msg.role_Shop())
+    -- This actor has crossed its marker. Each fresh closure enters that
+    -- epoch before allocating the session's Endpoint. A session already
+    -- running keeps its original closure; contract publishes under a new
+    -- fingerprint, leaving the expand callback available to the old offer.
+    Vault.set(starts(), fp, fn (sid, abandoned) -> start_session(c, h, sid, abandoned))
     match Vault.get(v, "cur") do
       Some(o) ->
         if o.fingerprint == fp do ()
         else
-          match Order_Run.offer_Shop(c, h, 64, fn (s, st) -> shop(s, st)) do
+          match open_shop(h, fp) do
             Ok(o2) ->
               Vault.set(v, "cur", o2)
               SessionNode.close_offer(o)
@@ -76,7 +106,7 @@ mod ProtocolSplit do
           end
         end
       None ->
-        match Order_Run.offer_Shop(c, h, 64, fn (s, st) -> shop(s, st)) do
+        match open_shop(h, fp) do
           Ok(o) -> Vault.set(v, "cur", o)
           Err(e) -> panic(SessionNode.run_error_message(e))
         end

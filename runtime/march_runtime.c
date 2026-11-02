@@ -611,13 +611,15 @@ int64_t march_live_allocs(void) {
  * every RC free-on-zero path.  Cell layout: native_ptr@16, dtor@24. */
 void march_decrc(void *p);
 /* Only the runtime's reserved cell kinds (all NEGATIVE tags: String, Resource,
- * Float, Task, ...) can need work here; every ADT, tuple, record and closure
- * cell has a tag >= 0.  The tag test is therefore inlined into the free paths
+ * Float, Task, epoch-pinned Closure, ...) can need work here; ordinary ADT,
+ * tuple, record and non-HCR closure cells have a tag >= 0.  The tag test is therefore inlined into the free paths
  * and the rest kept out of line, so a constructor cell's free carries no call
  * frame for a destructor it never runs. */
 __attribute__((noinline, cold))
 static void march_run_resource_dtor_slow(void *p, int32_t tag) {
-    if (tag == MARCH_RESOURCE_TAG) {
+    if (tag == MARCH_CLOSURE_TAG) {
+        march_epoch_unpin((uint32_t)((march_hdr *)p)->pad);
+    } else if (tag == MARCH_RESOURCE_TAG) {
         void (*dtor)(void *) = *(void (**)(void *))((char *)p + 24);
         void *native = *(void **)((char *)p + 16);
         if (dtor) dtor(native);
@@ -707,6 +709,39 @@ void *march_alloc(int64_t sz) {
     if (__builtin_expect((str_stats_state & gc_trace_state) != -1, 0))
         march_alloc_note(p, sz);
     return p;
+}
+
+/* Called once while a newly allocated closure is still private. The creator
+ * already has a frame pin in compiled hot-reload code; foreign creators without
+ * a frame retry current-epoch selection across a concurrent activation. */
+void march_clo_capture_epoch(void *clo) {
+    uint32_t epoch = march_sched_current_epoch();
+    if (!epoch) {
+        do { epoch = march_epoch_current(); } while (march_epoch_pin(epoch) != 0);
+    } else if (march_epoch_pin(epoch) != 0) {
+        fputs("march: closure captured a retired code epoch\n", stderr);
+        abort();
+    }
+    march_hdr *h = clo;
+    h->tag = MARCH_CLOSURE_TAG;
+    h->pad = (int32_t)epoch;
+}
+
+/* FBIP may recycle a unique closure cell for another object. */
+void march_clo_forget_epoch(void *clo) {
+    march_hdr *h = clo;
+    if (h->tag == MARCH_CLOSURE_TAG) {
+        march_epoch_unpin((uint32_t)h->pad);
+        h->tag = 0;
+        h->pad = 0;
+    }
+}
+
+/* Apply enters before it can release its environment, transferring lifetime
+ * protection to the call's frame. Runtime callbacks use the same prologue. */
+void march_clo_frame_enter(void *clo) {
+    march_hdr *h = clo;
+    march_frame_enter(h && h->tag == MARCH_CLOSURE_TAG ? (uint32_t)h->pad : 0);
 }
 
 /* ── Reference counting ──────────────────────────────────────────────── */
@@ -2503,6 +2538,7 @@ static void diag_dispatch(int kind, const char *msg, size_t msg_len,
     march_test_in_test = 0;
     jmp_buf **jslot = diag_jmp_slot();
     for (volatile int64_t k = 0; k < n; k++) {
+        void *frame_mark = march_frame_mark();
         jmp_buf jb;
         *jslot = &jb;
         if (setjmp(jb) == 0) {
@@ -2514,6 +2550,7 @@ static void diag_dispatch(int kind, const char *msg, size_t msg_len,
         }
         /* else: the observer panicked; what it held is abandoned, like a
          * crashed actor's frames. */
+        march_frame_unwind(frame_mark);
         *jslot = NULL;
     }
     march_test_in_test = saved_in_test;
@@ -2840,7 +2877,9 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
     march_test_fail_buf[0] = '\0';
     march_test_in_test = 1;
     march_panic_handled = 1;   /* a failing test is not a crash to report */
+    void *frame_mark = march_frame_mark();
     int jmp_rc = setjmp(march_test_jmp_buf);
+    march_frame_unwind(frame_mark);
     if (jmp_rc == 0) {
         fn();
         march_test_in_test = 0;
@@ -2946,6 +2985,7 @@ int32_t march_test_report(void) {
  * the apply panics we still decref the thunk via the cleanup path.
  */
 void *march_try_call(void *thunk) {
+    void *frame_mark = march_frame_mark();
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)thunk + 16);
 
@@ -2970,6 +3010,7 @@ void *march_try_call(void *thunk) {
     if (setjmp(march_test_jmp_buf) == 0) {
         ok_result = apply(thunk, 1);   /* 1 = dummy Bool argument */
     } else {
+        march_frame_unwind(frame_mark);
         panicked = 1;
     }
 
@@ -3023,6 +3064,9 @@ void *march_try_call(void *thunk) {
     return result;
 }
 
+/* Strong counterpart to dispatch-only harnesses' weak cleanup hook. */
+void march_frame_drop_closure(void *closure) { march_clo_release(closure); }
+
 /* ── __try_call_val (C: march_try_call_val) ─────────────────────────────── */
 /*
  * __try_call_val : (Bool -> a) -> Result(a, String)
@@ -3045,6 +3089,7 @@ void *march_try_call(void *thunk) {
  * RC contract, closure layout, and Result layout are identical to __try_call.
  */
 void *march_try_call_val(void *thunk) {
+    void *frame_mark = march_frame_mark();
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)thunk + 16);
 
@@ -3067,6 +3112,7 @@ void *march_try_call_val(void *thunk) {
     if (setjmp(march_test_jmp_buf) == 0) {
         ok_result = apply(thunk, 1);   /* 1 = dummy Bool argument */
     } else {
+        march_frame_unwind(frame_mark);
         panicked = 1;
     }
 
@@ -3131,6 +3177,7 @@ void *march_try_call_val(void *thunk) {
  * reference — same accepted trade-off as __try_call's panic path.
  */
 void *march_try_finally(void *action, void *cleanup) {
+    void *frame_mark = march_frame_mark();
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply_action  = *(apply_fn_t *)((char *)action + 16);
     apply_fn_t apply_cleanup = *(apply_fn_t *)((char *)cleanup + 16);
@@ -3150,6 +3197,7 @@ void *march_try_finally(void *action, void *cleanup) {
     if (setjmp(march_test_jmp_buf) == 0) {
         result = apply_action(action, 1);   /* 1 = dummy Bool argument */
     } else {
+        march_frame_unwind(frame_mark);
         panicked = 1;
     }
 
@@ -3167,6 +3215,7 @@ void *march_try_finally(void *action, void *cleanup) {
     if (setjmp(march_test_jmp_buf) == 0) {
         (void)apply_cleanup(cleanup, 1);
     }
+    march_frame_unwind(frame_mark);
     /* else: cleanup panicked — swallowed. */
 
     /* Restore the outer panic handler BEFORE re-raising, so the re-raise
@@ -3469,8 +3518,8 @@ typedef struct march_actor_meta {
      * base image, a patch's own epoch for code in a patch .so.  The spawn
      * site is inlined into its caller, so it is the caller's version that
      * picks the layout, while the proc's epoch comes from the spawner's proc
-     * -- and an unpinned spawner (the compiled main, running a closure the
-     * base built) gives the CURRENT epoch.  actor_green_thread runs the
+     * or active frame. A reused old body can still build an older layout
+     * under a newer caller's routing context.  actor_green_thread runs the
      * migrations between the two before the first message
      * (hcr_catch_up_init_state).  0 = not recorded. */
     uint32_t                    build_epoch;
@@ -4279,10 +4328,8 @@ static void spawn_main_impl(void (*fn)(void), int force_pin) {
        it: a program compiled --pin-main needs the main thread to run at all
        (Cocoa/GLFW), so honouring MARCH_PIN_MAIN=0 there would break it in a
        way the user cannot diagnose from the message they would not get. */
-    /* `main` is the one unit that follows the current code version instead
-     * of pinning an epoch (march_proc.code_epoch): it runs for the process
-     * lifetime and never reaches a marker, so a pinned main would keep its
-     * epoch alive for ever and no version it uses could ever be retired. */
+    /* The entry frame must retain its initial ABI routing, even if main
+     * never returns. Admission reports the retained epoch when it blocks. */
     march_sched_spawn_main(main_fn_green_thread, (void *)(uintptr_t)fn,
                            want_pin);
 }
@@ -5082,10 +5129,12 @@ void march_hcr_counters_get(march_hcr_counters *o) {
 /* A marker left the mailbox by some path other than being consumed as one
  * (its proc died with it queued): give back the pin it held.  Registered
  * with the scheduler as the marker dtor. */
+void march_hcr_prune_migration_pins(void);
 static void hcr_marker_dtor(void *msg, uint32_t epoch) {
     (void)msg;   /* markers carry no payload */
     march_epoch_unpin(epoch);
     atomic_fetch_sub_explicit(&g_hcr_markers_live, 1, memory_order_relaxed);
+    march_hcr_prune_migration_pins();
 }
 
 /* ── The activation log ───────────────────────────────────────────────────
@@ -5109,6 +5158,7 @@ typedef struct {
 
 typedef struct hcr_log_rec {
     uint32_t            epoch;
+    int                 routing_pin;
     int                 n;
     hcr_log_entry      *e;
     struct hcr_log_rec *next;
@@ -5117,11 +5167,29 @@ typedef struct hcr_log_rec {
 static hcr_log_rec    *g_hcr_log_head = NULL, *g_hcr_log_tail = NULL;
 static pthread_mutex_t g_hcr_log_mu = PTHREAD_MUTEX_INITIALIZER;
 
+/* A migration is executable code too: until all older work is gone it
+ * can still be invoked, including by an old spawn site. Retain its nested
+ * dependencies, not just the migration's own mapped image/ring version.
+ * Walk oldest first so retired migration-role pins do not keep later ones. */
+void march_hcr_prune_migration_pins(void) {
+    pthread_mutex_lock(&g_hcr_log_mu);
+    for (hcr_log_rec *r = g_hcr_log_head; r; r = r->next) {
+        if (r->routing_pin && !march_epoch_pinned_in(1, r->epoch)) {
+            r->routing_pin = 0;
+            march_epoch_unpin(r->epoch);
+        }
+    }
+    pthread_mutex_unlock(&g_hcr_log_mu);
+}
+
 static void hcr_log_append(uint32_t epoch, const march_hcr_unit *u, int n) {
     hcr_log_rec *r = (hcr_log_rec *)calloc(1, sizeof(*r));
     hcr_log_entry *e = (hcr_log_entry *)calloc((size_t)(n ? n : 1), sizeof(*e));
     if (!r || !e) { fputs("march: out of memory (hot-reload log)\n", stderr); exit(1); }
     for (int i = 0; i < n; i++) {
+        if ((u[i].state_changed && u[i].migrate_fn)
+                || (u[i].msgs_changed && u[i].migrate_msg_fn))
+            r->routing_pin = 1;
         e[i].slot           = u[i].slot;
         e[i].ring_idx       = u[i].ring_idx;
         e[i].migrate_fn     = u[i].migrate_fn;
@@ -5130,6 +5198,7 @@ static void hcr_log_append(uint32_t epoch, const march_hcr_unit *u, int n) {
         e[i].msgs_changed   = (uint8_t)(u[i].msgs_changed != 0);
     }
     r->epoch = epoch; r->n = n; r->e = e;
+    if (r->routing_pin && march_epoch_pin(epoch) != 0) abort();
     pthread_mutex_lock(&g_hcr_log_mu);
     if (g_hcr_log_tail) g_hcr_log_tail->next = r; else g_hcr_log_head = r;
     g_hcr_log_tail = r;
@@ -5359,11 +5428,9 @@ int64_t march_epoch_holds_i64(void) {
 /* D27: is the running proc's code epoch draining?  The stdlib-only builtin
  * epoch_draining(): SessionNode asks it in its Endpoint actor's turn, and the
  * Endpoint holds the epoch its session formed in (march_epoch_hold), so this
- * is the PARTY's epoch.  An unpinned proc (the compiled main, epoch 0) is
- * never draining. */
+ * is the PARTY's epoch. Runtime maintenance daemons remain unpinned. */
 int64_t march_epoch_draining(void) {
-    march_proc *p = march_sched_current();
-    uint32_t e = p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
+    uint32_t e = march_sched_current_epoch();
     return march_hcr_epoch_draining(e) ? 1 : 0;
 }
 
@@ -5376,15 +5443,15 @@ static void hcr_migrate_state(uint32_t slot, int64_t *a, uint32_t from, uint32_t
     int k = hcr_log_state_migrations(slot, from, to, &m);
     for (int i = 0; i < k; i++) {
         uint32_t v;
-        void *held = march_dispatch_enter_version(
+        void *held = march_dispatch_enter_version_frame(
             slot, (uint32_t)m[i].ring_idx, &v);
         if (held && march_dispatch_epoch(slot, (uint32_t)m[i].ring_idx)
                     == m[i].epoch) {
             /* a[4] is the state record (state indirection layout). */
             a[4] = (int64_t)(uintptr_t)m[i].state_fn((void *)(uintptr_t)a[4]);
-            march_dispatch_leave(slot, v);
+            march_dispatch_leave_unit(slot, v);
         } else {
-            if (held) march_dispatch_leave(slot, v);
+            if (held) march_dispatch_leave_unit(slot, v);
             fprintf(stderr, "[hcr] migrate: slot %u lost the epoch-%u "
                     "version before its migration ran\n", slot, m[i].epoch);
         }
@@ -5395,9 +5462,8 @@ static void hcr_migrate_state(uint32_t slot, int64_t *a, uint32_t from, uint32_t
 /* A new actor whose `init` state was built by code OLDER than the epoch its
  * proc runs at (march_actor_meta.build_epoch): bring the state up to the
  * proc's epoch before the first message, or the new handlers read the old
- * layout.  The case: the compiled main (unpinned, so its spawns take the
- * current epoch) running a closure the base image built, after a deploy that
- * changed the actor's state.  An older proc epoch than the build is the
+ * layout. An unchanged body reached under a newer caller's routing epoch
+ * can still embed the earlier init layout. An older proc epoch than the build is the
  * other way round and cannot happen: code of epoch E only runs in a unit at
  * E or later.  specs/progress/2026-09-21-hcr-spawn-site-state-layout.md */
 static void hcr_catch_up_init_state(march_actor_meta *meta, int64_t *a,
@@ -5429,10 +5495,17 @@ static void hcr_advance(march_actor_meta *meta, int64_t *a, march_proc *self,
             if (march_epoch_pin(target) == 0) break;
         }
     }
+    /* Transfer the marker/temporary target pin to an unwindable frame
+     * while migration runs. A panicking migrator must not leak that pin. */
+    march_frame_enter(target);
+    march_epoch_unpin(target);
     uint32_t slot = meta->dispatch_name_id;
     if (alive && slot) hcr_migrate_state(slot, a, cur, target);
+    if (march_epoch_pin(target) != 0) abort(); /* frame still holds it */
     atomic_store_explicit(&self->code_epoch, target, memory_order_release);
+    march_frame_leave();
     march_epoch_unpin(cur);
+    march_hcr_prune_migration_pins();
     if (meta->hcr_pending_epoch && meta->hcr_pending_epoch <= target) {
         march_epoch_unpin(meta->hcr_pending_epoch);
         meta->hcr_pending_epoch = 0;
@@ -5605,10 +5678,10 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
     if (changes == 0) return HCR_DISPATCH;
     if (changes == 1 && mm.msg_fn) {
         uint32_t v;
-        if (march_dispatch_enter_version(slot, (uint32_t)mm.ring_idx, &v)) {
+        if (march_dispatch_enter_version_frame(slot, (uint32_t)mm.ring_idx, &v)) {
             if (march_dispatch_epoch(slot, (uint32_t)mm.ring_idx) == mm.epoch) {
                 void *out = mm.msg_fn(*msgp, (void *)g_hcr_none_cell);
-                march_dispatch_leave(slot, v);
+                march_dispatch_leave_unit(slot, v);
                 if (out != (void *)g_hcr_none_cell) {
                     *msgp = out;
                     atomic_fetch_add_explicit(&g_hcr_converted, 1, memory_order_relaxed);
@@ -5620,7 +5693,7 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
                 hcr_report_drop(conn, seq, "old message format: migrate_msg returned None");
                 return HCR_CONSUMED;
             }
-            march_dispatch_leave(slot, v);
+            march_dispatch_leave_unit(slot, v);
         }
     }
     /* No migrate_msg (or two message-type changes in between, which one
@@ -5704,6 +5777,20 @@ static void *on_stop_lookup(void *dispatch_clo) {
     return cb;
 }
 
+static int hcr_on_stop_slot(uint32_t dispatch_slot, uint32_t *out) {
+    const char *name = march_dispatch_id_to_name(dispatch_slot);
+    if (!name) return 0;
+    size_t n = strlen(name);
+    if (n <= 9 || strcmp(name + n - 9, "_dispatch") != 0) return 0;
+    char *callback = malloc(n + 1);
+    if (!callback) abort();
+    memcpy(callback, name, n - 9);
+    strcpy(callback + n - 9, "_on_stop");
+    int found = march_dispatch_name_to_id(callback, out);
+    free(callback);
+    return found;
+}
+
 /* Run [actor]'s on_stop callback [clo] on its own green thread [self].
  *
  * A panic inside it is LOGGED and the death proceeds as if it had returned
@@ -5721,7 +5808,9 @@ static void *on_stop_lookup(void *dispatch_clo) {
 /* Returns 1 when the callback panicked: it had moved the state fields out of
  * the record and never wrote them back, so they are no longer the record's
  * to release (actor_green_thread's state drop is skipped). */
-static int actor_run_on_stop(march_proc *self, void *actor, void *clo) {
+static int actor_run_on_stop(march_proc *self, void *actor, void *clo,
+                             void (*bare)(void *)) {
+    void *frame_mark = march_frame_mark();
     volatile int panicked = 0;
     jmp_buf on_stop_jmp;
     jmp_buf *saved_crash = self->crash_jmp;
@@ -5730,10 +5819,11 @@ static int actor_run_on_stop(march_proc *self, void *actor, void *clo) {
         /* Same closure convention (and the same immortal static closure) as
          * the dispatch call in actor_green_thread: fn(closure, actor). */
         typedef void (*on_stop_fn_t)(void *, void *);
-        on_stop_fn_t fn = *(on_stop_fn_t *)((char *)clo + 16);
-        march_incrc(clo);
-        fn(clo, actor);
+        on_stop_fn_t fn = clo ? *(on_stop_fn_t *)((char *)clo + 16) : NULL;
+        if (bare) bare(actor);
+        else { march_incrc(clo); fn(clo, actor); }
     } else {
+        march_frame_unwind(frame_mark);
         panicked = 1;
         const char *m = self->crash_message ? self->crash_message : "panic";
         size_t mlen = self->crash_message ? self->crash_message_len
@@ -5780,14 +5870,9 @@ static void actor_green_thread(void *arg) {
     int has_supervisor = meta->sup_pe != NULL;
     pthread_mutex_unlock(&g_tbl_mu);
 
-    /* The hot-reload dispatch pin, hoisted above the setjmp so the crash
-     * branch can release a pin the longjmp jumped over — see that branch.
-     * `volatile` is load-bearing, not decoration: an automatic object
-     * modified between setjmp and longjmp has an INDETERMINATE value in the
-     * branch the longjmp lands in unless it is volatile (C17 7.13.2.1p3),
-     * and these are written on every message of a hot-reload actor. */
-    volatile uint32_t  pinned_version  = 0;
-    volatile int       dispatch_pinned = 0;
+    /* Every nested code frame is owned by the proc; a catcher restores this
+     * immutable watermark, including refs that nested calls never released. */
+    void *frame_mark = march_frame_mark();
 
     /* The stop trap, for every actor: a nested `receive()` told to stop
      * lands here (march_actor_recv) and the actor dies the normal way.  The
@@ -5798,15 +5883,13 @@ static void actor_green_thread(void *arg) {
     /* Set when the stop trap fires (the longjmp left a handler or on_stop
      * mid-flight) or when on_stop panicked: either way the state fields were
      * moved into that frame's locals, so they are not the record's to
-     * release at `stopped`.  volatile: see the pin. */
+     * release at `stopped`. Volatile because longjmp must preserve writes
+     * made after setjmp (C17 7.13.2.1p3). */
     volatile int stopped_in_handler = 0;
     if (self) self->stop_jmp = &stop_jmp;
     if (self && setjmp(stop_jmp) != 0) {
         stopped_in_handler = 1;
-        if (dispatch_pinned) {
-            march_dispatch_leave(meta->dispatch_name_id, pinned_version);
-            dispatch_pinned = 0;
-        }
+        march_frame_unwind(frame_mark);
         goto stopped;
     }
     if (has_supervisor && self) {
@@ -5855,10 +5938,7 @@ static void actor_green_thread(void *arg) {
          * unrelated malloc.  test/native/actor_crash_rc_restore.march pins
          * that a crash leaves the refcount untouched, so reintroducing a
          * clobber here fails a test instead of corrupting a heap. */
-        if (dispatch_pinned) {
-            march_dispatch_leave(meta->dispatch_name_id, pinned_version);
-            dispatch_pinned = 0;
-        }
+        march_frame_unwind(frame_mark);
 
         char *crash_message = self->crash_message;
         size_t crash_message_len = self->crash_message_len;
@@ -6059,15 +6139,10 @@ static void actor_green_thread(void *arg) {
              * Counter_dispatch(actor, msg) — NOT a closure wrapper.
              * Call it directly without a closure env arg. */
             typedef void (*dispatch_fn_t)(void *, void *);
-            /* march_dispatch_enter takes a plain uint32_t* out-param, so the
-             * pin's version lands in a non-volatile local first and is then
-             * published to the volatile copy the crash branch reads. */
             /* D33: this actor's own epoch selects the version, the same rule
              * every compiled boundary call uses. */
             void *fn_raw = march_dispatch_enter_unit(meta->dispatch_name_id,
                                                      &tbl_version);
-            pinned_version = tbl_version;
-            dispatch_pinned = 1;
             dispatch_fn_t dispatch_fn;
             memcpy(&dispatch_fn, &fn_raw, sizeof(dispatch_fn));
             dispatch_fn(actor, msg);
@@ -6117,8 +6192,7 @@ static void actor_green_thread(void *arg) {
         }
 
         if (meta->dispatch_name_id) {
-            march_dispatch_leave(meta->dispatch_name_id, tbl_version);
-            dispatch_pinned = 0;   /* pin released: nothing for the crash branch to do */
+            march_dispatch_leave_unit(meta->dispatch_name_id, tbl_version);
         }
 
         march_sched_tick();
@@ -6136,7 +6210,17 @@ static void actor_green_thread(void *arg) {
         if (deadline != MARCH_DRAIN_NOT_ARMED
                 && (deadline < 0 || march_now_ms() < deadline)) {
             void *cb = on_stop_lookup((void *)(uintptr_t)a[2]);
-            if (cb) {
+            void (*bare_stop)(void *) = NULL;
+            uint32_t stop_version = 0;
+            void *stop_pin = meta->dispatch_name_id
+                ? march_dispatch_enter_unit(meta->dispatch_name_id, &stop_version) : NULL;
+            if (stop_pin)
+                bare_stop = march_dispatch_on_stop(meta->dispatch_name_id, stop_version);
+            uint32_t callback_slot = 0, callback_version = 0;
+            void *callback_pin = hcr_on_stop_slot(meta->dispatch_name_id, &callback_slot)
+                ? march_dispatch_enter_unit(callback_slot, &callback_version) : NULL;
+            if (callback_pin) memcpy(&bare_stop, &callback_pin, sizeof(bare_stop));
+            if (cb || bare_stop) {
                 /* Consume the stop request that woke this loop. It is a
                  * sticky flag on the proc, so left set it would make the
                  * callback's first blocking receive — a `receive()`, or the
@@ -6149,9 +6233,11 @@ static void actor_green_thread(void *arg) {
                 atomic_store_explicit(&self->stop_requested, 0,
                                       memory_order_seq_cst);
                 if (actor_alive_load(actor)
-                        && actor_run_on_stop(self, actor, cb))
+                        && actor_run_on_stop(self, actor, cb, bare_stop))
                     stopped_in_handler = 1;
             }
+            if (callback_pin) march_dispatch_leave_unit(callback_slot, callback_version);
+            if (stop_pin) march_dispatch_leave_unit(meta->dispatch_name_id, stop_version);
         }
     }
 
@@ -8031,9 +8117,38 @@ void *march_hcr_test_send_stamped(void *actor, void *msg, uint32_t epoch) {
     return r;
 }
 
+/* Check registered C/legacy callbacks too. Compiled hot-reload programs
+ * register every type's bare callback at startup, before it can spawn. */
+static int hcr_slot_has_on_stop(uint32_t slot) {
+    if (march_dispatch_has_on_stop(slot)) return 1;
+    size_t n;
+    hcr_target *targets = hcr_snapshot(slot, &n);
+    int found = 0;
+    for (size_t i = 0; i < n; i++) {
+        void *actor = targets[i].meta->actor;
+        if (on_stop_lookup((void *)(uintptr_t)((int64_t *)actor)[2])) found = 1;
+        march_decrc(actor);
+        meta_put(targets[i].meta);
+    }
+    free(targets);
+    return found;
+}
+
 int march_hcr_activate(march_hcr_unit *u, int n, uint32_t requested_epoch,
                        int64_t soft_ms, int64_t hard_ms, march_hcr_wait *wait) {
     if (n <= 0) return MARCH_HCR_ERROR;
+    march_hcr_prune_migration_pins();
+    for (int i = 0; i < n; i++) {
+        if (!u[i].state_changed || !hcr_slot_has_on_stop(u[i].slot)) continue;
+        if (!u[i].on_stop_fn) return MARCH_HCR_ERROR;
+        uint32_t callback_slot;
+        if (hcr_on_stop_slot(u[i].slot, &callback_slot)) {
+            int covered = 0;
+            for (int j = 0; j < n; j++)
+                if (u[j].slot == callback_slot && u[j].fn) covered = 1;
+            if (!covered) return MARCH_HCR_ERROR;
+        }
+    }
     if (soft_ms < 0) soft_ms = hcr_env_ms("MARCH_HCR_DRAIN_MS", MARCH_HCR_DRAIN_MS_DEFAULT);
     if (hard_ms < 0) hard_ms = hcr_env_ms("MARCH_HCR_HARD_DRAIN_MS", 0);
 
@@ -8070,6 +8185,10 @@ int march_hcr_activate(march_hcr_unit *u, int n, uint32_t requested_epoch,
             march_epoch_unpin(epoch);   /* the reservation */
             return MARCH_HCR_ERROR;
         }
+        void (*stop_fn)(void *) = u[i].on_stop_fn;
+        if (!stop_fn && !u[i].state_changed)
+            stop_fn = march_dispatch_on_stop(u[i].slot, march_dispatch_current(u[i].slot));
+        march_dispatch_set_on_stop(u[i].slot, (uint32_t)u[i].ring_idx, stop_fn);
         if (u[i].handle)
             march_dispatch_set_handle(u[i].slot, (uint32_t)u[i].ring_idx, u[i].handle);
         /* The version's .so holds a migration an older actor still has to
@@ -8088,7 +8207,7 @@ int march_hcr_activate(march_hcr_unit *u, int n, uint32_t requested_epoch,
 
     /* 3. Commit (live, current).  Nothing pinned below [epoch] can select
      * these versions: every pinned unit resolves at or below its own epoch.
-     * Only unpinned units (main, proc-less threads) follow current. */
+     * Only runtime maintenance and proc-less entry points follow current. */
     for (int i = 0; i < n; i++)
         march_dispatch_commit(u[i].slot, (uint32_t)u[i].ring_idx);
 
@@ -8322,6 +8441,7 @@ int64_t march_tasks_cancelled(void) {
 }
 
 static void march_thunk_trampoline(void *arg) {
+    void *frame_mark = march_frame_mark();
     march_thunk_arg *wa = (march_thunk_arg *)arg;
     void *clo = wa->clo;
     int64_t *task = wa->task;
@@ -8348,6 +8468,7 @@ static void march_thunk_trampoline(void *arg) {
     if (setjmp(cancel_jmp) == 0) {
         result = apply(clo, (int64_t)0);
     } else {
+        march_frame_unwind(frame_mark);
         cancelled = 1;
     }
     if (self) self->task_jmp = NULL;
@@ -9237,7 +9358,7 @@ void march_register_actor_inspect(void *dispatch_clo, void *inspect_clo) {
                 g_inspect_fn[k] = inspect_clo;
                 /* The code version that ran this spawn glue: the spawning
                  * proc's epoch, or the current one when it is unpinned
-                 * (main, epoch 0, always runs current code). */
+                 * (runtime maintenance, epoch 0). */
                 march_proc *p = march_sched_current();
                 uint32_t e = p ? atomic_load_explicit(&p->code_epoch,
                                                       memory_order_relaxed) : 0;
@@ -9362,6 +9483,7 @@ static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
         inspect_reply(request, mk_err_cstr("the actor's code changed by a hot reload since its renderer was registered"));
         return;
     }
+    void *frame_mark = march_frame_mark();
     jmp_buf jb;
     jmp_buf *saved_crash = self->crash_jmp;
     self->crash_jmp = &jb;
@@ -9375,6 +9497,7 @@ static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
         self->inspect_out = NULL;
         result = s ? mk_ok(s) : mk_err_cstr("the renderer produced nothing");
     } else {
+        march_frame_unwind(frame_mark);
         /* The render panicked; the actor carries on.  The longjmp skips
          * every release in Name_inspect, so the actor record still owns its
          * fields (the loads moved nothing out of it that anything freed);

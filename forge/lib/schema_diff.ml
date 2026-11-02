@@ -19,38 +19,6 @@ type actor_schema = {
   migrate_msg_from: ctor list option;  (* the old type <actor>_migrate_msg takes *)
 }
 
-let find_sub (hay : string) (needle : string) : int option =
-  let hl = String.length hay and nl = String.length needle in
-  let rec go i = if i + nl > hl then None
-    else if String.sub hay i nl = needle then Some i else go (i + 1) in
-  go 0
-
-(** Parse a one-line constructor list as the compiler writes it:
-    [[{"name":"Add","params":["Int"]}, {"name":"Show","params":[]}]]. *)
-let parse_ctor_list (line : string) : ctor list =
-  let len = String.length line in
-  let rec go pos acc =
-    match String.index_from_opt line pos '{' with
-    | None -> List.rev acc
-    | Some b ->
-      let e = match String.index_from_opt line b '}' with Some e -> e | None -> len - 1 in
-      let chunk = String.sub line b (e - b + 1) in
-      let cname = match String.split_on_char '"' chunk with
-        | _ :: "name" :: _ :: n :: _ -> n | _ -> "" in
-      let params =
-        match find_sub chunk "\"params\":[" with
-        | None -> []
-        | Some i ->
-          let start = i + String.length "\"params\":[" in
-          let stop = match String.index_from_opt chunk start ']' with
-            | Some j -> j | None -> String.length chunk in
-          let inner = String.sub chunk start (stop - start) in
-          List.filteri (fun k _ -> k mod 2 = 1) (String.split_on_char '"' inner)
-      in
-      go (e + 1) (if cname = "" then acc else { cname; params } :: acc)
-  in
-  go 0 []
-
 (** The deploy changed the actor's message type (D30, plan 6.3): a handler
     of the running version was removed, or takes different parameters.
     Adding a handler is not a change: old messages stay readable. *)
@@ -70,112 +38,32 @@ type actor_diff = {
   changes: field_change list;
 }
 
-(** Parse a .schemas.json file.  Returns an association list from actor name to
-    schema.  Returns [] when the file does not exist (first deploy) or is
-    unreadable. *)
-let parse_schemas_file (path : string) : (string * actor_schema) list =
+(** Decode both compiler sidecars and compact server responses. Malformed metadata
+    is an error, never an empty baseline. *)
+let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
+  let open Yojson.Safe.Util in
+  let ctors value = value |> to_list |> List.map (fun c ->
+      { cname = c |> member "name" |> to_string;
+        params = c |> member "params" |> to_list |> List.map to_string }) in
+  let optional key decode j = match member key j with
+    | `Null -> None | value -> Some (decode value) in
+  json |> to_assoc |> List.map (fun (actor, j) ->
+      let compat = match member "compat" j with
+        | `Null -> "full" | v -> to_string v in
+      let state_fields = member "state_fields" j |> to_list |> List.map (fun f ->
+          { name = f |> member "name" |> to_string;
+            ty = f |> member "ty" |> to_string }) in
+      actor, { compat; state_fields;
+               invariant = optional "invariant" to_string j;
+               handlers = optional "handlers" ctors j;
+               migrate_msg_from = optional "migrate_msg_from" ctors j })
+
+let parse_schemas_file path =
   if not (Sys.file_exists path) then []
-  else begin
-    let ic = open_in path in
-    let content = In_channel.input_all ic in
-    close_in ic;
-    let schemas = ref [] in
-    let current_actor = ref "" in
-    let current_compat = ref "full" in
-    let current_invariant : string option ref = ref None in
-    let current_fields : field list ref = ref [] in
-    let current_handlers : ctor list option ref = ref None in
-    let current_mm_from : ctor list option ref = ref None in
-    let in_fields = ref false in
-    let starts_with p l = String.length l >= String.length p
-                          && String.sub l 0 (String.length p) = p in
-    List.iter (fun line ->
-        let line = String.trim line in
-        let llen = String.length line in
-        if llen = 0 then ()
-        else begin
-          (* Detect actor key: "ActorName": { — first char is '"', not in a fields array *)
-          if line.[0] = '"' && not !in_fields then begin
-            (match String.split_on_char '"' line with
-            | "" :: name :: _ when name <> "compat" && name <> "invariant"
-                                 && name <> "state_fields"
-                                 && name <> "handlers" && name <> "migrate_msg_from"
-                                 && name <> "name" && name <> "ty" ->
-              if !current_actor <> "" then
-                schemas := (!current_actor,
-                  { compat = !current_compat;
-                    invariant = !current_invariant;
-                    state_fields = List.rev !current_fields;
-                    handlers = !current_handlers;
-                    migrate_msg_from = !current_mm_from }) :: !schemas;
-              current_actor := name;
-              current_compat := "full";
-              current_invariant := None;
-              current_fields := [];
-              current_handlers := None;
-              current_mm_from := None
-            | _ -> ())
-          end;
-          (* Detect "compat": "value" *)
-          if llen > 10 && String.sub line 0 9 = "\"compat\":" then begin
-            (match String.split_on_char '"' line with
-            | _ :: "compat" :: _ :: v :: _ -> current_compat := v
-            | _ -> ())
-          end;
-          (* Detect "invariant": "value" — extract between the first '"'
-             after ':' and the last '"' on the line, so embedded characters
-             written by %S (e.g. escaped operators) don't break the parse. *)
-          if llen > 13 && String.sub line 0 12 = "\"invariant\":" then begin
-            (try
-              let after_colon = String.index line ':' + 1 in
-              let first_q = String.index_from line after_colon '"' + 1 in
-              let last_q  = String.rindex line '"' in
-              if first_q <= last_q then
-                current_invariant := Some (String.sub line first_q (last_q - first_q))
-            with Not_found -> ())
-          end;
-          if starts_with "\"handlers\":" line then
-            current_handlers := Some (parse_ctor_list line);
-          if starts_with "\"migrate_msg_from\":" line then
-            current_mm_from := Some (parse_ctor_list line);
-          (* Detect state_fields array start; also scan for inline field entries
-             on the same line (e.g. "state_fields": [{"name":"x","ty":"Y"}]) *)
-          if llen >= 15 && String.sub line 0 15 = "\"state_fields\":" then begin
-            in_fields := true;
-            (* Scan rest of line for any {…} field objects *)
-            let rec scan_for_entries pos =
-              match String.index_from_opt line pos '{' with
-              | None -> ()
-              | Some brace ->
-                (match String.split_on_char '"' (String.sub line brace (llen - brace)) with
-                 | _ :: "name" :: _ :: n :: _ :: "ty" :: _ :: t :: _ when n <> "" ->
-                   current_fields := { name = n; ty = t } :: !current_fields
-                 | _ -> ());
-                scan_for_entries (brace + 1)
-            in
-            scan_for_entries 0
-          end;
-          (* Detect field entry on its own line: {"name":"x","ty":"Int"} *)
-          if !in_fields && llen > 0 && line.[0] = '{' then begin
-            (match String.split_on_char '"' line with
-            | _ :: "name" :: _ :: n :: _ :: "ty" :: _ :: t :: _ when n <> "" ->
-              current_fields := { name = n; ty = t } :: !current_fields
-            | _ -> ())
-          end;
-          (* Detect end of fields array *)
-          if !in_fields && (line = "]" || (llen > 0 && line.[llen - 1] = ']')) then
-            in_fields := false
-        end
-      ) (String.split_on_char '\n' content);
-    if !current_actor <> "" then
-      schemas := (!current_actor,
-        { compat = !current_compat;
-          invariant = !current_invariant;
-          state_fields = List.rev !current_fields;
-          handlers = !current_handlers;
-          migrate_msg_from = !current_mm_from }) :: !schemas;
-    List.rev !schemas
-  end
+  else
+    try parse_schemas_json (Yojson.Safe.from_file path) with
+    | Yojson.Json_error m | Sys_error m -> failwith ("invalid schema file " ^ path ^ ": " ^ m)
+    | Yojson.Safe.Util.Type_error (m, _) -> failwith ("invalid schema file " ^ path ^ ": " ^ m)
 
 (** Diff old and new schemas for a single actor.  Returns the list of changes. *)
 let diff_actor (old_s : actor_schema) (new_s : actor_schema) : field_change list =

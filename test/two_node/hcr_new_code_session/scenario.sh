@@ -10,9 +10,10 @@
 #     scheduler instead of a second one ("no green thread running on this
 #     scheduler"), and node-a's new hosting code finds the offer the OLD
 #     code stored in a Vault instead of a second, empty vault registry;
-#   - a call dispatches whenever its callee is reloadable, so the entry
-#     module's `drive` loop and the Driver's task reach the new `session`
-#     and `version` rather than the baseline they used to be pinned to.
+#   - Driver and ShopHost advance at actor markers. Driver creates each
+#     new session task in its current epoch; ShopHost publishes a new typed
+#     Shop callback while sessions inside the old callback drain. The main
+#     drive loop and previously created closures keep their original epoch.
 # The protocol does not change between the versions (that is step 9's
 # protocol_evolve, which this scenario is the reduced form of): version 2
 # only reports a different version number and prints what it sees. Rollout

@@ -6215,7 +6215,20 @@ end
 
 let divsafety_shadowing_suite =
   let errors name src = Alcotest.(check bool) name true (has_divsafety_error src) in
-  [ Alcotest.test_case "a `let` rebinding the guarded name retires the guard (else side)"
+  [ Alcotest.test_case "`let d = d - 1` is not the equation `d = d - 1`" `Quick (fun () ->
+        (* Recorded as a `let` value, the right-hand side was reflected with
+           `d` meaning the NEW binding: `d = d - 1`, unsatisfiable, so z3 proved
+           `d != 0` vacuously and `f(1)` divided by zero.  Fail-closed without z3
+           too, so not gated. *)
+        errors "error" {|
+mod S0 do
+  cap no_panic
+  fn f(d : {v : Int | v > 0 && v < 100}) : Int do
+    let d = d - 1
+    10 / d
+  end
+end|})
+  ; Alcotest.test_case "a `let` rebinding the guarded name retires the guard (else side)"
       `Quick (fun () ->
         errors "error" {|
 mod S1 do
@@ -6313,6 +6326,148 @@ mod S8 do
     end
   end
 end|}))
+  ]
+
+(* ── Overflow safety: `cap no_panic` Int `+ - *` and negation ──────────────
+   Like the division checker, [Overflow_safety] is its own pass in
+   bin/main.ml, so these call it directly on the desugared module, with the
+   typechecker's span -> type table as the driver hands it in (that table is
+   what tells an Int `+` from a Float one).  Each accept case has a reject
+   control beside it: an accept-only witness cannot tell "proved" from "not
+   looking". *)
+let ovf_error_texts src =
+  let desugared = March_desugar.Desugar.desugar_module (parse src) in
+  let _tc_errors, type_map = March_typecheck.Typecheck.check_module desugared in
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Overflow_safety.check_module ~type_map ctx desugared;
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.code = March_errors.Errors.Code.int_overflow then
+        Some d.March_errors.Errors.message
+      else None)
+    ctx.March_errors.Errors.diagnostics
+
+let ovf_suite =
+  let m body = Printf.sprintf "mod O do\n  cap no_panic\n%s\nend" body in
+  let rejects name body =
+    Alcotest.(check bool) name true (ovf_error_texts (m body) <> [])
+  in
+  let accepts name body =
+    Alcotest.(check (list string)) name [] (ovf_error_texts (m body))
+  in
+  [ gated "an unbounded `x + 1` is reported, with a witness" (fun () ->
+        match ovf_error_texts (m "  fn f(x : Int) : Int do x + 1 end") with
+        | [ msg ] ->
+          let has s =
+            let n = String.length s and h = String.length msg in
+            let rec go i = i + n <= h && (String.sub msg i n = s || go (i + 1)) in
+            go 0
+          in
+          Alcotest.(check bool) "names the operator" true (has "addition");
+          Alcotest.(check bool) "names the witness" true (has "x = 4611686018427387903");
+          Alcotest.(check bool) "names the wrapping form" true (has "int_wrapping_add")
+        | msgs -> Alcotest.failf "expected one error, got %d" (List.length msgs))
+  ; gated "a refinement bounds the operand" (fun () ->
+        accepts "accept" "  fn f(x : {v : Int | v < 100}) : Int do x + 1 end";
+        rejects "control: the bound on the wrong side"
+          "  fn f(x : {v : Int | v > 100}) : Int do x + 1 end")
+  ; gated "a guard against another Int bounds the operand" (fun () ->
+        accepts "accept" "  fn f(x : Int, n : Int) : Int do if x < n do x + 1 else x end end";
+        rejects "control: else side"
+          "  fn f(x : Int, n : Int) : Int do if x < n do x else x + 1 end end")
+  ; gated "every Int value is in range, so `x - 1` under `x >= 0` is safe" (fun () ->
+        accepts "accept" "  fn f(x : Int) : Int do if x >= 0 do x - 1 else 0 end end";
+        rejects "control" "  fn f(x : Int) : Int do if x <= 0 do x - 1 else 0 end end")
+  ; gated "negation" (fun () ->
+        accepts "accept" "  fn f(x : Int) : Int do if x > 0 do -x else 0 end end";
+        rejects "control: -(-2^62)" "  fn f(x : Int) : Int do if x < 0 do -x else 0 end end")
+  ; gated "multiplication" (fun () ->
+        accepts "accept" "  fn f(x : {v : Int | v >= 0 && v < 1000}) : Int do x * x end";
+        rejects "control" "  fn f(x : {v : Int | v >= 0}) : Int do x * x end")
+  ; Alcotest.test_case "Float arithmetic is not a site" `Quick (fun () ->
+        accepts "accept" "  fn f(x : Float) : Float do x + 1.0 end")
+  ; Alcotest.test_case "the wrapping builtins are not sites" `Quick (fun () ->
+        accepts "accept" "  fn f(x : Int) : Int do int_wrapping_add(x, 1) end")
+  ; Alcotest.test_case "literal-only operands settle without a solver" `Quick (fun () ->
+        accepts "accept" "  fn f() : Int do 0 - 1 end";
+        rejects "control" "  fn f() : Int do 4611686018427387903 + 1 end")
+  ; gated "a `let` value is used, transitively" (fun () ->
+        accepts "accept" {|  fn f(x : {v : Int | v >= 0 && v < 10}) : Int do
+    let y = x + 1
+    let z = y * 2
+    z + 1
+  end|})
+  ; gated "a `let` whose right-hand side names a rebound variable is not used"
+      (fun () ->
+        (* Read as an equation, `a = x` would be `a = 0` after the rebinding
+           and prove `a + 1`; `a` is the PARAMETER's value, which is unbounded. *)
+        rejects "error" {|  fn f(x : Int) : Int do
+    let a = x
+    let x = 0
+    a + 1
+  end|})
+  ; gated "a `let` whose right-hand side names its own binder is not an equation"
+      (fun () ->
+        (* `x = x - 1` has no integer solution; used as an equation it made every
+           goal under it vacuously true.  The new `x` reaches 98, and
+           98 * 10^17 is past 2^62, so this one really can overflow. *)
+        rejects "error" {|  fn f(x : {v : Int | v > 0 && v < 100}) : Int do
+    let x = x - 1
+    x * 100000000000000000
+  end|})
+  ; gated "a rebinding retires the guard" (fun () ->
+        rejects "error" {|  fn f(x : Int, y : Int) : Int do
+    if x < 10 do
+      let x = y
+      x + 1
+    else 0 end
+  end|})
+  ; gated "a guard's arithmetic is not assumed to have run (short circuit)" (fun () ->
+        (* On the else side `b > 0` may have been false, so `x + 1 > 2` never
+           ran and says nothing about whether `x + 1` is in range. *)
+        rejects "error"
+          "  fn f(b : Int, x : Int) : Int do if b > 0 && x + 1 > 2 do 0 else x + 1 end end")
+  ; gated "a Float guard is not read as an Int fact" (fun () ->
+        (* `0.0 < a && a < 1.0` has no integer solution; read over the integers
+           it would make every goal under it vacuously true. *)
+        rejects "error" {|  fn f(a : Float, x : Int) : Int do
+    if a > 0.0 && a < 1.0 do x + 1 else 0 end
+  end|})
+  ; gated "division and remainder by a positive literal are modelled" (fun () ->
+        accepts "`v / 64` is far inside the range" "  fn f(v : Int) : Int do 192 + v / 64 end";
+        accepts "`v % 64` is in [0, 64) for v >= 0"
+          "  fn f(v : {v : Int | v >= 0 && v < 4611686018427387800}) : Int do v + v % 64 end";
+        (* A negative dividend gives a negative remainder (truncation), so near
+           -2^62 the sum leaves the range: read as SMT's Euclidean `mod` (always
+           non-negative) this would wrongly prove. *)
+        rejects "control: truncated `%` of a negative dividend is negative"
+          "  fn f(v : {v : Int | v < 4611686018427387800}) : Int do v + v % 64 end";
+        rejects "control: `v * 64` is not"
+          "  fn f(v : Int) : Int do 192 + v * 64 end")
+  ; gated "a byte from string_byte_at is in -1..255" (fun () ->
+        accepts "accept" {|  fn f(s : String, i : Int) : Int do
+    let c = string_byte_at(s, i)
+    c + 1
+  end|})
+  ; gated "each site leaves an Overflow obligation" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore (ovf_error_texts (m {|  fn f(x : {v : Int | v < 100}, y : Int) : Int do
+    (x + 1) + y
+  end|}));
+        let os = March_refinecheck.Obligation.all () in
+        let count v =
+          List.length
+            (List.filter
+               (fun (o : March_refinecheck.Obligation.t) ->
+                 o.March_refinecheck.Obligation.kind = March_refinecheck.Obligation.Overflow
+                 && o.March_refinecheck.Obligation.verdict = v)
+               os)
+        in
+        Alcotest.(check int) "proved" 1 (count March_refinecheck.Obligation.Proved);
+        Alcotest.(check int) "violated" 1 (count March_refinecheck.Obligation.Violated);
+        Alcotest.(check string) "by-kind line"
+          "  by kind: 0 precondition, 0 postcondition, 0 division, 2 overflow"
+          (March_refinecheck.Obligation.by_kind_line os))
   ]
 
 (* ── Decl-walk coverage ────────────────────────────────────────────────────
@@ -28675,6 +28830,7 @@ let () =
       ("tier2-ledger-agrees", tier2_ledger_agrees_suite);
       ("divsafety-boolean-guard", divsafety_boolean_guard_suite);
       ("divsafety-shadowing", divsafety_shadowing_suite);
+      ("overflow-safety", ovf_suite);
       ("walk-coverage", walk_coverage_suite);
       ("compose", compose_suite);
       ("compose-adt", compose_adt_suite);

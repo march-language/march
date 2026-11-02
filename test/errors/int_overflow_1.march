@@ -1,0 +1,7 @@
+mod Counter do
+  cap no_panic
+
+  fn next(n : Int) : Int do
+    n + 1
+  end
+end

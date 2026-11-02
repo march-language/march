@@ -5,8 +5,13 @@
 # registers its fingerprint beside its endpoint, and a peer with a different
 # one (s1), or none at all (s2: a node built before the check), is refused
 # before the session forms. See node_a.march.
+export CLUSTER_FP_PEER_DONE="$work/peer-done"
 start_node a
 wait_line a "node-a: up"
 start_node b
-wait_exit a
+# A local setup error only queues the peer's refusal. Wait for B to receive
+# and report it before allowing A to close the link; otherwise disconnect
+# can win the race and replace the intended fingerprint diagnostic.
 wait_exit b
+touch "$CLUSTER_FP_PEER_DONE"
+wait_exit a

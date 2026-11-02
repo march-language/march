@@ -394,7 +394,51 @@ let test_cold_and_warm_home_emit_same_ir () =
        let warm = compile () in
        Alcotest.(check bool) "cold and warm HOME emit byte-identical IR" true (cold = warm))
 
+let test_captured_environment_changes_entry_abi ~hosted () =
+  let dir = Filename.temp_dir "topology_work_abi_" "" in
+  Fun.protect ~finally:(fun () -> ignore (Sys.command ("rm -rf " ^ Filename.quote dir)))
+    (fun () ->
+      let source = if hosted then entry_src ~back:(hook ^ actor) () else ok_src in
+      let digest_text = if hosted then digest ~body:"null" ~actor:{|"App.Back.Ledger"|} ()
+        else digest () in
+      let signature label src =
+        let output = Filename.concat dir (label ^ ".so") in
+        expect_ok (run ~mode:"--compile"
+          ~flags:("--compile-so --hot-reload App -o " ^ Filename.quote output)
+          ~src ~digest_text ());
+        let lines = String.split_on_char '\n' (read (output ^ ".hcr_manifest")) in
+        let entries = List.filter (String.starts_with ~prefix:"__topology_entry_") lines in
+        Alcotest.(check bool) "compiled adapter metadata exists" true (entries <> []);
+        List.map (fun line ->
+          match String.split_on_char ' ' line with
+          | name :: _impl :: abi :: fields ->
+            let field prefix = List.find_map (fun f ->
+                if String.starts_with ~prefix f then
+                  Some (String.sub f (String.length prefix) (String.length f - String.length prefix))
+                else None) fields |> Option.get in
+            Alcotest.(check string) "manifest reconstructs published entry ABI" abi
+              (March_cas.Hash.hcr_sig_hash ~sig_hash:(field "tsig=") ~modes:(field "modes="));
+            name, abi
+          | _ -> Alcotest.fail "malformed generated entry manifest") entries in
+      let baseline = signature "base" source in
+      let changed = source
+        |> Str.global_replace (Str.regexp_string "type Env = { factor : Int }")
+             "type Env = { factor : Int, label : String }"
+        |> Str.global_replace (Str.regexp_string "{ factor: 10 }")
+             "{ factor: 10, label: \"new\" }" in
+      let updated = signature "changed" changed in
+      let captured_entries = if hosted then
+          List.filter (fun (name, _) -> String.ends_with ~suffix:"_spawn" name) baseline
+        else baseline in
+      Alcotest.(check bool) "captured environment has guarded entry" true (captured_entries <> []);
+      List.iter (fun (name, abi) ->
+        Alcotest.(check bool) (name ^ " rejects changed captured Env") false
+          (abi = List.assoc name updated)) captured_entries)
+
 let tests = [
+  Alcotest.test_case "captured environment changes generated work-entry ABI" `Slow (test_captured_environment_changes_entry_abi ~hosted:false);
+  Alcotest.test_case "hosted captured environment changes generated spawn ABI" `Slow
+    (test_captured_environment_changes_entry_abi ~hosted:true);
   Alcotest.test_case "a function role: main is generated and typechecks" `Quick test_function_role_generates_main;
   Alcotest.test_case "an actor role: main is generated and typechecks" `Quick test_actor_role_generates_main;
   Alcotest.test_case "--emit-core-ast reports derived caps and initiates" `Quick test_derived_caps_and_initiates;

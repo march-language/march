@@ -12,11 +12,10 @@ let test_linux_identities () =
     "linux/amd64" amd64.canonical_target;
   Alcotest.(check string) "arm64 canonical target"
     "linux/arm64" arm64.canonical_target;
-  (* v4: a slot's sig_hash folds in its parameters' borrow modes; a v3
-     process must refuse this compiler's patches (forge's HCR_INFO
-     preflight and the runtime's check after dlopen). *)
+  (* v5: frame/closure routing calls and closure epoch tags need the new
+     runtime; preflight must refuse loading them into earlier processes. *)
   Alcotest.(check string) "ABI id"
-    "march-hcr-v4;triple=aarch64-unknown-linux-gnu;ptr=8"
+    "march-hcr-v5;triple=aarch64-unknown-linux-gnu;ptr=8"
     (March_tir.Hcr_abi.abi_id arm64)
 
 let test_unsupported_target () =
