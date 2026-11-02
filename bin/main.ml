@@ -1636,12 +1636,14 @@ let hr_abi_sigs ~(tir : March_tir.Tir.tir_module) ~(borrow_map : March_tir.Borro
             if March_tir.Hot_reload.is_work_entry name then
               work_type_sigs := (name, s) :: !work_type_sigs;
             let modes = March_cas.Hash.modes_string borrow_map name in
-            (* A reflected function's slot hash also covers its D17 logic
-               hash (reflection §7.2, I9): a patch to its body is a slot
-               change forge refuses (Cmd_deploy_hot.logic_changes). *)
+            (* A reflected function whose body a proof of this build
+               unfolded also covers its D17 logic hash in its slot hash
+               (reflection §7.2, I9): a patch to that body is a slot change
+               forge refuses (Cmd_deploy_hot.logic_changes).  One no proof
+               used keeps the plain hash and may be hot-patched. *)
             let logic =
               Option.value ~default:"-"
-                (March_refinecheck.Reflect_state.logic_hash_of_name name) in
+                (March_refinecheck.Reflect_state.used_logic_hash_of_name name) in
             Hashtbl.replace t name (March_cas.Hash.hcr_slot_sig_hash ~sig_hash:s ~modes ~logic, modes)) s
         end)
       type_sigs;
@@ -4996,12 +4998,12 @@ let compile filename =
                  match Hashtbl.find_opt hr_abi name, Hashtbl.find_opt remote_sig_hashes name with
                  | Some (h, modes), Some tsig ->
                    (* `logic=` (reflection §7.2, I9): the function's D17
-                      logic hash, present only for a reflected function;
-                      sig_hash already folds it in
-                      (March_cas.Hash.hcr_slot_sig_hash), and forge reads
-                      it to name a refused body change. *)
+                      logic hash, present only for a reflected function a
+                      proof of this build unfolded; sig_hash already folds
+                      it in (March_cas.Hash.hcr_slot_sig_hash), and forge
+                      reads it to name a refused body change. *)
                    let logic =
-                     match March_refinecheck.Reflect_state.logic_hash_of_name name with
+                     match March_refinecheck.Reflect_state.used_logic_hash_of_name name with
                      | Some l -> " logic=" ^ l
                      | None -> "" in
                    (h, Printf.sprintf " tsig=%s modes=%s%s" tsig modes logic)

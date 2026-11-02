@@ -512,8 +512,10 @@ git log is authoritative for exact commits.
 
 ### Changed
 
-- **Hot reload refuses a patch that changes a reflected function's body**: callers'
-  proofs may have used it. Redeploy with a restart, or mark the function `@[opaque]`.
+- **Hot reload refuses a patch that changes a reflected function's body when a proof used
+  it**: a caller's precondition was discharged by unfolding that body. Redeploy with a
+  restart, or mark the function `@[opaque]`. A reflected function no proof unfolded can
+  still be hot-patched.
 
 - **`@[measure]` now insists on reflection, and follows calls.** A `@[measure]` that is not
   reflected is the error `invalid_measure`, naming the first reason, including through a

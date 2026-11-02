@@ -207,6 +207,41 @@ let logic_hash_of_name (tir_name : string) : string option =
       if poly then of_entries (Option.value ~default:[] (Hashtbl.find_opt logic_by_name base)) else None)
     | _ -> None)
 
+(** The logic hash that enters a function's hot-reload slot hash (§7.2, I9,
+    narrowed): [logic_hash_of_name] restricted to the reflected definitions
+    some stage-2 query of this build unfolded ([check_frontier], the frontier,
+    so the safe superset of the unsat cores).  A reflected function no proof
+    used carries no logic hash in its slot, so a hot patch may change its body:
+    the patch build re-checks the whole program, and no running proof rests on
+    the old body.  [None] when no proof used it. *)
+let used_logic_hash_of_name (tir_name : string) : string option =
+  let used (name, file) =
+    Hashtbl.fold
+      (fun sym () acc ->
+        acc
+        || (match base_of sym with
+            | Some b -> Hashtbl.find_opt sym_origin b = Some (name, file)
+            | None -> false))
+      check_frontier false
+  in
+  let of_name name =
+    match Hashtbl.find_opt logic_by_name name with
+    | None -> None
+    | Some es -> (
+      match List.filter (fun (file, _) -> used (name, file)) es with
+      | [] -> None
+      | [ (_, h) ] -> Some h
+      | es -> Some (March_cas.Blake3.hash_string (String.concat "\000" (List.map snd es))))
+  in
+  match Hashtbl.find_opt logic_by_name tir_name with
+  | Some _ -> of_name tir_name
+  | None -> (
+    (* A specialisation [f$T] of a polymorphic reflected [f]: [f]'s entries,
+       exactly when [logic_hash_of_name] gives it [f]'s hash. *)
+    match String.index_opt tir_name '$' with
+    | Some i when i > 0 && logic_hash_of_name tir_name <> None -> of_name (String.sub tir_name 0 i)
+    | _ -> None)
+
 let reset () =
   active := false;
   Hashtbl.reset instance_base;

@@ -1330,10 +1330,14 @@ Nothing stale survives such an edit:
 - `march --emit-llvm --dump-impl-hashes` writes a fourth column, the logic
   hash, or `-` for a function that is not reflected.
 - **Hot code reload refuses a patch that changes a reflected function's
-  body**, even when its type is unchanged:
+  body when a proof used that body**, even when its type is unchanged:
   `the body of f is part of its callers' proofs; redeploy, or mark it @[opaque]`.
-  Deploy such a change with a restart. A function whose body you want to
-  hot-patch should be `@[opaque]`; its body then keys no caller's proof.
+  "Used" means some proof of the build unfolded the body to discharge a
+  caller's refinement. A reflected function no proof unfolded can be
+  hot-patched like any other function. Deploy a refused change with a
+  restart, or mark the function `@[opaque]` so its body keys no caller's proof.
+  Without the running build's manifest, forge cannot tell a dropped
+  proof-used body from a type change, and warns instead of refusing.
 - In the editor, with `MARCH_LSP_REFINE=1`, the language server shows
   refinement diagnostics for saved files. Saving `util.march` re-checks every
   open file whose proofs used a definition from it that changed, or that calls

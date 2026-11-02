@@ -1213,17 +1213,20 @@ let mode_change_refusal (changes : (string * string list) list) : string =
    restart; a function whose body should be patchable is marked `@[opaque]`
    (its body then keys no caller's proof, and it has no logic hash).
 
+   Which functions carry a logic hash: only a reflected function whose body
+   a proof of that build unfolded (Reflect_state.used_logic_hash_of_name);
+   one no proof used keeps the plain slot hash and may be hot-patched.
+
    Which slot-hash changes are logic changes: with the running build's
    manifest ([prior]) the two `logic=` fields are compared.  Without it, a
    function whose slot hash differs for a reason other than its borrow modes
-   counts as one when it is reflected in the patch, or when the running hash
-   is not the plain [hcr_sig_hash] of the patch's type and modes: an
-   unreflected slot publishes exactly that hash, so a different one means
-   the running version WAS reflected (now `@[opaque]`, effectful, or
-   unreflectable through a callee) -- or its type changed, which cannot be
-   told apart without the manifest (the conservative side; review round 1
-   of phase 1b, which found the "was reflected, is not now" shape reaching
-   the coordinated-upgrade gate). *)
+   counts as one when the patch's own build used its body.  A running slot
+   hash that is not the plain [hcr_sig_hash] of the patch's type and modes
+   means the running version used its body in a proof OR its type changed
+   (a coordinated upgrade): the two cannot be told apart without the
+   manifest, so [logic_unknowns] warns instead of refusing (refusing broke
+   coordinated type changes; the patch build re-checks every caller against
+   the new code). *)
 
 (** The functions of [to_activate] whose reflected logic changed against the
     running version, each with the change in words. *)
@@ -1242,25 +1245,40 @@ let logic_changes ~(prior : manifest option) ~(slot_of : string -> slot option)
                        && slot.slot_sig_hash <> fm.fn_sig_hash
                        && running_modes ~slot_sig:slot.slot_sig_hash fm = None ->
         let now = norm fm.fn_logic in
-        let plain_running () =
-          fm.fn_type_sig <> ""
-          && slot.slot_sig_hash = March_cas.Hash.hcr_sig_hash ~sig_hash:fm.fn_type_sig ~modes:fm.fn_modes
-        in
         (match prior_logic fm.fn_name with
          | Some before when before <> now ->
            Some (fm.fn_name, Printf.sprintf "the body of `%s` is part of its callers' proofs" fm.fn_name)
          | Some _ -> None
          | None when now <> "-" ->
            Some (fm.fn_name, Printf.sprintf "the body of `%s` is part of its callers' proofs" fm.fn_name)
-         | None when not (plain_running ()) ->
-           Some (fm.fn_name,
-                 Printf.sprintf
-                   "the running `%s` was reflected (its slot hash is not the plain hash of its type and \
-                    modes; with no running manifest a type change reads the same), and its body is part \
-                    of its callers' proofs" fm.fn_name)
          | None -> None)
       | _ -> None)
     to_activate
+
+(** The functions of [to_activate] whose running version may have had a
+    proof-used reflected body that the patch no longer has: no running
+    manifest, a slot hash that differs for a reason other than the borrow
+    modes, no logic hash in the patch, and a running hash that is not the
+    plain one of the patch's type and modes.  A type change reads the same,
+    so this is a warning, not a refusal (see the comment above
+    [logic_changes]). *)
+let logic_unknowns ~(prior : manifest option) ~(slot_of : string -> slot option)
+    ~(to_activate : fn_manifest list) : string list =
+  match prior with
+  | Some _ -> []
+  | None ->
+    List.filter_map (fun fm ->
+        match slot_of fm.fn_name with
+        | Some slot when slot.slot_sig_hash <> "" && fm.fn_sig_hash <> ""
+                         && slot.slot_sig_hash <> fm.fn_sig_hash
+                         && running_modes ~slot_sig:slot.slot_sig_hash fm = None
+                         && (fm.fn_logic = "" || fm.fn_logic = "-")
+                         && not (fm.fn_type_sig <> ""
+                                 && slot.slot_sig_hash
+                                    = March_cas.Hash.hcr_sig_hash ~sig_hash:fm.fn_type_sig ~modes:fm.fn_modes) ->
+          Some fm.fn_name
+        | _ -> None)
+      to_activate
 
 (** The refusal for [logic_changes]' non-empty answer, in words. *)
 let logic_change_refusal (changes : (string * string) list) : string =
@@ -1713,6 +1731,13 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
             if old_manifest_path <> "" && Sys.file_exists old_manifest_path then
               Result.to_option (parse_manifest old_manifest_path)
             else None in
+          (match logic_unknowns ~prior ~slot_of:(Hashtbl.find_opt slot_map) ~to_activate with
+           | [] -> ()
+           | names ->
+             Printf.eprintf
+               "warning: no manifest of the running build: cannot tell whether %s changed its type or \
+                dropped a body its callers' proofs used; the patch's own proofs were re-checked\n%!"
+               (String.concat ", " (List.map (Printf.sprintf "`%s`") names)));
           logic_changes ~prior ~slot_of:(Hashtbl.find_opt slot_map) ~to_activate in
         if logic <> [] then begin
           Printf.eprintf "error: %s\n" (logic_change_refusal logic);

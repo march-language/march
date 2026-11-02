@@ -282,30 +282,40 @@ let hcr_manifest_line src fn =
 
 let field p fs = List.find_map (fun f -> if String.starts_with ~prefix:p f then Some (String.sub f (String.length p) (String.length f - String.length p)) else None) fs
 
-let hcr_src ~opaque k =
+let hcr_src ?(used = true) ~opaque k =
+  (* [used]: a caller's precondition needs [inc]'s body, so a stage-2 query
+     unfolds it and the slot hash carries its logic hash.  Unused, no proof
+     depends on the body and a hot patch may change it. *)
   Printf.sprintf
     {|mod Main do
   needs IO.Console
   %sfn inc(n : Int) : Int do n + %d end
+  fn need_big(n : {Int | _ > 1}) : Int do n end
   fn main(_c : Cap(IO.Console)) do
-    println("${inc(1)}")
+    println("${%s}")
   end
 end
 |}
     (if opaque then "@[opaque]\n  " else "") k
+    (if used then "need_big(inc(1))" else "inc(1)")
 
 let hcr =
-  [ Alcotest.test_case "sound_hcr: a body edit to a reflected function changes its slot hash; to an @[opaque] one, not" `Slow
+  [ Alcotest.test_case "sound_hcr: a body edit to a reflected function a proof used changes its slot hash; to an unused or @[opaque] one, not" `Slow
       (fun () ->
-        let v ~opaque k = hcr_manifest_line (hcr_src ~opaque k) "inc" in
+        let v ?used ~opaque k = hcr_manifest_line (hcr_src ?used ~opaque k) "inc" in
         let sig_of fs = List.nth fs 2 in
         let r1 = v ~opaque:false 1 and r2 = v ~opaque:false 2 in
         Alcotest.(check (option string)) "same type signature" (field "tsig=" r1) (field "tsig=" r2);
         (match field "logic=" r1, field "logic=" r2 with
          | Some a, Some b -> if a = b then Alcotest.fail "the logic hash must change with the body"
-         | _ -> Alcotest.failf "a reflected function's line carries logic=: %s" (String.concat " " r1));
+         | _ -> Alcotest.failf "a proof-used reflected function's line carries logic=: %s" (String.concat " " r1));
         if sig_of r1 = sig_of r2 then
-          Alcotest.fail "a reflected body edit must change the slot sig_hash (forge then refuses it)";
+          Alcotest.fail "a proof-used reflected body edit must change the slot sig_hash (forge then refuses it)";
+        let u1 = v ~used:false ~opaque:false 1 and u2 = v ~used:false ~opaque:false 2 in
+        if field "logic=" u1 <> None then
+          Alcotest.failf "a reflected function no proof used has no logic=: %s" (String.concat " " u1);
+        Alcotest.(check string) "an unused reflected body edit keeps the slot sig_hash" (sig_of u1) (sig_of u2);
+        if List.nth u1 1 = List.nth u2 1 then Alcotest.fail "the unused edit did change the impl_hash";
         let o1 = v ~opaque:true 1 and o2 = v ~opaque:true 2 in
         if field "logic=" o1 <> None then Alcotest.failf "an @[opaque] function has no logic=: %s" (String.concat " " o1);
         Alcotest.(check string) "an @[opaque] body edit keeps the slot sig_hash" (sig_of o1) (sig_of o2);

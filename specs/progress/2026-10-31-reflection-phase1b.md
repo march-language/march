@@ -186,6 +186,32 @@ suites green; `lsp incremental jsonrpc` green (lsp 402, `refine-diagnostics` 7);
 2,069 green (`reflect-parity` 6); forge `test_reconcile` 23, `test_build_check` "forge test" 6,
 `test_deploy_plan` 35, `test_hcr_manifest_diff` 3 green.
 
+## CI round 1 (PR #1050): refuse only a proof-used body
+
+CI failed four hot-reload tests from main (`observe_which_source`, adversarial regression 48
+"running frames retain old ABI", and the ssh `deploy-e2e` acceptance): each hot-patches an ordinary
+function (`Billing.price`, `count`, `Back.scale`) that automatic reflection (D1) reflects, and I9
+refused every such patch. With D1 that blocks most business-logic hot patches. User decision
+(2026-11-02): **refuse only if a proof used the body.**
+
+- `Reflect_state.used_logic_hash_of_name`: the logic hash restricted to definitions some stage-2
+  query of the build unfolded (`check_frontier`, the frontier, so a superset of the unsat cores).
+  The slot hash (`bin/main.ml`, `hr_abi_sigs`) and the manifest's `logic=` use it;
+  `--dump-impl-hashes` keeps the full logic hash (an identity column).
+- **Ruling 3, amended again.** Review round 1 refused, with no running manifest, any slot change the
+  modes did not explain. That also refused a coordinated type change (adversarial regression 48), and
+  the two cannot be told apart without the manifest (the server has no query for its embedded one).
+  Now: no running manifest and no logic hash in the patch is a warning
+  (`Cmd_deploy_hot.logic_unknowns`), not a refusal. The patch build re-checks every caller against
+  the new code; the residual gap is a running caller frame proved against an old body, deployed with
+  no manifest. Cost if wrong: that gap. With the manifest, `logic=` is compared as before.
+- Tests: `sound_hcr` now builds a proof-used `inc` (a caller `need_big(inc(1))`) and an unused one;
+  the unused half was RED (the slot carried `logic=`), GREEN after. `test_logic_changes`: the two
+  no-manifest cases flip to "not refused" and a `logic_unknowns` block covers the warning (RED: did not
+  build). Locally green: reflect-1b 11, reflect-parity 6, reflect-report 28, reflect-unfold 49,
+  forge reconcile 23, adversarial regression 48, `observe_which_source`. The ssh e2e needs Docker
+  (not running locally); `Back.scale` is used by no refinement there, so its slot hash is plain.
+
 ## Not done, deferred or unverified
 
 - 5b (ruling 1) and everything in `specs/todos/2026-10-31-reflection-encoder-gaps.md`.

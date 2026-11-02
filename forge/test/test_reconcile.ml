@@ -796,16 +796,29 @@ let test_logic_changes () =
   (* reflected -> @[opaque] is a logic change too (the old callers' proofs) *)
   Alcotest.(check int) "reflected -> opaque (prior)" 1
     (List.length (changes ~prior:(manifest [ fm ~logic:l1 ]) ~running:(slot ~logic:l1) (fm ~logic:"")));
-  (* review round 1: reflected -> unreflected (@[opaque], an effect, a
-     callee that stopped being reflected) with NO running manifest: the
-     running slot hash is not the plain hash of the patch's type and modes,
-     so it was reflected (or the type changed: cannot be told apart).
-     Refused; before the fix `now = "-"` read as "no logic change" and fell
-     through to the coordinated-upgrade gate. *)
-  Alcotest.(check int) "reflected -> unreflected (no prior)" 1
+  (* reflected -> unreflected (@[opaque], an effect, a callee that stopped
+     being reflected) with NO running manifest: the running slot hash is not
+     the plain hash of the patch's type and modes, which a type change in a
+     coordinated upgrade also gives -- the two cannot be told apart.  Not
+     refused (the patch build re-checks every caller against the new code,
+     and refusing broke coordinated type changes); a warning names it. *)
+  let unknowns ~running f =
+    Cmd_deploy_hot.logic_unknowns ~prior:None ~slot_of:(fun _ -> Some (abi_slot running)) ~to_activate:[ f ] in
+  Alcotest.(check int) "reflected -> unreflected (no prior): not refused" 0
     (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:"")));
-  Alcotest.(check int) "reflected -> unreflected, `-` (no prior)" 1
+  Alcotest.(check int) "reflected -> unreflected, `-` (no prior): not refused" 0
     (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:"-")));
+  Alcotest.(check int) "reflected -> unreflected (no prior): warned" 1
+    (List.length (unknowns ~running:(slot ~logic:l1) (fm ~logic:"-")));
+  Alcotest.(check int) "a type change (no prior): warned the same way" 1
+    (List.length
+       (unknowns ~running:(March_cas.Hash.hcr_sig_hash ~sig_hash:(String.make 64 'b') ~modes:"o") (fm ~logic:"-")));
+  Alcotest.(check int) "an unchanged slot: no warning" 0
+    (List.length (unknowns ~running:(slot ~logic:"-") (fm ~logic:"-")));
+  Alcotest.(check int) "with the running manifest: no warning" 0
+    (List.length
+       (Cmd_deploy_hot.logic_unknowns ~prior:(Some (manifest [ fm ~logic:l1 ]))
+          ~slot_of:(fun _ -> Some (abi_slot (slot ~logic:l1))) ~to_activate:[ fm ~logic:"-" ]));
   (* an @[opaque] function's body edit: same slot hash, nothing to say *)
   Alcotest.(check int) "opaque body edit" 0 (List.length (changes ~running:(slot ~logic:"-") (fm ~logic:"")));
   Alcotest.(check int) "unchanged reflected body" 0 (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:l1)));
