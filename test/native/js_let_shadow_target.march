@@ -1,0 +1,29 @@
+-- A let bound to a match (or a let chain) whose arms bind the same name:
+-- the arms' inner `x` must not capture the assignment to the outer `x`
+-- (statement-mode emission; with closures the inner name was scoped).
+mod JsLetShadowTarget do
+  needs IO.Console
+
+  pfn pick(o : Option(Int), n : Int) : Int do
+    let x = match o do
+      Some(x) -> x + n
+      None ->
+        let x = n * 2
+        x + 1
+    end
+    x * 10
+  end
+
+  pfn chain(n : Int) : Int do
+    let y = if n > 0 do
+      let y = n + 1
+      let y = y * 2
+      y
+    else 0 end
+    y + 1
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(int_to_string(pick(Some(3), 4)) ++ " " ++ int_to_string(pick(None, 4)) ++ " " ++ int_to_string(chain(5)))
+  end
+end

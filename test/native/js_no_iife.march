@@ -1,0 +1,32 @@
+-- Compound expressions in value position on the JS target — a let bound to a
+-- match, a let whose value is itself a let chain, a match arm that binds —
+-- are emitted as statements assigning their result, not as an immediately
+-- invoked closure per expression (which cost ~40% of a Herald frame). The
+-- dune rule checks the emitted `shape` has no IIFE, and the output.
+mod JsNoIife do
+  needs IO.Console
+
+  pfn shape(n : Int, o : Option(Int), xs : List(Int)) : Int do
+    let a = match o do
+      Some(x) -> x + n
+      None -> 0
+    end
+    let b = if a > 10 do
+      let c = a * 2
+      c + 1
+    else
+      a - 1
+    end
+    let d = match xs do
+      Cons(h, _) ->
+        let k = h * b
+        if k > 100 do k else 0 - k end
+      Nil -> b
+    end
+    a + b + d
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(int_to_string(shape(5, Some(7), [9, 1])) ++ " " ++ int_to_string(shape(1, None, [])) ++ " " ++ int_to_string(shape(0, Some(3), [2])))
+  end
+end
