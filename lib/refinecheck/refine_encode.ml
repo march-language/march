@@ -1161,10 +1161,12 @@ let ctor_of_adt_raw (adt : string) (ctor : string) : string option =
    Filled by [finalize_ctor_names]. *)
 let ambiguous_adts : (string, unit) Hashtbl.t = Hashtbl.create 16
 
-(* The datatype key a site uses for "the value's type is KNOWN, and its
-   short name is one two or more declarants share": no constructor resolves
-   through it (it is in [ambiguous_adts] and declares nothing).  Distinct from
-   [None], "no type information". *)
+(* The datatype key a site uses for "the value's type is KNOWN, but no
+   constructor can be resolved through it": its short name is one two or
+   more declarants share (review round 2), or it is not a registered variant
+   at all (`Int`, a record, a built-in or synthesised type; review round 3).
+   It is in [ambiguous_adts] and declares nothing.  Distinct from [None], "no
+   type information" (a type variable, no type map). *)
 let ambiguous_adt_sentinel = "$ambiguous"
 
 (* [ctor_of_adt_raw], but [None] for every key in [ambiguous_adts] (review
@@ -1725,6 +1727,10 @@ let adt_sort_name_at (path : string) (name : string) : string =
    user declaration of such a name is filed under the pseudo path [top_path],
    so its key differs from the built-in's bare one. *)
 let builtin_path = "$builtin"
+
+(* The pseudo module path of a type the typechecker synthesises (an actor's
+   message type), counted as a declarant of its name. *)
+let synth_path = "$synth"
 let top_path = "$top"
 
 (* The built-in datatypes this checker SEEDS ([register_builtin_adts]): their
@@ -1767,7 +1773,11 @@ let short_name_conflated (short : string) : bool =
   match Hashtbl.find_opt adt_decl_paths ("M_" ^ short) with
   | None | Some [] -> false
   | Some entries ->
-    List.length (List.sort_uniq compare (List.map fst entries)) >= 2
+    (* ENTRIES, not distinct paths (review round 3): two declarations at one
+       module path (`type Zq` twice, a reopened `mod A`, a user `mod
+       Membership` beside the stdlib's) are merged by the typechecker, while
+       here the last one registered would become the whole datatype. *)
+    List.length entries >= 2
     || (List.mem short builtin_type_names
         && (not (List.mem short seeded_builtin_names))
         && not (Hashtbl.mem stdlib_declared short))
@@ -2222,24 +2232,31 @@ let adt_of_type_name (n : string) : string option =
   if short_name_conflated short then Some ambiguous_adt_sentinel
   else
     let adt = adt_sort_name short in
+    (* A KNOWN type that is not a registered variant (`Int`, `String`, a
+       record, a built-in or synthesised type the checker does not model) is
+       the sentinel too, never "unknown" (review round 3): no constructor of
+       any variant is a value of it. *)
     (match Hashtbl.find_opt adt_ctors adt with
-     | Some [ c ] when Hashtbl.mem ctor_field_names c -> None
+     | Some [ c ] when Hashtbl.mem ctor_field_names c -> Some ambiguous_adt_sentinel
      | Some _ -> Some adt
-     | None -> None)
+     | None -> Some ambiguous_adt_sentinel)
 
 let adt_of_tc_ty (t : March_typecheck.Typecheck.ty) : string option =
   let module T = March_typecheck.Typecheck in
   let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
   match strip t with
   | T.TCon (n, _) -> adt_of_type_name n
-  | _ -> None
+  (* A type variable is the one genuinely unknown type. *)
+  | T.TVar _ -> None
+  | _ -> Some ambiguous_adt_sentinel
 
 (* The same for a DECLARED type (a parameter's annotation). *)
 let rec adt_of_decl_ty (t : A.ty) : string option =
   match t with
   | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> adt_of_decl_ty b
   | A.TyCon (n, _) -> adt_of_type_name n.A.txt
-  | _ -> None
+  | A.TyVar _ -> None
+  | _ -> Some ambiguous_adt_sentinel
 
 (* The datatype the typechecker recorded for the expression at [sp], when it
    pins one. *)
@@ -2260,7 +2277,13 @@ let resolve_source_ctor ?(adt : string option) (c : string) : (string * string) 
 (* The SMT tester constructor for `is_<c>(x)` where [x] has sort [srt] (when
    known). *)
 let tester_ctor ?(srt : Smt.sort option) (c : string) : string option =
-  let adt = match srt with Some (Smt.SData (a, _)) when Hashtbl.mem adt_ctors a -> Some a | _ -> None in
+  let adt =
+    match srt with
+    | Some (Smt.SData (a, _)) when Hashtbl.mem adt_ctors a -> Some a
+    | None -> None
+    (* A known sort that is no registered datatype (review round 3). *)
+    | Some _ -> Some ambiguous_adt_sentinel
+  in
   Option.map snd (resolve_source_ctor ?adt c)
 
 (* A refinement or linearity wrapper says nothing about a value's SORT — a
@@ -2339,7 +2362,16 @@ let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
       | A.DActor (_, name, _, _) ->
         let key = record_key name in
         Hashtbl.replace adt_ctors key [ ctor_smt_name key name.A.txt ];
-        Hashtbl.replace adt_arity key 0
+        Hashtbl.replace adt_arity key 0;
+        (* The typechecker synthesises `<Actor>_Msg` for the handlers'
+           message constructors (review round 3): a declarant of that name,
+           so a user type of the same name is conflated with it.  No
+           constructors are modelled for it here. *)
+        let msg = March_typecheck.Typecheck_env.actor_msg_type_name name.A.txt in
+        let bare = "M_" ^ msg in
+        Hashtbl.replace adt_decl_paths bare
+          ((synth_path, adt_sort_name_at synth_path msg)
+           :: (try Hashtbl.find adt_decl_paths bare with Not_found -> []))
       | A.DMod (n, _, ds, _) ->
         register_adt_names ~path:(if path = "" then n.A.txt else path ^ "." ^ n.A.txt) ds
       | _ -> ())

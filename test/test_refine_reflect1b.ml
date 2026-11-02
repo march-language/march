@@ -916,3 +916,145 @@ end
         expect out ~line:21 ~callee:"need" "proved" ~uses:"wrap";
         expect out ~line:22 ~callee:"need" "proved" ~uses:"get";
         expect out ~line:23 ~callee:"need" "violated") ]
+
+(* ── Review round 3 ────────────────────────────────────────────────────────
+   Declarants the earlier rounds missed: a second declaration at the SAME
+   module path (the typechecker merges both), a type the typechecker
+   synthesises (an actor's `<Actor>_Msg`), and a tester on a value whose
+   known type is not a registered variant.  Each program proved a call that
+   is violated at run time. *)
+let ctor_review3 =
+  [ gated "ctor review3 h5: a second `type Zq` in the same module is a second declarant" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  type Zq = Pz | Qz
+  fn mk() : Zq do Pz end
+  type Zq = Rz(Int) | Sz
+  fn f(t : Zq, n : Int) : Int do
+    match t do
+      Rz(_) -> 1
+      Sz -> 1
+      _ -> need1(n)
+    end
+  end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(f(mk(), 0)))
+  end
+end
+|}
+        in
+        not_proved out ~line:11 ~callee:"need1");
+    gated "ctor review3 h6: a second `type Zq` in a reopened `mod A` is a second declarant" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  mod A do
+    type Zq = Pz | Qz
+    fn mk() : Zq do Pz end
+  end
+  mod A do
+    type Zq = Rz(Int)
+    fn f(t : Zq, n : Int) : Int do
+      match t do
+        Rz(_) -> 1
+        _ -> need1(n)
+      end
+    end
+  end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(A.f(A.mk(), 0)))
+  end
+end
+|}
+        in
+        not_proved out ~line:13 ~callee:"need1");
+    gated "ctor review3 m1: a user `mod Membership` declaring the stdlib's `MemberStatus` path again" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  mod Membership do
+    type MemberStatus = Gone(Int)
+    fn f(t : MemberStatus, n : Int) : Int do
+      match t do
+        Gone(_) -> 1
+        _ -> need1(n)
+      end
+    end
+  end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(Membership.f(Alive, 0)))
+  end
+end
+|}
+        in
+        not_proved out ~line:9 ~callee:"need1");
+    gated "ctor review3 ac1: a user `type Counter_Msg` beside actor Counter's message type" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  actor Counter do
+    state { v : Int }
+    init { v: 0 }
+    on Inc() do { state with v: state.v + 1 } end
+  end
+  type Counter_Msg = Rz(Int)
+  fn f(t : Counter_Msg, n : Int) : Int do
+    match t do
+      Rz(_) -> 1
+      _ -> need1(n)
+    end
+  end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(f(Inc(), 0)))
+  end
+end
+|}
+        in
+        not_proved out ~line:13 ~callee:"need1");
+    gated "ctor review3 t1: a tester on a value whose known type is not a variant (`Int`)" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  type Zq = Rz(Int)
+  fn need(x : {a | is_Rz(_)}) : Int do 1 end
+  fn c(y : Option(Int)) : Int do need(y) end
+  fn needi(x : {Int | is_Rz(_)}) : Int do 1 end
+  fn d(n : Int) : Int do needi(n) end
+  fn e() : Int do need(None) end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(c(None)))
+  end
+end
+|}
+        in
+        not_proved out ~line:7 ~callee:"needi");
+    gated "ctor review3: the renamed control (no conflation) keeps its proofs" (fun () ->
+        let out =
+          run
+            {|mod M do
+  type Stazus = Active(Int) | Gone
+  fn need(x : {Stazus | is_Active(_)}) : Int do 1 end
+  fn a() : Int do need(Active(1)) end
+  fn b() : Int do need(Gone) end
+  fn c(s : Stazus) : Int do
+    match s do
+      Active(_) -> need(s)
+      Gone -> 0
+    end
+  end
+end
+|}
+        in
+        expect out ~line:4 ~callee:"need" "proved";
+        expect out ~line:5 ~callee:"need" "violated";
+        expect out ~line:8 ~callee:"need" "proved") ]

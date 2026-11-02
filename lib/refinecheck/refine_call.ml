@@ -2223,11 +2223,17 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
         | Some (Some ty) -> adt_of_decl_ty ty
         | _ -> None
       in
+      let of_subject () = tc_adt_at (March_typecheck.Typecheck.span_of_expr subject) in
+      (* [None] from a declared type means a type VARIABLE (any other known
+         type that is not a variant is the sentinel, review round 3): then
+         the actual's own type decides. *)
       let known =
         match arg with
-        | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" -> param_adt (Some rp.idx)
-        | A.EVar { A.txt = x; _ } when List.mem_assoc x name_pos -> param_adt (List.assoc_opt x name_pos)
-        | _ -> tc_adt_at (March_typecheck.Typecheck.span_of_expr subject)
+        | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" ->
+          (match param_adt (Some rp.idx) with Some a -> Some a | None -> of_subject ())
+        | A.EVar { A.txt = x; _ } when List.mem_assoc x name_pos ->
+          (match param_adt (List.assoc_opt x name_pos) with Some a -> Some a | None -> of_subject ())
+        | _ -> of_subject ()
       in
       match resolve_source_ctor ?adt:known ctor with
       | None -> None

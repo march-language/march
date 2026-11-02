@@ -1252,7 +1252,12 @@ let pre_of (u : RT.unit_) (psorts : Smt.sort list) : Smt.term list =
                          match var x.A.txt with
                          | Some (Smt.Const pc) ->
                            (match List.find_index (fun j -> param_const j = pc) (List.init (List.length psorts) Fun.id) with
-                            | Some j -> (match List.nth_opt psorts j with Some (Smt.SData (a, _)) -> Some a | _ -> None)
+                            | Some j ->
+                              (match List.nth_opt psorts j with
+                               | Some (Smt.SData (a, _)) -> Some a
+                               (* A known sort that is no datatype (review round 3). *)
+                               | Some _ -> Some RE.ambiguous_adt_sentinel
+                               | None -> None)
                             | None -> None)
                          | _ -> None
                        in

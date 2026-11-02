@@ -5311,7 +5311,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         let p =
           match subj, br.A.branch_pat with
           | A.EVar s, (A.PatCon ({ A.txt = "Cons"; _ }, [ _; _ ]) as pat)
-            when sort_of_ctor "Cons" = Some (adt_sort_name "List")
+            (* The built-in list's `Cons`, by the scrutinee's type. *)
+            when resolve_source_ctor ?adt:subj_adt "Cons" = Some (adt_sort_name "List", list_cons ())
                  && (not (is_axiom_measure "len"))
                  && not (List.mem s.A.txt binders) ->
             let sp = s.A.span in

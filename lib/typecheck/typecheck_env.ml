@@ -183,6 +183,12 @@ type ref_record = {
 let qualify_ref_name (modname : string) (name : string) : string =
   if modname = "" then name else modname ^ "." ^ name
 
+(** The type the typechecker synthesises for actor [actor]'s messages: every
+    handler's message constructor has this [ci_type].  The one spelling every
+    site uses (and the refinement checker, which counts it as a declarant of
+    that type name). *)
+let actor_msg_type_name (actor : string) : string = actor ^ "_Msg"
+
 type env = {
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)

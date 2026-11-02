@@ -230,3 +230,54 @@ refinement violation"). This is the accepted cost of round 2, not a new bug.
   it safely means making every bare-name lookup pick the declarant by arity. That, or
   the typechecker fix (todo `2026-11-02-typecheck-conflates-same-short-named-types`),
   is the way to give same-named user types their proofs back.
+
+## Review round 3 (of `8b855a5f1`)
+
+Three more false proofs, all present at base `8aaeb6176`; each fix landed test-first (`ctor
+review3` cases of `reflect-ctor`, RED on `8b855a5f1`: every one reported `proved`).
+
+- **C1: a second declaration at the SAME module path was not a declarant.**
+  `short_name_conflated` counted distinct paths, so `type Zq` twice in one module (`h5`), a
+  reopened `mod A` (`h6`), or a user `mod Membership` re-declaring the stdlib's
+  `Membership.MemberStatus` (`m1`; likewise a user `mod DistLink`, or a dependency module sharing
+  a path with a user module) collapsed into one entry, and the last one registered became the
+  whole datatype, while the typechecker merges both. It now counts declaration ENTRIES: two or
+  more declarations of a short name, even at one path, conflate it. (`decl_key` still keys by
+  path; with the name conflated nothing resolves through that key.)
+- **C2: a type the typechecker synthesises was not a declarant.** An actor's handlers get the
+  message type `<Actor>_Msg`; a user `type Counter_Msg` beside `actor Counter` (`ac1`) matched
+  `Inc()` against its own constructors. `register_adt_names` now enters `<Actor>_Msg` (spelled
+  by the typechecker's new `Typecheck_env.actor_msg_type_name`, which every typechecker site now
+  uses) under the pseudo path `$synth`. The actor type itself was already a declarant (it is
+  registered as a record). No protocol/session type is synthesised under a user-visible name
+  (searched every `ci_type` construction in `lib/typecheck/`).
+- **C3: "known, not a variant" collapsed to "unknown".** `adt_of_type_name` returned `None` for
+  `Int`, `String`, a record, or any unregistered type, and `None` sends a site to the name
+  alone (`t1`: `needi(n)` for `n : Int` proved `is_Rz(_)`). It now returns the sentinel for
+  every known type that is not a registered variant; `adt_of_tc_ty` / `adt_of_decl_ty` return
+  `None` only for a type VARIABLE (and the sentinel for an arrow, tuple, …); the reflected
+  guard's parameter sort and `tester_ctor` treat a known non-datatype sort the same way. In
+  `Refine_call.resolve_tester`, a parameter declared with a type variable falls back to the
+  actual's own type, not straight to the name.
+- **Minor:** the list-length narrowing in `Refine_check` now asks whether the scrutinee's `Cons`
+  is the built-in list's (`resolve_source_ctor ?adt:subj_adt "Cons"`) instead of `sort_of_ctor
+  "Cons"`.
+
+Not reintroduced: narrowing conflation to same-arity declarants (tried and reverted in CI round
+1).
+
+Probes: across `ctor-review/`, `ctor-review2/` and `ctor-review3/` the only `proved` sites left
+are the ones the reviews listed as legitimate: `p10`/`p10b`, round-1 `t1`, `d1`-`d4`, `s2*`,
+`h3f` (an unreachable `_` arm) and `lp2` (the renamed control). A `ctor review3` control test
+pins `lp2`'s proofs.
+
+Rulings: (1) a declaration ENTRY is a declarant, so a program that declares one type name twice
+(even at one path) loses constructor facts over it; cost if wrong: lost proofs only, and such a
+program is already merged by the typechecker. (2) A type variable is the only "no type
+information"; everything else known and not a variant declines. Cost if wrong: lost proofs on a
+tester over a polymorphic reflected parameter (`SParam`), which now declines.
+
+Verification after round 3: `scripts/run-tests.sh refinecheck` 2,114 tests green; `-q compiler`
+1,351 green; `dune build --root . @types-check --force`: `core-march-types: 492 passed, 0
+failed`; `scripts/oracle-base.sh refine` IDENTICAL against `8aaeb6176`, and `refine-oracle.sh
+monotone` GREEN over 139,456 sites with 0 moves.

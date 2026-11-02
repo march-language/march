@@ -659,7 +659,7 @@ let actor_msg_alias env (name : string) : string option =
     let actor = match String.rindex_opt prefix '.' with
       | None -> prefix
       | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1) in
-    let target = actor ^ "_Msg" in
+    let target = actor_msg_type_name actor in
     if StrMap.exists (fun _ cis ->
         List.exists (fun ci -> ci.ci_is_actor_msg && ci.ci_type = target) cis)
         env.ctors

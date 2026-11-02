@@ -122,6 +122,9 @@ type ref_record = {
   ref_line : int;
 }
 val qualify_ref_name : string -> string -> string
+
+(** The type synthesised for an actor's messages ([actor ^ "_Msg"]). *)
+val actor_msg_type_name : string -> string
 type env = {
   vars : Typecheck_types.scheme StrMap.t;
   types : int StrMap.t;
