@@ -170,7 +170,7 @@ let def_hash out name =
   List.find_map
     (fun l ->
       match String.split_on_char '\t' l with
-      | [ "reflect-def"; _; n; h ] when n = name -> Some h
+      | [ "reflect-def"; _; n; h ] when n = name || String.ends_with ~suffix:("." ^ name) n -> Some h
       | _ -> None)
     (lines out)
 
@@ -459,9 +459,14 @@ end
            Alcotest.(check string) "g" "not-compared" st;
            if not (contains d "no logic definition") then Alcotest.failf "g's reason: %s" d
          | None -> Alcotest.failf "no parity row for g:\n%s" out);
-        match summary out with
-        | Some l -> if not (contains l "2 functions") then Alcotest.failf "summary: %s" l
-        | None -> Alcotest.failf "no summary:\n%s" out);
+        (match summary out with
+         | Some l -> if not (contains l "2 functions") then Alcotest.failf "summary: %s" l
+         | None -> Alcotest.failf "no summary:\n%s" out);
+        (* review round 2: a run that compared no input is not green *)
+        if not (contains out "parity: NOTHING COMPARED") then
+          Alcotest.failf "a run with no compared input says so:\n%s" out;
+        if contains (run ~args:"--check --reflect-parity" parity_src) "NOTHING COMPARED" then
+          Alcotest.fail "the parity program compares inputs");
     gated "parity RED: an arms-swapped term_of_body is a mismatch" (fun () ->
         let out = run ~env:"MARCH_REFLECT_PERTURB=swap-arms" ~args:"--check --reflect-parity" parity_src in
         Alcotest.(check string) "absv" "MISMATCH" (parity_status out "absv");

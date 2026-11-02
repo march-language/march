@@ -57,6 +57,24 @@ let with_project f =
 
 let unverified (r : R.result) = List.exists (fun (d : R.diag) -> d.R.d_code = "refinement_unverified") r.R.r_diags
 
+let violated (r : R.result) = List.exists (fun (d : R.diag) -> d.R.d_code = "refinement_violated") r.R.r_diags
+
+(* util.march at [util 1], app.march checked, then util.march at [util 100]
+   (only the contract the test is about moves): exactly app.march is
+   re-checked, and (with [violated_after]) the re-check rejects it. *)
+let contract_case ~(util : int -> string) ~(app : string) ~(violated_after : bool) =
+  with_project (fun dir ->
+      write dir "util.march" (util 1);
+      write dir "app.march" app;
+      let app_path = Filename.concat dir "app.march" and util_path = Filename.concat dir "util.march" in
+      if violated (R.check app_path) then Alcotest.fail "before the edit app.march is not rejected";
+      write dir "util.march" (util 100);
+      match R.on_change util_path with
+      | [ (f, after) ] ->
+        Alcotest.(check string) "the dependent re-checked" (R.canon app_path) f;
+        if violated_after && not (violated after) then Alcotest.fail "after the edit app.march is refinement_violated"
+      | rs -> Alcotest.failf "exactly app.march must be re-checked, got %d files" (List.length rs))
+
 let gated name f =
   Alcotest.test_case name `Quick (fun () -> if z3_available () then f () else Alcotest.skip ())
 
@@ -154,5 +172,22 @@ let tests =
             match R.on_change util2_path with
             | [ (f, _) ] -> Alcotest.(check string) "the dependent re-checked" (R.canon app_path) f
             | rs -> Alcotest.failf "app.march must be re-checked, got %d files" (List.length rs)));
+    (* Review round 2: a contract edit the key must see, as (util before,
+       util after, app); [violated_after] when the fresh check rejects app. *)
+    gated "lsp_invalidate: twin heads in two nested modules are told apart (review round 2)" (fun () ->
+        contract_case
+          ~util:(fun a -> Printf.sprintf
+                    "mod Util do\n  mod A do\n    fn need(n : {v : Int | v > %d}) : Int do n end\n  end\n  mod B do\n    fn need(n : {v : Int | v > 1}) : Int do n end\n  end\nend\n" a)
+          ~app:"mod App do\n  fn go2() : Int do\n    Util.A.need(3)\n  end\nend\n" ~violated_after:true);
+    gated "lsp_invalidate: a function named in a callee's refinement is keyed by its body (review round 2)" (fun () ->
+        contract_case
+          ~util:(fun k -> Printf.sprintf
+                    "mod Util do\n  fn size() : Int do %d end\n  fn need(n : {Int | _ < size()}) : Int do n end\nend\n" (if k = 1 then 128 else 4))
+          ~app:"mod App do\n  fn go2() : Int do\n    Util.need(5)\n  end\nend\n" ~violated_after:true);
+    gated "lsp_invalidate: a measure named in a callee's refinement is keyed by its body (review round 2)" (fun () ->
+        contract_case
+          ~util:(fun k -> Printf.sprintf
+                    "mod Util do\n  type T = L | N(T, Int)\n  @[measure]\n  fn sz(t : T) : Int do\n    match t do\n      L -> 0\n      N(r, _) -> %d + sz(r)\n    end\n  end\n  fn need(t : {T | sz(_) > 0}) : Int do 1 end\nend\n" (if k = 1 then 1 else 0))
+          ~app:"mod App do\n  fn go2() : Int do\n    Util.need(Util.N(Util.L, 3))\n  end\nend\n" ~violated_after:false);
     Alcotest.test_case "lemma hook: empty until @[lemma] exists (phase 2)" `Quick (fun () ->
         Alcotest.(check int) "no lemma key" 0 (List.length (R.lemma_key "app.march"))) ]

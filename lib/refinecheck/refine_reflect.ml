@@ -1603,7 +1603,69 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
        | Some a, Some b when a >= 0 && b >= a && b <= String.length text -> String.sub text a (b - a)
        | _ -> "")
   in
+  (* Review round 2: the functions a unit's refinements NAME.  A
+     predicate's call (`_ < size()`, `sz(_) > 0`) makes the callee's BODY
+     part of the contract.  Names resolve by their last component (same file
+     first, else every file): an over-approximation, so a re-check too many,
+     never a missed one.  (A refinement type alias, `type Big = {Int | ...}`,
+     does not parse, so a head's refinements are all written in it.) *)
+  let refs_of (u : RT.unit_) =
+    let names = ref [] in
+    let rec ty (t : A.ty) =
+      match t with
+      | A.TyRefine (b, _, e) ->
+        ty b;
+        let rec walk (e : A.expr) =
+          (match e with
+           | A.EVar n -> names := n.A.txt :: !names
+           | A.EField (_, n, _) -> names := n.A.txt :: !names
+           | _ -> ());
+          List.iter walk (RE.children e)
+        in
+        walk e
+      | A.TyCon (_, args) | A.TyTuple args -> List.iter ty args
+      | A.TyArrow (a, b) | A.TyNatOp (_, a, b) -> ty a; ty b
+      | A.TyRecord fs -> List.iter (fun (_, t) -> ty t) fs
+      | A.TyLinear (_, t) -> ty t
+      | A.TyVar _ | A.TyNat _ | A.TyChan _ -> ()
+    in
+    List.iter (Option.iter ty) u.RT.u_param_tys;
+    Option.iter ty u.RT.u_ret;
+    List.sort_uniq compare !names
+  in
+  let by_bare : (string, int) Hashtbl.t = Hashtbl.create 256 in
+  Array.iter (fun (u : RT.unit_) -> Hashtbl.add by_bare (RT.bare u.RT.u_name) u.RT.u_id) g.RT.units;
+  let resolve (u : RT.unit_) (name : string) =
+    let all = Hashtbl.find_all by_bare (RT.bare name) in
+    match List.filter (fun v -> g.RT.units.(v).RT.u_span.A.file = u.RT.u_span.A.file) all with
+    | [] -> all
+    | same -> same
+  in
+  let refs = lazy (Array.map refs_of g.RT.units) in
+  let pred_edges =
+    lazy
+      (let r = Lazy.force refs in
+       List.concat_map
+         (fun (u : RT.unit_) -> List.concat_map (fun n -> List.map (fun v -> (u.RT.u_id, v)) (resolve u n)) r.(u.RT.u_id))
+         (Array.to_list g.RT.units))
+  in
+  (* The units whose whole body is a contract: those a predicate names, and
+     everything their bodies reach. *)
+  let in_predicate =
+    lazy
+      (let n = Array.length g.RT.units in
+       let mark = Array.make n false in
+       let rec go v =
+         if not mark.(v) then begin
+           mark.(v) <- true;
+           List.iter (fun (e : RT.edge) -> go e.RT.e_dst) g.RT.out.(v)
+         end
+       in
+       List.iter (fun (_, v) -> go v) (Lazy.force pred_edges);
+       mark)
+  in
   let contract = lazy (
+    let whole = Lazy.force in_predicate in
     Array.map
       (fun (u : RT.unit_) ->
         let status =
@@ -1612,14 +1674,20 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
             "reflected" ^ String.concat "" (List.map (fun g -> "\000guard " ^ g) (Option.value ~default:[] (Hashtbl.find_opt guards_of u.RT.u_span)))
           | _ -> "-"
         in
+        let text = if whole.(u.RT.u_id) then "body " ^ Option.value ~default:"" (source_of u) else head_of u in
         March_cas.Blake3.hash_string
-          (String.concat "\000" ([ "march-contract-v1"; head_of u; status ] @ List.map (fun a -> "attr " ^ a) u.RT.u_attrs)))
+          (String.concat "\000"
+             ([ "march-contract-v2"; text; status ]
+             @ List.map (fun a -> "attr " ^ a) u.RT.u_attrs)))
       g.RT.units)
   in
   RS.contract_defs :=
     lazy (let c = Lazy.force contract in
           Array.map (fun (u : RT.unit_) -> (u.RT.u_span.A.file, u.RT.u_name, c.(u.RT.u_id))) g.RT.units);
-  RS.contract_edges := lazy (List.sort_uniq compare (List.map (fun (e : RT.edge) -> (e.RT.e_src, e.RT.e_dst)) g.RT.edges));
+  RS.contract_edges :=
+    lazy
+      (List.sort_uniq compare
+         (List.map (fun (e : RT.edge) -> (e.RT.e_src, e.RT.e_dst)) g.RT.edges @ Lazy.force pred_edges));
   RS.unfold_hook := unfold;
   March_refine.Refine.well_formed := declared_logic_symbols;
   RS.active := true;

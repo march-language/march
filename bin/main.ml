@@ -955,13 +955,27 @@ let print_reflect_report ~filename ~user_files ~type_map ~(recheck : unit -> uni
 (* --reflect-deps (reflection §7.2): the D17 hash of every reflected user
    function, then of every reflected function in the frontier of a stage-2
    query this check ran, each `<kind>\t<file>\t<name>\t<hash>`, sorted. *)
-let print_reflect_deps ~filename ~user_files () =
+let print_reflect_deps ~filename ~entry_mod ~user_files () =
   let module RS = March_refinecheck.Reflect_state in
   let is_user f = f = filename || List.mem f user_files
                   || not (March_typecheck.Typecheck_builtins.file_is_stdlib f) in
+  (* Review round 2: every row names its function by its QUALIFIED name (the
+     entry module's own functions print unqualified, so they get its name
+     back: `A.need` here is `Util.A.need` in a dependant's check).  The
+     logic and contract hashes cover source text from the bare name on, so
+     twin definitions in two nested modules (`Util.A.need`, `Util.B.need`)
+     share a hash; the LSP matches (file, name, hash), so the name tells
+     them apart.  The hash stays the D17 hash a query's `; reflect` line
+     carries. *)
+  let qualified file name =
+    if file = filename && not (String.starts_with ~prefix:(entry_mod ^ ".") name) then entry_mod ^ "." ^ name
+    else name in
+  let line kind file name h =
+    let q = qualified file name in
+    Printf.sprintf "%s\t%s\t%s\t%s" kind file q h in
   let row kind sym =
     match Hashtbl.find_opt RS.sym_origin sym, Hashtbl.find_opt RS.logic_hash sym with
-    | Some (name, file), Some h -> Some (Printf.sprintf "%s\t%s\t%s\t%s" kind file name h)
+    | Some (name, file), Some h -> Some (line kind file name h)
     | _ -> None
   in
   let defs =
@@ -977,7 +991,7 @@ let print_reflect_deps ~filename ~user_files () =
      own callees. *)
   let user_file f = f <> "<none>" && is_user f in
   let crow kind (file, name, h) =
-    if user_file file then Some (Printf.sprintf "%s\t%s\t%s\t%s" kind file name h) else None in
+    if user_file file then Some (line kind file name h) else None in
   let cdefs =
     List.filter_map (crow "reflect-cdef") (Array.to_list (Lazy.force !RS.contract_defs)) |> List.sort_uniq compare in
   let cdeps = List.filter_map (crow "reflect-cdep") (RS.contract_reach filename) |> List.sort_uniq compare in
@@ -2595,7 +2609,7 @@ let run_test_cmd args =
     (* After [Division_safety]: its [Division] obligations are part of the
        listing (and what R4 reads). *)
     if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
-    if !reflect_deps then print_reflect_deps ~filename ~user_files ();
+    if !reflect_deps then print_reflect_deps ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ~user_files ();
     if !reflect_parity then run_reflect_parity ~filename ~user_files ();
     if !reflect_report then
       print_reflect_report ~filename ~user_files ~type_map
@@ -3888,7 +3902,7 @@ let compile filename =
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
   if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
-  if !reflect_deps then print_reflect_deps ~filename ~user_files ();
+  if !reflect_deps then print_reflect_deps ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ~user_files ();
   if !reflect_parity then run_reflect_parity ~filename ~user_files ();
   if !reflect_report then
     print_reflect_report ~filename ~user_files ~type_map

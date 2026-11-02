@@ -169,12 +169,15 @@ let stale_dependents ~(changed : string) ~(defs : dep list) : string list =
       else if
         List.exists
           (fun d ->
-            (* By hash alone: the same function is `Util.is_small` in a
-               dependent's check and `is_small` when its own file is the
-               entry, and the hash covers the function's source text
-               (its name included), so it identifies the definition. *)
+            (* By (file, qualified name, hash): the compiler prints every
+               function by its qualified name (review round 2); twin
+               definitions in two nested modules of one file share a hash
+               and differ by name. *)
             reported d.dep_file
-            && not (List.exists (fun x -> x.dep_file = d.dep_file && x.dep_hash = d.dep_hash) defs))
+            && not
+                 (List.exists
+                    (fun x -> x.dep_file = d.dep_file && x.dep_name = d.dep_name && x.dep_hash = d.dep_hash)
+                    defs))
           r.r_deps
       then f :: acc
       else acc)
