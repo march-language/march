@@ -132,6 +132,8 @@ row is a behaviour change):
   `identity`: 6 green.
 - `scripts/run-tests.sh -q`: every suite green (run_errors 301 among them).
 - `scripts/check-docs.sh`, `scripts/check-tree-sitter.sh`: green.
+- Full `scripts/run-tests.sh` on `ff01ee663`: every suite green (compiler 1,454, eval 289,
+  codegen 723, stdlib 899, refinecheck 2,067, lsp 399, errors 301, and the rest).
 - Oracles, baselines recorded FIRST from a `git archive` build of `0adbf4418` (the record half of
   `scripts/oracle-base.sh`, cached), checked on the branch head:
   - `ir-oracle`: **IR IDENTICAL across 511 programs.** (The HCR fold changes only `--hot-reload`
