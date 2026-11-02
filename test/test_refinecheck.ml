@@ -23502,22 +23502,26 @@ let module_qualified_measure_and_sort_suite =
         ""
       ]
   in
+  (* Since 2026-11-02 (constructor registry, review round 2) both are SKIPS:
+     the typechecker conflates two types of one short name (`Tree` here and
+     the stdlib's `OrderedMap.Tree`), so a value typed `Tree` may be either
+     declarant's and the measure over it is not axiomatised (its arms'
+     constructors resolve through a conflated type).  Both proofs this suite
+     used to pin were therefore not safe; see
+     specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md and
+     specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md.
+     What still holds, and is pinned: the collision makes neither call a
+     proof nor a violation. *)
   [ gated
       "a user's own top-level Tree, colliding with the real stdlib OrderedMap.Tree \
-       once its whole stdlib is prepended, proves a literal member"
+       once its whole stdlib is prepended, is skipped, not proved (short-name conflation)"
       (fun () ->
-        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
+        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
           (ledger_counts3_with_ordered_map (fixture ~pred:"member(3, tree_elts(_))")));
 
-    gated "...and refutes a literal that is not a member, not merely skipping" (fun () ->
-        (* Refuted, but a set-valued measure has no interpreter meaning, so
-           the refutation cannot be REPRODUCED and is a `refuted-unconfirmed`
-           skip rather than a violation (a Tier 2 violation now always comes
-           with an error; see [tier2_ledger_agrees_suite]).  The reason is what
-           still distinguishes "refuted" from "merely skipping". *)
+    gated "...and a literal that is not a member is skipped too, not proved" (fun () ->
         Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
-          (ledger_counts3_with_ordered_map (fixture ~pred:"member(99, tree_elts(_))"));
-        Alcotest.(check bool) "the skip is a refutation" true (has_refuted_unconfirmed ()));
+          (ledger_counts3_with_ordered_map (fixture ~pred:"member(99, tree_elts(_))")));
   ]
 
 (* ── Generic set-measure instances (P3, 2026-09-15) ────────────────────────
@@ -28923,7 +28927,7 @@ let () =
       ("reflect-unfold", Test_refine_unfold.suite @ Test_refine_unfold.soundness @ Test_refine_unfold.review @ Test_refine_unfold.review2 @ Test_refine_unfold.review3 @ Test_refine_unfold.identical);
       ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr);
       ("reflect-parity", Test_refine_reflect1b.parity);
-      ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review);
+      ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);
       ("termination-ih", Test_refine_term.ih_suite);

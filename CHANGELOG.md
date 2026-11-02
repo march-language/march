@@ -596,7 +596,11 @@ git log is authoritative for exact commits.
   `Option` functions were never unfolded in such a program. Each type now keeps its
   own constructors; a `Some(…)`, a `match` arm or an `is_Some(x)` refers to the
   constructor of the type the checker knows the value has, and is skipped (never
-  guessed) when that type is not known.
+  guessed) when that type is not known. Because the typechecker currently treats two
+  types of the same name in different modules as one type, the checker also skips
+  constructor facts about any type whose name another module (or a built-in type)
+  shares; several such facts used to be "proved" although the program could violate
+  them at run time.
 - **A `refinement_unverified` hint re-labelled `reflect-fuel` or `reflect-budget` now
   names that reason** instead of the first attempt's.
 - **`cap no_panic` accepted a division by a `let` that rebinds its own name.** In

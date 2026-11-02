@@ -1161,26 +1161,30 @@ let ctor_of_adt_raw (adt : string) (ctor : string) : string option =
    Filled by [finalize_ctor_names]. *)
 let ambiguous_adts : (string, unit) Hashtbl.t = Hashtbl.create 16
 
-(* [ctor_of_adt_raw], unless [adt] is one of [ambiguous_adts]: then the
-   datatype is not known to be the value's, and only a constructor NAME that
-   [adt] alone declares (anywhere) is accepted, since that name fixes the
-   datatype by itself (a user top-level `Tree` with `UTip | UBranch` beside
-   the stdlib's `OrderedMap.Tree`).  A name another datatype also declares
-   (`K` in two `Tq`s) is [None]. *)
+(* The datatype key a site uses for "the value's type is KNOWN, and its
+   short name is one two or more declarants share": no constructor resolves
+   through it (it is in [ambiguous_adts] and declares nothing).  Distinct from
+   [None], "no type information". *)
+let ambiguous_adt_sentinel = "$ambiguous"
+
+(* [ctor_of_adt_raw], but [None] for every key in [ambiguous_adts] (review
+   round 2): the typechecker conflates two types of one short name, so a value
+   typed `Tq` may be either declarant's, and no constructor of either is
+   known to be its. *)
 let ctor_of_adt (adt : string) (ctor : string) : string option =
-  if not (Hashtbl.mem ambiguous_adts adt) then ctor_of_adt_raw adt ctor
-  else
-    match Hashtbl.find_opt ctor_decls ctor with
-    | Some [ a ] when a = adt -> ctor_of_adt_raw adt ctor
-    | _ -> None
+  if adt = ambiguous_adt_sentinel || Hashtbl.mem ambiguous_adts adt then None
+  else ctor_of_adt_raw adt ctor
 
 (* (datatype, SMT name) of a source constructor exactly one datatype
    declares; [None] for an unknown or an ambiguous name. *)
 let unique_ctor (ctor : string) : (string * string) option =
   match Hashtbl.find_opt ctor_decls ctor with
-  (* One datatype declares the name: whatever type the value was given, a
-     well-typed program built it with that datatype's constructor. *)
-  | Some [ adt ] -> Option.map (fun s -> (adt, s)) (ctor_of_adt_raw adt ctor)
+  (* One datatype declares the name AND no other declarant shares its type's
+     short name: then every value whose type has that short name is that
+     datatype's (the typechecker conflates by short name, review round 2), so
+     a site with no type information may still use it.  A datatype whose
+     short name is shared ([ambiguous_adts]) is never picked by name. *)
+  | Some [ adt ] -> Option.map (fun s -> (adt, s)) (ctor_of_adt adt ctor)
   | _ -> None
 
 (* The built-in list's constructors, by SMT name (qualified only in a
@@ -1722,15 +1726,51 @@ let adt_sort_name_at (path : string) (name : string) : string =
    so its key differs from the built-in's bare one. *)
 let builtin_path = "$builtin"
 let top_path = "$top"
-let builtin_type_names = [ "List"; "Option"; "Result" ]
+
+(* The built-in datatypes this checker SEEDS ([register_builtin_adts]): their
+   bare key is the built-in's, so a top-level user type of the name is filed
+   under [top_path]. *)
+let seeded_builtin_names = [ "List"; "Option"; "Result" ]
+
+(* Every built-in type of the typechecker's base environment (review round
+   2): each is a declarant of its short name, since the typechecker conflates
+   two types of one short name (a user `type DownReason`, `type Array`, …
+   with the built-in).  A name the stdlib itself declares is the stdlib's
+   declaration of that same nominal type and is not counted twice
+   ([stdlib_declared], pruned in [finalize_adt_canonical]). *)
+let builtin_type_names : string list =
+  List.filter (fun n -> not (String.contains n '.')) March_typecheck.Typecheck_builtins.builtin_type_names
+  |> List.sort_uniq compare
+
+(* Short type names a STDLIB file declares (filled by [register_adt_names]). *)
+let stdlib_declared : (string, unit) Hashtbl.t = Hashtbl.create 32
+
+
 let own_path (path : string) (name : string) : string =
-  if path = "" && List.mem name builtin_type_names then top_path else path
+  if path = "" && List.mem name seeded_builtin_names then top_path else path
 
 (* bare "M_<name>" -> every (module path, qualified key) registered under
    that bare name, most-recently-registered first.  Populated by
    [register_adt_names]; consumed (and then made moot) by
    [finalize_adt_canonical]. *)
 let adt_decl_paths : (string, (string * string) list) Hashtbl.t = Hashtbl.create 32
+
+(* Is the short type name [short] (bare key [bare] = "M_" ^ short) shared by
+   two or more declarants, so the typechecker conflates them: two module paths
+   ([adt_decl_paths], the seeded built-ins included under [builtin_path]), or
+   a user declaration of a typechecker built-in name that the stdlib does not
+   itself declare (`type DownReason`, `type Array` in a program without the
+   stdlib's own declaration of it).  The other built-ins are not entered in
+   [adt_decl_paths]: their bare key carries no constructors here, and filing
+   them there would make an unseeded name's preferred declarant empty. *)
+let short_name_conflated (short : string) : bool =
+  match Hashtbl.find_opt adt_decl_paths ("M_" ^ short) with
+  | None | Some [] -> false
+  | Some entries ->
+    List.length (List.sort_uniq compare (List.map fst entries)) >= 2
+    || (List.mem short builtin_type_names
+        && (not (List.mem short seeded_builtin_names))
+        && not (Hashtbl.mem stdlib_declared short))
 
 (* bare "M_<name>" -> the qualified key [adt_sort_name] should resolve it to,
    when that bare name was ambiguous.  Only holds entries for AMBIGUOUS
@@ -1947,9 +1987,13 @@ let finalize_ctor_names () : unit =
   Hashtbl.reset ctor_source;
   Hashtbl.reset ambiguous_adts;
   Hashtbl.iter
-    (fun _ entries ->
-      if List.length (List.sort_uniq compare (List.map fst entries)) >= 2 then
-        List.iter (fun (_, key) -> Hashtbl.replace ambiguous_adts key ()) entries)
+    (fun bare entries ->
+      let short = String.sub bare 2 (String.length bare - 2) in
+      if short_name_conflated short then begin
+        List.iter (fun (_, key) -> Hashtbl.replace ambiguous_adts key ()) entries;
+        (* The bare key too: a single declarant was re-filed there. *)
+        Hashtbl.replace ambiguous_adts bare ()
+      end)
     adt_decl_paths;
   let keys = List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) adt_ctors []) in
   List.iter
@@ -1970,8 +2014,9 @@ let finalize_ctor_names () : unit =
           let s = ctor_smt_name owner c in
           if s <> c then begin
             Hashtbl.remove tbl c;
-            (* Only while the built-in datatype still declares it (a user
-               top-level `type Option` replaced its constructor list). *)
+            (* Only while the built-in datatype still declares it (always,
+               since a top-level user `type Option` is filed under
+               [top_path]; kept as a guard). *)
             match Hashtbl.find_opt adt_ctors owner with
             | Some cs when List.mem c cs -> Hashtbl.replace tbl s v
             | _ -> ()
@@ -2172,9 +2217,10 @@ let adt_of_type_name (n : string) : string option =
     | Some i -> String.sub n (i + 1) (String.length n - i - 1)
     | None -> n
   in
-  match Hashtbl.find_opt adt_decl_paths ("M_" ^ short) with
-  | Some entries when List.length (List.sort_uniq compare (List.map fst entries)) >= 2 -> None
-  | _ ->
+  (* KNOWN but conflated: a sentinel that resolves no constructor, so the
+     caller declines rather than falling back to the name alone. *)
+  if short_name_conflated short then Some ambiguous_adt_sentinel
+  else
     let adt = adt_sort_name short in
     (match Hashtbl.find_opt adt_ctors adt with
      | Some [ c ] when Hashtbl.mem ctor_field_names c -> None
@@ -2259,7 +2305,13 @@ let rec smt_sort_of_field ?(pnames : string list = []) (t : A.ty) : Smt.sort =
    qualified key; [finalize_adt_canonical] decides afterwards whether that
    key also becomes the plain bare one. *)
 let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
-  let record_key (name : string) : string =
+  let record_key (nm : A.name) : string =
+    let name = nm.A.txt in
+    (* The caller-supplied stdlib identity ([stdlib_source_files], what a
+       harness passes) or the typechecker's own root-based one. *)
+    let f = nm.A.span.A.file in
+    if is_stdlib_source_file f || March_typecheck.Typecheck_builtins.file_is_stdlib f then
+      Hashtbl.replace stdlib_declared name ();
     let bare = "M_" ^ name in
     let key = adt_sort_name_at (own_path path name) name in
     Hashtbl.replace adt_decl_paths bare
@@ -2270,13 +2322,13 @@ let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
     (function
       | A.DType (_, name, tparams, A.TDVariant variants, _)
       | A.DAlwaysLinearType (_, name, tparams, A.TDVariant variants, _) ->
-        let key = record_key name.A.txt in
+        let key = record_key name in
         Hashtbl.replace adt_ctors key
           (List.map (fun (v : A.variant) -> ctor_smt_name key v.A.var_name.A.txt) variants);
         Hashtbl.replace adt_arity key (List.length tparams)
       | A.DType (_, name, tparams, A.TDRecord _, _)
       | A.DAlwaysLinearType (_, name, tparams, A.TDRecord _, _) ->
-        let key = record_key name.A.txt in
+        let key = record_key name in
         Hashtbl.replace adt_ctors key [ ctor_smt_name key name.A.txt ];
         Hashtbl.replace adt_arity key (List.length tparams)
       (* An actor's `state { ... }` is a record in every respect the checker
@@ -2285,7 +2337,7 @@ let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
          value: ... }` reflect through the same selectors a record does
          (plan phase 4: actor state as an inductive invariant). *)
       | A.DActor (_, name, _, _) ->
-        let key = record_key name.A.txt in
+        let key = record_key name in
         Hashtbl.replace adt_ctors key [ ctor_smt_name key name.A.txt ];
         Hashtbl.replace adt_arity key 0
       | A.DMod (n, _, ds, _) ->
@@ -3530,7 +3582,8 @@ let register_builtin_adts () : unit =
       let bare = "M_" ^ n in
       Hashtbl.replace adt_decl_paths bare
         ((builtin_path, bare) :: (try Hashtbl.find adt_decl_paths bare with Not_found -> [])))
-    builtin_type_names;
+    seeded_builtin_names;
+  Hashtbl.reset stdlib_declared;
   Hashtbl.replace adt_ctors list [ "Nil"; "Cons" ];
   Hashtbl.replace adt_arity list 1;
   set_ctor_fields list "Nil" [];

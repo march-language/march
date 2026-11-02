@@ -782,3 +782,137 @@ end
 |}
         in
         not_proved out ~line:4 ~callee:"need") ]
+
+(* ── Review round 2 (of c87e66495 + 037744add) ─────────────────────────────
+   The typechecker treats two types of one short name as ONE type (A.Tq and
+   B.Tq unify; `todo 2026-11-02-typecheck-conflates-same-short-named-types`),
+   so a constructor only A.Tq declares can be matched against a B.Tq value.
+   Each program below proved a call that is violated at run time. *)
+let ctor_review2 =
+  [ gated "ctor review2 c1: a nested pattern `W1(KA(n))` on a field type two modules declare" (fun () ->
+        let out =
+          run
+            {|mod M do
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  mod A do
+    type Tq = KA(Int)
+  end
+  mod B do
+    type Tq = K(Int) | Z
+    type W = W1(Tq)
+    fn g(w : W) : Int do
+      match w do
+        W1(KA(n)) -> 1
+        W1(_) -> 0
+      end
+    end
+    fn c4(w : W) : Int do need1(g(w)) end
+    fn c5() : Int do need1(g(W1(Z))) end
+  end
+end
+|}
+        in
+        not_proved out ~line:15 ~callee:"need1");
+    gated "ctor review2 c2: a `match` arm's exclusion through a type name two modules declare" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  mod A do
+    type Tq = KA(Int)
+  end
+  mod B do
+    type Tq = K(Int) | Z
+    fn f(x : Tq) : Int do
+      match x do
+        KA(_) -> 1
+        _ -> need1(0)
+      end
+    end
+    fn f2(x : Tq) : Int do
+      match x do
+        KA(n) -> need1(n)
+        _ -> 1
+      end
+    end
+  end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(B.f(B.Z)))
+  end
+end
+|}
+        in
+        not_proved out ~line:12 ~callee:"need1");
+    gated "ctor review2 c3: a top-level user `type Option` beside the built-in: `_` arm" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  type Option(a) = Only(a)
+  fn f(x : Option(Int)) : Int do
+    match x do
+      Only(_) -> 1
+      _ -> need1(0)
+    end
+  end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(f(None)))
+  end
+end
+|}
+        in
+        not_proved out ~line:8 ~callee:"need1");
+    gated "ctor review2 c4: a call-site tester on a value of a type name two modules declare" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  mod A do
+    type Tq = KA(Int)
+  end
+  mod B do
+    type Tq = K(Int) | Z
+    fn need_ka(x : {Tq | is_KA(_)}) : Int do
+      match x do
+        KA(_) -> 1
+        _ -> 0
+      end
+    end
+    fn c(x : Tq) : Int do need_ka(x) end
+    fn d() : Int do need_ka(Z) end
+  end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(B.c(B.Z)))
+  end
+end
+|}
+        in
+        not_proved out ~line:14 ~callee:"B.need_ka");
+    gated "ctor review2 c5: a user `type DownReason` beside the built-in/stdlib one" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  type DownReason = OnlyR(Int)
+  fn f(x : DownReason) : Int do
+    match x do
+      OnlyR(_) -> 1
+      _ -> need1(0)
+    end
+  end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(f(DownReason.Killed)))
+  end
+end
+|}
+        in
+        not_proved out ~line:8 ~callee:"need1");
+    gated "ctor review2: a program with no short-name conflation keeps its proofs" (fun () ->
+        let out = run ctor_src in
+        expect out ~line:11 ~callee:"need" "proved" ~uses:"val";
+        expect out ~line:21 ~callee:"need" "proved" ~uses:"wrap";
+        expect out ~line:22 ~callee:"need" "proved" ~uses:"get";
+        expect out ~line:23 ~callee:"need" "violated") ]

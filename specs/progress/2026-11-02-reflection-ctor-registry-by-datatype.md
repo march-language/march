@@ -143,10 +143,68 @@ test-first (the `ctor review` cases of `reflect-ctor`, RED on `c87e66495`).
 Probes: `p3` (nested `Option`) all three sites skip (were two false proofs); `p6` both sites skip
 (was a false proof); `p6b` (no `A.Tq`) still reports line 13 `violated`.
 
-Ruling: a datatype whose type name is ambiguous loses constructor resolution except for
-constructor names unique program-wide. Cost if wrong: lost proofs on programs reusing a type
-name AND its constructor names (the parent commit's behaviour for those was a guess).
+Ruling (superseded by round 2): a datatype whose type name is ambiguous loses constructor
+resolution except for constructor names unique program-wide.
 
 Verification after round 1: `scripts/run-tests.sh refinecheck` 2,102 tests green;
 `-q compiler` 1,351 green; `scripts/oracle-base.sh refine` IDENTICAL against `8aaeb6176`, and
 `refine-oracle.sh monotone` GREEN over 139,456 sites with 0 moves.
+
+## Review round 2 (of `c87e66495` + `037744add`)
+
+Five false proofs, all already present at base `8aaeb6176` (none a regression), none closed by
+round 1. **Root cause neither round saw: the typechecker treats two types of one SHORT name as one
+type** (`A.Tq` and `B.Tq` unify; a user type and a built-in of one name likewise): `A.g(B.ZB)`
+typechecks (probe `q1`), and the same program with B's type renamed is rejected (`c2diff`). So a
+constructor only `A.Tq` declares can legally be matched against a `B.Tq` value, and round 1's
+"a program-wide-unique constructor name pins its datatype" was false. Filed:
+`specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md` (`[P1]`), and the compiled
+crash of the `DownReason` probe, `specs/todos/2026-11-02-compiled-user-downreason-crashes-llvm-toplevel.md`.
+
+The rule now separates "the type is KNOWN but its short name is conflated" from "no type
+information":
+
+1. **`short_name_conflated`**: two or more module paths declare the short name (the seeded
+   built-ins `List`/`Option`/`Result` counted under `$builtin`), or a user declares a name from
+   the typechecker's built-in type table (`Typecheck_builtins.builtin_type_names`, now exported;
+   no hand-written list) that no stdlib file declares itself (`DownReason` without the stdlib's
+   `DistLink`, `Array`, …). A stdlib declaration of a built-in name (`Set`, `Map`, `Seq`, `Pid`,
+   `DownReason`) IS that nominal type, not a second declarant. Every key of a conflated name is in
+   `ambiguous_adts`.
+2. **`ctor_of_adt` returns `None` for every key in `ambiguous_adts`**, with no exception (round
+   1's unique-name exception is gone).
+3. **A site whose type is known but conflated declines**: `adt_of_type_name` (and so
+   `adt_of_tc_ty`, `adt_of_decl_ty`, `tc_adt_at`) returns the sentinel `$ambiguous`, which
+   resolves no constructor, instead of `None`; `field_adt` returns it for a conflated field type.
+   `resolve_source_ctor` never falls back to the name when it was handed a datatype. This closes
+   `c1` (nested pattern through a field), `c2` (arm exclusion), `c3` (top-level `type Option`),
+   `c4` (call-site tester) and `c5` (`type DownReason`).
+4. `Refine_post.ctor_belongs`, measure arms (`smt_arms`), `Refine_check`'s container sites and
+   `reflect_dt` all resolve through `ctor_of_adt`, so they decline alike.
+5. **`unique_ctor` (no type information at all) only for a constructor whose datatype is not
+   conflated.** Ruling: that is safe. A well-typed program builds a value matched by `C` with
+   `C`'s datatype `D`, or with a datatype the typechecker conflates with `D`, which exists only if
+   `D`'s short name is conflated; that case now declines. Cost if wrong: none found; the
+   alternative (never use the name alone) would also drop sites with no type map (unit
+   harnesses that do not typecheck).
+
+Minor items: the stale `rekey` comment about a top-level user `Option` is corrected (such a type
+is filed under `$top` since round 1, so the built-in stays the preferred declarant of
+`adt_sort_name "Option"`, which also settles "a top-level user `List`/`Option` becomes the
+preferred declarant").
+
+**Accepted cost:** `module-qualified-measure-and-sort` (a user top-level `Tree` beside the stdlib's
+`OrderedMap.Tree`) no longer proves or refutes; both cases are skips, and the test now pins that.
+By the same conflation those proofs were not safe.
+
+Tests (`reflect-ctor`, written first, RED on `037744add`, all reporting `proved`): `ctor review2
+c1` … `c5` (the five probes), plus `ctor review2: a program with no short-name conflation keeps
+its proofs` (GREEN before and after). Round-1 probes `p1`…`p10`, `t1` and round-2 probes rerun:
+no false proof; `p6b` line 13 still `violated`; `c2`, `c3`, `c5`'s reachable `need1(0)` is now
+reported `violated` (it is).
+
+Verification after round 2: `scripts/run-tests.sh refinecheck` 2,108 tests green; `-q compiler`
+1,351 green; `scripts/oracle-base.sh refine` IDENTICAL against `8aaeb6176`, and
+`refine-oracle.sh monotone` GREEN over 139,456 sites with 0 moves. The corpus (`test/native`,
+`stdlib`) has no site that depended on a conflated short name, so the conflation rule moved no
+oracle row; its cost shows only in `module-qualified-measure-and-sort`.

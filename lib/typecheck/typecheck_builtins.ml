@@ -2060,6 +2060,8 @@ let builtin_types : (string * int) list =
        the same nominal entries rather than inventing per-module wire tags. *)
     ("DownReason", 0); ("Down", 1); ]
 
+let builtin_type_names : string list = List.map fst builtin_types
+
 (** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType].
     Each constructor is registered under both its bare name ("Some") and its

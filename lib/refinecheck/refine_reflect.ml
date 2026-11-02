@@ -1011,6 +1011,9 @@ let resolve_ctor ?(adt : string option) (c : string) : string * string =
    is one: the sub-subject's type for a nested constructor pattern. *)
 let field_adt (smt : string) (i : int) : string option =
   match List.nth_opt (try Hashtbl.find RE.ctor_field_sorts_poly smt with Not_found -> []) i with
+  (* A field type whose short name two declarants share is KNOWN but
+     conflated: never a key a constructor resolves through (review round 2). *)
+  | Some (Smt.SData (a, _)) when Hashtbl.mem RE.ambiguous_adts a -> Some RE.ambiguous_adt_sentinel
   | Some (Smt.SData (a, _)) when Hashtbl.mem RE.adt_ctors a -> Some a
   | _ -> None
 
