@@ -376,7 +376,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                     def.Ast.fn_name.txt (String.concat ", " bound) c c))
         bound;
       Hashtbl.replace env.fn_bound_points qname
-        { fb_caps = List.sort_uniq String.compare bound; fb_span = nsp; fb_origin = Fn_decl }
+        { fb_caps = List.sort_uniq String.compare bound; fb_span = nsp;
+          fb_site = def.Ast.fn_name.Ast.span; fb_origin = Fn_decl }
   in
   (* An interface method's bound limits OTHER modules' impls, so unlike a
      function's it need not lie within this module's [needs] (the impl's own
@@ -392,12 +393,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       m.Ast.md_needs
   in
   let record_iface_bound ~(qname : string) ~(iface : string) ~(impl_ty : string option)
-      (m : Ast.method_decl) : unit =
+      ~(site : Ast.span) (m : Ast.method_decl) : unit =
     match iface_method_bound m with
     | None -> ()
     | Some (bound, nsp) ->
       Hashtbl.replace env.fn_bound_points qname
-        { fb_caps = bound; fb_span = nsp; fb_origin = Iface_method { iface; impl_ty } }
+        { fb_caps = bound; fb_span = nsp; fb_site = site;
+          fb_origin = Iface_method { iface; impl_ty } }
   in
   (* The interface an [impl] names: this module's own declaration first, then
      the environment, which holds the built-ins and other modules' interfaces
@@ -819,7 +821,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               Hashtbl.replace env.fn_scopes mangled cap_qname_prefix;
               record_expr_owner ~sp:idsp mangled [] [ e ];
               record_iface_bound ~qname:mangled ~iface:idef.Ast.iface_name.Ast.txt
-                ~impl_ty:None m;
+                ~impl_ty:None ~site:m.Ast.md_name.Ast.span m;
               if not (List.mem m.Ast.md_name.Ast.txt module_fn_names) then
                 record_dispatch_edge (cap_qname m.Ast.md_name.Ast.txt) mangled)
           idef.Ast.iface_methods
@@ -862,7 +864,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             in
             (match def.Ast.fn_needs, iface_method with
              | None, Some (iface, m) ->
-               record_iface_bound ~qname:mangled ~iface ~impl_ty:(Some ty_key) m
+               record_iface_bound ~qname:mangled ~iface ~impl_ty:(Some ty_key) ~site:mn.Ast.span m
              | Some (paths, nsp), Some (iface, m) ->
                (* An impl may narrow its interface's bound, never widen it.
                   Within it, the impl's own (tighter) bound is the one held;
@@ -884,7 +886,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                           interface `%s`'s `needs %s` for `%s`.\n\
                           help: narrow the impl's bound to within the interface's."
                          mn.Ast.txt iface ty_key (show_b own) iface (show_b ibound) mn.Ast.txt);
-                    record_iface_bound ~qname:mangled ~iface ~impl_ty:(Some ty_key) m
+                    record_iface_bound ~qname:mangled ~iface ~impl_ty:(Some ty_key) ~site:mn.Ast.span m
                   end)
              | _ -> record_fn_bound ~qname:mangled def);
             if not (List.mem mn.Ast.txt module_fn_names) then

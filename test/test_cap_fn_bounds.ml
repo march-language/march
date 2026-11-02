@@ -470,6 +470,58 @@ end|} in
   Alcotest.(check bool) "at the impure impl" true
     (List.exists (fun msg -> contains msg "impl Say(T)") bound_msgs)
 
+(* The built-in interfaces are bounded by `needs ()`: showing, comparing,
+   ordering and hashing a value never perform I/O.  A built-in has no source
+   span, so the error must point at the impl, not at generated code. *)
+let builtin_show body =
+  Printf.sprintf {|mod M do
+  needs IO.Console
+  type T = T(Int)
+  impl Show(T) do
+    fn show(_t) do
+%s
+    end
+  end
+end|} body
+
+let test_builtin_show_bound () =
+  clean "a pure impl of the built-in Show" (builtin_show {|      "t"|});
+  let src = builtin_show {|      println("x")
+      "t"|} in
+  rejects "cap_bound" "an impl of the built-in Show that prints" src;
+  Alcotest.(check bool) "names the built-in interface" true
+    (List.exists (fun msg -> contains msg "built-in interface `Show`") (messages src));
+  let errors = Test_helpers.typecheck src in
+  Alcotest.(check bool) "reported at the impl, not a synthetic span" true
+    (List.exists
+       (fun (d : March_errors.Errors.diagnostic) ->
+          d.March_errors.Errors.code = "cap_bound"
+          && d.March_errors.Errors.span.March_ast.Ast.start_line = 5)
+       errors.March_errors.Errors.diagnostics)
+
+let test_builtin_eq_ord_hash_bound () =
+  let src iface m ret body = Printf.sprintf {|mod M do
+  needs IO.Clock
+  type T = T(Int)
+  impl %s(T) do
+    fn %s(_a, _b) do
+%s
+      %s
+    end
+  end
+end|} iface m body ret in
+  rejects "cap_bound" "Eq" (src "Eq" "eq" "true" "let _ = unix_time()");
+  rejects "cap_bound" "Ord" (src "Ord" "compare" "0" "let _ = unix_time()");
+  clean "a pure Eq" (src "Eq" "eq" "true" "let _ = 1")
+
+let test_derived_impls_under_builtin_bound () =
+  clean "derived impls of all four"
+    {|mod M do
+  type U = U(Int, String)
+  derive Show, Eq, Ord, Hash for U
+  fn f(u : U) : String do show(u) end
+end|}
+
 let tests =
   [ Alcotest.test_case "direct reach" `Quick test_direct_reach
   ; Alcotest.test_case "transitive reach names the chain" `Quick test_transitive_reach_names_the_chain
@@ -503,4 +555,7 @@ let tests =
   ; Alcotest.test_case "impl narrowed bound still enforced" `Quick test_impl_narrowed_bound_still_enforced
   ; Alcotest.test_case "impl bound under unbounded method" `Quick test_impl_bound_under_unbounded_method
   ; Alcotest.test_case "interface violation reported once" `Quick test_iface_violation_reported_once
+  ; Alcotest.test_case "built-in Show bound" `Quick test_builtin_show_bound
+  ; Alcotest.test_case "built-in Eq and Ord bounds" `Quick test_builtin_eq_ord_hash_bound
+  ; Alcotest.test_case "derived impls under built-in bound" `Quick test_derived_impls_under_builtin_bound
   ]

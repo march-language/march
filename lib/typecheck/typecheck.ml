@@ -7960,10 +7960,13 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
     end
   in
   Hashtbl.iter
-    (fun qname { fb_caps = bound; fb_span = span; fb_origin } ->
+    (fun qname { fb_caps = bound; fb_span; fb_site; fb_origin } ->
        let row =
          Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows qname)
        in
+       (* A built-in interface's bound has no source: report at the impl. *)
+       let builtin = fb_span = Ast.dummy_span in
+       let span = if builtin then fb_site else fb_span in
        let leaf =
          match String.rindex_opt qname '.' with
          | Some i -> String.sub qname (i + 1) (String.length qname - i - 1)
@@ -7978,7 +7981,8 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
          | Fn_decl -> (Printf.sprintf "`%s`" leaf, Printf.sprintf "`needs %s`" shown)
          | Iface_method { iface; impl_ty = Some ty } ->
            ( Printf.sprintf "`%s` in `impl %s(%s)`" leaf iface ty,
-             Printf.sprintf "interface `%s`'s `needs %s`" iface shown )
+             Printf.sprintf "%sinterface `%s`'s `needs %s`"
+               (if builtin then "built-in " else "") iface shown )
          | Iface_method { iface; impl_ty = None } ->
            ( Printf.sprintf "the default `%s` of interface `%s`" leaf iface,
              Printf.sprintf "`needs %s`" shown )

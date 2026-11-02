@@ -192,8 +192,14 @@ type bound_origin =
   | Iface_method of { iface : string; impl_ty : string option }
 
 (** A bound to check: its capability paths, the span of the [needs] clause
-    that set it (the interface's, for an inherited bound), and its origin. *)
-type fn_bound = { fb_caps : string list; fb_span : Ast.span; fb_origin : bound_origin }
+    that set it (the interface's, for an inherited bound), the bounded
+    declaration's own span, and its origin. *)
+type fn_bound = {
+  fb_caps : string list;
+  fb_span : Ast.span;
+  fb_site : Ast.span;  (** the bounded declaration's name: reported at when [fb_span] has no source (a built-in interface) *)
+  fb_origin : bound_origin;
+}
 
 type env = {
   vars    : scheme StrMap.t;               (** Term variable → scheme *)

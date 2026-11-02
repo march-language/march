@@ -235,7 +235,7 @@ type ref_record = {
 type bound_origin =
   | Fn_decl
   | Iface_method of { iface : string; impl_ty : string option }
-type fn_bound = { fb_caps : string list; fb_span : Ast.span; fb_origin : bound_origin }
+type fn_bound = { fb_caps : string list; fb_span : Ast.span; fb_site : Ast.span; fb_origin : bound_origin }
 type env = {
   vars : scheme StrMap.t;
   types : int StrMap.t;

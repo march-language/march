@@ -128,6 +128,7 @@ type bound_origin =
 type fn_bound = {
   fb_caps : string list;
   fb_span : Typecheck_types.Ast.span;
+  fb_site : Typecheck_types.Ast.span;
   fb_origin : bound_origin;
 }
 type env = {
