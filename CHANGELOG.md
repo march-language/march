@@ -39,6 +39,17 @@ git log is authoritative for exact commits.
   `specs/progress/2026-10-30-int-overflow-trap.md` (design decision 2026-09-29,
   `specs/plans/2026-09-28-road-to-1.0.md`).
 
+- **`cap no_panic` now proves Int `+`, `-`, `*` and unary `-` cannot overflow.** Since
+  those operators panic on overflow they are panic sites, and a `cap no_panic` module must
+  show each one stays in [-2^62, 2^62) from refinements, guards and `let` values in scope
+  (new error code `int_overflow`, with a value the checker could not rule out). Every Int
+  the program holds counts as in range, so `x - 1` under `x >= 0` and `x + 1` under
+  `x < n` pass; a bare `x + 1` on an unrefined `x` is now an error. Spell intended or
+  externally bounded arithmetic with `int_wrapping_add` / `int_wrapping_sub` /
+  `int_wrapping_mul`. Float arithmetic is not checked. The stdlib's one `cap no_panic`
+  module, `JsonStream`, now spells its byte-offset and depth arithmetic that way (same
+  results for any real input).
+
 ### Added
 
 - **Hot deploys report their running schema baseline.** Hot-reload binaries embed
@@ -548,6 +559,19 @@ git log is authoritative for exact commits.
   inferred, so well-typed callers are unaffected and nothing runs differently.
 
 ### Fixed
+
+- **`cap no_panic` accepted a division by a `let` that rebinds its own name.** In
+  `let d = d - 1` followed by `10 / d`, the checker read the binding as the equation
+  `d = d - 1`, which no integer satisfies, so `d != 0` was vacuously proved and the
+  division by zero at `d = 1` went unreported. A `let` whose right-hand side names
+  the variable it binds, or names a variable rebound later, is no longer used as an
+  equation.
+
+- **The refinement checker sent `-2^62` to Z3 as `+2^62`.** An Int literal equal to
+  `int_min_value()` was printed `(- -4611686018427387904)`, because negating it in the
+  compiler wrapped back to itself; Z3 read that as 2^62. Any VC mentioning the literal
+  got the wrong number, which could make its assumptions contradictory and its goal
+  vacuously proved.
 
 - Generated topology offers select the accepting work's compatible version before
   creating a session endpoint. Saved user closures and running sessions retain their

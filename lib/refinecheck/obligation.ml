@@ -198,8 +198,12 @@ type verdict = Proved | Violated | Trusted | Skipped of reason
    design §3.4), [callee] naming the CALLED function.  Its own kind for the
    [Division] reason verbatim: `cap verified` escalates only the termination
    obligations of an annotated function (decision D2), and folding them into
-   [Precondition] would change both consumers for every recursive module. *)
-type kind = Precondition | Postcondition | Division | Termination
+   [Precondition] would change both consumers for every recursive module.
+
+   [Overflow]: a `cap no_panic` Int `+ - *` or negation checked to stay in
+   [-2^62, 2^62) by [Overflow_safety]; [callee] names the operator.  Its own
+   kind for the same reason as [Division]. *)
+type kind = Precondition | Postcondition | Division | Termination | Overflow
 
 type t =
   { span : March_ast.Ast.span
@@ -476,10 +480,13 @@ let summary () =
    tested.  The termination count (termination design §6) is printed only
    when there is one: such obligations exist only for an `@[decreases]`
    function or under `--termination-report`, so every other report keeps the
-   exact line it always had. *)
+   exact line it always had.  The overflow count follows the same rule: only a
+   `cap no_panic` module with Int arithmetic has any. *)
 let by_kind_line (os : t list) : string =
   let count k = List.length (List.filter (fun o -> o.kind = k) os) in
   let termination = count Termination in
-  Printf.sprintf "  by kind: %d precondition, %d postcondition, %d division%s" (count Precondition)
+  let overflow = count Overflow in
+  Printf.sprintf "  by kind: %d precondition, %d postcondition, %d division%s%s" (count Precondition)
     (count Postcondition) (count Division)
     (if termination > 0 then Printf.sprintf ", %d termination" termination else "")
+    (if overflow > 0 then Printf.sprintf ", %d overflow" overflow else "")

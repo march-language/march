@@ -4,8 +4,10 @@ mod P22CapabilityDirectives do
   proof cap Trusted
   cap no_panic
 
+  -- `cap no_panic` must prove an Int `+` cannot overflow; unbounded
+  -- parameters cannot be, so the sum is spelled with the wrapping builtin.
   fn add(a: Int, b: Int): Int do
-    a + b
+    int_wrapping_add(a, b)
   end
 
   fn main(_cap_console : Cap(IO.Console)) do
