@@ -292,7 +292,12 @@ let rec render = function
   | IsCtor (c, Ctor (c', _, _)) | IsCtorAt (c, _, _, Ctor (c', _, _)) -> if c = c' then "true" else "false"
   | IsCtor (c, t) | IsCtorAt (c, SData (_, []), _, t) -> Printf.sprintf "((_ is %s) %s)" c (render t)
   | IsCtorAt (c, s, n, t) -> tester_at c s n (render t)
-  | IntLit n -> if n < 0 then Printf.sprintf "(- %d)" (- n) else string_of_int n
+  (* Negative numerals are `(- n)` in SMT-LIB.  The magnitude is taken from the
+     decimal text, not as [- n]: [- min_int] is [min_int] again, which printed
+     `(- -4611686018427387904)`, i.e. +2^62. *)
+  | IntLit n ->
+    let s = string_of_int n in
+    if n < 0 then Printf.sprintf "(- %s)" (String.sub s 1 (String.length s - 1)) else s
   | BoolLit b -> if b then "true" else "false"
   | FloatLit (neg, d) -> render_float neg d
   | Add (a, b) -> Printf.sprintf "(+ %s %s)" (render a) (render b)

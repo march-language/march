@@ -60,6 +60,7 @@ let extern_needs_foreign = "extern_needs_foreign"
 let field_access_non_record = "field_access_non_record"
 let import_cap_missing = "import_cap_missing"
 let internal_error = "internal_error"
+let int_overflow = "int_overflow"
 let invalid_cap_scope = "invalid_cap_scope"
 let invalid_decreases = "invalid_decreases"
 let invalid_measure = "invalid_measure"
@@ -241,6 +242,7 @@ let all = [
   field_access_non_record;
   import_cap_missing;
   internal_error;
+  int_overflow;
   invalid_cap_scope;
   invalid_decreases;
   invalid_measure;

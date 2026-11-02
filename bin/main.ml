@@ -843,6 +843,7 @@ let print_refine_report_sites ~filename ~user_files () =
           | March_refinecheck.Obligation.Postcondition -> "postcondition"
           | March_refinecheck.Obligation.Division -> "division"
           | March_refinecheck.Obligation.Termination -> "termination"
+          | March_refinecheck.Obligation.Overflow -> "overflow"
         in
         Printf.eprintf "skip\t%s\t%s:%d:%d\t%s\t%s\t%s\t%s\n"
           (if is_user_span span then "user" else "stdlib")
@@ -874,6 +875,7 @@ let print_refine_report_sites_all ~filename ~user_files () =
         | O.Postcondition -> "postcondition"
         | O.Division -> "division"
         | O.Termination -> "termination"
+        | O.Overflow -> "overflow"
       in
       let slice = if is_user_span span then "user" else "stdlib" in
       let loc =
@@ -2604,8 +2606,9 @@ let run_test_cmd args =
     if !termination_report then
       print_termination_report ~filename ~user_files ~type_map desugared;
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
-    (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
+    (* Division- and overflow-safety: Z3-backed checks for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
+    March_refinecheck.Overflow_safety.check_module ~type_map errors desugared;
     (* After [Division_safety]: its [Division] obligations are part of the
        listing (and what R4 reads). *)
     if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
@@ -3899,8 +3902,9 @@ let compile filename =
   if !termination_report then
     print_termination_report ~filename ~user_files ~type_map desugared;
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
-  (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
+  (* Division- and overflow-safety: Z3-backed checks for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
+  March_refinecheck.Overflow_safety.check_module ~type_map errors desugared;
   if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
   if !reflect_deps then print_reflect_deps ~filename ~user_files ();
   if !reflect_parity then run_reflect_parity ~filename ~user_files ();
