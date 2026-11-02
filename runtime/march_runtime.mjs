@@ -102,18 +102,22 @@ function march_encode_bytes(s) {
   return out.subarray(0, n);
 }
 
-// The last few strings' byte views (null: every code unit is one byte).
-const march_view_cache = [];
+// The last few strings' byte views (null: every code unit is one byte), keyed by
+// the string itself: a Map hashes a string once and keeps the hash, where `===`
+// compares contents (JavaScriptCore does so even for a string and itself, which
+// made every byte_at on a 3.5 MB string cost ~150 us in Safari).
+const march_view_cache = new Map();
 function march_byte_view(s) {
   if (s.length < 32) {
     for (let i = 0; i < s.length; i++) if (!march_unit_is_byte(s.charCodeAt(i))) return march_encode_bytes(s);
     return null;
   }
-  for (const e of march_view_cache) if (e.s === s) return e.v;
+  const hit = march_view_cache.get(s);
+  if (hit !== undefined) return hit;
   let v = null;
   for (let i = 0; i < s.length; i++) if (!march_unit_is_byte(s.charCodeAt(i))) { v = march_encode_bytes(s); break; }
-  march_view_cache.unshift({ s, v });
-  if (march_view_cache.length > 4) march_view_cache.pop();
+  march_view_cache.set(s, v);
+  if (march_view_cache.size > 4) march_view_cache.delete(march_view_cache.keys().next().value);
   return v;
 }
 

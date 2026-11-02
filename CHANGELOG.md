@@ -19,6 +19,15 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--target js` byte strings are fast in Safari.** Each byte access on a long string
+  (`byte_at`, `byte_length`, `slice`) looked up its cached byte view by comparing strings
+  with `===`, which JavaScriptCore does in time linear in the string's length, even for a
+  string and itself. A game decoding a 3.5 MB world file never finished loading in
+  Safari. The cache is now a `Map` keyed by the string, which also stops V8 comparing
+  every byte of same-length strings on a miss.
+
 ## [0.7.0] - 2026-11-02
 
 ### Breaking changes
