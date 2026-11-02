@@ -1152,12 +1152,15 @@ let mode_change_refusal (changes : (string * string list) list) : string =
 
    Which slot-hash changes are logic changes: with the running build's
    manifest ([prior]) the two `logic=` fields are compared.  Without it, a
-   function that is reflected in the patch and whose slot hash differs for a
-   reason other than its borrow modes counts as one (its old body, or its
-   old reflectability, cannot be told apart from a type change: the
-   conservative side).  The one shape this misses is a function that WAS
-   reflected and is not in the patch, with no prior manifest: that reaches
-   the ordinary signature gate below. *)
+   function whose slot hash differs for a reason other than its borrow modes
+   counts as one when it is reflected in the patch, or when the running hash
+   is not the plain [hcr_sig_hash] of the patch's type and modes: an
+   unreflected slot publishes exactly that hash, so a different one means
+   the running version WAS reflected (now `@[opaque]`, effectful, or
+   unreflectable through a callee) -- or its type changed, which cannot be
+   told apart without the manifest (the conservative side; review round 1
+   of phase 1b, which found the "was reflected, is not now" shape reaching
+   the coordinated-upgrade gate). *)
 
 (** The functions of [to_activate] whose reflected logic changed against the
     running version, each with the change in words. *)
@@ -1176,15 +1179,23 @@ let logic_changes ~(prior : manifest option) ~(slot_of : string -> slot option)
                        && slot.slot_sig_hash <> fm.fn_sig_hash
                        && running_modes ~slot_sig:slot.slot_sig_hash fm = None ->
         let now = norm fm.fn_logic in
-        let changed =
-          match prior_logic fm.fn_name with
-          | Some before -> before <> now
-          | None -> now <> "-"
+        let plain_running () =
+          fm.fn_type_sig <> ""
+          && slot.slot_sig_hash = March_cas.Hash.hcr_sig_hash ~sig_hash:fm.fn_type_sig ~modes:fm.fn_modes
         in
-        if changed then
-          Some (fm.fn_name,
-                Printf.sprintf "the body of `%s` is part of its callers' proofs" fm.fn_name)
-        else None
+        (match prior_logic fm.fn_name with
+         | Some before when before <> now ->
+           Some (fm.fn_name, Printf.sprintf "the body of `%s` is part of its callers' proofs" fm.fn_name)
+         | Some _ -> None
+         | None when now <> "-" ->
+           Some (fm.fn_name, Printf.sprintf "the body of `%s` is part of its callers' proofs" fm.fn_name)
+         | None when not (plain_running ()) ->
+           Some (fm.fn_name,
+                 Printf.sprintf
+                   "the running `%s` was reflected (its slot hash is not the plain hash of its type and \
+                    modes; with no running manifest a type change reads the same), and its body is part \
+                    of its callers' proofs" fm.fn_name)
+         | None -> None)
       | _ -> None)
     to_activate
 

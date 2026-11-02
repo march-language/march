@@ -790,6 +790,16 @@ let test_logic_changes () =
   (* reflected -> @[opaque] is a logic change too (the old callers' proofs) *)
   Alcotest.(check int) "reflected -> opaque (prior)" 1
     (List.length (changes ~prior:(manifest [ fm ~logic:l1 ]) ~running:(slot ~logic:l1) (fm ~logic:"")));
+  (* review round 1: reflected -> unreflected (@[opaque], an effect, a
+     callee that stopped being reflected) with NO running manifest: the
+     running slot hash is not the plain hash of the patch's type and modes,
+     so it was reflected (or the type changed: cannot be told apart).
+     Refused; before the fix `now = "-"` read as "no logic change" and fell
+     through to the coordinated-upgrade gate. *)
+  Alcotest.(check int) "reflected -> unreflected (no prior)" 1
+    (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:"")));
+  Alcotest.(check int) "reflected -> unreflected, `-` (no prior)" 1
+    (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:"-")));
   (* an @[opaque] function's body edit: same slot hash, nothing to say *)
   Alcotest.(check int) "opaque body edit" 0 (List.length (changes ~running:(slot ~logic:"-") (fm ~logic:"")));
   Alcotest.(check int) "unchanged reflected body" 0 (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:l1)));
