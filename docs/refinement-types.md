@@ -1336,8 +1336,9 @@ Nothing stale survives such an edit:
   hot-patch should be `@[opaque]`; its body then keys no caller's proof.
 - In the editor, with `MARCH_LSP_REFINE=1`, the language server shows
   refinement diagnostics for saved files. Saving `util.march` re-checks every
-  open file whose proofs used a definition from it that changed, without an
-  edit to that file.
+  open file whose proofs used a definition from it that changed, or that calls
+  (directly or through other functions) a function whose refinement contract or
+  reflectability changed, without an edit to that file.
 
 **Checking the checker: `--reflection-parity`.** `forge test
 --reflection-parity` (or `march --check --reflect-parity file.march`) runs each
@@ -1346,11 +1347,14 @@ by the interpreter. The inputs include `0`, `1`, `-1`, the largest and smallest
 `Int` and their neighbours. Any disagreement, or a reflected function that
 panics on an input in its domain, fails the run: that is a compiler bug.
 A function whose arithmetic overflows at the boundary is reported `overflow?`,
-since the checker treats `Int` as unbounded (above). Example output:
+since the checker treats `Int` as unbounded (above). A reflected function the
+net cannot run by its definition (a `Float` comparison, a parameter type with
+no generator) is listed `not-compared` with the reason. A file whose ordinary
+check fails is reported as a check failure, not a parity failure. Example output:
 
 ```
 parity  m.march  area  agree      100 inputs
-parity  m.march  inc   overflow?  attempt to add with overflow at (4611686018427387903)
+parity  m.march  inc   overflow?  attempt to add with overflow at (4611686018427387903); 100 inputs compared
 ```
 
 ### `@[measure]`: insisting on reflection

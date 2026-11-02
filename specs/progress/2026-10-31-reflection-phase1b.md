@@ -75,10 +75,16 @@ open todo `2026-10-30-reflection-phase1b.md`; what stays open is
    frame already running was proved against the old body. Without the running build's manifest,
    a reflected function whose slot hash changed for a reason other than its modes is refused
    (cannot be told apart from a type change: conservative); with it, the `logic=` fields are
-   compared. Gap: a function that WAS reflected and is not in the patch (e.g. newly `@[opaque]`),
-   with no prior manifest and every caller in the deploy, reaches the ordinary signature gate. If
-   the refinement check did not run in the compiling process, no logic hash exists and the gate
-   sees `-` (the compile pipeline always runs it before TIR, `MARCH_REFLECT=0` aside).
+   compared. Without it, a function counts as a logic change when it is reflected in the patch,
+   or when the running slot hash is not the plain `hcr_sig_hash` of the patch's type and modes
+   (an unreflected slot publishes exactly that, so a different hash means it WAS reflected: now
+   `@[opaque]`, effectful, or unreflectable through a callee). Review round 1 closed the gap the
+   first version left here (that shape reached the coordinated-upgrade gate, which accepts it
+   with only a warning once `hcr_epoch > 0`). Cost: with no running manifest, a type change of an
+   unreflected function reads the same and is refused too (redeploy, or deploy with the running
+   build's manifest, which `forge deploy` always passes when it has it). If the refinement check
+   did not run in the compiling process, no logic hash exists and the gate sees `-` (the compile
+   pipeline always runs it before TIR, `MARCH_REFLECT=0` aside).
 4. **LSP refinement diagnostics are opt-in and on save.** Each check is a whole `march --check` of
    the file on disk (seconds), and an unsaved buffer is not what the compiler reads; on by
    default, existing LSP suites that read "the next publishDiagnostics" would see extra
@@ -143,6 +149,38 @@ row is a behaviour change):
     withdrawn 0.** The three lists are empty; no corpus fixture has a guard that calls a reflected
     function, so 5c moves no corpus site.
 
+## Review round 1
+
+A soundness review found no false proof and four problems; each fixed test-first (RED measured on
+the unfixed build, then GREEN):
+
+1. **LSP staleness missed contracts.** A dependant was keyed only on the reflected bodies in its
+   frontier, so `Util.need`'s parameter refinement going `v > 1` -> `v > 100` left
+   `Util.need(3)` clean in the editor, and a callee going from blocked to reflected re-checked
+   nothing. `--reflect-deps` now also prints `reflect-cdef` (a CONTRACT hash for every user
+   function: BLAKE3 over its attributes, its head's text up to its last clause's body, and
+   whether it is reflected, with its guards; `RS.contract_defs`, lazy) and `reflect-cdep` (the
+   contract of every function of another user file the entry REACHES through the termination
+   graph's edges, `RS.contract_reach`: a callee's reflectability rests on its own callees).
+   `Refine_diag` keys on both and marks a dependant stale when any file the changed file's check
+   reported (not only the changed file) no longer has one of its hashes. Rows in
+   `refine-diagnostics`: contract edit (RED: 0 files re-checked), blocked -> reflected (RED: 0),
+   a third file's effect unreflecting a callee (RED with direct callees only: 0; GREEN with
+   reach). `deps-core` still turns the frontier-vs-core row RED.
+2. **HCR: reflected -> unreflected with no running manifest** fell through to the
+   coordinated-upgrade gate (`now = "-"`). Ruling 3 above is amended; `test_logic_changes`
+   gains the `logic=""`/`"-"` rows (RED: 0 changes, GREEN: 1).
+3. **`overflow?` with zero inputs compared** is now `not-compared` (the logic decided no input;
+   the overflow is in the reason), and an `overflow?` row says `N inputs compared`.
+4. **The parity net dropped reflected functions with no template** (and with no logic symbol at
+   all, e.g. a `Float` parameter: `p1.march` printed `parity: 0 functions`). They are listed
+   `not-compared` with the reason (`Refine_reflect.reflected_fns` supplies the ones without a
+   symbol). `forge test --reflection-parity` runs each file once and reports a nonzero exit as
+   parity RED only when the net printed `parity: RED`; otherwise "the check failed (no parity
+   verdict)" with the check's diagnostics. Tests: `reflect-parity` rows 2-3 (RED: `overflow?`;
+   no row for `f`), `test_build_check` "forge test" rows 3-5 (RED: a refinement violation read
+   "reflection parity RED").
+
 ## Not done, deferred or unverified
 
 - 5b (ruling 1) and everything in `specs/todos/2026-10-31-reflection-encoder-gaps.md`.
@@ -150,8 +188,8 @@ row is a behaviour change):
   has the hook (`Refine_diag.lemma_key`), untested beyond "empty".
 - The server wiring of `Refine_diag` (publish on open/save/watched change, merge with the
   analysis's diagnostics) is built but not driven by a JSON-RPC test; `Refine_diag` itself is.
-- `forge test --reflection-parity` was run by hand on a scratch project (agree/overflow? green;
-  under `swap-arms` it exits 1 naming the file); no automated forge test.
+- `forge test --reflection-parity`'s project walk is not driven by a test; its per-file runner
+  (`Cmd_test.run_reflection_parity`) is, in `test_build_check` (review round 1).
 - §9.2's always-in-CI corpus sweep (every reflected function of `test/native` and the stdlib) and
   `--reflect-report`'s `overflow?` mark are not built: the net runs on the phase fixtures in
   `reflect-parity`, and `overflow?` is printed by the net itself. The axiom-tier measures are in

@@ -41,12 +41,16 @@ git log is authoritative for exact commits.
   `forge test --reflection-parity` (or `march --check --reflect-parity`) runs every
   reflected function both by its logic definition and in the interpreter, on generated
   inputs including the largest and smallest `Int`; a disagreement or a panic inside the
-  function's domain fails the run, and boundary overflow is reported `overflow?`.
+  function's domain fails the run, and boundary overflow is reported `overflow?`. A
+  reflected function the net cannot compare is listed `not-compared` with the reason, and
+  a file whose ordinary check fails is reported as a check failure, not a parity failure.
 - **Logic hashes in `--dump-impl-hashes`.** A fourth column gives each reflected
   function's logic hash (`-` when not reflected); every solver query that used a
-  definition names the hash in its cache key. `--reflect-deps` prints the hashes, and the
-  language server (opt-in, `MARCH_LSP_REFINE=1`) uses them to re-check open files when a
-  definition they relied on changes in another file.
+  definition names the hash in its cache key. `--reflect-deps` prints the hashes (and a
+  contract hash for every function a file reaches in other files), and the language
+  server (opt-in, `MARCH_LSP_REFINE=1`) uses them to re-check open files when a
+  definition, a refinement contract or the reflectability of a function they rely on
+  changes in another file.
 - **A parameter refinement may call a reflected function** (`fn f(n : {Int | is_small(_)})`),
   and the function is still reflected.
 
