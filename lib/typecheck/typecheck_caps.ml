@@ -180,7 +180,7 @@ let fn_capability_rows_tbl ?(with_rows = true) (env : env)
       t
     end
   in
-  March_caps.Cap_rows.solve ~with_rows ~own_caps:env.own_cap_closures
+  March_caps.Cap_rows.solve ~with_rows ~scopes:env.fn_scopes ~own_caps:env.own_cap_closures
     ~refs:env.fn_refs ~seeds ()
 
 let fn_transitive_capability_closures_tbl (env : env)
@@ -347,6 +347,16 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      so a function bound wider than the module would claim authority nothing
      grants.  The bound itself is held against the function's row by
      [Typecheck.check_fn_bounds] once every module's closure is complete. *)
+  let unknown_bound_cap ~(span : Ast.span) (c : string) : bool =
+    match March_caps.Cap_lattice.suggest_cap c with
+    | Some known ->
+      Err.error ~code:Err.Code.unknown_capability env.errors ~span
+        (Printf.sprintf
+           "`%s` is not a known capability.\n\
+            help: did you mean `%s`?" c known);
+      true
+    | None -> false
+  in
   let record_fn_bound ~(qname : string) (def : Ast.fn_def) : unit =
     match def.Ast.fn_needs with
     | None -> ()
@@ -354,13 +364,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       let bound = List.map cap_path_of_names paths in
       List.iter
         (fun c ->
-           match March_caps.Cap_lattice.suggest_cap c with
-           | Some known ->
-             Err.error ~code:Err.Code.unknown_capability env.errors ~span:nsp
-               (Printf.sprintf
-                  "`%s` is not a known capability.\n\
-                   help: did you mean `%s`?" c known)
-           | None ->
+           if unknown_bound_cap ~span:nsp c then ()
+           else
              if not (List.exists (fun n -> cap_subsumes n c) declared_needs) then
                Err.error ~code:Err.Code.cap_bound_needs env.errors ~span:nsp
                  (Printf.sprintf
@@ -370,7 +375,51 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                      help: add `needs %s` to the module, or narrow the bound."
                     def.Ast.fn_name.txt (String.concat ", " bound) c c))
         bound;
-      Hashtbl.replace env.fn_bound_points qname (List.sort_uniq String.compare bound, nsp)
+      Hashtbl.replace env.fn_bound_points qname
+        { fb_caps = List.sort_uniq String.compare bound; fb_span = nsp; fb_origin = Fn_decl }
+  in
+  (* An interface method's bound limits OTHER modules' impls, so unlike a
+     function's it need not lie within this module's [needs] (the impl's own
+     module still needs the capability, which Check 4 enforces as usual); it
+     must only name real capabilities.  It is recorded as the bound point of
+     each impl method (and of the interface's default body) that declares no
+     bound of its own; [check_fn_bounds] then holds that body's row under it.
+     Nothing here touches a type, a constraint or a caller. *)
+  let iface_method_bound (m : Ast.method_decl) : (string list * Ast.span) option =
+    Option.map
+      (fun (paths, nsp) ->
+         (List.sort_uniq String.compare (List.map cap_path_of_names paths), nsp))
+      m.Ast.md_needs
+  in
+  let record_iface_bound ~(qname : string) ~(iface : string) ~(impl_ty : string option)
+      (m : Ast.method_decl) : unit =
+    match iface_method_bound m with
+    | None -> ()
+    | Some (bound, nsp) ->
+      Hashtbl.replace env.fn_bound_points qname
+        { fb_caps = bound; fb_span = nsp; fb_origin = Iface_method { iface; impl_ty } }
+  in
+  (* The interface an [impl] names: this module's own declaration first, then
+     the environment, which holds the built-ins and other modules' interfaces
+     under both their qualified and short names. *)
+  let find_interface (name : string) : Ast.interface_def option =
+    let short =
+      match String.rindex_opt name '.' with
+      | Some i -> String.sub name (i + 1) (String.length name - i - 1)
+      | None -> name
+    in
+    match
+      List.find_map
+        (function
+          | Ast.DInterface (idef, _) when idef.Ast.iface_name.Ast.txt = short -> Some idef
+          | _ -> None)
+        decls
+    with
+    | Some idef -> Some idef
+    | None ->
+      (match StrMap.find_opt name env.interfaces with
+       | Some idef -> Some idef
+       | None -> StrMap.find_opt short env.interfaces)
   in
   (* See [locally_declared_names_of] for why a raw call-name match against
      [builtin_cap_table] must first check for module-local shadowing. *)
@@ -756,6 +805,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          Pinned by [test_interface_default_does_not_capture_a_same_named_fn]. *)
       | Ast.DInterface (idef, idsp) ->
         List.iter (fun (m : Ast.method_decl) ->
+            (match m.Ast.md_needs with
+             | Some (paths, nsp) ->
+               List.iter (fun p -> ignore (unknown_bound_cap ~span:nsp (cap_path_of_names p))) paths
+             | None -> ());
             match m.Ast.md_default with
             | None -> ()
             | Some e ->
@@ -763,7 +816,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                 cap_qname
                   (idef.Ast.iface_name.Ast.txt ^ "$default." ^ m.Ast.md_name.Ast.txt)
               in
+              Hashtbl.replace env.fn_scopes mangled cap_qname_prefix;
               record_expr_owner ~sp:idsp mangled [] [ e ];
+              record_iface_bound ~qname:mangled ~iface:idef.Ast.iface_name.Ast.txt
+                ~impl_ty:None m;
               if not (List.mem m.Ast.md_name.Ast.txt module_fn_names) then
                 record_dispatch_edge (cap_qname m.Ast.md_name.Ast.txt) mangled)
           idef.Ast.iface_methods
@@ -784,17 +840,30 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          a plain function's identity. *)
       | Ast.DImpl (idef, idsp) ->
         let ty_key = impl_ty_key idef.Ast.impl_ty in
+        let iface_def = find_interface idef.Ast.impl_iface.Ast.txt in
         List.iter (fun ((mn : Ast.name), (def : Ast.fn_def)) ->
             let mangled =
               cap_qname
                 (idef.Ast.impl_iface.Ast.txt ^ "$" ^ ty_key ^ "." ^ mn.Ast.txt)
             in
+            Hashtbl.replace env.fn_scopes mangled cap_qname_prefix;
             List.iter (fun (c : Ast.fn_clause) ->
                 record_expr_owner ~sp:idsp mangled (fn_clause_param_names c)
                   (c.Ast.fc_body :: Option.to_list c.Ast.fc_guard
                    @ default_param_exprs c))
               def.Ast.fn_clauses;
-            record_fn_bound ~qname:mangled def;
+            (match def.Ast.fn_needs, iface_def with
+             | None, Some iface ->
+               (match
+                  List.find_opt
+                    (fun (m : Ast.method_decl) -> m.Ast.md_name.Ast.txt = mn.Ast.txt)
+                    iface.Ast.iface_methods
+                with
+                | Some m ->
+                  record_iface_bound ~qname:mangled ~iface:iface.Ast.iface_name.Ast.txt
+                    ~impl_ty:(Some ty_key) m
+                | None -> ())
+             | _ -> record_fn_bound ~qname:mangled def);
             if not (List.mem mn.Ast.txt module_fn_names) then
               record_dispatch_edge (cap_qname mn.Ast.txt) mangled)
           idef.Ast.impl_methods

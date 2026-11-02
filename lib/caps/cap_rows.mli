@@ -98,8 +98,18 @@ type row = { caps : string list; deps : string list; unknown : bool }
 
 val empty_row : row
 
+val ref_prefix : ?scopes:(string, string) Hashtbl.t -> string -> string
+(** The prefix a bare reference made from inside [owner] is qualified with
+    ("Mod.Sub." or ""): [owner]'s entry in [scopes] when it has one, else
+    everything up to its last ['.'].  [scopes] is for keys whose last segment
+    is not their scope, i.e. an impl method or interface default body keyed
+    [<scope>.<Iface>$<Ty>.<m>]: its prefix-by-dot is [<scope>.<Iface>$<Ty>.],
+    so a local helper resolved against it was missed in a nested module.
+    Shared by [solve] and [cap_reach_chain] so the two cannot drift. *)
+
 val solve :
   ?with_rows:bool ->
+  ?scopes:(string, string) Hashtbl.t ->
   own_caps:(string, string list) Hashtbl.t ->
   refs:(string, string list) Hashtbl.t ->
   seeds:(string, seed) Hashtbl.t ->

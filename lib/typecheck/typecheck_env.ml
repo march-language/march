@@ -183,6 +183,18 @@ type ref_record = {
 let qualify_ref_name (modname : string) (name : string) : string =
   if modname = "" then name else modname ^ "." ^ name
 
+(** Where a per-function capability bound came from.  [Fn_decl] is written
+    on the function itself (phase 1); [Iface_method] is inherited from an
+    interface method's [needs] ([impl_ty = None] for the interface's own
+    default body).  Only the diagnostic wording depends on it. *)
+type bound_origin =
+  | Fn_decl
+  | Iface_method of { iface : string; impl_ty : string option }
+
+(** A bound to check: its capability paths, the span of the [needs] clause
+    that set it (the interface's, for an inherited bound), and its origin. *)
+type fn_bound = { fb_caps : string list; fb_span : Ast.span; fb_origin : bound_origin }
+
 type env = {
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)
@@ -660,6 +672,12 @@ type env = {
       reachability walk with these, a module-level `let` reaching a
       stdlib-mediated capability would be pruned as "unreachable from main" and
       the ceiling would miss it — a violation `--compile` still catches. *)
+  fn_scopes : (string, string) Hashtbl.t;
+  (** Module scope ("Mod.Sub", or "" for the entry module) of each capability
+      key whose scope is NOT the part before its last ['.']: an impl method
+      ([<scope>.<Iface>$<Ty>.<m>]) or interface default body.  Read through
+      [Cap_rows.ref_prefix] by every reference resolver; without it a nested
+      module's impl was charged nothing for its local helpers. *)
   fn_refs : (string, string list) Hashtbl.t;
   (** Per-function REFERENCE edges: fully-qualified function name ("Mod.fn",
       or the BARE name for a top-level function of the entry module — the same
@@ -713,10 +731,10 @@ type env = {
       still populated — Task 8 reads it to attribute a whole-program grant
       violation to the user's call chain — but nothing currently checks it.
       [main] is excluded regardless — [check_main_grant] owns it. *)
-  fn_bound_points : (string, string list * Ast.span) Hashtbl.t;
+  fn_bound_points : (string, fn_bound) Hashtbl.t;
   (** Functions declaring a per-function capability bound
-      ([fn f(x) needs IO.Console do]) — qualified name (the [cap_qname]
-      convention) → (the bound's capability paths, the bound's span).
+      ([fn f(x) needs IO.Console do]) or inheriting one from an interface
+      method — qualified name (the [cap_qname] convention) → [fn_bound].
       Recorded by [check_module_needs]; read by [check_fn_bounds], which holds
       each function's row under its bound.  Shared (mutated in place) across
       every env copy.  See specs/plans/2026-11-01-per-function-needs-bounds.md. *)
@@ -817,6 +835,7 @@ let make_env errors type_map = {
   body_cap_closures = Hashtbl.create 64;
   stdlib_fns = Hashtbl.create 64;
   ceiling_extra_roots = Hashtbl.create 16;
+  fn_scopes = Hashtbl.create 16;
   fn_refs = Hashtbl.create 64;
   fn_row_bodies = Hashtbl.create 64;
   role_grants = Hashtbl.create 8;

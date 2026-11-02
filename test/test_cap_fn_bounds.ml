@@ -216,6 +216,184 @@ let test_iface_formatter_keeps_the_bound () =
   Alcotest.(check string) "idempotent" out
     (March_format.Format.format_source ~filename:"t.march" out)
 
+(* An interface bound is checked on every impl, and on the default body.  It is
+   never part of the method's type: callers and [when] constraints see nothing
+   new, which is the "no capability threading" rule. *)
+let shows ?(iface_needs = "needs ()") ?(module_needs = "IO.Console") impl_body =
+  Printf.sprintf {|mod M do
+  needs %s
+  interface Show(a) do
+    fn show : a -> String %s
+  end
+  type T = T(Int)
+  pfn log(s : String) : Unit do println(s) end
+  impl Show(T) do
+    fn show(_t) do
+%s
+    end
+  end
+end|} module_needs iface_needs impl_body
+
+let test_impl_inherits_iface_bound () =
+  clean "a pure impl under `needs ()`" (shows {|      "t"|});
+  rejects "cap_bound" "an impl that prints under `needs ()`"
+    (shows {|      println("x")
+      "t"|})
+
+let test_iface_bound_message_names_the_interface () =
+  let msgs = messages (shows {|      println("x")
+      "t"|}) in
+  Alcotest.(check bool) "names the interface" true
+    (List.exists (fun msg -> contains msg "interface `Show`") msgs);
+  Alcotest.(check bool) "names the impl" true
+    (List.exists (fun msg -> contains msg "impl Show(T)") msgs)
+
+let test_iface_bound_transitive_chain () =
+  let src = shows {|      log("x")
+      "t"|} in
+  rejects "cap_bound" "reach through a helper" src;
+  Alcotest.(check bool) "the chain names the helper" true
+    (List.exists (fun msg -> contains msg "via log") (messages src))
+
+let test_iface_default_body_checked () =
+  let src default = Printf.sprintf {|mod M do
+  needs IO.Console
+  interface Label(a) do
+    fn label : a -> String needs () do fn (_) -> %s end
+  end
+end|} default in
+  clean "a pure default" (src {|"x"|});
+  rejects "cap_bound" "a default that prints"
+    (src {|do
+      println("x")
+      "x"
+    end|})
+
+let test_iface_unbounded_method_unchecked () =
+  clean "no bound on the method constrains nothing"
+    (shows ~iface_needs:"" {|      println("x")
+      "t"|})
+
+let test_iface_bound_outside_module_needs () =
+  (* The bound limits other modules' impls, so it need not lie within the
+     declaring module's needs; it must still name real capabilities. *)
+  let src bound = Printf.sprintf {|mod M do
+  interface Sink(a) do
+    fn emit : a -> Unit needs %s
+  end
+end|} bound in
+  clean "a bound the module does not itself need" (src "IO.Console");
+  rejects "unknown_capability" "a misspelt capability" (src "IO.Consol")
+
+let test_iface_bound_cross_module () =
+  let src body = Printf.sprintf {|mod M do
+  mod A do
+    interface Sink(a) do
+      fn emit : a -> Unit needs ()
+    end
+  end
+  mod B do
+    needs IO.Console
+    type T = T(Int)
+    impl A.Sink(T) do
+      fn emit(_t) do
+%s
+      end
+    end
+  end
+end|} body in
+  clean "a pure impl in another module" (src "        ()");
+  rejects "cap_bound" "an impl in another module that prints"
+    (src {|        println("x")|})
+
+let test_iface_bound_no_threading () =
+  (* A generic caller of a bounded method declares nothing and gets no new
+     diagnostic; the call is still charged the impls' own reach (the
+     dispatch node), which a bounded generic caller exposes. *)
+  let src sync_bound = Printf.sprintf {|mod M do
+  needs IO.Console
+  interface Store(a) do
+    fn put : a -> Unit needs IO.Console
+  end
+  type T = T(Int)
+  impl Store(T) do
+    fn put(_t) do println("x") end
+  end
+  fn sync(s : a) : Unit %s when Store(a) do put(s) end
+  fn run() : Unit do sync(T(1)) end
+end|} sync_bound in
+  clean "an unbounded generic caller and its caller" (src "");
+  rejects "cap_bound" "a generic caller bounded by `needs ()` is still charged the impl"
+    (src "needs ()")
+
+let test_iface_bound_untraceable_invocation () =
+  let src = {|mod M do
+  needs IO.Console
+  interface Run(a) do
+    fn run : a -> Int needs ()
+  end
+  type T = T(List((Int -> Int)))
+  impl Run(T) do
+    fn run(t) do
+      match t do
+        T(fs) -> match fs do
+          Cons(f, _) -> f(1)
+          Nil -> 0
+        end
+      end
+    end
+  end
+end|} in
+  rejects "cap_bound" "an untraceable call under a narrow interface bound" src;
+  Alcotest.(check bool) "the message says why" true
+    (List.exists (fun msg -> contains msg "cannot trace") (messages src))
+
+(* An impl method's capability key is [<scope>.<Iface>$<Ty>.<m>], so "the part
+   before the last dot" is [<scope>.<Iface>$<Ty>], not the module.  Resolving a
+   local helper against that missed it in a nested module (the bare-name
+   fallback only rescues the entry module), so the impl was charged nothing
+   for what the helper does.  Each case reaches IO.Console only via [log]. *)
+let nested_impl ~iface_needs ~impl_needs =
+  Printf.sprintf {|mod X do
+  mod B do
+    needs IO.Console
+    interface Sink(a) do
+      fn emit : a -> Unit %s
+    end
+    type T = T(Int)
+    pfn log(s : String) : Unit do println(s) end
+    impl Sink(T) do
+      fn emit(_t) %s do log("x") end
+    end
+  end
+end|} iface_needs impl_needs
+
+let test_nested_impl_helper_reach () =
+  rejects "cap_bound" "an impl's own bound, in a nested module"
+    (nested_impl ~iface_needs:"" ~impl_needs:"needs ()");
+  rejects "cap_bound" "an inherited bound, in a nested module"
+    (nested_impl ~iface_needs:"needs ()" ~impl_needs:"");
+  clean "a bound covering the helper's reach"
+    (nested_impl ~iface_needs:"needs IO.Console" ~impl_needs:"");
+  Alcotest.(check bool) "the chain names the helper" true
+    (List.exists (fun msg -> contains msg "log)")
+       (messages (nested_impl ~iface_needs:"needs ()" ~impl_needs:"")))
+
+let test_nested_default_helper_reach () =
+  rejects "cap_bound" "a default body reaching IO through a helper, in a nested module"
+    {|mod X do
+  mod B do
+    needs IO.Console
+    pfn log(s : String) : String do
+      println(s)
+      s
+    end
+    interface Label(a) do
+      fn label : a -> String needs () do fn (_) -> log("x") end
+    end
+  end
+end|}
+
 let tests =
   [ Alcotest.test_case "direct reach" `Quick test_direct_reach
   ; Alcotest.test_case "transitive reach names the chain" `Quick test_transitive_reach_names_the_chain
@@ -233,4 +411,15 @@ let tests =
   ; Alcotest.test_case "interface bound parses" `Quick test_iface_bound_parses
   ; Alcotest.test_case "interface bound with default parses" `Quick test_iface_bound_with_default_parses
   ; Alcotest.test_case "interface formatter keeps the bound" `Quick test_iface_formatter_keeps_the_bound
+  ; Alcotest.test_case "impl inherits interface bound" `Quick test_impl_inherits_iface_bound
+  ; Alcotest.test_case "interface bound message names the interface" `Quick test_iface_bound_message_names_the_interface
+  ; Alcotest.test_case "interface bound transitive chain" `Quick test_iface_bound_transitive_chain
+  ; Alcotest.test_case "interface default body checked" `Quick test_iface_default_body_checked
+  ; Alcotest.test_case "unbounded interface method unchecked" `Quick test_iface_unbounded_method_unchecked
+  ; Alcotest.test_case "interface bound outside module needs" `Quick test_iface_bound_outside_module_needs
+  ; Alcotest.test_case "interface bound cross-module" `Quick test_iface_bound_cross_module
+  ; Alcotest.test_case "interface bound adds no threading" `Quick test_iface_bound_no_threading
+  ; Alcotest.test_case "interface bound untraceable invocation" `Quick test_iface_bound_untraceable_invocation
+  ; Alcotest.test_case "nested impl helper reach" `Quick test_nested_impl_helper_reach
+  ; Alcotest.test_case "nested default helper reach" `Quick test_nested_default_helper_reach
   ]

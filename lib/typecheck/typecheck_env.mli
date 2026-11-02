@@ -122,6 +122,14 @@ type ref_record = {
   ref_line : int;
 }
 val qualify_ref_name : string -> string -> string
+type bound_origin =
+  | Fn_decl
+  | Iface_method of { iface : string; impl_ty : string option }
+type fn_bound = {
+  fb_caps : string list;
+  fb_span : Typecheck_types.Ast.span;
+  fb_origin : bound_origin;
+}
 type env = {
   vars : Typecheck_types.scheme StrMap.t;
   types : int StrMap.t;
@@ -233,6 +241,7 @@ type env = {
   body_cap_closures : (string, string list) Hashtbl.t;
   stdlib_fns : (string, unit) Hashtbl.t;
   ceiling_extra_roots : (string, unit) Hashtbl.t;
+  fn_scopes : (string, string) Hashtbl.t;
   fn_refs : (string, string list) Hashtbl.t;
   fn_row_bodies :
     (string, (string list * Typecheck_types.Ast.expr) list)
@@ -243,9 +252,7 @@ type env = {
   fn_grant_points :
     (string, string list * Typecheck_types.Ast.span)
     Hashtbl.t;
-  fn_bound_points :
-    (string, string list * Typecheck_types.Ast.span)
-    Hashtbl.t;
+  fn_bound_points : (string, fn_bound) Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts :
     (Typecheck_types.session_ty ref *

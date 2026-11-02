@@ -210,7 +210,16 @@ type row = { caps : string list; deps : string list; unknown : bool }
 
 let empty_row = { caps = []; deps = []; unknown = false }
 
-let solve ?(with_rows = true) ~(own_caps : (string, string list) Hashtbl.t)
+let ref_prefix ?scopes (owner : string) : string =
+  match Option.bind scopes (fun t -> Hashtbl.find_opt t owner) with
+  | Some "" -> ""
+  | Some s -> s ^ "."
+  | None ->
+    (match String.rindex_opt owner '.' with
+     | Some i -> String.sub owner 0 (i + 1)
+     | None -> "")
+
+let solve ?(with_rows = true) ?scopes ~(own_caps : (string, string list) Hashtbl.t)
     ~(refs : (string, string list) Hashtbl.t)
     ~(seeds : (string, seed) Hashtbl.t) () : (string, row) Hashtbl.t =
   let caps : (string, string list) Hashtbl.t = Hashtbl.create 64 in
@@ -228,11 +237,7 @@ let solve ?(with_rows = true) ~(own_caps : (string, string list) Hashtbl.t)
      one).  Membership in [caps] is the "is a known function" test because
      every recording site writes a caps entry, even an empty one. *)
   let resolve (owner : string) (r : string) : string option =
-    let qualified =
-      match String.rindex_opt owner '.' with
-      | Some i -> String.sub owner 0 i ^ "." ^ r
-      | None -> r
-    in
+    let qualified = ref_prefix ?scopes owner ^ r in
     if Hashtbl.mem caps qualified then Some qualified
     else if Hashtbl.mem caps r then Some r
     else None

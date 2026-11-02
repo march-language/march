@@ -7897,11 +7897,7 @@ let cap_reach_chain ?own_caps ?fn_refs (env : env) ~(from : string) ~(cap : stri
       let path = if k = from then path else path @ [ k ] in
       if k <> from && holds k then result := Some path
       else
-        let prefix =
-          match String.rindex_opt k '.' with
-          | Some i -> String.sub k 0 (i + 1)
-          | None -> ""
-        in
+        let prefix = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes k in
         List.iter
           (fun r ->
              let known n =
@@ -7931,7 +7927,7 @@ let cap_reach_chain ?own_caps ?fn_refs (env : env) ~(from : string) ~(cap : stri
      refused rather than certified. *)
 let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env : env) : unit =
   Hashtbl.iter
-    (fun qname (bound, span) ->
+    (fun qname { fb_caps = bound; fb_span = span; fb_origin } ->
        let row =
          Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows qname)
        in
@@ -7941,17 +7937,35 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
          | None -> qname
        in
        let shown = if bound = [] then "()" else String.concat ", " bound in
+       (* Who is bounded, and by what: a function by its own clause, an impl
+          method or default body by its interface's.  The [Fn_decl] wording is
+          phase 1's, unchanged. *)
+       let who, by =
+         match fb_origin with
+         | Fn_decl -> (Printf.sprintf "`%s`" leaf, Printf.sprintf "`needs %s`" shown)
+         | Iface_method { iface; impl_ty = Some ty } ->
+           ( Printf.sprintf "`%s` in `impl %s(%s)`" leaf iface ty,
+             Printf.sprintf "interface `%s`'s `needs %s`" iface shown )
+         | Iface_method { iface; impl_ty = None } ->
+           ( Printf.sprintf "the default `%s` of interface `%s`" leaf iface,
+             Printf.sprintf "`needs %s`" shown )
+       in
        let covered c = List.exists (fun b -> cap_subsumes b c) bound in
        if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) then
          Err.error ~code:Err.Code.cap_bound env.errors ~span
            (Printf.sprintf
-              "`%s` is bounded by `needs %s`, but its body invokes a function \
+              "%s is bounded by %s, but its body invokes a function \
                value whose origin the capability analysis cannot trace (one taken \
                from a record field, a list or a ref), so nothing can be charged \
-               for what that call does and the bound cannot be certified.\n\
-               help: pass the function in as a parameter or call it by name, or \
-               bound `%s` by `needs IO`."
-              leaf shown leaf);
+               for what that call does and the bound cannot be certified.\n%s"
+              who by
+              (match fb_origin with
+               | Fn_decl ->
+                 Printf.sprintf
+                   "help: pass the function in as a parameter or call it by name, or \
+                    bound `%s` by `needs IO`." leaf
+               | Iface_method _ ->
+                 "help: pass the function in as a parameter or call it by name."));
        List.iter
          (fun c ->
             if not (cap_subsumes "IO" c) || covered c then ()
@@ -7962,11 +7976,16 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
                   Printf.sprintf " (via %s)" (render_cap_chain chain)
                 | _ -> ""
               in
+              let help =
+                match fb_origin with
+                | Fn_decl -> Printf.sprintf "help: add `%s` to the bound, or remove the use." c
+                | Iface_method _ ->
+                  "help: remove the use; widening the interface's bound changes it \
+                   for every impl and every caller."
+              in
               Err.error ~code:Err.Code.cap_bound env.errors ~span
-                (Printf.sprintf
-                   "`%s` is bounded by `needs %s`, but reaches `%s`%s.\n\
-                    help: add `%s` to the bound, or remove the use."
-                   leaf shown c via c))
+                (Printf.sprintf "%s is bounded by %s, but reaches `%s`%s.\n%s"
+                   who by c via help))
          (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
     env.fn_bound_points
 
@@ -8522,7 +8541,7 @@ let call_site_args (env : env) ~(callee : string) (i : int) : (string * local_sc
 let rec resolve_root_value (env : env) ~(depth : int) ~(owner : string) (scope : local_scope) (e : Ast.expr)
   : root_value list =
   let known_fn n =
-    let prefix = match String.rindex_opt owner '.' with Some i -> String.sub owner 0 (i + 1) | None -> "" in
+    let prefix = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes owner in
     Hashtbl.mem env.own_cap_closures (prefix ^ n) || Hashtbl.mem env.own_cap_closures n
   in
   match e with
@@ -8654,7 +8673,7 @@ let solve_role_roots_full ?(decls = []) (env : env) : role_solve option =
       in
       List.iter (collect "") decls;
       let declared_caps_of ~owner n =
-        let prefix = match String.rindex_opt owner '.' with Some i -> String.sub owner 0 (i + 1) | None -> "" in
+        let prefix = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes owner in
         match Hashtbl.find_opt declared_io_caps (prefix ^ n) with
         | Some cs -> Some cs
         | None -> Hashtbl.find_opt declared_io_caps n
@@ -8756,7 +8775,10 @@ let solve_role_roots_full ?(decls = []) (env : env) : role_solve option =
                | RVUnknown why -> push unresolved k why)
              (resolve_root_value env ~depth:8 ~owner:r.rr_owner r.rr_scope r.rr_expr))
         keyed;
-      let rows = March_caps.Cap_rows.solve ~with_rows:true ~own_caps:own ~refs ~seeds () in
+      let rows =
+        March_caps.Cap_rows.solve ~with_rows:true ~scopes:env.fn_scopes ~own_caps:own ~refs
+          ~seeds ()
+      in
       Some
         { rs_keyed = keyed; rs_own = own; rs_refs = refs; rs_rows = rows; rs_synthetic = synthetic;
           rs_local_closures = local_closures; rs_held_pids = held_pids; rs_unresolved = unresolved;
@@ -8889,11 +8911,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
          authority. *)
       if !dump_role_authority then begin
         let resolve owner r =
-          let qualified =
-            match String.rindex_opt owner '.' with
-            | Some i -> String.sub owner 0 i ^ "." ^ r
-            | None -> r
-          in
+          let qualified = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes owner ^ r in
           if Hashtbl.mem rows qualified then Some qualified
           else if Hashtbl.mem rows r then Some r
           else None
