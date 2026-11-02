@@ -357,7 +357,14 @@ let check_fn ~(sym : string) ~(name : string) ~(file : string) (fs : RS.fsig) : 
       ins;
     match !red, !over with
     | Some r, _ -> mk !compared r
-    | None, Some o -> mk !compared (Overflow o)
+    | None, Some o when !compared > 0 -> mk !compared (Overflow (Printf.sprintf "%s; %d inputs compared" o !compared))
+    | None, Some o ->
+      (* Zero inputs compared (review round 1): the logic side decided no
+         input, so the overflow is no evidence about the definition. *)
+      mk 0
+        (Not_compared
+           (Printf.sprintf "%s; the interpreter overflows %s"
+              (Option.value ~default:"no input inside the domain" !why_not) o))
     | None, None ->
       if !compared > 0 then mk !compared Agree
       else mk 0 (Not_compared (Option.value ~default:"no input inside the domain" !why_not))
@@ -370,13 +377,42 @@ let run ~(is_user : string -> bool) () : string list * bool =
   let fns =
     Hashtbl.fold
       (fun sym (name, file) acc ->
-        if is_user file && (not (String.contains name '/')) && Hashtbl.mem Refine_reflect.templates sym then
-          match RS.sig_of sym with Some fs -> (sym, name, file, fs) :: acc | None -> acc
+        if is_user file && not (String.contains name '/') then
+          (Some sym, name, file, if Hashtbl.mem Refine_reflect.templates sym then RS.sig_of sym else None) :: acc
         else acc)
       RS.sym_origin []
+  in
+  (* Reflected by the rules but given no logic symbol (a parameter or result
+     sort the logic has no sort for, e.g. Float). *)
+  let with_sym = List.map (fun (_, n, f, _) -> (n, f)) fns in
+  let fns =
+    fns
+    @ List.filter_map
+        (fun (name, file) ->
+          if is_user file && (not (String.contains name '/')) && not (List.mem (name, file) with_sym) then
+            Some (None, name, file, None)
+          else None)
+        (List.sort_uniq compare !Refine_reflect.reflected_fns)
     |> List.sort (fun (_, a, f, _) (_, b, g, _) -> compare (f, a) (g, b))
   in
-  let results = List.map (fun (sym, name, file, fs) -> check_fn ~sym ~name ~file fs) fns in
+  (* A reflected function with no template (an uninterpreted logic symbol:
+     the encoder declined its body) or no signature is listed, never dropped
+     (review round 1): the net covers it with no evidence, and says so. *)
+  let results =
+    List.map
+      (fun (sym, name, file, fs) ->
+        match sym, fs with
+        | Some sym, Some fs -> check_fn ~sym ~name ~file fs
+        | _ ->
+          { p_name = name; p_file = file; p_compared = 0;
+            p_outcome =
+              Not_compared
+                (match sym with
+                 | None -> "no logic definition (no logic symbol: a parameter or result sort the logic lacks)"
+                 | Some sym when Hashtbl.mem Refine_reflect.templates sym -> "no logic signature"
+                 | Some _ -> "no logic definition (the encoder declined the body; its symbol is uninterpreted)") })
+      fns
+  in
   let line r =
     let status, detail =
       match r.p_outcome with

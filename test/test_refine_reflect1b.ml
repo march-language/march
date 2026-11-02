@@ -414,13 +414,54 @@ let parity =
         let out = run ~args:"--check --reflect-parity" parity_src in
         Alcotest.(check string) "inc at the maximum Int" "overflow?" (parity_status out "inc");
         (match parity_row out "inc" with
-         | Some (_, d) -> if not (contains d "4611686018427387903") then Alcotest.failf "inc's overflow input: %s" d
+         | Some (_, d) ->
+           if not (contains d "4611686018427387903") then Alcotest.failf "inc's overflow input: %s" d;
+           (* review round 1: an overflow? row says how many inputs agreed *)
+           if not (contains d "inputs compared") then Alcotest.failf "inc's overflow? row carries the compared count: %s" d
          | None -> ());
         Alcotest.(check string) "half: the evaluator's own 63-bit limit is not overflow?" "agree" (parity_status out "half");
         Alcotest.(check string) "area over a user type" "agree" (parity_status out "area");
         Alcotest.(check string) "get_or over Option" "agree" (parity_status out "get_or");
         Alcotest.(check string) "a refined parameter: only inputs inside pre_f" "agree" (parity_status out "pos_only");
         if parity_row out "guarded" <> None then Alcotest.fail "guarded is R5-blocked, so it is not in the net");
+    gated "parity: a logic side that fails on every input is not-compared, not overflow? (review round 1)" (fun () ->
+        (* k compares Floats (no template); f calls it, so f's logic side has
+           no definition on any input while the interpreter overflows at the
+           maximum Int.  Zero inputs compared: no evidence either way. *)
+        let src =
+          {|mod P3 do
+  fn k(n : Int) : Int do
+    if 2.0 == 2.0 do n + 1 else n - 1 end
+  end
+  fn f(n : Int) : Int do k(n) + n end
+end
+|}
+        in
+        let out = run ~args:"--check --reflect-parity" src in
+        Alcotest.(check string) "f" "not-compared" (parity_status out "f");
+        Alcotest.(check string) "k (reflected, no logic definition)" "not-compared" (parity_status out "k"));
+    gated "parity: a reflected function with no logic definition is listed, not dropped (review round 1)" (fun () ->
+        let src =
+          {|mod P1 do
+  fn f(n : Int, x : Float) : Int do
+    if x == x do n + 1 else n end
+  end
+  fn g(n : Int) : Int do
+    if 2.0 == 2.0 do n + 1 else n - 1 end
+  end
+end
+|}
+        in
+        let out = run ~args:"--check --reflect-parity" src in
+        Alcotest.(check string) "f" "not-compared" (parity_status out "f");
+        (match parity_row out "g" with
+         | Some (st, d) ->
+           Alcotest.(check string) "g" "not-compared" st;
+           if not (contains d "no logic definition") then Alcotest.failf "g's reason: %s" d
+         | None -> Alcotest.failf "no parity row for g:\n%s" out);
+        match summary out with
+        | Some l -> if not (contains l "2 functions") then Alcotest.failf "summary: %s" l
+        | None -> Alcotest.failf "no summary:\n%s" out);
     gated "parity RED: an arms-swapped term_of_body is a mismatch" (fun () ->
         let out = run ~env:"MARCH_REFLECT_PERTURB=swap-arms" ~args:"--check --reflect-parity" parity_src in
         Alcotest.(check string) "absv" "MISMATCH" (parity_status out "absv");

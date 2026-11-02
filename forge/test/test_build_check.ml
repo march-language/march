@@ -767,6 +767,53 @@ let test_forge_test_fails_on_unparsable_sibling () =
         Alcotest.(check bool) "failure is the test compilation, not a project error"
           true (contains msg "test compilation failed"))
 
+(** `forge test --reflection-parity` (review round 1 of reflection phase
+    1b): a file whose ordinary refinement check fails is reported as a CHECK
+    failure, not as a parity mismatch; a real mismatch (the swap-arms
+    perturbation) is still parity RED; a clean file passes. *)
+let with_parity_dir f =
+  if Sys.command "command -v z3 >/dev/null 2>&1" <> 0 then Alcotest.skip ()
+  else begin
+    let dir = Filename.temp_dir "forge_parity_" "" in
+    Fun.protect
+      ~finally:(fun () -> ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir))))
+      (fun () -> f dir)
+  end
+
+let parity_absv = "mod Absv do\n  fn absv(n : Int) : Int do\n    if n < 0 do 0 - n else n end\n  end\nend\n"
+
+let test_parity_clean_file_passes () =
+  with_parity_dir (fun dir ->
+      let f = Filename.concat dir "absv.march" in
+      write_file f parity_absv;
+      match Cmd_test.run_reflection_parity ~lib_path_env:"" [ f ] with
+      | Ok () -> ()
+      | Error e -> Alcotest.failf "a clean file must pass: %s" e)
+
+let test_parity_check_failure_is_not_parity_red () =
+  with_parity_dir (fun dir ->
+      let f = Filename.concat dir "bad.march" in
+      write_file f
+        "mod Bad do\n  fn need(n : {v : Int | v > 1}) : Int do n end\n  fn go() : Int do need(0) end\nend\n";
+      match Cmd_test.run_reflection_parity ~lib_path_env:"" [ f ] with
+      | Ok () -> Alcotest.fail "a failing check must fail the run"
+      | Error e ->
+        if contains e "parity RED" then Alcotest.failf "a check failure is not a parity mismatch: %s" e;
+        if not (contains e "check failed") then Alcotest.failf "the error names the check failure: %s" e)
+
+let test_parity_mismatch_is_red () =
+  with_parity_dir (fun dir ->
+      let f = Filename.concat dir "absv.march" in
+      write_file f parity_absv;
+      Unix.putenv "MARCH_REFLECT_PERTURB" "swap-arms";
+      let r =
+        Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_REFLECT_PERTURB" "")
+          (fun () -> Cmd_test.run_reflection_parity ~lib_path_env:"" [ f ])
+      in
+      match r with
+      | Ok () -> Alcotest.fail "swap-arms must make the net RED"
+      | Error e -> if not (contains e "parity RED") then Alcotest.failf "a mismatch is parity RED: %s" e)
+
 (* --------------------------------------------------------------- forge run *)
 
 (** [forge run] (INTERPRETED) must pass forge.toml's [[ffi]] sources through to
@@ -879,6 +926,10 @@ let () =
         test_project_env_walks_transitive_path_deps;
       Alcotest.test_case "fails on an unparsable sibling test file" `Quick
         test_forge_test_fails_on_unparsable_sibling;
+      Alcotest.test_case "--reflection-parity: a clean file passes" `Quick test_parity_clean_file_passes;
+      Alcotest.test_case "--reflection-parity: a check failure is not parity RED" `Quick
+        test_parity_check_failure_is_not_parity_red;
+      Alcotest.test_case "--reflection-parity: a mismatch is parity RED" `Quick test_parity_mismatch_is_red;
     ];
     "forge run", [
       Alcotest.test_case "interpreted run passes [ffi] sources to the compiler" `Quick

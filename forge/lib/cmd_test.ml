@@ -147,7 +147,8 @@ let project_env proj =
     `march --check --reflect-parity`, which compares every reflected
     function's logic definition with the interpreter on generated inputs
     (boundary Ints included) and exits 1 on a mismatch or an interpreter
-    failure.  The `parity` lines are printed as they come. *)
+    failure.  The `parity` lines are printed per file.  A file whose check
+    itself fails is reported as a check failure, not as parity RED. *)
 let project_sources root =
   List.concat_map
     (fun d ->
@@ -166,21 +167,45 @@ let project_sources root =
     [ "lib"; "src" ]
 
 let run_reflection_parity ~lib_path_env (files : string list) : (unit, string) result =
-  let red =
-    List.filter
+  (* One run per file, output and exit code both kept: a nonzero exit is a
+     parity verdict only when the net said so (`parity: RED`, printed just
+     before its exit 1); any other failure is the ordinary check failing
+     (a type error, a refinement violation), reported as that (review round
+     1 of reflection phase 1b). *)
+  let verdicts =
+    List.map
       (fun f ->
-        let cmd = Printf.sprintf "%smarch --check --reflect-parity %s 2>&1 | grep '^parity'"
-            lib_path_env (Filename.quote f) in
         Printf.printf "reflection parity: %s\n%!" f;
-        (* grep's own status is not the compiler's: ask the compiler again
-           only for its exit code when the lines show RED. *)
-        ignore (Sys.command cmd);
-        Sys.command (Printf.sprintf "%smarch --check --reflect-parity %s >/dev/null 2>&1"
-                       lib_path_env (Filename.quote f)) <> 0)
+        let out = Filename.temp_file "forge_parity" ".out" in
+        let code =
+          Sys.command (Printf.sprintf "%smarch --check --reflect-parity %s >%s 2>&1"
+                         lib_path_env (Filename.quote f) (Filename.quote out)) in
+        let text = try In_channel.with_open_bin out In_channel.input_all with Sys_error _ -> "" in
+        (try Sys.remove out with Sys_error _ -> ());
+        let lines = String.split_on_char '\n' text in
+        List.iter (fun l -> if String.starts_with ~prefix:"parity" l then print_endline l) lines;
+        let red = List.exists (fun l -> String.starts_with ~prefix:"parity: RED" l) lines in
+        if code = 0 then (f, `Ok)
+        else if red then (f, `Red)
+        else begin
+          (* the check's own diagnostics, so the failure is legible *)
+          List.iter (fun l -> if not (String.starts_with ~prefix:"parity" l) then prerr_endline l) lines;
+          (f, `Check_failed)
+        end)
       files
   in
-  if red = [] then Ok ()
-  else Error (Printf.sprintf "reflection parity RED in %s" (String.concat ", " red))
+  let pick k = List.filter_map (fun (f, v) -> if v = k then Some f else None) verdicts in
+  match pick `Red, pick `Check_failed with
+  | [], [] -> Ok ()
+  | red, failed ->
+    Error
+      (String.concat "; "
+         ((if red = [] then [] else [ Printf.sprintf "reflection parity RED in %s" (String.concat ", " red) ])
+         @
+         if failed = [] then []
+         else
+           [ Printf.sprintf "reflection parity: the check failed (no parity verdict) in %s"
+               (String.concat ", " failed) ]))
 
 (** Run forge test for a given list of test files (after directory expansion). *)
 let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(release=false) ?(reflection_parity=false) test_files =
