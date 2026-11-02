@@ -713,6 +713,13 @@ type env = {
       still populated — Task 8 reads it to attribute a whole-program grant
       violation to the user's call chain — but nothing currently checks it.
       [main] is excluded regardless — [check_main_grant] owns it. *)
+  fn_bound_points : (string, string list * Ast.span) Hashtbl.t;
+  (** Functions declaring a per-function capability bound
+      ([fn f(x) needs IO.Console do]) — qualified name (the [cap_qname]
+      convention) → (the bound's capability paths, the bound's span).
+      Recorded by [check_module_needs]; read by [check_fn_bounds], which holds
+      each function's row under its bound.  Shared (mutated in place) across
+      every env copy.  See specs/plans/2026-11-01-per-function-needs-bounds.md. *)
   local_mods : string list StrMap.t;
   (** In-file nested modules → their PRIVATE value/function member names.
       Populated by the [Ast.DMod] export step.  A same-file qualified reference
@@ -814,6 +821,7 @@ let make_env errors type_map = {
   fn_row_bodies = Hashtbl.create 64;
   role_grants = Hashtbl.create 8;
   fn_grant_points = Hashtbl.create 16;
+  fn_bound_points = Hashtbl.create 16;
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];

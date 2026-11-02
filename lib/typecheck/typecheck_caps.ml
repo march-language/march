@@ -341,6 +341,37 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | _ -> ()
   ) decls;
   let unknown_needs = !unknown_needs in
+  (* A declared per-function bound (`fn f(x) needs IO.Console do`), on a
+     function or an impl method.  Each path must be a real capability and must
+     lie within this module's `needs`: the module bounds every function in it,
+     so a function bound wider than the module would claim authority nothing
+     grants.  The bound itself is held against the function's row by
+     [Typecheck.check_fn_bounds] once every module's closure is complete. *)
+  let record_fn_bound ~(qname : string) (def : Ast.fn_def) : unit =
+    match def.Ast.fn_needs with
+    | None -> ()
+    | Some (paths, nsp) ->
+      let bound = List.map cap_path_of_names paths in
+      List.iter
+        (fun c ->
+           match March_caps.Cap_lattice.suggest_cap c with
+           | Some known ->
+             Err.error ~code:Err.Code.unknown_capability env.errors ~span:nsp
+               (Printf.sprintf
+                  "`%s` is not a known capability.\n\
+                   help: did you mean `%s`?" c known)
+           | None ->
+             if not (List.exists (fun n -> cap_subsumes n c) declared_needs) then
+               Err.error ~code:Err.Code.cap_bound_needs env.errors ~span:nsp
+                 (Printf.sprintf
+                    "`%s` is bounded by `needs %s`, but the module does not \
+                     declare `needs %s`. A function's bound must lie within its \
+                     module's `needs`.\n\
+                     help: add `needs %s` to the module, or narrow the bound."
+                    def.Ast.fn_name.txt (String.concat ", " bound) c c))
+        bound;
+      Hashtbl.replace env.fn_bound_points qname (List.sort_uniq String.compare bound, nsp)
+  in
   (* See [locally_declared_names_of] for why a raw call-name match against
      [builtin_cap_table] must first check for module-local shadowing. *)
   let locally_declared_names = locally_declared_names_of decls in
@@ -763,6 +794,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                   (c.Ast.fc_body :: Option.to_list c.Ast.fc_guard
                    @ default_param_exprs c))
               def.Ast.fn_clauses;
+            record_fn_bound ~qname:mangled def;
             if not (List.mem mn.Ast.txt module_fn_names) then
               record_dispatch_edge (cap_qname mn.Ast.txt) mangled)
           idef.Ast.impl_methods
@@ -804,6 +836,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       if param_caps <> [] && def.fn_name.txt <> "main" then
         Hashtbl.replace env.fn_grant_points qname
           (List.sort_uniq String.compare param_caps, sp);
+      record_fn_bound ~qname def;
       (* Annotations INSIDE the body are uses too, and were invisible here
          until 2026-08-05 — see [cap_annots_in_expr].
 

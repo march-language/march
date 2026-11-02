@@ -41,6 +41,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Per-function capability bounds.** A function header may declare `needs IO.Console`
+  (or `needs ()`, the empty bound) after its return type. Everything the function reaches
+  must be covered by the bound (`cap_bound`, naming the path), and the bound must lie
+  within the module's `needs` (`cap_bound_needs`). Callers are unaffected; a callback the
+  function is handed is charged to whoever supplies it, and a call to a function value
+  taken from a record, list or ref is refused under a bound narrower than `IO`. Impl
+  methods take bounds too. See the capabilities reference, "Per-function bounds".
+
 - **Hot deploys report their running schema baseline.** Hot-reload binaries embed
   deterministic schemas and manifests, and the owner-only `SCHEMAS` query reports
   each actor's latest activated schema and release. `forge deploy hot` uses that

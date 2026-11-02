@@ -243,6 +243,9 @@ type env = {
   fn_grant_points :
     (string, string list * Typecheck_types.Ast.span)
     Hashtbl.t;
+  fn_bound_points :
+    (string, string list * Typecheck_types.Ast.span)
+    Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts :
     (Typecheck_types.session_ty ref *

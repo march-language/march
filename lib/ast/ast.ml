@@ -256,6 +256,11 @@ and fn_def = {
       (** Expression payloads of attributes, by attribute name.  Only
           [@[decreases(e, ...)]] has one (termination design §2.1); its name is
           also in [fn_attrs] as plain ["decreases"]. *)
+  fn_needs : (name list list * span) option;
+      (** A per-function capability bound, [fn f(x) needs IO.Console do]:
+          the capability paths and the clause's span.  [Some ([], _)] is
+          [needs ()], the empty bound.  [None] when no clause declares one.
+          See specs/plans/2026-11-01-per-function-needs-bounds.md. *)
 }
 
 and fn_clause = {

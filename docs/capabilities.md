@@ -32,11 +32,11 @@ is open). This page covers all of them, in the order you are likely to need them
 academic "effect system". There are no algebraic effects, no effect handlers, and no
 user-defined effects with row-polymorphic inference. What exists is a fixed, closed
 lattice of IO and behavioral capabilities, checked by tracing which of them a
-function's reachable call graph touches. A per-function effect-row system is
-intentionally not built: it would make a `Cap(X)` parameter an upper limit over
-everything a function reaches, forcing every caller to thread capabilities it does
-not otherwise need, which is the opposite of March's module-scoped design. See
-[The grant](#grant).
+function's reachable call graph touches. A `Cap(X)` parameter is not an upper limit
+over what a function reaches (that would force every caller to thread capabilities it
+does not otherwise need); a function that wants a narrower limit than its module
+declares one in its header instead ([Per-function bounds](#per-function-bounds)), which
+callers never have to satisfy. See [The grant](#grant).
 
 ## On this page
 
@@ -567,11 +567,11 @@ Two intentional edges:
 
 The grant is `needs`' missing complement: `needs` states what a *module*
 touches; the grant bounds what the *program* may. Sandbox ladder stages A/B/D
-are shipped (`specs/2026-08-08-r1-no-ambient-io-design.md`). Per-function
-grants (effect rows) are stage C and intentionally **not** built: making a
-`Cap(X)` parameter an upper limit over everything a function reaches would force
-every caller to thread capabilities it does not otherwise need, which is the
-opposite of March's module-scoped design. A `Cap(X)` parameter is an authority
+are shipped (`specs/2026-08-08-r1-no-ambient-io-design.md`). Stage C, which made
+a `Cap(X)` parameter an upper limit over everything a function reaches, was removed
+because it forced every caller to thread capabilities it does not otherwise need; a
+declared bound ([Per-function bounds](#per-function-bounds)) gives a function the
+same limit without involving its callers. A `Cap(X)` parameter is an authority
 marker at a module boundary; the *checks* are `needs`, the module upper limit, and
 `main`'s grant.
 
@@ -583,6 +583,55 @@ each call of the role's runner. A role's grant must fit within `main`'s. See
 [Choreography]({{ site.baseurl }}/docs/choreography/#per-role-grants), including
 `--dump-role-authority`, the report of what a role can reach through references it is
 handed rather than through its own code.
+
+### Per-function bounds
+{: #per-function-bounds}
+
+A module's `needs` bounds every function in it. A function can declare a narrower bound
+in its header, after the return type:
+
+```march
+mod Report do
+  needs IO.Console, IO.Clock
+
+  fn log(msg : String) : Unit needs IO.Console do
+    println(msg)
+  end
+
+  fn parse(body : String) : Int needs () do
+    string_byte_length(body)
+  end
+end
+```
+
+`needs ()` is the empty bound: the function performs no capability. Two checks apply:
+
+- **The bound lies within the module.** Every capability it names must be covered by the
+  module's `needs` (a parent covers its children: a module declaring `IO.FileSystem`
+  admits a function bound of `IO.FileRead`). Otherwise `cap_bound_needs`.
+- **The function lies within the bound.** Everything the function reaches, through every
+  function it calls, transitively, must be covered by the bound, the same reachability
+  `main`'s grant is checked with. Otherwise `cap_bound`, naming the path to the capability:
+  ``"`parse` is bounded by `needs ()`, but reaches `IO.Console` (via log → println)"``.
+
+A bound has **no effect on callers**: calling a bounded function is the same as calling
+any other, and a caller stays bounded by its own module and `main`'s grant. Two cases
+are worth knowing:
+
+- **Callbacks are charged to whoever supplies them.** `fn apply(f : Int -> Int, x : Int)
+  : Int needs () do f(x) end` is accepted: calling `f` is charged to the caller that
+  passed it, as everywhere else in the capability checks. A bound means "my own
+  authority, plus whatever you hand me".
+- **Untraceable calls are refused.** A body that calls a function value taken out of a
+  record field, a list or a ref (a codec's stored encoder, say) cannot be charged to
+  anyone, so a bound narrower than all of `IO` is rejected (`cap_bound`) rather than
+  certified. Pass the function in as a parameter or call it by name instead.
+
+The bound may sit on any one clause of a multi-clause function, and covers all of them;
+two clauses declaring different bounds is a syntax error. Impl methods take bounds the
+same way. Local functions inside a body do not: their reach already counts toward the
+function that contains them. Path scopes (`IO.FileRead("/etc")`) are not accepted in a
+function bound.
 
 ### When *not* to use IO caps
 

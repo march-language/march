@@ -7915,6 +7915,61 @@ let cap_reach_chain ?own_caps ?fn_refs (env : env) ~(from : string) ~(cap : stri
   done;
   !result
 
+(* Per-function bounds: hold each function that declares `needs ...` in its
+   header to that bound (specs/plans/2026-11-01-per-function-needs-bounds.md).
+   This is R1 stage C's [check_fn_grants] (removed 2026-08-13) re-attached to a
+   DECLARATION: stage C made every `Cap(X)` parameter a ceiling, which forced
+   callers to thread capabilities; a declared bound has no effect on callers.
+
+   - [caps]: every IO-lattice capability the function reaches must be covered
+     by the bound.  A non-IO root (an FFI capability) is governed by the extern
+     checks, not this lattice.
+   - [deps] (parameters the body invokes) are not charged here: the caller
+     that supplies the callback is charged for it, as everywhere else.
+   - [unknown]: the body invokes a function value of untraceable origin, so no
+     caller can be charged for what it does; a bound short of all of `IO` is
+     refused rather than certified. *)
+let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env : env) : unit =
+  Hashtbl.iter
+    (fun qname (bound, span) ->
+       let row =
+         Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows qname)
+       in
+       let leaf =
+         match String.rindex_opt qname '.' with
+         | Some i -> String.sub qname (i + 1) (String.length qname - i - 1)
+         | None -> qname
+       in
+       let shown = if bound = [] then "()" else String.concat ", " bound in
+       let covered c = List.exists (fun b -> cap_subsumes b c) bound in
+       if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) then
+         Err.error ~code:Err.Code.cap_bound env.errors ~span
+           (Printf.sprintf
+              "`%s` is bounded by `needs %s`, but its body invokes a function \
+               value whose origin the capability analysis cannot trace (one taken \
+               from a record field, a list or a ref), so nothing can be charged \
+               for what that call does and the bound cannot be certified.\n\
+               help: pass the function in as a parameter or call it by name, or \
+               bound `%s` by `needs IO`."
+              leaf shown leaf);
+       List.iter
+         (fun c ->
+            if not (cap_subsumes "IO" c) || covered c then ()
+            else
+              let via =
+                match cap_reach_chain env ~from:qname ~cap:c with
+                | Some (_ :: _ as chain) ->
+                  Printf.sprintf " (via %s)" (render_cap_chain chain)
+                | _ -> ""
+              in
+              Err.error ~code:Err.Code.cap_bound env.errors ~span
+                (Printf.sprintf
+                   "`%s` is bounded by `needs %s`, but reaches `%s`%s.\n\
+                    help: add `%s` to the bound, or remove the use."
+                   leaf shown c via c))
+         (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
+    env.fn_bound_points
+
 let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
   (* [rows] lets the caller hand in an already-solved row table. Stage C made
      the flat closure a projection of that solve, and stage D added a second
@@ -9815,9 +9870,16 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      [~with_rows:false] keeps this call at the caps-only fixpoint, which is
      what [check_main_grant] actually reads — this was the pre-stage-C cost
      and stays that with stage C gone. *)
-  let cap_rows = fn_capability_rows_tbl ~with_rows:false final_env in
+  (* Rows (deps/unknown) are read only by [check_fn_bounds]; solving them only
+     when some function declares a bound keeps every other `--check` at the
+     caps-only fixpoint cost. *)
+  let cap_rows =
+    fn_capability_rows_tbl
+      ~with_rows:(Hashtbl.length final_env.fn_bound_points > 0) final_env
+  in
   dump_cap_rows final_env;
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
+  check_fn_bounds ~rows:cap_rows final_env;
   (* Per-role grants: the same walk from each runner-entry callback, bounded
      by `role R needs ...` (distributed-deploys step 4).  No-op for a
      program with no grant line. *)
