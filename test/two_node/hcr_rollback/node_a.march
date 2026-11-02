@@ -1,0 +1,28 @@
+mod Rollback do
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Clock
+
+  actor Counter do
+    state { count : Int, announced : Bool }
+    init { count: 0, announced: false }
+    on Tick() do
+      let _ = if state.announced do () else println("behavior: good") end
+      { count: state.count + 1, announced: true }
+    end
+    on Finish() do
+      println("all work preserved: " ++ bool_to_string(state.count == 150))
+      state
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock)) : Unit do
+    let counter = spawn(Counter)
+    println("ready")
+    List.each(List.range(0, 150), fn _ ->
+      send(counter, Tick)
+      sleep_ms(100))
+    send(counter, Finish)
+    sleep_ms(500)
+  end
+end

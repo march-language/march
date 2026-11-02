@@ -25,3 +25,27 @@ Options, an HCR-owner decision:
 
 Test either way: extend the `--hot-reload --cap-sandbox` case in
 `test/test_cap_sandbox_runtime.ml` with a `CAS_PUT` of a small blob.
+
+## Completed 2026-10-31
+
+The owner selected option 2: require the existing effective `IO.FileWrite`
+grant; do not weaken either OS filter. The compiler warns for
+`--compile --hot-reload --cap-sandbox` without that capability, naming CAS
+upload, activation state, and audit writes. The diagnostic uses the existing
+replay log so a cached build repeats it. Read-only reload queries stay available.
+As with the existing sandbox derivation, an unused `needs` declaration alone
+does not add an effective capability; the granted regression fixture actually
+uses `file_write`.
+
+`test/test_cap_sandbox_runtime.ml` now exercises a real `CAS_PUT` under both
+grant states, with isolated runtime HOME directories. Missing grant returns
+`ERR open_failed`, leaves `CAS_CHECK` missing, and creates no artifact; a held
+grant returns `OK`, makes the artifact present, and preserves its exact bytes.
+Both cases retain PING and observe-socket checks, verify unchanged RELEASE_HEAD,
+and compile twice to cover diagnostic replay.
+
+Validation: the missing-warning assertion failed before the diagnostic was
+added. The two focused cases subsequently passed on macOS (43.601 seconds).
+Linux cases are enabled by the same test but were **not run locally**: this host
+is Darwin and the installed Docker CLI has no running daemon. Seccomp validation
+remains a Linux CI responsibility; the macOS result is not Linux evidence.

@@ -87,3 +87,17 @@ Still to meet (the `terminate` bullet was met 2026-09-22):
 
 - **reload drain:** a reload waits for the in-flight handler and queue under a
   pause state (sends still accepted) before swapping code.
+
+## Completed 2026-10-31
+
+The original queue-drain description above was stale: epoch mailbox markers already
+finish queued old work before state migration, accept newer messages while waiting,
+and preserve deadline handling. The baseline migration runner passed 94 checks.
+
+The remaining shutdown-callback bug is fixed. Actors resolve `on_stop` at their active
+code epoch, callback-only changes have independent dispatch slots, and a state-changing
+activation cannot retain an incompatible callback. The extended migration runner passes
+102 checks, including callback admission and migration behavior. The compiled v1 → v2 →
+v3 → restart regression verifies the final callback sees the twice-migrated state.
+
+This closes reload drain/callback work without introducing a second pause mechanism.

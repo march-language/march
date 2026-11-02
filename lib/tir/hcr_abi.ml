@@ -23,7 +23,10 @@ type t = {
    into a v3 process are refused by identity (forge's HCR_INFO preflight,
    then the runtime's own check after dlopen) and need one restart on a v4
    build. *)
-let runtime_abi = 4
+(* 5: per-frame routing and closure epoch ownership add runtime entry points
+   and a closure header tag. Patches require the matching runtime so old
+   servers get a restart diagnostic before dlopen or execution. *)
+let runtime_abi = 5
 
 let contains haystack needle =
   let hay_len = String.length haystack in

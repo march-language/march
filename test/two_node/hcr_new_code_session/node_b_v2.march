@@ -3,9 +3,8 @@
 -- time, each session from a task the Driver actor spawns. The Buyer code
 -- lives in the nested module `Buy`, on the hot-reload boundary; the Driver's
 -- handler and `main` are identical in both versions, so the deploy activates
--- only `Buy.*`, and a task spawned after it runs version 2 only because its
--- call into `Buy` dispatches (a call dispatches whenever its callee is
--- reloadable). Each of those tasks runs a cluster session, a party endpoint
+-- only `Buy.*`. Driver advances at its marker, then captures that epoch in
+-- each task closure it creates; its direct call into `Buy` selects version 2. Each of those tasks runs a cluster session, a party endpoint
 -- actor and more green threads on the NEW code: what crashed when a patch
 -- carried its own copy of the C runtime. Every outcome is counted, then
 -- summarised. See scenario.sh.

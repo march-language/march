@@ -327,3 +327,8 @@
  (name test_so_exports_symbol)
  (modules test_so_exports_symbol)
  (libraries march_forge alcotest unix))
+
+(test
+ (name test_schema_baseline)
+ (modules test_schema_baseline)
+ (libraries march_forge alcotest unix str yojson))

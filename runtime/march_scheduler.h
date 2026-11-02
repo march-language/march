@@ -471,13 +471,15 @@ typedef struct march_proc {
      * authority-and-deploys-plan.md, II.4.1).  The code epoch this unit of
      * work runs at: every boundary call it makes resolves to the newest
      * version at or before it (march_dispatch_enter_unit).  0 = unpinned,
-     * follow the current version (only the compiled `main` green thread).
+     * follow the current version (runtime maintenance daemons only).
      * Set at spawn, inherited from the spawning proc (else the current
      * epoch), with one pin on that epoch (march_epoch_pin), dropped at the
      * reap.  Only the proc itself changes it afterwards (an actor advancing
      * at its marker); other threads read it (drains) -- hence atomic, and
      * per proc, never TLS: procs migrate across OS threads. */
     _Atomic(uint32_t)           code_epoch;
+    /* Owned by this green thread; follows it across scheduler migration. */
+    void                      *code_frames;
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping: this proc's own "fake stack" handle,
      * threaded through __sanitizer_start_switch_fiber/finish_switch_fiber
@@ -743,15 +745,17 @@ void         march_sched_exit(void);
 
 /* Return the currently running process (NULL if in scheduler context). */
 march_proc  *march_sched_current(void);
-/* The running proc's code epoch (0 when there is no proc, or it is unpinned).
+/* The running frame's routing epoch, else its proc epoch (0 if neither).
  * What march_dispatch_enter_unit resolves against. */
 uint32_t     march_sched_current_epoch(void);
+/* Unit epoch before saved closure frames; generated service entries only. */
+uint32_t     march_sched_work_epoch(void);
 /* The next proc the running proc spawns starts held (epoch_holds = 1); see
  * march_proc.hold_next_spawn.  The stdlib-only builtin epoch_hold_next_spawn. */
 void         march_sched_hold_next_spawn(void);
 /* Spawn the compiled `main` green thread: like march_sched_spawn[_pinned]
- * (sched_pinned selects scheduler 0), but UNPINNED in the epoch sense
- * (code_epoch 0, follows current), see march_proc.code_epoch. */
+ * (sched_pinned selects scheduler 0), pinned to the baseline image epoch.
+ * A nonreturning old main intentionally retains that epoch. */
 march_proc  *march_sched_spawn_main(void (*fn)(void *), void *arg,
                                     int sched_pinned);
 

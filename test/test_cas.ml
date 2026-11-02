@@ -918,6 +918,32 @@ let fn_using ty name : fn_def =
     fn_ret_ty = TInt; fn_body = EAtom (ALit (March_ast.Ast.LitInt 0));
     fn_kind = FnNormal }
 
+let test_work_entry_checks_captured_layout () =
+  let fd = fn_using (TCon ("Env", [])) "adapter" in
+  let sig_hash = (March_cas.Hash.hash_fn_def fd).sig_hash in
+  let hash inner = March_cas.Hash.work_entry_sig_hash fd ~sig_hash
+      ~type_defs:[TDRecord ("Env", ["unrelated", TInt]);
+                  TDRecord ("Back.Env", ["nested", TCon ("Nested", [])]);
+                  TDVariant ("Back.Nested", inner)] in
+  let old = hash ["A", [TInt]; "B", []] in
+  Alcotest.(check bool) "same nominal env with changed payload is incompatible" false
+    (old = hash ["A", [TString]; "B", []]);
+  Alcotest.(check bool) "changed constructor tags are incompatible" false
+    (old = hash ["B", []; "A", [TInt]]);
+  Alcotest.(check bool) "new constructors change captured layout" false
+    (old = hash ["A", [TInt]; "B", []; "C", []]);
+  Alcotest.(check bool) "ownership mode is part of adapter ABI" false
+    (March_cas.Hash.hcr_sig_hash ~sig_hash:old ~modes:"b"
+     = March_cas.Hash.hcr_sig_hash ~sig_hash:old ~modes:"o");
+  Alcotest.(check string) "ordinary type signature is unchanged" sig_hash
+    (March_cas.Hash.hash_fn_def fd).sig_hash;
+  let record_hash fields = March_cas.Hash.work_entry_sig_hash fd ~sig_hash
+      ~type_defs:[TDRecord ("Env", fields)] in
+  Alcotest.(check bool) "record field offsets are part of adapter ABI" false
+    (record_hash ["a", TInt; "b", TInt] = record_hash ["b", TInt; "a", TInt]);
+  Alcotest.(check string) "unchanged captured layout is compatible" old
+    (hash ["A", [TInt]; "B", []])
+
 let test_impl_hash_tracks_referenced_type_layout () =
   (* f takes a User. Changing User's record layout must move f's impl_hash
      (GEP offsets change → f must recompile). Today the type is referenced
@@ -1034,6 +1060,7 @@ let () =
       Alcotest.test_case "different targets separate entries" `Quick test_different_targets_cause_separate_cache_entries;
     ]);
     ("def_id", [
+      Alcotest.test_case "work entry captured layout ABI" `Quick test_work_entry_checks_captured_layout;
       Alcotest.test_case "def_id equality via hash"           `Quick test_def_id_equality;
       Alcotest.test_case "ADefRef tag is 0x80"                `Quick test_adefref_serialize_encodes_hash;
       Alcotest.test_case "ADefRef uses hash not name"         `Quick test_adefref_serializes_hash_not_name;

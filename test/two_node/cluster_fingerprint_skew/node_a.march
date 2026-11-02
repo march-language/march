@@ -13,6 +13,7 @@ mod ClusterFpSkewA do
   needs IO
   needs IO.Console
   needs IO.Mut
+  needs IO.FileRead
   needs IO.NetConnect
   needs IO.NetListen
   needs IO.Spawn
@@ -45,6 +46,13 @@ mod ClusterFpSkewA do
     else who ++ ": " ++ m end end
   end
 
+  pfn wait_peer_done(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(10)
+      wait_peer_done(path)
+    end
+  end
+
   fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "fp-secret", 1)
     match ClusterNode.start(c, cfg) do
@@ -66,6 +74,9 @@ mod ClusterFpSkewA do
           Ok(_) -> println("A s2: ok")
           Err(e) -> println(verdict("A s2", R_Run.error_message(e)))
         end
+        -- The refusal is queued to node-b, not acknowledged by our local
+        -- result. Keep the link alive until the harness observes B finish.
+        wait_peer_done(Env.require("CLUSTER_FP_PEER_DONE"))
         ClusterNode.stop(h)
     end
   end

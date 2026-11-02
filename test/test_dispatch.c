@@ -695,7 +695,7 @@ static void test_equal_epochs_prefer_current(void) {
     march_dispatch_leave(0, v);
     CHECK(march_dispatch_enter_unit(0, &v) == FN2,
           "enter_unit with no proc follows current");
-    march_dispatch_leave(0, v);
+    march_dispatch_leave_unit(0, v);
     march_dispatch_shutdown();
 }
 
