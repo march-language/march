@@ -686,8 +686,14 @@ jobs:
       # driver fixed (bin/toolchain.ml, runtime_dir_complete) it takes under
       # a minute, and the script fails if the prelude ever falls back to
       # recompiling again.
+      #
+      # 5 -> 10 on 2026-11-02. Not that bug again: every session after the
+      # first hits the tc_env cache and precompiles in ~0.07 s. The corpus
+      # grew: 87 per-file sessions at 1-2 s each, plus one cold prelude build
+      # (~55 s) and control.march's 249 expressions (~28 s), about 300 s in
+      # all. main ran 285-296 s and PR #1052 was killed at the limit.
       - name: Check stdlib `march>` doctests
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
