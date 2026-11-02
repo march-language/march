@@ -394,6 +394,50 @@ let test_nested_default_helper_reach () =
   end
 end|}
 
+(* An impl may narrow its interface's bound, never widen it; a narrowed bound
+   is then the one its body is held to. *)
+let narrowing ~iface_needs ~impl_needs body =
+  Printf.sprintf {|mod M do
+  needs IO.Console, IO.Clock
+  interface Show(a) do
+    fn show : a -> String %s
+  end
+  type T = T(Int)
+  impl Show(T) do
+    fn show(_t) %s do
+%s
+    end
+  end
+end|} iface_needs impl_needs body
+
+let test_impl_bound_narrower_ok () =
+  clean "an impl narrowing its interface's bound"
+    (narrowing ~iface_needs:"needs IO.Console, IO.Clock" ~impl_needs:"needs IO.Clock"
+       {|      "t"|})
+
+let test_impl_bound_wider_rejected () =
+  let src =
+    narrowing ~iface_needs:"needs ()" ~impl_needs:"needs IO.Console" {|      "t"|}
+  in
+  rejects "cap_bound_iface" "an impl widening its interface's bound" src;
+  Alcotest.(check bool) "the message names the interface's bound" true
+    (List.exists (fun msg -> contains msg "wider than interface `Show`'s `needs ()`")
+       (messages src))
+
+let test_impl_narrowed_bound_still_enforced () =
+  rejects "cap_bound" "a narrowed impl reaching past its own bound"
+    (narrowing ~iface_needs:"needs IO.Console, IO.Clock" ~impl_needs:"needs IO.Clock"
+       {|      println("x")
+      "t"|})
+
+let test_impl_bound_under_unbounded_method () =
+  clean "an impl bound under an unbounded method"
+    (narrowing ~iface_needs:"" ~impl_needs:"needs IO.Clock" {|      "t"|});
+  rejects "cap_bound" "and it is still checked"
+    (narrowing ~iface_needs:"" ~impl_needs:"needs IO.Clock"
+       {|      println("x")
+      "t"|})
+
 let tests =
   [ Alcotest.test_case "direct reach" `Quick test_direct_reach
   ; Alcotest.test_case "transitive reach names the chain" `Quick test_transitive_reach_names_the_chain
@@ -422,4 +466,8 @@ let tests =
   ; Alcotest.test_case "interface bound untraceable invocation" `Quick test_iface_bound_untraceable_invocation
   ; Alcotest.test_case "nested impl helper reach" `Quick test_nested_impl_helper_reach
   ; Alcotest.test_case "nested default helper reach" `Quick test_nested_default_helper_reach
+  ; Alcotest.test_case "impl bound narrower ok" `Quick test_impl_bound_narrower_ok
+  ; Alcotest.test_case "impl bound wider rejected" `Quick test_impl_bound_wider_rejected
+  ; Alcotest.test_case "impl narrowed bound still enforced" `Quick test_impl_narrowed_bound_still_enforced
+  ; Alcotest.test_case "impl bound under unbounded method" `Quick test_impl_bound_under_unbounded_method
   ]

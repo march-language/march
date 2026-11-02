@@ -852,17 +852,40 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                   (c.Ast.fc_body :: Option.to_list c.Ast.fc_guard
                    @ default_param_exprs c))
               def.Ast.fn_clauses;
-            (match def.Ast.fn_needs, iface_def with
-             | None, Some iface ->
-               (match
-                  List.find_opt
-                    (fun (m : Ast.method_decl) -> m.Ast.md_name.Ast.txt = mn.Ast.txt)
-                    iface.Ast.iface_methods
-                with
-                | Some m ->
-                  record_iface_bound ~qname:mangled ~iface:iface.Ast.iface_name.Ast.txt
-                    ~impl_ty:(Some ty_key) m
-                | None -> ())
+            let iface_method =
+              Option.bind iface_def (fun (iface : Ast.interface_def) ->
+                  Option.map
+                    (fun m -> (iface.Ast.iface_name.Ast.txt, m))
+                    (List.find_opt
+                       (fun (m : Ast.method_decl) -> m.Ast.md_name.Ast.txt = mn.Ast.txt)
+                       iface.Ast.iface_methods))
+            in
+            (match def.Ast.fn_needs, iface_method with
+             | None, Some (iface, m) ->
+               record_iface_bound ~qname:mangled ~iface ~impl_ty:(Some ty_key) m
+             | Some (paths, nsp), Some (iface, m) ->
+               (* An impl may narrow its interface's bound, never widen it.
+                  Within it, the impl's own (tighter) bound is the one held;
+                  past it, the interface's is, so the body is still checked
+                  against the bound that actually applies. *)
+               (match iface_method_bound m with
+                | None -> record_fn_bound ~qname:mangled def
+                | Some (ibound, _) ->
+                  let own = List.sort_uniq String.compare (List.map cap_path_of_names paths) in
+                  let wider =
+                    List.filter (fun c -> not (List.exists (fun b -> cap_subsumes b c) ibound)) own
+                  in
+                  if wider = [] then record_fn_bound ~qname:mangled def
+                  else begin
+                    let show_b b = if b = [] then "()" else String.concat ", " b in
+                    Err.error ~code:Err.Code.cap_bound_iface env.errors ~span:nsp
+                      (Printf.sprintf
+                         "`%s` in `impl %s(%s)` declares `needs %s`, which is wider than \
+                          interface `%s`'s `needs %s` for `%s`.\n\
+                          help: narrow the impl's bound to within the interface's."
+                         mn.Ast.txt iface ty_key (show_b own) iface (show_b ibound) mn.Ast.txt);
+                    record_iface_bound ~qname:mangled ~iface ~impl_ty:(Some ty_key) m
+                  end)
              | _ -> record_fn_bound ~qname:mangled def);
             if not (List.mem mn.Ast.txt module_fn_names) then
               record_dispatch_edge (cap_qname mn.Ast.txt) mangled)
