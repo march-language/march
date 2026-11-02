@@ -37,6 +37,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`String.fold_split` and `String.fold_split_ranges`: walk the fields of `split`
+  without building the list.** `fold_split` hands each field to a callback, one at a
+  time; `fold_split_ranges` hands over byte ranges and allocates nothing. On a
+  150,000-field buffer, `fold_split` uses 4 MB where `split` uses 25 MB, and
+  `fold_split_ranges` is also about 3x faster.
 - **Refinement predicates can use your own functions.** A function that terminates
   structurally, has no effects, cannot fail and calls only such functions is *reflected*
   automatically: its body becomes its meaning in the logic. `if is_small(n) do
@@ -529,6 +534,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- In the interpreter (and so in `march test` and the REPL), `String.split` with a
+  repeating multi-byte separator returned the wrong fields: `String.split(",,,,",
+  ",,")` gave `["", ",,"]` instead of `["", "", ""]`, which compiled code already
+  returned.
 - **`println` and `print` write a string's bytes on the JS target.** Under Node a string
   holding binary data (raw bytes) printed each byte's UTF-8 encoding; it now writes the
   bytes, as natively. `march_string_bytes(s)` (exported by `march_runtime.mjs`) gives an
@@ -872,6 +881,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **The compatibility policy now says the in-memory layout of values, strings
+  included, is not part of the 1.0 promise.** C code reaches strings only through
+  `march_ffi.h` (`march_slice`, `march_str_new`), and a check keeps that header from
+  exposing the string struct, so short strings can later be stored inline without
+  breaking anyone.
 - **What March 1.0 will promise, in writing.** New pages: [Compatibility &
   Deprecation](docs/compatibility.md) (what a 1.x release keeps working, including the
   cluster control plane's release format and messages; `@[deprecated]` and stdlib

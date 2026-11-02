@@ -1,0 +1,44 @@
+-- Split-fold benchmark: the fields of bench/string_split_large.march's buffer, walked
+-- without building the list. Same buffer, same 60 iterations, same checksum.
+--
+--   fold_split         one string per field, but only one alive at a time (no cons cells,
+--                      no list of every field)
+--   fold_split_ranges  byte ranges only: no allocation per field at all
+--
+-- Compare with string_split_large (a List(String) per iteration) under
+-- MARCH_STRING_STATS=1: allocs, obj_allocs and peak_live_bytes are what these remove.
+-- specs/progress/2026-10-31-string-abi-internal.md
+--
+-- Expected output:
+--   fold_split checksum=39000000
+--   fold_split_ranges checksum=39000000
+-- Usage: march --compile --opt 2 bench/string_split_fold.march -o /tmp/string_split_fold
+mod StringSplitFold do
+  needs IO.Console
+
+  -- Keep identical to string_split_large.
+  pfn rows() : Int do 50000 end
+  pfn iterations() : Int do 60 end
+
+  pfn go_fold(buf : String, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      let s = String.fold_split(buf, ",", 0, fn (a, f) -> a + String.byte_size(f))
+      go_fold(buf, i + 1, n, acc + s)
+    end
+  end
+
+  pfn go_ranges(buf : String, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      let s = String.fold_split_ranges(buf, ",", 0, fn (a, st, len) -> a + len)
+      go_ranges(buf, i + 1, n, acc + s)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let buf = String.repeat("aaa,bbb,ccc,ddd\n", rows())
+    println("fold_split checksum=" ++ to_string(go_fold(buf, 0, iterations(), 0)))
+    println("fold_split_ranges checksum=" ++ to_string(go_ranges(buf, 0, iterations(), 0)))
+  end
+end
