@@ -98,8 +98,9 @@ jobs:
           - { os: ubuntu-24.04, shard: rest }
           - { os: macos-15,     shard: all }
     runs-on: ${{ matrix.os }}
-    # Must stay above the Test step's 75 plus setup (12) and build (10).
-    timeout-minutes: 100
+    # Must stay above the Test step's timeout (105 on macOS, 75 on ubuntu)
+    # plus setup (12) and build (10).
+    timeout-minutes: ${{ matrix.os == 'macos-15' && 130 || 100 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -147,13 +148,18 @@ jobs:
           sudo sysctl -w kernel.core_pattern='/tmp/march-cores/core.%p.%E'
 
       - name: Test (${{ matrix.shard }})
-        # Sized for the unsharded macOS run: 37-49 min on main in late
-        # September 2026 (run_codegen alone took 28-29 min on a slow macOS
-        # runner; the ubuntu shards are well under it). 45 was hit on main
-        # itself; 75 leaves ~50% over the worst run seen. Don't split the
-        # macOS shard to get under a timeout: that doubled its runner-minutes
-        # (see README.md, "Runner budget").
-        timeout-minutes: 75
+        # Sized for the unsharded macOS run, which is CPU-bound on 3 cores and
+        # grows with every suite: 37-49 min on main in late September 2026,
+        # 44-72 min by late October (run_codegen ~37 min and run_compiler
+        # ~32 min of it, finishing last). 45 was hit on main in September; 75
+        # was hit on every main run from 2026-10-31 with no suite failing and
+        # run_codegen/run_compiler still running. 105 leaves ~45% over the
+        # worst green run seen (72). The ubuntu shards (under 30 min) keep 75,
+        # so a wedged dune there is still cut off early. Don't split the macOS
+        # shard to get under a timeout: that doubled its runner-minutes (see
+        # README.md, "Runner budget"). A timeout here with every printed suite
+        # [OK] means the job outgrew this number, not that a test hung.
+        timeout-minutes: ${{ matrix.os == 'macos-15' && 105 || 75 }}
         run: |
           eval $(opam env)
           if [ "$RUNNER_OS" = Linux ]; then ulimit -c unlimited; fi
