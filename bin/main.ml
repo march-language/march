@@ -970,7 +970,18 @@ let print_reflect_deps ~filename ~user_files () =
   let deps =
     Hashtbl.fold (fun sym () acc -> sym :: acc) RS.check_frontier []
     |> List.filter_map (row "reflect-dep") |> List.sort_uniq compare in
-  List.iter prerr_endline (defs @ deps)
+  (* The contract of every user function, and of every function of another
+     user file the entry file reaches through calls (review round 1): a
+     callee's refinement contract and reflectability enter a caller's proof
+     with no body in a frontier, and a callee's reflectability rests on its
+     own callees. *)
+  let user_file f = f <> "<none>" && is_user f in
+  let crow kind (file, name, h) =
+    if user_file file then Some (Printf.sprintf "%s\t%s\t%s\t%s" kind file name h) else None in
+  let cdefs =
+    List.filter_map (crow "reflect-cdef") (Array.to_list (Lazy.force !RS.contract_defs)) |> List.sort_uniq compare in
+  let cdeps = List.filter_map (crow "reflect-cdep") (RS.contract_reach filename) |> List.sort_uniq compare in
+  List.iter prerr_endline (defs @ deps @ cdefs @ cdeps)
 
 (* --reflect-parity (reflection §9.2, D16): the parity net over the
    reflected functions of user code; its lines on stderr, exit 1 on RED (a
@@ -7169,7 +7180,7 @@ let () =
     ("--refine-report-sites=all", Arg.Set refine_report_sites_all,
      " Print one line per refinement obligation of any verdict (proved, skip, violated, trusted): file:line:col, kind, callee, predicate");
     ("--reflect-deps", Arg.Set reflect_deps,
-     " Print the D17 logic hash of every reflected user function (reflect-def) and of every reflected function a stage-2 query of the check unfolded (reflect-dep); changes no verdict");
+     " Print the D17 logic hash of every reflected user function (reflect-def) and of every reflected function a stage-2 query of the check unfolded (reflect-dep), and the contract hash of every user function (reflect-cdef) and of every function of another user file the file reaches through calls (reflect-cdep); changes no verdict");
     ("--reflect-parity", Arg.Set reflect_parity,
      " Compare each reflected user function's logic definition with the interpreter on generated inputs (boundary Ints included); exit 1 on a mismatch or an interpreter failure");
     ("--reflect-report", Arg.Set reflect_report,

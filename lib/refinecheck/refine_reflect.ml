@@ -1238,6 +1238,11 @@ let encoder_blocked : (A.span, string) Hashtbl.t = Hashtbl.create 64
     the driver. *)
 let install_errors : (A.span * string) list ref = ref []
 
+(** (display name, declaring file) of every function the last [install]
+    found reflected, whether or not it got a logic symbol (the parity net
+    lists the ones that did not, review round 1). *)
+let reflected_fns : (string * string) list ref = ref []
+
 let debug_registered = ref false
 
 (* Every reflected logic symbol a query applies is declared by its preamble
@@ -1270,6 +1275,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   Hashtbl.reset templates;
   Hashtbl.reset encoder_blocked;
   install_errors := [];
+  reflected_fns := [];
   Hashtbl.reset RS.blocked_by_name;
   let g = t.RT.graph in
   let ne = Hashtbl.create 64 in
@@ -1284,6 +1290,8 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   in
   let rows = analyze inputs t decls in
   let refl_spans = Hashtbl.create 64 in
+  reflected_fns :=
+    List.filter_map (fun r -> match r.r_verdict with Reflected _ -> Some (r.r_name, r.r_span.A.file) | Blocked _ -> None) rows;
   List.iter
     (fun r ->
       match r.r_verdict with
@@ -1570,6 +1578,48 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
         Hashtbl.replace RS.logic_by_name u.RT.u_name (List.sort compare ((u.RT.u_span.A.file, h) :: prev))
       | _ -> ())
     g.RT.units;
+  (* The contract hash of every unit (review round 1): its head's text up to
+     its last clause's body, its attributes, and whether it is reflected
+     (with its unfolding guards).  A multi-clause function's earlier bodies
+     fall inside the head text: an over-approximation (a re-check too many),
+     never a missed one. *)
+  let head_of (u : RT.unit_) =
+    let sp = u.RT.u_span in
+    let stop =
+      List.fold_left
+        (fun (l, c) (o : RT.owner) ->
+          let b = T.span_of_expr o.RT.o_body in
+          if (b.A.start_line, b.A.start_col) > (l, c) then (b.A.start_line, b.A.start_col) else (l, c))
+        (sp.A.end_line, sp.A.end_col) u.RT.u_clauses
+    in
+    match file_text sp.A.file with
+    | None -> ""
+    | Some text ->
+      let offset (line, col) =
+        let rec go i l = if l >= line then Some i else match String.index_from_opt text i '\n' with Some j -> go (j + 1) (l + 1) | None -> None in
+        Option.map (fun i -> i + col) (go 0 1)
+      in
+      (match offset (sp.A.start_line, sp.A.start_col), offset stop with
+       | Some a, Some b when a >= 0 && b >= a && b <= String.length text -> String.sub text a (b - a)
+       | _ -> "")
+  in
+  let contract = lazy (
+    Array.map
+      (fun (u : RT.unit_) ->
+        let status =
+          match sym_of.(u.RT.u_id) with
+          | Some sym when Hashtbl.mem RS.logic_hash sym ->
+            "reflected" ^ String.concat "" (List.map (fun g -> "\000guard " ^ g) (Option.value ~default:[] (Hashtbl.find_opt guards_of u.RT.u_span)))
+          | _ -> "-"
+        in
+        March_cas.Blake3.hash_string
+          (String.concat "\000" ([ "march-contract-v1"; head_of u; status ] @ List.map (fun a -> "attr " ^ a) u.RT.u_attrs)))
+      g.RT.units)
+  in
+  RS.contract_defs :=
+    lazy (let c = Lazy.force contract in
+          Array.map (fun (u : RT.unit_) -> (u.RT.u_span.A.file, u.RT.u_name, c.(u.RT.u_id))) g.RT.units);
+  RS.contract_edges := lazy (List.sort_uniq compare (List.map (fun (e : RT.edge) -> (e.RT.e_src, e.RT.e_dst)) g.RT.edges));
   RS.unfold_hook := unfold;
   March_refine.Refine.well_formed := declared_logic_symbols;
   RS.active := true;

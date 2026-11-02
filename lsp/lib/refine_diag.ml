@@ -16,11 +16,23 @@
       not, and a skipped obligation has no core at all, so a dependency edit
       that would turn a skip into a proof would never re-check the file.
 
+    The key also holds the CONTRACT hash of every function of another file
+    the file reaches through calls (`reflect-cdep`; review round 1): its
+    head's text, parameter and return refinements included, and whether it
+    is reflected.  A callee's contract enters a caller's proof with no body
+    in any frontier (`Util.need(3)` against `need(n : {v | v > 1})`), a
+    callee going from blocked to reflected is in no frontier before the
+    edit, and a callee's reflectability rests on its own callees (reached,
+    so in the key, wherever they live).
+
     When a file is saved (or changes on disk), its own check reports the
-    current hash of every reflected function it defines (`reflect-def`);
-    every other checked file whose key names a function of that file with a
-    different hash, or one that is no longer reflected, is stale and is
-    re-checked.  A dependency edit that leaves every frontier hash alone
+    current logic hash of every reflected user function (`reflect-def`) and
+    the contract hash of every user function (`reflect-cdef`), of every user
+    file the check loaded, not only its own: a body edit can change a
+    function of ANOTHER file's reflectability (its callee gained an effect).
+    Every other checked file whose key names a function of a file that check
+    reported with a hash it no longer reports is stale and is re-checked.  A
+    dependency edit that moves no frontier hash and no called contract
     re-checks nothing.
 
     Lemmas (phase 2): a dependency lemma a file calls belongs in the key too,
@@ -94,9 +106,9 @@ let parse ~(file : string) (stdout : string) (stderr : string) : result =
              Some { dep_file = canon f; dep_name = n; dep_hash = h }
            | _ -> None)
   in
-  let defs = rows "reflect-def" in
+  let defs = rows "reflect-def" @ rows "reflect-cdef" in
   let deps =
-    if not (key_on_core ()) then rows "reflect-dep"
+    if not (key_on_core ()) then rows "reflect-dep" @ rows "reflect-cdep"
     else
       (* `uses: f, g` of the user's proved rows, matched to the frontier rows
          by name. *)
@@ -144,11 +156,13 @@ let check (file : string) : result =
   r
 
 (** The files (other than [changed]) whose dependency key is stale against
-    [defs], the reflected functions [changed] defines now: a key entry for a
-    function of [changed] whose hash no reflected function of [changed] has
-    any more (its body or its reflectability changed). *)
+    [defs], what [changed]'s fresh check reports of every user file it
+    loaded (logic and contract hashes): a key entry for a function of a
+    reported file (or of [changed] itself) whose hash that file no longer
+    has (its body, contract or reflectability changed). *)
 let stale_dependents ~(changed : string) ~(defs : dep list) : string list =
   let changed = canon changed in
+  let reported f = f = changed || List.exists (fun x -> x.dep_file = f) defs in
   Hashtbl.fold
     (fun f r acc ->
       if f = changed then acc
@@ -159,7 +173,8 @@ let stale_dependents ~(changed : string) ~(defs : dep list) : string list =
                dependent's check and `is_small` when its own file is the
                entry, and the hash covers the function's source text
                (its name included), so it identifies the definition. *)
-            d.dep_file = changed && not (List.exists (fun x -> x.dep_hash = d.dep_hash) defs))
+            reported d.dep_file
+            && not (List.exists (fun x -> x.dep_file = d.dep_file && x.dep_hash = d.dep_hash) defs))
           r.r_deps
       then f :: acc
       else acc)

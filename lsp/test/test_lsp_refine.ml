@@ -101,5 +101,58 @@ let tests =
             match R.on_change util_path with
             | [ (_, after) ] -> if unverified after then Alcotest.fail "after the edit need_small is proved"
             | rs -> Alcotest.failf "app.march must be re-checked, got %d files" (List.length rs)));
+    gated "lsp_invalidate: a callee's CONTRACT edit re-checks its caller (review round 1)" (fun () ->
+        (* Util.need's parameter refinement is no reflected body: before the
+           fix app.march's key listed only frontier bodies, so `v > 1` ->
+           `v > 100` left `Util.need(3)` clean in the editor while a fresh
+           --check reports refinement_violated. *)
+        with_project (fun dir ->
+            let util k = Printf.sprintf "mod Util do\n  fn need(n : {v : Int | v > %d}) : Int do n end\nend\n" k in
+            write dir "util.march" (util 1);
+            write dir "app.march" "mod App do\n  fn go2() : Int do\n    Util.need(3)\n  end\nend\n";
+            let app_path = Filename.concat dir "app.march" and util_path = Filename.concat dir "util.march" in
+            let violated (r : R.result) = List.exists (fun (d : R.diag) -> d.R.d_code = "refinement_violated") r.R.r_diags in
+            if violated (R.check app_path) then Alcotest.fail "before the edit Util.need(3) satisfies v > 1";
+            write dir "util.march" (util 100);
+            match R.on_change util_path with
+            | [ (f, after) ] ->
+              Alcotest.(check string) "the dependent re-checked" (R.canon app_path) f;
+              if not (violated after) then Alcotest.fail "after the edit Util.need(3) is refinement_violated"
+            | rs -> Alcotest.failf "exactly app.march must be re-checked, got %d files" (List.length rs)));
+    gated "lsp_invalidate: a callee going from blocked to reflected re-checks its caller (review round 1)" (fun () ->
+        with_project (fun dir ->
+            (* blocked: is_small has an effect, so it has no logic symbol and
+               is in no frontier; app.march's key held nothing of it. *)
+            write dir "util.march"
+              "mod Util do\n  fn is_small(n : Int) : Bool do\n    println(\"x\")\n    n < 10\n  end\nend\n";
+            write dir "app.march" app;
+            let app_path = Filename.concat dir "app.march" and util_path = Filename.concat dir "util.march" in
+            if not (unverified (R.check app_path)) then Alcotest.fail "with is_small blocked need_small is unverified";
+            write dir "util.march" (util 10);
+            match R.on_change util_path with
+            | [ (_, after) ] -> if unverified after then Alcotest.fail "after the edit need_small is proved"
+            | rs -> Alcotest.failf "app.march must be re-checked, got %d files" (List.length rs)));
+    gated "lsp_invalidate: a third file's edit that unreflects a callee re-checks the caller (review round 1)" (fun () ->
+        (* app calls Util.is_small, which calls Util2.lim.  lim gaining an
+           effect makes is_small unreflected (R: callee not reflected): a
+           change in util.march's functions that only util2.march's edit
+           causes.  app.march's key holds the contract (and reflectability)
+           of every function of another file it reaches, Util2.lim included. *)
+        with_project (fun dir ->
+            write dir "util.march" "mod Util do\n  fn is_small(n : Int) : Bool do n < Util2.lim(n) end\nend\n";
+            let util2 eff =
+              Printf.sprintf "mod Util2 do\n  fn lim(n : Int) : Int do\n    %s10\n  end\nend\n"
+                (if eff then "println(\"x\")\n    " else "")
+            in
+            write dir "util2.march" (util2 false);
+            write dir "app.march" app;
+            let app_path = Filename.concat dir "app.march" and util2_path = Filename.concat dir "util2.march" in
+            let before = R.check app_path in
+            if not (List.exists (fun d -> d.R.dep_name = "Util.is_small") before.R.r_deps) then
+              Alcotest.fail "app.march's key must name Util.is_small";
+            write dir "util2.march" (util2 true);
+            match R.on_change util2_path with
+            | [ (f, _) ] -> Alcotest.(check string) "the dependent re-checked" (R.canon app_path) f
+            | rs -> Alcotest.failf "app.march must be re-checked, got %d files" (List.length rs)));
     Alcotest.test_case "lemma hook: empty until @[lemma] exists (phase 2)" `Quick (fun () ->
         Alcotest.(check int) "no lemma key" 0 (List.length (R.lemma_key "app.march"))) ]

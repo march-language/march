@@ -127,8 +127,11 @@ let reflect_report = ref false
 (* --reflect-deps: after the check, one `reflect-def` line per reflected
    function of user code with its D17 logic hash, and one `reflect-dep` line
    per reflected function in the frontier of any stage-2 query the check ran
-   (reflection §7.2, I8).  The LSP keys a file's refinement diagnostics on
-   the `reflect-dep` lines (lsp/lib/refine_diag.ml).  Report-only. *)
+   (reflection §7.2, I8); then one `reflect-cdef` line per user function with
+   its contract hash and one `reflect-cdep` line per function of another
+   user file the file reaches through calls.  The LSP keys a file's refinement diagnostics on the
+   `reflect-dep` and `reflect-cdep` lines (lsp/lib/refine_diag.ml).
+   Report-only. *)
 let reflect_deps = ref false
 (* --reflect-parity: the parity net (reflection §9.2, D16): each reflected
    function of user code is evaluated by its logic definition and by the

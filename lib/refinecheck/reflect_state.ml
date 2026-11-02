@@ -119,6 +119,35 @@ let sym_origin : (string, string * string) Hashtbl.t = Hashtbl.create 64
     dependents.  Base symbol -> unit; read by [--reflect-deps]. *)
 let check_frontier : (string, unit) Hashtbl.t = Hashtbl.create 64
 
+(** The CONTRACT hash of every function of the program (review round 1 of
+    phase 1b): BLAKE3 over its attributes, its head's source text (from its
+    name to the start of its last clause's body: parameter and return
+    refinements included, position-free) and whether it is reflected.  A
+    caller's proof relies on a callee's contract and reflectability even
+    when no body of the callee is in any frontier, so the LSP keys a file on
+    the contract of every cross-file function it calls ([contract_edges])
+    as well as on its frontier.  (file, display name, hash), by unit id of
+    the termination graph. *)
+let contract_defs : (string * string * string) array Lazy.t ref = ref (lazy [||])
+
+(** The call and reference edges of the termination graph, (source unit,
+    destination unit): a callee's reflectability rests on its own callees,
+    so a caller's key covers every function it reaches. *)
+let contract_edges : (int * int) list Lazy.t ref = ref (lazy [])
+
+(** The units reachable from any unit declared in [file] (itself excluded:
+    the file's own functions are its definitions, not its dependencies). *)
+let contract_reach (file : string) : (string * string * string) list =
+  let defs = Lazy.force !contract_defs in
+  let n = Array.length defs in
+  let succ = Array.make n [] in
+  List.iter (fun (a, b) -> if a < n && b < n then succ.(a) <- b :: succ.(a)) (Lazy.force !contract_edges);
+  let seen = Array.make n false in
+  let rec go v = if not seen.(v) then begin seen.(v) <- true; List.iter go succ.(v) end in
+  Array.iteri (fun i (f, _, _) -> if f = file then go i) defs;
+  List.filter_map (fun i -> let (f, _, _) as d = defs.(i) in if seen.(i) && f <> file then Some d else None)
+    (List.init n Fun.id)
+
 (** The base symbol of a reflected application's head (base or instance). *)
 let base_of (f : string) : string option =
   if Hashtbl.mem logic_hash f then Some f
@@ -185,6 +214,8 @@ let reset () =
   Hashtbl.reset logic_by_name;
   Hashtbl.reset sym_origin;
   Hashtbl.reset check_frontier;
+  contract_defs := lazy [||];
+  contract_edges := lazy [];
   arm_on := false;
   frontier_seen := false;
   confirmed := false;
