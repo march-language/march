@@ -190,7 +190,9 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      for the DCE at the end to keep a few dozen; that was ~40% of a small
      program's compile.  Defun is [Dce]'s stated precondition.  The roots are
      the final DCE's plus the [extra_roots] and NoAlloc functions that block
-     pins after Escape, so this keeps a superset of what that DCE keeps;
+     pins after Escape, and the targets of [remote_ref_hashes] (the driver
+     hashes those from the pre-opt TIR although nothing calls them), so this
+     keeps a superset of what that DCE keeps;
      [tm_exports] is restored because it is also an ABI fact other passes
      read.  Off under hot reload and for JS (both have their own reachability
      rules) and when the optimizer is off. *)
@@ -199,7 +201,8 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     then tir
     else begin
       let wanted = Hashtbl.create 16 in
-      List.iter (fun n -> Hashtbl.replace wanted n ()) extra_roots;
+      List.iter (fun n -> Hashtbl.replace wanted n ())
+        (extra_roots @ Dce.remote_ref_targets tir);
       let pins = List.filter_map (fun (fn : Tir.fn_def) ->
           let n = fn.Tir.fn_name in
           if Hashtbl.mem wanted n

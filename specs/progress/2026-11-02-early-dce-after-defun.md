@@ -24,6 +24,12 @@ precondition [Dce] documents; the REPL shell already prunes there,
 pipeline pins after Escape, so it keeps a superset of what the final DCE keeps.
 `tm_exports` is restored afterwards: other passes read it as an ABI fact.
 
+It also roots every function a `remote_ref_hashes("Mod", "fn")` call names
+(`Dce.remote_ref_targets`). The driver hashes every pre-opt function for that
+constant fold, live or not, so a client and a server agree on a function only
+the server calls; without the root, `native_rpc_hash_elim` folded to empty
+hashes.
+
 Skipped under hot reload, for JS, and when the optimizer is off. Switch:
 `--disable-pass dce-early` / `MARCH_DISABLE_PASS=dce-early`.
 
@@ -34,3 +40,17 @@ Skipped under hot reload, for JS, and when the optimizer is off. Switch:
 | `mixed_tail_aggregate_drop` | 3.2 s | 1.7 s | 9 / 9 |
 
 (wall, warm HOME cache, cold CAS, M-series Mac.)
+
+## What the IR oracle showed
+
+`scripts/oracle-base.sh ir` reports 513 programs CHANGED, because fresh-name
+counters now run over fewer functions. Compared against the same compiler with
+`dce-early` disabled, after replacing digits and sorting lines:
+
+- 485 identical (2 byte-for-byte; the rest differ only in numbering and order);
+- 1 real loss, the `remote_ref_hashes` one above, fixed;
+- 29 differ in inlining: Opt's inliner counts call sites, and pruned stdlib
+  callers no longer count, so some helpers are now inlined and others kept
+  (e.g. `PeerRegistry.add` inlined, `NodeSend.encode_msg_schema` kept), and
+  the strings those bodies use move with them. All but `bench_dataframe_bench`
+  are `test/native` fixtures with golden output.
