@@ -433,5 +433,11 @@ let run ~(is_user : string -> bool) () : string list * bool =
   ( List.map line results
     @ [ Printf.sprintf
           "parity: %d functions (seed %d, %d draws + boundary Ints): %d agree, %d mismatch, %d interpreter failure, %d overflow?, %d not compared"
-          (List.length results) seed draws agree mism fails over nc ],
+          (List.length results) seed draws agree mism fails over nc ]
+    @ (* Review round 2: a run that compared no input (no reflected
+         function, or none the net could run) is no evidence; it says so in
+         words rather than reading as green.  Not RED: nothing disagreed. *)
+    (if List.fold_left (fun a r -> a + r.p_compared) 0 results = 0 && mism + fails = 0 then
+       [ "parity: NOTHING COMPARED (no input of any reflected function was compared; the net is no evidence here)" ]
+     else []),
     mism + fails > 0 )

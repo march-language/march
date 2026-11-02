@@ -148,7 +148,8 @@ let project_env proj =
     function's logic definition with the interpreter on generated inputs
     (boundary Ints included) and exits 1 on a mismatch or an interpreter
     failure.  The `parity` lines are printed per file.  A file whose check
-    itself fails is reported as a check failure, not as parity RED. *)
+    itself fails is reported as a check failure, not as parity RED; a run in
+    which no file compared any input fails as "compared nothing". *)
 let project_sources root =
   List.concat_map
     (fun d ->
@@ -185,7 +186,8 @@ let run_reflection_parity ~lib_path_env (files : string list) : (unit, string) r
         let lines = String.split_on_char '\n' text in
         List.iter (fun l -> if String.starts_with ~prefix:"parity" l then print_endline l) lines;
         let red = List.exists (fun l -> String.starts_with ~prefix:"parity: RED" l) lines in
-        if code = 0 then (f, `Ok)
+        let nothing = List.exists (fun l -> String.starts_with ~prefix:"parity: NOTHING COMPARED" l) lines in
+        if code = 0 then (f, if nothing then `Nothing else `Ok)
         else if red then (f, `Red)
         else begin
           (* the check's own diagnostics, so the failure is legible *)
@@ -196,6 +198,13 @@ let run_reflection_parity ~lib_path_env (files : string list) : (unit, string) r
   in
   let pick k = List.filter_map (fun (f, v) -> if v = k then Some f else None) verdicts in
   match pick `Red, pick `Check_failed with
+  | [], [] when files <> [] && List.for_all (fun (_, v) -> v = `Nothing) verdicts ->
+    (* Review round 2: the flag asked for evidence and no file gave any (no
+       reflected function the net could run). A failure, not parity RED. *)
+    Error
+      (Printf.sprintf
+         "reflection parity compared nothing: no input of any reflected function was compared in %s"
+         (String.concat ", " files))
   | [], [] -> Ok ()
   | red, failed ->
     Error

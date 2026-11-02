@@ -801,6 +801,16 @@ let test_parity_check_failure_is_not_parity_red () =
         if contains e "parity RED" then Alcotest.failf "a check failure is not a parity mismatch: %s" e;
         if not (contains e "check failed") then Alcotest.failf "the error names the check failure: %s" e)
 
+let test_parity_nothing_compared_fails () =
+  with_parity_dir (fun dir ->
+      let f = Filename.concat dir "flt.march" in
+      write_file f "mod Flt do\n  fn g(n : Int) : Int do\n    if 2.0 == 2.0 do n + 1 else n - 1 end\n  end\nend\n";
+      match Cmd_test.run_reflection_parity ~lib_path_env:"" [ f ] with
+      | Ok () -> Alcotest.fail "a run that compared nothing must not pass"
+      | Error e ->
+        if contains e "parity RED" then Alcotest.failf "nothing compared is not a mismatch: %s" e;
+        if not (contains e "compared nothing") then Alcotest.failf "the error says nothing was compared: %s" e)
+
 let test_parity_mismatch_is_red () =
   with_parity_dir (fun dir ->
       let f = Filename.concat dir "absv.march" in
@@ -930,6 +940,7 @@ let () =
       Alcotest.test_case "--reflection-parity: a check failure is not parity RED" `Quick
         test_parity_check_failure_is_not_parity_red;
       Alcotest.test_case "--reflection-parity: a mismatch is parity RED" `Quick test_parity_mismatch_is_red;
+      Alcotest.test_case "--reflection-parity: comparing nothing fails" `Quick test_parity_nothing_compared_fails;
     ];
     "forge run", [
       Alcotest.test_case "interpreted run passes [ffi] sources to the compiler" `Quick
