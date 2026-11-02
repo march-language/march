@@ -45,3 +45,13 @@ September to double its job-minutes on a 5-slot org-wide pool) fixes that.
 
 The macOS job's new wall time is an estimate until CI runs it (expected well
 under the 75 min step timeout).
+
+## Follow-ups from the PR's first CI run
+
+- The new cache key made every job build a cold opam switch. On macos-26 that
+  took setup-ocaml ~6 min (compiler build) plus ~5.5 min of `opam install`, so
+  both macOS jobs ran past their 12 min toolchain step during the cache save,
+  which left the cache unwritten. The macOS toolchain steps now get 20 min.
+- The cold switch pulled in js_of_ocaml 6.5.0, which broke the browser REPL's
+  deep-recursion smoke case. Pinned `< 6.5`; filed
+  `specs/todos/2026-11-02-js-of-ocaml-6-5-browser-repl-stack-overflow.md`.

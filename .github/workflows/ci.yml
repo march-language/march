@@ -98,16 +98,17 @@ jobs:
           - { os: ubuntu-24.04, shard: rest }
           - { os: macos-26,     shard: all }
     runs-on: ${{ matrix.os }}
-    # Must stay above the Test step's 75 plus setup (12) and build (10).
-    timeout-minutes: 100
+    # Must stay above the Test step's 75 plus setup (20) and build (10).
+    timeout-minutes: 108
     steps:
       - uses: actions/checkout@v7
 
       # cross-tools: `dune runtest` includes a linux/amd64 TLS+gzip test that
       # shells out to `zig cc` against the fetched sysroot. Installed for every
       # shard (~10s) rather than tracking which suite that test lives in.
+      # 20 for the macOS leg's cold cache; see the comment in macos-checks.
       - name: Set up toolchain
-        timeout-minutes: 12
+        timeout-minutes: 20
         uses: ./.github/actions/march-setup
         with:
           cross-tools: "true"
@@ -1316,12 +1317,17 @@ jobs:
   # regex-escaped, so a new group runs here without anyone editing this.
   macos-checks:
     runs-on: macos-26
-    timeout-minutes: 40
+    timeout-minutes: 48
     steps:
       - uses: actions/checkout@v7
 
+      # 20, not 12 like the Linux jobs: on a cold cache (a new runner image or
+      # a dependency change) macOS builds the compiler (~6 min in setup-ocaml)
+      # and the opam switch (~5.5 min) and then saves it. On macos-26's first
+      # run that took the step past 12 during the save, so the cache was never
+      # written and every later run would be cold too.
       - name: Set up toolchain
-        timeout-minutes: 12
+        timeout-minutes: 20
         uses: ./.github/actions/march-setup
 
       - name: Build compiler + property tests
