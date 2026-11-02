@@ -164,6 +164,8 @@ jobs:
             # that could not compile anything.
             cp runtime/*.c runtime/*.h _dist/runtime/
             cp -R runtime/third_party _dist/runtime/
+            # The JS target's runtime, copied next to every `--target js` output.
+            cp runtime/*.mjs _dist/runtime/
             cp LICENSE _dist/ 2>/dev/null || true
 
       # --- macOS: built on the runner host ---
@@ -224,6 +226,8 @@ jobs:
           # third_party/: see the Linux leg above.
           cp runtime/*.c runtime/*.h _dist/runtime/
           cp -R runtime/third_party _dist/runtime/
+          # JS runtime: see the Linux leg above.
+          cp runtime/*.mjs _dist/runtime/
           cp LICENSE _dist/ 2>/dev/null || true
 
       # --- Package ---
@@ -303,6 +307,23 @@ jobs:
             echo "::error::${{ matrix.platform }}: the compiled smoke program printed '$out', expected 'smoke 3'." >&2
             exit 1; }
           echo "  ok: compiled and ran with the packaged compiler ($out)"
+          # v0.7.0 shipped without runtime/*.mjs, so every `--target js` build
+          # from the archive failed in node with ERR_MODULE_NOT_FOUND.
+          mkdir -p "$work/js"
+          env -u MARCH_RUNTIME_DIR -u MARCH_STDLIB HOME="$work/home" \
+            "$dist/bin/march" --target js -o "$work/js/smoke.mjs" "$work/smoke.march" > js.log 2>&1 || {
+              echo "::error::${{ matrix.platform }}: the packaged compiler cannot build a program for --target js." >&2
+              cat js.log >&2; exit 1; }
+          [ -f "$work/js/march_runtime.mjs" ] || {
+            echo "::error::${{ matrix.platform }}: --target js did not place march_runtime.mjs next to its output; the archive is missing runtime/*.mjs." >&2
+            exit 1; }
+          if command -v node > /dev/null; then
+            out="$(node "$work/js/smoke.mjs")"
+            [ "$out" = "smoke 3" ] || {
+              echo "::error::${{ matrix.platform }}: the JS smoke program printed '$out', expected 'smoke 3'." >&2
+              exit 1; }
+          fi
+          echo "  ok: built for --target js with the packaged compiler"
 
       - name: Verify the archive runs on a bare system
         if: matrix.static
