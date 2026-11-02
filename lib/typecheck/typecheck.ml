@@ -7926,6 +7926,39 @@ let cap_reach_chain ?own_caps ?fn_refs (env : env) ~(from : string) ~(cap : stri
      caller can be charged for what it does; a bound short of all of `IO` is
      refused rather than certified. *)
 let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env : env) : unit =
+  let violates bound (row : March_caps.Cap_rows.row) =
+    (row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound))
+    || List.exists
+         (fun c -> cap_subsumes "IO" c && not (List.exists (fun b -> cap_subsumes b c) bound))
+         row.March_caps.Cap_rows.caps
+  in
+  (* A generic impl reaches every impl of its method through the dispatch
+     node, so one impl over its interface's bound would be reported again at
+     each generic impl.  Judge every bound against rows solved WITHOUT edges
+     into a violating impl or default body: a violation reached only through
+     another one is that one's, and is reported there, once.  Callers' rows
+     (the module ceiling, [main]'s grant) are untouched. *)
+  let violators = Hashtbl.create 8 in
+  Hashtbl.iter
+    (fun qname { fb_caps; fb_origin; _ } ->
+       match fb_origin with
+       | Iface_method _ ->
+         let row =
+           Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows qname)
+         in
+         if violates fb_caps row then Hashtbl.replace violators qname ()
+       | Fn_decl -> ())
+    env.fn_bound_points;
+  let rows, chain_refs =
+    if Hashtbl.length violators = 0 then (rows, env.fn_refs)
+    else begin
+      let refs = Hashtbl.create (Hashtbl.length env.fn_refs) in
+      Hashtbl.iter
+        (fun k rs -> Hashtbl.replace refs k (List.filter (fun r -> not (Hashtbl.mem violators r)) rs))
+        env.fn_refs;
+      (fn_capability_rows_tbl { env with fn_refs = refs }, refs)
+    end
+  in
   Hashtbl.iter
     (fun qname { fb_caps = bound; fb_span = span; fb_origin } ->
        let row =
@@ -7971,7 +8004,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
             if not (cap_subsumes "IO" c) || covered c then ()
             else
               let via =
-                match cap_reach_chain env ~from:qname ~cap:c with
+                match cap_reach_chain ~fn_refs:chain_refs env ~from:qname ~cap:c with
                 | Some (_ :: _ as chain) ->
                   Printf.sprintf " (via %s)" (render_cap_chain chain)
                 | _ -> ""

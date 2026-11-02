@@ -438,6 +438,38 @@ let test_impl_bound_under_unbounded_method () =
        {|      println("x")
       "t"|})
 
+(* A generic impl reaches every impl of the method through the dispatch node
+   (the union), so one impure impl would otherwise be reported again at every
+   generic impl.  The violation is reported where it is, once. *)
+let test_iface_violation_reported_once () =
+  let src = {|mod M do
+  needs IO.Console
+  interface Say(a) do
+    fn say : a -> String needs ()
+  end
+  type T = T(Int)
+  type Box(a) = Box(a)
+  impl Say(T) do
+    fn say(_t) do
+      println("x")
+      "t"
+    end
+  end
+  impl Say(Box(a)) when Say(a) do
+    fn say(b) do
+      match b do
+        Box(x) -> say(x)
+      end
+    end
+  end
+end|} in
+  let bound_msgs =
+    List.filter (fun msg -> contains msg "is bounded by interface") (messages src)
+  in
+  Alcotest.(check int) "one report" 1 (List.length bound_msgs);
+  Alcotest.(check bool) "at the impure impl" true
+    (List.exists (fun msg -> contains msg "impl Say(T)") bound_msgs)
+
 let tests =
   [ Alcotest.test_case "direct reach" `Quick test_direct_reach
   ; Alcotest.test_case "transitive reach names the chain" `Quick test_transitive_reach_names_the_chain
@@ -470,4 +502,5 @@ let tests =
   ; Alcotest.test_case "impl bound wider rejected" `Quick test_impl_bound_wider_rejected
   ; Alcotest.test_case "impl narrowed bound still enforced" `Quick test_impl_narrowed_bound_still_enforced
   ; Alcotest.test_case "impl bound under unbounded method" `Quick test_impl_bound_under_unbounded_method
+  ; Alcotest.test_case "interface violation reported once" `Quick test_iface_violation_reported_once
   ]
