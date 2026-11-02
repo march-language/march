@@ -49,6 +49,17 @@ IO`), no effect on callers, multi-clause (and conflicting bounds), nested module
 method, formatter round trip. Disabling `check_fn_bounds` fails 7 of them; the other 6
 cover the recording-time checks, parsing and the formatter.
 
+## Oracles
+
+`scripts/oracle-base.sh types refine` against the merge-base: refine unchanged (297
+fixtures); types reports 60 fixtures changed, all synthetic: derived and generated
+declarations get spans whose columns are hashes of AST values (`<none>`,
+`<work-entry>`, …), and `fn_def` gained a field, so the hashes moved. With every
+`"file":"<…>"` span normalised, 58 of the 60 are identical; `reject_t286` differs only in
+such a span printed inside an overlapping-impl message, and `reject_t278` lists the same
+31 diagnostics in a different order (they sort by those spans). No inference result or
+diagnostic changed.
+
 ## Next
 
 Phases 2–4: `specs/todos/2026-11-01-fn-needs-bounds-interfaces.md`,
