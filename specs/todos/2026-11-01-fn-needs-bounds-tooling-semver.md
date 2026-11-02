@@ -5,3 +5,8 @@ major bump in forge's semver check and shows in `forge audit` upgrade diffs (the
 `forge add`/`outdated` already gate on). Also: `forge fix` writes the tightest bound;
 LSP hover shows the inferred row for any function; `forge doc` renders the bound in the
 signature; `forge audit` reports per-function rows.
+
+Interface bounds (phase 2, done 2026-11-02): ANY change to an interface method's bound is
+a major bump, not only widening. Widening breaks callers relying on the guarantee;
+narrowing breaks implementors whose impls no longer fit. That includes the four built-in
+interfaces' `needs ()`.

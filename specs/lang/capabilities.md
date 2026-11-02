@@ -633,6 +633,32 @@ same way. Local functions inside a body do not: their reach already counts towar
 function that contains them. Path scopes (`IO.FileRead("/etc")`) are not accepted in a
 function bound.
 
+**Interface methods** take a bound too, after the method's type, and it holds every impl
+of that method (and the interface's default body) to it, including impls written in other
+modules:
+
+```march
+interface Store(a) do
+  fn get : (a, String) -> Option(String) needs IO.FileRead
+  fn describe : a -> String needs ()
+end
+```
+
+An impl method with no bound of its own is checked against the interface's (`cap_bound`,
+naming the interface). One with its own bound may narrow the interface's but not widen it
+(`cap_bound_iface`), and is then held to its own. An interface's bound need not lie within
+its own module's `needs`: it limits other modules' impls, and each impl's module still
+needs the capability itself. A violation reached only through another impl's (a generic
+`impl Store(List(a)) when Store(a)` calling an impure `impl Store(Disk)`) is reported once,
+at the impl that has it. The four built-in interfaces are bounded by `needs ()`; see
+[Standard Interfaces]({{ site.baseurl }}/docs/interfaces/#standard-interfaces).
+
+**No capability threading.** A bound, on a function or an interface method, is a check
+made once where the bounded code is written. It is never part of a type and never carried
+by a `when Iface(a)` constraint, so no caller, generic function or signature has to
+declare anything because of it. A call through an interface is charged what the impls in
+the program actually reach, exactly as before.
+
 ### When *not* to use IO caps
 
 **Pure functions need no declaration.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. A module with no `needs` that calls IO builtins directly in function bodies is rejected (`--check` exits 1); a stdlib-mediated call is outside that check but is caught by the upper-limit subset that runs under `--check`, and by the full upper limit under `--compile`. The guarantee is strongest when the functions in question actually take `Cap(X)` parameters or `use` something that does, because the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import.
