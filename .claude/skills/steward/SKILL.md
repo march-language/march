@@ -22,7 +22,7 @@ green.**
 
 | Check | Symptom | Policy |
 |---|---|---|
-| `test (macos-15, all)` | Times out, or one suite dies with nothing failing. It runs the whole `dune runtest` unsharded: 37–49 min on `main` with a 75 min ceiling; `run_codegen` alone takes ~28 min on a slow runner. | Check whether it timed out (grep the log for `timed out`) and whether `main`'s own run of the same day did too. One re-run. Never split the macOS shard to dodge the timeout (it doubled its runner-minutes; `.github/workflows/README.md`, "Runner budget"). |
+| `test (macos-26, all)` | Times out, or one suite dies with nothing failing. It runs `dune runtest` unsharded with the OS-independent suites and groups dropped (`MARCH_CI_SKIP_OS_INDEPENDENT=1`; group lists in `test/run_codegen.ml` / `test/run_compiler.ml`). Before that cut (2026-11-02) it ran 73–79 min against a 75 min ceiling. | Check whether it timed out (grep the log for `timed out`) and whether `main`'s own run of the same day did too. One re-run. Never split the macOS shard to dodge the timeout (it doubled its runner-minutes; `.github/workflows/README.md`, "Runner budget"). |
 | `two-node (K/3)`: `cluster_sessions` | node-a prints `A: links 0` where the golden pins `1` (a stop/print race). | One re-run. |
 | `sanitize-gate`: two-node `cluster_takeover` | `node-a: leader bound to ?` then a timeout, under ASan. | One re-run; grep `main`'s recent sanitize-gate logs for the same scenario. |
 | `sanitize-gate`: other two-node scenarios | A deadline inside a node expires under ASan with no sanitizer report. In-node deadlines are now scaled by `TWO_NODE_ASAN_SCALE` (`specs/progress/2026-10-05-two-node-asan-time-scale.md`). | A new one is a missing scale: file a todo naming the deadline, don't raise a timeout blindly. |

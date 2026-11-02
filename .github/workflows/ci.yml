@@ -96,12 +96,12 @@ jobs:
           - { os: ubuntu-24.04, shard: refinecheck }
           - { os: ubuntu-24.04, shard: compiler }
           - { os: ubuntu-24.04, shard: rest }
-          - { os: macos-15,     shard: all }
+          - { os: macos-26,     shard: all }
     runs-on: ${{ matrix.os }}
     # Must stay above the Test step's 75 plus setup (12) and build (10).
     timeout-minutes: 100
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # cross-tools: `dune runtest` includes a linux/amd64 TLS+gzip test that
       # shells out to `zig cc` against the fetched sysroot. Installed for every
@@ -150,9 +150,12 @@ jobs:
         # Sized for the unsharded macOS run: 37-49 min on main in late
         # September 2026 (run_codegen alone took 28-29 min on a slow macOS
         # runner; the ubuntu shards are well under it). 45 was hit on main
-        # itself; 75 leaves ~50% over the worst run seen. Don't split the
-        # macOS shard to get under a timeout: that doubled its runner-minutes
-        # (see README.md, "Runner budget").
+        # itself; 75 leaves ~50% over the worst run seen. By late October the
+        # macOS run had grown to 73-79 min and timed out on most runs; the
+        # fix was to run less there (OS-independent groups now Linux-only,
+        # 2026-11-02), not a higher timeout. Don't split the macOS shard to
+        # get under a timeout either: that doubled its runner-minutes (see
+        # README.md, "Runner budget").
         timeout-minutes: 75
         run: |
           eval $(opam env)
@@ -164,8 +167,10 @@ jobs:
             rest)        MARCH_CI_RUNTEST_SPLIT=1 dune runtest ;;
             # macOS skips the suites whose answer does not depend on the OS
             # (refinecheck, golden diagnostics, LSP; see "CI sharding" in
-            # test/dune): they run on the ubuntu shards, and this runner's 3
-            # cores are the bottleneck of the slowest job in the workflow.
+            # test/dune) and the OS-independent groups listed in
+            # test/run_codegen.ml and test/run_compiler.ml: they run on the
+            # ubuntu shards, and this runner's 3 cores are the bottleneck of
+            # the slowest job in the workflow.
             all)         MARCH_CI_SKIP_OS_INDEPENDENT=1 dune runtest ;;
             *) echo "::error::unknown test shard '${{ matrix.shard }}'"; exit 1 ;;
           esac
@@ -193,7 +198,7 @@ jobs:
 
       - name: Upload test cores (Linux)
         if: failure() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cores-${{ matrix.os }}-${{ matrix.shard }}
           path: /tmp/march-cores
@@ -229,7 +234,7 @@ jobs:
     # the soak (5) and the precompile (25).
     timeout-minutes: 105
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up toolchain
         timeout-minutes: 12
@@ -335,7 +340,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up toolchain
         timeout-minutes: 12
@@ -359,7 +364,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up toolchain
         timeout-minutes: 12
@@ -371,7 +376,7 @@ jobs:
           eval $(opam env)
           scripts/build-browser-repl.sh --out "$RUNNER_TEMP/browser"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -403,7 +408,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install tree-sitter CLI 0.26.7
         timeout-minutes: 5
@@ -425,7 +430,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up toolchain
         timeout-minutes: 12
@@ -739,7 +744,7 @@ jobs:
     # Step (45) + toolchain setup (12), rounded up.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up toolchain
         timeout-minutes: 12
@@ -792,7 +797,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up toolchain
         timeout-minutes: 12
@@ -808,7 +813,7 @@ jobs:
           dune build bin/main.exe forge/bin/main.exe test/test_oracle.exe test/test_properties.exe
 
       - name: Upload built exes
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ocaml-build-exes-${{ matrix.os }}-${{ github.run_id }}
           retention-days: 1
@@ -831,7 +836,7 @@ jobs:
     needs: [ocaml-build]
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # No OCaml/opam/dune here at all: this job only RUNS a prebuilt exe from
       # ocaml-build (a standalone native binary needs no OCaml toolchain to
@@ -857,14 +862,14 @@ jobs:
         with:
           version: 0.15.2
 
-      # path: _build/default, NOT `.` — upload-artifact@v4 strips the uploaded
+      # path: _build/default, NOT `.` — upload-artifact strips the uploaded
       # paths' least common ancestor, which for the three exes is
       # `_build/default`, so the artifact's own entries are `bin/main.exe` and
       # `test/*.exe`. Downloading to `.` therefore lands them at ./bin/... and
       # every reference below (which uses the in-repo _build path, as the
       # exes' own runtime-dir lookup expects) misses.
       - name: Download prebuilt exes
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           # ubuntu leg specifically: this job is Linux-only.
           name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
@@ -926,7 +931,7 @@ jobs:
         shard: ${{ fromJSON(github.event_name == 'push' && '[1, 2]' || '[1]') }}
     timeout-minutes: 70
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies (blake3, the compiler's only runtime .so)
         run: |
@@ -941,7 +946,7 @@ jobs:
           sudo ldconfig
 
       - name: Download prebuilt exes
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
           path: _build/default
@@ -1031,7 +1036,7 @@ jobs:
           - shard: rest
             filter: 'algebraic oracle|semantic properties|parse\+typecheck|classify_compile|record-update converged|cli: timings'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Only the C libraries the prebuilt exe dynamically links — no OCaml or
       # opam here, since this job only RUNS a binary built upstream.
@@ -1053,7 +1058,7 @@ jobs:
           fi
 
       - name: Download prebuilt exes
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ocaml-build-exes-${{ matrix.os }}-${{ github.run_id }}
           path: _build/default
@@ -1099,7 +1104,7 @@ jobs:
       # One artifact per (os, shard). Only ubuntu's are consumed downstream (the
       # group list is OS-independent), but uploading both keeps the step uniform.
       - name: Upload this shard's covered-groups report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: covered-groups-${{ matrix.os }}-${{ matrix.shard }}
           path: covered-${{ matrix.shard }}.txt
@@ -1146,7 +1151,7 @@ jobs:
           - shard: 2
             cases: "1,2,3 7,8,9 13,14,15 18,19"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # No OCaml/opam/dune here at all — see cross-linux-oracle's comment
       # above for why; only the system deps below (dynamic-linker + the
@@ -1165,14 +1170,14 @@ jobs:
           sudo cp blake3.h /usr/local/include/blake3.h
           sudo ldconfig
 
-      # path: _build/default, NOT `.` — upload-artifact@v4 strips the uploaded
+      # path: _build/default, NOT `.` — upload-artifact strips the uploaded
       # paths' least common ancestor, which for the three exes is
       # `_build/default`, so the artifact's own entries are `bin/main.exe` and
       # `test/*.exe`. Downloading to `.` therefore lands them at ./bin/... and
       # every reference below (which uses the in-repo _build path, as the
       # exes' own runtime-dir lookup expects) misses.
       - name: Download prebuilt exes
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           # ubuntu leg specifically: this job is Linux-only.
           name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
@@ -1256,10 +1261,10 @@ jobs:
     needs: [ocaml-build, property-tests]
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download prebuilt exes
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
           path: _build/default
@@ -1271,7 +1276,7 @@ jobs:
           chmod +x _build/default/test/test_properties.exe
 
       - name: Download every shard's covered-groups report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: covered-groups-ubuntu-24.04-*
           path: covered
@@ -1301,7 +1306,7 @@ jobs:
           fi
           echo "OK: all $(wc -l < all.txt) property groups are covered by a shard or the oracle."
 
-  # Everything macOS needs beyond `test (macos-15, all)`, in one job: every
+  # Everything macOS needs beyond `test (macos-26, all)`, in one job: every
   # QCheck property group except the interp-vs-compiled oracle (Linux-only,
   # in property-oracle), and the OS-sensitive @vault-scale benchmark. Until
   # 2026-10-07 this was five macOS jobs (ocaml-build, three property-tests
@@ -1310,10 +1315,10 @@ jobs:
   # The group list comes from the binary itself (minus the oracle group),
   # regex-escaped, so a new group runs here without anyone editing this.
   macos-checks:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up toolchain
         timeout-minutes: 12

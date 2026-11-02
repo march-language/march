@@ -2434,3 +2434,24 @@ let run_vectorize_check src =
   March_errors.Errors.sorted ctx
 
 (** pfn called from within a lambda passed to a HOF — must NOT be flagged. *)
+
+(* CI's macOS `test` job sets MARCH_CI_SKIP_OS_INDEPENDENT=1 (see "CI sharding"
+   in test/dune). Under it, [drop_os_independent ~groups suites] removes the
+   named alcotest groups: ones whose cases never invoke the C toolchain (clang,
+   zig) nor run a linked binary, so their answer cannot depend on the OS and
+   the ubuntu shards already give it. Unset, the suites pass through untouched.
+
+   It is a list of groups to DROP, not to keep, so a new group runs on macOS
+   until someone shows it is OS-independent. A name that matches no group is
+   an error rather than a no-op: a renamed group must not silently fall back
+   onto the macOS runner, nor a stale entry linger here. *)
+let drop_os_independent ~groups suites =
+  if Stdlib.Sys.getenv_opt "MARCH_CI_SKIP_OS_INDEPENDENT" <> Some "1" then suites
+  else begin
+    let present = List.map fst suites in
+    (match List.filter (fun g -> not (List.mem g present)) groups with
+     | [] -> ()
+     | missing ->
+       failwith ("drop_os_independent: no such group: " ^ String.concat ", " missing));
+    List.filter (fun (name, _) -> not (List.mem name groups)) suites
+  end

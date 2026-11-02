@@ -46,12 +46,30 @@ runs:
     # escape hatch — GH Actions cache entries are immutable per key, so a bad
     # key can never self-heal without one (and `v1` is burned by the
     # wrong-path attempt above).
+    #
+    # The key also names the OS RELEASE (macos-15 / macos-26, ubuntu-24.04),
+    # not just `runner.os`. CI's macOS jobs run on macos-26 while build.yml's
+    # release leg stays on macos-15 (the minimum macOS we ship for); with
+    # `runner.os` alone both read "macOS", and a switch whose C stubs were
+    # compiled against the macOS 26 SDK would be restored into the release
+    # build and raise its binaries' minimum OS.
+    - name: Name the runner image
+      id: image
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = macOS ]; then
+          rel="macos-$(sw_vers -productVersion | cut -d. -f1)"
+        else
+          rel="$(. /etc/os-release && echo "${ID}-${VERSION_ID}")"
+        fi
+        echo "id=${rel}-${RUNNER_ARCH}" >> "$GITHUB_OUTPUT"
+
     - name: Restore opam dependency cache
       id: opam-cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         path: _opam
-        key: ${{ runner.os }}-opam-v2-${{ inputs.ocaml-compiler }}-${{ hashFiles('dune-project', 'march.opam', 'forge.opam', 'march-lsp.opam') }}
+        key: ${{ runner.os }}-${{ steps.image.outputs.id }}-opam-v2-${{ inputs.ocaml-compiler }}-${{ hashFiles('dune-project', 'march.opam', 'forge.opam', 'march-lsp.opam') }}
 
     # Always run, even on a full cache hit: idempotent and a fast no-op then
     # ("Nothing to do"), and it is what actually verifies the restored switch
@@ -73,7 +91,7 @@ runs:
     # write under a key that already exists, which GH Actions rejects anyway.
     - name: Save opam dependency cache
       if: steps.opam-cache.outputs.cache-hit != 'true' && steps.opam-install.outputs.changed == 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v6
       with:
         path: _opam
         key: ${{ steps.opam-cache.outputs.cache-primary-key }}
