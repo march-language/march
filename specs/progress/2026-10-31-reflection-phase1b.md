@@ -186,6 +186,45 @@ suites green; `lsp incremental jsonrpc` green (lsp 402, `refine-diagnostics` 7);
 2,069 green (`reflect-parity` 6); forge `test_reconcile` 23, `test_build_check` "forge test" 6,
 `test_deploy_plan` 35, `test_hcr_manifest_diff` 3 green.
 
+## Review round 2
+
+A re-review of round 1 found three Important problems and one Minor; the three fixed test-first:
+
+1. **Twin heads shared a hash.** `Util.A.need` and `Util.B.need` with the same text had one
+   contract (and logic) hash, since both hash source text from the bare name; `stale_dependents`
+   matched on (file, hash), so editing only A left B "carrying" app's key. `--reflect-deps` now
+   prints every row under its QUALIFIED name (the entry module's own functions get its name
+   back, so `A.need` in util's check is `Util.A.need`, as in a dependant's); `Refine_diag`
+   matches (file, name, hash). The printed hash stays the D17 hash a query's `; reflect` line
+   carries (folding the name in as well was tried and broke that link, `d17_line`). The `reflect-def`/`reflect-dep`
+   logic-hash rows had the same exposure and get the same treatment; the proof-cache hashes
+   (`RS.logic_hash`, `--dump-impl-hashes`) are unchanged.
+2. **A function named in a callee's refinement was not keyed.** `need(n : {Int | _ < size()})`:
+   `size`'s cdef covered only its head. Predicate-reference edges (every name in a parameter or
+   return refinement, resolved by last component, same file first) now join `contract_reach`,
+   and a unit a predicate names (and everything its body reaches) has its WHOLE source in its
+   contract hash (`march-contract-v2`). Covers a `@[measure]` named in a refinement.
+3. **The parity net was green when it compared nothing.** A run whose compared-input total is 0
+   (and nothing RED) prints `parity: NOTHING COMPARED`; `march --check --reflect-parity` still
+   exits 0 (nothing disagreed). Ruling: `forge test --reflection-parity` FAILS ("compared
+   nothing") when every checked file compared nothing (the flag asked for evidence); a file
+   with nothing to compare among files that did compare is fine.
+4. **(Minor)** `plain_running` could never hold, so with no running manifest every non-mode
+   slot change was refused with a misleading message. Not changed here: superseded by
+   `cb1e4c26a` (the HCR rule is now "refuse only if a proof used the body"; slot hashes use the
+   frontier-restricted `used_logic_hash_of_name`, and the no-manifest refusal branch became the
+   `logic_unknowns` warning).
+
+RED -> GREEN: `refine-diagnostics` twin, size-in-refinement, measure-in-refinement rows (RED:
+"got 0 files"); `reflect-parity` row 3 (RED: no `NOTHING COMPARED`); `test_build_check`
+"comparing nothing fails" (RED: Ok).
+A refinement type alias in a head (`type Big = {Int | _ > 1}`) does not parse, so that shape
+needs no key.
+
+Gates after round 2: `scripts/run-tests.sh -q` all suites green; `lsp incremental jsonrpc` green
+(lsp 405, `refine-diagnostics` 10); `refinecheck` 2,069 green; forge `test_reconcile` 23,
+`test_build_check` 26, `test_deploy_plan` 35 green.
+
 ## Not done, deferred or unverified
 
 - 5b (ruling 1) and everything in `specs/todos/2026-10-31-reflection-encoder-gaps.md`.

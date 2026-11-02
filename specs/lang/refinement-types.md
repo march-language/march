@@ -1338,7 +1338,8 @@ Nothing stale survives such an edit:
   refinement diagnostics for saved files. Saving `util.march` re-checks every
   open file whose proofs used a definition from it that changed, or that calls
   (directly or through other functions) a function whose refinement contract or
-  reflectability changed, without an edit to that file.
+  reflectability changed, or whose contract names a function (`_ < size()`)
+  whose body changed, without an edit to that file.
 
 **Checking the checker: `--reflection-parity`.** `forge test
 --reflection-parity` (or `march --check --reflect-parity file.march`) runs each
@@ -1350,7 +1351,9 @@ A function whose arithmetic overflows at the boundary is reported `overflow?`,
 since the checker treats `Int` as unbounded (above). A reflected function the
 net cannot run by its definition (a `Float` comparison, a parameter type with
 no generator) is listed `not-compared` with the reason. A file whose ordinary
-check fails is reported as a check failure, not a parity failure. Example output:
+check fails is reported as a check failure, not a parity failure. A run that
+compared no input at all prints `parity: NOTHING COMPARED`, and `forge test
+--reflection-parity` fails on it. Example output:
 
 ```
 parity  m.march  area  agree      100 inputs

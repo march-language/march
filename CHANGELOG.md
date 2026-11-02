@@ -44,6 +44,8 @@ git log is authoritative for exact commits.
   function's domain fails the run, and boundary overflow is reported `overflow?`. A
   reflected function the net cannot compare is listed `not-compared` with the reason, and
   a file whose ordinary check fails is reported as a check failure, not a parity failure.
+  A run that compared no input at all says `parity: NOTHING COMPARED`, and
+  `forge test --reflection-parity` fails on it.
 - **Logic hashes in `--dump-impl-hashes`.** A fourth column gives each reflected
   function's logic hash (`-` when not reflected); every solver query that used a
   definition names the hash in its cache key. `--reflect-deps` prints the hashes (and a
