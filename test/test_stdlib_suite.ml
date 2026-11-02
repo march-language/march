@@ -12221,8 +12221,11 @@ let frame_pin_src version =
   "mod Main do\nneeds IO\n" ^ count ^ "actor Probe do\n" ^ state
   ^ "\non Tick() do\nprintln(\"fresh-\" ++ int_to_string(calc()))\nstate\nend\non_stop do\n"
   ^ stop ^ "\nend\nend\n" ^ migration
+  ^ "fn hold_frame(done : String, step : Int -> ()) : () do\nif File.exists(done) do () else\nstep(0)\nhold_frame(done, step)\nend\nend\n"
   ^ "fn main(_io : Cap(IO)) do\nlet a = spawn(Probe)\nprintln(\"frame-ready\")\n"
-  ^ "List.each(List.range(0, 200), fn _ ->\nif calc() != 101 do panic(\"old frame crossed ABI\") else () end\nsend(a, Tick())\nsleep_ms(50))\n"
+  ^ "let step = fn mark -> do\nif calc() != 101 do panic(\"old frame crossed ABI\") else () end\nif mark == 1 do println(\"old-closure-101\") else () end\nsend(a, Tick())\nsleep_ms(50)\nend\n"
+  ^ "hold_frame(Env.require(\"MARCH_FRAME_FINISH\"), step)\nstep(1)\n"
+  ^ "if calc() != 101 do panic(\"old main crossed ABI\") else println(\"old-main-101\") end\n"
   ^ "let _ = Actor.stop(a, 1000)\nprintln(\"frame-done\")\nend\nend\n"
 
 let test_hcr_running_frame_signature_change () =
@@ -12242,18 +12245,34 @@ let test_hcr_running_frame_signature_change () =
       | Ok m -> m | Error e -> Alcotest.fail e in
     let sock = Printf.sprintf "/tmp/march_frames_%d.sock" (Unix.getpid ()) in
     let log = Filename.concat dir "server.log" in
+    let finish = Filename.concat dir "frame.finish" in
+    let extra_env = [| "MARCH_FRAME_FINISH=" ^ finish |] in
+    let reset_finish () = if Sys.file_exists finish then Sys.remove finish in
     let verify () =
+      (* Fixture lifetime is controlled by evidence, not how long two
+         uploads/activations happen to take on a loaded runner. *)
+      let current = Unix.gettimeofday () +. 5. in
+      while Unix.gettimeofday () < current
+            && not (contains "fresh-301" (read_file_contents log)) do Unix.sleepf 0.01 done;
+      Alcotest.(check bool) "actor reached third version before releasing old frames" true
+        (contains "fresh-301" (read_file_contents log));
+      Out_channel.with_open_text finish (fun oc -> output_string oc "done\n");
       let deadline = Unix.gettimeofday () +. 15. in
       while Unix.gettimeofday () < deadline
             && not (contains "frame-done" (read_file_contents log)) do Unix.sleepf 0.05 done;
       let output = read_file_contents log in
       Alcotest.(check bool) ("old frame survives: " ^ output) true (contains "frame-done" output);
-      Alcotest.(check bool) "old ABI never crosses" false (contains "old frame crossed ABI" output);
+      Alcotest.(check bool) "old closure ABI never crosses" false (contains "old frame crossed ABI" output);
+      Alcotest.(check bool) "old main ABI never crosses" false (contains "old main crossed ABI" output);
+      Alcotest.(check bool) "old main resumes its original ABI" true (contains "old-main-101" output);
+      Alcotest.(check bool) "saved closure still calls its original ABI at finish" true
+        (contains "old-closure-101" output);
       Alcotest.(check bool) "eligible actor calls newest ABI" true (contains "fresh-301" output);
       Alcotest.(check bool) "new callback sees both migrations" true (contains "stop-third migrated-v3:42" output);
       Alcotest.(check bool) "old callback never runs on new state" false (contains "stop-old" output)
     in
-    with_reload_server ~dir ~bin ~sock ~extra_env:[||] (fun _pid ->
+    reset_finish ();
+    with_reload_server ~dir ~bin ~sock ~extra_env (fun _pid ->
       (match e2e_connect sock with
        | None -> Alcotest.fail "frame test server did not listen"
        | Some fd -> Unix.close fd);
@@ -12278,7 +12297,8 @@ let test_hcr_running_frame_signature_change () =
     (* The executable's main is still baseline code after persisted replay.
        Its entry reservation must predate restoring the newer current epoch. *)
     Out_channel.with_open_text log (fun _ -> ());
-    with_reload_server ~dir ~bin ~sock ~extra_env:[||] (fun _ -> verify ())
+    reset_finish ();
+    with_reload_server ~dir ~bin ~sock ~extra_env (fun _ -> verify ())
 
   | _ -> ()
 
