@@ -32383,7 +32383,7 @@ d=a[2],c="aarch64";if(d!==c&&d!=="arm64")if(d!=="i386"&&d!=="i686"){c="x86_64";i
 c="x86"}else
 c=e;return b([2,c])}if(i_===a)return c(bW[1]);if(gf!==a&&eN!==a)return c(bW);return n(Fk,bW,c)}]],[0,[0,ww,[9,ww,function(a,b){a:if(a){var
 c=a[1];if(typeof
-c==="number"&&!c&&!a[2])break a;return n(h,aLQ,b)}return b([2,"0.6.0"])}]],[0,[0,rU,[9,rU,function(a,b){if(a){var
+c==="number"&&!c&&!a[2])break a;return n(h,aLQ,b)}return b([2,"0.7.0"])}]],[0,[0,rU,[9,rU,function(a,b){if(a){var
 c=a[1];if(typeof
 c!=="number"&&2===c[0]){a=a[2];if(a&&!a[2]){var
 d=c[1],e=function(a,b){a:if(typeof
