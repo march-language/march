@@ -7942,7 +7942,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
   Hashtbl.iter
     (fun qname { fb_caps; fb_origin; _ } ->
        match fb_origin with
-       | Iface_method _ ->
+       | Iface_method _ | Impl_method _ ->
          let row =
            Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows qname)
          in
@@ -7986,6 +7986,9 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
          | Iface_method { iface; impl_ty = None } ->
            ( Printf.sprintf "the default `%s` of interface `%s`" leaf iface,
              Printf.sprintf "`needs %s`" shown )
+         | Impl_method { iface; impl_ty } ->
+           ( Printf.sprintf "`%s` in `impl %s(%s)`" leaf iface impl_ty,
+             Printf.sprintf "its own `needs %s`" shown )
        in
        let covered c = List.exists (fun b -> cap_subsumes b c) bound in
        if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) then
@@ -8001,7 +8004,7 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
                  Printf.sprintf
                    "help: pass the function in as a parameter or call it by name, or \
                     bound `%s` by `needs IO`." leaf
-               | Iface_method _ ->
+               | Iface_method _ | Impl_method _ ->
                  "help: pass the function in as a parameter or call it by name."));
        List.iter
          (fun c ->
@@ -8019,6 +8022,10 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
                 | Iface_method _ ->
                   "help: remove the use; widening the interface's bound changes it \
                    for every impl and every caller."
+                | Impl_method { iface; _ } ->
+                  Printf.sprintf
+                    "help: remove the use, or widen the impl's bound (it must stay \
+                     within interface `%s`'s)." iface
               in
               Err.error ~code:Err.Code.cap_bound env.errors ~span
                 (Printf.sprintf "%s is bounded by %s, but reaches `%s`%s.\n%s"

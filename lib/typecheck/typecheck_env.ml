@@ -186,10 +186,14 @@ let qualify_ref_name (modname : string) (name : string) : string =
 (** Where a per-function capability bound came from.  [Fn_decl] is written
     on the function itself (phase 1); [Iface_method] is inherited from an
     interface method's [needs] ([impl_ty = None] for the interface's own
-    default body).  Only the diagnostic wording depends on it. *)
+    default body); [Impl_method] is an impl method's own bound, which lies
+    within its interface's.  The diagnostic wording depends on it, and every
+    origin but [Fn_decl] is an impl or default body reached through a dispatch
+    node, which [check_fn_bounds] reports only where a violation is. *)
 type bound_origin =
   | Fn_decl
   | Iface_method of { iface : string; impl_ty : string option }
+  | Impl_method of { iface : string; impl_ty : string }
 
 (** A bound to check: its capability paths, the span of the [needs] clause
     that set it (the interface's, for an inherited bound), the bounded

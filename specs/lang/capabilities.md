@@ -649,8 +649,9 @@ naming the interface). One with its own bound may narrow the interface's but not
 (`cap_bound_iface`), and is then held to its own. An interface's bound need not lie within
 its own module's `needs`: it limits other modules' impls, and each impl's module still
 needs the capability itself. A violation reached only through another impl's (a generic
-`impl Store(List(a)) when Store(a)` calling an impure `impl Store(Disk)`) is reported once,
-at the impl that has it. The four built-in interfaces are bounded by `needs ()`; see
+`impl Store(List(a)) when Store(a)` calling an impure `impl Store(Disk)`, or a bounded
+function calling `get`) is reported once, at the impl that has it; once that impl is
+fixed, anything the caller reaches beyond its own bound is reported in turn. The four built-in interfaces are bounded by `needs ()`; see
 [Standard Interfaces]({{ site.baseurl }}/docs/interfaces/#standard-interfaces).
 
 **No capability threading.** A bound, on a function or an interface method, is a check

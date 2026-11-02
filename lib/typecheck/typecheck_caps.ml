@@ -357,7 +357,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       true
     | None -> false
   in
-  let record_fn_bound ~(qname : string) (def : Ast.fn_def) : unit =
+  let record_fn_bound ?(origin = Fn_decl) ~(qname : string) (def : Ast.fn_def) : unit =
     match def.Ast.fn_needs with
     | None -> ()
     | Some (paths, nsp) ->
@@ -377,7 +377,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         bound;
       Hashtbl.replace env.fn_bound_points qname
         { fb_caps = List.sort_uniq String.compare bound; fb_span = nsp;
-          fb_site = def.Ast.fn_name.Ast.span; fb_origin = Fn_decl }
+          fb_site = def.Ast.fn_name.Ast.span; fb_origin = origin }
   in
   (* An interface method's bound limits OTHER modules' impls, so unlike a
      function's it need not lie within this module's [needs] (the impl's own
@@ -405,11 +405,24 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      the environment, which holds the built-ins and other modules' interfaces
      under both their qualified and short names. *)
   let find_interface (name : string) : Ast.interface_def option =
-    let short =
-      match String.rindex_opt name '.' with
-      | Some i -> String.sub name (i + 1) (String.length name - i - 1)
-      | None -> name
-    in
+    match String.rindex_opt name '.' with
+    | Some _ ->
+      (* [impl A.Store(T)] names A's interface, even when this module declares
+         a [Store] of its own: never fall back to a short-name match. *)
+      (match StrMap.find_opt name env.interfaces with
+       | Some idef -> Some idef
+       | None ->
+         StrMap.fold
+           (fun k idef acc ->
+              match acc with
+              | Some _ -> acc
+              | None ->
+                let n = String.length name and l = String.length k in
+                if l > n && String.sub k (l - n) n = name && k.[l - n - 1] = '.'
+                then Some idef else None)
+           env.interfaces None)
+    | None ->
+    let short = name in
     match
       List.find_map
         (function
@@ -862,6 +875,14 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                        (fun (m : Ast.method_decl) -> m.Ast.md_name.Ast.txt = mn.Ast.txt)
                        iface.Ast.iface_methods))
             in
+            let own_origin =
+              Impl_method
+                { iface =
+                    (match iface_method with
+                     | Some (iface, _) -> iface
+                     | None -> idef.Ast.impl_iface.Ast.txt);
+                  impl_ty = ty_key }
+            in
             (match def.Ast.fn_needs, iface_method with
              | None, Some (iface, m) ->
                record_iface_bound ~qname:mangled ~iface ~impl_ty:(Some ty_key) ~site:mn.Ast.span m
@@ -871,13 +892,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                   past it, the interface's is, so the body is still checked
                   against the bound that actually applies. *)
                (match iface_method_bound m with
-                | None -> record_fn_bound ~qname:mangled def
+                | None -> record_fn_bound ~origin:own_origin ~qname:mangled def
                 | Some (ibound, _) ->
                   let own = List.sort_uniq String.compare (List.map cap_path_of_names paths) in
                   let wider =
                     List.filter (fun c -> not (List.exists (fun b -> cap_subsumes b c) ibound)) own
                   in
-                  if wider = [] then record_fn_bound ~qname:mangled def
+                  if wider = [] then record_fn_bound ~origin:own_origin ~qname:mangled def
                   else begin
                     let show_b b = if b = [] then "()" else String.concat ", " b in
                     Err.error ~code:Err.Code.cap_bound_iface env.errors ~span:nsp
@@ -888,7 +909,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                          mn.Ast.txt iface ty_key (show_b own) iface (show_b ibound) mn.Ast.txt);
                     record_iface_bound ~qname:mangled ~iface ~impl_ty:(Some ty_key) ~site:mn.Ast.span m
                   end)
-             | _ -> record_fn_bound ~qname:mangled def);
+             | _ -> record_fn_bound ~origin:own_origin ~qname:mangled def);
             if not (List.mem mn.Ast.txt module_fn_names) then
               record_dispatch_edge (cap_qname mn.Ast.txt) mangled)
           idef.Ast.impl_methods

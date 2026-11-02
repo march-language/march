@@ -522,6 +522,74 @@ let test_derived_impls_under_builtin_bound () =
   fn f(u : U) : String do show(u) end
 end|}
 
+(* Final review: an impl that NARROWS its interface's bound is just as much an
+   impl as one inheriting it, so a generic impl reaching it through the
+   dispatch node must not be reported too, and its message must not suggest
+   widening past the interface. *)
+let test_narrowed_impl_reported_once () =
+  let src = {|mod M do
+  needs IO.Console
+  interface Say(a) do
+    fn say : a -> String needs ()
+  end
+  type T = T(Int)
+  type Box(a) = Box(a)
+  impl Say(T) do
+    fn say(_t) needs () do
+      println("x")
+      "t"
+    end
+  end
+  impl Say(Box(a)) when Say(a) do
+    fn say(b) do
+      match b do
+        Box(x) -> say(x)
+      end
+    end
+  end
+end|} in
+  let bound_msgs = List.filter (fun msg -> contains msg "is bounded by") (messages src) in
+  Alcotest.(check int) "one report" 1 (List.length bound_msgs);
+  Alcotest.(check bool) "names the impl" true
+    (List.exists (fun msg -> contains msg "impl Say(T)") bound_msgs);
+  Alcotest.(check bool) "does not suggest widening past the interface" false
+    (List.exists (fun msg -> contains msg "to the bound, or remove") bound_msgs)
+
+(* Final review: [impl A.Store(T)] names A's interface even when the impl's own
+   module declares a [Store] of its own. *)
+let test_qualified_impl_binds_the_named_interface () =
+  let src ~a_needs ~b_needs = Printf.sprintf {|mod X do
+  mod A do
+    interface Store(a) do
+      fn put : a -> Unit %s
+    end
+  end
+  mod B do
+    needs IO.Console
+    interface Store(a) do
+      fn put : a -> Unit %s
+    end
+    type T = T(Int)
+    impl A.Store(T) do
+      fn put(_t) do println("x") end
+    end
+  end
+end|} a_needs b_needs in
+  clean "A's bound allows it, B's would not"
+    (src ~a_needs:"needs IO.Console" ~b_needs:"needs ()");
+  rejects "cap_bound" "A's bound refuses it, B's would allow it"
+    (src ~a_needs:"needs ()" ~b_needs:"needs IO.Console")
+
+let test_builtin_hash_bound () =
+  rejects "cap_bound" "a Hash impl reading the clock"
+    {|mod M do
+  needs IO.Clock
+  type T = T(Int)
+  impl Hash(T) do
+    fn hash(_t) do unix_time() end
+  end
+end|}
+
 let tests =
   [ Alcotest.test_case "direct reach" `Quick test_direct_reach
   ; Alcotest.test_case "transitive reach names the chain" `Quick test_transitive_reach_names_the_chain
@@ -558,4 +626,7 @@ let tests =
   ; Alcotest.test_case "built-in Show bound" `Quick test_builtin_show_bound
   ; Alcotest.test_case "built-in Eq and Ord bounds" `Quick test_builtin_eq_ord_hash_bound
   ; Alcotest.test_case "derived impls under built-in bound" `Quick test_derived_impls_under_builtin_bound
+  ; Alcotest.test_case "narrowed impl reported once" `Quick test_narrowed_impl_reported_once
+  ; Alcotest.test_case "qualified impl binds the named interface" `Quick test_qualified_impl_binds_the_named_interface
+  ; Alcotest.test_case "built-in Hash bound" `Quick test_builtin_hash_bound
   ]

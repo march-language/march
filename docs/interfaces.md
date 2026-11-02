@@ -262,7 +262,7 @@ end
 
 impl Store(Disk) do
   fn get(d, key) do read_entry(d, key) end   -- may read files, nothing else
-  fn describe(_d) do "disk" end              -- may perform no capability at all
+  fn describe(_d) do "disk" end              -- may perform no I/O at all
 end
 ```
 
@@ -279,11 +279,12 @@ full rules.
 ## Standard Interfaces
 
 All four standard interfaces are bounded by `needs ()`: an impl of `eq`, `compare`, `show`
-or `hash` performs no capability, directly or through anything it calls. Showing,
-comparing, ordering and hashing a value never do I/O, so neither do the `Map`, `Set` and
-sorting operations built on them. `derive` produces pure impls; a hand-written one that
-prints, logs or reads the clock is rejected (`cap_bound`) at the impl. Do that work outside
-the impl instead.
+or `hash` reaches no `IO` capability, directly or through anything it calls, so showing,
+comparing, ordering and hashing a value never do I/O. (The check covers the `IO` lattice;
+`Map`, `Sort` and most collection operations take a comparator function instead, which is
+charged to whoever passes it, as usual.) `derive` produces pure impls; a hand-written one
+that prints, logs or reads the clock is rejected (`cap_bound`) at the impl. Do that work
+outside the impl instead.
 
 ### `Eq(a)`: Equality
 
