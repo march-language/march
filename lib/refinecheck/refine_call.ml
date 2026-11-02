@@ -2013,7 +2013,10 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       if not (Hashtbl.mem tester_facts_loaded key) then begin
         Hashtbl.replace tester_facts_loaded key ();
         match List.assoc_opt x sc with
-        | Some (b, q, Some s) when is_meas_sort s -> (
+        (* The caller's DECLARED datatype must be the goal's (review round 1
+           of 2026-11-02, I2): a tester read in another datatype names a
+           different constructor. *)
+        | Some (b, q, Some s) when is_meas_sort s && s = meas_sort_prefix ^ adt -> (
           match q with
           | A.EApp (A.EVar { A.txt = t; _ }, [ A.EVar { A.txt = n; _ } ], _)
             when n = b || n = "_" || n = x -> (

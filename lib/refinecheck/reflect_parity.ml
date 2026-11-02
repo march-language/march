@@ -174,13 +174,18 @@ and call f args =
 let boundary = [ 0; 1; -1; max_int; min_int; max_int - 1; min_int + 1 ]
 
 (* A data type's constructors (SMT names) with their field sorts at [args],
-   or [None] for a record.  (A constructor name another data type also
-   declares is fine since 2026-11-02: the registry is keyed by datatype.) *)
+   or [None] when a generator cannot be trusted: a record, a datatype whose
+   TYPE NAME two modules (or a module and a built-in) declare, so a field
+   sort naming it may be the wrong declaration (review round 1 of
+   2026-11-02, I1: `W1(Tq)` drew only the other `Tq`'s constructors, and the
+   interpreter took them by name), or a constructor name another datatype
+   also declares (the interpreter's value carries the bare name only). *)
 let ctors_of (adt : string) (args : Smt.sort list) : (string * Smt.sort list) list option =
   match Hashtbl.find_opt RE.adt_ctors adt with
   | None | Some [] -> None
+  | Some _ when Hashtbl.mem RE.ambiguous_adts adt -> None
   | Some cs ->
-    if List.exists (fun c -> Hashtbl.mem RE.ctor_field_names c) cs then None
+    if List.exists (fun c -> Hashtbl.mem RE.ctor_field_names c || RE.ctor_display c <> c) cs then None
     else
       let fields c =
         match Hashtbl.find_opt RE.ctor_field_sorts_poly c with

@@ -681,3 +681,104 @@ end
         in
         expect out ~line:6 ~callee:"need_some" "proved";
         expect out ~line:7 ~callee:"need_some" "violated") ]
+
+(* ── Review round 1 of the constructor registry (c87e66495) ─────────────── *)
+
+(* C1: `W1`'s field is declared `Tq`, a type name two modules declare; the
+   field's datatype must not be taken from the name's preferred declarant.
+   At run time B.c4(B.W1(B.Z)) passes 0 to need1. *)
+let c1_src =
+  {|mod M do
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  mod A do
+    type Tq = K(Int)
+  end
+  mod B do
+    type Tq = K(Int) | Z
+    type W = W1(Tq)
+    fn g(w : W) : Int do
+      match w do
+        W1(K(n)) -> 1
+        W1(_) -> 0
+      end
+    end
+    fn c4(w : W) : Int do need1(g(w)) end
+  end
+end
+|}
+
+(* C2: a nested user type named like a built-in.  [ty] is the user type's
+   declaration, [tester]/[bad] a tester and a built-in value it is false of. *)
+let c2_src ~decl ~ty ~tester ~bad =
+  Printf.sprintf
+    {|mod M do
+  mod A do
+    %s
+  end
+  fn need(x : {%s | %s(_)}) : Int do 0 end
+  fn mk(n : Int) : %s do %s end
+  fn b(y : %s) : Int do need(y) end
+  fn c() : Int do need(mk(0)) end
+end
+|}
+    decl ty tester ty bad ty
+
+let c2_case name ~decl ~ty ~tester ~bad =
+  gated ("ctor review C2: a nested `" ^ name ^ "` does not replace the built-in") (fun () ->
+      let out = run (c2_src ~decl ~ty ~tester ~bad) in
+      (* mk(0) is the built-in's other constructor; y is anything. *)
+      not_proved out ~line:7 ~callee:"need";
+      not_proved out ~line:8 ~callee:"need")
+
+let ctor_review =
+  [ gated "ctor review C1: a nested pattern does not resolve through a field type two modules declare" (fun () ->
+        let out = run c1_src in
+        not_proved out ~line:15 ~callee:"need1");
+    gated "ctor review I1: the parity net does not report a C1-shaped function as agreeing" (fun () ->
+        let out = run ~args:"--check --reflect-parity" c1_src in
+        match parity_row out "B.g" with
+        | Some ("agree", _) -> Alcotest.failf "B.g reported agreeing on a model that cannot build W1(Z):\n%s" out
+        | _ -> ());
+    gated "ctor review I1: the parity generator draws nothing from a field type two modules declare" (fun () ->
+        (* `h`'s body is translated (it resolves no `Tq` constructor), so only
+           the generator stands between it and a draw of `W1` built from the
+           wrong `Tq`. *)
+        let src =
+          {|mod M do
+  mod A do
+    type Tq = K(Int)
+  end
+  mod B do
+    type Tq = K(Int) | Z
+    type W = W1(Tq)
+    fn h(w : W) : Int do
+      match w do
+        W1(_) -> 0
+      end
+    end
+  end
+end
+|}
+        in
+        let out = run ~args:"--check --reflect-parity" src in
+        match parity_row out "B.h" with
+        | Some ("not-compared", d) when contains d "generator" -> ()
+        | r ->
+          Alcotest.failf "B.h must be not-compared for want of a generator, got %s:\n%s"
+            (match r with Some (st, d) -> st ^ " " ^ d | None -> "no row") out);
+    c2_case "type Option(a) = Some(a)" ~decl:"type Option(a) = Some(a)" ~ty:"Option(Int)" ~tester:"is_Some" ~bad:"None";
+    c2_case "type Result(a, e) = Ok(a)" ~decl:"type Result(a, e) = Ok(a)" ~ty:"Result(Int, Int)" ~tester:"is_Ok"
+      ~bad:"Err(0)";
+    c2_case "type List(a) = Cons(a, List(a))" ~decl:"type List(a) = Cons(a, List(a))" ~ty:"List(Int)"
+      ~tester:"is_Cons" ~bad:"Nil";
+    gated "ctor review C2: a TOP-LEVEL `type Option` does not replace the built-in either" (fun () ->
+        let out =
+          run
+            {|mod M do
+  type Option(a) = Some(a)
+  fn need(x : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn b(y : Option(Int)) : Int do need(y) end
+end
+|}
+        in
+        not_proved out ~line:4 ~callee:"need") ]

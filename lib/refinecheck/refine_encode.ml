@@ -1147,17 +1147,40 @@ let ctor_smt_name (adt : string) (ctor : string) : string =
 
 (* The SMT name of source constructor [ctor] AS A CONSTRUCTOR OF [adt], or
    [None] when [adt] does not declare it. *)
-let ctor_of_adt (adt : string) (ctor : string) : string option =
+let ctor_of_adt_raw (adt : string) (ctor : string) : string option =
   let s = ctor_smt_name adt ctor in
   match Hashtbl.find_opt adt_ctors adt with
   | Some cs when List.mem s cs -> Some s
   | _ -> None
 
+(* Datatype keys whose TYPE NAME two or more modules (or a module and a
+   built-in) declare (review round 1 of 2026-11-02, C1).  Such a key may have
+   reached a caller through [adt_sort_name]'s PREFERRED declarant (a field
+   declared `Tq`, a measure parameter, a container entry), which is a guess
+   about which `Tq` is meant; a constructor is never resolved through it.
+   Filled by [finalize_ctor_names]. *)
+let ambiguous_adts : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+(* [ctor_of_adt_raw], unless [adt] is one of [ambiguous_adts]: then the
+   datatype is not known to be the value's, and only a constructor NAME that
+   [adt] alone declares (anywhere) is accepted, since that name fixes the
+   datatype by itself (a user top-level `Tree` with `UTip | UBranch` beside
+   the stdlib's `OrderedMap.Tree`).  A name another datatype also declares
+   (`K` in two `Tq`s) is [None]. *)
+let ctor_of_adt (adt : string) (ctor : string) : string option =
+  if not (Hashtbl.mem ambiguous_adts adt) then ctor_of_adt_raw adt ctor
+  else
+    match Hashtbl.find_opt ctor_decls ctor with
+    | Some [ a ] when a = adt -> ctor_of_adt_raw adt ctor
+    | _ -> None
+
 (* (datatype, SMT name) of a source constructor exactly one datatype
    declares; [None] for an unknown or an ambiguous name. *)
 let unique_ctor (ctor : string) : (string * string) option =
   match Hashtbl.find_opt ctor_decls ctor with
-  | Some [ adt ] -> Option.map (fun s -> (adt, s)) (ctor_of_adt adt ctor)
+  (* One datatype declares the name: whatever type the value was given, a
+     well-typed program built it with that datatype's constructor. *)
+  | Some [ adt ] -> Option.map (fun s -> (adt, s)) (ctor_of_adt_raw adt ctor)
   | _ -> None
 
 (* The built-in list's constructors, by SMT name (qualified only in a
@@ -1691,6 +1714,18 @@ let measure_preamble_sorts : (string, unit) Hashtbl.t = Hashtbl.create 8
 let adt_sort_name_at (path : string) (name : string) : string =
   if path = "" then "M_" ^ name else Printf.sprintf "M_%s$%s" path name
 
+(* The built-in datatypes ([register_builtin_adts]) count as declarants of
+   their names, under this pseudo module path, so a user type named `Option`
+   (nested or top-level) makes the name ambiguous instead of replacing the
+   built-in's constructors (review round 1 of 2026-11-02, C2).  A TOP-LEVEL
+   user declaration of such a name is filed under the pseudo path [top_path],
+   so its key differs from the built-in's bare one. *)
+let builtin_path = "$builtin"
+let top_path = "$top"
+let builtin_type_names = [ "List"; "Option"; "Result" ]
+let own_path (path : string) (name : string) : string =
+  if path = "" && List.mem name builtin_type_names then top_path else path
+
 (* bare "M_<name>" -> every (module path, qualified key) registered under
    that bare name, most-recently-registered first.  Populated by
    [register_adt_names]; consumed (and then made moot) by
@@ -1892,7 +1927,7 @@ let decl_key (path : string) (name : string) : string =
   let bare = "M_" ^ name in
   match Hashtbl.find_opt adt_decl_paths bare with
   | Some entries when List.length (List.sort_uniq compare (List.map fst entries)) >= 2 ->
-    adt_sort_name_at path name
+    adt_sort_name_at (own_path path name) name
   | _ -> bare
 
 (* The constructors the built-in datatypes are seeded with
@@ -1910,6 +1945,12 @@ let builtin_ctor_owner : (string * string) list =
 let finalize_ctor_names () : unit =
   Hashtbl.reset ctor_decls;
   Hashtbl.reset ctor_source;
+  Hashtbl.reset ambiguous_adts;
+  Hashtbl.iter
+    (fun _ entries ->
+      if List.length (List.sort_uniq compare (List.map fst entries)) >= 2 then
+        List.iter (fun (_, key) -> Hashtbl.replace ambiguous_adts key ()) entries)
+    adt_decl_paths;
   let keys = List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) adt_ctors []) in
   List.iter
     (fun adt ->
@@ -1984,7 +2025,9 @@ let finalize_adt_canonical () : unit =
            correctly-registered ctors/arity out from under it, which is
            exactly the module-qualification bug this function exists to
            fix, reintroduced one level up. *)
-        let entry_decl = List.find_opt (fun (p, _) -> p = "") entries in
+        (* The built-in's own entry sits at the bare key like a top-level
+           one (review round 1, C2). *)
+        let entry_decl = List.find_opt (fun (p, _) -> p = "" || p = builtin_path) entries in
         if entry_decl = None then begin
           Hashtbl.remove adt_ctors bare;
           Hashtbl.remove adt_arity bare
@@ -2218,7 +2261,7 @@ let rec smt_sort_of_field ?(pnames : string list = []) (t : A.ty) : Smt.sort =
 let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
   let record_key (name : string) : string =
     let bare = "M_" ^ name in
-    let key = adt_sort_name_at path name in
+    let key = adt_sort_name_at (own_path path name) name in
     Hashtbl.replace adt_decl_paths bare
       ((path, key) :: (try Hashtbl.find adt_decl_paths bare with Not_found -> []));
     key
@@ -3482,6 +3525,12 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
 let register_builtin_adts () : unit =
   let list = adt_sort_name "List" and option = adt_sort_name "Option"
   and result = adt_sort_name "Result" in
+  List.iter
+    (fun n ->
+      let bare = "M_" ^ n in
+      Hashtbl.replace adt_decl_paths bare
+        ((builtin_path, bare) :: (try Hashtbl.find adt_decl_paths bare with Not_found -> [])))
+    builtin_type_names;
   Hashtbl.replace adt_ctors list [ "Nil"; "Cons" ];
   Hashtbl.replace adt_arity list 1;
   set_ctor_fields list "Nil" [];

@@ -105,3 +105,48 @@ stay green.
   moves (no new proof, no lost proof, no new or withdrawn violation). The corpus has no program
   whose user-visible sites depend on a colliding constructor, so the new proofs show only in the
   `reflect-ctor` cases.
+
+## Review round 1 (of `c87e66495`)
+
+A fresh soundness review found two false proofs and a parity regression; each fix landed
+test-first (the `ctor review` cases of `reflect-ctor`, RED on `c87e66495`).
+
+- **C1 (new in `c87e66495`): a nested pattern resolved through a guessed field type.** In
+  `type W = W1(Tq)` with `Tq` declared by `A` and `B`, `W1`'s field sort comes from
+  `adt_sort_name "Tq"`, the preferred declarant `M_A$Tq`; the reflected body read `W1(K(n))`'s `K`
+  as `A.Tq`'s only constructor, so the tester was always true and `need1(g(w))` was proved though
+  `B.c4(B.W1(B.Z))` passes 0. Fix: `ambiguous_adts` holds every datatype key whose TYPE NAME two
+  or more modules (or a module and a built-in) declare; `ctor_of_adt` resolves a constructor
+  through such a key only when that constructor name is declared by that datatype alone anywhere
+  (the name then fixes the datatype by itself; this keeps a user top-level `Tree` with
+  `UTip | UBranch` beside the stdlib `OrderedMap.Tree` axiomatised,
+  `module-qualified-measure-and-sort`). Every resolver that receives a datatype (reflected
+  patterns via `field_adt`, `Refine_post.ctor_belongs`, `Refine_check`'s container sites,
+  measure arms, `reflect_dt`) goes through `ctor_of_adt`, so all of them decline alike.
+- **C2 (already on main): a user type named like a built-in replaced the built-in.** `List`,
+  `Option` and `Result` now count as declarants of their names (pseudo path `$builtin`, key the
+  bare one), so a nested `type Option(a) = Some(a)` makes `Option` ambiguous: the user type gets
+  its qualified key, the built-in keeps `M_Option` and its constructors, and constructors resolved
+  through either decline (unless unique by name). A TOP-LEVEL user `type Option` is filed under
+  the pseudo path `$top` (`M_$top$Option`) instead of overwriting the bare key. Tests: nested
+  `Option`, `Result` and `List` (the last was already not proved: a guard), and top-level
+  `Option`.
+- **I1: the parity net agreed on a wrong model.** `ctors_of` again refuses a datatype in
+  `ambiguous_adts` and a constructor whose name another datatype declares (its interpreter value
+  carries only the bare name). Tests: `B.g` of C1 is not reported agreeing; a function whose body
+  resolves no `Tq` constructor (`B.h`) is `not-compared` for want of a generator (RED, `agree
+  100 inputs`, with only this fix reverted).
+- **I2: `load_scope_tester_facts`** now requires the caller's declared sort marker to be the
+  goal's datatype (`$Meas:<adt>`) before reading the caller's `is_C` fact in it. Cheap, so done;
+  no probe reached it.
+
+Probes: `p3` (nested `Option`) all three sites skip (were two false proofs); `p6` both sites skip
+(was a false proof); `p6b` (no `A.Tq`) still reports line 13 `violated`.
+
+Ruling: a datatype whose type name is ambiguous loses constructor resolution except for
+constructor names unique program-wide. Cost if wrong: lost proofs on programs reusing a type
+name AND its constructor names (the parent commit's behaviour for those was a guess).
+
+Verification after round 1: `scripts/run-tests.sh refinecheck` 2,102 tests green;
+`-q compiler` 1,351 green; `scripts/oracle-base.sh refine` IDENTICAL against `8aaeb6176`, and
+`refine-oracle.sh monotone` GREEN over 139,456 sites with 0 moves.
