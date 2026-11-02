@@ -19,6 +19,8 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-02
+
 ### Breaking changes
 
 - **Hot-reload ABI v5 requires a rebuilt base binary.** Per-frame routing and
