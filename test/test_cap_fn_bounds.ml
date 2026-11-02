@@ -168,6 +168,54 @@ let test_formatter_keeps_the_bound () =
   Alcotest.(check bool) "list bound kept" true (contains out "needs IO.Console, IO.Clock do");
   Alcotest.(check bool) "empty bound kept" true (contains out "needs () do")
 
+(* ── Phase 2: interface method bounds ─────────────────────────────────── *)
+
+let iface_src = {|mod M do
+  interface Store(a) do
+    fn get : a -> Int needs IO.FileRead
+    fn put : a -> Unit needs ()
+    fn name : a -> String
+  end
+end|}
+
+let iface_methods src =
+  let m = Test_helpers.parse_module src in
+  List.concat_map
+    (function
+      | March_ast.Ast.DInterface (idef, _) -> idef.March_ast.Ast.iface_methods
+      | _ -> [])
+    m.March_ast.Ast.mod_decls
+
+let needs_paths (md : March_ast.Ast.method_decl) =
+  Option.map
+    (fun (paths, _) ->
+      List.map (fun p -> String.concat "." (List.map (fun (n : March_ast.Ast.name) -> n.txt) p)) paths)
+    md.March_ast.Ast.md_needs
+
+let test_iface_bound_parses () =
+  let got = List.map needs_paths (iface_methods iface_src) in
+  Alcotest.(check (list (option (list string)))) "bounds per method"
+    [ Some [ "IO.FileRead" ]; Some []; None ] got
+
+let test_iface_bound_with_default_parses () =
+  let src = {|mod M do
+  interface Label(a) do
+    fn label : a -> String needs () do fn (_) -> "x" end
+  end
+end|} in
+  match iface_methods src with
+  | [ md ] ->
+    Alcotest.(check (option (list string))) "empty bound" (Some []) (needs_paths md);
+    Alcotest.(check bool) "default kept" true (md.March_ast.Ast.md_default <> None)
+  | l -> Alcotest.failf "expected one method, got %d" (List.length l)
+
+let test_iface_formatter_keeps_the_bound () =
+  let out = March_format.Format.format_source ~filename:"t.march" iface_src in
+  Alcotest.(check bool) "list bound kept" true (contains out "fn get : a -> Int needs IO.FileRead");
+  Alcotest.(check bool) "empty bound kept" true (contains out "fn put : a -> Unit needs ()");
+  Alcotest.(check string) "idempotent" out
+    (March_format.Format.format_source ~filename:"t.march" out)
+
 let tests =
   [ Alcotest.test_case "direct reach" `Quick test_direct_reach
   ; Alcotest.test_case "transitive reach names the chain" `Quick test_transitive_reach_names_the_chain
@@ -182,4 +230,7 @@ let tests =
   ; Alcotest.test_case "nested module" `Quick test_nested_module
   ; Alcotest.test_case "impl method" `Quick test_impl_method
   ; Alcotest.test_case "formatter keeps the bound" `Quick test_formatter_keeps_the_bound
+  ; Alcotest.test_case "interface bound parses" `Quick test_iface_bound_parses
+  ; Alcotest.test_case "interface bound with default parses" `Quick test_iface_bound_with_default_parses
+  ; Alcotest.test_case "interface formatter keeps the bound" `Quick test_iface_formatter_keeps_the_bound
   ]

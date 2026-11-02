@@ -482,7 +482,7 @@ let get_tvar_id = function
 let mk_builtin_iface name methods =
   let mk_n txt = { Ast.txt; span = Ast.dummy_span } in
   let mk_method (mname, mty) =
-    { Ast.md_name = mk_n mname; md_ty = mty; md_default = None }
+    { Ast.md_name = mk_n mname; md_ty = mty; md_default = None; md_needs = None }
   in
   { Ast.iface_name        = mk_n name;
     iface_param           = mk_n "a";

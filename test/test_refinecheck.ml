@@ -12979,7 +12979,7 @@ module Audit_fixture = struct
         iface_param = nm "a";
         iface_superclasses = [];
         iface_assoc_types = [];
-        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None } ] }
+        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None; md_needs = None } ] }
     in
     (* [DImpl]: an [impl] block for a DIFFERENT interface than [Runner]
        above, so its [Impl_ty] site and its method's [Param]/[Return] sites
@@ -13253,7 +13253,7 @@ let audit_arrow_signature_suite =
             iface_param = nm "a";
             iface_superclasses = [];
             iface_assoc_types = [];
-            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None } ] }
+            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None; md_needs = None } ] }
         in
         let labels = Audit_fixture.labels [ A.DInterface (idf, dummy) ] in
         Alcotest.(check (list (triple string string (pair string int))))

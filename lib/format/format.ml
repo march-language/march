@@ -911,6 +911,19 @@ let same_compact_run a b =
   | Some x, Some y -> x = y
   | _ -> false
 
+(** A `needs` bound as printed after a function's return type or an interface
+    method's type: [" needs ()"], [" needs A.B, C"], or [""] for none.
+    Dropping it would silently widen the function (or every impl) to the
+    module's needs. *)
+let fmt_needs (needs : (name list list * span) option) : string =
+  match needs with
+  | None -> ""
+  | Some ([], _) -> " needs ()"
+  | Some (paths, _) ->
+    " needs "
+    ^ String.concat ", "
+        (List.map (fun p -> String.concat "." (List.map (fun (n : name) -> n.txt) p)) paths)
+
 (** Emit a list of declarations separated by blank lines,
     flushing comments before each one. *)
 let rec emit_decls ctx decls =
@@ -1036,9 +1049,11 @@ and emit_decl ctx = function
       List.iter (fun m ->
         match m.md_default with
         | None ->
-          line ctx (Printf.sprintf "fn %s : %s" m.md_name.txt (fmt_ty m.md_ty))
+          line ctx (Printf.sprintf "fn %s : %s%s" m.md_name.txt (fmt_ty m.md_ty)
+                      (fmt_needs m.md_needs))
         | Some def ->
-          line ctx (Printf.sprintf "fn %s : %s do" m.md_name.txt (fmt_ty m.md_ty));
+          line ctx (Printf.sprintf "fn %s : %s%s do" m.md_name.txt (fmt_ty m.md_ty)
+                      (fmt_needs m.md_needs));
           indented ctx (fun () -> emit_body ctx def);
           line ctx "end"
       ) iface.iface_methods
@@ -1251,14 +1266,7 @@ and emit_fn ctx fn =
      every clause of a multi-head function, like the return type, which the
      parser's clause merge accepts because the bounds are identical.
      Dropping it would silently widen the function to its module's needs. *)
-  let ret = match fn.fn_needs with
-    | None -> ret
-    | Some ([], _) -> ret ^ " needs ()"
-    | Some (paths, _) ->
-      ret ^ " needs "
-      ^ String.concat ", "
-          (List.map (fun p -> String.concat "." (List.map (fun (n : name) -> n.txt) p)) paths)
-  in
+  let ret = ret ^ fmt_needs fn.fn_needs in
   (match fn.fn_doc with
    | None -> ()
    | Some doc ->
