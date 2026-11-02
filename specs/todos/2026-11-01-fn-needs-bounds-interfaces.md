@@ -10,3 +10,5 @@ To do: grammar for `fn name : a -> b needs IO.X` in an interface body (and tree-
 record the bound per (interface, method); check each impl method's row against the
 interface's bound (an impl's own bound must be within it); a call dispatched through the
 interface is then bounded too. Measure on the stdlib's interfaces first.
+
+Implementation plan (2026-11-02): `specs/plans/2026-11-02-interface-needs-bounds.md`.
