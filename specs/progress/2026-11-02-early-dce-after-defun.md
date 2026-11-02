@@ -1,0 +1,36 @@
+# Early DCE: prune unreachable functions right after Defun
+
+**Landed** 2026-11-02.
+
+## Why
+
+Every program is lowered with the whole prepended stdlib (~6,700 functions after
+Defun, ~9,000 after Drop), and the only top-level DCE ran after the Opt loop. So
+Perceus, Drop, Escape, borrow inference and the Opt fixed point all ran over
+thousands of functions the program never reaches, for the final DCE to keep
+5 to 100 of them. Measured with `--timings` on three `test/native` fixtures, that
+was ~40% of a small program's compile.
+
+It was most of the macOS CI job's first 24 minutes: ~414 `test/native` fixture
+compiles before any suite finishes (main run 41514275700, job 125524405921), and
+it is in every suite that compiles a program.
+
+## What changed
+
+`Contract_pipeline.run` calls `Dce.prune_unreachable` right after Defun (the
+precondition [Dce] documents; the REPL shell already prunes there,
+`lib/jit/repl_jit.ml`). Its roots are the final DCE's (main, setup, migrate fns,
+`tm_exports`, tests) plus the `extra_roots` and NoAlloc functions that the
+pipeline pins after Escape, so it keeps a superset of what the final DCE keeps.
+`tm_exports` is restored afterwards: other passes read it as an ABI fact.
+
+Skipped under hot reload, for JS, and when the optimizer is off. Switch:
+`--disable-pass dce-early` / `MARCH_DISABLE_PASS=dce-early`.
+
+| fixture | before | after | final fns |
+|---|---|---|---|
+| `actor_on_stop_deadline` | 3.5 s | 1.4 s | 36 / 36 |
+| `array_trie_drop_leak_probe` | 3.8 s | 2.2 s | 110 / 110 |
+| `mixed_tail_aggregate_drop` | 3.2 s | 1.7 s | 9 / 9 |
+
+(wall, warm HOME cache, cold CAS, M-series Mac.)
