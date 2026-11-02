@@ -181,6 +181,11 @@ the unfixed build, then GREEN):
    no row for `f`), `test_build_check` "forge test" rows 3-5 (RED: a refinement violation read
    "reflection parity RED").
 
+Gates after the round (private HOME where the suite sets one): `scripts/run-tests.sh -q` all
+suites green; `lsp incremental jsonrpc` green (lsp 402, `refine-diagnostics` 7); `refinecheck`
+2,069 green (`reflect-parity` 6); forge `test_reconcile` 23, `test_build_check` "forge test" 6,
+`test_deploy_plan` 35, `test_hcr_manifest_diff` 3 green.
+
 ## Not done, deferred or unverified
 
 - 5b (ruling 1) and everything in `specs/todos/2026-10-31-reflection-encoder-gaps.md`.
