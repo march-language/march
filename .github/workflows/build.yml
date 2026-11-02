@@ -18,6 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Deliberately NOT macos-26 like CI's macOS jobs: the release binary
+          # inherits the build host's SDK as its minimum macOS, and 15 is the
+          # oldest we ship for.
           - os: macos-15
             platform: darwin-arm64
             ocaml-compiler: 5.5.1
@@ -58,7 +61,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
 
@@ -174,8 +177,10 @@ jobs:
       # failed with "no matching opam release" on darwin-arm64, and forcing a
       # prerelease opam fails GPG verification) AND installs the opam deps from
       # a cached switch, replacing the separate uncached `opam install` step
-      # this job used to run. Shares its cache key with ci.yml, so a release
-      # build usually starts from a switch some CI run already populated.
+      # this job used to run. The cache key names the OS release, so this
+      # macos-15 leg no longer shares a switch with CI's macOS jobs (macos-26):
+      # a switch built against the 26 SDK must not reach a release binary. It
+      # rebuilds its own switch once and then hits its own cache entry.
       #
       # Only the opam half is shared: this job's system-dependency step below
       # is deliberately NOT the common one, because release artifacts need a
@@ -410,7 +415,7 @@ jobs:
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: march-${{ inputs.version }}-${{ matrix.platform }}
           path: march-${{ inputs.version }}-${{ matrix.platform }}.tar.gz
@@ -420,7 +425,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -432,7 +437,7 @@ jobs:
           sha256sum -- *.tar.gz > ../march-${{ inputs.version }}-checksums.txt
 
       - name: Upload checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: march-${{ inputs.version }}-checksums
           path: march-${{ inputs.version }}-checksums.txt

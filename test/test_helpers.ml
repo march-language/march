@@ -2434,3 +2434,24 @@ let run_vectorize_check src =
   March_errors.Errors.sorted ctx
 
 (** pfn called from within a lambda passed to a HOF — must NOT be flagged. *)
+
+(* CI's macOS `test` job sets MARCH_CI_SKIP_OS_INDEPENDENT=1 (see "CI sharding"
+   in test/dune). Under it, [keep_os_sensitive ~groups suites] keeps ONLY the
+   named alcotest groups; unset, the suites pass through untouched. It is for
+   suites that are mostly compiler logic (run_codegen, run_compiler): there
+   the OS- or arch-sensitive groups are the few worth a macOS runner, and
+   test/native's compile-and-run fixtures, which run unfiltered, are where
+   macOS has actually caught bugs Linux missed.
+
+   A name that matches no group is an error rather than a no-op, so a renamed
+   group fails here instead of silently leaving macOS. *)
+let keep_os_sensitive ~groups suites =
+  if Stdlib.Sys.getenv_opt "MARCH_CI_SKIP_OS_INDEPENDENT" <> Some "1" then suites
+  else begin
+    let present = List.map fst suites in
+    (match List.filter (fun g -> not (List.mem g present)) groups with
+     | [] -> ()
+     | missing ->
+       failwith ("keep_os_sensitive: no such group: " ^ String.concat ", " missing));
+    List.filter (fun (name, _) -> List.mem name groups) suites
+  end

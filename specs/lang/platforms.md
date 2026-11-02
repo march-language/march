@@ -28,7 +28,7 @@ release. The three tier-1 platforms were decided on 2026-10-30.
 
 | Platform | What it is | How it is built | CI tests |
 |---|---|---|---|
-| `darwin-arm64` | macOS on Apple silicon | Native; links only system libraries at run time | Full suite on macOS 15 (`test (macos-15, all)`, `macos-checks`), except the suites whose answers don't depend on the OS (refinement checker, golden diagnostics, LSP), which run on Linux only |
+| `darwin-arm64` | macOS on Apple silicon | Native; links only system libraries at run time | Full suite on macOS 26 (`test (macos-26, all)`, `macos-checks`), except the tests whose answers don't depend on the OS (refinement checker, golden diagnostics, LSP, and the compiler-logic groups of the codegen and compiler suites), which run on Linux only |
 | `linux-x86_64` | 64-bit Intel/AMD Linux | Built on Alpine, fully static (musl), so it runs on any distribution | Full suite, plus the two-node cluster scenarios, AddressSanitizer, the property oracle and the determinism oracle |
 | `linux-aarch64` | 64-bit ARM Linux | Built on Alpine, fully static (musl) | **Built and smoke-tested only**: CI builds the archive and checks that its compiler compiles and runs a program, but runs no test suite on it |
 
