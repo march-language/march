@@ -326,6 +326,12 @@ let test_cmd =
     Arg.(value & flag & info ["release"]
            ~doc:"Compile test binary with -O2 instead of the default -O0 (slower build, faster test runtime)")
   in
+  let reflection_parity =
+    Arg.(value & flag & info ["reflection-parity"]
+           ~doc:"After the tests pass, compare every reflected function's logic definition with the \
+                 interpreter on generated inputs, boundary Ints included (refinement reflection's \
+                 parity net); fail on a mismatch or an interpreter failure")
+  in
   let files =
     Arg.(value & pos_all string [] &
          info [] ~docv:"FILE" ~doc:"Test files to run (default: all test files under test/)")
@@ -340,7 +346,7 @@ let test_cmd =
                  test's own checks fail or the reload servers report dropped messages, \
                  hard-deadline kills or lost markers. Runs instead of the unit tests.")
   in
-  let run v c f s sp r fs pkg up =
+  let run v c f s sp r rp fs pkg up =
     match up with
     | Some ref_ ->
       (match Upgrade_test.run ~ref_ () with
@@ -353,14 +359,14 @@ let test_cmd =
       let members = Workspace.members_from_root root in
       if members <> [] then
         handle (Workspace.run_for_members ~root ~members ~package:pkg
-                  (fun () -> Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ()))
+                  (fun () -> Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~reflection_parity:rp ~files:fs ()))
       else
-        handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ())
+        handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~reflection_parity:rp ~files:fs ())
     | _ ->
-      handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ())
+      handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~reflection_parity:rp ~files:fs ())
   in
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
-    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ release $ files $ workspace_package_flag $ upgrade_from)
+    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ release $ reflection_parity $ files $ workspace_package_flag $ upgrade_from)
 
 (* ------------------------------------------------------------------ forge lint *)
 

@@ -65,6 +65,10 @@ type ctx = {
   (* monotonic counter minting the $sN suffix for shadowing rebindings *)
   mutable tco : tco option;
   (* tail-call loop target of the function being emitted (see [tco]) *)
+  reserved : (string, unit) Hashtbl.t;
+  (* JS names of variables being assigned by [emit_assign] right now: a
+     binding minted inside (an arm's `x`, an inner `let x`) must not take
+     one, or it would capture the assignment meant for the outer variable *)
   mutable int_check : bool;
   (* --js-int-check: integer + - * results are range-checked (see march_ck_int) *)
   mutable src_file : string;
@@ -90,6 +94,7 @@ let create_ctx ?(fn_lines=[]) () = {
   name_env     = Hashtbl.create 16;
   shadow_ctr   = 0;
   tco          = None;
+  reserved     = Hashtbl.create 8;
   int_check    = false;
   src_file     = "";
   cur_loc      = "";
@@ -202,10 +207,19 @@ let js_local ctx name =
     the outer binding, and the fresh inner id never collides with it (no
     temporal-dead-zone read of a same-named block-hoisted const). *)
 let fresh_local_name ctx name =
-  if Hashtbl.mem ctx.name_env name then begin
+  if Hashtbl.mem ctx.name_env name || Hashtbl.mem ctx.reserved (mangle name) then begin
     ctx.shadow_ctr <- ctx.shadow_ctr + 1;
     mangle name ^ "$s" ^ string_of_int ctx.shadow_ctr
   end else mangle name
+
+(* Run [f] with [js] reserved (see [ctx.reserved]); nested reservations of
+   the same name restore correctly. *)
+let with_reserved ctx js f =
+  let had = Hashtbl.mem ctx.reserved js in
+  Hashtbl.replace ctx.reserved js ();
+  let r = f () in
+  if not had then Hashtbl.remove ctx.reserved js;
+  r
 
 (** Install [js] as the current emission of source [name]; returns the previous
     mapping so [unbind_local] can restore it when the binding leaves scope. *)
@@ -558,6 +572,7 @@ let rec emit_val  ctx expr = emit_val_impl  ctx expr
 and     emit_stmts ctx expr = emit_stmts_impl ctx expr
 and     emit_case  ctx rv expr = emit_case_impl ctx rv expr
 and     emit_fn_decl ctx fn = emit_fn_decl_impl ctx fn
+and     emit_assign ctx rv expr = emit_assign_impl ctx rv expr
 
 (* ── Value emission ──────────────────────────────────────────────── *)
 
@@ -628,10 +643,14 @@ and emit_val_impl ctx expr =
                  (match atom_ty a, atom_ty b with
                   | Tir.TInt, _ | _, Tir.TInt -> true | _ -> false)
                | _ -> false) ->
+         (* The in-range test is inline (atoms: recomputing the result is a
+            single add or multiply that V8 shares); only an overflow calls the
+            runtime, which throws. *)
          use_runtime ctx "march_int_ovf";
-         emit ctx "march_int_ovf("; emit_atom ctx a;
-         emit ctx (" " ^ op ^ " "); emit_atom ctx b;
-         emit ctx (match op with "+" -> ", 0)" | "-" -> ", 1)" | _ -> ", 2)")
+         let r () = emit ctx "("; emit_atom ctx a; emit ctx (" " ^ op ^ " "); emit_atom ctx b; emit ctx ")" in
+         emit ctx "("; r (); emit ctx " < 4611686018427387904 && "; r ();
+         emit ctx " >= -4611686018427387904 ? "; r (); emit ctx " : march_int_ovf("; r ();
+         emit ctx (match op with "+" -> ", 0))" | "-" -> ", 1))" | _ -> ", 2))")
        | _ ->
          emit ctx "(";
          emit_atom ctx (List.nth args 0);
@@ -956,6 +975,21 @@ and emit_stmts_impl ctx expr =
        no-ops in JS, so the call is the tail. *)
     emit_tail_jump ctx f.Tir.v_name args
 
+  | Tir.ELet (v, e1, rest) when is_compound e1 && (match e1 with Tir.ECase _ -> false | _ -> true) ->
+    (* A let whose value is itself a let/seq: compute it as statements into
+       the binding, not through a closure (see [emit_assign]). *)
+    let name = v.Tir.v_name in
+    let js = fresh_local_name ctx name in
+    emit_indent ctx; emit ctx "{\n";
+    ctx.indent <- ctx.indent + 1;
+    emitl ctx ("let " ^ js ^ ";");
+    with_reserved ctx js (fun () -> emit_assign ctx js e1);
+    let prev = install_local ctx name js in
+    emit_stmts ctx rest;
+    unbind_local ctx name prev;
+    ctx.indent <- ctx.indent - 1;
+    emit_indent ctx; emit ctx "}\n"
+
   | Tir.ELet (v, (Tir.ECase _ as case_expr), rest) ->
     (* let v = match ... — emit switch that assigns to v.
        Wrap in a block so this binding can shadow an outer variable of the same
@@ -966,7 +1000,7 @@ and emit_stmts_impl ctx expr =
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
     emitl ctx ("let " ^ js ^ ";");
-    emit_case ctx (Some js) case_expr;
+    with_reserved ctx js (fun () -> emit_case ctx (Some js) case_expr);
     let prev = install_local ctx name js in
     emit_stmts ctx rest;
     unbind_local ctx name prev;
@@ -1017,13 +1051,7 @@ and emit_stmts_impl ctx expr =
     emit_stmts ctx e1
 
   | Tir.ESeq (e1, e2) ->
-    (match e1 with
-     | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
-     | Tir.EFree _ | Tir.EReuse _ -> ()
-     | _ ->
-       emit_indent ctx;
-       emit_val ctx e1;
-       emit ctx ";\n");
+    emit_effect ctx e1;
     emit_stmts ctx e2
 
   | Tir.ECase _ ->
@@ -1060,11 +1088,7 @@ and emit_case_impl ctx result_var expr =
     (* Helper: emit the result assignment or return for a branch body *)
     let emit_result body =
       match result_var with
-      | Some v ->
-        emit_indent ctx;
-        emit ctx (v ^ " = ");
-        emit_val ctx body;
-        emit ctx ";\n"
+      | Some v -> emit_assign ctx v body
       | None -> emit_stmts ctx body
     in
     (* Tuples can appear as TTuple or as TCon("$TupleN", ...) or detected
@@ -1090,9 +1114,7 @@ and emit_case_impl ctx result_var expr =
         in
         let binds = bind_br_vars ctx scrut_name br.Tir.br_vars in
         (match result_var with
-         | Some rv ->
-           emit_indent ctx; emit ctx (rv ^ " = ");
-           emit_val ctx br.Tir.br_body; emit ctx ";\n"
+         | Some rv -> emit_assign ctx rv br.Tir.br_body
          | None -> emit_stmts ctx br.Tir.br_body);
         unbind_br_vars ctx binds
       ) branches;
@@ -1103,9 +1125,7 @@ and emit_case_impl ctx result_var expr =
       (match default, branches with
        | Some d, [] ->
          (match result_var with
-          | Some rv ->
-            emit_indent ctx; emit ctx (rv ^ " = ");
-            emit_val ctx d; emit ctx ";\n"
+          | Some rv -> emit_assign ctx rv d
           | None -> emit_stmts ctx d)
        | _ -> ())
     end else
@@ -1173,10 +1193,7 @@ and emit_case_impl ctx result_var expr =
             let binds = bind_br_vars ctx scrut_name br.Tir.br_vars in
             (match result_var with
              | Some rv ->
-               emit_indent ctx;
-               emit ctx (rv ^ " = ");
-               emit_val ctx br.Tir.br_body;
-               emit ctx ";\n";
+               emit_assign ctx rv br.Tir.br_body;
                emitl ctx "break;"
              | None ->
                (* Statement position: emit_stmts does not always end in a
@@ -1199,8 +1216,7 @@ and emit_case_impl ctx result_var expr =
            with_indent ctx (fun () ->
              match result_var with
              | Some rv ->
-               emit_indent ctx; emit ctx (rv ^ " = ");
-               emit_val ctx d; emit ctx ";\n";
+               emit_assign ctx rv d;
                emitl ctx "break;"
              | None -> emit_stmts ctx d
            )
@@ -1212,6 +1228,84 @@ and emit_case_impl ctx result_var expr =
   | _ -> failwith "emit_case: expected ECase"
 
 (* ── Function definition emission ───────────────────────────────── *)
+
+(* ── Assignment mode ──────────────────────────────────────────────
+
+   [emit_assign ctx rv e] emits statements that compute [e] and assign it to
+   the (already declared) JS variable [rv].  A compound expression in value
+   position (a let bound to a match, a let chain, an arm that binds) used to
+   become an immediately invoked closure, one per expression, which was ~40%
+   of a Herald frame; this keeps it in the enclosing function.  It never emits
+   a tail-call jump: nothing it emits is in tail position. *)
+and emit_assign_impl ctx rv expr =
+  match expr with
+  | Tir.ELet (v, e1, e2) ->
+    let name = v.Tir.v_name in
+    let js = fresh_local_name ctx name in
+    emit_indent ctx; emit ctx "{\n";
+    ctx.indent <- ctx.indent + 1;
+    if is_compound e1 then begin
+      emitl ctx ("let " ^ js ^ ";");
+      with_reserved ctx js (fun () -> emit_assign ctx js e1)
+    end else begin
+      emit_indent ctx;
+      emit ctx ("const " ^ js ^ " = ");
+      emit_val ctx e1;
+      emit ctx ";\n"
+    end;
+    let prev = install_local ctx name js in
+    emit_assign ctx rv e2;
+    unbind_local ctx name prev;
+    ctx.indent <- ctx.indent - 1;
+    emit_indent ctx; emit ctx "}\n"
+  | Tir.ELetRec (fns, body) ->
+    List.iter (fun (fn : Tir.fn_def) ->
+      Hashtbl.replace ctx.local_fns fn.Tir.fn_name ()) fns;
+    List.iter (emit_fn_decl ctx) fns;
+    emit_assign ctx rv body
+  | Tir.ESeq (e1, e2) when is_rc_noop_only e2 && not (is_rc_noop_only e1) ->
+    (* Perceus's self-call + post-DecRC shape: e1 is the value *)
+    emit_assign ctx rv e1
+  | Tir.ESeq (e1, e2) ->
+    emit_effect ctx e1;
+    emit_assign ctx rv e2
+  | Tir.ECase _ -> emit_case ctx (Some rv) expr
+  | Tir.EApp (f, args)
+    when (match f.Tir.v_name with
+          | "panic" | "panic_" | "todo_" | "unreachable_" -> true | _ -> false) ->
+    (* a panic needs no value: a throw statement, not a throwing closure *)
+    emit_indent ctx;
+    emit ctx "throw new Error(";
+    (match args with a :: _ -> emit_atom ctx a | [] -> emit ctx "\"panic\"");
+    emit ctx ");\n"
+  | e ->
+    emit_indent ctx;
+    emit ctx (rv ^ " = ");
+    emit_val ctx e;
+    emit ctx ";\n"
+
+(* An expression evaluated only for its effect: RC ops vanish; a compound one
+   is computed into a throwaway variable rather than a closure. *)
+and emit_effect ctx e =
+  match e with
+  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
+  | Tir.EFree _ | Tir.EReuse _ -> ()
+  | e when is_compound e ->
+    let tmp = fresh_local_name ctx "$eff" in
+    emit_indent ctx; emit ctx "{\n";
+    ctx.indent <- ctx.indent + 1;
+    emitl ctx ("let " ^ tmp ^ ";");
+    with_reserved ctx tmp (fun () -> emit_assign ctx tmp e);
+    ctx.indent <- ctx.indent - 1;
+    emit_indent ctx; emit ctx "}\n"
+  | e ->
+    emit_indent ctx;
+    emit_val ctx e;
+    emit ctx ";\n"
+
+and is_compound = function
+  | Tir.ECase _ | Tir.ELet _ | Tir.ELetRec _ | Tir.ESeq _ -> true
+  | _ -> false
 
 and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
   let self_loop = Llvm_tco.has_self_tail_call fn.Tir.fn_name fn.Tir.fn_body in

@@ -89,7 +89,7 @@ callers never have to satisfy. See [The grant](#grant).
 | Guarantee a function is completely pure | Declare no `needs`; the compiler verifies it |
 | Let a plugin only read the clock | `cap_narrow` to `Cap(IO.Clock)` at the call site |
 | Bound what the whole program may do | The grant: `main`'s capability parameter |
-| Prove integer division can never panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisor params |
+| Prove integer division and arithmetic can never panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisors and operands |
 | Guarantee zero heap allocation (realtime/embedded) | `cap no_alloc` for a whole module, `@[no_alloc]` for one function (the same check) |
 | Keep a module free of C/FFI | `cap no_extern` |
 | Guarantee zero side effects, not just no IO caps declared | `cap pure` |
@@ -747,7 +747,7 @@ mod SafeMath do
 end
 ```
 
-A module with `cap no_panic` must not contain any expression that can panic at runtime. Three checks enforce that, covering three different ways code panics: an unsafe call, an unsafe division, and an unhandled `match` case.
+A module with `cap no_panic` must not contain any expression that can panic at runtime. Four checks enforce that, covering four different ways code panics: an unsafe call, an unsafe division, an unhandled `match` case, and Int arithmetic that overflows.
 
 **1. Unsafe calls.** Some functions can panic: `panic` itself, `List.tail` on an empty list, `Option.unwrap` on `None`. The compiler splits these into two groups:
 
@@ -778,6 +778,8 @@ A module with `cap no_panic` must not contain any expression that can panic at r
 Use `Math.checked_div` / `Math.checked_mod` when you cannot prove the divisor is non-zero statically: they return `Option(Int)` instead of panicking.
 
 **3. Non-exhaustive `match`.** In an ordinary module, a `match` that does not cover every constructor is a warning: the build still succeeds. Under `cap no_panic` it is an error: an uncovered case is a runtime panic waiting to happen ("no matching clause"), and excluding that is exactly what the capability promises.
+
+**4. Int overflow.** `+`, `-`, `*` and unary `-` on `Int` panic when the result leaves [-2^62, 2^62) (see [Int width and overflow]({{ site.baseurl }}/docs/types/#int-width-and-overflow)). Under `cap no_panic` each one must be proven to stay in range, by the same machinery as division: refinements on parameters, enclosing guards, and `let` values in scope. The checker knows that every `Int` a program holds is already in range (a value outside it would have panicked where it was computed), so `x - 1` under `x >= 0`, `x + 1` under `x < n`, and `x * x` with `x` refined to `{v : Int | v >= 0 && v < 1000}` are all accepted, while a bare `x + 1` on an unrefined `x` is an error that names a value it cannot rule out (`x = 4611686018427387903`). Float arithmetic never traps and is not checked. When wrapping is genuinely what you want, or a counter is bounded by something the checker cannot see (a byte offset into the input, say), spell it `int_wrapping_add` / `int_wrapping_sub` / `int_wrapping_mul`: those wrap modulo 2^63 and never panic. `int_abs`, `int_pow` and `int_shl` also still wrap and are not checked.
 
 One tooling caveat: `march check` (the fast, package-level command) does not run the same proof infrastructure as `march --compile`/`--check`, so for the "allowed if you prove it" functions above it falls back to banning them by name rather than checking your guard. That means `march check` can reject a call that `march --compile` accepts. It is being more conservative, not wrong. The LSP has the same limitation inside a top-level module (nested modules get full proof-based squiggles).
 
@@ -894,7 +896,7 @@ History: both `cap pure`'s and `cap deterministic`'s banned-builtin sets used to
 
 | I want to… | Use |
 |------------|-----|
-| Prove no integer division can panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisor params |
+| Prove no integer division or arithmetic can panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisors and operands |
 | Guarantee safe use in a realtime audio callback | `cap no_alloc`, checked on the compiled code by `forge build`, `march --check` and the editor (+ `Tagged(DSP, Realtime)` for the calling site) |
 | Keep a module free of C/FFI trust-boundary crossings | `cap no_extern` |
 | Guarantee a module has zero side effects, not just no IO caps declared | `cap pure` |

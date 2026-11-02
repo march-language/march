@@ -3680,6 +3680,7 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
           if inst = [] then f else Reflect_state.instance_name f (String.concat "," (List.map Smt.set_elem_tag inst))
         in
         Hashtbl.replace Reflect_state.instances name (ps, ret);
+        Hashtbl.replace Reflect_state.instance_base name f;
         Smt.App (name, args')
       | Smt.App (f, args) -> Smt.App (f, List.map rewrite args)
       | Smt.SetEmpty _ -> Smt.SetEmpty (to_sort (pop ()))
@@ -3870,7 +3871,12 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
       "(declare-sort Elem 0)\n"
     else elem
   in
-  elem ^ (if dts = "" then "" else dts ^ "\n") ^ set_defs ^ ltext ^ mtext ^ axioms ^ rdecls
+  (* D17 (reflection §7.1): a stage-2 query names the logic hash of every
+     reflected definition in its frontier, so the cache key states what the
+     proof depends on (a body edit, a change of reflectability, a type's Eq
+     derivation).  Empty for every other query. *)
+  Reflect_state.d17_lines assumptions
+  ^ elem ^ (if dts = "" then "" else dts ^ "\n") ^ set_defs ^ ltext ^ mtext ^ axioms ^ rdecls
 
 (* [resolve_sorts_exact], forgiving ASSUMPTIONS.  A contradiction that only an
    assumption brings in (a guard over a program function whose name happens to

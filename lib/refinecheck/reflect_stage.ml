@@ -194,6 +194,31 @@ let two_stage ?(ok : ('a -> bool) option) ~(errctx : Err.ctx) (run : unit -> 'a)
         in
         March_refine.Refine.last_core := [];
         List.iter (fun o -> Obligation.record (override o)) o1;
+        (* A `refinement_unverified` hint stage 1 emitted for a skip the
+           override re-labels names stage 1's reason; give it the new one
+           (phase 1b, the 1a ruling 8 mismatch).  The first line (what was
+           not verified, where) is kept; the reason text is the one the
+           named-reason family prints, which is how [Refine_call] reports a
+           [reflect-fuel] / [reflect-budget] skip. *)
+        let relabel (d : Err.diagnostic) =
+          if d.Err.code <> Err.Code.refinement_unverified || d.Err.severity <> Err.Hint then d
+          else
+            match
+              List.find_map
+                (fun (o : Obligation.t) ->
+                  if o.Obligation.span <> d.Err.span then None
+                  else
+                    match o.Obligation.verdict, (override o).Obligation.verdict with
+                    | Obligation.Skipped r1, Obligation.Skipped r2 when r1 <> r2 -> Some r2
+                    | _ -> None)
+                o1
+            with
+            | None -> d
+            | Some r ->
+              let first = match String.index_opt d.Err.message '\n' with Some i -> String.sub d.Err.message 0 i | None -> d.Err.message in
+              { d with Err.message = first ^ "\n" ^ Obligation.reason_detail r }
+        in
+        let d1 = if budget || fuel then List.map relabel d1 else d1 in
         errctx.Err.diagnostics <- (List.filter (fun d -> not (List.memq d saved_diags)) d_inc) @ d1;
         r1
       end

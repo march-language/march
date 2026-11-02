@@ -53,7 +53,9 @@ the compiled (LLVM) code, give the same answer for every operation below.
   the panic site, the way it does for `panic`. A literal expression that
   overflows (`4611686018427387903 + 1`) is not folded at compile time; it
   panics when it runs. This makes `x + 1 > x` true for every `x` the
-  program reaches, which is what the refinement checker assumes.
+  program reaches, which is what the refinement checker assumes. In a
+  `cap no_panic` module each of these operators must be proven not to
+  overflow ([Capabilities]({{ site.baseurl }}/docs/capabilities/), check 4).
 - **Wrapping is explicit.** `int_wrapping_add`, `int_wrapping_sub` and
   `int_wrapping_mul` reduce their result modulo 2^63 back into the range:
   `int_wrapping_add(int_max_value(), 1) == int_min_value()`. Use them for

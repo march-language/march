@@ -39,6 +39,17 @@ git log is authoritative for exact commits.
   `specs/progress/2026-10-30-int-overflow-trap.md` (design decision 2026-09-29,
   `specs/plans/2026-09-28-road-to-1.0.md`).
 
+- **`cap no_panic` now proves Int `+`, `-`, `*` and unary `-` cannot overflow.** Since
+  those operators panic on overflow they are panic sites, and a `cap no_panic` module must
+  show each one stays in [-2^62, 2^62) from refinements, guards and `let` values in scope
+  (new error code `int_overflow`, with a value the checker could not rule out). Every Int
+  the program holds counts as in range, so `x - 1` under `x >= 0` and `x + 1` under
+  `x < n` pass; a bare `x + 1` on an unrefined `x` is now an error. Spell intended or
+  externally bounded arithmetic with `int_wrapping_add` / `int_wrapping_sub` /
+  `int_wrapping_mul`. Float arithmetic is not checked. The stdlib's one `cap no_panic`
+  module, `JsonStream`, now spells its byte-offset and depth arithmetic that way (same
+  results for any real input).
+
 ### Added
 
 - **Per-function capability bounds.** A function header may declare `needs IO.Console`
@@ -48,6 +59,25 @@ git log is authoritative for exact commits.
   function is handed is charged to whoever supplies it, and a call to a function value
   taken from a record, list or ref is refused under a bound narrower than `IO`. Impl
   methods take bounds too. See the capabilities reference, "Per-function bounds".
+
+- **`--reflection-parity`: check the refinement checker's reading of your functions.**
+  `forge test --reflection-parity` (or `march --check --reflect-parity`) runs every
+  reflected function both by its logic definition and in the interpreter, on generated
+  inputs including the largest and smallest `Int`; a disagreement or a panic inside the
+  function's domain fails the run, and boundary overflow is reported `overflow?`. A
+  reflected function the net cannot compare is listed `not-compared` with the reason, and
+  a file whose ordinary check fails is reported as a check failure, not a parity failure.
+  A run that compared no input at all says `parity: NOTHING COMPARED`, and
+  `forge test --reflection-parity` fails on it.
+- **Logic hashes in `--dump-impl-hashes`.** A fourth column gives each reflected
+  function's logic hash (`-` when not reflected); every solver query that used a
+  definition names the hash in its cache key. `--reflect-deps` prints the hashes (and a
+  contract hash for every function a file reaches in other files), and the language
+  server (opt-in, `MARCH_LSP_REFINE=1`) uses them to re-check open files when a
+  definition, a refinement contract or the reflectability of a function they rely on
+  changes in another file.
+- **A parameter refinement may call a reflected function** (`fn f(n : {Int | is_small(_)})`),
+  and the function is still reflected.
 
 - **Hot deploys report their running schema baseline.** Hot-reload binaries embed
   deterministic schemas and manifests, and the owner-only `SCHEMAS` query reports
@@ -492,12 +522,22 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Hot reload refuses a patch that changes a reflected function's body when a proof used
+  it**: a caller's precondition was discharged by unfolding that body. Redeploy with a
+  restart, or mark the function `@[opaque]`. A reflected function no proof unfolded can
+  still be hot-patched.
+
 - **`@[measure]` now insists on reflection, and follows calls.** A `@[measure]` that is not
   reflected is the error `invalid_measure`, naming the first reason, including through a
   function it calls (a measure whose `Nil` arm calls a function that prints, panics or
   loops was accepted before). Measures with several parameters, or with a `Bool` or list
   result, are now accepted and reflected; one-parameter `Int` and set measures keep their
   axioms exactly as before. A Bool measure discharges (it used to skip every use).
+
+- **JS output computes compound values as statements.** A `let` bound to a match or a
+  let chain, and a match arm that binds, used to become an immediately invoked closure
+  per expression; they are now plain statements assigning the result. Herald's renderer
+  runs about 3× faster on the JS target (Eclipse: ~90 ms to ~29 ms a frame).
 
 - **Termination: `@[diverges]`, actor handlers and `cap total`.** Mark a function meant
   to run for ever `@[diverges]` (an accept loop, a frame reader, a ticker): it files no
@@ -556,6 +596,21 @@ git log is authoritative for exact commits.
   inferred, so well-typed callers are unaffected and nothing runs differently.
 
 ### Fixed
+
+- **A `refinement_unverified` hint re-labelled `reflect-fuel` or `reflect-budget` now
+  names that reason** instead of the first attempt's.
+- **`cap no_panic` accepted a division by a `let` that rebinds its own name.** In
+  `let d = d - 1` followed by `10 / d`, the checker read the binding as the equation
+  `d = d - 1`, which no integer satisfies, so `d != 0` was vacuously proved and the
+  division by zero at `d = 1` went unreported. A `let` whose right-hand side names
+  the variable it binds, or names a variable rebound later, is no longer used as an
+  equation.
+
+- **The refinement checker sent `-2^62` to Z3 as `+2^62`.** An Int literal equal to
+  `int_min_value()` was printed `(- -4611686018427387904)`, because negating it in the
+  compiler wrapped back to itself; Z3 read that as 2^62. Any VC mentioning the literal
+  got the wrong number, which could make its assumptions contradictory and its goal
+  vacuously proved.
 
 - Generated topology offers select the accepting work's compatible version before
   creating a session endpoint. Saved user closures and running sessions retain their

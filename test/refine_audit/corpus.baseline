@@ -308,6 +308,8 @@ native_js_bitops: coverage audit (user + stdlib): 198 enforced, 0 inert (warned)
 native_js_bitops: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_bundle: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_bundle: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_bundle_ambiguous: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_bundle_ambiguous: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_canvas_available: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_canvas_available: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_closure_reuse_apply_slot: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
@@ -330,6 +332,8 @@ native_js_int_check: coverage audit (user + stdlib): 198 enforced, 0 inert (warn
 native_js_int_check: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_int_check_lit: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_int_check_lit: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_let_shadow_target: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_let_shadow_target: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_let_shadowing: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_let_shadowing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_local_shadows_fn: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
@@ -340,6 +344,8 @@ native_js_mutual_tail: coverage audit (user + stdlib): 198 enforced, 0 inert (wa
 native_js_mutual_tail: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_native_arrays: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_native_arrays: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_no_iife: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_no_iife: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_random_determinism: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_random_determinism: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_self_tail_call_rc_drop: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced

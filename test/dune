@@ -1337,7 +1337,7 @@
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))
- (modules test_refinecheck test_refine_term test_refine_reflect test_refine_unfold)
+ (modules test_refinecheck test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b)
  ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
  ; because the question it asks — "does a guarded call still error?" — spans
@@ -14929,6 +14929,52 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_bitops.expected js_bitops.out)))
 
+; js_no_iife — compound expressions in value position are statements that
+; assign their result, not one immediately invoked closure each.
+(rule
+ (targets js_no_iife.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_no_iife.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_no_iife.mjs native/js_no_iife.march)))
+
+(rule
+ (targets js_no_iife.out)
+ (deps js_no_iife.mjs march_runtime.mjs)
+ (action
+  (with-stdout-to js_no_iife.out
+   (system "node js_no_iife.mjs && echo \"iife $(awk '/^function shape\\(/{f=1} f&&/^}/{f=0} f' js_no_iife.mjs | grep -c '(() =>')\""))))
+
+(rule (alias runtest) (action (diff native/js_no_iife.expected js_no_iife.out)))
+
+; js_let_shadow_target — a let bound to a match whose arms bind the same name keeps its own value (statement-mode emission).
+(rule
+ (targets js_let_shadow_target.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_let_shadow_target.march) march_runtime.mjs )
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime 
+              -o js_let_shadow_target.mjs native/js_let_shadow_target.march)))
+
+(rule
+ (targets js_let_shadow_target.out)
+ (deps js_let_shadow_target.mjs march_runtime.mjs )
+ (action (with-stdout-to js_let_shadow_target.out (run node js_let_shadow_target.mjs))))
+
+(rule (alias runtest) (action (diff native/js_let_shadow_target.expected js_let_shadow_target.out)))
+
+; js_bundle_ambiguous — two different files at an extern module's relative
+; path stop the bundling with an error instead of copying either.
+(rule
+ (targets js_bundle_ambiguous.out)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (glob_files ../runtime/*.mjs)
+       (file native/js_bundle_ambiguous.march)
+       (file native/js_amb_mods/a/amb.mjs) (file native/js_amb_mods/b/amb.mjs))
+ (action
+  (with-stdout-to js_bundle_ambiguous.out
+   (system "rm -rf amb_out && mkdir amb_out && { %{exe:../bin/main.exe} --target js -o amb_out/x.mjs native/js_bundle_ambiguous.march 2>&1 >/dev/null; true; } | grep '^march: error' | head -1"))))
+
+(rule (alias runtest) (action (diff native/js_bundle_ambiguous.expected js_bundle_ambiguous.out)))
 
 (rule
  (targets test_hcr_frame_unwind_runner)

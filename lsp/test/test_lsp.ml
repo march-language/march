@@ -30,6 +30,7 @@ open Test_lsp_depot
 
 let () =
   Alcotest.run "march-lsp" [
+    "refine-diagnostics", Test_lsp_refine.tests;
     "cross-file", [
       "interface resolves across files", `Quick, test_cross_file_interface_resolves;
       "unknown interface still errors",  `Quick, test_unknown_interface_still_errors;

@@ -95,8 +95,162 @@ let unfold_hook :
     ((string * Smt.sort) list -> Smt.term -> Smt.term list -> (string * Smt.sort) list * Smt.term list) ref =
   ref (fun d _ a -> (d, a))
 
+(** Instance symbol -> its base symbol ([|r:x@Int|] -> [|r:x|]), filled
+    with [instances]. *)
+let instance_base : (string, string) Hashtbl.t = Hashtbl.create 64
+
+(** The D17 hash of each reflected function (§7.1, I8), by base symbol: BLAKE3
+    over its source text, its R-status and definition, and the [==] reading
+    of every type its body compares at.  Filled by [Refine_reflect.install]. *)
+let logic_hash : (string, string) Hashtbl.t = Hashtbl.create 64
+
+(** The same, by display name ([inc], [List.length], [Inner.dbl]) and source
+    file, for [--dump-impl-hashes] (whose rows are TIR names) and the LSP
+    dependency key.  Two functions of one display name ([f/go] twice) keep
+    both, sorted. *)
+let logic_by_name : (string, (string * string) list) Hashtbl.t = Hashtbl.create 64
+
+(** The display name and declaring file of each reflected base symbol. *)
+let sym_origin : (string, string * string) Hashtbl.t = Hashtbl.create 64
+
+(** Every reflected function in the frontier of ANY stage-2 query the
+    current check ran (§7.2, I8): the frontier, not the unsat core, so a
+    definition a cold run needed and a warm run did not still keys the
+    dependents.  Base symbol -> unit; read by [--reflect-deps]. *)
+let check_frontier : (string, unit) Hashtbl.t = Hashtbl.create 64
+
+(** The CONTRACT hash of every function of the program (review round 1 of
+    phase 1b): BLAKE3 over its attributes, its head's source text (from its
+    name to the start of its last clause's body: parameter and return
+    refinements included, position-free) and whether it is reflected.  A
+    caller's proof relies on a callee's contract and reflectability even
+    when no body of the callee is in any frontier, so the LSP keys a file on
+    the contract of every cross-file function it calls ([contract_edges])
+    as well as on its frontier.  (file, display name, hash), by unit id of
+    the termination graph. *)
+let contract_defs : (string * string * string) array Lazy.t ref = ref (lazy [||])
+
+(** The call and reference edges of the termination graph, (source unit,
+    destination unit): a callee's reflectability rests on its own callees,
+    so a caller's key covers every function it reaches. *)
+let contract_edges : (int * int) list Lazy.t ref = ref (lazy [])
+
+(** The units reachable from any unit declared in [file] (itself excluded:
+    the file's own functions are its definitions, not its dependencies). *)
+let contract_reach (file : string) : (string * string * string) list =
+  let defs = Lazy.force !contract_defs in
+  let n = Array.length defs in
+  let succ = Array.make n [] in
+  List.iter (fun (a, b) -> if a < n && b < n then succ.(a) <- b :: succ.(a)) (Lazy.force !contract_edges);
+  let seen = Array.make n false in
+  let rec go v = if not seen.(v) then begin seen.(v) <- true; List.iter go succ.(v) end in
+  Array.iteri (fun i (f, _, _) -> if f = file then go i) defs;
+  List.filter_map (fun i -> let (f, _, _) as d = defs.(i) in if seen.(i) && f <> file then Some d else None)
+    (List.init n Fun.id)
+
+(** The base symbol of a reflected application's head (base or instance). *)
+let base_of (f : string) : string option =
+  if Hashtbl.mem logic_hash f then Some f
+  else match Hashtbl.find_opt instance_base f with Some b -> Some b | None -> None
+
+(** The D17 comment lines of a stage-2 query (§7.1): one per reflected
+    definition in its frontier, read off the unfolding facts
+    ([lit => equations], the left-hand side of each equation naming the
+    function), sorted.  [""] for a query with no unfolding, so no other
+    query's text moves. *)
+let d17_lines (assumptions : Smt.term list) : string =
+  let acc = ref [] in
+  let rec lhs (t : Smt.term) =
+    match t with
+    | Smt.And (a, b) -> lhs a; lhs b
+    | Smt.Implies (_, e) -> lhs e
+    | Smt.Eq (Smt.App (f, _), _) -> (
+      match base_of f with
+      | Some b when not (List.mem b !acc) -> acc := b :: !acc
+      | _ -> ())
+    | _ -> ()
+  in
+  List.iter
+    (function
+      | Smt.Implies (Smt.Const lit, body) when String.length lit > 5 && String.sub lit 0 5 = "|$ru_" -> lhs body
+      | _ -> ())
+    assumptions;
+  String.concat ""
+    (List.map
+       (fun b -> Printf.sprintf "; reflect %s blake3=%s\n" b (Option.value ~default:"-" (Hashtbl.find_opt logic_hash b)))
+       (List.sort compare !acc))
+
+(** The logic hash a post-TIR function named [tir_name] carries in
+    [--dump-impl-hashes] (§7.2, I9): its reflected function's D17 hash, or
+    [None] ([-]) for an unreflected one.  The entry module's functions are
+    unprefixed in TIR exactly as their display names are; a specialisation
+    of a polymorphic reflected function ([f$Int]) carries [f]'s hash.  Two
+    functions of one display name give the hash of both (the conservative
+    side: either body's edit changes it). *)
+let logic_hash_of_name (tir_name : string) : string option =
+  let of_entries = function
+    | [] -> None
+    | [ (_, h) ] -> Some h
+    | es -> Some (March_cas.Blake3.hash_string (String.concat "\000" (List.map snd es)))
+  in
+  match Hashtbl.find_opt logic_by_name tir_name with
+  | Some es -> of_entries es
+  | None -> (
+    match String.index_opt tir_name '$' with
+    | Some i when i > 0 -> (
+      let base = String.sub tir_name 0 i in
+      let poly =
+        Hashtbl.fold
+          (fun sym (n, _) acc -> acc || (n = base && match Hashtbl.find_opt syms sym with Some fs -> fs.fs_nvars > 0 | None -> false))
+          sym_origin false
+      in
+      if poly then of_entries (Option.value ~default:[] (Hashtbl.find_opt logic_by_name base)) else None)
+    | _ -> None)
+
+(** The logic hash that enters a function's hot-reload slot hash (§7.2, I9,
+    narrowed): [logic_hash_of_name] restricted to the reflected definitions
+    some stage-2 query of this build unfolded ([check_frontier], the frontier,
+    so the safe superset of the unsat cores).  A reflected function no proof
+    used carries no logic hash in its slot, so a hot patch may change its body:
+    the patch build re-checks the whole program, and no running proof rests on
+    the old body.  [None] when no proof used it. *)
+let used_logic_hash_of_name (tir_name : string) : string option =
+  let used (name, file) =
+    Hashtbl.fold
+      (fun sym () acc ->
+        acc
+        || (match base_of sym with
+            | Some b -> Hashtbl.find_opt sym_origin b = Some (name, file)
+            | None -> false))
+      check_frontier false
+  in
+  let of_name name =
+    match Hashtbl.find_opt logic_by_name name with
+    | None -> None
+    | Some es -> (
+      match List.filter (fun (file, _) -> used (name, file)) es with
+      | [] -> None
+      | [ (_, h) ] -> Some h
+      | es -> Some (March_cas.Blake3.hash_string (String.concat "\000" (List.map snd es))))
+  in
+  match Hashtbl.find_opt logic_by_name tir_name with
+  | Some _ -> of_name tir_name
+  | None -> (
+    (* A specialisation [f$T] of a polymorphic reflected [f]: [f]'s entries,
+       exactly when [logic_hash_of_name] gives it [f]'s hash. *)
+    match String.index_opt tir_name '$' with
+    | Some i when i > 0 && logic_hash_of_name tir_name <> None -> of_name (String.sub tir_name 0 i)
+    | _ -> None)
+
 let reset () =
   active := false;
+  Hashtbl.reset instance_base;
+  Hashtbl.reset logic_hash;
+  Hashtbl.reset logic_by_name;
+  Hashtbl.reset sym_origin;
+  Hashtbl.reset check_frontier;
+  contract_defs := lazy [||];
+  contract_edges := lazy [];
   arm_on := false;
   frontier_seen := false;
   confirmed := false;

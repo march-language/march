@@ -224,8 +224,11 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
     | A.EHole (_, sp) -> emit owner 4 "has a typed hole" sp
     | A.EMatch (s, brs, sp) ->
       if inp.nonexhaustive sp then begin
-        if List.exists (fun (b : A.branch) -> b.A.branch_guard <> None) brs then
-          emit owner 5 "guarded match may not match" sp
+        if List.exists (fun (b : A.branch) -> b.A.branch_guard <> None) brs then begin
+          (* Test-only: the parity net's C2 control admits a guarded match. *)
+          if Sys.getenv_opt "MARCH_REFLECT_PERTURB" <> Some "r5-guarded" then
+            emit owner 5 "guarded match may not match" sp
+        end
         else emit owner 5 "non-exhaustive match" sp
       end;
       w s;
@@ -380,6 +383,10 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
   let sites = Array.make n [] in
   List.iter (fun (s : RT.site) -> sites.(s.RT.s_src) <- s :: sites.(s.RT.s_src)) g.RT.sites;
   let deps = Array.make n [] in
+  (* The calls inside signatures' refinement predicates, by application span
+     ([Refine_term.graph.pred_sites]): R8 reads them by site (phase 1b). *)
+  let pred_site_tbl : (A.span, RT.site_target) Hashtbl.t = Hashtbl.create 64 in
+  List.iter (fun (sp, tgt) -> Hashtbl.replace pred_site_tbl sp tgt) g.RT.pred_sites;
   (* [`Refl v]: v must be reflected; [`Eq ids]: each must pass R2-R7 with its
      callees ([==], §3.5). *)
   let site_events (u : RT.unit_) : ev list =
@@ -515,7 +522,25 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
           let bad = ref None in
           List.iter
             (Refine_encode.iter_all (function
-              | A.EApp (A.EVar f, _, _) when !bad = None && not (inp.pred_fn f.A.txt) -> bad := Some f.A.txt
+              | A.EApp (A.EVar f, args, csp) when !bad = None && not (inp.pred_fn f.A.txt) -> (
+                (* Phase 1b: a call of a function the termination graph
+                   resolved AT THIS SITE, in the scope the predicate is
+                   written in, translates through that function's logic
+                   symbol, so the function must itself be reflected (a
+                   fixpoint dependency, like a body call).  A name two
+                   declarations could supply, or one the graph did not
+                   resolve to a unit, does not translate: R8 as before. *)
+                match Hashtbl.find_opt pred_site_tbl csp with
+                | Some (RT.S_unit _) when Sys.getenv_opt "MARCH_REFLECT_PERTURB" = Some "guard-no-dep" ->
+                  (* Test-only: the RED control of the dependency. *)
+                  ()
+                | Some (RT.S_unit v) when not (Hashtbl.mem g.RT.ambiguous csp) ->
+                  deps.(u.RT.u_id) <-
+                    ( `Refl v,
+                      { RT.s_src = u.RT.u_id; s_name = f.A.txt; s_span = csp; s_call = true; s_args = args;
+                        s_target = RT.S_unit v } )
+                    :: deps.(u.RT.u_id)
+                | _ -> bad := Some f.A.txt)
               | _ -> ()))
             (refines a);
           match !bad with
@@ -804,7 +829,24 @@ exception Decline
    placeholders [$rp<i>] (§3.4: one implication per arm, no default arm), and
    the conjunction of its parameter refinements over the same placeholders
    (§3.6, C1). *)
-type template = { t_cases : (Smt.term list * Smt.term) list; t_pre : Smt.term list; t_name : string }
+type template = {
+  t_cases : (Smt.term list * Smt.term) list;
+  t_pre : Smt.term list;
+  t_name : string;
+  t_eqs : (string * string) list;
+      (** each type the body uses program [==] at, with its §3.5 reading
+          ([structural] or [opaque]): part of the D17 hash (I8) *)
+}
+
+(* The types a body's [==] was read at while its template is built. *)
+let eq_seen : (string * string) list ref = ref []
+
+(* Test-only perturbation [swap-arms] (the parity net's RED control, §9.2):
+   the first two cases exchange their results, a wrong arm order the net
+   must catch. *)
+let swap_arms = function
+  | (g1, r1) :: (g2, r2) :: rest -> (g1, r2) :: (g2, r1) :: rest
+  | cs -> cs
 
 let templates : (string, template) Hashtbl.t = Hashtbl.create 64
 
@@ -906,6 +948,7 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
   let lits = ref [] and facts = ref [] in
   List.iteri
     (fun k (f, args) ->
+      Hashtbl.replace RS.check_frontier f ();
       let tp = Hashtbl.find templates f in
       let env = List.mapi (fun i a -> (param_const i, a)) args in
       let pre = if perturb = Some "no-guard" then [] else List.map (subst env) tp.t_pre in
@@ -946,6 +989,8 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
 let unique_ctor_adt (c : string) : string =
   match Hashtbl.fold (fun adt cs acc -> if List.mem c cs then adt :: acc else acc) RE.adt_ctors [] with
   | [ adt ] -> adt
+  (* Test-only: the RED control of the ambiguity rule (pick one). *)
+  | adt :: _ when Sys.getenv_opt "MARCH_REFLECT_PERTURB" = Some "ctor-guess" -> adt
   | _ -> raise Decline
 
 let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
@@ -1056,8 +1101,12 @@ and builtin c env nm args =
     let x = v a and y = v b in
     let eq =
       match ty_of a with
-      | Some t when c.c_eq_structural t || perturb = Some "eq-structural" -> Smt.Eq (x, y)
-      | Some _ -> Smt.App (RS.eq_sym, [ x; y ])
+      | Some t when c.c_eq_structural t || perturb = Some "eq-structural" ->
+        eq_seen := (T.pp_ty t, "structural") :: !eq_seen;
+        Smt.Eq (x, y)
+      | Some t ->
+        eq_seen := (T.pp_ty t, "opaque") :: !eq_seen;
+        Smt.App (RS.eq_sym, [ x; y ])
       | None -> raise Decline
     in
     if op = "==" then eq else Smt.Not eq
@@ -1189,6 +1238,11 @@ let encoder_blocked : (A.span, string) Hashtbl.t = Hashtbl.create 64
     the driver. *)
 let install_errors : (A.span * string) list ref = ref []
 
+(** (display name, declaring file) of every function the last [install]
+    found reflected, whether or not it got a logic symbol (the parity net
+    lists the ones that did not, review round 1). *)
+let reflected_fns : (string * string) list ref = ref []
+
 let debug_registered = ref false
 
 (* Every reflected logic symbol a query applies is declared by its preamble
@@ -1221,6 +1275,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   Hashtbl.reset templates;
   Hashtbl.reset encoder_blocked;
   install_errors := [];
+  reflected_fns := [];
   Hashtbl.reset RS.blocked_by_name;
   let g = t.RT.graph in
   let ne = Hashtbl.create 64 in
@@ -1235,6 +1290,8 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   in
   let rows = analyze inputs t decls in
   let refl_spans = Hashtbl.create 64 in
+  reflected_fns :=
+    List.filter_map (fun r -> match r.r_verdict with Reflected _ -> Some (r.r_name, r.r_span.A.file) | Blocked _ -> None) rows;
   List.iter
     (fun r ->
       match r.r_verdict with
@@ -1352,8 +1409,9 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     { c_sites = sites; c_sym_of_unit = (fun v -> sym_of.(v)); c_ty = ty_at; c_len_unit = len_unit;
       c_eq_structural = structural_ty []; c_unit = g.RT.units; c_ambiguous = Hashtbl.mem g.RT.ambiguous }
   in
-  (* Signatures and templates. *)
+  (* Signatures (§3.2, §3.3). *)
   let axiom_tier = Hashtbl.create 8 in
+  let sig_ptys = Array.make (Array.length g.RT.units) None in
   Array.iter
     (fun (u : RT.unit_) ->
       match sym_of.(u.RT.u_id) with
@@ -1374,31 +1432,18 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
              its calls never reach stage 2 (I10).  Its reflected symbol still
              serves a reflected body that calls it. *)
           RS.register fs;
+          sig_ptys.(u.RT.u_id) <- Some ptys;
           if List.mem "measure" u.RT.u_attrs && List.mem (RT.bare u.RT.u_name) !RE.registered_measures then
-            Hashtbl.replace axiom_tier sym ();
-          (* The body: a failure leaves the symbol uninterpreted, which is
-             sound (no equation is asserted), only weaker. *)
-          (try
-             let names =
-               List.mapi
-                 (fun i p -> match p with Some n -> (n, Smt.Const (param_const i)) | None -> raise Decline)
-                 (match u.RT.u_clauses with [ c ] -> c.RT.o_params | _ -> raise Decline)
-             in
-             (* Two parameters of one name (`fn two(a, a)`): which one the
-                body reads is the binder order's business, not the
-                translator's guess.  No definition. *)
-             if List.length (List.sort_uniq compare (List.map fst names)) <> List.length names then raise Decline;
-             let cases = tr_case ctx names body in
-             let pre = pre_of u ptys in
-             Hashtbl.replace templates sym { t_cases = cases; t_pre = pre; t_name = u.RT.u_name }
-           with Decline | Not_found | Invalid_argument _ | Failure _ -> ())
+            Hashtbl.replace axiom_tier sym ()
         with Decline | Not_found | Invalid_argument _ -> ()))
     g.RT.units;
   (* The one resolution rule (review C-1, C-2): a call site denotes a
      reflected function exactly when the termination graph's lexical walk
      resolved THAT site to that unit (program code), or resolved it in the
      scope where the predicate is written (a signature's refinement).  An
-     axiom-tier measure is never a frontier call (I10). *)
+     axiom-tier measure is never a frontier call (I10).  Filled before the
+     templates so a guard that calls a reflected function translates through
+     the same rule (phase 1b). *)
   let note sp v =
     if Hashtbl.mem g.RT.ambiguous sp then ()
     else
@@ -1411,6 +1456,238 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     (fun (s : RT.site) -> match s.RT.s_target with RT.S_unit v when s.RT.s_call -> note s.RT.s_span v | _ -> ())
     g.RT.sites;
   List.iter (fun (sp, tgt) -> match tgt with RT.S_unit v -> note sp v | _ -> ()) g.RT.pred_sites;
+  (* Templates (§3.4, §3.6). *)
+  Array.iter
+    (fun (u : RT.unit_) ->
+      match sym_of.(u.RT.u_id), sig_ptys.(u.RT.u_id) with
+      | Some sym, Some ptys -> (
+        (* The body: a failure leaves the symbol uninterpreted, which is
+           sound (no equation is asserted), only weaker. *)
+        try
+          let body = match u.RT.u_clauses with [ c ] -> c.RT.o_body | _ -> raise Decline in
+          let names =
+            List.mapi
+              (fun i p -> match p with Some n -> (n, Smt.Const (param_const i)) | None -> raise Decline)
+              (match u.RT.u_clauses with [ c ] -> c.RT.o_params | _ -> raise Decline)
+          in
+          (* Two parameters of one name (`fn two(a, a)`): which one the
+             body reads is the binder order's business, not the
+             translator's guess.  No definition. *)
+          if List.length (List.sort_uniq compare (List.map fst names)) <> List.length names then raise Decline;
+          eq_seen := [];
+          let cases = tr_case ctx names body in
+          let cases = if perturb = Some "swap-arms" then swap_arms cases else cases in
+          let eqs = List.sort_uniq compare !eq_seen in
+          (* A guard that calls a reflected function translates through its
+             logic symbol: the predicate translator's reflected-call arm,
+             which only translates in stage 2. *)
+          let pre =
+            let saved = !RS.arm_on and saved_active = !RS.active in
+            RS.arm_on := true;
+            RS.active := true;
+            Fun.protect
+              ~finally:(fun () -> RS.arm_on := saved; RS.active := saved_active)
+              (fun () -> pre_of u ptys)
+          in
+          Hashtbl.replace templates sym { t_cases = cases; t_pre = pre; t_name = u.RT.u_name; t_eqs = eqs }
+        with Decline | Not_found | Invalid_argument _ | Failure _ -> ())
+      | _ -> ())
+    g.RT.units;
+  (* The D17 hash of every reflected function (§7.1, I8). *)
+  let file_cache : (string, string option) Hashtbl.t = Hashtbl.create 16 in
+  let file_text f =
+    match Hashtbl.find_opt file_cache f with
+    | Some t -> t
+    | None ->
+      let t = try Some (In_channel.with_open_bin f In_channel.input_all) with Sys_error _ -> None in
+      Hashtbl.replace file_cache f t;
+      t
+  in
+  (* The source text of a unit: from its name to the end of its last clause
+     body.  Position-free, so an edit elsewhere in the file (a line inserted
+     above) does not change it. *)
+  let source_of (u : RT.unit_) =
+    let sp = u.RT.u_span in
+    let stop =
+      List.fold_left
+        (fun (l, c) (o : RT.owner) ->
+          let b = T.span_of_expr o.RT.o_body in
+          if (b.A.end_line, b.A.end_col) > (l, c) then (b.A.end_line, b.A.end_col) else (l, c))
+        (sp.A.end_line, sp.A.end_col) u.RT.u_clauses
+    in
+    match file_text sp.A.file with
+    | None -> None
+    | Some text ->
+      let offset (line, col) =
+        let rec go i l = if l >= line then Some i else match String.index_from_opt text i '\n' with Some j -> go (j + 1) (l + 1) | None -> None in
+        Option.map (fun i -> i + col) (go 0 1)
+      in
+      (match offset (sp.A.start_line, sp.A.start_col), offset stop with
+       | Some a, Some b when a >= 0 && b >= a && b <= String.length text -> Some (String.sub text a (b - a))
+       | _ -> None)
+  in
+  (* A template's text with every logic symbol named by its function and
+     file, not its position: the symbol's position moves with unrelated
+     edits, the identity does not. *)
+  let canon_name s =
+    match Hashtbl.find_opt RS.syms s with
+    | Some fs -> (
+      match Hashtbl.find_opt owners s with
+      | Some v -> Printf.sprintf "%s@%s" fs.RS.fs_name (Filename.basename g.RT.units.(v).RT.u_span.A.file)
+      | None -> fs.RS.fs_name)
+    | None -> s
+  in
+  let rec canon (t : Smt.term) : Smt.term =
+    match t with
+    | Smt.App (f, args) -> Smt.App (canon_name f, List.map canon args)
+    | t -> map_term canon t
+  in
+  let guards_of = Hashtbl.create 64 in
+  List.iter (fun r -> match r.r_verdict with Reflected gs -> Hashtbl.replace guards_of r.r_span gs | Blocked _ -> ()) rows;
+  Array.iter
+    (fun (u : RT.unit_) ->
+      match sym_of.(u.RT.u_id) with
+      | Some sym when Hashtbl.mem RS.syms sym ->
+        let src = Option.value ~default:"" (source_of u) in
+        let status =
+          "reflected" ^ String.concat "" (List.map (fun g -> "\000guard " ^ g) (Option.value ~default:[] (Hashtbl.find_opt guards_of u.RT.u_span)))
+        in
+        let defn, eqs =
+          match Hashtbl.find_opt templates sym with
+          | None -> ("uninterpreted", [])
+          | Some tp ->
+            ( String.concat "\000"
+                (List.map (fun t -> "pre " ^ Smt.render (canon t)) tp.t_pre
+                @ List.map
+                    (fun (cs, r) ->
+                      "case " ^ String.concat " & " (List.map (fun c -> Smt.render (canon c)) cs) ^ " => " ^ Smt.render (canon r))
+                    tp.t_cases),
+              tp.t_eqs )
+        in
+        let payload =
+          if perturb = Some "hash-text-only" then src
+          else
+            String.concat "\000"
+              ([ "march-reflect-logic-v1"; src; status; defn ]
+              @ List.map (fun (t, k) -> "eq " ^ t ^ " " ^ k) eqs)
+        in
+        let h = March_cas.Blake3.hash_string payload in
+        Hashtbl.replace RS.logic_hash sym h;
+        Hashtbl.replace RS.sym_origin sym (u.RT.u_name, u.RT.u_span.A.file);
+        let prev = Option.value ~default:[] (Hashtbl.find_opt RS.logic_by_name u.RT.u_name) in
+        Hashtbl.replace RS.logic_by_name u.RT.u_name (List.sort compare ((u.RT.u_span.A.file, h) :: prev))
+      | _ -> ())
+    g.RT.units;
+  (* The contract hash of every unit (review round 1): its head's text up to
+     its last clause's body, its attributes, and whether it is reflected
+     (with its unfolding guards).  A multi-clause function's earlier bodies
+     fall inside the head text: an over-approximation (a re-check too many),
+     never a missed one. *)
+  let head_of (u : RT.unit_) =
+    let sp = u.RT.u_span in
+    let stop =
+      List.fold_left
+        (fun (l, c) (o : RT.owner) ->
+          let b = T.span_of_expr o.RT.o_body in
+          if (b.A.start_line, b.A.start_col) > (l, c) then (b.A.start_line, b.A.start_col) else (l, c))
+        (sp.A.end_line, sp.A.end_col) u.RT.u_clauses
+    in
+    match file_text sp.A.file with
+    | None -> ""
+    | Some text ->
+      let offset (line, col) =
+        let rec go i l = if l >= line then Some i else match String.index_from_opt text i '\n' with Some j -> go (j + 1) (l + 1) | None -> None in
+        Option.map (fun i -> i + col) (go 0 1)
+      in
+      (match offset (sp.A.start_line, sp.A.start_col), offset stop with
+       | Some a, Some b when a >= 0 && b >= a && b <= String.length text -> String.sub text a (b - a)
+       | _ -> "")
+  in
+  (* Review round 2: the functions a unit's refinements NAME.  A
+     predicate's call (`_ < size()`, `sz(_) > 0`) makes the callee's BODY
+     part of the contract.  Names resolve by their last component (same file
+     first, else every file): an over-approximation, so a re-check too many,
+     never a missed one.  (A refinement type alias, `type Big = {Int | ...}`,
+     does not parse, so a head's refinements are all written in it.) *)
+  let refs_of (u : RT.unit_) =
+    let names = ref [] in
+    let rec ty (t : A.ty) =
+      match t with
+      | A.TyRefine (b, _, e) ->
+        ty b;
+        let rec walk (e : A.expr) =
+          (match e with
+           | A.EVar n -> names := n.A.txt :: !names
+           | A.EField (_, n, _) -> names := n.A.txt :: !names
+           | _ -> ());
+          List.iter walk (RE.children e)
+        in
+        walk e
+      | A.TyCon (_, args) | A.TyTuple args -> List.iter ty args
+      | A.TyArrow (a, b) | A.TyNatOp (_, a, b) -> ty a; ty b
+      | A.TyRecord fs -> List.iter (fun (_, t) -> ty t) fs
+      | A.TyLinear (_, t) -> ty t
+      | A.TyVar _ | A.TyNat _ | A.TyChan _ -> ()
+    in
+    List.iter (Option.iter ty) u.RT.u_param_tys;
+    Option.iter ty u.RT.u_ret;
+    List.sort_uniq compare !names
+  in
+  let by_bare : (string, int) Hashtbl.t = Hashtbl.create 256 in
+  Array.iter (fun (u : RT.unit_) -> Hashtbl.add by_bare (RT.bare u.RT.u_name) u.RT.u_id) g.RT.units;
+  let resolve (u : RT.unit_) (name : string) =
+    let all = Hashtbl.find_all by_bare (RT.bare name) in
+    match List.filter (fun v -> g.RT.units.(v).RT.u_span.A.file = u.RT.u_span.A.file) all with
+    | [] -> all
+    | same -> same
+  in
+  let refs = lazy (Array.map refs_of g.RT.units) in
+  let pred_edges =
+    lazy
+      (let r = Lazy.force refs in
+       List.concat_map
+         (fun (u : RT.unit_) -> List.concat_map (fun n -> List.map (fun v -> (u.RT.u_id, v)) (resolve u n)) r.(u.RT.u_id))
+         (Array.to_list g.RT.units))
+  in
+  (* The units whose whole body is a contract: those a predicate names, and
+     everything their bodies reach. *)
+  let in_predicate =
+    lazy
+      (let n = Array.length g.RT.units in
+       let mark = Array.make n false in
+       let rec go v =
+         if not mark.(v) then begin
+           mark.(v) <- true;
+           List.iter (fun (e : RT.edge) -> go e.RT.e_dst) g.RT.out.(v)
+         end
+       in
+       List.iter (fun (_, v) -> go v) (Lazy.force pred_edges);
+       mark)
+  in
+  let contract = lazy (
+    let whole = Lazy.force in_predicate in
+    Array.map
+      (fun (u : RT.unit_) ->
+        let status =
+          match sym_of.(u.RT.u_id) with
+          | Some sym when Hashtbl.mem RS.logic_hash sym ->
+            "reflected" ^ String.concat "" (List.map (fun g -> "\000guard " ^ g) (Option.value ~default:[] (Hashtbl.find_opt guards_of u.RT.u_span)))
+          | _ -> "-"
+        in
+        let text = if whole.(u.RT.u_id) then "body " ^ Option.value ~default:"" (source_of u) else head_of u in
+        March_cas.Blake3.hash_string
+          (String.concat "\000"
+             ([ "march-contract-v2"; text; status ]
+             @ List.map (fun a -> "attr " ^ a) u.RT.u_attrs)))
+      g.RT.units)
+  in
+  RS.contract_defs :=
+    lazy (let c = Lazy.force contract in
+          Array.map (fun (u : RT.unit_) -> (u.RT.u_span.A.file, u.RT.u_name, c.(u.RT.u_id))) g.RT.units);
+  RS.contract_edges :=
+    lazy
+      (List.sort_uniq compare
+         (List.map (fun (e : RT.edge) -> (e.RT.e_src, e.RT.e_dst)) g.RT.edges @ Lazy.force pred_edges));
   RS.unfold_hook := unfold;
   March_refine.Refine.well_formed := declared_logic_symbols;
   RS.active := true;
