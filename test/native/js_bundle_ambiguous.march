@@ -1,0 +1,15 @@
+-- Two different files match an extern module's relative path ("./amb.mjs"
+-- under js_amb_mods/a and js_amb_mods/b): bundling stops with an error naming
+-- both rather than silently copying whichever it found first.
+mod JsBundleAmbiguous do
+  needs IO.Console
+  needs IO.Foreign
+
+  extern "./amb.mjs" : Cap(IO.Foreign) do
+    fn which() : String
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+    println(which())
+  end
+end

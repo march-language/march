@@ -14938,3 +14938,17 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_let_shadow_target.out (run node js_let_shadow_target.mjs))))
 
 (rule (alias runtest) (action (diff native/js_let_shadow_target.expected js_let_shadow_target.out)))
+
+; js_bundle_ambiguous — two different files at an extern module's relative
+; path stop the bundling with an error instead of copying either.
+(rule
+ (targets js_bundle_ambiguous.out)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (glob_files ../runtime/*.mjs)
+       (file native/js_bundle_ambiguous.march)
+       (file native/js_amb_mods/a/amb.mjs) (file native/js_amb_mods/b/amb.mjs))
+ (action
+  (with-stdout-to js_bundle_ambiguous.out
+   (system "rm -rf amb_out && mkdir amb_out && { %{exe:../bin/main.exe} --target js -o amb_out/x.mjs native/js_bundle_ambiguous.march 2>&1 >/dev/null; true; } | grep '^march: error' | head -1"))))
+
+(rule (alias runtest) (action (diff native/js_bundle_ambiguous.expected js_bundle_ambiguous.out)))

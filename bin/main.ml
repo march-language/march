@@ -46,21 +46,19 @@ let normalize_rel_path (p : string) : string option =
   in
   Option.map (String.concat "/") (go [] (String.split_on_char '/' p))
 
-let rec find_under ~(depth : int) (dir : string) (rel : string) : string option =
+(* Every directory under [dir] (to [depth]) holding [rel], in sorted order. *)
+let rec find_all_under ~(depth : int) (dir : string) (rel : string) : string list =
   let here = Filename.concat dir rel in
-  if Sys.file_exists here then Some here
-  else if depth = 0 then None
+  let found = if Sys.file_exists here then [ here ] else [] in
+  if depth = 0 then found
   else
     let entries = try Array.to_list (Sys.readdir dir) with Sys_error _ -> [] in
-    List.fold_left (fun acc d ->
-      match acc with
-      | Some _ -> acc
-      | None ->
+    found @ List.concat_map (fun d ->
         let path = Filename.concat dir d in
         if d <> "" && d.[0] <> '.' && d <> "_build" && d <> "node_modules"
            && (try Sys.is_directory path with Sys_error _ -> false)
-        then find_under ~depth:(depth - 1) path rel else None)
-      None (List.sort String.compare entries)
+        then find_all_under ~depth:(depth - 1) path rel else [])
+      (List.sort String.compare entries)
 
 let read_whole_file (path : string) : string =
   let ic = open_in_bin path in
@@ -94,9 +92,21 @@ let bundle_js_modules ~(src_file : string) ~(out_bin : string) : unit =
         | Some _, _ -> runtime
         | None, Some p when Sys.file_exists p -> Some p
         | None, _ ->
-          List.fold_left (fun acc root ->
-            match acc with Some _ -> acc | None -> find_under ~depth:6 root rel)
-            None roots
+          (* Two different files at that relative path would make the pick
+             arbitrary: refuse rather than bundle the wrong module. *)
+          let all = List.concat_map (fun root -> find_all_under ~depth:6 root rel) roots in
+          let distinct =
+            List.fold_left (fun acc f ->
+              if List.exists (fun g -> read_whole_file g = read_whole_file f) acc
+              then acc else acc @ [ f ]) [] all in
+          (match distinct with
+           | [] -> None
+           | [ f ] -> Some f
+           | fs ->
+             Printf.eprintf "march: error: the JS output imports ./%s, which matches more than one file:\n%s\n\
+                             Give the extern module a path unique under the entry's directory and MARCH_LIB_PATH.\n"
+               rel (String.concat "\n" (List.map (fun f -> "  " ^ f) fs));
+             exit 1)
       in
       match src with
       | None ->
