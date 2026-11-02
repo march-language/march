@@ -14923,3 +14923,18 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (system "node js_no_iife.mjs && echo \"iife $(awk '/^function shape\\(/{f=1} f&&/^}/{f=0} f' js_no_iife.mjs | grep -c '(() =>')\""))))
 
 (rule (alias runtest) (action (diff native/js_no_iife.expected js_no_iife.out)))
+
+; js_let_shadow_target — a let bound to a match whose arms bind the same name keeps its own value (statement-mode emission).
+(rule
+ (targets js_let_shadow_target.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_let_shadow_target.march) march_runtime.mjs )
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime 
+              -o js_let_shadow_target.mjs native/js_let_shadow_target.march)))
+
+(rule
+ (targets js_let_shadow_target.out)
+ (deps js_let_shadow_target.mjs march_runtime.mjs )
+ (action (with-stdout-to js_let_shadow_target.out (run node js_let_shadow_target.mjs))))
+
+(rule (alias runtest) (action (diff native/js_let_shadow_target.expected js_let_shadow_target.out)))

@@ -330,6 +330,8 @@ native_js_int_check: coverage audit (user + stdlib): 198 enforced, 0 inert (warn
 native_js_int_check: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_int_check_lit: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_int_check_lit: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_let_shadow_target: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
+native_js_let_shadow_target: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_let_shadowing: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced
 native_js_let_shadowing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_local_shadows_fn: coverage audit (user + stdlib): 198 enforced, 0 inert (warned), 0 unenforced

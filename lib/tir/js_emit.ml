@@ -65,6 +65,10 @@ type ctx = {
   (* monotonic counter minting the $sN suffix for shadowing rebindings *)
   mutable tco : tco option;
   (* tail-call loop target of the function being emitted (see [tco]) *)
+  reserved : (string, unit) Hashtbl.t;
+  (* JS names of variables being assigned by [emit_assign] right now: a
+     binding minted inside (an arm's `x`, an inner `let x`) must not take
+     one, or it would capture the assignment meant for the outer variable *)
   mutable int_check : bool;
   (* --js-int-check: integer + - * results are range-checked (see march_ck_int) *)
   mutable src_file : string;
@@ -90,6 +94,7 @@ let create_ctx ?(fn_lines=[]) () = {
   name_env     = Hashtbl.create 16;
   shadow_ctr   = 0;
   tco          = None;
+  reserved     = Hashtbl.create 8;
   int_check    = false;
   src_file     = "";
   cur_loc      = "";
@@ -202,10 +207,19 @@ let js_local ctx name =
     the outer binding, and the fresh inner id never collides with it (no
     temporal-dead-zone read of a same-named block-hoisted const). *)
 let fresh_local_name ctx name =
-  if Hashtbl.mem ctx.name_env name then begin
+  if Hashtbl.mem ctx.name_env name || Hashtbl.mem ctx.reserved (mangle name) then begin
     ctx.shadow_ctr <- ctx.shadow_ctr + 1;
     mangle name ^ "$s" ^ string_of_int ctx.shadow_ctr
   end else mangle name
+
+(* Run [f] with [js] reserved (see [ctx.reserved]); nested reservations of
+   the same name restore correctly. *)
+let with_reserved ctx js f =
+  let had = Hashtbl.mem ctx.reserved js in
+  Hashtbl.replace ctx.reserved js ();
+  let r = f () in
+  if not had then Hashtbl.remove ctx.reserved js;
+  r
 
 (** Install [js] as the current emission of source [name]; returns the previous
     mapping so [unbind_local] can restore it when the binding leaves scope. *)
@@ -969,7 +983,7 @@ and emit_stmts_impl ctx expr =
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
     emitl ctx ("let " ^ js ^ ";");
-    emit_assign ctx js e1;
+    with_reserved ctx js (fun () -> emit_assign ctx js e1);
     let prev = install_local ctx name js in
     emit_stmts ctx rest;
     unbind_local ctx name prev;
@@ -986,7 +1000,7 @@ and emit_stmts_impl ctx expr =
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
     emitl ctx ("let " ^ js ^ ";");
-    emit_case ctx (Some js) case_expr;
+    with_reserved ctx js (fun () -> emit_case ctx (Some js) case_expr);
     let prev = install_local ctx name js in
     emit_stmts ctx rest;
     unbind_local ctx name prev;
@@ -1232,7 +1246,7 @@ and emit_assign_impl ctx rv expr =
     ctx.indent <- ctx.indent + 1;
     if is_compound e1 then begin
       emitl ctx ("let " ^ js ^ ";");
-      emit_assign ctx js e1
+      with_reserved ctx js (fun () -> emit_assign ctx js e1)
     end else begin
       emit_indent ctx;
       emit ctx ("const " ^ js ^ " = ");
@@ -1281,7 +1295,7 @@ and emit_effect ctx e =
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
     emitl ctx ("let " ^ tmp ^ ";");
-    emit_assign ctx tmp e;
+    with_reserved ctx tmp (fun () -> emit_assign ctx tmp e);
     ctx.indent <- ctx.indent - 1;
     emit_indent ctx; emit ctx "}\n"
   | e ->
