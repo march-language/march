@@ -9,7 +9,7 @@
 # specs/progress/2026-09-21-hcr-spawn-site-state-layout.md
 deploy=$root/_build/default/test/hcr_deploy.exe
 need_built test/hcr_deploy.exe
-mkdir -p "$work/keys" "$work/patch_a" "$work/base_so"
+mkdir -p "$work/keys" "$work/patch_a"
 "$deploy" keygen "$work/keys" || fail "keygen failed"
 pk=$(cat "$work/keys/pk")
 
@@ -21,16 +21,7 @@ cp "$dir/node_a_v2.march" "$work/patch_a/node_a.march"
    -o "$work/patch_a/v2.so" node_a.march) > "$work/patch_a.log" 2>&1 \
   || { cat "$work/patch_a.log" >&2; fail "node_a_v2.march did not build"; }
 [ -f "$work/patch_a/v2.so.hcr_manifest" ] || fail "no manifest for the patch"
-# The running version's schemas and manifest, which `forge deploy hot` keeps
-# from the previous deploy (.march/<name>_hot.so.schemas.json.prev); a plain
-# --compile writes neither, so build version 1 as a patch .so just for them.
-# Without the old schemas the deploy cannot see C's state change and sends
-# no migrate bit at all.
-cp "$dir/node_a.march" "$work/base_so/node_a.march"
-(cd "$work/base_so" && "$MARCH" --compile --compile-so --hot-reload SpawnSite \
-   -o "$work/base_so/v1.so" node_a.march) > "$work/base_so.log" 2>&1 \
-  || { cat "$work/base_so.log" >&2; fail "node_a.march did not build as a .so"; }
-[ -f "$work/base_so/v1.so.schemas.json" ] || fail "no schemas for version 1"
+# No local baseline: the first deploy obtains the running schemas from SCHEMAS.
 
 # A Unix socket path is cut at 104 bytes on macOS.
 socks=$(mktemp -d /tmp/ss.XXXXXX)
@@ -38,8 +29,7 @@ export MARCH_HOT_RELOAD_SOCKET=$socks/a.sock
 start_node a
 wait_line a "node-a: version 1 up"
 sleep 2
-"$deploy" deploy "$socks/a.sock" "$work/keys" "$work/patch_a/v2.so" \
-  "$work/base_so/v1.so.schemas.json" "$work/base_so/v1.so.hcr_manifest" > "$work/deploy_a.log" 2>&1 \
+"$deploy" deploy "$socks/a.sock" "$work/keys" "$work/patch_a/v2.so" > "$work/deploy_a.log" 2>&1 \
   || { cat "$work/deploy_a.log" >&2; fail "the deploy failed"; }
 grep -v "^  " "$work/deploy_a.log" >&2
 wait_exit a

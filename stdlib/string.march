@@ -170,6 +170,59 @@ mod String do
   fn split(s, sep) do string_split(s, sep) end
 
   doc """
+  Fold over the fields `String.split(s, sep)` would return, one at a time, without building
+  the list: `f` is called as `f(acc, field)` for each field in order.
+
+      march> String.fold_split("a,bb,ccc", ",", 0, fn (n, f) -> n + String.byte_size(f))
+      6
+      march> String.fold_split("a,,b", ",", [], fn (acc, f) -> Cons(f, acc))
+      ["b", "", "a"]
+
+  The fields are exactly `split`'s (an empty `s` is one empty field; adjacent separators
+  give empty fields; an empty `sep` gives one field per byte, and none for an empty `s`), but only one is alive at a time, so a
+  large input never holds every field at once. Each field is still a fresh string; to
+  allocate nothing at all, use `fold_split_ranges`.
+
+  Cost: O(n) where n = byte_size(s), plus one string per field.
+  """
+  fn fold_split(s : String, sep : String, acc : b, f : b -> String -> b) : b do
+    fold_split_ranges(s, sep, acc, fn (a, start, len) -> f(a, string_slice(s, start, len)))
+  end
+
+  doc """
+  Fold over the byte ranges of the fields `String.split(s, sep)` would return, allocating
+  nothing: `f` is called as `f(acc, start, len)` for each field, where the field is
+  `String.slice_bytes(s, start, len)`. Slice only the fields you keep.
+
+      march> String.fold_split_ranges("a,bb,ccc", ",", [], fn (acc, st, len) -> Cons((st, len), acc))
+      [(5, 3), (2, 2), (0, 1)]
+      march> String.fold_split_ranges("", ",", 0, fn (n, st, len) -> n + 1)
+      1
+
+  The ranges cover exactly `split`'s fields, in order (an empty `s` is one empty range; an
+  empty `sep` gives one range per byte).
+
+  Cost: O(n) where n = byte_size(s); no allocation of its own.
+  """
+  fn fold_split_ranges(s : String, sep : String, acc : b, f : b -> Int -> Int -> b) : b do
+    let n = string_byte_length(s)
+    if string_byte_length(sep) == 0 do fold_bytes_go(n, 0, acc, f)
+    else fold_ranges_go(s, sep, string_byte_length(sep), n, 0, acc, f) end
+  end
+
+  pfn fold_ranges_go(s : String, sep : String, m : Int, n : Int, start : Int, acc : b,
+                     f : b -> Int -> Int -> b) : b do
+    match string_index_of_from(s, sep, start) do
+      Some(i) -> fold_ranges_go(s, sep, m, n, i + m, f(acc, start, i - start), f)
+      None -> f(acc, start, n - start)
+    end
+  end
+
+  pfn fold_bytes_go(n : Int, i : Int, acc : b, f : b -> Int -> Int -> b) : b do
+    if i >= n do acc else fold_bytes_go(n, i + 1, f(acc, i, 1), f) end
+  end
+
+  doc """
   Split `s` on the **first** occurrence of `sep`.
   Returns `Some((head, tail))` if `sep` is found, or `None` if not found.
 

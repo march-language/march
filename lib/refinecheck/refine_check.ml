@@ -6019,6 +6019,18 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
                   A predicate can call a zero-argument function only when its body folds to \
                   an Int or Bool literal."
                  f why)
+          (* Reflection (§2.4): a reflected function IS predicate
+             vocabulary; one that exists but is not reflected names its
+             first blocker, which is what the user can act on. *)
+          | _ when !Reflect_state.active && Reflect_state.resolve_site span <> None -> ()
+          | _ when !Reflect_state.active && Hashtbl.mem Reflect_state.blocked_by_name f ->
+            let why, at = Hashtbl.find Reflect_state.blocked_by_name f in
+            Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
+              (Printf.sprintf
+                 "`%s` is not reflected, so this refinement is not checked: it %s (line %d).\n\
+                  note: a function is usable in a predicate when it terminates, has no effects, \
+                  cannot fail, and calls only such functions."
+                 f why at.A.start_line)
           | _ ->
             Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
               (Printf.sprintf
@@ -6050,9 +6062,45 @@ let rec warn_predicate_ty ?(abstract_refs : string list = []) (errctx : Err.ctx)
     (t : A.ty) : unit =
   let go = warn_predicate_ty ~abstract_refs errctx in
   match t with
-  | A.TyRefine (base, _binder, pred) ->
+  | A.TyRefine (base, binder, pred) ->
     go base;
-    warn_predicate_expr ~abstract_refs errctx pred
+    warn_predicate_expr ~abstract_refs errctx pred;
+    (* Reflection §3.5: `==` in a predicate is structural (logical) equality,
+       whatever the type's `Eq` says.  At a type with a hand-written `Eq` that
+       differs from what the program's `==` runs, so say so.  No verdict
+       changes. *)
+    let rec head (t : A.ty) =
+      match t with
+      | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> head b
+      | A.TyCon (n, _) -> Some (Refine_term.bare n.A.txt)
+      | _ -> None
+    in
+    let bn = match binder with Some b -> b.A.txt | None -> "_" in
+    let operand_type (e : A.expr) =
+      match e with
+      | A.EVar { A.txt; _ } when txt = bn || txt = "_" -> head base
+      | A.ECon (c, _, _) -> (
+        match sort_of_ctor c.A.txt with
+        | Some adt ->
+          Hashtbl.fold
+            (fun k () acc -> if acc = None && adt_sort_name k = adt then Some k else acc)
+            Reflect_state.hand_eq None
+        | None -> None)
+      | _ -> None
+    in
+    iter_all
+      (function
+        | A.EApp (A.EVar { A.txt = "==" | "!="; _ }, [ x; y ], span) -> (
+          match List.find_map (fun e -> match operand_type e with Some t when Hashtbl.mem Reflect_state.hand_eq t -> Some t | _ -> None) [ x; y ] with
+          | Some t ->
+            Err.warning ~code:Err.Code.predicate_eq_structural errctx ~span
+              (Printf.sprintf
+                 "`==` in a refinement means structural equality; `%s` has a hand-written `Eq`, \
+                  which this predicate does not use."
+                 t)
+          | None -> ())
+        | _ -> ())
+      pred
   | A.TyCon (_, args) ->
     (* A concrete relation that is not well-formed (W2/W4, multi-arg design
        §1.4) is warned here, at its declaration, and is then treated as not
@@ -7748,7 +7796,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
    so `@[decrease(n)]` would look like a metric that found nothing.  These are
    every `fn` attribute some pass reads (the name before a `:` payload). *)
 let known_fn_attributes =
-  [ "assume"; "decreases"; "diverges"; "measure"; "no_alloc"; "no_warn_recursion"; "trusted";
+  [ "assume"; "decreases"; "diverges"; "measure"; "no_alloc"; "no_warn_recursion"; "opaque"; "trusted";
     "trusted_linear"; "vectorize" ]
 
 (* Levenshtein distance, for the did-you-mean. *)
@@ -8571,11 +8619,33 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      Runs regardless of [measure_axioms] — it is about what a measure IS, not
      whether its recursion equations are asserted — and needs [adt_ctors]
      populated, hence its position after [register_adt_names]. *)
+  (* Reflection §5 (D2, option A): `@[measure]` asserts that the function is
+     reflected.  One that fits today's measure fragment (one parameter, an
+     Int or Set result) keeps its quantified axioms: the AXIOM TIER, exactly
+     as before.  Any other — several parameters (F2's shape error, lifted), a
+     Bool result (F5), a datatype result (F6) — is reflected like every other
+     function: the UNFOLDING TIER, never registered as a measure; it must
+     pass R1-R9 (checked after [Refine_reflect.install]). *)
+  let unfold_measures = ref [] in
+  let axiom_tier_ret (fd : A.fn_def) =
+    let rec strip (t : A.ty) = match t with A.TyRefine (b, _, _) | A.TyLinear (_, b) -> strip b | t -> t in
+    match fd.A.fn_ret_ty with
+    | None -> true
+    | Some t -> (
+      match strip t with
+      | A.TyCon ({ A.txt = "Int" | "Set"; _ }, _) -> true
+      | _ -> false)
+  in
+  let several_params (fd : A.fn_def) =
+    match fd.A.fn_clauses with c :: _ -> List.length c.A.fc_params >= 2 | [] -> false
+  in
   let mfns =
     List.filter
       (fun (name, fd) ->
         match measure_shape_error fd with
-        | None -> true
+        | None when axiom_tier_ret fd -> true
+        | None -> unfold_measures := (name, fd) :: !unfold_measures; false
+        | Some _ when several_params fd -> unfold_measures := (name, fd) :: !unfold_measures; false
         | Some msg ->
           Err.error ~code:Err.Code.invalid_measure errctx ~span:fd.A.fn_name.A.span
             (Printf.sprintf "@[measure] `%s` %s" name msg);
@@ -8670,6 +8740,105 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   in
   warn_unknown_attributes errctx m.A.mod_decls;
   diverges_conflicts errctx term m.A.mod_decls all_mfns;
+  (* Reflection, phase 1a (specs/2026-10-29-refinement-reflection-design.md
+     §3): every function that passes R1-R9 and R11 gets a logic symbol and
+     its guarded definition, read by the two-stage discharge.  Automatic
+     (D1); `MARCH_REFLECT=0` turns it off (an A/B switch for the oracles and
+     the timing budget, not a user setting). *)
+  Reflect_state.reset ();
+  Hashtbl.reset Reflect_state.hand_eq;
+  (* Which `negate` a site applies (review C-3).  A literal `-2` is
+     `negate(2)`, and a user `fn negate` in scope captures it, in program
+     code and in a predicate alike; the termination graph resolved every such
+     site.  A site it never saw (an annotation on a `let`, a lambda's type) is
+     the builtin only when no `negate` is defined outside the stdlib nor in
+     the site's own file. *)
+  (let g = (Lazy.force term).Refine_term.graph in
+   let tbl = Hashtbl.create 64 in
+   let builtin = function Refine_term.S_builtin | Refine_term.S_impls _ -> true | _ -> false in
+   List.iter
+     (fun (st : Refine_term.site) -> if st.Refine_term.s_name = "negate" then Hashtbl.replace tbl st.Refine_term.s_span (builtin st.Refine_term.s_target))
+     g.Refine_term.sites;
+   List.iter (fun (sp, t) -> Hashtbl.replace tbl sp (builtin t)) g.Refine_term.pred_sites;
+   let user_negate_files =
+     Array.fold_left
+       (fun acc (u : Refine_term.unit_) ->
+         if Refine_term.bare u.Refine_term.u_name = "negate" then u.Refine_term.u_span.A.file :: acc else acc)
+       [] g.Refine_term.units
+   in
+   let any_user = List.exists (fun f -> not (is_stdlib_source_file f)) user_negate_files in
+   Reflect_state.negate_builtin_at :=
+     fun sp ->
+       match Hashtbl.find_opt tbl sp with
+       | Some b -> b
+       | None -> (not any_user) && not (List.mem sp.A.file user_negate_files));
+  if Sys.getenv_opt "MARCH_REFLECT" <> Some "0" then begin
+    Refine_reflect.install ~user_files:[] ~type_map (Lazy.force term) m.A.mod_decls;
+    List.iter
+      (fun (span, msg) -> Err.error ~code:Err.Code.internal_error errctx ~span msg)
+      !Refine_reflect.install_errors
+  end;
+  (* The first blocker of a function the encoder does not reflect, as
+     (rule number, "R<k>:<text>"). *)
+  let reflect_blocker (fd : A.fn_def) : (int * string) option =
+    if not !Reflect_state.active then None
+    else
+      match Hashtbl.find_opt Refine_reflect.encoder_blocked fd.A.fn_name.A.span with
+      | Some txt ->
+        let k = try Scanf.sscanf txt "R%d:" Fun.id with _ -> 0 in
+        Some (k, txt)
+      | None -> None
+  in
+  let blocker_text (txt : string) =
+    match String.index_opt txt ':' with Some i -> String.sub txt (i + 1) (String.length txt - i - 1) | None -> txt
+  in
+  (* `@[opaque]` (§2.5): with `@[measure]` it contradicts itself
+     ([reflect_conflict]); on a function that would not be reflected anyway it
+     does nothing ([attribute_no_effect]). *)
+  let rec opaque_fns (ds : A.decl list) : A.fn_def list =
+    List.concat_map
+      (function
+        | A.DFn (fd, _) when List.mem "opaque" fd.A.fn_attrs -> [ fd ]
+        | A.DMod (_, _, inner, _) -> opaque_fns inner
+        | _ -> [])
+      ds
+  in
+  List.iter
+    (fun (fd : A.fn_def) ->
+      if List.mem "measure" fd.A.fn_attrs then
+        Err.error ~code:Err.Code.reflect_conflict errctx ~span:fd.A.fn_name.A.span
+          (Printf.sprintf
+             "`%s` is marked both `@[opaque]` and `@[measure]`: `@[measure]` asks for the body to \
+              be reflected into the logic and `@[opaque]` keeps it out. Remove one."
+             fd.A.fn_name.A.txt)
+      else
+        match reflect_blocker fd with
+        | Some (k, txt) when k < 9 ->
+          Err.warning ~code:Err.Code.attribute_no_effect errctx ~span:fd.A.fn_name.A.span
+            (Printf.sprintf
+               "`@[opaque]` on `%s` has no effect: `%s` would not be reflected anyway (it %s)."
+               fd.A.fn_name.A.txt fd.A.fn_name.A.txt (blocker_text txt))
+        | _ -> ())
+    (opaque_fns m.A.mod_decls);
+  (* An unfolding-tier measure must be reflected (§5.2, option A).  A sort
+     the encoding cannot model (R8: an undeclared or unencodable type) is
+     not an error, as it never was: the measure is simply not reflected. *)
+  List.iter
+    (fun (name, (fd : A.fn_def)) ->
+      if not (List.mem "opaque" fd.A.fn_attrs) then
+        match reflect_blocker fd with
+        | Some (8, _) -> ()
+        | Some (k, txt) ->
+          let why =
+            if k = 2 && Refine_term.uncertified (Lazy.force term) fd.A.fn_name.A.span then
+              "is not structurally recursive (every recursive call must be on a component of the \
+               matched parameter)"
+            else "is not reflected: it " ^ blocker_text txt
+          in
+          Err.error ~code:Err.Code.invalid_measure errctx ~span:fd.A.fn_name.A.span
+            (Printf.sprintf "@[measure] `%s` %s" name why)
+        | None -> ())
+    (List.rev !unfold_measures);
   if measure_axioms then begin
     (* Measure symbols are not module-qualified, so two `@[measure]`s with one
        name (a user's and a stdlib module's) would each emit a `declare-fun`
@@ -8714,6 +8883,20 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
              && Refine_term.uncertified (Lazy.force term) fd.A.fn_name.A.span
           then msgs @ [ not_structural ]
           else msgs
+        in
+        (* The gate is R1-R9 now (§5.2): it follows callees.  The syntactic
+           rules above keep their wording; a function they pass that the
+           reflection analysis still blocks names the first blocker. *)
+        let msgs =
+          if msgs <> [] || List.mem "diverges" fd.A.fn_attrs || List.mem "opaque" fd.A.fn_attrs then msgs
+          else
+            match reflect_blocker fd with
+            | Some (2, _) when Refine_term.uncertified (Lazy.force term) fd.A.fn_name.A.span -> [ not_structural ]
+            (* A sort outside the encoding (an undeclared type) falls back to
+               symbolic reasoning, as before: not an error. *)
+            | Some (8, _) -> msgs
+            | Some (_, txt) -> [ "is not reflected: it " ^ blocker_text txt ]
+            | None -> msgs
         in
         List.iter
           (fun msg ->

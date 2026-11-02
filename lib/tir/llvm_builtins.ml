@@ -1310,6 +1310,10 @@ let runtime_only_declares : (string * string) list = [
   ("march_panic", "declare void @march_panic(ptr %s)");
   ("march_dispatch_enter", "declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)");
   ("march_dispatch_enter_gen", "declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)");
+  ("march_dispatch_set_initial_on_stop", "declare void @march_dispatch_set_initial_on_stop(i32, ptr)");
+  ("march_dispatch_leave_unit", "declare void @march_dispatch_leave_unit(i32, i32)");
+  ("march_dispatch_reserve_main", "declare void @march_dispatch_reserve_main()");
+  ("march_dispatch_enter_work_compatible", "declare ptr @march_dispatch_enter_work_compatible(i32 %name_id, ptr %expected_sig, ptr %out_version)");
   ("march_dispatch_enter_unit", "declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)");
   ("march_dispatch_leave", "declare void @march_dispatch_leave(i32 %name_id, i32 %version)");
   ("march_dispatch_publish", "declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)");
@@ -1330,6 +1334,12 @@ let runtime_only_declares : (string * string) list = [
   ("march_decrc_local_freed", "declare i64  @march_decrc_local_freed(ptr %p)");
   ("march_clo_param_own", "declare void @march_clo_param_own(ptr %p)");
   ("march_clo_release", "declare void @march_clo_release(ptr %p)");
+  ("march_clo_capture_epoch", "declare void @march_clo_capture_epoch(ptr %p)");
+  ("march_clo_forget_epoch", "declare void @march_clo_forget_epoch(ptr %p)");
+  ("march_clo_frame_enter", "declare void @march_clo_frame_enter(ptr %p)");
+  ("march_frame_leave", "declare void @march_frame_leave()");
+  ("march_frame_own_closure", "declare void @march_frame_own_closure(ptr)");
+  ("march_frame_disown_closure", "declare void @march_frame_disown_closure(ptr)");
   ("march_decrc_erased", "declare void @march_decrc_erased(ptr %p)");
   ("march_decrc_erased_local", "declare void @march_decrc_erased_local(ptr %p)");
   ("march_clo_float_arg", "declare ptr  @march_clo_float_arg(ptr %p)");
@@ -1439,6 +1449,10 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_dispatch_enter";
   PDeclare "march_dispatch_enter_gen";
   PDeclare "march_dispatch_enter_unit";
+  PDeclare "march_dispatch_enter_work_compatible";
+  PDeclare "march_dispatch_reserve_main";
+  PDeclare "march_dispatch_leave_unit";
+  PDeclare "march_dispatch_set_initial_on_stop";
   PDeclare "march_dispatch_leave";
   PDeclare "march_dispatch_publish";
   PDeclare "march_dispatch_publish_epoch";
@@ -1458,6 +1472,12 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_decrc_local_freed";
   PDeclare "march_clo_param_own";
   PDeclare "march_clo_release";
+  PDeclare "march_clo_capture_epoch";
+  PDeclare "march_clo_forget_epoch";
+  PDeclare "march_clo_frame_enter";
+  PDeclare "march_frame_leave";
+  PDeclare "march_frame_own_closure";
+  PDeclare "march_frame_disown_closure";
   PDeclare "march_decrc_erased";
   PDeclare "march_decrc_erased_local";
   PDeclare "march_clo_float_arg";

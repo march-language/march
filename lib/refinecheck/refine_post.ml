@@ -542,7 +542,7 @@ let rec pred_conjuncts (e : A.expr) : A.expr list =
   | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> pred_conjuncts a @ pred_conjuncts b
   | _ -> [ e ]
 
-let check_post ~root errctx ~span ?(record_sort : string option = None)
+let check_post_stage ~root errctx ~span ?(record_sort : string option = None)
     ?(scalar_env : (string * Smt.sort) list = [])
     ?(fn_name : string option = None) ?(emit = true) ?(record = true)
     ?(fn_params : (string * A.ty option) list = [])
@@ -1358,6 +1358,25 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
    nothing outside `cap verified`. *)
 
 (* The SMT sort of a DECLARED March type; None when the checker has no model. *)
+(* Reflection's two-stage discharge around a postcondition (§4.4); see
+   [Refine_call.check_call].  A run that records nothing (the propagation
+   pre-pass, [~record:false]) is judged by its answer instead. *)
+let check_post ~root errctx ~span ?(record_sort : string option = None)
+    ?(scalar_env : (string * Smt.sort) list = [])
+    ?(fn_name : string option = None) ?(emit = true) ?(record = true)
+    ?(fn_params : (string * A.ty option) list = [])
+    ?(string_ret = false)
+    ?(list_ret = false)
+    ?(demand : (A.expr -> [ `Na | `Proved | `Unproved of Obligation.reason ]) option)
+    ?(shown : A.expr option)
+    ?(ret_scalar : Smt.sort option)
+    ?(let_calls : (string * A.expr) list = [])
+    (sc : scope) (binder : string) (ret_pred : A.expr)
+    ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
+  Reflect_stage.two_stage ~ok:Fun.id ~errctx (fun () ->
+      check_post_stage ~root errctx ~span ~record_sort ~scalar_env ~fn_name ~emit ~record ~fn_params ~string_ret
+        ~list_ret ?demand ?shown ?ret_scalar ~let_calls sc binder ret_pred (path, tail_e))
+
 let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
   match t with
   | A.TyRefine (base, _, _) -> smt_sort_of_ty base

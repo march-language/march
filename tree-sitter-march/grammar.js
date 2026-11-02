@@ -107,9 +107,10 @@ module.exports = grammar({
       $.setup_all_decl,
     ),
 
-    // @[name], @[name(arg)], @name(arg), @invariant(expr)
+    // @[name], @[name(arg)], @name(arg), @invariant(expr), @[opaque]
+    // (`opaque` is a keyword, so it is spelled out beside the identifier).
     attribute: $ => seq('@', choice(
-      seq('[', $.identifier, optional(seq('(', commaSep($._expr), ')')), ']'),
+      seq('[', choice($.identifier, 'opaque'), optional(seq('(', commaSep($._expr), ')')), ']'),
       seq($.identifier, '(', commaSep($._expr), ')'),
     )),
 

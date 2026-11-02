@@ -80,16 +80,18 @@ REPORT="$DIR/diagnostics.txt"
 
 [ -x "$EXE" ] || { echo "FATAL: $EXE not built. Run: dune build --root . bin/main.exe"; exit 2; }
 
-# --check is not the compile path, but --emit-core-ast shares plumbing with it;
-# clearing costs nothing and rules the class out.  Do NOT clear .march/cas/vc —
-# that is the refinement oracle's concern and clearing it here only slows the
-# run.
-rm -rf "$ROOT/.march/cas/artifacts-v2"
+# Both caches under <cwd>/.march/cas matter here: artifacts-v2 (the compile
+# path shares plumbing with --emit-core-ast) and vc, the refinement VC cache.
+# A cached VC replays a STORED z3 counterexample, so a warm vc changes the
+# "(e.g. ... h = 4)" text of a refinement_violated diagnostic (measured
+# 2026-10-30 on reject/t351: cold h = 4, warm h = 3), and with one shared cache
+# the parallel workers would warm each other in scheduling order.  So every
+# fixture runs from its own fresh cwd under <dir>/cwd/, both caches cold.
 
 mkdir -p "$DIR/json"
 rm -f "$DIR"/json/*.json
-rm -rf "$DIR/home"
-mkdir -p "$DIR/home/.cache"      # NOT just $DIR/home — see the note above
+rm -rf "$DIR/home" "$DIR/cwd"
+mkdir -p "$DIR/home/.cache" "$DIR/cwd"      # NOT just $DIR/home — see the note above
 export HOME="$DIR/home"
 : > "$DIR/sha.tmp"
 : > "$DIR/diag.tmp"
@@ -100,7 +102,18 @@ cd "$ROOT" || exit 2
 # cache before the parallel sweep: several hundred processes racing to write
 # that Marshal blob is not a race worth taking, and the warm cache is also what
 # makes the parallel sweep fast.
-"$EXE" --check "$ROOT/specs/lang/types/accept/t01_literals.march" > /dev/null 2>&1 || true
+fresh_cwd() {
+  rm -rf "$DIR/cwd/$1"; mkdir -p "$DIR/cwd/$1"
+  for t in specs test stdlib; do ln -s "$ROOT/$t" "$DIR/cwd/$1/$t"; done
+}
+export -f fresh_cwd
+
+# Same cwd shape and relative stdlib as the workers, or it warms a different
+# cache key.  MARCH_STDLIB=stdlib: the corpus includes stdlib/prelude.march,
+# and only when the fixture path and the loaded prelude are the same string
+# does the checker not see two preludes (11 false overlapping_impl errors).
+fresh_cwd _warmup
+(cd "$DIR/cwd/_warmup" && MARCH_STDLIB=stdlib "$EXE" --check specs/lang/types/accept/t01_literals.march) > /dev/null 2>&1 || true
 
 # One fixture per worker.  Output is per-fixture and tagged, and both manifests
 # are SORTED below, so interleaving across workers cannot move a byte — the
@@ -108,7 +121,6 @@ cd "$ROOT" || exit 2
 export EXE ROOT DIR
 sweep_one() {
   f="$1"
-  rel="${f#$ROOT/}"
   # Namespace by parent dir: basenames collide across the four corpora.
   tag="$(basename "$(dirname "$f")")_$(basename "$f" .march)"
   # Normalise: strip the repo root, then collapse any directory prefix on a
@@ -117,14 +129,22 @@ sweep_one() {
   # spelling appears is not a property of the checker.
   # Tier 1: the checker's whole result, hashed.  The JSON is kept on disk so a
   # mismatch can be diffed rather than merely reported.
-  (cd "$ROOT" && "$EXE" --emit-core-ast "$rel") 2>&1 \
+  # Fresh cwd per fixture (cold .march/cas), but the compiler must still be
+  # handed the SAME relative path as from the repo root: rendered headers pad
+  # with dashes to the path's length, and derive-generated spans hash the path,
+  # so an absolute one makes the output depend on where the tree lives (a base
+  # export vs this worktree) even after the prefix is stripped.  Symlinking the
+  # corpus roots into the cwd gives the relative path without the shared cache.
+  fresh_cwd "$tag"
+  (cd "$DIR/cwd/$tag" && MARCH_STDLIB=stdlib "$EXE" --emit-core-ast "${f#$ROOT/}") 2>&1 \
     | sed "s|$ROOT/||g" | sed -E 's#[A-Za-z0-9_./-]*stdlib/#stdlib/#g' \
     > "$DIR/json/$tag.json"
   printf '%s  %s\n' "$(shasum -a 256 < "$DIR/json/$tag.json" | cut -d' ' -f1)" "$tag" \
     >> "$DIR/sha.parts/$tag"
   # Tier 2: the rendered diagnostic text, tagged so a fixture that stops
   # emitting shows up as its lines disappearing rather than as a silent shift.
-  (cd "$ROOT" && "$EXE" --check "$rel") 2>&1 \
+  fresh_cwd "$tag"
+  (cd "$DIR/cwd/$tag" && MARCH_STDLIB=stdlib "$EXE" --check "${f#$ROOT/}") 2>&1 \
     | sed "s|$ROOT/||g" | sed -E 's#[A-Za-z0-9_./-]*stdlib/#stdlib/#g' \
     | sed "s|^|$tag: |" >> "$DIR/diag.parts/$tag"
 }
@@ -137,7 +157,13 @@ ls "$ROOT"/specs/lang/types/accept/*.march \
    "$ROOT"/test/native/*.march \
    "$ROOT"/stdlib/*.march 2>/dev/null > "$DIR/fixtures.txt"
 n=$(wc -l < "$DIR/fixtures.txt" | tr -d ' ')
-xargs -P 8 -n 1 -I{} bash -c 'sweep_one "$@"' _ {} < "$DIR/fixtures.txt"
+# NOT `xargs -I{}`: macOS xargs refuses a -I line over 255 bytes ("command
+# line cannot be assembled, too long") and stops, leaving a partial corpus
+# (a long <dir> is enough to trigger it).  With -n 1 the path is appended.
+tr '\n' '\0' < "$DIR/fixtures.txt" | xargs -0 -P 8 -n 1 bash -c 'sweep_one "$1"' _ \
+  || { echo "FATAL: xargs failed; the sweep is incomplete"; exit 2; }
+got=$(ls "$DIR/diag.parts" | wc -l | tr -d ' ')
+[ "$got" -eq "$n" ] || { echo "FATAL: $got of $n fixtures produced a result"; exit 2; }
 
 cat "$DIR/sha.parts"/*  > "$DIR/sha.tmp"  2>/dev/null
 cat "$DIR/diag.parts"/* > "$DIR/diag.tmp" 2>/dev/null

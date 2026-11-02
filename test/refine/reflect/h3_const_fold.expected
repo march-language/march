@@ -1,6 +1,6 @@
 proved	user	h3_const_fold.march:10:12	precondition	idx	_ >= 0 && _ < two_x()
 violated	user	h3_const_fold.march:11:12	precondition	idx	_ >= 0 && _ < two_x()
-skip	user	h3_const_fold.march:12:12	unreflectable-predicate	precondition	idx2	_ < inc(3)
+proved	user	h3_const_fold.march:12:12	precondition	idx2	_ < inc(3)	uses: inc
 reflect	h3_const_fold.march:2:5	size_x	reflected	unfold
 reflect	h3_const_fold.march:3:5	two_x	reflected	unfold
 reflect	h3_const_fold.march:4:5	inc	reflected	unfold

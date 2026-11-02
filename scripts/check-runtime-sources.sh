@@ -17,6 +17,7 @@
 #      `march --compile` either globs ../runtime/*.c or names every core, http
 #      and hcr file (those are what the driver links, so they are what the
 #      rule's output depends on).
+#   5. runtime/march_ffi.h never names the string struct or its fields.
 #
 # Usage: scripts/check-runtime-sources.sh     # exit 1 on any problem
 set -euo pipefail
@@ -124,6 +125,19 @@ PY
 )
 done
 [[ $c4 -eq 0 ]] && echo "  ok — $nrules rule blocks consistent" || echo "  ($nrules rule blocks checked)"
+
+# Check 5: the public FFI header keeps String opaque. The string layout is not part of
+# the 1.0 promise (specs/lang/compatibility.md, decided 2026-10-31): C code reads a
+# String's bytes only through march_slice and makes one with march_str_new, so the
+# representation (for example inline short strings) can change within 1.x. A header
+# that named the struct or its fields would let user C depend on the layout.
+echo "== Check 5: runtime/march_ffi.h keeps String opaque =="
+c5=0
+if grep -nE 'march_string|struct[[:space:]]+march_str|->(len|data)\b' runtime/march_ffi.h; then
+  problem "runtime/march_ffi.h exposes the string layout (above): user C must go through march_slice / march_str_new"
+  c5=1
+fi
+[[ $c5 -eq 0 ]] && echo "  ok — no string struct or field in the public header"
 
 echo
 if [[ $fail -ne 0 ]]; then echo "check-runtime-sources FAILED"; exit 1; fi

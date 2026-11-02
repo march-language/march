@@ -46,6 +46,10 @@ enum { MARCH_NATIVE = 0, MARCH_TRAMPOLINE = 1 };
  * any prior table first). */
 void march_dispatch_init(uint32_t n_slots);
 void march_dispatch_shutdown(void);
+/* Generated startup reserves the baseline entry before persisted replay;
+ * spawning main transfers this reservation to the proc's lifetime pin. */
+void march_dispatch_reserve_main(void);
+void march_dispatch_release_main_reservation(void);
 
 /* Publish [fn_ptr] as the new current version of slot [name_id].
  * [sig_hash] is the ABI signature hash (64 hex chars); stored per-version for
@@ -71,11 +75,22 @@ void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version);
 void *march_dispatch_enter_version(uint32_t name_id, uint32_t version,
                                    uint32_t *out_version);
 
+/* Runtime migration callback: explicit version, with its routing epoch and
+ * direct ref owned by the unwindable frame stack. */
+void *march_dispatch_enter_version_frame(uint32_t name_id, uint32_t version,
+                                         uint32_t *out_version);
+
 /* Unpin a version previously returned by enter. */
 void march_dispatch_leave(uint32_t name_id, uint32_t version);
+/* Pair enter_unit/enter_version_frame with this, never the raw leave. */
+void march_dispatch_leave_unit(uint32_t name_id, uint32_t version);
 
 /* Introspection (tests / tooling / reload server). */
 uint32_t    march_dispatch_current(uint32_t name_id);
+void march_dispatch_set_on_stop(uint32_t name_id, uint32_t version, void (*fn)(void *));
+void march_dispatch_set_initial_on_stop(uint32_t name_id, void (*fn)(void *));
+void (*march_dispatch_on_stop(uint32_t name_id, uint32_t version))(void *);
+int march_dispatch_has_on_stop(uint32_t name_id);
 uint64_t    march_dispatch_refs(uint32_t name_id, uint32_t version);
 const char *march_dispatch_impl_hash(uint32_t name_id, uint32_t version);
 const char *march_dispatch_sig_hash(uint32_t name_id, uint32_t version);
@@ -153,10 +168,9 @@ uint32_t march_dispatch_epoch(uint32_t name_id, uint32_t version);
  * Every unit of work (a proc: actor, task, session party) carries a code
  * epoch, march_proc.code_epoch.  A boundary call resolves against it:
  * march_dispatch_enter_unit picks the newest live version whose epoch is at or
- * before the running proc's epoch.  A proc whose epoch is 0 is UNPINNED and
- * follows the slot's current version; the compiled `main` green thread is the
- * one such unit (it runs for the process lifetime and has no marker, so a
- * pinned main would keep its epoch alive for ever and block retirement).
+ * before the running frame's routing epoch, inherited from its caller or
+ * proc. The compiled main pins its entry epoch too: an indefinitely running
+ * old frame can intentionally block retirement, never cross to a newer ABI.
  *
  * Epoch numbering.  g_current_epoch starts at MARCH_EPOCH_BASE (1): every proc
  * spawned before the first deploy is pinned to it, and baseline versions carry
@@ -166,7 +180,7 @@ uint32_t march_dispatch_epoch(uint32_t name_id, uint32_t version);
  *
  * Pins (D32).  A small table of MARCH_EPOCH_PIN_SLOTS entries counts the units
  * pinned to each epoch, separately from a version's per-call `refs`.  Every
- * pin has a live holder: a proc (taken at spawn, moved when an actor advances,
+ * pin has a live holder: a frame, closure, proc (taken at spawn, moved when an actor advances,
  * dropped at the reap), a queued marker (moved to the actor that consumes it),
  * or the "current" role itself (the current epoch always holds one pin, so a
  * spawn that reads g_current_epoch can always pin it).  An entry whose count is
@@ -185,6 +199,27 @@ uint32_t march_dispatch_epoch(uint32_t name_id, uint32_t version);
 /* Pin the ring version the running proc's epoch selects (see above).  The
  * base binary and every .so call this at a boundary call. */
 void    *march_dispatch_enter_unit(uint32_t name_id, uint32_t *out_version);
+/* Generated service adapters may enter their request's epoch only when the
+ * complete ABI (including captured nominal layouts) matches. NULL leaves the
+ * frame stack unchanged. Never falls through to global latest. */
+void *march_dispatch_enter_work_compatible(uint32_t name_id,
+                                          const char *expected_sig_hash,
+                                          uint32_t *out_version);
+
+/* Frame context. An explicit epoch must already have a live holder. Zero
+ * inherits the enclosing frame/proc, or pins current on a foreign thread.
+ * A watermark survives longjmp; unwind releases nested dispatch refs too. */
+void march_frame_enter(uint32_t epoch);
+void march_frame_leave(void);
+/* Apply wrappers transfer their callee-owned environment reference here
+ * until the compiler emits its normal release. Unwind releases it once. */
+void march_frame_own_closure(void *closure);
+void march_frame_disown_closure(void *closure);
+void *march_frame_mark(void);
+void march_frame_unwind(void *mark);
+void march_frame_clear(void **head);
+uint32_t march_frame_epoch(void);
+void **march_sched_frame_slot(void);
 
 uint32_t march_epoch_current(void);
 /* The runtime epoch for an activation the client tagged [requested]:

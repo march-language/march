@@ -1,5 +1,5 @@
-skip	user	c2_bool_measure.march:13:12	float-sort-gate	precondition	need	all_pos(_)
-skip	user	c2_bool_measure.march:14:12	float-sort-gate	precondition	need	all_pos(_)
+skip	user	c2_bool_measure.march:13:12	reflect-fuel	precondition	need	all_pos(_)
+skip	user	c2_bool_measure.march:14:12	reflect-fuel	precondition	need	all_pos(_)
 reflect	c2_bool_measure.march:3:5	all_pos	reflected	unfold
-reflect	c2_bool_measure.march:10:5	need	reflected	unfold (guard: all_pos(xs))
+reflect	c2_bool_measure.march:10:5	need	no	R8:the refinement of xs does not translate (all_pos is not predicate vocabulary) (c2_bool_measure.march:10:5)
 reflect	c2_bool_measure.march:12:5	main	no	R1:is `main` (c2_bool_measure.march:12:5)

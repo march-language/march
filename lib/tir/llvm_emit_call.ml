@@ -331,6 +331,16 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
              ) (List.combine param_llvm_tys arg_pairs)
            | _ -> arg_strs)
     in
+    if ctx.owned_closure <> None then begin
+      let modes = Clo_flags.borrowed_params resolved_name in
+      List.iteri (fun i (ty, value) ->
+        let borrowed = match modes with
+          | Some modes -> Option.value ~default:false (List.nth_opt modes i)
+          | None -> Borrow.is_borrowed Borrow.empty resolved_name i
+        in
+        if ty = "ptr" && not borrowed then Llvm_ctx.disown_closure_value ctx value
+      ) arg_pairs
+    end;
     let args_str = String.concat ", " arg_strs in
     let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with
       | Some c_name -> c_name
@@ -396,7 +406,8 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
                      ~callee_module:(module_of_name resolved_name)
                    (* an entry-file top-level fn: bare-named, so its module
                       says nothing (Hot_reload.is_entry_file_slot) *)
-                   || Hot_reload.is_entry_file_slot cfg resolved_name)
+                   || Hot_reload.is_entry_file_slot cfg resolved_name
+                   || Hot_reload.is_work_entry resolved_name)
                (* A self-call stays direct: a running invocation finishes on
                   the version it started on, as a self-TAIL-call (a loop,
                   never a call) always did.  Dispatching it cost ~5 ns per
@@ -415,14 +426,22 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       let vslot = fresh ctx "hrver" in
       emit ctx (Printf.sprintf "%s = alloca i32" vslot);
       let fp = fresh ctx "hrfp" in
-      (* D33 (plan II.4.1): every boundary call, in the base binary and in
-         every .so alike, resolves against the RUNNING PROC's code epoch.
-         march_dispatch_enter_unit reads it and picks the newest live
-         version at or before it (current, for an unpinned proc).  The
-         per-.so @__march_hcr_epoch cell is still defined and still written
-         by __march_init, but nothing reads it any more. *)
-      emit ctx (Printf.sprintf
-        "%s = call ptr @march_dispatch_enter_unit(i32 %s, ptr %s)" fp name_id vslot);
+      (* The proc-owned frame stack preserves the caller's routing epoch.
+         enter_unit pins both that epoch and the selected version; leave
+         restores the enclosing context, and runtime catchers unwind both
+         on panic/cancellation. Entry frames (including main) are pinned
+         before user code runs, so the first call after a deploy is safe. *)
+      let work_entry = Hot_reload.is_work_entry resolved_name in
+      if work_entry then begin
+        let expected = match Hashtbl.find_opt ctx.hr_sig_hashes resolved_name with
+          | Some h when h <> "" -> Llvm_ctx.intern_string ctx h
+          | _ -> failwith ("missing work-entry ABI: " ^ resolved_name) in
+        emit ctx (Printf.sprintf
+          "%s = call ptr @march_dispatch_enter_work_compatible(i32 %s, ptr %s, ptr %s)"
+          fp name_id expected vslot)
+      end else
+        emit ctx (Printf.sprintf
+          "%s = call ptr @march_dispatch_enter_unit(i32 %s, ptr %s)" fp name_id vslot);
       (* Startup-warmup guard.  march_dispatch_enter returns NULL when the target
          slot has not been published yet (or the publish is not yet visible to
          this thread) — e.g. an HTTP worker thread serving a request during the
@@ -441,7 +460,16 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       (* Direct (baseline) path — table not ready. *)
       emit_label ctx blk_direct;
       let direct_r =
-        if ret_ty = "void" then begin
+        if work_entry then begin
+          let message = "hot reload: incompatible generated work entry " ^ resolved_name ^ "; restart required" in
+          let bytes = Llvm_ctx.intern_string ctx message in
+          let value = fresh ctx "hr_error" in
+          emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
+            value bytes (String.length message));
+          emit ctx (Printf.sprintf "call void @march_panic(ptr %s)" value);
+          emit ctx "unreachable";
+          None
+        end else if ret_ty = "void" then begin
           emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
           None
         end else begin
@@ -451,7 +479,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
           Some r
         end
       in
-      emit ctx (Printf.sprintf "br label %%%s" blk_cont);
+      if not work_entry then emit ctx (Printf.sprintf "br label %%%s" blk_cont);
       (* Dispatched path — pinned to a published version; must leave after. *)
       emit_label ctx blk_disp;
       let disp_r =
@@ -467,7 +495,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       let v = fresh ctx "hrv" in
       emit ctx (Printf.sprintf "%s = load i32, ptr %s" v vslot);
       emit ctx (Printf.sprintf
-        "call void @march_dispatch_leave(i32 %s, i32 %s)" name_id v);
+        "call void @march_dispatch_leave_unit(i32 %s, i32 %s)" name_id v);
       emit ctx (Printf.sprintf "br label %%%s" blk_cont);
       (* Continuation — merge the two call results. *)
       emit_label ctx blk_cont;
@@ -478,6 +506,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
           emit ctx (Printf.sprintf "%s = phi %s [ %s, %%%s ], [ %s, %%%s ]"
                       phi ret_ty rd blk_direct rs blk_disp);
           (ret_ty, phi)
+        | None, Some rs when work_entry -> (ret_ty, rs)
         | _ -> ("i64", "0")
       in
       result
@@ -830,8 +859,10 @@ let emit_callptr_closure ~emit_atom ctx (fn_atom : Tir.atom)
            emit ctx (Printf.sprintf "%s = call ptr @march_clo_float_arg(ptr %s)" fa v');
            float_arg_boxes := fa :: !float_arg_boxes
          | _ -> ());
+        if pty = "ptr" then Llvm_ctx.disown_closure_value ctx v';
         pty ^ " " ^ v'
       ) (List.combine declared_param_llvm_tys orig_param_llvm_tys) args in
+    Llvm_ctx.disown_closure_value ctx clo_ptr;
     let all_arg_strs = Printf.sprintf "ptr %s" clo_ptr :: orig_arg_strs in
     (* Released unconditionally, even when the callee hands the same box back
        as its result: a callee whose param is erased took its own reference

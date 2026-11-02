@@ -85,3 +85,18 @@ int64_t hcrpin_retained(void) {
     memcpy(&f, &sym, sizeof f);
     return (int64_t)f();
 }
+
+/* Model admission of an external request, rather than a nested call from
+ * baseline main. Keep the explicit frame until the request has returned;
+ * closures that escape it retain their own creation-epoch pin. */
+uint32_t march_epoch_current(void);
+void march_frame_enter(uint32_t epoch);
+void march_frame_leave(void);
+int64_t hcrpin_request_begin(void) {
+    march_frame_enter(march_epoch_current());
+    return 0;
+}
+int64_t hcrpin_request_end(void) {
+    march_frame_leave();
+    return 0;
+}

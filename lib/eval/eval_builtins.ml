@@ -1309,7 +1309,12 @@ let base_env : env =
               let result = ref [] and start = ref 0 in
               (try
                  for i = 0 to ls - lsep do
-                   if String.sub s i lsep = sep then begin
+                   (* Only at or after the end of the previous match: an
+                      overlapping one (",," at 1 in ",,,,") gave a negative
+                      length, and the exception it raised ended the loop, so
+                      the interpreter returned ["", ",,"] where compiled code
+                      returns ["", "", ""]. *)
+                   if i >= !start && String.sub s i lsep = sep then begin
                      result := String.sub s !start (i - !start) :: !result;
                      start := i + lsep
                    end

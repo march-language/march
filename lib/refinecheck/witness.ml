@@ -580,7 +580,7 @@ and eval_operand ~(lookup : string -> V.value option) (e : A.expr) : V.value opt
      | Some (V.VString s) -> Some (V.VInt (String.length s))
      | Some v -> Option.map (fun n -> V.VInt n) (list_len v)
      | None -> None)
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) ->
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp ->
     (match eval_operand ~lookup a with
      | Some (V.VInt n) -> Some (V.VInt (-n))
      | Some (V.VFloat f) -> Some (V.VFloat (-.f))

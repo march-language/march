@@ -698,6 +698,12 @@ let test_upgrade_refused_with_restart_advice () =
   (match Cmd_deploy_hot.check_identity ~manifest:(v2 ~abi:v3 ()) ~info:{ info with abi = v4 } with
    | Error m -> Alcotest.(check bool) m true (contains m "rebuild the patch with the toolchain that built the server")
    | Ok () -> Alcotest.fail "a v3 patch was accepted by a v4 server");
+  let v5 = "march-hcr-v5;triple=aarch64-unknown-linux-gnu;ptr=8" in
+  (match Cmd_deploy_hot.check_identity ~manifest:(v2 ~abi:v5 ()) ~info:{ info with abi = v4 } with
+   | Error m ->
+     List.iter (fun frag -> Alcotest.(check bool) (frag ^ " in: " ^ m) true (contains m frag))
+       [ "per-frame routing"; "Restart the server once"; "nothing was deployed" ]
+   | Ok () -> Alcotest.fail "a v5 patch was accepted by a v4 server");
   (* End to end against a server that answers an older ABI. *)
   let dir = short_tmp () in
   let (pk, sk) = March_ed25519.Ed25519.keygen () in

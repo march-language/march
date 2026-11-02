@@ -1,4 +1,4 @@
-skip	user	b2_two_arg_int_measure.march:13:12	unreflectable-subject	precondition	need_small	_ <= 1
+skip	user	b2_two_arg_int_measure.march:13:12	reflect-fuel	precondition	need_small	_ <= 1
 reflect	b2_two_arg_int_measure.march:3:5	count_ge	reflected	unfold
 reflect	b2_two_arg_int_measure.march:10:5	need_small	reflected	unfold (guard: n <= 1)
 reflect	b2_two_arg_int_measure.march:12:5	main	no	R1:is `main` (b2_two_arg_int_measure.march:12:5)

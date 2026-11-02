@@ -219,4 +219,44 @@ describe "index_of" do
   end
 end
 
+
+  -- Strings over {a, b, ','} so separators, adjacent separators and a trailing
+  -- separator all come up often; the folds must give split's fields exactly.
+  pfn small_text() do
+    Gen.string_of(Gen.one_of([Gen.int(97, 98), Gen.constant(44)]))
+  end
+
+  pfn via_fold(s, sep) do
+    List.reverse(String.fold_split(s, sep, [], fn (acc, f) -> Cons(f, acc)))
+  end
+
+  pfn via_ranges(s, sep) do
+    List.reverse(String.fold_split_ranges(s, sep, [], fn (acc, st, len) ->
+      Cons(String.slice_bytes(s, st, len), acc)))
+  end
+
+describe "fold_split / fold_split_ranges" do
+  test "fold_split gives split's fields, random text, every separator shape" do
+    Check.all(small_text(), fn s ->
+      List.all([",", ",,", "a,", ""], fn sep -> via_fold(s, sep) == String.split(s, sep)))
+  end
+
+  test "fold_split_ranges covers split's fields, random text, every separator shape" do
+    Check.all(small_text(), fn s ->
+      List.all([",", ",,", "a,", ""], fn sep -> via_ranges(s, sep) == String.split(s, sep)))
+  end
+
+  test "edge cases" do
+    assert via_fold("", ",") == [""]
+    assert via_fold("", "") == []
+    assert via_fold(",", ",") == ["", ""]
+    assert via_fold("aaa", "aa") == ["", "a"]
+    assert via_ranges("abc", "") == ["a", "b", "c"]
+    -- split itself with a repeating multi-byte separator: the interpreter returned
+    -- ["", ",,"] here (compiled code was right) until 2026-10-31.
+    assert String.split(",,,,", ",,") == ["", "", ""]
+    assert via_fold(",,,,", ",,") == ["", "", ""]
+  end
+end
+
 end

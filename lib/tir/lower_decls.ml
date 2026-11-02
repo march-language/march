@@ -389,6 +389,8 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
         let fn = lower_fn_def env def in
         let fn = rename_scoped_vars scopes fn in
         Provenance.rename ~old:fn.fn_name ~new_:(prefix ^ fn.fn_name);
+        if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
+          Hot_reload.note_work_entry (prefix ^ fn.fn_name);
         !Lower_state._fns_ref := { fn with fn_name = prefix ^ fn.fn_name } :: !(!Lower_state._fns_ref)
       | Ast.DType (_, tname, params, td, _)
       | Ast.DAlwaysLinearType (_, tname, params, td, _) ->

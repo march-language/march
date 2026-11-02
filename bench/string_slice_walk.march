@@ -24,10 +24,12 @@
 -- That attribution is what decides between an array-returning split and a
 -- view representation, so the two files MUST stay in sync.
 --
--- Deliberately does NOT tokenize by searching.  The obvious formulation --
+-- Deliberately does NOT tokenize by searching.  The tail-slicing formulation --
 -- index_of the next comma, then slice off the remainder and recurse -- is
--- O(n^2) in bytes copied, because String.index_of has no start-offset variant
--- and so the tail must be re-sliced at every step (~80GB for this buffer).
+-- O(n^2) in bytes copied (~80GB for this buffer); String.index_of_from (a
+-- start offset) avoids that, and String.fold_split / fold_split_ranges walk
+-- the fields without a list or, for ranges, any allocation
+-- (bench/string_split_fold.march).
 -- Walking by arithmetic keeps the copy volume O(n) and comparable to split's,
 -- which is the whole point of the pair.  The cost of the *search* is measured
 -- separately and honestly by bench/string_scan.march.
