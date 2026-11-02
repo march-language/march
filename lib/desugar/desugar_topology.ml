@@ -448,7 +448,20 @@ let helper_sources ?pools (f : facts) (t : t) : (string list * string) list =
 (** The generated [main], as March source (one [fn] declaration). *)
 let main_source ?pools (f : facts) (t : t) : string =
   let b = Buffer.create 2048 in
+  let adapters = Buffer.create 1024 in
   let add fmt = Printf.bprintf b fmt in
+  let work_name key =
+    let encoded = String.concat "" (List.init (String.length key)
+        (fun i -> Printf.sprintf "%02x" (Char.code key.[i]))) in
+    "__topology_entry_" ^ encoded in
+  let work_factory key run role body ps =
+    let name = work_name key in
+    Printf.bprintf adapters "fn %s_body(topology_env, %s) do %s(%s) end\n"
+      name (String.concat ", " ps) body (String.concat ", " ("topology_env" :: ps));
+    Printf.bprintf adapters
+      "fn %s_open(topology_env, topology_io, topology_node, topology_cap) do\n  %s.offer_work_%s(topology_io, topology_node, topology_cap, fn (%s) -> %s_body(%s))\nend\n"
+      name run role (String.concat ", " ps) name (String.concat ", " ("topology_env" :: ps));
+    name ^ "_open" in
   let pools = selected_pools ?pools t in
   add "fn main(topology_io : Cap(IO)) do\n";
   (* Only ClusterNode may hand out a Cap(ClusterNode.Live) (D35), so the
@@ -486,10 +499,10 @@ let main_source ?pools (f : facts) (t : t) : string =
               (match r.r_body, r.r_actor with
                | Some body, _ ->
                  let ps = [ "topology_s" ] @ caps @ [ "topology_st" ] in
+                 let factory = work_factory (p.p_name ^ ":" ^ r.r_name) run r.r_role (ref_of f body) ps in
                  Some (Printf.sprintf
-                         "      Topology.offer_role(%S, %s, %d, fn topology_cap -> %s.offer_%s(topology_io, topology_node, topology_cap,\n        fn (%s) -> %s(%s)))"
-                         r.r_name (place_src r.r_place) cap run r.r_role
-                         (String.concat ", " ps) (ref_of f body) (String.concat ", " (env :: ps)))
+                         "      Topology.offer_role(%S, %s, %d, fn topology_cap -> %s(%s, topology_io, topology_node, topology_cap))"
+                         r.r_name (place_src r.r_place) cap factory env)
                | None, Some a ->
                  (match Hashtbl.find_opt f.actors a with
                   | None -> None
@@ -499,12 +512,24 @@ let main_source ?pools (f : facts) (t : t) : string =
                     let start_ps = [ "topology_sid"; "topology_s" ] @ caps in
                     let dl = [ "topology_sid"; "topology_s"; "topology_from"; "topology_m"; "topology_ep" ] in
                     let cl = [ "topology_sid"; "topology_s"; "topology_role"; "topology_cause"; "topology_ep" ] in
-                    let call name ps = Printf.sprintf "fn (%s) -> %s(%s)" (String.concat ", " ps) (h name)
-                        (String.concat ", " ("topology_a" :: ps)) in
+                    let name = work_name (p.p_name ^ ":" ^ r.r_name) in
+                    let call kind ps =
+                      let args = String.concat ", " ("topology_a" :: ps) in
+                      Printf.bprintf adapters "fn %s_%s(%s) do %s(%s) end\n"
+                        name kind args (h kind) args;
+                      Printf.sprintf "fn (%s) -> %s_%s(%s)"
+                        (String.concat ", " ps) name kind args in
+                    let start = call "start" start_ps in
+                    let deliver = call "deliver" dl in
+                    let cancel = call "cancel" cl in
+                    Printf.bprintf adapters "fn %s_spawn(topology_env) do %s(topology_env) end\n"
+                      name (h "spawn");
+                    Printf.bprintf adapters
+                      "fn %s_open(topology_a, topology_io, topology_node, topology_cap) do\n  %s.offer_work_hosted_%s(topology_io, topology_node, topology_cap, topology_a,\n    %s,\n    %s,\n    %s)\nend\n"
+                      name run r.r_role start deliver cancel;
                     Some (Printf.sprintf
-                            "      Topology.offer_actor_role(%S, %s, %d, fn () -> %s(%s),\n        fn (topology_a, topology_cap) -> %s.offer_hosted_%s(topology_io, topology_node, topology_cap, topology_a,\n          %s,\n          %s,\n          %s))"
-                            r.r_name (place_src r.r_place) cap (h "spawn") env run r.r_role
-                            (call "start" start_ps) (call "deliver" dl) (call "cancel" cl)))
+                            "      Topology.offer_actor_role(%S, %s, %d, fn () -> %s_spawn(%s),\n        fn (topology_a, topology_cap) -> %s_open(topology_a, topology_io, topology_node, topology_cap))"
+                            r.r_name (place_src r.r_place) cap name env name))
                | None, None -> None))
           p.p_serves
       in
@@ -519,9 +544,11 @@ let main_source ?pools (f : facts) (t : t) : string =
     match t.control with
     | None -> ""
     | Some c ->
+      let factory = work_factory "control" "Ctl_Run" "Control" "ctl_control_session"
+          ([ "topology_s" ] @ xs 5 @ [ "topology_st" ]) in
       Printf.sprintf
-        ", [\n      Topology.pinned(Topology.offer_role(\"Ctl.Control\", Topology.count_on(%S, 1), 256, fn topology_cap -> Ctl_Run.offer_Control(topology_io, topology_node, topology_cap,\n        fn (topology_s, topology_x1, topology_x2, topology_x3, topology_x4, topology_x5, topology_st) -> ctl_control_session(topology_node, topology_s, topology_x1, topology_x2, topology_x3, topology_x4, topology_x5, topology_st))))\n    ]"
-        c.c_candidates
+        ", [\n      Topology.pinned(Topology.offer_role(\"Ctl.Control\", Topology.count_on(%S, 1), 256, fn topology_cap -> %s(topology_node, topology_io, topology_node, topology_cap)))\n    ]"
+        c.c_candidates factory
   in
   add "  Topology.place(topology_node, List.concat([%s%s]))\n"
     (String.concat ", " (List.mapi (fun i _ -> Printf.sprintf "topology_roles_%d" i) pools)) ctl_roles;
@@ -531,7 +558,7 @@ let main_source ?pools (f : facts) (t : t) : string =
   add "  Topology.drain_on_signal(topology_node, %d, %d)\n" t.soft_ms t.hard_ms;
   add "  Topology.supervise_offers(topology_node)\n";
   add "end\n";
-  Buffer.contents b
+  Buffer.contents adapters ^ Buffer.contents b
 
 (** Insert [extra] at the end of the module at [path] ([path] starts with
     the module the declarations are rooted at: the entry's name for

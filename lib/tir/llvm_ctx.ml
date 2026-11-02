@@ -222,6 +222,7 @@ type ctx = {
   (* TIR name of the function currently being emitted — for diagnostics
      (e.g. the shape-mismatch match-failure panic message). *)
   mutable cur_emit_fn   : string;
+  mutable owned_closure : string option;
   mutable tco_loop_label : string;
   mutable tco_param_info : (string * string * string) list;
   (* SSA value (e.g. "%sp.save42") holding the llvm.stacksave() result taken at
@@ -319,6 +320,7 @@ type ctx = {
      Maps qualified fn name ("Math.add") → hex hash string. *)
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
+  hr_sig_hashes : (string, string) Hashtbl.t;
   (* When true, non-exported function definitions in the patch .so get hidden
      ELF visibility so intra-.so PLT calls resolve to the .so's own definitions
      instead of looking up the global symbol table.  Without this, a v2 patch's
@@ -438,6 +440,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   var_llvm_ty = Hashtbl.create 32;
   tco_fn_name    = None;
   cur_emit_fn    = "";
+  owned_closure = None;
   tco_loop_label = "";
   tco_param_info = [];
   tco_in_tail    = true;
@@ -462,6 +465,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   ctor_desc_inst_rows = Buffer.create 256;
   remote_impl_hashes = Hashtbl.create 0;
   remote_sig_hashes  = Hashtbl.create 0;
+  hr_sig_hashes = Hashtbl.create 0;
   compile_so = false;
   atom_names = Hashtbl.create 16;
 }
@@ -578,6 +582,18 @@ let llvm_ret_ty (ctx : ctx) : Tir.ty -> string = function
 (** The name [n] is a [let] copy of, followed to the end ([n] itself if none). *)
 let alias_root ctx n =
   match Hashtbl.find_opt ctx.let_alias n with Some r -> r | None -> n
+
+(** Track just the apply frame's owned environment and its explicit aliases.
+    Other local values keep their ordinary ownership rules. *)
+let own_closure_alias ctx atom value =
+  match ctx.owned_closure, atom with
+  | Some name, Tir.AVar v when alias_root ctx v.Tir.v_name = name ->
+    emit ctx (Printf.sprintf "call void @march_frame_own_closure(ptr %s)" value)
+  | _ -> ()
+
+let disown_closure_value ctx value =
+  if ctx.owned_closure <> None then
+    emit ctx (Printf.sprintf "call void @march_frame_disown_closure(ptr %s)" value)
 
 (** LLVM type string for a function *parameter*, augmented with alias-analysis
     attributes for pointer types.

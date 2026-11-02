@@ -348,6 +348,7 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
   Hashtbl.clear ctx.Llvm_ctx.let_alias;
   ctx.Llvm_ctx.ret_ty <- fn.Tir.fn_ret_ty;
   ctx.Llvm_ctx.cur_emit_fn <- fn.Tir.fn_name;
+  ctx.Llvm_ctx.owned_closure <- None;
   ctx.Llvm_ctx.hr_cur_module <- Llvm_ctx.module_of_name fn.Tir.fn_name;
   let fn_llvm_name = Llvm_builtins.mangle_extern fn.Tir.fn_name in
   (* Closure apply wrappers use the generic ptr ABI (see [is_apply_fn]) so a
@@ -420,6 +421,7 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
     if ctx.Llvm_ctx.compile_so
        && not (Hot_reload.is_slot_actor_dispatch fname)
        && not (Tir_names.is_migrate_fn_name fname)
+       && not (String.ends_with ~suffix:Tir_names.actor_on_stop_suffix fname)
        && Hot_reload.Name_table.id_of ctx.Llvm_ctx.hr_names fname = None
     then "hidden "
     else ""
@@ -428,6 +430,23 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
     if !debug_info && not ctx.Llvm_ctx.repl then dbg_define_suffix fn fn_llvm_name else "" in
   Buffer.add_string ctx.Llvm_ctx.buf
     (Printf.sprintf "\ndefine %s%s @%s(%s)%s {\nentry:\n" vis_prefix ret_ty fn_llvm_name params_str dbg_suffix);
+
+  (* A closure may escape into work at a newer epoch, including a C callback.
+     Capture routing before the body can release its environment. *)
+  let closure_frame = is_apply_wrapper && ctx.Llvm_ctx.hr_config <> None in
+  if closure_frame then begin
+    match fn.Tir.fn_params with
+    | clo :: _ ->
+      Llvm_ctx.emit ctx (Printf.sprintf "call void @march_clo_frame_enter(ptr %%%s.arg)"
+        (Llvm_ctx.llvm_name clo.Tir.v_name));
+      ctx.Llvm_ctx.owned_closure <- Some clo.Tir.v_name;
+      Llvm_ctx.emit ctx (Printf.sprintf "call void @march_frame_own_closure(ptr %%%s.arg)"
+        (Llvm_ctx.llvm_name clo.Tir.v_name))
+    | [] -> failwith "closure apply function has no environment"
+  end;
+  let leave_closure_frame () =
+    if closure_frame then Llvm_ctx.emit ctx "call void @march_frame_leave()"
+  in
 
   (* Alloca + store for each parameter; collect slot info for TCO. *)
   let native_vec_idxs = native_vec_param_idxs fn in
@@ -589,10 +608,13 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
     ctx.Llvm_ctx.tco_dup_bound <- [];
     if ret_ty = "void" then begin
       Llvm_tco.emit_defer_drain ctx;
+      leave_closure_frame ();
       Llvm_ctx.emit_term ctx "ret void"
     end else begin
       let final_val = Llvm_ctx.coerce ctx body_ty body_val ret_ty in
       Llvm_tco.emit_defer_drain ctx;
+      if ret_ty = "ptr" then Llvm_ctx.disown_closure_value ctx final_val;
+      leave_closure_frame ();
       Llvm_ctx.emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
     end;
     ctx.Llvm_ctx.tco_defer_slot <- ""
@@ -606,14 +628,18 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
     ctx.Llvm_ctx.norm_ret_pos <- true;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
     ctx.Llvm_ctx.norm_ret_pos <- false;
-    if ret_ty = "void" then
+    if ret_ty = "void" then begin
+      leave_closure_frame ();
       Llvm_ctx.emit_term ctx "ret void"
-    else begin
+    end else begin
       let final_val = Llvm_ctx.coerce ctx body_ty body_val ret_ty in
+      if ret_ty = "ptr" then Llvm_ctx.disown_closure_value ctx final_val;
+      leave_closure_frame ();
       Llvm_ctx.emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
     end
   end;
 
+  ctx.Llvm_ctx.owned_closure <- None;
   Buffer.add_string ctx.Llvm_ctx.buf "}\n"
 
 (** Return the LLVM `declare` string for a function, for use as a forward
@@ -1543,7 +1569,7 @@ let emit_module ~emit_expr
   (* Patch .so: hide all non-exported symbols so intra-.so PLT calls prefer the
      .so's own definitions over same-named symbols in the server binary.  This
      is the compile-time complement to RTLD_DEEPBIND (which is Linux-only). *)
-  let ctx = { ctx with Llvm_ctx.compile_so = not emit_main } in
+  let ctx = { ctx with Llvm_ctx.compile_so = not emit_main; hr_sig_hashes } in
   (* Phase 9: in .so patch mode WITH hot-reload enabled, emit the file-static
      epoch cell into the preamble.  Static (private) linkage keeps it out of
      the global symbol table so multiple deployed .so files don't collide.
@@ -1581,6 +1607,7 @@ let emit_module ~emit_expr
         (* Dispatch slot IDs are 1-based: slot 0 is reserved as the "not set"
            sentinel in march_actor_meta.dispatch_name_id (0 = no HCR dispatch). *)
         Printf.bprintf b "  call void @march_dispatch_init(i32 %d)\n" (n + 1);
+        Buffer.add_string b "  call void @march_dispatch_reserve_main()\n";
         List.iter (fun (fn : Tir.fn_def) ->
           match Hot_reload.Name_table.id_of hr_names fn.Tir.fn_name with
           | None -> ()
@@ -1617,6 +1644,14 @@ let emit_module ~emit_expr
               Printf.bprintf b
                 "  call i32 @march_dispatch_publish(i32 %d, ptr @%s, %s, %s, i8 0)\n"
                 id (Llvm_builtins.mangle_extern fn.Tir.fn_name) hash_arg sig_arg;
+              if String.ends_with ~suffix:"_dispatch" fn.Tir.fn_name then begin
+                let actor = String.sub fn.Tir.fn_name 0 (String.length fn.Tir.fn_name - 9) in
+                let stop = actor ^ Tir_names.actor_on_stop_suffix in
+                if List.exists (fun (f : Tir.fn_def) -> f.fn_name = stop) m.Tir.tm_fns then
+                  Printf.bprintf b
+                    "  call void @march_dispatch_set_initial_on_stop(i32 %d, ptr @%s)\n"
+                    id (Llvm_builtins.mangle_extern stop)
+              end;
               (* Register name→ID mapping for the reload server. *)
               let name_g = Printf.sprintf "@.hr_name%d" id in
               Buffer.add_string ctx.Llvm_ctx.preamble
@@ -1741,6 +1776,12 @@ let emit_module ~emit_expr
         let fname = fn.Tir.fn_name in
         let flen = String.length fname in
         emit_fn ~emit_expr ctx fn;
+        if String.ends_with ~suffix:Tir_names.actor_on_stop_suffix fname then begin
+          let actor = String.sub fname 0 (flen - String.length Tir_names.actor_on_stop_suffix) in
+          let alias = "__on_stop_" ^ String.map (fun c -> if c = '.' then '_' else c) actor in
+          Buffer.add_string ctx.Llvm_ctx.buf (Printf.sprintf
+            "@%s = alias void (ptr), ptr @%s\n" alias (Llvm_builtins.mangle_extern fname))
+        end;
         (* Phase 5: for migrate_state functions, export a __migrate_<Actor>
            alias so march_reload.c can dlsym it without knowing the full
            mangled March name.

@@ -1,4 +1,5 @@
+driver: v2 fresh true, v2 bad 0
 main: v1 true, v2 fresh false, v2 migrated true, v2 bad 0
 node-a: version 1 up
-slot: v1 true, v2 fresh true, v2 migrated false, v2 bad 0
+slot: v1 true, v2 fresh false, v2 migrated true, v2 bad 0
 task: v1 true, v2 fresh false, v2 migrated true, v2 bad 0

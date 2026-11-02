@@ -1616,22 +1616,36 @@ let hr_config () =
    flips a parameter between borrowed and owned is a signature change to
    forge's gate.  Empty without --hot-reload: nothing else reads it, and no
    other build's IR changes.  Returns (abi hash, modes) per function. *)
-let hr_abi_sigs ~(borrow_map : March_tir.Borrow.borrow_map)
+let hr_abi_sigs ~(tir : March_tir.Tir.tir_module) ~(borrow_map : March_tir.Borrow.borrow_map)
     (type_sigs : (string, string) Hashtbl.t) : (string, string * string) Hashtbl.t =
   let t = Hashtbl.create (Hashtbl.length type_sigs) in
+  let work_type_sigs = ref [] in
   if hr_config () <> None then
     Hashtbl.iter (fun name s ->
         if s <> "" then begin
-          let modes = March_cas.Hash.modes_string borrow_map name in
-          (* A reflected function's slot hash also covers its D17 logic
-             hash (reflection §7.2, I9): a patch to its body is a slot
-             change forge refuses (Cmd_deploy_hot.logic_changes). *)
-          let logic =
-            Option.value ~default:"-"
-              (March_refinecheck.Reflect_state.logic_hash_of_name name) in
-          Hashtbl.replace t name (March_cas.Hash.hcr_slot_sig_hash ~sig_hash:s ~modes ~logic, modes)
+          let s = if March_tir.Hot_reload.is_work_entry name then
+              match List.find_opt (fun fd -> fd.March_tir.Tir.fn_name = name) tir.tm_fns with
+              | Some fd -> Some (March_cas.Hash.work_entry_sig_hash ~type_defs:tir.tm_types fd ~sig_hash:s)
+              (* The pre-opt hash map also contains unused generated fronts.
+                 They have no emitted slot, and therefore no entry ABI. *)
+              | None -> None
+            else Some s in
+          Option.iter (fun s ->
+            if March_tir.Hot_reload.is_work_entry name then
+              work_type_sigs := (name, s) :: !work_type_sigs;
+            let modes = March_cas.Hash.modes_string borrow_map name in
+            (* A reflected function's slot hash also covers its D17 logic
+               hash (reflection §7.2, I9): a patch to its body is a slot
+               change forge refuses (Cmd_deploy_hot.logic_changes). *)
+            let logic =
+              Option.value ~default:"-"
+                (March_refinecheck.Reflect_state.logic_hash_of_name name) in
+            Hashtbl.replace t name (March_cas.Hash.hcr_slot_sig_hash ~sig_hash:s ~modes ~logic, modes)) s
         end)
       type_sigs;
+  (* Manifest tsig and the published ABI must use the same type-only input,
+     including captured layouts, so Forge can recognize borrow-only changes. *)
+  List.iter (fun (name, s) -> Hashtbl.replace type_sigs name s) !work_type_sigs;
   t
 
 let hr_sig_table (abi : (string, string * string) Hashtbl.t) : (string, string) Hashtbl.t =
@@ -3508,7 +3522,7 @@ let compile filename =
         (match March_cas.Cas.lookup_artifact store ch,
                March_cas.Cas.lookup_diagnostics store ch with
          | Some cached_bin, Some diag_text
-           when (not !compile_so || March_cas.Cas.restore_sidecars store ch out_bin)
+           when ((not !compile_so && !hot_reload_prefix = None) || March_cas.Cas.restore_sidecars store ch out_bin)
                 && March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin ->
            (* B7.1: print what the compile that produced this artifact
               printed.  No [.diag] record (an entry cached before replay
@@ -4052,6 +4066,14 @@ let compile filename =
        ~timeout_ms:!shell_timeout_ms ~force:!shell_force ~inputs:!shell_inputs
    | None -> ());
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
+  (if !do_compile && !cap_sandbox && !hot_reload_prefix <> None && not frontend_rejected then begin
+    let caps = own_caps_of_this_module ~stdlib_files:(stdlib_span_files stdlib_decls)
+        typecheck_env desugared in
+    if not (List.exists (fun c ->
+        March_caps.Cap_lattice.cap_subsumes "IO.FileWrite" c ||
+        March_caps.Cap_lattice.cap_subsumes c "IO.FileWrite") caps) then
+      emit_diag_text "Warning: --hot-reload --cap-sandbox without IO.FileWrite: CAS upload, activation state, and audit writes require an IO.FileWrite grant; read-only reload queries remain available.\n"
+  end);
   (* --jit: replace the tree-walking interpreter with the in-process ORC JIT
      for this run.  Every diagnostic above has already been produced and
      printed exactly as in interpreted mode — this flag only swaps the
@@ -4293,7 +4315,7 @@ let compile filename =
     let actor_invariant_map : (string * March_ast.Ast.expr) list =
       collect_actor_invariant [] desugared.March_ast.Ast.mod_decls in
     let actor_schemas : (string * (string * March_tir.Tir.ty) list) list =
-      if Option.is_some !hot_reload_prefix && !compile_so then
+      if Option.is_some !hot_reload_prefix then
         List.filter_map (fun td ->
             match td with
             | March_tir.Tir.TDRecord (tname, fields)
@@ -4305,6 +4327,7 @@ let compile filename =
                 Some (actor_name, user_fields)
             | _ -> None
           ) tir.March_tir.Tir.tm_types
+        |> List.sort (fun (a, _) (b, _) -> String.compare a b)
       else []
     in
     (* DD step 6 (plan II.4.8): each actor's handler signatures (its lowered
@@ -4803,6 +4826,279 @@ let compile filename =
           Printf.eprintf "march: %s\n" msg;
           exit 1
       end;
+      let make_hcr_manifest hr_impl_hashes hr_abi remote_sig_hashes ch =
+        if not !compile_so && !hot_reload_prefix = None then "" else begin
+          (* Per-fn OWN cap closures, keyed by qualified name ("Mod.fn").
+             fn_own_capability_closures returns each function's own caps
+             (body/sig/extern), WITHOUT the module-wide `needs` merge that
+             fn_capability_closures performs — that merge is what made the
+             whole-artifact union app-invariant (Granularity revision,
+             2026-07-04).  Caps are already normalized by Cap_lattice.normalize;
+             sort here only for deterministic CSV output (List.sort does not
+             mutate the underlying set). *)
+          let fn_caps_tbl : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+          List.iter (fun (name, caps) -> Hashtbl.replace fn_caps_tbl name caps)
+            (March_typecheck.Typecheck.fn_own_capability_closures typecheck_env);
+          let caps_for name =
+            (* Manifest names are TIR names.  An actor handler's TIR name is
+               BARE ("Weeble_Zorp") while the typechecker keys its closure by
+               the declaring module ("Sub.Weeble_Zorp") — two same-named actors
+               in different modules must not share one closure.  Bridge the two
+               spellings through [Handler_owner], the ownership channel lowering
+               already records for exactly this reason; a top-level actor has no
+               owner registered and hits the direct lookup. *)
+            let key =
+              if Hashtbl.mem fn_caps_tbl name then Some name
+              else
+                match March_tir.Handler_owner.owner_of name with
+                | Some owner when Hashtbl.mem fn_caps_tbl (owner ^ "." ^ name) ->
+                  Some (owner ^ "." ^ name)
+                | _ -> None
+            in
+            match Option.bind key (Hashtbl.find_opt fn_caps_tbl) with
+            | Some caps -> List.sort_uniq String.compare caps
+            | None -> []
+          in
+          (* Build a reverse caller index: callee_name → sorted list of
+             boundary caller names.  Walk the pre-opt TIR so that calls which
+             the optimizer inlined away are still captured. *)
+          let callee_to_callers : (string, string list) Hashtbl.t =
+            Hashtbl.create 16
+          in
+          let add_caller ~callee ~caller =
+            let prev = Option.value ~default:[]
+                (Hashtbl.find_opt callee_to_callers callee) in
+            Hashtbl.replace callee_to_callers callee (caller :: prev)
+          in
+          (* Recursively scan an expr for EApp calls to boundary functions. *)
+          let rec scan_expr caller e =
+            let open March_tir.Tir in
+            match e with
+            | EApp (callee_var, args) ->
+              let cn = callee_var.v_name in
+              if Hashtbl.mem hr_impl_hashes cn && cn <> caller then
+                add_caller ~callee:cn ~caller;
+              List.iter (scan_atom caller) args
+            | ECallPtr (f, args) ->
+              scan_atom caller f;
+              List.iter (scan_atom caller) args
+            | ELet (_, e1, e2) ->
+              scan_expr caller e1; scan_expr caller e2
+            | ELetRec (fns, body) ->
+              List.iter (fun fd -> scan_expr caller fd.fn_body) fns;
+              scan_expr caller body
+            | ECase (a, brs, def) ->
+              scan_atom caller a;
+              List.iter (fun br -> scan_expr caller br.br_body) brs;
+              Option.iter (scan_expr caller) def
+            | ESeq (e1, e2) -> scan_expr caller e1; scan_expr caller e2
+            | EAtom a -> scan_atom caller a
+            | ETuple atoms -> List.iter (scan_atom caller) atoms
+            | ERecord fields -> List.iter (fun (_, a) -> scan_atom caller a) fields
+            | EField (a, _) -> scan_atom caller a
+            | EUpdate (a, fields) ->
+              scan_atom caller a;
+              List.iter (fun (_, av) -> scan_atom caller av) fields
+            | EAlloc (_, args) -> List.iter (scan_atom caller) args
+            | EStackAlloc (_, args) -> List.iter (scan_atom caller) args
+            | EFree a | EIncRC a | EDecRC a
+            | EAtomicIncRC a | EAtomicDecRC a -> scan_atom caller a
+            | EReuse (a, _, args) ->
+              scan_atom caller a;
+              List.iter (scan_atom caller) args
+            | EAllocHole (tok, _, args, _) ->
+              Option.iter (scan_atom caller) tok;
+              List.iter (scan_atom caller) args
+            | ESetField (o, _, v) -> scan_atom caller o; scan_atom caller v
+          (* A closure's code is named as an atom (`alloc $Clo_..($lam9$apply$3,
+             ...)`), never called by name: record the fn that BUILDS it as
+             its caller too.  Without the edge forge's planner
+             (Deploy_plan.undeliverable) saw a changed lambda with no caller
+             and planned a restart for any edit inside a role body's
+             closure, although the slot that builds the closure changes with
+             it (its hash folds the lambda in) and its patch carries the new
+             lambda code.  Only for unslotted bare callees (lifted lambdas,
+             join points): a slot's `callers:` is signed into ACTIVATE and
+             capped, and a slot is reached by its own activation anyway. *)
+          and scan_atom caller a =
+            match a, hr_config () with
+            | March_tir.Tir.AVar v, Some cfg ->
+              let cn = v.March_tir.Tir.v_name in
+              if cn <> caller
+                 && Hashtbl.mem hr_impl_hashes cn
+                 && String.equal (March_tir.Hot_reload.module_of_name cn) ""
+                 && not (March_tir.Hot_reload.is_slot_fn cfg cn)
+              then add_caller ~callee:cn ~caller
+            | _ -> ()
+          in
+          (* Scan every boundary function's body in pre-opt TIR. *)
+          List.iter (fun (fd : March_tir.Tir.fn_def) ->
+            if Hashtbl.mem hr_impl_hashes fd.fn_name then
+              scan_expr fd.fn_name fd.fn_body
+          ) pre_opt_tir.March_tir.Tir.tm_fns;
+          (* Deduplicate and sort each callers list for deterministic output. *)
+          Hashtbl.iter (fun callee callers ->
+            let deduped = List.sort_uniq String.compare callers in
+            Hashtbl.replace callee_to_callers callee deduped
+          ) callee_to_callers;
+          let oc = Buffer.create 1024 in
+             (match March_tir.Hcr_abi.of_target target with
+              | Ok abi ->
+                Printf.bprintf oc
+                  "# march-hcr-manifest v2\n# cas_hash %s\n# target %s\n# hcr_abi %s\n# module_prefix %s\n"
+                  ch abi.canonical_target (March_tir.Hcr_abi.abi_id abi)
+                  (Option.value ~default:"" !hot_reload_prefix);
+                (* The standard library this artifact was compiled against:
+                   the digest of its source ([stdlib_source_hash], the same
+                   one that keys the CAS).  A stdlib actor has no dispatch
+                   slot (Hot_reload.is_slot_actor_dispatch), so a patch can
+                   never deliver a stdlib change; forge compares this line
+                   with the running build's and asks for a restart instead
+                   of activating nothing (deploy --plan, deploy hot). *)
+                (match stdlib_source_hash () with
+                 | Some (_, h, _) -> Printf.bprintf oc "# stdlib_hash %s\n" h
+                 | None -> ());
+                (* The patch's own dispatch slots ([Hot_reload.is_slot_fn]).
+                   A slot's impl_hash stops at a slot callee, so when the
+                   running build has no slot for one (a function new since
+                   its last restart: a patch calls its own copy of it),
+                   that callee's change is in no caller's hash; the deploy
+                   redeploys its callers to carry it
+                   (Cmd_deploy_hot.unslotted_carriers). *)
+                (match hr_config () with
+                 | Some cfg ->
+                   let slots =
+                     Hashtbl.fold (fun n _ acc ->
+                         if March_tir.Hot_reload.is_slot_fn cfg n then n :: acc else acc)
+                       hr_impl_hashes []
+                     |> List.sort String.compare in
+                   Printf.bprintf oc "# slots %s\n" (String.concat "," slots)
+                 | None -> ());
+              | Error _ ->
+                Printf.bprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
+             List.iter (fun (name, impl_h) ->
+               (* A capture-release function ([Drop.run]'s [$clodrop$<clo>]) is
+                  reached only through the registry main fills at start-up; a
+                  patch never registers one, so no deploy can deliver or need
+                  it.  Its name carries the lambda counter, so a one-line edit
+                  renames and "changes" them wholesale, and the planner would
+                  count each as an undeliverable change (restart).  Not listed. *)
+               if String.starts_with ~prefix:March_tir.Tir_names.clo_drop_fn_prefix name then () else
+               (* sig_hash is the slot ABI hash (type + borrow modes,
+                  [hr_abi_sigs]); `tsig=` (the type-only hash) and `modes=`
+                  let forge name what changed when the two builds' ABI
+                  hashes differ only by a mode. *)
+               let (sig_h, abi_fields) =
+                 match Hashtbl.find_opt hr_abi name, Hashtbl.find_opt remote_sig_hashes name with
+                 | Some (h, modes), Some tsig ->
+                   (* `logic=` (reflection §7.2, I9): the function's D17
+                      logic hash, present only for a reflected function;
+                      sig_hash already folds it in
+                      (March_cas.Hash.hcr_slot_sig_hash), and forge reads
+                      it to name a refused body change. *)
+                   let logic =
+                     match March_refinecheck.Reflect_state.logic_hash_of_name name with
+                     | Some l -> " logic=" ^ l
+                     | None -> "" in
+                   (h, Printf.sprintf " tsig=%s modes=%s%s" tsig modes logic)
+                 | _, ts -> (Option.value ~default:"" ts, "") in
+               let callers_field =
+                 match Hashtbl.find_opt callee_to_callers name with
+                 | Some (_ :: _ as cs) -> " callers:" ^ String.concat "," cs
+                 | _ -> ""
+               in
+               let caps_field = "caps=" ^ String.concat "," (caps_for name) in
+               Printf.bprintf oc "%s %s %s%s%s %s\n" name impl_h sig_h callers_field abi_fields caps_field
+             ) (Hashtbl.to_seq hr_impl_hashes |> List.of_seq |> List.sort compare);
+             (* DD build step 10: one ROLE line per role with a grant, its
+                FULL closure from the solve check_role_grants runs (section
+                5, "Admission": a changed function's own caps miss a patch
+                that calls an existing, more powerful helper).  `via=` carries
+                each cap's reach chain for the deploy diagnostic. *)
+             List.iter (fun (role, caps, chains) ->
+               let via =
+                 if chains = [] then ""
+                 else
+                   " via=" ^ String.concat ";"
+                     (List.map (fun (c, chain) -> c ^ ":" ^ String.concat ">" chain) chains)
+               in
+               Printf.bprintf oc "ROLE %s caps=%s%s\n" role (String.concat "," caps) via
+             ) (March_typecheck.Typecheck.role_capability_closures typecheck_env);
+             Buffer.contents oc
+        end in
+      let hcr_schemas =
+          let rec pred_to_string (e : March_ast.Ast.expr) : string =
+            let open March_ast.Ast in
+            match e with
+            | ELit (LitInt n, _)    -> string_of_int n
+            | ELit (LitBool b, _)   -> if b then "true" else "false"
+            | EVar { txt; _ }       -> txt
+            | EField (base, field, _) ->
+              pred_to_string base ^ "." ^ field.txt
+            (* Binary operators: &&, ||, arithmetic, comparisons *)
+            | EApp (EVar { txt = ("&&"|"||"|"+"|"-"|"*"|"/"|"%"
+                                 |"=="|"!="|"<"|">"|"<="|">=" as op); _ },
+                    [l; r], _) ->
+              "(" ^ pred_to_string l ^ " " ^ op ^ " " ^ pred_to_string r ^ ")"
+            (* Unary operators *)
+            | EApp (EVar { txt = "not"; _ }, [inner], _) ->
+              "!(" ^ pred_to_string inner ^ ")"
+            | EApp (EVar { txt = "negate"; _ }, [inner], _) ->
+              "-" ^ pred_to_string inner
+            (* Single-argument measure/function calls *)
+            | EApp (EVar { txt = fn_name; _ }, [arg], _) ->
+              fn_name ^ "(" ^ pred_to_string arg ^ ")"
+            | _ -> raise (Invalid_argument "pred_to_string")
+          in
+          let oc = Buffer.create 1024 in
+            Printf.bprintf oc "{\n";
+            List.iteri (fun i (actor_name, fields) ->
+                let field_lines =
+                  if fields = [] then "[]"
+                  else "[\n" ^
+                    String.concat ",\n" (List.map (fun (fname, fty) ->
+                      Printf.sprintf {|      {"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
+                    ) fields) ^ "\n    ]"
+                in
+                let compat = Option.value ~default:"full"
+                    (List.assoc_opt actor_name actor_compat_map) in
+                let invariant_line = match List.assoc_opt actor_name actor_invariant_map with
+                  | None -> ""
+                  | Some e ->
+                    (try Printf.sprintf "    \"invariant\": %S,\n" (pred_to_string e)
+                     with Invalid_argument _ ->
+                       Printf.eprintf
+                         "warning: @invariant on %s contains unsupported expression; omitting\n"
+                         actor_name;
+                       "")
+                in
+                let ctor_list ctors =
+                  "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
+                      Printf.sprintf {|{"name":%S,"params":[%s]}|} cn
+                        (String.concat "," (List.map (fun t ->
+                             Printf.sprintf "%S" (ty_to_schema_str t)) tys))) ctors) ^ "]" in
+                let handlers_line = match List.assoc_opt actor_name actor_handlers with
+                  | None -> ""
+                  | Some c -> Printf.sprintf "    \"handlers\": %s,\n" (ctor_list c) in
+                let mm_line = match List.assoc_opt actor_name actor_migrate_msg_from with
+                  | None -> ""
+                  | Some c -> Printf.sprintf "    \"migrate_msg_from\": %s,\n" (ctor_list c) in
+                Printf.bprintf oc
+                  "  %S: {\n    \"compat\": %S,\n%s%s%s    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat invariant_line handlers_line mm_line field_lines
+                  (if i < List.length actor_schemas - 1 then "," else "")
+              ) actor_schemas;
+            Printf.bprintf oc "}\n";
+            Buffer.contents oc
+      in
+      let embed_hcr_metadata manifest ir =
+        if !hot_reload_prefix = None then ir else
+        let global name value = Printf.sprintf
+            "\n@%s = constant [%d x i8] c\"%s\\00\"\n"
+            name (String.length value + 1) (March_tir.Llvm_ctx.llvm_escape_string value) in
+        ir ^ global "__march_hcr_schemas" hcr_schemas
+           ^ global "__march_hcr_manifest" manifest
+      in
       let basename = Filename.remove_extension filename in
       let ll_file  = basename ^ ".ll" in
       (* The IR is written to a per-process temp beside [ll_file] and only
@@ -5024,9 +5320,12 @@ let compile filename =
          | Some cfg ->
            hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes;
            hr_store_sources ~cfg ~store ~decls:desugared.March_ast.Ast.mod_decls hr_impl_hashes);
-        let hr_abi = hr_abi_sigs ~borrow_map:pipe.March_tir.Contract_pipeline.borrow_map
+        let hr_abi = hr_abi_sigs ~tir ~borrow_map:pipe.March_tir.Contract_pipeline.borrow_map
             remote_sig_hashes in
         let hr_sig_hashes = hr_sig_table hr_abi in
+        let hcr_manifest = make_hcr_manifest hr_impl_hashes hr_abi remote_sig_hashes in
+        let mod_hash = if !hot_reload_prefix = None then mod_hash else
+          mod_hash ^ "|hcr-metadata:" ^ hcr_schemas ^ hcr_manifest "" in
         (* Post-TIR cache: same key construction as the source-level early
            check above (build_cas_key), keyed on the module's per-SCC impl
            hashes instead of the source digest. *)
@@ -5090,6 +5389,7 @@ let compile filename =
           let () = March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None in
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~hr_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls ?cap_manifest
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
+          let ir = embed_hcr_metadata (hcr_manifest ch) ir in
           let ir = match !shell_ident_decls with
             | Some decls ->
               (* The functions a shell fragment may call instead of copying:
@@ -5950,286 +6250,20 @@ let compile filename =
            sorted, from March_typecheck.Typecheck.role_capability_closures.
            forge's per-role widening gate compares it with the baseline, and
            ACTIVATE6 signs a root over it for the server's admission gate. *)
-        (if !compile_so && Hashtbl.length hr_impl_hashes > 0 then begin
-          (* Per-fn OWN cap closures, keyed by qualified name ("Mod.fn").
-             fn_own_capability_closures returns each function's own caps
-             (body/sig/extern), WITHOUT the module-wide `needs` merge that
-             fn_capability_closures performs — that merge is what made the
-             whole-artifact union app-invariant (Granularity revision,
-             2026-07-04).  Caps are already normalized by Cap_lattice.normalize;
-             sort here only for deterministic CSV output (List.sort does not
-             mutate the underlying set). *)
-          let fn_caps_tbl : (string, string list) Hashtbl.t = Hashtbl.create 16 in
-          List.iter (fun (name, caps) -> Hashtbl.replace fn_caps_tbl name caps)
-            (March_typecheck.Typecheck.fn_own_capability_closures typecheck_env);
-          let caps_for name =
-            (* Manifest names are TIR names.  An actor handler's TIR name is
-               BARE ("Weeble_Zorp") while the typechecker keys its closure by
-               the declaring module ("Sub.Weeble_Zorp") — two same-named actors
-               in different modules must not share one closure.  Bridge the two
-               spellings through [Handler_owner], the ownership channel lowering
-               already records for exactly this reason; a top-level actor has no
-               owner registered and hits the direct lookup. *)
-            let key =
-              if Hashtbl.mem fn_caps_tbl name then Some name
-              else
-                match March_tir.Handler_owner.owner_of name with
-                | Some owner when Hashtbl.mem fn_caps_tbl (owner ^ "." ^ name) ->
-                  Some (owner ^ "." ^ name)
-                | _ -> None
-            in
-            match Option.bind key (Hashtbl.find_opt fn_caps_tbl) with
-            | Some caps -> List.sort_uniq String.compare caps
-            | None -> []
-          in
-          (* Build a reverse caller index: callee_name → sorted list of
-             boundary caller names.  Walk the pre-opt TIR so that calls which
-             the optimizer inlined away are still captured. *)
-          let callee_to_callers : (string, string list) Hashtbl.t =
-            Hashtbl.create 16
-          in
-          let add_caller ~callee ~caller =
-            let prev = Option.value ~default:[]
-                (Hashtbl.find_opt callee_to_callers callee) in
-            Hashtbl.replace callee_to_callers callee (caller :: prev)
-          in
-          (* Recursively scan an expr for EApp calls to boundary functions. *)
-          let rec scan_expr caller e =
-            let open March_tir.Tir in
-            match e with
-            | EApp (callee_var, args) ->
-              let cn = callee_var.v_name in
-              if Hashtbl.mem hr_impl_hashes cn && cn <> caller then
-                add_caller ~callee:cn ~caller;
-              List.iter (scan_atom caller) args
-            | ECallPtr (f, args) ->
-              scan_atom caller f;
-              List.iter (scan_atom caller) args
-            | ELet (_, e1, e2) ->
-              scan_expr caller e1; scan_expr caller e2
-            | ELetRec (fns, body) ->
-              List.iter (fun fd -> scan_expr caller fd.fn_body) fns;
-              scan_expr caller body
-            | ECase (a, brs, def) ->
-              scan_atom caller a;
-              List.iter (fun br -> scan_expr caller br.br_body) brs;
-              Option.iter (scan_expr caller) def
-            | ESeq (e1, e2) -> scan_expr caller e1; scan_expr caller e2
-            | EAtom a -> scan_atom caller a
-            | ETuple atoms -> List.iter (scan_atom caller) atoms
-            | ERecord fields -> List.iter (fun (_, a) -> scan_atom caller a) fields
-            | EField (a, _) -> scan_atom caller a
-            | EUpdate (a, fields) ->
-              scan_atom caller a;
-              List.iter (fun (_, av) -> scan_atom caller av) fields
-            | EAlloc (_, args) -> List.iter (scan_atom caller) args
-            | EStackAlloc (_, args) -> List.iter (scan_atom caller) args
-            | EFree a | EIncRC a | EDecRC a
-            | EAtomicIncRC a | EAtomicDecRC a -> scan_atom caller a
-            | EReuse (a, _, args) ->
-              scan_atom caller a;
-              List.iter (scan_atom caller) args
-            | EAllocHole (tok, _, args, _) ->
-              Option.iter (scan_atom caller) tok;
-              List.iter (scan_atom caller) args
-            | ESetField (o, _, v) -> scan_atom caller o; scan_atom caller v
-          (* A closure's code is named as an atom (`alloc $Clo_..($lam9$apply$3,
-             ...)`), never called by name: record the fn that BUILDS it as
-             its caller too.  Without the edge forge's planner
-             (Deploy_plan.undeliverable) saw a changed lambda with no caller
-             and planned a restart for any edit inside a role body's
-             closure, although the slot that builds the closure changes with
-             it (its hash folds the lambda in) and its patch carries the new
-             lambda code.  Only for unslotted bare callees (lifted lambdas,
-             join points): a slot's `callers:` is signed into ACTIVATE and
-             capped, and a slot is reached by its own activation anyway. *)
-          and scan_atom caller a =
-            match a, hr_config () with
-            | March_tir.Tir.AVar v, Some cfg ->
-              let cn = v.March_tir.Tir.v_name in
-              if cn <> caller
-                 && Hashtbl.mem hr_impl_hashes cn
-                 && String.equal (March_tir.Hot_reload.module_of_name cn) ""
-                 && not (March_tir.Hot_reload.is_slot_fn cfg cn)
-              then add_caller ~callee:cn ~caller
-            | _ -> ()
-          in
-          (* Scan every boundary function's body in pre-opt TIR. *)
-          List.iter (fun (fd : March_tir.Tir.fn_def) ->
-            if Hashtbl.mem hr_impl_hashes fd.fn_name then
-              scan_expr fd.fn_name fd.fn_body
-          ) pre_opt_tir.March_tir.Tir.tm_fns;
-          (* Deduplicate and sort each callers list for deterministic output. *)
-          Hashtbl.iter (fun callee callers ->
-            let deduped = List.sort_uniq String.compare callers in
-            Hashtbl.replace callee_to_callers callee deduped
-          ) callee_to_callers;
-          let mf = out_bin ^ ".hcr_manifest" in
-          (try
-             let oc = open_out mf in
-             (match March_tir.Hcr_abi.of_target target with
-              | Ok abi ->
-                Printf.fprintf oc
-                  "# march-hcr-manifest v2\n# cas_hash %s\n# target %s\n# hcr_abi %s\n# module_prefix %s\n"
-                  ch abi.canonical_target (March_tir.Hcr_abi.abi_id abi)
-                  (Option.value ~default:"" !hot_reload_prefix);
-                (* The standard library this artifact was compiled against:
-                   the digest of its source ([stdlib_source_hash], the same
-                   one that keys the CAS).  A stdlib actor has no dispatch
-                   slot (Hot_reload.is_slot_actor_dispatch), so a patch can
-                   never deliver a stdlib change; forge compares this line
-                   with the running build's and asks for a restart instead
-                   of activating nothing (deploy --plan, deploy hot). *)
-                (match stdlib_source_hash () with
-                 | Some (_, h, _) -> Printf.fprintf oc "# stdlib_hash %s\n" h
-                 | None -> ());
-                (* The patch's own dispatch slots ([Hot_reload.is_slot_fn]).
-                   A slot's impl_hash stops at a slot callee, so when the
-                   running build has no slot for one (a function new since
-                   its last restart: a patch calls its own copy of it),
-                   that callee's change is in no caller's hash; the deploy
-                   redeploys its callers to carry it
-                   (Cmd_deploy_hot.unslotted_carriers). *)
-                (match hr_config () with
-                 | Some cfg ->
-                   let slots =
-                     Hashtbl.fold (fun n _ acc ->
-                         if March_tir.Hot_reload.is_slot_fn cfg n then n :: acc else acc)
-                       hr_impl_hashes []
-                     |> List.sort String.compare in
-                   Printf.fprintf oc "# slots %s\n" (String.concat "," slots)
-                 | None -> ());
-              | Error _ ->
-                Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
-             Hashtbl.iter (fun name impl_h ->
-               (* A capture-release function ([Drop.run]'s [$clodrop$<clo>]) is
-                  reached only through the registry main fills at start-up; a
-                  patch never registers one, so no deploy can deliver or need
-                  it.  Its name carries the lambda counter, so a one-line edit
-                  renames and "changes" them wholesale, and the planner would
-                  count each as an undeliverable change (restart).  Not listed. *)
-               if String.starts_with ~prefix:March_tir.Tir_names.clo_drop_fn_prefix name then () else
-               (* sig_hash is the slot ABI hash (type + borrow modes,
-                  [hr_abi_sigs]); `tsig=` (the type-only hash) and `modes=`
-                  let forge name what changed when the two builds' ABI
-                  hashes differ only by a mode. *)
-               let (sig_h, abi_fields) =
-                 match Hashtbl.find_opt hr_abi name, Hashtbl.find_opt remote_sig_hashes name with
-                 | Some (h, modes), Some tsig ->
-                   (* `logic=` (reflection §7.2, I9): the function's D17
-                      logic hash, present only for a reflected function;
-                      sig_hash already folds it in
-                      (March_cas.Hash.hcr_slot_sig_hash), and forge reads
-                      it to name a refused body change. *)
-                   let logic =
-                     match March_refinecheck.Reflect_state.logic_hash_of_name name with
-                     | Some l -> " logic=" ^ l
-                     | None -> "" in
-                   (h, Printf.sprintf " tsig=%s modes=%s%s" tsig modes logic)
-                 | _, ts -> (Option.value ~default:"" ts, "") in
-               let callers_field =
-                 match Hashtbl.find_opt callee_to_callers name with
-                 | Some (_ :: _ as cs) -> " callers:" ^ String.concat "," cs
-                 | _ -> ""
-               in
-               let caps_field = "caps=" ^ String.concat "," (caps_for name) in
-               Printf.fprintf oc "%s %s %s%s%s %s\n" name impl_h sig_h callers_field abi_fields caps_field
-             ) hr_impl_hashes;
-             (* DD build step 10: one ROLE line per role with a grant, its
-                FULL closure from the solve check_role_grants runs (section
-                5, "Admission": a changed function's own caps miss a patch
-                that calls an existing, more powerful helper).  `via=` carries
-                each cap's reach chain for the deploy diagnostic. *)
-             List.iter (fun (role, caps, chains) ->
-               let via =
-                 if chains = [] then ""
-                 else
-                   " via=" ^ String.concat ";"
-                     (List.map (fun (c, chain) -> c ^ ":" ^ String.concat ">" chain) chains)
-               in
-               Printf.fprintf oc "ROLE %s caps=%s%s\n" role (String.concat "," caps) via
-             ) (March_typecheck.Typecheck.role_capability_closures typecheck_env);
-             close_out oc
-           with Sys_error _ -> ()) (* non-fatal if manifest write fails *)
+        (if !compile_so || !hot_reload_prefix <> None then begin
+          let write_sidecar suffix contents =
+            let oc = open_out (out_bin ^ suffix) in
+            Fun.protect ~finally:(fun () -> close_out oc)
+              (fun () -> output_string oc contents) in
+          write_sidecar ".hcr_manifest" (hcr_manifest ch);
+          write_sidecar ".schemas.json" hcr_schemas
         end);
         (* Phase 5: emit .schemas.json sidecar for actor state schema checking
            at deploy time.  Each entry records the actor's state field names
            and types so forge deploy hot can diff old vs new schemas. *)
-        (if !compile_so && actor_schemas <> [] then begin
-          let schema_path = out_bin ^ ".schemas.json" in
-          (* Convert an AST predicate expression to a source-text string for
-             storage in .schemas.json.  Raises Invalid_argument on unsupported nodes.
-             Operators are represented as EApp in the March AST (e.g. "+"(a,b)). *)
-          let rec pred_to_string (e : March_ast.Ast.expr) : string =
-            let open March_ast.Ast in
-            match e with
-            | ELit (LitInt n, _)    -> string_of_int n
-            | ELit (LitBool b, _)   -> if b then "true" else "false"
-            | EVar { txt; _ }       -> txt
-            | EField (base, field, _) ->
-              pred_to_string base ^ "." ^ field.txt
-            (* Binary operators: &&, ||, arithmetic, comparisons *)
-            | EApp (EVar { txt = ("&&"|"||"|"+"|"-"|"*"|"/"|"%"
-                                 |"=="|"!="|"<"|">"|"<="|">=" as op); _ },
-                    [l; r], _) ->
-              "(" ^ pred_to_string l ^ " " ^ op ^ " " ^ pred_to_string r ^ ")"
-            (* Unary operators *)
-            | EApp (EVar { txt = "not"; _ }, [inner], _) ->
-              "!(" ^ pred_to_string inner ^ ")"
-            | EApp (EVar { txt = "negate"; _ }, [inner], _) ->
-              "-" ^ pred_to_string inner
-            (* Single-argument measure/function calls *)
-            | EApp (EVar { txt = fn_name; _ }, [arg], _) ->
-              fn_name ^ "(" ^ pred_to_string arg ^ ")"
-            | _ -> raise (Invalid_argument "pred_to_string")
-          in
-          (try
-            let oc = open_out schema_path in
-            Printf.fprintf oc "{\n";
-            List.iteri (fun i (actor_name, fields) ->
-                let field_lines =
-                  if fields = [] then "[]"
-                  else "[\n" ^
-                    String.concat ",\n" (List.map (fun (fname, fty) ->
-                      Printf.sprintf {|      {"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
-                    ) fields) ^ "\n    ]"
-                in
-                let compat = Option.value ~default:"full"
-                    (List.assoc_opt actor_name actor_compat_map) in
-                let invariant_line = match List.assoc_opt actor_name actor_invariant_map with
-                  | None -> ""
-                  | Some e ->
-                    (try Printf.sprintf "    \"invariant\": %S,\n" (pred_to_string e)
-                     with Invalid_argument _ ->
-                       Printf.eprintf
-                         "warning: @invariant on %s contains unsupported expression; omitting\n"
-                         actor_name;
-                       "")
-                in
-                let ctor_list ctors =
-                  "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
-                      Printf.sprintf {|{"name":%S,"params":[%s]}|} cn
-                        (String.concat "," (List.map (fun t ->
-                             Printf.sprintf "%S" (ty_to_schema_str t)) tys))) ctors) ^ "]" in
-                let handlers_line = match List.assoc_opt actor_name actor_handlers with
-                  | None -> ""
-                  | Some c -> Printf.sprintf "    \"handlers\": %s,\n" (ctor_list c) in
-                let mm_line = match List.assoc_opt actor_name actor_migrate_msg_from with
-                  | None -> ""
-                  | Some c -> Printf.sprintf "    \"migrate_msg_from\": %s,\n" (ctor_list c) in
-                Printf.fprintf oc
-                  "  %S: {\n    \"compat\": %S,\n%s%s%s    \"state_fields\": %s\n  }%s\n"
-                  actor_name compat invariant_line handlers_line mm_line field_lines
-                  (if i < List.length actor_schemas - 1 then "," else "")
-              ) actor_schemas;
-            Printf.fprintf oc "}\n";
-            close_out oc
-          with Sys_error e ->
-            Printf.eprintf "warning: could not write %s: %s\n" schema_path e)
-        end);
         (* Cache the sidecars just written with the artifact, under both
            keys, so the source-level early hit can restore them. *)
-        if !compile_so then
+        if !compile_so || !hot_reload_prefix <> None then
           List.iter (fun (st, key) -> March_cas.Cas.store_sidecars st key out_bin)
             ((store, ch) :: (match source_cas_state with Some p -> [ p ] | None -> []))
       end (* else begin: non-JS LLVM/clang path *)
@@ -6290,12 +6324,14 @@ let compile filename =
         (match hr_config () with
          | None -> ()
          | Some cfg -> hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes);
-        let hr_sig_hashes =
-          hr_sig_table (hr_abi_sigs ~borrow_map:pipe.March_tir.Contract_pipeline.borrow_map
-                          remote_sig_hashes2) in
+        let hr_abi = hr_abi_sigs ~tir ~borrow_map:pipe.March_tir.Contract_pipeline.borrow_map
+                          remote_sig_hashes2 in
+        let hr_sig_hashes = hr_sig_table hr_abi in
+        let hcr_manifest = make_hcr_manifest hr_impl_hashes hr_abi remote_sig_hashes2 in
         March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None;
         let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~hr_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls ?cap_manifest
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
+        let ir = embed_hcr_metadata (hcr_manifest "") ir in
           let ir = finish_ir target ir in
         (* Same temp-then-rename as --compile, so a concurrent reader never
            sees a half-written file. *)

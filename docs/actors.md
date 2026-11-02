@@ -106,7 +106,7 @@ Rules of thumb:
 | **Linear types** | A linear value moves on `send`; the receiver becomes its sole owner. Native arrays are copy-on-write, so nothing is unsendable. | [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
 | **Session types** | For a two-party conversation with an enforced order, a session channel replaces an ad-hoc message protocol; an actor can host one endpoint. | [Session Types]({{ site.baseurl }}/docs/session-types/) |
 | **Observing a running node** | `Scheduler` and `Actor.top_by_mailbox` answer "is the system behind?" from inside; the observe socket and `forge top` answer it from outside. | [Observe]({{ site.baseurl }}/docs/observe/) |
-| **Hot code reload** | A deploy migrates actor state in place; `on_stop` under a reload is the one registered when the actor was spawned. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) |
+| **Hot code reload** | A deploy migrates actor state at an epoch boundary; `on_stop` resolves against the actor's active code version. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) |
 | **Clustering** | A `Pid` is local; `GlobalPid` and `Node.send` carry messages across nodes, with the same `Down` shape for remote monitors. | [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) |
 | **Overload and resilience** | Mailbox limits, load shedding, deadlines and restart backoff, used together. | [Overload & Resilience]({{ site.baseurl }}/docs/overload-resilience/) |
 
@@ -722,9 +722,10 @@ Both backends implement the same rules, and each is pinned compiled and interpre
 - The interpreter cannot preempt running code, so there the deadline binds only an
   `on_stop` that *blocks* (a `receive()` it cannot satisfy waits out the deadline and
   the actor is killed); a compute loop in `on_stop` runs to completion.
-- Under `--hot-reload`, the callback registered is the one from the code the actor was
-  spawned with; draining across a reload is still open
-  (`specs/todos/2026-08-12-graceful-shutdown-and-drain.md`).
+- Under `--hot-reload`, `on_stop` resolves against the actor's active code version.
+  A state-changing activation must provide a compatible replacement callback when
+  the actor already has one. Mailbox epoch markers let in-flight and pre-marker
+  work finish on old code before migration; configured drain deadlines still apply.
 
 ---
 

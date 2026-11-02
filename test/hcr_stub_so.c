@@ -31,3 +31,10 @@ int64_t test_fn_digest(void) { return 1337; }
 int64_t test_fn_epoch(void) { return 42 + (int64_t)g_epoch * 0; }
 int64_t test_fn_digest(void) { return 42; }
 #endif
+
+const char __march_hcr_schemas[] = "{\"Counter\":{\"compat\":\"full\",\"state_fields\":[{\"name\":\"n\",\"ty\":\"Int\"}]},\"Other\":{\"compat\":\"any\",\"state_fields\":[]}}";
+const char __march_hcr_manifest[] = "patch manifest\n";
+int64_t Counter_dispatch(void) { return 42; }
+
+/* Deliberately lacks a matching embedded schema: must not replace a known actor. */
+int64_t KnownOnly_dispatch(void) { return 42; }

@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Breaking changes
 
+- **Hot-reload ABI v5 requires a rebuilt base binary.** Per-frame routing and
+  closure lifetime hooks are incompatible with older running servers. Forge
+  refuses the patch before upload and explains the one-time restart requirement.
+
 - **Int `+`, `-`, `*` and unary `-` panic on overflow instead of wrapping.** A result
   outside the 63-bit range [-2^62, 2^62) is now a runtime panic, `attempt to add with
   overflow` (or `subtract`/`multiply`/`negate`), with the same message in the
@@ -54,6 +58,22 @@ git log is authoritative for exact commits.
 - **A parameter refinement may call a reflected function** (`fn f(n : {Int | is_small(_)})`),
   and the function is still reflected.
 
+- **Hot deploys report their running schema baseline.** Hot-reload binaries embed
+  deterministic schemas and manifests, and the owner-only `SCHEMAS` query reports
+  each actor's latest activated schema and release. `forge deploy hot` uses that
+  baseline for the first deploy and warns when local `.prev` data is stale. Older
+  servers require a saved baseline or explicit `--old-schemas`.
+- **Hot reload retains routing versions for running frames and escaping closures.**
+  Nested calls keep a compatible ABI through a coordinated upgrade. Actor mailbox
+  boundaries admit new work to the new version; a nonreturning old frame can keep
+  old versions alive and block further deployment when the version limit is reached.
+  This requires HCR ABI v5 and a rebuilt base binary.
+
+- **`String.fold_split` and `String.fold_split_ranges`: walk the fields of `split`
+  without building the list.** `fold_split` hands each field to a callback, one at a
+  time; `fold_split_ranges` hands over byte ranges and allocates nothing. On a
+  150,000-field buffer, `fold_split` uses 4 MB where `split` uses 25 MB, and
+  `fold_split_ranges` is also about 3x faster.
 - **Refinement predicates can use your own functions.** A function that terminates
   structurally, has no effects, cannot fail and calls only such functions is *reflected*
   automatically: its body becomes its meaning in the logic. `if is_small(n) do
@@ -552,6 +572,28 @@ git log is authoritative for exact commits.
 - **A `refinement_unverified` hint re-labelled `reflect-fuel` or `reflect-budget` now
   names that reason** instead of the first attempt's.
 
+- Generated topology offers select the accepting work's compatible version before
+  creating a session endpoint. Saved user closures and running sessions retain their
+  original versions; incompatible captured layouts produce a restart diagnostic.
+- `--compile-so` again writes and restores manifest/schema sidecars when used without
+  `--hot-reload`, including Forge's entry-file discovery builds.
+- Hot-deploy restart replay preserves complete migration chains and their helper
+  versions, so baseline-initialized actors can cross multiple state changes safely.
+  An invalid saved dependency refuses its batch and dependent suffix. Signed rollback
+  with a reverse state migration is covered by an end-to-end continuity test.
+- A migrated actor's graceful shutdown uses its current-version `on_stop`, including
+  callback-only hot patches. A state-changing activation without a compatible
+  replacement callback is refused.
+- Sandboxed hot-reload builds diagnose a missing `IO.FileWrite` grant. Reload storage
+  remains subject to the existing OS filter; read-only queries remain available.
+- Hot-deploy persistence failures detected before publication leave code and schemas
+  unchanged. An unexpected persistence commit failure after publication stops the
+  process with a diagnostic rather than acknowledging an undurable deployment.
+
+- In the interpreter (and so in `march test` and the REPL), `String.split` with a
+  repeating multi-byte separator returned the wrong fields: `String.split(",,,,",
+  ",,")` gave `["", ",,"]` instead of `["", "", ""]`, which compiled code already
+  returned.
 - **`println` and `print` write a string's bytes on the JS target.** Under Node a string
   holding binary data (raw bytes) printed each byte's UTF-8 encoding; it now writes the
   bytes, as natively. `march_string_bytes(s)` (exported by `march_runtime.mjs`) gives an
@@ -895,6 +937,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **The compatibility policy now says the in-memory layout of values, strings
+  included, is not part of the 1.0 promise.** C code reaches strings only through
+  `march_ffi.h` (`march_slice`, `march_str_new`), and a check keeps that header from
+  exposing the string struct, so short strings can later be stored inline without
+  breaking anyone.
 - **What March 1.0 will promise, in writing.** New pages: [Compatibility &
   Deprecation](docs/compatibility.md) (what a 1.x release keeps working, including the
   cluster control plane's release format and messages; `@[deprecated]` and stdlib

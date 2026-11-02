@@ -118,7 +118,27 @@ let agree ~expected ~tag root =
        (run_capture binary)
    | Error e -> Alcotest.failf "forge build: %s" e);
   match Cmd_deploy_hot.build_so ~proj ~output:(Filename.concat root "hot") with
-  | Ok _ -> ()
+  | Ok (so_path, manifest_path) ->
+    (* These projects have no [hot-reload] section: --compile-so alone must
+       still publish usable deployment metadata, including on a cache hit. *)
+    (match Cmd_deploy_hot.parse_manifest manifest_path with
+     | Error e -> Alcotest.failf "deploy manifest: %s" e
+     | Ok manifest ->
+       Alcotest.(check bool) "manifest includes the entry function" true
+         (List.exists (fun (fn : Cmd_deploy_hot.fn_manifest) -> fn.fn_name = "main")
+            manifest.functions));
+    let schema_path = so_path ^ ".schemas.json" in
+    Alcotest.(check bool) "deploy schema sidecar exists" true
+      (Sys.file_exists schema_path);
+    let sidecars = List.map (fun path -> path, In_channel.with_open_text path In_channel.input_all)
+        [manifest_path; schema_path] in
+    List.iter (fun (path, _) -> Sys.remove path) sidecars;
+    (match Cmd_deploy_hot.build_so ~proj ~output:(Filename.concat root "hot") with
+     | Error e -> Alcotest.failf "cached deploy build step: %s" e
+     | Ok _ ->
+       List.iter (fun (path, expected) ->
+         Alcotest.(check string) "cached deploy restores metadata" expected
+           (In_channel.with_open_text path In_channel.input_all)) sidecars)
   | Error e -> Alcotest.failf "deploy build step: %s" e
 
 let test_lib_layout () =

@@ -2,11 +2,10 @@
 -- deployed over node_a.march (see it for the design): offers role Shop of `Order` from the hosting actor
 -- ShopHost and keeps the offer in a Vault. The code that changes between
 -- the versions lives in the nested module `Host`, so it is on the
--- hot-reload boundary (`--hot-reload HcrSessionA`; entry-module functions
--- get bare names and are not); the actor's handler and `main` are the same
--- in both versions and are NOT activated by the deploy. Their calls into
--- `Host` reach version 2 only because a call dispatches whenever its callee
--- is reloadable, whoever the caller is. See scenario.sh.
+-- hot-reload boundary. The actor's handler and `main` are identical in
+-- both versions. A hosting actor turn advances at its marker, calls the new
+-- `Host` code and publishes a fresh Shop callback; existing closures and
+-- sessions retain their creation epoch. See scenario.sh.
 mod HcrSessionA do
   needs IO
   needs IO.Console
@@ -59,11 +58,12 @@ mod HcrSessionA do
       end
     end
 
-    -- The hosting actor's tick: open the offer once and keep it. The offer's
-    -- body closure is built here, by version 1; its call to `shop` is a
-    -- boundary call too, so sessions formed after the deploy get version 2.
+    -- The hosting actor creates the offer body in its selected epoch.
+    -- Version 2 publishes a new typed callback from a new actor turn;
+    -- sessions already using the old callback keep their original epoch.
     fn host_tick(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
       let v = offers()
+      let bodies = Vault.open("hcr_shop_bodies")
       -- Version 2 reports, once, whether it finds the offer version 1
       -- stored: with a second vault registry in the patch it would not, and
       -- would open a second offer.
@@ -73,13 +73,22 @@ mod HcrSessionA do
           if Vault.get(flags, "noted") == None do
             Vault.set(flags, "noted", 1)
             println("node-a: version 2 host sees the version-1 offer")
+            -- The protocol is unchanged, so this typed callback has the
+            -- same endpoint ABI. Publish it from the new actor frame;
+            -- sessions already inside the old callback keep that epoch.
+            Vault.set(bodies, "cur", fn (s, st) -> shop(s, st))
           else () end
         None ->
           if Vault.get(flags, "noted") == None do
             Vault.set(flags, "noted", 1)
             println("node-a: version 2 host finds NO offer: it opens another")
           else () end
-          match Order_Run.offer_Shop(c, h, 64, fn (s, st) -> shop(s, st)) do
+          Vault.set(bodies, "cur", fn (s, st) -> shop(s, st))
+          match Order_Run.offer_work_Shop(c, h, 64, fn (s, st) ->
+            match Vault.get(bodies, "cur") do
+              Some(body) -> body(s, st)
+              None -> panic("node-a: no Shop callback")
+            end) do
             Ok(o) -> Vault.set(v, "cur", o)
             Err(e) -> panic(SessionNode.run_error_message(e))
           end
