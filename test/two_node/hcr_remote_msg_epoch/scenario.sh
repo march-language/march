@@ -3,14 +3,12 @@
 # the new format, must be delivered: not converted, not dropped (review
 # finding specs/progress/2026-09-25-dd-review-link-reader-tasks-pin-epoch.md).
 #
-# node-b's data-reader task for the link to node-a is spawned when the link
-# forms, before the deploy. A task never advances its code epoch (II.4.3), so
-# before the fix that reader routed every later delivery at the baseline
-# epoch: it ran version 1 of the route's decoder and its `send` stamped the
-# message with epoch 1, so the version-2 sink (message type changed at epoch
-# 2, no migrate_msg) dropped it. Now a link reader that finds its epoch
-# draining hands its connection to a fresh reader the node actor spawns (the
-# node actor has passed its marker), and that reader routes the message.
+# The route closure retains the epoch in which it was registered. It sends
+# the stable wire Delivery to a Decoder actor, whose turn selects the new
+# epoch before decoding into Sink's changed message type. A direct call from
+# the saved route closure must remain old: advancing the link reader cannot
+# change the closure's creation epoch. This exercises the explicit actor
+# boundary required when long-lived routes hand off new versioned work.
 #
 # The version-1 message goes before the deploy (forming the link), the
 # version-2 one after it; node-b's reload server must count nothing

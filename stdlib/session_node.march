@@ -3161,6 +3161,35 @@ mod SessionNode do
   end
 
   doc """
+  Generated work-offer bridge. The typed protocol front supplies a named,
+  ABI-checked session-start adapter as [start]; authorization and offer
+  lifecycle are the same as `offer_role`. This function does not advance
+  arbitrary callbacks: [start] itself retains its creation epoch.
+  """
+  fn offer_work_role(node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+                    roles : List((String, Int)), compat : List((Int, List(String))),
+                    my_role : Int, capacity : Int,
+                    start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError))
+      : Result(Offer, RunError) do
+    offer_with(node, proto, fingerprint, roles, compat, my_role, capacity, start)
+  end
+
+  doc """
+  Generated session-start bridge, called after the typed work adapter
+  selects a compatible work epoch. Creates the endpoint in that frame and
+  preserves the ordinary offer's peer authorization and abandonment checks.
+  Calling this function alone does not select a newer code epoch.
+  """
+  fn start_offered_role(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String,
+                        roles : List((String, Int)), my_role : Int, peers : List(Int),
+                        session : String, abandoned : Int -> Bool,
+                        on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
+      : Result(Session.Outcome, RunError) do
+    run_cluster_with(io, node, my_role, peers, session, on_close, body, abandoned,
+                     ap_holder_check(node, proto, roles))
+  end
+
+  doc """
   `offer_role`, with the role HOSTED IN AN ACTOR [host] (its pid as an Int)
   for every session at once: each accepted session runs
   `run_cluster_hosted` in its own task, and the actor keeps one parked
@@ -3197,6 +3226,41 @@ mod SessionNode do
                                 cancel(sid, s, role, cause, ep)
                               end,
                               abandoned, holders))
+  end
+
+  doc """
+  Generated hosted session-start bridge. The typed work adapter selects a
+  compatible epoch before this creates the endpoint. Host monitoring,
+  abandonment, peer authorization and callback tracing match `offer_hosted`.
+  This bridge does not advance an ordinary callback's creation epoch.
+  """
+  fn start_offered_hosted(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+                         roles : List((String, Int)), my_role : Int, peers : List(Int),
+                         sid : String, abandoned : Int -> Bool, on_close : Int -> Unit, host : Int,
+                         start : String -> Cap(Session.Live) -> Unit,
+                         deliver : String -> Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
+                         cancel : String -> Cap(Session.Live) -> Int -> String -> Int -> Unit)
+      : Result(Session.Outcome, RunError) do
+    let holders = ap_holder_check(node, proto, roles)
+    let trace = hosted_trace_on()
+    let what = proto ++ "/" ++ int_to_string(my_role) ++ " fp=" ++ fingerprint ++ " host=" ++ int_to_string(host)
+    run_cluster_hosted_with(io, node, my_role, peers, sid, on_close, host,
+                              fn s -> do
+                                hosted_trace(trace, what, "start", sid, "")
+                                start(sid, s)
+                              end,
+                              fn (s, from, msg, ep) -> do
+                                hosted_trace(trace, what, "deliver", sid,
+                                             "from=" ++ int_to_string(from) ++ " ep=" ++ int_to_string(ep)
+                                               ++ " bytes=" ++ int_to_string(Bytes.length(msg)))
+                                deliver(sid, s, from, msg, ep)
+                              end,
+                              fn (s, role, cause, ep) -> do
+                                hosted_trace(trace, what, "cancel", sid,
+                                             "role=" ++ int_to_string(role) ++ " ep=" ++ int_to_string(ep) ++ " cause=" ++ cause)
+                                cancel(sid, s, role, cause, ep)
+                              end,
+                              abandoned, holders)
   end
 
   -- Debug trace of a hosted access point's callbacks (MARCH_SESSION_TRACE_HOSTED=1):

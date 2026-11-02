@@ -1442,16 +1442,20 @@ let deploy_hot_cmd =
                  against a server that predates capability admission, or to \
                  deliberately bypass the gate.")
   in
-  let run o s target prefix e c t grant_caps no_cap_gate =
+  let old_schemas =
+    Arg.(value & opt string "" & info ["old-schemas"] ~docv:"PATH"
+      ~doc:"Explicit running schema baseline for servers without SCHEMAS reporting.")
+  in
+  let run o s target prefix e c t grant_caps no_cap_gate old_schemas =
     ignore target; ignore prefix;
     (* D26: a topology app's derived pool caps go through the same gate. *)
     let pool_gate proj ~env = Pool_caps.deploy_gate ~proj ~env ~grant_caps () in
     let result =
       if e = "" && c = 0 then
         (* Single-server fast path (backward compat) *)
-        Cmd_deploy_hot.deploy ~output:o ~so:s ~grant_caps ~no_cap_gate ~pool_gate ()
+        Cmd_deploy_hot.deploy ~output:o ~so:s ~old_schemas ~grant_caps ~no_cap_gate ~pool_gate ()
       else
-        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~env:e ~canary:c ~timeout_ms:t
+        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~old_schemas ~env:e ~canary:c ~timeout_ms:t
           ~grant_caps ~no_cap_gate ~pool_gate ()
     in
     match result with
@@ -1460,7 +1464,7 @@ let deploy_hot_cmd =
   in
   Cmd.v (Cmd.info "hot"
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
-  Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate)
+  Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate $ old_schemas)
 
 let deploy_term =
   let env_arg =

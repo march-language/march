@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# HCR regression: a reclaimed version's closures still run, and a patch's
-# closures release their captures.
+# HCR regression: old closures survive deployment and release their captures
+# and epoch pins before their version is reclaimed.
 #
 #   test/hcr_closure_pin/run.sh MARCH_BIN OUT_DIR
 #
@@ -8,8 +8,12 @@
 # patches (v2, v1, v2, v1; four distinct files, so each deploy maps its own
 # image), runs the base, and prints its stdout and exit status.  The base
 # deploys patch k at request N/5 * k, keeps the closures every version built,
-# and calls them after the fourth deploy, by which time the 3-version ring has
-# reclaimed patch 1.  Expected output: test/hcr_closure_pin/expected.
+# and calls them across a deploy, by which time later requests see new code.
+# By the fourth deploy the 3-version ring has reclaimed patch 1 after its
+# closures were released. Each batch is invoked
+# after the next deploy and released before the following one: escaping
+# closures now pin their creation epoch and prevent premature reclamation.
+# Expected output: test/hcr_closure_pin/expected.
 #
 # MARCH_SANITIZE=1 builds the base and the patches with ASan/UBSan (run it
 # in the Linux CI image; specs/lang/golden/sanitize.sh does). The test/dune

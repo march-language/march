@@ -91,9 +91,12 @@ let with_provenance f =
   Fun.protect f ~finally:HR.reset_actor_provenance
 
 let test_stdlib_actor_dispatch_not_slot () =
+  let cfg = HR.default_config "MyApp" in
   with_provenance (fun () ->
-      HR.note_actor_fns ~stdlib:true [ "Writer_dispatch"; "Writer_Wait" ];
-      HR.note_actor_fns ~stdlib:false [ "Counter_dispatch" ];
+      HR.note_actor_fns ~stdlib:true [ "Writer_dispatch"; "Writer_Wait"; "Writer_on_stop" ];
+      HR.note_actor_fns ~stdlib:false [ "Counter_dispatch"; "Counter_on_stop" ];
+      check "app on_stop has independent slot" true (HR.is_slot_fn cfg "Counter_on_stop");
+      check "stdlib on_stop has no slot" false (HR.is_slot_fn cfg "Writer_on_stop");
       check "stdlib dispatch: no slot" false (HR.is_slot_actor_dispatch "Writer_dispatch");
       check "app dispatch: slot" true (HR.is_slot_actor_dispatch "Counter_dispatch");
       check "unrecorded dispatch: slot" true (HR.is_slot_actor_dispatch "Other_dispatch");

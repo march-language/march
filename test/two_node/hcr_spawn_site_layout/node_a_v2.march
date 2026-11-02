@@ -26,6 +26,17 @@ mod SpawnSite do
     { count: old.count, label: "migrated", extra: 1 }
   end
 
+  -- A mailbox boundary can advance to new code while main keeps its old frame.
+  actor Driver do
+    state { ticks : Int }
+    init { ticks: 0 }
+    on Tick() do
+      let c = spawn(C)
+      send(c, Show("driver"))
+      { ticks: state.ticks + 1 }
+    end
+  end
+
   -- Spawn site 1: a function reached through its dispatch slot, which the
   -- patch replaces (its impl hash moves with C's init, which is inlined).
   pfn spawn_by_slot() : Unit do
@@ -55,14 +66,15 @@ mod SpawnSite do
 
   fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock), _m : Cap(IO.Mut)) : Unit do
     println("node-a: version 2 up")
+    let driver = spawn(Driver)
     let n = 50
     let t = task_spawn(fn _ -> old_task_loop(0, n))
-    -- Spawn site 3: main's own closure. main follows the current epoch,
-    -- but this closure's code is the version that built it.
+    -- Spawn site 3: main and its closure keep their original routing epoch.
     List.each(List.range(0, n), fn _ ->
       let c = spawn(C)
       send(c, Show("main"))
       spawn_by_slot()
+      send(driver, Tick)
       sleep_ms(150))
     let _ = task_await_unwrap(t)
     sleep_ms(500)
@@ -70,5 +82,7 @@ mod SpawnSite do
     report(tl, "slot")
     report(tl, "task")
     report(tl, "main")
+    println("driver: v2 fresh " ++ bool_to_string(Vault.get_or(tl, "driver v2 fresh", 0) > 0)
+            ++ ", v2 bad " ++ int_to_string(Vault.get_or(tl, "driver v2 BAD", 0)))
   end
 end

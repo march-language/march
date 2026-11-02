@@ -25,6 +25,9 @@
 #              policy does not: ERR cap_policy IO.FileWrite, and the
 #              whole batch, serve_one included, is refused           4007
 #
+# HostedEcho additionally uses an actor role and a loop boundary. Its new
+# sessions must finish after both reloads: creating their endpoint in the
+# saved offer's old epoch would drain every one before the final answer.
 # Before the fix, v2 was refused with `ERR cap_policy Session.Live`.
 source "$root/test/two_node/control_plane/lib.sh"
 FORGE="${FORGE_BIN:-$root/_build/default/forge/bin/main.exe}"
@@ -42,10 +45,11 @@ printf '[package]\nname = "role_app"\nversion = "0.1.0"\n' > "$proj/forge.toml"
 cat > "$proj/topology.toml" <<'TOML'
 [roles]
 "Echo.Server" = { body = "RoleApp.Back.serve_one", capacity = 8 }
+"HostedEcho.Server" = { actor = "RoleApp.Back.HostedServer", capacity = 8 }
 
 [pool.back]
 start  = "RoleApp.Back.start"
-serves = ["Echo.Server"]
+serves = ["Echo.Server", "HostedEcho.Server"]
 caps   = ["IO.Console", "IO.Mut"]
 
 [pool.front]
@@ -101,7 +105,7 @@ grep -q '^Back.serve_one .*caps=IO.Console,IO.Mut,Session.Live$' "$work/v2/v2.so
   || { cat "$work/policy.err" >&2; fail "no policy for the back pool"; }
 grep -qx "IO.Console" "$work/back.policy" && grep -qx "IO.Mut" "$work/back.policy" \
   || fail "the policy lacks the pool's caps: $(cat "$work/back.policy")"
-grep -qx "serves Echo.Server" "$work/back.policy" || fail "the policy does not name the roles back serves: $(cat "$work/back.policy")"
+grep -qx "serves Echo.Server HostedEcho.Server" "$work/back.policy" || fail "the policy does not name the roles back serves: $(cat "$work/back.policy")"
 if grep -v '^serves' "$work/back.policy" | grep -qvx 'IO\(\..*\)\{0,1\}'; then fail "the generated policy names a non-IO cap: $(cat "$work/back.policy")"; fi
 if grep -qx "IO.FileWrite" "$work/back.policy"; then fail "the policy allows IO.FileWrite: $(cat "$work/back.policy")"; fi
 
@@ -127,12 +131,14 @@ sleep 1
 rp_start b front "127.0.0.1:$(ctl_port a)"
 wait_line a "back: hook ran"
 wait_line b "front: answer 40"
+wait_line b "front: hosted answer 40"
 
 # v2 over the reload socket: what `forge deploy hot` sends (Cmd_deploy_hot.run).
 "$HCR" deploy "$(ctl_sock a)" "$work/keys" "$work/v2/v2.so" "$work/v1/v1.so.schemas.json" "$work/v1/v1.so.hcr_manifest" \
   > "$work/deploy_v2.log" 2>&1 || { cat "$work/deploy_v2.log" >&2; fail "the role body patch (v2) was refused over the socket"; }
 grep -q "Back.serve_one" "$work/deploy_v2.log" || fail "v2 did not activate serve_one: $(cat "$work/deploy_v2.log")"
 wait_line b "front: answer 407"
+wait_line b "front: hosted answer 407"
 
 # v3 through the control plane: a signed release the Agent relays.
 ctl_until 40 "a leader" ctl_leader
@@ -143,6 +149,7 @@ CANARY=0 FOLLOW_S=90 "$HCR" release "$work/keys" "$eps" shared back "$work/v3/v3
   || { cat "$work/release_v3.out" >&2; fail "the role body release (v3) through the control plane failed"; }
 grep -q "complete" "$work/release_v3.out" || fail "the v3 release did not complete: $(cat "$work/release_v3.out")"
 wait_line b "front: answer 4007"
+wait_line b "front: hosted answer 4007"
 
 # v4 widens Back.audit to IO.FileWrite: the operator grants it, the node's
 # policy still refuses it, and nothing of v4 runs.
@@ -158,5 +165,7 @@ wait_line b "front: done"
 # Every answer front saw, in order: v4's (4) never.
 answers=$(grep '^front: answer ' "$work/b.out" | sed 's/^front: answer //' | tr '\n' ' ')
 [ "$answers" = "40 407 4007 " ] || fail "front saw the answers: $answers"
+hosted_answers=$(grep '^front: hosted answer ' "$work/b.out" | sed 's/^front: hosted answer //' | tr '\n' ' ')
+[ "$hosted_answers" = "40 407 4007 " ] || fail "front saw the hosted answers: $hosted_answers"
 ctl_no_ssh
 ctl_done

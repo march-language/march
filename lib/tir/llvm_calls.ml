@@ -426,7 +426,7 @@ let deep_drop_name ~(has_fn : string -> bool) (ty : Tir.ty) : string option =
   let name = Tir_names.drop_fn_prefix ^ Drop.mangle ty in
   if has_fn name then Some name else None
 
-let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) ?(own_float = true)
+let clo_wrap_define ?(frame_epoch = false) ?(drop_clo = false) ?(borrowed = []) ?(own_float = true)
     ?(deep_drops = []) wrap_name (param_ltys : string list) target_ret fn_name =
   let arg_names = List.mapi (fun i _ -> Printf.sprintf "%%a%d" i) param_ltys in
   (* A closure call consumes its heap arguments ([Clo_flags]), but the target
@@ -501,7 +501,9 @@ let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) ?(own_float = true)
         end)
       param_ltys arg_names in
   let call_args = String.concat ", " call_arg_strs in
+  let releases = releases ^ (if frame_epoch then "  call void @march_frame_leave()\n" else "") in
   let pro =
+    (if frame_epoch then "  call void @march_clo_frame_enter(ptr %_clo)\n" else "") ^
     (if drop_clo then "  call void @march_decrc(ptr %_clo)\n" else "")
     ^ Buffer.contents prologue
   in

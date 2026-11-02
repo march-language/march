@@ -66,6 +66,7 @@ let check_slot_ty (ctx : Llvm_ctx.ctx) (where : string) (ty_str : string) =
       where ty_str tname)
 
 let emit_store_field ctx obj_val i ty_str val_str =
+  if ty_str = "ptr" then Llvm_ctx.disown_closure_value ctx val_str;
   check_slot_ty ctx "emit_store_field" ty_str;
   let offset = 16 + i * 8 in
   let fp = Llvm_ctx.fresh ctx "fp" in
