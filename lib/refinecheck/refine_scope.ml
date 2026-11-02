@@ -378,15 +378,17 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
      [List.map] evaluates EVERY argument regardless of an earlier failure, matching
      [smt_of]'s side-effecting resolvers ([reflect_cache] et al.); the first [Error]
      found (left to right) is what's reported. *)
-  | A.ECon ({ A.txt = ctor; _ }, args, _) when Hashtbl.mem ctor_field_sorts ctor ->
+  | A.ECon ({ A.txt = ctor; _ }, args, sp) when is_source_ctor ctor ->
     let reflected = List.map r args in
     (match List.find_map (function Error e -> Some e | Ok _ -> None) reflected with
      | Some e -> Error e
      | None ->
        let ts = List.map (function Ok t -> t | Error _ -> assert false) reflected in
-       Ok (match sort_of_ctor ctor with
-           | Some adt -> ctor_term adt ctor ts
-           | None -> Smt.App (ctor, ts)))
+       (* The constructor by the expression's type (2026-11-02); a name no
+          type pins to one datatype is not reflected. *)
+       (match resolve_source_ctor ?adt:(tc_adt_at sp) ctor with
+        | Some (adt, k) -> Ok (ctor_term adt k ts)
+        | None -> Error e))
   (* Field access on a bare variable: s.count → selector applied to s.
      Only EVar receivers are supported; complex receivers conservatively return
      None — safe under the definite-failure soundness stance. *)
@@ -713,9 +715,9 @@ let rec pretty_smt_value (v : string) : string =
        | Some fields when List.length fields = List.length args ->
          "{ " ^ String.concat ", "
            (List.map2 (fun f a -> f ^ ": " ^ pretty_smt_value a) fields args) ^ " }"
-       | _ -> v)
-    | _ -> v
-  end else v
+       | _ -> unqualify_ctors v)
+    | _ -> unqualify_ctors v
+  end else unqualify_ctors v
 
 (* True for the "ret<N>" suffix of a propagated-postcondition constant. *)
 let is_ret_suffix (s : string) : bool =

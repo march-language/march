@@ -1101,6 +1101,101 @@ let measure_body_nonneg (self : string) (known : string list) (body : A.expr) : 
 let ctor_field_sorts : (string, Smt.sort list) Hashtbl.t = Hashtbl.create 32
 let adt_ctors : (string, string list) Hashtbl.t = Hashtbl.create 16
 
+(* ── Constructor names: SOURCE vs SMT (2026-11-02) ────────────────────────
+   March lets two datatypes declare the same constructor name (`Some` in a
+   user `type Mb = Some(Int) | None` and in the built-in `Option`).  Every
+   constructor-keyed table here ([ctor_field_sorts], [ctor_field_sorts_poly],
+   [ctor_field_names], [ctor_param_fields], [ctor_field_params],
+   [ctor_field_joint]) and every constructor list in [adt_ctors] is keyed by
+   the constructor's SMT NAME, which is also the name its `declare-datatypes`
+   entry, its tester `(_ is C)` and its selectors `C_<i>` use:
+
+     - a constructor name only ONE datatype declares keeps its source
+       spelling (`Cons`, `Some` in a program with no other `Some`): the
+       queries of a program without a collision are byte-for-byte unchanged;
+     - a name TWO OR MORE datatypes declare is qualified by its datatype's
+       sort, `<sort>$<Ctor>` (`M_Option$Some`, `M_Mb$Some`), for every one of
+       them.  `$` cannot occur in a March name, so the qualified spelling
+       never meets a source one.
+
+   Before this, the tables were keyed by the source name alone, so the last
+   declaration registered overwrote the others' fields (`Option`'s `Some`
+   was declared with the user type's `Int` payload, review of reflection
+   phase 1a).
+
+   A SOURCE name (an `ECon`/`PatCon`, an `is_Some` tester) is turned into
+   the SMT one only through [ctor_of_adt] (the datatype is known: the
+   scrutinee's or expected type) or [unique_ctor] (exactly one datatype
+   declares it).  A colliding source name looked up directly in any table
+   above simply misses, so a reader that was not taught the resolution
+   declines rather than guesses.  Filled by [finalize_ctor_names], right
+   after the datatype keys are final. *)
+
+(* Source constructor name -> every datatype key declaring it. *)
+let ctor_decls : (string, string list) Hashtbl.t = Hashtbl.create 64
+
+(* SMT constructor name -> its source name, for messages and for decoding a
+   model value back into a March value. *)
+let ctor_source : (string, string) Hashtbl.t = Hashtbl.create 64
+
+(* The SMT name of source constructor [ctor] of datatype [adt] (whether or
+   not [adt] declares it; see [ctor_of_adt] for the checked lookup). *)
+let ctor_smt_name (adt : string) (ctor : string) : string =
+  match Hashtbl.find_opt ctor_decls ctor with
+  | Some (_ :: _ :: _) -> adt ^ "$" ^ ctor
+  | _ -> ctor
+
+(* The SMT name of source constructor [ctor] AS A CONSTRUCTOR OF [adt], or
+   [None] when [adt] does not declare it. *)
+let ctor_of_adt (adt : string) (ctor : string) : string option =
+  let s = ctor_smt_name adt ctor in
+  match Hashtbl.find_opt adt_ctors adt with
+  | Some cs when List.mem s cs -> Some s
+  | _ -> None
+
+(* (datatype, SMT name) of a source constructor exactly one datatype
+   declares; [None] for an unknown or an ambiguous name. *)
+let unique_ctor (ctor : string) : (string * string) option =
+  match Hashtbl.find_opt ctor_decls ctor with
+  | Some [ adt ] -> Option.map (fun s -> (adt, s)) (ctor_of_adt adt ctor)
+  | _ -> None
+
+(* The built-in list's constructors, by SMT name (qualified only in a
+   program that declares its own `Nil`/`Cons`). *)
+let list_nil () : string = ctor_smt_name "M_List" "Nil"
+let list_cons () : string = ctor_smt_name "M_List" "Cons"
+
+(* Does some registered datatype declare source constructor [ctor]? *)
+let is_source_ctor (ctor : string) : bool = Hashtbl.mem ctor_decls ctor
+
+(* The source spelling of an SMT constructor name (itself when unqualified). *)
+let ctor_display (smt : string) : string =
+  match Hashtbl.find_opt ctor_source smt with Some c -> c | None -> smt
+
+(* [s] with every qualified SMT constructor name replaced by its source name:
+   a rendered model value or term shown to the user. *)
+let unqualify_ctors (s : string) : string =
+  if not (String.contains s '$') then s
+  else
+    Hashtbl.fold (fun smt c acc -> if smt = c then acc else (smt, c) :: acc) ctor_source []
+    (* Longest first, so `M_T$Ab` is never rewritten inside `M_T$Abc`. *)
+    |> List.sort (fun (a, _) (b, _) -> compare (String.length b, b) (String.length a, a))
+    |> List.fold_left
+         (fun acc (smt, c) ->
+           let n = String.length smt in
+           let b = Buffer.create (String.length acc) in
+           let ident ch = ch = '_' || ch = '$' || (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') in
+           let i = ref 0 and m = String.length acc in
+           while !i < m do
+             if !i + n <= m && String.sub acc !i n = smt
+                && (!i = 0 || not (ident acc.[!i - 1]))
+                && (!i + n = m || not (ident acc.[!i + n]))
+             then (Buffer.add_string b c; i := !i + n)
+             else (Buffer.add_char b acc.[!i]; incr i)
+           done;
+           Buffer.contents b)
+         s
+
 (* ── Parametric datatypes (specs/plans/set-refinements-strengthening-plan.md
    step 1.2) ───────────────────────────────────────────────────────────────
    [adt_arity]: a datatype sort's number of type parameters (0 for a
@@ -1330,8 +1425,8 @@ let set_preamble ~(elem_declared : bool) ~(str_declared : bool) ?(measure_attach
    element sorts left for [resolve_set_sorts].  None for anything opaque. *)
 let rec concrete_elts (t : Smt.term) : Smt.term option =
   match ctor_view t with
-  | Some ("Nil", []) -> Some (Smt.SetEmpty Smt.set_unknown_elem)
-  | Some ("Cons", [ h; tl ]) ->
+  | Some (c, []) when c = list_nil () -> Some (Smt.SetEmpty Smt.set_unknown_elem)
+  | Some (c, [ h; tl ]) when c = list_cons () ->
     (match ctor_view h with
      | Some _ -> None
      | None ->
@@ -1356,10 +1451,9 @@ let ctor_of_tester (m : string) : string option =
   if String.length m <= n || String.sub m 0 n <> pfx then None
   else
     let ctor = String.sub m n (String.length m - n) in
-    let known =
-      Hashtbl.fold (fun _ ctors acc -> acc || List.mem ctor ctors) adt_ctors false
-    in
-    if known then Some ctor else None
+    (* The SOURCE name: a site building the tester resolves it to the SMT
+       constructor by the argument's datatype ([tester_ctor]). *)
+    if is_source_ctor ctor then Some ctor else None
 
 (* True iff the checker attaches meaning to [m] applied inside a predicate. *)
 let known_predicate_fn (m : string) : bool =
@@ -1789,6 +1883,71 @@ let rec entry_shaped ?(depth = 0) ~(name_of : int -> string) (c : string) (s : i
    (pass 1) has seen every declaration.  Must run before [register_field_sorts]
    (pass 2) and before anything else calls [adt_sort_name], since pass 2's
    cross-type field references and every later consumer read through it. *)
+(* The key a declaration of [name] in module [path] is filed under once
+   [finalize_adt_canonical] has run: the bare key when one module path
+   declares the name, its own qualified key otherwise.  (Unlike
+   [adt_sort_name], never the PREFERRED declarant's key: pass 2 registers
+   each declaration's constructors with its own datatype.) *)
+let decl_key (path : string) (name : string) : string =
+  let bare = "M_" ^ name in
+  match Hashtbl.find_opt adt_decl_paths bare with
+  | Some entries when List.length (List.sort_uniq compare (List.map fst entries)) >= 2 ->
+    adt_sort_name_at path name
+  | _ -> bare
+
+(* The constructors the built-in datatypes are seeded with
+   ([register_builtin_adts]), by source name. *)
+let builtin_ctor_owner : (string * string) list =
+  [ ("Nil", "M_List"); ("Cons", "M_List"); ("None", "M_Option"); ("Some", "M_Option");
+    ("Ok", "M_Result"); ("Err", "M_Result") ]
+
+(* Decide every constructor's SMT name (see [ctor_smt_name]) once the
+   datatype keys are final, and re-key what was registered before that: the
+   constructor lists of pass 1 ([register_adt_names], source names) and the
+   built-in constructors' tables ([register_builtin_adts]).  Pass 2
+   ([register_field_sorts]) runs after this and registers under the final
+   names directly. *)
+let finalize_ctor_names () : unit =
+  Hashtbl.reset ctor_decls;
+  Hashtbl.reset ctor_source;
+  let keys = List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) adt_ctors []) in
+  List.iter
+    (fun adt ->
+      List.iter
+        (fun c ->
+          let prev = Option.value ~default:[] (Hashtbl.find_opt ctor_decls c) in
+          if not (List.mem adt prev) then Hashtbl.replace ctor_decls c (prev @ [ adt ]))
+        (Hashtbl.find adt_ctors adt))
+    keys;
+  (* The built-in constructors' entries, seeded under their source names. *)
+  let rekey (type v) (tbl : (string, v) Hashtbl.t) : unit =
+    List.iter
+      (fun (c, owner) ->
+        match Hashtbl.find_opt tbl c with
+        | None -> ()
+        | Some v ->
+          let s = ctor_smt_name owner c in
+          if s <> c then begin
+            Hashtbl.remove tbl c;
+            (* Only while the built-in datatype still declares it (a user
+               top-level `type Option` replaced its constructor list). *)
+            match Hashtbl.find_opt adt_ctors owner with
+            | Some cs when List.mem c cs -> Hashtbl.replace tbl s v
+            | _ -> ()
+          end)
+      builtin_ctor_owner
+  in
+  rekey ctor_field_sorts_poly;
+  rekey ctor_field_sorts;
+  rekey ctor_param_fields;
+  List.iter
+    (fun adt ->
+      let cs = Hashtbl.find adt_ctors adt in
+      let cs' = List.map (ctor_smt_name adt) cs in
+      List.iter2 (fun c s -> Hashtbl.replace ctor_source s c) cs cs';
+      Hashtbl.replace adt_ctors adt cs')
+    keys
+
 let finalize_adt_canonical () : unit =
   Hashtbl.reset adt_canonical;
   Hashtbl.iter
@@ -1836,7 +1995,8 @@ let finalize_adt_canonical () : unit =
           | None -> snd (List.nth entries (List.length entries - 1))
         in
         if preferred <> bare then Hashtbl.replace adt_canonical bare preferred)
-    adt_decl_paths
+    adt_decl_paths;
+  finalize_ctor_names ()
 
 (* The MEASURE-ONLY marker for a March ADT — see [meas_sort_prefix]. *)
 let meas_sort_name (march_name : string) : string =
@@ -1957,6 +2117,63 @@ let caller_sort_at (sp : A.span) : Smt.sort option =
   | None -> None
   | Some tm -> Option.bind (Hashtbl.find_opt tm sp) sort_of_tc_ty
 
+(* ── Resolving a SOURCE constructor (2026-11-02) ───────────────────────── *)
+
+(* The datatype a typechecker type names, when it pins exactly ONE: a short
+   type name two modules declare (`A.T`, `B.T`) does not ([adt_sort_name]'s
+   preferred declarant would be a guess), a record is not a variant, and
+   anything that is not a registered datatype is unknown. *)
+let adt_of_type_name (n : string) : string option =
+  let short =
+    match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+    | None -> n
+  in
+  match Hashtbl.find_opt adt_decl_paths ("M_" ^ short) with
+  | Some entries when List.length (List.sort_uniq compare (List.map fst entries)) >= 2 -> None
+  | _ ->
+    let adt = adt_sort_name short in
+    (match Hashtbl.find_opt adt_ctors adt with
+     | Some [ c ] when Hashtbl.mem ctor_field_names c -> None
+     | Some _ -> Some adt
+     | None -> None)
+
+let adt_of_tc_ty (t : March_typecheck.Typecheck.ty) : string option =
+  let module T = March_typecheck.Typecheck in
+  let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
+  match strip t with
+  | T.TCon (n, _) -> adt_of_type_name n
+  | _ -> None
+
+(* The same for a DECLARED type (a parameter's annotation). *)
+let rec adt_of_decl_ty (t : A.ty) : string option =
+  match t with
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> adt_of_decl_ty b
+  | A.TyCon (n, _) -> adt_of_type_name n.A.txt
+  | _ -> None
+
+(* The datatype the typechecker recorded for the expression at [sp], when it
+   pins one. *)
+let tc_adt_at (sp : A.span) : string option =
+  match !call_type_map with
+  | None -> None
+  | Some tm -> Option.bind (Hashtbl.find_opt tm sp) adt_of_tc_ty
+
+(* A source constructor [c] as (datatype, SMT constructor): by [adt], the
+   datatype the value is known to have (then [c] must be one of its
+   constructors), else by the name alone when exactly one datatype declares
+   it.  [None] otherwise: the caller declines, never guesses. *)
+let resolve_source_ctor ?(adt : string option) (c : string) : (string * string) option =
+  match adt with
+  | Some a -> Option.map (fun k -> (a, k)) (ctor_of_adt a c)
+  | None -> unique_ctor c
+
+(* The SMT tester constructor for `is_<c>(x)` where [x] has sort [srt] (when
+   known). *)
+let tester_ctor ?(srt : Smt.sort option) (c : string) : string option =
+  let adt = match srt with Some (Smt.SData (a, _)) when Hashtbl.mem adt_ctors a -> Some a | _ -> None in
+  Option.map snd (resolve_source_ctor ?adt c)
+
 (* A refinement or linearity wrapper says nothing about a value's SORT — a
    `{Int | _ > 0}` field is an Int field.  Before 2026-09-13 this fell through
    to the opaque `Elem` sort, which is harmless while nothing reads a refined
@@ -2012,12 +2229,12 @@ let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
       | A.DAlwaysLinearType (_, name, tparams, A.TDVariant variants, _) ->
         let key = record_key name.A.txt in
         Hashtbl.replace adt_ctors key
-          (List.map (fun (v : A.variant) -> v.A.var_name.A.txt) variants);
+          (List.map (fun (v : A.variant) -> ctor_smt_name key v.A.var_name.A.txt) variants);
         Hashtbl.replace adt_arity key (List.length tparams)
       | A.DType (_, name, tparams, A.TDRecord _, _)
       | A.DAlwaysLinearType (_, name, tparams, A.TDRecord _, _) ->
         let key = record_key name.A.txt in
-        Hashtbl.replace adt_ctors key [ name.A.txt ];
+        Hashtbl.replace adt_ctors key [ ctor_smt_name key name.A.txt ];
         Hashtbl.replace adt_arity key (List.length tparams)
       (* An actor's `state { ... }` is a record in every respect the checker
          cares about — named fields, one constructor — registered under the
@@ -2026,7 +2243,7 @@ let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
          (plan phase 4: actor state as an inductive invariant). *)
       | A.DActor (_, name, _, _) ->
         let key = record_key name.A.txt in
-        Hashtbl.replace adt_ctors key [ name.A.txt ];
+        Hashtbl.replace adt_ctors key [ ctor_smt_name key name.A.txt ];
         Hashtbl.replace adt_arity key 0
       | A.DMod (n, _, ds, _) ->
         register_adt_names ~path:(if path = "" then n.A.txt else path ^ "." ^ n.A.txt) ds
@@ -2120,12 +2337,17 @@ let rec register_field_sorts_once ?(path : string = "") (decls : A.decl list) : 
           |> List.sort_uniq compare
         in
         Hashtbl.replace ctor_hidden_params (adt_sort_name tname.A.txt) hidden;
+        (* Each constructor under its OWN datatype's SMT name ([decl_key],
+           not the preferred declarant [adt_sort_name] picks for the bare
+           type name). *)
+        let own = decl_key path tname.A.txt in
         List.iter
           (fun (v : A.variant) ->
-            set_ctor_fields (adt_sort_name tname.A.txt) v.A.var_name.A.txt
+            let k = ctor_smt_name own v.A.var_name.A.txt in
+            set_ctor_fields own k
               (List.map (smt_sort_of_field ~pnames) v.A.var_args);
-            Hashtbl.replace ctor_param_fields v.A.var_name.A.txt (List.map role_of v.A.var_args);
-            Hashtbl.replace ctor_field_joint v.A.var_name.A.txt
+            Hashtbl.replace ctor_param_fields k (List.map role_of v.A.var_args);
+            Hashtbl.replace ctor_field_joint k
               (List.map
                  (fun (t : A.ty) ->
                    match t with
@@ -2138,7 +2360,7 @@ let rec register_field_sorts_once ?(path : string = "") (decls : A.decl list) : 
                           args)
                    | _ -> None)
                  v.A.var_args);
-            Hashtbl.replace ctor_field_params v.A.var_name.A.txt
+            Hashtbl.replace ctor_field_params k
               (List.map
                  (fun (t : A.ty) ->
                    let ps =
@@ -2152,15 +2374,17 @@ let rec register_field_sorts_once ?(path : string = "") (decls : A.decl list) : 
           variants
       | A.DType (_, name, tparams, A.TDRecord fields, _)
       | A.DAlwaysLinearType (_, name, tparams, A.TDRecord fields, _) ->
-        let ctor = name.A.txt in
+        let own = decl_key path name.A.txt in
+        let ctor = ctor_smt_name own name.A.txt in
         let pnames = List.map (fun (p : A.name) -> p.A.txt) tparams in
-        set_ctor_fields (adt_sort_name name.A.txt) ctor
+        set_ctor_fields own ctor
           (List.map (fun (f : A.field) -> smt_sort_of_field ~pnames f.A.fld_ty) fields);
         Hashtbl.replace ctor_field_names ctor
           (List.map (fun (f : A.field) -> f.A.fld_name.A.txt) fields)
       | A.DActor (_, name, ad, _) ->
-        let ctor = name.A.txt in
-        set_ctor_fields (adt_sort_name name.A.txt) ctor
+        let own = decl_key path name.A.txt in
+        let ctor = ctor_smt_name own name.A.txt in
+        set_ctor_fields own ctor
           (List.map (fun (f : A.field) -> smt_sort_of_field f.A.fld_ty) ad.A.actor_state);
         Hashtbl.replace ctor_field_names ctor
           (List.map (fun (f : A.field) -> f.A.fld_name.A.txt) ad.A.actor_state)
@@ -2993,6 +3217,14 @@ let measure_definition (name : string) (arg : Smt.sort)
    arms fail to translate against the current candidate set, until stable.  All
    `declare-fun`s are emitted before any axiom so cross-measure (incl. mutually
    recursive) references resolve. *)
+(* A measure's arms ([measure_arms], source constructor names) with each
+   constructor as [adt]'s SMT constructor; [None] when an arm names a
+   constructor [adt] does not declare. *)
+let smt_arms (adt : string) (arms : (string * string list * A.expr) list)
+  : (string * string list * A.expr) list option =
+  let arms' = List.map (fun (c, vs, b) -> Option.map (fun c' -> (c', vs, b)) (ctor_of_adt adt c)) arms in
+  if List.for_all Option.is_some arms' then Some (List.map Option.get arms') else None
+
 let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
   Hashtbl.reset axiom_measures;
   (* shape-OK measures: (name, param-ADT, arms), exhaustive match on the param. *)
@@ -3001,7 +3233,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
       (fun (name, fd) ->
         match measure_param_adt fd, fd.A.fn_clauses with
         | Some (param, adt), c :: _ -> (
-          match measure_arms param c.A.fc_body with
+          match Option.bind (measure_arms param c.A.fc_body) (smt_arms adt) with
           | Some arms ->
             let covered = List.sort compare (List.map (fun (c, _, _) -> c) arms) in
             let all = List.sort compare (try Hashtbl.find adt_ctors adt with Not_found -> []) in
@@ -4443,8 +4675,10 @@ let measure_gate_errors (fd : A.fn_def) : string list =
       | Some (param, adt) -> (
         match measure_arms param body with
         | Some arms ->
+          (* Compared by SOURCE name, the parameter's datatype supplying the
+             SMT ones (a colliding name is qualified there). *)
           let covered = List.map (fun (ctor, _, _) -> ctor) arms in
-          let all = try Hashtbl.find adt_ctors adt with Not_found -> [] in
+          let all = List.map ctor_display (try Hashtbl.find adt_ctors adt with Not_found -> []) in
           let missing = List.filter (fun ctor -> not (List.mem ctor covered)) all in
           if all <> [] && missing <> [] then
             add

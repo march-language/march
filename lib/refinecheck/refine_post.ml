@@ -1386,8 +1386,10 @@ let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
     Some (adt_sort (adt_sort_name txt))
   | _ -> None
 
-let ctor_belongs (ctor : string) (adt : string) : bool =
-  match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor cs | None -> false
+(* Does datatype [adt] declare SOURCE constructor [ctor]?  ([ctor_k] is its
+   SMT name there, 2026-11-02.) *)
+let ctor_belongs (ctor : string) (adt : string) : bool = ctor_of_adt adt ctor <> None
+let ctor_k (ctor : string) (adt : string) : string = Option.get (ctor_of_adt adt ctor)
 
 (* The FULL solver-free acceptance test [check_post_induction] applies before
    it ever builds a VC: the outer shape match (a refined ADT-non-record
@@ -1792,7 +1794,8 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
               | A.EVar { A.txt = x; _ } ->
                 if declare x (adt_sort d) then Some (Smt.Const x) else None
               | A.ECon (ct, args, _) when ctor_belongs ct.A.txt d ->
-                let fs = try Hashtbl.find ctor_field_sorts ct.A.txt with Not_found -> [] in
+                let k = ctor_k ct.A.txt d in
+                let fs = try Hashtbl.find ctor_field_sorts k with Not_found -> [] in
                 if List.length fs <> List.length args then None
                 else
                   List.fold_right2
@@ -1801,7 +1804,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                       | Some t, Some ts -> Some (t :: ts)
                       | _ -> None)
                     args fs (Some [])
-                  |> Option.map (fun ts -> ctor_term d ct.A.txt ts)
+                  |> Option.map (fun ts -> ctor_term d k ts)
               (* ── THE INDUCTION HYPOTHESIS ─────────────────────────────────
                  A self-recursive call returning this datatype.  It becomes a
                  fresh opaque constant; the postcondition is assumed ABOUT that
@@ -2254,7 +2257,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                         | Smt.SData (sub_adt, _) when ctor_belongs ct.A.txt sub_adt -> (
                           incr pat_ctr;
                           let n = Printf.sprintf "$p%d" !pat_ctr in
-                          match flatten n sub_adt ct.A.txt sub with
+                          match flatten n sub_adt (ctor_k ct.A.txt sub_adt) sub with
                           | Some (bs, eqs) -> Some (n, (n, fs) :: bs, eqs)
                           | None -> None)
                         | _ -> None)
@@ -2312,7 +2315,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
               in
               match br.A.branch_pat with
               | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
-                match flatten mparam madt ct.A.txt subpats with
+                match flatten mparam madt (ctor_k ct.A.txt madt) subpats with
                 | None -> reject ()
                 | Some (binder_sorts, equations) ->
                   (* A binder that reuses a parameter's name would be

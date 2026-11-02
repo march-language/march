@@ -486,3 +486,198 @@ end
         let out = run ~env:"MARCH_REFLECT_PERTURB=r5-guarded" ~args:"--check --reflect-parity" parity_src in
         Alcotest.(check string) "guarded" "INTERPRETER-FAILURE" (parity_status out "guarded");
         if not (contains out "parity: RED") then Alcotest.failf "the net must report RED:\n%s" out) ]
+
+(* ── The constructor registry, keyed by (datatype, constructor) ──────────
+   (specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md).  A
+   constructor name two datatypes declare gets one SMT constructor per
+   datatype, `<datatype sort>$<Ctor>`; a source `Some` is resolved by the
+   type the checker knows for it, and declines when that type does not pin
+   one datatype. *)
+
+let ctor_src =
+  {|mod M do
+  fn need(x : {Int | _ == 100}) : Int do x end
+  mod U do
+    type Mb = Some(Int) | None
+    fn val(x : Mb) : Int do
+      match x do
+        Some(n) -> n + 2
+        None -> 0
+      end
+    end
+    fn b() : Int do need(val(Some(98))) end
+    fn b2() : Int do need(val(Some(97))) end
+  end
+  fn wrap(n : Int) : Option(Int) do Some(n) end
+  fn get(x : Option(Int)) : Int do
+    match x do
+      Some(n) -> n
+      None -> 0
+    end
+  end
+  fn a() : Int do need(get(wrap(100))) end
+  fn c() : Int do need(get(Some(100))) end
+  fn d() : Int do need(get(Some(98))) end
+end
+|}
+
+(* Every `declare-datatypes` of an `M_Option` instance in [qs], as (instance
+   suffix, the payload field's declared sort). *)
+let option_decls qs =
+  let re = Str.regexp {|((M_Option\([^ ]*\) 0)) ((([^()]*None) ([^ ]*Some ([^ ]*Some_0 \([^()]*\))))))|} in
+  List.concat_map
+    (fun q ->
+      let rec go pos acc =
+        match Str.search_forward re q pos with
+        | exception Not_found -> List.rev acc
+        | i -> go (i + 1) ((Str.matched_group 1 q, Str.matched_group 2 q) :: acc)
+      in
+      go 0 [])
+    qs
+
+let ctor_registry =
+  [ gated "ctor (a): a user Some(Int) leaves Option's sorts alone, and Option functions are reflected" (fun () ->
+        let out, qs = run_logged ~args:"--check --refine-report-sites=all" ctor_src in
+        expect out ~line:21 ~callee:"need" "proved" ~uses:"wrap";
+        expect out ~line:22 ~callee:"need" "proved" ~uses:"get";
+        let ds = option_decls qs in
+        if ds = [] then Alcotest.failf "no Option datatype declaration in the z3 log (vacuous)";
+        List.iter
+          (fun (suffix, field) ->
+            let want = if suffix = "" then "Elem" else if suffix = "$Int" then "Int" else String.sub suffix 1 (String.length suffix - 1) in
+            if field <> want then
+              Alcotest.failf "M_Option%s declares Some's payload as %s (want %s): the user type lent its fields"
+                suffix field want)
+          ds);
+    gated "ctor (b): one program matching on a user Some and Option's Some resolves each to its own type" (fun () ->
+        let out = run ctor_src in
+        expect out ~line:11 ~callee:"need" "proved" ~uses:"val";
+        expect out ~line:22 ~callee:"need" "proved" ~uses:"get");
+    gated "ctor (d): a violation through colliding constructor names is still a violation" (fun () ->
+        let out = run ctor_src in
+        (* U.val(Some(97)) is 99 and get(Some(98)) is 98 at run time. *)
+        expect out ~line:12 ~callee:"need" "violated";
+        expect out ~line:23 ~callee:"need" "violated");
+    gated "ctor (c): a type name two modules declare does not pin a datatype: declined, not guessed" (fun () ->
+        (* Both modules declare `type T` with a `K`; whichever datatype a
+           guess picked, one of the two calls would be decided wrongly. *)
+        let out =
+          run
+            {|mod M do
+  mod A do
+    type T = K(Int) | Z
+    fn f(x : T) : Int do
+      match x do
+        K(n) -> n + 1
+        Z -> 0
+      end
+    end
+  end
+  mod B do
+    type T = Z | K(Int)
+    fn f(x : T) : Int do
+      match x do
+        K(n) -> n * 2
+        Z -> 0
+      end
+    end
+  end
+  fn need6(x : {Int | _ == 6}) : Int do x end
+  fn a() : Int do need6(B.f(B.K(3))) end
+  fn b() : Int do need6(A.f(A.K(3))) end
+end
+|}
+        in
+        (* B.f(B.K(3)) is 6 and A.f(A.K(3)) is 4 at run time: a proof of
+           either line, or a violation of line 21, is a guess. *)
+        not_proved out ~line:21 ~callee:"need6";
+        not_proved out ~line:22 ~callee:"need6";
+        (match U.rows out ~line:21 ~callee:"need6" with
+         | rs when List.exists (fun (v, _) -> v = "violated") rs ->
+           Alcotest.failf "line 21 (true at run time) reported violated:\n%s" out
+         | _ -> ()));
+    gated "ctor: a library module declaring Some(Int), reached directly and by `alias`, lends Option nothing" (fun () ->
+        (* L.val(L.Some(98)) is 100 and V.val(V.Some(99)) is 101 at run time.
+           A library function is not unfolded today (so neither is proved);
+           what must hold is that no guess decides either, and that Option's
+           own sites are decided at Option's sorts. *)
+        let out =
+          U.run_lib
+            ~lib:[ ("l.march", "mod L do\n  type Mb = Some(Int) | None\n  fn val(x : Mb) : Int do\n    match x do\n      Some(n) -> n + 2\n      None -> 0\n    end\n  end\nend\n") ]
+            {|mod M do
+  fn need(x : {Int | _ == 100}) : Int do x end
+  fn get(x : Option(Int)) : Int do
+    match x do
+      Some(n) -> n
+      None -> 0
+    end
+  end
+  alias L as V
+  fn a() : Int do need(get(Some(100))) end
+  fn b() : Int do need(get(Some(99))) end
+  fn c() : Int do need(L.val(L.Some(98))) end
+  fn d() : Int do need(V.val(V.Some(98))) end
+  fn e() : Int do need(V.val(V.Some(99))) end
+end
+|}
+        in
+        expect ~file:"m.march" out ~line:10 ~callee:"need" "proved" ~uses:"get";
+        expect ~file:"m.march" out ~line:11 ~callee:"need" "violated";
+        List.iter
+          (fun line ->
+            match U.rows ~file:"m.march" out ~line ~callee:"need" with
+            | [] -> Alcotest.failf "no need row at line %d:\n%s" line out
+            | rs ->
+              let bad = if line = 14 then "proved" else "violated" in
+              if List.exists (fun (v, _) -> v = bad) rs then
+                Alcotest.failf "line %d must not be %s:\n%s" line bad out)
+          [ 12; 13; 14 ]);
+    gated "ctor: a nested module named like a stdlib module, declaring Some, does not lend its fields" (fun () ->
+        (* `mod Option` inside the entry collides with nothing the checker
+           keys on, but its `Some(Int)` collides with Option's `Some(a)`. *)
+        let out =
+          run
+            {|mod M do
+  fn need(x : {Int | _ == 100}) : Int do x end
+  mod Option do
+    type Mb = Some(Int) | None
+    fn val(x : Mb) : Int do
+      match x do
+        Some(n) -> n + 2
+        None -> 0
+      end
+    end
+  end
+  fn get(x : Option(Int)) : Int do
+    match x do
+      Some(n) -> n
+      None -> 0
+    end
+  end
+  fn a() : Int do need(get(Some(98))) end
+  fn b() : Int do need(Option.val(Option.Some(98))) end
+end
+|}
+        in
+        (* get(Some(98)) is 98; Option.val(Option.Some(98)) is 100 (not
+           unfolded today: a module named `Option` is not resolved). *)
+        expect out ~line:18 ~callee:"need" "violated";
+        (match U.rows out ~line:19 ~callee:"need" with
+         | rs when List.exists (fun (v, _) -> v = "violated") rs ->
+           Alcotest.failf "line 19 (true at run time) reported violated:\n%s" out
+         | _ -> ()));
+    gated "ctor: a predicate tester on a colliding name resolves by the argument's type" (fun () ->
+        let out =
+          run
+            {|mod M do
+  mod U do
+    type Mb = Some(Int) | None
+  end
+  fn need_some(x : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn a() : Int do need_some(Some(1)) end
+  fn b() : Int do need_some(None) end
+end
+|}
+        in
+        expect out ~line:6 ~callee:"need_some" "proved";
+        expect out ~line:7 ~callee:"need_some" "violated") ]

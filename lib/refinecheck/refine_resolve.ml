@@ -437,8 +437,8 @@ let rec selector_reduce (term : Smt.term) : Smt.term =
    axioms that would cause Z3 to return `unknown` instead of sat/unsat. *)
 let rec concrete_len (term : Smt.term) : int option =
   match ctor_view (selector_reduce term) with
-  | Some ("Nil", []) -> Some 0
-  | Some ("Cons", [ _h; t ]) -> Option.map (( + ) 1) (concrete_len t)
+  | Some (c, []) when c = list_nil () -> Some 0
+  | Some (c, [ _h; t ]) when c = list_cons () -> Option.map (( + ) 1) (concrete_len t)
   | _ -> None
 
 (* Try to evaluate an axiom measure on a concrete SMT term.

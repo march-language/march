@@ -199,9 +199,11 @@ let rec decode_smt (ty : A.ty) (s : string) : V.value option =
            else None
          | _ -> None
        in
+       (* A model names a constructor by its SMT name, qualified when two
+          datatypes declare it (2026-11-02); the program's is the source one. *)
        (match tokens_of s with
-        | Some (cname :: args) -> by_ctor cname args
-        | None -> by_ctor s []
+        | Some (cname :: args) -> by_ctor (Refine_encode.ctor_display cname) args
+        | None -> by_ctor (Refine_encode.ctor_display s) []
         | Some [] -> None)
      | None ->
        (match Hashtbl.find_opt record_fields name, tokens_of s with
