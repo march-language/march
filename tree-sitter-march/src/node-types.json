@@ -3542,6 +3542,21 @@
     }
   },
   {
+    "type": "fn_needs",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "module_path",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "fn_param",
     "named": true,
     "fields": {},
@@ -3693,6 +3708,10 @@
         },
         {
           "type": "arrow_type",
+          "named": true
+        },
+        {
+          "type": "fn_needs",
           "named": true
         },
         {

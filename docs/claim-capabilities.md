@@ -45,8 +45,10 @@ program refuses to start if the sandbox can't be put in place.
 
 ## Not claimed
 
-- **Per-function bounds.** Functions inside a module share the module's `needs`. A
-  declared per-function bound is planned, not built.
+- **Bounds on functions that do not declare one.** A function without a `needs` clause
+  in its header shares its module's `needs`. A declared bound is checked (its reach, and
+  that it lies within the module's `needs`); a callback it is handed is charged to the
+  caller that supplied it.
 - **What code does with a capability it holds**, or what it prints to the console.
 - **Hot-patched code.** A hot deploy is checked against the patch's own signed list of
   capabilities and an optional node policy, not against what the patch's code does.

@@ -26,6 +26,8 @@ let annotated_tyvar_fixed = "annotated_tyvar_fixed"
 let arity_mismatch = "arity_mismatch"
 let attribute_no_effect = "attribute_no_effect"
 let builtin_arity = "builtin_arity"
+let cap_bound = "cap_bound"
+let cap_bound_needs = "cap_bound_needs"
 let cap_ceiling = "cap_ceiling"
 let cap_deserialize = "cap_deserialize"
 let cap_dict_misuse = "cap_dict_misuse"
@@ -208,6 +210,8 @@ let all = [
   arity_mismatch;
   attribute_no_effect;
   builtin_arity;
+  cap_bound;
+  cap_bound_needs;
   cap_ceiling;
   cap_deserialize;
   cap_dict_misuse;

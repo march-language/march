@@ -1247,6 +1247,18 @@ and emit_fn ctx fn =
     | None   -> ""
     | Some t -> Printf.sprintf " : %s" (fmt_ty t)
   in
+  (* A per-function `needs` bound rides on the return annotation: printed on
+     every clause of a multi-head function, like the return type, which the
+     parser's clause merge accepts because the bounds are identical.
+     Dropping it would silently widen the function to its module's needs. *)
+  let ret = match fn.fn_needs with
+    | None -> ret
+    | Some ([], _) -> ret ^ " needs ()"
+    | Some (paths, _) ->
+      ret ^ " needs "
+      ^ String.concat ", "
+          (List.map (fun p -> String.concat "." (List.map (fun (n : name) -> n.txt) p)) paths)
+  in
   (match fn.fn_doc with
    | None -> ()
    | Some doc ->

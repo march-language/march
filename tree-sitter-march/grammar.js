@@ -166,9 +166,13 @@ module.exports = grammar({
       optional(seq('[', commaSep1(seq($.identifier, ':', $._type)), ']')),
       '(', optional(commaSep($.fn_param)), ')',
       optional(seq(':', field('return_type', $._type))),
+      optional($.fn_needs),
       optional($.when_guard),
       'do', field('body', $.block_body), 'end',
     ),
+
+    // Per-function capability bound: `needs IO.Console`, or `needs ()`.
+    fn_needs: $ => seq('needs', choice(seq('(', ')'), commaSep1($.module_path))),
 
     fn_param: $ => choice(
       $.named_param,

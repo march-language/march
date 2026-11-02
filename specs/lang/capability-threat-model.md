@@ -82,24 +82,30 @@ the module that declares them.
 **Per-role grants.** A protocol role declared `role Ledger needs IO.FileWrite` gets its
 grant checked the same way `main`'s is: its code may reach only what the role names.
 
-### 2. What is *not* checked per function
+### 2. What is checked per function
 
-There are **no per-function capability bounds** in 1.0 today. Inside a module, every
-function shares that module's `needs`. A `Cap(X)` parameter marks authority at a module
-boundary, but it does not limit what that function reaches.
+Inside a module, every function shares that module's `needs` unless it **declares** a
+narrower bound in its header: `fn fetch(url) needs IO.NetConnect do`, or `needs ()` for a
+function that performs no capability. A declared bound is checked two ways: the function's
+transitive reach must lie within it, and it must lie within the module's `needs`. It has
+no effect on callers, which stay bounded by their own module and `main`'s grant. See
+[Capabilities, per-function bounds]({{ site.baseurl }}/docs/capabilities/#per-function-bounds).
 
-A per-function check did exist from 2026-08-10 to 2026-08-13 ("R1 stage C", a check
-called `check_fn_grants`). It was removed on 2026-08-13 because it forced every caller to
-pass capabilities it didn't otherwise need
+What a declared bound does not cover:
+
+- **Callbacks.** Calling a function that arrived as a parameter is charged to the caller
+  that supplied it, so a bound means "my own authority, plus whatever you hand me".
+- **Functions without a bound.** An undeclared function is bounded only by its module.
+- **Untraceable calls are refused, not certified.** A body that calls a function value
+  taken from a record field, a list or a ref cannot be bounded short of all of `IO`; the
+  compiler rejects the narrower bound rather than accepting it.
+
+A `Cap(X)` parameter is still only an authority marker at a module boundary. A check that
+made such a parameter a ceiling existed from 2026-08-10 to 2026-08-13 ("R1 stage C",
+`check_fn_grants`) and was removed because it forced every caller to pass capabilities it
+didn't otherwise need
 ([`specs/progress/2026-08-13-remove-per-function-grant-ceiling.md`](../progress/2026-08-13-remove-per-function-grant-ceiling.md)).
-The provable-sandbox design page described it as shipped; that was true for those three
-days only.
-
-A declared per-function bound with no effect on callers (`fn fetch(url) needs
-IO.NetConnect.TLS do`) is **planned** for 1.0, with module-level bounds as the fallback if
-it proves too noisy (road-to-1.0 plan, "Pillar 2 — per-function bounds"). The per-function
-data it needs already exists (`lib/caps/cap_rows.ml`); only the declaration and the check
-are missing.
+Declared bounds are that check attached to a declaration instead.
 
 ### 3. Reading a binary or a dependency tree
 
@@ -193,8 +199,8 @@ The compile-time claim holds only if all of these are true:
 
 ## What is not claimed
 
-- **Per-function bounds.** A module's functions share its authority (see
-  [above](#2-what-is-not-checked-per-function)).
+- **Bounds on functions that do not declare one.** An undeclared function shares its
+  module's authority (see [above](#2-what-is-checked-per-function)).
 - **What code does with a capability it holds.** `IO.NetConnect` allows a telemetry ping
   and a data leak equally.
 - **Output to the console.** Anything a program may print, it may leak; no capability

@@ -294,14 +294,33 @@
         let ret = def.fn_ret_ty in
         let vis = def.fn_vis in
         let clauses = def.fn_clauses in
-        let rec collect_same ret_acc clauses_acc = function
+        (* A `needs` bound, like a return type, may be written on any one
+           clause; two clauses declaring DIFFERENT bounds is an error rather
+           than a silent pick. *)
+        let merge_needs (a : (name list list * span) option) b =
+          match a, b with
+          | Some (pa, _), Some (pb, sb) ->
+            let paths ps = List.map (List.map (fun (n : name) -> n.txt)) ps in
+            if paths pa <> paths pb then
+              error_raise
+                (Printf.sprintf
+                   "clauses of `%s` declare different `needs` bounds" name)
+                (Some "Write the bound on one clause, or the same bound on each.")
+                { Lexing.pos_fname = sb.file; pos_lnum = sb.start_line;
+                  pos_bol = 0; pos_cnum = sb.start_col };
+            a
+          | Some _, None -> a
+          | None, _ -> b
+        in
+        let rec collect_same ret_acc needs_acc clauses_acc = function
           | DFn (d, _) :: rest' when d.fn_name.txt = name ->
             let r = match ret_acc with Some _ -> ret_acc | None -> d.fn_ret_ty in
-            collect_same r (clauses_acc @ d.fn_clauses) rest'
-          | rest' -> (ret_acc, clauses_acc, rest')
+            collect_same r (merge_needs needs_acc d.fn_needs) (clauses_acc @ d.fn_clauses) rest'
+          | rest' -> (ret_acc, needs_acc, clauses_acc, rest')
         in
-        let (final_ret, all_clauses, rest') = collect_same ret clauses rest in
-        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_attrs = def.fn_attrs; fn_ret_ty = final_ret; fn_clauses = all_clauses; fn_bounds = def.fn_bounds; fn_attr_args = def.fn_attr_args }, span) :: acc) rest'
+        let (final_ret, final_needs, all_clauses, rest') =
+          collect_same ret def.fn_needs clauses rest in
+        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_attrs = def.fn_attrs; fn_ret_ty = final_ret; fn_clauses = all_clauses; fn_bounds = def.fn_bounds; fn_attr_args = def.fn_attr_args; fn_needs = final_needs }, span) :: acc) rest'
       | d :: rest -> go (d :: acc) rest
     in
     let grouped = go [] decls in
@@ -727,7 +746,8 @@ fn_decl_name:
 
 fn_decl:
   | FN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
-    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    ret = option(ret_annot); needs = option(fn_needs_clause); guard = option(when_guard);
+    DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Public;
              fn_doc = None;
@@ -739,12 +759,13 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = []; fn_attr_args = [] },
+             fn_bounds = []; fn_attr_args = []; fn_needs = needs },
            mk_span ($loc)) }
   | FN; name = fn_decl_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
     _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
-    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    ret = option(ret_annot); needs = option(fn_needs_clause); guard = option(when_guard);
+    DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Public;
              fn_doc = None;
@@ -756,10 +777,11 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = bounds; fn_attr_args = [] },
+             fn_bounds = bounds; fn_attr_args = []; fn_needs = needs },
            mk_span ($loc)) }
   | PFN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
-    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    ret = option(ret_annot); needs = option(fn_needs_clause); guard = option(when_guard);
+    DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Private;
              fn_doc = None;
@@ -771,12 +793,13 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = []; fn_attr_args = [] },
+             fn_bounds = []; fn_attr_args = []; fn_needs = needs },
            mk_span ($loc)) }
   | PFN; name = fn_decl_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
     _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
-    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    ret = option(ret_annot); needs = option(fn_needs_clause); guard = option(when_guard);
+    DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Private;
              fn_doc = None;
@@ -788,7 +811,7 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = bounds; fn_attr_args = [] },
+             fn_bounds = bounds; fn_attr_args = []; fn_needs = needs },
            mk_span ($loc)) }
   | FN; _n = fn_decl_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
     { error_raise
@@ -1341,6 +1364,14 @@ upper_dot_path:
     A scope narrows the capability to that directory subtree; its absence means
     any path.  Only filesystem capabilities accept one — the typechecker
     rejects a scope elsewhere rather than ignoring it. *)
+(** A per-function capability bound in a function header:
+      fn fetch(url) : String needs IO.NetConnect do ... end
+      fn len(s) needs () do ... end
+    Plain capability paths only (no path scope). *)
+fn_needs_clause:
+  | NEEDS; LPAREN; RPAREN { ([], mk_span ($loc)) }
+  | NEEDS; caps = separated_nonempty_list(COMMA, cap_path) { (caps, mk_span ($loc)) }
+
 needs_decl:
   | NEEDS; caps = separated_nonempty_list(COMMA, scoped_cap_path)
     { DNeeds (caps, mk_span ($loc)) }

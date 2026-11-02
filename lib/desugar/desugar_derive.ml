@@ -38,7 +38,7 @@ let mk_fn_def name params body : fn_def =
     fn_doc     = None;
     fn_attrs   = [];
     fn_ret_ty  = None;
-    fn_bounds  = []; fn_attr_args = [];
+    fn_bounds  = []; fn_attr_args = []; fn_needs = None;
     fn_clauses = [{
       fc_params = List.map (fun p ->
         FPNamed { param_name = mk_name p; param_ty = None; param_lin = Unrestricted }
