@@ -1415,16 +1415,18 @@ jobs:
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
+      # The PR's file list from the API, not a checkout: a full-history fetch
+      # of this repository takes longer than this job's whole budget.
       - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "${{ github.event_name }}" != pull_request ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- \
-            lib/refine lib/refinecheck z3.version scripts/install-z3.sh scripts/refine-verdicts.sh)
+          changed=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename' \
+            | grep -E '^(lib/refine/|lib/refinecheck/|z3\.version$|scripts/install-z3\.sh$|scripts/refine-verdicts\.sh$)' || true)
           if [ -n "$changed" ]; then
             echo "refine/z3 files changed:"; echo "$changed"
             echo "run=true" >> "$GITHUB_OUTPUT"
