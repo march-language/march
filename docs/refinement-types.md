@@ -24,9 +24,21 @@ correct code, at the price that silence does not mean "proved". The page's
 tooling sections show how to tell the two apart, and `cap verified` turns
 silence into an error for a module that wants a guarantee.
 
-> **Requires Z3.** Refinement checking runs only when the `z3` solver is on your
-> `PATH`. Without it, the predicates type-check as their base type and no
-> refinement diagnostics are produced (the build still succeeds).
+> **The solver.** Refinements are proved by the z3 SMT solver, pinned to the
+> version in `z3.version` (4.16.0). Every release archive ships it at
+> `libexec/z3`, so a fresh install needs nothing else. March looks for z3 in
+> `MARCH_Z3`, then next to the running `march`, then on `PATH`. If none can be
+> used, the build still succeeds, the predicates type-check as their base type,
+> and a program with refinements of its own gets one
+> [`solver_unavailable`]({{ site.baseurl }}/docs/errors/solver_unavailable/)
+> warning saying why; another z3 version is used, with a
+> [`solver_version_mismatch`]({{ site.baseurl }}/docs/errors/solver_version_mismatch/)
+> warning.
+>
+> Each query runs under a fixed resource limit (z3's `rlimit`, a count of solver
+> steps), not a time limit, so a verdict does not depend on how busy the machine
+> is, and the same on every platform. A project with a known-hard proof can raise
+> it with `march --refine-rlimit N` or `[refine] rlimit = N` in `forge.toml`.
 
 > **What's new (October 2026).** Refinements now reach further into
 > containers, callbacks and folds:
@@ -259,6 +271,41 @@ comparisons, which is every ordinary refinement. A division in a bare
 `Int`-valued position, such as a call's argument `f(n / d)`, is translated only
 when its divisor is a non-zero literal or is syntactically positive
 (`len(xs) + 1`).
+
+### A message for each half of a contract
+
+A predicate's `&&` conjuncts can each carry a message, written after the
+conjunct with `else`. When a call breaks that conjunct, the message leads the
+diagnostic, in the caller's terms rather than the checker's notation:
+
+```march
+fn nth(xs : List(a), n : {Int | _ >= 0 else "index must not be negative"
+                             && _ < len(xs) else "index must be less than the list's length"}) : a do
+  ...
+end
+```
+
+```
+refinement violation: index must not be negative [refinement_violated]
+argument `n` of `List.nth` does not satisfy `_ >= 0`
+```
+
+The line under the message names the conjunct the call breaks, alone. When
+the checker cannot prove a call either way, the hint that already names the
+missing conjunct carries its message too: `` `_ >= 0` established here;
+`_ < len(xs)` not: index must be less than the list's length ``.
+
+- `else` binds tighter than `&&`: in `_ >= 0 && _ < 10 else "…"` the message
+  belongs to `_ < 10` only.
+- A message is optional per conjunct. A conjunct without one, or a call that
+  breaks only the conjunction and no single conjunct, is reported exactly as
+  a refinement without messages is.
+- A message is plain text. It attaches only to the top-level `&&` conjuncts,
+  not inside an `||` or a nested expression. It changes no verdict: the
+  checker proves and refutes exactly what it would without it.
+- The standard library's two-sided bounds carry messages: `List.nth`,
+  `Array.get`/`set`, the `Simd` lane accessors, `DateTime.fixed_zone` and
+  `fixed_zone_hm`, `Random.bernoulli`, and `Stats.percentile`/`quantile`.
 
 ### Refinements inside containers, callbacks and folds
 
@@ -1582,6 +1629,56 @@ regenerates the file, and a test fails when it is stale.
 The logic's `Int` is mathematical (D8): a lemma such as
 `{Unit | inc(n) > n}` proves, although at the maximum `Int` the program's `inc`
 overflows. Overflow obligations come in a later phase.
+
+**Lemmas in `forge test`.** Every `forge test` also tests the lemmas of each
+project source file that has one (`march --check --lemma-test FILE` does the
+same for one file). Each lemma's theorem is evaluated on generated inputs:
+boundary `Int`s, then 100 random draws from a fixed seed (20261031, printed in
+the report). An input outside a refined parameter is skipped. The report has
+one `lemma-test` line per lemma:
+
+- an **unproved** lemma becomes a property test. A false theorem is a
+  `COUNTEREXAMPLE` with the input, and the run fails. Otherwise the line says
+  `tested, not proved: N inputs`.
+- an **admitted** lemma is checked again in the interpreter and in a small
+  compiled program. The checker proved it, so if it is false in either, the
+  compiler or runtime has a bug: `FALSE` or `COMPILED-FALSE`, and the run
+  fails.
+- an `Int` overflow is reported as `overflow?`, not as a counterexample (the
+  logic's `Int` has no bounds). A lemma whose parameter type has no generator
+  (a `String`, a `Float`, a record) is `not-tested`.
+
+The tests are separate programs. Your build still removes every lemma.
+
+**Laws in the docs and in search.** `forge doc` lists, under each function,
+the lemmas whose theorem calls it, under the heading "Laws", with the theorem
+as written. `forge search --law TEXT` finds lemmas whose theorem contains TEXT
+(case and spaces ignored) or calls a function named TEXT, and a plain name
+search for a function also finds the lemmas about it.
+
+**Lemmas as a contract for changes.** A lemma states a law the code must keep,
+and the checker re-proves it on every build. To make a broken law fail the
+build, put the lemmas in a `cap verified` module, where `lemma_unproved` is an
+error, not a warning:
+
+```march
+mod ListLaws do
+  cap verified
+  -- cat and rev as above
+  @[lemma]
+  fn cat_nil(xs : List(a)) : {Unit | cat(xs, Nil) == xs} do
+    match xs do
+      Nil -> ()
+      Cons(_, t) -> cat_nil(t)
+    end
+  end
+end
+```
+
+A change to `cat` that breaks `cat(xs, Nil) == xs` now stops the build, and
+`forge test` prints an input that shows it. This is useful when someone else,
+for example a coding agent, changes the code: the lemmas say what must still
+hold, and the build checks it.
 
 ### Constant functions as bounds
 
@@ -6486,7 +6583,7 @@ edges:
   `let`-bound selectors) instead of `declare-fun` + forall axioms
   (`measure_definition`, 2026-09-14). Under the quantified encoding z3 answered
   every *satisfiable* query over such a measure `unknown (incomplete
-  quantifiers)` only at the 3 s per-query timeout, so a single contracted
+  quantifiers)` only at the 3 s per-query timeout then in force, so a single contracted
   `Array.get` in the stdlib cost ~1 min of cold checking per program; the
   definition decides the same query in ~30 ms in both directions. Recursive
   and set-valued measures keep the axioms.

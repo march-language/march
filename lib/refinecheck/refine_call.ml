@@ -28,6 +28,47 @@
 
 include Refine_resolve
 
+(* The `&&` spines of a goal and of the predicate it was reflected from.  When
+   the two have the same length, the i-th SMT conjunct came from the i-th
+   source conjunct, which is how a per-conjunct verdict gets quoted back in the
+   user's own syntax ([Partial_conjunct], and author messages below). *)
+let rec smt_conjuncts = function
+  | Smt.And (a, b) -> smt_conjuncts a @ smt_conjuncts b
+  | t -> [ t ]
+
+let rec pred_conjuncts (e : A.expr) =
+  match e with
+  | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> pred_conjuncts a @ pred_conjuncts b
+  | e -> [ e ]
+
+(* The conjuncts of [pred] that a refuted call definitely breaks and whose
+   author wrote a message for them (`_ >= 0 else "…"`, [March_ast.Refine_msg]),
+   as (source conjunct, message).  [refuted g] answers whether the solver proves
+   [g] false here.  A one-conjunct predicate needs no extra query: the call
+   already refuted it.  Empty when no conjunct carries a message, so a predicate
+   without messages costs no solver time, and when the spines do not line up or
+   no single messaged conjunct is refuted on its own (the call breaks only the
+   conjunction): the diagnostic then falls back to quoting the whole predicate. *)
+let refuted_messages ~(refuted : Smt.term -> bool) ~(goal : Smt.term) (pred : A.expr)
+    : (A.expr * string) list =
+  let parts = pred_conjuncts pred in
+  let with_msg = List.map (fun p -> (p, March_ast.Refine_msg.message_for p)) parts in
+  if List.for_all (fun (_, m) -> m = None) with_msg then []
+  else
+    match with_msg with
+    | [ (p, Some m) ] -> [ (p, m) ]
+    | _ ->
+      let gparts = smt_conjuncts goal in
+      if List.length gparts <> List.length parts then []
+      else
+        List.concat
+          (List.map2
+             (fun g (p, m) ->
+               match m with
+               | Some m when refuted g -> [ (p, m) ]
+               | _ -> [])
+             gparts with_msg)
+
 (* =================================================================
    §14 Verdict state and withdrawal diagnostics
    ================================================================= *)
@@ -200,7 +241,7 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ECond (arms, _) -> List.exists (fun (c, b) -> free c || free b) arms
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
-  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> free e
 
 (* ── Attributing a skip to a withdrawn alias ───────────────────────────────
@@ -490,7 +531,7 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.EIf (c, t, el, _) -> any [ c; t; el ]
       | A.ECond (arms, _) -> List.exists (fun (c, b) -> recur c || recur b) arms
       | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
-      | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+      | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
       | A.EDbg (Some e, _) -> recur e
     in
     (* [pred] itself may be a top-level conjunction (`len(_) >= 0 && len(_) >
@@ -3315,12 +3356,33 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                   | None -> fallback ())
                | _ -> fallback ()
              in
+             (* The author's words for the conjunct(s) this call breaks lead
+                the message, and the line under them names the argument and
+                exactly those conjuncts.  Without a message the whole
+                predicate is quoted, as it always was. *)
+             let headline =
+               match
+                 refuted_messages
+                   ~refuted:(fun g ->
+                     Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not g }
+                     = Refine.Verified)
+                   ~goal rp.pred
+               with
+               | [] ->
+                 Printf.sprintf "%s does not satisfy %s `%s`%s" param_label obligation_noun
+                   (pred_str rp.pred) cx_str
+               | broken ->
+                 Printf.sprintf "%s\n%s does not satisfy %s `%s`%s"
+                   (String.concat "; " (List.map snd broken))
+                   param_label obligation_noun
+                   (String.concat " && " (List.map (fun (p, _) -> pred_str p) broken))
+                   cx_str
+             in
              Err.report errctx
                { Err.severity = Err.Error; span;
                  message = display_measures @@ Printf.sprintf
-                   "refinement violation: %s does not satisfy %s `%s`%s\n%s"
-                   param_label obligation_noun (pred_str rp.pred)
-                   cx_str
+                   "refinement violation: %s\n%s"
+                   headline
                    (match subject with
                     | Argument ->
                       (* The guard is the predicate over the ARGUMENT, not
@@ -3484,17 +3546,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                   pairing is wrong, and quoting the user a fragment that does
                   not correspond to the conjunct tested is worse than the vague
                   message. *)
-               let rec spine = function
-                 | Smt.And (a, b) -> spine a @ spine b
-                 | t -> [ t ]
-               in
-               let rec pred_spine (e : A.expr) =
-                 match e with
-                 | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
-                   pred_spine a @ pred_spine b
-                 | e -> [ e ]
-               in
-               let goal_parts = spine goal and pred_parts = pred_spine rp.pred in
+               let goal_parts = smt_conjuncts goal and pred_parts = pred_conjuncts rp.pred in
                let partial =
                  if List.length goal_parts < 2
                     || List.length goal_parts <> List.length pred_parts
@@ -3507,17 +3559,22 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                            Refine.discharge ~root ~preamble { vc with Smt.goal = g }
                            = Refine.Verified
                          in
-                         (holds, pred_str p))
+                         (holds, p))
                        goal_parts pred_parts
                    in
-                   let held = List.filter_map (fun (h, s) -> if h then Some s else None) judged
+                   let held =
+                     List.filter_map (fun (h, p) -> if h then Some (pred_str p) else None) judged
                    and missing =
-                     List.filter_map (fun (h, s) -> if h then None else Some s) judged
+                     List.filter_map (fun (h, p) -> if h then None else Some (pred_str p)) judged
+                   and messages =
+                     List.filter_map
+                       (fun (h, p) -> if h then None else March_ast.Refine_msg.message_for p)
+                       judged
                    in
                    (* Every conjunct failing is not "partial" — it is whatever
                       the syntactic diagnosis says. *)
                    if held = [] || missing = [] then None
-                   else Some (Obligation.Partial_conjunct { held; missing })
+                   else Some (Obligation.Partial_conjunct { held; missing; messages })
                in
                note
                  (Obligation.Skipped

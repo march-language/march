@@ -7,6 +7,7 @@ description: >
   Exists because the jobs below were split apart to run in parallel — every
   one of them needs the same ~30 lines of setup, and duplicating that across
   seven jobs is how the blake3/z3 dependency lists drift out of sync.
+  Includes the pinned z3 (z3.version), on PATH.
 
 inputs:
   ocaml-compiler:
@@ -32,27 +33,66 @@ runs:
     - name: Install system dependencies
       shell: bash
       run: |
-        # z3: the refinement-type conformance corpus (@types-check) discharges
-        # pre/postcondition + division-safety VCs via the `z3` binary on PATH
-        # (lib/refine/solver.ml). Without it, refinement checks silently no-op
-        # and the reject/t71-t73 witnesses stop being rejected. Install it on
-        # both runners so the corpus is deterministic (macOS previously relied
-        # on the runner image's pre-installed z3).
+        # z3 is NOT installed from brew/apt: the step below puts the pinned
+        # z3 (z3.version) on PATH, the same version every platform and every
+        # release archive uses.
         if [ "$RUNNER_OS" = "macOS" ]; then
-          brew install blake3 brotli zstd llvm z3
+          brew install blake3 brotli zstd llvm
         else
-          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev z3
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
           # libblake3-dev is not available in Ubuntu 24.04; build from source
           git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
           cd /tmp/blake3/c
+          # SIMD units are per-arch (see build.yml's Alpine leg): the arm64
+          # runner the refine-agreement job uses needs NEON, not the x86 units.
+          case "$(uname -m)" in
+            aarch64) B3_SIMD="blake3_neon.c" ;;
+            *)       B3_SIMD="blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S" ;;
+          esac
           gcc -O2 -shared -fPIC -o libblake3.so \
-            blake3.c blake3_dispatch.c blake3_portable.c \
-            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
-            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+            blake3.c blake3_dispatch.c blake3_portable.c $B3_SIMD
           sudo cp libblake3.so /usr/local/lib/libblake3.so
           sudo cp blake3.h /usr/local/include/blake3.h
           sudo ldconfig
         fi
+
+    # The pinned z3 (z3.version), built from source by scripts/install-z3.sh
+    # and cached per platform, version and recipe.  The refinement corpus
+    # (@types-check), the refinecheck suite and the verdict-agreement job all
+    # discharge their VCs with it; a distro z3 (Ubuntu's apt has 4.8.12)
+    # proves different things and warns solver_version_mismatch.
+    #
+    # On Linux it is the SAME binary the release ships: built static (musl)
+    # inside alpine:3.21 with the release build's recipe, so the refinement
+    # suites and the agreement job test the z3 users run, not a glibc build of
+    # it.  A cold build takes ~15 min on a 4-vCPU runner (once per key); the
+    # callers' setup-step timeouts allow for it.
+    - name: Restore the pinned z3
+      id: z3-cache
+      uses: actions/cache/restore@v6
+      with:
+        path: ~/.cache/march-z3
+        key: z3-${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('z3.version', 'scripts/install-z3.sh') }}
+
+    - name: Build the pinned z3 (cache miss only) and put it on PATH
+      shell: bash
+      run: |
+        mkdir -p "$HOME/.cache/march-z3"
+        if [ "$RUNNER_OS" = Linux ]; then
+          docker run --rm -v "$PWD:/work:ro" -v "$HOME/.cache/march-z3:/out" -w /work alpine:3.21 \
+            sh -euc 'apk add --no-cache bash build-base cmake python3 curl >/dev/null && bash scripts/install-z3.sh /out --static'
+        else
+          scripts/install-z3.sh "$HOME/.cache/march-z3"
+        fi
+        "$HOME/.cache/march-z3/z3" --version
+        echo "$HOME/.cache/march-z3" >> "$GITHUB_PATH"
+
+    - name: Save the pinned z3
+      if: steps.z3-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ~/.cache/march-z3
+        key: ${{ steps.z3-cache.outputs.cache-primary-key }}
 
     - name: Install zig (the C cross-compiler)
       if: inputs.cross-tools == 'true'

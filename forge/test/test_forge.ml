@@ -801,6 +801,35 @@ let test_project_pin_main_default_and_false () =
 (* A non-boolean value is an error, not a silent "off": the failure mode of a
    GUI app that silently did not pin is a window that never appears, with no
    diagnostic anywhere. *)
+(* [refine] rlimit: the per-query z3 limit for a project with a known-hard
+   proof.  forge passes it to every march it runs, through the one prefix
+   they all share. *)
+let test_forge_toml_refine_rlimit_passed () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\nname = \"x\"\n\n[refine]\nrlimit = 123\n";
+  (match Project.load_from_dir dir with
+   | Error e -> Alcotest.failf "load failed: %s" e
+   | Ok p ->
+     Alcotest.(check (option int)) "parsed" (Some 123) p.Project.refine_rlimit;
+     let env = Cmd_build.lib_path_env p in
+     Alcotest.(check bool) ("prefix carries it: " ^ env) true
+       (try ignore (Str.search_forward (Str.regexp_string "MARCH_REFINE_RLIMIT=123 ") env 0); true
+        with Not_found -> false));
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml") "[package]\nname = \"x\"\n";
+  (match Project.load_from_dir dir with
+   | Error e -> Alcotest.failf "load failed: %s" e
+   | Ok p ->
+     Alcotest.(check (option int)) "absent" None p.Project.refine_rlimit;
+     Alcotest.(check bool) "no env when absent" false
+       (try ignore (Str.search_forward (Str.regexp_string "MARCH_REFINE_RLIMIT") (Cmd_build.lib_path_env p) 0); true
+        with Not_found -> false));
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml") "[package]\nname = \"x\"\n\n[refine]\nrlimit = 0\n";
+  Alcotest.(check bool) "zero is an error" true
+    (match Project.load_from_dir dir with Error _ -> true | Ok _ -> false | exception Failure _ -> true)
+
 let test_project_pin_main_non_bool_is_error () =
   let dir = fresh_dir () in
   write_file (Filename.concat dir "forge.toml")
@@ -3321,6 +3350,7 @@ let () =
       Alcotest.test_case "pin_main = true"                    `Quick test_project_pin_main_true;
       Alcotest.test_case "pin_main absent/false -> false"     `Quick test_project_pin_main_default_and_false;
       Alcotest.test_case "pin_main non-bool -> error"         `Quick test_project_pin_main_non_bool_is_error;
+      Alcotest.test_case "forge_toml_refine_rlimit_passed"    `Quick test_forge_toml_refine_rlimit_passed;
     ];
     "workspace", [
       Alcotest.test_case "parse_members: extracts list"    `Quick test_workspace_parse_members;

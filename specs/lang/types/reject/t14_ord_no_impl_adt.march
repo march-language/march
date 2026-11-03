@@ -9,3 +9,4 @@ mod M do
     println(if a < b do "y" else "n" end)
   end
 end
+-- EXPECT-FIX-PARTIAL: the derive fix is right; `main` also performs IO with no grant (cap_grant), an independent error

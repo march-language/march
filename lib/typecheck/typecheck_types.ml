@@ -139,6 +139,12 @@ type constraint_ =
   | CADTBound of string * ty
   | CTNatBound of ty
 
+(** Where a pending constraint came from: the variable whose instantiation
+    produced it (an operator like [<], or a call to a generic function) and
+    that use's span, so [missing_impl] can point at the use instead of the
+    enclosing declaration. *)
+type constraint_site = { cs_span : Ast.span; cs_name : string }
+
 (** A type scheme encodes Hindley-Milner polymorphism.
     [Poly(ids, cs, ty)] represents ∀(α₁ … αₙ). τ where the αᵢ are the
     [Unbound] variable ids that are quantified, and [cs] are class
@@ -474,6 +480,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.ELetStar (_, _, _, sp) -> sp
   | Ast.EAssert (_, sp)         -> sp
   | Ast.ESigil (_, _, sp)       -> sp
+  | Ast.ERefineMsg (_, _, sp)       -> sp
 
 (** The provided side of a type mismatch (D5, diagnostics plan §9): the
     sub-expression whose inferred type [p_ty] failed to meet the context,
@@ -575,6 +582,7 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
     free_vars_expr bound l @ free_vars_expr bound r
   | Ast.EAssert (e, _) -> free_vars_expr bound e
   | Ast.ESigil (_, content, _) -> free_vars_expr bound content
+  | Ast.ERefineMsg (content, _, _) -> free_vars_expr bound content
 
 and free_vars_block (bound : string list) (es : Ast.expr list) : string list =
   match es with

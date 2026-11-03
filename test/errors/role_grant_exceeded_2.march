@@ -1,4 +1,4 @@
--- EXPECT-ERROR: but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → wipe)
+-- EXPECT-ERROR: but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite`
 -- Per-role grants, the root is the VALUE (2026-09-24, review finding
 -- dd-review-role-grants-miss-let-bound-body): `Cons` is granted the network
 -- only, and the body reaches `file_delete` (`IO.FileWrite` in the capability

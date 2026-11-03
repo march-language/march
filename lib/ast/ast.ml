@@ -103,6 +103,13 @@ type expr =
           The string is the sigil name (e.g. "H", "xml", "toml").
           The expr is the string content (may include interpolation).
           Desugared to Sigil.x(content) call by the desugar pass. *)
+  | ERefineMsg of expr * string * span
+      (** A conjunct of a refinement predicate with an author-written message:
+          `{Int | _ >= 0 else "index must not be negative" && ...}`.  Only
+          the parser builds it, and only at a top-level `&&` conjunct of a
+          [TyRefine] predicate.  The refinement checker strips it on entry
+          ([Refine_msg.strip]) and keeps the message for its diagnostics, so
+          no predicate reasoning ever sees this node. *)
 
 and param = {
   param_name : name;
@@ -588,6 +595,7 @@ let show_expr = function
   | ELetStar _ -> "ELetStar(...)"
   | EAssert _ -> "EAssert(...)"
   | ESigil _ -> "ESigil(...)"
+  | ERefineMsg _ -> "ERefineMsg(...)"
 
 (** The restart-backoff curve a `supervise` block gets when it declares no
     `backoff` clause: exactly the constants that were hardcoded in the runtime

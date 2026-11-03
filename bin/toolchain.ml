@@ -171,17 +171,22 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
   let hint_module (d : E.diagnostic) = name_after ~marker:"to module `" d.E.message in
   (* Every (module, capability) pair already covered by some Error/Warning
      in the diagnostic list. *)
-  let strong_caps : (string * string) list =
+  let strong : (string * string * E.diagnostic) list =
     List.concat_map (fun (d : E.diagnostic) ->
         match d.E.severity, cap_needs_code d with
         | (E.Error | E.Warning), Some code ->
           (match error_module d with
-           | Some m -> List.map (fun c -> (m, c)) (caps_of_code code)
+           | Some m -> List.map (fun c -> (m, c, d)) (caps_of_code code)
            | None -> [])
         | _ -> [])
       diags
   in
-  List.filter_map
+  let strong_caps = List.map (fun (m, c, _) -> (m, c)) strong in
+  (* A covered hint's chain is folded into the error that covers it, as a
+     note (plan §X7: one report, its chain inside it), rather than kept as a
+     separate HINT that repeats the error's caret. *)
+  let chain_notes : (E.diagnostic * string) list ref = ref [] in
+  let kept = List.filter_map
     (fun (d : E.diagnostic) ->
        match d.E.severity, cap_needs_code d with
        | E.Hint, Some code ->
@@ -203,18 +208,32 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
          if not covered then Some d
          else begin
            let marker = March_refinecheck.Cap_infer.chain_marker in
-           match find_substring ~needle:marker d.E.message with
-           | Some i ->
-             let chain_start = i + String.length marker in
-             let chain =
-               String.sub d.E.message chain_start
-                 (String.length d.E.message - chain_start)
-             in
-             Some { d with E.message = "reached from `main`: " ^ chain }
-           | None -> None
+           (match find_substring ~needle:marker d.E.message, caps_of_code code,
+                  hint_module d with
+            | Some i, [ hint_cap ], Some m ->
+              let chain_start = i + String.length marker in
+              let chain =
+                String.sub d.E.message chain_start
+                  (String.length d.E.message - chain_start)
+              in
+              (match List.find_opt (fun (em, ec, _) ->
+                   em = m && March_caps.Cap_lattice.cap_subsumes ec hint_cap) strong with
+               | Some (_, _, err) ->
+                 let note = "reached from `main`: " ^ chain in
+                 if not (List.exists (fun (e, n) -> e == err && n = note) !chain_notes) then
+                   chain_notes := (err, note) :: !chain_notes
+               | None -> ())
+            | _ -> ());
+           None
          end
        | _ -> Some d)
     diags
+  in
+  List.map (fun (d : E.diagnostic) ->
+      match List.filter_map (fun (e, n) -> if e == d then Some n else None) !chain_notes with
+      | [] -> d
+      | ns -> { d with E.notes = d.E.notes @ List.rev ns })
+    kept
 
 let b64_decode_pubkey b64 =
   let tbl = Array.make 256 (-1) in
@@ -643,16 +662,23 @@ let load_stdlib ?(for_js=false) () =
       String.sub (Digest.to_hex (Digest.string stdlib_dir)) 0 8 in
     let cache_path = Filename.concat cache_dir
       ("stdlib_ast_" ^ build_id ^ "_" ^ dir_tag ^ "_" ^ short_hash ^ ".bin") in
+    (* The blob holds the DESUGARED stdlib, from which desugar has already
+       stripped the author-written refinement messages into
+       [March_ast.Refine_msg]'s table, so the stdlib's entries are stored
+       beside the decls and put back on a hit. *)
+    let stdlib_paths = List.map (Filename.concat stdlib_dir) file_list in
     (* Cache hit: unmarshal parsed ASTs *)
     match (try
       if Sys.file_exists cache_path then begin
         let ic = open_in_bin cache_path in
-        let data : March_ast.Ast.decl list = Marshal.from_channel ic in
+        let data : March_ast.Ast.decl list * (March_ast.Ast.span * string) list =
+          Marshal.from_channel ic in
         close_in ic;
         Some data
       end else None
     with _ -> None) with
-    | Some decls ->
+    | Some (decls, refine_msgs) ->
+      March_ast.Refine_msg.restore ~files:stdlib_paths refine_msgs;
       March_typecheck.Typecheck_builtins.note_stdlib_decls decls;
       decls
     | None ->
@@ -666,7 +692,8 @@ let load_stdlib ?(for_js=false) () =
            sessions; a reader must never see a half-written Marshal blob. *)
         let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
         let oc = open_out_bin tmp in
-        Marshal.to_channel oc decls [];
+        Marshal.to_channel oc
+          (decls, March_ast.Refine_msg.entries_for ~files:stdlib_paths) [];
         close_out oc;
         Sys.rename tmp cache_path
       with _ -> ());

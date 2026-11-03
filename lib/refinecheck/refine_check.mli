@@ -308,3 +308,11 @@ val manifest_off : bool ref
 (** The stdlib lemmas the last module admitted, as (qualified name, manifest
     digest). *)
 val manifest_rows : (string * string) list ref
+
+(** The last checked module's valid lemmas (no L1-L5 error): qualified name,
+    definition, admitted.  Read by [Lemma_test]. *)
+val lemma_defs : (string * A.fn_def * bool) list ref
+
+(** L1: a lemma's declared result is [{Unit | P}] with [P] not mentioning the
+    unit value; [Ok (binder, P)], or [Error why]. *)
+val lemma_post : A.fn_def -> (string * A.expr, string) result

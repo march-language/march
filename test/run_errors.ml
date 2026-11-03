@@ -398,6 +398,28 @@ let check_internals ~src name human =
                         test/errors/internals-allowlist.txt" name t name t)
     allowed
 
+(* A machine fix must fix (plan §X4): a case whose fixes leave the program
+   still rejected fails, unless its source says why with
+   `-- EXPECT-FIX-PARTIAL: <reason>` (the program has a second, independent
+   error the fix is not about).  A case carrying the marker whose fixes do
+   reach exit 0 fails too, so a stale marker can't hide a later regression. *)
+let fix_partial_marker = "-- EXPECT-FIX-PARTIAL:"
+
+let check_fix_fixes ~src name (r : result) =
+  let partial = contains src fix_partial_marker in
+  match r.after with
+  | Some (code, _) when code <> 0 && not partial ->
+    Alcotest.failf "%s: applying its machine fixes leaves the program rejected \
+                    (exit %d). Fix the fix, or mark the case with %S and the \
+                    reason the program still fails" name code fix_partial_marker
+  | Some (0, _) when partial ->
+    Alcotest.failf "%s: its fixes now make the program check; remove its %S line"
+      name fix_partial_marker
+  | None when partial ->
+    Alcotest.failf "%s: it offers no machine fix; remove its %S line"
+      name fix_partial_marker
+  | _ -> ()
+
 let check results name () =
   let (src, human, json) = render (Lazy.force results) name in
   let base = Filename.concat (errors_dir ()) name in
@@ -425,7 +447,8 @@ let check results name () =
     cmp "rendered diagnostics" exp_h human;
     cmp "--check-json" exp_j json
   end;
-  check_internals ~src name human
+  check_internals ~src name human;
+  check_fix_fixes ~src name (Hashtbl.find (Lazy.force results) name)
 
 (* [ERRORS_ONLY=cap_,linear_used_twice_6] runs only the cases whose name
    starts with one of the comma-separated prefixes: the whole corpus is a

@@ -1,3 +1,14 @@
 (library
  (name march_refine)
  (libraries march_cas unix))
+
+; The pinned z3 version, read from the repo-root z3.version (line 1), which
+; CI, the release build and this version check all share.
+(rule
+ (targets z3_pin.ml)
+ (deps %{project_root}/z3.version)
+ (action
+  (with-stdout-to
+   %{targets}
+   (bash
+    "printf 'let version = \"%s\"\\n' \"$(head -n 1 %{deps} | tr -d '[:space:]')\""))))

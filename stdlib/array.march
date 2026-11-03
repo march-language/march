@@ -426,7 +426,7 @@ mod Array do
       march> Array.get(Array.from_list(List.range(0, 100)), 70)
       70
   """
-  fn get(v : PVec(a), idx : {Int | _ >= 0 && _ < pvec_length(v)}) do
+  fn get(v : PVec(a), idx : {Int | _ >= 0 else "index must not be negative" && _ < pvec_length(v) else "index must be less than the vector's length"}) do
     match v do
     PVec(n, shift, root, tail) -> do
       if idx < 0 || idx >= n do panic("Array.get: index out of range")
@@ -457,7 +457,7 @@ mod Array do
   -- Assumed, not proved: the checker cannot reflect the nested `if` that
   -- picks tail vs trie.  Witnessed in test/stdlib/test_array.march.
   @[assume]
-  fn set(v : PVec(a), idx : {Int | _ >= 0 && _ < pvec_length(v)}, val) : {PVec(a) | pvec_length(_) == pvec_length(v)} do
+  fn set(v : PVec(a), idx : {Int | _ >= 0 else "index must not be negative" && _ < pvec_length(v) else "index must be less than the vector's length"}, val) : {PVec(a) | pvec_length(_) == pvec_length(v)} do
     match v do
     PVec(n, shift, root, tail) -> do
       if idx < 0 || idx >= n do panic("Array.set: index out of range")

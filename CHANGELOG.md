@@ -29,6 +29,30 @@ git log is authoritative for exact commits.
   `stdlib/lemmas.verified`, so a check does not prove them again. `List.filter` also gains a
   proved `len(_) <= len(xs)` contract.
 
+- **A refinement can say what each half of it means.** Write a message after a
+  conjunct with `else`: `{Int | _ >= 0 else "index must not be negative" &&
+  _ < len(xs) else "index must be less than the list's length"}`. A call that
+  breaks a conjunct now leads with its message and names that conjunct alone
+  (`argument `n` of `List.nth` does not satisfy precondition `_ >= 0``), and the hint for a
+  call the checker cannot prove carries the message of the conjunct it could
+  not establish. `else` binds tighter than `&&`; a conjunct without a message is
+  reported as before. The stdlib's two-sided bounds carry messages: `List.nth`,
+  `Array.get`/`set`, the `Simd` lane accessors, `DateTime.fixed_zone` and
+  `fixed_zone_hm`, `Random.bernoulli`, and `Stats.percentile`/`quantile`.
+- **z3 ships with the toolchain.** Every release archive includes z3 4.16.0 at
+  `libexec/z3` (static on Linux), with its license in `licenses/`, so refinement types
+  are checked on a fresh install with nothing else to install. March looks for z3 in
+  `MARCH_Z3`, then next to the running `march` (through forge's `~/.march/current`
+  symlink), then on `PATH`. The pinned version lives in `z3.version`.
+- **A warning when refinements could not be checked.** A program with refinements of its
+  own gets one `solver_unavailable` warning when no z3 can be used (none found,
+  `MARCH_Z3` pointing nowhere, a z3 that fails `--version`, or one that crashes or stops
+  answering mid-run), with how to fix it; the build still succeeds. Under `cap verified`
+  the error now says the solver could not be run. Another z3 version is used with a
+  `solver_version_mismatch` warning. Both have `march --explain` pages.
+- **`--refine-rlimit N` and `[refine] rlimit = N` in `forge.toml`** raise the per-query
+  solver limit for a project with a known-hard proof. forge passes the setting to every
+  `march` it runs.
 - **Refinement proofs take decided steps (fuel).** The checker now expands a
   reflected call that another call's definition produces when its branch is already
   decided (its argument is a constructor, or known to equal one), up to a per-function
@@ -51,6 +75,19 @@ git log is authoritative for exact commits.
   `lemma_argument_impure`. The editor re-checks a file when a lemma it uses changes or
   stops proving, and shows a lemma's theorem on hover.
 
+- **`forge test` tests lemmas.** Each project file with an `@[lemma]` is checked with
+  the new `march --check --lemma-test`, which evaluates every lemma's theorem on
+  generated inputs (boundary Ints and 100 draws from a fixed, printed seed). An unproved
+  lemma becomes a property test: a false theorem prints a concrete counterexample and
+  fails the run, and a true one reports "tested, not proved: N inputs". A proved lemma is
+  checked again in the interpreter and in a compiled program; if it is false in either,
+  that is a compiler or runtime bug, and the run fails.
+
+- **Laws in `forge doc` and `forge search`.** A function's API page lists, under
+  "Laws", the lemmas whose theorem calls it, with the theorem as written (march_doc).
+  `forge search --law TEXT` finds lemmas by the text of their theorem or by a function
+  they mention, and a name search for a function also finds the lemmas about it.
+
 - **Parallel combinators reject closures that capture a native handle.** A
   lambda passed to `List.pmap`, `List.pfilter`, `List.preduce`, the
   `Parallel.*` family or `Task.async_stream` may no longer capture a
@@ -64,10 +101,46 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Refinement verdicts no longer depend on machine load.** Each z3 query runs under a
+  fixed resource limit (`rlimit`: 3,000,000 steps, about four times the costliest proof in the
+  corpus and stdlib, and 50,000 for stage-2 reflection queries) instead of a 3-second wall-clock
+  timeout, after a reset, so the same query gets the same answer on every machine and
+  platform. A 60-second backstop only catches a z3 that has stopped responding.
+- **Refinement caches are keyed by the z3 version, the limits and the platform.** A z3
+  upgrade or a new limit never replays an old verdict; entries written before this change
+  are not used. An `unknown` from the limit is now cached like any other answer; a query
+  z3 rejects never is.
+- **CI uses the pinned z3 on every platform** (built from source and cached) instead of
+  the package manager's, and a new `refine-agreement` job requires every refinement
+  verdict to be the same on darwin-arm64, linux-x86_64 and linux-aarch64.
 - Diagnostics: follow-on errors are dropped when another error already explains them: the type
   mismatch after a callback-arity error, "unused variable `x`" next to a misspelled use of `x`,
-  `cap_grant` while the program has other errors, and `cap_ceiling` alongside the matching
-  `cap_needs`.
+  `cap_grant` while the program has other errors, `cap_ceiling` alongside the matching
+  `cap_needs`, duplicate reports, and the type and constructor errors that follow from an invalid
+  protocol. The editor (LSP) drops the same ones.
+- Diagnostics: a capability grant error (`cap_grant_exceeded`) now points at the call that needs
+  the capability and labels each call on the way from `main`, instead of naming the chain in prose.
+- Diagnostics: `missing_impl` points at the operator or call that needs the implementation (`a < b`,
+  `same(x, y)`) instead of the enclosing function, labels a generic function's `when Eq(a)` bound,
+  and, for a type declared in the file, offers `derive Eq for T` (also `Ord`, `Show`, `Hash`) as a
+  machine fix.
+- Diagnostics: actor errors name actors, not their state records or generated message types:
+  `send_wrong_actor` says "this pid is an actor `B`" and lists `B`'s messages; a wrong message
+  payload says it is a message of actor `A` and points at the handler's parameter; a misspelt field
+  in `{ state with … }` says it is `A`'s state and suggests the field (with a fix); a handler that
+  does not return the state is reported in plain words, pointing at what it returns. A constructor
+  shared by an actor message and another type no longer suggests the uncallable `A_Msg.X` spelling.
+- Diagnostics: `role_grant_exceeded` points at the use and labels the callback and each call on
+  the way, like `cap_grant_exceeded`; in a `cap no_panic` module, a panic reached through several
+  of its functions is reported once, at the panic, with a label on each caller.
+- Diagnostics: `overlapping_impl` no longer prints a garbage position (`<none>:29:266475457`) for a
+  generated implementation, and is dropped when `json_derive_name_collision` already explains it.
+
+### Documentation
+
+- `march --explain` pages for `cap_grant_exceeded`, `cap_ceiling`, `cap_widen`, `cap_deserialize`,
+  `proof_cap_return`, `proof_cap_mint_private`, `io_not_allowed`, `send_wrong_actor`,
+  `actor_handler_state_type` and `codec_missing`.
 
 - **Native compiles are about 45% faster for small programs.** Code the program
   cannot reach (most of the prepended stdlib) is now dropped right after
@@ -84,6 +157,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march test` with several files no longer leaks Vault state between them.** Named
+  Vaults (and the Config values stored in them) lived for the whole process, so when one
+  `march test` run covered several files, the stdlib's own `Vault` and `Config` doctests,
+  which run once per file, saw counters and keys from the previous file and failed
+  (`forge test --coverage` in a project with several test files). Each file now starts from
+  a fresh interpreter runtime.
+
 - **No more false refinement violations for container elements and passed functions.**
   When an element refinement could not be translated for the solver (for example one that
   calls an `@[opaque]` function), or when a proof stopped at a reflected call it did not
@@ -95,6 +175,8 @@ git log is authoritative for exact commits.
 - Diagnostics: the `List.filter(fn (x, y) -> …)` hint suggests a one-parameter function instead of
   a curried one; an infinite-type error no longer stacks contradictory notes; refinement errors on
   callbacks no longer show `$cb_arg`, and their guard suggestion uses the real argument.
+- A parameter that only its refinement mentions (`fn f(t : {Tree | size(t) < 1})`) is no longer
+  reported as unused, with a fix that broke the refinement.
 
 - **`--target js` byte strings are fast in Safari.** Each byte access on a long string
   (`byte_at`, `byte_length`, `slice`) looked up its cached byte view by comparing strings
@@ -103,6 +185,13 @@ git log is authoritative for exact commits.
   Safari. The cache is now a `Map` keyed by the string, holding at most one string of
   each length so older V8 (which hashes long strings by length) doesn't compare them
   either.
+
+### Documentation
+
+- **Lemmas as a contract for changes.** The refinement-types chapter and the
+  `march-lang`, `march-test` and `forge-search` agent skills explain how to state a law
+  as a lemma in a `cap verified` module, where an unproved lemma is a build error, so a
+  change that breaks the law fails the build.
 
 ## [0.7.0] - 2026-11-02
 

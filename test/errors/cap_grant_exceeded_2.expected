@@ -7,5 +7,6 @@ help: add a `Cap(IO.FileRead)` parameter to `main` (e.g. `fn main(…, _cap_file
 33 |   fn main(cap : Cap(IO.Console)) : () do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+    run `march --explain cap_grant_exceeded`
 
 

@@ -1062,6 +1062,49 @@ let run_reflect_parity ~filename ~user_files () =
     exit 1
   end
 
+(* --lemma-test (specs/todos/2026-11-02-lemma-uses-beyond-refinement.md
+   ideas 1 and 2): every lemma of the entry file has its theorem evaluated
+   on the parity net's inputs in the interpreter, and each admitted one again
+   in a compiled harness program.  Its lines on stderr; exit 1 on RED (a
+   counterexample to an unproved lemma, or a proved one false somewhere). *)
+let run_lemma_test ~filename ~entry_mod () =
+  let compile_run src =
+    let dir = Filename.temp_dir "march_lemma_test_" "" in
+    let entry = Filename.concat dir "lemma_harness.march" in
+    Out_channel.with_open_bin entry (fun oc -> output_string oc src);
+    let read f = try In_channel.with_open_bin f In_channel.input_all with Sys_error _ -> "" in
+    (* The entry file's directory joins the library path, so the harness's
+       `use` finds its module (a directory already listed is not repeated). *)
+    let real d = try Unix.realpath d with Unix.Unix_error _ -> d in
+    let own = real (Filename.dirname filename) in
+    let lib =
+      match Sys.getenv_opt "MARCH_LIB_PATH" with
+      | Some l -> List.filter (( <> ) "") (String.split_on_char ':' l)
+      | None -> []
+    in
+    let lib = if List.exists (fun d -> real d = own) lib then lib else lib @ [ own ] in
+    let exe = Filename.concat dir "lemma_harness" in
+    let cout = Filename.concat dir "compile.out" and rout = Filename.concat dir "run.out" in
+    let code =
+      Sys.command
+        (Printf.sprintf "MARCH_LIB_PATH=%s %s --compile --opt 0 -o %s %s >%s 2>&1"
+           (Filename.quote (String.concat ":" lib)) (Filename.quote Sys.executable_name)
+           (Filename.quote exe) (Filename.quote entry) (Filename.quote cout))
+    in
+    if code <> 0 then begin
+      let out = read cout in
+      prerr_endline "lemma-test: the compiled harness did not compile:";
+      List.iter (fun l -> if l <> "" then prerr_endline ("lemma-test:   " ^ l)) (String.split_on_char '\n' out);
+      `Compile_failed out
+    end
+    else
+      let rc = Sys.command (Printf.sprintf "%s >%s 2>&1" (Filename.quote exe) (Filename.quote rout)) in
+      `Ran (rc, read rout)
+  in
+  let lines, red = March_refinecheck.Lemma_test.run ~filename ~entry_mod ~compile_run () in
+  List.iter prerr_endline lines;
+  if red then exit 1
+
 (* --refine-audit: every declared refinement occurrence
    ([March_refinecheck.Refine_audit.sites]), classified
    ([March_refinecheck.Refine_audit.classify]) against what the checker
@@ -1868,12 +1911,59 @@ let hr_store_sources ~(cfg : March_tir.Hot_reload.config) ~(store : March_cas.Ca
         Option.iter (fun r -> March_cas.Cas.store_source store h (SI.region_text r)) region
       end)
     hr_impl_hashes
-(* Whether z3 can be found.  Without it every refinement obligation comes
-   back unverified, which changes the verdict (an obligation that would be
-   refuted is not), so a z3-less run must not share a cache entry with one
-   that has z3.  Only the absence is tagged, so a normal key is unchanged. *)
-let z3_cas_tag () =
-  if March_refine.Solver.find_z3 () = None then [ "noz3" ] else []
+(* The z3 a build's refinement verdicts depend on: its version, the limits
+   and the platform, or its absence ([Solver.cas_tag]; never runs z3). *)
+let z3_cas_tag () = March_refine.Solver.cas_tag ()
+
+(* One warning per run when z3 is missing, broken or not the pinned version
+   (specs/2026-11-02-bundled-z3-design.md), and only for a run with
+   refinement obligations in the user's own files: every run also checks the
+   stdlib's, which would otherwise make hello-world warn.  The span is the
+   entry file's first line, so it is shown (and replayed on a warm build) like
+   any user diagnostic. *)
+let report_z3 errors ~filename ~user_files =
+  let own (f : string) = f = filename || List.mem f user_files in
+  let user_obligation =
+    List.exists
+      (fun (o : March_refinecheck.Obligation.t) -> own o.span.March_ast.Ast.file)
+      (March_refinecheck.Obligation.all ())
+  in
+  if user_obligation then begin
+    let span =
+      { March_ast.Ast.file = filename; start_line = 1; start_col = 0; end_line = 1; end_col = 0 }
+    in
+    let pin = March_refine.Z3_pin.version in
+    let fix =
+      Printf.sprintf
+        "Reinstall the March toolchain (`forge toolchain install`), or set MARCH_Z3 to a z3 %s binary." pin
+    in
+    let unavailable msg =
+      March_errors.Errors.warning errors ~code:March_errors.Code.solver_unavailable ~span
+        ("Refinements were not checked: " ^ msg ^ " " ^ fix)
+    in
+    match March_refine.Refine.run_report () with
+    | None | Some (March_refine.Solver.Healthy _) -> ()
+    | Some (March_refine.Solver.Missing bundled) ->
+      unavailable
+        (Printf.sprintf
+           "no z3 found (looked in MARCH_Z3, next to march at %s, and on PATH)."
+           (Filename.dirname bundled))
+    | Some (March_refine.Solver.Broken { path; reason })
+      when not (March_refine.Refine.solver_unusable ()) ->
+      (* z3 worked, then died or hung: say what was lost, not that nothing
+         was checked. *)
+      March_errors.Errors.warning errors ~code:March_errors.Code.solver_unavailable ~span
+        (Printf.sprintf
+           "Some refinements were not checked: z3 at %s %s; %d of %d queries got no answer. %s"
+           path reason !March_refine.Refine.queries_unanswered !March_refine.Refine.queries_asked fix)
+    | Some (March_refine.Solver.Broken { path; reason }) ->
+      unavailable (Printf.sprintf "z3 at %s %s." path reason)
+    | Some (March_refine.Solver.Mismatch { path; version; _ }) ->
+      March_errors.Errors.warning errors ~code:March_errors.Code.solver_version_mismatch ~span
+        (Printf.sprintf
+           "Using z3 %s from %s, but this toolchain is pinned to z3 %s; refinement verdicts may differ from CI."
+           version path pin)
+  end
 
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
@@ -2680,6 +2770,7 @@ let run_test_cmd args =
     if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
     if !reflect_deps then print_reflect_deps ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ~user_files ();
     if !reflect_parity then run_reflect_parity ~filename ~user_files ();
+    if !lemma_test then run_lemma_test ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ();
     if !reflect_report then
       print_reflect_report ~filename ~user_files ~type_map
         ~recheck:(fun () ->
@@ -2707,6 +2798,7 @@ let run_test_cmd args =
        index from a hypothesis module. Before [shutdown]: the probes need the
        solver. *)
     March_refinecheck.Precond_infer.attach_promoted_fixes errors desugared;
+    report_z3 errors ~filename ~user_files;
     (* Solving scope ends here: reap the shared z3 child now rather than
        holding an idle solver process for the rest of the run. *)
     March_refine.Refine.shutdown ();
@@ -2736,6 +2828,11 @@ let run_test_cmd args =
       March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved desugared.March_ast.Ast.mod_decls
     in
     let desugared = erase_lemmas desugared in
+    (* Each file starts from a fresh interpreter runtime: named Vaults (and
+       what is stored in them, such as Config values) are process-global, so
+       a second file's run of the same doctests would otherwise see the
+       first file's counters (`Vault.incr` returned 42, not 6). *)
+    March_eval.Eval.reset_scheduler_state ();
     (* Enable coverage tracking for this file's test run. *)
     if !coverage then begin
       March_coverage.Coverage.reset ();
@@ -3404,7 +3501,7 @@ let compile filename =
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
       || !termination_report || !reflect_report || !refine_report_sites_all
-      || !reflect_deps || !reflect_parity || !emit_lemma_manifest
+      || !reflect_deps || !reflect_parity || !emit_lemma_manifest || !lemma_test
       || !report_contracts
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
@@ -3987,6 +4084,7 @@ let compile filename =
       (List.sort_uniq compare !March_refinecheck.Refine_check.manifest_rows)
   end;
   if !reflect_parity then run_reflect_parity ~filename ~user_files ();
+  if !lemma_test then run_lemma_test ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ();
   if !reflect_report then
     print_reflect_report ~filename ~user_files ~type_map
       ~recheck:(fun () ->
@@ -4043,6 +4141,7 @@ let compile filename =
   (* Solving scope ends here: reap the shared z3 child now rather than holding
      an idle solver for the rest of the run (eval servers live indefinitely).
      --check-migration below lazily respawns; its child is reaped by at_exit. *)
+  report_z3 errors ~filename ~user_files;
   March_refine.Refine.shutdown ();
   stamp "typecheck";
   (* Lemma erasure (§4.5): after the refinement checker, before anything
@@ -7240,6 +7339,11 @@ let () =
      " Print the fn-name -> origin provenance table after the TIR pipeline (with --emit-llvm/--compile/--dump-tir)");
     ("--shell",      Arg.String (fun p -> shell_socket := Some p),
      "<socket> A remote shell on the node serving <socket> (its `<reload socket>.shell`): typecheck the program once, then compile each input into a signed fragment the node runs");
+    ("--refine-rlimit",
+     Arg.Int (fun n ->
+         if n <= 0 then raise (Arg.Bad "march: --refine-rlimit wants a positive integer\n")
+         else March_refine.Solver.set_rlimit n),
+     "<n> The per-query z3 resource limit for refinement proofs (default: the measured one; MARCH_REFINE_RLIMIT also sets it)");
     ("--shell-timeout-ms", Arg.Int (fun n -> shell_timeout_ms := n),
      "<ms> With --shell: how long each input may run on the node (default 10000, max 30000)");
     ("--shell-inputs", Arg.String (fun f -> shell_inputs := Some (In_channel.with_open_bin f In_channel.input_all)),
@@ -7337,6 +7441,8 @@ let () =
      " Print the D17 logic hash of every reflected user function (reflect-def) and of every reflected function a stage-2 query of the check unfolded (reflect-dep), and the contract hash of every user function (reflect-cdef) and of every function of another user file the file reaches through calls (reflect-cdep); changes no verdict");
     ("--reflect-parity", Arg.Set reflect_parity,
      " Compare each reflected user function's logic definition with the interpreter on generated inputs (boundary Ints included); exit 1 on a mismatch or an interpreter failure");
+    ("--lemma-test", Arg.Set lemma_test,
+     " Evaluate each lemma's theorem on generated inputs: an unproved lemma in the interpreter (a property test: exit 1 on a counterexample), an admitted one in the interpreter and a compiled program (exit 1 if it is false in either: a compiler or runtime bug)");
     ("--reflect-report", Arg.Set reflect_report,
      " Print one line per user function: reflected (its body usable in predicates, from phase 1 of reflection) or the first rule that blocks it; changes no verdict");
     ("--refine-audit", Arg.Set refine_audit,

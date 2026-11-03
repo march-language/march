@@ -7,22 +7,21 @@ erasure.
 
 This file records the ideas so none is lost. Split one into its own todo when it is picked up.
 
-The ideas, cheapest and most valuable first:
+Done on 2026-11-03 (`specs/progress/2026-11-03-lemma-tests-laws-search.md`): idea 1 (an
+unproved lemma becomes a property test in `forge test`), idea 2 (admitted lemmas re-checked in
+the interpreter and a compiled program), idea 3 without status marks, idea 4 at the text level,
+and idea 10 (guidance). What remains of them:
 
-1. **An unproved lemma becomes a property test.** Every function a lemma mentions is reflected,
-   so it can run, and the statement `P` can be evaluated on concrete inputs. When z3 skips a
-   lemma, `forge test` could evaluate `P` over generated inputs. It would reuse the §9.2 parity
-   net's generators and its fixed, recorded seed. The result is a counterexample, or "tested,
-   not proved". It runs only under `forge test`; erasure still removes lemmas from every
-   production path. Today an unproved lemma is only a `lemma_unproved` warning.
-2. **Catching miscompiles.** A proved lemma whose `P` is false in compiled code can only be a
-   compiler or runtime bug. Evaluating proved laws on a few inputs through both the interpreter
-   and the compiled backend gives a cheap differential test. It complements `scripts/triage.sh`.
-3. **Laws in the docs.** `forge doc` renders the lemmas about a function as a "Laws" section on
-   its API page, marked proved, tested or unproved. This pairs with phase 3's stdlib `List`
-   lemmas.
-4. **Searching by law.** `forge search` finds functions by what is proved about them, such as
-   `f(f(x)) == x` or "preserves length", alongside search by type signature.
+3. **Laws in the docs: status marks.** `forge doc` lists the laws about each function
+   (march_doc), but not whether each is proved, tested or unproved. That needs the
+   `--reflect-deps` lemma rows (or `--lemma-test` lines) per file during `forge doc`, which
+   means a z3 check of every documented file.
+4. **Searching by law: shapes.** `forge search --law` matches theorem text and the functions
+   a theorem calls. Matching a law's shape (`f(f(x)) == x` finds every involution) is not
+   done.
+
+The open ideas:
+
 5. **Proof-backed refactors in the LSP.** A code action offers a rewrite such as `reverse(reverse(xs))`
    → `xs` only when an admitted lemma justifies it, and names that lemma.
 6. **Interface laws.** `interface Monoid` declares `combine_assoc` and `empty_left` as lemmas
@@ -40,9 +39,6 @@ The ideas, cheapest and most valuable first:
    justified by an admitted lemma: map fusion, `append(xs, Nil)`, `reverse(reverse(xs))`. This
    is **unsafe until the Int-overflow phase** (spec §10 phase 6, D8), because the logic's `Int`
    is unbounded.
-10. **Specs for code written by agents.** A set of lemmas is a machine-checked contract that an
-    agent's refactor must keep proving. That is stronger than "the tests pass" and cheaper than a
-    review round.
 
 Out of reach until later phases:
 

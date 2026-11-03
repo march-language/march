@@ -400,6 +400,8 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
 
   | Ast.ESigil (_, content, _) ->
     collect_expr ~def_map ~use_map ~calls content
+  | Ast.ERefineMsg (content, _, _) ->
+    collect_expr ~def_map ~use_map ~calls content
 
   | Ast.ELetQ (p, r, c, _) | Ast.ELetStar (p, r, c, _) ->
     collect_pat_defs ~def_map ~use_map p;
@@ -555,6 +557,7 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) -> walk scope e1; walk scope e2
     | Ast.EAssert (e, _) -> walk scope e
     | Ast.ESigil (_, content, _) -> walk scope content
+    | Ast.ERefineMsg (content, _, _) -> walk scope content
     | Ast.ELetQ (p, r, c, _) | Ast.ELetStar (p, r, c, _) ->
       walk scope r;
       let bs = pat_binders p in
@@ -3267,7 +3270,12 @@ let analyse ~filename ~src : t =
     in
     let diags =
       let compiler_diags =
-        Err.sorted errors |> List.filter_map (diag_to_lsp ~filename)
+        (* The CLI's cascade rules (one root cause, one report), with the
+           same "only a shown diagnostic suppresses" condition: here a
+           diagnostic is shown when it maps into this document. *)
+        Err.sorted errors
+        |> Err.suppress_cascades ~visible:(fun d -> diag_to_lsp ~filename d <> None)
+        |> List.filter_map (diag_to_lsp ~filename)
       in
       (* The typechecker's own tail-call checker already reports every
          non-tail recursive call, at the same span, saying the same thing —

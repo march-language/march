@@ -39,6 +39,9 @@ What tier 1 gives you on every tier-1 platform:
 
 - **The toolchain**: `march` and `forge`, with the runtime and standard library, from one
   archive, checksum-verified on install.
+- **Refinement checking out of the box**: the pinned z3 (4.16.0) ships in the archive at
+  `libexec/z3` (static on Linux), and CI requires every refinement verdict to be the same
+  on all three tier-1 platforms. Tier 2 and 3 use `MARCH_Z3` or a `z3` on `PATH`.
 - **Compiling to a native binary** (`march --compile`). You need a C toolchain: `clang` and
   LLVM (see [Installation]({{ site.baseurl }}/docs/installation/)).
 - **`--static`**: on Linux, a fully static binary when the host uses musl (it is refused on

@@ -8,16 +8,8 @@ hint: add these to the module body —
 5 |       println(int_to_string(n))
           ^^^^^^^
 
+    reached from `main`: main → show
     run `march --explain cap_needs`
-
-
--- HINT --------------------- errors/cap_ceiling_1.march
-
-reached from `main`: main → show [cap_needs]
-
-5 |       println(int_to_string(n))
-          ^^^^^^^
-
 
 
 

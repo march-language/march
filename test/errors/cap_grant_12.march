@@ -49,3 +49,4 @@ mod ZonkForge do
     println("forged root authority from a string literal")
   end
 end
+-- EXPECT-FIX-PARTIAL: the grant fix is right; the program also deserializes a capability (cap_deserialize), reported once it checks

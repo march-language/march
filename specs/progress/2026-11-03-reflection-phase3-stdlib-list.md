@@ -80,7 +80,7 @@ phases 2 (lemmas, #1061) and 4 (fuel, #1065).
 | refine-oracle vs main `9517c9ed5` | see "Oracle" below |
 | ir-oracle vs main | CHANGED, see ruling 3 |
 | doc-lint | passes |
-| full suites | SUITES_P3 |
+| after merging main | `reflect-stdlib-list` 9/9, `reflect-lemma` 42/42, `reflect-fuel` 13/13, `run_errors` 325/325; the full refinecheck and compiler suites are left to CI |
 
 ### Oracle
 

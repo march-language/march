@@ -1,0 +1,15 @@
+mod Safe do
+  cap no_panic
+
+  fn check(ok : Bool) : Bool do
+    if ok do true else panic("not ok") end
+  end
+
+  fn validate(n : Int) : Bool do
+    check(n > 0)
+  end
+
+  fn validate_all(a : Int, b : Int) : Bool do
+    validate(a) && validate(b)
+  end
+end

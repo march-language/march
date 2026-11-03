@@ -1,0 +1,14 @@
+mod Main do
+  needs IO.Console
+
+  actor Total do
+    state { sum : Int, count : Int }
+    init { sum: 0, count: 0 }
+    on Deposit(k : Int) do state.sum + k end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let t = spawn(Total)
+    send(t, Deposit(5))
+  end
+end

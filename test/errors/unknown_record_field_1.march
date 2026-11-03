@@ -1,0 +1,14 @@
+mod Main do
+  needs IO.Console
+
+  actor Counter do
+    state { count : Int, label : String }
+    init { count: 0, label: "c" }
+    on Bump(k : Int) do { state with cuont: state.count + k } end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let c = spawn(Counter)
+    send(c, Bump(1))
+  end
+end

@@ -144,6 +144,7 @@ let emit_lemma_manifest = ref false
    (lib/refinecheck/reflect_parity.ml).  Exit 1 on a mismatch or an
    interpreter failure.  Changes no verdict. *)
 let reflect_parity = ref false
+let lemma_test = ref false
 (* --refine-audit: print every declared refinement occurrence the checker
    never enforces (Unenforced) or only warns about (Inert_warned), plus a
    three-bucket summary. Read-only: changes no verdict, emits no diagnostic.

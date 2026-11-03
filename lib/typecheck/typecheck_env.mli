@@ -150,7 +150,9 @@ type env = {
   level : int;
   lin : lin_entry list;
   errors : Typecheck_types.Err.ctx;
-  pending_constraints : Typecheck_types.constraint_ list ref;
+  pending_constraints :
+    (Typecheck_types.constraint_ * Typecheck_types.constraint_site option) list ref;
+  decl_sites : (string, Typecheck_types.Ast.span) Hashtbl.t;
   type_map :
     (Typecheck_types.Ast.span,
      Typecheck_types.ty)

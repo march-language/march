@@ -5907,7 +5907,7 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     List.iter (fun (_, v) -> go v) fields
   | A.EField (r, _, _) -> go r
   | A.EPipe (a, b, _) -> go a; go b
-  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) -> go e
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _) -> go e
   | A.ESend (a, b, _) -> go a; go b
   | A.ELetQ (p, e1, e2, _) | A.ELetStar (p, e1, e2, _) ->
     go e1;
@@ -6648,6 +6648,7 @@ let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
   | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> ge e1; ge e2
   | A.EAssert (e, _) -> ge e
   | A.ESigil (_, e, _) -> ge e
+  | A.ERefineMsg (e, _, _) -> ge e
 
 (* Exhaustive over [A.decl], for the same reason the obligation walks are: the
    `| _ -> ()` this replaced meant the "not a measure or known predicate"
@@ -8183,6 +8184,9 @@ let lemma_rows : (string * string * string * bool) list ref = ref []
 
 let lemma_called : (string * string) list ref = ref []
 
+(** The last module's VALID lemmas (no L1-L5 error), each with its qualified
+    name and whether it was admitted; read by [Lemma_test]. *)
+let lemma_defs : (string * A.fn_def * bool) list ref = ref []
 
 (** L1: a lemma's declared result is [{Unit | P}] with [P] not mentioning
     the unit value; [Ok (binder, P)], or [Error why]. *)
@@ -9622,6 +9626,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       Refine_post.lemma_verdict := fun ~root:_ _ _ -> false) @@ fun () ->
   let ih_eligible : (A.span, unit) Hashtbl.t = Hashtbl.create 8 in
   lemma_rows := [];
+  lemma_defs := [];
   lemma_called := [];
   manifest_rows := [];
   gate_unverified_posts_ih ~root
@@ -9669,6 +9674,14 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
              fd.A.fn_name.A.txt)
       end)
     (lemma_fns m.A.mod_decls);
+  lemma_defs :=
+    List.filter_map
+      (fun (q, (fd : A.fn_def)) ->
+        let sp = fd.A.fn_name.A.span in
+        if Hashtbl.mem lemma_valid sp then
+          Some (q, fd, List.exists (fun (f, n, _, a) -> a && f = sp.A.file && n = q) !lemma_rows)
+        else None)
+      (lemma_fns_q m.A.mod_decls);
   ret_elem_demand := None;
   gate_elem_returns ~root defs m.A.mod_decls;
   (* Termination, phase 2 (design §3.3-§3.5, §9): plan the metric

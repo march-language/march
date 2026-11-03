@@ -5,19 +5,7 @@
 #
 # Generated actor/protocol message types (`<Name>_Msg`):
 # specs/todos/2026-11-02-diag-actor-messages.md
-linear_mixed_consumption_5 Host_Msg
-send_wrong_actor_2 Labels_Msg
-overlapping_impl_1 Stream_Msg
-role_needs_invalid_2 Logging_Msg
-type_mismatch_12 Logging_Msg
-type_mismatch_13 Logging_Msg
 # Generated session states (`S_<step>`):
 # specs/todos/2026-11-02-diag-choreography-session-messages.md
 linear_used_twice_6 S_end
 unknown_qualified_name_2 S_end
-role_needs_invalid_2 S_end
-type_mismatch_12 S_end
-type_mismatch_13 S_end
-type_mismatch_13 S_recv_Done
-type_mismatch_13 S_recv_Read
-type_mismatch_13 S_send_Msg_I_L_1

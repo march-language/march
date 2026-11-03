@@ -28789,6 +28789,99 @@ let opaque_by_decl_suite =
         in
         Alcotest.check cg_ps "same(w)" [ cg_proved ] (slugs "same(…)" obs)) ]
 
+(* Author-written conjunct messages (`p else "msg"`, March_ast.Refine_msg):
+   the message for the conjunct a call breaks leads the diagnostic, which then
+   names that conjunct alone; an unproven call's hint carries the message of
+   the conjunct it could not establish; and a conjunct without one keeps the
+   wording every other refinement gets. *)
+let refine_messages_suite =
+  let at_decl =
+    "  fn at(xs : List(Int), n : {Int | _ >= 0 else \"index must not be negative\" \
+     && _ < len(xs) else \"index must be less than the list's length\"}) : Int do 0 end\n"
+  in
+  let prog body = "mod RM do\n" ^ at_decl ^ body ^ "end\n" in
+  let expect_error label src ~has ~lacks =
+    let text = refine_error_text_d src in
+    List.iter
+      (fun n -> Alcotest.(check bool) (label ^ ": has " ^ n) true (contains text n))
+      has;
+    List.iter
+      (fun n -> Alcotest.(check bool) (label ^ ": lacks " ^ n) false (contains text n))
+      lacks
+  in
+  [ gated "first conjunct broken: its message leads" (fun () ->
+        expect_error "neg" (prog "  fn go() : Int do at([10, 20], -1) end\n")
+          ~has:[ "refinement violation: index must not be negative\n";
+                 "argument `n` of `at` does not satisfy precondition `_ >= 0`" ]
+          ~lacks:[ "less than the list's length"; "precondition `_ >= 0 && _ < len(xs)`" ]);
+    gated "second conjunct broken: its message leads" (fun () ->
+        expect_error "far" (prog "  fn go() : Int do at([10, 20], 2) end\n")
+          ~has:[ "refinement violation: index must be less than the list's length\n";
+                 "argument `n` of `at` does not satisfy precondition `_ < len(xs)`" ]
+          ~lacks:[ "must not be negative" ]);
+    gated "binder form, single conjunct" (fun () ->
+        expect_error "div"
+          "mod RD do\n\
+          \  fn div(a : Int, b : {v : Int | v != 0 else \"the divisor must not be zero\"}) : Int do a end\n\
+          \  fn go() : Int do div(1, 0) end\n\
+           end\n"
+          ~has:[ "refinement violation: the divisor must not be zero\n";
+                 "argument `b` of `div` does not satisfy precondition `v != 0`" ]
+          ~lacks:[]);
+    gated "else binds tighter than &&: an unmessaged conjunct keeps the old text" (fun () ->
+        (* The message belongs to `_ < 10` only; breaking `_ >= 0` quotes the
+           whole predicate exactly as a refinement without messages does. *)
+        expect_error "tight"
+          "mod RT do\n\
+          \  fn small(n : {Int | _ >= 0 && _ < 10 else \"must be below 10\"}) : Int do n end\n\
+          \  fn go() : Int do small(-1) end\n\
+           end\n"
+          ~has:[ "argument `n` of `small` does not satisfy precondition `_ >= 0 && _ < 10`" ]
+          ~lacks:[ "must be below 10" ]);
+    gated "unproven call: the hint carries the missing conjunct's message" (fun () ->
+        let hints =
+          refine_hints_d
+            (prog "  fn go(xs : List(Int)) : Int do if List.length(xs) > 0 do at(xs, 3) else 0 end end\n")
+        in
+        Alcotest.(check bool) "hint" true
+          (List.exists
+             (fun h ->
+               contains h
+                 "`_ >= 0` established here; `_ < len(xs)` not: index must be less than the list's length")
+             hints));
+    Alcotest.test_case "a re-desugared file drops a deleted message" `Quick (fun () ->
+        (* The table is keyed by span, and a span outlives the text that was
+           there: re-desugaring the same file must not keep a message its
+           author has since removed. *)
+        let src_with =
+          "mod RP do\n  fn f(n : {Int | _ >= 0 else \"gone soon\"}) : Int do n end\nend\n"
+        and src_without = "mod RP do\n  fn f(n : {Int | _ >= 0             }) : Int do n end\nend\n" in
+        let conj_of (m : March_ast.Ast.module_) =
+          let rec find = function
+            | [] -> None
+            | March_ast.Ast.DFn (fd, _) :: rest -> (
+              match fd.March_ast.Ast.fn_clauses with
+              | c :: _ -> (
+                match c.March_ast.Ast.fc_params with
+                | March_ast.Ast.FPNamed
+                    { March_ast.Ast.param_ty = Some (March_ast.Ast.TyRefine (_, _, p)); _ }
+                  :: _ -> Some p
+                | _ -> find rest)
+              | [] -> find rest)
+            | March_ast.Ast.DMod (_, _, ds, _) :: rest -> (
+              match find ds with Some p -> Some p | None -> find rest)
+            | _ :: rest -> find rest
+          in
+          find m.March_ast.Ast.mod_decls
+        in
+        let msg src =
+          match conj_of (March_desugar.Desugar.desugar_module (parse src)) with
+          | Some p -> March_ast.Refine_msg.message_for p
+          | None -> Alcotest.fail "no refined parameter found"
+        in
+        Alcotest.(check (option string)) "with" (Some "gone soon") (msg src_with);
+        Alcotest.(check (option string)) "without" None (msg src_without)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -28929,7 +29022,7 @@ let () =
       ("reflect-parity", Test_refine_reflect1b.parity);
       ("reflect-fuel", Test_refine_fuel.tests);
       ("reflect-stdlib-list", Test_refine_stdlib_list.tests);
-      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase);
+      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);
@@ -28986,4 +29079,5 @@ let () =
       ("p2-value-refs", p2_value_refs_suite);
       ("opaque-by-decl", opaque_by_decl_suite);
       ("stdlib-step-guards", stdlib_step_guard_suite);
+      ("refine-messages", refine_messages_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

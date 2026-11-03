@@ -1,4 +1,4 @@
--- EXPECT-ERROR: but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → cons → save)
+-- EXPECT-ERROR: but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite`
 -- Per-role grants (distributed-deploys step 4, 2026-09-22): `Cons` is granted
 -- the console only, and its body reaches `file_write` through `save`.  The
 -- TYPE cannot catch this -- `save` takes no capability value; `needs

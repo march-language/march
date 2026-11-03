@@ -247,7 +247,11 @@ type env = {
   level   : int;                           (** Current generalization level *)
   lin     : lin_entry list;                (** Linear/affine use tracking *)
   errors  : Err.ctx;
-  pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
+  pending_constraints : (constraint_ * constraint_site option) list ref;
+  (** Accumulated use-site constraints, each with the use that produced it *)
+  decl_sites : (string, Ast.span) Hashtbl.t;
+  (** ["fn|Iface"] -> the span of that function's [when Iface(..)] bound, so a
+      [missing_impl] at a call can say where the requirement comes from *)
   type_map : (Ast.span, ty) Hashtbl.t;
   json_derive_sites : (string * Ast.span) list;
   (** Every `derive Json` this env's check has seen, as (declaring-module-
@@ -803,7 +807,7 @@ let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   ty_aliases = StrMap.empty;
   level = 0; lin = [];
-  errors; pending_constraints = ref []; type_map; record_names_snapshot = []; json_derive_sites = [];
+  errors; pending_constraints = ref []; decl_sites = Hashtbl.create 16; type_map; record_names_snapshot = []; json_derive_sites = [];
   refs = ref []; current_decl = ref "";
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
@@ -1809,8 +1813,12 @@ let suggest_var_in_scope (name : string) (env : env) : string option =
   let best      = ref None in
   let best_dist = ref max_int in
   StrMap.iter (fun k _ ->
-    (* Skip qualified names (Mod.member) — those are suggested elsewhere. *)
-    if not (String.contains k '.') then begin
+    (* Skip qualified names (Mod.member) — those are suggested elsewhere —
+       and operators: a one-letter `y` is one edit from `%`, which is no
+       spelling of a variable. *)
+    let is_ident k =
+      k <> "" && (match k.[0] with 'a'..'z' | 'A'..'Z' | '_' -> true | _ -> false) in
+    if not (String.contains k '.') && is_ident k then begin
       let d = edit_distance name_lo (String.lowercase_ascii k) in
       if d > 0 && d <= max_dist && d < !best_dist then begin
         best      := Some k;
@@ -2174,7 +2182,12 @@ let instantiate ?use_span ?use_name level env = function
         | CADTBound (n, t) -> CADTBound (n, inst t)
         | CTNatBound t -> CTNatBound (inst t)) cs
     in
-    env.pending_constraints := inst_cs @ !(env.pending_constraints);
+    let site = match use_span, use_name with
+      | Some cs_span, Some cs_name -> Some { cs_span; cs_name }
+      | _ -> None
+    in
+    env.pending_constraints :=
+      List.map (fun c -> (c, site)) inst_cs @ !(env.pending_constraints);
     (* A1 witnesses: record the scheme (deduped by ids) and, if this call
        site supplied a span, the instantiation's type-argument vector. The
        fresh vars in `subst` are ordinary unification vars; they resolve

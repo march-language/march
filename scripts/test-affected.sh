@@ -34,6 +34,8 @@ expect checks "scripts/check-docs.sh" -- docs/types.md
 expect suites "refinecheck" -- lib/refinecheck/refine_check.ml
 expect suites "!ALL" -- lib/refinecheck/refine_check.ml
 expect oracles "refine" -- lib/refinecheck/refine_check.ml
+expect dune "@test/runtest-test_refine" -- lib/refine/solver.ml
+expect dune "@test/runtest-test_z3_lookup" -- lib/refine/solver.ml
 expect oracles "ir" -- lib/tir/perceus.ml
 expect dune "@test/runtest-run_snapshots" -- lib/tir/perceus.ml
 expect suites "!eval" -- lib/tir/perceus.ml

@@ -370,7 +370,13 @@ fields or pass the value to a measure.
 {v : Cfg | v.port >= 1}            -- a record field
 {v : Cfg | v.port > v.retries}     -- one field against another
 {v : Tree | size(v) < 100}         -- a @[measure] over a structure
+{Int | _ >= 0 else "must not be negative" && _ < 10 else "must be below 10"}
+                                   -- a message for each conjunct
 ```
+
+A conjunct may carry a message after `else`, shown when a call breaks that
+conjunct (`else` binds tighter than `&&`); see
+[A message for each half of a contract](refinement-types.md#a-message-for-each-half-of-a-contract).
 
 The predicate fragment is `+ - *`, `/ %` (with March's truncating semantics;
 a zero divisor makes the predicate false), the comparisons
@@ -403,7 +409,8 @@ end
 
 Checking is definite-failure: it flags only what can *never* hold, so there
 are no false positives, and silence means "not disproved", never "verified".
-It runs only when `z3` is on `PATH`. A predicate calling a name the checker
+It uses the z3 that ships with the toolchain (or `MARCH_Z3`, or a `z3` on `PATH`), and
+warns once (`solver_unavailable`) when none can be used. A predicate calling a name the checker
 does not know produces a **warning** rather than silently enforcing no check at all.
 
 `Float` predicates are **comparisons only**; float *arithmetic* in a predicate
