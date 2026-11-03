@@ -153,6 +153,9 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- A new Lemmas guide (`specs/lang/lemmas.md`, `/docs/lemmas/` on the site): writing `@[lemma]` proofs by induction,
+  `assert` steps and fuel, using lemmas with refinements, and what `forge test`, `forge doc`,
+  `forge search --law` and the editor do with them.
 - `march --explain` pages for `cap_grant_exceeded`, `cap_ceiling`, `cap_widen`, `cap_deserialize`,
   `proof_cap_return`, `proof_cap_mint_private`, `io_not_allowed`, `send_wrong_actor`,
   `actor_handler_state_type` and `codec_missing`.
