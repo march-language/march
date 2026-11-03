@@ -4015,8 +4015,10 @@ let compile filename =
      span — see its doc comment above. Applied here, once, so every
      downstream consumer of [diags] (human-readable printing below,
      --check-json, --emit-core-ast) sees the same de-duplicated set. *)
-  let diags = dedupe_cap_hints (March_errors.Errors.sorted errors) in
   let is_user_file = user_diag ~filename ~user_files in
+  let diags =
+    March_errors.Errors.suppress_cascades ~visible:is_user_file
+      (dedupe_cap_hints (March_errors.Errors.sorted errors)) in
   (* The front-end half of --check's accept/reject condition (has_user_errors
      || has_resolve_errors || has_desugar_errors; a parse error never gets
      this far, [compile] exits at the parse step), hoisted

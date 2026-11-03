@@ -347,9 +347,12 @@ this reason). The corpus must run cold too.
    "unbound variable: Lsit.length". `Lsit.nope(...)` is correctly rejected with "Did you
    mean `List`?", so qualified resolution falls back to the unqualified builtin when the last
    segment names one. This is a soundness hole as well as a message bug.
-2. The run-time stack trace for that program names line 7, not line 4.
+2. ~~The run-time stack trace for that program names line 7, not line 4.~~ Not a bug: each
+   frame is a call site by design (`[1] f() x.march:7` reads "`f` was called at line 7"). The
+   format misled the survey, which suggests naming the calling function too (`main → f()`);
+   left for a later pass.
 
-Both go first; neither depends on anything else here.
+Item 1 landed 2026-11-02 (`specs/progress/2026-11-02-qualified-builtin-fallback-accepts-unknown-module.md`).
 
 ---
 

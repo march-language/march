@@ -1490,8 +1490,34 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
         | Some m, Some (what, n, span) when n >= 1 && n <> m ->
           let plural k = if k = 1 then "" else "s" in
           let vars = List.init n (fun i -> String.make 1 (Char.chr (97 + i mod 26))) in
+          (* The parameter's declared arrow depth: `f : b -> a -> b` (a fold)
+             is 2, `pred : a -> Bool` (a filter) is 1.  Only a parameter
+             whose type is itself curried at least [n] deep can take the
+             curried rewrite; for `pred` the fix is a function of [m]
+             parameters, and suggesting `fn a -> fn b -> …` was wrong. *)
+          let param_depth =
+            let sch_ty = match lookup_var fname env with
+              | Some (Mono t) | Some (Poly (_, _, t)) -> Some t
+              | None -> None in
+            let rec nth_param t k =
+              match repr t with
+              | TArrow (a, b) -> if k = 0 then Some a else nth_param b (k - 1)
+              | _ -> None in
+            let rec depth t =
+              match repr t with TArrow (_, b) -> 1 + depth b | _ -> 0 in
+            let idx =
+              let rec find i = function
+                | [] -> None
+                | (p, _) :: rest -> if p = pname then Some i else find (i + 1) rest in
+              find 0 ps in
+            match sch_ty, idx with
+            | Some t, Some i -> Option.map depth (nth_param t i)
+            | _ -> None
+          in
+          let curried_param =
+            match param_depth with Some d -> d >= n | None -> true in
           let hint =
-            if m = 1 && n >= 2 then
+            if m = 1 && n >= 2 && curried_param then
               Printf.sprintf
                 "`%s` applies `%s` one argument at a time (a curried \
                  function, `a -> b -> …`), and March has no partial \
@@ -1503,6 +1529,10 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
                      (String.concat " -> fn " vars) v.txt (String.concat ", " vars)
                  | _ ->
                    Printf.sprintf "fn %s -> …" (String.concat " -> fn " vars))
+            else if m = 1 && n >= 2 then
+              Printf.sprintf
+                "`%s` calls `%s` with one argument, so pass a function of \
+                 one parameter:\n    fn x -> …" fname pname
             else
               Printf.sprintf
                 "March functions are not curried: a function is always \
@@ -1779,7 +1809,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
                 | Some sch -> Some sch
                 | None -> try_suffix rest)
            in
-           (match try_suffix name.txt with
+           (* A single-qualifier `Q.member` whose `Q` names no module at all
+              (not in the registry — the guard above — and no `Q.`-prefixed
+              binding or in-file module) is a misspelled module, not a path
+              to strip: stripping `Lsit.` off `Lsit.length` resolved the
+              builtin `length`, so the typo checked clean and failed only at
+              run time with "unbound variable: Lsit.length". *)
+           let unknown_single_qualifier =
+             match split_qualified name.txt with
+             | Some (q, member) when not (String.contains member '.') ->
+               let prefix = q ^ "." in
+               not (StrMap.mem q env.local_mods)
+               && not (StrMap.exists (fun k _ -> String.starts_with ~prefix k) env.vars)
+             | _ -> false
+           in
+           (match (if unknown_single_qualifier then None else try_suffix name.txt) with
             | Some sch -> instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
             | None ->
               let msg =
@@ -1792,7 +1836,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   | None   -> base
                 end
               in
-              Err.error ~code:Err.Code.unbound_variable env.errors ~span:name.span msg;
+              let code =
+                if String.contains name.txt '.' then Err.Code.unknown_qualified_name
+                else Err.Code.unbound_variable in
+              Err.error ~code env.errors ~span:name.span msg;
               TError))
 
     (* ── Type annotations ─────────────────────────────────────────── *)
