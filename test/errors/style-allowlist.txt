@@ -1,0 +1,32 @@
+# Codes whose messages still break the house style, checked by the style
+# lint in test/run_errors.ml (specs/plans/2026-11-02-diagnostics-depth-plan.md
+# §X5). One `<slug> <rule>` per line; rules: quote, capital, period, prefix.
+# This file may only shrink: the full run fails on an entry no case violates
+# any more, so a fix removes its line.
+#
+# The type-mismatch headline ("expected `X` but got `Y`."), rewritten by the
+# type-mismatch item of the plan (§F-items), which a sibling change owns;
+# capitalising it alone would touch every reject corpus `EXPECT-ERROR`.
+type_mismatch capital
+# Refinement and proof messages ("refinement violation: …", "division by …",
+# "this addition may overflow …", "the lemma …"), pinned by the ~550
+# z3-backed test_refinecheck cases; reworded with the refinement items.
+refinement_violated capital
+refinement_violated period
+refinement_unverified capital
+refinement_unverified period
+division_by_zero capital
+int_overflow capital
+lemma_argument_impure capital
+lemma_unproved capital
+lemma_unproved period
+lemma_unproved_call capital
+lemma_unproved_call period
+invalid_lemma period
+invalid_reflect period
+invalid_decreases period
+termination_unproved period
+# "Parse error in declaration": its text is matched in lib/parser/parse.ml's
+# generic_messages and raised from parser.mly (a grammar change is gated by
+# the tree-sitter check); fix the two together.
+parse_error period

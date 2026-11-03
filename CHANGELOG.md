@@ -114,6 +114,16 @@ git log is authoritative for exact commits.
 - **CI uses the pinned z3 on every platform** (built from source and cached) instead of
   the package manager's, and a new `refine-agreement` job requires every refinement
   verdict to be the same on darwin-arm64, linux-x86_64 and linux-aarch64.
+- Diagnostics: a rendered diagnostic's header names its category instead of a bare `ERROR`:
+  `-- TYPE MISMATCH ----`, `-- CAPABILITY ----`, `-- PROTOCOL ----`, and for a warning or hint
+  `-- WARNING: UNUSED ----` / `-- HINT: REFINEMENT ----`. `--check-json` objects gain a
+  `category` field (existing fields unchanged). Errors found while expanding `derive`,
+  `satisfy`, `@[endpoints]` and `@[remote]`, and the compiled backend's "interpreter-only"
+  rejections, are no longer raw `file:line:col: error:` lines: they render like every other
+  diagnostic (source excerpt, caret, code) and appear in `--check-json`. Messages follow one house
+  style (backticks, capitalised, full sentences), checked by the error corpus; e.g. a handler that
+  returns the wrong type now says "The handler for `Poke` in actor `A` must return the actor's
+  new state, a `{ n : Int }`, but returns `Int`."
 - Diagnostics: "did you mean" suggestions for an unknown constructor, actor message, variable or
   record field are ranked by type. A candidate that fits what the position needs (the actor of
   the pid in `send`, the annotated type, the field type) is shown alone, ahead of a closer

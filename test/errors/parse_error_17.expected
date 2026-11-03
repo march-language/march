@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------------- errors/parse_error_17.march
+-- SYNTAX ------------------- errors/parse_error_17.march
 
 This `fn` (line 10) has no matching `end`. [parse_error]
 

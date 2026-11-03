@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------------- errors/elif_keyword_1.march
+-- SYNTAX ------------------- errors/elif_keyword_1.march
 
 March has no `elif`: an `else if` is a nested `if`, and each `if` needs its own `end`. [elif_keyword]
 

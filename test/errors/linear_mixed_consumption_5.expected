@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------- errors/linear_mixed_consumption_5.march
+-- LINEARITY ---- errors/linear_mixed_consumption_5.march
 
 The linear value `m` is consumed on some branches but not others. [linear_mixed_consumption]
 On a branch that doesn't consume it, the value is dropped. Consume it on every branch, or end that branch with `panic(…)` if it never returns.
@@ -19,7 +19,7 @@ On a branch that doesn't consume it, the value is dropped. Consume it on every b
                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
--- ERROR -------- errors/linear_mixed_consumption_5.march
+-- LINEARITY ---- errors/linear_mixed_consumption_5.march
 
 The linear value `state.sessions` is used more than once here. [linear_used_twice]
 Linear values must be consumed exactly once — they cannot be copied or ignored.
@@ -36,7 +36,7 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
     run `march --explain linear_used_twice`
 
 
--- HINT -------- errors/linear_mixed_consumption_5.march
+-- HINT: NAMING -- errors/linear_mixed_consumption_5.march
 
 Constructor `Close` is defined by multiple types (a message of actor `Host`, `WsFrame`). Use a qualified form to disambiguate, e.g. `WsFrame.Close`. [ambiguous_constructor]
 

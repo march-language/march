@@ -1,5 +1,5 @@
 exit: 1
--- WARNING ------------------ errors/unused_binding_6.march
+-- WARNING: UNUSED -------- errors/unused_binding_6.march
 
 Unused variable `x`. [unused_binding]
 Use `_` to mark intentionally unused params.
@@ -9,7 +9,7 @@ Use `_` to mark intentionally unused params.
 
 
 
--- ERROR ------------------ errors/unused_binding_6.march
+-- LINEARITY -------------- errors/unused_binding_6.march
 
 `S1` is linear, but `drop_it` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
 Consume the value here instead, or, if `drop_it` uses that parameter exactly once, mark it `linear` where `drop_it` is defined (`linear x : a`).

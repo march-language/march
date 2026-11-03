@@ -369,7 +369,7 @@ let stdlib_only_session =
 let check_stdlib_only_session ~label (out, code) =
   Alcotest.(check int) (label ^ ": REPL exit code") 0 code;
   List.iter (fun (name, hint) ->
-      let needle = Printf.sprintf "`%s` is internal to the standard library; %s" name hint in
+      let needle = Printf.sprintf "`%s` is internal to the standard library; %s." name hint in
       if not (contains ~needle out) then
         Alcotest.failf "%s: expected the gate's error for %s in session output, got:\n%s"
           label name out)

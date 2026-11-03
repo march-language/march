@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------ errors/linear_generic_param_9.march
+-- LINEARITY -------- errors/linear_generic_param_9.march
 
 `RingBuf(a)` is linear, but `Task.async` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
 Consume the value here instead, or, if `Task.async` uses that parameter exactly once, mark it `linear` where `Task.async` is defined (`linear x : a`).
@@ -10,7 +10,7 @@ Consume the value here instead, or, if `Task.async` uses that parameter exactly 
     run `march --explain linear_generic_param`
 
 
--- ERROR ------------ errors/linear_generic_param_9.march
+-- LINEARITY -------- errors/linear_generic_param_9.march
 
 `RingBuf(c)` is linear, but `Task.await` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
 Consume the value here instead, or, if `Task.await` uses that parameter exactly once, mark it `linear` where `Task.await` is defined (`linear x : a`).
@@ -20,7 +20,7 @@ Consume the value here instead, or, if `Task.await` uses that parameter exactly 
 
 
 
--- ERROR ------------ errors/linear_generic_param_9.march
+-- LINEARITY -------- errors/linear_generic_param_9.march
 
 `RingBuf(b)` is linear, but `Task.await` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
 Consume the value here instead, or, if `Task.await` uses that parameter exactly once, mark it `linear` where `Task.await` is defined (`linear x : a`).

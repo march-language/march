@@ -288,7 +288,7 @@ let test_warn_form_exit_zero () =
   let (rc, out) = compile warn_src in
   Alcotest.(check int) "rc 0" 0 rc;
   Alcotest.(check bool) "warning printed" true
-    (contains "-- WARNING --" out && contains "is marked @[no_alloc] but allocates" out)
+    (contains "-- WARNING: CONTRACT " out && contains "is marked @[no_alloc] but allocates" out)
 
 let test_no_opt_downgrades () =
   let (rc, out) = compile ~flags:"--no-opt" live_src in
@@ -1062,9 +1062,9 @@ let test_cap_explicit_warn_opts_out () =
   let (rc, out) = compile cap_warn_src in
   if rc <> 0 then Alcotest.failf "warn opt-out should build:\n%s" out;
   Alcotest.(check bool) "warning, not error" true
-    (contains "-- WARNING --" out
+    (contains "-- WARNING: CONTRACT " out
      && contains "`Pair.make_pair` is marked @[no_alloc] but allocates" out
-     && not (contains "-- ERROR --" out))
+     && not (contains "-- CONTRACT " out))
 
 let test_cap_interpreter_hints_once () =
   let (rc, out) = run_cli ~args:"" cap_tuple_src in
@@ -1102,7 +1102,7 @@ let test_check_unlowerable_warns_unchecked () =
   let (rc, out) = check_cli unlowerable_src in
   Alcotest.(check int) "--check accepts" 0 rc;
   Alcotest.(check bool) "unchecked warning" true
-    (contains "-- WARNING --" out
+    (contains "-- WARNING: CONTRACT " out
      && contains "`add` is under @[no_alloc], but its allocation contract was not checked" out)
 
 let cap_tests = [

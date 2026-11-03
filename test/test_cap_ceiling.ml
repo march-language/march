@@ -281,7 +281,7 @@ end
    | exception Not_found ->
      Alcotest.failf "no fix hint in ceiling diagnostic:\n%s" out);
   (* Still names the offending module and the missing capability. *)
-  (match Str.search_forward (Str.regexp_string "module `Inner` uses `IO.FileWrite` but does not declare `needs IO.FileWrite`") out 0 with
+  (match Str.search_forward (Str.regexp_string "Module `Inner` uses `IO.FileWrite` but does not declare `needs IO.FileWrite`") out 0 with
    | _ -> ()
    | exception Not_found ->
      Alcotest.failf "diagnostic no longer names the offending module:\n%s" out)

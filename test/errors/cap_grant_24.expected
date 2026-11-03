@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_24.march
+-- ACTOR ---------------------- errors/cap_grant_24.march
 
 `spawn` needs a plain actor name written directly, like `spawn(Counter)`. [spawn_computed_actor]
 A computed actor expression (from an `if`, `match`, or function call) isn't supported: March resolves which actor to spawn at compile time from its name.

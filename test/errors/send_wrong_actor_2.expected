@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------- errors/send_wrong_actor_2.march
+-- ACTOR ---------------- errors/send_wrong_actor_2.march
 
 `Tally` is a message for `Labels`, but this pid is an actor `Counter`, so the message would be dropped. [send_wrong_actor]
 `Tally` is also a handler of `Counter`, but a bare `Tally` resolves to `Labels`'s, and an actor message cannot be qualified by its actor; rename one of the two handlers.
@@ -16,7 +16,7 @@ exit: 1
     run `march --explain send_wrong_actor`
 
 
--- HINT ---------------- errors/send_wrong_actor_2.march
+-- HINT: NAMING --------- errors/send_wrong_actor_2.march
 
 `Tally` is a message of more than one actor (`Labels`, `Counter`), and a message cannot be qualified by its actor; rename one of the handlers. [ambiguous_constructor]
 

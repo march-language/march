@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------ errors/linear_generic_param_6.march
+-- LINEARITY -------- errors/linear_generic_param_6.march
 
 `y` has type `a`, which holds a type variable that a `linear` parameter of `go` opts in to linear values, so a caller may pass a linear value here too.  Mark it `linear y` (or `affine y`) so the body is checked to use it once. [linear_generic_param]
 

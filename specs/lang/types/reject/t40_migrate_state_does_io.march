@@ -1,4 +1,4 @@
--- EXPECT-ERROR: migrate_state must be IO-free
+-- EXPECT-ERROR: `migrate_state` must be IO-free
 -- Capabilities widening, Task 3 -- Check 8 (`typecheck.ml:5798-5834`), the
 -- REJECT side. Companion to accept/t53 with the migrate fn's body changed
 -- to actually perform IO (`println`, `IO.Console` in `builtin_cap_table`,

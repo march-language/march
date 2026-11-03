@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------- errors/send_wrong_actor_1.march
+-- ACTOR ---------------- errors/send_wrong_actor_1.march
 
 `Poke` is a message for `A`, but this pid is an actor `B`, so the message would be dropped. [send_wrong_actor]
 Send it to a pid spawned from `A`, or send this actor one of its own messages.

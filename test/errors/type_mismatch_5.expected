@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------- errors/type_mismatch_5.march
+-- TYPE MISMATCH ----------- errors/type_mismatch_5.march
 
 expected `Bool` but got `Int`. [type_mismatch]
 

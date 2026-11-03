@@ -1,7 +1,7 @@
 exit: 1
--- ERROR ---------------- errors/proof_cap_return_2.march
+-- CAPABILITY ----------- errors/proof_cap_return_2.march
 
-function `pretend` returns `Cap(Db.Ready)` but `Cap(Db.Ready)` is a proof capability declared in `Db`. [proof_cap_return]
+The function `pretend` returns `Cap(Db.Ready)` but `Cap(Db.Ready)` is a proof capability declared in `Db`. [proof_cap_return]
 Only public functions of `Db` can construct `Cap(Db.Ready)`.
 hint: accept `Cap(Db.Ready)` as a parameter and pass it through, or call a factory in `Db`.
 
@@ -11,9 +11,9 @@ hint: accept `Cap(Db.Ready)` as a parameter and pass it through, or call a facto
     run `march --explain proof_cap_return`
 
 
--- HINT ---------------- errors/proof_cap_return_2.march
+-- HINT: CAPABILITY ----- errors/proof_cap_return_2.march
 
-this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
+This function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
 
 11 |     fn pretend(c : Cap(IO)) : Cap(Db.Ready) do mint_cap(c) end
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

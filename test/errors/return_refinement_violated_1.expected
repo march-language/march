@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------ errors/return_refinement_violated_1.march
+-- REFINEMENT -- errors/return_refinement_violated_1.march
 
 `bad` does not satisfy its return type constraint on all code paths. [return_refinement_violated]
 

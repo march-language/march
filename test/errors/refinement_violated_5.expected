@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------- errors/refinement_violated_5.march
+-- REFINEMENT -------- errors/refinement_violated_5.march
 
 refinement violation: argument `xs` of `last` does not satisfy precondition `len(v) > 0` [refinement_violated]
 note: this value never satisfies it; pass one that does

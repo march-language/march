@@ -4413,7 +4413,7 @@ Two generated examples, one per reason:
 ```
 $ march --check test/native/simd_lane_panic.march
 
--- HINT -- test/native/simd_lane_panic.march
+-- HINT: REFINEMENT -- test/native/simd_lane_panic.march
 
 precondition `0 <= _ && _ < 4` on `Simd.extract_i32x4` was NOT verified here.
 the argument `lane(1)` could not be translated to SMT, so no goal was built
@@ -4442,7 +4442,7 @@ end
 ```
 $ march --check up_doc.march
 
--- WARNING -- up_doc.march
+-- WARNING: REFINEMENT -- up_doc.march
 
 `is_prime` is not a measure or known predicate, so this refinement is not checked. Annotate the function `@[measure]`, or use a supported predicate.
 
@@ -4451,7 +4451,7 @@ $ march --check up_doc.march
 
 
 
--- HINT -- up_doc.march
+-- HINT: REFINEMENT -- up_doc.march
 
 precondition `is_prime(_)` on `f` was NOT verified here.
 the predicate's `is_prime(_)` has no SMT translation
@@ -4472,7 +4472,7 @@ error; see [the alias-withdrawal note](#a-withdrawn-alias-names-itself) below.
 ```
 $ march --check <file>
 
--- HINT -- <file>
+-- HINT: REFINEMENT -- <file>
 
 precondition `len(_) > 0` on `head` was NOT verified here.
 no fact the checker derived constrains `ys`
@@ -4484,7 +4484,7 @@ no fact the checker derived constrains `ys`
 The residual reasons still print the longer canned paragraph, unchanged:
 
 ```
--- HINT -- <file>
+-- HINT: REFINEMENT -- <file>
 
 precondition `len(_) > 0` on `head_of` was NOT verified here.
 reason: solver-undecided — the solver proved neither the predicate nor its negation
@@ -4913,7 +4913,7 @@ would silently do nothing. The checker warns about it (`unknown_attribute`),
 with a suggestion when the name is close to a known one:
 
 ```
-warning: unknown attribute `@[decrease]` on `f`: it is ignored.
+warning: Unknown attribute `@[decrease]` on `f`: it is ignored.
 note: did you mean `@[decreases]`?
 ```
 

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------- errors/protocol_invalid_3.march
+-- PROTOCOL ------------- errors/protocol_invalid_3.march
 
 Protocol `Bad`: the steps after `stop` can never run — `stop` exits the loop immediately, so it must be the last step. [protocol_invalid]
 

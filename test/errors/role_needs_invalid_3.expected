@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------- errors/role_needs_invalid_3.march
+-- PROTOCOL ----------- errors/role_needs_invalid_3.march
 
 Protocol `Logging`: `C` has crashed, so it cannot take part in the crash branch of `C -> I : ...`. [role_needs_invalid]
 
@@ -8,7 +8,7 @@ Protocol `Logging`: `C` has crashed, so it cannot take part in the crash branch 
 
 
 
--- ERROR -------------- errors/role_needs_invalid_3.march
+-- PROTOCOL ----------- errors/role_needs_invalid_3.march
 
 Protocol `Logging`: `C` has crashed, so it cannot take part in its own crash branch (`I -> C : ...`). [role_needs_invalid]
 

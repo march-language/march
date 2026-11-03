@@ -2886,7 +2886,12 @@ let analyse ~filename ~src : t =
           if d.span = sp &&
              String.length d.message >= plen &&
              String.sub d.message 0 plen = prefix
-          then Some (String.sub d.message plen (String.length d.message - plen))
+          then
+            (* The message ends its sentence with a period (house style,
+               plan §X5); the case is what comes before it. *)
+            let rest = String.sub d.message plen (String.length d.message - plen) in
+            let n = String.length rest in
+            Some (if n > 0 && rest.[n - 1] = '.' then String.sub rest 0 (n - 1) else rest)
           else None
         ) (March_errors.Errors.sorted errors)
     in

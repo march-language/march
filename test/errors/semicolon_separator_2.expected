@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------- errors/semicolon_separator_2.march
+-- SYNTAX ------------ errors/semicolon_separator_2.march
 
 Unexpected `;`: March separates expressions with newlines, not semicolons. [semicolon_separator]
 

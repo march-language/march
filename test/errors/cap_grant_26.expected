@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_26.march
+-- PROTOCOL ------------------- errors/cap_grant_26.march
 
 Chan.choose: label `:maybe` is not a valid branch of this protocol. [session_choice_label]
 

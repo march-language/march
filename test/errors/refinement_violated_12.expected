@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------ errors/refinement_violated_12.march
+-- REFINEMENT ------- errors/refinement_violated_12.march
 
 refinement violation: index must be less than the list's length [refinement_violated]
 argument `n` of `List.nth` does not satisfy precondition `_ < len(xs)`

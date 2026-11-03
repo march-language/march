@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------------- errors/missing_impl_5.march
+-- INTERFACE ---------------- errors/missing_impl_5.march
 
 `Shape` does not implement interface `Eq`. [missing_impl]
 `==` needs it here.

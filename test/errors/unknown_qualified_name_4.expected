@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------- errors/unknown_qualified_name_4.march
+-- NAMING --------- errors/unknown_qualified_name_4.march
 
 Function `lst_rev` is private to module `Array`. [unknown_qualified_name]
 

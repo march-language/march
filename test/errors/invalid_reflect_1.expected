@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------------- errors/invalid_reflect_1.march
+-- REFINEMENT ------------ errors/invalid_reflect_1.march
 
 `@[reflect]` on `noisy`: `noisy` is not reflected: it calls println [invalid_reflect]
 

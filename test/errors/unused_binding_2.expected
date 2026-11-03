@@ -1,5 +1,5 @@
 exit: 1
--- WARNING ------------------ errors/unused_binding_2.march
+-- WARNING: UNUSED -------- errors/unused_binding_2.march
 
 Unused variable `o`. [unused_binding]
 Use `_` to mark intentionally unused params.
@@ -9,7 +9,7 @@ Use `_` to mark intentionally unused params.
 
 
 
--- ERROR ------------------ errors/unused_binding_2.march
+-- REFINEMENT ------------- errors/unused_binding_2.march
 
 refinement violation: argument `o` of `unwrap` does not satisfy precondition `is_Some(_)` (e.g. x = None) [refinement_violated]
 note: guard the call (e.g. `if is_Some(x) do …`) or pass a value known to satisfy it

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_34.march
+-- PROTOCOL ------------------- errors/cap_grant_34.march
 
 Chan.recv: this channel came from `Chan.offer`, and the protocol's branches continue differently, so I don't know which one the peer chose. [session_offer_unrefined]
 Match on the label first — `match lbl do :ok -> ... :err -> ... end` — and use the channel inside each arm.
