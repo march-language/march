@@ -444,6 +444,10 @@ prints a counterexample when one is false. Don't weaken or delete a lemma to
 get green: a failing lemma means the change broke a law. See
 `specs/lang/refinement-types.md`, "Lemmas: proving what one unfolding cannot".
 
+An interface can carry laws too: `@[lemma] fn law(x : a, ...) : {Unit | P}` with no body,
+inside `interface I(a) do ... end`. Each `impl` in the same file must satisfy it (a proof is
+an impl `@[lemma] fn law(..) do ... end`). See `specs/lang/interfaces.md`, "Laws".
+
 
 ---
 

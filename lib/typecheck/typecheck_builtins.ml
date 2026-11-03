@@ -492,7 +492,8 @@ let mk_builtin_iface name methods =
     iface_param           = mk_n "a";
     iface_superclasses    = [];
     iface_assoc_types     = [];
-    iface_methods         = List.map mk_method methods }
+    iface_methods         = List.map mk_method methods;
+    iface_laws            = [] }
 
 let _mk_n txt = { Ast.txt; span = Ast.dummy_span }
 

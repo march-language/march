@@ -45,6 +45,13 @@ git log is authoritative for exact commits.
 - **`--refine-rlimit N` and `[refine] rlimit = N` in `forge.toml`** raise the per-query
   solver limit for a project with a known-hard proof. forge passes the setting to every
   `march` it runs.
+- **Interface laws.** An interface can declare laws, written as `@[lemma]` signatures
+  with no body (`@[lemma] fn combine_assoc(x : a, y : a, z : a) : {Unit | ...}`). The
+  checker checks each law for every `impl` in the file, using that impl's methods: a
+  proved law is silent, a broken one is an error with a counterexample, and one it cannot
+  prove is `lemma_unproved` and is tested by `forge test`. An impl can supply a proof as
+  a `@[lemma]` with the law's name. Laws never run.
+
 - **Lemma rewrites in the editor.** When a proved `@[lemma]` states an equation
   `lhs == rhs`, the language server offers a code action that rewrites an expression of
   the shape `lhs` into `rhs`, named after the lemma ("Rewrite to `Cons(1, zs)` (by the

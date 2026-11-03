@@ -766,3 +766,115 @@ let lemma_tests =
         let out = run (src "") in
         expect_unproved out "count_cat";
         if contains out "-- ERROR" then Alcotest.failf "outside `cap verified` it is a warning:\n%s" out) ]
+
+(* ── Interface laws (idea 6): an interface's `@[lemma]` signature is one lemma
+   per impl, over copies of the impl's methods ([Interface_laws]) ──────── *)
+
+(* The lemma-def status ("admitted" / "unproved") of the generated lemma
+   [name], from `--reflect-deps`. *)
+let lemma_def_status out name =
+  List.find_map
+    (fun l ->
+      match String.split_on_char '\t' l with
+      | [ "lemma-def"; _; q; h ] when q = name || String.ends_with ~suffix:("." ^ name) q -> (
+        match List.rev (String.split_on_char ':' h) with s :: _ -> Some s | [] -> None)
+      | _ -> None)
+    (lines out)
+
+let expect_status out name status =
+  match lemma_def_status out name with
+  | Some s when s = status -> ()
+  | s -> Alcotest.failf "expected `%s` %s, got %s:\n%s" name status (Option.value ~default:"no row" s) out
+
+let monoid =
+  {|  interface Monoid(a) do
+    fn combine : a -> a -> a
+    @[lemma]
+    fn combine_assoc(x : a, y : a, z : a) : {Unit | combine(combine(x, y), z) == combine(x, combine(y, z))}
+  end
+  impl Monoid(Int) do
+    fn combine(x, y) do x + y end
+  end
+|}
+
+let joinable ~proof =
+  {|  interface Joinable(a) do
+    fn join : a -> a -> a
+    fn none : a -> a
+    @[lemma]
+    fn join_none(x : a) : {Unit | join(x, none(x)) == x}
+  end
+  impl Joinable(List(a)) do
+    fn join(xs, ys) do
+      match xs do
+        Nil -> ys
+        Cons(h, t) -> Cons(h, join(t, ys))
+      end
+    end
+    fn none(_xs) do Nil end
+|}
+  ^ (if proof then
+       {|    @[lemma]
+    fn join_none(xs) do
+      match xs do
+        Nil -> ()
+        Cons(_, t) -> join_none(t)
+      end
+    end
+|}
+     else "")
+  ^ "  end\n"
+
+let iface_laws =
+  [ gated "iface_law_proved: a law an impl satisfies is admitted for that impl" (fun () ->
+        let out = run ~args:"--check --reflect-deps" ("mod N do\n" ^ monoid ^ "end\n") in
+        expect_status out "combine_assoc__Monoid_Int" "admitted";
+        if contains out "-- ERROR" || contains out "[lemma_unproved]" then
+          Alcotest.failf "a satisfied law draws nothing:\n%s" out);
+    gated "iface_law_refuted: an impl that breaks a law is refinement_violated, with an input" (fun () ->
+        let out =
+          run ~args:"--check --reflect-deps"
+            ("mod N do\n" ^ monoid
+           ^ "  type Box = Box(Int)\n  impl Monoid(Box) do\n    fn combine(p, q) do\n      match p do\n        Box(a) -> match q do\n          Box(b) -> Box(a - b)\n        end\n      end\n    end\n  end\nend\n")
+        in
+        expect_refuted out "combine_assoc__Monoid_Box" ~at:"x = Box(";
+        (* The message reads the theorem as written, not the generated names. *)
+        if not (contains out "its theorem `combine(combine(x, y), z) == combine(x, combine(y, z))`") then
+          Alcotest.failf "the theorem prints as written:\n%s" out;
+        expect_status out "combine_assoc__Monoid_Box" "unproved";
+        expect_status out "combine_assoc__Monoid_Int" "admitted");
+    gated "iface_law_proof: an impl's own `@[lemma]` of the law's name is its proof" (fun () ->
+        let out = run ~args:"--check --reflect-deps" ("mod N do\n" ^ joinable ~proof:true ^ "end\n") in
+        expect_status out "join_none__Joinable_List_a" "admitted";
+        (* Without the proof the law needs induction it does not get. *)
+        let out = run ~args:"--check --reflect-deps" ("mod N do\n" ^ joinable ~proof:false ^ "end\n") in
+        expect_unproved out "join_none__Joinable_List_a";
+        expect_status out "join_none__Joinable_List_a" "unproved");
+    gated "iface_law_verified: under `cap verified` an unproved law is an error" (fun () ->
+        let out = run ~args:"--check" ("mod N do\n  cap verified\n" ^ joinable ~proof:false ^ "end\n") in
+        if not (unproved out "join_none__Joinable_List_a" && contains out "-- ERROR") then
+          Alcotest.failf "an unproved law in a verified module is an error:\n%s" out);
+    gated "iface_law_lemma_test: `--lemma-test` tests each impl's law" (fun () ->
+        let out = run ~args:"--check --lemma-test" ("mod N do\n" ^ joinable ~proof:false ^ "end\n") in
+        expect_row out "join_none__Joinable_List_a" ~status:"tested" ~detail:"tested, not proved: ");
+    gated "iface_law_erased: laws and the method copies never run" (fun () ->
+        let src =
+          "mod N do\n  needs IO.Console\n" ^ joinable ~proof:true
+          ^ "  fn main(_cap : Cap(IO.Console)) do\n    println(int_to_string(List.length(join([1, 2], [3]))))\n  end\nend\n"
+        in
+        List.iter
+          (fun mode ->
+            let out = output mode src in
+            match List.rev (lines out) with
+            | l :: _ when String.trim l = "3" -> ()
+            | _ -> Alcotest.failf "the program prints 3:\n%s" out)
+          [ `Interp; `Compiled ];
+        let ir = ll src in
+        if contains ir "__law_" || contains ir "join_none" then Alcotest.fail "the law's code reaches the IR");
+    gated "iface_law_syntax: a body-less interface `fn` must be a `@[lemma]`" (fun () ->
+        let out =
+          run ~args:"--check"
+            "mod N do\n  interface I(a) do\n    @[opaque]\n    fn l(x : a) : {Unit | x == x}\n  end\nend\n"
+        in
+        if not (contains out "An interface can declare laws") then
+          Alcotest.failf "expected the law-syntax error:\n%s" out) ]

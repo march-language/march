@@ -36,6 +36,7 @@ conditional implementations, constraints on functions, the four standard interfa
 - [Conditional Implementations](#conditional-implementations)
 - [Using Interfaces in Function Signatures](#using-interfaces-in-function-signatures)
 - [Capability bounds on methods](#capability-bounds-on-methods)
+- [Laws](#laws)
 
 **The standard interfaces**
 
@@ -273,6 +274,72 @@ impls only: it is not part of the method's type, and a function constrained by
 `when Store(a)` declares nothing new. See
 [Per-function bounds]({{ site.baseurl }}/docs/capabilities/#per-function-bounds) for the
 full rules.
+
+## Laws
+
+An interface can state laws: properties every implementation must have. A law is
+written as a lemma signature with no body, `@[lemma] fn name(params) : {Unit | P}`,
+where `P` may call the interface's methods (see
+[Lemmas]({{ site.baseurl }}/docs/refinement-types/#lemmas-proving-what-one-unfolding-cannot)).
+
+```march
+interface Monoid(a) do
+  fn combine : a -> a -> a
+  @[lemma]
+  fn combine_assoc(x : a, y : a, z : a)
+    : {Unit | combine(combine(x, y), z) == combine(x, combine(y, z))}
+end
+
+impl Monoid(Int) do
+  fn combine(x, y) do x + y end
+end
+```
+
+The checker checks each law once per `impl`, with that impl's methods. Here
+`combine_assoc` is proved for `Int`. An impl whose methods break a law is an error with
+an input that shows it:
+
+```text
+the lemma `combine_assoc__Monoid_Box` is false: its theorem
+`combine(combine(x, y), z) == combine(x, combine(y, z))` does not hold at
+x = Box(-3), y = Box(-2), z = Box(-1)
+```
+
+When a law needs a proof (an induction, say), the impl gives one as a lemma with the
+law's name. Without it, the checker tries the law with an empty body:
+
+```march
+impl Joinable(List(a)) do
+  fn join(xs, ys) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, join(t, ys))
+    end
+  end
+  fn none(_xs) do Nil end
+  @[lemma]
+  fn join_none(xs) do        -- proves the interface's join_none for lists
+    match xs do
+      Nil -> ()
+      Cons(_, t) -> join_none(t)
+    end
+  end
+end
+```
+
+A law the checker cannot prove for an impl is `lemma_unproved` (an error in a
+`cap verified` module), and `forge test` tests it on generated inputs, like any
+lemma. Laws never run: they and the code the checker uses for them are removed
+before the program is built.
+
+The checker names each impl's law `<law>__<Interface>_<Type>` in its messages
+(`combine_assoc__Monoid_Int`). Current limits:
+
+- only impls in the same file as the interface are checked;
+- a method the impl does not define (a default) is not known to the law;
+- a law can't call a method with a `Unit` argument (`empty(())`): the logic has no
+  `Unit` value, so such a law stays unproved;
+- laws over a hand-written `Eq` are opaque (`==` in a law is structural equality).
 
 ---
 

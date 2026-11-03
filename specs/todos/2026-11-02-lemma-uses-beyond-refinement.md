@@ -23,13 +23,15 @@ and idea 10 (guidance); idea 5 for the open file's lemmas
 5. **Proof-backed rewrites: other files' lemmas.** The LSP rewrite
    (`specs/progress/2026-11-03-lemma-refutation-and-rewrites.md`) uses the open file's lemmas
    only. The stdlib's (phase 3) and dependencies' need their admitted status too.
+6. **Interface laws: the rest.** Laws are checked per impl
+   (`specs/progress/2026-11-03-interface-laws.md`) for impls in the interface's own file,
+   over the methods the impl defines. Not yet: impls in other files, default methods, a
+   method called with `()` (no `Unit` in the logic), the compiled side of `--lemma-test`
+   for generated lemmas, generated proofs for derived impls, and laws over a hand-written
+   `Eq` (D7).
 
 The open ideas:
 
-6. **Interface laws.** `interface Monoid` declares `combine_assoc` and `empty_left` as lemmas
-   that every `impl` must discharge, as proofs or at least as idea 1's tests. A derived impl
-   could carry generated proofs. This is blocked by D7 (a hand-written `eq` is opaque) for laws
-   over `Eq`.
 7. **Versioning by behaviour.** A package's lemmas are part of its public interface:
    `forge publish` checks that the new version still proves the previous version's lemmas, so
    breaking a published law is flagged as a breaking change. Related:

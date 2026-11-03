@@ -264,6 +264,33 @@ end|} in
   in
   Alcotest.(check int) "attribute kept on every clause" 2 (count_attrs out)
 
+(* An interface law (`@[lemma] fn ... : {Unit | P}`, no body) and an impl's
+   proof of it survive formatting: dropping either would silently remove a
+   checked law. *)
+let test_interface_law_preserved () =
+  let src = {|mod Test do
+interface Monoid(a) do
+fn combine : a -> a -> a
+@[lemma]
+fn combine_assoc(x : a, y : a, z : a) : {Unit | combine(combine(x, y), z) == combine(x, combine(y, z))}
+end
+impl Monoid(Int) do
+fn combine(x, y) do x + y end
+@[lemma]
+fn combine_assoc(x, y, z) do () end
+end
+end|} in
+  check_parses "interface law" src;
+  check_idempotent "interface law" src;
+  let out = fmt src in
+  let count needle =
+    let n = String.length needle and l = String.length out in
+    let rec go i acc = if i + n > l then acc else go (i + 1) (if String.sub out i n = needle then acc + 1 else acc) in
+    go 0 0
+  in
+  Alcotest.(check int) "law and proof keep @[lemma]" 2 (count "@[lemma]");
+  Alcotest.(check int) "the law keeps its theorem" 1 (count "fn combine_assoc(x : a, y : a, z : a)")
+
 let test_local_fn () =
   let src = {|mod Test do
 fn fib(n : Int) : Int do
@@ -691,6 +718,7 @@ let () =
       test_case "record literal"  `Quick test_record_literal;
       test_case "record pattern"  `Quick test_record_pattern;
       test_case "fn attribute"    `Quick test_fn_attribute_preserved;
+      test_case "interface law"   `Quick test_interface_law_preserved;
       test_case "local fn"        `Quick test_local_fn;
       test_case "use decl"        `Quick test_use_decl;
       test_case "doc comment"     `Quick test_doc_comment;
