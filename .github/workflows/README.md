@@ -66,6 +66,7 @@ bench-gate (ubuntu)
 conformance (ubuntu)
 tree-sitter (ubuntu)
 browser-repl (ubuntu)
+refine-agreement-gate (ubuntu) ── refine-agreement × darwin-arm64 | linux-x86_64 | linux-aarch64 ── refine-agreement-compare
 ocaml-build (ubuntu) ─┬─ property-tests × soundness | tir | rest ─┐
                       │                                           └─ property-coverage
                       ├─ cross-linux-oracle
@@ -95,6 +96,7 @@ ocaml-build (ubuntu) ─┬─ property-tests × soundness | tir | rest ─┐
 | `property-oracle` × 2 | The differential oracle: ~1090 generated programs, interpreted vs compiled, outputs must match. Eight case lists, four running side by side on each runner (one list is one sequential process; one per runner left three cores idle). | An interpreter/compiler divergence; the log has the program. |
 | `cross-linux-oracle` | Cross-compiles the golden corpus to linux/amd64 with `zig cc` and checks output is byte-identical to the native build. The oracle step takes about 20 minutes (1,181 s measured on main); its limit is 30. | A cross-compilation or target-flag regression. A step killed at "program 79 of 81" with no results matrix is the time limit, not a regression. |
 | `determinism` | `scripts/determinism-oracle.sh`, `--corpus small` (~30 programs) on pull requests and `--corpus all` on pushes to `main`, where the ~500-program corpus runs as two `--shard K/2` jobs because one job exceeded its 60-minute step limit: every program in the IR-oracle corpus compiled with `--emit-llvm --dump-impl-hashes` under a cold and a warm private `$HOME`, from two cwds; the `.ll` and `.hashes` must be byte-identical across all four. Runs `--self-test` first (a perturbed stdlib copy must make it red). | Compiler output depends on cache state or cwd (a fresh-name counter, Hashtbl order, or a cached-vs-fresh stdlib difference, cf. PRs #805/#807). The log names the program, the condition pair and the first differing line; rerun locally with `scripts/determinism-oracle.sh -w <dir>` and diff `out/<tag>/{1,2,3,4}.ll`. A red self-test means the oracle itself is broken. |
+| `refine-agreement` (gate, three platform legs, compare) | Cross-platform refinement agreement: on each tier-1 platform, with the pinned z3 (`z3.version`, built by `scripts/install-z3.sh` and cached), `scripts/refine-verdicts.sh` writes every refinement verdict of `test/native`, the conformance corpus and the stdlib sites; the compare job fails on any line that differs from linux-x86_64, or on a leg with fewer than 1000 verdicts. Runs on pushes to `main` and on PRs touching `lib/refine`, `lib/refinecheck`, `z3.version` or the two scripts (the gate decides). | A verdict that depends on the platform: same z3 version and rlimit, different answer. The diff names the fixture and site; run `scripts/refine-verdicts.sh <dir>` on two machines and diff `verdicts.txt`. A z3 cache miss on a leg is slow (a from-source build), not red. |
 
 **What CI does not cover:** Linux arm64 (only built, by `build.yml`), Windows,
 the tests quarantined out of `runtest` (run informationally by the nightly), and

@@ -43,10 +43,14 @@ runs:
           # libblake3-dev is not available in Ubuntu 24.04; build from source
           git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
           cd /tmp/blake3/c
+          # SIMD units are per-arch (see build.yml's Alpine leg): the arm64
+          # runner the refine-agreement job uses needs NEON, not the x86 units.
+          case "$(uname -m)" in
+            aarch64) B3_SIMD="blake3_neon.c" ;;
+            *)       B3_SIMD="blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S" ;;
+          esac
           gcc -O2 -shared -fPIC -o libblake3.so \
-            blake3.c blake3_dispatch.c blake3_portable.c \
-            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
-            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+            blake3.c blake3_dispatch.c blake3_portable.c $B3_SIMD
           sudo cp libblake3.so /usr/local/lib/libblake3.so
           sudo cp blake3.h /usr/local/include/blake3.h
           sudo ldconfig
