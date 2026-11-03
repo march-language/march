@@ -86,14 +86,20 @@ version() {
   grep -qF "$answer -- ANSWER" "$work/v$v/role_app.march" || fail "version $v: the ANSWER line was not rewritten"
 }
 flags="--hot-reload RoleApp --signing-pubkey $pk --topology $digest"
+for v in 1 2 3 4; do version "$v"; done
+# The base builds beside the patches, in its own directory: a compiler's cwd
+# holds its CAS, which concurrent compiles must not share.
+mkdir -p "$work/base"; cp "$work/v1/role_app.march" "$work/base/role_app.march"
 for v in 1 2 3 4; do
-  version "$v"
-  (cd "$work/v$v" && HOME="$work/home" "$MARCH" --compile --compile-so $flags -o "$work/v$v/v$v.so" role_app.march) \
-    > "$work/patch$v.log" 2>&1 || { cat "$work/patch$v.log" >&2; fail "version $v's patch did not build"; }
+  bg_build "$work/v$v" "$work/patch$v.log" "version $v's patch" \
+    env HOME="$work/home" "$MARCH" --compile --compile-so $flags -o "$work/v$v/v$v.so" role_app.march
+done
+bg_build "$work/base" "$work/compile.log" "the base" \
+  env HOME="$work/home" "$MARCH" --compile $flags -o "$work/node_base" role_app.march
+wait_builds
+for v in 1 2 3 4; do
   [ -f "$work/v$v/v$v.so.hcr_manifest" ] || fail "no manifest for version $v"
 done
-(cd "$work/v1" && HOME="$work/home" "$MARCH" --compile $flags -o "$work/node_base" role_app.march) \
-  > "$work/compile.log" 2>&1 || { cat "$work/compile.log" >&2; fail "the base did not compile"; }
 cp "$work/node_base" "$work/node_a"; cp "$work/node_base" "$work/node_b"
 
 # What the bug was about: the role body's own caps hold the session.

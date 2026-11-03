@@ -157,30 +157,52 @@ let declaration (orig, _, kind) =
   | Inc | Dec _ -> Printf.sprintf "declare void @%s(ptr)" orig
   | DecFreed _ -> Printf.sprintf "declare i64 @%s(ptr)" orig
 
-let starts_with pre s =
-  String.length s >= String.length pre && String.sub s 0 (String.length pre) = pre
+(* These scan every line of the module, so they allocate nothing on a line
+   with no match: a hot-reload build's module is large enough that a
+   substring per character made this pass most of llvm-emit. *)
+
+(** [s] has [pat] at offset [i]. *)
+let matches_at s i pat =
+  let m = String.length pat in
+  i + m <= String.length s
+  && (let rec go k = k >= m || (String.unsafe_get s (i + k) = String.unsafe_get pat k && go (k + 1)) in
+      go 0)
+
+let starts_with pre s = matches_at s 0 pre
+
+(* [@orig(] and [@twin(] per entry. No pattern is a prefix of another (the
+   [(] ends each name), and no twin contains a pattern, so one left-to-right
+   pass replaces exactly what one pass per entry did. *)
+let patterns = List.map (fun (orig, twin, _) -> (orig, "@" ^ orig ^ "(", "@" ^ twin ^ "(")) entries
 
 (** Replace every [@orig(] in [line] with [@twin(]. *)
 let rewrite_line (line : string) : string * string list =
   if starts_with "declare " line || starts_with "define " line then (line, [])
-  else
-    List.fold_left (fun (l, used) (orig, twin, _) ->
-        let pat = "@" ^ orig ^ "(" in
-        if not (String.length l >= String.length pat) then (l, used)
-        else begin
-          let buf = Buffer.create (String.length l) in
-          let n = String.length l and m = String.length pat in
-          let hit = ref false in
-          let i = ref 0 in
-          while !i < n do
-            if !i + m <= n && String.sub l !i m = pat then begin
-              Buffer.add_string buf ("@" ^ twin ^ "("); i := !i + m; hit := true
-            end else begin
-              Buffer.add_char buf l.[!i]; incr i
-            end
-          done;
-          (Buffer.contents buf, if !hit then orig :: used else used)
-        end) (line, []) entries
+  else begin
+    let n = String.length line in
+    let rec first_hit i =
+      match String.index_from_opt line i '@' with
+      | None -> None
+      | Some j ->
+        match List.find_opt (fun (_, pat, _) -> matches_at line j pat) patterns with
+        | Some p -> Some (j, p)
+        | None -> if j + 1 < n then first_hit (j + 1) else None
+    in
+    match first_hit 0 with
+    | None -> (line, [])
+    | Some hit ->
+      let buf = Buffer.create (n + 32) in
+      let rec go from used = function
+        | None -> Buffer.add_substring buf line from (n - from); used
+        | Some (j, (orig, pat, twin)) ->
+          Buffer.add_substring buf line from (j - from);
+          Buffer.add_string buf twin;
+          let k = j + String.length pat in
+          go k (orig :: used) (if k < n then first_hit k else None)
+      in
+      let used = go 0 [] (Some hit) in
+      (Buffer.contents buf, used)
+  end
 
 (* ── entry-block alloca hoisting ─────────────────────────────────────
 
@@ -270,7 +292,7 @@ let rewrite (ir : string) : string =
   let used = Hashtbl.create 8 in
   let declared = Hashtbl.create 8 in
   let lines' = List.map (fun line ->
-      List.iter (fun (orig, _, _) ->
+      if starts_with "declare " line then List.iter (fun (orig, _, _) ->
           if starts_with ("declare void @" ^ orig ^ "(") line
           || starts_with ("declare i64 @" ^ orig ^ "(") line
           || starts_with ("declare i64  @" ^ orig ^ "(") line

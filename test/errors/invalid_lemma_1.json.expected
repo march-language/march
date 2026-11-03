@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/invalid_lemma_1.march","start_line":3,"start_col":5,"end_line":3,"end_col":10,"message":"`bogus` is not a valid lemma (L2): it calls panic; a lemma never runs, so its body must be total and pure","code":"invalid_lemma","fix":null,"labels":[],"notes":[]}

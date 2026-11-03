@@ -17856,6 +17856,7 @@ let compiler_suites =
       ("cap_fn_bounds", Test_cap_fn_bounds.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
       ("alloc_contract", Test_alloc_contract.tests);
+      ("portable_closures", Test_portable.tests);
       ("cap_unforgeable", Test_cap_unforgeable.tests);
       ("cap_dict", Test_cap_dict.tests);
       ("endpoints", Test_endpoints.tests);

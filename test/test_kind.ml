@@ -386,6 +386,30 @@ let test_short_collision_stays_boxed_under_both () =
       Alcotest.check repr_pp (n ^ " Boxed") Kind.Boxed (Kind.of_ty t (TCon (n, []))).Kind.repr)
     [ "A.Dur"; "B.Dur"; "Dur" ]
 
+let test_resource_free () =
+  (* `resource Acc` lowers to a constructor-less variant; reaching one through
+     a field, a container or a type argument makes a value not resource-free.
+     A function type holds none of its argument types, so it stays free
+     (portable.ml: a closure capturing `acc_push` captures no handle). *)
+  let open Tir in
+  let defs = [ TDVariant ("Main.Acc", []);
+               TDVariant ("Main.Box", [ ("Box", [TCon ("Acc", []); TInt]) ]);
+               TDVariant ("Main.Plain", [ ("Plain", [TInt]) ]) ] in
+  let t = table defs in
+  let free ty = (Kind.of_ty t ty).Kind.resource_free in
+  Alcotest.(check bool) "Acc is a resource name, both spellings" true
+    (Kind.is_resource_name t "Acc" && Kind.is_resource_name t "Main.Acc");
+  Alcotest.(check bool) "Plain is not a resource" false (Kind.is_resource_name t "Plain");
+  Alcotest.(check bool) "Acc" false (free (TCon ("Acc", [])));
+  Alcotest.(check bool) "Box holds an Acc (short spelling)" false (free (TCon ("Box", [])));
+  Alcotest.(check bool) "Box holds an Acc (qualified)" false (free (TCon ("Main.Box", [])));
+  Alcotest.(check bool) "List(Acc)" false (free (TCon ("List", [TCon ("Acc", [])])));
+  Alcotest.(check bool) "tuple with an Acc" false (free (TTuple [TInt; TCon ("Acc", [])]));
+  Alcotest.(check bool) "Plain" true (free (TCon ("Plain", [])));
+  Alcotest.(check bool) "Int" true (free TInt);
+  Alcotest.(check bool) "(Acc, Int) -> Int holds no Acc" true
+    (free (TFn ([TCon ("Acc", []); TInt], TInt)))
+
 let suites = [
   ( "kind", [
       Alcotest.test_case "needs_rc/borrowable truth table"        `Quick test_truth_table;
@@ -406,5 +430,6 @@ let suites = [
       Alcotest.test_case "CsvRow keeps its declared (niche) layout" `Quick test_csv_row_declared_layout_pin;
       Alcotest.test_case "canonical_name"                          `Quick test_canonical_name;
       Alcotest.test_case "short-name collision stays Boxed"        `Quick test_short_collision_stays_boxed_under_both;
+      Alcotest.test_case "resource_free"                           `Quick test_resource_free;
     ] );
 ]

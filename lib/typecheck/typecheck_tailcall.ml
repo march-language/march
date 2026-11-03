@@ -732,7 +732,8 @@ let rec enforce_tail_calls_in_decls
            List.length scc > 1 ||
            StringSet.mem def.fn_name.txt direct
          in
-         if is_recursive && not (List.mem "no_warn_recursion" def.fn_attrs) then begin
+         (* A `@[lemma]` never runs (reflection design §4.5): no stack to warn about. *)
+         if is_recursive && not (List.mem "no_warn_recursion" def.fn_attrs) && not (List.mem "lemma" def.fn_attrs) then begin
            (* [check_tail_position] matches [EVar]s, so the recursive-name set
               has to be in the CALL-SITE namespace, not the bare one. *)
            let rec_set =

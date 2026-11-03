@@ -14,7 +14,7 @@ need_built test/hcr_deploy.exe
 # ctl_prepare [extra compile flags...]: keys, the topology digest, the app
 # built once (every node runs the same binary) and its two patches.
 ctl_prepare() {
-  mkdir -p "$work/keys" "$work/p1" "$work/p2" "$work/fakebin" "$work/nodes"
+  mkdir -p "$work/keys" "$work/p0" "$work/p1" "$work/p2" "$work/fakebin" "$work/nodes"
   "$HCR" keygen "$work/keys" || fail "keygen failed"
   pk=$(cat "$work/keys/pk")
   printf '#!/bin/sh\necho "ssh $*" >> "%s/ssh.log"\nexit 1\n' "$work" > "$work/fakebin/ssh"
@@ -28,15 +28,17 @@ ctl_prepare() {
   "control": { "candidates": "control", "port": 7947 } }
 JSON
   cp "$CP/app.march" "$work/p1/ctl_app.march"
+  cp "$CP/app.march" "$work/p0/ctl_app.march"
   cp "$CP/app_v2.march" "$work/p2/ctl_app.march"
   local flags="--hot-reload CtlApp --signing-pubkey $pk --topology $work/topology.json"
-  (cd "$work/p1" && "$MARCH" --compile $flags "$@" -o "$work/node_a" ctl_app.march) > "$work/compile.log" 2>&1 \
-    || { cat "$work/compile.log" >&2; fail "the app did not compile"; }
-  cp "$work/node_a" "$work/node_b"; cp "$work/node_a" "$work/node_c"
+  # The app and its two patches build at once, each in its own directory (a
+  # compiler's cwd holds its CAS, which concurrent compiles must not share).
+  bg_build "$work/p0" "$work/compile.log" "the app" "$MARCH" --compile $flags "$@" -o "$work/node_a" ctl_app.march
   for v in 1 2; do
-    (cd "$work/p$v" && "$MARCH" --compile --compile-so $flags "$@" -o "$work/p$v/v$v.so" ctl_app.march) > "$work/patch$v.log" 2>&1 \
-      || { cat "$work/patch$v.log" >&2; fail "patch $v did not build"; }
+    bg_build "$work/p$v" "$work/patch$v.log" "patch $v" "$MARCH" --compile --compile-so $flags "$@" -o "$work/p$v/v$v.so" ctl_app.march
   done
+  wait_builds
+  cp "$work/node_a" "$work/node_b"; cp "$work/node_a" "$work/node_c"
   socks=$(mktemp -d /tmp/hs.XXXXXX)
 }
 

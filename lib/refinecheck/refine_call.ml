@@ -622,6 +622,12 @@ type check_subject =
      termination pass words `termination_unproved` itself, for an annotated
      unit only (decision D2).  A failure is [Skipped (Not_decreasing cx)]. *)
   | Decreases
+  (* A lemma's theorem at one tail of its body, or a static `assert` inside a
+     lemma (reflection design §4.3): phrased, like [Decreases], as a call to a
+     synthetic signature whose one refined parameter is the goal.  It raises
+     no `refinement_unverified` of its own: the lemma pass words
+     `lemma_unproved` once, at the lemma.  A refutation is reported as usual. *)
+  | Lemma_goal
 
 (* Span of an expression, for pointing a diagnostic at ONE argument instead of
    the whole call. [refinecheck] does not depend on [march_typecheck], so this
@@ -708,6 +714,19 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
   let { root; errctx; postcond; path; lets; sc; re; binds; demand = _ } = cx in
+  (* A lemma body's pattern links (§4.3), read by stage 2 only; the `$link:`
+     facts themselves translate to nothing, so stage 1 is unchanged. *)
+  Reflect_state.links :=
+    List.filter_map
+      (fun ((f : A.expr), _) ->
+        match f with
+        | A.EApp (A.EVar { A.txt = m; _ }, [ A.EVar b; A.EVar x ], _)
+          when String.starts_with ~prefix:Reflect_state.link_prefix m -> (
+          match String.split_on_char ':' (String.sub m 6 (String.length m - 6)) with
+          | [ k; i ] -> Option.map (fun i -> (b.A.txt, x.A.txt, k, i)) (int_of_string_opt i)
+          | _ -> None)
+        | _ -> None)
+      path;
   (* A Bool local bound to a comparison or connective (`let ok = k < 5`,
      recorded in [lets], which retires it when `ok` or anything it mentions
      is rebound) is read as that predicate in a path condition, so `if ok`
@@ -736,6 +755,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
     | Element_domain -> "container's elements"
     | Callback_codomain -> "passed function's return"
     | Decreases -> "recursive call's metric"
+    | Lemma_goal -> "lemma's theorem"
   in
   let obligation_noun =
     match subject with
@@ -745,6 +765,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
     | Element_domain -> "the expected element refinement"
     | Callback_codomain -> "the expected codomain refinement"
     | Decreases -> "the termination metric"
+    | Lemma_goal -> "the goal"
   in
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
   (* A CALLER-scope name whose declared type is a record (see [recenv]).  Such a
@@ -789,7 +810,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        diagnostic is a second thing to be confused by. *)
     let verdict, cause =
       match verdict with
-      | Obligation.Skipped _ when subject = Decreases -> (verdict, None)
+      | Obligation.Skipped _ when subject = Decreases || subject = Lemma_goal -> (verdict, None)
       | Obligation.Skipped r ->
         (* The obligation's own SUBJECT — the actual passed at [rp.idx].  Read
            here rather than taken from the enclosing [self_actual] because
@@ -850,7 +871,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        here, which is how `@[trusted]` suppresses the escalation. *)
     match verdict with
     (* A termination obligation words no diagnostic here (see [Decreases]). *)
-    | _ when subject = Decreases -> ()
+    | _ when subject = Decreases || subject = Lemma_goal -> ()
     | Obligation.Skipped r when !strict_verified ->
       (* The remedy depends on the reason.  The generic advice below is worse
          than useless for a withdrawn alias — "guard the call" is what the
@@ -895,7 +916,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
               the expected element refinement, build the container from \
               elements the checker can see, or remove `cap verified` from this \
               module — it asks for every obligation to be discharged"
-           | Decreases -> ""
+           | Decreases | Lemma_goal -> ""
            | Callback_codomain ->
              "note: declare (and prove) a return refinement on the passed function \
               that implies the expected codomain, weaken the expected codomain, or \
@@ -2618,9 +2639,20 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
         when adt = list_sort && (ctor = "Nil" || ctor = "Cons") ->
         (match measure_of_var "len" x with
          | Some len_x ->
-           Some
-             (if ctor = "Nil" then Smt.Eq (len_x, Smt.IntLit 0)
-              else Smt.Gt (len_x, Smt.IntLit 0))
+           let len_fact =
+             if ctor = "Nil" then Smt.Eq (len_x, Smt.IntLit 0) else Smt.Gt (len_x, Smt.IntLit 0)
+           in
+           (* Stage 2 (reflection design §4.4) also states the tag on the
+              datatype constant an unfolding's guard reads: `cat$r(xs, ys)`
+              is decided by `xs = Nil`, which `len$xs = 0` alone does not
+              say.  Stage 1 keeps today's query byte for byte. *)
+           if not !Reflect_state.arm_on then Some len_fact
+           else (
+             match Option.bind resolved (fun (adt, k) -> Option.map (fun t -> (adt, k, t)) (reflect_dt adt arg)) with
+             | Some (adt, k, t) ->
+               if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
+               Some (Smt.And (len_fact, Smt.IsCtor (k, t)))
+             | None -> Some len_fact)
          | None -> None)
       | _ ->
       match resolved with
@@ -3210,6 +3242,8 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                | Callback_codomain, _ ->
                  Printf.sprintf "the return of `%s`, passed where a refined codomain is expected," callee
                | Decreases, _ -> Printf.sprintf "the recursive call to `%s`" callee
+               | Lemma_goal, _ when callee = "assert" -> "this static `assert` in a lemma"
+               | Lemma_goal, _ -> Printf.sprintf "the lemma `%s`" callee
              in
              (* Point at the offending argument itself. The call span covers the
                 whole expression, which on a multi-argument call underlines
@@ -3298,6 +3332,9 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                          the container's declared element type, or weaken the expected one"
                         (pred_str rp.pred)
                     | Decreases -> ""
+                    | Lemma_goal ->
+                      "note: a lemma's theorem must hold on every path of its body; this \
+                       one is false on the path above"
                     | Callback_codomain ->
                       Printf.sprintf
                         "note: a function is passed where its result must satisfy `%s` only \

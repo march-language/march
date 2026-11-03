@@ -289,6 +289,10 @@ val actor_info_at : t -> line:int -> character:int -> string option
 val perf_insight_at : t -> line:int -> character:int -> string option
 val query_type_at : t -> line:int -> utf16_char:int -> string option
 val query_doc_name_at : t -> line:int -> utf16_char:int -> string option
+
+(** A call of a `@[lemma]` declared in this file under the cursor: the lemma's
+    name and its theorem as written (reflection design §4). *)
+val query_lemma_hover_at : t -> line:int -> utf16_char:int -> (string * string) option
 val query_perf_insight_at : t -> line:int -> utf16_char:int -> string option
 val query_actor_info_at : t -> line:int -> utf16_char:int -> string option
 val query_typestate_hover_at :

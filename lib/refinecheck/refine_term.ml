@@ -625,7 +625,13 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
   let impls = List.rev !impls in
   let unit_name = Hashtbl.create 64 in
   (* Pass 2: walk bodies. *)
+  (* Inside a lemma an `assert` is a static proof step that never runs
+     (reflection design §4.3): its calls keep their sites (the predicate
+     translator resolves them there) but are not call edges. *)
+  let in_lemma = ref false in
+  let in_lemma_assert = ref false in
   let add_edge ?(dispatch = false) ~env ~src ~dst ~kind ~args ~span ~owner () =
+    if not !in_lemma_assert then
     let shadowed =
       List.filter
         (fun p -> SM.find_opt p env <> Some Param)
@@ -866,6 +872,9 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
         List.iter w args
     in
     match e with
+    | A.EAssert (x, _) when !in_lemma ->
+      in_lemma_assert := true;
+      Fun.protect ~finally:(fun () -> in_lemma_assert := false) (fun () -> w x)
     | A.EApp (f, args, sp) -> call f args sp
     | A.EPipe (l, A.EVar n, sp) -> call (A.EVar n) [ l ] sp
     | A.EPipe (l, A.EApp (f, args, _), sp) -> call f (l :: args) sp
@@ -941,6 +950,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       | `Fn (id, (def : A.fn_def), scope) ->
         cur := scope;
         set_measure := is_set_measure def;
+        in_lemma := List.mem "lemma" def.A.fn_attrs;
         List.iter
           (fun (c : A.fn_clause) ->
             let owner = { o_params = fst (clause_params c); o_body = c.A.fc_body } in
@@ -954,6 +964,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       | `Handler (id, (h : A.actor_handler), scope) ->
         cur := scope;
         set_measure := false;
+        in_lemma := false;
         let params = List.map (fun (p : A.param) -> p.A.param_name.A.txt) h.A.ah_params in
         let owner = { o_params = List.map Option.some params; o_body = h.A.ah_body } in
         (* A handler body also sees the actor's [state] (the typechecker's
@@ -962,6 +973,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       | `Expr (id, (owner : owner), scope) ->
         cur := scope;
         set_measure := false;
+        in_lemma := false;
         walk ~src:id ~owner ~lam:false
           (bind_params SM.empty (List.filter_map Fun.id owner.o_params))
           owner.o_body)

@@ -19,6 +19,31 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Lemmas: `@[lemma]` proofs for refinement types.** A lemma states a theorem in its
+  result type, `{Unit | P}`, and proves it with ordinary code: `match` and `if` for
+  cases, a recursive call as the induction hypothesis, calls of other lemmas, and
+  `assert` for intermediate steps. A proved lemma's theorem becomes a fact after each
+  call, so `cat_nil(xs)` lets the checker know `cat(xs, Nil) == xs`. A lemma that does
+  not prove gives no facts and draws `lemma_unproved`. Lemmas never run: every lemma
+  and lemma call is removed before the program is built or interpreted, whether or not
+  it was proved, so a program behaves exactly as it would without them. New
+  diagnostics: `invalid_lemma`, `lemma_unproved`, `lemma_unproved_call`,
+  `lemma_argument_impure`. The editor re-checks a file when a lemma it uses changes or
+  stops proving, and shows a lemma's theorem on hover.
+
+- **Parallel combinators reject closures that capture a native handle.** A
+  lambda passed to `List.pmap`, `List.pfilter`, `List.preduce`, the
+  `Parallel.*` family or `Task.async_stream` may no longer capture a
+  `resource` value from an `extern` library, directly or inside a record,
+  variant, list or tuple, since nothing says the C library is safe to call
+  from several threads. The check follows the lambda through your own
+  functions that pass it on, and reports at the function, naming the
+  variable and the combinator (`portable_capture`). Create the handle inside
+  the lambda, or use the sequential version. `task_spawn` and `Task.async`
+  are unaffected.
+
 ### Changed
 
 - Diagnostics: follow-on errors are dropped when another error already explains them: the type
@@ -35,6 +60,12 @@ git log is authoritative for exact commits.
   and the optimizer no longer run over ~9,000 unused functions. Programs are
   the same apart from some inlining choices, which now count only reachable
   callers. `--disable-pass dce-early` turns it off.
+- **`--hot-reload` builds are about twice as fast.** A hot-reload server build
+  now links the precompiled C runtime (only the four files that read its
+  signing key and HCR identity are compiled per build), builds its HCR
+  manifest once instead of twice, reuses typecheck's role-capability solve,
+  and the refcount-inlining rewrite no longer allocates per character. The
+  emitted program is unchanged.
 
 ### Fixed
 
@@ -58,6 +89,12 @@ git log is authoritative for exact commits.
 ## [0.7.0] - 2026-11-02
 
 ### Breaking changes
+
+- **`Show`, `Eq`, `Ord` and `Hash` impls may not perform I/O.** The four built-in
+  interfaces are bounded by `needs ()`, so a hand-written `show`, `eq`, `compare` or `hash`
+  that prints, logs, reads the clock or reaches any other capability is rejected at the
+  impl (`cap_bound`). Derived impls are unaffected, and no impl in the stdlib was. Move
+  such work out of the impl.
 
 - **Hot-reload ABI v5 requires a rebuilt base binary.** Per-frame routing and
   closure lifetime hooks are incompatible with older running servers. Forge
@@ -97,6 +134,14 @@ git log is authoritative for exact commits.
   function is handed is charged to whoever supplies it, and a call to a function value
   taken from a record, list or ref is refused under a bound narrower than `IO`. Impl
   methods take bounds too. See the capabilities reference, "Per-function bounds".
+
+- **Capability bounds on interface methods.** An interface method signature may declare
+  `needs …` after its type (`fn get : a -> Int needs IO.FileRead`). Every impl of the
+  method, in any module, and the interface's default body are checked against it
+  (`cap_bound`, naming the interface); an impl may declare a narrower bound of its own but
+  not a wider one (`cap_bound_iface`). The bound is never part of the method's type, so
+  callers and `when` constraints declare nothing new. See the interfaces reference,
+  "Capability bounds on methods".
 
 - **`--reflection-parity`: check the refinement checker's reading of your functions.**
   `forge test --reflection-parity` (or `march --check --reflect-parity`) runs every
@@ -634,6 +679,12 @@ git log is authoritative for exact commits.
   inferred, so well-typed callers are unaffected and nothing runs differently.
 
 ### Fixed
+
+- **An impl method in a nested module was charged nothing for the helpers it calls.**
+  The capability checks (the module ceiling, `main`'s grant, per-function bounds) resolved
+  a local reference from an impl method or interface default body against the wrong
+  scope, so in `mod B`, an `impl Show(T)` whose `show` called a `pfn log` that prints was
+  not charged `log`'s `IO.Console`. It is now.
 
 - **A type of yours with a constructor named like another type's no longer breaks
   refinement checking of that other type.** Declaring, say, `type Mb = Some(Int) |

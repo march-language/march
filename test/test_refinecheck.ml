@@ -12979,7 +12979,7 @@ module Audit_fixture = struct
         iface_param = nm "a";
         iface_superclasses = [];
         iface_assoc_types = [];
-        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None } ] }
+        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None; md_needs = None } ] }
     in
     (* [DImpl]: an [impl] block for a DIFFERENT interface than [Runner]
        above, so its [Impl_ty] site and its method's [Param]/[Return] sites
@@ -13253,7 +13253,7 @@ let audit_arrow_signature_suite =
             iface_param = nm "a";
             iface_superclasses = [];
             iface_assoc_types = [];
-            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None } ] }
+            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None; md_needs = None } ] }
         in
         let labels = Audit_fixture.labels [ A.DInterface (idf, dummy) ] in
         Alcotest.(check (list (triple string string (pair string int))))
@@ -28927,6 +28927,7 @@ let () =
       ("reflect-unfold", Test_refine_unfold.suite @ Test_refine_unfold.soundness @ Test_refine_unfold.review @ Test_refine_unfold.review2 @ Test_refine_unfold.review3 @ Test_refine_unfold.identical);
       ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr);
       ("reflect-parity", Test_refine_reflect1b.parity);
+      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);

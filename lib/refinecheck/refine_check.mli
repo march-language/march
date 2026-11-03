@@ -292,3 +292,11 @@ val entry_meet : entry -> entry -> entry
 val smt_sort_of_marker : string option -> Smt.sort
 val register_types_for_check : A.decl list -> unit
 val expr_binds_name : string -> A.expr -> bool
+
+(** The last checked module's lemmas, for the LSP key (reflection §7.2,
+    phase 2): (declaring file, qualified name, digest of the theorem and
+    body, admitted). *)
+val lemma_rows : (string * string * string * bool) list ref
+
+(** The lemmas (file, qualified name) some call in the last module reaches. *)
+val lemma_called : (string * string) list ref
