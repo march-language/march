@@ -7074,7 +7074,17 @@ let lemma_scratch_verdict ~root defs (fd : A.fn_def) : bool =
           let errs = Err.create () in
           let ctx = { rctx0 with modpath = !Refine_post.lemma_prefix } in
           visit_fn ~root errs defs ctx fd;
-          result := not (List.exists (fun (d : Err.diagnostic) -> d.Err.code = Err.Code.lemma_unproved) (Err.sorted errs))));
+          (* A refuted theorem draws `refinement_violated` instead of
+             `lemma_unproved` (both at the lemma's name): not proved either.
+             Looking for `lemma_unproved` alone admitted a refuted lemma, and
+             its false theorem became a fact for every caller. *)
+          result :=
+            not
+              (List.exists
+                 (fun (d : Err.diagnostic) ->
+                   d.Err.code = Err.Code.lemma_unproved
+                   || (d.Err.code = Err.Code.refinement_violated && d.Err.span = fd.A.fn_name.A.span))
+                 (Err.sorted errs))));
   !result
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =

@@ -735,6 +735,14 @@ let lemma_tests =
         in
         expect_refuted out "nn" ~at:"n = -";
         expect_refuted out "mm" ~at:"n = -";
+        (* A refuted lemma is not admitted: its callers get no fact from it.
+           `need_nn(k)` after `mm(k)` must not be proved (k = -1 refutes it). *)
+        let out =
+          run
+            "mod N do\n  fn need_nn(n : {Int | _ + _ >= _}) : Int do n end\n  @[lemma]\n  fn mm(n : Int) : {Unit | n + n >= n} do\n    ()\n  end\n  fn f(k : Int) : Int do\n    mm(k)\n    need_nn(k)\n  end\nend\n"
+        in
+        expect_refuted out "mm" ~at:"n = -";
+        U.not_proved out ~line:9 ~callee:"need_nn";
         (* Control: true but needing induction stays unproved, not refuted. *)
         let out = run ("mod N do\n" ^ defs4_6 ^ count_fn ^ count_cat ^ "end\n") in
         expect_unproved out "count_cat";

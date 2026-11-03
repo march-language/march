@@ -22,6 +22,12 @@ counterexample `n = -1` the checker did not.
 - The lemma pass reports a recorded lemma as `refinement_violated` ("the lemma `nn` is
   false: its theorem `twice(n) >= n` does not hold at n = -1") instead of
   `lemma_unproved`.
+- The gate's scratch verdict for a lemma ([Refine_check.lemma_scratch_verdict]) read
+  "proved" as "the walk drew no `lemma_unproved`". With the refutation reported as
+  `refinement_violated` instead, a refuted lemma was admitted, and its false theorem became
+  a fact for callers: `mm(k)` then proved `need_nn(k)` (`k + k >= k`). Found while testing
+  interface laws, by `--lemma-test` printing "proved, yet false". The verdict now also
+  counts a `refinement_violated` at the lemma's name; `lemma_refuted` pins the caller.
 - A theorem false at every input (`{Unit | false}`) was already `refinement_violated`
   through the definite path, unchanged.
 
