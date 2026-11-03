@@ -132,6 +132,13 @@ type fn_bound = {
   fb_site : Typecheck_types.Ast.span;
   fb_origin : bound_origin;
 }
+
+
+(** The type synthesised for an actor's messages ([actor ^ "_Msg"]). *)
+val actor_msg_type_name : string -> string
+
+(** [Some "<Actor>_Msg"] when the name is spelled `<Actor>.Msg` (scope not checked). *)
+val actor_msg_alias_target : string -> string option
 type env = {
   vars : Typecheck_types.scheme StrMap.t;
   types : int StrMap.t;

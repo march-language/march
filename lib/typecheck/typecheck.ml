@@ -6138,7 +6138,7 @@ let register_actor_ctors ~ci_module env (name : Ast.name) (actor : Ast.actor_def
             Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
                         span = p.param_name.span }
         ) h.ah_params in
-      let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+      let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                  ci_arg_tys = arg_tys; ci_module; ci_vis = Ast.Public;
                  ci_is_actor_msg = true } in
       { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
@@ -9878,7 +9878,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                   Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
                               span = p.param_name.span }
               ) h.ah_params in
-            let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+            let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
@@ -10261,7 +10261,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                   Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
                               span = p.param_name.span }
               ) h.ah_params in
-            let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+            let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }

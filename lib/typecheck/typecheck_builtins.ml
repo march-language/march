@@ -2100,6 +2100,32 @@ let builtin_ctors : (string * ctor_info) list =
     ("Down",        down_ci);   ("Down.Down",         down_ci);
   ]
 
+(* Every type name the base environment can produce: the built-in type
+   table, the built-in constructors' types, and every [TCon] head anywhere in
+   a built-in signature (`CancelToken`, `TimerRef`, … are named only there).
+   Derived, not hand-kept, so a new builtin signature is covered by
+   construction. *)
+let builtin_type_names : string list =
+  let acc = Hashtbl.create 64 in
+  let add n = Hashtbl.replace acc n () in
+  let rec walk (t : ty) =
+    match t with
+    | TCon (n, args) -> add n; List.iter walk args
+    | TArrow (a, b) -> walk a; walk b
+    | TTuple ts -> List.iter walk ts
+    | TRecord fs -> List.iter (fun (_, t) -> walk t) fs
+    | TLin (_, t) | TRefine (t, _, _) -> walk t
+    | TNatOp (_, a, b) -> walk a; walk b
+    | TVar r -> (match !r with Link t -> walk t | Unbound _ -> ())
+    | TNat _ | TChan _ | TError -> ()
+  in
+  let scheme = function Mono t -> walk t | Poly (_, _, t) -> walk t in
+  List.iter (fun (n, _) -> add n) builtin_types;
+  List.iter (fun (_, ci) -> add ci.ci_type) builtin_ctors;
+  List.iter (fun (_, sc) -> scheme sc) builtin_bindings;
+  List.iter (fun (_, sc) -> scheme sc) builtin_interface_bindings;
+  List.sort compare (Hashtbl.fold (fun n () l -> n :: l) acc [])
+
 let base_env errors type_map =
   let env = make_env errors type_map in
   let env = bind_vars builtin_bindings env in

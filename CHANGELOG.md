@@ -19,6 +19,15 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **Native compiles are about 45% faster for small programs.** Code the program
+  cannot reach (most of the prepended stdlib) is now dropped right after
+  defunctionalization instead of after the optimizer, so Perceus, drop, escape
+  and the optimizer no longer run over ~9,000 unused functions. Programs are
+  the same apart from some inlining choices, which now count only reachable
+  callers. `--disable-pass dce-early` turns it off.
+
 ## [0.7.0] - 2026-11-02
 
 ### Breaking changes
@@ -619,6 +628,18 @@ git log is authoritative for exact commits.
   scope, so in `mod B`, an `impl Show(T)` whose `show` called a `pfn log` that prints was
   not charged `log`'s `IO.Console`. It is now.
 
+- **A type of yours with a constructor named like another type's no longer breaks
+  refinement checking of that other type.** Declaring, say, `type Mb = Some(Int) |
+  None` used to make the refinement checker model every built-in `Option` value with
+  an `Int` payload, so checks involving `Option` were skipped, and the standard
+  `Option` functions were never unfolded in such a program. Each type now keeps its
+  own constructors; a `Some(…)`, a `match` arm or an `is_Some(x)` refers to the
+  constructor of the type the checker knows the value has, and is skipped (never
+  guessed) when that type is not known. Because the typechecker currently treats two
+  types of the same name in different modules as one type, the checker also skips
+  constructor facts about any type whose name another module (or a built-in type)
+  shares; several such facts used to be "proved" although the program could violate
+  them at run time.
 - **A `refinement_unverified` hint re-labelled `reflect-fuel` or `reflect-budget` now
   names that reason** instead of the first attempt's.
 - **`cap no_panic` accepted a division by a `let` that rebinds its own name.** In

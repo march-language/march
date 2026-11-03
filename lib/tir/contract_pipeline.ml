@@ -184,6 +184,36 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let tir = Defun.defunctionalize tir in
   snap "tir-defun" tir;
   stamp_tir "defun" tir;
+  (* Early DCE: drop what the entry points cannot reach before the passes
+     below run on it.  Without it every program carries the whole prepended
+     stdlib (~9,000 fns) through Perceus, Drop, Escape and the Opt loop, only
+     for the DCE at the end to keep a few dozen; that was ~40% of a small
+     program's compile.  Defun is [Dce]'s stated precondition.  The roots are
+     the final DCE's plus the [extra_roots] and NoAlloc functions that block
+     pins after Escape, and the targets of [remote_ref_hashes] (the driver
+     hashes those from the pre-opt TIR although nothing calls them), so this
+     keeps a superset of what that DCE keeps;
+     [tm_exports] is restored because it is also an ABI fact other passes
+     read.  Off under hot reload and for JS (both have their own reachability
+     rules) and when the optimizer is off. *)
+  let tir =
+    if not (opt && hot_reload = None && (not is_js) && Pass_switch.on "dce-early")
+    then tir
+    else begin
+      let wanted = Hashtbl.create 16 in
+      List.iter (fun n -> Hashtbl.replace wanted n ())
+        (extra_roots @ Dce.remote_ref_targets tir);
+      let pins = List.filter_map (fun (fn : Tir.fn_def) ->
+          let n = fn.Tir.fn_name in
+          if Hashtbl.mem wanted n
+             || Hashtbl.mem wanted (Tir_names.strip_specialization_suffix n)
+             || Alloc_contract.has_noalloc_policy fn
+          then Some n else None) tir.Tir.tm_fns in
+      let pruned = Dce.prune_unreachable
+          { tir with Tir.tm_exports = tir.Tir.tm_exports @ pins } in
+      { pruned with Tir.tm_exports = tir.Tir.tm_exports }
+    end
+  in
   (* The per-type table is decided here — after Mono (which instantiates
      generic variants) and Defun (which adds the closure structs), so the
      decision is made on the type list the remaining passes see, and BEFORE

@@ -94,6 +94,28 @@ let rec called_fns : Tir.expr -> StringSet.t = function
   | Tir.ESeq (e1, e2)       -> StringSet.union (called_fns e1) (called_fns e2)
   | _                        -> StringSet.empty
 
+(** Functions a [remote_ref_hashes("Mod", "fn")] call names by string, as
+    [Mod.fn] and [fn] (the emitter's two lookups).  Nothing calls them, but the
+    driver hashes every pre-opt function for that constant fold, so a prune
+    BEFORE that point must keep them (see [Contract_pipeline]'s early DCE). *)
+let remote_ref_targets (m : Tir.tir_module) : string list =
+  let acc = ref [] in
+  let rec go = function
+    | Tir.EApp ({ Tir.v_name = "remote_ref_hashes"; _ },
+                [ Tir.ALit (March_ast.Ast.LitString md);
+                  Tir.ALit (March_ast.Ast.LitString fn) ]) ->
+      acc := (md ^ "." ^ fn) :: fn :: !acc
+    | Tir.ELet (_, rhs, body) -> go rhs; go body
+    | Tir.ELetRec (fns, body) ->
+      List.iter (fun fd -> go fd.Tir.fn_body) fns; go body
+    | Tir.ECase (_, branches, default) ->
+      List.iter (fun b -> go b.Tir.br_body) branches; Option.iter go default
+    | Tir.ESeq (e1, e2) -> go e1; go e2
+    | _ -> ()
+  in
+  List.iter (fun fd -> go fd.Tir.fn_body) m.Tir.tm_fns;
+  !acc
+
 (** Operational entry/root names preserved by top-level DCE.  [roots], when
     given, replaces them (with [tm_exports] still added): a REPL or shell
     fragment roots at its own entry only, not at every function named

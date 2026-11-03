@@ -2326,9 +2326,13 @@ goes quiet rather than guessing:
   under a second name, but the arm's head is a `PatAs`, not a bare constructor
   pattern, so no tag fact is recorded, for `z` or for the scrutinee. Write
   `None ->` if you want the narrowing.
-- **An ambiguous constructor name is skipped.** If two ADTs in scope both
-  declare a constructor `Row`, `is_Row` identifies no particular datatype and is
-  not checked.
+- **A constructor name two types declare is resolved by type.** If two ADTs
+  both declare a constructor `Row` (or a type of yours declares `Some`, like the
+  built-in `Option`), each keeps its own fields, and a `Row(…)` or `is_Row(x)`
+  means the constructor of the type the checker knows that value has (the
+  scrutinee's, the parameter's, the expression's). When that type does not
+  pin one datatype (it is unknown, or its own name is declared in two modules)
+  the fact is skipped, never guessed.
 - **Rebinding the name retires the fact.** A narrowing is recorded against a
   *name*, so any construct that rebinds that name inside the arm (a `let`, a
   `let?`, a lambda parameter, an inner `match` binder) discards it. In
