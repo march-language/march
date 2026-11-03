@@ -688,6 +688,12 @@ let search_cmd =
     Arg.(value & opt string "" &
          info ["doc"; "d"] ~docv:"KEYWORDS" ~doc:"Keywords to search in doc strings")
   in
+  let law_query =
+    Arg.(value & opt string "" &
+         info ["law"] ~docv:"TEXT"
+           ~doc:"Search the theorems of @[lemma]s: TEXT appears in a theorem (case and spaces ignored), \
+                 or names a function a theorem calls")
+  in
   let callers =
     Arg.(value & opt string "" &
          info ["callers"] ~docv:"NAME" ~doc:"Find call sites that reference NAME (reverse-reference search)")
@@ -705,13 +711,13 @@ let search_cmd =
   let rebuild =
     Arg.(value & flag & info ["rebuild"] ~doc:"Rebuild the search index before searching")
   in
-  let run q t d c n j p r =
-    Cmd_search.run ~query:q ~type_sig:t ~doc_query:d ~callers:c ~limit:n ~as_json:j ~plain:p ~rebuild:r ()
+  let run q t d l c n j p r =
+    Cmd_search.run ~query:q ~type_sig:t ~doc_query:d ~law_query:l ~callers:c ~limit:n ~as_json:j ~plain:p ~rebuild:r ()
   in
   Cmd.v
     (Cmd.info "search"
        ~doc:"Search stdlib and dependencies for functions, types, and constructors")
-    Term.(const run $ query $ type_sig $ doc_query $ callers $ limit $ as_json $ plain $ rebuild)
+    Term.(const run $ query $ type_sig $ doc_query $ law_query $ callers $ limit $ as_json $ plain $ rebuild)
 
 (* --------------------------------------------------------------- forge publish *)
 

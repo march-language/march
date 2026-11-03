@@ -1,7 +1,9 @@
-(** forge search [QUERY] [--type TYPE] [--doc KEYWORDS] [--callers NAME] [--limit N] [--json]
+(** forge search [QUERY] [--type TYPE] [--doc KEYWORDS] [--law TEXT] [--callers NAME] [--limit N] [--json]
 
     Hoogle-style search across March stdlib and project dependencies.
-    Searches function names, type signatures, and doc strings. *)
+    Searches function names, type signatures, doc strings, and the theorems
+    of `@[lemma]`s (a name search also finds the lemmas whose theorem calls
+    that name). *)
 
 module Search = March_search.Search
 
@@ -142,7 +144,7 @@ let print_results ~as_json ~plain ~limit results =
 (* Command                                                             *)
 (* ------------------------------------------------------------------ *)
 
-let run ~query ~type_sig ~doc_query ~callers ~limit ~as_json ~plain ~rebuild () =
+let run ~query ~type_sig ~doc_query ?(law_query = "") ~callers ~limit ~as_json ~plain ~rebuild () =
   let (root, all_deps) = match Project.load () with
     | Ok p  ->
       let deps = p.Project.deps @ p.Project.dev_deps @ p.Project.dev_only_deps in
@@ -169,6 +171,7 @@ let run ~query ~type_sig ~doc_query ~callers ~limit ~as_json ~plain ~rebuild () 
       let name_q     = if String.length query    > 0 then Some query    else None in
       let type_q     = if String.length type_sig > 0 then Some type_sig else None in
       let doc_q      = if String.length doc_query > 0 then Some doc_query else None in
+      let law_q      = if String.length law_query > 0 then Some law_query else None in
       (match type_q with
        | Some q ->
          (match Search.parse_type_query q with
@@ -176,13 +179,13 @@ let run ~query ~type_sig ~doc_query ~callers ~limit ~as_json ~plain ~rebuild () 
           | Ok _ -> ())
        | None -> ());
       let results =
-        if name_q = None && type_q = None && doc_q = None then
+        if name_q = None && type_q = None && doc_q = None && law_q = None then
           (* No query — print a summary *)
           (Printf.printf "index contains %d entries (stdlib + deps)\n%!"
              (List.length idx.Search.entries);
            [])
         else
-          Search.search_combined idx ?name:name_q ?type_sig:type_q ?doc_query:doc_q ()
+          Search.search_combined idx ?name:name_q ?type_sig:type_q ?doc_query:doc_q ?law_query:law_q ()
       in
       print_results ~as_json ~plain ~limit results
     end

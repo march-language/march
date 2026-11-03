@@ -1062,6 +1062,49 @@ let run_reflect_parity ~filename ~user_files () =
     exit 1
   end
 
+(* --lemma-test (specs/todos/2026-11-02-lemma-uses-beyond-refinement.md
+   ideas 1 and 2): every lemma of the entry file has its theorem evaluated
+   on the parity net's inputs in the interpreter, and each admitted one again
+   in a compiled harness program.  Its lines on stderr; exit 1 on RED (a
+   counterexample to an unproved lemma, or a proved one false somewhere). *)
+let run_lemma_test ~filename ~entry_mod () =
+  let compile_run src =
+    let dir = Filename.temp_dir "march_lemma_test_" "" in
+    let entry = Filename.concat dir "lemma_harness.march" in
+    Out_channel.with_open_bin entry (fun oc -> output_string oc src);
+    let read f = try In_channel.with_open_bin f In_channel.input_all with Sys_error _ -> "" in
+    (* The entry file's directory joins the library path, so the harness's
+       `use` finds its module (a directory already listed is not repeated). *)
+    let real d = try Unix.realpath d with Unix.Unix_error _ -> d in
+    let own = real (Filename.dirname filename) in
+    let lib =
+      match Sys.getenv_opt "MARCH_LIB_PATH" with
+      | Some l -> List.filter (( <> ) "") (String.split_on_char ':' l)
+      | None -> []
+    in
+    let lib = if List.exists (fun d -> real d = own) lib then lib else lib @ [ own ] in
+    let exe = Filename.concat dir "lemma_harness" in
+    let cout = Filename.concat dir "compile.out" and rout = Filename.concat dir "run.out" in
+    let code =
+      Sys.command
+        (Printf.sprintf "MARCH_LIB_PATH=%s %s --compile --opt 0 -o %s %s >%s 2>&1"
+           (Filename.quote (String.concat ":" lib)) (Filename.quote Sys.executable_name)
+           (Filename.quote exe) (Filename.quote entry) (Filename.quote cout))
+    in
+    if code <> 0 then begin
+      let out = read cout in
+      prerr_endline "lemma-test: the compiled harness did not compile:";
+      List.iter (fun l -> if l <> "" then prerr_endline ("lemma-test:   " ^ l)) (String.split_on_char '\n' out);
+      `Compile_failed out
+    end
+    else
+      let rc = Sys.command (Printf.sprintf "%s >%s 2>&1" (Filename.quote exe) (Filename.quote rout)) in
+      `Ran (rc, read rout)
+  in
+  let lines, red = March_refinecheck.Lemma_test.run ~filename ~entry_mod ~compile_run () in
+  List.iter prerr_endline lines;
+  if red then exit 1
+
 (* --refine-audit: every declared refinement occurrence
    ([March_refinecheck.Refine_audit.sites]), classified
    ([March_refinecheck.Refine_audit.classify]) against what the checker
@@ -2680,6 +2723,7 @@ let run_test_cmd args =
     if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
     if !reflect_deps then print_reflect_deps ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ~user_files ();
     if !reflect_parity then run_reflect_parity ~filename ~user_files ();
+    if !lemma_test then run_lemma_test ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ();
     if !reflect_report then
       print_reflect_report ~filename ~user_files ~type_map
         ~recheck:(fun () ->
@@ -3404,7 +3448,7 @@ let compile filename =
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
       || !termination_report || !reflect_report || !refine_report_sites_all
-      || !reflect_deps || !reflect_parity
+      || !reflect_deps || !reflect_parity || !lemma_test
       || !report_contracts
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
@@ -3978,6 +4022,7 @@ let compile filename =
   if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
   if !reflect_deps then print_reflect_deps ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ~user_files ();
   if !reflect_parity then run_reflect_parity ~filename ~user_files ();
+  if !lemma_test then run_lemma_test ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ();
   if !reflect_report then
     print_reflect_report ~filename ~user_files ~type_map
       ~recheck:(fun () ->
@@ -7325,6 +7370,8 @@ let () =
      " Print the D17 logic hash of every reflected user function (reflect-def) and of every reflected function a stage-2 query of the check unfolded (reflect-dep), and the contract hash of every user function (reflect-cdef) and of every function of another user file the file reaches through calls (reflect-cdep); changes no verdict");
     ("--reflect-parity", Arg.Set reflect_parity,
      " Compare each reflected user function's logic definition with the interpreter on generated inputs (boundary Ints included); exit 1 on a mismatch or an interpreter failure");
+    ("--lemma-test", Arg.Set lemma_test,
+     " Evaluate each lemma's theorem on generated inputs: an unproved lemma in the interpreter (a property test: exit 1 on a counterexample), an admitted one in the interpreter and a compiled program (exit 1 if it is false in either: a compiler or runtime bug)");
     ("--reflect-report", Arg.Set reflect_report,
      " Print one line per user function: reflected (its body usable in predicates, from phase 1 of reflection) or the first rule that blocks it; changes no verdict");
     ("--refine-audit", Arg.Set refine_audit,

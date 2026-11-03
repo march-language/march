@@ -8135,6 +8135,10 @@ let lemma_rows : (string * string * string * bool) list ref = ref []
 
 let lemma_called : (string * string) list ref = ref []
 
+(** The last module's VALID lemmas (no L1-L5 error), each with its qualified
+    name and whether it was admitted; read by [Lemma_test]. *)
+let lemma_defs : (string * A.fn_def * bool) list ref = ref []
+
 (** L1: a lemma's declared result is [{Unit | P}] with [P] not mentioning
     the unit value; [Ok (binder, P)], or [Error why]. *)
 let lemma_post (fd : A.fn_def) : (string * A.expr, string) result =
@@ -9485,6 +9489,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       Refine_post.lemma_verdict := fun ~root:_ _ _ -> false) @@ fun () ->
   let ih_eligible : (A.span, unit) Hashtbl.t = Hashtbl.create 8 in
   lemma_rows := [];
+  lemma_defs := [];
   lemma_called := [];
   gate_unverified_posts_ih ~root
     ~ih:(fun pending ->
@@ -9529,6 +9534,14 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
              fd.A.fn_name.A.txt)
       end)
     (lemma_fns m.A.mod_decls);
+  lemma_defs :=
+    List.filter_map
+      (fun (q, (fd : A.fn_def)) ->
+        let sp = fd.A.fn_name.A.span in
+        if Hashtbl.mem lemma_valid sp then
+          Some (q, fd, List.exists (fun (f, n, _, a) -> a && f = sp.A.file && n = q) !lemma_rows)
+        else None)
+      (lemma_fns_q m.A.mod_decls);
   ret_elem_demand := None;
   gate_elem_returns ~root defs m.A.mod_decls;
   (* Termination, phase 2 (design §3.3-§3.5, §9): plan the metric

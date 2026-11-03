@@ -326,8 +326,8 @@ let test_no_leading_dot_or_synthetic_module_in_refs () =
 
 let make_entry ?(module_name = "List") ?(kind = Search.Fn)
     ?(signature = "") ?(doc = None) ?(file = "stdlib/list.march")
-    ?(line = 1) ?(params = []) ?(return_type = None) name =
-  Search.{ name; module_name; kind; signature; doc; file; line; params; return_type }
+    ?(line = 1) ?(params = []) ?(return_type = None) ?(law = None) name =
+  Search.{ name; module_name; kind; signature; doc; file; line; params; return_type; law }
 
 let sample_index () : Search.index =
   Search.{
@@ -1036,6 +1036,75 @@ let references_tests = [
                                     `Quick, test_no_leading_dot_or_synthetic_module_in_refs;
 ]
 
+(* ------------------------------------------------------------------ *)
+(* Lemmas: search by law, text level                                   *)
+(* ------------------------------------------------------------------ *)
+
+let lemma_index () : Search.index =
+  let dir = Filename.temp_dir "search_lemma" "" in
+  let f = Filename.concat dir "laws.march" in
+  Out_channel.with_open_bin f (fun oc ->
+      output_string oc
+        {|mod Laws do
+  fn cat(xs : List(a), ys : List(a)) : List(a) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, cat(t, ys))
+    end
+  end
+  fn rev(xs : List(a)) : List(a) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> cat(rev(t), Cons(h, Nil))
+    end
+  end
+  @[lemma]
+  fn rev_rev(xs : List(a)) : {Unit | rev(rev(xs)) == xs} do
+    ()
+  end
+  @[lemma]
+  fn cat_nil(xs : List(a)) : {Unit | cat(xs, Nil) == xs} do
+    ()
+  end
+end
+|});
+  Search.build_index_from_dirs [ dir ]
+
+let names results = List.map (fun ((e : Search.entry), _) -> e.Search.name) results
+
+let lemma_tests = [
+  Alcotest.test_case "a lemma is a Lemma entry carrying its theorem as written" `Quick (fun () ->
+    let idx = lemma_index () in
+    match List.find_opt (fun (e : Search.entry) -> e.Search.name = "rev_rev") idx.Search.entries with
+    | Some { Search.kind = Search.Lemma; law = Some (t, calls); _ } ->
+      Alcotest.(check string) "theorem" "rev(rev(xs)) == xs" t;
+      Alcotest.(check (list string)) "calls" [ "rev" ] calls
+    | _ -> Alcotest.fail "rev_rev must be a Lemma entry with its law");
+  Alcotest.test_case "--law finds a phrase of a theorem, ignoring spaces" `Quick (fun () ->
+    let idx = lemma_index () in
+    Alcotest.(check (list string)) "phrase" [ "rev_rev" ] (names (Search.search_laws idx "rev( rev(xs) )"));
+    Alcotest.(check (list string)) "no match" [] (names (Search.search_laws idx "reverse")));
+  Alcotest.test_case "--law with a function name finds the lemmas whose theorem calls it" `Quick (fun () ->
+    let idx = lemma_index () in
+    Alcotest.(check (list string)) "cat" [ "cat_nil" ]
+      (names (Search.search_combined idx ~law_query:"cat" ())));
+  Alcotest.test_case "a name search for a function also finds the laws about it" `Quick (fun () ->
+    let idx = lemma_index () in
+    let found = names (Search.search_name idx "rev") in
+    if not (List.mem "rev" found && List.mem "rev_rev" found) then
+      Alcotest.failf "rev and rev_rev expected: %s" (String.concat ", " found);
+    if List.mem "cat_nil" found then Alcotest.fail "cat_nil is not about rev");
+  Alcotest.test_case "the law survives the JSON cache and prints with its functions" `Quick (fun () ->
+    let idx = Search.index_from_json (Search.index_to_json (lemma_index ())) in
+    match List.find_opt (fun (e : Search.entry) -> e.Search.name = "cat_nil") idx.Search.entries with
+    | Some e ->
+      Alcotest.(check bool) "kind" true (e.Search.kind = Search.Lemma);
+      let text = Search.format_entry e in
+      if not (Search.contains_substr text "law: cat(xs, Nil) == xs  (about: cat)") then
+        Alcotest.failf "plain output names the law and its function:\n%s" text
+    | None -> Alcotest.fail "cat_nil missing after a JSON round trip");
+]
+
 let () =
   Alcotest.run "march_search" [
     "levenshtein",   levenshtein_tests;
@@ -1047,4 +1116,5 @@ let () =
     "json",          json_tests;
     "integration",   integration_tests;
     "references",    references_tests;
+    "lemmas",        lemma_tests;
   ]

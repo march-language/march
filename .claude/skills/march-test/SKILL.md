@@ -155,6 +155,21 @@ A single file also runs on its own with `march test test/stdlib/test_FOO.march`.
 2. For property tests: the report includes the shrunk counterexample and seed. Replay with `forge test --seed=<N>` to reproduce deterministically while debugging.
 3. If a property shrinks to something surprising (e.g. empty list), that's often a missing base-case in the implementation.
 
+## Lemma tests
+
+`forge test` also tests `@[lemma]`s: each project file with a lemma is checked with
+`march --check --lemma-test FILE`, and every lemma's theorem `P` (its `{Unit | P}` result) is
+evaluated on generated inputs (boundary Ints plus 100 draws from the fixed seed 20261031):
+
+- an **unproved** lemma is a property test: `COUNTEREXAMPLE ... at xs = ...` fails the run;
+  otherwise the line says `tested, not proved: N inputs`;
+- an **admitted** lemma is re-checked in the interpreter and in a compiled program; false in
+  either (`FALSE`, `COMPILED-FALSE`) is a compiler or runtime bug and fails the run.
+
+To state a law that a change must keep (for example a refactor by an agent), write it as a lemma
+in a `cap verified` module: an unproved lemma is then a build error, not a warning. Prefer that
+to a `Check.all` property when the law is about reflected (pure, first-order) functions.
+
 ## Doctests
 
 `forge test` also runs doctests extracted from `doc """..."""` annotations (the `march>` blocks under `## Examples`). See the **`march-docs`** skill for doctest format and conventions. Doctests count toward the test totals and report failures alongside unit tests.

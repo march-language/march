@@ -43,6 +43,19 @@ git log is authoritative for exact commits.
   `lemma_argument_impure`. The editor re-checks a file when a lemma it uses changes or
   stops proving, and shows a lemma's theorem on hover.
 
+- **`forge test` tests lemmas.** Each project file with an `@[lemma]` is checked with
+  the new `march --check --lemma-test`, which evaluates every lemma's theorem on
+  generated inputs (boundary Ints and 100 draws from a fixed, printed seed). An unproved
+  lemma becomes a property test: a false theorem prints a concrete counterexample and
+  fails the run, and a true one reports "tested, not proved: N inputs". A proved lemma is
+  checked again in the interpreter and in a compiled program; if it is false in either,
+  that is a compiler or runtime bug, and the run fails.
+
+- **Laws in `forge doc` and `forge search`.** A function's API page lists, under
+  "Laws", the lemmas whose theorem calls it, with the theorem as written (march_doc).
+  `forge search --law TEXT` finds lemmas by the text of their theorem or by a function
+  they mention, and a name search for a function also finds the lemmas about it.
+
 - **Parallel combinators reject closures that capture a native handle.** A
   lambda passed to `List.pmap`, `List.pfilter`, `List.preduce`, the
   `Parallel.*` family or `Task.async_stream` may no longer capture a
@@ -95,6 +108,13 @@ git log is authoritative for exact commits.
   Safari. The cache is now a `Map` keyed by the string, holding at most one string of
   each length so older V8 (which hashes long strings by length) doesn't compare them
   either.
+
+### Documentation
+
+- **Lemmas as a contract for changes.** The refinement-types chapter and the
+  `march-lang`, `march-test` and `forge-search` agent skills explain how to state a law
+  as a lemma in a `cap verified` module, where an unproved lemma is a build error, so a
+  change that breaks the law fails the build.
 
 ## [0.7.0] - 2026-11-02
 
