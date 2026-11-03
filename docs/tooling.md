@@ -749,7 +749,7 @@ The candidate grammar covers sign and non-zero contracts on `Int` and `Float`,
 against each list or string parameter in the same signature. A parameter with
 no type annotation, or one that is already refined, is left as-is.
 
-Requires Z3 on `PATH`, like the rest of refinement checking. `--budget N` caps
+Uses the bundled z3, like the rest of refinement checking. `--budget N` caps
 how many hypothesis re-checks the inference may spend **per function** (default
 200), so a `--all` sweep cannot have its answers silently truncated by whichever
 functions happen to be visited first.

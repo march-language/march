@@ -33,16 +33,23 @@ list every assumption it relies on.)
 
 These make up the trusted base. If one is false, a "proved" contract may not hold.
 
-- **z3 is present and correct.** Today z3 is found through `MARCH_Z3` or the first `z3` on
-  `PATH` (`lib/refine/solver.ml`). It is not shipped with March and its version is not
-  pinned. Without z3, ordinary modules get no refinement checking at all and no warning; a
-  `cap verified` module fails the build, but the error says "solver-undecided", not "z3
-  is missing". Bundling a pinned z3 in every release archive was decided on 2026-09-29 and
-  is not built yet.
-- **Each solver query finishes within 3 seconds.** The timeout is wall-clock time, so a
-  heavily loaded machine can turn a proof into "undecided" and a `cap verified` build red.
-- **Cached results came from a working z3.** The build cache does not record which z3, or
-  whether any, produced a cached result.
+- **z3 is present and correct.** Every release archive ships z3 4.16.0 (pinned in
+  `z3.version`) at `libexec/z3`. March uses `MARCH_Z3` first, then that bundled z3, then a
+  `z3` on `PATH` (`lib/refine/solver.ml`). Without a usable z3, a program with refinements
+  of its own builds with one `solver_unavailable` warning, and a `cap verified` module fails
+  with an error saying the solver could not be run. Another z3 version is used, with a
+  `solver_version_mismatch` warning, and may prove different things.
+- **Each query is decided within its resource limit.** A query runs under z3's `rlimit` (a
+  step count): 3,000,000 per query, about four times the costliest query z3 decides in the
+  test corpus, the conformance corpus and the stdlib, and 50,000 for stage-2 reflection
+  queries, fifteen times theirs (`specs/progress/2026-11-02-z3-rlimit-measurement.md`). Because it is a count, not a
+  time, machine load cannot change a verdict. A query that needs more is "undecided"; a
+  project can raise the limit (`--refine-rlimit`, `[refine] rlimit`). The only wall clock is
+  a 60-second backstop for a z3 that has stopped responding: that query is undecided, not
+  cached, and the run warns.
+- **Cached results came from the same z3 and limits.** Cached verdicts are keyed by the z3
+  version, the limits and the platform (never the z3 path), so an upgrade or a new limit
+  never replays an old verdict.
 - **`Int` arithmetic does not overflow.** The solver treats integers as unbounded. At run
   time an `Int` is 63-bit and **wraps** on overflow
   ([Int width and overflow]({{ site.baseurl }}/docs/types/#int-width-and-overflow)). So a
@@ -80,7 +87,12 @@ These make up the trusted base. If one is false, a "proved" contract may not hol
 **Runs in CI today:**
 
 - The z3-backed refinement suite (`test (ubuntu, refinecheck)`, Linux only; macOS skips it
-  because its answers don't depend on the OS).
+  because its answers don't depend on the OS), with the pinned z3, which every CI platform
+  uses.
+- **Cross-platform agreement** (`refine-agreement`): every refinement verdict in the test
+  corpus, the conformance corpus and the stdlib must be the same on all three tier-1
+  platforms. It runs on pushes to `main` and on pull requests that touch the checker or the
+  z3 pin.
 - The refinement obligation coverage ratchet in the `conformance` job: a drop in proved
   obligations, or a rise in skipped ones, fails the build.
 - The measure soundness check is a compile error, so it runs on every build.
@@ -89,8 +101,5 @@ These make up the trusted base. If one is false, a "proved" contract may not hol
 
 - A **must-reject soundness corpus** (overflow, skipped callers, interface signatures,
   higher-order code), separate from the coverage ratchet.
-- A **determinism job** that runs the refinement suite on a deliberately starved CPU and
-  requires identical results, after the solver moves from a wall-clock timeout to a
-  resource limit.
-- A **pinned z3** in CI on every platform (CI uses whatever z3 its package manager
-  provides today, which differs between Linux and macOS).
+- A **starved-CPU run** of the refinement suite. With a resource limit instead of a
+  timeout, load can only trip the 60-second hang backstop, which reports itself.

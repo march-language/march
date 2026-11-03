@@ -19,6 +19,38 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **z3 ships with the toolchain.** Every release archive includes z3 4.16.0 at
+  `libexec/z3` (static on Linux), with its license in `licenses/`, so refinement types
+  are checked on a fresh install with nothing else to install. March looks for z3 in
+  `MARCH_Z3`, then next to the running `march` (through forge's `~/.march/current`
+  symlink), then on `PATH`. The pinned version lives in `z3.version`.
+- **A warning when refinements could not be checked.** A program with refinements of its
+  own gets one `solver_unavailable` warning when no z3 can be used (none found,
+  `MARCH_Z3` pointing nowhere, a z3 that fails `--version`, or one that crashes or stops
+  answering mid-run), with how to fix it; the build still succeeds. Under `cap verified`
+  the error now says the solver could not be run. Another z3 version is used with a
+  `solver_version_mismatch` warning. Both have `march --explain` pages.
+- **`--refine-rlimit N` and `[refine] rlimit = N` in `forge.toml`** raise the per-query
+  solver limit for a project with a known-hard proof. forge passes the setting to every
+  `march` it runs.
+
+### Changed
+
+- **Refinement verdicts no longer depend on machine load.** Each z3 query runs under a
+  fixed resource limit (`rlimit`: 3,000,000 steps, about four times the costliest proof in the
+  corpus and stdlib, and 50,000 for stage-2 reflection queries) instead of a 3-second wall-clock
+  timeout, after a reset, so the same query gets the same answer on every machine and
+  platform. A 60-second backstop only catches a z3 that has stopped responding.
+- **Refinement caches are keyed by the z3 version, the limits and the platform.** A z3
+  upgrade or a new limit never replays an old verdict; entries written before this change
+  are not used. An `unknown` from the limit is now cached like any other answer; a query
+  z3 rejects never is.
+- **CI uses the pinned z3 on every platform** (built from source and cached) instead of
+  the package manager's, and a new `refine-agreement` job requires every refinement
+  verdict to be the same on darwin-arm64, linux-x86_64 and linux-aarch64.
+
 ## [0.7.0] - 2026-11-02
 
 ### Breaking changes
