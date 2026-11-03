@@ -99,6 +99,7 @@ let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.EDbg (Some inner, _) -> cap_annots_in_expr acc inner
   | Ast.EAssert (ex, _) -> cap_annots_in_expr acc ex
   | Ast.ESigil (_, content, _) -> cap_annots_in_expr acc content
+  | Ast.ERefineMsg (content, _, _) -> cap_annots_in_expr acc content
   | Ast.EDbg (None, _) -> acc
   | Ast.EHole _ -> acc
   | Ast.EResultRef _ -> acc

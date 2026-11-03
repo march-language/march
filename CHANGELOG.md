@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A refinement can say what each half of it means.** Write a message after a
+  conjunct with `else`: `{Int | _ >= 0 else "index must not be negative" &&
+  _ < len(xs) else "index must be less than the list's length"}`. A call that
+  breaks a conjunct now leads with its message and names that conjunct alone
+  (`argument `n` of `List.nth` does not satisfy `_ >= 0``), and the hint for a
+  call the checker cannot prove carries the message of the conjunct it could
+  not establish. `else` binds tighter than `&&`; a conjunct without a message is
+  reported as before. The stdlib's two-sided bounds carry messages: `List.nth`,
+  `Array.get`/`set`, the `Simd` lane accessors, `DateTime.fixed_zone` and
+  `fixed_zone_hm`, `Random.bernoulli`, and `Stats.percentile`/`quantile`.
 - **Parallel combinators reject closures that capture a native handle.** A
   lambda passed to `List.pmap`, `List.pfilter`, `List.preduce`, the
   `Parallel.*` family or `Task.async_stream` may no longer capture a

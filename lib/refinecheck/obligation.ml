@@ -98,7 +98,10 @@ type reason =
      text.  Both lists are kept because "`i >= 0` holds" and "`i < len(xs)`
      does not" are both load-bearing — the first tells the reader their guard
      worked and stops them rewriting it. *)
-  | Partial_conjunct of { held : string list; missing : string list }
+  | Partial_conjunct of { held : string list; missing : string list; messages : string list }
+      (** [messages]: what the predicate's author wrote for the [missing]
+          conjuncts, in order, for those that carry one
+          ([March_ast.Refine_msg]). *)
   (* An element obligation on a polymorphic call's result (`sum_pos(List.map(ys,
      f))`), discharged by checking every way a value of the demanded type
      variable can ENTER the callee (2026-09-18 plan, Phase 3): at least one of
@@ -423,10 +426,11 @@ let reason_detail = function
   | Opaque_application name ->
     Printf.sprintf
       "the checker has no meaning for `%s`, so it cannot reason through it" name
-  | Partial_conjunct { held; missing } ->
-    Printf.sprintf "%s established here; %s not"
+  | Partial_conjunct { held; missing; messages } ->
+    Printf.sprintf "%s established here; %s not%s"
       (String.concat " and " (List.map (Printf.sprintf "`%s`") held))
       (String.concat " and " (List.map (Printf.sprintf "`%s`") missing))
+      (match messages with [] -> "" | ms -> ": " ^ String.concat "; " ms)
   | Parametric_source_unproved what -> what
   | Accumulator_base_unproved what -> what
   | Accumulator_step_unproved what -> what

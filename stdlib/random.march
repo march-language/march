@@ -315,7 +315,7 @@ mod Random do
 
       let (heads, rng2) = Random.bernoulli(rng, 0.5)
   """
-  fn bernoulli(rng : Rng, p : {Float | _ >= 0.0 && _ <= 1.0}) : (Bool, Rng) do
+  fn bernoulli(rng : Rng, p : {Float | _ >= 0.0 else "probability must be at least 0.0" && _ <= 1.0 else "probability must be at most 1.0"}) : (Bool, Rng) do
     if p < 0.0 || p > 1.0 do panic("Random.bernoulli: p must be in [0, 1]")
     else do
       let (u, rng2) = next_float(rng)

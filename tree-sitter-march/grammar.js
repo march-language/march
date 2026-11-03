@@ -322,9 +322,23 @@ module.exports = grammar({
       optional(seq(field('binder', $.identifier), ':')),
       field('base', $._type),
       '|',
-      field('predicate', $._expr),
+      field('predicate', $._refinement_predicate),
       '}',
     ),
+
+    // A predicate whose `&&` conjuncts may each carry an author-written
+    // message (parser.mly `refine_pred`):
+    // `_ >= 0 else "index must not be negative" && _ < len(xs) else "…"`.
+    // `else` binds tighter than `&&`, so the message follows its conjunct.
+    _refinement_predicate: $ => seq(
+      $._expr,
+      optional(seq(
+        $.refinement_message,
+        optional(seq('&&', $._refinement_predicate)),
+      )),
+    ),
+
+    refinement_message: $ => seq('else', field('message', $.string)),
 
     unit_type: _ => seq('(', ')'),
     parenthesized_type: $ => seq('(', $._type, ')'),

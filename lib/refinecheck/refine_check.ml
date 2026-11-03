@@ -5665,7 +5665,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     List.iter (fun (_, v) -> go v) fields
   | A.EField (r, _, _) -> go r
   | A.EPipe (a, b, _) -> go a; go b
-  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) -> go e
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _) -> go e
   | A.ESend (a, b, _) -> go a; go b
   | A.ELetQ (p, e1, e2, _) | A.ELetStar (p, e1, e2, _) ->
     go e1;
@@ -6406,6 +6406,7 @@ let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
   | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> ge e1; ge e2
   | A.EAssert (e, _) -> ge e
   | A.ESigil (_, e, _) -> ge e
+  | A.ERefineMsg (e, _, _) -> ge e
 
 (* Exhaustive over [A.decl], for the same reason the obligation walks are: the
    `| _ -> ()` this replaced meant the "not a measure or known predicate"

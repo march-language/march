@@ -158,6 +158,8 @@ let seed_of_body (params : string list) (body : A.expr) : seed =
     | A.EAnnot (ex, _, _) | A.ESpawn (ex, _) | A.EAssert (ex, _)
     | A.ESigil (_, ex, _) ->
       go scope ex
+    | A.ERefineMsg (ex, _, _) ->
+      go scope ex
     | A.ESend (a, b, _) ->
       go scope a;
       go scope b

@@ -400,6 +400,8 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
 
   | Ast.ESigil (_, content, _) ->
     collect_expr ~def_map ~use_map ~calls content
+  | Ast.ERefineMsg (content, _, _) ->
+    collect_expr ~def_map ~use_map ~calls content
 
   | Ast.ELetQ (p, r, c, _) | Ast.ELetStar (p, r, c, _) ->
     collect_pat_defs ~def_map ~use_map p;
@@ -555,6 +557,7 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) -> walk scope e1; walk scope e2
     | Ast.EAssert (e, _) -> walk scope e
     | Ast.ESigil (_, content, _) -> walk scope content
+    | Ast.ERefineMsg (content, _, _) -> walk scope content
     | Ast.ELetQ (p, r, c, _) | Ast.ELetStar (p, r, c, _) ->
       walk scope r;
       let bs = pat_binders p in
