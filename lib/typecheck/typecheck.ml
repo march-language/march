@@ -1809,17 +1809,22 @@ let rec infer_expr env (e : Ast.expr) : ty =
                 | Some sch -> Some sch
                 | None -> try_suffix rest)
            in
-           (* A single-qualifier `Q.member` whose `Q` names no module at all
-              (not in the registry — the guard above — and no `Q.`-prefixed
-              binding or in-file module) is a misspelled module, not a path
-              to strip: stripping `Lsit.` off `Lsit.length` resolved the
+           (* A single-qualifier `Q.member` whose `Q` names nothing at all
+              (no registry module — the guard above —, no type, no in-file
+              module, no `Q.`-prefixed binding) is a misspelled module, not a
+              path to strip: stripping `Lsit.` off `Lsit.length` resolved the
               builtin `length`, so the typo checked clean and failed only at
-              run time with "unbound variable: Lsit.length". *)
+              run time with "unbound variable: Lsit.length".  A qualifier
+              that names a TYPE keeps the fallback: `Int.to_string(n)` is
+              how programs spell the bare `to_string` on an Int. *)
            let unknown_single_qualifier =
              match split_qualified name.txt with
              | Some (q, member) when not (String.contains member '.') ->
                let prefix = q ^ "." in
-               not (StrMap.mem q env.local_mods)
+               not (StrMap.mem q env.types)
+               && not (StrMap.mem q env.records)
+               && not (StrMap.mem q env.ty_aliases)
+               && not (StrMap.mem q env.local_mods)
                && not (StrMap.exists (fun k _ -> String.starts_with ~prefix k) env.vars)
              | _ -> false
            in
