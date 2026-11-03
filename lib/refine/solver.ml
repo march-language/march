@@ -107,18 +107,76 @@ let rec mkdir_p dir =
     try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
   end
 
+(* `<path> --version`, with no stdin (a z3 that read it would wait on ours)
+   and under the hang backstop, so a wedged z3 cannot hang the compiler. *)
 let exec_version (path : string) : (string, string) Stdlib.result =
-  match Unix.open_process_args_in path [| path; "--version" |] with
+  match
+    let null = Unix.openfile "/dev/null" [ Unix.O_RDONLY; Unix.O_CLOEXEC ] 0 in
+    let out_r, out_w = Unix.pipe ~cloexec:true () in
+    let pid =
+      Fun.protect
+        ~finally:(fun () -> Unix.close null; Unix.close out_w)
+        (fun () ->
+          try Unix.create_process path [| path; "--version" |] null out_w Unix.stderr
+          with e -> Unix.close out_r; raise e)
+    in
+    (pid, out_r)
+  with
   | exception Unix.Unix_error (e, _, _) -> Error ("could not be started (" ^ Unix.error_message e ^ ")")
-  | ic ->
-      let out = try In_channel.input_all ic with _ -> "" in
-      (match Unix.close_process_in ic with
-       | Unix.WEXITED 0 -> (
-           match parse_version out with
-           | Some v -> Ok v
-           | None -> Error "printed an unrecognised version (`z3 --version` did not say `Z3 version X.Y.Z`)")
-       | Unix.WEXITED n -> Error (Printf.sprintf "exited with status %d on `--version`" n)
-       | Unix.WSIGNALED n | Unix.WSTOPPED n -> Error (Printf.sprintf "was killed by signal %d on `--version`" n))
+  | pid, out_r ->
+      let deadline = Unix.gettimeofday () +. (float_of_int (backstop_ms ()) /. 1000.) in
+      let buf = Buffer.create 128 and chunk = Bytes.create 4096 in
+      let rec read () =
+        let left = deadline -. Unix.gettimeofday () in
+        if left <= 0. then false
+        else
+          match Unix.select [ out_r ] [] [] left with
+          | [], _, _ -> false
+          | _ -> (
+              match Unix.read out_r chunk 0 (Bytes.length chunk) with
+              | 0 -> true
+              | n -> Buffer.add_subbytes buf chunk 0 n; read ()
+              | exception Unix.Unix_error (Unix.EINTR, _, _) -> read ())
+          | exception Unix.Unix_error (Unix.EINTR, _, _) -> read ()
+      in
+      let finished = read () in
+      Unix.close out_r;
+      if not finished then (try Unix.kill pid Sys.sigkill with _ -> ());
+      let rec wait () =
+        try snd (Unix.waitpid [] pid) with Unix.Unix_error (Unix.EINTR, _, _) -> wait ()
+      in
+      let status = wait () in
+      if not finished then Error "did not answer `--version`"
+      else
+        match status with
+        | Unix.WEXITED 0 -> (
+            match parse_version (Buffer.contents buf) with
+            | Some v -> Ok v
+            | None -> Error "printed an unrecognised version (`z3 --version` did not say `Z3 version X.Y.Z`)")
+        | Unix.WEXITED n -> Error (Printf.sprintf "exited with status %d on `--version`" n)
+        | Unix.WSIGNALED n | Unix.WSTOPPED n -> Error (Printf.sprintf "was killed by signal %d on `--version`" n)
+
+let probe_disk_file path (st : Unix.stats) : string option =
+  Option.map
+    (fun d ->
+      Filename.concat d
+        (March_cas.Blake3.hash_string
+           (Printf.sprintf "%s\x00%d\x00%.6f\x00%d" path st.Unix.st_size st.Unix.st_mtime st.Unix.st_ino)))
+    (probe_cache_dir ())
+
+let read_probe_file (f : string) : string option =
+  if Sys.file_exists f then
+    try
+      let v = String.trim (In_channel.with_open_bin f In_channel.input_all) in
+      if v <> "" then Some v else None
+    with _ -> None
+  else None
+
+(* The version a previous probe recorded for [path], without running z3. *)
+let cached_version (path : string) : string option =
+  match Unix.stat path with
+  | exception Unix.Unix_error _ -> None
+  | st -> Option.bind (probe_disk_file path st) read_probe_file
 
 let probe_version (path : string) : (string, string) Stdlib.result =
   match Unix.stat path with
@@ -128,23 +186,8 @@ let probe_version (path : string) : (string, string) Stdlib.result =
       match Hashtbl.find_opt probe_memo memo_key with
       | Some r -> r
       | None ->
-          let disk =
-            Option.map
-              (fun d ->
-                Filename.concat d
-                  (March_cas.Blake3.hash_string
-                     (Printf.sprintf "%s\x00%d\x00%.6f\x00%d" path st.Unix.st_size st.Unix.st_mtime st.Unix.st_ino)))
-              (probe_cache_dir ())
-          in
-          let cached =
-            match disk with
-            | Some f when Sys.file_exists f -> (
-                try
-                  let v = String.trim (In_channel.with_open_bin f In_channel.input_all) in
-                  if v <> "" then Some (Ok v) else None
-                with _ -> None)
-            | _ -> None
-          in
+          let disk = probe_disk_file path st in
+          let cached = Option.map (fun v -> Ok v) (Option.bind disk read_probe_file) in
           let r =
             match cached with
             | Some r -> r
@@ -187,6 +230,45 @@ let health () : health =
       | Ok version when version = Z3_pin.version -> Healthy { path; version; source }
       | Ok version -> Mismatch { path; version; source }
       | Error reason -> Broken { path; reason })
+
+(* ── Identity: what a cached verdict depends on ─────────────────────────────
+   A verdict is a function of the query text, the z3 version, the limits and
+   (to be safe across machines sharing a cache) the platform.  Never the z3
+   path: the determinism oracle runs from two HOMEs and cwds, and the same z3
+   at two paths must share verdicts. *)
+let platform : string Lazy.t =
+  lazy
+    (let raw =
+       try
+         let ic = Unix.open_process_args_in "uname" [| "uname"; "-sm" |] in
+         let s = try input_line ic with End_of_file -> "" in
+         ignore (Unix.close_process_in ic);
+         s
+       with _ -> ""
+     in
+     match String.split_on_char ' ' (String.trim raw) with
+     | [ os; arch ] -> String.lowercase_ascii os ^ "-" ^ arch
+     | _ -> String.lowercase_ascii Sys.os_type)
+
+let limits_tag () = Printf.sprintf "rl-%d-%d" !default_rlimit !stage2_rlimit
+
+let identity () : string option =
+  match health () with
+  | Healthy { version; _ } | Mismatch { version; _ } ->
+      Some (Printf.sprintf "z3-%s/%s/%s" version (limits_tag ()) (Lazy.force platform))
+  | Missing _ | Broken _ -> None
+
+(* The build (CAS) cache's z3 fragment.  It never runs z3: a compile with no
+   refinement obligations must not start one.  The version comes from a
+   probe already cached on disk, else "unprobed"; a new z3 binary has a new
+   mtime and so no cached probe, so a build made with another z3 is never
+   replayed. *)
+let cas_tag () : string list =
+  match find_z3 () with
+  | Error _ -> [ "noz3" ]
+  | Ok (path, _) ->
+      let v = Option.value ~default:"unprobed" (cached_version path) in
+      [ Printf.sprintf "z3:%s/%s/%s" v (limits_tag ()) (Lazy.force platform) ]
 
 (* The options every query starts with, sent after its (reset). *)
 let init_options : string =

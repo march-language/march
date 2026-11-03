@@ -159,6 +159,30 @@ let probe_suite =
                 Alcotest.(check string) "version" "4.8.12" version;
                 Alcotest.(check string) "path" z3 path
             | _ -> Alcotest.fail "expected Mismatch"));
+    (* A z3 that never finishes `--version` (wedged, or a fake reading its
+       stdin) must not hang the compiler: the probe gets no stdin and the
+       hang backstop, and reports it as broken. *)
+    Alcotest.test_case "probe_does_not_hang" `Quick (fun () ->
+        with_env ~path:(fresh_dir "empty") (fun () ->
+            (* This process's stdin: a pipe nobody ever writes or closes, so
+               a probe that inherits it would wait for ever. *)
+            let saved_stdin = Unix.dup Unix.stdin in
+            let r, w = Unix.pipe () in
+            Unix.dup2 r Unix.stdin;
+            let reads = Filename.concat (fresh_dir "reads") "z3" in
+            write_script reads "/bin/cat > /dev/null; echo 'Z3 version 4.16.0 - 64 bit'";
+            let got = Solver.probe_version reads in
+            Unix.dup2 saved_stdin Unix.stdin;
+            List.iter Unix.close [ saved_stdin; r; w ];
+            Alcotest.(check (result string string)) "stdin is empty" (Ok "4.16.0") got;
+            let sleeps = Filename.concat (fresh_dir "sleeps") "z3" in
+            write_script sleeps "/bin/sleep 30";
+            Unix.putenv "MARCH_Z3_BACKSTOP_MS" "500";
+            let t0 = Unix.gettimeofday () in
+            let r = Solver.probe_version sleeps in
+            Unix.putenv "MARCH_Z3_BACKSTOP_MS" "";
+            Alcotest.(check bool) "an error" true (Result.is_error r);
+            Alcotest.(check bool) "within 3 s" true (Unix.gettimeofday () -. t0 < 3.0)));
     Alcotest.test_case "health_broken_on_bad_probe" `Quick (fun () ->
         let z3 = Filename.concat (fresh_dir "bad") "z3" in
         write_script z3 "exit 1";

@@ -1,10 +1,15 @@
 (* Content-addressed verdict cache under <root>/.march/cas/vc/.
-   Key = BLAKE3 of the VC's canonical assertion block; the solver is consulted
+   Key = BLAKE3 of the z3 identity and the VC's canonical assertion block; the solver is consulted
    only on a miss.  Mirrors the git-style <prefix2>/<rest> layout used by the
    rest of the CAS. *)
 
 let key_of_vc ?(preamble = "") (vc : Smt.vc) : string =
-  March_cas.Blake3.hash_string (preamble ^ "\n" ^ Smt.assertion_block vc)
+  (* The z3 version, the limits and the platform ([Solver.identity]) are part
+     of the key, so an upgrade or a new limit never replays a verdict, and
+     entries from before they were (some holding a wall-clock `unknown`) are
+     unreachable. *)
+  let id = Option.value ~default:"noz3" (Solver.identity ()) in
+  March_cas.Blake3.hash_string ("vc2\n" ^ id ^ "\n" ^ preamble ^ "\n" ^ Smt.assertion_block vc)
 
 let string_of_result : Solver.result -> string = function
   | Solver.Unsat -> "unsat"

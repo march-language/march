@@ -1317,7 +1317,7 @@
 (test
  (name test_refine)
  (modules test_refine)
- (libraries march_refine alcotest unix))
+ (libraries march_refine march_cas alcotest unix))
 
 ; The one z3 lookup, the pinned-version probe and the health report
 ; (specs/2026-11-02-bundled-z3-design.md).  z3_lookup_helper is copied into a

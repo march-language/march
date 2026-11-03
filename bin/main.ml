@@ -1828,12 +1828,9 @@ let hr_store_sources ~(cfg : March_tir.Hot_reload.config) ~(store : March_cas.Ca
         Option.iter (fun r -> March_cas.Cas.store_source store h (SI.region_text r)) region
       end)
     hr_impl_hashes
-(* Whether z3 can be found.  Without it every refinement obligation comes
-   back unverified, which changes the verdict (an obligation that would be
-   refuted is not), so a z3-less run must not share a cache entry with one
-   that has z3.  Only the absence is tagged, so a normal key is unchanged. *)
-let z3_cas_tag () =
-  if Result.is_error (March_refine.Solver.find_z3 ()) then [ "noz3" ] else []
+(* The z3 a build's refinement verdicts depend on: its version, the limits
+   and the platform, or its absence ([Solver.cas_tag]; never runs z3). *)
+let z3_cas_tag () = March_refine.Solver.cas_tag ()
 
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []

@@ -166,7 +166,7 @@ let rlimit_suite =
         Out_channel.with_open_bin fake (fun oc ->
             (* No exec: the shell keeps stdout open while cat swallows stdin, so
                the driver sees silence, not end-of-file. *)
-            output_string oc "#!/bin/sh\ncat > /dev/null\n");
+            output_string oc "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'Z3 version 4.16.0 - 64 bit'; exit 0; }\ncat > /dev/null\n");
         Unix.chmod fake 0o755;
         Unix.putenv "MARCH_Z3" fake;
         Unix.putenv "MARCH_Z3_BACKSTOP_MS" "500";
@@ -196,7 +196,7 @@ let rlimit_suite =
            `hangme`, where it stops reading and answering. *)
         Out_channel.with_open_bin fake (fun oc ->
             output_string oc
-              "#!/bin/sh\nh=0\nwhile read l; do case \"$l\" in *hangme*) h=1;; \"(check-sat)\"*) \
+              "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'Z3 version 4.16.0 - 64 bit'; exit 0; }\nh=0\nwhile read l; do case \"$l\" in *hangme*) h=1;; \"(check-sat)\"*) \
                if [ $h = 1 ]; then cat > /dev/null; fi; echo unsat;; esac; done\n");
         Unix.chmod fake 0o755;
         let root = Filename.concat dir "root" in
@@ -443,6 +443,80 @@ let refine_suite =
         | Refine.Refuted _ -> ()
         | _ -> Alcotest.fail "division must not be ground-evaluated") ]
 
+
+(* ── Cache keys: z3 version, rlimit and platform, never the z3 path ─────── *)
+let fake_dir_counter = ref 0
+
+let fake_z3_with ?log version =
+  incr fake_dir_counter;
+  let dir = Filename.temp_file (Printf.sprintf "march_z3_key%d_" !fake_dir_counter) "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  let p = Filename.concat dir "z3" in
+  let logging = match log with Some l -> Printf.sprintf "echo x >> %s\n" l | None -> "" in
+  Out_channel.with_open_bin p (fun oc ->
+      output_string oc (Printf.sprintf "#!/bin/sh\n%secho 'Z3 version %s - 64 bit'\n" logging version));
+  Unix.chmod p 0o755;
+  p
+
+let with_z3 path f =
+  let cache = Filename.temp_file "march_z3_probe" "" in
+  Sys.remove cache;
+  Unix.putenv "MARCH_Z3" path;
+  Unix.putenv "XDG_CACHE_HOME" cache;
+  Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_Z3" ""; Unix.putenv "XDG_CACHE_HOME" "") f
+
+let key_suite =
+  [ Alcotest.test_case "key_changes_with_version" `Quick (fun () ->
+        let a = with_z3 (fake_z3_with "4.16.0") (fun () -> Vc_cache.key_of_vc sample_vc) in
+        let b = with_z3 (fake_z3_with "4.16.1") (fun () -> Vc_cache.key_of_vc sample_vc) in
+        Alcotest.(check bool) "different keys" true (a <> b));
+    Alcotest.test_case "key_changes_with_rlimit" `Quick (fun () ->
+        let z3 = fake_z3_with "4.16.0" in
+        let saved = !Refine.default_rlimit in
+        Fun.protect ~finally:(fun () -> Refine.default_rlimit := saved) (fun () ->
+            let a = with_z3 z3 (fun () -> Vc_cache.key_of_vc sample_vc) in
+            Refine.default_rlimit := saved + 1;
+            let b = with_z3 z3 (fun () -> Vc_cache.key_of_vc sample_vc) in
+            Alcotest.(check bool) "different keys" true (a <> b)));
+    Alcotest.test_case "key_has_no_path" `Quick (fun () ->
+        let a = with_z3 (fake_z3_with "4.16.0") (fun () -> Vc_cache.key_of_vc sample_vc) in
+        let b = with_z3 (fake_z3_with "4.16.0") (fun () -> Vc_cache.key_of_vc sample_vc) in
+        Alcotest.(check string) "same key" a b);
+    Alcotest.test_case "cas_tag_never_execs_z3" `Quick (fun () ->
+        let log = Filename.temp_file "march_z3_calls" "" in
+        let z3 = fake_z3_with ~log "4.16.0" in
+        with_z3 z3 (fun () ->
+            let cold = Solver.cas_tag () in
+            Alcotest.(check string) "z3 not run" ""
+              (In_channel.with_open_bin log In_channel.input_all);
+            Alcotest.(check bool) "cold tag says unprobed" true
+              (List.exists (fun t -> contains t "unprobed") cold);
+            ignore (Solver.probe_version z3);
+            Solver.clear_probe_memo ();
+            let warm = Solver.cas_tag () in
+            Alcotest.(check bool) "warm tag carries the version" true
+              (List.exists (fun t -> contains t "4.16.0") warm)));
+    (* Entries written before the version entered the key (some holding
+       `unknown`, which was then a wall-clock accident) sit under the old
+       key and must never be served. *)
+    with_solver "old_cache_entries_are_not_served" (fun _s ->
+        let root = Filename.temp_file "march_refine_oldkey" "" in
+        Sys.remove root;
+        Unix.mkdir root 0o755;
+        let invalid : Smt.vc =
+          { decls = [ ("d", Smt.SInt) ]; assumptions = []; goal = Smt.Ne (Smt.Const "d", Smt.IntLit 0) }
+        in
+        let old_key = March_cas.Blake3.hash_string ("" ^ "\n" ^ Smt.assertion_block invalid) in
+        Vc_cache.store ~root old_key Solver.Unsat;
+        let r = Refine.discharge ~root invalid in
+        Refine.shutdown ();
+        match r with
+        | Refine.Refuted _ -> ()
+        | Refine.Verified -> Alcotest.fail "served a verdict stored under the old key"
+        | Refine.Unverified -> Alcotest.fail "expected refuted") ]
+
+
 (* ── Solver-process lifecycle (regression: 2026-07 z3 orphan leak) ────────
    Every compile/check run used to leave one immortal z3: the shared solver
    was never closed, and the child inherited the write end of its own stdin
@@ -546,6 +620,7 @@ let () =
       ("model", model_suite);
       ("solver", solver_suite);
       ("rlimit", rlimit_suite);
+      ("keys", key_suite);
       ("solver-resync", resync_suite);
       ("cache", cache_suite);
       ("refine", refine_suite);

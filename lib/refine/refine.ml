@@ -174,9 +174,7 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
   let key = Vc_cache.key_of_vc ~preamble vc in
   let neg_key =
     if assume = [] then ""
-    else key ^ "/" ^ (match Solver.find_z3 () with
-                   | Ok (p, _) -> (match Solver.probe_version p with Ok v -> v | Error _ -> "?")
-                   | Error _ -> "") ^ "/" ^ string_of_int !stage2_rlimit
+    else key (* already carries the z3 version and the limits *)
   in
   if assume <> [] && Hashtbl.mem stage2_unknown neg_key
      && Sys.getenv_opt "MARCH_REFLECT_PERTURB" <> Some "no-negcache" then begin
