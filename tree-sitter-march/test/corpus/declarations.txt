@@ -230,3 +230,48 @@ end
       (fn_needs)
       body: (block_body
         (identifier)))))
+
+================================================================================
+Interface method with a needs bound
+================================================================================
+mod Foo do
+interface Store(a) do
+fn get : a -> Int needs IO.FileRead
+fn label : a -> String needs () do fn (_) -> "x" end
+end
+end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (interface_def
+      name: (type_identifier)
+      param: (type_variable
+        (type_variable))
+      (method_sig
+        name: (identifier)
+        type: (arrow_type
+          param: (type_variable
+            (type_variable))
+          return: (type_constructor
+            (type_constructor)))
+        (fn_needs
+          (module_path
+            (type_identifier)
+            (type_identifier))))
+      (method_sig
+        name: (identifier)
+        type: (arrow_type
+          param: (type_variable
+            (type_variable))
+          return: (type_constructor
+            (type_constructor)))
+        (fn_needs)
+        default: (lambda_expression
+          (fn_param
+            (wildcard_pattern))
+          body: (block_body
+            (string)))))))
+

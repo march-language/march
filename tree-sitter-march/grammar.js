@@ -436,6 +436,7 @@ module.exports = grammar({
     ),
     method_sig: $ => seq(
       'fn', field('name', $.identifier), ':', field('type', $._type),
+      optional($.fn_needs),
       optional(seq('do', field('default', $._expr), 'end')),
     ),
 

@@ -35,6 +35,7 @@ conditional implementations, constraints on functions, the four standard interfa
 - [Implementing an Interface](#implementing-an-interface)
 - [Conditional Implementations](#conditional-implementations)
 - [Using Interfaces in Function Signatures](#using-interfaces-in-function-signatures)
+- [Capability bounds on methods](#capability-bounds-on-methods)
 
 **The standard interfaces**
 
@@ -248,7 +249,42 @@ end
 
 ---
 
+## Capability bounds on methods
+
+A method signature can carry a `needs` bound after its type. Every impl of the method, in
+any module, and the interface's default body are checked against it:
+
+```march
+interface Store(a) do
+  fn get : (a, String) -> Option(String) needs IO.FileRead
+  fn describe : a -> String needs ()
+end
+
+impl Store(Disk) do
+  fn get(d, key) do read_entry(d, key) end   -- may read files, nothing else
+  fn describe(_d) do "disk" end              -- may perform no I/O at all
+end
+```
+
+An impl that reaches past the bound is rejected at the impl, with the path to the
+capability. An impl may declare a narrower bound of its own (`fn describe(_d) needs ()`)
+but not a wider one. A method with no bound constrains nothing. The bound is a check on
+impls only: it is not part of the method's type, and a function constrained by
+`when Store(a)` declares nothing new. See
+[Per-function bounds]({{ site.baseurl }}/docs/capabilities/#per-function-bounds) for the
+full rules.
+
+---
+
 ## Standard Interfaces
+
+All four standard interfaces are bounded by `needs ()`: an impl of `eq`, `compare`, `show`
+or `hash` reaches no `IO` capability, directly or through anything it calls, so showing,
+comparing, ordering and hashing a value never do I/O. (The check covers the `IO` lattice;
+`Map`, `Sort` and most collection operations take a comparator function instead, which is
+charged to whoever passes it, as usual.) `derive` produces pure impls; a hand-written one
+that prints, logs or reads the clock is rejected (`cap_bound`) at the impl. Do that work
+outside the impl instead.
 
 ### `Eq(a)`: Equality
 

@@ -33,6 +33,17 @@ git log is authoritative for exact commits.
   `lemma_argument_impure`. The editor re-checks a file when a lemma it uses changes or
   stops proving, and shows a lemma's theorem on hover.
 
+- **Parallel combinators reject closures that capture a native handle.** A
+  lambda passed to `List.pmap`, `List.pfilter`, `List.preduce`, the
+  `Parallel.*` family or `Task.async_stream` may no longer capture a
+  `resource` value from an `extern` library, directly or inside a record,
+  variant, list or tuple, since nothing says the C library is safe to call
+  from several threads. The check follows the lambda through your own
+  functions that pass it on, and reports at the function, naming the
+  variable and the combinator (`portable_capture`). Create the handle inside
+  the lambda, or use the sequential version. `task_spawn` and `Task.async`
+  are unaffected.
+
 ### Changed
 
 - **Native compiles are about 45% faster for small programs.** Code the program
@@ -42,9 +53,25 @@ git log is authoritative for exact commits.
   the same apart from some inlining choices, which now count only reachable
   callers. `--disable-pass dce-early` turns it off.
 
+### Fixed
+
+- **`--target js` byte strings are fast in Safari.** Each byte access on a long string
+  (`byte_at`, `byte_length`, `slice`) looked up its cached byte view by comparing strings
+  with `===`, which JavaScriptCore does in time linear in the string's length, even for a
+  string and itself. A game decoding a 3.5 MB world file never finished loading in
+  Safari. The cache is now a `Map` keyed by the string, holding at most one string of
+  each length so older V8 (which hashes long strings by length) doesn't compare them
+  either.
+
 ## [0.7.0] - 2026-11-02
 
 ### Breaking changes
+
+- **`Show`, `Eq`, `Ord` and `Hash` impls may not perform I/O.** The four built-in
+  interfaces are bounded by `needs ()`, so a hand-written `show`, `eq`, `compare` or `hash`
+  that prints, logs, reads the clock or reaches any other capability is rejected at the
+  impl (`cap_bound`). Derived impls are unaffected, and no impl in the stdlib was. Move
+  such work out of the impl.
 
 - **Hot-reload ABI v5 requires a rebuilt base binary.** Per-frame routing and
   closure lifetime hooks are incompatible with older running servers. Forge
@@ -84,6 +111,14 @@ git log is authoritative for exact commits.
   function is handed is charged to whoever supplies it, and a call to a function value
   taken from a record, list or ref is refused under a bound narrower than `IO`. Impl
   methods take bounds too. See the capabilities reference, "Per-function bounds".
+
+- **Capability bounds on interface methods.** An interface method signature may declare
+  `needs …` after its type (`fn get : a -> Int needs IO.FileRead`). Every impl of the
+  method, in any module, and the interface's default body are checked against it
+  (`cap_bound`, naming the interface); an impl may declare a narrower bound of its own but
+  not a wider one (`cap_bound_iface`). The bound is never part of the method's type, so
+  callers and `when` constraints declare nothing new. See the interfaces reference,
+  "Capability bounds on methods".
 
 - **`--reflection-parity`: check the refinement checker's reading of your functions.**
   `forge test --reflection-parity` (or `march --check --reflect-parity`) runs every
@@ -621,6 +656,12 @@ git log is authoritative for exact commits.
   inferred, so well-typed callers are unaffected and nothing runs differently.
 
 ### Fixed
+
+- **An impl method in a nested module was charged nothing for the helpers it calls.**
+  The capability checks (the module ceiling, `main`'s grant, per-function bounds) resolved
+  a local reference from an impl method or interface default body against the wrong
+  scope, so in `mod B`, an `impl Show(T)` whose `show` called a `pfn log` that prints was
+  not charged `log`'s `IO.Console`. It is now.
 
 - **A type of yours with a constructor named like another type's no longer breaks
   refinement checking of that other type.** Declaring, say, `type Mb = Some(Int) |

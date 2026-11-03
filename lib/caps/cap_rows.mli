@@ -77,6 +77,24 @@ val merge_seed : seed -> seed -> seed
     function may differ in arity only through desugar's arity mangling, where
     the longer list is the more informative one. *)
 
+val reaches_unknown :
+  ?scopes:(string, string) Hashtbl.t ->
+  known:(string, 'a) Hashtbl.t ->
+  refs:(string, string list) Hashtbl.t ->
+  seed_unknown:(string -> bool) ->
+  string ->
+  bool
+(** [reaches_unknown ~known ~refs ~seed_unknown root] is [solve]'s [unknown]
+    flag for [root], computed by walking only what [root] reaches: [root] or
+    a function it reaches through [refs] (resolved as [solve] resolves them,
+    against the functions in [known]) invokes a function value of
+    untraceable origin, per [seed_unknown].  [unknown] spreads only along
+    reference edges ([deps] never feed it), so this equals [solve]'s flag
+    without classifying every body in the program. *)
+
+val bodies_classified : int ref
+(** Count of [seed_of_bodies] calls, for tests. *)
+
 val seed_of_bodies : (string list * March_ast.Ast.expr) list -> seed
 (** [seed_of_bodies bodies] classifies each [(params, body)] pair exactly the
     way [Typecheck.record_fn_refs] pairs a clause's parameter names with its
@@ -98,8 +116,18 @@ type row = { caps : string list; deps : string list; unknown : bool }
 
 val empty_row : row
 
+val ref_prefix : ?scopes:(string, string) Hashtbl.t -> string -> string
+(** The prefix a bare reference made from inside [owner] is qualified with
+    ("Mod.Sub." or ""): [owner]'s entry in [scopes] when it has one, else
+    everything up to its last ['.'].  [scopes] is for keys whose last segment
+    is not their scope, i.e. an impl method or interface default body keyed
+    [<scope>.<Iface>$<Ty>.<m>]: its prefix-by-dot is [<scope>.<Iface>$<Ty>.],
+    so a local helper resolved against it was missed in a nested module.
+    Shared by [solve] and [cap_reach_chain] so the two cannot drift. *)
+
 val solve :
   ?with_rows:bool ->
+  ?scopes:(string, string) Hashtbl.t ->
   own_caps:(string, string list) Hashtbl.t ->
   refs:(string, string list) Hashtbl.t ->
   seeds:(string, seed) Hashtbl.t ->

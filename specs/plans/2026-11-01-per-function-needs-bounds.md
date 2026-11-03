@@ -44,7 +44,11 @@ declaration instead of to `Cap(X)` parameters, which is what forced the threadin
    the two checks above with the `unknown` refusal, error code, reference docs, tests,
    and a noise measurement: bounds declared across a sample of stdlib modules.
 2. **Interfaces** (decision 2): a `needs` bound on an interface method signature; every
-   impl method checked against it.
+   impl method checked against it. Plan: `specs/plans/2026-11-02-interface-needs-bounds.md`. **Done 2026-11-02**
+   (`progress/2026-11-02-fn-needs-bounds-interfaces.md`), with the four built-in
+   interfaces bounded by `needs ()`. The bound
+   is a check on impls only, never part of a method's type or a constraint, so it adds no
+   capability threading.
 3. **Tooling and semver** (decision 3): widening a declared bound is a major bump in
    forge's semver check and appears in `forge audit` upgrade diffs; `forge fix` can write
    the tightest bound; LSP hover shows the inferred row.

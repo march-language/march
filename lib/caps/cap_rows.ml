@@ -199,7 +199,12 @@ let seed_of_body (params : string list) (body : A.expr) : seed =
     sd_calls = !calls;
   }
 
+(* How many function bodies have been classified ([seed_of_bodies]); a test
+   pins that the bound check classifies only what bounded bodies reach. *)
+let bodies_classified = ref 0
+
 let seed_of_bodies (bodies : (string list * A.expr) list) : seed =
+  incr bodies_classified;
   List.fold_left
     (fun acc (params, body) -> merge_seed acc (seed_of_body params body))
     empty_seed bodies
@@ -210,7 +215,43 @@ type row = { caps : string list; deps : string list; unknown : bool }
 
 let empty_row = { caps = []; deps = []; unknown = false }
 
-let solve ?(with_rows = true) ~(own_caps : (string, string list) Hashtbl.t)
+let ref_prefix ?scopes (owner : string) : string =
+  match Option.bind scopes (fun t -> Hashtbl.find_opt t owner) with
+  | Some "" -> ""
+  | Some s -> s ^ "."
+  | None ->
+    (match String.rindex_opt owner '.' with
+     | Some i -> String.sub owner 0 (i + 1)
+     | None -> "")
+
+(* Resolve reference [r] made from inside [owner] against the known
+   functions: the owner's module prefix first (a bare reference from inside
+   a nested module), then the raw name (an already-dotted reference, or an
+   entry-level bare one).  Shared by [solve] and [reaches_unknown] so the two
+   cannot resolve differently. *)
+let resolve_ref ?scopes (known : (string, 'a) Hashtbl.t) (owner : string) (r : string) : string option =
+  let qualified = ref_prefix ?scopes owner ^ r in
+  if Hashtbl.mem known qualified then Some qualified
+  else if Hashtbl.mem known r then Some r
+  else None
+
+let reaches_unknown ?scopes ~(known : (string, 'a) Hashtbl.t)
+    ~(refs : (string, string list) Hashtbl.t) ~(seed_unknown : string -> bool) (root : string) : bool =
+  let visited = Hashtbl.create 64 in
+  let rec go = function
+    | [] -> false
+    | k :: rest when Hashtbl.mem visited k -> go rest
+    | k :: rest ->
+      Hashtbl.replace visited k ();
+      seed_unknown k
+      || go
+           (List.filter_map (resolve_ref ?scopes known k)
+              (Option.value ~default:[] (Hashtbl.find_opt refs k))
+           @ rest)
+  in
+  go [ root ]
+
+let solve ?(with_rows = true) ?scopes ~(own_caps : (string, string list) Hashtbl.t)
     ~(refs : (string, string list) Hashtbl.t)
     ~(seeds : (string, seed) Hashtbl.t) () : (string, row) Hashtbl.t =
   let caps : (string, string list) Hashtbl.t = Hashtbl.create 64 in
@@ -227,16 +268,7 @@ let solve ?(with_rows = true) ~(own_caps : (string, string list) Hashtbl.t)
      then the raw name (an already-dotted reference, or an entry-level bare
      one).  Membership in [caps] is the "is a known function" test because
      every recording site writes a caps entry, even an empty one. *)
-  let resolve (owner : string) (r : string) : string option =
-    let qualified =
-      match String.rindex_opt owner '.' with
-      | Some i -> String.sub owner 0 i ^ "." ^ r
-      | None -> r
-    in
-    if Hashtbl.mem caps qualified then Some qualified
-    else if Hashtbl.mem caps r then Some r
-    else None
-  in
+  let resolve = resolve_ref ?scopes caps in
   let changed = ref true in
   let add_deps key ps =
     let prior = Option.value ~default:[] (Hashtbl.find_opt deps key) in

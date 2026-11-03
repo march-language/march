@@ -45,6 +45,7 @@ type kind = {
   needs_tag    : bool;         (** scalar that must be [(v<<1)|1] in a ptr slot *)
   closure_free : bool;         (** DEEP: no [TFn] reachable through fields *)
   float_free   : bool;         (** DEEP: no [TFloat] reachable through fields *)
+  resource_free : bool;        (** DEEP: no native [resource] handle reachable *)
 }
 
 type table
@@ -128,6 +129,10 @@ val canonical_ty : table -> Tir.ty -> Tir.ty
     to [canonical_name]: exact name, else the unique declaration with that
     short name. *)
 val declaration_of : table -> string -> string
+
+(** True iff the name denotes a native [resource] handle type (a variant
+    with no constructors, which only `resource X` produces). *)
+val is_resource_name : table -> string -> bool
 
 val unboxed_of_type_name : table -> string -> (string * Tir.ty list) option
 val unboxed_of_llvm_ty : table -> string -> (string * string * Tir.ty list) option
