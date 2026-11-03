@@ -483,20 +483,23 @@ let key_suite =
         let a = with_z3 (fake_z3_with "4.16.0") (fun () -> Vc_cache.key_of_vc sample_vc) in
         let b = with_z3 (fake_z3_with "4.16.0") (fun () -> Vc_cache.key_of_vc sample_vc) in
         Alcotest.(check string) "same key" a b);
-    Alcotest.test_case "cas_tag_never_execs_z3" `Quick (fun () ->
+    (* The build-cache tag must be the same before and after a build: a
+       build probes z3 (every run checks the stdlib's obligations), so a tag
+       that said "unprobed" until then made a fresh machine's second build miss
+       the source-level cache.  It probes itself, at most once per z3 binary. *)
+    Alcotest.test_case "cas_tag_is_stable_across_a_build" `Quick (fun () ->
         let log = Filename.temp_file "march_z3_calls" "" in
         let z3 = fake_z3_with ~log "4.16.0" in
         with_z3 z3 (fun () ->
-            let cold = Solver.cas_tag () in
-            Alcotest.(check string) "z3 not run" ""
-              (In_channel.with_open_bin log In_channel.input_all);
-            Alcotest.(check bool) "cold tag says unprobed" true
-              (List.exists (fun t -> contains t "unprobed") cold);
+            let before = Solver.cas_tag () in
             ignore (Solver.probe_version z3);
             Solver.clear_probe_memo ();
-            let warm = Solver.cas_tag () in
-            Alcotest.(check bool) "warm tag carries the version" true
-              (List.exists (fun t -> contains t "4.16.0") warm)));
+            let after = Solver.cas_tag () in
+            Alcotest.(check (list string)) "same tag" before after;
+            Alcotest.(check bool) "carries the version" true
+              (List.exists (fun t -> contains t "4.16.0") before);
+            Alcotest.(check string) "z3 run once" "x\n"
+              (In_channel.with_open_bin log In_channel.input_all)));
     (* Entries written before the version entered the key (some holding
        `unknown`, which was then a wall-clock accident) sit under the old
        key and must never be served. *)

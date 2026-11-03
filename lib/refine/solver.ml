@@ -188,12 +188,6 @@ let read_probe_file (f : string) : string option =
     with _ -> None
   else None
 
-(* The version a previous probe recorded for [path], without running z3. *)
-let cached_version (path : string) : string option =
-  match Unix.stat path with
-  | exception Unix.Unix_error _ -> None
-  | st -> Option.bind (probe_disk_file path st) read_probe_file
-
 let probe_version (path : string) : (string, string) Stdlib.result =
   match Unix.stat path with
   | exception Unix.Unix_error (e, _, _) -> Error (Unix.error_message e)
@@ -274,16 +268,18 @@ let identity () : string option =
       Some (Printf.sprintf "z3-%s/%s/%s" version (limits_tag ()) (Lazy.force platform))
   | Missing _ | Broken _ -> None
 
-(* The build (CAS) cache's z3 fragment.  It never runs z3: a compile with no
-   refinement obligations must not start one.  The version comes from a
-   probe already cached on disk, else "unprobed"; a new z3 binary has a new
-   mtime and so no cached probe, so a build made with another z3 is never
-   replayed. *)
+(* The build (CAS) cache's z3 fragment: the version (probed, so at most one
+   `z3 --version` per z3 binary, cached on disk), the limits and the platform.
+   It must read the same before and after a build: every build probes z3 for
+   the stdlib's own obligations, so a tag that said "unprobed" until then made
+   a fresh machine's second build miss the source-level cache.  A z3 that
+   fails the probe tags as broken, so a build made without a working solver is
+   never replayed for one with it. *)
 let cas_tag () : string list =
   match find_z3 () with
   | Error _ -> [ "noz3" ]
   | Ok (path, _) ->
-      let v = Option.value ~default:"unprobed" (cached_version path) in
+      let v = match probe_version path with Ok v -> v | Error _ -> "broken" in
       [ Printf.sprintf "z3:%s/%s/%s" v (limits_tag ()) (Lazy.force platform) ]
 
 (* The options every query starts with, sent after its (reset). *)
