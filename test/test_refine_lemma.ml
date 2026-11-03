@@ -643,6 +643,14 @@ let count_fn =
   end
 |}
 
+(* True, but needs induction its empty body does not give: unproved. *)
+let count_cat =
+  {|  @[lemma]
+  fn count_cat(xs : List(a), ys : List(a)) : {Unit | count(cat(xs, ys)) == count(xs) + count(ys)} do
+    ()
+  end
+|}
+
 (* The `lemma-test` row of [name]: (status, detail). *)
 let lemma_test_row out name =
   List.find_map
@@ -670,11 +678,8 @@ let lemma_tests =
         expect_row out "short" ~status:"COUNTEREXAMPLE" ~detail:"the theorem is false at xs = Cons(";
         if not (red out) then Alcotest.failf "a counterexample makes the run RED:\n%s" out);
     gated "lemma_test_tested: an unproved, true lemma is \"tested, not proved\" (idea 1)" (fun () ->
-        let out =
-          run ~args:"--check --lemma-test"
-            ("mod N do\n" ^ defs4_6 ^ cat_nil ^ cat_assoc ^ rev_cat ^ rev_rev ~asserts:false ^ "end\n")
-        in
-        expect_row out "rev_rev" ~status:"tested" ~detail:"tested, not proved: ";
+        let out = run ~args:"--check --lemma-test" ("mod N do\n" ^ defs4_6 ^ count_fn ^ count_cat ^ "end\n") in
+        expect_row out "count_cat" ~status:"tested" ~detail:"tested, not proved: ";
         if red out then Alcotest.failf "a true unproved lemma is not RED:\n%s" out);
     gated "lemma_test_refined_param: an input outside a parameter's refinement is no input" (fun () ->
         (* Without the precondition filter, n = -1 would be a counterexample. *)
@@ -709,15 +714,15 @@ let lemma_tests =
         let out = run ~args:"--check" ("mod N do\n" ^ defs4_6 ^ cat_nil ^ "end\n") in
         if contains out "lemma-test" then Alcotest.failf "no lemma test without the flag:\n%s" out);
     gated "verified_unproved: in a `cap verified` module an unproved lemma is an error (idea 10)" (fun () ->
-        let src cap = "mod N do\n" ^ cap ^ defs4_6 ^ cat_nil ^ cat_assoc ^ rev_cat ^ rev_rev ~asserts:false ^ "end\n" in
+        let src cap = "mod N do\n" ^ cap ^ defs4_6 ^ count_fn ^ count_cat ^ "end\n" in
         let out = run (src "  cap verified\n") in
         if
           not
             (List.exists
-               (fun l -> contains l "[lemma_unproved]" && contains l "`rev_rev`")
+               (fun l -> contains l "[lemma_unproved]" && contains l "`count_cat`")
                (lines out)
             && contains out "-- ERROR")
         then Alcotest.failf "an unproved lemma in a verified module is an error:\n%s" out;
         let out = run (src "") in
-        expect_unproved out "rev_rev";
+        expect_unproved out "count_cat";
         if contains out "-- ERROR" then Alcotest.failf "outside `cap verified` it is a warning:\n%s" out) ]
