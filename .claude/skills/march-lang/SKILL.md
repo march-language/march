@@ -408,6 +408,7 @@ forge search "" --json > out.json              # JSON output
 forge search sort --rebuild                    # force index rebuild
 forge search map --limit 5
 forge search --callers List.map                # reverse reference: who calls/uses it
+forge search "" --law "rev(rev"                # lemmas whose theorem contains the text
 
 # Refinement contracts (see "Getting refinements inferred" below)
 forge refine --infer --diff      # propose every contract the checker can verify, as a diff
@@ -431,6 +432,18 @@ forge clean --all                # remove entire .march/
 forge publish --dry-run
 forge publish --old-source ./v1  # semver check
 ```
+
+### Laws as lemmas (when you change code)
+
+When code must keep a law (`reverse(reverse(xs)) == xs`, "appending `Nil`
+changes nothing"), state it as an `@[lemma]` whose result is `{Unit | P}`, in
+a module with `cap verified`. There an unproved lemma (`lemma_unproved`) is an
+error, so a change that breaks the law fails the build instead of passing
+quietly. `forge test` also runs every lemma's theorem on generated inputs and
+prints a counterexample when one is false. Don't weaken or delete a lemma to
+get green: a failing lemma means the change broke a law. See
+`specs/lang/refinement-types.md`, "Lemmas: proving what one unfolding cannot".
+
 
 ---
 

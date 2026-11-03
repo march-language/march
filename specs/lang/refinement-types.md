@@ -1256,13 +1256,28 @@ need(r)           -- proved
 Functions with several parameters, and functions that return a list or a
 `Bool`, are reflected like any other.
 
-**One step at a time.** The checker uses each reflected call's definition
-**once**, at the arguments it sees. It does not then expand the calls that
-definition produces. So `cat(Nil, ys) == ys` is proved, because one step of
-`cat` gives `ys`. But `len(cat([1], [2])) == 2` is not: one step gives
-`Cons(1, cat(Nil, [2]))`, and the inner call is not expanded. Such an
-obligation is reported as unverified with the reason `reflect-fuel`. An
-`assert` of the intermediate fact is the way through today.
+**Steps the facts decide, up to the fuel.** The checker uses each reflected
+call's definition at the arguments it sees. When that produces another call,
+the checker expands it too, but only if which branch it takes is already
+**decided**, and only a limited number of steps deep. A branch is decided
+when its argument is a constructor (or is known to equal one, from a `match`
+arm, an earlier step or a fact in scope), or when its condition is a literal
+comparison. So `len(cat([1], [2])) == 2` is proved:
+- one step gives `Cons(1, cat(Nil, [2]))`;
+- the inner `cat(Nil, [2])` is decided (its first argument is `Nil`), so it
+  expands to `[2]`.
+
+`len(cat(xs, ys)) == 2` with `xs` unknown is not proved: no step after the
+first is decided. When a needed step is not taken, the obligation is reported
+as unverified with the reason `reflect-fuel`.
+
+**Fuel** is how many steps deep a chain through one function goes. The default
+is 2: the call itself, and one decided step after it. `@[reflect(fuel: N)]` on a
+function sets it from 1 to 8. A long literal list through `cat` needs a higher
+fuel. `@[reflect(fuel: 1)]` turns a function back to one step. `@[reflect]`
+also asserts that the function is reflected, and is the error
+`invalid_reflect` if it is not. A query never takes more than 32 steps in
+all; past that, the reason is `reflect-budget`.
 
 **A call outside the function's domain says nothing.** When a reflected
 function has refined parameters, its definition is used only where the
@@ -1398,9 +1413,10 @@ time. `@[opaque]` together with `@[measure]` is the error `reflect_conflict`.
 
 ### Lemmas: proving what one unfolding cannot
 
-The checker unfolds each reflected call **once**. That is enough for
-`cat(Nil, ys) == ys`, but not for `cat(xs, Nil) == xs`, which is true for every
-list and needs induction to show. A **lemma** is how you supply that proof.
+The checker expands only steps the facts decide. That is enough for
+`cat(Nil, ys) == ys` or `cat([1], [2]) == [1, 2]`, but not for
+`cat(xs, Nil) == xs` with `xs` unknown, which is true for every list and needs
+induction to show. A **lemma** is how you supply that proof.
 
 A lemma is a function marked `@[lemma]`. Its result type is `{Unit | P}`: `P`
 is the theorem, and the body is the proof. The proof uses only what March
@@ -1455,8 +1471,10 @@ runs, so an `assert` is checked statically, and it is assumed afterwards **only
 if it was proved**. A step that can't be proved is reported, and the rest of
 the proof goes on without it. `assert false` proves nothing.
 
-Single unfolding means each step that needs a second unfolding must be written
-out. Here is `rev(rev(xs)) == xs`, with the steps as `assert`s:
+Here is `rev(rev(xs)) == xs`. With the default fuel, its decided steps (such as
+`rev(Cons(h, Nil)) == Cons(h, Nil)`) are taken automatically, so the five
+`assert`s below are optional. They are kept to show the steps, and they are
+what a proof needs at `@[reflect(fuel: 1)]`:
 
 ```march
 fn rev(xs : List(a)) : List(a) do
@@ -1501,8 +1519,9 @@ fn rev_rev(xs : List(a)) : {Unit | rev(rev(xs)) == xs} do
 end
 ```
 
-Without the five `assert`s, `rev_rev` is `lemma_unproved`: each needs an
-unfolding of a term the first unfolding creates.
+Each `assert` is a step that needs a second unfolding. At the default fuel the
+checker takes those steps itself; at `@[reflect(fuel: 1)]` on `rev` and `cat`,
+`rev_rev` without them is `lemma_unproved`.
 
 **Lemmas never run.** Before the program is built, interpreted or run in the
 REPL, the compiler removes every lemma call and every lemma body. This does not
@@ -1527,6 +1546,56 @@ Anything else, such as a call that prints, is the error
 The logic's `Int` is mathematical (D8): a lemma such as
 `{Unit | inc(n) > n}` proves, although at the maximum `Int` the program's `inc`
 overflows. Overflow obligations come in a later phase.
+
+**Lemmas in `forge test`.** Every `forge test` also tests the lemmas of each
+project source file that has one (`march --check --lemma-test FILE` does the
+same for one file). Each lemma's theorem is evaluated on generated inputs:
+boundary `Int`s, then 100 random draws from a fixed seed (20261031, printed in
+the report). An input outside a refined parameter is skipped. The report has
+one `lemma-test` line per lemma:
+
+- an **unproved** lemma becomes a property test. A false theorem is a
+  `COUNTEREXAMPLE` with the input, and the run fails. Otherwise the line says
+  `tested, not proved: N inputs`.
+- an **admitted** lemma is checked again in the interpreter and in a small
+  compiled program. The checker proved it, so if it is false in either, the
+  compiler or runtime has a bug: `FALSE` or `COMPILED-FALSE`, and the run
+  fails.
+- an `Int` overflow is reported as `overflow?`, not as a counterexample (the
+  logic's `Int` has no bounds). A lemma whose parameter type has no generator
+  (a `String`, a `Float`, a record) is `not-tested`.
+
+The tests are separate programs. Your build still removes every lemma.
+
+**Laws in the docs and in search.** `forge doc` lists, under each function,
+the lemmas whose theorem calls it, under the heading "Laws", with the theorem
+as written. `forge search --law TEXT` finds lemmas whose theorem contains TEXT
+(case and spaces ignored) or calls a function named TEXT, and a plain name
+search for a function also finds the lemmas about it.
+
+**Lemmas as a contract for changes.** A lemma states a law the code must keep,
+and the checker re-proves it on every build. To make a broken law fail the
+build, put the lemmas in a `cap verified` module, where `lemma_unproved` is an
+error, not a warning:
+
+```march
+mod ListLaws do
+  cap verified
+  -- cat and rev as above
+  @[lemma]
+  fn cat_nil(xs : List(a)) : {Unit | cat(xs, Nil) == xs} do
+    match xs do
+      Nil -> ()
+      Cons(_, t) -> cat_nil(t)
+    end
+  end
+end
+```
+
+A change to `cat` that breaks `cat(xs, Nil) == xs` now stops the build, and
+`forge test` prints an input that shows it. This is useful when someone else,
+for example a coding agent, changes the code: the lemmas say what must still
+hold, and the build checks it.
 
 ### Constant functions as bounds
 

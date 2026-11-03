@@ -8091,7 +8091,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
    so `@[decrease(n)]` would look like a metric that found nothing.  These are
    every `fn` attribute some pass reads (the name before a `:` payload). *)
 let known_fn_attributes =
-  [ "assume"; "decreases"; "diverges"; "lemma"; "measure"; "no_alloc"; "no_warn_recursion"; "opaque"; "trusted";
+  [ "assume"; "decreases"; "diverges"; "lemma"; "measure"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "trusted";
     "trusted_linear"; "vectorize" ]
 
 (* Levenshtein distance, for the did-you-mean. *)
@@ -8134,6 +8134,10 @@ let rec lemma_fns_q ?(prefix = "") (ds : A.decl list) : (string * A.fn_def) list
 let lemma_rows : (string * string * string * bool) list ref = ref []
 
 let lemma_called : (string * string) list ref = ref []
+
+(** The last module's VALID lemmas (no L1-L5 error), each with its qualified
+    name and whether it was admitted; read by [Lemma_test]. *)
+let lemma_defs : (string * A.fn_def * bool) list ref = ref []
 
 (** L1: a lemma's declared result is [{Unit | P}] with [P] not mentioning
     the unit value; [Ok (binder, P)], or [Error why]. *)
@@ -9192,6 +9196,57 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
                fd.A.fn_name.A.txt fd.A.fn_name.A.txt (blocker_text txt))
         | _ -> ())
     (opaque_fns m.A.mod_decls);
+  (* `@[reflect]` / `@[reflect(fuel: N)]` (§3.8): an assertion that the
+     function is reflected, never a switch that turns reflection on (D1).
+     A lemma's own `@[reflect]` is L5's (below). *)
+  let rec reflect_fns (ds : A.decl list) : A.fn_def list =
+    List.concat_map
+      (function
+        | A.DFn (fd, _)
+          when List.exists (fun a -> a = "reflect" || String.starts_with ~prefix:"reflect:" a) fd.A.fn_attrs
+               && not (List.mem "lemma" fd.A.fn_attrs) -> [ fd ]
+        | A.DMod (_, _, inner, _) -> reflect_fns inner
+        | _ -> [])
+      ds
+  in
+  List.iter
+    (fun (fd : A.fn_def) ->
+      let name = fd.A.fn_name.A.txt and span = fd.A.fn_name.A.span in
+      let bad why = Err.error ~code:Err.Code.invalid_reflect errctx ~span (Printf.sprintf "`@[reflect]` on `%s`: %s" name why) in
+      let payloads =
+        List.filter_map
+          (fun a -> if String.starts_with ~prefix:"reflect:" a then Some (String.sub a 8 (String.length a - 8)) else None)
+          fd.A.fn_attrs
+      in
+      if List.mem "opaque" fd.A.fn_attrs then
+        Err.error ~code:Err.Code.reflect_conflict errctx ~span
+          (Printf.sprintf
+             "`%s` is marked both `@[opaque]` and `@[reflect]`: `@[reflect]` asserts the body is \
+              reflected into the logic and `@[opaque]` keeps it out. Remove one."
+             name)
+      else
+        match
+          List.find_map
+            (fun p ->
+              match String.split_on_char ':' p with
+              | [ "fuel"; n ] -> (
+                match int_of_string_opt n with
+                | Some k when k >= 1 && k <= 8 -> None
+                | _ ->
+                  Some
+                    (Printf.sprintf
+                       "the fuel must be between 1 and 8, not %s (`@[opaque]` keeps a function out of \
+                        the logic)"
+                       n))
+              | _ -> Some (Printf.sprintf "`%s` is not an argument it takes; write `@[reflect(fuel: N)]`" p))
+            payloads
+        with
+        | Some why -> bad why
+        | None -> (
+          match reflect_blocker fd with
+          | Some (_, txt) -> bad (Printf.sprintf "`%s` is not reflected: it %s" name (blocker_text txt))
+          | None -> ()))
+    (reflect_fns m.A.mod_decls);
   (* `@[lemma]` (§4.2): L1, L2, L3 and L5; L4 needs the induction
      certificates, so it is decided where they are ([invalid_lemma_l4]). *)
   Hashtbl.reset lemma_valid;
@@ -9219,7 +9274,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   List.iter
     (fun (fd : A.fn_def) ->
       match
-        List.find_opt (fun a -> List.mem a fd.A.fn_attrs)
+        List.find_opt
+          (fun a -> List.exists (fun x -> x = a || String.starts_with ~prefix:(a ^ ":") x) fd.A.fn_attrs)
           [ "opaque"; "reflect"; "measure"; "diverges"; "trusted"; "assume" ]
       with
       | Some a ->
@@ -9433,6 +9489,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       Refine_post.lemma_verdict := fun ~root:_ _ _ -> false) @@ fun () ->
   let ih_eligible : (A.span, unit) Hashtbl.t = Hashtbl.create 8 in
   lemma_rows := [];
+  lemma_defs := [];
   lemma_called := [];
   gate_unverified_posts_ih ~root
     ~ih:(fun pending ->
@@ -9477,6 +9534,14 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
              fd.A.fn_name.A.txt)
       end)
     (lemma_fns m.A.mod_decls);
+  lemma_defs :=
+    List.filter_map
+      (fun (q, (fd : A.fn_def)) ->
+        let sp = fd.A.fn_name.A.span in
+        if Hashtbl.mem lemma_valid sp then
+          Some (q, fd, List.exists (fun (f, n, _, a) -> a && f = sp.A.file && n = q) !lemma_rows)
+        else None)
+      (lemma_fns_q m.A.mod_decls);
   ret_elem_demand := None;
   gate_elem_returns ~root defs m.A.mod_decls;
   (* Termination, phase 2 (design §3.3-§3.5, §9): plan the metric

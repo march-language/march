@@ -386,10 +386,12 @@ end
     gated "cat_assoc, rev_cat, rev_rev (§4.6): lemmas calling lemmas, with assert steps" (fun () ->
         let out = run ("mod N do\n" ^ defs4_6 ^ cat_nil ^ cat_assoc ^ rev_cat ^ rev_rev ~asserts:true ^ "end\n") in
         List.iter (expect_admitted out) [ "cat_nil"; "cat_assoc"; "rev_cat"; "rev_rev" ]);
-    gated "rev_rev_short: without the asserts, single unfolding cannot finish rev_rev" (fun () ->
+    gated "rev_rev_short (phase 4): without the asserts, decided steps finish rev_rev" (fun () ->
+        (* Phase 2 needed the five asserts (single unfolding: lemma_unproved);
+           phase 4's decided second step supplies them.  `@[reflect(fuel: 1)]`
+           on `rev` and `cat` brings back the phase-2 verdict ([fuel_lower]). *)
         let out = run ("mod N do\n" ^ defs4_6 ^ cat_nil ^ cat_assoc ^ rev_cat ^ rev_rev ~asserts:false ^ "end\n") in
-        List.iter (expect_admitted out) [ "cat_nil"; "cat_assoc"; "rev_cat" ];
-        expect_unproved out "rev_rev");
+        List.iter (expect_admitted out) [ "cat_nil"; "cat_assoc"; "rev_cat"; "rev_rev" ]);
     gated "sound_eq_float: a lemma's logical == does not become program == at Float (C3)" (fun () ->
         let out =
           run
@@ -628,3 +630,99 @@ end
             let out = output mode src in
             if not (contains out "B.l ran") then Alcotest.failf "B.l must still run:\n%s" out)
           [ `Interp; `Compiled ]) ]
+
+(* ── Lemma tests (`--lemma-test`, specs/todos/2026-11-02-lemma-uses-beyond-refinement.md
+   ideas 1, 2 and 10) ──────────────────────────────────────────────────── *)
+
+let count_fn =
+  {|  fn count(xs : List(a)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + count(t)
+    end
+  end
+|}
+
+(* True, but needs induction its empty body does not give: unproved. *)
+let count_cat =
+  {|  @[lemma]
+  fn count_cat(xs : List(a), ys : List(a)) : {Unit | count(cat(xs, ys)) == count(xs) + count(ys)} do
+    ()
+  end
+|}
+
+(* The `lemma-test` row of [name]: (status, detail). *)
+let lemma_test_row out name =
+  List.find_map
+    (fun l ->
+      match String.split_on_char '\t' l with
+      | [ "lemma-test"; _; n; status; detail ] when n = name -> Some (status, detail)
+      | _ -> None)
+    (lines out)
+
+let expect_row out name ~status ~detail =
+  match lemma_test_row out name with
+  | Some (s, d) when s = status && contains d detail -> ()
+  | _ -> Alcotest.failf "expected lemma-test %s %s (%s):\n%s" name status detail out
+
+let red out = List.exists (fun l -> String.starts_with ~prefix:"lemma-test: RED" l) (lines out)
+
+let lemma_tests =
+  [ gated "lemma_test_counterexample: an unproved, false lemma gets a concrete counterexample (idea 1)" (fun () ->
+        (* `count(xs) <= 2` needs three unfoldings to refute, so z3 leaves it
+           unproved; the generated inputs include a longer list. *)
+        let out =
+          run ~args:"--check --lemma-test"
+            ("mod N do\n" ^ count_fn ^ "  @[lemma]\n  fn short(xs : List(a)) : {Unit | count(xs) <= 2} do\n    ()\n  end\nend\n")
+        in
+        expect_row out "short" ~status:"COUNTEREXAMPLE" ~detail:"the theorem is false at xs = Cons(";
+        if not (red out) then Alcotest.failf "a counterexample makes the run RED:\n%s" out);
+    gated "lemma_test_tested: an unproved, true lemma is \"tested, not proved\" (idea 1)" (fun () ->
+        let out = run ~args:"--check --lemma-test" ("mod N do\n" ^ defs4_6 ^ count_fn ^ count_cat ^ "end\n") in
+        expect_row out "count_cat" ~status:"tested" ~detail:"tested, not proved: ";
+        if red out then Alcotest.failf "a true unproved lemma is not RED:\n%s" out);
+    gated "lemma_test_refined_param: an input outside a parameter's refinement is no input" (fun () ->
+        (* Without the precondition filter, n = -1 would be a counterexample. *)
+        let out =
+          run ~args:"--check --lemma-test"
+            ("mod N do\n" ^ count_fn
+           ^ "  fn twice(n : Int) : Int do n + n end\n  @[lemma]\n  fn nn(n : {Int | _ >= 0}, xs : List(Int)) : {Unit | twice(n) >= n + count(xs) - count(xs)} do\n    ()\n  end\nend\n")
+        in
+        (match lemma_test_row out "nn" with
+         | Some (("tested" | "holds"), _) -> ()
+         | _ -> Alcotest.failf "nn holds on every input inside its refinement:\n%s" out);
+        if red out then Alcotest.failf "no counterexample inside the refinement:\n%s" out);
+    gated "lemma_test_admitted: a proved lemma is re-checked in the interpreter and a compiled program (idea 2)" (fun () ->
+        let out =
+          run ~args:"--check --lemma-test" ("mod N do\n" ^ defs4_6 ^ cat_nil ^ cat_assoc ^ rev_cat ^ "end\n")
+        in
+        List.iter
+          (fun n -> expect_row out n ~status:"holds" ~detail:" compiled")
+          [ "cat_nil"; "cat_assoc"; "rev_cat" ];
+        if red out then Alcotest.failf "true proved lemmas are not RED:\n%s" out);
+    gated "lemma_test_miscompile_red: a proved law false in either backend is RED (perturbed, idea 2)" (fun () ->
+        let src = "mod N do\n" ^ defs4_6 ^ cat_nil ^ "end\n" in
+        let out = run ~env:"MARCH_LEMMA_TEST_PERTURB=interp" ~args:"--check --lemma-test" src in
+        expect_row out "cat_nil" ~status:"FALSE" ~detail:"false in the interpreter";
+        if not (red out) then Alcotest.failf "interpreter-false is RED:\n%s" out;
+        let out = run ~env:"MARCH_LEMMA_TEST_PERTURB=compiled" ~args:"--check --lemma-test" src in
+        expect_row out "cat_nil" ~status:"COMPILED-FALSE" ~detail:"false in the compiled program";
+        if not (red out) then Alcotest.failf "compiled-false is RED:\n%s" out);
+    gated "lemma_test_erased: a lemma test leaves the compiled program lemma-free" (fun () ->
+        (* The harness is a separate program; the user's own build still
+           erases every lemma (sound_erase_ir pins the IR). *)
+        let out = run ~args:"--check" ("mod N do\n" ^ defs4_6 ^ cat_nil ^ "end\n") in
+        if contains out "lemma-test" then Alcotest.failf "no lemma test without the flag:\n%s" out);
+    gated "verified_unproved: in a `cap verified` module an unproved lemma is an error (idea 10)" (fun () ->
+        let src cap = "mod N do\n" ^ cap ^ defs4_6 ^ count_fn ^ count_cat ^ "end\n" in
+        let out = run (src "  cap verified\n") in
+        if
+          not
+            (List.exists
+               (fun l -> contains l "[lemma_unproved]" && contains l "`count_cat`")
+               (lines out)
+            && contains out "-- ERROR")
+        then Alcotest.failf "an unproved lemma in a verified module is an error:\n%s" out;
+        let out = run (src "") in
+        expect_unproved out "count_cat";
+        if contains out "-- ERROR" then Alcotest.failf "outside `cap verified` it is a warning:\n%s" out) ]

@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinement proofs take decided steps (fuel).** The checker now expands a
+  reflected call that another call's definition produces when its branch is already
+  decided (its argument is a constructor, or known to equal one), up to a per-function
+  fuel, default 2. So `len(cat([1], [2])) == 2` and `rev(rev(xs)) == xs` (with its
+  lemmas, no intermediate `assert`s) now prove. `@[reflect(fuel: N)]` sets the fuel
+  from 1 to 8, and `@[reflect]` asserts a function is reflected: the new error
+  `invalid_reflect` names why when it is not. Some calls that used to be skipped as
+  `reflect-fuel` are now proved or, where the contract is really broken, reported as
+  violations.
+
 - **Lemmas: `@[lemma]` proofs for refinement types.** A lemma states a theorem in its
   result type, `{Unit | P}`, and proves it with ordinary code: `match` and `if` for
   cases, a recursive call as the induction hypothesis, calls of other lemmas, and
@@ -32,6 +42,19 @@ git log is authoritative for exact commits.
   diagnostics: `invalid_lemma`, `lemma_unproved`, `lemma_unproved_call`,
   `lemma_argument_impure`. The editor re-checks a file when a lemma it uses changes or
   stops proving, and shows a lemma's theorem on hover.
+
+- **`forge test` tests lemmas.** Each project file with an `@[lemma]` is checked with
+  the new `march --check --lemma-test`, which evaluates every lemma's theorem on
+  generated inputs (boundary Ints and 100 draws from a fixed, printed seed). An unproved
+  lemma becomes a property test: a false theorem prints a concrete counterexample and
+  fails the run, and a true one reports "tested, not proved: N inputs". A proved lemma is
+  checked again in the interpreter and in a compiled program; if it is false in either,
+  that is a compiler or runtime bug, and the run fails.
+
+- **Laws in `forge doc` and `forge search`.** A function's API page lists, under
+  "Laws", the lemmas whose theorem calls it, with the theorem as written (march_doc).
+  `forge search --law TEXT` finds lemmas by the text of their theorem or by a function
+  they mention, and a name search for a function also finds the lemmas about it.
 
 - **Parallel combinators reject closures that capture a native handle.** A
   lambda passed to `List.pmap`, `List.pfilter`, `List.preduce`, the
@@ -87,6 +110,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march test` with several files no longer leaks Vault state between them.** Named
+  Vaults (and the Config values stored in them) lived for the whole process, so when one
+  `march test` run covered several files, the stdlib's own `Vault` and `Config` doctests,
+  which run once per file, saw counters and keys from the previous file and failed
+  (`forge test --coverage` in a project with several test files). Each file now starts from
+  a fresh interpreter runtime.
+
+- **No more false refinement violations for container elements and passed functions.**
+  When an element refinement could not be translated for the solver (for example one that
+  calls an `@[opaque]` function), or when a proof stopped at a reflected call it did not
+  expand, the checker could report `refinement_violated` with a made-up element value for a
+  program that cannot fail. These are now reported as unverified (a skip), not violations.
 - `march --check` no longer accepts a misspelled module whose member names a builtin
   (`Lsit.length(xs)`): it reports "Unknown module `Lsit`. Did you mean `List`?" instead of
   failing at run time.
@@ -103,6 +138,13 @@ git log is authoritative for exact commits.
   Safari. The cache is now a `Map` keyed by the string, holding at most one string of
   each length so older V8 (which hashes long strings by length) doesn't compare them
   either.
+
+### Documentation
+
+- **Lemmas as a contract for changes.** The refinement-types chapter and the
+  `march-lang`, `march-test` and `forge-search` agent skills explain how to state a law
+  as a lemma in a `cap verified` module, where an unproved lemma is a build error, so a
+  change that breaks the law fails the build.
 
 ## [0.7.0] - 2026-11-02
 
