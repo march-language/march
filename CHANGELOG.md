@@ -92,6 +92,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march test` with several files no longer leaks Vault state between them.** Named
+  Vaults (and the Config values stored in them) lived for the whole process, so when one
+  `march test` run covered several files, the stdlib's own `Vault` and `Config` doctests,
+  which run once per file, saw counters and keys from the previous file and failed
+  (`forge test --coverage` in a project with several test files). Each file now starts from
+  a fresh interpreter runtime.
+
 - **No more false refinement violations for container elements and passed functions.**
   When an element refinement could not be translated for the solver (for example one that
   calls an `@[opaque]` function), or when a proof stopped at a reflected call it did not
