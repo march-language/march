@@ -873,6 +873,12 @@ let return_refine_sorted (fd : A.fn_def) : (string * A.expr * string option) opt
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, _) as base), binder, pred))
     when is_adt_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name name))
+  (* A lemma's `{Unit | P}` (reflection design §4.1): [P] never mentions the
+     unit value (L1), so the result's sort is never read; the declared theorem
+     is what a call admits once the lemma is proved. *)
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = "Unit"; _ }, []) | A.TyTuple []), binder, pred))
+    when List.mem "lemma" fd.A.fn_attrs ->
+    Some (binder_name binder, pred, None)
   | _ -> None
 
 (* Positional placeholder name for a synthesized callback [fn_sig] — it is

@@ -75,6 +75,7 @@ silence into an error for a module that wants a guarantee.
 **Refining each kind of value**
 
 - [Measures: Refining over Data Structures](#measures-refining-over-data-structures)
+  - [Lemmas: proving what one unfolding cannot](#lemmas-proving-what-one-unfolding-cannot)
 - [String Refinements](#string-refinements)
 - [Set Refinements](#set-refinements)
 - [Bool Refinements](#bool-refinements)
@@ -1394,6 +1395,137 @@ other measures and be mutually recursive (a `Tree`/`Forest` pair), and the
 built-in `List` is modelled too. Any other `@[measure]` (several parameters, a
 `Bool` or list result) is reflected like an ordinary function, one step at a
 time. `@[opaque]` together with `@[measure]` is the error `reflect_conflict`.
+
+### Lemmas: proving what one unfolding cannot
+
+The checker unfolds each reflected call **once**. That is enough for
+`cat(Nil, ys) == ys`, but not for `cat(xs, Nil) == xs`, which is true for every
+list and needs induction to show. A **lemma** is how you supply that proof.
+
+A lemma is a function marked `@[lemma]`. Its result type is `{Unit | P}`: `P`
+is the theorem, and the body is the proof. The proof uses only what March
+already has:
+- `match` and `if` to split cases;
+- a call of the lemma itself on a smaller value (the induction hypothesis);
+- calls of other lemmas;
+- `assert` for an intermediate step.
+
+```march
+fn cat(xs : List(a), ys : List(a)) : List(a) do
+  match xs do
+    Nil -> ys
+    Cons(h, t) -> Cons(h, cat(t, ys))
+  end
+end
+
+@[lemma]
+fn cat_nil(xs : List(a)) : {Unit | cat(xs, Nil) == xs} do
+  match xs do
+    Nil -> ()
+    Cons(_, t) -> cat_nil(t)
+  end
+end
+
+fn need_eq(a : List(Int), b : {List(Int) | _ == a}) : Int do 0 end
+
+fn f(xs : List(Int)) : Int do
+  cat_nil(xs)
+  need_eq(xs, cat(xs, Nil))   -- proved: the lemma's theorem holds here
+end
+```
+
+**How a lemma is checked.** The theorem must hold at every place the body
+returns, given what is known there: the branch taken, earlier lemma calls, and
+earlier `assert`s. The recursive call `cat_nil(t)` gives `cat(t, Nil) == t` as
+the induction hypothesis. The checker accepts it only when the recursion
+provably terminates (here it is structural, on the tail) and the recursive
+call meets the lemma's own preconditions. A lemma that proves is **admitted**.
+A lemma that does not draws `lemma_unproved` (an error under `cap verified`),
+and gives its callers nothing.
+
+**Calling a lemma.** A call on its own line, or as `let _ = l(...)`, adds the
+theorem, instantiated at the call's arguments, as a fact for the rest of that
+block. The fact stays inside the branch the call is in. If the lemma's
+parameters carry refinements, they are its hypotheses: each call has to prove
+them, and a call that can't gives no fact (`lemma_unproved_call`).
+
+**`assert` in a lemma is a proof step.** Outside lemmas, `assert` is checked
+at run time, and the checker assumes it afterwards. Inside a lemma nothing
+runs, so an `assert` is checked statically, and it is assumed afterwards **only
+if it was proved**. A step that can't be proved is reported, and the rest of
+the proof goes on without it. `assert false` proves nothing.
+
+Single unfolding means each step that needs a second unfolding must be written
+out. Here is `rev(rev(xs)) == xs`, with the steps as `assert`s:
+
+```march
+fn rev(xs : List(a)) : List(a) do
+  match xs do
+    Nil -> Nil
+    Cons(h, t) -> cat(rev(t), Cons(h, Nil))
+  end
+end
+
+@[lemma]
+fn cat_assoc(xs : List(a), ys : List(a), zs : List(a)) : {Unit | cat(cat(xs, ys), zs) == cat(xs, cat(ys, zs))} do
+  match xs do
+    Nil -> ()
+    Cons(_, t) -> cat_assoc(t, ys, zs)
+  end
+end
+
+@[lemma]
+fn rev_cat(xs : List(a), ys : List(a)) : {Unit | rev(cat(xs, ys)) == cat(rev(ys), rev(xs))} do
+  match xs do
+    Nil ->
+      cat_nil(rev(ys))
+    Cons(h, t) ->
+      rev_cat(t, ys)
+      cat_assoc(rev(ys), rev(t), Cons(h, Nil))
+  end
+end
+
+@[lemma]
+fn rev_rev(xs : List(a)) : {Unit | rev(rev(xs)) == xs} do
+  match xs do
+    Nil -> ()
+    Cons(h, t) ->
+      rev_rev(t)
+      rev_cat(rev(t), Cons(h, Nil))
+      assert rev(Nil) == Nil
+      assert cat(Nil, Cons(h, Nil)) == Cons(h, Nil)
+      assert rev(Cons(h, Nil)) == Cons(h, Nil)
+      assert cat(Nil, t) == t
+      assert cat(Cons(h, Nil), t) == Cons(h, t)
+  end
+end
+```
+
+Without the five `assert`s, `rev_rev` is `lemma_unproved`: each needs an
+unfolding of a term the first unfolding creates.
+
+**Lemmas never run.** Before the program is built, interpreted or run in the
+REPL, the compiler removes every lemma call and every lemma body. This does not
+depend on whether the lemma was proved, or on whether z3 is installed. A
+program behaves exactly as it would with its lemmas deleted. Because a call's
+arguments are removed with it, each argument must be a **pure term**: a
+variable, a literal, a constructor, or a call of a reflected function.
+Anything else, such as a call that prints, is the error
+`lemma_argument_impure`. Bind such a value to a name first.
+
+**What a lemma may be** (`invalid_lemma` otherwise):
+- its result type is `{Unit | P}`;
+- its body has no effects, no failure path and no `match` that might not
+  match;
+- it calls only reflected functions, other lemmas, constructors, and builtins
+  the logic knows;
+- if it is recursive, its recursion provably terminates;
+- it is never used as a value, and carries no `@[opaque]`, `@[measure]`,
+  `@[trusted]`, `@[assume]` or `@[diverges]`.
+
+The logic's `Int` is mathematical (D8): a lemma such as
+`{Unit | inc(n) > n}` proves, although at the maximum `Int` the program's `inc`
+overflows. Overflow obligations come in a later phase.
 
 ### Constant functions as bounds
 

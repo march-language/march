@@ -19,6 +19,20 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Lemmas: `@[lemma]` proofs for refinement types.** A lemma states a theorem in its
+  result type, `{Unit | P}`, and proves it with ordinary code: `match` and `if` for
+  cases, a recursive call as the induction hypothesis, calls of other lemmas, and
+  `assert` for intermediate steps. A proved lemma's theorem becomes a fact after each
+  call, so `cat_nil(xs)` lets the checker know `cat(xs, Nil) == xs`. A lemma that does
+  not prove gives no facts and draws `lemma_unproved`. Lemmas never run: every lemma
+  and lemma call is removed before the program is built or interpreted, whether or not
+  it was proved, so a program behaves exactly as it would without them. New
+  diagnostics: `invalid_lemma`, `lemma_unproved`, `lemma_unproved_call`,
+  `lemma_argument_impure`. The editor re-checks a file when a lemma it uses changes or
+  stops proving, and shows a lemma's theorem on hover.
+
 ### Changed
 
 - **Native compiles are about 45% faster for small programs.** Code the program

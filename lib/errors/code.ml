@@ -65,11 +65,15 @@ let internal_error = "internal_error"
 let int_overflow = "int_overflow"
 let invalid_cap_scope = "invalid_cap_scope"
 let invalid_decreases = "invalid_decreases"
+let invalid_lemma = "invalid_lemma"
 let invalid_measure = "invalid_measure"
 let invalid_type_bound = "invalid_type_bound"
 let io_not_allowed = "io_not_allowed"
 let island_missing_fn = "island_missing_fn"
 let json_derive_name_collision = "json_derive_name_collision"
+let lemma_argument_impure = "lemma_argument_impure"
+let lemma_unproved = "lemma_unproved"
+let lemma_unproved_call = "lemma_unproved_call"
 let let_question_last = "let_question_last"
 let let_star_bad_flat_map = "let_star_bad_flat_map"
 let let_star_last = "let_star_last"
@@ -249,11 +253,15 @@ let all = [
   int_overflow;
   invalid_cap_scope;
   invalid_decreases;
+  invalid_lemma;
   invalid_measure;
   invalid_type_bound;
   io_not_allowed;
   island_missing_fn;
   json_derive_name_collision;
+  lemma_argument_impure;
+  lemma_unproved;
+  lemma_unproved_call;
   let_question_last;
   let_star_bad_flat_map;
   let_star_last;

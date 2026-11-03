@@ -854,6 +854,7 @@ let print_refine_report_sites ~filename ~user_files () =
           | March_refinecheck.Obligation.Division -> "division"
           | March_refinecheck.Obligation.Termination -> "termination"
           | March_refinecheck.Obligation.Overflow -> "overflow"
+          | March_refinecheck.Obligation.Assertion -> "assertion"
         in
         Printf.eprintf "skip\t%s\t%s:%d:%d\t%s\t%s\t%s\t%s\n"
           (if is_user_span span then "user" else "stdlib")
@@ -863,6 +864,23 @@ let print_refine_report_sites ~filename ~user_files () =
           kind o.callee o.predicate
       | _ -> ())
     (March_refinecheck.Obligation.all ())
+
+(* Lemma erasure (reflection design §4.5): every path that runs code removes
+   `@[lemma]` calls and bodies after typechecking, independent of any proof
+   verdict.  [lemma_env] is built over the whole program (stdlib included),
+   so a name another declaration also binds is never erased. *)
+let lemma_reserved n =
+  List.mem_assoc n March_typecheck.Typecheck_builtins.builtin_bindings
+  || List.mem_assoc n March_typecheck.Typecheck_builtins.builtin_interface_bindings
+
+let erase_lemmas_in ~(whole : March_ast.Ast.module_) (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+  let env = March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved whole.March_ast.Ast.mod_decls in
+  { m with March_ast.Ast.mod_decls = March_desugar.Lemma_erase.erase_module_with env m.March_ast.Ast.mod_decls }
+
+let erase_lemmas (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+  { m with
+    March_ast.Ast.mod_decls =
+      March_desugar.Lemma_erase.erase_module ~reserved:lemma_reserved m.March_ast.Ast.mod_decls }
 
 (* --refine-report-sites=all (reflection design §6.1): one line per
    obligation of any verdict, so a run can be compared site by site against a
@@ -886,6 +904,7 @@ let print_refine_report_sites_all ~filename ~user_files () =
         | O.Division -> "division"
         | O.Termination -> "termination"
         | O.Overflow -> "overflow"
+        | O.Assertion -> "assertion"
       in
       let slice = if is_user_span span then "user" else "stdlib" in
       let loc =
@@ -1007,7 +1026,26 @@ let print_reflect_deps ~filename ~entry_mod ~user_files () =
   let cdefs =
     List.filter_map (crow "reflect-cdef") (Array.to_list (Lazy.force !RS.contract_defs)) |> List.sort_uniq compare in
   let cdeps = List.filter_map (crow "reflect-cdep") (RS.contract_reach filename) |> List.sort_uniq compare in
-  List.iter prerr_endline (defs @ deps @ cdefs @ cdeps)
+  (* Lemmas (phase 2): a lemma's text and whether it was admitted, so a
+     dependency lemma that changes or stops proving re-checks its callers. *)
+  let lemma_hash (_, _, d, admitted) = Printf.sprintf "lemma:%s:%s" d (if admitted then "admitted" else "unproved") in
+  let rows = !March_refinecheck.Refine_check.lemma_rows in
+  let ldefs =
+    List.filter_map
+      (fun ((file, name, _, _) as r) -> if user_file file then Some (line "lemma-def" file name (lemma_hash r)) else None)
+      rows
+    |> List.sort_uniq compare
+  in
+  let ldeps =
+    List.filter_map
+      (fun (file, name) ->
+        match List.find_opt (fun (f, n, _, _) -> f = file && n = name) rows with
+        | Some r when user_file file -> Some (line "lemma-dep" file name (lemma_hash r))
+        | _ -> None)
+      !March_refinecheck.Refine_check.lemma_called
+    |> List.sort_uniq compare
+  in
+  List.iter prerr_endline (defs @ deps @ cdefs @ cdeps @ ldefs @ ldeps)
 
 (* --reflect-parity (reflection §9.2, D16): the parity net over the
    reflected functions of user code; its lines on stderr, exit 1 on RED (a
@@ -2692,6 +2730,10 @@ let run_test_cmd args =
      | Some h when is_user_file h ->
        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file h)
      | Some _ | None -> ());
+    let lemma_env =
+      March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved desugared.March_ast.Ast.mod_decls
+    in
+    let desugared = erase_lemmas desugared in
     (* Enable coverage tracking for this file's test run. *)
     if !coverage then begin
       March_coverage.Coverage.reset ();
@@ -2740,7 +2782,7 @@ let run_test_cmd args =
         | Error _ ->
           failwith ("doctest parse error in: " ^ src)
       in
-      March_desugar.Desugar.desugar_expr expr
+      March_desugar.Lemma_erase.erase_expr lemma_env (March_desugar.Desugar.desugar_expr expr)
     in
     let (dt_total, dt_failed, dt_failures) =
       if !verbose then
@@ -3992,6 +4034,10 @@ let compile filename =
      --check-migration below lazily respawns; its child is reaped by at_exit. *)
   March_refine.Refine.shutdown ();
   stamp "typecheck";
+  (* Lemma erasure (§4.5): after the refinement checker, before anything
+     lowers, interprets or JIT-compiles the program. *)
+  let user_only_desugared = erase_lemmas_in ~whole:desugared user_only_desugared in
+  let desugared = erase_lemmas desugared in
   (* Allocation contracts (`cap no_alloc` modules and @[no_alloc] functions)
      are judged on lowered TIR.  --check lowers on demand for them (below);
      the interpreter and --jit never lower, so they give one
@@ -7099,6 +7145,12 @@ let () =
         March_parser.Parse.module_of_lexbuf lexbuf in
       let desugared = March_desugar.Desugar.desugar_module module_ast in
       let stdlib_decls = load_stdlib () in
+      (* No typecheck here, so erase straight after desugaring (§4.5). *)
+      let desugared =
+        erase_lemmas_in
+          ~whole:{ desugared with March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
+          desugared
+      in
       if not (is_shipped_stdlib_file path) then
         check_no_prelude_collision ~stdlib_decls desugared;
       let combined =

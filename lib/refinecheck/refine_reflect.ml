@@ -151,6 +151,14 @@ let pos_lt (a : A.span) (b : A.span) = compare (a.A.start_line, a.A.start_col) (
 
 type ev = { ev_rule : int; ev_text : string; ev_span : A.span }
 
+(** Lemmas (§4.2) the last [analyze] found invalid under L2 or L3, by
+    declaring span: (2 or 3, the first offending event's text). *)
+let lemma_blocked : (A.span, int * string) Hashtbl.t = Hashtbl.create 16
+
+(** L5: each site the last [analyze] found naming a lemma as a value, with
+    the lemma's name. *)
+let lemma_value_uses : (A.span * string) list ref = ref []
+
 type bind = { k_var : bool;  (** a value ([false]: a local [fn]) *) k_owner : A.span  (** the unit that bound it *) }
 
 let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
@@ -614,8 +622,12 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
   let refl = Array.map (fun evs -> evs = []) local in
   (* EqOK: R2-R7 (§3.5, C4): an [impl Eq] method's own R1 does not apply. *)
   let eqok = Array.map (List.for_all (fun e -> e.ev_rule < 2 || e.ev_rule > 7)) local in
+  (* A call of a lemma is `()` in the logic (§4.5, I2): it is erased before the
+     program runs, so it neither blocks its caller nor needs a definition. *)
   let dep_ok (d, _) =
-    match d with `Refl v -> refl.(v) | `Eq ids -> List.for_all (fun i -> eqok.(i)) ids
+    match d with
+    | `Refl v -> refl.(v) || List.mem "lemma" (unit_ v).RT.u_attrs
+    | `Eq ids -> List.for_all (fun i -> eqok.(i)) ids
   in
   let changed = ref true in
   while !changed do
@@ -743,6 +755,68 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
            | _ -> [])
          u.RT.u_params)
   in
+  (* ── Lemmas (§4.2): L2 and L3 over the same events ───────────────────────
+     A lemma never runs, so the rules that keep a reflected body total and
+     pure (R3, R4, R5, R7) apply to it, except that its `assert` is a static
+     obligation (L2); its callees must be reflected functions, other lemmas,
+     constructors or R6 builtins (L3).  R8's "returns Unit" is the point of a
+     lemma and does not apply. *)
+  Hashtbl.reset lemma_blocked;
+  lemma_value_uses := [];
+  let is_lemma v = List.mem "lemma" (unit_ v).RT.u_attrs in
+  Array.iter
+    (fun (u : RT.unit_) ->
+      let i = u.RT.u_id in
+      if is_lemma i then begin
+        (* `==` inside a lemma's `assert` is the predicate's logical
+           equality (§3.5), never a call of `eq`. *)
+        let asserts = ref [] in
+        List.iter
+          (fun (c : RT.owner) ->
+            Refine_encode.iter_all (function A.EAssert (_, sp) -> asserts := sp :: !asserts | _ -> ()) c.RT.o_body)
+          u.RT.u_clauses;
+        let in_assert (sp : A.span) =
+          List.exists
+            (fun (a : A.span) ->
+              sp.A.file = a.A.file
+              && compare (sp.A.start_line, sp.A.start_col) (a.A.start_line, a.A.start_col) >= 0
+              && compare (sp.A.end_line, sp.A.end_col) (a.A.end_line, a.A.end_col) <= 0)
+            !asserts
+        in
+        let l2 =
+          List.filter
+            (fun e -> List.mem e.ev_rule [ 3; 4; 5; 7 ] && e.ev_text <> "has a runtime `assert`")
+            local.(i)
+        in
+        let l3 =
+          List.filter (fun e -> e.ev_rule = 6) local.(i)
+          @ List.filter_map
+              (fun ((d, (s : RT.site)) as dd) ->
+                match d with
+                | `Refl v when refl.(v) || is_lemma v -> None
+                | `Refl v ->
+                  Some { ev_rule = 6; ev_text = Printf.sprintf "calls %s, which is not reflected" (unit_ v).RT.u_name;
+                         ev_span = s.RT.s_span }
+                | `Eq _ when dep_ok dd || in_assert s.RT.s_span -> None
+                | `Eq _ ->
+                  Some { ev_rule = 6; ev_text = Printf.sprintf "uses %s on a type whose `eq` is not total" s.RT.s_name;
+                         ev_span = s.RT.s_span })
+              deps.(i)
+        in
+        match (first l2, first l3) with
+        | Some e, _ -> Hashtbl.replace lemma_blocked u.RT.u_span (2, e.ev_text)
+        | None, Some e -> Hashtbl.replace lemma_blocked u.RT.u_span (3, e.ev_text)
+        | None, None -> ()
+      end)
+    g.RT.units;
+  (* L5: a lemma named as a value. *)
+  List.iter
+    (fun (s : RT.site) ->
+      match s.RT.s_target with
+      | RT.S_unit v when (not s.RT.s_call) && is_lemma v ->
+        lemma_value_uses := (s.RT.s_span, (unit_ v).RT.u_name) :: !lemma_value_uses
+      | _ -> ())
+    g.RT.sites;
   Array.to_list g.RT.units
   |> List.filter_map (fun (u : RT.unit_) ->
          match (u.RT.u_kind, origin_of u) with
@@ -1111,6 +1185,19 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
     | _ -> raise Decline)
   | _ -> raise Decline
 
+(* A statement-position call of a lemma, `l(..)` or `let _ = l(..)`: erased
+   before the program runs, so it is `()` in a reflected body (§4.5, I2). *)
+and lemma_stmt (c : tctx) (e : A.expr) : bool =
+  let call =
+    match e with
+    | A.EApp (A.EVar _, _, sp) -> Some sp
+    | A.ELet ({ A.bind_pat = A.PatWild _; bind_expr = A.EApp (A.EVar _, _, sp); _ }, _) -> Some sp
+    | _ -> None
+  in
+  match Option.bind call (Hashtbl.find_opt c.c_sites) with
+  | Some { RT.s_target = RT.S_unit u; _ } -> List.mem "lemma" c.c_unit.(u).RT.u_attrs
+  | _ -> false
+
 and builtin c env nm args =
   let v = tr_val c env in
   let ty_of a = c.c_ty (T.span_of_expr a) in
@@ -1151,6 +1238,7 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
   match e with
   | A.EAnnot (x, _, _) -> tr_case c env x
   | A.EBlock ([ x ], _) -> tr_case c env x
+  | A.EBlock (stmt :: (_ :: _ as rest), sp) when lemma_stmt c stmt -> tr_case c env (A.EBlock (rest, sp))
   | A.EBlock (A.ELet (b, _) :: rest, sp) -> (
     match b.A.bind_pat with
     | A.PatVar x -> tr_case c ((x.A.txt, tr_val c env b.A.bind_expr) :: env) (A.EBlock (rest, sp))

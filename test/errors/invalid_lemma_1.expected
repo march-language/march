@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR ------------------- errors/invalid_lemma_1.march
+
+`bogus` is not a valid lemma (L2): it calls panic; a lemma never runs, so its body must be total and pure [invalid_lemma]
+
+3 |   fn bogus(n : Int) : {Unit | n == n + 1} do
+         ^^^^^
+
+    run `march --explain invalid_lemma`
+
+
