@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`List` ships lemmas about its own functions.** `List.append_nil`, `append_assoc`,
+  `len_append`, `reverse_append`, `reverse_reverse`, `len_reverse`, `len_take`, `len_drop`
+  and `take_drop` can be called from any program to give the refinement checker that
+  theorem as a fact, for example `len(append(a, b)) == len(a) + len(b)` after
+  `List.len_append(a, b)`. They cost nothing at run time. They are proved once and recorded in
+  `stdlib/lemmas.verified`, so a check does not prove them again. `List.filter` also gains a
+  proved `len(_) <= len(xs)` contract.
+
 - **Refinement proofs take decided steps (fuel).** The checker now expands a
   reflected call that another call's definition produces when its branch is already
   decided (its argument is a constructor, or known to equal one), up to a per-function

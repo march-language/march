@@ -2089,7 +2089,13 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
               match reflect_field a s, acc with Some t, Some ts -> Some (t :: ts) | _ -> None)
             cargs sorts (Some [])
           |> Option.map (fun ts -> Smt.Ctor (k, inst, ts))
-      | A.EVar { A.txt = x; _ } -> decls := (x, inst) :: !decls; Some (Smt.Const x)
+      | A.EVar { A.txt = x; _ } ->
+        decls := (x, inst) :: !decls;
+        (* Stage 2: a caller variable reached only inside a reflected call
+           (`len(append(xs, ys))`) still carries its own measure facts
+           (`len(_) == 1`), which `len$x = $len(x)` then connects. *)
+        if !Reflect_state.arm_on then !load_scope_measure_facts_ref x;
+        Some (Smt.Const x)
       (* ── Tier 2 propagation ────────────────────────────────────────────────
          A CALL returning a value at this very datatype sort, whose callee has a
          PROVEN postcondition (an unproven one has already been cleared by
@@ -2488,6 +2494,17 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       match m, arg with
       | "len", Smt.Const c when string_len_available () && Hashtbl.mem str_names c ->
         Some (Smt.App (strlen_fn, [ arg ]))
+      (* Stage 2: `len` of a reflected call's term (`len(append(xs, ys))` in a
+         lemma's theorem) is the list measure over it, which the call's
+         unfolding and `$len`'s own equations meet -- the subject arm's rule. *)
+      | "len", Smt.App (f, _) when !Reflect_state.arm_on && (Reflect_state.is_sym f || Reflect_state.is_instance f) ->
+        Some (Smt.App (list_len_measure, [ arg ]))
+      (* …and of a list constructor term (`len(Cons(h, acc))` in an induction
+         hypothesis), which `$len`'s axioms evaluate. *)
+      | "len", Smt.Ctor (k, _, _)
+        when !Reflect_state.arm_on
+             && List.mem k (Option.value ~default:[] (Hashtbl.find_opt adt_ctors list_adt)) ->
+        Some (Smt.App (list_len_measure, [ arg ]))
       | _ ->
         (match mode with
          | `Record _ -> resolve_measure_app_record m arg

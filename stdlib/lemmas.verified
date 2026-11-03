@@ -1,0 +1,17 @@
+# The stdlib lemmas the refinement checker proved, with a digest of every file each one's
+# theorem and proof reach (reflection design, phase 3).  A stdlib lemma whose line
+# still matches is admitted without re-proving it.  Regenerate with
+# scripts/gen-lemma-manifest.sh; a test fails when this file is stale.
+List.append_assoc	b9baa1e8c3c720b19c1f4b79062ea8d8
+List.append_nil	86f7a8944a20f38ca1b2c0ad01da3b04
+List.len_append	9dfe674d9cf27f4ee631438c07cc9c51
+List.len_drop	d245e3e3f4ac37e006dc0ad44f1908fa
+List.len_reverse	897add13a4f198635e8a6b6c106785a2
+List.len_reverse_onto	eae4fc1d951100834df4f347d3cfb2e4
+List.len_take	33f0955855b8232b767e72a63e86a785
+List.len_take_onto	2027bc96cd991ab3cc02b414cc7b413c
+List.reverse_append	29a67cffdbc5dc6a3577d9c6836cf119
+List.reverse_onto_append	5906172fd389c6133c28382d35918a6b
+List.reverse_reverse	4a64759a85cfc4b29cbcb91e0f4976e1
+List.take_drop	7e53f03f81c8b25331d3840a385dd69b
+List.take_onto_drop	c5ebcd35406b51ee42d4e116cc8829ec

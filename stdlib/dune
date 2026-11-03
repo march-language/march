@@ -1,4 +1,4 @@
 (install
  (package march)
  (section share)
- (files (glob_files *.march)))
+ (files (glob_files *.march) lemmas.verified))

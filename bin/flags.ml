@@ -133,6 +133,11 @@ let reflect_report = ref false
    `reflect-dep` and `reflect-cdep` lines (lsp/lib/refine_diag.ml).
    Report-only. *)
 let reflect_deps = ref false
+
+(* --emit-lemma-manifest (reflection phase 3): prove every lemma, ignoring
+   stdlib/lemmas.verified, and print the manifest of the stdlib ones that
+   proved. *)
+let emit_lemma_manifest = ref false
 (* --reflect-parity: the parity net (reflection §9.2, D16): each reflected
    function of user code is evaluated by its logic definition and by the
    interpreter on generated inputs, boundary Ints included
