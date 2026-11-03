@@ -650,16 +650,10 @@ let expanding_aliases : string list ref = ref []
     for an actor whose message constructors are in scope, and no real type of
     that name exists. *)
 let actor_msg_alias env (name : string) : string option =
-  let sfx = ".Msg" in
-  let n = String.length name and k = String.length sfx in
-  if n <= k || String.sub name (n - k) k <> sfx || lookup_type name env <> None
-  then None
-  else
-    let prefix = String.sub name 0 (n - k) in
-    let actor = match String.rindex_opt prefix '.' with
-      | None -> prefix
-      | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1) in
-    let target = actor_msg_type_name actor in
+  match actor_msg_alias_target name with
+  | None -> None
+  | Some _ when lookup_type name env <> None -> None
+  | Some target ->
     if StrMap.exists (fun _ cis ->
         List.exists (fun ci -> ci.ci_is_actor_msg && ci.ci_type = target) cis)
         env.ctors

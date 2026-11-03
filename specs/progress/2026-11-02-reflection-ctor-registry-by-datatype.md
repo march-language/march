@@ -281,3 +281,60 @@ Verification after round 3: `scripts/run-tests.sh refinecheck` 2,114 tests green
 1,351 green; `dune build --root . @types-check --force`: `core-march-types: 492 passed, 0
 failed`; `scripts/oracle-base.sh refine` IDENTICAL against `8aaeb6176`, and `refine-oracle.sh
 monotone` GREEN over 139,456 sites with 0 moves.
+
+## Review round 4 (of `13fd9eade`)
+
+Three more false proofs and one measure gap, all present at base; each fix landed test-first
+(`ctor review4` cases of `reflect-ctor`, RED on `13fd9eade`).
+
+- **C1: a qualified type name was resolved by its last segment.** `Counter.Msg` (the
+  typechecker's alias for the actor's synthesised `Counter_Msg`) resolved to an unrelated
+  `U.Msg`, so `is_Zap(m)` was proved for an `Inc()` (`msg3`). `adt_of_type_name` now resolves a
+  dotted name exactly (the one module path declaring the last segment must be the qualifier or
+  end with it, or the qualifier ends with that path, as `canonical_type_name`), else through the
+  actor alias, whose spelling rule is now the typechecker's own
+  (`Typecheck_env.actor_msg_alias_target`, shared with `Typecheck_unify.actor_msg_alias`), else
+  it is KNOWN-but-unresolved (the sentinel). `sort_of_tc_ty` no longer strips a qualifier either
+  (it goes through `adt_sort_name`'s qualifier rule), and `Refine_reflect.poly_sort` uses
+  `adt_of_type_name` (so `short_name_conflated` too: the reviewer's minor item).
+- **C2: a test on a value of type-variable type fell back to the name** (`tv2`). A TEST (an
+  `is_C` tester, a pattern, an arm's tag fact) now resolves only through the datatype the value
+  is known to have (`resolve_tested_ctor`); the name alone (`unique_ctor`) is reachable only from
+  a CONSTRUCTION `C(…)`, which pins its own type (`resolve_source_ctor`, `Refine_scope`'s and the
+  reflected body's `ECon`). This supersedes round 3's ruling 2: a type variable is "no type
+  information", and no test is made on a value with no type information.
+- **C3: typechecker-made types outside `builtin_types`.** `builtin_type_names` is now DERIVED in
+  `Typecheck_builtins`: the built-in type table, the built-in constructors' types, and every
+  `TCon` head of every built-in signature (`CancelToken`, `TimerRef` appear only there). A unit
+  test pins that the derivation reaches them (`builtin_type_names covers types named only in
+  builtin signatures`). Probes `ct1`, `ct2`, `ct3`, `tr1` now decline.
+- **Measures:** an axiomatised measure applied to a predicate name is reflected only when the
+  value is KNOWN to be of the measure's datatype (the refined or named parameter's declared type,
+  else the actual's own type; `ms1`'s type-variable, `Option` and `Int` actuals now decline).
+  The counterpart of round 3's tester fix.
+
+The backend side of `ct3` (a user `CancelToken` merged with the built-in compiles to invalid
+LLVM) is added to `specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md`.
+
+Tests: RED→GREEN `msg3`, `tv2`, `ct1`, `ct3`, `tr1`, `ms1`; `msg2` turned out to have no
+`is_Zap` obligation row (its only row is a legitimate `_ > 0` proof) and is kept as a guard that
+no `is_Zap` row is proved; controls `ct1c`, `msg1c` keep their proofs.
+
+Rulings: (1) no test ever resolves by the name alone when a typechecker ran; cost if wrong: lost
+tag facts on values of polymorphic type and on nested patterns under a type-parameter field
+(`Some(Cons(…))` in a reflected body). With NO type map at all (`call_type_map` unset: only unit
+harnesses that call `check_module` without typechecking; every production caller passes one),
+a test, and a measure over a value of unknown type, keep the pre-branch name-only reading for a
+non-conflated datatype: there is no typing to be sound against, and the harness groups
+(`arm-exclusion`, `arm-exclusion-nested`, `adt-tags`, `let-equality-alias`,
+`measure-base-case-axiom`) depend on it. (2) A dotted name that does not resolve exactly is known-but-unresolved, never
+its last segment; cost: lost proofs where the typechecker qualifies a type with a path that is
+neither the declaring path nor a suffix relation of it.
+
+Verification after round 4: `scripts/run-tests.sh refinecheck` 2,124 tests green; `-q compiler`
+1,351 green; `scripts/run-tests.sh errors` 302 green with no `.expected` change; `dune build
+--root . @types-check --force`: `core-march-types: 492 passed, 0 failed`; `scripts/oracle-base.sh
+refine` IDENTICAL against `8aaeb6176`, `refine-oracle.sh monotone` GREEN over 139,456 sites with
+0 moves. Probes (`ctor-review{,2,3,4}`): the only `proved` sites are the listed legitimate ones
+(`p10`, `p10b`, round-1 `t1`, `d1`-`d4`, `s2*`, `h3f`, `lp2`) and round 4's controls (`ct1c`,
+`msg1c`, `lp1`/`lp1n`'s `g(Z)`, `msg2`'s `_ > 0`).

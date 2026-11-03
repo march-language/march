@@ -991,12 +991,15 @@ let adt_of_ty (t : T.ty) : string option = RE.adt_of_tc_ty t
    specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md):
    by [adt], the type the checker knows the value has, when it knows one
    (and then the constructor must be one of that datatype's); else by the
-   name alone when exactly one datatype declares it.  Anything else — an
-   ambiguous name with no type, a type that does not declare it — raises
-   [Decline].  Never guess. *)
-let resolve_ctor ?(adt : string option) (c : string) : string * string =
+   name alone when exactly one datatype declares it, and then only in a
+   CONSTRUCTION ([~construct]): a pattern or tester on a value of unknown
+   type declines (review round 4).  Anything else — an ambiguous name with
+   no type, a type that does not declare it — raises [Decline].  Never
+   guess. *)
+let resolve_ctor ?(construct = false) ?(adt : string option) (c : string) : string * string =
   match adt with
   | Some a -> (match RE.ctor_of_adt a c with Some s -> (a, s) | None -> raise Decline)
+  | None when not construct && not (RE.untyped_harness ()) -> raise Decline
   | None -> (
     match RE.unique_ctor c with
     | Some p -> p
@@ -1018,7 +1021,6 @@ let field_adt (smt : string) (i : int) : string option =
   | _ -> None
 
 let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
-  let short n = match String.rindex_opt n '.' with Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
   let rec go (t : T.ty) =
     match T.repr t with
     | T.TCon ("Int", []) -> Smt.SInt
@@ -1037,10 +1039,14 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
     | T.TCon (n, args) ->
       (* Two declared types of one short name (`A.T`, `B.T`): which one the
          short name denotes is not decided here.  Decline. *)
-      (match Hashtbl.find_opt RE.adt_decl_paths ("M_" ^ short n) with
-       | Some (_ :: _ :: _) -> raise Decline
-       | _ -> ());
-      let adt = RE.adt_sort_name (short n) in
+      (* The same resolution as a constructor's ([RE.adt_of_type_name],
+         review round 4): a conflated short name, an inexact qualified one,
+         or a type that is no registered variant declines. *)
+      let adt =
+        match RE.adt_of_type_name n with
+        | Some a when a <> RE.ambiguous_adt_sentinel -> a
+        | _ -> raise Decline
+      in
       (match Hashtbl.find_opt RE.adt_ctors adt with
        | Some [ ctor ] when Hashtbl.mem RE.ctor_field_names ctor -> raise Decline (* a record *)
        | Some _ ->
@@ -1082,7 +1088,7 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
   | A.EIf (cnd, a, b, _) -> Smt.Ite (v cnd, v a, v b)
   | A.ECon (ctor, args, sp) when RE.is_source_ctor ctor.A.txt ->
     (* Resolved by the expression's own type (2026-11-02). *)
-    let adt, k = resolve_ctor ?adt:(Option.bind (c.c_ty sp) adt_of_ty) ctor.A.txt in
+    let adt, k = resolve_ctor ~construct:true ?adt:(Option.bind (c.c_ty sp) adt_of_ty) ctor.A.txt in
     let ts = List.map v args in
     if List.length ts <> List.length (try Hashtbl.find RE.ctor_field_sorts k with Not_found -> []) then
       raise Decline;

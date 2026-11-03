@@ -1058,3 +1058,218 @@ end
         expect out ~line:4 ~callee:"need" "proved";
         expect out ~line:5 ~callee:"need" "violated";
         expect out ~line:8 ~callee:"need" "proved") ]
+
+(* ── Review round 4 ────────────────────────────────────────────────────────
+   A qualified type name (`Counter.Msg`, the actor message alias) resolved by
+   its last segment, a tester on an actual whose type is a type variable,
+   typechecker-made types outside the built-in type table (`CancelToken`,
+   `TimerRef`), and a measure applied to an actual of another type.  Each
+   program proved a call that is violated at run time (or ill-typed for the
+   measure). *)
+let ctor_review4 =
+  [ gated "ctor review4 msg3: `Counter.Msg` is the actor's message type, not an unrelated `U.Msg`" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  mod U do
+    type Msg = Zap(Int)
+  end
+  actor Counter do
+    state { v : Int }
+    init { v: 0 }
+    on Inc() do { state with v: state.v + 1 } end
+  end
+  fn need(m : Counter.Msg, n : {Int | is_Zap(m)}) : Int do n end
+  fn c(m : Counter.Msg) : Int do need(m, 1) end
+  fn d() : Int do need(Inc(), 1) end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(c(Inc())))
+  end
+end
+|}
+        in
+        not_proved out ~line:12 ~callee:"need");
+    gated "ctor review4 msg2: `Counter.Msg` in a refined parameter's own base type" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  mod U do
+    type Msg = Zap(Int)
+  end
+  actor Counter do
+    state { v : Int }
+    init { v: 0 }
+    on Inc() do { state with v: state.v + 1 } end
+  end
+  fn need(x : {Counter.Msg | is_Zap(_)}, n : {Int | _ > 0}) : Int do n end
+  fn c(m : Counter.Msg) : Int do need(m, 1) end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(c(Inc())))
+  end
+end
+|}
+        in
+        (* Line 12's `_ > 0` on `n` is a legitimate proof; the `is_Zap` one
+           on `x` must not be. *)
+        List.iter
+          (fun l ->
+            if contains l "is_Zap" && String.starts_with ~prefix:"proved" l then
+              Alcotest.failf "is_Zap(_) proved for a Counter.Msg value:\n%s" out)
+          (lines out));
+    gated "ctor review4 tv2: a tester on an actual whose type is a type variable" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  type Zq = Rz(Int)
+  fn need(m : a, n : {Int | is_Rz(m)}) : Int do n end
+  fn c(y : b) : Int do need(y, 1) end
+  fn d(y : Option(Int)) : Int do need(y, 1) end
+  fn e() : Int do need(None, 1) end
+  fn f() : Int do need(5, 1) end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(c(None)))
+  end
+end
+|}
+        in
+        not_proved out ~line:5 ~callee:"need");
+    gated "ctor review4 ct1: a user `type CancelToken` beside the typechecker's own" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  type CancelToken = Tok(Int)
+  fn need(m : CancelToken, n : {Int | is_Tok(m)}) : Int do n end
+  fn c(t : CancelToken) : Int do need(t, 1) end
+  fn main(cap : Cap(IO)) : Unit do
+    let t = task_cancel_token_new()
+    println(int_to_string(c(t)))
+  end
+end
+|}
+        in
+        not_proved out ~line:5 ~callee:"need");
+    gated "ctor review4 ct3: a nested pattern over a user `CancelToken`" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  type CancelToken = Tok(Int)
+  fn need1(x : {Int | _ == 1}) : Int do
+    println("need1 got " ++ int_to_string(x))
+    x
+  end
+  fn g(o : Option(CancelToken)) : Int do
+    match o do
+      Some(Tok(_)) -> 1
+      _ -> 0
+    end
+  end
+  fn c(o : Option(CancelToken)) : Int do need1(g(o)) end
+  fn c2(o : Option(CancelToken)) : Int do match o do
+      Some(_) -> need1(g(o))
+      None -> 1
+    end
+  end
+  fn main(cap : Cap(IO)) : Unit do
+    let t = task_cancel_token_new()
+    println(int_to_string(c2(Some(t))))
+  end
+end
+|}
+        in
+        not_proved out ~line:16 ~callee:"need1");
+    gated "ctor review4 tr1: a user `type TimerRef` beside the typechecker's own" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  type TimerRef = Tm(Int)
+  fn need(m : TimerRef, n : {Int | is_Tm(m)}) : Int do n end
+  fn c(t : TimerRef) : Int do need(t, 1) end
+end
+|}
+        in
+        not_proved out ~line:5 ~callee:"need");
+    gated "ctor review4 ms1: a measure applied to an actual not of its datatype" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  type Zq = Rz(Int) | Qz
+  @[measure]
+  fn cnt(t : Zq) : Int do
+    match t do
+      Rz(_) -> 1
+      Qz -> 1
+    end
+  end
+  fn need(m : a, n : {Int | cnt(m) > 0}) : Int do n end
+  fn c(y : b) : Int do need(y, 1) end
+  fn d(y : Option(Int)) : Int do need(y, 1) end
+  fn d2(y : Int) : Int do need(y, 1) end
+  fn e() : Int do need(None, 1) end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(c(None)))
+  end
+end
+|}
+        in
+        not_proved out ~line:12 ~callee:"need";
+        not_proved out ~line:13 ~callee:"need";
+        not_proved out ~line:14 ~callee:"need");
+    gated "ctor review4 control ct1c: no conflation, the proof stays" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  type CancelTokn = Tok(Int)
+  fn need(m : CancelTokn, n : {Int | is_Tok(m)}) : Int do n end
+  fn c(t : CancelTokn) : Int do need(t, 1) end
+  fn main(cap : Cap(IO)) : Unit do
+    let t = Tok(3)
+    println(int_to_string(c(t)))
+  end
+end
+|}
+        in
+        expect out ~line:5 ~callee:"need" "proved");
+    gated "ctor review4 control msg1c: no conflation, the proof stays" (fun () ->
+        let out =
+          run
+            {|mod M do
+  needs IO
+  mod U do
+    type Msg = Zap(Int)
+  end
+  actor Counter do
+    state { v : Int }
+    init { v: 0 }
+    on Inc() do { state with v: state.v + 1 } end
+  end
+  fn need(x : {U.Msg | is_Zap(_)}) : Int do 1 end
+  fn c(m : U.Msg) : Int do need(m) end
+  fn d() : Int do need(U.Zap(1)) end
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(c(U.Zap(2))))
+  end
+end
+|}
+        in
+        expect out ~line:12 ~callee:"need" "proved") ]
+
+(* Review round 4, C3: every type a built-in signature names is a built-in
+   type name the refinement checker counts as a declarant.  The list is
+   derived from the signatures; this pins that the derivation reaches names
+   that appear ONLY there. *)
+let builtin_names_cover_signatures =
+  [ Alcotest.test_case "builtin_type_names covers types named only in builtin signatures" `Quick (fun () ->
+        let names = March_typecheck.Typecheck_builtins.builtin_type_names in
+        List.iter
+          (fun n ->
+            if not (List.mem n names) then
+              Alcotest.failf "%s (named by a builtin signature) is missing from builtin_type_names" n)
+          [ "CancelToken"; "TimerRef"; "DownReason"; "Option"; "Int" ]) ]

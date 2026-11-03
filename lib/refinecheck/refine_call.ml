@@ -2207,35 +2207,40 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        itself.  [reflect_dt] turns a literal into `(Ctor …)` (so the tester
        decides concretely) and a variable into an opaque datatype constant (so
        an unconstrained value stays unknown and we keep silent). *)
-    let resolve_tester ctor arg =
-      let subject =
-        match arg with
-        | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" -> self_actual
-        | A.EVar { A.txt = x; _ } ->
-          (match actual_of_name x with Some a -> a | None -> arg)
-        | _ -> arg
-      in
-      (* The tester's datatype (2026-11-02): the refined parameter's or the
-         named parameter's DECLARED type, else the subject's own type; a
-         constructor name no type pins to one datatype is not tested. *)
+    (* The datatype of the value a predicate name [arg] denotes (2026-11-02):
+       the refined parameter's or the named parameter's DECLARED type, else the
+       subject's own typechecker type.  [None] from a declared type means a
+       type VARIABLE (any other known type that is not a variant is the
+       sentinel, review round 3), and then the actual's own type decides;
+       [None] overall means the value's type is a type variable or unknown. *)
+    let subject_of arg =
+      match arg with
+      | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" -> self_actual
+      | A.EVar { A.txt = x; _ } ->
+        (match actual_of_name x with Some a -> a | None -> arg)
+      | _ -> arg
+    in
+    let known_adt_of arg =
+      let subject = subject_of arg in
       let param_adt idx =
         match Option.bind idx (fun i -> List.nth_opt sg.param_tys i) with
         | Some (Some ty) -> adt_of_decl_ty ty
         | _ -> None
       in
       let of_subject () = tc_adt_at (March_typecheck.Typecheck.span_of_expr subject) in
-      (* [None] from a declared type means a type VARIABLE (any other known
-         type that is not a variant is the sentinel, review round 3): then
-         the actual's own type decides. *)
-      let known =
-        match arg with
-        | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" ->
-          (match param_adt (Some rp.idx) with Some a -> Some a | None -> of_subject ())
-        | A.EVar { A.txt = x; _ } when List.mem_assoc x name_pos ->
-          (match param_adt (List.assoc_opt x name_pos) with Some a -> Some a | None -> of_subject ())
-        | _ -> of_subject ()
-      in
-      match resolve_source_ctor ?adt:known ctor with
+      match arg with
+      | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" ->
+        (match param_adt (Some rp.idx) with Some a -> Some a | None -> of_subject ())
+      | A.EVar { A.txt = x; _ } when List.mem_assoc x name_pos ->
+        (match param_adt (List.assoc_opt x name_pos) with Some a -> Some a | None -> of_subject ())
+      | _ -> of_subject ()
+    in
+    let resolve_tester ctor arg =
+      let subject = subject_of arg in
+      let known = known_adt_of arg in
+      (* A TEST never resolves by the name alone (review round 4): a value
+         whose type is unknown or a type variable may be of any datatype. *)
+      match resolve_tested_ctor known ctor with
       | None -> None
       | Some (adt, ctor) ->
         (* The subject is a bare caller-scope name: load whatever the CALLER's
@@ -2295,6 +2300,14 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
            nor a call with a proven postcondition): an unconstrained constant,
            i.e. SAT, i.e. a skip. *)
         let actual = if is_self name then Some self_actual else actual_of_name name in
+        (* The value must be KNOWN to be of the measure's datatype (review
+           round 4): an actual of a type variable, of another datatype, or of
+           a conflated name is not reflected at the measure's sort. *)
+        if (match known_adt_of (A.EVar { A.txt = name; A.span = A.dummy_span }) with
+            | Some a -> a <> adt
+            | None -> not (untyped_harness ()))
+        then None
+        else
         match actual with
         | None ->
           decls := (name, adt_sort adt) :: !decls;
@@ -2590,7 +2603,10 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
          invented rather than derived. *)
       let list_sort = adt_sort_name "List" in
       (* The tester's datatype by the caller value's own type (2026-11-02). *)
-      let resolved = resolve_source_ctor ?adt:(tc_adt_at (March_typecheck.Typecheck.span_of_expr arg)) ctor in
+      (* A test: by the caller value's own type only (review round 4). *)
+      let resolved =
+        resolve_tested_ctor (tc_adt_at (March_typecheck.Typecheck.span_of_expr arg)) ctor
+      in
       match arg, Option.map fst resolved with
       | A.EVar { A.txt = x; _ }, Some adt
         when adt = list_sort && (ctor = "Nil" || ctor = "Cons") ->

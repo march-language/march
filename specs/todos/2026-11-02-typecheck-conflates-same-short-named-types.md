@@ -20,3 +20,11 @@ The refinement checker now works around it (every datatype whose short name two 
 the typechecker's built-in types included, resolves no constructor), at the cost of proofs over
 such types (`module-qualified-measure-and-sort`). Fixing the typechecker (qualified nominal types)
 would let that rule be relaxed.
+
+**The same conflation reaches the backend** (round-4 review, probe `ctor-review4/ct3.march`): a
+user `type CancelToken = Tok(Int)` is merged with the typechecker's built-in `CancelToken` (named
+only in builtin signatures such as `task_cancel_token_new`), so
+`match Some(task_cancel_token_new()) do Some(Tok(_)) -> …` typechecks; interpreted it reaches the
+wrong arm, and `--compile` emits invalid LLVM (`march: clang failed (exit 1)`). A user type named
+like any type the base environment produces (`Typecheck_builtins.builtin_type_names`) should be
+rejected or kept distinct by the typechecker.

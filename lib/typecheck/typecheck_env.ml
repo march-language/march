@@ -189,6 +189,20 @@ let qualify_ref_name (modname : string) (name : string) : string =
     that type name). *)
 let actor_msg_type_name (actor : string) : string = actor ^ "_Msg"
 
+(** The SPELLING half of the `<Actor>.Msg` alias ([Typecheck_unify.actor_msg_alias]
+    adds the scope checks): [Some "<Actor>_Msg"] when [name] is `<Actor>.Msg`
+    or `M.<Actor>.Msg`. *)
+let actor_msg_alias_target (name : string) : string option =
+  let sfx = ".Msg" in
+  let n = String.length name and k = String.length sfx in
+  if n <= k || String.sub name (n - k) k <> sfx then None
+  else
+    let prefix = String.sub name 0 (n - k) in
+    let actor = match String.rindex_opt prefix '.' with
+      | None -> prefix
+      | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1) in
+    Some (actor_msg_type_name actor)
+
 type env = {
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)

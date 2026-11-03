@@ -5166,7 +5166,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
        the scrutinee's type where the typechecker pins one datatype, else by
        a name only one datatype declares.  [None]: no tag fact. *)
     let subj_adt = tc_adt_at (March_typecheck.Typecheck.span_of_expr subj) in
-    let arm_ctor (c : string) : string option = Option.map snd (resolve_source_ctor ?adt:subj_adt c) in
+    let arm_ctor (c : string) : string option = Option.map snd (resolve_tested_ctor subj_adt c) in
     ignore
     @@ List.fold_left
       (fun (earlier : A.branch list) (br : A.branch) ->
@@ -5312,7 +5312,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
           match subj, br.A.branch_pat with
           | A.EVar s, (A.PatCon ({ A.txt = "Cons"; _ }, [ _; _ ]) as pat)
             (* The built-in list's `Cons`, by the scrutinee's type. *)
-            when resolve_source_ctor ?adt:subj_adt "Cons" = Some (adt_sort_name "List", list_cons ())
+            when resolve_tested_ctor subj_adt "Cons" = Some (adt_sort_name "List", list_cons ())
                  && (not (is_axiom_measure "len"))
                  && not (List.mem s.A.txt binders) ->
             let sp = s.A.span in
@@ -5464,7 +5464,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                 | Some (ctor, i, d) when cur.A.txt = ctor ->
                   (match List.nth_opt cur_subs i with
                    | Some (A.PatVar t)
-                     when resolve_source_ctor ?adt:(tc_adt_at t.A.span) d <> None ->
+                     when resolve_tested_ctor (tc_adt_at t.A.span) d <> None ->
                      let sp = t.A.span in
                      let tester =
                        A.EApp

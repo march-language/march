@@ -2171,19 +2171,17 @@ let call_type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option ref 
    through [recenv]), a tuple, an arrow, `Char`, unit, a channel: [None]. *)
 let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
   let module T = March_typecheck.Typecheck in
-  let short n =
-    match String.rindex_opt n '.' with
-    | Some i -> String.sub n (i + 1) (String.length n - i - 1)
-    | None -> n
-  in
+  (* A qualified name resolves through [adt_sort_name]'s own qualifier rule
+     ([canonical_type_name]), never by its last segment alone (review round
+     4: `Counter.Msg` is not an unrelated `Msg`). *)
   let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
   (* An instance argument, as [instance_sort_of_ty] reads one. *)
   let rec inst t =
     match strip t with
     | T.TCon ("Int", []) -> Smt.SInt
     | T.TCon ("Bool", []) -> Smt.SBool
-    | T.TCon (n, args) when Hashtbl.mem adt_ctors (adt_sort_name (short n)) ->
-      let adt = adt_sort_name (short n) in
+    | T.TCon (n, args) when Hashtbl.mem adt_ctors (adt_sort_name n) ->
+      let adt = adt_sort_name n in
       let k = try Hashtbl.find adt_arity adt with Not_found -> 0 in
       if k = 0 then Smt.sdata adt
       else
@@ -2201,7 +2199,7 @@ let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
      result of a set measure over it (`elts(s)`, `keys(m)`), never the sort
      of the value itself. *)
   | T.TCon (n, _) as ty ->
-    let adt = adt_sort_name (short n) in
+    let adt = adt_sort_name n in
     (match Hashtbl.find_opt adt_ctors adt with
      | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor -> None
      | Some _ -> Some (inst ty)
@@ -2221,12 +2219,34 @@ let caller_sort_at (sp : A.span) : Smt.sort option =
    type name two modules declare (`A.T`, `B.T`) does not ([adt_sort_name]'s
    preferred declarant would be a guess), a record is not a variant, and
    anything that is not a registered datatype is unknown. *)
-let adt_of_type_name (n : string) : string option =
-  let short =
-    match String.rindex_opt n '.' with
-    | Some i -> String.sub n (i + 1) (String.length n - i - 1)
-    | None -> n
-  in
+let rec adt_of_type_name (n : string) : string option =
+  match String.rindex_opt n '.' with
+  | None -> adt_of_short_type_name n
+  | Some i ->
+    (* A QUALIFIED name resolves EXACTLY or not at all (review round 4):
+       `Counter.Msg` is not whatever `Msg` some other module declares.  As
+       [canonical_type_name]: the one module path declaring the last segment
+       must be the qualifier (or end with it; or the qualifier, carrying an
+       enclosing module, ends with that path).  Else the actor alias
+       `<Actor>.Msg` (the typechecker's own spelling rule) names the
+       synthesised `<Actor>_Msg`.  Anything else is KNOWN but unresolved. *)
+    let q = String.sub n 0 i and t = String.sub n (i + 1) (String.length n - i - 1) in
+    let exact =
+      match Hashtbl.find_opt adt_decl_paths ("M_" ^ t) with
+      | Some entries -> (
+        match List.sort_uniq compare (List.map fst entries) with
+        | [ path ] ->
+          path <> "" && (path = q || String.ends_with ~suffix:("." ^ q) path || String.ends_with ~suffix:("." ^ path) q)
+        | _ -> false)
+      | None -> false
+    in
+    if exact then adt_of_short_type_name t
+    else (
+      match March_typecheck.Typecheck_env.actor_msg_alias_target n with
+      | Some target when Hashtbl.mem adt_decl_paths ("M_" ^ target) -> adt_of_type_name target
+      | _ -> Some ambiguous_adt_sentinel)
+
+and adt_of_short_type_name (short : string) : string option =
   (* KNOWN but conflated: a sentinel that resolves no constructor, so the
      caller declines rather than falling back to the name alone. *)
   if short_name_conflated short then Some ambiguous_adt_sentinel
@@ -2265,14 +2285,34 @@ let tc_adt_at (sp : A.span) : string option =
   | None -> None
   | Some tm -> Option.bind (Hashtbl.find_opt tm sp) adt_of_tc_ty
 
-(* A source constructor [c] as (datatype, SMT constructor): by [adt], the
-   datatype the value is known to have (then [c] must be one of its
-   constructors), else by the name alone when exactly one datatype declares
-   it.  [None] otherwise: the caller declines, never guesses. *)
+(* A source constructor [c] in a CONSTRUCTION `c(…)`, as (datatype, SMT
+   constructor): by [adt], the datatype the value is known to have (then [c]
+   must be one of its constructors), else by the name alone when exactly one
+   datatype declares it (a construction pins its own type).  [None]
+   otherwise: the caller declines, never guesses. *)
 let resolve_source_ctor ?(adt : string option) (c : string) : (string * string) option =
   match adt with
   | Some a -> Option.map (fun k -> (a, k)) (ctor_of_adt a c)
   | None -> unique_ctor c
+
+(* A source constructor [c] TESTED of a value (a pattern, an `is_c` tester, a
+   tag fact): only by the datatype the value is known to have.  A value whose
+   type is unknown or a type variable may be of any datatype, so the name
+   alone never pins it (review round 4). *)
+let resolve_tested_ctor (adt : string option) (c : string) : (string * string) option =
+  match adt with
+  | Some a -> resolve_source_ctor ~adt:a c
+  (* No typechecker ran at all ([call_type_map] unset: a unit harness; every
+     production caller passes the type map): there is no type to be sound
+     against, and a name only one non-conflated datatype declares keeps the
+     pre-2026-11-02 reading. *)
+  | None when !call_type_map = None -> unique_ctor c
+  | None -> None
+
+(* Whether a value of no known type may still be read at datatype [adt] (a
+   measure's), by the same rule as [resolve_tested_ctor]: only when no
+   typechecker ran. *)
+let untyped_harness () : bool = !call_type_map = None
 
 (* The SMT tester constructor for `is_<c>(x)` where [x] has sort [srt] (when
    known). *)
@@ -2284,7 +2324,7 @@ let tester_ctor ?(srt : Smt.sort option) (c : string) : string option =
     (* A known sort that is no registered datatype (review round 3). *)
     | Some _ -> Some ambiguous_adt_sentinel
   in
-  Option.map snd (resolve_source_ctor ?adt c)
+  Option.map snd (resolve_tested_ctor adt c)
 
 (* A refinement or linearity wrapper says nothing about a value's SORT — a
    `{Int | _ > 0}` field is an Int field.  Before 2026-09-13 this fell through
