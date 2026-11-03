@@ -157,6 +157,7 @@ string was sanitized"): that is an opaque type's job, see
 | **Standard library** | Stdlib functions such as `List.head`, `List.nth` and `Option.unwrap` carry refinement contracts, so a user call site is checked against them. | [Standard Library](standard-library.md) |
 | **Linear types** | The other compile-time safety layer: linearity tracks *use*, refinements track *value*. | [Linear Types](linear-types.md) |
 | **Safety by construction** | Refinements are one of three orthogonal layers, beside capabilities and typestate. | [Safety by Construction](safety-by-construction.md) |
+| **Lemmas** | A `@[lemma]` proves what one unfolding cannot (induction); a proved lemma's theorem is a fact after each call. | [Lemmas]({{ site.baseurl }}/docs/lemmas/) |
 | **Tooling** | `forge refine` proposes a contract; `--refine-report` and `--refine-audit` say what was proved, skipped, or never looked at. | [Tooling](https://github.com/march-language/march/blob/main/docs/tooling.md) |
 
 ---
@@ -1464,6 +1465,10 @@ The checker expands only steps the facts decide. That is enough for
 `cat(Nil, ys) == ys` or `cat([1], [2]) == [1, 2]`, but not for
 `cat(xs, Nil) == xs` with `xs` unknown, which is true for every list and needs
 induction to show. A **lemma** is how you supply that proof.
+
+This section is the reference summary. [Lemmas]({{ site.baseurl }}/docs/lemmas/) is the
+full guide: writing proofs step by step, reading `lemma_unproved`, fuel, and what
+`forge test`, `forge doc`, `forge search --law` and the editor do with lemmas.
 
 A lemma is a function marked `@[lemma]`. Its result type is `{Unit | P}`: `P`
 is the theorem, and the body is the proof. The proof uses only what March
@@ -6703,5 +6708,6 @@ golden corpus itself remains 46/46 MATCH.
 - [Type System](type-system.md): the types refinements attach to
 - [Linear Types](linear-types.md): the other compile-time safety layer
 - [Pattern Matching](pattern-matching.md): `match` guards feed path sensitivity
+- [Lemmas]({{ site.baseurl }}/docs/lemmas/): proving what one unfolding cannot, with `@[lemma]`
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/): `cap no_panic` and `cap verified` beside the other behavioral caps
 - [Safety by Construction](safety-by-construction.md): refinements as one of three layers

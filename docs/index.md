@@ -331,6 +331,7 @@ that defends it, including the checks that are still only planned.
 | [Capabilities](capabilities.md) | IO permission caps, the upper limit, the grant, proof caps, typestate |
 | [Linear Types](linear-types.md) | Ownership, linear and affine qualifiers, `LinearMap`, `RingBuf` |
 | [Refinement Types](refinement-types.md) | `{T \| pred}` predicates checked by Z3, `cap verified`, `cap no_panic` |
+| [Lemmas](lemmas.md) | `@[lemma]`: proofs by induction in ordinary code, laws tested by `forge test` |
 | [Capability Enforcement](capability-enforcement.md) | Turning declared capabilities into an OS sandbox and a deploy gate |
 | [Capability Threat Model](capability-threat-model.md) | What the capability system guarantees, assumes and does not cover |
 | [Capability Audit](capability-audit.md) | `forge audit` on dependency updates; `forge cap inspect` on a binary |
