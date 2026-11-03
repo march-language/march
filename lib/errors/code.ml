@@ -68,6 +68,7 @@ let invalid_cap_scope = "invalid_cap_scope"
 let invalid_decreases = "invalid_decreases"
 let invalid_lemma = "invalid_lemma"
 let invalid_measure = "invalid_measure"
+let invalid_reflect = "invalid_reflect"
 let invalid_type_bound = "invalid_type_bound"
 let io_not_allowed = "io_not_allowed"
 let island_missing_fn = "island_missing_fn"
@@ -258,6 +259,7 @@ let all = [
   invalid_decreases;
   invalid_lemma;
   invalid_measure;
+  invalid_reflect;
   invalid_type_bound;
   io_not_allowed;
   island_missing_fn;
