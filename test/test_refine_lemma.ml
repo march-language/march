@@ -148,6 +148,18 @@ let unproved out name =
 let expect_unproved out name =
   if not (unproved out name) then Alcotest.failf "expected lemma_unproved on `%s`:\n%s" name out
 
+(* The lemma is reported false: a confirmed counterexample (the solver's
+   model, run in the interpreter), [refinement_violated] at the lemma. *)
+let refuted out name =
+  List.exists
+    (fun l -> contains l "[refinement_violated]" && contains l ("the lemma `" ^ name ^ "` is false"))
+    (lines out)
+
+let expect_refuted out name ~at =
+  if not (refuted out name && contains out ("does not hold at " ^ at)) then
+    Alcotest.failf "expected `%s` refuted at %s:\n%s" name at out;
+  if unproved out name then Alcotest.failf "a refuted lemma is not also merely unproved:\n%s" out
+
 (* Admitted: no lemma_unproved or invalid_lemma, at least one theorem row,
    and every theorem row proved (a lemma that was never walked has none). *)
 let expect_admitted out name =
@@ -423,8 +435,8 @@ let l4 =
           run ~args:"--check"
             "mod N do\n  @[lemma]\n  fn bad2(n : Int) : {Unit | n < 0} do\n    if n == 0 do () else bad2(n - 1) end\n  end\nend\n"
         in
-        if not (invalid_lemma out ~name:"bad2" ~rule:"L4" || unproved out "bad2") then
-          Alcotest.failf "bad2 must be invalid (L4) or unproved:\n%s" out;
+        if not (invalid_lemma out ~name:"bad2" ~rule:"L4" || unproved out "bad2" || refuted out "bad2") then
+          Alcotest.failf "bad2 must be invalid (L4), unproved or refuted:\n%s" out;
         let out =
           run
             "mod N do\n  @[lemma]\n  fn good(n : Int) : {Unit | n <= 0 || n > 0} do\n    if n <= 0 do () else good(n - 1) end\n  end\nend\n"
@@ -713,6 +725,34 @@ let lemma_tests =
            erases every lemma (sound_erase_ir pins the IR). *)
         let out = run ~args:"--check" ("mod N do\n" ^ defs4_6 ^ cat_nil ^ "end\n") in
         if contains out "lemma-test" then Alcotest.failf "no lemma test without the flag:\n%s" out);
+    gated "lemma_refuted: a theorem false at some input is refinement_violated, with the input" (fun () ->
+        (* Both are false at n = -1 and true at n >= 0, so `¬P` is not valid and
+           the definite-failure rule alone skipped them as `lemma_unproved`.
+           `twice` is a reflected call: its model comes from stage 2. *)
+        let out =
+          run
+            "mod N do\n  fn twice(n : Int) : Int do n + n end\n  @[lemma]\n  fn nn(n : Int) : {Unit | twice(n) >= n} do\n    ()\n  end\n  @[lemma]\n  fn mm(n : Int) : {Unit | n + n >= n} do\n    ()\n  end\nend\n"
+        in
+        expect_refuted out "nn" ~at:"n = -";
+        expect_refuted out "mm" ~at:"n = -";
+        (* A refuted lemma is not admitted: its callers get no fact from it.
+           `need_nn(k)` after `mm(k)` must not be proved (k = -1 refutes it). *)
+        let out =
+          run
+            "mod N do\n  fn need_nn(n : {Int | _ + _ >= _}) : Int do n end\n  @[lemma]\n  fn mm(n : Int) : {Unit | n + n >= n} do\n    ()\n  end\n  fn f(k : Int) : Int do\n    mm(k)\n    need_nn(k)\n  end\nend\n"
+        in
+        expect_refuted out "mm" ~at:"n = -";
+        U.not_proved out ~line:9 ~callee:"need_nn";
+        (* Control: true but needing induction stays unproved, not refuted. *)
+        let out = run ("mod N do\n" ^ defs4_6 ^ count_fn ^ count_cat ^ "end\n") in
+        expect_unproved out "count_cat";
+        if refuted out "count_cat" then Alcotest.failf "a true lemma is never refuted:\n%s" out;
+        (* A refined parameter: the model must satisfy it to count. *)
+        let out =
+          run
+            "mod N do\n  @[lemma]\n  fn pos_ok(n : {Int | _ >= 0}) : {Unit | n + n >= n} do\n    ()\n  end\nend\n"
+        in
+        if refuted out "pos_ok" then Alcotest.failf "no counterexample inside the refinement:\n%s" out);
     gated "verified_unproved: in a `cap verified` module an unproved lemma is an error (idea 10)" (fun () ->
         let src cap = "mod N do\n" ^ cap ^ defs4_6 ^ count_fn ^ count_cat ^ "end\n" in
         let out = run (src "  cap verified\n") in
