@@ -62,13 +62,13 @@ let rec subst_ty (a : string) (by : ty) (t : ty) : ty =
   | TyRefine (b, x, p) -> TyRefine (subst_ty a by b, x, p)
   | t -> t
 
-(* Every variable (call heads included) renamed by [f]; spans kept. *)
-let rec rename (f : string -> string option) (e : expr) : expr =
-  let r = rename f in
-  let nm (n : name) = match f n.txt with Some s -> { n with txt = s } | None -> n in
+(* [g] applied bottom-up to every subexpression; spans kept. *)
+let rec map_expr (g : expr -> expr) (e : expr) : expr =
+  let r = map_expr g in
+  g
+  @@
   match e with
-  | EVar n -> EVar (nm n)
-  | EApp (g, args, sp) -> EApp (r g, List.map r args, sp)
+  | EApp (f, args, sp) -> EApp (r f, List.map r args, sp)
   | ECon (n, args, sp) -> ECon (n, List.map r args, sp)
   | ELam (ps, body, sp) -> ELam (ps, r body, sp)
   | EBlock (es, sp) -> EBlock (List.map r es, sp)
@@ -90,6 +90,24 @@ let rec rename (f : string -> string option) (e : expr) : expr =
   | ELetStar (p, a, b, sp) -> ELetStar (p, r a, r b, sp)
   | EAssert (e, sp) -> EAssert (r e, sp)
   | e -> e
+
+(* Every variable (call heads included) renamed by [f]. *)
+let rename (f : string -> string option) (e : expr) : expr =
+  map_expr (function EVar n -> (match f n.txt with Some s -> EVar { n with txt = s } | None -> EVar n) | e -> e) e
+
+let is_unit_ty = function TyCon ({ txt = "Unit"; _ }, []) | TyTuple [] -> true | _ -> false
+
+(* A call of a copy taking `Unit` arguments, those arguments dropped: the
+   logic has no `Unit` value, so `empty(())` becomes `empty()`.  [units]
+   maps a copy's name to the positions of its `Unit` parameters. *)
+let drop_unit_args (units : (string * int list) list) (e : expr) : expr =
+  map_expr
+    (function
+      | EApp ((EVar n as h), args, sp) when List.mem_assoc n.txt units ->
+        let drop = List.assoc n.txt units in
+        EApp (h, List.filteri (fun i _ -> not (List.mem i drop)) args, sp)
+      | e -> e)
+    e
 
 (* `a -> b -> c` as ([a; b], c). *)
 let rec arrows (t : ty) : ty list * ty =
@@ -118,10 +136,38 @@ let generate (ifaces : (string * interface_def) list) (idef : impl_def) (impl_sp
       List.partition (fun ((n : name), (fd : fn_def)) -> List.mem "lemma" fd.fn_attrs && List.mem n.txt law_names) idef.impl_methods
     in
     let method_names = List.map (fun (m : method_decl) -> m.md_name.txt) iface.iface_methods in
-    let defined = List.filter_map (fun ((n : name), _) -> if List.mem n.txt method_names then Some n.txt else None) methods in
+    (* A default the impl takes (an impl in another file never had it
+       injected): a function built from the default's lambda. *)
+    let defaults =
+      List.filter_map
+        (fun (md : method_decl) ->
+          match md.md_default with
+          | Some (ELam (ps, body, sp)) when not (List.exists (fun ((n : name), _) -> n.txt = md.md_name.txt) methods) ->
+            Some
+              ( md.md_name,
+                { fn_name = md.md_name; fn_vis = Private; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
+                  fn_clauses =
+                    [ { fc_params = List.map (fun p -> FPNamed p) ps; fc_guard = None; fc_body = body; fc_span = sp;
+                        fc_params_span = sp } ];
+                  fn_bounds = []; fn_attr_args = []; fn_needs = None } )
+          | _ -> None)
+        iface.iface_methods
+    in
+    let methods_all = methods @ defaults in
+    let defined = List.filter_map (fun ((n : name), _) -> if List.mem n.txt method_names then Some n.txt else None) methods_all in
     let copy m = copy_prefix ^ m ^ "__" ^ tag in
     let to_copy s = if List.mem (bare s) defined then Some (copy (bare s)) else None in
     let law_name l = l ^ "__" ^ tag in
+    (* Each copy's `Unit` parameter positions, from the signature. *)
+    let units =
+      List.filter_map
+        (fun (md : method_decl) ->
+          let args, _ = arrows md.md_ty in
+          let pos = List.concat (List.mapi (fun i t -> if is_unit_ty t then [ i ] else []) args) in
+          if pos <> [] && List.mem md.md_name.txt defined then Some (copy md.md_name.txt, pos) else None)
+        iface.iface_methods
+    in
+    let rewrite f e = drop_unit_args units (rename f e) in
     (* The impl's methods as top-level functions, typed from the signature. *)
     let copies =
       List.filter_map
@@ -136,6 +182,7 @@ let generate (ifaces : (string * interface_def) list) (idef : impl_def) (impl_sp
                 match List.nth_opt args i with Some t -> FPNamed { p with param_ty = Some t } | None -> fp)
               | fp -> fp
             in
+            let unit_pos = Option.value ~default:[] (List.assoc_opt (copy n.txt) units) in
             let fd =
               { fd with
                 fn_name = { n with txt = copy n.txt };
@@ -144,11 +191,14 @@ let generate (ifaces : (string * interface_def) list) (idef : impl_def) (impl_sp
                 fn_ret_ty = (match fd.fn_ret_ty with Some t -> Some t | None -> Some ret);
                 fn_clauses =
                   List.map
-                    (fun c -> { c with fc_params = List.mapi typed c.fc_params; fc_body = rename to_copy c.fc_body })
+                    (fun c ->
+                      { c with
+                        fc_params = List.filteri (fun i _ -> not (List.mem i unit_pos)) (List.mapi typed c.fc_params);
+                        fc_body = rewrite to_copy c.fc_body })
                     fd.fn_clauses }
             in
             Some (DFn (fd, impl_sp)))
-        methods
+        methods_all
     in
     let lemmas =
       List.mapi
@@ -171,7 +221,7 @@ let generate (ifaces : (string * interface_def) list) (idef : impl_def) (impl_sp
           in
           let ret =
             match law.fn_ret_ty with
-            | Some (TyRefine (b, x, p)) -> Some (TyRefine (b, x, rename theorem_rename p))
+            | Some (TyRefine (b, x, p)) -> Some (TyRefine (b, x, rewrite theorem_rename p))
             | t -> t
           in
           let params =
@@ -190,7 +240,7 @@ let generate (ifaces : (string * interface_def) list) (idef : impl_def) (impl_sp
             match proof with
             | Some pf -> (
               match pf.fn_clauses with
-              | c :: _ -> rename (fun s -> match to_law s with Some n -> Some n | None -> to_copy s) c.fc_body
+              | c :: _ -> rewrite (fun s -> match to_law s with Some n -> Some n | None -> to_copy s) c.fc_body
               | [] -> ETuple ([], impl_sp))
             | None -> ETuple ([], impl_sp)
           in
@@ -233,16 +283,21 @@ let rec collect_ifaces (ds : decl list) : (string * interface_def) list =
       | _ -> [])
     ds
 
-(** Each impl of a lawful interface of [decls] followed by its generated
-    copies and lemmas; [decls] unchanged when no interface has a law. *)
-let expand (decls : decl list) : decl list =
-  let ifaces = collect_ifaces decls in
+(* Was this impl already expanded (its first law's lemma is a sibling)? *)
+let expanded (ifaces : (string * interface_def) list) (siblings : decl list) (idef : impl_def) : bool =
+  match List.assoc_opt (bare idef.impl_iface.txt) ifaces with
+  | Some ({ iface_laws = l :: _; _ } as iface) ->
+    let name = l.fn_name.txt ^ "__" ^ bare iface.iface_name.txt ^ "_" ^ ty_tag idef.impl_ty in
+    List.exists (function DFn (fd, _) -> fd.fn_name.txt = name | _ -> false) siblings
+  | _ -> false
+
+let expand_with (ifaces : (string * interface_def) list) (decls : decl list) : decl list =
   if ifaces = [] then decls
   else
     let rec go ds =
       List.concat_map
         (function
-          | DImpl (idef, sp) ->
+          | DImpl (idef, sp) when not (expanded ifaces ds idef) ->
             let idef, extra = generate ifaces idef sp in
             DImpl (idef, sp) :: extra
           | DMod (n, v, inner, sp) -> [ DMod (n, v, go inner, sp) ]
@@ -250,3 +305,14 @@ let expand (decls : decl list) : decl list =
         ds
     in
     go decls
+
+(** Each impl of a lawful interface of [decls] followed by its generated
+    copies and lemmas; [decls] unchanged when no interface has a law.  One
+    file, inside [Desugar.desugar_module]. *)
+let expand (decls : decl list) : decl list = expand_with (collect_ifaces decls) decls
+
+(** The whole program: impls in one file of an interface declared in another
+    ([context] is the other files' declarations when the caller keeps them
+    apart).  An impl the per-file [expand] already handled is left alone. *)
+let expand_program ?(context : decl list = []) (decls : decl list) : decl list =
+  expand_with (collect_ifaces (context @ decls)) decls

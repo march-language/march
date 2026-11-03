@@ -333,13 +333,12 @@ lemma. Laws never run: they and the code the checker uses for them are removed
 before the program is built.
 
 The checker names each impl's law `<law>__<Interface>_<Type>` in its messages
-(`combine_assoc__Monoid_Int`). Current limits:
+(`combine_assoc__Monoid_Int`). Every impl is checked: in the interface's file or in
+another one, and with the interface's default for any method it does not define. A law
+may call a method that takes `Unit` (`combine(empty(()), x) == x`).
 
-- only impls in the same file as the interface are checked;
-- a method the impl does not define (a default) is not known to the law;
-- a law can't call a method with a `Unit` argument (`empty(())`): the logic has no
-  `Unit` value, so such a law stays unproved;
-- laws over a hand-written `Eq` are opaque (`==` in a law is structural equality).
+`==` in a law is structural equality, so a law about a type with a hand-written `Eq`
+does not use that `eq`.
 
 ---
 

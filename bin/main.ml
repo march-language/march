@@ -2719,7 +2719,8 @@ let run_test_cmd args =
     end;
     let desugared =
       { desugared with
-        March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
+        March_ast.Ast.mod_decls =
+          March_desugar.Interface_laws.expand_program (extra_decls @ desugared.March_ast.Ast.mod_decls) }
     in
     let stdlib_decls = load_stdlib () in
     if not (is_shipped_stdlib_file filename) then
@@ -3832,7 +3833,8 @@ let compile filename =
   in
   let desugared =
     { desugared with
-      March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
+      March_ast.Ast.mod_decls =
+        March_desugar.Interface_laws.expand_program (extra_decls @ desugared.March_ast.Ast.mod_decls) }
   in
   (* Snapshot of the user's own decls (entry file + resolved imports) BEFORE
      stdlib gets prepended below.  Used to typecheck against the cached
@@ -6849,6 +6851,8 @@ let run_check_cmd ?(emit_caps = false) files =
       else begin Hashtbl.add seen_mod_names mn (); true end
     | _ -> true
   ) all_decls in
+  (* Interface laws whose impl and interface are in different files. *)
+  let all_decls = March_desugar.Interface_laws.expand_program all_decls in
   (* If a checked file's own module name shadows a stdlib module (e.g. a
      project's own `mod Crypto do` — the exact scenario [compile]'s
      [extern_mod_names] below already guards against for the single-file

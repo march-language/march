@@ -1634,7 +1634,10 @@ search for a function also finds the lemmas about it.
 **Rewrites in the editor.** When a proved lemma's theorem is an equation,
 `lhs == rhs`, the editor offers to rewrite an expression of the shape `lhs`
 into `rhs`, and names the lemma. With `cat_nil` proved, the cursor on
-`cat(Cons(1, zs), Nil)` offers "Rewrite to `Cons(1, zs)`". Only proved lemmas
+`cat(Cons(1, zs), Nil)` offers "Rewrite to `Cons(1, zs)`". The lemmas can be in
+the open file, a project file it uses, or the stdlib (those the stdlib's
+`lemmas.verified` lists); a lemma from another module has that module's
+functions qualified in the rewrite (`List.append(..)`). Only proved lemmas
 are offered, and only left to right.
 
 **Lemmas as a contract for changes.** A lemma states a law the code must keep,

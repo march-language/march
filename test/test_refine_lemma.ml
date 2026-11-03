@@ -871,6 +871,31 @@ let iface_laws =
           [ `Interp; `Compiled ];
         let ir = ll src in
         if contains ir "__law_" || contains ir "join_none" then Alcotest.fail "the law's code reaches the IR");
+    gated "iface_law_cross_file: an impl of an interface declared in another file is checked" (fun () ->
+        let algebra =
+          "mod Algebra do\n  interface Monoid(a) do\n    fn combine : a -> a -> a\n    @[lemma]\n    fn combine_assoc(x : a, y : a, z : a) : {Unit | combine(combine(x, y), z) == combine(x, combine(y, z))}\n  end\nend\n"
+        in
+        let out =
+          U.run_lib ~args:"--check --reflect-deps" ~lib:[ ("algebra.march", algebra) ]
+            "mod Main do\n  use Algebra.*\n  type Box = Box(Int)\n  impl Monoid(Int) do\n    fn combine(x, y) do x + y end\n  end\n  impl Monoid(Box) do\n    fn combine(p, q) do\n      match p do\n        Box(a) -> match q do\n          Box(b) -> Box(a - b)\n        end\n      end\n    end\n  end\nend\n"
+        in
+        expect_status out "combine_assoc__Monoid_Int" "admitted";
+        expect_refuted out "combine_assoc__Monoid_Box" ~at:"x = Box(");
+    gated "iface_law_default_unit: a default method, and a method called with `()`" (fun () ->
+        let sem =
+          "  interface Sem(a) do\n    fn combine : a -> a -> a\n    fn twice : a -> a do\n      fn x -> combine(x, x)\n    end\n    fn unit : Unit -> a\n    @[lemma]\n    fn twice_def(x : a) : {Unit | twice(x) == combine(x, x)}\n    @[lemma]\n    fn unit_left(x : a) : {Unit | combine(unit(()), x) == x}\n  end\n"
+        in
+        let impl = "  impl Sem(Int) do\n    fn combine(x, y) do x + y end\n    fn unit(_u) do 0 end\n  end\n" in
+        let out = run ~args:"--check --reflect-deps" ("mod N do\n" ^ sem ^ impl ^ "end\n") in
+        expect_status out "twice_def__Sem_Int" "admitted";
+        expect_status out "unit_left__Sem_Int" "admitted";
+        (* The impl in another file: the default is not injected there. *)
+        let out =
+          U.run_lib ~args:"--check --reflect-deps" ~lib:[ ("alg.march", "mod Alg do\n" ^ sem ^ "end\n") ]
+            ("mod Main do\n  use Alg.*\n" ^ impl ^ "end\n")
+        in
+        expect_status out "twice_def__Sem_Int" "admitted";
+        expect_status out "unit_left__Sem_Int" "admitted");
     gated "iface_law_syntax: a body-less interface `fn` must be a `@[lemma]`" (fun () ->
         let out =
           run ~args:"--check"
