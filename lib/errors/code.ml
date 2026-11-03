@@ -114,6 +114,7 @@ let parse_error = "parse_error"
 let pid_serialize = "pid_serialize"
 let pipe_into_match = "pipe_into_match"
 let pipe_match_pattern = "pipe_match_pattern"
+let portable_capture = "portable_capture"
 let predicate_eq_structural = "predicate_eq_structural"
 let prelude_collision = "prelude_collision"
 let proof_cap_foreign = "proof_cap_foreign"
@@ -299,6 +300,7 @@ let all = [
   pid_serialize;
   pipe_into_match;
   pipe_match_pattern;
+  portable_capture;
   predicate_eq_structural;
   prelude_collision;
   proof_cap_foreign;

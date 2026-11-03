@@ -19,6 +19,19 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Parallel combinators reject closures that capture a native handle.** A
+  lambda passed to `List.pmap`, `List.pfilter`, `List.preduce`, the
+  `Parallel.*` family or `Task.async_stream` may no longer capture a
+  `resource` value from an `extern` library, directly or inside a record,
+  variant, list or tuple, since nothing says the C library is safe to call
+  from several threads. The check follows the lambda through your own
+  functions that pass it on, and reports at the function, naming the
+  variable and the combinator (`portable_capture`). Create the handle inside
+  the lambda, or use the sequential version. `task_spawn` and `Task.async`
+  are unaffected.
+
 ### Changed
 
 - **Native compiles are about 45% faster for small programs.** Code the program
