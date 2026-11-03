@@ -126,23 +126,27 @@ let severity_to_lsp (sev : Err.severity) =
    [Code_actions_diag] can offer every compiler fix without a per-message
    rule, and any other client can apply it too (D4, diagnostics plan §8). *)
 let fix_data (fix : Err.fix_kind option) : Yojson.Safe.t option =
-  match fix with
-  | None -> None
-  | Some (Err.FInsert { after_line; text }) ->
-    Some (`Assoc [ ("fix", `Assoc [ ("kind", `String "insert");
-                                    ("after_line", `Int after_line);
-                                    ("text", `String text) ]) ])
-  | Some (Err.FDelete { start_line; end_line }) ->
-    Some (`Assoc [ ("fix", `Assoc [ ("kind", `String "delete");
-                                    ("start_line", `Int start_line);
-                                    ("end_line", `Int end_line) ]) ])
-  | Some (Err.FReplace { span; text }) ->
-    Some (`Assoc [ ("fix", `Assoc [ ("kind", `String "replace");
-                                    ("start_line", `Int span.Ast.start_line);
-                                    ("start_col", `Int span.Ast.start_col);
-                                    ("end_line", `Int span.Ast.end_line);
-                                    ("end_col", `Int span.Ast.end_col);
-                                    ("text", `String text) ]) ])
+  let rec edit : Err.fix_kind -> Yojson.Safe.t = function
+    | Err.FInsert { after_line; text } ->
+      `Assoc [ ("kind", `String "insert");
+               ("after_line", `Int after_line);
+               ("text", `String text) ]
+    | Err.FDelete { start_line; end_line } ->
+      `Assoc [ ("kind", `String "delete");
+               ("start_line", `Int start_line);
+               ("end_line", `Int end_line) ]
+    | Err.FReplace { span; text } ->
+      `Assoc [ ("kind", `String "replace");
+               ("start_line", `Int span.Ast.start_line);
+               ("start_col", `Int span.Ast.start_col);
+               ("end_line", `Int span.Ast.end_line);
+               ("end_col", `Int span.Ast.end_col);
+               ("text", `String text) ]
+    | Err.FMulti fs ->
+      `Assoc [ ("kind", `String "multi");
+               ("edits", `List (List.map edit (List.concat_map Err.fix_edits fs))) ]
+  in
+  Option.map (fun f -> `Assoc [ ("fix", edit f) ]) fix
 
 let diag_to_lsp ~filename (d : Err.diagnostic) =
   let is_user =

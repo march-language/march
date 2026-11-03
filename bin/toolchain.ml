@@ -157,14 +157,20 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
        | Some j -> Some (String.sub rest 0 j)
        | None -> None)
   in
-  (* Check 1b's aggregated error: "function bodies in `M` call builtins
-     that require ...". Check 1's per-Cap(X)-parameter error: "`Cap(X)` used
-     in module `M` but ...". Both anchors are tried in turn — a diagnostic's
+  (* Check 1b's aggregated error ("... prints, but module `M` declares no
+     `needs X`"; "function bodies in `M` call builtins that require ..."
+     before F1). Check 1's per-Cap(X)-parameter error: "`Cap(X)` used
+     in module `M` but ...". The anchors are tried in turn — a diagnostic's
      message matches at most one of them. *)
   let error_module (d : E.diagnostic) =
     match name_after ~marker:"bodies in `" d.E.message with
     | Some m -> Some m
-    | None -> name_after ~marker:"used in module `" d.E.message
+    | None ->
+      (match name_after ~marker:"used in module `" d.E.message with
+       | Some m -> Some m
+       (* The use-site form: "the `Inc` handler of actor `A` prints, but
+          module `M` declares no `needs X`" (diagnostics plan F1). *)
+       | None -> name_after ~marker:"but module `" d.E.message)
   in
   (* Cap_infer's hint: "call to `f` requires `needs X` — add `needs X` to
      module `M`...". *)
@@ -232,6 +238,11 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
   List.map (fun (d : E.diagnostic) ->
       match List.filter_map (fun (e, n) -> if e == d then Some n else None) !chain_notes with
       | [] -> d
+      (* An error that already labels each call on the way (the X7 trace a
+         merged grant finding brings) shows the chain as spans; the prose
+         chain would say it twice. *)
+      | _ when List.exists (fun (l : E.label) ->
+          find_substring ~needle:" calls `" l.E.lbl_message <> None) d.E.labels -> d
       | ns -> { d with E.notes = d.E.notes @ List.rev ns })
     kept
 

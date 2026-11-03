@@ -1,0 +1,14 @@
+-- A capability that CONTAINS the one needed (diagnostics plan F1): `Cap(IO)`
+-- passed where `Cap(IO.Console)` is needed.  A capability is never narrowed
+-- implicitly; the fix narrows it explicitly with `cap_narrow`.
+mod Main do
+  needs IO
+
+  fn greet(con : Cap(IO.Console), name : String) : () do
+    println("hello " ++ name)
+  end
+
+  fn main(cap : Cap(IO)) do
+    greet(cap, "march")
+  end
+end

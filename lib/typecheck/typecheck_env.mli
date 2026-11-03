@@ -139,6 +139,21 @@ val actor_msg_type_name : string -> string
 
 (** [Some "<Actor>_Msg"] when the name is spelled `<Actor>.Msg` (scope not checked). *)
 val actor_msg_alias_target : string -> string option
+
+(** A capability value passed where a different capability is needed
+    (specs/plans/2026-11-02-diagnostics-depth-plan.md §F1): recorded by
+    [report_mismatch] when it reports [cap_mismatch], so the end-of-module
+    pass ([Typecheck.refine_capability_reports]) can name the callee and
+    attach a fix, which need the declarations. *)
+type cap_mismatch_site = {
+  cm_span : Typecheck_types.Ast.span;           (** the argument; the diagnostic's primary span *)
+  cm_call : Typecheck_types.Ast.span option;    (** the call, when the expectation is an argument *)
+  cm_arg_name : string option;  (** the argument, when it is a plain variable *)
+  cm_have : string;             (** the capability passed, e.g. ["IO.Console"] *)
+  cm_need : string;             (** the capability needed, e.g. ["IO.FileRead"] *)
+  cm_in_fn : string;            (** [current_decl] at the site ("Mod.fn") *)
+}
+
 type env = {
   vars : Typecheck_types.scheme StrMap.t;
   types : int StrMap.t;
@@ -233,6 +248,7 @@ type env = {
     (Typecheck_types.Ast.span *
      Typecheck_types.ty * bool * string)
     list ref;
+  cap_mismatch_sites : cap_mismatch_site list ref;
   cap_narrow_sites :
     (Typecheck_types.Ast.span *
      Typecheck_types.ty)
@@ -331,12 +347,25 @@ val resolve_qualified_var :
   string -> env -> env * Typecheck_types.scheme option
 val resolve_qualified_type : string -> env -> env * int option
 val resolve_qualified_ctor : string -> env -> env * ctor_info option
-val suggest_var_in_scope : string -> env -> string option
 val is_confirmed_private_qualified : string -> env -> bool
 val qualified_error_msg : string -> env -> string
 val all_ctors_named : string -> env -> string list
 val all_ctor_candidates_named : string -> env -> (string * string) list
-val suggest_ctors : string -> env -> (string * string) list
+
+(* Did-you-mean ranking (diagnostics-depth plan X8, tier 1): spelling
+   candidates ranked by a read-only structural fit to what the position
+   needs, then locality, then edit distance. See the implementation. *)
+type suggest_need =
+  | NeedType of Typecheck_types.ty
+  | NeedSendTo of Typecheck_types.ty
+val spelling_max_dist : int -> int
+val is_generated_name : ?ctor_type:string -> string -> bool
+val could_fit : Typecheck_types.ty -> Typecheck_types.ty -> bool
+val suggest_var_in_scope : ?need:Typecheck_types.ty -> string -> env -> string option
+val suggest_field :
+  ?need:Typecheck_types.ty -> string -> (string * Typecheck_types.ty) list -> string option
+val suggest_ctors : ?need:suggest_need -> string -> env -> (string * string) list
+val unknown_ctor_hint : ?need:suggest_need -> string -> env -> string
 (* The stdlib-only builtin table; see [Typecheck_builtins.stdlib_only]. *)
 val stdlib_only : (string * string) list ref
 

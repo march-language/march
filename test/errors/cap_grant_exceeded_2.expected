@@ -10,3 +10,10 @@ help: add a `Cap(IO.FileRead)` parameter to `main` (e.g. `fn main(…, _cap_file
     run `march --explain cap_grant_exceeded`
 
 
+
+fix [cap_grant_exceeded]:
+@@ lines 33-33 @@
+-  fn main(cap : Cap(IO.Console)) : () do
++  fn main(cap : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+
+after fix: exit 0

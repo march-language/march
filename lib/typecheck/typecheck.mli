@@ -238,6 +238,14 @@ type bound_origin =
   | Iface_method of { iface : string; impl_ty : string option }
   | Impl_method of { iface : string; impl_ty : string }
 type fn_bound = { fb_caps : string list; fb_span : Ast.span; fb_site : Ast.span; fb_origin : bound_origin }
+type cap_mismatch_site = {
+  cm_span : Ast.span;
+  cm_call : Ast.span option;
+  cm_arg_name : string option;
+  cm_have : string;
+  cm_need : string;
+  cm_in_fn : string;
+}
 type env = {
   vars : scheme StrMap.t;
   types : int StrMap.t;
@@ -302,6 +310,7 @@ type env = {
   cap_impl_sites : (Ast.span * ty * ty * bool * string) list ref;
   cap_dict_sites : Ast.span list ref;
   mint_cap_sites : (Ast.span * ty * bool * string) list ref;
+  cap_mismatch_sites : cap_mismatch_site list ref;
   cap_narrow_sites : (Ast.span * ty) list ref;
   node_send_sites : (Ast.span * string * ty) list ref;
   json_codecs : ty list ref;

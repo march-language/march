@@ -20,3 +20,10 @@ help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_fil
     run `march --explain cap_grant_exceeded`
 
 
+
+fix [cap_grant_exceeded]:
+@@ lines 10-10 @@
+-  fn main(_c : Cap(IO.Console)) do
++  fn main(_c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+
+after fix: exit 0

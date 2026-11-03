@@ -1081,9 +1081,7 @@ let code_actions_at (a : t) ~line ~character
         match d.data with
         | Some (`Assoc kv) ->
           (match List.assoc_opt "fix" kv with
-           | Some (`Assoc f) ->
-             let int k = match List.assoc_opt k f with Some (`Int n) -> n | _ -> 0 in
-             let str k = match List.assoc_opt k f with Some (`String t) -> t | _ -> "" in
+           | Some (`Assoc fix) ->
              let on_range (r : Range.t) =
                (line > r.start.line || (line = r.start.line && character >= r.start.character))
                && (line < r.end_.line || (line = r.end_.line && character <= r.end_.character))
@@ -1092,49 +1090,66 @@ let code_actions_at (a : t) ~line ~character
                if String.contains t '\n' then "a line break"
                else let t = String.trim t in if t = "" then "" else "`" ^ t ^ "`"
              in
-             let edit, title =
-               match str "kind" with
-               | "replace" ->
-                 let range = Range.create
-                     ~start:(Position.create ~line:(int "start_line" - 1) ~character:(int "start_col"))
-                     ~end_:(Position.create ~line:(int "end_line" - 1) ~character:(int "end_col")) in
-                 let old_text =
-                   let sp = { Ast.file = a.filename;
-                              start_line = int "start_line"; start_col = int "start_col";
-                              end_line = int "end_line"; end_col = int "end_col" } in
-                   let so = offset_of_pos a.src (sp.Ast.start_line - 1) sp.Ast.start_col in
-                   let eo = offset_of_pos a.src (sp.Ast.end_line - 1) sp.Ast.end_col in
-                   if so >= 0 && eo > so && eo <= String.length a.src
-                   then String.sub a.src so (eo - so) else ""
-                 in
-                 let text = str "text" in
-                 let title =
-                   if title_text text = "" then Printf.sprintf "Remove `%s`" (String.trim old_text)
-                   else Printf.sprintf "Replace `%s` with %s" (String.trim old_text) (title_text text)
-                 in
-                 (Some (TextEdit.create ~range ~newText:text, range), title)
-               | "insert" ->
-                 (* FInsert: a new line after 1-indexed [after_line] = at the
-                    start of 0-indexed line [after_line]. *)
-                 let pos = Position.create ~line:(int "after_line") ~character:0 in
-                 let range = Range.create ~start:pos ~end_:pos in
-                 (Some (TextEdit.create ~range ~newText:(str "text" ^ "\n"), range),
-                  Printf.sprintf "Insert %s" (title_text (str "text")))
-               | "delete" ->
-                 let range = Range.create
-                     ~start:(Position.create ~line:(int "start_line" - 1) ~character:0)
-                     ~end_:(Position.create ~line:(int "end_line") ~character:0) in
-                 (Some (TextEdit.create ~range ~newText:"", range),
-                  (if int "start_line" = int "end_line"
-                   then Printf.sprintf "Delete line %d" (int "start_line")
-                   else Printf.sprintf "Delete lines %d-%d" (int "start_line") (int "end_line")))
-               | _ -> (None, "")
+             let one_edit f =
+               let int k = match List.assoc_opt k f with Some (`Int n) -> n | _ -> 0 in
+               let str k = match List.assoc_opt k f with Some (`String t) -> t | _ -> "" in
+               let edit, title =
+                 match str "kind" with
+                 | "replace" ->
+                   let range = Range.create
+                       ~start:(Position.create ~line:(int "start_line" - 1) ~character:(int "start_col"))
+                       ~end_:(Position.create ~line:(int "end_line" - 1) ~character:(int "end_col")) in
+                   let old_text =
+                     let sp = { Ast.file = a.filename;
+                                start_line = int "start_line"; start_col = int "start_col";
+                                end_line = int "end_line"; end_col = int "end_col" } in
+                     let so = offset_of_pos a.src (sp.Ast.start_line - 1) sp.Ast.start_col in
+                     let eo = offset_of_pos a.src (sp.Ast.end_line - 1) sp.Ast.end_col in
+                     if so >= 0 && eo > so && eo <= String.length a.src
+                     then String.sub a.src so (eo - so) else ""
+                   in
+                   let text = str "text" in
+                   let title =
+                     if title_text text = "" then Printf.sprintf "Remove `%s`" (String.trim old_text)
+                     else Printf.sprintf "Replace `%s` with %s" (String.trim old_text) (title_text text)
+                   in
+                   (Some (TextEdit.create ~range ~newText:text, range), title)
+                 | "insert" ->
+                   (* FInsert: a new line after 1-indexed [after_line] = at the
+                      start of 0-indexed line [after_line]. *)
+                   let pos = Position.create ~line:(int "after_line") ~character:0 in
+                   let range = Range.create ~start:pos ~end_:pos in
+                   (Some (TextEdit.create ~range ~newText:(str "text" ^ "\n"), range),
+                    Printf.sprintf "Insert %s" (title_text (str "text")))
+                 | "delete" ->
+                   let range = Range.create
+                       ~start:(Position.create ~line:(int "start_line" - 1) ~character:0)
+                       ~end_:(Position.create ~line:(int "end_line") ~character:0) in
+                   (Some (TextEdit.create ~range ~newText:"", range),
+                    (if int "start_line" = int "end_line"
+                     then Printf.sprintf "Delete line %d" (int "start_line")
+                     else Printf.sprintf "Delete lines %d-%d" (int "start_line") (int "end_line")))
+                 | _ -> (None, "")
+               in
+               (edit, title)
              in
-             (match edit with
-              | Some (te, fix_range) when on_range d.range || on_range fix_range ->
+             (* A multi-edit fix ({"kind":"multi","edits":[…]}) is one quick
+                fix whose workspace edit carries every edit. *)
+             let parts =
+               match List.assoc_opt "kind" fix, List.assoc_opt "edits" fix with
+               | Some (`String "multi"), Some (`List es) ->
+                 List.filter_map (function `Assoc e -> Some (one_edit e) | _ -> None) es
+               | _ -> [ one_edit fix ]
+             in
+             let edits = List.filter_map (fun (e, _) -> e) parts in
+             let on_any =
+               on_range d.range || List.exists (fun (_, r) -> on_range r) edits in
+             let title = String.concat "; " (List.map snd parts) in
+             (match edits with
+              | _ :: _ when on_any && List.length edits = List.length parts ->
                 Some (CodeAction.create ~title ~kind:CodeActionKind.QuickFix
                         ~diagnostics:[d] ~isPreferred:true
-                        ~edit:(WorkspaceEdit.create ~changes:[(uri, [te])] ()) ())
+                        ~edit:(WorkspaceEdit.create ~changes:[(uri, List.map fst edits)] ()) ())
               | _ -> None)
            | _ -> None)
         | _ -> None)

@@ -1,3 +1,4 @@
+-- EXPECT-FIX-PARTIAL: the grant fix is right; `as_writer` also widens `Cap(IO.Console)` to `Cap(IO.FileWrite)` (cap_widen), which needs a code change
 mod Main do
   needs IO.Console
   needs IO.FileWrite
