@@ -982,19 +982,45 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
 
 (* ── Sorts of a signature (§3.2, §3.3) ──────────────────────────────────── *)
 
-(* The one datatype a constructor NAME belongs to, or [Decline] when two
-   registered datatypes declare it (review audit): the SMT constructor,
-   tester and selectors are keyed by that name, so an ambiguous one could be
-   read at the wrong datatype.  Never guess. *)
-let unique_ctor_adt (c : string) : string =
-  match Hashtbl.fold (fun adt cs acc -> if List.mem c cs then adt :: acc else acc) RE.adt_ctors [] with
-  | [ adt ] -> adt
-  (* Test-only: the RED control of the ambiguity rule (pick one). *)
-  | adt :: _ when Sys.getenv_opt "MARCH_REFLECT_PERTURB" = Some "ctor-guess" -> adt
-  | _ -> raise Decline
+(* The datatype a typechecker type names, when it pins exactly ONE: a short
+   type name two modules declare (`A.T`, `B.T`) is not decided here, and a
+   record is not a variant.  [None] = not known. *)
+let adt_of_ty (t : T.ty) : string option = RE.adt_of_tc_ty t
+
+(* A SOURCE constructor name as (datatype, SMT constructor) (2026-11-02,
+   specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md):
+   by [adt], the type the checker knows the value has, when it knows one
+   (and then the constructor must be one of that datatype's); else by the
+   name alone when exactly one datatype declares it, and then only in a
+   CONSTRUCTION ([~construct]): a pattern or tester on a value of unknown
+   type declines (review round 4).  Anything else — an ambiguous name with
+   no type, a type that does not declare it — raises [Decline].  Never
+   guess. *)
+let resolve_ctor ?(construct = false) ?(adt : string option) (c : string) : string * string =
+  match adt with
+  | Some a -> (match RE.ctor_of_adt a c with Some s -> (a, s) | None -> raise Decline)
+  | None when not construct && not (RE.untyped_harness ()) -> raise Decline
+  | None -> (
+    match RE.unique_ctor c with
+    | Some p -> p
+    | None -> (
+      match Hashtbl.find_opt RE.ctor_decls c with
+      (* Test-only: the RED control of the ambiguity rule (pick one). *)
+      | Some (a :: _) when Sys.getenv_opt "MARCH_REFLECT_PERTURB" = Some "ctor-guess" ->
+        (a, RE.ctor_smt_name a c)
+      | _ -> raise Decline))
+
+(* The datatype a field of SMT constructor [smt] holds at index [i], when it
+   is one: the sub-subject's type for a nested constructor pattern. *)
+let field_adt (smt : string) (i : int) : string option =
+  match List.nth_opt (try Hashtbl.find RE.ctor_field_sorts_poly smt with Not_found -> []) i with
+  (* A field type whose short name two declarants share is KNOWN but
+     conflated: never a key a constructor resolves through (review round 2). *)
+  | Some (Smt.SData (a, _)) when Hashtbl.mem RE.ambiguous_adts a -> Some RE.ambiguous_adt_sentinel
+  | Some (Smt.SData (a, _)) when Hashtbl.mem RE.adt_ctors a -> Some a
+  | _ -> None
 
 let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
-  let short n = match String.rindex_opt n '.' with Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
   let rec go (t : T.ty) =
     match T.repr t with
     | T.TCon ("Int", []) -> Smt.SInt
@@ -1013,10 +1039,14 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
     | T.TCon (n, args) ->
       (* Two declared types of one short name (`A.T`, `B.T`): which one the
          short name denotes is not decided here.  Decline. *)
-      (match Hashtbl.find_opt RE.adt_decl_paths ("M_" ^ short n) with
-       | Some (_ :: _ :: _) -> raise Decline
-       | _ -> ());
-      let adt = RE.adt_sort_name (short n) in
+      (* The same resolution as a constructor's ([RE.adt_of_type_name],
+         review round 4): a conflated short name, an inexact qualified one,
+         or a type that is no registered variant declines. *)
+      let adt =
+        match RE.adt_of_type_name n with
+        | Some a when a <> RE.ambiguous_adt_sentinel -> a
+        | _ -> raise Decline
+      in
       (match Hashtbl.find_opt RE.adt_ctors adt with
        | Some [ ctor ] when Hashtbl.mem RE.ctor_field_names ctor -> raise Decline (* a record *)
        | Some _ ->
@@ -1056,9 +1086,13 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
     | [ ([], t) ] -> t
     | _ -> raise Decline)
   | A.EIf (cnd, a, b, _) -> Smt.Ite (v cnd, v a, v b)
-  | A.ECon (ctor, args, _) when Hashtbl.mem RE.ctor_field_sorts ctor.A.txt ->
+  | A.ECon (ctor, args, sp) when RE.is_source_ctor ctor.A.txt ->
+    (* Resolved by the expression's own type (2026-11-02). *)
+    let adt, k = resolve_ctor ~construct:true ?adt:(Option.bind (c.c_ty sp) adt_of_ty) ctor.A.txt in
     let ts = List.map v args in
-    RE.ctor_term (unique_ctor_adt ctor.A.txt) ctor.A.txt ts
+    if List.length ts <> List.length (try Hashtbl.find RE.ctor_field_sorts k with Not_found -> []) then
+      raise Decline;
+    RE.ctor_term adt k ts
   | A.EApp (A.EVar f, args, sp) -> (
     (* The same rule as [note] (third review C1): an ambiguous site has no
        single callee, in every branch below. *)
@@ -1133,6 +1167,9 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
       | A.ETuple (xs, _) -> List.map (tr_val c env) xs
       | x -> [ tr_val c env x ]
     in
+    (* Each subject's datatype, from its type, for its constructor patterns. *)
+    let adt_of x = Option.bind (c.c_ty (T.span_of_expr x)) adt_of_ty in
+    let adts = match scrut with A.ETuple (xs, _) -> List.map adt_of xs | x -> [ adt_of x ] in
     let tupled = match scrut with A.ETuple _ -> true | _ -> false in
     let prior = ref [] in
     List.concat_map
@@ -1141,12 +1178,12 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
           match tupled, br.A.branch_pat with
           | true, A.PatTuple (ps, _) when List.length ps = List.length subjects ->
             List.fold_left2
-              (fun (cs, bs) p s ->
-                let c', b' = pat p s in
+              (fun (cs, bs) p (s, adt) ->
+                let c', b' = pat ?adt p s in
                 (cs @ c', bs @ b'))
-              ([], []) ps subjects
+              ([], []) ps (List.combine subjects adts)
           | true, A.PatWild _ -> ([], [])
-          | false, p -> pat p (List.hd subjects)
+          | false, p -> pat ?adt:(List.hd adts) p (List.hd subjects)
           | _ -> raise Decline
         in
         let env' = binds @ env in
@@ -1159,23 +1196,24 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
   | e -> [ ([], tr_val c env e) ]
 
 (* A pattern over a subject term: its conditions and bindings. *)
-and pat (p : A.pattern) (s : Smt.term) : Smt.term list * (string * Smt.term) list =
+(* [adt]: the subject's datatype, when its type pins one ([adt_of_ty]). *)
+and pat ?(adt : string option) (p : A.pattern) (s : Smt.term) : Smt.term list * (string * Smt.term) list =
   match p with
   | A.PatWild _ -> ([], [])
   | A.PatVar x -> ([], [ (x.A.txt, s) ])
   | A.PatAs (q, x, _) ->
-    let cs, bs = pat q s in
+    let cs, bs = pat ?adt q s in
     (cs, (x.A.txt, s) :: bs)
   | A.PatLit (A.LitInt n, _) -> ([ Smt.Eq (s, Smt.IntLit n) ], [])
   | A.PatLit (A.LitBool b, _) -> ([ (if b then s else Smt.Not s) ], [])
-  | A.PatCon (ctor, ps) when Hashtbl.mem RE.ctor_field_sorts ctor.A.txt ->
-    ignore (unique_ctor_adt ctor.A.txt);
-    let n = List.length (Hashtbl.find RE.ctor_field_sorts ctor.A.txt) in
+  | A.PatCon (ctor, ps) when RE.is_source_ctor ctor.A.txt ->
+    let _, k = resolve_ctor ?adt ctor.A.txt in
+    let n = List.length (try Hashtbl.find RE.ctor_field_sorts k with Not_found -> raise Decline) in
     if List.length ps <> n then raise Decline;
     let sub =
-      List.mapi (fun i q -> pat q (Smt.App (Printf.sprintf "%s_%d" ctor.A.txt i, [ s ]))) ps
+      List.mapi (fun i q -> pat ?adt:(field_adt k i) q (Smt.App (Printf.sprintf "%s_%d" k i, [ s ]))) ps
     in
-    (Smt.IsCtor (ctor.A.txt, s) :: List.concat_map fst sub, List.concat_map snd sub)
+    (Smt.IsCtor (k, s) :: List.concat_map fst sub, List.concat_map snd sub)
   | _ -> raise Decline
 
 (* The guard of an unfolding (§3.6): each parameter refinement, over the
@@ -1214,7 +1252,23 @@ let pre_of (u : RT.unit_) (psorts : Smt.sort list) : Smt.term list =
                  Refine_scope.smt_of ~resolve_var:var ~resolve_measure:measure
                    ~resolve_tester:(fun ctor a ->
                      match a with
-                     | A.EVar x -> ignore (unique_ctor_adt ctor); Option.map (fun t -> Smt.IsCtor (ctor, t)) (var x.A.txt)
+                     | A.EVar x ->
+                       (* The tester's constructor, by the parameter's sort. *)
+                       let adt =
+                         match var x.A.txt with
+                         | Some (Smt.Const pc) ->
+                           (match List.find_index (fun j -> param_const j = pc) (List.init (List.length psorts) Fun.id) with
+                            | Some j ->
+                              (match List.nth_opt psorts j with
+                               | Some (Smt.SData (a, _)) -> Some a
+                               (* A known sort that is no datatype (review round 3). *)
+                               | Some _ -> Some RE.ambiguous_adt_sentinel
+                               | None -> None)
+                            | None -> None)
+                         | _ -> None
+                       in
+                       let _, k = resolve_ctor ?adt ctor in
+                       Option.map (fun t -> Smt.IsCtor (k, t)) (var x.A.txt)
                      | _ -> None)
                    pred
                with

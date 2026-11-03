@@ -64,8 +64,8 @@ exception Unsupported of string
 let rec show = function
   | LInt n -> string_of_int n
   | LBool b -> string_of_bool b
-  | LCon (c, []) -> c
-  | LCon (c, xs) -> c ^ "(" ^ String.concat ", " (List.map show xs) ^ ")"
+  | LCon (c, []) -> RE.ctor_display c
+  | LCon (c, xs) -> RE.ctor_display c ^ "(" ^ String.concat ", " (List.map show xs) ^ ")"
 
 (* ── The logic side ──────────────────────────────────────────────────────── *)
 
@@ -135,8 +135,8 @@ let rec eval (env : (string * lv) list) (t : Smt.term) : lv =
   | Smt.Ge (a, b) -> LBool (int a >= int b)
   | Smt.App (f, [ a ]) when f = RE.list_len_measure ->
     let rec len n = function
-      | LCon ("Nil", []) -> n
-      | LCon ("Cons", [ _; t ]) -> len (n + 1) t
+      | LCon (c, []) when c = RE.list_nil () -> n
+      | LCon (c, [ _; t ]) when c = RE.list_cons () -> len (n + 1) t
       | v -> raise (Unsupported ("len of " ^ show v))
     in
     LInt (len 0 (eval env a))
@@ -173,15 +173,19 @@ and call f args =
 
 let boundary = [ 0; 1; -1; max_int; min_int; max_int - 1; min_int + 1 ]
 
-(* A data type's constructors with their field sorts at [args], or [None]
-   when a generator cannot be trusted: a constructor name another data type
-   also declares (the field registry is keyed by name), or a record. *)
+(* A data type's constructors (SMT names) with their field sorts at [args],
+   or [None] when a generator cannot be trusted: a record, a datatype whose
+   TYPE NAME two modules (or a module and a built-in) declare, so a field
+   sort naming it may be the wrong declaration (review round 1 of
+   2026-11-02, I1: `W1(Tq)` drew only the other `Tq`'s constructors, and the
+   interpreter took them by name), or a constructor name another datatype
+   also declares (the interpreter's value carries the bare name only). *)
 let ctors_of (adt : string) (args : Smt.sort list) : (string * Smt.sort list) list option =
   match Hashtbl.find_opt RE.adt_ctors adt with
   | None | Some [] -> None
+  | Some _ when Hashtbl.mem RE.ambiguous_adts adt -> None
   | Some cs ->
-    let owners c = Hashtbl.fold (fun _ cs' n -> if List.mem c cs' then n + 1 else n) RE.adt_ctors 0 in
-    if List.exists (fun c -> owners c <> 1 || Hashtbl.mem RE.ctor_field_names c) cs then None
+    if List.exists (fun c -> Hashtbl.mem RE.ctor_field_names c || RE.ctor_display c <> c) cs then None
     else
       let fields c =
         match Hashtbl.find_opt RE.ctor_field_sorts_poly c with
@@ -265,7 +269,7 @@ let inputs (name : string) (params : Smt.sort list) : (bool * lv list) list opti
 let rec to_value = function
   | LInt n -> V.VInt n
   | LBool b -> V.VBool b
-  | LCon (c, xs) -> V.VCon (c, List.map to_value xs)
+  | LCon (c, xs) -> V.VCon (RE.ctor_display c, List.map to_value xs)
 
 (* A constructor tag the interpreter may qualify ([M.Some]). *)
 let bare_tag c = match String.rindex_opt c '.' with Some i -> String.sub c (i + 1) (String.length c - i - 1) | None -> c
@@ -275,7 +279,7 @@ let rec same (v : V.value) (l : lv) : bool option =
   | V.VInt a, LInt b -> Some (a = b)
   | V.VBool a, LBool b -> Some (a = b)
   | V.VCon (c, xs), LCon (d, ys) ->
-    if bare_tag c <> bare_tag d || List.length xs <> List.length ys then Some false
+    if bare_tag c <> RE.ctor_display d || List.length xs <> List.length ys then Some false
     else
       List.fold_left2
         (fun acc x y -> match acc, same x y with Some true, r -> r | a, _ -> a)

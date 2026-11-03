@@ -3318,10 +3318,13 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
      relation when one [Within] field holds every related slot (leftovers
      phase E's rule), and a recorded skip for any other shape. *)
   | A.ECon (k, args, _)
-    when sort_of_ctor k.A.txt = Some (adt_sort_name container)
-         && Hashtbl.mem ctor_param_fields k.A.txt ->
-    let roles = Hashtbl.find ctor_param_fields k.A.txt in
-    let fparams = Hashtbl.find_opt ctor_field_params k.A.txt in
+    when (match ctor_of_adt (adt_sort_name container) k.A.txt with
+          | Some kk -> Hashtbl.mem ctor_param_fields kk
+          | None -> false) ->
+    (* [container]'s own constructor of that name (2026-11-02). *)
+    let kk = Option.get (ctor_of_adt (adt_sort_name container) k.A.txt) in
+    let roles = Hashtbl.find ctor_param_fields kk in
+    let fparams = Hashtbl.find_opt ctor_field_params kk in
     if List.length roles <> List.length args then true
     else
       let slot j = Option.join (List.nth_opt slots j) in
@@ -5159,6 +5162,11 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
       body
   | A.EMatch (subj, branches, _) ->
     go subj;
+    (* An arm's constructor as the scrutinee's datatype's (2026-11-02): by
+       the scrutinee's type where the typechecker pins one datatype, else by
+       a name only one datatype declares.  [None]: no tag fact. *)
+    let subj_adt = tc_adt_at (March_typecheck.Typecheck.span_of_expr subj) in
+    let arm_ctor (c : string) : string option = Option.map snd (resolve_tested_ctor subj_adt c) in
     ignore
     @@ List.fold_left
       (fun (earlier : A.branch list) (br : A.branch) ->
@@ -5248,7 +5256,11 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         let re =
           match br.A.branch_pat with
           | A.PatCon (ctor, subpats) ->
-            let sorts = try Hashtbl.find ctor_field_sorts ctor.A.txt with Not_found -> [] in
+            let sorts =
+              match arm_ctor ctor.A.txt with
+              | Some k -> (try Hashtbl.find ctor_field_sorts k with Not_found -> [])
+              | None -> []
+            in
             if List.length subpats <> List.length sorts then re
             else
               List.fold_left2
@@ -5274,7 +5286,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         let p =
           match subj, br.A.branch_pat with
           | A.EVar s, A.PatCon (ctor, _)
-            when sort_of_ctor ctor.A.txt <> None && not (List.mem s.A.txt binders) ->
+            when arm_ctor ctor.A.txt <> None && not (List.mem s.A.txt binders) ->
             let sp = s.A.span in
             let tester =
               A.EApp
@@ -5299,7 +5311,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         let p =
           match subj, br.A.branch_pat with
           | A.EVar s, (A.PatCon ({ A.txt = "Cons"; _ }, [ _; _ ]) as pat)
-            when sort_of_ctor "Cons" = Some (adt_sort_name "List")
+            (* The built-in list's `Cons`, by the scrutinee's type. *)
+            when resolve_tested_ctor subj_adt "Cons" = Some (adt_sort_name "List", list_cons ())
                  && (not (is_axiom_measure "len"))
                  && not (List.mem s.A.txt binders) ->
             let sp = s.A.span in
@@ -5352,7 +5365,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
             List.fold_left
               (fun p (prev : A.branch) ->
                 match arm_excludes_tag prev with
-                | Some ctor when sort_of_ctor ctor <> None ->
+                | Some ctor when arm_ctor ctor <> None ->
                   let sp = s.A.span in
                   let tester =
                     A.EApp
@@ -5413,7 +5426,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
           | A.PatLit ((A.LitBool _ | A.LitInt _), _) -> true
           | A.PatTuple (subs, _) -> List.for_all irrefutable_pat subs
           | A.PatCon (ctor, subs) ->
-            subj_var && sort_of_ctor ctor.A.txt <> None && List.for_all irrefutable_pat subs
+            subj_var && arm_ctor ctor.A.txt <> None && List.for_all irrefutable_pat subs
           | _ -> false
         in
         let excluded_before (prev : A.branch) =
@@ -5423,7 +5436,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
           | A.PatLit ((A.LitBool _ | A.LitInt _), _) -> true
           | A.PatCon (ctor, _) ->
             subj_var
-            && (match arm_excludes_tag prev with Some c -> c = ctor.A.txt && sort_of_ctor c <> None | None -> false)
+            && (match arm_excludes_tag prev with Some c -> c = ctor.A.txt && arm_ctor c <> None | None -> false)
           | _ -> false
         in
         let p =
@@ -5448,9 +5461,10 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
             List.fold_left
               (fun p (prev : A.branch) ->
                 match arm_excludes_nested prev with
-                | Some (ctor, i, d) when cur.A.txt = ctor && sort_of_ctor d <> None ->
+                | Some (ctor, i, d) when cur.A.txt = ctor ->
                   (match List.nth_opt cur_subs i with
-                   | Some (A.PatVar t) ->
+                   | Some (A.PatVar t)
+                     when resolve_tested_ctor (tc_adt_at t.A.span) d <> None ->
                      let sp = t.A.span in
                      let tester =
                        A.EApp
@@ -5475,10 +5489,15 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         let sc, ce, p =
           match br.A.branch_pat with
           | A.PatCon (k, subpats) ->
-            (match container_entry_of_expr ctx defs cb ce_outer subj, Hashtbl.find_opt ctor_param_fields k.A.txt with
-             | Some ({ cont = container; slots; _ } as entry), Some roles
-               when sort_of_ctor k.A.txt = Some (adt_sort_name container)
-                    && List.length roles = List.length subpats ->
+            (match container_entry_of_expr ctx defs cb ce_outer subj with
+             | Some ({ cont = container; slots; _ } as entry)
+               when (match ctor_of_adt (adt_sort_name container) k.A.txt with
+                     | Some kk -> (match Hashtbl.find_opt ctor_param_fields kk with
+                                   | Some roles -> List.length roles = List.length subpats
+                                   | None -> false)
+                     | None -> false) ->
+               let kk = Option.get (ctor_of_adt (adt_sort_name container) k.A.txt) in
+               let roles = Hashtbl.find ctor_param_fields kk in
                (* Table-driven (P3 design §2a): a `PatVar` at a [Param i]
                   field takes slot [i] — a refined slot as a scope fact, a
                   nested container as its own env entry — and a `PatVar` at
@@ -5490,7 +5509,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                   nothing ([ctor_field_params]): at a permuted or non-parameter
                   self-reference (`N(T(b, a))`) the outer slots are the wrong
                   ones (multi-arg design phase 0). *)
-               let fparams = Hashtbl.find_opt ctor_field_params k.A.txt in
+               let fparams = Hashtbl.find_opt ctor_field_params kk in
                let hides fi =
                  match Option.bind fparams (fun fs -> List.nth_opt fs fi) with
                  | Some (_ :: _, _) -> true
@@ -6991,6 +7010,8 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear ctor_param_fields;
   Hashtbl.clear ctor_field_params;
   Hashtbl.clear ctor_field_joint;
+  Hashtbl.clear ctor_decls;
+  Hashtbl.clear ctor_source;
   Hashtbl.clear axiom_measures;
   Hashtbl.clear measure_base_cases;
   Hashtbl.clear measure_scalar_field_dep;
@@ -8581,6 +8602,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset ctor_field_params;
   Hashtbl.reset ctor_field_joint;
   Hashtbl.reset ctor_hidden_params;
+  Hashtbl.reset ctor_decls;
+  Hashtbl.reset ctor_source;
   Hashtbl.reset opaque_containers;
   Hashtbl.reset axiom_measures;
   Hashtbl.reset measure_base_cases;

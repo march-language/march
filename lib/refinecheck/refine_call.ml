@@ -2013,15 +2013,18 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       if not (Hashtbl.mem tester_facts_loaded key) then begin
         Hashtbl.replace tester_facts_loaded key ();
         match List.assoc_opt x sc with
-        | Some (b, q, Some s) when is_meas_sort s -> (
+        (* The caller's DECLARED datatype must be the goal's (review round 1
+           of 2026-11-02, I2): a tester read in another datatype names a
+           different constructor. *)
+        | Some (b, q, Some s) when is_meas_sort s && s = meas_sort_prefix ^ adt -> (
           match q with
           | A.EApp (A.EVar { A.txt = t; _ }, [ A.EVar { A.txt = n; _ } ], _)
             when n = b || n = "_" || n = x -> (
             match ctor_of_tester t with
-            | Some ctor when ctor = goal_ctor && sort_of_ctor ctor = Some adt ->
+            | Some ctor when ctor_of_adt adt ctor = Some goal_ctor ->
               decls := (x, adt_sort adt) :: !decls;
               if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
-              push_user (Smt.IsCtor (ctor, Smt.Const x))
+              push_user (Smt.IsCtor (goal_ctor, Smt.Const x))
             | _ -> ())
           | _ -> ())
         | _ -> ()
@@ -2048,13 +2051,14 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
     let rec reflect_dt ?(args : Smt.sort list option) adt e =
       let inst = match args with Some a -> Smt.SData (adt, a) | None -> adt_sort adt in
       match e with
-      | A.ECon (ctor, cargs, _)
-        when (match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor.A.txt cs | None -> false) ->
+      | A.ECon (ctor, cargs, _) when ctor_of_adt adt ctor.A.txt <> None ->
+        (* [adt]'s own constructor of that source name (2026-11-02). *)
+        let k = Option.get (ctor_of_adt adt ctor.A.txt) in
         let sorts =
           match args with
           | Some a ->
-            List.map (Smt.instantiate a) (try Hashtbl.find ctor_field_sorts_poly ctor.A.txt with Not_found -> [])
-          | None -> (try Hashtbl.find ctor_field_sorts ctor.A.txt with Not_found -> [])
+            List.map (Smt.instantiate a) (try Hashtbl.find ctor_field_sorts_poly k with Not_found -> [])
+          | None -> (try Hashtbl.find ctor_field_sorts k with Not_found -> [])
         in
         if List.length cargs <> List.length sorts then None
         else
@@ -2062,7 +2066,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
             (fun a s acc ->
               match reflect_field a s, acc with Some t, Some ts -> Some (t :: ts) | _ -> None)
             cargs sorts (Some [])
-          |> Option.map (fun ts -> Smt.Ctor (ctor.A.txt, inst, ts))
+          |> Option.map (fun ts -> Smt.Ctor (k, inst, ts))
       | A.EVar { A.txt = x; _ } -> decls := (x, inst) :: !decls; Some (Smt.Const x)
       (* ── Tier 2 propagation ────────────────────────────────────────────────
          A CALL returning a value at this very datatype sort, whose callee has a
@@ -2150,9 +2154,9 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
           let rt ctor arg =
             match arg with
             | A.EVar { A.txt = x; _ } when x = b || x = "_" ->
-              (match sort_of_ctor ctor with
-               | Some a when a = adt -> Some (Smt.IsCtor (ctor, c))
-               | _ -> None)
+              (match ctor_of_adt adt ctor with
+               | Some k -> Some (Smt.IsCtor (k, c))
+               | None -> None)
             | _ -> None
           in
           let rmc m f cargs' = if is_call_measure m then set_of_call m f cargs' else None in
@@ -2203,17 +2207,48 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        itself.  [reflect_dt] turns a literal into `(Ctor …)` (so the tester
        decides concretely) and a variable into an opaque datatype constant (so
        an unconstrained value stays unknown and we keep silent). *)
+    (* The datatype of the value a predicate name [arg] denotes (2026-11-02):
+       the refined parameter's or the named parameter's DECLARED type, else the
+       subject's own typechecker type.  [None] from a declared type means a
+       type VARIABLE (any other known type that is not a variant is the
+       sentinel, review round 3), and then the actual's own type decides;
+       [None] overall means the value's type is a type variable or unknown. *)
+    let subject_of arg =
+      match arg with
+      | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" -> self_actual
+      | A.EVar { A.txt = x; _ } ->
+        (match actual_of_name x with Some a -> a | None -> arg)
+      | _ -> arg
+    in
+    let known_adt_of arg =
+      let subject = subject_of arg in
+      let param_adt idx =
+        match Option.bind idx (fun i -> List.nth_opt sg.param_tys i) with
+        | Some (Some ty) -> adt_of_decl_ty ty
+        | _ -> None
+      in
+      (* A synthesized subject at [A.dummy_span] (the measure path's name
+         lookup) has no type of its own: whatever the typechecker last
+         recorded there is not its type (review round 5). *)
+      let of_subject () =
+        let sp = March_typecheck.Typecheck.span_of_expr subject in
+        if sp = A.dummy_span then None else tc_adt_at sp
+      in
+      match arg with
+      | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" ->
+        (match param_adt (Some rp.idx) with Some a -> Some a | None -> of_subject ())
+      | A.EVar { A.txt = x; _ } when List.mem_assoc x name_pos ->
+        (match param_adt (List.assoc_opt x name_pos) with Some a -> Some a | None -> of_subject ())
+      | _ -> of_subject ()
+    in
     let resolve_tester ctor arg =
-      match sort_of_ctor ctor with
+      let subject = subject_of arg in
+      let known = known_adt_of arg in
+      (* A TEST never resolves by the name alone (review round 4): a value
+         whose type is unknown or a type variable may be of any datatype. *)
+      match resolve_tested_ctor known ctor with
       | None -> None
-      | Some adt ->
-        let subject =
-          match arg with
-          | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" -> self_actual
-          | A.EVar { A.txt = x; _ } ->
-            (match actual_of_name x with Some a -> a | None -> arg)
-          | _ -> arg
-        in
+      | Some (adt, ctor) ->
         (* The subject is a bare caller-scope name: load whatever the CALLER's
            own signature promises about its TAG first, so the promise and the
            goal meet on the one `Const x` symbol [reflect_dt] is about to
@@ -2271,6 +2306,14 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
            nor a call with a proven postcondition): an unconstrained constant,
            i.e. SAT, i.e. a skip. *)
         let actual = if is_self name then Some self_actual else actual_of_name name in
+        (* The value must be KNOWN to be of the measure's datatype (review
+           round 4): an actual of a type variable, of another datatype, or of
+           a conflated name is not reflected at the measure's sort. *)
+        if (match known_adt_of (A.EVar { A.txt = name; A.span = A.dummy_span }) with
+            | Some a -> a <> adt
+            | None -> not (untyped_harness ()))
+        then None
+        else
         match actual with
         | None ->
           decls := (name, adt_sort adt) :: !decls;
@@ -2483,7 +2526,9 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
          constructor the goal tests, under [load_scope_tester_facts]' rules. *)
       else if caller_dt name <> None then begin
         let adt = Option.get (caller_dt name) in
-        List.iter (fun c -> load_scope_tester_facts adt c name) goal_ctors;
+        List.iter
+          (fun c -> Option.iter (fun k -> load_scope_tester_facts adt k name) (ctor_of_adt adt c))
+          goal_ctors;
         match reflect_dt adt (A.EVar { A.txt = name; A.span }) with
         | Some t ->
           if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
@@ -2563,7 +2608,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
          ADT is free to have its own `Nil`, and a `len` claim about that would be
          invented rather than derived. *)
       let list_sort = adt_sort_name "List" in
-      match arg, sort_of_ctor ctor with
+      (* The tester's datatype by the caller value's own type (2026-11-02). *)
+      (* A test: by the caller value's own type only (review round 4). *)
+      let resolved =
+        resolve_tested_ctor (tc_adt_at (March_typecheck.Typecheck.span_of_expr arg)) ctor
+      in
+      match arg, Option.map fst resolved with
       | A.EVar { A.txt = x; _ }, Some adt
         when adt = list_sort && (ctor = "Nil" || ctor = "Cons") ->
         (match measure_of_var "len" x with
@@ -2573,13 +2623,13 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
               else Smt.Gt (len_x, Smt.IntLit 0))
          | None -> None)
       | _ ->
-      match sort_of_ctor ctor with
+      match resolved with
       | None -> None
-      | Some adt ->
+      | Some (adt, k) ->
         (match reflect_dt adt arg with
          | Some t ->
            if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
-           Some (Smt.IsCtor (ctor, t))
+           Some (Smt.IsCtor (k, t))
          | None -> None)
     in
     (* Translate the path conditions into assumptions (dropping any that fall
