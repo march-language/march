@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A refinement can say what each half of it means.** Write a message after a
+  conjunct with `else`: `{Int | _ >= 0 else "index must not be negative" &&
+  _ < len(xs) else "index must be less than the list's length"}`. A call that
+  breaks a conjunct now leads with its message and names that conjunct alone
+  (`argument `n` of `List.nth` does not satisfy precondition `_ >= 0``), and the hint for a
+  call the checker cannot prove carries the message of the conjunct it could
+  not establish. `else` binds tighter than `&&`; a conjunct without a message is
+  reported as before. The stdlib's two-sided bounds carry messages: `List.nth`,
+  `Array.get`/`set`, the `Simd` lane accessors, `DateTime.fixed_zone` and
+  `fixed_zone_hm`, `Random.bernoulli`, and `Stats.percentile`/`quantile`.
 - **Refinement proofs take decided steps (fuel).** The checker now expands a
   reflected call that another call's definition produces when its branch is already
   decided (its argument is a constructor, or known to equal one), up to a per-function

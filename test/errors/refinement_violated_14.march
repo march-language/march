@@ -1,0 +1,9 @@
+mod Main do
+  -- A stdlib bound whose author wrote a message for each half: the message for
+  -- the half this call breaks (`_ >= 0`) leads the diagnostic, and the line
+  -- under it names that half alone.
+  -- EXPECT-ERROR: index must not be negative
+  fn first() : Int do
+    List.nth([10, 20, 30], -1)
+  end
+end

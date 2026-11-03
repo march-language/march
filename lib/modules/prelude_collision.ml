@@ -139,6 +139,7 @@ let rec free_names (bound : StrSet.t) (e : expr) : StrSet.t =
   | EPipe (l, r, _) -> StrSet.union (go l) (go r)
   | EAssert (e, _) -> go e
   | ESigil (_, content, _) -> go content
+  | ERefineMsg (content, _, _) -> go content
 
 and free_names_block (bound : StrSet.t) (es : expr list) : StrSet.t =
   match es with

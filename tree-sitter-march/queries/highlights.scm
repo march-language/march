@@ -25,6 +25,7 @@
 
 ; Refinement types — the predicate's `_` stands for the refined value
 (refinement_placeholder) @variable.builtin
+(refinement_message "else" @keyword)
 
 ; Module paths
 (module_path (type_identifier) @module)

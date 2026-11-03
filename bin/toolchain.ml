@@ -662,16 +662,23 @@ let load_stdlib ?(for_js=false) () =
       String.sub (Digest.to_hex (Digest.string stdlib_dir)) 0 8 in
     let cache_path = Filename.concat cache_dir
       ("stdlib_ast_" ^ build_id ^ "_" ^ dir_tag ^ "_" ^ short_hash ^ ".bin") in
+    (* The blob holds the DESUGARED stdlib, from which desugar has already
+       stripped the author-written refinement messages into
+       [March_ast.Refine_msg]'s table, so the stdlib's entries are stored
+       beside the decls and put back on a hit. *)
+    let stdlib_paths = List.map (Filename.concat stdlib_dir) file_list in
     (* Cache hit: unmarshal parsed ASTs *)
     match (try
       if Sys.file_exists cache_path then begin
         let ic = open_in_bin cache_path in
-        let data : March_ast.Ast.decl list = Marshal.from_channel ic in
+        let data : March_ast.Ast.decl list * (March_ast.Ast.span * string) list =
+          Marshal.from_channel ic in
         close_in ic;
         Some data
       end else None
     with _ -> None) with
-    | Some decls ->
+    | Some (decls, refine_msgs) ->
+      March_ast.Refine_msg.restore ~files:stdlib_paths refine_msgs;
       March_typecheck.Typecheck_builtins.note_stdlib_decls decls;
       decls
     | None ->
@@ -685,7 +692,8 @@ let load_stdlib ?(for_js=false) () =
            sessions; a reader must never see a half-written Marshal blob. *)
         let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
         let oc = open_out_bin tmp in
-        Marshal.to_channel oc decls [];
+        Marshal.to_channel oc
+          (decls, March_ast.Refine_msg.entries_for ~files:stdlib_paths) [];
         close_out oc;
         Sys.rename tmp cache_path
       with _ -> ());

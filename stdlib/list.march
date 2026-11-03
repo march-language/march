@@ -222,7 +222,7 @@ mod List do
       march> List.nth([10, 20, 30], 2)
       30
   """
-  fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do
+  fn nth(xs : List(a), n : {Int | _ >= 0 else "index must not be negative" && _ < len(xs) else "index must be less than the list's length"}) : a do
     match xs do
     Nil        -> panic("List.nth: index out of bounds")
     Cons(h, t) -> if n == 0 do h else nth(t, n - 1) end

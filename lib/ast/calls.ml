@@ -68,6 +68,7 @@ let rec calls_in_expr (acc : (string * Ast.span * Ast.span) list) (e : Ast.expr)
   | Ast.ELetStar (_, rhs, body, _) -> calls_in_expr (calls_in_expr acc rhs) body
   | Ast.EAssert (e, _) -> calls_in_expr acc e
   | Ast.ESigil (_, content, _) -> calls_in_expr acc content
+  | Ast.ERefineMsg (content, _, _) -> calls_in_expr acc content
   | Ast.ELit _ | Ast.EVar _ -> acc
 
 (** [names_and_name_spans e] is [calls_in_expr] projected to the
@@ -181,6 +182,7 @@ let builtin_candidate_calls ?(bound = []) (e : Ast.expr)
       go (List.fold_left (fun s v -> SSet.add v s) bound (pattern_vars [] pat)) acc body
     | Ast.EAssert (ex, _) -> go' acc ex
     | Ast.ESigil (_, content, _) -> go' acc content
+    | Ast.ERefineMsg (content, _, _) -> go' acc content
     | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)
     | Ast.ELit _ | Ast.EVar _ -> acc
   in
@@ -252,6 +254,7 @@ let rec spawned_actor_names (acc : string list) (e : Ast.expr) : string list =
     spawned_actor_names (spawned_actor_names acc rhs) body
   | Ast.EAssert (e, _) -> spawned_actor_names acc e
   | Ast.ESigil (_, content, _) -> spawned_actor_names acc content
+  | Ast.ERefineMsg (content, _, _) -> spawned_actor_names acc content
   | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)
   | Ast.ELit _ | Ast.EVar _ -> acc
 
@@ -361,6 +364,7 @@ let free_app_sites ?(bound = []) (e : Ast.expr) : app_site list =
       go (List.fold_left (fun s v -> SSet.add v s) bound (pattern_vars [] pat)) acc body
     | Ast.EAssert (ex, _) -> go' acc ex
     | Ast.ESigil (_, content, _) -> go' acc content
+    | Ast.ERefineMsg (content, _, _) -> go' acc content
     | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)
     | Ast.ELit _ | Ast.EVar _ -> acc
   in

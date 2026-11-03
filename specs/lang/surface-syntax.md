@@ -370,7 +370,13 @@ fields or pass the value to a measure.
 {v : Cfg | v.port >= 1}            -- a record field
 {v : Cfg | v.port > v.retries}     -- one field against another
 {v : Tree | size(v) < 100}         -- a @[measure] over a structure
+{Int | _ >= 0 else "must not be negative" && _ < 10 else "must be below 10"}
+                                   -- a message for each conjunct
 ```
+
+A conjunct may carry a message after `else`, shown when a call breaks that
+conjunct (`else` binds tighter than `&&`); see
+[A message for each half of a contract](refinement-types.md#a-message-for-each-half-of-a-contract).
 
 The predicate fragment is `+ - *`, `/ %` (with March's truncating semantics;
 a zero divisor makes the predicate false), the comparisons

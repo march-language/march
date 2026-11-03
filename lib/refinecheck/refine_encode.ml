@@ -4646,7 +4646,7 @@ let children : A.expr -> A.expr list = function
   | A.EIf (c, t, e, _) -> [ c; t; e ]
   | A.ECond (arms, _) -> List.concat_map (fun (c, b) -> [ c; b ]) arms
   | A.EPipe (a, b, _) -> [ a; b ]
-  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> [ e ]
   | A.ESend (a, b, _) -> [ a; b ]
   | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> [ e1; e2 ]

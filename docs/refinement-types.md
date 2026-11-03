@@ -260,6 +260,41 @@ comparisons, which is every ordinary refinement. A division in a bare
 when its divisor is a non-zero literal or is syntactically positive
 (`len(xs) + 1`).
 
+### A message for each half of a contract
+
+A predicate's `&&` conjuncts can each carry a message, written after the
+conjunct with `else`. When a call breaks that conjunct, the message leads the
+diagnostic, in the caller's terms rather than the checker's notation:
+
+```march
+fn nth(xs : List(a), n : {Int | _ >= 0 else "index must not be negative"
+                             && _ < len(xs) else "index must be less than the list's length"}) : a do
+  ...
+end
+```
+
+```
+refinement violation: index must not be negative [refinement_violated]
+argument `n` of `List.nth` does not satisfy `_ >= 0`
+```
+
+The line under the message names the conjunct the call breaks, alone. When
+the checker cannot prove a call either way, the hint that already names the
+missing conjunct carries its message too: `` `_ >= 0` established here;
+`_ < len(xs)` not: index must be less than the list's length ``.
+
+- `else` binds tighter than `&&`: in `_ >= 0 && _ < 10 else "…"` the message
+  belongs to `_ < 10` only.
+- A message is optional per conjunct. A conjunct without one, or a call that
+  breaks only the conjunction and no single conjunct, is reported exactly as
+  a refinement without messages is.
+- A message is plain text. It attaches only to the top-level `&&` conjuncts,
+  not inside an `||` or a nested expression. It changes no verdict: the
+  checker proves and refutes exactly what it would without it.
+- The standard library's two-sided bounds carry messages: `List.nth`,
+  `Array.get`/`set`, the `Simd` lane accessors, `DateTime.fixed_zone` and
+  `fixed_zone_hm`, `Random.bernoulli`, and `Stats.percentile`/`quantile`.
+
 ### Refinements inside containers, callbacks and folds
 
 A refinement may also sit inside a type argument, on a callback, or on a

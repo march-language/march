@@ -644,6 +644,28 @@ end|} in
   Alcotest.(check bool) "long form stays long" true (has "_ == r(x, y)");
   Alcotest.(check bool) "no synthetic binder leaks" false (has "$x")
 
+(* Author-written conjunct messages on a refinement (`p else "msg"`,
+   March_ast.Refine_msg) print back where they were written, and `else`
+   binding tighter than `&&` survives the round trip. *)
+let test_refinement_messages () =
+  let src = {|mod Test do
+fn at(xs : List(Int), n : {Int | _ >= 0 else "index must not be negative" && _ < len(xs) else "index must be less than the list's length"}) : Int do
+  0
+end
+fn div(a : Int, b : {v : Int | v != 0 else "the divisor must not be \"zero\""}) : Int do
+  a
+end
+end|} in
+  check_parses "refinement messages" src;
+  check_idempotent "refinement messages" src;
+  let out = fmt src in
+  let has needle =
+    let n = String.length out and m = String.length needle in
+    let rec go i = i + m <= n && (String.sub out i m = needle || go (i + 1)) in go 0 in
+  Alcotest.(check bool) "both conjunct messages kept" true
+    (has {|_ >= 0 else "index must not be negative" && _ < len(xs) else "index must be less than the list's length"|});
+  Alcotest.(check bool) "escaped quote kept" true (has {|v != 0 else "the divisor must not be \"zero\""|})
+
 let () =
   let open Alcotest in
   run "formatter" [
@@ -651,6 +673,7 @@ let () =
       test_case "simple fn"       `Quick test_simple_fn;
       test_case "abstract refinement shorthand" `Quick test_abstract_refinement_shorthand;
       test_case "two-argument abstract refinement shorthand" `Quick test_abstract_refinement_two_argument_shorthand;
+      test_case "refinement messages" `Quick test_refinement_messages;
       test_case "match expr"      `Quick test_match_expr;
       test_case "if expr"         `Quick test_if_expr;
       test_case "let binding"     `Quick test_let_binding;

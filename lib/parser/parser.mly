@@ -1654,15 +1654,28 @@ ty_atom:
   (* Refinement type, no binder: { Int | _ >= 0 }, { List(a) | len(_) > 0 }.
      Base is a [ty_app] (constructor/atom application) — function-arrow and
      nat-arithmetic bases are not refined directly in v1. *)
-  | LBRACE; t = ty_app; PIPE; p = expr; RBRACE
+  | LBRACE; t = ty_app; PIPE; p = refine_pred; RBRACE
     { TyRefine (t, None, p) }
   (* Refinement type with binder: { v : Int | v != 0 }.  Shares the
      `lower_name COLON ty` prefix with a record field; menhir resolves on the
      PIPE (refinement) vs COMMA/RBRACE (record) lookahead. *)
-  | LBRACE; name = lower_name; COLON; t = ty; PIPE; p = expr; RBRACE
+  | LBRACE; name = lower_name; COLON; t = ty; PIPE; p = refine_pred; RBRACE
     { TyRefine (t, Some name, p) }
   | LBRACE; fields = separated_nonempty_list(COMMA, ty_record_field); RBRACE
     { TyRecord fields }
+
+(* A refinement predicate whose `&&` conjuncts may each carry an
+   author-written message, shown when that conjunct is the one a call fails:
+   `{Int | _ >= 0 else "index must not be negative" && _ < len(xs) else "…"}`.
+   `else` binds tighter than `&&` ([Refine_msg.attach]), and a predicate with
+   no message is an ordinary [expr]. *)
+refine_pred:
+  | p = expr { p }
+  | p = expr; ELSE; msg = STRING
+    { March_ast.Refine_msg.attach p msg (mk_span $loc) }
+  | p = expr; ELSE; msg = STRING; AND; rest = refine_pred
+    { EApp (EVar (mk_name "&&" $loc), [ March_ast.Refine_msg.attach p msg (mk_span $loc(msg)); rest ],
+            mk_span $loc) }
 
 ty_record_field:
   | name = lower_name; COLON; t = ty { (name, t) }

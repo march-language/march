@@ -8308,6 +8308,22 @@
     }
   },
   {
+    "type": "refinement_message",
+    "named": true,
+    "fields": {
+      "message": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "refinement_placeholder",
     "named": true,
     "fields": {}
@@ -8385,9 +8401,13 @@
         ]
       },
       "predicate": {
-        "multiple": false,
+        "multiple": true,
         "required": true,
         "types": [
+          {
+            "type": "&&",
+            "named": false
+          },
           {
             "type": "additive_expression",
             "named": true
@@ -8490,6 +8510,10 @@
           },
           {
             "type": "record_update",
+            "named": true
+          },
+          {
+            "type": "refinement_message",
             "named": true
           },
           {

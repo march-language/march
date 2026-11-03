@@ -76,6 +76,7 @@ let span_of_expr (e : expr) : span =
   | ELetQ (_, _, _, sp) | ELetStar (_, _, _, sp) -> sp
   | EAssert (_, sp) -> sp
   | ESigil (_, _, sp) -> sp
+  | ERefineMsg (_, _, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -165,6 +166,8 @@ let rec walk_expr ~file (acc_e : (string, unit) Hashtbl.t)
   | EAtom (_, args, _) ->
     List.iter (walk_expr ~file acc_e acc_b) args
   | ESigil (_, content, _) ->
+    walk_expr ~file acc_e acc_b content
+  | ERefineMsg (content, _, _) ->
     walk_expr ~file acc_e acc_b content
   | ELit _ | EVar _ | EHole _ | EDbg (None, _) | EResultRef _ -> ()
 
