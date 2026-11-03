@@ -386,10 +386,12 @@ end
     gated "cat_assoc, rev_cat, rev_rev (§4.6): lemmas calling lemmas, with assert steps" (fun () ->
         let out = run ("mod N do\n" ^ defs4_6 ^ cat_nil ^ cat_assoc ^ rev_cat ^ rev_rev ~asserts:true ^ "end\n") in
         List.iter (expect_admitted out) [ "cat_nil"; "cat_assoc"; "rev_cat"; "rev_rev" ]);
-    gated "rev_rev_short: without the asserts, single unfolding cannot finish rev_rev" (fun () ->
+    gated "rev_rev_short (phase 4): without the asserts, decided steps finish rev_rev" (fun () ->
+        (* Phase 2 needed the five asserts (single unfolding: lemma_unproved);
+           phase 4's decided second step supplies them.  `@[reflect(fuel: 1)]`
+           on `rev` and `cat` brings back the phase-2 verdict ([fuel_lower]). *)
         let out = run ("mod N do\n" ^ defs4_6 ^ cat_nil ^ cat_assoc ^ rev_cat ^ rev_rev ~asserts:false ^ "end\n") in
-        List.iter (expect_admitted out) [ "cat_nil"; "cat_assoc"; "rev_cat" ];
-        expect_unproved out "rev_rev");
+        List.iter (expect_admitted out) [ "cat_nil"; "cat_assoc"; "rev_cat"; "rev_rev" ]);
     gated "sound_eq_float: a lemma's logical == does not become program == at Float (C3)" (fun () ->
         let out =
           run

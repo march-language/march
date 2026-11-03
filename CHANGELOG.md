@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinement proofs take decided steps (fuel).** The checker now expands a
+  reflected call that another call's definition produces when its branch is already
+  decided (its argument is a constructor, or known to equal one), up to a per-function
+  fuel, default 2. So `len(cat([1], [2])) == 2` and `rev(rev(xs)) == xs` (with its
+  lemmas, no intermediate `assert`s) now prove. `@[reflect(fuel: N)]` sets the fuel
+  from 1 to 8, and `@[reflect]` asserts a function is reflected: the new error
+  `invalid_reflect` names why when it is not. Some calls that used to be skipped as
+  `reflect-fuel` are now proved or, where the contract is really broken, reported as
+  violations.
+
 - **Lemmas: `@[lemma]` proofs for refinement types.** A lemma states a theorem in its
   result type, `{Unit | P}`, and proves it with ordinary code: `match` and `if` for
   cases, a recursive call as the induction hypothesis, calls of other lemmas, and
@@ -66,6 +76,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **No more false refinement violations for container elements and passed functions.**
+  When an element refinement could not be translated for the solver (for example one that
+  calls an `@[opaque]` function), or when a proof stopped at a reflected call it did not
+  expand, the checker could report `refinement_violated` with a made-up element value for a
+  program that cannot fail. These are now reported as unverified (a skip), not violations.
 - `march --check` no longer accepts a misspelled module whose member names a builtin
   (`Lsit.length(xs)`): it reports "Unknown module `Lsit`. Did you mean `List`?" instead of
   failing at run time.

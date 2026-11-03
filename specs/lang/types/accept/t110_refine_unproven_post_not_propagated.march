@@ -39,8 +39,16 @@
 -- `_ < n` on every input while staying unprovable through the opaque call,
 -- and the instantiated `_ < 0` at `shady(0)` still contradicts `takepos`'s
 -- `_ >= 0`, so the propagation trap is exactly as armed as before.)
+--
+-- (2026-11-03, reflection phase 4: `opaque_id` is now `@[opaque]`.  Without
+-- it the checker REFLECTS `opaque_id` (it is the identity) and, since phase
+-- 4's decided steps, computes `shady(0) = 0 - 1` outright, so the call is a
+-- real, proved violation that has nothing to do with propagation.  The
+-- witness needs a callee the logic cannot see into, which is what
+-- `@[opaque]` says.)
 mod M do
   needs IO.Console
+  @[opaque]
   fn opaque_id(n : Int) : Int do n end
   fn shady(n : Int) : {Int | _ < n} do opaque_id(n) - 1 end
   fn takepos(k : {Int | _ >= 0}) : Int do k end

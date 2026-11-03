@@ -1,0 +1,13 @@
+mod Main do
+  needs IO.Console
+
+  @[reflect]
+  fn noisy(n : Int) : Int do
+    println("computing")
+    n + 1
+  end
+
+  fn main(_cap : Cap(IO.Console)) : Int do
+    noisy(1)
+  end
+end
