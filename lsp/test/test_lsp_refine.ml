@@ -246,4 +246,30 @@ end
         | Some (n, p) ->
           Alcotest.(check string) "name" "inc_gt" n;
           Alcotest.(check string) "theorem" "inc(n) > n" p
-        | None -> Alcotest.fail "no lemma hover on the call") ]
+        | None -> Alcotest.fail "no lemma hover on the call");
+    Alcotest.test_case "lsp_lemma_rewrite: an admitted equation is offered as a rewrite, naming the lemma" `Quick (fun () ->
+        let src =
+          "mod T do\n  fn cat(xs : List(Int), ys : List(Int)) : List(Int) do\n    match xs do\n      Nil -> ys\n      Cons(h, t) -> Cons(h, cat(t, ys))\n    end\n  end\n  @[lemma]\n  fn cat_nil(xs : List(Int)) : {Unit | cat(xs, Nil) == xs} do\n    match xs do\n      Nil -> ()\n      Cons(_, t) -> cat_nil(t)\n    end\n  end\n  fn f(zs : List(Int)) : List(Int) do\n    cat(Cons(1, zs), Nil)\n  end\n  fn g(zs : List(Int)) : List(Int) do\n    cat(zs, zs)\n  end\nend\n"
+        in
+        let a = March_lsp_lib.Analysis.analyse ~filename:"test.march" ~src in
+        let at needle =
+          let line, col = Test_lsp_harness.pos_of src needle in
+          (line, col + 1)
+        in
+        let acts ~admitted needle =
+          let line, character = at needle in
+          March_lsp_lib.Lemma_rewrite.actions a ~line ~character ~admitted
+        in
+        let proved n = if n = "cat_nil" then Some true else None in
+        (match acts ~admitted:proved "cat(Cons(1, zs), Nil)" with
+         | [ act ] ->
+           Alcotest.(check string) "title" "Rewrite to `Cons(1, zs)` (by the proved lemma `cat_nil`)"
+             act.Test_lsp_harness.Lsp.Types.CodeAction.title
+         | l -> Alcotest.failf "expected one rewrite, got %d" (List.length l));
+        (* An unproved lemma justifies nothing. *)
+        if acts ~admitted:(fun _ -> Some false) "cat(Cons(1, zs), Nil)" <> [] then
+          Alcotest.fail "an unproved lemma offers no rewrite";
+        if acts ~admitted:(fun _ -> None) "cat(Cons(1, zs), Nil)" <> [] then
+          Alcotest.fail "an unchecked lemma offers no rewrite";
+        (* `cat(zs, zs)` is not an instance of `cat(xs, Nil)`. *)
+        if acts ~admitted:proved "cat(zs, zs)" <> [] then Alcotest.fail "no rewrite where the left side does not match") ]

@@ -2838,7 +2838,13 @@ let test_record_update_missing_field_on_erased_base_converged () =
        STDERR, and [run_capture] discards stderr — using it here would leave
        [interp_err] empty and this test would silently stop checking the
        error text. *)
-    let (rc_interp, _interp_out, interp_err) = run_capture3 ~timeout:10 interp_cmd in
+    (* 120, like the compile below: a cold interpreter run (empty stdlib
+       cache, loaded CI runner) outlived 10 s on #1068's ubuntu job, and a
+       timeout's 124 passed the `< 128` check below, so it read as "stderr
+       does not mention the field". *)
+    let (rc_interp, _interp_out, interp_err) = run_capture3 ~timeout:120 interp_cmd in
+    if rc_interp = 124 then
+      Alcotest.failf "the interpreter run timed out (120 s); stderr so far:\n%s" interp_err;
     let bin_file = src_file ^ ".bin" in
     let compile_cmd =
       Printf.sprintf "%s --compile %s -o %s"

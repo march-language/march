@@ -45,6 +45,11 @@ git log is authoritative for exact commits.
 - **`--refine-rlimit N` and `[refine] rlimit = N` in `forge.toml`** raise the per-query
   solver limit for a project with a known-hard proof. forge passes the setting to every
   `march` it runs.
+- **Lemma rewrites in the editor.** When a proved `@[lemma]` states an equation
+  `lhs == rhs`, the language server offers a code action that rewrites an expression of
+  the shape `lhs` into `rhs`, named after the lemma ("Rewrite to `Cons(1, zs)` (by the
+  proved lemma `cat_nil`)"). Unproved lemmas offer nothing.
+
 - **Refinement proofs take decided steps (fuel).** The checker now expands a
   reflected call that another call's definition produces when its branch is already
   decided (its argument is a constructor, or known to equal one), up to a per-function
@@ -148,6 +153,12 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **A false lemma is an error, not a warning.** A lemma whose theorem is false at some
+  input, such as `{Unit | n + n >= n}` at `n = -1`, was reported only as
+  `lemma_unproved` unless the theorem was false at every input. The checker now runs the
+  theorem on the solver's counterexample and, when it is false there, reports
+  `refinement_violated` with that input.
 
 - **`march test` with several files no longer leaks Vault state between them.** Named
   Vaults (and the Config values stored in them) lived for the whole process, so when one
