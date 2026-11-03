@@ -1,0 +1,17 @@
+mod P45CapTotalAndDiverges do
+  -- `cap total` (one token, like `cap verified`) and `@[diverges]` (a bare
+  -- attribute, on its own line or on the `fn`'s line): termination design
+  -- specs/2026-10-26-termination-checking-design.md §2.2, §4.1, phase 4.
+  cap total
+
+  fn countdown(n : Int) : Int do
+    if n <= 0 do 0 else countdown(n - 1) end
+  end
+
+  @[diverges]
+  fn serve(n : Int) : Int do serve(n + 1) end
+
+  @[diverges] pfn tick(n : Int) : Int do tick(n) end
+
+  fn main() : Int do countdown(3) end
+end

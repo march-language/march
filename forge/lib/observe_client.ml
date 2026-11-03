@@ -78,15 +78,19 @@ let query_socket (path : string) (request : string) : (Yojson.Safe.t, string) re
     this tolerates up to 30 s of clock skew either way. *)
 let debug_window_ms = 30_000
 
-(** [signed_request ~sk ~nonce ~now_ms verb fields]: the request line for a
-    debug verb, e.g. [STATE <sig> nonce:… not_after_ms:… pid:7].  The
+(** [signed_request ~sk ~nonce ~boot ~now_ms verb fields]: the request line
+    for a debug verb, e.g. [STATE <sig> nonce:… boot:… not_after_ms:… pid:7].
+    [boot] is the node's HELLO answer: the signature then names one process
+    of one node, so a captured line cannot be replayed after a restart or
+    against another node holding the same key.  The
     signature covers the line without its signature word, which is what
     runtime/march_observe_debug.c verifies.  Pure, for tests. *)
-let signed_request ~(sk : bytes) ~(nonce : string) ~(now_ms : int)
+let signed_request ~(sk : bytes) ~(nonce : string) ~(boot : string) ~(now_ms : int)
     (verb : string) (fields : string list) : string =
   let body =
     String.concat " "
       (Printf.sprintf "nonce:%s" nonce
+       :: Printf.sprintf "boot:%s" boot
        :: Printf.sprintf "not_after_ms:%d" (now_ms + debug_window_ms)
        :: fields) in
   let sig_b64 =
@@ -115,4 +119,11 @@ let explain_debug_error (m : string) : string =
   | "not_after_too_far" -> m ^ " (the node's clock is more than 30 s behind this machine's)"
   | "policy" -> m ^ " (the verb is not listed in the node's $MARCH_DEBUG_POLICY file)"
   | "replay" -> m ^ " (the node has already seen this request's nonce)"
+  | "wrong_boot" -> m ^ " (the node restarted between HELLO and the request: try again)"
+  | "limit_required" -> m ^ " (a trace needs a limit: --max-events N or --rate N/SECS)"
+  | "limit_out_of_range" ->
+    m ^ " (Count 1..65536; Rate events 1..100000 per 1..3600 seconds)"
+  | "unknown_function" -> m ^ " (not a boundary function of that --hot-reload build; app functions only)"
+  | "too_many_sessions" -> m ^ " (the node runs 4 trace sessions at most: --trace-stop one)"
+  | "not_found" -> m ^ " (no such trace session: stopped, expired or never started)"
   | _ -> m

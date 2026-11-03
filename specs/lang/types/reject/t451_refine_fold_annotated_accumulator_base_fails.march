@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: cannot verify the accumulator invariant `_ > 0` annotated on `acc` (passed to `List.fold_left`) (accumulator-base-unproved:
+-- Accumulator invariants, phase 4 (2026-10-18): an annotated accumulator
+-- whose initial value does not meet the annotation.  `0` is not `_ > 0`, and
+-- it is the result on `[]`.  The annotation's own obligation is a skip with
+-- the base reason (never a violation: the base is data dependent), an error
+-- under `cap verified`; it is not assumed in the body, and `s` gets nothing.
+-- Before phase 4 this module was rejected too, for `need_pos(s)` (nothing
+-- constrained `s`); it now also names the annotation.  Accept twin:
+-- accept/t450.
+mod FoldAnnotatedAccumulatorBaseFails do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn count(ys : List(Int)) : Int do
+    let s = List.fold_left(ys, 0, fn (acc : {Int | _ > 0}, _x) -> acc + 1)
+    need_pos(s)
+  end
+end

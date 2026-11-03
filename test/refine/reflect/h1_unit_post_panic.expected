@@ -1,0 +1,7 @@
+skip	user	h1_unit_post_panic.march:2:5	unreflectable-subject	postcondition	bogus	n == n + 1
+skip	user	h1_unit_post_panic.march:6:5	unreflectable-subject	postcondition	spin	n == n + 1
+violated	user	h1_unit_post_panic.march:15:12	precondition	need_pos	_ > 0
+reflect	h1_unit_post_panic.march:2:5	bogus	no	R4:calls panic (h1_unit_post_panic.march:3:4)
+reflect	h1_unit_post_panic.march:6:5	spin	no	R2:unproved:not-decreasing (h1_unit_post_panic.march:6:5)
+reflect	h1_unit_post_panic.march:10:5	need_pos	reflected	unfold (guard: k > 0)
+reflect	h1_unit_post_panic.march:12:5	main	no	R1:is `main` (h1_unit_post_panic.march:12:5)

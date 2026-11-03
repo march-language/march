@@ -44,9 +44,11 @@ val emit_module :
   ?impl_hashes:(string, string) Hashtbl.t ->
   ?remote_impl_hashes:(string, string) Hashtbl.t ->
   ?remote_sig_hashes:(string, string) Hashtbl.t ->
+  ?hr_sig_hashes:(string, string) Hashtbl.t ->
   ?emit_main:bool ->
   ?cap_attrib:(String.t * string) list ->
   ?cap_decls:(string * string) list ->
+  ?cap_manifest:string ->
   ?k_table:Kind.table -> Tir.tir_module -> string
 
 val emit_preamble : ?target:target_config -> ?repl:bool -> Buffer.t -> unit
@@ -94,6 +96,9 @@ val emit_repl_expr :
   fns:Tir.fn_def list ->
   ?extern_fns:Tir.fn_def list ->
   ?store_as_slot:int option ->
+  ?borrow_slots:bool ->
+  ?slot_drop_fn:string ->
+  ?register_drops:bool ->
   ?session_wraps:session_wraps ->
   types:Tir.type_def list -> Tir.expr -> string
 
@@ -106,6 +111,8 @@ val emit_repl_decl :
   prev_slots:repl_slot_info list ->
   fns:Tir.fn_def list ->
   ?extern_fns:Tir.fn_def list ->
+  ?borrow_slots:bool ->
+  ?register_drops:bool ->
   ?session_wraps:session_wraps ->
   types:Tir.type_def list -> Tir.expr -> string
 

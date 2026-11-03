@@ -1,0 +1,47 @@
+-- Compiled to_string of a record whose fields share names and slot kinds
+-- with some OTHER declared record but not its field types.  A structural
+-- record used to be matched to a declared one by slot kind alone, which maps
+-- Int, Bool, Unit and Atom all to one kind: `{ n: true }` matched the stdlib's
+-- `{ n : Int }` record and printed `{ n: 1 }`.
+mod Main do
+  needs IO.Console
+
+  type P = { n : Bool }
+  type F = { x : Float }
+  type K = { k : Int }
+  type V = { v : List(Int) }
+  type W = W(Bool)
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    -- one-field undeclared records of each scalar
+    println(to_string({ n: true }))
+    println(to_string({ f: 1.5 }))
+    println(to_string({ c: char_from_int(97) }))
+    println(to_string({ u: () }))
+    println(to_string({ s: "s" }))
+    -- declared one-field records
+    let p : P = { n: false }
+    println(to_string(p))
+    let f : F = { x: 2.5 }
+    println(to_string(f))
+    -- a single-constructor ADT with one Bool field
+    println(to_string(W(true)))
+    -- same field name and slot kind as a declared record, different type
+    println(to_string({ k: true }))
+    println(to_string({ k: () }))
+    println(to_string({ v: "not a list" }))
+    let k : K = { k: 7 }
+    println(to_string(k))
+    -- nested in a List or an Option
+    println([p])
+    println([{ n: true }, { n: false }])
+    println(Some({ n: false }))
+    println(Some(p))
+    println([W(false)])
+    println(Some(W(true)))
+    println([{ f: 0.5 }])
+    println([{ c: char_from_int(122) }])
+    println(Some({ u: () }))
+    println([{ k: false }])
+  end
+end

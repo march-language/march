@@ -36,6 +36,8 @@
 --
 -- Still to come: an OCaml-side renderer into lib/errors so library and
 -- compiler diagnostics are indistinguishable.
+--
+-- doc: try
 
 mod Parser do
 
@@ -105,6 +107,13 @@ mod Parser do
   That behaviour is correct for a parser you are composing INTO a larger one,
   and wrong for a top-level "parse this whole input" call. For the latter
   reach for `run_all`, which is this plus `eof`.
+
+  ## Examples
+
+      march> Parser.run(Parser.lit("let"), "let x")
+      Ok("let")
+      march> Result.map_err(Parser.run(Parser.lit("let"), "lex"), fn e -> Parser.render("lex", e))
+      Err("1:1: I was expecting `let`")
   """
   fn run(p : Parser(a), input : String) : Result(a, ParseErr) do
     match p do
@@ -131,6 +140,13 @@ mod Parser do
 
   Use `run` instead only when a leftover tail is meaningful — streaming, or
   hand-managing the offset yourself.
+
+  ## Examples
+
+      march> Parser.run_all(Parser.take_while1("digits", fn b -> b >= 48 && b <= 57), "123")
+      Ok("123")
+      march> Result.map_err(Parser.run_all(Parser.take_while1("digits", fn b -> b >= 48 && b <= 57), "123xyz"), fn e -> Parser.render("123xyz", e))
+      Err("1:4: I was expecting end of input")
   """
   fn run_all(p : Parser(a), input : String) : Result(a, ParseErr) do
     run(skip_then(p, eof()), input)
@@ -147,6 +163,13 @@ mod Parser do
   On failure the reported offset is where the literal *started*, not where the
   bytes diverged: a caller who wrote `lit("ab")` wants to be told that `ab`
   was expected here, not that `b` was expected one byte along.
+
+  ## Examples
+
+      march> Parser.run(Parser.lit("ab"), "abc")
+      Ok("ab")
+      march> Result.map_err(Parser.run(Parser.lit("ab"), "ax"), fn e -> e.pos)
+      Err(0)
   """
   fn lit(s : String) : Parser(String) do
     let n = string_byte_length(s)
@@ -253,6 +276,13 @@ mod Parser do
   where the input actually diverged rather than at the start of the sequence.
   A hard failure (`RCut`) from either side propagates without being turned
   into a soft failure — that is what makes a commit point stick.
+
+  ## Examples
+
+      march> Parser.run_all(Parser.and_then(Parser.lit("a"), Parser.lit("b")), "ab")
+      Ok(("a", "b"))
+      march> Result.map_err(Parser.run_all(Parser.and_then(Parser.lit("a"), Parser.lit("b")), "ax"), fn e -> Parser.render("ax", e))
+      Err("1:2: I was expecting `b`")
   """
   fn and_then(p : Parser(a), q : Parser(b)) : Parser((a, b)) do
     match (p, q) do
@@ -277,7 +307,15 @@ mod Parser do
   A hard failure from `p` — one raised past a commit point — is propagated
   rather than swallowed, which is the whole point of committing. When both
   alternatives fail softly the two errors are merged by `merge_err`, so the
-  reported position is the furthest either one reached.
+  reported position is the furthest either one reached (and at a tie, both
+  expected-sets are reported).
+
+  ## Examples
+
+      march> Parser.run_all(Parser.alt(Parser.lit("yes"), Parser.lit("no")), "no")
+      Ok("no")
+      march> Result.map_err(Parser.run_all(Parser.alt(Parser.lit("yes"), Parser.lit("no")), "maybe"), fn e -> Parser.render("maybe", e))
+      Err("1:1: I was expecting `yes` or `no`")
   """
   fn alt(p : Parser(a), q : Parser(a)) : Parser(a) do
     match (p, q) do
@@ -300,7 +338,16 @@ mod Parser do
   Match one byte by its code (0..255).
 
   There is no character literal in March, so byte codes are the primitive and
-  `lit` is the ergonomic form for anything spelled as text.
+  `lit` is the ergonomic form for anything spelled as text.  Returns the
+  matched code.  In an error a printable ASCII byte is named as itself; any
+  other byte as `byte N`.
+
+  ## Examples
+
+      march> Parser.run(Parser.byte(65), "ABC")
+      Ok(65)
+      march> Result.map_err(Parser.run(Parser.byte(65), "xyz"), fn e -> Parser.render("xyz", e))
+      Err("1:1: I was expecting `A`")
   """
   fn byte(code : Int) : Parser(Int) do
     Parser(fn (input, i) ->
@@ -318,8 +365,16 @@ mod Parser do
   The name is what the reader sees in a message ("I was expecting a digit"),
   so it should name the class, not the predicate: "digit", not "is_digit".
 
-  `string_byte_at` returns -1 past the end of the input, and a predicate over
-  byte values will reject that, so end-of-input needs no special case.
+  `string_byte_at` returns -1 past the end of the input, and `byte_if` never
+  calls `pred` there, so end-of-input needs no special case.  Returns the
+  matched byte code.
+
+  ## Examples
+
+      march> Parser.run(Parser.byte_if("digit", fn b -> b >= 48 && b <= 57), "7")
+      Ok(55)
+      march> Result.map_err(Parser.run(Parser.byte_if("digit", fn b -> b >= 48 && b <= 57), ""), fn e -> Parser.render("", e))
+      Err("1:1: I was expecting digit")
   """
   fn byte_if(name : String, pred : Int -> Bool) : Parser(Int) do
     Parser(fn (input, i) ->
@@ -338,6 +393,13 @@ mod Parser do
   `run` with `eof` already appended. Reach for `eof` directly when the
   end-of-input requirement sits INSIDE a grammar — one branch of an `alt`,
   say — rather than at the outermost call.
+
+  ## Examples
+
+      march> Parser.run(Parser.eof(), "")
+      Ok(())
+      march> Result.map_err(Parser.run(Parser.eof(), "x"), fn e -> Parser.render("x", e))
+      Err("1:1: I was expecting end of input")
   """
   fn eof() : Parser(Unit) do
     Parser(fn (input, i) ->
@@ -347,6 +409,11 @@ mod Parser do
 
   doc """
   Transform a parser's result, leaving its failure behaviour untouched.
+
+  ## Examples
+
+      march> Parser.run_all(Parser.map(Parser.take_while1("digits", fn b -> b >= 48 && b <= 57), fn s -> string_to_int(s)), "2024")
+      Ok(Some(2024))
   """
   fn map(p : Parser(a), f : a -> b) : Parser(b) do
     match p do
@@ -375,6 +442,12 @@ mod Parser do
   This is not a March quirk; every combinator library in a strict language
   needs the same device (Scala's `P(...)`, OCaml's `fix`). It is the one piece
   of ceremony a grammar DSL would remove, since a DSL can see the recursion.
+  The thunk is called again on every run of the parser (not memoized).
+
+  ## Examples
+
+      march> Parser.run(Parser.delay(fn -> Parser.lit("z")), "z")
+      Ok("z")
   """
   fn delay(thunk : Unit -> Parser(a)) : Parser(a) do
     Parser(fn (input, i) ->
@@ -390,7 +463,15 @@ mod Parser do
   allocates a list cell per byte and then needs a second pass to rebuild a
   string. This scans to the end of the run and takes a single slice — one
   allocation per token instead of one per character, which is the difference
-  between a combinator lexer being usable and being a toy.
+  between a combinator lexer being usable and being a toy.  Fails softly,
+  expecting `name`, when the first byte does not satisfy `pred`.
+
+  ## Examples
+
+      march> Parser.run(Parser.take_while1("digits", fn b -> b >= 48 && b <= 57), "123xyz")
+      Ok("123")
+      march> Result.map_err(Parser.run(Parser.take_while1("digits", fn b -> b >= 48 && b <= 57), "xyz"), fn e -> Parser.render("xyz", e))
+      Err("1:1: I was expecting digits")
   """
   fn take_while1(name : String, pred : Int -> Bool) : Parser(String) do
     Parser(fn (input, i) ->
@@ -403,6 +484,13 @@ mod Parser do
   Match a run of zero or more bytes satisfying `pred`, returned as one String.
 
   Never fails, so it is the right shape for optional whitespace.
+
+  ## Examples
+
+      march> Parser.run(Parser.take_while(fn b -> b == 32), "   abc")
+      Ok("   ")
+      march> Parser.run(Parser.take_while(fn b -> b == 32), "abc")
+      Ok("")
   """
   fn take_while(pred : Int -> Bool) : Parser(String) do
     Parser(fn (input, i) ->
@@ -415,6 +503,13 @@ mod Parser do
 
   A hard failure still propagates: past a commit point the construct was not
   optional.
+
+  ## Examples
+
+      march> Parser.run_all(Parser.and_then(Parser.optional(Parser.lit("-")), Parser.lit("42")), "-42")
+      Ok((Some("-"), "42"))
+      march> Parser.run_all(Parser.and_then(Parser.optional(Parser.lit("-")), Parser.lit("42")), "42")
+      Ok((None, "42"))
   """
   fn optional(p : Parser(a)) : Parser(Option(a)) do
     match p do
@@ -443,6 +538,11 @@ mod Parser do
 
   The furthest-failure position is threaded through both halves, so an error
   in the dependent parser still competes correctly inside an `alt`.
+
+  ## Examples
+
+      march> Parser.run_all(Parser.flat_map(Parser.byte_if("digit", fn b -> b >= 48 && b <= 57), fn d -> Parser.repeat(Parser.lit("x"), d - 48)), "3xxx")
+      Ok(["x", "x", "x"])
   """
   fn flat_map(p : Parser(a), f : a -> Parser(b)) : Parser(b) do
     match p do
@@ -469,7 +569,16 @@ mod Parser do
 
   Unlike `many`, a shortfall is an error rather than a shorter list: `n` came
   from somewhere — usually a length prefix — so falling short means the input
-  disagrees with itself.
+  disagrees with itself.  `n <= 0` succeeds with `[]` without consuming.
+  A zero-width `p` still yields `n` results (no zero-width guard, unlike
+  `many`).
+
+  ## Examples
+
+      march> Parser.run_all(Parser.repeat(Parser.lit("ab"), 2), "abab")
+      Ok(["ab", "ab"])
+      march> Result.map_err(Parser.run_all(Parser.repeat(Parser.lit("ab"), 3), "abab"), fn e -> Parser.render("abab", e))
+      Err("1:5: I was expecting `ab`")
   """
   fn repeat(p : Parser(a), n : Int) : Parser(List(a)) do
     match p do
@@ -484,6 +593,11 @@ mod Parser do
   "a, then a separator I do not care about". Pairing with `and_then` gives the
   NimbleParsec-style pipeline the design notes describe — and the left-nested
   tuples that make the case for named binders past three elements.
+
+  ## Examples
+
+      march> Parser.run_all(Parser.skip_then(Parser.lit("42"), Parser.lit(";")), "42;")
+      Ok("42")
   """
   fn skip_then(p : Parser(a), q : Parser(b)) : Parser(a) do
     map(and_then(p, q), fn (pr) -> match pr do (x, _) -> x end)
@@ -496,6 +610,16 @@ mod Parser do
   failure propagates instead: once a commit point inside an item has been
   passed, the item was not optional, and quietly ending the list there would
   turn a real error into a short parse.
+
+  An item that succeeds without consuming input also ends the list (it is
+  not included), so `many` of a zero-width parser terminates.
+
+  ## Examples
+
+      march> Parser.run_all(Parser.many(Parser.lit("ab")), "ababab")
+      Ok(["ab", "ab", "ab"])
+      march> Parser.run_all(Parser.many(Parser.lit("ab")), "")
+      Ok([])
   """
   fn many(p : Parser(a)) : Parser(List(a)) do
     match p do
@@ -504,7 +628,14 @@ mod Parser do
   end
 
   doc """
-  One or more occurrences of `p`.
+  One or more occurrences of `p`.  Fails like `p` when there is not even one.
+
+  ## Examples
+
+      march> Parser.run_all(Parser.many1(Parser.lit("a")), "aaa")
+      Ok(["a", "a", "a"])
+      march> Result.map_err(Parser.run_all(Parser.many1(Parser.lit("a")), ""), fn e -> Parser.render("", e))
+      Err("1:1: I was expecting `a`")
   """
   fn many1(p : Parser(a)) : Parser(List(a)) do
     map(and_then(p, many(p)), fn (pr) -> match pr do (x, xs) -> Cons(x, xs) end)
@@ -512,13 +643,30 @@ mod Parser do
 
   doc """
   Zero or more occurrences of `p` separated by `sep`, discarding separators.
+  Never fails softly (no items is `[]`).
+
+  ## Examples
+
+      march> Parser.run_all(Parser.sep_by(Parser.take_while1("digits", fn b -> b >= 48 && b <= 57), Parser.lit(",")), "1,22,333")
+      Ok(["1", "22", "333"])
+      march> Parser.run_all(Parser.sep_by(Parser.lit("x"), Parser.lit(",")), "")
+      Ok([])
   """
   fn sep_by(p : Parser(a), sep : Parser(b)) : Parser(List(a)) do
     alt(sep_by1(p, sep), pure(Nil))
   end
 
   doc """
-  One or more occurrences of `p` separated by `sep`.
+  One or more occurrences of `p` separated by `sep`, discarding separators.
+  A trailing separator is not consumed: the list ends before it, so under
+  `run_all` it is reported as unexpected input.
+
+  ## Examples
+
+      march> Parser.run_all(Parser.sep_by1(Parser.lit("x"), Parser.lit(",")), "x,x")
+      Ok(["x", "x"])
+      march> Result.map_err(Parser.run_all(Parser.sep_by1(Parser.lit("x"), Parser.lit(",")), "x,x,"), fn e -> Parser.render("x,x,", e))
+      Err("1:4: I was expecting end of input")
   """
   fn sep_by1(p : Parser(a), sep : Parser(b)) : Parser(List(a)) do
     map(and_then(p, many(skip_first(sep, p))),
@@ -527,6 +675,11 @@ mod Parser do
 
   doc """
   Succeed with `x` without consuming input.
+
+  ## Examples
+
+      march> Parser.run(Parser.pure(42), "anything")
+      Ok(42)
   """
   fn pure(x : a) : Parser(a) do
     Parser(fn (_input, i) -> ROk(x, i, i))
@@ -534,6 +687,11 @@ mod Parser do
 
   doc """
   Run `p`, then `q`, and keep **`q`'s** value — the mirror of `skip_then`.
+
+  ## Examples
+
+      march> Parser.run_all(Parser.skip_first(Parser.lit("#"), Parser.lit("42")), "#42")
+      Ok("42")
   """
   fn skip_first(p : Parser(a), q : Parser(b)) : Parser(b) do
     map(and_then(p, q), fn (pr) -> match pr do (_, y) -> y end)
@@ -548,6 +706,13 @@ mod Parser do
   error message ends up pointing at the wrong construct entirely.
 
   A success is passed through untouched; only a soft failure is upgraded.
+
+  ## Examples
+
+  Without the commit, `alt` would fall through to the second alternative:
+
+      march> Result.map_err(Parser.run(Parser.alt(Parser.commit(Parser.lit("ab")), Parser.lit("x")), "x"), fn e -> Parser.render("x", e))
+      Err("1:1: I was expecting `ab`")
   """
   fn commit(p : Parser(a)) : Parser(a) do
     match p do
@@ -582,6 +747,13 @@ mod Parser do
   Both accept `{}`, so the difference never shows up on valid input — only on
   the malformed input where the message mattered. This combinator exists so
   the right shape is the short one.
+
+  ## Examples
+
+  Once `a` has matched, the `ac` alternative is no longer tried:
+
+      march> Result.map_err(Parser.run(Parser.alt(Parser.then_commit(Parser.lit("a"), Parser.lit("b")), Parser.map(Parser.lit("ac"), fn s -> (s, ""))), "ac"), fn e -> Parser.render("ac", e))
+      Err("1:2: I was expecting `b`")
   """
   fn then_commit(p : Parser(a), q : Parser(b)) : Parser((a, b)) do
     and_then(p, commit(q))
@@ -601,6 +773,11 @@ mod Parser do
 
   Only hard failures carry context: a soft failure is a path not taken, and
   naming every alternative a parser merely tried would be noise, not context.
+
+  ## Examples
+
+      march> Result.map_err(Parser.run_all(Parser.ctx("pair", Parser.then_commit(Parser.lit("("), Parser.lit(")"))), "(x"), fn e -> Parser.render("(x", e))
+      Err("1:2: I was expecting `)` in the pair that started at 1:1")
   """
   fn ctx(name : String, p : Parser(a)) : Parser(a) do
     match p do
@@ -634,6 +811,13 @@ mod Parser do
 
       run(label("a number", lit("0")), "x")  ->  Err(..)
                                                  -- 1:1: I was expecting a number
+
+  ## Examples
+
+      march> Result.map_err(Parser.run(Parser.label("a number", Parser.lit("0")), "x"), fn e -> Parser.render("x", e))
+      Err("1:1: I was expecting a number")
+      march> Result.map_err(Parser.run(Parser.label("a pair", Parser.and_then(Parser.lit("("), Parser.lit(")"))), "(x"), fn e -> Parser.render("(x", e))
+      Err("1:2: I was expecting `)`")
   """
   fn label(name : String, p : Parser(a)) : Parser(a) do
     match p do
@@ -682,6 +866,13 @@ mod Parser do
   Runs `p`, but converts a hard failure back into a soft one at this
   boundary, so one construct's `commit` cannot abort a sibling. This is the
   other half of SNOBOL's `FENCE`: committing is scoped, not global.
+
+  ## Examples
+
+  The fenced commit no longer stops `alt` from trying `ac`:
+
+      march> Parser.run(Parser.alt(Parser.fence(Parser.then_commit(Parser.lit("a"), Parser.lit("b"))), Parser.map(Parser.lit("ac"), fn s -> (s, ""))), "ac")
+      Ok(("ac", ""))
   """
   fn fence(p : Parser(a)) : Parser(a) do
     match p do
@@ -721,6 +912,11 @@ mod Parser do
   fails and `skip_to` cannot advance, so `recover` succeeds without
   consuming and `many` stops — which is the termination argument. Without
   that guard this pair would spin.
+
+  ## Examples
+
+      march> List.map(Result.unwrap_or(Parser.run_all(Parser.many(Parser.recover(Parser.skip_then(Parser.lit("ok"), Parser.lit(";")), Parser.lit(";"))), "ok;BAD;ok;"), Nil), fn r -> Result.map_err(r, fn e -> e.pos))
+      [Ok("ok"), Err(3), Ok("ok")]
   """
   fn recover(p : Parser(a), sync : Parser(b)) : Parser(Result(a, ParseErr)) do
     match (p, sync) do
@@ -750,7 +946,15 @@ mod Parser do
   end
 
   doc """
-  Convert a byte offset into a 1-based `(line, column)` pair.
+  Convert a byte offset into a 1-based `(line, column)` pair.  Columns
+  count bytes, not code points; a newline byte (10) starts a new line.
+
+  ## Examples
+
+      march> Parser.line_col("ab\ncd", 4)
+      (2, 2)
+      march> Parser.line_col("abc", 0)
+      (1, 1)
   """
   fn line_col(input : String, pos : Int) : (Int, Int) do
     line_col_go(input, pos, 0, 1, 1)
@@ -785,7 +989,13 @@ mod Parser do
 
   Only the innermost context frame is named. A full stack reads as a trace,
   and a parse error is not a stack trace — the construct you are inside is
-  what locates the mistake.
+  what locates the mistake.  Several expected items at the same offset are
+  joined with " or ".
+
+  ## Examples
+
+      march> Result.map_err(Parser.run_all(Parser.skip_first(Parser.lit(" "), Parser.ctx("pair", Parser.then_commit(Parser.lit("("), Parser.lit(")")))), " (x"), fn e -> Parser.render(" (x", e))
+      Err("1:3: I was expecting `)` in the pair that started at 1:2")
   """
   fn render(input : String, e : ParseErr) : String do
     let (l, c) = line_col(input, e.pos)

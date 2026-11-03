@@ -1,0 +1,19 @@
+-- A top-level function named like a stdlib callback parameter (`f`, the
+-- parameter of List.map, List.fold_left, ...).  The optimiser inlined each
+-- lambda's body into List.map's specialised clone, whose callback parameter is
+-- also `f`, so the lambda's call to the top-level `f` became a call through the
+-- parameter: the second line printed 409 compiled at --opt 0 and --opt 2, where
+-- the interpreter prints 309 (specs/progress/2026-10-11-inline-capture-guard.md).
+-- Prints the mapped values, not a length, so a wrong callee shows.
+mod Main do
+  needs IO.Console
+
+  fn f(m) do m + 1 end
+
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    let xs = Cons(1, Cons(2, Cons(3, Nil)))
+    println(int_to_string(List.fold_left(List.map(xs, fn x -> x * f(x)), 0, fn (a, x) -> a + x)))
+    println(int_to_string(List.fold_left(List.map(xs, fn x -> f(x) + 100), 0, fn (a, x) -> a + x)))
+    List.each(List.map(xs, fn x -> f(x) * 10), fn v -> println(int_to_string(v)))
+  end
+end

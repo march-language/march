@@ -243,6 +243,54 @@ Integer division and modulo emit through shim helpers that reproduce March's
 semantics (truncation toward zero, sign of modulo) rather than relying on raw
 JS `/` and `%`.
 
+### Int on the JS target (as built)
+
+`Int` is a double: exact within ±(2^53 − 1). Bitwise helpers (`int_and`,
+`int_shl`, …) throw when an operand is out of that range. Plain `+ - *` do
+not: a product of two 32-bit values (up to 2^64) silently rounds, and so does
+a constant the compiler folded to more than 53 bits.
+
+`--js-int-check` (from forge: `MARCH_JS_INT_CHECK=1 forge build --target js`) is for
+finding such code: every Int `+ - *` is emitted as `march_ck_int(...)`, which
+throws `RangeError: Int overflow on the JS target in <fn> (<file>:<line>): a op b`
+when the result is outside the exact range, and an Int literal beyond it throws
+`Int literal … is not exact`. The location is the enclosing function's
+definition (TIR carries no expression positions). Without the flag, Int
+`+ - *` keep the 63-bit overflow check (`march_int_ovf`) every backend has.
+
+The fix belongs at the source: compute wide products in 16-bit halves (Herald's
+`Herald.Bits.mul_mod_pow2` does `(a * b) mod 2^k` for 32-bit operands), so
+native and JS give the same answer.
+
+## Byte Strings
+
+A March `String` is a byte sequence; natively it may hold binary data (a file
+read with `File.read`, a packed asset) as well as UTF-8 text. On the JS target
+it is carried in a JS string so text stays ordinary JS text and passes to DOM
+and other externs unchanged:
+
+- a code unit below 0x80 is that ASCII byte;
+- U+F780..U+F7FF is the single byte 0x80..0xFF — a byte that is not part of
+  valid UTF-8;
+- any other character stands for its UTF-8 bytes.
+
+Externs that hand raw bytes to March build strings with
+`march_bytes_to_string(Uint8Array)` (exported by `march_runtime.mjs`), which
+produces the canonical form: valid UTF-8 runs decode to text, every other byte
+uses the U+F7xx range. So a slice of binary data holding `Town` is `===` the
+literal `"Town"`, and `u8_arr_to_bytes` of `[195, 169]` is `"é"`.
+
+The byte-indexed operations — `string_byte_length`, `string_byte_at`,
+`string_slice`, `string_index_of(_from)`, `string_last_index_of` — work on
+those bytes and agree with native. When every code unit of a string is one
+byte they index it directly; otherwise they use a byte view built once and
+cached for the last few strings, so a scan with `byte_at` is O(1) per byte.
+
+Caveats: concatenating two halves of a split UTF-8 sequence gives a string
+with the right bytes that is not `===` the literal it spells (it holds two
+U+F7xx units, not the decoded character); and a literal containing U+F780..
+U+F7FF is read as raw bytes.
+
 ## CLI / Build / Caching
 
 - `--target js` (aliases `javascript`) → the `Js` target variant in

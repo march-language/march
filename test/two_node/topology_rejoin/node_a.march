@@ -1,0 +1,75 @@
+-- Two-node scenario "topology_rejoin" (todo 2026-10-05-lab-rejoining-node-
+-- offers-count-role-at-once): Ledger.Server is placed `count = 1`, and
+-- node-b ranks first for it. node-b is SIGKILLed; node-a, the survivor,
+-- takes the role over. node-b is started again (creation 2): node-a counts
+-- it only once MARCH_PLACEMENT_SETTLE_MS has passed since it rejoined, and
+-- node-b must not offer the role inside that period either, or both nodes
+-- offer a count = 1 role with no partition at all. This side: report its
+-- offering state whenever it changes and then holds for 1.5 s (so the brief
+-- duplicate while markers replicate, and a tick's overlap at the hand-back,
+-- never reach the golden). See scenario.sh and node_b.march.
+mod TopologyRejoinA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Ledger do
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Ledger_Server.Entry) : Ledger_Server.Yield do
+    Ledger_Server.recv_Ask(s, st, fn (n, st1) -> Ledger_Server.close(s, Ledger_Server.send_Answer(s, st1, n)))
+  end
+
+  pfn watch(h : Cap(ClusterNode.Live), me : String, shown : Bool, seen : Bool, since : Int, stop : String) : () do
+    if File.exists(stop) do () else
+      let now = Topology.offered(h) == ["Ledger.Server"]
+      let t = unix_time_ms()
+      let since2 = if now == seen do since else t end
+      let shown2 = if now != shown && t - since2 >= 1500 do
+        println(me ++ ": " ++ (if now do "offering Ledger.Server" else "not offering Ledger.Server" end))
+        now
+      else shown end
+      sleep_ms(50)
+      watch(h, me, shown2, now, since2, stop)
+    end
+  end
+
+  pfn wait_marker(h : Cap(ClusterNode.Live), name : String, left : Int) : () do
+    if Option.is_some(ClusterNode.lookup(h, name)) || left <= 0 do () else
+      sleep_ms(50)
+      wait_marker(h, name, left - 50)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let me = "node-a"
+    let port = Env.require_int("MARCH_PORT_A")
+    match ClusterNode.start(c, ClusterNode.config(me, port, "", Nil, "topo-rejoin-secret", 1)) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println(me ++ ": up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic(me ++ ": never joined") end
+        let ranked = Topology.rank("Ledger.Server", [ClusterNode.node_id_of("node-a"), ClusterNode.node_id_of("node-b")])
+        if List.take(ranked, 1) == [ClusterNode.node_id_of("node-b")] do println(me ++ ": ranked second")
+        else panic(me ++ ": the scenario needs node-b to rank first for Ledger.Server") end
+        -- Ranked second: place once node-b's marker is visible, so this node
+        -- never offers the role at the cluster's start (see topology_move).
+        wait_marker(h, Topology.marker("Ledger.Server", ClusterNode.node_id_of("node-b")), 60000)
+        Topology.place(h, [ Topology.role("Ledger.Server", Topology.count(1),
+                              fn () -> Ledger_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st))) ])
+        watch(h, me, false, false, unix_time_ms(), Env.require("TOPOLOGY_STOP_FILE"))
+        println(me ++ ": stopping")
+        Topology.stop(h)
+    end
+  end
+end

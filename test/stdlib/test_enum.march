@@ -65,6 +65,35 @@ describe "Enum" do
       assert (length(result) == 0)
     end
 
+    test "filter preserves order" do
+      assert (Enum.filter([5, 1, 4, 2, 3, 6], fn x -> x > 2) == [5, 4, 3, 6])
+    end
+
+    test "filter keeps duplicates in place" do
+      assert (Enum.filter([3, 1, 3, 2, 3], fn x -> x == 3) == [3, 3, 3])
+    end
+
+    test "filter empty" do
+      let empty : List(Int) = Nil
+      assert (Enum.filter(empty, fn x -> x > 0) == Nil)
+    end
+
+    test "filter all pass is the input" do
+      assert (Enum.filter([4, 2, 9], fn x -> x > 0) == [4, 2, 9])
+    end
+
+    test "filter all fail is empty" do
+      assert (Enum.filter([4, 2, 9], fn x -> x < 0) == Nil)
+    end
+
+    test "filter a long list" do
+      let xs = List.range(0, 100000)
+      let ys = Enum.filter(xs, fn x -> x % 2 == 0)
+      assert (length(ys) == 50000)
+      assert (head(ys) == 0)
+      assert (List.last(ys) == 99998)
+    end
+
   end
 
   describe "fold" do
@@ -167,6 +196,63 @@ describe "Enum" do
       None -> ()
       Some(_) -> panic("FAIL: find not found returned Some")
       end
+    end
+
+    test "find returns the FIRST match" do
+      assert (Enum.find([1, 7, 3, 9], fn x -> x > 2) == Some(7))
+    end
+
+    test "find on empty" do
+      let empty : List(Int) = Nil
+      assert (Enum.find(empty, fn x -> x > 0) == None)
+    end
+
+  end
+
+  describe "take_while" do
+
+    test "take_while stops at the first failure" do
+      assert (Enum.take_while([1, 2, 3, 4, 1], fn x -> x < 3) == [1, 2])
+    end
+
+    test "take_while empty" do
+      let empty : List(Int) = Nil
+      assert (Enum.take_while(empty, fn x -> x > 0) == Nil)
+    end
+
+    test "take_while all pass is the input" do
+      assert (Enum.take_while([3, 1, 2], fn x -> x > 0) == [3, 1, 2])
+    end
+
+    test "take_while first fails is empty" do
+      assert (Enum.take_while([0, 1, 2], fn x -> x > 0) == Nil)
+    end
+
+    test "take_while a long prefix" do
+      let xs = List.range(0, 100000)
+      let ys = Enum.take_while(xs, fn x -> x < 60000)
+      assert (length(ys) == 60000)
+      assert (List.last(ys) == 59999)
+    end
+
+  end
+
+  describe "Range.filter" do
+
+    test "Range.filter preserves order" do
+      assert (Range.filter(Range.new(0, 10), fn x -> x % 3 == 0) == [0, 3, 6, 9])
+    end
+
+    test "Range.filter empty range" do
+      assert (Range.filter(Range.new(5, 5), fn x -> x > 0) == Nil)
+    end
+
+    test "Range.filter all pass" do
+      assert (Range.filter(Range.new(1, 4), fn x -> x > 0) == [1, 2, 3])
+    end
+
+    test "Range.filter all fail" do
+      assert (Range.filter(Range.new(1, 4), fn x -> x > 10) == Nil)
     end
 
   end

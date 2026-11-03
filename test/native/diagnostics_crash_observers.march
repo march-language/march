@@ -1,0 +1,170 @@
+-- Diagnostics crash observers (stdlib/diagnostics.march), interpreted and
+-- compiled against ONE .expected: what an observer sees and what it cannot
+-- change.
+--
+--   * a supervised actor's panic is reported once, as ActorCrashed, with the
+--     panic's bare message and the context of BOTH with_context scopes it was
+--     raised in (inner first), and the supervisor still restarts the child;
+--   * observers run in registration order; one that panics, or panics inside
+--     its own with_context, is abandoned and the next one still runs;
+--   * unregistering an observer during a dispatch still lets that dispatch
+--     call it (a snapshot), and never again after; removing twice is fine;
+--   * a panic handled by __try_call is not reported, and with_context
+--     restores the outer context on the way out of both return and panic;
+--   * an unhandled panic in main is reported as Panic and the process still
+--     exits 1 with its usual stderr, even after an observer panicked inside
+--     its own with_context during an earlier crash (its re-raise once left a
+--     flag set that silenced the next report);
+--   * the location is the panic or todo call, compiled as interpreted.
+--
+-- Location and backtrace, on both backends and every platform: the location
+-- is the panic call (line 32, recorded by lowering's __panic_site compiled);
+-- every frame has a file and a line, and one is in this file.  Frame NAMES
+-- differ (interpreted frames name each call; compiled frames come from the
+-- program's function table, where LLVM may have inlined `boom`), so they are
+-- not compared.
+mod Main do
+  needs IO
+  needs IO.Console
+
+  @[no_warn_recursion]
+  fn boom(n : Int) : Int do
+    if n <= 0 do panic("poisoned at depth") else boom(n - 1) + 1 end
+  end
+
+  actor Fragile do
+    state { handled : Int }
+    init  { handled: 0 }
+    on Later() do
+      let _ : Int = todo("later")
+      state
+    end
+
+    on Poison() do
+      let _ = Diagnostics.with_context([("request_id", Diagnostics.DStr("r-42"))],
+        fn -> Diagnostics.with_context([("attempt", Diagnostics.DInt(2))], fn -> boom(3)))
+      state
+    end
+  end
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Fragile child
+    end
+  end
+
+  fn value_text(v : Diagnostics.DiagnosticValue) : String do
+    match v do
+    Diagnostics.DStr(s) -> s
+    Diagnostics.DInt(n) -> int_to_string(n)
+    Diagnostics.DFloat(_) -> "float"
+    Diagnostics.DBool(b) -> bool_to_string(b)
+    Diagnostics.DNull -> "null"
+    end
+  end
+
+  fn ctx_text(ctx : List((String, Diagnostics.DiagnosticValue))) : String do
+    List.fold_left(ctx, "", fn (acc, kv) ->
+      match kv do
+      (k, v) -> acc ++ "[" ++ k ++ "=" ++ value_text(v) ++ "]"
+      end)
+  end
+
+  fn in_fixture(file : String) : Bool do
+    String.ends_with(file, "diagnostics_crash_observers.march")
+  end
+
+  fn backtrace_ok(r : Diagnostics.CrashReport) : Bool do
+    let location_ok = match r.location do
+      -- The lines of boom's panic(...) and Fragile.Later's todo(...): keep
+      -- them in step if this file's lines move.
+      Some(loc) -> in_fixture(loc.file) && loc.line == (if r.message == "later" do 39 else 32 end)
+      None -> false
+    end
+    -- Fragile.Later's body may be inlined into the actor's dispatch
+    -- function compiled, which has no source span: its frames can be empty.
+    let well_formed =
+      List.all(r.backtrace, fn f -> f.name != "" && f.file != "" && f.line > 0)
+    let frames_ok = well_formed
+      && (r.message == "later" || List.any(r.backtrace, fn f -> in_fixture(f.file)))
+    location_ok && frames_ok
+  end
+
+  fn describe(tag : String, r : Diagnostics.CrashReport) : Unit do
+    println(tag ++ ": " ++ Diagnostics.kind_to_string(r.kind)
+      ++ " \"" ++ r.message ++ "\""
+      ++ " supervised=" ++ bool_to_string(r.process.supervised)
+      ++ " actor=" ++ bool_to_string(r.process.pid >= 0)
+      ++ " context=" ++ ctx_text(r.context)
+      ++ " backtrace_ok=" ++ bool_to_string(backtrace_ok(r)))
+  end
+
+  fn is_err(r : Result(Bool, String)) : Bool do
+    match r do
+    Ok(_) -> false
+    Err(_) -> true
+    end
+  end
+
+  fn current_child(boss) do
+    match get_actor_field(boss, "child") do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+
+    -- with_context without a crash: nested, inner first, restored after.
+    let inside = Diagnostics.with_context([("outer", Diagnostics.DBool(true))], fn ->
+      Diagnostics.with_context([("inner", Diagnostics.DNull)], fn ->
+        ctx_text(Diagnostics.current_context())))
+    println("nested context: " ++ inside)
+    println("context after return: " ++ ctx_text(Diagnostics.current_context()))
+    let caught = __try_call(fn _ ->
+      Diagnostics.with_context([("scoped", Diagnostics.DInt(1))], fn -> boom(1) > 0))
+    println("context after a handled panic: " ++ ctx_text(Diagnostics.current_context())
+      ++ " (caught=" ++ bool_to_string(is_err(caught)) ++ ")")
+
+    -- A runs first and removes C, which runs after it, mid-dispatch.  A
+    -- cannot name C's handle before C exists, so it rebuilds it: handles are
+    -- the process's registration ids, from 1, and A and C are the first two.
+    let a = Diagnostics.observe_crashes(fn r ->
+      describe("A", r)
+      Diagnostics.unobserve(Diagnostics.ObserverHandle(2)))
+    let c = Diagnostics.observe_crashes(fn r -> describe("C", r))
+    let b = Diagnostics.observe_crashes(fn _ -> panic("observer B exploded"))
+    let d = Diagnostics.observe_crashes(fn _ ->
+      Diagnostics.with_context([("in_observer", Diagnostics.DStr("d"))], fn ->
+        panic("observer D exploded")))
+    let e = Diagnostics.observe_crashes(fn r -> describe("E", r))
+
+    let handled = __try_call(fn _ -> boom(1) > 0)
+    println("handled panic: " ++ bool_to_string(is_err(handled)) ++ " (no report above)")
+
+    let boss = spawn(Boss)
+    let victim = current_child(boss)
+    send(Actor.pid_from_int(intro, victim), Poison())
+    run_until_idle()
+    println("restarted: " ++ bool_to_string(current_child(boss) != victim))
+    -- todo(...) goes through the prelude's todo wrapper compiled: its site
+    -- survives the call.
+    send(Actor.pid_from_int(intro, current_child(boss)), Later())
+    run_until_idle()
+    println("context in main after the crash: " ++ ctx_text(Diagnostics.current_context()))
+
+    Diagnostics.unobserve(c)
+    Diagnostics.unobserve(a)
+    Diagnostics.unobserve(a)
+    Diagnostics.unobserve(b)
+    Diagnostics.unobserve(d)
+    let _ = e
+    Diagnostics.with_context([("job", Diagnostics.DStr("nightly"))], fn -> boom(2))
+    println("unreachable: the panic above ends the process")
+  end
+end

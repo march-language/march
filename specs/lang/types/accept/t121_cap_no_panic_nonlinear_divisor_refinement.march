@@ -17,6 +17,10 @@
 -- refinement it could not decide would also pass. reject/t122 is the twin that
 -- gives this file its content: `v * v >= 0` is just as non-linear, just as
 -- reflectable, and true of EVERY integer, so it must still be rejected.
+--
+-- `main` prints the two results separately: `scale(2) + guarded(5)` is an Int
+-- addition of two unbounded call results, which `cap no_panic` now has to
+-- prove cannot overflow (it cannot, without return refinements).
 mod NonlinearDivisor do
   needs IO.Console
   cap no_panic
@@ -30,6 +34,7 @@ mod NonlinearDivisor do
   end
 
   fn main(_cap_console : Cap(IO.Console)) do
-    println(int_to_string(scale(2) + guarded(5)))
+    println(int_to_string(scale(2)))
+    println(int_to_string(guarded(5)))
   end
 end

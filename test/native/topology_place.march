@@ -92,7 +92,7 @@ mod TopologyPlace do
   end
 
   pfn wait_marker(h : Cap(ClusterNode.Live), name : String, left : Int) : Bool do
-    if ClusterNode.lookup(h, name) != None do true
+    if Option.is_some(ClusterNode.lookup(h, name)) do true
     else if left <= 0 do false else
       sleep_ms(20)
       wait_marker(h, name, left - 20)

@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: `a` is bound twice
+mod Main do
+  needs IO.Console
+  fn pick(0, a, a) : Int do a end
+  fn pick(_, a, b) : Int do a + b end
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(pick(0, 1, 2)))
+  end
+end

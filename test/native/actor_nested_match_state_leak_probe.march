@@ -1,0 +1,148 @@
+-- Leak guard: an actor handler whose body held a nested match leaked its
+-- whole old state record on every message, and every MAC computed with
+-- `hmac_sha256_bytes` leaked its message.
+--
+-- 1. Perceus's aggregate scope-end drop (`drop_agg_at_tails`) stopped at the
+--    first scope that released the aggregate on ANY path. A nested pattern
+--    (`Ok((st1, _c))`) adds a non-exhaustive `_ -> dec_rc state; panic(..)`
+--    arm, so the handler's `let $result = <body> in ..` "released" `state`,
+--    and every other path through the body kept its reference: the old state
+--    record and everything only it held, per message. ClusterNode's CtlFrame
+--    handler has that shape, so a cluster node leaked its whole CnState on
+--    every SWIM frame (~13k objects a second per node in the multi-host lab
+--    with no control-plane leader).
+-- 2. `hmac_sha256_bytes` was missing from `Defun.builtin_names`, so every call
+--    was an indirect call, whose convention consumes the arguments, to a C
+--    entry that only reads them: NetFrame.mac_tag leaked two objects per
+--    sealed cluster frame. `md5` was missing the same way.
+-- specs/progress/2026-10-05-lab-leaderless-agents-leak.md
+--
+-- Measured before the fix, --compile --opt 2, objects per message: the
+-- nested-match handler's else path 3, its Ok path 2, the shared-state path 2;
+-- hmac_sha256_bytes 2 per call, md5 1.
+--
+-- The shared leg keeps the state's record in a second field before the
+-- handler replaces it, so the release must be a decrement, not a free; the
+-- kept record is read back afterwards (a premature free shows as a wrong
+-- value here and as a use-after-free under ASAN).
+--
+-- SIGNAL: live_allocs() deltas against a bound far below the iteration count,
+-- printed as booleans so the golden is deterministic.
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+
+  type Big = { name : String, xs : List(Int), n : Int }
+  type H = { label : String }
+  type St = { st : Big, keep : Big, h : H, started : Bool }
+
+  pfn tick(b : Big, now : Int) : (Big, List(Int)) do
+    ({ b with n: now, xs: Cons(now, Nil) }, Cons(now, Nil))
+  end
+
+  pfn upd(b : Big, now : Int) : Result((Big, String), String) do
+    if now < 0 do Err("negative") else Ok(({ b with n: now }, "ok")) end
+  end
+
+  -- Called from several handlers, so it is not inlined into them (inlined,
+  -- the scope's tail is a record literal and the leak did not show).
+  pfn step_io(_st0 : Big, keep : Big, h : H, out : (Big, List(Int)), started : Bool) : St do
+    match out do
+      (b, effs) ->
+        let _ = List.map(effs, fn e -> e + 1)
+        { st: b, keep: keep, h: h, started: started }
+    end
+  end
+
+  actor A do
+    state { st : Big, keep : Big, h : H, started : Bool }
+    init { st: { name: "st" ++ int_to_string(1), xs: Nil, n: 0 },
+           keep: { name: "keep" ++ int_to_string(0), xs: Nil, n: 0 },
+           h: { label: "h" ++ int_to_string(2) }, started: true }
+    -- The shape of ClusterNode's CtlFrame: a nested match in one branch, a
+    -- call in tail position in the other.
+    on Tick(now : Int, tag : Int) do
+      if state.started do
+        if tag == 16 do
+          match upd(state.st, now) do
+            Ok((st1, _c)) -> step_io(st1, state.keep, state.h, (st1, Nil), state.started)
+            Err(_why) -> state
+          end
+        else
+          step_io(state.st, state.keep, state.h, tick(state.st, now), state.started)
+        end
+      else state end
+    end
+    -- Share the current record: from here on `keep` and `st` point at one cell.
+    on Keep() do
+      { st: state.st, keep: state.st, h: state.h, started: state.started }
+    end
+    on Report() do
+      println("kept " ++ state.keep.name ++ " n=" ++ int_to_string(state.keep.n)
+              ++ " xs=" ++ int_to_string(List.length(state.keep.xs)))
+      state
+    end
+  end
+
+  pfn ticks(p, i : Int, n : Int, tag : Int) : () do
+    if i > n do () else
+      let _ = send(p, Tick(i, tag))
+      ticks(p, i + 1, n, tag)
+    end
+  end
+
+  -- Keep, then one Tick that replaces the shared record: the release of the
+  -- old state must leave the kept copy alive.
+  pfn shared(p, i : Int, n : Int) : () do
+    if i > n do () else
+      let _ = send(p, Keep())
+      let _ = send(p, Tick(i, i % 2 * 16))
+      shared(p, i + 1, n)
+    end
+  end
+
+  pfn macs(key : Bytes, i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else
+      let m = hmac_sha256_bytes(key, Bytes.concat(Bytes.from_string("frame "), Bytes.from_string(int_to_string(i))))
+      macs(key, i - 1, acc + Bytes.length(m))
+    end
+  end
+
+  pfn digests(i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else digests(i - 1, acc + string_length(md5("frame " ++ int_to_string(i)))) end
+  end
+
+  pfn report(label : String, grew : Int) : () do
+    println(label ++ ", flat: " ++ bool_to_string(grew < 100))
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let a = spawn(A)
+    let _ = send(a, Tick(0, 0))
+    run_until_idle()
+    let a0 = live_allocs()
+    ticks(a, 1, 5000, 0)
+    run_until_idle()
+    let a1 = live_allocs()
+    ticks(a, 1, 5000, 16)
+    run_until_idle()
+    let a2 = live_allocs()
+    shared(a, 1, 5000)
+    run_until_idle()
+    let a3 = live_allocs()
+    let key = Bytes.from_string("k" ++ int_to_string(7))
+    let total = macs(key, 5000, 0)
+    let a4 = live_allocs()
+    let hex = digests(5000, 0)
+    let a5 = live_allocs()
+    report("nested match, tail call path", a1 - a0)
+    report("nested match, Ok path", a2 - a1)
+    report("shared state record", a3 - a2)
+    report("hmac_sha256_bytes = " ++ int_to_string(total), a4 - a3)
+    report("md5 = " ++ int_to_string(hex), a5 - a4)
+    let _ = send(a, Report())
+    run_until_idle()
+  end
+end

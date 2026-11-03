@@ -9,6 +9,10 @@
 --   CRDT.PNCounter   -- increment/decrement counter (two GCounters)
 --   CRDT.LWWRegister -- last-write-wins register (uses VectorClock)
 --   CRDT.ORSet       -- observed-remove set (add/remove with UUID tags)
+--
+-- All values are immutable; every operation returns a new CRDT.
+--
+-- doc: try
 
 mod CRDT do
 
@@ -20,12 +24,26 @@ mod CRDT do
     -- Internal: map from actor IDs to non-negative counts.
     ptype T = GCounter(Map(String, Int))
 
-    doc "An empty counter (all actor counts are 0)."
+    doc """
+    An empty grow-only counter: every actor's count is 0.
+
+    ## Examples
+
+        march> CRDT.GCounter.value(CRDT.GCounter.new())
+        0
+    """
     fn new() : T do
       GCounter(Map.empty())
     end
 
-    doc "Increment actor_id's slot by 1."
+    doc """
+    Increment `actor_id`'s slot by 1 (creating it at 1 when absent).
+
+    ## Examples
+
+        march> CRDT.GCounter.entries(CRDT.GCounter.increment(CRDT.GCounter.new(), "a"))
+        [("a", 1)]
+    """
     fn increment(c : T, actor_id : String) : T do
       match c do
       GCounter(m) ->
@@ -34,7 +52,16 @@ mod CRDT do
       end
     end
 
-    doc "Add n to actor_id's slot (n must be >= 0)."
+    doc """
+    Add `n` to `actor_id`'s slot. `n` must be >= 0 for the counter to stay a
+    valid CRDT; a negative `n` is not checked and breaks the merge (the max
+    of the slots would discard the decrease).
+
+    ## Examples
+
+        march> CRDT.GCounter.entries(CRDT.GCounter.add(CRDT.GCounter.new(), "a", 5))
+        [("a", 5)]
+    """
     fn add(c : T, actor_id : String, n : Int) : T do
       match c do
       GCounter(m) ->
@@ -43,14 +70,36 @@ mod CRDT do
       end
     end
 
-    doc "Sum of all actor slots."
+    doc """
+    The counter's value: the sum of all actor slots.
+
+    ## Examples
+
+        march> CRDT.GCounter.value(CRDT.GCounter.add(CRDT.GCounter.increment(CRDT.GCounter.new(), "a"), "b", 4))
+        5
+    """
     fn value(c : T) : Int do
       match c do
       GCounter(m) -> Map.fold(m, 0, fn (acc, _k, v) -> acc + v)
       end
     end
 
-    doc "Component-wise maximum — the CRDT join."
+    doc """
+    The CRDT join: the per-actor maximum of the two counters' slots, keeping
+    every actor present in either. Commutative, associative and idempotent.
+
+    ## Examples
+
+        march> CRDT.GCounter.value(CRDT.GCounter.merge(CRDT.GCounter.add(CRDT.GCounter.new(), "a", 2), CRDT.GCounter.add(CRDT.GCounter.new(), "b", 3)))
+        5
+
+    Merging two replicas that both counted for the same actor keeps the larger
+    count rather than adding them:
+
+        let x = CRDT.GCounter.add(CRDT.GCounter.new(), "a", 2)
+        let y = CRDT.GCounter.add(CRDT.GCounter.new(), "a", 3)
+        CRDT.GCounter.value(CRDT.GCounter.merge(x, y))   -- 3
+    """
     fn merge(a : T, b : T) : T do
       match (a, b) do
       (GCounter(ma), GCounter(mb)) ->
@@ -59,7 +108,18 @@ mod CRDT do
       end
     end
 
-    doc "True when both counters have identical internal state."
+    doc """
+    True when both counters hold the same count for every actor (an absent
+    slot counts as 0, so a slot explicitly at 0 equals a missing one).
+
+    ## Examples
+
+        march> CRDT.GCounter.equal(CRDT.GCounter.new(), CRDT.GCounter.new())
+        true
+
+        CRDT.GCounter.equal(CRDT.GCounter.increment(CRDT.GCounter.new(), "a"),
+                            CRDT.GCounter.increment(CRDT.GCounter.new(), "b"))   -- false
+    """
     fn equal(a : T, b : T) : Bool do
       match (a, b) do
       (GCounter(ma), GCounter(mb)) ->
@@ -71,7 +131,14 @@ mod CRDT do
       end
     end
 
-    doc "All (actor_id, count) pairs."
+    doc """
+    All `(actor_id, count)` pairs, in the underlying map's hash-traversal order.
+
+    ## Examples
+
+        march> CRDT.GCounter.entries(CRDT.GCounter.new())
+        []
+    """
     fn entries(c : T) : List((String, Int)) do
       match c do
       GCounter(m) -> Map.to_list(m)
@@ -102,33 +169,70 @@ mod CRDT do
       Map.merge_with(ma, mb, fn va -> fn vb -> Math.max_int(va, vb), Map.str_cmp)
     end
 
-    doc "An empty counter with value 0."
+    doc """
+    An empty increment/decrement counter with value 0.
+
+    ## Examples
+
+        march> CRDT.PNCounter.value(CRDT.PNCounter.new())
+        0
+    """
     fn new() : T do
       PNCounter(Map.empty(), Map.empty())
     end
 
-    doc "Increment the counter for actor_id."
+    doc """
+    Increment the counter by 1 on behalf of `actor_id` (bumps its P slot).
+
+    ## Examples
+
+        march> CRDT.PNCounter.value(CRDT.PNCounter.increment(CRDT.PNCounter.new(), "a"))
+        1
+    """
     fn increment(c : T, actor_id : String) : T do
       match c do
       PNCounter(pm, nm) -> PNCounter(map_inc(pm, actor_id), nm)
       end
     end
 
-    doc "Decrement the counter for actor_id."
+    doc """
+    Decrement the counter by 1 on behalf of `actor_id` (bumps its N slot).
+    The value may go negative.
+
+    ## Examples
+
+        march> CRDT.PNCounter.value(CRDT.PNCounter.decrement(CRDT.PNCounter.new(), "a"))
+        -1
+    """
     fn decrement(c : T, actor_id : String) : T do
       match c do
       PNCounter(pm, nm) -> PNCounter(pm, map_inc(nm, actor_id))
       end
     end
 
-    doc "Current value: sum of increments minus sum of decrements."
+    doc """
+    Current value: the sum of all increments minus the sum of all decrements.
+
+    ## Examples
+
+        march> CRDT.PNCounter.value(CRDT.PNCounter.decrement(CRDT.PNCounter.increment(CRDT.PNCounter.new(), "a"), "b"))
+        0
+    """
     fn value(c : T) : Int do
       match c do
       PNCounter(pm, nm) -> map_sum(pm) - map_sum(nm)
       end
     end
 
-    doc "Merge two PNCounters: join both P and N maps independently."
+    doc """
+    The CRDT join: the per-actor maximum of the increment (P) maps and,
+    independently, of the decrement (N) maps.
+
+    ## Examples
+
+        march> CRDT.PNCounter.value(CRDT.PNCounter.merge(CRDT.PNCounter.increment(CRDT.PNCounter.new(), "a"), CRDT.PNCounter.decrement(CRDT.PNCounter.new(), "b")))
+        0
+    """
     fn merge(a : T, b : T) : T do
       match (a, b) do
       (PNCounter(pa, na), PNCounter(pb, nb)) ->
@@ -136,7 +240,19 @@ mod CRDT do
       end
     end
 
-    doc "True when both PNCounters have the same net increments and decrements."
+    doc """
+    True when both counters have the same TOTAL of increments and the same
+    total of decrements. This compares sums only, not per-actor state: two
+    replicas that each counted one increment for different actors are
+    `equal` although merging them gives 2.
+
+    ## Examples
+
+        march> CRDT.PNCounter.equal(CRDT.PNCounter.new(), CRDT.PNCounter.increment(CRDT.PNCounter.new(), "a"))
+        false
+        march> CRDT.PNCounter.equal(CRDT.PNCounter.increment(CRDT.PNCounter.new(), "a"), CRDT.PNCounter.increment(CRDT.PNCounter.new(), "b"))
+        true
+    """
     fn equal(a : T, b : T) : Bool do
       match (a, b) do
       (PNCounter(pa, na), PNCounter(pb, nb)) ->
@@ -148,34 +264,65 @@ mod CRDT do
 
   -- ── LWWRegister ───────────────────────────────────────────────────────────
   -- Last-write-wins register: each write carries a VectorClock timestamp.
-  -- On concurrent writes, the one with the higher total timestamp wins;
-  -- ties are broken by picking the existing value (left bias).
+  -- merge keeps the causally later write; on concurrent (or equal) clocks it
+  -- keeps the left argument. No timestamp sum or tiebreak is consulted, so
+  -- merge is NOT commutative for concurrent writes.
 
   mod LWWRegister do
 
     -- LWWRegister(value, clock_at_write)
     type T(a) = LWWRegister(a, VectorClock)
 
-    doc "Create a new register with an initial value and the clock at write time."
+    doc """
+    A register holding `value`, written at vector clock `clock`.
+
+    ## Examples
+
+        march> CRDT.LWWRegister.get(CRDT.LWWRegister.new("draft", VectorClock.new()))
+        "draft"
+    """
     fn new(value : a, clock : VectorClock) : T(a) do
       LWWRegister(value, clock)
     end
 
-    doc "Read the current value."
+    doc """
+    The register's current value.
+
+    ## Examples
+
+        march> CRDT.LWWRegister.get(CRDT.LWWRegister.set(CRDT.LWWRegister.new("draft", VectorClock.new()), "final", "n1"))
+        "final"
+    """
     fn get(r : T(a)) : a do
       match r do
       LWWRegister(v, _) -> v
       end
     end
 
-    doc "Read the vector clock of the last write."
+    doc """
+    The vector clock of the last write.
+
+    ## Examples
+
+        march> VectorClock.entries(CRDT.LWWRegister.clock(CRDT.LWWRegister.new("draft", VectorClock.new())))
+        []
+    """
     fn clock(r : T(a)) : VectorClock do
       match r do
       LWWRegister(_, vc) -> vc
       end
     end
 
-    doc "Write a new value, advancing the actor's clock slot."
+    doc """
+    Write `new_val` on behalf of `actor_id`: the stored clock is the previous
+    one with `actor_id`'s slot incremented, so the new write is causally after
+    the old one.
+
+    ## Examples
+
+        march> VectorClock.entries(CRDT.LWWRegister.clock(CRDT.LWWRegister.set(CRDT.LWWRegister.new("draft", VectorClock.new()), "final", "n1")))
+        [("n1", 1)]
+    """
     fn set(r : T(a), new_val : a, actor_id : String) : T(a) do
       match r do
       LWWRegister(_, vc) ->
@@ -184,7 +331,20 @@ mod CRDT do
       end
     end
 
-    doc "Merge: keep the value with the causally later clock. Concurrent = keep left."
+    doc """
+    Keep `b` when `a`'s clock happened before `b`'s; otherwise keep `a`. That
+    includes concurrent and equal clocks, so concurrent writes resolve to the
+    LEFT argument and `merge(a, b)` and `merge(b, a)` can differ.
+
+    ## Examples
+
+        march> CRDT.LWWRegister.get(CRDT.LWWRegister.merge(CRDT.LWWRegister.new("left", VectorClock.new()), CRDT.LWWRegister.new("right", VectorClock.new())))
+        "left"
+
+        let r0 = CRDT.LWWRegister.new("v0", VectorClock.new())
+        let r1 = CRDT.LWWRegister.set(r0, "v1", "n1")
+        CRDT.LWWRegister.get(CRDT.LWWRegister.merge(r0, r1))   -- "v1"
+    """
     fn merge(a : T(x), b : T(x)) : T(x) do
       match (a, b) do
       (LWWRegister(_, vca), LWWRegister(_, vcb)) ->
@@ -195,7 +355,15 @@ mod CRDT do
       end
     end
 
-    doc "True when both registers hold the same clock (values may still differ on concurrent writes)."
+    doc """
+    True when both registers carry equal clocks. Values are not compared, so
+    two registers created with different values at the same clock are equal.
+
+    ## Examples
+
+        march> CRDT.LWWRegister.equal(CRDT.LWWRegister.new("left", VectorClock.new()), CRDT.LWWRegister.new("right", VectorClock.new()))
+        true
+    """
     fn equal(a : T(x), b : T(x)) : Bool do
       match (a, b) do
       (LWWRegister(_, vca), LWWRegister(_, vcb)) ->
@@ -210,8 +378,10 @@ mod CRDT do
 
   -- ── ORSet ─────────────────────────────────────────────────────────────────
   -- Observed-remove set: add operations attach unique tags; remove clears those
-  -- tags. If a concurrent add and remove arrive, the add wins (the new tag
-  -- survives). Elements with at least one surviving tag are in the set.
+  -- tags. Elements with at least one surviving tag are in the set.
+  -- NOTE: remove deletes the element's entry outright (no tombstones), so a
+  -- merge with any replica that still holds the element brings it back with
+  -- all its old tags; removals do not survive merges, concurrent or not.
   --
   -- Elements are identified by a caller-supplied `to_key : a -> String`
   -- function (e.g. int_to_string, string_to_string, JSON serialisation).
@@ -221,12 +391,28 @@ mod CRDT do
     -- Internal: map from to_key(elem) to (elem, surviving_tags).
     ptype T(a) = ORSet(Map(String, (a, List(String))))
 
-    doc "An empty set."
+    doc """
+    An empty set.
+
+    ## Examples
+
+        march> CRDT.ORSet.elements(CRDT.ORSet.new())
+        []
+    """
     fn new() : T(a) do
       ORSet(Map.empty())
     end
 
-    doc "Add elem with a unique tag (use UUID.v4() for the tag)."
+    doc """
+    Add `elem` under the key `to_key(elem)`, recording `tag` (which should be
+    unique per add, e.g. `UUID.v4()`). Adding an element already present adds
+    another tag and replaces the stored element with `elem`.
+
+    ## Examples
+
+        march> CRDT.ORSet.elements(CRDT.ORSet.add(CRDT.ORSet.new(), 1, int_to_string, "t1"))
+        [1]
+    """
     fn add(s : T(a), elem : a, to_key : a -> String, tag : String) : T(a) do
       match s do
       ORSet(m) ->
@@ -239,14 +425,36 @@ mod CRDT do
       end
     end
 
-    doc "Remove all observed tags for elem (concurrent adds in-flight survive)."
+    doc """
+    Remove `elem` (by `to_key(elem)`) together with all its tags. Removing an
+    absent element is a no-op. The entry is dropped without a tombstone, so a
+    later `merge` with a replica that still has the element restores it.
+
+        let s = CRDT.ORSet.add(CRDT.ORSet.new(), 1, int_to_string, "t1")
+        CRDT.ORSet.size(CRDT.ORSet.remove(s, 1, int_to_string))   -- 0
+
+    ## Examples
+
+        march> CRDT.ORSet.size(CRDT.ORSet.remove(CRDT.ORSet.new(), 1, int_to_string))
+        0
+    """
     fn remove(s : T(a), elem : a, to_key : a -> String) : T(a) do
       match s do
       ORSet(m) -> ORSet(Map.remove(m, to_key(elem), Map.str_cmp))
       end
     end
 
-    doc "True if elem has at least one surviving tag."
+    doc """
+    True when `to_key(elem)` is present with at least one tag.
+
+    ## Examples
+
+        march> CRDT.ORSet.contains(CRDT.ORSet.new(), 1, int_to_string)
+        false
+
+        let s = CRDT.ORSet.add(CRDT.ORSet.new(), 1, int_to_string, "t1")
+        CRDT.ORSet.contains(s, 1, int_to_string)   -- true
+    """
     fn contains(s : T(a), elem : a, to_key : a -> String) : Bool do
       match s do
       ORSet(m) ->
@@ -257,7 +465,15 @@ mod CRDT do
       end
     end
 
-    doc "All elements currently in the set."
+    doc """
+    All elements currently in the set, in the underlying map's hash-traversal
+    order.
+
+    ## Examples
+
+        march> CRDT.ORSet.elements(CRDT.ORSet.add(CRDT.ORSet.new(), "x", fn s -> s, "t1"))
+        ["x"]
+    """
     fn elements(s : T(a)) : List(a) do
       match s do
       ORSet(m) ->
@@ -277,7 +493,16 @@ mod CRDT do
       end
     end
 
-    doc "Merge: union tags for each element key."
+    doc """
+    Union of two sets: every key from either side, with the tag lists of a
+    key present in both appended (duplicates are kept, so tag lists grow on
+    repeated merges). On a shared key the element stored in `a` is kept.
+
+    ## Examples
+
+        march> CRDT.ORSet.size(CRDT.ORSet.merge(CRDT.ORSet.add(CRDT.ORSet.new(), 1, int_to_string, "t1"), CRDT.ORSet.add(CRDT.ORSet.new(), 2, int_to_string, "t2")))
+        2
+    """
     fn merge(a : T(x), b : T(x)) : T(x) do
       match (a, b) do
       (ORSet(ma), ORSet(mb)) ->
@@ -286,7 +511,19 @@ mod CRDT do
       end
     end
 
-    doc "True when both ORSets have the same elements (ignoring tag identity)."
+    doc """
+    True when both sets have the same NUMBER of elements. Only the sizes are
+    compared, not the elements themselves, so a set holding 1 and a set
+    holding 2 count as equal; compare `elements` yourself when membership
+    matters.
+
+    ## Examples
+
+        march> CRDT.ORSet.equal(CRDT.ORSet.new(), CRDT.ORSet.new())
+        true
+        march> CRDT.ORSet.equal(CRDT.ORSet.new(), CRDT.ORSet.add(CRDT.ORSet.new(), 1, int_to_string, "t1"))
+        false
+    """
     fn equal(a : T(x), b : T(x)) : Bool do
       match (a, b) do
       (ORSet(ma), ORSet(mb)) ->
@@ -296,7 +533,14 @@ mod CRDT do
       end
     end
 
-    doc "Number of elements with at least one tag."
+    doc """
+    Number of elements with at least one tag. O(n).
+
+    ## Examples
+
+        march> CRDT.ORSet.size(CRDT.ORSet.add(CRDT.ORSet.add(CRDT.ORSet.new(), 1, int_to_string, "t1"), 2, int_to_string, "t2"))
+        2
+    """
     fn size(s : T(a)) : Int do
       List.length(elements(s))
     end

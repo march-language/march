@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: not one slot: mark every slot it relates, `Assoc(k[p], v[p])`
+-- `k -> v -> Bool[p]` defines a `p` of two arguments, which relates two
+-- sibling slots; marking one (`Assoc(k, v[p])`) is a hard error naming the
+-- fix (multi-arg design 2026-10-18 §1.4 W2, decision D3).
+mod R20BoolSugarTwoArgumentSingleSlot do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+  fn one(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k, v[p]) do a end
+end

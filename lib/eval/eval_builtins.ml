@@ -24,15 +24,39 @@ let strip_trailing_cr s =
   let n = String.length s in
   if n > 0 && s.[n - 1] = '\r' then String.sub s 0 (n - 1) else s
 
+(* __try_call / __try_call_val: run the thunk (a 1-arg lambda whose argument
+   is ignored) and reflect any runtime failure as Err.  The failure is handled
+   here, so the frames a panic leaves on the March stack for a backtrace are
+   dropped back to the mark taken on entry: kept, they surfaced in every later
+   backtrace, the printed one and a Diagnostics crash report alike. *)
+let try_call_thunk (thunk : value) : value =
+  let restore_stack = !Eval_prim.march_stack_mark () in
+  let err s = restore_stack (); VCon ("Err", [VString s]) in
+  try VCon ("Ok", [!apply_hook thunk [VBool true]])
+  with
+  | BlockedOnReceive    -> raise BlockedOnReceive
+  | Assert_failure msg -> err msg
+  | Match_failure msg  -> err ("match failure: " ^ msg)
+  | Eval_error msg     -> err msg
+  | Failure msg        -> err msg
+  | Division_by_zero   -> err "division by zero"
+  | Stack_overflow     -> err "stack overflow"
+  | Invalid_argument m -> err ("invalid argument: " ^ m)
+  | exn                -> err (Printexc.to_string exn)
+
+(* The IPv4 address HTTP servers and tcp_listen bind to: any address until
+   http_server_bind_host sets it (mirrors march_http_bind_addr in the C runtime). *)
+let http_bind_addr = ref Unix.inet_addr_any
+
 let base_env : env =
   (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
      surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
      here, dispatched via E-App-Prim (§4.2) — there is no separate arithmetic
      evaluation path. *)
   [ (* Integer arithmetic *)
-    ("+",  arith_num ( + ) ( +. ) "+")   (* δ-Add-I / δ-Add-F — §4.4 *)
-  ; ("-",  arith_num ( - ) ( -. ) "-")   (* δ-Sub-I / δ-Sub-F — §4.4 *)
-  ; ("*",  arith_num ( * ) ( *. ) "*")   (* δ-Mul-I / δ-Mul-F — §4.4 *)
+    ("+",  arith_num int_add ( +. ) "+")   (* δ-Add-I / δ-Add-F — §4.4 *)
+  ; ("-",  arith_num int_sub ( -. ) "-")   (* δ-Sub-I / δ-Sub-F — §4.4 *)
+  ; ("*",  arith_num int_mul ( *. ) "*")   (* δ-Mul-I / δ-Mul-F — §4.4 *)
   ; ("/",  VBuiltin ("/", function       (* δ-Div-I / δ-Div-F / δ-Div-0 / δ-Div-0F — §4.4 *)
         | [VInt a;   VInt b]   when b <> 0   -> VInt (a / b)
         | [VFloat a; VFloat b] when b <> 0.0 -> VFloat (a /. b)
@@ -127,17 +151,7 @@ let base_env : env =
              is a workaround for a typechecker issue with `() -> a` types
              in argument position. We pass VBool true, which the March-side
              lambda `fn _ -> body` discards. *)
-          (try VCon ("Ok", [!apply_hook thunk [VBool true]])
-           with
-           | BlockedOnReceive    -> raise BlockedOnReceive
-           | Assert_failure msg -> VCon ("Err", [VString msg])
-           | Match_failure msg  -> VCon ("Err", [VString ("match failure: " ^ msg)])
-           | Eval_error msg     -> VCon ("Err", [VString msg])
-           | Failure msg        -> VCon ("Err", [VString msg])
-           | Division_by_zero   -> VCon ("Err", [VString "division by zero"])
-           | Stack_overflow     -> VCon ("Err", [VString "stack overflow"])
-           | Invalid_argument m -> VCon ("Err", [VString ("invalid argument: " ^ m)])
-           | exn                -> VCon ("Err", [VString (Printexc.to_string exn)]))
+          try_call_thunk thunk
         | _ -> eval_error "__try_call: expected one thunk argument"))
     (* Value-carrying try — same semantics as __try_call but the Ok payload is
        the thunk's actual (possibly heap) result rather than a Bool.  The
@@ -145,17 +159,7 @@ let base_env : env =
        the two differ only in the native runtime + typechecker signature. *)
   ; ("__try_call_val", VBuiltin ("__try_call_val", function
         | [thunk] ->
-          (try VCon ("Ok", [!apply_hook thunk [VBool true]])
-           with
-           | BlockedOnReceive    -> raise BlockedOnReceive
-           | Assert_failure msg -> VCon ("Err", [VString msg])
-           | Match_failure msg  -> VCon ("Err", [VString ("match failure: " ^ msg)])
-           | Eval_error msg     -> VCon ("Err", [VString msg])
-           | Failure msg        -> VCon ("Err", [VString msg])
-           | Division_by_zero   -> VCon ("Err", [VString "division by zero"])
-           | Stack_overflow     -> VCon ("Err", [VString "stack overflow"])
-           | Invalid_argument m -> VCon ("Err", [VString ("invalid argument: " ^ m)])
-           | exn                -> VCon ("Err", [VString (Printexc.to_string exn)]))
+          try_call_thunk thunk
         | _ -> eval_error "__try_call_val: expected one thunk argument"))
     (* Conversions *)
   ; ("bool_to_string", VBuiltin ("bool_to_string", function
@@ -170,7 +174,12 @@ let base_env : env =
   ; ("string_to_int", VBuiltin ("string_to_int", function
         | [VString s] ->
           (try VCon ("Some", [VInt (int_of_string s)])
-           with Failure _ -> VCon ("None", []))
+           with Failure _ ->
+             (* A narrow host (the browser REPL) rejects a decimal native
+                March would accept: report the width, not "not a number". *)
+             if narrow_int && Int64.of_string_opt s <> None
+             then int_overflow "string_to_int"
+             else VCon ("None", []))
         | _ -> eval_error "string_to_int: expected string"))
   ; ("string_length", VBuiltin ("string_length", function
         | [VString s] -> VInt (String.length s)
@@ -218,7 +227,7 @@ let base_env : env =
         | _ -> eval_error "is_nil: expected list"))
     (* Negation *)
   ; ("negate", VBuiltin ("negate", function
-        | [VInt n]   -> VInt (~- n)
+        | [VInt n]   -> VInt (int_neg n)
         | [VFloat f] -> VFloat (~-. f)
         | _ -> eval_error "negate: expected number"))
     (* Actor builtins — operate on the global actor_registry *)
@@ -339,6 +348,14 @@ let base_env : env =
            | Some inst -> VInt (Queue.length inst.ai_mailbox)
            | None      -> VInt 0)
         | _ -> eval_error "mailbox_size: expected pid"))
+  (* The interpreter's Actor.call holds nothing off the mailbox, so the
+     backlog is the queue length. *)
+  ; ("mailbox_backlog", VBuiltin ("mailbox_backlog", function
+        | [VPid pid] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst -> VInt (Queue.length inst.ai_mailbox)
+           | None      -> VInt 0)
+        | _ -> eval_error "mailbox_backlog: expected pid"))
   (* The observe socket's reply to one request line, built from the
      interpreter's actor table (lib/eval/eval_observe.ml). Stdlib-only: Recon. *)
   ; ("observe_count_send", VBuiltin ("observe_count_send", function
@@ -740,7 +757,7 @@ let base_env : env =
             statically, the interpreter at runtime, and they must agree. *)
          | VCon (("Safe" | "TrustedHtml"), [VString s]) when id = 0 -> VString s
          | VCon ("TrustedAttr", [VString s]) when id = 1 -> VString s
-         | VCon ("TrustedUrl", [VString s]) when id = 2 || id = 3 -> VString s
+         | VCon ("TrustedUrl", [VString s]) when id = 2 || id = 3 || id = 10 -> VString s
          | VCon ("TrustedCss", [VString s]) when id = 4 || id = 7 -> VString s
          (* Both JS escapers: 5 inside a string literal, 9 at an expression
             position. They differ in POSITION within one language, like the
@@ -838,6 +855,13 @@ let base_env : env =
         | [VFloat a;  VFloat b]  -> VInt (Float.compare a b)
         | [VString a; VString b] -> VInt (String.compare a b)
         | [VBool a;   VBool b]   -> VInt (Bool.compare a b)
+        | [VTuple xs; VTuple ys] as args ->
+          (* Lexicographic, each component by its own order; OCaml's
+             structural [compare] ordered an ADT component by constructor
+             NAME and never consulted its Ord impl. *)
+          (match tuple_compare xs ys with
+           | Some n -> VInt n
+           | None -> (match args with [a; b] -> VInt (compare a b) | _ -> VInt 0))
         | [a; b] ->
           (match type_name_of_value a with
            | Some tname ->
@@ -875,12 +899,25 @@ let base_env : env =
        directly in the env, so the env-bound version is used as fallback. *)
   ; ("to_json", VBuiltin ("to_json", function
         | [v] ->
+          (* A value whose type's short name collides (two modules each
+             declare and derive Json for a `Note`) resolves to its declaring
+             module's qualified name first, which the DImpl registered beside
+             the bare key; the bare key alone belongs to whichever of them was
+             evaluated last. *)
+          let qualified =
+            match dispatch_type_name_of_value v with
+            | Some q when q <> "" -> Hashtbl.find_opt impl_tbl ("JsonTo", q)
+            | _ -> None
+          in
+          (match qualified with
+           | Some to_fn -> !apply_hook to_fn [v]
+           | None ->
           (match type_name_of_value v with
            | Some tname ->
              (match Hashtbl.find_opt impl_tbl ("JsonTo", tname) with
               | Some to_fn -> !apply_hook to_fn [v]
               | None       -> eval_error "to_json: no Json derive for type %s" tname)
-           | None -> eval_error "to_json: cannot determine type of value")
+           | None -> eval_error "to_json: cannot determine type of value"))
         | _ -> eval_error "to_json: expected one argument"))
   ; ("from_json", VBuiltin ("from_json", function
         | [v] ->
@@ -947,13 +984,23 @@ let base_env : env =
 
     (* ---- Int primitives ---- *)
   ; ("int_abs", VBuiltin ("int_abs", function
-        | [VInt n] -> VInt (abs n)
+        (* abs(-2^62) is -2^62, as compiled: int_abs wraps, `-` does not. *)
+        | [VInt n] -> VInt (if n < 0 then int_wrapping_sub 0 n else n)
         | _ -> eval_error "int_abs: expected int"))
+  ; ("int_wrapping_add", VBuiltin ("int_wrapping_add", function
+        | [VInt a; VInt b] -> VInt (int_wrapping_add a b)
+        | _ -> eval_error "int_wrapping_add: expected two ints"))
+  ; ("int_wrapping_sub", VBuiltin ("int_wrapping_sub", function
+        | [VInt a; VInt b] -> VInt (int_wrapping_sub a b)
+        | _ -> eval_error "int_wrapping_sub: expected two ints"))
+  ; ("int_wrapping_mul", VBuiltin ("int_wrapping_mul", function
+        | [VInt a; VInt b] -> VInt (int_wrapping_mul a b)
+        | _ -> eval_error "int_wrapping_mul: expected two ints"))
   ; ("int_pow", VBuiltin ("int_pow", function
         | [VInt base; VInt exp] ->
           if exp < 0 then eval_error "int_pow: negative exponent"
           else
-            let rec go acc b e = if e = 0 then acc else go (acc * b) b (e - 1)
+            let rec go acc b e = if e = 0 then acc else go (int_wrapping_mul acc b) b (e - 1)
             in VInt (go 1 base exp)
         | _ -> eval_error "int_pow: expected two ints"))
   ; ("int_div", VBuiltin ("int_div", function
@@ -981,6 +1028,21 @@ let base_env : env =
             let r = a mod b in
             VInt (if r < 0 then r + abs b else r)
         | _ -> eval_error "int_mod_euclid: expected two ints"))
+  ; ("int_div_floor", VBuiltin ("int_div_floor", function
+        | [VInt a; VInt b] ->
+          if b = 0 then eval_error "int_div_floor: division by zero"
+          else
+            let q = a / b in
+            let r = a - q * b in
+            VInt (if r <> 0 && ((r < 0) <> (b < 0)) then q - 1 else q)
+        | _ -> eval_error "int_div_floor: expected two ints"))
+  ; ("int_mod_floor", VBuiltin ("int_mod_floor", function
+        | [VInt a; VInt b] ->
+          if b = 0 then eval_error "int_mod_floor: division by zero"
+          else
+            let r = a mod b in
+            VInt (if r <> 0 && ((r < 0) <> (b < 0)) then r + b else r)
+        | _ -> eval_error "int_mod_floor: expected two ints"))
   ; ("int_to_float", VBuiltin ("int_to_float", function
         | [VInt n] -> VFloat (float_of_int n)
         | _ -> eval_error "int_to_float: expected int"))
@@ -1006,6 +1068,8 @@ let base_env : env =
   ; ("int_shl", VBuiltin ("int_shl", function
         | [VInt a; VInt n] ->
           if n < 0 || n >= 63 then eval_error "int_shl: shift out of range"
+          else if narrow_int && (n >= Sys.int_size - 1 || (a asr (Sys.int_size - 1 - n)) <> (if a < 0 then -1 else 0))
+          then (if a = 0 then VInt 0 else int_overflow "int_shl")
           else VInt (a lsl n)
         | _ -> eval_error "int_shl: expected two ints"))
   ; ("int_shr", VBuiltin ("int_shr", function
@@ -1043,10 +1107,10 @@ let base_env : env =
         | [VFloat f] -> VInt (Float.to_int (Float.round f))
         | _ -> eval_error "float_round: expected float"))
   ; ("float_truncate", VBuiltin ("float_truncate", function
-        | [VFloat f] -> VInt (Float.to_int f)
+        | [VFloat f] -> VInt (int_of_float_checked "float_truncate" f)
         | _ -> eval_error "float_truncate: expected float"))
   ; ("float_to_int", VBuiltin ("float_to_int", function
-        | [VFloat f] -> VInt (Float.to_int f)
+        | [VFloat f] -> VInt (int_of_float_checked "float_to_int" f)
         | _ -> eval_error "float_to_int: expected float"))
   ; ("float_is_nan", VBuiltin ("float_is_nan", function
         | [VFloat f] -> VBool (Float.is_nan f)
@@ -1245,7 +1309,12 @@ let base_env : env =
               let result = ref [] and start = ref 0 in
               (try
                  for i = 0 to ls - lsep do
-                   if String.sub s i lsep = sep then begin
+                   (* Only at or after the end of the previous match: an
+                      overlapping one (",," at 1 in ",,,,") gave a negative
+                      length, and the exception it raised ended the loop, so
+                      the interpreter returned ["", ",,"] where compiled code
+                      returns ["", "", ""]. *)
+                   if i >= !start && String.sub s i lsep = sep then begin
                      result := String.sub s !start (i - !start) :: !result;
                      start := i + lsep
                    end
@@ -2022,7 +2091,7 @@ let base_env : env =
              let open Unix in
              let sock = socket PF_INET SOCK_STREAM 0 in
              setsockopt sock SO_REUSEADDR true;
-             bind sock (ADDR_INET (inet_addr_any, port));
+             bind sock (ADDR_INET (!http_bind_addr, port));
              listen sock 1024;
              VCon ("Ok", [VInt (Obj.magic sock : int)])
            with Unix.Unix_error (err, _, _) ->
@@ -2248,6 +2317,56 @@ let base_env : env =
            | Ok _, Ok _ -> march_bytes_of_string ""
            | Error e, _ | _, Error e -> eval_error "x25519: %s" e)
         | _ -> eval_error "x25519(scalar: Bytes, point: Bytes): Bytes"))
+    (* ---- ML-KEM-768 / ML-DSA-65 (lib/pqc, the same vendored C the native
+       runtime links via runtime/march_pqc.c). Parity with the runtime: a
+       wrong-length argument or a rejected key gives EMPTY Bytes (verify:
+       false), never an error. ---- *)
+  ; ("mlkem768_keypair", VBuiltin ("mlkem768_keypair", function
+        | [seed_v] ->
+          (match march_val_to_raw seed_v with
+           | Ok seed ->
+             march_bytes_of_string
+               (Option.value ~default:"" (March_pqc.Pqc.mlkem768_keypair seed))
+           | Error e -> eval_error "mlkem768_keypair: %s" e)
+        | _ -> eval_error "mlkem768_keypair(seed: Bytes): Bytes"))
+  ; ("mlkem768_encaps", VBuiltin ("mlkem768_encaps", function
+        | [pk_v; coins_v] ->
+          (match march_val_to_raw pk_v, march_val_to_raw coins_v with
+           | Ok pk, Ok coins ->
+             march_bytes_of_string
+               (Option.value ~default:"" (March_pqc.Pqc.mlkem768_encaps pk coins))
+           | Error e, _ | _, Error e -> eval_error "mlkem768_encaps: %s" e)
+        | _ -> eval_error "mlkem768_encaps(pk: Bytes, coins: Bytes): Bytes"))
+  ; ("mlkem768_decaps", VBuiltin ("mlkem768_decaps", function
+        | [sk_v; ct_v] ->
+          (match march_val_to_raw sk_v, march_val_to_raw ct_v with
+           | Ok sk, Ok ct ->
+             march_bytes_of_string
+               (Option.value ~default:"" (March_pqc.Pqc.mlkem768_decaps sk ct))
+           | Error e, _ | _, Error e -> eval_error "mlkem768_decaps: %s" e)
+        | _ -> eval_error "mlkem768_decaps(sk: Bytes, ct: Bytes): Bytes"))
+  ; ("mldsa65_keypair", VBuiltin ("mldsa65_keypair", function
+        | [seed_v] ->
+          (match march_val_to_raw seed_v with
+           | Ok seed ->
+             march_bytes_of_string
+               (Option.value ~default:"" (March_pqc.Pqc.mldsa65_keypair seed))
+           | Error e -> eval_error "mldsa65_keypair: %s" e)
+        | _ -> eval_error "mldsa65_keypair(seed: Bytes): Bytes"))
+  ; ("mldsa65_sign", VBuiltin ("mldsa65_sign", function
+        | [sk_v; msg_v; rnd_v] ->
+          (match march_val_to_raw sk_v, march_val_to_raw msg_v, march_val_to_raw rnd_v with
+           | Ok sk, Ok msg, Ok rnd ->
+             march_bytes_of_string
+               (Option.value ~default:"" (March_pqc.Pqc.mldsa65_sign sk msg rnd))
+           | Error e, _, _ | _, Error e, _ | _, _, Error e -> eval_error "mldsa65_sign: %s" e)
+        | _ -> eval_error "mldsa65_sign(sk: Bytes, msg: Bytes, rnd: Bytes): Bytes"))
+  ; ("mldsa65_verify", VBuiltin ("mldsa65_verify", function
+        | [pk_v; msg_v; sig_v] ->
+          (match march_val_to_raw pk_v, march_val_to_raw msg_v, march_val_to_raw sig_v with
+           | Ok pk, Ok msg, Ok sg -> VBool (March_pqc.Pqc.mldsa65_verify pk msg sg)
+           | Error e, _, _ | _, Error e, _ | _, _, Error e -> eval_error "mldsa65_verify: %s" e)
+        | _ -> eval_error "mldsa65_verify(pk: Bytes, msg: Bytes, sig: Bytes): Bool"))
     (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->
@@ -2931,10 +3050,10 @@ let base_env : env =
         let open Unix in
         let server_sock = socket PF_INET SOCK_STREAM 0 in
         setsockopt server_sock SO_REUSEADDR true;
-        bind server_sock (ADDR_INET (inet_addr_any, port));
+        bind server_sock (ADDR_INET (!http_bind_addr, port));
         listen server_sock 128;
         Printf.eprintf "march: HTTP server listening on port %d\n%!" port;
-        (try run_http_event_loop server_sock pipeline_fn
+        (try Eval_prim.with_shutdown_consumer (fun () -> run_http_event_loop server_sock pipeline_fn)
          with
          (* EINTR from accept/select that slipped past inner handlers —
             treat as a clean shutdown rather than re-raising as a fatal error *)
@@ -2959,7 +3078,7 @@ let base_env : env =
         let open Unix in
         let server_sock = socket PF_INET SOCK_STREAM 0 in
         setsockopt server_sock SO_REUSEADDR true;
-        bind server_sock (ADDR_INET (inet_addr_any, port));
+        bind server_sock (ADDR_INET (!http_bind_addr, port));
         listen server_sock 128;
         let (read_fd, write_fd) = pipe () in
         (match fork () with
@@ -2991,6 +3110,15 @@ let base_env : env =
       | _ -> eval_error "http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline)"))
 
   (* http_server_wait(pid) — waitpid for the spawned server child *)
+  (* http_server_bind_host(host) — later listens bind to this IPv4 address *)
+  ; ("http_server_bind_host", VBuiltin ("http_server_bind_host", function
+      | [VString host] ->
+        let bad () = eval_error "bind_host: not an IPv4 address: %s" host in
+        let a = (try Unix.inet_addr_of_string host with Failure _ -> bad ()) in
+        if Unix.domain_of_sockaddr (Unix.ADDR_INET (a, 0)) <> Unix.PF_INET then bad ();
+        http_bind_addr := a;
+        VUnit
+      | _ -> eval_error "http_server_bind_host(host)"))
   ; ("http_server_wait", VBuiltin ("http_server_wait", function
       | [VInt pid] ->
         (try ignore (Unix.waitpid [] pid) with _ -> ());
@@ -3107,6 +3235,23 @@ let base_env : env =
   ; ("tls_peer_cn", VBuiltin ("tls_peer_cn", function
         | [VInt _ssl] -> VCon ("None", [])
         | _ -> eval_error "tls_peer_cn(ssl_handle)"))
+
+  (* tls_ctx_set_groups(ctx_handle, groups) → Ok(Int)|Err(String);
+     tls_negotiated_group(ssl_handle) → Option(String);
+     tls_pq_available() → Bool.  No real TLS in the interpreter: the
+     context stub accepts any list, no handshake ever agreed a group, and
+     there is no OpenSSL to offer the post-quantum group. *)
+  ; ("tls_ctx_set_groups", VBuiltin ("tls_ctx_set_groups", function
+        | [VInt _ctx; VString g] ->
+          if g = "" then VCon ("Err", [VString "set_groups: empty group list"])
+          else VCon ("Ok", [VInt 0])
+        | _ -> eval_error "tls_ctx_set_groups(ctx_handle, groups)"))
+  ; ("tls_negotiated_group", VBuiltin ("tls_negotiated_group", function
+        | [VInt _ssl] -> VCon ("None", [])
+        | _ -> eval_error "tls_negotiated_group(ssl_handle)"))
+  ; ("tls_pq_available", VBuiltin ("tls_pq_available", function
+        | args when args = [] || args = [VUnit] -> VBool false
+        | _ -> eval_error "tls_pq_available: takes no arguments"))
 
   (* ---- Option combinators ---- *)
   ; ("Option.map", VBuiltin ("Option.map", function
@@ -3626,8 +3771,8 @@ let base_env : env =
              in
              VCon ("Ok", [VCon ("ProcessResult",
                [VInt code; VString (Buffer.contents buf); VString ""])])
-           with Unix.Unix_error (err, _, _) ->
-             VCon ("Err", [VString (Unix.error_message err)]))
+           with Unix.Unix_error (err, fn, _) ->
+             VCon ("Err", [VString (process_spawn_error cmd fn err)]))
         | _ -> eval_error "process_spawn_sync: expected (String, List(String))"))
   (* Run a command and return its whole stdout as one String.
      Returns Ok(stdout) on success or Err(msg) on OS error.  Both backends
@@ -3650,8 +3795,8 @@ let base_env : env =
              let out = In_channel.input_all ic in
              let _ = Unix.close_process (ic, oc) in
              VCon ("Ok", [VString out])
-           with Unix.Unix_error (err, _, _) ->
-             VCon ("Err", [VString (Unix.error_message err)]))
+           with Unix.Unix_error (err, fn, _) ->
+             VCon ("Err", [VString (process_spawn_error cmd fn err)]))
         | _ -> eval_error "process_spawn_lines: expected (String, List(String))"))
 
   (* Spawn a process asynchronously (non-blocking).
@@ -3686,8 +3831,8 @@ let base_env : env =
             incr live_proc_next_id;
             Hashtbl.add live_proc_tbl id (ic, oc, pid);
             VCon ("Ok", [VCon ("LiveProcess", [VInt pid; VInt id])])
-          with Unix.Unix_error (err, _, _) ->
-            VCon ("Err", [VString (Unix.error_message err)]))
+          with Unix.Unix_error (err, fn, _) ->
+            VCon ("Err", [VString (process_spawn_error cmd fn err)]))
         | _ -> eval_error "process_spawn_async: expected (String, List(String))"))
 
   (* Read one line from a LiveProcess's stdout.
@@ -3865,6 +4010,28 @@ let base_env : env =
             List.filter (fun (n, _) -> n <> name) !logger_appenders;
           VUnit
         | _ -> eval_error "logger_remove_appender(name: String)"))
+  (* ── Diagnostics crash observers (stdlib/diagnostics.march).  The
+     registry and context live in Eval_prim; Eval.diag_report_crash
+     dispatches at the crash boundaries. ── *)
+  ; ("diag_observe", VBuiltin ("diag_observe", function
+        | [cb] ->
+          let id = !Eval_prim.diag_next_id in
+          incr Eval_prim.diag_next_id;
+          Eval_prim.diag_observers := !Eval_prim.diag_observers @ [(id, cb)];
+          VInt id
+        | _ -> eval_error "diag_observe(observer: DiagCrash -> Unit)"))
+  ; ("diag_unobserve", VBuiltin ("diag_unobserve", function
+        | [VInt id] ->
+          Eval_prim.diag_observers :=
+            List.filter (fun (i, _) -> i <> id) !Eval_prim.diag_observers;
+          VUnit
+        | _ -> eval_error "diag_unobserve(id: Int)"))
+  ; ("diag_context_get", VBuiltin ("diag_context_get", function
+        | [] -> !Eval_prim.diag_ctx
+        | _ -> eval_error "diag_context_get: no arguments"))
+  ; ("diag_context_set", VBuiltin ("diag_context_set", function
+        | [ctx] -> Eval_prim.diag_ctx := ctx; VUnit
+        | _ -> eval_error "diag_context_set(ctx)"))
   ; ("logger_clear_appenders", VBuiltin ("logger_clear_appenders", function
         | [] -> logger_appenders := []; VUnit
         | _ -> eval_error "logger_clear_appenders: no arguments"))

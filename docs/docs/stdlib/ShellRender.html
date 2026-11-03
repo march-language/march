@@ -1,0 +1,577 @@
+<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ShellRender — March Docs</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,400;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style>
+/* Dark theme (default) — deep navy with cyan accent, matching the March homepage */
+:root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
+--acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
+--faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
+
+/* Light theme overrides */
+[data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
+--acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
+--faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
+
+/* Reset + base */
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;font-size:15px;line-height:1.6;display:flex;flex-direction:column;min-height:100vh}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:var(--acc2)}
+
+/* Top bar */
+#topbar{display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:60px;background:var(--bg-nav);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--bdr);flex-shrink:0;position:sticky;top:0;z-index:100}
+#topbar .brand{font-family:'Lora',Georgia,serif;font-size:18px;font-weight:600;color:var(--text);letter-spacing:-.02em;display:flex;align-items:center;gap:9px}
+#topbar .brand svg{width:20px;height:20px}
+#topbar .actions{display:flex;align-items:center;gap:12px}
+#theme-toggle{background:none;border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 8px;font-size:13px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:4px;transition:all .15s}
+#theme-toggle:hover{color:var(--text);border-color:var(--acc)}
+#search-trigger{background:var(--card);border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 14px;font-size:13px;display:flex;align-items:center;gap:8px;transition:all .15s;min-width:200px}
+#search-trigger:hover{border-color:var(--acc);color:var(--text)}
+#search-trigger kbd{font-size:10px;background:var(--bg);border:1px solid var(--bdr);border-radius:3px;padding:1px 5px;margin-left:auto;font-family:inherit}
+
+/* Content wrapper (sidebar + main) */
+.content-wrap{display:flex;flex:1;overflow:hidden}
+
+/* Typography */
+code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
+pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
+code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
+h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
+h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
+p{margin:8px 0}
+
+/* Sidebar */
+#sb{width:248px;min-width:208px;background:var(--sb);border-right:1px solid var(--bdr);padding:8px 10px 28px;position:sticky;top:60px;height:calc(100vh - 60px);overflow-y:auto;flex-shrink:0}
+#sb::-webkit-scrollbar{width:5px}#sb::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}#sb::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+.sb-section{padding:0}
+.sb-heading{font-family:'JetBrains Mono','Fira Code',monospace;font-size:10px;font-weight:500;color:var(--faint);text-transform:uppercase;letter-spacing:.16em;padding:20px 10px 8px;user-select:none}
+
+/* Generic nav link (top-level + sub-items) */
+.sl{display:block;padding:5px 10px;border-radius:6px;font-size:13px;line-height:1.45;color:var(--dim);transition:color .12s,background .12s}
+.sl:hover{background:color-mix(in oklab,var(--acc) 9%,transparent);color:var(--text);text-decoration:none}
+.sl.active{color:var(--acc);font-weight:500}
+.sb-section>.sl.active,.sb-sub .sl.active{background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}
+
+/* Hierarchical sidebar groups */
+.sb-group{margin:1px 0}
+.sb-group-hdr{display:flex;align-items:center;border-radius:6px;cursor:pointer;user-select:none;transition:background .12s}
+.sb-group-hdr:hover{background:color-mix(in oklab,var(--acc) 9%,transparent)}
+.sb-group-hdr:hover .sl,.sb-group-hdr:hover .sb-chevron{color:var(--text)}
+.sb-group-hdr:has(.sl.active){background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}
+.sb-group-hdr .sl{flex:1;padding-left:1px}
+.sb-chevron{font-size:9px;transition:transform .15s,color .12s;width:20px;align-self:stretch;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--faint)}
+.sb-group.open>.sb-group-hdr .sb-chevron{transform:rotate(90deg);color:var(--acc)}
+.sb-sub{display:none;margin:1px 0 6px 19px;padding-left:8px;border-left:1px solid var(--bdr)}
+.sb-group.open .sb-sub{display:block}
+.sb-sub .sl{font-size:12px;padding:3px 8px;color:var(--dim)}
+.sb-sub .sl:hover{color:var(--text)}
+.sb-kind{display:inline-block;width:12px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;letter-spacing:.03em;margin-right:8px;text-transform:uppercase;text-align:center}
+
+/* Main content */
+#main{flex:1;padding:40px max(52px,calc(50% - 574px));min-width:0;overflow-y:auto;height:calc(100vh - 60px)}
+
+/* Breadcrumb */
+.breadcrumb{font-size:12px;color:var(--dim);margin-bottom:16px;display:flex;align-items:center;gap:6px}
+.breadcrumb a{color:var(--dim);font-size:12px}.breadcrumb a:hover{color:var(--acc)}
+.breadcrumb .sep{color:var(--bdr)}
+
+/* Module doc card */
+.mdoc{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:20px 24px;margin-bottom:24px;color:var(--dim);font-size:14px;line-height:1.7}
+
+/* Items */
+.item{border:1px solid var(--bdr);border-radius:8px;margin-bottom:12px;overflow:hidden;transition:border-color .15s}
+.item:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bdr))}
+.ih{display:flex;align-items:baseline;gap:10px;padding:12px 16px;background:var(--card);cursor:pointer;user-select:none;transition:background .1s}
+.ih:hover{background:color-mix(in srgb,var(--card) 80%,var(--acc) 20%)}
+
+/* Badges */
+.badge{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:500;letter-spacing:.08em;padding:2px 9px;border-radius:100px;text-transform:uppercase;flex-shrink:0;border:1px solid transparent}
+.bfn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn);border-color:color-mix(in oklab,var(--fn) 24%,transparent)}
+.bpfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 30%,transparent)}
+.bty{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty);border-color:color-mix(in oklab,var(--ty) 24%,transparent)}
+.bpt{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 26%,transparent)}
+.bif{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if);border-color:color-mix(in oklab,var(--if) 24%,transparent)}
+
+/* Item content */
+.name{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:var(--bright);font-weight:600}
+.sig{font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;color:var(--dim);flex:1;margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ib{padding:18px 20px;border-top:1px solid var(--bdr);display:none;font-size:14px;color:var(--text);line-height:1.7}
+.ib.open{display:block}
+
+/* Source + anchor links */
+.src-link{font-size:10px;color:var(--dim);background:var(--bg);border:1px solid var(--bdr);border-radius:4px;padding:1px 6px;margin-left:auto;opacity:0;transition:all .15s;text-decoration:none;flex-shrink:0}
+.ih:hover .src-link{opacity:1}.src-link:hover{color:var(--acc);border-color:var(--acc);text-decoration:none}
+.anchor-link{color:var(--bdr);font-size:14px;margin-left:6px;opacity:0;transition:opacity .15s;text-decoration:none}
+.ih:hover .anchor-link{opacity:1}.anchor-link:hover{color:var(--acc);text-decoration:none}
+
+/* Module cards (index page) */
+.mc{border:1px solid var(--bdr);border-radius:8px;padding:16px 20px;margin-bottom:12px;background:var(--card);transition:all .15s}
+.mc:hover{border-color:var(--acc);transform:translateY(-1px)}
+.mc h3{font-family:'Lora',Georgia,serif;color:var(--acc);font-size:1.05rem;font-weight:600;letter-spacing:-.01em}
+.mc p{font-size:13px;color:var(--dim);margin-top:6px}
+.st{font-size:12px;color:var(--dim);margin-top:8px;display:flex;gap:16px}
+.st span{display:flex;align-items:center;gap:4px}
+
+/* Copy button */
+.pre-wrap{position:relative}
+.copy-btn{position:absolute;top:8px;right:10px;background:var(--card);color:var(--dim);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;opacity:0;transition:all .15s}
+.pre-wrap:hover .copy-btn{opacity:1}
+.copy-btn:hover{color:var(--text);border-color:var(--acc)}
+.copy-btn.copied{color:var(--fn);border-color:var(--fn);opacity:1}
+
+/* Search overlay (Cmd+K) */
+#search-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:flex-start;justify-content:center;padding-top:min(20vh,160px)}
+#search-overlay.open{display:flex}
+#search-modal{background:var(--sb);border:1px solid var(--bdr);border-radius:12px;width:560px;max-width:90vw;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.4)}
+#search-input{width:100%;background:transparent;border:none;border-bottom:1px solid var(--bdr);color:var(--text);padding:16px 20px;font-size:15px;outline:none;font-family:inherit}
+#search-input::placeholder{color:var(--dim)}
+#sr{max-height:50vh;overflow-y:auto;padding:8px}
+#sr:empty{display:none}
+.sr-item{display:flex;align-items:baseline;gap:8px;padding:8px 12px;border-radius:6px;cursor:pointer;text-decoration:none;color:var(--text);font-size:13px;transition:background .1s}
+.sr-item:hover{background:var(--card);text-decoration:none}
+.sr-kind{font-size:9px;font-weight:700;letter-spacing:.06em;padding:2px 6px;border-radius:4px;text-transform:uppercase;flex-shrink:0;min-width:32px;text-align:center}
+.sr-fn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn)}.sr-type{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty)}
+.sr-interface{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if)}.sr-module{background:color-mix(in oklab,var(--acc) 13%,transparent);color:var(--acc)}
+.sr-pfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv)}.sr-ptype{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv)}
+.sr-name{color:var(--bright);font-family:monospace;font-weight:600;white-space:nowrap}
+.sr-mod{color:var(--dim);font-size:11px;margin-left:auto;flex-shrink:0}
+.sr-doc{color:var(--dim);font-size:11px;padding:0 12px 6px 48px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sr-sep{border-top:1px solid var(--bdr);margin:2px 8px}
+
+/* Admonitions */
+.admonition{border-left:3px solid var(--acc);background:var(--card);border-radius:0 6px 6px 0;padding:12px 16px;margin:12px 0;font-size:14px;color:var(--text)}
+.admonition.warning{border-left-color:var(--ty)}
+.admonition.note{border-left-color:var(--acc2)}
+
+/* Lists */
+ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
+
+/* Guide body */
+.guide-body{line-height:1.8;font-size:15px}
+.guide-body h3{font-family:'Lora',Georgia,serif;font-size:1.4rem;margin:30px 0 12px;color:var(--bright);font-weight:600;letter-spacing:-.01em}
+.guide-body h4{font-family:'Lora',Georgia,serif;font-size:1.1rem;margin:24px 0 10px;color:var(--bright);font-weight:600}
+
+/* Code blocks follow theme tokens (light code surface in light mode, like the main page) */
+
+/* Responsive */
+@media(max-width:768px){#sb{display:none}#main{padding:24px 16px}#search-trigger{min-width:auto}}
+</style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Actor.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Actor.html">Actor</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="AhoCorasick.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="AhoCorasick.html">AhoCorasick</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Array.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Array.html">Array</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Base64.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Base64.html">Base64</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="BigInt.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="BigInt.html">BigInt</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Bytes.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Bytes.html">Bytes</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="CRDT.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="CRDT.html">CRDT</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Channel.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Channel.html">Channel</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ChannelServer.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ChannelServer.html">ChannelServer</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ChannelSocket.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ChannelSocket.html">ChannelSocket</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Char.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Char.html">Char</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Check.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Check.html">Check</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Cli.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Cli.html">Cli</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Cluster.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Cluster.html">Cluster</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ClusterAuth.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ClusterAuth.html">ClusterAuth</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ClusterConn.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ClusterConn.html">ClusterConn</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ClusterLoad.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ClusterLoad.html">ClusterLoad</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ClusterNode.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ClusterNode.html">ClusterNode</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Compress.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Compress.html">Compress</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Config.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Config.html">Config</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ConsistentHash.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ConsistentHash.html">ConsistentHash</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Control.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Control.html">Control</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Crypto.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Crypto.html">Crypto</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Csv.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Csv.html">Csv</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="DataFrame.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="DataFrame.html">DataFrame</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="DateTime.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="DateTime.html">DateTime</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Decimal.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Decimal.html">Decimal</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Deque.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Deque.html">Deque</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Diagnose.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Diagnose.html">Diagnose</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Diagnostics.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Diagnostics.html">Diagnostics</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Dir.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Dir.html">Dir</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="DistLink.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="DistLink.html">DistLink</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="DistSupervisor.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="DistSupervisor.html">DistSupervisor</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Dns.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Dns.html">Dns</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Duration.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Duration.html">Duration</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Enum.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Enum.html">Enum</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Env.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Env.html">Env</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="File.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="File.html">File</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Flow.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Flow.html">Flow</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Forge.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Forge.html">Forge</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Gen.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Gen.html">Gen</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="GlobalPid.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="GlobalPid.html">GlobalPid</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="GlobalRegistry.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="GlobalRegistry.html">GlobalRegistry</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Hamt.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Hamt.html">Hamt</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Handle.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Handle.html">Handle</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Handshake.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Handshake.html">Handshake</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="HashMap.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="HashMap.html">HashMap</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Html.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Html.html">Html</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Http.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Http.html">Http</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="HttpClient.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="HttpClient.html">HttpClient</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="HttpServer.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="HttpServer.html">HttpServer</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="HttpTransport.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="HttpTransport.html">HttpTransport</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="IO.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="IO.html">IO</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="IOList.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="IOList.html">IOList</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Iterable.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Iterable.html">Iterable</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Js.Audio.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Js.Audio.html">Js.Audio</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Js.Canvas.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Js.Canvas.html">Js.Canvas</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Js.Dom.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Js.Dom.html">Js.Dom</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Json.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Json.html">Json</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="JsonStream.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="JsonStream.html">JsonStream</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="LazyNicheProbe.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="LazyNicheProbe.html">LazyNicheProbe</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="LinearMap.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="LinearMap.html">LinearMap</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="List.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="List.html">List</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Logger.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Logger.html">Logger</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Map.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Map.html">Map</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Math.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Math.html">Math</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Membership.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Membership.html">Membership</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Merkle.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Merkle.html">Merkle</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlDsa.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlDsa.html">MlDsa</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlKem.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlKem.html">MlKem</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Msgpack.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Msgpack.html">Msgpack</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NativeArray.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NativeArray.html">NativeArray</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NetKernel.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NetKernel.html">NetKernel</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Node.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Node.html">Node</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeCall.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeCall.html">NodeCall</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeCert.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeCert.html">NodeCert</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeIdentity.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeIdentity.html">NodeIdentity</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeQueue.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeQueue.html">NodeQueue</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeRpc.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeRpc.html">NodeRpc</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeSend.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeSend.html">NodeSend</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Option.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Option.html">Option</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="OrderedMap.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="OrderedMap.html">OrderedMap</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Parallel.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Parallel.html">Parallel</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Parser.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Parser.html">Parser</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Path.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Path.html">Path</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="PeerReader.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="PeerReader.html">PeerReader</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="PeerRegistry.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="PeerRegistry.html">PeerRegistry</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Plot.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Plot.html">Plot</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Prelude.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Prelude.html">Prelude</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Presence.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Presence.html">Presence</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Process.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Process.html">Process</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="PubSub.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="PubSub.html">PubSub</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Queue.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Queue.html">Queue</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="RRB.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="RRB.html">RRB</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Random.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Random.html">Random</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Range.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Range.html">Range</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Recon.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Recon.html">Recon</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Regex.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Regex.html">Regex</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="RemoteCall.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="RemoteCall.html">RemoteCall</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Result.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Result.html">Result</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="RingBuf.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="RingBuf.html">RingBuf</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Scheduler.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Scheduler.html">Scheduler</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Seq.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Seq.html">Seq</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Session.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Session.html">Session</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="SessionAP.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="SessionAP.html">SessionAP</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Set.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Set.html">Set</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ShellRender.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ShellRender.html">ShellRender</a></div><div class="sb-sub"><a class="sl" href="ShellRender.html#fn-anon_record"><span class="sb-kind" style="color:var(--fn)">F</span>anon_record</a>
+<a class="sl" href="ShellRender.html#fn-array"><span class="sb-kind" style="color:var(--fn)">F</span>array</a>
+<a class="sl" href="ShellRender.html#fn-ctor"><span class="sb-kind" style="color:var(--fn)">F</span>ctor</a>
+<a class="sl" href="ShellRender.html#fn-deque"><span class="sb-kind" style="color:var(--fn)">F</span>deque</a>
+<a class="sl" href="ShellRender.html#fn-hash_map"><span class="sb-kind" style="color:var(--fn)">F</span>hash_map</a>
+<a class="sl" href="ShellRender.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
+<a class="sl" href="ShellRender.html#fn-map"><span class="sb-kind" style="color:var(--fn)">F</span>map</a>
+<a class="sl" href="ShellRender.html#fn-native_array"><span class="sb-kind" style="color:var(--fn)">F</span>native_array</a>
+<a class="sl" href="ShellRender.html#fn-ordered_map"><span class="sb-kind" style="color:var(--fn)">F</span>ordered_map</a>
+<a class="sl" href="ShellRender.html#fn-queue"><span class="sb-kind" style="color:var(--fn)">F</span>queue</a>
+<a class="sl" href="ShellRender.html#fn-quote"><span class="sb-kind" style="color:var(--fn)">F</span>quote</a>
+<a class="sl" href="ShellRender.html#fn-raw"><span class="sb-kind" style="color:var(--fn)">F</span>raw</a>
+<a class="sl" href="ShellRender.html#fn-record"><span class="sb-kind" style="color:var(--fn)">F</span>record</a>
+<a class="sl" href="ShellRender.html#fn-rrb_vec"><span class="sb-kind" style="color:var(--fn)">F</span>rrb_vec</a>
+<a class="sl" href="ShellRender.html#fn-set"><span class="sb-kind" style="color:var(--fn)">F</span>set</a>
+<a class="sl" href="ShellRender.html#fn-show_cap"><span class="sb-kind" style="color:var(--fn)">F</span>show_cap</a>
+<a class="sl" href="ShellRender.html#fn-show_cut"><span class="sb-kind" style="color:var(--fn)">F</span>show_cut</a>
+<a class="sl" href="ShellRender.html#fn-sorted_set"><span class="sb-kind" style="color:var(--fn)">F</span>sorted_set</a>
+<a class="sl" href="ShellRender.html#fn-string"><span class="sb-kind" style="color:var(--fn)">F</span>string</a>
+<a class="sl" href="ShellRender.html#fn-tuple"><span class="sb-kind" style="color:var(--fn)">F</span>tuple</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Sigil.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Sigil.html">Sigil</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Signal.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Signal.html">Signal</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Simd.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Simd.html">Simd</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Socket.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Socket.html">Socket</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Sort.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Sort.html">Sort</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="SortedSet.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="SortedSet.html">SortedSet</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Stats.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Stats.html">Stats</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="String.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="String.html">String</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Swim.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Swim.html">Swim</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="SwimDriver.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="SwimDriver.html">SwimDriver</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="System.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="System.html">System</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Task.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Task.html">Task</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Test.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Test.html">Test</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Tls.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Tls.html">Tls</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Toml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Toml.html">Toml</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Topology.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Topology.html">Topology</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Trace.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Trace.html">Trace</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Tuple.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Tuple.html">Tuple</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="UUID.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="UUID.html">UUID</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Uri.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Uri.html">Uri</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Vault.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Vault.html">Vault</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="VectorClock.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="VectorClock.html">VectorClock</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="WebSocket.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WebSocket.html">WebSocket</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="WorkDispatch.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WorkDispatch.html">WorkDispatch</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Xml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Xml.html">Xml</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>ShellRender</span></nav><h1>ShellRender</h1><div class="mdoc"><p>ShellRender: the combinators <code>march --shell</code> renders a result with.</p><p>The shell (bin/shell_cmd.ml, bin/shell_render_gen.ml) compiles each input into a fragment that returns its result as a String.  It generates, from the result's static type, a renderer built from these functions: one per record, tuple and ADT the type reaches, each passing the element limit down.  The rules (R5.7 of specs/plans/2026-09-28-observe-recon-shell-plan.md):</p><ul><li>A collection (List, Array, Map, Set, and the other stdlib containers:</li></ul><pre><code><span class="tok-ty">HashMap</span>, <span class="tok-ty">OrderedMap</span>, <span class="tok-ty">SortedSet</span>, <span class="tok-ty">Deque</span>, <span class="tok-ty">Queue</span>, <span class="tok-ty">RRB</span>.<span class="tok-ty">Vec</span>, <span class="tok-ty">NativeArray</span>) shows
+at most `limit` elements and then `… n more`.  <span class="tok-ty">A</span> string shows at most `limit` characters (codepoints),
+quoted and escaped, then `… n more chars`.  <span class="tok-ty">The</span> limit applies at every
+depth; `limit &lt;= <span class="tok-num">0</span>` means no limit.</code></pre><ul><li>Records, tuples and constructors render field by field, in derive Show's</li></ul><pre><code>form.</code></pre><ul><li>A hand-written Show impl's string is cut at 16 KiB (<code>show_cut</code>).</li></ul></div><h2>Functions</h2><div class="item" id="fn-anon_record"><div class="ih"><span class="badge bfn">fn</span><span class="name">anon_record</span><span class="sig">anon_record(fields : List(String)) : String</span><a class="anchor-link" href="#fn-anon_record" title="Link">#</a></div><div class="ib"><p>An anonymous record: <code>{ a: 1, b: 2 }</code>.  Each field arrives rendered as <code>a: 1</code>.  No fields renders as <code>{}</code>.</p><h3>Examples</h3><pre data-try="ShellRender.anon_record([&quot;a: 1&quot;, &quot;b: 2&quot;])
+ShellRender.anon_record([])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.anon_record([<span class="tok-str">&quot;a: 1&quot;</span>, <span class="tok-str">&quot;b: 2&quot;</span>])
+<span class="tok-str">&quot;{ a: 1, b: 2 }&quot;</span>
+march&gt; <span class="tok-ty">ShellRender</span>.anon_record([])
+<span class="tok-str">&quot;{}&quot;</span></code></pre></div></div>
+<div class="item" id="fn-array"><div class="ih"><span class="badge bfn">fn</span><span class="name">array</span><span class="sig">array(v, limit : Int, f) : String</span><a class="anchor-link" href="#fn-array" title="Link">#</a></div><div class="ib"><p>An Array: <code>Array[1, 2, … n more]</code>, as <code>list</code>.</p><h3>Examples</h3><pre data-try="ShellRender.array(Array.from_list([1, 2, 3]), 2, int_to_string) == &quot;Array[1, 2, … 1 more]&quot;" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.array(<span class="tok-ty">Array</span>.from_list([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>]), <span class="tok-num">2</span>, int_to_string) == <span class="tok-str">&quot;Array[1, 2, … 1 more]&quot;</span>
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-ctor"><div class="ih"><span class="badge bfn">fn</span><span class="name">ctor</span><span class="sig">ctor(name : String, args : List(String)) : String</span><a class="anchor-link" href="#fn-ctor" title="Link">#</a></div><div class="ib"><p>A constructor with arguments: <code>Name(a, b)</code>.  The arguments arrive already rendered.  An empty list still prints the parentheses (<code>Name()</code>); a nullary constructor is rendered by its bare name instead.</p><h3>Examples</h3><pre data-try="ShellRender.ctor(&quot;Pair&quot;, [&quot;1&quot;, &quot;\&quot;a\&quot;&quot;])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.ctor(<span class="tok-str">&quot;Pair&quot;</span>, [<span class="tok-str">&quot;1&quot;</span>, <span class="tok-str">&quot;\&quot;a\&quot;&quot;</span>])
+<span class="tok-str">&quot;Pair(1, \&quot;a\&quot;)&quot;</span></code></pre></div></div>
+<div class="item" id="fn-deque"><div class="ih"><span class="badge bfn">fn</span><span class="name">deque</span><span class="sig">deque(d, limit : Int, f) : String</span><a class="anchor-link" href="#fn-deque" title="Link">#</a></div><div class="ib"><p>A Deque: <code>Deque[1, 2, … n more]</code>, as <code>list</code>, front to back.</p><h3>Examples</h3><pre data-try="ShellRender.deque(Deque.from_list([1, 2, 3]), 0, int_to_string)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.deque(<span class="tok-ty">Deque</span>.from_list([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>]), <span class="tok-num">0</span>, int_to_string)
+<span class="tok-str">&quot;Deque[1, 2, 3]&quot;</span></code></pre></div></div>
+<div class="item" id="fn-hash_map"><div class="ih"><span class="badge bfn">fn</span><span class="name">hash_map</span><span class="sig">hash_map(m, limit : Int, fk, fv) : String</span><a class="anchor-link" href="#fn-hash_map" title="Link">#</a></div><div class="ib"><p>A HashMap: <code>HashMap{k =&gt; v, … n more}</code>, as <code>map</code>, in the map's hash order.</p><h3>Examples</h3><pre data-try="ShellRender.hash_map(HashMap.from_list([(1, &quot;a&quot;)]), 0, int_to_string, ShellRender.quote)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.hash_map(<span class="tok-ty">HashMap</span>.from_list([(<span class="tok-num">1</span>, <span class="tok-str">&quot;a&quot;</span>)]), <span class="tok-num">0</span>, int_to_string, <span class="tok-ty">ShellRender</span>.quote)
+<span class="tok-str">&quot;HashMap{1 =&gt; \&quot;a\&quot;}&quot;</span></code></pre></div></div>
+<div class="item" id="fn-list"><div class="ih"><span class="badge bfn">fn</span><span class="name">list</span><span class="sig">list(xs : List(a), limit : Int, f : a -&gt; String) : String</span><a class="anchor-link" href="#fn-list" title="Link">#</a></div><div class="ib"><p>A list, each element rendered by <code>f</code>: <code>[1, 2, … 98 more]</code> at most <code>limit</code> elements (all when <code>limit &lt;= 0</code>).  <code>f</code> is called only on the elements shown.</p><h3>Examples</h3><pre data-try="ShellRender.list([1, 2, 3, 4], 2, int_to_string) == &quot;[1, 2, … 2 more]&quot;
+ShellRender.list([1, 2, 3], 0, int_to_string)
+ShellRender.list([], 2, int_to_string)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.list([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>], <span class="tok-num">2</span>, int_to_string) == <span class="tok-str">&quot;[1, 2, … 2 more]&quot;</span>
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">ShellRender</span>.list([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>], <span class="tok-num">0</span>, int_to_string)
+<span class="tok-str">&quot;[1, 2, 3]&quot;</span>
+march&gt; <span class="tok-ty">ShellRender</span>.list([], <span class="tok-num">2</span>, int_to_string)
+<span class="tok-str">&quot;[]&quot;</span></code></pre></div></div>
+<div class="item" id="fn-map"><div class="ih"><span class="badge bfn">fn</span><span class="name">map</span><span class="sig">map(m, limit : Int, fk, fv) : String</span><a class="anchor-link" href="#fn-map" title="Link">#</a></div><div class="ib"><p>A Map: <code>Map{k =&gt; v, … n more}</code>, keys by <code>fk</code> and values by <code>fv</code>, at most <code>limit</code> entries, in the map's iteration order.</p><h3>Examples</h3><pre data-try="ShellRender.map(Map.from_list_int([(1, &quot;a&quot;), (2, &quot;b&quot;)]), 1, int_to_string, ShellRender.quote) == &quot;Map{1 =&gt; \&quot;a\&quot;, … 1 more}&quot;" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.map(<span class="tok-ty">Map</span>.from_list_int([(<span class="tok-num">1</span>, <span class="tok-str">&quot;a&quot;</span>), (<span class="tok-num">2</span>, <span class="tok-str">&quot;b&quot;</span>)]), <span class="tok-num">1</span>, int_to_string, <span class="tok-ty">ShellRender</span>.quote) == <span class="tok-str">&quot;Map{1 =&gt; \&quot;a\&quot;, … 1 more}&quot;</span>
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-native_array"><div class="ih"><span class="badge bfn">fn</span><span class="name">native_array</span><span class="sig">native_array(xs : List(a), limit : Int, f : a -&gt; String) : String</span><a class="anchor-link" href="#fn-native_array" title="Link">#</a></div><div class="ib"><p>A NativeArray, given as the list of its elements (its family's <code>to_list_*</code>): <code>NativeArray[1, 2, … n more]</code>, as <code>list</code>.</p><h3>Examples</h3><pre data-try="ShellRender.native_array([1, 2, 3], 2, int_to_string) == &quot;NativeArray[1, 2, … 1 more]&quot;" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.native_array([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>], <span class="tok-num">2</span>, int_to_string) == <span class="tok-str">&quot;NativeArray[1, 2, … 1 more]&quot;</span>
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-ordered_map"><div class="ih"><span class="badge bfn">fn</span><span class="name">ordered_map</span><span class="sig">ordered_map(m, limit : Int, fk, fv) : String</span><a class="anchor-link" href="#fn-ordered_map" title="Link">#</a></div><div class="ib"><p>An OrderedMap: <code>OrderedMap{k =&gt; v, … n more}</code>, as <code>map</code>, in key order.</p><h3>Examples</h3><pre data-try="ShellRender.ordered_map(OrderedMap.from_list([(2, &quot;b&quot;), (1, &quot;a&quot;)], fn (a, b) -&gt; a - b), 0, int_to_string, ShellRender.quote)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.ordered_map(<span class="tok-ty">OrderedMap</span>.from_list([(<span class="tok-num">2</span>, <span class="tok-str">&quot;b&quot;</span>), (<span class="tok-num">1</span>, <span class="tok-str">&quot;a&quot;</span>)], <span class="tok-kw">fn</span> (a, b) -&gt; a - b), <span class="tok-num">0</span>, int_to_string, <span class="tok-ty">ShellRender</span>.quote)
+<span class="tok-str">&quot;OrderedMap{1 =&gt; \&quot;a\&quot;, 2 =&gt; \&quot;b\&quot;}&quot;</span></code></pre></div></div>
+<div class="item" id="fn-queue"><div class="ih"><span class="badge bfn">fn</span><span class="name">queue</span><span class="sig">queue(q, limit : Int, f) : String</span><a class="anchor-link" href="#fn-queue" title="Link">#</a></div><div class="ib"><p>A Queue: <code>Queue[1, 2, … n more]</code>, as <code>list</code>, front to back.</p><h3>Examples</h3><pre data-try="ShellRender.queue(Queue.from_list([1, 2, 3]), 1, int_to_string) == &quot;Queue[1, … 2 more]&quot;" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.queue(<span class="tok-ty">Queue</span>.from_list([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>]), <span class="tok-num">1</span>, int_to_string) == <span class="tok-str">&quot;Queue[1, … 2 more]&quot;</span>
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-quote"><div class="ih"><span class="badge bfn">fn</span><span class="name">quote</span><span class="sig">quote(s : String) : String</span><a class="anchor-link" href="#fn-quote" title="Link">#</a></div><div class="ib"><p><code>s</code> as a March string literal: quoted, with double quotes, backslashes, control bytes and an interpolation opener escaped.  <code>\n</code>, <code>\r</code> and <code>\t</code> use their short escapes, other control bytes and DEL become <code>\xNN</code>, and <code>$</code> is escaped only when followed by <code>{</code>.  Bytes &gt;= 128 pass through.</p><h3>Examples</h3><pre data-try="ShellRender.quote(&quot;hi&quot;)
+ShellRender.quote(&quot;a\tb&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.quote(<span class="tok-str">&quot;hi&quot;</span>)
+<span class="tok-str">&quot;\&quot;hi\&quot;&quot;</span>
+march&gt; <span class="tok-ty">ShellRender</span>.quote(<span class="tok-str">&quot;a\tb&quot;</span>)
+<span class="tok-str">&quot;\&quot;a\\tb\&quot;&quot;</span></code></pre></div></div>
+<div class="item" id="fn-raw"><div class="ih"><span class="badge bfn">fn</span><span class="name">raw</span><span class="sig">raw(s : String, limit : Int) : String</span><a class="anchor-link" href="#fn-raw" title="Link">#</a></div><div class="ib"><p><code>s</code> unquoted, cut after <code>limit</code> codepoints with <code>… n more chars</code> (<code>limit &lt;= 0</code> keeps all of it): the shell prints a string at the top of a result this way, and the payload of a top-level one-field constructor (<code>Ok(&quot;…&quot;)</code>, as <code>Actor.inspect_state</code> returns its already rendered state).</p><h3>Examples</h3><pre data-try="ShellRender.raw(&quot;hello&quot;, 3) == &quot;hel… 2 more chars&quot;
+ShellRender.raw(&quot;hello&quot;, 10)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.raw(<span class="tok-str">&quot;hello&quot;</span>, <span class="tok-num">3</span>) == <span class="tok-str">&quot;hel… 2 more chars&quot;</span>
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">ShellRender</span>.raw(<span class="tok-str">&quot;hello&quot;</span>, <span class="tok-num">10</span>)
+<span class="tok-str">&quot;hello&quot;</span></code></pre></div></div>
+<div class="item" id="fn-record"><div class="ih"><span class="badge bfn">fn</span><span class="name">record</span><span class="sig">record(name : String, fields : List(String)) : String</span><a class="anchor-link" href="#fn-record" title="Link">#</a></div><div class="ib"><p>A named record, in derive Show's form: <code>Name { a = 1, b = 2 }</code>.  Each field arrives rendered as <code>a = 1</code>.</p><h3>Examples</h3><pre data-try="ShellRender.record(&quot;Point&quot;, [&quot;x = 1&quot;, &quot;y = 2&quot;])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.record(<span class="tok-str">&quot;Point&quot;</span>, [<span class="tok-str">&quot;x = 1&quot;</span>, <span class="tok-str">&quot;y = 2&quot;</span>])
+<span class="tok-str">&quot;Point { x = 1, y = 2 }&quot;</span></code></pre></div></div>
+<div class="item" id="fn-rrb_vec"><div class="ih"><span class="badge bfn">fn</span><span class="name">rrb_vec</span><span class="sig">rrb_vec(v, limit : Int, f) : String</span><a class="anchor-link" href="#fn-rrb_vec" title="Link">#</a></div><div class="ib"><p>An RRB vector: <code>RRB.Vec[1, 2, … n more]</code>, as <code>list</code>, in index order.</p><h3>Examples</h3><pre data-try="ShellRender.rrb_vec(RRB.from_list([1, 2, 3]), 0, int_to_string)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.rrb_vec(<span class="tok-ty">RRB</span>.from_list([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>]), <span class="tok-num">0</span>, int_to_string)
+<span class="tok-str">&quot;RRB.Vec[1, 2, 3]&quot;</span></code></pre></div></div>
+<div class="item" id="fn-set"><div class="ih"><span class="badge bfn">fn</span><span class="name">set</span><span class="sig">set(s, limit : Int, f) : String</span><a class="anchor-link" href="#fn-set" title="Link">#</a></div><div class="ib"><p>A Set: <code>Set{1, 2, … n more}</code>, as <code>list</code>, in the set's iteration order.</p><h3>Examples</h3><pre data-try="ShellRender.set(Set.from_list([3, 1, 2], fn a -&gt; fn b -&gt; a &lt; b), 0, int_to_string)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.set(<span class="tok-ty">Set</span>.from_list([<span class="tok-num">3</span>, <span class="tok-num">1</span>, <span class="tok-num">2</span>], <span class="tok-kw">fn</span> a -&gt; <span class="tok-kw">fn</span> b -&gt; a &lt; b), <span class="tok-num">0</span>, int_to_string)
+<span class="tok-str">&quot;Set{1, 2, 3}&quot;</span></code></pre></div></div>
+<div class="item" id="fn-show_cap"><div class="ih"><span class="badge bfn">fn</span><span class="name">show_cap</span><span class="sig">show_cap() : Int do 16384 end</span><a class="anchor-link" href="#fn-show_cap" title="Link">#</a></div><div class="ib"><p>The most bytes <code>show_cut</code> keeps of a hand-written Show impl's string: 16 KiB.</p><h3>Examples</h3><pre data-try="ShellRender.show_cap()" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.show_cap()
+<span class="tok-num">16384</span></code></pre></div></div>
+<div class="item" id="fn-show_cut"><div class="ih"><span class="badge bfn">fn</span><span class="name">show_cut</span><span class="sig">show_cut(s : String) : String</span><a class="anchor-link" href="#fn-show_cut" title="Link">#</a></div><div class="ib"><p>A hand-written Show impl's string, cut at 16 KiB (on a codepoint boundary) with <code>… (n more bytes)</code>; it cannot take an element limit. A string of at most <code>show_cap()</code> bytes is returned unchanged.</p><h3>Examples</h3><pre data-try="ShellRender.show_cut(&quot;short&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.show_cut(<span class="tok-str">&quot;short&quot;</span>)
+<span class="tok-str">&quot;short&quot;</span></code></pre></div></div>
+<div class="item" id="fn-sorted_set"><div class="ih"><span class="badge bfn">fn</span><span class="name">sorted_set</span><span class="sig">sorted_set(s, limit : Int, f) : String</span><a class="anchor-link" href="#fn-sorted_set" title="Link">#</a></div><div class="ib"><p>A SortedSet: <code>SortedSet{1, 2, … n more}</code>, as <code>list</code>, in order.</p><h3>Examples</h3><pre data-try="ShellRender.sorted_set(SortedSet.from_list([3, 1, 2], fn (a, b) -&gt; a - b), 2, int_to_string) == &quot;SortedSet{1, 2, … 1 more}&quot;" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.sorted_set(<span class="tok-ty">SortedSet</span>.from_list([<span class="tok-num">3</span>, <span class="tok-num">1</span>, <span class="tok-num">2</span>], <span class="tok-kw">fn</span> (a, b) -&gt; a - b), <span class="tok-num">2</span>, int_to_string) == <span class="tok-str">&quot;SortedSet{1, 2, … 1 more}&quot;</span>
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-string"><div class="ih"><span class="badge bfn">fn</span><span class="name">string</span><span class="sig">string(s : String, limit : Int) : String</span><a class="anchor-link" href="#fn-string" title="Link">#</a></div><div class="ib"><p><code>s</code> quoted (see <code>quote</code>), cut after <code>limit</code> codepoints with <code>… n more chars</code>.  <code>limit &lt;= 0</code> keeps all of it.  The cut counts codepoints but <code>n</code> is computed from the grapheme count, so the two can disagree for text with combining marks.</p><h3>Examples</h3><pre data-try="ShellRender.string(&quot;hello&quot;, 0)
+ShellRender.string(&quot;hello&quot;, 3) == &quot;\&quot;hel\&quot;… 2 more chars&quot;" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.string(<span class="tok-str">&quot;hello&quot;</span>, <span class="tok-num">0</span>)
+<span class="tok-str">&quot;\&quot;hello\&quot;&quot;</span>
+march&gt; <span class="tok-ty">ShellRender</span>.string(<span class="tok-str">&quot;hello&quot;</span>, <span class="tok-num">3</span>) == <span class="tok-str">&quot;\&quot;hel\&quot;… 2 more chars&quot;</span>
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-tuple"><div class="ih"><span class="badge bfn">fn</span><span class="name">tuple</span><span class="sig">tuple(parts : List(String)) : String</span><a class="anchor-link" href="#fn-tuple" title="Link">#</a></div><div class="ib"><p>A tuple: <code>(a, b)</code>, its parts already rendered.</p><h3>Examples</h3><pre data-try="ShellRender.tuple([&quot;1&quot;, &quot;true&quot;])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">ShellRender</span>.tuple([<span class="tok-str">&quot;1&quot;</span>, <span class="tok-str">&quot;true&quot;</span>])
+<span class="tok-str">&quot;(1, true)&quot;</span></code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
+/* Theme toggle */
+/* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
+function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
+function lsSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+function getTheme(){var t=lsGet('march-doc-theme');
+if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}
+function applyTheme(t){document.documentElement.setAttribute('data-theme',t);
+var moon=document.getElementById('icon-moon'),sun=document.getElementById('icon-sun');
+if(moon&&sun){moon.style.display=t==='dark'?'block':'none';sun.style.display=t==='light'?'block':'none';}}
+function toggleTheme(){var t=getTheme()==='dark'?'light':'dark';lsSet('march-doc-theme',t);applyTheme(t);}
+applyTheme(getTheme());
+
+/* Search overlay */
+function openSearch(){loadSI();document.getElementById('search-overlay').classList.add('open');
+var inp=document.getElementById('search-input');if(inp){inp.value='';inp.focus();}}
+function closeSearch(){document.getElementById('search-overlay').classList.remove('open');
+var sr=document.getElementById('sr');if(sr)sr.innerHTML='';}
+
+/* DOMContentLoaded */
+document.addEventListener('DOMContentLoaded',function(){
+
+/* Collapsible items */
+document.querySelectorAll('.ih').forEach(function(h){h.addEventListener('click',function(e){
+if(e.target.classList.contains('anchor-link'))return;
+var b=this.nextElementSibling;if(b)b.classList.toggle('open');});});
+
+/* Active sidebar link + auto-expand current module group */
+var path=window.location.pathname;
+document.querySelectorAll('.sl').forEach(function(a){var h=a.getAttribute('href');if(h&&path.endsWith(h)){a.classList.add('active');var g=a.closest('.sb-group');if(g)g.classList.add('open');}});
+
+/* Sidebar group toggle (chevron click expands/collapses) */
+document.querySelectorAll('.sb-group-hdr').forEach(function(hdr){hdr.addEventListener('click',function(e){
+if(e.target.tagName==='A')return;e.preventDefault();this.parentElement.classList.toggle('open');});});
+
+/* Copy buttons on pre blocks */
+document.querySelectorAll('.ib pre').forEach(function(pre){
+var wrap=document.createElement('div');wrap.className='pre-wrap';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);
+var btn=document.createElement('button');btn.className='copy-btn';btn.textContent='Copy';
+btn.addEventListener('click',function(e){e.stopPropagation();
+var code=pre.querySelector('code');var text=code?code.textContent:pre.textContent;
+navigator.clipboard.writeText(text).then(function(){
+btn.textContent='Copied!';btn.classList.add('copied');
+setTimeout(function(){btn.textContent='Copy';btn.classList.remove('copied');},2000);
+}).catch(function(){btn.textContent='!';setTimeout(function(){btn.textContent='Copy';},1500);});});
+wrap.appendChild(btn);});
+
+/* Open anchor from URL hash */
+if(window.location.hash){var el=document.querySelector(window.location.hash);if(el){var ib=el.querySelector('.ib');if(ib)ib.classList.add('open');el.scrollIntoView({behavior:'smooth',block:'start'});}}
+
+/* Cmd+K search shortcut */
+document.addEventListener('keydown',function(e){
+if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();openSearch();}
+if(e.key==='Escape')closeSearch();});
+
+});
+
+/* Cross-module search: loads search-index.json, fuzzy matches, renders results */
+/* The index covers every module (~400 KB for the stdlib), so it is fetched the
+   first time search is opened (or the search button is hovered), not with every
+   page. A query typed before it arrives is re-run when it lands. */
+var SI=null,SIloading=false;
+function loadSI(){if(SI||SIloading)return;SIloading=true;
+fetch('search-index.json').then(function(r){return r.json();}).then(function(d){SI=d;
+var q=document.getElementById('search-input');if(q&&q.value.trim())q.dispatchEvent(new Event('input'));})
+.catch(function(){SIloading=false;});}
+var STR=document.getElementById('search-trigger');if(STR)STR.addEventListener('mouseenter',loadSI);
+
+/* Levenshtein distance */
+function ld(a,b){
+if(!a.length)return b.length;if(!b.length)return a.length;
+var m=[];for(var i=0;i<=b.length;i++)m[i]=[i];
+for(var j=0;j<=a.length;j++)m[0][j]=j;
+for(i=1;i<=b.length;i++)for(j=1;j<=a.length;j++){
+m[i][j]=b[i-1]===a[j-1]?m[i-1][j-1]:Math.min(m[i-1][j-1]+1,m[i][j-1]+1,m[i-1][j]+1);
+}return m[b.length][a.length];}
+
+/* Fuzzy scoring: returns 0 if no match */
+function fs(q,t){
+if(!t)return 0;var ql=q.toLowerCase(),tl=t.toLowerCase();
+/* Exact match */
+if(tl===ql)return 10000;
+/* Starts with */
+if(tl.indexOf(ql)===0)return 5000-tl.length;
+/* Substring */
+var idx=tl.indexOf(ql);if(idx>0)return 3000-idx;
+/* Word boundary match (camelCase, snake_case) */
+var words=tl.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/_/g,' ').split(' ');
+for(var w=0;w<words.length;w++){if(words[w].indexOf(ql)===0)return 2000-w*100;}
+/* Levenshtein for short queries */
+if(ql.length<=8&&tl.length<=40){var d=ld(ql,tl.substring(0,Math.max(ql.length+2,8)));
+if(d<=Math.ceil(ql.length*0.35))return 1000-d*100;}
+return 0;}
+
+/* Score an entry against a query */
+function scoreEntry(q,e){
+return Math.max(
+fs(q,e.n)*4, /* name match (highest weight) */
+fs(q,e.s)*2, /* signature match */
+fs(q,e.m)*2, /* module name match */
+fs(q,e.d) /* doc string match (lowest weight) */
+);}
+
+/* Render search results */
+function renderSR(results){
+var el=document.getElementById('sr');if(!el)return;
+if(!results.length){el.className='';el.innerHTML='';return;}
+el.className='open';var h='';
+for(var i=0;i<results.length;i++){
+var e=results[i].entry,k=e.k,href=e.m+'.html';
+if(k==='fn'||k==='pfn')href+='#fn-'+encodeURIComponent(e.n);
+else if(k==='type'||k==='ptype')href+='#type-'+encodeURIComponent(e.n);
+else if(k==='interface')href+='#iface-'+encodeURIComponent(e.n);
+var kc='sr-'+k;
+h+='<a class="sr-item" href="'+href+'">'+
+'<span class="sr-kind '+kc+'">'+k+'</span>'+
+'<span class="sr-name">'+esc(e.n)+'</span>'+
+'<span class="sr-mod">'+esc(e.m)+'</span></a>';
+if(e.d)h+='<div class="sr-doc">'+esc(e.d.substring(0,100))+'</div>';
+if(i<results.length-1)h+='<div class="sr-sep"></div>';
+}el.innerHTML=h;}
+
+/* HTML escape helper */
+function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+
+/* Search handler — uses the modal search input */
+var si=document.getElementById('search-input');
+if(si)si.addEventListener('input',function(){
+var q=this.value.trim();
+if(!q||!SI){renderSR([]);return;}
+var results=[];
+for(var i=0;i<SI.length;i++){
+var sc=scoreEntry(q,SI[i]);
+if(sc>0)results.push({entry:SI[i],score:sc});
+}
+results.sort(function(a,b){return b.score-a.score;});
+renderSR(results.slice(0,25));
+});
+</script></body></html>

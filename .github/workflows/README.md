@@ -21,9 +21,11 @@ suite unsharded. Be most careful with macOS: 5 slots for the whole org.
 | [`ci.yml`](ci.yml) | every PR and push to `main`, **except Markdown-only changes** | The merge gate: tests, corpora, sanitizers, property/oracle checks. |
 | [`doc-lint.yml`](doc-lint.yml) | every PR and push to `main` | Seconds-long doc and source-level checks, including on Markdown-only changes. |
 | [`nightly.yml`](nightly.yml) | 00:00 UTC; manual | Publishes a `nightly-YYYYMMDD` prerelease when `main` is green and has moved. |
-| [`release.yml`](release.yml) | push of a `v*` tag | Builds and publishes a versioned release. |
+| [`perf-ab.yml`](perf-ab.yml) | 03:00 UTC; manual | Same-box performance A/B of the last release tag against `main` (`scripts/perf-ab.sh`); uploads the table. A report: red only on an invalid comparison, a failed self-test, or a regression when dispatched with `fail_on_regression`. |
+| [`release.yml`](release.yml) | push of a `v*` tag; manual | Builds and publishes a versioned release. Run manually with a `tag` to rebuild an existing release's archives and replace them. |
 | [`build.yml`](build.yml) | called by nightly/release | Builds the three distributable archives. Not triggered on its own. |
 | [`gen-stdlib-docs.yml`](gen-stdlib-docs.yml) | push to `main` touching `stdlib/**` | Regenerates the committed stdlib API pages and search index. |
+| [`gen-browser-repl.yml`](gen-browser-repl.yml) | push to `main` touching `lib/**`, `stdlib/**`, `js/**`, the JS runtimes or the Tetris demo | Rebuilds the committed in-browser REPL, live compiler and Tetris playground files (`scripts/build-browser-repl.sh`), smoke-tests them, and commits them if they changed. |
 | [`sync-docs-search-index.yml`](sync-docs-search-index.yml) | push to `main` touching `docs/**` | Regenerates the committed Pagefind index (`docs/pagefind/`). |
 | [`deploy-pages.yml`](deploy-pages.yml) | push to `main` touching `docs/**` | Publishes the separately built site to `march-language.github.io`. |
 | [`march-lean-dispatch.yml`](march-lean-dispatch.yml) | push to `main` touching the type corpus/checker | Tells the independent Lean re-checker (`march-lean`) to re-run. |
@@ -63,6 +65,7 @@ sanitize-gate (ubuntu) × 1/3 | 2/3 | 3/3
 bench-gate (ubuntu)
 conformance (ubuntu)
 tree-sitter (ubuntu)
+browser-repl (ubuntu)
 ocaml-build (ubuntu) ─┬─ property-tests × soundness | tir | rest ─┐
                       │                                           └─ property-coverage
                       ├─ cross-linux-oracle
@@ -73,7 +76,7 @@ ocaml-build (ubuntu) ─┬─ property-tests × soundness | tir | rest ─┐
 | Job | What it checks | If it's red |
 |---|---|---|
 | `doc-lint` (in `doc-lint.yml`) | `scripts/check-docs.sh` (dead source pointers, stale stdlib counts, corpus INDEX counts, quarantine inventory, `docs/` language chapters match `scripts/gen-lang-docs.py` output); `scripts/test-run-tests.sh` (the test runner's own failure reporting); PRs must not touch the bot-owned `docs/pagefind/`; `runtime/sources.list` agrees with every C link list; no plain store to an actor's refcount word. | Almost always a doc/manifest edit you forgot. The error names the file. |
-| `test (macos-15, all)` | Plain `dune runtest`: all four ubuntu shards' work in one job on macOS. | Whatever suite failed; reproduce as for the matching ubuntu shard. |
+| `test (macos-26, all)` | `dune runtest` with `MARCH_CI_SKIP_OS_INDEPENDENT=1`: the four ubuntu shards' work in one job on macOS, minus the suites whose answer does not depend on the OS (refinecheck, golden diagnostics `run_errors`, the `lsp/test` suites) which run on Linux only. In `run_codegen` and `run_compiler` it runs only the OS- or arm64-sensitive groups listed in `test/run_codegen.ml` / `test/run_compiler.ml` (JIT, debug info, SIMD, ABIs, linking, sandbox, binary contents); a new group there runs on Linux only until it is added. Everything else, including every `test/native` compile-and-run fixture, runs unfiltered. | Whatever suite failed; reproduce as for the matching ubuntu shard. |
 | `test (ubuntu, codegen)` | `dune build @test/runtest-run_codegen`: the LLVM codegen suite (`test/test_codegen.ml` and friends), including native compile-and-run cases. | A codegen or runtime regression; reproduce with `scripts/run-tests.sh codegen`. |
 | `test (ubuntu, refinecheck)` | `@test/runtest-test_refinecheck`: the z3-backed refinement checker corpus. | `scripts/run-tests.sh refinecheck` (needs z3 on PATH). |
 | `test (ubuntu, compiler)` | `@test/runtest-run_compiler`: frontend, typecheck, capabilities, CAS, CLI behaviour. | `scripts/run-tests.sh compiler`. |
@@ -81,16 +84,17 @@ ocaml-build (ubuntu) ─┬─ property-tests × soundness | tir | rest ─┐
 | `test (ubuntu, *)` crash artifacts | A test binary that dies of a signal on a Linux `test` shard leaves a core in `/tmp/march-cores` (the job points `kernel.core_pattern` there; a stock runner pipes cores to apport, which drops them for unpackaged binaries). When the job fails, a step prints `$_siginfo` and every thread's backtrace for up to 8 cores, and the cores plus their executables upload as the `cores-<os>-<shard>` artifact (14 days). | A bare `Segmentation fault (core dumped)` from a `sh -c ./native_X` rule: open the `Backtrace test cores` step. `si_code` 128 (`SI_KERNEL`) means the kernel forced the signal (a frame it could not push), a small positive code a real fault the runtime handler never got to, 0 or a negative one a signal sent by a process (`kill`, `tgkill`). |
 | `two-node (K/3)` | Every `test/two_node/<scenario>`, split over three shards by `scripts/two-node.sh --list K/3` (round-robin over the sorted list): two real OS processes, a fault injected from outside, per-node goldens. Shard 1 also runs the `node_discovery` soak (200 runs diffed against the golden, a torn-stdout guard). | `scripts/two-node.sh <scenario>`; `scripts/two-node.sh --list K/3` shows which shard owns it. A shard timing out with every scenario `ok` means the list outgrew the shards: add one (see the job's comment), don't raise the timeout. Two scenarios are known flaky on `main`; check `main`'s own runs before blaming your diff. A scenario that needs a helper exe (`test/hcr_deploy.exe` for the hot-deploy ones) declares it with `need_built`, and the job also builds it up front. Before the scenarios, a precompile step compiles the shard's nodes 4 at a time (`scripts/two-node.sh --precompile`); a scenario reuses a prebuilt binary only for an unflagged node with identical source and toolchain stamp, so a precompile problem can only cost time. |
 | `bench-gate` | Compiles every gated `bench/*.march` at `--opt 2`, runs it, checks the printed value. The only place benchmarks run in CI. | A benchmark stopped compiling or computes a different answer (not a timing check). |
-| `conformance` | Ubuntu only. `@types-check` (static-semantics corpus) and `@grammar-check`, the refinement obligation ratchet, `@vault-scale`, doc notebooks (`.scrollmd`) compile, stdlib `march>` doctests. (The coverage-audit ratchet was dropped as a near-copy of refinecheck's `audit-baseline` test, and the formatting step, which could never fail, was removed.) | The step name says which. Ratchets fail when coverage drops, not just on errors. |
+| `conformance` | Ubuntu only. `@types-check` (static-semantics corpus) and `@grammar-check`, the refinement obligation ratchet, `@vault-scale`, doc notebooks (`.scrollmd`) compile, stdlib `march>` doctests, and `@demo/demo` (compiles every `demo/*.march` program; nothing else in CI builds `demo/`). (The coverage-audit ratchet was dropped as a near-copy of refinecheck's `audit-baseline` test, and the formatting step, which could never fail, was removed.) | The step name says which. Ratchets fail when coverage drops, not just on errors. `Build demo/ programs` red means a stdlib, capability or language change broke a demo: `dune build --root . @demo/demo` reproduces it; fix the demo in the same PR. |
 | `tree-sitter` | `scripts/check-tree-sitter.sh --self-test`, then the script: `tree-sitter-march/src` regenerates byte-identical with the pinned CLI, `tree-sitter test` corpus passes, every `.scm` under `tree-sitter-march/queries/` and `zed-march/languages/march/` compiles, and every `.march` under `stdlib/ test/ examples/ bench/ specs/lang/` parses without ERROR except those in `tree-sitter-march/known-failures.txt`. | A syntax change the grammar does not cover (extend `grammar.js`, or list the file with a todo), a grammar edit without `tree-sitter generate`, a stale known-failures entry, or a query that no longer matches the grammar. |
-| `sanitize-gate (K/3)` | AddressSanitizer over the golden corpus, a curated native list and the two-node sweep (`specs/lang/golden/sanitize.sh`). Guards RC/use-after-free bugs. Ubuntu only. Three shards: each sweeps a third of the two-node scenarios (`SANITIZE_TWO_NODE_SHARD=K/3`); shard 1 also runs golden + native, the others set `SANITIZE_TWO_NODE_ONLY=1`. | A memory-safety bug even if every test passed. A two-node scenario that exits 3 is reported as SKIP ("needs root" is the gate's label for every exit 3; `protocol_evolve` skips itself under ASan as timing-bound, see its scenario.sh). On a Mac, reproduce in a Linux Docker container: ASAN binaries can hang on macOS hosts running endpoint security software. |
+| `browser-repl` | `scripts/build-browser-repl.sh --out $RUNNER_TEMP/browser` builds the in-browser March from this commit (both js_of_ocaml bundles release-built, `march_stdlib.js`, the Tetris playground source, `tetris.mjs` and its runtimes), then `node scripts/browser-repl-smoke.js` loads that build (17 pinned REPL results, including on-demand module loading, the "not available in the browser" message and Int overflow; the live compiler must compile the Tetris source), and `node scripts/browser-repl-doc-sweep.js` runs every stdlib `march>` example through it, failures only as listed in its `EXPECTED_FAILURES`; `node scripts/check-doc-try-it.js` replays every "Try it" example on the committed `docs/docs/stdlib/` pages through it. The committed copies in `docs/assets/` are bot-owned (`gen-browser-repl.yml` regenerates them after a merge) and are not compared. | A compiler, stdlib, `js/` or `runtime/*.mjs` change that breaks the browser REPL or the Tetris live compiler (a missing primitive, a stdlib module the browser list no longer loads, a value-printer regression, a capability or typecheck regression in the live compile). |
+| `sanitize-gate (K/3)` | AddressSanitizer over the golden corpus, a curated native list and the two-node sweep (`specs/lang/golden/sanitize.sh`). Guards RC/use-after-free bugs. Ubuntu only. Three shards: each sweeps a third of the two-node scenarios (`SANITIZE_TWO_NODE_SHARD=K/3`); shard 1 also runs golden + native, the others set `SANITIZE_TWO_NODE_ONLY=1`. | A memory-safety bug even if every test passed. A two-node scenario that exits 3 is reported as SKIP with the scenario's own final log line (for example `protocol_evolve` says it is timing-bound under ASan); the skip is not a pass. On a Mac, reproduce in a Linux Docker container: ASAN binaries can hang on macOS hosts running endpoint security software. |
 | `ocaml-build` | Ubuntu. Builds the compiler and oracle binaries once and uploads them for the jobs below. | A build break; everything downstream is skipped. |
 | `property-tests (<shard>)` | QCheck property groups from `test/test_properties.ml`, split into three shards, on Linux. | Shrunk counterexample is in the log. |
 | `macos-checks` | macOS: every property group except the interp-vs-compiled oracle, in one process (group list read from the binary), plus `@vault-scale`. Replaces five macOS jobs (ocaml-build, three property-tests shards, conformance). | A property counterexample on macOS (the log has it), or Vault's read scaling on the macOS runner. |
 | `property-coverage` | Asserts the three shards together cover every property group, so a new group can't silently run nowhere. | Add the group to a shard's filter in `ci.yml`. |
 | `property-oracle` × 2 | The differential oracle: ~1090 generated programs, interpreted vs compiled, outputs must match. Eight case lists, four running side by side on each runner (one list is one sequential process; one per runner left three cores idle). | An interpreter/compiler divergence; the log has the program. |
-| `cross-linux-oracle` | Cross-compiles the golden corpus to linux/amd64 with `zig cc` and checks output is byte-identical to the native build. | A cross-compilation or target-flag regression. |
-| `determinism` | `scripts/determinism-oracle.sh`, `--corpus small` (~30 programs) on pull requests and `--corpus all` on pushes to `main`: every program in the IR-oracle corpus compiled with `--emit-llvm --dump-impl-hashes` under a cold and a warm private `$HOME`, from two cwds; the `.ll` and `.hashes` must be byte-identical across all four. Runs `--self-test` first (a perturbed stdlib copy must make it red). | Compiler output depends on cache state or cwd (a fresh-name counter, Hashtbl order, or a cached-vs-fresh stdlib difference, cf. PRs #805/#807). The log names the program, the condition pair and the first differing line; rerun locally with `scripts/determinism-oracle.sh -w <dir>` and diff `out/<tag>/{1,2,3,4}.ll`. A red self-test means the oracle itself is broken. |
+| `cross-linux-oracle` | Cross-compiles the golden corpus to linux/amd64 with `zig cc` and checks output is byte-identical to the native build. The oracle step takes about 20 minutes (1,181 s measured on main); its limit is 30. | A cross-compilation or target-flag regression. A step killed at "program 79 of 81" with no results matrix is the time limit, not a regression. |
+| `determinism` | `scripts/determinism-oracle.sh`, `--corpus small` (~30 programs) on pull requests and `--corpus all` on pushes to `main`, where the ~500-program corpus runs as two `--shard K/2` jobs because one job exceeded its 60-minute step limit: every program in the IR-oracle corpus compiled with `--emit-llvm --dump-impl-hashes` under a cold and a warm private `$HOME`, from two cwds; the `.ll` and `.hashes` must be byte-identical across all four. Runs `--self-test` first (a perturbed stdlib copy must make it red). | Compiler output depends on cache state or cwd (a fresh-name counter, Hashtbl order, or a cached-vs-fresh stdlib difference, cf. PRs #805/#807). The log names the program, the condition pair and the first differing line; rerun locally with `scripts/determinism-oracle.sh -w <dir>` and diff `out/<tag>/{1,2,3,4}.ll`. A red self-test means the oracle itself is broken. |
 
 **What CI does not cover:** Linux arm64 (only built, by `build.yml`), Windows,
 the tests quarantined out of `runtest` (run informationally by the nightly), and
@@ -116,20 +120,50 @@ the tests quarantined out of `runtest` (run informationally by the nightly), and
 
 Every job checks out the commit `gate` picked.
 
+## `perf-ab.yml`
+
+One Linux job runs `scripts/perf-ab.sh` with the newest `v*` tag as A and
+`main`'s HEAD as B (or any two refs, or a self-test, when dispatched) and puts
+the table in the job summary and the `perf-ab` artifact
+(`table.md`, `results.json` with every sample). It never runs per PR: timing
+wants a quiet runner and the org's runner slots are shared. Absolute
+milliseconds from a hosted VM mean nothing; the ratios are sound because both
+arms are interleaved on the same VM. A red run means the comparison itself is
+broken (a build failed, a benchmark crashed, the two arms printed different
+answers); a regression only turns it red when dispatched with
+`fail_on_regression`. Design: `specs/2026-10-30-perf-ab-runner-design.md`.
+
 ## `build.yml` and `release.yml`
 
 `build.yml` produces `darwin-arm64`, `linux-x86_64` and `linux-aarch64`
 archives. Both Linux legs build inside Alpine and are fully static (musl);
 the job fails if a "static" binary has dynamic dependencies or won't run in a
-bare container. `release.yml` calls it on a `v*` tag and publishes a release.
+bare container, and on every leg if the packaged compiler cannot compile and
+run a program with only the archive's own runtime and stdlib (v0.5.0 shipped
+archives missing `runtime/third_party/` because only `--version` was checked).
+`release.yml` calls it on a `v*` tag and publishes a release. Run manually
+(`gh workflow run release.yml -f tag=vX.Y.Z`), it rebuilds that existing tag's
+sources with the current `build.yml` and replaces the release's archives and
+checksums, leaving the notes, the tag and `latest` alone.
 
 ## Docs bots
 
 The site (`march-lang.org`) is served by GitHub's own Jekyll over `docs/`, so
-generated files must be committed. Two bots keep them fresh after a merge:
-`gen-stdlib-docs.yml` (stdlib pages + search index, on stdlib changes) and
-`sync-docs-search-index.yml` (search index, on any docs change). PRs should not
-commit `docs/pagefind/`; `doc-lint` rejects it. `deploy-pages.yml` is a
+generated files must be committed. Three bots keep them fresh after a merge:
+`gen-stdlib-docs.yml` (stdlib pages + search index, on stdlib changes),
+`sync-docs-search-index.yml` (search index, on any docs change) and
+`gen-browser-repl.yml` (the in-browser REPL, live compiler and Tetris files under
+`docs/assets/`, on compiler, stdlib or `js/` changes). A stdlib merge
+usually fires all three, and all push to `main`. The two index bots retry a rejected
+push by resetting onto the new `main` and regenerating the index there (never
+`git pull --rebase`: Pagefind's file names are not reproducible, so two indexes
+conflict). gen-stdlib-docs keeps its generated pages across a retry, and stops
+if `stdlib/**` changed meanwhile, since its newer queued run will publish those.
+gen-browser-repl never touches `docs/pagefind/`, so it retries with
+`git pull --rebase`. Their pushes use `GITHUB_TOKEN`, so they trigger no other
+workflow (not each other, not `deploy-pages.yml`); GitHub's Pages build still picks
+them up. PRs should not commit `docs/pagefind/`; `doc-lint` rejects it. PRs need not
+regenerate the browser files. `deploy-pages.yml` is a
 separate path that publishes to the external `march-language.github.io` repo.
 
 ## Running the same checks locally
@@ -138,4 +172,4 @@ separate path that publishes to the external `march-language.github.io` repo.
 names). It does not run the dune-rule tests (native goldens, C unit tests);
 `dune runtest --root .` does. Conformance lanes are `dune build --root .
 @types-check --force` and `@grammar-check --force` (without `--force` they can
-be empty and still exit 0).
+be empty and still exit 0). The demos build with `dune build --root . @demo/demo`.

@@ -292,6 +292,26 @@ end
   | other ->
     Alcotest.failf "expected one `;` quick fix, got %d" (List.length other)
 
+(* A client echoes the diagnostics it was sent, and may change optional
+   fields on the way: the echo is the same diagnostic (range, code, message),
+   so it must not double the action. *)
+let test_fix_adapter_echoed_diag_not_doubled () =
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 1; let y = 2
+    x + y
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src ";" in
+  let echoed =
+    List.map (fun (d : Lsp.Types.Diagnostic.t) -> { d with source = Some "echo-client" }) a.An.diagnostics
+  in
+  let acts = An.code_actions_at a ~line ~character:col ~diagnostics:(echoed @ echoed) () in
+  Alcotest.(check int) "one `;` quick fix" 1
+    (List.length (List.filter (fun (t, _) -> t = "Replace `;` with a line break") (fix_edits acts)))
+
 let test_fix_adapter_lambda_arity_edits_the_lambda () =
   let src = {|mod M do
   fn f() : Int do
@@ -1754,3 +1774,179 @@ end
     Alcotest.(check bool) "rewrite is !(... || ...)" true
       (String.length new_text > 2 && new_text.[0] = '!')
 
+
+(* ------------------------------------------------------------------ *)
+(* Termination code actions (termination design §6, phase 4)          *)
+(* ------------------------------------------------------------------ *)
+
+(* The LSP does not run the refinement checker, so these tests run it the
+   way `march --check-json` does, hand its `termination_unproved` diagnostic
+   to [code_actions_at] as a client's context diagnostic, apply the chosen
+   action's edit, and run the checker again: the diagnostic must be gone. *)
+(* The metric obligations need z3; without it the counterexample (and so the
+   `x <= 0` fix) is missing, so each case skips, as test_refinecheck's do. *)
+let z3_or_skip () =
+  match March_refine.Solver.create () with
+  | None -> Alcotest.skip ()
+  | Some s -> March_refine.Solver.close s
+
+let term_diags src =
+  let lexbuf = Lexing.from_string src in
+  lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "test.march" };
+  let d = March_desugar.Desugar.desugar_module (March_parser.Parse.module_of_lexbuf lexbuf) in
+  let _errs, type_map = March_typecheck.Typecheck.check_module d in
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Obligation.reset ();
+  March_refinecheck.Refine_check.check_module ~type_map ctx d;
+  List.filter
+    (fun (e : March_errors.Errors.diagnostic) ->
+      List.mem e.March_errors.Errors.code [ "termination_unproved"; "diverges_conflict" ])
+    ctx.March_errors.Errors.diagnostics
+
+let apply_action src (ca : Lsp.Types.CodeAction.t) =
+  let edits =
+    match ca.edit with
+    | Some { changes = Some chs; _ } -> List.concat_map snd chs
+    | _ -> Alcotest.fail ("no edit on " ^ ca.title)
+  in
+  let ofs (p : Lsp.Types.Position.t) =
+    let l = ref 0 and i = ref 0 in
+    while !l < p.line do
+      if src.[!i] = '\n' then incr l;
+      incr i
+    done;
+    !i + p.character
+  in
+  let edits =
+    List.sort (fun (a : Lsp.Types.TextEdit.t) b -> compare (ofs b.range.start) (ofs a.range.start)) edits
+  in
+  List.fold_left
+    (fun s (te : Lsp.Types.TextEdit.t) ->
+      let a = ofs te.range.start and b = ofs te.range.end_ in
+      String.sub s 0 a ^ te.newText ^ String.sub s b (String.length s - b))
+    src edits
+
+let term_actions ?(edit_msg = fun m -> m) src =
+  let diags = term_diags src in
+  Alcotest.(check bool) "a termination_unproved to repair" true
+    (List.exists (fun (e : March_errors.Errors.diagnostic) -> e.code = "termination_unproved") diags);
+  let lds = List.filter_map (An.diag_to_lsp ~filename:"test.march") diags in
+  let lds =
+    List.map
+      (fun (d : Lsp.Types.Diagnostic.t) ->
+        match d.message with `String m -> { d with message = `String (edit_msg m) } | _ -> d)
+      lds
+  in
+  let a = analyse src in
+  List.concat_map
+    (fun (d : Lsp.Types.Diagnostic.t) ->
+      An.code_actions_at a ~line:d.range.start.line ~character:d.range.start.character ~diagnostics:[ d ] ())
+    lds
+
+let round_trip ?edit_msg label src ~title =
+  let acts = term_actions ?edit_msg src in
+  let has_prefix p (s : string) = String.length s >= String.length p && String.sub s 0 (String.length p) = p in
+  match List.find_opt (fun (ca : Lsp.Types.CodeAction.t) -> has_prefix title ca.title) acts with
+  | None ->
+    Alcotest.fail
+      (Printf.sprintf "%s: no action %S among [%s]" label title
+         (String.concat "; " (List.map (fun (ca : Lsp.Types.CodeAction.t) -> ca.title) acts)))
+  | Some ca ->
+    let src' = apply_action src ca in
+    Alcotest.(check (list string)) (label ^ ": re-checked, nothing left\n" ^ src') []
+      (List.map (fun (e : March_errors.Errors.diagnostic) -> e.message) (term_diags src'));
+    src'
+
+let term_down_annotated = {|mod M do
+  @[decreases(n)]
+  fn down(n : Int) : Int do if n == 0 do 0 else down(n - 1) end end
+end
+|}
+
+let term_total_caller = {|mod M do
+  cap total
+  @[diverges]
+  fn serve(n : Int) : Int do serve(n + 1) end
+  fn run(n : Int) : Int do serve(n) end
+end
+|}
+
+let term_total_up = {|mod M do
+  cap total
+  fn up(n : Int) : Int do if n >= 100 do 0 else up(n + 1) end end
+end
+|}
+
+let test_term_action_eq_zero () =
+  z3_or_skip ();
+  (* The repair changes behaviour (a hang becomes a base-case return), so it
+     is no machine fix -- `forge fix` applies every machine fix -- and the
+     LSP action built from the note is not a preferred one. *)
+  Alcotest.(check (list string)) "no machine fix on any termination diagnostic" []
+    (List.filter_map
+       (fun (e : March_errors.Errors.diagnostic) ->
+         match e.March_errors.Errors.fix with Some _ -> Some e.March_errors.Errors.message | None -> None)
+       (term_diags term_down_annotated));
+  (match
+     List.find_opt
+       (fun (ca : Lsp.Types.CodeAction.t) -> ca.title = "Change `n == 0` to `n <= 0`")
+       (term_actions term_down_annotated)
+   with
+   | Some ca -> Alcotest.(check bool) "not a preferred action" false (ca.isPreferred = Some true)
+   | None -> Alcotest.fail "no `Change `n == 0` to `n <= 0`` action");
+  let src' = round_trip "x == 0" term_down_annotated ~title:"Change `n == 0` to `n <= 0`" in
+  Alcotest.(check bool) "the guard was rewritten" true
+    (let n = "if n <= 0 do" in
+     let rec go i = i + String.length n <= String.length src' && (String.sub src' i (String.length n) = n || go (i + 1)) in
+     go 0)
+
+let test_term_action_diverges_replaces_decreases () =
+  z3_or_skip ();
+  ignore (round_trip "diverges" term_down_annotated ~title:"Replace `@[decreases]` on `down` with `@[diverges]`")
+
+let test_term_action_diverges_inserts () =
+  z3_or_skip ();
+  ignore (round_trip "diverges (cap total)" term_total_caller ~title:"Mark `run` `@[diverges]`")
+
+(* The action reads the compiler's `note: try `@[decreases(e)]`.`, which
+   phase 5's inference writes when it runs: under `--refine-infer` or
+   `--termination-report` ([Refine_term.infer]), never under a plain
+   `--check`. *)
+let with_infer f =
+  March_refinecheck.Refine_term.infer := true;
+  Fun.protect ~finally:(fun () -> March_refinecheck.Refine_term.infer := false) f
+
+let is_add_decreases (ca : Lsp.Types.CodeAction.t) =
+  String.length ca.title >= 15 && String.sub ca.title 0 15 = "Add `@[decrease"
+
+let test_term_action_decreases_frame () =
+  z3_or_skip ();
+  let acts = term_actions term_total_up in
+  Alcotest.(check bool) "a plain --check infers nothing, so no metric is offered" false
+    (List.exists is_add_decreases acts);
+  ignore
+    (round_trip "decreases frame" term_total_up
+       ~edit_msg:(fun m -> m ^ " note: try `@[decreases(100 - n)]`.")
+       ~title:"Add `@[decreases(100 - n)]` to `up`")
+
+(* Phase 5: the inferred metric, from the real diagnostic. *)
+let test_term_action_decreases_inferred () =
+  z3_or_skip ();
+  with_infer (fun () ->
+      ignore (round_trip "inferred (cap total)" term_total_up ~title:"Add `@[decreases(100 - n)]` to `up`"))
+
+(* An annotated metric that fails: the action REPLACES it. *)
+let term_up_wrong = {|mod M do
+  @[decreases(n)]
+  fn up(n : Int) : Int do if n >= 100 do 0 else up(n + 1) end end
+end
+|}
+
+let test_term_action_decreases_replaces () =
+  z3_or_skip ();
+  with_infer (fun () ->
+      let src' = round_trip "inferred (replaces)" term_up_wrong ~title:"Add `@[decreases(100 - n)]` to `up`" in
+      Alcotest.(check bool) ("the written metric is gone\n" ^ src') false
+        (let n = "@[decreases(n)]" in
+         let rec go i = i + String.length n <= String.length src' && (String.sub src' i (String.length n) = n || go (i + 1)) in
+         go 0))

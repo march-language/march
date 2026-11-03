@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -222,9 +223,22 @@ static const char *verb_fails(march_jw *w, const char *args) {
     (void)w; (void)args;
     return "bad_args";
 }
+/* A stand-in SNAPSHOT (the real one needs the rest of the runtime): counts
+ * how often WATCH asks, and rejects the section "bogus". */
+static _Atomic int g_snap_calls;
+static const char *verb_snap(march_jw *w, const char *args) {
+    if (strstr(args, "bogus")) return "bad_args";
+    int n = atomic_fetch_add(&g_snap_calls, 1) + 1;
+    march_jw_obj_begin(w);
+    march_jw_key(w, "call"); march_jw_i64(w, n);
+    march_jw_key(w, "sections"); march_jw_str(w, args);
+    march_jw_obj_end(w);
+    return NULL;
+}
 static const march_observe_verb test_verbs[] = {
     { "ECHO", "observe", "<text>", "echo the arguments", verb_echo },
     { "FAILS", "debug", "", "always bad_args", verb_fails },
+    { "SNAPSHOT", "observe", "[sections]", "test double", verb_snap },
 };
 
 static void test_registered(const char *path) {
@@ -336,6 +350,151 @@ static void test_server(const char *path) {
     CHECK(wait_active(0, 2000), "idle slot released");
 }
 
+/* ── WATCH ─────────────────────────────────────────────────────────────── */
+
+static int64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int count_lines(const char *s) {
+    int n = 0;
+    for (const char *p = s; *p; p++) if (*p == '\n') n++;
+    return n;
+}
+
+/* Everything the server sends, newline kept, until it closes. */
+static char *read_stream(int fd) {
+    char *r = read_all(fd);
+    size_t n = strlen(r);
+    r = realloc(r, n + 2);
+    r[n] = '\n'; r[n + 1] = '\0';   /* read_all dropped the last newline */
+    return r;
+}
+
+static void test_watch(const char *path) {
+    char *r;
+    CHECK(wait_active(0, 2000), "idle before the WATCH tests");
+
+    /* A bounded stream: exactly `max` frames, in order, one interval apart,
+     * then the server closes. */
+    int calls0 = atomic_load(&g_snap_calls);
+    int64_t t0 = mono_ms();
+    int fd = connect_sock(path);
+    send(fd, "WATCH actors,mem 250 3\n", 23, 0);
+    r = read_stream(fd);
+    int64_t took = mono_ms() - t0;
+    close(fd);
+    CHECK(count_lines(r) == 3, "three frames for max 3 (got %d): %s", count_lines(r), r);
+    CHECK(strstr(r, "\"seq\":1,\"of\":3") && strstr(r, "\"seq\":2,\"of\":3") && strstr(r, "\"seq\":3,\"of\":3"),
+          "frames are numbered seq/of: %s", r);
+    CHECK(strstr(r, "\"sections\":\"actors,mem\"}"),
+          "each frame is the SNAPSHOT of the sections: %s", r);
+    CHECK(took >= 480, "frames are an interval apart (3 frames took %lld ms)", (long long)took);
+    CHECK(atomic_load(&g_snap_calls) - calls0 == 3, "three snapshots taken");
+    char *line = r;
+    for (int i = 0; i < 3; i++) {
+        char *nl = strchr(line, '\n');
+        *nl = '\0';
+        CHECK(is_json(line), "frame %d is JSON", i + 1);
+        line = nl + 1;
+    }
+    free(r);
+    CHECK(wait_active(0, 2000) && march_observe_active_watches() == 0, "a finished stream frees its slot");
+
+    /* Bounds: max is mandatory, 1..3600; interval 250..60000. */
+    static const struct { const char *line, *code; } bad[] = {
+        { "WATCH actors 250", "bad_args" },
+        { "WATCH", "bad_args" },
+        { "WATCH actors 250 x", "bad_args" },
+        { "WATCH actors 250 5 extra", "bad_args" },
+        { "WATCH actors 250 0", "bad_max" },
+        { "WATCH actors 250 3601", "bad_max" },
+        { "WATCH actors 250 -1", "bad_max" },
+        { "WATCH actors 249 5", "bad_interval" },
+        { "WATCH actors 0 5", "bad_interval" },
+        { "WATCH actors 60001 5", "bad_interval" },
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        r = query(path, bad[i].line);
+        char want[64];
+        snprintf(want, sizeof want, "\"error\":\"%s\"", bad[i].code);
+        CHECK(r && strstr(r, want) && !strstr(r, "\"data\"") && count_lines(r) == 0,
+              "%s -> %s: %s", bad[i].line, bad[i].code, r ? r : "(null)");
+        free(r);
+    }
+}
+
+static void test_watch_disconnect_and_cap(const char *path) {
+    char *r;
+    CHECK(wait_active(0, 4000), "idle before the disconnect test (active %d)", march_observe_active_conns());
+
+    /* A client that hangs up mid-stream frees the slot and stops the work. */
+    int fd = connect_sock(path);
+    send(fd, "WATCH x 250 3600\n", 17, 0);
+    char b[4096];
+    ssize_t k = recv(fd, b, sizeof b, 0);
+    CHECK(k > 0 && strstr(b, "\"seq\":1,\"of\":3600"), "first frame arrives");
+    CHECK(march_observe_active_conns() == 1 && march_observe_active_watches() == 1,
+          "a stream holds one connection slot");
+    close(fd);
+    int ok = 0;
+    for (int i = 0; i < 100 && !ok; i++) {
+        ok = march_observe_active_watches() == 0 && march_observe_active_conns() == 0;
+        if (!ok) sleep_ms(10);
+    }
+    CHECK(ok, "disconnect frees the slot within 1 s (watches %d, conns %d)",
+          march_observe_active_watches(), march_observe_active_conns());
+    int after = atomic_load(&g_snap_calls);
+    sleep_ms(600);
+    CHECK(atomic_load(&g_snap_calls) == after, "and no more frames are produced");
+
+    /* A bad section ends the stream with the error as its only frame. */
+    fd = connect_sock(path);
+    send(fd, "WATCH bogus 250 5\n", 18, 0);
+    r = read_stream(fd);
+    close(fd);
+    CHECK(count_lines(r) == 1 && strstr(r, "\"error\":\"bad_args\""), "bad section: one error frame: %s", r);
+    free(r);
+
+    /* At most four streams at once; the other verbs keep answering. */
+    int w[5];
+    for (int i = 0; i < 4; i++) {
+        w[i] = connect_sock(path);
+        send(w[i], "WATCH x 1000 3600\n", 18, 0);
+        k = recv(w[i], b, sizeof b, 0);
+        CHECK(k > 0 && strstr(b, "\"seq\":1"), "stream %d starts", i + 1);
+    }
+    CHECK(march_observe_active_watches() == 4, "four streams (%d)", march_observe_active_watches());
+    r = query(path, "WATCH x 1000 5");
+    CHECK(r && strstr(r, "\"error\":\"watch_busy\""), "a fifth stream is refused: %s", r ? r : "(null)");
+    free(r);
+    r = query(path, "PING");
+    CHECK(r && strstr(r, "\"data\":\"pong\""), "PING still answers beside four streams: %s", r ? r : "");
+    free(r);
+    for (int i = 0; i < 4; i++) close(w[i]);
+    ok = 0;
+    for (int i = 0; i < 200 && !ok; i++) {
+        ok = march_observe_active_watches() == 0;
+        if (!ok) sleep_ms(10);
+    }
+    CHECK(ok, "closing all four frees them");
+
+    /* In-process (observe_query) there is no stream to write to. */
+    march_jw out;
+    march_jw_init(&out, 4096);
+    march_observe_handle("WATCH x 250 3", 13, &out);
+    CHECK(strstr(march_jw_text(&out), "\"error\":\"watch_needs_socket\""), "in-process WATCH is refused: %s",
+          march_jw_text(&out));
+    march_jw_free(&out);
+
+    r = query(path, "HELP");
+    CHECK(r && strstr(r, "{\"name\":\"WATCH\",\"tier\":\"observe\",\"args\":\"<sections> <interval_ms> <max>\""),
+          "HELP lists WATCH: %s", r ? r : "");
+    free(r);
+}
+
 static void test_refuses_non_socket(const char *dir) {
     char path[512];
     snprintf(path, sizeof path, "%s/regular_file", dir);
@@ -371,13 +530,15 @@ int main(void) {
     test_deep();
     test_f64_float();
     test_refuses_non_socket(dir);
-    CHECK(march_observe_add_verbs(test_verbs, 2) == 0, "verbs register before the server starts");
+    CHECK(march_observe_add_verbs(test_verbs, 3) == 0, "verbs register before the server starts");
     if (march_observe_server_start(path) != 0) { fprintf(stderr, "server failed to start\n"); return 1; }
     struct stat st;
     CHECK(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600, "socket is owner-only (mode %o)",
           (unsigned)(st.st_mode & 0777));
     test_server(path);
     test_registered(path);
+    test_watch_disconnect_and_cap(path);
+    test_watch(path);
 
     unlink(path);
     rmdir(dir);

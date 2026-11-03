@@ -307,7 +307,10 @@ let lower_fn_def (env : Lower_state.env) (def : Ast.fn_def) : Tir.fn_def =
   let saved_scope = Hashtbl.copy Lower_state._fn_param_types in
   Hashtbl.clear Lower_state._fn_param_types;
   List.iter (fun v -> Hashtbl.replace Lower_state._fn_param_types v.Tir.v_name v.Tir.v_ty) params;
-  let body = Lower_match.lower_expr env clause.fc_body in
+  let body =
+    Lower_state.with_host
+      (Lower_state.host_name ~mod_prefix:env.Lower_state.mod_prefix def.fn_name.txt)
+      (fun () -> Lower_match.lower_expr env clause.fc_body) in
   Hashtbl.clear Lower_state._fn_param_types;
   Hashtbl.iter (fun k v -> Hashtbl.replace Lower_state._fn_param_types k v) saved_scope;
   Provenance.note_span def.fn_name.txt def.fn_name.span;
@@ -341,9 +344,15 @@ let lower_extern_fns (edef : Ast.extern_def) (ext_fns : Ast.extern_fn list) : Ti
   List.map (fun (ef : Ast.extern_fn) ->
       let params = List.map (fun (_, t) -> Lower_types.lower_ty t) ef.ef_params in
       let ret = Lower_types.lower_ty ef.ef_ret_ty in
+      (* A JS module specifier ("./x.mjs", "npm:...") isn't a C identifier;
+         its externs still get a valid native symbol, so a module carrying a
+         browser backend compiles natively as long as nothing native calls
+         one (a call is then an undefined-symbol link error, not bad IR). *)
+      let c_ident s = String.map (fun c ->
+          match c with 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' -> c | _ -> '_') s in
       let c_name = match ef.ef_symbol with
-        | Some s -> s
-        | None   -> edef.Ast.ext_lib_name ^ "_" ^ ef.ef_name.txt in
+        | Some s -> c_ident s
+        | None   -> c_ident edef.Ast.ext_lib_name ^ "_" ^ ef.ef_name.txt in
       let js_sym = match ef.ef_symbol with
         | Some s -> s
         | None   -> ef.ef_name.txt in
@@ -380,6 +389,8 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
         let fn = lower_fn_def env def in
         let fn = rename_scoped_vars scopes fn in
         Provenance.rename ~old:fn.fn_name ~new_:(prefix ^ fn.fn_name);
+        if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
+          Hot_reload.note_work_entry (prefix ^ fn.fn_name);
         !Lower_state._fns_ref := { fn with fn_name = prefix ^ fn.fn_name } :: !(!Lower_state._fns_ref)
       | Ast.DType (_, tname, params, td, _)
       | Ast.DAlwaysLinearType (_, tname, params, td, _) ->

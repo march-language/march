@@ -358,30 +358,34 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
     | _ -> None
   in
   List.fold_left (fun acc_env (name, sch) ->
+      (* D5: the span [infer_pattern] recorded for this binder, consumed so
+         a later non-pattern binding of the same name cannot pick it up. *)
+      let span = Hashtbl.find_opt env.pat_spans name in
+      Hashtbl.remove env.pat_spans name;
       match sch with
       | Mono t ->
         (match repr t with
          | TLin (lin, inner) when lin <> Ast.Unrestricted ->
            (* Binding type carries TLin — use that linearity. *)
-           bind_linear name lin inner acc_env
+           bind_linear ?span name lin inner acc_env
          | t' ->
            (match inherited_lin with
             | Some lin when inherits_linearity env ~scrut_ty t' ->
               (* Scrutinee was linear: the bound variable inherits its linearity. *)
-              bind_linear name lin t' acc_env
+              bind_linear ?span name lin t' acc_env
             | _ ->
               (match always_linear_of t' with
-               | Some lin -> bind_linear name lin t' acc_env
+               | Some lin -> bind_linear ?span name lin t' acc_env
                | None ->
-                 let env1 = bind_var name (Mono t') acc_env in
+                 let env1 = bind_var ?span name (Mono t') acc_env in
                  bind_linear_field_sentinels name t' env1)))
       | Poly (_, _, t) ->
         (match always_linear_of t with
-         | Some lin -> bind_linear name lin t acc_env
+         | Some lin -> bind_linear ?span name lin t acc_env
          | None ->
            (* Generalised binding: bind normally but also add field sentinels for
               any linear fields in the underlying type. *)
-           let env1 = bind_var name sch acc_env in
+           let env1 = bind_var ?span name sch acc_env in
            bind_linear_field_sentinels name (repr t) env1)
     ) env bindings
 
@@ -621,6 +625,98 @@ let with_wildcards f =
   let r = Fun.protect ~finally:(fun () -> wildcard_sink := saved) f in
   (r, !log)
 
+(* ── duplicate_binder: one binding position binds each name once ──────
+   A parameter list or a pattern that binds one name twice has no single
+   meaning: the interpreter's environment kept the FIRST binding and compiled
+   code the LAST (`fn (a, a) -> a` at (1, 2) gave 1 and 2), and multi-clause
+   heads and constructor patterns diverged the other way round.  ML-family
+   languages reject such non-linear patterns; so does March.  Curried lambdas
+   and nested patterns in another arm or lambda are separate scopes and keep
+   ordinary shadowing.  `_` binds nothing.  See
+   specs/progress/2026-10-21-duplicate-binder-rejected.md. *)
+
+(** The names a pattern binds, in source order, `_` excluded.  An or-pattern's
+    alternatives bind the same names (checked in [infer_pattern]), so its
+    first alternative stands for the whole. *)
+let rec pattern_binders (p : Ast.pattern) : Ast.name list =
+  match p with
+  | Ast.PatWild _ | Ast.PatLit _ -> []
+  | Ast.PatVar n -> if n.txt = "_" then [] else [n]
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+    List.concat_map pattern_binders ps
+  | Ast.PatRecord (flds, _) -> List.concat_map (fun (_, p) -> pattern_binders p) flds
+  | Ast.PatAs (inner, n, _) ->
+    pattern_binders inner @ (if n.txt = "_" then [] else [n])
+  | Ast.PatOr (alts, _) ->
+    (match alts with a :: _ -> pattern_binders a | [] -> [])
+
+(** Report each name that a LATER group binds again after an earlier group
+    bound it.  The groups are the parts of ONE binding position: the elements
+    of a tuple or constructor pattern, or the parameters of one list.  A
+    repeat inside a single group is that group's own report (the recursive
+    [infer_pattern] call on it), so every repeat is reported exactly once, at
+    the binding that repeats it, with a label at the first. *)
+let report_duplicate_binders env (groups : Ast.name list list) =
+  let seen : (string, Ast.name) Hashtbl.t = Hashtbl.create 8 in
+  List.iter (fun group ->
+      let here : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+      List.iter (fun (n : Ast.name) ->
+          if not (Hashtbl.mem here n.txt) then begin
+            Hashtbl.replace here n.txt ();
+            match Hashtbl.find_opt seen n.txt with
+            | Some first ->
+              Err.report env.errors
+                { Err.severity = Err.Error; span = n.span;
+                  message =
+                    Printf.sprintf
+                      "`%s` is bound twice in the same parameter list or pattern."
+                      n.txt;
+                  labels = [ { Err.lbl_span = first.span;
+                               lbl_message = "first bound here" } ];
+                  notes =
+                    [ "A parameter list or a pattern binds each name once, so \
+                       there is no single value this name could refer to.";
+                      Printf.sprintf
+                        "Rename one of them, or write `_` for an argument \
+                         you don't use. To require two values to be equal, \
+                         bind two names and compare them in a `when` guard: \
+                         `(%s, %s2) when %s == %s2 -> …`."
+                        n.txt n.txt n.txt n.txt ];
+                  code = Err.Code.duplicate_binder;
+                  fix = None }
+            | None -> ()
+          end) group;
+      List.iter (fun (n : Ast.name) ->
+          if not (Hashtbl.mem seen n.txt) then Hashtbl.replace seen n.txt n)
+        group)
+    groups
+
+(** One parameter list, as [report_duplicate_binders] groups. *)
+let report_duplicate_params env (params : Ast.param list) =
+  report_duplicate_binders env
+    (List.map (fun (p : Ast.param) ->
+         if p.param_name.txt = "_" then [] else [p.param_name]) params)
+
+let report_duplicate_fn_params env (params : Ast.fn_param list) =
+  report_duplicate_binders env
+    (List.map (function
+         | Ast.FPNamed p | Ast.FPDefault (p, _) ->
+           if p.param_name.txt = "_" then [] else [p.param_name]
+         | Ast.FPPat pat -> pattern_binders pat) params)
+
+(** The local check at one pattern node: its immediate sub-patterns are the
+    groups.  An or-pattern's alternatives are not groups (they bind the same
+    names on purpose); each is checked on its own by the recursion. *)
+let report_duplicate_pattern_binders env (pat : Ast.pattern) =
+  match pat with
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+    report_duplicate_binders env (List.map pattern_binders ps)
+  | Ast.PatRecord (flds, _) ->
+    report_duplicate_binders env (List.map (fun (_, p) -> pattern_binders p) flds)
+  | Ast.PatAs (inner, n, _) ->
+    if n.txt <> "_" then report_duplicate_binders env [pattern_binders inner; [n]]
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ | Ast.PatOr _ -> ()
+
 (** Infer the type that a pattern *expects*, and return the list of
     (name, scheme) bindings it introduces.
 
@@ -629,6 +725,7 @@ let with_wildcards f =
     when [DType] declarations populate the type registry. *)
 let rec infer_pattern ?expected env (pat : Ast.pattern)
     : (string * scheme) list * ty =
+  report_duplicate_pattern_binders env pat;
   match pat with
   | Ast.PatWild sp ->
     let t = fresh_var env.level in
@@ -649,6 +746,8 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
     (* Record in type_map so lower.ml can look up the resolved type via ty_of_span.
        Unification happens after infer_pattern returns; repr t follows the link. *)
     Hashtbl.replace env.type_map name.span t;
+    (* D5: the binder's span, picked up by [bind_pattern_bindings]. *)
+    Hashtbl.replace env.pat_spans name.txt name.span;
     [(name.txt, Mono t)], t
 
   | Ast.PatLit (lit, _) ->
@@ -1320,6 +1419,224 @@ let check_wildcard_let_discard env (pat : Ast.pattern) rhs_expr rhs_ty =
     (match discarded_linear_binding env rhs_expr with
      | Some name -> report_linear_wildcard_discard env ~span:sp ~name rhs_ty
      | None -> ())
+  | _ -> ()
+
+(** The callback call-arity check (see [Typecheck_callarity]): in a call of a
+    known function [f], an argument that is a function of KNOWN arity — a
+    module fn named by value, a let-bound lambda, or a lambda literal — must
+    take exactly as many arguments as [f]'s body applies that parameter to.
+    Curried arrow types cannot tell `fn add(a, b)` from `fn a -> fn b -> …`,
+    and March has no partial application, so a mismatch typechecked and then
+    failed at runtime (an arity panic interpreted, a SIGSEGV compiled). *)
+let rec callee_call_arities env (name : string)
+    : (string * int option) list option =
+  let entry_at sp =
+    match StrMap.find_opt name env.param_call_arities with
+    | Some (sp', ps) when sp = sp' -> Some ps
+    | _ -> None in
+  if String.contains name '.' then
+    match StrMap.find_opt name env.qual_fn_arities with
+    | Some (_, sp) -> entry_at sp
+    | None -> None
+  else
+    match StrMap.find_opt name env.fn_arities with
+    | Some (_, sp) -> entry_at sp
+    | None ->
+      (* A let-bound lambda literal: its entry is keyed by the let name at
+         the lambda's span (see the [Ast.ELet] case of [infer_block]). *)
+      (match StrMap.find_opt name env.lambda_arities with
+       | Some (_, lam_sp, _) -> entry_at lam_sp
+       | None ->
+         (* `let h = f`: [h] is [f]. *)
+         (match StrMap.find_opt name env.fn_aliases with
+          | Some (_, orig) when orig <> name -> callee_call_arities env orig
+          | _ -> None))
+
+let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
+  let callee =
+    match f with
+    | Ast.EVar name ->
+      Option.map (fun ps -> (name.txt, ps)) (callee_call_arities env name.txt)
+    | _ -> None
+  in
+  match callee with
+  | None -> ()
+  | Some (fname, ps) when List.length ps = List.length args ->
+    List.iter2 (fun (pname, m) (arg : Ast.expr) ->
+        let rec strip = function Ast.EAnnot (e, _, _) -> strip e | e -> e in
+        let arg = strip arg in
+        let known =
+          match m, arg with
+          | None, _ -> None
+          | Some _, Ast.ELam (params, _, lsp) ->
+            Some ("This lambda", List.length params, lsp)
+          | Some _, Ast.EVar v when String.contains v.txt '.' ->
+            (match StrMap.find_opt v.txt env.qual_fn_arities with
+             | Some (n, _) -> Some (Printf.sprintf "`%s`" v.txt, n, v.span)
+             | None -> None)
+          | Some _, Ast.EVar v ->
+            (match StrMap.find_opt v.txt env.fn_arities,
+                   StrMap.find_opt v.txt env.lambda_arities,
+                   StrMap.find_opt v.txt env.fn_aliases with
+             | Some (n, _), _, _ -> Some (Printf.sprintf "`%s`" v.txt, n, v.span)
+             | None, Some (n, _, _), _ ->
+               Some (Printf.sprintf "`%s` (a lambda)" v.txt, n, v.span)
+             | None, None, Some (n, orig) ->
+               Some (Printf.sprintf "`%s` (bound to `%s`)" v.txt orig, n, v.span)
+             | None, None, None -> None)
+          | Some _, _ -> None
+        in
+        match m, known with
+        | Some m, Some (what, n, span) when n >= 1 && n <> m ->
+          let plural k = if k = 1 then "" else "s" in
+          let vars = List.init n (fun i -> String.make 1 (Char.chr (97 + i mod 26))) in
+          let hint =
+            if m = 1 && n >= 2 then
+              Printf.sprintf
+                "`%s` applies `%s` one argument at a time (a curried \
+                 function, `a -> b -> …`), and March has no partial \
+                 application.\nPass a curried function instead:\n    %s"
+                fname pname
+                (match arg with
+                 | Ast.EVar v ->
+                   Printf.sprintf "fn %s -> %s(%s)"
+                     (String.concat " -> fn " vars) v.txt (String.concat ", " vars)
+                 | _ ->
+                   Printf.sprintf "fn %s -> …" (String.concat " -> fn " vars))
+            else
+              Printf.sprintf
+                "March functions are not curried: a function is always \
+                 called with exactly its own number of arguments.\nPass a \
+                 function of %d parameter%s." m (plural m)
+          in
+          Err.report env.errors
+            { Err.severity = Err.Error; span;
+              message = Printf.sprintf
+                  "%s takes %d argument%s, but `%s` calls its parameter `%s` \
+                   with %d argument%s.\n%s"
+                  what n (plural n) fname pname m (plural m) hint;
+              labels = []; notes = [];
+              code = Err.Code.callback_arity_mismatch; fix = None }
+        | _ -> ()) ps args
+  | Some _ -> ()
+
+(** [send(pid, msg)]: reject a message the actor this pid points to cannot
+    handle (finding 19, specs/lang/core-march-types.md §2.6.4).
+
+    [msg]'s type is its owner's [<Actor>_Msg], and both backends route by that
+    owner: compiled code gives every actor message a globally unique tag, so a
+    message of another actor matches no branch of the target's dispatch and is
+    dropped.  So the question is whether the OWNER's state could be the pid's.
+
+    A pid's type is [Pid(state)], and an actor's state is a STRUCTURAL record,
+    so the pid cannot name its actor; two actors with identically-shaped state
+    share one [Pid] type.  The check is therefore one-sided.  "Could be" treats
+    every unification variable and every non-record type as a wildcard, so it
+    never rejects a program whose pid type it cannot see through (an
+    unannotated or generic pid, a [Pid(SomeAlias)] that has not been expanded).
+    What it misses, a message for an actor whose state has the same shape as
+    the target's, is still dropped at run time on the compiled backend.
+
+    A handler name two actors share is the sharp case: a bare [Get] resolves to
+    ONE owner ([lookup_ctor]), so [send(other_pid, Get(1))] builds the wrong
+    actor's message.  The interpreter dispatches by name and runs the target's
+    handler anyway, while compiled code drops it.  When another actor with that
+    handler fits the pid, the error says so; no qualified spelling selects an
+    actor's message today, so the advice is to rename one handler. *)
+let check_send_target env ~(span : Ast.span) (pid_ty : ty) (msg : Ast.expr) (msg_ty : ty) : unit =
+  let rec could_be a b =
+    match repr a, repr b with
+    | TVar _, _ | _, TVar _ -> true
+    | TRecord fa, TRecord fb ->
+      List.length fa = List.length fb
+      && List.for_all2 (fun (na, ta) (nb, tb) -> na = nb && could_be ta tb) fa fb
+    | TCon (na, aa), TCon (nb, ab) when na = nb ->
+      List.length aa = List.length ab && List.for_all2 could_be aa ab
+    | TCon (na, []), TCon (nb, []) ->
+      (* Two different names are only certainly different types when neither
+         can be an alias or a same-named nominal type from another module. *)
+      let prim = [ "Int"; "Float"; "String"; "Bool"; "Char"; "Bytes"; "Atom"; "Unit" ] in
+      not (List.mem na prim && List.mem nb prim)
+    | TTuple aa, TTuple ab -> List.length aa = List.length ab && List.for_all2 could_be aa ab
+    | (TRecord _ | TTuple _), (TRecord _ | TTuple _) -> false
+    | _ -> true
+  in
+  let msg_sfx = "_Msg" in
+  let actor_of_msg_type t =
+    let n = String.length t and k = String.length msg_sfx in
+    if n > k && String.sub t (n - k) k = msg_sfx then Some (String.sub t 0 (n - k)) else None
+  in
+  (* The state an actor's pid carries: [DActor] binds the actor name to
+     [Pid(state)] in [env.vars] (bare, and module-qualified when nested). *)
+  let state_of (ci : ctor_info) actor =
+    let keys = actor :: (if ci.ci_module = "" then [] else [ci.ci_module ^ "." ^ actor]) in
+    List.find_map (fun k ->
+        match StrMap.find_opt k env.vars with
+        | Some sch ->
+          (match instantiate env.level env sch with
+           | TCon ("Pid", [s]) -> Some s
+           | _ -> None)
+        | None -> None) keys
+  in
+  let fits pid_state ((a : string), (ci : ctor_info)) = match state_of ci a with
+    | Some s -> could_be s pid_state
+    | None -> true
+  in
+  (* Every actor-message constructor whose owner type satisfies [keep]. *)
+  let actor_ctors keep =
+    StrMap.fold (fun name cis acc ->
+        List.fold_left (fun acc (ci : ctor_info) ->
+            if ci.ci_is_actor_msg && keep name ci then
+              match actor_of_msg_type ci.ci_type with
+              | Some a when not (List.mem_assoc a acc) -> (a, ci) :: acc
+              | _ -> acc
+            else acc) acc cis)
+      env.ctors []
+  in
+  match repr pid_ty, repr msg_ty with
+  | TCon ("Pid", [pid_state]), TCon (owner_ty, []) when actor_of_msg_type owner_ty <> None ->
+    (match repr pid_state with
+     | TRecord _ ->
+       let owner = actor_ctors (fun _ ci -> ci.ci_type = owner_ty) in
+       if owner <> [] && not (List.exists (fits pid_state) owner) then begin
+         let owner_name = fst (List.hd owner) in
+         let ctor_name = match msg with
+           | Ast.ECon (n, _, _) -> Some n.txt
+           | _ -> None in
+         let what = match ctor_name with
+           | Some c -> Printf.sprintf "`%s`" c
+           | None -> "this message" in
+         (* Another actor that handles a message of the same name and fits. *)
+         let alternatives = match ctor_name with
+           | None -> []
+           | Some c ->
+             actor_ctors (fun name ci -> name = c && ci.ci_type <> owner_ty)
+             |> List.filter (fits pid_state)
+             |> List.map fst |> List.sort_uniq String.compare
+         in
+         let advice = match alternatives, ctor_name with
+           | a :: _, Some c ->
+             ignore a;
+             Printf.sprintf
+               "`%s` is also a handler of %s, but a bare `%s` resolves to `%s`'s, \
+                and an actor message cannot be qualified by its actor; rename \
+                one of the two handlers."
+               c (String.concat ", " (List.map (fun a -> "`" ^ a ^ "`") alternatives))
+               c owner_name
+           | _ ->
+             Printf.sprintf "Send it to a pid spawned from `%s`, or send this actor one \
+                             of its own messages." owner_name
+         in
+         Err.report env.errors
+           { Err.severity = Err.Error; span;
+             message = Printf.sprintf
+                 "%s is a message for `%s`, but this pid points to an actor whose \
+                  state is `%s`, so the message would be dropped.\n%s"
+                 what owner_name (pp_ty (repr pid_state)) advice;
+             labels = []; notes = [];
+             code = Err.Code.send_wrong_actor; fix = None }
+       end
+     | _ -> ())
   | _ -> ()
 
 (** [infer_expr env e] synthesises the type of [e], accumulating any
@@ -2384,7 +2701,46 @@ let rec infer_expr env (e : Ast.expr) : ty =
            | _ -> None)
         | _ -> None
       in
+      (* The same rule for an alias of a known function ([fn_aliases]):
+         `let h = add` then `h(1)` called the two-parameter `add` with one
+         argument. *)
+      let alias_arity_error =
+        match f, lambda_arity_error with
+        | Ast.EVar name, None when not (String.contains name.txt '.') ->
+          (match StrMap.find_opt name.txt env.fn_aliases with
+           | Some (arity, orig)
+             when arity >= 1 && List.length args <> arity
+                  && count_arrows f_ty >= arity ->
+             Some (name, arity, List.length args, orig)
+           | _ -> None)
+        | _ -> None
+      in
       (match arity_error, noncallable_error, lambda_arity_error with
+       | None, None, None when alias_arity_error <> None ->
+         let (name, arity, n_args, orig) = Option.get alias_arity_error in
+         List.iter (fun a -> ignore (infer_expr env a)) args;
+         let plural n = if n = 1 then "" else "s" in
+         Err.report env.errors
+           { Err.severity = Err.Error; span = sp;
+             message = Printf.sprintf
+               "`%s` is bound to `%s`, which takes %d argument%s, but is called \
+                with %d argument%s.\n\
+                March has no partial application — a call must supply all arguments."
+               name.txt orig arity (plural arity) n_args (plural n_args);
+             labels = (match StrMap.find_opt name.txt env.binder_spans with
+                 | Some b -> [{ Err.lbl_span = b;
+                                Err.lbl_message = Printf.sprintf "bound to `%s` here" orig }]
+                 | None -> []);
+             notes = [];
+             code = Err.Code.arity_mismatch; fix = None };
+         (* Under-application is the curried reading (`let g = h(1)` then
+            `g(2)`): its result has no type to give, so do not cascade one. *)
+         if n_args < arity then TError
+         else
+           let rec peel n t =
+             if n <= 0 then t
+             else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
+           peel arity f_ty
        | None, None, Some (name, arity, n_args, lam_sp, wildcard) ->
          List.iter (fun a -> ignore (infer_expr env a)) args;
          let plural n = if n = 1 then "" else "s" in
@@ -2445,6 +2801,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
               name.txt (pp_ty (repr f_ty)) name.txt);
          TError
        | None, None, _ ->
+         check_callback_arities env f args;
          let res = infer_app env sp f_ty args 0 in
          (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
             result — recorded in check_fn), taint the call's result so the unify
@@ -2609,7 +2966,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let (bindings, pat_ty), wilds =
         with_wildcards (fun () -> infer_pattern ~expected:rhs_ty env b.bind_pat) in
       let reason = Some (RLetBind sp) in
-      unify env ~span:sp ~reason rhs_ty pat_ty;
+      unify env ~span:sp ~reason ~provided:(provided_of_expr b.bind_expr rhs_ty) rhs_ty pat_ty;
       check_wildcard_discards env wilds;
       check_wildcard_let_discard env b.bind_pat b.bind_expr rhs_ty;
       (* Record variable name type for hover even in tail position *)
@@ -2861,6 +3218,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       unify env ~span:else_sp
         ~reason:(Some (RBecause (RMatchArm then_sp,
           "Both branches of an if expression must return the same type.")))
+        ~provided:(provided_of_expr else_ t_else)
         t_else t_then;
       t_then
 
@@ -2933,7 +3291,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── Actor messaging ──────────────────────────────────────────── *)
     | Ast.ESend (cap, msg, _sp) ->
-      ignore (infer_expr env cap);
+      let pid_ty = infer_expr env cap in
       (* Message-payload sendability (RingBuf/NativeIntArr/NativeFloatArr)
          is checked once, at message-CONSTRUCTION time, in the ECon arm
          (guarded by ci_is_actor_msg) -- not here. The overall type of `msg`
@@ -2941,7 +3299,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
          registered with ci_params = []) never varies with payload and so
          could never see a mutable-buffer type nested in it; checking it
          here was a no-op regardless of what check_sendable's argument was. *)
-      let _msg_ty = infer_expr env msg in
+      let msg_ty = infer_expr env msg in
+      check_send_target env ~span:(span_of_expr msg) pid_ty msg msg_ty;
       (* send() returns Option(Unit): Some(()) when the message was enqueued,
          None when the target actor is dead/unknown (fire-and-forget drop).
          This is the ACTUAL contract of both backends — the interpreter's ESend
@@ -3072,7 +3431,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          let result_ty = infer_expr env result_expr in
          let t_ok  = fresh_var env.level in
          let t_err = fresh_var env.level in
-         unify env ~span:sp
+         unify env ~span:sp ~provided:(provided_of_expr result_expr result_ty)
            ~reason:(Some (RBuiltin
              "The right-hand side of `let?` must be a Result value."))
            result_ty (t_result t_ok t_err);
@@ -3223,6 +3582,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 
   (* Lambda in check mode: peel arrow types one-by-one *)
   | Ast.ELam (params, body, lsp), _ ->
+    report_duplicate_params env params;
     let env0 = env in
     (* Must-use for the parameters bound on the way down, once the body has
        been checked in the innermost env.  Not in the fallback arm below: that
@@ -3254,7 +3614,9 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
         peel rest ret_ty env'
       | _, _ ->
         let inferred = infer_expr env (Ast.ELam (params, body, lsp)) in
-        unify env ~span:lsp ~reason inferred expected
+        unify env ~span:lsp ~reason
+          ~provided:(provided_of_expr (Ast.ELam (params, body, lsp)) inferred)
+          inferred expected
     in
     (* `fn (a, b) -> e` is a TWO-parameter (curried) lambda, not a lambda over
        a pair.  Checked against a ONE-argument callback over an n-tuple
@@ -3313,7 +3675,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     iter_arms_linear env ~span:msp branches (fun (br : Ast.branch) ->
         let (bindings, pat_ty), wilds =
           with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
-        unify env ~span:msp ~reason:(Some (RMatchArm msp)) scrut_ty pat_ty;
+        unify env ~span:msp ~reason:(Some (RMatchArm msp))
+          ~provided:(provided_of_expr scrut scrut_ty) scrut_ty pat_ty;
         (* A diverging arm drops nothing that matters: nothing after it runs. *)
         if not (path_diverges br.branch_body) then check_wildcard_discards env wilds;
         (* Propagate linearity from scrutinee to pattern-bound variables. *)
@@ -3367,12 +3730,12 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
        (* Expected type doesn't name a type defining this constructor —
           fall back to inference so the normal mismatch error is produced. *)
        let inferred = infer_expr env e in
-       unify env ~span:sp ~reason inferred expected)
+       unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected)
 
   (* All other expressions: infer then unify *)
   | _ ->
     let inferred = infer_expr env e in
-    unify env ~span:sp ~reason inferred expected
+    unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected
 
 (** Thread function application through argument list, tracking arg index. *)
 and infer_app env span f_ty args idx =
@@ -3577,7 +3940,8 @@ and infer_match env span scrut scrut_ty branches =
   iter_arms_linear env ~span branches (fun (br : Ast.branch) ->
       let (bindings, pat_ty), wilds =
         with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
-      unify env ~span ~reason:(Some (RMatchArm span)) scrut_ty pat_ty;
+      unify env ~span ~reason:(Some (RMatchArm span))
+        ~provided:(provided_of_expr scrut scrut_ty) scrut_ty pat_ty;
       if not (path_diverges br.branch_body) then check_wildcard_discards env wilds;
       (* Propagate linearity from scrutinee to pattern-bound variables. *)
       let env' = bind_pattern_bindings scrut bindings env in
@@ -3681,7 +4045,8 @@ and infer_block env exprs =
        unchanged for every other pattern shape. *)
     let (bindings, pat_ty), wilds =
       with_wildcards (fun () -> infer_pattern ~expected:rhs_ty env_rhs b.bind_pat) in
-    unify env_rhs ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+    unify env_rhs ~span:sp ~reason:(Some (RLetBind sp))
+      ~provided:(provided_of_expr b.bind_expr rhs_ty) rhs_ty pat_ty;
     check_wildcard_discards env_rhs wilds;
     check_wildcard_let_discard env_rhs b.bind_pat b.bind_expr rhs_ty;
     (* Record the binding type in type_map so LSP hover over `let x = …` shows
@@ -3701,8 +4066,10 @@ and infer_block env exprs =
     (* Vault handles are the ML [ref []] case: `let t = Vault.new("t")` is an
        application, and generalizing its element type would let each use pick a
        different one.  Skipped when the binding is annotated — writing the type
-       out is the explicit opt-out.  See [demote_vault_handle_vars]. *)
-    if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
+       out is the explicit opt-out.  Inside a fn body the element type is pinned
+       for that fn (not the whole program) when a parameter type names it; see
+       [vault_pin_frames]. *)
+    if b.bind_ty = None then demote_block_vault_handle_vars rhs_ty;
     let gen_binding bnd = match bnd with
       | (name, Mono t) -> (name, generalize env.level t)
       | other          -> other
@@ -3800,7 +4167,7 @@ and infer_block env exprs =
        test/native/unit_callback_zero_arg.march.) *)
     let env' =
       match b.bind_pat, auto_lin, b.bind_expr with
-      | Ast.PatVar name, Ast.Unrestricted, Ast.ELam (params, _, lam_sp) ->
+      | Ast.PatVar name, Ast.Unrestricted, Ast.ELam (params, body_of_lam, lam_sp) ->
         (* Remember the lambda's arity for the call-site check (D4): see
            [lambda_arities]. `fn _ -> e` also records the `fn _` extent,
            which is the text the fix replaces with `fn`. *)
@@ -3811,10 +4178,48 @@ and infer_block env exprs =
                                Ast.end_col = p.Ast.param_name.Ast.span.Ast.end_col }
           | _ -> None
         in
+        (* And how its body applies each parameter, so a call of it is
+           callback-arity checked like a call of a module fn
+           ([check_callback_arities]); keyed by the let name at the lambda's
+           span. Resolved in the pre-binding [env]. *)
+        let lookup n =
+          Option.map (fun ps -> (lam_sp, ps)) (callee_call_arities env n) in
+        let ps = Typecheck_callarity.lambda ~lookup params body_of_lam in
         { env' with lambda_arities =
-            StrMap.add name.txt (List.length params, lam_sp, wildcard) env'.lambda_arities }
-      | Ast.PatVar name, Ast.Unrestricted, _ ->
-        { env' with plain_let_names = StringSet.add name.txt env'.plain_let_names }
+            StrMap.add name.txt (List.length params, lam_sp, wildcard) env'.lambda_arities;
+                    param_call_arities =
+            StrMap.add name.txt (lam_sp, ps) env'.param_call_arities }
+      | Ast.PatVar name, Ast.Unrestricted, rhs ->
+        let env' =
+          { env' with plain_let_names = StringSet.add name.txt env'.plain_let_names } in
+        (* `let g = f`, [f] a function value of known arity: [g] is [f]
+           ([lambda_arities] / [fn_aliases]). Looked up in the pre-binding
+           [env], so `let f = f` sees the outer [f]. *)
+        let rec strip = function Ast.EAnnot (e, _, _) -> strip e | e -> e in
+        (match strip rhs with
+         | Ast.EVar v when String.contains v.txt '.' ->
+           (match StrMap.find_opt v.txt env.qual_fn_arities with
+            | Some (n, _) when n >= 1 ->
+              { env' with fn_aliases = StrMap.add name.txt (n, v.txt) env'.fn_aliases }
+            | _ -> env')
+         | Ast.EVar v ->
+           (match StrMap.find_opt v.txt env.fn_arities,
+                  StrMap.find_opt v.txt env.lambda_arities,
+                  StrMap.find_opt v.txt env.fn_aliases with
+            | Some (n, _), _, _ when n >= 1 ->
+              { env' with fn_aliases = StrMap.add name.txt (n, v.txt) env'.fn_aliases }
+            | None, Some ((_, lam_sp, _) as la), _ ->
+              { env' with
+                lambda_arities = StrMap.add name.txt la env'.lambda_arities;
+                param_call_arities =
+                  (match StrMap.find_opt v.txt env.param_call_arities with
+                   | Some (sp', ps) when sp' = lam_sp ->
+                     StrMap.add name.txt (sp', ps) env'.param_call_arities
+                   | _ -> env'.param_call_arities) }
+            | None, None, Some al ->
+              { env' with fn_aliases = StrMap.add name.txt al env'.fn_aliases }
+            | _ -> env')
+         | _ -> env')
       | _ -> env'
     in
     (* F5 path-dependent OFFER refinement: if this let destructures a
@@ -3881,6 +4286,16 @@ and infer_block env exprs =
     result_ty
   (* Local named recursive function: fn go(params) : ret_ty do body end *)
   | Ast.ELetFn (name, params, ret_ann, body, sp) :: rest ->
+    (* Check the local fn one level deeper, as [ELet] does for its RHS, and
+       generalize back at the enclosing level.  Its own params and return
+       were created at the ENCLOSING level before, so `generalize (level - 1)`
+       below also quantified the type variables of everything it captures:
+       in `fn union(a, b, cmp) do fn go(acc, x) do insert(acc, x, cmp) end
+       … end` the element type of `cmp` became go's own parameter, came
+       apart from `a`'s, and compiled code specialised `Set.union` at the
+       wrong element type (String hashing applied to Int keys, SIGSEGV). *)
+    let outer_level = env.level in
+    let env = enter_level env in
     (* Introduce a fresh type for the function, check recursively *)
     let fn_ty = fresh_var env.level in
     let env_with_self = bind_var name.txt (Mono fn_ty) env in
@@ -3948,7 +4363,8 @@ and infer_block env exprs =
        already cleared any stale entry under this name (shadow semantics),
        so this is a plain (re-)add, not a merge. *)
     let env' =
-      { env' with fn_arities =
+      { env' with level = outer_level;
+                  fn_arities =
           StrMap.add name.txt (List.length params, name.span) env'.fn_arities } in
     infer_block env' rest
   | e :: rest ->
@@ -3998,6 +4414,7 @@ and check_spawn_args env ~site_span ~spelling (actor_name : string)
 
 (* Bind lambda parameters into the environment, returning (types, env). *)
 and bind_lam_params env params =
+  report_duplicate_params env params;
   List.fold_right
     (fun p (tys, env) ->
        let t = fresh_var env.level in
@@ -4061,11 +4478,11 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
   match effective_lin with
   | Ast.Unrestricted when is_unbound_var t ->
     (* Not known yet: the body may still fix it to a linear type. *)
-    bind_pending p.param_name.txt t env
+    bind_pending ~span:p.param_name.span p.param_name.txt t env
   | Ast.Unrestricted ->
-    let env1 = bind_var p.param_name.txt (Mono t) env in
+    let env1 = bind_var ~span:p.param_name.span p.param_name.txt (Mono t) env in
     bind_linear_field_sentinels p.param_name.txt t env1
-  | lin -> bind_linear p.param_name.txt lin bind_ty env
+  | lin -> bind_linear ~span:p.param_name.span p.param_name.txt lin bind_ty env
 
 (* =================================================================
    §6  Declaration checking
@@ -4217,14 +4634,16 @@ let rec ty_mentions_var t = match repr t with
   | TLin (_, t) | TRefine (t, _, _) -> ty_mentions_var t
   | TError | TNat _ | TChan _ -> false
 
-(** Warn, at its first mention in the signature, about each type variable
-    of [def] that its body did not leave generic
-    (specs/todos/2026-09-18-typecheck-annotated-tyvars-flexible.md, option
-    (b)).  Both a variable fixed to a concrete type and one made equal to
-    another of the signature's variables are reported: each is a signature
-    that promises callers a freedom the body does not give them, and each
-    would be an error were annotation variables rigid. *)
-let warn_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
+(** Reject, at its first mention in the signature, each type variable of
+    [def] that its body did not leave generic: annotation type variables are
+    rigid (specs/progress/2026-10-11-annotated-tyvars-rigid.md; option (a) of
+    the 2026-09-18 todo, a Warning under option (b) from 2026-09-22).  Both a
+    variable fixed to a concrete type and one made equal to another of the
+    signature's variables are errors: each is a signature that promises
+    callers a freedom the body does not give them.  Checked after the body,
+    not by skolemising during it, so the error points at the signature and
+    names the type the body needed. *)
+let check_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
   List.iter (fun (v, span, fixing) ->
       let message, note = match fixing with
         | Tyvar_concrete t ->
@@ -4251,7 +4670,7 @@ let warn_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
              same type, or make the body generic in each." other v
       in
       Err.report env.errors
-        { Err.severity = Err.Warning; span; message; labels = [];
+        { Err.severity = Err.Error; span; message; labels = [];
           notes = [ note ]; code = Err.Code.annotated_tyvar_fixed; fix = None })
     (annotated_tyvar_fixings def fn_tvars)
 
@@ -4275,6 +4694,9 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
   env.current_decl := qualify_ref_name env.current_module def.fn_name.txt;
   Fun.protect ~finally:(fun () -> env.current_decl := saved_caller) (fun () ->
   let env'    = enter_level env in
+  (* Block-`let` Vault handles in this body; settled against the parameter
+     types before generalization (see [vault_pin_frames]). *)
+  with_vault_pin_frame env'.level @@ fun settle_vault_pins ->
   (* Captured BEFORE the self-bind below (which unconditionally clears any
      [local_fns] entry for this name, per [bind_var]'s shadowing discipline)
      so we know whether to restore it afterward — this fn is only a genuine
@@ -4386,6 +4808,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       in
 
       (* Bind parameters *)
+      report_duplicate_fn_params env' clause.fc_params;
       let param_tys, body_env =
         List.fold_right (fun fp (tys, env) ->
             match fp with
@@ -4423,16 +4846,16 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                      an ERROR, not a warning — previously only let-bound and lambda
                      params registered these, so fn-param field linearity was
                      silently warning-only. *)
-                  let env1 = bind_var p.param_name.txt (Mono t) env in
+                  let env1 = bind_var ~span:p.param_name.span p.param_name.txt (Mono t) env in
                   bind_linear_field_sentinels p.param_name.txt t env1
-                | lin              -> bind_linear p.param_name.txt lin bind_ty env
+                | lin              -> bind_linear ~span:p.param_name.span p.param_name.txt lin bind_ty env
               in
               (t :: tys, env')
             | Ast.FPPat (Ast.PatVar name) ->
               (* Single variable pattern — trivially named.  Its type is not
                  known yet, so its linearity is decided at the body's close. *)
               let t = fresh_var env'.level in
-              let env' = bind_pending name.txt t env in
+              let env' = bind_pending ~span:name.span name.txt t env in
               (t :: tys, env')
             | Ast.FPPat pat ->
               (* Complex pattern parameter: should have been desugared into a
@@ -4658,11 +5081,12 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          mismatch at the call.  Skipped when the body reported an error: its
          unifications are then unreliable evidence of what the author meant. *)
       if not (Err.error_since env.errors diag_mark) then
-        warn_annotated_tyvar_fixings env def !fn_tvars;
+        check_annotated_tyvar_fixings env def !fn_tvars;
 
       (* Generalize; attach bound constraints and any when-clause class constraints *)
       let all_constraints = bound_constraints @ class_constraints in
       mark_trusted_linear_vars env def ~fn_span ~fn_tvars:!fn_tvars trusted_vars;
+      settle_vault_pins param_tys;
       let base_sch = generalize env.level fn_ty in
       (match all_constraints with
        | [] -> base_sch
@@ -4841,6 +5265,8 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
     | Ast.TyRefine (base, _, _) -> lenient_ty base
   in
   let inst_ty = lenient_ty idef.impl_ty in
+  let bounds = List.concat_map (fun ((name : Ast.name), ts) ->
+      List.map (fun t -> name.txt, lenient_ty t) ts) idef.impl_constraints in
   let key = idef.impl_iface.txt in
   let sp  = idef.impl_iface.span in
   let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
@@ -4906,12 +5332,12 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
      machinery test fixtures — rejecting it (DECIDE-1) is deferred as a follow-on
      so this ships without that disruptive change. *)
   match List.find_opt
-          (fun (t, s, m_old) ->
+          (fun (t, s, m_old, _) ->
              s <> sp && s <> Ast.dummy_span
              && types_overlap t inst_ty
              && not (modules_distinct m_old head_type_module))
           lst with
-  | Some (_, prev_sp, _) ->
+  | Some (_, prev_sp, _, _) ->
     Err.error ~code:Err.Code.overlapping_impl env.errors ~span:sp
       (Printf.sprintf
          "Overlapping implementation: `impl %s(%s)` conflicts with the \
@@ -4925,10 +5351,10 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
   | None ->
     (* No conflict. Register (unless our own same-span entry is already present
        from a Pass-1 re-registration, in which case this is a no-op). *)
-    if List.exists (fun (t, s, _) -> s = sp && types_overlap t inst_ty) lst
+    if List.exists (fun (t, s, _, _) -> s = sp && types_overlap t inst_ty) lst
     then env
     else { env with impls =
-             StrMap.add key ((inst_ty, sp, head_type_module) :: lst) env.impls }
+             StrMap.add key ((inst_ty, sp, head_type_module, bounds) :: lst) env.impls }
 
 (** Pre-register a forward-reference interface declared in [prefix]: its name
     (qualified `Mod.Iface` AND bare `Iface`) plus each method (qualified and
@@ -4997,6 +5423,87 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
     end
   ) e1 idef.iface_methods
 
+(* Resolve conditional impls without unifying their stored head variables:
+   those variables are shared by every use site. Bounds use the same variable
+   ids as the head, so a local substitution specialises them for this call. *)
+let interface_satisfied env iface target =
+  let rec strip t = match repr t with TLin (_, t) -> strip t | t -> t in
+  let within_size_budget ty =
+    let remaining = ref 4096 in
+    let rec visit t =
+      decr remaining;
+      !remaining >= 0 && match strip t with
+      | TCon (_, ts) | TTuple ts -> List.for_all visit ts
+      | TArrow (a, b) -> visit a && visit b
+      | TRecord fs -> List.for_all (fun (_, t) -> visit t) fs
+      | _ -> true
+    in
+    visit ty
+  in
+  let failed = Hashtbl.create 16 in
+  let rec satisfies depth seen iface target =
+    let target = strip target in
+    match target with
+    | TVar _ | TError -> true
+    | _ when depth >= 128 || not (within_size_budget target) -> false
+    | TTuple ts when iface = "Eq" -> List.for_all (satisfies depth seen iface) ts
+    (* Ord only through 5-tuples: the prelude's per-arity impls are what
+       compiled `compare` and `<` dispatch to. *)
+    | TTuple ts when iface = "Ord" && List.length ts >= 2 && List.length ts <= 5 ->
+      List.for_all (satisfies depth seen iface) ts
+    | _ ->
+      let key = iface ^ ":" ^ pp_ty target in
+      (* Expanding bounds need not repeat an obligation. A proof budget
+         terminates those too; memoising failures prevents duplicate registered
+         heads from turning a failed search into exponential work. Depth
+         and the active obligations are part of the key: both affect which
+         proofs remain available. *)
+      if List.mem key seen || Hashtbl.mem failed (key, depth, seen) then false
+      else
+        let failure_key = key, depth, seen in
+        let seen = key :: seen in
+        let matches (head, _, _, bounds) =
+          let subst = Hashtbl.create 8 in
+          let rec match_head head target =
+            match strip head, strip target with
+            | TVar r, t ->
+              (match !r with
+               | Unbound (id, _) ->
+                 (match Hashtbl.find_opt subst id with
+                  | Some old -> types_overlap old t
+                  | None -> Hashtbl.add subst id t; true)
+               | Link _ -> assert false)
+            | TCon (n, xs), TCon (m, ys) when n = m && List.length xs = List.length ys ->
+              List.for_all2 match_head xs ys
+            | TTuple xs, TTuple ys when List.length xs = List.length ys ->
+              List.for_all2 match_head xs ys
+            | TArrow (a, b), TArrow (c, d) -> match_head a c && match_head b d
+            | TRecord xs, TRecord ys when List.map fst xs = List.map fst ys ->
+              List.for_all2 (fun (_, x) (_, y) -> match_head x y) xs ys
+            | x, y -> impl_matches_ty x y
+          in
+          let rec specialise t = match repr t with
+            | TVar r ->
+              (match !r with
+               | Unbound (id, _) -> Option.value ~default:t (Hashtbl.find_opt subst id)
+               | Link _ -> assert false)
+            | TCon (n, ts) -> TCon (n, List.map specialise ts)
+            | TTuple ts -> TTuple (List.map specialise ts)
+            | TArrow (a, b) -> TArrow (specialise a, specialise b)
+            | TRecord fs -> TRecord (List.map (fun (n, t) -> n, specialise t) fs)
+            | TLin (l, t) -> TLin (l, specialise t)
+            | t -> t
+          in
+          match_head head target &&
+          List.for_all (fun (name, ty) ->
+            satisfies (depth + 1) seen name (specialise ty)) bounds
+        in
+        let result = List.exists matches (Option.value ~default:[] (StrMap.find_opt iface env.impls)) in
+        if not result then Hashtbl.replace failed failure_key ();
+        result
+  in
+  satisfies 0 [] iface target
+
 (** Discharge all pending Num/Ord/CInterface constraints accumulated during
     inference.  Called at each declaration boundary (DFn, DLet) to verify
     that constrained type variables were unified with a compatible type. *)
@@ -5056,21 +5563,12 @@ let discharge_constraints env span =
         (match ty with
          | TVar _ -> ()   (* Still polymorphic — cannot check yet *)
          | _ ->
-           (* A tuple is Eq when every component is: both backends compare
-              tuples structurally, and no impl can be written for every
-              arity. A component that is still a type variable is
+           (* A tuple is Eq (Ord) when every component is: both backends
+              compare tuples structurally (Ord: lexicographically, via the
+              prelude's per-arity impls when compiled), and no impl can be
+              written for every arity. A component that is still a type variable is
               polymorphic, like the top-level case above. *)
-           let rec satisfies t =
-             match strip_lin t with
-             | TVar _ -> true
-             | TTuple ts when iface_name = "Eq" -> List.for_all satisfies ts
-             | t' ->
-               (match StrMap.find_opt iface_name env.impls with
-                | None -> false
-                | Some impl_tys -> List.exists (fun (impl_ty, _, _) ->
-                    impl_matches_ty (repr impl_ty) t') impl_tys)
-           in
-           let satisfied = satisfies ty in
+           let satisfied = interface_satisfied env iface_name ty in
            if not satisfied then begin
              (* Record field auto-satisfy: discharge a single-method
                 accessor-shaped interface against an anonymous TRecord when
@@ -5615,6 +6113,37 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
   in
   walk ~tail:[] ~dead:[] pdef.Ast.proto_steps
 
+(** Register actor [name] as a zero-arg constructor (so `spawn(Name)`
+    typechecks) and each `on Msg(...)` handler as a constructor of
+    "<Name>_Msg", owned by module [ci_module].  ALL params are included,
+    annotated or not, so constructor arity is always correct; an unannotated
+    one gets a unique TyVar placeholder ("$p<i>_<Msg>") that instantiates to a
+    fresh unification variable, so `send(pid, Msg(x))` typechecks even when
+    the handler omits the annotation.  Shared by [check_decl]'s DActor arm and
+    the nested-module forward pass in its DMod arm: the two must build
+    IDENTICAL entries so [add_ctor] dedups the second registration instead of
+    making every message constructor "defined by multiple types". *)
+let register_actor_ctors ~ci_module env (name : Ast.name) (actor : Ast.actor_def) =
+  let env = { env with ctors =
+    add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module; ci_vis = Ast.Public;
+                        ci_is_actor_msg = false }
+      env.ctors } in
+  List.fold_left (fun acc_env (h : Ast.actor_handler) ->
+      let arg_tys = List.mapi (fun i (p : Ast.param) ->
+          match p.param_ty with
+          | Some ty -> ty
+          | None ->
+            (* Unique name per (handler, position) so each instantiation
+               gets an independent fresh variable. *)
+            Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
+                        span = p.param_name.span }
+        ) h.ah_params in
+      let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
+                 ci_arg_tys = arg_tys; ci_module; ci_vis = Ast.Public;
+                 ci_is_actor_msg = true } in
+      { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+    ) env actor.actor_handlers
+
 let rec check_decl env (d : Ast.decl) : env =
   match d with
   | Ast.DFn (def, sp) ->
@@ -5712,7 +6241,8 @@ let rec check_decl env (d : Ast.decl) : env =
         infer_let_annotated env' sp b.bind_ty b.bind_expr) in
       Hashtbl.replace env.type_map sp (repr rhs_ty);
       let bindings, pat_ty = infer_pattern ~expected:rhs_ty env' b.bind_pat in
-      unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+      unify env' ~span:sp ~reason:(Some (RLetBind sp))
+        ~provided:(provided_of_expr b.bind_expr rhs_ty) rhs_ty pat_ty;
       (rhs_ty, bindings) in
     discharge_constraints env sp;
     ignore (leave_level env');
@@ -5740,7 +6270,7 @@ let rec check_decl env (d : Ast.decl) : env =
             what (pp_ty t))
      | _ -> ());
     (* Same Vault value restriction as the block-[let] path above. *)
-    if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
+    if b.bind_ty = None then demote_block_vault_handle_vars rhs_ty;
     (* Generalise simple variable bindings at module level *)
     let gen_bnd bnd = match bnd with
       | (name, Mono t) -> (name, generalize env.level t)
@@ -5889,25 +6419,8 @@ let rec check_decl env (d : Ast.decl) : env =
        (named "$p<i>_<Msg>") that resolves to a fresh unification variable during
        instantiation; this ensures `send(pid, Msg(x))` typechecks correctly even
        when the handler omits a type annotation. *)
-    let env_with_actor_ctor = { env with ctors =
-      add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = env.current_module; ci_vis = Ast.Public;
-                          ci_is_actor_msg = false }
-        env.ctors } in
-    let env_with_ctors = List.fold_left (fun acc_env (h : Ast.actor_handler) ->
-        let arg_tys = List.mapi (fun i (p : Ast.param) ->
-            match p.param_ty with
-            | Some ty -> ty
-            | None ->
-              (* Unique name per (handler, position) so each instantiation
-                 gets an independent fresh variable. *)
-              Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
-                          span = p.param_name.span }
-          ) h.ah_params in
-        let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                   ci_arg_tys = arg_tys; ci_module = env.current_module; ci_vis = Ast.Public;
-                   ci_is_actor_msg = true } in
-        { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
-      ) env_with_actor_ctor actor.actor_handlers in
+    let env_with_ctors =
+      register_actor_ctors ~ci_module:env.current_module env name actor in
     (* `init(env : T, …)` (D24): the parameters are in scope in the init
        expression (and in a supervise block's child `init` arguments, below),
        and their types are recorded for `spawn(A, …)` to check against.  They
@@ -5923,6 +6436,7 @@ let rec check_decl env (d : Ast.decl) : env =
           (p.param_name.txt, t)) actor.actor_init_params
     in
     Hashtbl.replace env.actor_init_sigs name.txt init_sig;
+    report_duplicate_params env actor.actor_init_params;
     let init_env =
       List.fold_left2
         (fun e (p : Ast.param) (_, t) -> bind_lam_param e p.param_name.span p (Some t))
@@ -5970,6 +6484,7 @@ let rec check_decl env (d : Ast.decl) : env =
            (finding L6: a linear value sent as a message is a zero-copy move)
            enforced the sender's half and dropped the receiver's.  See
            specs/todos/2026-09-11-linear-actor-handler-parameter-untracked.md. *)
+        report_duplicate_params env h.ah_params;
         let handler_env =
           List.fold_left
             (fun e (p : Ast.param) -> bind_lam_param e p.Ast.param_name.Ast.span p None)
@@ -6061,12 +6576,23 @@ let rec check_decl env (d : Ast.decl) : env =
           let e = bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e in
           { e with local_fns = StrMap.add def.fn_name.txt () e.local_fns;
                    fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) e.fn_arities }
+        | Ast.DActor (_, aname, actor, _) ->
+          (* An actor's message constructors are in scope for the WHOLE
+             module, as they are for the entry module (its pass 1 registers
+             every DActor up front).  Without this, a fn or actor declared
+             ABOVE the actor in a nested module could not name them:
+             `send(p.ep, PeerGone(...))` in SessionNode was "I don't know a
+             constructor called `PeerGone`" (hidden, being stdlib) while
+             codegen and the interpreter resolved it.  [ci_module] is this
+             module's name, what [check_decl]'s DActor arm uses here, so its
+             later registration dedups against this one. *)
+          register_actor_ctors ~ci_module:name.txt e aname actor
         | _ -> e
       ) { scope_env with local_fns = StrMap.empty; current_module = name.txt;
           cap_qual_prefix =
             (if env.cap_qual_prefix = "" then name.txt
              else env.cap_qual_prefix ^ "." ^ name.txt) } decls in
-    let inner_env = List.fold_left check_decl pre_env (reorder_decls decls) in
+    let inner_env = check_decls_with_callarity pre_env decls in
     (* Collect the names that are explicitly public within this module. *)
     let pub_set =
       List.filter_map (function
@@ -6211,6 +6737,14 @@ let rec check_decl env (d : Ast.decl) : env =
           | Some a -> StrMap.add (name.txt ^ "." ^ k) a acc
           | None -> acc
       ) inner_env.vars StrMap.empty in
+    (* Their callback call-arities, re-keyed the same way (a nested module's
+       entry is already qualified relative to this module). *)
+    let new_param_call_arities = StrMap.fold (fun k _ acc ->
+        match StrMap.find_opt k inner_env.param_call_arities with
+        | Some e -> StrMap.add (name.txt ^ "." ^ k) e acc
+        | None -> acc
+      ) (StrMap.filter (fun k _ -> StrMap.mem (name.txt ^ "." ^ k) new_fn_arities)
+           inner_env.vars) StrMap.empty in
     (* Also export type names and constructors from public DMod into outer scope.
        Types defined in a module (e.g. IOList, Option) are referred to by their
        bare name throughout user code, not prefixed.
@@ -6346,6 +6880,8 @@ let rec check_decl env (d : Ast.decl) : env =
       records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
       qual_fn_names = StrMap.union (fun _k a _ -> Some a) new_fn_quals env'.qual_fn_names;
       qual_fn_arities = StrMap.union (fun _k a _ -> Some a) new_fn_arities env'.qual_fn_arities;
+      param_call_arities =
+        StrMap.union (fun _k a _ -> Some a) new_param_call_arities env'.param_call_arities;
       module_caps = module_caps';
       proof_caps = inner_env.proof_caps;
       cap_dicts = inner_env.cap_dicts;
@@ -6537,13 +7073,17 @@ let rec check_decl env (d : Ast.decl) : env =
     (* The impl header's own type (`impl Iface(T)`) has no enclosing
        function — see [with_no_caller]. *)
     let inst_ty = with_no_caller env (fun () -> surface_ty env ~tvars idef.impl_ty) in
+    let bounds = with_no_caller env (fun () ->
+        List.concat_map (fun ((name : Ast.name), ts) ->
+            List.map (fun t -> name.txt, surface_ty env ~tvars t) ts)
+          idef.impl_constraints) in
     (* Register this implementation so CInterface constraints can be discharged. *)
     let env_with_impl = { env with impls =
       (let key = idef.impl_iface.txt in
        let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
        (* Pass-2 re-registration for constraint discharge; coherence is enforced
           in [register_impl_shape] (Pass 1). Carry the span for the new shape. *)
-       StrMap.add key ((inst_ty, idef.impl_iface.span, None) :: lst) env.impls) } in
+       StrMap.add key ((inst_ty, idef.impl_iface.span, None, bounds) :: lst) env.impls) } in
     (* A derived Json encoder is a module-wide fact (see [env.json_codecs]). *)
     if idef.impl_iface.txt = "JsonTo" then
       env.json_codecs := inst_ty :: !(env.json_codecs);
@@ -6557,10 +7097,7 @@ let rec check_decl env (d : Ast.decl) : env =
           (match cty with
            | TVar _ -> ()   (* Polymorphic param — checked at use sites *)
            | _ ->
-             if not (match StrMap.find_opt cname.txt env.impls with
-                 | None -> false
-                 | Some tys -> List.exists (fun (impl_ty, _, _) ->
-                     impl_matches_ty (repr impl_ty) cty) tys) then
+             if not (interface_satisfied env cname.txt cty) then
                Err.error ~code:Err.Code.unsatisfied_constraint env.errors ~span:cname.span
                  (Printf.sprintf
                     "Constraint `%s(%s)` in `when` clause is not satisfied.\n\
@@ -6593,10 +7130,7 @@ let rec check_decl env (d : Ast.decl) : env =
               (match sc_inst_ty with
                | TVar _ -> ()  (* polymorphic param — checked at use sites *)
                | _ ->
-                 if not (match StrMap.find_opt sc_name.txt env.impls with
-                     | None -> false
-                     | Some tys -> List.exists (fun (impl_ty, _, _) ->
-                         impl_matches_ty (repr impl_ty) sc_inst_ty) tys) then
+                 if not (interface_satisfied env sc_name.txt sc_inst_ty) then
                    Err.error ~code:Err.Code.missing_superclass_impl env.errors ~span:idef.impl_iface.span
                      (Printf.sprintf
                         "Cannot implement `%s(%s)`: required superclass `%s(%s)` is not \
@@ -7142,6 +7676,30 @@ let rec check_decl env (d : Ast.decl) : env =
     (* DSatisfy is expanded to DImpl blocks by the desugar pass; nothing to typecheck here. *)
     env
 
+(** [List.fold_left check_decl env (reorder_decls decls)] for one module's
+    declarations, keeping the module's callback call-arity table
+    ([Typecheck_callarity], [env.param_call_arities]) current: computed up
+    front, and recomputed after each nested/sibling [DMod] is checked, since a
+    fn here may hand a parameter to that module's exported fns
+    (`Map.insert(m, k, v, cmp)`) whose entries only exist once it is checked. *)
+and check_decls_with_callarity env decls =
+  let defs = List.filter_map (function
+      | Ast.DFn (def, _) -> Some def | _ -> None) decls in
+  let refresh env =
+    if defs = [] then env
+    else
+      let lookup n =
+        if String.contains n '.' then StrMap.find_opt n env.param_call_arities
+        else None in
+      let entries = Typecheck_callarity.compute ~lookup defs in
+      { env with param_call_arities =
+          List.fold_left (fun m (n, e) -> StrMap.add n e m)
+            env.param_call_arities entries } in
+  List.fold_left (fun env d ->
+      let env = check_decl env d in
+      match d with Ast.DMod _ -> refresh env | _ -> env)
+    (refresh env) (reorder_decls decls)
+
 (** Emit warnings for any imports or aliases that were never referenced. *)
 let warn_unused_imports env =
   List.iter (fun ie ->
@@ -7356,6 +7914,61 @@ let cap_reach_chain ?own_caps ?fn_refs (env : env) ~(from : string) ~(cap : stri
     end
   done;
   !result
+
+(* Per-function bounds: hold each function that declares `needs ...` in its
+   header to that bound (specs/plans/2026-11-01-per-function-needs-bounds.md).
+   This is R1 stage C's [check_fn_grants] (removed 2026-08-13) re-attached to a
+   DECLARATION: stage C made every `Cap(X)` parameter a ceiling, which forced
+   callers to thread capabilities; a declared bound has no effect on callers.
+
+   - [caps]: every IO-lattice capability the function reaches must be covered
+     by the bound.  A non-IO root (an FFI capability) is governed by the extern
+     checks, not this lattice.
+   - [deps] (parameters the body invokes) are not charged here: the caller
+     that supplies the callback is charged for it, as everywhere else.
+   - [unknown]: the body invokes a function value of untraceable origin, so no
+     caller can be charged for what it does; a bound short of all of `IO` is
+     refused rather than certified. *)
+let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env : env) : unit =
+  Hashtbl.iter
+    (fun qname (bound, span) ->
+       let row =
+         Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows qname)
+       in
+       let leaf =
+         match String.rindex_opt qname '.' with
+         | Some i -> String.sub qname (i + 1) (String.length qname - i - 1)
+         | None -> qname
+       in
+       let shown = if bound = [] then "()" else String.concat ", " bound in
+       let covered c = List.exists (fun b -> cap_subsumes b c) bound in
+       if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) then
+         Err.error ~code:Err.Code.cap_bound env.errors ~span
+           (Printf.sprintf
+              "`%s` is bounded by `needs %s`, but its body invokes a function \
+               value whose origin the capability analysis cannot trace (one taken \
+               from a record field, a list or a ref), so nothing can be charged \
+               for what that call does and the bound cannot be certified.\n\
+               help: pass the function in as a parameter or call it by name, or \
+               bound `%s` by `needs IO`."
+              leaf shown leaf);
+       List.iter
+         (fun c ->
+            if not (cap_subsumes "IO" c) || covered c then ()
+            else
+              let via =
+                match cap_reach_chain env ~from:qname ~cap:c with
+                | Some (_ :: _ as chain) ->
+                  Printf.sprintf " (via %s)" (render_cap_chain chain)
+                | _ -> ""
+              in
+              Err.error ~code:Err.Code.cap_bound env.errors ~span
+                (Printf.sprintf
+                   "`%s` is bounded by `needs %s`, but reaches `%s`%s.\n\
+                    help: add `%s` to the bound, or remove the use."
+                   leaf shown c via c))
+         (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
+    env.fn_bound_points
 
 let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
   (* [rows] lets the caller hand in an already-solved row table. Stage C made
@@ -8695,6 +9308,114 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
          (March_caps.Cap_lattice.normalize attributed))
     user_fns
 
+(** Reject a non-regular ("nested") datatype: one whose recursive mention
+    of itself, directly or through other types of the same module, applies it
+    to a GROWING argument, as in [type Nest(a) = Z(a) | S(Nest(List(a)))].
+    Expanding such a type never reaches a fixed point — [Nest(Int)] needs
+    [Nest(List(Int))], which needs [Nest(List(List(Int)))], … — and every
+    compiled pass that synthesises per-instance code (deep drop, printing,
+    equality) walked that chain forever: the compiler hung instead of
+    reporting anything. Functions over such a type need polymorphic recursion,
+    which HM already rejects (specs/lang/core-march-types.md), so the type
+    could only be built, never traversed.
+
+    The test expands each variant/record type of one module scope from its
+    own parameters, substituting through constructor fields, and collects the
+    instances of same-scope types it reaches. A regular type reaches finitely
+    many instances whose nesting stays bounded; a non-regular one keeps
+    producing deeper ones, and is reported once it passes [depth_limit] (far
+    beyond anything a regular declaration reaches: an instance is at most
+    as deep as the deepest field type plus the starting parameters).
+    specs/progress/2026-10-12-nonregular-type-compiler-hang.md *)
+let check_nonregular_types (errors : Err.ctx) (decls : Ast.decl list) : unit =
+  let rec depth (t : Ast.ty) : int =
+    match t with
+    | Ast.TyCon (_, args) | Ast.TyTuple args ->
+      1 + List.fold_left (fun m a -> max m (depth a)) 0 args
+    | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> 1 + max (depth a) (depth b)
+    | Ast.TyRecord fs -> 1 + List.fold_left (fun m (_, a) -> max m (depth a)) 0 fs
+    | Ast.TyLinear (_, a) | Ast.TyRefine (a, _, _) -> depth a
+    | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> 1
+  in
+  let rec subst (s : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
+    match t with
+    | Ast.TyVar n -> (match List.assoc_opt n.Ast.txt s with Some r -> r | None -> t)
+    | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map (subst s) args)
+    | Ast.TyTuple args -> Ast.TyTuple (List.map (subst s) args)
+    | Ast.TyArrow (a, b) -> Ast.TyArrow (subst s a, subst s b)
+    | Ast.TyRecord fs -> Ast.TyRecord (List.map (fun (n, a) -> (n, subst s a)) fs)
+    | Ast.TyLinear (l, a) -> Ast.TyLinear (l, subst s a)
+    | Ast.TyRefine (a, b, p) -> Ast.TyRefine (subst s a, b, p)
+    | Ast.TyNatOp (o, a, b) -> Ast.TyNatOp (o, subst s a, subst s b)
+    | Ast.TyNat _ | Ast.TyChan _ -> t
+  in
+  let rec check_scope (decls : Ast.decl list) =
+    let types : (string, string list * Ast.ty list) Hashtbl.t = Hashtbl.create 8 in
+    let order = ref [] in
+    List.iter (fun (d : Ast.decl) ->
+        match d with
+        | Ast.DType (_, name, params, td, _)
+        | Ast.DAlwaysLinearType (_, name, params, td, _) ->
+          let fields = match td with
+            | Ast.TDVariant vs -> List.concat_map (fun (v : Ast.variant) -> v.var_args) vs
+            | Ast.TDRecord fs -> List.map (fun (f : Ast.field) -> f.fld_ty) fs
+            | Ast.TDAlias _ -> []
+          in
+          (match td with
+           | Ast.TDAlias _ -> ()
+           | _ ->
+             Hashtbl.replace types name.Ast.txt
+               (List.map (fun (p : Ast.name) -> p.Ast.txt) params, fields);
+             order := (name, params) :: !order)
+        | Ast.DMod (_, _, inner, _) -> check_scope inner
+        | _ -> ()) decls;
+    let depth_limit = 32 and instance_limit = 512 in
+    List.iter (fun ((name : Ast.name), (params : Ast.name list)) ->
+        (* The instances of same-scope types reachable from [name(params)]. *)
+        let seen = Hashtbl.create 16 in
+        let grows = ref None in
+        let rec visit (t : Ast.ty) =
+          if !grows = None then
+            match t with
+            | Ast.TyCon (n, args) when Hashtbl.mem types n.Ast.txt ->
+              List.iter visit args;
+              let key = Ast.show_ty t in
+              if !grows = None && not (Hashtbl.mem seen key) then begin
+                if depth t > depth_limit || Hashtbl.length seen > instance_limit then
+                  grows := Some t
+                else begin
+                  Hashtbl.add seen key ();
+                  let (ps, fields) = Hashtbl.find types n.Ast.txt in
+                  if List.length ps = List.length args then
+                    List.iter (fun f -> visit (subst (List.combine ps args) f)) fields
+                end
+              end
+            | Ast.TyCon (_, args) | Ast.TyTuple args -> List.iter visit args
+            | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> visit a; visit b
+            | Ast.TyRecord fs -> List.iter (fun (_, a) -> visit a) fs
+            | Ast.TyLinear (_, a) | Ast.TyRefine (a, _, _) -> visit a
+            | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> ()
+        in
+        visit (Ast.TyCon (name, List.map (fun p -> Ast.TyVar p) params));
+        match !grows with
+        | None -> ()
+        | Some _ ->
+          Err.error ~code:Err.Code.nonregular_type errors ~span:name.Ast.span
+            (Printf.sprintf
+               "type `%s` refers to itself at a growing type argument, which \
+                is not supported\n\
+                Polymorphic recursion through a type (a nested datatype such \
+                as `type Nest(a) = Z(a) | S(Nest(List(a)))`) has no finite \
+                set of instances to compile, and no function could walk it: \
+                a recursive call at a different type is rejected. Make the \
+                recursive mention use `%s`'s own parameters, e.g. \
+                `%s`."
+               name.Ast.txt name.Ast.txt
+               (Ast.show_ty (Ast.TyCon (name, List.map (fun p -> Ast.TyVar p) params)))))
+      (List.rev !order)
+  in
+  check_scope decls
+
 (** Every `always_linear type` declared anywhere in [decls], as the bare name
     plus the module-qualified name, spelled exactly as [check_decl]'s
     [DAlwaysLinearType] arm spells them — a nested module qualifies with its
@@ -8721,6 +9442,89 @@ let rec always_linear_names ~(modname : string) (decls : Ast.decl list) : string
        | _ -> [])
     decls
 
+(** Every derived Json decoder in [decls] (the [JsonFrom] impl [derive Json]
+    expands to), as (declaring-module-qualified type name, derive site).
+    The qualified name resolves the derive's bare type name the way the
+    desugarer's derive expansion does: the innermost enclosing level that
+    declares it.  The entry module's own top level is the empty path, so its
+    types keep their bare name. *)
+let collect_json_derive_sites (decls : Ast.decl list) : (string * Ast.span) list =
+  let acc = ref [] in
+  let rec walk path scopes decls =
+    let here = List.filter_map (function
+        | Ast.DType (_, n, _, _, _) -> Some n.Ast.txt
+        | _ -> None) decls in
+    let scopes = (path, here) :: scopes in
+    List.iter (function
+        | Ast.DImpl (idef, sp) when idef.Ast.impl_iface.txt = "JsonFrom" ->
+          (match idef.Ast.impl_ty with
+           | Ast.TyCon (n, _) ->
+             let name = n.Ast.txt in
+             let qual =
+               if String.contains name '.' then name
+               else match List.find_opt (fun (_, ts) -> List.mem name ts) scopes with
+                 | Some (p, _) when p <> "" -> p ^ "." ^ name
+                 | _ -> name
+             in
+             acc := (qual, sp) :: !acc
+           | _ -> ())
+        | Ast.DMod (n, _, inner, _) ->
+          walk (if path = "" then n.Ast.txt else path ^ "." ^ n.Ast.txt) scopes inner
+        | _ -> ()) decls
+  in
+  walk "" [] decls;
+  List.rev !acc
+
+(** Reject two DIFFERENT types with the same short name that both
+    [derive Json] (owner decision 2026-10-11,
+    specs/todos/2026-10-03-derive-json-same-short-name-two-modules.md).
+
+    The typechecker canonicalizes a nested-module type to its bare name, so
+    [from_json]'s result-type dispatch cannot tell [A.Note] from [B.Note]: the
+    interpreter decoded with the wrong codec and the compiled backend failed as
+    an ambiguous interface call.  Until nested-module types get their own
+    identity, the program is a compile error naming both types and both
+    derive sites.  Only one of the two deriving Json is fine: there is then
+    only one codec to find.
+
+    [seed] holds the sites a seeding env (the stdlib) already saw; a collision
+    entirely inside the seed was that check's to report, so only a pair with
+    at least one [own] site is reported here, at the [own] site. *)
+let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
+    ~(own : (string * Ast.span) list) : unit =
+  let short q =
+    match String.rindex_opt q '.' with
+    | Some i -> String.sub q (i + 1) (String.length q - i - 1)
+    | None -> q
+  in
+  let seen = ref seed in
+  List.iter (fun ((q, sp) as site) ->
+      (match List.find_opt (fun (q', _) -> q' <> q && short q' = short q) !seen with
+       | Some (q', sp') ->
+         Err.report errors
+           { Err.severity = Err.Error; span = sp;
+             message = Printf.sprintf
+                 "Two different types named `%s` both derive Json: `%s` (here) \
+                  and `%s` (at %s:%d:%d).\n\
+                  `from_json` picks its decoder by the result type's short name, \
+                  so it cannot tell these two apart and would decode with the \
+                  wrong one. Rename one of the types, or derive Json for only \
+                  one of them."
+                 (short q) q q' sp'.Ast.file sp'.Ast.start_line sp'.Ast.start_col;
+             labels = [{ Err.lbl_span = sp';
+                         Err.lbl_message =
+                           Printf.sprintf "`%s` derives Json here" q' }];
+             notes = [];
+             code = Err.Code.json_derive_name_collision; fix = None }
+       | None -> ());
+      seen := !seen @ [site]) own
+
+(** The [nonexhaustive_match_spans] of the last [check_module_core] run,
+    guarded matches included (see [check_exhaustiveness]).  Read only by
+    [--reflect-report]'s R5 (lib/refinecheck/refine_reflect.ml): the driver's
+    [--check] path keeps no env to read them from. *)
+let last_nonexhaustive_match_spans : Ast.span list ref = ref []
+
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
   (* `from_json` return-type dispatch is recorded per call-site span by
@@ -8738,6 +9542,14 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   record_names_load (match seed_env with
     | Some (se : env) -> se.record_names_snapshot
     | None -> []);
+  let json_derive_sites =
+    let seed = match seed_env with
+      | Some (se : env) -> se.json_derive_sites
+      | None -> [] in
+    let own = collect_json_derive_sites m.Ast.mod_decls in
+    check_json_derive_collisions errors ~seed ~own;
+    seed @ own
+  in
   let type_map = match seed_env with
     | Some (se : env) -> se.type_map
     | None -> Hashtbl.create 256
@@ -8968,7 +9780,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                   Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
                               span = p.param_name.span }
               ) h.ah_params in
-            let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+            let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
@@ -9021,7 +9833,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
       enclosing_package =
         (if pre_env.enclosing_package = "" then m.Ast.mod_name.txt
          else pre_env.enclosing_package) } in
-  let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
+  let final_env = check_decls_with_callarity pre_env m.Ast.mod_decls in
   (* Part 1: the cap_narrow proof-cap forge is closed by the [unify] hook
      ([cap_producer_ivars]), which fires at the exact moment a cap_narrow-derived
      inner var is bound to a nominal proof cap — position- and flow-independent
@@ -9058,9 +9870,16 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      [~with_rows:false] keeps this call at the caps-only fixpoint, which is
      what [check_main_grant] actually reads — this was the pre-stage-C cost
      and stays that with stage C gone. *)
-  let cap_rows = fn_capability_rows_tbl ~with_rows:false final_env in
+  (* Rows (deps/unknown) are read only by [check_fn_bounds]; solving them only
+     when some function declares a bound keeps every other `--check` at the
+     caps-only fixpoint cost. *)
+  let cap_rows =
+    fn_capability_rows_tbl
+      ~with_rows:(Hashtbl.length final_env.fn_bound_points > 0) final_env
+  in
   dump_cap_rows final_env;
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
+  check_fn_bounds ~rows:cap_rows final_env;
   (* Per-role grants: the same walk from each runner-entry callback, bounded
      by `role R needs ...` (distributed-deploys step 4).  No-op for a
      program with no grant line. *)
@@ -9113,8 +9932,11 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)
+  check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
-  (errors, type_map, { final_env with record_names_snapshot = record_names_dump () })
+  last_nonexhaustive_match_spans := !(final_env.nonexhaustive_match_spans);
+  (errors, type_map, { final_env with record_names_snapshot = record_names_dump ();
+                                      json_derive_sites })
 
 let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let (errs, type_map, _env) = check_module_core ?errors m in
@@ -9345,7 +10167,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                   Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
                               span = p.param_name.span }
               ) h.ah_params in
-            let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+            let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
@@ -9365,9 +10187,10 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
       always_linear_types =
         always_linear_names ~modname:m.Ast.mod_name.txt m.Ast.mod_decls
         @ pre_env.always_linear_types } in
-  let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
+  let final_env = check_decls_with_callarity pre_env m.Ast.mod_decls in
   last_with_env_final := { final_env with record_names_snapshot = record_names_dump () };
   (* Pass 3: tail-call enforcement *)
+  check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
   (errors, type_map)
 
@@ -9395,7 +10218,7 @@ let check_letq_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
   let t_ok  = fresh_var env'.level in
   let t_err = fresh_var env'.level in
   let sp = span_of_expr e in
-  unify env' ~span:sp
+  unify env' ~span:sp ~provided:(provided_of_expr e result_ty)
     ~reason:(Some (RBuiltin "The right-hand side of `let?` must be a Result value."))
     result_ty (t_result t_ok t_err);
   let bindings, pat_ty = infer_pattern ~expected:t_ok env' p in

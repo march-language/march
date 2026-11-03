@@ -109,8 +109,12 @@ hosts = [{ host = "root@render-1", labels = ["gpu"] }, "root@render-2"]
   the same way and offers when it is in the top n. When a node is declared dead, the
   next one in the ranking takes the role over. A node that rejoins counts again only
   after `MARCH_PLACEMENT_SETTLE_MS` (default 15000), so a flapping node does not pull
-  roles back and forth. `count = 1` is not a lock: during a partition each side may
-  offer.
+  roles back and forth. The returning node applies the same period to itself: it
+  opens no `count` role before its first registry sync with its peers (waiting at
+  most the settle period, so a lone node still takes its roles), and while its peers
+  count it as rejoined it leaves a `count` role to the nodes already offering it
+  unless they cannot fill the count without it. `count = 1` is not a lock: during a
+  partition each side may offer.
 - **Both:** `count` ranks only the labelled nodes.
 
 ## `forge topology check`
@@ -206,6 +210,43 @@ Prints the digest plus the derived facts:
 The JSON schema is documented in
 [specs/features/topology.md](https://github.com/march-language/march/blob/main/specs/features/topology.md).
 
+## Derived capabilities and the widening gate
+
+A pool's derived `caps` are not unchecked: a code change that makes a pool reach a
+capability it did not reach at the last deploy (a helper starts calling `file_write`,
+say) is a widening, and goes through the same monotonicity gate as a hot deploy's
+function and role capabilities. The baseline is `.forge/deploy/<env>/derived.json`
+(`default` without `--env`), each pool's derived `caps` and `initiates`, written when a
+`forge deploy` or `forge deploy hot` completes.
+
+- **`forge deploy hot`** compares before it builds. A pool that widens stops the deploy:
+
+  ```
+  error: hot deploy would widen pool edge's derived capabilities (D26)
+    last deployed caps:    IO.Console   (the default environment)
+    new version adds:      IO.FileWrite
+    A hot deploy may only narrow authority. To authorize this widening, re-run with:
+        forge deploy hot --grant-cap IO.FileWrite
+  ```
+
+  `--grant-cap <CAP>` names the capability, not the pool, and is matched by subsumption
+  (`--grant-cap IO.FileSystem` covers `IO.FileWrite`); it authorizes that capability for
+  every pool that widens to it, and prints `granted widening: pool edge gains
+  IO.FileWrite (via --grant-cap IO.FileWrite)`. Narrowing is always allowed. A pool new
+  to the record widens by all its caps. With no record (a first deploy) the gate is
+  permissive, with a note; with a record but no derivation (the compiler could not run)
+  it refuses.
+- **`forge deploy --plan`** marks it in block 6 (`back derived caps (D26) widens to
+  IO.FileWrite: needs --grant-cap IO.FileWrite`), and `forge deploy` blocks that pool.
+- **`forge build`** warns, once per pool and recorded environment:
+
+  ```
+  warning: pool edge's derived caps widen since the last deploy to env prod: adds IO.FileWrite; deploying it needs --grant-cap IO.FileWrite
+  ```
+
+A written `caps` is an upper limit the compiler enforces, so it never widens silently;
+the gate is what keeps an omitted one from doing so.
+
 ## `forge topology gen <target>`
 
 Built-in targets, each written to stdout behind `# ==> <file> <==` markers, or under a
@@ -250,8 +291,10 @@ generated `main`:
    declares, then the node handle;
 3. opens the offers the topology places on this node, re-evaluating as nodes join
    and leave;
-4. on SIGTERM or SIGINT, closes every offer, lets running sessions finish, and exits
-   (`[drain] hard_ms` is the most it waits);
+4. on SIGTERM or SIGINT, closes every offer, starts no new session (an
+   `initiate_<Role>` from a hook's task returns `Err(Left("draining"))`), lets
+   running sessions finish, and exits (`[drain] hard_ms` is the most it waits; a
+   second signal stops it at once, with status 1);
 5. offers a role again if its offer, or the actor serving it, dies.
 
 A process of a shared build runs the pools named in `MARCH_POOLS` (comma-separated),
@@ -507,7 +550,7 @@ plan splits it in two (D21) and says so under "3. Order and splits":
 `forge deploy` stops after the expand; running it again for the same source is the
 contract. In the expand build the chooser's `choose_<label>` panics, so chooser code that
 must run in both builds asks first:
-`<P>_Msg.role_fingerprint(<P>_Msg.role_<Chooser>()) == <P>_Msg.fingerprint()` is false
+`<P>_<Chooser>.may_choose_<label>()` is false
 until the contract. Which changes are compatible is the compiler's rule, computed over
 wire tags against what the environment runs (`.forge/deploy/<env>/protocols/`, never the
 build-to-build `.forge/protocols/`). Anything else is breaking: every node offers both

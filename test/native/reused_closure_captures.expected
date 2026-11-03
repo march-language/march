@@ -1,0 +1,3 @@
+fold with a capturing closure = 15150, no growth: true
+fold into a map = 199, no growth: true
+captured function tail-called = 292, no growth: true

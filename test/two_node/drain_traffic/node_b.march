@@ -1,0 +1,51 @@
+-- Three-node scenario "drain_traffic": node-b serves Order.Ledger through
+-- `Topology.place` and drains on SIGTERM, as a generated topology `main`
+-- does. See scenario.sh.
+mod DrainTrafficB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.Signal
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Order do
+    loop do
+      want: Shop -> Stock : Int
+      choose by Stock:
+        have -> Stock -> Shop : Int
+                book: Stock -> Ledger : Int
+                booked: Ledger -> Shop : Int
+        out  -> Stock -> Shop : Int
+                skip: Stock -> Ledger : Int
+                stop
+      end
+    end
+  end
+
+  pfn ledger(s : Cap(Session.Live), st : Order_Ledger.Entry) : Order_Ledger.Yield do
+    Order_Ledger.offer_have_out(s, st,
+      fn (_item, st1) -> ledger(s, Order_Ledger.send_Booked(s, st1, 0)),
+      fn (_item, st1) -> Order_Ledger.close(s, st1))
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "drain-traffic-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
+        println("node-b: up")
+        Topology.place(h, [ Topology.offer_role("Order.Ledger", Topology.everywhere(), 32,
+                              fn cap -> Order_Run.offer_Ledger(c, h, cap, fn (s, st) -> ledger(s, st))) ])
+        Topology.drain_on_signal(h, 1000, 4000)
+        Topology.supervise_offers(h)
+    end
+  end
+end

@@ -164,34 +164,21 @@ let rec apply_subst (subst : (string * Tir.ty) list) (ty : Tir.ty) : Tir.ty =
   | _ -> ty
 
 (* A name-safe key for a monomorphic type.  Only needs to be injective over
-   the types that reach it, and stable within one compilation. *)
-let rec mangle (ty : Tir.ty) : string =
-  match ty with
-  | Tir.TInt -> "Int" | Tir.TFloat -> "Float" | Tir.TBool -> "Bool"
-  | Tir.TString -> "String" | Tir.TUnit -> "Unit"
-  | Tir.TTuple ts -> "T" ^ string_of_int (List.length ts)
-                     ^ "_" ^ String.concat "_" (List.map mangle ts)
-  | Tir.TRecord fs ->
-    (* Field names AND types, sorted, not merely the arity.  This key is the
-       memo key in [env.names] and the suffix of the synthesized function's
-       name, so a bare "R<n>" made every n-field record collide: the first
-       2-field record to be asked about decided the answer for all of them, and
-       a memoized negative (no heap children) then suppressed the drop for a
-       later { n : Int, s : String }, silently leaking its string.  Harmless
-       while aggregates never got drop functions; a correctness bug now.
-       Names are part of the identity because the drop projects fields by name
-       and TRecord's layout is name-sorted. *)
-    let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
-    "R" ^ string_of_int (List.length fs)
-    ^ "_" ^ String.concat "_"
-              (List.map (fun (n, t) -> n ^ "$" ^ mangle t) sorted)
-  | Tir.TCon (n, []) -> String.map (fun c -> if c = '.' then '_' else c) n
-  | Tir.TCon (n, args) ->
-    String.map (fun c -> if c = '.' then '_' else c) n
-    ^ "_" ^ String.concat "_" (List.map mangle args)
-  | Tir.TFn _ -> "Fn"
-  | Tir.TPtr _ -> "Ptr"
-  | Tir.TVar n -> "V" ^ n
+   the types that reach it, up to renaming a residual type variable, and the
+   same in every build of the same program.
+
+   A residual type variable is spelled by its POSITION, first appearance
+   first ([List(a)] -> [List_V0], [(b, a, b)] -> [T3_V0_V1_V0]), never by its
+   name.  Its name is a typechecker fresh-variable id ([_53272]) that depends
+   on how much was inferred before, so spelling it moved the drop glue's
+   symbol ([__drop$List_V_53272] vs [__drop$List_V_53278]) after an unrelated
+   edit (specs/progress/2026-10-07-drop-glue-name-carries-tvar-id.md).  Types
+   that differ only by such a renaming now share one key, so their drop
+   functions merge.  Lowering's placeholder [TVar "_"] keeps its own
+   spelling ([V_]); see the arm below.  That is sound: this pass treats every [TVar] alike (an
+   erased slot, released by a bare [EDecRC]), so two alpha-equivalent types
+   get alpha-equivalent drop functions. *)
+let mangle = Tir_names.drop_type_key
 
 type env = {
   type_defs     : Tir.type_def list;
@@ -297,27 +284,42 @@ let colliding_union (env : env) (name : string) (ty_args : Tir.ty list)
     match Hashtbl.find_opt env.collision_set name with
     | None -> None
     | Some candidates ->
+      (* [`Skip] a candidate that cannot be this type: one whose constructor
+         fields mention MORE type variables than [ty_args] supplies (a type
+         applied to n arguments declares n parameters, and the parameters a
+         field mentions are a subset of those).  A user
+         `type Tree = Leaf | Node(Tree, Int, Tree)` is never a
+         [Tree(Int, String)] the other way round, but a candidate with FEWER
+         field-mentioned parameters may be a phantom-parameter type, so only a
+         parameterless one (nothing to substitute) is taken as is. *)
       let per_candidate qualified =
         match Kind.find_variant env.k_table qualified with
-        | None -> None
+        | None -> `Refuse
         | Some ctors ->
           let niche =
             match Kind.niche_repr_of_concrete env.k_table qualified with
             | Some (Kind.Niche _) -> true
             | _ -> false in
           let params = type_params_of ctors in
-          if niche || List.length params <> List.length ty_args then None
+          let n_params = List.length params and n_args = List.length ty_args in
+          if niche then `Refuse
+          else if n_params > n_args then `Skip
+          else if n_params <> n_args && n_params <> 0 then `Refuse
           else
-            let subst = List.combine params ty_args in
-            Some (List.map (fun (cn, ftys) ->
+            let subst = if n_params = 0 then [] else List.combine params ty_args in
+            `Ctors (List.map (fun (cn, ftys) ->
                 (qualified ^ "." ^ cn, List.map (apply_subst subst) ftys)) ctors)
       in
       let rec all acc = function
-        | [] -> Some (List.concat (List.rev acc))
+        | [] ->
+          (match List.concat (List.rev acc) with
+           | [] -> None
+           | ctors -> Some ctors)
         | c :: rest ->
           (match per_candidate c with
-           | Some cs -> all (cs :: acc) rest
-           | None -> None)
+           | `Ctors cs -> all (cs :: acc) rest
+           | `Skip -> all acc rest
+           | `Refuse -> None)
       in
       (* The tag only names the candidate when the constructor's key was
          qualified at the construction.  [Lower_expr] qualifies it only for the
@@ -333,10 +335,21 @@ let colliding_union (env : env) (name : string) (ty_args : Tir.ty list)
       let short q = match String.rindex_opt q '.' with
         | Some i -> String.sub q (i + 1) (String.length q - i - 1)
         | None -> q in
+      (* A pair with the BARE-named candidate (the entry module's own type,
+         key "Tree.Node") is exempt: its constructions key bare and hit their
+         own [ctor_info] entry exactly, and every module declaring a type that
+         a bare-named twin shadows keys its constructions module-qualified
+         ([Lower_state.own_module_ctor_key]), so neither side can carry the
+         other's tag. *)
+      let bare_candidate q =
+        match String.index_opt q '.' with
+        | Some i -> not (String.contains_from q (i + 1) '.')
+        | None -> true in
       let consistent ctors =
         List.for_all (fun (q, ftys) ->
             List.for_all (fun (q', ftys') ->
-                not (String.equal (short q) (short q')) || ftys = ftys')
+                not (String.equal (short q) (short q')) || ftys = ftys'
+                || bare_candidate q || bare_candidate q')
               ctors) ctors in
       (match all [] (List.sort String.compare candidates) with
        | Some ctors when consistent ctors -> Some ctors
@@ -515,16 +528,29 @@ let boxed_float_slots (env : env) (ty : Tir.ty) (cname : string)
     (ftys : Tir.ty list) : int list =
   match ty with
   | Tir.TCon (name, _) ->
-    (match variant_ctors env name with
-     | Some ctors ->
-       (match List.assoc_opt cname ctors with
-        | Some decl when List.length decl = List.length ftys ->
-          List.concat (List.mapi (fun i (d, f) ->
-              match d, f with
-              | Tir.TVar _, Tir.TFloat -> [i]
-              | _ -> []) (List.combine decl ftys))
-        | _ -> [])
-     | None -> [])
+    (* The declared field types of [cname].  A colliding type's drop branches
+       come from [colliding_union], whose constructor names are QUALIFIED by
+       their candidate type ("Map.HEntry.HLeaf"); those are looked up in that
+       candidate, since a bare-name lookup in [name] misses them -- which left
+       the Float key box of every [Map(Float, v)] leaf unreleased. *)
+    let decl =
+      match Option.bind (variant_ctors env name) (List.assoc_opt cname) with
+      | Some _ as d -> d
+      | None ->
+        (match String.rindex_opt cname '.' with
+         | Some i ->
+           let q = String.sub cname 0 i in
+           let cn = String.sub cname (i + 1) (String.length cname - i - 1) in
+           Option.bind (Kind.find_variant env.k_table q) (List.assoc_opt cn)
+         | None -> None)
+    in
+    (match decl with
+     | Some decl when List.length decl = List.length ftys ->
+       List.concat (List.mapi (fun i (d, f) ->
+           match d, f with
+           | Tir.TVar _, Tir.TFloat -> [i]
+           | _ -> []) (List.combine decl ftys))
+     | _ -> [])
   | _ -> []
 
 (** For a value of payload-sharing representation (niche: [Some(x)] IS [x],
@@ -814,7 +840,25 @@ and drop_op (env : env) (v : Tir.var) : Tir.expr =
      | Some (`Newtype pty) ->
        let p = { Tir.v_name = fresh env "dp"; v_ty = pty; v_lin = Tir.Unr } in
        Tir.ELet (p, Tir.EAtom (Tir.AVar v), drop_op env p)
-     | None -> Tir.EDecRC (Tir.AVar v))
+     | None ->
+       (* A niche-CAPABLE declaration whose CONCRETE instantiation is Boxed:
+          [Option(Float)] -- 0.0 bitcasts to the None niche, so the Some side
+          is encoded as a BOXED cell holding a march_alloc_float box
+          ([Kind.repr_of] says Boxed) while [may_be_non_heap], decided from
+          the declaration's [TVar] payload, says niche.  A bare [EDecRC] here
+          was shallow: it freed the Some cell and orphaned its float box (a
+          record member [{ o : Option(Float) }] leaked one box per drop).
+          Route [Option(Float)] through the synthesized Boxed-convention drop
+          ([__drop$Option_Float]).  ONLY Option(Float): [Option(Unit)] is a
+          genuine niche whose None is the raw word 0 (built on the C side in
+          test/native/ffi_codec2), and a deep drop would dereference it. *)
+       (match ty, (match ty with Tir.TCon (_, [Tir.TFloat]) -> drop_fn_for env ty | _ -> None) with
+        | _, Some callee ->
+          let f = { Tir.v_name = callee;
+                    v_ty = Tir.TFn ([ty], Tir.TUnit);
+                    v_lin = Tir.Unr } in
+          Tir.EApp (f, [Tir.AVar v])
+        | _, None -> Tir.EDecRC (Tir.AVar v)))
   | ty ->
     (match drop_fn_for env ty with
      | Some callee ->
@@ -835,6 +879,23 @@ and tuple_boxed_float (ty : Tir.ty) (fty : Tir.ty) : bool =
   | _ -> false
 
 (* ── Closure environments ──────────────────────────────────────────────── *)
+
+(** The 1-based [$fvN] indices of the [Repr.Unboxed] aggregates among a
+    closure's capture types.  A closure slot is 8 bytes, so such a capture is
+    stored as a BOX ([Llvm_ctx.llvm_field_ty] -> ["ptr"]; [Llvm_ctx.coerce]
+    allocates it when the environment is built), a fresh rc=1 cell the
+    environment alone references.  [Kind.needs_rc_of] is false for the
+    aggregate, so nothing that filters captures by it ever released the box:
+    one cell leaked per environment
+    (specs/progress/2026-10-12-unboxed-aggregate-closure-capture-leak.md).
+    Same test as [llvm_field_ty], so the two cannot disagree on which slots
+    hold a box. *)
+let unboxed_capture_fields (env : env) (cap_tys : Tir.ty list) : int list =
+  List.filter_map Fun.id (List.mapi (fun i ty ->
+      match ty with
+      | Tir.TCon (n, _) when Kind.unboxed_of_type_name env.k_table n <> None ->
+        Some (i + 1)
+      | _ -> None) cap_tys)
 
 (** True for the RHS of one of the prefix bindings [Defun.lift_lambda] and
     Perceus leave at the head of an apply function: a capture read
@@ -859,11 +920,13 @@ let rec capture_read (clo : string) (e : Tir.expr) : string option =
     when String.equal src.Tir.v_name clo -> capture_read clo inner
   | _ -> None
 
-(** The apply-wrapper name for a closure struct: ["$Clo_go$7"] -> ["go$apply$7"].
+(** The apply-wrapper name for a closure struct:
+    ["$Clo_go$0_Main_outer"] -> ["go$apply$0_Main_outer"].
     Inverse of [Tir_names.clo_struct_name] / [apply_fn_name] applied to the same
-    (fn_name, lam_uid) pair — the uid is everything after the LAST ['$'], which
-    is what keeps a lambda whose defun-minted name itself contains ['$']
-    (["$lam30269"], ["$jp7650"]) resolving correctly. *)
+    (fn_name, lam_uid) pair — the uid is everything after the LAST ['$']
+    ([Tir_names.lam_uid] never contains one), which is what keeps a lambda
+    whose lowering-minted name itself contains ['$'] (["outer$lam0"],
+    ["outer$jp2"]) resolving correctly. *)
 let apply_name_of_clo (clo_name : string) : string option =
   if not (Tir_names.is_clo_struct clo_name) then None
   else
@@ -871,11 +934,9 @@ let apply_name_of_clo (clo_name : string) : string option =
     match String.rindex_opt base '$' with
     | None -> None
     | Some i ->
-      (match int_of_string_opt
-               (String.sub base (i + 1) (String.length base - i - 1)) with
-       | Some uid ->
-         Some (Tir_names.apply_fn_name ~fn_name:(String.sub base 0 i) ~lam_uid:uid)
-       | None -> None)
+      let uid = String.sub base (i + 1) (String.length base - i - 1) in
+      if uid = "" then None
+      else Some (Tir_names.apply_fn_name ~fn_name:(String.sub base 0 i) ~lam_uid:uid)
 
 (** Closure types whose environment OWNS its captures, keyed by apply-fn name.
 
@@ -935,8 +996,19 @@ let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
       note n false; scan k e2
     | Tir.EStackAlloc (Tir.TCon (n, _), _) when Tir_names.is_clo_struct n ->
       note n false
-    | Tir.EAlloc (Tir.TCon (n, _), _) when Tir_names.is_clo_struct n ->
-      (* Do NOT reach this arm from an ELet by descending into the allocation
+    | (Tir.EAlloc (Tir.TCon (n, _), _) | Tir.EReuse (_, Tir.TCon (n, _), _))
+      when Tir_names.is_clo_struct n ->
+      (* An [EReuse] of a closure struct is the same allocation after FBIP
+         recycled a dying cell for it (Map.node_fold's [go] reuses the
+         [HBranch] it destructured).  Perceus placed its RC ops while it was
+         still an [EAlloc], judging it with this same [closure_escapes], so it
+         is judged the same here.  Without this arm the type had no noted
+         allocation site, was never owning, and its environment's death
+         released nothing it held: every [Map.fold] with a capturing closure
+         leaked that closure (one per fold; ClusterNode.collect_tombstones,
+         twice per cluster session;
+         specs/progress/2026-10-07-reused-closure-captures-leak.md).
+         Do NOT reach this arm from an ELet by descending into the allocation
          with the wrong context: that is how the first version latched EVERY
          closure type to false and silently turned the pass off.  The ELet arm
          passes [`Bound], which is the judgement it used to make inline. *)
@@ -1010,18 +1082,20 @@ let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
     [$clo]-source bindings followed by [ESeq (EDecRC $clo, rest)].  Anything
     else means Perceus spliced no release here (a capture-free apply function,
     the REPL-only arm) and there is nothing to pair child releases with. *)
-let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env : env) (body : Tir.expr) : Tir.expr =
+let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
+    ?(heap = true) ?(boxes : int list = []) (env : env) (body : Tir.expr) : Tir.expr =
   let clo = Tir_names.clo_param_name in
   let clo_var =
     { Tir.v_name = clo; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
   let unit_expr = Tir.ETuple [] in
   (* Capture locals, in prefix order, that are worth releasing.  A capture read
      twice binds twice; only the first binding is kept, so the environment's
-     single reference is released once. *)
+     single reference is released once.  [heap = false] (an environment that
+     borrows its heap captures) keeps none: only the [boxes] are its own. *)
   let seen_fields = Hashtbl.create 4 in
   let captures = ref [] in
   let note_capture field (v : Tir.var) =
-    if Kind.needs_rc_of env.k_table v.Tir.v_ty && not (Hashtbl.mem seen_fields field)
+    if heap && Kind.needs_rc_of env.k_table v.Tir.v_ty && not (Hashtbl.mem seen_fields field)
     then begin
       Hashtbl.add seen_fields field ();
       captures := v :: !captures
@@ -1036,14 +1110,35 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
     | op :: rest -> Tir.ESeq (op, chain rest)
   in
   (* [incs] is the run of [inc_rc x] statements IMMEDIATELY before the node
-     being visited (reset by anything else), as a list of variable names with
-     one entry per inc.  See the tail-call case below. *)
+     being visited (reset by anything else but a release of an unrelated
+     variable, [releases_other]), as a list of variable names with one entry
+     per inc.  See the tail-call case below. *)
+  let is_capture n = List.exists (fun (c : Tir.var) -> String.equal c.Tir.v_name n) !captures in
+  let releases_other (incs : string list) (e : Tir.expr) : bool =
+    let unrelated n = not (is_capture n) && not (List.mem n incs) && not (String.equal n clo) in
+    incs <> [] &&
+    (match e with
+     | Tir.EDecRC (Tir.AVar x) | Tir.EAtomicDecRC (Tir.AVar x) | Tir.EFree (Tir.AVar x) ->
+       unrelated x.Tir.v_name
+     | Tir.EApp (f, [ Tir.AVar x ]) ->
+       String.starts_with ~prefix:Tir_names.drop_fn_prefix f.Tir.v_name
+       && unrelated x.Tir.v_name
+     | _ -> false)
+  in
   let rec push ?(incs : string list = []) (freed : Tir.var) (e : Tir.expr)
     : Tir.expr =
     match e with
     | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, push freed e2)
     | Tir.ESeq ((Tir.EIncRC (Tir.AVar v) as e1), e2) ->
       Tir.ESeq (e1, push ~incs:(v.Tir.v_name :: incs) freed e2)
+    (* A release of some OTHER variable between those incs and the tail (the
+       owned-aggregate parameter drop [Perceus] places right before a tail:
+       `fn (_p, s) -> body(s)` releases [_p] there) does not touch the
+       captures, so the run of incs it interrupts still covers the call.
+       Resetting on it left SessionNode.run_cluster_with's role closure
+       leaking the role function it captured, once per cluster session
+       (specs/progress/2026-10-07-reused-closure-captures-leak.md). *)
+    | Tir.ESeq (e1, e2) when releases_other incs e1 -> Tir.ESeq (e1, push ~incs freed e2)
     | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push freed e2)
     | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push freed inner)
     | Tir.ECase (a, branches, default) ->
@@ -1127,11 +1222,34 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
   let decrc_freed_fn =
     { Tir.v_name = "march_decrc_freed";
       v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TBool); v_lin = Tir.Unr } in
+  (* An unboxed-aggregate capture ([boxes], by [$fvN] index) lives in its
+     8-byte slot as a BOX [Llvm_ctx.coerce] built when the environment was
+     allocated: a fresh cell nothing but the environment references.  The
+     prefix copied the struct OUT of it (or never read it), so the box is dead
+     the moment the environment is: its raw slot word is loaded as a
+     [Ptr(Unit)] BEFORE the release (which may free the cell) and released
+     right after it, on the path where that release freed the environment.
+     Unlike a heap capture this needs no tail placement: nothing in the body
+     reads the box. *)
   let freed_release (target : Tir.var) (rest : Tir.expr) : Tir.expr =
     let freed = { Tir.v_name = fresh env "cfree"; v_ty = Tir.TBool;
                   v_lin = Tir.Unr } in
-    Tir.ELet (freed, Tir.EApp (decrc_freed_fn, [Tir.AVar target]),
-              push freed rest)
+    let box_vars = List.map (fun i ->
+        ({ Tir.v_name = fresh env "cub"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr },
+         Tir_names.fv_field i)) boxes in
+    let rest' = if !captures = [] then rest else push freed rest in
+    let after =
+      if box_vars = [] then rest'
+      else
+        Tir.ESeq (Tir.ECase (Tir.AVar freed,
+            [ { Tir.br_tag = "True"; br_vars = [];
+                br_body = chain (List.map (fun (v, _) -> Tir.EDecRC (Tir.AVar v)) box_vars) } ],
+            Some unit_expr), rest')
+    in
+    List.fold_right (fun (v, field) acc ->
+        Tir.ELet (v, Tir.EField (Tir.AVar target, field), acc))
+      box_vars
+      (Tir.ELet (freed, Tir.EApp (decrc_freed_fn, [Tir.AVar target]), after))
   in
   (* The SELF-BINDING ALIAS's release needs the same treatment, and in a
      self-recursive apply function it is the one that actually frees.
@@ -1169,7 +1287,7 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
        | None -> Hashtbl.replace aliases v.Tir.v_name ());
       Option.map (fun rest' -> Tir.ELet (v, e1, rest')) (walk rest)
     | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest) when String.equal v.Tir.v_name clo ->
-      if !captures = [] then None
+      if !captures = [] && boxes = [] then None
       else Some (freed_release clo_var (rewrite_alias_drops rest))
     | _ -> None
   in
@@ -1450,6 +1568,19 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
      [owning_apply_fns] for why this gate is load-bearing rather than an
      optimisation. *)
   let owning = owning_apply_fns m in
+  (* Apply fn -> the [$fvN] indices of its environment's unboxed-aggregate
+     captures.  Each is a box the environment alone owns, whether or not it
+     owns its heap captures ([rewrite_apply_clo_drop]'s [boxes]), so these are
+     released under every environment, not just the [owning] ones. *)
+  let clo_boxes = Hashtbl.create 16 in
+  List.iter (function
+      | Tir.TDClosure (clo, _ :: cap_tys) ->
+        (match apply_name_of_clo clo, unboxed_capture_fields env cap_tys with
+         | Some apply, (_ :: _ as idxs) -> Hashtbl.replace clo_boxes apply idxs
+         | _ -> ())
+      | _ -> ()) m.Tir.tm_types;
+  let boxes_of apply =
+    Option.value ~default:[] (Hashtbl.find_opt clo_boxes apply) in
   let module_fns = Hashtbl.create 256 in
   List.iter (fun f -> Hashtbl.replace module_fns f.Tir.fn_name ()) m.Tir.tm_fns;
   let fns = List.map (fun f ->
@@ -1459,8 +1590,10 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
          capture releases it inserts then go through that rewrite in turn, so a
          captured closure is itself deep-dropped. *)
       let body =
-        if f.Tir.fn_kind = Tir.FnApply && Hashtbl.mem owning f.Tir.fn_name
-        then rewrite_apply_clo_drop ~module_fns env f.Tir.fn_body
+        let heap = Hashtbl.mem owning f.Tir.fn_name in
+        let boxes = boxes_of f.Tir.fn_name in
+        if f.Tir.fn_kind = Tir.FnApply && (heap || boxes <> [])
+        then rewrite_apply_clo_drop ~module_fns ~heap ~boxes env f.Tir.fn_body
         else f.Tir.fn_body
       in
       Hashtbl.reset env.owned_locals;
@@ -1494,13 +1627,25 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
     List.filter_map (function
         | Tir.TDClosure (clo, _ :: cap_tys) ->
           (match apply_name_of_clo clo with
-           | Some apply when Hashtbl.mem owning apply ->
+           | Some apply when Hashtbl.mem owning apply || boxes_of apply <> [] ->
              let clo_var =
                { Tir.v_name = Tir_names.clo_param_name; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
-             let caps = List.filteri (fun _ (v, _) -> Kind.needs_rc_of env.k_table v.Tir.v_ty)
+             let heap = Hashtbl.mem owning apply in
+             let boxes = boxes_of apply in
+             (* Heap captures only when the environment owns them; an
+                unboxed-aggregate capture's box always (see [clo_boxes]),
+                loaded as its raw slot word so the release is a bare
+                [EDecRC] of the cell. *)
+             let caps = List.filter_map Fun.id
                  (List.mapi (fun i ty ->
-                      ({ Tir.v_name = Printf.sprintf "$cap%d" (i + 1); v_ty = ty; v_lin = Tir.Unr },
-                       Tir_names.fv_field (i + 1))) cap_tys) in
+                      let field = Tir_names.fv_field (i + 1) in
+                      if heap && Kind.needs_rc_of env.k_table ty then
+                        Some ({ Tir.v_name = Printf.sprintf "$cap%d" (i + 1); v_ty = ty; v_lin = Tir.Unr },
+                              field)
+                      else if List.mem (i + 1) boxes then
+                        Some ({ Tir.v_name = Printf.sprintf "$cub%d" (i + 1);
+                                v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr }, field)
+                      else None) cap_tys) in
              if caps = [] then None
              else begin
                let rec chain = function
@@ -1550,6 +1695,33 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
           end
         | _ -> None) m.Tir.tm_types
   in
+  (* Deep drops for the records the program allocates.  A record released
+     through an ERASED type (a lambda's [TVar] parameter, an element of a
+     generic container's drop) is a bare [EDecRC] on a [TVar], which names no
+     layout: the runtime freed the cell and leaked every heap field.  Each
+     allocated record type that owns a heap field gets its [__drop$R..]
+     here; [Dce] keeps it alive through the allocation, and the LLVM backend
+     tags the record's shape with it and registers it with the runtime, which
+     runs it from [march_decrc_erased]
+     (specs/progress/2026-10-12-erased-record-shallow-release.md). *)
+  let rec record_allocs (e : Tir.expr) : unit =
+    match e with
+    | Tir.ERecord fields ->
+      ignore (drop_fn_for env (Tir.TRecord
+        (List.sort (fun (a, _) (b, _) -> String.compare a b)
+           (List.map (fun (n, a) -> (n, Tir_names.atom_ty a)) fields))))
+    | Tir.EUpdate (Tir.AVar { Tir.v_ty = Tir.TRecord fs; _ }, _) ->
+      ignore (drop_fn_for env (Tir.TRecord fs))
+    | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> record_allocs a; record_allocs b
+    | Tir.ELetRec (fds, body) ->
+      List.iter (fun (fd : Tir.fn_def) -> record_allocs fd.Tir.fn_body) fds;
+      record_allocs body
+    | Tir.ECase (_, brs, d) ->
+      List.iter (fun (br : Tir.branch) -> record_allocs br.Tir.br_body) brs;
+      Option.iter record_allocs d
+    | _ -> ()
+  in
+  List.iter (fun (f : Tir.fn_def) -> record_allocs f.Tir.fn_body) fns;
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
      directly when emitting each field op), so they are appended as-is. *)
   { m with Tir.tm_fns = fns @ clo_drops @ actor_drops @ List.rev env.fns }

@@ -24,6 +24,10 @@ every `specs/lang/*.md` with Jekyll front matter) are GENERATED from it by
 `scripts/gen-lang-docs.py` and committed. Edit the `specs/lang/` chapter, run
 `scripts/gen-lang-docs.py`, and commit both; doc-lint Check F fails on a hand-edited or
 un-regenerated `docs/` chapter. `docs/pagefind/` is still bot-owned: don't regenerate it in a PR.
+The in-browser March (`docs/assets/march.js`, `march_compile.js`, `march_stdlib.js`,
+`docs/assets/tetris/`) is bot-owned too: `gen-browser-repl.yml` rebuilds it with
+`scripts/build-browser-repl.sh` after each merge. A PR need not regenerate it; CI's
+`browser-repl` job builds it fresh and runs `scripts/browser-repl-smoke.js`.
 
 **Doc freshness lint.** `scripts/check-docs.sh` (run in CI) guards the current-truth docs
 (root guides, `docs/`, `specs/features/`, the agent SKILL) against two kinds of rot: dead
@@ -81,6 +85,19 @@ dune exec march -- file.march   # run the compiler
 ```
 
 ### Parallel-agent / reliable test invocation
+
+**Run only what your change can reach.** `scripts/affected.sh` maps the files changed since the
+merge-base with `origin/main` (committed, uncommitted and untracked) to the suites, dune aliases,
+oracles and checks that cover them, and `--run` runs that plan (`-q` unless `--full`). A path
+with no rule selects everything, so an unknown change is never under-tested. It is for the edit
+loop; the full suite still runs before merge. `scripts/test-affected.sh` pins its mapping (CI:
+doc-lint); when you add a suite or a lib directory, add its rule there too.
+
+```bash
+scripts/affected.sh                    # print the plan and why each file selected what
+scripts/affected.sh --run              # run it
+scripts/affected.sh --run --no-oracles # suites and checks only
+```
 
 `dune runtest` uses a per-project RPC daemon. Stale zombie dune processes from prior sessions block new runs and prevent log files from updating. Use one of:
 
@@ -206,6 +223,23 @@ scripts/types-oracle.sh  baseline|check <dir>   # two-tier: core-AST inference r
 scripts/determinism-oracle.sh [--corpus small|all] [--self-test]  # same source, cold/warm HOME × two cwds: .ll + --dump-impl-hashes identical
 ```
 
+The ir and refine oracles fan out over `MARCH_ORACLE_JOBS` processes (default: CPU count;
+types-oracle uses 8) under a private `HOME`, so they finish in minutes, not most of an hour.
+refine and types run each fixture from its own fresh cwd: the compile CAS and the VC cache
+live under `<cwd>/.march/cas`, and a warm VC cache replays a stored z3 counterexample, which
+changes diagnostic text. For the usual question ("did my branch move anything since it forked"),
+skip the manual baseline dance:
+
+```
+scripts/oracle-base.sh ir refine       # baseline at merge-base(HEAD, origin/main), cached; then check this tree
+scripts/oracle-base.sh all --base REF  # ir + refine + types against another base
+```
+
+It exports the base commit with `git archive`, builds it, records the baseline with THIS tree's
+oracle script, and caches only the manifests under `~/.cache/march-oracle-base/<sha>-<script-hash>/`.
+Later runs on the same base only do the check. Editing an oracle script invalidates its cache
+entry. A fixture your branch adds or edits shows up as a change; that is expected.
+
 What they do **not** cover, which matters when choosing one:
 - `ir-oracle` is blind to `lib/eval/` (the interpreter is never emitted as IR) and
   to `lsp/`; a green there proves no property of those trees. For interpreter
@@ -223,6 +257,29 @@ What they do **not** cover, which matters when choosing one:
 Related: `dune build @types-check` **without `--force` is an empty check**: it exits 0
 with a zero-byte log. Assert on the log's contents, never on the exit code.
 
+## Agent skills
+
+The repo carries its own skills in `.claude/skills/<name>/SKILL.md` and slash commands in
+`.claude/commands/`. Load the one that matches the task; each is checked into the repo, so keep
+it current when the code it describes changes (doc-lint checks their source pointers).
+
+| Skill | Use it for |
+|---|---|
+| `march-debug` | Any misbehaving program, failing test, compiled-vs-interpreted divergence, leak, slow compile or red CI: symptom → first command → how to read it. Covers `scripts/triage.sh`, `--verify-tir`, `march query`, `--bisect-pass`, `--reduce`, `--rc-trace`, the sanitizer and the oracles. |
+| `compiler-rc` | Reference-counting bugs: Perceus, borrow inference, drop glue, runtime RC. |
+| `compiler-builtin` | Adding a builtin: every table, runtime symbol and test that must agree. |
+| `steward` | Driving a PR to green: known flaky checks, reading CI logs, what CI enforces. |
+| `march-lang` | The language itself: syntax, builtins, stdlib API, pitfalls. |
+| `spec-search` | Full-text search over the language reference, internals and feature designs. |
+| `march-test` | Writing `.march` unit and property tests (`Check.all`), and running them here. |
+| `march-docs` | `doc` annotations and `march>` doctests; `forge doc`. |
+| `forge-search` | Finding March code by name, type or doc text, and every caller of a name. |
+| `forge-add` | Adding a dependency to a March project. |
+| `pulse`, `narratives`, `archaeology` | Decision-graph modes (see Decision Graph Workflow below). |
+
+Slash commands (`.claude/commands/`): `/build-test` (build and test the compiler, or a forge
+project) and the decision-graph commands listed under Decision Graph Workflow.
+
 ## Multi-file compilation (MARCH_LIB_PATH)
 
 March accepts exactly ONE input file per invocation. Multi-file projects (apps + library deps) use the `MARCH_LIB_PATH` environment variable to auto-discover all `.march` files in dependency directories.
@@ -238,8 +295,12 @@ March walks ALL `.march` files in each `MARCH_LIB_PATH` directory recursively an
 **CAS cache:** Compiled binaries are content-hash cached in `<project>/.march/cas/artifacts-v2/` (**not** `artifacts/`; that is the inert v1 pointer store; deleting only it clears no artifacts). The cache key includes digests of the compiler executable and the runtime C sources (`runtime/*.c`, `runtime/*.h`) **of the runtime directory the compiler actually compiles**; the driver resolves it once (exe-relative first, `MARCH_RUNTIME_DIR` overrides) and registers it with the CAS, so editing the runtime or rebuilding the compiler invalidates it automatically. Note that "the runtime the compiler compiles" is the *staged* one, `_build/default/runtime`, which a targeted `dune build bin/main.exe` does **not** refresh: after editing `runtime/*.c`, build a target that restages it (e.g. `dune build --root .` or any rule with a `runtime` dep) or the edit is simply not in the build at all. If a cache looks wrong anyway, clear it with:
 
 ```bash
-rm -rf /Users/80197052/code/march/.march/cas/artifacts-v2/
+rm -rf /Users/80197052/code/march/.march/cas/artifacts-v2/ ~/.march/cas/artifacts-v2/
 ```
+
+Every build also writes its entry through to the global store `~/.march/cas/artifacts-v2/`, and a
+project-local miss is served from there, so clearing only the project's tree does **not** force a
+rebuild (a private `HOME`, as the oracles and `scripts/triage.sh` use, isolates both).
 
 **Example (test_conduit_app):**
 ```bash
@@ -283,7 +344,7 @@ lib/tir/                    typed IR: lower (+lower_state/types/match/decls/expr
                              llvm_emit (+llvm_ctx/builtins/eq/data/case/calls/tco/toplevel/repl,
                              and the per-arm bodies in llvm_emit_{arith,alloc,call,data,html,task,tcoarm,simd,nmap}),
                              builtin_name (closed variant for builtin dispatch),
-                             tir_names (cross-pass name contracts), rc_types (needs_rc/borrow_eligible)
+                             tir_names (cross-pass name contracts), kind (per-type table: needs_rc_of/borrowable_of, repr)
 lib/refinecheck/            refinement/contract checking (SMT): refine_check (orchestrator),
                              +refine_{encode,scope,resolve,call,post} — the pipeline in
                              dependency order, each including the one before it; plus
@@ -295,7 +356,7 @@ lsp/lib/                    LSP analysis: analysis (+.mli) + analysis_{types,uti
                              code_actions_{ast,diag} (the two code-action engines)
 lsp/test/                   test_lsp (Alcotest registration only) + the test bodies in
                              test_lsp_{harness,analysis,actions,perf,features,refactor,html,depot}
-stdlib/                     130 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
+stdlib/                     135 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
 lsp/                        LSP server (diagnostics, hover, goto-def, completions, code actions)

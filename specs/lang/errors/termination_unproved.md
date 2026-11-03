@@ -1,0 +1,81 @@
+---
+layout: docs
+title: "termination_unproved"
+permalink: /docs/errors/termination_unproved/
+---
+
+# `termination_unproved`: a `@[decreases]` metric is not shown to fall
+
+A function marked `@[decreases(...)]` promises a metric: a number that stays at
+least 0 and falls at every recursive call. The checker asks the solver to prove
+that at each recursive call, with the guards on the way to the call and the
+parameters' refinements as facts. This diagnostic names a call where it could
+not, and gives a value of the parameters it could not rule out.
+
+It is a warning, and an error in a `cap verified` module. Recursion without
+`@[decreases]` is never warned about; `--termination-report` lists it.
+
+In a `cap total` module every function must be shown to terminate, so there the
+diagnostic is an error for any function that is not: unproved recursion, and a
+function that calls one, or calls a `@[diverges]` function without being marked
+`@[diverges]` itself, or shares a recursive cycle with a `@[diverges]` function
+without being marked too (there, one mark does not cover the cycle). An actor handler gets it as "handler `X` may not return".
+`main` is exempt.
+
+## A program that triggers it
+
+```march
+mod Main do
+  @[decreases(n)]
+  fn down(n : Int) : Int do
+    if n == 0 do 0 else down(n - 1) end
+  end
+
+  fn main() do
+    down(3)
+  end
+end
+```
+
+`down(-1)` calls `down(-2)`, and so on forever: the exit `n == 0` is never
+reached from below, and the metric `n` goes negative.
+
+## The fix
+
+Make the exit cover every value the metric must not go below:
+
+```march
+mod Main do
+  @[decreases(n)]
+  fn down(n : Int) : Int do
+    if n <= 0 do 0 else down(n - 1) end
+  end
+
+  fn main() do
+    down(3)
+  end
+end
+```
+
+Whenever the counterexample is negative and the exit is `x == 0`, the diagnostic
+says so in a note, and the editor offers the rewrite as a quick fix. It is not a
+machine fix, so `forge fix` does not apply it: it changes what the program does,
+since a call that never returned now returns the base case, and only you can say
+that is what you meant. The editor also offers to mark the function `@[diverges]`
+(replacing its `@[decreases]`) when it is meant to run for ever.
+
+Refining the parameter to `{Int | _ >= 0}` works too: then every caller must
+pass a value that is at least 0, and the recursive call `down(n - 1)` is checked
+to pass one.
+
+## Why the rule exists
+
+A metric that can go below 0 proves nothing: any value can fall forever.
+That is why every metric component must stay at least 0 where it falls, and why
+several components (`@[decreases(m, n)]`) are compared left to right. The
+proof is what will let the refinement checker assume a recursive function's
+return refinement at its own recursive calls (the termination design,
+`specs/2026-10-26-termination-checking-design.md`).
+
+See also: [the language reference](../refinement-types.md), `invalid_decreases`,
+`diverges_conflict`.

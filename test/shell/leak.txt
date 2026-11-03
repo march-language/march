@@ -1,0 +1,21 @@
+let s = "[true, null, \"x\"]"
+let xs = List.range(1, 500)
+let f = 2.5
+List.length(evens(100))
+if Result.is_ok(Json.parse(s)) do 1 else 0 end
+string_length(Json.to_string(Result.unwrap(Json.parse(s))))
+let a = live_allocs()
+List.length(evens(100))
+if Result.is_ok(Json.parse(s)) do 1 else 0 end
+string_length(Json.to_string(Result.unwrap(Json.parse(s))))
+List.length(evens(100))
+if Result.is_ok(Json.parse(s)) do 1 else 0 end
+string_length(Json.to_string(Result.unwrap(Json.parse(s))))
+List.length(evens(100))
+if Result.is_ok(Json.parse(s)) do 1 else 0 end
+string_length(Json.to_string(Result.unwrap(Json.parse(s))))
+live_allocs() - a
+let ys = List.map(xs, fn x -> int_to_string(x))
+let r = Result.unwrap(Json.parse(s))
+string_length(Json.to_string(r))
+live_allocs()

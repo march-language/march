@@ -1,0 +1,17 @@
+mod C4 do
+  @[measure]
+  fn sz(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(h, t) -> 1 + sz(t)
+    end
+  end
+
+  fn need(xs : {List(Int) | sz(_) == 2}) : Int do 0 end
+
+  fn main() : Unit do
+    let _ = need(Cons(1, Cons(2, Nil)))
+    let _ = need(Cons(1, Nil))
+    ()
+  end
+end

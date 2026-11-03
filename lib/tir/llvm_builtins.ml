@@ -119,6 +119,11 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_unreachable_ext()" };
   { march_name = "todo_"; c_name = Some "march_todo_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_todo_ext(ptr %s)" };
+  (* Emitted by lowering (never written in source) right before a direct
+     panic / todo / unreachable call: the call site a Diagnostics crash
+     report gives as its location. *)
+  { march_name = "__panic_site"; c_name = Some "march_panic_site"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_panic_site(ptr %file, i64 %line)" };
   (* Structured cleanup: try_finally(action, cleanup) runs action(), then
      cleanup() (even if action panicked), then re-raises action's panic.
      Returns the action's value at the polymorphic type `a` DIRECTLY, so
@@ -458,6 +463,20 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_ed25519_verify(ptr %pk, ptr %msg, ptr %sig)" };
   { march_name = "x25519"; c_name = Some "march_x25519"; ret_ty = Some (Tir.TCon ("Bytes", []));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_x25519(ptr %k, ptr %u)" };
+  (* ML-KEM-768 / ML-DSA-65 over the vendored mlkem-native / mldsa-native
+     (runtime/pqc.c, runtime/march_pqc.c). *)
+  { march_name = "mlkem768_keypair"; c_name = Some "march_mlkem768_keypair"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mlkem768_keypair(ptr %seed)" };
+  { march_name = "mlkem768_encaps"; c_name = Some "march_mlkem768_encaps"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mlkem768_encaps(ptr %pk, ptr %coins)" };
+  { march_name = "mlkem768_decaps"; c_name = Some "march_mlkem768_decaps"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mlkem768_decaps(ptr %sk, ptr %ct)" };
+  { march_name = "mldsa65_keypair"; c_name = Some "march_mldsa65_keypair"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mldsa65_keypair(ptr %seed)" };
+  { march_name = "mldsa65_sign"; c_name = Some "march_mldsa65_sign"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mldsa65_sign(ptr %sk, ptr %msg, ptr %rnd)" };
+  { march_name = "mldsa65_verify"; c_name = Some "march_mldsa65_verify"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_mldsa65_verify(ptr %pk, ptr %msg, ptr %sig)" };
   { march_name = "pbkdf2_sha256"; c_name = Some "march_pbkdf2_sha256"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)" };
   { march_name = "base64_encode"; c_name = Some "march_base64_encode"; ret_ty = Some Tir.TString;
@@ -573,6 +592,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_remove_appender(ptr %name)" };
   { march_name = "logger_clear_appenders"; c_name = Some "march_logger_clear_appenders"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_clear_appenders()" };
+  (* Diagnostics crash observers (march_runtime.c's "Diagnostics: crash
+     observers"; stdlib/diagnostics.march). *)
+  { march_name = "diag_observe"; c_name = Some "march_diag_observe"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_diag_observe(ptr %cb)" };
+  { march_name = "diag_unobserve"; c_name = Some "march_diag_unobserve"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_diag_unobserve(i64 %id)" };
+  { march_name = "diag_context_get"; c_name = Some "march_diag_context_get"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_diag_context_get()" };
+  { march_name = "diag_context_set"; c_name = Some "march_diag_context_set"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_diag_context_set(ptr %ctx)" };
   { march_name = "logger_appender_names"; c_name = Some "march_logger_appender_names"; ret_ty = Some (Tir.TCon ("List", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_appender_names()" };
   { march_name = "logger_set_module_level"; c_name = Some "march_logger_set_module_level"; ret_ty = Some Tir.TUnit;
@@ -651,6 +680,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)" };
   { march_name = "http_server_wait"; c_name = Some "march_http_server_wait"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_http_server_wait(i64 %handle)" };
+  { march_name = "http_server_bind_host"; c_name = Some "march_http_server_bind_host"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_http_server_bind_host(ptr %host)" };
   { march_name = "ws_handshake"; c_name = Some "march_ws_handshake"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = false; declare_sig = Some "declare void @march_ws_handshake(i64 %fd, ptr %key)" };
   { march_name = "ws_recv"; c_name = Some "march_ws_recv"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
@@ -759,6 +790,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_negotiated_alpn(i64 %ssl_handle)" };
   { march_name = "tls_peer_cn"; c_name = Some "march_tls_peer_cn"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_peer_cn(i64 %ssl_handle)" };
+  { march_name = "tls_ctx_set_groups"; c_name = Some "march_tls_ctx_set_groups"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_ctx_set_groups(i64 %ctx_handle, ptr %groups)" };
+  { march_name = "tls_negotiated_group"; c_name = Some "march_tls_negotiated_group"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_negotiated_group(i64 %ssl_handle)" };
+  { march_name = "tls_pq_available"; c_name = Some "march_tls_pq_available"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_tls_pq_available()" };
   { march_name = "typed_array_create"; c_name = Some "march_typed_array_create"; ret_ty = Some (Tir.TVar "a");
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_typed_array_create(i64 %len, ptr %default_val)" };
   { march_name = "typed_array_from_list"; c_name = Some "march_typed_array_from_list"; ret_ty = Some (Tir.TVar "a");
@@ -1063,6 +1100,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_dist_monitor_register_pid(i64 %target_pid, ptr %node, i64 %watcher_pid, i64 %fd)" };
   { march_name = "mailbox_size"; c_name = Some "march_mailbox_size"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_mailbox_size(ptr %pid)" };
+  { march_name = "mailbox_backlog"; c_name = Some "march_mailbox_backlog"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_mailbox_backlog(ptr %pid)" };
   { march_name = "sched_stat"; c_name = Some "march_sched_stat"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_sched_stat(i64 %which)" };
   { march_name = "observe_query"; c_name = Some "march_observe_query"; ret_ty = Some Tir.TString;
@@ -1271,6 +1310,10 @@ let runtime_only_declares : (string * string) list = [
   ("march_panic", "declare void @march_panic(ptr %s)");
   ("march_dispatch_enter", "declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)");
   ("march_dispatch_enter_gen", "declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)");
+  ("march_dispatch_set_initial_on_stop", "declare void @march_dispatch_set_initial_on_stop(i32, ptr)");
+  ("march_dispatch_leave_unit", "declare void @march_dispatch_leave_unit(i32, i32)");
+  ("march_dispatch_reserve_main", "declare void @march_dispatch_reserve_main()");
+  ("march_dispatch_enter_work_compatible", "declare ptr @march_dispatch_enter_work_compatible(i32 %name_id, ptr %expected_sig, ptr %out_version)");
   ("march_dispatch_enter_unit", "declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)");
   ("march_dispatch_leave", "declare void @march_dispatch_leave(i32 %name_id, i32 %version)");
   ("march_dispatch_publish", "declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)");
@@ -1279,7 +1322,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_dispatch_register_name", "declare void @march_dispatch_register_name(i32, ptr)");
   ("march_dispatch_name_to_id", "declare i32  @march_dispatch_name_to_id(ptr, ptr)");
   ("march_reload_server_start", "declare void @march_reload_server_start(ptr)");
-  ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)");
+  ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id, i32 %build_epoch)");
   ("march_actor_set_call_tags", "declare void @march_actor_set_call_tags(ptr %actor, ptr %tags, i64 %n)");
   ("getenv", "declare ptr  @getenv(ptr)");
   ("march_alloc", "declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)");
@@ -1291,6 +1334,14 @@ let runtime_only_declares : (string * string) list = [
   ("march_decrc_local_freed", "declare i64  @march_decrc_local_freed(ptr %p)");
   ("march_clo_param_own", "declare void @march_clo_param_own(ptr %p)");
   ("march_clo_release", "declare void @march_clo_release(ptr %p)");
+  ("march_clo_capture_epoch", "declare void @march_clo_capture_epoch(ptr %p)");
+  ("march_clo_forget_epoch", "declare void @march_clo_forget_epoch(ptr %p)");
+  ("march_clo_frame_enter", "declare void @march_clo_frame_enter(ptr %p)");
+  ("march_frame_leave", "declare void @march_frame_leave()");
+  ("march_frame_own_closure", "declare void @march_frame_own_closure(ptr)");
+  ("march_frame_disown_closure", "declare void @march_frame_disown_closure(ptr)");
+  ("march_decrc_erased", "declare void @march_decrc_erased(ptr %p)");
+  ("march_decrc_erased_local", "declare void @march_decrc_erased_local(ptr %p)");
   ("march_clo_float_arg", "declare ptr  @march_clo_float_arg(ptr %p)");
   ("march_free", "declare void @march_free(ptr %p)");
   ("march_tco_defer_push", "declare ptr  @march_tco_defer_push(ptr %buf, ptr %release, ptr %v)");
@@ -1317,6 +1368,8 @@ let runtime_only_declares : (string * string) list = [
   ("march_checked_imod", "declare i64    @march_checked_imod(i64 %a, i64 %b)");
   ("march_checked_emod", "declare i64    @march_checked_emod(i64 %a, i64 %b)");
   ("march_checked_ediv", "declare i64    @march_checked_ediv(i64 %a, i64 %b)");
+  ("march_checked_ifloordiv", "declare i64    @march_checked_ifloordiv(i64 %a, i64 %b)");
+  ("march_checked_ifloormod", "declare i64    @march_checked_ifloormod(i64 %a, i64 %b)");
   ("march_checked_div_op", "declare i64    @march_checked_div_op(i64 %a, i64 %b)");
   ("march_checked_mod_op", "declare i64    @march_checked_mod_op(i64 %a, i64 %b)");
   ("march_checked_shl", "declare i64    @march_checked_shl(i64 %a, i64 %n)");
@@ -1324,6 +1377,10 @@ let runtime_only_declares : (string * string) list = [
   ("march_poly_eq", "declare i64  @march_poly_eq(ptr %a, ptr %b)");
   ("march_remote_init", "declare void @march_remote_init()");
   ("march_int_pow", "declare i64  @march_int_pow(i64 %base, i64 %exp)");
+  ("march_int_overflow", "declare void @march_int_overflow(i64 %op, ptr %file, i64 %line) cold noreturn");
+  ("llvm.sadd.with.overflow.i64", "declare {i64, i1} @llvm.sadd.with.overflow.i64(i64 %a, i64 %b)");
+  ("llvm.ssub.with.overflow.i64", "declare {i64, i1} @llvm.ssub.with.overflow.i64(i64 %a, i64 %b)");
+  ("llvm.smul.with.overflow.i64", "declare {i64, i1} @llvm.smul.with.overflow.i64(i64 %a, i64 %b)");
   ("llvm.ctpop.i64", "declare i64  @llvm.ctpop.i64(i64 %val)");
   ("llvm.abs.i64", "declare i64  @llvm.abs.i64(i64 %val, i1 %is_int_min_poison)");
   ("llvm.stacksave", "declare ptr  @llvm.stacksave()");
@@ -1392,6 +1449,10 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_dispatch_enter";
   PDeclare "march_dispatch_enter_gen";
   PDeclare "march_dispatch_enter_unit";
+  PDeclare "march_dispatch_enter_work_compatible";
+  PDeclare "march_dispatch_reserve_main";
+  PDeclare "march_dispatch_leave_unit";
+  PDeclare "march_dispatch_set_initial_on_stop";
   PDeclare "march_dispatch_leave";
   PDeclare "march_dispatch_publish";
   PDeclare "march_dispatch_publish_epoch";
@@ -1411,6 +1472,14 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_decrc_local_freed";
   PDeclare "march_clo_param_own";
   PDeclare "march_clo_release";
+  PDeclare "march_clo_capture_epoch";
+  PDeclare "march_clo_forget_epoch";
+  PDeclare "march_clo_frame_enter";
+  PDeclare "march_frame_leave";
+  PDeclare "march_frame_own_closure";
+  PDeclare "march_frame_disown_closure";
+  PDeclare "march_decrc_erased";
+  PDeclare "march_decrc_erased_local";
   PDeclare "march_clo_float_arg";
   PDeclare "march_free";
   PDeclare "march_tco_defer_push";
@@ -1466,6 +1535,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_checked_imod";
   PDeclare "march_checked_emod";
   PDeclare "march_checked_ediv";
+  PDeclare "march_checked_ifloordiv";
+  PDeclare "march_checked_ifloormod";
   PComment "; Operator forms of / and % — bare \"division by zero\" / \"modulo by zero\" messages";
   PDeclare "march_checked_div_op";
   PDeclare "march_checked_mod_op";
@@ -1593,6 +1664,12 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_ed25519_sign";
   PDeclare "march_ed25519_verify";
   PDeclare "march_x25519";
+  PDeclare "march_mlkem768_keypair";
+  PDeclare "march_mlkem768_encaps";
+  PDeclare "march_mlkem768_decaps";
+  PDeclare "march_mldsa65_keypair";
+  PDeclare "march_mldsa65_sign";
+  PDeclare "march_mldsa65_verify";
   PDeclare "march_pbkdf2_sha256";
   PDeclare "march_base64_encode";
   PDeclare "march_base64_decode";
@@ -1633,7 +1710,11 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_remote_invoke_march";
   PComment "; Integer math helpers";
   PDeclare "march_int_pow";
+  PDeclare "march_int_overflow";
   PComment "; LLVM intrinsics";
+  PDeclare "llvm.sadd.with.overflow.i64";
+  PDeclare "llvm.ssub.with.overflow.i64";
+  PDeclare "llvm.smul.with.overflow.i64";
   PDeclare "llvm.ctpop.i64";
   PDeclare "llvm.abs.i64";
   PDeclare "llvm.stacksave";
@@ -1657,6 +1738,12 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_logger_set_module_level";
   PDeclare "march_logger_clear_module_level";
   PDeclare "march_logger_module_level";
+  PComment "; Diagnostics crash observers";
+  PDeclare "march_diag_observe";
+  PDeclare "march_diag_unobserve";
+  PDeclare "march_diag_context_get";
+  PDeclare "march_diag_context_set";
+  PDeclare "march_panic_site";
   PComment "; REPL JIT persistent variable slot table (march_extras.c)";
   PDeclare "march_repl_get";
   PDeclare "march_repl_set";
@@ -1720,6 +1807,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_http_server_listen";
   PDeclare "march_http_server_spawn_n";
   PDeclare "march_http_server_wait";
+  PDeclare "march_http_server_bind_host";
   PDeclare "march_ws_handshake";
   PDeclare "march_ws_recv";
   PDeclare "march_ws_send";
@@ -1777,6 +1865,9 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_tls_ctx_free";
   PDeclare "march_tls_negotiated_alpn";
   PDeclare "march_tls_peer_cn";
+  PDeclare "march_tls_ctx_set_groups";
+  PDeclare "march_tls_negotiated_group";
+  PDeclare "march_tls_pq_available";
   PComment "; TypedArray builtins";
   PDeclare "march_typed_array_create";
   PDeclare "march_typed_array_from_list";
@@ -1917,6 +2008,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_dist_monitor_ack_pid";
   PDeclare "march_dist_monitor_register_pid";
   PDeclare "march_mailbox_size";
+  PDeclare "march_mailbox_backlog";
   PDeclare "march_sched_stat";
   PDeclare "march_observe_query";
   PDeclare "march_observe_count_send";

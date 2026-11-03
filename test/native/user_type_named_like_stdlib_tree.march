@@ -1,0 +1,89 @@
+-- A program declaring its own `type Tree` beside stdlib OrderedMap, whose
+-- own `type Tree(k, v)` shares the short name AND both constructor names
+-- (Leaf, Node). The static type stays the bare TCon "Tree" for both, the
+-- entry module's types register under the bare name, so OrderedMap's own
+-- bare "Tree.Node" constructions and matches hit the USER's 3-field Node:
+-- an ICE ("constructor Tree.Node has 3 field(s) but field index 3 was
+-- requested"), compiled only. Then the drop of a Tree(k, v) resolved to the
+-- user's type alone (SIGSEGV). Both trees are built, matched (including
+-- a nested pattern), and dropped deep here: right answers, no growth.
+-- specs/progress/2026-10-07-user-type-named-like-stdlib-tree.md
+mod Main do
+  needs IO.Console
+
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[no_warn_recursion]
+  pfn build(lo : Int, hi : Int) : Tree do
+    if lo > hi do Leaf
+    else
+      let mid = (lo + hi) / 2
+      Node(build(lo, mid - 1), mid, build(mid + 1, hi))
+    end
+  end
+
+  pfn sum(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, x, r) -> sum(l) + x + sum(r)
+    end
+  end
+
+  pfn left2(t : Tree) : Int do
+    match t do
+      Node(Node(_, a, _), b, _) -> a + b
+      Node(_, b, _) -> b
+      Leaf -> 0
+    end
+  end
+
+  pfn pairs(n : Int) : List((Int, String)) do
+    List.map(List.range(0, n), fn i -> (i, int_to_string(i * 10)))
+  end
+
+  pfn om_work(n : Int) : Int do
+    let m = OrderedMap.from_list(pairs(n), fn (a, b) -> a - b)
+    let m = OrderedMap.delete(m, 3)
+    let m = OrderedMap.put(m, 100, "hundred")
+    OrderedMap.size(m) + List.length(OrderedMap.keys(m))
+  end
+
+  pfn show_key(o : Option(Int)) : String do
+    match o do
+      Some(k) -> int_to_string(k)
+      None -> "none"
+    end
+  end
+
+  pfn times(n : Int, f : () -> Int) : Int do
+    if n <= 0 do 0 else f() + times(n - 1, f) end
+  end
+
+  pfn flat(name : String, f : () -> Int) : () do
+    let _ = times(3, f)
+    let a0 = live_allocs()
+    let _ = times(200, f)
+    println(name ++ ", no growth: " ++ bool_to_string(live_allocs() - a0 <= 0))
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let m = OrderedMap.put(OrderedMap.new(fn (a, b) -> a - b), 5, "five")
+    println(int_to_string(OrderedMap.size(m)))
+    let m = OrderedMap.from_list(pairs(10), fn (a, b) -> a - b)
+    println(int_to_string(OrderedMap.size(m)))
+    println(String.join(OrderedMap.values(m), ","))
+    println(OrderedMap.get_or(m, 7, "none"))
+    println(OrderedMap.get_or(m, 42, "none"))
+    let m = OrderedMap.delete(m, 4)
+    println(String.join(List.map(OrderedMap.keys(m), int_to_string), ","))
+    println(show_key(OrderedMap.min_key(m)))
+    println(show_key(OrderedMap.max_key(m)))
+    println(int_to_string(OrderedMap.fold(m, 0, fn (acc, k, _v) -> acc + k)))
+    let t = build(1, 7)
+    println(int_to_string(sum(t)))
+    println(int_to_string(left2(t)))
+    println(int_to_string(left2(Node(Leaf, 1, Leaf))))
+    flat("an OrderedMap.Tree dropped", fn () -> om_work(20))
+    flat("the local Tree dropped", fn () -> sum(build(1, 20)))
+  end
+end

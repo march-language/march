@@ -1,0 +1,8 @@
+ksnd_f=10.
+kfst_f=4.
+ksnd_s=28
+kfst_s=24
+ksnd_f2k=2001000. leaked=0
+kfst_f2k=2000. leaked=0
+ksnd_s2k=18893 leaked=0
+kfst_s2k=16893 leaked=0

@@ -80,6 +80,18 @@ sleep 4
 wait_line a "Shop re-offered under version 2"
 wait_line b "node-b: later from a v1 Shop"
 
+# Neither node may keep what its sessions allocated. In 2026-09/10 every
+# session here grew both nodes by ~17 MB on Linux (to ~1.6 GB over the
+# ~93 sessions; specs/progress/2026-09-28-linux-per-session-memory-growth.md):
+# each session's 13 Vault tables were never freed (fixed by #785) and a
+# --hot-reload build leaked every capture-free lambda it called (#814). Both
+# nodes now stay under ~100 MB on Linux and macOS; 200 MB leaves twice that.
+for n in a b; do
+  rss=$(ps -o rss= -p "$(pid_of "$n")" 2> /dev/null | tr -d ' ')
+  [ -n "$rss" ] || fail "node-$n is gone before its RSS check"
+  [ "$rss" -le 204800 ] || fail "node-$n holds $((rss / 1024)) MB of RSS after its sessions (limit 200 MB)"
+done
+
 # node-b lingers five seconds after its summary for this.
 for n in a b; do
   counters=$("$deploy" counters "$socks/$n.sock" dropped killed markers_lost 2>&1)

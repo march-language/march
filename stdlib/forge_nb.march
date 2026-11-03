@@ -5,16 +5,20 @@
 
 mod Forge do
 
-  -- Add a dependency to the notebook's forge.toml.
-  --
-  -- spec is a string passed directly to `forge add`:
-  --   Forge.add("json --git https://github.com/march-lang/json")
-  --   Forge.add("utils --path ../my-utils")
-  --   Forge.add("mylib --git https://github.com/me/mylib --tag v1.0")
-  --
-  -- The notebook server intercepts the sentinel and runs `forge add` in the
-  -- notebook's directory. A toast notification appears when the dep is installed.
-  -- Subsequent cells can use the newly added package.
+  doc """
+  Add a dependency to the notebook's forge.toml, from inside a notebook cell.
+  [spec] is passed verbatim to `forge add`. This prints the sentinel line
+  `__FORGE_ADD__:<spec>` to stdout; the notebook server intercepts it, runs
+  `forge add` in the notebook's directory and shows a toast once the
+  dependency is installed, so later cells can use the package. Outside a
+  notebook server it only prints that line.
+
+  ## Examples
+
+      Forge.add("json --git https://github.com/march-lang/json")
+      Forge.add("utils --path ../my-utils")
+      Forge.add("mylib --git https://github.com/me/mylib --tag v1.0")
+  """
   fn add(spec) do
     println("__FORGE_ADD__:" ++ spec)
   end

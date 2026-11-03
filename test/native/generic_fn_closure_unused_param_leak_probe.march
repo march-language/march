@@ -1,0 +1,57 @@
+-- Leak guard for a GENERIC NAMED fn called through a closure that ignores one
+-- of its parameters.
+--
+-- `pfn ksnd(_p, x) do x end` passed where a `Float -> Float -> Float` is
+-- expected keeps its erased (TVar) parameters. An erased parameter is never
+-- borrowable, so it is owned -- but outside a lambda's apply fn nothing drops
+-- an owned parameter the body never mentions. Its `$clo_wrap` trampoline
+-- hands it a reference (a closure call consumes its arguments; a Float box
+-- gets its own via march_clo_param_own), so the unused one leaked once per
+-- call: a Float box, or a whole String. Perceus now registers such a
+-- parameter as borrowed for the trampoline, which releases it after the call
+-- (found by the LSan pass of scripts/native-sanitize-sweep.sh, in
+-- generic_fn_float_closure).
+--
+-- The used parameter is the double-free witness: it is returned, so a release
+-- of the wrong one would hand the caller a freed value.
+--
+-- SIGNAL: live_allocs() deltas over 2,000 calls each; each must be 0.
+mod GenericFnClosureUnusedParamLeakProbe do
+  needs IO.Console
+
+  pfn ksnd(_p, x) do x end
+  pfn kfst(p, _x) do p end
+
+  pfn call_f(f : Float -> Float -> Float, n : Int, acc : Float) : Float do
+    if n <= 0 do acc else call_f(f, n - 1, acc +. f(1.0, int_to_float(n))) end
+  end
+
+  pfn call_s(f : String -> String -> String, n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let a = "left-" ++ int_to_string(n)
+      let b = "right-" ++ int_to_string(n)
+      call_s(f, n - 1, acc + string_length(f(a, b)))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    println("ksnd_f=" ++ float_to_string(call_f(ksnd, 4, 0.0)))
+    println("kfst_f=" ++ float_to_string(call_f(kfst, 4, 0.0)))
+    println("ksnd_s=" ++ int_to_string(call_s(ksnd, 4, 0)))
+    println("kfst_s=" ++ int_to_string(call_s(kfst, 4, 0)))
+    let b0 = live_allocs()
+    let a = call_f(ksnd, 2000, 0.0)
+    let b1 = live_allocs()
+    let b = call_f(kfst, 2000, 0.0)
+    let b2 = live_allocs()
+    let c = call_s(ksnd, 2000, 0)
+    let b3 = live_allocs()
+    let d = call_s(kfst, 2000, 0)
+    let b4 = live_allocs()
+    println("ksnd_f2k=" ++ float_to_string(a) ++ " leaked=" ++ int_to_string(b1 - b0))
+    println("kfst_f2k=" ++ float_to_string(b) ++ " leaked=" ++ int_to_string(b2 - b1))
+    println("ksnd_s2k=" ++ int_to_string(c) ++ " leaked=" ++ int_to_string(b3 - b2))
+    println("kfst_s2k=" ++ int_to_string(d) ++ " leaked=" ++ int_to_string(b4 - b3))
+  end
+end

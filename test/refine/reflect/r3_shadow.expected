@@ -1,0 +1,4 @@
+proved	user	r3_shadow.march:9:12	precondition	need	len(_) == 1
+reflect	r3_shadow.march:3:5	len	no	R11:its name `len` is predicate vocabulary (r3_shadow.march:3:5)
+reflect	r3_shadow.march:5:5	need	reflected	unfold (guard: len(xs) == 1)
+reflect	r3_shadow.march:7:5	main	no	R1:is `main` (r3_shadow.march:7:5)

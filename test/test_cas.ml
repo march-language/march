@@ -197,7 +197,7 @@ let with_tmpdir f =
 
 let test_cas_store_and_lookup_def () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd : fn_def = {
     fn_name   = "id";
     fn_params = [{ v_name = "x"; v_ty = TInt; v_lin = Unr }];
@@ -217,13 +217,13 @@ let test_cas_store_and_lookup_def () =
 
 let test_cas_lookup_miss_returns_none () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let result = March_cas.Cas.lookup_def store (String.make 64 'a') in
   Alcotest.(check bool) "unknown hash returns None" true (Option.is_none result)
 
 let test_cas_name_index () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let def_id = { March_cas.Cas.did_name = "List.map"; did_hash = String.make 64 'b' } in
   March_cas.Cas.update_index store [("List.map", def_id)];
   let result = March_cas.Cas.lookup_name store "List.map" in
@@ -244,7 +244,7 @@ let read_file_str path =
 
 let test_cas_store_artifact_and_lookup () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let ch = March_cas.Cas.compilation_hash (String.make 64 'c')
              ~target:"aarch64-darwin" ~flags:["-O2"] in
   (* An artifact must be real: the store copies its CONTENT into the cache. *)
@@ -276,7 +276,7 @@ let test_cas_store_artifact_and_lookup () =
     verification loops in this repo), so this was reachable in normal use. *)
 let test_cas_artifact_survives_source_overwrite () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let ch_a = March_cas.Cas.compilation_hash (String.make 64 'a')
                ~target:"aarch64-darwin" ~flags:["-O2"] in
   let shared = Filename.concat root "shared_out.bin" in
@@ -332,6 +332,56 @@ let test_cas_runtime_identity_ignores_non_c_files () =
   write "build_wasm.sh" "#!/bin/sh";
   let h2 = March_cas.Cas.runtime_identity_of_dir dir in
   Alcotest.(check string) "non-.c/.h files do not affect digest" h1 h2
+
+let test_cas_runtime_identity_tracks_nested_sources () =
+  with_tmpdir @@ fun dir ->
+  let third_party = Filename.concat dir "third_party/mimalloc" in
+  Unix.mkdir (Filename.concat dir "third_party") 0o755;
+  Unix.mkdir third_party 0o755;
+  let write name data =
+    let oc = open_out_bin (Filename.concat third_party name) in
+    output_string oc data;
+    close_out oc
+  in
+  write "mimalloc.c" "int mimalloc_version(void) { return 1; }";
+  let h1 = March_cas.Cas.runtime_identity_of_dir dir in
+  write "mimalloc.c" "int mimalloc_version(void) { return 2; }";
+  let h2 = March_cas.Cas.runtime_identity_of_dir dir in
+  Alcotest.(check bool) "edited nested .c source → different digest"
+    false (String.equal h1 h2)
+
+let test_cas_runtime_identity_tracks_symlinked_sources () =
+  with_tmpdir @@ fun dir ->
+  let write path data =
+    let oc = open_out_bin path in
+    output_string oc data;
+    close_out oc
+  in
+  let linked_file = Filename.concat dir "mimalloc.c" in
+  let file_target = Filename.concat dir "mimalloc-target" in
+  write file_target "int mimalloc_version(void) { return 1; }";
+  Unix.symlink "mimalloc-target" linked_file;
+  Unix.symlink "." (Filename.concat dir "loop");
+  let h1 = March_cas.Cas.runtime_identity_of_dir dir in
+  write file_target "int mimalloc_version(void) { return 2; }";
+  let h2 = March_cas.Cas.runtime_identity_of_dir dir in
+  Alcotest.(check bool) "edited symlinked .c source → different digest"
+    false (String.equal h1 h2);
+  let vendor = Filename.temp_file "march_cas_vendor" "" in
+  Unix.unlink vendor;
+  Unix.mkdir vendor 0o700;
+  Fun.protect
+    ~finally:(fun () ->
+      let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote vendor)) in ())
+    (fun () ->
+       let header = Filename.concat vendor "mimalloc.h" in
+       write header "#define MIMALLOC_VERSION 1";
+       Unix.symlink vendor (Filename.concat dir "third_party");
+       let h3 = March_cas.Cas.runtime_identity_of_dir dir in
+       write header "#define MIMALLOC_VERSION 2";
+       let h4 = March_cas.Cas.runtime_identity_of_dir dir in
+       Alcotest.(check bool) "edited source under symlinked directory → different digest"
+         false (String.equal h3 h4))
 
 (* The compilation_hash must follow the runtime directory the DRIVER says it
    compiles (bin/main.ml registers it via set_runtime_dir), not a directory
@@ -450,9 +500,39 @@ let test_cas_compilation_hash_differs_by_target () =
   Alcotest.(check bool) "different targets → different compilation hashes"
     false (String.equal ch1 ch2)
 
+(* R10: a function's source text is kept under its impl_hash. *)
+let test_cas_source_roundtrip () =
+  with_tmpdir @@ fun root ->
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
+  let h = String.make 64 'a' in
+  Alcotest.(check (option string)) "nothing before" None (March_cas.Cas.lookup_source store h);
+  March_cas.Cas.store_source store h "fn f() do 1 end";
+  Alcotest.(check (option string)) "stored text comes back"
+    (Some "fn f() do 1 end") (March_cas.Cas.lookup_source store h);
+  (* the key is the code's identity: an entry is never rewritten *)
+  March_cas.Cas.store_source store h "something else";
+  Alcotest.(check (option string)) "same hash keeps its first text"
+    (Some "fn f() do 1 end") (March_cas.Cas.lookup_source store h);
+  Alcotest.(check bool) "laid out as sources/<2>/<62>" true
+    (Sys.file_exists (root ^ "/.march/cas/sources/aa/" ^ String.make 62 'a'))
+
+let test_cas_source_refuses_bad_keys_and_big_text () =
+  with_tmpdir @@ fun root ->
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
+  let up = String.make 64 'A' and short = "abc" and dots = "../" ^ String.make 61 'a' in
+  List.iter (fun h ->
+      March_cas.Cas.store_source store h "x";
+      Alcotest.(check (option string)) ("no lookup for " ^ h) None (March_cas.Cas.lookup_source store h))
+    [ up; short; dots ];
+  Alcotest.(check bool) "nothing written outside sources/" false
+    (Sys.file_exists (root ^ "/.march/cas/sources/ab"));
+  let h = String.make 64 'b' in
+  March_cas.Cas.store_source store h (String.make (March_cas.Cas.source_max_bytes + 1) 'x');
+  Alcotest.(check (option string)) "over the limit: not stored" None (March_cas.Cas.lookup_source store h)
+
 let test_cas_gc_removes_unreferenced () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd : fn_def = {
     fn_name   = "foo";
     fn_params = [];
@@ -666,7 +746,7 @@ let test_hash_module_independent_fns_two_sccs () =
 let test_compile_scc_cache_miss_calls_compiler () =
   (* First call: cache miss → compiler is invoked exactly once *)
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd = make_fn "f" (int_atom 42) in
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
@@ -680,7 +760,7 @@ let test_compile_scc_cache_miss_calls_compiler () =
 let test_compile_scc_cache_hit_skips_compiler () =
   (* Second call with same hash: artifact already cached → compiler not called *)
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd = make_fn "f" (int_atom 42) in
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
@@ -700,7 +780,7 @@ let test_compile_scc_cache_hit_skips_compiler () =
 
 let test_compile_scc_returns_artifact_path () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd = make_fn "f" (int_atom 7) in
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
@@ -713,7 +793,7 @@ let test_compile_scc_returns_artifact_path () =
 let test_compile_scc_cache_hit_returns_cached_path () =
   (* After cache is warm, returned path is the originally stored path *)
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd = make_fn "f" (int_atom 7) in
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
@@ -734,7 +814,7 @@ let test_compile_scc_cache_hit_returns_cached_path () =
 let test_changed_body_causes_cache_miss () =
   (* Two fns with same name but different bodies → different hashes → both miss *)
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd1 = make_fn "f" (int_atom 1) in
   let fd2 = make_fn "f" (int_atom 2) in
   let hmod1 = March_cas.Pipeline.hash_module
@@ -754,7 +834,7 @@ let test_changed_body_causes_cache_miss () =
 let test_different_targets_cause_separate_cache_entries () =
   (* Same SCC, different target → different compilation_hash → two misses *)
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd = make_fn "f" (int_atom 5) in
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
@@ -837,6 +917,32 @@ let fn_using ty name : fn_def =
   { fn_name = name; fn_params = [{ v_name = "u"; v_ty = ty; v_lin = Unr }];
     fn_ret_ty = TInt; fn_body = EAtom (ALit (March_ast.Ast.LitInt 0));
     fn_kind = FnNormal }
+
+let test_work_entry_checks_captured_layout () =
+  let fd = fn_using (TCon ("Env", [])) "adapter" in
+  let sig_hash = (March_cas.Hash.hash_fn_def fd).sig_hash in
+  let hash inner = March_cas.Hash.work_entry_sig_hash fd ~sig_hash
+      ~type_defs:[TDRecord ("Env", ["unrelated", TInt]);
+                  TDRecord ("Back.Env", ["nested", TCon ("Nested", [])]);
+                  TDVariant ("Back.Nested", inner)] in
+  let old = hash ["A", [TInt]; "B", []] in
+  Alcotest.(check bool) "same nominal env with changed payload is incompatible" false
+    (old = hash ["A", [TString]; "B", []]);
+  Alcotest.(check bool) "changed constructor tags are incompatible" false
+    (old = hash ["B", []; "A", [TInt]]);
+  Alcotest.(check bool) "new constructors change captured layout" false
+    (old = hash ["A", [TInt]; "B", []; "C", []]);
+  Alcotest.(check bool) "ownership mode is part of adapter ABI" false
+    (March_cas.Hash.hcr_sig_hash ~sig_hash:old ~modes:"b"
+     = March_cas.Hash.hcr_sig_hash ~sig_hash:old ~modes:"o");
+  Alcotest.(check string) "ordinary type signature is unchanged" sig_hash
+    (March_cas.Hash.hash_fn_def fd).sig_hash;
+  let record_hash fields = March_cas.Hash.work_entry_sig_hash fd ~sig_hash
+      ~type_defs:[TDRecord ("Env", fields)] in
+  Alcotest.(check bool) "record field offsets are part of adapter ABI" false
+    (record_hash ["a", TInt; "b", TInt] = record_hash ["b", TInt; "a", TInt]);
+  Alcotest.(check string) "unchanged captured layout is compatible" old
+    (hash ["A", [TInt]; "B", []])
 
 let test_impl_hash_tracks_referenced_type_layout () =
   (* f takes a User. Changing User's record layout must move f's impl_hash
@@ -922,6 +1028,8 @@ let () =
         test_cas_artifact_survives_source_overwrite;
       Alcotest.test_case "runtime identity tracks sources"    `Quick test_cas_runtime_identity_changes_with_sources;
       Alcotest.test_case "runtime identity ignores non-C"     `Quick test_cas_runtime_identity_ignores_non_c_files;
+      Alcotest.test_case "runtime identity tracks nested sources" `Quick test_cas_runtime_identity_tracks_nested_sources;
+      Alcotest.test_case "runtime identity tracks symlinked sources" `Quick test_cas_runtime_identity_tracks_symlinked_sources;
       Alcotest.test_case "compilation hash follows registered runtime dir" `Quick
         test_cas_compilation_hash_follows_registered_runtime_dir;
       Alcotest.test_case "runtime dir fallback prefers exe-relative over cwd" `Quick
@@ -931,6 +1039,8 @@ let () =
       Alcotest.test_case "copy_artifact same file ok"         `Quick test_cas_copy_artifact_same_file_ok;
       Alcotest.test_case "compilation hash differs by target" `Quick test_cas_compilation_hash_differs_by_target;
       Alcotest.test_case "gc removes unreferenced"            `Quick test_cas_gc_removes_unreferenced;
+      Alcotest.test_case "source text round trip (R10)"       `Quick test_cas_source_roundtrip;
+      Alcotest.test_case "source: bad keys and big text (R10)" `Quick test_cas_source_refuses_bad_keys_and_big_text;
     ]);
     ("scc", [
       Alcotest.test_case "single non-recursive fn"            `Quick test_scc_single_non_recursive;
@@ -950,6 +1060,7 @@ let () =
       Alcotest.test_case "different targets separate entries" `Quick test_different_targets_cause_separate_cache_entries;
     ]);
     ("def_id", [
+      Alcotest.test_case "work entry captured layout ABI" `Quick test_work_entry_checks_captured_layout;
       Alcotest.test_case "def_id equality via hash"           `Quick test_def_id_equality;
       Alcotest.test_case "ADefRef tag is 0x80"                `Quick test_adefref_serialize_encodes_hash;
       Alcotest.test_case "ADefRef uses hash not name"         `Quick test_adefref_serializes_hash_not_name;

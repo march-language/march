@@ -28,6 +28,20 @@ mod RoleApp do
     answer: Server -> Client : Int
   end
 
+  -- Loop boundaries expose stale endpoint epochs: a freshly accepted
+  -- hosted session must not drain merely because its saved offer is old.
+  @[endpoints]
+  protocol HostedEcho do
+    loop do
+      ask: Client -> Server : Int
+      choose by Server:
+        more -> Server -> Client : Int
+        done -> Server -> Client : Int
+                stop
+      end
+    end
+  end
+
   -- ── the back pool ────────────────────────────────────────────────────
 
   mod Back do
@@ -75,6 +89,47 @@ mod RoleApp do
         let a = n * env.factor + m * 0 -- ANSWER
         Echo_Server.close(s, Echo_Server.send_Answer(s, st1, a)))
     end
+    actor HostedServer do
+      state { factor : Int, sessions : LinearMap(String, HostedEcho_Server.Parked_Server) }
+      init(env : Env) { factor: env.factor, sessions: LinearMap.empty_string() }
+      on Start(sid : String, s : Cap(Session.Live)) do
+        let parked = HostedEcho_Server.await_Ask(s, HostedEcho_Server.register(s, 0))
+        match LinearMap.put(state.sessions, sid, parked) do
+          (None, m) -> { state with sessions: m }
+          (Some(old), m) ->
+            HostedEcho_Server.take_closed(HostedEcho_Server.cancel(s, old))
+            { state with sessions: m }
+        end
+      end
+      on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+        match LinearMap.take_slot(state.sessions, sid) do
+          (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+          (Some(parked), slot) ->
+            match HostedEcho_Server.resume(parked, from, msg, ep) do
+              HostedEcho_Server.Got_Ask(n, st) ->
+                let env = { factor: state.factor }
+                let m = mark()
+                let a = n * env.factor + m * 0 -- ANSWER
+                if n >= 4 do
+                  HostedEcho_Server.take_closed(HostedEcho_Server.finish(s, HostedEcho_Server.choose_done(s, st, a)))
+                  { state with sessions: LinearMap.vacate(slot) }
+                else
+                  let st2 = HostedEcho_Server.choose_more(s, st, a)
+                  { state with sessions: LinearMap.fill(slot, HostedEcho_Server.await_Ask(s, st2)) }
+                end
+            end
+        end
+      end
+      on Cancel(sid : String, s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+        match LinearMap.take(state.sessions, sid) do
+          (None, m) -> { state with sessions: m }
+          (Some(parked), m) ->
+            HostedEcho_Server.take_closed(HostedEcho_Server.cancel(s, parked))
+            { state with sessions: m }
+        end
+      end
+    end
+
   end
 
   -- ── the front pool ───────────────────────────────────────────────────
@@ -90,13 +145,13 @@ mod RoleApp do
     type Env = { started : Bool }
 
     fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
-      let _ = task_spawn(fn _ -> run(io, node, 0))
+      let _ = task_spawn(fn _ -> run(io, node, 0, 0))
       { started: true }
     end
 
     -- Ask, print an answer that differs from the last one printed, and go
     -- again, until $ROLE_APP_STOP exists.
-    fn run(io : Cap(IO), node : Cap(ClusterNode.Live), last : Int) : Int do
+    fn run(io : Cap(IO), node : Cap(ClusterNode.Live), last : Int, hosted_last : Int) : Int do
       let stop = Env.get("ROLE_APP_STOP", "")
       if stop != "" && File.exists(stop) do
         println("front: done")
@@ -110,8 +165,31 @@ mod RoleApp do
             else last end
           None -> last
         end
+        let hosted_next = match hosted_echo(io, node) do
+          Some(v) ->
+            if v != hosted_last do println("front: hosted answer " ++ int_to_string(v)) else () end
+            v
+          None -> hosted_last
+        end
         sleep_ms(150)
-        run(io, node, next)
+        run(io, node, next, hosted_next)
+      end
+    end
+
+    fn hosted_client(s : Cap(Session.Live), st : HostedEcho_Client.Entry, got : Vault(Int), n : Int)
+        : HostedEcho_Client.Yield do
+      HostedEcho_Client.offer_more_done(s, HostedEcho_Client.send_Ask(s, st, n),
+        fn (_v, st2) -> hosted_client(s, st2, got, n + 1),
+        fn (v, st2) ->
+          Vault.set(got, "v", v)
+          HostedEcho_Client.close(s, st2))
+    end
+
+    fn hosted_echo(io : Cap(IO), node : Cap(ClusterNode.Live)) : Option(Int) do
+      let got = Vault.new("front_hosted_echo")
+      match HostedEcho_Run.initiate_Client(io, node, fn (s, st) -> hosted_client(s, st, got, 3)) do
+        Ok(_) -> Vault.get(got, "v")
+        Err(_) -> None
       end
     end
 

@@ -778,9 +778,12 @@ pfn priv_fn() do ... end      -- private
 doc "Returns the length of a list."
 fn length(xs) do ... end
 
-@[deprecated]
-fn old_api() do ... end
+@[decreases(len(xs) - i)]   -- a termination metric (refinement-types.md)
+fn scan(xs, i) do ... end
 ```
+
+An attribute name the compiler does not know is warned about
+(`unknown_attribute`), not silently ignored.
 
 ### Allocation contracts
 
@@ -916,9 +919,15 @@ end
 
 ```march
 needs IO.Network, IO.Clock
+
+fn log(msg : String) : Unit needs IO.Console do println(msg) end
+fn size(s : String) : Int needs () do string_byte_length(s) end
 ```
 
-Declares capability requirements for the module.
+A `needs` line declares capability requirements for the module. A `needs` clause in a
+function header, after the return type, bounds that function: everything it reaches must
+be covered by the clause, and the clause by the module's `needs`. `needs ()` is the empty
+bound. See [Capabilities]({{ site.baseurl }}/docs/capabilities/#per-function-bounds).
 
 ---
 

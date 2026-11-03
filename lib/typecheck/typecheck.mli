@@ -243,6 +243,7 @@ type env = {
   errors : Err.ctx;
   pending_constraints : constraint_ list ref;
   type_map : (Ast.span, ty) Hashtbl.t;
+  json_derive_sites : (string * Ast.span) list;
   record_names_snapshot : (string * string option) list;
   refs : ref_record list ref;
   current_decl : string ref;
@@ -254,15 +255,20 @@ type env = {
   mod_need_scopes : (string * string option) list;
   module_caps : (string * string list) list;
   protocols : proto_info StrMap.t;
-  impls : (ty * Ast.span * string option) list StrMap.t;
+  impls : (ty * Ast.span * string option * (string * ty) list) list StrMap.t;
   import_tracker : import_entry list ref;
   import_idx : import_index;
   deferred_check4 : (string * string list * string * Ast.span) list ref;
+  deferred_unused_needs : (string * string * Ast.span) list ref;
   local_fns : unit StrMap.t;
   fn_arities : (int * Ast.span) StrMap.t;
   qual_fn_arities : (int * Ast.span) StrMap.t;
+  param_call_arities : (Ast.span * (string * int option) list) StrMap.t;
   qual_fn_names : unit StrMap.t;
+  binder_spans : Ast.span StrMap.t;
+  pat_spans : (string, Ast.span) Hashtbl.t;
   lambda_arities : (int * Ast.span * Ast.span option) StrMap.t;
+  fn_aliases : (int * string) StrMap.t;
   plain_let_names : StringSet.t;
   proof_caps : (string * string) list;
   always_linear_types : string list;
@@ -305,6 +311,7 @@ type env = {
   fn_row_bodies : (string, (string list * Ast.expr) list) Hashtbl.t;
   role_grants : (string * string, string list * Ast.span) Hashtbl.t;
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
+  fn_bound_points : (string, string list * Ast.span) Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts : (session_ty ref * (string * session_ty) list) list ref;
   offer_labels :
@@ -368,6 +375,7 @@ val panic_surface_suggestion : string -> string
 val check_no_panic_module : Err.ctx -> env -> Ast.decl list -> unit
 val check_decl : env -> Ast.decl -> env
 val render_cap_chain : string list -> string
+val last_nonexhaustive_match_spans : Ast.span list ref
 val check_module_core :
   ?errors:Err.ctx ->
   ?seed_env:env -> Ast.module_ -> Err.ctx * (Ast.span, ty) Hashtbl.t * env
@@ -387,4 +395,3 @@ val check_module_full :
   ?seed_env:env -> Ast.module_ -> Err.ctx * (Ast.span, ty) Hashtbl.t * env
 val check_letq_repl : env -> Ast.pattern -> Ast.expr -> env
 val check_letstar_repl : env -> Ast.pattern -> Ast.expr -> env
-

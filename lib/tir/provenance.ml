@@ -149,6 +149,15 @@ let effective_span name =
   in
   go [] name
 
+(** How a crash report names a source file: a stdlib file (one whose
+    directory is literally named "stdlib", the rule bin/main.ml's backtrace
+    uses) as "stdlib/<name>.march", so where the compiler is installed does
+    not end up in the program; any other file as the compiler was given it. *)
+let display_file (file : string) : string =
+  if Filename.basename (Filename.dirname file) = "stdlib"
+  then "stdlib/" ^ Filename.basename file
+  else file
+
 let string_of_span (sp : March_ast.Ast.span) =
   Printf.sprintf "%s:%d:%d" sp.March_ast.Ast.file sp.March_ast.Ast.start_line
     sp.March_ast.Ast.start_col

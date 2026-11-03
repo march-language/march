@@ -37,6 +37,45 @@ let fresh_rc_var (ty : Tir.ty) : Tir.var =
   { Tir.v_name = Printf.sprintf "$rc_%d" !_rc_fresh_ctr;
     v_ty = ty; v_lin = Tir.Unr }
 
+(* ── Owned-call clones (owned-call drop fusion, 2026-10-07) ────────────────
+
+   A call [let r = f(x) in drop x; k] -- [x] passed at a BORROWED position of
+   [f] and dead after the call -- walks [x] twice: once in [f], then again in
+   the deep drop that follows.  When this table is present (the driver's
+   optimised native pipeline only), Perceus instead redirects such a call to
+   an OWNED clone [f$own<i>] of [f] in which those positions are owned, and
+   emits no drop: the clone consumes [x], so a destructuring match on it
+   releases each cell as the walk passes it ([Llvm_case]'s leading-dec arm
+   frees a unique cell shallowly and dups the fields of a shared one).
+
+   Clones are made lazily, only for a (callee, positions) pair some call site
+   actually redirected to, from the callee's pre-RC body; Perceus then runs
+   on the clone like on any other function, which may request further clones.
+   See specs/progress/2026-10-07-owned-call-drop-fusion.md. *)
+type owned_calls = {
+  oc_fns : (string, Tir.fn_def) Hashtbl.t;
+      (** Functions that may be cloned, by name, as handed to [insert_rc]. *)
+  oc_clones : (string, string * int list) Hashtbl.t;
+      (** Every clone requested so far: clone name -> (original, positions). *)
+  oc_pending : (string * string * int list) Queue.t;
+      (** Requested clones whose bodies have not been built yet. *)
+  oc_alloc_bound : StringSet.t ref;
+      (** For the function being processed: names bound directly by
+          [let v = EAlloc ...].  Never redirected: [Escape] may promote such
+          a cell to the stack through a borrowing callee, which an owning
+          one would forbid. *)
+  oc_useful : (string * int, unit) Hashtbl.t;
+      (** (function, borrowed position) pairs worth an owned clone: the
+          parameter is destructured by an [ECase] in the body, or handed on at
+          a useful position of another clone-eligible function.  A call in an
+          ORIGINAL function is redirected only when one of its handed
+          positions is useful: owning anything else only moves the caller's
+          drop into the callee, a copy of the function for nothing. *)
+}
+
+let owned_clone_name (orig : string) (positions : int list) : string =
+  orig ^ "$own" ^ String.concat "_" (List.map string_of_int positions)
+
 (* ── Env — immutable state threaded through insert_rc_expr (Wave 3 Task 4) ──
 
    Replaces the module-level mutable refs that a prior version of this file
@@ -156,6 +195,14 @@ type env = {
           = borrowed_field]).  Each ELet scope descends with its own updated
           copy of this field so inner bindings do not contaminate the
           caller's [env] (was: saved/restored via [_borrowed_field_vars]). *)
+  field_owner : string StringMap.t;
+      (** For each [borrowed_field_vars] binding made by a projection, the
+          variable it points into ([let t = d.f] maps [t] to [d]; an alias or
+          a nested chain [let t = (let a = d.x in a.y)] maps to the same
+          root).  A projection keeps its owner alive: the cross-branch release
+          of an owner dead in one arm must not run at the arm's head while a
+          projection of it is still read there.
+          specs/progress/2026-10-08-perceus-parent-released-before-field-use.md. *)
   cons_live : StringSet.t;
       (** Variables that are in [live_after] only CONSERVATIVELY: an
           [ECase] arm's pattern-bound fields, re-added to the arm's live set
@@ -196,6 +243,10 @@ type env = {
           misbalance to produce a use-after-free when the go-closure's
           function-pointer slot is misread as a Bytes payload pointer,
           triggering the observed march_decrc crash.  Was [_var_ctx]. *)
+  owned_calls : owned_calls option;
+      (** Module-scoped: the owned-call clone table, or [None] (the default:
+          REPL, JS, hot reload, unoptimised builds, MARCH_NO_OWNED_CALLS=1)
+          to never redirect.  See [owned_calls]. *)
 }
 
 (** The env used before any module has been processed / after [perceus]
@@ -212,8 +263,10 @@ let empty_env : env = {
   actor_sent = StringSet.empty;
   moved_vars = StringSet.empty;
   borrowed_field_vars = StringSet.empty;
+  field_owner = StringMap.empty;
   cons_live = StringSet.empty;
   var_ctx = StringMap.empty;
+  owned_calls = None;
 }
 
 (** True when a value of type [ty] shares its heap object with the payload of
@@ -448,6 +501,7 @@ let builtin_op_result_ty (name : string) (args : Tir.atom list) : Tir.ty option 
     | Tir.AVar w -> Some w.Tir.v_ty
     | Tir.ALit (March_ast.Ast.LitInt _) -> Some Tir.TInt
     | Tir.ALit (March_ast.Ast.LitFloat _) -> Some Tir.TFloat
+    | Tir.ALit (March_ast.Ast.LitString _) -> Some Tir.TString
     | _ -> None
   in
   let all_are ty = args <> [] && List.for_all (fun a -> atom_ty a = Some ty) args in
@@ -456,6 +510,10 @@ let builtin_op_result_ty (name : string) (args : Tir.atom list) : Tir.ty option 
     if all_are Tir.TInt then Some Tir.TInt
     else if all_are Tir.TFloat then Some Tir.TFloat
     else None
+  (* String concatenation.  Untyped, a scope whose value is [a ++ b] refused
+     the aggregate scope-end drop, so [let (a, b) = (s, s) in a ++ b] leaked
+     the pair and the references it held, once per call. *)
+  | "++" -> if all_are Tir.TString then Some Tir.TString else None
   | "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "not" -> Some Tir.TBool
   | _ -> None
 
@@ -786,6 +844,23 @@ let find_inc_vars ?(include_borrowed_fields = true)
        let n = count - 1 + (if StringSet.mem name live_after then 1 else 0) in
        List.init n (fun _ -> v))
 
+(* TRMC's destination-passing helpers take their parent cell as their final
+   argument and write through it without consuming it.  After Defun the helper
+   can be a closure, so the indirect-call branch must preserve this protocol
+   too. *)
+let dps_consumed_args callee args =
+  let marker = "$dps" in
+  let has_marker name =
+    let rec go i =
+      i + String.length marker <= String.length name
+      && (String.sub name i (String.length marker) = marker || go (i + 1))
+    in
+    go 0
+  in
+  match callee, List.rev args with
+  | Tir.AVar f, _ :: rev_args when has_marker f.Tir.v_name -> List.rev rev_args
+  | _ -> args
+
 (** Dup every TAIL-position projection of [name] in [e]: the value the scope
     returns.  Used by the aggregate scope-end drop in [insert_rc_expr]'s ELet
     case, which releases the aggregate AFTER its scope's result is computed
@@ -924,7 +999,29 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
   in
   let rec go bal (x : Tir.expr) : Tir.expr =
     match x with
-    | _ when releases_var name x && not (is_branching x) -> x
+    (* This rule also covers the actor-handler tuple-match leak (the match's panic
+       arms release [state]; specs/progress/2026-10-12-actor-handler-tuple-match-state-leak.md),
+       which a parallel branch fixed with the narrower is_branching-only form. *)
+    (* A statement or let value that releases [v] (on some path, maybe not
+       all), with [v] dead after it: [v]'s lifetime ends inside it, so each of
+       its paths settles [v] for itself, and the paths that release it are
+       left alone below.  Treating "releases somewhere" as "releases" leaked
+       [v] on the other paths: [if st.fd >= 0 do close(st.fd) else () end; ..]
+       (the cross-branch pass releases [st] in the else arm only) leaked a
+       compiled actor's state record on every message (ClusterNode's
+       CtlWriter, found by the TIR verifier's leak sweep). *)
+    | Tir.ESeq (a, body)
+      when releases_var name a && not (Perceus_liveness.name_free_in name body) ->
+      Tir.ESeq (go bal a, body)
+    | Tir.ELet (w, e1, body)
+      when releases_var name e1 && not (Perceus_liveness.name_free_in name body) ->
+      Tir.ELet (w, go bal e1, body)
+    (* A release on the straight path (not under a case): nothing to add.
+       A let or statement is not one by itself; the rules below stop at the
+       piece that releases, so a release nested in a later case still lets
+       the other paths of that case be dropped. *)
+    | _ when releases_var name x && not (is_branching x)
+             && (match x with Tir.ELet _ | Tir.ESeq _ -> false | _ -> true) -> x
     | Tir.ELet (_, e1, _) when releases_var name e1 -> x
     | Tir.ESeq (a, _) when releases_var name a -> x
     | Tir.ELet (w, e1, body) ->
@@ -958,6 +1055,17 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
        actor handler's trailing `:unit`; a literal has no type to bind). *)
     | Tir.EAtom (Tir.ALit _) as tail -> Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
     | (Tir.EApp _ | Tir.ECallPtr _) as tail when call_is_safe tail ->
+      Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
+    (* A TRMC destination write ([$dst.1 <- x], the tail of a [$dps]
+       helper's non-recursive arm, e.g. its panic default) has no type to
+       bind; when neither side points into [v] the release goes in front of
+       it.  Refusing it abandoned the drop on EVERY path, so a record
+       destructured in a TRMC'd map leaked once per element (Plot's
+       render_legend, found by the TIR verifier's leak sweep). *)
+    | Tir.ESetField (o, _, value) as tail
+      when not (List.exists (function
+          | Tir.AVar w -> points_into w
+          | _ -> false) [ o; value ]) ->
       Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
     | tail ->
       (match tir_expr_ty tail with
@@ -994,6 +1102,120 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
 let is_actor_move_source (src : Tir.var) : bool =
   (String.equal src.Tir.v_name Tir_names.actor_param && src.Tir.v_lin = Tir.Lin)
   || String.equal src.Tir.v_name Tir_names.actor_state_ptr_var
+
+(** The variable a projection reads from: [src] for [src.f], and the root
+    of a nested chain, [d] for [let a = d.x in a.y] (a three-deep read
+    [st.a.b.c] lowers to exactly such a chain). *)
+let rec projection_root (e : Tir.expr) : Tir.var option =
+  match e with
+  | Tir.EField (Tir.AVar s, _) -> Some s
+  | Tir.ELet (iv, rhs, body) ->
+    (match projection_root body with
+     | Some s when String.equal s.Tir.v_name iv.Tir.v_name -> projection_root rhs
+     | r -> r)
+  | _ -> None
+
+(** [name] and every variable it points into through [field_owner]. *)
+let owner_chain (env : env) (name : string) : string list =
+  let rec go seen n =
+    match StringMap.find_opt n env.field_owner with
+    | Some o when not (List.mem o seen) -> go (o :: seen) o
+    | _ -> seen
+  in
+  go [] name
+
+(** Owned-call drop fusion: decide whether the known call [f(args)] can go to
+    an owned clone of [f] instead of being followed by caller-side drops of
+    [post_dec_vars] (the arguments at [f]'s borrowed positions whose last use
+    is this call, which the caller owns; one entry per variable).  Returns
+    the clone's var, the post-call drops that remain, and the extra
+    [EIncRC]s to emit before the call (one entry per reference).
+
+    A variable at one borrowed position is handed to that position.  Inside
+    a clone, a variable at k > 1 borrowed positions is handed to all k, and
+    the caller dups it k - 1 times before the call: its one reference
+    becomes one per position, so no release is left after the call.  In an
+    ORIGINAL function such a variable keeps its post-call drop, the base
+    pipeline's shape there, so nothing the original did is lost.  In a
+    clone the variable may be owned where the original only borrowed it,
+    and a drop kept after a clone's tail call turned a loop of the original
+    into real recursion (specs/progress/2026-10-07-owned-call-dup-arg.md).
+    A variable bound by an [EAlloc] in this function is never handed
+    ([owned_calls.oc_alloc_bound]).  A variable that also sits at an OWNED
+    position never reaches here (the caller's dual-position accounting):
+    borrow inference makes such a variable owned in the original as well (a
+    parameter at an owned position is owned, and so is a scrutinee whose
+    matched field reaches one), so the original keeps the same post-call
+    drop and the clone's call has the original's shape.
+
+    When a call is redirected, EVERY handable variable is handed over, not
+    only the profitable ones, so the redirected call keeps no post-call drop
+    at all and stays a tail call if it was one.  (A clone parameter its body
+    never mentions is released at the clone's entry,
+    [Perceus.perceus_owned].)
+
+    Loops: inside [f] itself a recursive call to [f] is never redirected (its
+    [Llvm_tco] back edge stays where it was).  Inside a clone, a call to [f]
+    goes to the clone for ITS positions -- the clone itself when they match
+    (a self loop), else a sibling clone, with which it forms a clean
+    tail-call cycle that [Llvm_tco]'s mutual-TCO groups flatten like any
+    other. *)
+let owned_call_redirect (env : env) (oc : owned_calls) (f : Tir.var)
+    (args : Tir.atom list) (post_dec_vars : Tir.var list)
+    : (Tir.var * Tir.var list * Tir.var list) option =
+  let callee = f.Tir.v_name in
+  match Hashtbl.find_opt oc.oc_fns callee with
+  | None -> None
+  | Some _ ->
+    let cur = env.current_fn_name in
+    let in_clone = Hashtbl.mem oc.oc_clones cur in
+    let positions_of name =
+      List.concat (List.mapi (fun i a -> match a with
+          | Tir.AVar v when String.equal v.Tir.v_name name -> [i]
+          | _ -> []) args)
+    in
+    let handed =
+      List.filter_map (fun (v : Tir.var) ->
+          let ps = positions_of v.Tir.v_name in
+          if ps = [] || StringSet.mem v.Tir.v_name !(oc.oc_alloc_bound)
+             || (List.length ps > 1 && not in_clone) then None
+          else Some (v, ps))
+        post_dec_vars
+    in
+    (* Profitability gate, for originals only: some handed position must be
+       one the clone destructures ([oc_useful]).  Inside a clone there is no
+       gate: its variables that were BORROWED in the original (its owned
+       parameters, and the fields it matches out of them) are owned there,
+       and a call that kept a drop of one after it would no longer be a tail
+       call where the original's was -- a self or mutual loop of the
+       original would become real recursion in the clone. *)
+    let gate =
+      in_clone
+      || List.exists (fun (_, ps) ->
+          List.exists (fun i -> Hashtbl.mem oc.oc_useful (callee, i)) ps)
+        handed
+    in
+    (* Inside [f] itself a recursive call to [f] keeps its existing shape
+       (and its [Llvm_tco] back edge). *)
+    if handed = [] || not gate || String.equal callee cur then None
+    else begin
+      let positions = List.sort compare (List.concat_map snd handed) in
+      let name = owned_clone_name callee positions in
+      if not (Hashtbl.mem oc.oc_clones name) then begin
+        Hashtbl.replace oc.oc_clones name (callee, positions);
+        Queue.push (name, callee, positions) oc.oc_pending
+      end;
+      let handed_names =
+        List.fold_left (fun s ((v : Tir.var), _) -> StringSet.add v.Tir.v_name s)
+          StringSet.empty handed in
+      let rest = List.filter (fun (v : Tir.var) ->
+          not (StringSet.mem v.Tir.v_name handed_names)) post_dec_vars in
+      (* One reference owned, [List.length ps] consumers: dup the rest. *)
+      let extra_incs =
+        List.concat_map (fun (v, ps) ->
+            List.init (List.length ps - 1) (fun _ -> v)) handed in
+      Some ({ f with Tir.v_name = name }, rest, extra_incs)
+    end
 
 (** Insert RC operations into an expression.
     Returns [(expr', live_before)] where expr' has RC ops inserted and
@@ -1113,6 +1335,23 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
       List.partition
         (fun (v : Tir.var) -> StringSet.mem v.Tir.v_name owned_pos_names)
         post_dec_vars
+    in
+    (* Owned-call drop fusion: hand dying borrowed arguments to an owned
+       clone instead of dropping them after the call (inside a clone, with
+       one dup per extra position a variable occupies; see
+       [owned_call_redirect]).  Never when a variable also sits at an owned
+       position (the dual-position accounting above stays exactly as it
+       was).  The self-call test is re-taken against the final callee: a
+       redirect can turn a call into a clone's self call. *)
+    let e, f, post_dec_vars, inc_vars, is_self_call =
+      match env.owned_calls with
+      | Some oc when dual_pos_vars = [] && post_dec_vars <> [] ->
+        (match owned_call_redirect env oc f args post_dec_vars with
+         | Some (f', rest, extra_incs) ->
+           (Tir.EApp (f', args), f', rest, inc_vars @ extra_incs,
+            String.equal f'.Tir.v_name env.current_fn_name)
+         | None -> (e, f, post_dec_vars, inc_vars, is_self_call))
+      | _ -> (e, f, post_dec_vars, inc_vars, is_self_call)
     in
     let inc_vars, post_dec_vars =
       if is_self_call then (inc_vars, post_dec_vars)
@@ -1265,7 +1504,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        parameter owned, and a [$clo_wrap] releases what its target borrows.
        Before both, a read-only parameter stayed borrowed and a fresh argument
        leaked once per call. *)
-    let all_atoms = a :: args in
+    let all_atoms = a :: dps_consumed_args a args in
     let inc_vars = find_inc_vars env all_atoms live_after in
     let e' = wrap_incrcs env inc_vars e in
     let lb =
@@ -1457,8 +1696,15 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        in [e2] releases it before the binding's scope ends. *)
     let dup_owned_field =
       is_borrowed_field
-      && (match e1 with
-          | Tir.EField (Tir.AVar src, _) ->
+      (* A nested chain [let t = (let a = o.x in a.y)] has the same hazard as
+         [let t = o.y]: [e2] consuming [o] frees what [t] reads.  Only the
+         direct projection used to qualify, so [o.ap.fingerprint] followed by
+         [active(o)] read a freed string (Topology's offer and drain lines). *)
+      && (match (match e1 with
+                 | Tir.EField (Tir.AVar src, _) -> Some src
+                 | Tir.ELet _ -> projection_root e1
+                 | _ -> None) with
+          | Some src ->
             (match src.Tir.v_ty with Tir.TPtr _ -> false | _ -> true)
             && src.Tir.v_lin = Tir.Unr
             && v.Tir.v_lin = Tir.Unr
@@ -1471,13 +1717,27 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
           | _ -> false)
     in
     let is_borrowed_field = is_borrowed_field && not dup_owned_field in
+    let owner =
+      if not is_borrowed_field then None
+      else match e1 with
+        | Tir.EAtom (Tir.AVar src) ->
+          (match StringMap.find_opt src.Tir.v_name env.field_owner with
+           | Some o -> Some o
+           | None -> Some src.Tir.v_name)
+        | _ -> Option.map (fun (s : Tir.var) -> s.Tir.v_name) (projection_root e1)
+    in
     let env_for_e2 =
       { env with
         var_ctx = StringMap.add v.Tir.v_name v env.var_ctx;
         borrowed_field_vars =
           if is_borrowed_field
           then StringSet.add v.Tir.v_name env.borrowed_field_vars
-          else env.borrowed_field_vars }
+          else env.borrowed_field_vars;
+        field_owner =
+          (match owner with
+           | Some o when not (String.equal o v.Tir.v_name) ->
+             StringMap.add v.Tir.v_name o env.field_owner
+           | _ -> StringMap.remove v.Tir.v_name env.field_owner) }
     in
     let live_after_e2 =
       if is_borrowed_field then StringSet.add v.Tir.v_name live_after
@@ -1968,6 +2228,21 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
         |> (fun s -> match scrutinee_name with
             | Some n -> StringSet.remove n s
             | None -> s)
+        (* An owner whose borrowed projection this arm still reads is not
+           released at the arm's head: [match d.tag do "k" -> .. d ..; other
+           -> "unknown " ++ other end] freed [d], and the string [other]
+           points into, before the concatenation.  Its release goes to the
+           arm's tails instead, through the passes that place drops behind
+           the last read of a projection: the owned-aggregate parameter drop
+           and the scope-end aggregate drop.  Either may give up (a leak),
+           never release early. *)
+        |> (fun s ->
+            StringSet.fold (fun live acc ->
+                if StringSet.mem live env.borrowed_field_vars then
+                  List.fold_left (fun acc o -> StringSet.remove o acc) acc
+                    (owner_chain env live)
+                else acc)
+              live_before_br s)
       in
       let prepend body =
         StringSet.fold (fun name body_acc ->

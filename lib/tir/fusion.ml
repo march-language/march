@@ -32,10 +32,21 @@ module StringSet = Set.Make(String)
 
 let mk_var name ty = { Tir.v_name = name; Tir.v_ty = ty; Tir.v_lin = Tir.Unr }
 
-let gensym_ctr = ref 0
+(* A fused helper is named after the function it is fused INTO (the
+   provenance host, set by [Provenance.with_host] around each rewrite) and
+   its ordinal among that host's fused helpers of the same shape (B1):
+   [$fused_mf_Main_total_0] ([Tir_names.structural_tag] spells the host's
+   ['$'] and ['.'] as ['_']; see [Tir_names.lam_uid] for why no ['.']).
+   Reset per module in [run] / [run_struct]. *)
+let gensym_ordinals : (string * string, int) Hashtbl.t = Hashtbl.create 16
+let reset_gensym () = Hashtbl.reset gensym_ordinals
 let gensym prefix =
-  incr gensym_ctr;
-  Printf.sprintf "$fused_%s_%d" prefix !gensym_ctr
+  let host = match !Provenance.current_host with
+    | Some h -> Tir_names.structural_tag h
+    | None -> "top" in
+  let k = Option.value ~default:0 (Hashtbl.find_opt gensym_ordinals (host, prefix)) in
+  Hashtbl.replace gensym_ordinals (host, prefix) (k + 1);
+  Printf.sprintf "$fused_%s_%s_%d" prefix host k
 
 (** Atom type — uses TVar "_" as a fallback for unknown. *)
 let ty_of_atom : Tir.atom -> Tir.ty = function
@@ -682,6 +693,7 @@ and try_fuse_2step_let
 (* ── Module-level pass ───────────────────────────────────────────────── *)
 
 let run ~(changed : bool ref) (m : Tir.tir_module) : Tir.tir_module =
+  reset_gensym ();
   let new_fns_acc = ref [] in
   let fns' = List.map (fun fd ->
     Provenance.with_host fd.Tir.fn_name (fun () ->
@@ -747,6 +759,7 @@ let rec fuse_struct_expr ~changed : Tir.expr -> Tir.expr = function
     Pipeline position: Opt coordinator (after Defun/Perceus/Escape).
     Runs in the fixed-point loop alongside Inline/CProp/Fold/Simplify/DCE. *)
 let run_struct ~(changed : bool ref) (m : Tir.tir_module) : Tir.tir_module =
+  reset_gensym ();
   { m with Tir.tm_fns = List.map (fun fd ->
     { fd with Tir.fn_body = fuse_struct_expr ~changed fd.Tir.fn_body }
   ) m.Tir.tm_fns }

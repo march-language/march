@@ -108,8 +108,63 @@ let test_all_cap_symbols_classified_unstripped () =
         < List.length March_caps.Cap_symbols.all_caps));
   Sys.remove obj
 
+(* Declared path scopes (Cap_binary.scope_decls), the manifest channel
+   `forge cap run` narrows its sandbox from. *)
+let scopes_of data =
+  let path = write_tmp data in
+  let r =
+    match Cap_binary.read path with
+    | Error e -> Error e
+    | Ok t -> Cap_binary.scope_decls t
+  in
+  Sys.remove path;
+  r
+
+let scopes_t = Alcotest.(result (list (pair string (option string))) string)
+
+let test_scope_manifest_round_trip () =
+  (* The writer is the compiler's own Cap_scope.manifest_json, so this pins
+     writer and reader to one format. *)
+  let json =
+    match
+      March_caps.Cap_scope.manifest_json
+        [ ("IO.FileWrite", Some "/srv/out/"); ("IO", None); ("IO.Console", None) ]
+    with
+    | Some j -> j
+    | None -> Alcotest.fail "a scoped declaration must produce a manifest"
+  in
+  Alcotest.check scopes_t "scopes read back, unscoped kept as None"
+    (Ok [ ("IO", None); ("IO.FileWrite", Some "/srv/out") ])
+    (scopes_of ("hdr " ^ manifest_blob json ^ " tail"))
+
+let test_no_manifest_means_no_scopes () =
+  (* An old binary (no manifest) and an unscoped program (no manifest either)
+     both keep the unscoped sandbox. *)
+  Alcotest.check scopes_t "no manifest => Ok []" (Ok [])
+    (scopes_of "no manifest here");
+  Alcotest.check scopes_t "manifest without a scopes key => Ok []" (Ok [])
+    (scopes_of (manifest_blob {|{"v":1,"effective":["IO.Console"]}|}))
+
+let test_malformed_scopes_are_an_error () =
+  (* Never silently widen a broken claim to "any path". *)
+  List.iter
+    (fun json ->
+       match scopes_of (manifest_blob json) with
+       | Ok _ -> Alcotest.failf "accepted malformed scopes: %s" json
+       | Error _ -> ())
+    [ {|{"v":1,"scopes":"/etc"}|};
+      {|{"v":1,"scopes":[{"cap":"IO.FileRead","scope":"relative/dir"}]}|};
+      {|{"v":1,"scopes":[{"scope":"/etc"}]}|};
+      {|{"v":1,"scopes":[|} ]
+
 let tests =
   [
+    Alcotest.test_case "scope manifest round-trips" `Quick
+      test_scope_manifest_round_trip;
+    Alcotest.test_case "no manifest => no scopes" `Quick
+      test_no_manifest_means_no_scopes;
+    Alcotest.test_case "malformed scopes are an error" `Quick
+      test_malformed_scopes_are_an_error;
     Alcotest.test_case "duplicate manifest blobs are rejected" `Quick
       test_duplicate_manifest_is_an_error;
     Alcotest.test_case "all-cap-symbols binary is Unstripped, caps withheld"

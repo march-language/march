@@ -1505,9 +1505,9 @@ let test_gate_io_root_add_blocked () =
 let test_gate_attribution_names_introducing_function () =
   let functions = [
     { Cmd_deploy_hot.fn_name = "MyApp.Server.handle"; fn_impl_hash = "h1"; fn_sig_hash = "s1";
-      fn_callers = []; fn_caps = ["IO.Process"]; fn_has_caps = true };
+      fn_callers = []; fn_caps = ["IO.Process"]; fn_has_caps = true; fn_type_sig = ""; fn_modes = ""; fn_logic = "" };
     { Cmd_deploy_hot.fn_name = "MyApp.Other.fn"; fn_impl_hash = "h2"; fn_sig_hash = "s2";
-      fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true };
+      fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true; fn_type_sig = ""; fn_modes = ""; fn_logic = "" };
   ] in
   let attributed = Cmd_deploy_hot.attribute_widening functions ["IO.Process"] in
   Alcotest.(check (list (pair string string))) "attributes widened cap to its function"
@@ -1521,7 +1521,7 @@ let test_gate_attribution_names_introducing_function () =
 
 let fm ~name ~caps =
   { Cmd_deploy_hot.fn_name = name; fn_impl_hash = "h"; fn_sig_hash = "s";
-    fn_callers = []; fn_caps = caps; fn_has_caps = true }
+    fn_callers = []; fn_caps = caps; fn_has_caps = true; fn_type_sig = ""; fn_modes = ""; fn_logic = "" }
 
 let test_scoped_caps_no_prior_baseline_permissive () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
@@ -1890,6 +1890,34 @@ let test_parse_wait () =
     "waiting on 3 unit(s) pinned to epoch 5, hard deadline in 40s"
     (Cmd_deploy_hot.describe_wait (5, 3, 40000, false))
 
+let test_schema_response_validation () =
+  let open Cmd_deploy_hot in
+  let good = {|SCHEMAS {"version":1,"schemas":{"Counter":{"state_fields":[{"name":"x","ty":"Int"}]}},"releases":{"Counter":{"seq":0,"id":"-"}}}|} in
+  (match parse_schema_response good with
+   | Ok (Some json) -> Alcotest.(check int) "one actor" 1
+       (List.length (Schema_diff.parse_schemas_json json))
+   | _ -> Alcotest.fail "valid schema reply rejected");
+  List.iter (fun reply -> match parse_schema_response reply with
+      | Error _ -> () | _ -> Alcotest.failf "accepted malformed reply: %s" reply)
+    ["SCHEMAS {}"; "SCHEMAS {bad"; "SCHEMAS {\"version\":2,\"schemas\":{}}";
+     "SCHEMAS {\"version\":1,\"schemas\":{\"A\":{}}}"; "ERR read_failed"];
+  List.iter (fun reply -> Alcotest.(check bool) "legacy fallback only" true
+      (parse_schema_response reply = Ok None))
+    ["ERR unknown_command"; "ERR schemas_unavailable"]
+
+let test_compact_schema_baseline () =
+  let path = Filename.temp_file "server-schemas" ".json" in
+  let oc = open_out path in
+  output_string oc {|{"Counter":{"compat":"full","state_fields":[{"name":"value","ty":"Int"}],"handlers":[{"name":"Add","params":["Int"]}]}}|};
+  close_out oc;
+  let schemas = Fun.protect ~finally:(fun () -> Sys.remove path)
+      (fun () -> Schema_diff.parse_schemas_file path) in
+  Alcotest.(check (list string)) "compact server baseline preserves actors"
+    ["Counter"] (List.map fst schemas);
+  let counter = List.assoc "Counter" schemas in
+  Alcotest.(check (list string)) "compact baseline preserves fields" ["value"]
+    (List.map (fun (f : Schema_diff.field) -> f.name) counter.state_fields)
+
 let test_schema_handlers_and_message_diff () =
   let path = Filename.temp_file "schemas" ".json" in
   let oc = open_out path in
@@ -1960,7 +1988,7 @@ let test_activate4_caps_csv_is_sorted_own_caps_per_function () =
      function's caps must not leak into this one's CSV. *)
   let handle_fn =
     { Cmd_deploy_hot.fn_name = "MyApp.handle"; fn_impl_hash = "h"; fn_sig_hash = "s";
-      fn_callers = []; fn_caps = ["IO.NetConnect"; "IO.Console"]; fn_has_caps = true } in
+      fn_callers = []; fn_caps = ["IO.NetConnect"; "IO.Console"]; fn_has_caps = true; fn_type_sig = ""; fn_modes = ""; fn_logic = "" } in
   let caps_csv = String.concat "," (List.sort String.compare handle_fn.Cmd_deploy_hot.fn_caps) in
   Alcotest.(check string) "own caps CSV, sorted" "IO.Console,IO.NetConnect" caps_csv
 
@@ -1977,7 +2005,7 @@ let manifest_with_caps =
     target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None; slots = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
-        fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ];
+        fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true; fn_type_sig = ""; fn_modes = ""; fn_logic = "" } ];
     roles = [] }
 
 let legacy_manifest =
@@ -1985,7 +2013,7 @@ let legacy_manifest =
     target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None; slots = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
-        fn_callers = []; fn_caps = []; fn_has_caps = false } ];
+        fn_callers = []; fn_caps = []; fn_has_caps = false; fn_type_sig = ""; fn_modes = ""; fn_logic = "" } ];
     roles = [] }
 
 let test_branch_caps_present_no_flag_selects_activate4 () =
@@ -2158,6 +2186,73 @@ let test_compile_command_pin_main () =
   Alcotest.(check string) "pinned command shape"
     "MARCH_LIB_PATH=/p/lib march --compile -o '/p/out' --opt 0 --pin-main '/p/lib/app.march'"
     (cmd true)
+
+(* `forge query`: pass the query's own arguments to `march query`, and add what
+   `forge build` adds (entry file, library path, the build's flags). *)
+let test_query_command_shape () =
+  let cmd ?(entry = Some "/p/lib/app.march") ?at ?(json = false) args =
+    Cmd_query.command ~lib_path_env:"MARCH_LIB_PATH=/p/lib " ~flags:" --opt 0"
+      ~entry ~at ~json args in
+  Alcotest.(check string) "name, then the entry file, then the build's flags"
+    "MARCH_LIB_PATH=/p/lib march query 'fn' 'main' '/p/lib/app.march' --opt 0"
+    (cmd [ "fn"; "main" ]);
+  Alcotest.(check string) "a query with no name"
+    "MARCH_LIB_PATH=/p/lib march query 'verify' '/p/lib/app.march' --opt 0"
+    (cmd [ "verify" ]);
+  Alcotest.(check string) "a named .march file replaces the entry"
+    "MARCH_LIB_PATH=/p/lib march query 'fn' 'main' 'src/other.march' --opt 0"
+    (cmd [ "fn"; "main"; "src/other.march" ]);
+  Alcotest.(check string) "--at and --json are forwarded, after the flags"
+    "MARCH_LIB_PATH=/p/lib march query 'fn' 'main' '/p/lib/app.march' --opt 0 --at 'tir-perceus' --json"
+    (cmd ~at:"tir-perceus" ~json:true [ "fn"; "main" ]);
+  Alcotest.(check string) "outside a project nothing is added but the flags"
+    "march query 'verify' 'x.march' --opt 0"
+    (Cmd_query.command ~lib_path_env:"" ~flags:" --opt 0" ~entry:None ~at:None
+       ~json:false [ "verify"; "x.march" ]);
+  (* a name is data, not shell *)
+  Alcotest.(check string) "a hostile name stays one quoted word"
+    {|MARCH_LIB_PATH=/p/lib march query 'fn' 'a'\''; rm -rf /; echo '\''' '/p/lib/app.march' --opt 0|}
+    (cmd [ "fn"; "a'; rm -rf /; echo '" ])
+
+let test_query_check_args () =
+  let bad args = Result.is_error (Cmd_query.check_args args) in
+  Alcotest.(check bool) "--opt is refused (use --release)" true (bad [ "verify"; "--opt"; "2" ]);
+  Alcotest.(check bool) "--opt=2 is refused" true (bad [ "verify"; "--opt=2" ]);
+  Alcotest.(check bool) "--target is refused (use forge query --target)" true
+    (bad [ "verify"; "--target"; "js" ]);
+  Alcotest.(check bool) "other compiler flags pass" false (bad [ "verify"; "--no-opt" ]);
+  (match Cmd_query.check_args [ "verify"; "--opt"; "2" ] with
+   | Error m -> Alcotest.(check bool) "the error names --release" true (contains m "--release")
+   | Ok () -> Alcotest.fail "expected an error")
+
+(* The flags a query passes are the flags the build passes: one function builds
+   both, so `key` and `why-miss` describe the build `forge build` would run. *)
+let test_query_flags_are_the_builds () =
+  let flags =
+    Cmd_build.compile_flags ~ffi_flags:ffi_flags_sample ~release:true ~dump_phases:false
+      ~target:"js" ~pin_main:true () in
+  let build =
+    Cmd_build.compile_command ~lib_path_env:"" ~ffi_flags:ffi_flags_sample ~output:"/o"
+      ~release:true ~dump_phases:false ~target:"js" ~pin_main:true "/p/app.march" in
+  Alcotest.(check bool) "release, target, pin-main and ffi are all in it" true
+    (contains flags " --opt 2" && contains flags " --target js"
+     && contains flags " --pin-main" && contains flags "--ffi-link '-lsqlite3'");
+  Alcotest.(check bool) "the build's compile command carries exactly those flags" true
+    (contains build flags)
+
+(* A library has no entry file: asking about it without naming one is an
+   error that says so, not a compile of nothing. *)
+let test_query_library_needs_a_file () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml") "[package]\nname = \"x\"\ntype = \"lib\"\n";
+  let cwd = Sys.getcwd () in
+  Fun.protect ~finally:(fun () -> Sys.chdir cwd) (fun () ->
+      Sys.chdir dir;
+      match Cmd_query.run [ "verify" ] with
+      | Ok () -> Alcotest.fail "a library query with no file must be an error"
+      | Error m ->
+        Alcotest.(check bool) "says it is a library and to name a file" true
+          (contains m "library" && contains m ".march"))
 
 let test_interp_command_includes_ffi_flags () =
   let cmd =
@@ -2749,6 +2844,56 @@ entrypoint = ".forge/generated/lib/genentry.march"
             once preprocessors run, got: %s" msg
        | Ok () -> ()))
 
+(** [js_entrypoint] picks the entry file for [--target js] builds, so an app
+    can have a browser main beside its native one; native builds keep
+    [lib/<name>.march].  Real compiles plus a node run, so [`Slow]. *)
+let test_js_entrypoint_selects_js_main () =
+ with_dev_march_on_path (fun () ->
+  let tmpdir = Filename.temp_dir "forge_js_entry_" "" in
+  let lib_dir = Filename.concat tmpdir "lib" in
+  Project.mkdir_p lib_dir;
+  let main_mod name text =
+    String.concat "\n"
+      [ "mod " ^ name ^ " do";
+        "  needs IO.Console";
+        "  fn main(_c : Cap(IO.Console)) : Unit do";
+        "    println(\"" ^ text ^ "\")";
+        "  end";
+        "end";
+        "" ] in
+  write_file (Filename.concat lib_dir "jsentry.march") (main_mod "Jsentry" "native main");
+  write_file (Filename.concat lib_dir "jsentry_web.march") (main_mod "JsentryWeb" "web main");
+  write_file (Filename.concat tmpdir "forge.toml")
+    {|[package]
+name = "jsentry"
+type = "app"
+js_entrypoint = "lib/jsentry_web.march"
+|};
+  let old_cwd = Sys.getcwd () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in
+        ())
+    (fun () ->
+       Unix.chdir tmpdir;
+       (match Cmd_build.build ~release:false ~target:"js" () with
+        | Error msg -> Alcotest.failf "js build failed: %s" msg
+        | Ok _ -> ());
+       let out =
+         let ic = Unix.open_process_in "node .march/build/debug/jsentry.mjs 2>&1" in
+         let l = try input_line ic with End_of_file -> "" in
+         ignore (Unix.close_process_in ic); l in
+       Alcotest.(check string) "the js build runs js_entrypoint's main" "web main" out;
+       (match Cmd_build.build ~release:false () with
+        | Error msg -> Alcotest.failf "native build failed: %s" msg
+        | Ok _ -> ());
+       let nat =
+         let ic = Unix.open_process_in "./.march/build/debug/jsentry 2>&1" in
+         let l = try input_line ic with End_of_file -> "" in
+         ignore (Unix.close_process_in ic); l in
+       Alcotest.(check string) "the native build keeps lib/<name>.march" "native main" nat))
+
 (** Regression: [Cmd_bench.run] compiled every [bench/*.march] with a
     hardcoded [~ffi_flags:""], so a benchmark calling an extern from the
     project's [[ffi] sources] failed to link while `forge build`/`run`/`test`
@@ -2947,6 +3092,128 @@ let test_split_changes_of_dirs () =
     Alcotest.(check string) "new: this build" "f2" c.new_.v_fingerprint
   | l -> Alcotest.failf "expected one change, got %d" (List.length l)
 
+(* forge shell / forge rpc --force passes --shell-force to `march --shell`
+   (forge/lib/cmd_shell.ml); without it, nothing. *)
+let test_shell_force_flag () =
+  let args force =
+    Cmd_shell.march_args ~sock:"/tmp/n.sock.shell" ~timeout_ms:5000 ~force
+      ~inputs:(Some "/tmp/in.txt") ~entry:"app.march" in
+  let has s sub =
+    let n = String.length s and m = String.length sub in
+    let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+    go 0 in
+  Alcotest.(check bool) "--force adds --shell-force" true (has (args true) " --shell-force ");
+  Alcotest.(check bool) "no --force, no --shell-force" false (has (args false) "--shell-force");
+  Alcotest.(check bool) "the entry stays last" true
+    (let a = args true and e = " " ^ Filename.quote "app.march" in
+     String.sub a (String.length a - String.length e) (String.length e) = e)
+
+(* `forge refine --infer` shells out to `march` once per file.  A march that
+   fails (no --refine-infer flag, a file that does not check) must be reported
+   per file, never swallowed: stderr used to go to /dev/null and every rc but 3
+   was ignored, so the command printed nothing at all. *)
+let with_fake_march ~stderr_line ~rc f =
+  let dir = Filename.temp_dir "fake_march_" "" in
+  let script = Filename.concat dir "march" in
+  let oc = open_out script in
+  Printf.fprintf oc "#!/bin/sh\necho 'proposal text'\necho %s >&2\nexit %d\n" (Filename.quote stderr_line) rc;
+  close_out oc;
+  Unix.chmod script 0o755;
+  f (Printf.sprintf "PATH=%s:\"$PATH\" " (Filename.quote dir))
+
+let test_refine_infer_reports_march_failure () =
+  with_fake_march ~stderr_line:"march: unknown option '--refine-infer'." ~rc:2 (fun env ->
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "a.march" ] ~apply:false ~diff:false () with
+      | Ok [ (f, why) ] ->
+        Alcotest.(check string) "file" "a.march" f;
+        Alcotest.(check bool) "reason names the compiler's message" true
+          (try ignore (Str.search_forward (Str.regexp_string "unknown option") why 0); true with Not_found -> false)
+      | Ok l -> Alcotest.failf "expected one skipped file, got %d" (List.length l)
+      | Error e -> Alcotest.failf "unexpected error: %s" e)
+
+let test_refine_infer_reports_unchecked_file () =
+  with_fake_march ~stderr_line:"--refine-infer: skipped, the program has errors (fix them first)" ~rc:1 (fun env ->
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "b.march" ] ~apply:false ~diff:false () with
+      | Ok [ ("b.march", why) ] ->
+        Alcotest.(check bool) "reason is the skip line" true
+          (try ignore (Str.search_forward (Str.regexp_string "the program has errors") why 0); true with Not_found -> false)
+      | Ok l -> Alcotest.failf "expected b.march skipped, got %d" (List.length l)
+      | Error e -> Alcotest.failf "unexpected error: %s" e)
+
+let test_refine_infer_clean_run_skips_nothing () =
+  with_fake_march ~stderr_line:"" ~rc:0 (fun env ->
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "c.march" ] ~apply:false ~diff:false () with
+      | Ok [] -> ()
+      | Ok l -> Alcotest.failf "expected nothing skipped, got %d" (List.length l)
+      | Error e -> Alcotest.failf "unexpected error: %s" e)
+
+let test_refine_infer_mismatch_is_an_error () =
+  with_fake_march ~stderr_line:"--refine-infer: the re-check did not match" ~rc:3 (fun env ->
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "d.march" ] ~apply:true ~diff:false () with
+      | Error _ -> ()
+      | Ok _ -> Alcotest.fail "a reverted apply must be an error")
+
+(* `forge refine --infer --apply` checks the project as ONE unit.  One run per
+   file used the file as the entry, and the resolver loads only the modules an
+   entry names: a caller in another file was invisible, so `total` below was
+   withheld as having only external callers, or not, depending on which file
+   happened to be the entry. *)
+let infer_project () =
+  let root = Filename.temp_dir "forge_infer_" "" in
+  let lib = Filename.concat root "lib" in
+  let sub = Filename.concat lib "inferdemo" in
+  Unix.mkdir lib 0o755;
+  Unix.mkdir sub 0o755;
+  let write f s = Out_channel.with_open_bin f (fun oc -> output_string oc s) in
+  let main = Filename.concat lib "inferdemo.march" and user = Filename.concat sub "user.march" in
+  write main
+    "mod Inferdemo do\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n  fn total(xs : List(Int)) : Int do sum_pos(xs) end\n  fn lonely(xs : List(Int)) : Int do sum_pos(xs) end\nend\n";
+  write user "mod Inferdemo.User do\n  fn run() : Int do Inferdemo.total([1, 2]) end\nend\n";
+  let env =
+    Printf.sprintf "HOME=%s MARCH_LIB_PATH=%s " (Filename.quote root) (Filename.quote (lib ^ ":" ^ sub))
+  in
+  (root, env, main, [ main; user ])
+
+let z3_on_path () = Sys.command "command -v z3 > /dev/null 2>&1" = 0
+
+let read_all f = In_channel.with_open_bin f In_channel.input_all
+
+let contains hay needle =
+  try ignore (Str.search_forward (Str.regexp_string needle) hay 0); true with Not_found -> false
+
+(* A project that does not check as one unit falls back to one run per file,
+   so the files that do check still get inference. *)
+let test_refine_infer_falls_back_per_file () =
+  with_fake_march ~stderr_line:"--refine-infer: skipped, the program has errors (fix them first)" ~rc:1 (fun env ->
+      let dir = Filename.temp_dir "forge_infer_fb_" "" in
+      let mk n m = let f = Filename.concat dir n in Out_channel.with_open_bin f (fun oc -> Printf.fprintf oc "mod %s do\nend\n" m); f in
+      let a = mk "a.march" "A" and b = mk "b.march" "B" in
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ a; b ] ~apply:false ~diff:false () with
+      | Ok sk -> Alcotest.(check (list string)) "each file tried on its own" [ a; b ] (List.map fst sk)
+      | Error e -> Alcotest.failf "unexpected error: %s" e)
+
+let test_refine_infer_apply_whole_project () =
+  if not (z3_on_path ()) then Alcotest.skip ();
+  with_dev_march_on_path (fun () ->
+      let _, env, main, files = infer_project () in
+      (match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files ~apply:true ~diff:false () with
+       | Ok [] -> ()
+       | Ok sk -> Alcotest.failf "skipped: %s" (String.concat "; " (List.map snd sk))
+       | Error e -> Alcotest.failf "error: %s" e);
+      let src = read_all main in
+      Alcotest.(check bool) ("total written (its caller is in another file): " ^ src) true
+        (contains src "fn total(xs : List({Int | _ > 0}))");
+      Alcotest.(check bool) "lonely withheld without --apply-public" true
+        (contains src "fn lonely(xs : List(Int))"))
+
+let test_refine_infer_apply_public () =
+  if not (z3_on_path ()) then Alcotest.skip ();
+  with_dev_march_on_path (fun () ->
+      let _, env, main, files = infer_project () in
+      ignore (March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files ~apply:true ~diff:false ~apply_public:true ());
+      Alcotest.(check bool) "lonely written with --apply-public" true
+        (contains (read_all main) "fn lonely(xs : List({Int | _ > 0}))"))
+
 let () =
   Alcotest.run "forge" [
     "protocol split", [
@@ -2956,6 +3223,15 @@ let () =
       Alcotest.test_case "a monolith that chooses and receives splits into expand/contract" `Quick test_split_monolith;
       Alcotest.test_case "separate pools deploy once, receivers first" `Quick test_split_separate_pools;
       Alcotest.test_case "breaking and unchanged protocols" `Quick test_split_breaking_and_unchanged;
+    ];
+    "refine --infer", [
+      Alcotest.test_case "a failing march is reported per file" `Quick test_refine_infer_reports_march_failure;
+      Alcotest.test_case "a file that does not check is reported" `Quick test_refine_infer_reports_unchecked_file;
+      Alcotest.test_case "a clean run skips nothing" `Quick test_refine_infer_clean_run_skips_nothing;
+      Alcotest.test_case "a reverted apply is an error" `Quick test_refine_infer_mismatch_is_an_error;
+      Alcotest.test_case "a project that does not check as a unit falls back per file" `Quick test_refine_infer_falls_back_per_file;
+      Alcotest.test_case "--apply checks the project as one unit" `Slow test_refine_infer_apply_whole_project;
+      Alcotest.test_case "--apply-public is passed through" `Slow test_refine_infer_apply_public;
     ];
     "protocols", [
       Alcotest.test_case "build passes protocol baselines only when a protocol exists" `Quick test_protocol_flags;
@@ -3148,6 +3424,8 @@ let () =
       Alcotest.test_case "SEQ: a signed line wrapped in a release" `Quick test_wrap_release;
       Alcotest.test_case "COMPACT: parsed and described" `Quick test_parse_compact;
       Alcotest.test_case "WAIT: parsed and described" `Quick test_parse_wait;
+      Alcotest.test_case "schema response validation" `Quick test_schema_response_validation;
+      Alcotest.test_case "compact server schema baseline" `Quick test_compact_schema_baseline;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;
       Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;
@@ -3157,6 +3435,12 @@ let () =
     ];
     "pin_main", [
       Alcotest.test_case "build command carries --pin-main iff set" `Quick test_compile_command_pin_main;
+    ];
+    "forge_query", [
+      Alcotest.test_case "command shape" `Quick test_query_command_shape;
+      Alcotest.test_case "refuses --opt and --target" `Quick test_query_check_args;
+      Alcotest.test_case "flags are the build's" `Quick test_query_flags_are_the_builds;
+      Alcotest.test_case "a library needs a named file" `Quick test_query_library_needs_a_file;
     ];
     "interp_command", [
       Alcotest.test_case "forge run threads [ffi] flags to march" `Quick
@@ -3193,6 +3477,11 @@ let () =
         test_compiled_project_build_generated_entrypoint;
       Alcotest.test_case "forge bench links the project's [ffi] C sources" `Slow
         test_bench_links_ffi_sources;
+      Alcotest.test_case "js_entrypoint picks the --target js entry" `Slow
+        test_js_entrypoint_selects_js_main;
+    ];
+    "shell", [
+      Alcotest.test_case "--force passes --shell-force" `Quick test_shell_force_flag;
     ];
     "search_index_cache", [
       Alcotest.test_case "stale version cache is rebuilt" `Quick

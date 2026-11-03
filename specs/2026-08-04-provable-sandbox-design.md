@@ -1,5 +1,14 @@
 # Toward a provable sandbox
 
+> **Read [`specs/lang/capability-threat-model.md`](lang/capability-threat-model.md) first
+> (2026-10-30).** That page is the current, code-checked statement of what the capability
+> system guarantees. This page is the design history and is partly out of date. In
+> particular, **R1 stage C (per-function grants, `check_fn_grants`) was removed on
+> 2026-08-13** ([`progress/2026-08-13-remove-per-function-grant-ceiling.md`](progress/2026-08-13-remove-per-function-grant-ceiling.md));
+> the text below that calls it "built" and the stage-3 "compositional" claim in §3 describe
+> it during the three days it existed. Functions inside a module now share the module's
+> `needs`; a declared per-function bound with no effect on callers is planned for 1.0.
+
 Status: **R2, R3, R4/R4a built (2026-08-05/06); R1 stages A+B built
 (2026-08-09); R1 stage C + a bounded form of R5, and stage D (the ambient
 default retired) built (2026-08-10); R6 not started though its algebraic

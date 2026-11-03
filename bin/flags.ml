@@ -23,8 +23,12 @@ let emit_llvm      = ref false
 let shell_socket   : string option ref = ref None
 let shell_timeout_ms = ref 10_000
 let shell_inputs   : string option ref = ref None
+(* --shell-force: run a read-only input that reaches declarations differing
+   from the node's build (observe plan R5.4; Shell_ident.not_read_only). *)
+let shell_force = ref false
 (* --dump-impl-hashes: write <basename>.hashes beside the .ll, one line per
-   post-TIR definition `symbol<TAB>impl_hash<TAB>sig_hash`, sorted by symbol.
+   post-TIR definition `symbol<TAB>impl_hash<TAB>sig_hash<TAB>logic_hash`
+   (`-` for a function that is not reflected), sorted by symbol.
    Read-only view of the CAS hashing (Pipeline.hash_module); consumed by
    scripts/determinism-oracle.sh. *)
 let dump_impl_hashes = ref false
@@ -71,6 +75,11 @@ let topology_isolate_foreign = ref false
    that is not `isolate = true` (the opt-in check of plan section 4). *)
 
 let cap_sandbox    = ref false   (* --cap-sandbox: embed a self-imposed capability sandbox profile *)
+(* --static: a self-contained executable (static-output design, Stages 4 and 6:
+   specs/2026-09-23-static-compile-output-design.md).  Linux: musl only, a
+   fully static ELF.  macOS: no load command outside /usr/lib and /System.
+   See Static_link. *)
+let static_build   = ref false
 (* `needs` is a hard ceiling, checked against attributed use.  ON by default
    since 2026-08-08; `--no-cap-strict` opts out.
 
@@ -95,6 +104,10 @@ let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to 
 let emit_core_ast_file : string option ref = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
 let refine_report  = ref false   (* --refine-report: print obligation-ledger proved/violated/skipped counts *)
+(* --termination-report: one line per recursive unit with its termination
+   class (Refine_term, specs/2026-10-26-termination-checking-design.md).
+   Report-only: nothing else reads the analysis. *)
+let termination_report = ref false
 (* --refine-report-sites: one line per SKIPPED obligation — file:line:col, the
    reason slug, the callee and predicate, and the reason's detail sentence.
    [refine_report]'s per-reason counts answer "how many", which is the wrong
@@ -103,6 +116,29 @@ let refine_report  = ref false   (* --refine-report: print obligation-ledger pro
    and reading them out of the hint text is not a substitute — the hints are
    throttled per module, so most skips never print one. *)
 let refine_report_sites = ref false
+(* --refine-report-sites=all: one line per obligation of ANY verdict (proved,
+   skip, violated, trusted), the listing `scripts/refine-oracle.sh monotone`
+   compares (reflection design §6.1).  The bare flag's output is unchanged. *)
+let refine_report_sites_all = ref false
+(* --reflect-report: one row per user function, reflected or the first R-rule
+   blocking it (lib/refinecheck/refine_reflect.ml, reflection design §2.4).
+   Report-only: nothing else reads the analysis. *)
+let reflect_report = ref false
+(* --reflect-deps: after the check, one `reflect-def` line per reflected
+   function of user code with its D17 logic hash, and one `reflect-dep` line
+   per reflected function in the frontier of any stage-2 query the check ran
+   (reflection §7.2, I8); then one `reflect-cdef` line per user function with
+   its contract hash and one `reflect-cdep` line per function of another
+   user file the file reaches through calls.  The LSP keys a file's refinement diagnostics on the
+   `reflect-dep` and `reflect-cdep` lines (lsp/lib/refine_diag.ml).
+   Report-only. *)
+let reflect_deps = ref false
+(* --reflect-parity: the parity net (reflection §9.2, D16): each reflected
+   function of user code is evaluated by its logic definition and by the
+   interpreter on generated inputs, boundary Ints included
+   (lib/refinecheck/reflect_parity.ml).  Exit 1 on a mismatch or an
+   interpreter failure.  Changes no verdict. *)
+let reflect_parity = ref false
 (* --refine-audit: print every declared refinement occurrence the checker
    never enforces (Unenforced) or only warns about (Inert_warned), plus a
    three-bucket summary. Read-only: changes no verdict, emits no diagnostic.
@@ -128,6 +164,18 @@ let refine_suggest_budget = ref March_refinecheck.Precond_infer.default_budget
 (* --refine-suggest-post: propose the RETURN refinement that lets a function's
    CALLERS discharge obligations.  Separate from the precondition flags because
    it answers a different question — see lib/refinecheck/postcond_infer.ml. *)
+(* --refine-infer (design specs/2026-10-20-refinement-suggest-lite-design.md
+   §4.1): every candidate kind, module-wide fixpoint; see
+   lib/refinecheck/refine_infer.ml. *)
+let refine_infer           = ref false
+let refine_infer_json      = ref false
+let refine_infer_kinds     : string option ref = ref None
+let refine_infer_budget    = ref March_refinecheck.Refine_infer.default_budget
+let refine_infer_stdlib    = ref false
+let allow_caller_violations = ref false
+let apply_public           = ref false
+let refine_infer_apply     = ref false
+let refine_infer_diff      = ref false
 let refine_suggest_post : string option ref = ref None
 let refine_suggest_post_all = ref false
 
@@ -155,13 +203,28 @@ let debug_info     = ref false
 (* --dump-provenance: print the fn-name -> origin side table after the TIR
    pipeline (specs/plans/incremental-codegen-cas-plan.md §7). *)
 let dump_provenance = ref false
+
+(* `march query <sub> ...` (A7, lib/query/query.ml): the request, the
+   pipeline snapshot collector it installs, the compiler arguments left after
+   its own are stripped, and the cache-key inputs the compile path records
+   (every build, so a successful one can write them for a later why-miss). *)
+let query_req : March_query.Query.request option ref = ref None
+let query_collector : March_query.Query.Collector.t option ref = ref None
+let query_argv : string array option ref = ref None
+let key_capture : March_query.Query.Key.t option ref = ref None
 let opt_enabled    = ref true
+(* A4: --bisect-pass / --expect / --reduce / --oracle (bin/pass_tools.ml). *)
+let bisect_pass_file = ref ""
+let bisect_expect    = ref ""
+let reduce_file      = ref ""
+let reduce_oracle    = ref ""
 let fast_math      = ref false
 (* --rc-trace: store a site id before every refcount/alloc/free call and emit
    the site table (lib/tir/llvm_rc_trace.ml).  MARCH_RC_TRACE=1 is the same
    switch for build paths that cannot pass a flag (forge, the IR oracle). *)
 let rc_trace       = ref false
 let pmap_threshold = ref 1024    (* --pmap-threshold: List.pmap sequential-fallback cutoff *)
+let js_int_check = ref false     (* --js-int-check: range-check Int + - * on the JS target *)
 let no_copy_runtime = ref false    (* --no-copy-runtime: skip auto-copy of march_runtime.mjs *)
 (* --hot-reload=<Prefix>: compile boundary modules (under <Prefix>) with the
    versioned dispatch table so their functions can be hot-swapped at runtime. *)

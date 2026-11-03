@@ -320,8 +320,15 @@ int64_t march_string_ends_with(void *s, void *suffix) {
 /* Remaining string stubs — return empty or identity for now */
 void *march_string_slice(void *s, int64_t start, int64_t len) {
     march_string *str = (march_string *)s;
-    if (start >= str->length || len <= 0) return march_string_lit("", 0);
-    if (start + len > str->length) len = str->length - start;
+    /* Clamp exactly like march_string_slice in march_runtime.c (and the
+       interpreter): a negative start is 0, start past the end is the end,
+       a negative len is 0, an over-long len stops at the end. */
+    int64_t slen = str->length;
+    if (start < 0) start = 0;
+    if (start > slen) start = slen;
+    if (len < 0) len = 0;
+    if (len > slen - start) len = slen - start;
+    if (len == 0) return march_string_lit("", 0);
     char *data = (char *)march_alloc(len + 1);
     for (int64_t i = 0; i < len; i++) data[i] = str->data[start + i];
     data[len] = '\0';
@@ -565,6 +572,20 @@ void march_println(void *s) { (void)s; }
 void march_panic(void *s) {
     (void)s;
     __builtin_trap();
+}
+
+/* Int `+ - *` overflow (march_runtime.c's march_int_overflow): a panic,
+ * which on wasm traps the instance. */
+void march_int_overflow(int64_t op, const char *file, int64_t line) {
+    (void)op; (void)file; (void)line;
+    __builtin_trap();
+}
+
+/* Diagnostics' panic-site record (march_runtime.c): the wasm runtime has no
+ * crash observers, so the site lowering emits before a panic is dropped. */
+void *march_panic_site(void *file, int64_t line) {
+    (void)file; (void)line;
+    return NULL;
 }
 
 /* Structured cleanup — see march_try_finally in march_runtime.c for the

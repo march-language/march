@@ -38,6 +38,10 @@
     - A function whose name is used anywhere except as a call HEAD — captured
       in a closure ([ADefRef]), or passed as a value — is NOT elaborated.
       Changing its arity would break that reference.
+    - An interface impl method that some call site reaches through the
+      interface (a generic receiver, resolved only by Mono) is NOT elaborated:
+      that call site names the method, not the impl, so it cannot be threaded
+      (see [mark_iface_dispatch_targets]).
     - Actor handlers are invoked by the scheduler rather than by an elaborated
       caller, so there is nobody to thread from; they are left alone. *)
 
@@ -244,6 +248,38 @@ let supervised_children (e : T.expr) : string list =
   in
   go e; List.rev !acc
 
+(** An interface method called through a still-generic receiver is a call head
+    naming the METHOD ([event_append], or a qualified spelling), not the impl:
+    Mono resolves it to [Iface$Ty.method] only later.  So the call graph has no
+    edge to the impl, the caller is never threaded, and an impl given a
+    capability parameter here is then called with one argument too few: every
+    argument shifts by one register and the callee segfaults (#708, conduit's
+    [impl Storage] reading [DateTime.now()] under [forge test]).
+
+    Freeze every impl such a call can dispatch to.  Resolution mirrors Mono's
+    [iface_target]: the exact name, then each shorter module-stripped suffix,
+    and [to_string] falling back to [show].  A direct, already-resolved call to
+    an impl stays a normal call edge and is unaffected when no generic call
+    names the method anywhere. *)
+let mark_iface_dispatch_targets (f : facts) : unit =
+  let iface = Lower_state.get_iface_methods () in
+  let rec impls_of n =
+    match Hashtbl.find_opt iface n with
+    | Some impls -> impls
+    | None ->
+      (match String.index_opt n '.' with
+       | Some i -> impls_of (String.sub n (i + 1) (String.length n - i - 1))
+       | None -> if n = "to_string" then impls_of "show" else [])
+  in
+  Hashtbl.iter
+    (fun _ heads ->
+       List.iter
+         (fun h ->
+            if not (Tir_names.is_iface_mangled h) then
+              List.iter (fun (_, impl) -> Hashtbl.replace f.unsafe impl ()) (impls_of h))
+         heads)
+    f.calls
+
 (** [needed_caps m] maps each function to the capabilities it must carry: the
     ones its own body performs, plus everything its callees need, to a
     fixpoint.  Functions in [unsafe] are excluded — their arity cannot change. *)
@@ -310,6 +346,7 @@ let needed_caps (m : T.tir_module) : (string, string list) Hashtbl.t =
   Hashtbl.iter
     (fun k _ -> if not (Hashtbl.mem f.toplevel k) then Hashtbl.remove need k)
     (Hashtbl.copy need);
+  mark_iface_dispatch_targets f;
   (* Drop anything whose arity must not change, and anything left needing
      nothing. *)
   Hashtbl.iter

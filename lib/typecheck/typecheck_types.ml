@@ -475,6 +475,21 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.EAssert (_, sp)         -> sp
   | Ast.ESigil (_, _, sp)       -> sp
 
+(** The provided side of a type mismatch (D5, diagnostics plan §9): the
+    sub-expression whose inferred type [p_ty] failed to meet the context,
+    and, when it is a plain variable, its name so [report_mismatch] can
+    point at the binder through [env.binder_spans]. Set only by the
+    TOP-LEVEL [unify] call for a sub-expression and carried unchanged
+    through [unify]'s recursion, so the label always describes the whole
+    expression even when the headline reports an inner type argument. *)
+type provided = { p_span : Ast.span; p_name : string option; p_ty : ty }
+
+let provided_of_expr (e : Ast.expr) (t : ty) : provided =
+  { p_span = span_of_expr e;
+    p_name = (match e with Ast.EVar n -> Some n.Ast.txt | _ -> None);
+    p_ty = t }
+
+
 (* ─────────────────────────────────────────────────────────────────
    [free_vars_expr] / [free_vars_block] / [free_vars_pattern] were §15's first
    definitions in typecheck.ml.  Like [span_of_expr] above they are pure AST

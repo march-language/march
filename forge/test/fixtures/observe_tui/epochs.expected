@@ -1,0 +1,12 @@
+current epoch 3
+
+EPOCH        PINS  STATE
+3               5  current
+2               2  draining
+
+SLOT  NAME                               IMPL            EPOCH  ACTIVATED
+1     Main.handle_request                9f3a1c7de4b~        3  1 min ago
+2     Main.render_page                   c04be1126a7~        2  1.1 h ago
+
+deferred 4  converted 12  dropped 0  killed 0  stopped 0  advances 3  early 0  forced 0
+markers live 0  lost 0

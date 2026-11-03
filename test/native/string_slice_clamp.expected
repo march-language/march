@@ -1,0 +1,11 @@
+neg_start=[hel]
+neg_start_far=[he]
+neg_start_long=[hello]
+past_end=[]
+at_end=[]
+neg_len=[]
+zero_len=[]
+long_len=[llo]
+mid=[ell]
+empty_src=[]
+1

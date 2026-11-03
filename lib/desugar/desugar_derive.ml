@@ -38,7 +38,7 @@ let mk_fn_def name params body : fn_def =
     fn_doc     = None;
     fn_attrs   = [];
     fn_ret_ty  = None;
-    fn_bounds  = [];
+    fn_bounds  = []; fn_attr_args = []; fn_needs = None;
     fn_clauses = [{
       fc_params = List.map (fun p ->
         FPNamed { param_name = mk_name p; param_ty = None; param_lin = Unrestricted }
@@ -221,6 +221,7 @@ let respan_fn_def (fd : fn_def) : fn_def =
     fn_name    = respan_name fd.fn_name;
     fn_ret_ty  = Option.map respan_ty fd.fn_ret_ty;
     fn_bounds  = List.map (fun (n, t) -> (respan_name n, respan_ty t)) fd.fn_bounds;
+    fn_attr_args = fd.fn_attr_args;
     fn_clauses = List.map (fun c ->
         { fc_params = List.map respan_fn_param c.fc_params;
           fc_guard  = Option.map respan_expr c.fc_guard;
@@ -430,7 +431,9 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         (match fields with
          | [] -> ELit (LitInt 0, dummy_span)
          | fields ->
-           (* Combine field hashes: fold over fields, mixing with prime *)
+           (* Combine field hashes: fold over fields, mixing with prime.
+              Modulo 2^63 (int_wrapping_add/mul): a field hash may be any Int,
+              and `*`/`+` panic on overflow. *)
            let hash_field fld =
              (* Use the polymorphic hash for each field's value.
                 Note: field values may be any type — hash is safe here since
@@ -444,8 +447,8 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
             | [f] -> hash_field f
             | f :: rest ->
               List.fold_left (fun acc fld ->
-                  EApp (EVar (mk_name "+"),
-                        [EApp (EVar (mk_name "*"), [acc; ELit (LitInt 31, dummy_span)], dummy_span);
+                  EApp (EVar (mk_name "int_wrapping_add"),
+                        [EApp (EVar (mk_name "int_wrapping_mul"), [acc; ELit (LitInt 31, dummy_span)], dummy_span);
                          hash_field fld],
                         dummy_span)
                 ) (hash_field f) rest))
@@ -605,6 +608,11 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
     (* derive Json: generate standalone to_json and from_json functions.
        to_json(x : T) : JsonValue   — structural encoding to JSON
        from_json(v : JsonValue) : Result(T, String) — decoding from JSON *)
+    (* The generated impls carry the derive site as their own decl span, like
+       every other derive ([impl_one]); the bodies stay on [dummy_span]. The
+       typechecker's same-short-name check
+       ([Typecheck.check_json_derive_collisions]) points at it. *)
+    let derive_sp = sp in
     let sp = dummy_span in
     (* Helper: encode a field value based on its type annotation *)
     let encoder_for_ty (ty : ty) (value_expr : expr) : expr =
@@ -918,7 +926,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         impl_assoc_types = [];
         impl_methods     = [(mk_name meth_name, fn_body)];
       } in
-      DImpl (idef, sp)
+      DImpl (idef, derive_sp)
     in
     (* ── from_json_events (Task 7 / Phase B) ───────────────────────────
        A second, event-consuming decoder, generated ONLY for TDRecord

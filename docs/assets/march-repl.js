@@ -3,10 +3,13 @@
  *
  * Usage:
  *   var repl = new MarchRepl({ wrapId, historyId, inputId, loadingId, cls });
- *   repl.submit()           — eval whatever is in the textarea
+ *   repl.submit()           — eval whatever is in the textarea (a pasted
+ *                             "march> " transcript runs one prompt line at a time)
+ *   repl.run(code)          — eval code as if typed (queued: runs in order)
  *   repl.load(code)         — HTML-decode and load code into the textarea
  *   repl.loadThen(s, code)  — silently eval s, then load code into the textarea
- *   repl.reset()            — clear session and history
+ *   repl.clear()            — clear the screen; definitions and input history stay
+ *   repl.reset()            — clear the screen and forget every definition
  *
  * cfg.cls must have: entry, inputLine, output, error, info
  */
@@ -51,6 +54,11 @@
           self._input.value = "";
         }
         self._resize();
+      } else if ((e.key === "l" || e.key === "L") && e.ctrlKey && !e.metaKey && !e.altKey) {
+        // Ctrl+L clears the screen, as in a terminal. (Cmd+L is the browser's
+        // address bar on macOS, so it is left alone.)
+        e.preventDefault();
+        self.clear();
       } else if (!self._loaded && !self._loading) {
         self._loadBundle(function () {});
       }
@@ -90,14 +98,66 @@
     var fail = function () {
       self._loading = false;
       self._loadEl.textContent = "Failed to load interpreter.";
+      // Still call back: each waiting input then reports "Interpreter not
+      // available." and the run queue moves on instead of hanging.
+      cb();
+      if (self._pending) { var f = self._pending; self._pending = null; f(); }
     };
 
-    this._loadScript(this._base + "/assets/march_stdlib.js?v=" + this._ver, function () {
-      self._loadScript(self._base + "/assets/march.js?v=" + self._ver, finish, fail);
-    }, function () {
-      // stdlib load failed — interpreter still works without it
-      self._loadScript(self._base + "/assets/march.js?v=" + self._ver, finish, fail);
-    });
+    // Startup stdlib, then the module index (which module lives in which file,
+    // for on-demand loading), then the interpreter. A failed stdlib or index load
+    // still leaves a working interpreter, just with less of the stdlib.
+    var v = "?v=" + this._ver;
+    var loadMarch = function () {
+      self._loadScript(self._base + "/assets/march.js" + v, finish, fail);
+    };
+    var loadIndex = function () {
+      self._loadScript(self._base + "/assets/march_stdlib_index.js" + v, loadMarch, loadMarch);
+    };
+    this._loadScript(this._base + "/assets/march_stdlib.js" + v, loadIndex, loadIndex);
+  };
+
+  /* ------------------------------------------------------------------ */
+  /* On-demand stdlib modules                                            */
+  /* ------------------------------------------------------------------ */
+
+  // Before evaluating [code], load the stdlib modules it uses that this session
+  // does not have yet (march.js's marchModulesNeeded follows the module index,
+  // dependencies first), one stdlib/<file>.js each. Calls cb(null) when ready, or
+  // cb(message) when [code] names a module that cannot run in a browser or a
+  // module failed to load; then nothing is evaluated. Mirrors
+  // scripts/browser-repl-node.js, which the CI smoke test and doc sweep use.
+  MarchRepl.prototype._ensureModules = function (code, cb) {
+    var self = this;
+    if (!window.marchModulesNeeded) { cb(null); return; }
+    var need = window.marchModulesNeeded(code);
+    var unavailable = Array.prototype.slice.call(need.unavailable);
+    if (unavailable.length) {
+      cb(unavailable.map(function (u) {
+        return u.module + " isn't available in the browser REPL: " + u.reason +
+               ". Install March to run this: " + location.origin + self._base +
+               "/docs/installation/";
+      }).join("\n"));
+      return;
+    }
+    var files = Array.prototype.slice.call(need.load);
+    var next = function (i) {
+      if (i >= files.length) { self._loadEl.textContent = ""; cb(null); return; }
+      var file = files[i];
+      self._loadEl.textContent = "Loading " + file.replace(/\.march$/, "") + "…";
+      self._loadScript(
+        self._base + "/assets/stdlib/" + file.replace(/\.march$/, ".js") + "?v=" + self._ver,
+        function () {
+          var r = window.marchLoadModule(file, (window.marchStdlib || {})[file] || "");
+          if (r.error) { self._loadEl.textContent = ""; cb(r.error); }
+          else next(i + 1);
+        },
+        function () {
+          self._loadEl.textContent = "";
+          cb("could not download the stdlib module " + file);
+        });
+    };
+    next(0);
   };
 
   /* ------------------------------------------------------------------ */
@@ -245,7 +305,30 @@
   /* Public API                                                          */
   /* ------------------------------------------------------------------ */
 
+  // Inputs run strictly in order. One may wait on the interpreter download or
+  // on an on-demand stdlib module, so later inputs (a "Try it" transcript sends
+  // several at once) queue behind it rather than overtaking it or being
+  // dropped by _loadBundle's single pending slot.
   MarchRepl.prototype._run = function (code) {
+    this._queue = this._queue || [];
+    this._queue.push(code);
+    if (!this._busy) this._drain();
+  };
+
+  MarchRepl.prototype._drain = function () {
+    var self = this;
+    while (this._queue.length) {
+      var code = this._queue.shift();
+      this._busy = true;
+      var pending = this._runNow(code, function () { self._busy = false; self._drain(); });
+      if (pending) return; // the done callback resumes the queue
+      this._busy = false;
+    }
+  };
+
+  // Evaluate one input. Returns true when it finishes asynchronously, in which
+  // case done() is called once it has; returns false when it already finished.
+  MarchRepl.prototype._runNow = function (code, done) {
     var self = this;
     var cls  = this._cls;
     var trimmed = code.trim();
@@ -256,11 +339,16 @@
     if (this._cmdHist.length > 50) this._cmdHist.pop();
     this._histIdx = -1;
 
+    if (trimmed === ":clear") {
+      this._wipe();
+      return;
+    }
+
     this._appendInput(code);
 
     if (trimmed === ":reset") {
       if (this._loaded && window.marchResetSession) window.marchResetSession();
-      while (this._hist.firstChild) this._hist.removeChild(this._hist.firstChild);
+      this._wipe();
       this._appendLine("Session reset.", cls.info);
       return;
     }
@@ -270,7 +358,8 @@
         "March REPL — quick reference",
         "",
         "Commands:",
-        "  :reset        clear session and history",
+        "  :clear        clear the screen (Ctrl+L); definitions stay",
+        "  :reset        clear the screen and forget every definition",
         "  :help         show this message",
         "  h(name)       look up stdlib docs (e.g. h(map))",
         "",
@@ -291,6 +380,7 @@
     this._loadBundle(function () {
       if (!window.marchEvalLine) {
         self._appendLine("Interpreter not available.", cls.error);
+        done();
         return;
       }
 
@@ -309,24 +399,81 @@
             self._appendLine("  " + h.sig, cls.output);
           });
         }
+        done();
         return;
       }
 
-      var result = window.marchEvalLine(code);
-      if (result.output && result.output.trim()) self._appendLine(result.output.trimEnd(), cls.output);
-      if (result.error !== null)                 self._appendLine(result.error, cls.error);
+      self._ensureModules(code, function (err) {
+        if (err) { self._appendLine(err, cls.error); done(); return; }
+        var result = window.marchEvalLine(code);
+        if (result.output && result.output.trim()) self._appendLine(result.output.trimEnd(), cls.output);
+        if (result.error !== null)                 self._appendLine(result.error, cls.error);
+        done();
+      });
     });
+    return true;
   };
 
-  // Submit whatever is currently in the textarea.
+  // Split a pasted stdlib-doc transcript into its inputs.
+  //
+  // The stdlib pages' Copy button copies the whole doctest transcript, prompts
+  // ("march> ...") and expected-output lines alike, and the "march> " shown in
+  // the REPL history is a CSS ::before, so a pasted prompt line looks harmless.
+  // On Sort.html a reader edited the first line to
+  // "march> Sort.heapsort_by([8, 5, 2, 9999999, 1, 2], fn a -> fn b -> a <= b)"
+  // and left the transcript's output line "[1, 2, 2, 5, 8]" under it; March
+  // evaluated the two lines as one block and printed the value of the LAST
+  // expression, the literal list, which looked exactly like heapsort dropping
+  // 9999999. So when any line begins with "march> ", the text is a transcript:
+  // each prompt line (prefix stripped) is one input, in order, and every other
+  // line is expected output and is dropped. Text with no prompt line is
+  // returned as the single input it always was.
+  MarchRepl.splitTranscript = function (code) {
+    var lines = code.split("\n");
+    var inputs = [];
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/^\s*march>(?:\s(.*))?$/);
+      if (m) inputs.push(m[1] || "");
+    }
+    return inputs.length ? inputs : [code];
+  };
+
+  // Evaluate code as if the reader had typed it (used by "Try it" buttons).
+  MarchRepl.prototype.run = function (code) { this._run(code); };
+
+  // Submit whatever is currently in the textarea. A pasted doc transcript runs
+  // one prompt line at a time (see splitTranscript).
   MarchRepl.prototype.submit = function () {
     var code = this._input.value;
     this._input.value = "";
     this._resize();
-    this._run(code);
+    var inputs = MarchRepl.splitTranscript(code);
+    for (var i = 0; i < inputs.length; i++) this._run(inputs[i]);
   };
 
-  // Clear session and history.
+  // Remove every transcript entry except the one holding the loading-status
+  // line: on the landing page and the cookbook sidebar that line lives inside
+  // the transcript, and removing it would leave later "Loading interpreter…"
+  // updates writing to a detached node.
+  MarchRepl.prototype._wipe = function () {
+    var keep = null;
+    for (var n = this._loadEl; n && n !== this._hist; n = n.parentNode) keep = n;
+    if (keep && keep.parentNode !== this._hist) keep = null;
+    var kids = Array.prototype.slice.call(this._hist.childNodes);
+    for (var i = 0; i < kids.length; i++) {
+      if (kids[i] !== keep) this._hist.removeChild(kids[i]);
+    }
+  };
+
+  // Clear the screen. The interpreter session (every definition) and the
+  // up/down input history are kept; nothing is evaluated, so this works
+  // before the interpreter has loaded and never triggers its download.
+  MarchRepl.prototype.clear = function () {
+    this._wipe();
+    this._input.focus();
+  };
+
+  // Clear the screen and forget every definition.
   MarchRepl.prototype.reset = function () {
     this._input.value = "";
     this._resize();

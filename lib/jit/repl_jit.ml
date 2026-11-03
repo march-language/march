@@ -142,6 +142,10 @@ let get_orc ctx =
     let j = Jit_orc.create () in
     ctx.orc <- Some j; j
 
+(* The REPL printer's atom-name tables; see [atom_name]. *)
+let atom_lits : (int64, string) Hashtbl.t = Hashtbl.create 64
+let atom_name_fn : nativeint ref = ref Nativeint.zero
+
 let create ~runtime_so ?(clang="clang") () =
   (* Per-process artifact dir.  A single shared "march_jit" dir raced when
      several JIT sessions ran concurrently (dune executes the test runners in
@@ -192,6 +196,10 @@ let create ~runtime_so ?(clang="clang") () =
   end;
   (* Load the runtime .so first so its symbols are globally available *)
   let rt_handle = Jit.dlopen runtime_so in
+  (* The printer's runtime atom-name source (see [atom_lits]).  A runtime
+     too old to export it just leaves the printer on its own table. *)
+  (try atom_name_fn := Jit.dlsym rt_handle "march_atom_name_cstr"
+   with Failure _ -> ());
   let undef_flag = if is_macos () then " -undefined dynamic_lookup" else "" in
   (* Only macOS needs the explicit two-level runtime binding; Linux resolves
      RTLD_GLOBAL symbols correctly, so keep its link line unchanged. *)
@@ -499,6 +507,15 @@ let prev_slots_of ctx : March_tir.Llvm_emit.repl_slot_info list =
 (** Lower a single-expression module through the TIR pipeline.
     [repl_vars] are bare variable names of REPL globals that should be
     treated as borrowed by Perceus so they are never freed mid-session. *)
+(* Every fragment lowered in this process gets its own lowering scope
+   ([$repl<n>.]), so the structural names of its lambdas, join points and
+   apply fns ([main$lam0] in every fragment otherwise) are distinct symbols
+   across the per-fragment shared objects.  The stdlib precompile passes
+   [~fragment:false]: its names must be the ones the CLI mints, since the
+   cached .so is shared with it.  This replaces the persisted
+   [lambda_counter=N] sentinel the .names file used to carry. *)
+let fragment_seq = ref 0
+
 (* TIR verifier (A1, lib/tir/tir_verify.ml) for the REPL/JIT pipeline, which
    does not go through Contract_pipeline: on under --verify-tir /
    MARCH_VERIFY_TIR=1.  No borrow map here (the REPL runs no
@@ -512,11 +529,17 @@ let verify_repl ?(repl_vars = []) stage tir =
       tir;
   tir
 
-let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) (m : March_ast.Ast.module_) =
+let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) ?(fragment = true) (m : March_ast.Ast.module_) =
   (* [~shadow_builtins:false]: fragments bind fns by bare name through closure
      slots, and [is_c_runtime_fn] already keeps a runtime-defined name out of
      a fragment; renaming here would desynchronise the two. *)
-  let tir = March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false m in
+  if fragment then begin
+    incr fragment_seq;
+    March_tir.Lower_state.set_fragment_scope (Printf.sprintf "$repl%d." !fragment_seq)
+  end;
+  let tir =
+    Fun.protect ~finally:(fun () -> March_tir.Lower_state.set_fragment_scope "")
+      (fun () -> March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false m) in
   (* Match the compiled pipeline: bin/main.ml runs Trmc.transform_module
      immediately post-lower (pre-mono), and without it a function behaves
      differently in the REPL than when compiled.  The position matters as much
@@ -546,9 +569,30 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
      unboxing off, handed to every pass this fragment runs (and matching the
      [~repl:true] ctx the emitter builds), replaces the old process-wide
      [force_disable] latch. *)
+  (* A fragment runs the native pipeline's RC passes around Perceus
+     (Contract_pipeline), as the remote shell's fragments do
+     ([shell_compile]; specs/progress/2026-10-08-shell-slot-and-drop-leaks.md):
+     - [Known_call] first: a local closure only ever called (`List.filter`'s
+       `go`) becomes a direct call of its apply function, the shape
+       [Drop.run] recognises as owning its captures.  Without it nothing
+       released the predicate it captured: one closure per call.
+     - [Drop.run] after: without it a [dec_rc] of a list, record or variant
+       the code does not take apart freed its top cell and orphaned the rest.
+     The stdlib precompile ([~fragment:false]) runs them too: every
+     fragment calls the prelude's compiled stdlib, so a shallow release there
+     (Show$List.show's intermediate lists) leaked on every input whatever the
+     fragment itself did.  The prelude registers no closure releases, so a
+     stdlib closure released through its function type stays shallow. *)
+  let tir =
+    if March_tir.Pass_switch.on "known-call-pre"
+    then verify_repl ~repl_vars "tir-known-call"
+        (March_tir.Known_call.run ~changed:(ref false) tir)
+    else tir in
   let k_table = March_tir.Kind.of_module ~unboxing:false tir in
+  let borrow_map = March_tir.Borrow.infer_module ~k_table tir in
   let tir = verify_repl ~repl_vars "tir-perceus"
-      (March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir) in
+      (March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table ~borrow_map tir) in
+  let tir = verify_repl ~repl_vars "tir-drop" (March_tir.Drop.run ~k_table ~borrow_map tir) in
   verify_repl ~repl_vars "tir-escape" (March_tir.Escape.escape_analysis ~k_table tir)
 
 (* ── Heap pretty-printer ───────────────────────────────────────────── *)
@@ -776,6 +820,61 @@ let ctor_index_of_tag ~ctor_tags (name : string) (tag : int) : int option =
       | t :: rest -> if t = tag then Some i else go (i + 1) rest in
     go 0 tags
 
+(** Atom names for the printer.  Atoms compile to nameless FNV-1a hashes
+    ([Llvm_ctx.atom_hash]), so rendering one needs a hash -> name table.
+    Two sources, tried in order:
+    - [atom_lits]: every atom literal in a fragment this process lowered
+      ([record_atom_lits]), covering atoms typed at the prompt — a fragment
+      like `Some(:a)` never calls atom_to_string, so it registers no table
+      with the runtime;
+    - the runtime's registry ([march_atom_name_cstr], dlsym'd into
+      [atom_name_fn] by [create]): the stdlib precompile registers its table
+      there, covering atoms a precompiled stdlib fn returned (UUID.parse's
+      :invalid), whose literal no fragment ever contains.
+    Process-wide, not per-session: a hash is a pure function of the name, so
+    a name learned by another session can only be right.  The two tables
+    themselves are defined above [create], which fills [atom_name_fn]. *)
+
+(** Record every atom literal in [fns] in [atom_lits]. *)
+let record_atom_lits (fns : March_tir.Tir.fn_def list) : unit =
+  let open March_tir.Tir in
+  let atom = function
+    | ALit (March_ast.Ast.LitAtom name) ->
+      Hashtbl.replace atom_lits (March_tir.Llvm_ctx.atom_hash name) name
+    | ALit _ | AVar _ | ADefRef _ -> () in
+  let rec go = function
+    | EAtom a | EField (a, _) | EFree a | EIncRC a | EDecRC a
+    | EAtomicIncRC a | EAtomicDecRC a -> atom a
+    | EApp (_, args) -> List.iter atom args
+    | ECallPtr (f, args) -> atom f; List.iter atom args
+    | ELet (_, e1, e2) | ESeq (e1, e2) -> go e1; go e2
+    | ELetRec (lfns, e2) ->
+      List.iter (fun (f : fn_def) -> go f.fn_body) lfns; go e2
+    | ECase (scrut, branches, dflt) ->
+      atom scrut;
+      List.iter (fun (b : branch) -> go b.br_body) branches;
+      Option.iter go dflt
+    | ETuple atoms | EAlloc (_, atoms) | EStackAlloc (_, atoms) ->
+      List.iter atom atoms
+    | ERecord fields -> List.iter (fun (_, a) -> atom a) fields
+    | EUpdate (a, fields) -> atom a; List.iter (fun (_, x) -> atom x) fields
+    | EReuse (a, _, atoms) -> atom a; List.iter atom atoms
+    | EAllocHole (tok, _, atoms, _) -> Option.iter atom tok; List.iter atom atoms
+    | ESetField (obj, _, v) -> atom obj; atom v
+  in
+  List.iter (fun (f : fn_def) -> go f.fn_body) fns
+
+(** Render the atom hash [h] as ":name", or ":<atom>" (the compiled
+    fallback's spelling) when neither table knows it. *)
+let atom_name (h : int64) : string =
+  match Hashtbl.find_opt atom_lits h with
+  | Some name -> ":" ^ name
+  | None ->
+    let from_runtime =
+      if !atom_name_fn = Nativeint.zero then None
+      else Jit.call_atom_name !atom_name_fn h in
+    Option.value from_runtime ~default:":<atom>"
+
 (** Pretty-print a March heap value given its TIR type.
     [type_defs] provides user-declared TDVariant/TDRecord lookups for
     non-builtin TCon names.  Recursion is bounded to depth 64. *)
@@ -789,6 +888,8 @@ let rec pp_heap_value ?(depth=0) ~type_defs ~ctor_tags (ty : March_tir.Tir.ty) (
      the recursive calls re-entering here cost only a hash hit. *)
   let ty = qualify_ty ~type_defs ty in
   match ty with
+  (* An atom is the raw (untagged) i64 hash, not a cell — see [pp_word]. *)
+  | TCon ("Atom", []) -> atom_name (Int64.of_nativeint ptr)
   (* Niche / newtype types are NOT heap cells: [ptr] is the raw payload word
      (or 0 for a niche's nullary ctor), so these must be decoded before the
      null guard and before any tag read. *)
@@ -932,25 +1033,39 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
   let open March_tir.Tir in
   let scalar () =
     let v = Int64.of_nativeint w in
-    if tagged then Int64.shift_right_logical v 1 else v
+    (* ARITHMETIC shift: a tagged word is (v<<1)|1 for a signed v, so a
+       logical shift turns -1 (all ones) into max_int. *)
+    if tagged then Int64.shift_right v 1 else v
   in
   match ty with
   | TInt  -> Int64.to_string (scalar ())
   | TBool -> if scalar () = 0L then "false" else "true"
   | TUnit -> "()"
   | TFloat -> pp_float_word ~erased:tagged w
+  | TCon ("Atom", []) ->
+    (* An atom is an i64 hash, never a heap cell (until 2026-10-14 this fell
+       through to [pp_heap_value], which read a "tag" at the hash: Err(:x)
+       segfaulted the REPL).  In an erased slot it is low-bit tagged; the
+       ARITHMETIC shift restores bit 63, which [atom_hash] mints equal to
+       bit 62 precisely so the hash survives that round trip. *)
+    let h = Int64.of_nativeint w in
+    atom_name (if tagged then Int64.shift_right h 1 else h)
   | TVar _ ->
     (* Erased slot: a scalar is low-bit tagged, a heap value is an aligned
        pointer.  Decide from the word itself — dereferencing a tagged scalar
        as a cell would read unmapped memory. *)
     if Nativeint.logand w 1n = 1n then
-      Int64.to_string (Int64.shift_right_logical (Int64.of_nativeint w) 1)
+      Int64.to_string (Int64.shift_right (Int64.of_nativeint w) 1)
     else if w = Nativeint.zero then "null"
     else if is_float_box w then pp_float_word ~erased:true w
     else Printf.sprintf "#<tag:%d>" (heap_tag w)
   | _ ->
-    if w = Nativeint.zero then "null"
-    else pp_heap_value ~depth:(depth + 1) ~type_defs ~ctor_tags ty w
+    (* A zero word is a niche type's nullary ctor (`None` in a list of
+       Options), which only [pp_heap_value]'s niche arm can name; anything
+       else it answers "#<null>" for, spelled "null" here as before. *)
+    (match pp_heap_value ~depth:(depth + 1) ~type_defs ~ctor_tags ty w with
+     | "#<null>" -> "null"
+     | s -> s)
 
 (** True when a value of [ty] is NOT a heap pointer but the raw payload word
     of a niche/newtype representation — the two cases where the "small word =
@@ -1251,6 +1366,15 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
          main_fn.March_tir.Tir.fn_params) in
   let thunk = Printf.sprintf "march_jit_main_thunk_%d" n in
   let entry = Printf.sprintf "march_jit_program_%d" n in
+  (* Register this fragment's atom-name table before main runs.  The ORC
+     backend runs no @llvm.global_ctors, so the constructor that registers it
+     (Llvm_toplevel.emit_atom_show_table) only fires under the clang/dlopen
+     backend; without the registration the prelude's Show$Atom.show cannot
+     name the program's own atoms and prints ":<atom>".  Registration is
+     idempotent, so the clang backend's double call is harmless. *)
+  let register_atoms =
+    if contains_sub ir "define internal void @march_atom_namer_register()"
+    then "  call void @march_atom_namer_register()\n" else "" in
   let ir =
     ir
     ^ "\n" ^ declare_if_absent ir "declare void @march_remote_init()"
@@ -1262,11 +1386,11 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
         (if ret_ty = "void" then "" else "%_r = ")
         ret_ty mangled erased_args
     ^ Printf.sprintf
-        "\ndefine void @%s() {\nentry:\n\
+        "\ndefine void @%s() {\nentry:\n%s\
         \  call void @march_remote_init()\n\
         \  call void @march_spawn_main(ptr @%s)\n\
         \  call void @march_run_scheduler()\n\
-        \  ret void\n}\n" entry thunk in
+        \  ret void\n}\n" entry register_atoms thunk in
   let handle = compile_fragment ctx ir in
   mark_compiled_fns ctx new_fns;
   commit_wraps ctx sw;
@@ -1291,6 +1415,7 @@ let run_expr ctx ~tc_env m =
     (fun () -> with_prior_fns ctx (fun () ->
          lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m)) in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
+  record_atom_lits tir.March_tir.Tir.tm_fns;
   let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name = "main") tir.March_tir.Tir.tm_fns with
   | Some f -> f
@@ -1315,6 +1440,14 @@ let run_expr ctx ~tc_env m =
       ~fns:new_fns
       ~extern_fns
       ~store_as_slot:(Some v_slot)
+      (* As the shell's fragments
+         (specs/progress/2026-10-08-shell-slot-and-drop-leaks.md): no slot
+         increment, since Perceus treats a slot variable as borrowed in
+         [main] and never releases one, so every input used to add a count
+         to every heap binding; and the fragment's closure releases
+         registered, so a capturing closure releases its captures. *)
+      ~borrow_slots:true
+      ~register_drops:true
       ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       main_fn.fn_body) in
@@ -1337,6 +1470,8 @@ let run_expr ctx ~tc_env m =
     | March_tir.Tir.TUnit ->
       Jit.call_void_to_void fptr;
       "()"
+    | March_tir.Tir.TCon ("Atom", []) ->
+      atom_name (Jit.call_void_to_int fptr)
     | March_tir.Tir.TVar _ ->
       (* Unresolved type var — try to recover the actual type.  Walk the fn body
          into the tail position, recursing through ELet, ESeq, and ECase branches.
@@ -1554,6 +1689,8 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
       ~prev_slots:(prev_slots_of ctx)
       ~fns:user_fns
       ~extern_fns
+      ~borrow_slots:true      (* as [run_expr] *)
+      ~register_drops:true
       ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       main_fn.fn_body in
@@ -1691,23 +1828,16 @@ let precompile_stdlib ctx
       register_type_defs ctx cached_types;
       ctx.loaded_tir_types <- cached_types @ ctx.loaded_tir_types;
       ctx.handles <- handle :: ctx.handles;
-      (* Read function names and mark as compiled.
-         The last line of the .names file may be "lambda_counter=N" — if so,
-         restore the defun lambda counter so that fresh REPL compilations
-         always assign UIDs strictly above those used by prelude functions.
-         Without this, a cache-hit run starts the counter at 0 and the REPL's
-         freshly-generated go$apply$N functions get UIDs that collide with
-         prelude-compiled functions, causing partition_fns to treat them as
-         already-compiled externs and link the wrong implementation.
+      (* Read function names and mark as compiled.  (The file once ended
+         with a "lambda_counter=N" sentinel for the global defun counter;
+         names are structural now, so a stale line of that shape is ignored.)
          Use Fun.protect to guarantee close_in even on malformed lines. *)
       let ic = open_in names_path in
       Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
         try while true do
           let line = String.trim (input_line ic) in
-          if String.length line > 15 && String.sub line 0 15 = "lambda_counter=" then begin
-            let n = int_of_string (String.sub line 15 (String.length line - 15)) in
-            March_tir.Defun.set_lambda_counter n
-          end else if line <> "" then
+          if String.length line > 15 && String.sub line 0 15 = "lambda_counter=" then ()
+          else if line <> "" then
             Hashtbl.replace ctx.compiled_fns line ()
         done with End_of_file -> ())
     with exn ->
@@ -1735,7 +1865,7 @@ let precompile_stdlib ctx
         mod_decls = stdlib_decls } in
     (try
       let (_, type_map_stdlib) = March_typecheck.Typecheck.check_module stdlib_mod in
-      let tir = lower_module ~type_map:type_map_stdlib stdlib_mod in
+      let tir = lower_module ~type_map:type_map_stdlib ~fragment:false stdlib_mod in
       let stdlib_fns = List.filter
         (fun (f : March_tir.Tir.fn_def) ->
           not (is_c_runtime_fn f.fn_name) &&
@@ -1786,9 +1916,7 @@ let precompile_stdlib ctx
          | Unix.WEXITED 0 ->
            (* .ll no longer needed once clang succeeded. *)
            (try Sys.remove ll_path with _ -> ());
-           (* Write companion names file: one function name per line, then
-              a "lambda_counter=N" sentinel so cache-hit runs can restore
-              the counter and avoid UID collisions with prelude functions.
+           (* Write companion names file: one function name per line.
               Written to a temp and renamed BEFORE the .so is renamed: the
               cache-hit check requires both files, so publishing the .so
               last guarantees no reader ever pairs it with a partial
@@ -1799,10 +1927,7 @@ let precompile_stdlib ctx
              let nc = open_out names_tmp in
              Fun.protect ~finally:(fun () -> close_out_noerr nc) (fun () ->
                List.iter (fun (f : March_tir.Tir.fn_def) ->
-                 output_string nc (f.fn_name ^ "\n")) stdlib_fns;
-               output_string nc
-                 (Printf.sprintf "lambda_counter=%d\n"
-                    (March_tir.Defun.get_lambda_counter ())));
+                 output_string nc (f.fn_name ^ "\n")) stdlib_fns);
              Sys.rename names_tmp names_path
            with _ -> ());
            (* Companion .types: the `~types` list this .so was compiled with,
@@ -1937,6 +2062,8 @@ type shell_fragment = {
   sf_entry : string;               (** its one exported symbol *)
   sf_ret   : March_tir.Tir.ty;     (** the entry's return type *)
   sf_caps  : string list;          (** the capabilities its code uses, sorted *)
+  sf_skew  : string list;          (** with [~force]: the differing declarations it
+                                       reaches (it is read-only); else [] *)
 }
 
 (** The shell fragment's function.  It is `main` because monomorphisation
@@ -1965,7 +2092,8 @@ let shell_program_lowered ctx ~program_name ~program_decls ~program_type_map =
                       { March_ast.Ast.txt = program_name;
                         span = { March_ast.Ast.dummy_span with file = "" } };
                     mod_decls = shell_program_decls program_decls } in
-    let type_map = Hashtbl.copy program_type_map in
+    (* Not a copy: the typechecker adds each input's spans to this table. *)
+    let type_map = program_type_map in
     let tir = time_phase "lower-program" (fun () ->
         let tir = March_tir.Lower.lower_module ~type_map ~shadow_builtins:false
             ~resumable:true program in
@@ -1982,21 +2110,172 @@ let shell_lower_program ctx ~program_name ~program_decls ~program_type_map =
     and makes the entry return nothing useful (an init fragment); otherwise
     the entry returns the value of [main] (a String: the caller wraps the
     input in its renderer).  Raises [Typecheck_failed] / [Failure]. *)
-let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
+(* ── In-process fragment emission ────────────────────────────────────────
+   `clang -shared -O1 -x ir` costs ~90 ms per input on macOS and ~46 ms on
+   Linux, almost all of it fixed cost: two process starts (driver + cc1-in-
+   process + linker), the driver itself, and its link step.  Instead the
+   shell emits the object in-process (Jit_emit: parse, `default<O1>`, object
+   for the node's triple) and runs the linker directly, with exactly the argv
+   `clang -###` reports for the same link — so the export list, version
+   script, -Bsymbolic, undefined-symbol allowance, platform version and libs
+   are clang's own.  MARCH_SHELL_CLANG=1 forces the old path; it is also the
+   fallback whenever libLLVM, the node's backend, or the link probe is
+   unavailable. *)
+
+let shell_force_clang () =
+  match Sys.getenv_opt "MARCH_SHELL_CLANG" with
+  | Some ("" | "0") | None -> false
+  | Some _ -> true
+
+(** The node triple, LLVM backend and CPU to emit in-process for, or [None]
+    to compile with clang. *)
+let shell_inprocess_target (triple : string option) : (string * string) option =
+  if shell_force_clang () then None
+  else match triple with
+    | Some t when t <> "" && t <> "unknown" ->
+      (match Jit_emit.target_of_triple t with
+       | Some (arch, cpu) when Jit_emit.available ~arch -> Some (t, cpu)
+       | _ -> None)
+    | _ -> None
+
+(* Replace every occurrence of [sub] in [s] by [by]. *)
+let replace_all (s : string) ~(sub : string) ~(by : string) : string =
+  let n = String.length sub in
+  if n = 0 then s else begin
+    let b = Buffer.create (String.length s) in
+    let i = ref 0 in
+    while !i < String.length s do
+      if !i + n <= String.length s && String.sub s !i n = sub then
+        (Buffer.add_string b by; i := !i + n)
+      else (Buffer.add_char b s.[!i]; incr i)
+    done;
+    Buffer.contents b
+  end
+
+(* The arguments of one `clang -###` job line: each is double-quoted, with
+   backslash, double quote and dollar backslash-escaped (llvm::sys::printArg). *)
+let parse_hash_job (line : string) : string list =
+  let args = ref [] and cur = Buffer.create 64 in
+  let n = String.length line in
+  let i = ref 0 in
+  while !i < n do
+    if line.[!i] = '"' then begin
+      Buffer.clear cur;
+      incr i;
+      while !i < n && line.[!i] <> '"' do
+        if line.[!i] = '\\' && !i + 1 < n then (Buffer.add_char cur line.[!i + 1]; i := !i + 2)
+        else (Buffer.add_char cur line.[!i]; incr i)
+      done;
+      args := Buffer.contents cur :: !args;
+      incr i
+    end else incr i
+  done;
+  List.rev !args
+
+(* Link templates by (clang, target flags): built once per process. *)
+let shell_link_cache : (string, (obj:string -> so:string -> entry:string -> map:string
+                                  -> string array) option) Hashtbl.t =
+  Hashtbl.create 2
+
+(** The linker argv clang would run to link one object into a fragment .so,
+    as a function of the object, output, entry and version-script paths.
+    Found by running `clang -### ... probe.o -o probe.so <exports>` once and
+    substituting the probe names; [None] if clang does not report exactly
+    one job. *)
+let shell_link_argv ctx ~target_flags
+    ~(export_flags : entry:string -> map:string -> string) =
+  let key = ctx.clang ^ "\000" ^ target_flags in
+  match Hashtbl.find_opt shell_link_cache key with
+  | Some t -> t
+  | None ->
+    let t = time_phase "link-probe" (fun () ->
+        try
+          let p = Filename.concat ctx.tmp_dir "march_link_probe" in
+          let p_obj = p ^ ".o" and p_so = p ^ ".so" and p_map = p ^ ".map"
+          and p_entry = "march_link_probe_entry" in
+          (* clang -### checks that its inputs exist. *)
+          close_out (open_out p_obj);
+          let out = p ^ ".hash" in
+          let cmd = Printf.sprintf "%s -###%s -shared -fPIC %s -o %s%s > %s 2>&1"
+              ctx.clang target_flags (Filename.quote p_obj) (Filename.quote p_so)
+              (export_flags ~entry:p_entry ~map:p_map) (Filename.quote out) in
+          if Sys.command cmd <> 0 then None
+          else begin
+            let jobs =
+              In_channel.with_open_text out In_channel.input_all
+              |> String.split_on_char '\n'
+              |> List.filter (fun l -> String.length l > 1 && l.[0] = ' ' && l.[1] = '"') in
+            match jobs with
+            | [ job ] ->
+              let args = parse_hash_job job in
+              if args = [] || not (List.mem p_obj args) then None
+              else Some (fun ~obj ~so ~entry ~map ->
+                  Array.of_list (List.map (fun a ->
+                      a |> replace_all ~sub:p_obj ~by:obj
+                        |> replace_all ~sub:p_so ~by:so
+                        |> replace_all ~sub:p_map ~by:map
+                        |> replace_all ~sub:p_entry ~by:entry) args))
+            | _ -> None
+          end
+        with _ -> None) in
+    Hashtbl.replace shell_link_cache key t;
+    t
+
+(* Run [argv] directly (no shell), stdout and stderr to [log]; its exit
+   code, or 127 if it could not be started. *)
+let run_argv (argv : string array) ~(log : string) : int =
+  try
+    let fd = Unix.openfile log [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC; Unix.O_CLOEXEC] 0o644 in
+    let pid = Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
+        Unix.create_process argv.(0) argv Unix.stdin fd fd) in
+    let rec wait () =
+      match Unix.waitpid [] pid with
+      | _, Unix.WEXITED c -> c
+      | _, _ -> 128
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> wait () in
+    wait ()
+  with _ -> 127
+
+(** The clang flags that select the NODE's platform ([triple], from its
+    HELLO), as [(target_is_mac, flags)].  Compiling for another platform is
+    often necessary: a Linux node cannot load a Mach-O.  From macOS to
+    Linux the system clang cross-compiles with lld; a fragment links
+    against nothing (every runtime symbol binds at the node's dlopen), so
+    no target libc or sysroot is needed.
+
+    The triple is NOT trusted: HELLO is unauthenticated and these flags go
+    on a [Sys.command] line.  A triple [Jit_emit.triple_ok] rejects is a
+    [Failure] here, before any command runs, and the value is quoted as
+    well, so the command builder is safe whatever the caller checked. *)
+let shell_target_flags ~(triple : string option) : bool * string =
+  (match triple with
+   | Some t when t <> "" && t <> "unknown" && not (Jit_emit.triple_ok t) ->
+     failwith (Printf.sprintf
+                 "shell: the node's target triple is not a valid triple (%S); refusing to compile"
+                 t)
+   | _ -> ());
+  let target_is_mac = match triple with
+    | Some t -> contains_sub t "apple" || contains_sub t "darwin"
+    | None -> is_macos () in
+  if target_is_mac && not (is_macos ()) then
+    failwith "shell: this node runs macOS; its fragments must be compiled on macOS";
+  let flags = match triple with
+    | Some t when t <> "" && t <> "unknown" ->
+      Printf.sprintf " --target=%s%s" (Filename.quote t)
+        (if (not target_is_mac) && is_macos () then " -fuse-ld=lld -nostdlib" else "")
+    | _ -> "" in
+  (target_is_mac, flags)
+
+let shell_compile ?triple ?ident ?(force = false) ctx ~tc_env ~(program_name : string)
     ~(program_decls : March_ast.Ast.decl list)
     ~(program_type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t)
-    ?store_as (m : March_ast.Ast.module_) : shell_fragment =
-  let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
+    ?store_as (m : March_ast.Ast.module_) : shell_fragment =  let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
   let errors = March_errors.Errors.create () in
   let env = { tc_env with March_typecheck.Typecheck.errors;
               refs = ref []; current_decl = ref "" } in
   let input_map =
     checked_type_map (time_phase "typecheck"
       (fun () -> March_typecheck.Typecheck.check_module_with_env env m)) in
-  (* The program's map plus the input's: the input's own spans, and every
-     stdlib/app body it reaches, typed. *)
-  let type_map = Hashtbl.copy program_type_map in
-  Hashtbl.iter (fun k v -> Hashtbl.replace type_map k v) input_map;
   (* The program is lowered ONCE per session, through the full path the
      native build uses (imports, aliases, actors and externs of every module,
      a library on MARCH_LIB_PATH included), and kept resumable; each input
@@ -2005,8 +2284,14 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
      and ignores `import`, so a library like Depot (`import Encode`, then a
      bare `encode(..)`) did not lower.  Lowering the whole program again for
      every input cost ~200-270 ms for a Depot-sized one. *)
+  (* The typechecker writes the input's types into the session's own table,
+     [program_type_map] (it is [tc_env]'s, ~120k entries), which lowering
+     reads too; when it is a different table, the input's own spans (file
+     "") are merged in.  Copying the whole table cost ~10 ms an input. *)
   let sp = shell_program_lowered ctx ~program_name ~program_decls ~program_type_map in
-  Hashtbl.iter (fun k v -> Hashtbl.replace sp.sp_type_map k v) input_map;
+  if input_map != sp.sp_type_map then
+    Hashtbl.iter (fun (k : March_ast.Ast.span) v ->
+        if k.file = "" then Hashtbl.replace sp.sp_type_map k v) input_map;
   (* An input's self-qualified `DepotNode.pg` is stripped to `pg`, as the
      entry's own desugar does (typechecking accepted both spellings). *)
   let decls = March_desugar.Desugar.strip_entry_self_qual
@@ -2034,64 +2319,297 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
   let tir = time_phase "prune-pre" (fun () ->
       let impls = Hashtbl.fold (fun _ rows acc -> List.map snd rows @ acc)
           iface_methods [] in
-      let pruned = March_tir.Dce.prune_unreachable
+      let pruned = March_tir.Dce.prune_unreachable ~roots:[ shell_entry_fn ]
           { tir with March_tir.Tir.tm_exports = impls } in
       { pruned with March_tir.Tir.tm_exports = [] }) in
-  let tir =
+  let pre =
       let tir = time_phase "mono" (fun () -> March_tir.Mono.monomorphize ~iface_methods tir) in
       let tir = time_phase "defun" (fun () -> March_tir.Defun.defunctionalize tir) in
-      let tir = time_phase "prune" (fun () -> March_tir.Dce.prune_unreachable tir) in
-      time_phase "rc" (fun () ->
-          let k_table = March_tir.Kind.of_module ~unboxing:false tir in
-          let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir in
-          March_tir.Escape.escape_analysis ~k_table tir) in
-  register_type_defs ctx tir.March_tir.Tir.tm_types;
-  let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
-      f.fn_name = shell_entry_fn) tir.March_tir.Tir.tm_fns with
-    | Some f -> f
-    | None -> failwith ("shell: the TIR pipeline produced no '" ^ shell_entry_fn ^ "' function") in
-  let fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
-      f.fn_name <> shell_entry_fn && not (is_c_runtime_fn f.fn_name)) tir.March_tir.Tir.tm_fns in
+      time_phase "prune" (fun () -> March_tir.Dce.prune_unreachable ~roots:[ shell_entry_fn ] tir) in
+  register_type_defs ctx pre.March_tir.Tir.tm_types;
   if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None then
     List.iter (fun (f : March_tir.Tir.fn_def) ->
-        Printf.eprintf "[shell] fn %s\n%!" f.fn_name) tir.March_tir.Tir.tm_fns;
+        Printf.eprintf "[shell] fn %s\n%!" f.fn_name) pre.March_tir.Tir.tm_fns;
+  (* R5.4: refuse an input whose code differs from the node's build (see
+     shell_ident.ml), before paying for clang.  Over everything the input
+     reaches, including what it will call on the node rather than copy.
+     With [force], differing code (not a type's definition or constructor
+     tags) is let through here and the input must then prove read-only
+     ([skewed]). *)
+  let refuse ?(extra = []) head diffs =
+    let shown = List.filteri (fun i _ -> i < 8) diffs in
+    let more = List.length diffs - List.length shown in
+    failwith (String.concat "\n  "
+      (head :: shown
+       @ (if more > 0 then [ Printf.sprintf "... and %d more" more ] else [])
+       @ extra)) in
+  let differs_head = "this input reaches code that differs from the node's build:" in
+  let skewed =
+    match ident with
+    | Some c ->
+      let p = time_phase "ident" @@ fun () ->
+        Shell_ident.fragment_skew_parts c ~types:pre.March_tir.Tir.tm_types
+          (List.filter (fun (f : March_tir.Tir.fn_def) -> not (is_c_runtime_fn f.fn_name))
+             pre.March_tir.Tir.tm_fns) in
+      (match p.Shell_ident.sk_decls, p.Shell_ident.sk_types @ p.Shell_ident.sk_tags with
+       | [], [] -> []
+       | decls, [] when force -> decls
+       | decls, layout ->
+         refuse differs_head (List.sort compare (decls @ layout))
+           ~extra:(if force && layout <> [] then
+                     [ "(--shell-force never overrides a differing type or constructor numbering)" ]
+                   else []))
+    | None -> [] in
   let n = next_id ctx in
   let entry = Printf.sprintf "repl_%d" n in
-  let sw = fresh_wrap_state ctx in
-  (* R5.4: refuse an input whose code differs from the node's build (see
-     shell_ident.ml), before paying for clang. *)
-  (match ident with
-   | Some c ->
-     (match Shell_ident.fragment_skew c ~types:tir.March_tir.Tir.tm_types (main_fn :: fns) with
-      | [] -> ()
-      | diffs ->
-        let shown = List.filteri (fun i _ -> i < 8) diffs in
-        let more = List.length diffs - List.length shown in
-        failwith (String.concat "\n  "
-          ("this input reaches code that differs from the node's build:" :: shown
-           @ (if more > 0 then [ Printf.sprintf "... and %d more" more ] else []))))
-   | None -> ());
-  (* The capabilities are those of the C symbols the emitted code calls, as
-     for a binary's cap markers (llvm_toplevel.ml): a fragment carries every
-     body it runs, so this covers what it reaches through program and library
-     code, not only the caps the input names. *)
-  March_tir.Llvm_builtins.reset_called_syms ();
-  let ir = time_phase "emit_ir" (fun () ->
-      March_tir.Llvm_emit.emit_repl_expr
-        ~n ~ret_ty:main_fn.fn_ret_ty
-        ~prev_slots:(prev_slots_of ctx)
-        ~fns ~extern_fns:[]
-        ~store_as_slot:store_as
-        ~session_wraps:sw
-        (* The program's types, in the node build's order: [combined] is
-           lowered from the same declarations in the same order (colliding
-           type names take tags from a counter over this list). *)
-        ~types:tir.March_tir.Tir.tm_types
-        main_fn.fn_body) in
+  (* The functions this fragment calls on the node instead of carrying (see
+     [Shell_ident]'s "calling the node's own functions").  None without the
+     node's table, or with MARCH_SHELL_NO_LINK set, or for a forced skewed
+     input: that one runs this checkout's copy of everything it reaches (a
+     differing function must not be swapped for the node's), and its
+     read-only check reads the emitted code's symbols, which must then be
+     all of it. *)
+  let node = match ident with
+    | Some (c : Shell_ident.check)
+      when skewed = [] && Sys.getenv_opt "MARCH_SHELL_NO_LINK" = None -> Some c.node
+    | _ -> None in
+  (* An init fragment storing a heap value also registers its release for
+     the slot (see [build]); a scalar slot has none. *)
+  let slot_drop =
+    match store_as, List.find_opt (fun (f : March_tir.Tir.fn_def) ->
+        f.fn_name = shell_entry_fn) pre.March_tir.Tir.tm_fns with
+    | Some _, Some f when March_tir.Llvm_repl.slot_holds_heap_ref f.fn_ret_ty ->
+      Some ("shell_slot_drop", f.fn_ret_ty)
+    | _ -> None in
+  (* Lower RC and emit with [linked] declared rather than defined; the node's
+     parameter modes decide RC at the fragment's calls to them. *)
+  let build (linked : March_tir.Tir.fn_def list) =
+    let is_linked name = List.exists (fun (f : March_tir.Tir.fn_def) -> f.fn_name = name) linked in
+    let tir = { pre with March_tir.Tir.tm_fns =
+                           List.filter (fun (f : March_tir.Tir.fn_def) -> not (is_linked f.fn_name))
+                             pre.March_tir.Tir.tm_fns } in
+    let tir = March_tir.Dce.prune_unreachable ~roots:[ shell_entry_fn ] tir in
+    let tir = time_phase "rc" (fun () ->
+        (* Known calls first, as the native build does before Perceus
+           (Contract_pipeline): a local closure only ever called
+           (`List.filter`'s `go`) becomes a direct call of its apply
+           function, the shape [Drop.run] recognises as owning its
+           captures.  Without it the closure stayed a `call_ptr` callee, its
+           environment was judged to borrow the predicate it captured, and
+           nothing released the predicate: one closure per call. *)
+        let tir = if March_tir.Pass_switch.on "known-call-pre"
+          then March_tir.Known_call.run ~changed:(ref false) tir else tir in
+        let k_table = March_tir.Kind.of_module ~unboxing:false tir in
+        let borrow_map = March_tir.Borrow.infer_module ~k_table tir in
+        let borrow_map = match node with
+          | None -> borrow_map
+          | Some t ->
+            List.fold_left (fun bm (f : March_tir.Tir.fn_def) ->
+                match Shell_ident.node_modes t f.fn_name with
+                | Some modes -> March_tir.Borrow.StringMap.add f.fn_name modes bm
+                | None -> bm) borrow_map linked in
+        let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table ~borrow_map tir in
+        (* An init fragment's release for the value it stores in its slot,
+           which the node runs when the session ends.  Added after Perceus
+           as a bare [dec_rc] of its parameter, so [Drop.run] below makes it
+           the type's deep drop. *)
+        let tir = match slot_drop with
+          | None -> tir
+          | Some (name, ty) ->
+            let x = { March_tir.Tir.v_name = "x"; v_ty = ty; v_lin = March_tir.Tir.Unr } in
+            let f = { March_tir.Tir.fn_name = name; fn_params = [ x ]; fn_ret_ty = March_tir.Tir.TUnit;
+                      fn_body = March_tir.Tir.ESeq (March_tir.Tir.EDecRC (March_tir.Tir.AVar x),
+                                                    March_tir.Tir.ETuple []);
+                      fn_kind = March_tir.Tir.FnNormal } in
+            { tir with March_tir.Tir.tm_fns = tir.March_tir.Tir.tm_fns @ [ f ] } in
+        (* Deep drops, as the native pipeline (Contract_pipeline) runs after
+           Perceus: without them a [dec_rc] of a list, record or variant the
+           code does not take apart freed its top cell and orphaned the rest
+           (specs/progress/2026-10-08-shell-slot-and-drop-leaks.md). *)
+        let tir = March_tir.Drop.run ~k_table ~borrow_map tir in
+        (* Drop.run also makes a release for every actor and closure type of
+           the program, which nothing in a fragment calls (more than 80 of a
+           100-function fragment); the native build prunes them the same way. *)
+        let prune roots =
+          let m = March_tir.Dce.prune_unreachable
+              { tir with March_tir.Tir.tm_exports = tir.March_tir.Tir.tm_exports @ roots } in
+          { m with March_tir.Tir.tm_exports = tir.March_tir.Tir.tm_exports } in
+        let slot_roots = match slot_drop with Some (d, _) -> [ d ] | None -> [] in
+        (* ...keeping the releases the fragment registers for the closures
+           and actors it allocates (Llvm_repl.emit_repl_expr ~register_drops). *)
+        let registered =
+          List.sort_uniq String.compare
+            (List.map snd (March_tir.Llvm_toplevel.closure_drop_wants (prune slot_roots))) in
+        let tir = prune (slot_roots @ registered) in
+        March_tir.Escape.escape_analysis ~k_table tir) in
+    let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
+        f.fn_name = shell_entry_fn) tir.March_tir.Tir.tm_fns with
+      | Some f -> f
+      | None -> failwith ("shell: the TIR pipeline produced no '" ^ shell_entry_fn ^ "' function") in
+    let fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
+        f.fn_name <> shell_entry_fn && not (is_c_runtime_fn f.fn_name)) tir.March_tir.Tir.tm_fns in
+    let sw = fresh_wrap_state ctx in
+    (* The capabilities are those of the C symbols the emitted code calls, as
+       for a binary's cap markers (llvm_toplevel.ml): a fragment carries
+       every body it runs, so this covers what it reaches through program and
+       library code, not only the caps the input names.  A function it calls
+       on the node is not emitted here, so its caps are added below. *)
+    March_tir.Llvm_builtins.reset_called_syms ();
+    let ir = time_phase "emit_ir" (fun () ->
+        March_tir.Llvm_emit.emit_repl_expr
+          ~n ~ret_ty:main_fn.fn_ret_ty
+          ~prev_slots:(prev_slots_of ctx)
+          ~fns ~extern_fns:linked
+          ~store_as_slot:store_as
+          ~borrow_slots:true
+          ~register_drops:true
+          ?slot_drop_fn:(Option.map fst slot_drop)
+          ~session_wraps:sw
+          (* The program's types, in the node build's order: [combined] is
+             lowered from the same declarations in the same order (colliding
+             type names take tags from a counter over this list). *)
+          ~types:tir.March_tir.Tir.tm_types
+          main_fn.fn_body) in
+    (ir, main_fn, March_tir.Llvm_builtins.called_c_symbols (), fns) in
+  (* Link what the node has; drop any whose declared signature turns out not
+     to be the node's, and build again.  Each round links fewer, so this
+     ends, at worst with nothing linked. *)
+  let rec link_loop linked =
+    let (ir, main_fn, syms, fns) = build linked in
+    match node with
+    | None -> (ir, main_fn, syms, linked, fns)
+    | Some t ->
+      let declared = Shell_ident.signatures ~declares:true ir in
+      let mismatched = List.filter (fun (f : March_tir.Tir.fn_def) ->
+          match List.assoc_opt f.fn_name declared, Hashtbl.find_opt t.Shell_ident.fns f.fn_name with
+          | Some mine, Some (theirs, _) -> mine <> theirs
+          | None, _ -> false     (* not called after all: harmless *)
+          | Some _, None -> true) linked in
+      if mismatched = [] then (ir, main_fn, syms, linked, fns)
+      else begin
+        if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None then
+          List.iter (fun (f : March_tir.Tir.fn_def) ->
+              Printf.eprintf "[shell] not linking %s: signature %s here, %s on the node\n%!"
+                f.fn_name
+                (Option.value ~default:"?" (List.assoc_opt f.fn_name declared))
+                (match Hashtbl.find_opt t.Shell_ident.fns f.fn_name with
+                 | Some (sg, _) -> sg | None -> "?")) mismatched;
+        link_loop (List.filter (fun f -> not (List.memq f mismatched)) linked)
+      end in
+  let initial = match node with
+    | Some t -> Shell_ident.linkable t
+                  (List.filter (fun (f : March_tir.Tir.fn_def) -> f.fn_name <> shell_entry_fn)
+                     pre.March_tir.Tir.tm_fns)
+    | None -> [] in
+  let (ir, main_fn, syms, linked, emitted) = link_loop initial in
+  (* An actor of the program's own runs the NODE's handlers: a fragment that
+     spawns one calls the node's `<Actor>_spawn` (kept and offered by a shell
+     node's build, bin/main.ml), so the actor is dispatched through its
+     hot-reload slot, answers inspect with the node's renderer, and is
+     upgraded by a deploy like every other instance.  A fragment carrying
+     its own copy of the handlers would spawn an actor running the shell's
+     code for ever (fragments are never unloaded), which no deploy reaches:
+     refuse it rather than run it.  The stdlib's actors have no slot and are
+     not affected. *)
+  (match List.filter (fun (f : March_tir.Tir.fn_def) ->
+       March_tir.Hot_reload.is_slot_actor_dispatch f.fn_name) emitted with
+   | [] -> ()
+   | f :: _ ->
+     let sfx = March_tir.Tir_names.actor_dispatch_suffix in
+     let actor = String.sub f.fn_name 0 (String.length f.fn_name - String.length sfx) in
+     failwith (Printf.sprintf
+       "this input spawns actor %s, but cannot call the node's %s%s (a node \
+        built by an older compiler, or MARCH_SHELL_NO_LINK set); a copy would \
+        run this input's handlers instead of the node's"
+       actor actor March_tir.Tir_names.actor_spawn_suffix));
+  if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None || Sys.getenv_opt "MARCH_SHELL_LINK_REPORT" <> None then
+    Printf.eprintf "[shell] calls %d node function%s%s\n%!" (List.length linked)
+      (if List.length linked = 1 then "" else "s")
+      (if linked = [] then "" else
+         ": " ^ String.concat ", " (List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name) linked));
+  (* A function called on the node instead of copied is not emitted here, so
+     its caps (and those of everything it reaches) come from the names its
+     copy refers to, as cap attribution reads TIR before it is optimised.
+     Taken over the whole self-contained reach set, whatever was linked, so
+     linking can only add caps to the declaration, never drop one. *)
+  let reached_caps = time_phase "caps" @@ fun () ->
+    if linked = [] then []
+    else
+      List.concat_map (fun (f : March_tir.Tir.fn_def) ->
+          March_tir.Dce.StringSet.elements (March_tir.Dce.free_vars f.fn_body)
+          @ March_tir.Dce.StringSet.elements (March_tir.Dce.called_fns f.fn_body))
+        pre.March_tir.Tir.tm_fns
+      |> List.filter_map March_tir.Cap_attrib.cap_of_call in
+  (* Proof capabilities (Actor.Debug, Actor.Introspect, ...) are held, not
+     called: no runtime symbol carries them, so neither set above sees them,
+     and a policy without Actor.Debug let `Actor.inspect_state(debug, ...)`
+     run.  A Cap value only reaches code by being passed down from the
+     input's pre-bound roots (or a session binding holding one), so every
+     `Cap(C)` in the type of a parameter or a let-bound variable of the code
+     the input reaches is declared.  This can over-declare (refuse more),
+     never under-declare what the input holds. *)
+  let proof_caps =
+    let acc = Hashtbl.create 8 in
+    let rec of_ty (t : March_tir.Tir.ty) =
+      match t with
+      (* The root, `Cap(IO)`, only appears where the client narrows it into
+         a pre-bound name (`Actor.introspect(root_cap)`, `cap_narrow`): an
+         input that mentions root_cap is refused, so no input holds it. *)
+      | March_tir.Tir.TCon ("Cap", [ March_tir.Tir.TCon ("IO", []) ]) -> ()
+      | March_tir.Tir.TCon ("Cap", [ March_tir.Tir.TCon (c, []) ]) -> Hashtbl.replace acc c ()
+      | March_tir.Tir.TCon (_, args) -> List.iter of_ty args
+      | March_tir.Tir.TTuple ts -> List.iter of_ty ts
+      | March_tir.Tir.TRecord fs -> List.iter (fun (_, t) -> of_ty t) fs
+      | March_tir.Tir.TFn (ps, r) -> List.iter of_ty ps; of_ty r
+      | March_tir.Tir.TPtr t -> of_ty t
+      | March_tir.Tir.TInt | March_tir.Tir.TFloat | March_tir.Tir.TBool
+      | March_tir.Tir.TString | March_tir.Tir.TUnit | March_tir.Tir.TVar _ -> () in
+    let rec of_expr (e : March_tir.Tir.expr) =
+      match e with
+      | March_tir.Tir.ELet (v, rhs, body) -> of_ty v.v_ty; of_expr rhs; of_expr body
+      | March_tir.Tir.ELetRec (fds, body) -> List.iter of_fn fds; of_expr body
+      | March_tir.Tir.ECase (_, branches, default) ->
+        List.iter (fun (b : March_tir.Tir.branch) ->
+            List.iter (fun (v : March_tir.Tir.var) -> of_ty v.v_ty) b.br_vars;
+            of_expr b.br_body) branches;
+        Option.iter of_expr default
+      | March_tir.Tir.ESeq (a, b) -> of_expr a; of_expr b
+      | _ -> ()
+    and of_fn (f : March_tir.Tir.fn_def) =
+      List.iter (fun (v : March_tir.Tir.var) -> of_ty v.v_ty) f.fn_params;
+      of_expr f.fn_body in
+    List.iter of_fn pre.March_tir.Tir.tm_fns;
+    Hashtbl.fold (fun c () l -> c :: l) acc [] in
   let caps =
-    March_tir.Llvm_builtins.called_c_symbols ()
-    |> List.filter_map March_caps.Cap_symbols.cap_of_symbol
+    (List.filter_map March_caps.Cap_symbols.cap_of_symbol syms @ reached_caps @ proof_caps)
     |> List.sort_uniq String.compare in
+  (* --shell-force: a skewed input runs only if it is read-only
+     ([Shell_ident.not_read_only]); nothing was linked, so [syms] is every C
+     symbol its code calls. *)
+  if skewed <> [] then begin
+    (* A closure kept by an earlier input's `let` has its code in that
+       input's fragment, where these symbols cannot see it: a forced input
+       may not use such a binding. *)
+    let referenced = List.fold_left (fun acc (f : March_tir.Tir.fn_def) ->
+        March_tir.Dce.StringSet.union acc
+          (List.fold_left (fun s (v : March_tir.Tir.var) ->
+               March_tir.Dce.StringSet.remove v.v_name s)
+              (March_tir.Dce.free_vars f.fn_body) f.fn_params))
+        March_tir.Dce.StringSet.empty pre.March_tir.Tir.tm_fns in
+    if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None then
+      Printf.eprintf "[shell] forced input calls: %s\n%!" (String.concat " " (List.sort compare syms));
+    let closure_lets = List.filter_map (fun (name, _, ty) ->
+        if March_tir.Dce.StringSet.mem name referenced
+        && Shell_ident.may_hold_closure ~types:pre.March_tir.Tir.tm_types ty
+        then Some name else None) ctx.var_slots in
+    match Shell_ident.not_read_only ~caps ~syms ~closure_lets
+            ~fns:(List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name) pre.March_tir.Tir.tm_fns) () with
+    | [] -> ()
+    | why ->
+      refuse differs_head skewed
+        ~extra:("--shell-force runs such an input only when it is read-only, and this one is not:"
+                :: List.map (fun w -> "  " ^ w) why)
+  end;
   (* The node checks this against the signed `caps:` after loading the
      fragment (runtime/march_shell.c), so a fragment cannot run under a
      narrower declaration than its own code. *)
@@ -2107,40 +2625,60 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
   let oc = open_out ll in
   output_string oc ir;
   close_out oc;
-  (* Compile for the NODE's platform ([triple], from its HELLO), which is
-     often not this machine's: a Linux node cannot load a Mach-O.  From macOS
-     to Linux, the system clang cross-compiles with lld; a fragment links
-     against nothing (every runtime symbol binds at the node's dlopen), so no
-     target libc or sysroot is needed. *)
-  let target_is_mac = match triple with
-    | Some t -> contains_sub t "apple" || contains_sub t "darwin"
-    | None -> is_macos () in
-  if target_is_mac && not (is_macos ()) then
-    failwith "shell: this node runs macOS; its fragments must be compiled on macOS";
-  let target_flags = match triple with
-    | Some t when t <> "" && t <> "unknown" ->
-      Printf.sprintf " --target=%s%s" t
-        (if (not target_is_mac) && is_macos () then " -fuse-ld=lld -nostdlib" else "")
-    | _ -> "" in
+  (* Compile for the NODE's platform ([triple], from its HELLO); see
+     [shell_target_flags]. *)
+  let target_is_mac, target_flags = shell_target_flags ~triple in
   (* Export the entry only: every other symbol is local, so references inside
      the fragment bind to the fragment's own copies. *)
-  let export_flags =
+  let export_flags ~entry ~map =
     if target_is_mac then
       Printf.sprintf " -undefined dynamic_lookup -Wl,-exported_symbol,_%s \
                       -Wl,-exported_symbol,___march_cap_manifest" entry
     else begin
-      let vs = base ^ ".map" in
-      let oc = open_out vs in
+      let oc = open_out map in
       Printf.fprintf oc "{ global: %s; __march_cap_manifest; local: *; };\n" entry;
       close_out oc;
-      Printf.sprintf " -Wl,--version-script=%s -Wl,-Bsymbolic" (Filename.quote vs)
+      Printf.sprintf " -Wl,--version-script=%s -Wl,-Bsymbolic" (Filename.quote map)
     end in
   let log = base ^ ".clang.log" in
-  let cmd = Printf.sprintf "%s%s -shared -fPIC -O1 -Wno-override-module -x ir %s -o %s%s > %s 2>&1"
-      ctx.clang target_flags (Filename.quote ll) (Filename.quote so) export_flags (Filename.quote log) in
-  let rc = time_phase "clang" (fun () -> Sys.command cmd) in
-  if rc <> 0 then begin
-    let msg = try In_channel.with_open_text log In_channel.input_all with _ -> "" in
-    failwith ("shell: clang failed:\n" ^ msg)
-  end;
-  { sf_so = so; sf_entry = entry; sf_ret = main_fn.fn_ret_ty; sf_caps = caps }
+  let via_clang () =
+    let cmd = Printf.sprintf "%s%s -shared -fPIC -O1 -Wno-override-module -x ir %s -o %s%s > %s 2>&1"
+        ctx.clang target_flags (Filename.quote ll) (Filename.quote so)
+        (export_flags ~entry ~map:(base ^ ".map")) (Filename.quote log) in
+    let rc = time_phase "clang" (fun () -> Sys.command cmd) in
+    if rc <> 0 then begin
+      let msg = try In_channel.with_open_text log In_channel.input_all with _ -> "" in
+      failwith ("shell: clang failed:\n" ^ msg)
+    end in
+  (match shell_inprocess_target triple with
+   | None -> via_clang ()
+   | Some (t, cpu) ->
+     (* Emit the object in-process, then run only the linker clang would
+        have run (see [shell_link_argv]).  Any failure falls back to the
+        full clang command, which then reports the real diagnostic. *)
+     let obj = base ^ ".o" in
+     let linked =
+       match time_phase "emit-obj" (fun () ->
+           Jit_emit.emit_object ~ir ~triple:t ~cpu ~out:obj) with
+       | Error msg -> Error ("emit: " ^ msg)
+       | Ok () ->
+         match shell_link_argv ctx ~target_flags ~export_flags with
+         | None -> Error "no link command from `clang -###`"
+         | Some tmpl ->
+           let argv = tmpl ~obj ~so ~entry ~map:(base ^ ".map") in
+           (* [export_flags] writes the ELF version script as a side effect;
+              the template was made against a probe path, so write the real
+              one here. *)
+           if not target_is_mac then ignore (export_flags ~entry ~map:(base ^ ".map"));
+           let rc = time_phase "link" (fun () -> run_argv argv ~log) in
+           if rc = 0 then Ok ()
+           else Error ("link failed: "
+                       ^ (try In_channel.with_open_text log In_channel.input_all
+                          with _ -> "")) in
+     match linked with
+     | Ok () -> ()
+     | Error why ->
+       if profile_enabled then
+         Printf.eprintf "[jit-prof] in-process emit fell back to clang: %s\n%!" why;
+       via_clang ());
+  { sf_so = so; sf_entry = entry; sf_ret = main_fn.fn_ret_ty; sf_caps = caps; sf_skew = skewed }

@@ -13,6 +13,11 @@ expected `String` but got `Int`. [type_mismatch]
 
 4 |     "item " ++ n
         ^^^^^^^^^^^^
+
+    `n` was bound here as `Int`:
+
+3 |   fn label(n : Int) : String do
+               ^
     run `march --explain type_mismatch`
 
 

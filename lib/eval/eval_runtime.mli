@@ -48,10 +48,17 @@ val vault_shard_for : string -> vault_shard array -> vault_shard
 val is_list_value : value -> bool
 val list_elems : value list -> value -> value list
 val display_tag : string -> string
+
+(** A record's fields in display order: sorted by field name, the order the
+    compiled backend lays them out in. *)
+val sorted_record_fields : (string * 'a) list -> (string * 'a) list
 val value_to_string : value -> string
 val value_display : value -> string
 val show_dispatch : value -> string
 val type_name_of_value : value -> string option
+val ctor_qualified_type_tbl : (string, string) Hashtbl.t
+val dispatch_type_name_of_value : value -> string option
+val tuple_compare : value list -> value list -> int option
 val type_tag_of : value -> string option
 
 (** {1 Actors, supervision and monitors} *)
@@ -163,6 +170,11 @@ val uname_info : (string * string) option Lazy.t
 val live_proc_tbl : (int, in_channel * out_channel * int) Hashtbl.t
 val live_proc_next_id : int ref
 
+(** Err message of a Process.* spawn builtin for a [Unix_error (err, fn, _)]:
+    ["cannot execute <cmd>: <strerror>"] when the command could not be
+    executed, the bare message otherwise.  Matches the compiled runtime. *)
+val process_spawn_error : string -> string -> Unix.error -> string
+
 (** {1 Declaration tables populated at load time} *)
 
 val impl_tbl : (string * string, value) Hashtbl.t
@@ -222,6 +234,32 @@ exception BlockedOnReceive
 
     Each takes the per-type operation and the builtin's name (for the error
     message) and returns the builtin's [value]. *)
+
+(** [true] when the host [int] is narrower than March's 63-bit [Int] (the
+    js_of_ocaml browser REPL); then the helpers below raise the host-limit
+    error on overflow. [false] on native builds. *)
+val narrow_int : bool
+
+(** Raise the "does not fit the browser REPL's Int" error for [op]. *)
+val int_overflow : string -> 'a
+
+(** Int `+ - *` and negation: raise "attempt to add with overflow" (etc.)
+    when the result leaves the 63-bit range (the host-limit error on a narrow
+    host). *)
+val int_add : int -> int -> int
+val int_sub : int -> int -> int
+val int_mul : int -> int -> int
+val int_neg : int -> int
+
+(** int_wrapping_add/sub/mul: modulo 2^63 (checked against the host limit on
+    a narrow host, which cannot hold the wrapped result). *)
+val int_wrapping_add : int -> int -> int
+val int_wrapping_sub : int -> int -> int
+val int_wrapping_mul : int -> int -> int
+
+(** [Float.to_int], raising [int_overflow op] when the float is out of the
+    host Int range on a narrow host. *)
+val int_of_float_checked : string -> float -> int
 
 val arith_num :
   (int -> int -> int) -> (float -> float -> float) -> string -> value

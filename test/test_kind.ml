@@ -337,13 +337,16 @@ let both_spellings_agree label t q =
 let test_both_spellings_agree () =
   let t = table module_defs in
   let r l q = (both_spellings_agree l t q).Kind.repr in
-  (* module-declared: the short name is what is built, so Boxed *)
+  (* module-declared newtype/niche: the short name is what is built, so Boxed *)
   Alcotest.check repr_pp "Lib.Dur is Boxed under both" Kind.Boxed (r "newtype" "Lib.Dur");
   Alcotest.check repr_pp "Lib.Wrap is Boxed under both" Kind.Boxed (r "heap newtype" "Lib.Wrap");
   Alcotest.check repr_pp "Lib.Maybe2 is Boxed under both" Kind.Boxed (r "niche" "Lib.Maybe2");
-  Alcotest.check repr_pp "Lib.P2 is Boxed under both" Kind.Boxed (r "unboxable" "Lib.P2");
-  Alcotest.(check string) "and spelled ptr under both" "ptr"
-    (Kind.of_ty t (Tir.TCon ("Lib.P2", []))).Kind.llvm_ty;
+  (* module-declared unboxable aggregate: resolves to its declaration under
+     both spellings (specs/progress/2026-10-11-module-unboxed-aggregates.md) *)
+  Alcotest.check repr_pp "Lib.P2 is Unboxed under both"
+    (Kind.Unboxed { ctor = "P2"; fields = [ Tir.TFloat; Tir.TFloat ] }) (r "unboxable" "Lib.P2");
+  Alcotest.(check string) "and spelled as its struct under both" "%ub.Lib_P2"
+    (Kind.of_ty t (Tir.TCon ("P2", []))).Kind.llvm_ty;
   Alcotest.(check bool) "and refcounted under both" true
     (Kind.of_ty t (Tir.TCon ("Lib.Dur", []))).Kind.needs_rc;
   (* a bare-registered type keeps its shape answer, qualified or not *)
@@ -366,6 +369,8 @@ let test_canonical_name () =
   Alcotest.(check string) "qualified -> short" "Dur" (Kind.canonical_name t "Lib.Dur");
   Alcotest.(check string) "short stays short" "Dur" (Kind.canonical_name t "Dur");
   Alcotest.(check string) "deeply qualified -> short" "Id" (Kind.canonical_name t "Main.Inner.Id");
+  Alcotest.(check string) "unboxable short -> declaration" "Lib.P2" (Kind.canonical_name t "P2");
+  Alcotest.(check string) "unboxable qualified stays" "Lib.P2" (Kind.canonical_name t "Lib.P2");
   Alcotest.(check string) "idempotent on the pin" "Csv.CsvRow"
     (Kind.canonical_name t (Kind.canonical_name t "Csv.CsvRow"))
 

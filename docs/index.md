@@ -11,19 +11,132 @@ permalink: /
 
 # March
 
-**Elixir's concurrency model. ML's type safety. Native performance.**
+**ML's types. Capabilities for every effect. BEAM-style actors, compiled to native code.**
 
-March is a statically-typed, capability-based functional language built for concurrent and distributed systems: the kind you'd normally reach for Elixir or Erlang to build, but with a static type system, a compile-time effect system, algebraic data types, and compilation to native binaries via LLVM.
+March is a statically typed functional language for programs built from actors. It takes message passing and supervision from the BEAM and algebraic data types from ML, and compiles the result to a native binary through LLVM. Memory is managed by [Perceus reference counting with in-place reuse]({{ site.baseurl }}/docs/memory-model/), so there is no garbage collector and no pauses, and functional code runs at Rust-like speed.
 
-Write code that reads like Elixir. Get compile-time guarantees that your message protocols are correct, your resources aren't leaked, and your actor supervision trees handle faults the way you expect. Run at native speed with no garbage collector pauses.
+Safety is the compiler's job, not the test suite's. Side effects are part of the type: a module declares the [capabilities]({{ site.baseurl }}/docs/capabilities/) it needs, so what any piece of code can touch is visible in its signature, bounded by what `main` was granted, and auditable across every dependency you pull in. [Linear types]({{ site.baseurl }}/docs/linear-types/) make a resource that is used out of order, twice, or never a compile error. [Refinement types]({{ site.baseurl }}/docs/refinement-types/) reject a value a function cannot accept before it runs. A message protocol is checked on both sides, a crashed actor is restarted the way you declared, and a running node [takes new code without a restart]({{ site.baseurl }}/docs/hot-code-reload/).
 
 ---
 
 ## What makes March different
 
+### The whole program is bounded by `main`'s signature
+
+`main`'s capability parameter is the program's grant, and everything the program can
+reach has to fit under it: every helper, every stdlib call, every dependency. Declare
+`Cap(IO.Console)` and the build fails the moment anything in that closure opens a file
+or a socket, naming the chain that got there.
+
+```march
+mod Report do
+  needs IO.Console
+
+  fn main(cap : Cap(IO.Console)) : () do
+    println("report done")      -- fine
+    save_to_disk()              -- a helper that calls file_write
+  end
+end
+```
+
+```
+`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite`
+(reached from `main`: main → save_to_disk). The grant is a ceiling on the WHOLE
+program — declaring `needs IO.FileWrite` does not raise it.
+help: add a `Cap(IO.FileWrite)` parameter to `main`, or widen the grant to `Cap(IO)`,
+or remove the use.
+```
+
+Every module also declares what it touches with `needs`, and the compiler checks that
+the declaration is honest against the code it actually emits, so a dependency that
+reads `/etc/passwd` behind a `needs IO.Console` fails your build without the
+publisher's cooperation. See [Capabilities]({{ site.baseurl }}/docs/capabilities/).
+
+### Three safety layers on one function
+
+Capabilities say *what resources* code may touch. Linear types and typestate say *how
+many times, and in what order*, a resource is used. Refinement types say *with what
+values* a function may be called. They are independent, they compose on the same
+function, and all three fire at compile time.
+
+```march
+mod ChunkReader do
+  needs IO.FileRead                          -- (1) may read files
+
+  always_linear type File(s) = File(Int)     -- (2) a handle used exactly once,
+  tag Open                                   --     tracked Open vs Closed
+  tag Closed
+
+  fn open(cap : Cap(IO.FileRead), path : String) : File(Open) do ... end
+
+  fn read_chunk(
+    f      : File(Open),
+    offset : {Int | _ >= 0},                 -- (3) checked by an SMT solver
+    size   : {Int | _ > 0 && _ <= 4096}
+  ) : (String, File(Open)) do ... end
+
+  fn close(f : File(Open)) : File(Closed) do ... end
+end
+```
+
+A module without `needs IO.FileRead` cannot call `open`. Reading from a handle after
+`close`, or closing it twice, is a type error. `read_chunk(f, -1, 8192)` is rejected
+with the failing predicate quoted back. See
+[Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/).
+
+### Typed protocols, for two parties or twenty
+
+Write a conversation once, from the point of view of the whole system. For two parties
+the compiler checks that each side's view is the dual of the other's. Mark the protocol
+`@[endpoints]` and it generates a typed module per role, so a role that sends out of
+turn, receives twice, or stops halfway does not compile, and a runner that connects the
+roles over the network, each role its own program on its own machine.
+
+```march
+@[endpoints]
+protocol Fan do
+  number:  A -> C : Int
+  second:  B -> C : Int
+  verdict: C -> A : Bool
+end
+
+-- Role B, as the compiler types it: send, then close. Nothing else typechecks.
+pfn role_b(s : Cap(Session.Live), st : Fan_B.Entry) : Fan_B.Yield do
+  Fan_B.close(s, Fan_B.send_Second(s, st, 9))
+end
+```
+
+A role that fails cancels only the roles that were waiting on it, and a protocol can
+say which roles may crash and what the conversation does then. See
+[Session Types]({{ site.baseurl }}/docs/session-types/) and
+[Choreography]({{ site.baseurl }}/docs/choreography/).
+
+### Deploy to a running node, and only what it is allowed to do
+
+`forge deploy hot` ships just the functions that changed into a live process. Actors
+keep running; one with a changed state shape finishes the messages it already has on
+the old code, then runs your `migrate_state` and carries on. Each patched function
+brings its own capabilities, and a patch that reaches for more than the running version
+had stops at the deploy tool until you authorise it by name:
+
+```
+$ forge deploy hot --so v2.so
+Deploying 1 changed function(s)...
+error: hot deploy would add authority not held by the running version
+  running version caps:  IO.Console
+  new version adds:      IO.FileWrite (from Server.handle)
+  A hot deploy may only narrow authority. To authorize this widening, re-run with:
+      forge deploy hot --grant-cap IO.FileWrite
+error: capability widening — deploy aborted
+```
+
+Grant it, and the node still has the last word: a node whose policy forbids
+`IO.FileWrite` rejects the activation and rolls the batch back, whoever signed it. See
+[Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/).
+
 ### Actors with supervision trees
 
-March's concurrency model is the actor model: share-nothing, message-passing processes, just like Elixir. Actors are first-class: spawn them, link them, monitor them, and organize them into supervision trees that automatically restart failed processes.
+March's concurrency model is the actor model: share-nothing, message-passing processes, as on the BEAM. Actors are first-class: spawn them, monitor them, and organize them into supervision trees that automatically restart failed processes.
 
 ```march
 actor Counter do
@@ -57,24 +170,7 @@ actor WorkerSup do
 end
 ```
 
-The type system enforces actor isolation: you cannot accidentally share mutable state between processes.
-
-### Session types: typed communication protocols
-
-March can verify at compile time that two actors follow a compatible communication protocol, including that neither side will deadlock. If your protocol states the server sends a response after receiving a request, the compiler checks both sides agree.
-
-```march
--- Protocol: Client sends a query, Server replies with results.
--- Roles are inferred from the steps; the keyword is `protocol`.
-protocol Search do
-  Client -> Server : String
-  Server -> Client : List(String)
-end
-```
-
-Each side gets its own projected view and the compiler checks they're duals, so
-mismatched message patterns and deadlocks become compile errors, not runtime
-surprises. See [Session Types]({{ site.baseurl }}/docs/session-types/) for the full walkthrough.
+The type system enforces actor isolation: you cannot accidentally share mutable state between processes. A spawned actor's handlers count against `main`'s grant like any other code, so a program granted only the console cannot smuggle a file write into a handler. See [Actors]({{ site.baseurl }}/docs/actors/) and [Supervision]({{ site.baseurl }}/docs/supervision/).
 
 ### Perceus reference counting + FBIP
 
@@ -98,36 +194,7 @@ On a depth-20 binary tree (1M leaves), 100 passes of a transformation like this:
 | Rust (`Box`) | 9.5 s |
 | **March (FBIP)** | **1.3 s** |
 
-March wins not because C is slow, but because FBIP eliminates 200M allocator calls entirely.
-
-### Linear and affine types
-
-March tracks ownership at the type level. Mark a type as `linear` and the compiler guarantees it is used exactly once: no leaks, no double-frees, no "I thought this was already closed" bugs. File handles, socket connections, and database transactions get static guarantees without a runtime cost.
-
-```march
-always_linear type FileHandle = FileHandle(Int)
-
-fn write_and_close(f : FileHandle, content : String) : Unit do
-  match f do
-    FileHandle(fd) -> write_to_fd(fd, content)  -- consumes f
-  end
-  -- f cannot be used again; the compiler enforces this
-end
-```
-
-### A REPL worth using
-
-The March REPL is built with the ambition of Clojure's REPL experience: two-pane TUI, tab completion, syntax highlighting, `:type` and `:doc` queries, and access to the full standard library. Explore types interactively, test functions in isolation, and build intuition without a write-compile-run cycle.
-
-### `forge`, a batteries-included build tool
-
-```sh
-forge new my_app       # scaffold a new project
-forge build            # compile
-forge test             # run the test suite
-forge search "List.map"  # Hoogle-style search by name or type signature
-forge interactive      # launch the REPL
-```
+March wins not because C is slow, but because FBIP eliminates 200M allocator calls entirely. The benchmark is [`bench/tree_transform.march`](https://github.com/march-language/march/blob/main/bench/tree_transform.march); current numbers are in [`bench/RESULTS.md`](https://github.com/march-language/march/blob/main/bench/RESULTS.md). See the [Memory Model]({{ site.baseurl }}/docs/memory-model/).
 
 ---
 
@@ -173,9 +240,11 @@ end
 
 ### Concurrency
 - **Actor model**: share-nothing message passing, isolated by the type system
-- **Supervision trees**: OneForOne, OneForAll, RestForOne restart strategies
-- **Session types**: typed two-party protocols; deadlocks caught at compile time
-- **Structured concurrency** via `Task(a)` and `Future(a)`
+- **Supervision trees**: `one_for_one`, `one_for_all`, `rest_for_one` restart strategies, restart budgets and backoff
+- **Session types**: typed two-party protocols; a send out of turn is a compile error
+- **Choreographies**: one protocol, many roles, each role compiled to its own program on its own node
+- **Structured concurrency** via `Task.async`, `await_many`, `race` and `scope`
+- **Hot code reload**: deploy to a running node; actors migrate their state in place
 
 ### Runtime and performance
 - **Perceus reference counting**: deterministic, no tracing collector; freeing is inline work at a point you choose ([memory model]({{ site.baseurl }}/docs/memory-model/))
@@ -190,7 +259,7 @@ end
 - **Algebraic data types**: `type Shape = Circle(Float) | Rect(Float, Float)`
 - **Pattern matching** with exhaustiveness checking and guards
 - **Pipe operator**: `list |> map(f) |> filter(g) |> sum`
-- **Multi-head functions**: Elixir-style clause dispatch
+- **Multi-head functions**: clause dispatch on patterns in the parameter list
 - **`with` expressions**: monadic chaining for `Result`/`Option`
 - **`let?` propagation**: `let? x = e` binds `Ok(x)` and returns `Err` immediately
 - **Linear and affine types**: ownership tracking for resource safety
@@ -204,9 +273,9 @@ end
 - **Type-level naturals**: `Vector(n, a)` with compile-time dimension checking
 
 ### Tooling
-- **REPL**: two-pane TUI, tab completion, `:type` / `:doc` queries
+- **REPL**: two-pane TUI, tab completion, syntax highlighting, `:type` / `:doc` queries, the full standard library
 - **LSP server**: diagnostics, hover, go-to-definition, completions
-- **`forge` build tool**: new, build, test, search, interactive
+- **`forge` build tool**: new, build, test, Hoogle-style search, deploy, observe, and more ([reference]({{ site.baseurl }}/docs/tooling/))
 - **Tree-sitter grammar** for Zed editor syntax highlighting
 - **Time-travel debugger**: step backward through execution history
 
@@ -216,41 +285,95 @@ end
 
 ### Start here
 
-New to March? Read these three in order, then branch out.
-
 | Guide | What it covers |
 |-------|---------------|
 | [Installation](installation.md) | Prebuilt binaries (recommended); building from source |
 | [Getting Started](getting-started.md) | Hello world, compiling, running the REPL |
 | [Language Tour](tour.md) | Variables, functions, types, pipes: the essentials |
+| [Try It Out](playground.md) | A March interpreter in the browser; no install |
+| [Build a CLI Tool](build-a-cli.md) | Start-to-finish: scaffold, args, files, test, build |
+| [Cookbook](cookbook/) | Goal-oriented recipes: CLI, HTTP, JSON, files, config |
+| [Examples](examples.md) | Runnable programs in `examples/`, one feature each |
+| Coming from [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md) | Mental-model maps for newcomers |
 
-Prefer to poke at it live? [Try It Out](playground.md) runs March in your browser.
+### What 1.0 promises
 
-### Guides and reference
+| Page | What it covers |
+|-------|---------------|
+| [Compatibility & Deprecation](compatibility.md) | What a 1.x release keeps working, how things are deprecated, stdlib stability tiers |
+| [Supported Platforms](platforms.md) | Tier 1 (darwin-arm64, linux-x86_64, linux-aarch64), tier 2 and tier 3, and what each means |
+| [Claim: Deploys & Distribution](claim-deploys.md) | Verified installs, pinned builds, deterministic output, static binaries, cluster deploys |
+| [Claim: Capabilities](claim-capabilities.md) | What `main`'s grant and `needs` guarantee; see also the [threat model](capability-threat-model.md) |
+| [Claim: Performance](claim-performance.md) | How speed is measured (same-machine A/B against the last release); targets still to be set |
+| [Claim: Refinement Types](claim-refinements.md) | What `cap verified` proves, and the trusted base it relies on |
+
+Each claim page states the guarantee, its assumptions, what is not claimed, and the CI check
+that defends it, including the checks that are still only planned.
+
+### The language
 
 | Guide | What it covers |
 |-------|---------------|
-| [Build a CLI Tool](build-a-cli.md) | Start-to-finish: scaffold, args, files, test, build |
-| [Cookbook](cookbook/) | Goal-oriented recipes: CLI, HTTP, JSON, files, config |
 | [Type System](types.md) | ADTs, records, generics, Option, Result |
-| [Linear Types](linear-types.md) | Ownership, linear and affine qualifiers |
-| [Capabilities](capabilities.md) | IO permission caps, proof tokens, `needs` enforcement |
-| [Refinement Types](refinement-types.md) | `{T \| pred}` predicates checked by Z3 |
-| [Pattern Matching](pattern-matching.md) | Match, guards, exhaustiveness, nested patterns |
-| [Safety by Construction](safety-by-construction.md) | Composing linear, capability, refinement, and typestate guarantees |
-| [Memory Model](memory-model.md) | Perceus RC, FBIP in-place reuse, allocation-free code |
+| [Pattern Matching](pattern-matching.md) | Match, guards, exhaustiveness, `with`, multi-head functions |
 | [Module System](modules.md) | `mod`, `use`, `import`, `alias`, visibility |
-| [Actors](actors.md) | Spawn, send, receive, linking, monitoring |
-| [Supervision](supervision.md) | Supervision trees, restart strategies |
-| [Parallelism](parallelism.md) | Tasks, `pmap`, the M:N work-stealing scheduler |
-| [Session Types](session-types.md) | Typed two-party protocols; deadlocks caught at compile time |
-| [Choreography](choreography.md) | One protocol, many roles, each role its own program on its own node |
-| [Flow](flow.md) | Backpressure pipelines for streaming work |
-| [Overload & Resilience](overload-resilience.md) | Bounded mailboxes, load shedding, and backoff, withstanding thundering herds |
-| [Clustering](clustering.md) | Distributed actors: SWIM, CRDTs, RPC across nodes |
 | [Interfaces](interfaces.md) | `interface`, `impl`, `derive` |
-| [FFI](ffi.md) | Bind C/Rust libraries: `extern`, ownership, codecs, the `march` crate |
+| [Sigils & Templating](sigils.md) | `~H`, `~T` and friends: typed literals for HTML, TOML and more |
+| [Parsing](parsing.md) | The `Parse` combinator library |
 | [Standard Library](stdlib.md) | List, Map, String, Option, Result, and more |
+| [Coding Standards](coding-standards.md) | Style, safety and idiom rules, and `forge lint` |
+
+### Safety at compile time
+
+| Guide | What it covers |
+|-------|---------------|
+| [Safety by Construction](safety-by-construction.md) | Which layer catches which bug: capabilities, linearity, refinements |
+| [Capabilities](capabilities.md) | IO permission caps, the upper limit, the grant, proof caps, typestate |
+| [Linear Types](linear-types.md) | Ownership, linear and affine qualifiers, `LinearMap`, `RingBuf` |
+| [Refinement Types](refinement-types.md) | `{T \| pred}` predicates checked by Z3, `cap verified`, `cap no_panic` |
+| [Capability Enforcement](capability-enforcement.md) | Turning declared capabilities into an OS sandbox and a deploy gate |
+| [Capability Threat Model](capability-threat-model.md) | What the capability system guarantees, assumes and does not cover |
+| [Capability Audit](capability-audit.md) | `forge audit` on dependency updates; `forge cap inspect` on a binary |
+| [Memory Model](memory-model.md) | Perceus RC, FBIP in-place reuse, allocation-free code |
+
+### Concurrency
+
+| Guide | What it covers |
+|-------|---------------|
+| [Actors](actors.md) | Spawn, send, receive, monitoring, named actors, mailbox limits |
+| [Supervision](supervision.md) | Supervision trees, restart strategies, budgets and backoff |
+| [Parallelism](parallelism.md) | `pmap` and friends on the M:N work-stealing scheduler |
+| [Flow](flow.md) | Backpressure pipelines for streaming work |
+| [Overload & Resilience](overload-resilience.md) | Bounded mailboxes, load shedding and backoff, withstanding thundering herds |
+| [Session Types](session-types.md) | Typed two-party protocols; a send out of turn is a compile error |
+| [Choreography](choreography.md) | One protocol, many roles, each role its own program on its own node |
+| [SIMD & Native Arrays](simd-vectorization.md) | Auto-vectorised numeric loops and explicit vector types; [benchmarks](simd-benchmarks.md) |
+
+### Distribution and operations
+
+| Guide | What it covers |
+|-------|---------------|
+| [Clustering](clustering.md) | Nodes, membership, the global registry, typed remote messages, RPC |
+| [Cluster Certificates](cluster-certificates.md) | Admitting nodes by certificate: issuing, renewing, revoking |
+| [Topology](topology.md) | `topology.toml`: which pool serves which role, and on which hosts |
+| [Hot Code Reload](hot-code-reload.md) | Deploy to a running node; state migration, capability-safe deploys |
+| [Observing a running node](observe.md) | The observe socket, `forge status` / `diagnose` / `top`, the remote shell |
+| [Multi-host Lab](lab.md) | What happens to a real multi-host deployment when it is cut, restarted and failed over |
+
+### Tooling
+
+| Guide | What it covers |
+|-------|---------------|
+| [Tooling](tooling.md) | `forge` command reference: build, test, search, deploy, and more |
+| [LSP & Editors](lsp.md) | `march-lsp` features, editor setup, the DAP debugger |
 | [REPL](repl.md) | Interactive session guide |
-| [Tooling](tooling.md) | LSP, Zed, forge build tool |
-| Coming from [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md) | Mental-model maps for newcomers |
+| [Property Testing](property-testing.md) | `Check.all` generators and shrinking |
+| [FFI](ffi.md) | Bind C/Rust libraries: `extern`, ownership, codecs, the `march` crate |
+| [Value Representation](value-representation.md) | Compiler internals: how values are laid out in memory |
+
+### Upgrading
+
+| Guide | What it covers |
+|-------|---------------|
+| [Upgrading to 0.4.0](upgrading-to-0-4-0.md) | No breaking source changes; what moved |
+| [Upgrading to 0.3.0](upgrading-to-0-3-0.md) | The breaking changes in 0.3.0, one by one |

@@ -30,29 +30,42 @@ mod Handshake do
   type Hello = { identity : NodeIdentity.Identity, nonce : String, role : String, addr : String,
                  cert : Option(HelloCert) }
 
+  doc "The role of a control connection (SWIM, registry sync, monitors, CREDIT, DELIVERY_FAILED): \"control\"."
   fn role_control() : String do "control" end
+  doc "The role of a data connection (ACTOR_MSG, RPC): \"data\"."
   fn role_data() : String do "data" end
 
+  doc "A shared-secret hello from [identity] with challenge [nonce], opening a control connection and advertising no address."
   fn make_hello(identity : NodeIdentity.Identity, nonce : String) : Hello do
     { identity: identity, nonce: nonce, role: role_control(), addr: "", cert: None }
   end
 
+  doc "As `make_hello`, opening a connection of [role] (`role_control()` or `role_data()`)."
   fn make_hello_role(identity : NodeIdentity.Identity, nonce : String, role : String) : Hello do
     { identity: identity, nonce: nonce, role: role, addr: "", cert: None }
   end
 
+  doc "As `make_hello_role`, advertising [addr] (\"host:port\", this node's listen address; \"\" for none)."
   fn make_hello_addr(identity : NodeIdentity.Identity, nonce : String, role : String, addr : String) : Hello do
     { identity: identity, nonce: nonce, role: role, addr: addr, cert: None }
   end
 
+  doc """
+  A certificate-mode hello: as `make_hello_addr`, carrying this node's signed
+  certificate [cert] (`NodeCert.to_bytes`) and the connection's ephemeral
+  X25519 public key [eph].
+  """
   fn make_hello_cert(identity : NodeIdentity.Identity, nonce : String, role : String, addr : String,
                      cert : List(Int), eph : List(Int)) : Hello do
     { identity: identity, nonce: nonce, role: role, addr: addr, cert: Some({ cert: cert, eph: eph }) }
   end
 
-  -- Serialize a Hello to MessagePack bytes: [name, node_id, incarnation,
-  -- nonce, role] plus [addr] when one is set (so a hello without an address
-  -- is byte-identical to the pre-service shape).
+  doc """
+  Serialize [h] to MessagePack bytes: [name, node_id, incarnation, nonce,
+  role], then [addr] when it is not "" (so a hello without an address is
+  byte-identical to the pre-service shape). A certificate hello always
+  carries the address (possibly "") and then ["cert1", Bin(cert), Bin(eph)].
+  """
   fn encode_hello(h : Hello) : List(Int) do
     let tail = match h.cert do
       Some(hc) -> [Msgpack.str(h.addr), Msgpack.array([Msgpack.str("cert1"), Msgpack.bin(hc.cert), Msgpack.bin(hc.eph)])]
@@ -66,6 +79,12 @@ mod Handshake do
       Cons(Msgpack.str(h.role), tail)))))))
   end
 
+  doc """
+  Decode the bytes of `encode_hello`, and the older shapes: a 6-element hello
+  (no certificate), a 5-element one (no address: `addr` ""), and a
+  4-element one from before roles (read as a control connection). `Err`
+  for bytes that are not MessagePack, or "Handshake: malformed hello".
+  """
   fn decode_hello(bytes : List(Int)) : Result(Hello, String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -102,9 +121,14 @@ mod Handshake do
     end
   end
 
-  -- Given the cluster [secret], the nonce *we* issued to the peer, the peer's
-  -- decoded Hello, and the peer's proof, decide: authenticated peer identity
-  -- or a rejection reason. The proof must bind to the nonce we issued.
+  doc """
+  Shared-secret mode's decision. Given the cluster [secret], the nonce
+  [our_nonce] *we* issued to the peer, the peer's decoded hello [peer], and
+  the peer's proof [peer_proof]: `Ok` with the identity the hello claims
+  when the proof is `ClusterAuth.prove(secret, our_nonce)`, else
+  `Err("Handshake: peer failed authentication")`. A proof made for another
+  nonce never verifies.
+  """
   fn authenticate(secret : String, our_nonce : String, peer : Hello,
                   peer_proof : String) : Result(NodeIdentity.Identity, String) do
     if ClusterAuth.verify(secret, our_nonce, peer_proof) do
@@ -120,7 +144,8 @@ mod Handshake do
   The two modes do not mix: a certificate-mode node refuses a shared-secret
   peer and a shared-secret node refuses a certificate-mode one, each naming
   what the other side must be given. (A pre-11a node cannot decode a
-  certificate hello at all and fails with "malformed hello".)
+  certificate hello at all and fails with "malformed hello".) `Ok(())` when
+  the modes agree.
   """
   fn check_mode(mine : ClusterAuth.Auth, peer : Hello) : Result((), String) do
     match (mine, peer.cert) do

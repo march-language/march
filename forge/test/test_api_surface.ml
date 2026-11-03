@@ -294,10 +294,11 @@ let test_extract_from_directory_reports_parse_failures () =
 (* ------------------------------------------------------------------ *)
 
 let make_fn name params ret =
-  Resolver_api_surface.{ name; params_raw = params; return_raw = ret; clauses_raw = "" }
+  Resolver_api_surface.{ name; params_raw = params; return_raw = ret;
+                         clauses_raw = ""; sig_ast = None }
 
 let make_ty name body =
-  Resolver_api_surface.{ type_name = name; body_raw = body }
+  Resolver_api_surface.{ type_name = name; body_raw = body; type_ast = None }
 
 let make_surface fns types =
   Resolver_api_surface.{ fns; types }
@@ -492,6 +493,82 @@ let test_unannotated_reformat_is_still_a_patch () =
     (verdict = Resolver_api_surface.Ok)
 
 (* ------------------------------------------------------------------ *)
+(*  Structural comparison: the false MAJOR, and what must stay MAJOR    *)
+(* ------------------------------------------------------------------ *)
+
+(* specs/2026-09-18-forge-p1-design.md section 3, step 1, without the
+   typechecker: parameter names dropped, type variables alpha-renamed.  Each "now a PATCH" case below was MAJOR under
+   the string diff; each "Box gains a parameter" / "constructors made private"
+   case was a PATCH under it, because the type's parameters and constructor
+   visibility were not part of the comparison at all. *)
+
+(* The bump [diff] requires between two versions of one module body. *)
+let required ~old_src ~new_src =
+  let surface src =
+    let s = Resolver_api_surface.extract_from_string
+        ("mod Pkg do\n" ^ src ^ "\nend\n") in
+    (* An unparsed fixture extracts to an EMPTY surface and diffs as no
+       change; insist something was read. *)
+    Alcotest.(check bool) "the fixture parsed and has a public surface" true
+      (s.Resolver_api_surface.fns <> [] || s.Resolver_api_surface.types <> []);
+    s in
+  let changes =
+    Resolver_api_surface.diff ~old_:(surface old_src) ~new_:(surface new_src) in
+  Resolver_api_surface.string_of_change_kind
+    (Resolver_api_surface.required_bump changes)
+
+let check_bump what want ~old_src ~new_src =
+  Alcotest.(check string) what want (required ~old_src ~new_src)
+
+let test_renames_are_a_patch () =
+  check_bump "parameter renamed" "PATCH"
+    ~old_src:"fn inc(x : Int) : Int do x + 1 end"
+    ~new_src:"fn inc(n : Int) : Int do n + 1 end";
+  check_bump "type variable renamed" "PATCH"
+    ~old_src:"fn first(xs : List(a), d : a) : a do d end"
+    ~new_src:"fn first(xs : List(elem), d : elem) : elem do d end";
+  check_bump "type variables renamed in a multi-head fn" "PATCH"
+    ~old_src:"fn pick(x : a, y : b) : a do x end"
+    ~new_src:"fn pick(p : t, q : u) : t do p end";
+  check_bump "type parameter renamed" "PATCH"
+    ~old_src:"type Box(a) = Box(a) | Empty"
+    ~new_src:"type Box(t) = Box(t) | Empty";
+  check_bump "record type parameter renamed" "PATCH"
+    ~old_src:"type Pair(a, b) = { fst : a, snd : b }"
+    ~new_src:"type Pair(x, y) = { fst : x, snd : y }"
+
+let test_real_changes_stay_major () =
+  check_bump "two type variables identified" "MAJOR"
+    ~old_src:"fn pair(x : a, y : b) : (a, b) do (x, y) end"
+    ~new_src:"fn pair(x : a, y : a) : (a, a) do (x, y) end";
+  check_bump "returns the other type variable" "MAJOR"
+    ~old_src:"fn k(x : a, y : b) : a do x end"
+    ~new_src:"fn k(x : a, y : b) : b do y end";
+  check_bump "parameters swapped" "MAJOR"
+    ~old_src:"fn f(x : Int, s : String) : Int do x end"
+    ~new_src:"fn f(s : String, x : Int) : Int do x end";
+  check_bump "default argument removed" "MAJOR"
+    ~old_src:"fn greet(name : String, g : String \\\\ \"Hi\") : String do g end"
+    ~new_src:"fn greet(name : String, g : String) : String do g end";
+  check_bump "constructor added (breaks an exhaustive match)" "MAJOR"
+    ~old_src:"type Color = Red | Blue"
+    ~new_src:"type Color = Red | Blue | Green";
+  (* Not an alias: `type UserId = Int` is a variant with one constructor
+     named `Int`, so this is a different parameter type. *)
+  check_bump "one-constructor type replaced by its constructor's name" "MAJOR"
+    ~old_src:"type UserId = Int\nfn find(id : UserId) : Bool do true end"
+    ~new_src:"type UserId = Int\nfn find(id : Int) : Bool do true end"
+
+(* Two former false PATCHes. *)
+let test_type_shape_changes_are_major () =
+  check_bump "type gains a parameter" "MAJOR"
+    ~old_src:"type Box(a) = Box(a) | Empty"
+    ~new_src:"type Box(a, b) = Box(a) | Empty";
+  check_bump "constructors made private (opaque)" "MAJOR"
+    ~old_src:"type Token = Token(String)"
+    ~new_src:"opaque type Token = Token(String)"
+
+(* ------------------------------------------------------------------ *)
 (*  Suite                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -554,5 +631,13 @@ let () =
         test_annotated_body_change_is_still_a_patch;
       Alcotest.test_case "unannotated reformat is still a PATCH"    `Quick
         test_unannotated_reformat_is_still_a_patch;
+    ];
+    "structural-comparison", [
+      Alcotest.test_case "renames are a PATCH"                      `Quick
+        test_renames_are_a_patch;
+      Alcotest.test_case "real changes stay MAJOR"                  `Quick
+        test_real_changes_stay_major;
+      Alcotest.test_case "type shape changes are MAJOR"             `Quick
+        test_type_shape_changes_are_major;
     ];
   ]

@@ -7,45 +7,52 @@
 -- and blocks until the actor calls Actor.reply(reply_to, result).
 -- Returns Ok(result), or Err(reason) if no reply arrives.
 --
--- call protocol:
---   Pass a zero-arg sentinel constructor as the call message. Its tag
---   selects which handler receives the call, and the runtime injects the
---   caller (the "reply channel") as that handler's first argument. The
---   handler must call Actor.reply(reply_to, result) to unblock the caller;
---   if it never replies, call returns Err("no reply ...").
+-- call protocol: pass a zero-arg sentinel constructor as the call message.
+-- Its tag selects which handler receives the call, and the runtime injects
+-- the caller (the "reply channel") as that handler's first argument. The
+-- handler must call Actor.reply(reply_to, result) to unblock the caller;
+-- if it never replies, call returns Err("no reply ...").
 --
---   So the call handler must be declared FIRST in the actor (tag 0), and
---   the sentinel must have a name distinct from that handler to avoid a
---   constructor-name clash.
+-- So the call handler must be declared FIRST in the actor (tag 0), and
+-- the sentinel must have a name distinct from that handler to avoid a
+-- constructor-name clash.
 --
--- Example:
+-- Example (runs as written: "Try it" on the docs page, or natively):
 --
---   type GetReq = GetReq          -- zero-arg sentinel for the sync call
+-- ```march try
+-- type GetReq = GetReq          -- zero-arg sentinel for the sync call
 --
---   actor Counter do
---     state { count : Int }
---     init  { count: 0 }
+-- actor Counter do
+--   state { count : Int }
+--   init  { count: 0 }
 --
---     -- First handler (tag 0) = the call handler; reply_to is the caller.
---     on GetCount(reply_to) do
---       Actor.reply(reply_to, state.count)
---       state
---     end
---
---     on Inc(n : Int) do
---       { state with count: state.count + n }
---     end
+--   -- First handler (tag 0) = the call handler; reply_to is the caller.
+--   on GetCount(reply_to) do
+--     Actor.reply(reply_to, state.count)
+--     state
 --   end
 --
---   fn main() do
---     let pid = spawn(Counter)
---     Actor.cast(pid, Inc(1))
---     run_until_idle()
---     match Actor.call(pid, GetReq, 5000) do
---       Ok(n)  -> println("count = " ++ int_to_string(n))
---       Err(e) -> println("error: " ++ e)
---     end
+--   on Inc(n : Int) do
+--     { state with count: state.count + n }
 --   end
+-- end
+--
+-- fn main(io : Cap(IO)) do
+--   let pid = spawn(Counter)
+--   Actor.cast(pid, Inc(1))
+--   run_until_idle()
+--   match Actor.call(pid, GetReq, 5000) do
+--     Ok(n)  -> println("count = " ++ int_to_string(n))
+--     Err(e) -> println("error: " ++ e)
+--   end
+-- end
+-- ```
+--
+-- ```output
+-- count = 1
+-- ```
+--
+-- doc: try
 
 mod Actor do
   needs IO
@@ -133,12 +140,22 @@ mod Actor do
   reads out of a supervisor's state) back into a Pid. An unknown index
   resolves to a safe already-dead sentinel, so `is_alive` on it is `false`
   and `send` to it returns `None`.
+
+      let c = Actor.introspect(io)
+      let p = Actor.pid_from_int(c, pid_to_int(worker))   -- the same actor as worker
   """
   fn pid_from_int(_c : Cap(Actor.Introspect), n : Int) do
     pid_of_int(n)
   end
 
-  doc "Fire-and-forget: enqueue msg in the actor's mailbox without waiting."
+  doc """
+  Fire-and-forget: enqueue msg in the actor's mailbox without waiting.
+  `msg` is a constructor the actor has an `on` handler for. Delivery is
+  subject to the actor's mailbox policy (see `set_queue_limit`).
+
+      Actor.cast(pid, Inc(1))
+      run_until_idle()          -- let the actor process it
+  """
   fn cast(pid, msg) do
     actor_cast(pid, msg)
   end
@@ -151,6 +168,13 @@ mod Actor do
   timeout_ms is a real wall-clock deadline on both backends: a reply produced
   after it has passed is discarded and the call returns Err, so the timeout you
   write is a bound you can build retry and fallback logic on.
+
+      match Actor.call(pid, GetReq, 5000) do
+        Ok(n)  -> println("count = " ++ int_to_string(n))
+        Err(e) -> println("no answer: " ++ e)
+      end
+
+  See the module header for a complete program.
   """
   fn call(pid, msg, timeout_ms) do
     actor_call(pid, msg, timeout_ms)
@@ -160,6 +184,11 @@ mod Actor do
   Reply to a synchronous call from within an actor handler.
   ref_id is the reply channel — the handler's first argument, injected by
   Actor.call. result is the value to return to the caller.
+
+      on GetCount(reply_to) do
+        Actor.reply(reply_to, state.count)
+        state
+      end
   """
   fn reply(ref_id, result) do
     actor_reply(ref_id, result)
@@ -177,6 +206,8 @@ mod Actor do
   timeout Err from Actor.call. Callers that rely on Actor.call against a
   bounded actor should prefer the block policy (3) instead, so no request
   or reply is ever silently discarded.
+
+      Actor.set_queue_limit(pid, 1000, 2)   -- keep the newest 1000 messages
   """
   fn set_queue_limit(pid, limit, policy) do
     actor_set_mailbox_limit(pid, limit, policy)
@@ -187,6 +218,10 @@ mod Actor do
   Returns false if the name is already held by a LIVE actor, or if `pid` is
   dead. A registered actor's name is carried forward across supervisor
   restarts, so callers should hold the name, not the Pid.
+
+      let pid = spawn(Counter)
+      Actor.register(pid, "counter")          -- true
+      Actor.register(spawn(Counter), "counter")  -- false: held by a live actor
   """
   fn register(pid, name) do
     actor_register(pid, name)
@@ -208,6 +243,9 @@ mod Actor do
   Stopping a supervisor stops its children first, in REVERSE declaration
   order, each with its own `shutdown` budget from the `supervise` block's
   child spec (`Worker w shutdown 5000`), defaulting to 5 seconds.
+
+      Actor.stop(pid, 5000)      -- true: drain for up to 5 s, then die normally
+      Actor.stop(pid, 5000)      -- false: already stopping
   """
   fn stop(pid, timeout_ms) do
     actor_stop(pid, timeout_ms)
@@ -215,13 +253,25 @@ mod Actor do
 
   doc """
   Is `pid` stopping — accepting no new messages, but not dead yet? `is_alive`
-  alone cannot express this: a draining actor is still alive.
+  alone cannot express this: a draining actor is still alive. `false` for a
+  live actor that is not stopping and for a dead one.
+
+      Actor.stop(pid, 5000)
+      Actor.is_draining(pid)     -- true until the queue is worked off
   """
   fn is_draining(pid) do
     actor_is_draining(pid)
   end
 
-  doc "Remove a name. Returns false if it was not registered."
+  doc """
+  Remove a name. Returns false if it was not registered.  Needs no
+  capability: releasing a name reveals nothing.
+
+  ## Examples
+
+      march> Actor.unregister("doc_never_registered")
+      false
+  """
   fn unregister(name) do
     actor_unregister(name)
   end
@@ -232,6 +282,11 @@ mod Actor do
   supervised actor is waiting out its restart backoff, which is the honest
   signal that the service is mid-restart. Registering is not authority;
   resolving a name you were never handed is, so this takes the cap.
+
+      match Actor.whereis(c, "counter") do
+        Some(pid) -> Actor.cast(pid, Inc(1))
+        None      -> ()        -- not running, or mid-restart
+      end
   """
   fn whereis(_c : Cap(Actor.Introspect), name) do
     actor_whereis(name)
@@ -266,13 +321,18 @@ mod Actor do
         Nil                   -> ()
       end
 
-  A snapshot: it walks `Actor.list(c)` and asks `mailbox_size` of each, so an
+  The depth is the actor's waiting work, `mailbox_backlog`: its queued
+  messages plus any that an `Actor.call` it is blocked in has set aside until
+  the reply. An actor stuck in a slow call with work piling up is exactly the
+  one this should find, and `mailbox_size` alone reads 0 for it.
+
+  A snapshot: it walks `Actor.list(c)` and asks `mailbox_backlog` of each, so an
   actor can die or drain between the walk and your reaction. Ties keep spawn
   order. Cost is one pass over every live actor plus a sort, so call it from a
   timer, not from a hot path.
   """
   fn top_by_mailbox(c : Cap(Actor.Introspect), n : Int) : List((Pid(a), Int)) do
-    let depths = List.map(list(c), fn p -> (p, mailbox_size(p)))
+    let depths = List.map(list(c), fn p -> (p, mailbox_backlog(p)))
     let deeper = fn (a, b) ->
       match a do
         (_, da) -> match b do (_, db) -> da > db end
@@ -288,15 +348,20 @@ mod Actor do
       List.each(Actor.over_mailbox(c, 500), fn hot ->
         match hot do (p, d) -> log_slow_actor(p, d) end)
 
-  Same snapshot caveats as `top_by_mailbox`. A threshold below zero returns
-  every live actor.
+  Depth is `mailbox_backlog`, as for `top_by_mailbox`. Same snapshot caveats.
+  A threshold below zero returns every live actor.
   """
   fn over_mailbox(c : Cap(Actor.Introspect), threshold : Int) : List((Pid(a), Int)) do
-    let depths = List.map(list(c), fn p -> (p, mailbox_size(p)))
+    let depths = List.map(list(c), fn p -> (p, mailbox_backlog(p)))
     List.filter(depths, fn pd -> match pd do (_, d) -> d > threshold end)
   end
 
-  doc "Every currently-registered name."
+  doc """
+  Every currently-registered name, as a list of strings.  A snapshot, like
+  `list`.
+
+      List.each(Actor.registered(c), fn name -> println(name))
+  """
   fn registered(_c : Cap(Actor.Introspect)) do
     actor_registered()
   end
@@ -333,6 +398,10 @@ mod Actor do
   including after the timer has already fired or been cancelled already
   (both are harmless no-ops) — delivers nothing if called before the
   deadline.
+
+      let ref = Actor.send_after(pid, Tick, 1000)
+      Actor.cancel_timer(ref)    -- Tick is never delivered
+      Actor.cancel_timer(ref)    -- a second cancel is a no-op
   """
   fn cancel_timer(ref) do
     actor_cancel_timer(ref)

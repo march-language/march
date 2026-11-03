@@ -17,8 +17,15 @@
 -- refused).
 --
 -- R3 of specs/plans/2026-09-28-observe-recon-shell-plan.md.
+--
+-- Every reading is of the live program, so the examples are plain code; only
+-- `format_top`, which renders rows you hand it, carries runnable ones. Every
+-- reader answers its empty value (Nil, None, zeros) when the query fails.
+--
+-- doc: try
 mod Recon do
   needs Actor.Introspect
+  needs Actor.Debug
 
   -- One live actor, as `info` and the other actor views report it.
   type ActorInfo = {
@@ -35,6 +42,37 @@ mod Recon do
     msgs_out : Int,
     crashes : Int,
     child_crashes : Int
+  }
+
+  -- A supervisor's restart policy: `policy` (one_for_one, one_for_all or rest_for_one), `limit` restarts allowed within `window_secs`, and `held`, how many are inside the window now.
+  type Supervision = {
+    policy : String,
+    limit : Int,
+    window_secs : Int,
+    held : Int
+  }
+
+  -- One row of `top`: who the actor is, what it was ranked on, how big it is, and how it
+  -- is supervised. `value` is the ranked metric; `link` is "supervised" (a supervise block
+  -- restarts it), "spawned" (nobody restarts it, but an actor spawned it) or "none"
+  -- (spawned from `main` or a task). `parent` and `parent_type` name its supervisor, and
+  -- `supervision` is Some only when the row is itself a supervisor.
+  type TopRow = {
+    pid : Int,
+    type_name : String,
+    names : List(String),
+    status : String,
+    value : Int,
+    mbox : Int,
+    stack_bytes : Int,
+    link : String,
+    parent : Option(Int),
+    parent_type : String,
+    spawned_by : Option(Int),
+    children : Int,
+    crashes : Int,
+    child_crashes : Int,
+    supervision : Option(Supervision)
   }
 
   -- A supervision-tree node: pid, actor type, registered names, children.
@@ -63,6 +101,19 @@ mod Recon do
 
   -- Hot-reload epochs: the current one and (epoch, pins) for every pinned epoch.
   type EpochReport = { current : Int, pins : List((Int, Int)) }
+
+  -- The version of a reloadable function a node runs: `impl_hash` is the
+  -- code's identity (what `forge deploy hot` diffs), `baseline_hash` the one
+  -- the program was built with, `patched` whether they differ, `epoch` the hot-reload epoch
+  -- that activated it, and `activated_at_ms` when (0 for the baseline).
+  type FnVersion = {
+    name : String,
+    impl_hash : String,
+    baseline_hash : Option(String),
+    patched : Bool,
+    epoch : Int,
+    activated_at_ms : Int
+  }
 
   -- ── Decoding the envelope ─────────────────────────────────────────────
 
@@ -158,7 +209,12 @@ mod Recon do
     end
   end
 
-  doc "Every live actor, deepest mailbox first."
+  doc """
+  Every live actor (up to 10000), deepest mailbox first. Nil if the query
+  fails.
+
+      let busy = List.filter(Recon.actors(c), fn a -> a.mbox > 100)
+  """
   fn actors(_c : Cap(Actor.Introspect)) : List(ActorInfo) do
     match ask("ACTORS mbox 10000") do
       Ok(d) -> List.map(list_of(d, "actors"), actor_info)
@@ -178,12 +234,142 @@ mod Recon do
   children's crashes in the last hour), "slices", "msgs_in" or "msgs_out"
   (cumulative since spawn; see `proc_window` for a rate). An unknown `attr`
   gives Nil.
+
+      match Recon.proc_count(c, "mbox", 1) do
+        Cons((pid, depth), _) -> println(int_to_string(pid) ++ ": " ++ int_to_string(depth))
+        Nil -> println("no actors")
+      end
   """
   fn proc_count(_c : Cap(Actor.Introspect), attr : String, n : Int) : List((Int, Int)) do
     match ask("TOP " ++ attr ++ " " ++ int_to_string(n) ++ counter_window(attr)) do
       Ok(d) -> List.map(list_of(d, "top"), fn r -> (int_of(r, "pid"), int_of(r, "value")))
       Err(_) -> Nil
     end
+  end
+
+  pfn supervision_of(j : Json.JsonValue) : Option(Supervision) do
+    match Json.get(j, "supervisor") do
+      Some(Json.Object(_) as sj) ->
+        Some({ policy: str_of(sj, "strategy"), limit: int_of(sj, "max_restarts"),
+               window_secs: int_of(sj, "window_secs"), held: int_of(sj, "restarts_held") })
+      _ -> None
+    end
+  end
+
+  pfn top_row(r : Json.JsonValue) : TopRow do
+    {
+      pid: int_of(r, "pid"),
+      type_name: str_of(r, "type"),
+      names: strings(list_of(r, "names")),
+      status: str_of(r, "status"),
+      value: int_of(r, "value"),
+      mbox: int_of(r, "mbox"),
+      stack_bytes: int_of(r, "stack_bytes"),
+      link: str_of(r, "link"),
+      parent: opt_int(r, "parent"),
+      parent_type: str_of(r, "parent_type"),
+      spawned_by: opt_int(r, "spawned_by"),
+      children: int_of(r, "children"),
+      crashes: int_of(r, "crashes"),
+      child_crashes: int_of(r, "child_crashes"),
+      supervision: supervision_of(r)
+    }
+  end
+
+  doc """
+  The `n` live actors highest on `attr`, biggest first, each with its supervision.
+  Equal values are ordered by pid, so the same node state gives the same list.
+
+  `attr` is "mbox" (or "mailbox"; waiting work: queued plus held), "stack" (committed machine-stack
+  bytes, the memory the runtime can attribute to one actor), "crashes" (its own and its
+  children's in the last hour), or "slices", "msgs_in", "msgs_out" (cumulative since
+  spawn; see `proc_window` for a rate). An unknown `attr` gives Nil. Heap bytes owned by
+  an actor are not tracked, so there is no "heap" ranking.
+
+      Recon.top(c, "mbox", 10)
+  """
+  fn top(_c : Cap(Actor.Introspect), attr0 : String, n : Int) : List(TopRow) do
+    let attr = if attr0 == "mailbox" do "mbox" else attr0 end
+    match ask("TOP " ++ attr ++ " " ++ int_to_string(n) ++ counter_window(attr)) do
+      Ok(d) -> List.map(list_of(d, "top"), top_row)
+      Err(_) -> Nil
+    end
+  end
+
+  pfn clip(s : String, w : Int) : String do
+    if string_length(s) > w do string_slice(s, 0, w) else s end
+  end
+
+  pfn cell(s : String, w : Int) : String do String.pad_right(clip(s, w), w, " ") end
+
+  pfn num_cell(n : Int, w : Int) : String do String.pad_left(int_to_string(n), w, " ") end
+
+  pfn label_of(r : TopRow) : String do
+    match r.names do
+      Cons(n, _) -> n
+      Nil -> if r.type_name == "" do "-" else r.type_name end
+    end
+  end
+
+  pfn supervised_by(r : TopRow) : String do
+    match r.parent do
+      Some(p) ->
+        int_to_string(p) ++ (if r.parent_type == "" do "" else " (" ++ r.parent_type ++ ")" end)
+      None ->
+        match r.spawned_by do
+          Some(p) -> "spawned by " ++ int_to_string(p)
+          None -> "-"
+        end
+    end
+  end
+
+  pfn policy_of(r : TopRow) : String do
+    match r.supervision do
+      Some(s) ->
+        s.policy ++ " " ++ int_to_string(s.held) ++ "/" ++ int_to_string(s.limit)
+          ++ " in " ++ int_to_string(s.window_secs) ++ "s, " ++ int_to_string(r.children) ++ " kids"
+      None -> "-"
+    end
+  end
+
+  pfn top_line(r : TopRow) : String do
+    num_cell(r.pid, 7) ++ "  " ++ cell(label_of(r), 16) ++ " " ++ cell(r.status, 8)
+      ++ num_cell(r.mbox, 8) ++ num_cell(r.stack_bytes, 9) ++ num_cell(r.value, 9)
+      ++ num_cell(r.crashes + r.child_crashes, 8) ++ "  " ++ cell(r.link, 11)
+      ++ cell(supervised_by(r), 22) ++ policy_of(r)
+  end
+
+  doc """
+  `rows` (from `top`) as a table, one line per actor and a header line, in the order given.
+  The ranked column is headed `VALUE`; `NAME` is the first registered name,
+  else the actor type, and long cells are clipped to their column. No trailing
+  newline; an empty `rows` gives the header line alone.
+
+  ## Examples
+
+      march> let row = { pid: 12, type_name: "Worker", names: ["billing"], status: "running", value: 40, mbox: 40, stack_bytes: 8192, link: "supervised", parent: Some(3), parent_type: "AppSup", spawned_by: Some(3), children: 0, crashes: 1, child_crashes: 0, supervision: None }
+      march> List.length(String.split(Recon.format_top([row, row]), "\n"))
+      3
+      march> let row = { pid: 12, type_name: "Worker", names: ["billing"], status: "running", value: 40, mbox: 40, stack_bytes: 8192, link: "supervised", parent: Some(3), parent_type: "AppSup", spawned_by: Some(3), children: 0, crashes: 1, child_crashes: 0, supervision: None }
+      march> List.nth(String.split(Recon.format_top([row]), "\n"), 1)
+      "     12  billing          running       40     8192       40       1  supervised 3 (AppSup)            -"
+      march> List.length(String.split(Recon.format_top([]), "\n"))
+      1
+  """
+  fn format_top(rows : List(TopRow)) : String do
+    let head = String.pad_left("PID", 7, " ") ++ "  " ++ cell("NAME", 16) ++ " " ++ cell("STATUS", 8)
+      ++ String.pad_left("MBOX", 8, " ") ++ String.pad_left("STACK", 9, " ")
+      ++ String.pad_left("VALUE", 9, " ") ++ String.pad_left("CRASHES", 8, " ") ++ "  "
+      ++ cell("LINK", 11) ++ cell("SUPERVISOR", 22) ++ "POLICY (held/max in window)"
+    String.join(Cons(head, List.map(rows, top_line)), "\n")
+  end
+
+  doc """
+  Print `top(c, attr, n)` as a table: the one-liner for the remote shell,
+  `Recon.print_top(intro, "stack", 10)`. See `format_top` for the layout.
+  """
+  fn print_top(c : Cap(Actor.Introspect), attr : String, n : Int) : Unit do
+    println(format_top(top(c, attr, n)))
   end
 
   pfn counter(a : ActorInfo, attr : String) : Int do
@@ -204,6 +390,9 @@ mod Recon do
   Like `proc_count` for "slices", "msgs_in" or "msgs_out", but ranked by how
   much each rose over the next `window_ms`: two samples, with this green
   thread asleep between them. An actor born during the window counts from 0.
+  Any other `attr` ranks by mailbox depth growth.
+
+      Recon.proc_window(c, "msgs_in", 5, 1000)   -- top 5 receivers over 1 s
   """
   fn proc_window(c : Cap(Actor.Introspect), attr : String, n : Int, window_ms : Int) : List((Int, Int)) do
     let before = List.map(actors(c), fn a -> (a.pid, counter(a, attr)))
@@ -223,6 +412,15 @@ mod Recon do
   The supervision tree: one node per root (an actor with no supervisor that
   supervises or spawned something live), children nested. Actors in neither
   role are left out; `actors` lists everything.
+
+      fn show(n : Recon.SupNode, depth : Int) : Unit do
+        match n do
+          Recon.SupNode(pid, ty, _, kids) ->
+            println(String.repeat("  ", depth) ++ ty ++ " " ++ int_to_string(pid))
+            List.each(kids, fn k -> show(k, depth + 1))
+        end
+      end
+      List.each(Recon.tree(c), fn r -> show(r, 0))
   """
   fn tree(_c : Cap(Actor.Introspect)) : List(SupNode) do
     match ask("TREE") do
@@ -231,7 +429,13 @@ mod Recon do
     end
   end
 
-  doc "Actors, queued messages, memory and crash totals from one snapshot."
+  doc """
+  Actors, queued messages, memory and crash totals from one snapshot. All
+  zeros and Nones if the query fails.
+
+      let s = Recon.node_stats(c)
+      println(int_to_string(s.actors) ++ " actors, " ++ int_to_string(s.queued) ++ " queued")
+  """
   fn node_stats(_c : Cap(Actor.Introspect)) : NodeStats do
     match ask("SNAPSHOT mem,sched,crashes") do
       Ok(d) ->
@@ -252,7 +456,11 @@ mod Recon do
     end
   end
 
-  doc "The last `n` crashes (at most 256), newest first, without their messages."
+  doc """
+  The last `n` crashes (at most 256), newest first, without their messages.
+
+      List.each(Recon.crashes(c, 10), fn r -> println(r.type_name ++ " " ++ r.kind))
+  """
   fn crashes(_c : Cap(Actor.Introspect), n : Int) : List(CrashReport) do
     match ask("CRASHES " ++ int_to_string(n)) do
       Ok(d) ->
@@ -264,7 +472,13 @@ mod Recon do
     end
   end
 
-  doc "The current hot-reload epoch and the pins held at each epoch."
+  doc """
+  The current hot-reload epoch and the pins held at each epoch, as
+  `(epoch, pins)` pairs. `{ current: 0, pins: Nil }` if the query fails.
+
+      let e = Recon.epochs(c)
+      println("epoch " ++ int_to_string(e.current))
+  """
   fn epochs(_c : Cap(Actor.Introspect)) : EpochReport do
     match ask("EPOCHS") do
       Ok(d) ->
@@ -282,6 +496,10 @@ mod Recon do
   Each scheduler's utilisation over the next `window_ms`, as (scheduler id,
   fraction busy in 0.0 to 1.0): two samples of its idle time, with this green
   thread asleep between them. Nil under the interpreter (no scheduler threads).
+  The fraction is clamped to 0.0..1.0.
+
+      List.each(Recon.scheduler_usage(c, 1000), fn t ->
+        match t do (id, busy) -> println(int_to_string(id) ++ ": " ++ float_to_string(busy)) end)
   """
   fn scheduler_usage(_c : Cap(Actor.Introspect), window_ms : Int) : List((Int, Float)) do
     match ask("SCHED 0") do
@@ -299,6 +517,58 @@ mod Recon do
           Err(_) -> Nil
         end
       Err(_) -> Nil
+    end
+  end
+
+  -- ── Which code is running ─────────────────────────────────────────────
+
+  doc """
+  Which version of the reloadable function `name` ("Mod.fn", or an actor's
+  "Counter_dispatch") this node runs: its impl_hash, the baseline it was built
+  with, and when the current version was activated. `Err("not_found")` when
+  `name` is not a reload slot of this node (a typo, a function the build does
+  not make reloadable, or an interpreted program).
+
+      match Recon.which(intro, "Billing.total") do
+        Ok(v) -> println(v.impl_hash)
+        Err(e) -> println(e)
+      end
+  """
+  fn which(_c : Cap(Actor.Introspect), name : String) : Result(FnVersion, String) do
+    match ask("WHICH " ++ name) do
+      Ok(d) ->
+        let baseline = match Json.get(d, "baseline_hash") do
+          Some(Json.Str(h)) -> Some(h)
+          _ -> None
+        end
+        let patched = match Json.get(d, "patched") do
+          Some(Json.Bool(b)) -> b
+          _ -> false
+        end
+        Ok({ name: str_of(d, "name"), impl_hash: str_of(d, "impl_hash"),
+             baseline_hash: baseline, patched: patched,
+             epoch: int_of(d, "epoch"), activated_at_ms: int_of(d, "activated_at_ms") })
+      Err(code) -> Err(code)
+    end
+  end
+
+  doc """
+  The source text of the version of `name` this node runs now, as it stood
+  when that version was built and uploaded: the declaration, with the comments
+  up to the next one. Debug tier: it needs `Cap(Actor.Debug)` and a
+  `$MARCH_DEBUG_POLICY` file that lists `SOURCE`, else `Err("policy")`.
+  `Err("no_source")` when the text of this version was never uploaded
+  (`forge deploy hot` uploads it; a node built elsewhere has only its own).
+
+      match Recon.source(debug, "Billing.total") do
+        Ok(text) -> println(text)
+        Err(e) -> println("no source: " ++ e)
+      end
+  """
+  fn source(_d : Cap(Actor.Debug), name : String) : Result(String, String) do
+    match ask("SOURCE local name:" ++ name) do
+      Ok(d) -> Ok(str_of(d, "source"))
+      Err(code) -> Err(code)
     end
   end
 end

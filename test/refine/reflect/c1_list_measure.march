@@ -1,0 +1,18 @@
+mod C1 do
+  @[measure]
+  fn rev1(xs : List(Int)) : List(Int) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> Cons(h, rev1(t))
+    end
+  end
+
+  fn law(xs : List(Int)) : {Unit | len(rev1(xs)) == len(xs)} do
+    ()
+  end
+
+  fn main() : Unit do
+    let _ = law(Nil)
+    ()
+  end
+end

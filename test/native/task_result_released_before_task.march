@@ -1,0 +1,50 @@
+-- A Task's result handed to its awaiter, which releases it and drops the
+-- Task handle while the task's own trampoline may still hold the Task.
+--
+-- When the last reference to a Task goes, its destructor releases the result
+-- only if it is a Float box (task_await_unwrap reads the double out without
+-- consuming it). It used to decide that by reading the RESULT's tag at that
+-- moment -- but any other result belongs to the awaiter, which may already
+-- have freed it: a heap-use-after-free whenever the trampoline's reference
+-- was the last one (ASAN, tcp_recv_eagain_after_park at 14 schedulers, about
+-- 1 run in 800 under load). The trampoline now records "Float box" in the
+-- Task header while it still owns the result.
+--
+-- The tuple legs are the use-after-free shape (ASAN's to catch, via
+-- scripts/native-sanitize-sweep.sh; here they assert the values). The Float
+-- leg pins the other direction: a Float result must still be released when
+-- its Task dies, so live_allocs() stays flat.
+mod TaskResultReleasedBeforeTask do
+  needs IO.Console
+  needs IO.Spawn
+
+  pfn pair_of(n : Int) : (Int, Int) do (n, n * 2) end
+
+  pfn tuple_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let ts = List.map(List.range(0, 8), fn i -> task_spawn(fn _ -> pair_of(i + n)))
+      let s = List.fold_left(ts, 0, fn (a, t) ->
+        let (x, y) = task_await_unwrap(t)
+        a + x + y)
+      tuple_leg(n - 1, acc + s)
+    end
+  end
+
+  pfn float_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> int_to_float(n) *. 0.5)
+      float_leg(n - 1, acc +. task_await_unwrap(t))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+    println("tuples=" ++ int_to_string(tuple_leg(300, 0)))
+    println("floats=" ++ float_to_string(float_leg(4, 0.0)))
+    let b0 = live_allocs()
+    let f = float_leg(2000, 0.0)
+    let b1 = live_allocs()
+    println("floats2k=" ++ float_to_string(f) ++ " leaked=" ++ int_to_string(b1 - b0))
+  end
+end

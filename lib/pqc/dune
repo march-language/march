@@ -1,0 +1,24 @@
+; lib/pqc/dune — OCaml bindings for the vendored post-quantum primitives
+; (runtime/pqc.c over runtime/third_party/{mlkem,mldsa}-native), so the
+; interpreter's mlkem768_* / mldsa65_* builtins run the same C as the
+; compiled runtime (runtime/march_pqc.c).
+;
+; pqc.c is copied in (as lib/ed25519 copies tweetnacl.c); its
+; `#include "pqc.h"` and `#include "third_party/..."` resolve through
+; include_dirs against the staged runtime/, which extra_deps makes real
+; tracked dependencies.
+(library
+ (name march_pqc)
+ (foreign_stubs
+  (language c)
+  (names stubs pqc_impl)
+  (include_dirs ../../runtime)
+  (extra_deps
+   ../../runtime/pqc.h
+   (source_tree ../../runtime/third_party/mlkem-native)
+   (source_tree ../../runtime/third_party/mldsa-native))))
+
+(rule
+ (target pqc_impl.c)
+ (deps %{project_root}/runtime/pqc.c)
+ (action (copy %{deps} %{target})))

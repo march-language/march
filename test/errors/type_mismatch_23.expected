@@ -1,0 +1,22 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_23.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+9 |     println(int_to_string(count(names)))
+                                    ^^^^^
+
+    This is argument #1 of a function call.
+
+    the expected type comes from here:
+
+9 |     println(int_to_string(count(names)))
+                              ^^^^^^^^^^^^
+
+    `names` was bound here as `List(String)`:
+
+8 |     let names = ["a", "b"]
+            ^^^^^
+    run `march --explain type_mismatch`
+
+

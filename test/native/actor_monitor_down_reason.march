@@ -15,7 +15,7 @@ mod ActorMonitorDownReason do
     type Down = Down(Int)
   end
 
-  fn wait_for_queued_message(pid) do
+  @[diverges] fn wait_for_queued_message(pid) do
     if mailbox_size(pid) > 0 do
       ()
     else

@@ -298,6 +298,13 @@ typedef struct march_proc {
     _Atomic int                mbox_lock;    /* Spinlock for mailbox access              */
     _Atomic int                mbox_wait_mode; /* 0=not mailbox-waiting, 1=receive any,
                                                   2=actor dispatch waiting for user only. */
+    /* Trace sessions that watch this proc's actor (march_trace.h): bit i is
+     * set while session i's pid filter names this actor.  It fills the hole
+     * the three 4-byte fields above leave before the next pointer, on the
+     * line the send path locks anyway, so the struct does not grow.  Written
+     * only by the trace control plane; the hooks read it relaxed.  A bit can
+     * outlive its session (the producer that notices clears it). */
+    _Atomic uint32_t           trace_mask;
     struct march_proc         *mbox_send_waiters; /* Task 8 (MARCH_MBOX_BLOCK): intrusive
                                                  singly-linked list of sender procs parked
                                                  on THIS proc's full mailbox, threaded
@@ -444,18 +451,35 @@ typedef struct march_proc {
      * cancelled, so a task computing without receiving no longer runs on.
      * Lives on the proc for the same migration reason as crash_jmp. */
     jmp_buf                   *task_jmp;
+    /* Diagnostics (stdlib/diagnostics.march; march_runtime.c's "Diagnostics:
+     * crash observers").  diag_ctx is this green thread's crash context, a
+     * March List((String, DiagnosticValue)) the proc owns one reference to
+     * (NULL = empty; released at the reap through march_diag_proc_exit).
+     * diag_jmp is the landing for a panic an observer raises while this proc
+     * dispatches a crash report (NULL when not dispatching).  Both live on
+     * the proc for the crash_jmp migration reason. */
+    void                      *diag_ctx;
+    jmp_buf                   *diag_jmp;
+    /* The source site of the panic call about to run (march_panic_site,
+     * emitted by lowering right before a direct panic/todo/unreachable
+     * call): a March String literal (never freed) and its line, 0 = none.
+     * Read and cleared by the next march_panic on this proc. */
+    void                      *diag_site_file;
+    int64_t                    diag_site_line;
     _Atomic int                cancel_requested;
     /* The unified epoch model (D12/D33; specs/plans/2026-09-21-distributed-
      * authority-and-deploys-plan.md, II.4.1).  The code epoch this unit of
      * work runs at: every boundary call it makes resolves to the newest
      * version at or before it (march_dispatch_enter_unit).  0 = unpinned,
-     * follow the current version (only the compiled `main` green thread).
+     * follow the current version (runtime maintenance daemons only).
      * Set at spawn, inherited from the spawning proc (else the current
      * epoch), with one pin on that epoch (march_epoch_pin), dropped at the
      * reap.  Only the proc itself changes it afterwards (an actor advancing
      * at its marker); other threads read it (drains) -- hence atomic, and
      * per proc, never TLS: procs migrate across OS threads. */
     _Atomic(uint32_t)           code_epoch;
+    /* Owned by this green thread; follows it across scheduler migration. */
+    void                      *code_frames;
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping: this proc's own "fake stack" handle,
      * threaded through __sanitizer_start_switch_fiber/finish_switch_fiber
@@ -512,6 +536,15 @@ typedef struct march_proc {
      * primitives append to this buffer instead of writing to stdout.  Only
      * the proc's own green thread sets, clears and writes it. */
     struct march_out_capture   *out_capture;
+    /* The pid index (+1; 0 = none) of the actor this proc runs, stored by
+     * activate_actor_green_thread BEFORE the proc is published to senders, so
+     * an actor that has not run yet already has one.  Read only by the trace
+     * hooks (march_trace.h); never dereferences the actor's meta, which can be
+     * retired while its proc still exists.  LAST, like the observe counters
+     * above: placed earlier it shifted every field after it, and the
+     * multi-producer send benchmark (4 senders into one mailbox) moved by
+     * about 10%: a cache-line layout effect, not instructions. */
+    _Atomic int64_t            actor_pid1;
 } march_proc;
 
 /* Bump a single-writer counter: relaxed load + store, the same instructions
@@ -554,9 +587,10 @@ typedef struct march_scheduler {
     pthread_t       thread;       /* OS thread handle (for schedulers 1..N-1)    */
     /* What this scheduler thread has done since the last march_sched_init;
      * see march_sched_thread_stat.  `started` is written by march_sched_run
-     * before the thread exists; the rest only by the owning thread, so they
-     * are plain fields, exact once march_sched_run has returned and a racy
-     * snapshot before that. */
+     * before the thread exists; the rest only by the owning thread.  Every
+     * access is a relaxed __atomic load/store (MARCH_SCHED_STAT_BUMP), so a
+     * read from another thread is a defined but approximate snapshot, exact
+     * once march_sched_run has returned. */
     int             started;      /* thread exists (scheduler 0: always)         */
     int             entered;      /* sched_loop was reached                      */
     int64_t         stat_dispatches;  /* green-thread dispatches                 */
@@ -577,6 +611,12 @@ typedef struct march_scheduler {
                                    * handler.  How the handler tells OUR tick
                                    * from a host's delivery of the same signal
                                    * (which it chains to the host's handler). */
+    /* One deferred call to run on THIS scheduler's native OS-thread stack,
+     * set by march_sched_run_on_sched_stack just before its green thread
+     * switches back here, and run (then cleared) by sched_loop right after
+     * the switch returns, before the proc is re-queued.  Owner thread only. */
+    void          (*after_switch_fn)(void *);
+    void           *after_switch_arg;
     _Atomic int     tls_live;     /* 1 only while this thread is inside
                                    * sched_loop, with its TLS materialised.
                                    * The preempt handler writes TLS only when
@@ -678,6 +718,15 @@ march_proc  *march_sched_spawn_daemon(void (*fn)(void *), void *arg);
 /* Cooperatively yield the CPU back to the scheduler. */
 void         march_sched_yield(void);
 
+/* Run fn(arg) on a native OS-thread stack, never on a green thread's.
+ * From a green thread: yields, the scheduler runs fn(arg) on its own stack
+ * right after the switch (before re-queueing the caller), and the call
+ * returns once the caller is resumed, so fn has finished by then.  Anywhere
+ * else: calls fn(arg) directly.  For work that must not run on a green
+ * stack: under ASAN, pthread_create from a green thread is a silent SIGSEGV
+ * (specs/progress/2026-10-12-asan-ffi-blocking-worker-spawn-sigsegv.md). */
+void         march_sched_run_on_sched_stack(void (*fn)(void *), void *arg);
+
 /* Cooperatively yield until no OTHER process is runnable or mid-work
  * (RUNNABLE, RUNNING, PARKED, or WAITING with a non-empty mailbox).  This is
  * the in-scheduler implementation of run_until_idle(): callable only from
@@ -696,15 +745,17 @@ void         march_sched_exit(void);
 
 /* Return the currently running process (NULL if in scheduler context). */
 march_proc  *march_sched_current(void);
-/* The running proc's code epoch (0 when there is no proc, or it is unpinned).
+/* The running frame's routing epoch, else its proc epoch (0 if neither).
  * What march_dispatch_enter_unit resolves against. */
 uint32_t     march_sched_current_epoch(void);
+/* Unit epoch before saved closure frames; generated service entries only. */
+uint32_t     march_sched_work_epoch(void);
 /* The next proc the running proc spawns starts held (epoch_holds = 1); see
  * march_proc.hold_next_spawn.  The stdlib-only builtin epoch_hold_next_spawn. */
 void         march_sched_hold_next_spawn(void);
 /* Spawn the compiled `main` green thread: like march_sched_spawn[_pinned]
- * (sched_pinned selects scheduler 0), but UNPINNED in the epoch sense
- * (code_epoch 0, follows current), see march_proc.code_epoch. */
+ * (sched_pinned selects scheduler 0), pinned to the baseline image epoch.
+ * A nonreturning old main intentionally retains that epoch. */
 march_proc  *march_sched_spawn_main(void (*fn)(void *), void *arg,
                                     int sched_pinned);
 
@@ -724,6 +775,34 @@ int64_t      march_sched_total_spawned(void);
  * it outright; MARCH_SEND_DROPPED is only ever produced once a caller has
  * opted in via march_sched_set_mbox_limit. */
 int          march_sched_send(march_proc *target, void *msg);
+
+/* ── Actor-event tracing hooks (march_trace.h) ────────────────────────────
+ * g_introspect_armed: bit i set while trace session i records actor events
+ * (Sent, Received, Spawned, Exited, Dropped).  Zero (the common case) costs
+ * the send path one relaxed load of a line nothing writes and a never-taken
+ * branch.  The hooks are defined in march_trace.c; this file carries weak
+ * no-op defaults for builds without it (--compile-so, C harnesses), where
+ * the word is never set so they are never called.  Every hook runs on the
+ * caller's thread, lock-free, with no allocation, and never waits. */
+typedef struct {
+    _Atomic uint32_t word;
+    char             pad[124];     /* the rest of a 128-byte line (Apple silicon's) */
+} march_armed_line;
+extern march_armed_line g_introspect_armed_line;
+/* Alone on its line on purpose: every send loads it, and a neighbour that is
+ * written (a stat counter, a lock) would turn each load into a coherence miss. */
+#define g_introspect_armed (g_introspect_armed_line.word)
+/* [sender] is the sending proc (NULL off a green thread), [target] the
+ * receiving one (NULL: a message to nobody).  [msg] is only inspected for
+ * its constructor tag, never its fields. */
+void march_trace_ev_sent(march_proc *sender, march_proc *target, void *msg);
+void march_trace_ev_received(march_proc *self, void *msg);
+/* reason: MARCH_TRACE_DROP_*.  [target] may be NULL (a dead actor's proc is
+ * gone); [target_pid] is then the pid index, else -2 to derive it. */
+void march_trace_ev_dropped(march_proc *sender, march_proc *target,
+                            int64_t target_pid, void *msg, int reason);
+void march_trace_ev_spawned(march_proc *parent, int64_t parent_pid, int64_t child_pid);
+void march_trace_ev_exited(march_proc *gt, int64_t pid, int reason);
 /* Every entry point below that takes a `march_proc *` other than the caller's
  * own (send, send_control, wake, request_stop, set_mbox_limit, mbox_count)
  * requires the caller to hold it under the rule on march_proc: resolved in a
@@ -771,6 +850,9 @@ void         march_sched_set_msg_dtor(void (*fn)(void *));
  * process. Relaxed atomic read — safe to call from any thread without
  * mbox_lock. Returns 0 if p is NULL. */
 int64_t      march_sched_mbox_count(march_proc *p);
+/* User messages an Actor.call on [p] holds off its mailbox right now (the
+ * proc's own `held`); not part of march_sched_mbox_count. */
+int64_t      march_sched_held_count(march_proc *p);
 
 /* ── Cross-file stat counters (indices 3-5 and 7 of march_sched_stat) ───
  * Reserved slots bumped from outside march_scheduler.c (march_runtime.c and
@@ -1125,6 +1207,17 @@ extern volatile _Thread_local int64_t march_tls_reductions;
  * volatile for the same reason as march_tls_reductions: the value must be
  * re-read rather than cached in a register across a signal delivery point. */
 extern volatile int64_t march_preempt_request;
+
+/* Every C-side write of march_preempt_request goes through this: a relaxed
+ * atomic store, which on arm64/x86-64 is the same single store instruction
+ * as the plain volatile one (no fence), but is not a data race in the C11
+ * sense.  The writers are the preemption signal handler, the yield path and
+ * cancellation, on different threads.  A plain store there is a race TSAN
+ * reports, and a report raised INSIDE the signal handler can self-deadlock
+ * TSAN (specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md).  Compiled
+ * code's `load volatile` read is uninstrumented and stays as it is. */
+#define MARCH_PREEMPT_REQUEST_SET(v) \
+    __atomic_store_n(&march_preempt_request, (int64_t)(v), __ATOMIC_RELAXED)
 
 /* Called by compiled code when march_preempt_request is set.
  * Clears the request, refills the reduction budget, and cooperatively yields

@@ -161,9 +161,9 @@ mod Main do
       -- A handle used after the close (a task outliving its session): an
       -- empty table that keeps nothing.
       Vault.set(t, "late", mk(i))
-      let kept = if Vault.get(t, "late") != None || Vault.size(t) != 0 do 1 else 0 end
+      let kept = if Option.is_some(Vault.get(t, "late")) || Vault.size(t) != 0 do 1 else 0 end
       let left : Option(Vault(Rec)) = Vault.whereis(name)
-      tables(i + 1, stop, found + kept + (if left != None do 1 else 0 end))
+      tables(i + 1, stop, found + kept + (if Option.is_some(left) do 1 else 0 end))
     end
   end
 

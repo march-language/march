@@ -120,12 +120,16 @@ let decode_hashed_def (s : string) : hashed_def option =
 
 (* ── Public API ─────────────────────────────────────────────────────────── *)
 
-let create ~project_root =
+(* [~use_global:false] gives a store with NO global root: nothing is written
+   through to ~/.march/cas and a local miss never consults it. For tests that
+   store synthetic artifacts, which would otherwise outlive the test in the
+   shared global store and turn every later run's first-pass miss into a hit. *)
+let create ?(use_global = true) ~project_root () =
   let local_root = project_root ^ "/.march/cas" in
   mkdir_p (local_root ^ "/objects");
   mkdir_p (local_root ^ "/artifacts");
   let global_root =
-    match Sys.getenv_opt "HOME" with
+    match (if use_global then Sys.getenv_opt "HOME" else None) with
     | Some h ->
       let g = h ^ "/.march/cas" in
       (try mkdir_p (g ^ "/objects"); mkdir_p (g ^ "/artifacts"); Some g
@@ -184,17 +188,32 @@ let compiler_identity : string Lazy.t = lazy (
    binaries.  The runtime sources are NOT part of the compiler executable,
    so compiler_identity does not cover them: editing runtime/march_extras.c
    would still serve the stale binary cached under the same key.  Digest
-   every .c/.h file (sorted name + contents) in the runtime directory. *)
+   every .c/.h file (sorted relative name + contents) below the runtime
+   directory. *)
 let runtime_identity_of_dir (dir : string) : string =
-  let files =
-    try
-      Sys.readdir dir
-      |> Array.to_list
-      |> List.filter (fun f ->
-           Filename.check_suffix f ".c" || Filename.check_suffix f ".h")
-      |> List.sort String.compare
-    with Sys_error _ -> []
+  let rec source_files visited_dirs rel_dir =
+    let path = Filename.concat dir rel_dir in
+    let canonical_dir =
+      try Unix.realpath path with Unix.Unix_error _ -> path
+    in
+    if List.mem canonical_dir visited_dirs then [] else
+      try
+        Sys.readdir path
+        |> Array.to_list
+        |> List.sort String.compare
+        |> List.concat_map (fun name ->
+             let rel_path = Filename.concat rel_dir name in
+             let full_path = Filename.concat dir rel_path in
+             try
+               match (Unix.stat full_path).Unix.st_kind with
+               | Unix.S_DIR -> source_files (canonical_dir :: visited_dirs) rel_path
+               | _ when Filename.check_suffix name ".c"
+                        || Filename.check_suffix name ".h" -> [rel_path]
+               | _ -> []
+             with Unix.Unix_error _ -> [])
+      with Sys_error _ -> []
   in
+  let files = source_files [] "" |> List.sort String.compare in
   let buf = Buffer.create (1 lsl 16) in
   List.iter (fun f ->
     Buffer.add_string buf f;
@@ -299,10 +318,86 @@ let copy_file_exec ~(src : string) ~(dest : string) : bool =
 (* Store the compiled binary IN the cache (by content), not a pointer to it.
    See [artifact_path] for why a pointer is unsound. A failed copy simply
    leaves no entry — a future compile misses and rebuilds, which is correct. *)
+(* ── Write-through to the global store (observability plan B7.3) ─────────
+   [global_root] (~/.march/cas) was created but never written: every project
+   and every fresh clone rebuilt what another had already built with the same
+   compiler, runtime, flags and sources.  Every artifact-store write now also
+   goes to the global store with the same temp+rename discipline
+   ([copy_file_exec]), and a local miss consults the global store and warms
+   the local one from it.  The key already includes the compiler and runtime
+   identities, the target, every codegen flag and the source digest, so a
+   global entry is valid in any project that computes the same key.  Clearing
+   a stale cache now means clearing BOTH artifacts-v2 trees. *)
+let global_artifact_path t ch =
+  Option.map (fun gr -> artifact_path gr ch) t.global_root
+
+(* Every file that belongs to an artifact entry: the blob, its diagnostics
+   and sidecar records ([.diag], [.sidecars]) and its sidecar outputs. *)
+let entry_suffixes () = [ ""; ".diag"; ".sidecars" ] @ [ ".hcr_manifest"; ".schemas.json" ]
+
+(* Copy the [suffixes] of [ch]'s entry that exist under [from_blob] to
+   [to_blob]. *)
+let copy_entry ?(suffixes = entry_suffixes ()) ~from_blob ~to_blob () =
+  List.iter (fun sfx ->
+      let src = from_blob ^ sfx in
+      if Sys.file_exists src then ignore (copy_file_exec ~src ~dest:(to_blob ^ sfx)))
+    suffixes
+
+(* Mirror just-written local entry files ([suffixes]) into the global store. *)
+let write_through ~suffixes t ch =
+  match global_artifact_path t ch with
+  | Some gblob ->
+    copy_entry ~suffixes ~from_blob:(artifact_path t.local_root ch) ~to_blob:gblob ()
+  | None -> ()
+
 let store_artifact (t : t) (ch : string) (path : string) : unit =
   let blob = artifact_path t.local_root ch in
-  if copy_file_exec ~src:path ~dest:blob then
-    Hashtbl.replace t.artifacts ch blob
+  if copy_file_exec ~src:path ~dest:blob then begin
+    Hashtbl.replace t.artifacts ch blob;
+    write_through ~suffixes:[ "" ] t ch
+  end
+
+(* ── Function source text (observe plan R10) ──────────────────────────────
+   A `--hot-reload` build keeps each boundary function's source text under
+   its reload identity, the non-transitive impl_hash a node's WHICH reports,
+   in <root>/sources/<2 hex>/<62 hex>.  The node serves it back through the
+   signed SOURCE verb; `forge deploy hot` uploads it with CAS_PUT kind:source.
+   Content addressed in the sense that the key is the code's identity: the same
+   hash is the same code, so an existing entry is never rewritten.  Not part
+   of an artifact entry (an artifact cache hit does not need it). *)
+let source_max_bytes = 262144
+
+let is_hash64 h =
+  String.length h = 64
+  && String.for_all (fun c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) h
+
+let source_path root h =
+  root ^ "/sources/" ^ String.sub h 0 2 ^ "/" ^ String.sub h 2 62
+
+let store_source_in root h text =
+  let path = source_path root h in
+  if not (Sys.file_exists path) then begin
+    let tmp = path ^ ".tmp" ^ string_of_int (Unix.getpid ()) in
+    (try write_file tmp text; Unix.rename tmp path
+     with Sys_error _ | Unix.Unix_error _ -> (try Sys.remove tmp with Sys_error _ -> ()))
+  end
+
+(** Keep [text] as the source of the function whose impl_hash is [h], in the
+    project store and the global one.  Ignores a malformed hash and text over
+    [source_max_bytes] (a function that long is not shown, not truncated). *)
+let store_source (t : t) (h : string) (text : string) : unit =
+  if is_hash64 h && String.length text <= source_max_bytes then begin
+    store_source_in t.local_root h text;
+    Option.iter (fun gr -> store_source_in gr h text) t.global_root
+  end
+
+(** The source kept for [h]: the project store, else the global one. *)
+let lookup_source (t : t) (h : string) : string option =
+  if not (is_hash64 h) then None
+  else
+    match read_file (source_path t.local_root h) with
+    | Some s -> Some s
+    | None -> Option.bind t.global_root (fun gr -> read_file (source_path gr h))
 
 (* Copy a cached artifact to [dest], returning false if the artifact file is
    gone or the copy fails — callers must treat that as a cache miss and
@@ -340,8 +435,9 @@ let store_sidecars (t : t) (ch : string) (out : string) : unit =
   let stored = List.filter (fun sfx ->
       Sys.file_exists (out ^ sfx) && copy_file_exec ~src:(out ^ sfx) ~dest:(blob ^ sfx))
       sidecar_suffixes in
-  try write_file (sidecar_list_path t ch) (String.concat "\n" stored ^ "\n")
-  with Sys_error _ -> ()
+  (try write_file (sidecar_list_path t ch) (String.concat "\n" stored ^ "\n")
+   with Sys_error _ -> ());
+  write_through ~suffixes:(".sidecars" :: sidecar_suffixes) t ch
 
 (* Restore [ch]'s sidecars next to [out], removing any [out] sidecar the
    cached build did not produce (a stale manifest from another build is
@@ -362,8 +458,40 @@ let restore_sidecars (t : t) (ch : string) (out : string) : bool =
         sidecar_suffixes;
     ok
 
+(* ── Diagnostics replay (observability plan B7.1) ─────────────────────────
+   A successful compile can still print warnings and hints.  A source-level
+   cache hit exits before the front end runs, so without this the next
+   identical build printed nothing: the warnings silently disappeared on a
+   warm cache.  The rendered text the compile printed is stored beside its
+   artifact as [<blob>.diag] (empty when it printed nothing) and replayed on
+   a hit.  An entry with no [.diag] (cached before this existed) is a miss,
+   like a missing [.sidecars] record. *)
+let diag_path t ch = artifact_path t.local_root ch ^ ".diag"
+
+let store_diagnostics (t : t) (ch : string) (text : string) : unit =
+  let path = diag_path t ch in
+  try
+    mkdir_p (Filename.dirname path);
+    let tmp = path ^ ".tmp." ^ string_of_int (Unix.getpid ()) in
+    write_file tmp text;
+    Sys.rename tmp path;
+    write_through ~suffixes:[ ".diag" ] t ch
+  with Sys_error _ | Unix.Unix_error _ -> ()
+
+let lookup_diagnostics (t : t) (ch : string) : string option =
+  match read_file (diag_path t ch) with
+  | Some d -> Some d
+  | None ->
+    (* B7.3: an entry another project wrote through to the global store. *)
+    Option.bind t.global_root (fun gr -> read_file (artifact_path gr ch ^ ".diag"))
+
 let lookup_artifact (t : t) (ch : string) : string option =
   let blob = artifact_path t.local_root ch in
+  (* Local miss, global hit: warm the local store from the global one. *)
+  (if not (Sys.file_exists blob) then
+     match global_artifact_path t ch with
+     | Some gblob when Sys.file_exists gblob -> copy_entry ~from_blob:gblob ~to_blob:blob ()
+     | _ -> ());
   if Sys.file_exists blob then begin
     (* Keep the memo in step with the on-disk truth. *)
     Hashtbl.replace t.artifacts ch blob;

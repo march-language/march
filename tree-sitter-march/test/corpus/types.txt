@@ -212,3 +212,39 @@ end
               (type_identifier))
             (identifier))
           (identifier))))))
+
+================================================================================
+Abstract refinement shorthand
+================================================================================
+mod Foo do fn f(xs : List(a[p]), k : a -> Bool[p]) : Int do 1 end end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (named_param
+          name: (identifier)
+          type: (type_application
+            name: (type_identifier)
+            (abstract_refinement_type
+              base: (type_variable
+                (type_variable))
+              predicate: (identifier)))))
+      (fn_param
+        (named_param
+          name: (identifier)
+          type: (arrow_type
+            param: (type_variable
+              (type_variable))
+            return: (abstract_refinement_type
+              base: (type_constructor
+                (type_constructor))
+              predicate: (identifier)))))
+      return_type: (type_constructor
+        (type_constructor))
+      body: (block_body
+        (integer)))))

@@ -18,21 +18,7 @@ let rec is_float_free = function
   | Tir.TCon _      -> false  (* conservative: definition may contain float fields *)
   | Tir.TVar _      -> false  (* conservative: unknown *)
 
-let gensym =
-  let ctr = ref 0 in
-  fun prefix ->
-    incr ctr;
-    Printf.sprintf "%s_s%d" prefix !ctr
-
 let mk_var name ty = { Tir.v_name = name; v_ty = ty; v_lin = Tir.Unr }
-
-(** Wrap a new EApp in a fresh let binding (ANF-safe strength reduction). *)
-let let_wrap ty op args =
-  let name = gensym "sr" in
-  let var = mk_var name ty in
-  let op_var = mk_var op (Tir.TFn ([], ty)) in
-  let rhs = Tir.EApp (op_var, args) in
-  Tir.ELet (var, rhs, Tir.EAtom (Tir.AVar var))
 
 let rec simplify_expr ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
   (* x + 0 | 0 + x → x *)
@@ -50,12 +36,10 @@ let rec simplify_expr ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
     when f.Tir.v_name = "-" && a.Tir.v_name = b.Tir.v_name ->
     changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt 0))
 
-  (* Strength reduction: x * 2 → let t = x + x in t (integer only)
-     MUST come before x * 0 and x * 1 so 2 is not matched by those. *)
-  | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitInt 2)]) when f.Tir.v_name = "*" ->
-    changed := true; let_wrap Tir.TInt "+" [x; x]
-  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt 2); x]) when f.Tir.v_name = "*" ->
-    changed := true; let_wrap Tir.TInt "+" [x; x]
+  (* No `x * 2 → x + x` strength reduction: `*` and `+` panic on overflow
+     with different messages ("attempt to multiply/add with overflow"), and
+     the interpreter reports the multiply.  LLVM reduces the checked
+     multiply itself. *)
 
   (* x * 1 | 1 * x → x *)
   | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitInt 1)]) when f.Tir.v_name = "*" ->

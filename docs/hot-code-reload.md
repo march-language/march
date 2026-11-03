@@ -7,9 +7,94 @@ permalink: /docs/hot-code-reload/
 
 # Hot Code Reload
 
-March supports deploying new code to a running server **without restarting the process**. Actors keep running and their state is preserved. Work that started on the old code finishes on the old code: each actor handles the messages it already has queued with the version they were sent to, then moves to the new version and migrates its state. New work runs on the new code.
+March can deploy new code to a running server **without restarting the process**.
+Actors keep running and keep their state. Work that started on the old code finishes
+on the old code: each actor handles the messages it already has queued with the
+version they were sent to, then moves to the new version and migrates its state. New
+work runs on the new code.
 
-This is useful in practice: no cold-start latency, no dropped connections, no TCP state reset, and no need to drain traffic before a routine code push.
+The mechanism is a signed patch of only the functions that changed, loaded into the
+live process and activated as one step under a new **epoch** number. Every unit of
+work (an actor, a task, a session) remembers the epoch it runs at and calls the
+version of each function that was current at that epoch, so a partial rollout never
+hands a live call the wrong shape of arguments. Two gates decide whether a patch may
+widen what the node is allowed to do, and every signed request is sequenced so it
+cannot be replayed.
+
+In practice: no cold-start latency, no dropped connections, no TCP state reset, and no
+need to drain traffic before a routine code push. Some edge cases are still open; read
+[Current limitations](#current-limitations) before relying on it in production.
+
+## On this page
+
+**Start here**
+
+- [When to use it](#when-to-use-it)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [How it works](#how-it-works)
+- [Current limitations](#current-limitations)
+
+**One server**
+
+- [Server setup](#server-setup)
+- [Configuring forge.toml](#configuring-forgetoml) and the [`[hot-reload]` reference](#single-server-forgetoml-reference)
+- [Deploying](#deploying)
+
+**Many hosts**
+
+- [Multi-host deploys](#multi-host-deploys) and [the in-cluster control plane](#through-the-in-cluster-control-plane)
+- [Pushing a topology: the `TOPOLOGY` verb](#pushing-a-topology-the-topology-verb)
+
+**What happens to running work**
+
+- [Actor state migration](#actor-state-migration): [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
+- [Compatibility annotations](#compatibility-annotations)
+- [Verifying migration soundness with `@invariant`](#verifying-migration-soundness-with-invariant) and [what `@invariant` accepts](#what-expressions-are-allowed-in-invariant)
+- [Deploying signature changes](#deploying-signature-changes)
+- [Independent deploy pace (epoch-tagged dispatch)](#independent-deploy-pace-epoch-tagged-dispatch)
+
+**Trust and durability**
+
+- [Capability-safe deploys](#capability-safe-deploys): the two gates, `MARCH_DEPLOY_POLICY`, per-role closures, `--grant-cap`, the threat model
+- [Sequenced releases: no replayed requests](#sequenced-releases-no-replayed-requests)
+- [Artifact integrity: the signature covers the bytes](#artifact-integrity-the-signature-covers-the-bytes)
+- [Restart durability](#restart-durability)
+
+- [See also](#see-also)
+
+## When to use it
+
+Use a hot deploy for a **routine code push to a long-running node**: a handler
+change, a bug fix, a new field on an actor's state with a `migrate_state` to fill it,
+a protocol change that is compatible or that you roll out in the documented order.
+What you keep is everything a restart would lose: in-memory actor state, open
+connections, sessions in flight, and the warm process.
+
+| The change | How it ships |
+|---|---|
+| A function body, an actor handler, a nested module's function | Hot patch of just that function |
+| An actor's state shape | Hot patch plus a `migrate_state` (or a `@compat` annotation) |
+| An actor's message type | Hot patch plus a `migrate_msg`, or old-format messages are dropped and counted |
+| A function's signature | Hot patch; every caller must be in the same batch, unless the server supports epoch-tagged dispatch |
+| A protocol a `choose` branch was added to | Hot patch, receivers of the choice before its chooser |
+| `main`, a topology hook, generated protocol code, the standard library, the runtime | A restart; `forge deploy` plans it for you |
+| A patch that reaches a capability the running version did not | Stops at the deploy-time gate until you `--grant-cap` it, and at the node's policy regardless |
+
+Reach for a plain restart when the change is one of the last two rows, when the patch
+stack has grown long (see [compaction](#restart-durability)), or when nothing on the
+node is worth keeping.
+
+## How it fits with the rest of March
+
+| Concept | Where hot reload meets it | Chapter |
+|---|---|---|
+| **Actors** | The unit that migrates. An actor moves epochs at a marker in its own mailbox and runs `migrate_state` there; a supervisor restarts an actor killed at a hard drain on the new code. | [Actors]({{ site.baseurl }}/docs/actors/), [Supervision]({{ site.baseurl }}/docs/supervision/) |
+| **Capabilities** | Each patched function carries its own IO capabilities. The deploy-time gate refuses a widening without `--grant-cap`; the node's `MARCH_DEPLOY_POLICY` refuses one regardless. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
+| **Choreography** | A session pins the epoch it formed in; a deploy changes only which protocol version new sessions form under, and drains sessions at loop boundaries. | [Choreography]({{ site.baseurl }}/docs/choreography/#changing-a-protocol) |
+| **Refinement types** | `@invariant` on an actor is checked against `migrate_state` by the same SMT checker, with a counterexample on failure. | [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) |
+| **Topology and clustering** | `forge deploy` plans per pool, pushes a signed topology, and with a `[control]` section runs releases through the in-cluster control plane. | [Topology]({{ site.baseurl }}/docs/topology/), [Clustering]({{ site.baseurl }}/docs/clustering/) |
+| **Observing a running node** | `EPOCHS` shows what each deploy is still waiting on; `WHICH` and `SOURCE` say which version of a function runs; the deploy key also signs debug requests. | [Observe]({{ site.baseurl }}/docs/observe/) |
+| **Tooling** | `forge deploy hot`, `forge deploy --plan`, `forge hot-reload keygen` / `status` / `migrate-msg-stub`, `forge host init`. | [Tooling]({{ site.baseurl }}/docs/tooling/) |
 
 ---
 
@@ -28,15 +113,31 @@ When you run `forge deploy hot`, the build tool:
    the server uses your public key to confirm the patch really came from you, the same
    idea as an SSH key) and sends it to the server
 5. The server activates the whole deploy as one step, tagged with a new **epoch**
-   number. Work that starts after that (a new task, session or actor, and `main`)
-   runs the new code at once; running actors move over at their own pace, as the
-   next section explains
+   number. Eligible new work runs the new code; running actors move over at their
+   own pace, as the next section explains. Active caller frames, including the
+   baseline `main`, retain their original routing epoch until they return
 
 Actors that have a state schema change are migrated in mailbox order: messages already queued when the deploy lands finish on the old code against the old state, then the actor runs `migrate_state` and handles everything after that on the new code. New code never sees an old-shaped state. See [Messages queued during a deploy](#messages-queued-during-a-deploy).
 
 Deploys are also **capability-gated**: each changed function brings its own IO capabilities, and both the deploy tool and the receiving node can refuse a patch that reaches for more authority than the running version (or the node's policy) allows. See [Capability-safe deploys](#capability-safe-deploys) below.
 
 ---
+
+## Schema baselines and rollback
+
+Every hot-reload base and patch embeds its actor schemas and manifest. Forge queries
+`SCHEMAS` on the running server before migration checks, so the first state-changing
+deploy does not require a local `.prev` file. The response describes the newest
+activated schema for each actor and its release; actors still draining may be older.
+A stale local baseline produces a warning and the server baseline wins. On legacy
+servers that cannot answer the query, supply `--old-schemas` or restart onto a fresh
+base. Malformed responses and connection failures abort the deploy.
+
+Rollback is another signed deploy with a higher release sequence. If the faulty patch
+changed state shape, the rollback needs an explicit reverse `migrate_state` that
+preserves newer state. Re-uploading the original artifact without that migration is
+refused. The rollback integration scenario verifies service continuity, restored
+behavior and increasing release counters; automatic rollback is not provided.
 
 ## Server setup
 
@@ -75,6 +176,27 @@ forge hot-reload keygen
 ```
 
 Put the public key in `forge.toml` and embed the secret key in the server binary at build time (or pass it as an environment variable; see your server's startup flags).
+
+---
+
+## Single-server `forge.toml` reference
+
+```toml
+[hot-reload]
+ssh_host   = "my-server"        # required: SSH host (alias or hostname)
+socket     = "/tmp/app.sock"    # optional: Unix socket path on the remote (default: /tmp/march_hcr.sock)
+public_key = "base64key="       # ed25519 public key (base64), embedded for signature verification
+```
+
+Only `ssh_host` is strictly required; `socket` falls back to `/tmp/march_hcr.sock` if omitted. The deploy uses `ssh` from the system PATH; your `~/.ssh/config` aliases and identity files are respected.
+
+More `[hot-reload]` options serve
+larger deployments: a `strategy` key (`"rolling"`, the default, vs. `"simultaneous"`), a
+`health_check_url` polled between rolling-deploy steps, and `compact_after = N`
+(see [Restart durability](#restart-durability)). For a fleet, see
+[Multi-host deploys](#multi-host-deploys); the older repeatable `[[hot-reload.env]]`
+table (each entry with its own `ssh_host`/`socket`/`public_key`, deployed with
+`forge deploy hot --env <name>`) is still supported.
 
 ---
 
@@ -124,6 +246,19 @@ before it connects, and `forge deploy --plan` plans the pool as a restart:
 error: the standard library changed (stdlib 3f2a91c07d4e -> 8b0c5e11a2f9): stdlib code, its actors included, has no hot-reload slot, so a patch cannot deliver it; a stdlib change ships with a toolchain change and deploys by restart
 error: deploy aborted, nothing was activated: deploy this build with a restart
 ```
+
+A **toolchain upgrade that changes the hot-reload ABI** is a restart deploy too. Every
+binary and patch records an ABI id (`# hcr_abi` in the manifest, `HCR_INFO` on the
+server, `march-hcr-v5;triple=...;ptr=8` today). When the running server's id is older
+than the patch's, `forge deploy hot` refuses before it uploads anything:
+
+```
+error: the running server was built by an older March toolchain (HCR ABI march-hcr-v4;triple=...) than this patch (march-hcr-v5;triple=...). The hot-reload ABI changed in between (march-hcr-v5 adds per-frame routing and closure lifetime hooks required by this patch), so this server cannot take hot patches from this toolchain, and nothing was deployed. Restart the server once on a base build from this toolchain (a cold deploy); hot deploys work again after that
+```
+
+The server repeats the check after it loads a patch (`ERR identity abi mismatch`), so an
+older `forge` cannot slip one past it either. Restart once on a build from the new
+toolchain; later hot deploys from that toolchain go through as before.
 
 ---
 
@@ -292,6 +427,20 @@ directory (`.forge/run/<node>.control`) and its control API on its cluster port 
 
 ---
 
+## Pushing a topology: the `TOPOLOGY` verb
+
+Pushing a topology changes what a node offers, so, like every reconciler action, it is signed. `Cmd_deploy_hot.push_topology` sends
+
+```
+TOPOLOGY <blake3 of the file> <signature> <size>
+```
+
+with the signature over `TOPOLOGY <blake3>` made with the deploy key. The server checks the signature **before** it accepts the body (`READY`), checks that the body hashes to the signed digest (`ERR digest_mismatch`), writes it to the service's state directory (`topology.toml`), records the digest and signature in the persisted state, and calls the runtime's topology hook, `march_hcr_on_topology(path)`, then answers `OK <blake3>`. At start, a persisted topology whose signature and digest still verify goes through the hook again, so the node comes back on the topology it had.
+
+The signed copy is the one that takes effect. The server sets `MARCH_TOPOLOGY_VERIFIED_FILE` to that `topology.toml` when it starts, and `Topology.reload` reads it in preference to the unsigned `MARCH_TOPOLOGY_FILE`. After a push, the hook sends the process SIGHUP so the node re-reads it and opens its own offers, but only when a SIGHUP watcher is installed (`Topology.place` installs one): a program with no watcher would die of the signal. At start the hook does nothing; `Topology.place` applies the verified copy itself, so a restarted node comes back on the topology last pushed to it, not the one it was built with. With `MARCH_HCR_REQUIRE_RELEASE=1` the unsigned file is never read. The ssh reconciler backend (`forge topology apply --env`, `forge deploy --env`) still also writes the digest to `MARCH_TOPOLOGY_FILE` and signals the unit, for nodes built before this; a node whose server refused the signed push is not signalled.
+
+---
+
 ## Actor state migration
 
 When an actor's state record changes between deploys, the server needs to know how to upgrade the existing in-memory state of every live actor. You provide a `migrate_state` function:
@@ -435,335 +584,6 @@ so a session started by patched code can crash the process
 
 ---
 
-## Capability-safe deploys
-
-A hot deploy pushes new code straight into a running process: it's compiled, shipped to the server, loaded into the live process's memory with `dlopen` (the OS mechanism for loading a shared library at runtime, the same one plugins use), and starts handling requests. The ed25519 signature on each patch answers one question: *is this really from us?* It leaves a second, equally important one unanswered: *is this code allowed to do what it does?*
-
-That gap is real. A patch you signed could call `file_delete`, open a network connection, or spawn a process, even if the version it replaces never touched the filesystem or the network at all. Signing proves **origin**, not **behavior**.
-
-Capability-safe deploys add the missing check. March already knows each function's IO capabilities from compile time: its `needs` declarations plus the effects inferred from its body. A hot deploy brings those capabilities with it, and **two gates** decide whether the new code may run: one on your machine when you deploy, and one on the server when it activates.
-
-### The unit of enforcement: per-activated-function caps
-
-A hot deploy only re-activates the functions that **changed**. Each changed function brings **its own** inferred IO capabilities (the effects its own body requires), not the capabilities of the whole artifact.
-
-This granularity matters. `--hot-reload` links the entire standard library into every patch, so a *whole-artifact* capability set would be dominated by the stdlib's footprint (filesystem, network, process, clock, …) and would be identical for every app, useless for a policy. Gating on the **changed function's own caps** is what makes the check discriminating: a patch that adds `file_write` to one function is caught exactly because that function now declares `IO.FileWrite`, regardless of what the rest of the linked code can do.
-
-The trust boundary follows from this: the **base server binary is trusted**: you built and started it, with a policy. Each **hot-patched function** is the mobile code the gates govern.
-
-### Two gates
-
-1. **Monotonicity gate (deploy-time, on your machine).** *Monotonicity* just means the capabilities can only move in one direction. Across deploys, a function's set of capabilities may get *smaller* on its own, but it can't get *bigger* without your say-so.
-
-   - **Dropping** a capability is always allowed: a function that used to write files and no longer does is strictly safer, so it deploys without ceremony.
-   - **Adding** a capability is called a **widening**: for example, a function that gains the ability to write files, open a socket, or spawn a process that its running version didn't have. A widening **stops the deploy** and asks you to confirm it explicitly with `--grant-cap`.
-
-   The point of this one-directional rule is that a routine code push can't grant your running system new powers unannounced; the moment a patch reaches for more, you have to sign off on it by name.
-
-2. **Node policy gate (activation-time, on the server).** If the node sets `MARCH_DEPLOY_POLICY`, the server will not activate any function with capabilities that exceed the node's policy, regardless of who signed it. This is enforced independently of the deploy tooling, so it stays in force even if the deploy pipeline is bypassed or compromised.
-
-### A worked example
-
-Start from a server with a reloadable handler that only writes to the console:
-
-```march
--- server.march (v1)
-mod App do
-  needs IO.NetListen
-  needs IO.Console
-  mod Server do
-    needs IO.Console
-    fn handle(x : Int) : Int do
-      println("handle v1 (console only)")
-      x + 1
-    end
-  end
-  fn main() do
-    println("cap-demo server up")
-    let _ = Server.handle(1)
-    match tcp_listen(9099) do
-      Err(e) -> println("listen err: " ++ e)
-      Ok(fd) -> let _ = tcp_accept(fd)  println("server shutting down")
-    end
-  end
-end
-```
-
-`Server.handle`'s own capabilities are just `{IO.Console}`. Run the node with a policy that permits only console I/O:
-
-```sh
-# on the server host
-printf 'IO.Console\n' > /etc/march/deploy-policy.txt
-MARCH_HOT_RELOAD_SOCKET=/tmp/app.sock \
-MARCH_DEPLOY_POLICY=/etc/march/deploy-policy.txt \
-  ./cap_server
-```
-
-Now a `v2` that adds a filesystem write to the same function:
-
-```march
-  mod Server do
-    needs IO.Console
-    needs IO.FileWrite
-    fn handle(x : Int) : Int do
-      println("handle v2 (now writes a file!)")
-      let _ = file_write("/var/log/app-debug.log", "handled " ++ int_to_string(x))  -- needs IO.FileWrite
-      x + 2
-    end
-  end
-```
-
-`Server.handle`'s own caps are now `{IO.Console, IO.FileWrite}`.
-
-**Step 1: deploy v2 with no grant.** The monotonicity gate aborts on the client, before anything is uploaded:
-
-```
-$ forge deploy hot --so v2.so
-Deploying 1 changed function(s)...
-error: hot deploy would add authority not held by the running version
-  running version caps:  IO.Console
-  new version adds:      IO.FileWrite (from Server.handle)
-  A hot deploy may only narrow authority. To authorize this widening, re-run with:
-      forge deploy hot --grant-cap IO.FileWrite
-error: capability widening — deploy aborted
-```
-
-Note the diagnostic names the exact capability *and* the specific function that introduced it. Widening the authority of a live system mid-flight is exactly the event an operator should consciously sign off on.
-
-**Step 2: grant the widening, but the node policy forbids it.** With `--grant-cap` you pass the deploy-time gate, the artifact uploads, and the server's policy gate rejects the activation:
-
-```
-$ forge deploy hot --grant-cap IO.FileWrite --so v2.so
-Deploying 1 changed function(s)...
-  granted widening: IO.FileWrite (via --grant-cap IO.FileWrite)
-Uploading artifact v2.so...
-Artifact uploaded.
-  FAILED Server.handle: ERR cap_policy IO.FileWrite — deploy rejected by node capability policy
-  Rolled back: 1 function(s) failed, server state unchanged.
-error: 1 function(s) failed to activate
-```
-
-The node had the final say. The batch rolled back cleanly; the live system is unchanged.
-
-**Step 3: a node with a policy that permits it.** Update the policy on the node and restart it (the policy is read once at startup):
-
-```sh
-printf 'IO.Console\nIO.FileWrite\n' > /etc/march/deploy-policy.txt
-# restart the server so it re-reads the policy
-```
-
-```
-$ forge deploy hot --grant-cap IO.FileWrite --so v2.so
-Deploying 1 changed function(s)...
-  granted widening: IO.FileWrite (via --grant-cap IO.FileWrite)
-  activated: Server.handle
-Deploy complete: 1 function(s) activated.
-```
-
-The same signed patch is admitted here and rejected on the console-only node: per-node authority, enforced at the node.
-
-### Configuring `MARCH_DEPLOY_POLICY`
-
-`MARCH_DEPLOY_POLICY` is the path to a newline-delimited file of permitted capability paths. The check is **subsumption-aware**: listing a parent capability permits its children (`IO.Network` permits `IO.NetConnect`, `IO.NetConnect.TLS`, `IO.NetListen`, …). See [Capabilities]({{ site.baseurl }}/docs/capabilities/) for the full hierarchy.
-
-```
-# /etc/march/deploy-policy.txt — this node may only gain console + read-only + outbound TLS
-IO.Console
-IO.FileRead
-IO.NetConnect.TLS
-```
-
-A node with this policy will never *admit a hot patch* that declares file-write, process-spawn, or foreign-FFI authority, regardless of signature.
-
-**The policy speaks about IO capabilities only.** The gate checks every capability under the `IO` lattice (`IO`, `IO.Console`, …, including an unknown `IO.` path) and does not police one outside it: a proof capability such as `Session.Live`, `ClusterNode.Live`, `Actor.Introspect` or your own `Db.Migrated`, or an FFI root. Those carry no IO authority of their own. The type system already decides who can hold one (only the declaring module mints it, from a `Cap(IO)` that is charged to the minter), and whatever IO a proof capability's dictionary performs is charged to the code that minted it: a session's transport belongs to the runner, not to the role body it is handed to. Calling foreign code is charged `IO.Foreign`, which the policy does police. This is the rule the compiler's own grant checks follow (a role's `needs` and `main`'s grant skip non-IO caps), and a pool's `caps` in a topology are IO caps, so the policy `forge host init` generates from them never names a proof capability. In practice it means a role body, whose own caps always include the session it is handed (`caps=IO.Console,Session.Live`), hot patches under that policy; a patch that also reaches an IO capability the policy lacks is still refused, proof capabilities beside it or not.
-
-> **An empty policy *file* is the opposite of permissive.** Only an **unset** (or
-> pointing-at-nothing) `MARCH_DEPLOY_POLICY` means "no policy is loaded" ⇒ permissive,
-> which is the default for backward compatibility. The moment the server can open a
-> policy file at all (even a completely empty, zero-byte one), it treats that as "a
-> policy is active, and it permits zero capabilities," so it will then reject *every*
-> function that declares any IO capability at all. If you want permissive, unset the
-> variable entirely; don't point it at an empty file.
-
-A line `serves <Proto.Role> ...` names the roles this node serves, and scopes the [per-role closure](#per-role-closures-activate6) check to them. The policy `forge host init` writes for a pool is the pool's `caps` (or its derived ones), the caps the topology runner charges to its roles, and that line:
-
-```
-# /etc/march/<project>/back.policy, generated
-IO.Clock
-IO.Console
-IO.Mut
-IO.Process
-IO.Spawn
-serves Echo.Server
-```
-
-A role the node does not serve is another pool's (a shared build carries every pool's roles) or the control plane's (`Ctl.Agent` and `Ctl.Control`, generated into every node's `main` when the topology has a `[control]` section, and charged to it like the runner). This pool's policy is not the bound on those, and granting their closures here instead would widen what any patch on the node may do. A bare `serves` says the node serves no role. A policy with no `serves` line bounds every role's closure, so a hand-written policy behaves as it always did; a function's own capabilities are checked against the capability lines either way.
-
-The policy is loaded once at startup; change it by restarting the server.
-
-A useful pattern is to size the policy from the app's own manifest: build the app, inspect the `caps=` fields in the `.hcr_manifest`, and grant exactly the capabilities the running boundary functions declare; then any future patch that reaches for more is caught.
-
-### Per-role closures (`ACTIVATE6`)
-
-A changed function's own capabilities have one blind spot: a patch that only *calls* an existing helper which already holds a capability. The patched function's own caps do not change, yet what it can reach does. For code that runs as a protocol role with a grant (`role Cons needs IO.Console`, see [Per-role grants]({{ site.baseurl }}/docs/choreography/#per-role-grants)), both gates also check the role's **full capability closure**: everything the role's code reaches, from the same solve the compiler's role-grant check runs.
-
-The manifest `--compile-so` writes carries one line per granted role, with each capability's reach chain:
-
-```
-ROLE Stream.Cons caps=IO.Console,IO.FileWrite via=IO.Console:body>cons;IO.FileWrite:body>cons>save
-```
-
-`forge deploy hot` compares each role's closure with the saved baseline, exactly as it compares functions. A widened role stops the deploy unless `--grant-cap` covers it:
-
-```
-error: hot deploy would widen role Stream.Cons's capability closure
-  running version caps:  IO.Console
-  new version adds:      IO.FileWrite (reached: body → cons → save)
-  A hot deploy may only narrow authority. To authorize this widening, re-run with:
-      forge deploy hot --grant-cap IO.FileWrite
-```
-
-A role new to the baseline widens by its whole closure. A baseline written before per-role closures (no `ROLE` lines) makes this gate permissive for one deploy, with a note.
-
-On the wire, a manifest with `ROLE` lines is deployed with the `ACTIVATE6` message: `ACTIVATE5`'s fields plus `role_caps:<Proto.Role>=<digest>;...` inside the signed line (one digest per role, sorted by role, the `cap_root` recipe over its closure) and an unsigned `roles:<Proto.Role>=<caps>;...` block. The server recomputes every digest from the block and refuses a mismatch, a signed role the block leaves out, or a role it adds unsigned (`ERR role_cap_tamper`), then checks the IO capabilities of every closure against `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy Stream.Cons IO.FileWrite`), or of every role the policy's `serves` line names. A granted widening therefore still stops at a node whose policy forbids it. It is a new message rather than an extra field because an older server rebuilds the signed line without the role digests, so a signature check there would fail for a confusing reason. Today forge sends both shapes as `ACTIVATE7`, which adds a signed digest of the patch's bytes (see [Artifact integrity](#artifact-integrity-the-signature-covers-the-bytes)); a server that predates it refuses the deploy (upgrade it).
-
-### `--grant-cap`
-
-`--grant-cap <CAP>` is repeatable and subsumption-matched: `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. The granted capability becomes part of the deployed function's own signed capability set, so it can't be stripped or altered without breaking the signature; the server's audit log records who deployed which function, when, and with which capability set, so a widening is always traceable back to the person who authorized it.
-
-Each `ACTIVATE` appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`) with `ts`, `type` (`activate`, `restore` for a replay at start, `topology` for a topology push, `drain` for a `DRAIN` request, `release` for a release accepted or refused), `fn`, `impl_hash`, `signer`, `cas_hash`, `caps`, `cap_root` and `result`, plus `roles` (the role closures as received) for `ACTIVATE6`. `caps` is the deploy's capability list (`[]` for a capless artifact) and `cap_root` its signed root; both are `null` for deploys over pre-v4 protocols, which carry no capability data. They are recorded as received, so on a rejected request (`err_sig`, `err_cap_tamper`) they show what the request claimed, not a verified set. To find when a node last gained a capability: `jq -c 'select(.result == "ok" and (.caps // [] | index("IO.Network")))' audit.jsonl | tail -1`.
-
-```sh
-forge deploy hot --grant-cap IO.FileWrite --grant-cap IO.Process --so v2.so
-```
-
-The grant only relaxes the client-side monotonicity gate. It does **not** override a node's `MARCH_DEPLOY_POLICY`; as the worked example shows, a granted widening still gets `ERR cap_policy` at a node that forbids the capability.
-
-### `migrate_state` must be IO-free
-
-A `migrate_state` function runs in the migration window, between the last message sent to the old code and the first handled by the new code, a moment where doing IO (or panicking) has dangerous ordering and partial-failure semantics. The compiler enforces this: a `*_migrate_state` function with a body that performs any IO builtin or `extern` call is a compile error.
-
-```
-migrate_state must be IO-free
-MyApp.Counter.counter_migrate_state calls capabilities that need IO.FileWrite.
-migrate_state runs during the hot-migration window, before user messages.
-hint: move side effects into a normal handler that runs after migration completes.
-```
-
-The check uses the migration function's **own** effects: a `migrate_state` in a module that declares `needs IO.Console` for its *handlers* still compiles cleanly, because the migration body itself does no IO.
-
-### Threat model: what the gates do and do not prove
-
-The capability manifest is **self-reported by the compiler**. The node's checks prove
-*integrity* (each function's declared capability set is hashed into a `cap_root`, and
-that hash is part of what's signed, so an attacker modifying the capability list in
-transit (without the signing key) produces a hash mismatch that aborts with
-`ERR cap_tamper`) and *policy* (the declared authority fits the node), but **not
-truthfulness** (that the compiled machine code actually stays within the declared caps;
-the server cannot recompute effects from a shared object).
-
-- **Defends against:** accidental authority creep by a well-behaved toolchain (the common case); operator error shipping the wrong build to a restricted node; a compromised deploy *pipeline* that still builds with the real compiler; tampering with the capability set in transit.
-- **Does not defend against:** a party holding the signing key who hand-crafts a `.so` with a lying manifest. Capability admission is authorization *on top of* authentication, a defense-in-depth layer, not a sandbox. For stronger guarantees, combine it with OS-level confinement of the reload server.
-
-A policy constrains what *hot-patched* functions may do; it does not retroactively constrain the trusted base binary the operator already deployed.
-
-### Backward compatibility
-
-Every gate is opt-in and additive. A pre-capability artifact (no capability fields in its manifest) deploys with permissive admission and a one-line note. A manifest without `ROLE` lines is admitted exactly as before (forge sends it as `ACTIVATE7`, which only adds the bytes' digest). A node with no `MARCH_DEPLOY_POLICY` allows everything, exactly as before. Deploying capability-aware code to a server that predates node admission fails fast with an actionable message rather than silently downgrading; re-run with `--no-cap-gate` if you intentionally want the legacy path.
-
----
-
-## Restart durability
-
-A restarted server comes back on the code it was running, without a redeploy and before `main` runs (so before a node opens any offer). The reload server keeps a **patch stack** on the host, under its CAS root next to `next_epoch`:
-
-```
-~/.march/cas/hcr_state/<16 hex of blake3(socket path)>/state
-```
-
-It holds every activated function's signed message and signature in activation order (a deploy's functions share one sequence number), a digest of the base build it patches, a digest of the code actually running (`manifest`), and the digest of the last topology pushed. It is rewritten with a temporary file and a rename after every deploy.
-
-At start, before `march_reload_server_start` returns, the server replays it:
-
-- Each entry's **signature is verified again** from the stored signed line with the key baked into the binary.
-- An entry that fails (bad signature, artifact gone from the CAS, a function this binary does not have, a malformed line) is **skipped with an audit line** (`"type":"restore"`, `"result":"err_restore_sig"` and so on), never a crash.
-- An `ACTIVATE7` entry's artifact must **still hash to its signed digest** (`err_restore_digest` otherwise), and is loaded through the same verified copy as a live deploy, so bytes replaced in the CAS while the node was down are not replayed. An entry written before `ACTIVATE7` has no signed digest to check its bytes against: it is replayed only where such a line would still be accepted live (no release held, no `MARCH_HCR_REQUIRE_RELEASE`), and skipped otherwise (`err_restore_no_digest`); that function comes back on the base build until the next deploy.
-- Each function's newest valid entry is republished, deploy by deploy in the original order, so epochs keep their order. Superseded and broken entries are dropped from the rewritten file.
-- A **different build** on the same socket (its baseline digest differs) does not replay the stack: patches of one build are not patches of another. The file is set aside as `state.base-changed`.
-- `MARCH_HCR_NO_REPLAY=1` starts from the base binary and sets the stack aside as `state.no-replay`: the escape hatch for a patch that breaks the boot.
-
-`VERSIONS` then shows the hot versions as before, and `VERSIONS_DETAIL` gains a line saying what the start restored:
-
-```
-RESTORED entries:1 skipped:0 mode:replayed stack:1 manifest:<hex> topology:<hex>
-```
-
-(`mode` is `none` on a first start, `replayed`, `off` under `MARCH_HCR_NO_REPLAY`, or `base_changed`.) The state is keyed by the socket path because the CAS root is shared by every March program of a user; the socket names the service.
-
-**Compaction.** A host that boots its base binary and then republishes a long stack boots slowly and runs code no single build produced. `COMPACT` reports the stack's size, and `forge hot-reload status` prints it per node:
-
-```
-Patch stack: 3 persisted patches over 2 deploys (2 functions), 1 artifact, 1.2 MiB in the CAS
-```
-
-When it grows long, `forge deploy --compact --env <env>` rebuilds each build's base image from the current version, restarts its hosts onto it (the new base build makes the server set the old stack aside) and removes what was set aside; each node then reports an empty stack. With `[hot-reload] compact_after = N` in `forge.toml`, `forge deploy` does this by itself for a build whose nodes report a stack longer than `N`.
-
----
-
-## Pushing a topology: the `TOPOLOGY` verb
-
-Pushing a topology changes what a node offers, so, like every reconciler action, it is signed. `Cmd_deploy_hot.push_topology` sends
-
-```
-TOPOLOGY <blake3 of the file> <signature> <size>
-```
-
-with the signature over `TOPOLOGY <blake3>` made with the deploy key. The server checks the signature **before** it accepts the body (`READY`), checks that the body hashes to the signed digest (`ERR digest_mismatch`), writes it to the service's state directory (`topology.toml`), records the digest and signature in the persisted state, and calls the runtime's topology hook, `march_hcr_on_topology(path)`, then answers `OK <blake3>`. At start, a persisted topology whose signature and digest still verify goes through the hook again, so the node comes back on the topology it had.
-
-The signed copy is the one that takes effect. The server sets `MARCH_TOPOLOGY_VERIFIED_FILE` to that `topology.toml` when it starts, and `Topology.reload` reads it in preference to the unsigned `MARCH_TOPOLOGY_FILE`. After a push, the hook sends the process SIGHUP so the node re-reads it and opens its own offers, but only when a SIGHUP watcher is installed (`Topology.place` installs one): a program with no watcher would die of the signal. At start the hook does nothing; `Topology.place` applies the verified copy itself, so a restarted node comes back on the topology last pushed to it, not the one it was built with. With `MARCH_HCR_REQUIRE_RELEASE=1` the unsigned file is never read. The ssh reconciler backend (`forge topology apply --env`, `forge deploy --env`) still also writes the digest to `MARCH_TOPOLOGY_FILE` and signals the unit, for nodes built before this; a node whose server refused the signed push is not signalled.
-
-## Sequenced releases: no replayed requests
-
-A signed line on its own proves who wrote it, not when. Without more, a signed `ACTIVATE`, `TOPOLOGY` or `DRAIN` recorded once could be sent again later: to roll a function back to an old version, re-push an old placement, or repeat a drain. So forge wraps every signed line it sends in a **release**:
-
-```
-SEQ <seq> <id> <signature> <signed line>
-```
-
-signed over `SEQ <seq> <id> <signed line>` with the deploy key. The inner line keeps its own signature, checked as before. One `forge` invocation is one release: `<id>` is random (32 hex digits), and `<seq>` is the time in milliseconds, or one more than the node's current release if that is higher. The node keeps the highest release it has accepted, its **head**, in a file of its own next to the persisted state (`<state dir>/release`), so a restart, `MARCH_HCR_NO_REPLAY` or a different build on the socket does not forget it:
-
-| The release | The node |
-|---|---|
-| newer than the head | accepts it, and it becomes the head (gaps are fine: a node a deploy did not touch never saw that release) |
-| the head itself | accepts it: a retry, or the next line of the same deploy |
-| the head's number with another id | refuses it, `ERR release_fork head:<n>:<id>`: two deploys chose the same number |
-| older than the head | refuses it, `ERR stale_release head:<n>` |
-
-Once a node holds a release, or when it was started with `MARCH_HCR_REQUIRE_RELEASE=1`, a signed line that is not wrapped is refused with `ERR release_required`, so a line recorded before the node saw its first release cannot be replayed either. `RELEASE_HEAD` answers `HEAD <seq> <id>` (`HEAD 0 -` before any release, with ` required` appended under `MARCH_HCR_REQUIRE_RELEASE`); forge asks it once per connection and sends unwrapped lines only to a server that does not know the request. Every release a node accepts or refuses is audited (`type` `release`).
-
-forge reports a refusal in words: a stale release means another deploy reached the node first, or this machine's clock is behind; a fork means two deploys ran at once. Re-run the deploy either way.
-
-## Artifact integrity: the signature covers the bytes
-
-A patch reaches a node in two parts: its bytes go into the node's artifact store (the CAS, `~/.march/cas/artifacts/`, under the compiler's compilation hash), and a signed `ACTIVATE` line names them. The CAS is **not** a trust boundary. Anyone who can reach the reload socket, or the control API of a candidate, can write it with `CAS_PUT`, and the compilation hash is a hash of the build's inputs, not of the bytes stored under it. Until `ACTIVATE7` nothing signed the bytes, so whoever could write a node's CAS chose what an operator's signed line loaded, constructors included (review `specs/progress/2026-10-04-dd12-review-cas-artifact-unverified.md`).
-
-`ACTIVATE7` carries the BLAKE3 of the `.so` file's bytes, `so_blake3:<hex>`, **inside** the signed line (between `epoch:` and `cap_root:`); otherwise it is `ACTIVATE5`, or `ACTIVATE6` with the role blocks. Before it maps anything, the node reads the artifact once, hashes exactly the bytes it read, and copies them to a directory of its own (`<state dir>/loaded/<so_blake3>.so`, mode `0700`, written by no request). It loads that copy only if the bytes are the signed ones, so a file replaced between the check and the load changes nothing. Bytes that do not match are refused with `ERR artifact_digest`, audited as `err_artifact_digest`, and none of their code runs.
-
-The CAS verbs take the digest as well, so forge spots a bad copy before it activates anything:
-
-| Request | Answer |
-|---|---|
-| `CAS_CHECK <hash> so_blake3:<hex>` | `PRESENT` only if the stored bytes hash to `<hex>`, so forge uploads a stale or substituted artifact again |
-| `CAS_PUT <hash> <size> so_blake3:<hex>` | `ERR digest_mismatch` (nothing stored) for bytes that do not hash to `<hex>` |
-
-Both still accept the old form without the digest. Someone who can write the CAS can still replace an artifact after forge uploads it; the deploy then fails with `ERR artifact_digest`, and forge says so. That is a delay, not a forgery: no unsigned code runs (design D37).
-
-Older lines (`ACTIVATE` through `ACTIVATE6`) sign no digest of the bytes. A node that holds a release, or runs with `MARCH_HCR_REQUIRE_RELEASE=1`, refuses them with `ERR artifact_digest_required`, wrapped in a release or not, and does not replay such entries from its patch stack (see [Restart durability](#restart-durability)). Before its first release a node still accepts them, as before. forge sends `ACTIVATE7` for every capability-aware deploy. `--no-cap-gate` still sends the legacy `ACTIVATE3`, so it only works against a node that accepts unbound lines.
-
-The reload socket itself is owner-only (`0600`, set before it accepts connections, whatever the umask the node inherited), and a peer whose uid is not the node's (or root's) is disconnected.
-
----
-
 ## Compatibility annotations
 
 Without a `migrate_state` function, `forge deploy hot` enforces strict compatibility: if the state schema changed, the deploy is rejected. You can relax this with `@compat`:
@@ -891,72 +711,67 @@ Invariants can only reference the actor's own state fields. External function ca
 > rejected.** If an `@invariant` predicate falls outside this grammar, the compiler
 > prints a `warning: @invariant on <actor> contains unsupported expression; omitting` at
 > build time and drops the invariant entirely; `forge deploy hot` then proceeds with
-> **no SMT verification at all** for that actor, not a rejected deploy. It's easy to
-> read the previous section and assume `@invariant` is always enforced; in practice it's
-> only enforced for predicates in the table above, so treat that compiler warning as
+> **no SMT verification at all** for that actor, not a rejected deploy. `@invariant` is
+> enforced only for predicates in the table above, so treat that compiler warning as
 > something to look for, not something you can ignore.
-
----
-
-## Single-server `forge.toml` reference
-
-```toml
-[hot-reload]
-ssh_host   = "my-server"        # required: SSH host (alias or hostname)
-socket     = "/tmp/app.sock"    # optional: Unix socket path on the remote (default: /tmp/march_hcr.sock)
-public_key = "base64key="       # ed25519 public key (base64), embedded for signature verification
-```
-
-Only `ssh_host` is strictly required; `socket` falls back to `/tmp/march_hcr.sock` if omitted. The deploy uses `ssh` from the system PATH; your `~/.ssh/config` aliases and identity files are respected.
-
-This is the single-server setup this page focuses on. More `[hot-reload]` options serve
-larger deployments: a `strategy` key (`"rolling"`, the default, vs. `"simultaneous"`), a
-`health_check_url` polled between rolling-deploy steps, and `compact_after = N`
-(see [Restart durability](#restart-durability)). For a fleet, see
-[Multi-host deploys](#multi-host-deploys); the older repeatable `[[hot-reload.env]]`
-table (each entry with its own `ssh_host`/`socket`/`public_key`, deployed with
-`forge deploy hot --env <name>`) is still supported.
 
 ---
 
 ## Deploying signature changes
 
-When a function's signature changes between deploys (for example, `B.foo` gains a new parameter), the server needs to know that every existing caller of the old signature is also being replaced in the same deploy batch. Otherwise old callers would pass the wrong number or type of arguments to new code.
+A running caller must keep calling versions compatible with its compiled arguments.
+Current servers advertise `FRAME_PINS 1`: every active frame retains its routing epoch,
+including nested calls and baseline `main`; closures retain their creation epoch until
+released. New actor work uses the actor's current epoch after mailbox migration.
 
-`forge deploy hot` enforces this automatically via the **coordinated upgrade gate**. The compiler records which boundary functions call each export in the `.hcr_manifest` sidecar (`callers:` field). The server stores this caller set per slot at activation time. On the next deploy, when it detects a `sig_hash` change for `B.foo`, it checks whether every server-recorded caller is included in the current deploy batch:
+Generated topology role offers enter the accepting actor or task's epoch before
+creating a new session endpoint. Their entry adapters check the captured environment's
+layout and parameter ownership before crossing versions. An incompatible environment
+is refused with a restart diagnostic. The check conservatively includes reachable
+nominal types, including types carried by handles, so some layout changes require a
+restart even when a more precise compatibility proof might permit them. An already-running
+session retains its epoch; ordinary saved closures and `offer_<Role>` callbacks retain their creation epoch.
 
-- **All callers covered:** the deploy proceeds, and forge notes it:
-  ```
-  Coordinated upgrade: sig_hash changed, all callers covered.
-  ```
+Forge permits signature changes only with this frame-pinning support. It records caller
+coverage and warns when callers remain on old versions. An older server requires a
+restart onto the current toolchain or an expand-contract rollout. A loop that never
+returns can retain old versions indefinitely and eventually exhaust version capacity;
+restart or refactor the loop to return to an actor mailbox between requests.
 
-- **A caller is missing:** the deploy is rejected, naming exactly which caller is uncovered:
-  ```
-  error: function signature changed but not all callers are in this deploy:
+### Parameter borrow modes are part of the signature
 
-    B.foo — uncovered caller(s):
-      A.Worker_dispatch
+A boundary function's `sig_hash` covers more than its types. The compiler decides, from
+the body, whether each heap parameter (a `String`, a `List`, any ADT) is **borrowed** (the
+callee only reads it, and the caller keeps its reference) or **owned** (the callee takes
+the reference, for example because it stores the value, returns it or passes it on to an
+owning position). A caller is compiled against those modes. So a body edit that turns a
+borrowed parameter owned changes the function's ABI even though its source signature did
+not change: running code would keep using a value the new code frees (a use-after-free),
+and the reverse change would leak one reference per call. Records and tuples are always
+passed owned, so a change to how a body uses one never changes the ABI.
 
-  Include the missing modules in this deploy, or use expand-contract:
-    1. Add B.foo_v2 alongside B.foo, update callers, deploy together
-    2. In a later deploy, remove B.foo
+Each boundary function's `sig_hash` (in the `.hcr_manifest`, in the binary's dispatch
+table and in `ABI_QUERY`) is therefore a hash of the type signature **and** one mode per
+parameter; the manifest also lists the parts (`tsig=` and `modes=`, `b` borrowed, `o`
+owned). A deploy that changes only a mode is always refused, naming the parameter:
 
-  error: deploy aborted
-  ```
+```
+error: a hot deploy cannot change a boundary function's parameter borrow mode: parameter 1 of Handler.count changed from borrowed to owned. Code already running was compiled against the old mode and would use a reference the new code releases (a use-after-free) or never release one it now owns (a leak per call). Deploy this build with a restart, or keep the mode (a parameter becomes owned when the body stores it, returns it or passes it to an owning position)
+error: deploy aborted, nothing was activated
+```
 
-If neither module in a pair has been deployed with caller tracking enabled at any point (e.g. they were compiled separately before this feature existed), the gate conservatively allows the deploy: the caller set is empty, so there are no recorded callers to check.
+Borrow-mode changes remain conservatively refused even with frame pinning. Deploy
+such a change with a restart; body-only changes that retain the modes can deploy hot.
+
+A server records the `sig_hash` of each version it activates (from the patch itself), so
+the check applies to every deploy, not only the first one after a restart.
 
 ---
 
 ## Independent deploy pace (epoch-tagged dispatch)
 
-The coordinated upgrade gate above is a hard synchronization requirement: every caller
-of a changed signature has to be redeployed in the very same batch, or the deploy is
-blocked entirely. That's the right default (it's what keeps a partial rollout from
-passing the wrong arguments to new code), but it's also a real constraint. Sometimes
-`A` and `B` are owned by different people, or you'd truly rather ship `B.foo` v2
-today and only get around to updating `A` to match next sprint, without the two
-deploys being forced to happen together.
+Epoch routing lets callers and callees advance independently while retaining the
+versions needed by active frames and closures.
 
 **Epoch-tagged dispatch** is the alternative mechanism that makes that safe, and the
 idea is closer to keeping a small version history than to any kind of locking. Every
@@ -975,7 +790,7 @@ version that existed at or before the caller's own epoch**. So:
 - The same actor after its marker, now at epoch 7, calls `B.foo` → it gets the newest
   `B.foo`, because its own epoch has caught up.
 
-In other words, a unit of work only sees versions compatible with its own epoch, never
+A unit of work only sees versions compatible with its own epoch, never
 anything newer, whether the call is made from the base binary or from a hot patch. It
 picks up the new versions when it moves epochs (an actor at its marker; a task or session
 never, so it finishes on the code it started with). No coordination, no batching, no
@@ -1002,10 +817,370 @@ check.
 
 ---
 
-## Next Steps
+## Capability-safe deploys
+
+A hot deploy pushes new code straight into a running process: it's compiled, shipped to the server, loaded into the live process's memory with `dlopen` (the OS mechanism for loading a shared library at runtime, the same one plugins use), and starts handling requests. The ed25519 signature on each patch answers one question: *is this really from us?* It leaves a second, equally important one unanswered: *is this code allowed to do what it does?*
+
+A patch you signed could call `file_delete`, open a network connection, or spawn a process, even if the version it replaces never touched the filesystem or the network at all. Signing proves **origin**, not **behavior**.
+
+Capability-safe deploys add the missing check. March already knows each function's IO capabilities from compile time: its `needs` declarations plus the effects inferred from its body. A hot deploy brings those capabilities with it, and **two gates** decide whether the new code may run: one on your machine when you deploy, and one on the server when it activates.
+
+### The unit of enforcement: per-activated-function caps
+
+A hot deploy only re-activates the functions that **changed**. Each changed function brings **its own** inferred IO capabilities (the effects its own body requires), not the capabilities of the whole artifact.
+
+This granularity matters. `--hot-reload` links the entire standard library into every patch, so a *whole-artifact* capability set would be dominated by the stdlib's footprint (filesystem, network, process, clock, …) and would be identical for every app, useless for a policy. Gating on the **changed function's own caps** is what makes the check discriminating: a patch that adds `file_write` to one function is caught exactly because that function now declares `IO.FileWrite`, regardless of what the rest of the linked code can do.
+
+The trust boundary follows from this: the **base server binary is trusted**: you built and started it, with a policy. Each **hot-patched function** is the mobile code the gates govern.
+
+### Two gates
+
+1. **Monotonicity gate (deploy-time, on your machine).** *Monotonicity* means the capabilities can only move in one direction. Across deploys, a function's set of capabilities may get *smaller* on its own, but it can't get *bigger* without your say-so.
+
+   - **Dropping** a capability is always allowed: a function that used to write files and no longer does is strictly safer, so it deploys without ceremony.
+   - **Adding** a capability is called a **widening**: for example, a function that gains the ability to write files, open a socket, or spawn a process that its running version didn't have. A widening **stops the deploy** and asks you to confirm it explicitly with `--grant-cap`.
+
+   The point of this one-directional rule is that a routine code push can't grant your running system new powers unannounced; the moment a patch reaches for more, you have to sign off on it by name.
+
+2. **Node policy gate (activation-time, on the server).** If the node sets `MARCH_DEPLOY_POLICY`, the server will not activate any function with capabilities that exceed the node's policy, regardless of who signed it. This is enforced independently of the deploy tooling, so it stays in force even if the deploy pipeline is bypassed or compromised.
+
+### A worked example
+
+Start from a server with a reloadable handler that only writes to the console:
+
+```march
+-- server.march (v1)
+mod App do
+  needs IO.NetListen
+  needs IO.Console
+  mod Server do
+    needs IO.Console
+    fn handle(x : Int) : Int do
+      println("handle v1 (console only)")
+      x + 1
+    end
+  end
+  fn main() do
+    println("cap-demo server up")
+    let _ = Server.handle(1)
+    match tcp_listen(9099) do
+      Err(e) -> println("listen err: " ++ e)
+      Ok(fd) -> let _ = tcp_accept(fd)  println("server shutting down")
+    end
+  end
+end
+```
+
+`Server.handle`'s own capabilities are just `{IO.Console}`. Run the node with a policy that permits only console I/O:
+
+```sh
+# on the server host
+printf 'IO.Console\n' > /etc/march/deploy-policy.txt
+MARCH_HOT_RELOAD_SOCKET=/tmp/app.sock \
+MARCH_DEPLOY_POLICY=/etc/march/deploy-policy.txt \
+  ./cap_server
+```
+
+Now a `v2` that adds a filesystem write to the same function:
+
+```march
+  mod Server do
+    needs IO.Console
+    needs IO.FileWrite
+    fn handle(x : Int) : Int do
+      println("handle v2 (now writes a file!)")
+      let _ = file_write("/var/log/app-debug.log", "handled " ++ int_to_string(x))  -- needs IO.FileWrite
+      x + 2
+    end
+  end
+```
+
+`Server.handle`'s own caps are now `{IO.Console, IO.FileWrite}`.
+
+**Step 1: deploy v2 with no grant.** The monotonicity gate aborts on the client, before anything is uploaded:
+
+```
+$ forge deploy hot --so v2.so
+Deploying 1 changed function(s)...
+error: hot deploy would add authority not held by the running version
+  running version caps:  IO.Console
+  new version adds:      IO.FileWrite (from Server.handle)
+  A hot deploy may only narrow authority. To authorize this widening, re-run with:
+      forge deploy hot --grant-cap IO.FileWrite
+error: capability widening — deploy aborted
+```
+
+The diagnostic names the exact capability *and* the specific function that introduced it. Widening the authority of a live system mid-flight is exactly the event an operator should consciously sign off on.
+
+**Step 2: grant the widening, but the node policy forbids it.** With `--grant-cap` you pass the deploy-time gate, the artifact uploads, and the server's policy gate rejects the activation:
+
+```
+$ forge deploy hot --grant-cap IO.FileWrite --so v2.so
+Deploying 1 changed function(s)...
+  granted widening: IO.FileWrite (via --grant-cap IO.FileWrite)
+Uploading artifact v2.so...
+Artifact uploaded.
+  FAILED Server.handle: ERR cap_policy IO.FileWrite — deploy rejected by node capability policy
+  Rolled back: 1 function(s) failed, server state unchanged.
+error: 1 function(s) failed to activate
+```
+
+The node had the final say. The batch rolled back cleanly; the live system is unchanged.
+
+**Step 3: a node with a policy that permits it.** Update the policy on the node and restart it (the policy is read once at startup):
+
+```sh
+printf 'IO.Console\nIO.FileWrite\n' > /etc/march/deploy-policy.txt
+# restart the server so it re-reads the policy
+```
+
+```
+$ forge deploy hot --grant-cap IO.FileWrite --so v2.so
+Deploying 1 changed function(s)...
+  granted widening: IO.FileWrite (via --grant-cap IO.FileWrite)
+  activated: Server.handle
+Deploy complete: 1 function(s) activated.
+```
+
+The same signed patch is admitted here and rejected on the console-only node: per-node authority, enforced at the node.
+
+### Configuring `MARCH_DEPLOY_POLICY`
+
+`MARCH_DEPLOY_POLICY` is the path to a newline-delimited file of permitted capability paths. The check is **subsumption-aware**: listing a parent capability permits its children (`IO.Network` permits `IO.NetConnect`, `IO.NetConnect.TLS`, `IO.NetListen`, …). See [Capabilities]({{ site.baseurl }}/docs/capabilities/) for the full hierarchy.
+
+```
+# /etc/march/deploy-policy.txt — this node may only gain console + read-only + outbound TLS
+IO.Console
+IO.FileRead
+IO.NetConnect.TLS
+```
+
+A node with this policy will never *admit a hot patch* that declares file-write, process-spawn, or foreign-FFI authority, regardless of signature.
+
+**The policy speaks about IO capabilities only.** The gate checks every capability under the `IO` lattice (`IO`, `IO.Console`, …, including an unknown `IO.` path) and does not police one outside it: a proof capability such as `Session.Live`, `ClusterNode.Live`, `Actor.Introspect` or your own `Db.Migrated`, or an FFI root. Those carry no IO authority of their own. The type system already decides who can hold one (only the declaring module mints it, from a `Cap(IO)` that is charged to the minter), and whatever IO a proof capability's dictionary performs is charged to the code that minted it: a session's transport belongs to the runner, not to the role body it is handed to. Calling foreign code is charged `IO.Foreign`, which the policy does police. This is the rule the compiler's own grant checks follow (a role's `needs` and `main`'s grant skip non-IO caps), and a pool's `caps` in a topology are IO caps, so the policy `forge host init` generates from them never names a proof capability. In practice it means a role body, whose own caps always include the session it is handed (`caps=IO.Console,Session.Live`), hot patches under that policy; a patch that also reaches an IO capability the policy lacks is still refused, proof capabilities beside it or not.
+
+> **An empty policy *file* is the opposite of permissive.** Only an **unset** (or
+> pointing-at-nothing) `MARCH_DEPLOY_POLICY` means "no policy is loaded" ⇒ permissive,
+> which is the default for backward compatibility. The moment the server can open a
+> policy file at all (even a completely empty, zero-byte one), it treats that as "a
+> policy is active, and it permits zero capabilities," so it will then reject *every*
+> function that declares any IO capability at all. If you want permissive, unset the
+> variable entirely; don't point it at an empty file.
+
+A line `serves <Proto.Role> ...` names the roles this node serves, and scopes the [per-role closure](#per-role-closures-activate6) check to them. The policy `forge host init` writes for a pool is the pool's `caps` (or its derived ones), the caps the topology runner charges to its roles, and that line:
+
+```
+# /etc/march/<project>/back.policy, generated
+IO.Clock
+IO.Console
+IO.Mut
+IO.Process
+IO.Spawn
+serves Echo.Server
+```
+
+A role the node does not serve is another pool's (a shared build carries every pool's roles) or the control plane's (`Ctl.Agent` and `Ctl.Control`, generated into every node's `main` when the topology has a `[control]` section, and charged to it like the runner). This pool's policy is not the bound on those, and granting their closures here instead would widen what any patch on the node may do. A bare `serves` says the node serves no role. A policy with no `serves` line bounds every role's closure, so a hand-written policy behaves as it always did; a function's own capabilities are checked against the capability lines either way.
+
+The policy is loaded once at startup; change it by restarting the server.
+
+A useful pattern is to size the policy from the app's own manifest: build the app, inspect the `caps=` fields in the `.hcr_manifest`, and grant exactly the capabilities the running boundary functions declare; then any future patch that reaches for more is caught.
+
+### Per-role closures (`ACTIVATE6`)
+
+A changed function's own capabilities have one blind spot: a patch that only *calls* an existing helper which already holds a capability. The patched function's own caps do not change, yet what it can reach does. For code that runs as a protocol role with a grant (`role Cons needs IO.Console`, see [Per-role grants]({{ site.baseurl }}/docs/choreography/#per-role-grants)), both gates also check the role's **full capability closure**: everything the role's code reaches, from the same solve the compiler's role-grant check runs.
+
+The manifest `--compile-so` writes carries one line per granted role, with each capability's reach chain:
+
+```
+ROLE Stream.Cons caps=IO.Console,IO.FileWrite via=IO.Console:body>cons;IO.FileWrite:body>cons>save
+```
+
+`forge deploy hot` compares each role's closure with the saved baseline, exactly as it compares functions. A widened role stops the deploy unless `--grant-cap` covers it:
+
+```
+error: hot deploy would widen role Stream.Cons's capability closure
+  running version caps:  IO.Console
+  new version adds:      IO.FileWrite (reached: body → cons → save)
+  A hot deploy may only narrow authority. To authorize this widening, re-run with:
+      forge deploy hot --grant-cap IO.FileWrite
+```
+
+A role new to the baseline widens by its whole closure. A baseline written before per-role closures (no `ROLE` lines) makes this gate permissive for one deploy, with a note.
+
+On the wire, a manifest with `ROLE` lines is deployed with the `ACTIVATE6` message: `ACTIVATE5`'s fields plus `role_caps:<Proto.Role>=<digest>;...` inside the signed line (one digest per role, sorted by role, the `cap_root` recipe over its closure) and an unsigned `roles:<Proto.Role>=<caps>;...` block. The server recomputes every digest from the block and refuses a mismatch, a signed role the block leaves out, or a role it adds unsigned (`ERR role_cap_tamper`), then checks the IO capabilities of every closure against `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy Stream.Cons IO.FileWrite`), or of every role the policy's `serves` line names. A granted widening therefore still stops at a node whose policy forbids it. It is a new message rather than an extra field because an older server rebuilds the signed line without the role digests, so a signature check there would fail for a confusing reason. Today forge sends both shapes as `ACTIVATE7`, which adds a signed digest of the patch's bytes (see [Artifact integrity](#artifact-integrity-the-signature-covers-the-bytes)); a server that predates it refuses the deploy (upgrade it).
+
+### Topology pools' derived capabilities
+
+In a topology app (a project with a `topology.toml`), a pool whose `caps` the file leaves out gets them derived by the compiler from what its hook and roles reach. Derived does not mean unchecked: `forge deploy hot` compares each pool's derived caps with the ones recorded at the last completed deploy to the same environment (`.forge/deploy/<env>/derived.json`, `default` without `--env`; the same file `forge deploy` records), before it builds anything. A pool that gains a capability stops the deploy unless `--grant-cap` covers it:
+
+```
+error: hot deploy would widen pool edge's derived capabilities (D26)
+  last deployed caps:    IO.Console   (the default environment)
+  new version adds:      IO.FileWrite
+  A hot deploy may only narrow authority. To authorize this widening, re-run with:
+      forge deploy hot --grant-cap IO.FileWrite
+```
+
+A grant names the capability, not the pool: it authorizes it for every pool that widens to it. A pool new to the record widens by all its caps. With no record yet (the first deploy) the gate is permissive, with a note; when a record exists but the caps cannot be derived, the deploy stops rather than pass the gate blind. The record advances only when the deploy completes on every server. `forge build` prints a warning for each pool that widens relative to any environment's record. See [Topology → Derived capabilities and the widening gate]({{ site.baseurl }}/docs/topology/#derived-capabilities-and-the-widening-gate).
+
+### `--grant-cap`
+
+`--grant-cap <CAP>` is repeatable and subsumption-matched: `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. The granted capability becomes part of the deployed function's own signed capability set, so it can't be stripped or altered without breaking the signature; the server's audit log records who deployed which function, when, and with which capability set, so a widening is always traceable back to the person who authorized it.
+
+Each `ACTIVATE` appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`) with `ts`, `type` (`activate`, `restore` for a replay at start, `topology` for a topology push, `drain` for a `DRAIN` request, `release` for a release accepted or refused), `fn`, `impl_hash`, `signer`, `cas_hash`, `caps`, `cap_root` and `result`, plus `roles` (the role closures as received) for `ACTIVATE6`. `caps` is the deploy's capability list (`[]` for a capless artifact) and `cap_root` its signed root; both are `null` for deploys over pre-v4 protocols, which carry no capability data. They are recorded as received, so on a rejected request (`err_sig`, `err_cap_tamper`) they show what the request claimed, not a verified set. To find when a node last gained a capability: `jq -c 'select(.result == "ok" and (.caps // [] | index("IO.Network")))' audit.jsonl | tail -1`.
+
+```sh
+forge deploy hot --grant-cap IO.FileWrite --grant-cap IO.Process --so v2.so
+```
+
+The grant only relaxes the client-side monotonicity gate. It does **not** override a node's `MARCH_DEPLOY_POLICY`; as the worked example shows, a granted widening still gets `ERR cap_policy` at a node that forbids the capability.
+
+### `migrate_state` must be IO-free
+
+A `migrate_state` function runs in the migration window, between the last message sent to the old code and the first handled by the new code, a moment where doing IO (or panicking) has dangerous ordering and partial-failure semantics. The compiler enforces this: a `*_migrate_state` function with a body that performs any IO builtin or `extern` call is a compile error.
+
+```
+migrate_state must be IO-free
+MyApp.Counter.counter_migrate_state calls capabilities that need IO.FileWrite.
+migrate_state runs during the hot-migration window, before user messages.
+hint: move side effects into a normal handler that runs after migration completes.
+```
+
+The check uses the migration function's **own** effects: a `migrate_state` in a module that declares `needs IO.Console` for its *handlers* still compiles cleanly, because the migration body itself does no IO.
+
+### Threat model: what the gates do and do not prove
+
+The capability manifest is **self-reported by the compiler**. The node's checks prove
+*integrity* (each function's declared capability set is hashed into a `cap_root`, and
+that hash is part of what's signed, so an attacker modifying the capability list in
+transit (without the signing key) produces a hash mismatch that aborts with
+`ERR cap_tamper`) and *policy* (the declared authority fits the node), but **not
+truthfulness** (that the compiled machine code actually stays within the declared caps;
+the server cannot recompute effects from a shared object).
+
+- **Defends against:** accidental authority creep by a well-behaved toolchain (the common case); operator error shipping the wrong build to a restricted node; a compromised deploy *pipeline* that still builds with the real compiler; tampering with the capability set in transit.
+- **Does not defend against:** a party holding the signing key who hand-crafts a `.so` with a lying manifest. Capability admission is authorization *on top of* authentication, a defense-in-depth layer, not a sandbox. For stronger guarantees, combine it with OS-level confinement of the reload server.
+
+A policy constrains what *hot-patched* functions may do; it does not retroactively constrain the trusted base binary the operator already deployed.
+
+### Backward compatibility
+
+Every gate is opt-in and additive. A pre-capability artifact (no capability fields in its manifest) deploys with permissive admission and a one-line note. A manifest without `ROLE` lines is admitted exactly as before (forge sends it as `ACTIVATE7`, which only adds the bytes' digest). A node with no `MARCH_DEPLOY_POLICY` allows everything, exactly as before. Deploying capability-aware code to a server that predates node admission fails fast with an actionable message rather than silently downgrading; re-run with `--no-cap-gate` if you intentionally want the legacy path.
+
+---
+
+## Sequenced releases: no replayed requests
+
+A signed line on its own proves who wrote it, not when. Without more, a signed `ACTIVATE`, `TOPOLOGY` or `DRAIN` recorded once could be sent again later: to roll a function back to an old version, re-push an old placement, or repeat a drain. So forge wraps every signed line it sends in a **release**:
+
+```
+SEQ <seq> <id> <signature> <signed line>
+```
+
+signed over `SEQ <seq> <id> <signed line>` with the deploy key. The inner line keeps its own signature, checked as before. One `forge` invocation is one release: `<id>` is random (32 hex digits), and `<seq>` is the time in milliseconds, or one more than the node's current release if that is higher. The node keeps the highest release it has accepted, its **head**, in a file of its own next to the persisted state (`<state dir>/release`), so a restart, `MARCH_HCR_NO_REPLAY` or a different build on the socket does not forget it:
+
+| The release | The node |
+|---|---|
+| newer than the head | accepts it, and it becomes the head (gaps are fine: a node a deploy did not touch never saw that release) |
+| the head itself | accepts it: a retry, or the next line of the same deploy |
+| the head's number with another id | refuses it, `ERR release_fork head:<n>:<id>`: two deploys chose the same number |
+| older than the head | refuses it, `ERR stale_release head:<n>` |
+
+Once a node holds a release, or when it was started with `MARCH_HCR_REQUIRE_RELEASE=1`, a signed line that is not wrapped is refused with `ERR release_required`, so a line recorded before the node saw its first release cannot be replayed either. `RELEASE_HEAD` answers `HEAD <seq> <id>` (`HEAD 0 -` before any release, with ` required` appended under `MARCH_HCR_REQUIRE_RELEASE`); forge asks it once per connection and sends unwrapped lines only to a server that does not know the request. Every release a node accepts or refuses is audited (`type` `release`).
+
+forge reports a refusal in words: a stale release means another deploy reached the node first, or this machine's clock is behind; a fork means two deploys ran at once. Re-run the deploy either way.
+
+---
+
+## Artifact integrity: the signature covers the bytes
+
+A patch reaches a node in two parts: its bytes go into the node's artifact store (the CAS, `~/.march/cas/artifacts/`, under the compiler's compilation hash), and a signed `ACTIVATE` line names them. The CAS is **not** a trust boundary. Anyone who can reach the reload socket, or the control API of a candidate, can write it with `CAS_PUT`, and the compilation hash is a hash of the build's inputs, not of the bytes stored under it. Until `ACTIVATE7` nothing signed the bytes, so whoever could write a node's CAS chose what an operator's signed line loaded, constructors included (review `specs/progress/2026-10-04-dd12-review-cas-artifact-unverified.md`).
+
+`ACTIVATE7` carries the BLAKE3 of the `.so` file's bytes, `so_blake3:<hex>`, **inside** the signed line (between `epoch:` and `cap_root:`); otherwise it is `ACTIVATE5`, or `ACTIVATE6` with the role blocks. Before it maps anything, the node reads the artifact once, hashes exactly the bytes it read, and copies them to a directory of its own (`<state dir>/loaded/<so_blake3>.so`, mode `0700`, written by no request). It loads that copy only if the bytes are the signed ones, so a file replaced between the check and the load changes nothing. Bytes that do not match are refused with `ERR artifact_digest`, audited as `err_artifact_digest`, and none of their code runs.
+
+The CAS verbs take the digest as well, so forge spots a bad copy before it activates anything:
+
+| Request | Answer |
+|---|---|
+| `CAS_CHECK <hash> so_blake3:<hex>` | `PRESENT` only if the stored bytes hash to `<hex>`, so forge uploads a stale or substituted artifact again |
+| `CAS_PUT <hash> <size> so_blake3:<hex>` | `ERR digest_mismatch` (nothing stored) for bytes that do not hash to `<hex>` |
+
+Both still accept the old form without the digest. Someone who can write the CAS can still replace an artifact after forge uploads it; the deploy then fails with `ERR artifact_digest`, and forge says so. That is a delay, not a forgery: no unsigned code runs (design D37).
+
+Older lines (`ACTIVATE` through `ACTIVATE6`) sign no digest of the bytes. A node that holds a release, or runs with `MARCH_HCR_REQUIRE_RELEASE=1`, refuses them with `ERR artifact_digest_required`, wrapped in a release or not, and does not replay such entries from its patch stack (see [Restart durability](#restart-durability)). Before its first release a node still accepts them, as before. forge sends `ACTIVATE7` for every capability-aware deploy. `--no-cap-gate` still sends the legacy `ACTIVATE3`, so it only works against a node that accepts unbound lines.
+
+The reload socket itself is owner-only (`0600`, set before it accepts connections, whatever the umask the node inherited), and a peer whose uid is not the node's (or root's) is disconnected.
+
+---
+
+## Restart durability
+
+A restarted server comes back on the code it was running, without a redeploy and before `main` runs (so before a node opens any offer). The reload server keeps a **patch stack** on the host, under its CAS root next to `next_epoch`:
+
+```
+~/.march/cas/hcr_state/<16 hex of blake3(socket path)>/state
+```
+
+It holds every activated function's signed message and signature in activation order (a deploy's functions share one sequence number), a digest of the base build it patches, a digest of the code actually running (`manifest`), and the digest of the last topology pushed. It is rewritten with a temporary file and a rename after every deploy.
+
+At start, before `march_reload_server_start` returns, the server replays it:
+
+- Each entry's **signature is verified again** from the stored signed line with the key baked into the binary.
+- An invalid entry (bad signature, missing artifact, unknown function) is audited (`"type":"restore"`, `"result":"err_restore_sig"` and so on). Its **whole deploy batch and every later batch are refused**: a later migration may depend on the missing version. The server retains the verified prefix, or the base build if no complete batch precedes the failure. A malformed stack line prevents all replay because its batch dependencies cannot be established.
+- An `ACTIVATE7` entry's artifact must **still hash to its signed digest** (`err_restore_digest` otherwise), and is loaded through the same verified copy as a live deploy, so bytes replaced in the CAS while the node was down are not replayed. An entry written before `ACTIVATE7` has no signed digest to check its bytes against: it is replayed only where such a line would still be accepted live (no release held, no `MARCH_HCR_REQUIRE_RELEASE`), and refused otherwise (`err_restore_no_digest`), stopping replay at that batch.
+- Every complete deploy batch is republished in its original order, including signed migration flags and the helper functions that migrations may call. This preserves multi-hop state conversions for actors initialized by the base program after restart. Successfully replayed history remains in the rewritten stack; a refused suffix is removed. If bounded version or epoch capacity cannot retain that history, startup exits with an explicit full-release/restart diagnostic instead of dropping migrations or continuing on an incomplete chain.
+- A **different build** on the same socket (its baseline digest differs) does not replay the stack: patches of one build are not patches of another. The file is set aside as `state.base-changed`.
+- `MARCH_HCR_NO_REPLAY=1` starts from the base binary and sets the stack aside as `state.no-replay`: the escape hatch for a patch that breaks the boot.
+
+`VERSIONS` then shows the hot versions as before, and `VERSIONS_DETAIL` gains a line saying what the start restored:
+
+```
+RESTORED entries:1 skipped:0 mode:replayed stack:1 manifest:<hex> topology:<hex>
+```
+
+(`mode` is `none` on a first start, `replayed`, `off` under `MARCH_HCR_NO_REPLAY`, or `base_changed`.) The state is keyed by the socket path because the CAS root is shared by every March program of a user; the socket names the service.
+
+**Compaction.** A host that boots its base binary and then republishes a long stack boots slowly and runs code no single build produced. `COMPACT` reports the stack's size, and `forge hot-reload status` prints it per node:
+
+```
+Patch stack: 3 persisted patches over 2 deploys (2 functions), 1 artifact, 1.2 MiB in the CAS
+```
+
+When it grows long, `forge deploy --compact --env <env>` rebuilds each build's base image from the current version, restarts its hosts onto it (the new base build makes the server set the old stack aside) and removes what was set aside; each node then reports an empty stack. With `[hot-reload] compact_after = N` in `forge.toml`, `forge deploy` does this by itself for a build whose nodes report a stack longer than `N`.
+
+---
+
+## Current limitations
+
+Hot reload swaps native code in a live process, and that has failure modes a restart
+does not. The Phase 0 soundness spike (2026-10-13,
+[`specs/progress/2026-10-13-hcr-phase0-spike.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-13-hcr-phase0-spike.md))
+ran the shipped `.so` patch model under AddressSanitizer and found three ways a swap
+corrupted or leaked memory: a parameter changing from borrowed to owned (use-after-free),
+a patch introducing a new closure shape (leaked captures), and a reclaimed patch image
+being unmapped under live closure code (crash). All three were fixed the same day. The
+spike's verdict was to keep the shipped native-patch model and not build an in-server
+JIT on top of it.
+
+These are still open:
+
+- **Long-running frames retain old versions.** A `main` loop that never returns,
+  or an escaping closure, can prevent version reclamation. Baseline main keeps its
+  baseline routing epoch even when saved patches are restored on restart.
+- **Sandboxed reload writes need `IO.FileWrite`.** Without it, the compiler warns
+  and the sandbox rejects artifact and persistence writes. Read-only observation
+  remains available.
+- **Old patch images stay mapped.** A reclaimed version's `.so` is never unloaded, so a
+  long-lived node keeps one mapped image per deploy until it restarts.
+  ([todo](https://github.com/march-language/march/blob/main/specs/todos/2026-10-13-hcr-unload-unreachable-patch-images.md))
+
+## See also
 
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/): the capability system behind capability-safe deploys, including the full IO capability hierarchy
 - [Actors]({{ site.baseurl }}/docs/actors/): the actor model hot reload builds on
 - [Supervision Trees]({{ site.baseurl }}/docs/supervision/): combine hot reload with fault-tolerant supervision
 - [Refinement Types]({{ site.baseurl }}/docs/refinement-types/): the type-level system behind `@invariant` checking
 - [Tooling]({{ site.baseurl }}/docs/tooling/): `forge` build tool reference
+- [Choreography]({{ site.baseurl }}/docs/choreography/#changing-a-protocol): what a protocol change means for sessions in flight
+- [Observing a running node]({{ site.baseurl }}/docs/observe/): `EPOCHS`, `WHICH` and `SOURCE` on a node after a deploy
+- [Topology]({{ site.baseurl }}/docs/topology/): the pools, hosts and control plane `forge deploy` plans against

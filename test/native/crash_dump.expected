@@ -1,0 +1,14 @@
+program exit=1
+dump written
+no .tmp left behind
+diagnose exit=2
+"id":"crash.loop","severity":"critical"
+"dump":{"reason":"panic"
+crash rows with the panic message: 1
+crash rows with a child message: 3
+live-only
+snapshot envelopes: 1
+unset exit=1
+no dump without MARCH_CRASH_DUMP
+unwritable path exit=1
+not a dump exit=3

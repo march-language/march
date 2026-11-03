@@ -1,0 +1,91 @@
+-- File and CSV handles are `Int`s, so nothing in compiled code releases
+-- them: the handle used to be a heap cell that file_close / csv_close could
+-- not free (a second close must stay a no-op), and every open leaked it
+-- (24 bytes per file_open, 40 per csv_open; LSan, close_returns_ok_atom and
+-- csv_niche_row). Handles are now entries in a runtime table with a
+-- generation, freed on close (specs/progress/2026-10-12-file-csv-handle-cell-leak.md).
+--
+-- Measured before the fix, --compile --opt 2, live objects per 300 opens:
+--   - file_open + read + file_close ................ 300
+--   - Csv.read_all (csv_open, rows, csv_close) ..... 300
+-- After: 0 on both.
+--
+-- The stale-handle legs pin what the table must keep: a second close is a
+-- no-op, a read after close is end of stream, and a closed handle whose slot
+-- an open has since reused still reads as closed (it must not reach the new
+-- stream).
+mod Main do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.FileWrite
+
+  pfn file_leg(path : String, n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      match file_open(path) do
+      Err(_) -> -1
+      Ok(fd) ->
+        let got = match file_read_line(fd) do
+          Some(l) -> string_length(l)
+          None -> 0
+        end
+        let _ = file_close(fd)
+        file_leg(path, n - 1, acc + got)
+      end
+    end
+  end
+
+  pfn csv_leg(path : String, n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      match Csv.read_all(path, ",", :rfc4180) do
+      Err(_) -> -1
+      Ok(rows) -> csv_leg(path, n - 1, acc + List.length(rows))
+      end
+    end
+  end
+
+  pfn line_of(o : Option(String)) : String do
+    match o do
+    Some(l) -> l
+    None -> "<eof>"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite)) : Unit do
+    let path = "/tmp/march_native_file_handle_leak_probe.csv"
+    match File.write(path, "a,b,c\n1,2,3\n") do
+    Err(_) -> panic("write failed")
+    Ok(_) -> :ok
+    end
+    let w = file_leg(path, 5, 0) + csv_leg(path, 5, 0)
+    let a0 = live_allocs()
+    let x = file_leg(path, 300, 0)
+    let a1 = live_allocs()
+    let y = csv_leg(path, 300, 0)
+    let a2 = live_allocs()
+    println("warmup " ++ int_to_string(w))
+    println("file open/close: total " ++ int_to_string(x) ++ ", flat: " ++ bool_to_string(a1 - a0 < 30))
+    println("csv open/close: total " ++ int_to_string(y) ++ ", flat: " ++ bool_to_string(a2 - a1 < 30))
+
+    match file_open(path) do
+    Err(_) -> println("file_open err")
+    Ok(old) ->
+      let _ = file_close(old)
+      println("second close == :ok: " ++ bool_to_string(file_close(old) == :ok))
+      println("read after close: " ++ line_of(file_read_line(old)))
+      match file_open(path) do
+      Err(_) -> println("file_open err")
+      Ok(fresh) ->
+        println("stale handle reads: " ++ line_of(file_read_line(old)))
+        println("fresh handle reads: " ++ line_of(file_read_line(fresh)))
+        let _ = file_close(old)
+        println("fresh after stale close: " ++ line_of(file_read_line(fresh)))
+        let _ = file_close(fresh)
+        ()
+      end
+    end
+
+    match File.delete(path) do _ -> () end
+  end
+end

@@ -27,19 +27,26 @@ Naming overlap with module-qualified APIs is intentional:
 New code should prefer module-qualified calls for readability;
 prelude names exist for short scripts and for the few cases (head,
 tail, length, reverse) where the unqualified name reads better.
+Prelude functions are called unqualified (`length(xs)`, not
+`Prelude.length(xs)`).
 
 ## fn with_cap(_c, f) do f(()) end
 
 Runs `f` with `c` installed as the capability its operations dispatch
-  through, so a test can substitute an implementation:
+through, so a test can substitute an implementation:
 
 
-  At runtime this simply calls `f` — the capability is consumed by the
-  compiler's capability-passing elaboration, which rewrites calls inside `f`
-  to route through `c`'s dictionary. Outside a `--test` build the elaboration
-  does not run and this is exactly `f(())`.
+At runtime this simply calls `f` — the capability is consumed by the
+compiler's capability-passing elaboration, which rewrites calls inside `f`
+to route through `c`'s dictionary. Outside a `--test` build the elaboration
+does not run and this is exactly `f(())`.
+
+## Examples
+
+    march> with_cap(0, fn _ -> 9)
+    9
 
 ```march
-  with_cap(mock, fn _ -> code_under_test())
+with_cap(mock, fn _ -> code_under_test())
 ```
 

@@ -1,0 +1,24 @@
+mod A1 do
+  fn cat(xs : List(Int), ys : List(Int)) : {List(Int) | len(_) == len(xs) + len(ys)} do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, cat(t, ys))
+    end
+  end
+
+  fn rev(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> cat(rev(t), Cons(h, Nil))
+    end
+  end
+
+  fn need3(xs : {List(Int) | len(_) == 3}) : Int do 0 end
+
+  fn main() : Unit do
+    let a = cat(Cons(1, Nil), Cons(2, Cons(3, Nil)))
+    let _ = need3(a)
+    let _ = need3(rev(a))
+    ()
+  end
+end

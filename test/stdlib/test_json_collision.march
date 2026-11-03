@@ -1,0 +1,58 @@
+-- Two types that share a short name in two modules, where only ONE of them
+-- derives Json (specs/todos/2026-10-03-derive-json-same-short-name-two-modules.md).
+-- Run: dune exec march -- test test/stdlib/test_json_collision.march
+--
+-- When BOTH derive Json the program is now a compile error
+-- (`json_derive_name_collision`, owner decision 2026-10-11; pinned by
+-- specs/lang/types/reject/t318_derive_json_same_short_name.march and
+-- test/errors/json_derive_name_collision_1.march): `from_json` picks its codec by the
+-- result type's short name and decoded with the wrong one. With only one
+-- codec in the program there is nothing to confuse, so this shape must keep
+-- working: A's Note round-trips through to_json/from_json while B's Note,
+-- which derives nothing, is used alongside it.
+
+mod TestJsonCollision do
+
+  mod A do
+    type Note = NA(Int) | NB(String)
+    derive Json for Note
+    fn enc(n : Note) : String do Json.to_string(to_json(n)) end
+    fn roundtrip(n : Note) : String do
+      match Json.parse(enc(n)) do
+        Ok(j) ->
+          let r : Result(Note, Json.DecodeError) = from_json(j)
+          match r do
+            Ok(NA(k)) -> "NA " ++ int_to_string(k)
+            Ok(NB(s)) -> "NB " ++ s
+            Err(_) -> "decode error"
+          end
+        Err(_) -> "parse error"
+      end
+    end
+  end
+
+  mod B do
+    type Note = NC(Bool) | ND(Int, Int)
+    fn label(n : Note) : String do
+      match n do
+        NC(b) -> if b do "NC t" else "NC f" end
+        ND(x, y) -> "ND " ++ int_to_string(x + y)
+      end
+    end
+  end
+
+  describe "same short name, only one derives Json" do
+    test "A.Note encodes with A's codec" do
+      assert A.enc(A.NA(3)) == "{\"tag\":\"NA\",\"0\":3}"
+      assert A.enc(A.NB("x")) == "{\"tag\":\"NB\",\"0\":\"x\"}"
+    end
+    test "A.Note round-trips through from_json" do
+      assert A.roundtrip(A.NA(3)) == "NA 3"
+      assert A.roundtrip(A.NB("x")) == "NB x"
+    end
+    test "B.Note is still usable" do
+      assert B.label(B.ND(1, 2)) == "ND 3"
+      assert B.label(B.NC(true)) == "NC t"
+    end
+  end
+end

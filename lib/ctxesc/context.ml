@@ -30,6 +30,46 @@ type attr =
   | AtUrlMid
       (** a URL attribute value with literal content already before the hole —
           the interpolation is a component, so it needs percent-encoding *)
+  | AtUrlScheme
+      (** a URL attribute value holding only literal, scheme-shaped text so far
+          (`java`, `http`): the scheme may still be open. A hole here is a
+          component, as at [AtUrlMid], but it moves to [AtUrlSchemeHoleMid] so a
+          later literal `:` cannot complete a scheme the hole helped spell. *)
+  | AtUrlSchemeHole
+      (** the scheme is still open and a whole-URL hole has written into it
+          (an `href` value that opens with a hole). The whole-URL escaper checked the scheme of that ONE
+          value; a literal `:` here would make the value itself the scheme
+          (`javascript` + `:`), so the table rejects one. Consecutive holes stay
+          here and keep the whole-URL escaper. *)
+  | AtUrlSchemeHoleMid
+      (** the scheme is still open, a hole has written into it, and literal or
+          component text followed. Holes here are components again; a literal
+          `:` is rejected for the same reason as at [AtUrlSchemeHole]. *)
+  | AtUrlSchemeRef
+      (** as [AtUrlScheme], but the template has written a character
+          reference (`&`) since the last hole. A hole here is REJECTED: it
+          could finish the reference (`javascript&#` + `58` decodes to
+          `javascript:`) or the percent-escape a reference for `%` starts. *)
+  | AtUrlPct
+      (** in a URL path right after a literal `%` (or a reference for one).
+          A hole here is REJECTED: it could finish the percent-escape, and
+          `.%` + `2e` is the dot segment `..` to the URL parser. *)
+  | AtUrlPct1
+      (** in a URL path right after `%` and one hex digit; rejects a hole for
+          the same reason as [AtUrlPct]. *)
+  | AtUrlRef
+      (** in a URL path right after a numeric character reference (finished
+          or not). Rejects a hole: the table cannot decode the reference, and
+          it may be `%` or one the value completes (`&#` + `46` is a dot). *)
+  | AtUrlQuery
+      (** inside a URL's QUERY: the template wrote a literal `?` after the
+          scheme settled. A hole here is a query component and gets
+          [EscUrlComponent]. Split from [AtUrlMid] on 2026-10-11 so that the
+          path positions could get [EscUrlPath] -- a dot segment is only
+          meaningful in a path, and `q=..` is honest data. *)
+  | AtUrlFragment
+      (** inside a URL's FRAGMENT: the template wrote a literal `#`. A hole
+          here is a fragment component; [EscUrlComponent], as in the query. *)
   | AtStyle
       (** a `style` attribute at a DECLARATION position — the start of the
           value, or just after a `;`. A hole here is a declaration list
@@ -39,12 +79,30 @@ type attr =
           a single value (`#fff`, `var(--x)`), so `:` and `;` are NOT allowed:
           either would let the value start a new declaration. *)
   | AtCssUrl
-      (** inside a CSS `url(...)`, whether in a `style` attribute or a `<style>`
-          body. A hole here is a URL, not a CSS value: escaping it as CSS
+      (** at the START of a CSS `url(...)` (nothing but whitespace and an
+          opening quote written yet), whether in a `style` attribute or a
+          `<style>` body; the positions after it are [AtCssUrlScheme] ..
+          [AtCssUrlMid], and all of them share this escaper. A hole here is a URL, not a CSS value: escaping it as CSS
           mangles the slashes and breaks the reference, while escaping it as a
           plain URL would not stop it closing the `url(`. This is the one place
           the paper's subsidiary automata genuinely earn their keep — see
           [EscCssUrl]. *)
+  | AtCssUrlScheme
+      (** inside a CSS `url(...)`, with only literal, scheme-shaped text so
+          far: the scheme is still open. Same idea as [AtUrlScheme]. *)
+  | AtCssUrlRef
+      (** inside a CSS `url(...)` whose scheme is still open, after a
+          character reference or a CSS escape (`\`) that a hole could finish
+          (`\` + `00003a` is the CSS escape for `:`). Rejects a hole. *)
+  | AtCssUrlHole
+      (** inside a CSS `url(...)` whose scheme is still open and which a hole
+          has written into. A literal `:` here -- or a reference or CSS escape,
+          either of which can decode to one -- is rejected: it would let the
+          hole choose the scheme, as `url(${s}:x)` with s = `javascript` did
+          until 2026-10-11. *)
+  | AtCssUrlMid
+      (** inside a CSS `url(...)` whose scheme is settled. [AtCssUrl] is now
+          only the START of the url(). *)
   | AtScript
       (** JS at an EXPRESSION position — a `<script>` body outside any string
           literal, or an `on*` handler attribute at the same. A hole here is a
@@ -109,7 +167,10 @@ let all_states =
 
 let all_elements = [ ElNormal; ElScript; ElStyle; ElTextarea; ElTitle ]
 let all_attrs =
-  [ AtNormal; AtUrl; AtUrlMid; AtStyle; AtStyleValue; AtCssUrl; AtScript;
+  [ AtNormal; AtUrl; AtUrlMid; AtUrlScheme; AtUrlSchemeHole;
+    AtUrlSchemeHoleMid; AtUrlSchemeRef; AtUrlPct; AtUrlPct1; AtUrlRef;
+    AtUrlQuery; AtUrlFragment; AtStyle; AtStyleValue; AtCssUrl;
+    AtCssUrlScheme; AtCssUrlRef; AtCssUrlHole; AtCssUrlMid; AtScript;
     AtJsString; AtJsComment; AtJsRegex; AtJsTemplate; AtSrcset; AtHtmlDoc ]
 let all_delims = [ DlNone; DlSingle; DlDouble; DlUnquoted; DlDoubleSubst ]
 
@@ -135,9 +196,22 @@ let attr_name = function
   | AtNormal -> "normal"
   | AtUrl -> "url"
   | AtUrlMid -> "urlmid"
+  | AtUrlScheme -> "urlscheme"
+  | AtUrlSchemeHole -> "urlschemehole"
+  | AtUrlSchemeHoleMid -> "urlschemeholemid"
+  | AtUrlSchemeRef -> "urlschemeref"
+  | AtUrlPct -> "urlpct"
+  | AtUrlPct1 -> "urlpct1"
+  | AtUrlRef -> "urlref"
+  | AtUrlQuery -> "urlquery"
+  | AtUrlFragment -> "urlfragment"
   | AtStyle -> "style"
   | AtStyleValue -> "stylevalue"
   | AtCssUrl -> "cssurl"
+  | AtCssUrlScheme -> "cssurlscheme"
+  | AtCssUrlRef -> "cssurlref"
+  | AtCssUrlHole -> "cssurlhole"
+  | AtCssUrlMid -> "cssurlmid"
   | AtScript -> "script"
   | AtJsString -> "jsstring"
   | AtJsComment -> "jscomment"
@@ -184,10 +258,26 @@ let describe c =
   | Afterattrname, _, _ -> "just after an attribute name"
   | Beforeattrvalue, _, _ -> "just before an attribute value"
   | Attrvalue, AtUrl, _ -> "at the start of a URL attribute value"
-  | Attrvalue, AtUrlMid, _ -> "inside a URL attribute value"
+  | Attrvalue, (AtUrlMid | AtUrlScheme), _ -> "inside a URL attribute value"
+  | Attrvalue, AtUrlQuery, _ -> "in the query of a URL attribute value"
+  | Attrvalue, AtUrlFragment, _ -> "in the fragment of a URL attribute value"
+  | Attrvalue, (AtUrlSchemeRef | AtUrlRef), _ ->
+    "inside a URL attribute value, right after a character reference"
+  | Attrvalue, (AtUrlPct | AtUrlPct1), _ ->
+    "inside a URL attribute value, right after an unfinished percent-escape"
+  | Attrvalue, (AtUrlSchemeHole | AtUrlSchemeHoleMid), _ ->
+    "inside a URL attribute value whose scheme an interpolation may still be \
+     spelling"
   | Attrvalue, AtStyle, _ -> "at a declaration position in a style attribute"
   | Attrvalue, AtStyleValue, _ -> "at a value position in a style attribute"
-  | Attrvalue, AtCssUrl, _ -> "inside a CSS url() in a style attribute"
+  | Attrvalue, (AtCssUrl | AtCssUrlScheme | AtCssUrlMid), _ ->
+    "inside a CSS url() in a style attribute"
+  | Attrvalue, AtCssUrlRef, _ ->
+    "inside a CSS url() in a style attribute, right after a character \
+     reference or CSS escape"
+  | Attrvalue, AtCssUrlHole, _ ->
+    "inside a CSS url() in a style attribute whose scheme an interpolation \
+     may still be spelling"
   | Attrvalue, AtScript, _ ->
     "at a JS expression position in an event-handler attribute"
   | Attrvalue, AtJsString, _ ->
@@ -260,6 +350,16 @@ type escaper =
           trusted-id tables in lib/tir/llvm_emit.ml and lib/eval/eval.ml.
           Appended rather than inserted so the existing ids stay stable: they
           are shared verbatim with the C runtime's MARCH_ESC_* defines. *)
+  | EscUrlPath
+      (** a hole in a URL's PATH (or authority) after literal text: the
+          component escaper, plus one refusal. A value made of nothing but
+          dots is a DOT SEGMENT once it fills a path segment --
+          `href="/users/${id}/edit"` with id = `..` renders `/users/../edit`,
+          which the URL parser resolves to `/edit` -- and percent-encoding
+          cannot help, because the URL parser treats `%2e` as `.` too. Such a
+          value is replaced with an inert token instead. Query and fragment
+          holes keep [EscUrlComponent]: a dot segment means nothing there, and
+          `?q=..` is honest data. Appended so the existing ids stay stable. *)
 
 let escaper_id = function
   | EscHtml -> 0
@@ -272,6 +372,7 @@ let escaper_id = function
   | EscCssDecl -> 7
   | EscCssUrl -> 8
   | EscJsExpr -> 9
+  | EscUrlPath -> 10
 
 let escaper_name = function
   | EscHtml -> "html"
@@ -284,3 +385,4 @@ let escaper_name = function
   | EscCssDecl -> "css_decl"
   | EscCssUrl -> "css_url"
   | EscJsExpr -> "js_expr"
+  | EscUrlPath -> "url_path"

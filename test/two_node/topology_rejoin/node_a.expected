@@ -1,0 +1,6 @@
+node-a: not offering Ledger.Server
+node-a: offering Ledger.Server
+node-a: ranked second
+node-a: stopping
+node-a: up
+topology: Ledger.Server: no longer placed on node-a; draining its offer

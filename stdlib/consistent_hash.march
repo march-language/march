@@ -9,6 +9,10 @@
 --
 -- The internal ring is a sorted List((Hash, node)) — O(replicas) per add/remove,
 -- O(replicas) per lookup. Suitable for small-to-medium cluster sizes.
+-- (More precisely: add/remove/get are linear in the total number of virtual
+-- nodes on the ring, nodes * replicas, since the ring is a plain list.)
+--
+-- doc: try
 
 mod ConsistentHash do
 
@@ -18,12 +22,35 @@ mod ConsistentHash do
   -- replicas: virtual nodes per physical node
   ptype HashRing(a) = HashRing(List((String, a)), Map(String, a), Int)
 
-  doc "Create an empty ring with the given virtual node count per physical node."
+  doc """
+  An empty ring that will place `replicas` virtual nodes per physical node.
+  More replicas spread keys more evenly at the cost of a longer ring.
+  `replicas` of 0 or less makes `add` register the name without putting any
+  virtual node on the ring, so `get` keeps returning `None`.
+
+  ## Examples
+
+      march> ConsistentHash.is_empty(ConsistentHash.new(3))
+      true
+      march> ConsistentHash.size(ConsistentHash.new(3))
+      0
+  """
   fn new(replicas : Int) : HashRing(a) do
     HashRing(Nil, Map.empty(), replicas)
   end
 
-  doc "Add a named node to the ring, inserting `replicas` virtual nodes."
+  doc """
+  Add physical node `node` under `name`, inserting `replicas` virtual nodes at
+  `Crypto.sha256(name ++ "#" ++ i)` for i in 0..replicas-1. Adding a name that
+  is already present replaces its entry in the name map but inserts a second
+  set of virtual nodes, which still point at the old value; `remove` the name
+  first to replace a node cleanly.
+
+  ## Examples
+
+      march> ConsistentHash.size(ConsistentHash.add(ConsistentHash.add(ConsistentHash.new(3), "n1", 1), "n2", 2))
+      2
+  """
   fn add(ring : HashRing(a), name : String, node : a) : HashRing(a) do
     match ring do
     HashRing(lst, nodes, replicas) ->
@@ -51,7 +78,13 @@ mod ConsistentHash do
     end
   end
 
-  doc "Remove a named node and all its virtual nodes from the ring."
+  doc """
+  Remove the node registered under `name` and all its virtual nodes. Removing
+  an unknown name returns an equivalent ring.
+
+      let ring = ConsistentHash.add(ConsistentHash.new(3), "n1", 1)
+      ConsistentHash.size(ConsistentHash.remove(ring, "n1"))   -- 0
+  """
   fn remove(ring : HashRing(a), name : String) : HashRing(a) do
     match ring do
     HashRing(lst, nodes, replicas) ->
@@ -65,7 +98,19 @@ mod ConsistentHash do
     end
   end
 
-  doc "Find the node responsible for key. Returns None only when the ring is empty."
+  doc """
+  The node responsible for `key`: the first virtual node whose position (hex
+  SHA-256 string, compared lexicographically) is >= `Crypto.sha256(key)`.
+  Returns `None` only when the ring has no virtual nodes. With a single
+  physical node every key maps to it.
+
+  ## Examples
+
+      march> ConsistentHash.get(ConsistentHash.new(3), "user:42")
+      None
+      march> ConsistentHash.get(ConsistentHash.add(ConsistentHash.new(3), "n1", "node-1"), "user:42")
+      Some("node-1")
+  """
   fn get(ring : HashRing(a), key : String) : Option(a) do
     match ring do
     HashRing(lst, _, _) ->
@@ -88,28 +133,57 @@ mod ConsistentHash do
     end
   end
 
-  doc "All distinct physical node values (in ring insertion order of their first virtual node)."
+  doc """
+  All physical node values, one per registered name, in the name map's
+  hash-traversal order (not ring order and not insertion order).
+
+  ## Examples
+
+      march> ConsistentHash.nodes(ConsistentHash.add(ConsistentHash.new(3), "n1", "node-1"))
+      ["node-1"]
+  """
   fn nodes(ring : HashRing(a)) : List(a) do
     match ring do
     HashRing(_, name_map, _) -> Map.values(name_map)
     end
   end
 
-  doc "All registered node names."
+  doc """
+  All registered node names, in the name map's hash-traversal order.
+
+  ## Examples
+
+      march> ConsistentHash.node_names(ConsistentHash.add(ConsistentHash.new(3), "n1", "node-1"))
+      ["n1"]
+  """
   fn node_names(ring : HashRing(a)) : List(String) do
     match ring do
     HashRing(_, name_map, _) -> Map.keys(name_map)
     end
   end
 
-  doc "True when the ring has no nodes."
+  doc """
+  True when no physical node is registered.
+
+  ## Examples
+
+      march> ConsistentHash.is_empty(ConsistentHash.add(ConsistentHash.new(3), "n1", 1))
+      false
+  """
   fn is_empty(ring : HashRing(a)) : Bool do
     match ring do
     HashRing(_, name_map, _) -> Map.is_empty(name_map)
     end
   end
 
-  doc "Number of distinct physical nodes."
+  doc """
+  Number of registered physical nodes (names), not virtual nodes.
+
+  ## Examples
+
+      march> ConsistentHash.size(ConsistentHash.add(ConsistentHash.new(8), "n1", 1))
+      1
+  """
   fn size(ring : HashRing(a)) : Int do
     match ring do
     HashRing(_, name_map, _) -> Map.size(name_map)

@@ -31,6 +31,18 @@ type fn_manifest = {
                            a genuinely pre-Phase-5C legacy manifest (no fn
                            has this field) from a current manifest where a
                            capless function legitimately has fn_caps = []. *)
+  fn_type_sig  : string;  (* `tsig=`: the type-only signature hash; "" for a
+                             manifest from before 2026-10-13 *)
+  fn_modes     : string;  (* `modes=`: one char per parameter, 'b' borrowed /
+                             'o' owned ("-": not inferred); fn_sig_hash is
+                             March_cas.Hash.hcr_sig_hash over tsig and these.
+                             "" for a manifest from before 2026-10-13 *)
+  fn_logic     : string;  (* `logic=`: the D17 logic hash of a reflected
+                             function (refinement reflection §7.2, I9),
+                             folded into fn_sig_hash
+                             (March_cas.Hash.hcr_slot_sig_hash); "" when the
+                             function is not reflected or the manifest
+                             predates 2026-10-31 *)
 }
 
 (** One [ROLE <Proto.Role> caps=<csv> [via=<cap>:<frame>>...;...]] line
@@ -159,19 +171,27 @@ let parse_manifest path : (manifest, string) result =
              | Some f -> parse_caps f
              | None -> []
            in
-           (callers, caps, has_caps)
+           let field p =
+             match List.find_opt (fun f -> has_prefix f p) tail with
+             | Some f -> String.sub f (String.length p) (String.length f - String.length p)
+             | None -> ""
+           in
+           (callers, caps, has_caps, field "tsig=", field "modes=", field "logic=")
          in
          (match String.split_on_char ' ' line with
          | name :: impl_h :: sig_h :: tail when tail <> [] ->
-           let (callers, caps, has_caps) = extract_from_tail tail in
+           let (callers, caps, has_caps, tsig, modes, logic) = extract_from_tail tail in
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
-                    fn_callers = callers; fn_caps = caps; fn_has_caps = has_caps } :: !fns
+                    fn_callers = callers; fn_caps = caps; fn_has_caps = has_caps;
+                    fn_type_sig = tsig; fn_modes = modes; fn_logic = logic } :: !fns
          | [name; impl_h; sig_h] ->
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
-                    fn_callers = []; fn_caps = []; fn_has_caps = false } :: !fns
+                    fn_callers = []; fn_caps = []; fn_has_caps = false;
+                    fn_type_sig = ""; fn_modes = ""; fn_logic = "" } :: !fns
          | [name; impl_h] ->
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = "";
-                    fn_callers = []; fn_caps = []; fn_has_caps = false } :: !fns
+                    fn_callers = []; fn_caps = []; fn_has_caps = false;
+                    fn_type_sig = ""; fn_modes = ""; fn_logic = "" } :: !fns
          | _ -> ())  (* skip malformed lines *)
        end
      done with End_of_file -> ());
@@ -845,6 +865,29 @@ let canonical_of_triple (triple : string) : string option =
   | Some o, Some a -> Some (o ^ "/" ^ a)
   | _ -> None
 
+(** The [N] of an ABI id ["march-hcr-vN;..."]. *)
+let abi_version (abi : string) : int option =
+  let p = "march-hcr-v" in
+  let n = String.length p in
+  match String.index_opt abi ';' with
+  | Some i when i > n && String.sub abi 0 n = p -> int_of_string_opt (String.sub abi n (i - n))
+  | _ -> None
+
+(** Two ABI ids that differ only in their version (same triple, same pointer size). *)
+let same_abi_rest (a : string) (b : string) : bool =
+  let rest s = match String.index_opt s ';' with
+    | Some i -> String.sub s i (String.length s - i) | None -> s in
+  rest a = rest b
+
+(** What a version bump that a running server predates changed, in words. *)
+let abi_change_note (patch_version : int) : string =
+  if patch_version >= 5 then
+    " (march-hcr-v5 adds per-frame routing and closure lifetime hooks required by this patch)"
+  else if patch_version >= 4 then
+    " (from march-hcr-v4, a boundary function's signature hash covers its parameters' \
+     borrow modes, so a v3 server's hashes cannot be checked against this patch's)"
+  else ""
+
 (** Compare a patch's manifest identity with a running server's HCR_INFO.
     A v1 manifest carries no identity (the legacy native path): nothing to
     compare. *)
@@ -856,16 +899,23 @@ let check_identity ~(manifest : manifest) ~(info : hcr_info) : (unit, string) re
                "the patch's %s (%s) is not the running server's (%s): rebuild the patch for the server's identity"
                what patch server)
     in
-    (* A server built by #606's runtime reports its ABI id with the triple
-       in double quotes (march_reload.c stringifies MARCH_HCR_TRIPLE, which
-       bin/main.ml already passes quoted), while the manifest writes it bare
-       (Hcr_abi.abi_id).  The runtime's own post-dlopen check compares two
-       quoted ids, so both spellings name the same identity: compare them
-       without quotes. *)
-    let unquote s = String.concat "" (String.split_on_char '"' s) in
     match manifest.target, manifest.hcr_abi, manifest.module_prefix with
     | Some t, _, _ when t <> info.target -> mism "target" t info.target
-    | _, Some a, _ when unquote a <> unquote info.abi -> mism "HCR ABI" a info.abi
+    | _, Some a, _ when a <> info.abi ->
+      (match abi_version a, abi_version info.abi with
+       | Some pv, Some sv when pv > sv && same_abi_rest a info.abi ->
+         Error (Printf.sprintf
+                  "the running server was built by an older March toolchain (HCR ABI %s) than this patch (%s). \
+                   The hot-reload ABI changed in between%s, so this server cannot take hot patches from this \
+                   toolchain, and nothing was deployed. Restart the server once on a base build from this \
+                   toolchain (a cold deploy); hot deploys work again after that"
+                  info.abi a (abi_change_note pv))
+       | Some pv, Some sv when pv < sv && same_abi_rest a info.abi ->
+         Error (Printf.sprintf
+                  "this patch was built by an older March toolchain (HCR ABI %s) than the running server (%s): \
+                   rebuild the patch with the toolchain that built the server"
+                  a info.abi)
+       | _ -> mism "HCR ABI" a info.abi)
     | _, _, Some p when p <> "" && p <> info.prefix -> mism "module prefix" p info.prefix
     | _ -> Ok ()
   end
@@ -964,6 +1014,73 @@ let connect_socket path =
 
 (* ─── Protocol helpers ───────────────────────────────────────────────────── *)
 
+(** Only explicit lack of schema reporting permits legacy fallback. An invalid
+    response must not turn a state-changing deploy into an unchecked swap. *)
+let parse_schema_response line =
+  if line = "ERR unknown_command" || line = "ERR schemas_unavailable" then Ok None
+  else if not (String.starts_with ~prefix:"SCHEMAS " line) then
+    Error ("cannot read running schemas: " ^ line)
+  else
+    try
+      let open Yojson.Safe.Util in
+      let json = Yojson.Safe.from_string (String.sub line 8 (String.length line - 8)) in
+      if member "version" json <> `Int 1 then failwith "unsupported schema response version";
+      let unique_fields value =
+        let fields = to_assoc value in
+        let names = List.map fst fields in
+        if List.length names <> List.length (List.sort_uniq String.compare names) then
+          failwith "duplicate schema response field";
+        fields in
+      ignore (unique_fields json);
+      let schemas = member "schemas" json in
+      let actor_names = unique_fields schemas |> List.map fst |> List.sort String.compare in
+      ignore (Schema_diff.parse_schemas_json schemas);
+      let releases = member "releases" json |> unique_fields in
+      if actor_names <> (List.map fst releases |> List.sort String.compare) then
+        failwith "schema release actors do not match schemas";
+      List.iter (fun (_, release) ->
+          ignore (unique_fields release);
+          let seq = match member "seq" release with
+            | `Int n when n >= 0 -> string_of_int n
+            | `Intlit s -> s
+            | _ -> failwith "invalid schema release sequence" in
+          let max_seq = "18446744073709551614" in
+          if seq = "" || not (String.for_all (fun c -> c >= '0' && c <= '9') seq)
+             || (String.length seq > 1 && seq.[0] = '0')
+             || String.length seq > String.length max_seq
+             || (String.length seq = String.length max_seq && String.compare seq max_seq > 0) then
+            failwith "invalid schema release sequence";
+          let id = member "id" release |> to_string in
+          let valid_id = String.length id = 32 && String.for_all (function
+              | '0'..'9' | 'a'..'f' -> true | _ -> false) id in
+          if (seq = "0" && id <> "-") || (seq <> "0" && not valid_id) then
+            failwith "invalid schema release identifier") releases;
+      Ok (Some schemas)
+    with Yojson.Json_error m | Failure m -> Error ("invalid SCHEMAS response: " ^ m)
+       | Yojson.Safe.Util.Type_error (m, _) -> Error ("invalid SCHEMAS response: " ^ m)
+
+let running_schemas conn ~local_path =
+  send_line conn "SCHEMAS";
+  match parse_schema_response (recv_line conn) with
+  | Error m -> Error m
+  | Ok None ->
+    if local_path <> "" && Sys.file_exists local_path then
+      (try
+         let json = Yojson.Safe.from_file local_path in
+         ignore (Schema_diff.parse_schemas_json json);
+         Ok json
+       with _ -> Error ("invalid prior schema file: " ^ local_path))
+    else Error "this server predates schema reporting: restart it on a current build or pass --old-schemas"
+  | Ok (Some json) ->
+    let local = if local_path <> "" && Sys.file_exists local_path then
+        try Some (Schema_diff.parse_schemas_file local_path) with _ -> None
+      else None in
+    (match local with
+     | Some prior when List.sort compare prior <> List.sort compare (Schema_diff.parse_schemas_json json) ->
+       Printf.eprintf "Warning: local schema baseline is stale; using the running server's schemas.\n%!"
+     | _ -> ());
+    Ok json
+
 (** Parse ABI_QUERY response lines.
     Each line: SLOT <id> <name> <impl_hash> <sig_hash> *)
 type slot = {
@@ -1003,6 +1120,171 @@ let parse_abi_query conn =
     end
   in
   loop ()
+
+(* ─── Borrow-mode changes (2026-10-13) ─────────────────────────────────────
+
+   A slot's sig_hash is March_cas.Hash.hcr_sig_hash: the type signature hash
+   plus one mode character per parameter ('b' borrowed, 'o' owned), the
+   modes the running callers were compiled against.  A patch whose body
+   turns a borrowed parameter owned releases a reference its old callers
+   still hold (a use-after-free); the reverse leaks one per call
+   (specs/progress/2026-10-13-hcr-borrow-mode-not-in-sig-hash.md).
+
+   When the server's hash differs from the patch's, [running_modes] finds
+   out whether only the modes differ: the manifest carries the patch's
+   type-only hash (`tsig=`), so forge hashes it with every other mode
+   string of the same length and compares.
+
+   Mode changes remain conservatively refused, including when every caller
+   ships in the batch. This policy predates per-frame routing: the original
+   spike reproduced a running main caller reaching a newly owned callee and
+   crashing. Frame pinning now retains compatible calls, but this change does
+   not relax the separately tested borrow-mode gate. *)
+
+(** The modes the running version of [fm] was built with, when the server's
+    [slot_sig] is the slot ABI hash of [fm]'s type signature with modes other
+    than [fm]'s.  [None] when the type signature changed too, the manifest
+    predates `tsig=`/`modes=`, or the function has more than 16 parameters. *)
+let running_modes ~(slot_sig : string) (fm : fn_manifest) : string option =
+  let k = String.length fm.fn_modes in
+  if fm.fn_type_sig = "" || fm.fn_modes = "" || k > 16 || String.length slot_sig <> 64
+  then None
+  else begin
+    let matches modes =
+      modes <> fm.fn_modes
+      && March_cas.Hash.hcr_slot_sig_hash ~sig_hash:fm.fn_type_sig ~modes ~logic:fm.fn_logic = slot_sig in
+    if matches "-" then Some "-"
+    else if fm.fn_modes = "-" then None
+    else
+      let rec go m =
+        if m >= 1 lsl k then None
+        else
+          let modes = String.init k (fun i -> if (m lsr i) land 1 = 1 then 'b' else 'o') in
+          if matches modes then Some modes else go (m + 1)
+      in
+      go 0
+  end
+
+(** ["parameter 2 of Handler.count changed from borrowed to owned"], one per
+    parameter whose mode differs. *)
+let describe_mode_change ~(name : string) ~(old_modes : string) ~(new_modes : string) : string list =
+  let word = function 'b' -> "borrowed" | 'o' -> "owned" | _ -> "not inferred" in
+  if String.length old_modes = String.length new_modes && old_modes <> "-" && new_modes <> "-" then
+    List.filter_map (fun i ->
+        if old_modes.[i] = new_modes.[i] then None
+        else Some (Printf.sprintf "parameter %d of %s changed from %s to %s"
+                     (i + 1) name (word old_modes.[i]) (word new_modes.[i])))
+      (List.init (String.length new_modes) Fun.id)
+  else [ Printf.sprintf "the parameter borrow modes of %s changed (%s -> %s)" name old_modes new_modes ]
+
+(** The functions of [to_activate] whose parameter borrow modes differ from
+    the running version's (same types), each with the change in words. *)
+let mode_changes ~(slot_of : string -> slot option) ~(to_activate : fn_manifest list)
+  : (string * string list) list =
+  List.filter_map (fun fm ->
+      match slot_of fm.fn_name with
+      | Some slot when slot.slot_sig_hash <> fm.fn_sig_hash ->
+        Option.map (fun old_modes ->
+            (fm.fn_name, describe_mode_change ~name:fm.fn_name ~old_modes ~new_modes:fm.fn_modes))
+          (running_modes ~slot_sig:slot.slot_sig_hash fm)
+      | _ -> None)
+    to_activate
+
+(** The refusal for [mode_changes]' non-empty answer, in words. *)
+let mode_change_refusal (changes : (string * string list) list) : string =
+  Printf.sprintf
+    "a hot deploy cannot change a boundary function's parameter borrow mode: %s. \
+     Code already running was compiled against the old mode and would use a reference the new code \
+     releases (a use-after-free) or never release one it now owns (a leak per call). \
+     Deploy this build with a restart, or keep the mode (a parameter becomes owned when the body \
+     stores it, returns it or passes it to an owning position)"
+    (String.concat "; " (List.concat_map snd changes))
+
+(* ─── Reflected bodies (refinement reflection §7.2, I9, 2026-10-31) ───────
+
+   A reflected function's body is part of its callers' proofs: a caller's
+   precondition may have been discharged by unfolding it.  The compiler folds
+   the function's D17 logic hash into its slot sig_hash
+   (March_cas.Hash.hcr_slot_sig_hash) and writes it as `logic=` on the
+   manifest line, so a patch that changes the body of a reflected function
+   reaches this gate as a slot-hash change.  Refused outright, for the
+   mode-change reason: a caller frame already running was proved against the
+   old body and its next call reaches the new one.  The deploy has to be a
+   restart; a function whose body should be patchable is marked `@[opaque]`
+   (its body then keys no caller's proof, and it has no logic hash).
+
+   Which functions carry a logic hash: only a reflected function whose body
+   a proof of that build unfolded (Reflect_state.used_logic_hash_of_name);
+   one no proof used keeps the plain slot hash and may be hot-patched.
+
+   Which slot-hash changes are logic changes: with the running build's
+   manifest ([prior]) the two `logic=` fields are compared.  Without it, a
+   function whose slot hash differs for a reason other than its borrow modes
+   counts as one when the patch's own build used its body.  A running slot
+   hash that is not the plain [hcr_sig_hash] of the patch's type and modes
+   means the running version used its body in a proof OR its type changed
+   (a coordinated upgrade): the two cannot be told apart without the
+   manifest, so [logic_unknowns] warns instead of refusing (refusing broke
+   coordinated type changes; the patch build re-checks every caller against
+   the new code). *)
+
+(** The functions of [to_activate] whose reflected logic changed against the
+    running version, each with the change in words. *)
+let logic_changes ~(prior : manifest option) ~(slot_of : string -> slot option)
+    ~(to_activate : fn_manifest list) : (string * string) list =
+  let norm l = if l = "" then "-" else l in
+  let prior_logic name =
+    match prior with
+    | None -> None
+    | Some p ->
+      Option.map (fun f -> norm f.fn_logic) (List.find_opt (fun f -> f.fn_name = name) p.functions)
+  in
+  List.filter_map (fun fm ->
+      match slot_of fm.fn_name with
+      | Some slot when slot.slot_sig_hash <> "" && fm.fn_sig_hash <> ""
+                       && slot.slot_sig_hash <> fm.fn_sig_hash
+                       && running_modes ~slot_sig:slot.slot_sig_hash fm = None ->
+        let now = norm fm.fn_logic in
+        (match prior_logic fm.fn_name with
+         | Some before when before <> now ->
+           Some (fm.fn_name, Printf.sprintf "the body of `%s` is part of its callers' proofs" fm.fn_name)
+         | Some _ -> None
+         | None when now <> "-" ->
+           Some (fm.fn_name, Printf.sprintf "the body of `%s` is part of its callers' proofs" fm.fn_name)
+         | None -> None)
+      | _ -> None)
+    to_activate
+
+(** The functions of [to_activate] whose running version may have had a
+    proof-used reflected body that the patch no longer has: no running
+    manifest, a slot hash that differs for a reason other than the borrow
+    modes, no logic hash in the patch, and a running hash that is not the
+    plain one of the patch's type and modes.  A type change reads the same,
+    so this is a warning, not a refusal (see the comment above
+    [logic_changes]). *)
+let logic_unknowns ~(prior : manifest option) ~(slot_of : string -> slot option)
+    ~(to_activate : fn_manifest list) : string list =
+  match prior with
+  | Some _ -> []
+  | None ->
+    List.filter_map (fun fm ->
+        match slot_of fm.fn_name with
+        | Some slot when slot.slot_sig_hash <> "" && fm.fn_sig_hash <> ""
+                         && slot.slot_sig_hash <> fm.fn_sig_hash
+                         && running_modes ~slot_sig:slot.slot_sig_hash fm = None
+                         && (fm.fn_logic = "" || fm.fn_logic = "-")
+                         && not (fm.fn_type_sig <> ""
+                                 && slot.slot_sig_hash
+                                    = March_cas.Hash.hcr_sig_hash ~sig_hash:fm.fn_type_sig ~modes:fm.fn_modes) ->
+          Some fm.fn_name
+        | _ -> None)
+      to_activate
+
+(** The refusal for [logic_changes]' non-empty answer, in words. *)
+let logic_change_refusal (changes : (string * string) list) : string =
+  Printf.sprintf
+    "a hot deploy cannot change a reflected function: %s; redeploy, or mark it `@[opaque]`"
+    (String.concat "; " (List.map snd changes))
 
 (** Parse VERSIONS response. Returns list of (name, baseline, current_or_none). *)
 type version_entry = {
@@ -1064,6 +1346,79 @@ let cas_put ?digest conn hash path =
   let final = recv_line conn in
   if not (String.length final >= 2 && String.sub final 0 2 = "OK") then
     failwith (Printf.sprintf "CAS_PUT failed: %s" final)
+
+(* ─── Function source text (observe R10) ─────────────────────────────────
+
+   A `--hot-reload` build keeps each boundary function's source under its
+   impl_hash in <cas>/sources/<2 hex>/<62 hex> (March_cas.Cas.store_source,
+   in the project's .march/cas and in $HOME/.march/cas).  A deploy puts the
+   text of every version it is about to switch to, and of the version it
+   switches from when this machine has it, on the node with
+   [CAS_PUT <impl_hash> <size> kind:source], so the debug-tier SOURCE verb can
+   answer for both.  Source is the debug tier: nothing is uploaded unless the
+   operator's $MARCH_DEBUG_POLICY lists SOURCE (the file the node reads for the
+   same decision), and never as part of a deploy that fails for want of it.
+   A node that predates the verb stores the bytes as an unused artifact. *)
+
+(** True iff the file $MARCH_DEBUG_POLICY names lists [verb] on a line of its
+    own ('#' starts a comment): the node's own rule
+    (runtime/march_sig.c [march_sig_debug_allowed]). *)
+let debug_policy_allows ?(verb = "SOURCE") () : bool =
+  match Sys.getenv_opt "MARCH_DEBUG_POLICY" with
+  | None | Some "" -> false
+  | Some path ->
+    (match In_channel.with_open_bin path In_channel.input_all with
+     | exception Sys_error _ -> false
+     | text ->
+       List.exists (fun line ->
+           let line = match String.index_opt line '#' with
+             | Some i -> String.sub line 0 i
+             | None -> line in
+           String.trim line = verb)
+         (String.split_on_char '\n' text))
+
+let is_hash64 h =
+  String.length h = 64
+  && String.for_all (fun c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) h
+
+(** The source text this machine kept for [impl_hash]: the project's store
+    ([project_root]/.march/cas), else $HOME/.march/cas. *)
+let local_source ?(project_root = Sys.getcwd ()) (impl_hash : string) : string option =
+  if not (is_hash64 impl_hash) then None
+  else
+    let rel = "/sources/" ^ String.sub impl_hash 0 2 ^ "/" ^ String.sub impl_hash 2 62 in
+    let roots =
+      (project_root ^ "/.march/cas")
+      :: (match Sys.getenv_opt "HOME" with Some h -> [ h ^ "/.march/cas" ] | None -> []) in
+    List.find_map (fun root ->
+        match In_channel.with_open_bin (root ^ rel) In_channel.input_all with
+        | s -> Some s
+        | exception Sys_error _ -> None) roots
+
+let source_put conn hash text =
+  let size = String.length text in
+  send_line conn (Printf.sprintf "CAS_PUT %s %d kind:source" hash size);
+  let resp = recv_line conn in
+  if resp <> "READY" then failwith (Printf.sprintf "CAS_PUT source: server not ready: %s" resp);
+  send_binary conn (Bytes.of_string text) 0 size;
+  let final = recv_line conn in
+  if not (String.length final >= 2 && String.sub final 0 2 = "OK") then
+    failwith (Printf.sprintf "CAS_PUT source failed: %s" final)
+
+(** Upload the source of every [hashes] this machine has.  Returns how many
+    went up.  A failure to upload is a warning, never a failed deploy: the
+    code is what matters, and SOURCE says no_source for what is missing. *)
+let upload_sources conn (hashes : string list) : int =
+  if not (debug_policy_allows ()) then 0
+  else
+    List.fold_left (fun n h ->
+        match local_source h with
+        | None -> n
+        | Some text ->
+          (try source_put conn h text; n + 1
+           with Failure m ->
+             Printf.eprintf "NOTE: source of %s not uploaded: %s\n%!" h m; n))
+      0 (List.sort_uniq String.compare hashes)
 
 (* ─── Signed TOPOLOGY push (distributed-deploys build step 10) ────────────
 
@@ -1156,10 +1511,18 @@ let get_epoch_from_server ~ssh_host ~remote_socket : int =
 
 (* ─── Main deploy flow ───────────────────────────────────────────────────── *)
 
-(* Check if a symbol is exported from a shared library (for migrate_state presence check). *)
+(* Check if a symbol is exported from a shared library (for migrate_state presence check).
+   `nm -D` reads an ELF's dynamic symbol table and prints NOTHING for a
+   Mach-O image, so on macOS this was always false: every deploy that changed
+   an actor's state was refused for want of the migrate_state it carried, and
+   the sig_hash exemption for a migrating dispatch never applied.  So `nm -g`
+   (the external symbols) is asked too, and Mach-O's leading underscore
+   (`___migrate_C` for `__migrate_C`) is accepted. *)
 let so_exports_symbol (so_path : string) (sym : string) : bool =
-  let cmd = Printf.sprintf "nm -D %s 2>/dev/null | grep -q ' T %s$'"
-    (Filename.quote so_path) (Filename.quote sym) in
+  let pat = Filename.quote (Printf.sprintf " T _?%s$" sym) in
+  let cmd = Printf.sprintf
+    "{ nm -D %s 2>/dev/null; nm -g %s 2>/dev/null; } | grep -Eq %s"
+    (Filename.quote so_path) (Filename.quote so_path) pat in
   Sys.command cmd = 0
 
 let deploy_connected (_conn : conn) ~signing_pubkey:_ ~sk:_ ~manifest:_
@@ -1178,6 +1541,8 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
     ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=([] : string list))
     ?(no_cap_gate=false) () =
   without_sigpipe @@ fun () ->
+  let new_schemas_path = if new_schemas_path = "" then so_path ^ ".schemas.json"
+    else new_schemas_path in
   (* 0. A stdlib change cannot ship as a patch (no stdlib function or actor
      has a dispatch slot): refuse before connecting, rather than find nothing
      to activate and report the server up to date. *)
@@ -1208,8 +1573,11 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
     end
   in
 
+  let schema_temp = ref None in
   let result =
-    Fun.protect ~finally:(fun () -> if tunnel then close_tunnel tunnel_pid local_socket) (fun () ->
+    Fun.protect ~finally:(fun () ->
+      Option.iter (fun p -> try Sys.remove p with Sys_error _ -> ()) !schema_temp;
+      if tunnel then close_tunnel tunnel_pid local_socket) (fun () ->
     (try
       let fd = connect_socket local_socket in
       let conn = conn_of_fd fd in
@@ -1303,6 +1671,16 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
       end else begin
         Printf.printf "Deploying %d changed function(s)...\n%!" (List.length to_activate);
 
+        (if not (Sys.file_exists new_schemas_path)
+            && List.exists (fun fm -> String.ends_with ~suffix:"_dispatch" fm.fn_name) to_activate
+         then begin Unix.close fd; failwith "actor hot deploy requires the patch's .schemas.json sidecar" end);
+        let baseline = match running_schemas conn ~local_path:old_schemas_path with
+          | Ok json -> json
+          | Error m -> Unix.close fd; failwith m in
+        let old_schemas_path = Filename.temp_file "march-running-schemas-" ".json" in
+        schema_temp := Some old_schemas_path;
+        Yojson.Safe.to_file old_schemas_path baseline;
+
         (* 5. sig_hash safety gate: new sig_hash must match old sig_hash (no ABI breaks).
            Exception: actor dispatch functions whose state schema changed AND whose actor
            exports a __migrate_<Actor> symbol are allowed to have a different sig_hash —
@@ -1330,6 +1708,43 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
             slot.slot_sig_hash <> fm.fn_sig_hash &&
             not (has_migrate_exemption fm.fn_name)
         ) to_activate in
+        (if abi_violations <> [] then begin
+          send_line conn "FRAME_PINS";
+          if recv_line conn <> "FRAME_PINS 1" then begin
+            Unix.close fd;
+            failwith "signature-changing hot deploy requires per-frame version pinning: restart on a current server or use expand-contract"
+          end
+        end);
+        (* A parameter's borrow mode changed (same types): never a hot
+           deploy, whatever the callers and the epoch (see [mode_changes]). *)
+        let modes = mode_changes ~slot_of:(Hashtbl.find_opt slot_map) ~to_activate in
+        if modes <> [] then begin
+          Printf.eprintf "error: %s\n" (mode_change_refusal modes);
+          Printf.eprintf "error: deploy aborted, nothing was activated\n%!";
+          Unix.close fd;
+          raise (Failure (mode_change_refusal modes))
+        end;
+        (* A reflected function's body changed (same types): never a hot
+           deploy either (see [logic_changes]). *)
+        let logic =
+          let prior =
+            if old_manifest_path <> "" && Sys.file_exists old_manifest_path then
+              Result.to_option (parse_manifest old_manifest_path)
+            else None in
+          (match logic_unknowns ~prior ~slot_of:(Hashtbl.find_opt slot_map) ~to_activate with
+           | [] -> ()
+           | names ->
+             Printf.eprintf
+               "warning: no manifest of the running build: cannot tell whether %s changed its type or \
+                dropped a body its callers' proofs used; the patch's own proofs were re-checked\n%!"
+               (String.concat ", " (List.map (Printf.sprintf "`%s`") names)));
+          logic_changes ~prior ~slot_of:(Hashtbl.find_opt slot_map) ~to_activate in
+        if logic <> [] then begin
+          Printf.eprintf "error: %s\n" (logic_change_refusal logic);
+          Printf.eprintf "error: deploy aborted, nothing was activated\n%!";
+          Unix.close fd;
+          raise (Failure (logic_change_refusal logic))
+        end;
         (* Phase 8 — coordinated upgrade gate.
            For each sig-changed function, check whether all server-recorded callers
            are also being replaced in this deploy.  If the server has no caller data
@@ -1370,7 +1785,7 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
              next deploy.  Emit a warning naming the in-flight callers. *)
           if missing_callers <> [] then begin
             Printf.eprintf "Warning: function signature changed — old callers will continue\n";
-            Printf.eprintf "  calling the previous version until they are redeployed:\n";
+            Printf.eprintf "  calling compatible versions while their old frames remain active:\n";
             List.iter (fun (fn_name, callers) ->
               Printf.eprintf "  %s — old caller(s): %s\n"
                 fn_name (String.concat ", " callers)
@@ -1457,6 +1872,19 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
             Printf.printf "Artifact uploaded.\n%!"
           end else
             Printf.printf "Artifact already on server (cache hit).\n%!";
+
+          (* Observe R10: the text of the versions this deploy moves between,
+             before the switch, so SOURCE never names a new hash it cannot
+             show.  Only when $MARCH_DEBUG_POLICY allows SOURCE. *)
+          let src_hashes =
+            List.concat_map (fun fm ->
+                fm.fn_impl_hash
+                :: (match Hashtbl.find_opt slot_map fm.fn_name with
+                    | Some sl -> [ sl.slot_impl_hash ]
+                    | None -> []))
+              to_activate in
+          let n_src = upload_sources conn src_hashes in
+          if n_src > 0 then Printf.printf "Uploaded source of %d function version(s).\n%!" n_src;
 
           (* Phase 5: load actor state schemas for compat checking and migrate_required flag *)
           let old_schemas =
@@ -2003,7 +2431,7 @@ let run_status ?(env="") () : (unit, string) result =
 
 (* ─── Build step ─────────────────────────────────────────────────────────── *)
 
-let build_so ~proj ~output : (string * string, string) result =
+let build_so_for ~(target : string option) ~proj ~output : (string * string, string) result =
   let so_path = output ^ ".so" in
   let manifest_path = output ^ ".so.hcr_manifest" in
   let lib_env = Cmd_build.lib_path_env proj in
@@ -2011,7 +2439,7 @@ let build_so ~proj ~output : (string * string, string) result =
   let target_flag, hcr_flags =
     match proj.Project.hot_reload with
     | Some hr ->
-      let target = match hr.Project.hr_target with
+      let target = match (match target with Some _ as t -> t | None -> hr.Project.hr_target) with
         | Some t -> " --target " ^ Filename.quote t | None -> "" in
       let hcr = match hr.Project.hr_module_prefix, hr.Project.hr_public_key with
         | Some p, Some k -> " --hot-reload " ^ Filename.quote p ^
@@ -2034,13 +2462,26 @@ let build_so ~proj ~output : (string * string, string) result =
   else
     Ok (so_path, manifest_path)
 
+(** [build_so_for] with the project's own target ([hr_target]). *)
+let build_so ~proj ~output = build_so_for ~target:None ~proj ~output
+
 (* ─── Entry point ────────────────────────────────────────────────────────── *)
+
+(** [pool_gate], when given, runs right after [Topology.gate] and before
+    anything is built: [forge deploy hot]'s derived-pool-caps widening gate
+    ([Pool_caps.deploy_gate], D26; passed in by the CLI because [Pool_caps]
+    sits above this module). Its [Ok record] is called once the deploy has
+    completed on every server, so the next deploy compares against it. *)
+type pool_gate = Project.project -> env:string option -> (unit -> unit, string) result
+
+let no_pool_gate : pool_gate = fun _ ~env:_ -> Ok (fun () -> ())
 
 (** [deploy ~so ~output ()] deploys a hot-reload artifact.
     When [so] is non-empty, it is used as the pre-built .so (the build step is
     skipped).  This allows cross-compiled artifacts (e.g. built in Docker for
     a remote Linux host) to be deployed without a local rebuild. *)
-let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ()
+let deploy ?(output="") ?(so="") ?(old_schemas="") ?(grant_caps=([] : string list)) ?(no_cap_gate=false)
+    ?(pool_gate = no_pool_gate) ()
     : (unit, string) result =
   (* Load project *)
   match Project.load () with
@@ -2049,6 +2490,9 @@ let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=
     match Topology.gate ~proj () with
     | Error m -> Error m
     | Ok () ->
+    match pool_gate proj ~env:None with
+    | Error m -> Error m
+    | Ok record_pool_caps ->
     match proj.Project.hot_reload with
     | None -> Error "no [hot-reload] section in forge.toml — add ssh_host, socket, public_key"
     | Some hr ->
@@ -2118,7 +2562,7 @@ let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=
                   ~sk
                   ~manifest
                   ~so_path:so_path2
-                  ~old_schemas_path:prev_schemas_path
+                  ~old_schemas_path:(if old_schemas = "" then prev_schemas_path else old_schemas)
                   ~new_schemas_path
                   ~entry_path
                   ~old_manifest_path:prev_manifest_path
@@ -2143,7 +2587,9 @@ let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=
                 with Sys_error _ -> ())
               | _ -> ());
               (match result2 with
-              | Ok _ -> save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path
+              | Ok _ ->
+                save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
+                record_pool_caps ()
               | Error _ -> ());
               result2 |> Result.map ignore
       end
@@ -2206,8 +2652,9 @@ let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
     - [env]: name of the [[hot-reload.env]] group (empty → use flat [hot-reload] config).
     - [canary]: if > 0, deploy to the first n servers, health-check, then roll out to rest.
     - [timeout_ms]: canary health-check window in milliseconds (default 30 000). *)
-let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
-    ?(grant_caps=([] : string list)) ?(no_cap_gate=false) () : (unit, string) result =
+let deploy_env ?(output="") ?(so="") ?(old_schemas="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
+    ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ?(pool_gate = no_pool_gate) ()
+    : (unit, string) result =
   match Project.load () with
   | Error m -> Error m
   | Ok proj ->
@@ -2215,6 +2662,9 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
     match Topology.gate ?env:(if env = "" then None else Some env) ~proj () with
     | Error m -> Error m
     | Ok () ->
+    match pool_gate proj ~env:(if env = "" then None else Some env) with
+    | Error m -> Error m
+    | Ok record_pool_caps ->
     match proj.Project.hot_reload with
     | None -> Error "no [hot-reload] section in forge.toml — add ssh_host, socket, public_key"
     | Some hr ->
@@ -2294,7 +2744,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
 
               let deploy_step host =
                 deploy_one ~host ~sk ~manifest ~so_path:so_path2
-                  ~old_schemas_path:prev_schemas_path
+                  ~old_schemas_path:(if old_schemas = "" then prev_schemas_path else old_schemas)
                   ~new_schemas_path ~entry_path ~old_manifest_path:prev_manifest_path
                   ~provided_epoch:shared_epoch ~grant_caps ~no_cap_gate ()
               in
@@ -2358,6 +2808,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                     if failed = [] then begin
                       save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                       save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
+                      record_pool_caps ();
                       Ok ()
                     end else
                       Error (Printf.sprintf "%d server(s) failed during rollout" (List.length failed))
@@ -2374,6 +2825,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                 if failed = [] then begin
                   save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                   save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
+                  record_pool_caps ();
                   Ok ()
                 end else begin
                   Printf.eprintf "\nFailed servers:\n";
@@ -2393,6 +2845,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                   (* Only advance the schema baseline when all servers succeeded. *)
                   save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                   save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
+                  record_pool_caps ();
                   Ok ()
                 end else begin
                   Printf.eprintf "\nFailed servers:\n";

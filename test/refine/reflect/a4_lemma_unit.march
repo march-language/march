@@ -1,0 +1,29 @@
+mod A4 do
+  fn cat(xs : List(Int), ys : List(Int)) : List(Int) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, cat(t, ys))
+    end
+  end
+
+  fn rev(xs : List(Int)) : List(Int) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> cat(rev(t), Cons(h, Nil))
+    end
+  end
+
+  fn revrev_lemma(xs : List(Int)) : {Unit | rev(rev(xs)) == xs} do
+    ()
+  end
+
+  fn len_app_lemma(xs : List(Int), ys : List(Int)) : {Unit | len(cat(xs, ys)) == len(xs) + len(ys)} do
+    ()
+  end
+
+  fn main() : Unit do
+    let _ = revrev_lemma(Cons(1, Nil))
+    let _ = len_app_lemma(Nil, Nil)
+    ()
+  end
+end

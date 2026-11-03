@@ -43,3 +43,8 @@ val read_ptr_at : nativeint -> int -> nativeint
 (** Read a march_string* as an OCaml string.
     Layout: {rc:i64, len:i64, data:char[]}; len at offset 8, data at offset 16. *)
 val read_march_string : nativeint -> string
+
+(** [call_atom_name fptr h] calls the runtime's [march_atom_name_cstr]
+    (at [fptr]) to name the atom hash [h]: [Some ":name"], or [None] when no
+    registered atom table knows it. *)
+val call_atom_name : nativeint -> int64 -> string option

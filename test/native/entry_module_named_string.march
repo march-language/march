@@ -1,0 +1,18 @@
+-- Regression (2026-10-12): the `String` counterpart of
+-- entry_module_named_list.  The stdlib's String module is kept beside the
+-- entry: the entry's `String.byte_size` call reaches its own `byte_size`, the
+-- stdlib's callers (Json, Path, the prelude) keep the stdlib's.
+mod String do
+  needs IO.Console
+
+  fn byte_size(_s : String) : Int do 99 end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(to_string(String.byte_size("abc")))
+    println(String.join(["x", "y"], "+"))
+    println(to_string(String.last_index_of("a.b.c", ".")))
+    println(to_string(String.split("a,b,c", ",")))
+    println(Json.to_string(Json.parse("[1, 2]") |> Result.unwrap_or(Json.Null)))
+    println(to_string(List.length([1, 2, 3])))
+  end
+end

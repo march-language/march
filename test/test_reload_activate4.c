@@ -37,15 +37,50 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <errno.h>
 #include <time.h>
 #include <signal.h>
+#include <stdatomic.h>
+#include <sys/syscall.h>
 
 #ifndef MARCH_SIGNING_PUBKEY_HEX
 #error "test_reload_activate4 must be compiled with -DMARCH_SIGNING_PUBKEY_HEX"
 #endif
+
+char __march_hcr_schemas[600000] = "{\"Counter\":{\"compat\":\"full\",\"state_fields\":[]},\"Other\":{\"compat\":\"full\",\"state_fields\":[]},\"KnownOnly\":{\"state_fields\":[]}}";
+const char __march_hcr_manifest[] = "base manifest\n";
+
+/* Observe real fsync calls, retaining the kernel operation except for the
+ * deliberate post-publication directory failure in a forked test phase. */
+static _Atomic int g_directory_syncs, g_parent_directory_syncs;
+static _Atomic int g_metadata_directory_synced;
+static _Atomic int g_fail_published_directory_sync;
+static char g_sync_directory[1024], g_sync_parent[1024];
+static char g_sync_manifest[1200], g_sync_manifest_tmp[1208], g_sync_snapshot_tmp[1200];
+int fsync(int fd) {
+    struct stat st, expected;
+    int directory = fstat(fd, &st) == 0 && S_ISDIR(st.st_mode);
+    if (directory && g_sync_parent[0] && stat(g_sync_parent, &expected) == 0 &&
+        st.st_dev == expected.st_dev && st.st_ino == expected.st_ino)
+        atomic_fetch_add(&g_parent_directory_syncs, 1);
+    if (directory && g_sync_directory[0] &&
+        stat(g_sync_directory, &expected) == 0 && st.st_dev == expected.st_dev && st.st_ino == expected.st_ino) {
+        atomic_fetch_add(&g_directory_syncs, 1);
+        uint32_t slot;
+        if (march_dispatch_name_to_id("Counter_dispatch", &slot)) {
+            const char *hash = march_dispatch_impl_hash(slot, march_dispatch_current(slot));
+            int published = hash && strcmp(hash, "baseline") != 0;
+            if (published && atomic_load(&g_fail_published_directory_sync)) { errno = EIO; return -1; }
+            if (published && access(g_sync_manifest, F_OK) == 0 &&
+                access(g_sync_manifest_tmp, F_OK) != 0 && access(g_sync_snapshot_tmp, F_OK) != 0)
+                atomic_store(&g_metadata_directory_synced, 1);
+        }
+    }
+    return (int)syscall(SYS_fsync, fd);
+}
 
 static int g_failed = 0;
 #define CHECK(cond, msg) do {                                               \
@@ -246,15 +281,18 @@ static void test_in_process_request(void) {
 static void test_hcr_info(void) {
     int fd = connect_sock(SOCK_PATH);
     CHECK(fd >= 0, "HCR_INFO connects");
-    send_line(fd, "HCR_INFO\n");
+    send_line(fd, "HCR_INFO");
     char resp[1024];
     int n = read_resp(fd, resp, sizeof(resp));
     CHECK(n > 0 && strncmp(resp, "HCR_INFO target:", 16) == 0,
           "HCR_INFO returns identity");
-    CHECK(strstr(resp, " abi:march-hcr-v3;triple:") == NULL,
+    CHECK(strstr(resp, " abi:march-hcr-v5;triple:") == NULL,
           "HCR_INFO uses abi field");
     CHECK(strstr(resp, " prefix:") != NULL && strstr(resp, " key:") != NULL,
           "HCR_INFO includes prefix and key");
+    send_line(fd, "FRAME_PINS");
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "FRAME_PINS 1") == 0, "server advertises frame routing support");
     close(fd);
 }
 
@@ -527,6 +565,34 @@ static void read_pins(int fd, char *out, size_t max) {
         strncat(out, line, max - strlen(out) - 2);
         strncat(out, "\n", max - strlen(out) - 1);
     }
+}
+
+static void test_schema_baseline(void) {
+    int fd = connect_sock(SOCK_PATH);
+    char resp[4096];
+    send_line(fd, "SCHEMAS"); read_resp(fd, resp, sizeof(resp));
+    CHECK(strncmp(resp, "SCHEMAS {", 9) == 0, "SCHEMAS reports embedded base");
+    CHECK(strstr(resp, "\"Counter\":{\"compat\":\"full\",\"state_fields\":[]}") != NULL,
+          "base actor schema is known before first deployment");
+    CHECK(put_stub(fd), "schema patch uploaded");
+    activate5(fd, "KnownOnly_dispatch", 0, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR schemas_missing") == 0,
+          "known actor dispatch cannot activate without its patch schema");
+    send_line(fd, "BEGIN_BATCH"); read_resp(fd, resp, sizeof(resp));
+    activate5(fd, "Counter_dispatch", 0, resp, sizeof(resp));
+    send_line(fd, "SCHEMAS"); read_resp(fd, resp, sizeof(resp));
+    CHECK(strstr(resp, "Int") == NULL, "staging does not advance baseline");
+    close(fd);
+    fd = connect_sock(SOCK_PATH);
+    send_line(fd, "SCHEMAS"); read_resp(fd, resp, sizeof(resp));
+    CHECK(strstr(resp, "Int") == NULL, "disconnect does not advance baseline");
+    activate5(fd, "Counter_dispatch", 0, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "schema actor activated");
+    send_line(fd, "SCHEMAS"); read_resp(fd, resp, sizeof(resp));
+    CHECK(strstr(resp, "Int") != NULL, "activation advances schema from patch artifact");
+    CHECK(strstr(resp, "\"Other\":{\"compat\":\"full\",\"state_fields\":[]}") != NULL,
+          "partial update preserves unrelated actor schema");
+    close(fd);
 }
 
 static void test_epoch_model_wait_pins_drain(void) {
@@ -1345,6 +1411,8 @@ static void restore_boot(const char *baseline) {
     sigaction(SIGHUP, &dfl, NULL);
     march_dispatch_init(64);
     march_dispatch_register_name(1, "test_fn_epoch");
+    march_dispatch_register_name(2, "Counter_dispatch");
+    march_dispatch_publish(2, (void *)0x1010, baseline, NULL, MARCH_NATIVE);
     march_dispatch_publish(1, (void *)0x1010, baseline, NULL, MARCH_NATIVE);
     march_reload_server_start(SOCK_PATH);
 }
@@ -1523,7 +1591,7 @@ static void ph_release_after_restart(void) {
 static int write_old_format_state(void) {
     char key[65], base[65], dir[512], path[600];
     march_blake3_hex((const unsigned char *)SOCK_PATH, strlen(SOCK_PATH), key);
-    static const char slots[] = "test_fn_epoch baseline\n";
+    static const char slots[] = "test_fn_epoch baseline\nCounter_dispatch baseline\n";
     march_blake3_hex((const unsigned char *)slots, strlen(slots), base);
     snprintf(dir, sizeof(dir), "%s/.march/cas/hcr_state/%.16s", g_restore_home, key);
     snprintf(path, sizeof(path), "%s/state", dir);
@@ -1612,6 +1680,170 @@ static int state_has_entries(void) {
     return system(cmd) == 0;
 }
 
+static void schema_release_check(int fd, int hot) {
+    char resp[4096];
+    send_line(fd, "SCHEMAS"); read_resp(fd, resp, sizeof(resp));
+    CHECK(strncmp(resp, "SCHEMAS ", 8) == 0, "schema baseline is available");
+    CHECK((strstr(resp, "Int") != NULL) == hot, "schema matches activated or replayed code");
+    CHECK(strstr(resp, hot ? "\"Counter\":{\"seq\":4," : "\"Counter\":{\"seq\":0,") != NULL,
+          "schema names its activated release, independent of accepted release head");
+    CHECK(strstr(resp, "\"Other\":{\"compat\":\"full\",\"state_fields\":[]}") != NULL,
+          "replay preserves unrelated base actor");
+}
+static void observe_schema_directory_sync(void) {
+    char key[65]; topo_digest(SOCK_PATH, key);
+    snprintf(g_sync_directory, sizeof(g_sync_directory), "%s/.march/cas/hcr_state/%.16s", g_restore_home, key);
+    snprintf(g_sync_parent, sizeof(g_sync_parent), "%s/.march/cas/hcr_state", g_restore_home);
+    snprintf(g_sync_manifest, sizeof(g_sync_manifest), "%s/artifact-%s.manifest", g_sync_directory, ART_CAS);
+    snprintf(g_sync_manifest_tmp, sizeof(g_sync_manifest_tmp), "%s.tmp", g_sync_manifest);
+    snprintf(g_sync_snapshot_tmp, sizeof(g_sync_snapshot_tmp), "%s/schemas.json.tmp", g_sync_directory);
+    atomic_store(&g_directory_syncs, 0);
+    atomic_store(&g_parent_directory_syncs, 0);
+    atomic_store(&g_metadata_directory_synced, 0);
+}
+static void ph_schema_activate(void) {
+    restore_boot("baseline");
+    observe_schema_directory_sync();
+    int fd = connect_sock(SOCK_PATH);
+    char good[65], resp[4096], inner[4096], line[8192];
+    file_digest("hcr_stub.so", good);
+    put_file(fd, ART_CAS, "hcr_stub.so", good, resp, sizeof(resp));
+    char key[65], blocked[1024];
+    topo_digest(SOCK_PATH, key);
+    snprintf(blocked, sizeof(blocked), "%s/.march/cas/hcr_state/%.16s/state.tmp", g_restore_home, key);
+    CHECK(mkdir(blocked, 0700) == 0, "block prospective stack write");
+    activate7_line("Counter_dispatch", ART_CAS, good, good, inner, sizeof(inner));
+    seq_wrap(4, 4, REL_A, inner, line, sizeof(line));
+    send_line(fd, line); read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR state_write") == 0, "denied persistence refuses activation");
+    CHECK(call_current("Counter_dispatch") == 0, "denied write leaves code unchanged");
+    schema_release_check(fd, 0);
+    CHECK(rmdir(blocked) == 0, "restore prospective stack writes");
+    activate7_line("Counter_dispatch", ART_CAS, good, good, inner, sizeof(inner));
+    seq_wrap(4, 4, REL_A, inner, line, sizeof(line));
+    send_line(fd, line); read_resp(fd, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "signed schema activation succeeds");
+    CHECK(atomic_load(&g_directory_syncs) > 0, "activation syncs its containing state directory");
+    CHECK(atomic_load(&g_parent_directory_syncs) > 0, "activation syncs directory ancestry before publication");
+    CHECK(atomic_load(&g_metadata_directory_synced), "ACK follows directory sync after all metadata renames");
+    schema_release_check(fd, 1);
+    send_line(fd, "BEGIN_BATCH"); read_resp(fd, resp, sizeof(resp));
+    activate7_line("Counter_dispatch", ART_CAS, good, good, inner, sizeof(inner));
+    seq_wrap(5, 5, REL_B, inner, line, sizeof(line));
+    send_line(fd, line); read_resp(fd, resp, sizeof(resp));
+    activate7_line("missing_dispatch", ART_CAS, good, good, inner, sizeof(inner));
+    seq_wrap(5, 5, REL_B, inner, line, sizeof(line));
+    send_line(fd, line); read_resp(fd, resp, sizeof(resp));
+    send_line(fd, "COMMIT_BATCH"); read_resp(fd, resp, sizeof(resp));
+    CHECK(strncmp(resp, "ERR ", 4) == 0, "bad batch fails");
+    schema_release_check(fd, 1);
+    close(fd);
+}
+static void ph_schema_replayed(void) {
+    restore_boot("baseline");
+    int fd = connect_sock(SOCK_PATH);
+    schema_release_check(fd, 1);
+    CHECK(call_current("Counter_dispatch") == 42, "schema replay restores matching code");
+    char key[65], path[1024];
+    topo_digest(SOCK_PATH, key);
+    snprintf(path, sizeof(path), "%s/.march/cas/hcr_state/%.16s/schemas.json", g_restore_home, key);
+    CHECK(access(path, R_OK) == 0, "activated schemas are persisted with the stack");
+    snprintf(path, sizeof(path), "%s/.march/cas/hcr_state/%.16s/artifact-%s.schemas.json", g_restore_home, key, ART_CAS);
+    CHECK(access(path, R_OK) == 0, "each activated image retains its schemas");
+    snprintf(path, sizeof(path), "%s/.march/cas/hcr_state/%.16s/artifact-%s.manifest", g_restore_home, key, ART_CAS);
+    CHECK(access(path, R_OK) == 0, "each activated image retains its manifest");
+    close(fd);
+}
+static void ph_schema_substituted(void) {
+    restore_boot("baseline");
+    int fd = connect_sock(SOCK_PATH);
+    schema_release_check(fd, 0);
+    char key[65], path[1024];
+    topo_digest(SOCK_PATH, key);
+    snprintf(path, sizeof(path), "%s/.march/cas/hcr_state/%.16s/artifact-%s.schemas.json", g_restore_home, key, ART_CAS);
+    CHECK(access(path, F_OK) != 0, "pruned stack removes its image schemas");
+    close(fd);
+}
+
+static void ph_schema_directory_sync_failure(void) {
+    restore_boot("baseline");
+    observe_schema_directory_sync();
+    int fd = connect_sock(SOCK_PATH);
+    char good[65], resp[4096], inner[4096], line[8192];
+    file_digest("hcr_stub.so", good);
+    put_file(fd, ART_CAS, "hcr_stub.so", good, resp, sizeof(resp));
+    activate7_line("Counter_dispatch", ART_CAS, good, good, inner, sizeof(inner));
+    seq_wrap(6, 6, REL_B, inner, line, sizeof(line));
+    atomic_store(&g_fail_published_directory_sync, 1);
+    send_line(fd, line); read_resp(fd, resp, sizeof(resp));
+    CHECK(0, "post-publication directory sync failure must exit before ACK");
+    close(fd);
+}
+
+static void ph_schema_chain_activate(void) {
+    restore_boot("baseline");
+    int fd = connect_sock(SOCK_PATH);
+    char resp[512];
+    CHECK(put_stub(fd), "chain artifact uploaded");
+    for (int i = 0; i < 2; i++) {
+        send_line(fd, "BEGIN_BATCH"); read_resp(fd, resp, sizeof(resp));
+        activate5(fd, "test_fn_epoch", 0, resp, sizeof(resp));
+        activate5(fd, "Counter_dispatch", 0, resp, sizeof(resp));
+        send_line(fd, "COMMIT_BATCH"); read_resp(fd, resp, sizeof(resp));
+        CHECK(strncmp(resp, "OK", 2) == 0, "complete dependency batch activates");
+    }
+    close(fd);
+}
+static void ph_schema_chain_replayed(void) {
+    restore_boot("baseline");
+    int fd = connect_sock(SOCK_PATH);
+    char versions[4096];
+    restore_versions(fd, versions, sizeof(versions), "VERSIONS_DETAIL");
+    CHECK(strstr(versions, "RESTORED entries:4 skipped:0 mode:replayed") != NULL,
+          "replay preserves every original batch and its helper dependencies");
+    CHECK(call_current("Counter_dispatch") == 42 && call_current("test_fn_epoch") == 42,
+          "replayed batch functions are both active");
+    close(fd);
+}
+static void ph_schema_chain_broken(void) {
+    restore_boot("baseline");
+    int fd = connect_sock(SOCK_PATH);
+    char versions[4096];
+    restore_versions(fd, versions, sizeof(versions), "VERSIONS_DETAIL");
+    CHECK(strstr(versions, "RESTORED entries:0 skipped:4 mode:replayed") != NULL,
+          "invalid dependency refuses its complete batch and dependent suffix");
+    CHECK(call_current("Counter_dispatch") == 0 && call_current("test_fn_epoch") == 0,
+          "broken migration history cannot publish an incoherent suffix");
+    close(fd);
+}
+static void test_schema_chain(void) {
+    const char *saved_socket = SOCK_PATH;
+    char socket[108]; snprintf(socket, sizeof(socket), "%s.chain", saved_socket);
+    SOCK_PATH = socket;
+    CHECK(run_phase(ph_schema_chain_activate) == 0, "persist two complete deploy batches");
+    CHECK(run_phase(ph_schema_chain_replayed) == 0, "replay the complete dependency history");
+    char key[65], path[1024], tmp[1032], line[20000];
+    topo_digest(SOCK_PATH, key);
+    snprintf(path, sizeof(path), "%s/.march/cas/hcr_state/%.16s/state", g_restore_home, key);
+    snprintf(tmp, sizeof(tmp), "%s.test", path);
+    FILE *in = fopen(path, "r"), *out = fopen(tmp, "w");
+    int changed = 0;
+    if (in && out) {
+        while (fgets(line, sizeof(line), in)) {
+            if (!changed && !strncmp(line, "entry ", 6) && strstr(line, " Counter_dispatch ")) {
+                int off = 0; sscanf(line, "%*s %*s %*s %*s %n", &off);
+                if (off) { line[off] = line[off] == 'A' ? 'B' : 'A'; changed = 1; }
+            }
+            fputs(line, out);
+        }
+    }
+    if (in) fclose(in);
+    if (out) fclose(out);
+    CHECK(changed && rename(tmp, path) == 0, "corrupt one dependency in the first batch");
+    CHECK(run_phase(ph_schema_chain_broken) == 0, "do not replay past a missing dependency");
+    SOCK_PATH = saved_socket;
+}
+
 static void test_restart_durability(void) {
     CHECK(run_phase(phase_activate) == 0, "phase 1: activate a patch, then exit");
     CHECK(state_has_entries(), "the patch stack is persisted under the CAS root");
@@ -1652,6 +1884,32 @@ static void test_restart_durability(void) {
     CHECK(!marker_exists(), "phase 15: the substituted artifact's code never ran");
 }
 
+static void test_large_schema_response(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "large schema client connects");
+    if (fd < 0) return;
+    struct timeval timeout = {3, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    send_line(fd, "SCHEMAS");
+    char *reply = malloc(700000);
+    size_t n = 0;
+    while (reply && n < 699999) {
+        size_t chunk = 699999 - n;
+        if (chunk > 997) chunk = 997;
+        ssize_t got = read(fd, reply + n, chunk);
+        if (got <= 0) break;
+        n += (size_t)got;
+        if (reply[n - 1] == '\n') break;
+    }
+    if (reply) reply[n] = '\0';
+    CHECK(reply && n > 500000 && reply[n-1] == '\n',
+          "schema response exceeding socket capacity arrives completely");
+    CHECK(reply && strstr(reply, "\"releases\":{") != NULL,
+          "large response includes final provenance object");
+    free(reply);
+    close(fd);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <keys_file> [policy|policy-all|restore]\n", argv[0]);
@@ -1680,6 +1938,27 @@ int main(int argc, char **argv) {
     snprintf(home, sizeof(home), "/tmp/march_reload_home_%d", (int)getpid());
     mkdir(home, 0700);
     setenv("HOME", home, 1);
+    if (argc >= 3 && strcmp(argv[2], "schemas-large") == 0) {
+        const char *prefix = "{\"Large\":{\"state_fields\":[],\"invariant\":\"";
+        size_t n = strlen(prefix);
+        memcpy(__march_hcr_schemas, prefix, n);
+        memset(__march_hcr_schemas + n, 'x', 500000); n += 500000;
+        strcpy(__march_hcr_schemas + n, "\"}}");
+        march_dispatch_init(64);
+        march_reload_server_start(SOCK_PATH);
+        test_large_schema_response();
+        return g_failed ? 1 : 0;
+    }
+    if (argc >= 3 && strcmp(argv[2], "schemas-restore") == 0) {
+        g_restore_home = home;
+        CHECK(run_phase(ph_schema_activate) == 0, "schema signed deployment and failed batch");
+        CHECK(run_phase(ph_schema_replayed) == 0, "schema baseline restored from verified artifact");
+        CHECK(substitute_artifact(), "schema replay artifact substituted");
+        CHECK(run_phase(ph_schema_substituted) == 0, "unverified artifact cannot advance schema baseline");
+        CHECK(run_phase(ph_schema_directory_sync_failure) == 74, "directory sync failure fail-stops without acknowledgement");
+        test_schema_chain();
+        return g_failed ? 1 : 0;
+    }
     if (argc >= 3 && strcmp(argv[2], "restore") == 0) {
         /* Nothing is started in this process: every server lifetime is a
          * forked child (see test_restart_durability). */
@@ -1712,6 +1991,10 @@ int main(int argc, char **argv) {
     march_dispatch_register_name(10, "test_fn_epoch");
     march_dispatch_register_name(11, "test_fn_role");
     march_dispatch_register_name(12, "test_fn_digest");
+    march_dispatch_register_name(13, "Counter_dispatch");
+    march_dispatch_register_name(14, "KnownOnly_dispatch");
+    march_dispatch_publish(14, (void *)0x1010, "baseline", NULL, MARCH_NATIVE);
+    march_dispatch_publish(13, (void *)0x1010, "baseline", NULL, MARCH_NATIVE);
     march_dispatch_publish(10, (void *)0x1010, "baseline", NULL, MARCH_NATIVE);
     march_dispatch_publish(12, (void *)0x1010, "baseline", NULL, MARCH_NATIVE);
     /* Review 2026-10-04 (dd12 P3): the socket is owner-only whatever the
@@ -1760,6 +2043,7 @@ int main(int argc, char **argv) {
             if (strncmp(resp, want, sizeof(want) - 1) != 0) fprintf(stderr, "    got: %s\n", resp);
             close(fd);
         }
+        test_schema_baseline();
         test_artifact_digest();
         test_in_process_request();
         test_sequenced_releases();   /* it makes the server require releases */
@@ -1807,6 +2091,7 @@ int main(int argc, char **argv) {
         test_policy_served_roles(!policy_all);
         /* Capless, so within every policy: the policy gate never stands in
          * for the bytes check. */
+        test_schema_baseline();
         test_artifact_digest();
     }
 

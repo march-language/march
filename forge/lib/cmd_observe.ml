@@ -37,7 +37,21 @@ let print_reply ~json (reply : Yojson.Safe.t) =
 
 (** A debug request ([--state], [--crashes-full]): signed with the deploy
     key, so it is built here rather than taken from the positional words. *)
-type debug = No_debug | State of { pid : int; timeout_ms : int } | Crashes_full of int option
+type trace_limit = Max_events of int | Rate of int * int
+
+type debug =
+  | No_debug
+  | State of { pid : int; timeout_ms : int }
+  | Crashes_full of int option
+  | Trace_start of { fns : string; limit : trace_limit; ring : int option;
+                     events : string list; pids : int list }
+  | Trace_drain of { session : int; max : int option }
+  | Trace_stop of int
+
+(** The actor-event kinds a trace session can record, and how many pids it may
+    name (the node enforces both; this is the early, readable refusal). *)
+let trace_event_kinds = [ "sent"; "received"; "spawned"; "exited"; "dropped" ]
+let max_trace_pids = 8
 
 (** The longest [--state --timeout-ms] forge allows: the client reads the
     reply with a 10 s socket timeout ([Remote.connect_with_timeout]), so a
@@ -45,26 +59,67 @@ type debug = No_debug | State of { pid : int; timeout_ms : int } | Crashes_full 
     up, and the user would see a socket error instead of ["timeout"]. *)
 let max_state_timeout_ms = 8000
 
-let debug_request (d : debug) : (string option, string) result =
+(** A debug request, ready to sign: the verb, its fields, and the key. The
+    node's boot id (HELLO) is added per target, just before signing. *)
+let debug_request (d : debug) : ((boot:string -> string) option, string) result =
   match d with
   | No_debug -> Ok None
   | State { timeout_ms; _ } when timeout_ms < 0 || timeout_ms > max_state_timeout_ms ->
     Error (Printf.sprintf
              "observe: --timeout-ms must be between 0 and %d (forge waits at most 10 s for a reply)"
              max_state_timeout_ms)
-  | State _ | Crashes_full _ ->
+  | Trace_start { events; pids; fns; _ } when events <> [] && pids = [] ->
+    ignore fns;
+    Error "observe: --events needs --pids: actor events are recorded only for the actors you name (1 to 8)"
+  | Trace_start { events; pids; _ } when events = [] && pids <> [] ->
+    Error "observe: --pids needs --events"
+  | Trace_start { pids; _ } when List.length pids > max_trace_pids || List.exists (fun p -> p < 0) pids ->
+    Error (Printf.sprintf "observe: --pids takes 1 to %d non-negative pids" max_trace_pids)
+  | Trace_start { events; _ } when List.exists (fun k -> not (List.mem k trace_event_kinds)) events
+                                   || List.length (List.sort_uniq compare events) <> List.length events ->
+    Error (Printf.sprintf "observe: --events takes each of %s at most once"
+             (String.concat ", " trace_event_kinds))
+  | Trace_start { fns; events; _ } when events = [] && (fns = "" || fns = "-") ->
+    Error "observe: --trace-start needs boundary function names, or - with --events and --pids"
+  | Trace_start { limit = Max_events n; _ } when n < 1 || n > 65536 ->
+    Error "observe: --max-events must be between 1 and 65536"
+  | Trace_start { limit = Rate (n, s); _ } when n < 1 || n > 100000 || s < 1 || s > 3600 ->
+    Error "observe: --rate N/SECS needs N in 1..100000 and SECS in 1..3600"
+  | _ ->
     match Cmd_hot_reload.read_sk_raw () with
     | Error m -> Error ("observe: " ^ m)
     | Ok sk ->
-      let now_ms = int_of_float (Unix.gettimeofday () *. 1000.) in
-      let nonce = Observe_client.fresh_nonce () in
       let verb, fields = match d with
         | State { pid; timeout_ms } ->
           "STATE", [ Printf.sprintf "pid:%d" pid; Printf.sprintf "timeout_ms:%d" timeout_ms ]
         | Crashes_full n ->
           "CRASHES_FULL", (match n with Some n -> [ Printf.sprintf "n:%d" n ] | None -> [])
+        | Trace_start { fns; limit; ring; events; pids } ->
+          "TRACE_START",
+          (match limit with
+           | Max_events n -> [ Printf.sprintf "count:%d" n ]
+           | Rate (n, s) -> [ Printf.sprintf "rate:%d" n; Printf.sprintf "per_s:%d" s ])
+          @ (if fns = "" || fns = "-" then [] else [ "fn:" ^ fns ])
+          @ (if events = [] then [] else [ "events:" ^ String.concat "," events ])
+          @ (if pids = [] then []
+             else [ "pids:" ^ String.concat "," (List.map string_of_int pids) ])
+          @ (match ring with Some r -> [ Printf.sprintf "ring:%d" r ] | None -> [])
+        | Trace_drain { session; max } ->
+          "TRACE_DRAIN", Printf.sprintf "session:%d" session
+                         :: (match max with Some m -> [ Printf.sprintf "max:%d" m ] | None -> [])
+        | Trace_stop session -> "TRACE_STOP", [ Printf.sprintf "session:%d" session ]
         | No_debug -> assert false in
-      Ok (Some (Observe_client.signed_request ~sk ~nonce ~now_ms verb fields))
+      Ok (Some (fun ~boot ->
+          let now_ms = int_of_float (Unix.gettimeofday () *. 1000.) in
+          let nonce = Observe_client.fresh_nonce () in
+          Observe_client.signed_request ~sk ~nonce ~boot ~now_ms verb fields))
+
+(** The boot id in a HELLO reply. *)
+let boot_of (hello : Yojson.Safe.t) : (string, string) result =
+  match Yojson.Safe.Util.(member "data" hello |> member "boot") with
+  | `String b when b <> "" -> Ok b
+  | _ -> Error "observe: the node's HELLO gave no boot id"
+  | exception _ -> Error "observe: the node's HELLO gave no boot id"
 
 (** Run one request; every target's reply is printed (one line each with
     [~json]).  The result is an error if any target failed. *)
@@ -74,16 +129,26 @@ let run ?(debug = No_debug) ~(socket : string option) ~(env : string) ~(json : b
     match debug_request debug with
     | Error _ as e -> e
     | Ok (Some _) when words <> [] || sections <> [] ->
-      Error "observe: give --state or --crashes-full alone, without a request or --section"
-    | Ok (Some r) -> Ok r
-    | Ok None -> request_of ~words ~sections in
+      Error "observe: give a debug flag alone, without a request or --section"
+    | Ok (Some mk) -> Ok (`Signed mk)
+    | Ok None -> Result.map (fun r -> `Plain r) (request_of ~words ~sections) in
+  (* A signed request names the target's boot id, so it is built per target,
+     after a HELLO. *)
+  let send ask = function
+    | `Plain r -> ask r
+    | `Signed mk ->
+      match ask "HELLO" with
+      | Error _ as e -> e
+      | Ok h -> match boot_of h with
+        | Error _ as e -> e
+        | Ok boot -> ask (mk ~boot) in
   let explain = if debug = No_debug then Fun.id else Observe_client.explain_debug_error in
   match request with
   | Error _ as e -> e
   | Ok request ->
     match socket with
     | Some path ->
-      Result.map (print_reply ~json) (Observe_client.query_socket path request)
+      Result.map (print_reply ~json) (send (Observe_client.query_socket path) request)
       |> Result.map_error explain
     | None ->
       match Project.load () with
@@ -96,7 +161,7 @@ let run ?(debug = No_debug) ~(socket : string option) ~(env : string) ~(json : b
           | Error _ as e -> e
           | Ok hosts ->
             let failures = List.filter_map (fun h ->
-                match Observe_client.query Remote.ssh h request with
+                match send (Observe_client.query Remote.ssh h) request with
                 | Ok reply -> print_reply ~json reply; None
                 | Error m -> Some (h.Hosts.name ^ ": " ^ explain m)) hosts
             in
@@ -147,7 +212,7 @@ let run_diagnose ~(socket : string option) ~(env : string) ~(json : bool)
               let node = match after with
                 | `Assoc kv -> (match List.assoc_opt "node" kv with Some (`String n) -> n | _ -> name)
                 | _ -> name in
-              print_reply ~json (Diagnose.to_json ~node ~window_ms fs);
+              print_reply ~json (Diagnose.to_json ~node ~window_ms ~before ~after fs);
               Diagnose.exit_code fs
         in
         max worst code) 0 targets
@@ -218,6 +283,36 @@ let summary_request = "SNAPSHOT mem,sched,crashes,actors"
 let reply_summary (reply : Yojson.Safe.t) : summary =
   summary_of (Observe_client.data_of reply) ~now_ms:(ji (jm "at_ms" reply))
 
+let clip n s = if String.length s > n then String.sub s 0 n else s
+
+(** One table row of a [TOP] reply: the actor, what it was ranked on, its
+    size, and how it is supervised ([link]: supervised, spawned or none;
+    [SUPERVISOR] its supervisor's pid and type, or the spawner; [POLICY]
+    only for a supervisor). Fields an older node does not send read as 0 or
+    empty. *)
+let top_row_line (r : Yojson.Safe.t) : string =
+  let name = match jl (jm "names" r) with `String n :: _ -> n | _ -> "" in
+  let typ = match jm "type" r with `String t -> t | _ -> "" in
+  let sup = match jm "parent" r with
+    | `Int p ->
+      string_of_int p ^ (match jm "parent_type" r with `String t when t <> "" -> " (" ^ t ^ ")" | _ -> "")
+    | _ -> (match jm "spawned_by" r with `Int p -> "spawned by " ^ string_of_int p | _ -> "-") in
+  let policy = match jm "supervisor" r with
+    | `Assoc _ as sj ->
+      Printf.sprintf "%s %d/%d in %ds, %d kids" (js (jm "strategy" sj)) (ji (jm "restarts_held" sj))
+        (ji (jm "max_restarts" sj)) (ji (jm "window_secs" sj)) (ji (jm "children" r))
+    | _ -> "-" in
+  Printf.sprintf "%8d  %-20s %-18s %-9s %8d %9d %10d %7d  %-10s %-22s %s"
+    (ji (jm "pid" r)) (clip 20 name) (clip 18 typ) (js (jm "status" r))
+    (ji (jm "mbox" r)) (ji (jm "stack_bytes" r)) (ji (jm "value" r))
+    (ji (jm "crashes" r) + ji (jm "child_crashes" r))
+    (match jm "link" r with `String l -> l | _ -> "-") (clip 22 sup) policy
+
+(** The column header [top_row_line]'s rows sit under; [sort] names the ranked column. *)
+let top_header (sort : string) : string =
+  Printf.sprintf "%8s  %-20s %-18s %-9s %8s %9s %10s %7s  %-10s %-22s %s" "PID" "NAME" "TYPE" "STATUS" "MBOX"
+    "STACK" (String.uppercase_ascii sort) "CRASHES" "LINK" "SUPERVISOR" "POLICY (held/max in window)"
+
 (** One [forge top] frame from a [TOP] reply and a summary. *)
 let render_top ~(node : string) ~(sort : string) ~(window_ms : int option)
     (s : summary) (top : Yojson.Safe.t) : string =
@@ -225,14 +320,8 @@ let render_top ~(node : string) ~(sort : string) ~(window_ms : int option)
   Printf.bprintf b "%s  %s\n" node (summary_line s);
   Printf.bprintf b "sorted by %s%s\n\n" sort
     (match window_ms with Some w -> Printf.sprintf " over %d ms" w | None -> "");
-  Printf.bprintf b "%8s  %-20s %-18s %-9s %8s %10s\n" "PID" "NAME" "TYPE" "STATUS" "MBOX" (String.uppercase_ascii sort);
-  List.iter (fun r ->
-      let name = match jl (jm "names" r) with `String n :: _ -> n | _ -> "" in
-      let typ = match jm "type" r with `String t -> t | _ -> "" in
-      let clip n s = if String.length s > n then String.sub s 0 n else s in
-      Printf.bprintf b "%8d  %-20s %-18s %-9s %8d %10d\n"
-        (ji (jm "pid" r)) (clip 20 name) (clip 18 typ) (js (jm "status" r))
-        (ji (jm "mbox" r)) (ji (jm "value" r)))
+  Printf.bprintf b "%s\n" (top_header sort);
+  List.iter (fun r -> Printf.bprintf b "%s\n" (top_row_line r))
     (jl (jm "top" (Observe_client.data_of top)));
   Buffer.contents b
 
@@ -243,7 +332,7 @@ let counter_sort s = List.mem s [ "slices"; "msgs_in"; "msgs_out" ]
     window, which is also the refresh; others refresh every
     max(1 s, 4 x the snapshot's cost). *)
 let run_top ~(socket : string option) ~(env : string) ~(sort : string) ~(n : int)
-    ~(window_ms : int) ~(once : bool) () : (unit, string) result =
+    ~(window_ms : int) ~(once : bool) ?(json = false) () : (unit, string) result =
   let target =
     match socket with
     | Some path -> Ok (path, Observe_client.query_socket path)
@@ -268,6 +357,7 @@ let run_top ~(socket : string option) ~(env : string) ~(sort : string) ~(n : int
     let rec loop () =
       match ask top_req with
       | Error _ as e -> e
+      | Ok top when json -> print_reply ~json:true top; Ok ()   (* the TOP envelope, one frame *)
       | Ok top ->
         match ask summary_request with
         | Error _ as e -> e

@@ -118,8 +118,23 @@ a no-op without a `topology.toml`.
   caller), without types, so a call through a closure value or an interface method is
   not followed.
 - **`caps`** derivation needs the typechecker's capability closure and is the
-  compiler's. It is `null` in the export until `march --topology` grows the derivation
-  (step 3/4). D26's widening gate (`--grant-cap` on a deploy) waits on the same.
+  compiler's (`march --topology <digest> --emit-core-ast`'s `topology` object, below;
+  `Topology_run.compiler_derived`). It is `null` in the export when the compiler cannot
+  run.
+- **The widening gate (D26)** is `forge/lib/pool_caps.ml`. The baseline is
+  `.forge/deploy/<env>/derived.json` (`Pool_caps.baseline_file`, `Reconcile.deploy_dir`;
+  `{ "<pool>": { "caps": [...], "initiates": [...] } }`), written by `forge deploy`
+  (`Cmd_deploy.record`) and by a `forge deploy hot` that completes on every server.
+  `Pool_caps.widenings` normalizes both sides and reuses
+  `Cmd_deploy_hot.compute_cap_widening`/`filter_granted_widening`, so a grant is a
+  plain capability name matched by subsumption, for every pool that widens to it; a
+  pool absent from the baseline widens by all its caps, as in `Deploy_plan.classify`.
+  `forge deploy hot` runs `Pool_caps.deploy_gate` (passed in as `~pool_gate`, since
+  `Pool_caps` sits above `Cmd_deploy_hot`) right after `Topology.gate` and before the
+  build: permissive with no baseline, refusing when a baseline exists but the caps
+  cannot be derived. `forge build` prints `Pool_caps.build_warnings` against every
+  recorded environment. `forge deploy --plan` has marked derived widenings since step
+  10b. Tests: the `authority` group of `forge/test/test_deploy_plan.ml`.
 
 ## Tests
 

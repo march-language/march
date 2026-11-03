@@ -20,13 +20,18 @@ type t =
   | Int_abs
   | Int_div
   | Int_div_euclid
+  | Int_div_floor
   | Int_max_value
   | Int_min_value
   | Int_mod
   | Int_mod_euclid
+  | Int_mod_floor
   | Int_not
   | Int_popcount
   | Int_pow
+  | Int_wrapping_add
+  | Int_wrapping_mul
+  | Int_wrapping_sub
   | Int_to_string
   | Mpst_send
   | Negate

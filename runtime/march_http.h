@@ -229,6 +229,12 @@ int64_t march_http_server_spawn_n(int64_t port, int64_t n,
 /* Wait for a child PID returned by march_http_server_spawn_n to exit. */
 void march_http_server_wait(int64_t handle);
 
+/* The address HTTP servers bind to (INADDR_ANY by default, network order),
+ * and http_server_bind_host(host), which sets it from a dotted IPv4 string. */
+#include <netinet/in.h>
+extern in_addr_t march_http_bind_addr;
+void march_http_server_bind_host(void *host);
+
 /* ── WebSocket builtins ────────────────────────────────────────────── */
 
 /* Perform the WebSocket handshake upgrade on an already-accepted fd.

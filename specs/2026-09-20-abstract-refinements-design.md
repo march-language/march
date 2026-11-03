@@ -4,7 +4,8 @@
 **Status:** phase 1 landed 2026-09-21; phase 2 landed 2026-10-06 (preceded by
 the callback-binder PR; plan `specs/plans/2026-10-06-abstract-refinements-phase2-plan.md`,
 record `specs/progress/2026-10-06-abstract-refinements-phase2.md`). Phase 3 landed 2026-10-07
-(`specs/progress/2026-10-07-abstract-refinements-phase3.md`; `Map.filter` stays out per §9.3). Phase 4 open.
+(`specs/progress/2026-10-07-abstract-refinements-phase3.md`; `Map.filter` stays out per §9.3). Phase 4
+landed 2026-10-08 (`specs/progress/2026-10-08-abstract-refinements-phase4.md`). All four phases done.
 **Closes:** item 6 of `specs/todos/2026-09-18-refine-element-flow-followups.md`
 ("Abstract refinements, so `filter` can produce `List({Int | p})` from a
 predicate. A new mechanism in the logic, not plumbing; its own design.")
@@ -382,8 +383,9 @@ contract).
 plus witnesses, stated in the progress note.
 
 **Phase 4 — sugar.** `a[p]` and `Bool[p]`, desugaring to phase 1's forms, with
-the menhir conflict count held at its current 9 (`parser.mly:1860-1861`; note
-the stale "11" comment at `:1092-1093` and fix it while there). Grammar fixtures
+the menhir conflict count held (it was actually 11, not 9, when phase 4 began;
+phase 4 took it to 7 by making the `let?`/`let*` annotation errors stop at the
+colon, and the shorthand added none). Grammar fixtures
 under `specs/lang/grammar/parse/`, and the language reference updated in **both**
 `specs/lang/refinement-types.md` and `docs/refinement-types.md`.
 

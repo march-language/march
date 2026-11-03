@@ -1,0 +1,64 @@
+-- Tests for the Range stdlib module
+-- Run with: dune exec march -- test test/stdlib/test_range.march
+
+mod TestRange do
+needs IO.Mut
+
+-- An Int the refinement checker cannot see through, so a call passing it
+-- reaches the runtime guard instead of being rejected at compile time.
+pfn opaque_int(s : String) : Int do
+  match string_to_int(s) do
+  Some(n) -> n
+  None    -> 1
+  end
+end
+
+describe "to_list" do
+  test "good paths are unchanged" do
+    assert (Range.to_list(Range.new(1, 4)) == [1, 2, 3])
+    assert (Range.to_list(Range.new(3, 3)) == [])
+    assert (Range.to_list(Range.new_step(0, 10, 3)) == [0, 3, 6, 9])
+    assert (Range.to_list(Range.new_step(5, 0, -2)) == [5, 3, 1])
+    assert (Range.to_list(Range.new_step(0, 5, -1)) == [])
+    assert (Range.to_list({start: 2, stop: 7, step: 2}) == [2, 4, 6])
+  end
+
+  test "the functions built on to_list are unchanged" do
+    assert (Range.map(Range.new(1, 4), fn x -> x * x) == [1, 4, 9])
+    assert (Range.filter(Range.new(0, 10), fn x -> x % 4 == 0) == [0, 4, 8])
+    assert (Range.reduce(Range.new(1, 5), 1, fn (acc, x) -> acc * x) == 24)
+    assert (Range.sum(Range.new_step(10, 0, -5)) == 15)
+    assert (Range.to_list(Range.reverse(Range.new_step(0, 10, 3))) == [9, 6, 3, 0])
+    assert (Range.all(Range.new(1, 5), fn x -> x > 0))
+    assert (Range.any(Range.new(1, 5), fn x -> x == 4))
+  end
+
+  -- A zero step used to hang when start > stop (the walk recursed on the
+  -- same `i` forever, building an ever-longer list) and returned [] when
+  -- start <= stop; it now panics either way, as Range.new_step does.
+  test "a zero step panics instead of hanging" do
+    let zero = opaque_int("0")
+    let msg = "panic: Range.to_list: step must be non-zero"
+    assert (__try_call_val(fn _ -> Range.to_list({start: 5, stop: 0, step: zero})) == Err(msg))
+    assert (__try_call_val(fn _ -> Range.to_list({start: 0, stop: 5, step: zero})) == Err(msg))
+    assert (__try_call_val(fn _ -> Range.sum({start: 5, stop: 0, step: zero})) == Err(msg))
+  end
+end
+
+describe "each" do
+  test "visits every element in order" do
+    let v = Vault.new("test_range_each_visits")
+    Range.each(Range.new_step(5, 0, -2), fn i ->
+      Vault.set(v, "seen", Vault.get_or(v, "seen", "") ++ int_to_string(i)))
+    assert (Vault.get_or(v, "seen", "") == "531")
+  end
+
+  -- each has its own walk, with the same zero-step hang.
+  test "a zero step panics instead of hanging" do
+    let zero = opaque_int("0")
+    let r = __try_call_val(fn _ -> Range.each({start: 5, stop: 0, step: zero}, fn _ -> ()))
+    assert (r == Err("panic: Range.each: step must be non-zero"))
+  end
+end
+
+end

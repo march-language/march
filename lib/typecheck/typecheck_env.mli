@@ -122,6 +122,12 @@ type ref_record = {
   ref_line : int;
 }
 val qualify_ref_name : string -> string -> string
+
+(** The type synthesised for an actor's messages ([actor ^ "_Msg"]). *)
+val actor_msg_type_name : string -> string
+
+(** [Some "<Actor>_Msg"] when the name is spelled `<Actor>.Msg` (scope not checked). *)
+val actor_msg_alias_target : string -> string option
 type env = {
   vars : Typecheck_types.scheme StrMap.t;
   types : int StrMap.t;
@@ -138,6 +144,7 @@ type env = {
     (Typecheck_types.Ast.span,
      Typecheck_types.ty)
     Hashtbl.t;
+  json_derive_sites : (string * Typecheck_types.Ast.span) list;
   record_names_snapshot : (string * string option) list;
   refs : ref_record list ref;
   current_decl : string ref;
@@ -158,16 +165,21 @@ type env = {
   protocols : proto_info StrMap.t;
   impls :
     (Typecheck_types.ty *
-     Typecheck_types.Ast.span * string option)
+     Typecheck_types.Ast.span * string option * (string * Typecheck_types.ty) list)
     list StrMap.t;
   import_tracker : import_entry list ref;
   import_idx : import_index;
   deferred_check4 : (string * string list * string * Typecheck_types.Ast.span) list ref;
+  deferred_unused_needs : (string * string * Typecheck_types.Ast.span) list ref;
   local_fns : unit StrMap.t;
   fn_arities : (int * Typecheck_types.Ast.span) StrMap.t;
   qual_fn_arities : (int * Typecheck_types.Ast.span) StrMap.t;
+  param_call_arities : (Typecheck_types.Ast.span * (string * int option) list) StrMap.t;
   qual_fn_names : unit StrMap.t;
+  binder_spans : Typecheck_types.Ast.span StrMap.t;
+  pat_spans : (string, Typecheck_types.Ast.span) Hashtbl.t;
   lambda_arities : (int * Typecheck_types.Ast.span * Typecheck_types.Ast.span option) StrMap.t;
+  fn_aliases : (int * string) StrMap.t;
   plain_let_names : Typecheck_types.StringSet.t;
   proof_caps : (string * string) list;
   always_linear_types : string list;
@@ -237,6 +249,9 @@ type env = {
   fn_grant_points :
     (string, string list * Typecheck_types.Ast.span)
     Hashtbl.t;
+  fn_bound_points :
+    (string, string list * Typecheck_types.Ast.span)
+    Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts :
     (Typecheck_types.session_ty ref *
@@ -261,6 +276,9 @@ val offer_catchall_depth : int ref
 val offer_unrefined_message : string -> string
 val demote_to_monomorphic : Typecheck_types.ty -> unit
 val demote_vault_handle_vars : Typecheck_types.ty -> unit
+val demote_block_vault_handle_vars : Typecheck_types.ty -> unit
+val with_vault_pin_frame :
+  int -> ((Typecheck_types.ty list -> unit) -> 'a) -> 'a
 val tag_cap_producer_result :
   env ->
   Typecheck_types.ty ->
@@ -314,14 +332,15 @@ val stdlib_only : (string * string) list ref
 val note_gated_rebind : string -> Typecheck_types.StringSet.t -> Typecheck_types.StringSet.t
 
 val bind_var :
-  StrMap.key -> Typecheck_types.scheme -> env -> env
+  ?span:Typecheck_types.Ast.span -> StrMap.key -> Typecheck_types.scheme -> env -> env
 val bind_vars :
   (StrMap.key * Typecheck_types.scheme) list -> env -> env
 val bind_linear :
+  ?span:Typecheck_types.Ast.span ->
   StrMap.key ->
   Typecheck_types.Ast.linearity ->
   Typecheck_types.ty -> env -> env
-val bind_pending : StrMap.key -> Typecheck_types.ty -> env -> env
+val bind_pending : ?span:Typecheck_types.Ast.span -> StrMap.key -> Typecheck_types.ty -> env -> env
 val generalize :
   int ->
   Typecheck_types.ty ->

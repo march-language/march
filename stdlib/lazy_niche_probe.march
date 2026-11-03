@@ -10,6 +10,7 @@
 -- Do NOT add this file to stdlib_file_list — that would make it eagerly
 -- typechecked and defeat the regression it guards (see test/native/lazy_niche).
 mod LazyNicheProbe do
+  doc "Internal compiler regression fixture (lazy-load niche codegen, test/native/lazy_niche), not a library function: the first element of [xs], or [dflt] when empty."
   fn first_or(xs : List(Int), dflt : Int) : Int do
     match List.nth_opt(xs, 0) do
       Some(v) -> v

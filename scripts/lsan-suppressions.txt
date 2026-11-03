@@ -1,0 +1,21 @@
+# LeakSanitizer suppressions for scripts/native-sanitize-sweep.sh -l.
+#
+# Only allocations that are NOT leaks belong here: process-lifetime runtime
+# caches and frames abandoned by design. A suppression matches any report
+# whose allocation stack contains the named function, so name the allocating
+# function itself, never a caller as broad as march_main. See
+# specs/todos/2026-10-12-lsan-sweep-remaining-leaks.md for the triage.
+
+# Runtime caches that live for the process.
+#   march_ctor_table_ensure: the constructor-name table for to_string / show
+#   (one 15 KiB table per type, built on first use).
+leak:march_ctor_table_ensure
+#   registry_init_once: the named actor registry's table name, built once.
+leak:registry_init_once
+
+# The frame of an on_stop that panicked, or that its deadline cut off, is
+# abandoned like any panicking frame (test/native/actor_on_stop_panic.march,
+# actor_on_stop_deadline.march, actor_state_released.march pin this).
+leak:Bad_on_stop
+leak:Stuck_on_stop
+leak:Messy_on_stop

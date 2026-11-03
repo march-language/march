@@ -4,3 +4,5 @@ evens(4)
 Main.evens(3)
 List.length([Dark, Light])
 2 + 2
+Actor.inspect_state(debug, Actor.pid_from_int(intro, 0), 500)
+Actor.list(intro)

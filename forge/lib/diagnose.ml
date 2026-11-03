@@ -137,7 +137,9 @@ let crash_loop _b a =
         next = "forge observe CRASHES 20, then ACTOR <supervisor>" } ]
   | [], [] -> []
 
-(* 5. Live heap objects up more than 10% with the actor count flat (±5%). *)
+(* 5. Live heap objects up more than 10% with the actor count flat (±5%).
+   Queued messages are themselves live objects, so exclude their net growth:
+   a backed-up mailbox is reported by [mailbox_growth], not as an RC leak. *)
 let rc_climb b a =
   let objs s = member "live_objects" (section s "mem") in
   let acts s = int_of (member "actors" (section s "mem")) in
@@ -146,11 +148,15 @@ let rc_climb b a =
   | v0, v1 ->
     let o0 = int_of v0 and o1 = int_of v1 in
     let a0 = acts b and a1 = acts a in
-    if o0 >= 1000 && o1 * 10 > o0 * 11 && abs (a1 - a0) * 20 <= max a0 1 then
+    let queued_growth =
+      max 0 (int_of (member "queued_messages" (section a "mem"))
+             - int_of (member "queued_messages" (section b "mem"))) in
+    let adjusted_o1 = max 0 (o1 - queued_growth) in
+    if o0 >= 1000 && adjusted_o1 * 10 > o0 * 11 && abs (a1 - a0) * 20 <= max a0 1 then
       [ { id = "rc.climb"; severity = Warning;
           rows = [ `Assoc [ "live_objects_before", `Int o0; "live_objects_after", `Int o1;
-                            "actors", `Int a1 ] ];
-          next = "heap objects climb with no new actors: a leak; compare SNAPSHOT mem over minutes" } ]
+                            "queued_messages_growth", `Int queued_growth; "actors", `Int a1 ] ];
+          next = "heap objects climb beyond queued-message growth with no new actors: a leak; compare SNAPSHOT mem over minutes" } ]
     else []
 
 (* 6. A draining epoch; and units pinned two or more epochs behind current. *)
@@ -183,6 +189,24 @@ let partial = [
   "mailbox.over_limit", "per-actor dropped counts are not tracked; the node total is used";
 ]
 
+let snapshot_coverage env =
+  let snap = snap_of env in
+  let actors = section snap "actors" in
+  let crashes = section snap "crashes" in
+  let actor_total = int_of (member "total" actors) in
+  let actor_shown = int_of (member "shown" actors) in
+  let crash_total = int_of (member "total" crashes) in
+  let crash_shown = List.length (list_of (member "crashes" crashes)) in
+  (if actor_shown < actor_total then
+     [ "actors", Printf.sprintf "shown %d of %d" actor_shown actor_total ] else [])
+  @ (if crash_shown < crash_total then
+       [ "crashes", Printf.sprintf "shown %d of %d" crash_shown crash_total ] else [])
+
+let coverage ~before ~after =
+  List.fold_left (fun acc (key, value) ->
+      if List.mem_assoc key acc then acc else acc @ [ key, value ])
+    [] (snapshot_coverage before @ snapshot_coverage after)
+
 (** All findings over a before/after pair of [SNAPSHOT] envelopes. *)
 let run ~(before : Yojson.Safe.t) ~(after : Yojson.Safe.t) : finding list =
   let b = snap_of before and a = snap_of after in
@@ -196,7 +220,7 @@ let exit_code (fs : finding list) =
   else if fs <> [] then 1 else 0
 
 (** The [march.diagnose/1] envelope. *)
-let to_json ~node ~window_ms (fs : finding list) : Yojson.Safe.t =
+let to_json ~node ~window_ms ~before ~after (fs : finding list) : Yojson.Safe.t =
   `Assoc [
     "proto", `String "march.diagnose/1";
     "node", `String node;
@@ -207,7 +231,7 @@ let to_json ~node ~window_ms (fs : finding list) : Yojson.Safe.t =
     "coverage", `Assoc [
       "ran", `List (List.map (fun p -> `String p) probes);
       "unavailable", `Assoc (List.map (fun (k, v) -> (k, `String v)) unavailable);
-      "partial", `Assoc (List.map (fun (k, v) -> (k, `String v)) partial);
+      "partial", `Assoc (List.map (fun (k, v) -> (k, `String v)) (partial @ coverage ~before ~after));
     ];
   ]
 

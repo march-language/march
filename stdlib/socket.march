@@ -29,7 +29,14 @@ mod Socket do
     | RecvTimeout(Int)
     | SocketOptionFailed(String)
 
-  doc "Return a human-readable description of a SocketError."
+  doc """
+  Return a human-readable description of a SocketError.
+
+  ## Examples
+
+      Socket.error_message(RecvTimeout(500))     -- "receive timed out after 500ms"
+      Socket.error_message(WriteFailed("EPIPE")) -- "write failed: EPIPE"
+  """
   fn error_message(e : SocketError) : String do
     match e do
     ConnectionFailed(msg) -> "connection failed: " ++ msg
@@ -40,7 +47,17 @@ mod Socket do
     end
   end
 
-  doc "Open a TCP connection to host:port. Returns Ok(fd) or Err."
+  doc """
+  Open a TCP connection to host:port. Returns `Ok(fd)` or
+  `Err(ConnectionFailed(msg))`. The caller must `close` the fd.
+
+  ## Examples
+
+      match Socket.connect("127.0.0.1", 6379) do
+        Ok(fd) -> use_redis(fd)
+        Err(e) -> println(Socket.error_message(e))
+      end
+  """
   fn connect(host : String, port : Int) : Result(Int, SocketError) do
     match tcp_connect(host, port) do
     Ok(fd)   -> Ok(fd)
@@ -53,6 +70,11 @@ mod Socket do
   peer never answers (a SYN dropped by a partition gets no RST, so a plain
   `connect` waits out the kernel's SYN retries, a minute or two).
   timeout_ms <= 0 means no bound. A refused connection still fails at once.
+  Every failure, including the timeout, is `Err(ConnectionFailed(msg))`.
+
+  ## Examples
+
+      Socket.connect_timeout("10.0.0.5", 8080, 2000)
   """
   fn connect_timeout(host : String, port : Int, timeout_ms : Int) : Result(Int, SocketError) do
     match tcp_connect_timeout(host, port, timeout_ms) do
@@ -61,7 +83,14 @@ mod Socket do
     end
   end
 
-  doc "Write all bytes of data over fd. Returns Ok(()) or Err(WriteFailed(...))."
+  doc """
+  Write all bytes of data over fd, looping over short writes. Returns
+  `Ok(())` or `Err(WriteFailed(msg))`.
+
+  ## Examples
+
+      Socket.write(fd, "PING\r\n")
+  """
   fn write(fd : Int, data : String) : Result((), SocketError) do
     match tcp_send_all(fd, data) do
     Ok(_)    -> Ok(())
@@ -76,6 +105,16 @@ mod Socket do
   set_recv_timeout and that deadline expires -- the 0 records that the bound
   came from the descriptor rather than from this call, which had none of its
   own.  Otherwise it blocks until the peer sends or the connection closes.
+  `Ok("")` means the peer closed the connection (EOF); other failures are
+  `Err(RecvFailed(msg))`.
+
+  ## Examples
+
+      match Socket.recv(fd, 4096) do
+        Ok("") -> :closed
+        Ok(data) -> handle(data)
+        Err(e) -> println(Socket.error_message(e))
+      end
   """
   fn recv(fd : Int, max_bytes : Int) : Result(String, SocketError) do
     match tcp_recv_chunk(fd, max_bytes) do
@@ -101,6 +140,13 @@ mod Socket do
 
   On a peer that accepts the connection and then sends nothing, this returns
   Err(RecvTimeout(timeout_ms)) rather than blocking.
+
+  ## Examples
+
+      match Socket.recv_timeout(fd, 4096, 1000) do
+        Err(RecvTimeout(_)) -> retry()
+        other -> other
+      end
   """
   fn recv_timeout(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(String, SocketError) do
     match tcp_recv_chunk_timeout(fd, max_bytes, timeout_ms) do
@@ -129,7 +175,13 @@ mod Socket do
   leaves the session unusable.  On timeout, close the connection -- do not
   retry the read.
 
-  Returns Ok(()) once the option is applied.
+  Returns Ok(()) once the option is applied, or
+  `Err(SocketOptionFailed(msg))`.
+
+  ## Examples
+
+      let? _ = Socket.set_recv_timeout(fd, 30000)
+      Tls.connect(fd, ctx, "example.com")
   """
   fn set_recv_timeout(fd : Int, timeout_ms : Int) : Result((), SocketError) do
     match tcp_set_recv_timeout(fd, timeout_ms) do
@@ -148,7 +200,16 @@ mod Socket do
   the calling code say what it means — a reader that treats silence as normal
   and one that treats it as an error should not have to share a spelling.
 
-  `Ok(Some(""))` is a clean EOF, as in `recv`.
+  `Ok(Some(""))` is a clean EOF, as in `recv`. Other failures are
+  `Err(RecvFailed(msg))`.
+
+  ## Examples
+
+      match Socket.recv_deadline(fd, 4096, 250) do
+        Ok(None) -> poll_again()
+        Ok(Some(data)) -> handle(data)
+        Err(e) -> Socket.close(fd)
+      end
   """
   fn recv_deadline(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(Option(String), SocketError) do
     match tcp_recv_timeout(fd, max_bytes, timeout_ms) do
@@ -162,7 +223,18 @@ mod Socket do
     tcp_close(fd)
   end
 
-  doc "Open a connection, run f(fd), then close. fd is always closed."
+  doc """
+  Open a connection, run `f(fd)`, then close the fd and return `f`'s
+  result. `f` must itself return a `Result(a, SocketError)`; a connection
+  failure is `Err(ConnectionFailed(msg))` and `f` is not called. The fd is
+  closed when `f` returns normally, but NOT if `f` panics.
+
+  ## Examples
+
+      Socket.with_connection("example.com", 80, fn fd ->
+        let? _ = Socket.write(fd, "HEAD / HTTP/1.0\r\n\r\n")
+        Socket.recv(fd, 4096))
+  """
   fn with_connection(host : String, port : Int, f) do
     match connect(host, port) do
     Err(e) -> Err(e)

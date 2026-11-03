@@ -27,12 +27,121 @@
 
   (** Raise [ParseError] from an `error` production.  [pos] is the position
       the message is about; [Parse] renders the diagnostic there. *)
+  (* The expression payloads of a declaration's attributes: only
+     `@[decreases(e, ...)]` carries one (termination design §2.1). *)
+  let attr_args_of (attrs : (string * expr list) list) : (string * expr list) list =
+    List.filter (fun (_, args) -> args <> []) attrs
+
   let error_raise ?code ?fix msg hint pos =
     (* The code and fix ride [Errors.parse_error_extra] (see its comment):
        set on EVERY raise so a production without them cannot inherit a
        stale pair from an earlier error. *)
     March_errors.Errors.parse_error_extra := (code, fix);
     raise (March_errors.Errors.ParseError (msg, hint, pos))
+
+  (* `D -> Bool[p]` (the marker [ty_post] puts on `Bool`) is the definer form
+     of an abstract refinement, `({x : D | true}) -> {Bool | _ == p(x)}`
+     (design 2026-09-20 §1).  A domain that already names its binder keeps it;
+     one refined over `_` cannot be referred to, so it is rejected with the
+     fix; a tuple domain is ONE tuple argument, whose parts it cannot relate (a
+     callback of several arguments is the curried chain below).  Anything
+     else — including an explicit `{Bool | p(_)}`, which has no marker — is
+     returned unchanged. *)
+  (* The generated codomain is MARKED with the binder `Some "_"` (multi-arg
+     design 2026-10-18 §9 phase 3), which a user cannot write, so an outer
+     arrow can recognise a definer this function made and extend its chain:
+     `k -> v -> Bool[p]` is `({$x2 : k | true}) -> ({$x : v | true}) -> {Bool |
+     _ == p($x2, $x)}`, the two-argument definer.  The innermost binder stays
+     `$x`, so a one-argument definer's output is what it always was (only the
+     marker is new; every reader treats `Some "_"` as `None`).  An explicit
+     `{Bool | _ == p(x)}` has no marker and is never extended. *)
+  let marked_definer (t : ty) : (name * expr list * span) option =
+    match t with
+    | TyRefine (TyCon ({ txt = "Bool"; _ }, []), Some { txt = "_"; _ },
+                EApp (EVar { txt = "=="; _ }, [ EVar { txt = "_"; _ }; EApp (EVar p, args, sp) ], _)) ->
+      Some (p, args, sp)
+    | _ -> None
+
+  (* The marked definer at the end of a chain this function built: [cod] is
+     `D2 -> … -> Dn -> <marked>` whose `p` is applied to exactly one binder per
+     arrow walked.  Returns `p` and its arguments so far. *)
+  let rec definer_chain (cod : ty) (depth : int) : (name * expr list) option =
+    match cod with
+    | TyArrow (_, c) ->
+      (match marked_definer c with
+       | Some (p, args, _) when List.length args = depth -> Some (p, args)
+       | Some _ -> None
+       | None -> definer_chain c (depth + 1))
+    | _ -> None
+
+  (* [cod] with its innermost definer's `p` applied to [x] first. *)
+  let rec prepend_definer_arg (x : name) (cod : ty) : ty =
+    match cod with
+    | TyArrow (d, c) ->
+      (match c with
+       | TyRefine (b, m, EApp (eq, [ u; EApp (EVar p, args, sp) ], sp2)) when marked_definer c <> None ->
+         TyArrow (d, TyRefine (b, m, EApp (eq, [ u; EApp (EVar p, EVar x :: args, sp) ], sp2)))
+       | _ -> TyArrow (d, prepend_definer_arg x c))
+    | t -> t
+
+  let abstract_definer_arrow (dom : ty) (cod : ty) (pos : Lexing.position) : ty =
+    (* The callback argument [dom] as a definer domain: its binder (the user's,
+       else [synthetic]) and the domain carrying it. *)
+    let bind_domain ?(more = 0) (p : name) (synthetic : string) (sp : span) : name * ty =
+      match dom with
+      | TyTuple [] ->
+        error_raise
+          (Printf.sprintf
+             "`Bool[%s]` defines an abstract refinement from the callback's arguments, and \
+              `()` is no argument to define it over."
+             p.txt)
+          (Some "keep : a -> Bool[p]") pos
+      | TyTuple ts ->
+        (* [cod] prints as the rest of the chain (`Bool[p]`, `v -> Bool[p]`):
+           [show_ty] renders a definer the way it was written. *)
+        let n = List.length ts + more in
+        let part t = match t with TyArrow _ -> "(" ^ show_ty t ^ ")" | t -> show_ty t in
+        error_raise
+          (Printf.sprintf
+             "A tuple domain `%s` is ONE tuple argument, so `Bool[%s]` over it cannot relate \
+              its parts. A callback of %d arguments is curried: write `%s -> %s`."
+             (show_ty dom) p.txt n (String.concat " -> " (List.map part ts)) (show_ty cod))
+          (Some "keep : k -> v -> Bool[p]") pos
+      | TyRefine (_, Some x, _) when x.txt <> "_" -> (x, dom)
+      | TyRefine (_, _, _) ->
+        error_raise
+          "`Bool[p]` needs to name the callback's argument: write the domain as \
+           `{x : T | ...}`."
+          (Some "keep : ({x : Int | x > 0}) -> Bool[p]") pos
+      | d ->
+        let x = { p with txt = synthetic } in
+        (x, TyRefine (d, Some x, ELit (LitBool true, sp)))
+    in
+    match cod with
+    | TyRefine ((TyCon ({ txt = "Bool"; _ }, []) as b), Some { txt = "_"; _ },
+                EApp (EVar p, [ EVar { txt = "_"; _ } ], sp)) ->
+      let x, dom' = bind_domain p "$x" sp in
+      let u = { p with txt = "_" } in
+      TyArrow
+        ( dom'
+        , TyRefine
+            (b, Some u, EApp (EVar { p with txt = "==" }, [ EVar u; EApp (EVar p, [ EVar x ], sp) ], sp)) )
+    | TyArrow _ ->
+      (match definer_chain cod 1 with
+       | Some (p, args) ->
+         let x, dom' =
+           bind_domain ~more:(List.length args) p ("$x" ^ string_of_int (List.length args + 1)) p.span
+         in
+         if List.exists (function EVar y -> y.txt = x.txt | _ -> false) args then
+           error_raise
+             (Printf.sprintf
+                "`Bool[%s]` relates the callback's arguments, so each needs its own name; `%s` \
+                 names two of them."
+                p.txt x.txt)
+             (Some "keep : ({x : Int | x > 0}) -> ({y : Int | y > x}) -> Bool[p]") pos;
+         TyArrow (dom', prepend_definer_arg x cod)
+       | None -> TyArrow (dom, cod))
+    | _ -> TyArrow (dom, cod)
 
   (* A replacement fix over one grammar symbol's extent. *)
   let replace_fix loc text =
@@ -185,14 +294,33 @@
         let ret = def.fn_ret_ty in
         let vis = def.fn_vis in
         let clauses = def.fn_clauses in
-        let rec collect_same ret_acc clauses_acc = function
+        (* A `needs` bound, like a return type, may be written on any one
+           clause; two clauses declaring DIFFERENT bounds is an error rather
+           than a silent pick. *)
+        let merge_needs (a : (name list list * span) option) b =
+          match a, b with
+          | Some (pa, _), Some (pb, sb) ->
+            let paths ps = List.map (List.map (fun (n : name) -> n.txt)) ps in
+            if paths pa <> paths pb then
+              error_raise
+                (Printf.sprintf
+                   "clauses of `%s` declare different `needs` bounds" name)
+                (Some "Write the bound on one clause, or the same bound on each.")
+                { Lexing.pos_fname = sb.file; pos_lnum = sb.start_line;
+                  pos_bol = 0; pos_cnum = sb.start_col };
+            a
+          | Some _, None -> a
+          | None, _ -> b
+        in
+        let rec collect_same ret_acc needs_acc clauses_acc = function
           | DFn (d, _) :: rest' when d.fn_name.txt = name ->
             let r = match ret_acc with Some _ -> ret_acc | None -> d.fn_ret_ty in
-            collect_same r (clauses_acc @ d.fn_clauses) rest'
-          | rest' -> (ret_acc, clauses_acc, rest')
+            collect_same r (merge_needs needs_acc d.fn_needs) (clauses_acc @ d.fn_clauses) rest'
+          | rest' -> (ret_acc, needs_acc, clauses_acc, rest')
         in
-        let (final_ret, all_clauses, rest') = collect_same ret clauses rest in
-        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_attrs = def.fn_attrs; fn_ret_ty = final_ret; fn_clauses = all_clauses; fn_bounds = def.fn_bounds }, span) :: acc) rest'
+        let (final_ret, final_needs, all_clauses, rest') =
+          collect_same ret def.fn_needs clauses rest in
+        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_attrs = def.fn_attrs; fn_ret_ty = final_ret; fn_clauses = all_clauses; fn_bounds = def.fn_bounds; fn_attr_args = def.fn_attr_args; fn_needs = final_needs }, span) :: acc) rest'
       | d :: rest -> go (d :: acc) rest
     in
     let grouped = go [] decls in
@@ -300,7 +428,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT INIT_PAREN PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN AS USE NEEDS ROLE REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC CAP_VERIFIED
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS ROLE REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC CAP_VERIFIED CAP_TOTAL
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE SATISFY FOR IN OPAQUE GETS DSLASH
 %token RESOURCE
 %token APP ON_START ON_STOP
@@ -407,18 +535,38 @@ decl_list_r:
 
 (* ---- Declarations ---- *)
 
+(* An attribute is its name (or `name:value` for a one-identifier payload)
+   plus, for `@[decreases(e, ...)]` only, its expression payload.  The
+   bracketed payload is parsed as an expression list (termination design
+   §2.1): a single bare identifier keeps today's `name:value` string, so
+   `@[no_alloc(warn)]` and friends are unchanged; `decreases` always keeps
+   its expressions (and the plain name `decreases`); any other attribute
+   with a non-identifier payload is a parse error naming it. *)
 fn_attr:
-  | AT; LBRACKET; name = LOWER_IDENT; RBRACKET { name }
-  | AT; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN { name ^ ":" ^ value }
-  | AT; LBRACKET; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN; RBRACKET
-      { name ^ ":" ^ value }
+  | AT; LBRACKET; name = LOWER_IDENT; RBRACKET { (name, []) }
+  | AT; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN { (name ^ ":" ^ value, []) }
+  | AT; LBRACKET; name = LOWER_IDENT; LPAREN; args = separated_nonempty_list(COMMA, expr); RPAREN; RBRACKET
+      { if name = "decreases" then (name, args)
+        else
+          match args with
+          | [ EVar v ] when not (String.contains v.txt '.') -> (name ^ ":" ^ v.txt, [])
+          | _ ->
+            error_raise
+              (Printf.sprintf
+                 "`@[%s(...)]` takes a single name as its argument. Only \
+                  `@[decreases(...)]` takes expressions." name)
+              None $startpos(args) }
   (* `transient` is a KEYWORD (a supervisor restart type), so it never reaches
      the LOWER_IDENT rules above.  @[no_alloc(transient)] is the one attribute
      payload that collides with one; spell it out rather than un-reserving the
      keyword, which would change supervisor child specs. *)
-  | AT; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN { name ^ ":transient" }
+  | AT; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN { (name ^ ":transient", []) }
   | AT; LBRACKET; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN; RBRACKET
-      { name ^ ":transient" }
+      { (name ^ ":transient", []) }
+  (* `opaque` is a KEYWORD too (`opaque type`), so `@[opaque]` (reflection
+     design §2.5: keep a function's body out of the logic) needs its own
+     production, exactly like `transient` above. *)
+  | AT; LBRACKET; OPAQUE; RBRACKET { ("opaque", []) }
 
 decl:
   (* `module Name do` (D4): the token filter mints MODULE_KW for `module`
@@ -471,8 +619,9 @@ decl:
      declaration, and on a documented function that line sits between the
      `doc` and the `fn` — unparseable.  Attribute validation is the same as
      the attributes-only rule below; see it for the payload check. *)
-  | DOC; s = STRING; attrs = nonempty_list(fn_attr); d = fn_decl
-    { List.iter (fun a ->
+  | DOC; s = STRING; attrs_args = nonempty_list(fn_attr); d = fn_decl
+    { let attrs = List.map fst attrs_args in
+      List.iter (fun a ->
           if String.length a > 9 && String.sub a 0 9 = "no_alloc:"
              && a <> "no_alloc:warn" && a <> "no_alloc:assume"
              && a <> "no_alloc:transient" then
@@ -480,12 +629,14 @@ decl:
               (Printf.sprintf
                  "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, `@[no_alloc(transient)]`, and `@[no_alloc(assume)]`."
                  (String.sub a 9 (String.length a - 9)))
-              None $startpos(attrs)) attrs;
+              None $startpos(attrs_args)) attrs;
       match d with
-      | DFn (def, span) -> DFn ({ def with fn_doc = Some s; fn_attrs = attrs }, span)
+      | DFn (def, span) ->
+        DFn ({ def with fn_doc = Some s; fn_attrs = attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
-  | attrs = nonempty_list(fn_attr); d = fn_decl
-    { (* @[no_alloc] takes exactly three payloads; anything else is a typo, not
+  | attrs_args = nonempty_list(fn_attr); d = fn_decl
+    { let attrs = List.map fst attrs_args in
+      (* @[no_alloc] takes exactly three payloads; anything else is a typo, not
          a silently-ignored attribute (see lib/tir/alloc_contract.ml). *)
       List.iter (fun a ->
           if String.length a > 9 && String.sub a 0 9 = "no_alloc:"
@@ -495,12 +646,12 @@ decl:
               (Printf.sprintf
                  "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, `@[no_alloc(transient)]`, and `@[no_alloc(assume)]`."
                  (String.sub a 9 (String.length a - 9)))
-              None $startpos(attrs)) attrs;
+              None $startpos(attrs_args)) attrs;
       match d with
-      | DFn (def, span) -> DFn ({ def with fn_attrs = attrs }, span)
+      | DFn (def, span) -> DFn ({ def with fn_attrs = attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
   | attrs = nonempty_list(fn_attr); d = protocol_decl
-    { (* The one protocol attribute is `@[endpoints]`: generate typed session
+    { let attrs = List.map fst attrs in (* The one protocol attribute is `@[endpoints]`: generate typed session
          endpoints over the `Session` capability for every role
          (lib/desugar/desugar_endpoints.ml).  Anything else is rejected here
          rather than ignored, for the same reason `@[no_alloc]` is checked on
@@ -517,7 +668,7 @@ decl:
         DProtocol (name, { pdef with proto_attrs = attrs }, span)
       | d -> d }
   | attrs = nonempty_list(fn_attr); d = actor_decl
-    { if List.exists (fun a -> a = "no_alloc"
+    { let attrs = List.map fst attrs in if List.exists (fun a -> a = "no_alloc"
                         || (String.length a > 9 && String.sub a 0 9 = "no_alloc:")) attrs then
         error_raise "`@[no_alloc]` only applies to `fn` and `pfn` declarations, not to actors." None $startpos(attrs);
       let compat = List.fold_left (fun acc a ->
@@ -536,7 +687,7 @@ decl:
         DActor (vis, name, { adef with actor_invariant = Some inv }, span)
       | d -> d }
   | AT; INVARIANT; LPAREN; inv = expr; RPAREN; attrs = nonempty_list(fn_attr); d = actor_decl
-    { if List.exists (fun a -> a = "no_alloc"
+    { let attrs = List.map fst attrs in if List.exists (fun a -> a = "no_alloc"
                         || (String.length a > 9 && String.sub a 0 9 = "no_alloc:")) attrs then
         error_raise "`@[no_alloc]` only applies to `fn` and `pfn` declarations, not to actors." None $startpos(attrs);
       let compat = List.fold_left (fun acc a ->
@@ -569,6 +720,7 @@ decl:
   | d = cap_deterministic_decl { d }
   | d = cap_no_alloc_decl      { d }
   | d = cap_verified_decl      { d }
+  | d = cap_total_decl         { d }
   | d = transitions_decl       { d }
   | d = app_decl          { d }
   | d = derive_decl    { d }
@@ -594,7 +746,8 @@ fn_decl_name:
 
 fn_decl:
   | FN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
-    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    ret = option(ret_annot); needs = option(fn_needs_clause); guard = option(when_guard);
+    DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Public;
              fn_doc = None;
@@ -606,12 +759,13 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = [] },
+             fn_bounds = []; fn_attr_args = []; fn_needs = needs },
            mk_span ($loc)) }
   | FN; name = fn_decl_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
     _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
-    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    ret = option(ret_annot); needs = option(fn_needs_clause); guard = option(when_guard);
+    DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Public;
              fn_doc = None;
@@ -623,10 +777,11 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = bounds },
+             fn_bounds = bounds; fn_attr_args = []; fn_needs = needs },
            mk_span ($loc)) }
   | PFN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
-    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    ret = option(ret_annot); needs = option(fn_needs_clause); guard = option(when_guard);
+    DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Private;
              fn_doc = None;
@@ -638,12 +793,13 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = [] },
+             fn_bounds = []; fn_attr_args = []; fn_needs = needs },
            mk_span ($loc)) }
   | PFN; name = fn_decl_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
     _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
-    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    ret = option(ret_annot); needs = option(fn_needs_clause); guard = option(when_guard);
+    DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Private;
              fn_doc = None;
@@ -655,7 +811,7 @@ fn_decl:
                              fc_span = mk_span ($loc);
                              fc_params_span =
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
-             fn_bounds = bounds },
+             fn_bounds = bounds; fn_attr_args = []; fn_needs = needs },
            mk_span ($loc)) }
   | FN; _n = fn_decl_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
     { error_raise
@@ -1208,6 +1364,14 @@ upper_dot_path:
     A scope narrows the capability to that directory subtree; its absence means
     any path.  Only filesystem capabilities accept one — the typechecker
     rejects a scope elsewhere rather than ignoring it. *)
+(** A per-function capability bound in a function header:
+      fn fetch(url) : String needs IO.NetConnect do ... end
+      fn len(s) needs () do ... end
+    Plain capability paths only (no path scope). *)
+fn_needs_clause:
+  | NEEDS; LPAREN; RPAREN { ([], mk_span ($loc)) }
+  | NEEDS; caps = separated_nonempty_list(COMMA, cap_path) { (caps, mk_span ($loc)) }
+
 needs_decl:
   | NEEDS; caps = separated_nonempty_list(COMMA, scoped_cap_path)
     { DNeeds (caps, mk_span ($loc)) }
@@ -1228,8 +1392,9 @@ proof_cap_decl:
     `proof cap Live with SessionOps`.  Absent means the capability stays
     runtime-erased, which is every capability written before this existed.
 
-    KNOWN CONFLICT (verified 2026-08-31: this rule takes the grammar from 10
-    shift/reduce conflicts to 11).  After `PROOFCAP upper_name` with `WITH`
+    KNOWN CONFLICT (verified 2026-08-31: this rule took the grammar from 10
+    shift/reduce conflicts to 11; the total is 7 since 2026-10-08, when the
+    `let?`/`let*` annotation errors stopped parsing a type and 4 others went).  After `PROOFCAP upper_name` with `WITH`
     ahead, menhir cannot decide between reducing the empty `proof_cap_dict`
     and shifting, because the REPL entry point's `repl_sequence` can itself
     BEGIN with `WITH`.  Menhir resolves it by shifting, which is the reading
@@ -1265,6 +1430,12 @@ cap_no_alloc_decl:
 cap_verified_decl:
   | CAP_VERIFIED
     { DOpts (["verified"], mk_span ($loc)) }
+
+(** `cap total` (termination design §4.1, D2, phase 4): every function of the
+    decl list must be shown to terminate; `main` is exempt. *)
+cap_total_decl:
+  | CAP_TOTAL
+    { DOpts (["total"], mk_span ($loc)) }
 
 (** Compiler-enforced state-machine transitions:
     transitions Handle do
@@ -1425,7 +1596,7 @@ ty_eof:
   | t = ty EOF { t }
 
 ty:
-  | t = ty_nat_add ARROW u = ty { TyArrow (t, u) }
+  | t = ty_nat_add ARROW u = ty { abstract_definer_arrow t u $startpos(u) }
   | t = ty_nat_add { t }
 
 ty_nat_add:
@@ -1442,7 +1613,19 @@ ty_app:
   | id = upper_name; DOT; rest = dotted_upper_tail; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
     { let joined = id.txt ^ "." ^ String.concat "." (List.map (fun (n : March_ast.Ast.name) -> n.txt) rest) in
       TyCon (mk_name joined $loc, args) }
+  | t = ty_post { t }
+
+(* `T[p]`: an abstract refinement applied to a type, `{T | p(_)}`.  The binder
+   is the marker `Some "_"`: a user cannot write `{_ : T | …}` (`_` is not a
+   [lower_name]), so the shorthand stays recognisable — [show_ty] prints it
+   back, and an arrow whose codomain is `Bool[p]` reads it as a definer
+   ([abstract_definer_arrow]).  It means exactly `{T | p(_)}`.  Adds no
+   shift/reduce conflict (7 before and after, 2026-10-08). *)
+ty_post:
   | t = ty_atom { t }
+  | t = ty_atom; LBRACKET; p = lower_name; RBRACKET
+    { let u = mk_name "_" $loc in
+      TyRefine (t, Some u, EApp (EVar p, [ EVar u ], mk_span $loc)) }
 
 ty_atom:
   | n = INT { TyNat n }
@@ -1526,13 +1709,16 @@ block_expr:
             mk_span ($loc)) }
   | LET; QUESTION; p = simple_pattern; EQUALS; e = expr
     { ELetQ (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
-  | LET; QUESTION; _p = simple_pattern; ty = type_annot; _e = preceded(EQUALS, expr)?
-    { let _ = ty in
-      error_raise
+  (* Stops at the `:`: the rule exists only to report this error, and parsing
+     the type made it ambiguous with a statement after a bare annotation (4 of
+     the grammar's shift/reduce conflicts, and 2 more once a type may end in
+     `[p]`).  The caret is unchanged: [type_annot] began at this same COLON. *)
+  | LET; QUESTION; _p = simple_pattern; COLON
+    { error_raise
         "A `let?` binding can't have a type annotation — its type is inferred \
          from the `Ok` payload of the `Result` on the right."
         (Some "let? name = result_expr")
-        $startpos(ty) }
+        $startpos($4) }
   | LET; QUESTION; _p = simple_pattern; error
     { error_raise
         "I was expecting `=` in the let? binding here:"
@@ -1540,13 +1726,16 @@ block_expr:
         $startpos($4) }
   | LET; STAR; p = simple_pattern; EQUALS; e = expr
     { ELetStar (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
-  | LET; STAR; _p = simple_pattern; ty = type_annot; _e = preceded(EQUALS, expr)?
-    { let _ = ty in
-      error_raise
+  (* Stops at the `:`: the rule exists only to report this error, and parsing
+     the type made it ambiguous with a statement after a bare annotation (4 of
+     the grammar's shift/reduce conflicts, and 2 more once a type may end in
+     `[p]`).  The caret is unchanged: [type_annot] began at this same COLON. *)
+  | LET; STAR; _p = simple_pattern; COLON
+    { error_raise
         "A `let*` binding can't have a type annotation — its type is \
          inferred from the right-hand side."
         (Some "let* name = expr")
-        $startpos(ty) }
+        $startpos($4) }
   | LET; STAR; _p = simple_pattern; error
     { error_raise
         "I was expecting `=` in the let* binding here:"
@@ -2024,7 +2213,8 @@ pattern:
    an arm separator only ever follows a COMPLETE branch — one that has
    already consumed its ARROW and body — so LR(1) distinguishes the two uses
    without a conflict.  Verified: adding this production leaves menhir's
-   conflict count unchanged at 9. *)
+   conflict count unchanged (it was 9 then; 7 since 2026-10-08, counted with
+   `menhir --explain` on this file). *)
 pattern_no_as:
   | p = pattern_alt; PIPE; ps = separated_nonempty_list(PIPE, pattern_alt)
     { PatOr (p :: ps, mk_span ($loc)) }

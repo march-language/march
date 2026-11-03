@@ -35,7 +35,11 @@ mod DistLink do
     watcher_pid : GlobalPid.Pid
   }
 
-  -- Convert wire reason_tag (0–3) to DownReason.
+  doc """
+  Convert a wire reason tag to a `DownReason`: 0 `Normal`, 1 `Killed`, 2
+  `Crash(msg)`, and any other tag (3, or anything unexpected, negative
+  included) `NodeDown`. [msg] is ignored except for tag 2.
+  """
   fn reason_of_tag(tag : Int, msg : String) : DownReason do
     match tag do
       0 -> Normal
@@ -45,7 +49,9 @@ mod DistLink do
     end
   end
 
-  -- Convert DownReason to wire reason_tag.
+  doc """
+  Convert a `DownReason` to its wire (tag, message) pair; the message is "" except for `Crash(msg)`.
+  """
   fn tag_of_reason(r : DownReason) : (Int, String) do
     match r do
       Normal       -> (0, "")
@@ -57,12 +63,15 @@ mod DistLink do
 
   -- ── Wire encode/decode helpers ────────────────────────────────────────────
 
-  -- Encode a MONITOR_REQ frame to send to the target's node.
+  doc "Encode a MONITOR_REQ frame (tag 7) asking the target's node to watch [target_pid] on behalf of [watcher_pid] at [watcher_node]."
   fn encode_req(watcher_node : String, watcher_pid : Int, target_pid : Int) : List(Int) do
     NetKernel.encode_monitor_req(watcher_node, watcher_pid, target_pid)
   end
 
-  -- Encode a MONITOR_FIRE frame (called by the C runtime when an actor exits).
+  doc """
+  Encode a MONITOR_FIRE frame (tag 8) reporting that [target_pid] exited with
+  [reason]; `resend_pending` uses it to re-send unacked fires.
+  """
   fn encode_fire(target_pid : Int, reason : DownReason) : List(Int) do
     let tag_msg = tag_of_reason(reason)
     let tag = match tag_msg do (t, _) -> t end
@@ -70,7 +79,12 @@ mod DistLink do
     NetKernel.encode_monitor_fire(target_pid, tag, msg)
   end
 
-  -- Decode an inbound MONITOR_FIRE frame into (target_pid, reason).
+  doc """
+  Decode an inbound MONITOR_FIRE frame into (target_pid, reason). Returns
+  `Err` for invalid MessagePack or a frame that is not
+  `[8, target_pid, reason_tag, reason_msg]`; an unknown reason tag decodes as
+  `NodeDown`.
+  """
   fn decode_fire(bytes : List(Int)) : Result((Int, DownReason), String) do
     match NetKernel.decode_monitor_fire(bytes) do
       Err(e) -> Err(e)
@@ -81,15 +95,20 @@ mod DistLink do
     end
   end
 
-  -- MONITOR_ACK (tag 12): the watcher's node has delivered the Down for
-  -- (target_pid, watcher_pid); the firing node forgets the pending fire.
+  doc "The wire tag of a MONITOR_ACK frame (12): the watcher's node has delivered the Down, so the firing node forgets the pending fire."
   fn tag_ack() : Int do 12 end
 
+  doc "Encode a MONITOR_ACK frame `[12, target_pid, watcher_pid]`."
   fn encode_ack(target_pid : Int, watcher_pid : Int) : List(Int) do
     Msgpack.encode(Msgpack.array(
       Cons(Msgpack.int(tag_ack()), Cons(Msgpack.int(target_pid), Cons(Msgpack.int(watcher_pid), Nil)))))
   end
 
+  doc """
+  Decode a MONITOR_ACK frame into (target_pid, watcher_pid). Returns `Err` for
+  invalid MessagePack or any frame that is not exactly
+  `[12, target_pid, watcher_pid]`.
+  """
   fn decode_ack(bytes : List(Int)) : Result((Int, Int), String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -98,11 +117,15 @@ mod DistLink do
     end
   end
 
-  -- At-least-once: resend every fired-but-unacked MONITOR_FIRE to the
-  -- watcher's node's CURRENT control connection (from the peer registry --
-  -- the fd the fire was first written on may be gone). Returns how many
-  -- were resent; entries whose node is not connected wait for the next
-  -- call. Call from a timer or after a reconnect.
+  doc """
+  At-least-once delivery: resend every fired-but-unacked MONITOR_FIRE (from
+  the runtime's pending-fire table) to the watcher node's CURRENT control
+  connection, looked up in [reg], since the fd the fire was first written on
+  may be gone. Returns how many frames were written; entries whose node is
+  not in [reg], or whose write fails, wait for the next call. Entries stay
+  pending until a MONITOR_ACK arrives. Call from a timer or after a
+  reconnect.
+  """
   fn resend_pending(reg : PeerRegistry.Registry) : Int do
     List.fold_left(dist_monitor_pending(), 0, fn (n, entry) ->
       match entry do
@@ -118,7 +141,11 @@ mod DistLink do
       end)
   end
 
-  -- Decode an inbound MONITOR_REQ frame.
+  doc """
+  Decode an inbound MONITOR_REQ frame into (watcher_node, watcher_pid,
+  target_pid). Returns `Err` for invalid MessagePack or a frame that is not
+  `[7, watcher_node, watcher_pid, target_pid]`.
+  """
   fn decode_req(bytes : List(Int)) : Result((String, Int, Int), String) do
     NetKernel.decode_monitor_req(bytes)
   end
@@ -129,12 +156,14 @@ mod DistLink do
 
   type MonitorTable = MonitorTable(Map(Int, PendingMonitor))
 
+  doc "An empty pending-monitor table."
   fn empty_table() : MonitorTable do MonitorTable(Map.empty()) end
 
   pfn ref_key(ref : MonitorRef) : Int do
     match ref do MonitorRef(n) -> n end
   end
 
+  doc "Add [m] to the table keyed by its monitor ref, replacing any entry with the same ref."
   fn insert_monitor(tbl : MonitorTable, m : PendingMonitor) : MonitorTable do
     match tbl do
       MonitorTable(mp) ->
@@ -142,6 +171,7 @@ mod DistLink do
     end
   end
 
+  doc "Remove the entry for [ref]; the table is unchanged if it has none."
   fn remove_monitor(tbl : MonitorTable, ref : MonitorRef) : MonitorTable do
     match tbl do
       MonitorTable(mp) ->
@@ -149,7 +179,12 @@ mod DistLink do
     end
   end
 
-  -- Find a monitor entry by target_pid (for matching MONITOR_FIRE).
+  doc """
+  The first monitor whose `target_pid` is [target_pid], or `None`. O(n) scan.
+  When several monitors (several watchers, or the same pid number on
+  different nodes) match, which one is returned is unspecified: the target
+  node is not compared.
+  """
   fn find_by_target_pid(tbl : MonitorTable, target_pid : Int) : Option(PendingMonitor) do
     match tbl do
       MonitorTable(mp) ->
@@ -161,7 +196,7 @@ mod DistLink do
     end
   end
 
-  -- All monitors whose target is on node_id (for NodeDown sweep).
+  doc "Every monitor whose target lives on [node_id], in unspecified order; used for the NodeDown sweep when that peer disconnects. O(n)."
   fn monitors_on_node(tbl : MonitorTable, node_id : String) : List(PendingMonitor) do
     match tbl do
       MonitorTable(mp) ->
@@ -172,8 +207,7 @@ mod DistLink do
     end
   end
 
-  -- Factory: construct a PendingMonitor. Keeps record construction inside the
-  -- module so callers don't hit the bare-vs-qualified type name mismatch.
+  doc "Construct a `PendingMonitor`. Keeps record construction inside the module so callers avoid the bare-vs-qualified type name mismatch."
   fn make_monitor(ref : MonitorRef, target_node : String, target_pid : Int,
                   watcher_pid : GlobalPid.Pid) : PendingMonitor do
     { ref: ref, target_node: target_node, target_pid: target_pid,
@@ -204,9 +238,11 @@ mod DistLink do
 
   -- ── Down message helpers ──────────────────────────────────────────────────
 
-  -- Compute the Down message tuple a watcher should receive.
-  -- In the full runtime, this is delivered to watcher_pid's mailbox via send.
-  -- (actor_call / message-passing is not eval-testable; that's the runtime glue.)
+  doc """
+  The `(ref, target_pid, reason)` Down tuple a watcher should receive for
+  monitor [m]. Delivering it to the watcher's mailbox is the runtime glue's
+  job.
+  """
   fn down_msg(m : PendingMonitor, reason : DownReason) : (MonitorRef, Int, DownReason) do
     (m.ref, m.target_pid, reason)
   end

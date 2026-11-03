@@ -1,0 +1,4 @@
+skip	user	b1_two_arg_measure.march:10:5	unreflectable-subject	postcondition	law	len(cat(xs, ys)) == len(xs) + len(ys)
+reflect	b1_two_arg_measure.march:3:5	cat	reflected	unfold
+reflect	b1_two_arg_measure.march:10:5	law	no	R8:returns Unit (b1_two_arg_measure.march:10:5)
+reflect	b1_two_arg_measure.march:14:5	main	no	R1:is `main` (b1_two_arg_measure.march:14:5)

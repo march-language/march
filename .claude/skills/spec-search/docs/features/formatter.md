@@ -62,7 +62,7 @@ end
 ## Formatting Rules
 
 - `do ... end` blocks are indented 2 spaces
-- Match arms: `| Pat -> body` — one arm per line, indented to align with `|`
+- Match arms: `| Pat -> body`, one arm per line, indented to align with `|`
 - Function definitions: signature on one line when it fits; body indented
 - Pipes `|>` kept at start of continuation line
 - Trailing whitespace removed; single trailing newline

@@ -69,6 +69,20 @@ static void esc_url_component(sink *s, const char *src, size_t len) {
     }
 }
 
+/* ── URL path ──────────────────────────────────────────────────────────────
+ * A component, except that a value of nothing but dots is a dot segment once
+ * it fills a path segment, and percent-encoding cannot stop that (`%2e` is
+ * `.` to the URL parser). Replaced with an inert token instead. Query and
+ * fragment holes keep the plain component escaper. Mirrors Escape.url_path in
+ * lib/ctxesc/escape.ml. */
+static void esc_url_path(sink *s, const char *src, size_t len) {
+    int all_dots = len > 0;
+    for (size_t i = 0; i < len && all_dots; i++)
+        if (src[i] != '.') all_dots = 0;
+    if (all_dots) { put_str(s, MARCH_URL_DOT_SEGMENT_REPLACEMENT); return; }
+    esc_url_component(s, src, len);
+}
+
 /* ── Whole URL ─────────────────────────────────────────────────────────────
  * A hole at the start of a url attribute IS the whole URL, so the value can
  * choose its own scheme. Only an allowlist is safe here: `javascript:` and
@@ -365,6 +379,7 @@ size_t march_ctx_escape(int escaper_id, const char *src, size_t len, char *out) 
     case MARCH_ESC_CSS_URL:       esc_css_url(&s, src, len); break;
     case MARCH_ESC_JS_STRING:     esc_js_string(&s, src, len); break;
     case MARCH_ESC_JS_EXPR:       esc_js_expr(&s, src, len); break;
+    case MARCH_ESC_URL_PATH:      esc_url_path(&s, src, len); break;
     case MARCH_ESC_NONE:          put(&s, src, len); break;
     default:
         /* An id the runtime does not know means the emitter and the runtime

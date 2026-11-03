@@ -1,0 +1,7 @@
+; A7 query interface (specs/plans/incremental-codegen-cas-plan.md §12):
+; `march query <sub> ...` answers questions about one compile from the
+; pipeline's own state.  The driver (bin/main.ml) feeds it; this library holds
+; the requests, the snapshot collector, the cache-key record and the answers.
+(library
+ (name march_query)
+ (libraries march_tir march_cas march_ast yojson unix))

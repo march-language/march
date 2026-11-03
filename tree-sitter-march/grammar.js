@@ -107,9 +107,10 @@ module.exports = grammar({
       $.setup_all_decl,
     ),
 
-    // @[name], @[name(arg)], @name(arg), @invariant(expr)
+    // @[name], @[name(arg)], @name(arg), @invariant(expr), @[opaque]
+    // (`opaque` is a keyword, so it is spelled out beside the identifier).
     attribute: $ => seq('@', choice(
-      seq('[', $.identifier, optional(seq('(', commaSep($._expr), ')')), ']'),
+      seq('[', choice($.identifier, 'opaque'), optional(seq('(', commaSep($._expr), ')')), ']'),
       seq($.identifier, '(', commaSep($._expr), ')'),
     )),
 
@@ -165,9 +166,13 @@ module.exports = grammar({
       optional(seq('[', commaSep1(seq($.identifier, ':', $._type)), ']')),
       '(', optional(commaSep($.fn_param)), ')',
       optional(seq(':', field('return_type', $._type))),
+      optional($.fn_needs),
       optional($.when_guard),
       'do', field('body', $.block_body), 'end',
     ),
+
+    // Per-function capability bound: `needs IO.Console`, or `needs ()`.
+    fn_needs: $ => seq('needs', choice(seq('(', ')'), commaSep1($.module_path))),
 
     fn_param: $ => choice(
       $.named_param,
@@ -301,7 +306,15 @@ module.exports = grammar({
       $.linear_type,
       $.tuple_type,
       $.refinement_type,
+      $.abstract_refinement_type,
     ),
+
+    // `a[p]`, `Bool[p]`: an abstract refinement applied to a type
+    // (parser.mly `ty_post`).
+    abstract_refinement_type: $ => prec(2, seq(
+      field('base', choice($.type_variable, $.type_constructor, $.type_application, $.qualified_type)),
+      '[', field('predicate', $.identifier), ']',
+    )),
 
     // { Int | _ > 0 }, { List(a) | len(_) > 0 }, { v : Int | v != 0 }
     refinement_type: $ => seq(
@@ -537,7 +550,7 @@ module.exports = grammar({
       seq('proof', 'cap', field('name', $.type_identifier),
           optional(seq('with', field('dictionary', $.type_identifier)))),
       seq('cap', field('name', choice(
-        'no_panic', 'pure', 'no_extern', 'deterministic', 'no_alloc', 'verified',
+        'no_panic', 'pure', 'no_extern', 'deterministic', 'no_alloc', 'verified', 'total',
       ))),
     ),
 

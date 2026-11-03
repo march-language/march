@@ -1,0 +1,22 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_22.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+5 |     n + s
+            ^
+
+    This is argument #2 of a function call.
+
+    the expected type comes from here:
+
+5 |     n + s
+        ^^^^^
+
+    `s` was bound here as `String`:
+
+4 |     let s = "hello"
+            ^
+    run `march --explain type_mismatch`
+
+

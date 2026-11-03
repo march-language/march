@@ -108,6 +108,7 @@ let all_stdlib_decls =
     "http_client.march";
     "seq.march";
     "path.march";
+    "uri.march";
     "file.march";
     "dir.march";
     "sort.march";
@@ -148,6 +149,8 @@ let all_stdlib_decls =
     "html.march";
     "sigil.march";
     "crypto.march";
+    "ml_kem.march";
+    "ml_dsa.march";
     "deque.march";
     "ordered_map.march";
     "sorted_set.march";
@@ -197,6 +200,11 @@ let all_stdlib_decls =
        test_native_array_send.march (Part C, Phase C1). *)
     "native_array.march";
     "task.march";
+    "shell_render.march";
+    (* For test_range.march; Range defines no constructors. *)
+    "range.march";
+    (* For test_duration.march; its one constructor, Duration, is unique. *)
+    "duration.march";
     (* Loaded last: datetime.march's Date/Time/Tz constructors must not steal
        bare-name lookups from modules loaded before it. *)
     "datetime.march";
@@ -494,6 +502,10 @@ let () =
       Alcotest.test_case "DateTime module"
         `Quick (run_stdlib_test "test_datetime.march" "TestDateTime");
     ]);
+    ("int_floor", [
+      Alcotest.test_case "int_div_floor / int_mod_floor"
+        `Quick (run_stdlib_test "test_int_floor.march" "TestIntFloor");
+    ]);
     ("hash_map", [
       Alcotest.test_case "HashMap module"
         `Quick (run_stdlib_test "test_hash_map.march" "TestHashMap");
@@ -518,6 +530,10 @@ let () =
       Alcotest.test_case "Json module"
         `Quick (run_stdlib_test "test_json.march" "TestJson");
     ]);
+    ("shell_render", [
+      Alcotest.test_case "ShellRender module"
+        `Quick (run_stdlib_test "test_shell_render.march" "TestShellRender");
+    ]);
     ("json_stream", [
       Alcotest.test_case "JsonStream module"
         `Quick (run_stdlib_test "test_json_stream.march" "TestJsonStream");
@@ -525,6 +541,10 @@ let () =
     ("json_typed", [
       Alcotest.test_case "derive Json x JsonStream typed decoding"
         `Quick (run_stdlib_test "test_json_typed.march" "TestJsonTyped");
+    ]);
+    ("json_collision", [
+      Alcotest.test_case "derive Json on same-short-name types in two modules"
+        `Quick (run_stdlib_test "test_json_collision.march" "TestJsonCollision");
     ]);
     ("msgpack", [
       Alcotest.test_case "Msgpack module"
@@ -587,6 +607,10 @@ let () =
     ("node_identity", [
       Alcotest.test_case "NodeIdentity module"
         `Quick (run_stdlib_test "test_node_identity.march" "TestNodeIdentity");
+    ]);
+    ("pqc", [
+      Alcotest.test_case "MlKem / MlDsa + mlkem768_*/mldsa65_* builtins"
+        `Quick (run_stdlib_test "test_pqc.march" "TestPqc");
     ]);
     ("cluster", [
       Alcotest.test_case "Cluster module"
@@ -694,6 +718,14 @@ let () =
       Alcotest.test_case "List module"
         `Quick (run_stdlib_test "test_list.march" "TestList");
     ]);
+    ("range", [
+      Alcotest.test_case "Range module"
+        `Quick (run_stdlib_test "test_range.march" "TestRange");
+    ]);
+    ("duration", [
+      Alcotest.test_case "Duration module"
+        `Quick (run_stdlib_test "test_duration.march" "TestDuration");
+    ]);
     ("work_dispatch", [
       Alcotest.test_case "WorkDispatch module"
         `Quick (run_stdlib_test "test_work_dispatch.march" "TestWorkDispatch");
@@ -725,5 +757,9 @@ let () =
     ("crypto_builtins", [
       Alcotest.test_case "bare sha256 builtin returns a hex String"
         `Quick (run_stdlib_test "test_crypto_builtins.march" "TestCryptoBuiltins");
+    ]);
+    ("uri", [
+      Alcotest.test_case "Uri module: RFC 3986 parse, merge, merge_strict"
+        `Quick (run_stdlib_test "test_uri.march" "TestUri");
     ]);
   ]

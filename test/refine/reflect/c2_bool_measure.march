@@ -1,0 +1,17 @@
+mod C2 do
+  @[measure]
+  fn all_pos(xs : List(Int)) : Bool do
+    match xs do
+      Nil -> true
+      Cons(h, t) -> h > 0 && all_pos(t)
+    end
+  end
+
+  fn need(xs : {List(Int) | all_pos(_)}) : Int do 0 end
+
+  fn main() : Unit do
+    let _ = need(Cons(1, Cons(2, Nil)))
+    let _ = need(Cons(1, Cons(0 - 2, Nil)))
+    ()
+  end
+end

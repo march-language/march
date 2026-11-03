@@ -1,0 +1,27 @@
+-- Element refinements, domain facts for a multi-parameter lambda (2026-10-18,
+-- design specs/2026-10-18-element-flow-followups-design.md phase 1): every
+-- parameter of `fn (x, y) -> ...` assumes the element fact of its own
+-- position in the callee's `a -> b -> c` (`x` gets `xs`'s `_ > 0`, `y`
+-- `ys`'s), and `sort_by`'s `a -> a -> Bool` gives both parameters `a`'s.
+-- Before, only a one-parameter lambda got a fact, and every demand below was
+-- a skip, so `cap verified` rejected this module.  Under `cap verified`,
+-- exit 0 means every demand PROVED.  Reject twins: reject/t341 (a fold's
+-- accumulator gets nothing) and reject/t342 (a fact naming a sibling
+-- parameter is not given).
+mod MultiParamDomainFacts do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn zipped(xs : List({Int | _ > 0}), ys : List({Int | _ > 0})) : Int do
+    sum_pos(List.zip_with(xs, ys, fn (x, y) -> x + y))
+  end
+  fn checked(xs : List({Int | _ > 0}), ys : List({Int | _ > 0})) : List(Int) do
+    List.zip_with(xs, ys, fn (x, y) -> need_pos(x) + need_pos(y))
+  end
+  fn folded(xs : List({Int | _ > 0})) : Int do
+    List.fold_left(xs, 0, fn (acc, x) -> acc + need_pos(x))
+  end
+  fn sorted(xs : List({Int | _ > 0})) : List({Int | _ > 0}) do
+    List.sort_by(xs, fn (a, b) -> need_pos(a) < need_pos(b))
+  end
+end

@@ -51,6 +51,22 @@ let url_component s =
     s;
   Buffer.contents b
 
+(* A path hole: a component, except that a value of nothing but dots is a
+   DOT SEGMENT once it fills a segment (`/users/${id}/edit` with id = `..`
+   resolves to `/edit`). Percent-encoding cannot help -- the URL parser reads
+   `%2e` as `.` when it removes dot segments -- so the value is replaced with
+   an inert token. Mirrors esc_url_path in runtime/march_ctx_escape.c.
+
+   [url_component] leaves `.` alone and encodes every other non-unreserved
+   byte, so its output is all dots exactly when the input is. *)
+let url_dot_segment_replacement = "zSoyz"
+
+let url_path s =
+  let e = url_component s in
+  if e <> "" && String.for_all (fun c -> c = '.') e then
+    url_dot_segment_replacement
+  else e
+
 (* Allowlist, not a javascript: denylist. Browsers strip leading whitespace and
    C0 control bytes before parsing a URL and ignore them INSIDE a scheme, so
    `  javascript:` and `java\tscript:` both defeat a prefix check — the scheme
@@ -264,13 +280,14 @@ let apply (e : C.escaper) s =
   | C.EscCssUrl -> css_url s
   | C.EscJsString -> js_string s
   | C.EscJsExpr -> js_expr s
+  | C.EscUrlPath -> url_path s
   | C.EscNone -> s
 
 let apply_id id s =
   match List.find_opt (fun e -> C.escaper_id e = id)
           [ C.EscHtml; C.EscAttr; C.EscUrlComponent; C.EscUrlWhole;
             C.EscCssValue; C.EscJsString; C.EscNone; C.EscCssDecl;
-            C.EscCssUrl; C.EscJsExpr ] with
+            C.EscCssUrl; C.EscJsExpr; C.EscUrlPath ] with
   | Some e -> apply e s
   | None ->
     invalid_arg

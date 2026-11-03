@@ -345,8 +345,10 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
   Hashtbl.clear ctx.Llvm_ctx.local_names;
   Hashtbl.clear ctx.Llvm_ctx.var_slot;
   Hashtbl.clear ctx.Llvm_ctx.var_llvm_ty;
+  Hashtbl.clear ctx.Llvm_ctx.let_alias;
   ctx.Llvm_ctx.ret_ty <- fn.Tir.fn_ret_ty;
   ctx.Llvm_ctx.cur_emit_fn <- fn.Tir.fn_name;
+  ctx.Llvm_ctx.owned_closure <- None;
   ctx.Llvm_ctx.hr_cur_module <- Llvm_ctx.module_of_name fn.Tir.fn_name;
   let fn_llvm_name = Llvm_builtins.mangle_extern fn.Tir.fn_name in
   (* Closure apply wrappers use the generic ptr ABI (see [is_apply_fn]) so a
@@ -419,6 +421,7 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
     if ctx.Llvm_ctx.compile_so
        && not (Hot_reload.is_slot_actor_dispatch fname)
        && not (Tir_names.is_migrate_fn_name fname)
+       && not (String.ends_with ~suffix:Tir_names.actor_on_stop_suffix fname)
        && Hot_reload.Name_table.id_of ctx.Llvm_ctx.hr_names fname = None
     then "hidden "
     else ""
@@ -427,6 +430,23 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
     if !debug_info && not ctx.Llvm_ctx.repl then dbg_define_suffix fn fn_llvm_name else "" in
   Buffer.add_string ctx.Llvm_ctx.buf
     (Printf.sprintf "\ndefine %s%s @%s(%s)%s {\nentry:\n" vis_prefix ret_ty fn_llvm_name params_str dbg_suffix);
+
+  (* A closure may escape into work at a newer epoch, including a C callback.
+     Capture routing before the body can release its environment. *)
+  let closure_frame = is_apply_wrapper && ctx.Llvm_ctx.hr_config <> None in
+  if closure_frame then begin
+    match fn.Tir.fn_params with
+    | clo :: _ ->
+      Llvm_ctx.emit ctx (Printf.sprintf "call void @march_clo_frame_enter(ptr %%%s.arg)"
+        (Llvm_ctx.llvm_name clo.Tir.v_name));
+      ctx.Llvm_ctx.owned_closure <- Some clo.Tir.v_name;
+      Llvm_ctx.emit ctx (Printf.sprintf "call void @march_frame_own_closure(ptr %%%s.arg)"
+        (Llvm_ctx.llvm_name clo.Tir.v_name))
+    | [] -> failwith "closure apply function has no environment"
+  end;
+  let leave_closure_frame () =
+    if closure_frame then Llvm_ctx.emit ctx "call void @march_frame_leave()"
+  in
 
   (* Alloca + store for each parameter; collect slot info for TCO. *)
   let native_vec_idxs = native_vec_param_idxs fn in
@@ -588,10 +608,13 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
     ctx.Llvm_ctx.tco_dup_bound <- [];
     if ret_ty = "void" then begin
       Llvm_tco.emit_defer_drain ctx;
+      leave_closure_frame ();
       Llvm_ctx.emit_term ctx "ret void"
     end else begin
       let final_val = Llvm_ctx.coerce ctx body_ty body_val ret_ty in
       Llvm_tco.emit_defer_drain ctx;
+      if ret_ty = "ptr" then Llvm_ctx.disown_closure_value ctx final_val;
+      leave_closure_frame ();
       Llvm_ctx.emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
     end;
     ctx.Llvm_ctx.tco_defer_slot <- ""
@@ -605,14 +628,18 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
     ctx.Llvm_ctx.norm_ret_pos <- true;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
     ctx.Llvm_ctx.norm_ret_pos <- false;
-    if ret_ty = "void" then
+    if ret_ty = "void" then begin
+      leave_closure_frame ();
       Llvm_ctx.emit_term ctx "ret void"
-    else begin
+    end else begin
       let final_val = Llvm_ctx.coerce ctx body_ty body_val ret_ty in
+      if ret_ty = "ptr" then Llvm_ctx.disown_closure_value ctx final_val;
+      leave_closure_frame ();
       Llvm_ctx.emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
     end
   end;
 
+  ctx.Llvm_ctx.owned_closure <- None;
   Buffer.add_string ctx.Llvm_ctx.buf "}\n"
 
 (** Return the LLVM `declare` string for a function, for use as a forward
@@ -683,8 +710,18 @@ let buffer_contains (b : Buffer.t) (needle : string) : bool =
     body is routinely inlined into its caller, so the wrapper vanishes while the
     call to @march_atom_to_string remains.  Scanning the emitted IR is the
     ground truth.  The `not already-defined` guard makes a second call on the
-    same ctx a no-op (can't double-define the symbol or its globals). *)
-let emit_atom_show_table ctx =
+    same ctx a no-op (can't double-define the symbol or its globals).
+
+    [~jit] (every JIT/REPL emitter in llvm_repl.ml) changes two things.  A
+    JIT program is split across modules: `show(:zz)` in the program fragment
+    calls the precompiled stdlib prelude's Show$Atom.show, i.e. the PRELUDE's
+    table, which never saw :zz.  So a JIT module (1) emits its table whenever
+    it has atoms of its own, even with no call site, so the runtime registry
+    learns them, and (2) asks that registry (march_atom_name_registered,
+    march_runtime.c) for a hash its own table lacks before answering
+    ":<atom>".  The registry calls each module's pure lookup, never this
+    function, so the fallback cannot recurse. *)
+let emit_atom_show_table ?(jit = false) ctx =
   let in_module s =
     buffer_contains ctx.Llvm_ctx.buf s
     || buffer_contains ctx.Llvm_ctx.extra_fns s
@@ -697,6 +734,8 @@ let emit_atom_show_table ctx =
     in_module "call ptr @march_atom_to_string"
     || in_module "call ptr @march_logger_dispatch("
     || in_module "call ptr @march_logger_get_context("
+    || (jit && ctx.Llvm_ctx.shape_meta
+        && Hashtbl.length ctx.Llvm_ctx.atom_names > 0)
   in
   let already_defined =
     buffer_contains ctx.Llvm_ctx.extra_fns "define internal ptr @march_atom_to_string"
@@ -753,6 +792,27 @@ let emit_atom_show_table ctx =
        first @march_atom_to_string the dynamic linker found (an earlier
        fragment's, or the runtime's since-removed weak NULL stub) and showed
        "null" for `show(:ok)`. *)
+    if jit && ctx.Llvm_ctx.shape_meta then
+      Buffer.add_string b
+        "declare ptr @march_atom_name_registered(i64)\n\
+         define internal ptr @march_atom_to_string(i64 %h) {\n\
+         entry:\n\
+        \  %s = call ptr @march_atom_name_or_null(i64 %h)\n\
+        \  %known = icmp ne ptr %s, null\n\
+        \  br i1 %known, label %atom_known, label %atom_other\n\
+         atom_known:\n\
+        \  ret ptr %s\n\
+         atom_other:\n\
+        \  %r = call ptr @march_atom_name_registered(i64 %h)\n\
+        \  %rknown = icmp ne ptr %r, null\n\
+        \  br i1 %rknown, label %atom_reg, label %atom_unknown\n\
+         atom_reg:\n\
+        \  ret ptr %r\n\
+         atom_unknown:\n\
+        \  %u = call ptr @march_string_lit(ptr @.atomname_unknown, i64 7)\n\
+        \  ret ptr %u\n\
+         }\n"
+    else
     Buffer.add_string b
       "define internal ptr @march_atom_to_string(i64 %h) {\n\
        entry:\n\
@@ -791,24 +851,16 @@ let emit_atom_show_table ctx =
          [{ i32, ptr, ptr } { i32 65535, ptr @march_atom_namer_unregister, ptr null }]\n"
   end
 
-(** [define internal void @march_clo_drops_register()]: hands the runtime
-    every (apply function, capture-release function) pair of this program, so
-    a closure released without being called releases its captures
-    ([march_clo_release], specs/progress/2026-10-05-dropped-closure-captures.md).
-    The pairs come from the FINAL module's closure allocations -- field 0 of a
-    [$Clo_*] allocation is the apply function the cell will carry -- so a
-    pair exists only for a closure type [Drop.run] gave a release function
-    (its environment owns its captures) and that is still allocated.  An
-    apply function seen with two closure types (none should be) is left out:
-    a wrong layout is worse than a leak.  main's prologue calls it once,
-    before the scheduler starts.  An actor allocation registers the same way:
-    field 0 is the dispatch function's closure value, whose trampoline is
-    paired with the actor's state release ([Drop.run]'s [$actordrop$]), which
-    the actor's thread runs as it exits. *)
-let clo_drop_registration (m : Tir.tir_module) : string =
+(** Every (registry key, release function) pair [m]'s closure and actor
+    allocations ask for, in walk order: a [$Clo_*] or actor allocation whose
+    apply function [m] defines, whether or not [m] defines the release
+    function too.  [clo_drop_registration] keeps the pairs whose release is
+    defined; a REPL/shell fragment, which prunes unreachable functions after
+    [Drop.run], keeps the releases named here alive (lib/jit/repl_jit.ml). *)
+let closure_drop_wants (m : Tir.tir_module) : (string * string) list =
   let defined = Hashtbl.create 1024 in
   List.iter (fun (fn : Tir.fn_def) -> Hashtbl.replace defined fn.Tir.fn_name ()) m.Tir.tm_fns;
-  let pairs : (string, string option) Hashtbl.t = Hashtbl.create 64 in
+  let acc = ref [] in
   let note clo atoms =
     match atoms with
     | Tir.AVar f :: _ when Tir_names.is_clo_struct clo
@@ -823,11 +875,7 @@ let clo_drop_registration (m : Tir.tir_module) : string =
         else
           (Llvm_builtins.mangle_extern f.Tir.v_name ^ "$clo_wrap",
            Tir_names.actor_drop_fn_name clo) in
-      if Hashtbl.mem defined f.Tir.v_name && Hashtbl.mem defined drop then
-        (match Hashtbl.find_opt pairs key with
-         | None -> Hashtbl.replace pairs key (Some drop)
-         | Some (Some d) when d = drop -> ()
-         | Some _ -> Hashtbl.replace pairs key None)
+      if Hashtbl.mem defined f.Tir.v_name then acc := (key, drop) :: !acc
     | _ -> ()
   in
   let rec walk (e : Tir.expr) =
@@ -843,14 +891,61 @@ let clo_drop_registration (m : Tir.tir_module) : string =
     | _ -> ()
   in
   List.iter (fun (fn : Tir.fn_def) -> walk fn.Tir.fn_body) m.Tir.tm_fns;
+  List.rev !acc
+
+(** [define internal void @march_clo_drops_register()]: hands the runtime
+    every (apply function, capture-release function) pair of this program, so
+    a closure released without being called releases its captures
+    ([march_clo_release], specs/progress/2026-10-05-dropped-closure-captures.md).
+    The pairs come from the FINAL module's closure allocations -- field 0 of a
+    [$Clo_*] allocation is the apply function the cell will carry -- so a
+    pair exists only for a closure type [Drop.run] gave a release function
+    (its environment owns its captures) and that is still allocated.  An
+    apply function seen with two closure types (none should be) is left out:
+    a wrong layout is worse than a leak.  main's prologue calls it once,
+    before the scheduler starts.  An actor allocation registers the same way:
+    field 0 is the dispatch function's closure value, whose trampoline is
+    paired with the actor's state release ([Drop.run]'s [$actordrop$]), which
+    the actor's thread runs as it exits. *)
+let clo_drop_registration ?(rec_drops : (string * string * string) list = [])
+    (m : Tir.tir_module) : string =
+  let defined = Hashtbl.create 1024 in
+  List.iter (fun (fn : Tir.fn_def) -> Hashtbl.replace defined fn.Tir.fn_name ()) m.Tir.tm_fns;
+  let pairs : (string, string option) Hashtbl.t = Hashtbl.create 64 in
+  List.iter (fun (key, drop) ->
+      if Hashtbl.mem defined drop then
+        (match Hashtbl.find_opt pairs key with
+         | None -> Hashtbl.replace pairs key (Some drop)
+         | Some (Some d) when d = drop -> ()
+         | Some _ -> Hashtbl.replace pairs key None))
+    (closure_drop_wants m);
   let entries =
     Hashtbl.fold (fun apply d acc ->
         match d with Some drop -> (apply, drop) :: acc | None -> acc) pairs []
     |> List.sort compare
   in
   let n = List.length entries in
+  (* Record deep drops, one per shape tagged with one
+     ([Llvm_data.shape_drop_registrations]): (descriptor, id cache, drop), so
+     the runtime interns the shape and attaches the drop to it
+     (specs/progress/2026-10-12-erased-record-shallow-release.md). *)
+  let rec_drops = List.filter (fun (_, _, d) -> Hashtbl.mem defined d) rec_drops in
+  let nr = List.length rec_drops in
+  let rec_decl, rec_call =
+    if nr = 0 then ("", "")
+    else
+      let elems = String.concat ", " (List.concat_map (fun (dg, cg, drop) ->
+          [ "ptr " ^ dg; "ptr " ^ cg;
+            "ptr @" ^ Llvm_builtins.mangle_extern drop ]) rec_drops) in
+      (Printf.sprintf
+         "@march_rec_drop_triples = private constant [%d x ptr] [%s]\n\
+          declare void @march_record_register_drops(ptr, i64)\n" (3 * nr) elems,
+       Printf.sprintf
+         "  call void @march_record_register_drops(ptr @march_rec_drop_triples, i64 %d)\n" nr)
+  in
   if n = 0 then
-    "\ndefine internal void @march_clo_drops_register() {\nentry:\n  ret void\n}\n"
+    Printf.sprintf "\n%sdefine internal void @march_clo_drops_register() {\nentry:\n%s  ret void\n}\n"
+      rec_decl rec_call
   else
     let elems = String.concat ", " (List.concat_map (fun (apply, drop) ->
         [ "ptr @" ^ apply;
@@ -858,9 +953,11 @@ let clo_drop_registration (m : Tir.tir_module) : string =
     Printf.sprintf
       "\n@march_clo_drop_pairs = private constant [%d x ptr] [%s]\n\
        declare void @march_clo_register_drops(ptr, i64)\n\
+       %s\
        define internal void @march_clo_drops_register() {\nentry:\n\
       \  call void @march_clo_register_drops(ptr @march_clo_drop_pairs, i64 %d)\n\
-      \  ret void\n}\n" (2 * n) elems n
+       %s\
+      \  ret void\n}\n" (2 * n) elems rec_decl n rec_call
 
 (* emit_mutual_tco_group moved to [Llvm_tco] (Wave 3 Task 6, chunk 2).
    Its single call site (emit_module, below) passes emit_expr as a labeled
@@ -1205,20 +1302,236 @@ let build_ctor_info ctx (m : Tir.tir_module) =
         { Llvm_ctx.ce_tag = 0; ce_fields = field_tys; ce_type_id = 0 }
   ) m.Tir.tm_types
 
+(** TIR verifier check 4 (representation invariants), at emission: the
+    decisions codegen COMMITTED to, read back from the repr audit table and
+    [ctx.ctor_info] after the module is emitted (see the {1 Check 4} section
+    of {!Tir_verify}).  Returns [(type, message)] findings.
+
+    - A type's recorded encodings do not mix families (Boxed / Niche /
+      Newtype / Unboxed) for one payload, or through a site that had no
+      payload to go on: the MARCH_REPR_AUDIT conditions, now failures.
+    - A type in a collision group (one short name, several declaring
+      modules) is Boxed at every site: [Kind.repr_of] forces it, so a niche or
+      unboxed encoding means a site decided without the kind table.
+    - Its constructors carry tags from the collision range, and no two
+      constructors in the group share one: a match on the bare short name
+      tells the declaring modules apart only by tag. *)
+let repr_finding msg = "[llvm-emit] repr/" ^ msg
+
+(** Check 4a: the repr audit's flagged types ({!Llvm_ctx.repr_audit_flagged}). *)
+let repr_mix_findings flagged : (string * string) list =
+  List.map (fun (ty, families, kind, es) ->
+      (ty, repr_finding (Printf.sprintf "mixed: `%s` is encoded as %s (%s): %s" ty
+                           (String.concat " and " families) kind
+                           (String.concat "; " (List.map (fun (p, f, s) ->
+                                Printf.sprintf "%s payload=%s at %s" f p s) es)))))
+    flagged
+
+(** Check 4b: every recorded encoding of a type in a collision group is Boxed.
+    [recorded]: [(type, [(payload, family, site)])], the audit table's rows. *)
+let collision_repr_findings ~collision_set recorded : (string * string) list =
+  List.concat_map (fun (ty, entries) ->
+      if not (Collision_set.is_colliding collision_set ty) then []
+      else
+        List.filter_map (fun (p, f, s) ->
+            if f = "Boxed" then None
+            else Some (ty, repr_finding (Printf.sprintf
+                "collision: `%s` shares its short name with another module's \
+                 type, so it must be Boxed, but %s encodes it as %s (payload=%s)"
+                ty s f p)))
+          (List.sort_uniq compare entries))
+    recorded
+
+(** Check 4c: a collision group's constructor tags are in the collision range
+    and pairwise distinct.  [ctors name] is a variant's constructors,
+    [tag_of "Type.Ctor"] the tag codegen installed. *)
+let collision_tag_findings ~collision_set ~(ctors : string -> string list option)
+    ~(tag_of : string -> int option) : (string * string) list =
+  let findings = ref [] in
+  let report ty msg = findings := (ty, repr_finding msg) :: !findings in
+  Hashtbl.iter (fun short names ->
+      let seen = Hashtbl.create 16 in
+      List.iter (fun name ->
+          match ctors name with
+          | None -> ()
+          | Some cs ->
+            List.iter (fun ctor ->
+                let key = name ^ "." ^ ctor in
+                match tag_of key with
+                | None -> ()
+                | Some tag ->
+                  if tag < Llvm_builtins.collision_tag_base
+                  || tag >= Llvm_builtins.collision_tag_limit then
+                    report name (Printf.sprintf "collision: `%s` (short name `%s` is \
+                                                 declared by %s) has tag 0x%x, outside \
+                                                 the collision range" key short
+                                   (String.concat ", " (List.sort compare names)) tag);
+                  (match Hashtbl.find_opt seen tag with
+                   | Some other when other <> key ->
+                     report name (Printf.sprintf "collision: `%s` and `%s` share tag \
+                                                  0x%x, so a match on `%s` cannot \
+                                                  tell them apart" other key tag short)
+                   | _ -> Hashtbl.replace seen tag key))
+              cs)
+        (List.sort compare names))
+    collision_set;
+  !findings
+
+(** TIR verifier check 4 (representation invariants), at emission: the
+    decisions codegen COMMITTED to, read back from the repr audit table and
+    [ctx.ctor_info] after the module is emitted (the {1 Check 4} section of
+    {!Tir_verify}).  4a: no type mixes encoding families for one payload, or
+    through a site with no payload to go on.  4b: a type in a collision group
+    (one short name, several declaring modules) is Boxed at every site.  4c:
+    the group's constructor tags are in the collision range and distinct, the
+    only way a match on the bare short name tells the modules apart. *)
+let check4_findings ctx (m : Tir.tir_module) : (string * string) list =
+  let collision_set = ctx.Llvm_ctx.collision_set in
+  let variants = Hashtbl.create 16 in
+  List.iter (function
+      | Tir.TDVariant (n, cs) when not (Hashtbl.mem variants n) ->
+        Hashtbl.add variants n (List.map fst cs)
+      | _ -> ()) m.Tir.tm_types;
+  let recorded =
+    Hashtbl.fold (fun ty entries acc -> (ty, !entries) :: acc) Llvm_ctx._repr_audit [] in
+  List.sort_uniq compare
+    (repr_mix_findings (Llvm_ctx.repr_audit_flagged ())
+     @ collision_repr_findings ~collision_set recorded
+     @ collision_tag_findings ~collision_set ~ctors:(Hashtbl.find_opt variants)
+         ~tag_of:(fun key -> Option.map (fun e -> e.Llvm_ctx.ce_tag)
+                     (Hashtbl.find_opt ctx.Llvm_ctx.ctor_info key)))
+
+(* ── The function table (Diagnostics crash-report frames) ───────────────
+   A compiled program's main registers a table of every function its module
+   defines: readable source name, file, definition line and address
+   (march_runtime.c's march_fn_table_register).  A crash report maps each
+   return address on the failing stack to the entry at or below it, so its
+   frames are named from the program itself: on any platform (dladdr sees only
+   exported symbols, which a Linux executable does not export), with source
+   names rather than mangled ones, and with anything outside the table known
+   to be runtime code.  @march_text_end, defined last, bounds the last entry:
+   the module's functions are laid out in definition order in one object.
+   A function with no source span (drop glue, closure wrappers, actor
+   dispatch) is an entry with no name, so its frames are skipped but still
+   bounded.  alwaysinline helpers are left out: listing one would keep its
+   body alive after it was inlined everywhere. *)
+
+(* The defined function names of [ir], in definition order, with whether the
+   definition is alwaysinline. *)
+let fn_table_defines (ir : string) : (string * bool) list =
+  let acc = ref [] in
+  List.iter (fun line ->
+      if String.length line > 7 && String.sub line 0 7 = "define " then
+        match String.index_opt line '@' with
+        | None -> ()
+        | Some at ->
+          let rest = String.sub line (at + 1) (String.length line - at - 1) in
+          let name =
+            if rest <> "" && rest.[0] = '"' then
+              (match String.index_from_opt rest 1 '"' with
+               | Some q -> Some (String.sub rest 1 (q - 1))
+               | None -> None)
+            else
+              (match String.index_opt rest '(' with
+               | Some p -> Some (String.sub rest 0 p)
+               | None -> None)
+          in
+          (match name with
+           | Some n ->
+             let contains sub =
+               let ls = String.length line and lsub = String.length sub in
+               let rec go i = i + lsub <= ls && (String.sub line i lsub = sub || go (i + 1)) in
+               go 0 in
+             acc := (n, contains "alwaysinline") :: !acc
+           | None -> ()))
+    (String.split_on_char '\n' ir);
+  List.rev !acc
+
+(* How a crash report names [fn_name]: the source function, without the
+   specialisation suffixes passes add ("List.append$dps$...", "f$Int"), and
+   a lambda as "<host>.{fn}". *)
+let fn_table_display (fn_name : string) : string =
+  let base n = match String.index_opt n '$' with
+    | None | Some 0 -> n
+    | Some i -> String.sub n 0 i in
+  if fn_name <> "" && fn_name.[0] = '$' then
+    match Provenance.find fn_name with
+    | Some { Provenance.host = Some h; _ } -> base h ^ ".{fn}"
+    | _ -> "{fn}"
+  else base fn_name
+
+(* The table's globals and the end marker, for the functions [ir] defines;
+   [tir_name_of] maps an LLVM name back to its TIR function. *)
+let fn_table_block (ir : string) (tir_name_of : string -> string option) : string =
+  let b = Buffer.create 4096 in
+  let strings : (string, string) Hashtbl.t = Hashtbl.create 64 in
+  let n_str = ref 0 in
+  let str s =
+    match Hashtbl.find_opt strings s with
+    | Some g -> g
+    | None ->
+      let g = Printf.sprintf "@.fnt.s%d" !n_str in
+      incr n_str;
+      Hashtbl.replace strings s g;
+      Printf.bprintf b "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
+        g (String.length s + 1) (Llvm_ctx.llvm_escape_string s);
+      g
+  in
+  let ref_of n =
+    if String.exists (fun c -> not (Char.code c < 128 &&
+                                    (c = '_' || c = '.' || c = '$' || c = '-'
+                                     || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                                     || (c >= '0' && c <= '9')))) n
+    then Printf.sprintf "@\"%s\"" n else "@" ^ n in
+  let entries =
+    List.filter_map (fun (n, inl) ->
+        if inl || n = "main" then None
+        else
+          let info = match tir_name_of n with
+            | None -> None
+            | Some t ->
+              (match Provenance.effective_span t with
+               | Some sp when sp.March_ast.Ast.start_line > 0 ->
+                 Some (fn_table_display t, Provenance.display_file sp.March_ast.Ast.file,
+                       sp.March_ast.Ast.start_line)
+               | _ -> None) in
+          let fields = match info with
+            | Some (disp, file, line) ->
+              Printf.sprintf "ptr %s, ptr %s, i64 %d" (str disp) (str file) line
+            | None -> "ptr null, ptr null, i64 0" in
+          (* The function pointer last: "ptr @f," is how a hot-reload slot
+             publish reads, and IR checks look for exactly that. *)
+          Some (Printf.sprintf "{ ptr, ptr, i64, ptr } { %s, ptr %s }" fields (ref_of n)))
+      (fn_table_defines ir)
+  in
+  Printf.bprintf b
+    "@march_fn_table = private constant [%d x { ptr, ptr, i64, ptr }] [\n  %s\n]\n\
+     @march_fn_table_len = private constant i64 %d\n\
+     define void @march_text_end() noinline nounwind {\nentry:\n  ret void\n}\n"
+    (List.length entries) (String.concat ",\n  " entries) (List.length entries);
+  Buffer.contents b
+
+let fn_table_wanted = ref false
+
 let emit_module ~emit_expr
     ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     ?(hot_reload=None) ?(impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(remote_impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(remote_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
+    ?(hr_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(emit_main=true)
     ?(cap_attrib=([] : (string * string) list))
     ?(cap_decls=([] : (string * string) list))
+    ?(cap_manifest : string option)
     ?(k_table : Kind.table option)
     (m : Tir.tir_module) : string =
   (* type defs are threaded via ctx.type_defs (set below); reset the
      repr-consistency audit per module emission. *)
   Hashtbl.reset Llvm_ctx._repr_audit;
+  (* Check 4 reads the recorded decisions back after emission. *)
+  Llvm_ctx.repr_audit_forced := Tir_verify.enabled ();
   dbg_reset ();
+  fn_table_wanted := false;
   (* Capability markers: start each module emission with a clean slate so
      symbols recorded by a previous emission in the same process (tests,
      forge multi-entry checks) cannot leak into this module's markers. *)
@@ -1256,7 +1569,7 @@ let emit_module ~emit_expr
   (* Patch .so: hide all non-exported symbols so intra-.so PLT calls prefer the
      .so's own definitions over same-named symbols in the server binary.  This
      is the compile-time complement to RTLD_DEEPBIND (which is Linux-only). *)
-  let ctx = { ctx with Llvm_ctx.compile_so = not emit_main } in
+  let ctx = { ctx with Llvm_ctx.compile_so = not emit_main; hr_sig_hashes } in
   (* Phase 9: in .so patch mode WITH hot-reload enabled, emit the file-static
      epoch cell into the preamble.  Static (private) linkage keeps it out of
      the global symbol table so multiple deployed .so files don't collide.
@@ -1294,6 +1607,7 @@ let emit_module ~emit_expr
         (* Dispatch slot IDs are 1-based: slot 0 is reserved as the "not set"
            sentinel in march_actor_meta.dispatch_name_id (0 = no HCR dispatch). *)
         Printf.bprintf b "  call void @march_dispatch_init(i32 %d)\n" (n + 1);
+        Buffer.add_string b "  call void @march_dispatch_reserve_main()\n";
         List.iter (fun (fn : Tir.fn_def) ->
           match Hot_reload.Name_table.id_of hr_names fn.Tir.fn_name with
           | None -> ()
@@ -1312,8 +1626,12 @@ let emit_module ~emit_expr
                   Printf.sprintf "ptr %s" g
                 | _ -> "ptr null"
               in
+              (* The slot ABI hash (type signature + parameter borrow
+                 modes, March_cas.Hash.hcr_sig_hash), NOT the type-only
+                 RPC hash in remote_sig_hashes: forge's sig_hash gate
+                 compares a patch's against this one. *)
               let sig_arg =
-                match Hashtbl.find_opt ctx.Llvm_ctx.remote_sig_hashes fn.Tir.fn_name with
+                match Hashtbl.find_opt hr_sig_hashes fn.Tir.fn_name with
                 | Some h when String.length h > 0 ->
                   let sg = Printf.sprintf "@.hr_sighash%d" id in
                   Buffer.add_string ctx.Llvm_ctx.preamble
@@ -1326,6 +1644,14 @@ let emit_module ~emit_expr
               Printf.bprintf b
                 "  call i32 @march_dispatch_publish(i32 %d, ptr @%s, %s, %s, i8 0)\n"
                 id (Llvm_builtins.mangle_extern fn.Tir.fn_name) hash_arg sig_arg;
+              if String.ends_with ~suffix:"_dispatch" fn.Tir.fn_name then begin
+                let actor = String.sub fn.Tir.fn_name 0 (String.length fn.Tir.fn_name - 9) in
+                let stop = actor ^ Tir_names.actor_on_stop_suffix in
+                if List.exists (fun (f : Tir.fn_def) -> f.fn_name = stop) m.Tir.tm_fns then
+                  Printf.bprintf b
+                    "  call void @march_dispatch_set_initial_on_stop(i32 %d, ptr @%s)\n"
+                    id (Llvm_builtins.mangle_extern stop)
+              end;
               (* Register name→ID mapping for the reload server. *)
               let name_g = Printf.sprintf "@.hr_name%d" id in
               Buffer.add_string ctx.Llvm_ctx.preamble
@@ -1450,6 +1776,12 @@ let emit_module ~emit_expr
         let fname = fn.Tir.fn_name in
         let flen = String.length fname in
         emit_fn ~emit_expr ctx fn;
+        if String.ends_with ~suffix:Tir_names.actor_on_stop_suffix fname then begin
+          let actor = String.sub fname 0 (flen - String.length Tir_names.actor_on_stop_suffix) in
+          let alias = "__on_stop_" ^ String.map (fun c -> if c = '.' then '_' else c) actor in
+          Buffer.add_string ctx.Llvm_ctx.buf (Printf.sprintf
+            "@%s = alias void (ptr), ptr @%s\n" alias (Llvm_builtins.mangle_extern fname))
+        end;
         (* Phase 5: for migrate_state functions, export a __migrate_<Actor>
            alias so march_reload.c can dlsym it without knowing the full
            mangled March name.
@@ -1800,7 +2132,35 @@ let emit_module ~emit_expr
          ("\ndefine void @__march_init(i32 %epoch) {\nentry:\n\
           \  store i32 %epoch, ptr @__march_hcr_epoch\n"
           ^ Buffer.contents resolve
-          ^ "  ret void\n}\n")
+          (* The patch's own closure capture-release and record shape drops,
+             as main's prologue registers the base's: without them a closure
+             type the patch introduces leaks its captures whenever it is
+             released outside its apply.  The keys point into this image,
+             which is never unloaded (march_dispatch_retain_image), so they
+             stay valid.
+             specs/progress/2026-10-13-hcr-patch-closures-not-in-drop-table.md *)
+          ^ "  call void @march_clo_drops_register()\n"
+          ^ "  ret void\n}\n"
+          ^ clo_drop_registration
+              ~rec_drops:(Llvm_data.shape_drop_registrations ctx) m);
+       (* The slot ABI hash of every boundary function this patch defines,
+          one "<name> <hash>\n" line each: the reload server records it as
+          the activated version's sig_hash (runtime/march_reload.c,
+          activate_items), so ABI_QUERY reports the RUNNING version's ABI
+          after a deploy, not "(none)", and the next deploy's gate compares
+          against it.  Covered by ACTIVATE7's signed digest of the bytes. *)
+       let sig_lines = Buffer.create 256 in
+       List.iter (fun (fn : Tir.fn_def) ->
+           match Hot_reload.Name_table.id_of hr_names fn.Tir.fn_name,
+                 Hashtbl.find_opt hr_sig_hashes fn.Tir.fn_name with
+           | Some _, Some h when String.length h = 64 ->
+             Printf.bprintf sig_lines "%s %s\n" fn.Tir.fn_name h
+           | _ -> ())
+         m.Tir.tm_fns;
+       let tbl = Buffer.contents sig_lines in
+       Printf.bprintf out
+         "@__march_hcr_sigs = constant [%d x i8] c\"%s\\00\"\n"
+         (String.length tbl + 1) (Llvm_ctx.llvm_escape_string tbl)
      end else
      if m.Tir.tm_tests <> [] then begin
        (* --test mode: emit a @main that calls the test harness.
@@ -1854,7 +2214,8 @@ let emit_module ~emit_expr
        ) m.Tir.tm_tests;
        Buffer.add_string buf2 "  %rc = call i32 @march_test_report()\n";
        Buffer.add_string buf2 "  ret i32 %rc\n}\n";
-       Buffer.add_string buf2 (clo_drop_registration m);
+       Buffer.add_string buf2
+         (clo_drop_registration ~rec_drops:(Llvm_data.shape_drop_registrations ctx) m);
        Buffer.add_buffer out buf2
      end else begin
        (match main_fn_name with
@@ -1900,21 +2261,34 @@ let emit_module ~emit_expr
                     call void @%s(%s)\n\
                     ret void\n}\n" mangled erased_args)
           in
+          (* The function table (see fn_table_block): native targets only,
+             the wasm runtime has no crash observers. *)
+          let fn_table_setup =
+            if is_wasm_target target then ""
+            else begin
+              fn_table_wanted := true;
+              "  call void @march_fn_table_register(ptr @march_fn_table, \
+               ptr @march_fn_table_len, ptr @march_text_end)\n"
+            end in
           Buffer.add_string out
             (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
              declare void @march_spawn_main%s(ptr %%fn)\n\
-             %s\
+             %s%s\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
                call void @march_clo_drops_register()\n\
+             %s\
                call void @march_remote_init()\n\
              %s%s\
                call void @march_spawn_main%s(ptr %s)\n\
                call void @march_run_scheduler()\n\
                ret i32 0\n}\n" (if !pin_main then "_pinned" else "")
-                thunk_def hr_setup stub_setup
+                (if fn_table_setup = "" then ""
+                 else "declare void @march_fn_table_register(ptr, ptr, ptr)\n")
+                thunk_def fn_table_setup hr_setup stub_setup
                 (if !pin_main then "_pinned" else "") spawn_target);
-          Buffer.add_string out (clo_drop_registration m)
+          Buffer.add_string out
+            (clo_drop_registration ~rec_drops:(Llvm_data.shape_drop_registrations ctx) m)
         | None ->
           (* Library module with no user-defined main: emit a stub @main so
              clang can link a valid binary (forge build type-checks libraries). *)
@@ -1928,6 +2302,7 @@ let emit_module ~emit_expr
   emit_atom_show_table ctx;
   (* Append closure wrapper functions generated for top-level fn-as-value *)
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
+  Llvm_ctor_desc.flush ctx out;
 
   (* Capability markers (specs/2026-08-03-forge-cap-audit-design.md §4.3, C).
      Derived from the C symbols the emitted code actually resolved through
@@ -2019,30 +2394,77 @@ let emit_module ~emit_expr
           Buffer.add_string out
             (Printf.sprintf "@__march_capdecl_%s__%s = constant i8 1\n"
                (mangle_cap cap) owner))
-       decls_emitted;
-     let refs =
-       List.map
-         (fun cap -> Printf.sprintf "ptr @__march_cap_%s" (mangle_cap cap))
-         caps
-       @ List.map
-           (fun (cap, owner) ->
-              Printf.sprintf "ptr @__march_capfrom_%s__%s" (mangle_cap cap)
-                owner)
-           attrib
-       @ List.map
-           (fun (cap, owner) ->
-              Printf.sprintf "ptr @__march_capdecl_%s__%s" (mangle_cap cap)
-                owner)
-           decls_emitted
-     in
+       decls_emitted
+   end;
+   (* Declared path-scope manifest (specs/todos/2026-08-04-path-scope-
+      followups.md): MARCHCAP\x01 <u32 le length> <json>, the blob
+      forge/lib/cap_binary.ml scans for.  Only present when some filesystem
+      declaration carries a scope, so an unscoped program's IR is unchanged.
+      The symbol prefix "__march_capscope_" differs from the flat-marker
+      prefix "__march_cap_" at the 12th character, so the marker reader
+      cannot decode it as a capability named "manifest". *)
+   let manifest_ref =
+     match cap_manifest with
+     | None -> []
+     | Some json ->
+       let len = String.length json in
+       let blob =
+         "MARCHCAP\x01"
+         ^ String.init 4 (fun i -> Char.chr ((len lsr (8 * i)) land 0xff))
+         ^ json
+       in
+       let esc = Buffer.create (String.length blob * 2) in
+       String.iter
+         (fun c ->
+            let k = Char.code c in
+            if k >= 0x20 && k < 0x7f && c <> '"' && c <> '\\' then
+              Buffer.add_char esc c
+            else Buffer.add_string esc (Printf.sprintf "\\%02X" k))
+         blob;
+       Buffer.add_string out
+         (Printf.sprintf
+            "@__march_capscope_manifest = constant [%d x i8] c\"%s\"\n"
+            (String.length blob) (Buffer.contents esc));
+       [ "ptr @__march_capscope_manifest" ]
+   in
+   let refs =
+     (if caps = [] then []
+      else
+        List.map
+          (fun cap -> Printf.sprintf "ptr @__march_cap_%s" (mangle_cap cap))
+          caps
+        @ List.map
+            (fun (cap, owner) ->
+               Printf.sprintf "ptr @__march_capfrom_%s__%s" (mangle_cap cap)
+                 owner)
+            attrib
+        @ List.map
+            (fun (cap, owner) ->
+               Printf.sprintf "ptr @__march_capdecl_%s__%s" (mangle_cap cap)
+                 owner)
+            decls_emitted)
+     @ manifest_ref
+   in
+   if refs <> [] then
      Buffer.add_string out
        (Printf.sprintf
           "@llvm.used = appending global [%d x ptr] [%s], section \
            \"llvm.metadata\"\n"
-          (List.length refs) (String.concat ", " refs))
-   end);
+          (List.length refs) (String.concat ", " refs)));
 
+  if !fn_table_wanted then begin
+    let tir_names : (string, string) Hashtbl.t = Hashtbl.create 256 in
+    List.iter (fun (fn : Tir.fn_def) ->
+        Hashtbl.replace tir_names (Llvm_builtins.mangle_extern fn.Tir.fn_name) fn.Tir.fn_name)
+      m.Tir.tm_fns;
+    Buffer.add_string out
+      (fn_table_block (Buffer.contents out) (Hashtbl.find_opt tir_names))
+  end;
   Llvm_ctx.repr_audit_report ();
+  (if Tir_verify.enabled () then
+     match check4_findings ctx m with
+     | [] -> ()
+     | fs -> raise (Tir_verify.Failed ("llvm-emit", fs)));
   if !debug_info then begin
     Buffer.add_string out (dbg_module_block ());
     attach_call_dbg (Buffer.contents out)

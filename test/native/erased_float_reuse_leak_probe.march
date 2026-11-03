@@ -1,0 +1,138 @@
+-- Leak guard for a FLOAT IN AN ERASED SLOT whose cell the branch REUSES (FBIP).
+--
+-- `Option(Float)` keeps its payload as a march_alloc_float box (it is
+-- niche-unsafe). When a branch destructures `Some(f)` and its body rebuilds
+-- a same-arity constructor, Perceus turns that into a reuse of the Some cell.
+-- Until 2026-10-12 the binder `f` held the BOX on that path, and nothing
+-- released it: re-boxing `f` into the reused cell (`Some(f) -> Ok(f)`), or
+-- storing it as a raw double (`Some(f) -> N(f)`), left the old box with no
+-- owner. One box leaked per call -- e.g. per number Json.parse read, since
+-- Json.parse_number is exactly `Some(f) -> Ok((Number(f), e2))`.
+--
+-- The binder is now a copy of the double, and the reuse emitters release the
+-- box on the path where the cell is taken over in place or freed
+-- (lib/tir/llvm_emit_alloc.ml, reuse_orphans). The shared legs destructure a
+-- still-live cell twice: a release that fired on the shared path would free
+-- a box the surviving cell still owns, so their printed sums are the
+-- double-free witnesses (and ASAN's, in the sanitizer sweep).
+--
+-- SIGNAL: live_allocs() deltas over 2,000 iterations; each must be 0.
+mod ErasedFloatReuseLeakProbe do
+  needs IO.Console
+
+  type J = N(Float) | Z
+  type K = KN(Float) | KZ | KW(Int)
+
+  -- niche-shaped target: the reuse degenerates to release + fresh cell
+  pfn to_j(o : Option(Float)) : J do
+    match o do
+      Some(f) -> N(f)
+      None -> Z
+    end
+  end
+
+  -- boxed target: the reuse takes the cell over in place
+  pfn to_k(o : Option(Float)) : K do
+    match o do
+      Some(f) -> KN(f)
+      None -> KZ
+    end
+  end
+
+  -- erased target: the value is re-boxed into the reused cell
+  pfn to_ok(o : Option(Float)) : Result(Float, Int) do
+    match o do
+      Some(f) -> Ok(f)
+      None -> Err(0)
+    end
+  end
+
+  -- identity rebuild: same cell, same shape
+  pfn bump(o : Option(Float)) : Option(Float) do
+    match o do
+      Some(f) -> Some(f +. 1.0)
+      None -> None
+    end
+  end
+
+  pfn j_val(j : J) : Float do
+    match j do
+      N(x) -> x
+      Z -> 0.0
+    end
+  end
+
+  pfn k_val(k : K) : Float do
+    match k do
+      KN(x) -> x
+      _ -> 0.0
+    end
+  end
+
+  pfn ok_val(r : Result(Float, Int)) : Float do
+    match r do
+      Ok(x) -> x
+      Err(_) -> 0.0
+    end
+  end
+
+  pfn o_val(o : Option(Float)) : Float do
+    match o do
+      Some(x) -> x
+      None -> 0.0
+    end
+  end
+
+  pfn unique_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let a = j_val(to_j(string_to_float("0.5")))
+      let b = k_val(to_k(string_to_float("0.25")))
+      let c = ok_val(to_ok(string_to_float("0.125")))
+      let d = o_val(bump(string_to_float("1.0")))
+      unique_leg(n - 1, acc +. a +. b +. c +. d)
+    end
+  end
+
+  -- DOUBLE-FREE WITNESS: `o` is consumed by a reusing match while a second
+  -- reference is still live, so every reuse sees RC > 1.
+  pfn shared_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let o = string_to_float("0.5")
+      let a = ok_val(to_ok(o))
+      let b = j_val(to_j(o))
+      let c = o_val(bump(o))
+      let d = o_val(o)
+      shared_leg(n - 1, acc +. a +. b +. c +. d)
+    end
+  end
+
+  pfn json_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let r = match Json.parse("[1.5, 2, -3e2]") do
+        Ok(_) -> 1
+        Err(_) -> 0
+      end
+      json_leg(n - 1, acc + r)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    -- Warm every leg outside the window so one-time statics do not count.
+    println("unique=" ++ float_to_string(unique_leg(4, 0.0)))
+    println("shared=" ++ float_to_string(shared_leg(4, 0.0)))
+    println("json=" ++ int_to_string(json_leg(4, 0)))
+    let b0 = live_allocs()
+    let u = unique_leg(2000, 0.0)
+    let b1 = live_allocs()
+    let s = shared_leg(2000, 0.0)
+    let b2 = live_allocs()
+    let j = json_leg(2000, 0)
+    let b3 = live_allocs()
+    println("unique2k=" ++ float_to_string(u) ++ " leaked=" ++ int_to_string(b1 - b0))
+    println("shared2k=" ++ float_to_string(s) ++ " leaked=" ++ int_to_string(b2 - b1))
+    println("json2k=" ++ int_to_string(j) ++ " leaked=" ++ int_to_string(b3 - b2))
+  end
+end

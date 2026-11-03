@@ -68,7 +68,16 @@ val emit_fn :
   emit_expr:(Llvm_ctx.ctx -> Tir.expr -> string * string) ->
   Llvm_ctx.ctx -> Tir.fn_def -> unit
 val fn_declare_str : Tir.fn_def -> string
-val emit_atom_show_table : Llvm_ctx.ctx -> unit
+val emit_atom_show_table : ?jit:bool -> Llvm_ctx.ctx -> unit
+
+(** The (registry key, release function) pairs the module's closure and actor
+    allocations ask for (see the implementation). *)
+val closure_drop_wants : Tir.tir_module -> (string * string) list
+
+(** [define internal void @march_clo_drops_register()], registering the
+    module's closure and actor releases with the runtime. *)
+val clo_drop_registration :
+  ?rec_drops:(string * string * string) list -> Tir.tir_module -> string
 
 (** Stable actor-message constructor tags, ["<Actor>_Msg.<Ctor>" -> tag]
     (see the implementation's comment); [pins] as for {!variant_ctor_tags}. *)
@@ -98,6 +107,25 @@ val variant_ctor_tags :
 
 val build_ctor_info :
   Llvm_ctx.ctx -> Tir.tir_module -> unit
+
+(** TIR verifier check 4 (representation invariants), the pure parts that
+    [emit_module] runs on the decisions it committed to, under --verify-tir:
+    4a, a type's encodings do not mix families ({!Llvm_ctx.repr_audit_flagged});
+    4b, every recorded encoding of a type in a collision group is Boxed
+    ([(type, [(payload, family, site)])]); 4c, a collision group's constructor
+    tags are in the collision range and distinct.  Each returns
+    [(type, finding)]. *)
+val repr_mix_findings :
+  (string * string list * string * (string * string * string) list) list ->
+  (string * string) list
+val collision_repr_findings :
+  collision_set:(string, string list) Hashtbl.t ->
+  (string * (string * string * string) list) list -> (string * string) list
+val collision_tag_findings :
+  collision_set:(string, string list) Hashtbl.t ->
+  ctors:(string -> string list option) -> tag_of:(string -> int option) ->
+  (string * string) list
+
 val emit_module :
   emit_expr:(Llvm_ctx.ctx -> Tir.expr -> string * string) ->
   ?fast_math:bool ->
@@ -107,7 +135,9 @@ val emit_module :
   ?impl_hashes:(string, string) Hashtbl.t ->
   ?remote_impl_hashes:(string, string) Hashtbl.t ->
   ?remote_sig_hashes:(string, string) Hashtbl.t ->
+  ?hr_sig_hashes:(string, string) Hashtbl.t ->
   ?emit_main:bool ->
   ?cap_attrib:(String.t * string) list ->
   ?cap_decls:(string * string) list ->
+  ?cap_manifest:string ->
   ?k_table:Kind.table -> Tir.tir_module -> string

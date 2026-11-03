@@ -276,6 +276,19 @@ let rec literal_path_uses (acc : (string * string * Ast.span) list)
   | Ast.ELam (_, b, _) | Ast.ELetFn (_, _, _, b, _) -> literal_path_uses acc b
   | _ -> acc
 
+(* Check 2's "declared but no function requires" warning, shared by
+   [check_module_needs] and [check_deferred_imports]. *)
+let warn_unused_needs (env : env) (mod_name : string) (need : string) (need_sp : Ast.span) : unit =
+  Err.warning_with_fix ~code:Err.Code.unused_needs env.errors ~span:need_sp
+    ~fix:(Err.FDelete {
+      start_line = need_sp.March_ast.Ast.start_line;
+      end_line   = need_sp.March_ast.Ast.end_line })
+    (render_parts [
+      MPText "module "; MPCode mod_name; MPText " declares ";
+      MPCode ("needs " ^ need); MPText " but no function requires ";
+      MPCode ("Cap(" ^ need ^ ")"); MPText " or a sub-capability.";
+      MPBreak; MPText "help: remove the unused capability declaration." ])
+
 let check_module_needs (env : env) (mod_name : Ast.name)
     ~(cap_qname_prefix : string) (decls : Ast.decl list) =
   (* [cap_qname_prefix] carries no trailing dot (e.g. "", "Lib", "Lib.Sub").
@@ -328,6 +341,37 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | _ -> ()
   ) decls;
   let unknown_needs = !unknown_needs in
+  (* A declared per-function bound (`fn f(x) needs IO.Console do`), on a
+     function or an impl method.  Each path must be a real capability and must
+     lie within this module's `needs`: the module bounds every function in it,
+     so a function bound wider than the module would claim authority nothing
+     grants.  The bound itself is held against the function's row by
+     [Typecheck.check_fn_bounds] once every module's closure is complete. *)
+  let record_fn_bound ~(qname : string) (def : Ast.fn_def) : unit =
+    match def.Ast.fn_needs with
+    | None -> ()
+    | Some (paths, nsp) ->
+      let bound = List.map cap_path_of_names paths in
+      List.iter
+        (fun c ->
+           match March_caps.Cap_lattice.suggest_cap c with
+           | Some known ->
+             Err.error ~code:Err.Code.unknown_capability env.errors ~span:nsp
+               (Printf.sprintf
+                  "`%s` is not a known capability.\n\
+                   help: did you mean `%s`?" c known)
+           | None ->
+             if not (List.exists (fun n -> cap_subsumes n c) declared_needs) then
+               Err.error ~code:Err.Code.cap_bound_needs env.errors ~span:nsp
+                 (Printf.sprintf
+                    "`%s` is bounded by `needs %s`, but the module does not \
+                     declare `needs %s`. A function's bound must lie within its \
+                     module's `needs`.\n\
+                     help: add `needs %s` to the module, or narrow the bound."
+                    def.Ast.fn_name.txt (String.concat ", " bound) c c))
+        bound;
+      Hashtbl.replace env.fn_bound_points qname (List.sort_uniq String.compare bound, nsp)
+  in
   (* See [locally_declared_names_of] for why a raw call-name match against
      [builtin_cap_table] must first check for module-local shadowing. *)
   let locally_declared_names = locally_declared_names_of decls in
@@ -750,6 +794,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                   (c.Ast.fc_body :: Option.to_list c.Ast.fc_guard
                    @ default_param_exprs c))
               def.Ast.fn_clauses;
+            record_fn_bound ~qname:mangled def;
             if not (List.mem mn.Ast.txt module_fn_names) then
               record_dispatch_edge (cap_qname mn.Ast.txt) mangled)
           idef.Ast.impl_methods
@@ -791,6 +836,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       if param_caps <> [] && def.fn_name.txt <> "main" then
         Hashtbl.replace env.fn_grant_points qname
           (List.sort_uniq String.compare param_caps, sp);
+      record_fn_bound ~qname def;
       (* Annotations INSIDE the body are uses too, and were invisible here
          until 2026-08-05 — see [cap_annots_in_expr].
 
@@ -1366,6 +1412,15 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       decls
     |> List.sort_uniq String.compare)
   in
+  (* Same condition Check 4 below uses to defer an import. *)
+  let has_deferred_import =
+    List.exists (function
+      | Ast.DUse (ud, _) ->
+        not (List.mem_assoc
+               (String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path))
+               env.module_caps)
+      | _ -> false) decls
+  in
   List.iter (fun need ->
     let need_sp =
       let rec find_span = function
@@ -1385,15 +1440,16 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               || List.exists (fun cap_path -> cap_subsumes need cap_path)
                    (Lazy.force own_transitive_caps) in
     if not used then
-      Err.warning_with_fix ~code:Err.Code.unused_needs env.errors ~span:need_sp
-        ~fix:(Err.FDelete {
-          start_line = need_sp.March_ast.Ast.start_line;
-          end_line   = need_sp.March_ast.Ast.end_line })
-        (render_parts [
-          MPText "module "; MPCode mod_name.txt; MPText " declares ";
-          MPCode ("needs " ^ need); MPText " but no function requires ";
-          cap need; MPText " or a sub-capability.";
-          MPBreak; MPText "help: remove the unused capability declaration." ])
+      (* A deferred Check-4 import (an importee not analysed yet) will require
+         the importee's whole declared set (fail-closed, see
+         [check_deferred_imports]), possibly including this very [needs]:
+         reporting it unused now would contradict that error, and the autofix
+         would re-break the build.  Hold the verdict until the deferred imports
+         are resolved. *)
+      if has_deferred_import then
+        env.deferred_unused_needs :=
+          (mod_name.txt, need, need_sp) :: !(env.deferred_unused_needs)
+      else warn_unused_needs env mod_name.txt need need_sp
   ) (List.filter (fun need -> not (List.mem need unknown_needs)) declared_needs);
   (* Check 3 (hint): Cap(IO) root — suggest narrowing.  Not on `main`: the
      reference calls `fn main(cap : Cap(IO))` the entry-point convention, so
@@ -2351,4 +2407,20 @@ let check_deferred_imports (env : env) : unit =
               MPBreak; MPText "help: add "; MPCode ("needs " ^ req_cap);
               MPText " to the module body." ])
       ) req_caps
-  ) pending
+  ) pending;
+  (* Check 2's held-back verdicts: a [needs] is unused only if no deferred
+     import of its module requires it. *)
+  let held = List.rev !(env.deferred_unused_needs) in
+  env.deferred_unused_needs := [];
+  List.iter (fun (importer, need, need_sp) ->
+    let required =
+      List.exists (fun (imp, _, imported, _) ->
+        imp = importer &&
+        (match List.assoc_opt imported env.module_caps with
+         | Some req_caps ->
+           List.exists (fun c -> cap_subsumes need c || cap_subsumes c need) req_caps
+         | None -> false))
+        pending
+    in
+    if not required then warn_unused_needs env importer need need_sp
+  ) held

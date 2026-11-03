@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: an element passed to `return of mk_bad` does not satisfy precondition `_ > 0`
+-- Abstract refinements, the leftovers, phase E: a `List(a)` constructor
+-- field is a modelled nested-container field, so a `-1` in the BACK list of a
+-- `Dq({Int | _ > 0})` is a refinement VIOLATION at the construction.  Before
+-- phase E it filed no obligation at all (silently unenforced), and after the
+-- multi-arg design's phase 0 it was a recorded skip.  Row Q4 of the design.
+-- Accept companion: accept/t430.
+mod WithinListFieldViolated do
+  type Dq(a) = Dq(Int, List(a), List(a))
+  fn mk_bad() : Dq({Int | _ > 0}) do Dq(2, [1], [0 - 1]) end
+end

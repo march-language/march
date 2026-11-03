@@ -28,9 +28,23 @@ static inline int march_rc_is_unique(const void *p) {
     return __atomic_load_n(&((const march_hdr *)p)->rc, __ATOMIC_ACQUIRE) == 1;
 }
 
+/* A read of a count another thread may be updating with an atomic RMW, for a
+ * check that orders nothing: the immortal-cell test at the top of every
+ * release (rc >= MARCH_RC_IMMORTAL) and diagnostic prints.  A plain load there
+ * is a C11 data race (MARCH_SANITIZE=thread reported it in march_decrc), even
+ * though the only value it can misjudge is a mortal count, and a mortal count
+ * stays mortal whatever it races with.  Relaxed is enough and is the same
+ * `ldr` as the plain load on arm64 and x86-64.  The inline twins in
+ * lib/tir/llvm_rc_inline.ml load it as `load atomic ... monotonic`, the LLVM
+ * name for the same ordering; keep the two in step. */
+static inline int64_t march_rc_peek(const void *p) {
+    return __atomic_load_n(&((const march_hdr *)p)->rc, __ATOMIC_RELAXED);
+}
+
 /* ── What the header pad word means ───────────────────────────────────
  *
  * `pad` is multiplexed, decided by SIGN and by tag:
+ *   MARCH_CLOSURE_TAG: uint32 creation epoch, independent of signed pad value.
  *   > 0   record shape id (march_record_shape_intern, tag 0 cells), or the
  *         SIMD lane kind (under MARCH_SIMD_TAG).
  *   == 0  nothing known.  march_alloc zeroes it, and every cell the C runtime
@@ -58,6 +72,33 @@ static inline int32_t march_hdr_type_id(const void *p) {
 }
 /* The id the compiler stamps for a type named [name] (march_extras.c). */
 int32_t march_type_id_of_name(const char *name);
+/* Lazily memoised march_type_id_of_name for a `static int32_t` slot (0 = not
+ * yet computed).  Every scheduler thread may fill the slot at once; they all
+ * store the same pure hash, so relaxed atomics are enough -- they only make
+ * the access a non-race for C11/TSAN (a plain ldr/str on arm64). */
+static inline int32_t march_type_id_memo(int32_t *slot, const char *name) {
+    int32_t id = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    if (id == 0) {
+        id = march_type_id_of_name(name);
+        __atomic_store_n(slot, id, __ATOMIC_RELAXED);
+    }
+    return id;
+}
+/* The id of stdlib `Bytes` (`type Bytes = Bytes(String)` in `mod Bytes`, so
+ * lowered as "Bytes.Bytes"), for the C sites that build a Bytes cell
+ * themselves.  Same hash as march_type_id_of_name, inlined so a TU that does
+ * not link march_extras.c (bench/bench_http_simd.sh builds march_http.c
+ * alone) can still stamp it.  An unstamped C-built Bytes printed "#<tag:0>"
+ * compiled (`to_string(Base64.decode(s))`) where the interpreter printed
+ * `Bytes("...")`. */
+static inline int32_t march_bytes_type_id(void) {
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)"Bytes.Bytes"; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+    return -(int32_t)(1u + (h & 0x3FFFFFFFu));
+}
 /* `~H` hole on an ERASED value: flattens iff the header id says IOList,
  * otherwise renders by name and escapes (march_extras.c). */
 void   *march_html_auto_escape_dyn(void *v);
@@ -132,6 +173,8 @@ void  march_print_stderr(void *s);
 void *march_io_read_line(void);
 int64_t march_io_read_byte(void);
 int64_t march_int_pow(int64_t base, int64_t exp);
+void    march_int_overflow(int64_t op, const char *file, int64_t line)
+            __attribute__((noreturn, cold));
 
 /* Panic/todo primitive variants (return ptr so they satisfy polymorphic `a`). */
 void *march_panic_ext(void *s);
@@ -196,6 +239,8 @@ void   *march_logger_register_appender(void *name, void *cb);
  * emit_atom_show_table in lib/tir/llvm_toplevel.ml. */
 void    march_set_atom_namer(void *fn);
 void    march_unset_atom_namer(void *fn);
+void   *march_atom_name_registered(int64_t h);
+int64_t march_atom_name_cstr(int64_t h, char *buf, int64_t cap);
 void   *march_logger_remove_appender(void *name);
 void   *march_logger_clear_appenders(void);
 void   *march_logger_appender_names(void);
@@ -295,6 +340,21 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * task[3] (task_await_unwrap unboxes without consuming, since a task may be
  * awaited twice); march_run_resource_dtor releases it when the Task dies. */
 #define MARCH_TASK_TAG ((int32_t)-7)
+/* A Task's header pad: set by the task trampoline when the result it stored
+ * is a Float box the Task owns (released when the Task dies). */
+#define MARCH_TASK_OWNS_FLOAT_BOX ((int32_t)1)
+/* A TypedArray (typed_array_alloc in march_runtime.c): [hdr][len@16][cap@24]
+ * then len 8-byte element slots, each holding a tagged immediate or ONE
+ * owned reference to a heap value (a Float is a march_alloc_float box). Tag 0
+ * made it look like an ADT cell, so march_decrc freed it shallowly and every
+ * heap element leaked; march_run_resource_dtor now releases each slot. */
+#define MARCH_TYPED_ARR_TAG ((int32_t)-8)
+/* Hot-reload closure: pad stores its pinned creation epoch. */
+#define MARCH_CLOSURE_TAG ((int32_t)-9)
+void march_clo_capture_epoch(void *clo);
+void march_clo_forget_epoch(void *clo);
+void march_clo_frame_enter(void *clo);
+
 
 /* send_after(pid, msg, delay_ms) : TimerRef — schedule msg for delivery to
  * the actor `actor` after delay_ms milliseconds. RC contract matches
@@ -679,7 +739,7 @@ typedef struct {
 /* Set the dispatch-table NAME_ID for a hot-reload actor.  Must be called
  * immediately after march_spawn().  name_id is the slot ID registered for
  * the actor's _dispatch function.  No-op if actor has no meta entry. */
-void march_actor_set_dispatch_id(void *actor, uint32_t name_id);
+void march_actor_set_dispatch_id(void *actor, uint32_t name_id, uint32_t build_epoch);
 
 /* Register the global tag of the actor's FIRST message constructor (its
  * "call tag base").  Emitted by codegen right after the actor record's
@@ -709,6 +769,7 @@ typedef struct {
     int         msgs_changed;
     void       *handle;
     int         ring_idx;
+    void      (*on_stop_fn)(void *);
 } march_hcr_unit;
 
 /* Why an activation could not proceed yet (MARCH_HCR_WAIT): the oldest
@@ -1051,6 +1112,9 @@ void   *march_vault_keys(void *table);
 /* Collect the values [key]'s shard has stopped holding, as a List(v) the
  * caller owns; Vault's typed wrappers drop it (march_extras.c). */
 void   *march_vault_reap(void *table, void *key);
+/* Release [key]'s shard's buried values with a plain decrc each: for a
+ * runtime-owned table whose values need no typed drop (march_extras.c). */
+void    march_vault_release_dead(void *table, void *key);
 /* Unregister and empty a table, returning every value it held (march_extras.c). */
 void   *march_vault_close(void *table);
 /* Vault tables created and not yet freed (a leak gauge for tests). */
@@ -1070,6 +1134,14 @@ void   *march_ed25519_seed_keypair(void *seed);
 void   *march_ed25519_sign(void *sk, void *msg);
 int64_t march_ed25519_verify(void *pk, void *msg, void *sig);
 void   *march_x25519(void *scalar, void *point);
+/* ML-KEM-768 / ML-DSA-65 over the vendored mlkem-native / mldsa-native
+ * (runtime/pqc.c, builtins in runtime/march_pqc.c). */
+void   *march_mlkem768_keypair(void *seed);
+void   *march_mlkem768_encaps(void *pk, void *coins);
+void   *march_mlkem768_decaps(void *sk, void *ct);
+void   *march_mldsa65_keypair(void *seed);
+void   *march_mldsa65_sign(void *sk, void *msg, void *rnd);
+int64_t march_mldsa65_verify(void *pk, void *msg, void *sig);
 void   *march_pbkdf2_sha256(void *pass, void *salt, int64_t iters, int64_t dklen);
 void   *march_base64_encode(void *input);
 void   *march_base64_decode(void *str);
@@ -1105,10 +1177,23 @@ void   *march_mpst_send(void *ep, void *target_role_str, void *val);
 void   *march_mpst_recv(void *ep, void *source_role_str);
 int64_t march_mpst_close(void *ep);
 
+/* Diagnostics crash observers (stdlib/diagnostics.march). */
+int64_t march_diag_observe(void *cb);
+void   *march_diag_unobserve(int64_t id);
+void   *march_diag_context_get(void);
+void   *march_diag_context_set(void *ctx);
+void    march_diag_proc_exit(void *ctx);
+void   *march_panic_site(void *file, int64_t line);
+void    march_fn_table_register(const void *table, const int64_t *len, void *text_end);
+
 /* Test harness — used by --test compiled binaries. */
 extern jmp_buf  march_test_jmp_buf;
 extern int      march_test_in_test;
 extern char     march_test_fail_buf[4096];
+/* Nonzero while a catcher that HANDLES a panic is active (the test runner,
+ * __try_call).  try_finally only intercepts and re-raises, so it leaves this
+ * alone: a panic under it still reaches the crash observers. */
+extern int      march_panic_handled;
 void    march_test_init(int32_t argc, char **argv);
 void    march_test_setup_all(void (*fn)(void));
 void    march_test_run(void (*fn)(void), const char *name, void (*setup)(void));

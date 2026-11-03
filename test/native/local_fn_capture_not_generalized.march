@@ -1,0 +1,37 @@
+-- Regression (2026-10-12): a local `fn` generalized the type variables of
+-- what it CAPTURED.  In `union` below, `go` captures `cmp`; `go`'s type was
+-- quantified over `cmp`'s element type, so the element types of `a`/`b` and
+-- of `cmp` came apart.  A let-bound polymorphic comparator then left `cmp`'s
+-- element type unresolved, monomorphization defaulted it to String, and the
+-- `ins` specialisation printed/hashed the Int elements as Strings (the same
+-- shape crashed `Set.union` compiled with SIGSEGV).  The interpreter, which
+-- has no specialisation, always printed the right thing.
+mod LocalFnCaptureNotGeneralized do
+  needs IO.Console
+
+  fn fold(acc, xs, f) do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> fold(f(acc, h), t, f)
+    end
+  end
+
+  fn ins(acc, x, cmp) do
+    let below = cmp(x)
+    if below(10) do Cons(to_string(x) ++ "#" ++ int_to_string(int_and(hash(x), 7)), acc) else acc end
+  end
+
+  fn union(a, b, cmp) do
+    fn go(acc, x) do
+      ins(acc, x, cmp)
+    end
+    fold(a, b, go)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let lt = fn x -> fn y -> x < y
+    println(String.join(union([], [2, 30, 3], lt), ","))
+    let s = Set.union(Set.from_list([1, 2], lt), Set.from_list([2, 3], lt), lt)
+    println(to_string(Set.to_list(s)))
+  end
+end

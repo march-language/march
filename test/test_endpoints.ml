@@ -154,8 +154,20 @@ let stream_shape =
            ("Stream_Run", "cluster_Prod"); ("Stream_Run", "cluster_Cons");
            (* access points, and the hosted (actor) forms of both *)
            ("Stream_Run", "offer_Prod"); ("Stream_Run", "initiate_Cons");
+           ("Stream_Run", "offer_work_Prod"); ("Stream_Run", "__offer_work_start_Prod");
            ("Stream_Run", "offer_hosted_Prod"); ("Stream_Run", "offer_hosted_Cons");
-           ("Stream_Run", "cluster_hosted_Prod"); ("Stream_Run", "cluster_hosted_Cons") ])
+           ("Stream_Run", "offer_work_hosted_Prod"); ("Stream_Run", "__offer_work_hosted_start_Prod");
+           ("Stream_Run", "cluster_hosted_Prod"); ("Stream_Run", "cluster_hosted_Cons") ];
+       let m = parse_and_desugar (wrap stream) in
+       let entries = List.concat_map (function
+         | DMod (name, _, ds, _) when name.txt = "Stream_Run" ->
+           List.filter_map (function
+             | DFn (f, _) when f.fn_name.span.file = "<work-entry>" -> Some f.fn_name.txt
+             | _ -> None) ds
+         | _ -> []) m.mod_decls in
+       Alcotest.(check (list string)) "only session-start adapters opt into new work"
+         [ "__offer_work_start_Prod"; "__offer_work_start_Cons";
+           "__offer_work_hosted_start_Prod"; "__offer_work_hosted_start_Cons" ] entries)
 
 let relay_shape =
   Alcotest.test_case "Relay: three roles, each with exactly its own send/recv" `Quick
@@ -244,7 +256,8 @@ let stream_prod_fns =
 
 let stream_cons_fns =
   [ "register"; "cancelled"; "drained"; "leave_recv_Msg_Prod_Cons_1"; "recv_Msg_Prod_Cons_1";
-    "recv_Msg_Prod_Cons_1_or"; "recv_Msg_Prod_Cons_1_or_drain"; "leave_choose_more_done"; "choose_more"; "choose_done"; "close";
+    "recv_Msg_Prod_Cons_1_or"; "recv_Msg_Prod_Cons_1_or_drain"; "leave_choose_more_done";
+    "may_choose_more"; "choose_more"; "may_choose_done"; "choose_done"; "close";
     "idle"; "take_idle"; "take_closed"; "cancel"; "await_Msg_Prod_Cons_1"; "finish"; "resume";
     "step_name"; "script_S_recv_Msg_Prod_Cons_1"; "script_S_choose_more_done"; "script_S_end"; "script";
     "chaos_S_recv_Msg_Prod_Cons_1"; "chaos_S_choose_more_done"; "chaos_S_end"; "chaos" ]
@@ -1721,7 +1734,7 @@ let granted_body_type =
          (fun f ->
             Alcotest.(check string) (f ^ " body")
               (param_ty src "Stream_Run" "run_Cons" "body") (param_ty src "Stream_Run" f "body"))
-         [ "cluster_Cons"; "offer_Cons"; "initiate_Cons" ];
+         [ "cluster_Cons"; "offer_Cons"; "offer_work_Cons"; "__offer_work_start_Cons"; "initiate_Cons" ];
        (* the hosted fronts thread the grant through `start` *)
        Alcotest.(check string) "host_Cons start"
          (session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()") (param_ty src "Stream_Run" "host_Cons" "start");
@@ -1730,6 +1743,11 @@ let granted_body_type =
        Alcotest.(check string) "offer_hosted_Cons start"
          ("String -> " ^ session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()")
          (param_ty src "Stream_Run" "offer_hosted_Cons" "start");
+       List.iter (fun f ->
+         Alcotest.(check string) (f ^ " start grants")
+           (param_ty src "Stream_Run" "offer_hosted_Cons" "start")
+           (param_ty src "Stream_Run" f "start"))
+         [ "offer_work_hosted_Cons"; "__offer_work_hosted_start_Cons" ];
        Alcotest.(check string) "cluster_hosted_Cons start"
          ("String -> " ^ session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()")
          (param_ty src "Stream_Run" "cluster_hosted_Cons" "start");
@@ -2605,6 +2623,7 @@ let expand_build_ok =
            with_expand [ ("Stream", "pause") ] (fun () ->
                let src = wrap (stream_v2 ^ {|
   pfn fp_of_chooser() : String do Stream_Msg.role_fingerprint(Stream_Msg.role_Cons()) end
+  pfn choice_available() : Bool do Stream_Cons.may_choose_pause() end
 |}) in
                let mods = generated src in
                Alcotest.(check bool) "Stream_Msg.role_fingerprint" true (has_fn mods "Stream_Msg" "role_fingerprint");
@@ -2621,6 +2640,27 @@ let expand_build_refused =
            with_expand [ ("Stream", "more") ] (fun () ->
                Alcotest.(check bool) "wrong branch" true
                  (has "the branch this version adds is `pause`" (desugar_errors (wrap stream_v2))))))
+
+let expand_choice_predicate =
+  Alcotest.test_case "may_choose reports each branch's expand availability" `Quick
+    (fun () ->
+       let value label =
+         let m = parse_and_desugar (wrap stream_v2) in
+         let decls = List.find_map (function
+             | DMod (n, _, ds, _) when n.txt = "Stream_Cons" -> Some ds
+             | _ -> None) m.mod_decls |> Option.get in
+         let fd = List.find_map (function
+             | DFn (fd, _) when fd.fn_name.txt = "may_choose_" ^ label -> Some fd
+             | _ -> None) decls |> Option.get in
+         match fd.fn_clauses with
+         | [{ fc_params = []; fc_body = ELit (LitBool b, _); _ }] -> b
+         | _ -> Alcotest.fail "expected a nullary constant Bool predicate"
+       in
+       Alcotest.(check bool) "plain build allows pause" true (value "pause");
+       with_baseline (E.next_baseline None (version_of_src stream)) (fun () ->
+           with_expand [("Stream", "pause")] (fun () ->
+               Alcotest.(check bool) "expand holds pause" false (value "pause");
+               Alcotest.(check bool) "expand permits existing more" true (value "more"))))
 
 (* ── D25: unlabelled steps in a protocol the topology uses ──────────────── *)
 
@@ -2687,4 +2727,4 @@ let tests =
     crash_choose_shape; crash_choose_ok; crash_chan_refused;
     crash_hosted_shape; crash_choose_hosted_shape; crash_hosted_ok; crash_hosted_state_is_the_branch;
     compat_branch_added; compat_renumbered; compat_labelled; compat_grant_change; compat_payload_change;
-    compat_baseline_roundtrip; compat_generated_ok; expand_build_ok; expand_build_refused; d25_unlabelled_warns; d25_quiet ]
+    compat_baseline_roundtrip; compat_generated_ok; expand_build_ok; expand_build_refused; expand_choice_predicate; d25_unlabelled_warns; d25_quiet ]

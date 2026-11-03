@@ -68,7 +68,7 @@ mod ProtocolMixedLocal do
   end
 
   pfn visible(h : Cap(ClusterNode.Live), o : SessionNode.Offer, left : Int) : () do
-    if ClusterNode.lookup(h, o.name) != None do ()
+    if Option.is_some(ClusterNode.lookup(h, o.name)) do ()
     else if left <= 0 do panic("the offer never became visible") else
       sleep_ms(20)
       visible(h, o, left - 20)
@@ -76,7 +76,7 @@ mod ProtocolMixedLocal do
   end
 
   pfn gone(h : Cap(ClusterNode.Live), o : SessionNode.Offer, left : Int) : () do
-    if ClusterNode.lookup(h, o.name) == None do ()
+    if Option.is_none(ClusterNode.lookup(h, o.name)) do ()
     else if left <= 0 do panic("the offer never went") else
       sleep_ms(20)
       gone(h, o, left - 20)

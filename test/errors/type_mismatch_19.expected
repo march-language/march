@@ -7,6 +7,11 @@ expected `Result(a, b)` but got `Int`. [type_mismatch]
         ^^^^^^^^^^^
 
     The right-hand side of `let?` must be a Result value.
+
+    this is `Int`:
+
+6 |     let? x = 42
+                 ^^
     run `march --explain type_mismatch`
 
 

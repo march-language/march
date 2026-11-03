@@ -1,0 +1,62 @@
+-- Two-node scenario "peer_closed_queue_gone": node-b links to node-a and
+-- asks, from inside its `on_peer_closed` handler (which runs in the data
+-- reader, before the node actor has dropped the connection), for its
+-- session queue to node-a. It must be gone: a session party that links to
+-- a node subscribes to that node's close and then rechecks its queue, and a
+-- queue still handed out after the close was told is one whose close the
+-- party never hears (it waited for that link's end for ever). See
+-- scenario.sh.
+mod PeerClosedQueueGoneB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn linked(h : Cap(ClusterNode.Live), left : Int) : Bool do
+    if Option.is_some(ClusterNode.session_queue_for(h, ClusterNode.node_id_of("node-a"))) do true
+    else if left <= 0 do false
+    else
+      sleep_ms(50)
+      linked(h, left - 50)
+    end end
+  end
+
+  pfn await_report(seen : Vault(String), left : Int) : String do
+    match Vault.get(seen, "q") do
+      Some(r) -> r
+      None ->
+        if left <= 0 do "no close reported" else
+          sleep_ms(50)
+          await_report(seen, left - 50)
+        end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "queue-gone-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if linked(h, 120000) do () else panic("node-b: never linked to node-a") end
+        let a = ClusterNode.node_id_of("node-a")
+        let seen = Vault.new("peer_closed_queue_gone")
+        let _ = ClusterNode.on_peer_closed(h, fn (nid, _why) ->
+          if nid == a do
+            let r = match ClusterNode.session_queue_for(h, a) do
+              None -> "gone"
+              Some(_) -> "still handed out"
+            end
+            Vault.set(seen, "q", r)
+          else () end)
+        println("node-b: linked")
+        println("node-b: queue to node-a at its close: " ++ await_report(seen, 60000))
+        ClusterNode.stop(h)
+        process_exit(0)
+    end
+  end
+end

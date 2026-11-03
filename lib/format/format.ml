@@ -208,10 +208,47 @@ let fmt_lit = function
    Assigned once [expr_inline] is in scope, at the bottom of this module. *)
 let fmt_pred_ref : (expr -> string) ref = ref (fun _ -> "...")
 
+(* The abstract-refinement DEFINER `D1 -> … -> Dn -> Bool[p]`, as the parser
+   rewrites it (Parser.abstract_definer_arrow): each domain carries a binder
+   (a synthetic `$x…` when the user wrote none), and the codomain is `{Bool |
+   _ == p(x1, …, xn)}` over exactly those binders, MARKED with the binder `_`.
+   Returns the domains and `p`.  An unmarked codomain is a user's spelled-out
+   long form and is printed as written: printed as the shorthand under an
+   outer arrow (`Int -> ({x : a | true}) -> {Bool | _ == p(x)}`) it would
+   re-parse as a definer of two arguments. *)
+let definer_chain (t : ty) : (ty list * string) option =
+  let rec go doms t =
+    match t with
+    | TyArrow (dom, cod) -> go (dom :: doms) cod
+    | TyRefine (TyCon ({ txt = "Bool"; _ }, []), m,
+                EApp (EVar { txt = "=="; _ }, [ EVar { txt = "_"; _ }; EApp (EVar p, args, _) ], _)) ->
+      let doms = List.rev doms in
+      let marked = match m with Some { txt = "_"; _ } -> true | _ -> false in
+      let binder d = match d with TyRefine (_, Some { txt; _ }, _) -> Some txt | _ -> None in
+      let arg a = match a with EVar { txt; _ } -> Some txt | _ -> None in
+      if doms <> [] && marked
+         && List.length args = List.length doms
+         && List.map binder doms = List.map arg args
+      then Some (doms, p.txt)
+      else None
+    | _ -> None
+  in
+  match t with TyArrow _ -> go [] t | _ -> None
+
 let rec fmt_ty = function
   | TyCon ({ txt; _ }, [])   -> txt
   | TyCon ({ txt; _ }, args) -> Printf.sprintf "%s(%s)" txt (fmt_tys args)
   | TyVar { txt; _ }         -> txt
+  (* The abstract-refinement DEFINER (see [definer_chain]): print the
+     shorthand back, which re-parses to the same tree, whereas the expanded
+     form with `$x` cannot even be lexed. *)
+  | TyArrow _ as t when definer_chain t <> None ->
+    let doms, p = Option.get (definer_chain t) in
+    let dom_s d = match d with
+      | TyRefine (d, Some { txt; _ }, ELit (LitBool true, _))
+        when String.length txt >= 2 && String.sub txt 0 2 = "$x" -> fmt_ty_atom d
+      | d -> Printf.sprintf "(%s)" (fmt_ty d) in
+    Printf.sprintf "%s -> Bool[%s]" (String.concat " -> " (List.map dom_s doms)) p
   | TyArrow (a, b)           -> Printf.sprintf "%s -> %s" (fmt_ty_atom a) (fmt_ty b)
   | TyTuple tys              -> Printf.sprintf "(%s)" (fmt_tys tys)
   | TyRecord flds            ->
@@ -224,6 +261,10 @@ let rec fmt_ty = function
     let s = match op with NatAdd -> "+" | NatMul -> "*" in
     Printf.sprintf "%s %s %s" (fmt_ty a) s (fmt_ty b)
   | TyChan (r, p)            -> Printf.sprintf "Chan(%s, %s)" r.txt p.txt
+  (* The abstract-refinement shorthand `T[p]`: the parser marks it with the
+     binder `_`, which a user cannot write, so it prints back as written. *)
+  | TyRefine (base, Some { txt = "_"; _ }, EApp (EVar p, [ EVar { txt = "_"; _ } ], _)) ->
+    Printf.sprintf "%s[%s]" (fmt_ty_atom base) p.txt
   | TyRefine (base, None, pred) ->
     Printf.sprintf "{ %s | %s }" (fmt_ty base) (!fmt_pred_ref pred)
   | TyRefine (base, Some n, pred) ->
@@ -1206,6 +1247,18 @@ and emit_fn ctx fn =
     | None   -> ""
     | Some t -> Printf.sprintf " : %s" (fmt_ty t)
   in
+  (* A per-function `needs` bound rides on the return annotation: printed on
+     every clause of a multi-head function, like the return type, which the
+     parser's clause merge accepts because the bounds are identical.
+     Dropping it would silently widen the function to its module's needs. *)
+  let ret = match fn.fn_needs with
+    | None -> ret
+    | Some ([], _) -> ret ^ " needs ()"
+    | Some (paths, _) ->
+      ret ^ " needs "
+      ^ String.concat ", "
+          (List.map (fun p -> String.concat "." (List.map (fun (n : name) -> n.txt) p)) paths)
+  in
   (match fn.fn_doc with
    | None -> ()
    | Some doc ->
@@ -1238,7 +1291,22 @@ and emit_fn ctx fn =
      as one `fn` declaration per clause, and the attribute binds to the
      declaration in the grammar (`nonempty_list(fn_attr); fn_decl`). *)
   let emit_attrs () =
-    List.iter (fun a -> line ctx (Printf.sprintf "@[%s]" a)) fn.fn_attrs
+    List.iter
+      (fun a ->
+        let text =
+          match List.assoc_opt a fn.fn_attr_args with
+          (* `@[decreases(e, ...)]`: the payload is expressions, kept apart
+             from the name (termination design §2.1). *)
+          | Some args -> Printf.sprintf "%s(%s)" a (String.concat ", " (List.map expr_inline args))
+          | None -> (
+            (* A one-identifier payload is stored `name:value`; it is
+               written `name(value)`. *)
+            match String.index_opt a ':' with
+            | Some i -> Printf.sprintf "%s(%s)" (String.sub a 0 i) (String.sub a (i + 1) (String.length a - i - 1))
+            | None -> a)
+        in
+        line ctx (Printf.sprintf "@[%s]" text))
+      fn.fn_attrs
   in
   match fn.fn_clauses with
   | [] -> ()

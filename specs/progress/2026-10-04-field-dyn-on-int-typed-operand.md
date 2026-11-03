@@ -1,0 +1,95 @@
+`[P2]` - [x] Invalid IR: `march_record_field_dyn` handed an `Int`-typed operand
+
+**Filed:** 2026-10-04, from `scripts/compile-time-bench.sh` (branch
+`bench/compile-time-harness`) compiling `examples/topology_app/src/topology_app.march`
+WITHOUT its `--topology` digest (`--compile --opt 2`). clang rejected the IR:
+
+```
+topology_app.<pid>.tmp.ll:29145:50: error: '%w635505' defined with type 'i64' but expected 'ptr'
+  %cr5506 = call ptr @march_record_field_dyn(ptr %w635505, ptr @.str154, i64 11)
+```
+
+## What the IR says
+
+`%w635505` is not counter 635505. It is the lazy Int63 normaliser's prefix
+`w63` plus counter `5505` (`%w63N = ashr exact i64 %w63sM, 1`), and `%cr5506`
+is the next fresh name. So `emit_field` (`lib/tir/llvm_emit_data.ml`) got an
+`EField` whose operand's TIR type is `Int`. `get_record_fields` found no shape,
+so it took the by-name `march_record_field_dyn` path, and the operand was
+emitted (untagged) as an i64. The emitter then spliced that i64 in as `ptr`
+without checking its type. The defect is upstream, in whatever typed a record
+value as `Int`: lowering, mono or defun. An emitter coercion cannot repair it,
+because the `ashr` has already halved the cell's address.
+
+## Not reproduced
+
+On `f2088b568` (the bench branch's compiler source is identical), all of these
+produced valid IR and a linking binary:
+
+- `--emit-llvm` with the real `HOME`
+- `--compile` with the real `HOME`
+- `--compile` with a fresh `HOME` (cold stdlib caches), then a comment-edit
+  recompile
+
+The bench session also noted that the first compile in a fresh `HOME` produces
+a different post-TIR key than later ones. So the TIR depends on cache state,
+which is the best lead. Repro attempts stopped at load average 250-340 from
+other sessions: a single `--dump-tir` took 46 minutes.
+
+## What landed meanwhile
+
+- `emit_field`'s two dyn paths now go through `dyn_record_obj`, which fails
+  with `llvm_emit: field .F read from X, whose TIR type T emits as i64, not a
+  record pointer` instead of writing invalid IR. A recurrence names the
+  operand and its type. Unit test:
+  `test_codegen` / `field_dyn_on_scalar_operand_refused`.
+- A main-less compile no longer emits the whole stdlib
+  ([`progress/2026-10-04-mainless-compile-emits-whole-stdlib.md`](../progress/2026-10-04-mainless-compile-emits-whole-stdlib.md)).
+  Whatever function carried the bad `EField` may now be pruned from this
+  repro, so to chase it, use a stdlib-wide root (e.g. the pre-fix driver)
+  or a program that reaches it.
+
+## Next
+
+Under normal load: loop fresh-`HOME` / warm-`HOME` / comment-edit compiles of
+the topology app with a pre-pruning driver plus the assertion, until the ICE
+fires. Then `--dump-tir` that state and trace the operand's type back through
+`tir-lower` / `tir-mono` / `tir-defun` (`MARCH_DUMP_TXT`). Also diff
+`--dump-tir` between a fresh-`HOME` first compile and a second one, per the
+bench note above.
+
+## Retried 2026-10-07 on `d9fbbf179` (load avg ~50): still not reproduced
+
+- `--compile --opt 2` of `examples/topology_app` (no digest), fresh `HOME`, then
+  two comment-edit recompiles, then a second fresh `HOME`: all clean, all link.
+- `--emit-llvm --opt 2` twice in one fresh `HOME`: byte-identical `.ll`.
+- With the main-less rooting from #799 locally disabled (so DCE fails open and
+  the whole stdlib is emitted, 9,696 definitions, 240 `march_record_field_dyn`
+  calls, like the pre-#799 bench run), warm and cold `HOME`: clean, and the two
+  `.ll` files are byte-identical. The `dyn_record_obj` guard never fired.
+
+So on current main neither the cache-state dependence nor the bad `EField`
+shows up, even with the pre-#799 emission set. One unproven candidate for the
+original: a stale `_build/default/stdlib` copy in the bench worktree (a targeted
+`dune build bin/main.exe` does not restage it), which would type stdlib values
+differently from the source. If the guard fires again, the message names the
+operand and its type; start from that.
+
+## Closed 2026-10-11 on `8b6a4b7da`: not reproduced a third time
+
+The todo's recipe once more, with the origin/main compiler and again with the
+`group-c/representation` branch compiler: `--compile --opt 2` of
+`examples/topology_app` (no `--topology` digest) in a fresh `HOME`, a
+comment-edit recompile in the now-warm `HOME`, then `--emit-llvm --opt 2`
+(125 `march_record_field_dyn` calls). All clean and linking; the
+`dyn_record_obj` guard never fired.
+
+Closed as believed gone. No commit is known to have fixed it: the original
+ICE was never reproduced on any commit, the leading theory remains a stale
+`_build/default/stdlib` in the bench worktree, and the emission set it came
+from was cut by #799 (`31e176add`, main-less compiles rooted on the file's own
+functions). The regression guard #799 added already pins the case:
+`test_codegen` / `field_dyn_on_scalar_operand_refused` hands `emit_field` an
+`Int`-typed operand and asserts the named `llvm_emit` failure instead of
+invalid IR. If it ever fires, its message names the operand and its TIR type;
+reopen from there.

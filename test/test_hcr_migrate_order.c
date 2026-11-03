@@ -147,10 +147,17 @@ static void *migrate_msg_inc(void *msg, void *none) {
 void *new_actor(uint32_t slot) {
     int64_t *a = (int64_t *)march_alloc(48);
     a[3] = 1;                                   /* $alive */
-    int64_t *s = (int64_t *)march_alloc(24);
-    s[1] = 1; s[2] = 0;
+    uint32_t epoch = march_sched_current_epoch();
+    if (!epoch) epoch = march_epoch_current();
+    uint32_t version;
+    void *body = march_dispatch_enter_gen(slot, epoch, &version);
+    int newer = body == (void *)v2_dispatch;
+    if (body) march_dispatch_leave(slot, version);
+    int64_t *s = (int64_t *)march_alloc(newer ? 32 : 24);
+    s[1] = newer ? 2 : 1; s[2] = newer ? 0x1234 : 0;
+    if (newer) s[3] = 0;
     a[4] = (int64_t)(uintptr_t)s;
-    march_actor_set_dispatch_id(a, slot);
+    march_actor_set_dispatch_id(a, slot, epoch);
     march_spawn(a);
     return a;
 }
@@ -188,7 +195,7 @@ static void wait_pins_zero(uint32_t epoch, long timeout_ms) {
 enum { SLOT_ORDER = 1, SLOT_MANY, SLOT_DRAIN, SLOT_DRAIN_FMT, SLOT_BUSY,
        SLOT_HOLD, SLOT_EARLY, SLOT_CONVERT, SLOT_FULL, SLOT_HARD, SLOT_DEATH,
        SLOT_TASKS, SLOT_ORIGIN, SLOT_CHILD, SLOT_SPAWNER,
-       SLOT_NESTED, SLOT_SPAWNOLD, SLOT_PLAINDEPLOY, N_SLOTS };
+       SLOT_NESTED, SLOT_SPAWNOLD, SLOT_PLAINDEPLOY, SLOT_STOP, SLOT_STOP_CALLBACK, N_SLOTS };
 #define N_MANY 2100   /* > the old 2048-entry snapshot cap */
 
 static void reset(void) {
@@ -594,10 +601,15 @@ static _Atomic long g_task_ticks, g_task_finished;
 /* "Computing": never receives, only sleeps (a cancellation point). */
 static void *busy_task(void *clo, int64_t arg) {
     (void)clo; (void)arg;
+    uint32_t outer, inner;
+    march_dispatch_enter_unit(SLOT_TASKS, &outer);
+    march_dispatch_enter_unit(SLOT_TASKS, &inner);
     while (!atomic_load(&g_task_stop)) {
         atomic_fetch_add(&g_task_ticks, 1);
         march_sleep_ms(1);
     }
+    march_dispatch_leave_unit(SLOT_TASKS, inner);
+    march_dispatch_leave_unit(SLOT_TASKS, outer);
     atomic_fetch_add(&g_task_finished, 1);
     return (void *)7;
 }
@@ -637,6 +649,10 @@ static void test_hard_deadline_cancels_tasks(void) {
     CHECK(((march_hdr *)r2)->tag == 0 /* Ok */, "the new-epoch task finishes normally");
     CHECK(atomic_load(&g_task_finished) == 1, "and only it finished");
     CHECK(!march_is_alive(a), "the held actor was killed at the hard deadline");
+    uint64_t refs = 0;
+    for (uint32_t v = 0; v < MARCH_MAX_LIVE_VERSIONS; v++)
+        refs += march_dispatch_refs(SLOT_TASKS, v);
+    CHECK(refs == 0, "cancellation and normal return release nested dispatch refs");
     (void)c1;
 }
 
@@ -776,7 +792,64 @@ static void test_dead_actor_releases_pins(void) {
     CHECK(atomic_load(&g_v2_mismatch) == 0, "new code never sees an old-layout state");
 }
 
+static int stop_old, stop_new, stop_latest;
+static uint32_t stop_target_epoch;
+static void *stop_migrate(void *state) {
+    CHECK(march_sched_current_epoch() == stop_target_epoch,
+          "migration callback routes nested calls at replacement epoch");
+    return migrate_v1_v2(state);
+}
+static void old_stop(void *clo, void *actor) {
+    (void)clo;
+    stop_old++;
+    CHECK(state_of(actor)[1] == 1, "old stop sees old state");
+}
+static void old_stop_bare(void *actor) { old_stop(NULL, actor); }
+static void new_stop(void *actor) {
+    stop_new++;
+    CHECK(state_of(actor)[1] == 2, "new stop sees migrated state");
+}
+static void latest_stop(void *actor) {
+    stop_latest++;
+    CHECK(state_of(actor)[1] == 2, "callback-only patch sees unchanged migrated state");
+}
+static void test_stop_migration(void) {
+    reset();
+    int64_t dispatch_clo[] = {INT64_MAX, 0, 0};
+    int64_t stop_clo[] = {INT64_MAX, 0, (int64_t)(uintptr_t)old_stop};
+    march_register_actor_on_stop(dispatch_clo, stop_clo);
+    void *a = new_actor(SLOT_STOP);
+    ((int64_t *)a)[2] = (int64_t)(uintptr_t)dispatch_clo;
+    uint32_t before = march_epoch_current();
+    march_hcr_unit u = {.slot = SLOT_STOP, .fn = (void *)v2_dispatch,
+        .impl_hash = "stop-v2", .migrate_fn = stop_migrate, .state_changed = 1};
+    CHECK(march_hcr_activate(&u, 1, 0, 0, 0, NULL) == MARCH_HCR_ERROR,
+          "state change without replacement on_stop refuses");
+    CHECK(march_epoch_current() == before, "callback refusal leaves epoch unchanged");
+    u.on_stop_fn = new_stop;
+    stop_target_epoch = march_epoch_next(0);
+    march_hcr_unit initial[] = {u, {.slot = SLOT_STOP_CALLBACK,
+        .fn = (void *)new_stop, .impl_hash = "stop-v2-callback"}};
+    CHECK(march_hcr_activate(initial, 2, 0, 0, 0, NULL) > (int)before,
+          "state change with replacement on_stop activates");
+    wait_until(&g_migrations, 1, 2000);
+    march_hcr_unit callback = {.slot = SLOT_STOP_CALLBACK, .fn = (void *)latest_stop,
+        .impl_hash = "stop-only-v3"};
+    CHECK(march_hcr_activate(&callback, 1, 0, 0, 0, NULL) > (int)stop_target_epoch,
+          "callback-only patch activates without replacing dispatch");
+    sleep_ms(20);
+    march_actor_stop(a, 2000);
+    CHECK(stop_latest == 1 && stop_new == 0 && stop_old == 0,
+          "migrated actor runs latest independent callback once");
+}
+
 static void test_main(void) {
+    /* This C harness is an external deployment controller, not compiled
+     * March user code. Its fresh actors/sends intentionally follow current. */
+    march_proc *controller = march_sched_current();
+    uint32_t held = atomic_exchange(&controller->code_epoch, 0);
+    march_epoch_unpin(held);
+    test_stop_migration();
     test_queued_messages_run_on_old_code();
     test_every_actor_is_migrated();
     test_old_epoch_spawn_gets_marker();
@@ -844,11 +917,13 @@ static void register_slots(void) {
         "DrainFmt_dispatch", "Busy_dispatch", "Hold_dispatch",
         "Early_dispatch", "Convert_dispatch", "Full_dispatch",
         "Hard_dispatch", "Death_dispatch", "Tasks_dispatch", "Origin_dispatch", "Child_dispatch", "Spawner_dispatch",
-        "Nested_dispatch", "SpawnOld_dispatch", "PlainDeploy_dispatch" };
+        "Nested_dispatch", "SpawnOld_dispatch", "PlainDeploy_dispatch", "Stop_dispatch", "Stop_on_stop" };
     march_dispatch_init(N_SLOTS);
     for (uint32_t i = 1; i < N_SLOTS; i++) {
         march_dispatch_register_name(i, names[i]);
-        march_dispatch_publish(i, (void *)v1_dispatch, "v1", NULL, MARCH_NATIVE);
+        march_dispatch_publish(i, i == SLOT_STOP_CALLBACK ? (void *)old_stop_bare
+                                                       : (void *)v1_dispatch,
+                               "v1", NULL, MARCH_NATIVE);
     }
 }
 

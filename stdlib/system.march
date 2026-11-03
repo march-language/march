@@ -147,7 +147,8 @@ mod System do
 
   doc """
   Run an external command synchronously, capturing stdout.
-  Returns Ok(ProcessResult(exit_code, stdout, stderr)) or Err(msg).
+  Returns Ok(ProcessResult(exit_code, stdout, stderr)) or Err(msg); a
+  missing or non-executable command is Err("cannot execute <cmd>: <reason>").
 
       match System.cmd("git", ["status"]) do
       Ok(r)    -> println(System.stdout(r))

@@ -1,0 +1,490 @@
+-- Trace: watch which boundary functions run, and on whose behalf, with a
+-- limit you cannot leave out.
+--
+-- A session watches named functions of a `--hot-reload` build (the ones
+-- `forge deploy hot` can replace: your app's, not the stdlib's). Each call into
+-- one writes an event into the session's ring: the calling actor's pid, the
+-- function, the code epoch it ran at, and when. NEVER ITS ARGUMENTS: they can
+-- hold anything the program holds, passwords and tokens included.
+--
+-- Every session has a limit, and `start` takes it as an argument so there is no
+-- way to call it without one:
+--
+--   MaxEvents(n)       stops itself after exactly n events (1..65536);
+--   Rate(n, secs)  keeps at most n events per `secs`-second window (n in
+--                  1..100000, secs in 1..3600) and counts the rest as dropped.
+--
+-- Anything else (0, negative, over the caps) is refused with LimitOutOfRange.
+-- A session also ends by itself after 600 seconds, or 60 seconds without a
+-- `drain`, and at most 4 exist at once. A session belongs to the process, not
+-- to your connection: `stop` frees it early; a forgotten one frees itself.
+--
+-- You pull events with `drain`; the tracer is never waited for. A full ring
+-- drops the event and counts it (`dropped`), so a slow reader costs
+-- completeness, never the traced program's speed.
+--
+-- Actor events. A session can also record what actors do: `Sent`, `Received`,
+-- `Spawned`, `Exited` and `Dropped`, with the pids, the message's constructor
+-- tag, why (for the last two) and when. NEVER a message's contents. They are
+-- recorded only for the actors you NAME (`pids`, one to eight live pids as
+-- `pid_to_int` gives them): an event is kept when its pid or its peer is one of
+-- them. There is no "every actor" form, because a stream of the whole node
+-- would make every send on it pay for the tracer. Build the options with
+-- `actors`, `calls` and `with_calls` and start with `start_with`:
+--
+--   Trace.start_with(d, Trace.actors([Trace.Sent, Trace.Received], [pid_to_int(a)]),
+--                    Trace.MaxEvents(100))
+--
+-- The limit counts boundary calls and actor events together. See `ActorEvent`.
+--
+-- Backends. Compiled with `--hot-reload` only: other builds, and the
+-- interpreter, have no dispatch table to watch and answer `Unavailable`.
+-- Over the observe socket the same operations are the signed debug verbs
+-- TRACE_START, TRACE_DRAIN and TRACE_STOP (docs/observe.md).
+--
+-- Debug tier: every function takes `Cap(Actor.Debug)` (mint it with
+-- `Actor.debug(io)` in `main`; the remote shell has it pre-bound as `debug`).
+--
+-- R8 of specs/plans/2026-09-28-observe-recon-shell-plan.md.
+--
+-- Only the option builders and the formatters are pure; they carry the
+-- runnable examples. Everything that talks to the tracer needs a
+-- `--hot-reload` build and the debug cap, so its examples are plain code.
+--
+-- doc: try
+mod Trace do
+  needs Actor.Debug
+
+  -- How a session ends by itself. There is no other kind of limit.
+  type Limit = MaxEvents(Int) | Rate(Int, Int)
+
+  -- What an actor-event session records. `Sent`: `pid` sent a message to
+  -- `peer` (recorded when it is handed to the mailbox, so a refusal follows as
+  -- a `Dropped`). `Received`: `pid` took a message off its mailbox to run it.
+  -- `Spawned`: `pid` spawned `peer`. `Exited`: `pid` died (`reason`: "normal",
+  -- "killed" or "crash"). `Dropped`: `pid` did not get a message from `peer`
+  -- (`reason`: "dead", "draining", "full" or "evicted").
+  type EventKind = Sent | Received | Spawned | Exited | Dropped
+
+  -- What to watch: boundary functions, actor events for some pids, or both.
+  -- `events` needs `pids` (one to eight live pids); `fns` may then be empty.
+  type Options = {
+    fns : List(String),
+    events : List(EventKind),
+    pids : List(Int)
+  }
+
+  -- One actor event. `peer` is the other pid (-1 when it is not an actor, as
+  -- `main` is not), absent for Received and Exited. `msg_tag` is the message's
+  -- constructor tag (absent for a message with no heap value, such as a bare
+  -- constant). `at_ns` counts from the session's start.
+  type ActorEvent = {
+    kind : EventKind,
+    pid : Int,
+    peer : Option(Int),
+    msg_tag : Option(Int),
+    reason : Option(String),
+    epoch : Int,
+    at_ns : Int
+  }
+
+  -- A started session's id. Holding it is the authority to drain and stop it.
+  type TraceId = TraceId(Int)
+
+  -- One boundary call. `at_ns` counts from the session's start.
+  type CallEvent = {
+    caller : Int,
+    fn_name : String,
+    epoch : Int,
+    at_ns : Int
+  }
+
+  -- What a drain returns: the new events, and where the session stands.
+  -- `recorded` is the total accepted so far; `dropped` counts events lost to
+  -- a full ring and `rate_dropped` those over a Rate budget. `done` is true once
+  -- the session has stopped recording, and `why` says so: "count", "expired",
+  -- "idle" or "stopped".
+  type Batch = {
+    events : List(CallEvent),
+    actor_events : List(ActorEvent),
+    recorded : Int,
+    dropped : Int,
+    rate_dropped : Int,
+    queued : Int,
+    done : Bool,
+    why : Option(String)
+  }
+
+  -- Why a call failed:
+  --   LimitOutOfRange: MaxEvents(n) with n outside 1..65536, Rate with n outside
+  --     1..100000 or secs outside 1..3600;
+  --   UnknownFunction: a name is not a boundary function of this build;
+  --   TooManySessions: four are already running;
+  --   NoSuchSession: stopped, expired or never started;
+  --   BadRequest: nothing to watch, more than 32 names, more than 8 pids, or an odd name;
+  --   PidsRequired: actor events with no pids;
+  --   UnknownPid: a pid is not a live actor;
+  --   Unavailable(why): this build or backend cannot trace.
+  type TraceError =
+    LimitOutOfRange
+    | UnknownFunction
+    | TooManySessions
+    | NoSuchSession
+    | BadRequest
+    | PidsRequired
+    | UnknownPid
+    | Unavailable(String)
+
+  pfn ask(line : String) : Result(Json.JsonValue, String) do
+    match Json.parse(observe_query(line)) do
+      Ok(env) ->
+        match Json.get(env, "data") do
+          Some(d) -> Ok(d)
+          None ->
+            match Json.get(env, "error") do
+              Some(Json.Str(code)) -> Err(code)
+              _ -> Err("malformed_reply")
+            end
+        end
+      Err(_) -> Err("malformed_reply")
+    end
+  end
+
+  pfn error_of(code : String) : TraceError do
+    if code == "limit_out_of_range" do LimitOutOfRange
+    else if code == "unknown_function" do UnknownFunction
+    else if code == "too_many_sessions" do TooManySessions
+    else if code == "not_found" do NoSuchSession
+    else if code == "bad_args" do BadRequest
+    else if code == "pids_required" do PidsRequired
+    else if code == "unknown_pid" do UnknownPid
+    else Unavailable(code) end end end end end end end
+  end
+
+  pfn int_of(j : Json.JsonValue, key : String) : Int do
+    match Json.get(j, key) do
+      Some(Json.Number(f)) -> float_to_int(f)
+      _ -> 0
+    end
+  end
+
+  pfn str_of(j : Json.JsonValue, key : String) : String do
+    match Json.get(j, key) do
+      Some(Json.Str(s)) -> s
+      _ -> ""
+    end
+  end
+
+  pfn list_of(j : Json.JsonValue, key : String) : List(Json.JsonValue) do
+    match Json.get(j, key) do
+      Some(Json.Array(xs)) -> xs
+      _ -> Nil
+    end
+  end
+
+  pfn limit_words(limit : Limit) : String do
+    match limit do
+      MaxEvents(n) -> "count:" ++ int_to_string(n)
+      Rate(n, secs) -> "rate:" ++ int_to_string(n) ++ " per_s:" ++ int_to_string(secs)
+    end
+  end
+
+  pfn limit_negative(limit : Limit) : Bool do
+    match limit do
+      MaxEvents(n) -> n < 0
+      Rate(n, secs) -> n < 0 || secs < 0
+    end
+  end
+
+  pfn join_names(names : List(String)) : String do
+    String.join(names, ",")
+  end
+
+  pfn session_id(s : TraceId) : Int do
+    match s do
+      TraceId(id) -> id
+    end
+  end
+
+  pfn kind_word(k : EventKind) : String do
+    match k do
+      Sent -> "sent"
+      Received -> "received"
+      Spawned -> "spawned"
+      Exited -> "exited"
+      Dropped -> "dropped"
+    end
+  end
+
+  pfn kind_of_word(w : String) : Option(EventKind) do
+    if w == "sent" do Some(Sent)
+    else if w == "received" do Some(Received)
+    else if w == "spawned" do Some(Spawned)
+    else if w == "exited" do Some(Exited)
+    else if w == "dropped" do Some(Dropped)
+    else None end end end end end
+  end
+
+  pfn opt_int(j : Json.JsonValue, key : String) : Option(Int) do
+    match Json.get(j, key) do
+      Some(Json.Number(f)) -> Some(float_to_int(f))
+      _ -> None
+    end
+  end
+
+  -- An event with a "kind" other than "call" is an actor event; a call event
+  -- either has no "kind" (a calls-only session) or says "call".
+  pfn is_actor_event(e : Json.JsonValue) : Bool do
+    match Json.get(e, "kind") do
+      Some(Json.Str(w)) -> w != "call"
+      _ -> false
+    end
+  end
+
+  pfn actor_event_of(e : Json.JsonValue) : Option(ActorEvent) do
+    match kind_of_word(str_of(e, "kind")) do
+      Some(k) ->
+        Some({ kind: k, pid: int_of(e, "pid"), peer: opt_int(e, "peer"),
+               msg_tag: opt_int(e, "msg_tag"), reason: opt_str(e, "reason"),
+               epoch: int_of(e, "epoch"), at_ns: int_of(e, "at_ns") })
+      None -> None
+    end
+  end
+
+  pfn event_of(e : Json.JsonValue) : CallEvent do
+    { caller: int_of(e, "pid"), fn_name: str_of(e, "fn"), epoch: int_of(e, "epoch"),
+      at_ns: int_of(e, "at_ns") }
+  end
+
+  pfn opt_str(j : Json.JsonValue, key : String) : Option(String) do
+    match Json.get(j, key) do
+      Some(Json.Str(w)) -> Some(w)
+      _ -> None
+    end
+  end
+
+  pfn bool_of(j : Json.JsonValue, key : String) : Bool do
+    match Json.get(j, key) do
+      Some(Json.Bool(b)) -> b
+      _ -> false
+    end
+  end
+
+  pfn drained_of(d : Json.JsonValue) : Batch do
+    {
+      events: List.map(List.filter(list_of(d, "events"), fn e -> !is_actor_event(e)), event_of),
+      actor_events: List.filter_map(list_of(d, "events"), fn e ->
+        if is_actor_event(e) do actor_event_of(e) else None end),
+      recorded: int_of(d, "recorded"),
+      dropped: int_of(d, "dropped"),
+      rate_dropped: int_of(d, "rate_dropped"),
+      queued: int_of(d, "pending"),
+      done: bool_of(d, "done"),
+      why: opt_str(d, "why")
+    }
+  end
+
+  doc """
+  Start watching the boundary functions `names` (exact names, as `Recon`'s
+  and `forge deploy hot` print them) under `limit`. At most 32 names and 4
+  sessions. Shorthand for `start_with(c, calls(names), limit)`, so an empty
+  `names` is refused with `BadRequest` (nothing to watch).
+
+      match Trace.start(d, ["Billing.charge"], Trace.MaxEvents(10)) do
+        Ok(s) -> ...
+        Err(Trace.UnknownFunction) -> println("not a boundary function")
+        Err(e) -> println("cannot trace")
+      end
+  """
+  fn start(c : Cap(Actor.Debug), names : List(String), limit : Limit) : Result(TraceId, TraceError) do
+    start_with(c, calls(names), limit)
+  end
+
+  doc """
+  Options that watch only the boundary functions `names`: no actor events
+  and no pids.
+
+  ## Examples
+
+      march> let tc = Trace.calls(["Billing.charge"])
+      march> tc.fns
+      ["Billing.charge"]
+      march> let tc = Trace.calls(["Billing.charge"])
+      march> List.length(tc.events)
+      0
+  """
+  fn calls(names : List(String)) : Options do
+    { fns: names, events: Nil, pids: Nil }
+  end
+
+  doc """
+  Options that watch actor events of the kinds `kinds` for the actors `pids`
+  (pid indices, as `pid_to_int` gives them; one to eight, all live). No
+  boundary functions. The pids are only checked when the session starts.
+
+  ## Examples
+
+      march> let ta = Trace.actors([Trace.Sent, Trace.Received], [3, 5])
+      march> ta.pids
+      [3, 5]
+      march> let ta = Trace.actors([Trace.Sent, Trace.Received], [3, 5])
+      march> ta.fns
+      []
+  """
+  fn actors(kinds : List(EventKind), pids : List(Int)) : Options do
+    { fns: Nil, events: kinds, pids: pids }
+  end
+
+  doc """
+  The same options, also watching the boundary functions `names`. The names
+  REPLACE any already in `o` rather than adding to them.
+
+  ## Examples
+
+      march> let tw = Trace.with_calls(Trace.actors([Trace.Sent], [3]), ["Billing.charge"])
+      march> tw.fns
+      ["Billing.charge"]
+      march> let tw = Trace.with_calls(Trace.actors([Trace.Sent], [3]), ["Billing.charge"])
+      march> tw.pids
+      [3]
+  """
+  fn with_calls(o : Options, names : List(String)) : Options do
+    { o with fns: names }
+  end
+
+  pfn start_words(o : Options) : String do
+    let fns = if List.is_empty(o.fns) do "" else " fn:" ++ join_names(o.fns) end
+    let evs = if List.is_empty(o.events) do ""
+              else " events:" ++ String.join(List.map(o.events, kind_word), ",") end
+    let ps = if List.is_empty(o.pids) do ""
+             else " pids:" ++ String.join(List.map(o.pids, fn p -> int_to_string(p)), ",") end
+    fns ++ evs ++ ps
+  end
+
+  pfn pids_negative(o : Options) : Bool do
+    List.any(o.pids, fn p -> p < 0)
+  end
+
+  doc """
+  Start a session over `opts` (see `calls`, `actors`, `with_calls`) under
+  `limit`. Actor events without pids, or pids without events, are refused;
+  so are more than 8 pids and pids that are not live actors. A negative limit
+  (`LimitOutOfRange`) or a negative pid (`BadRequest`) is refused before the
+  tracer is asked.
+
+      match Trace.start_with(d, Trace.actors([Trace.Sent, Trace.Exited], [pid_to_int(a)]),
+                             Trace.MaxEvents(50)) do
+        Ok(s) -> ...
+        Err(Trace.PidsRequired) -> println("name the actors to watch")
+        Err(e) -> println("cannot trace")
+      end
+  """
+  fn start_with(_c : Cap(Actor.Debug), opts : Options, limit : Limit) : Result(TraceId, TraceError) do
+    if limit_negative(limit) do Err(LimitOutOfRange)
+    else if pids_negative(opts) do Err(BadRequest)
+    else
+      match ask("TRACE_START local " ++ limit_words(limit) ++ start_words(opts)) do
+        Ok(d) -> Ok(TraceId(int_of(d, "session")))
+        Err(code) -> Err(error_of(code))
+      end
+    end end
+  end
+
+  doc """
+  The events recorded since the last drain (at most 1024; `drain_max` takes a
+  bound up to 4096), oldest first, and the session's state. Boundary calls
+  land in `events`, actor events in `actor_events`. Draining also keeps the
+  session alive: one left undrained for 60 seconds ends itself ("idle").
+  `Err(NoSuchSession)` once it has been stopped or has expired.
+
+      match Trace.drain(d, s) do
+        Ok(b) ->
+          println(Trace.format(b.events))
+          if b.done do println("finished: " ++ unwrap_or(b.why, "")) else () end
+        Err(e) -> println("session gone")
+      end
+  """
+  fn drain(_c : Cap(Actor.Debug), s : TraceId) : Result(Batch, TraceError) do
+    match ask("TRACE_DRAIN local session:" ++ int_to_string(session_id(s))) do
+      Ok(d) -> Ok(drained_of(d))
+      Err(code) -> Err(error_of(code))
+    end
+  end
+
+  doc """
+  Like `drain`, taking at most `max` events (1..4096). Events beyond `max`
+  stay queued for the next drain (`queued` in the batch counts them).
+
+      let b = Trace.drain_max(d, s, 4096)
+  """
+  fn drain_max(_c : Cap(Actor.Debug), s : TraceId, max : Int) : Result(Batch, TraceError) do
+    match ask("TRACE_DRAIN local session:" ++ int_to_string(session_id(s)) ++ " max:" ++ int_to_string(max)) do
+      Ok(d) -> Ok(drained_of(d))
+      Err(code) -> Err(error_of(code))
+    end
+  end
+
+  doc """
+  Stop the session and free it; events not yet drained are discarded. Returns
+  the final state (`done` true, `why` `Some("stopped")`), or
+  `Err(NoSuchSession)` if it had already ended.
+
+      let _ = Trace.stop(d, s)
+  """
+  fn stop(_c : Cap(Actor.Debug), s : TraceId) : Result(Batch, TraceError) do
+    match ask("TRACE_STOP local session:" ++ int_to_string(session_id(s))) do
+      Ok(d) -> Ok(drained_of(d))
+      Err(code) -> Err(error_of(code))
+    end
+  end
+
+  doc """
+  One line per actor event: `<at_ns>ns <kind> pid <pid> [peer <p>] [tag <t>] [<reason>]`,
+  joined with newlines (no trailing one); absent fields are left out. An empty
+  list gives "".
+
+  ## Examples
+
+      march> Trace.format_actor([{ kind: Trace.Sent, pid: 3, peer: Some(5), msg_tag: Some(0), reason: None, epoch: 1, at_ns: 100 }])
+      "100ns sent pid 3 peer 5 tag 0"
+      march> Trace.format_actor([{ kind: Trace.Exited, pid: 5, peer: None, msg_tag: None, reason: Some("crash"), epoch: 1, at_ns: 900 }])
+      "900ns exited pid 5 crash"
+  """
+  fn format_actor(events : List(ActorEvent)) : String do
+    String.join(List.map(events, fn e ->
+      int_to_string(e.at_ns) ++ "ns " ++ kind_word(e.kind) ++ " pid " ++ int_to_string(e.pid)
+        ++ labelled(" peer ", e.peer) ++ labelled(" tag ", e.msg_tag)
+        ++ word_of(e.reason)), "\n")
+  end
+
+  pfn labelled(label : String, v : Option(Int)) : String do
+    match v do
+      Some(n) -> label ++ int_to_string(n)
+      None -> ""
+    end
+  end
+
+  pfn word_of(w : Option(String)) : String do
+    match w do
+      Some(r) -> " " ++ r
+      None -> ""
+    end
+  end
+
+  doc """
+  One line per event: `<at_ns>ns pid <pid> <function> epoch <epoch>`, joined
+  with newlines (no trailing one). An empty list gives "".
+
+  ## Examples
+
+      march> Trace.format([{ caller: 3, fn_name: "Billing.charge", epoch: 1, at_ns: 1500 }, { caller: 4, fn_name: "Billing.refund", epoch: 2, at_ns: 2700 }])
+      "1500ns pid 3 Billing.charge epoch 1\n2700ns pid 4 Billing.refund epoch 2"
+      march> Trace.format([])
+      ""
+  """
+  fn format(events : List(CallEvent)) : String do
+    String.join(List.map(events, fn e ->
+      int_to_string(e.at_ns) ++ "ns pid " ++ int_to_string(e.caller) ++ " " ++ e.fn_name
+        ++ " epoch " ++ int_to_string(e.epoch)), "\n")
+  end
+end

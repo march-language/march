@@ -76,19 +76,15 @@ let emit_int_arith ~emit_atom ctx (f : Tir.var) (a : Tir.atom) (b : Tir.atom)
          (matching the interpreter) instead of emitting a raw sdiv/srem that
          returns garbage.  The helpers use the bare operator messages
          ("division by zero" / "modulo by zero"); other ops stay native. *)
+      (* `+ - *` on Int panic when the result leaves the 63-bit range
+         ([Llvm_ctx.emit_checked_int_op]); the explicit wrapping forms are
+         the `int_wrapping_*` builtins.  [%] never leaves the range; [/]
+         does only for -2^62 / -1, and that bare 2^62 normalises to -2^62
+         at its first observation ([Llvm_ctx.emit_wrap_int63]). *)
       (match f.Tir.v_name with
-       | "/" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_div_op(i64 %s, i64 %s)" r va' vb)
-       | "%" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_mod_op(i64 %s, i64 %s)" r va' vb)
-       | _   -> emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_arith_op f.Tir.v_name) va' vb));
-      (* March Int is 63-bit and wraps, but the reduction modulo 2^63 is
-         LAZY: `+ - *` are ring operations, so the bare i64 result is left
-         as it is and normalised at its first observation (an icmp operand,
-         a C-call argument, ...) by [Llvm_emit.emit_atom] -- see
-         [Llvm_ctx.emit_wrap_int63].  Keeping the `add` bare between
-         `fib(n-1) + fib(n-2)` and `ret` is what lets LLVM's accumulator
-         tail-recursion elimination fire.  [%] never leaves the range; [/]
-         does only for -2^62 / -1, and that bare 2^62 normalises to -2^62. *)
-      ("i64", r)
+       | "/" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_div_op(i64 %s, i64 %s)" r va' vb); ("i64", r)
+       | "%" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_mod_op(i64 %s, i64 %s)" r va' vb); ("i64", r)
+       | op  -> ("i64", emit_checked_int_op ctx op va' vb))
     end
 
 (** Body of the `== != < <= > >=` arm: SIMD lanes, string equality and

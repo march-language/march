@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: expected `String` but got `Int`
+-- The companion of accept/t314: a Vault element type that NO parameter names
+-- stays pinned for the whole program, as before 2026-10-11. `peek` reads a
+-- named table back at whatever type its caller wants; generalising `b` would
+-- let one call read the table as Int and another as String (the erasure the
+-- typed handle exists to remove), so the first use fixes `b` and the second is
+-- an error.
+mod M do
+  needs IO.Mut
+
+  fn peek() : Option(b) do
+    let t = Vault.open("shared")
+    Vault.get(t, "k")
+  end
+
+  fn main(_m : Cap(IO.Mut)) : Bool do
+    let x : Option(Int) = peek()
+    let y : Option(String) = peek()
+    match (x, y) do
+      (Some(_), Some(_)) -> true
+      _ -> false
+    end
+  end
+end

@@ -1,0 +1,98 @@
+-- Regression: an `extern` called from (or passed as) a closure, compiled.
+-- Defun captured a user extern into the lambda's closure as a free variable,
+-- so the emitted LLVM called `@acc_push` (the March name; only the C symbol
+-- `ffi_acc_push` exists) and clang failed with "use of undefined value"; a
+-- zero-argument extern was stored as a function-pointer value instead.  An
+-- extern passed as a first-class value (`List.map(xs, dbl)`) built its
+-- `$clo_wrap` trampoline around the March name the same way, and that
+-- trampoline must also release the heap arguments the C callee only borrows.
+-- Run interpreted AND compiled against the one .expected; the last line is a
+-- live-allocation delta over a churn of every case (leak / double-free: 0).
+mod FfiExternLambda do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  resource Acc
+  extern "rt" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+    fn dbl(n: Int): Int = "ffi_test_dbl"
+    fn slen(s: String): Int = "ffi_test_slen"
+    fn acc_new(): Acc = "ffi_acc_new"
+    fn acc_push(a: Acc, n: Int): Int = "ffi_acc_push"
+    fn acc_total(a: Acc): Int = "ffi_acc_total"
+    fn finish(consume a: Acc): Int = "ffi_acc_finish"
+  end
+  fn sum(xs: List(Int)) : Int do List.fold_left(xs, 0, fn (s, x) -> s + x) end
+  -- an extern called in a lambda that captures a resource
+  fn pushes() : Int do
+    let a = acc_new()
+    let _ = List.map([1, 2, 3], fn x -> acc_push(a, x))
+    finish(a)
+  end
+  -- a zero-argument extern called in a lambda
+  fn fresh_in_lambda() : Int do
+    let mk = fn () -> acc_new()
+    let a = mk()
+    acc_push(a, 7)
+    finish(a)
+  end
+  -- an extern passed as a first-class value
+  fn as_value() : Int do sum(List.map([1, 2, 3], dbl)) end
+  -- heap-argument externs passed as values: the trampoline releases what
+  -- the C callee only borrows
+  fn heap_as_value() : Int do
+    let a = acc_new()
+    acc_push(a, 4)
+    let b = acc_new()
+    acc_push(b, 5)
+    let t = sum(List.map([a, b], acc_total))
+    let words = [string_concat("ab", int_to_string(t)), "cde"]
+    let n = t + sum(List.map(words, slen))
+    finish(a) + finish(b) + n
+  end
+  -- an extern in a nested lambda
+  fn nested() : Int do
+    let a = acc_new()
+    let _ = List.map([1, 2], fn x -> sum(List.map([x, x], fn y -> acc_push(a, y))))
+    let t = acc_total(a)
+    let _ = finish(a)
+    t
+  end
+  -- a `consume` extern inside a lambda
+  fn consume_in_lambda() : Int do
+    sum(List.map([5, 6], fn n ->
+      let a = acc_new()
+      acc_push(a, n)
+      finish(a)))
+  end
+  -- a local binding that shadows an extern's name is still captured
+  fn shadowed() : Int do
+    let dbl = fn n -> n + 100
+    sum(List.map([1, 2], fn x -> dbl(x)))
+  end
+  fn churn(n: Int) : Unit do
+    if n == 0 do () else
+      let _ = pushes()
+      let _ = fresh_in_lambda()
+      let _ = as_value()
+      let _ = heap_as_value()
+      let _ = nested()
+      let _ = consume_in_lambda()
+      let _ = shadowed()
+      churn(n - 1)
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    println(int_to_string(pushes()))
+    println(int_to_string(fresh_in_lambda()))
+    println(int_to_string(as_value()))
+    println(int_to_string(heap_as_value()))
+    println(int_to_string(nested()))
+    println(int_to_string(consume_in_lambda()))
+    println(int_to_string(shadowed()))
+    churn(20)
+    let base = live_allocs()
+    churn(500)
+    println(int_to_string(live_allocs() - base))
+  end
+end

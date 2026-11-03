@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR --------------- errors/diverges_conflict_1.march
+
+`down` is marked `@[diverges]` and `@[decreases]`: `@[diverges]` says the function is not claimed to terminate, and a metric claims that it does. [diverges_conflict]
+note: remove one of them.
+
+4 |   fn down(n : Int) : Int do
+         ^^^^
+
+    run `march --explain diverges_conflict`
+
+

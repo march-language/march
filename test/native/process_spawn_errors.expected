@@ -1,0 +1,11 @@
+run missing: Err cannot execute march_no_such_program_xyz: No such file or directory
+run_stream missing: Err cannot execute march_no_such_program_xyz: No such file or directory
+spawn_async missing: Err cannot execute march_no_such_program_xyz: No such file or directory
+run not executable: Err cannot execute /etc/hosts: Permission denied
+echo: Ok code=0 out=[hello world
+]
+exit 3: Ok code=3 out=[out]
+sh missing: Ok code=127 out=[]
+cat: ping
+env: Ok code=0 out=[from-parent]
+cwd matches: true

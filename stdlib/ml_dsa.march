@@ -1,0 +1,92 @@
+-- MlDsa: ML-DSA-65 digital signatures (FIPS 204), the NIST post-quantum
+-- signature scheme.
+--
+-- Pure ML-DSA with an empty context string. Signing is hedged by default
+-- (`sign` mixes 32 fresh random bytes in, FIPS 204's default);
+-- `sign_deterministic` is the deterministic variant. Both verify the same way.
+--
+-- Backed by the vendored mldsa-native (runtime/pqc.c, runtime/third_party/),
+-- portable C, the same code on the compiled and interpreted backends.
+mod MlDsa do
+  needs IO.Random
+
+  type KeyPair = { public_key : Bytes, secret_key : Bytes }
+
+  doc "Public key size in bytes: 1952."
+  fn public_key_bytes() : Int do 1952 end
+
+  doc "Secret key size in bytes: 4032."
+  fn secret_key_bytes() : Int do 4032 end
+
+  doc "Signature size in bytes: 3309."
+  fn signature_bytes() : Int do 3309 end
+
+  pfn len_err(what : String, want : Int, got : Bytes) : String do
+    "MlDsa: " ++ what ++ " must be " ++ int_to_string(want) ++ " bytes, got "
+      ++ int_to_string(Bytes.length(got))
+  end
+
+  doc """
+  The key pair a 32-byte seed determines (FIPS 204 ML-DSA.KeyGen_internal).
+  Err for a seed of any other length.
+  """
+  fn keypair_from_seed(seed : Bytes) : Result(KeyPair, String) do
+    let kp = mldsa65_keypair(seed)
+    if Bytes.is_empty(kp) do Err(len_err("a key seed", 32, seed))
+    else Ok({ public_key: Bytes.slice(kp, 4032, 1952), secret_key: Bytes.slice(kp, 0, 4032) })
+    end
+  end
+
+  doc """
+  A fresh key pair from 32 random bytes.
+
+      let kp = MlDsa.keypair()
+      -- kp.public_key: 1952 bytes, kp.secret_key: 4032 bytes
+  """
+  fn keypair() : KeyPair do
+    match keypair_from_seed(Crypto.random_bytes(32)) do
+      Ok(kp) -> kp
+      Err(e) -> panic(e)
+    end
+  end
+
+  pfn sign_rnd(secret_key : Bytes, msg : Bytes, rnd : Bytes) : Result(Bytes, String) do
+    if Bytes.length(secret_key) != 4032 do Err(len_err("a secret key", 4032, secret_key))
+    else
+      let sg = mldsa65_sign(secret_key, msg, rnd)
+      if Bytes.is_empty(sg) do Err("MlDsa: signing failed")
+      else Ok(sg)
+      end
+    end
+  end
+
+  doc """
+  Sign [msg] with [secret_key] (hedged: 32 fresh random bytes are mixed in, so
+  two signatures of one message differ). Err for a wrong-length key.
+
+      match MlDsa.sign(kp.secret_key, Bytes.from_string("hello")) do
+        Ok(s) -> MlDsa.verify(kp.public_key, Bytes.from_string("hello"), s)  -- true
+        Err(e) -> ...
+      end
+  """
+  fn sign(secret_key : Bytes, msg : Bytes) : Result(Bytes, String) do
+    sign_rnd(secret_key, msg, Crypto.random_bytes(32))
+  end
+
+  doc """
+  Sign [msg] with [secret_key] deterministically (FIPS 204's deterministic
+  variant: the same key and message always give the same signature).
+  """
+  fn sign_deterministic(secret_key : Bytes, msg : Bytes) : Result(Bytes, String) do
+    sign_rnd(secret_key, msg, Bytes.from_list(List.map(List.range(0, 32), fn _ -> 0)))
+  end
+
+  doc """
+  Whether [signature] is a valid signature of [msg] under [public_key]. False for any
+  malformed argument, never an error.
+  """
+  fn verify(public_key : Bytes, msg : Bytes, signature : Bytes) : Bool do
+    mldsa65_verify(public_key, msg, signature)
+  end
+
+end

@@ -22,6 +22,11 @@ const unsigned char *march_sig_pubkey(void);
 /* The key as 64 lowercase hex chars, or "" without a key. */
 void march_sig_pubkey_hex(char out[65]);
 
+/* This process's boot id: 32 lowercase hex chars from the OS entropy source,
+ * drawn once.  A signed observe request names it (`boot:`), so a captured
+ * request is useless against a restarted process or another node. */
+const char *march_sig_boot_id(void);
+
 /* 1 iff [sig_b64] (base64, standard or URL-safe, padding optional) is a valid
  * ed25519 signature over [msg] by the compiled-in key. */
 int  march_sig_verify(const char *msg, const char *sig_b64);
@@ -54,5 +59,18 @@ int  march_sig_debug_allowed(const char *verb);
  * march_audit_close, which writes the line out under a process-wide lock. */
 FILE *march_audit_open(void);
 void  march_audit_close(FILE *f);
+
+/* The node's CAS root: $HOME/.march/cas, or /tmp/.march_cas without $HOME.
+ * The reload server stores uploads under it; the observe socket's SOURCE
+ * verb (R10) reads function source text from <root>/sources/. */
+const char *march_cas_root(void);
+
+/* The largest source text a node stores or serves for one function. */
+#define MARCH_SOURCE_MAX_BYTES 262144
+
+/* Write "<root>/sources/<2 hex>/<62 hex>" for the 64-lowercase-hex [hash]
+ * into [out]; 0 (and [out] untouched) when [hash] is not exactly that, or
+ * [outsz] is too small. */
+int march_source_path(char *out, size_t outsz, const char *hash);
 
 #endif /* MARCH_SIG_H */

@@ -18,6 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Deliberately NOT macos-26 like CI's macOS jobs: the release binary
+          # inherits the build host's SDK as its minimum macOS, and 15 is the
+          # oldest we ship for.
           - os: macos-15
             platform: darwin-arm64
             ocaml-compiler: 5.5.1
@@ -58,7 +61,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
 
@@ -156,7 +159,13 @@ jobs:
             cp _build/default/forge/bin/main.exe _dist/bin/forge
             cp stdlib/*.march _dist/stdlib/
             # Bundle the C runtime sources so `march --compile` works from the prebuilt.
+            # third_party/ (vendored BLAKE3 and mimalloc, with their licenses) is
+            # compiled into every program: without it v0.5.0 shipped a compiler
+            # that could not compile anything.
             cp runtime/*.c runtime/*.h _dist/runtime/
+            cp -R runtime/third_party _dist/runtime/
+            # The JS target's runtime, copied next to every `--target js` output.
+            cp runtime/*.mjs _dist/runtime/
             cp LICENSE _dist/ 2>/dev/null || true
 
       # --- macOS: built on the runner host ---
@@ -170,8 +179,10 @@ jobs:
       # failed with "no matching opam release" on darwin-arm64, and forcing a
       # prerelease opam fails GPG verification) AND installs the opam deps from
       # a cached switch, replacing the separate uncached `opam install` step
-      # this job used to run. Shares its cache key with ci.yml, so a release
-      # build usually starts from a switch some CI run already populated.
+      # this job used to run. The cache key names the OS release, so this
+      # macos-15 leg no longer shares a switch with CI's macOS jobs (macos-26):
+      # a switch built against the 26 SDK must not reach a release binary. It
+      # rebuilds its own switch once and then hits its own cache entry.
       #
       # Only the opam half is shared: this job's system-dependency step below
       # is deliberately NOT the common one, because release artifacts need a
@@ -212,7 +223,11 @@ jobs:
           cp _build/default/forge/bin/main.exe _dist/bin/forge
           cp stdlib/*.march _dist/stdlib/
           # Bundle the C runtime sources so `march --compile` works from the prebuilt.
+          # third_party/: see the Linux leg above.
           cp runtime/*.c runtime/*.h _dist/runtime/
+          cp -R runtime/third_party _dist/runtime/
+          # JS runtime: see the Linux leg above.
+          cp runtime/*.mjs _dist/runtime/
           cp LICENSE _dist/ 2>/dev/null || true
 
       # --- Package ---
@@ -259,6 +274,57 @@ jobs:
       # one that is merely musl-DYNAMIC (which alpine would happily run).
       #
       # Runs BEFORE `strip`, for the same reason the binaries-exist check does.
+      # `--version` proves the compiler starts, not that it can do its job.
+      # v0.5.0 published three archives whose compiler failed every
+      # `march --compile` ('third_party/blake3/blake3.h' file not found): the
+      # packaging copied runtime/*.c and *.h but not runtime/third_party/, and
+      # every check here ran `--version` only. Compile and run a real program
+      # with the PACKAGED compiler, runtime and stdlib, from outside the
+      # checkout and with a private HOME, so nothing in the source tree or a
+      # warm cache can stand in for a missing file.
+      - name: Verify the archive compiles and runs a program
+        run: |
+          set -euo pipefail
+          dist="$PWD/_dist"
+          work="$(mktemp -d)"
+          mkdir -p "$work/home"
+          cat > "$work/smoke.march" <<'MARCH'
+          mod Smoke do
+            needs IO.Console
+            fn main(_c : Cap(IO.Console)) do
+              let xs = List.map([1, 2, 3], fn x -> x * 2)
+              println("smoke " ++ int_to_string(List.length(xs)))
+            end
+          end
+          MARCH
+          cd "$work"
+          env -u MARCH_RUNTIME_DIR -u MARCH_STDLIB HOME="$work/home" \
+            "$dist/bin/march" --compile -o "$work/smoke" "$work/smoke.march" > compile.log 2>&1 || {
+              echo "::error::${{ matrix.platform }}: the packaged compiler cannot compile a program." >&2
+              cat compile.log >&2; exit 1; }
+          out="$("$work/smoke")"
+          [ "$out" = "smoke 3" ] || {
+            echo "::error::${{ matrix.platform }}: the compiled smoke program printed '$out', expected 'smoke 3'." >&2
+            exit 1; }
+          echo "  ok: compiled and ran with the packaged compiler ($out)"
+          # v0.7.0 shipped without runtime/*.mjs, so every `--target js` build
+          # from the archive failed in node with ERR_MODULE_NOT_FOUND.
+          mkdir -p "$work/js"
+          env -u MARCH_RUNTIME_DIR -u MARCH_STDLIB HOME="$work/home" \
+            "$dist/bin/march" --target js -o "$work/js/smoke.mjs" "$work/smoke.march" > js.log 2>&1 || {
+              echo "::error::${{ matrix.platform }}: the packaged compiler cannot build a program for --target js." >&2
+              cat js.log >&2; exit 1; }
+          [ -f "$work/js/march_runtime.mjs" ] || {
+            echo "::error::${{ matrix.platform }}: --target js did not place march_runtime.mjs next to its output; the archive is missing runtime/*.mjs." >&2
+            exit 1; }
+          if command -v node > /dev/null; then
+            out="$(node "$work/js/smoke.mjs")"
+            [ "$out" = "smoke 3" ] || {
+              echo "::error::${{ matrix.platform }}: the JS smoke program printed '$out', expected 'smoke 3'." >&2
+              exit 1; }
+          fi
+          echo "  ok: built for --target js with the packaged compiler"
+
       - name: Verify the archive runs on a bare system
         if: matrix.static
         run: |
@@ -287,6 +353,75 @@ jobs:
           } || echo "  none — statically linked"
           exit $fail
 
+      # `march --compile --static` (static-output design, Stage 4:
+      # specs/2026-09-23-static-compile-output-design.md §6 check 2). A link
+      # that merely succeeds is not evidence: run the binary in an image with
+      # nothing in it but the binary. Compiled with the PACKAGED compiler
+      # inside a stock Alpine (musl) container, since --static is musl-only
+      # and this runner is glibc. The red half is the same hello WITHOUT
+      # --static, which must fail to start in the same scratch image; if it
+      # starts, this check could not tell the two apart.
+      - name: Verify --static output runs in an empty container
+        if: matrix.alpine
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          mkdir -p "$work/home"
+          cat > "$work/hello.march" <<'MARCH'
+          mod Hello do
+            needs IO.Console
+            fn main(_c : Cap(IO.Console)) : Unit do
+              println("hi")
+            end
+          end
+          MARCH
+          cat > "$work/tlsp.march" <<'MARCH'
+          mod Tlsp do
+            needs IO.Console
+            needs IO.NetConnect.TLS
+            fn main(_c : Cap(IO.Console), _t : Cap(IO.NetConnect.TLS)) : Unit do
+              match Tls.client_ctx(Tls.default_client_config()) do
+                Ok(_) -> println("tls ctx ok")
+                Err(e) -> println("tls err " ++ Tls.error_to_string(e))
+              end
+            end
+          end
+          MARCH
+          docker run --rm -v "$PWD/_dist:/dist:ro" -v "$work:/w" -w /w alpine:3.21 sh -euc '
+            apk add --no-cache clang build-base openssl-dev openssl-libs-static               zlib-dev zlib-static zstd-dev zstd-static brotli-dev brotli-static               libucontext-dev > /dev/null
+            for p in hello tlsp; do
+              HOME=/w/home /dist/bin/march --compile --static -o /w/$p /w/$p.march
+            done
+            HOME=/w/home /dist/bin/march --compile -o /w/hello_dynamic /w/hello.march'
+          fail=0
+          if readelf -d "$work/hello" "$work/tlsp" | grep NEEDED; then
+            echo "::error::${{ matrix.platform }}: a --static binary has NEEDED entries." >&2
+            fail=1
+          fi
+          run_scratch() {  # run_scratch BIN -> its stdout, from a FROM-scratch image
+            local d; d="$(mktemp -d)"
+            cp "$work/$1" "$d/prog"
+            printf 'FROM scratch\nCOPY prog /prog\nENTRYPOINT ["/prog"]\n' > "$d/Dockerfile"
+            docker build -q -t "march-static-check-$1" "$d" > /dev/null
+            docker run --rm "march-static-check-$1" 2>&1
+          }
+          for pe in "hello:hi" "tlsp:tls ctx ok"; do
+            p="${pe%%:*}"; want="${pe#*:}"
+            if out=$(run_scratch "$p") && [ "$out" = "$want" ]; then
+              echo "  ok: $p --static in scratch: $out"
+            else
+              echo "::error::${{ matrix.platform }}: $p --static in a scratch image printed '$out', expected '$want'." >&2
+              fail=1
+            fi
+          done
+          if out=$(run_scratch hello_dynamic); then
+            echo "::error::${{ matrix.platform }}: the DYNAMIC hello started in scratch ('$out'); this check cannot tell static from dynamic." >&2
+            fail=1
+          else
+            echo "  ok: the dynamic hello does not start in scratch, as expected"
+          fi
+          exit $fail
+
       - name: Strip binary
         run: |
           if command -v strip &> /dev/null; then
@@ -301,7 +436,7 @@ jobs:
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: march-${{ inputs.version }}-${{ matrix.platform }}
           path: march-${{ inputs.version }}-${{ matrix.platform }}.tar.gz
@@ -311,7 +446,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -323,7 +458,7 @@ jobs:
           sha256sum -- *.tar.gz > ../march-${{ inputs.version }}-checksums.txt
 
       - name: Upload checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: march-${{ inputs.version }}-checksums
           path: march-${{ inputs.version }}-checksums.txt

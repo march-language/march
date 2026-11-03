@@ -1,0 +1,14 @@
+mod Letp do
+  fn mh(Cons(h, _)) : Int do h end
+
+  fn tup(p : (Int, Int)) : Int do
+    let (a, _) = p
+    a
+  end
+
+  fn main() : Unit do
+    let _ = mh(Cons(1, Nil))
+    let _ = tup((1, 2))
+    ()
+  end
+end

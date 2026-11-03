@@ -1,0 +1,13 @@
+exit: 1
+-- ERROR -------------------- errors/int_overflow_1.march
+
+this addition may overflow Int in a `cap no_panic` module: nothing in scope keeps the result within [-2^62, 2^62) (e.g. n = 4611686018427387903). [int_overflow]
+
+Bound the operands with a refinement (`{v : Int | v < 1000000}`) or a guard (`if x < n do x + 1 ...`), or spell it `int_wrapping_add` if wrapping modulo 2^63 is what you want.
+
+5 |     n + 1
+        ^^^^^
+
+    run `march --explain int_overflow`
+
+

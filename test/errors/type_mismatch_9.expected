@@ -13,6 +13,11 @@ expected `S_end` but got `S_send_Msg_Prod_Cons_1`. [type_mismatch]
 
 20 |     Stream_Prod.close(s, st)
          ^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `st` was bound here as `S_send_Msg_Prod_Cons_1`:
+
+19 |   pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1) : Stream_Prod.Yield do
+                                       ^^
     run `march --explain type_mismatch`
 
 

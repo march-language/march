@@ -20,6 +20,10 @@ mod M do
     let n : Option(Int) = Config.get(port)
     let h : String = Config.get_with_default(host, "")
     let s : Result(String, Config.Error) = Config.fetch(port_as_string)
-    n == Some(4000) && h == "localhost" && s != Ok("4000")
+    let wrong_codec = match s do
+      Ok(value) -> value != "4000"
+      Err(_) -> true
+    end
+    n == Some(4000) && h == "localhost" && wrong_codec
   end
 end

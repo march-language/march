@@ -10,6 +10,8 @@
 -- against forge/test/fixtures/diagnose (expected.txt names each fixture's
 -- findings), so a threshold changed in one place and not the other fails a
 -- test. Change them together.
+--
+-- doc: try
 mod Diagnose do
   needs Actor.Introspect
 
@@ -53,6 +55,24 @@ mod Diagnose do
 
   pfn actors(env : Json.JsonValue) : List(Json.JsonValue) do
     list_at(section(env, "actors"), "actors")
+  end
+
+  pfn actor_coverage(env : Json.JsonValue) : Option(String) do
+    let s = section(env, "actors")
+    let total = num_at(s, "total")
+    let shown = num_at(s, "shown")
+    if shown < total do
+      Some("actors: shown " ++ int_to_string(shown) ++ " of " ++ int_to_string(total))
+    else None end
+  end
+
+  pfn crash_coverage(env : Json.JsonValue) : Option(String) do
+    let s = section(env, "crashes")
+    let total = num_at(s, "total")
+    let shown = List.length(list_at(s, "crashes"))
+    if shown < total do
+      Some("crashes: shown " ++ int_to_string(shown) ++ " of " ++ int_to_string(total))
+    else None end
   end
 
   pfn waiting(a : Json.JsonValue) : Int do num_at(a, "mbox") + num_at(a, "held") end
@@ -205,6 +225,8 @@ mod Diagnose do
   end
 
   -- 5. Live heap objects up more than 10% with the actor count flat (±5%).
+  -- Queued messages are live objects too, so mailbox backlog is accounted for
+  -- by mailbox.growth rather than reported as an RC leak.
   pfn rc_climb(b : Json.JsonValue, a : Json.JsonValue) : List(Finding) do
     match (get(section(b, "mem"), "live_objects"), get(section(a, "mem"), "live_objects")) do
       (Json.Number(f0), Json.Number(f1)) ->
@@ -212,11 +234,15 @@ mod Diagnose do
         let o1 = float_to_int(f1)
         let a0 = num_at(section(b, "mem"), "actors")
         let a1 = num_at(section(a, "mem"), "actors")
+        let queued_b = num_at(section(b, "mem"), "queued_messages")
+        let queued_a = num_at(section(a, "mem"), "queued_messages")
+        let queued_growth = if queued_a > queued_b do queued_a - queued_b else 0 end
+        let adjusted_o1 = if o1 > queued_growth do o1 - queued_growth else 0 end
         let d = if a1 > a0 do a1 - a0 else a0 - a1 end
         let base = if a0 > 1 do a0 else 1 end
-        if o0 >= 1000 && o1 * 10 > o0 * 11 && d * 20 <= base do
+        if o0 >= 1000 && adjusted_o1 * 10 > o0 * 11 && d * 20 <= base do
           [finding("rc.climb", "warning", [o0, o1],
-                   "heap objects climb with no new actors: a leak; compare SNAPSHOT mem over minutes")]
+                   "heap objects climb beyond queued-message growth with no new actors: a leak; compare SNAPSHOT mem over minutes")]
         else Nil end
       _ -> Nil
     end
@@ -254,6 +280,33 @@ mod Diagnose do
   `observe_query` returns them), `before` taken a window ahead of `after`.
   Nil means none fired; probes this backend cannot run (cluster suspicion,
   lost global names) are not in the list at all.
+
+  The checks, in order: `mailbox.growth` (an actor's waiting work grew to 10
+  or more; critical when it holds over half of a node queue of 100+),
+  `mailbox.over_limit` (actors at a drop-policy limit while the node
+  dropped), `sched.saturated` and `sched.idle_imbalance` (scheduler
+  utilisation over the window), `crash.loop` (a supervisor's children
+  crashed 3+ times: critical within a minute of `after`, warning within an
+  hour), `rc.climb` (live heap objects up over 10% with the actor count
+  flat) and `epoch.stuck` / `epoch.old_units`. A missing section or field
+  reads as empty or 0, so a malformed envelope yields no findings rather
+  than an error.
+
+  ## Examples
+
+  Three crashes under supervisor 7 inside the last minute:
+
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> let looping = Result.unwrap_or(Json.parse("{\"at_ms\": 1000, \"data\": {\"crashes\": {\"total\": 5, \"crashes\": [{\"supervisor\": 7, \"at_ms\": 900}, {\"supervisor\": 7, \"at_ms\": 950}, {\"supervisor\": 7, \"at_ms\": 990}]}}}"), Json.Null)
+      march> Diagnose.ids_of(Diagnose.findings(quiet, looping))
+      ["crash.loop/critical"]
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> let looping = Result.unwrap_or(Json.parse("{\"at_ms\": 1000, \"data\": {\"crashes\": {\"total\": 5, \"crashes\": [{\"supervisor\": 7, \"at_ms\": 900}, {\"supervisor\": 7, \"at_ms\": 950}, {\"supervisor\": 7, \"at_ms\": 990}]}}}"), Json.Null)
+      march> List.map(Diagnose.findings(quiet, looping), fn f -> f.rows)
+      [[7]]
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> List.length(Diagnose.findings(quiet, quiet))
+      0
   """
   fn findings(before : Json.JsonValue, after : Json.JsonValue) : List(Finding) do
     List.concat([mailbox_growth(before, after), mailbox_over_limit(before, after),
@@ -262,8 +315,47 @@ mod Diagnose do
   end
 
   doc """
+  Reports actor or crash sections truncated in either SNAPSHOT envelope: at
+  most one line for actors and one for crashes (`before` checked first),
+  so a finding computed over a truncated list is not mistaken for the whole
+  picture. Nil when nothing was truncated.
+
+  ## Examples
+
+  Using `quiet` and `looping` from `findings` (the crash ring shows 3 of 5):
+
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> let looping = Result.unwrap_or(Json.parse("{\"at_ms\": 1000, \"data\": {\"crashes\": {\"total\": 5, \"crashes\": [{\"supervisor\": 7, \"at_ms\": 900}, {\"supervisor\": 7, \"at_ms\": 950}, {\"supervisor\": 7, \"at_ms\": 990}]}}}"), Json.Null)
+      march> Diagnose.coverage(quiet, looping)
+      ["crashes: shown 3 of 5"]
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> Diagnose.coverage(quiet, quiet)
+      []
+  """
+  fn coverage(before : Json.JsonValue, after : Json.JsonValue) : List(String) do
+    let coverage_rows =
+      match actor_coverage(before) do
+      Some(s) -> [s]
+      None ->
+        match actor_coverage(after) do
+          Some(s) -> [s]
+          None -> Nil
+        end
+      end
+    match crash_coverage(before) do
+      Some(s) -> List.append(coverage_rows, [s])
+      None ->
+        match crash_coverage(after) do
+          Some(s) -> List.append(coverage_rows, [s])
+          None -> coverage_rows
+        end
+    end
+  end
+
+  doc """
   Run the findings on this program: two snapshots `window_ms` apart, with
-  this green thread asleep between them.
+  this green thread asleep between them. Nil when nothing fired, or when
+  either snapshot cannot be parsed.
 
       match Diagnose.run(c, 1000) do
         Nil -> ()
@@ -282,7 +374,16 @@ mod Diagnose do
     end
   end
 
-  doc "\"id/severity\" for each finding, sorted: the form forge's fixture test compares."
+  doc """
+  "id/severity" for each finding, sorted: the form forge's fixture test compares.
+
+  ## Examples
+
+      march> Diagnose.ids_of([{ id: "sched.saturated", severity: "warning", rows: [0], next: "" }, { id: "crash.loop", severity: "critical", rows: [7], next: "" }])
+      ["crash.loop/critical", "sched.saturated/warning"]
+      march> Diagnose.ids_of([])
+      []
+  """
   fn ids_of(fs : List(Finding)) : List(String) do
     List.sort_by(List.map(fs, fn f -> f.id ++ "/" ++ f.severity), fn (x, y) -> x < y)
   end

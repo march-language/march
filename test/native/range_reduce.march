@@ -1,0 +1,11 @@
+-- Range.reduce must pass a two-argument reducer through to List.fold_left.
+-- Before the fix its curried wrapper panics interpreted and returns garbage
+-- compiled.  specs/todos/2026-10-07-range-reduce-curried-callback.md
+mod Main do
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) do
+    let r = Range.new(1, 6)
+    println(int_to_string(Range.reduce(r, 7, fn (acc, x) -> acc * 10 + x)))
+  end
+end

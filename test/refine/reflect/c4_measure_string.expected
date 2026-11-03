@@ -1,0 +1,5 @@
+proved	user	c4_measure_string.march:13:12	precondition	need	sz(_) == 2
+violated	user	c4_measure_string.march:14:12	precondition	need	sz(_) == 2
+reflect	c4_measure_string.march:3:5	sz	reflected	unfold
+reflect	c4_measure_string.march:10:5	need	reflected	unfold (guard: sz(xs) == 2)
+reflect	c4_measure_string.march:12:5	main	no	R1:is `main` (c4_measure_string.march:12:5)

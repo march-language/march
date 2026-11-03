@@ -1,0 +1,4 @@
+ranked by mbox (s cycles: mbox stack crashes slices msgs_in msgs_out)   showing 2 of 2
+     PID  NAME                 TYPE               STATUS        MBOX     STACK       MBOX CRASHES  LINK       SUPERVISOR         ~
+       1  boss                                    waiting          0     16384          0       3  none       -                  ~
+       4                                          waiting          0     16384          0       0  supervised 1                  ~

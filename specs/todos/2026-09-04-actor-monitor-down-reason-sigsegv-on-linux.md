@@ -288,3 +288,22 @@ theory. It has been measured.
 3. If it does not reproduce in a few thousand Linux iterations, leave this file
    open with the negative result recorded rather than deleting it; a single
    SIGSEGV in the death path is worth a second sighting before it is dismissed.
+
+## TSAN on macOS, 2026-10-11: no race reported
+
+`MARCH_SANITIZE=thread` build (macOS arm64, LLVM 22), `MARCH_NUM_SCHEDULERS=4`, 11 runs:
+no TSAN report in any run. 4 runs wedged (some partway through the output, some after
+the last line). That is the TSAN-only wedge in
+`specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md` (never seen in plain or ASAN
+builds), a hang rather than a fault. The refcount race TSAN had flagged in `march_decrc`
+(a plain immortal-check read, now a relaxed atomic) is benign: a mortal count can never
+reach the 2^40 threshold, so the read cannot give a wrong answer and cannot explain a
+SIGSEGV in the death path.
+
+## 2026-10-12: did not reproduce under ASAN on Linux arm64
+
+30 runs at `MARCH_NUM_SCHEDULERS=14` under `MARCH_SANITIZE=1
+MARCH_DEBUG_RUNTIME=1` (`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`), Docker
+`march-ci-ubuntu-step6b` (arm64, glibc 2.39), concurrently with a 6-way ASAN
+sweep for load: 0 failures, no sanitizer report. (Its golden is a grep, not a
+`.expected`, so the test/native sanitizer sweep does not pick it up.)

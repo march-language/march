@@ -45,6 +45,7 @@
 #
 #   scripts/determinism-oracle.sh                    # --corpus small (snapshots + topology_app, ~30 programs)
 #   scripts/determinism-oracle.sh --corpus all       # + test/native + bench (~420 programs; CI)
+#   scripts/determinism-oracle.sh --corpus all --shard 1/2   # shard K of N (1-based), CI runs two
 #   scripts/determinism-oracle.sh --self-test        # must print RED: proves the oracle can fail
 #   scripts/determinism-oracle.sh -j 8 -w /tmp/det   # parallelism / keep the work dir
 #
@@ -162,10 +163,11 @@ if [ "${1:-}" = "--one" ]; then
 fi
 
 # ── driver ───────────────────────────────────────────────────────────────────
-CORPUS=small; JOBS=""; WORK=""; SELF_TEST=0
+CORPUS=small; JOBS=""; WORK=""; SELF_TEST=0; SHARD=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --corpus) CORPUS="${2:?--corpus needs small or all}"; shift 2 ;;
+    --shard) SHARD="${2:?--shard needs K/N}"; shift 2 ;;
     -j) JOBS="${2:?-j needs a number}"; shift 2 ;;
     -w) WORK="${2:?-w needs a directory}"; shift 2 ;;
     --self-test) SELF_TEST=1; shift ;;
@@ -174,6 +176,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$CORPUS" in small|all) ;; *) echo "FATAL: --corpus must be small or all, got: $CORPUS"; exit 2 ;; esac
+if [ -n "$SHARD" ]; then
+  [[ $SHARD =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ] \
+    || { echo "FATAL: --shard takes K/N with 1 <= K <= N, got: $SHARD"; exit 2; }
+  SHARD_K="${BASH_REMATCH[1]}"; SHARD_N="${BASH_REMATCH[2]}"
+fi
 [ -x "$EXE" ] || { echo "FATAL: $EXE not built. Run: dune build --root . bin/main.exe"; exit 2; }
 "$EXE" --help 2>&1 | grep -q -- '--dump-impl-hashes' \
   || { echo "FATAL: $EXE has no --dump-impl-hashes (stale build?)"; exit 2; }
@@ -251,8 +258,20 @@ else
   echo "WARNING: no forge exe at $FORGE; skipping examples/topology_app, the program"
   echo "         the known cold/warm drift (#805) showed on.  Build it: dune build --root . forge/bin/main.exe"
 fi
+# --shard K/N keeps every Nth program of the sorted list, dealt round-robin
+# (the way scripts/two-node.sh --list does), so each shard gets a mix of the
+# cheap and the heavy programs.  examples_topology_app is kept in EVERY shard:
+# it is the program the known drift showed on (see above) and costs one compile.
+if [ -n "$SHARD" ]; then
+  i=0
+  for t in $(LC_ALL=C ls "$ARGS"); do
+    i=$((i + 1))
+    [ "$t" = examples_topology_app ] && continue
+    [ $(( (i - 1) % SHARD_N + 1 )) -eq "$SHARD_K" ] || rm -f "$ARGS/$t"
+  done
+fi
 total="$(ls "$ARGS" | wc -l | tr -d ' ')"
-echo "determinism-oracle: corpus=$CORPUS programs=$total jobs=$JOBS work=$WORK"
+echo "determinism-oracle: corpus=$CORPUS${SHARD:+ shard=$SHARD} programs=$total jobs=$JOBS work=$WORK"
 start="$(date +%s)"
 # xargs -P fans the per-program worker out; each worker writes only under
 # its own $WORK/out/<tag>, so there is no shared state to race on.

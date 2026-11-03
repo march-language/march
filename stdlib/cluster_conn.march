@@ -14,7 +14,16 @@
 mod ClusterConn do
   needs IO.NetListen
 
-  -- Open a listening socket on [port]; returns the fd, or Err on failure.
+  doc """
+  Open a TCP listening socket on [port] (`tcp_listen`). Returns `Ok(fd)`, or
+  `Err(message)` when the port cannot be bound (e.g. already in use). Pass
+  the fd to `accept_split` / `accept_split_auth` / `accept_one`.
+
+      match ClusterConn.listen(9100) do
+        Ok(lfd) -> serve(lfd)
+        Err(e) -> println("listen failed: " ++ e)
+      end
+  """
   fn listen(port : Int) : Result(Int, String) do
     match tcp_listen(port) do
       Ok(fd) -> Ok(fd)
@@ -92,13 +101,24 @@ mod ClusterConn do
   doc "The verified certificate of peer [node_id] (certificate mode), if it presented one."
   fn peer_cert(node_id : String) : Option(NodeCert.Cert) do Vault.get(certs(), node_id) end
 
-  -- Dial [host]:[port] twice -- control first, then data -- and register the
-  -- peer with both.
+  doc """
+  Dial [host]:[port] twice, control connection first and then data, run the
+  shared-[secret] handshake as [my_id] on each, and register the peer in
+  [reg] with both fds. Returns `Ok((reg2, peer))` or `Err(message)` (connect
+  failure, handshake failure, or the two connections reaching different
+  nodes); on failure every socket it opened is closed. The handshakes are
+  unbounded: blocks until the peer answers. See `connect_split_within`.
+  """
   fn connect_split(reg, host, port, my_id, secret) do
     connect_split_within(reg, host, port, my_id, secret, 0)
   end
 
-  -- `connect_split`, each handshake bounded by [timeout_ms] (<= 0: no bound).
+  doc """
+  `connect_split`, with each handshake's reads bounded by [timeout_ms]
+  (<= 0: no bound), so a peer that accepts and then says nothing fails with
+  the handshake's error instead of blocking the caller for ever. The TCP
+  connect itself is not bounded by [timeout_ms].
+  """
   fn connect_split_within(reg, host, port, my_id, secret, timeout_ms) do
     match connect_split_auth(reg, host, port, my_id, ClusterAuth.Secret(secret), timeout_ms) do
       Err(e) -> Err(e)
@@ -145,16 +165,25 @@ mod ClusterConn do
     end
   end
 
-  -- Accept one peer's TWO connections (in the order the peer dials them:
-  -- control, then data) and register it with both.
+  doc """
+  Accept one peer's TWO connections on [listen_fd], in the order the peer
+  dials them (control, then data), run the shared-[secret] handshake as
+  [my_id] on each, and register the peer in [reg] with both fds. Returns
+  `Ok((reg2, peer))`, or `Err(message)` when an accept or handshake fails or
+  the connections arrive out of role order or from different nodes. Blocks
+  until both connections arrive; see `accept_split_within` for a bound.
+  """
   fn accept_split(reg, listen_fd, my_id, secret) do
     accept_split_within(reg, listen_fd, my_id, secret, 0)
   end
 
-  -- `accept_split`, giving up when [timeout_ms] (<= 0: no bound) passes
-  -- with no connection pending, or with a handshake unfinished:
-  -- Err("tcp_accept: timed out") for the first, the handshake's own error
-  -- for the second.
+  doc """
+  `accept_split`, giving up when [timeout_ms] (<= 0: no bound) passes with
+  no connection pending, or with a handshake unfinished:
+  `Err("tcp_accept: timed out")` for the first, the handshake's own error for
+  the second. The bound applies to each accept and each handshake
+  separately, so the whole call can take up to about four times [timeout_ms].
+  """
   fn accept_split_within(reg, listen_fd, my_id, secret, timeout_ms) do
     match accept_split_auth(reg, listen_fd, my_id, ClusterAuth.Secret(secret), timeout_ms) do
       Err(e) -> Err(e)
@@ -191,7 +220,14 @@ mod ClusterConn do
     end
   end
 
-  -- Dial [host]:[port], handshake as [my_id]/[secret], register the peer.
+  doc """
+  Single-connection (pre-split) dial: connect to [host]:[port], run the
+  shared-[secret] handshake as [my_id], and register the peer in [reg] with
+  no data connection (`data_fd` is `PeerRegistry.no_fd()`). Returns
+  `Ok((reg2, peer))` or `Err(message)`; the socket is closed on a handshake
+  failure. Unbounded: blocks until the peer completes the handshake. Kept for
+  pre-split peers and fixtures; new code uses `connect_split_auth`.
+  """
   fn connect_to_peer(reg, host, port, my_id, secret) do
     match Socket.connect(host, port) do
       Err(e) -> Err(Socket.error_message(e))
@@ -200,7 +236,14 @@ mod ClusterConn do
     end
   end
 
-  -- Accept one inbound connection on [listen_fd], handshake, register.
+  doc """
+  Single-connection (pre-split) accept: wait for one inbound connection on
+  [listen_fd], run the shared-[secret] handshake as [my_id], and register the
+  peer in [reg] with no data connection. Returns `Ok((reg2, peer))` or
+  `Err(message)`; the socket is closed on a handshake failure. Blocks until a
+  peer connects and completes the handshake. The counterpart of
+  `connect_to_peer`.
+  """
   fn accept_one(reg, listen_fd, my_id, secret) do
     match tcp_accept(listen_fd) do
       Err(e) -> Err(e)

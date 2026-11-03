@@ -1,0 +1,2 @@
+reflect	r2_guard2.march:3:5	guarded	no	R5:guarded match may not match (r2_guard2.march:4:10)
+reflect	r2_guard2.march:10:5	main	no	R1:is `main` (r2_guard2.march:10:5)

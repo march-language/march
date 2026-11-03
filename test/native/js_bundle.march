@@ -1,0 +1,24 @@
+-- Without --no-copy-runtime, `march --target js -o out/x.mjs` puts every module
+-- the program imports beside it: march_runtime.mjs, the built-in canvas module
+-- (referenced, though not called under Node) and relative-path extern modules,
+-- keeping their relative paths, plus the relative modules those import. The
+-- dune rule builds into a fresh directory and runs node there.
+mod JsBundle do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.Process
+
+  extern "./js_bundle_mods/greet.mjs" : Cap(IO.Foreign) do
+    fn greet() : String
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process)) : Unit do
+    println(greet())
+    if List.length(process_argv()) > 100 do
+      match Js.Canvas.get_context(Js.Dom.body()) do
+        Some(ctx) -> Js.Canvas.fill_rect(ctx, 0.0, 0.0, 1.0, 1.0)
+        None -> ()
+      end
+    else () end
+  end
+end

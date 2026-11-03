@@ -1,0 +1,27 @@
+-- Two-node scenario "peer_closed_queue_gone": node-a only joins and waits
+-- to be SIGKILLed. See scenario.sh.
+mod PeerClosedQueueGoneA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn idle() : () do
+    sleep_ms(250)
+    idle()
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "queue-gone-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(_h) ->
+        println("node-a: up")
+        idle()
+    end
+  end
+end

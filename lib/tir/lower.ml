@@ -197,6 +197,7 @@ let _resume : (Ast.decl list -> Tir.fn_def list * Tir.type_def list) option ref 
 let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) ?(resumable=false) (m : Ast.module_) : Tir.tir_module =
   _resume := None;
   reset_counter ();
+  Lower_state.reset_hosts ();
   Provenance.reset ();
   (* Collision-conditional qualification (Task 3 of specs/plans/2026-07-20-
      fqn-impl-dispatch-identity.md, impl symbols; extended by Task 3 of
@@ -258,6 +259,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   Handler_owner.reset ();
   Hot_reload.reset_actor_provenance ();
   Hot_reload.reset_entry_file_fns ();
+  Hot_reload.reset_work_entries ();
   Migrate_msg_pins.reset ();
   _lowered_modules := Hashtbl.create 8;
   (* Entry-file top-level fns named like a builtin that has its own C symbol
@@ -806,6 +808,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             | None -> fn
           in
           note_migrate_msg ~prefix:"" def fn;
+          if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
+            Hot_reload.note_work_entry fn.fn_name;
           (* The entry file's own top-level fns, by provenance: they may be
              hot-reload slots (see [Hot_reload.is_entry_file_slot]). *)
           if String.equal sp.Ast.file !Lower_state._entry_file
@@ -892,6 +896,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 Provenance.rename ~old:fn.fn_name ~new_:(prefix ^ fn.fn_name);
                 let fn = { fn with fn_name = prefix ^ fn.fn_name } in
                 note_migrate_msg ~prefix def fn;
+                if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
+                  Hot_reload.note_work_entry fn.fn_name;
                 fns := fn :: !fns
               | Ast.DType (_, tname, params, td, _)
               | Ast.DAlwaysLinearType (_, tname, params, td, _) ->

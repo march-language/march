@@ -1,0 +1,27 @@
+-- Regression: a record with no declared type inside a List, Option, Result
+-- or tuple did not compile: `to_string([{ a: 1 }])` failed with "ambiguous
+-- interface-method call to `show`: 6 implementations are in scope".  The
+-- container's Show impl calls `show` on the element; mono found no nominal
+-- name for the structural record, fell to the single-impl fallback, and left
+-- the bare `show` for codegen.  It now takes the `to_string` fallback a
+-- declared type without a Show impl already took, which prints the record
+-- through its descriptor.
+--
+-- Run interpreted AND compiled against the SAME .expected.
+mod Main do
+  needs IO.Console
+
+  type Meters = Meters(Int)
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(to_string([{ a: 1 }]))
+    println(to_string(Some({ a: 1 })))
+    println(to_string([{ a: [1, 2], b: "x" }, { a: [], b: "y" }]))
+    println(to_string(Some([{ q: Some({ y: 2.5, z: 1 }) }])))
+    let ok : Result({ a : Int }, String) = Ok({ a: 1 })
+    println(to_string(ok))
+    println(to_string(({ a: 1 }, [{ b: Meters(2) }])))
+    println([{ m: 1, n: true }])
+    println(inspect([{ s: "q" }]))
+  end
+end

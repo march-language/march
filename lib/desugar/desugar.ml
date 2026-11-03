@@ -624,6 +624,10 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
        encoding that makes an attacker-chosen attribute name safe. *)
   let tbl = Lazy.force March_ctxesc.Automaton.default in
   let ctx = ref March_ctxesc.Context.initial in
+  (* A literal chunk the walk rejected leaves [ctx] where the rejection
+     happened, so the terminal check below would report a second, derived
+     error ("does not end in a well-formed state") for the same mistake. *)
+  let literal_rejected = ref false in
   let lit s psp = ELit (LitString s, psp) in
   let parts = List.concat_map (fun part ->
     match part with
@@ -631,6 +635,7 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
       (match March_ctxesc.Automaton.consume_literal tbl !ctx s with
        | Ok o -> ctx := o.March_ctxesc.Automaton.ctx; [lit o.March_ctxesc.Automaton.emit psp]
        | Error (msg, _off) ->
+         literal_rejected := true;
          desugar_expr_error ~code:Err.Code.template_unsafe_interpolation ~sp:psp msg;
          [part])
     | EApp (EVar { txt = "to_string"; _ }, args, psp) ->
@@ -670,7 +675,8 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
   (* A template must not end mid-tag, mid-attribute or mid-comment: whatever
      the caller concatenates next would splice into it, which is exactly the
      composition hazard this analysis exists to stop. *)
-  if not (March_ctxesc.Automaton.is_valid_terminal !ctx) then
+  if not !literal_rejected
+     && not (March_ctxesc.Automaton.is_valid_terminal !ctx) then
     desugar_expr_error ~code:Err.Code.template_unterminated ~sp
       (Printf.sprintf
          "This ~H template does not end in a well-formed state — it ends %s. \
@@ -1317,7 +1323,7 @@ let rec desugar_decl (d : decl) : decl =
       fn_doc     = None;
       fn_attrs   = [];
       fn_ret_ty  = None;
-      fn_bounds  = [];
+      fn_bounds  = []; fn_attr_args = []; fn_needs = None;
       fn_clauses = [{
         fc_params = [];
         fc_guard  = None;
@@ -1381,7 +1387,7 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
                    fc_span = m.md_name.span;
                    fc_params_span = m.md_name.span;
                  }];
-                 fn_bounds = [];
+                 fn_bounds = []; fn_attr_args = []; fn_needs = None;
                } in
                Some (m.md_name, fn_def)
          ) iface.iface_methods
@@ -1542,7 +1548,7 @@ let gen_island_bridges (sp : span) : decl list =
       fn_doc    = None;
       fn_attrs  = [];
       fn_ret_ty = None;
-      fn_bounds = [];
+      fn_bounds = []; fn_attr_args = []; fn_needs = None;
       fn_clauses = [{
         fc_params = List.map (fun p ->
           FPNamed { param_name = mk_name p; param_ty = None; param_lin = Unrestricted }

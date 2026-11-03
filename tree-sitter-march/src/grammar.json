@@ -169,8 +169,17 @@
                   "value": "["
                 },
                 {
-                  "type": "SYMBOL",
-                  "name": "identifier"
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "identifier"
+                    },
+                    {
+                      "type": "STRING",
+                      "value": "opaque"
+                    }
+                  ]
                 },
                 {
                   "type": "CHOICE",
@@ -876,6 +885,18 @@
           "members": [
             {
               "type": "SYMBOL",
+              "name": "fn_needs"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
               "name": "when_guard"
             },
             {
@@ -898,6 +919,58 @@
         {
           "type": "STRING",
           "value": "end"
+        }
+      ]
+    },
+    "fn_needs": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "needs"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "("
+                },
+                {
+                  "type": "STRING",
+                  "value": ")"
+                }
+              ]
+            },
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "module_path"
+                },
+                {
+                  "type": "REPEAT",
+                  "content": {
+                    "type": "SEQ",
+                    "members": [
+                      {
+                        "type": "STRING",
+                        "value": ","
+                      },
+                      {
+                        "type": "SYMBOL",
+                        "name": "module_path"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
         }
       ]
     },
@@ -1858,8 +1931,62 @@
         {
           "type": "SYMBOL",
           "name": "refinement_type"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "abstract_refinement_type"
         }
       ]
+    },
+    "abstract_refinement_type": {
+      "type": "PREC",
+      "value": 2,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "FIELD",
+            "name": "base",
+            "content": {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "type_variable"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "type_constructor"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "type_application"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "qualified_type"
+                }
+              ]
+            }
+          },
+          {
+            "type": "STRING",
+            "value": "["
+          },
+          {
+            "type": "FIELD",
+            "name": "predicate",
+            "content": {
+              "type": "SYMBOL",
+              "name": "identifier"
+            }
+          },
+          {
+            "type": "STRING",
+            "value": "]"
+          }
+        ]
+      }
     },
     "refinement_type": {
       "type": "SEQ",
@@ -4425,6 +4552,10 @@
                   {
                     "type": "STRING",
                     "value": "verified"
+                  },
+                  {
+                    "type": "STRING",
+                    "value": "total"
                   }
                 ]
               }

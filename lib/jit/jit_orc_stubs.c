@@ -101,6 +101,13 @@ CAMLprim value march_orc_available(value v_unit) {
     CAMLreturn(Val_bool(llvm_probe_state == 1));
 }
 
+/* For jit_emit_stubs.c: make libLLVM's symbols visible to dlsym(RTLD_DEFAULT)
+   if it is not linked in already.  Returns nonzero when it was dlopened. */
+int march_llvm_try_load(void) {
+    if (!llvm_loaded && try_open_libllvm()) llvm_loaded = 1;
+    return llvm_loaded;
+}
+
 /* ── error helper ─────────────────────────────────────────────────────── */
 
 static void fail_with_llvm_err(const char *prefix, LLVMErrorRef err) {

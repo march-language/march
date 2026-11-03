@@ -534,6 +534,20 @@ let test_no_payload_moves_the_parser () =
               if r.at.C.delim = C.DlDoubleSubst then
                 { r.at with C.delim = C.DlDouble }
               else r.at in
+            (* The URL scheme positions reject a template-written `:` while a
+               hole may be spelling the scheme. That is a rule about the
+               TEMPLATE's literals; the escaped value's own colon (in
+               `about:invalid#zSoyz`, say) has already been scheme-checked.
+               Re-walk it as settled URL text: this invariant is about state,
+               element and delimiter, which the attr does not affect. *)
+            let start =
+              match start.C.attr with
+              | C.AtUrlScheme | C.AtUrlSchemeHole | C.AtUrlSchemeHoleMid ->
+                { start with C.attr = C.AtUrlMid }
+              (* The same rule for CSS url() (2026-10-11). *)
+              | C.AtCssUrl | C.AtCssUrlScheme | C.AtCssUrlHole ->
+                { start with C.attr = C.AtCssUrlMid }
+              | _ -> start in
             match A.consume_literal (Lazy.force table) start r.hole with
             | Error (m, _) ->
               Alcotest.failf "%s: escaped payload %S does not re-parse: %s"
@@ -663,6 +677,743 @@ let test_reported_rows_that_must_not_compile () =
     [ "srcdoc is rejected rather than entity-escaped", "<iframe srcdoc=\"";
       "srcset is rejected rather than half-validated", "<img srcset=\"" ]
 
+(* ── URL scheme sub-automaton ─────────────────────────────────────────────
+   Before 2026-10-11 a URL attribute had two positions: the start (a hole there
+   gets the scheme allowlist) and everything after the first literal character.
+   The allowlist checks the scheme of ONE VALUE, so text after that value could
+   still extend it into a scheme:
+
+     href="${s}://${rest}"   s = "javascript", rest = "\nalert(1)//"
+
+   rendered `javascript://%0Aalert%281%29%2F%2F` -- `javascript` has no colon,
+   so it passed as a relative reference, and the template's own `:` then made
+   it the scheme. These tests render templates with SEVERAL holes, because the
+   defect only exists in the composition. *)
+
+(* Render a template given as alternating literals and hole values,
+   [lit0; v0; lit1; v1; ...; litN]. Error is the compile-time rejection. *)
+let render_parts parts =
+  let tbl = Lazy.force table in
+  let acc = Buffer.create 64 in
+  let rec go ctx = function
+    | [] -> Ok (Buffer.contents acc)
+    | lit :: rest ->
+      (match A.consume_literal tbl ctx lit with
+       | Error (m, _) -> Error m
+       | Ok o ->
+         Buffer.add_string acc o.A.emit;
+         (match rest with
+          | [] -> Ok (Buffer.contents acc)
+          | v :: rest' ->
+            (match A.consume_interp tbl o.A.ctx with
+             | Error d -> Error d
+             | Ok (esc, subst, ctx') ->
+               Buffer.add_string acc subst;
+               Buffer.add_string acc (E.apply esc v);
+               go ctx' rest')))
+  in
+  go C.initial parts
+
+(* The escapers a template's holes get, given its literal chunks (one hole
+   between each consecutive pair). Fails the test on any rejection or on a bad
+   terminal state. *)
+let escapers_of what lits =
+  let tbl = Lazy.force table in
+  let rec go ctx acc = function
+    | [] -> List.rev acc
+    | lit :: rest ->
+      (match A.consume_literal tbl ctx lit with
+       | Error (m, _) -> Alcotest.failf "%s: literal %S rejected: %s" what lit m
+       | Ok o ->
+         (match rest with
+          | [] ->
+            if not (A.is_valid_terminal o.A.ctx) then
+              Alcotest.failf "%s: ends in a bad state (%s)" what
+                (C.describe o.A.ctx);
+            List.rev acc
+          | _ ->
+            (match A.consume_interp tbl o.A.ctx with
+             | Error d -> Alcotest.failf "%s: hole rejected: %s" what d
+             | Ok (e, _, c') -> go c' (e :: acc) rest)))
+  in
+  go C.initial [] lits
+
+(* What a browser takes as the scheme of the first quoted (or unquoted) `href`
+   value in [rendered]: decode the character references the HTML parser
+   decodes, strip leading C0/space and delete tab/CR/LF (the URL parser does
+   both), then read scheme characters up to a `:`. None for a relative
+   reference. *)
+let effective_scheme rendered =
+  let value =
+    match String.index_opt rendered '=' with
+    | None -> rendered
+    | Some i ->
+      let n = String.length rendered in
+      if i + 1 < n && rendered.[i + 1] = '"' then
+        (match String.index_from_opt rendered (i + 2) '"' with
+         | Some j -> String.sub rendered (i + 2) (j - i - 2)
+         | None -> String.sub rendered (i + 2) (n - i - 2))
+      else
+        (match String.index_from_opt rendered (i + 1) '>' with
+         | Some j -> String.sub rendered (i + 1) (j - i - 1)
+         | None -> String.sub rendered (i + 1) (n - i - 1))
+  in
+  let n = String.length value in
+  let b = Buffer.create n in
+  let rec dec i =
+    if i >= n then ()
+    else if value.[i] <> '&' then (Buffer.add_char b value.[i]; dec (i + 1))
+    else
+      let decoded =
+        match String.index_from_opt value i ';' with
+        | Some j when j - i <= 10 ->
+          let ent = String.sub value (i + 1) (j - i - 1) in
+          let ch =
+            match ent with
+            | "colon" -> Some ':' | "Tab" -> Some '\t' | "NewLine" -> Some '\n'
+            | "amp" -> Some '&' | "quot" -> Some '"' | "lt" -> Some '<'
+            | "gt" -> Some '>'
+            | _ when String.length ent > 1 && ent.[0] = '#' ->
+              (try
+                 let num = String.sub ent 1 (String.length ent - 1) in
+                 let code =
+                   if num.[0] = 'x' || num.[0] = 'X' then
+                     int_of_string
+                       ("0x" ^ String.sub num 1 (String.length num - 1))
+                   else int_of_string num in
+                 if code < 128 then Some (Char.chr code) else None
+               with _ -> None)
+            | _ -> None
+          in
+          Option.map (fun c -> (c, j + 1)) ch
+        | _ -> None
+      in
+      match decoded with
+      | Some (c, next) -> Buffer.add_char b c; dec next
+      | None -> Buffer.add_char b '&'; dec (i + 1)
+  in
+  dec 0;
+  let v = Buffer.contents b in
+  let k = ref 0 in
+  while !k < String.length v && Char.code v.[!k] <= 0x20 do incr k done;
+  let v = String.sub v !k (String.length v - !k) in
+  let v =
+    String.to_seq v
+    |> Seq.filter (fun c -> c <> '\t' && c <> '\n' && c <> '\r')
+    |> String.of_seq in
+  let rec scan i =
+    if i >= String.length v then None
+    else match v.[i] with
+      | ':' ->
+        if i = 0 then None else Some (String.lowercase_ascii (String.sub v 0 i))
+      | 'a'..'z' | 'A'..'Z' | '0'..'9' | '+' | '-' | '.' -> scan (i + 1)
+      | _ -> None
+  in
+  scan 0
+
+let dangerous_scheme = function
+  | Some ("javascript" | "vbscript" | "data") -> true
+  | _ -> false
+
+(* The exploit shapes, as [lit; value; lit; ...]. Each compiled before the
+   scheme tracking and rendered a `javascript:` URL with the values shown. *)
+let url_scheme_exploits =
+  [ "scheme hole then literal colon",
+    [ "<a href=\""; "javascript"; "://"; "\nalert(1)//"; "\">x</a>" ];
+    "hole spells the scheme head",
+    [ "<a href=\""; "java"; "script:alert(1)\">x</a>" ];
+    "literal head, hole spells the tail",
+    [ "<a href=\"java"; "script"; ":alert(1)\">x</a>" ];
+    "unquoted value",
+    [ "<a href="; "javascript"; ":alert(1)>x</a>" ];
+    "unquoted literal head",
+    [ "<a href=java"; "script"; ":alert(1)>x</a>" ];
+    "tab between hole and colon",
+    [ "<a href=\""; "javascript"; "\t:alert(1)\">x</a>" ];
+    "numeric reference for the colon",
+    [ "<a href=\""; "javascript"; "&#58;alert(1)\">x</a>" ];
+    "hex reference for the colon",
+    [ "<a href=\""; "javascript"; "&#x3a;alert(1)\">x</a>" ];
+    "named reference for the colon",
+    [ "<a href=\""; "javascript"; "&colon;alert(1)\">x</a>" ];
+    "reference after literal text in the scheme",
+    [ "<a href=\"java"; "scr"; "ipt&#58;alert(1)\">x</a>" ];
+    "&Tab; between hole and colon",
+    [ "<a href=\""; "javascript"; "&Tab;:alert(1)\">x</a>" ];
+    "reference in the literal head",
+    [ "<a href=\"java&#115;"; "cript"; ":alert(1)\">x</a>" ];
+    "unquoted reference in the literal head",
+    [ "<a href=&#106;ava"; "script"; ":alert(1)>x</a>" ];
+    "two holes then colon",
+    [ "<a href=\""; "java"; ""; "script"; ":alert(1)\">x</a>" ];
+    "src is a URL attribute too",
+    [ "<iframe src=\""; "javascript"; ":alert(1)\"></iframe>" ] ]
+
+(* Every shape above must be REJECTED at compile time. If one is accepted, the
+   failure names the scheme it rendered. *)
+let test_url_scheme_exploits_do_not_compile () =
+  List.iter
+    (fun (what, parts) ->
+       match render_parts parts with
+       | Error _ -> ()
+       | Ok out ->
+         Alcotest.failf "%s: compiled and rendered %s (scheme %s)" what out
+           (match effective_scheme out with Some s -> s | None -> "none"))
+    url_scheme_exploits
+
+(* The tracking must not cost legitimate templates anything: each of these
+   compiles, and every hole gets the escaper it got before (whole-URL at the
+   very start or right after another start hole, component after any
+   literal). The one deliberate change is "leading space then hole": the URL
+   parser strips that space, so the hole is the start of the URL and now gets
+   the scheme allowlist (it used to get the component escaper). *)
+let test_url_templates_keep_their_escapers () =
+  (* [p] is the path escaper: the component escaper plus a dot-segment
+     refusal. It replaced [c] at every path/authority position on 2026-10-11;
+     query and fragment holes keep [c]. *)
+  let w = C.EscUrlWhole and c = C.EscUrlComponent and p = C.EscUrlPath in
+  let case what lits want =
+    Alcotest.(check (list escaper)) what want (escapers_of what lits) in
+  case "whole URL" [ "<a href=\""; "\">x</a>" ] [ w ];
+  case "query component" [ "<a href=\"/search?q="; "\">x</a>" ] [ c ];
+  case "literal scheme" [ "<a href=\"https://x.example/"; "\">x</a>" ] [ p ];
+  case "mailto" [ "<a href=\"mailto:"; "\">x</a>" ] [ p ];
+  case "relative page name" [ "<a href=\"page"; ".html\">x</a>" ] [ p ];
+  case "literal scheme-shaped head" [ "<a href=\"java"; "\">x</a>" ] [ p ];
+  case "base then path" [ "<a href=\""; "/"; "\">x</a>" ] [ w; p ];
+  case "base then query" [ "<a href=\""; "?page="; "\">x</a>" ] [ w; c ];
+  case "two adjacent holes" [ "<a href=\""; ""; "\">x</a>" ] [ w; w ];
+  case "hole, letters, hole" [ "<a href=\""; "x"; "\">x</a>" ] [ w; p ];
+  case "base then ampersand query" [ "<a href=\""; "&page=2\">x</a>" ] [ w ];
+  case "fragment after a hole" [ "<a href=\""; "#top\">x</a>" ] [ w ];
+  case "leading space then hole" [ "<a href=\" "; "\">x</a>" ] [ w ];
+  case "unquoted whole URL" [ "<a href="; ">x</a>" ] [ w ];
+  case "unquoted relative path" [ "<a href=/p/"; ">x</a>" ] [ p ];
+  case "single-quoted whole URL" [ "<a href='"; "'>x</a>" ] [ w ];
+  case "colon after a settled path" [ "<a href=\""; "/a:b\">x</a>" ] [ w ];
+  case "port after a literal host" [ "<a href=\"http://h:"; "/\">x</a>" ] [ p ]
+
+(* ── URL path / query / fragment ────────────────────────────────────────
+   After the scheme settles, every hole is a percent-encoded component, so it
+   cannot write a delimiter. What that did not stop, until 2026-10-11, is a
+   value of nothing but dots: in a path it fills a segment and becomes a DOT
+   SEGMENT. `href="/users/${id}/edit"` with id = `..` rendered
+   `/users/../edit`, which a browser resolves to `/edit`. *)
+
+let test_url_positions_split_path_query_fragment () =
+  let c = C.EscUrlComponent and p = C.EscUrlPath and w = C.EscUrlWhole in
+  let case what lits want =
+    Alcotest.(check (list escaper)) what want (escapers_of what lits) in
+  case "path segment" [ "<a href=\"/users/"; "/edit\">x</a>" ] [ p ];
+  case "path, then query" [ "<a href=\"/u/"; "?tab="; "\">x</a>" ] [ p; c ];
+  case "query, then fragment" [ "<a href=\"/s?q="; "#"; "\">x</a>" ] [ c; c ];
+  case "path, then fragment" [ "<a href=\"/doc/"; "#"; "\">x</a>" ] [ p; c ];
+  case "question mark inside a query is data"
+    [ "<a href=\"/s?a=1?b="; "\">x</a>" ] [ c ];
+  case "bare query" [ "<a href=\"?page="; "\">x</a>" ] [ c ];
+  case "bare fragment" [ "<a href=\"#"; "\">x</a>" ] [ c ];
+  case "whole URL then query" [ "<a href=\""; "?page="; "\">x</a>" ] [ w; c ];
+  case "unquoted query" [ "<a href=?q="; ">x</a>" ] [ c ];
+  case "authority is a path-class position"
+    [ "<a href=\"https://"; "/x\">x</a>" ] [ p ];
+  (* An entity spelling of `?` leaves the walk in the path: the over-strict
+     direction, since only the path escaper refuses anything. *)
+  case "entity question mark stays in the path"
+    [ "<a href=\"/s&#63;q="; "\">x</a>" ] [ p ]
+  ;
+  (* ... and the `#` of a numeric reference does not start a fragment. (A
+     hole RIGHT after the reference is rejected since 2026-10-11 -- see the
+     escape-completion exploits -- so a literal byte separates them.) *)
+  case "numeric reference is not a fragment"
+    [ "<a href=\"/a/&#46;-"; "/b\">x</a>" ] [ p ]
+
+(* The path of the first URL attribute value in [rendered], as the browser
+   resolves it: entity-decode `&amp;` and decimal references, cut the query and fragment, read `\`
+   as `/` (special schemes do), drop an authority, then remove dot segments --
+   including their percent-encoded spellings, which the URL parser honours. *)
+let resolved_path_segments rendered =
+  let value =
+    match String.index_opt rendered '=' with
+    | None -> rendered
+    | Some i ->
+      let n = String.length rendered in
+      let quoted = i + 1 < n && rendered.[i + 1] = '"' in
+      let start = if quoted then i + 2 else i + 1 in
+      let stop =
+        match String.index_from_opt rendered start (if quoted then '"' else '>')
+        with Some j -> j | None -> n in
+      String.sub rendered start (stop - start)
+  in
+  let value =
+    let b = Buffer.create (String.length value) in
+    let n = String.length value in
+    let rec go i =
+      if i >= n then ()
+      else if i + 5 <= n && String.sub value i 5 = "&amp;" then
+        (Buffer.add_char b '&'; go (i + 5))
+      else if i + 2 < n && value.[i] = '&' && value.[i + 1] = '#'
+              && Option.is_some (String.index_from_opt value i ';') then begin
+        let j = String.index_from value i ';' in
+        match int_of_string_opt (String.sub value (i + 2) (j - i - 2)) with
+        | Some code when code < 128 ->
+          Buffer.add_char b (Char.chr code); go (j + 1)
+        | _ -> Buffer.add_char b '&'; go (i + 1)
+      end
+      else (Buffer.add_char b (if value.[i] = '\\' then '/' else value.[i]);
+            go (i + 1)) in
+    go 0; Buffer.contents b in
+  let cut c v = match String.index_opt v c with
+    | Some i -> String.sub v 0 i | None -> v in
+  let v = cut '#' (cut '?' value) in
+  let v =
+    match String.index_opt v ':' with
+    | Some i when i > 0 && not (String.contains (String.sub v 0 i) '/') ->
+      String.sub v (i + 1) (String.length v - i - 1)
+    | _ -> v in
+  let v =
+    if String.length v >= 2 && String.sub v 0 2 = "//" then
+      (match String.index_from_opt v 2 '/' with
+       | Some j -> String.sub v j (String.length v - j)
+       | None -> "/")
+    else v in
+  let is_dot s = String.lowercase_ascii s = "." || String.lowercase_ascii s = "%2e" in
+  let is_dotdot s =
+    match String.lowercase_ascii s with
+    | ".." | ".%2e" | "%2e." | "%2e%2e" -> true
+    | _ -> false in
+  let segs = match String.split_on_char '/' v with "" :: r -> r | r -> r in
+  List.fold_left
+    (fun acc seg ->
+       if is_dot seg then acc
+       else if is_dotdot seg then (match acc with [] -> [] | _ :: t -> t)
+       else seg :: acc)
+    [] segs
+  |> List.rev
+
+let rec is_prefix pre l =
+  match pre, l with
+  | [], _ -> true
+  | x :: pre', y :: l' -> x = y && is_prefix pre' l'
+  | _ -> false
+
+(* Every path hole, with every dot-ish payload: the resolved path keeps the
+   template's literal prefix. Before the path escaper, the first shape
+   rendered `/users/../edit` and resolved to `/edit`. *)
+let test_url_path_holes_cannot_traverse () =
+  let payloads =
+    [ ".."; "."; "..."; "%2e%2e"; ".%2e"; "%2E%2E"; "../admin"; "..\\admin";
+      "..%2fadmin"; ".. "; "..;"; "x"; "" ] in
+  let shapes =
+    [ "users",  [ "<a href=\"/users/"; "/edit\">x</a>" ];
+      "static", [ "<img src=\"/static/"; "\">" ];
+      "a",      [ "<a href=\"/a/."; "/b\">x</a>" ];
+      "a",      [ "<a href=\"/a/"; "."; "/b\">x</a>" ];
+      "files",  [ "<a href=\"https://h.example/files/"; "\">x</a>" ];
+      "users",  [ "<a href=/users/"; "/edit>x</a>" ];
+      "u",      [ "<a href=\"/u/"; "/"; "\">x</a>" ];
+      "api",    [ "<form action=\"/api/"; "/save\"></form>" ];
+      "img",    [ "<a href=\""; "/img/"; "\">x</a>" ];
+      (* A COMPLETE escape for a dot right before the hole. (`&#46;` here
+         used to be a shape too; a hole right after a reference is now a
+         compile error, see the escape-completion exploits.) *)
+      "a",      [ "<a href=\"/a/%2e"; "/b\">x</a>" ];
+      "a",      [ "<a href=\"/a/%2E"; "/b\">x</a>" ] ] in
+  List.iter
+    (fun (prefix, shape) ->
+       List.iter
+         (fun p1 ->
+            List.iter
+              (fun p2 ->
+                 let parts =
+                   match shape with
+                   | [ a; b ] -> [ a; p1; b ]
+                   | [ a; b; c ] -> [ a; p1; b; p2; c ]
+                   | s -> s in
+                 (* The whole-URL hole is the author's to choose; only the
+                    path holes after it are under test. *)
+                 let parts =
+                   match parts with
+                   | [ a; _; b; v; c ] when a = "<a href=\"" ->
+                     [ a; "/base"; b; v; c ]
+                   | ps -> ps in
+                 match render_parts parts with
+                 | Error e -> Alcotest.failf "legitimate shape rejected: %s" e
+                 | Ok out ->
+                   let segs = resolved_path_segments out in
+                   let want =
+                     if List.hd parts = "<a href=\"" then [ "base"; prefix ]
+                     else [ prefix ] in
+                   if not (is_prefix want segs) then
+                     Alcotest.failf "%S resolves to /%s, outside /%s/" out
+                       (String.concat "/" segs) (String.concat "/" want))
+              payloads)
+         payloads)
+    shapes
+
+(* The refusal is confined to the path: a query or fragment value of `..` is
+   data and must come out unchanged, and a path value with anything besides
+   dots is untouched. *)
+let test_url_query_and_fragment_keep_dots () =
+  let check what parts want =
+    match render_parts parts with
+    | Error e -> Alcotest.failf "%s: rejected: %s" what e
+    | Ok out -> Alcotest.(check string) what want out in
+  check "query value of dots"
+    [ "<a href=\"/s?q="; ".."; "\">x</a>" ] "<a href=\"/s?q=..\">x</a>";
+  check "fragment of dots"
+    [ "<a href=\"/doc#"; ".."; "\">x</a>" ] "<a href=\"/doc#..\">x</a>";
+  check "version in a path"
+    [ "<a href=\"/pkg/"; "0.2.3"; "/\">x</a>" ] "<a href=\"/pkg/0.2.3/\">x</a>";
+  check "dot segment in a path"
+    [ "<a href=\"/users/"; ".."; "/edit\">x</a>" ]
+    "<a href=\"/users/zSoyz/edit\">x</a>"
+
+(* Every allowed URL shape, with every scheme payload in every hole: nothing
+   renders a dangerous scheme. The escaper-choice test above says what is
+   chosen; this says what comes out. *)
+let test_url_corpus_renders_no_dangerous_scheme () =
+  let payloads =
+    [ "javascript"; "javascript:alert(1)"; "JaVaScRiPt:alert(1)";
+      "java\tscript:alert(1)"; " javascript:alert(1)"; "\001javascript:x";
+      "java"; "script"; ":alert(1)"; "script:alert(1)"; "&#58;";
+      "data:text/html,x"; "vbscript:x"; "javascript&#58;x"; "" ] in
+  let shapes =
+    [ [ "<a href=\""; "\">x</a>" ];
+      [ "<a href=\""; ""; "\">x</a>" ];
+      [ "<a href=\""; "x"; "\">x</a>" ];
+      [ "<a href=\""; "/"; "\">x</a>" ];
+      [ "<a href=\"java"; "\">x</a>" ];
+      [ "<a href=\"java"; ""; "\">x</a>" ];
+      [ "<a href="; ">x</a>" ];
+      [ "<a href=\" "; "\">x</a>" ];
+      [ "<a href=\""; "&page=2\">x</a>" ] ] in
+  List.iter
+    (fun shape ->
+       List.iter
+         (fun p1 ->
+            List.iter
+              (fun p2 ->
+                 let parts =
+                   match shape with
+                   | [ a; b ] -> [ a; p1; b ]
+                   | [ a; b; c ] -> [ a; p1; b; p2; c ]
+                   | s -> s in
+                 match render_parts parts with
+                 | Error e -> Alcotest.failf "legitimate shape rejected: %s" e
+                 | Ok out ->
+                   if dangerous_scheme (effective_scheme out) then
+                     Alcotest.failf "rendered a dangerous scheme: %S" out)
+              payloads)
+         payloads)
+    shapes
+
+(* The pre-fix rendering, asserted exactly, so the regression direction is
+   visible: the scheme-hole template is now a compile error carrying a reason
+   that names the colon. *)
+let test_scheme_colon_rejection_names_the_colon () =
+  match render_parts [ "<a href=\""; "javascript"; "://"; "x"; "\">x</a>" ] with
+  | Ok out -> Alcotest.failf "compiled: %s" out
+  | Error m ->
+    let contains s sub =
+      let n = String.length s and k = String.length sub in
+      let rec go i = i + k <= n && (String.sub s i k = sub || go (i + 1)) in
+      go 0 in
+    Alcotest.(check bool) "message names the scheme" true (contains m "scheme")
+
+(* ── A hole that finishes an escape sequence (2026-10-11) ───────────────
+   The URL path escaper refuses a value of nothing but dots and
+   percent-encodes everything else. Neither helps when the TEMPLATE has
+   already written the start of an escape and the hole only has to finish it:
+   `href="/users/.%${x}/edit"` with x = `2e` rendered `/users/.%2e/edit`,
+   which the URL parser reads as `/users/../edit` and resolves to `/edit`. The
+   same holds for `&#37;` / `&percnt;` (which decode to the `%`), and for a
+   numeric character reference the hole can complete (`&#${x}` with x = `46`
+   is a dot, with x = `58` a colon). Each shape below compiled on the base and
+   rendered the traversal or scheme shown on failure. *)
+let url_escape_completion_exploits =
+  [ "percent before a path hole",
+    [ "<a href=\"/users/.%"; "2e"; "/edit\">x</a>" ];
+    "percent and one hex digit before a path hole",
+    [ "<a href=\"/users/.%2"; "e"; "/edit\">x</a>" ];
+    "&#37; before a path hole",
+    [ "<a href=\"/users/.&#37;"; "2e"; "/edit\">x</a>" ];
+    "&#x25; before a path hole",
+    [ "<a href=\"/users/.&#x25;"; "2e"; "/edit\">x</a>" ];
+    "&#37 without its semicolon",
+    [ "<a href=\"/users/.&#37"; "2e"; "/edit\">x</a>" ];
+    "&percnt; before a path hole",
+    [ "<a href=\"/users/.&percnt;"; "2e"; "/edit\">x</a>" ];
+    "percent then a hex digit as a reference",
+    [ "<a href=\"/users/.%&#50;"; "e"; "/edit\">x</a>" ];
+    "hole finishes a numeric reference to a dot",
+    [ "<a href=\"/users/.&#"; "46"; "/edit\">x</a>" ];
+    "unquoted percent before a path hole",
+    [ "<a href=/users/.%"; "2e"; "/edit>x</a>" ];
+    "percent before a hole, after a literal host",
+    [ "<a href=\"https://h.example/a/.%"; "2e"; "/b\">x</a>" ];
+    "percent after a whole-URL hole",
+    [ "<a href=\""; "/base/."; "%"; "2e"; "/x\">x</a>" ];
+    "percent while the scheme is still open",
+    [ "<a href=\".%"; "2e"; "/x\">x</a>" ];
+    "&#37; while the scheme is still open",
+    [ "<a href=\".&#37;"; "2e"; "/x\">x</a>" ];
+    "&percnt; after a whole-URL hole",
+    [ "<a href=\""; "."; "&percnt;"; "2e"; "/x\">x</a>" ];
+    (* The scheme twin, found while closing the above: the hole finishes a
+       numeric reference to `:`. *)
+    "hole finishes a numeric reference to a colon",
+    [ "<a href=\"javascript&#"; "58"; "alert(1)\">x</a>" ];
+    "hole finishes a hex reference to a colon",
+    [ "<a href=\"javascript&#x"; "3a"; "alert(1)\">x</a>" ] ]
+
+(* Every shape is tried before failing, so a regression report lists all of
+   them rather than the first. *)
+let fail_if_any_compiled describe exploits =
+  let compiled =
+    List.filter_map
+      (fun (what, parts) ->
+         match render_parts parts with
+         | Error _ -> None
+         | Ok out -> Some (what ^ ": compiled and rendered " ^ describe out))
+      exploits in
+  if compiled <> [] then
+    Alcotest.failf "%d of %d compiled:\n%s" (List.length compiled)
+      (List.length exploits) (String.concat "\n" compiled)
+
+let test_url_escape_completion_exploits_do_not_compile () =
+  fail_if_any_compiled
+    (fun out ->
+       Printf.sprintf "%s (path /%s, scheme %s)" out
+         (String.concat "/" (resolved_path_segments out))
+         (match effective_scheme out with Some s -> s | None -> "none"))
+    url_escape_completion_exploits
+
+(* What must keep compiling: a COMPLETE percent-escape or reference before a
+   hole, and a `%` in a query or fragment (a dot segment means nothing there). *)
+let test_url_complete_escapes_keep_compiling () =
+  let c = C.EscUrlComponent and p = C.EscUrlPath and w = C.EscUrlWhole in
+  let case what lits want =
+    Alcotest.(check (list escaper)) what want (escapers_of what lits) in
+  case "complete percent-escape" [ "<a href=\"/a/%20"; "\">x</a>" ] [ p ];
+  case "percent-escape, then a segment" [ "<a href=\"/a%2Fb/"; "\">x</a>" ] [ p ];
+  case "percent in a query" [ "<a href=\"/s?q=%"; "\">x</a>" ] [ c ];
+  case "percent in a fragment" [ "<a href=\"/d#%"; "\">x</a>" ] [ c ];
+  case "reference then a separator" [ "<a href=\"/a/&#46;b/"; "\">x</a>" ] [ p ];
+  case "ampersand in a path" [ "<a href=\"/a&amp;b/"; "\">x</a>" ] [ p ];
+  case "base then ampersand query" [ "<a href=\""; "&page=2\">x</a>" ] [ w ];
+  case "base then percent-escape" [ "<a href=\""; "%20"; "\">x</a>" ] [ w; p ]
+
+(* ── CSS url(): a hole must not choose the scheme (2026-10-11) ─────────
+   The same composition shape the href scheme fix closed: `url(${s}:x)`
+   checked `s` alone, which has no colon and so passed as a relative
+   reference, and the template's own `:` then made it the scheme. No current
+   browser runs `javascript:` from CSS, so this was not executable; the owner
+   decided on 2026-10-11 that it follows the same rule as `href` anyway. *)
+
+(* The scheme a browser would read from the first url(...) in [rendered]:
+   decode character references (as an attribute would) AND CSS escapes (as
+   the CSS tokenizer would) -- doing both regardless of context only makes
+   the check stricter -- strip quotes and whitespace, then read a scheme. *)
+let css_url_scheme rendered =
+  let lower = String.lowercase_ascii rendered in
+  let find sub =
+    let n = String.length lower and k = String.length sub in
+    let rec go i = if i + k > n then None
+      else if String.sub lower i k = sub then Some i else go (i + 1) in
+    go 0 in
+  match find "url(" with
+  | None -> None
+  | Some i ->
+    let start = i + 4 in
+    let stop =
+      match String.index_from_opt rendered start ')' with
+      | Some j -> j | None -> String.length rendered in
+    let v = String.sub rendered start (stop - start) in
+    let ent v =
+      let n = String.length v in
+      let b = Buffer.create n in
+      let rec go i =
+        if i >= n then ()
+        else if v.[i] = '&' then begin
+          let j = ref (i + 1) in
+          while !j < n && (match v.[!j] with
+              | 'a'..'z' | 'A'..'Z' | '0'..'9' | '#' -> true | _ -> false)
+          do incr j done;
+          let body = String.sub v (i + 1) (!j - i - 1) in
+          let next = if !j < n && v.[!j] = ';' then !j + 1 else !j in
+          let ch =
+            match String.lowercase_ascii body with
+            | "colon" -> Some ':' | "quot" -> Some '"' | "apos" -> Some '\''
+            | "amp" -> Some '&' | "tab" -> Some '\t' | "newline" -> Some '\n'
+            | b when String.length b > 1 && b.[0] = '#' ->
+              (try
+                 let num = String.sub b 1 (String.length b - 1) in
+                 let code =
+                   if num.[0] = 'x' then
+                     int_of_string
+                       ("0x" ^ String.sub num 1 (String.length num - 1))
+                   else int_of_string num in
+                 if code < 128 then Some (Char.chr code) else None
+               with _ -> None)
+            | _ -> None in
+          match ch with
+          | Some c -> Buffer.add_char b c; go next
+          | None -> Buffer.add_char b '&'; go (i + 1)
+        end
+        else (Buffer.add_char b v.[i]; go (i + 1)) in
+      go 0; Buffer.contents b in
+    let css v =
+      let n = String.length v in
+      let b = Buffer.create n in
+      let is_hex c = match c with
+        | '0'..'9' | 'a'..'f' | 'A'..'F' -> true | _ -> false in
+      let rec go i =
+        if i >= n then ()
+        else if v.[i] = '\\' && i + 1 < n then begin
+          if is_hex v.[i + 1] then begin
+            let j = ref (i + 1) in
+            while !j < n && !j < i + 7 && is_hex v.[!j] do incr j done;
+            let code =
+              int_of_string ("0x" ^ String.sub v (i + 1) (!j - i - 1)) in
+            Buffer.add_char b (if code < 128 then Char.chr code else '?');
+            go (if !j < n && (v.[!j] = ' ' || v.[!j] = '\t' || v.[!j] = '\n')
+                then !j + 1 else !j)
+          end
+          else (Buffer.add_char b v.[i + 1]; go (i + 2))
+        end
+        else (Buffer.add_char b v.[i]; go (i + 1)) in
+      go 0; Buffer.contents b in
+    let v = css (ent v) in
+    let v =
+      String.to_seq v
+      |> Seq.filter (fun c -> c <> '\t' && c <> '\n' && c <> '\r')
+      |> String.of_seq in
+    let k = ref 0 in
+    while !k < String.length v
+          && (Char.code v.[!k] <= 0x20 || v.[!k] = '"' || v.[!k] = '\'')
+    do incr k done;
+    let v = String.sub v !k (String.length v - !k) in
+    let rec scan i =
+      if i >= String.length v then None
+      else match v.[i] with
+        | ':' -> if i = 0 then None
+          else Some (String.lowercase_ascii (String.sub v 0 i))
+        | 'a'..'z' | 'A'..'Z' | '0'..'9' | '+' | '-' | '.' -> scan (i + 1)
+        | _ -> None in
+    scan 0
+
+let css_url_scheme_exploits =
+  [ "style attr: hole then literal colon",
+    [ "<div style=\"background:url("; "javascript"; ":alert(1))\">x</div>" ];
+    "style attr: quoted url",
+    [ "<div style=\"background:url('"; "javascript"; ":alert(1)')\">x</div>" ];
+    "style attr: literal head, hole spells the tail",
+    [ "<div style=\"background:url(java"; "script"; ":alert(1))\">x</div>" ];
+    "style attr: hole, letters, hole, colon",
+    [ "<div style=\"background:url("; "java"; "s"; "cript"; ":x)\">x</div>" ];
+    "style attr: two adjacent holes then colon",
+    [ "<div style=\"background:url("; "java"; ""; "script"; ":x)\">x</div>" ];
+    "style attr: tab between hole and colon",
+    [ "<div style=\"background:url('"; "javascript"; "\t:x')\">x</div>" ];
+    "style attr: numeric reference for the colon",
+    [ "<div style=\"background:url("; "javascript"; "&#58;x)\">x</div>" ];
+    "style attr: named reference for the colon",
+    [ "<div style=\"background:url("; "javascript"; "&colon;x)\">x</div>" ];
+    "style attr: CSS escape for the colon",
+    [ "<div style=\"background:url("; "javascript"; "\\3a x)\">x</div>" ];
+    "style attr: hole finishes a numeric reference",
+    [ "<div style=\"background:url(javascript&#"; "58"; "x)\">x</div>" ];
+    "style attr: hole finishes a CSS escape",
+    [ "<div style=\"background:url(javascript\\"; "00003a"; "x)\">x</div>" ];
+    "style attr: url after a declaration",
+    [ "<div style=\"color:red;background:url("; "javascript"; ":x)\">x</div>" ];
+    "style body: hole then literal colon",
+    [ "<style>a{background:url("; "javascript"; ":x)}</style>" ];
+    "style body: quoted, hole finishes a CSS escape",
+    [ "<style>a{background:url(\"javascript\\"; "00003a"; "x\")}</style>" ];
+    "style body: literal head, hole spells the tail",
+    [ "<style>a{background:url(java"; "script"; ":x)}</style>" ] ]
+
+let test_css_url_scheme_exploits_do_not_compile () =
+  fail_if_any_compiled
+    (fun out ->
+       Printf.sprintf "%s (scheme %s)" out
+         (match css_url_scheme out with Some s -> s | None -> "none"))
+    css_url_scheme_exploits
+
+(* Every honest CSS url() shape still compiles and every hole still gets the
+   CSS url escaper. *)
+let test_css_url_templates_keep_compiling () =
+  let u = C.EscCssUrl and v = C.EscCssValue in
+  let case what lits want =
+    Alcotest.(check (list escaper)) what want (escapers_of what lits) in
+  case "whole url" [ "<div style=\"background:url("; ")\">x</div>" ] [ u ];
+  case "quoted whole url"
+    [ "<div style=\"background:url('"; "')\">x</div>" ] [ u ];
+  case "entity-quoted whole url"
+    [ "<div style=\"background:url(&quot;"; "&quot;)\">x</div>" ] [ u ];
+  case "path then hole"
+    [ "<div style=\"background:url(/img/"; ".png)\">x</div>" ] [ u ];
+  case "literal scheme then hole"
+    [ "<div style=\"background:url(https://cdn.example/"; ")\">x</div>" ] [ u ];
+  case "base then path"
+    [ "<div style=\"background:url("; "/"; ")\">x</div>" ] [ u; u ];
+  case "adjacent holes"
+    [ "<div style=\"background:url("; ""; ")\">x</div>" ] [ u; u ];
+  case "base then query"
+    [ "<div style=\"background:url("; "?v="; ")\">x</div>" ] [ u; u ];
+  case "value after the url"
+    [ "<div style=\"background:url("; ") no-repeat;color:"; "\">x</div>" ]
+    [ u; v ];
+  case "colon after a settled path"
+    [ "<div style=\"background:url("; "/a:b)\">x</div>" ] [ u ];
+  case "style body" [ "<style>a{background:url("; ")}</style>" ] [ u ];
+  case "style body, two urls"
+    [ "<style>a{background:url("; ")} b{background:url(/x/"; ")}</style>" ]
+    [ u; u ];
+  case "style body, literal scheme"
+    [ "<style>@import url(https://fonts.example/css?family="; ");</style>" ]
+    [ u ]
+
+(* Every honest shape, with every scheme payload in every hole: nothing
+   renders a dangerous scheme. *)
+let test_css_url_corpus_renders_no_dangerous_scheme () =
+  let payloads =
+    [ "javascript"; "javascript:alert(1)"; "JaVaScRiPt:x"; "java\tscript:x";
+      " javascript:x"; "java"; "script"; ":alert(1)"; "script:x";
+      "\\3a"; "3a"; "00003a"; "58"; "data:text/html,x"; "vbscript:x"; "" ] in
+  let shapes =
+    [ [ "<div style=\"background:url("; ")\">x</div>" ];
+      [ "<div style=\"background:url("; ""; ")\">x</div>" ];
+      [ "<div style=\"background:url("; "x"; ")\">x</div>" ];
+      [ "<div style=\"background:url("; "/"; ")\">x</div>" ];
+      [ "<div style=\"background:url('"; "')\">x</div>" ];
+      [ "<div style=\"background:url(java"; ")\">x</div>" ];
+      [ "<style>a{background:url("; ")}</style>" ];
+      [ "<style>a{background:url(\""; "\")}</style>" ];
+      [ "<style>a{background:url(java"; ""; ")}</style>" ] ] in
+  List.iter
+    (fun shape ->
+       List.iter
+         (fun p1 ->
+            List.iter
+              (fun p2 ->
+                 let parts =
+                   match shape with
+                   | [ a; b ] -> [ a; p1; b ]
+                   | [ a; b; c ] -> [ a; p1; b; p2; c ]
+                   | s -> s in
+                 match render_parts parts with
+                 | Error e -> Alcotest.failf "legitimate shape rejected: %s" e
+                 | Ok out ->
+                   (match css_url_scheme out with
+                    | Some ("javascript" | "vbscript" | "data") ->
+                      Alcotest.failf "rendered a dangerous scheme: %S" out
+                    | _ -> ()))
+              payloads)
+         payloads)
+    shapes
+
 let corpus_tests =
   [ Alcotest.test_case "no payload emits structural bytes" `Quick
       test_no_payload_emits_structural_bytes;
@@ -675,7 +1426,31 @@ let corpus_tests =
     Alcotest.test_case "reported rows render as expected" `Quick
       test_reported_rows_render_as_expected;
     Alcotest.test_case "reported rows that must not compile" `Quick
-      test_reported_rows_that_must_not_compile ]
+      test_reported_rows_that_must_not_compile;
+    Alcotest.test_case "url scheme exploits do not compile" `Quick
+      test_url_scheme_exploits_do_not_compile;
+    Alcotest.test_case "url templates keep their escapers" `Quick
+      test_url_templates_keep_their_escapers;
+    Alcotest.test_case "url corpus renders no dangerous scheme" `Quick
+      test_url_corpus_renders_no_dangerous_scheme;
+    Alcotest.test_case "url positions split path, query, fragment" `Quick
+      test_url_positions_split_path_query_fragment;
+    Alcotest.test_case "url path holes cannot traverse" `Quick
+      test_url_path_holes_cannot_traverse;
+    Alcotest.test_case "url query and fragment keep dots" `Quick
+      test_url_query_and_fragment_keep_dots;
+    Alcotest.test_case "scheme colon rejection names the scheme" `Quick
+      test_scheme_colon_rejection_names_the_colon;
+    Alcotest.test_case "url escape-completion exploits do not compile" `Quick
+      test_url_escape_completion_exploits_do_not_compile;
+    Alcotest.test_case "url complete escapes keep compiling" `Quick
+      test_url_complete_escapes_keep_compiling;
+    Alcotest.test_case "css url scheme exploits do not compile" `Quick
+      test_css_url_scheme_exploits_do_not_compile;
+    Alcotest.test_case "css url templates keep compiling" `Quick
+      test_css_url_templates_keep_compiling;
+    Alcotest.test_case "css url corpus renders no dangerous scheme" `Quick
+      test_css_url_corpus_renders_no_dangerous_scheme ]
 
 let automaton_tests =
   [ Alcotest.test_case "pcdata" `Quick test_pcdata_stays_pcdata;

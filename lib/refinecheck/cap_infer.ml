@@ -84,6 +84,7 @@ let cap_table : (string * string) list = [
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
+  ("http_server_bind_host", "IO.NetListen");
   (* IO.Process *)
   ("process_env",           "IO.Process");
   ("process_set_env",       "IO.Process");
@@ -142,6 +143,8 @@ let cap_table : (string * string) list = [
   ("tls_write",             "IO.NetConnect.TLS");
   ("tls_negotiated_alpn",   "IO.NetConnect.TLS");
   ("tls_peer_cn",           "IO.NetConnect.TLS");
+  ("tls_ctx_set_groups",    "IO.NetConnect.TLS");
+  ("tls_negotiated_group",  "IO.NetConnect.TLS");
 ]
 
 let cap_of_call name = List.assoc_opt name cap_table

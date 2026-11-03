@@ -58,7 +58,7 @@ mod ControlChannelLoopback do
   -- ── node-a: two readers ─────────────────────────────────────────────────
   -- Reads until EOF; on an error, remembers it so a short count is
   -- diagnosable from the golden diff rather than a bare "false".
-  pfn read_data(fd : Int, got : Int) : Int do
+  @[diverges] pfn read_data(fd : Int, got : Int) : Int do
     match Socket.recv(fd, 1048576) do
       Ok(s) ->
         if String.is_empty(s) do got else read_data(fd, got + string_length(s)) end

@@ -1,0 +1,11 @@
+actors 6, queued 0, rss 6 MB, busy 7%, crashes (1h) 3
+
+node               web-1
+sampled at         2026-10-11 18:37:18 UTC
+actors             6   queued messages 0
+memory             rss 6.5 MiB   peak 6.5 MiB   live heap objects 16
+schedulers         14   run queue 0   live procs 7
+code epoch         3
+hot-reload slots   2
+crashes            3 in the last hour, 3 in the ring
+reply cost         51 us

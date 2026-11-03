@@ -1,0 +1,142 @@
+-- One supervisor, four children that crash at the same time, and a restart
+-- that lands while the supervisor is in the middle of a handler
+-- (specs/progress/2026-10-12-supervisor-child-slot-race.md).
+--
+-- Each child's pid lives in a word of the supervisor's state. A restart runs
+-- on whichever thread processed the death (the crashed child's own, at 14
+-- schedulers), so four children crashing at once restart on four threads.
+--
+-- Phase 1 poisons all four children at once, for several rounds, and waits
+-- for every slot to name a new child that takes messages. A slot used to be
+-- written before the replacement's green thread existed, so a send to the
+-- pid read from it was dropped and the child never crashed again. Under
+-- MARCH_SANITIZE=thread this phase must report nothing.
+--
+-- Phase 2 kills a child while its supervisor is inside a handler. A compiled
+-- handler loads every state field on entry and stores them all back on exit,
+-- so a restart that wrote the slot in between was undone by the write-back:
+-- the supervisor went on naming the dead child. A fresh supervisor is used so
+-- that this is the child's first crash, which restarts synchronously inside
+-- `kill` (later crashes are delayed by the backoff).
+mod SupervisorConcurrentChildCrash do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+  needs Actor.Introspect
+
+  type GetReq = GetReq
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Poison() do
+      panic("poisoned")
+    end
+  end
+
+  actor Sup do
+    state { a : Int, b : Int, c : Int, d : Int, naps : Int }
+    init  { a: 0, b: 0, c: 0, d: 0, naps: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 1000000 within 60
+      backoff base 1 cap 2 jitter 0%
+      Worker a
+      Worker b
+      Worker c
+      Worker d
+    end
+
+    -- GetReq routes here (first handler).
+    on Get(reply_to) do
+      Actor.reply(reply_to, state.a)
+      state
+    end
+
+    -- Parks inside the handler, so a restart can land while it runs at any
+    -- scheduler count.
+    on Nap(ms : Int) do
+      sleep_ms(ms)
+      { state with naps: state.naps + 1 }
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn poison(intro : Cap(Actor.Introspect), sup, field) do
+    send(Actor.pid_from_int(intro, child_int(sup, field)), Poison())
+  end
+
+  -- Wait (bounded by a deadline) until [field] names a live child other
+  -- than [old].
+  fn await_restart(intro : Cap(Actor.Introspect), sup, field, old, deadline) do
+    let now_pid = child_int(sup, field)
+    if now_pid != old && is_alive(Actor.pid_from_int(intro, now_pid)) do
+      true
+    else if unix_time_ms() >= deadline do
+      false
+    else
+      sleep_ms(1)
+      await_restart(intro, sup, field, old, deadline)
+    end end
+  end
+
+  fn crash_round(intro : Cap(Actor.Introspect), sup, i, total, ok) do
+    if i == total do
+      ok
+    else
+      let a0 = child_int(sup, "a")
+      let b0 = child_int(sup, "b")
+      let c0 = child_int(sup, "c")
+      let d0 = child_int(sup, "d")
+      let _ = poison(intro, sup, "a")
+      let _ = poison(intro, sup, "b")
+      let _ = poison(intro, sup, "c")
+      let _ = poison(intro, sup, "d")
+      let deadline = unix_time_ms() + 20000
+      let ra = await_restart(intro, sup, "a", a0, deadline)
+      let rb = await_restart(intro, sup, "b", b0, deadline)
+      let rc = await_restart(intro, sup, "c", c0, deadline)
+      let rd = await_restart(intro, sup, "d", d0, deadline)
+      crash_round(intro, sup, i + 1, total, ok && ra && rb && rc && rd)
+    end
+  end
+
+  -- Wait until the supervisor has taken Nap off its queue, i.e. is inside
+  -- the handler.
+  fn await_dequeued(sup, deadline) do
+    if mailbox_size(sup) == 0 || unix_time_ms() >= deadline do
+      0
+    else
+      sleep_ms(1)
+      await_dequeued(sup, deadline)
+    end
+  end
+
+  fn main(io : Cap(IO), _clock : Cap(IO.Clock)) do
+    let intro = Actor.introspect(io)
+    let sup = spawn(Sup)
+
+    let all_restarted = crash_round(intro, sup, 0, 20, true)
+    println("concurrent crashes restarted: " ++ bool_to_string(all_restarted))
+
+    let sup2 = spawn(Sup)
+    let old_a = child_int(sup2, "a")
+    send(sup2, Nap(500))
+    let _ = await_dequeued(sup2, unix_time_ms() + 20000)
+    kill(Actor.pid_from_int(intro, old_a))
+    match Actor.call(sup2, GetReq, 20000) do
+      Ok(a) ->
+        println("restart during a handler kept: "
+                ++ bool_to_string(a != old_a && is_alive(Actor.pid_from_int(intro, a))))
+      Err(_) -> println("call failed")
+    end
+  end
+end

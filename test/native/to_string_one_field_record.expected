@@ -1,0 +1,22 @@
+{ n: true }
+{ f: 1.5 }
+{ c: "a" }
+{ u: () }
+{ s: "s" }
+{ n: false }
+{ x: 2.5 }
+W(true)
+{ k: true }
+{ k: () }
+{ v: "not a list" }
+{ k: 7 }
+[{ n: false }]
+[{ n: true }, { n: false }]
+Some({ n: false })
+Some({ n: false })
+[W(false)]
+Some(W(true))
+[{ f: 0.5 }]
+[{ c: "z" }]
+Some({ u: () })
+[{ k: false }]

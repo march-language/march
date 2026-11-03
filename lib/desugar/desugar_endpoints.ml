@@ -462,7 +462,7 @@ let param ?(lin = Unrestricted) name ty = FPNamed { param_name = n name; param_t
 let fn ?(linear = []) ?(vis = Public) name params ret body : decl =
   DFn
     ( { fn_name = n name; fn_vis = vis; fn_doc = None; fn_attrs = []; fn_ret_ty = Some ret;
-        fn_bounds = [];
+        fn_bounds = []; fn_attr_args = []; fn_needs = None;
         fn_clauses =
           [ { fc_params =
                 List.map (fun (p, t) -> param ~lin:(if List.mem p linear then Linear else Unrestricted) p t) params;
@@ -1011,10 +1011,12 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                      [ app "Session.emit"
                          [ var "s"; var "ep"; role_idx to_; app (msg ^ ".encode") [ con (msg ^ "." ^ ctor) [ var "v" ] ] ] ])) ]
          | LChoose brs ->
-           List.map
+           List.concat_map
              (fun (lbl, to_, ctor, payload, next) ->
                 let nx = state_of next in
-                fn ("choose_" ^ lbl) [ ("s", t_cap_session); ("st", sty this); ("v", payload) ] (sty nx)
+                [ fn ("may_choose_" ^ lbl) [] (TyCon (n "Bool", []))
+                    (ELit (LitBool (not (List.mem lbl held_labels)), sp));
+                  fn ("choose_" ^ lbl) [ ("s", t_cap_session); ("st", sty this); ("v", payload) ] (sty nx)
                   (let send_it =
                      on_ep
                        (con nx
@@ -1034,7 +1036,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                                   (--protocol-expand %s:%s); it can be chosen once the contract deploy has gone out"
                                  proto lbl proto lbl));
                          send_it ]
-                   else send_it))
+                   else send_it) ])
              brs
          | LRecv (from, ctor, payload, next) ->
            let nx = state_of next in
@@ -1833,7 +1835,9 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
      cluster node (`ClusterNode.start`) instead of connections of its own --
      `SessionNode.run_cluster`: peers found by name under the session id,
      frames over the node's shared connections, SWIM as the failure
-     detector. Design: specs/progress/2026-09-18-cluster-node-service.md. *)
+     detector, and the role's fingerprint registered beside its endpoint so
+     a peer from another protocol version is refused before the session
+     forms. Design: specs/progress/2026-09-18-cluster-node-service.md. *)
   let clusters =
     List.map
       (fun (role, entry) ->
@@ -1843,7 +1847,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster"
               [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) [];
-                var "session"; lam [ "_ep" ] unit; call_body role ]))
+                var "session"; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+                lam [ "_ep" ] unit; call_body role ]))
       roles
   in
   (* `offer_<Role>(io, node, capacity, body)`: an ACCESS POINT -- this node
@@ -1868,6 +1873,40 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
                 app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; call_body role ]))
       roles
+  in
+  (* Topology alone opts into fresh work. The saved offer callback enters a
+     named, ABI-checked adapter before allocating any session endpoint.
+     Ordinary offer_<Role> callbacks retain their creation epoch. *)
+  let work_offers =
+    List.concat_map (fun (role, entry) ->
+        let start_name = "__offer_work_start_" ^ role in
+        let start = fn start_name
+            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
+              ("session", t_string); ("abandoned", TyArrow (t_int, tycon "Bool" []));
+              ("body", t_body role entry) ]
+            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
+            (app "SessionNode.start_offered_role"
+               [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_names") [];
+                 app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) [];
+                 var "session"; var "abandoned"; lam [ "_ep" ] unit; call_body role ]) in
+        let start = match start with
+          | DFn (f, span) ->
+            DFn ({ f with fn_name = { f.fn_name with
+              span = { f.fn_name.span with file = "<work-entry>" } } }, span)
+          | _ -> assert false in
+        let offer = fn ("offer_work_" ^ role)
+            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
+              ("capacity", t_int); ("body", t_body role entry) ]
+            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
+            (app "SessionNode.offer_work_role"
+               [ var "node"; lit_str proto;
+                 app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+                 app (msg ^ ".role_names") []; app (msg ^ ".compat_by_role") [];
+                 app (msg ^ ".role_" ^ role) []; var "capacity";
+                 lam [ "session"; "abandoned" ]
+                   (app start_name [ var "io"; var "node"; var "session";
+                                     var "abandoned"; var "body" ]) ]) in
+        [ start; offer ]) roles
   in
   let initiators =
     List.map
@@ -1973,6 +2012,43 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
                 start_sid_of role; var "deliver"; var "cancel" ]))
       roles
   in
+  let work_offers_hosted =
+    List.concat_map (fun (role, _entry) ->
+        let start_name = "__offer_work_hosted_start_" ^ role in
+        let callback_params =
+          [ ("start", t_start_sid role); ("deliver", t_deliver_sid); ("cancel", t_cancel_sid) ] in
+        let start = fn start_name
+            ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
+               ("session", t_string); ("abandoned", TyArrow (t_int, tycon "Bool" []));
+               ("host", t_int) ] @ callback_params)
+            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
+            (app "SessionNode.start_offered_hosted"
+               [ var "io"; var "node"; lit_str proto;
+                 app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+                 app (msg ^ ".role_names") []; app (msg ^ ".role_" ^ role) [];
+                 app (msg ^ ".peers_" ^ role) []; var "session"; var "abandoned";
+                 lam [ "_ep" ] unit; var "host"; start_sid_of role;
+                 var "deliver"; var "cancel" ]) in
+        let start = match start with
+          | DFn (f, span) ->
+            DFn ({ f with fn_name = { f.fn_name with
+              span = { f.fn_name.span with file = "<work-entry>" } } }, span)
+          | _ -> assert false in
+        let offer = fn ("offer_work_hosted_" ^ role)
+            ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("capacity", t_int) ]
+             @ hosted_callbacks role)
+            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
+            (app "SessionNode.offer_work_role"
+               [ var "node"; lit_str proto;
+                 app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+                 app (msg ^ ".role_names") []; app (msg ^ ".compat_by_role") [];
+                 app (msg ^ ".role_" ^ role) []; var "capacity";
+                 lam [ "session"; "abandoned" ]
+                   (app start_name [ var "io"; var "node"; var "session"; var "abandoned";
+                                     app "pid_to_int" [ var "host" ]; var "start";
+                                     var "deliver"; var "cancel" ]) ]) in
+        [ start; offer ]) roles
+  in
   let clusters_hosted =
     List.map
       (fun (role, _entry) ->
@@ -1982,6 +2058,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster_hosted"
               [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "session";
+                app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
                 lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
                 lam [ "s" ] (app "start" (var "session" :: var "s" :: narrowed role));
                 lam [ "s"; "from"; "m"; "ep" ] (app "deliver" [ var "session"; var "s"; var "from"; var "m"; var "ep" ]);
@@ -2007,8 +2084,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
         sp )
   in
   DMod (n mname, Public,
-        (needs :: addrs :: error_message :: runners) @ clusters @ offers @ initiators @ hosters @ hosters_or
-        @ offers_hosted @ clusters_hosted, sp)
+        (needs :: addrs :: error_message :: runners) @ clusters @ offers @ work_offers @ initiators @ hosters @ hosters_or
+        @ offers_hosted @ work_offers_hosted @ clusters_hosted, sp)
 
 (* ── protocol evolution: the wire view and the compatibility table ─────── *)
 
@@ -2437,8 +2514,16 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
             | Some ctors ->
               let roles = roles_of steps in
               let multiparty = List.length roles > 2 in
+              let respan_decl d =
+                let fresh = D.respan_derived_decl d in
+                match d, fresh with
+                | DFn (original, _), DFn (f, s)
+                    when original.fn_name.span.file = "<work-entry>" ->
+                  DFn ({ f with fn_name = { f.fn_name with
+                    span = { f.fn_name.span with file = "<work-entry>" } } }, s)
+                | _ -> fresh in
               let respan_mod = function
-                | DMod (nm, vis, ds, s) -> DMod (nm, vis, List.map D.respan_derived_decl ds, s)
+                | DMod (nm, vis, ds, s) -> DMod (nm, vis, List.map respan_decl ds, s)
                 | d -> d
               in
               let peers = List.map (fun r -> (r, peers_of steps roles r)) roles in

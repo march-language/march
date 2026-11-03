@@ -1,0 +1,23 @@
+exit=0
+exit=0
+s : String
+xs : List(Int)
+f : Float
+50
+1
+15
+a : Int
+50
+1
+15
+50
+1
+15
+50
+1
+15
+0
+ys : List(String)
+r : JsonValue
+15
+the session end released its bindings

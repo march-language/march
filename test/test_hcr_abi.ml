@@ -11,7 +11,12 @@ let test_linux_identities () =
   Alcotest.(check string) "amd64 canonical target"
     "linux/amd64" amd64.canonical_target;
   Alcotest.(check string) "arm64 canonical target"
-    "linux/arm64" arm64.canonical_target
+    "linux/arm64" arm64.canonical_target;
+  (* v5: frame/closure routing calls and closure epoch tags need the new
+     runtime; preflight must refuse loading them into earlier processes. *)
+  Alcotest.(check string) "ABI id"
+    "march-hcr-v5;triple=aarch64-unknown-linux-gnu;ptr=8"
+    (March_tir.Hcr_abi.abi_id arm64)
 
 let test_unsupported_target () =
   match March_tir.Hcr_abi.of_target March_tir.Llvm_toplevel.Wasm32Wasi with

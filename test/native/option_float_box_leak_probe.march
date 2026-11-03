@@ -1,0 +1,88 @@
+-- Leak guard: an `Option(Float)` value is BOXED-encoded (0.0 bitcasts to the
+-- niche None, so Some is a heap cell holding a march_alloc_float box), and a
+-- niche-capable DECLARATION made two release sites treat it as niche:
+--
+--   1. Drop synthesis (Drop.drop_op's may_be_non_heap arm): the record
+--      member `{ o : Option(Float) }` was released with a bare dec_rc that
+--      freed the Some cell shallowly and orphaned its float box -- 200
+--      rebuilds of the record grew live_allocs by 200.
+--   2. emit_reuse_ctor's FBIP path: Json.parse_number's
+--      `reuse $opt as JsonValue.Number(f)` overwrote the pointer-convention
+--      slot (holding the owned float box) with a raw double on BOTH the
+--      in-place reuse and the fresh-alloc paths -- one leaked box per parsed
+--      number. The niche-skip guard also misfired on Option(Float), skipping
+--      the reuse without releasing the dying cell's slot content.
+--
+-- SIGNAL: live_allocs(), not RSS (see native_arr_fold_leak_probe.march for
+-- the rationale: an absolute RSS threshold is not portable across platforms,
+-- a live-object count needs no calibration).
+--
+-- The healthy figure is a small CONSTANT (1 here: the warm-up leg's
+-- string-interning one-off), independent of the iteration counts. Each
+-- defect scales linearly with them, so the `< 1000` bound the dune rule
+-- asserts is far from both and falsifiable in both directions.
+--
+-- Legs (20,000 iterations each):
+--   record_leg  -- a record { o : Option(Float) } built, field-matched and
+--                  dropped per iteration (Drop scope-end aggregate drop).
+--   json_leg    -- Json.parse of a two-number array per iteration (FBIP
+--                  cross-type reuse in parse_number).
+--   int_leg     -- CONTROL: Option(Int) is niche-encoded (a tagged
+--                  immediate, no cell, no box) and must stay flat through
+--                  all of this. Do not "simplify" it away.
+mod OptionFloatLeakProbe do
+  needs IO.Console
+
+  type R = { o : Option(Float), s : String }
+
+  pfn sc(f : Float) : String do int_to_string(float_to_int(f *. 100.0)) end
+
+  pfn record_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let r = { o: Some(1.5), s: "x" }
+      let v = match r.o do
+        Some(f) -> f
+        None -> 0.0
+      end
+      record_leg(n - 1, acc +. v)
+    end
+  end
+
+  pfn json_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let k = match Json.parse("[1.5, 2]") do
+        Ok(_) -> 1
+        Err(_) -> 0
+      end
+      json_leg(n - 1, acc + k)
+    end
+  end
+
+  -- CONTROL: niche-encoded Option(Int), no boxes anywhere.
+  pfn int_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let a = match (if n % 2 == 0 do Some(3) else None end) do
+        Some(x) -> x
+        None -> 1
+      end
+      int_leg(n - 1, acc + a)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    -- Warm every leg outside the measurement window so one-time statics
+    -- (string literals, closure globals) do not count as leaks.
+    println("record=" ++ sc(record_leg(4, 0.0)))
+    println("json=" ++ int_to_string(json_leg(4, 0)))
+    println("int=" ++ int_to_string(int_leg(4, 0)))
+    let before = live_allocs()
+    println("record20k=" ++ sc(record_leg(20000, 0.0)))
+    println("json20k=" ++ int_to_string(json_leg(20000, 0)))
+    println("int20k=" ++ int_to_string(int_leg(20000, 0)))
+    let after = live_allocs()
+    IO.warn(int_to_string(after - before))
+  end
+end

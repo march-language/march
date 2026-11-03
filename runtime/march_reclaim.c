@@ -29,6 +29,7 @@
 #include "march_reclaim.h"
 
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,7 +78,7 @@ static void slot_release(void *v) {
 static void key_init(void) {
     if (pthread_key_create(&g_key, slot_release) != 0) {
         fputs("march_reclaim: pthread_key_create failed\n", stderr);
-        abort();
+        march_abort(__func__);
     }
 }
 
@@ -95,7 +96,7 @@ static march_reclaim_slot *slot_claim(void) {
         void *mem = NULL;
         if (posix_memalign(&mem, 64, sizeof(march_reclaim_slot)) != 0 || !mem) {
             fputs("march_reclaim: out of memory (slot)\n", stderr);
-            abort();
+            march_abort(__func__);
         }
         s = (march_reclaim_slot *)mem;
         memset(s, 0, sizeof *s);
@@ -129,7 +130,7 @@ static inline void announce_online(march_reclaim_slot *s) {
 static void die(const char *what, const char *site) {
     fprintf(stderr, "march_reclaim[BUG]: %s%s%s\n", what,
             site ? " at " : "", site ? site : "");
-    abort();
+    march_abort(__func__);
 }
 
 __attribute__((noinline))
@@ -282,7 +283,7 @@ void march_reclaim_retire(void *p, void (*free_fn)(void *)) {
         if (g_ret_len == g_ret_cap) {
             size_t cap = g_ret_cap ? g_ret_cap * 2 : 256;
             march_retired *g = (march_retired *)realloc(g_ret, cap * sizeof *g);
-            if (!g) { fputs("march_reclaim: out of memory (retire)\n", stderr); abort(); }
+            if (!g) { fputs("march_reclaim: out of memory (retire)\n", stderr); march_abort(__func__); }
             g_ret = g;
             g_ret_cap = cap;
         }
@@ -301,4 +302,35 @@ int64_t march_reclaim_retired_count(void) {
 
 int64_t march_reclaim_freed_count(void) {
     return atomic_load_explicit(&g_freed_total, memory_order_relaxed);
+}
+
+/* ── fatal exits ──────────────────────────────────────────────────────── */
+
+static void (*_Atomic g_fatal_hook)(const char *);
+
+void march_fatal_set_hook(void (*fn)(const char *why)) {
+    atomic_store_explicit(&g_fatal_hook, fn, memory_order_release);
+}
+
+/* True when the calling thread is running on its alternate signal stack,
+ * i.e. inside a handler installed with SA_ONSTACK (the scheduler's fault and
+ * preemption handlers are).  sigaltstack(2) is async-signal-safe. */
+static int on_signal_stack(void) {
+    stack_t ss;
+    return sigaltstack(NULL, &ss) == 0 && (ss.ss_flags & SS_ONSTACK) != 0;
+}
+
+__attribute__((noinline))
+int march_fatal_dump(const char *why) {
+    void (*hook)(const char *) = atomic_load_explicit(&g_fatal_hook, memory_order_acquire);
+    if (!hook) return 0;
+    if (march_reclaim_depth() != 0) return 0;
+    if (on_signal_stack()) return 0;
+    hook(why);
+    return 1;
+}
+
+void march_abort(const char *why) {
+    (void)march_fatal_dump(why);
+    abort();
 }

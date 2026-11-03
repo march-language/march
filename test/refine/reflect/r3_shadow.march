@@ -1,0 +1,12 @@
+mod Shadow do
+  needs IO
+  fn len(xs : List(Int)) : Int do 7 end
+
+  fn need(xs : {List(Int) | len(_) == 1}) : Int do 0 end
+
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(len(Cons(1, Nil))))
+    let _ = need(Cons(1, Nil))
+    ()
+  end
+end

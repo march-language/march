@@ -183,6 +183,26 @@ type ref_record = {
 let qualify_ref_name (modname : string) (name : string) : string =
   if modname = "" then name else modname ^ "." ^ name
 
+(** The type the typechecker synthesises for actor [actor]'s messages: every
+    handler's message constructor has this [ci_type].  The one spelling every
+    site uses (and the refinement checker, which counts it as a declarant of
+    that type name). *)
+let actor_msg_type_name (actor : string) : string = actor ^ "_Msg"
+
+(** The SPELLING half of the `<Actor>.Msg` alias ([Typecheck_unify.actor_msg_alias]
+    adds the scope checks): [Some "<Actor>_Msg"] when [name] is `<Actor>.Msg`
+    or `M.<Actor>.Msg`. *)
+let actor_msg_alias_target (name : string) : string option =
+  let sfx = ".Msg" in
+  let n = String.length name and k = String.length sfx in
+  if n <= k || String.sub name (n - k) k <> sfx then None
+  else
+    let prefix = String.sub name 0 (n - k) in
+    let actor = match String.rindex_opt prefix '.' with
+      | None -> prefix
+      | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1) in
+    Some (actor_msg_type_name actor)
+
 type env = {
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)
@@ -207,6 +227,12 @@ type env = {
   errors  : Err.ctx;
   pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
   type_map : (Ast.span, ty) Hashtbl.t;
+  json_derive_sites : (string * Ast.span) list;
+  (** Every `derive Json` this env's check has seen, as (declaring-module-
+      qualified type name, derive site).  Carried forward like
+      [record_names_snapshot] so a check seeded from the stdlib env still sees
+      stdlib's derives when it looks for a short-name collision
+      ([check_json_derive_collisions] in typecheck.ml). *)
   record_names_snapshot : (string * string option) list;
   (** The display-only record-name index ([Typecheck_types._record_names]) as
       it stood when this env was produced by a check. A check seeded from this
@@ -254,9 +280,11 @@ type env = {
       written, which Check 4 looks up).  Entries from modules nested inside a
       [DMod] propagate outward through it. *)
   protocols  : proto_info StrMap.t; (** Registered session-type protocols *)
-  impls      : (ty * Ast.span * string option) list StrMap.t;
+  impls      : (ty * Ast.span * string option * (string * ty) list) list StrMap.t;
   (** iface_name → (bare impl head type, decl span, resolved declaring-module of
-      the head type — None when unresolved). Head type stays BARE so
+      the head type — None when unresolved, conditional interface bounds).
+      Bounds share the head's type variables and are specialised at use sites.
+      Head type stays BARE so
       [discharge_constraints] is unaffected; the module is used ONLY by the
       coherence overlap test. *)
   import_tracker : import_entry list ref;
@@ -275,6 +303,13 @@ type env = {
       [Typecheck_caps.check_deferred_imports] resolves them against the final
       [module_caps] once the whole module run is done.  Shared (mutable)
       across all env copies, same as [import_tracker]. *)
+  deferred_unused_needs : (string * string * Ast.span) list ref;
+  (** Check-2 "declared but unused" verdicts held back because the module
+      also has a deferred Check-4 import (above), whose fail-closed answer
+      may require the very [needs] Check 2 would call unused.  Each row is
+      (module name, the [needs] path, its declaration span);
+      [check_deferred_imports] reports only the ones no deferred import of
+      that module requires. *)
   local_fns : unit StrMap.t;
   (** Function names DEFINED by the module currently being checked (set from
       the pass-1 / DMod forward-reference prebind).  A bulk import
@@ -298,6 +333,17 @@ type env = {
       [fn_arities] and its own [qual_fn_arities] (nested modules).  Never
       cleared by [bind_var]: a qualified name cannot be shadowed by a local.
       Registry-loaded [ExFn] exports carry no arity and are not in it. *)
+  param_call_arities : (Ast.span * (string * int option) list) StrMap.t;
+  (** Callback call-arity of each parameter of a known function, for the
+      check that a function VALUE passed as an argument takes as many
+      arguments as the callee applies that parameter to (see
+      [Typecheck_callarity]).  Keyed like [fn_arities] (bare, this module's
+      own fns) and [qual_fn_arities] (qualified exports); the span is the
+      definition's name span, and an entry is only consulted when the
+      matching [fn_arities]/[qual_fn_arities] entry has the same span, so a
+      shadowing local fn never inherits a stale entry.  [Some m]: every call
+      of the parameter in the body (direct, or by passing it on to another
+      known function's parameter) supplies [m] arguments. *)
   qual_fn_names : unit StrMap.t;
   (** Qualified ("Mod.name") keys in [vars] that denote a genuine top-level
       function — i.e. a [DFn], an interface method, or a registry [ExFn]
@@ -313,6 +359,17 @@ type env = {
       (`Mod.SOME_CONST`) is never recorded as a `` `Call `` reference, while
       a qualified function/interface-method call still is — see [local_fns]
       for the bare-name analogue of this same distinction. *)
+  binder_spans : Ast.span StrMap.t;
+  (** Where each in-scope variable was bound: its parameter, `let` pattern
+      or match-pattern occurrence (D5, diagnostics plan §9). Scope-correct
+      because it lives in the immutable env and is set or cleared by every
+      [bind_var]/[bind_linear]: a rebinding without a span removes the stale
+      entry. [report_mismatch] labels "`x` was bound here as `T`" from it. *)
+  pat_spans : (string, Ast.span) Hashtbl.t;
+  (** Transient: [infer_pattern] records each [PatVar]'s span here and the
+      binding funnel that follows it ([bind_pattern_bindings]) moves the
+      entry into [binder_spans]. Keyed by name only, so it is read right
+      after the pattern that wrote it and never used for a lookup later. *)
   lambda_arities : (int * Ast.span * Ast.span option) StrMap.t;
   (** Names most recently bound by `let name = fn … -> …` (a lambda LITERAL
       on the right-hand side; see the [Ast.ELet] case of [infer_block]):
@@ -322,7 +379,15 @@ type env = {
       application) and the runtime panics on a wrong-arity call
       ("arity mismatch: expected 1 args, got 0"), which the type `a -> T`
       cannot express: the thunk `fn -> e` and the discard `fn _ -> e` both
-      unify with `() -> T`. Cleared by [bind_var] like [fn_arities]. *)
+      unify with `() -> T`. Cleared by [bind_var] like [fn_arities].
+      `let g = f` with [f] itself in this map copies [f]'s entry. *)
+  fn_aliases : (int * string) StrMap.t;
+  (** Names most recently bound by `let name = f`, [f] a function of known
+      arity n >= 1 named by value (a module fn, or a qualified export): n and
+      [f]'s spelling.  The value is that function's closure, which takes
+      exactly n arguments, so a call of [name] and a callback check treat it
+      as [f] itself (`let h = add` then `h(1)` was accepted, then panicked
+      interpreted / SIGSEGV'd compiled).  Cleared by [bind_var]. *)
   plain_let_names : StringSet.t;
   (** Names most recently bound by a simple, unrestricted `let name = expr`
       (single-variable pattern — see the [Ast.ELet] case of [infer_block]).
@@ -668,6 +733,13 @@ type env = {
       still populated — Task 8 reads it to attribute a whole-program grant
       violation to the user's call chain — but nothing currently checks it.
       [main] is excluded regardless — [check_main_grant] owns it. *)
+  fn_bound_points : (string, string list * Ast.span) Hashtbl.t;
+  (** Functions declaring a per-function capability bound
+      ([fn f(x) needs IO.Console do]) — qualified name (the [cap_qname]
+      convention) → (the bound's capability paths, the bound's span).
+      Recorded by [check_module_needs]; read by [check_fn_bounds], which holds
+      each function's row under its bound.  Shared (mutated in place) across
+      every env copy.  See specs/plans/2026-11-01-per-function-needs-bounds.md. *)
   local_mods : string list StrMap.t;
   (** In-file nested modules → their PRIVATE value/function member names.
       Populated by the [Ast.DMod] export step.  A same-file qualified reference
@@ -703,7 +775,7 @@ let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   ty_aliases = StrMap.empty;
   level = 0; lin = [];
-  errors; pending_constraints = ref []; type_map; record_names_snapshot = [];
+  errors; pending_constraints = ref []; type_map; record_names_snapshot = []; json_derive_sites = [];
   refs = ref []; current_decl = ref "";
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
@@ -712,12 +784,17 @@ let make_env errors type_map = {
   import_tracker = ref [];
   import_idx = make_import_index ();
   deferred_check4 = ref [];
+  deferred_unused_needs = ref [];
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
   qual_fn_arities = StrMap.empty;
+  param_call_arities = StrMap.empty;
   qual_fn_names = StrMap.empty;
   plain_let_names = StringSet.empty;
+  binder_spans = StrMap.empty;
+  pat_spans = Hashtbl.create 16;
   lambda_arities = StrMap.empty;
+  fn_aliases = StrMap.empty;
   proof_caps = [];
   (* "RingBuf" is seeded here so the builtin type is tracked as linear with
      no declaring module (Part C, Phase C2 of
@@ -764,6 +841,7 @@ let make_env errors type_map = {
   fn_row_bodies = Hashtbl.create 64;
   role_grants = Hashtbl.create 8;
   fn_grant_points = Hashtbl.create 16;
+  fn_bound_points = Hashtbl.create 16;
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];
@@ -878,22 +956,114 @@ let rec demote_to_monomorphic (t : ty) : unit =
 
     Scoped to [Vault] on purpose: no type that does not mention [Vault]
     anywhere changes generalization behaviour by one variable. *)
-let rec demote_vault_handle_vars (t : ty) : unit =
+let rec demote_vault_handle_vars_with (demote : ty -> unit) (t : ty) : unit =
+  let go = demote_vault_handle_vars_with demote in
   match t with
-  | TCon ("Vault", args) -> List.iter demote_to_monomorphic args
+  | TCon ("Vault", args) -> List.iter demote args
   | TVar r ->
     (match !r with
-     | Link t'   -> demote_vault_handle_vars t'
+     | Link t'   -> go t'
      | Unbound _ -> ())
-  | TCon   (_, args)    -> List.iter demote_vault_handle_vars args
-  | TArrow (a, b)       -> demote_vault_handle_vars a; demote_vault_handle_vars b
-  | TTuple ts           -> List.iter demote_vault_handle_vars ts
-  | TRecord flds        -> List.iter (fun (_, t) -> demote_vault_handle_vars t) flds
-  | TLin   (_, t)       -> demote_vault_handle_vars t
-  | TNatOp (_, a, b)    -> demote_vault_handle_vars a; demote_vault_handle_vars b
+  | TCon   (_, args)    -> List.iter go args
+  | TArrow (a, b)       -> go a; go b
+  | TTuple ts           -> List.iter go ts
+  | TRecord flds        -> List.iter (fun (_, t) -> go t) flds
+  | TLin   (_, t)       -> go t
+  | TNatOp (_, a, b)    -> go a; go b
   | TChan  _            -> ()
-  | TRefine (base, _, _) -> demote_vault_handle_vars base
+  | TRefine (base, _, _) -> go base
   | TNat _ | TError     -> ()
+
+let demote_vault_handle_vars (t : ty) : unit =
+  demote_vault_handle_vars_with demote_to_monomorphic t
+
+(** Lower every unbound var in [t] to at most [lvl]. *)
+let rec demote_to_level (lvl : int) (t : ty) : unit =
+  let go = demote_to_level lvl in
+  match t with
+  | TVar r ->
+    (match !r with
+     | Unbound (id, l) -> if l > lvl then r := Unbound (id, lvl)
+     | Link t'         -> go t')
+  | TCon   (_, args)    -> List.iter go args
+  | TArrow (a, b)       -> go a; go b
+  | TTuple ts           -> List.iter go ts
+  | TRecord flds        -> List.iter (fun (_, t) -> go t) flds
+  | TLin   (_, t)       -> go t
+  | TNatOp (_, a, b)    -> go a; go b
+  | TChan  _            -> ()
+  | TRefine (base, _, _) -> go base
+  | TNat _ | TError     -> ()
+
+(** One frame per [check_fn] in progress: the level of the fn's body (its
+    generalization threshold + 1) and the types of the unannotated block
+    [let]s in that body that hold a Vault handle.
+
+    The block-[let] Vault value restriction used to demote a handle's element
+    type straight to level 0, i.e. pin it for the WHOLE program.  That is right
+    for a variable only the body can name, but wrong for one the enclosing
+    function's parameters name: in
+    [fn keep(mk : () -> Pid(a)) do let t = Vault.new("x") ... Vault.set(t, "h", mk()) end]
+    the handle's element type IS [Pid(a)], and pinning it made [a] itself
+    monomorphic, so the first caller fixed [a] for every other caller.
+
+    So a block [let] demotes the handle's vars only to the enclosing fn's body
+    level (no [let] or local fn inside the body generalizes them, so every use
+    in one call still shares one element type), and [settle_vault_pins] at the
+    fn's own generalization demotes to level 0 only the vars that no parameter
+    type mentions.  A var a parameter mentions is chosen by each caller through
+    its arguments; one only the body or the return type mentions
+    ([fn g() : Option(b) do Vault.get(Vault.open("x"), "k") end]) stays pinned,
+    as before. *)
+let vault_pin_frames : (int * ty list ref) list ref = ref []
+
+(** The block-[let] Vault value restriction; see [vault_pin_frames]. *)
+let demote_block_vault_handle_vars (t : ty) : unit =
+  match !vault_pin_frames with
+  | (lvl, acc) :: _ ->
+    demote_vault_handle_vars_with (demote_to_level lvl) t;
+    acc := t :: !acc
+  | [] -> demote_vault_handle_vars t
+
+(** Run [f] with a fresh pin frame at body level [lvl]; [f] receives the
+    frame's [settle] function, to call (with the parameter types) just before
+    the fn generalizes. *)
+let with_vault_pin_frame (lvl : int) (f : (ty list -> unit) -> 'a) : 'a =
+  let acc = ref [] in
+  let saved = !vault_pin_frames in
+  vault_pin_frames := (lvl, acc) :: saved;
+  let settle (param_tys : ty list) =
+    let param_ids = Hashtbl.create 8 in
+    let rec collect t =
+      match t with
+      | TVar r ->
+        (match !r with
+         | Unbound (id, _) -> Hashtbl.replace param_ids id ()
+         | Link t' -> collect t')
+      | TCon (_, args) | TTuple args -> List.iter collect args
+      | TArrow (a, b) | TNatOp (_, a, b) -> collect a; collect b
+      | TRecord flds -> List.iter (fun (_, t) -> collect t) flds
+      | TLin (_, t) | TRefine (t, _, _) -> collect t
+      | TChan _ | TNat _ | TError -> ()
+    in
+    List.iter collect param_tys;
+    let rec pin t =
+      match t with
+      | TVar r ->
+        (match !r with
+         | Unbound (id, l) ->
+           if l > 0 && not (Hashtbl.mem param_ids id) then r := Unbound (id, 0)
+         | Link t' -> pin t')
+      | TCon (_, args) | TTuple args -> List.iter pin args
+      | TArrow (a, b) | TNatOp (_, a, b) -> pin a; pin b
+      | TRecord flds -> List.iter (fun (_, t) -> pin t) flds
+      | TLin (_, t) | TRefine (t, _, _) -> pin t
+      | TChan _ | TNat _ | TError -> ()
+    in
+    List.iter (demote_vault_handle_vars_with pin) !acc
+  in
+  Fun.protect ~finally:(fun () -> vault_pin_frames := saved)
+    (fun () -> f settle)
 
 (** Tag the inner cap-argument var of a [cap_narrow] result [Cap(a)] so [unify]
     can reject the instant [a] is bound to a nominal proof cap — closing the
@@ -1437,10 +1607,20 @@ let suggest_module_name (name : string) : string option =
        Array.iter (fun entry ->
          if Filename.check_suffix entry ".march" then begin
            let base = Filename.chop_suffix entry ".march" in
-           let parts = String.split_on_char '_' base in
-           let mod_name = String.concat "" (List.map String.capitalize_ascii parts) in
+           (* Suggest the name the file DECLARES (`BigInt` for bigint.march),
+              falling back to the CamelCase of its filename. *)
+           let mod_name =
+             match March_modules.Module_registry.declared_module_of_file
+                     (Filename.concat dir entry) with
+             | Some m -> m
+             | None ->
+               let parts = String.split_on_char '_' base in
+               String.concat "" (List.map String.capitalize_ascii parts)
+           in
            let d = edit_distance (String.lowercase_ascii name) (String.lowercase_ascii mod_name) in
-           if d > 0 && d < !best_dist && d <= 2 then begin
+           (* d = 0 is a case-only difference (`Bigint` vs `BigInt`): the
+              best suggestion there is, not a reason to skip. *)
+           if mod_name <> name && d < !best_dist && d <= 2 then begin
              best := Some mod_name;
              best_dist := d
            end
@@ -1807,12 +1987,19 @@ let note_gated_rebind name set =
   if List.mem_assoc name !stdlib_only then StringSet.add name set
   else set
 
-let bind_var name sch env =
+let binder_spans_with name span env =
+  match span with
+  | Some sp -> StrMap.add name sp env.binder_spans
+  | None -> StrMap.remove name env.binder_spans
+
+let bind_var ?span name sch env =
   { env with vars = StrMap.add name sch env.vars;
              gated_shadowed = note_gated_rebind name env.gated_shadowed;
              fn_arities = StrMap.remove name env.fn_arities;
              plain_let_names = StringSet.remove name env.plain_let_names;
+             binder_spans = binder_spans_with name span env;
              lambda_arities = StrMap.remove name env.lambda_arities;
+             fn_aliases = StrMap.remove name env.fn_aliases;
              local_fns = StrMap.remove name env.local_fns;
              offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
@@ -1820,7 +2007,7 @@ let bind_vars bindings env =
   List.fold_left (fun e (n, s) -> bind_var n s e) env bindings
 
 (** Extend env with a new linear/affine variable. *)
-let bind_linear name lin ty env =
+let bind_linear ?span name lin ty env =
   let le = { le_name = name; le_lin = lin; le_used = ref false; le_first_use = ref None;
              le_pending = None; le_dup = ref None; le_mixed = ref None } in
   { env with
@@ -1828,16 +2015,17 @@ let bind_linear name lin ty env =
     gated_shadowed = note_gated_rebind name env.gated_shadowed;
     fn_arities = StrMap.remove name env.fn_arities;
     plain_let_names = StringSet.remove name env.plain_let_names;
+    binder_spans = binder_spans_with name span env;
     lin  = le :: env.lin;
     offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
 (** Bind a parameter whose type [ty] is still an unbound variable: an ordinary
     binding plus a pending linear entry, judged when the scope closes. *)
-let bind_pending name ty env =
+let bind_pending ?span name ty env =
   let le = { le_name = name; le_lin = Ast.Unrestricted; le_used = ref false;
              le_first_use = ref None; le_pending = Some ty; le_dup = ref None;
              le_mixed = ref None } in
-  { (bind_var name (Mono ty) env) with lin = le :: env.lin }
+  { (bind_var ?span name (Mono ty) env) with lin = le :: env.lin }
 
 (* =================================================================
    §8  Generalization and instantiation

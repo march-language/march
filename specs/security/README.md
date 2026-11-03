@@ -48,7 +48,7 @@ Four fields, exactly as the paper describes:
 |---|---|
 | `state` | `pcdata` `rcdata` `tagname` `closetagname` `beforeattrname` `afterattrname` `beforeattrvalue` `attrvalue` `comment` |
 | `element` | `normal` `script` `style` `textarea` `title` |
-| `attr` | `normal` `url` `urlmid` `style` `stylevalue` `cssurl` `script` `jsstring` `jscomment` `jsregex` `jstemplate` `srcset` `htmldoc` |
+| `attr` | `normal` `url` `urlmid` `urlscheme` `urlschemehole` `urlschemeholemid` `urlschemeref` `urlpct` `urlpct1` `urlref` `urlquery` `urlfragment` `style` `stylevalue` `cssurl` `cssurlscheme` `cssurlref` `cssurlhole` `cssurlmid` `script` `jsstring` `jscomment` `jsregex` `jstemplate` `srcset` `htmldoc` |
 | `delim` | `none` `single` `double` `unquoted` `doublesubst` |
 
 `element` tracks which element's content we are inside, because `<script>` and
@@ -94,12 +94,65 @@ unsafe direction.
 
 `srcset` and `htmldoc` are not positions but refusals; see "What is rejected".
 
-`urlmid` is `url` after at least one literal character of the value has been
-seen. The distinction is load-bearing: a hole at the *start* of a URL attribute
+`url` and `urlmid` split a URL attribute value at its first literal character.
+The distinction is load-bearing: a hole at the *start* of a URL attribute
 **is** the whole URL and needs a scheme allowlist (`href="${u}"` must not accept
 `javascript:`), while a hole after literal text is a *component* and needs
-percent-encoding (`href="/search?q=${q}"`). Rather than add a fifth context
-field, the table demotes `url` → `urlmid` on the first literal character.
+percent-encoding (`href="/search?q=${q}"`).
+
+Between them sits a small scheme sub-automaton, because the allowlist checks
+the scheme of ONE value and text after that value can still extend it. Until
+2026-10-11 the first literal character went straight to `urlmid`, so
+`href="${s}://${rest}"` with `s = "javascript"` passed the allowlist (no colon:
+a relative reference), and the template's own `:` then made it the scheme. The
+rendered `javascript://%0Aalert%281%29` executes. Now:
+
+| `attr` | Meaning |
+|---|---|
+| `url` | nothing written yet (leading whitespace does not count: the URL parser strips it) |
+| `urlscheme` | only literal, scheme-shaped text so far (`java`, `http`) |
+| `urlschemehole` | the scheme is still open and a whole-URL hole wrote into it |
+| `urlschemeholemid` | the scheme is still open, a hole wrote into it, and more text followed |
+| `urlschemeref` | as `urlscheme`, but the template wrote a character reference (`&`) since the last hole; a hole here is rejected |
+| `urlmid` | the scheme is settled (`/`, `:` written by the template, or any non-scheme character): the PATH, or the authority |
+| `urlquery` | the template wrote a literal `?` (from any of the above) |
+| `urlfragment` | the template wrote a literal `#` (not the `#` of a `&#` reference) |
+
+In the two `…hole…` positions a literal `:` is a compile error, and so are
+`&#` and `&colon;`, which the HTML parser can decode into one. `&` and `;` keep
+the scheme open (they spell character references); tab, CR and LF keep it open
+(the URL parser deletes them). The tracking changes no escaper except one: a
+hole after nothing but leading whitespace now gets the whole-URL escaper.
+
+A hole must also not FINISH an escape the template started (2026-10-11).
+`href="/users/.%${x}/edit"` with x = `2e` rendered `/users/.%2e/edit`, which
+the URL parser reads as `/users/../edit`, and `href="javascript&#${x}..."` with
+x = `58` rendered `javascript&#58...` -- the HTML parser decodes a numeric
+reference without its `;`, so that is `javascript:`. Three path positions and
+one scheme position reject a hole:
+
+| `attr` | Meaning |
+|---|---|
+| `urlpct` | the template just wrote `%` (or `&percnt;`); `%` cannot be in a scheme, so it also settles it |
+| `urlpct1` | the template just wrote `%` and one hex digit |
+| `urlref` | the template just wrote a numeric character reference in the path, finished or not (it may be `&#37;`) |
+| `urlschemeref` | see above: a reference while the scheme is open |
+
+The table cannot decode a reference, so a hole right after any numeric
+reference in a path is rejected, not only one that spells `%`. `&percnt;`
+right after a hole that is still in the scheme is rejected outright, as `&#`
+and `&colon;` already were.
+
+Path holes and query/fragment holes get different escapers (2026-10-11). Both
+percent-encode every non-unreserved byte, so neither can write a delimiter; the
+path one (`url_path`) additionally replaces a value made of nothing but dots
+with the inert token `zSoyz`. In a path such a value is a dot segment:
+`href="/users/${id}/edit"` with id = `..` used to render `/users/../edit`, which
+resolves to `/edit`. Percent-encoding cannot help, since the URL parser reads
+`%2e` as `.`. In a query or fragment a dot segment means nothing and `?q=..` is
+data, which is why those positions are tracked at all. Only a literal `?`/`#`
+moves the walk out of the path; an entity spelling of either leaves it there
+(over-strict), and the `#` of a `&#` reference is not a fragment delimiter.
 
 ### `doublesubst` — the substitution mechanism
 
@@ -180,11 +233,12 @@ row — one less thing to get out of sync:
 |---|---|
 | `pcdata`, `rcdata` in `textarea`/`title` | HTML entity-encode |
 | `attrvalue` with `attr = normal` | HTML entity-encode, plus backtick |
-| `attrvalue` with `attr = url` (start of value) | URL scheme allowlist |
-| `attrvalue` with `attr = urlmid` | percent-encode |
+| `attrvalue` with `attr = url` / `urlschemehole` (start of value, or right after a start hole) | URL scheme allowlist |
+| `attrvalue` with `attr = urlmid` / `urlscheme` / `urlschemeholemid` (path or authority) | percent-encode, and refuse a dot segment (`url_path`) |
+| `attrvalue` with `attr = urlquery` / `urlfragment` | percent-encode |
 | `attrvalue` with `attr = style`, or `rcdata` in `style` | CSS **declaration** escape |
 | `attrvalue` with `attr = stylevalue` | CSS **value** escape |
-| `attr = cssurl`, or `rcdata` in `style` inside `url(` | CSS **url** escape |
+| `attr = cssurl` / `cssurlscheme` / `cssurlhole` / `cssurlmid`, in a `style` attribute or a `<style>` body | CSS **url** escape |
 | `attrvalue` with `attr = jsstring`, or `rcdata` in `script` inside a string literal | JS **string** escape |
 | `attrvalue` with `attr = script`, or `rcdata` in `script` at expression position | JS **expression** escape |
 
@@ -197,6 +251,7 @@ compile errors carrying the reason:
 |---|---|
 | element name, attribute name | nothing to escape — `onerror` has no special character |
 | inside an HTML comment | comment-ending sequences vary between parsers |
+| a literal `:` (or `&#`, `&colon;`) in a URL whose scheme a hole has written into | the hole's value would become the scheme without ever being checked as one: `${s}:` with `s = "javascript"`. Interpolate the whole URL as one hole |
 | inside a JS comment | the value is dead text until a newline or `*/` moves it into live code |
 | inside a JS regex literal | an unescaped `/` ends the literal and everything after it is code |
 | inside a JS template literal | a backtick ends it and `${` opens a substitution — arbitrary code |
@@ -237,6 +292,12 @@ might first appear:
   check; the scheme is therefore extracted by skipping those bytes rather than
   by comparing a prefix. Anything not on the list becomes
   `about:invalid#zSoyz`.
+- **URL path** is the component escaper plus one refusal: an all-dot value
+  (`.`, `..`, ...) becomes `zSoyz`, because it would be a dot segment and no
+  encoding stops that. A dot segment the TEMPLATE writes around an empty value
+  (`/a/.${x}./b` with x = ``) is the template's own text and is not caught.
+  A raw `%` (or `&#37;`, `&percnt;`) written right before a path hole would
+  let the hole finish a `%2e`; the table rejects that hole instead (above).
 - **CSS** is an allowlist too — anything outside `[A-Za-z0-9-_#%., ]` becomes a
   `\XX ` hex escape. That means interpolating a whole declaration
   (`style="${'color: red'}"`) will not work: the colon is escaped. This is
@@ -253,6 +314,17 @@ the construct and start writing CSS. The `css_url` escaper runs the scheme
 allowlist and then percent-encodes only what is structural in CSS or HTML —
 percent-encoding being the right tool because the URL layer decodes it *after*
 CSS and HTML have parsed.
+
+Since 2026-10-11 `url(...)` tracks its scheme the way a URL attribute does, so
+the scheme check of one value cannot be extended by the template:
+`url(${s}:x)` with s = `javascript` used to pass. `cssurl` is now only the
+start of the url(); `cssurlscheme` holds literal scheme-shaped text,
+`cssurlhole` a scheme a hole wrote into (a `:`, `&` or `\` there is a compile
+error: references and CSS escapes can both decode to `:`), `cssurlref` a
+reference or CSS escape a hole could finish (`\` + `00003a`; a hole there is
+rejected), and `cssurlmid` a settled scheme. No current browser runs
+`javascript:` from CSS; the rule is applied anyway so that `href` and `url()`
+follow one rule.
 
 This is the nearest thing here to the paper's subsidiary automata. It is still a
 flat context rather than a nested automaton with codecs; see

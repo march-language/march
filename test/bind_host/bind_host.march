@@ -1,0 +1,20 @@
+-- test/bind_host/bind_host.march: a server bound to 127.0.0.1 only
+-- (driven by test/test_http_bind_host.sh).
+mod BindHost do
+  needs IO.NetListen
+
+  fn router(conn) do
+    match (HttpServer.method(conn), HttpServer.path_info(conn)) do
+    (:get, Nil) -> conn |> HttpServer.text(200, "ok")
+    _ -> conn |> HttpServer.text(404, "Not Found")
+    end
+  end
+
+  fn main(_cap_netlisten : Cap(IO.NetListen)) do
+    HttpServer.bind_host("127.0.0.1")
+    HttpServer.new(47811)
+    |> HttpServer.plug(router)
+    |> HttpServer.listen()
+  end
+
+end

@@ -1,0 +1,97 @@
+-- Leak guard: a `~H` hole must release the value it interpolates.
+--
+-- The desugar lowers every hole to `html_escape_ctx(id, v)`. Neither that
+-- builtin nor `html_auto_escape` was in borrow.ml's extern_borrow_table, so
+-- Perceus defaulted them to OWNED: the caller handed its reference over and
+-- emitted no release, while the C escapers only read the value. Every
+-- dynamic hole therefore leaked what it interpolated, and the emitter's own
+-- intermediates (the to_string of a non-String hole, the flattened String of
+-- an IOList hole escaped for a non-HTML context) were never released either.
+--
+-- Measured on main before the fix (ac7e9a23), --compile --opt 2, objects
+-- leaked per render: String 1, Int 1, nested ~H 9 (the partial's own hole
+-- plus its Segments/Cons/Str cells, at both levels), IOList in an attribute
+-- 10, TrustedHtml 1, TrustedHtml in an attribute 2, Html.tag's dynamic-id
+-- attribute 1. A server-rendered page interpolates dozens of holes, so every
+-- uncached page leaked tens of objects (found in forgepm's web process).
+--
+-- The ADT leg still leaks ONE object per render after the fix, and it is not
+-- the hole's: `to_string(Pt(n, n))` with no template leaks the same one. Its
+-- bound below is per-render so the leg still guards the hole's own release
+-- (2 per render before) without pinning the separate to_string leak.
+--
+-- The trusted legs pin the other half of the change. A TrustedHtml hole in
+-- element content is inserted verbatim by loading the wrapped String out of
+-- the cell; once the hole borrows, that String must be handed back with its
+-- own reference or it is freed with the wrapper. The rendered text of every
+-- leg is printed once so a use-after-free shows up as wrong output, not just
+-- a count.
+--
+-- SIGNAL: live_allocs() deltas over 10,000 renders, printed as booleans
+-- against a bound far below the iteration count, so the golden is
+-- deterministic.
+mod Main do
+  needs IO.Console
+
+  type Pt = Pt(Int, Int)
+
+  pfn partial(n : Int) : IOList do
+    ~H"<b>${int_to_string(n)}</b>"
+  end
+
+  pfn render(leg : Int, n : Int) : String do
+    let s = int_to_string(n)
+    match leg do
+    0 -> IOList.to_string(~H"<p>${s}</p>")
+    1 -> IOList.to_string(~H"<p>${n}</p>")
+    2 -> IOList.to_string(~H"<p>${partial(n)}</p>")
+    3 -> IOList.to_string(~H"<a title=\"${partial(n)}\">x</a>")
+    4 -> IOList.to_string(~H"<p>${Pt(n, n)}</p>")
+    5 -> IOList.to_string(~H"<p>${Html.trust_html(s)}</p>")
+    6 -> IOList.to_string(~H"<a title=\"${Html.trust_html(s)}\">x</a>")
+    _ -> IOList.to_string(Html.tag("a", [("title", s)], IOList.empty()))
+    end
+  end
+
+  pfn name(leg : Int) : String do
+    match leg do
+    0 -> "String hole"
+    1 -> "Int hole"
+    2 -> "nested ~H hole"
+    3 -> "IOList in attribute"
+    4 -> "ADT hole"
+    5 -> "TrustedHtml hole"
+    6 -> "TrustedHtml in attribute"
+    _ -> "Html.tag attribute"
+    end
+  end
+
+  pfn run(leg : Int, n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let out = render(leg, n)
+      run(leg, n - 1, acc + string_byte_length(out))
+    end
+  end
+
+  pfn measure(leg : Int) : Unit do
+    let _ = run(leg, 100, 0)
+    let before = live_allocs()
+    let bytes = run(leg, 10000, 0)
+    let delta = live_allocs() - before
+    -- The ADT leg's allowance is the separate to_string leak (see above).
+    let allowed = if leg == 4 do 10000 + 100 else 100 end
+    println(name(leg) ++ ": " ++ render(leg, 7) ++ " bytes=" ++ int_to_string(bytes)
+            ++ " flat: " ++ bool_to_string(delta < allowed))
+  end
+
+  pfn all(leg : Int) : Unit do
+    if leg > 7 do () else
+      let _ = measure(leg)
+      all(leg + 1)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    all(0)
+  end
+end

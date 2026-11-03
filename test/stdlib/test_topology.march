@@ -109,6 +109,47 @@ mod TestTopology do
       assert (Topology.settled(15000, Some(0), 15000))
     end
 
+    -- A count = 1 role over two nodes: B took it over while A was down; A
+    -- restarts, ranks first, and a peer showed it as rejoining at t = 1000.
+    -- B does not count A for the settle period; A must not open the role
+    -- for that long either, or two nodes offer it with no partition.
+    test "a rejoining node that ranks first does not open a count role inside the settle period" do
+      let ids = ["node-a", "node-b"]
+      let ranked = Topology.rank("Order.Ledger", ids)
+      let a = nth(ranked, 0)
+      let b = nth(ranked, 1)
+      let p = Topology.count(1)
+      -- A wants it (it ranks first among both markers)...
+      assert (Topology.wants(p, "Order.Ledger", a, Nil, [b]))
+      -- ...B, which excludes the settling A, still wants it too...
+      assert (Topology.wants(p, "Order.Ledger", b, Nil, Nil))
+      -- ...so A may not open it until 15 s after it rejoined.
+      assert (Topology.may_open(p, 1, 1500, 0, true, Some(1000), 15000) == false)
+      assert (Topology.may_open(p, 1, 15999, 0, true, Some(1000), 15000) == false)
+      assert (Topology.may_open(p, 1, 16000, 0, true, Some(1000), 15000))
+    end
+
+    test "a just-started node opens no ranked role before its first registry sync, for at most the settle period" do
+      let p = Topology.count(1)
+      -- Not synced: it sees no other marker yet, so wanting proves nothing.
+      assert (Topology.may_open(p, 0, 500, 0, false, None, 15000) == false)
+      -- Bounded: seeds unreachable for the whole period, it takes the role.
+      assert (Topology.may_open(p, 0, 15000, 0, false, None, 15000))
+      -- Synced, no peer remembers it (a fresh cluster): at once.
+      assert (Topology.may_open(p, 1, 500, 0, true, None, 15000))
+      -- Unranked roles are never held back.
+      assert (Topology.may_open(Topology.everywhere(), 0, 0, 0, false, Some(0), 15000))
+    end
+
+    test "a rejoining node still fills a count its peers cannot" do
+      -- Alone (the holder died while it was down), or fewer others than the count.
+      assert (Topology.may_open(Topology.count(1), 0, 1500, 0, true, Some(1000), 15000))
+      assert (Topology.may_open(Topology.count(3), 2, 1500, 0, true, Some(1000), 15000))
+      assert (Topology.may_open(Topology.count(2), 2, 1500, 0, true, Some(1000), 15000) == false)
+      assert (Topology.count_of(Topology.count_on("db", 2)) == 2)
+      assert (Topology.count_of(Topology.everywhere()) == 0)
+    end
+
   end
 
   describe "Topology reload: the digest a SIGHUP re-reads" do

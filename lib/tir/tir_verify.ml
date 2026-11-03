@@ -34,9 +34,73 @@
     - no two [fn_def]s share a name (from [tir-mono] on: before it a program
       fn may shadow a generic prelude fn of the same bare name).
 
-    Checks 2-5 (types, RC balance, repr, pass contracts) are separate PRs;
-    [borrow_map] and [k_table] are accepted now so their call sites do not
-    change then. *)
+    {1 Check 2: type consistency ([check_types])}
+
+    From [tir-mono] on, where every type a pass relies on is concrete.  Each
+    rule fires only on a mismatch that changes the machine code, never on a
+    type difference codegen tolerates (an erased [TVar], a closure behind a
+    pointer, a named record against its structure):
+
+    - a call to a module function passes exactly its parameter count;
+    - with the kind table (from [tir-defun] on), each argument has the same
+      machine representation as its parameter ({!Kind.layout_of}: immediate,
+      float, pointer, unboxed aggregate, SIMD vector). Closure apply
+      functions are exempt: they share one boxed ABI by design
+      ([Tir_names.is_apply_fn]);
+    - a case branch binds exactly as many variables as its constructor has
+      fields, when the scrutinee's variant is known;
+    - a projected field exists in the record or closure type;
+    - no source-named type variable ([a]) survives monomorphisation in an
+      ordinary function's signature; the typechecker's own [_<id>] variables
+      are erased by design.
+
+    {1 Check 3: RC balance ({!Tir_verify_rc})}
+
+    On with the verifier.  At [tir-perceus], given the
+    borrow map and kind table Perceus used: no
+    path consumes or releases a reference it does not hold, or reads an
+    object after its last reference is gone.  Leaks only with [~rc_leaks]
+    (or [MARCH_VERIFY_TIR_LEAKS=1]).
+
+    {1 Check 5: pass contracts}
+
+    Postconditions a pass documents, checked from the stage after it.  So far
+    Defun's, from [tir-defun] on ({!post_defun_stage}):
+
+    - no lambda creation site, [letrec f = .. in f], remains: each became an
+      allocation of its closure struct;
+    - a name bound locally (parameter, let, branch binder) is never called
+      directly: a call through a local binding is an indirect call, even when
+      a top-level function shares its name.
+
+    Reported with a [[contract]] tag.  The second one catches a name captured
+    by a later pass: an inlined body that calls a top-level [f] landing in a
+    scope that binds its own [f].  It found exactly that in [Inline], now
+    guarded (specs/progress/2026-10-11-inline-capture-guard.md).
+    Post-mono "no polymorphic fn_def" is check 2's named-type-variable rule;
+    "every [$jp] is defined once" is not an invariant (inlining the same body
+    twice repeats the name in one function, and scoping makes that harmless),
+    and "stack allocations do not escape" needs the escape analysis itself.
+
+    {1 Check 4: representation invariants (at emission)}
+
+    The one check that runs after the TIR pipeline, inside [emit_module]
+    ({!Llvm_toplevel.check4_findings}), because what it checks is what codegen
+    committed to: under the verifier, the [MARCH_REPR_AUDIT] recorder is
+    forced on, and its record of every allocation, reuse, match and equality
+    site's encoding is read back, with the constructor tags codegen installed.
+    A finding raises {!Failed} at stage [llvm-emit], tagged [repr/]:
+
+    - [mixed]: a type's sites mix encoding families (Boxed, Niche, Newtype,
+      Unboxed) for one payload, or a site with no payload to go on disagrees
+      with one that had it (the [Option(Option(_))] null-vs-boxed bug shape);
+    - [collision]: a type in a collision group (one short name, several
+      declaring modules) is encoded as anything but Boxed, or the group's
+      constructor tags leave the collision range or repeat, so a match on
+      the bare short name could not tell the modules apart.
+
+    [march query verify] stops before emission, so it does not run check 4;
+    [--verify-tir] and [MARCH_VERIFY_TIR=1] builds do. *)
 
 module StringSet = Set.Make (String)
 
@@ -53,10 +117,34 @@ let enabled_flag = ref false
 
 let enabled () = !enabled_flag || Lazy.force enabled_by_env
 
+(** [--verify-tir-rc] / [MARCH_VERIFY_TIR_RC=1]: accepted spellings of the
+    verifier, kept from when check 3 (RC balance) had its own switch.  It ran
+    separately until the Perceus bugs it found were fixed
+    (specs/progress/2026-10-08-perceus-parent-released-before-field-use.md);
+    check 3 is now part of every verified build.  The rest of this note is
+    the original rationale: it found real
+    Perceus bugs in stdlib code every program compiles
+    (specs/todos/2026-10-07-perceus-releases-parent-before-field-use.md);
+    until they are fixed, putting it under plain [--verify-tir] would fail
+    every verified build. *)
+let rc_flag = ref false
+let rc_by_env : bool Lazy.t =
+  lazy (match Sys.getenv_opt "MARCH_VERIFY_TIR_RC" with
+        | Some ("" | "0") | None -> false | Some _ -> true)
+let enabled () = enabled () || !rc_flag || Lazy.force rc_by_env
+
 (* Stages before monomorphisation, where a bare interface-method call
    ([show(x)]) is legitimately unresolved. *)
 let pre_mono_stage stage =
   List.mem stage [ "tir-lower"; "tir-trmc" ]
+
+(* Stages from [tir-defun] on: Defun's postconditions hold (check 5, pass
+   contracts).  Every stage name the pipeline, the REPL and the test harnesses
+   pass starts with "tir-"; those before Defun are listed, so a new later stage
+   is covered without touching this. *)
+let post_defun_stage stage =
+  String.starts_with ~prefix:"tir-" stage
+  && not (List.mem stage [ "tir-lower"; "tir-trmc"; "tir-mono"; "tir-fusion" ])
 
 (* Callee names the emitter handles in a dedicated [emit_expr] arm BEFORE
    its general known-callee test ([Llvm_calls.is_known_callee]), and which
@@ -69,6 +157,9 @@ let emitter_arm name =
   || Llvm_emit_simd.decode_simd_call name <> None
   || Llvm_emit_nmap.decode_nmap_inline_call name <> None
   || Llvm_emit_nmap.decode_nfold_inline_call name <> None
+  (* NativeArray sum(map) fusion (phase C) landed after check 1 and added
+     this family; the emitter decodes it in its own arm too. *)
+  || Llvm_emit_nmap.decode_nsummap_inline_call name <> None
   || Dispatch_registry.is_sentinel name
   (* @[vectorize] sentinels stamped by Vectorize_mark and consumed by
      Vectorize_check before emission *)
@@ -92,8 +183,181 @@ let js_only_name name =
 let derived_iface_methods = [ "to_json"; "from_json"; "from_json_events" ]
 
 
-let check ~(stage : string) ?borrow_map:(_ : Borrow.borrow_map option)
-    ?k_table:(_ : Kind.table option)
+(* ── Check 2: type consistency ─────────────────────────────────────── *)
+
+let atom_ty (a : Tir.atom) : Tir.ty option =
+  match a with
+  | Tir.AVar v -> Some v.Tir.v_ty
+  | Tir.ALit (March_ast.Ast.LitInt _) -> Some Tir.TInt
+  | Tir.ALit (March_ast.Ast.LitFloat _) -> Some Tir.TFloat
+  | Tir.ALit (March_ast.Ast.LitString _) -> Some Tir.TString
+  | Tir.ALit (March_ast.Ast.LitBool _) -> Some Tir.TBool
+  | Tir.ALit _ | Tir.ADefRef _ -> None
+
+(** The representation class a value is passed in, or [None] when it is
+    erased (decided at run time). *)
+let repr_class (k : Kind.table) (t : Tir.ty) : string option =
+  (* `()` is unit whether spelled [TUnit] or the empty tuple ([Show$Unit.show]
+     is called with an empty-tuple atom). *)
+  let t = match t with Tir.TTuple [] -> Tir.TUnit | t -> t in
+  match (Kind.of_ty k t).Kind.layout with
+  | Kind.Erased -> None
+  | Kind.Imm -> Some "an immediate word"
+  | Kind.Flt -> Some "a native float"
+  | Kind.Heap | Kind.Cell -> Some "a heap pointer"
+  | Kind.Agg s -> Some ("the unboxed aggregate " ^ s)
+  | Kind.Vec n -> Some (Printf.sprintf "a %d-lane vector" n)
+
+let last_segment s =
+  match String.rindex_opt s '.' with
+  | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+  | None -> s
+
+(* A source-named type variable ([a], from an annotation).  The
+   typechecker's own variables ([_53272]) and lowering's unknown ([_]) are
+   erased by design when nothing pins them: mono defaults only some of them
+   ([Mono.default_residual_in_subst]), and a corpus sweep found them in
+   ordinary stdlib signatures everywhere. *)
+let rec has_named_tvar (t : Tir.ty) =
+  match t with
+  | Tir.TVar n -> String.length n > 0 && n.[0] <> '_'
+  | Tir.TTuple ts -> List.exists has_named_tvar ts
+  | Tir.TRecord fs -> List.exists (fun (_, t) -> has_named_tvar t) fs
+  | Tir.TCon (_, ts) -> List.exists has_named_tvar ts
+  | Tir.TFn (ps, r) -> List.exists has_named_tvar ps || has_named_tvar r
+  | Tir.TPtr t -> has_named_tvar t
+  | _ -> false
+
+let check_types ~report ~(k_table : Kind.table option) (m : Tir.tir_module) =
+  let fns = Hashtbl.create 256 in
+  List.iter (fun (fd : Tir.fn_def) -> Hashtbl.replace fns fd.Tir.fn_name fd) m.Tir.tm_fns;
+  let variants = Hashtbl.create 64 and records = Hashtbl.create 64
+  and closures = Hashtbl.create 64 in
+  (* Two modules may each define a type with the same short name (the
+     collision set, [Collision_set]); a TIR type reference then does not say
+     which, so a name defined more than once is not checked. *)
+  let defs = Hashtbl.create 64 in
+  List.iter (function
+      | Tir.TDVariant (n, _) | Tir.TDRecord (n, _) | Tir.TDClosure (n, _) ->
+        let k = last_segment n in
+        Hashtbl.replace defs k (1 + Option.value ~default:0 (Hashtbl.find_opt defs k)))
+    m.Tir.tm_types;
+  (* by short name: a colliding type is registered qualified ([HttpServer.Conn])
+     while a reference to it may say only [Conn] *)
+  let unique n = Hashtbl.find_opt defs (last_segment n) = Some 1 in
+  List.iter (function
+      | Tir.TDVariant (n, ctors) when unique n -> Hashtbl.replace variants n ctors
+      | Tir.TDRecord (n, fs) when unique n -> Hashtbl.replace records n fs
+      | Tir.TDClosure (n, tys) when unique n -> Hashtbl.replace closures n tys
+      | _ -> ())
+    m.Tir.tm_types;
+  let ty = Pp.string_of_ty in
+  let check_call fn env (f : Tir.var) args =
+    if not (StringSet.mem f.Tir.v_name env) then
+      match Hashtbl.find_opt fns f.Tir.v_name with
+      | None -> ()
+      | Some callee ->
+        let np = List.length callee.Tir.fn_params and na = List.length args in
+        if np <> na then
+          report fn (Printf.sprintf "call to `%s` passes %d argument(s); it takes %d"
+                       f.Tir.v_name na np)
+        else
+          match k_table with
+          | Some k when not (Tir_names.is_apply_fn callee.Tir.fn_name)
+                     && callee.Tir.fn_kind <> Tir.FnApply ->
+            List.iteri (fun i ((p : Tir.var), a) ->
+                match atom_ty a with
+                | None -> ()
+                | Some at ->
+                  match repr_class k p.Tir.v_ty, repr_class k at with
+                  | Some pc, Some ac when pc <> ac ->
+                    report fn (Printf.sprintf
+                                 "argument %d of `%s` is %s (`%s`), but the parameter `%s` \
+                                  is %s (`%s`)"
+                                 (i + 1) f.Tir.v_name ac (ty at) p.Tir.v_name pc (ty p.Tir.v_ty))
+                  | _ -> ())
+              (List.combine callee.Tir.fn_params args)
+          | _ -> ()
+  in
+  let check_case fn (scrut : Tir.atom) (branches : Tir.branch list) =
+    match atom_ty scrut with
+    | Some (Tir.TCon (tn, _)) ->
+      (match Hashtbl.find_opt variants tn with
+       | None -> ()
+       | Some ctors ->
+         List.iter (fun (b : Tir.branch) ->
+             let want = last_segment b.Tir.br_tag in
+             match List.filter (fun (c, _) -> last_segment c = want) ctors with
+             | [ (c, args) ] ->
+               let n = List.length b.Tir.br_vars and k = List.length args in
+               if n <> k then
+                 report fn (Printf.sprintf
+                              "case branch `%s` binds %d variable(s); constructor `%s` of \
+                               `%s` has %d field(s)" b.Tir.br_tag n c tn k)
+             | _ -> ())
+           branches)
+    | _ -> ()
+  in
+  let check_field fn (a : Tir.atom) field =
+    let missing kind tname =
+      report fn (Printf.sprintf "field `%s` is projected from %s `%s`, which has no such field"
+                   field kind tname) in
+    match atom_ty a with
+    | Some (Tir.TRecord fs) when not (List.mem_assoc field fs) ->
+      missing "the record" (ty (Tir.TRecord fs))
+    | Some (Tir.TCon (tn, _)) ->
+      (match Hashtbl.find_opt records tn with
+       | Some fs when not (List.mem_assoc field fs) -> missing "the record type" tn
+       | Some _ -> ()
+       | None ->
+         match Hashtbl.find_opt closures tn with
+         | Some tys when Tir_names.is_fv_field field ->
+           let idx = int_of_string_opt (String.sub field 3 (String.length field - 3)) in
+           (match idx with
+            | Some i when i < 1 || i >= List.length tys -> missing "the closure struct" tn
+            | _ -> ())
+         | _ -> ())
+    | _ -> ()
+  in
+  let rec walk fn env (e : Tir.expr) =
+    match e with
+    | Tir.EApp (f, args) -> check_call fn env f args
+    | Tir.ECase (scrut, branches, default) ->
+      check_case fn scrut branches;
+      List.iter (fun (b : Tir.branch) ->
+          walk fn (List.fold_left (fun s (v : Tir.var) -> StringSet.add v.Tir.v_name s)
+                     env b.Tir.br_vars) b.Tir.br_body) branches;
+      Option.iter (walk fn env) default
+    | Tir.EField (a, f) -> check_field fn a f
+    | Tir.ELet (v, rhs, body) -> walk fn env rhs; walk fn (StringSet.add v.Tir.v_name env) body
+    | Tir.ELetRec (fds, body) ->
+      let env = List.fold_left (fun s (fd : Tir.fn_def) -> StringSet.add fd.Tir.fn_name s) env fds in
+      List.iter (fun (fd : Tir.fn_def) ->
+          walk fn (List.fold_left (fun s (v : Tir.var) -> StringSet.add v.Tir.v_name s)
+                     env fd.Tir.fn_params) fd.Tir.fn_body) fds;
+      walk fn env body
+    | Tir.ESeq (a, b) -> walk fn env a; walk fn env b
+    | _ -> ()
+  in
+  List.iter (fun (fd : Tir.fn_def) ->
+      (* Drop glue ([__drop$List_V0]) is synthesised per type, erased
+         element included; it is not a specialisation mono failed to finish. *)
+      if fd.Tir.fn_kind = Tir.FnNormal
+         && not (String.starts_with ~prefix:Tir_names.drop_fn_prefix fd.Tir.fn_name)
+         && (List.exists (fun (v : Tir.var) -> has_named_tvar v.Tir.v_ty) fd.Tir.fn_params
+             || has_named_tvar fd.Tir.fn_ret_ty) then
+        report fd.Tir.fn_name
+          (Printf.sprintf "a named type variable survived monomorphisation in the \
+                           signature (%s) -> %s"
+             (String.concat ", " (List.map (fun (v : Tir.var) -> ty v.Tir.v_ty) fd.Tir.fn_params))
+             (ty fd.Tir.fn_ret_ty));
+      let env = List.fold_left (fun s (v : Tir.var) -> StringSet.add v.Tir.v_name s)
+          StringSet.empty fd.Tir.fn_params in
+      walk fd.Tir.fn_name env fd.Tir.fn_body)
+    m.Tir.tm_fns
+
+let check ~(stage : string) ?(borrow_map : Borrow.borrow_map option)
+    ?(k_table : Kind.table option) ?(rc = true) ?rc_leaks
     ?(iface_methods : (string, (string * string) list) Hashtbl.t option)
     ?(def_hashes : (string, string) Hashtbl.t option)
     ?(known_fn : string -> bool = fun _ -> false)
@@ -120,6 +384,7 @@ let check ~(stage : string) ?borrow_map:(_ : Borrow.borrow_map option)
   let is_iface name =
     match iface_methods with Some h -> Hashtbl.mem h name | None -> false in
   let pre_mono = pre_mono_stage stage in
+  let post_defun = post_defun_stage stage in
   (* Bare interface-method names: the method part of an interface-mangled
      fn ([Json$Point.from_json] -> [from_json]).  Before mono a call may still
      name the method bare (return-position dispatch); mono resolves it. *)
@@ -199,6 +464,13 @@ let check ~(stage : string) ?borrow_map:(_ : Borrow.borrow_map option)
         report fn (Printf.sprintf "call to `%s`, which is not a function in \
                                    tm_fns, an extern, a builtin or a local \
                                    binding" f.Tir.v_name);
+      (* Check 5, Defun: a locally bound name that is called is a closure
+         pointer and dispatches through ECallPtr, even when a top-level
+         function shares its name (Defun.rw, case B). *)
+      if post_defun && StringSet.mem f.Tir.v_name env && not (emitter_arm f.Tir.v_name) then
+        report fn (Printf.sprintf "[contract] `%s` is bound locally but is called \
+                                   directly after Defun; a call through a local \
+                                   binding must be an indirect call" f.Tir.v_name);
       atoms args
     | Tir.ECallPtr (callee, args) ->
       check_atom fn env callee;
@@ -215,6 +487,15 @@ let check ~(stage : string) ?borrow_map:(_ : Borrow.borrow_map option)
       check_expr fn env rhs;
       check_expr fn (StringSet.add v.Tir.v_name env) body
     | Tir.ELetRec (fns, body) ->
+      (* Check 5, Defun: a lambda creation site, [letrec f = .. in f], is
+         replaced by an allocation of its closure struct. *)
+      (match fns, body with
+       | [ fd ], Tir.EAtom (Tir.AVar v)
+         when post_defun && String.equal v.Tir.v_name fd.Tir.fn_name ->
+         report fn (Printf.sprintf "[contract] lambda `%s` survived Defun as a \
+                                    letrec creation site; it should be an \
+                                    allocation of its closure struct" fd.Tir.fn_name)
+       | _ -> ());
       let env' =
         List.fold_left (fun s (fd : Tir.fn_def) -> StringSet.add fd.Tir.fn_name s)
           env fns in
@@ -246,7 +527,15 @@ let check ~(stage : string) ?borrow_map:(_ : Borrow.borrow_map option)
     check_expr fd.Tir.fn_name env fd.Tir.fn_body
   in
   List.iter (check_fn ~env:StringSet.empty) m.Tir.tm_fns;
-  List.rev !findings
+  if not pre_mono then check_types ~report ~k_table m;
+  (* Check 3 (RC balance, lib/tir/tir_verify_rc.ml): at tir-perceus only,
+     with the borrow map and kind table Perceus itself used. *)
+  let rc =
+    match stage, borrow_map, k_table with
+    | "tir-perceus", Some borrow_map, Some k_table when rc ->
+      Tir_verify_rc.check ~stage ?leaks:rc_leaks ~k_table ~borrow_map m
+    | _ -> [] in
+  List.rev !findings @ rc
 
 let render ~stage (findings : (string * string) list) : string =
   Printf.sprintf "TIR verifier: %d finding(s) after %s:\n%s" (List.length findings) stage
@@ -259,7 +548,7 @@ let () =
     | _ -> None)
 
 (** Run [check] and raise [Failed] on any finding. *)
-let enforce ~stage ?borrow_map ?k_table ?iface_methods ?def_hashes ?known_fn m =
-  match check ~stage ?borrow_map ?k_table ?iface_methods ?def_hashes ?known_fn m with
+let enforce ~stage ?borrow_map ?k_table ?rc ?rc_leaks ?iface_methods ?def_hashes ?known_fn m =
+  match check ~stage ?borrow_map ?k_table ?rc ?rc_leaks ?iface_methods ?def_hashes ?known_fn m with
   | [] -> ()
   | findings -> raise (Failed (stage, findings))

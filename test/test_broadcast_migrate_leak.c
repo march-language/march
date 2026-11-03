@@ -96,8 +96,8 @@ int main(void) {
     const uint32_t DISPATCH_ID = 7;
     void *a1 = fake_actor();
     void *a2 = fake_actor();
-    march_actor_set_dispatch_id(a1, DISPATCH_ID);
-    march_actor_set_dispatch_id(a2, DISPATCH_ID);
+    march_actor_set_dispatch_id(a1, DISPATCH_ID, 0);
+    march_actor_set_dispatch_id(a2, DISPATCH_ID, 0);
     march_test_actor_bind_green_thread(a1, victim);
     march_test_actor_bind_green_thread(a2, victim);
 

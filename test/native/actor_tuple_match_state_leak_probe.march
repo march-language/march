@@ -1,0 +1,122 @@
+-- Leak guard: an actor handler whose body is a match on a tuple a call
+-- returned (LinearMap.take_slot) leaked its old `state` record, and the map
+-- it held, on every message: the match is non-exhaustive in TIR, its panic
+-- arms release `state`, and Perceus's aggregate scope-end drop
+-- (drop_agg_at_tails) saw "a release somewhere in the RHS of `$result`" and
+-- placed the drop on NO path instead of on the paths that did not release.
+--
+-- Measured before the fix, --compile --opt 2, objects per message:
+--   - Step for an absent id ............................ 2
+--   - Open + three Steps on one id (4 messages) ........ 15
+--   - the shared-state control below ................... 2
+-- After: flat.  (specs/progress/2026-10-12-actor-handler-tuple-match-state-leak.md)
+--
+-- The `Keep` actor is the shared-state control: one arm of its tuple match
+-- hands `state` itself back (the path that must NOT drop it), the other
+-- builds the new state from a String projected out of the old one through the
+-- tuple, so the old record and the new one share it.  A drop on the wrong
+-- path, or one that freed the shared label, is a double free or a
+-- use-after-free under ASAN, and the final `kept` line would print garbage.
+--
+-- SIGNAL: live_allocs() deltas against a bound far below the message count,
+-- printed as booleans so the golden is deterministic.
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+
+  always_linear type S1 = S1(Int)
+
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+
+  actor Host do
+    state { done : Int, sessions : LinearMap(Int, S1) }
+    init  { done: 0, sessions: LinearMap.empty_int() }
+    on Open(sid : Int) do
+      let (old, m) = LinearMap.put(state.sessions, sid, S1(0))
+      match old do
+        None -> { state with sessions: m }
+        Some(s) -> { state with done: state.done + sink(s), sessions: m }
+      end
+    end
+    on Step(sid : Int, last : Bool) do
+      match LinearMap.take_slot(state.sessions, sid) do
+        (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+        (Some(s), slot) ->
+          if last do
+            { state with done: state.done + sink(s), sessions: LinearMap.vacate(slot) }
+          else
+            { state with sessions: LinearMap.fill(slot, S1(sink(s) + 1)) }
+          end
+      end
+    end
+    on Report(n : Int) do
+      println("done " ++ int_to_string(state.done + n))
+      state
+    end
+  end
+
+  actor Keep do
+    state { n : Int, label : String, hist : List(String) }
+    init  { n: 0, label: "k", hist: Nil }
+    on Push(k : Int) do
+      match (k, state.label) do
+        (0, _) -> state
+        (_, l) -> { state with n: state.n + k, label: l, hist: Cons(int_to_string(k), state.hist) }
+      end
+    end
+    on Show(k : Int) do
+      println("kept " ++ state.label ++ " " ++ int_to_string(List.length(state.hist)) ++ " n " ++ int_to_string(state.n + k))
+      { state with hist: Nil }
+    end
+  end
+
+  pfn absent(h, n : Int) : () do
+    if n <= 0 do () else
+      let _ = send(h, Step(100000 + n, false))
+      absent(h, n - 1)
+    end
+  end
+
+  pfn present(h, n : Int) : () do
+    if n <= 0 do () else
+      let _ = send(h, Open(n))
+      let _ = send(h, Step(n, false))
+      let _ = send(h, Step(n, false))
+      let _ = send(h, Step(n, true))
+      present(h, n - 1)
+    end
+  end
+
+  pfn push(k, n : Int) : () do
+    if n <= 0 do () else
+      let _ = send(k, Push(n % 3))
+      push(k, n - 1)
+    end
+  end
+
+  pfn report(label : String, grew : Int) : () do
+    println(label ++ ", flat: " ++ bool_to_string(grew < 100))
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let h = spawn(Host)
+    let k = spawn(Keep)
+    run_until_idle()
+    let a0 = live_allocs()
+    absent(h, 5000)
+    run_until_idle()
+    let a1 = live_allocs()
+    present(h, 2000)
+    run_until_idle()
+    let a2 = live_allocs()
+    push(k, 3000)
+    let _ = send(k, Show(0))
+    run_until_idle()
+    let a3 = live_allocs()
+    let _ = send(h, Report(0))
+    run_until_idle()
+    report("tuple-match handler, absent id", a1 - a0)
+    report("tuple-match handler, open and steps", a2 - a1)
+    report("shared state, kept and updated", a3 - a2)
+  end
+end

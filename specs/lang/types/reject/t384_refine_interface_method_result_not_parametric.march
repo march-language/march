@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: cannot verify precondition `_ > 0` on `need_pos`
+-- The parametricity gate and interface methods (2026-10-18, found by the
+-- fold-accumulator invariants phase 1 controls): `pick` looks parametric in
+-- `a`, but it returns `dflt(1)`, and the only impl of `dflt : Int -> t` is
+-- written at `Int` and returns -5.  The gate accepted `pick` through the
+-- adopted impl's head-free body, so the scalar demand
+-- `need_pos(pick(o, 1))` was PROVED and `cap verified` accepted this module,
+-- although `pick(Some(3), 1)` returns -5.  A call to an interface method whose
+-- result mentions a type variable now taints the caller.  A skip, an error
+-- under `cap verified`.
+mod InterfaceResultNotParametric do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  interface Dflt(t) do
+    fn dflt : Int -> t
+  end
+  impl Dflt(Int) do
+    fn dflt(_n) do 0 - 5 end
+  end
+  fn pick(o : Option(a), d : a) : a do
+    match o do
+      Some(_) -> dflt(1)
+      None -> d
+    end
+  end
+  fn go(o : Option({Int | _ > 0})) : Int do need_pos(pick(o, 1)) end
+end

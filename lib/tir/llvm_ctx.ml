@@ -222,6 +222,7 @@ type ctx = {
   (* TIR name of the function currently being emitted — for diagnostics
      (e.g. the shape-mismatch match-failure panic message). *)
   mutable cur_emit_fn   : string;
+  mutable owned_closure : string option;
   mutable tco_loop_label : string;
   mutable tco_param_info : (string * string * string) list;
   (* SSA value (e.g. "%sp.save42") holding the llvm.stacksave() result taken at
@@ -260,6 +261,20 @@ type ctx = {
      commit eafbd71a).  Populated by [emit_fn] per function. *)
   mutable tco_dup_bound : string list;
   mutable tco_defer_slot : string;
+  (* Erased-slot boxes (a Float's march_alloc_float box, or an unboxed
+     aggregate's box) that a case branch copied out of its scrutinee's cell
+     while that branch's body REUSES the cell (FBIP).  Keyed by the
+     scrutinee's TIR name, valued by the SSA box pointers loaded at branch
+     entry.  The binder holds a copy, so once the cell is taken over in place
+     (or freed) nothing owns these boxes any more: the reuse emitters in
+     [Llvm_emit_alloc] release them on exactly those paths.  Set and cleared
+     by [Llvm_case.emit_case] around the branch body. *)
+  reuse_orphan_boxes : (string, string list) Hashtbl.t;
+  (* [let x = y] copies in the function being emitted: x -> the name it
+     ultimately copies (inlining leaves `let o = $t` and then matches on [o]
+     while Perceus reuses [$t]).  Lets [reuse_orphan_boxes] tie a reuse token
+     to the scrutinee it aliases.  Cleared per function. *)
+  let_alias : (string, string) Hashtbl.t;
   (* Mutual TCO state — set by emit_mutual_tco_group for the combined function.
      mutual_tco_group: names of all functions in the current mutual group (empty = not active).
      mutual_tco_tag_slot: alloca slot name for the dispatch tag.
@@ -294,10 +309,18 @@ type ctx = {
      is emitted into the module at all. *)
   mutable ctor_desc_globals : (string * string) option;
   ctor_desc_ids : (string, int) Hashtbl.t;
+  (* Instances of generic types the descriptor describes with their type
+     arguments substituted (`Box(Meters)`): [Tir.show_ty] key -> LOCAL id, and
+     the descriptor rows written for them so far.  Filled on demand by
+     [Llvm_ctor_desc.id_for_ty]; written out with the base rows by
+     [Llvm_ctor_desc.flush] once the whole unit has been emitted. *)
+  ctor_desc_insts : (string, int) Hashtbl.t;
+  ctor_desc_inst_rows : Buffer.t;
   (* Distributed OTP L4: CAS-derived hash maps for remote_ref_hashes constant folding.
      Maps qualified fn name ("Math.add") → hex hash string. *)
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
+  hr_sig_hashes : (string, string) Hashtbl.t;
   (* When true, non-exported function definitions in the patch .so get hidden
      ELF visibility so intra-.so PLT calls resolve to the .so's own definitions
      instead of looking up the global symbol table.  Without this, a v2 patch's
@@ -417,12 +440,15 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   var_llvm_ty = Hashtbl.create 32;
   tco_fn_name    = None;
   cur_emit_fn    = "";
+  owned_closure = None;
   tco_loop_label = "";
   tco_param_info = [];
   tco_in_tail    = true;
   norm_ret_pos   = false;
   tco_stack_save = "";
   tco_dup_bound  = [];
+  reuse_orphan_boxes = Hashtbl.create 4;
+  let_alias = Hashtbl.create 16;
   tco_defer_slot = "";
   mutual_tco_group      = [];
   mutual_tco_tag_slot   = "";
@@ -435,8 +461,11 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   rec_shape_globals = Hashtbl.create 16;
   ctor_desc_globals = None;
   ctor_desc_ids = Hashtbl.create 64;
+  ctor_desc_insts = Hashtbl.create 16;
+  ctor_desc_inst_rows = Buffer.create 256;
   remote_impl_hashes = Hashtbl.create 0;
   remote_sig_hashes  = Hashtbl.create 0;
+  hr_sig_hashes = Hashtbl.create 0;
   compile_so = false;
   atom_names = Hashtbl.create 16;
 }
@@ -549,6 +578,22 @@ let llvm_field_ty (ctx : ctx) (ty : Tir.ty) : string =
 let llvm_ret_ty (ctx : ctx) : Tir.ty -> string = function
   | Tir.TUnit -> "void"
   | t -> llvm_ty ctx t
+
+(** The name [n] is a [let] copy of, followed to the end ([n] itself if none). *)
+let alias_root ctx n =
+  match Hashtbl.find_opt ctx.let_alias n with Some r -> r | None -> n
+
+(** Track just the apply frame's owned environment and its explicit aliases.
+    Other local values keep their ordinary ownership rules. *)
+let own_closure_alias ctx atom value =
+  match ctx.owned_closure, atom with
+  | Some name, Tir.AVar v when alias_root ctx v.Tir.v_name = name ->
+    emit ctx (Printf.sprintf "call void @march_frame_own_closure(ptr %s)" value)
+  | _ -> ()
+
+let disown_closure_value ctx value =
+  if ctx.owned_closure <> None then
+    emit ctx (Printf.sprintf "call void @march_frame_disown_closure(ptr %s)" value)
 
 (** LLVM type string for a function *parameter*, augmented with alias-analysis
     attributes for pointer types.
@@ -987,6 +1032,57 @@ let intern_string_site ctx s =
     (Printf.sprintf "%s = internal global ptr null\n" cell);
   (bytes, cell)
 
+(** Checked 63-bit Int `+ - *` and negation (specs/lang/type-system.md, "Int
+    width and overflow"): a result outside [-2^62, 2^62) panics instead of
+    wrapping, with the message the interpreter and the JS backend raise.
+
+    [va] and [vb] must be NORMALISED (in range): read them through
+    [Llvm_emit.emit_atom], not [emit_atom_raw].  The check is the tagged-Int
+    trick: [2a + 2b] (and [2a * b]) overflows i64 exactly when [a + b]
+    ([a * b]) leaves the 63-bit range, so one [*.with.overflow] intrinsic on a
+    pre-shifted operand decides it, and the exact [ashr 1] of the i64 result
+    is the 63-bit answer.  The result is therefore always normalised; only
+    the operations that still wrap (shl, int_pow, int_abs, the -2^62 / -1
+    quotient) leave a bare value for lazy normalisation ([emit_wrap_int63]).
+
+    The overflow edge goes to a block that calls [march_int_overflow] (cold,
+    noreturn) with the op and the enclosing function's source site: TIR
+    carries no expression spans, so the site is the function's definition
+    ([Provenance.effective_span]), recorded the way [march_panic_site] records
+    a `panic` call's.  [op] is "+", "-", "*" or "neg" ([vb] ignored). *)
+let emit_checked_int_op ctx (op : string) (va : string) (vb : string) : string =
+  let shl1 v =
+    let s = fresh ctx "ovs" in
+    emit ctx (Printf.sprintf "%s = shl i64 %s, 1" s v); s in
+  let (intr, x, y, code) = match op with
+    | "+"   -> ("sadd", shl1 va, shl1 vb, 0)
+    | "-"   -> ("ssub", shl1 va, shl1 vb, 1)
+    | "*"   -> ("smul", shl1 va, vb, 2)
+    | "neg" -> ("ssub", "0", shl1 va, 3)
+    | s -> failwith ("emit_checked_int_op: " ^ s) in
+  let pair = fresh ctx "ovp" in
+  emit ctx (Printf.sprintf "%s = call {i64, i1} @llvm.%s.with.overflow.i64(i64 %s, i64 %s)"
+              pair intr x y);
+  let r2 = fresh ctx "ovr" in
+  emit ctx (Printf.sprintf "%s = extractvalue {i64, i1} %s, 0" r2 pair);
+  let o = fresh ctx "ovf" in
+  emit ctx (Printf.sprintf "%s = extractvalue {i64, i1} %s, 1" o pair);
+  let trap_lbl = fresh_block ctx "ovf_trap" in
+  let ok_lbl = fresh_block ctx "ovf_ok" in
+  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" o trap_lbl ok_lbl);
+  emit_label ctx trap_lbl;
+  let (file, line) = match Provenance.effective_span ctx.cur_emit_fn with
+    | Some sp -> (Provenance.display_file sp.March_ast.Ast.file, sp.March_ast.Ast.start_line)
+    | None -> ("", 0) in
+  let fname = if file = "" then "null" else intern_string ctx file in
+  emit ctx (Printf.sprintf "call void @march_int_overflow(i64 %d, ptr %s, i64 %d)"
+              code fname line);
+  emit_term ctx "unreachable";
+  emit_label ctx ok_lbl;
+  let r = fresh ctx "ov" in
+  emit ctx (Printf.sprintf "%s = ashr exact i64 %s, 1" r r2);
+  r
+
 (* One immortal, statically-initialised closure object per top-level function
    used as a first-class value.  The object march_alloc would build here is
    entirely compile-time constant — march_hdr {rc; tag; pad} (16 bytes, see
@@ -1095,13 +1191,17 @@ let wrap_emit_kind ctx (wrap_name : string) : [ `Skip | `Define | `Declare ] =
    llvm_emit.ml) still resets the table per module and prints the report;
    both are re-exported bare there, same pattern as the ctx primitives
    above. *)
-let repr_audit_on = lazy (Sys.getenv_opt "MARCH_REPR_AUDIT" <> None)
+let repr_audit_env = lazy (Sys.getenv_opt "MARCH_REPR_AUDIT" <> None)
+(* Set by [emit_module] when the TIR verifier is on: check 4 turns the report
+   into findings (Tir_verify, "llvm-emit" stage), so the recording must run. *)
+let repr_audit_forced = ref false
+let repr_audit_on_now () = Lazy.force repr_audit_env || !repr_audit_forced
 (* type_name -> (payload_key, family, site) list, deduped *)
 let _repr_audit : (string, (string * string * string) list ref) Hashtbl.t =
   Hashtbl.create 64
 let repr_audit_record ~(ty : string) ~(payload : string) ~(family : string)
     ~(site : string) : unit =
-  if Lazy.force repr_audit_on then begin
+  if repr_audit_on_now () then begin
     let l = match Hashtbl.find_opt _repr_audit ty with
       | Some l -> l
       | None -> let l = ref [] in Hashtbl.add _repr_audit ty l; l
@@ -1109,13 +1209,14 @@ let repr_audit_record ~(ty : string) ~(payload : string) ~(family : string)
     let entry = (payload, family, site) in
     if not (List.mem entry !l) then l := entry :: !l
   end
-let repr_audit_report () =
-  if Lazy.force repr_audit_on then begin
-    let flagged = ref 0 in
-    Hashtbl.iter (fun ty entries ->
+(* The flagged types: [(type, families, conflict kind, entries)], sorted by
+   type so a report or a finding list is deterministic. *)
+let repr_audit_flagged () =
+  Hashtbl.fold (fun ty entries acc ->
       let es = !entries in
       let families = List.sort_uniq compare (List.map (fun (_, f, _) -> f) es) in
-      if List.length families > 1 then begin
+      if List.length families <= 1 then acc
+      else
         (* Mixed families for this type: definite if within one concrete
            payload key; suspicious if via a "?" site. Legitimate when two
            DIFFERENT concrete payloads pick different reprs (Option(Int) niche
@@ -1125,18 +1226,25 @@ let repr_audit_report () =
             List.exists (fun (p2, f2, _) -> p1 = p2 && f1 <> f2) es) es in
         let unknown_conflict =
           List.exists (fun (p, _, _) -> p = "?") es in
-        if same_key_conflict || unknown_conflict then begin
-          incr flagged;
-          Printf.eprintf "[repr-audit] %s: MIXED %s%s\n" ty
-            (String.concat "/" families)
-            (if same_key_conflict then " (same-payload conflict)"
-             else " (unknown-payload site disagrees)");
-          List.iter (fun (p, f, s) ->
-            Printf.eprintf "    %-8s payload=%-24s %s\n" f p s) es
-        end
-      end
-    ) _repr_audit;
-    Printf.eprintf "[repr-audit] %d type(s) flagged\n%!" !flagged
+        if same_key_conflict || unknown_conflict then
+          (ty, families,
+           (if same_key_conflict then "same-payload conflict"
+            else "unknown-payload site disagrees"),
+           List.sort compare es) :: acc
+        else acc)
+    _repr_audit []
+  |> List.sort compare
+
+let repr_audit_report () =
+  if Lazy.force repr_audit_env then begin
+    let flagged = repr_audit_flagged () in
+    List.iter (fun (ty, families, kind, es) ->
+        Printf.eprintf "[repr-audit] %s: MIXED %s (%s)\n" ty
+          (String.concat "/" families) kind;
+        List.iter (fun (p, f, s) ->
+            Printf.eprintf "    %-8s payload=%-24s %s\n" f p s) es)
+      flagged;
+    Printf.eprintf "[repr-audit] %d type(s) flagged\n%!" (List.length flagged)
   end
 
 (* ── Reduction-check helper ───────────────────────────────────────────── *)

@@ -99,16 +99,186 @@ let rec tails_bound (path : (A.expr * bool) list) (bound : string list) (e : A.e
      | [] -> [ (path, e, bound) ])
   | A.EIf (c, t, el, _) ->
     tails_bound ((c, false) :: path) bound t @ tails_bound ((c, true) :: path) bound el
-  | A.ECond (arms, _) -> List.concat_map (fun (c, b) -> tails_bound ((c, false) :: path) bound b) arms
+  (* A later `cond` arm, and any `match` arm but an irrefutable first one,
+     is reached under conditions this path does not record (the earlier
+     conditions' failure, the pattern itself): the opaque marker, which is
+     `true` to the solver and tells [check_call] not to take a model as a
+     definite counterexample (review of 8e5c15c48). *)
+  | A.ECond (arms, _) ->
+    List.concat
+      (List.mapi
+         (fun i (c, b) ->
+           let path = if i = 0 then path else opaque_path_marker :: path in
+           tails_bound ((c, false) :: path) bound b)
+         arms)
+  | A.EMatch (_, branches, _) ->
+    List.concat
+      (List.mapi
+         (fun i (br : A.branch) ->
+           let ns = pat_binders br.A.branch_pat in
+           let path = path_shadow path ns in
+           let path =
+             if i = 0 && irrefutable_pat br.A.branch_pat then path else opaque_path_marker :: path
+           in
+           let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
+           tails_bound p (ns @ bound) br.A.branch_body)
+         branches)
+  (* A `let?` / `let*` stays ONE tail: its early `Err` exit (or the
+     `flat_map` callback a `let*` becomes) is not a syntactic tail, so its
+     continuation must not be walked as if it were the only return.  Its
+     pattern's binders are recorded all the same, so a rule consulting
+     [bound] (a rebinding of a name the contract mentions) treats the tail as
+     under them rather than relying on the whole expression being
+     unreflectable. *)
+  | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> [ (path, e, pat_binders p @ bound) ]
+  | _ -> [ (path, e, bound) ]
+
+(* ── `let r = f(args)` ahead of a return tail (C1's let form, 2026-10-26) ──
+   Per tail, in [tails_bound]'s order, the block `let`s of a plain name to a
+   direct call that are still in force at the tail, innermost first.  A
+   binding is RETIRED when its name, or any name its call mentions, is bound
+   again before the tail (a later `let`, a local `fn`, a `match` arm's
+   pattern, a `let?`/`let*` pattern), so the call's arguments denote at the
+   tail exactly what they denoted at the `let`.  A call that mentions its own
+   name (`let x = inc(x)`) is never recorded: its argument is the OUTER
+   binding.  [check_post] reads the name as a fresh value carrying the
+   callee's PROVED return ([post_lookup]); nothing here assumes anything. *)
+let rec tails_let_calls (lets : (string * A.expr) list) (e : A.expr) : (string * A.expr) list list =
+  let retire ns lets =
+    if ns = [] then lets
+    else List.filter (fun (n, rhs) -> not (List.mem n ns) && not (Refine_scope.expr_mentions ns rhs)) lets
+  in
+  match e with
+  | A.EBlock (es, _) ->
+    (match List.rev es with
+     | last :: _ ->
+       let lets =
+         List.fold_left
+           (fun lets e ->
+             match e with
+             | A.ELet (b, _) ->
+               let lets = retire (pat_binders b.A.bind_pat) lets in
+               (match b.A.bind_pat, b.A.bind_expr with
+                | A.PatVar n, (A.EApp (A.EVar { A.txt = f; _ }, _, _) as rhs)
+                  when (not (List.mem f predicate_operators))
+                       && not (Refine_scope.expr_mentions [ n.A.txt ] rhs) ->
+                  (n.A.txt, rhs) :: lets
+                | _ -> lets)
+             | A.ELetFn (n, _, _, _, _) -> retire [ n.A.txt ] lets
+             | _ -> lets)
+           lets es
+       in
+       tails_let_calls lets last
+     | [] -> [ lets ])
+  | A.EIf (_, t, el, _) -> tails_let_calls lets t @ tails_let_calls lets el
+  | A.ECond (arms, _) -> List.concat_map (fun (_, b) -> tails_let_calls lets b) arms
   | A.EMatch (_, branches, _) ->
     List.concat_map
-      (fun (br : A.branch) ->
-        let ns = pat_binders br.A.branch_pat in
-        let path = path_shadow path ns in
-        let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
-        tails_bound p (ns @ bound) br.A.branch_body)
+      (fun (br : A.branch) -> tails_let_calls (retire (pat_binders br.A.branch_pat) lets) br.A.branch_body)
       branches
-  | _ -> [ (path, e, bound) ]
+  | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> [ retire (pat_binders p) lets ]
+  | _ -> [ lets ]
+
+(* ── A tail's inner binders, apart from the names its checker already knows ─
+   A tail is checked in an env built ABOVE it (a clause's parameters, a
+   lambda's), but its path conditions were collected on the way DOWN, under
+   whatever an inner `match` arm or `let` bound.  [tails_bound]'s
+   [path_shadow] drops the facts collected before such a binder, so every
+   mention of a [bound] name still in the path (or in the tail) is about the
+   INNER binding — but read in the outer env it lands on the same SMT name as
+   the parameter it shadows.  `fn g2(n : {Int | _ < 0}, p) : {Int | _ > 0}`
+   with `Some(n) -> if n > 5 do 0 - 7 else 1 end` put `n < 0` and `n > 5` on
+   one `n`, and the contradiction proved the false `-7` tail.  Renaming the
+   inner binding to a fresh name ([inner_name]) in both the path and the tail
+   keeps every fact about it (no precision lost) and never conflates.
+
+   Only names that clash are renamed, so a local `fn` the tail calls keeps
+   the name [post_lookup] resolves it by. *)
+let inner_name (n : string) : string = n ^ "$in"
+
+(* [rename_free_checked env e]: [e] with every FREE occurrence of a name in
+   [env] renamed, capture-avoiding: a lambda's parameters, a `match` arm's or
+   `let`'s pattern, a local `fn`'s name and parameters and a `let?`/`let*`
+   pattern stop the renaming of the names they rebind, for the scope they
+   bind.  Application heads are renamed too (a let-bound lambda reusing a
+   callback parameter's name is the inner value, not the parameter).  The
+   flag is false when a form this does not know still mentions a renamed name:
+   that occurrence was NOT renamed and must not be read ([rename_path] drops
+   such a fact; a tail with one gets no scalar demand hook). *)
+let rename_free_checked (env : (string * string) list) (e : A.expr) : A.expr * bool =
+  let complete = ref true in
+  let drop env ns = List.filter (fun (n, _) -> not (List.mem n ns)) env in
+  let pnames (ps : A.param list) = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+  let rec go env e =
+    if env = [] then e
+    else
+      match e with
+      | A.EVar n -> (match List.assoc_opt n.A.txt env with Some m -> A.EVar { n with A.txt = m } | None -> e)
+      | A.ELit _ | A.EHole _ | A.EResultRef _ -> e
+      | A.EApp (f, args, sp) -> A.EApp (go env f, List.map (go env) args, sp)
+      | A.ETuple (es, sp) -> A.ETuple (List.map (go env) es, sp)
+      | A.ECon (c, es, sp) -> A.ECon (c, List.map (go env) es, sp)
+      | A.EAtom (a, es, sp) -> A.EAtom (a, List.map (go env) es, sp)
+      | A.EField (r, n, sp) -> A.EField (go env r, n, sp)
+      | A.EAnnot (x, t, sp) -> A.EAnnot (go env x, t, sp)
+      | A.EIf (c, t, el, sp) -> A.EIf (go env c, go env t, go env el, sp)
+      | A.ECond (arms, sp) -> A.ECond (List.map (fun (c, b) -> (go env c, go env b)) arms, sp)
+      | A.ERecord (fs, sp) -> A.ERecord (List.map (fun (n, v) -> (n, go env v)) fs, sp)
+      | A.ERecordUpdate (r, fs, sp) ->
+        A.ERecordUpdate (go env r, List.map (fun (n, v) -> (n, go env v)) fs, sp)
+      | A.ELam (ps, body, sp) -> A.ELam (ps, go (drop env (pnames ps)) body, sp)
+      | A.EMatch (x, brs, sp) ->
+        A.EMatch
+          ( go env x
+          , List.map
+              (fun (br : A.branch) ->
+                let env' = drop env (pat_binders br.A.branch_pat) in
+                { br with
+                  A.branch_guard = Option.map (go env') br.A.branch_guard
+                ; A.branch_body = go env' br.A.branch_body })
+              brs
+          , sp )
+      | A.EBlock (es, sp) ->
+        let _, es' =
+          List.fold_left
+            (fun (env, acc) e ->
+              match e with
+              | A.ELet (b, lsp) ->
+                let b' = { b with A.bind_expr = go env b.A.bind_expr } in
+                (drop env (pat_binders b.A.bind_pat), A.ELet (b', lsp) :: acc)
+              | A.ELetFn (n, ps, rt, body, lsp) ->
+                (* The name is in scope in its own body (recursion). *)
+                let env = drop env [ n.A.txt ] in
+                (env, A.ELetFn (n, ps, rt, go (drop env (pnames ps)) body, lsp) :: acc)
+              | e -> (env, go env e :: acc))
+            (env, []) es
+        in
+        A.EBlock (List.rev es', sp)
+      | A.ELet (b, sp) -> A.ELet ({ b with A.bind_expr = go env b.A.bind_expr }, sp)
+      | A.ELetQ (p, e1, e2, sp) -> A.ELetQ (p, go env e1, go (drop env (pat_binders p)) e2, sp)
+      | A.ELetStar (p, e1, e2, sp) -> A.ELetStar (p, go env e1, go (drop env (pat_binders p)) e2, sp)
+      | _ ->
+        if expr_mentions (List.map fst env) e then complete := false;
+        e
+  in
+  let e' = go env e in
+  (e', !complete)
+
+let rename_free (env : (string * string) list) (e : A.expr) : A.expr = fst (rename_free_checked env e)
+
+(* [names] (the [bound] names that clash with the checker's env) renamed apart
+   in a tail's path conditions.  A fact the renaming could not complete is
+   dropped: weaker, never conflated. *)
+let rename_path (names : string list) (path : (A.expr * bool) list) : (A.expr * bool) list =
+  let env = List.map (fun n -> (n, inner_name n)) (List.sort_uniq compare names) in
+  if env = [] then path
+  else
+    List.filter_map
+      (fun (c, neg) ->
+        match rename_free_checked env c with
+        | c', true -> Some (c', neg)
+        | _, false -> None)
+      path
 
 (* Return-position expressions of a body, each with the path reaching it. *)
 let tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list * A.expr) list =
@@ -131,12 +301,26 @@ let tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list * A
    member(1, elts(_))}`, whose promise does not translate because of `len`,
    so `elts(xs) = {}` — an input the contract forbids — was reported as the
    counterexample to a return of `xs`. *)
-let scope_facts (sc : scope)
+let scope_facts ?(env : (string * Smt.sort) list = []) (sc : scope)
     : (string * Smt.sort) list * Smt.term list * bool * bool * bool =
   let has_string =
     List.exists (fun (_, (_, _, sort)) -> sort = Some str_sort) sc
   in
   let dropped = ref false in
+  (* A name an entry's predicate mentions that is no entry of its own (an
+     unrefined sibling parameter, `k : {Int | _ > x}` beside `x : Int`)
+     still needs a declaration, at its declared scalar sort ([env], the
+     clause's parameter sorts) or the Int default: left undeclared, z3
+     rejected the query (`unknown constant x`) and the obligation was a
+     silent skip.  A name a later producer declares at another sort is a
+     two-sort declaration, which [check_post] turns into a recorded
+     `sort-conflict` skip (demand chains, 2026-10-24). *)
+  let free_decls = ref [] in
+  let free_const n =
+    if (not (List.mem_assoc n sc)) && not (List.mem_assoc n !free_decls) then
+      free_decls := (n, Option.value (List.assoc_opt n env) ~default:Smt.SInt) :: !free_decls;
+    Some (Smt.Const n)
+  in
   let loaded ds asm has_rec = function
     | Some qa -> (ds, qa :: asm, has_rec)
     | None -> dropped := true; (ds, asm, has_rec)
@@ -153,7 +337,7 @@ let scope_facts (sc : scope)
       | _ when scalar_sort_of_marker sort <> None ->
         let s = scalar_sort_or_int sort in
         let c = Smt.Const name in
-        let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
+        let rv n = if n = b || n = "_" then Some c else free_const n in
         let ds = (name, s) :: ds in
         loaded ds asm has_rec (smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q)
       | None -> (ds, asm, has_rec)
@@ -206,7 +390,7 @@ let scope_facts (sc : scope)
       | Some sort_name ->
         let c = Smt.Const name in
         let ds = (name, adt_sort sort_name) :: ds in
-        let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
+        let rv n = if n = b || n = "_" then Some c else free_const n in
         let rf = make_field_resolver b sort_name c in
         let rma m arg =
           if is_axiom_measure m then Some (Smt.App (m, [ arg ])) else None
@@ -220,7 +404,7 @@ let scope_facts (sc : scope)
          | None -> dropped := true; (ds, asm, has_rec)))
     ([], [], false) sc
   in
-  (ds, asm, has_rec, has_string, not !dropped)
+  (List.rev_append !free_decls ds, asm, has_rec, has_string, not !dropped)
 
 (* Check one return-position tail against the declared return refinement.
 
@@ -255,6 +439,83 @@ let with_post_lookup lookup (f : unit -> 'a) : 'a =
   post_lookup := lookup;
   Fun.protect ~finally:(fun () -> post_lookup := saved) f
 
+(* ── The induction hypothesis (termination design §4.2, phase 3) ─────────
+   A recursive call's own contract, assumed at that call while its function
+   is being gated, is the induction hypothesis.  Decision D1: it is granted
+   ONLY behind a termination certificate, and only at a call that passed
+   rule (a) — the call is an intra-SCC edge of a certified SCC whose every
+   reachable recursive SCC is certified too, the walk reached it, and every
+   precondition obligation filed there was proved ([Refine_check]'s
+   [ih_prepare] decides all of it, before the gate's IH rounds).
+
+   Two channels, both keyed by the CALL's span (never by name: a name could
+   be resolved differently by the termination graph and by this checker,
+   and an IH read across that mismatch would lend one function's contract
+   to another's call):
+   - [ih_at]: the scalar/datatype return hypothesis, installed only while
+     [gate_unverified_posts] checks one certified SCC's pending members
+     together ([rounds]' atomic admission).  It answers the callee member's
+     DECLARED (still unproved) contract, instantiated at the call's actuals;
+   - [ih_spans]: every eligible span of the module, with whether its edge is
+     a self-edge.  The self-call hypotheses that pre-date this design (Tier 2
+     [ih_arg], the element return's [hyp_applies], a local `fn`'s
+     [local_elem_hyp]) widen "a structural argument" to "or an eligible
+     self-edge span".  Set by [Refine_check.check_module] and cleared when it
+     returns, so no other entry point (the inference probes) ever sees a
+     stale certificate. *)
+let ih_at : (A.span -> string -> A.expr list -> (string * A.expr * string option) option) ref =
+  ref (fun _ _ _ -> None)
+
+let ih_spans : (A.span, bool * A.span) Hashtbl.t = Hashtbl.create 16
+
+(* An eligible SELF-edge span whose graph callee is the unit declared at
+   [callee] (its declaring name's span).  Every [ih_spans] consumer names
+   the callee IT resolved the call to, so a graph/checker resolution
+   mismatch (the graph tying the call to another declaration of the name)
+   withholds the hypothesis instead of lending a contract across it
+   (review fixes, defence in depth). *)
+let ih_self_edge (sp : A.span) ~(callee : A.span) : bool =
+  match Hashtbl.find_opt ih_spans sp with
+  | Some (true, c) -> c = callee
+  | _ -> false
+
+(* The contract a call carries inside a postcondition check: the induction
+   hypothesis at an eligible span, else the proved contract ([post_lookup]). *)
+let call_post (sp : A.span) (f : string) (args : A.expr list) =
+  match !ih_at sp f args with Some r -> Some r | None -> !post_lookup f args
+
+(* ── A scalar demand at a return tail (design 2026-10-18 element-flow
+   follow-ups, phase 2; the hook specs/2026-10-18-fold-accumulator-invariants-design.md
+   §3.1 builds on) ────────────────────────────────────────────────────────
+   `fn go(o : Option({Int | _ > 0})) : {Int | _ > 0} do Option.unwrap_or(o, 1) end`:
+   the tail is a call with no postcondition, so it never reflects, but the
+   declared return may still hold of every value its callee can return
+   ([Refine_check.scalar_demand], the same entry point a precondition's
+   subject reaches through [call_ctx.demand]).  The post engine knows only the
+   clause's parameters, so the hook is handed the tail's [path], the names
+   bound on the way down to it ([tails_bound]'s [bound]) and the parameters,
+   and builds its env from those.  A cell rather than a parameter for the
+   reason [post_lookup] is one; set by [Refine_check] at module init, so the
+   [gate_unverified_posts] pre-pass (which lives here) installs the same hook
+   the walk does.  [`Na] leaves the tail's skip exactly as it was. *)
+type tail_demand =
+  path:(A.expr * bool) list -> bound:string list -> params:A.fn_param list -> sc:scope
+  -> string * A.expr * string option -> A.expr -> [ `Na | `Proved | `Unproved of Obligation.reason ]
+
+let no_tail_demand : tail_demand = fun ~path:_ ~bound:_ ~params:_ ~sc:_ _ _ -> `Na
+
+let tail_demand : tail_demand ref = ref no_tail_demand
+
+let with_tail_demand (d : tail_demand) (f : unit -> 'a) : 'a =
+  let saved = !tail_demand in
+  tail_demand := d;
+  Fun.protect ~finally:(fun () -> tail_demand := saved) f
+
+(* The hook for a module context; [Refine_check] replaces the default. *)
+let tail_demand_of :
+    (root:string -> rctx -> (string, fn_sig option) Hashtbl.t -> tail_demand) ref =
+  ref (fun ~root:_ _ _ -> no_tail_demand)
+
 (* [sg]'s postcondition instantiated at [args], in the caller's namespace
    (the same rule [postcond_of] applies to a resolved callee). *)
 let ret_instance (sg : fn_sig) (args : A.expr list) : (string * A.expr * string option) option =
@@ -269,7 +530,9 @@ let ret_instance (sg : fn_sig) (args : A.expr list) : (string * A.expr * string 
         List.mapi (fun i n -> (n, List.nth_opt args i)) sg.param_names
         |> List.filter_map (function "_", _ | _, None -> None | n, Some a -> Some (n, a))
       in
-      if List.for_all (fun q -> List.mem_assoc q env) ps then Some (b, subst_params env p, sg.ret_sort)
+      if List.for_all (fun q -> List.mem_assoc q env) ps then
+        let b, p = binder_apart b p in
+        Some (b, subst_params env p, sg.ret_sort)
       else None)
 
 (* The conjuncts of a predicate, so one untranslatable conjunct of a callee's
@@ -279,12 +542,16 @@ let rec pred_conjuncts (e : A.expr) : A.expr list =
   | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> pred_conjuncts a @ pred_conjuncts b
   | _ -> [ e ]
 
-let check_post ~root errctx ~span ?(record_sort : string option = None)
+let check_post_stage ~root errctx ~span ?(record_sort : string option = None)
     ?(scalar_env : (string * Smt.sort) list = [])
     ?(fn_name : string option = None) ?(emit = true) ?(record = true)
     ?(fn_params : (string * A.ty option) list = [])
     ?(string_ret = false)
     ?(list_ret = false)
+    ?(demand : (A.expr -> [ `Na | `Proved | `Unproved of Obligation.reason ]) option)
+    ?(shown : A.expr option)
+    ?(ret_scalar : Smt.sort option)
+    ?(let_calls : (string * A.expr) list = [])
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
@@ -310,7 +577,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     if record then
       Obligation.record
         { Obligation.span; callee = Option.value ~default:"" fn_name
-        ; predicate = pred_str ret_pred; verdict; kind = Obligation.Postcondition };
+        ; predicate = pred_str ret_pred; verdict; kind = Obligation.Postcondition; inst = None };
     (* `cap verified` escalates an undischarged POSTCONDITION exactly as
        [check_call] escalates an undischarged precondition — the last place a
        fact was granted without obliging anyone.  Gated on [record] (which
@@ -369,7 +636,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
          | None -> false)
   in
   let base_decls, base_assume, scope_has_record, scope_has_string, scope_complete =
-    scope_facts sc
+    scope_facts ~env:scalar_env sc
   in
   let decls = ref base_decls and assume = ref base_assume in
   (* String literals, for a String RETURN ([string_ret]): the tail `"a"` and
@@ -482,6 +749,73 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
       Some (Smt.Const nm)
     end
   in
+  (* C1's let form ([tails_let_calls]): a body name bound by `let r =
+     f(args)` and still in force at this tail is a fresh `f$let<N>` carrying
+     [f]'s PROVED (or `@[assume]`d) return, instantiated at [args] in this
+     body's namespace and read conjunct by conjunct, exactly as [scalar_call]
+     reads a bare call tail.  [post_lookup] answers only proved contracts and
+     the [gate_unverified_posts] fixpoint admits one only once it is proved,
+     so neither a self-call nor a cycle sees its own unproved return.  No
+     contract (or one at a non-scalar sort): the name stays the plain
+     unconstrained constant it always was.  Memoised, so every mention (the
+     tail, a path condition, a chained `let`'s argument) is one constant;
+     [let_in_progress] stops a cycle, which [tails_let_calls] already rules
+     out.  Shadows [var_const] for everything below. *)
+  let plain_var_const = var_const in
+  let let_memo : (string, Smt.term option) Hashtbl.t = Hashtbl.create 4 in
+  let let_in_progress = ref [] in
+  let let_ret_ctr = ref 0 in
+  let rec var_const name =
+    if is_str_scope name then plain_var_const name
+    else
+      match let_call_const name with
+      | Some t -> Some t
+      | None -> plain_var_const name
+  and let_call_const name : Smt.term option =
+    match List.assoc_opt name let_calls with
+    | None -> None
+    | Some _ when List.mem name !let_in_progress -> None
+    | Some rhs ->
+      (match Hashtbl.find_opt let_memo name with
+       | Some t -> t
+       | None ->
+         let_in_progress := name :: !let_in_progress;
+         let t =
+           match rhs with
+           | A.EApp (A.EVar { A.txt = f; _ }, cargs, csp) when not (is_measure_app f) -> (
+             match call_post csp f cargs with
+             | Some (b, q, m) -> (
+               match scalar_sort_of_marker m with
+               | Some srt ->
+                 let rec fresh () =
+                   incr let_ret_ctr;
+                   let nm = Printf.sprintf "%s$let%d" f !let_ret_ctr in
+                   if List.exists (fun (n, _) -> n = nm) !decls then fresh () else nm
+                 in
+                 let nm = fresh () in
+                 let c = Smt.Const nm in
+                 decls := (nm, srt) :: !decls;
+                 let rv n = if n = b || n = "_" then Some c else var_const n in
+                 (* A measure of the returned scalar means nothing. *)
+                 let rm mm n = if n = b || n = "_" then None else resolve_measure mm n in
+                 List.iter
+                   (fun conj ->
+                     match
+                       smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app
+                         ~resolve_str_lit:str_lit_const conj
+                     with
+                     | Some t -> assume := t :: !assume
+                     | None -> ())
+                   (pred_conjuncts q);
+                 Some c
+               | None -> None)
+             | None -> None)
+           | _ -> None
+         in
+         let_in_progress := List.filter (fun n -> n <> name) !let_in_progress;
+         Hashtbl.replace let_memo name t;
+         t)
+  in
   (* A built-in list measure of a CALL: a constant carrying the callee's
      proved contract, conjunct by conjunct; a nested call in that contract
      (`elts(reverse(xs))`) recurses. *)
@@ -536,6 +870,131 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     smt_of ~resolve_var:var_const ~resolve_measure ~resolve_measure_app
       ~resolve_field:scope_field_resolver ~resolve_str_lit:str_lit_const e
   in
+  (* ── A CALL tail at a scalar return (C1, demand chains 2026-10-24) ──────
+     `fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end`: the tail is a
+     fresh constant carrying the callee's contract, conjunct by conjunct,
+     exactly as an argument `need_pos(a(x))` carries it at a call site
+     ([Refine_resolve.reflect_scalar]).  [post_lookup] answers only PROVED
+     (or `@[assume]`d) contracts: the [gate_unverified_posts] fixpoint admits
+     a contract once it is proved, so a function whose tail calls itself, or
+     a member of a cycle, never sees its own unproved return.  A relational
+     contract arrives already instantiated at the actuals in this body's
+     namespace ([postcond_of]); a conjunct naming something this query cannot
+     reflect (a nested call) is dropped, which only loses the proof.  Only at
+     the return's own scalar sort ([ret_scalar]): a contract at any other
+     sort says nothing about this value. *)
+  let call_post_ctr = ref 0 in
+  let scalar_call (e : A.expr) : Smt.term option =
+    match e, ret_scalar with
+    | A.EApp (A.EVar { A.txt = f; _ }, cargs, csp), Some srt
+      when (not (List.mem f predicate_operators)) && not (is_measure_app f) -> (
+      match call_post csp f cargs with
+      | Some (b, q, m) when scalar_sort_of_marker m = Some srt ->
+        (* `f$ret<N>`, the spelling a counterexample renders as "f() can
+           return v" ([render_model_entry]); N skips any name already
+           declared in this query. *)
+        let rec fresh () =
+          incr call_post_ctr;
+          let nm = Printf.sprintf "%s$ret%d" f !call_post_ctr in
+          if List.exists (fun (n, _) -> n = nm) !decls then fresh () else nm
+        in
+        let nm = fresh () in
+        let c = Smt.Const nm in
+        decls := (nm, srt) :: !decls;
+        let rv n = if n = b || n = "_" then Some c else var_const n in
+        (* A measure of the returned scalar means nothing; refuse it rather
+           than mint a `m$_` shared with any other spelling of `_`. *)
+        let rm mm n = if n = b || n = "_" then None else resolve_measure mm n in
+        List.iter
+          (fun conj ->
+            match
+              smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app
+                ~resolve_field:scope_field_resolver ~resolve_str_lit:str_lit_const conj
+            with
+            | Some t -> assume := t :: !assume
+            | None -> ())
+          (pred_conjuncts q);
+        Some c
+      | _ -> None)
+    | _ -> None
+  in
+  (* ── Rule (b): a call NESTED in a scalar tail (termination design §4.2,
+     F8) ─────────────────────────────────────────────────────────────────
+     `n + sum_to(n - 1)`: the tail is not a bare call, so [scalar_call] does
+     not apply, and [scalar] has no arm for a call.  Each call sub-term
+     whose contract [call_post] answers becomes a fresh `f$ret<N>` carrying
+     that contract conjunct by conjunct, exactly as [scalar_call] reads a
+     bare tail.  Tried only after [scalar] and [scalar_call] both failed, so
+     no tail that reflected before changes its query.
+     Sound for the reason [scalar_call] is: March is call-by-value with
+     strict `&&`/`||` (F11) and [smt_of] has no conditional, so every call
+     under these operators WAS evaluated when the tail's value exists, and
+     its result satisfies its proved (or IH-certified) contract.  Each
+     occurrence is its own constant: two calls of one function need not
+     return the same value.  Only strict operators and call arguments are
+     descended into; a measure, a tester or anything else is left whole. *)
+  let strict_ops =
+    [ "+"; "-"; "*"; "/"; "%"; "negate"; "not"; "&&"; "||"; "=="; "!="; "<"; "<="; ">"; ">=" ]
+  in
+  let scalar_nested (e : A.expr) : Smt.term option =
+    match ret_scalar with
+    | None -> None
+    | Some _ ->
+      let minted : (string, Smt.term) Hashtbl.t = Hashtbl.create 4 in
+      let rv n = match Hashtbl.find_opt minted n with Some c -> Some c | None -> var_const n in
+      let staged_decls = ref [] and staged_assume = ref [] in
+      let rec rw (e : A.expr) : A.expr =
+        match e with
+        | A.EApp ((A.EVar { A.txt = f; _ } as fv), cargs, sp) when List.mem f strict_ops ->
+          A.EApp (fv, List.map rw cargs, sp)
+        | A.EApp ((A.EVar { A.txt = f; _ } as fv), (_ :: _ as cargs), csp)
+          when (not (is_predicate_operator f)) && (not (is_measure_app f))
+               && ctor_of_tester f = None && not (List.mem f !current_abstracts) -> (
+          let cargs = List.map rw cargs in
+          match call_post csp f cargs with
+          | Some (b, q, m) -> (
+            match scalar_sort_of_marker m with
+            | Some srt ->
+              let rec fresh () =
+                incr call_post_ctr;
+                let nm = Printf.sprintf "%s$ret%d" f !call_post_ctr in
+                if List.exists (fun (n, _) -> n = nm) (!decls @ !staged_decls) then fresh () else nm
+              in
+              let nm = fresh () in
+              let c = Smt.Const nm in
+              staged_decls := (nm, srt) :: !staged_decls;
+              Hashtbl.replace minted nm c;
+              let rv' n = if n = b || n = "_" then Some c else rv n in
+              let rm mm n = if n = b || n = "_" then None else resolve_measure mm n in
+              List.iter
+                (fun conj ->
+                  match
+                    smt_of ~resolve_var:rv' ~resolve_measure:rm ~resolve_measure_app
+                      ~resolve_field:scope_field_resolver ~resolve_str_lit:str_lit_const conj
+                  with
+                  | Some t -> staged_assume := t :: !staged_assume
+                  | None -> ())
+                (pred_conjuncts q);
+              A.EVar { A.txt = nm; A.span = csp }
+            | None -> A.EApp (fv, cargs, csp))
+          | None -> A.EApp (fv, cargs, csp))
+        | _ -> e
+      in
+      let e' = rw e in
+      if Hashtbl.length minted = 0 then None
+      else
+        match
+          smt_of ~resolve_var:rv ~resolve_measure ~resolve_measure_app
+            ~resolve_field:scope_field_resolver ~resolve_str_lit:str_lit_const e'
+        with
+        | Some t ->
+          (* Commit the minted constants only for a tail that now reflects:
+             a failed attempt leaves the query exactly as it was. *)
+          decls := !staged_decls @ !decls;
+          assume := !staged_assume @ !assume;
+          Some t
+        | None -> None
+  in
   let tail_term_opt =
     match record_sort with
     | Some sort_name ->
@@ -563,7 +1022,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        | A.ELit (A.LitString s, _) -> str_lit_const s
        | A.EVar { A.txt = x; _ } when is_str_scope x -> uses_string := true; Some (Smt.Const x)
        | _ -> scalar tail_e)
-    | None -> scalar tail_e
+    | None ->
+      (match scalar tail_e with
+       | Some t -> Some t
+       | None -> (match scalar_call tail_e with Some t -> Some t | None -> scalar_nested tail_e))
   in
   match tail_term_opt with
   | None ->
@@ -580,15 +1042,27 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        `<predicate>` would read as if that were the user's own spelling, so
        fall back to the function name instead when it does. *)
     let tail_display =
-      let rendered = pred_str tail_e in
+      (* The user's spelling, not a renamed-apart one ([rename_free]). *)
+      let rendered = pred_str (Option.value shown ~default:tail_e) in
       if rendered <> "<predicate>" then Printf.sprintf "the return expression `%s`" rendered
       else
         Printf.sprintf "the return expression of `%s`"
           (Option.value ~default:"<anonymous>" fn_name)
     in
-    if enum_witness_error () then note Obligation.Violated
-    else note (Obligation.Skipped (Obligation.Unreflectable_subject tail_display));
-    false
+    (* A call tail with no postcondition: the declared return may still hold
+       of every value its callee returns ([tail_demand]).  A refuted source
+       stays a skip (design §3.4), unless the enumerative witness confirms a
+       real failing call, exactly as before. *)
+    (match (match demand with Some f -> f tail_e | None -> `Na) with
+     | `Proved -> note Obligation.Proved; true
+     | `Unproved r ->
+       if enum_witness_error () then note Obligation.Violated
+       else note (Obligation.Skipped r);
+       false
+     | `Na ->
+       if enum_witness_error () then note Obligation.Violated
+       else note (Obligation.Skipped (Obligation.Unreflectable_subject tail_display));
+       false)
   | Some tail_term ->
     let resolve_field = match record_sort with
       | Some sort_name -> make_field_resolver binder sort_name tail_term
@@ -643,6 +1117,21 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
       then Some (Smt.App (strlen_fn, [ tail_term ]))
       (* `elts(_)` over a list return IS the tail's set term. *)
       else if list_ret && m = elts_measure && (name = binder || name = "_") then Some tail_term
+      (* …and `len(_)` (a mixed `elts && len` contract) is the TAIL's length,
+         not a fresh unconstrained constant: a returned name's own `len`
+         constant, `1 + len(t)` per `Cons`, 0 for `Nil`, a call's proved
+         contract.  Anything else keeps the fresh constant (weaker). *)
+      else if list_ret && m = "len" && (name = binder || name = "_") then
+        let rec len_of (e : A.expr) : Smt.term option =
+          match e with
+          | A.EVar { A.txt = x; _ } -> resolve_measure "len" x
+          | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (Smt.IntLit 0)
+          | A.ECon ({ A.txt = "Cons"; _ }, [ _; t ], _) ->
+            Option.map (fun l -> Smt.Add (Smt.IntLit 1, l)) (len_of t)
+          | A.EApp (A.EVar { A.txt = f; _ }, cargs, _) -> measure_of_call "len" f cargs
+          | _ -> None
+        in
+        (match len_of tail_e with Some _ as r -> r | None -> resolve_measure m name)
       else resolve_measure m name
     in
     (match
@@ -712,6 +1201,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
          (* Last: an abstract symbol's argument sort is declared above. *)
          ^ abstract_preamble vc
        in
+       (* One abstract symbol at two sort tuples cannot be declared (multi-arg
+          design §3a): refused, like any other sort conflict. *)
+       if abs_sort_conflict vc then (note (Obligation.Skipped Obligation.Sort_conflict); false)
+       else
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved; true
         | first ->
@@ -855,9 +1348,35 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
    Everything outside a narrow, recognised shape returns false (= not proven =
    skipped): several clauses, a clause guard, a catch-all arm, a nested pattern,
    a binder that shadows a parameter, a sort we cannot pin down.  Skipping costs
-   completeness; guessing would cost correctness. *)
+   completeness; guessing would cost correctness.
+
+   Superseded in part since this was written: a refutation the interpreter
+   reproduces IS reported ([settle_refutation]); every shape records its
+   verdict; a body outside Shapes 1-2 is checked tail by tail without an IH
+   (Shape 3); a declined signature records a named skip; and [record_tier2]
+   escalates a skip under `cap verified` (2026-10-24).  A skip still emits
+   nothing outside `cap verified`. *)
 
 (* The SMT sort of a DECLARED March type; None when the checker has no model. *)
+(* Reflection's two-stage discharge around a postcondition (§4.4); see
+   [Refine_call.check_call].  A run that records nothing (the propagation
+   pre-pass, [~record:false]) is judged by its answer instead. *)
+let check_post ~root errctx ~span ?(record_sort : string option = None)
+    ?(scalar_env : (string * Smt.sort) list = [])
+    ?(fn_name : string option = None) ?(emit = true) ?(record = true)
+    ?(fn_params : (string * A.ty option) list = [])
+    ?(string_ret = false)
+    ?(list_ret = false)
+    ?(demand : (A.expr -> [ `Na | `Proved | `Unproved of Obligation.reason ]) option)
+    ?(shown : A.expr option)
+    ?(ret_scalar : Smt.sort option)
+    ?(let_calls : (string * A.expr) list = [])
+    (sc : scope) (binder : string) (ret_pred : A.expr)
+    ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
+  Reflect_stage.two_stage ~ok:Fun.id ~errctx (fun () ->
+      check_post_stage ~root errctx ~span ~record_sort ~scalar_env ~fn_name ~emit ~record ~fn_params ~string_ret
+        ~list_ret ?demand ?shown ?ret_scalar ~let_calls sc binder ret_pred (path, tail_e))
+
 let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
   match t with
   | A.TyRefine (base, _, _) -> smt_sort_of_ty base
@@ -867,8 +1386,10 @@ let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
     Some (adt_sort (adt_sort_name txt))
   | _ -> None
 
-let ctor_belongs (ctor : string) (adt : string) : bool =
-  match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor cs | None -> false
+(* Does datatype [adt] declare SOURCE constructor [ctor]?  ([ctor_k] is its
+   SMT name there, 2026-11-02.) *)
+let ctor_belongs (ctor : string) (adt : string) : bool = ctor_of_adt adt ctor <> None
+let ctor_k (ctor : string) (adt : string) : string = Option.get (ctor_of_adt adt ctor)
 
 (* The FULL solver-free acceptance test [check_post_induction] applies before
    it ever builds a VC: the outer shape match (a refined ADT-non-record
@@ -1035,10 +1556,10 @@ let rec inline_lets (e : A.expr) : A.expr option =
 let induction_body (e : A.expr) : A.expr =
   match inline_lets e with Some b -> b | None -> e
 
-(* Does [check_post_induction] reach a body shape it checks (Shape 1 or
-   Shape 2), rather than its final `| _ -> false`?  Solver-free, for
-   [Refine_audit]: [post_induction_shape] alone accepts the signature
-   whatever the body is. *)
+(* Does [check_post_induction] reach a body shape it checks BY INDUCTION
+   (Shape 1 or Shape 2), rather than Shape 3's induction-free tail walk?
+   Solver-free.  Gates the `elts` path's induction attempt only; what the
+   audit asks ("is it checked at all") is [return_refinement_checked]. *)
 let post_induction_checks (fd : A.fn_def) : bool =
   match post_induction_shape fd with
   | None -> false
@@ -1049,12 +1570,67 @@ let post_induction_checks (fd : A.fn_def) : bool =
       induction_match_adt c sv.A.txt <> None
     | _ -> false)
 
+(* Record one Tier 2 postcondition verdict, exactly as [check_post]'s [note]
+   does for the direct path: `@[trusted]` accepts a skip, and `cap verified`
+   escalates one to an error.  Tier 2 used to record its ledger entry and
+   stop there, so an unproved list/ADT contract inside `cap verified`
+   compiled in silence (2026-10-24).  Gated on [record], which the caller
+   threads from [emit], so the propagation pre-pass neither counts nor
+   reports. *)
+let record_tier2 ~record errctx (fd : A.fn_def) (pred : A.expr) (v : Obligation.verdict) : unit =
+  if record then begin
+    let v = match v with Obligation.Skipped _ when !trusted_fn -> Obligation.Trusted | _ -> v in
+    Obligation.record
+      { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
+      ; predicate = pred_str pred; verdict = v; kind = Obligation.Postcondition; inst = None };
+    match v with
+    | Obligation.Skipped r when !strict_verified ->
+      Err.error ~code:Err.Code.refinement_unverified errctx ~span:fd.A.fn_name.A.span
+        (Printf.sprintf
+           "`cap verified` module: cannot verify return type constraint `%s` on `%s` (%s: %s)\n%s"
+           (pred_str pred) fd.A.fn_name.A.txt (Obligation.reason_name r)
+           (Obligation.reason_detail r)
+           "note: strengthen the return expression so the checker can see it satisfies this \
+            contract, rewrite the predicate into the fragment the checker supports, or remove \
+            `cap verified` from this module — it asks for every obligation to be discharged")
+    | _ -> ()
+  end
+
+(* Why [post_induction_shape] declined a REFINED return, as a recorded skip
+   reason: a return refinement no path checks must still file an obligation
+   (2026-10-24), or `--refine-report` cannot tell it from no contract. *)
+let tier2_declined_reason (fd : A.fn_def) (pred : A.expr) : Obligation.reason =
+  let self = fd.A.fn_name.A.txt in
+  match fd.A.fn_clauses with
+  | [] | _ :: _ :: _ ->
+    Obligation.Unreflectable_subject
+      (Printf.sprintf
+         "the return expression of `%s` (a definition of %d clauses; the induction path models one)"
+         self (List.length fd.A.fn_clauses))
+  | [ c ] when c.A.fc_guard <> None ->
+    Obligation.Unreflectable_subject
+      (Printf.sprintf "the return expression of `%s` (a guarded clause; the induction path models none)" self)
+  | [ c ] -> (
+    let binder = match fd.A.fn_ret_ty with Some (A.TyRefine (_, b, _)) -> binder_name b | _ -> "_" in
+    match classify_pred binder (List.map param_name_of c.A.fc_params) pred with
+    | Unusable -> Obligation.Unreflectable_predicate (pred_str pred, None)
+    | Closed | Relational _ ->
+      Obligation.Unreflectable_subject
+        (Printf.sprintf
+           "the return expression of `%s` (its return type has no measure or datatype the checker declares)"
+           self))
+
 let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_def) : bool =
   let self = fd.A.fn_name.A.txt in
   let dummy_span = fd.A.fn_name.A.span in
   let evar x = A.EVar { A.txt = x; A.span = dummy_span } in
   match post_induction_shape fd with
-  | None -> false
+  | None ->
+    (match Option.map unlinear fd.A.fn_ret_ty with
+     | Some (A.TyRefine (_, _, pred)) ->
+       record_tier2 ~record errctx fd pred (Obligation.Skipped (tier2_declined_reason fd pred))
+     | _ -> ());
+    false
   | Some (ret_adt, binder, params, pred, c, ps) ->
       (* The positive-goal models of every tail [check_tail] REFUTED, as
          candidate counterexamples for [settle_refutation]. *)
@@ -1218,7 +1794,8 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
               | A.EVar { A.txt = x; _ } ->
                 if declare x (adt_sort d) then Some (Smt.Const x) else None
               | A.ECon (ct, args, _) when ctor_belongs ct.A.txt d ->
-                let fs = try Hashtbl.find ctor_field_sorts ct.A.txt with Not_found -> [] in
+                let k = ctor_k ct.A.txt d in
+                let fs = try Hashtbl.find ctor_field_sorts k with Not_found -> [] in
                 if List.length fs <> List.length args then None
                 else
                   List.fold_right2
@@ -1227,7 +1804,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                       | Some t, Some ts -> Some (t :: ts)
                       | _ -> None)
                     args fs (Some [])
-                  |> Option.map (fun ts -> ctor_term d ct.A.txt ts)
+                  |> Option.map (fun ts -> ctor_term d k ts)
               (* ── THE INDUCTION HYPOTHESIS ─────────────────────────────────
                  A self-recursive call returning this datatype.  It becomes a
                  fresh opaque constant; the postcondition is assumed ABOUT that
@@ -1238,18 +1815,24 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                  nothing, which is exactly the skip we want.  With no [mctx]
                  there is no matched parameter and hence nothing that could be
                  structurally smaller, so no IH is ever available. *)
-              | A.EApp (A.EVar { A.txt = f; _ }, args, _) when f = self && d = ret_adt ->
+              | A.EApp (A.EVar { A.txt = f; _ }, args, csp) when f = self && d = ret_adt ->
                 incr ctr;
                 let nm = Printf.sprintf "$t2rec%d" !ctr in
                 Hashtbl.replace decls nm (adt_sort ret_adt);
                 let cst = Smt.Const nm in
                 let ih_arg =
                   match mctx with
-                  | None -> None
-                  | Some (_, _, mparam_idx, sset) -> (
-                    match List.nth_opt args mparam_idx with
-                    | Some (A.EVar v) when Hashtbl.mem sset v.A.txt -> Some v
-                    | _ -> None)
+                  | Some (_, _, mparam_idx, sset)
+                    when (match List.nth_opt args mparam_idx with
+                          | Some (A.EVar v) -> Hashtbl.mem sset v.A.txt
+                          | _ -> false) ->
+                    Some ()
+                  (* Termination phase 3 (§4.2): an eligible SELF-edge span of
+                     a certified SCC ([ih_spans]: rule (a) held there) carries
+                     the hypothesis with no structural argument and no
+                     matched parameter. *)
+                  | _ when ih_self_edge csp ~callee:fd.A.fn_name.A.span -> Some ()
+                  | _ -> None
                 in
                 (match ih_arg with
                  | Some _ ->
@@ -1513,6 +2096,59 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                     end
                     else Some (Obligation.Skipped Obligation.Solver_undecided))
       in
+      (* ── Shape 3: any other body, tail by tail, with NO induction ─────────
+         A bare parameter, a `let`, an `if`, a call, a match on something
+         that is not a declared-ADT parameter: each return position is
+         checked by [check_tail] with no [mctx], so no induction hypothesis
+         can ever be assumed (a self-call is an unconstrained constant) and
+         no pattern equation is asserted (an inner match's binders are free
+         constants: weaker, never wrong).  Before 2026-10-24 every such body
+         fell through to `false` and filed NOTHING, so `fn f(xs) : {List(Int)
+         | len(_) == len(xs) + 5} do xs end` passed in silence.  A tail under
+         an inner binder that reuses a parameter's name is renamed apart
+         ([inner_name]), as [check_fn_post_verdict] does; one the renaming
+         cannot complete is a recorded skip.  ONE obligation per function,
+         like Shape 2: proved iff every tail is. *)
+      let shape3 (body : A.expr) : bool =
+        let verdicts =
+          List.map
+            (fun (path, t, bound) ->
+              let clash = List.sort_uniq compare (List.filter (fun n -> List.mem n params) bound) in
+              let env = List.map (fun n -> (n, inner_name n)) clash in
+              match rename_free_checked env t with
+              | _, false ->
+                Obligation.Skipped
+                  (Obligation.Unreflectable_subject
+                     (Printf.sprintf
+                        "the return expression of `%s` under an inner binding that rebinds `%s`" self
+                        (String.concat "`, `" clash)))
+              | t', true -> (
+                match check_tail ~mctx:None ~pat:None ~refute:record (rename_path clash path, t') with
+                | Some v -> v
+                | None ->
+                  let rendered = pred_str t in
+                  Obligation.Skipped
+                    (Obligation.Unreflectable_subject
+                       (if rendered <> "<predicate>" then
+                          Printf.sprintf "the return expression `%s`" rendered
+                        else Printf.sprintf "the return expression of `%s`" self))))
+            (tails_bound [] [] body)
+        in
+        let ok = verdicts <> [] && List.for_all (fun v -> v = Obligation.Proved) verdicts in
+        let v =
+          if ok then Obligation.Proved
+          else if not record then Obligation.Skipped Obligation.Solver_undecided
+          else if List.mem Obligation.Violated verdicts then settle_refutation ()
+          else
+            match List.find_opt (fun v -> v <> Obligation.Proved) verdicts with
+            | Some v -> v
+            | None ->
+              Obligation.Skipped
+                (Obligation.Unreflectable_subject (Printf.sprintf "the return expression of `%s`" self))
+        in
+        record_tier2 ~record errctx fd pred v;
+        ok
+      in
       (match induction_body c.A.fc_body with
       (* ── Shape 1: a constructor-literal body ───────────────────────────────
          The simplest possible case, and one that needs no induction at all:
@@ -1561,16 +2197,10 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
             Obligation.Skipped (Obligation.Unreflectable_subject body_display)
         in
         let v = if record && v = Obligation.Violated then settle_refutation () else v in
-        if record then
-          Obligation.record
-            { Obligation.span = fd.A.fn_name.A.span
-            ; callee = self
-            ; predicate = pred_str pred
-            ; verdict = v
-            ; kind = Obligation.Postcondition };
+        record_tier2 ~record errctx fd pred v;
         v = Obligation.Proved
       (* ── Shape 2: one clause whose whole body matches on a parameter ─────── *)
-      | A.EMatch (A.EVar sv, branches, _) when List.mem sv.A.txt params -> (
+      | A.EMatch (A.EVar sv, branches, _) as mbody when List.mem sv.A.txt params -> (
         let mparam = sv.A.txt in
         let mparam_idx =
           let rec ix i = function
@@ -1580,7 +2210,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
           ix 0 params
         in
         match induction_match_adt c mparam with
-        | None -> false
+        | None -> shape3 mbody
         | Some madt ->
           begin
             (* Structurally smaller variables, computed over the WHOLE clause
@@ -1627,7 +2257,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                         | Smt.SData (sub_adt, _) when ctor_belongs ct.A.txt sub_adt -> (
                           incr pat_ctr;
                           let n = Printf.sprintf "$p%d" !pat_ctr in
-                          match flatten n sub_adt ct.A.txt sub with
+                          match flatten n sub_adt (ctor_k ct.A.txt sub_adt) sub with
                           | Some (bs, eqs) -> Some (n, (n, fs) :: bs, eqs)
                           | None -> None)
                         | _ -> None)
@@ -1675,13 +2305,17 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                                     self n))
                             :: !verdicts;
                           false
-                        | None -> proved_tail ~mctx ~pat (path, t))
+                        | None ->
+                          (* The tail mentions none of [outer]'s rebound
+                             names; its path may, about the inner binding. *)
+                          proved_tail ~mctx ~pat
+                            (rename_path (List.filter (fun n -> List.mem n outer) bound) path, t))
                        && acc)
                      true ts
               in
               match br.A.branch_pat with
               | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
-                match flatten mparam madt ct.A.txt subpats with
+                match flatten mparam madt (ctor_k ct.A.txt madt) subpats with
                 | None -> reject ()
                 | Some (binder_sorts, equations) ->
                   (* A binder that reuses a parameter's name would be
@@ -1713,16 +2347,11 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                   | Some v -> v
                   | None -> unbuilt ()
               in
-              Obligation.record
-                { Obligation.span = fd.A.fn_name.A.span
-                ; callee = self
-                ; predicate = pred_str pred
-                ; verdict = v
-                ; kind = Obligation.Postcondition }
+              record_tier2 ~record errctx fd pred v
             end;
             ok
           end)
-      | _ -> false)
+      | body -> shape3 body)
 
 (* =================================================================
    §18 Function-level postcondition entry points and gating
@@ -1769,15 +2398,19 @@ let assumed_return (fd : A.fn_def) : A.expr option =
    file an obligation or produce a verdict — rather than fall through to a
    path that silently files nothing?  The same routing, solver-free, so
    [Refine_audit] cannot report Enforced for a contract the checker never
-   looks at (a `{List(Int) | len(_) > 0}` return with no list measure, or a
-   Tier 2 match on an unannotated parameter). *)
+   looks at.  Since 2026-10-24 Tier 2 checks EVERY body of a signature
+   [post_induction_shape] accepts (Shape 3 walks the tails a constructor
+   literal or a parameter match does not cover), so only a signature it
+   declines -- several clauses, a guard, an unusable predicate, a return
+   type with no declared measure -- is unchecked, and that one now files a
+   recorded skip instead of nothing. *)
 let return_refinement_checked (fd : A.fn_def) : bool =
   (is_assumed fd && assumed_return fd <> None)
   ||
   match return_refine_ext fd with
-  | None -> post_induction_checks fd
+  | None -> post_induction_shape fd <> None
   | Some (_, ret_pred, Some marker) when is_meas_sort marker && not (pred_mentions_elts ret_pred) ->
-    post_induction_checks fd
+    post_induction_shape fd <> None
   | Some _ -> true
 
 let rec check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
@@ -1805,7 +2438,15 @@ let rec check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool
     let lookup =
       List.fold_left
         (fun lookup (n, lfd) ->
-          if with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false lfd)
+          (* No scalar demand hook in this PRE-pass: the module-level [ctx]
+             it would run under knows neither the sibling locals nor the
+             enclosing parameters a tail call may name.  The walk's own check
+             of the local ([Refine_check.visit_local_fn]) runs the hook under
+             the local's [ctx] (element-flow phase 3), so a proof there
+             reaches the block's later calls; here it only loses one. *)
+          if
+            with_tail_demand no_tail_demand (fun () ->
+                with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false lfd))
           then
             let sg = sig_of_fn lfd in
             fun f args -> if f = n then ret_instance sg args else lookup f args
@@ -1821,7 +2462,7 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
       Obligation.record
         { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
         ; predicate = pred_str pred; verdict = Obligation.Trusted
-        ; kind = Obligation.Postcondition };
+        ; kind = Obligation.Postcondition; inst = None };
     true
   | _ ->
   match return_refine_ext fd with
@@ -1845,7 +2486,7 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
       Obligation.record
         { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
         ; predicate = pred_str ret_pred; verdict = Obligation.Proved
-        ; kind = Obligation.Postcondition };
+        ; kind = Obligation.Postcondition; inst = None };
     true
   | Some (binder, ret_pred, marker) ->
     (* [record_sort] must carry only a DECLARED sort name.  A scalar marker
@@ -1869,7 +2510,61 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
           c.A.fc_params
       in
       let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-      let ts = tails base c.A.fc_body in
+      (* A tail's inner binders that clash with a parameter are renamed apart
+         in its path and in the tail itself ([rename_free]): the VC reads the
+         parameters' facts from [sc] and the return predicate over the
+         parameters, so an inner `n` must not be the same SMT name. *)
+      let pnames = List.concat_map fnparam_binders c.A.fc_params in
+      let tails = tails_bound base [] c.A.fc_body in
+      (* C1's let form: the `let r = f(args)` bindings in force at each tail
+         (same walk, same order), moved by the tail's own clash renaming so a
+         binding named like a parameter, or a call over an inner binding
+         that shadows one, means what it means in the renamed tail.  An
+         incomplete renaming drops the binding (a lost proof only). *)
+      let lcs =
+        let l = tails_let_calls [] c.A.fc_body in
+        if List.length l = List.length tails then l else List.map (fun _ -> []) tails
+      in
+      let ts =
+        List.map2
+          (fun (p, e, bound) lc ->
+            let clash = List.sort_uniq compare (List.filter (fun n -> List.mem n pnames) bound) in
+            let env = List.map (fun n -> (n, inner_name n)) clash in
+            let let_calls =
+              List.filter_map
+                (fun (n, rhs) ->
+                  match rename_free_checked env rhs with
+                  | rhs', true -> Some ((match List.assoc_opt n env with Some n' -> n' | None -> n), rhs')
+                  | _, false -> None)
+                lc
+            in
+            let e', complete = rename_free_checked env e in
+            (* The hook declines a tail mentioning a [bound] name it would read
+               in the parameters' env; a renamed-apart one is in no env, so
+               only the names left as they are count.  A tail whose renaming
+               could not complete gets no hook at all. *)
+            ( rename_path clash p
+            , e'
+            , (if complete then Some (List.filter (fun n -> not (List.mem n clash)) bound) else None)
+            , e
+            , let_calls ))
+          tails lcs
+      in
+      (* Only a plain scalar return reaches the scalar demand entry point. *)
+      let demand (path, _, bound, _, _) =
+        match bound with
+        | None -> None
+        | Some bound ->
+        if record_sort <> None || string_ret || list_ret then None
+        else
+          Some
+            (fun e ->
+              !tail_demand ~path ~bound ~params:c.A.fc_params ~sc (binder, ret_pred, marker) e)
+      in
+      (* A plain scalar return's own sort, for a call tail ([check_post]). *)
+      let ret_scalar =
+        if record_sort <> None || string_ret || list_ret then None else scalar_sort_of_marker marker
+      in
       (* Fold (not List.for_all): every tail must be checked so every
          diagnostic is emitted — short-circuiting would hide errors. *)
       let fn_params =
@@ -1877,10 +2572,10 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
       in
       ts <> []
       && List.fold_left
-           (fun acc t ->
+           (fun acc ((p, e, _, shown, let_calls) as t) ->
              check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env ~string_ret
-               ~list_ret ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit ~fn_params
-               sc binder ret_pred t
+               ~list_ret ?demand:(demand t) ~shown ?ret_scalar ~let_calls ~fn_name:(Some fd.A.fn_name.A.txt) ~emit
+               ~record:emit ~fn_params sc binder ret_pred (p, e)
              && acc)
            true ts
     in
@@ -1924,9 +2619,22 @@ let check_fn_post ~root errctx (fd : A.fn_def) : unit =
    before it is proved, cycles included (neither side of a mutual dependency
    can be proved from the other's unproven contract).  A later round
    re-checks only a function that calls a name proved in the round before. *)
-let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t)
-    (decls : A.decl list) : unit =
+(* A pending refined return: its [defs] key, module path, definition and
+   declared signature. *)
+type gate_item = string * string * A.fn_def * fn_sig
+
+(* One certified SCC's induction hypothesis (termination phase 3, §4.2): its
+   members still pending after the IH-free rounds, and its eligible call
+   spans, each with the declaring-name span of the member it calls. *)
+type ih_group = { ig_items : gate_item list; ig_at : (A.span, A.span) Hashtbl.t }
+
+let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) option) errctx
+    (defs : (string, fn_sig option) Hashtbl.t) (decls : A.decl list) : unit =
   let pending = ref [] in
+  (* The cleared signature [defs] holds for each pending key, so the IH can
+     check that this checker's own name resolution reaches the very member
+     the termination graph says the call reaches (physical identity). *)
+  let cleared : (string, fn_sig) Hashtbl.t = Hashtbl.create 16 in
   let rec collect prefix decls =
     List.iter
       (function
@@ -1942,7 +2650,9 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
              (* Keep the entry (it must still shadow an outer same-named
                 function for [resolve_call]); drop the postcondition until it
                 is proved. *)
-             Hashtbl.replace defs key (Some { sg with ret = None });
+             let c = { sg with ret = None } in
+             Hashtbl.replace defs key (Some c);
+             Hashtbl.replace cleared key c;
              pending := (key, prefix, fd, sg) :: !pending
            | _ -> ())
         | A.DMod (name, _, ds, _) ->
@@ -1971,29 +2681,109 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
     | _ -> acc
   in
   let short key = match String.rindex_opt key '.' with Some i -> String.sub key (i + 1) (String.length key - i - 1) | None -> key in
-  let check (key, prefix, fd, sg) =
-    let lookup = postcond_of { rctx0 with modpath = prefix } defs in
-    if with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd) then begin
+  (* The module path of the item being checked, for the IH's resolution
+     check ([check_group]). *)
+  let checking_prefix = ref "" in
+  let verdict (_, prefix, fd, _) =
+    let ctx = { rctx0 with modpath = prefix } in
+    let lookup = postcond_of ctx defs in
+    checking_prefix := prefix;
+    with_tail_demand (!tail_demand_of ~root ctx defs) (fun () ->
+        with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd))
+  in
+  let check ((key, _, _, sg) as item) =
+    if verdict item then begin
       Hashtbl.replace defs key (Some sg);
       true
     end
     else false
   in
-  let rec rounds (todo : (string * string * A.fn_def * fn_sig) list) (fresh : string list option) =
-    let eligible (_, _, (fd : A.fn_def), _) =
-      match fresh with
-      | None -> true
-      | Some names ->
-        let called =
-          List.concat_map (fun (c : A.fn_clause) -> calls_of [] c.A.fc_body) fd.A.fn_clauses
-        in
-        List.exists (fun n -> List.mem n names || List.mem (short n) names) called
-    in
-    let proved, rest =
-      List.partition (fun item -> eligible item && check item) todo
-    in
-    if proved <> [] && rest <> [] then
-      rounds rest (Some (List.concat_map (fun (k, _, _, _) -> [ k; short k ]) proved))
+  let eligible fresh (_, _, (fd : A.fn_def), _) =
+    match fresh with
+    | None -> true
+    | Some names ->
+      let called =
+        List.concat_map (fun (c : A.fn_clause) -> calls_of [] c.A.fc_body) fd.A.fn_clauses
+      in
+      List.exists (fun n -> List.mem n names || List.mem (short n) names) called
   in
-  rounds (List.rev !pending) None
+  let names_of proved = List.concat_map (fun (k, _, _, _) -> [ k; short k ]) proved in
+  (* Returns what is still unproved when no round makes progress. *)
+  let rec rounds (todo : gate_item list) (fresh : string list option) : gate_item list =
+    let proved, rest =
+      List.partition (fun item -> eligible fresh item && check item) todo
+    in
+    if proved <> [] && rest <> [] then rounds rest (Some (names_of proved)) else rest
+  in
+  let rest = rounds (List.rev !pending) None in
+  (* ── Termination phase 3: the IH rounds (§4.2) ──────────────────────────
+     Only after the IH-free fixpoint has stalled, so a contract that proves
+     without the hypothesis is admitted exactly as before.  [ih] decides the
+     certified SCCs over the contracts proved so far ([Refine_check]'s
+     [ih_prepare]) and returns one group per SCC.  A group is admitted
+     ATOMICALLY: every pending member is checked with every member's
+     hypothesis at the group's eligible spans, and all are admitted iff all
+     prove.  A group that fails is retried only when a contract it calls is
+     proved later; an ordinary item is retried as before. *)
+  match ih with
+  | None -> ()
+  | Some ih ->
+    (* Called even with nothing pending: the element-return gate and the
+       walk read the [ih_spans] it fills. *)
+    let groups = ih rest in
+    let in_group (k, _, _, _) =
+      List.exists (fun g -> List.exists (fun (k', _, _, _) -> k' = k) g.ig_items) groups
+    in
+    let check_group (g : ih_group) (items : gate_item list) =
+      let lookup sp f args =
+        match Hashtbl.find_opt g.ig_at sp with
+        | None -> None
+        | Some callee_span -> (
+          match
+            List.find_opt (fun (_, _, (fd : A.fn_def), _) -> fd.A.fn_name.A.span = callee_span) items
+          with
+          | None -> None
+          | Some (key, _, _, sg) ->
+            (* The call must also resolve, by this checker's own rule from the
+               module of the function being checked, to that member's
+               (cleared) entry: the graph and the checker agree on the callee. *)
+            let agrees =
+              match
+                resolve_call_arity { rctx0 with modpath = !checking_prefix } defs f (List.length args)
+              with
+              | Some (Some found) -> (
+                match Hashtbl.find_opt cleared key with Some c -> found == c | None -> false)
+              | _ -> false
+            in
+            if agrees then instantiate_ret sg args else None)
+      in
+      let saved = !ih_at in
+      ih_at := lookup;
+      (* No member is admitted until every member has proved: a member
+         admitted early would lend its contract, through the ordinary
+         lookup, to a sibling's call that is not an eligible span. *)
+      Fun.protect ~finally:(fun () -> ih_at := saved) (fun () -> List.for_all verdict items)
+    in
+    let rec ih_rounds (todo : gate_item list) (fresh : string list option) =
+      let admitted = ref [] in
+      List.iter
+        (fun g ->
+          let items = List.filter (fun (k, _, _, _) -> List.exists (fun (k', _, _, _) -> k' = k) todo) g.ig_items in
+          if items <> [] && List.exists (eligible fresh) items && check_group g items then begin
+            List.iter (fun (k, _, _, sg) -> Hashtbl.replace defs k (Some sg)) items;
+            admitted := items @ !admitted
+          end)
+        groups;
+      let todo = List.filter (fun (k, _, _, _) -> not (List.exists (fun (k', _, _, _) -> k' = k) !admitted)) todo in
+      let proved, rest =
+        List.partition (fun item -> (not (in_group item)) && eligible (Some (names_of !admitted)) item && check item) todo
+      in
+      let progress = !admitted @ proved in
+      if progress <> [] && rest <> [] then ih_rounds rest (Some (names_of progress))
+    in
+    if rest <> [] then ih_rounds rest None
+
+(* The IH-free gate: what every caller outside [Refine_check.check_module]
+   (the inference probes) runs. *)
+let gate_unverified_posts ~root errctx defs decls = gate_unverified_posts_ih ~root errctx defs decls
 

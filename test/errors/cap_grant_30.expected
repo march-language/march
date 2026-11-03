@@ -26,6 +26,11 @@ expected `Int` but got `String`. [type_mismatch]
 
 39 |         println(int_to_string(s))
                      ^^^^^^^^^^^^^^^^
+
+    `s` was bound here as `String`:
+
+37 |         let (s, sc3) = Chan.recv(sc2)
+                  ^
     run `march --explain type_mismatch`
 
 

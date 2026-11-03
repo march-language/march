@@ -131,8 +131,8 @@ the scenario is a `FAIL`. If it passes, `run.sh` reports `XPASS` and fails, so t
 the bug is fixed. A scenario that cannot run in this lab's configuration (one that
 needs certificates, with a shared secret) is reported `SKIP`.
 
-Every node grows by about 1 MB a second on its own today, and more with each session, and
-the hosts are capped at `LAB_HOST_MEMORY`. So each scenario after `deploy` starts by
+Every node grew by about 1 MB a second on its own until that leak was fixed (see the
+findings), still grows with each session, and the hosts are capped at `LAB_HOST_MEMORY`. So each scenario after `deploy` starts by
 deploying the lab again from nothing when any node is no longer running or uses more than
 `LAB_RESET_MB` (default 500), or sessions have stopped finishing, and says so in the notes. (Restarting the nodes instead does
 not work today: see the findings.) Traffic is one session every two seconds outside
@@ -150,30 +150,37 @@ What the lab has found so far, each filed with its repro:
 - [`2026-10-05-lab-restarted-node-offers-invisible.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-restarted-node-offers-invisible.md):
   a restarted node's offers are open but no initiator sees them ("no access point is
   registered"). `restart_persist` is expected-fail on it, at its last step.
-- [`2026-10-05-lab-rejoining-node-offers-count-role-at-once.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-rejoining-node-offers-count-role-at-once.md):
-  a restarted node offers a `count = 1` role a second after it starts, so two nodes offer
-  it for the settle period. `failover` is expected-fail on it.
-- [`2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md):
-  a session whose two offered roles (Stock, Ledger) are on different hosts can hang for
-  ever, nearly always in certificate mode and occasionally with a shared secret.
-- [`2026-10-05-lab-leaderless-agents-leak.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-leaderless-agents-leak.md):
-  with no leader, every node grows by ~13k heap objects a second with no traffic at all.
-- [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-simultaneous-restart-memory-burst.md):
-  nodes restarted together can each allocate ~1 GB in 30 s and be OOM-killed.
-- [`2026-10-04-lab-control-topology-step-races-report.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-04-lab-control-topology-step-races-report.md):
-  a release's topology step halts when the Agent checks the node's report before the
-  placement loop has re-read the topology.
-- [`2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md):
-  a halted first `forge deploy` records nothing (the retry restarts every node again), and
-  following a release gives up on `ERR no_leader`.
+- [`2026-10-05-lab-rejoining-node-offers-count-role-at-once.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-rejoining-node-offers-count-role-at-once.md)
+  (fixed 2026-10-12): a restarted node offered a `count = 1` role a second after it
+  started, so two nodes offered it for the settle period. `failover` no longer expects
+  that failure (it is still expected-fail on the restarted node's invisible offers).
+- A few sessions stalled once, after ~90, with a shared secret. Fixed on one machine
+  ([progress note](https://github.com/march-language/march/blob/main/specs/progress/2026-10-12-session-redial-hang.md)):
+  a node pair redialled while a session formed left one party waiting on a peer that had
+  already ended. Not yet re-run in the lab; `deploy` still reports any session that never
+  ends. The certificate-mode hang of sessions whose Stock and Ledger run on different
+  hosts is fixed too
+  ([progress note](https://github.com/march-language/march/blob/main/specs/progress/2026-10-12-cert-mode-offer-to-offer-session-hang.md)).
+- [`2026-10-05-lab-leaderless-agents-leak.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-leaderless-agents-leak.md)
+  (fixed): with no leader, every node grew by ~13k heap objects a second with no traffic
+  at all; the two-node scenario `control_leaderless_flat` guards it.
+- [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-simultaneous-restart-memory-burst.md)
+  (fixed): nodes restarted together could each allocate ~1 GB in 30 s and be OOM-killed,
+  a leak on every cluster message; the two-node scenario `control_restart_together` guards it.
+- [`2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md)
+  (fixed 2026-10-12): a halted first `forge deploy` recorded nothing (the retry restarted
+  every node again), and following a release gave up on `ERR no_leader`. A retry now
+  sends only what is left, and a leader change is waited out.
 - [`2026-10-04-lab-control-wiring-none-ctor-ambiguous.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-04-lab-control-wiring-none-ctor-ambiguous.md):
   a protocol branch labelled `none` breaks the control-plane wiring of a `[control]` app;
   the lab's branch is called `out`.
-- The per-session leaks already filed
-  ([`2026-10-01-session-node-vault-tables-leak.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-01-session-node-vault-tables-leak.md),
-  [`2026-09-28-linux-per-session-memory-growth.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-09-28-linux-per-session-memory-growth.md)):
-  at a session every 300 ms the first lab nodes reached 1.5-2 GB in four minutes, so the
-  lab paces traffic at one session a second.
+- The per-session leaks
+  ([`2026-10-01-session-node-vault-tables-leak.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-01-session-node-vault-tables-leak.md),
+  [`2026-09-28-linux-per-session-memory-growth.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-09-28-linux-per-session-memory-growth.md),
+  both fixed): at a session every 300 ms the first lab nodes reached 1.5-2 GB in four
+  minutes, so the lab paces traffic at one session a second. Since 2026-10-13 a node pair
+  runs 400 back-to-back sessions in ~40 MB per node on Linux, so the pacing is no longer
+  needed for memory; it has not been raised.
 
 ## Security
 

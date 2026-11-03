@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: cannot verify precondition `_ > 0` on `need_pos`
+-- Element refinements, a scalar demand on a single-element result (2026-10-18,
+-- design specs/2026-10-18-element-flow-followups-design.md phase 2), shadowing:
+-- the lambda's tail `Option.unwrap_or(o, 1)` is checked over the LAMBDA's `o`,
+-- which `p` supplies and nothing constrains.  Discharged against the caller's
+-- `o : Option({Int | _ > 0})` instead, the demand would prove, and
+-- `applied(None, Some(0 - 5))` returns -5.  The call is a skip, an error under
+-- `cap verified`.  Accept twin: accept/t360.
+mod ScalarDemandLambdaShadow do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn ap(x : b, f : b -> a) : a do f(x) end
+  fn applied(o : Option({Int | _ > 0}), p : Option(Int)) : Int do
+    need_pos(ap(p, fn o -> Option.unwrap_or(o, 1)))
+  end
+end

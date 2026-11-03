@@ -159,6 +159,7 @@ type ctx = Llvm_ctx.ctx = {
   var_llvm_ty : (string, string) Hashtbl.t;
   mutable tco_fn_name   : string option;
   mutable cur_emit_fn   : string;
+  mutable owned_closure : string option;
   mutable tco_loop_label : string;
   mutable tco_param_info : (string * string * string) list;
   mutable tco_stack_save : string;
@@ -166,6 +167,8 @@ type ctx = Llvm_ctx.ctx = {
   mutable norm_ret_pos  : bool;
   mutable tco_dup_bound : string list;
   mutable tco_defer_slot : string;
+  reuse_orphan_boxes : (string, string list) Hashtbl.t;
+  let_alias : (string, string) Hashtbl.t;
   mutable mutual_tco_group      : string list;
   mutable mutual_tco_tag_slot   : string;
   mutable mutual_tco_loop_label : string;
@@ -177,8 +180,11 @@ type ctx = Llvm_ctx.ctx = {
   rec_shape_globals : (string, string * string) Hashtbl.t;
   mutable ctor_desc_globals : (string * string) option;
   ctor_desc_ids : (string, int) Hashtbl.t;
+  ctor_desc_insts : (string, int) Hashtbl.t;
+  ctor_desc_inst_rows : Buffer.t;
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
+  hr_sig_hashes : (string, string) Hashtbl.t;
   compile_so : bool;
   atom_names : (int64, string) Hashtbl.t;
 }
@@ -316,6 +322,55 @@ let is_float_arith name = List.mem name ["+."; "-."; "*."; "/."]
 
 let is_int_bitwise name = List.mem name ["int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr"]
 
+(* The integer division builtins ([int_div], [int_mod], their [_euclid] and
+   [_floor] variants) lower here, for both the [EApp] and [ECallPtr] arms.
+
+   Route through a checked runtime helper so a zero divisor traps via
+   march_panic (matching the interpreter) instead of executing a raw
+   sdiv/srem, which is undefined for a 0 divisor.
+
+   Exception: [int_div_floor] / [int_mod_floor] by a literal other than 0 or -1
+   cannot trap, so they are emitted inline and LLVM strength-reduces the
+   [sdiv]/[srem] by the constant.  The floor correction is one compare and one
+   select: the truncated remainder has the sign of the dividend, so the quotient
+   is one too high exactly when the remainder's sign is opposite the divisor's
+   ([r < 0] for [n > 0], [r > 0] for [n < 0]).  [-1] stays on the helper
+   because [sdiv] by -1 overflows at INT64_MIN. *)
+let emit_checked_int_div ctx (name : string) (va : string) (b : Tir.atom)
+    (vb : string) : string =
+  let r = fresh ctx "ar" in
+  (match name, b with
+   | ("int_div_floor" | "int_mod_floor"), Tir.ALit (March_ast.Ast.LitInt n)
+     when n <> 0 && n <> -1 ->
+     let q   = fresh ctx "fq" in
+     let rem = fresh ctx "fr" in
+     let c   = fresh ctx "fc" in
+     emit ctx (Printf.sprintf "%s = sdiv i64 %s, %s" q va vb);
+     emit ctx (Printf.sprintf "%s = srem i64 %s, %s" rem va vb);
+     emit ctx (Printf.sprintf "%s = icmp %s i64 %s, 0" c
+                 (if n > 0 then "slt" else "sgt") rem);
+     if name = "int_div_floor" then begin
+       let qm1 = fresh ctx "fm" in
+       emit ctx (Printf.sprintf "%s = sub i64 %s, 1" qm1 q);
+       emit ctx (Printf.sprintf "%s = select i1 %s, i64 %s, i64 %s" r c qm1 q)
+     end else begin
+       let rn = fresh ctx "fm" in
+       emit ctx (Printf.sprintf "%s = add i64 %s, %s" rn rem vb);
+       emit ctx (Printf.sprintf "%s = select i1 %s, i64 %s, i64 %s" r c rn rem)
+     end
+   | _ ->
+     let helper = match name with
+       | "int_mod"        -> "march_checked_imod"
+       | "int_div"        -> "march_checked_idiv"
+       | "int_mod_euclid" -> "march_checked_emod"
+       | "int_div_euclid" -> "march_checked_ediv"
+       | "int_mod_floor"  -> "march_checked_ifloormod"
+       | "int_div_floor"  -> "march_checked_ifloordiv"
+       | _                -> assert false
+     in
+     emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb));
+  r
+
 (* True when [name] is a user-defined top-level function whose bare name also
    names one of [emit_expr]'s codegen-dispatched builtins.  See the
    "User top-level fn shadowing a codegen-dispatched builtin name" arm. *)
@@ -342,15 +397,25 @@ let alloca_name = Llvm_ctx.alloca_name
      - the REPL/JIT, whose fragments are separate modules with their own ctx
        (a per-fragment global would give the same fn different pointers across
        fragments, and can collide in the ORC backend's shared JITDylib);
-     - hot-reload boundary functions, which must keep a per-materialization
-       object rather than a module-lifetime one.
-   Both fall back to the original fresh-march_alloc path. *)
-let static_closure_ok ctx (march_name : string) : bool =
-  (not ctx.repl)
-  && (match ctx.hr_config with
-      | None     -> true
-      | Some cfg ->
-        not (Hot_reload.needs_dispatch_to cfg march_name))
+     - hot-reload function values, which retain their creation epoch even if
+       their own body is unchanged. Runtime actor callbacks instead inherit
+       the actor-selected epoch and retain their static wrapper.
+   Ordinary hot-reload values use fresh epoch-pinned heap closures. *)
+let closure_epoch_needed ctx name =
+  ctx.hr_config <> None && not (clo_wrap_runtime_owned name)
+
+let static_closure_ok ctx name =
+  not ctx.repl && not (closure_epoch_needed ctx name)
+
+(* The LLVM symbol a top-level function value names: a user extern's C symbol
+   ([ed_c_name], via [extern_map]) — the extern's March name is defined
+   nowhere — else the mangled March name.  Externs are registered in
+   [top_fns], so the [top_fns] arms of [emit_atom_raw] below reach this for an
+   extern passed as a value (`List.map(xs, dbl)`). *)
+let top_fn_symbol ctx (name : string) : string =
+  match Hashtbl.find_opt ctx.extern_map name with
+  | Some c_name -> c_name
+  | None -> mangle_extern name
 
 (** Emit code for [atom], returning (llvm_type, llvm_value). *)
 let emit_atom_raw ctx (atom : Tir.atom) : string * string =
@@ -413,7 +478,7 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
        and make the raw fn accept an extra leading ptr arg that it ignores.
        Actually, all top-level fn_defs DON'T take a clo arg. So we need
        a wrapper. Let's create one inline. *)
-    let fn_name = llvm_name (mangle_extern v.Tir.v_name) in
+    let fn_name = llvm_name (top_fn_symbol ctx v.Tir.v_name) in
     (* Determine the wrapper name *)
     let wrap_name = fn_name ^ "$clo_wrap" in
     (* Register wrapper if not already generated *)
@@ -469,7 +534,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
         (match wrap_kind with
          | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
          | `Define  ->
-           clo_wrap_define ~drop_clo:ctx.repl
+           clo_wrap_define ~drop_clo:(ctx.repl || closure_epoch_needed ctx v.Tir.v_name)
+             ~frame_epoch:(closure_epoch_needed ctx v.Tir.v_name)
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_tys))
              ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
              ~deep_drops:(List.map
@@ -488,6 +554,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
       let fp = fresh ctx "cwf" in
       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
       emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+      if closure_epoch_needed ctx v.Tir.v_name then
+        emit ctx (Printf.sprintf "call void @march_clo_capture_epoch(ptr %s)" hp);
       ("ptr", hp)
     end
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name
@@ -499,7 +567,7 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
        to materialise the value rather than returning a function pointer.
        A local binding of the same name (in var_slot) shadows the top-level
        function — fall through to the local-load path in that case. *)
-    ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
+    ("ptr", "@" ^ llvm_name (top_fn_symbol ctx v.Tir.v_name))
   | Tir.AVar v when Hashtbl.mem ctx.repl_slot_fns v.Tir.v_name
                  && not (Hashtbl.mem ctx.top_fns v.Tir.v_name)
                  && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
@@ -611,7 +679,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
         (match wrap_kind with
          | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_ltys
          | `Define  ->
-           clo_wrap_define ~drop_clo:ctx.repl
+           clo_wrap_define ~drop_clo:(ctx.repl || closure_epoch_needed ctx v.Tir.v_name)
+             ~frame_epoch:(closure_epoch_needed ctx v.Tir.v_name)
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_ltys))
              ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
              ~deep_drops
@@ -627,6 +696,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
       let fp = fresh ctx "cwf" in
       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
       emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+      if closure_epoch_needed ctx v.Tir.v_name then
+        emit ctx (Printf.sprintf "call void @march_clo_capture_epoch(ptr %s)" hp);
       ("ptr", hp)
     end
   (* ── AVar with no registered alloca slot ────────────────────────── *)
@@ -678,7 +749,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
             (match wrap_kind with
              | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
              | `Define  ->
-               clo_wrap_define ~drop_clo:ctx.repl
+               clo_wrap_define ~drop_clo:(ctx.repl || closure_epoch_needed ctx resolved)
+                 ~frame_epoch:(closure_epoch_needed ctx resolved)
                  ~borrowed:(clo_wrap_borrowed resolved (List.length param_tys))
                  ~own_float:(not (clo_wrap_runtime_owned resolved))
                  ~deep_drops:(List.map
@@ -696,6 +768,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
          let fp  = fresh ctx "cwf" in
          emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
          emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+         if closure_epoch_needed ctx resolved then
+           emit ctx (Printf.sprintf "call void @march_clo_capture_epoch(ptr %s)" hp);
          ("ptr", hp)
        end
      | _ ->
@@ -967,9 +1041,12 @@ let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.Float_nan | Builtin_name.Float_neg_infinity
   | Builtin_name.Int_abs | Builtin_name.Int_div
   | Builtin_name.Int_div_euclid | Builtin_name.Int_max_value
+  | Builtin_name.Int_div_floor | Builtin_name.Int_mod_floor
   | Builtin_name.Int_min_value | Builtin_name.Int_mod
   | Builtin_name.Int_mod_euclid | Builtin_name.Int_not
   | Builtin_name.Int_popcount | Builtin_name.Int_pow
+  | Builtin_name.Int_wrapping_add | Builtin_name.Int_wrapping_mul
+  | Builtin_name.Int_wrapping_sub
   | Builtin_name.Int_to_string | Builtin_name.Negate | Builtin_name.Not
   | Builtin_name.To_string ->
     Bg_arith
@@ -1003,9 +1080,16 @@ let builtin_group : Builtin_name.t -> builtin_group = function
    [march_clo_release], which releases its captures when the release frees it
    (specs/progress/2026-10-05-dropped-closure-captures.md); anything else
    through [default]. *)
-let decrc_fn_for (atom : Tir.atom) (default : string) : string =
+let decrc_fn_for ctx (atom : Tir.atom) (default : string) : string =
   match atom with
   | Tir.AVar { Tir.v_ty = Tir.TFn _; _ } -> "march_clo_release"
+  (* An erased value may be a record whose shape carries a registered deep
+     drop ([Llvm_data.shape_desc_with_drop]); [march_decrc_erased] runs it, and
+     releases anything else as [default] would
+     (specs/progress/2026-10-12-erased-record-shallow-release.md). *)
+  | Tir.AVar { Tir.v_ty = Tir.TVar _; _ } when ctx.shape_meta ->
+    if String.equal default "march_decrc" then "march_decrc_erased"
+    else "march_decrc_erased_local"
   | _ -> default
 
 let rec emit_expr ctx (e : Tir.expr) : string * string =
@@ -1102,6 +1186,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Let binding ───────────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->
+    (match rhs with
+     | Tir.EAtom (Tir.AVar w) ->
+       Hashtbl.replace ctx.let_alias v.Tir.v_name (Llvm_ctx.alias_root ctx w.Tir.v_name)
+     | _ -> Hashtbl.remove ctx.let_alias v.Tir.v_name);
     (* The rhs is in non-tail position: a self-call here must be an ordinary
        call, not a TCO back-edge (else the let body would be dropped). *)
     let saved_tail = ctx.tco_in_tail in
@@ -1285,15 +1373,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Arithmetic builtins ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_arith f.Tir.v_name ->
-    (* `+ - *` are ring operations modulo 2^63: a bare (unnormalised)
-       operand gives the same bare result, so they read their operands
-       through [emit_atom_raw].  This is not only the saved shift pair --
-       with `fib(n-1) + fib(n-2)` the add must consume the call results
-       DIRECTLY for LLVM's accumulator TRE to recognise it
-       ([Llvm_ctx.emit_wrap_int63]).  `/` and `%` go through the checked C
-       helpers and keep normalised operands. *)
-    let emit_atom =
-      if List.mem f.Tir.v_name ["+"; "-"; "*"] then emit_atom_raw else emit_atom in
+    (* Every operand is read normalised: the overflow check of `+ - *`
+       ([Llvm_ctx.emit_checked_int_op]) needs in-range inputs, and `/` and
+       `%` go through the checked C helpers. *)
     Llvm_emit_arith.emit_int_arith ~emit_atom ctx f a b
 
   | Tir.EApp (f, [a; b]) when is_int_cmp f.Tir.v_name ->
@@ -1324,19 +1406,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Negate f.Tir.v_name ->
-    (* Negation is a ring operation: a bare operand is fine (see the `+` arm). *)
-    let (ty, va) = emit_atom_raw ctx a in
-    let r = fresh ctx "ar" in
+    let (ty, va) = emit_atom ctx a in
     if ty = "double" then begin
+      let r = fresh ctx "ar" in
       emit ctx (Printf.sprintf "%s = fneg double %s" r va);
       (ty, r)
-    end else begin
-      emit ctx (Printf.sprintf "%s = sub i64 0, %s" r va);
-      (* -(-2^62) = 2^62 leaves the 63-bit range; left bare, it normalises
-         to -2^62 at its first observation (lazy normalisation,
-         [Llvm_ctx.emit_wrap_int63]). *)
-      (ty, r)
-    end
+    end else
+      (* -(-2^62) = 2^62 leaves the 63-bit range: it panics, as `0 - x`
+         does ([Llvm_ctx.emit_checked_int_op]). *)
+      (ty, Llvm_ctx.emit_checked_int_op ctx "neg" va "")
 
   (* ── ~H sigil: html_auto_escape(v) ────────────────────────────────────
      The runtime `march_html_auto_escape` takes a single generic `ptr` and
@@ -1725,7 +1803,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         render through it so a user ADT prints `Circle(7)` rather than
         `#<tag:0>`.  This is the ONE place the static TIR type is still known;
         [Llvm_ctor_desc.id_for] returns [None] for every shape the table
-        cannot walk (unboxed/newtype/niche repr, an erased TVar), which falls
+        cannot walk (a generic niche, an erased TVar), which falls
         through to the generic renderer below — never worse than before. *)
      | _ when Llvm_ctor_desc.id_for ctx tir_ty <> None ->
        let v = coerce ctx arg_ty arg_val "ptr" in
@@ -1758,21 +1836,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, [a; b])
     when Builtin_name.(is Int_mod f.Tir.v_name || is Int_div f.Tir.v_name
                        || is Int_mod_euclid f.Tir.v_name
-                       || is Int_div_euclid f.Tir.v_name) ->
+                       || is Int_div_euclid f.Tir.v_name
+                       || is Int_mod_floor f.Tir.v_name
+                       || is Int_div_floor f.Tir.v_name) ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
-    let r  = fresh ctx "ar" in
-    (* Route through a checked runtime helper so a zero divisor traps via
-       march_panic (matching the interpreter) instead of executing a raw
-       sdiv/srem/urem, which is undefined for a 0 divisor. *)
-    let helper = match f.Tir.v_name with
-      | "int_mod"        -> "march_checked_imod"
-      | "int_div"        -> "march_checked_idiv"
-      | "int_mod_euclid" -> "march_checked_emod"
-      | "int_div_euclid" -> "march_checked_ediv"
-      | _                -> assert false
-    in
-    emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
+    let r  = emit_checked_int_div ctx f.Tir.v_name va b vb in
     (* Quotients leave the 63-bit Int range only for -2^62 / -1 (= 2^62,
        which reads back as -2^62 at its first observation); remainders never
        do.  See [Llvm_ctx.emit_wrap_int63]. *)
@@ -1787,6 +1856,25 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     (* march_int_pow wraps mod 2^64; reduced mod 2^63 at its first
        observation that is the 63-bit wrapped power the interpreter
        computes ([Llvm_ctx.emit_wrap_int63]). *)
+    ("i64", r)
+
+  (* int_wrapping_{add,sub,mul}: the explicit modulo-2^63 forms for hashes
+     and checksums.  Ring operations, so they take bare operands and leave a
+     bare result, normalised at its first observation -- the lazy scheme
+     `+ - *` themselves used before they were checked
+     ([Llvm_ctx.emit_wrap_int63]). *)
+  | Tir.EApp (f, [a; b])
+    when Builtin_name.is Builtin_name.Int_wrapping_add f.Tir.v_name
+      || Builtin_name.is Builtin_name.Int_wrapping_sub f.Tir.v_name
+      || Builtin_name.is Builtin_name.Int_wrapping_mul f.Tir.v_name ->
+    let raw_i64 x = let (t, v) = emit_atom_raw ctx x in coerce ctx t v "i64" in
+    let va = raw_i64 a in
+    let vb = raw_i64 b in
+    let op = if Builtin_name.is Builtin_name.Int_wrapping_add f.Tir.v_name then "add"
+      else if Builtin_name.is Builtin_name.Int_wrapping_sub f.Tir.v_name then "sub"
+      else "mul" in
+    let r = fresh ctx "ar" in
+    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r op va vb);
     ("i64", r)
 
   | Tir.EApp (f, [a])
@@ -2410,19 +2498,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.ECallPtr (Tir.AVar f, [a; b])
     when Builtin_name.(is Int_mod f.Tir.v_name || is Int_div f.Tir.v_name
                        || is Int_mod_euclid f.Tir.v_name
-                       || is Int_div_euclid f.Tir.v_name) ->
+                       || is Int_div_euclid f.Tir.v_name
+                       || is Int_mod_floor f.Tir.v_name
+                       || is Int_div_floor f.Tir.v_name) ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
-    let r  = fresh ctx "ar" in
-    (* Same checked-helper routing as the EApp form above. *)
-    let helper = match f.Tir.v_name with
-      | "int_mod"        -> "march_checked_imod"
-      | "int_div"        -> "march_checked_idiv"
-      | "int_mod_euclid" -> "march_checked_emod"
-      | "int_div_euclid" -> "march_checked_ediv"
-      | _                -> assert false
-    in
-    emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
+    (* Same lowering as the EApp form above. *)
+    let r  = emit_checked_int_div ctx f.Tir.v_name va b vb in
     ("i64", r)
 
   (* ── Indirect call through closure ────────────────────────────────── *)
@@ -2549,8 +2631,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EIncRC atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then
+    if ty = "ptr" then begin
       emit ctx (Printf.sprintf "call void @march_incrc_local(ptr %s)" v);
+      Llvm_ctx.own_closure_alias ctx atom v
+    end;
     ("i64", "0")
 
   | Tir.EDecRC atom
@@ -2560,8 +2644,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for atom "march_decrc_local") v);
+    if ty = "ptr" then begin
+      Llvm_ctx.disown_closure_value ctx v;
+      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for ctx atom "march_decrc_local") v)
+    end;
     ("i64", "0")
 
   | Tir.EAtomicIncRC atom
@@ -2571,8 +2657,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EAtomicIncRC atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then
+    if ty = "ptr" then begin
       emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" v);
+      Llvm_ctx.own_closure_alias ctx atom v
+    end;
     ("i64", "0")
 
   | Tir.EAtomicDecRC atom
@@ -2582,8 +2670,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EAtomicDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for atom "march_decrc") v);
+    if ty = "ptr" then begin
+      Llvm_ctx.disown_closure_value ctx v;
+      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for ctx atom "march_decrc") v)
+    end;
     ("i64", "0")
 
   | Tir.EFree atom
@@ -2593,8 +2683,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EFree atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @march_free(ptr %s)" v);
+    if ty = "ptr" then begin
+      Llvm_ctx.disown_closure_value ctx v;
+      emit ctx (Printf.sprintf "call void @march_free(ptr %s)" v)
+    end;
     ("i64", "0")
 
   (* ── Tuples ────────────────────────────────────────────────────────── *)
@@ -2666,12 +2758,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 let emit_preamble = Llvm_toplevel.emit_preamble
 
 let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
-    ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
-    ?k_table (m : Tir.tir_module) : string =
+    ?remote_impl_hashes ?remote_sig_hashes ?hr_sig_hashes ?emit_main ?cap_attrib ?cap_decls
+    ?cap_manifest ?k_table (m : Tir.tir_module) : string =
   Llvm_toplevel.emit_module ~emit_expr
     ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
-    ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
-    ?k_table m
+    ?remote_impl_hashes ?remote_sig_hashes ?hr_sig_hashes ?emit_main ?cap_attrib ?cap_decls
+    ?cap_manifest ?k_table m
 
 
 type repl_slot_info = Llvm_repl.repl_slot_info = {
@@ -2681,16 +2773,18 @@ type repl_slot_info = Llvm_repl.repl_slot_info = {
 }
 
 let emit_repl_expr ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns
-    ?store_as_slot ?session_wraps ~types (body : Tir.expr) : string =
+    ?store_as_slot ?borrow_slots ?slot_drop_fn ?register_drops ?session_wraps ~types
+    (body : Tir.expr) : string =
   Llvm_repl.emit_repl_expr ~emit_expr
     ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns ?store_as_slot
-    ?session_wraps ~types body
+    ?borrow_slots ?slot_drop_fn ?register_drops ?session_wraps ~types body
 
 let emit_repl_decl ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns
-    ?extern_fns ?session_wraps ~types (body : Tir.expr) : string =
+    ?extern_fns ?borrow_slots ?register_drops ?session_wraps ~types
+    (body : Tir.expr) : string =
   Llvm_repl.emit_repl_decl ~emit_expr
     ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns ?extern_fns
-    ?session_wraps ~types body
+    ?borrow_slots ?register_drops ?session_wraps ~types body
 
 let emit_repl_fn_with_closure_slot ?fast_math ~n ~bind_name ~dest_slot
     ~prev_slots ?helper_fns ?extern_fns ?session_wraps ~types (fn : Tir.fn_def) : string =

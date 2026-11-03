@@ -113,7 +113,102 @@ let test_comment_edit_hit_skips_emit_and_clang () =
   Alcotest.(check string) "the cached binary's output" "post-tir 42"
     (String.trim (read_file run_log))
 
+(* The capability-attribution markers ([__march_capfrom_CAP__OWNER] /
+   [__march_capdecl_CAP__OWNER]) name the entry module by [tm_name] and come
+   from the `needs` declarations, neither of which the per-SCC impl hashes
+   cover (the entry module's functions are unprefixed in TIR).  Two programs
+   identical but for the module name, or for one `needs` line, hashed alike
+   at the post-TIR key, and the second was served the first's binary — with
+   the FIRST module's markers in it, which is what forge cap inspect/run,
+   forge audit and march caps read
+   (specs/progress/2026-10-12-cas-key-missing-cap-markers.md). *)
+let marker_src ~name ~needs = Printf.sprintf {|mod %s do
+  needs %s
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("markers")
+  end
+end
+|} name needs
+
+let compile_file ~dir ~file ~out ~log =
+  let cmd = Printf.sprintf "cd %s && env HOME=%s %s --compile -o %s %s > %s 2>&1"
+      (Filename.quote dir) (Filename.quote dir) (Filename.quote compiler_exe)
+      (Filename.quote out) (Filename.quote file) (Filename.quote log) in
+  let rc = Sys.command cmd in
+  let text = read_file log in
+  if rc <> 0 then Alcotest.failf "compile of %s failed (rc=%d):\n%s" file rc text;
+  text
+
+(* The cap-attribution symbols in a binary, as nm prints them. *)
+let cap_markers ~dir bin =
+  let log = Filename.concat dir (bin ^ ".nm") in
+  let rc = Sys.command (Printf.sprintf "nm %s > %s 2>&1"
+      (Filename.quote (Filename.concat dir bin)) (Filename.quote log)) in
+  if rc <> 0 then Alcotest.failf "nm %s failed:\n%s" bin (read_file log);
+  read_file log |> String.split_on_char '\n'
+  |> List.filter_map (fun l ->
+      match String.rindex_opt l ' ' with
+      | Some i ->
+        let sym = String.sub l (i + 1) (String.length l - i - 1) in
+        if contains sym "__march_capfrom_" || contains sym "__march_capdecl_"
+        then Some sym else None
+      | None -> None)
+  |> List.sort_uniq compare
+
+let has_marker markers m = List.exists (fun s -> contains s m) markers
+
+let check_second_carries_own_markers ~a ~b ~expect ~reject () =
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf "compiler not found at %s" compiler_exe;
+  with_scratch @@ fun dir ->
+  let write f s = Out_channel.with_open_bin (Filename.concat dir f)
+      (fun oc -> output_string oc s) in
+  write "a.march" a;
+  write "b.march" b;
+  let first = compile_file ~dir ~file:"a.march" ~out:"a.bin"
+      ~log:(Filename.concat dir "a.log") in
+  Alcotest.(check bool) ("the first compile is not a hit: " ^ first) false
+    (contains first "(cached)");
+  let second = compile_file ~dir ~file:"b.march" ~out:"b.bin"
+      ~log:(Filename.concat dir "b.log") in
+  let markers = cap_markers ~dir "b.bin" in
+  let what s = Printf.sprintf "%s; b's markers: [%s]; b's log:\n%s" s
+      (String.concat " " markers) second in
+  List.iter (fun m ->
+      Alcotest.(check bool) (what ("b carries " ^ m)) true (has_marker markers m))
+    expect;
+  List.iter (fun m ->
+      Alcotest.(check bool) (what ("b does not carry " ^ m)) false
+        (has_marker markers m))
+    reject;
+  (* The key must still be stable: an unchanged rebuild of b is a hit. *)
+  let third = compile_file ~dir ~file:"b.march" ~out:"b2.bin"
+      ~log:(Filename.concat dir "b2.log") in
+  Alcotest.(check bool) ("an unchanged rebuild of b is a hit: " ^ third) true
+    (contains third "(cached)")
+
+let test_module_name_in_key =
+  check_second_carries_own_markers
+    ~a:(marker_src ~name:"CapKeyAlpha" ~needs:"IO.Console")
+    ~b:(marker_src ~name:"CapKeyBeta" ~needs:"IO.Console")
+    ~expect:[ "__march_capfrom_IO_Console__CapKeyBeta";
+              "__march_capdecl_IO_Console__CapKeyBeta" ]
+    ~reject:[ "CapKeyAlpha" ]
+
+let test_needs_in_key =
+  check_second_carries_own_markers
+    ~a:(marker_src ~name:"CapKeyNeeds" ~needs:"IO.Console")
+    ~b:(marker_src ~name:"CapKeyNeeds" ~needs:"IO.Console, IO.FileRead")
+    ~expect:[ "__march_capdecl_IO_Console__CapKeyNeeds";
+              "__march_capdecl_IO_FileRead__CapKeyNeeds" ]
+    ~reject:[]
+
 let tests =
   [ Alcotest.test_case "comment-only edit: post-TIR hit skips llvm-emit and clang"
       `Slow test_comment_edit_hit_skips_emit_and_clang;
+    Alcotest.test_case "module name is in the post-TIR key (cap markers)"
+      `Slow test_module_name_in_key;
+    Alcotest.test_case "declared needs are in the post-TIR key (cap markers)"
+      `Slow test_needs_in_key;
   ]

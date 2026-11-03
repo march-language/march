@@ -1,6 +1,6 @@
 # March Syntax Quick Reference
 
-> Part of the March Language Reference — see [specs/lang/index.md](index.md)
+> Part of the March Language Reference; see [specs/lang/index.md](index.md)
 
 A terse example of every construct. See `lib/parser/parser.mly` for authoritative grammar, or [`grammar.md`](grammar.md) for the normative, resolved grammar reference (precedence/associativity made explicit, the lexer + `token_filter` preprocessing layers formalized, backed by a parse/reject conformance corpus).
 
@@ -49,7 +49,7 @@ pfn helper(x) do              -- pfn = private
 end
 ```
 
-Multi-head pattern matching — consecutive clauses with the same name are merged:
+Multi-head pattern matching: consecutive clauses with the same name are merged:
 
 ```march
 fn len(Nil) do 0 end
@@ -76,7 +76,7 @@ greet("World")           -- "Hello, World!"
 greet("World", "Hi")    -- "Hi, World!"
 ```
 
-Multiple defaults — all must be trailing parameters:
+Multiple defaults: all must be trailing parameters:
 
 ```march
 fn make(x, y \\ 10, z \\ 20) do x + y + z end
@@ -107,7 +107,7 @@ fn () -> compute()            -- zero-arg explicit form (identical)
 ```
 
 Multi-statement lambda bodies are supported with leading `let` bindings followed by
-a final expression — identical to match arm block bodies:
+a final expression, identical to match arm block bodies:
 
 ```march
 fn x ->
@@ -126,15 +126,55 @@ fn () ->
 ```
 
 The body is: zero or more `let`/`linear let` bindings, then a final expression.
-Single-expression lambdas are unchanged — no `let` bindings means no `EBlock` wrapper.
+Single-expression lambdas are unchanged: no `let` bindings means no `EBlock` wrapper.
 
-Both `fn -> expr` and `fn () -> expr` are valid zero-arg lambdas — they are identical.
+Both `fn -> expr` and `fn () -> expr` are valid zero-arg lambdas; they are identical.
+A zero-arg lambda has type `() -> T` (the same as `Unit -> T`) wherever it appears, so it
+can fill a `() -> T` record field or be bound with `let` and passed on, and `f()` calls it:
+
+```march
+type Job = { name : String, run : () -> Int }
+let g = fn () -> 4
+let job = { name: "j", run: g }
+job.run()                     -- 4
+```
+
+### `fn (a, b) -> …` takes TWO arguments, it does not destructure a pair
+
+The parenthesized parameter list is a *curried* parameter list, not a tuple
+pattern: `fn (a, b) -> …` is a two-argument lambda, exactly like
+`fn(a, b)` at the top level. Nested patterns (`fn ((a, b)) -> …`) are a parse
+error. So a callback that receives a PAIR cannot be written that way:
+
+```march
+-- WRONG: a 2-argument lambda where a 1-argument callback over a pair is wanted
+List.map(pairs, fn (k, v) -> v)
+
+-- RIGHT: one parameter, matched on
+List.map(pairs, fn pair -> match pair do (k, v) -> v end)
+```
+
+The compiler reports the wrong form directly ("This lambda takes 2 arguments,
+but it is passed where a function of ONE argument, a 2-tuple `(K, V)`, is
+expected") and suggests the `match` rewrite. Before that diagnostic existed the
+mistake either typechecked to a nonsense type (the callback's result variable
+absorbed the extra arrow, so `List.map(xs, fn (_, w) -> w)` produced
+`List(b -> b)`) or failed with a misleading "this type would have to be
+infinitely recursive" message.
+
+A genuinely curried callback is unaffected — `List.fold_left`'s function
+parameter is `b -> a -> b`, so two parameters are correct there even when the
+accumulator itself is a tuple:
+
+```march
+List.fold_left(xs, (0, 0), fn (acc, x) -> ...)   -- fine: really two arguments
+```
 
 ---
 
 ## Let Bindings
 
-Block-level `let` — no `in`; subsequent exprs in the block see the binding:
+Block-level `let`: no `in`; subsequent exprs in the block see the binding:
 
 ```march
 fn main() do
@@ -179,13 +219,13 @@ end
 Rules:
 - The right-hand side must be `Result(T, E)`.
 - The pattern binds the `T` (Ok payload).
-- The code after the `let?` must also produce `Result(R, E)` — the error type `E` must match across all `let?` bindings in the block.
+- The code after the `let?` must also produce `Result(R, E)`; the error type `E` must match across all `let?` bindings in the block.
 - `let?` cannot be the last expression in a block (there must be something after it).
 
 Works in function bodies, match arms, and lambda bodies:
 
 ```march
-fn process(items: List(String)): Result(List(Int), String) do
+fn process(items: List(String)): List(Result(Int, String)) do
   List.map(items, fn s ->
     let? n = parse(s)
     Ok(n * 2))
@@ -196,7 +236,7 @@ end
 
 ## Types
 
-Variant (ADT) — no leading `|`:
+Variant (ADT), no leading `|`:
 
 ```march
 type Color = Red | Green | Blue
@@ -223,7 +263,7 @@ Private type (type and constructors both private):
 ptype Internal = Foo | Bar(Int)
 ```
 
-Phantom label type (`tag` — zero-arg type used as a state or resource marker):
+Phantom label type (`tag`, a zero-arg type used as a state or resource marker):
 
 ```march
 tag ConnTag    -- equivalent to: type ConnTag = ConnTag
@@ -231,7 +271,7 @@ tag Open       -- equivalent to: type Open = Open
 tag Closed     -- equivalent to: type Closed = Closed
 ```
 
-Always-linear type (every binding is automatically tracked as linear — no per-site annotation needed):
+Always-linear type (every binding is automatically tracked as linear; no per-site annotation needed):
 
 ```march
 always_linear type Handle(r, s) = Handle(Int)
@@ -280,6 +320,13 @@ end
 -- Outside: can call Token.make/Token.value, cannot use Token(_) directly
 ```
 
+The two combine: `always_linear opaque type` is linear at every binding and keeps
+its constructors private (the stdlib's `LinearMap` is declared this way):
+
+```march
+always_linear opaque type Pool(a) = Pool(Int, List(a))
+```
+
 ---
 
 ## Type Syntax
@@ -307,22 +354,42 @@ type Arr(n) = Array(n * 2)
 ## Refinement Types
 
 A base type plus a predicate, checked by an SMT solver (Z3) at compile time.
-`_` is the value being refined; the predicate is `Int`/`Bool` linear arithmetic.
+`_` is the value being refined; a named binder (`v : T`) is required to reach
+fields or pass the value to a measure.
 
 ```march
 {Int | _ >= 0}                     -- a non-negative Int
 {Int | _ != 0}                     -- a non-zero Int
 {v : Int | v >= 0 && v < 100}      -- named binder form
+{String | len(_) > 0}              -- a non-empty String
+{String | _ != ""}                 -- literal equality
+{Bool | _ == true}                 -- a Bool (operator form; `not _` won't parse)
+{Float | _ >= 0.0}                 -- a Float, via Z3's IEEE-754 theory
+{Float | _ != 0.0}                 -- a safe divisor (`-0.0` is rejected too)
+{Option(Int) | is_Some(_)}         -- an ADT constructor tag
+{v : Cfg | v.port >= 1}            -- a record field
+{v : Cfg | v.port > v.retries}     -- one field against another
+{v : Tree | size(v) < 100}         -- a @[measure] over a structure
 ```
 
-Used as parameter (precondition) or return (postcondition) types:
+The predicate fragment is `+ - *`, `/ %` (with March's truncating semantics;
+a zero divisor makes the predicate false), the comparisons
+`== != < <= > >=`, the connectives `&& || not`, literals, field projection,
+`len`, `is_<Ctor>` testers, and `@[measure]` functions. A predicate may also
+mention **another parameter**, which makes it *relational*:
 
 ```march
-fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do ... end
-fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
+fn slice(lo : Int, hi : {Int | _ > lo}) : Int do hi end
+fn get(t : Tree, i : {Int | _ >= 0 && _ < size(t)}) : Int do i end
+fn insert(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do ... end
 ```
 
-A `@[measure]` function (total, terminating, pure) may be used in predicates:
+Used as parameter (precondition) or return (postcondition) types. A return
+refinement the checker can **prove** propagates to call sites, so
+`takepos(neg())` is rejected when `neg` promises `{Int | _ < 0}`.
+
+A `@[measure]` function (total, terminating, pure, recursive by structure) may
+be used in predicates:
 
 ```march
 @[measure]
@@ -334,10 +401,23 @@ fn size(t : Tree(a)) : Int do
 end
 ```
 
-Checking is definite-failure (flags only what can *never* hold — no false
-positives) and runs only when `z3` is on `PATH`. See the
-[Refinement Types guide](refinement-types.md) for the full story and
-limitations (`Int`/`Bool` only, no `Float` value-refinements, direct calls only).
+Checking is definite-failure: it flags only what can *never* hold, so there
+are no false positives, and silence means "not disproved", never "verified".
+It runs only when `z3` is on `PATH`. A predicate calling a name the checker
+does not know produces a **warning** rather than silently enforcing no check at all.
+
+`Float` predicates are **comparisons only**; float *arithmetic* in a predicate
+(`_ +. 1.0 > 0.0`) is out of scope and makes the obligation skipped rather than
+guessed at. They are discharged through Z3's bit-precise IEEE-754 theory, never
+by modelling floats as reals: over reals `not (x >= 0.0) && not (x <= 0.0)` is
+unsatisfiable and correct code would be flagged, while over floats it is
+satisfiable (witness: `NaN`) and correctly stays silent.
+
+See the [Refinement Types guide](refinement-types.md) for the full story and
+the exact limitations (float arithmetic, float record fields and special-value
+predicates are out of scope; strings support only `len` and literal equality;
+higher-order checking covers refined callback types and local aliases but not
+unrefined callbacks or `interface` dispatch).
 
 ---
 
@@ -361,7 +441,50 @@ Cons(h, t)                -- nested constructor
 :error(msg)               -- atom with args
 Mod.Con(x)                -- qualified constructor (disambiguation)
 -5                        -- negative int literal
+Some(x) as whole          -- as-pattern: binds `whole` to the entire value
+                          --   while `x` destructures it
+{ x: a, y: b }            -- record pattern: destructures fields x, y
+{ x, y }                  -- punned: shorthand for { x: x, y: y }
+1 | 2 | 3                 -- or-pattern: matches any of the alternatives
+Red | Green               -- or-pattern over nullary constructors
 ```
+
+In a `match` arm, a record pattern's field list is open: `{ x: a }` matches
+any record with (at least) an `x` field, whatever else it has, and fields it
+doesn't mention are simply not bound. Naming a field the record lacks is a
+compile error. A `let` binding and a bare record-pattern function parameter
+still require naming every field of the scrutinee, since neither has an
+independent expected type to open the pattern against:
+
+```march
+match point do
+  { x: 0 } -> "on y-axis"   -- y need not be named
+  _        -> "elsewhere"
+end
+let { x: px, y: py } = point   -- let: every field still required
+fn area({ w: w, h: h }) do w * h end   -- fn param: every field still required
+```
+
+An or-pattern's alternatives may **not** bind variables: `A(x) | B(x) -> x`
+is a compile error, because every alternative shares one arm body:
+
+```march
+match n do
+  1 | 2 | 3 -> "small"   -- OK: no alternative binds anything
+  _         -> "big"
+end
+
+match e do
+  A(x) | B(x) -> x * 10   -- OK: every alternative binds `x` at the same type
+end
+
+match e do
+  A(x) | B(y) -> x + y    -- REJECTED: alternatives must bind the same names
+end
+```
+
+Split into separate arms, or match the common shape and test the difference
+with a `when` guard, instead.
 
 ---
 
@@ -454,13 +577,13 @@ else
 end
 ```
 
-`else` is **mandatory** — omitting it is a parse error:
+`else` is **mandatory**; omitting it is a parse error:
 
 ```
 March `if` expressions always need an `else` branch:
 ```
 
-There is no `then` keyword — `if c then e1 else e2` is rejected with a targeted parse error:
+There is no `then` keyword; `if c then e1 else e2` is rejected with a targeted parse error:
 
 ```
 I don't recognize `then` here — March uses do/end blocks instead.
@@ -475,6 +598,19 @@ Float arithmetic: `+.`, `-.`, `*.`, `/.`
 String/list concat: `++`
 Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
 Logic: `&&`, `||`, `!` (prefix not), unary `-` (negate)
+
+Each `++` allocates and copies both operands into a new string/list. A chain
+of them (`a ++ b ++ c`) is collapsed by the compiler into a single concat: two
+or three parts become one allocation and one copy directly, and four or more
+become an n-ary concat that sums every part's length once, allocates once, and
+copies each byte once. So a k-part chain costs one allocation, not k-1, and is
+linear in the total byte count at every k. But using `++` as a loop accumulator
+(`acc = acc ++ x`) still copies `acc` again on every iteration, which is O(n²)
+overall — the collapse applies within one chain, not across iterations. String
+interpolation (`"${a}${b}"`) desugars to exactly the same `++` chain and gets
+the same treatment. For accumulating many segments
+across loop iterations, use `IOList` (`stdlib/iolist.march`), which builds a
+tree and defers concatenation to a single O(n) pass at the end.
 
 ---
 
@@ -594,7 +730,7 @@ Functional update:
 
 ```march
 List.map(xs, fn x -> x + 1)   -- module-qualified call
-String.length(s)
+String.byte_size(s)
 p.x                            -- field access
 a.b.c                          -- chained field/module access
 ```
@@ -646,6 +782,44 @@ fn length(xs) do ... end
 fn old_api() do ... end
 ```
 
+### Allocation contracts
+
+```march
+@[no_alloc]           -- error if the compiled function, or anything it calls, allocates
+fn inc_leaves(t : Tree) : Tree do ... end
+
+@[no_alloc(warn)]     -- same check, reported as a warning
+
+@[no_alloc(transient)] -- weaker: allocations are allowed, but none may SURVIVE the call
+fn frame(w : World) : Int do ... end
+
+@[no_alloc(assume)]   -- never checked; callers trust it (for closure/extern wrappers)
+```
+
+Checked on the final compiled form, after reference counting and escape
+analysis, so a constructor the compiler reuses in place (`♻`) and a value it
+promotes to the stack (`⚡`) both pass. The check is transitive over callees and
+needs no annotation on them; the one exception is a call through an unknown
+closure or an `extern`, which fails unless the enclosing function is
+`assume`. `fn` and `pfn` only — on an actor or with any other payload it is a
+parse error. A `doc` string comes FIRST, then the attributes, then the
+declaration (`doc "..."` / `@[no_alloc]` / `fn f() ...`); the reverse order is
+a parse error. `march --check` and `march check` judge it too (they lower the program when
+it carries a contract); the interpreter, `--jit` and the REPL cannot, and
+print one `no_alloc_unchecked` hint. `cap no_alloc` on a module applies the
+hard form to every function in it. See [memory model](memory-model.md) for
+how to make a function pass, and [capabilities](capabilities.md) for the cap.
+
+`transient` asks a different question: not "did it allocate" but "does anything
+it allocated outlive the call". A function fails it when it returns something
+it allocated, writes one into an object it did not allocate, or hands one to an
+actor, a `Vault`, a spawned task, an `extern` or an unknown closure — and when
+anything it calls does. It passes when a callee allocates freely and the
+annotated function drops the result before returning, which is exactly the case
+the bare form rejects. An amortized growth path (a buffer that reallocates its
+storage and keeps the new storage) is *retained*, so `transient` rejects it too
+— it is not a way to bless growable buffers.
+
 ---
 
 ## Interfaces (Typeclasses)
@@ -654,7 +828,7 @@ fn old_api() do ... end
 interface Eq(a) do
   fn eq: a -> a -> Bool
   fn neq: a -> a -> Bool do  -- default implementation
-    !eq(x, y)
+    fn (x, y) -> !eq(x, y)  -- default body's type is the FULL arrow type, not the return type
   end
 end
 
@@ -728,6 +902,8 @@ end
 ## FFI (Extern)
 
 ```march
+needs LibC, IO.Foreign
+
 extern "libc": Cap(LibC) do
   fn malloc(n: Int): Int
   fn free(ptr: Int): ()
@@ -771,19 +947,59 @@ let pid = spawn(Counter)
 send(pid, Increment())
 ```
 
+A mailbox bound declared with the actor (after `init`, before any `supervise`
+block; the policy by name, `drop_new` / `drop_old` / `block_sender`):
+
+```march
+actor Worker do
+  state { n : Int }
+  init { n: 0 }
+  mailbox 1000 drop_old
+  on Work() do { n: state.n + 1 } end
+end
+```
+
+A terminate callback, run once on a graceful `Actor.stop` (after the drain,
+never on `kill`); `state` and `self` are in scope, its value is discarded. At
+most one per actor, anywhere among the handlers (`on_stop` is the keyword the
+`app` block already uses):
+
+```march
+actor Tally do
+  state { n : Int }
+  init { n: 0 }
+  on Bump() do { n: state.n + 1 } end
+  on_stop do
+    println("tally stopped at " ++ int_to_string(state.n))
+  end
+end
+```
+
 Supervision block inside an actor:
 
 ```march
 actor App do
-  state {}
-  init {}
+  state { w : Int }
+  init { w: 0 }
   supervise do
     strategy one_for_one
     max_restarts 3 within 60
-    Worker w
+    backoff base 25 cap 5000 jitter 25%   -- optional; these are the defaults
+    Worker w                              -- restart permanent (the default)
+    Worker j restart transient            -- crash restarts it, kill() retires it
+    Reaper r restart temporary            -- never restarted
+    Db     d shutdown 1000                -- Actor.stop waits 1s for it to drain
   end
 end
 ```
+
+Per-child `restart` policy and `shutdown` budget, and the block-level
+`backoff` curve, are all optional; omitting them gives `permanent` and `25 / 5000 / 25`, which is what
+every `supervise` block written before these clauses existed already means.
+`restart`, `shutdown`, `backoff`, `base`, `cap` and `jitter` are **not**
+reserved words —
+they stay usable as ordinary identifiers everywhere, including inside a
+`supervise` block's own children.
 
 ---
 
@@ -797,7 +1013,7 @@ app MyApp do
   on_stop do
     Logger.info("stopping")
   end
-  Supervisor.spec(:one_for_one, [Worker])
+  Supervisor.spec(:one_for_one, [worker(Worker)])
 end
 ```
 
@@ -859,18 +1075,40 @@ task_cancel_by_id(t)
 
 ```march
 protocol Transfer do
-  Client -> Server : Request(String)
-  Server -> Client : Response(Int)
+  Client -> Server : String
+  Server -> Client : Int
   loop do
-    Client -> Server : More(String)
-    Server -> Client : Ack()
+    Client -> Server : String
+    Server -> Client : Bool
   end
 end
 
 protocol Negotiation do
   choose by Client:
-    | accept -> Client -> Server : Accept()
-    | reject -> Client -> Server : Reject()
+    | accept -> Client -> Server : Bool
+    | reject -> Client -> Server : Bool
+  end
+end
+
+-- `stop` exits an enclosing `loop` instead of repeating it; legal only
+-- inside a `loop` body, directly or inside a `choose` branch nested in one.
+-- A message step may carry a label (`item:`), lowercase like a branch
+-- label: `@[endpoints]` then names the message `Item` (`send_Item`,
+-- `recv_Item`) instead of `Msg_Prod_Cons_1`. A branch's head message is
+-- named by the branch label and takes no label of its own.
+-- `role R needs IO.X, ...` grants the role's code those capabilities (see
+-- choreography.md, "Per-role grants"); it must come before the first
+-- message step, and `role` is a soft keyword, an identifier elsewhere.
+protocol Stream do
+  role Prod needs IO.Console
+  role Cons needs IO.Console, IO.FileWrite
+  loop do
+    item: Prod -> Cons : Int
+    choose by Cons:
+      more -> Cons -> Prod : Bool
+      done -> Cons -> Prod : Bool
+              stop
+    end
   end
 end
 ```
@@ -896,15 +1134,18 @@ test "addition works" do
   assert (1 + 1 == 2)
 end
 
+-- setup/setup_all are module-level declarations, not nested inside describe
+setup do
+  -- runs before each test
+  ()
+end
+
+setup_all do
+  -- runs once before all tests
+  ()
+end
+
 describe "arithmetic" do
-  setup do
-    -- runs before each test in this describe block
-  end
-
-  setup_all do
-    -- runs once before all tests
-  end
-
   test "multiply" do
     assert (2 * 3 == 6)
   end
@@ -925,7 +1166,7 @@ dbg(some_expr)                -- trace / conditional
 ## Semantics notes
 
 Behaviors real users hit that aren't obvious from the syntax above. Each was
-verified against HEAD with a runnable probe program — not carried over from
+verified against HEAD with a runnable probe program, not brought over from
 an older finding without re-checking.
 
 ### Top-level `let` RHS: re-evaluated once per referencing function (compiled), once total (interpreter)
@@ -935,13 +1176,13 @@ backends give it different evaluation counts when `rhs` has a side effect and
 multiple functions reference `name`. The interpreter evaluates `rhs` exactly
 once (during module env construction) and every function sees the same
 value. The compiled backend has no shared module-init step for top-level
-lets — instead, the top-level-let injection post-pass in `lib/tir/lower.ml`
+lets; instead, the top-level-let injection post-pass in `lib/tir/lower.ml`
 (the `fn_body_uses` scan, marked by the comment "Inject top-level let
 bindings into function bodies that reference them") walks each function body
 and, for every top-level let it references, injects a fresh
 `ELet (v, rhs, body)` at the top of *that function*. If two functions and
 `main` all reference the binding, the compiled binary re-evaluates `rhs`
-three times — once per injection site.
+three times, once per injection site.
 
 ```march
 mod Main do
@@ -966,7 +1207,7 @@ mod Main do
 end
 ```
 
-Interpreter output — one evaluation:
+Interpreter output, one evaluation:
 
 ```
 evaluating shared RHS
@@ -975,10 +1216,10 @@ use_b sees: 42
 main sees: 42
 ```
 
-Compiled (`--compile`) — `evaluating shared RHS` prints **three times**, one
+Compiled (`--compile`): `evaluating shared RHS` prints **three times**, one
 per referencing function (verified with `| grep -c`). The exact interleaving
 of the injected evaluations relative to the other output lines is not
-guaranteed and has been observed to differ across builds — the invariant is
+guaranteed and has been observed to differ across builds; the invariant is
 the *count*: one evaluation per function that references the binding, versus
 exactly one total in the interpreter.
 
@@ -989,14 +1230,14 @@ code.
 ### Newline-glom: a continuation token on the next line joins the previous expression
 
 Outside `match` bodies, `lib/parser/token_filter.ml`'s NL filter
-unconditionally swallows newline tokens (the `NL` dispatch arm whose fallback
-reads `next lexbuf  (* outside match body — swallow *)`) — the parser never
+unconditionally swallows newline tokens (the `NL` dispatch arm with a fallback that
+reads `next lexbuf  (* outside match body — swallow *)`); the parser never
 sees them. Statement separation inside `block_body` (the
 `block_body: nonempty_list(block_expr)` production in
 `lib/parser/parser.mly`) is therefore purely a side effect of where
 Menhir's grammar happens to close one `expr` and open the next. A line that
-*starts* with a token that can continue the prior expression — `(` (call/tuple),
-`-` (binary minus), or any infix operator (`++`, `+`, etc.) — gloms onto the
+*starts* with a token that can continue the prior expression, `(` (call/tuple),
+`-` (binary minus), or any infix operator (`++`, `+`, etc.), gloms onto the
 previous line instead of starting a new statement.
 
 ```march
@@ -1014,7 +1255,7 @@ let f = identity
 -- desugars to `let f = identity(5)`  (f = 5), not `f = identity` then a bare `(5)`
 ```
 
-The sharpest trap is when the previous line's value isn't callable — the
+The sharpest trap is when the previous line's value isn't callable: the
 error surfaces far from the real mistake:
 
 ```march
@@ -1026,7 +1267,7 @@ println("...")
 ```
 
 fails to typecheck with `This is not a function — it has type Int`, pointing
-at `let b = 10` — because `let b = 10 \n (negate(b))` glommed into
+at `let b = 10`, because `let b = 10 \n (negate(b))` glommed into
 `let b = 10(negate(b))`. The fix is to make the continuation impossible:
 start the next line with something that cannot extend an expression (another
 `let`, a bare identifier call with no leading operator/paren ambiguity), or
@@ -1034,20 +1275,20 @@ parenthesize/terminate the prior expression so the next line can't attach.
 
 ### Derived `Ord`/`Hash` ignore constructor payloads
 
-(The compiled-crash half of this section — named `eq`/`compare`/`hash` on
-`Newtype`-repr variants SIGSEGV'ing or panicking — was fixed 2026-07-04; see
+(The compiled-crash part of this section, named `eq`/`compare`/`hash` on
+`Newtype`-repr variants SIGSEGV'ing or panicking, was fixed 2026-07-04; see
 `specs/progress/` for the root cause and fix. The
 payload-ignoring `Ord`/`Hash` *semantics* below are unchanged and intentional.)
 
 **Semantics (interpreter, and compiled where it doesn't crash):** `derive Ord
 for T` and `derive Hash for T` on a variant type only look at the
-constructor's declared index — never its payload fields. `expand_derive` in
+constructor's declared index, never its payload fields. `expand_derive` in
 `lib/desugar/desugar.ml` builds the derived `compare` body (its `"Ord"` case)
 as `ctor_index(a) - ctor_index(b)`, matching each constructor with wildcard
 patterns (`PatWild`) that discard the arguments; the derived `hash` body (the
 `"Hash"` case) does the same, returning the bare constructor index. Two
 values built from the *same* constructor always compare equal and hash equal,
-regardless of payload. Derived `Eq` is different — it IS payload-aware
+regardless of payload. Derived `Eq` is different: it IS payload-aware
 (`eq(Wrap(1), Wrap(2))` is `false`), so a type deriving both `Eq` and `Ord`
 reports `eq(a, b) == false` yet `compare(a, b) == 0` for same-constructor
 values with different payloads.
@@ -1066,29 +1307,27 @@ mod Main do
 end
 ```
 
-Interpreter output: `0` / `0` / `0` — payload ignored. Compiled output is
-identical (this used to crash on single-ctor single-field — `Newtype`-repr —
+Interpreter output: `0` / `0` / `0`, payload ignored. Compiled output is
+identical (this used to crash on single-ctor single-field (`Newtype`-repr)
 variants; fixed 2026-07-04, see `specs/progress/`).
 
 Records are unaffected: derived `Ord`/`Hash` for `TDRecord` compares/hashes
 field-by-field as expected. Do not rely on derived `Ord`/`Hash` for any
-variant type whose constructors carry payload data that should affect
-ordering or hashing — write a manual `impl` instead.
+variant type with constructors that include payload data that should affect
+ordering or hashing; write a manual `impl` instead.
 
-### Nested-module default-arg functions silently drop default values
+### Nested-module default-arg functions (fixed 2026-07-15)
 
-A `fn f(x, y \\ default)` defined at the top level of a module gets expanded
-by `expand_defaults_decl` (`lib/desugar/desugar.ml`) into mangled full-arity
-and short-arity wrapper decls, so calling with fewer arguments dispatches to
-a variant that supplies the default. That expansion only runs on top-level
-`DFn` decls. A default-arg function declared inside a *nested*
-`mod ... do ... end` never reaches `expand_defaults_decl`; instead it takes
-the `desugar_fn_def` fast path (same file) that just strips every
-`FPDefault` down to a required `FPNamed` — its own comment reads *"Default
-values are dropped here ... nested default-arg dispatch was never wired
-up"*. The nested function's real signature ends up requiring **all**
-parameters — the default expression is discarded entirely, not deferred or
-evaluated.
+Nested default-arg functions used to silently drop their default values (a
+`fn f(x, y \\ default)` inside a nested `mod ... do ... end` took a fast
+desugar path that stripped every default down to a required parameter), and
+separately, a default-arg function's own bare name couldn't be resolved from
+source at any arity (`I cannot find `add`` under `--check`). Both were fixed
+in the same slice (`specs/todos/`, 2026-07-15, open-items plan Phase 7.1):
+`expand_defaults_decl` now recurses into nested modules, and the typechecker
+redirects an unbound `foo(args)` call to its arity-specific variant. Nested
+default-arg functions now behave identically to top-level ones, on both
+backends:
 
 ```march
 mod Main do
@@ -1097,48 +1336,24 @@ mod Main do
   end
 
   fn main() do
-    let partial = Inner.add(1)      -- typechecks as a partial application
-    println(int_to_string(partial(2, 3)))
+    println(int_to_string(Inner.add(1)))         -- 31
+    println(int_to_string(Inner.add(1, 5)))       -- 26
+    println(int_to_string(Inner.add(1, 5, 6)))    -- 12
   end
 end
 ```
 
-Calling `Inner.add(1)` alone in a context expecting `Int` fails typecheck
-(`expected Int but got Int -> Int -> Int`); calling it as a genuine partial
-application (as above) typechecks but crashes at runtime with `arity
-mismatch: expected 3 args, got 1` — there is no 1-arg or 2-arg overload for a
-nested default-arg function, unlike its top-level counterpart. (This
-replaced an earlier, worse bug — commit `92dadd92` — where the nested
-function boxed all parameters into a synthesized tuple and could
-use-after-free an erased closure parameter; the current behavior is safe but
-still incomplete.) Give nested default-arg functions all their arguments
-explicitly, or hoist them to the top level of the module.
+### Reserved soft-keyword imbalance: bindable but not referenceable
 
-Note: this campaign also found — orthogonally — that even a *top-level*
-default-arg function's short name cannot be resolved from March source: the
-typechecker binds `DFn` declarations by their post-desugar name only (the
-mangled `f$N`), and never reconstructs the arity-dispatch overload set that
-the interpreter's env-builder and the TIR's `_default_dispatch` table build
-for themselves later in the pipeline. A source-level call like `add(1)` to a
-default-arg top-level function fails with `I cannot find `add`` under
-`--check`, `--compile`, and plain interpretation alike — at ANY arity,
-including full arity; only OCaml-level test harnesses that call
-`call_fn env "add" [...]` directly (bypassing name resolution) exercise the
-arity-dispatch machinery today. Filed as a P1 compiler bug in
-`specs/todos/` (typecheck-level default-arg name resolution + the test
-gap).
-
-### Reserved soft-keyword asymmetry: bindable but not referenceable
-
-A handful of identifiers double as keywords elsewhere in the grammar —
-`init`, `loop`, `on`, `state`, `protocol`, `app`, `as`, `with`, `when`, `use`,
-`in`, `for` — and are listed in the `soft_lower_name` production
+A handful of identifiers double as keywords elsewhere in the grammar
+(`init`, `loop`, `on`, `state`, `protocol`, `app`, `as`, `with`, `when`, `use`,
+`in`, `for`) and are listed in the `soft_lower_name` production
 (`lib/parser/parser.mly`) so they can be used in *binding* positions:
 function params, patterns, and `let` bindings. They are **not** listed in
 the primary-expression rule for a bare variable reference (the
 `id = LOWER_IDENT { EVar (mk_name id $loc) }` production in the same file),
-so referencing one of them in expression position — even a bare reference,
-not just inside an arithmetic expression — is a parse error:
+so referencing one of them in expression position (even a bare reference,
+not just inside an arithmetic expression) is a parse error:
 
 ```march
 let init = 3           -- parses: `init` accepted as a binding name
@@ -1147,15 +1362,15 @@ println(int_to_string(init + 1))   -- same error
 ```
 
 The same restriction blocks declaring a function named `init` (`fn init(x)
-do ... end` — function names use the plain `lower_name` rule, not
-`soft_lower_name`, so this is also a parse error) — it is the identical root
+do ... end`: function names use the plain `lower_name` rule, not
+`soft_lower_name`, so this is also a parse error); it is the identical root
 cause as the expression-position gap, not a separate bug.
 
 `tag` is the one exception: commit `4bb0e87c` promoted it to a full soft
 keyword by adding it to *both* the `lower_name` production (declarations,
 dot-access, record fields) and the primary-expression variable-reference
 rule, so `let tag = 3` followed by `tag + 1` works end-to-end. The other
-soft keywords above have not received the same treatment — the asymmetry is
+soft keywords above have not received the same treatment; the imbalance is
 current behavior, not a stale finding.
 
 ---

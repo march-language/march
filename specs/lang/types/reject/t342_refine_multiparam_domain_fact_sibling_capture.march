@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: cannot verify precondition `_ < 0` on `need_neg`
+-- Element refinements, multi-parameter domain facts (2026-10-18, design
+-- specs/2026-10-18-element-flow-followups-design.md phase 1, guard G2-3):
+-- `y`'s position fact is `xs`'s `_ < n`, about the CALLER's `n`, but the
+-- lambda binds its own `n`.  Given anyway, `y < n` would be read about the
+-- lambda's `n` and its guard `n < 0` would prove `need_neg(y)`, which
+-- `f(5, [3], [0 - 1])` breaks (y = 3, n = -1).  The fact is not given, the
+-- call is a skip, and `cap verified` makes it this error.  Accept twin:
+-- accept/t340.
+mod MultiParamSiblingCapture do
+  cap verified
+  fn need_neg(k : {Int | _ < 0}) : Int do k end
+  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do
+    List.zip_with(ys, xs, fn (n, y) -> if n < 0 do need_neg(y) else 0 end)
+  end
+end

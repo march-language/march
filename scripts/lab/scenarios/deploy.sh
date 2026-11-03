@@ -22,10 +22,11 @@ lab_forge_ok hot-reload keygen
 # How the nodes authenticate each other. LAB_AUTH=secret (the default for
 # now): one shared cluster secret. LAB_AUTH=certs: an operator key first, so
 # `forge host init` issues every node a certificate naming its pool's roles
-# (what cert_rotate needs). In certificate mode a session whose Stock and
-# Ledger run on different hosts hangs for ever
-# (specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md), so
-# the lab defaults to the secret until that is fixed.
+# (what cert_rotate needs). Certificate mode used to hang every session whose
+# Stock and Ledger ran on different hosts, which is why the lab defaults to the
+# secret. That hang is fixed
+# (specs/progress/2026-10-12-cert-mode-offer-to-offer-session-hang.md), but the
+# lab has not been re-run in certificate mode since.
 auth=${LAB_AUTH:-secret}
 echo "$auth" > "$LAB_DIR/auth"
 if [ "$auth" = certs ]; then lab_forge_ok cluster keygen; fi
@@ -35,10 +36,11 @@ for h in $LAB_HOSTS; do
   lab_expect "host init" "$LAB_OUT" "$(lab_node "$h") (root@$h, pool $(lab_pool "$h"))"
 done
 lab_expect "host init" "$LAB_OUT" "target $LAB_TARGET"
-# One session a second, at most 4 at once: every cluster session leaves
-# memory behind on each node it touches (specs/todos/2026-10-01-session-node-vault-tables-leak.md,
-# 2026-10-01-session-message-encoding-leak.md, 2026-09-28-linux-per-session-memory-growth.md),
-# so the lab keeps traffic modest. lab-1's hook re-reads this file before each session.
+# One session a second, at most 4 at once: every cluster session used to leave
+# memory behind on each node it touches (specs/progress/2026-10-01-session-node-vault-tables-leak.md,
+# specs/todos/2026-10-01-session-message-encoding-leak.md, specs/progress/2026-09-28-linux-per-session-memory-growth.md;
+# all three were measured gone 2026-10-13),
+# so the lab kept traffic modest, and still does. lab-1's hook re-reads this file before each session.
 lab_traffic 1000 16
 
 lab_forge_ok deploy --env lab --plan
@@ -49,9 +51,9 @@ lab_expect "first plan" "$LAB_OUT" "nothing has been deployed to this environmen
 # (the default, since the topology has [control]) forge restarts every node
 # over ssh and then sends the topology as a release through the control
 # plane; on the lab that release halts nearly every time
-# (specs/todos/2026-10-04-lab-control-topology-step-races-report.md), and a
-# halted first deploy is not recorded, so running it again restarts every
-# node a second time (specs/todos/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md).
+# (specs/todos/2026-10-04-lab-control-topology-step-races-report.md). (Since
+# 2026-10-12 a retry of that halted deploy sends only the release again, the
+# restarts being recorded: specs/progress/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md.)
 lab_forge_ok deploy --env lab --yes --via ssh
 lab_expect "first deploy" "$LAB_OUT" "ingress-lab-1: restarted" "work-lab-2: restarted" "work-lab-3: restarted" \
   "work-lab-4: restarted" "deploy complete"
@@ -81,15 +83,15 @@ lab_until 30 "a Ledger total from $ledger" lab_stat_ge "booked@$(lab_node "$ledg
 [ "$(lab_stat bad_reply)" = 0 ] || fail "a reply did not parse"
 
 # Every started session should end (finish, or be refused or fail within the
-# session setup time). Some never do, intermittently with a shared secret
-# (specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md):
-# reported, not asserted, since every later scenario starts from this one.
-# With LAB_AUTH=certs they nearly all hang and the checks above fail first.
+# session setup time). Some never did, once, with a shared secret
+# (specs/progress/2026-10-12-session-redial-hang.md, fixed on one machine,
+# not yet re-run here): reported, not asserted, since every later scenario
+# starts from this one.
 lab_traffic 0
 ended_all() { [ "$(lab_unended)" = 0 ]; }
 end=$((SECONDS + 60))
 until ended_all || [ $SECONDS -ge $end ]; do sleep 1; done
-n=$(lab_unended); [ "$n" = 0 ] || lab_note "FINDING: $n of $(lab_stat started) sessions never ended (specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md)"
+n=$(lab_unended); [ "$n" = 0 ] || lab_note "FINDING: $n of $(lab_stat started) sessions never ended (specs/progress/2026-10-12-session-redial-hang.md)"
 lab_traffic 1000 16
 
 lab_forge_ok topology status --env lab

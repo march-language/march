@@ -26,7 +26,7 @@ mod PreferLocalA do
   end
 
   pfn wait_done(h : Cap(ClusterNode.Live), left : Int) : Bool do
-    if ClusterNode.lookup(h, "pl-done") != None do true
+    if Option.is_some(ClusterNode.lookup(h, "pl-done")) do true
     else if left <= 0 do false else
       sleep_ms(50)
       wait_done(h, left - 50)

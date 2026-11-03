@@ -4,6 +4,10 @@
 -- Each actor increments only its own slot. Comparing two clocks determines
 -- causal order: one event "happened before" another when every slot in the
 -- first clock is <= the corresponding slot in the second and at least one is <.
+--
+-- Clocks are immutable values; every update returns a new clock.
+--
+-- doc: try
 
 mod VectorClock do
 
@@ -14,19 +18,49 @@ mod VectorClock do
   type ClockOrder = Before | After | Concurrent | Equal
   derive Eq for ClockOrder
 
-  doc "An empty vector clock (all timestamps implicitly 0)."
+  doc """
+  An empty vector clock: every actor's timestamp is implicitly 0.
+
+  ## Examples
+
+      march> VectorClock.entries(VectorClock.new())
+      []
+      march> VectorClock.get(VectorClock.new(), "a")
+      0
+  """
   fn new() : VectorClock do
     VectorClock(Map.empty())
   end
 
-  doc "Return the logical timestamp for actor_id (0 if unseen)."
+  doc """
+  The logical timestamp recorded for `actor_id`, or 0 when the clock has no
+  slot for it.
+
+  ## Examples
+
+      march> VectorClock.get(VectorClock.new(), "node-a")
+      0
+
+  After two increments of the same slot:
+
+      VectorClock.get(VectorClock.increment(VectorClock.increment(VectorClock.new(), "a"), "a"), "a")
+      -- 2
+  """
   fn get(vc : VectorClock, actor_id : String) : Int do
     match vc do
     VectorClock(m) -> Map.get_or(m, actor_id, 0, Map.str_cmp)
     end
   end
 
-  doc "Increment the slot for actor_id, returning the updated clock."
+  doc """
+  Increment `actor_id`'s slot by 1 (creating it at 1 when absent) and return
+  the updated clock. An actor should only ever increment its own slot.
+
+  ## Examples
+
+      march> VectorClock.entries(VectorClock.increment(VectorClock.new(), "a"))
+      [("a", 1)]
+  """
   fn increment(vc : VectorClock, actor_id : String) : VectorClock do
     match vc do
     VectorClock(m) ->
@@ -35,7 +69,22 @@ mod VectorClock do
     end
   end
 
-  doc "Component-wise maximum: keep the higher timestamp for each slot."
+  doc """
+  Component-wise maximum of two clocks: the result has every slot present in
+  either clock, holding the higher of the two timestamps. Commutative,
+  associative and idempotent, so replicas can merge in any order.
+
+  ## Examples
+
+      march> VectorClock.sum(VectorClock.merge(VectorClock.advance(VectorClock.new(), "a", 3), VectorClock.advance(VectorClock.new(), "b", 4)))
+      7
+
+  A slot both clocks know takes the larger value:
+
+      let x = VectorClock.advance(VectorClock.new(), "a", 3)
+      let y = VectorClock.advance(VectorClock.new(), "a", 5)
+      VectorClock.get(VectorClock.merge(x, y), "a")   -- 5
+  """
   fn merge(a : VectorClock, b : VectorClock) : VectorClock do
     match (a, b) do
     (VectorClock(ma), VectorClock(mb)) ->
@@ -44,7 +93,26 @@ mod VectorClock do
     end
   end
 
-  doc "Compare two vector clocks and return their causal relationship."
+  doc """
+  The causal relationship of `a` to `b`, treating missing slots as 0:
+  `Before` when every slot of `a` is <= the one in `b` and at least one is
+  smaller, `After` for the mirror case, `Equal` when all slots agree, and
+  `Concurrent` when each clock is ahead of the other in some slot.
+  O(n * m) in the number of slots (the key union is built with a list scan).
+
+  ## Examples
+
+      march> VectorClock.compare(VectorClock.new(), VectorClock.new())
+      Equal
+
+  With clocks that have real slots:
+
+      let a = VectorClock.increment(VectorClock.new(), "a")
+      let b = VectorClock.increment(VectorClock.new(), "b")
+      VectorClock.compare(VectorClock.new(), a)        -- Before
+      VectorClock.compare(a, VectorClock.new())        -- After
+      VectorClock.compare(a, b)                        -- Concurrent
+  """
   fn compare(a : VectorClock, b : VectorClock) : ClockOrder do
     match (a, b) do
     (VectorClock(ma), VectorClock(mb)) ->
@@ -68,7 +136,18 @@ mod VectorClock do
     end
   end
 
-  doc "True when a causally precedes b (a happened-before b)."
+  doc """
+  True when `a` causally precedes `b`, i.e. `compare(a, b) == Before`. Equal
+  clocks do not happen before each other.
+
+  ## Examples
+
+      march> VectorClock.happens_before(VectorClock.new(), VectorClock.new())
+      false
+
+      VectorClock.happens_before(VectorClock.new(), VectorClock.increment(VectorClock.new(), "a"))
+      -- true
+  """
   fn happens_before(a : VectorClock, b : VectorClock) : Bool do
     match compare(a, b) do
     Before -> true
@@ -76,7 +155,19 @@ mod VectorClock do
     end
   end
 
-  doc "True when neither clock precedes the other."
+  doc """
+  True when the clocks are concurrent: each is ahead of the other in at least
+  one slot (`compare(a, b) == Concurrent`). Equal clocks are not concurrent.
+
+  ## Examples
+
+      march> VectorClock.concurrent(VectorClock.new(), VectorClock.new())
+      false
+
+      let a = VectorClock.increment(VectorClock.new(), "a")
+      let b = VectorClock.increment(VectorClock.new(), "b")
+      VectorClock.concurrent(a, b)   -- true
+  """
   fn concurrent(a : VectorClock, b : VectorClock) : Bool do
     match compare(a, b) do
     Concurrent -> true
@@ -84,7 +175,18 @@ mod VectorClock do
     end
   end
 
-  doc "Advance actor_id's slot to at least ts (no-op if already >= ts)."
+  doc """
+  Raise `actor_id`'s slot to `ts` when `ts` is greater than its current value;
+  otherwise return the clock unchanged (it never lowers a slot). Advancing an
+  absent slot to 0 or less leaves it absent.
+
+  ## Examples
+
+      march> VectorClock.entries(VectorClock.advance(VectorClock.new(), "a", 5))
+      [("a", 5)]
+      march> VectorClock.entries(VectorClock.advance(VectorClock.new(), "a", 0))
+      []
+  """
   fn advance(vc : VectorClock, actor_id : String, ts : Int) : VectorClock do
     match vc do
     VectorClock(m) ->
@@ -97,14 +199,32 @@ mod VectorClock do
     end
   end
 
-  doc "All (actor_id, timestamp) pairs in arbitrary order."
+  doc """
+  All `(actor_id, timestamp)` pairs, in the underlying map's hash-traversal
+  order (not sorted, and not guaranteed stable across platforms).
+
+  ## Examples
+
+      march> VectorClock.entries(VectorClock.increment(VectorClock.new(), "a"))
+      [("a", 1)]
+  """
   fn entries(vc : VectorClock) : List((String, Int)) do
     match vc do
     VectorClock(m) -> Map.to_list(m)
     end
   end
 
-  doc "Sum of all timestamps (useful as a monotone scalar counter)."
+  doc """
+  Sum of all timestamps. It never decreases under `increment`, `advance` or
+  `merge`, so it is usable as a monotone scalar summary of the clock.
+
+  ## Examples
+
+      march> VectorClock.sum(VectorClock.new())
+      0
+      march> VectorClock.sum(VectorClock.merge(VectorClock.increment(VectorClock.new(), "a"), VectorClock.increment(VectorClock.new(), "b")))
+      2
+  """
   fn sum(vc : VectorClock) : Int do
     match vc do
     VectorClock(m) -> Map.fold(m, 0, fn (acc, _k, v) -> acc + v)

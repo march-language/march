@@ -105,7 +105,7 @@ answered "float-free".
 
   No other function changed.
 - `scripts/run-tests.sh` over every suite but refinecheck: exit 0, 11 suites,
-  3,785 tests, 0 failures. Refinecheck runs in CI; the only refinecheck input
+  3,797 tests, 0 failures (after merging main). Refinecheck runs in CI; the only refinecheck input
   this change touches is the audit baseline, regenerated above.
 - `test/refine_audit/corpus.baseline` regenerated for the new fixture (the two
   expected lines).

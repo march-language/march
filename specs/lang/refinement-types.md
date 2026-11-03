@@ -10,30 +10,141 @@ permalink: /docs/refinement-types/
 # Refinement Types
 
 A **refinement type** attaches a logical predicate to an ordinary type:
-`{Int | _ >= 0}` is "an `Int` that is non-negative". March discharges these
-predicates with an SMT solver (Z3) at compile time, so a whole class of bugs
-(out-of-bounds indices, negative sizes, division by zero, broken invariants)
-becomes a **compile error** instead of a runtime panic.
+`{Int | _ >= 0}` is "an `Int` that is non-negative". Write one on a parameter
+and every call must satisfy it; write one on a return type and every return
+path must satisfy it. The compiler discharges the predicates with the Z3 SMT
+solver at compile time, so out-of-bounds indices, negative sizes, division by
+zero and broken invariants become compile errors instead of runtime panics.
+Nothing is checked at runtime: a refined type compiles to exactly its base type.
 
-Refinements are March's pragmatic slice of **dependent typing**: types that
-depend on *values*. You get the safety where it pays off (preconditions,
-bounds, postconditions) without a proof assistant's ceremony; and, crucially,
-**without false positives**: if the checker can't prove a value is definitely
-wrong, it stays silent.
+The checker reports a violation **only when it can demonstrate one**, and then
+names the concrete input that fails. If it cannot prove a value is wrong, it
+stays silent. That is the design's central bargain: no false positives on
+correct code, at the price that silence does not mean "proved". The page's
+tooling sections show how to tell the two apart, and `cap verified` turns
+silence into an error for a module that wants a guarantee.
 
 > **Requires Z3.** Refinement checking runs only when the `z3` solver is on your
 > `PATH`. Without it, the predicates type-check as their base type and no
 > refinement diagnostics are produced (the build still succeeds).
 
-**New to this?** Read [Syntax](#syntax) through
-[A Parameter's Own Contract Is a Fact Inside Its Body](#a-parameters-own-contract-is-a-fact-inside-its-body)
-and you'll be able to write and read everyday refinements. Everything after
-[Postconditions](#postconditions) goes deeper: measures over your own data
-structures, `String`/`Bool`/`Float`/tag refinements, the strict `cap verified` /
-[`cap no_panic`](#cap-no_panic--divisions-that-cant-panic) modes, and the full
-[Limitations](#limitations) list. If you just want to know why a specific
-contract *isn't* catching something, jump straight to Limitations or to
-[`--refine-report`](#counting-the-obligations---refine-report).
+> **What's new (October 2026).** Refinements now reach further into
+> containers, callbacks and folds:
+>
+> - **2026-10-18. Fold accumulator invariants.** A demand on a fold's result
+>   is checked as the invariant its accumulator keeps. You can also state the
+>   invariant yourself by annotating the accumulator. See
+>   [Folds](#folds-an-accumulator-invariant) and
+>   [An annotated accumulator](#an-annotated-accumulator).
+> - **2026-10-21. Relational element refinements.** One slot of a type can
+>   mention another slot, so you can say "every value is bigger than its key".
+>   See [Relational element refinements](#relational-element-refinements).
+> - **2026-10-21. Two-argument abstract refinements.** A filter whose callback
+>   looks at a key and a value together now carries what the callback decided.
+>   `Map.filter` carries this fact. It is assumed, and a runtime property test
+>   checks it. See [Two arguments](#two-arguments-a-relation-between-sibling-slots).
+> - **2026-10-21. More stdlib functions carry element facts.** `Hamt.fold` and
+>   `Enum.scan` carry the fold invariant. `Queue`'s functions pass element
+>   refinements through. See [which stdlib folds carry it](#folds-an-accumulator-invariant).
+> - **2026-10-21. Module-wide inference.** `march --refine-infer` and
+>   `forge refine --infer` propose every kind of refinement the checker can
+>   verify. See [Module-wide inference](#module-wide-inference-march---refine-infer-and-forge-refine---infer).
+> - **2026-10-22. A name bound twice is a type error.** A lambda, function or
+>   pattern that binds the same name twice is rejected as
+>   [`duplicate_binder`]({{ site.baseurl }}/docs/errors/duplicate_binder/).
+>
+> The gaps these features still have are listed under
+> [Limitations](#open-gaps-in-element-and-abstract-refinements).
+
+## On this page
+
+**Start here**
+
+- [When to use refinements](#when-to-use-refinements)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [The Problem They Solve](#the-problem-they-solve)
+- [Syntax](#syntax)
+- [How Checking Works: Definite Failure](#how-checking-works-definite-failure)
+- [Counterexamples: the failing input, in source terms](#counterexamples-the-failing-input-in-source-terms)
+- [Path Sensitivity: Guards Establish Facts](#path-sensitivity-guards-establish-facts)
+- [A Parameter's Own Contract Is a Fact Inside Its Body](#a-parameters-own-contract-is-a-fact-inside-its-body)
+- [Postconditions](#postconditions) and [how they flow to call sites](#postconditions-flow-to-call-sites)
+- [Where Refinements Resolve](#where-refinements-resolve)
+- [Practical Rules](#practical-rules)
+
+**Refining each kind of value**
+
+- [Measures: Refining over Data Structures](#measures-refining-over-data-structures)
+- [String Refinements](#string-refinements)
+- [Set Refinements](#set-refinements)
+- [Bool Refinements](#bool-refinements)
+- [Float Refinements](#float-refinements)
+- [Constructor Tags: Refining over ADT Variants](#constructor-tags-refining-over-adt-variants)
+- [Element Refinements: Refining What a Container Holds](#element-refinements-refining-what-a-container-holds)
+  - [Relational element refinements](#relational-element-refinements): a relation between sibling slots
+  - [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says): `filter` keeps what its predicate says
+    - [Two arguments](#two-arguments-a-relation-between-sibling-slots): `k -> v -> Bool[p]`, `Map(k[p], v[p])`
+  - [Folds: an accumulator invariant](#folds-an-accumulator-invariant)
+    - [An annotated accumulator](#an-annotated-accumulator)
+
+**Finding out what was actually checked**
+
+- [Counting the obligations: `--refine-report`](#counting-the-obligations---refine-report)
+- [Which functions are reflected: `--reflect-report`](#which-functions-are-reflected---reflect-report)
+- [Getting a contract proposed for you: `forge refine`](#getting-a-contract-proposed-for-you-forge-refine)
+  - [Module-wide inference: `march --refine-infer` and `forge refine --infer`](#module-wide-inference-march---refine-infer-and-forge-refine---infer)
+- [Coverage audit: does the checker even look at this refinement?](#coverage-audit-does-the-checker-even-look-at-this-refinement)
+- [Promoting a skip: a demonstrated precondition failure](#promoting-a-skip-a-demonstrated-precondition-failure)
+- [The `--no-measure-axioms` Flag](#the---no-measure-axioms-flag)
+
+**Strict modes**
+
+- [`cap verified`: turning silence into an error](#cap-verified-turning-silence-into-an-error)
+- [`cap no_panic`: Divisions That Can't Panic](#cap-no_panic--divisions-that-cant-panic)
+
+**Limits and status**
+
+- [Limitations](#limitations)
+  - [Open gaps in element and abstract refinements](#open-gaps-in-element-and-abstract-refinements)
+- [Conformance status](#conformance-status)
+- [See also](#see-also)
+
+## When to use refinements
+
+Use a refinement where a bad value is a **real bug the caller can avoid**: an
+index into a list, a chunk size, an unguarded divisor, a non-empty input a
+function cannot do without, a return value a caller will rely on. One contract
+at the function boundary replaces a runtime check in the body and a comment in
+the docs, and the compiler enforces it at every call.
+
+| You want to | Reach for |
+|---|---|
+| Reject a bad argument at the call site | A refined parameter: `i : {Int | _ >= 0 && _ < len(xs)}` |
+| Promise something about a result | A refined return type: `: {Int | _ >= 0}` |
+| Talk about a list's length, a record's fields, or your own data | A [measure](#measures-refining-over-data-structures) |
+| Say which elements a collection holds | [Set](#set-refinements) and [element](#element-refinements-refining-what-a-container-holds) refinements |
+| Say which constructor an ADT value is | A [constructor tag](#constructor-tags-refining-over-adt-variants) |
+| Make unproven contracts an error, not silence | [`cap verified`](#cap-verified-turning-silence-into-an-error) |
+| Prove no division in a module can panic | [`cap no_panic`](#cap-no_panic--divisions-that-cant-panic) |
+| Find out whether a contract is checked at all | [`--refine-report`](#counting-the-obligations---refine-report) and the [coverage audit](#coverage-audit-does-the-checker-even-look-at-this-refinement) |
+
+Do not refine every `Int`. Many March APIs clamp defensively and have no real
+precondition; a contract there adds obligations without preventing a bug. And
+do not use a refinement for a fact about *where a value came from* ("this
+string was sanitized"): that is an opaque type's job, see
+[Capabilities]({{ site.baseurl }}/docs/capabilities/).
+
+## How it fits with the rest of March
+
+| Concept | Where refinements meet it | Chapter |
+|---|---|---|
+| **Type system** | A refined type is its base type to the type checker; refinement checking is a separate pass after inference, at call sites and return paths. | [Type System](type-system.md) |
+| **Pattern matching** | `if` and `match … when` guards become facts the solver can use on the branch they dominate. | [Pattern Matching](pattern-matching.md) |
+| **Capabilities** | `cap verified` and `cap no_panic` are behavioral caps that change what the checker does with an unproven obligation. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
+| **Standard library** | Stdlib functions such as `List.head`, `List.nth` and `Option.unwrap` carry refinement contracts, so a user call site is checked against them. | [Standard Library](standard-library.md) |
+| **Linear types** | The other compile-time safety layer: linearity tracks *use*, refinements track *value*. | [Linear Types](linear-types.md) |
+| **Safety by construction** | Refinements are one of three orthogonal layers, beside capabilities and typestate. | [Safety by Construction](safety-by-construction.md) |
+| **Tooling** | `forge refine` proposes a contract; `--refine-report` and `--refine-audit` say what was proved, skipped, or never looked at. | [Tooling](https://github.com/march-language/march/blob/main/docs/tooling.md) |
 
 ---
 
@@ -147,6 +258,45 @@ comparisons, which is every ordinary refinement. A division in a bare
 `Int`-valued position, such as a call's argument `f(n / d)`, is translated only
 when its divisor is a non-zero literal or is syntactically positive
 (`len(xs) + 1`).
+
+### Refinements inside containers, callbacks and folds
+
+A refinement may also sit inside a type argument, on a callback, or on a
+fold's accumulator. Each form has its own section further down:
+
+| Form | Meaning | Section |
+|---|---|---|
+| `List({Int \| _ > 0})` | every element is positive | [Element refinements](#element-refinements-refining-what-a-container-holds) |
+| `Assoc({x : k \| true}, {y : v \| y > x})` | every value is bigger than its key: one slot mentions the other | [Relational element refinements](#relational-element-refinements) |
+| `pred : a -> Bool[p]` returning `List(a[p])` | every element of the result passed `pred` | [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says) |
+| `keep : k -> v -> Bool[p]` returning `Map(k[p], v[p])` | every key and value of the result passed `keep` together | [Two arguments](#two-arguments-a-relation-between-sibling-slots) |
+| `fn (acc : {Int \| _ > 0}, x) -> …` passed to a fold | the accumulator stays positive: checked at the start and at every step, then a fact about the result | [An annotated accumulator](#an-annotated-accumulator) |
+| `@[assume]` on a function whose return refines its elements | the element fact is assumed, not proved, and counted as `trusted` | [`Map.filter` carries it, assumed](#two-arguments-a-relation-between-sibling-slots) |
+
+```march
+type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+fn need_pos(k : {Int | _ > 0}) : Int do k end
+fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end
+fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+
+fn rel_ok() : Int do need_arel(ACons(1, 2, ANil)) end     -- proved
+fn rel_bad() : Int do need_arel(ACons(5, 2, ANil)) end    -- violation: the entry (5, 2)
+
+fn kept(ys : List(Int)) : Int do
+  sum_pos(List.filter(ys, fn y -> y > 0))                  -- proved
+end
+
+fn vals(m : Map(String, Int)) : Int do
+  need_vals(Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp))   -- proved (assumed entry fact)
+end
+
+fn counted(ys : List(Int)) : Int do
+  let s = List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)
+  need_pos(s)                                              -- proved: the annotation holds
+end
+```
 
 ---
 
@@ -352,77 +502,11 @@ Counterexamples come from the two sites that emit diagnostics: the
 **definition** (return contracts over `Int`/`Bool`/`Float`/records) and the
 **call site** (preconditions of any checkable type, `List` and `String`
 included). A return refinement over a collection takes the Tier 2 structural
-induction path instead, which emits no diagnostic either way (see
-[Limitations](#limitations)), so a broken `{List(Int) | len(_) > 0}` return is
-caught where the value is *used*, not where it is produced.
-
----
-
-## Postconditions Flow to Call Sites
-
-A function's declared return refinement is a fact its callers can use. Both the
-direct and the `let`-bound form are checked:
-
-```march
-fn neg() : {Int | _ < 0} do 0 - 1 end
-fn takepos(n : {Int | _ >= 0}) : Int do n end
-
-takepos(neg())          -- error: `neg` returns a negative, `takepos` needs >= 0
-
-let c = neg()
-takepos(c)              -- error: same, through the binding
-```
-
-Resolution follows the same rules as everything else: direct named calls,
-across modules, through `alias` and `use`.
-
-**Relational postconditions propagate too, by substitution.** A predicate that
-mentions a parameter (`{Int | _ < n}`, `{Int | _ < len(xs)}`) is *relational*.
-At a call site the call's arguments are substituted for the callee's parameters,
-which restates the contract entirely in the caller's own terms:
-
-```march
-fn below(n : Int) : {Int | _ < n} do n - 1 end
-fn takepos(k : {Int | _ >= 0}) : Int do k end
-
-takepos(below(0))       -- error: `_ < n` instantiates to `_ < 0`, never >= 0
-takepos(below(10))      -- fine: `_ < 10` can still be >= 0
-```
-
-Parameters are matched to arguments **positionally**, and substitution is
-**simultaneous**: with `fn f(n : Int, m : Int) : {Int | _ < n + m}` called as
-`f(m, 1)`, the result is `_ < m + 1` (the caller's `m`), never `_ < 1 + 1`.
-
-Propagation is **skipped** (silently, and with no loss of soundness) whenever
-the instantiation cannot be made exactly:
-
-- the predicate mentions a name that is neither the refinement binder nor one of
-  the callee's parameters;
-- a parameter the predicate mentions has no corresponding argument (an arity
-  mismatch, or an omitted defaulted argument);
-- the predicate uses syntax the checker does not reflect;
-- the callee has a *pattern* parameter, which is rewritten before this pass runs
-  and so no longer includes the parameter names the predicate refers to.
-
-A partially substituted predicate is never used: mixing the callee's and the
-caller's namespaces is exactly how a false positive would arise here, so the
-checker abandons the whole instantiation rather than guess at part of it.
-
-**Only *proven* postconditions propagate.** A declared return refinement
-becomes an assumption at call sites only when the definition side actually
-*proved* it: every return path of every clause discharged as verified. A
-postcondition the checker can neither prove nor refute stays perfectly legal at
-the definition (rejecting it would flag correct-but-unprovable code), it simply
-does not travel: callers learn no fact from it.
-
-This is not a stylistic preference, it is what keeps the no-false-positives
-promise. A propagated fact is *added* to the assumptions a call-site query
-proves against, so a false assumption makes a violation easier to "prove": a
-stale `{Int | _ < 0}` on a function that in fact returns `6` would flag the
-perfectly correct call `takepos(score(5))`. Only facts that are true may be
-assumed. The cost is incompleteness (a postcondition with a body opaque to
-the solver buys its callers no facts), which is the safe direction and the trade
-this checker makes everywhere else.
+induction path instead (see [Limitations](#limitations)). It reports a
+contract it can show never holds only once the interpreter reproduces the
+failure, and then with the failing call (`but f([]) returns [].`); a contract
+it can neither prove nor refute is a recorded skip, which `cap verified` makes
+an error.
 
 ---
 
@@ -458,6 +542,20 @@ silent because it was *skipped*, not because it was verified. That is fixed; the
 corpus brackets it from both sides (`accept/t118`, `reject/t117`), because an
 accept-only witness exits 0 either way and so cannot tell a working guard from a
 contract that checks no property.
+
+**The alias also applies to an argument and a `let`** (since 2026-10-26), not
+only to a guard. `need_nn(List.length(xs))` is checked as `need_nn` of
+`len(xs)`, so it proves, and `need_pos(List.length(xs))` proves exactly when
+`xs` is known non-empty (`xs : {List(Int) | len(_) > 0}`, a guard, a literal);
+otherwise it is a skip. Arithmetic over it reflects too
+(`List.length(xs) + 1`). `let n = List.length(xs)` records `n == len(xs)`, so
+
+```march
+let n = List.length(xs)
+if i >= 0 && i < n do List.nth(xs, i) else 0 end   -- proved
+```
+
+and rebinding `xs` or `n` before the use retires the fact.
 
 The alias is intentionally narrow, because attaching `len`'s meaning to the wrong
 function would manufacture false positives:
@@ -915,17 +1013,363 @@ narrower, more powerful case is covered in [Limitations](#limitations), under
 
 ---
 
+## Postconditions Flow to Call Sites
+
+A function's declared return refinement is a fact its callers can use. Both the
+direct and the `let`-bound form are checked:
+
+```march
+fn neg() : {Int | _ < 0} do 0 - 1 end
+fn takepos(n : {Int | _ >= 0}) : Int do n end
+
+takepos(neg())          -- error: `neg` returns a negative, `takepos` needs >= 0
+
+let c = neg()
+takepos(c)              -- error: same, through the binding
+```
+
+Resolution follows the same rules as everything else: direct named calls,
+across modules, through `alias` and `use`.
+
+**Relational postconditions propagate too, by substitution.** A predicate that
+mentions a parameter (`{Int | _ < n}`, `{Int | _ < len(xs)}`) is *relational*.
+At a call site the call's arguments are substituted for the callee's parameters,
+which restates the contract entirely in the caller's own terms:
+
+```march
+fn below(n : Int) : {Int | _ < n} do n - 1 end
+fn takepos(k : {Int | _ >= 0}) : Int do k end
+
+takepos(below(0))       -- error: `_ < n` instantiates to `_ < 0`, never >= 0
+takepos(below(10))      -- fine: `_ < 10` can still be >= 0
+```
+
+Parameters are matched to arguments **positionally**, and substitution is
+**simultaneous**: with `fn f(n : Int, m : Int) : {Int | _ < n + m}` called as
+`f(m, 1)`, the result is `_ < m + 1` (the caller's `m`), never `_ < 1 + 1`.
+
+Propagation is **skipped** (silently, and with no loss of soundness) whenever
+the instantiation cannot be made exactly:
+
+- the predicate mentions a name that is neither the refinement binder nor one of
+  the callee's parameters;
+- a parameter the predicate mentions has no corresponding argument (an arity
+  mismatch, or an omitted defaulted argument);
+- the predicate uses syntax the checker does not reflect;
+- the callee has a *pattern* parameter, which is rewritten before this pass runs
+  and so no longer includes the parameter names the predicate refers to.
+
+A partially substituted predicate is never used: mixing the callee's and the
+caller's namespaces is exactly how a false positive would arise here, so the
+checker abandons the whole instantiation rather than guess at part of it.
+
+The instantiated contract brings the caller's own facts about the names it
+now mentions with it, so a relational return composes with the caller's
+refinements:
+
+```march
+fn inc(x : Int) : {Int | _ > x} do x + 1 end
+fn need_pos(k : {Int | _ > 0}) : Int do k end
+
+fn go(n : {Int | _ >= 0}) : Int do need_pos(inc(n)) end   -- proved: inc(n) > n >= 0
+```
+
+A named return binder (`{r : Int | r > x}`) is renamed apart before the
+arguments go in, so a caller variable that happens to be called `r` stays
+the caller's `r`. An argument the checker cannot reflect (a call to a
+function, say) drops the instantiated fact, and the obligation is skipped
+rather than proved.
+
+**A return whose tail is a call uses the callee's return too.** The function's
+own postcondition is checked with the tail call standing for a value that
+satisfies the callee's proved (or `@[assume]`d) return, instantiated at the
+call's arguments, exactly as a call site's argument is:
+
+```march
+fn a(x : {Int | _ > 0}) : {Int | _ > 0} do x + 1 end
+fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end      -- proved from a's return
+fn c(x : {Int | _ > 0}) : {Int | _ > 0} do b(x) end      -- and so on, in any order
+```
+
+A function never uses its own unproved return this way: a self-recursive tail
+(`f(n - 1)`), or two functions that return each other's calls, stay skipped
+(`unreflectable-subject`). A `let` bound to the call and then returned is
+read the same way (since 2026-10-26), also through a chain of them and inside a
+larger tail:
+
+```march
+fn b(x : {Int | _ > 0}) : {Int | _ > 0} do
+  let r = a(x)
+  r                     -- proved from a's return (`r + 1` too)
+end
+```
+
+The binding is forgotten when its name, or a name its call mentions, is bound
+again before the return (a later `let`, a `match` arm's pattern), so the call
+is read at the arguments it really had.
+
+**Only *proven* postconditions propagate.** A declared return refinement
+becomes an assumption at call sites only when the definition side actually
+*proved* it: every return path of every clause discharged as verified. A
+postcondition the checker can neither prove nor refute stays perfectly legal at
+the definition (rejecting it would flag correct-but-unprovable code), it simply
+does not travel: callers learn no fact from it.
+
+This is not a stylistic preference, it is what keeps the no-false-positives
+promise. A propagated fact is *added* to the assumptions a call-site query
+proves against, so a false assumption makes a violation easier to "prove": a
+stale `{Int | _ < 0}` on a function that in fact returns `6` would flag the
+perfectly correct call `takepos(score(5))`. Only facts that are true may be
+assumed. The cost is incompleteness (a postcondition with a body opaque to
+the solver buys its callers no facts), which is the safe direction and the trade
+this checker makes everywhere else.
+
+---
+
+## Where Refinements Resolve
+
+Refinement checking follows the same name resolution as the type checker:
+**direct named calls**, across modules, through **`alias`** and **`use`**:
+
+```march
+mod App do
+  use Lib.{take_pos}          -- imported name resolves to Lib.take_pos
+  alias Lib.Inner as I        -- alias resolves to Lib.Inner.*
+
+  fn run() : Int do
+    take_pos(-1)              -- error: resolved + checked against Lib's precondition
+    I.helper(-1)             -- error: alias-qualified call checked too
+  end
+end
+```
+
+A bare call binds to the nearest enclosing module that defines it (with
+shadowing), so a local helper is never confused with a same-named function
+elsewhere. Resolution is scope-aware about imports: at each enclosing scope the
+checker consults that scope's own definition and then that *same* scope's
+`use`-imports before falling outward. So a `use` written **inside** a nested
+module beats an enclosing module's own definition of the same name, matching
+how the call really dispatches, while an enclosing module's `use` still loses
+to a nested module's *own* definition: an import never reaches in and
+overrides a local one.
+
+```march
+mod Outer do
+  fn take_pos(n : {Int | n >= 0}) : Int do n end   -- Outer's own contract
+
+  mod Inner do
+    use Lib.{take_pos}                              -- Lib's take_pos, unrefined
+
+    fn go() : Int do
+      take_pos(-1)   -- resolves to Lib.take_pos, NOT Outer's: no error
+    end
+  end
+end
+```
+
+Checking this call against the enclosing `Outer.take_pos` instead would be a
+false positive on correct code, since `Inner.go` never actually calls it. (This
+was a live false positive until 2026-07-31; see item 6 in
+[Open holes](#open-holes-stated-as-of-2026-07-29).)
+
+---
+
+## Practical Rules
+
+1. **Refine the contract, not the convenience.** Add `{Int | _ > 0}` where a
+   non-positive value is a real bug (a chunk size, an unguarded divisor), not
+   to every `Int`. Many March APIs already clamp defensively and have no real
+   precondition.
+2. **Guard, then call.** A precondition you can't satisfy with a literal is
+   discharged by an `if`/`when` guard right before the call.
+3. **Reach for `assert` as your lemma.** When you *know* a fact the checker
+   can't derive, `assert(p)` makes it available, and documents the assumption.
+4. **Annotate measures you'll reason about.** A `@[measure]` only earns its
+   keep if a predicate mentions it; keep them total, exhaustive, and structural
+   so they pass the gate.
+
+---
+
 ## Measures: Refining over Data Structures
 
-A **measure** is a function from a value to an `Int` (or `Bool`) that you can
-mention in predicates. The built-in `len` measures a list:
+A predicate can call your own functions. The checker knows what such a call
+means because it **reflects** the function: it reads the function's body and
+uses it as the function's meaning in the logic. The built-in `len` is one such
+function over lists:
 
 ```march
 fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do ... end
 ```
 
-You can define your own with the `@[measure]` attribute, for example the size
-of a tree:
+### Reflection: your functions in predicates
+
+A function is reflected automatically when all of these hold. There is nothing
+to annotate.
+
+- It **terminates**, with a structural certificate: every recursive call is on
+  a part of the value it matched on. (A function that terminates only by a
+  numeric measure is not reflected yet.)
+- It has **no effects**: no printing, no actors, no `dbg`.
+- It **cannot fail**: no `panic`, `todo` or runtime `assert`, and no `/` or
+  `%` except by a non-zero literal.
+- Every `match` in it **covers every case**, guarded arms included.
+- It calls only reflected functions, constructors, and the arithmetic,
+  comparison and Boolean operators.
+- It takes no function as a parameter and makes no lambda.
+- Its parameters and result are `Int`, `Bool`, data types (lists, options,
+  your own types) or type variables, and it does not return `Unit`.
+- It is not marked `@[opaque]`, `@[assume]` or `@[trusted]`, and its name is not
+  one predicates already give a meaning (`len`, the set words, `is_<Ctor>`).
+
+The standard library is reflected under the same rules.
+
+Here `is_small` is reflected, so the path fact `is_small(n)` tells the checker
+`n < 10`:
+
+```march
+fn is_small(n : Int) : Bool do n < 10 end
+
+fn need_small(n : {Int | _ < 10}) : Int do n end
+
+fn f(n : Int) : Int do
+  if is_small(n) do need_small(n) else 0 end   -- proved
+end
+```
+
+A reflected call may appear in a predicate, as an argument, or as the value of
+a `let`:
+
+```march
+fn inc(n : Int) : Int do n + 1 end
+
+fn idx(i : {Int | _ < inc(3)}) : Int do i end
+fn need(x : {Int | _ == 2}) : Int do x end
+
+idx(3)            -- proved
+idx(4)            -- rejected: 4 < inc(3) is false
+need(inc(1))      -- proved
+let r = inc(1)
+need(r)           -- proved
+```
+
+Functions with several parameters, and functions that return a list or a
+`Bool`, are reflected like any other.
+
+**One step at a time.** The checker uses each reflected call's definition
+**once**, at the arguments it sees. It does not then expand the calls that
+definition produces. So `cat(Nil, ys) == ys` is proved, because one step of
+`cat` gives `ys`. But `len(cat([1], [2])) == 2` is not: one step gives
+`Cons(1, cat(Nil, [2]))`, and the inner call is not expanded. Such an
+obligation is reported as unverified with the reason `reflect-fuel`. An
+`assert` of the intermediate fact is the way through today.
+
+**A call outside the function's domain says nothing.** When a reflected
+function has refined parameters, its definition is used only where the
+arguments satisfy them. For `fn pos(n : {Int | _ >= 0}) : Int do n end`, the
+checker knows `pos(1) == 1` but nothing about `pos(0 - 1)`.
+
+**Equality in a predicate is structural.** `a == b` in a predicate means "the
+same value", for every type. A type with a hand-written `Eq` (one that, say,
+compares only some fields) still gets structural equality in a predicate, and
+the checker warns about it (`predicate_eq_structural`). Inside a reflected
+body, `==` is the program's own `==`: structural for `Int`, `Bool`, `String`
+and types whose `Eq` is derived all the way down, and an unknown function
+otherwise (a hand-written `Eq`, anything holding a `Float`, a type variable).
+An `Eq` that prints, panics or loops stops the function from being reflected.
+
+**`Int` is mathematical.** The checker reasons about `Int` as the unbounded
+integers. At run time `Int` is 63 bits, and `+`, `-`, `*` and negation stop the
+program with a panic when the result does not fit. So a fact such as
+`inc(n) > n` holds wherever the program actually gets past the call; at the
+largest `Int` the call panics instead. The checker does not yet prove that no
+overflow happens: a reflected function counts as unable to fail even though its
+arithmetic can overflow.
+
+**Seeing what is reflected.** `march --check --reflect-report file.march`
+prints one row per function: `reflected`, or the first rule that blocks it.
+When a predicate calls a function that exists but is not reflected, the
+warning names the reason:
+
+```
+`rev` is not reflected, so this refinement is not checked: it calls println (line 14). [refinement_unchecked]
+```
+
+`--refine-report-sites=all` marks a proof that used a definition with the
+functions it used, for example `uses: is_small`.
+
+**Opting out.** `@[opaque]` keeps a function's body out of the logic, so
+callers see only its declared contract. Use it when a body is expected to
+change and callers' proofs should not depend on it, or when unfolding it slows
+checking. `@[opaque]` on a function that would not be reflected anyway draws
+an `attribute_no_effect` warning.
+
+**A parameter refinement may call a reflected function.** The function is then
+reflected too, and its definition is used where the call in its refinement
+holds:
+
+```march
+fn is_small(n : Int) : Bool do n < 10 end
+fn f(n : {Int | is_small(_)}) : Int do n + 1 end
+fn need_eq(a : Int, b : {Int | _ == a}) : Int do b end
+
+fn g(n : Int) : Int do
+  if is_small(n) do need_eq(n + 1, f(n)) else 0 end   -- proved
+end
+```
+
+**A body is part of its callers' proofs.** When a caller's proof uses a
+reflected function's definition, an edit to that body can change the proof.
+Nothing stale survives such an edit:
+
+- Each reflected function has a **logic hash**: a hash of its source text, of
+  whether it is reflected, and of how `==` reads at each type its body
+  compares. A line inserted above the function does not change it; a body
+  edit, losing reflectability, or switching a type from `derive Eq` to a
+  hand-written `impl Eq` does. The solver cache key of every proof that used
+  the definition names this hash, so a cached answer never outlives the body.
+- `march --emit-llvm --dump-impl-hashes` writes a fourth column, the logic
+  hash, or `-` for a function that is not reflected.
+- **Hot code reload refuses a patch that changes a reflected function's
+  body when a proof used that body**, even when its type is unchanged:
+  `the body of f is part of its callers' proofs; redeploy, or mark it @[opaque]`.
+  "Used" means some proof of the build unfolded the body to discharge a
+  caller's refinement. A reflected function no proof unfolded can be
+  hot-patched like any other function. Deploy a refused change with a
+  restart, or mark the function `@[opaque]` so its body keys no caller's proof.
+  Without the running build's manifest, forge cannot tell a dropped
+  proof-used body from a type change, and warns instead of refusing.
+- In the editor, with `MARCH_LSP_REFINE=1`, the language server shows
+  refinement diagnostics for saved files. Saving `util.march` re-checks every
+  open file whose proofs used a definition from it that changed, or that calls
+  (directly or through other functions) a function whose refinement contract or
+  reflectability changed, or whose contract names a function (`_ < size()`)
+  whose body changed, without an edit to that file.
+
+**Checking the checker: `--reflection-parity`.** `forge test
+--reflection-parity` (or `march --check --reflect-parity file.march`) runs each
+reflected function both ways on generated inputs: by its logic definition and
+by the interpreter. The inputs include `0`, `1`, `-1`, the largest and smallest
+`Int` and their neighbours. Any disagreement, or a reflected function that
+panics on an input in its domain, fails the run: that is a compiler bug.
+A function whose arithmetic overflows at the boundary is reported `overflow?`,
+since the checker treats `Int` as unbounded (above). A reflected function the
+net cannot run by its definition (a `Float` comparison, a parameter type with
+no generator) is listed `not-compared` with the reason. A file whose ordinary
+check fails is reported as a check failure, not a parity failure. A run that
+compared no input at all prints `parity: NOTHING COMPARED`, and `forge test
+--reflection-parity` fails on it. Example output:
+
+```
+parity  m.march  area  agree      100 inputs
+parity  m.march  inc   overflow?  attempt to add with overflow at (4611686018427387903); 100 inputs compared
+```
+
+### `@[measure]`: insisting on reflection
+
+`@[measure]` says "this function must be reflected". If it is not, the
+compiler reports `invalid_measure` and names the first reason. So a later edit
+that adds a `println` to a measure is an error, not a quiet loss of every proof
+that used it:
 
 ```march
 type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
@@ -941,12 +1385,15 @@ end
 fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do ... end
 ```
 
-The solver reasons about measures **by structure**: from the recursion
-equations above it computes `size(Node(Leaf, x, Leaf)) = 1`, so an out-of-bounds
-index into a literal tree is caught, and `size(t) >= 0` is known for any `t`.
-Measures may call **other measures** and be **mutually recursive** (e.g. a
-`Tree`/`Forest` pair), and the built-in `List` is modelled too, so a user
-`length` measure over `List(a)` reasons by structure just like `size`.
+A measure of one data-type parameter with an `Int` or set result, like `size`,
+is also given its recursion equations as quantified axioms, as before. The
+solver then reasons about it **by structure** to any depth: it computes
+`size(Node(Leaf, x, Leaf)) = 1`, so an out-of-bounds index into a literal tree
+is caught, and `size(t) >= 0` is known for any `t`. Such measures may call
+other measures and be mutually recursive (a `Tree`/`Forest` pair), and the
+built-in `List` is modelled too. Any other `@[measure]` (several parameters, a
+`Bool` or list result) is reflected like an ordinary function, one step at a
+time. `@[opaque]` together with `@[measure]` is the error `reflect_conflict`.
 
 ### Constant functions as bounds
 
@@ -1014,6 +1461,32 @@ head([])            -- reported: `len(_) > 0` cannot hold
 head([1, 2])        -- silent
 fn f(ys : List(Int)) : Int do head(ys) end   -- skipped: length unknown
 ```
+
+**A `let`-bound list of known length keeps its length** (since 2026-10-26).
+`let t = [1, 2, 3]` records `len(t) == 3`, the same fact a parameter
+`t : {List(Int) | len(_) == 3}` carries, so `head(t)` and `Stats.mean(t)` are
+checked exactly as `head([1, 2, 3])` is. This covers any constructor chain
+ending in `Nil`: a literal, `[]`, `Cons(1, Nil)`, and a nested literal, which
+counts its outer cells. Rebinding `t`, by a `let` or a `match` arm, retires
+the fact:
+
+```march
+let t = [1, 2, 3]
+head(t)             -- proved
+let t = []
+head(t)             -- reported: `len(_) > 0` cannot hold
+```
+
+**`Cons(h, t)` is one longer than `t`** (since 2026-10-26). `len`'s own
+defining equations, `len(Nil) == 0` and `len(Cons(h, t)) == len(t) + 1`, are
+used wherever a constructor meets a length demand: at a call argument
+(`head(Cons(x, t))` proves for any `t`), at a `let` (`let ys = Cons(x, t)`
+records `len(ys) == len(t) + 1`), and in a `Cons(h, t) ->` arm on a variable
+`xs`, which knows `len(xs) == len(t) + 1`. The last is what proves
+`List.nth`'s own recursive call `nth(t, n - 1)` from `n < len(xs)`. The tail's
+own facts compose (`t : {List(Int) | len(_) == 1}` gives `Cons(x, t)` length
+2). A self-rebinding `let t = Cons(x, t)` records nothing, and rebinding `t`
+later retires the fact.
 
 Thirteen stdlib functions that panic on an empty argument carry this contract:
 `List.head`/`tail`/`last`/`minimum_int`/`maximum_int`, the `prelude` `head`/`tail`,
@@ -1230,6 +1703,8 @@ pick the stand-in's value would not be one.
 Records also compose with measures: `{v : State | len(v.history) == v.count}`
 reasons about a `List` field by structure, exactly as `len` does elsewhere.
 
+---
+
 ## String Refinements
 
 `len` also measures a **String**, so an emptiness contract is expressible and
@@ -1339,21 +1814,23 @@ and cheap. The consequence worth spelling out clearly:
 
 A `@[measure]` is a *promise* that the function is a **total, terminating, pure**
 mathematical function: the solver trusts it, so a broken one would let it
-"prove" anything. March enforces the promise as a **hard compile error**. A
-`@[measure]` is rejected if it:
+"prove" anything. March enforces the promise as a **hard compile error**. The
+rule is the reflection rule above, and it follows calls: a measure that calls a
+function that prints, panics or loops is rejected, naming that function. In
+particular a `@[measure]` is rejected if it:
 
-- has an **effect** (`spawn`, `send`, `dbg`, `assert`),
-- can **diverge or abort** (`panic`, `todo`, `exit`),
-- is **non-total**: a non-exhaustive `match` on its parameter, or a `/` / `%`
-  that could divide by zero,
+- has an **effect** (`spawn`, `send`, `dbg`, `assert`), directly or through a
+  function it calls,
+- can **diverge or abort** (`panic`, `todo`, `exit`), directly or through a
+  function it calls,
+- is **non-total**: a non-exhaustive `match`, or a `/` / `%` that could divide
+  by zero,
 - is **not recursive over the structure**: a recursive call with an argument that isn't a
-  component of the matched parameter,
-- does **not take exactly one parameter**, the value it measures: a predicate can
-  only apply a measure to one argument, so a zero-argument or multi-parameter
-  `@[measure]` could never be translated and the annotation would only silence
-  the vocabulary warning while every call site went unverified. A zero-argument
-  constant needs no annotation (see [Constant functions as
-  bounds](#constant-functions-as-bounds)).
+  component of the matched parameter. This covers the measure's whole call cycle, not only its
+  calls to itself: two measures calling each other must form a cycle with a
+  [structural certificate](#the-structural-certificate), or both are rejected,
+- takes **no parameters**. A zero-argument constant needs no annotation (see
+  [Constant functions as bounds](#constant-functions-as-bounds)).
 
 A measure that is sound but outside what the encoding can model (see
 limitations) isn't an error: it simply falls back to weaker, symbolic
@@ -1431,7 +1908,12 @@ element sets are stated rather than proved: every public `Set` operation
 `difference`, `contains`, `is_subset`, `is_empty`, `eq`, `to_list`,
 `from_list`) and the key-affecting `Map` operations (`empty`, `singleton`,
 `insert`, `remove`, `get`, `contains_key`, `is_empty`, `keys`, `map_values`,
-`filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`:
+`filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`.
+`Map.filter` also assumes an entry fact, `Map(k[p], v[p])`: every entry of its
+result satisfies `pred` (see [two-argument abstract
+refinements](#abstract-refinements-filter-keeps-what-its-predicate-says)).
+The element facts of `Map`'s other functions are not assumed; they are checked
+by parametricity (see [`Map`'s own functions](#maps-own-functions)).
 
 ```march
 @[assume]
@@ -1611,6 +2093,11 @@ renders its model as a set literal: `Set.insert() can return {4}`,
   such as "this list has no duplicates" (`card(elts(xs)) == len(xs)` after
   `List.dedup`), is not provable, and a permutation contract still writes
   both halves: `{List(Int) | elts(_) == elts(xs) && len(_) == len(xs)}`.
+  Once proved, a caller gets both halves (since 2026-10-26): every conjunct of
+  a proved return is lent on its own, so `f(xs)` meets a `len(_) == len(xs)`
+  demand and a `subset(elts(_), elts(xs))` demand alike. Before, a call site
+  asking about one measure dropped the whole conjunction and got neither half.
+  A return whose proof fails lends nothing, not even a true conjunct.
 - **List structure is followed only inside a proof by recursion.** A
   contract on a function that recurses over a list (see "Proved list
   contracts" above) is proved through its `Cons` cells. Everywhere else `elts`
@@ -1631,6 +2118,8 @@ renders its model as a set literal: `Set.insert() can return {4}`,
   ordinary code, including an `if` guard, they are just names: a module's own
   `fn keys(r)` or `fn member(xs, x)` is treated like any other function.
 - **A rebound name loses its set promise**, exactly as it loses a `len` one.
+
+---
 
 ## Bool Refinements
 
@@ -1837,9 +2326,13 @@ goes quiet rather than guessing:
   under a second name, but the arm's head is a `PatAs`, not a bare constructor
   pattern, so no tag fact is recorded, for `z` or for the scrutinee. Write
   `None ->` if you want the narrowing.
-- **An ambiguous constructor name is skipped.** If two ADTs in scope both
-  declare a constructor `Row`, `is_Row` identifies no particular datatype and is
-  not checked.
+- **A constructor name two types declare is resolved by type.** If two ADTs
+  both declare a constructor `Row` (or a type of yours declares `Some`, like the
+  built-in `Option`), each keeps its own fields, and a `Row(…)` or `is_Row(x)`
+  means the constructor of the type the checker knows that value has (the
+  scrutinee's, the parameter's, the expression's). When that type does not
+  pin one datatype (it is unknown, or its own name is declared in two modules)
+  the fact is skipped, never guessed.
 - **Rebinding the name retires the fact.** A narrowing is recorded against a
   *name*, so any construct that rebinds that name inside the arm (a `let`, a
   `let?`, a lambda parameter, an inner `match` binder) discards it. In
@@ -1883,7 +2376,11 @@ This works for `List`, `Option`, `Result`, and every user variant type
 
 **Where a container value owes the element obligation:** at a call argument, a
 function's return (every tail, with the facts of the block's `let`s in scope),
-an annotated `let`, and a record field. A literal is checked element by
+an annotated `let`, and a record field or variant constructor argument (a
+literal, a `{ r with … }` update, or `W(xs)`), whether or not any other field
+carries a refinement of its own, and an actor message's argument
+(`Push(xs)` for `on Push(xs : List({Int | _ > 0}))`), which the handler body
+then assumes. A literal is checked element by
 element. A value whose element refinement is known must *imply* the expected one
 (`List({Int | _ > 1})` passes where `List({Int | _ > 0})` is expected; the
 reverse is reported with a witness element). A value's element refinement is
@@ -1899,6 +2396,337 @@ known when it is:
 Anything else is a recorded skip. Every element a `match` takes out of such a
 value carries the fact, whether the scrutinee is a variable or a call
 (`match List.head_opt(xs) do Some(h) -> …`).
+
+**An element refinement that names a parameter** means that parameter, at the
+call. `fn need_lt(xs : List({Int | _ < n}), n : Int)` called as
+`need_lt(ys, 10)` demands `_ < 10` of every element of `ys`, whatever the
+caller happens to call `n`; a demand naming a parameter the call does not
+supply is a recorded skip. Inside a function, such a fact is about the
+binding it names: after `let n = 0`, `xs`'s elements are no longer known to be
+`< n`, and a return tail under a binding that rebinds `n` is a recorded skip
+rather than checked against the local. A lambda whose parameter is spelled like
+a name the demand mentions is not read as that name. On a record field
+(`xs : List({Int | _ < n})` naming the sibling field `n`), on a variant
+constructor argument (`W(List({Int | _ < n}))`, where `n` is bound by nothing)
+or on an expected function codomain, such a refinement is a recorded skip,
+never checked.
+
+The same holds for a **return**. A call to a function whose container return
+names a parameter and was proved at its definition carries that return at the
+call's own arguments:
+
+```march
+fn below(n : Int) : List({Int | _ < n}) do [n - 1, n - 2] end
+
+fn t(k : {Int | _ <= 10}) : Int do
+  sum_small(below(10)) + sum_small(below(k))   -- both proved (_ < 10)
+end
+sum_lt5(below(10))                              -- violated: _ < 10 does not imply _ < 5
+```
+
+Only an argument that is a variable, a literal, or `+`/`-`/literal-`*`
+arithmetic over them is substituted. `below(f(x))` carries nothing. A
+`let`-bound result (`let ys = below(k)`) keeps the fact until a name it
+mentions is rebound. A recursive call to the function being checked carries the
+return at its own arguments, so `clamp(t, n)` inside
+`fn clamp(xs, n) : List({Int | _ <= n})` is `_ <= n`. A tuple component works
+the same way, and so does a block-level `fn` whose return names only its own
+parameters. A function passed as a value carries nothing, because there are no
+arguments to substitute.
+
+When such a return fails to imply what a call demands, the result is a
+violation only if every caller variable it or the demand mentions is
+constrained by a refinement or a guard (`k` above), and the checker can read
+every condition on the way to the call. Under a guard it cannot translate
+(`if small(k)`), a pattern it does not record (`Some(3) ->`), a `match` arm
+after one whose failure it does not record, or a later arm of a `match do`
+cond, the call is a recorded skip instead. An `Int` literal arm (`3 ->`) is
+recorded: inside it the scrutinee is `3`, and after an unguarded one it is
+not. A `Bool` local bound to a comparison or connective (`let ok = k < 5`) is
+read as that comparison in a guard, until `ok` or a name it mentions is
+rebound. Any other local the guard or the demand mentions (`let ok =
+small(k)`, a value destructured from a computed local, a lambda's parameter)
+makes the call a skip rather than a violation. If no fact constrains the
+variable (`sum_small(below(n))` with `n : Int`), the call is a recorded skip,
+unless no value of it could work (`need_ge(below(n), n)` against
+`List({Int | _ >= n})` is violated for every `n`). A pattern binder spelled
+like a name the slot mentions (`Cons(n, _)` over `List({Int | _ < n})`) gets no
+fact from it.
+
+### Relational element refinements
+
+An element refinement says something about each element on its own:
+
+```march
+List({Int | _ > 0})   -- every element is positive
+```
+
+Some facts are about two values at once. Take a list of key/value pairs where
+every value must be bigger than its key. No refinement on the keys alone, or
+on the values alone, can say that. It is a fact about the key and the value of
+the same pair.
+
+The running example in this section is an association list:
+
+```march
+type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+```
+
+To state the fact, give each slot a name and let one slot's predicate mention
+the other's name:
+
+```march
+Assoc({x : Int | true}, {y : Int | y > x})   -- every value is bigger than its key
+```
+
+Here `x` names the key and `y` names the value. `true` means the key on its own
+is unconstrained. `y > x` is the relation.
+
+**An entry** is the values one constructor holds for the related slots: the
+`k` and `v` fields of one `ACons`. The relation must hold of every entry.
+
+```
+ACons(1, 5, ACons(2, 9, ANil))
+      ^  ^        ^  ^
+      entry (1, 5)   entry (2, 9)
+```
+
+Both entries have a value bigger than its key, so this value satisfies the
+relation. `ANil` holds no key and no value. It is no entry, so it owes nothing.
+
+The checker uses a relation in three ways.
+
+**Building a value owes the relation, once per entry.** Each `ACons` you write
+is checked over its own two fields:
+
+```march
+mod Build do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn need_up(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+  fn ok() : Int do need_up(ACons(1, 5, ACons(2, 9, ANil))) end    -- proved
+  fn bad() : Int do need_up(ACons(1, 5, ACons(7, 3, ANil))) end   -- violation
+end
+```
+
+The violation names the entry that breaks it:
+
+```
+refinement violation: the entry (7, 3) passed to `need_up` does not satisfy precondition `y > x`
+```
+
+**Matching an entry gives you the relation.** If you bind the key and the value
+from the same constructor pattern, the checker knows they are related:
+
+```march
+mod Match do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn need_gt(k : Int, v : {Int | _ > k}) : Int do v - k end
+
+  fn first_gap(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    match a do
+      ANil -> 0
+      ACons(k, v, _) -> need_gt(k, v)                 -- proved
+    end
+  end
+
+  fn mixed(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    match a do
+      ACons(k, _, ACons(_, v, _)) -> need_gt(k, v)    -- skip: no fact the checker derived constrains `v`
+      _ -> 0
+    end
+  end
+end
+```
+
+In `mixed`, `k` is the first entry's key and `v` is the second entry's value.
+They are not one entry, so nothing relates them. Both names must be pattern
+variables of the same constructor.
+
+**Passing to a weaker demand works when the relation implies it.** A function
+may ask for less than a value promises. Then the checker asks whether every
+entry that keeps the promise also meets the demand. This is called projection.
+
+```march
+mod Project do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn need_pos_vals(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end
+
+  fn pos_up(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do
+    need_pos_vals(a)   -- proved
+  end
+
+  fn up(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    need_pos_vals(a)   -- violation (e.g. x = -1, y = 0)
+  end
+end
+```
+
+`need_pos_vals` asks only that every value be positive. In `pos_up`, every key
+is positive and every value is bigger than its key. So every value is
+positive, and the call is proved. In `up`, keys may be negative. The entry
+`(-1, 0)` has a value bigger than its key, but the value is not positive. The
+checker reports that entry:
+
+```
+refinement violation: an element of the container passed as `a` does not satisfy the expected element refinement `_ > 0` (e.g. x = -1, y = 0)
+```
+
+**The names are local to each type.** A demand may spell the same relation with
+other names. Only the meaning is compared:
+
+```march
+mod Rename do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn need_up(_a : Assoc({a : Int | true}, {b : Int | b > a})) : Int do 0 end
+
+  fn renamed(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    need_up(a)   -- proved: `b > a` is `y > x`
+  end
+end
+```
+
+A relation also travels the way any element refinement does. A proved
+annotated `let` carries it. So do a proved declared return and the recursive
+call of the function being checked:
+
+```march
+mod Bump do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn need_up(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+  fn bump(a : Assoc({x : Int | true}, {y : Int | y > x})) : Assoc({x : Int | true}, {y : Int | y > x}) do
+    match a do
+      ANil -> ANil
+      ACons(k, v, t) -> ACons(k, v + 1, bump(t))   -- proved: the recursive call keeps it
+    end
+  end
+
+  fn use_bump(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    need_up(bump(a))                               -- proved
+  end
+end
+```
+
+**Details.**
+
+- A slot can mention the names of all its siblings, in any order.
+- If a parameter has the same name as a slot's name, the slot's name wins
+  inside the type:
+
+  ```march
+  fn f(x : Int, a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do … end
+  -- inside the type, `x` in `y > x` is the key, not the parameter `x`
+  ```
+
+- A slot predicate is split at its top-level `&&`. A part that mentions no
+  sibling stays an ordinary fact about that slot. So a predicate over one slot
+  is always an ordinary element refinement:
+
+  ```march
+  {y : Int | y > 0 && y > x}   -- `y > 0` is a fact about each value; `y > x` is the relation
+  ```
+
+- Two slots may mention each other. Each slot's predicate is then one
+  relation:
+
+  ```march
+  Assoc({x : Int | x < y}, {y : Int | y > x})
+  ```
+
+- A constructor whose only field is another container passes the relation on
+  to that container, when the inner container holds all the related slots:
+
+  ```march
+  type Outer(k, v) = O(Assoc(k, v))   -- a relation on Outer is checked on the inner Assoc's entries
+  ```
+
+- You cannot write a relation over type-variable slots.
+- You cannot write a relation between two different entries, such as "the keys
+  are sorted".
+
+**What is not checked.**
+
+- **A relation is lost when the value goes through a generic function.**
+  Calling `need_up` on the result of `shift(a)` is a skip, even when `a`
+  carries the relation. A function generic in `k` and `v` keeps each slot's
+  own facts. But it may pair the key of one entry with the value of another.
+  This `shift` does exactly that:
+
+  ```march
+  mod Shift do
+    type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+    fn need_up(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+    fn shift(a : Assoc(k, v)) : Assoc(k, v) do
+      match a do
+        ACons(k1, _, ACons(_, v2, rest)) -> ACons(k1, v2, rest)
+        _ -> a
+      end
+    end
+
+    fn t() : Int do need_up(shift(ACons(5, 6, ACons(0, 1, ANil)))) end   -- skip
+  end
+  ```
+
+  The input's entries `(5, 6)` and `(0, 1)` both have a value bigger than its
+  key. The result has the single entry `(5, 1)`, which does not. So the call
+  is a `parametric-source-unproved` skip, with this message:
+
+  ```
+  a relation between `k` and `v` is not preserved through `shift`: a function parametric in them may pair the components of different entries
+  ```
+
+  A generic reverse is treated the same way. To carry a relation through a
+  combinator, give the combinator a
+  [two-argument abstract refinement](#two-arguments-a-relation-between-sibling-slots).
+
+- **A relation on a type that is not entry-shaped is ignored, with a
+  warning.** Every constructor must hold one value for each related slot, or
+  none of them. This type breaks that rule:
+
+  ```march
+  mod Shape do
+    type Two(k, v) = K(k) | V(v)
+
+    fn need_two(_t : Two({x : Int | true}, {y : Int | y > x})) : Int do 0 end   -- warning: refinement_unchecked
+
+    fn go() : Int do need_two(V(0 - 5)) end   -- no obligation
+  end
+  ```
+
+  `V(-5)` holds a value and no key. It sits in no entry, so the value has no
+  key to be compared with. The relation is therefore treated as not written.
+  It is never assumed and never owed. The checker warns:
+
+  ```
+  This relation is not checked: `Two`'s constructor `K` carries a value for `x` without one for `y`, so a relation between them has no entries to hold of
+  ```
+
+  The same warning covers these shapes:
+
+  - a slot whose type is itself a container;
+  - a slot inside a nested container that mentions an outer slot's name;
+  - a constructor that holds some related values directly and others inside a
+    nested container;
+  - a constructor that holds them inside another type, where they are not one
+    entry.
+
+  ```march
+  {xs : List(Int) | true}                            -- a slot whose type is a container
+  Assoc({x : Int | true}, List({y : Int | y > x}))   -- a nested slot names the outer `x`
+  type Mix(k, v) = MX(k, List(v))                    -- `k` direct, `v` inside a List
+  type Pairs(k, v) = Pairs((List(k), List(v)))       -- inside a tuple of lists: no entry
+  ```
+
+  One type application of both slots does count as entry-shaped. `Map` is
+  fine, because it holds its keys and values in one `HEntry(k, v)`.
 
 ### Through a polymorphic call
 
@@ -1929,9 +2757,15 @@ that the signature tells the truth about the callee:
   another, or let in through an unannotated parameter carries nothing.
 - **The body must not be able to create one.** A function that reaches a builtin
   returning a type variable it was not given (a decoder such as `from_json`, a
-  typed global lookup, an actor call), an FFI extern, or an interface method of
-  that shape, directly or through another function, carries nothing. The
-  builtin classification is computed from the typechecker's own builtin table.
+  typed global lookup, an actor call), an FFI extern, or an interface method
+  whose result mentions a type variable, directly or through another function,
+  carries nothing. The builtin classification is computed from the
+  typechecker's own builtin table. An interface method counts even when its
+  result is one of its arguments' types (`fn norm : t -> t`) and even when the
+  module has a single `impl` of it: that `impl` is written at one type and may
+  return any value of it. Such a function counts wherever its name appears, not
+  only where it is called: passed as an argument (`apply1(dflt, 1)`), bound by
+  `let` (`let g = dflt`), stored in a record or tuple, or piped to.
 - **A callee with a bound on the variable carries nothing.**
 
 When any of these fails, the call's element obligation is a recorded skip:
@@ -1962,10 +2796,78 @@ As `b` shows, a one-parameter lambda passed where the callee's function
 argument takes the element type receives its source's element refinement as a
 fact, both for this check and for every obligation inside the lambda body.
 
+A *named* function passed there contributes its declared return refinement,
+but only when each of its own refined parameters is met by what the callee
+hands it at that position: the element refinement of the source there, or (for
+a fold's accumulator) the demand itself, see
+[Folds](#folds-an-accumulator-invariant). With
+`fn dbl(x : {Int | _ > 0}) : {Int | _ > 0}`, `sum_pos(List.map(pos, dbl))`
+proves and `sum_pos(List.map(ys, dbl))` over an unrefined `ys` is a skip naming
+`dbl`'s unmet precondition.
+
+A lambda with several parameters gets the same fact position by position: each
+parameter assumes the element refinement of the type variable at its place in
+the callee's function type, when every source of that variable is an element.
+
+```march
+fn need_pos(k : {Int | _ > 0}) : Int do k end
+
+fn d(xs : List({Int | _ > 0}), ys : List({Int | _ > 0})) : Int do
+  sum_pos(List.zip_with(xs, ys, fn (x, y) -> x + y))       -- proved: x from xs, y from ys
+end
+
+fn e(xs : List({Int | _ > 0})) : Int do
+  List.fold_left(xs, 0, fn (acc, x) -> acc + need_pos(x))  -- proved: x comes from xs
+end
+
+fn s(xs : List({Int | _ > 0})) : List({Int | _ > 0}) do
+  List.sort_by(xs, fn (a, b) -> need_pos(a) < need_pos(b)) -- proved: a -> a -> Bool, both from xs
+end
+```
+
+`fold_left`'s accumulator gets no *domain* fact: its type variable also enters
+through the bare initial value and the callback's own result, so
+`fn (acc, x) -> need_pos(acc) + x` is a skip. (A demand on the fold's *result*
+is different: the accumulator may then assume it, see
+[Folds](#folds-an-accumulator-invariant).) A lambda in which any parameter
+carries a refinement annotation of its own receives no fact at all (an
+[annotated accumulator](#an-annotated-accumulator) whose annotation was proved
+aside: its siblings keep theirs), a fact
+that names one of the lambda's own parameters is not given to any of them,
+and a lambda with fewer parameters than the function type takes arguments (other
+than a one-parameter lambda) gets nothing.
+
 A source that does not meet the demand gives a **skip**, never a violation, with
 the reason `parametric-source-unproved`. `sum_pos(List.map(ys, fn y -> 0))` is
 fine when `ys` is empty, and whether it is empty is the caller's data. Under
 `cap verified` the skip is an error, as always.
+
+The same rule applies when the callee returns a single value of the type
+variable rather than a container of them, and the demand is a scalar
+refinement: a precondition, an annotated `let`, an element of a literal, or a
+function's declared return.
+
+```march
+fn f(o : Option({Int | _ > 0}), xs : {List({Int | _ > 0}) | len(_) > 0}) : Int do
+  need_pos(Option.unwrap_or(o, 1))                         -- proved: an element of o, or 1
+  need_pos(Option.unwrap_or_else(o, fn () -> 1))           -- proved
+  need_pos(List.fold_left(xs, 1, fn (acc, x) -> x))        -- proved: x comes from xs
+  need_pos(List.head(xs) + 1)                              -- proved: List.head(xs) > 0
+  need_pos(Option.unwrap_or(o, 0))                         -- skip: the default can fail it
+end
+
+fn g(o : Option({Int | _ > 0})) : {Int | _ > 0} do
+  Option.unwrap_or(o, 1)                                   -- proved
+end
+```
+
+An element demand on such a call works the same way: when the value the call
+returns is itself a container (`b` instantiated to `List(Int)` at the call),
+the whole demand is `b`'s, and each source must meet it as a container. With
+`fn pick(c : Bool, x : b, y : b) : b`, `sum_pos(pick(c, pos, [3]))` is proved
+and `sum_pos(pick(c, pos, zs))` with `zs : List(Int)` is a skip. A fold's
+list-building accumulator is the case that matters; see
+[Folds](#folds-an-accumulator-invariant).
 
 ### Callbacks and user-written combinators
 
@@ -2010,19 +2912,58 @@ records no obligation.
 
 ### Abstract refinements: `filter` keeps what its predicate says
 
-`List.filter`'s signature names a predicate `p` and says the result's elements
-satisfy it:
+`List.filter` returns the elements its predicate accepted, and its signature
+says so:
+
+```march
+fn filter(xs : List(a), pred : a -> Bool[p]) : {List(a[p]) | subset(elts(_), elts(xs))}
+```
+
+`p` is an *abstract refinement*. The signature uses it twice:
+
+```march
+pred : a -> Bool[p]   -- defines p: whatever pred returns for an element
+List(a[p])            -- every element of the result satisfies p
+```
+
+At each call, `p` stands for whatever the passed predicate computes. The
+shorthand means exactly this spelled-out form, which is also accepted:
 
 ```march
 fn filter(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)})
     : {List({a | p(_)}) | subset(elts(_), elts(xs))}
 ```
 
-`p` is an *abstract refinement*: the callback's codomain `_ == p(x)` defines
-it, and at each call it stands for whatever the passed predicate computes. So
-with `sum_pos(xs : List({Int | _ > 0}))`:
+The shorthand has three forms:
 
 ```march
+T[p]                -- means {T | p(_)}, e.g. List(a[p]), Option(a[p]), List(Bool[p])
+D -> Bool[p]        -- the definer: means ({x : D | true}) -> {Bool | _ == p(x)}
+k -> v -> Bool[p]   -- a definer of a two-argument p
+```
+
+A few rules about the definer:
+
+- If the callback's domain already names its argument, the definer keeps that
+  name.
+- If the domain is refined over `_`, it must name its argument instead.
+- Breaking either rule is a parse error that says so.
+- A curried callback of two arguments defines a `p` of two arguments. It
+  relates two sibling slots; see [Two arguments](#two-arguments-a-relation-between-sibling-slots).
+- A tuple domain is one argument, a tuple. So it defines nothing over the
+  tuple's parts. Writing one is a parse error, and the message writes the
+  curried chain for you.
+
+```march
+({v : Int | v > 0}) -> Bool[p]   -- keeps the name `v`
+(a, a) -> Bool[p]                -- parse error: one tuple argument
+```
+
+Here is `List.filter` at work, with this demand:
+
+```march
+fn sum_pos(xs : List({Int | _ > 0})) : Int do … end
+
 sum_pos(List.filter(ys, fn y -> y > 0))     -- proved
 let zs = List.filter(ys, fn y -> y > 0)
 sum_pos(zs)                                 -- proved
@@ -2031,29 +2972,121 @@ sum_pos(List.filter(pos, fn y -> y < 100))  -- proved when pos : List({Int | _ >
 sum_pos(List.filter(ys, fn y -> y >= 0))    -- skip: abstract-refinement-too-weak
 ```
 
-At the call the checker substitutes the lambda's body for `p` and decides one
-implication, "body ⇒ demand", for an arbitrary element. A predicate too weak
-for the demand is a skip, **never a violation** — `List.filter([], …)` is
-fine whatever the predicate — so it is an error only under `cap verified`
-(reason `abstract-refinement-too-weak`, naming the lambda and the demand).
-Inside `filter` itself `p` is an uninterpreted function: the body proves its
-own return from the guard `if pred(h)` and the callback's contract, so the
+At the call, the checker puts the lambda's body in place of `p`. Then it
+decides one question for an arbitrary element: does the body imply the
+demand?
+
+A predicate too weak for the demand is a skip, never a violation. Filtering an
+empty list is fine whatever the predicate. So a too-weak predicate is an error
+only under `cap verified`. The reason is `abstract-refinement-too-weak`, and
+the message names the lambda and the demand.
+
+Inside `filter` itself, `p` is an uninterpreted function. The body proves its
+own return from its guard on `pred(h)` and from the callback's contract. So the
 fact is proved, not assumed.
 
-A user function can declare one the same way: a callback parameter whose
-codomain is `{Bool | _ == p(x)}` over its domain binder `x`, and `p(_)` in an
-element slot of the return (`List({a | p(_)})`). Its body must prove that
-return like any other element contract; a body that does not (one returning
-its input unfiltered, say) lends nothing at its calls. Passing any callable
-for the defining parameter is always allowed — `p` is, by definition, what it
-returns — so it owes no codomain obligation where it is passed.
+**Your own functions can declare one.** Give a callback parameter a type
+ending in `Bool[p]`, and put `a[p]` in an element slot of the return:
 
-`p` may also sit in a *parameter's* element slot, where it is an obligation
-on the caller: with `need(xs : List({a | p(_)}), keep : ({x : a | true}) ->
-{Bool | _ == p(x)})`, the call `need(pos, fn y -> y > 0)` is checked like a
-call to a function taking `List({Int | _ > 0})` — proved for
-`pos : List({Int | _ > 0})` or `[1, 2]`, a violation for `[0, 1]`, a skip for
-an unrefined list — and inside `need`, `xs`'s elements carry `p`.
+```march
+fn keep_if(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do … end
+```
+
+The body must prove that return like any other element contract. A body that
+does not prove it lends nothing at its calls. One that returns its input
+unfiltered is an example.
+
+Passing any callable for the defining parameter is always allowed. `p` is, by
+definition, what that callable returns. So the pass site owes no codomain
+obligation.
+
+**`p` can also sit on a parameter.** Then it is an obligation on the caller,
+checked as if the parameter's elements carried the passed predicate:
+
+```march
+fn need(xs : List(a[p]), keep : a -> Bool[p]) : Int do … end
+
+need(pos, fn y -> y > 0)      -- proved, when pos : List({Int | _ > 0})
+need([1, 2], fn y -> y > 0)   -- proved
+need([0, 1], fn y -> y > 0)   -- violation
+need(ys, fn y -> y > 0)       -- skip, when ys : List(Int)
+```
+
+Inside `need`, the elements of `xs` carry `p`.
+
+**Negation and combined slots.** An element slot may combine `p(_)` with `&&`,
+`||` and `!` or `not`. It may also use the ordinary vocabulary over the
+element. Spell the negation with `!`, or with `not` and parentheses. `not` is a
+function, so it needs the parentheses:
+
+```march
+{a | !p(_)}       -- ok
+{a | not(p(_))}   -- ok
+{a | not p(_)}    -- syntax error
+```
+
+At a call, the checker reads the slot with `p` replaced by the passed
+predicate:
+
+```march
+fn rej(xs : List(a), pred : a -> Bool[p]) : List({a | !p(_)}) do
+  match xs do
+  Nil -> Nil
+  Cons(h, t) -> if pred(h) do rej(t, pred) else Cons(h, rej(t, pred)) end
+  end
+end
+
+fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do … end
+sum_nonpos(rej(ys, fn y -> y > 0))     -- proved: `!(y > 0)`
+sum_nonpos(rej(ys, fn y -> y > 5))     -- skip: `!(y > 5)` is too weak
+```
+
+A slot may also sit at a concrete base type, as in `Range`'s helper:
+
+```march
+pfn filter_list(xs : List(Int), f : Int -> Bool[p]) : List(Int[p]) do … end
+```
+
+**Helpers inside a definition.** An accumulator helper may take a parameter
+whose elements carry `p`. It is checked like any other parameter:
+
+- If you push an element on the branch where `pred` rejected it, that is a
+  violation.
+- If you push it without testing `pred`, that is a skip.
+
+```march
+acc : List(a[p])   -- the helper's accumulator parameter
+Cons(h, acc)       -- pushed where pred(h) was false: violation
+```
+
+A recursive helper's element return is proved by induction only when every
+element precondition of its recursive call is proved. A skip or a violation
+there leaves the return unproved. Then the helper lends nothing to its
+callers. This holds for a concrete slot too, such as an accumulator of
+positive `Int`s.
+
+The recursive call must also pass the function's own callback, unchanged, for
+each abstract refinement:
+
+```march
+filt(t, pred)           -- covered
+filt(t, fn y -> true)   -- not covered
+let q = pred            -- an alias: not covered
+```
+
+Two callbacks passed in swapped order, or a rebound `pred`, are not covered
+either. A definition may pass its own callback on to another combinator, for
+example to `List.filter` inside a `myfilter` with the same signature.
+
+**Shapes that are not read.** If `p` is applied under anything but `&&`, `||`
+and `!`, the slot is not read at a call. Two abstract refinements in one slot
+are not read either. Both are `abstract-refinement-uninstantiated`. Applying
+`p` to another function's result is an error:
+
+```march
+{a | p(_) == false}   -- not read at a call
+{a | p(q(_))}         -- an error
+```
 
 **What can instantiate `p`.** Besides an inline lambda:
 
@@ -2069,110 +3102,923 @@ fn keep_pos(ys : List(Int), k : ({x : Int | true}) -> {Bool | _ == (x > 0)}) : I
 end
 ```
 
-A named function or callback contributes its *proved* return `{Bool | _ == e}`
-(either side of the `==`) over its one parameter. A return the definition does
-not prove never reaches a caller, so it never instantiates `p` either; a
-predicate with no such contract (`fn is_pos(n : Int) : Bool`) instantiates
-nothing. A `let`-bound lambda is read as the lambda itself (it shadows a
-top-level function of the same name), and stops counting once its name is
-rebound.
+A named function or a callback contributes its proved Bool contract over its
+one parameter, the shape `is_pos` has above. The `==` may be written either
+way round. A contract the definition does not prove never reaches a caller.
+So it never instantiates `p` either. A predicate whose return type is a plain
+`Bool` instantiates nothing.
 
-**The standard library.** `List.filter`, `List.find`
-(`Option({a | p(_)})`), `List.take_while` and `Option.filter` all carry `p`:
+A `let`-bound lambda is read as the lambda itself. It shadows a top-level
+function of the same name. It stops counting once its name is rebound.
+
+**Lambda bodies.** A lambda's body is read as an exact predicate over its
+parameter, never a weaker one. The reader understands:
+
+- `&&`, `||`, `!` and `not`;
+- `if`;
+- a `match` on a Bool, with `true` and `false` arms, or one of them and `_`,
+  and no guards;
+- a call to a `let`-bound lambda, read as its body with the arguments put in;
+- a call to a function or callback with a proved Bool contract over any number
+  of parameters, read as that contract with the arguments put in order.
+
+```march
+fn gt(n : Int, m : Int) : {Bool | _ == (n > m)} do n > m end
+
+sum_pos(List.filter(ys, fn y -> is_pos(y) && y < 100))             -- proved
+sum_pos(List.filter(ys, fn y -> if y > 0 do y < 100 else false end)) -- proved
+sum_pos(List.filter(ys, fn y -> gt(y, 0)))                         -- proved: `y > 0`
+sum_pos(List.filter(ys, fn y -> gt(0, y)))                         -- skip: too weak
+sum_pos(List.filter(ys, fn y -> is_pos(y) || y < 100))             -- skip: too weak
+```
+
+A too-weak skip prints the lambda and what it was read as:
+
+```
+`fn y -> is_pos(y) || y < 100` (read as `y > 0 || y < 100`) does not imply `_ > 0`
+```
+
+The body may also mention the caller's own local variables (its parameters,
+`let`s, lambda parameters and `match` binders). The element fact then names
+that variable, and it is read in the caller's scope, where the variable's own
+refinement can discharge the demand. This is how a `List.filter` with a captured
+bound proves a relational return:
+
+```march
+fn small(xs : List(Int), n : Int) : List({Int | _ < n}) do
+  List.filter(xs, fn y -> y < n)       -- proved; `small(ys, 10)` is `List({Int | _ < 10})`
+end
+fn g(xs : List(Int), k : {Int | _ <= 10}) : Int do
+  sum_lt10(List.filter(xs, fn y -> y < k))   -- proved from `k <= 10`
+end
+fn h(xs : List(Int), k : Int) : Int do
+  sum_lt10(List.filter(xs, fn y -> gt(y, k)))   -- skip: nothing bounds `k`
+end
+```
+
+A captured variable must be one the call can see and that nothing rebinds on
+the way to the use. A module-level name is declined, and the message names it.
+A `let`-bound lambda, or a `let`-bound result, whose captured variable is
+rebound before the call or the use is forgotten, so the call is a skip. A
+`let`-bound lambda that captures a variable is still declined when it is
+*called inside* the lambda body (`fn y -> f(y) && y > 0`), and so is a capture
+the reader would only introduce by inlining.
+
+Calls to `let`-bound lambdas are inlined at most four deep. `f4` calling `f3`
+calling `f2` calling `f1` is read. One level more is declined, and the message
+names the bound.
+
+A helper's Bool contract holds only for arguments that meet its refined
+parameters. So the reader inlines a helper only where each of those is proved
+at the call. The facts come from two places:
+
+- what the combinator's callback domain promises, which for a plain
+  `a -> Bool[p]` is nothing;
+- what the lambda has already decided on the way to the call, such as the left
+  side of `&&` or `||`, or an `if` condition.
+
+```march
+fn weird(a : {Int | _ > 0}) : {Bool | _ == (a > 0)} do a > 0 end
+
+sum_pos(List.filter(ys, fn y -> weird(y)))            -- declined: weird's precondition is not proved
+sum_pos(List.filter(ys, fn y -> y > 0 && weird(y)))   -- proved: read as `y > 0 && y > 0`
+```
+
+**The standard library.** These combinators carry `p`:
+
+- `List.filter`, `List.take_while` and `List.partition`;
+- `List.find`, with an `Option` result;
+- `Option.filter`;
+- the bare `filter` (`Prelude.filter`), `Enum.filter`, `Enum.take_while` and
+  `Iterable.filter`, each returning a `List`;
+- `Enum.find` and `Iterable.find`, each returning an `Option`;
+- `Range.filter`, whose predicate is over `Int`;
+- `Deque.filter`, returning a `Deque`.
+
+The last bullet of
+[What element refinements do not do](#what-element-refinements-do-not-do)
+explains how a type whose elements sit in `List` fields is checked.
 
 ```march
 fn one_pos(o : Option({Int | _ > 0})) : Int do … end
 one_pos(List.find(ys, fn y -> y > 0))         -- proved
 one_pos(Option.filter(o, is_pos))             -- proved
 sum_pos(List.take_while(ys, is_pos))          -- proved
+sum_pos(filter(ys, fn y -> y > 0))            -- proved: Prelude.filter
+one_pos(Enum.find(ys, fn y -> y > 0))         -- proved
+sum_pos(Range.filter(Range.new(0, n), fn y -> y > 0))  -- proved
+sum_pos(Deque.to_list(Deque.filter(d, fn y -> y > 0))) -- proved
 ```
 
-What it does not do (reason `abstract-refinement-uninstantiated` where a
-demand meets one of these):
+Each proves its own contract on the definition side. None is assumed.
 
-- **A predicate with no proved `{Bool | _ == …}` contract over one parameter**
-  instantiates nothing: no contract is inferred from a body, and a
-  two-parameter function (`gt(n, m)`, even as `fn y -> gt(y, 0)`) is declined.
-- **A lambda that mentions any name besides its parameter** (`fn y -> y > m`)
-  is declined rather than read with `m` unknown, and so is one whose body
-  calls a function other than as the single eta-reducible call
-  (`fn y -> is_pos(y) && y < 100`).
-- **One argument only.** `Map.filter`'s `(k, v) -> Bool` and a `fold_left`
-  accumulator invariant would need a two-argument `p(k, v)`.
-- **Not every combinator.** `List.partition` would need `p` inside a tuple and
-  under `not`; `drop_while` keeps no element fact; `Deque.filter` does not
-  declare one.
-- **`p` only in an element slot**, not on a bare scalar return
-  (`(a) -> {a | p(_)}`), and not through `interface`/`impl` dispatch.
-- **No shorthand.** Liquid Haskell writes `a<p>`; March has only the spelled-out
-  form above.
+**Tuples: `List.partition`.** A return that is a tuple of containers carries
+one element slot per component:
+
+```march
+fn partition(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)}))
+
+let (pos, neg) = List.partition(ys, fn y -> y > 0)
+sum_pos(pos)                                  -- proved: `y > 0`
+sum_nonpos(neg)                               -- proved: `!(y > 0)`
+sum_pos(neg)                                  -- skip: too weak (`!(y > 0)`)
+match List.partition(ys, fn y -> y > 0) do
+(pos, _) -> sum_pos(pos)                      -- proved
+end
+```
+
+A component reaches a demand only when you destructure the call directly.
+There are two ways:
+
+- a `let` with a tuple pattern;
+- a `match` with exactly one arm, no guard, whose pattern is a tuple of names
+  and `_`.
+
+Each name then stands for its component of that call. An alias of the name
+keeps it. The fact ends when the name, or a name the call mentions, is
+rebound.
+
+```march
+let (a, b) = g(…)                  -- a let with a tuple pattern
+match g(…) do (a, _) -> … end      -- one arm, a tuple of names and `_`
+let p2 = pos                       -- an alias keeps the fact
+```
+
+Your own function may declare such a return, abstract or not:
+
+```march
+fn split_pos(xs : List(Int)) : (List({Int | _ > 0}), List(Int)) do … end
+```
+
+Every tail is checked component by component. A tail may be a tuple literal,
+a recursive call through the structural induction hypothesis, or a call to
+another proved tuple return. A recursive result destructured in the body
+carries the hypothesis as well:
+
+```march
+let (yes, no) = part(t, pred)
+```
+
+`List.partition` uses a tail-recursive accumulator, a top-level helper named
+`partition_go`. Its `yes` and `no` parameters carry the two element slots, and
+they are checked at every push. So both halves are proved on the definition
+side.
+
+#### Two arguments: a relation between sibling slots
+
+Some filters decide on a key and a value together. Their callback takes two
+arguments, so it defines a `p` of two arguments.
+
+In March a two-argument callback is a curried chain, whichever way the
+combinator calls it. A tuple domain is one argument:
+
+```march
+D1 -> D2 -> Bool   -- two arguments
+(D1, D2) -> Bool   -- ONE argument, a tuple
+```
+
+The definer applies `p` to both of its argument names, in order. Each use of
+`p` then relates two sibling slots of one type, as a
+[relational element refinement](#relational-element-refinements) does. The
+shorthand marks every slot that `p` relates, in slot order:
+
+```march
+type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do
+  match a do
+    ANil -> ANil
+    ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end
+  end
+end
+```
+
+It means exactly the spelled-out form, which is also accepted:
+
+```march
+fn filt(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)})
+    : Assoc({x : k | true}, {y : v | p(x, y)}) do
+  …
+end
+```
+
+The slot markings mean one relation only because `p` takes two arguments. The
+checker reads that from the definer in the same signature. With a
+one-argument `p`, the same markings are two separate facts, one per slot:
+
+```march
+keep : k -> v -> Bool[p]   -- with Assoc(k[p], v[p]): one relation over each entry
+keep : k -> Bool[p]        -- with Assoc(k[p], k[p]): two facts, one per slot
+```
+
+A domain may name its argument in the chain, as for one argument. Two domains
+may not share one name:
+
+```march
+({x : Int | x > 0}) -> v -> Bool[p]
+```
+
+**What the return means.** The return says that every entry of the result
+satisfies `p`. Inside `filt`, `p` is an uninterpreted function of two
+arguments. Calling `keep` on a key and a value is `p` of that key and value.
+So the guard in the body is exactly what it needs to prove its return.
+
+**At a call, `p` is what the passed callable computes.** The checker compares
+the relation it produces with the demand. A demand about one slot is met by
+[projection](#relational-element-refinements), as for a written relation:
+
+```march
+mod Filt do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do
+    match a do
+      ANil -> ANil
+      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end
+    end
+  end
+
+  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end
+  fn need_up(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+  fn t1(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (_k, v) -> v > 0)) end          -- proved
+  fn t2(a : Assoc(Int, Int)) : Int do need_up(filt(a, fn (k, v) -> v > k)) end            -- proved: the relation itself
+  fn t3(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (k, v) -> k > 0 && v > k)) end  -- proved: projected onto the values
+  fn t4(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (k, v) -> v > k)) end           -- skip: too weak (a negative key)
+  fn t5(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (_k, v) -> v >= 0)) end         -- skip: too weak
+end
+```
+
+The two skips are `abstract-refinement-too-weak`. The message for `t4` is:
+
+```
+`fn (k, v) -> v > k` does not imply `_ > 0`
+```
+
+In `t4`, an entry such as `(-1, 0)` passes the filter, and its value is not
+positive.
+
+**What you can pass for a two-argument `p`:**
+
+- an uncurried lambda, for a combinator that calls its callback with both
+  arguments at once;
+- a curried lambda, for a combinator that calls it in two steps (today that
+  counts only for a parameter's `p` and for the assumed returns of `Map.filter`
+  and `HashMap.filter`, below; see "Not yet");
+- either of those bound by `let`;
+- a function with a proved Bool contract over two parameters;
+- a callback parameter that itself defines a two-argument abstract refinement
+  of the enclosing function, passing its own `p` on.
+
+A lambda may capture the caller's own variables, under the rule for one
+argument ([captured variables](#abstract-refinements-filter-keeps-what-its-predicate-says)):
+`filt(a, fn (k, v) -> v > k + n)` gives `y > x + n`, read with `n`'s own
+refinement. A captured name that is also a parameter of the callee (a slot
+`{y : v | p(x, y) && y > n}` of a callee with its own `n`) or a slot binder
+stays the caller's (since 2026-10-26).
+
+```march
+fn (k, v) -> v > k                                       -- uncurried lambda
+fn k -> fn v -> v > k                                    -- curried lambda
+fn above(k : Int, v : Int) : {Bool | _ == (v > k)} do … end   -- a named function
+keep : k -> v -> Bool[q]                                 -- a callback parameter, passing its q on
+```
+
+Anything else is `abstract-refinement-uninstantiated`, and the message says
+why. Two cases are worth knowing.
+
+**A name bound twice.** A lambda that binds one name twice in one parameter
+list is not a program at all. Since 2026-10-22 the typechecker rejects it as
+[`duplicate_binder`]({{ site.baseurl }}/docs/errors/duplicate_binder/). It
+rejects a function's parameter list and a pattern the same way. Before that,
+the interpreter and compiled code disagreed about which argument the name
+meant. A curried chain that reuses a name is ordinary shadowing, and it still
+typechecks. It instantiates nothing. The call is an
+`abstract-refinement-uninstantiated` skip.
+
+```march
+fn (x, x) -> x > 0                  -- duplicate_binder
+fn two(a : Int, a : Int) : Int      -- duplicate_binder
+(a, a)                              -- duplicate_binder, in a pattern
+fn k -> fn k -> k > 0               -- typechecks; skip: "the lambda passed for `p` binds `k` twice"
+```
+
+**A chain ending in a concrete contract.** Nothing checks the callable passed
+for such a parameter against its contract. So inside the function, calling it
+gives no fact. Passing it on to `filt` instantiates nothing. A one-argument
+codomain contract, by contrast, is checked at each call, as above.
+
+```march
+kk : ({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (y > x)}   -- carries no fact yet
+```
+
+**`p` can also sit on a parameter.** Then the argument's entries must meet the
+relation that the passed callable computes. A callable that makes the
+relation constant still binds it. Passing one that always returns `false` is a
+violation for any non-empty argument:
+
+```march
+fn need(a : Assoc({x : k | true}, {y : v | p(x, y)}), keep : k -> v -> Bool[p]) : Int do … end
+
+need(ACons(1, 2, ANil), fn (k, v) -> v > k)       -- proved
+need(ACons(1, 2, ANil), fn (_k, _v) -> false)     -- violation: the entry (1, 2)
+```
+
+**A slot may also mention another parameter of the callee.** That name is read
+at the call's argument for it. This holds on a return and on a parameter
+alike:
+
+```march
+{y : Int | p(x, y) && y > n}   -- `n` is the call's argument for the parameter `n`
+```
+
+**The input's slot facts carry over. Its relations do not.** A fact about each
+value of the input still holds of each value of the result, as for one
+argument. A relation on the input is not carried. The result's entries are not
+the input's, and a function generic in `k` and `v` may pair the key of one
+entry with the value of another (see `shift` under
+[relational element refinements](#relational-element-refinements)).
+
+```march
+-- a : Assoc(Int, {Int | _ > 0})
+filt(a, fn (_k, v) -> v < 100)   -- meets Assoc(Int, {Int | _ > 0 && _ < 100})
+```
+
+**The signature is checked.** Each of these mistakes is an
+`abstract_refinement_misuse` error, and the message gives the fix:
+
+- the definer does not apply `p` to every argument of its chain, once each, in
+  order;
+- a use of `p` does not name distinct binders of sibling slots, for example it
+  marks a single slot or a number of slots other than two;
+- an argument has different types in the definer and in a use;
+- the container is not entry-shaped (every constructor must hold one `k` and
+  one `v`, or neither; see
+  [relational element refinements](#relational-element-refinements));
+- one `p` is used with two arities.
+
+```march
+p(y)                                   -- under a two-argument callback: error
+p(y, x)                                -- arguments out of order: error
+Assoc(k, v[p])                         -- one slot: error, the fix is Assoc(k[p], v[p])
+Assoc(k, {v | p(_)})                   -- the same
+HamtMap(HEntry(k, v))                  -- inside another type, one type application of both: fine
+```
+
+**Not yet.** Inside a body, a callback called in two steps gives the second
+step no fact. So a combinator written that way does not prove its relational
+return, and its calls instantiate nothing. (March has no syntax for calling
+the result directly, as in `keep(k)(v)`.)
+
+```march
+let g = keep(k)
+if g(v) do … else … end   -- no fact about k and v
+```
+
+**`Map.filter` carries it, assumed.** Its callback is curried, and it decides
+on a key and a value together:
+
+```march
+@[assume]
+fn filter(m : Map(k, v), pred : k -> v -> Bool[p], cmp : k -> k -> Bool)
+    : {Map(k[p], v[p]) | subset(keys(_), keys(m))} do … end
+```
+
+```march
+mod MapFilter do
+  fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+  fn need_rel(_m : Map({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+  fn t1(m : Map(String, Int)) : Int do
+    need_vals(Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp))    -- proved
+  end
+  fn t2(n : Map(Int, Int)) : Int do
+    need_rel(Map.filter(n, fn k -> fn v -> v > k, Map.int_cmp))      -- proved
+  end
+  fn t3(m : Map(String, Int)) : Int do
+    need_vals(Map.filter(m, fn _k -> fn v -> v >= 0, Map.str_cmp))   -- skip: too weak
+  end
+end
+```
+
+`Map`'s body goes through a list of tuples, and it calls `pred` in two steps.
+So the checker cannot prove the entry fact. It is `@[assume]`d, like every
+other `Map` contract.
+
+`@[assume]` on a function whose return has an element entry assumes that
+entry. The entry may be slots, relations or abstract applications. The body is
+not checked against it. The definition counts one `trusted` postcondition per
+entry in `--refine-report`, and it is accepted under `cap verified`.
+
+At a call, an assumed entry is instantiated like a proved one, with two
+differences:
+
+- An assumed callee is asked only that its type variables are generic in its
+  inferred type. Its parameters must be annotated.
+- The input's own element facts are not added. A map of positive values,
+  filtered to values below 100, does not meet a demand for values that are
+  both. The too-weak message says so.
+
+```march
+-- m : Map(String, {Int | _ > 0})
+Map.filter(m, fn _k -> fn v -> v < 100, Map.str_cmp)   -- does not meet `_ > 0 && _ < 100`
+```
+
+The property test in `test/stdlib/test_map.march` checks the fact at run time.
+
+`HashMap.filter` carries the same assumed entry fact, with no comparator and
+no key-set contract:
+
+```march
+@[assume]
+fn filter(m : HashMap(k, v), pred : k -> v -> Bool[p]) : HashMap(k[p], v[p]) do … end
+```
+
+Its property test is in `test/stdlib/test_hash_map.march`. `OrderedMap.filter`
+and a list of pairs do not carry it yet; see
+[Limitations](#open-gaps-in-element-and-abstract-refinements).
+
+#### `Map`'s own functions
+
+`Map.insert`, `get`, `get_or`, `remove`, `keys`, `values`, `merge`,
+`map_values` and `singleton` carry a refined map's key and value facts. This
+is not assumed: each is annotated with its generic type, and the parametric
+element rule (the one `List.reverse` uses) checks that its body cannot make a
+`k` or a `v`. So every value of the result entered through an argument, and a
+demand on the result is checked against each one.
+
+```march
+mod MapFlow do
+  fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+  fn one_pos(_o : Option({Int | _ > 0})) : Int do 0 end
+
+  fn t1(m : Map(String, {Int | _ > 0})) : Int do
+    need_vals(Map.insert(m, "b", 5, Map.str_cmp))   -- proved: m's values, and 5
+  end
+  fn t2(m : Map(String, {Int | _ > 0})) : Int do
+    need_vals(Map.insert(m, "b", 0, Map.str_cmp))   -- skip: 0 is not positive
+  end
+  fn t3(m : Map(String, {Int | _ > 0})) : Int do
+    one_pos(Map.get(m, "a", Map.str_cmp))           -- proved
+  end
+  fn t4(m : Map(String, Int)) : Int do
+    need_vals(Map.map_values(m, fn v -> v * v + 1)) -- proved: from the lambda
+  end
+end
+```
+
+`Map`'s representation hides both parameters: its values sit in a trie of
+lists of pairs, not in fields the checker models. A type like that is a source
+only when it is declared opaque (`ptype` or `opaque type`), and only when no other
+declaration of the same name is a plain `type`. No construction of
+such a value establishes an element fact (it is a recorded skip), so its facts
+come only from declarations, assumed returns and these parametric calls. A
+plain `type` with the same hidden shape stays a skip.
+
+These do not carry it: `Map.empty()` (no parameter shows `k` and `v` are
+generic, so it is not a source and `Map.insert(Map.empty(), …)` is a skip),
+the functions over lists of pairs (`from_list`, `to_list`, `entries`), and the
+unannotated `merge_with`. `HashMap`'s and `Set`'s functions other than the
+filters are not annotated yet.
+
+#### What abstract refinements do not do
+
+These apply to one argument and two alike. Where a demand meets one of them,
+the reason is `abstract-refinement-uninstantiated`. The two-argument gaps are
+also collected under
+[Limitations](#open-gaps-in-element-and-abstract-refinements).
+
+- **A predicate with no proved Bool contract instantiates nothing.** This is
+  true by name and when called inside a lambda. No contract is inferred from a
+  body. Passed by name, a predicate must also take one parameter. A bare
+  two-parameter `gt` has no one-argument meaning. Calling it inside a lambda
+  is read:
+
+  ```march
+  sum_pos(List.filter(ys, fn y -> gt(y, 0)))   -- read as `y > 0`
+  ```
+
+- **Some lambda bodies are not translated.** The checker declines them, and
+  the message names the construct. These are:
+  - a body that mentions a name besides its parameter;
+  - a block with `let`;
+  - a `match` on anything but a Bool, or one with guards;
+  - an `if` or Bool `match` used as a non-Bool value;
+  - a call to a function with no proved contract, or to the lambda's own
+    parameter;
+  - a call whose head is computed;
+  - a `let`-bound lambda that names itself;
+  - inlining deeper than four `let`-bound lambdas.
+
+  Int-valued helpers are not inlined. Neither is a helper whose refined
+  parameters are not proved at the call inside the lambda.
+
+  ```march
+  fn y -> y > m       -- mentions `m`: declined
+  fn y -> score(y) > 3   -- with score : {Int | _ == …}: not inlined
+  ```
+
+- **A callback parameter's contract is taken on trust from its callers.**
+  Inside `keep_pos` above, the contract on `k` instantiates `p`. But it is only
+  as good as the obligation at each place `keep_pos` is called. Today, passing
+  a callable whose return is not known to meet it is a skip there, not a
+  violation.
+
+- **`Map.filter` does not keep its input's facts.** `Map`'s other functions
+  carry them by parametricity (see [`Map`'s own functions](#maps-own-functions)),
+  but an assumed callee is never conjoined with its input. A fold's
+  accumulator invariant needs no abstract refinement at all; see
+  [Folds](#folds-an-accumulator-invariant).
+
+- **Not every combinator carries `p`.**
+  - `drop_while` (`List`, `Enum`) keeps no element fact. Its result starts at
+    the first element that FAILS `pred`, so nothing holds of all of it.
+  - `List.filter_map`'s callback returns an `Option`, not a `Bool`, so nothing
+    defines `p`.
+  - `List.find_index` returns an index, not an element.
+
+- **A tuple component counts only through direct destructuring.** These carry
+  no component fact:
+  - taking a component with a function such as `Tuple.first`;
+  - binding the tuple whole and taking it apart later;
+  - a `match` with more than one arm, or with a refutable component;
+  - a tuple `let` whose call mentions one of its own names;
+  - a nested tuple, or a tuple inside a container;
+  - a tuple passed on to another function.
+
+  ```march
+  Tuple.first(g(…))                  -- no fact
+  let r = g(…)                       -- then `match r do …`: no fact
+  (Cons(_, pos), _) -> …             -- a refutable component: no fact
+  let (xs, b) = g(xs)                -- the call mentions `xs`: no fact
+  ```
+
+- **A String callback on the definition side is not read yet.** Inside a
+  combinator over a list of strings, calling the callback does not yet reflect
+  as `p`. So a body written by hand over strings does not prove its return.
+  Delegating to `List.filter` does.
+
+  ```march
+  f : String -> Bool[p]   -- `f(h)` inside the body is not read as `p(h)`
+  ```
+
+- **`p` only works in an element slot.** It does not work on a bare scalar
+  return, and not through `interface`/`impl` dispatch.
+
+  ```march
+  (a) -> {a | p(_)}   -- not supported
+  ```
+
+### Folds: an accumulator invariant
+
+A demand on the result of a fold is read as the invariant its accumulator
+keeps. Look at `List.fold_left`'s signature:
+
+```march
+fn fold_left(xs : List(a), acc : b, f : b -> a -> b) : b
+```
+
+It is generic in `b`. So every `b` it returns is either the initial value or
+a result of `f`. Every `b` it hands to `f` is one of those again. The demand
+therefore holds when two things do:
+
+- **the base**: the initial value meets it;
+- **the step**: `f` returns a value that meets it, assuming the demand of each
+  of its parameters whose type is exactly `b`.
+
+```march
+fn need_nn(k : {Int | _ >= 0}) : Int do k end
+fn need_pos(k : {Int | _ > 0}) : Int do k end
+
+fn count(ys : List(Int)) : Int do
+  need_nn(List.fold_left(ys, 0, fn (acc, _x) -> acc + 1))      -- proved
+end
+
+fn drained(pos : List({Int | _ > 0})) : Int do
+  need_nn(List.fold_left(pos, 0, fn (acc, x) -> acc - x))      -- skip: the step can break it
+end
+
+fn summed(pos : List({Int | _ > 0})) : Int do
+  need_pos(List.fold_left(pos, 0, fn (acc, x) -> acc + x))     -- skip: the base 0 fails it
+end
+
+fn running_max(ys : List(Int)) : {Int | _ >= 0} do
+  List.fold_left(ys, 0, fn (a, x) -> if x > a do x else a end) -- proved, at a return
+end
+```
+
+The step may also use what its other parameters know. In `drained`, `x` has
+`pos`'s element refinement. The step may use anything it captures too. Adding
+a captured positive `m` proves, and adding a captured unrefined `m` does not.
+
+Nothing about how often, or in what order, the step runs is assumed. Running
+it zero times is the base. So these all work the same way:
+
+- `fold_right`, whose accumulator is the second parameter;
+- the curried `Enum.fold`, whose step is read as one two-parameter lambda;
+- `Enum.reduce`, which has no initial value: the list's elements are the base,
+  and both parameters assume the demand;
+- a fold you write yourself.
+
+Nothing here is specific to the stdlib's folds. The rule applies to any
+function generic in its return variable, with a callback that consumes it.
+
+**The accumulator can be a container.** Then an element demand on the fold's
+result sets `b` to that refined list. The initial list must meet it. The step,
+assuming the list it is handed meets it, must build one that does.
+
+```march
+fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+
+fn reversed(pos : List({Int | _ > 0})) : Int do
+  sum_pos(List.fold_left(pos, [], fn (acc, x) -> Cons(x, acc)))       -- proved
+end
+
+fn kept(ys : List(Int)) : List({Int | _ > 0}) do
+  List.fold_left(ys, [1], fn (acc, x) -> if x > 0 do Cons(x, acc) else acc end) -- proved
+end
+
+fn copied(ys : List(Int)) : Int do
+  sum_pos(List.fold_left(ys, [], fn (acc, x) -> Cons(x, acc)))        -- skip: x is not known positive
+end
+
+fn seeded(pos : List({Int | _ > 0})) : Int do
+  sum_pos(List.fold_left(pos, [0], fn (acc, x) -> Cons(x, acc)))      -- skip: the base [0] fails it
+end
+```
+
+`List.fold_right`, the curried `Enum.fold` and a nested fold prove the same
+way. In a nested fold, the inner fold's initial value is the outer
+accumulator, which meets the demand by the outer assumption. A curried step's
+inner parameter also gets its element refinement here:
+
+```march
+need_pos(Enum.fold(pos, 1, fn a -> fn x -> a + x))   -- proved: `x` comes from pos
+```
+
+**Which stdlib folds carry it.**
+
+- `List.fold_left`, `List.fold_right` and the prelude's `fold_left`;
+- `Enum.fold`, `Iterable.fold`, `Enum.reduce` and `Range.reduce`;
+- `Map.fold`, `Set.fold` and `HashMap.fold`;
+- `SortedSet.fold` and `OrderedMap.fold`, whose collection parameter is a
+  record (`{cmp: …, tree: …}`): the parametricity check matches a declared
+  record field by field;
+- `Array.fold_left`, `RRB.fold`, `RRB.fold_left`, `Deque.fold_left` and
+  `Deque.fold_right`;
+- `Hamt.fold`, whose callback is curried.
+
+Each declares its accumulator `b` and its callback's arrow. The parametricity
+checks read those:
+
+```march
+f : b -> k -> v -> b   -- the map folds
+f : b -> a -> b        -- the rest declare one of these two
+f : a -> b -> b
+```
+
+`List.scan_left` and the curried `Enum.scan` return every accumulator value as
+a list. So an element demand on their result is the same invariant:
+
+```march
+sum_nn(Enum.scan(ys, 0, fn a -> fn _x -> a + 1))   -- proved
+```
+
+```march
+fn entries(m : Map(String, Int)) : Int do
+  need_nn(Map.fold(m, 0, fn (acc, _k, _v) -> acc + 1))         -- proved
+end
+
+fn shrink(d : Deque.Deque(Int)) : Int do
+  need_nn(Deque.fold_left(d, 0, fn (acc, _x) -> acc - 1))      -- skip: the step can break it
+end
+```
+
+These folds do **not** carry it, and a demand through them stays a skip:
+
+- the `NativeArray` folds, such as `fold_int`: the body is one builtin, which
+  the checks cannot see through;
+- `Seq.fold`, `Seq.fold_while` and the folds built on them, `JsonStream.fold`
+  and `Flow.reduce`: the accumulator travels through a closure stored in data.
+
+None of these is `@[assume]`d. Parametricity is checked, never taken on trust.
+
+A refuted base or step is a **skip, never a violation**. Each has its own
+reason, `accumulator-base-unproved` or `accumulator-step-unproved`, so the
+report says which half failed. A failing base can be harmless on a non-empty
+list. A failing step can be harmless on an empty one. And a true property
+need not be an invariant of the step. A fold that adds 1 from 0 never returns
+-1, but "not -1" before a step does not imply "not -1" after it. Under
+`cap verified` the skip is an error, as always.
+
+The argument rests on the callee being unable to make a `b` of its own. So it
+applies only where the [parametricity checks](#through-a-polymorphic-call)
+pass. A "fold" gets no assumption, and keeps the plain
+`parametric-source-unproved` skip, when it does any of these:
+
+- its body fixes `b`;
+- it feeds the step a value it built;
+- it takes an unannotated callback;
+- it calls a decoder or an interface method returning a type variable;
+- it is marked `@[trusted]` or `@[assume]`, or dispatched through an `impl`.
+
+The rule also declines a step that uses `let?` or `let*`, and a step whose
+parameter is spelled like a name the demand mentions. An accumulator
+parameter with its own refinement annotation is the next subsection's case.
+
+Only a demand the checker already traces reaches a fold:
+
+- a closed scalar demand: a precondition, an annotated `let`, or a closed
+  return;
+- an element demand on the call, or a declared element return.
+
+```march
+one_pos(Enum.reduce(pos, …))           -- an element demand on the call
+sum_pos(List.fold_left(pos, [], …))    -- the same
+: {Int | _ >= lo}                      -- a relational scalar return: not traced yet
+```
+
+A `let`-bound fold result used later carries nothing, unless the accumulator
+is annotated (below). The step's tails are checked where the lambda is
+written. So a tail that names something bound inside the step is not checked,
+and the call is a skip:
+
+```march
+match acc do Cons(h, _) -> Cons(h, acc) … end   -- `h` is bound inside the step: skip
+```
+
+#### An annotated accumulator
+
+You can state the invariant yourself by annotating the accumulator:
+
+```march
+fn (acc : {Int | _ > 0}, x) -> …
+```
+
+The annotation is checked as exactly the judgment above, with the annotation
+in place of a demand. The initial value must meet it. The step, assuming it of
+every parameter typed `b`, must return a value that meets it.
+
+When it holds, `acc` may assume it inside the step's body. The call's result
+carries it too. So a `let`-bound fold result has the fact with no demand on
+the call:
+
+```march
+fn count(ys : List(Int)) : Int do
+  let s = List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) ->
+    let _u = need_pos(acc)                                 -- proved: acc assumes it
+    acc + 1)
+  need_pos(s) + need_nn(s)                                 -- both proved
+end
+
+fn above(ys : List(Int), lo : Int) : Int do
+  let s = List.fold_left(ys, lo, fn (acc : {Int | _ >= lo}, _x) -> acc + 1)
+  need_ge(s, lo)                                           -- proved
+end
+
+fn zeroed(ys : List(Int)) : Int do
+  let s = List.fold_left(ys, 0, fn (acc : {Int | _ > 0}, _x) -> acc + 1)
+  need_pos(s)                         -- skip: the base 0 fails the annotation
+end
+
+fn shrinking(ys : List(Int)) : Int do
+  List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc - 1) -- skip: the step breaks it
+end
+```
+
+The annotation is an obligation of its own, on the parameter. It is reported
+against the callee, `List.fold_left`, with the same two reasons. A refuted
+base or step is a skip, never a violation, for the reasons above. Under
+`cap verified` it is an error.
+
+An annotation that does not hold is not assumed, in the body or of the
+result. The fact belongs to its call's result. It is retired like any other
+fact when the result is rebound, or when a name the annotation mentions is
+rebound, such as `lo` above.
+
+If the call also has a demand on it, the annotation is checked and must imply
+the demand. A return tail counts as a demand. If the annotation does not hold,
+or does not imply the demand, the demand is tried as the invariant on its own,
+as if the parameter were unannotated. The annotation is never assumed for it.
+
+```march
+need_nn(List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1))   -- annotation and demand
+```
+
+The same gates apply. The callee must be generic in its return variable `b`
+by the parametricity checks. It must not be `@[trusted]`, `@[assume]` or an
+`impl` method. The shape is narrow:
+
+- The callee's declared return is a bare type variable `b`, and the annotated
+  parameter's type is exactly `b`. The lambda must be written inline. A
+  `let`-bound lambda passed by name is not read.
+- The annotation refines the value itself, not a container's elements. An
+  annotation on a list accumulator's elements stays as it was: not checked,
+  not assumed.
+- Exactly one parameter typed `b` is annotated. The others typed `b` assume it
+  too. Two annotated ones are left as they were.
+- A one-parameter lambda is checked at the pass site instead, as any refined
+  callable is. That includes the outer lambda of a curried step. Annotating an
+  inner curried parameter is read as above.
+
+```march
+acc : List({Int | _ > 0})                              -- a container's elements: not read
+fn (a : {Int | _ > 0}, c) -> a + c                     -- passed as f : b -> b -> b: `c` assumes it too
+fn (k : {Int | _ > 0}) -> k + 1                        -- passed as f : b -> b: violation at the pass site
+Enum.fold(ys, 1, fn (a : {Int | _ > 0}) -> fn x -> …)  -- the outer lambda of a curried step: pass site
+```
+
+The one-parameter case is a violation because `b` does not imply `_ > 0`.
+
+An annotation on the *element* parameter is not an invariant of anything. It
+is a claim about the list's elements that nobody checks. So it is neither
+checked nor assumed. Give the list the refinement instead, and the element
+parameter gets it:
+
+```march
+fn (acc, x : {Int | _ > 0}) -> …   -- not checked, not assumed
+xs : List({Int | _ > 0})           -- do this instead: then `x` gets it
+```
 
 ### What element refinements do not do
 
-- **Only four combinators carry an abstract refinement** (`List.filter`,
-  `List.find`, `List.take_while`, `Option.filter`), instantiated from a lambda,
-  a named predicate with a proved contract, a callback parameter or a
+- **Only these combinators carry an abstract refinement:** `List.filter`,
+  `List.find`, `List.take_while`, `Option.filter`, `List.partition` (per
+  component), `Prelude.filter` (the bare `filter`), `Enum.filter`,
+  `Enum.find`, `Enum.take_while`, `Iterable.filter`, `Iterable.find`,
+  `Range.filter`, `Deque.filter` and, over a key and a value together and
+  assumed rather than proved, `Map.filter` and `HashMap.filter`. Each is
+  instantiated from a lambda (whose body may combine `&&`/`||`/`not`/`if` and
+  calls to proved helpers), a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
-- **Only a container demand is traced.** A single element flowing into a scalar
-  position (`need_pos(Option.unwrap_or(o, 1))`, the result of `fold_left`) is
-  not checked through the callee's sources.
-- **Only a one-parameter lambda receives a domain fact.** `fold_left`'s
-  two-parameter callback does not.
-- **A local `fn` with a container return** has its tails checked by nothing and
-  lends no element fact at its call sites.
-- **An element refinement that names a parameter** (`: List({Int | _ < n})`) is
-  not a fact at the call site of the function that returns it.
-- **A predicate relating elements to each other** (sortedness, distinctness)
-  cannot be written; see [Set Refinements](#set-refinements) for what a
-  predicate can say about a collection's elements as a set.
-
----
-
-## Where Refinements Resolve
-
-Refinement checking follows the same name resolution as the type checker:
-**direct named calls**, across modules, through **`alias`** and **`use`**:
-
-```march
-mod App do
-  use Lib.{take_pos}          -- imported name resolves to Lib.take_pos
-  alias Lib.Inner as I        -- alias resolves to Lib.Inner.*
-
-  fn run() : Int do
-    take_pos(-1)              -- error: resolved + checked against Lib's precondition
-    I.helper(-1)             -- error: alias-qualified call checked too
-  end
-end
-```
-
-A bare call binds to the nearest enclosing module that defines it (with
-shadowing), so a local helper is never confused with a same-named function
-elsewhere. Resolution is scope-aware about imports: at each enclosing scope the
-checker consults that scope's own definition and then that *same* scope's
-`use`-imports before falling outward. So a `use` written **inside** a nested
-module beats an enclosing module's own definition of the same name, matching
-how the call really dispatches, while an enclosing module's `use` still loses
-to a nested module's *own* definition: an import never reaches in and
-overrides a local one.
-
-```march
-mod Outer do
-  fn take_pos(n : {Int | n >= 0}) : Int do n end   -- Outer's own contract
-
-  mod Inner do
-    use Lib.{take_pos}                              -- Lib's take_pos, unrefined
-
-    fn go() : Int do
-      take_pos(-1)   -- resolves to Lib.take_pos, NOT Outer's: no error
-    end
-  end
-end
-```
-
-Checking this call against the enclosing `Outer.take_pos` instead would be a
-false positive on correct code, since `Inner.go` never actually calls it. (This
-was a live false positive until 2026-07-31; see item 6 in
-[Open holes](#open-holes-stated-as-of-2026-07-29).)
+- **A scalar demand is traced only when it is closed.** `need_pos(Option.unwrap_or(o, 1))`
+  is checked through `unwrap_or`'s sources (the elements of `o` and the
+  default), but a demand that names another parameter of its function
+  (`List.nth(xs, Option.unwrap_or(o, 0))` against `_ < len(xs)`) is not, and
+  neither is a relational return (`: {Int | _ >= lo}`, so a fold's running
+  maximum `>= lo` is not checked either). A block-level `fn`'s
+  return tail is traced over that `fn`'s own parameters only: a captured
+  variable carries no fact there. A source that fails the demand makes the call
+  a skip, never a violation.
+- **A fold's accumulator assumes only a demand on the fold's result.** In
+  `fold_left(xs, 1, fn (acc, x) -> …)`, `x` assumes `xs`'s element refinement,
+  but `acc` assumes something only while the step's result is being checked
+  against a demand on the call ([Folds](#folds-an-accumulator-invariant)).
+  With no such demand (`need_pos(acc)` inside the step, a `let`-bound result
+  used later) it assumes nothing unless it is annotated
+  ([An annotated accumulator](#an-annotated-accumulator)), and an invariant is
+  never inferred. An annotation on the element parameter
+  (`fn (acc, x : {Int | _ > 0}) -> …`) is neither checked nor assumed. Indexed
+  invariants (`_ == len(xs)`), tuple or record accumulators, a
+  callback parameter of type `List(b)` and a hand-written accumulator
+  recursion (`fn sum(xs, acc : {Int | _ >= 0}) : {Int | _ >= 0}`) are not
+  covered. A curried lambda (`fn a -> fn x -> …`) gives an element fact to its
+  inner parameters only while its result is checked against a demand on the
+  call; inside its body otherwise, only the outer parameter gets one.
+- **A local `fn` with a container return lends it only when the entry names
+  nothing but the `fn`'s own parameters.** Its tails are checked like a
+  top-level function's, and a proved one is a fact at its later calls in the
+  block (read at each call's arguments), but a return naming a captured
+  variable (`List({Int | _ < k})` with `k` from outside) lends nothing. A
+  recursive call inside the local carries the declared return when one of its
+  arguments is a structural part of the matching parameter (`go(t, i + 1)`
+  after `Cons(h, t)` of `lst`), the rule a top-level function gets, and only
+  once the local's return is proved with it. So `find_index`'s shape, a local
+  `go(lst, i : {Int | _ >= 0}) : Option({Int | _ >= 0})`, proves, and so does
+  a `match` on its result. A non-structural self-call (`go(lst, i + 1)`)
+  carries nothing. A local returning a tuple of element-refined containers has
+  every component of every tail checked, but lends nothing at its calls.
+- **A predicate relating different elements to each other** (sortedness,
+  distinctness) cannot be written. A relation between the components of ONE
+  entry can ([Relational element refinements](#relational-element-refinements));
+  see [Set Refinements](#set-refinements) for what a predicate can say about a
+  collection's elements as a set.
+- **A parameter inside another container is followed one level, and only
+  as a bare argument.** A constructor field `C(…)` of another registered
+  container (`List`, `Option`, `Result`, or a variant type of the program)
+  whose every argument is a bare type parameter or mentions none is checked
+  as that container: in `type Dq(a) = Dq(Int, List(a), List(a))`,
+  `Dq(1, [0 - 1], [])` against `Dq({Int | _ > 0})` is a violation, and
+  `match d do Dq(_, f, b) -> …` gives `f` and `b` the element refinement. That
+  is what lets `Deque.filter` declare `Deque(a[p])`. Any other field that
+  holds a parameter (`type Box(b) = Box(Int -> b)`,
+  `type Wrap(k, v) = Wrap(List((k, v)))`, a `List(List(a))` field, a field of
+  a container that itself hides the parameter, a self-reference with the
+  parameters permuted) has its element refinement checked at no construction:
+  `Wrap([(1, 0 - 5)])` against `Wrap(Int, {Int | _ > 0})` is a recorded
+  `unreflectable-subject` skip naming the constructor and the hiding type (an
+  error under `cap verified`), a function returning such a construction lends
+  no element fact at its call sites, and a `match` binder at that field gets
+  none. Element refinements say nothing about order or size: a `Dq(a[p])`
+  with its two lists swapped is still one.
+- **A module-qualified container spelling is read only when it is certain.**
+  `q : Queue.Queue({Int | _ > 0})` and `d : Deque.Deque({Int | _ > 0})` are
+  element sources like a container declared in the module under check, so
+  `sum_pos(Queue.to_list(q))` and `sum_pos(Deque.to_list(d))` are proved, and
+  so is a user combinator returning `Deque.Deque(a[p])`. The qualified name
+  `M.T` is resolved only when exactly one module declares a type `T` and `M`
+  names that module. When two modules declare `T`, `M.T` stays unknown and
+  the call is a skip.
 
 ---
 
@@ -2199,7 +4045,8 @@ refinement obligations (user + stdlib): 17 proved, 0 violated, 0 trusted, 33 ski
   by kind: 50 precondition, 0 postcondition, 0 division
 ```
 
-> **Clear `.march/cas/artifacts-v2` first.** A `--check` run with sources that hash to
+> **Clear `.march/cas/artifacts-v2` and `~/.march/cas/artifacts-v2` first** (builds
+> write through to the global store, so a project-only clear can still hit). A `--check` run with sources that hash to
 > an artifact already in the CAS exits immediately, before parsing, so the
 > report never runs and the command prints **no output** while still exiting 0.
 > That looks identical to "no obligations found", which is exactly the
@@ -2227,7 +4074,7 @@ moment the measure alias stops working, which is exactly what the unit-global
 glob-import bug did to every March program, invisibly, while `t118` still exited
 0 (a skip and a proof are both exit 0; only the count tells them apart).
 
-Each skip is attributed to one of eleven reasons:
+Each skip is attributed to one of sixteen reasons:
 
 | Reason | What happened |
 |---|---|
@@ -2241,6 +4088,11 @@ Each skip is attributed to one of eleven reasons:
 | `opaque-application` | the goal names a function the checker has no meaning for, so it cannot reason through it |
 | `nonlinear-goal` | the goal multiplies two non-constant terms (`y * y + 1`, `x * k`), and the solver, which is incomplete on non-linear integer arithmetic, settled it neither way |
 | `parametric-source-unproved` | a polymorphic call's result meets an element demand only if every source of the demanded type variable does, and the source the message names did not |
+| `accumulator-base-unproved` | a fold's initial value (or, for a `reduce`, the list's elements) was not proved to meet the demand or the annotated accumulator; see [Folds](#folds-an-accumulator-invariant) |
+| `accumulator-step-unproved` | a fold's step, assuming the invariant of its accumulator parameters, was not proved to keep it (or the rule declined that step; the message says why) |
+| `abstract-refinement-too-weak` | the predicate instantiated from the passed callable does not imply the demand; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says) |
+| `abstract-refinement-uninstantiated` | the abstract refinement could not be instantiated from what was passed (a callable with no proved contract, a lambda body the reader does not translate, a name bound twice, …); the message names why |
+| `refuted-unconfirmed` | the solver refuted the goal on some path, but no concrete input was found on which the function returns a violating value (Tier 2 induction), so nothing is reported |
 | `solver-undecided` | the solver proved neither the predicate nor its negation |
 
 `unconstrained-subject`, `partial-conjunct`, `opaque-application`, and
@@ -2388,6 +4240,639 @@ undischarged postcondition; see below.
 
 ---
 
+## Termination: `--termination-report`
+
+The refinement checker never assumes a recursive function's return refinement
+before that return is proved, because a function that never returns would make
+any return refinement "provable". Termination checking is what will allow that
+assumption, the induction hypothesis
+(`specs/2026-10-26-termination-checking-design.md`). The first step is a report:
+
+```
+$ march --check --termination-report prog.march
+termination report: 3 recursive units, 1 calling a non-positive function value
+term	C	int-dec	prog.march:2:5	down	top	scc=1	cert=unproved:no-structural-arg
+term	A	structural	prog.march:5:5	len2	top	scc=1	cert=structural
+term	?	none	prog.march:11:5	spin	top	scc=1	cert=unproved:no-structural-arg
+term	F	value	prog.march:14:5	w	top	scc=1	cert=unproved:non-positive
+  by class: ?=1 A=1 C=1 F=1
+  certificate: 1 structural, 0 metric, 0 trusted, 3 unproved
+  trusted: 0 builtin or extern callees
+  unresolved: 0 callees
+```
+
+There is one line per recursive *unit* of your code. A unit is a top-level function, a
+local `fn` (named `outer/inner`), an actor handler, an `impl` method (`impl Show.show`), an
+interface's default method, or a top-level `let` (a lambda's body runs at each call). A unit
+is recursive when it sits in a cycle of the call graph. The graph has three kinds of edge:
+
+- a direct call;
+- a call inside a lambda or a `let*` continuation;
+- a function named as a value (`apply(f, x)` inside `f`).
+
+So recursion that runs only through a callback still counts.
+
+Every callee name is resolved the way the checker resolves a call: a local binder
+first, then the enclosing module and its `use` / `import`s, out to the top level, then
+an `alias`ed module (`alias Other as Z` makes `Z.g` reach `Other.g`). A call to an
+interface method (`show(x)`), or to a builtin an interface constrains (`==`, `<`),
+reaches every `impl` of that interface the argument's type can dispatch to. A builtin
+or an `extern` is assumed to terminate. Any other name is **unresolved**: it may
+diverge, so its cycle is not certified (`cert=unproved:unresolved`) and the report's
+`unresolved:` line lists it.
+
+The second and third columns classify how the unit recurses:
+
+| Class | Shape | Meaning |
+| --- | --- | --- |
+| A | `structural` | some argument is a pattern component of the matched parameter at every recursive call |
+| B | `int-dec` / `int-asc` | an `Int` parameter moves by a positive literal (`n - 1`, `n / 2`, `i + 1`) at every call, and the parameter appears in an ordering comparison or a refinement |
+| C | `int-dec` / `int-asc` | the same metric, but nothing bounds it: `if n == 0 do … else down(n - 1)` loops on `down(-1)` |
+| D | `lex` | no single position falls, but some position falls at every call with the earlier ones unchanged (Ackermann) |
+| F | `lambda` / `ref` | recursion through a lambda or a function value |
+| E | `diverges` | marked `@[diverges]` (itself, a function in its cycle, or the function enclosing a local `fn`): not claimed to terminate |
+| `E?` | `none` | no syntactic metric, and the cycle waits on something outside the program: it reaches a builtin that receives a message, accepts a connection, reads a socket, a file or a process, reads the clock, or reads a `Vault` another task writes |
+| `?` | `none` | no syntactic metric |
+
+`mutual` after the shape means the unit shares its cycle with other functions; `scc=`
+gives the cycle's size.
+
+The classification is syntactic and changes no verdict. In particular, an `Int`
+argument like `n - 0`, `n / 1` or `n - (0 - 1)` is **not** a metric. The tail-call
+check still calls such a call "structurally recursive", because that check is about
+stack depth, not termination.
+
+### The structural certificate
+
+The last column is a **certificate**: whether the checker can prove that the unit's
+cycle terminates. For now the only proof is structural, and an unproved unit is
+reported, never warned about. `cert=structural` holds for a cycle when:
+
+- each member matches on a parameter, and every call in the cycle passes a *pattern
+  component* of the caller's matched parameter, as a bare variable, at the callee's
+  position. Arithmetic (`n - 1`), a nullary constructor (`f(Nil)`) and the parameter
+  itself never count. The match must be on the parameter's own value: after
+  `let xs = Cons(0, xs)` (or an arm, lambda, `let?` or local `fn` binding `xs`),
+  `match xs` is a match on something else, and its components are not smaller than
+  the argument;
+- a component name is trusted only if every binding of that name in the body is
+  structural. `Cons(_, t)` of a *second* list reusing the outer `t` spoils it;
+- in a cycle of several functions, every member matches on a parameter of one type
+  **family**: the same type (`even`/`odd` on `Nat`), or types defined in terms of each
+  other (a `Tree` holding a `Forest` that holds `Tree`s). A tree recursing through a
+  `List(Tree)` of children is not certified yet, because `List` is not defined in terms of
+  `Tree`;
+- no member names a member of its own cycle as a value (`apply(f, x)` inside `f`):
+  the arguments of such a call are unknown;
+- no member calls a function value whose type mentions a **non-positive** type.
+
+A type is non-positive when it occurs to the left of an arrow inside its own
+definition, directly (`type Fix = Fix(Fix -> Int)`), through a type it is mutually
+defined with, or through a generic type that uses its parameter on the left of an
+arrow. Such a type lets a program loop with no recursion in sight:
+
+```march
+type Fix = Fix(Fix -> Int)
+fn w(f : Fix) : Int do match f do Fix(g) -> g(f) end end
+fn omega() : Int do w(Fix(w)) end    -- never returns
+```
+
+`w` is listed with `cert=unproved:non-positive` although it is not recursive.
+`type T = T(Int -> Int)` is positive and blocks nothing.
+
+The reasons are `no-structural-arg`, `not-same-family`, `reference`, `non-positive` and
+`unresolved` (a member calls a name the checker cannot resolve, above).
+`Int` recursion (`down(n - 1)`) is the job of a metric, below.
+
+### Metrics and `@[decreases]`
+
+A cycle that is not structural can still be shown to terminate by a **metric**: a
+number, computed from the parameters, that stays at least 0 and falls at every
+recursive call. The checker proves this with the solver at each recursive call,
+using the same facts it uses for a precondition there: the guards on the way to
+the call and the parameters' refinements.
+
+Without an annotation, the metric is the function's first `Int` parameter.
+This `fib` needs nothing written:
+
+```march
+fn fib(n : Int) : Int do
+  if n < 2 do n else fib(n - 1) + fib(n - 2) end
+end
+```
+
+At each call, `n >= 2` holds, so `n - 1` and `n - 2` are at least 0 and below `n`.
+
+Where the first `Int` parameter is not the right measure, write one with
+`@[decreases(...)]`:
+
+```march
+@[decreases(100 - n)]
+fn up(n : Int) : Int do
+  if n >= 100 do 0 else up(n + 1) end
+end
+```
+
+A metric may use the function's parameters, `Int` literals, `+`, `-`, `*`, `/`
+by a positive literal, and measures such as `len`. A list or another data type is
+not a number by itself, so measure it:
+
+```march
+@[decreases(len(xs) - i)]
+fn scan(xs : List(Int), i : {Int | _ >= 0}, acc : Int) : Int do
+  if i >= List.length(xs) do acc else scan(xs, i + 1, acc + 1) end
+end
+```
+
+Several metrics, separated by commas, are compared left to right: a call is fine
+if the first one falls (and stays at least 0), or the first stays equal and the
+rest fall by the same rule. That covers Ackermann's function:
+
+```march
+@[decreases(m, n)]
+fn ack(m : Int, n : Int) : Int do
+  if m <= 0 do n + 1
+  else if n <= 0 do ack(m - 1, 1)
+  else ack(m - 1, ack(m, n - 1)) end end
+end
+```
+
+In a cycle of several functions, each function has its own metric, all of the
+same length, and every call in the cycle must decrease from the caller's metric to
+the callee's. When one function of a cycle carries `@[decreases]`, the others
+either carry one too or use their first `Int` parameter (only when the metrics
+have one component).
+
+The order the checker tries is fixed: the structural certificate first; then the
+written `@[decreases]`, if there is one, and only that; then the first `Int`
+parameter. When none of these works, `--refine-infer` can search for a metric to
+write (see "Inferring a metric" below).
+
+A metric must really stay at least 0. This loops on `down(-1)`, and is not proved:
+
+```march
+@[decreases(n)]
+fn down(n : Int) : Int do
+  if n == 0 do 0 else down(n - 1) end
+end
+```
+
+```
+warning: `down` is not shown to terminate: the recursive call `down(n - 1)`
+is not shown to decrease `n`: e.g. n = -1 [termination_unproved]
+```
+
+The fix is an exit that covers negative numbers (`if n <= 0`), or a parameter
+refined to `{Int | _ >= 0}`.
+
+**When you are told.** Termination is reported, not enforced:
+
+- `termination_unproved` is a warning, and only for a function that carries
+  `@[decreases]`. Unannotated recursion is listed by `--termination-report` but
+  never warned about.
+- In a `cap verified` module, `termination_unproved` on an annotated function is
+  an error.
+- A metric outside the fragment above, naming something that is not a parameter,
+  or with a different length from the rest of its cycle, is an `invalid_decreases`
+  error. `@[decreases]` on a function that is not recursive is an
+  `attribute_no_effect` warning.
+
+Under `--termination-report`, every recursive unit of your code gets its metric
+checked: `cert=metric` when every call proves, `cert=trusted` when an
+`@[assume]` or `@[trusted]` function accepted an unproved one, and
+`cert=unproved:not-decreasing` otherwise. Other reasons are `invalid-decreases`,
+`no-int-parameter` (a function of the cycle has no `Int` parameter),
+`unannotated:<name>` (a function of an annotated cycle has no metric of the right
+length) and `shadowed` (a recursive call sits under a binding that reuses a name
+the metric reads, so the metric would read the inner value). `--refine-report`
+counts the checks as `termination` in its `by kind:` line. Calls to builtins and
+`extern` functions are assumed to terminate; the report's `trusted:` line lists
+them. A name the checker cannot resolve is never assumed to terminate; the
+`unresolved:` line lists it.
+
+### Inferring a metric
+
+When neither the structural certificate nor the first `Int` parameter works,
+`march --refine-infer` (and `forge refine --infer`) search for a metric and
+propose it as an `@[decreases(...)]` to add. `--termination-report` runs the
+same search and lists what it found. A plain `--check` never searches.
+
+For each cycle the checker could not certify, it tries at most 8 candidate
+metrics, in this order:
+
+1. each `Int` parameter, in parameter order;
+2. `b - i`, for an `Int` parameter `i` that some recursive call passes as
+   `i + 1` (or `i + k`), when the body compares `i` with `b` and `b` is a
+   literal or built from parameters every recursive call passes unchanged
+   (`i >= b` or `i < b` gives `b - i`; `i > b` or `i <= b` gives `b - i + 1`),
+   and `len(x) - i` for such an `i` and a list or string `x` passed unchanged;
+3. `len(x)`, for a `List` parameter `x`;
+4. pairs of the above, in parameter order, compared left to right.
+
+The metric phase 2 already tried (the first `Int` parameter, or your own
+`@[decreases]`) is not tried again. Each candidate is checked exactly as if you
+had written it: every recursive call of the cycle must prove that it decreases.
+A candidate is proposed only if all of them prove; nothing is assumed.
+
+```march
+fn up(n : Int) : Int do
+  if n >= 100 do 0 else up(n + 1) end
+end
+
+pfn count_to(i : Int, hi : Int, acc : Int) : Int do
+  if i >= hi do acc else count_to(i + 1, hi, acc + 1) end
+end
+```
+
+```
+$ march --check --refine-infer up.march
+inferred refinements: 0 proposed, 0 refused; user skips 0 -> 0 (47 probes, 1 rounds)
+inferred metrics: 2 proposed, 0 not inferred
+  up (up.march:1)  @[decreases(100 - n)]  [termination, class B, 1 of 1 candidate checked]
+  count_to (up.march:5)  @[decreases(hi - i)]  [termination, class B, 3 of 8 candidates checked]
+```
+
+`--refine-infer-apply` writes each attribute in front of its function's `fn`, on
+the same line, then re-checks the module. A proposal is written only when that
+re-check certifies its cycle. A cycle of several functions gets one attribute
+per function, and is written whole or not at all. A written metric can also give
+a refined return its induction hypothesis (below): `--refine-report
+--refine-infer` counts the obligations that closes, from the same re-check.
+
+A list falls through a helper's proved return. Here `len(lst)` is inferred,
+because `pop_front` promises a shorter list:
+
+```march
+fn pop_front(xs : {List(Int) | len(_) > 0}) : {List(Int) | len(_) < len(xs)} do
+  match xs do
+    Cons(_, t) -> t
+    Nil -> xs
+  end
+end
+
+fn walk(lst : List(Int), acc : Int) : Int do
+  match lst do
+    Nil -> acc
+    Cons(_, _) -> walk(pop_front(lst), acc + 1)
+  end
+end
+```
+
+Some proposals are shown but not written:
+
+- a metric for a local `fn` (`chunks/go`), since a local `fn` takes no
+  attribute;
+- a metric that would replace a `@[decreases]` you wrote. The editor offers that
+  replacement as a quick fix (below).
+
+A function the search cannot help is listed as `no metric inferred`, with how
+many candidates were checked. When there were more than 8, the line says the cap
+was reached. A function that really can loop never gets a proposal: `up` with an
+`n == 100` exit loops from 101, and none of its candidates proves. The search
+also cannot see through a byte test. `Json.skip_ws(s, i + 1)` stops when
+`string_byte_at(s, i)` is not a space. The search tries `len(s) - i` (an index
+climbing through a string it passes unchanged), but nothing tells the checker that
+a space means `i` is still inside `s`, so no metric is inferred for it.
+
+Under `--termination-report`, each searched unit gets a line:
+
+```
+infer	up.march:1:5	up	@[decreases(100 - n)]	1 of 1 candidate checked
+infer	scan.march:4:5	skip_ws	none	1 of 1 candidate checked
+  inferred: 1 of 2 uncertified units
+```
+
+### The induction hypothesis
+
+A proof of termination is what lets the checker assume a recursive function's
+own return refinement at its recursive calls. This assumption is the
+**induction hypothesis**. With it, `sum_to` proves:
+
+```march
+fn sum_to(n : {Int | _ >= 0}) : {Int | _ >= 0} do
+  if n == 0 do 0 else n + sum_to(n - 1) end
+end
+
+fn caller(k : {Int | _ >= 0}) : Int do need_nn(sum_to(k)) end
+```
+
+Here is the reasoning, step by step:
+
+1. The call `sum_to(n - 1)` meets its precondition, because `n - 1 >= 0` when
+   `n != 0`.
+2. The metric `n` falls at that call.
+3. So the checker may assume that the call's result is `>= 0`.
+4. `n + (something >= 0)` is `>= 0`, so the return refinement holds.
+5. Once proved, the contract is a fact at `caller`'s call too.
+
+The hypothesis is used only when all of these hold:
+
+- **The cycle is certified.** Its certificate is `structural` or `metric`.
+  A cycle that is `unproved` gets no hypothesis, and neither does one that is
+  `trusted`. Without this rule, a function that never returns would "prove"
+  any return refinement at all:
+
+  ```march
+  fn loopy(x : Int) : {Int | _ < 0} do loopy(x) end
+  ```
+
+  This function has no metric, so its return refinement is not proved. The
+  return stays a skip, and a call that depends on it is not reported as a
+  violation.
+- **Everything it calls is certified too.** If any recursive function the
+  cycle calls (directly or further down) is not certified, or anything it calls
+  is unresolved, the hypothesis is withheld. A call into a function that may
+  never return could make the whole cycle never return. This includes a call
+  through an `alias`, a `use` or `import`, an interface method's `impl`, and a
+  top-level `let` lambda.
+- **The recursive call is checked.** The checker must have reached the call,
+  and proved every precondition there. A call that breaks a precondition gets
+  no hypothesis:
+
+  ```march
+  fn f(n : {Int | _ >= 0}, k : {Int | _ > 0}) : {Int | _ > 0} do
+    if n == 0 do k else f(n - 1, k - 1) end
+  end
+  ```
+
+  Here `f(n - 1, k - 1)` decreases `n`, but it breaks `k > 0` when `k = 1`.
+  So `f`'s return refinement is not proved, and that is correct: `f(1, 1)`
+  returns `0`.
+- **A cycle of several functions proves all together, or not at all.** Each
+  function's return refinement is checked assuming all the others at their
+  recursive calls. They are accepted only if every one of them proves.
+  If one is false, none is accepted, even those that would prove under the
+  false one's hypothesis.
+
+The hypothesis serves every kind of return refinement:
+
+- a number or `Bool` return (`{Int | _ >= 0}`);
+- a data type return (`{List(Int) | len(_) == n}`);
+- an element return (`List({Int | _ > 0})`), for a top-level function or a
+  local `fn`.
+
+A data type, element or local `fn` return uses the hypothesis only at a call
+to itself. In each case, structural recursion already had a hypothesis; a
+certified metric now gives one too:
+
+```march
+@[decreases(n)]
+fn replicate(x : {Int | _ > 0}, n : {Int | _ >= 0}) : List({Int | _ > 0}) do
+  if n == 0 do Nil else Cons(x, replicate(x, n - 1)) end
+end
+```
+
+Without `@[decreases(n)]`, the metric would be the first `Int` parameter, `x`.
+`x` does not change at the call, so the cycle would not be certified.
+
+A call can now sit inside arithmetic in a return expression, for example
+`n + sum_to(n - 1)` or `1 + len2(t)`. The call's proved contract is a fact
+there, just as it is for a call returned on its own or bound with `let`. This
+works for any function with a proved contract, recursive or not.
+
+The checker looks for a hypothesis only after the ordinary proof has failed.
+It then checks termination only for the cycles that could use one. These are
+cycles with a return refinement that is still unproved, or with an element
+return. A module with neither does no extra work. The termination checks made
+for the hypothesis are not added to the `--refine-report` totals.
+`--termination-report` and `@[decreases]` still list them, as before.
+
+### Attribute names are checked
+
+A function attribute the compiler does not know is ignored, so a misspelling
+would silently do nothing. The checker warns about it (`unknown_attribute`),
+with a suggestion when the name is close to a known one:
+
+```
+warning: unknown attribute `@[decrease]` on `f`: it is ignored.
+note: did you mean `@[decreases]`?
+```
+
+The function attributes are `@[assume]`, `@[decreases]`, `@[diverges]`,
+`@[measure]`, `@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`,
+`@[trusted_linear]` and `@[vectorize]`.
+
+### Functions meant to run for ever: `@[diverges]`
+
+Some functions are not supposed to end: a server's accept loop, a reader that
+waits for the next frame, a ticker that runs until the program stops. Mark one
+`@[diverges]`:
+
+```march
+@[diverges]
+fn accept_loop(listen_fd : Int) : Int do
+  match tcp_accept(listen_fd) do
+    Err(_) -> 0
+    Ok(fd) ->
+      handle(fd)
+      accept_loop(listen_fd)
+  end
+end
+```
+
+The attribute says the function is not claimed to terminate. The checker then:
+
+- files no termination obligation for it;
+- never assumes its return refinement at its own recursive calls (the induction
+  hypothesis), nor at the recursive calls of any cycle that reaches it;
+- lists it in `--termination-report` with `cert=diverges`, under class E.
+
+Callers do not have to repeat the attribute. That a caller *may* diverge is
+worked out for it, through the call graph, and the report lists such callers:
+
+```
+  may diverge through @[diverges]: 2 units: main, serve_all
+```
+
+A local `fn` cannot carry an attribute. It is covered when the function around
+it is marked. One mark on any function of a recursive cycle covers the whole
+cycle, except in a `cap total` module, where every function of the cycle must be
+marked (see "Requiring termination: `cap total`").
+
+`@[diverges]` cannot be combined with `@[decreases]`, which claims a metric that
+proves the function does terminate, or with `@[measure]`, since a measure is a
+logical definition and must terminate. A measure that calls a `@[diverges]`
+function, directly or through other calls, is rejected too. Each of these is a
+`diverges_conflict` error.
+
+The standard library marks its event loops this way: the cluster's accept,
+tick and link-reading loops, the frame readers of `NetKernel`, `NodeCall`,
+`NodeSend` and `PeerReader`, the `Csv` and `File` row and line readers, the
+`Session` and `SessionNode` drain and heartbeat loops, and the `Topology`
+placement loop. A test checks that no event loop in the standard library is left
+unmarked, except a short, explained list of loops that do end (a retry with a
+counter, a poll with a deadline) and of loops inside local functions.
+
+### Actor handlers
+
+An actor handler runs once per message, so it must return for each one. Its own
+body is not a loop: `send(self(), Again(k + 1))` puts a message in the mailbox
+and returns, so it is not a recursive call. A handler may still call a function
+that does not return. `--termination-report` then says so:
+
+```
+handler	prog.march:7:7	Counter.Spin	may not return: it reaches `spin`, whose recursion is not shown to terminate
+```
+
+This is a report line, never a warning, except in a `cap total` module.
+
+### Requiring termination: `cap total`
+
+By default termination is only reported. A module that wants every function
+proved to terminate declares `cap total`:
+
+```march
+mod Counting do
+  cap total
+
+  fn countdown(n : Int) : Int do
+    if n <= 0 do 0 else countdown(n - 1) end
+  end
+
+  @[diverges]
+  fn serve(n : Int) : Int do serve(n + 1) end
+
+  fn main() do serve(0) end
+end
+```
+
+In a `cap total` module, `termination_unproved` is an error for:
+
+- a recursive function whose cycle has no certificate (structural, a proved
+  metric, or `@[trusted]`);
+- a function that calls one, or calls an unresolved name;
+- a function that calls a `@[diverges]` function without being marked
+  `@[diverges]` itself;
+- a function in a recursive cycle with a `@[diverges]` function, unless it is
+  marked `@[diverges]` too: under `cap total` one mark does not cover the
+  cycle, as Idris's `partial` covers only the function it is written on;
+- an actor handler that may not return.
+
+`main` and its local functions are exempt, and so is a function marked
+`@[diverges]`, which says plainly that it may run for ever. Like `cap verified`,
+the cap covers the declarations of its own module; a nested `mod` declares its
+own.
+
+A call through an interface (`show(x)` with `x` of a type variable) reaches
+every `impl` of the interface, and an `impl` that does not terminate is an error
+on its own method. The call itself is not: the `impl` is picked by a value at run
+time, so the caller terminates whenever the `impl` it is given does, as with any
+function passed as an argument. A call on a known type (`show(Box(1))`) names
+its `impl` where it is written, so an `impl` that may not terminate makes the
+caller an error too.
+
+Builtins that run an `impl` count as such calls: string interpolation
+(`"${e}"`) and `to_string` run `Show`, as does `println`; `==`, `!=`, `eq` run
+`Eq`; `<`, `<=`, `>`, `>=`, `compare` run `Ord`; `hash` runs `Hash`; `to_json`,
+`from_json` and `from_json_events` run the derived Json codecs; and `own` runs
+`Drop`. The same holds for the induction hypothesis: a function whose
+interpolation runs an `impl Show` that calls the function back gets no
+hypothesis unless that cycle is certified.
+
+### Editor repairs
+
+The editor offers quick fixes on a `termination_unproved` diagnostic that
+`march --check-json` reports:
+
+- **change `n == 0` to `n <= 0`**, when the counterexample is negative and the
+  exit is `n == 0`. The diagnostic says so in a note
+  (`note: the exit `n == 0` misses a negative `n`; `n <= 0` covers it.`), and the
+  editor offers the change only when asked: it changes what the program does (a
+  call that never returned now returns the base case), so it is not a machine
+  fix, `forge fix` never applies it, and it is not a preferred quick fix;
+- **mark the function `@[diverges]`**, replacing its `@[decreases(...)]` if it
+  has one;
+- **add `@[decreases(e)]`**, when the compiler inferred a metric and checked it
+  (see "Inferring a metric"). The diagnostic then ends with
+  `note: try `@[decreases(e)]`.`, and the fix inserts the attribute, or replaces
+  a `@[decreases(...)]` that failed. Inference runs only under `--refine-infer`
+  or `--termination-report`, and only for a cycle of one top-level function, so
+  a diagnostic from a plain `--check` has no such note.
+
+---
+
+## Which functions are reflected: `--reflect-report`
+
+A predicate can use a function whose body is *reflected*: automatically, every
+function that terminates, has no effects, cannot fail, and calls only such
+functions (see [Reflection](#reflection-your-functions-in-predicates) and
+`specs/2026-10-29-refinement-reflection-design.md`). `--reflect-report` shows
+which functions qualify, and for each one that does not, the first rule that
+stops it. For this program:
+
+```march
+mod Prog do
+  needs IO.Console
+  fn noisy(n : Int) : Int do
+    println("hi")
+    n
+  end
+  fn mid(n : Int) : Int do noisy(n) + 1 end
+  fn half(n : Int) : Int do n / 2 end
+  fn ratio(a : Int, b : Int) : Int do a / b end
+end
+```
+
+the report is:
+
+```
+$ march --check --reflect-report prog.march
+reflect report: 4 functions, 1 reflected
+reflect	prog.march:3:5	noisy	no	R3:calls println (prog.march:4:4)
+reflect	prog.march:7:5	mid	no	R6:calls noisy, which is not reflected (prog.march:7:27)
+reflect	prog.march:8:5	half	reflected	unfold
+reflect	prog.march:9:5	ratio	no	R4:division by b not proved (prog.march:9:38)
+  top-level: 1 of 4 reflected
+  first blocker: R3=1 R4=1 R6=1
+```
+
+The rules, in the order the report checks them:
+
+- **R1**: a top-level `fn`, or a local `fn` that captures no variable (a local
+  is named `outer/go`). `main`, `impl` methods and actor handlers are not
+  reflected.
+- **R2**: it terminates. A recursive function needs a `structural` or `metric`
+  certificate, the same one `--termination-report` prints; `trusted`,
+  `diverges` and `unproved` do not count.
+- **R3**: no effect: no `spawn`, `send`, `dbg`, or effectful builtin such as
+  `println`.
+- **R4**: it cannot fail: no `panic`, no runtime `assert`, and every `/` or `%`
+  by something other than a non-zero literal has its division obligation
+  proved (in a `cap no_panic` module).
+- **R5**: every `match` covers all cases, including a guarded match whose
+  unguarded arms do not cover.
+- **R6**: every callee is itself reflected, or a builtin the solver understands
+  (`+`, `-`, `*`, comparisons on `Int` and `Float`, `&&`, `||`, `not`, the
+  length functions). `==` is allowed when every `Eq` it can reach is itself
+  total and pure. Any other interface call (`show`, string interpolation, a
+  user `compare`) blocks.
+- **R7**: no function values: no lambda, no function-typed parameter, no
+  function passed or stored as a value.
+- **R8**: every parameter and the result have a solver sort; a function
+  returning `Unit` is not reflected.
+- **R9**: not marked `@[trusted]`, `@[assume]` or `@[opaque]`.
+- **R11**: its name is not predicate vocabulary (`len`, `elts`, `keys`, the
+  set operators, `is_<Ctor>`): inside a predicate such a name always means the
+  built-in.
+
+A recursive group is reflected as a whole or not at all. A reflected function
+whose parameters are refined shows the guard each use will carry, for example
+`unfold (guard: n >= 0)`. Like `--termination-report`, the flag bypasses the
+compile cache. To read a termination certificate for every recursive function of
+your code it runs the refinement check a second time, on the side, so the
+obligations `--refine-report` counts are the same with or without it. It changes no
+verdict: nothing uses reflection yet.
+
+To compare runs obligation by obligation, `--refine-report-sites=all` prints one
+line per obligation of any verdict, not just the skipped ones:
+
+```
+proved	user	prog.march:12:12	precondition	need	_ < 10
+skip	user	prog.march:13:12	unconstrained-subject	precondition	need	_ < 10
+```
+
+---
+
 ## Getting a contract proposed for you: `forge refine`
 
 `--refine-report` tells you an obligation went unproven; it does not tell you
@@ -2406,8 +4891,11 @@ span, a callee and a verdict; it does **not** record which parameter is to
 blame, and there is no truthful way to recover that after the fact, since an
 argument is an arbitrary expression over several parameters. So the tool does
 not attribute anything. It hypothesises a refinement onto the signature,
-re-runs the *real* checker over the function, and keeps the candidate only if
-the ledger's debt actually shrank and no new violation appeared.
+re-runs the *real* checker over the function **and every caller of it in the
+unit**, and keeps the candidate only if, site by site, it proves at least one
+obligation, breaks none, and creates no violation. A candidate that would turn a
+caller's call into a violation is reported as `refused (caller-violation)` with
+that call, not proposed.
 
 Two consequences follow, both intentional:
 
@@ -2430,8 +4918,156 @@ The grammar is finite by design (sign and non-zero contracts on `Int`/`Float`,
 parameter in the same signature). It will miss contracts it cannot spell; it
 will not invent one it did not prove.
 
-See [docs/tooling.md](https://github.com/march-language/march/blob/main/docs/tooling.md)
-for the full command surface, including `--apply` and the editor code action.
+See [`forge refine` in the Tooling guide](../../docs/tooling.md#forge-refine-suggest-a-refinement-type)
+for the per-function command surface, including `--apply`, `--all`, `--budget`
+and the editor code action.
+
+The per-function tool proposes a parameter contract for one function, from a
+fixed grammar. With `--postconditions` it proposes a return contract instead.
+
+To propose **every** kind of refinement the checker can verify, use
+module-wide inference. It works over a whole module or project at once, and it
+covers returns, element and abstract refinements, and fold accumulators.
+Preview the edits with `--diff`, and write them with `--apply`. See the next
+subsection.
+
+```
+march --check --refine-infer FILE   # one module
+forge refine --infer                # the whole project
+```
+
+### Module-wide inference: `march --refine-infer` and `forge refine --infer`
+
+`--refine-infer` runs the same assume-and-re-check loop over every function in
+user code. It covers every kind of refinement the checker can verify:
+
+| Kind | Example proposal |
+|---|---|
+| scalar parameter / return | `b : {Int \| _ != 0}`, `: {Int \| _ > 0}` |
+| relational | `i : {Int \| _ < n}` (a demand a callee makes, re-spelled in the caller); a return over a parameter, `inc(x : Int) : {Int \| _ > x}` |
+| element parameter / return | `xs : List({Int \| _ > 0})`, `: (List({Int \| _ > 0}), Int)`, each slot of a `Map` (`: Map(String, {Int \| _ > 0})`), `Deque.Deque({Int \| _ > 0})` |
+| relational element | `: Assoc({x : Int \| true}, {y : Int \| y > x})`, when a caller demands exactly that type |
+| abstract | `pred : a -> Bool[p]` with `: List(a[p])`, `Option(a[p])`, `Deque.Deque(a[p])`, or `partition`'s `(List(a[p]), List({a \| !p(_)}))`; two arguments, `keep : k -> v -> Bool[p]` with `: Assoc(k[p], v[p])` |
+| fold accumulator | `fn (acc : {Int \| _ > 0}, x) -> …`, a `fold_right` step's `fn (x, acc : …)`, any literal or `Int`/`Float` parameter as the initial value |
+| termination metric | `@[decreases(100 - n)]` on a recursive function nothing certified (see "Inferring a metric") |
+
+**Where candidates come from.** The program is mined first:
+
+- the predicate a skipped obligation asks for;
+- refinements already written in signatures the function can see;
+- comparisons in its body, and, for a scalar return, the relation its tail
+  has to a parameter: a tail `x + 1` offers `_ > x`, `_ >= x` and
+  `_ == x + 1`, a tail `x - 1` offers `_ < x`, `_ <= x` and `_ == x - 1`,
+  and a tail `x + y` offers `_ == x + y` (at most four, and only when the
+  function has a caller in the unit).
+
+Only then are candidates taken from the fixed grammar. Each slot gets at most
+12, weakest first by implication (the relational returns come on top). A
+predicate that does not mention the value (`true`) is never a candidate. A
+relation between two slots of a container (`Assoc({x : Int | true}, {y : Int |
+y > x})`) is offered only when a caller passes the function's result, or the
+function passes its parameter, to a parameter declared with exactly that type.
+
+**The search order.** The search is a fixpoint over the call graph, callees
+first. Returns and abstract refinements are tried before preconditions,
+because they cost no caller anything. A precondition moves the obligation to
+the callers. A return that holds only through its tail call tries the
+callee's return too. A return is proposed only when the checker proves it,
+**and** some caller gets something from it.
+
+**A precondition must prove a site, not delete it.** Take this function:
+
+```march
+pfn set_n(j : Int, n : Int, v) do
+  if j >= n do v else set_n(j + 37, n, Array.set(v, j, 0 - j)) end
+end
+```
+
+`n : {Int | _ <= j}` closes the `Array.set` index obligation only because the
+`else` can no longer run. So for each site a precondition closes, the checker
+also asks whether any execution still reaches it. A site that is reachable
+without the precondition and dead with it does not count for the proposal. If
+no other site is left, or too few to pay for the obligations the precondition
+adds at its callers, the candidate is rejected as `vacuous-branch`:
+
+```
+  set_n: rejected (vacuous-branch) param n : _ <= j
+    closes `Array.set` at array_trie_drop_leak_probe.march:46:26 only by making its branch unreachable
+```
+
+A precondition that proves a real site, and as a result also makes a branch
+dead, is still proposed. The dead branch's site still counts in its total.
+
+```
+$ march --check --refine-infer app.march
+inferred refinements: 2 proposed, 1 refused; user skips 3 -> 1 (58 probes, 2 rounds)
+  pos_only (app.march:4)  return/elem : List({Int | _ > 0})  [element-return, closes 1]
+  total (app.march:6)  param xs/elem : List({Int | _ > 0})  [element-param, closes 1]
+  go: refused (caller-violation) param n : _ > 0
+    would break the call at app.march:9:21
+```
+
+**Previewing and applying.**
+
+- `--refine-infer-diff` prints the edits as a diff.
+- `--refine-infer-apply` writes them, through the same splicer the editor's
+  code action uses. Then it re-checks the program. If the result is not
+  exactly the predicted one, it reverts every edit and exits 3. A mismatch is
+  a bug in the tool, never something to fix by hand.
+- A second run after applying proposes nothing.
+
+**For a whole project, use `forge refine --infer`.** It runs inference over
+the project as one checked unit, so a caller in another file counts. A project
+that does not check as a unit is tried one file at a time. `--apply-public`
+and `--allow-caller-violations` pass through. `--fixpoint` is now the same
+thing as `--infer`. The
+[Tooling guide](../../docs/tooling.md#infer-every-contract-forge-refine---infer)
+covers the command in full.
+
+```
+forge refine --infer            # print the proposals
+forge refine --infer --diff     # print them as a diff
+forge refine --infer --apply    # write them, then re-check
+```
+
+**Other outputs and switches.**
+
+- `--refine-infer-json` emits the same results as JSON (version 1).
+- With `--refine-report`, the report also prints the ledger as it will be once
+  the proposals are applied. For a `cap verified` module, it also says how
+  many of the module's errors they close.
+- `--refine-infer-kinds` restricts the kinds, as in `--refine-infer-kinds k1,k4`.
+  The kind `decreases` names the termination metrics; a list without it infers
+  none.
+- `--refine-infer-budget N` caps the probes. The default is 3000.
+- `--allow-caller-violations` accepts a refused precondition.
+
+```
+refinement obligations (user code, if applied): …
+```
+
+**In the editor**, the code actions "Infer refinements for `f`" and "Infer
+refinements in this file" run the same inference and apply the same bytes. A
+precondition that adds unproven obligations at its callers is marked as
+needing confirmation.
+
+A proposal on a public function with no caller in the unit is marked, because
+its real callers are elsewhere. Nothing is proposed for a program that does
+not check.
+
+**It cannot exceed the checker.** Like the per-function tool, it never
+proposes a contract the checker does not prove, however natural. Examples it
+misses today:
+
+- a relation kept from a parameter to the return (`bump(a)` keeping `y > x`
+  needs both annotations at once; one root at a time is tried).
+
+The limits are:
+
+- a fold accumulator's initial value must be a literal, a difference of two
+  literals, or an `Int`/`Float` parameter, and a curried step
+  (`fn acc -> fn x -> …`) is not annotated;
+- no mutually recursive functions, which are reported `scc-unsupported`.
 
 ---
 
@@ -2751,6 +5387,20 @@ for a contract the solver proved can never hold. A nonzero `violated` count on
 a module without `cap verified` is therefore not necessarily a bad annotation;
 it can be a demonstrated call-site failure the checker found on its own. The
 report does not currently distinguish the two shapes.
+
+---
+
+## The `--no-measure-axioms` Flag
+
+Pass `--no-measure-axioms` to reflect `@[measure]` functions **symbolically**
+instead of axiomatising them. This skips the datatype/quantifier reasoning (and
+the soundness gate), trading structural measure reasoning for speed. It changes
+only diagnostics, never the compiled artifact. Refinement checking of plain
+`Int`/`Bool` predicates is unaffected and always cheap.
+
+```bash
+march --check --no-measure-axioms app.march
+```
 
 ---
 
@@ -3293,7 +5943,10 @@ edges:
   [String Refinements](#string-refinements)). Over a **variant**
   (multi-constructor) ADT the checker reasons about the constructor tag only
   (`is_Some(_)`), never the payload: `{Option(Int) | is_Some(_)}` is checkable,
-  a predicate about the `Int` inside is not. **Sets of elements** are
+  a predicate about the `Int` inside is not. (A refinement on the payload's
+  *type*, `Option({Int | _ > 0})`, is an
+  [element refinement](#element-refinements-refining-what-a-container-holds)
+  and is checked.) **Sets of elements** are
   supported through the set vocabulary (`elts`, `keys`, `member`, `subset`,
   …; see [Set Refinements](#set-refinements)), with cardinality through
   ground facts only and list structure only inside a proof by recursion.
@@ -3458,9 +6111,24 @@ edges:
     application**: `fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1}
     do Node(t, x, Leaf) end`. No induction is needed here (there is no recursive
     call to hypothesise over), just one unfolding of the measure's recursion
-    equation. Both shapes **record their verdict in the obligation ledger**, so
-    `--refine-report` distinguishes "attempted and proved" from "never looked
-    at"; neither emits a diagnostic;
+    equation;
+  - **any other single-clause, unguarded body**: a bare parameter, a `let`,
+    an `if`, a call, a `match` on something other than a declared-ADT
+    parameter. Each return position is checked on its own, with **no**
+    induction hypothesis (a self-call there is an unknown value), under the
+    path conditions that reach it. `fn f(xs : List(Int)) : {List(Int) |
+    len(_) == len(xs)} do xs end` is proved, and the same contract with
+    `+ 5` is reported. Until 2026-10-24 these bodies filed **no obligation at
+    all**, so a false length contract on one passed in silence;
+  - every shape **records its verdict in the obligation ledger** (one
+    postcondition per function), so `--refine-report` distinguishes "attempted
+    and proved" from "never looked at". A refutation is reported only when the
+    interpreter reproduces it; an unproved contract is a recorded skip, an
+    error under `cap verified` (since 2026-10-24; Tier 2 skips used to pass
+    `cap verified` unreported). A return refinement Tier 2 does not model at
+    all (several clauses, a guard, which desugar rewrites over fresh argument
+    names, or a return type no measure describes) is also a recorded skip,
+    never silence;
   - a return refinement over a **variant ADT** (`{Tree | …}`, `{List(Int) | …}`)
     with a predicate that mentions a **`@[measure]`**, or, over a `List`, the
     built-in **`len`** and **`elts`**, which follow the list's `Cons` cells
@@ -3481,15 +6149,17 @@ edges:
   - an accumulator parameter that *grows*: the induction is on the matched
     parameter only, so the hypothesis is universally quantified over the rest.
 
-  **What is not, and stays silent:**
+  **What is not proved (each is a recorded skip):**
   - **mutual recursion.** The hypothesis is created only for a call to the
     function's *own* name, so two functions that call each other prove no property.
   - **a recursive call inside a lambda, or behind a nested `match`.** Only the
     top-level `match`'s pattern equation is supplied, so an arm with a tail that sits
     under a second `match` cannot see the inner scrutinee's shape.
-  - **non-structural recursion.** A recursive call on the whole parameter, on a
-    reconstructed value, or on anything `structural_subvars` does not certify as
-    a component gets **no** hypothesis. This is a correctness requirement, not a
+  - **non-structural recursion, unless its cycle is certified to terminate.** A
+    recursive call on the whole parameter, on a reconstructed value, or on anything
+    `structural_subvars` does not certify as a component gets **no** hypothesis,
+    unless a termination metric certifies the call (see "The induction
+    hypothesis" under Termination). This is a correctness requirement, not a
     completeness one: a proven postcondition is *added* to the assumption set
     that call-site checks prove `¬goal` against, and adding assumptions makes a
     violation easier to prove, so an unsound hypothesis would manufacture false
@@ -3644,35 +6314,52 @@ edges:
   checked, so you can annotate the function `@[measure]` or switch to a
   supported predicate.
 
----
+### Open gaps in element and abstract refinements
 
-## The `--no-measure-axioms` Flag
+The October 2026 features stop at these edges. Each one is a recorded skip:
+never a violation, and an error under `cap verified`. Each has an open item in
+`specs/todos/`, except the two marked as design rulings.
 
-Pass `--no-measure-axioms` to reflect `@[measure]` functions **symbolically**
-instead of axiomatising them. This skips the datatype/quantifier reasoning (and
-the soundness gate), trading structural measure reasoning for speed. It changes
-only diagnostics, never the compiled artifact. Refinement checking of plain
-`Int`/`Bool` predicates is unaffected and always cheap.
+- **Some `Map` functions, and `HashMap`'s and `Set`'s, carry no element
+  fact.** `Map.empty()`, the list-of-pairs functions and `merge_with` are not
+  sources; `HashMap` and `Set` functions other than the filters are not
+  annotated. (Todo: Map element flow, the remainder.)
+- **`OrderedMap.filter` carries no entry fact yet**, unlike `Map.filter` and
+  `HashMap.filter`. (Todo: OrderedMap filter two-argument abstract.)
+- **A list of pairs is not modelled.** A tuple element is not a container
+  type, so a list of pairs has no element slots, and no relation over its
+  parts. This is also why `Map.filter`'s entry fact is assumed rather than
+  proved. (Todo: tuple elements, list of pairs, abstract.)
+- **A curried callback with a concrete contract carries no fact.** Inside the
+  function, calling it gives no fact. Nothing checks the callable passed for
+  it. Only a chain whose result applies an abstract `p` is read; see
+  [Two arguments](#two-arguments-a-relation-between-sibling-slots). (Todo:
+  chain predicate contract pass site.)
+- **A callback called in two steps gives no fact.** If a body takes the
+  partial call into a `let` and then tests the result, it establishes nothing.
+  So a combinator written that way does not prove its relational return.
+  (Todo: abstract curried two-step call, no fact.)
+- **A relation is lost through a generic function.** A function generic in `k`
+  and `v` keeps each slot's fact. But it may pair one entry's key with another
+  entry's value, as `shift` does, so its result is a recorded skip. To carry a
+  relation through a combinator, give it a two-argument abstract refinement.
+  (No todo: a ruling, recorded in the progress note for phase 1b of the
+  multi-argument abstract refinements.)
+- **A container named with a module qualifier is unknown when its bare
+  name is ambiguous.** If two modules each declare `Bx`, a parameter typed
+  `A.Bx({Int | _ > 0})` gives no element fact, and the call is a skip. A
+  qualifier on a uniquely declared container, such as `Queue.Queue` or
+  `Deque.Deque`, is read. (No todo: a ruling, recorded in the progress note
+  for the `Deque.to_list` element fact.)
 
-```bash
-march --check --no-measure-axioms app.march
+```march
+Map.insert(Map.empty(), "b", 5, cmp)    -- into a positive-value demand: skip
+List((k, v))                            -- a list of pairs: no slots
+kk : ({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (y > x)}   -- no fact
+let g = keep(k)                         -- then `if g(v)`: no fact
+need_up(shift(a))                       -- the relation is lost: skip
+b : A.Bx({Int | _ > 0})                 -- two modules declare `Bx`: skip
 ```
-
----
-
-## Practical Rules
-
-1. **Refine the contract, not the convenience.** Add `{Int | _ > 0}` where a
-   non-positive value is a real bug (a chunk size, an unguarded divisor), not
-   to every `Int`. Many March APIs already clamp defensively and have no real
-   precondition.
-2. **Guard, then call.** A precondition you can't satisfy with a literal is
-   discharged by an `if`/`when` guard right before the call.
-3. **Reach for `assert` as your lemma.** When you *know* a fact the checker
-   can't derive, `assert(p)` makes it available, and documents the assumption.
-4. **Annotate measures you'll reason about.** A `@[measure]` only earns its
-   keep if a predicate mentions it; keep them total, exhaustive, and structural
-   so they pass the gate.
 
 ---
 
@@ -3740,8 +6427,12 @@ tags, `Bool`, `Float`, `String` `len`, non-empty `List`, and the stdlib
 output on one program using all of them: an exact byte match, exit 0 both. The
 golden corpus itself remains 46/46 MATCH.
 
-## Next Steps
+---
+
+## See also
 
 - [Type System](type-system.md): the types refinements attach to
 - [Linear Types](linear-types.md): the other compile-time safety layer
 - [Pattern Matching](pattern-matching.md): `match` guards feed path sensitivity
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/): `cap no_panic` and `cap verified` beside the other behavioral caps
+- [Safety by Construction](safety-by-construction.md): refinements as one of three layers

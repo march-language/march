@@ -1,0 +1,49 @@
+-- Regression (2026-10-12): Set.union, then Set.intersection / Set.difference
+-- over the same sets with one comparator closure was a compiled use-after-free.
+-- cprop rewrote node_fold's `reuse node as <closure>` token to the alias the
+-- inlined body bound for `node`, while the `case node` scrutinee kept the
+-- alias. Codegen pairs the two by name to dup the children of a SHARED node,
+-- so the dup was skipped. union's fold then freed b's tree nodes under the
+-- caller, and the next operation on b read freed memory.
+--
+-- The comparator and both sets are shared across every operation below, each
+-- operation runs twice, and the sets are big enough to have branch nodes.
+mod SetOpsSharedComparator do
+  needs IO.Console
+
+  fn range(lo : Int, hi : Int) : List(Int) do
+    List.range(lo, hi)
+  end
+
+  fn show(s : Set(Int)) : String do
+    to_string(Set.to_list(s))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let lt = fn (x : Int) -> fn (y : Int) -> x < y
+    let a = Set.from_list([1, 2], lt)
+    let b = Set.from_list([2, 3], lt)
+    println(show(Set.union(a, b, lt)))
+    println(show(Set.intersection(a, b, lt)))
+    println(show(Set.difference(a, b, lt)))
+    println(show(Set.union(b, a, lt)))
+    println(show(Set.difference(b, a, lt)))
+    let big_a = Set.from_list(range(0, 60), lt)
+    let big_b = Set.from_list(range(40, 100), lt)
+    let u = Set.union(big_a, big_b, lt)
+    let i = Set.intersection(big_a, big_b, lt)
+    let d = Set.difference(big_a, big_b, lt)
+    println(to_string(Set.size(u)) ++ " " ++ to_string(Set.size(i)) ++ " " ++ to_string(Set.size(d)))
+    println(show(i))
+    println(to_string(Set.is_subset(i, big_a, lt)) ++ " " ++ to_string(Set.is_subset(big_a, i, lt)))
+    let u2 = Set.union(big_a, big_b, lt)
+    let i2 = Set.intersection(big_b, big_a, lt)
+    let d2 = Set.difference(big_b, big_a, lt)
+    println(to_string(Set.size(u2)) ++ " " ++ to_string(Set.size(i2)) ++ " " ++ to_string(Set.size(d2)))
+    println(to_string(Set.contains(big_a, 59, lt)) ++ " " ++ to_string(Set.contains(big_b, 39, lt)))
+    let big_a2 = Set.insert(Set.remove(big_a, 10, lt), 500, lt)
+    println(to_string(Set.size(big_a)) ++ " " ++ to_string(Set.size(big_a2)))
+    println(show(Set.difference(big_a2, big_a, lt)) ++ " " ++ show(Set.difference(big_a, big_a2, lt)))
+    println(show(a) ++ " " ++ show(b) ++ " " ++ to_string(Set.size(big_b)))
+  end
+end

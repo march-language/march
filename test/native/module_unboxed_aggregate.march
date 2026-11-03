@@ -1,0 +1,77 @@
+-- A scalar-only single-constructor type declared inside a NESTED module gets
+-- the same unboxed (LLVM struct value) layout as one declared at the top of
+-- the entry module (specs/todos/2026-10-07-module-type-layouts.md, first
+-- slice).  Lowering registers it as `Geo.P2` and builds values under the
+-- short key `P2.P2`; before the fix the short spelling missed the qualified
+-- declaration, so every value was a boxed heap cell.  Each line below crosses
+-- a boundary where the unboxed and boxed forms must agree: match, a list
+-- element (ptr slot), a tuple field, a closure capture, a boxed
+-- constructor's field, structural equality and the generic `to_string`.
+-- SIGNAL: the compiled output matches the interpreter's.  The layout itself
+-- is pinned by test_codegen "module-declared aggregate is unboxed".
+mod ModuleUnboxedAggregate do
+  needs IO.Console
+
+  mod Geo do
+    type P2 = P2(Int, Int)
+    type V3 = V3(Float, Float, Float)
+    type Seg = Seg(P2, Int)
+
+    derive Eq for P2
+
+    fn add(a : P2, b : P2) : P2 do
+      match (a, b) do
+        (P2(ax, ay), P2(bx, cy)) -> P2(ax + bx, ay + cy)
+      end
+    end
+
+    fn px(p : P2) : Int do
+      match p do
+        P2(x, _) -> x
+      end
+    end
+
+    fn scale(v : V3, k : Float) : V3 do
+      match v do
+        V3(x, y, z) -> V3(x *. k, y *. k, z *. k)
+      end
+    end
+
+    fn vsum(v : V3) : Float do
+      match v do
+        V3(x, y, z) -> x +. y +. z
+      end
+    end
+  end
+
+  pfn py(p : Geo.P2) : Int do
+    match p do
+      Geo.P2(_, y) -> y
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let a = Geo.P2(1, 2)
+    let b = Geo.add(a, Geo.P2(10, 20))
+    println(int_to_string(Geo.px(b) + py(b)))
+    println(float_to_string(Geo.vsum(Geo.scale(Geo.V3(1.0, 2.0, 3.0), 2.0))))
+    let ps = [Geo.P2(1, 1), Geo.P2(2, 3), Geo.P2(4, 5)]
+    let s = List.fold_left(ps, Geo.P2(0, 0), fn (acc, p) -> Geo.add(acc, p))
+    println(int_to_string(Geo.px(s)) ++ "," ++ int_to_string(py(s)))
+    let t = (Geo.P2(7, 8), 9)
+    match t do
+      (p, n) -> println(int_to_string(Geo.px(p) + py(p) + n))
+    end
+    let off = Geo.P2(100, 200)
+    let shifted = List.map(ps, fn p -> Geo.add(p, off))
+    println(int_to_string(List.fold_left(shifted, 0, fn (acc, p) -> acc + py(p))))
+    let seg = Geo.Seg(Geo.P2(3, 4), 5)
+    match seg do
+      Geo.Seg(p, n) -> println(int_to_string(Geo.px(p) * py(p) * n))
+    end
+    println(bool_to_string(Geo.P2(1, 2) == a))
+    println(bool_to_string(Geo.P2(2, 1) == a))
+    println(to_string(b))
+    println(to_string(seg))
+  end
+end

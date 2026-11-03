@@ -1,10 +1,18 @@
 -- SortedSet module: AVL tree-based sorted set.
 --
--- Wraps OrderedMap with unit values for a pure set interface.
+-- Same AVL design as OrderedMap, storing elements only (its own tree type,
+-- not an OrderedMap underneath).
 -- Keys are ordered by a user-supplied comparator function:
 --   cmp(a, b) < 0  means a < b
 --   cmp(a, b) = 0  means a = b
 --   cmp(a, b) > 0  means a > b
+-- The built-in `compare` works for Int, String and other ordered values.
+-- add / remove / member are O(log n); to_list and fold run in ascending order.
+-- Binary operations (union, intersect, difference, subset) use each
+-- argument's own comparator for its own tree; the result of union,
+-- intersect and difference keeps `a`'s comparator.
+--
+-- doc: try
 
 mod SortedSet do
 
@@ -203,73 +211,190 @@ mod SortedSet do
 
   -- ---- Public API ----
 
-  doc "Creates a new empty sorted set with the given comparator."
+  doc """
+  Creates a new empty sorted set with the given comparator.
+
+  ## Examples
+
+      march> SortedSet.is_empty(SortedSet.new(compare))
+      true
+  """
   fn new(cmp : a -> a -> Int) : {cmp: a -> a -> Int, tree: AvlTree(a)} do
     {cmp: cmp, tree: AvlLeaf}
   end
 
-  doc "Adds element v to the set. No-op if already present."
+  doc """
+  Adds element v to the set. No-op if already present.  O(log n).
+
+  ## Examples
+
+      march> SortedSet.to_list(SortedSet.add(SortedSet.from_list([3, 1], compare), 2))
+      [1, 2, 3]
+      march> SortedSet.size(SortedSet.add(SortedSet.from_list([1], compare), 1))
+      1
+  """
   fn add(s : {cmp: a -> a -> Int, tree: AvlTree(a)}, v : a) : {cmp: a -> a -> Int, tree: AvlTree(a)} do
     {cmp: s.cmp, tree: tree_insert(s.tree, s.cmp, v)}
   end
 
-  doc "Removes element v from the set. No-op if not present."
+  doc """
+  Removes element v from the set. No-op if not present.  O(log n).
+
+  ## Examples
+
+      march> SortedSet.to_list(SortedSet.remove(SortedSet.from_list([1, 2, 3], compare), 2))
+      [1, 3]
+      march> SortedSet.to_list(SortedSet.remove(SortedSet.from_list([1, 2, 3], compare), 9))
+      [1, 2, 3]
+  """
   fn remove(s : {cmp: a -> a -> Int, tree: AvlTree(a)}, v : a) : {cmp: a -> a -> Int, tree: AvlTree(a)} do
     {cmp: s.cmp, tree: tree_delete(s.tree, s.cmp, v)}
   end
 
-  doc "Returns true if v is in the set."
+  doc """
+  Returns true if v is in the set.  O(log n).
+
+  ## Examples
+
+      march> SortedSet.member(SortedSet.from_list(["a", "b"], compare), "b")
+      true
+      march> SortedSet.member(SortedSet.from_list(["a", "b"], compare), "c")
+      false
+  """
   fn member(s : {cmp: a -> a -> Int, tree: AvlTree(a)}, v : a) : Bool do
     tree_member(s.tree, s.cmp, v)
   end
 
-  doc "Returns all elements in sorted order."
+  doc """
+  Returns all elements in ascending order.
+
+  ## Examples
+
+      march> SortedSet.to_list(SortedSet.from_list(["pear", "apple", "fig"], compare))
+      ["apple", "fig", "pear"]
+      march> SortedSet.to_list(SortedSet.new(compare))
+      []
+  """
   fn to_list(s : {cmp: a -> a -> Int, tree: AvlTree(a)}) : List(a) do
     tree_to_list(s.tree, Nil)
   end
 
-  doc "Builds a set from a list of elements."
+  doc """
+  Builds a set from a list of elements; duplicates are kept once.  O(n log n).
+
+  ## Examples
+
+      march> SortedSet.to_list(SortedSet.from_list([3, 1, 2, 3, 1], compare))
+      [1, 2, 3]
+  """
   fn from_list(items : List(a), cmp : a -> a -> Int) : {cmp: a -> a -> Int, tree: AvlTree(a)} do
     List.fold_left(items, new(cmp), fn (s, v) -> add(s, v))
   end
 
-  doc "Returns the number of elements in the set."
+  doc """
+  Returns the number of elements in the set.  O(n): the count is not cached.
+
+  ## Examples
+
+      march> SortedSet.size(SortedSet.from_list([5, 5, 6], compare))
+      2
+  """
   fn size(s : {cmp: a -> a -> Int, tree: AvlTree(a)}) : Int do
     tree_size(s.tree)
   end
 
-  doc "Returns the smallest element, or None if empty."
+  doc """
+  Returns the smallest element, or None if empty.  O(log n).
+
+  ## Examples
+
+      march> SortedSet.min(SortedSet.from_list([3, 1, 2], compare))
+      Some(1)
+      march> SortedSet.min(SortedSet.new(compare))
+      None
+  """
   fn min(s : {cmp: a -> a -> Int, tree: AvlTree(a)}) : Option(a) do
     tree_min(s.tree)
   end
 
-  doc "Returns the largest element, or None if empty."
+  doc """
+  Returns the largest element, or None if empty.  O(log n).
+
+  ## Examples
+
+      march> SortedSet.max(SortedSet.from_list([3, 1, 2], compare))
+      Some(3)
+      march> SortedSet.max(SortedSet.new(compare))
+      None
+  """
   fn max(s : {cmp: a -> a -> Int, tree: AvlTree(a)}) : Option(a) do
     tree_max(s.tree)
   end
 
-  doc "Returns a set containing all elements in either a or b."
+  doc """
+  Returns a set containing all elements in either a or b (adds each element
+  of b to a; the result keeps a's comparator).
+
+  ## Examples
+
+      march> SortedSet.to_list(SortedSet.union(SortedSet.from_list([1, 3], compare), SortedSet.from_list([2, 3], compare)))
+      [1, 2, 3]
+  """
   fn union(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : {cmp: k -> k -> Int, tree: AvlTree(k)} do
     List.fold_left(to_list(b), a, fn (s, v) -> add(s, v))
   end
 
-  doc "Returns a set containing only elements in both a and b."
+  doc """
+  Returns a set containing only elements in both a and b (the result keeps
+  a's comparator).
+
+  ## Examples
+
+      march> SortedSet.to_list(SortedSet.intersect(SortedSet.from_list([1, 2, 3], compare), SortedSet.from_list([2, 3, 4], compare)))
+      [2, 3]
+      march> SortedSet.is_empty(SortedSet.intersect(SortedSet.from_list([1], compare), SortedSet.from_list([2], compare)))
+      true
+  """
   fn intersect(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : {cmp: k -> k -> Int, tree: AvlTree(k)} do
     List.fold_left(to_list(a), new(a.cmp), fn (s, v) ->
       if tree_member(b.tree, b.cmp, v) do add(s, v) else s end)
   end
 
-  doc "Returns a set of elements in a that are not in b."
+  doc """
+  Returns a set of elements in a that are not in b (removes each element of
+  b from a; the result keeps a's comparator).
+
+  ## Examples
+
+      march> SortedSet.to_list(SortedSet.difference(SortedSet.from_list([1, 2, 3], compare), SortedSet.from_list([2, 9], compare)))
+      [1, 3]
+  """
   fn difference(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : {cmp: k -> k -> Int, tree: AvlTree(k)} do
     List.fold_left(to_list(b), a, fn (s, v) -> remove(s, v))
   end
 
-  doc "Folds over the set in sorted order: f(acc, element) -> acc."
+  doc """
+  Folds over the set in ascending order: f(acc, element) -> acc.
+
+  ## Examples
+
+      march> SortedSet.fold(SortedSet.from_list([3, 1, 2], compare), 0, fn (acc, x) -> acc * 10 + x)
+      123
+  """
   fn fold(s : {cmp: a -> a -> Int, tree: AvlTree(a)}, acc : b, f : b -> a -> b) : b do
     tree_fold(s.tree, acc, f)
   end
 
-  doc "Returns true if the set is empty."
+  doc """
+  Returns true if the set is empty.  O(1).
+
+  ## Examples
+
+      march> SortedSet.is_empty(SortedSet.remove(SortedSet.from_list([1], compare), 1))
+      true
+      march> SortedSet.is_empty(SortedSet.from_list([1], compare))
+      false
+  """
   fn is_empty(s : {cmp: a -> a -> Int, tree: AvlTree(a)}) : Bool do
     match s.tree do
     AvlLeaf -> true
@@ -277,7 +402,19 @@ mod SortedSet do
     end
   end
 
-  doc "Returns true if a is a subset of b (every element of a is in b)."
+  doc """
+  Returns true if a is a subset of b (every element of a is in b).  The
+  empty set is a subset of every set.
+
+  ## Examples
+
+      march> SortedSet.subset(SortedSet.from_list([1, 3], compare), SortedSet.from_list([1, 2, 3], compare))
+      true
+      march> SortedSet.subset(SortedSet.from_list([1, 4], compare), SortedSet.from_list([1, 2, 3], compare))
+      false
+      march> SortedSet.subset(SortedSet.new(compare), SortedSet.from_list([1], compare))
+      true
+  """
   fn subset(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : Bool do
     List.all(to_list(a), fn v -> tree_member(b.tree, b.cmp, v))
   end

@@ -1,0 +1,19 @@
+-- Abstract refinements, phase 4 (specs/plans/2026-10-07-abstract-refinements-phase4-plan.md):
+-- a user combinator declared with the shorthand (`keep : a -> Bool[p]`,
+-- result `List(a[p])`) proves its own body and instantiates `p` at its
+-- calls exactly as the spelled-out form does, including at a parameter slot
+-- (`need`).  Under `cap verified`, exit 0 means every obligation PROVED.
+-- Reject companion: reject/t313.
+mod AbsShorthand do
+  cap verified
+  fn keep_all(xs : List(a), keep : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do Cons(h, keep_all(t, keep)) else keep_all(t, keep) end
+    end
+  end
+  fn need(xs : List(a[p]), keep : a -> Bool[p]) : Int do List.length(xs) end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn go(ys : List(Int)) : Int do sum_pos(keep_all(ys, fn y -> y > 0)) end
+  fn at_param(pos : List({Int | _ > 0})) : Int do need(pos, fn y -> y > 0) end
+end

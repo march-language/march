@@ -1,0 +1,20 @@
+exit: 1
+-- ERROR --------------- errors/invalid_decreases_1.march
+
+@[decreases]: `xs` is a `List`, not an Int: a metric component must be an Int expression. To measure a data structure, apply a measure to it, such as `len(xs)` or a `@[measure]` like `size(xs)` [invalid_decreases]
+
+2 |   @[decreases(xs)]
+                  ^^
+
+    run `march --explain invalid_decreases`
+
+
+-- WARNING --------------- errors/invalid_decreases_1.march
+
+Warning: function `count` is structurally recursive but not tail-recursive. If the recursive call is the direct argument of a constructor in tail position, tail-recursion-modulo-cons compiles it to a loop with no extra stack (it always runs). Otherwise it uses O(depth) stack space and deep input can overflow the stack — consider an accumulator parameter. [non_tail_recursion]
+
+6 |       Cons(_, t) -> 1 + count(t)
+                            ^^^^^^^^
+
+
+

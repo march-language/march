@@ -8,7 +8,7 @@
  (libraries unix march_tir march_ast march_typecheck march_cas)
  (foreign_stubs
   (language c)
-  (names jit_stubs jit_orc_stubs)
+  (names jit_stubs jit_orc_stubs jit_emit_stubs)
   (flags (:standard (:include jit_c_flags.sexp))))
  (c_library_flags (:include jit_link_flags.sexp)))
 

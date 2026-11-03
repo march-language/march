@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: cannot verify precondition `_ < 0` on `need_neg`
+-- Element refinements, a binder named like a name its element slot mentions
+-- (2026-10-18, found with phase 4 of
+-- specs/2026-10-18-element-flow-followups-design.md): `xs : List({Int | _ <
+-- n})` destructured as `Cons(n, _)` handed the NEW `n` the slot `_ < n`, read
+-- as `n < n`, a contradiction from which `need_neg(n)` "proved" (`g(5, [3])`
+-- passes 3).  The same through `let n = hd(xs)`, and, since phase 4 lends
+-- `below(n)`'s entry at the call, through `match below(k) do Cons(k, _)`.
+-- Such a slot now gives the binder no fact, so under `cap verified` the
+-- unproved `need_neg(n)` rejects the module.  Before, it was ACCEPTED.
+mod ElementBinderCapture do
+  cap verified
+  fn need_neg(k : {Int | _ < 0}) : Int do k end
+  fn g(n : Int, xs : List({Int | _ < n})) : Int do
+    match xs do
+      Cons(n, _) -> need_neg(n)
+      Nil -> 0
+    end
+  end
+end

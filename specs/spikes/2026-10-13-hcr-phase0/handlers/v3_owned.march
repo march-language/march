@@ -1,0 +1,19 @@
+    -- v3: BORROW FLIP.  handle stores the Conn into a list, an owning use, so
+    -- borrow inference makes its parameter OWNED in this build.  The running
+    -- caller was compiled against v1's BORROWED mode.
+    fn handle(conn: SpikeConn): Int do
+      let l = [conn, conn]
+      List.length(l) + conn.status
+    end
+    fn mk(conn: SpikeConn): Int -> Int do
+      let s = conn.status
+      fn x -> x + s
+    end
+    fn tag(): String do
+      "v3"
+    end
+    -- count now OWNS its List: storing it in a list is an owning use.
+    fn count(hs: List(String)): Int do
+      let l = [hs, hs]
+      List.length(l) + 1
+    end

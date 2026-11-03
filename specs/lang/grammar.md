@@ -1505,7 +1505,10 @@ ty_nat_mul ::= ty_nat_mul "*" ty_app
 
 ty_app     ::= upper_name "(" separated_nonempty_list(",", ty) ")"
              | upper_name "." dotted_upper_tail "(" separated_nonempty_list(",", ty) ")"
-             | ty_atom
+             | ty_post
+
+ty_post    ::= ty_atom
+             | ty_atom "[" lower_name "]"                      (* abstract refinement: {T | p(_)} *)
 
 ty_atom    ::= INT
              | LOWER_IDENT
@@ -1843,6 +1846,18 @@ There are also two grammar-level error-recovery alternatives specific to
 `fn_decl` (`parser.mly:398–407`), both firing when the parameter list closes
 but no `do` follows: `` I was expecting `do` to start the function body
 here: `` for both `fn` and `pfn`.
+
+**Attributes.** A `fn` may be preceded by attributes (`fn_attr`): `@[name]`,
+`@[name(value)]` and the unbracketed `@name(value)`. The bracketed payload is a
+comma-separated list of expressions (since 2026-10-27; termination design
+`specs/2026-10-26-termination-checking-design.md` §2.1). A payload that is one
+bare identifier keeps the `name:value` string every attribute reader expects
+(`@[no_alloc(warn)]` is `no_alloc:warn`); `@[decreases(e, ...)]` keeps its
+expressions, in the declaration's `fn_attr_args`; any other attribute with a
+non-identifier payload is a parse error naming it. `@[no_alloc(transient)]`
+has its own rule, since `transient` is a keyword. The change left menhir at 7
+conflicts. Witness:
+[`parse/p44_decreases_attribute.march`](grammar/parse/p44_decreases_attribute.march).
 
 ### 8.3 `let` declarations
 

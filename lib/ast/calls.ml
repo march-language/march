@@ -254,3 +254,114 @@ let rec spawned_actor_names (acc : string list) (e : Ast.expr) : string list =
   | Ast.ESigil (_, content, _) -> spawned_actor_names acc content
   | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)
   | Ast.ELit _ | Ast.EVar _ -> acc
+
+(** One application site found by [free_app_sites]. *)
+type app_site = {
+  as_callee : string;
+      (** The callee: a bare name not bound inside the walked expression, or a
+          qualified ["Mod.fn"]. *)
+  as_args : string option list;
+      (** One entry per argument: [Some x] when the argument is a bare variable
+          [x] that is free at that point (not rebound by an enclosing binder
+          inside the walked expression), [None] for anything else. The list's
+          length is the call's argument count. *)
+}
+
+(** [free_app_sites ?bound e] is every application in [e] whose callee is a
+    variable that is FREE at the call (bare and not bound by a lambda / [let] /
+    match-arm / local [fn] / [let?] / [let*] binder inside [e], nor in
+    [bound]), or a qualified name.  Scope rules are those of
+    [builtin_candidate_calls].
+
+    Used by the typechecker's callback call-arity analysis
+    ([Typecheck_callarity]): how many arguments a function parameter is
+    applied to, and which callee parameters it is passed on to. *)
+let free_app_sites ?(bound = []) (e : Ast.expr) : app_site list =
+  let rec go bound acc (e : Ast.expr) =
+    let go' = go bound in
+    let arg_names args =
+      List.map (fun (a : Ast.expr) ->
+          match a with
+          | Ast.EVar n
+            when (not (String.contains n.Ast.txt '.'))
+                 && not (SSet.mem n.Ast.txt bound) -> Some n.Ast.txt
+          | _ -> None) args
+    in
+    match e with
+    | Ast.EApp (Ast.EVar fn_name, args, _) ->
+      let acc =
+        if SSet.mem fn_name.Ast.txt bound then acc
+        else { as_callee = fn_name.Ast.txt; as_args = arg_names args } :: acc
+      in
+      List.fold_left go' acc args
+    | Ast.EApp (Ast.EField (Ast.EVar mod_name, fn_name, _), args, _)
+      when not (SSet.mem mod_name.Ast.txt bound) ->
+      let acc =
+        { as_callee = mod_name.Ast.txt ^ "." ^ fn_name.Ast.txt;
+          as_args = arg_names args } :: acc in
+      List.fold_left go' acc args
+    | Ast.EApp (f, args, _) -> List.fold_left go' (go' acc f) args
+    | Ast.ECon (_, args, _) -> List.fold_left go' acc args
+    | Ast.ELam (params, body, _) ->
+      let bound =
+        List.fold_left (fun s (p : Ast.param) -> SSet.add p.Ast.param_name.Ast.txt s)
+          bound params
+      in
+      go bound acc body
+    | Ast.EBlock (es, _) ->
+      let _, acc =
+        List.fold_left (fun (bound, acc) (ex : Ast.expr) ->
+            let acc = go bound acc ex in
+            let bound =
+              match ex with
+              | Ast.ELet (b, _) ->
+                List.fold_left (fun s v -> SSet.add v s) bound
+                  (pattern_vars [] b.Ast.bind_pat)
+              | Ast.ELetFn (n, _, _, _, _) -> SSet.add n.Ast.txt bound
+              | _ -> bound
+            in
+            (bound, acc))
+          (bound, acc) es
+      in
+      acc
+    | Ast.ELet (b, _) -> go' acc b.Ast.bind_expr
+    | Ast.EMatch (scrut, arms, _) ->
+      let acc = go' acc scrut in
+      List.fold_left (fun a (arm : Ast.branch) ->
+          let bound =
+            List.fold_left (fun s v -> SSet.add v s) bound
+              (pattern_vars [] arm.Ast.branch_pat)
+          in
+          let a = Option.fold ~none:a ~some:(go bound a) arm.Ast.branch_guard in
+          go bound a arm.Ast.branch_body)
+        acc arms
+    | Ast.ETuple (es, _) -> List.fold_left go' acc es
+    | Ast.ERecord (fields, _) ->
+      List.fold_left (fun a (_, ex) -> go' a ex) acc fields
+    | Ast.ERecordUpdate (base, fields, _) ->
+      List.fold_left (fun a (_, ex) -> go' a ex) (go' acc base) fields
+    | Ast.EField (inner, _, _) -> go' acc inner
+    | Ast.EIf (c, t, f, _) -> go' (go' (go' acc c) t) f
+    | Ast.ECond (arms, _) ->
+      List.fold_left (fun a (ce, be) -> go' (go' a ce) be) acc arms
+    | Ast.EPipe (a, b, _) -> go' (go' acc a) b
+    | Ast.EAnnot (ex, _, _) -> go' acc ex
+    | Ast.EAtom (_, args, _) -> List.fold_left go' acc args
+    | Ast.ESend (a, b, _) -> go' (go' acc a) b
+    | Ast.ESpawn (ex, _) -> go' acc ex
+    | Ast.EDbg (Some inner, _) -> go' acc inner
+    | Ast.ELetFn (n, params, _, body, _) ->
+      let bound =
+        List.fold_left (fun s (p : Ast.param) -> SSet.add p.Ast.param_name.Ast.txt s)
+          (SSet.add n.Ast.txt bound) params
+      in
+      go bound acc body
+    | Ast.ELetQ (pat, rhs, body, _) | Ast.ELetStar (pat, rhs, body, _) ->
+      let acc = go' acc rhs in
+      go (List.fold_left (fun s v -> SSet.add v s) bound (pattern_vars [] pat)) acc body
+    | Ast.EAssert (ex, _) -> go' acc ex
+    | Ast.ESigil (_, content, _) -> go' acc content
+    | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)
+    | Ast.ELit _ | Ast.EVar _ -> acc
+  in
+  go (SSet.of_list bound) [] e

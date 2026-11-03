@@ -228,6 +228,26 @@ sweep() {
   total_pass=$((total_pass+pass)); total_fail=$((total_fail+fail)); total_ran=$((total_ran+$#))
 }
 
+# ── Hot reload: a reclaimed version's closures (test/hcr_closure_pin) ─────
+# A --hot-reload base plus four --compile-so patches deployed in process, then
+# a call of closures the first patch built after the 3-version ring reclaimed
+# it. Not a single-file program, so the sweep above cannot build it; the
+# fixture's own script does, with MARCH_SANITIZE=1 for the base and every
+# patch. Its stdout must still match the plain test/dune rule's expected file.
+# specs/progress/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md
+hcr_closure_pin_leg() {
+  local d="$root/test/hcr_closure_pin" o="$work/hcr_closure_pin"
+  if MARCH_SANITIZE=1 bash "$d/run.sh" "$bin" "$o" >"$work/hcr_closure_pin.log" 2>&1 \
+     && diff -q "$work/hcr_closure_pin.log" "$d/expected" >/dev/null \
+     && ! grep -qiE "AddressSanitizer|runtime error:|LeakSanitizer" "$work/hcr_closure_pin.log" "$o/run.err"; then
+    echo "  [hcr/hcr_closure_pin] CLEAN"; total_pass=$((total_pass+1))
+  else
+    echo "  [hcr/hcr_closure_pin] SANITIZER FAIL"; sed 's/^/    /' "$work/hcr_closure_pin.log"
+    total_fail=$((total_fail+1))
+  fi
+  total_ran=$((total_ran+1))
+}
+
 # SANITIZE_TWO_NODE_ONLY=1 skips the golden and native sweeps, for the CI
 # shards after the first: shard 1 runs them plus its two-node slice, the
 # others only their slice (see SANITIZE_TWO_NODE_SHARD below).
@@ -237,6 +257,8 @@ else
   sweep golden 25 "$here"/*.march
   echo
   sweep native 25 "${native_files[@]}"
+  echo
+  hcr_closure_pin_leg
 fi
 
 # ── Corpus 3: the two-node scenarios ──────────────────────────────────────
@@ -251,14 +273,15 @@ fi
 # Slower than the per-program sweeps (two processes, real timeouts, ASAN's
 # 2-20x), so each scenario gets its own generous deadline via the harness's own
 # TWO_NODE_TIMEOUT rather than the `perl alarm` the sweep() helper uses.
-# A scenario that needs root it does not have (partition, iptables) exits 3;
-# that is reported as SKIP, not as a pass — the count at the end is what says
-# whether this gate ran.
+# A scenario may exit 3 when a required host capability is absent (partition,
+# iptables) or when it explicitly declines an ASan run. That is reported as a
+# reasoned SKIP, not as a pass — the count at the end is what says whether this
+# gate ran.
 #
 # SANITIZE_TWO_NODE_SHARD=K/N sweeps only shard K of N (scripts/two-node.sh
 # --list K/N), for splitting this corpus across CI jobs; unset, all of it.
 two_node_sweep() {
-  local pass=0 fail=0 skip=0 s rc list
+  local pass=0 fail=0 skip=0 s rc list skip_reason
   # Captured, not looped over inline: `for s in $(...)` ignores a failing
   # --list and the sweep would quietly cover zero scenarios.
   list=$("$root/scripts/two-node.sh" --list "${SANITIZE_TWO_NODE_SHARD:-1/1}") \
@@ -277,7 +300,13 @@ two_node_sweep() {
     TWO_NODE_PREBUILT="$work/two-node-prebuilt" \
       "$root/scripts/two-node.sh" "$s" >"$work/two-node-$s.log" 2>&1; rc=$?
     if [ $rc -eq 3 ]; then
-      echo "  [two-node/$s] SKIP (needs root)"; skip=$((skip+1))
+      skip_reason=$(sed -n '/[^[:space:]]/h; ${g;p;}' "$work/two-node-$s.log")
+      if [ -n "$skip_reason" ]; then
+        echo "  [two-node/$s] SKIP ($skip_reason)"
+      else
+        echo "  [two-node/$s] SKIP (scenario exited 3 without a reason)"
+      fi
+      skip=$((skip+1))
     elif [ $rc -ne 0 ] || grep -qiE "AddressSanitizer|runtime error:" "$work/two-node-$s.log"; then
       echo "  [two-node/$s] SANITIZER FAIL (rc=$rc)"; sed 's/^/    /' "$work/two-node-$s.log"
       fail=$((fail+1))

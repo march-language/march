@@ -1,0 +1,28 @@
+-- Regression (2026-10-12): an entry module named like a stdlib module the rest
+-- of the stdlib depends on (`List`) used to strip the stdlib's List module, so
+-- `--compile` failed with "body could not be specialized" (Actor's call to
+-- `List.head_opt`) on a program the interpreter runs.  The stdlib module is now
+-- kept, distinct from the entry: the entry's own `List.length` call reaches its
+-- own `length`, every other `List.f` (and the stdlib's own `List.length`, here
+-- inside Stats.count) reaches the stdlib.
+mod List do
+  needs IO.Console
+
+  fn length(_xs : List(Int)) : Int do 42 end
+
+  fn shout(s : String) : String do "own shout " ++ s end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(to_string(List.length([1, 2, 3])))
+    println(to_string(length([1, 2])))
+    println(List.shout("x"))
+    println(to_string(List.reverse([1, 2, 3])))
+    println(to_string(List.map([1, 2, 3], fn x -> x * 2)))
+    println(to_string(List.head_opt([7, 8])))
+    println(to_string(Stats.count([1.0, 2.0, 3.0])))
+    let lt = fn (a : Int) -> fn (b : Int) -> a < b
+    let m = Map.insert(Map.insert(Map.empty(), 2, "b", lt), 1, "a", lt)
+    println(to_string(Map.to_list(m)))
+    println(String.join(["a", "b", "c"], "-"))
+  end
+end

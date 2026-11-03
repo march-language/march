@@ -1,7 +1,12 @@
 -- Canvas — 2D drawing bindings for March compiled with --target js.
 --
--- Wraps the browser's CanvasRenderingContext2D. Requires --target js;
--- calling these functions from a native build panics.
+-- Wraps the browser's CanvasRenderingContext2D. Each call maps one-to-one
+-- onto the matching context method or property (`fill_rect` is `fillRect`,
+-- `set_fill_style` assigns `fillStyle`, ...), so canvas semantics apply:
+-- coordinates are Floats in canvas units with the origin at the top-left and
+-- y growing downward, and an invalid style or alignment string is silently
+-- ignored by the browser. Requires --target js; the native compiler and REPL
+-- have no implementation of these externs.
 --
 -- Usage:
 --   match Js.Dom.find("game-canvas") do
@@ -72,94 +77,208 @@ mod Js.Canvas do
 
   -- ── Public API ─────────────────────────────────────────────────────────
 
-  doc "Get the 2D drawing context for a `<canvas>` element. Returns `None` if `node` is not a canvas element."
+  doc """
+  Get the 2D drawing context of a `<canvas>` element (`node.getContext("2d")`).
+  Returns `None` when the browser cannot provide one, e.g. the canvas already
+  has a context of another kind (WebGL). Repeated calls on the same canvas
+  return the same context. `node` must be a canvas element: on any other
+  element the underlying `getContext` call does not exist and throws.
+
+  ## Examples
+
+      match Js.Dom.find("game-canvas") do
+        None -> ()
+        Some(node) ->
+          match Js.Canvas.get_context(node) do
+            None -> ()
+            Some(ctx) -> Js.Canvas.fill_rect(ctx, 0.0, 0.0, 10.0, 10.0)
+          end
+      end
+  """
   fn get_context(node)                 do canvas_get_context(node) end
 
-  doc "Push the current drawing state (transform, styles) onto a stack. Pair with `restore`."
+  doc """
+  Push the current drawing state onto the context's state stack: the
+  transform, clip region, fill/stroke styles, line width, global alpha, font
+  and text alignment. Pair every `save` with a `restore`.
+
+  ## Examples
+
+      Js.Canvas.save(ctx)
+      Js.Canvas.translate(ctx, 100.0, 50.0)
+      Js.Canvas.rotate(ctx, 0.5)
+      Js.Canvas.fill_rect(ctx, -10.0, -10.0, 20.0, 20.0)   -- rotated square
+      Js.Canvas.restore(ctx)                              -- transform undone
+  """
   fn save(ctx)                         do canvas_save(ctx) end
 
-  doc "Pop the most recently `save`d drawing state, restoring transform and styles."
+  doc "Pop the most recently `save`d drawing state, restoring its transform and styles. No-op if the stack is empty."
   fn restore(ctx)                      do canvas_restore(ctx) end
 
-  doc "Translate the drawing origin by `(x, y)`."
+  doc "Move the drawing origin by `(x, y)`; composes with the current transform (use `save`/`restore` to undo)."
   fn translate(ctx, x, y)              do canvas_translate(ctx, x, y) end
 
-  doc "Rotate subsequent drawing by `angle` radians, clockwise around the current origin."
+  doc "Rotate subsequent drawing by `angle` radians around the current origin; positive angles turn clockwise on screen (y points down)."
   fn rotate(ctx, angle)                do canvas_rotate(ctx, angle) end
 
-  doc "Scale subsequent drawing by `(sx, sy)`."
+  doc "Scale subsequent drawing by `sx` horizontally and `sy` vertically around the current origin (negative values mirror)."
   fn scale(ctx, sx, sy)                do canvas_scale(ctx, sx, sy) end
 
-  doc "Set the fill color/style used by `fill_rect`, `fill`, and `fill_text` (any CSS color string, e.g. \"#e74c3c\" or \"rgba(0,0,0,0.5)\")."
+  doc "Set the fill style used by `fill_rect`, `fill` and `fill_text`: any CSS color string, e.g. \"#e74c3c\" or \"rgba(0,0,0,0.5)\". An unparsable string leaves the previous style in place."
   fn set_fill_style(ctx, color)        do canvas_set_fill_style(ctx, color) end
 
-  doc "Set the stroke color/style used by `stroke_rect`, `stroke`, and `stroke_text`."
+  doc "Set the stroke style (a CSS color string) used by `stroke_rect`, `stroke` and `stroke_text`. An unparsable string leaves the previous style in place."
   fn set_stroke_style(ctx, color)      do canvas_set_stroke_style(ctx, color) end
 
-  doc "Set the line width (in canvas units) used by `stroke_rect` and `stroke`."
+  doc "Set the line width, in canvas units, used by `stroke_rect`, `stroke` and `stroke_text`. The default is 1.0; zero, negative and non-finite values are ignored."
   fn set_line_width(ctx, w)            do canvas_set_line_width(ctx, w) end
 
-  doc "Set the global alpha (opacity) for subsequent drawing, from 0.0 (transparent) to 1.0 (opaque)."
+  doc "Set the global alpha (opacity) multiplied into all subsequent drawing, from 0.0 (transparent) to 1.0 (opaque, the default). Values outside that range are ignored."
   fn set_global_alpha(ctx, a)          do canvas_set_global_alpha(ctx, a) end
 
-  doc "Set the font used by `fill_text`/`stroke_text` (CSS font shorthand, e.g. \"16px sans-serif\")."
+  doc "Set the font used by `fill_text`/`stroke_text`, as CSS font shorthand (e.g. \"16px sans-serif\", \"bold 24px monospace\"). The default is \"10px sans-serif\"; an unparsable string is ignored."
   fn set_font(ctx, font)               do canvas_set_font(ctx, font) end
 
-  doc "Clear the rectangle at `(x, y)` of size `(w, h)` to fully transparent."
+  doc """
+  Clear the rectangle with top-left corner `(x, y)` and size `(w, h)` to fully
+  transparent pixels (the current transform applies). Typically called over
+  the whole canvas at the start of each frame.
+
+  ## Examples
+
+      Js.Canvas.clear_rect(ctx, 0.0, 0.0, 640.0, 480.0)
+  """
   fn clear_rect(ctx, x, y, w, h)       do canvas_clear_rect(ctx, x, y, w, h) end
 
-  doc "Fill the rectangle at `(x, y)` of size `(w, h)` with the current fill style."
+  doc """
+  Fill the rectangle with top-left corner `(x, y)` and size `(w, h)` with the
+  current fill style. Does not touch the current path.
+
+  ## Examples
+
+      Js.Canvas.set_fill_style(ctx, "#e74c3c")
+      Js.Canvas.fill_rect(ctx, 10.0, 10.0, 80.0, 40.0)
+  """
   fn fill_rect(ctx, x, y, w, h)        do canvas_fill_rect(ctx, x, y, w, h) end
 
-  doc "Stroke the outline of the rectangle at `(x, y)` of size `(w, h)` with the current stroke style."
+  doc "Stroke the outline of the rectangle with top-left corner `(x, y)` and size `(w, h)` using the current stroke style and line width. Does not touch the current path."
   fn stroke_rect(ctx, x, y, w, h)      do canvas_stroke_rect(ctx, x, y, w, h) end
 
-  doc "Start a new path, discarding any path built so far."
+  doc """
+  Start a new path, discarding any path built so far. Call before building
+  each shape, or `fill`/`stroke` will redraw every earlier shape too.
+
+  ## Examples
+
+      Js.Canvas.begin_path(ctx)
+      Js.Canvas.move_to(ctx, 50.0, 10.0)
+      Js.Canvas.line_to(ctx, 90.0, 90.0)
+      Js.Canvas.line_to(ctx, 10.0, 90.0)
+      Js.Canvas.close_path(ctx)
+      Js.Canvas.fill(ctx)                     -- filled triangle
+  """
   fn begin_path(ctx)                   do canvas_begin_path(ctx) end
 
-  doc "Close the current path by drawing a straight line back to its start point."
+  doc "Close the current subpath with a straight line back to its starting point. No-op if the path is empty. It does not draw anything by itself; follow with `fill` or `stroke`."
   fn close_path(ctx)                   do canvas_close_path(ctx) end
 
-  doc "Move the path's current point to `(x, y)` without drawing."
+  doc "Begin a new subpath at `(x, y)` without drawing a line to it."
   fn move_to(ctx, x, y)                do canvas_move_to(ctx, x, y) end
 
-  doc "Add a straight line from the path's current point to `(x, y)`."
+  doc "Add a straight line from the path's current point to `(x, y)`. With no current point (right after `begin_path`) it acts like `move_to`."
   fn line_to(ctx, x, y)                do canvas_line_to(ctx, x, y) end
 
-  doc "Add a circular arc centered at `(x, y)` with the given `radius`, from `start_angle` to `end_angle` (radians, clockwise). Use `start_angle = 0.0, end_angle = 6.283185307179586` (2*pi) for a full circle."
+  doc """
+  Add a circular arc centered at `(x, y)` with the given `radius`, from
+  `start_angle` to `end_angle` in radians, measured from the positive x axis
+  and running clockwise on screen. If the path has a current point, a straight
+  line joins it to the arc's start. A negative `radius` throws.
+
+  ## Examples
+
+      -- A filled circle of radius 20 at (100, 100):
+      Js.Canvas.begin_path(ctx)
+      Js.Canvas.arc(ctx, 100.0, 100.0, 20.0, 0.0, 6.283185307179586)
+      Js.Canvas.fill(ctx)
+  """
   fn arc(ctx, x, y, radius, start_angle, end_angle) do canvas_arc(ctx, x, y, radius, start_angle, end_angle) end
 
-  doc "Add a quadratic Bezier curve from the path's current point to `(x, y)`, using `(cpx, cpy)` as the control point."
+  doc "Add a quadratic Bezier curve from the path's current point to `(x, y)`, with control point `(cpx, cpy)`."
   fn quadratic_curve_to(ctx, cpx, cpy, x, y) do canvas_quadratic_curve_to(ctx, cpx, cpy, x, y) end
 
-  doc "Add a cubic Bezier curve from the path's current point to `(x, y)`, using `(cp1x, cp1y)` and `(cp2x, cp2y)` as control points."
+  doc "Add a cubic Bezier curve from the path's current point to `(x, y)`, with control points `(cp1x, cp1y)` (near the start) and `(cp2x, cp2y)` (near the end)."
   fn bezier_curve_to(ctx, cp1x, cp1y, cp2x, cp2y, x, y) do canvas_bezier_curve_to(ctx, cp1x, cp1y, cp2x, cp2y, x, y) end
 
-  doc "Fill the current path with the current fill style."
+  doc "Fill the current path with the current fill style (open subpaths are closed implicitly). The path is kept, so it can also be `stroke`d."
   fn fill(ctx)                         do canvas_fill(ctx) end
 
-  doc "Stroke the current path's outline with the current stroke style."
+  doc "Stroke the current path's outline with the current stroke style and line width. The path is kept, so it can also be `fill`ed."
   fn stroke(ctx)                       do canvas_stroke(ctx) end
 
-  doc "Fill a circle centered at `(cx, cy)` with radius `radius` using a tileable, world-aligned value-noise texture (a soft cloudy/wispy look), faded to transparent at the edge. `alpha` caps the overall opacity. The noise tile is generated once and cached, so repeated calls are cheap."
+  doc """
+  Draw a soft, cloudy blob (a nebula or smoke puff) roughly `radius` in size
+  around `(cx, cy)`, textured with a greyscale value-noise pattern.
+
+  Despite the name the outline is not a circle: it is a lobed silhouette (three
+  sine harmonics around the edge), about a third of blobs also grow one narrow
+  arm reaching 1.6x to 2.2x `radius`, and up to three holes may be cut in the
+  interior. The whole shape is then blurred (14 to 40 px, scaling with
+  `radius`) and drawn with opacity `alpha`. All of these choices are derived
+  from a hash of `(cx, cy)`, so the same center always yields the same shape,
+  and the noise texture is world-aligned so neighbouring blobs read as one
+  continuous texture. It draws in greyscale; tint it by drawing a translucent
+  colored layer over it.
+
+  The 256x256 noise tile is generated once per page and cached, but each call
+  still renders and blurs an offscreen buffer, so call it a handful of times
+  per frame, not hundreds. It leaves the current path, styles and transform
+  unchanged.
+
+  ## Examples
+
+      Js.Canvas.fill_noise_circle(ctx, 320.0, 200.0, 120.0, 0.35)
+  """
   fn fill_noise_circle(ctx, cx, cy, radius, alpha) do canvas_fill_noise_circle(ctx, cx, cy, radius, alpha) end
 
-  doc "Draw `text` filled with the current fill style, baseline at `(x, y)`."
+  doc """
+  Draw `text` filled with the current fill style and font. `x` is positioned
+  according to `set_text_align` (left edge by default) and `y` is the
+  alphabetic baseline.
+
+  ## Examples
+
+      Js.Canvas.set_font(ctx, "bold 24px monospace")
+      Js.Canvas.set_text_align(ctx, "center")
+      Js.Canvas.set_fill_style(ctx, "white")
+      Js.Canvas.fill_text(ctx, "GAME OVER", 320.0, 240.0)
+  """
   fn fill_text(ctx, text, x, y)        do canvas_fill_text(ctx, text, x, y) end
 
-  doc "Draw `text` outlined with the current stroke style, baseline at `(x, y)`."
+  doc "Draw the outline of `text` with the current stroke style, line width and font; `x`/`y` are positioned as for `fill_text`."
   fn stroke_text(ctx, text, x, y)      do canvas_stroke_text(ctx, text, x, y) end
 
-  doc "Set horizontal text alignment for `fill_text`/`stroke_text`: \"left\", \"center\", or \"right\"."
+  doc "Set how `fill_text`/`stroke_text` place text relative to `x`: \"left\", \"center\" or \"right\" (also \"start\", the default, and \"end\", which follow the text direction). Any other string is ignored."
   fn set_text_align(ctx, align)        do canvas_set_text_align(ctx, align) end
 
-  doc "Load an image from `url` (asynchronously). Returns `Err` with a message if the image fails to load."
+  doc """
+  Load an image from `url`, suspending the caller until it has loaded (the
+  compiled JS awaits the browser's `onload`). Returns `Ok(image)` for use with
+  `draw_image`, or `Err("failed to load image: " ++ url)` if it fails to load
+  or decode. Load each image once at startup and keep the handle.
+
+  ## Examples
+
+      match Js.Canvas.load_image("sprites/ship.png") do
+        Ok(img) -> Js.Canvas.draw_image(ctx, img, 10.0, 10.0)
+        Err(msg) -> println(msg)
+      end
+  """
   fn load_image(url)                   do canvas_load_image(url) end
 
-  doc "Draw `img` at `(x, y)` using its natural size."
+  doc "Draw `img` with its top-left corner at `(x, y)` at its natural size (in canvas units, subject to the current transform)."
   fn draw_image(ctx, img, x, y)        do canvas_draw_image(ctx, img, x, y) end
 
-  doc "Draw `img` at `(x, y)`, scaled to `(w, h)`."
+  doc "Draw `img` with its top-left corner at `(x, y)`, stretched to width `w` and height `h`."
   fn draw_image_scaled(ctx, img, x, y, w, h) do canvas_draw_image_scaled(ctx, img, x, y, w, h) end
 
 end

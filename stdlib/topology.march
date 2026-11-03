@@ -247,12 +247,54 @@ mod Topology do
     end
   end
 
+  doc "How many nodes [p] places on (n for a `count = n` role; 0 for an unranked one)."
+  fn count_of(p : TopoPlacement) : Int do
+    match p do
+      PlaceCount(n) -> n
+      PlaceCountOn(_, n) -> n
+      _ -> 0
+    end
+  end
+
+  doc """
+  Whether this node may OPEN ranked role [p] it now ranks for (it is not
+  offering it yet), at [now]: the settle rule its peers apply to it, applied
+  by the node itself. A node that started at [started] and has not yet
+  merged a peer's registry ([synced] false) knows no other node's marker, so
+  it opens nothing ranked until it has, or until [settle_ms] have passed
+  (seeds unreachable: a lone node still takes its roles). A node that a peer
+  last showed as rejoining at [rejoined_at] (`ClusterNode.rejoined_at`) is
+  not counted by those peers for [settle_ms], so for that long it opens the
+  role only if the [others] other non-dead nodes marked eligible cannot fill
+  its count without it. Never stops a node keeping an offer it holds.
+  """
+  fn may_open(p : TopoPlacement, others : Int, now : Int, started : Int, synced : Bool,
+              rejoined_at : Option(Int), settle_ms : Int) : Bool do
+    if not(ranked(p)) do true
+    else if not(synced) && now - started < settle_ms do false
+    else
+      match rejoined_at do
+        Some(t) -> if now - t < settle_ms do others < count_of(p) else true end
+        None -> true
+      end
+    end end
+  end
+
   doc "The name an eligible node registers for a ranked role."
   fn marker(role_name : String, node_id : String) : String do
     "topo:" ++ role_name ++ "/" ++ node_id
   end
 
-  -- The node ids behind every marker of [role_name] in [names].
+  doc """
+  The node ids behind every `marker(role_name, id)` in [names], in [names]
+  order; names that are not markers of [role_name] are ignored (duplicates
+  are kept).
+
+  ## Examples
+
+      Topology.marked("P.Db", ["topo:P.Db/n1", "other", "topo:P.Web/n2", "topo:P.Db/n3"])
+      -- ["n1", "n3"]
+  """
   fn marked(role_name : String, names : List(String)) : List(String) do
     let prefix = "topo:" ++ role_name ++ "/"
     let k = String.byte_size(prefix)
@@ -334,12 +376,20 @@ mod Topology do
   (default 200 ms) against the current membership, opening a role this node
   now ranks for and closing (draining) one it no longer does. Membership
   events are recorded as they arrive; a node that rejoins counts after the
-  settling period. Returns once the first evaluation has opened its offers.
+  settling period. This node applies that period to itself too (`may_open`):
+  it opens no ranked role before its first registry sync (bounded by
+  MARCH_PLACEMENT_SETTLE_MS), and while a peer counts it as rejoined it
+  leaves a ranked role to the nodes already offering it. Returns once the
+  first evaluation has opened the offers it may open now (a ranked one held
+  back opens on a later tick).
   """
   fn place(node : Cap(ClusterNode.Live), roles : List(TopoRole)) : () do
     let st = state_of(node)
     Vault.set(st.roles, "roles", roles)
     Vault.set(st.roles, "base", roles)
+    -- When placement began here: the bound on waiting for a first registry
+    -- sync (`may_open`).
+    if Vault.get(st.meta, "started") == None do Vault.set(st.meta, "started", unix_time_ms()) else () end
     -- A restarted node comes back on the topology last pushed to it (plan
     -- 6.5): the reload server restored and re-verified its signed copy
     -- before `main` ran.  Only that copy: the unsigned file is what the
@@ -361,7 +411,7 @@ mod Topology do
     ()
   end
 
-  pfn place_loop(node : Cap(ClusterNode.Live), st : TopoState) : Int do
+  @[diverges] pfn place_loop(node : Cap(ClusterNode.Live), st : TopoState) : Int do
     sleep_ms(tick_ms())
     if Vault.get(st.meta, "closing") != None do 0
     else if Vault.get(st.meta, "stopped") != None do 0
@@ -391,6 +441,29 @@ mod Topology do
       id != ClusterNode.node_id(node) && List.member(alive, id) && settled(now, Vault.get(st.meta, "r:" ++ id), settle))
   end
 
+  -- The other nodes marked eligible for [r] that are not Dead here (one
+  -- not yet in the member table counts: its marker came from a peer that
+  -- knows it), settled or not: those a rejoining node defers to.
+  pfn marked_others(node : Cap(ClusterNode.Live), r : TopoRole) : Int do
+    let me = ClusterNode.node_id(node)
+    let dead = List.filter_map(ClusterNode.all_members(node), fn m ->
+      match m.status do
+        Membership.Dead -> Some(m.node_id)
+        _ -> None
+      end)
+    List.length(List.filter(marked(r.name, ClusterNode.names(node)), fn id ->
+      id != me && not(List.member(dead, id))))
+  end
+
+  -- `may_open` for [r] on [node] now.
+  pfn may_open_here(node : Cap(ClusterNode.Live), st : TopoState, now : Int, r : TopoRole) : Bool do
+    if not(ranked(r.place)) do true
+    else
+      may_open(r.place, marked_others(node, r), now, Vault.get_or(st.meta, "started", now),
+               ClusterNode.registry_synced(node), ClusterNode.rejoined_at(node), settle_ms())
+    end
+  end
+
   doc """
   Re-evaluate [node]'s placement now, as the next tick would. For tests that
   drive membership through a fake dictionary and should not wait for a tick
@@ -413,7 +486,19 @@ mod Topology do
     let want = wants(r.place, r.name, ClusterNode.node_id(node), labels, others)
     match Vault.get(st.offers, r.name) do
       None ->
-        if want do open_role(node, st, now, r) else clear_conflict(st, r.name) end
+        if want && may_open_here(node, st, now, r) do
+          Vault.drop(st.meta, "d:" ++ r.name)
+          open_role(node, st, now, r)
+        else if want do
+          -- Report a rejoining node's deferral once, not every tick (the
+          -- wait for a first sync is silent: it normally lasts a link's
+          -- handshake).
+          if ClusterNode.registry_synced(node) && Vault.get(st.meta, "d:" ++ r.name) == None do
+            Vault.set(st.meta, "d:" ++ r.name, 1)
+            report(r.name ++ ": " ++ label(node) ++ " ranks for it but a peer counts it as rejoined and it is settling;"
+                   ++ " leaving it to the nodes already counted")
+          else () end
+        else clear_conflict(st, r.name) end end
       Some(o) ->
         if not(want) do
           report(r.name ++ ": no longer placed on " ++ label(node) ++ "; draining its offer")
@@ -432,7 +517,7 @@ mod Topology do
   -- Register (or release) this node's marker for a ranked role.
   pfn mark(node : Cap(ClusterNode.Live), st : TopoState, role_name : String, here : Bool) : () do
     let name = marker(role_name, ClusterNode.node_id(node))
-    let held = ClusterNode.lookup(node, name) != None
+    let held = Option.is_some(ClusterNode.lookup(node, name))
     if here && not(held) do
       let _ = ClusterNode.register(node, name, anchor(st))
       ()
@@ -737,7 +822,8 @@ mod Topology do
   What the digest [text] asks of this process: for each role one of
   [pools] serves, its placement and capacity (a role no such pool serves is
   absent); the drain deadlines; and an error for text that is not a
-  version-1 digest.
+  version-1 digest. Defaults for missing fields: capacity 64, soft drain
+  30000 ms, hard drain 120000 ms.
   """
   fn desired_of(text : String, pools : String -> Bool) : Result((List(TopoDesired), Int, Int), String) do
     match Json.parse(text) do
@@ -986,11 +1072,16 @@ mod Topology do
     List.each(Vault.get_or(st.roles, "roles", Nil), fn r ->
       if ranked(r.place) do mark(node, st, r.name, false) else () end)
     List.each(Vault.all(st.offers), fn kv -> match kv do (name, o) -> retire(st, name, o) end)
+    -- And start no session of its own: a hook's task that initiates
+    -- sessions back to back now gets `Err(Left("draining"))`, so the drain
+    -- can reach zero sessions instead of running to its hard deadline.
+    SessionNode.refuse_initiations(node)
   end
 
   doc """
   On SIGTERM or SIGINT: close every offer of [node] (new invitations are
-  refused), drain every code epoch the process runs (running sessions end
+  refused) and refuse every new `initiate` on it (`Err(Left("draining"))`),
+  drain every code epoch the process runs (running sessions end
   at their next loop boundary, D27, and actors take the epoch drain's
   deadlines), then exit 0 once no session is running. At [soft_ms] a drain
   still waiting is reported; at [hard_ms] the process exits 1, naming how
@@ -1002,10 +1093,21 @@ mod Topology do
     Signal.watch(Signal.Int, fn -> drain(node, soft_ms, hard_ms))
   end
 
-  doc "Drain [node] now, as SIGTERM does under `drain_on_signal`."
+  doc """
+  Drain [node] now, as SIGTERM does under `drain_on_signal`. Called again
+  while a drain runs (a second signal), it stops the process at once, with
+  status 1.
+  """
   fn drain(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : () do
     let st = state_of(node)
-    if Vault.get(st.meta, "closing") != None do () else
+    if Vault.get(st.meta, "draining") != None do
+      -- The runtime's own second-signal escape only ends an HTTP server's
+      -- loop, so without this a draining node ignored every further
+      -- SIGTERM until its hard deadline.
+      report("second signal: stopping " ++ label(node) ++ " now with " ++ int_to_string(unfinished(node)) ++ " session(s) still running")
+      process_exit(1)
+    else if Vault.get(st.meta, "closing") != None do () else
+      Vault.set(st.meta, "draining", 1)
       report("draining " ++ label(node) ++ " (soft " ++ int_to_string(soft_ms) ++ " ms, hard "
              ++ int_to_string(hard_ms) ++ " ms)")
       close_all(node)
@@ -1019,7 +1121,7 @@ mod Topology do
       let t0 = unix_time_ms()
       let _ = task_spawn(fn _ -> drain_wait(node, soft_ms, hard_ms, t0, false))
       ()
-    end
+    end end
   end
 
   pfn drain_wait(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int, t0 : Int, warned : Bool) : Int do
@@ -1062,7 +1164,7 @@ mod Topology do
     supervise_wait(st)
   end
 
-  pfn supervise_wait(st : TopoState) : () do
+  @[diverges] pfn supervise_wait(st : TopoState) : () do
     if Vault.get(st.meta, "stopped") != None do ()
     else
       sleep_ms(250)
@@ -1120,6 +1222,13 @@ mod Topology do
   The node's configuration from the environment (`ClusterNode.config_from_env`),
   with defaults for a lone local run: MARCH_NODE_NAME defaults to `local-1`
   and MARCH_NODE_PORT to 7946.
+
+  Without MARCH_NODE_CERT (shared-secret mode) it also reads the seeds from
+  MARCH_CLUSTER_NODES (comma-separated), MARCH_NODE_ADVERTISE, the secret
+  from MARCH_CLUSTER_SECRET (default `march-cluster`) and MARCH_NODE_CREATION
+  (default: the current Unix ms). With MARCH_NODE_CERT set, certificate mode
+  is read by `ClusterNode.config_from_env` instead, and a configuration it
+  rejects stops the program via `start_failed`.
   """
   fn config_from_env() : ClusterNode.CnConfig do
     if Env.is_set("MARCH_NODE_CERT") do
@@ -1156,7 +1265,8 @@ mod Topology do
   doc """
   Whether this process runs pool [pool]: MARCH_POOLS (comma-separated) names
   the pools a process of a shared build runs; unset, it runs every pool the
-  build contains (`forge run`'s one process, D9).
+  build contains (`forge run`'s one process, D9), as it does when MARCH_POOLS
+  names no pool at all (empty or only commas).
   """
   fn runs_pool(pool : String) : Bool do
     match process_env("MARCH_POOLS") do

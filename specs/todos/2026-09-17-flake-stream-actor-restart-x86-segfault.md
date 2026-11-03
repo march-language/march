@@ -14,3 +14,11 @@ a reproduction): a second fixture crashing in the same path on the same leg is t
 **What to do.** Nothing to bisect. Next time either fixture fails on Linux, download
 the run's log ZIP (`gh api repos/.../actions/runs/<id>/logs`; `gh run view --log`
 truncates) before rerunning, and attach the trace to the 09-04 file.
+
+## 2026-10-12: did not reproduce under ASAN on Linux arm64
+
+30 runs at `MARCH_NUM_SCHEDULERS=14` under `MARCH_SANITIZE=1
+MARCH_DEBUG_RUNTIME=1` (`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`), Docker
+`march-ci-ubuntu-step6b` (arm64, glibc 2.39), concurrently with a 6-way ASAN
+sweep for load: 0 failures, no sanitizer report. (It lives in test/session/,
+so the test/native sanitizer sweep does not cover it.)

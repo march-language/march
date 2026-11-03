@@ -42,6 +42,14 @@ mod Main do
     -- snapshots) on both backends. Not printed: its findings depend on the
     -- machine, and stdout must equal expected.txt.
     let _ = Diagnose.run(Actor.introspect(io), 10)
+    match Json.parse("{\"data\":{\"actors\":{\"total\":101,\"shown\":100},\"crashes\":{\"total\":21,\"crashes\":[]}}}") do
+      Ok(capped) ->
+        match Diagnose.coverage(capped, capped) do
+          Cons("actors: shown 100 of 101", Cons("crashes: shown 0 of 21", Nil)) -> ()
+          _ -> panic("Diagnose.coverage did not report capped snapshots")
+        end
+      Err(_) -> panic("capped Diagnose fixture did not parse")
+    end
     ()
   end
 end

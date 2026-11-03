@@ -199,9 +199,11 @@ let rec decode_smt (ty : A.ty) (s : string) : V.value option =
            else None
          | _ -> None
        in
+       (* A model names a constructor by its SMT name, qualified when two
+          datatypes declare it (2026-11-02); the program's is the source one. *)
        (match tokens_of s with
-        | Some (cname :: args) -> by_ctor cname args
-        | None -> by_ctor s []
+        | Some (cname :: args) -> by_ctor (Refine_encode.ctor_display cname) args
+        | None -> by_ctor (Refine_encode.ctor_display s) []
         | Some [] -> None)
      | None ->
        (match Hashtbl.find_opt record_fields name, tokens_of s with
@@ -518,6 +520,52 @@ let call_fn ~(name : string) ~(args : V.value list) : exec_result =
         | Ok v -> Ret v
         | Error e -> e))
 
+(* The parity net (reflection §9.2) needs more than [exec_result]: an
+   interpreter FAILURE on a reflected function (a panic, a match failure, the
+   fuel running out) is a reflectability bug to report, an Int overflow
+   (#1042: `+ - *` and negation panic out of range) is D8's `overflow?`, and
+   only a blocked effect or an evaluator limitation is "not compared".  Runs
+   under the same effect veto and fuel as [call_fn], uncharged to the
+   module's witness budget (the net has its own input count). *)
+type classified =
+  | C_ret of V.value
+  | C_overflow of string
+  | C_panic of string
+  | C_match_failure of string
+  | C_fuel
+  | C_not_run of string
+
+let call_fn_classified ~(name : string) ~(args : V.value list) : classified =
+  match module_env () with
+  | None -> C_not_run "the interpreter environment could not be built"
+  | Some env -> (
+    match lookup_fn env name with
+    | None -> C_not_run ("the interpreter has no single binding for " ^ name)
+    | Some f ->
+      March_eval.Eval_prim.builtin_guard :=
+        Some (fun n -> if blocked_name n then raise (March_eval.Eval_prim.Blocked_builtin n));
+      March_eval.Eval.arm_reduction_budget per_call_fuel;
+      Fun.protect
+        ~finally:(fun () ->
+          March_eval.Eval.set_reduction_counting false;
+          March_eval.Eval_prim.builtin_guard := None)
+        (fun () ->
+          try C_ret (March_eval.Eval.apply f args) with
+          | March_eval.Eval.Yield -> C_fuel
+          | Stack_overflow -> C_fuel
+          | March_eval.Eval_prim.Blocked_builtin b -> C_not_run ("calls the effect " ^ b)
+          | March_eval.Eval_runtime.Match_failure m -> C_match_failure m
+          | March_eval.Eval_runtime.Assert_failure m -> C_panic ("assert: " ^ m)
+          | March_eval.Eval_prim.Eval_error msg ->
+            let has sub =
+              let n = String.length sub and h = String.length msg in
+              let rec go i = i + n <= h && (String.sub msg i n = sub || go (i + 1)) in
+              go 0
+            in
+            if has "with overflow" || has "does not fit" then C_overflow msg
+            else (match user_panic_message msg with Some m -> C_panic m | None -> C_not_run msg)
+          | e -> C_not_run (Printexc.to_string e)))
+
 (* Defined after [call_fn]: a user measure in a predicate is evaluated by
    running its definition. *)
 (* Evaluate a refinement predicate structurally over runtime values.
@@ -580,7 +628,7 @@ and eval_operand ~(lookup : string -> V.value option) (e : A.expr) : V.value opt
      | Some (V.VString s) -> Some (V.VInt (String.length s))
      | Some v -> Option.map (fun n -> V.VInt n) (list_len v)
      | None -> None)
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) ->
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp ->
     (match eval_operand ~lookup a with
      | Some (V.VInt n) -> Some (V.VInt (-n))
      | Some (V.VFloat f) -> Some (V.VFloat (-.f))

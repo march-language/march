@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: (read as `y > 0 || y < 100`) does not imply `_ > 0`
+-- Abstract refinements, the leftovers, phase A (row L1c): the lambda body is
+-- read exactly, so `is_pos(y) || y < 100` is `y > 0 || y < 100`, which admits
+-- non-positive elements.  A too-weak skip whose message prints the lambda
+-- and its reading; `cap verified` makes it this error.  Accept companion:
+-- accept/t331.
+mod AbsLambdaOrWeak do
+  cap verified
+  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn go(ys : List(Int)) : Int do sum_pos(List.filter(ys, fn y -> is_pos(y) || y < 100)) end
+end

@@ -96,6 +96,9 @@ let gated : (string * string * compare_mode) list = [
   (* ── core compute / codegen ── *)
   "fib",              "102334155",    Exact;
   "list_ops",         "333333666666", Exact;
+  (* checked Int `+ - *` in counted loops: the cost the 2026-10-30
+     overflow trap adds per iteration. *)
+  "index_loop",       "548550000003", Exact;
   (* an unboxed P2(Int, Int) built in the arms of an `if`, 50M times: the
      struct-typed case join slot (specs/progress/2026-09-30-unbox-aware-case-
      join-slot.md). *)
@@ -150,6 +153,7 @@ let gated : (string * string * compare_mode) list = [
   "string_slice_walk",  "checksum=27000000",  Exact;
   "string_small_churn", "checksum=17793810",  Exact;
   "string_split_large", "checksum=39000000",  Exact;
+  "string_split_fold",  "fold_split checksum=39000000\nfold_split_ranges checksum=39000000", Exact;
 
   (* ── timing-bearing: values checked, wall-clock masked ──
      IgnoreTiming does NOT compare `expected` at all: it requires every anchor

@@ -1,0 +1,28 @@
+-- Abstract refinements, the leftovers, phase D
+-- (specs/2026-10-18-abstract-refinements-leftovers-design.md §4.2): the
+-- stdlib sweep.  A bare `filter(...)` is `Prelude.filter`, which now declares
+-- `List(a[p])` like `List.filter`; so do `Enum.filter`, `Enum.take_while` and
+-- `Iterable.filter` (rewritten to `List.filter`'s natural body), while
+-- `Enum.find` and `Iterable.find` declare `Option(a[p])` and `Range.filter`
+-- declares `f : Int -> Bool[p]` and `List(Int[p])` (a concrete base).  Rows
+-- B1, B2, E1 and R2 of the design.  Under `cap verified`, exit 0 means every
+-- obligation PROVED.  Reject companion: reject/t411.
+mod AbsStdlibSweep do
+  cap verified
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn one_pos(x : Option({Int | _ > 0})) : Int do
+    match x do
+    Some(_) -> 1
+    None -> 0
+    end
+  end
+  fn b1(ys : List(Int)) : Int do sum_pos(filter(ys, fn y -> y > 0)) end
+  fn b2(ys : List(Int)) : Int do
+    sum_pos(Enum.filter(ys, fn y -> y > 0)) + sum_pos(Iterable.filter(ys, fn y -> y > 0))
+  end
+  fn tw(ys : List(Int)) : Int do sum_pos(Enum.take_while(ys, fn y -> y > 0)) end
+  fn e1(ys : List(Int)) : Int do
+    one_pos(Enum.find(ys, fn y -> y > 0)) + one_pos(Iterable.find(ys, fn y -> y > 0))
+  end
+  fn r2(n : Int) : Int do sum_pos(Range.filter(Range.new(0, n), fn y -> y > 0)) end
+end

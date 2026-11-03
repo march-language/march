@@ -1,0 +1,32 @@
+Meters(7)
+Name("bob")
+Flag(true)
+Flag(false)
+Wrapped(Meters(3))
+Held(Square(4))
+Box(5)
+Box("s")
+Named("x")
+NoName
+SomeN(-5)
+NoN
+SomeS(Circle(2))
+NoS
+SomeF(1.5)
+NoF
+[Meters(1), Meters(2)]
+[NoName, Named("y")]
+[[Meters(1)], []]
+Some(Meters(3))
+Some(NoName)
+[Some(Meters(2)), None]
+(Meters(4), Named("z"))
+Ok(Meters(1))
+Ok(NoN)
+Pair(Meters(5), NoName)
+Node(Leaf, Meters(1), Node(Leaf, Meters(2), Leaf))
+{ m: Meters(6), n: Named("w") }
+w=Wrapped(Meters(11)) n=NoName
+Meters(8)
+NoName
+<p>Wrapped(Meters(11)) Named(&quot;&lt;b&gt;&quot;) NoName</p>

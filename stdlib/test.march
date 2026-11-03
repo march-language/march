@@ -2,25 +2,59 @@
 --
 -- Tests are plain March functions; a test passes if it returns
 -- without calling panic/fail. Use these helpers to make assertions.
+-- Every helper returns normally (with `()` or the unwrapped value) when
+-- the assertion holds and panics with a message naming `msg` when not.
+--
+-- doc: try
 
 mod Test do
 
-  doc "Fail immediately with a descriptive message."
+  doc """
+  Fail immediately: panics with `"FAIL: " ++ msg`. Never returns; the
+  `Unit` return type only lets it sit in any branch of a test.
+
+      if not(ok) do Test.fail("handshake never completed") else () end
+  """
   fn fail(msg : String) : Unit do
     panic("FAIL: " ++ msg)
   end
 
-  doc "Assert that cond is true; panic with msg if not."
+  doc """
+  Assert that `cond` is true. Returns `()`; panics with
+  `"Assertion failed: " ++ msg` if `cond` is false.
+
+  ## Examples
+
+      march> Test.assert_true(1 < 2, "ordered")
+      ()
+  """
   fn assert_true(cond : Bool, msg : String) : Unit do
     if not(cond) do panic("Assertion failed: " ++ msg) else () end
   end
 
-  doc "Assert that cond is false; panic with msg if not."
+  doc """
+  Assert that `cond` is false. Returns `()`; panics with a message
+  containing `msg` if `cond` is true.
+
+  ## Examples
+
+      march> Test.assert_false(String.is_empty("x"), "non-empty")
+      ()
+  """
   fn assert_false(cond : Bool, msg : String) : Unit do
     if cond do panic("Assertion failed: expected false — " ++ msg) else () end
   end
 
-  doc "Assert two ints are equal."
+  doc """
+  Assert two ints are equal. Note the argument order: `a` is the value
+  under test ("got") and `b` the expected value (the reverse of
+  `assert_eq`). Returns `()`; panics with both values on mismatch.
+
+  ## Examples
+
+      march> Test.assert_eq_int(2 + 2, 4, "sum")
+      ()
+  """
   fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
     if a != b do
       panic("Assertion failed: " ++ msg
@@ -29,7 +63,16 @@ mod Test do
     else () end
   end
 
-  doc "Assert two strings are equal."
+  doc """
+  Assert two strings are equal; `a` is the value under test, `b` the
+  expected value. Returns `()`; panics with both strings (quoted) on
+  mismatch.
+
+  ## Examples
+
+      march> Test.assert_eq_str(String.to_uppercase("ok"), "OK", "upper")
+      ()
+  """
   fn assert_eq_str(a : String, b : String, msg : String) : Unit do
     if a != b do
       panic("Assertion failed: " ++ msg
@@ -37,7 +80,15 @@ mod Test do
     else () end
   end
 
-  doc "Assert two booleans are equal."
+  doc """
+  Assert two booleans are equal; `a` is the value under test, `b` the
+  expected value. Returns `()`; panics with both values on mismatch.
+
+  ## Examples
+
+      march> Test.assert_eq_bool(List.is_empty([]), true, "empty")
+      ()
+  """
   fn assert_eq_bool(a : Bool, b : Bool, msg : String) : Unit do
     if a != b do
       panic("Assertion failed: " ++ msg
@@ -46,7 +97,15 @@ mod Test do
     else () end
   end
 
-  doc "Assert an Option is Some and return the inner value."
+  doc """
+  Assert an Option is `Some` and return the inner value, so the result
+  can be used in further assertions. Panics if it is `None`.
+
+  ## Examples
+
+      march> Test.assert_some(List.head_opt([3, 4]), "has a head")
+      3
+  """
   fn assert_some(opt : Option(a), msg : String) : a do
     match opt do
     Some(x) -> x
@@ -54,7 +113,14 @@ mod Test do
     end
   end
 
-  doc "Assert an Option is None."
+  doc """
+  Assert an Option is `None`. Returns `()`; panics if it is `Some`.
+
+  ## Examples
+
+      march> Test.assert_none(List.head_opt([]), "no head")
+      ()
+  """
   fn assert_none(opt : Option(a), msg : String) : Unit do
     match opt do
     None    -> ()
@@ -62,7 +128,15 @@ mod Test do
     end
   end
 
-  doc "Assert a Result is Ok and return the inner value."
+  doc """
+  Assert a Result is `Ok` and return the inner value. Panics if it is
+  `Err` (the error value itself is not included in the message).
+
+  ## Examples
+
+      march> Test.assert_ok(Ok(5), "parsed")
+      5
+  """
   fn assert_ok(res : Result(a, e), msg : String) : a do
     match res do
     Ok(x)  -> x
@@ -70,7 +144,15 @@ mod Test do
     end
   end
 
-  doc "Assert a Result is Err and return the error value."
+  doc """
+  Assert a Result is `Err` and return the error value, so the error can
+  be checked further. Panics if it is `Ok`.
+
+  ## Examples
+
+      march> Test.assert_err(Err("boom"), "should fail")
+      "boom"
+  """
   fn assert_err(res : Result(a, e), msg : String) : e do
     match res do
     Err(e) -> e
@@ -90,10 +172,14 @@ mod Test do
   `inspect`/`debug`) and included in the panic message so failures
   are easy to diagnose.
 
-  Example:
-    Test.assert_eq((1, "a"), (1, "a"), "tuple equal")
-    Test.assert_eq([1, 2, 3], [1, 2, 3], "list equal")
-    Test.assert_eq(Some(42), Some(42), "option equal")
+  Note the argument order: the expected value comes first.
+
+  ## Examples
+
+      march> Test.assert_eq((1, "a"), (1, "a"), "tuple equal")
+      ()
+      march> Test.assert_eq(Some([1, 2]), Some(List.reverse([2, 1])), "option equal")
+      ()
   """
   fn assert_eq(expected, actual, msg : String) : Unit do
     if expected != actual do
@@ -108,6 +194,12 @@ mod Test do
 
   Counterpart to `assert_eq`; panics if the values compare equal via `==`.
   Useful for checking that mutation/update paths actually changed something.
+  On failure the message shows the (shared) value via `to_string`.
+
+  ## Examples
+
+      march> Test.assert_ne([1, 2], List.reverse([1, 2]), "reversed")
+      ()
   """
   fn assert_ne(left, right, msg : String) : Unit do
     if left == right do

@@ -11,6 +11,8 @@
 --   to_list                 O(n)
 --
 -- Rebalancing: when the "consume" end is empty we reverse the other list.
+--
+-- doc: try
 
 mod Queue do
 
@@ -18,21 +20,21 @@ mod Queue do
 
   -- ── Private helpers ───────────────────────────────────────────────────────
 
-  pfn rev(xs, acc) do
+  pfn rev(xs : List(a), acc : List(a)) : List(a) do
     match xs do
     Nil -> acc
     Cons(h, t) -> rev(t, Cons(h, acc))
     end
   end
 
-  pfn list_len(xs, acc) do
+  pfn list_len(xs : List(a), acc : Int) : Int do
     match xs do
     Nil -> acc
     Cons(_, t) -> list_len(t, acc + 1)
     end
   end
 
-  pfn list_append(xs, ys) do
+  pfn list_append(xs : List(a), ys : List(a)) : List(a) do
     match xs do
     Nil -> ys
     Cons(h, t) -> Cons(h, list_append(t, ys))
@@ -41,28 +43,60 @@ mod Queue do
 
   -- ── Public API ────────────────────────────────────────────────────────────
 
-  doc "Returns an empty deque."
-  fn empty() do
+  doc """
+  Returns an empty queue.
+
+  ## Examples
+
+      march> Queue.to_list(Queue.empty())
+      []
+      march> Queue.is_empty(Queue.empty())
+      true
+  """
+  fn empty() : Queue(a) do
     Queue(Nil, Nil)
   end
 
-  doc "Returns true if the deque contains no elements."
-  fn is_empty(q) do
+  doc """
+  Returns true if the queue contains no elements. O(1).
+
+  ## Examples
+
+      march> Queue.is_empty(Queue.empty())
+      true
+      march> Queue.is_empty(Queue.push_back(Queue.empty(), 1))
+      false
+  """
+  fn is_empty(q : Queue(a)) : Bool do
     match q do
     Queue(Nil, Nil) -> true
     _ -> false
     end
   end
 
-  doc "Add an element to the back of the deque."
-  fn push_back(q, x) do
+  doc """
+  Add an element to the back of the queue. O(1).
+
+  ## Examples
+
+      march> Queue.to_list(Queue.push_back(Queue.from_list([1, 2]), 3))
+      [1, 2, 3]
+  """
+  fn push_back(q : Queue(a), x : a) : Queue(a) do
     match q do
     Queue(front, back) -> Queue(front, Cons(x, back))
     end
   end
 
-  doc "Add an element to the front of the deque."
-  fn push_front(q, x) do
+  doc """
+  Add an element to the front of the queue. O(1).
+
+  ## Examples
+
+      march> Queue.to_list(Queue.push_front(Queue.from_list([2, 3]), 1))
+      [1, 2, 3]
+  """
+  fn push_front(q : Queue(a), x : a) : Queue(a) do
     match q do
     Queue(front, back) -> Queue(Cons(x, front), back)
     end
@@ -70,9 +104,17 @@ mod Queue do
 
   doc """
   Remove and return the front element.
-  Returns Some((element, new_queue)) if non-empty, or None if empty.
+  Returns `Some((element, new_queue))` if non-empty, or `None` if empty. O(1) amortised:
+  when the front list is exhausted the back list is reversed once into the front.
+
+  ## Examples
+
+      march> Option.map(Queue.pop_front(Queue.from_list([1, 2, 3])), fn p -> match p do (x, q) -> (x, Queue.to_list(q)) end)
+      Some((1, [2, 3]))
+      march> Queue.pop_front(Queue.empty())
+      None
   """
-  fn pop_front(q) do
+  fn pop_front(q : Queue(a)) : Option((a, Queue(a))) do
     match q do
     Queue(Nil, Nil) -> None
     Queue(Nil, back) -> do
@@ -88,9 +130,17 @@ mod Queue do
 
   doc """
   Remove and return the back element.
-  Returns Some((element, new_queue)) if non-empty, or None if empty.
+  Returns `Some((element, new_queue))` if non-empty, or `None` if empty. O(1) amortised:
+  when the back list is exhausted the front list is reversed once into the back.
+
+  ## Examples
+
+      march> Option.map(Queue.pop_back(Queue.from_list([1, 2, 3])), fn p -> match p do (x, q) -> (x, Queue.to_list(q)) end)
+      Some((3, [1, 2]))
+      march> Queue.pop_back(Queue.empty())
+      None
   """
-  fn pop_back(q) do
+  fn pop_back(q : Queue(a)) : Option((a, Queue(a))) do
     match q do
     Queue(Nil, Nil) -> None
     Queue(front, Nil) -> do
@@ -104,8 +154,18 @@ mod Queue do
     end
   end
 
-  doc "Return the front element without removing it, or None if empty."
-  fn peek_front(q) do
+  doc """
+  Return the front element without removing it, or `None` if empty. O(1) amortised
+  (O(n) when the front list is empty; the reversal is not kept).
+
+  ## Examples
+
+      march> Queue.peek_front(Queue.from_list([1, 2, 3]))
+      Some(1)
+      march> Queue.peek_front(Queue.empty())
+      None
+  """
+  fn peek_front(q : Queue(a)) : Option(a) do
     match q do
     Queue(Nil, Nil) -> None
     Queue(Cons(h, _), _) -> Some(h)
@@ -119,8 +179,18 @@ mod Queue do
     end
   end
 
-  doc "Return the back element without removing it, or None if empty."
-  fn peek_back(q) do
+  doc """
+  Return the back element without removing it, or `None` if empty. O(1) amortised
+  (O(n) when the back list is empty; the reversal is not kept).
+
+  ## Examples
+
+      march> Queue.peek_back(Queue.from_list([1, 2, 3]))
+      Some(3)
+      march> Queue.peek_back(Queue.push_front(Queue.empty(), 9))
+      Some(9)
+  """
+  fn peek_back(q : Queue(a)) : Option(a) do
     match q do
     Queue(Nil, Nil) -> None
     Queue(_, Cons(h, _)) -> Some(h)
@@ -134,22 +204,47 @@ mod Queue do
     end
   end
 
-  doc "Return the number of elements in the deque. O(n)."
-  fn size(q) do
+  doc """
+  Return the number of elements in the queue. O(n): both internal lists are counted.
+
+  ## Examples
+
+      march> Queue.size(Queue.from_list([1, 2, 3]))
+      3
+      march> Queue.size(Queue.empty())
+      0
+  """
+  fn size(q : Queue(a)) : Int do
     match q do
     Queue(front, back) -> list_len(front, 0) + list_len(back, 0)
     end
   end
 
-  doc "Convert the deque to a list ordered from front to back."
-  fn to_list(q) do
+  doc """
+  Convert the queue to a list ordered from front to back. O(n).
+
+  ## Examples
+
+      march> Queue.to_list(Queue.push_front(Queue.push_back(Queue.empty(), 2), 1))
+      [1, 2]
+  """
+  fn to_list(q : Queue(a)) : List(a) do
     match q do
     Queue(front, back) -> list_append(front, rev(back, Nil))
     end
   end
 
-  doc "Build a deque from a list. The first element of the list becomes the front."
-  fn from_list(xs) do
+  doc """
+  Build a queue from a list. The first element of the list becomes the front. O(n).
+
+  ## Examples
+
+      march> Queue.peek_front(Queue.from_list([1, 2, 3]))
+      Some(1)
+      march> Queue.to_list(Queue.from_list([]))
+      []
+  """
+  fn from_list(xs : List(a)) : Queue(a) do
     fn go(lst, q) do
       match lst do
       Nil -> q

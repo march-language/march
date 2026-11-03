@@ -1,0 +1,10 @@
+current epoch 1
+
+EPOCH        PINS  STATE
+1               2  current
+
+SLOT  NAME                               IMPL            EPOCH  ACTIVATED
+(no hot-reload slots: this node was not built with --hot-reload)
+
+deferred 0  converted 0  dropped 0  killed 0  stopped 0  advances 0  early 0  forced 0
+markers live 0  lost 0

@@ -648,13 +648,12 @@ let output_ext = function
 
 type hcr_build = { prefix : string; public_key : string }
 
-(** The shell command that compiles the entry file to [output]. [target] is
-    passed as --target <t>; omitting it compiles to a native binary.
-    [pin_main] (from forge.toml's [package] pin_main) adds --pin-main; when it
-    is false the command is byte-identical to what forge ran before the key
-    existed (pinned by forge/test/test_forge.ml's "pin_main" group). *)
-let compile_command ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target ?hcr
-    ~pin_main entry =
+(** The compiler flags a build passes for the build's own settings: optimisation
+    level, [--pmap-threshold], [--target], [--pin-main], [--dump-phases],
+    hot-reload and the FFI/protocol/topology flags in [ffi_flags].  Shared by
+    [compile_command] and [forge query] ({!Cmd_query}), so a query describes
+    the build [forge build] would run. *)
+let compile_flags ~ffi_flags ~release ~dump_phases ?target ?hcr ~pin_main () =
   let opt_flag    = if release then " --opt 2" else " --opt 0" in
   let dump_flag   = if dump_phases then " --dump-phases" else "" in
   let target_flag = match target with Some t -> " --target " ^ t | None -> "" in
@@ -670,9 +669,26 @@ let compile_command ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?targ
     | Some v when v <> "" -> " --pmap-threshold=" ^ v
     | _ -> ""
   in
-  Printf.sprintf "%smarch --compile -o %s%s%s%s%s%s%s%s %s"
-    lib_path_env (Filename.quote output) opt_flag pmap_flag target_flag
-    pin_flag dump_flag hcr_flags ffi_flags (Filename.quote entry)
+  (* MARCH_JS_INT_CHECK=1 with --target js range-checks Int + - * (the
+     compiler's --js-int-check), for finding code that needs more than 53 bits. *)
+  let int_check_flag =
+    match target, Sys.getenv_opt "MARCH_JS_INT_CHECK" with
+    | Some ("js" | "javascript"), Some v when v <> "" && v <> "0" -> " --js-int-check"
+    | _ -> ""
+  in
+  opt_flag ^ pmap_flag ^ target_flag ^ int_check_flag ^ pin_flag ^ dump_flag ^ hcr_flags ^ ffi_flags
+
+(** The shell command that compiles the entry file to [output]. [target] is
+    passed as --target <t>; omitting it compiles to a native binary.
+    [pin_main] (from forge.toml's [package] pin_main) adds --pin-main; when it
+    is false the command is byte-identical to what forge ran before the key
+    existed (pinned by forge/test/test_forge.ml's "pin_main" group). *)
+let compile_command ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target ?hcr
+    ~pin_main entry =
+  Printf.sprintf "%smarch --compile -o %s%s %s"
+    lib_path_env (Filename.quote output)
+    (compile_flags ~ffi_flags ~release ~dump_phases ?target ?hcr ~pin_main ())
+    (Filename.quote entry)
 
 (** Compile the entry file to [output] (see [compile_command]).
     Returns [(exit_code, n_errors, n_warnings)]. *)
@@ -833,7 +849,7 @@ let protocols_dir ~root = Filename.concat root (Filename.concat ".forge" "protoc
     Passed only when a source file declares an `@[endpoints]` protocol:
     `--emit-protocols` turns off the compiler's source-level cache exit (it
     must expand the protocols to write them), which every other project keeps. *)
-let protocol_flags ~root (sources : string list) : string =
+let protocol_flags ?(emit = true) ~root (sources : string list) : string =
   let declares f =
     try
       let ic = open_in_bin f in
@@ -855,8 +871,14 @@ let protocol_flags ~root (sources : string list) : string =
     in
     String.concat ""
       (List.map (fun f -> " --protocol-baseline " ^ Filename.quote (Filename.concat dir f)) stored)
-    ^ " --emit-protocols " ^ Filename.quote dir
+    ^ (if emit then " --emit-protocols " ^ Filename.quote dir else "")
   end
+
+(** Cross-target aliases in the compiler's canonical form. *)
+let normalise_target = function
+  | "linux/x86_64" | "linux-x86_64" -> "linux/amd64"
+  | "linux/aarch64" | "linux-arm64" -> "linux/arm64"
+  | other -> other
 
 (** [topology_pools]: a topology app's build restricted to these pools
     ([march --topology-pools]); [output_suffix] names the artifact
@@ -873,11 +895,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
   let t0 = Unix.gettimeofday () in
   (* Normalize cross-target aliases to the compiler's canonical form and derive
      a per-target output subdir so a Linux build never clobbers the host binary. *)
-  let target = Option.map (fun t ->
-    match t with
-    | "linux/x86_64" | "linux-x86_64" -> "linux/amd64"
-    | "linux/aarch64" | "linux-arm64" -> "linux/arm64"
-    | other -> other) target in
+  let target = Option.map normalise_target target in
   let target_subdir = match target with
     | Some "linux/amd64" -> "linux-amd64"
     | Some "linux/arm64" -> "linux-arm64"
@@ -959,7 +977,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
     in
     let files = find_march_files lib_dir @ gen_files in
     let has_entry = proj.Project.project_type <> Project.Lib
-                    && Result.is_ok (Project.entry proj) in
+                    && Result.is_ok (Project.entry ~js:(match target with Some ("js" | "javascript") -> true | _ -> false) proj) in
     if files = [] && not has_entry then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
@@ -985,7 +1003,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
           Ok (Printf.sprintf "checked %d file(s) in %s" (List.length files) lib_dir)
         end
       | Project.App | Project.Tool ->
-        match Project.entry proj with
+        match Project.entry ~js:(match target with Some ("js" | "javascript") -> true | _ -> false) proj with
         | Error e -> Error e
         | Ok entry_path ->
         (* Check every lib/ file individually before compilation so that orphan

@@ -159,6 +159,7 @@ static void *make_bytes_from_raw(const uint8_t *data, int64_t len) {
     void *s = march_string_lit((const char *)data, len);
     void *b = march_alloc(16 + 8);
     /* tag stays 0 = Bytes ctor */
+    ((march_hdr *)b)->pad = march_bytes_type_id();
     *(void **)((char *)b + 16) = s;
     return b;
 }
@@ -190,6 +191,30 @@ static int istrncmp(const char *a, const char *b, size_t n) {
 
 /* ── TCP builtins ─────────────────────────────────────────────────────── */
 
+/* The IPv4 address HTTP servers bind to: INADDR_ANY until
+ * http_server_bind_host sets it (network byte order).  Read by every listen
+ * path: tcp_listen_raw here and create_reuseport_listener in the event loop. */
+in_addr_t march_http_bind_addr = INADDR_ANY;
+
+/* http_server_bind_host(host) -> Unit: later listens bind to `host`, a
+ * dotted IPv4 address such as "127.0.0.1".  Panics on anything else. */
+void march_http_server_bind_host(void *host_ptr) {
+    march_string *hs = (march_string *)host_ptr;
+    char buf[64];
+    size_t n = hs ? (size_t)hs->len : 0;
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    if (hs) memcpy(buf, hs->data, n);
+    buf[n] = 0;
+    struct in_addr a;
+    if (inet_pton(AF_INET, buf, &a) != 1) {
+        char msg[128];
+        int k = snprintf(msg, sizeof(msg), "bind_host: not an IPv4 address: %s", buf);
+        march_panic_user(march_string_lit(msg, k));
+        return;
+    }
+    march_http_bind_addr = a.s_addr;
+}
+
 /* Raw helpers used by the internal HTTP server loop (not called from March). */
 static int64_t tcp_listen_raw(int64_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -199,7 +224,7 @@ static int64_t tcp_listen_raw(int64_t port) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = march_http_bind_addr;
     addr.sin_port        = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(fd); return -1;
@@ -2386,6 +2411,25 @@ static void *pool_worker(void *arg) {
     return NULL;
 }
 
+/* Start the pool's initial g_pool.size workers.  Runs on the scheduler's
+   NATIVE stack (march_sched_run_on_sched_stack): march_http_server_listen,
+   the caller, is a green thread, and under ASAN pthread_create runs with
+   every signal blocked, so a lazy green-stack growth fault inside it is fatal
+   (silent exit 139; see march_sched_getaddrinfo's resolver spawn in
+   march_scheduler.c).  pool_grow_if_starved needs no such care: it runs on a
+   pool worker, an ordinary OS thread. */
+static void pool_spawn_initial(void *arg) {
+    (void)arg;
+    for (int i = 0; i < g_pool.size; i++) {
+        if (pthread_create(&g_pool.threads[i], NULL, pool_worker, NULL) != 0) {
+            fprintf(stderr, "march: pool worker[%d] create failed: %s\n",
+                    i, strerror(errno));
+            g_pool.size = i;   /* only join threads we actually started */
+            break;
+        }
+    }
+}
+
 void march_http_pool_start(int64_t pool_size, void *pipeline) {
     march_http_pool_start_max(pool_size, 0, pipeline);
 }
@@ -2431,14 +2475,7 @@ void march_http_pool_start_max(int64_t pool_size, int64_t max_conns,
         return;
     }
 
-    for (int i = 0; i < g_pool.size; i++) {
-        if (pthread_create(&g_pool.threads[i], NULL, pool_worker, NULL) != 0) {
-            fprintf(stderr, "march: pool worker[%d] create failed: %s\n",
-                    i, strerror(errno));
-            g_pool.size = i;   /* only join threads we actually started */
-            break;
-        }
-    }
+    march_sched_run_on_sched_stack(pool_spawn_initial, NULL);
     fprintf(stderr, "march: HTTP thread pool started "
                     "(%d workers, growing to %d as connections arrive)\n",
             g_pool.size, g_pool.max_size);

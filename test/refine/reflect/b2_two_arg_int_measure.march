@@ -1,0 +1,16 @@
+mod B2 do
+  @[measure]
+  fn count_ge(xs : List(Int), k : Int) : Int do
+    match xs do
+      Nil -> 0
+      Cons(h, t) -> if h >= k do 1 + count_ge(t, k) else count_ge(t, k) end
+    end
+  end
+
+  fn need_small(n : {Int | _ <= 1}) : Int do n end
+
+  fn main() : Unit do
+    let _ = need_small(count_ge(Cons(5, Nil), 3))
+    ()
+  end
+end

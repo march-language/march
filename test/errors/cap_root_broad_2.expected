@@ -44,6 +44,11 @@ expected `Cap(IO)` but got `ActorCap(a)`. [type_mismatch]
 
 44 |       Some(c) -> println(int_to_string(wants_root(c)))
                                             ^^^^^^^^^^^^^
+
+    `c` was bound here as `ActorCap(a)`:
+
+44 |       Some(c) -> println(int_to_string(wants_root(c)))
+                ^
     run `march --explain type_mismatch`
 
 

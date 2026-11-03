@@ -17,6 +17,80 @@ module Sys = struct
     | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> 255
 end
 
+(* [Alcotest] for this file and every test file that opens Test_helpers: the
+   real module, except that its assertion functions take one process-wide
+   lock while they print.
+
+   Every check, check', fail, failf, check_raises and match_raises with a
+   non-empty message prints an "ASSERT <msg>" line (alcotest 1.9.1,
+   src/alcotest-engine/test.ml, [show_assert]): it flushes alcotest's
+   stdout formatter and fprintfs to its stderr formatter. Both are ONE shared
+   [Format.formatter] each, held in a global ref, so [parallel_cases] bodies
+   asserting on several domains at once drive the same formatter
+   concurrently. Format's pretty-printing queue is not domain-safe: OCaml
+   5.5.1 detects the torn queue and raises
+   [Invalid_argument "Format: Unsynchronized access to formatter"] out of the
+   body (CI run 40142534056), and 5.3 can garble or lose the lines instead.
+
+   [check_raises] / [match_raises] run the thunk (and the predicate) OUTSIDE
+   the lock, then replay the outcome through the real function under it, so
+   a thunk that itself asserts cannot deadlock and slow thunks do not
+   serialize.
+   [check] / [check'] pass the caller's location as [~here], which the real
+   [check] would otherwise attribute to this wrapper. *)
+module Alcotest = struct
+  include Alcotest
+
+  let print_lock = Mutex.create ()
+  let locked f = Mutex.protect print_lock f
+
+  (* The location of the call to the wrapper that calls this: frame 0 is
+     this function, 1 the wrapper, 2 the test code. Best effort, like
+     alcotest's own guess, and off under the same env switch. *)
+  let[@inline never] caller_here () =
+    let guess =
+      match Stdlib.Sys.getenv "ALCOTEST_SOURCE_CODE_POSITION" with
+      | "" | "false" | "no" | "n" | "0" -> false
+      | _ | (exception Not_found) -> true
+    in
+    if not guess then None
+    else
+      let entries = Printexc.(raw_backtrace_entries (get_callstack 3)) in
+      if Array.length entries < 3 then None
+      else
+        match Printexc.backtrace_slots_of_raw_entry entries.(2) with
+        | Some [| slot |] ->
+          Option.map (fun { Printexc.filename; line_number; start_char; _ } ->
+              { Lexing.pos_fname = filename; pos_lnum = line_number;
+                pos_bol = 0; pos_cnum = start_char })
+            (Printexc.Slot.location slot)
+        | _ -> None
+
+  let[@inline never] check ?here ?pos t msg expected actual =
+    let here = match here, pos with None, None -> caller_here () | _ -> here in
+    locked (fun () -> Alcotest.check ?here ?pos t msg expected actual)
+
+  let[@inline never] check' ?here ?pos t ~msg ~expected ~actual =
+    let here = match here, pos with None, None -> caller_here () | _ -> here in
+    locked (fun () -> Alcotest.check ?here ?pos t msg expected actual)
+
+  let fail ?here ?pos msg = locked (fun () -> Alcotest.fail ?here ?pos msg)
+  let failf ?here ?pos fmt = Format.kasprintf (fun msg -> fail ?here ?pos msg) fmt
+
+  let check_raises ?here ?pos msg exn f =
+    let outcome = try f (); None with e -> Some e in
+    locked (fun () ->
+      Alcotest.check_raises ?here ?pos msg exn (fun () ->
+        Option.iter raise outcome))
+
+  let match_raises ?here ?pos msg exnp f =
+    let outcome = try f (); None with e -> Some e in
+    let expected = match outcome with Some e -> exnp e | None -> false in
+    locked (fun () ->
+      Alcotest.match_raises ?here ?pos msg (fun _ -> expected) (fun () ->
+        Option.iter raise outcome))
+end
+
 let parse_module src =
   let lexbuf = Lexing.from_string src in
   March_parser.Parse.module_of_lexbuf lexbuf
@@ -488,6 +562,19 @@ let ir_contains ir pat =
   try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
   with Not_found -> false
 
+(** [ir] without the entries of the Diagnostics function table
+    (`@march_fn_table`, emitted by Llvm_toplevel.fn_table_block), which lists
+    `ptr @f` for every function the module defines: for checks that a
+    function's address appears nowhere else. *)
+let ir_outside_fn_table ir =
+  let entry = "{ ptr, ptr, i64, ptr } {" in
+  String.split_on_char '\n' ir
+  |> List.filter (fun l ->
+      let l = String.trim l in
+      not (String.length l >= String.length entry
+           && String.sub l 0 (String.length entry) = entry))
+  |> String.concat "\n"
+
 (** Compiled actor: dispatch function is emitted in the LLVM IR. *)
 let ir_count ir pat =
   let re = Str.regexp_string pat in
@@ -619,11 +706,15 @@ let test_jobs () =
     verifier run): run serially they left a 4-core CI runner ~75% idle and
     were the long pole of whole suites (CI audit, 2026-10-07). [f] must not
     touch process-global state: no [Sys.chdir], no [Unix.putenv], no
-    in-process compiler pipeline (typecheck/eval keep global tables). Temp
+    in-process compiler pipeline (typecheck/eval keep global tables), no
+    shared [Format.formatter] ([Format.std_formatter], [Fmt.stderr], a
+    module-level buffer formatter; [Format.asprintf] is fine). Alcotest's
+    assertions are safe only through the [Alcotest] shadow above, i.e. in a
+    file that opens Test_helpers. [?jobs] overrides [test_jobs ()]. Temp
     files are fine: [Filename.temp_file]'s PRNG is domain-local. An exception
     from [f] is re-raised for the first failing input, after every domain
     has been joined. *)
-let parallel_map (f : int -> 'a -> 'b) (xs : 'a list) : 'b list =
+let parallel_map ?jobs (f : int -> 'a -> 'b) (xs : 'a list) : 'b list =
   let input = Array.of_list xs in
   let n = Array.length input in
   let output = Array.make n None in
@@ -635,7 +726,7 @@ let parallel_map (f : int -> 'a -> 'b) (xs : 'a list) : 'b list =
       worker w
     end
   in
-  let jobs = max 1 (min n (test_jobs ())) in
+  let jobs = max 1 (min n (Option.value jobs ~default:(test_jobs ()))) in
   let domains = List.init (jobs - 1) (fun w -> Domain.spawn (fun () -> worker (w + 1))) in
   worker 0;
   List.iter Domain.join domains;
@@ -658,14 +749,15 @@ let parallel_map (f : int -> 'a -> 'b) (xs : 'a list) : 'b list =
     exception and is reported normally), and filtering a run down to ONE of
     these cases still runs the whole batch. [MARCH_TEST_JOBS=1] runs each
     body inline, in its own case, as before. *)
-let parallel_cases (cases : (string * Alcotest.speed_level * (unit -> unit)) list)
+let parallel_cases ?jobs
+    (cases : (string * Alcotest.speed_level * (unit -> unit)) list)
     : unit Alcotest.test_case list =
-  if test_jobs () = 1 then
+  if Option.value jobs ~default:(test_jobs ()) = 1 then
     List.map (fun (name, speed, body) -> Alcotest.test_case name speed body) cases
   else begin
     let outcomes =
       lazy (Array.of_list
-              (parallel_map
+              (parallel_map ?jobs
                  (fun _ (_, _, body) -> try Ok (body ()) with e -> Error e)
                  cases))
     in
@@ -804,7 +896,8 @@ let setup_jit_runtime () =
       "march_gc.c"; "sha1.c"; "march_extras.c"; "march_ctx_escape.c";
       "base64.c"; "march_ffi.c";
       "march_dispatch.c"; "march_reload.c"; "march_remote_registry.c";
-      "march_monitor_registry.c"; "march_observe.c"; "march_observe_snapshot.c"; "march_observe_debug.c"; "march_sig.c"; "tweetnacl.c"; "march_nacl.c";
+      "march_monitor_registry.c"; "march_observe.c"; "march_observe_snapshot.c"; "march_observe_debug.c"; "march_trace.c"; "march_sig.c"; "tweetnacl.c"; "march_nacl.c";
+      "pqc.c"; "march_pqc.c";
     ] in
     let c_inputs = runtime_c :: extra_src_list in
     let h_inputs =
@@ -1363,7 +1456,7 @@ let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
     fn_name = { txt = "main"; span = s };
     fn_vis = March_ast.Ast.Public;
     fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-    fn_clauses = [clause]; fn_bounds = [] } in
+    fn_clauses = [clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
     mod_decls = [March_ast.Ast.DFn (fn_def, s)] }
 
@@ -1378,7 +1471,7 @@ let make_stdlib_module stdlib_decls (e : March_ast.Ast.expr) : March_ast.Ast.mod
   let main_def = March_ast.Ast.{
     fn_name = { txt = "main"; span = s };
     fn_vis = March_ast.Ast.Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-    fn_clauses = [clause]; fn_bounds = [] } in
+    fn_clauses = [clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
   { March_ast.Ast.mod_name = { txt = "Main"; span = s };
     mod_decls = stdlib_decls @ [March_ast.Ast.DFn (main_def, s)] }
 
@@ -2341,3 +2434,24 @@ let run_vectorize_check src =
   March_errors.Errors.sorted ctx
 
 (** pfn called from within a lambda passed to a HOF — must NOT be flagged. *)
+
+(* CI's macOS `test` job sets MARCH_CI_SKIP_OS_INDEPENDENT=1 (see "CI sharding"
+   in test/dune). Under it, [keep_os_sensitive ~groups suites] keeps ONLY the
+   named alcotest groups; unset, the suites pass through untouched. It is for
+   suites that are mostly compiler logic (run_codegen, run_compiler): there
+   the OS- or arch-sensitive groups are the few worth a macOS runner, and
+   test/native's compile-and-run fixtures, which run unfiltered, are where
+   macOS has actually caught bugs Linux missed.
+
+   A name that matches no group is an error rather than a no-op, so a renamed
+   group fails here instead of silently leaving macOS. *)
+let keep_os_sensitive ~groups suites =
+  if Stdlib.Sys.getenv_opt "MARCH_CI_SKIP_OS_INDEPENDENT" <> Some "1" then suites
+  else begin
+    let present = List.map fst suites in
+    (match List.filter (fun g -> not (List.mem g present)) groups with
+     | [] -> ()
+     | missing ->
+       failwith ("keep_os_sensitive: no such group: " ^ String.concat ", " missing));
+    List.filter (fun (name, _) -> List.mem name groups) suites
+  end

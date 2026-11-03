@@ -93,6 +93,13 @@ document outside `specs/lang/` and linked from here rather than duplicated.
 | Parallelism | [`parallelism.md`](parallelism.md) | canonical |
 | Clustering | [`clustering.md`](clustering.md) | canonical |
 | Standard library (overview/pointer chapter) | [`standard-library.md`](standard-library.md) | canonical |
+| 1.0: compatibility and deprecation policy | [`compatibility.md`](compatibility.md) | canonical |
+| 1.0: supported platforms (tiers) | [`platforms.md`](platforms.md) | canonical |
+| 1.0 claim: deploys and distribution | [`claim-deploys.md`](claim-deploys.md) | canonical |
+| 1.0 claim: capabilities | [`claim-capabilities.md`](claim-capabilities.md) | canonical |
+| Capability threat model (reconciles the capability pages) | [`capability-threat-model.md`](capability-threat-model.md) | canonical |
+| 1.0 claim: performance | [`claim-performance.md`](claim-performance.md) | canonical |
+| 1.0 claim: refinement types | [`claim-refinements.md`](claim-refinements.md) | canonical |
 | Implementation reference (compiler internals, sibling) | [`specs/impl/index.md`](../impl/index.md) | external (sibling) |
 
 ---

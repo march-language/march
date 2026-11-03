@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: does not satisfy the expected element refinement `_ < 10`
+-- Relational element refinements, z1 (2026-10-18, design
+-- specs/2026-10-18-element-flow-followups-design.md phase 0): `need_lt`'s
+-- slot `_ < n` names ITS `n`, here 10.  Read in the caller's namespace it
+-- meant the caller's `let n = 1000`, and `_ < 60` "implied" it: proved.
+-- `ys = [59]` breaks the contract.  Accept companion: accept/t325.
+mod ElemDemandCallerNs do
+  cap verified
+  fn need_lt(xs : List({Int | _ < n}), n : Int) : Int do 0 end
+  fn go(ys : List({Int | _ < 60})) : Int do
+    let n = 1000
+    need_lt(ys, 10)
+  end
+end

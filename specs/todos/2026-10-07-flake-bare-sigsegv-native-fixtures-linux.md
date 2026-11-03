@@ -46,7 +46,9 @@ cores of unpackaged binaries.
 - **A full `rest` shard** (`MARCH_CI_RUNTEST_SPLIT=1 dune runtest -j 4`, arm64,
   7 GB, cores captured): no March binary crashed. (One unrelated C harness did:
   `test_reload_activate4_runner` faulted in `__march_init` of a dlopen'd stub on
-  the reload-server thread.)
+  the reload-server thread. That was a pre-`march_sched_init` spawn overrunning
+  its stack reservation, fixed separately:
+  `specs/progress/2026-10-07-preinit-spawn-stack-overruns-reservation.md`.)
 - **A signal sent from outside.** Nothing in `test/` or `scripts/` sends SIGSEGV
   to a process, so a stray kill of a recycled PID cannot produce this.
 - **Memory pressure (OOM) in the failing job.** Its log has no OOM-killer or
@@ -70,3 +72,30 @@ the three cases above: `si_code` 128 (`SI_KERNEL`) is case 3, a fault code
 (1, 2) with the runtime's line missing is case 1 or 2, and the backtrace says
 which; 0 or a negative code would mean a signal sent by a process after all.
 Fix from that evidence, then move this file to `specs/progress/`.
+
+## TSAN on macOS, 2026-10-11: no race found that explains it
+
+Both fixtures were built with `MARCH_SANITIZE=thread` (macOS arm64, LLVM 22) and run
+(`run_until_idle_ping_pong` at 14 schedulers 11 times, `branch_alias_tail_drop` 35
+times at 1 to 14 schedulers). Every run that finished printed no TSAN report. The one
+refcount race TSAN had flagged elsewhere (the plain immortal-check read in `march_decrc`,
+fixed in `specs/progress/2026-10-07-macos-tsan-green-thread-races.md`) cannot cause a
+fault: it compares the count against 2^40, and a mortal count cannot reach 2^40, so the
+racy read always gave the right answer. So it is not the cause here.
+What TSAN did show is a TSAN-only scheduler wedge (`ping_pong` wedged in all 11 runs, with
+no output). That is a hang, not a fault, and it never happens in plain or ASAN builds, so
+it is not this crash either
+(`specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md`). If that wedge turns out to be a
+real lost-proc bug that TSAN's timing exposes, look at it again here.
+
+**Update 2026-10-11:** the wedge was not a lost proc. It was TSAN deadlocking in its own
+report path, re-entered through the preemption signal handler; fixed, see
+`specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md`. It is unrelated to this crash.
+
+## 2026-10-12: did not reproduce under ASAN on Linux arm64
+
+30 runs at `MARCH_NUM_SCHEDULERS=14` under `MARCH_SANITIZE=1
+MARCH_DEBUG_RUNTIME=1` (`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`), Docker
+`march-ci-ubuntu-step6b` (arm64, glibc 2.39), concurrently with a 6-way ASAN
+sweep for load: 0 failures, no sanitizer report. Both fixtures named above (`branch_alias_tail_drop`, `run_until_idle_ping_pong`) were looped. Both are also clean in
+the full `scripts/native-sanitize-sweep.sh` error pass at 1 and 14 schedulers.

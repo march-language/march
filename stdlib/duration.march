@@ -12,7 +12,10 @@
 --   :ms  :s  :m  :h  :d  :w
 --
 -- Negative durations are supported (e.g. for countdown timers).
--- Duration.format/1 handles negatives by prepending "-".
+-- Duration.format/1 handles negatives by prepending "-" (the smallest Int
+-- included: its magnitude is formatted without negating it).
+--
+-- doc: try
 
 mod Duration do
 
@@ -24,11 +27,15 @@ mod Duration do
   Create a Duration from an amount and a unit atom.
 
   Supported units: `:ms` (milliseconds), `:s` (seconds), `:m` (minutes),
-  `:h` (hours), `:d` (days), `:w` (weeks).
+  `:h` (hours), `:d` (days), `:w` (weeks).  Any other atom is a
+  match failure at runtime.
 
-      Duration.new(30, :s)   -- 30 seconds
-      Duration.new(2, :h)    -- 2 hours
-      Duration.new(500, :ms) -- 500 milliseconds
+      march> Duration.new(30, :s)  -- 30 seconds
+      Duration(30000)
+      march> Duration.new(2, :h)  -- 2 hours
+      Duration(7200000)
+      march> Duration.new(500, :ms)  -- 500 milliseconds
+      Duration(500)
   """
   fn new(amount, unit) do
     match unit do
@@ -41,22 +48,68 @@ mod Duration do
     end
   end
 
-  doc "Create a Duration of n milliseconds."
+  doc """
+  Create a Duration of n milliseconds. n may be negative.
+
+  ## Examples
+
+      march> Duration.milliseconds(1500)
+      Duration(1500)
+      march> Duration.format(Duration.milliseconds(-250))
+      "-250 milliseconds"
+  """
   fn milliseconds(n) do Duration(n) end
 
-  doc "Create a Duration of n seconds."
+  doc """
+  Create a Duration of n seconds (stored as `n * 1000` milliseconds).
+
+  ## Examples
+
+      march> Duration.seconds(2)
+      Duration(2000)
+      march> Duration.seconds(-1)
+      Duration(-1000)
+  """
   fn seconds(n) do Duration(n * 1000) end
 
-  doc "Create a Duration of n minutes."
+  doc """
+  Create a Duration of n minutes (stored as `n * 60000` milliseconds).
+
+  ## Examples
+
+      march> Duration.minutes(90) == Duration.add(Duration.hours(1), Duration.minutes(30))
+      true
+  """
   fn minutes(n) do Duration(n * 60000) end
 
-  doc "Create a Duration of n hours."
+  doc """
+  Create a Duration of n hours (stored as `n * 3600000` milliseconds).
+
+  ## Examples
+
+      march> Duration.to_milliseconds(Duration.hours(1))
+      3600000
+  """
   fn hours(n) do Duration(n * 3600000) end
 
-  doc "Create a Duration of n days (24-hour days)."
+  doc """
+  Create a Duration of n days (24-hour days, `n * 86400000` milliseconds).
+
+  ## Examples
+
+      march> Duration.format(Duration.days(3))
+      "3 days"
+  """
   fn days(n) do Duration(n * 86400000) end
 
-  doc "Create a Duration of n weeks (7 days each)."
+  doc """
+  Create a Duration of n weeks (7 days each, `n * 604800000` milliseconds).
+
+  ## Examples
+
+      march> Duration.weeks(1) == Duration.days(7)
+      true
+  """
   fn weeks(n) do Duration(n * 604800000) end
 
   -- ── Conversion ────────────────────────────────────────────────────────────
@@ -64,8 +117,10 @@ mod Duration do
   doc """
   Return the duration as a whole number of milliseconds.
 
-      Duration.to_milliseconds(Duration.seconds(2))  -- 2000
-      Duration.to_milliseconds(Duration.minutes(1))  -- 60000
+      march> Duration.to_milliseconds(Duration.seconds(2))
+      2000
+      march> Duration.to_milliseconds(Duration.minutes(1))
+      60000
   """
   fn to_milliseconds(d) do
     match d do Duration(ms) -> ms end
@@ -74,8 +129,10 @@ mod Duration do
   doc """
   Return the duration as a floating-point number of seconds.
 
-      Duration.to_seconds(Duration.milliseconds(1500))  -- 1.5
-      Duration.to_seconds(Duration.minutes(1))          -- 60.
+      march> Duration.to_seconds(Duration.milliseconds(1500))
+      1.5
+      march> Duration.to_seconds(Duration.minutes(1)) == 60.0
+      true
   """
   fn to_seconds(d) do
     match d do Duration(ms) -> int_to_float(ms) / 1000.0 end
@@ -86,8 +143,8 @@ mod Duration do
   doc """
   Add two durations.
 
-      Duration.add(Duration.seconds(30), Duration.seconds(30))
-      -- Duration(60000)  i.e. 1 minute
+      march> Duration.add(Duration.seconds(30), Duration.seconds(30))  -- 1 minute
+      Duration(60000)
   """
   fn add(a, b) do
     match (a, b) do
@@ -98,8 +155,8 @@ mod Duration do
   doc """
   Subtract duration b from duration a.
 
-      Duration.subtract(Duration.hours(2), Duration.minutes(30))
-      -- Duration(5400000)  i.e. 1 hour 30 minutes
+      march> Duration.subtract(Duration.hours(2), Duration.minutes(30))  -- 1 hour 30 minutes
+      Duration(5400000)
   """
   fn subtract(a, b) do
     match (a, b) do
@@ -110,8 +167,10 @@ mod Duration do
   doc """
   Multiply a duration by an integer factor.
 
-      Duration.multiply(Duration.seconds(10), 6)  -- Duration(60000)
-      Duration.multiply(Duration.hours(1), 24)    -- Duration for 1 day
+      march> Duration.multiply(Duration.seconds(10), 6)
+      Duration(60000)
+      march> Duration.multiply(Duration.hours(1), 24) == Duration.days(1)
+      true
   """
   fn multiply(d, factor) do
     match d do Duration(ms) -> Duration(ms * factor) end
@@ -124,9 +183,12 @@ mod Duration do
 
   Returns -1 if a < b, 0 if a == b, 1 if a > b.
 
-      Duration.compare(Duration.seconds(10), Duration.minutes(1))  -- -1
-      Duration.compare(Duration.hours(1), Duration.hours(1))       -- 0
-      Duration.compare(Duration.days(1), Duration.hours(12))       -- 1
+      march> Duration.compare(Duration.seconds(10), Duration.minutes(1))
+      -1
+      march> Duration.compare(Duration.hours(1), Duration.hours(1))
+      0
+      march> Duration.compare(Duration.days(1), Duration.hours(12))
+      1
   """
   fn compare(a, b) do
     match (a, b) do
@@ -142,67 +204,79 @@ mod Duration do
   doc """
   Format a Duration as a human-readable string.
 
-      Duration.format(Duration.seconds(90))          -- "1 minute, 30 seconds"
-      Duration.format(Duration.hours(2))             -- "2 hours"
-      Duration.format(Duration.milliseconds(500))    -- "500 milliseconds"
-      Duration.format(Duration.new(0, :ms))          -- "0 milliseconds"
-      Duration.format(Duration.seconds(-70))         -- "-1 minute, 10 seconds"
+      march> Duration.format(Duration.seconds(90))
+      "1 minute, 30 seconds"
+      march> Duration.format(Duration.hours(2))
+      "2 hours"
+      march> Duration.format(Duration.milliseconds(500))
+      "500 milliseconds"
+      march> Duration.format(Duration.new(0, :ms))
+      "0 milliseconds"
+      march> Duration.format(Duration.seconds(-70))
+      "-1 minute, 10 seconds"
 
   Units shown (from largest to smallest): weeks, days, hours, minutes,
   seconds, milliseconds.  Zero-valued units are omitted.  Singular forms
-  are used when the count is 1.
+  are used when the count is 1.  A negative duration is `-` followed by
+  its magnitude; this holds for every Int, the smallest included.
   """
   fn format(d) do
     match d do
     Duration(ms) ->
-      if ms < 0 do "-" ++ format(Duration(-ms))
-      else if ms == 0 do "0 milliseconds"
-      else
-        let total_s  = ms / 1000
-        let rem_ms   = ms % 1000
-        let total_m  = total_s / 60
-        let rem_s    = total_s % 60
-        let total_h  = total_m / 60
-        let rem_m    = total_m % 60
-        let total_d  = total_h / 24
-        let rem_h    = total_h % 24
-        let weeks_   = total_d / 7
-        let days_    = total_d % 7
-
-        fn plural(n, singular, pl) do
-          if n == 1 do int_to_string(n) ++ " " ++ singular
-          else int_to_string(n) ++ " " ++ pl end
-        end
-
-        -- Build list of non-zero parts
-        fn add_part(n, s, p, acc) do
-          if n == 0 do acc
-          else Cons(plural(n, s, p), acc) end
-        end
-
-        let parts =
-          add_part(rem_ms,  "millisecond",  "milliseconds",
-          add_part(rem_s,   "second",       "seconds",
-          add_part(rem_m,   "minute",       "minutes",
-          add_part(rem_h,   "hour",         "hours",
-          add_part(days_,   "day",          "days",
-          add_part(weeks_,  "week",         "weeks",
-          Nil))))))
-
-        fn rev_and_join(lst) do
-          fn rev(xs, acc) do
-            match xs do
-            Nil -> acc
-            Cons(h, t) -> rev(t, Cons(h, acc))
-            end
-          end
-          string_join(rev(lst, Nil), ", ")
-        end
-
-        rev_and_join(parts)
-      end
-      end
+      if ms == 0 do "0 milliseconds"
+      -- A negative duration is split into whole seconds and milliseconds
+      -- BEFORE negating: `-ms` overflows when ms is the smallest Int (it
+      -- negates to itself, so `format(Duration(-ms))` recursed forever), but
+      -- both parts of the split are safe to negate (`/` and `%` truncate
+      -- toward zero, so both are <= 0 here).
+      else if ms < 0 do "-" ++ format_parts(0 - ms / 1000, 0 - ms % 1000)
+      else format_parts(ms / 1000, ms % 1000) end end
     end
+  end
+
+  -- Formats a non-negative, non-zero magnitude given as whole seconds plus
+  -- the remaining milliseconds (0..999).
+  pfn format_parts(total_s, rem_ms) do
+    let total_m  = total_s / 60
+    let rem_s    = total_s % 60
+    let total_h  = total_m / 60
+    let rem_m    = total_m % 60
+    let total_d  = total_h / 24
+    let rem_h    = total_h % 24
+    let weeks_   = total_d / 7
+    let days_    = total_d % 7
+
+    fn plural(n, singular, pl) do
+      if n == 1 do int_to_string(n) ++ " " ++ singular
+      else int_to_string(n) ++ " " ++ pl end
+    end
+
+    -- Build list of non-zero parts
+    fn add_part(n, s, p, acc) do
+      if n == 0 do acc
+      else Cons(plural(n, s, p), acc) end
+    end
+
+    let parts =
+      add_part(rem_ms,  "millisecond",  "milliseconds",
+      add_part(rem_s,   "second",       "seconds",
+      add_part(rem_m,   "minute",       "minutes",
+      add_part(rem_h,   "hour",         "hours",
+      add_part(days_,   "day",          "days",
+      add_part(weeks_,  "week",         "weeks",
+      Nil))))))
+
+    fn rev_and_join(lst) do
+      fn rev(xs, acc) do
+        match xs do
+        Nil -> acc
+        Cons(h, t) -> rev(t, Cons(h, acc))
+        end
+      end
+      string_join(rev(lst, Nil), ", ")
+    end
+
+    rev_and_join(parts)
   end
 
 end

@@ -32,6 +32,8 @@ mod HEscapeCtxBuiltin do
     println("css=" ++ html_escape_ctx(4, "expression(alert(1))"))
     println("js=" ++ html_escape_ctx(5, "</script>"))
     println("none=" ++ html_escape_ctx(6, "<b>"))
+    println("urlp_dot=" ++ html_escape_ctx(10, ".."))
+    println("urlp_ok=" ++ html_escape_ctx(10, "0.2.3 a/b"))
     println("int=" ++ html_escape_ctx(0, 42))
     let io = ~H"<i>x</i>"
     println("iolist_html=" ++ html_escape_ctx(0, io))

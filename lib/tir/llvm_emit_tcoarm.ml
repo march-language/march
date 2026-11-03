@@ -86,6 +86,11 @@ let emit_fv_load ~emit_atom ~emit_expr ctx (v : Tir.var) (rhs : Tir.expr)
     value, a top-level function or builtin name that is not a local). *)
 let emit_defer_release ~emit_atom ctx (op : Tir.expr) : bool =
   let release_fn = match op with
+    (* An erased value: see [Llvm_emit.decrc_fn_for]. *)
+    | Tir.EDecRC (Tir.AVar { Tir.v_ty = Tir.TVar _; _ }) when ctx.Llvm_ctx.shape_meta ->
+      Some "@march_decrc_erased_local"
+    | Tir.EAtomicDecRC (Tir.AVar { Tir.v_ty = Tir.TVar _; _ }) when ctx.Llvm_ctx.shape_meta ->
+      Some "@march_decrc_erased"
     | Tir.EDecRC _ -> Some "@march_decrc_local"
     | Tir.EAtomicDecRC _ -> Some "@march_decrc"
     | Tir.EFree _ -> Some "@march_free"

@@ -17,6 +17,7 @@
 #      `march --compile` either globs ../runtime/*.c or names every core, http
 #      and hcr file (those are what the driver links, so they are what the
 #      rule's output depends on).
+#   5. runtime/march_ffi.h never names the string struct or its fields.
 #
 # Usage: scripts/check-runtime-sources.sh     # exit 1 on any problem
 set -euo pipefail
@@ -44,7 +45,7 @@ for p in runtime/*.c; do
 done
 for f in $(all_files); do
   [[ -e "runtime/$f" ]] || problem "STALE: $manifest lists $f but runtime/$f does not exist"
-  case "$(role_of "$f")" in core|http|hcr|unit-test-only|wasm) ;; *) problem "MANIFEST: $f has unknown role '$(role_of "$f")'";; esac
+  case "$(role_of "$f")" in core|codec|http|hcr|unit-test-only|wasm) ;; *) problem "MANIFEST: $f has unknown role '$(role_of "$f")'";; esac
 done
 [[ $fail -eq 0 ]] && echo "  ok — $nfiles files classified"
 
@@ -57,7 +58,7 @@ for drv in bin/main.ml bin/toolchain.ml; do
   for f in $(all_files); do
     r=$(role_of "$f")
     case "$r" in
-      core|http|hcr)
+      core|codec|http|hcr)
         grep -qx "$f" <<<"$named" || { problem "$drv does not name $r file $f"; c2=1; } ;;
       unit-test-only)
         grep -qx "$f" <<<"$named" && { problem "$drv names unit-test-only file $f (the driver must not link the arena)"; c2=1; } ;;
@@ -79,7 +80,7 @@ done
 [[ $c3 -eq 0 ]] && echo "  ok — JIT link list covers every jit-tagged file"
 
 echo "== Check 4: test/dune and demo/dune rule blocks =="
-required=$( { files_with_role core; files_with_role http; files_with_role hcr; } )
+required=$( { files_with_role core; files_with_role codec; files_with_role http; files_with_role hcr; } )
 c4=0; nrules=0
 for dunefile in test/dune demo/dune; do
   # Emit one line per (rule ...) block: "<target>|<kind>|<glob>|<deps files>|<action files>".
@@ -124,6 +125,19 @@ PY
 )
 done
 [[ $c4 -eq 0 ]] && echo "  ok — $nrules rule blocks consistent" || echo "  ($nrules rule blocks checked)"
+
+# Check 5: the public FFI header keeps String opaque. The string layout is not part of
+# the 1.0 promise (specs/lang/compatibility.md, decided 2026-10-31): C code reads a
+# String's bytes only through march_slice and makes one with march_str_new, so the
+# representation (for example inline short strings) can change within 1.x. A header
+# that named the struct or its fields would let user C depend on the layout.
+echo "== Check 5: runtime/march_ffi.h keeps String opaque =="
+c5=0
+if grep -nE 'march_string|struct[[:space:]]+march_str|->(len|data)\b' runtime/march_ffi.h; then
+  problem "runtime/march_ffi.h exposes the string layout (above): user C must go through march_slice / march_str_new"
+  c5=1
+fi
+[[ $c5 -eq 0 ]] && echo "  ok — no string struct or field in the public header"
 
 echo
 if [[ $fail -ne 0 ]]; then echo "check-runtime-sources FAILED"; exit 1; fi

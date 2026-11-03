@@ -17,6 +17,7 @@
 
 #include <errno.h>
 #include <math.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -185,6 +186,11 @@ void march_jw_bool(march_jw *w, int v) {
     if (v) jw_raw(w, "true", 4); else jw_raw(w, "false", 5);
 }
 
+void march_jw_raw(march_jw *w, const char *json, size_t n) {
+    jw_sep(w);
+    jw_raw(w, json, n);
+}
+
 void march_jw_null(march_jw *w) {
     jw_sep(w);
     jw_raw(w, "null", 4);
@@ -202,10 +208,14 @@ void march_jw_null(march_jw *w) {
  * standalone (test_observe links it alone). */
 static const char *verb_help(march_jw *w, const char *args);
 static const char *verb_ping(march_jw *w, const char *args);
+static const char *verb_watch(march_jw *w, const char *args);
 
 static const march_observe_verb verbs[] = {
     { "HELP", "observe", "", "the verbs this node serves", verb_help },
     { "PING", "observe", "", "liveness: data is \"pong\"", verb_ping },
+    { "WATCH", "observe", "<sections> <interval_ms> <max>",
+      "socket only: stream max (1..3600) SNAPSHOT <sections> envelopes, one per interval_ms (>= 250), then close",
+      verb_watch },
 };
 #define N_VERBS (sizeof verbs / sizeof verbs[0])
 
@@ -280,8 +290,8 @@ static void node_name(char *out, size_t n) {
 
 /* Write the reply envelope for one request into [out].  [data] is the
  * verb's writer, or NULL for an error reply. */
-static void build_envelope(march_jw *out, const char *error, march_jw *data,
-                           int64_t took_us) {
+static void build_envelope_ex(march_jw *out, const char *error, march_jw *data,
+                              int64_t took_us, int64_t seq, int64_t of) {
     char node[256];
     node_name(node, sizeof node);
     march_jw_obj_begin(out);
@@ -290,6 +300,10 @@ static void build_envelope(march_jw *out, const char *error, march_jw *data,
     march_jw_key(out, "at_ms");    march_jw_i64(out, now_ms());
     march_jw_key(out, "took_us");  march_jw_i64(out, took_us);
     int truncated = data && !march_jw_ok(data);
+    if (seq > 0) {   /* a WATCH frame: its position in the stream */
+        march_jw_key(out, "seq");  march_jw_i64(out, seq);
+        march_jw_key(out, "of");   march_jw_i64(out, of);
+    }
     march_jw_key(out, "truncated"); march_jw_bool(out, truncated);
     if (error) {
         march_jw_key(out, "error"); march_jw_str(out, error);
@@ -306,22 +320,30 @@ static void build_envelope(march_jw *out, const char *error, march_jw *data,
     march_jw_obj_end(out);
 }
 
-/* Handle one request line; the reply (without its newline) goes in [out]. */
-static void handle_line(char *line, march_jw *out) {
+static void build_envelope(march_jw *out, const char *error, march_jw *data,
+                           int64_t took_us) {
+    build_envelope_ex(out, error, data, took_us, 0, 0);
+}
+
+/* Handle one request line; the reply (without its newline) goes in [out].
+ * [seq] > 0 marks it as frame [seq] of [of] of a WATCH stream. */
+static void handle_line_ex(char *line, march_jw *out, int64_t seq, int64_t of) {
     int64_t t0 = mono_us();
     char *args = strchr(line, ' ');
     if (args) *args++ = '\0'; else args = line + strlen(line);
     const march_observe_verb *v = find_verb(line);
     if (!v) {
-        build_envelope(out, "unknown_verb", NULL, mono_us() - t0);
+        build_envelope_ex(out, "unknown_verb", NULL, mono_us() - t0, seq, of);
         return;
     }
     march_jw data;
     march_jw_init(&data, OBS_DATA_LIMIT);
     const char *err = v->fn(&data, args);
-    build_envelope(out, err, err ? NULL : &data, mono_us() - t0);
+    build_envelope_ex(out, err, err ? NULL : &data, mono_us() - t0, seq, of);
     march_jw_free(&data);
 }
+
+static void handle_line(char *line, march_jw *out) { handle_line_ex(line, out, 0, 0); }
 
 /* The same reply a socket client gets, for an in-process caller (the
  * observe_query builtin, march_observe_snapshot.c).  [line] need not be
@@ -403,6 +425,133 @@ static int read_request(int fd, char *buf) {
     return (int)n;
 }
 
+/* ── WATCH <sections> <interval_ms> <max> ────────────────────────────────
+ * Streams `max` SNAPSHOT <sections> envelopes (newline-delimited, each with
+ * "seq" and "of") on one connection, `interval_ms` apart, then closes.  The
+ * frames are produced exactly as SNAPSHOT is (the same walk, on this
+ * connection's thread, never a scheduler thread), so a frame costs what a
+ * SNAPSHOT costs and the other verbs are unaffected.  `max` is mandatory and
+ * bounded: a forgotten watcher cannot run for ever.  The interval is a floor
+ * between frame STARTS; a frame that takes longer than the interval is
+ * followed at once by the next (no catch-up burst).  Between frames the
+ * thread polls the socket, so a client that closes its end is noticed within
+ * a poll wakeup rather than at the next send. */
+#define WATCH_MAX_FRAMES      3600
+#define WATCH_MIN_INTERVAL_MS 250
+#define WATCH_MAX_INTERVAL_MS 60000
+/* A watcher holds a connection slot for its whole life; at most this many
+ * may do so at once, so eight of them cannot lock out every other client. */
+#define WATCH_MAX_CONCURRENT  4
+
+static _Atomic int g_watching;
+
+static const char *verb_watch(march_jw *w, const char *args) {
+    (void)w; (void)args;
+    return "watch_needs_socket";   /* reached only in-process (observe_query) */
+}
+
+static int next_token(const char **p, char *out, size_t cap) {
+    while (**p == ' ') (*p)++;
+    size_t n = 0;
+    while ((*p)[n] && (*p)[n] != ' ') n++;
+    if (n == 0 || n >= cap) return 0;
+    memcpy(out, *p, n);
+    out[n] = '\0';
+    *p += n;
+    return 1;
+}
+
+static int parse_ll(const char *s, long long *out) {
+    char *end;
+    errno = 0;
+    long long v = strtoll(s, &end, 10);
+    if (errno || end == s || *end) return 0;
+    *out = v;
+    return 1;
+}
+
+/* 0 ok; -1 the client is gone or too slow to read. */
+static int send_frame(int fd, march_jw *reply) {
+    if (!march_jw_ok(reply)) return -1;
+    size_t n = reply->len + 1;
+    char *buf = (char *)malloc(n);
+    if (!buf) return -1;
+    memcpy(buf, march_jw_text(reply), reply->len);
+    buf[reply->len] = '\n';
+    const char *p = buf;
+    int rc = 0;
+    while (n > 0) {
+        ssize_t k = send(fd, p, n, MSG_NOSIGNAL);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) { rc = -1; break; }
+        p += k;
+        n -= (size_t)k;
+    }
+    free(buf);
+    return rc;
+}
+
+/* Wait until [deadline_us] (monotonic).  Returns 1 if the client hung up,
+ * 0 when the time has come.  Bytes the client sends are read and dropped. */
+static int wait_or_hangup(int fd, int64_t deadline_us) {
+    for (;;) {
+        int64_t left_us = deadline_us - mono_us();
+        if (left_us <= 0) return 0;
+        struct pollfd pf = { fd, POLLIN, 0 };
+        int r = poll(&pf, 1, (int)((left_us + 999) / 1000));
+        if (r < 0) { if (errno == EINTR) continue; return 1; }
+        if (r == 0) return 0;
+        if (pf.revents & (POLLERR | POLLNVAL)) return 1;
+        if (pf.revents & (POLLIN | POLLHUP)) {
+            char c[64];
+            ssize_t k = recv(fd, c, sizeof c, 0);
+            if (k == 0) return 1;
+            if (k < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) return 1;
+            if (k < 0 && (pf.revents & POLLHUP)) return 1;
+        }
+    }
+}
+
+static void watch_stream(int fd, const char *args) {
+    char sections[256], word[32];
+    long long interval = 0, max = 0;
+    const char *p = args;
+    int ok = next_token(&p, sections, sizeof sections);
+    ok = ok && next_token(&p, word, sizeof word) && parse_ll(word, &interval);
+    ok = ok && next_token(&p, word, sizeof word) && parse_ll(word, &max);
+    while (*p == ' ') p++;
+    if (!ok || *p) { send_error(fd, "bad_args"); return; }
+    if (max < 1 || max > WATCH_MAX_FRAMES) { send_error(fd, "bad_max"); return; }
+    if (interval < WATCH_MIN_INTERVAL_MS || interval > WATCH_MAX_INTERVAL_MS) {
+        send_error(fd, "bad_interval");
+        return;
+    }
+    if (atomic_fetch_add_explicit(&g_watching, 1, memory_order_acq_rel) >= WATCH_MAX_CONCURRENT) {
+        atomic_fetch_sub_explicit(&g_watching, 1, memory_order_release);
+        send_error(fd, "watch_busy");
+        return;
+    }
+    char req[sizeof sections + 16];
+    for (long long i = 1; i <= max; i++) {
+        int64_t start = mono_us();
+        if (strcmp(sections, "all") == 0) snprintf(req, sizeof req, "SNAPSHOT");
+        else snprintf(req, sizeof req, "SNAPSHOT %s", sections);
+        march_jw out;
+        march_jw_init(&out, OBS_DATA_LIMIT + 4096);
+        handle_line_ex(req, &out, i, max);
+        int sent = send_frame(fd, &out);
+        int errored = strstr(march_jw_text(&out), "\"error\":") != NULL;
+        march_jw_free(&out);
+        if (sent != 0 || errored || i == max) break;
+        if (wait_or_hangup(fd, start + interval * 1000)) break;
+    }
+    atomic_fetch_sub_explicit(&g_watching, 1, memory_order_release);
+}
+
+int march_observe_active_watches(void) {
+    return atomic_load_explicit(&g_watching, memory_order_relaxed);
+}
+
 static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
     block_all_signals();
@@ -413,6 +562,9 @@ static void *conn_thread(void *arg) {
         int n = read_request(fd, line);
         if (n == -2) {
             send_error(fd, "line_too_long");
+        } else if (n >= 0 && strncmp(line, "WATCH", 5) == 0
+                   && (line[5] == ' ' || line[5] == '\0')) {
+            watch_stream(fd, line + (line[5] ? 6 : 5));
         } else if (n >= 0) {
             march_jw out;
             march_jw_init(&out, OBS_DATA_LIMIT + 4096);
@@ -566,4 +718,15 @@ void march_observe_maybe_start(void) {
         path = derived;
     }
     (void)march_observe_server_start(path);
+}
+
+int march_observe_fn_name_ok(const char *name) {
+    size_t n = name ? strlen(name) : 0;
+    if (n == 0 || n > 255) return 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+              || c == '_' || c == '.' || c == '$' || c == '\'')) return 0;
+    }
+    return 1;
 }

@@ -237,7 +237,7 @@ static void dbg_mark_enqueued(march_proc *p, const char *site) {
                 (long long)p->pid, site,
                 (int)atomic_load_explicit(&p->status, memory_order_acquire),
                 atomic_load_explicit(&p->dbg_running_on, memory_order_acquire));
-        abort();
+        march_abort(__func__);
     }
 }
 static void dbg_mark_dequeued(march_proc *p, const char *site) {
@@ -249,7 +249,7 @@ static void dbg_mark_dequeued(march_proc *p, const char *site) {
                 (long long)p->pid, site,
                 (int)atomic_load_explicit(&p->status, memory_order_acquire),
                 atomic_load_explicit(&p->dbg_running_on, memory_order_acquire));
-        abort();
+        march_abort(__func__);
     }
 }
 static void dbg_mark_dispatched(march_proc *p, int sched_id) {
@@ -261,7 +261,7 @@ static void dbg_mark_dispatched(march_proc *p, int sched_id) {
                 "claiming while already running on scheduler %d (status=%d)\n",
                 (long long)p->pid, sched_id, prev - 1,
                 (int)atomic_load_explicit(&p->status, memory_order_acquire));
-        abort();
+        march_abort(__func__);
     }
 }
 static void dbg_mark_undispatched(march_proc *p) {
@@ -426,14 +426,25 @@ uint64_t march_sched_started_ns(int sched_id) {
     return atomic_load_explicit(&g_scheds[sched_id].started_ns, memory_order_relaxed);
 }
 
+/* Owner-thread increment of a per-scheduler statistic that other threads
+ * read (march_sched_thread_stat).  Only the owner writes, so a relaxed load +
+ * relaxed store (not an atomic RMW) is exact and compiles to the same
+ * ldr/add/str as `x++`; it only makes the cross-thread read a non-race. */
+#define MARCH_SCHED_STAT_BUMP(field) \
+    __atomic_store_n(&(field), __atomic_load_n(&(field), __ATOMIC_RELAXED) + 1, \
+                     __ATOMIC_RELAXED)
+
 int64_t march_sched_thread_stat(int sched_id, int which) {
     if (sched_id < 0 || sched_id >= g_num_scheds) return -1;
     const march_scheduler *s = &g_scheds[sched_id];
+    /* Relaxed loads: the owner thread writes these with relaxed stores
+     * (MARCH_SCHED_STAT_BUMP) while an observe snapshot reads them from
+     * another thread.  A racy-but-defined snapshot; plain ldr on arm64. */
     switch (which) {
-    case MARCH_THREAD_STAT_STARTED:    return s->started;
-    case MARCH_THREAD_STAT_ENTERED:    return s->entered;
-    case MARCH_THREAD_STAT_DISPATCHES: return s->stat_dispatches;
-    case MARCH_THREAD_STAT_IDLE_POLLS: return s->stat_idle_polls;
+    case MARCH_THREAD_STAT_STARTED:    return __atomic_load_n(&s->started, __ATOMIC_RELAXED);
+    case MARCH_THREAD_STAT_ENTERED:    return __atomic_load_n(&s->entered, __ATOMIC_RELAXED);
+    case MARCH_THREAD_STAT_DISPATCHES: return __atomic_load_n(&s->stat_dispatches, __ATOMIC_RELAXED);
+    case MARCH_THREAD_STAT_IDLE_POLLS: return __atomic_load_n(&s->stat_idle_polls, __ATOMIC_RELAXED);
     default: return -1;
     }
 }
@@ -443,9 +454,29 @@ static _Thread_local march_scheduler *tl_sched = NULL;
 /* Definition of the sentinel exported via march_scheduler.h. */
 int march_recv_no_msg_sentinel;
 
-/* Cached OS page size — initialised once in march_sched_init().
- * Used by the SIGSEGV handler (sysconf is not async-signal-safe). */
+/* Cached OS page size.  Used by the SIGSEGV handler (sysconf is not
+ * async-signal-safe), so it is cached ahead of time -- and by the stack
+ * helpers, which must never see 0: a spawn can come BEFORE march_sched_init
+ * (march_hcr_drain arms its hard-deadline proc from whatever thread runs
+ * the reload server, and a C harness may never init the scheduler at all).
+ * With page 0, stack_alloc_lazy reserved MARCH_STACK_MAX bytes with no
+ * guard page and then mprotect'ed the page just PAST its own reservation
+ * read/write: whatever mapping sat directly above it (on Linux, mmap hands
+ * out addresses top-down, so typically the most recent one -- e.g. a
+ * just-dlopen'd hot patch's text page) lost PROT_EXEC.  Always read it
+ * through sched_page_size() outside the signal handler; every stack exists
+ * only after that call, so the handler never reads it as 0. */
 static size_t g_page_size = 0;
+static pthread_once_t g_page_size_once = PTHREAD_ONCE_INIT;
+
+static void page_size_init(void) {
+    g_page_size = (size_t)sysconf(_SC_PAGE_SIZE);
+}
+
+static size_t sched_page_size(void) {
+    pthread_once(&g_page_size_once, page_size_init);
+    return g_page_size;
+}
 
 /* ── Process registry (for march_sched_find) ──────────────────────────── */
 
@@ -503,7 +534,7 @@ static march_registry *registry_alloc(int64_t cap) {
         (march_registry *)calloc(1, sizeof(march_registry) + cap * sizeof(march_proc *));
     if (!r) {
         fputs("march_sched: out of memory (registry alloc)\n", stderr);
-        abort();
+        march_abort(__func__);
     }
     r->cap = cap;
     return r;
@@ -562,7 +593,7 @@ static void registry_remove(march_proc *p) {
  * base of the mmap (for munmap on process death).
  */
 static void *stack_alloc_lazy(size_t *alloc_size, void **mmap_base_out) {
-    size_t page  = g_page_size;
+    size_t page  = sched_page_size();
     size_t total = MARCH_STACK_MAX + page;   /* guard page + max usable */
 
     /* Reserve the full range as PROT_NONE. */
@@ -638,7 +669,7 @@ static void *stack_reuse(size_t *alloc_size, void **mmap_base_out) {
     void *mem = n->mmap_base;
     free(n);
 
-    size_t page  = g_page_size;
+    size_t page  = sched_page_size();
     size_t total = MARCH_STACK_MAX + page;
     /* Re-protect the whole range PROT_NONE, then re-commit the top
      * MARCH_STACK_INITIAL window — mirrors stack_alloc_lazy's fresh-mmap
@@ -668,7 +699,7 @@ static void stack_retire(void *mmap_base) {
     stack_free_node *n = (stack_free_node *)malloc(sizeof *n);
     if (!n) {
         /* Can't record it on the free-list; don't leak the mapping either. */
-        munmap(mmap_base, MARCH_STACK_MAX + g_page_size);
+        munmap(mmap_base, MARCH_STACK_MAX + sched_page_size());
         return;
     }
     n->mmap_base = mmap_base;
@@ -712,7 +743,7 @@ static void setup_alt_stack(void) {
 #else
     if (tl_alt_stack) return;   /* already set up for this thread */
     char *alt = (char *)malloc(MARCH_SIGALTSTACK_SIZE);
-    if (!alt) { fputs("march_sched: OOM (sigaltstack)\n", stderr); abort(); }
+    if (!alt) { fputs("march_sched: OOM (sigaltstack)\n", stderr); march_abort(__func__); }
     stack_t ss;
     ss.ss_sp    = alt;
     ss.ss_size  = MARCH_SIGALTSTACK_SIZE;
@@ -799,7 +830,8 @@ static void march_report_fatal_fault(int sig, siginfo_t *info, void *uctx) {
     char buf[512];
     size_t cap = sizeof buf, at = 0;
     at = fatal_put_str(buf, at, cap, "march: fatal ");
-    at = fatal_put_str(buf, at, cap, sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : "signal");
+    at = fatal_put_str(buf, at, cap, sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS"
+                                     : sig == SIGILL ? "SIGILL" : sig == SIGTRAP ? "SIGTRAP" : "signal");
     at = fatal_put_str(buf, at, cap, " si_code=");
     at = fatal_put_dec(buf, at, cap, info ? info->si_code : -1);
     at = fatal_put_str(buf, at, cap, " addr=");
@@ -995,6 +1027,172 @@ fatal:
     _exit(128 + sig);
 }
 
+/* ── Fatal trap report: SIGILL / SIGTRAP ──────────────────────────────────
+ *
+ * An illegal or trap instruction used to kill a compiled program with no
+ * output at all: nothing handled SIGILL or SIGTRAP, so the only trace was the
+ * shell's exit status.  native_actor_state_released died that way on macOS CI
+ * (status 132, SIGILL) several times, and never locally, so the status was
+ * all there was to go on (specs/todos/2026-10-07-flake-actor-state-released-
+ * macos-exit.md).  On arm64 a `brk` (__builtin_trap, llvm.trap, an
+ * `unreachable` lowered as a trap) raises SIGTRAP; SIGILL means the CPU ran a
+ * word that is not an instruction, i.e. control reached a bad address that
+ * happens to be executable (zeros, a constant, a string in __TEXT).
+ *
+ * This writes the march_report_fatal_fault line, then one line with the
+ * faulting pc, lr and fp in both runtime and STATIC (image-relative, for
+ * `lldb <binary>` + `image lookup -a`) form, then a frame-pointer walk of the
+ * interrupted context, also static.  All of that is write(2) and hand-rolled
+ * hex.  With MARCH_FATAL_BACKTRACE=1 (read at install time; the fixture's
+ * dune rule sets it) the walked frames are also symbolised with
+ * backtrace_symbols_fd, which is not async-signal-safe (dladdr) but is on the
+ * way to _exit, and the binary that trapped on CI is not kept, so names are
+ * the only thing that survives the run.  Then _exit(128 + sig), for the same
+ * reason the SIGSEGV path never re-raises (see its `fatal:` comment). */
+/* musl has no <execinfo.h>: there, the frames are written unsymbolised and
+ * MARCH_FATAL_BACKTRACE has no effect (the condition march_runtime.c uses
+ * for MARCH_HAVE_EXECINFO).  Unguarded, this include broke every compile
+ * on Alpine, caught by build.yml's --static scratch-container check. */
+#if !defined(__linux__) || defined(__GLIBC__)
+#define MARCH_SCHED_HAVE_EXECINFO 1
+#include <execinfo.h>
+#endif
+#if defined(__APPLE__)
+extern intptr_t _dyld_get_image_vmaddr_slide(uint32_t image_index);
+#endif
+
+static int g_fatal_backtrace_symbols = 0;
+
+static void fatal_fault_regs(void *uctx, uint64_t *lr, uint64_t *fp) {
+    *lr = 0;
+    *fp = 0;
+    if (!uctx) return;
+    ucontext_t *uc = (ucontext_t *)uctx;
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (uc->uc_mcontext) {
+        *lr = (uint64_t)uc->uc_mcontext->__ss.__lr;
+        *fp = (uint64_t)uc->uc_mcontext->__ss.__fp;
+    }
+#elif defined(__APPLE__) && defined(__x86_64__)
+    if (uc->uc_mcontext) *fp = (uint64_t)uc->uc_mcontext->__ss.__rbp;
+#elif defined(__linux__) && defined(__x86_64__)
+    *fp = (uint64_t)uc->uc_mcontext.gregs[REG_RBP];
+#elif defined(__linux__) && defined(__aarch64__)
+    *lr = (uint64_t)uc->uc_mcontext.regs[30];
+    *fp = (uint64_t)uc->uc_mcontext.regs[29];
+#else
+    (void)uc;
+#endif
+}
+
+static uint64_t fatal_image_slide(void) {
+#if defined(__APPLE__)
+    return (uint64_t)_dyld_get_image_vmaddr_slide(0);
+#else
+    return 0;   /* Linux: no static form; pc - load base via /proc/self/maps */
+#endif
+}
+
+#define MARCH_FATAL_MAX_FRAMES 32
+
+static void march_fatal_trap_handler(int sig, siginfo_t *info, void *uctx) {
+    march_report_fatal_fault(sig, info, uctx);
+
+    char buf[768];
+    size_t cap = sizeof buf, at = 0;
+    uint64_t pc = fatal_fault_pc(uctx), lr, fp;
+    fatal_fault_regs(uctx, &lr, &fp);
+    uint64_t slide = fatal_image_slide();
+    at = fatal_put_str(buf, at, cap, "march: fatal ");
+    at = fatal_put_str(buf, at, cap, sig == SIGILL ? "SIGILL" : sig == SIGTRAP ? "SIGTRAP" : "signal");
+    at = fatal_put_str(buf, at, cap, " static pc=");
+    at = fatal_put_hex(buf, at, cap, pc - slide);
+    at = fatal_put_str(buf, at, cap, " lr=");
+    at = fatal_put_hex(buf, at, cap, lr ? lr - slide : 0);
+    at = fatal_put_str(buf, at, cap, " (runtime lr=");
+    at = fatal_put_hex(buf, at, cap, lr);
+    at = fatal_put_str(buf, at, cap, " fp=");
+    at = fatal_put_hex(buf, at, cap, fp);
+    at = fatal_put_str(buf, at, cap, " slide=");
+    at = fatal_put_hex(buf, at, cap, slide);
+    at = fatal_put_str(buf, at, cap, ")");
+#if defined(__aarch64__)
+    /* The word at pc, when pc is plausibly mapped code (the kernel already
+     * fetched it to raise SIGILL/SIGTRAP, so reading it cannot fault). */
+    if (pc && (pc & 3) == 0) {
+        at = fatal_put_str(buf, at, cap, " insn=");
+        at = fatal_put_hex(buf, at, cap, (uint64_t)*(volatile uint32_t *)(uintptr_t)pc);
+    }
+#endif
+    buf[at++] = '\n';
+    ssize_t ignored = write(2, buf, at);
+
+    /* Frame-pointer walk of the interrupted context: [fp] = caller's fp,
+     * [fp + 8] = return address.  Stops at the first implausible fp (zero,
+     * misaligned, not strictly increasing, or a jump of over 8 MiB), so a
+     * corrupted chain ends the walk rather than faulting in it. */
+    void *frames[MARCH_FATAL_MAX_FRAMES + 2];
+    int nf = 0;
+    if (pc) frames[nf++] = (void *)(uintptr_t)pc;
+    if (lr) frames[nf++] = (void *)(uintptr_t)lr;
+    /* Walk only inside a stack we know is mapped: the running green
+     * thread's reservation, else this OS thread's own stack. */
+    uint64_t lo = 0, hi = 0;
+    march_scheduler *s = tl_sched;
+    march_proc *p = s ? s->current : NULL;
+    if (p && p->stack_mmap_base) {
+        lo = (uint64_t)(uintptr_t)p->stack_base;
+        hi = (uint64_t)(uintptr_t)p->stack_mmap_base + p->stack_alloc;
+    }
+#if defined(__APPLE__)
+    if (!(fp >= lo && fp < hi)) {
+        pthread_t me = pthread_self();
+        hi = (uint64_t)(uintptr_t)pthread_get_stackaddr_np(me);
+        lo = hi - pthread_get_stacksize_np(me);
+    }
+#endif
+    uint64_t f = fp;
+    while (nf < MARCH_FATAL_MAX_FRAMES && f >= lo && f + 16 <= hi && (f & 7) == 0) {
+        uint64_t next = ((volatile uint64_t *)(uintptr_t)f)[0];
+        uint64_t ret  = ((volatile uint64_t *)(uintptr_t)f)[1];
+        if (!ret) break;
+        frames[nf++] = (void *)(uintptr_t)ret;
+        if (next <= f) break;
+        f = next;
+    }
+    at = 0;
+    at = fatal_put_str(buf, at, cap, "march: fatal trap frames (static):");
+    for (int i = 0; i < nf; i++) {
+        at = fatal_put_str(buf, at, cap, " ");
+        at = fatal_put_hex(buf, at, cap, (uint64_t)(uintptr_t)frames[i] - slide);
+    }
+    buf[at++] = '\n';
+    ignored = write(2, buf, at);
+    (void)ignored;
+#ifdef MARCH_SCHED_HAVE_EXECINFO
+    if (g_fatal_backtrace_symbols && nf > 0)
+        backtrace_symbols_fd(frames, nf, 2);
+#endif
+    _exit(128 + sig);
+}
+
+static void install_fatal_trap_handler(void) {
+    const char *v = getenv("MARCH_FATAL_BACKTRACE");
+    g_fatal_backtrace_symbols = v && *v && strcmp(v, "0") != 0;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = march_fatal_trap_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    /* Only over the default disposition: a host (or a sanitizer runtime)
+     * that installed its own handler keeps it. */
+    struct sigaction old;
+    if (sigaction(SIGILL, NULL, &old) == 0 && old.sa_handler == SIG_DFL)
+        (void)sigaction(SIGILL, &sa, NULL);
+    if (sigaction(SIGTRAP, NULL, &old) == 0 && old.sa_handler == SIG_DFL)
+        (void)sigaction(SIGTRAP, &sa, NULL);
+}
+
 static _Atomic int g_sigsegv_installed = 0;
 
 static void install_stack_growth_handler(void) {
@@ -1019,6 +1217,7 @@ static void install_stack_growth_handler(void) {
     if (sigaction(SIGBUS, &sa, NULL) != 0) {
         perror("march_sched: sigaction(SIGBUS)");
     }
+    install_fatal_trap_handler();
 }
 
 /* ── Mailbox spinlock ────────────────────────────────────────────────── */
@@ -1041,7 +1240,7 @@ static inline void mbox_lock_release(march_proc *p) {
 uint32_t march_epoch_current(void);   /* march_dispatch.c (weak fallback below) */
 
 /* D29: the stamp a message sent from here carries -- the sending proc's code
- * epoch, or the current epoch when the sender is unpinned (main) or not a
+ * epoch, or the current epoch when the sender is a maintenance daemon or not a
  * proc at all (the event loop, a foreign thread). */
 _Atomic(uint32_t) march_sched_test_stamp = 0;
 
@@ -1049,8 +1248,7 @@ uint32_t march_sched_send_epoch(void) {
     uint32_t forced = atomic_load_explicit(&march_sched_test_stamp,
                                            memory_order_relaxed);
     if (forced) return forced;
-    march_proc *p = tl_sched ? tl_sched->current : NULL;
-    uint32_t e = p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
+    uint32_t e = march_sched_current_epoch();
     return e ? e : march_epoch_current();
 }
 
@@ -1068,7 +1266,7 @@ void march_sched_delivery_origin_clear(void) {
 
 static march_mbox_node *mbox_node_new(void *msg) {
     march_mbox_node *node = malloc(sizeof(march_mbox_node));
-    if (!node) { fputs("march_sched: OOM (mbox node)\n", stderr); abort(); }
+    if (!node) { fputs("march_sched: OOM (mbox node)\n", stderr); march_abort(__func__); }
     node->msg = msg;
     node->next = NULL;
     node->epoch = march_sched_send_epoch();
@@ -1398,13 +1596,9 @@ static void proc_trampoline(int arg_hi, int arg_lo) {
     /* Function returned — mark dead and hand control back to the scheduler.
      * This proc never resumes after this switch, so there is no matching
      * MARCH_ASAN_SWITCH_DONE call. */
-    march_reclaim_check_switch("proc exit");
-    atomic_store_explicit(&proc->status, PROC_DEAD, memory_order_release);
-    MARCH_ASAN_SWITCH_TO_SCHED(proc);
-    MARCH_TSAN_SWITCH_TO_SCHED(proc->owner_sched);
-    swapcontext(proc->ctx, &proc->owner_sched->sched_ctx);
+    march_sched_exit();
     /* If we ever return here the OS context is gone — abort defensively. */
-    abort();
+    march_abort(__func__);
 }
 
 /* ── Public API ───────────────────────────────────────────────────────── */
@@ -1503,8 +1697,7 @@ static int default_sched_count(void) {
 
 void march_sched_init(void) {
     /* Cache the OS page size for use in the async-signal-safe SIGSEGV handler. */
-    if (g_page_size == 0)
-        g_page_size = (size_t)sysconf(_SC_PAGE_SIZE);
+    (void)sched_page_size();
 
     atomic_store_explicit(&g_next_pid, 0, memory_order_relaxed);
     atomic_store_explicit(&g_all_done,       0, memory_order_relaxed);
@@ -1623,15 +1816,28 @@ int march_sched_num_schedulers(void) { return g_num_scheds; }
 __attribute__((weak)) uint32_t march_epoch_current(void) { return 1; }
 __attribute__((weak)) int      march_epoch_pin(uint32_t e) { (void)e; return 0; }
 __attribute__((weak)) void     march_epoch_unpin(uint32_t e) { (void)e; }
+__attribute__((weak)) uint32_t march_frame_epoch(void) { return 0; }
+__attribute__((weak)) void march_frame_clear(void **head) { (void)head; }
+__attribute__((weak)) void march_hcr_prune_migration_pins(void) {}
+__attribute__((weak)) void march_dispatch_release_main_reservation(void) {}
+static _Thread_local void *foreign_code_frames;
+__attribute__((noinline)) void **march_sched_frame_slot(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    return p ? &p->code_frames : &foreign_code_frames;
+}
 
 void march_sched_hold_next_spawn(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (p) atomic_store_explicit(&p->hold_next_spawn, 1, memory_order_relaxed);
 }
 
-uint32_t march_sched_current_epoch(void) {
+uint32_t march_sched_work_epoch(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     return p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
+}
+uint32_t march_sched_current_epoch(void) {
+    uint32_t frame_epoch = march_frame_epoch();
+    return frame_epoch ? frame_epoch : march_sched_work_epoch();
 }
 
 /* The epoch a new proc runs at: its spawner's (II.4.3: a task spawned by an
@@ -1641,8 +1847,7 @@ uint32_t march_sched_current_epoch(void) {
  * activation advanced it between the load and the pin -- reload and retry. */
 static uint32_t spawn_code_epoch(int from_parent) {
     march_proc *parent = (from_parent && tl_sched) ? tl_sched->current : NULL;
-    uint32_t pe = parent
-        ? atomic_load_explicit(&parent->code_epoch, memory_order_relaxed) : 0;
+    uint32_t pe = parent ? march_sched_current_epoch() : 0;
     if (pe && march_epoch_pin(pe) == 0) return pe;
     for (;;) {
         uint32_t e = march_epoch_current();
@@ -1661,6 +1866,7 @@ static uint32_t spawn_code_epoch(int from_parent) {
  * mask instead. */
 static sigset_t   g_sched_sigmask;
 static _Atomic int g_sched_sigmask_set;
+static _Atomic int g_sched_sigmask_claim;   /* sched_loop: who records it */
 
 static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
                                       int is_daemon, int pinned,
@@ -1759,10 +1965,17 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
     makecontext(p->ctx, (void (*)(void))proc_trampoline, 2, arg_hi, arg_lo);
 
     /* After every failure return above: the pin is dropped only at the reap. */
-    /* follow_current: 1 = unpinned (main), 2 = the current epoch (a
-     * supervisor restart), 0 = inherit (everything else). */
-    atomic_init(&p->code_epoch,
-                follow_current == 1 ? 0u : spawn_code_epoch(follow_current == 0));
+    /* follow_current: 1 = unpinned maintenance, 2 = the current epoch (a
+     * supervisor restart), 3 = baseline main, 0 = inherit (everything else). */
+    uint32_t entry_epoch;
+    if (follow_current == 3) {
+        entry_epoch = 1; /* compiled main belongs to the baseline image */
+        if (march_epoch_pin(entry_epoch) != 0) {
+            fputs("march: baseline entry epoch unavailable after replay\n", stderr);
+            abort();
+        }
+    } else entry_epoch = follow_current == 1 ? 0u : spawn_code_epoch(follow_current == 0);
+    atomic_init(&p->code_epoch, entry_epoch);
     /* A spawn the spawner asked to start held (march_sched_hold_next_spawn):
      * the hold is on the child before it can run, so its spawn marker, if
      * any, is deferred like any other. */
@@ -1828,7 +2041,9 @@ march_proc *march_sched_spawn_daemon(void (*fn)(void *), void *arg) {
 
 march_proc *march_sched_spawn_main(void (*fn)(void *), void *arg,
                                    int sched_pinned) {
-    return sched_spawn_common(fn, arg, 0, sched_pinned, 1);
+    march_proc *p = sched_spawn_common(fn, arg, 0, sched_pinned, 3);
+    march_dispatch_release_main_reservation();
+    return p;
 }
 
 march_proc *march_sched_spawn_current(void (*fn)(void *), void *arg) {
@@ -1884,6 +2099,10 @@ __attribute__((weak)) void march_signal_drain(void) { }
  * failing to link. */
 __attribute__((weak)) void march_incrc(void *p) { (void)p; }
 
+/* Releases a dead proc's Diagnostics crash context (march_runtime.c, STRONG);
+ * the same standalone-unit-test fallback as above. */
+__attribute__((weak)) void march_diag_proc_exit(void *ctx) { (void)ctx; }
+
 /* march_reclaim's free function for a reaped proc: runs once no thread can
  * still hold a pointer it resolved before the reap (see the retire call in
  * sched_loop's PROC_DEAD branch).  Its context and stack were released at
@@ -1898,12 +2117,68 @@ static void proc_free(void *v) {
                               memory_order_relaxed);
 }
 
+/* Dispatch-time check of the context about to be resumed.
+ *
+ * Resuming a corrupt or freed ucontext is the one way this runtime dies of
+ * SIGSEGV WITHOUT a "march: fatal" line: setcontext/swapcontext restores the
+ * saved uc_sigmask before jumping to the saved pc, so a garbage context
+ * typically blocks SIGSEGV and then faults, and the kernel kills the process
+ * with the default action ("Segmentation fault (core dumped)", nothing else).
+ * That is exactly what native_run_until_idle_ping_pong printed once on the
+ * Linux amd64 CI leg (specs/todos/2026-10-04-run-until-idle-ping-pong-
+ * segfault-14-scheds.md).  A legitimately saved green-thread context never
+ * blocks the synchronous fault signals (sched_spawn_common strips them, and
+ * no green thread switches out with them blocked) and its stack pointer is
+ * inside its own reservation, so either violation means the proc's context
+ * is not one it saved: report it here, at the dispatch, with the pid and
+ * the bad words, and abort, instead of letting the switch die silently.
+ *
+ * Cost: two bit tests and, on Linux, two compares, next to a swapcontext
+ * that itself makes a sigprocmask syscall. */
+static uint64_t ctx_saved_sp(const ucontext_t *uc) {
+#if defined(__linux__) && defined(__x86_64__)
+    return (uint64_t)uc->uc_mcontext.gregs[REG_RSP];
+#elif defined(__linux__) && defined(__aarch64__)
+    return (uint64_t)uc->uc_mcontext.sp;
+#else
+    (void)uc;   /* macOS: uc_mcontext is a pointer; not dereferenced here */
+    return 0;
+#endif
+}
+
+static void dispatch_check_ctx(const march_scheduler *sched, const march_proc *p) {
+    const ucontext_t *uc = p->ctx;
+    int mask_bad = sigismember(&uc->uc_sigmask, SIGSEGV) == 1
+                   || sigismember(&uc->uc_sigmask, SIGBUS) == 1;
+    uint64_t sp = ctx_saved_sp(uc);
+    uint64_t lo = (uint64_t)(uintptr_t)p->stack_mmap_base;
+    uint64_t hi = lo + (uint64_t)p->stack_alloc;
+    int sp_bad = sp != 0 && lo != 0 && (sp < lo || sp > hi);
+    if (__builtin_expect(!mask_bad && !sp_bad, 1)) return;
+    fprintf(stderr,
+            "march_sched[BUG]: dispatch of pid %lld on scheduler %d with a "
+            "context it did not save (%s%s%s): saved sp=0x%llx, stack "
+            "[0x%llx, 0x%llx], status=%d\n",
+            (long long)p->pid, sched->id,
+            mask_bad ? "signal mask blocks SIGSEGV/SIGBUS" : "",
+            mask_bad && sp_bad ? ", " : "",
+            sp_bad ? "stack pointer outside its stack" : "",
+            (unsigned long long)sp, (unsigned long long)lo,
+            (unsigned long long)hi,
+            (int)atomic_load_explicit(&p->status, memory_order_acquire));
+    march_abort(__func__);
+}
+
 static void sched_loop(march_scheduler *sched) {
     /* Set up the per-thread alternate signal stack before running any green
      * threads.  The SIGSEGV handler for lazy stack growth requires SA_ONSTACK
      * so it can run even when the green thread's stack is exhausted. */
     setup_alt_stack();
-    if (!atomic_load_explicit(&g_sched_sigmask_set, memory_order_acquire)) {
+    /* One writer: the first scheduler to claim it (they all start at once,
+     * and two plain writes of the mask would race). */
+    int unclaimed = 0;
+    if (atomic_compare_exchange_strong_explicit(&g_sched_sigmask_claim,
+            &unclaimed, 1, memory_order_relaxed, memory_order_relaxed)) {
         sigset_t m;
         if (pthread_sigmask(SIG_SETMASK, NULL, &m) == 0) {
             g_sched_sigmask = m;
@@ -1937,7 +2212,7 @@ static void sched_loop(march_scheduler *sched) {
     /* This thread is now a quiescent-state reader for march_reclaim: online,
      * with a quiescent state announced at the top of every iteration below. */
     march_reclaim_sched_attach();
-    sched->entered = 1;
+    __atomic_store_n(&sched->entered, 1, __ATOMIC_RELAXED);
     atomic_store_explicit(&sched->started_ns, march_mono_ns(), memory_order_relaxed);
     atomic_store_explicit(&sched->running, 1, memory_order_release);
     unsigned int steal_seed = (unsigned int)sched->id;
@@ -2045,7 +2320,7 @@ static void sched_loop(march_scheduler *sched) {
                     && wake_idle_daemons() > 0)
                 continue;  /* woken procs are in the global runq — next
                             * iteration's global_runq_pop picks them up */
-            sched->stat_idle_polls++;
+            MARCH_SCHED_STAT_BUMP(sched->stat_idle_polls);
             /* No runnable process: sleep 1ms to avoid burning CPU at idle.
              * sched_yield() alone causes ~99% CPU on a waiting server. */
             struct timespec idle_sleep = { 0, 1000000 }; /* 1ms */
@@ -2096,7 +2371,7 @@ static void sched_loop(march_scheduler *sched) {
                             "march_sched[BUG]: claim of dequeued pid %lld "
                             "failed twice (status=%d)\n",
                             (long long)p->pid, (int)claim);
-                    abort();
+                    march_abort(__func__);
 #endif
                     continue;
                 }
@@ -2109,7 +2384,7 @@ static void sched_loop(march_scheduler *sched) {
                         (long long)p->pid, (int)claim,
                         atomic_load_explicit(&p->dbg_running_on,
                                              memory_order_acquire));
-                abort();
+                march_abort(__func__);
 #endif
                 continue;   /* stale/duplicate reference: drop, never run */
             }
@@ -2118,7 +2393,7 @@ static void sched_loop(march_scheduler *sched) {
         /* Atomic store: read by the observe walk (march_obs_actors). */
         __atomic_store_n(&p->owner_sched, sched, __ATOMIC_RELAXED);
         sched->current  = p;
-        sched->stat_dispatches++;
+        MARCH_SCHED_STAT_BUMP(sched->stat_dispatches);
         /* Observe counters (march_proc): this scheduler owns p now. */
         int64_t run_ms = atomic_load_explicit(&g_coarse_ms, memory_order_relaxed);
         if (run_ms == 0) {   /* no preemption daemon: the scheduler's own clock */
@@ -2135,14 +2410,23 @@ static void sched_loop(march_scheduler *sched) {
         if (!p->ctx) {
             fprintf(stderr, "march_sched[BUG]: dispatch of reaped pid %lld (no context)\n",
                     (long long)p->pid);
-            abort();
+            march_abort(__func__);
         }
+        dispatch_check_ctx(sched, p);
         MARCH_ASAN_SWITCH_TO_PROC(sched, p);
         MARCH_TSAN_SWITCH_TO_PROC(p);
         atomic_store_explicit(&sched->busy, 1, memory_order_relaxed);
         swapcontext(&sched->sched_ctx, p->ctx);
         atomic_store_explicit(&sched->busy, 0, memory_order_relaxed);
         MARCH_ASAN_SWITCH_DONE(sched);
+        /* march_sched_run_on_sched_stack: p asked for fn to run on this
+         * native stack.  Before the status handling below, so p is not
+         * re-queued (and cannot be resumed anywhere) until fn has returned. */
+        if (__builtin_expect(sched->after_switch_fn != NULL, 0)) {
+            void (*fn)(void *) = sched->after_switch_fn;
+            sched->after_switch_fn = NULL;
+            fn(sched->after_switch_arg);
+        }
         dbg_mark_undispatched(p);
 
         sched->current = NULL;
@@ -2217,6 +2501,7 @@ static void sched_loop(march_scheduler *sched) {
         } else if (st == PROC_DEAD) {
             atomic_store_explicit(&p->hold_next_spawn, 0, memory_order_relaxed);
             registry_remove(p);
+            march_frame_clear(&p->code_frames);
             /* The epoch pin taken at spawn (or moved there by an advance):
              * dropped exactly once, here.  The PROC_DEAD release store
              * orders the proc's last code_epoch write before this read. */
@@ -2225,6 +2510,7 @@ static void sched_loop(march_scheduler *sched) {
                                                    memory_order_relaxed);
                 if (ce) march_epoch_unpin(ce);
             }
+            march_hcr_prune_migration_pins();
             atomic_fetch_sub_explicit(&g_live_procs, 1, memory_order_release);
             if (!p->is_daemon)
                 atomic_fetch_sub_explicit(&g_live_nondaemon, 1, memory_order_release);
@@ -2345,6 +2631,15 @@ static void sched_loop(march_scheduler *sched) {
              * reported use-after-free rather than a silent read.  This is
              * 880 of the struct's 1136 bytes on macOS/arm64
              * (specs/progress/2026-09-17-proc-ctx-released-at-death.md). */
+            /* The Diagnostics crash context this proc still held (a context
+             * left set by a path that skipped with_context's cleanup, such
+             * as a task cancellation).  Dropped outside every lock, like the
+             * mailbox payloads above. */
+            if (p->diag_ctx) {
+                void *dctx = p->diag_ctx;
+                p->diag_ctx = NULL;
+                march_diag_proc_exit(dctx);
+            }
             if (p->ctx) {
                 free(p->ctx);
                 p->ctx = NULL;
@@ -2475,7 +2770,7 @@ void march_sched_run(void) {
      * sibling merely ran on another OS thread (parallelism, not preemption). */
     if (g_num_scheds <= 1) {
         g_scheds[0].thread = pthread_self();
-        g_scheds[0].started = 1;
+        __atomic_store_n(&g_scheds[0].started, 1, __ATOMIC_RELAXED);
         march_sched_preempt_start();
         sched_loop(&g_scheds[0]);
         /* Final drain: a Signal.watch delivery that landed just before shutdown
@@ -2490,7 +2785,7 @@ void march_sched_run(void) {
     /* Scheduler 0 runs on the calling thread — record its pthread_t so the
      * preemption daemon can send SIGUSR1 to it like any other worker. */
     g_scheds[0].thread = pthread_self();
-    g_scheds[0].started = 1;
+    __atomic_store_n(&g_scheds[0].started, 1, __ATOMIC_RELAXED);
 
     /* Spawn N-1 worker threads; scheduler 0 runs on the calling thread.
      *
@@ -2513,7 +2808,7 @@ void march_sched_run(void) {
                     i + 1, g_num_scheds, strerror(rc));
             continue;
         }
-        g_scheds[i].started = 1;
+        __atomic_store_n(&g_scheds[i].started, 1, __ATOMIC_RELAXED);
         n_started++;
     }
     if (n_started < g_num_scheds)
@@ -2594,6 +2889,19 @@ void march_sched_yield(void) {
     MARCH_ASAN_SWITCH_DONE(p);
     /* Execution resumes here after the scheduler re-schedules us — possibly
      * on a different OS thread than the one that called this function. */
+}
+
+/* march_sched_yield, with fn(arg) handed to the scheduler to run on its own
+ * stack after the switch (sched_loop's after_switch_fn).  The proc is still
+ * RUNNABLE-but-unqueued while it runs, so nothing can resume the caller
+ * before fn returns.  Same TLS discipline as march_sched_yield: tl_sched is
+ * read only before the switch. */
+__attribute__((noinline))
+void march_sched_run_on_sched_stack(void (*fn)(void *), void *arg) {
+    if (!tl_sched || !tl_sched->current) { fn(arg); return; }
+    tl_sched->after_switch_fn  = fn;
+    tl_sched->after_switch_arg = arg;
+    march_sched_yield();
 }
 
 /* Grace iterations before march_sched_wait_idle backs off to a 1ms poll, so a
@@ -2742,14 +3050,18 @@ void march_sched_tick(void) {
 void march_sched_exit(void) {
     if (!tl_sched || !tl_sched->current) return;
     march_proc *p = tl_sched->current;
+    /* Release abandoned frames on the proc, where destructor callbacks see
+     * its routing context and may safely yield. The proc pointer survives
+     * migration; owner_sched below is read after cleanup. */
+    march_frame_clear(&p->code_frames);
     march_reclaim_check_switch("march_sched_exit");
     atomic_store_explicit(&p->status, PROC_DEAD, memory_order_release);
     /* This proc never resumes after this switch, so there is no matching
      * MARCH_ASAN_SWITCH_DONE call. */
     MARCH_ASAN_SWITCH_TO_SCHED(p);
-    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
-    swapcontext(p->ctx, &tl_sched->sched_ctx);
-    abort(); /* Should never be reached. */
+    MARCH_TSAN_SWITCH_TO_SCHED(p->owner_sched);
+    swapcontext(p->ctx, &p->owner_sched->sched_ctx);
+    march_abort(__func__); /* Should never be reached. */
 }
 
 march_proc *march_sched_current(void) {
@@ -2841,7 +3153,7 @@ void march_yield_from_compiled(void) {
     /* Clear the request FIRST.  If we cleared it after yielding, this thread
      * would re-enter compiled code, immediately observe the still-set flag,
      * and yield again in a tight loop until the daemon happened to clear it. */
-    march_preempt_request = 0;
+    MARCH_PREEMPT_REQUEST_SET(0);
     /* Refill the budget before yielding so the process gets a fresh quantum
      * when it is rescheduled.  Do this unconditionally — if we are not inside
      * a scheduler context the yield below is a no-op, but the counter should
@@ -2869,6 +3181,22 @@ void march_sched_set_mbox_limit(march_proc *p, int64_t limit,
     __atomic_store_n(&p->mbox_limit, limit > 0 ? limit : 0, __ATOMIC_RELAXED);
     __atomic_store_n(&p->mbox_policy, (int32_t)policy, __ATOMIC_RELAXED);
     mbox_lock_release(p);
+}
+
+/* True when the caller runs on a scheduler's own OS-thread C stack but not
+ * inside a dispatched green thread (march_sched_send's BLOCK self-deadlock
+ * guard).  NOINLINE for the reason spelled out on
+ * mbox_block_register_and_park below: march_sched_send's retry loop calls
+ * this again after a BLOCK park, which can resume the sender on another OS
+ * thread.  Written inline in the loop, clang hoisted the tl_sched read out of
+ * it, and the post-migration iteration read the OLD scheduler's `current`
+ * while that scheduler was dispatching (TSAN, proc_reclaim_kill_respawn at 2
+ * and 14 schedulers: march_sched_send vs sched_loop's `current = p`/NULL).
+ * An idle old scheduler then made a green-thread sender skip its BLOCK wait. */
+__attribute__((noinline))
+static int on_sched_control_plane(void) {
+    march_scheduler *s = tl_sched;
+    return s && !s->current;
 }
 
 /* Register the CURRENT green thread as a MARCH_MBOX_BLOCK sender-waiter on
@@ -3030,6 +3358,28 @@ static int mbox_block_register_and_park(march_proc *target) {
     return MARCH_SEND_OK;   /* caller retries unconditionally */
 }
 
+/* Actor-event tracing (march_trace.h).  The armed word lives here so every
+ * build that has a scheduler has it; the hooks are strong in march_trace.c and
+ * these weak no-ops stand in where that file is not linked. */
+march_armed_line g_introspect_armed_line __attribute__((aligned(128)));
+__attribute__((weak)) void march_trace_ev_sent(march_proc *sender, march_proc *target, void *msg) {
+    (void)sender; (void)target; (void)msg;
+}
+__attribute__((weak)) void march_trace_ev_received(march_proc *self, void *msg) {
+    (void)self; (void)msg;
+}
+__attribute__((weak)) void march_trace_ev_dropped(march_proc *sender, march_proc *target,
+                                                  int64_t target_pid, void *msg, int reason) {
+    (void)sender; (void)target; (void)target_pid; (void)msg; (void)reason;
+}
+__attribute__((weak)) void march_trace_ev_spawned(march_proc *parent, int64_t parent_pid,
+                                                  int64_t child_pid) {
+    (void)parent; (void)parent_pid; (void)child_pid;
+}
+__attribute__((weak)) void march_trace_ev_exited(march_proc *gt, int64_t pid, int reason) {
+    (void)gt; (void)pid; (void)reason;
+}
+
 int march_sched_send(march_proc *target, void *msg) {
     /* Allocate the mailbox node ONCE before the retry loop and lock
      * acquisition, off the spinlock hot path. The node is freed on every
@@ -3062,6 +3412,15 @@ int march_sched_send(march_proc *target, void *msg) {
      * BLOCK park.  The proc pointer stays valid across the park (it is the
      * caller's own); only tl_sched may change.  NULL off a green thread. */
     march_proc *const sender = tl_sched ? tl_sched->current : NULL;
+    /* Actor-event tracing: the one cost of the feature on this path while no
+     * session records actor events is this relaxed load and never-taken
+     * branch.  Sent is recorded before the enqueue, while the message is
+     * still this thread's alone (its tag is read here, never after the push:
+     * the receiver may have consumed it by then); a refusal below follows as
+     * a Dropped event. */
+    if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                              memory_order_relaxed) != 0, 0))
+        march_trace_ev_sent(sender, target, msg);
     for (;;) {
         if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD) {
             free(node);
@@ -3073,6 +3432,9 @@ int march_sched_send(march_proc *target, void *msg) {
             switch (target->mbox_policy) {
             case MARCH_MBOX_DROP_NEW:
                 mbox_lock_release(target);
+                if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                                          memory_order_relaxed) != 0, 0))
+                    march_trace_ev_dropped(sender, target, -2, msg, 2 /* full */);
                 atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
                                           1, memory_order_relaxed);
                 march_mbox_dispose(msg);          /* disposed via the registered dtor (see march_sched_set_msg_dtor's contract) */
@@ -3133,7 +3495,7 @@ int march_sched_send(march_proc *target, void *msg) {
                  * entire point is "never drop, only wait" -- worse than a
                  * depth spike this thread cannot cause again until it is
                  * next dispatched to run more control-plane code. */
-                if (tl_sched && !tl_sched->current) {
+                if (on_sched_control_plane()) {
                     break;
                 }
 
@@ -3189,6 +3551,9 @@ int march_sched_send(march_proc *target, void *msg) {
              * the caller disposes msg on that return, same as the
              * top-of-loop DEAD return above. */
             if (evicted_old) {
+                if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                                          memory_order_relaxed) != 0, 0))
+                    march_trace_ev_dropped(sender, target, -2, evicted_old, 3 /* evicted */);
                 march_mbox_dispose(evicted_old);
             }
             return MARCH_SEND_DEAD;
@@ -3203,6 +3568,9 @@ int march_sched_send(march_proc *target, void *msg) {
          * lock is released and the wake has fired, per the re-entrancy
          * contract on march_sched_set_msg_dtor. */
         if (evicted_old) {
+            if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                                      memory_order_relaxed) != 0, 0))
+                march_trace_ev_dropped(sender, target, -2, evicted_old, 3 /* evicted */);
             march_mbox_dispose(evicted_old);
         }
         if (sender) march_proc_bump(sender->msgs_out);
@@ -3420,7 +3788,7 @@ int64_t march_sched_stop_epoch(uint32_t upto) {
     pthread_mutex_unlock(&g_registry_mu);
     /* Make every running green thread reach a compiled yield point now, so a
      * task computing without yielding meets its cancellation promptly. */
-    if (n > 0) march_preempt_request = 1;
+    if (n > 0) MARCH_PREEMPT_REQUEST_SET(1);
     return n;
 }
 
@@ -3432,6 +3800,11 @@ uint32_t march_sched_last_recv_epoch(void) {
 int64_t march_sched_mbox_count(march_proc *p) {
     if (!p) return 0;
     return atomic_load_explicit(&p->mbox_count, memory_order_relaxed);
+}
+
+int64_t march_sched_held_count(march_proc *p) {
+    if (!p) return 0;
+    return atomic_load_explicit(&p->held, memory_order_relaxed);
 }
 
 /* One park + resume for march_sched_recv_mode's loop, in its OWN NOINLINE
@@ -3752,7 +4125,7 @@ static void timer_heap_push_ent(march_timer_ent ent) {
         g_timer_cap = g_timer_cap ? g_timer_cap * 2 : 64;
         g_timer_heap = realloc(g_timer_heap,
                                (size_t)g_timer_cap * sizeof(march_timer_ent));
-        if (!g_timer_heap) { fputs("march_sched: OOM (timer)\n", stderr); abort(); }
+        if (!g_timer_heap) { fputs("march_sched: OOM (timer)\n", stderr); march_abort(__func__); }
     }
     int i = g_timer_len++;
     g_timer_heap[i] = ent;
@@ -4215,7 +4588,7 @@ static void chain_prev_preempt_handler(int sig, siginfo_t *si, void *uctx) {
  * 400ms on two schedulers), and treating 0 as "another process" chained our
  * own ticks to the host.  A real sending process always has a nonzero pid.  A host's in-process use of the signal (its own pthread_kill)
  * carries our pid, but finds no pending tick, so it is chained too. */
-static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
+static void preempt_signal_handler_body(int sig, siginfo_t *si, void *uctx) {
     /* From another process: the host's, full stop.  Decided BEFORE looking at
      * the tick flag, and without consuming it: a host signal landing on a
      * scheduler thread between the daemon setting that thread's flag and its
@@ -4241,13 +4614,14 @@ static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
                                          memory_order_acquire)
                     && atomic_load_explicit(&g_scheds[i].busy,
                                             memory_order_relaxed)) {
-                    /* Both writes are async-signal-safe here (volatile scalar
-                     * stores, TLS already materialised).
+                    /* Both writes are async-signal-safe here (a relaxed
+                     * atomic and a volatile scalar store, TLS already
+                     * materialised).
                      * march_preempt_request is what compiled code actually
                      * polls; march_tls_reductions is kept in sync so
                      * task_reductions() and any interpreter-side budget
                      * logic see a spent quantum. */
-                    march_preempt_request = 1;
+                    MARCH_PREEMPT_REQUEST_SET(1);
                     march_tls_reductions  = 0;
                 }
                 ours = 1;
@@ -4260,6 +4634,21 @@ static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
         ours = 1;
     if (!ours)
         chain_prev_preempt_handler(sig, si, uctx);
+}
+
+
+/* The installed handler: the body above with errno saved and restored, as
+ * every asynchronous handler must (the interrupted code may be between a
+ * failing call and its errno read; a chained host handler may change it).
+ * Under TSAN this is also what keeps the handler free of reports: TSAN
+ * checks errno across an async handler ("signal handler spoils errno"), and
+ * a report raised in this handler can deadlock TSAN outright when the tick
+ * was deferred into a TSAN report already in progress on the same thread
+ * (specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md). */
+static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
+    int saved_errno = errno;
+    preempt_signal_handler_body(sig, si, uctx);
+    errno = saved_errno;
 }
 
 /* ── fd readiness: park a green thread on a socket ────────────────────────
@@ -4309,17 +4698,23 @@ static fdwait_ent      *g_fdwait_head = NULL;
 static int              g_fdwait_fd   = -1;    /* kqueue()/epoll_create1(), lazily */
 
 /* Under g_fdwait_mu. */
+/* Under g_fdwait_mu.  The store is atomic because fdwait_service reads
+ * g_fdwait_fd from the preempt daemon WITHOUT the mutex (a plain racy int,
+ * reported by TSAN); every other access holds g_fdwait_mu. */
 static int fdwait_open(void) {
     if (g_fdwait_fd >= 0) return 0;
+    int fd;
 #if defined(MARCH_FDWAIT_KQUEUE)
-    g_fdwait_fd = kqueue();
+    fd = kqueue();
 #elif defined(MARCH_FDWAIT_EPOLL)
-    g_fdwait_fd = epoll_create1(EPOLL_CLOEXEC);
+    fd = epoll_create1(EPOLL_CLOEXEC);
 #else
     errno = ENOSYS;
     return -1;
 #endif
-    return g_fdwait_fd >= 0 ? 0 : -1;
+    if (fd < 0) return -1;
+    __atomic_store_n(&g_fdwait_fd, fd, __ATOMIC_RELEASE);
+    return 0;
 }
 
 /* Under g_fdwait_mu.  Arm [fd] one-shot for the direction asked. */
@@ -4369,13 +4764,15 @@ static void fdwait_remove(fdwait_ent *ent) {
 /* Called from the preempt daemon every quantum: drain whatever fired and
  * wake its waiters (rule 1 above: the wake happens under the mutex). */
 static void fdwait_service(void) {
-    if (g_fdwait_fd < 0) return;
+    /* Unlocked read (see fdwait_open): -1 until the first wait_fd. */
+    const int pfd = __atomic_load_n(&g_fdwait_fd, __ATOMIC_ACQUIRE);
+    if (pfd < 0) return;
     for (;;) {
         int fds[64], writes[64], n = 0;
 #if defined(MARCH_FDWAIT_KQUEUE)
         struct kevent evs[64];
         struct timespec zero = { 0, 0 };
-        int got = kevent(g_fdwait_fd, NULL, 0, evs, 64, &zero);
+        int got = kevent(pfd, NULL, 0, evs, 64, &zero);
         if (got < 0 && errno == EINTR) continue;
         if (got <= 0) return;
         for (int i = 0; i < got; i++) {
@@ -4385,7 +4782,7 @@ static void fdwait_service(void) {
         }
 #elif defined(MARCH_FDWAIT_EPOLL)
         struct epoll_event evs[64];
-        int got = epoll_wait(g_fdwait_fd, evs, 64, 0);
+        int got = epoll_wait(pfd, evs, 64, 0);
         if (got < 0 && errno == EINTR) continue;
         if (got <= 0) return;
         for (int i = 0; i < got; i++) {
@@ -4589,6 +4986,31 @@ static void *resolve_thread(void *arg) {
     return NULL;
 }
 
+typedef struct {
+    resolve_req *q;
+    int          created;
+} resolve_spawn;
+
+/* Start the detached resolve_thread for s->q; s->created = 1 on success.
+ * Runs on the scheduler's NATIVE stack (march_sched_run_on_sched_stack),
+ * never on the calling green thread's.  Under ASAN, pthread_create runs with
+ * every signal blocked, so when glibc's allocate_stack (calloc in
+ * allocate_dtv) touched a green-stack page that had not been grown yet, the
+ * lazy-growth SIGSEGV could not be delivered and the kernel killed the
+ * process -- no report, exit 139 (test/test_scheduler_fdwait.c's resolver
+ * case under -fsanitize=address, Linux arm64; same failure as the blocking-FFI
+ * pool, specs/progress/2026-10-12-asan-getaddrinfo-helper-thread-spawn.md). */
+static void resolve_spawn_thread(void *arg) {
+    resolve_spawn *s = (resolve_spawn *)arg;
+    pthread_t t;
+    pthread_attr_t attr;
+    s->created = 0;
+    if (pthread_attr_init(&attr) != 0) return;
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    s->created = pthread_create(&t, &attr, resolve_thread, s->q) == 0;
+    pthread_attr_destroy(&attr);
+}
+
 int march_sched_getaddrinfo(const char *host, const char *port,
                             const struct addrinfo *hints, struct addrinfo **res) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
@@ -4596,13 +5018,12 @@ int march_sched_getaddrinfo(const char *host, const char *port,
         resolve_req q;
         q.host = host; q.port = port; q.hints = hints; q.res = NULL; q.rc = 0; q.proc = p;
         atomic_store(&q.done, 0); atomic_store(&q.woke, 0);
-        pthread_t t;
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        int created = pthread_create(&t, &attr, resolve_thread, &q) == 0;
-        pthread_attr_destroy(&attr);
-        if (created) {
+        /* Both live on this green thread's stack, which stays put (and this
+         * proc unresumable) until the spawn has returned.  The helper may
+         * finish first: its wake lands as a permit the park below consumes. */
+        resolve_spawn s = { &q, 0 };
+        march_sched_run_on_sched_stack(resolve_spawn_thread, &s);
+        if (s.created) {
             /* Park until the result is in (the wake permit covers a wake that
              * lands before the park), then until the wake has been issued. */
             while (!atomic_load_explicit(&q.done, memory_order_acquire))
@@ -4762,7 +5183,7 @@ march_cancel_token *march_cancel_token_new(void) {
     march_cancel_token *tok = (march_cancel_token *)malloc(sizeof(march_cancel_token));
     if (!tok) {
         fputs("march_cancel_token: OOM\n", stderr);
-        abort();
+        march_abort(__func__);
     }
     atomic_init(&tok->cancelled, 0);
     atomic_init(&tok->refcount, 1);

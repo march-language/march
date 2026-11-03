@@ -28,7 +28,7 @@ March uses Hindley-Milner type inference with bidirectional checking at function
 
 | Type | Description | Literals |
 |------|-------------|---------|
-| `Int` | 63-bit signed integer, wraps on overflow ([below](#int-width-and-overflow)) | `42`, `-7`, `0` |
+| `Int` | 63-bit signed integer; `+ - *` panic on overflow ([below](#int-width-and-overflow)) | `42`, `-7`, `0` |
 | `Float` | 64-bit IEEE 754 | `3.14`, `-0.5`, `1.0e10` |
 | `Bool` | Boolean | `true`, `false` |
 | `String` | UTF-8 string | `"hello"` |
@@ -42,11 +42,28 @@ March uses Hindley-Milner type inference with bidirectional checking at function
 (`int_min_value()` / `int_max_value()`). Both backends, the interpreter and
 the compiled (LLVM) code, give the same answer for every operation below.
 
-- **Overflow wraps.** `+`, `-`, `*`, unary `-`, `/`, `int_div`, `int_abs`,
-  `int_pow` and `int_shl` reduce their result modulo 2^63 back into the range.
-  Nothing traps on overflow: `int_max_value() + 1 == int_min_value()`,
-  `-int_min_value() == int_min_value()`, `int_abs(int_min_value()) ==
-  int_min_value()` and `int_min_value() / -1 == int_min_value()`.
+- **`+`, `-`, `*` and unary `-` panic on overflow.** A result outside the
+  range is a runtime panic, not a wrapped value: `int_max_value() + 1`
+  panics with `attempt to add with overflow`, and `-`, `*` and negation
+  with `attempt to subtract with overflow`, `attempt to multiply with
+  overflow` and `attempt to negate with overflow`
+  (`-int_min_value()` panics). The message is the same on every backend;
+  compiled code also records the enclosing function's source location as
+  the panic site, the way it does for `panic`. A literal expression that
+  overflows (`4611686018427387903 + 1`) is not folded at compile time; it
+  panics when it runs. This makes `x + 1 > x` true for every `x` the
+  program reaches, which is what the refinement checker assumes. In a
+  `cap no_panic` module each of these operators must be proven not to
+  overflow ([Capabilities]({{ site.baseurl }}/docs/capabilities/), check 4).
+- **Wrapping is explicit.** `int_wrapping_add`, `int_wrapping_sub` and
+  `int_wrapping_mul` reduce their result modulo 2^63 back into the range:
+  `int_wrapping_add(int_max_value(), 1) == int_min_value()`. Use them for
+  hashes, checksums and random-number mixing, where overflow is the point.
+  A derived `Hash` combines field hashes with them.
+- **Some builtins still wrap.** `/`, `int_div`, `int_abs`, `int_pow` and
+  `int_shl` reduce an out-of-range result modulo 2^63:
+  `int_abs(int_min_value()) == int_min_value()` and
+  `int_min_value() / -1 == int_min_value()`.
 - **Bitwise operators see 63 bits.** `int_and`/`int_or`/`int_xor`/`int_not`
   act on the 63-bit two's-complement pattern; `int_popcount(-1) == 63`.
   `int_shr` is an *arithmetic* (sign-propagating) shift: `int_shr(-8, 1) ==
@@ -54,7 +71,23 @@ the compiled (LLVM) code, give the same answer for every operation below.
   count outside `[0, 62]`.
 - **Division** truncates toward zero and panics on a zero divisor
   (`division by zero` / `modulo by zero`); `int_pow` panics on a negative
-  exponent.
+  exponent. Three families differ only when an operand is negative:
+
+  | Operation | Quotient rounds | Remainder takes the sign of | `-7 ÷ 2` | `7 ÷ -2` |
+  |---|---|---|---|---|
+  | `/` `%`, `int_div` `int_mod` | toward zero | the dividend | `-3`, `-1` | `-3`, `1` |
+  | `int_div_floor` `int_mod_floor` | toward negative infinity | the divisor | `-4`, `1` | `-4`, `-1` |
+  | `int_div_euclid` `int_mod_euclid` | so the remainder is never negative | never negative | `-4`, `1` | `-3`, `1` |
+
+  Each pair satisfies `a == div(a, b) * b + mod(a, b)`. Use the floor pair
+  when you split a value into whole units and a leftover, and the leftover
+  must land in `[0, b)` however far below zero `a` is: a Unix timestamp
+  into days and seconds (`DateTime.from_timestamp` does this), an index
+  into a ring buffer, a coordinate into a grid cell. Truncating division
+  puts `-1` second in day 0; floor division puts it in day -1 at second
+  86399. All three families panic on a zero divisor. A literal positive or
+  negative divisor other than `0` or `-1` lets the compiled backend emit
+  `int_div_floor` / `int_mod_floor` inline instead of calling the runtime.
 - **Literals** must fit the range: a literal above `4611686018427387903` is
   a compile error. A negative literal is the negation of a positive one, so
   `int_min_value()` has no literal spelling; write `int_min_value()` or
@@ -65,15 +98,48 @@ Why 63 bits: a polymorphic slot (a `List(Int)` cell, a tuple or record field, a
 closure argument, an actor message) stores an `Int` as a tagged word,
 `(n << 1) | 1`, which has room for exactly 63 bits; the interpreter's OCaml
 `int` is 63-bit too. Compiled code keeps a monomorphic `Int` in a full 64-bit
-register (and in `NativeArray`'s unboxed `Int` storage) for speed; the
-operations listed above leave their result in the full register and the
-reduction to 63 bits happens where the value is *observed* (a comparison, a
-call into the runtime, a store into a list or array, printing), so a value
-reads back the same whether it travelled through a register or a list.
-Use `Float` (or a bignum library) for wider arithmetic.
+register (and in `NativeArray`'s unboxed `Int` storage) for speed. A checked
+`+ - *` tests its result against the 63-bit range directly (one
+overflow-flag test on operands pre-shifted by one bit), so its result is
+always in range; the operations that wrap leave their result in the full
+register and the reduction to 63 bits happens where the value is *observed*
+(a comparison, a call into the runtime, a store into a list or array,
+printing), so a value reads back the same whether it travelled through a
+register or a list. Use `Float` (or a bignum library) for wider arithmetic.
 
-> The JavaScript backend (`--target js`) represents `Int` as a JS number and
-> does not follow these rules yet.
+#### Int on the JavaScript target
+
+`--target js` implements a **subset** of the rules above. There an `Int` is a
+JS number (an IEEE-754 double), which holds integers exactly only within
+**±(2^53 - 1)** (`-9007199254740991` to `9007199254740991`). Inside that
+range every operation listed above gives the same answer as the interpreter
+and native code, including division (truncating), `int_shr` (arithmetic) and
+`int_popcount` (of the 63-bit pattern). Outside it, the JS target departs
+from the 63-bit rules instead of wrapping:
+
+- **`+`, `-`, `*`, unary `-` and `int_pow` round** to the nearest double:
+  `9007199254740991 + 2` gives `9007199254740992`, not `9007199254740993`.
+  The overflow panic of `+ - *` and negation checks the *rounded* result
+  against ±2^62, so it fires with the same message as native code when the
+  operands are exact (`2^61 + 2^61` panics), but a result within a rounding
+  step of ±2^62 can be judged either way.
+- **The bitwise and checked builtins throw.** `int_and`, `int_or`,
+  `int_xor`, `int_not`, `int_shl`, `int_shr`, `int_popcount`, `int_div`,
+  `int_mod`, `int_div_euclid`, `int_mod_euclid`, `int_div_floor`,
+  `int_mod_floor` and `int_wrapping_add`/`_sub`/`_mul` raise a JS `RangeError`
+  when an argument or the result lies outside ±(2^53 - 1), rather than
+  return a rounded value. Within the range they are exact on every bit, not
+  only the low 32 that JS's own `&`, `|` and `>>` see.
+- **`/` and `%` by zero give `NaN`** instead of panicking (`int_div` and
+  `int_mod` still panic).
+- **`int_max_value()` and `int_min_value()` do not compile** for the JS
+  target: ±2^62 has no exact JS number.
+
+Code that must agree with native builds keeps its `Int` values within
+±(2^53 - 1) (stdlib `Random` uses a 32-bit core for this reason), or builds
+a native or wasm target. The decision to treat the JS target as a subset
+rather than emulate 63 bits with `BigInt` is recorded in
+`specs/progress/2026-09-30-js-backend-int-63-bit-semantics.md`.
 
 ---
 
@@ -260,15 +326,15 @@ map_option(Some("hi"), String.byte_size) -- Option(Int) — there is no `String.
 
 ### A signature's type variables must stay generic
 
-A type variable in a signature is not yet a promise the compiler enforces: the
-body can fix it. This typechecks, and every caller sees `List(Int) -> List(Int)`:
+A type variable in a signature means "for all": the body may not fix it. This
+is an error, because `bad` promises any `List(a)` and returns a `List(Int)`:
 
 ```march
 fn bad(xs : List(a)) : List(a) do [0 - 5] end
 ```
 
-The compiler warns at the variable in the signature (warning code
-`annotated_tyvar_fixed`), naming the type the body gave it:
+The error (code `annotated_tyvar_fixed`) points at the variable in the
+signature and names the type the body gave it:
 
 ```
 The type variable `a` in `bad`'s signature is not generic: the body fixes it
@@ -277,19 +343,21 @@ to `Int`, so every caller gets `Int` in its place.
     body generic in `a`.
 ```
 
-It also warns when the body makes two of the signature's variables the same
-type, as in `fn second(x : a, y : b) : a do y end` (the body returns `y`, so
-`b` must be `a`). That signature promises callers two independent types, and
-they get only one.
+Making two of the signature's variables the same type is an error too, as in
+`fn second(x : a, y : b) : a do y end` (the body returns `y`, so `b` must be
+`a`). That signature promises callers two independent types, and they get only
+one.
 
-The warning covers only type variables you wrote in a function's parameter or
-return annotations (or its bounds). It is skipped when the function's body has
-a type error, since that error is the one to fix first — including the
-`curried_lambda_over_tuple` error for `fn (k, v) -> …` passed where a callback
-over a pair is expected, which names that mistake directly.
+The rule covers only type variables you wrote in a function's parameter or
+return annotations (or its bounds); an unannotated parameter's type is the
+body's to decide, and type variables in a local `let x : a = …` or a lambda
+annotation are not checked. The check is skipped when the function's body
+already has a type error, since that error is the one to fix first, including
+the `curried_lambda_over_tuple` error for `fn (k, v) -> …` passed where a
+callback over a pair is expected, which names that mistake directly.
 
-A later release plans to make these variables rigid, which turns this warning
-into an error.
+Until 2026-10-11 this was a warning, and before 2026-09-22 the body fixed the
+variable silently.
 
 ---
 
@@ -491,6 +559,20 @@ fn compose(f : b -> c, g : a -> b) : a -> c do
   fn x -> f(g(x))
 end
 ```
+
+`Int -> Int -> Int` is also the type of a two-argument function
+`fn add(a : Int, b : Int)`: the type does not record how many arguments a
+function takes at once. Calls do, because March has no partial application.
+So a callee that applies its parameter one argument at a time (`let g = f(x)`
+then `g(y)`, as `Map.insert` does with its comparator) needs a curried
+function, and a callee that calls `f(x, y)` (as `List.fold_left` does) needs a
+two-argument one. Passing a named function or a lambda of the other shape is
+the `callback_arity_mismatch` error, which suggests the curried wrapper
+`fn a -> fn b -> add(a, b)`. The check sees a function passed directly to a
+known function's or a let-bound lambda's parameter, including through a
+`let h = add` alias; such an alias is also called like `add` itself, so
+`h(1)` is an `arity_mismatch`. A function value stored in a record or list,
+or returned from a function, and applied later is not checked.
 
 ---
 

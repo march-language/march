@@ -142,7 +142,7 @@ let test_baselines_agree () =
     let binary = "/tmp/sbx_drift_probe_binary" in
     let forge_profile =
       March_forge.Cap_sandbox.profile_for
-        ~caps:[ "IO.Console"; "IO.FileWrite" ] ~binary
+        ~caps:[ "IO.Console"; "IO.FileWrite" ] ~binary ()
     in
     let forge_clauses =
       List.filter
@@ -172,7 +172,7 @@ let test_conditional_grants_agree () =
     let forge_clauses =
       clauses_of
         (March_forge.Cap_sandbox.profile_for
-           ~caps:[ "IO.Console"; "IO.FileWrite" ] ~binary)
+           ~caps:[ "IO.Console"; "IO.FileWrite" ] ~binary ())
     in
     let embedded_clauses = clauses_of (embedded_profile ()) in
     let has l c = List.mem c l in
@@ -357,7 +357,7 @@ let check_net_split ~name ~caps ~src ~outbound ~listen =
       List.filter
         (fun c -> not (is_forge_binary_read ~binary c)
                   && c <> "(allow process-exec)")
-        (clauses_of (March_forge.Cap_sandbox.profile_for ~caps ~binary))
+        (clauses_of (March_forge.Cap_sandbox.profile_for ~caps ~binary ()))
     in
     let embedded_clauses = profile_of src in
     Alcotest.(check (list string))

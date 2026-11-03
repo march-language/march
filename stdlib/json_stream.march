@@ -9,10 +9,20 @@
 -- All constructor names are prefixed (Ev*/E*/M*/P*/S*/Js*/St*): the ctor
 -- namespace is flat across modules, and Json.JsonValue already owns the
 -- natural names.  Do not rename until FQN type identity lands.
+--
+-- doc: try
 
 mod JsonStream do
 
   cap no_panic
+
+  -- Int `+ - *` panic on overflow, and `cap no_panic` makes the checker prove
+  -- each one cannot.  Byte indices, stream offsets, lengths and the nesting
+  -- depth are bounded by the input's size, far below 2^62, but nothing here
+  -- ties them to it, so their arithmetic is spelled `int_wrapping_add` /
+  -- `int_wrapping_sub` / `int_wrapping_mul`: the same value for any real
+  -- input, and no panic site.  Arithmetic the checker can prove (a byte under
+  -- a range guard, a literal) keeps the plain operators.
 
   -- ── Public types ──────────────────────────────────────────────────────
 
@@ -37,8 +47,31 @@ mod JsonStream do
   -- max_depth, max_token_bytes
   type JsonLimits = JsonLimits(Int, Int)
 
+  doc """
+  The default limits: `JsonLimits(512, 8000000)`, i.e. a maximum nesting
+  depth of 512 and a maximum single-token (string or number) length of
+  8,000,000 bytes.
+
+  ## Examples
+
+      march> JsonStream.default_limits()
+      JsonLimits(512, 8000000)
+  """
   fn default_limits() do JsonLimits(512, 8000000) end
 
+  doc """
+  Render a `JsonStreamError` as a one-line message ending in the absolute
+  byte offset it carries.
+
+  ## Examples
+
+      march> JsonStream.err_to_string(EMalformed("expected a JSON value", 3))
+      "expected a JSON value at byte 3"
+      march> JsonStream.err_to_string(EDepthLimit(7))
+      "nesting deeper than max_depth at byte 7"
+      march> JsonStream.err_to_string(ETruncated(5))
+      "input truncated at byte 5"
+  """
   fn err_to_string(e) do
     match e do
     EMalformed(msg, off) -> msg ++ " at byte " ++ to_string(off)
@@ -84,9 +117,54 @@ mod JsonStream do
 
   -- ── Construction ──────────────────────────────────────────────────────
 
+  doc """
+  A fresh tokenizer state for a single JSON document, with
+  `default_limits()`. Data after the first complete top-level value is
+  rejected. Feed it with `feed`, then close it with `finish`.
+
+  ## Examples
+
+      march> JsonStream.finish(JsonStream.start())
+      Err(ETruncated(0))
+  """
   fn start() do StOk(cfg_of(default_limits(), false), MTop, Nil, 0, PNone, 0) end
+
+  doc """
+  Like `start`, with caller-supplied `JsonLimits(max_depth, max_token_bytes)`.
+  Opening a container deeper than `max_depth` fails with `EDepthLimit`; a
+  string or number token longer than `max_token_bytes` fails with
+  `ETokenLimit` (offset of the token start).
+
+  ## Examples
+
+      march> JsonStream.feed(JsonStream.start_with(JsonLimits(1, 100)), "[[1]]")
+      Err(EDepthLimit(1))
+  """
   fn start_with(l) do StOk(cfg_of(l, false), MTop, Nil, 0, PNone, 0) end
+
+  doc """
+  A fresh tokenizer state for NDJSON (any number of top-level values,
+  whitespace-separated), with `default_limits()`. Unlike `start`, an
+  input with no values at all finishes successfully.
+
+  ## Examples
+
+      march> Result.map(JsonStream.feed(JsonStream.start_ndjson(), "1\n{}\n"), Tuple.first) == Ok([EvNum(1.0), EvObjStart, EvObjEnd])
+      true
+      march> JsonStream.finish(JsonStream.start_ndjson())
+      Ok([])
+  """
   fn start_ndjson() do StOk(cfg_of(default_limits(), true), MTop, Nil, 0, PNone, 0) end
+
+  doc """
+  Like `start_ndjson`, with caller-supplied
+  `JsonLimits(max_depth, max_token_bytes)`.
+
+  ## Examples
+
+      march> JsonStream.feed(JsonStream.start_ndjson_with(JsonLimits(8, 2)), "123")
+      Err(ETokenLimit(0))
+  """
   fn start_ndjson_with(l) do StOk(cfg_of(l, true), MTop, Nil, 0, PNone, 0) end
 
   pfn cfg_of(l, nd) do
@@ -104,6 +182,12 @@ mod JsonStream do
   Validation is unchanged -- a malformed number is still rejected with the
   same error at the same offset.  Intended for a fresh state; applied
   mid-stream it affects only numbers completed after the call.
+
+  ## Examples
+
+      march> let raw = JsonStream.feed(JsonStream.with_raw_numbers(JsonStream.start()), "[12345678901234567890]")
+      march> Result.map(raw, Tuple.first) == Ok([EvArrStart, EvNumRaw("12345678901234567890"), EvArrEnd])
+      true
   """
   fn with_raw_numbers(st) do
     match st do
@@ -142,7 +226,7 @@ mod JsonStream do
   end
 
   pfn hex_val(c) do
-    if is_digit(c) do c - 48
+    if is_digit(c) do int_wrapping_sub(c, 48)
     else if c >= 97 do if c <= 102 do c - 87 else 0 - 1 end
     else if c >= 65 do if c <= 70 do c - 55 else 0 - 1 end
     else 0 - 1 end end end
@@ -177,7 +261,7 @@ mod JsonStream do
   -- Replacing it with a C classifier is exactly the phase 2 design's
   -- Component 4 question, gated on measurement.
   pfn num_end(s, i) do
-    if is_num_byte(string_byte_at(s, i)) do num_end(s, i + 1) else i end
+    if is_num_byte(string_byte_at(s, i)) do num_end(s, int_wrapping_add(i, 1)) else i end
   end
 
   -- Encode a Unicode codepoint as UTF-8 bytes.  Every byte past the first
@@ -218,6 +302,28 @@ mod JsonStream do
   -- absolute offset of chunk byte 0; `base + i` is the current byte's
   -- absolute offset.
 
+  doc """
+  Feed one chunk of input to the tokenizer. Returns
+  `Ok((events, next_state))` with the events completed by this chunk, in
+  order, or `Err(JsonStreamError)` on the first error. Chunk boundaries
+  may fall anywhere, including inside a token: a partial token is carried
+  in the state and its event is emitted by the chunk that completes it. A
+  number at the very end of a chunk is not emitted until a delimiter
+  arrives (or `finish`). Error offsets are absolute across all chunks
+  fed; a malformed number reports its start offset.
+
+  ## Examples
+
+      march> let r1 = JsonStream.feed(JsonStream.start(), "[1, tr")
+      march> Result.map(r1, Tuple.first) == Ok([EvArrStart, EvNum(1.0)])
+      true
+      march> let r1 = JsonStream.feed(JsonStream.start(), "[1, tr")
+      march> let r2 = JsonStream.feed(Tuple.second(Result.unwrap(r1)), "ue]")
+      march> Result.map(r2, Tuple.first) == Ok([EvBool(true), EvArrEnd])
+      true
+      march> Result.map_err(JsonStream.feed(JsonStream.start(), "[1 2]"), JsonStream.err_to_string)
+      Err("expected ',' or ']' in array at byte 3")
+  """
   fn feed(st, chunk) do
     match st do
     StOk(cfg, mode, stack, depth, partial, base) ->
@@ -228,7 +334,7 @@ mod JsonStream do
   pfn go(s, i, cfg, mode, stack, depth, partial, base, evs) do
     let c = string_byte_at(s, i)
     if c < 0 do
-      Ok((rev(evs, Nil), StOk(cfg, mode, stack, depth, partial, base + i)))
+      Ok((rev(evs, Nil), StOk(cfg, mode, stack, depth, partial, int_wrapping_add(base, i))))
     else
       match partial do
       PNone -> free_byte(s, i, c, cfg, mode, stack, depth, base, evs)
@@ -244,30 +350,30 @@ mod JsonStream do
 
   -- No token in flight: dispatch on the grammar mode.
   pfn free_byte(s, i, c, cfg, mode, stack, depth, base, evs) do
-    if is_ws(c) do go(s, i + 1, cfg, mode, stack, depth, PNone, base, evs)
+    if is_ws(c) do go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PNone, base, evs)
     else
       match mode do
-      MDone -> Err(EMalformed("unexpected data after top-level value", base + i))
+      MDone -> Err(EMalformed("unexpected data after top-level value", int_wrapping_add(base, i)))
       MObjColon ->
-        if c == 58 do go(s, i + 1, cfg, MObjValue, stack, depth, PNone, base, evs)
-        else Err(EMalformed("expected ':' after object key", base + i)) end
+        if c == 58 do go(s, int_wrapping_add(i, 1), cfg, MObjValue, stack, depth, PNone, base, evs)
+        else Err(EMalformed("expected ':' after object key", int_wrapping_add(base, i))) end
       MObjNext ->
-        if c == 44 do go(s, i + 1, cfg, MObjKey, stack, depth, PNone, base, evs)
+        if c == 44 do go(s, int_wrapping_add(i, 1), cfg, MObjKey, stack, depth, PNone, base, evs)
         else if c == 125 do close_obj(s, i, cfg, stack, depth, base, evs)
-        else Err(EMalformed("expected ',' or '}' in object", base + i)) end end
+        else Err(EMalformed("expected ',' or '}' in object", int_wrapping_add(base, i))) end end
       MArrNext ->
-        if c == 44 do go(s, i + 1, cfg, MArrValue, stack, depth, PNone, base, evs)
+        if c == 44 do go(s, int_wrapping_add(i, 1), cfg, MArrValue, stack, depth, PNone, base, evs)
         else if c == 93 do close_arr(s, i, cfg, stack, depth, base, evs)
-        else Err(EMalformed("expected ',' or ']' in array", base + i)) end end
+        else Err(EMalformed("expected ',' or ']' in array", int_wrapping_add(base, i))) end end
       MObjFirst ->
         if c == 34 do
-          go(s, i + 1, cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, base + i), base, evs)
+          go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, int_wrapping_add(base, i)), base, evs)
         else if c == 125 do close_obj(s, i, cfg, stack, depth, base, evs)
-        else Err(EMalformed("expected a key or '}' in object", base + i)) end end
+        else Err(EMalformed("expected a key or '}' in object", int_wrapping_add(base, i))) end end
       MObjKey ->
         if c == 34 do
-          go(s, i + 1, cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, base + i), base, evs)
-        else Err(EMalformed("expected a key in object", base + i)) end
+          go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, int_wrapping_add(base, i)), base, evs)
+        else Err(EMalformed("expected a key in object", int_wrapping_add(base, i))) end
       MArrFirst ->
         if c == 93 do close_arr(s, i, cfg, stack, depth, base, evs)
         else value_start(s, i, c, cfg, mode, stack, depth, base, evs) end
@@ -280,13 +386,13 @@ mod JsonStream do
   -- or MObjValue).
   pfn value_start(s, i, c, cfg, mode, stack, depth, base, evs) do
     if c == 34 do
-      go(s, i + 1, cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, base + i), base, evs)
+      go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, int_wrapping_add(base, i)), base, evs)
     else if c == 116 do
-      go(s, i + 1, cfg, mode, stack, depth, PLit("true", 1, base + i), base, evs)
+      go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PLit("true", 1, int_wrapping_add(base, i)), base, evs)
     else if c == 102 do
-      go(s, i + 1, cfg, mode, stack, depth, PLit("false", 1, base + i), base, evs)
+      go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PLit("false", 1, int_wrapping_add(base, i)), base, evs)
     else if c == 110 do
-      go(s, i + 1, cfg, mode, stack, depth, PLit("null", 1, base + i), base, evs)
+      go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PLit("null", 1, int_wrapping_add(base, i)), base, evs)
     else if c == 45 do
       num_start(s, i, c, cfg, mode, stack, depth, base, evs)
     else if is_digit(c) do
@@ -295,7 +401,7 @@ mod JsonStream do
       open_container(s, i, true, cfg, mode, stack, depth, base, evs)
     else if c == 91 do
       open_container(s, i, false, cfg, mode, stack, depth, base, evs)
-    else Err(EMalformed("expected a JSON value", base + i))
+    else Err(EMalformed("expected a JSON value", int_wrapping_add(base, i)))
     end end end end end end end end
   end
 
@@ -307,10 +413,10 @@ mod JsonStream do
     let stop = num_end(s, i)
     match cfg do
     JsCfg(_, maxt, _, _) ->
-      if stop - i > maxt do Err(ETokenLimit(base + i))
+      if int_wrapping_sub(stop, i) > maxt do Err(ETokenLimit(int_wrapping_add(base, i)))
       else
         go(s, stop, cfg, mode, stack, depth,
-           PNum(Cons(string_slice(s, i, stop - i), Nil), stop - i, base + i), base, evs)
+           PNum(Cons(string_slice(s, i, int_wrapping_sub(stop, i)), Nil), int_wrapping_sub(stop, i), int_wrapping_add(base, i)), base, evs)
       end
     end
   end
@@ -319,29 +425,29 @@ mod JsonStream do
   pfn open_container(s, i, is_obj, cfg, mode, stack, depth, base, evs) do
     match cfg do
     JsCfg(maxd, _, _, _) ->
-      if depth + 1 > maxd do Err(EDepthLimit(base + i))
+      if int_wrapping_add(depth, 1) > maxd do Err(EDepthLimit(int_wrapping_add(base, i)))
       else
         let ev = if is_obj do EvObjStart else EvArrStart end
         let m2 = if is_obj do MObjFirst else MArrFirst end
-        go(s, i + 1, cfg, m2, Cons(mode, stack), depth + 1, PNone, base, Cons(ev, evs))
+        go(s, int_wrapping_add(i, 1), cfg, m2, Cons(mode, stack), int_wrapping_add(depth, 1), PNone, base, Cons(ev, evs))
       end
     end
   end
 
   pfn close_obj(s, i, cfg, stack, depth, base, evs) do
     match stack do
-    Nil -> Err(EMalformed("unmatched '}'", base + i))
+    Nil -> Err(EMalformed("unmatched '}'", int_wrapping_add(base, i)))
     Cons(parent, rest) ->
-      go(s, i + 1, cfg, after_value(cfg, parent), rest, depth - 1, PNone, base,
+      go(s, int_wrapping_add(i, 1), cfg, after_value(cfg, parent), rest, int_wrapping_sub(depth, 1), PNone, base,
          Cons(EvObjEnd, evs))
     end
   end
 
   pfn close_arr(s, i, cfg, stack, depth, base, evs) do
     match stack do
-    Nil -> Err(EMalformed("unmatched ']'", base + i))
+    Nil -> Err(EMalformed("unmatched ']'", int_wrapping_add(base, i)))
     Cons(parent, rest) ->
-      go(s, i + 1, cfg, after_value(cfg, parent), rest, depth - 1, PNone, base,
+      go(s, int_wrapping_add(i, 1), cfg, after_value(cfg, parent), rest, int_wrapping_sub(depth, 1), PNone, base,
          Cons(EvArrEnd, evs))
     end
   end
@@ -357,13 +463,13 @@ mod JsonStream do
   pfn lit_byte(s, i, c, cfg, mode, stack, depth, base, evs, lex, k, soff) do
     let e = string_byte_at(lex, k)
     if c == e do
-      if string_byte_at(lex, k + 1) < 0 do
-        go(s, i + 1, cfg, after_value(cfg, mode), stack, depth, PNone, base,
+      if string_byte_at(lex, int_wrapping_add(k, 1)) < 0 do
+        go(s, int_wrapping_add(i, 1), cfg, after_value(cfg, mode), stack, depth, PNone, base,
            Cons(lit_event(lex), evs))
       else
-        go(s, i + 1, cfg, mode, stack, depth, PLit(lex, k + 1, soff), base, evs)
+        go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PLit(lex, int_wrapping_add(k, 1), soff), base, evs)
       end
-    else Err(EMalformed("invalid literal", base + i)) end
+    else Err(EMalformed("invalid literal", int_wrapping_add(base, i))) end
   end
 
   -- ── Strings ───────────────────────────────────────────────────────────
@@ -383,10 +489,10 @@ mod JsonStream do
   pfn push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff, t) do
     match cfg do
     JsCfg(_, maxt, _, _) ->
-      let len2 = len + string_byte_length(t)
+      let len2 = int_wrapping_add(len, string_byte_length(t))
       if len2 > maxt do Err(ETokenLimit(soff))
       else
-        go(s, i + 1, cfg, mode, stack, depth,
+        go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth,
            PStr(Cons(t, ps), len2, SPlain, hi, soff), base, evs)
       end
     end
@@ -408,11 +514,11 @@ mod JsonStream do
     let stop = if e < 0 do string_byte_length(s) else e end
     match cfg do
     JsCfg(_, maxt, _, _) ->
-      let len2 = len + (stop - i)
+      let len2 = int_wrapping_add(len, (int_wrapping_sub(stop, i)))
       if len2 > maxt do Err(ETokenLimit(soff))
       else
         go(s, stop, cfg, mode, stack, depth,
-           PStr(Cons(string_slice(s, i, stop - i), ps), len2, SPlain, hi, soff),
+           PStr(Cons(string_slice(s, i, int_wrapping_sub(stop, i)), ps), len2, SPlain, hi, soff),
            base, evs)
       end
     end
@@ -421,9 +527,9 @@ mod JsonStream do
   pfn finish_str(s, i, cfg, mode, stack, depth, base, evs, ps) do
     let v = join_pieces(ps)
     match mode do
-    MObjFirst -> go(s, i + 1, cfg, MObjColon, stack, depth, PNone, base, Cons(EvKey(v), evs))
-    MObjKey -> go(s, i + 1, cfg, MObjColon, stack, depth, PNone, base, Cons(EvKey(v), evs))
-    _ -> go(s, i + 1, cfg, after_value(cfg, mode), stack, depth, PNone, base, Cons(EvStr(v), evs))
+    MObjFirst -> go(s, int_wrapping_add(i, 1), cfg, MObjColon, stack, depth, PNone, base, Cons(EvKey(v), evs))
+    MObjKey -> go(s, int_wrapping_add(i, 1), cfg, MObjColon, stack, depth, PNone, base, Cons(EvKey(v), evs))
+    _ -> go(s, int_wrapping_add(i, 1), cfg, after_value(cfg, mode), stack, depth, PNone, base, Cons(EvStr(v), evs))
     end
   end
 
@@ -433,11 +539,11 @@ mod JsonStream do
       if hi >= 0 do
         -- A high surrogate is pending: only '\' (opening the low half) is legal.
         if c == 92 do
-          go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SEsc, hi, soff), base, evs)
-        else Err(EMalformed("lone high surrogate in string escape", base + i)) end
+          go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PStr(ps, len, SEsc, hi, soff), base, evs)
+        else Err(EMalformed("lone high surrogate in string escape", int_wrapping_add(base, i))) end
       else if c == 34 do finish_str(s, i, cfg, mode, stack, depth, base, evs, ps)
       else if c == 92 do
-        go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SEsc, hi, soff), base, evs)
+        go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PStr(ps, len, SEsc, hi, soff), base, evs)
       else
         -- Plain content: take the whole run at once.  `c` is known not to be
         -- '"' or '\' here, and `hi < 0`, which is exactly str_run's contract.
@@ -445,22 +551,22 @@ mod JsonStream do
       end end end
     SEsc ->
       if c == 117 do
-        go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SHex(0, 0), hi, soff), base, evs)
+        go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PStr(ps, len, SHex(0, 0), hi, soff), base, evs)
       else if hi >= 0 do
-        Err(EMalformed("lone high surrogate in string escape", base + i))
+        Err(EMalformed("lone high surrogate in string escape", int_wrapping_add(base, i)))
       else
         match simple_escape(c) do
         Some(t) -> push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff, t)
-        None -> Err(EMalformed("unknown escape sequence", base + i))
+        None -> Err(EMalformed("unknown escape sequence", int_wrapping_add(base, i)))
         end
       end end
     SHex(k, v) ->
       let d = hex_val(c)
-      if d < 0 do Err(EMalformed("invalid hex digit in unicode escape", base + i))
+      if d < 0 do Err(EMalformed("invalid hex digit in unicode escape", int_wrapping_add(base, i)))
       else
-        let v2 = v * 16 + d
+        let v2 = int_wrapping_add(int_wrapping_mul(v, 16), d)
         if k < 3 do
-          go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SHex(k + 1, v2), hi, soff), base, evs)
+          go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PStr(ps, len, SHex(k + 1, v2), hi, soff), base, evs)
         else
           hex_done(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff, v2)
         end
@@ -474,17 +580,17 @@ mod JsonStream do
       -- Expecting the LOW half of a surrogate pair: DC00..DFFF.
       if cp >= 56320 do
         if cp <= 57343 do
-          let full = 65536 + (hi - 55296) * 1024 + (cp - 56320)
+          let full = int_wrapping_add(int_wrapping_add(65536, int_wrapping_mul((hi - 55296), 1024)), (cp - 56320))
           push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, 0 - 1, soff,
                      utf8_encode(full))
-        else Err(EMalformed("expected low surrogate in unicode escape", base + i)) end
-      else Err(EMalformed("expected low surrogate in unicode escape", base + i)) end
+        else Err(EMalformed("expected low surrogate in unicode escape", int_wrapping_add(base, i))) end
+      else Err(EMalformed("expected low surrogate in unicode escape", int_wrapping_add(base, i))) end
     else if cp >= 55296 do
       if cp <= 56319 do
         -- High surrogate: hold it; the next escape must be the low half.
-        go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SPlain, cp, soff), base, evs)
+        go(s, int_wrapping_add(i, 1), cfg, mode, stack, depth, PStr(ps, len, SPlain, cp, soff), base, evs)
       else if cp <= 57343 do
-        Err(EMalformed("lone low surrogate in unicode escape", base + i))
+        Err(EMalformed("lone low surrogate in unicode escape", int_wrapping_add(base, i)))
       else
         push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, 0 - 1, soff,
                    utf8_encode(cp))
@@ -505,11 +611,11 @@ mod JsonStream do
       let stop = num_end(s, i)
       match cfg do
       JsCfg(_, maxt, _, _) ->
-        let len2 = len + (stop - i)
+        let len2 = int_wrapping_add(len, (int_wrapping_sub(stop, i)))
         if len2 > maxt do Err(ETokenLimit(soff))
         else
           go(s, stop, cfg, mode, stack, depth,
-             PNum(Cons(string_slice(s, i, stop - i), ps), len2, soff), base, evs)
+             PNum(Cons(string_slice(s, i, int_wrapping_sub(stop, i)), ps), len2, soff), base, evs)
         end
       end
     else
@@ -545,49 +651,65 @@ mod JsonStream do
 
   pfn vn_int(lex, i) do
     let c = string_byte_at(lex, i)
-    if c == 48 do vn_frac(lex, i + 1)
-    else if is_digit(c) do vn_frac(lex, vn_digits(lex, i + 1))
+    if c == 48 do vn_frac(lex, int_wrapping_add(i, 1))
+    else if is_digit(c) do vn_frac(lex, vn_digits(lex, int_wrapping_add(i, 1)))
     else false end end
   end
 
   pfn vn_digits(lex, i) do
-    if is_digit(string_byte_at(lex, i)) do vn_digits(lex, i + 1) else i end
+    if is_digit(string_byte_at(lex, i)) do vn_digits(lex, int_wrapping_add(i, 1)) else i end
   end
 
   pfn vn_frac(lex, i) do
     let c = string_byte_at(lex, i)
     if c < 0 do true
     else if c == 46 do
-      if is_digit(string_byte_at(lex, i + 1)) do vn_exp(lex, vn_digits(lex, i + 2))
+      if is_digit(string_byte_at(lex, int_wrapping_add(i, 1))) do vn_exp(lex, vn_digits(lex, int_wrapping_add(i, 2)))
       else false end
-    else if c == 101 do vn_exp_body(lex, i + 1)
-    else if c == 69 do vn_exp_body(lex, i + 1)
+    else if c == 101 do vn_exp_body(lex, int_wrapping_add(i, 1))
+    else if c == 69 do vn_exp_body(lex, int_wrapping_add(i, 1))
     else false end end end end
   end
 
   pfn vn_exp(lex, i) do
     let c = string_byte_at(lex, i)
     if c < 0 do true
-    else if c == 101 do vn_exp_body(lex, i + 1)
-    else if c == 69 do vn_exp_body(lex, i + 1)
+    else if c == 101 do vn_exp_body(lex, int_wrapping_add(i, 1))
+    else if c == 69 do vn_exp_body(lex, int_wrapping_add(i, 1))
     else false end end end
   end
 
   pfn vn_exp_body(lex, i) do
     let c = string_byte_at(lex, i)
-    let j = if c == 43 do i + 1 else if c == 45 do i + 1 else i end end
-    if is_digit(string_byte_at(lex, j)) do vn_tail(lex, j + 1) else false end
+    let j = if c == 43 do int_wrapping_add(i, 1) else if c == 45 do int_wrapping_add(i, 1) else i end end
+    if is_digit(string_byte_at(lex, j)) do vn_tail(lex, int_wrapping_add(j, 1)) else false end
   end
 
   pfn vn_tail(lex, i) do
     let c = string_byte_at(lex, i)
     if c < 0 do true
-    else if is_digit(c) do vn_tail(lex, i + 1)
+    else if is_digit(c) do vn_tail(lex, int_wrapping_add(i, 1))
     else false end end
   end
 
   -- ── finish ────────────────────────────────────────────────────────────
 
+  doc """
+  Signal end of input. Returns `Ok(events)` with any final events (a
+  number still in flight at end of input), or `ETruncated(offset)` if the
+  input ended inside a string or literal (offset of its start), inside an
+  open container, or (single-document mode) before any value. A malformed
+  trailing number fails with `EMalformed`.
+
+  ## Examples
+
+      march> JsonStream.finish(Tuple.second(Result.unwrap(JsonStream.feed(JsonStream.start(), "12")))) == Ok([EvNum(12.0)])
+      true
+      march> JsonStream.finish(Tuple.second(Result.unwrap(JsonStream.feed(JsonStream.start(), "\"ab"))))
+      Err(ETruncated(0))
+      march> JsonStream.finish(Tuple.second(Result.unwrap(JsonStream.feed(JsonStream.start(), "01"))))
+      Err(EMalformed("invalid number", 0))
+  """
   fn finish(st) do
     match st do
     StOk(cfg, mode, stack, depth, partial, off) ->
@@ -627,6 +749,19 @@ mod JsonStream do
   -- Seq's Step constructors prove publicly constructible, switching to
   -- Seq.fold_while for early exit is a drop-in improvement.
 
+  doc """
+  Tokenize a whole `Seq` of chunks as ONE JSON document (`start()`
+  limits), folding `f(acc, event)` over every event in order. Returns
+  `Ok(acc)`, or the first tokenizer error. The fold is eager: after an
+  error, the remaining chunks are still consumed (and ignored).
+
+  ## Examples
+
+      march> JsonStream.fold(Seq.from_list(["[1,", "2]"]), 0, fn (n, _) -> n + 1)
+      Ok(4)
+      march> JsonStream.fold(Seq.from_list(["[1,", "2"]), 0, fn (n, _) -> n + 1)
+      Err(ETruncated(4))
+  """
   fn fold(chunks, z, f) do
     let r = Seq.fold(chunks, Ok((z, start())), fn (acc, chunk) ->
       match acc do
@@ -706,7 +841,18 @@ mod JsonStream do
     end
   end
 
-  -- Fold a whole single-document chunk stream into one JsonValue.
+  doc """
+  Fold a whole single-document chunk stream into one `Json.JsonValue`,
+  producing the same tree as `Json.parse` on the concatenated input but
+  with this tokenizer's limits and error offsets.
+
+  ## Examples
+
+      march> JsonStream.build(Seq.from_list(["{\"a\": [tr", "ue]}"])) == Ok(Json.encode_object([("a", Json.encode_array([Json.encode_bool(true)]))]))
+      true
+      march> JsonStream.build(Seq.from_list(["1 2"]))
+      Err(EMalformed("unexpected data after top-level value", 2))
+  """
   fn build(chunks) do
     let r = fold(chunks, Ok((Nil, None)), fn (acc, ev) ->
       match acc do
@@ -735,6 +881,15 @@ mod JsonStream do
     end
   end
 
+  doc """
+  Read the NDJSON file at `path` in 64 KiB chunks and call `cb(value)`
+  for each completed top-level `JsonValue`, in order, with memory bounded
+  by the largest single value. Returns `Ok(())`, or the first tokenizer
+  error; a file error is reported as `EMalformed("file error: ...", 0)`.
+  Values seen before an error have already been passed to `cb`.
+
+      JsonStream.each_value("events.ndjson", fn v -> println(Json.to_string(v)))
+  """
   -- NDJSON: parse `path`, calling cb(JsonValue) per completed top-level
   -- value, with bounded memory.  File.with_chunks wraps the callback's
   -- return in `Ok(callback_result)` (Result(_, FileError)), while
@@ -825,6 +980,16 @@ mod JsonStream do
   -- produced while consuming events from that line. This is independent
   -- of (and does not read) the tokenizer's own internal `StOk` offset
   -- field; it is a running counter of bytes handed to `feed` so far.
+  doc """
+  Read the NDJSON file at `path` line by line, decode each top-level value
+  with the caller's `derive Json`-generated `from_json`, and call
+  `cb(record)` per success. Returns `Ok(count)` of records decoded, or the
+  first failure as a `Json.DecodeError`: a decode failure carries the
+  failing record's line start offset (`$.id (byte 4096): expected Int`), a
+  tokenizer error its own offset, and a file error offset -1.
+
+      JsonStream.each_typed("users.ndjson", fn u -> println(u.name))
+  """
   fn each_typed(path, cb) do
     match File.with_lines(path, fn seq -> typed_run(seq, cb)) do
     Err(e) -> Err(Json.DecodeError("file error: " ++ to_string(e), Nil, 0 - 1))
@@ -874,7 +1039,7 @@ mod JsonStream do
       -- link today (separate, pre-existing, out-of-scope bug — undefined symbol
       -- `_to_json`/`_from_json` in the LLVM backend, `lib/tir/lower_state.ml`).
       -- Revisit this arithmetic if that link gap is ever fixed.
-      let off2 = off + string_byte_length(line) + 1
+      let off2 = int_wrapping_add(int_wrapping_add(off, string_byte_length(line)), 1)
       match typed_events(evs, frames, off, cnt, cb) do
       Err(e) -> Err(e)
       Ok((frames2, cnt2)) -> Ok((st2, frames2, off2, cnt2))
@@ -895,7 +1060,7 @@ mod JsonStream do
           Err(e) -> Err(Json.decode_error_at(off, e))
           Ok(r) -> do
             cb(r)
-            typed_events(t, frames2, off, cnt + 1, cb)
+            typed_events(t, frames2, off, int_wrapping_add(cnt, 1), cb)
           end
           end
         None -> typed_events(t, frames2, off, cnt, cb)

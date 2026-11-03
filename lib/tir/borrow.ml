@@ -49,6 +49,32 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_println", [true]);
   ("print",         [true]);   (* TIR builtin name before LLVM mangling *)
   ("println",       [true]);
+    (* march_print_stderr writes the bytes and returns.  Listed as owned
+       until 2026-10-12, so every IO.warn (and every line of the stderr
+       logger appender) leaked the line it printed. *)
+  ("print_stderr",  [true]);
+    (* The path-taking file and directory builtins only read their String
+       arguments (fopen / stat / remove / rename / mkdir / opendir on the
+       bytes; an error copies the path into a new string).  Listed as owned
+       until 2026-10-12, so every call leaked each path it was given, and
+       file_write / file_append the data too.  The handle-taking ones
+       (file_close, file_read_line, file_read_chunk) take an Int and stay in
+       the owned list. *)
+  ("file_exists",   [true]);
+  ("dir_exists",    [true]);
+  ("file_open",     [true]);
+  ("file_read",     [true]);
+  ("file_write",    [true; true]);
+  ("file_append",   [true; true]);
+  ("file_delete",   [true]);
+  ("file_copy",     [true; true]);
+  ("file_rename",   [true; true]);
+  ("file_stat",     [true]);
+  ("dir_mkdir",     [true]);
+  ("dir_mkdir_p",   [true]);
+  ("dir_rmdir",     [true]);
+  ("dir_rm_rf",     [true]);
+  ("dir_list",      [true]);
   ("print_line",    [true]);
   ("dist_monitor_register", [false; true; false; false]);
   ("march_dist_monitor_register_pid", [false; true; false; false]);
@@ -87,6 +113,16 @@ let extern_borrow_table : (string * bool list) list = [
        actor records outlived their actors (two per cluster session party,
        ClusterNode's RegWatch watching each session endpoint). *)
   ("monitor",           [false; true]);
+    (* The named registry only reads its arguments: march_actor_register
+       copies the name into the table (and a strdup into the actor's reverse
+       index) and takes its own reference to the actor (march_vault_set's
+       incrc); unregister and whereis look the name up.  Listed as owned
+       until 2026-10-12, so every registration leaked the name string and a
+       reference to the actor record, and every unregister / whereis leaked
+       the name. *)
+  ("actor_register",    [true; true]);
+  ("actor_unregister",  [true]);
+  ("actor_whereis",     [true]);
   ("kill",              [true]);
   ("march_kill",        [true]);
   ("actor_stop",        [true; false]);
@@ -97,8 +133,18 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_actor_is_draining", [true]);
   ("mailbox_size",      [true]);
   ("march_mailbox_size", [true]);
+  ("mailbox_backlog",   [true]);
+  ("march_mailbox_backlog", [true]);
   ("get_cap",           [true]);
   ("march_get_cap",     [true]);
+    (* The epoch-Cap plane only reads the cap: march_send_checked,
+       march_is_cap_valid and march_revoke_cap copy its (pid_index, epoch)
+       words and never store or free it.  send_checked's MESSAGE is consumed
+       (sent, or released on every refusal path).  Listed as owned until
+       2026-10-12, so every call leaked the cap get_cap had allocated. *)
+  ("send_checked",      [true; false]);
+  ("is_cap_valid",      [true]);
+  ("revoke_cap",        [true]);
   (* The rest of the read-only pid family, missed by the 2026-09-14 audit and
      left owned, so each call leaked one reference to its pid and a record
      ever passed to one was never freed
@@ -109,6 +155,13 @@ let extern_borrow_table : (string * bool list) list = [
      march_actor_register_child links the two METAS and activates the child
      (whose own reference march_spawn_common already took), storing only
      [spawn_clo], which stays OWNED. None stores or releases a pid. *)
+  (* march_task_cancel_by_id reads the Task's pid word and stores the
+     cancelled sentinel into its result word; it never stores or releases the
+     Task. Owned until 2026-10-12, so `Task.await(t); task_cancel_by_id(t)`
+     leaked the Task cell on every call (proc_reclaim_kill_respawn, under
+     LSan: ~9,000 Tasks). *)
+  ("task_cancel_by_id", [true]);
+  ("march_task_cancel_by_id", [true]);
   ("pid_to_int",        [true]);
   ("pid_index_of",      [true]);
   ("march_pid_index_of", [true]);
@@ -204,6 +257,17 @@ let extern_borrow_table : (string * bool list) list = [
      Bytes.from_list runs on every call — ~430 B per 3-byte Bytes.from_list,
      the bulk of an idle conduit worker's ~5 MB/min growth via depot's
      Postgres wire encoder/decoder. *)
+  (* The `~H` escapers only read the hole's value: march_html_escape_ctx,
+     march_html_auto_escape and their _dyn forms always return a fresh String
+     and neither store nor free their argument.  Unlisted (they are not
+     [in_is_builtin] rows, so test_builtin_borrow_classification never asked)
+     they defaulted to OWNED, and every dynamic hole of every template leaked
+     the value it interpolated -- a nested partial its whole IOList.  The
+     emitter's arms (Llvm_emit_html) are written for a borrowed argument: the
+     trusted pass-through takes its own reference to the String it hands
+     back.  Guard: test/native/h_sigil_hole_leak_probe.march. *)
+  ("html_auto_escape",     [true]);
+  ("html_escape_ctx",      [true; true]);
   ("string_chars",         [true]);
   ("string_from_chars",    [true]);
   (* march_tcp_send_all (march_http.c) writes the String's bytes to the
@@ -213,6 +277,9 @@ let extern_borrow_table : (string * bool list) list = [
      and every send leaked its payload String — one per Postgres message
      depot sends (five per parameterized query). *)
   ("tcp_send_all",         [false; true]);
+    (* march_http_server_bind_host copies the host's bytes into a stack
+       buffer for inet_pton and keeps nothing. *)
+  ("http_server_bind_host", [true]);
   (* ── Vault (march_extras.c), audited 2026-10-01: every one copies its
      table/name/key into C (vault_key_cstr) and takes its OWN reference to a
      stored value (march_incrc), never storing or releasing the caller's.
@@ -242,6 +309,8 @@ let extern_borrow_table : (string * bool list) list = [
      read the table and key.  specs/progress/2026-10-01-session-node-vault-tables-leak.md *)
   ("vault_reap",           [true; true]);
   ("vault_close",          [true]);
+  (* march_tls_ctx_set_groups only reads the group list (OpenSSL copies it). *)
+  ("tls_ctx_set_groups",   [false; true]);
   ("string_byte_at",       [true; false]);
   ("string_grapheme_count",[true]);
   ("string_is_empty",      [true]);
@@ -287,6 +356,12 @@ let extern_borrow_table : (string * bool list) list = [
   ("ed25519_sign",         [true; true]);
   ("ed25519_verify",       [true; true; true]);
   ("x25519",               [true; true]);
+  ("mlkem768_keypair",     [true]);
+  ("mlkem768_encaps",      [true; true]);
+  ("mlkem768_decaps",      [true; true]);
+  ("mldsa65_keypair",      [true]);
+  ("mldsa65_sign",         [true; true; true]);
+  ("mldsa65_verify",       [true; true; true]);
   ("base64_encode",        [true]);
   ("stdlib_base64_encode", [true]);
   ("base64_decode",        [true]);
@@ -441,6 +516,9 @@ let extern_borrow_table : (string * bool list) list = [
      leaked one reference to the probed actor record, which could then never
      be freed (test/native/pid_to_int_leak_probe.march). ── *)
   ("get_actor_field",           [true; true]);
+  (* __panic_site keeps its String literal without a reference (literals are
+     immortal) and reads nothing else. *)
+  ("__panic_site",              [true; true]);
   ("march_get_actor_field",     [true; true]);
   ("logger_write",              [true; true; true; true]);
   ("logger_dispatch",           [true; true; true; true]);
@@ -514,17 +592,24 @@ let is_simd_builtin (fn_name : string) : bool =
   let p = "simd_" in
   String.length fn_name > String.length p
   && String.sub fn_name 0 (String.length p) = p
-  (* …except the two that touch a NativeArray rather than only vectors.
-     [simd_<lane>_load] reads lanes out of an array and [_store] writes them
-     back; their FIRST parameter is that array, and the array's ownership is
-     the array builtins' story, not this one.  Classifying it borrowed moved
-     the release of a live array to its last syntactic use and broke
-     simd_vector_mem ("native_f32_arr_get: index 2 out of bounds (len=0)"),
-     simd_vector_core and native_arr_map_inline_vectorize.  The vector operand
-     they also take is the one this rule is about, and it is not the leak this
-     closes: a vector reaching an array builtin is stored lane-wise, never
-     boxed. *)
-  && not (ends_with ~suffix:"_load" fn_name)
+  (* …except [simd_<lane>_store], which CONSUMES its array: it follows the
+     FBIP contract of [native_f32_arr_set] (rc==1 -> store in place and hand
+     the same array back; rc>1 -> copy and release the original), so its
+     first parameter is owned.  Classifying it borrowed made the caller drop
+     an array the store had already handed back, and broke simd_vector_mem
+     ("native_f32_arr_get: index 2 out of bounds (len=0)"), simd_vector_core
+     and native_arr_map_inline_vectorize.
+
+     [simd_<lane>_load] is NOT excluded: it lowers to a bounds check and a
+     plain vector load ([Llvm_emit_simd]'s "load" arm) that neither stores
+     nor frees the array, exactly like [native_<w>_arr_get] in
+     [extern_borrow_table].  It was excluded together with [_store] until
+     2026-10-11, and owned-but-never-released meant Perceus dup'd the array
+     before every load and nothing dropped it: a +1 atomic RC op per load in
+     every index loop (the per-iteration overhead of
+     specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md) and an
+     array that could never be freed once loaded from.  Guard: the
+     codegen test "simd load borrows its array". *)
   && not (ends_with ~suffix:"_store" fn_name)
 
 (** Builtins with a heap ([ptr]) parameter that are deliberately OWNED: each
@@ -569,20 +654,22 @@ let extern_owned_builtins : string list = [
        appender registry (march_logger_register_appender), releasing both
        when the entry is replaced, removed or cleared. *)
     "logger_register_appender";
+    (* diag_observe keeps its callback in the crash-observer registry until
+       diag_unobserve; diag_context_set keeps the context list on the proc,
+       releasing the one it replaces (march_runtime.c, "Diagnostics: crash
+       observers"). *)
+    "diag_observe"; "diag_context_set";
     (* actor_inspect_store keeps its String in the proc's inspect_out slot
        until the actor loop sends it as the reply (observe plan R4). *)
     "actor_inspect_store";
-    "panic_"; "unreachable_"; "todo_"; "print_stderr";
+    "panic_"; "unreachable_"; "todo_";
     "list_append"; "list_concat";
     "bytes_to_u8_arr"; "u8_arr_to_bytes";
     "remote_register_stub"; "remote_check"; "remote_invoke";
     "logger_add_context"; "logger_add_field"; "spawn";
     "spawn_supervised"; "actor_reply";
     "actor_send_after"; "actor_cancel_timer"; "http_server_spawn_n";
-    "file_exists"; "dir_exists"; "file_open"; "file_close"; "file_read";
-    "file_read_line"; "file_read_chunk"; "file_write"; "file_append";
-    "file_delete"; "file_copy"; "file_rename"; "file_stat"; "dir_mkdir";
-    "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list";
+    "file_close"; "file_read_line"; "file_read_chunk";
     "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_write";
     (* typed_array_create STORES its default value in every slot: the
        transferred reference fills the first, each other slot takes its own
@@ -600,8 +687,6 @@ let extern_owned_builtins : string list = [
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
     "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps";
     "register_resource";
-    "actor_register"; "actor_unregister"; "actor_whereis";
-    "send_checked"; "revoke_cap"; "is_cap_valid";
     "register_actor_on_stop";
     (* Observe plan R4: registration reads two static closures; the inspect
        request reads the pid (march_actor_inspect never consumes it).

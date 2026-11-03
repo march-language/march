@@ -94,7 +94,7 @@ let builtin_names : StringSet.t =
       "cap_narrow"; "root_cap"; "mint_cap"; "cap_impl"; "cap_dict";
       "set_actor_caps"; "actor_caps";
       (* Monitor/supervision builtins *)
-      "demonitor"; "monitor"; "dist_monitor_register"; "actor_terminal_reason"; "dist_monitor_pending"; "dist_monitor_ack"; "dist_monitor_forget_node"; "mailbox_size"; "sched_stat"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_inspect_store"; "register_actor_inspect"; "actor_set_mailbox_limit";
+      "demonitor"; "monitor"; "dist_monitor_register"; "actor_terminal_reason"; "dist_monitor_pending"; "dist_monitor_ack"; "dist_monitor_forget_node"; "mailbox_size"; "mailbox_backlog"; "sched_stat"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_inspect_store"; "register_actor_inspect"; "actor_set_mailbox_limit";
       "run_until_idle"; "register_resource"; "get_cap";
       (* Named registry (Task 4) *)
       "actor_register"; "actor_unregister"; "actor_whereis"; "actor_registered";
@@ -124,7 +124,7 @@ let builtin_names : StringSet.t =
       (* IOList builtins *)
       "iolist_hash_fnv1a";
       (* HTTP server spawn/wait builtins *)
-      "http_server_spawn_n"; "http_server_wait";
+      "http_server_spawn_n"; "http_server_wait"; "http_server_bind_host";
       (* Char/byte conversion builtins *)
       "byte_to_char"; "char_is_alphanumeric"; "char_is_whitespace";
       (* Char builtins *)
@@ -143,11 +143,16 @@ let builtin_names : StringSet.t =
       "logger_remove_appender"; "logger_clear_appenders";
       "logger_appender_names"; "logger_set_module_level";
       "logger_clear_module_level"; "logger_module_level";
+      (* Diagnostics crash observers *)
+      "diag_observe"; "diag_unobserve"; "diag_context_get"; "diag_context_set";
+      "__panic_site";
       "http_fetch"; "http_fetch_available";
       "__try_call"; "__try_call_val";
       (* Integer builtins *)
       "int_abs"; "int_pow"; "int_max_value"; "int_min_value";
+      "int_wrapping_add"; "int_wrapping_sub"; "int_wrapping_mul";
       "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+      "int_div_floor"; "int_mod_floor";
       (* Float builtins *)
       "float_to_int"; "float_from_string"; "float_is_nan"; "float_is_infinite";
       "float_infinity"; "float_neg_infinity"; "float_nan"; "float_epsilon";
@@ -155,6 +160,7 @@ let builtin_names : StringSet.t =
       "tls_connect"; "tls_accept"; "tls_close"; "tls_read"; "tls_read_timeout"; "tls_write";
       "tls_client_ctx"; "tls_server_ctx"; "tls_ctx_free";
       "tls_negotiated_alpn"; "tls_peer_cn";
+      "tls_ctx_set_groups"; "tls_negotiated_group"; "tls_pq_available";
       (* Actor builtins *)
       "actor_call"; "actor_cast"; "actor_reply"; "actor_reply_retain"; "self"; "receive";
       (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-
@@ -278,7 +284,16 @@ let builtin_names : StringSet.t =
          These appear unqualified in stdlib code (session.march, csrf.march, etc.)
          and must be treated as top-level to avoid ECallPtr generation. *)
       "hmac_sha256"; "pbkdf2_sha256";
+      (* Missing here, every call was an indirect call, whose convention
+         consumes its arguments, to a C entry that only reads them: the
+         message (and key) of every MAC leaked.  NetFrame.mac_tag seals every
+         cluster frame with it, so a node leaked two objects per frame it
+         sent or received (specs/progress/2026-10-05-lab-leaderless-agents-leak.md).
+         The other two were missing the same way. *)
+      "hmac_sha256_bytes"; "stdlib_hmac_sha256"; "md5";
       "ed25519_seed_keypair"; "ed25519_sign"; "ed25519_verify"; "x25519";
+      "mlkem768_keypair"; "mlkem768_encaps"; "mlkem768_decaps";
+      "mldsa65_keypair"; "mldsa65_sign"; "mldsa65_verify";
       "sha256"; "sha512";
       "base64_encode"; "base64_decode";
       "random_bytes";
@@ -429,19 +444,11 @@ type lambda_info = {
   lam_fn           : Tir.fn_def;           (* the original fn_def inside ELetRec *)
   lam_fvs          : Tir.var list;             (* free variables, sorted by name, with linearity preserved *)
   lam_is_recursive : bool;                 (* body refers to fn's own name *)
-  lam_uid          : int;                  (* globally unique id — used to disambiguate
-                                              multiple lambdas with the same fn_name *)
+  lam_uid          : string;               (* [Tir_names.lam_uid]: the lambda's
+                                              ordinal in its top-level host fn plus
+                                              the host, so two local `fn go`s in
+                                              different hosts stay distinct *)
 }
-
-let lambda_counter : int ref = ref 0
-let fresh_lambda_uid () = let n = !lambda_counter in incr lambda_counter; n
-
-(** Read the current lambda counter value (for persisting to cache). *)
-let get_lambda_counter () = !lambda_counter
-
-(** Restore the lambda counter (when loading from cache, set it above all
-    prelude-compiled UIDs so fresh REPL fragments never reuse a prelude UID). *)
-let set_lambda_counter n = lambda_counter := n
 
 (** Collect all lambdas from all top-level fn bodies.
 
@@ -458,6 +465,12 @@ let set_lambda_counter n = lambda_counter := n
     below — this is the capture-side half. *)
 let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info list =
   let lambdas = ref [] in
+  (* The top-level fn being walked and how many lambdas it has yielded so far:
+     the two halves of every uid minted below. *)
+  let host = ref "" and host_k = ref 0 in
+  let fresh_lambda_uid () =
+    let uid = Tir_names.lam_uid ~host:!host !host_k in
+    incr host_k; uid in
 
   let add_bound bound (vs : Tir.var list) =
     List.fold_left (fun s (v : Tir.var) -> StringSet.add v.Tir.v_name s) bound vs
@@ -518,6 +531,7 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
   in
 
   List.iter (fun fn ->
+    host := fn.Tir.fn_name; host_k := 0;
     collect_expr (add_bound StringSet.empty fn.Tir.fn_params) fn.Tir.fn_body)
     m.Tir.tm_fns;
   List.rev !lambdas
@@ -667,8 +681,20 @@ let defunctionalize (m : Tir.tir_module) : Tir.tir_module =
   (* Phase 0: top-level names *)
   let top_level = collect_top_level_names m in
 
-  (* Phase 1: collect all lambdas and their free variables *)
-  let lambdas = collect_lambdas m top_level in
+  (* Phase 1: collect all lambdas and their free variables.  A user extern
+     (FFI) is a global C symbol, never a captured value: a lambda that calls
+     [acc_push] must not copy it into its closure as a free variable (the
+     apply fn would then load "[acc_push]" from [$clo] and the closure alloc
+     would store [@acc_push], a symbol nothing defines — only the extern's
+     [ed_c_name] exists).  Exempt externs from capture only: [rewrite_expr]
+     still turns the call into [ECallPtr], the shape a direct extern call
+     already has, which Perceus ([env.extern_names]) and codegen
+     ([extern_map]) resolve to the C symbol.  Shadowing still works: a local
+     binding named like an extern is removed via [top_level_eff]. *)
+  let capture_exempt =
+    List.fold_left (fun s (ed : Tir.extern_decl) ->
+      StringSet.add ed.Tir.ed_march_name s) top_level m.Tir.tm_externs in
+  let lambdas = collect_lambdas m capture_exempt in
   let known_lambdas = List.map (fun lam -> (lam.lam_fn.Tir.fn_name, lam)) lambdas in
 
   (* Phase 2: generate closure structs and lifted fns *)

@@ -1,0 +1,61 @@
+-- A closure whose cell FBIP reused still releases what it captured
+-- (specs/progress/2026-10-07-reused-closure-captures-leak.md). Map.node_fold
+-- builds its recursive `go` closure in the dying HBranch cell; the release of
+-- captures on an environment's death only knew closures built by `alloc`, so
+-- `go` released nothing, and every Map.fold with a capturing closure leaked
+-- that closure. And a closure that drops an owned record parameter right
+-- before tail-calling a function it captured (SessionNode.run_cluster_with's
+-- `fn (_p, s) -> body(s)`) leaked that function: the release of its owned
+-- parameter hid the reference the call took for itself. SIGNAL: under 5
+-- objects left over 100 calls of each shape (RED before: 101, 94 and 201).
+mod Main do
+  needs IO.Console
+
+  pfn fold_capture(m : Map(String, Int), k : Int) : Int do
+    Map.fold(m, 0, fn (acc, _key, v) -> acc + v * k)
+  end
+
+  pfn fold_map_acc(m : Map(String, Int), k : Int) : Map(String, Int) do
+    Map.fold(m, m, fn (acc, key, v) -> if v > k do Map.remove(acc, key, Map.str_cmp) else acc end)
+  end
+
+  type P = { name : String, n : Int }
+
+  pfn run(drive : P -> Int -> Int, i : Int) : Int do
+    drive({ name: "p" ++ int_to_string(i), n: i }, i)
+  end
+
+  pfn tail_calls_capture(i : Int) : Int do
+    let tag = "t" ++ int_to_string(i)
+    let body = fn s -> string_byte_length(tag) + s * 0
+    run(fn (_p, s) -> body(s), i)
+  end
+
+  pfn times3(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else times3(n - 1, acc + tail_calls_capture(n)) end
+  end
+
+  pfn times(n : Int, m : Map(String, Int), acc : Int) : Int do
+    if n <= 0 do acc else times(n - 1, m, acc + fold_capture(m, n)) end
+  end
+
+  pfn times2(n : Int, m : Map(String, Int), acc : Int) : Int do
+    if n <= 0 do acc else times2(n - 1, m, acc + Map.size(fold_map_acc(m, n))) end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let m = Map.insert(Map.insert(Map.empty(), "a", 1, Map.str_cmp), "b", 2, Map.str_cmp)
+    let _ = times(3, m, 0)
+    let a0 = live_allocs()
+    let r = times(100, m, 0)
+    println("fold with a capturing closure = " ++ int_to_string(r) ++ ", no growth: " ++ bool_to_string(live_allocs() - a0 < 5))
+    let _ = times2(3, m, 0)
+    let a1 = live_allocs()
+    let r2 = times2(100, m, 0)
+    println("fold into a map = " ++ int_to_string(r2) ++ ", no growth: " ++ bool_to_string(live_allocs() - a1 < 5))
+    let _ = times3(3, 0)
+    let a2 = live_allocs()
+    let r3 = times3(100, 0)
+    println("captured function tail-called = " ++ int_to_string(r3) ++ ", no growth: " ++ bool_to_string(live_allocs() - a2 < 5))
+  end
+end

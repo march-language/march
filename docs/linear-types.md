@@ -9,13 +9,80 @@ permalink: /docs/linear-types/
 
 # Linear and Affine Types
 
-March's type system tracks ownership through **linear** and **affine** qualifiers. These let the compiler catch resource leaks and use-after-free bugs **at compile time**, not at runtime, and not by relying on a garbage collector.
+A **linear** value must be used exactly once: not zero times, not twice. An
+**affine** value may be used at most once: it can be dropped, but not used twice.
+March tracks both in the type system, so forgetting to close a handle, closing it
+twice, or using it after it has been handed off is a compile error. Nothing is checked
+at runtime, and nothing is tracked by a garbage collector.
 
-Think of a **linear** value as a claim ticket: you're given it once, and the
-compiler requires you to hand it in exactly once: not zero times, not twice. An
-**affine** value is a looser cousin: you're allowed to lose it, but you still can't use
-it twice. Both are checked entirely by the compiler, with no runtime cost and no
-runtime tracking.
+Linearity is the discipline behind three other things on this site. Typestate handles
+(`File(Open)`, `File(Closed)`) are `always_linear` types with a state parameter.
+Session-typed channels are linear endpoints whose type advances at every step. And a
+linear value is, by construction, uniquely owned, which is the fact the memory model's
+in-place reuse relies on.
+
+This page covers the qualifiers and where they apply: parameters and `let` bindings,
+record fields and actor state, closures and wildcards, generic code, the two linear
+collections (`LinearMap`, `RingBuf`), and the FFI `resource` form.
+
+## On this page
+
+**Start here**
+
+- [Which qualifier do I need?](#which-qualifier-do-i-need)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [The Problem They Solve](#the-problem-they-solve)
+- [Linear vs Affine](#linear-vs-affine)
+- [Linear Values](#linear-values) and [linear `let` bindings](#linear-let-bindings)
+- [Affine Values](#affine-values)
+
+**Where linearity reaches**
+
+- [Linear Record Fields](#linear-record-fields)
+- [always_linear Types](#always_linear-types)
+- [Linear Types and Actors](#linear-types-and-actors)
+- [Session Types](#session-types)
+- [Capabilities as Linear Types](#capabilities-as-linear-types)
+- [FFI and Native Resources](#ffi-and-native-resources)
+- [Linear Values in Closures, Containers, and Generic Code](#linear-values-in-closures-containers-and-generic-code)
+
+**Linear collections**
+
+- [Keyed Collections of Linear Values: `LinearMap`](#keyed-collections-of-linear-values-linearmap)
+- [A Single-Owner Buffer: `RingBuf`](#a-single-owner-buffer-ringbuf)
+
+**Rules and rationale**
+
+- [Linearity and Memory](#linearity-and-memory)
+- [Practical Rules](#practical-rules)
+- [Why Both?](#why-both)
+- [See also](#see-also)
+
+## Which qualifier do I need?
+
+| The value is | Write | What the compiler then rejects |
+|---|---|---|
+| A resource with mandatory cleanup: a file handle, a connection, a lock | `linear h : Handle` on a parameter, or `linear let h = …` | Dropping it, or using it twice |
+| An optional-use token you must not use twice | `cap : affine NetworkCap` | Using it twice; dropping it is fine |
+| A type whose every value is a resource | `always_linear type Token = …` | Dropping or duplicating any value of the type, with no per-site keyword |
+| A handle that moves through states | `always_linear type File(s)` with `tag` states; see [Capabilities: typestate]({{ site.baseurl }}/docs/capabilities/#typestate-tracking-resource-lifecycle) | Operations in the wrong state or order |
+| One of many linear values, looked up by key | `LinearMap(k, v)` | Losing a value in a `Map`, which copies on read and drops on overwrite |
+| A fixed buffer written in place | `RingBuf(a)` | Aliasing the buffer |
+| A C-owned pointer | `resource` plus a `consume` parameter on the freeing extern | A double free |
+
+Ordinary values need no qualifier. The default is unrestricted: copied, dropped and
+reused freely.
+
+## How it fits with the rest of March
+
+| Concept | Where linearity meets it | Chapter |
+|---|---|---|
+| **Capabilities and typestate** | A typestate handle is an `always_linear` type with a phantom state; `transitions` blocks declare which functions move it. A `linear` capability parameter forces the caller to give the capability up. | [Capabilities]({{ site.baseurl }}/docs/capabilities/#typestate-tracking-resource-lifecycle) |
+| **Session types** | An endpoint is linear: each `send`/`recv` consumes it and returns the advanced one, and an endpoint at `End` must be closed. | [Session Types]({{ site.baseurl }}/docs/session-types/) |
+| **Memory model** | A linear value has one owner by construction, so Perceus can elide reference-count traffic and reuse its cell in place. | [Memory Model]({{ site.baseurl }}/docs/memory-model/) |
+| **Actors** | A `send` is the consuming use; actor state owns its linear fields for the turn; `LinearMap` holds per-session state in an actor. | [Actors]({{ site.baseurl }}/docs/actors/) |
+| **Safety by construction** | Linearity is the second of three orthogonal layers, beside capabilities and refinements. | [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/) |
+| **FFI** | `resource` and `consume` make ownership transfer across a C boundary explicit. | [FFI]({{ site.baseurl }}/docs/ffi/) |
 
 ---
 
@@ -207,8 +274,8 @@ since it has no declaring module.
 
 ## Linearity and Memory
 
-*You don't need this section to use linear types correctly; skip ahead to [Linear
-Types and Actors](#linear-types-and-actors) if you just want the safety picture.*
+*This section is about performance, not correctness; skip to [Linear Types and
+Actors](#linear-types-and-actors) for the safety picture.*
 
 Linearity isn't only about correctness; it also feeds March's in-place
 memory model. Normally the compiler has to track "is anyone else still holding
@@ -228,8 +295,7 @@ These are performance facts, not semantic ones: linearity is
 
 ## Linear Types and Actors
 
-If you haven't read [Actors](actors.md) yet, the short version:
-`send(pid, msg)` delivers a message to another actor asynchronously. Sending a
+`send(pid, msg)` ([Actors](actors.md)) delivers a message to another actor asynchronously. Sending a
 linear value to an actor **is allowed, and the send is the consuming use**:
 
 ```march
@@ -336,10 +402,8 @@ the protocol.
 
 ## Capabilities as Linear Types
 
-*A quick reminder if you haven't read [Capabilities](capabilities.md) yet: a
-`Cap(X)` value is proof that your code is allowed to perform the effect `X`
-(like `Cap(IO.Network)` for opening sockets); it's how March makes permissions
-part of the type system instead of a runtime check.*
+*A `Cap(X)` value is proof that code may perform the effect `X`, such as
+`Cap(IO.Network)` for opening sockets; see [Capabilities](capabilities.md).*
 
 `Cap(X)` is, by default, an **ordinary unrestricted type**: `cap_narrow` is
 free and side-effect-free, and a plain `Cap(X)` value can be passed to as
@@ -378,8 +442,8 @@ end
 
 ## FFI and Native Resources
 
-*This section only matters if you're binding to a C library; skip ahead to
-[Practical Rules](#practical-rules) otherwise.*
+*This section matters only when binding to a C library; otherwise skip to
+[Practical Rules](#practical-rules).*
 
 There is no `Ptr` type in March, and no `linear Ptr(a)` spelling. The actual
 mechanism for safe manual memory management across the FFI boundary is the
@@ -599,7 +663,7 @@ might be affine: the operation is valid with or without it.
 
 ---
 
-## Next Steps
+## See also
 
 - [Type System](types.md): the broader type system context
 - `core-march-types.md` §2.9: the rule-by-rule static-semantics account of everything in this chapter (with `typecheck.ml` citations and the conformance corpus)
@@ -607,3 +671,6 @@ might be affine: the operation is valid with or without it.
 - [Refinement Types](refinement-types.md): the other compile-time safety layer: value predicates checked by an SMT solver
 - [Actors](actors.md): how linear types interact with actor message passing
 - [Pattern Matching](pattern-matching.md): destructuring linear values
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/#typestate-tracking-resource-lifecycle): typestate handles built on `always_linear`
+- [Session Types]({{ site.baseurl }}/docs/session-types/): the full protocol syntax and guarantees
+- [Memory Model]({{ site.baseurl }}/docs/memory-model/): what unique ownership buys at runtime

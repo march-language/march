@@ -1,0 +1,50 @@
+-- `let x = match (a, b) do (p, _) -> p end` on the JS target: the tuple case
+-- destructures its one branch; the compiler's non-exhaustive default must not
+-- also be emitted after it (it overwrote the result with a throw).
+mod JsTupleLetMatch do
+  needs IO.Console
+
+  type Fight = { hp : Int, shake : Int }
+
+  pfn take_shake(f : Fight) : (Fight, Int) do ({ f with shake: 0 }, f.shake) end
+
+  pfn step(f : Fight) : Int do
+    let stepped = take_shake(f)
+    let f2 = match stepped do
+      (ff, _) -> ff
+    end
+    let shake = match stepped do
+      (_, n) -> n
+    end
+    f2.hp + shake
+  end
+
+  -- A tuple of literals in return position: when no row matches, the inner
+  -- matches fall through to the tuple case's default (`_ -> None`).
+  pfn socket(model : String, view : Int, name : String) : Option(Int) do
+    match (model, view, name) do
+      ("bulwark", 0, "back") -> Some(6)
+      ("bulwark", 0, "hips") -> Some(45)
+      ("mender", 2, "top") -> Some(3)
+      _ -> None
+    end
+  end
+
+  pfn shown(o : Option(Int)) : String do
+    match o do
+      Some(n) -> int_to_string(n)
+      None -> "none"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(int_to_string(step({ hp: 40, shake: 2 })))
+    println(shown(socket("bulwark", 0, "hips")) ++ " " ++ shown(socket("mender", 2, "top")) ++ " " ++ shown(socket("mender", 1, "top")) ++ " " ++ shown(socket("x", 0, "back")))
+    let got = match ("bulwark", 0) do
+      ("bulwark", 1) -> "one"
+      ("bulwark", 0) -> "zero"
+      _ -> "other"
+    end
+    println(got)
+  end
+end

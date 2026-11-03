@@ -52,12 +52,22 @@ mod DataFrame do
   type DataFrame = DataFrame(List(Column))
 
   doc """
-  Construct a DataFrame directly from a list of columns.  Panics if any
-  column has a different length from the first — ragged frames silently
-  corrupt every downstream aggregation, so we fail fast instead.
+  Construct a DataFrame directly from a list of columns, in order. An empty
+  list gives the empty frame. Panics if any column has a different length
+  from the first: ragged frames silently corrupt every downstream
+  aggregation, so we fail fast instead.
 
   Use `from_columns` for the `Result`-returning version when columns may
   come from user input and the caller wants to handle the error.
+
+  ## Examples
+
+      let df = DataFrame.make_df([
+        DataFrame.IntCol("id", native_int_arr_from_list([1, 2, 3])),
+        DataFrame.StrCol("name", typed_array_from_list(["ann", "bob", "cy"]))
+      ])
+      DataFrame.schema(df)     -- ["id", "name"]
+      DataFrame.row_count(df)  -- 3
   """
   fn make_df(cols : List(Column)) : DataFrame do
     match cols do
@@ -105,7 +115,11 @@ mod DataFrame do
     end
   end
 
-  -- Get the i-th value from a column as a Value. O(1) with contiguous TypedArray.
+  doc """
+  The value at row `i` of `col` as a `Value` (`NullVal` for a null slot of a
+  nullable column). O(1). `i` must be in `0 .. col_len(col) - 1`; out of
+  range indices are not checked here and fail in the underlying array get.
+  """
   fn col_value_at(col : Column, i : Int) : Value do
     match col do
     IntCol(_, data)   -> IntVal(native_int_arr_get(data, i))
@@ -123,7 +137,7 @@ mod DataFrame do
     end
   end
 
-  -- Convert a column to List(Value). O(n).
+  doc "All values of `col`, in row order, as `List(Value)` (nulls as `NullVal`). O(n)."
   fn col_to_value_list(col : Column) : List(Value) do
     match col do
     IntCol(_, data)   -> List.map(native_int_arr_to_list(data), fn x -> IntVal(x))
@@ -149,7 +163,11 @@ mod DataFrame do
     end
   end
 
-  -- Keep only rows whose index is in the index list. O(1) per access with TypedArray.
+  doc """
+  A new column (same name and variant) holding the rows at `indices`, in
+  the order given; indices may repeat. O(len(indices)). Every index must be
+  in range.
+  """
   fn filter_col_by_indices(col : Column, indices : List(Int)) : Column do
     match col do
     IntCol(name, data) ->
@@ -183,7 +201,11 @@ mod DataFrame do
     end
   end
 
-  -- Filter a column by a boolean mask TypedArray. Single-pass vectorizable operation.
+  doc """
+  A new column keeping the rows where `mask` is true (the null bitmap of a
+  nullable column is filtered alongside). `mask` must have the column's
+  length.
+  """
   fn filter_col_by_mask(col : Column, mask : TypedArray(Bool)) : Column do
     match col do
     IntCol(name, data)   -> IntCol(name, native_int_arr_filter_mask(data, mask))
@@ -201,7 +223,7 @@ mod DataFrame do
     end
   end
 
-  -- Reorder a column by an index permutation.
+  doc "Reorder `col` by an index permutation; same as `filter_col_by_indices`."
   fn reorder_col(col : Column, indices : List(Int)) : Column do
     filter_col_by_indices(col, indices)
   end
@@ -244,7 +266,12 @@ mod DataFrame do
 
   -- ── Value helpers ──────────────────────────────────────────────────────────
 
-  doc "Converts a Value to its string representation."
+  doc """
+  The display form of a value, as used by CSV output, `to_html`,
+  `print_table` and `value_counts`: ints and floats via `int_to_string` /
+  `float_to_string`, strings unchanged, `"true"` / `"false"`, and `""` for
+  `NullVal` (so a null and an empty string print the same).
+  """
   fn value_to_string(v : Value) : String do
     match v do
     IntVal(n)   -> int_to_string(n)
@@ -255,7 +282,7 @@ mod DataFrame do
     end
   end
 
-  -- Type name of a value, for error messages.
+  doc "The type name of a value (`Int`, `Float`, `String`, `Bool` or `Null`), for error messages."
   fn value_type_str(v : Value) : String do
     match v do
     IntVal(_)   -> "Int"
@@ -266,7 +293,11 @@ mod DataFrame do
     end
   end
 
-  -- Value equality.
+  doc """
+  Structural equality of two values. Values of different variants are never
+  equal (so `IntVal(1)` is not equal to `FloatVal(1.0)`); `NullVal` equals
+  `NullVal`.
+  """
   fn values_equal(a : Value, b : Value) : Bool do
     match a do
     IntVal(x) -> do
@@ -302,7 +333,13 @@ mod DataFrame do
     end
   end
 
-  -- Compare two values for sort: returns -1, 0, or 1.
+  doc """
+  Three-way comparison used for sorting and ColExpr comparisons: -1, 0 or
+  1. `NullVal` sorts before every other value. Int and Float compare
+  numerically with each other; strings compare lexicographically; `false`
+  sorts before `true`. Any other mixed-type pair (e.g. Int vs String)
+  returns 1 in both directions, so it is not a consistent order.
+  """
   fn compare_values(a : Value, b : Value) : Int do
     match a do
     NullVal -> do
@@ -354,7 +391,12 @@ mod DataFrame do
     end
   end
 
-  -- Compute a simple hash for a Value (for GroupBy).
+  doc """
+  A hash of a value used for group-by / join keys: the Int itself, the
+  Float scaled by 1e6 and truncated, djb2 over a string's characters,
+  0/1 for Bool and 0 for Null. Equal values hash equally; not a
+  cryptographic hash.
+  """
   fn value_hash(v : Value) : Int do
     match v do
     IntVal(n)   -> n
@@ -370,7 +412,7 @@ mod DataFrame do
     end
   end
 
-  -- List(Value) equality (for GroupKey comparison).
+  doc "Element-wise `values_equal` of two value lists; lists of different lengths are unequal."
   fn values_list_eq(as_ : List(Value), bs : List(Value)) : Bool do
     match as_ do
     Nil -> do
@@ -399,6 +441,7 @@ mod DataFrame do
     | BoolBuilder(String, List(Bool))
     | NullBuilder(String, Int)  -- all nulls so far; count of nulls seen
 
+  doc "The column name a `ColumnBuilder` is accumulating."
   fn builder_name(b : ColumnBuilder) : String do
     match b do
     IntBuilder(name, _)   -> name
@@ -409,7 +452,13 @@ mod DataFrame do
     end
   end
 
-  -- Push a value into a builder (strict: error on type mismatch).
+  doc """
+  Push `val` into builder `b` without type conversion (used by `from_rows`).
+  Returns `Err` when `val`'s type differs from the builder's, when a
+  `NullVal` arrives in a typed builder, or when a non-null value arrives
+  in a builder that has only seen nulls (nullable inference is not
+  supported in strict mode).
+  """
   fn builder_push_strict(b : ColumnBuilder, val : Value) : Result(ColumnBuilder, String) do
     let name = builder_name(b)
     match b do
@@ -455,8 +504,19 @@ mod DataFrame do
     end
   end
 
-  -- Push a value into a builder with widening (for CSV/JSON readers).
-  -- Widening order: Bool < Int < Float < String.
+  doc """
+  Push `val` into builder `b`, widening the builder's type when needed (used
+  by the CSV/JSON readers, `group_by`, joins, `with_column` and friends).
+  Widening order is Bool < Int < Float < String: e.g. a Float arriving in
+  an Int builder converts the earlier Ints to Float, and a String arriving
+  in a numeric builder stringifies the earlier values. A Bool after Int or
+  Float widens to String; Int/Float after Bool converts the Bools to 1/0.
+
+  Nulls are not preserved once a type is known: a `NullVal` pushed into a
+  typed builder stores the type's default (`0`, `0.0`, `false`; a String
+  builder stores `""`), and nulls seen before the first typed value are
+  backfilled with that default.
+  """
   fn builder_push_widen(b : ColumnBuilder, val : Value) : ColumnBuilder do
     let name = builder_name(b)
     match b do
@@ -518,7 +578,10 @@ mod DataFrame do
     end
   end
 
-  -- Finalize a builder into a Column.
+  doc """
+  Finalize a builder into a non-nullable column of its type, in push order.
+  A builder that only ever saw nulls becomes an all-null `NullableStrCol`.
+  """
   fn builder_to_column(b : ColumnBuilder) : Column do
     match b do
     IntBuilder(name, xs)   -> IntCol(name, native_int_arr_from_list(List.reverse(xs)))
@@ -532,7 +595,7 @@ mod DataFrame do
     end
   end
 
-  -- Initialize a builder from the first value seen in a column.
+  doc "An empty `ColumnBuilder` named `name` whose type is that of `val` (a `NullVal` gives an all-null builder)."
   fn make_builder(name : String, val : Value) : ColumnBuilder do
     match val do
     IntVal(_)  -> IntBuilder(name, Nil)
@@ -551,8 +614,10 @@ mod DataFrame do
   end
 
   doc """
-  Constructs a DataFrame from a list of pre-built columns.
-  All columns must have equal length. Returns Err if they don't.
+  Constructs a DataFrame from a list of pre-built columns, in order. All
+  columns must have equal length; returns `Err` naming the first column
+  whose length differs from the first column's. Column names are not
+  checked for duplicates. An empty list gives `Ok(empty())`.
   """
   fn from_columns(cols : List(Column)) : Result(DataFrame, String) do
     match cols do
@@ -571,10 +636,30 @@ mod DataFrame do
   end
 
   doc """
-  Constructs a DataFrame from a list of Row values.
-  Type inference is strict: if a column starts as Int, every subsequent value
-  must also be IntVal. Errors on type mismatch or NullVal in Phase 1.
-  For widening inference (Int→Float→String), use from_rows_widen.
+  Constructs a DataFrame from a list of `Row` values. Column names and
+  types come from the first row; later rows are matched to columns by
+  POSITION, not by name (their field names are ignored), and must have the
+  same number of fields (else `Err`).
+
+  Type inference is strict: if a column starts as Int, every later value
+  must also be `IntVal` (no Int-to-Float promotion). `NullVal` is rejected
+  in a typed column, and a column whose first value is `NullVal` may only
+  hold nulls (it becomes an all-null `NullableStrCol`). An empty row list
+  gives the empty frame. For widening inference (Int, Float, String) use
+  `from_rows_widen`.
+
+  ## Examples
+
+      DataFrame.from_rows([
+        DataFrame.Row([("a", DataFrame.IntVal(1)), ("b", DataFrame.StrVal("x"))]),
+        DataFrame.Row([("a", DataFrame.IntVal(2)), ("b", DataFrame.StrVal("y"))])
+      ])
+      -- Ok(frame with IntCol "a" = [1, 2] and StrCol "b" = ["x", "y"])
+      DataFrame.from_rows([
+        DataFrame.Row([("a", DataFrame.IntVal(1))]),
+        DataFrame.Row([("a", DataFrame.FloatVal(1.0))])
+      ])
+      -- Err("from_rows: column 'a' is Int but got Float")
   """
   fn from_rows(rows : List(Row)) : Result(DataFrame, String) do
     match rows do
@@ -646,8 +731,15 @@ mod DataFrame do
     end
   end
 
-  -- Internal: construct a DataFrame from rows with widening type inference.
-  -- Used by read_csv and read_json.
+  doc """
+  Like `from_rows` (names from the first row, later rows matched by
+  position, `Err` on a field-count mismatch) but with widening type
+  inference via `builder_push_widen`: mixed Int/Float columns become Float,
+  anything mixed with a String becomes String. Nulls are NOT preserved: a
+  null in a typed column is stored as `0`, `0.0`, `false` or `""`, and only
+  a column that is null in every row stays null. Used by the CSV/JSON
+  readers, `group_by`, joins, `melt`, `pivot` and `summarize`.
+  """
   fn from_rows_widen(rows : List(Row)) : Result(DataFrame, String) do
     match rows do
     Nil -> Ok(DataFrame(Nil))
@@ -699,14 +791,14 @@ mod DataFrame do
 
   -- ── Phase 1: Metadata ──────────────────────────────────────────────────────
 
-  doc "Returns the ordered list of column names."
+  doc "Returns the ordered list of column names (`[]` for the empty frame)."
   fn schema(df : DataFrame) : List(String) do
     match df do
     DataFrame(cols) -> List.map(cols, fn c -> col_name(c))
     end
   end
 
-  doc "Returns the number of rows. O(1) for single-column frames; O(cols) otherwise."
+  doc "Returns the number of rows (the first column's length; 0 for a frame with no columns). O(1)."
   fn row_count(df : DataFrame) : Int do
     match df do
     DataFrame(Nil) -> 0
@@ -723,7 +815,7 @@ mod DataFrame do
 
   -- ── Phase 1: Column access ─────────────────────────────────────────────────
 
-  doc "Returns the column with the given name, or Err if not found."
+  doc "Returns the first column with the given name, or an `Err` naming the missing column."
   fn get_column(df : DataFrame, name : String) : Result(Column, String) do
     match df do
     DataFrame(cols) -> do
@@ -735,7 +827,7 @@ mod DataFrame do
     end
   end
 
-  doc "Returns the Int data list for a named column, or Err."
+  doc "Returns the data of a named `IntCol` as a list, or `Err` if the column is missing or is not a (non-nullable) `IntCol`; a `NullableIntCol` is rejected too."
   fn get_int_col(df : DataFrame, name : String) : Result(List(Int), String) do
     match get_column(df, name) do
     Err(e) -> Err(e)
@@ -748,7 +840,7 @@ mod DataFrame do
     end
   end
 
-  doc "Returns the Float data list for a named column, or Err."
+  doc "Returns the data of a named `FloatCol` as a list, or `Err` if the column is missing or is not a (non-nullable) `FloatCol`. Int columns are not promoted (see `float_list`)."
   fn get_float_col(df : DataFrame, name : String) : Result(List(Float), String) do
     match get_column(df, name) do
     Err(e) -> Err(e)
@@ -761,7 +853,7 @@ mod DataFrame do
     end
   end
 
-  doc "Returns the String data list for a named column, or Err."
+  doc "Returns the data of a named `StrCol` as a list, or `Err` if the column is missing or is not a (non-nullable) `StrCol`."
   fn get_string_col(df : DataFrame, name : String) : Result(List(String), String) do
     match get_column(df, name) do
     Err(e) -> Err(e)
@@ -774,7 +866,7 @@ mod DataFrame do
     end
   end
 
-  doc "Returns the Bool data list for a named column, or Err."
+  doc "Returns the data of a named `BoolCol` as a list, or `Err` if the column is missing or is not a (non-nullable) `BoolCol`."
   fn get_bool_col(df : DataFrame, name : String) : Result(List(Bool), String) do
     match get_column(df, name) do
     Err(e) -> Err(e)
@@ -787,7 +879,7 @@ mod DataFrame do
     end
   end
 
-  doc "Returns a column as List(Float) for use with Stats functions. Int columns are promoted."
+  doc "Returns a column as `List(Float)` for use with Stats functions. `IntCol` values are promoted; any other column type (including nullable numeric columns) is an `Err`."
   fn float_list(df : DataFrame, name : String) : Result(List(Float), String) do
     match get_column(df, name) do
     Err(e) -> Err(e)
@@ -853,10 +945,12 @@ mod DataFrame do
   end
 
   doc """
-  (count, mean, sum-of-squared-deviations) of an IntCol/FloatCol, computed via
-  two native C-level reduction passes (native_*_arr_sum for the mean, then
+  `(count, ssd)` of an IntCol/FloatCol, where `ssd` is the sum of squared
+  deviations from the mean; `(0, 0.0)` for an empty column, `Err` for a
+  missing or non-numeric (including nullable) column. Computed via two
+  native C-level reduction passes (native_*_arr_sum for the mean, then
   native_*_arr_sumsq_dev(arr, mean) for the deviations) instead of
-  materializing a List(Float) and folding — see col_native_min_max's doc for
+  materializing a List(Float) and folding; see col_native_min_max's doc for
   why a March-level index loop can't do this allocation-free. This is the
   standard two-pass variance algorithm rather than Stats' single-pass
   Welford, so results may differ in the last bit or two but are equally
@@ -894,7 +988,10 @@ mod DataFrame do
 
   -- ── Phase 1: Row access ────────────────────────────────────────────────────
 
-  doc "Materializes row i as a Row snapshot. O(col_count × i). Slow path."
+  doc """
+  Materializes row `i` as a `Row` of `(column name, value)` pairs in column
+  order. O(col_count). Slow path. `i` must be in `0 .. row_count(df) - 1`.
+  """
   fn get_row(df : DataFrame, i : Int) : Row do
     match df do
     DataFrame(cols) ->
@@ -902,7 +999,7 @@ mod DataFrame do
     end
   end
 
-  doc "Returns all rows as a list of Row values. O(rows × cols). Slow path."
+  doc "Returns all rows, in order, as a list of `Row` values. O(rows x cols). Slow path."
   fn to_rows(df : DataFrame) : List(Row) do
     let n = row_count(df)
     fn go(i : Int, acc : List(Row)) : List(Row) do
@@ -911,7 +1008,7 @@ mod DataFrame do
     go(n - 1, Nil)
   end
 
-  doc "Look up a field in a Row by name. Returns None if not found."
+  doc "Look up a field in a Row by name (the first field with that name). Returns None if not found; a null field is `Some(NullVal)`."
   fn row_get(row : Row, name : String) : Option(Value) do
     match row do
     Row(pairs) -> do
@@ -921,7 +1018,7 @@ mod DataFrame do
     end
   end
 
-  doc "Look up an Int field in a Row."
+  doc "Look up an Int field in a Row. None if the field is missing, null or not an `IntVal`."
   fn row_get_int(row : Row, name : String) : Option(Int) do
     match row_get(row, name) do
     None -> None
@@ -934,7 +1031,7 @@ mod DataFrame do
     end
   end
 
-  doc "Look up a Float field in a Row. Int values are promoted to Float."
+  doc "Look up a Float field in a Row. Int values are promoted to Float. None if the field is missing, null or not numeric."
   fn row_get_float(row : Row, name : String) : Option(Float) do
     match row_get(row, name) do
     None -> None
@@ -948,7 +1045,7 @@ mod DataFrame do
     end
   end
 
-  doc "Look up a String field in a Row."
+  doc "Look up a String field in a Row. None if the field is missing, null or not a `StrVal`."
   fn row_get_string(row : Row, name : String) : Option(String) do
     match row_get(row, name) do
     None -> None
@@ -961,7 +1058,7 @@ mod DataFrame do
     end
   end
 
-  doc "Look up a Bool field in a Row."
+  doc "Look up a Bool field in a Row. None if the field is missing, null or not a `BoolVal`."
   fn row_get_bool(row : Row, name : String) : Option(Bool) do
     match row_get(row, name) do
     None -> None
@@ -976,7 +1073,12 @@ mod DataFrame do
 
   -- ── Phase 1: Structural operations ────────────────────────────────────────
 
-  doc "Adds a column to a DataFrame. Errors if name already exists or length mismatches."
+  doc """
+  Appends a column at the end. Errors if a column with that name already
+  exists, or if the frame has rows and the column's length differs. A
+  frame with zero rows (including one with no columns) accepts a column of
+  any length.
+  """
   fn add_column(df : DataFrame, col : Column) : Result(DataFrame, String) do
     match df do
     DataFrame(cols) -> do
@@ -997,7 +1099,7 @@ mod DataFrame do
     end
   end
 
-  doc "Removes a column by name. No-op if not found."
+  doc "Removes every column with the given name. No-op if not found."
   fn drop_column(df : DataFrame, name : String) : DataFrame do
     match df do
     DataFrame(cols) ->
@@ -1005,7 +1107,7 @@ mod DataFrame do
     end
   end
 
-  doc "Renames a column. Errors if old_name not found or new_name already exists."
+  doc "Renames a column. Errors if `old_name` is not found or `new_name` already exists (including `new_name == old_name`)."
   fn rename_column(df : DataFrame, old_name : String, new_name : String) : Result(DataFrame, String) do
     match df do
     DataFrame(cols) -> do
@@ -1025,6 +1127,7 @@ mod DataFrame do
     end
   end
 
+  doc "The same column (data and null bitmap shared) under a new name."
   fn rename_col(col : Column, new_name : String) : Column do
     match col do
     IntCol(_, data)   -> IntCol(new_name, data)
@@ -1038,7 +1141,7 @@ mod DataFrame do
     end
   end
 
-  doc "Returns a DataFrame with columns reordered/selected by name list. Errors on missing names."
+  doc "Returns a DataFrame with exactly the named columns, in the order given (a name listed twice gives the column twice). Errors on the first missing name."
   fn select_columns(df : DataFrame, names : List(String)) : Result(DataFrame, String) do
     fn find_col(name : String) : Result(Column, String) do
       get_column(df, name)
@@ -1055,7 +1158,7 @@ mod DataFrame do
     end
   end
 
-  doc "Returns the first n rows."
+  doc "Returns the first `n` rows (all rows if `n` exceeds the row count; none if `n <= 0`)."
   fn head(df : DataFrame, n : Int) : DataFrame do
     let actual = if n > row_count(df) do row_count(df) else n end
     match df do
@@ -1064,7 +1167,7 @@ mod DataFrame do
     end
   end
 
-  doc "Returns the last n rows."
+  doc "Returns the last `n` rows (all rows if `n` exceeds the row count; none if `n <= 0`)."
   fn tail(df : DataFrame, n : Int) : DataFrame do
     let total = row_count(df)
     let start = if n >= total do 0 else total - n end
@@ -1074,7 +1177,11 @@ mod DataFrame do
     end
   end
 
-  doc "Returns rows [start, start+len). Clamps to available rows."
+  doc """
+  Returns rows `[start, start + len)`, clamped to the available rows: a
+  negative `start` counts as 0, and a `len` reaching past the end stops at
+  the last row. A non-positive `len` gives zero rows.
+  """
   fn slice(df : DataFrame, start : Int, len : Int) : DataFrame do
     let total = row_count(df)
     let s = if start < 0 do 0 else if start > total do total else start end end
@@ -1087,13 +1194,13 @@ mod DataFrame do
     end
   end
 
-  -- Slice a column from start index, taking len elements.
+  doc "A new column of the `len` rows starting at `start` (no clamping: the range must be in bounds). Zero rows when `len <= 0`."
   fn slice_col(col : Column, start : Int, len : Int) : Column do
     let indices = List.range(start, start + len)
     filter_col_by_indices(col, indices)
   end
 
-  -- Drop first n rows (for Offset plan node).
+  doc "Drops the first `n` rows (all rows if `n` exceeds the row count, none if `n <= 0`). Used by the `Offset` plan node."
   fn drop_rows(df : DataFrame, n : Int) : DataFrame do
     let total = row_count(df)
     let start = if n > total do total else n end
@@ -1158,66 +1265,113 @@ mod DataFrame do
 
   -- ── Phase 3: LazyFrame API ────────────────────────────────────────────────
 
-  doc "Wraps a materialized DataFrame in a lazy frame."
+  doc """
+  Wraps a materialized DataFrame in a lazy frame. Nothing runs until
+  `collect`; the plan nodes then execute in the order they were added.
+
+  ## Examples
+
+      DataFrame.lazy(df)
+        |> DataFrame.filter(DataFrame.Gt(DataFrame.Col("age"), DataFrame.LitInt(30)))
+        |> DataFrame.sort_by([("name", DataFrame.Asc)])
+        |> DataFrame.select(["name", "age"])
+        |> DataFrame.limit(10)
+        |> DataFrame.collect
+      -- Ok(at most 10 rows of name and age, for age > 30, sorted by name)
+  """
   fn lazy(df : DataFrame) : LazyFrame do
     LazyFrame(Source(df))
   end
 
-  doc "Appends a Filter node that uses a vectorized ColExpr predicate."
+  doc """
+  Appends a Filter node: keep the rows where the vectorized ColExpr
+  predicate is true (see `eval_col_expr`). At `collect`, `Err` if the
+  expression references a missing column or does not produce a Bool
+  column. Nulls compare as smaller than every value, so `Lt(Col(c), x)`
+  keeps null rows of `c`; use `IsNotNull` to exclude them.
+  """
   fn filter(lf : LazyFrame, expr : ColExpr) : LazyFrame do
     match lf do LazyFrame(plan) -> LazyFrame(Filter(plan, expr)) end
   end
 
-  doc "Projects a subset of columns."
+  doc "Appends a projection to the named columns, in the given order (`select_columns`). `Err` at `collect` on a missing name."
   fn select(lf : LazyFrame, cols : List(String)) : LazyFrame do
     match lf do LazyFrame(plan) -> LazyFrame(Select(plan, cols)) end
   end
 
-  doc "Adds or replaces a column computed row-by-row using a March closure."
+  doc """
+  Appends a node that computes a column row by row with a March closure
+  over each `Row` and adds it at the END of the frame, replacing (and
+  moving) any existing column of that name. The results are typed with
+  widening inference (`builder_push_widen`), so `NullVal` results do not
+  produce a nullable column. Slow path: materializes every row.
+
+  ## Examples
+
+      DataFrame.lazy(df)
+        |> DataFrame.with_column("double", fn row ->
+             DataFrame.IntVal(Option.unwrap_or(DataFrame.row_get_int(row, "id"), 0) * 2))
+        |> DataFrame.collect
+  """
   fn with_column(lf : LazyFrame, name : String, f : Row -> Value) : LazyFrame do
     match lf do LazyFrame(plan) -> LazyFrame(WithColumn(plan, name, f)) end
   end
 
-  doc "Appends a sort node. Keys is a list of (column_name, SortDir) pairs."
+  doc """
+  Appends a sort node. `keys` is a list of `(column_name, SortDir)` pairs;
+  later keys break ties of earlier ones. Values order as in
+  `compare_values` (nulls first under `Asc`, last under `Desc`). The sort
+  is not stable: rows that tie on every key come out in reverse input
+  order. A key naming a missing column is not an error; it compares every
+  row as equal.
+  """
   fn sort_by(lf : LazyFrame, keys : List((String, SortDir))) : LazyFrame do
     match lf do LazyFrame(plan) -> LazyFrame(SortBy(plan, keys)) end
   end
 
-  doc "Limits the result to the first n rows."
+  doc "Limits the result to the first `n` rows (see `head`)."
   fn limit(lf : LazyFrame, n : Int) : LazyFrame do
     match lf do LazyFrame(plan) -> LazyFrame(Limit(plan, n)) end
   end
 
-  doc "Skips the first n rows."
+  doc "Skips the first `n` rows (see `drop_rows`)."
   fn offset(lf : LazyFrame, n : Int) : LazyFrame do
     match lf do LazyFrame(plan) -> LazyFrame(Offset(plan, n)) end
   end
 
-  doc "Renames a column in the pipeline."
+  doc "Renames a column in the pipeline. `Err` at `collect` if `old_name` is missing or `new_name` already exists."
   fn rename(lf : LazyFrame, old_name : String, new_name : String) : LazyFrame do
     match lf do LazyFrame(plan) -> LazyFrame(Rename(plan, old_name, new_name)) end
   end
 
-  doc "Drops columns by name."
+  doc "Drops columns by name; names that are not present are ignored."
   fn drop(lf : LazyFrame, cols : List(String)) : LazyFrame do
     match lf do LazyFrame(plan) -> LazyFrame(DropCols(plan, cols)) end
   end
 
-  doc "Materializes the lazy plan into a DataFrame."
+  doc "Runs the lazy plan (see `eval_plan`) and returns the resulting DataFrame, or the first error any node produced."
   fn collect(lf : LazyFrame) : Result(DataFrame, String) do
     match lf do LazyFrame(plan) -> eval_plan(plan) end
   end
 
   doc """inner_join: keep only rows whose key values appear in both frames.
 
-  Only rows where every key column matches in both left and right are
-  included in the output. Right key columns are not duplicated.
+  One output row per matching (left row, right row) pair: all left columns
+  followed by the right frame's non-key columns (right key columns are not
+  duplicated; a non-key column name present on both sides appears twice).
+  Keys match with `values_equal`, so an Int key never matches a Float key.
+  Output rows follow left-row order; several matches for one left row come
+  in reverse right-row order. The result is rebuilt row by row with
+  widening inference, so nulls in nullable columns are not preserved, and
+  a join with no matching rows yields a frame with no columns. `Err` at
+  `collect` if a key column is missing on either side.
 
-  Example:
-    let lf     = DataFrame.lazy(orders_df)
-                 |> DataFrame.inner_join(products_df, ["product_id"])
-    let result = DataFrame.collect(lf)
-    -- Only orders that reference a known product_id are included
+  ## Examples
+
+      let lf     = DataFrame.lazy(orders_df)
+                   |> DataFrame.inner_join(products_df, ["product_id"])
+      let result = DataFrame.collect(lf)
+      -- Only orders that reference a known product_id are included
   """
   fn inner_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
     match lf do
@@ -1228,14 +1382,18 @@ mod DataFrame do
   doc """left_join: keep all rows from the left frame; unmatched right columns get Null.
 
   Rows in the left frame that have no match in the right frame are still
-  included, with all right-only columns set to Null (NullableXxxCol).
-  Right columns that are join keys are not duplicated.
+  included once, with all right-only columns set to Null; those columns
+  always come back as `NullableXxxCol`. Left columns keep their types.
+  Output follows left-row order (several matches for one left row in
+  reverse right-row order). Right key columns are not duplicated. `Err`
+  at `collect` if a key column is missing on either side.
 
-  Example:
-    let lf   = DataFrame.lazy(orders_df)
-               |> DataFrame.left_join(customers_df, ["customer_id"])
-    let result = DataFrame.collect(lf)
-    -- Every order row is present; customer_name is Null for unknown customers
+  ## Examples
+
+      let lf   = DataFrame.lazy(orders_df)
+                 |> DataFrame.left_join(customers_df, ["customer_id"])
+      let result = DataFrame.collect(lf)
+      -- Every order row is present; customer_name is Null for unknown customers
   """
   fn left_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
     match lf do
@@ -1246,14 +1404,18 @@ mod DataFrame do
   doc """right_join: keep all rows from the right frame; unmatched left columns get Null.
 
   The mirror image of left_join. Every row in `right` appears in the
-  output; rows with no match in the left frame get Null for every
-  left-only column.
+  output (in right-row order); rows with no match in the left frame get
+  Null for every left-only column. The output columns are the left frame's
+  non-key columns (as `NullableXxxCol`) followed by ALL right columns,
+  including the keys. `Err` at `collect` if a key column is missing on
+  either side.
 
-  Example:
-    let lf   = DataFrame.lazy(transactions_df)
-               |> DataFrame.right_join(reference_df, ["code"])
-    let result = DataFrame.collect(lf)
-    -- Every reference row is included; transaction cols are Null for unmatched codes
+  ## Examples
+
+      let lf   = DataFrame.lazy(transactions_df)
+                 |> DataFrame.right_join(reference_df, ["code"])
+      let result = DataFrame.collect(lf)
+      -- Every reference row is included; transaction cols are Null for unmatched codes
   """
   fn right_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
     match lf do
@@ -1261,17 +1423,21 @@ mod DataFrame do
     end
   end
 
-  doc """outer_join: full outer join — keep all rows from both frames, Null-filling unmatched sides.
+  doc """outer_join: full outer join, keeping all rows from both frames and Null-filling unmatched sides.
 
-  The union of left_join and right_join: every row from both the left
-  and right frames appears in the output. Rows with no match on the other
-  side get Null for all columns from that side.
+  The union of left_join and right_join: the left_join rows (in left-row
+  order) followed by the right rows that matched nothing (in right-row
+  order). Every column comes back nullable: all left columns, then the
+  right non-key columns. The key columns come from the left side only, so
+  for a right-only row the KEY columns are Null too (its key values are
+  lost). `Err` at `collect` if a key column is missing on either side.
 
-  Example:
-    let lf   = DataFrame.lazy(employees_df)
-               |> DataFrame.outer_join(departments_df, ["dept_id"])
-    let result = DataFrame.collect(lf)
-    -- All employees and all departments appear; Nulls where there is no match
+  ## Examples
+
+      let lf   = DataFrame.lazy(employees_df)
+                 |> DataFrame.outer_join(departments_df, ["dept_id"])
+      let result = DataFrame.collect(lf)
+      -- All employees and all departments appear; Nulls where there is no match
   """
   fn outer_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
     match lf do
@@ -1281,6 +1447,12 @@ mod DataFrame do
 
   -- ── Phase 3: Plan interpreter ──────────────────────────────────────────────
 
+  doc """
+  Interpret a `Plan` tree bottom-up, returning the first error any node
+  produces. `Limit`/`Offset` use `head`/`drop_rows`, `Select` uses
+  `select_columns`, `Rename` uses `rename_column`, `DropCols` ignores
+  missing names, and `Join` evaluates both sides then calls `apply_join`.
+  """
   @[no_warn_recursion]
   fn eval_plan(plan : Plan) : Result(DataFrame, String) do
     match plan do
@@ -1357,8 +1529,23 @@ mod DataFrame do
 
   -- ── Phase 3: ColExpr evaluator ────────────────────────────────────────────
 
-  -- Evaluate a ColExpr against a DataFrame. Returns a typed Column.
-  -- Scalar literals are broadcast to the frame's row count.
+  doc """
+  Evaluate a ColExpr against a DataFrame, producing a typed Column with one
+  entry per row. Literals are broadcast to the frame's row count.
+
+  - Comparisons (`Eq`, `Lt`, ...) use `compare_values` and give a BoolCol
+    (so Int and Float compare numerically, and nulls are smallest).
+  - `And`/`Or`/`Not` need (non-nullable) Bool operands, else `Err`.
+  - `Add`/`Sub`/`Mul` give an IntCol, or a FloatCol if either side has a
+    Float; `Div` always gives a FloatCol (Int division is not truncated).
+    Null or non-numeric operands count as 0 (as 1 for a `Div` divisor).
+  - `StrContains`/`StrStartsWith`/`StrEndsWith` need a (non-nullable)
+    String column, else `Err`.
+  - `IsNull`/`IsNotNull` read the null bitmap; a non-nullable column has
+    no nulls.
+
+  `Err` when a referenced column is missing.
+  """
   @[no_warn_recursion]
   fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
     let n = row_count(df)
@@ -1734,6 +1921,7 @@ mod DataFrame do
 
   -- ── Phase 3: apply_filter ─────────────────────────────────────────────────
 
+  doc "Keep the rows of `df` where `expr` evaluates to true; `Err` if it fails or is not a Bool column."
   fn apply_filter(df : DataFrame, expr : ColExpr) : Result(DataFrame, String) do
     match eval_col_expr(df, expr) do
     Err(e) -> Err(e)
@@ -1752,6 +1940,7 @@ mod DataFrame do
 
   -- ── Phase 3: apply_with_column ────────────────────────────────────────────
 
+  doc "Compute `f(row)` for every row, type the results with `values_to_column`, drop any existing column `name` and append the new one."
   fn apply_with_column(df : DataFrame, name : String, f : Row -> Value) : Result(DataFrame, String) do
     let n = row_count(df)
     fn build_values(i : Int, acc : List(Value)) : List(Value) do
@@ -1771,7 +1960,11 @@ mod DataFrame do
     end
   end
 
-  -- Convert a List(Value) to a typed Column using widening inference.
+  doc """
+  Type a list of values as a column named `name` using widening inference
+  (`builder_push_widen`, so nulls become defaults unless every value is
+  null). An empty list gives an empty `StrCol`. Always `Ok`.
+  """
   fn values_to_column(name : String, values : List(Value)) : Result(Column, String) do
     match values do
     Nil -> Ok(StrCol(name, typed_array_create(0, "")))
@@ -1785,6 +1978,7 @@ mod DataFrame do
 
   -- ── Phase 3: apply_sort ───────────────────────────────────────────────────
 
+  doc "Sort all rows by `keys` (see `sort_by` for the ordering and its caveats). Always `Ok`."
   fn apply_sort(df : DataFrame, keys : List((String, SortDir))) : Result(DataFrame, String) do
     let n = row_count(df)
     let indices = List.range(0, n)
@@ -1797,6 +1991,11 @@ mod DataFrame do
     end
   end
 
+  doc """
+  Compare rows `i` and `j` of `df` key by key with `compare_values`,
+  negating for `Desc`; the first non-zero result wins, 0 if all keys tie.
+  A missing key column reads as `NullVal` for both rows (a tie).
+  """
   fn compare_rows_by_keys(df : DataFrame, i : Int, j : Int, keys : List((String, SortDir))) : Int do
     match keys do
     Nil -> 0
@@ -1815,6 +2014,7 @@ mod DataFrame do
     end
   end
 
+  doc "The value at row `i` of the named column, or `NullVal` if there is no such column."
   fn col_value_at_by_name(df : DataFrame, name : String, i : Int) : Value do
     match get_column(df, name) do
     Err(_)  -> NullVal
@@ -1827,20 +2027,41 @@ mod DataFrame do
   type CsvWriteOpts = CsvWriteOpts(String, String, Bool)
   -- fields: delimiter, quote_char, write_header
 
-  doc "Default CSV write options: comma delimiter, double-quote, with header."
+  doc "Default CSV write options: comma delimiter, double-quote quoting, with a header line."
   fn default_csv_opts() : CsvWriteOpts do
     CsvWriteOpts(",", "\"", true)
   end
 
-  -- Split a CSV line on delimiter, respecting RFC-4180 double-quoted fields.
-  -- Returns a List(String) of raw (unquoted) cell values.
+  doc """
+  Split a CSV line on `delim` and trim whitespace around each cell. Quotes
+  are NOT interpreted: a quoted field containing the delimiter is split,
+  and the quote characters are kept in the cell.
+  """
   fn split_csv_line(line : String, delim : String) : List(String) do
     -- Simple split (no quote handling). Sufficient for unquoted CSV.
     let raw = string_split(line, delim)
     List.map(raw, fn cell -> string_trim(cell))
   end
 
-  doc "Parse a CSV string into a DataFrame. Infers column types with widening."
+  doc """
+  Parse a CSV string into a DataFrame. The first non-blank line is the
+  header; blank lines are skipped. Cells are split on commas and trimmed
+  (no quote handling, see `split_csv_line`), then typed per cell by
+  `parse_cell` and per column with widening (`from_rows_widen`): Int, then
+  Float, then String; `true`/`false` (any of three casings) are Bools.
+  Empty cells are not kept as nulls: they read back as `0`, `0.0`,
+  `false` or `""` unless the whole column is empty.
+
+  A row with more cells than the header is truncated to the header's
+  width; a row with fewer cells is an `Err`. An input with no non-blank
+  line gives `Ok(empty())`.
+
+  ## Examples
+
+      DataFrame.from_csv_string("id,name,score\n1,ann,9.5\n2,bob,7")
+      -- Ok: IntCol "id" [1, 2], StrCol "name" ["ann", "bob"],
+      --     FloatCol "score" [9.5, 7.0]
+  """
   fn from_csv_string(s : String) : Result(DataFrame, String) do
     -- Split by newline, filter blank lines.
     let lines = List.filter(string_split(s, "\n"), fn line ->
@@ -1862,7 +2083,11 @@ mod DataFrame do
     end
   end
 
-  -- Parse a single CSV cell string into a typed Value.
+  doc """
+  Type one CSV cell: `""` is `NullVal`, then Int, then Float (as accepted
+  by `string_to_int` / `string_to_float`), then `true`/`True`/`TRUE` and
+  `false`/`False`/`FALSE` as Bool, and anything else as a String.
+  """
   fn parse_cell(s : String) : Value do
     if string_is_empty(s) do NullVal
     else match string_to_int(s) do
@@ -1881,12 +2106,33 @@ mod DataFrame do
     end
   end
 
-  doc "Serialize a DataFrame to a CSV string. Uses default options."
+  doc """
+  Serialize a DataFrame to a CSV string with `default_csv_opts()`: a header
+  line, then one line per row, joined with `\n` (no trailing newline).
+  Values are written with `value_to_string` (nulls as empty cells) and a
+  cell containing a comma, a double quote or a newline is quoted with
+  inner quotes doubled. Note that `from_csv_string` does not undo that
+  quoting.
+
+  ## Examples
+
+      DataFrame.to_csv_string(df)   -- "id,name\n1,ann\n2,bob"
+  """
   fn to_csv_string(df : DataFrame) : String do
     to_csv_string_opts(df, default_csv_opts())
   end
 
-  doc "Serialize a DataFrame to a CSV string with custom options."
+  doc """
+  Serialize a DataFrame to CSV with custom options
+  `CsvWriteOpts(delimiter, quote_char, write_header)`; see `to_csv_string`
+  for the format. Cells containing the delimiter, the quote string or a
+  newline are quoted.
+
+  ## Examples
+
+      DataFrame.to_csv_string_opts(df, DataFrame.CsvWriteOpts(";", "'", false))
+      -- "1;ann\n2;bob"
+  """
   fn to_csv_string_opts(df : DataFrame, opts : CsvWriteOpts) : String do
     match opts do
     CsvWriteOpts(delim, quote, write_hdr) -> do
@@ -1902,6 +2148,7 @@ mod DataFrame do
     end
   end
 
+  doc "One CSV line (without header) per row of `df`, cells rendered with `value_to_string` and quoted by `csv_quote_cell`."
   fn data_rows_to_strings(df : DataFrame, delim : String, quote : String) : List(String) do
     let rows = to_rows(df)
     List.map(rows, fn row ->
@@ -1914,11 +2161,13 @@ mod DataFrame do
       end)
   end
 
+  doc "Join `cells` with `delim`, quoting each as needed (`csv_quote_cell`)."
   fn csv_row_to_string(cells : List(String), delim : String, quote : String) : String do
     let quoted = List.map(cells, fn cell -> csv_quote_cell(cell, delim, quote))
     string_join(quoted, delim)
   end
 
+  doc "Wrap `cell` in `quote` (doubling any inner `quote`) when it contains `delim`, `quote` or a newline; otherwise return it unchanged."
   fn csv_quote_cell(cell : String, delim : String, quote : String) : String do
     let needs_quote = string_contains(cell, delim)
                    || string_contains(cell, quote)
@@ -1933,7 +2182,21 @@ mod DataFrame do
 
   -- ── Phase 2: JSON I/O ─────────────────────────────────────────────────────
 
-  doc "Parse a JSON string (array of objects) into a DataFrame."
+  doc """
+  Parse a JSON array of objects into a DataFrame, one row per object.
+  Column names and order come from the first object; later objects are
+  matched by POSITION (key order), not by key, and must have the same
+  number of keys. Integral numbers become Int and others Float (widened
+  per column), strings String, booleans Bool; nested arrays/objects are
+  stored as their JSON text. JSON `null`s are not preserved (see
+  `from_rows_widen`). `Err` on invalid JSON, a non-array top level or a
+  non-object element; `[]` gives the empty frame.
+
+  ## Examples
+
+      DataFrame.from_json_string("[{\"a\": 1, \"b\": \"x\"}, {\"a\": 2.5, \"b\": \"y\"}]")
+      -- Ok: FloatCol "a" [1.0, 2.5], StrCol "b" ["x", "y"]
+  """
   fn from_json_string(s : String) : Result(DataFrame, String) do
     match Json.parse(s) do
     Err(e) -> Err("DataFrame.from_json_string: JSON parse error: " ++ e)
@@ -1946,6 +2209,7 @@ mod DataFrame do
     end
   end
 
+  doc "Convert parsed JSON array elements to a frame (see `from_json_string`); `Err` if any element is not an object."
   fn json_array_to_df(items : List(JsonValue)) : Result(DataFrame, String) do
     match items do
     Nil -> Ok(empty())
@@ -1968,6 +2232,7 @@ mod DataFrame do
     end
   end
 
+  doc "Convert one JSON value to a cell `Value`: null, Bool, integral number as `IntVal` (else `FloatVal`), string; arrays and objects become `StrVal` of their JSON text."
   fn json_value_to_value(jv : JsonValue) : Value do
     match jv do
     Null      -> NullVal
@@ -1981,7 +2246,15 @@ mod DataFrame do
     end
   end
 
-  doc "Serialize a DataFrame to a JSON string (array of objects)."
+  doc """
+  Serialize a DataFrame to a JSON string: an array with one object per
+  row, keys in column order. Nulls become JSON `null`; Ints are written as
+  JSON numbers (so they read back as Int).
+
+  ## Examples
+
+      DataFrame.to_json_string(df)   -- "[{\"id\":1,\"name\":\"ann\"},{\"id\":2,\"name\":\"bob\"}]"
+  """
   fn to_json_string(df : DataFrame) : String do
     let rows = to_rows(df)
     let json_rows = List.map(rows, fn row ->
@@ -1995,6 +2268,7 @@ mod DataFrame do
     Json.to_string(Array(json_rows))
   end
 
+  doc "Convert a cell value to JSON: numbers (Int via Float), string, bool, `NullVal` as `null`."
   fn value_to_json(v : Value) : JsonValue do
     match v do
     IntVal(n)   -> Number(int_to_float(n))
@@ -2025,7 +2299,7 @@ mod DataFrame do
   -- Structural group key: a list of typed Values, one per group column.
   type GroupKey = GroupKey(List(Value))
 
-  -- Polynomial hash combining per-Value hashes.
+  doc "FNV-style combination of the `value_hash` of each key value, masked to 31 bits."
   fn group_key_hash(gk : GroupKey) : Int do
     match gk do
     GroupKey(vals) -> do
@@ -2035,6 +2309,7 @@ mod DataFrame do
     end
   end
 
+  doc "Group keys are equal when their value lists are (`values_list_eq`)."
   fn group_key_eq(a : GroupKey, b : GroupKey) : Bool do
     match a do
     GroupKey(av) -> do
@@ -2047,23 +2322,58 @@ mod DataFrame do
 
   type GroupedFrame = GroupedFrame(DataFrame, List(String))
 
-  doc "Groups a DataFrame by the specified columns."
+  doc """
+  Groups a DataFrame by the specified columns. Nothing is computed until
+  `agg`; missing columns are reported there. Rows whose key values are
+  equal by `values_equal` share a group (nulls group together).
+  """
   fn group_by(df : DataFrame, group_cols : List(String)) : GroupedFrame do
     GroupedFrame(df, group_cols)
   end
 
-  doc "Aggregates a GroupedFrame using the given expressions. Returns a new DataFrame."
+  doc """
+  Aggregates a GroupedFrame: one output row per distinct key, holding the
+  group columns followed by one column per expression. Group (row) order
+  is unspecified (it follows the internal hash map). `Err` if a group
+  column is missing; an empty frame gives the empty frame, and an empty
+  `group_cols` list puts every row in one group.
+
+  - `Count` gives an Int; `CountDistinct(c)` an Int (null is one value);
+    `First(c)`/`Last(c)` keep the column's values.
+  - `Sum`, `Mean`, `Min`, `Max`, `Median`, `Std`, `Variance` give Floats
+    (also for Int columns). `Std` and `Variance` are sample statistics
+    (n - 1); `Variance` of one row is 0.0 and `Std` of one row is null.
+  - An aggregate over a missing, non-numeric or nullable column is null.
+    Output columns are rebuilt with widening inference, so such nulls read
+    back as the column type's default (e.g. 0.0) unless every group is
+    null.
+
+  Output names: the source column (`"count"` for `Count`), or the alias
+  of `AggAs(expr, name)`. When that name is already taken by a group
+  column or an earlier output, a suffix is added: `_sum`, `_mean`, `_min`,
+  `_max`, `_count`, `_n_distinct`, `_std`, `_variance`, `_first`, `_last`,
+  `_median` (or `_` plus the alias for `AggAs`).
+
+  ## Examples
+
+      DataFrame.group_by(sales, ["region"])
+        |> DataFrame.agg([DataFrame.Count,
+                          DataFrame.Sum("amount"),
+                          DataFrame.AggAs(DataFrame.Mean("amount"), "avg")])
+      -- Ok(columns: region, count, amount, avg; one row per region)
+  """
   fn agg(gf : GroupedFrame, exprs : List(AggExpr)) : Result(DataFrame, String) do
     match gf do
     GroupedFrame(df, group_cols) -> apply_group_by(df, group_cols, exprs)
     end
   end
 
+  doc "The `GroupKey` of row `row_idx`: the values of `group_cols` in that row (`NullVal` for a missing column)."
   fn make_group_key(df : DataFrame, row_idx : Int, group_cols : List(String)) : GroupKey do
     GroupKey(List.map(group_cols, fn name -> col_value_at_by_name(df, name, row_idx)))
   end
 
-  -- Determine the output column name for an AggExpr (with duplicate-suffix logic).
+  doc "The output column name for `expr`: `agg_base_name`, plus `_` and `agg_type_suffix` when the base name is already in `existing_names`."
   fn agg_output_name(expr : AggExpr, existing_names : List(String)) : String do
     let base_name = agg_base_name(expr)
     if List.any(existing_names, fn n -> n == base_name) do
@@ -2073,6 +2383,7 @@ mod DataFrame do
     end
   end
 
+  doc "The unsuffixed output name of an aggregate: its source column, `count` for `Count`, or the alias of `AggAs`."
   fn agg_base_name(expr : AggExpr) : String do
     match expr do
     Sum(col)          -> col
@@ -2090,6 +2401,7 @@ mod DataFrame do
     end
   end
 
+  doc "The disambiguating suffix of an aggregate (`sum`, `mean`, `n_distinct`, ...; the alias for `AggAs`)."
   fn agg_type_suffix(expr : AggExpr) : String do
     match expr do
     Sum(_)          -> "sum"
@@ -2107,6 +2419,7 @@ mod DataFrame do
     end
   end
 
+  doc "Group `df` by `group_cols` and evaluate `agg_exprs` per group (see `agg`)."
   fn apply_group_by(df : DataFrame, group_cols : List(String), agg_exprs : List(AggExpr)) : Result(DataFrame, String) do
     -- Step 1: Validate group columns exist
     let bad_col = List.find(group_cols, fn name ->
@@ -2148,7 +2461,7 @@ mod DataFrame do
     end
   end
 
-  -- Filter all columns of a DataFrame to keep only the given row indices.
+  doc "Keep the given row indices (in that order) in every column of `df`."
   fn filter_col_by_indices_df(df : DataFrame, indices : List(Int)) : DataFrame do
     match df do
     DataFrame(cols) ->
@@ -2156,7 +2469,7 @@ mod DataFrame do
     end
   end
 
-  -- Evaluate all agg expressions on a sub-DataFrame, returning (name, value) pairs.
+  doc "Evaluate every aggregate on one group's sub-frame, returning `(output name, value)` pairs in expression order (names from `agg_output_name`)."
   fn eval_agg_exprs(sub_df : DataFrame, exprs : List(AggExpr), group_cols : List(String)) : List((String, Value)) do
     fn go(remaining : List(AggExpr), seen_names : List(String), acc : List((String, Value))) : List((String, Value)) do
       match remaining do
@@ -2171,6 +2484,7 @@ mod DataFrame do
     go(exprs, Nil, Nil)
   end
 
+  doc "Evaluate one aggregate expression on a group's sub-frame (see `agg` for each aggregate's result). The output-name argument is unused."
   fn eval_agg(sub_df : DataFrame, expr : AggExpr, _out_name : String) : Value do
     match expr do
     Count -> IntVal(row_count(sub_df))
@@ -2268,7 +2582,18 @@ mod DataFrame do
 
   -- ── Phase 4: value_counts ─────────────────────────────────────────────────
 
-  doc "Count frequency of each distinct value. Returns DataFrame with columns [col_name, 'count'] sorted by count desc."
+  doc """
+  Count the frequency of each distinct value of a column. Returns a
+  DataFrame with a String column named `col` (each value's
+  `value_to_string` form, so a null and `""` count together, as do `1`
+  and `"1"`) and an Int column `"count"`, sorted by count descending.
+  `Err` if the column is missing; an empty column gives the empty frame.
+
+  ## Examples
+
+      DataFrame.value_counts(df, "city")
+      -- Ok: city ["paris", "rome"], count [3, 1]
+  """
   fn value_counts(df : DataFrame, col : String) : Result(DataFrame, String) do
     match get_column(df, col) do
     Err(e) -> Err(e)
@@ -2308,6 +2633,7 @@ mod DataFrame do
 
   -- ── Phase 5: Joins (all four kinds implemented) ────────────────────────────
 
+  doc "Dispatch a join of two materialized frames on `on_cols` to the implementation for `kind` (see `inner_join` and friends)."
   fn apply_join(left : DataFrame, right : DataFrame, on_cols : List(String), kind : JoinKind) : Result(DataFrame, String) do
     match kind do
     Inner -> apply_inner_join(left, right, on_cols)
@@ -2363,6 +2689,7 @@ mod DataFrame do
     end
   end
 
+  doc "Left join of two materialized frames (see `left_join`): hash the right keys, probe with each left row."
   fn apply_left_join(left : DataFrame, right : DataFrame, on_cols : List(String)) : Result(DataFrame, String) do
     let bad_left = List.find(on_cols, fn name ->
       match get_column(left, name) do Err(_) -> true | Ok(_) -> false end)
@@ -2429,6 +2756,7 @@ mod DataFrame do
     end
   end
 
+  doc "Right join of two materialized frames (see `right_join`): hash the left keys, probe with each right row."
   fn apply_right_join(left : DataFrame, right : DataFrame, on_cols : List(String)) : Result(DataFrame, String) do
     let bad_left = List.find(on_cols, fn name ->
       match get_column(left, name) do Err(_) -> true | Ok(_) -> false end)
@@ -2495,6 +2823,7 @@ mod DataFrame do
     end
   end
 
+  doc "Full outer join of two materialized frames (see `outer_join`). Finding the unmatched right rows is O(right rows x matches)."
   fn apply_outer_join(left : DataFrame, right : DataFrame, on_cols : List(String)) : Result(DataFrame, String) do
     let bad_left = List.find(on_cols, fn name ->
       match get_column(left, name) do Err(_) -> true | Ok(_) -> false end)
@@ -2572,6 +2901,7 @@ mod DataFrame do
     end
   end
 
+  doc "Inner join of two materialized frames (see `inner_join`): hash the right keys, probe with each left row, rebuild from rows."
   fn apply_inner_join(left : DataFrame, right : DataFrame, on_cols : List(String)) : Result(DataFrame, String) do
     -- Validate on_cols exist in both
     let bad_left = List.find(on_cols, fn name ->
@@ -2649,7 +2979,15 @@ mod DataFrame do
                                Option(Float), Option(Float))
   -- fields: name, col_type, count, mean, std, min, p25, median, p75, max
 
-  doc "Returns summary statistics for each column."
+  doc """
+  Returns one `ColStats(name, type, count, mean, std, min, p25, median,
+  p75, max)` per column, in column order. `type` is `"Int"`, `"Float"`,
+  `"String"`, `"Bool"` or `"Nullable"` (any nullable column) and `count`
+  is the row count. The statistics are `Some` only for a non-empty
+  `IntCol`/`FloatCol` (`std` is the sample standard deviation, 0.0 for a
+  single row); every other column, and a zero-row numeric one, gets
+  `None` for all of them.
+  """
   fn col_describe(df : DataFrame) : List(ColStats) do
     match df do
     DataFrame(cols) ->
@@ -2657,6 +2995,7 @@ mod DataFrame do
     end
   end
 
+  doc "The `ColStats` of one column (see `col_describe`)."
   fn col_describe_column(col : Column) : ColStats do
     let name = col_name(col)
     let n = col_len(col)
@@ -2699,13 +3038,21 @@ mod DataFrame do
   end
 
   doc """
-  Z-score normalize an IntCol or FloatCol. Returns FloatCol.
+  Z-score normalize an IntCol or FloatCol: `(x - mean) / std` with the
+  sample standard deviation. Returns a FloatCol of the same name; a column
+  whose values are all equal gives all `0.0`. `Err` for any other column
+  type, including nullable numeric columns.
 
   A zero-row column returns a zero-row FloatCol rather than an error: it is the
   `n = 0` instance of the zero-variance case just below, which already returns a
   same-length all-zeros column, and `head(df, 0)` or a filter that matches
   nothing produces one in ordinary use. The guard is on the list actually passed
   to `Stats.*`, which declare `{List(Float) | len(_) > 0}` and panic otherwise.
+
+  ## Examples
+
+      DataFrame.col_z_score(DataFrame.IntCol("x", native_int_arr_from_list([1, 2, 3])))
+      -- Ok(FloatCol("x", [-1.0, 0.0, 1.0]))
   """
   fn col_z_score(col : Column) : Result(Column, String) do
     match col do
@@ -2740,10 +3087,18 @@ mod DataFrame do
   end
 
   doc """
-  Min-max normalize a column to [0, 1]. Returns FloatCol.
+  Min-max normalize an IntCol or FloatCol to [0, 1]: `(x - min) / (max - min)`.
+  Returns a FloatCol of the same name; a column whose values are all equal
+  gives all `0.0`. `Err` for any other column type, including nullable
+  numeric columns.
 
   A zero-row column returns a zero-row FloatCol, for the same reason as
   `col_z_score` above: it is the `n = 0` instance of the zero-range case below.
+
+  ## Examples
+
+      DataFrame.col_normalize(DataFrame.IntCol("x", native_int_arr_from_list([10, 15, 20])))
+      -- Ok(FloatCol("x", [0.0, 0.5, 1.0]))
   """
   fn col_normalize(col : Column) : Result(Column, String) do
     match col do
@@ -2782,13 +3137,17 @@ mod DataFrame do
   doc """Returns a summary-statistics DataFrame with one row per column.
 
   Columns in the result: "column", "type", "count", "mean", "std",
-  "min", "p25", "median", "p75", "max".  Non-numeric columns get
-  NullVal for every numeric stat.
+  "min", "p25", "median", "p75", "max" (see `col_describe`). The table is
+  rebuilt with widening inference, so the missing statistics of a
+  non-numeric or nullable column read back as `0.0` (not null) whenever
+  the frame also has a non-empty numeric column; they are null only when no
+  column has statistics.
 
-  Example:
-    let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
-    let d  = DataFrame.summarize(df)
-    -- d has 1 row: column="x", type:"Int", count:5, mean:3.0, ...
+  ## Examples
+
+      let df = DataFrame.make_df([DataFrame.IntCol("x", native_int_arr_from_list([1, 2, 3, 4, 5]))])
+      let d  = DataFrame.summarize(df)
+      -- d has 1 row: column="x", type="Int", count=5, mean=3.0, ...
   """
   fn summarize(df : DataFrame) : DataFrame do
     let stats = col_describe(df)
@@ -2820,15 +3179,18 @@ mod DataFrame do
     end
   end
 
-  doc """Random systematic sample of n rows. Deterministic (no RNG state).
+  doc """Systematic sample of n rows. Deterministic (no randomness).
 
-  Selects n rows at evenly-spaced positions across the DataFrame.
-  Returns the full DataFrame unchanged when n >= row_count(df).
+  Selects rows `0, step, 2*step, ...` with `step = row_count / n`
+  (integer division), so the sample is spread across the frame but biased
+  towards its start. Returns the full DataFrame unchanged when
+  `n >= row_count(df)`, and zero rows (same columns) when `n <= 0`.
 
-  Example:
-    let df  = DataFrame.make_df([IntCol("v", [0,1,2,3,4,5,6,7,8,9])])
-    let s   = DataFrame.sample(df, 3)
-    -- picks rows 0, 3, 6  ->  IntCol("v", [0, 3, 6])
+  ## Examples
+
+      let df  = DataFrame.make_df([DataFrame.IntCol("v", native_int_arr_from_list([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))])
+      let s   = DataFrame.sample(df, 3)
+      -- picks rows 0, 3, 6  ->  IntCol("v", [0, 3, 6])
   """
   fn sample(df : DataFrame, n : Int) : DataFrame do
     let total = row_count(df)
@@ -2851,12 +3213,14 @@ mod DataFrame do
   doc """Split a DataFrame into (train, test) using the given ratio.
 
   ratio is the fraction of rows placed in the training set (0.0 < ratio < 1.0).
-  The first `floor(row_count * ratio)` rows become the training set;
-  the remainder become the test set. Row order is preserved.
+  The first `float_to_int(row_count * ratio)` rows (truncated) become the
+  training set; the remainder become the test set. Row order is preserved.
+  A ratio `>= 1.0` puts every row in train, one `<= 0.0` every row in test.
 
-  Example:
-    let (train, test) = DataFrame.train_test_split(df, 0.8)
-    -- 80% of rows → train, 20% → test
+  ## Examples
+
+      let (train, test) = DataFrame.train_test_split(df, 0.8)
+      -- 80% of rows -> train, 20% -> test
   """
   fn train_test_split(df : DataFrame, ratio : Float) : (DataFrame, DataFrame) do
     let total = row_count(df)
@@ -2867,11 +3231,13 @@ mod DataFrame do
   end
 
   doc """Add a scalar Float to every element of an Int or Float column.
-  Returns a FloatCol. Errors on other column types.
+  Returns a FloatCol with the same name. Errors on other column types
+  (including nullable numeric columns).
 
-  Example:
-    let c  = FloatCol("price", [1.0, 2.0, 3.0])
-    let c2 = DataFrame.col_add_float(c, 10.0)  -- Ok(FloatCol("price", [11.0, 12.0, 13.0]))
+  ## Examples
+
+      let c  = DataFrame.FloatCol("price", native_float_arr_from_list([1.0, 2.0, 3.0]))
+      let c2 = DataFrame.col_add_float(c, 10.0)  -- Ok(FloatCol("price", [11.0, 12.0, 13.0]))
   """
   fn col_add_float(col : Column, f : Float) : Result(Column, String) do
     match col do
@@ -2884,11 +3250,13 @@ mod DataFrame do
   end
 
   doc """Multiply every element of an Int or Float column by a scalar Float.
-  Returns a FloatCol. Errors on other column types.
+  Returns a FloatCol with the same name. Errors on other column types
+  (including nullable numeric columns).
 
-  Example:
-    let c  = IntCol("qty", [1, 2, 3])
-    let c2 = DataFrame.col_mul_float(c, 2.5)  -- Ok(FloatCol("qty", [2.5, 5.0, 7.5]))
+  ## Examples
+
+      let c  = DataFrame.IntCol("qty", native_int_arr_from_list([1, 2, 3]))
+      let c2 = DataFrame.col_mul_float(c, 2.5)  -- Ok(FloatCol("qty", [2.5, 5.0, 7.5]))
   """
   fn col_mul_float(col : Column, f : Float) : Result(Column, String) do
     match col do
@@ -2902,14 +3270,16 @@ mod DataFrame do
 
   doc """Element-wise addition of two numeric columns.
 
-  - Int + Int → IntCol (named after col1)
-  - Float + Float, Int + Float, Float + Int → FloatCol (named after col1)
-  Errors if the columns have different lengths or are non-numeric.
+  - Int + Int -> IntCol (named after col1)
+  - Float + Float, Int + Float, Float + Int -> FloatCol (named after col1)
+  Errors if the columns have different lengths or are non-numeric
+  (nullable numeric columns count as non-numeric).
 
-  Example:
-    let a   = IntCol("a", [1, 2, 3])
-    let b   = IntCol("b", [10, 20, 30])
-    let sum = DataFrame.col_add_col(a, b)  -- Ok(IntCol("a", [11, 22, 33]))
+  ## Examples
+
+      let a   = DataFrame.IntCol("a", native_int_arr_from_list([1, 2, 3]))
+      let b   = DataFrame.IntCol("b", native_int_arr_from_list([10, 20, 30]))
+      let sum = DataFrame.col_add_col(a, b)  -- Ok(IntCol("a", [11, 22, 33]))
   """
   fn col_add_col(col1 : Column, col2 : Column) : Result(Column, String) do
     let n1 = col_len(col1)
@@ -2947,7 +3317,7 @@ mod DataFrame do
 
   -- ── Phase 8: Missing Data Operations ──────────────────────────────────────
 
-  -- Check whether row i of a column is null.
+  doc "Whether row `i` of `col` is null (always false for a non-nullable column). `i` must be in range."
   fn col_has_null_at(col : Column, i : Int) : Bool do
     match col do
     NullableIntCol(_, _, nulls)   -> typed_array_get(nulls, i)
@@ -2958,7 +3328,14 @@ mod DataFrame do
     end
   end
 
-  doc "Remove rows that have a null in any column."
+  doc """
+  Remove rows that have a null in any column. Only nullable columns can
+  hold nulls; the columns keep their (nullable) types.
+
+  ## Examples
+
+      DataFrame.drop_nulls(joined)   -- e.g. the matched rows of a left_join
+  """
   fn drop_nulls(df : DataFrame) : DataFrame do
     let n = row_count(df)
     let all_cols = match df do DataFrame(cs) -> cs end
@@ -2975,7 +3352,7 @@ mod DataFrame do
     DataFrame(List.map(all_cols, fn c -> filter_col_by_indices(c, kept)))
   end
 
-  doc "Remove rows that have a null in any of the specified columns."
+  doc "Remove rows that have a null in any of the named columns; names that are not present are ignored."
   fn drop_nulls_in(df : DataFrame, names : List(String)) : DataFrame do
     let n = row_count(df)
     let all_cols = match df do DataFrame(cs) -> cs end
@@ -2994,7 +3371,18 @@ mod DataFrame do
     DataFrame(List.map(all_cols, fn c -> filter_col_by_indices(c, kept)))
   end
 
-  doc "Replace null values in a nullable column with fill_val. Errors on type mismatch."
+  doc """
+  Replace the nulls of a nullable column with `fill_val`, returning the
+  NON-nullable column of the same type and name. The value must match the
+  column type (an `IntVal` is also accepted for a Float column). Errors on
+  a type mismatch, and on a non-nullable column (even though it has
+  nothing to fill).
+
+  ## Examples
+
+      DataFrame.fill_null(score_col, DataFrame.FloatVal(0.0))
+      -- Ok(FloatCol("score", ...)) with every null replaced by 0.0
+  """
   fn fill_null(col : Column, fill_val : Value) : Result(Column, String) do
     let nm = col_name(col)
     match col do
@@ -3048,7 +3436,7 @@ mod DataFrame do
     end
   end
 
-  doc "Apply fill_null to a named column in a DataFrame, replacing it in-place."
+  doc "Apply `fill_null` to the named column of a DataFrame, replacing it in place (same position). Errors if the column is missing or `fill_null` fails."
   fn fill_null_df(df : DataFrame, col_nm : String, fill_val : Value) : Result(DataFrame, String) do
     match get_column(df, col_nm) do
     Err(e) -> Err(e)
@@ -3066,7 +3454,12 @@ mod DataFrame do
     end
   end
 
-  doc "Forward-fill nulls in a nullable column: propagate the last non-null value downward."
+  doc """
+  Forward-fill nulls in a nullable column: each null takes the last
+  non-null value above it. Returns the non-nullable column of the same
+  type; leading nulls (no value above) become `0`, `0.0`, `""` or
+  `false`. Non-nullable columns are returned unchanged.
+  """
   fn fill_null_forward(col : Column) : Column do
     match col do
     NullableIntCol(name, data, nulls) -> do
@@ -3137,7 +3530,12 @@ mod DataFrame do
     end
   end
 
-  doc "Backward-fill nulls in a nullable column: propagate the next non-null value upward."
+  doc """
+  Backward-fill nulls in a nullable column: each null takes the next
+  non-null value below it. Returns the non-nullable column of the same
+  type; trailing nulls (no value below) become `0`, `0.0`, `""` or
+  `false`. Non-nullable columns are returned unchanged.
+  """
   fn fill_null_backward(col : Column) : Column do
     -- Strategy: reverse the data, forward-fill, then the Cons-prepend accumulator
     -- is already in the correct (non-reversed) order because we processed in reverse.
@@ -3231,7 +3629,7 @@ mod DataFrame do
     | Lag(String, Int, Value)    -- value n rows before current row (fill_val if OOB)
     | Lead(String, Int, Value)   -- value n rows after current row (fill_val if OOB)
 
-  -- Internal: sort a List((Int, Int)) ascending by the first element.
+  doc "Sort `(Int, Int)` pairs by their first element, ascending (used to restore row order after ranking)."
   fn sort_pairs_asc(pairs : List((Int, Int))) : List((Int, Int)) do
     List.sort_by(pairs, fn (p1, p2) ->
       match p1 do (a, _) ->
@@ -3241,6 +3639,24 @@ mod DataFrame do
 
   doc """Apply a window function over the full DataFrame, appending the result as
   a new column named out_col. No partitioning (operates over all rows).
+  Errors if `out_col` already exists.
+
+  - `RowNum`: 0-based row number (IntCol).
+  - `Rank(c, dir)` / `DenseRank(c, dir)`: 1-based rank of each row when
+    sorted by `c` (ties share a rank; `Rank` then skips, 1,2,2,4, while
+    `DenseRank` does not, 1,2,2,3). A missing column ranks every row 1.
+  - `RunningSum(c)`: cumulative sum (IntCol for Int input, FloatCol for
+    Float). `RunningMean(c)`: cumulative mean (FloatCol). Both error on a
+    missing or non-numeric (including nullable) column.
+  - `Lag(c, n, fill)` / `Lead(c, n, fill)`: the value `n` rows before /
+    after, or `fill` past the edge; typed with widening inference, so a
+    `fill` of another type widens the column. O(rows^2). Panics if `n` is
+    negative and the shifted row falls outside the frame.
+
+  ## Examples
+
+      DataFrame.window(df, DataFrame.Rank("score", DataFrame.Desc), "rank")
+      DataFrame.window(df, DataFrame.Lag("price", 1, DataFrame.FloatVal(0.0)), "prev_price")
   """
   fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFrame, String) do
     let n = row_count(df)
@@ -3416,15 +3832,19 @@ mod DataFrame do
   -- ── Phase 10: Pivot / Melt ────────────────────────────────────────────────
 
   doc """Melt (unpivot): transform a wide DataFrame into a long one.
-  id_vars   — columns kept as-is in every output row.
-  value_vars — columns whose names become values of var_col and whose values
-               become values of val_col.
-  One output row is produced per (input row × value_var).
+  id_vars   - columns kept as-is in every output row (in the frame's column
+              order; names that are not present are skipped).
+  value_vars - columns whose names become values of var_col and whose values
+               become values of val_col (a missing one contributes nulls,
+               which widening turns into the type's default).
+  One output row is produced per (input row x value_var), row-major. The
+  value column is typed with widening inference across all value_vars.
 
-  Example:
-    melt(df, ["id"], ["jan","feb","mar"], "month", "value")
-    turns:  id | jan | feb | mar
-    into:   id | month | value   (3 output rows per original row)
+  ## Examples
+
+      melt(df, ["id"], ["jan","feb","mar"], "month", "value")
+      -- turns:  id | jan | feb | mar
+      -- into:   id | month | value   (3 output rows per original row)
   """
   fn melt(df : DataFrame, id_vars : List(String), value_vars : List(String),
           var_col : String, val_col : String) : Result(DataFrame, String) do
@@ -3448,15 +3868,23 @@ mod DataFrame do
   end
 
   doc """Pivot: transform a long DataFrame into a wide one.
-  index_col — column whose distinct values become output rows.
-  cols_col  — column whose distinct values become new output column names.
-  vals_col  — column whose values fill the output cells.
-  Missing (index, col) combinations get NullVal.
+  index_col - column whose distinct values become output rows.
+  cols_col  - column whose distinct values become new output column names
+              (via `value_to_string`).
+  vals_col  - column whose values fill the output cells.
+  Rows and new columns appear in first-appearance order. When several input
+  rows share an (index, col) pair, the first one wins. Missing (index, col)
+  combinations are null before typing, but the output is rebuilt with
+  widening inference, so they read back as the column type's default
+  (`0`, `0.0`, `""`, `false`) unless the whole column is missing.
+  Errors if any of the three columns is missing. O(index values x new
+  columns x rows).
 
-  Example:
-    pivot(df, "region", "product", "revenue")
-    turns:  region | product | revenue
-    into:   region | A | B | ...   (one column per distinct product)
+  ## Examples
+
+      pivot(df, "region", "product", "revenue")
+      -- turns:  region | product | revenue
+      -- into:   region | A | B | ...   (one column per distinct product)
   """
   fn pivot(df : DataFrame, index_col : String, cols_col : String,
            vals_col : String) : Result(DataFrame, String) do
@@ -3522,7 +3950,11 @@ mod DataFrame do
   end
 
   doc """
-  Render a DataFrame as an HTML table string.
+  Render a DataFrame as an HTML table string: a `<caption>` with the
+  dimensions ("N rows x M cols"), a header row of column names and one
+  `<tr>` per row (cells via `value_to_string`). Note: header and cell text
+  is only partially escaped; just the first occurrence of each of `&`,
+  `<`, `>` and `"` is replaced, so do not feed it untrusted text.
   The output is detected automatically by the March notebook and displayed
   as a styled table rather than raw text.
   """
@@ -3547,7 +3979,12 @@ mod DataFrame do
     "<table>" ++ footer ++ "<thead><tr>" ++ header ++ "</tr></thead><tbody>" ++ body ++ "</tbody></table>"
   end
 
-  doc "Print a DataFrame as a simple text table."
+  doc """
+  Print a DataFrame to stdout as a simple text table: the column names
+  joined with `" | "`, a dashed rule as wide as that header, then one
+  line per row (cells via `value_to_string`). Columns are not padded or
+  aligned.
+  """
   fn print_table(df : DataFrame) : Unit do
     let cols = schema(df)
     let header = string_join(cols, " | ")

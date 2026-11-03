@@ -1,0 +1,3 @@
+registered: true
+worker_a: rounds true, sends refused 0, calls failed 0, calls answered short 0
+worker_b: rounds true, sends refused 0, calls failed 0, calls answered short 0

@@ -63,6 +63,12 @@ mod SwimDriver do
     | SwimGossip(String, MemberStatus, Int)    -- node_id, status, incarnation
     | SwimGossipLoad(String, MemberStatus, Int, NodeLoad)  -- with piggybacked load
 
+  doc """
+  A driver for node [me] wrapping a fresh `Swim.make(me, incarnation, members,
+  swim_cfg)`, with an RNG seeded from [seed] and a protocol period of
+  [period_ms]. The period timer and the anti-entropy timer both start at 0, so
+  the first `step` begins a period and the first `anti_entropy_peers` fires.
+  """
   fn make(me : String, incarnation : Int, members : Members, swim_cfg : Swim.Config,
           period_ms : Int, seed : Int) : State do
     { swim: Swim.make(me, incarnation, members, swim_cfg),
@@ -162,10 +168,29 @@ mod SwimDriver do
 
   -- ── main step ─────────────────────────────────────────────────────────────
 
-  -- Advance the driver one tick.
-  -- [now]    = unix_time_ms
-  -- [events] = transport events since the last call
-  -- Returns the updated state and the list of Actions to execute.
+  doc """
+  Advance the driver one tick at [now] (Unix ms), folding in the transport
+  [events] received since the last call. Returns the updated state and the
+  actions to execute, in order: the actions the events produced (a `PeerDown`
+  gossips a Dead verdict, a `ConnLost` gossips a Suspect), then:
+
+  - at a period boundary (`now >= period_end`): end the previous probe (may
+    suspect its target), expire overdue suspects to Dead, refute if we are
+    suspected, then ping a randomly chosen Alive peer (no ping when there is
+    none) and roll the period timer to `now + period_ms`;
+  - mid-period: escalate the probe to indirect ping-reqs through up to
+    `indirect_k` randomly sampled helpers once the ack timeout has passed.
+
+  `GossipWithLoad` samples are stored in the peer-load table restamped with
+  [now]. Deterministic for a given seed and event sequence.
+
+  ## Examples
+
+      let d = SwimDriver.make("n1", 0, view, Swim.config(500, 5000, 3), 1000, 42)
+      match SwimDriver.step(d, now, Nil) do      -- first call begins a period
+        (d2, acts) -> SwimDriver.dispatch_all(acts, peers, "n1")
+      end
+  """
   fn step(s : State, now : Int, events : List(Event)) : (State, List(Swim.Action)) do
     -- 1. Fold in transport events.
     let ev_out = apply_events(s.swim, now, events)
@@ -249,9 +274,12 @@ mod SwimDriver do
 
   -- ── Anti-entropy helpers (P5a) ─────────────────────────────────────────────
 
-  -- Returns live peer node_ids when the anti-entropy timer has fired; else Nil.
-  -- The transport layer calls this each tick and sends REGISTRY_SYNC_REQ to
-  -- each returned peer.
+  doc """
+  The Alive peers other than ourselves (the anti-entropy targets) when the
+  anti-entropy timer has fired at [now], else `Nil`. The transport calls this
+  each tick and sends a registry sync request to each returned peer, then
+  calls `bump_anti_entropy`.
+  """
   fn anti_entropy_peers(s : State, now : Int) : List(String) do
     if now >= s.anti_entropy_next do
       alive_others(s)
@@ -260,15 +288,14 @@ mod SwimDriver do
     end
   end
 
-  -- Reset the anti-entropy timer after firing. Call immediately after
-  -- anti_entropy_peers returns a non-empty list.
+  doc "Re-arm the anti-entropy timer for 30 s after [now]; call it right after `anti_entropy_peers` returned a non-empty list."
   fn bump_anti_entropy(s : State, now : Int) : State do
     { s with anti_entropy_next: now + anti_entropy_period_ms() }
   end
 
   -- ── Load queries (P4) ─────────────────────────────────────────────────────
 
-  -- Current load reading for a peer, or None if never heard or stale.
+  doc "The last load sample heard from [node_id], or `None` if none was heard or it is more than 10 s old at [now] (receipt time on this node's clock)."
   fn peer_load(s : State, node_id : String, now : Int) : Option(NodeLoad) do
     match Map.get(s.peer_loads, node_id, Map.str_cmp) do
       None -> None
@@ -277,7 +304,7 @@ mod SwimDriver do
     end
   end
 
-  -- All non-stale peer loads.
+  doc "Every peer load sample received at most 10 s before [now], in unspecified order."
   fn fresh_peer_loads(s : State, now : Int) : List(NodeLoad) do
     let all = Map.values(s.peer_loads)
     List.filter(all, fn nl -> now - nl.sampled_at <= load_stale_ms())
@@ -302,6 +329,11 @@ mod SwimDriver do
     end
   end
 
+  doc """
+  Encode a wire message as a MessagePack array whose first element is its tag
+  (0 ping, 1 ack, 2 ping-req, 3 gossip; `SwimGossipLoad` is tag 3 with a fifth
+  element holding the `ClusterLoad.to_ints` of its load).
+  """
   fn encode_msg(msg : WireMsg) : List(Int) do
     match msg do
       SwimPing(sender) ->
@@ -332,6 +364,12 @@ mod SwimDriver do
     end
   end
 
+  doc """
+  Decode bytes produced by `encode_msg`. Returns `Err` for invalid
+  MessagePack, a non-array, an unknown tag, the wrong element count or types
+  for a tag, or a status int outside 0..2. In a tag-3 load frame, non-integer
+  load elements are silently dropped before `ClusterLoad.from_ints`.
+  """
   fn decode_msg(bytes : List(Int)) : Result(WireMsg, String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -392,7 +430,9 @@ mod SwimDriver do
   -- MEMBERS_SYNC is the whole view, exchanged both ways on every new
   -- connection: SWIM's push-pull join, and the heal path.
 
+  doc "The wire tag of a full-member MEMBER_GOSSIP frame (13)."
   fn tag_member_gossip() : Int do 13 end
+  doc "The wire tag of a MEMBERS_SYNC frame carrying a whole member view (14)."
   fn tag_members_sync() : Int do 14 end
 
   pfn member_fields(m : Member) do
@@ -416,10 +456,18 @@ mod SwimDriver do
     end
   end
 
+  doc """
+  Encode one member with its origin fields as a MEMBER_GOSSIP frame:
+  `[13, node_id, name, addr, creation, status_int, incarnation]`.
+  """
   fn encode_member_gossip(m : Member) : List(Int) do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(tag_member_gossip()), member_fields(m))))
   end
 
+  doc """
+  Decode a MEMBER_GOSSIP frame. Returns `Err` for invalid MessagePack, a frame
+  with another tag, a malformed member record, or a bad status int.
+  """
   fn decode_member_gossip(bytes : List(Int)) : Result(Member, String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -428,12 +476,22 @@ mod SwimDriver do
     end
   end
 
+  doc """
+  Encode a whole member view as a MEMBERS_SYNC frame:
+  `[14, [[node_id, name, addr, creation, status_int, incarnation], ...]]`.
+  Exchanged both ways on every new connection (push-pull join and heal).
+  """
   fn encode_members_sync(ms : List(Member)) : List(Int) do
     let recs = List.map(ms, fn m -> Msgpack.array(member_fields(m)))
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(tag_members_sync()), Cons(Msgpack.array(recs), Nil))))
   end
 
-  -- A malformed record is skipped, not fatal: the rest of the view still merges.
+  doc """
+  Decode a MEMBERS_SYNC frame into its members, in frame order. A malformed
+  record is skipped, not fatal, so the rest of the view still merges. Returns
+  `Err` only for invalid MessagePack or a frame that is not
+  `[14, [records...]]`.
+  """
   fn decode_members_sync(bytes : List(Int)) : Result(List(Member), String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -451,10 +509,13 @@ mod SwimDriver do
     end
   end
 
-  -- The frames one Swim.Action turns into, as (destination node_id, payload)
-  -- pairs, for a transport that writes through its own per-peer writers
-  -- instead of `dispatch`'s direct fd writes. Gossip goes to every id in
-  -- [peer_ids] as a full-member MEMBER_GOSSIP frame.
+  doc """
+  The frames one `Swim.Action` turns into, as (destination node_id, payload)
+  pairs, for a transport that writes through its own per-peer writers instead
+  of `dispatch`'s direct fd writes. A ping or ping-req yields one pair; a
+  `Gossip` yields one full-member MEMBER_GOSSIP frame per id in [peer_ids] (no
+  pairs when [peer_ids] is empty).
+  """
   fn action_frames(action : Swim.Action, my_id : String, peer_ids : List(String)) : List((String, List(Int))) do
     match action do
       SendPing(target) -> Cons((target, encode_msg(SwimPing(my_id))), Nil)
@@ -465,8 +526,12 @@ mod SwimDriver do
     end
   end
 
-  -- Decode a wire message into a driver Event (None for messages the transport
-  -- responder handles directly, e.g. SwimPing → send SwimPingAck back).
+  doc """
+  The driver `Event` for a decoded wire message: an ack becomes `PingAck`, a
+  tag-3 gossip becomes `GossipFrame`/`GossipWithLoad` with an origin-less
+  member (creation 0, name = node id, addr ""). Returns `None` for
+  `SwimPing` and `SwimPingReq`, which the transport answers directly.
+  """
   fn msg_to_event(msg : WireMsg) : Option(Event) do
     match msg do
       SwimPingAck(sender)            -> Some(PingAck(sender))
@@ -491,7 +556,13 @@ mod SwimDriver do
     end
   end
 
-  -- Execute one Swim.Action by sending the appropriate wire message(s).
+  doc """
+  Execute one `Swim.Action` by writing the wire frame straight to the peer's
+  fd from [peers]: a ping or ping-req to its one destination, a `Gossip` to
+  every registered peer as a legacy tag-3 frame (status and incarnation only;
+  the member's name, addr and creation are not sent). Destinations missing
+  from [peers] and send errors are silently ignored.
+  """
   fn dispatch(action : Swim.Action, peers : PeerRegistry.Registry, my_id : String) : () do
     match action do
       SendPing(target_id) ->
@@ -506,13 +577,13 @@ mod SwimDriver do
     end
   end
 
-  -- Dispatch a list of actions.
+  doc "Execute each action in order with `dispatch`."
   fn dispatch_all(actions : List(Swim.Action), peers : PeerRegistry.Registry, my_id : String) : () do
     List.fold_left(actions, (), fn (_, action) ->
       dispatch(action, peers, my_id))
   end
 
-  -- Like dispatch, but piggybacks [my_load] on Gossip frames (P4).
+  doc "Like `dispatch`, but a `Gossip` is sent as a tag-3 load frame that piggybacks [my_load]."
   fn dispatch_with_load(action : Swim.Action, peers : PeerRegistry.Registry,
                         my_id : String, my_load : NodeLoad) : () do
     match action do
@@ -526,6 +597,7 @@ mod SwimDriver do
     end
   end
 
+  doc "Execute each action in order with `dispatch_with_load`."
   fn dispatch_all_with_load(actions : List(Swim.Action), peers : PeerRegistry.Registry,
                              my_id : String, my_load : NodeLoad) : () do
     List.fold_left(actions, (), fn (_, action) ->

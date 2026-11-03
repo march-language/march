@@ -96,7 +96,7 @@ let has_deny profile needle =
   let re = Str.regexp_string needle in
   try ignore (Str.search_forward re profile 0); true with Not_found -> false
 
-let profile caps = Cap_sandbox.profile_for ~caps ~binary:"/tmp/whatever"
+let profile caps = Cap_sandbox.profile_for ~caps ~binary:"/tmp/whatever" ()
 
 let test_withheld_network_is_denied () =
   (* Deny-default: withholding means the ALLOW is absent, not that an
@@ -160,7 +160,7 @@ let test_target_binary_always_launchable () =
   (* Denying exec or read of the target prevents the process from starting
      at all — measured as exit 71 / SIGABRT. The profile must always carve
      these out or enforcement degenerates into "nothing runs". *)
-  let p = Cap_sandbox.profile_for ~caps:[] ~binary:"/tmp/target-bin" in
+  let p = Cap_sandbox.profile_for ~caps:[] ~binary:"/tmp/target-bin" () in
   Alcotest.(check bool) "exec is permitted by the baseline" true
     (has_deny p "(allow process-exec)");
   Alcotest.(check bool) "target is read-allowed" true
@@ -280,6 +280,208 @@ let test_filereads_enforceability_matches_backend () =
     Alcotest.(check bool) "Advisory only on a non-bwrap backend" true
       (not (Sys.file_exists "/usr/bin/bwrap" || Sys.file_exists "/bin/bwrap"))
 
+(* ── Declared path scopes (the binary's manifest) ──────────────────────
+   Scope paths live under a root that does not exist, so resolve_scope
+   (realpath of the longest existing prefix) returns them unchanged on any
+   host and the expected flags are deterministic. *)
+let nx = "/nonexistent_march_scope_root"
+
+let idx fl p =
+  let rec go i = function
+    | [] -> -1
+    | x :: tl -> if x = p then i else go (i + 1) tl
+  in
+  go 0 fl
+
+let test_bwrap_write_scope () =
+  let scopes = [ ("IO.FileWrite", Some (nx ^ "/out")) ] in
+  let fl =
+    Cap_sandbox.bwrap_args ~binary:"/tmp/app" ~scopes
+      ~caps:[ "IO.FileRead"; "IO.FileWrite" ] ()
+  in
+  Alcotest.(check bool) "scoped write => root NOT writable" false
+    (List.mem "--dev-bind / /" fl);
+  Alcotest.(check bool) "unscoped read => whole tree read-only" true
+    (List.mem "--ro-bind / /" fl);
+  let b = idx fl (Printf.sprintf "--bind-try '%s/out' '%s/out'" nx nx) in
+  Alcotest.(check bool) "write scope bound writable" true (b >= 0);
+  Alcotest.(check bool) "write scope bound after the /tmp tmpfs" true
+    (b > idx fl "--tmpfs /tmp")
+
+let test_bwrap_read_scope () =
+  let scopes = [ ("IO.FileRead", Some (nx ^ "/etc")) ] in
+  let fl = Cap_sandbox.bwrap_args ~binary:"/tmp/app" ~scopes
+      ~caps:[ "IO.FileRead" ] () in
+  Alcotest.(check bool) "scoped read => allow-list, root not bound" false
+    (List.mem "--ro-bind / /" fl || List.mem "--dev-bind / /" fl);
+  Alcotest.(check bool) "loader paths still bound" true
+    (List.mem "--ro-bind-try /usr /usr" fl);
+  Alcotest.(check bool) "read scope bound read-only" true
+    (List.mem (Printf.sprintf "--ro-bind-try '%s/etc' '%s/etc'" nx nx) fl);
+  (* IO.FileSystem("/srv") scopes both: read-only bind first, then the
+     writable one, so the writable mount wins. *)
+  let fs = Cap_sandbox.bwrap_args
+      ~scopes:[ ("IO.FileSystem", Some (nx ^ "/srv")) ]
+      ~caps:[ "IO.FileSystem" ] () in
+  let ro = idx fs (Printf.sprintf "--ro-bind-try '%s/srv' '%s/srv'" nx nx) in
+  let rw = idx fs (Printf.sprintf "--bind-try '%s/srv' '%s/srv'" nx nx) in
+  Alcotest.(check bool) "FileSystem scope: ro then rw" true (ro >= 0 && rw > ro);
+  Alcotest.(check bool) "FileSystem scope: root not bound" false
+    (List.mem "--ro-bind / /" fs || List.mem "--dev-bind / /" fs)
+
+let test_scopes_never_widen () =
+  (* A scope narrows a HELD class only: a withheld class stays withheld, and
+     an unscoped grant (or no manifest at all) keeps the old flags exactly. *)
+  let caps = [ "IO.Console" ] in
+  Alcotest.(check (list string)) "withheld write: manifest changes nothing"
+    (Cap_sandbox.bwrap_args ~binary:"/tmp/app" ~caps ())
+    (Cap_sandbox.bwrap_args ~binary:"/tmp/app"
+       ~scopes:[ ("IO.FileWrite", Some (nx ^ "/w")) ] ~caps ());
+  let caps = [ "IO.FileRead"; "IO.FileWrite" ] in
+  Alcotest.(check (list string)) "unscoped grant alongside a scope: unchanged"
+    (Cap_sandbox.bwrap_args ~caps ())
+    (Cap_sandbox.bwrap_args
+       ~scopes:[ ("IO.FileWrite", Some (nx ^ "/w")); ("IO.FileWrite", None) ]
+       ~caps ());
+  Alcotest.(check string) "SBPL: no scopes => old profile"
+    (Cap_sandbox.profile_for ~caps ~binary:"/b" ())
+    (Cap_sandbox.profile_for ~scopes:[] ~caps ~binary:"/b" ())
+
+let test_sbpl_write_scope () =
+  let p = Cap_sandbox.profile_for
+      ~scopes:[ ("IO.FileWrite", Some (nx ^ "/out")) ]
+      ~caps:[ "IO.FileWrite" ] ~binary:"/b" () in
+  Alcotest.(check bool) "blanket write grant gone" false
+    (has_deny p "(allow file-write*)\n");
+  Alcotest.(check bool) "subpath grant present" true
+    (has_deny p (Printf.sprintf "(allow file-write* (subpath \"%s/out\"))" nx))
+
+let test_resolve_scope_follows_symlinks () =
+  let d = Filename.temp_dir "scope_res" "" in
+  let real = Filename.concat d "real" in
+  Unix.mkdir real 0o755;
+  let link = Filename.concat d "link" in
+  Unix.symlink real link;
+  let real_abs = Unix.realpath real in
+  Alcotest.(check string) "existing symlink resolved" real_abs
+    (Cap_sandbox.resolve_scope link);
+  Alcotest.(check string) "missing tail re-appended to the resolved prefix"
+    (real_abs ^ "/not/yet")
+    (Cap_sandbox.resolve_scope (link ^ "/not/yet"));
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote d)))
+
+(* End to end: a REAL compiled binary carrying a scoped grant, run through
+   `forge cap run`.  Asserted by host-side effects, not program output, so
+   one test holds on both backends: macOS refuses the out-of-scope write
+   (EPERM), Linux bwrap lets it land in the sandbox's private /tmp tmpfs,
+   and either way nothing reaches the host outside the scope. *)
+let bwrap_usable () =
+  match Sys.command "bwrap --ro-bind / / true >/dev/null 2>&1" with
+  | 0 -> true
+  | _ -> false
+
+let scope_fixture ~modname ~decl ~inside ~outside =
+  Printf.sprintf
+    {|mod %s do
+  needs IO.Console
+  needs %s
+
+  fn main(_c : Cap(IO.Console), _w : Cap(IO.FileWrite)) : Unit do
+    let outside = "%s"
+    match file_write("%s", "x") do
+      Ok(_) -> println("inscope=0")
+      Err(_) -> println("inscope=1")
+    end
+    match file_write(outside ++ "", "x") do
+      Ok(_) -> println("outscope=0")
+      Err(_) -> println("outscope=1")
+    end
+  end
+end
+|}
+    modname decl outside inside
+
+let compile_fixture dir name src =
+  let path = Filename.concat dir (name ^ ".march") in
+  let oc = open_out path in
+  output_string oc src;
+  close_out oc;
+  let bin = Filename.concat dir name in
+  let rc = Sys.command
+      (Printf.sprintf "march --compile -o %s %s > %s.log 2>&1"
+         (Filename.quote bin) (Filename.quote path) (Filename.quote bin)) in
+  if rc <> 0 then Alcotest.failf "compiling %s failed (rc=%d), see %s.log" name rc bin;
+  bin
+
+let cap_run bin =
+  Sys.command
+    (Printf.sprintf "forge cap run %s > %s.run 2>&1" (Filename.quote bin)
+       (Filename.quote bin))
+
+let test_cap_run_enforces_declared_scope () =
+  if (not Cap_sandbox.supported)
+  || (Cap_sandbox.enforceability "IO.FileWrite" <> Cap_sandbox.Enforced)
+  || (not (Sys.file_exists "/usr/bin/sandbox-exec") && not (bwrap_usable ()))
+  then Alcotest.skip ()
+  else begin
+    (* Spelled through the unresolved temp dir (/var/folders -> /private/...
+       on macOS) so the scope must be resolved on this machine to match. *)
+    let d = Filename.temp_dir "cap_run_scope" "" in
+    let scope = Filename.concat d "in" in
+    Unix.mkdir scope 0o755;
+    let inside = Filename.concat scope "a.txt" in
+    let outside = Filename.concat d "out.txt" in
+    let reset () =
+      List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ inside; outside ]
+    in
+    (* Scoped grant: inside allowed, outside denied. *)
+    let scoped =
+      compile_fixture d "scoped"
+        (scope_fixture ~modname:"CapRunScoped"
+           ~decl:(Printf.sprintf "IO.FileWrite(\"%s\")" scope) ~inside ~outside)
+    in
+    (match Cap_binary.read scoped with
+     | Ok t ->
+       Alcotest.(check (result (list (pair string (option string))) string))
+         "compiled binary carries its declared scope"
+         (Ok [ ("IO.FileWrite", Some scope) ])
+         (Cap_binary.scope_decls t)
+     | Error e -> Alcotest.fail e);
+    reset ();
+    Alcotest.(check int) "scoped binary runs" 0 (cap_run scoped);
+    Alcotest.(check bool) "in-scope write reached the host" true
+      (Sys.file_exists inside);
+    Alcotest.(check bool) "out-of-scope write did NOT reach the host" false
+      (Sys.file_exists outside);
+    (* Unscoped grant: behaves as before — writes anywhere. *)
+    let unscoped =
+      compile_fixture d "unscoped"
+        (scope_fixture ~modname:"CapRunUnscoped" ~decl:"IO.FileWrite" ~inside
+           ~outside)
+    in
+    (match Cap_binary.read unscoped with
+     | Ok t ->
+       Alcotest.(check (option string))
+         "unscoped program embeds no manifest (identical to an old binary)"
+         None t.Cap_binary.manifest
+     | Error e -> Alcotest.fail e);
+    reset ();
+    Alcotest.(check int) "unscoped binary runs" 0 (cap_run unscoped);
+    (* Host effects of the UNSCOPED run are asserted on macOS only.  On bwrap
+       a program holding IO.FileWrite without IO.FileRead gets the allow-list
+       namespace whose only writable place is a private /tmp tmpfs, so its
+       writes never reach the host at all — a pre-existing limitation of
+       bwrap_args, unchanged here and recorded in
+       specs/todos/2026-08-04-path-scope-followups.md. *)
+    if Sys.file_exists "/usr/bin/sandbox-exec" then begin
+      Alcotest.(check bool) "unscoped: in-scope write lands" true
+        (Sys.file_exists inside);
+      Alcotest.(check bool) "unscoped: the 'outside' write lands too" true
+        (Sys.file_exists outside)
+    end;
+    ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote d)))
+  end
+
 let test_forge_fix_applies_capability_errors () =
   (* A capability-incorrect module must be repaired by `forge fix`, not
      refused. Both fixes are error-severity: the missing grant on `main`
@@ -329,6 +531,14 @@ let tests =
   [
     Alcotest.test_case "bwrap read scoping" `Quick test_bwrap_read_scoping;
     Alcotest.test_case "binary bound after tmpfs" `Quick test_binary_bound_after_tmpfs;
+    Alcotest.test_case "bwrap write scope" `Quick test_bwrap_write_scope;
+    Alcotest.test_case "bwrap read scope" `Quick test_bwrap_read_scope;
+    Alcotest.test_case "scopes never widen" `Quick test_scopes_never_widen;
+    Alcotest.test_case "SBPL write scope" `Quick test_sbpl_write_scope;
+    Alcotest.test_case "resolve_scope follows symlinks" `Quick
+      test_resolve_scope_follows_symlinks;
+    Alcotest.test_case "forge cap run enforces a declared scope" `Quick
+      test_cap_run_enforces_declared_scope;
     Alcotest.test_case "IO.FileRead enforceability matches backend" `Quick
       test_filereads_enforceability_matches_backend;
     Alcotest.test_case "bwrap withholds and grants correctly" `Quick

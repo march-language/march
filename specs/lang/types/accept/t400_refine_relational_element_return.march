@@ -1,0 +1,41 @@
+-- Element refinements, a relational element return as a call-site fact
+-- (2026-10-18, design specs/2026-10-18-element-flow-followups-design.md
+-- phase 4): `below(n) : List({Int | _ < n})`, once every tail is proved,
+-- carries its entry at a call with the call's actuals substituted for the
+-- parameters, so `below(10)` holds elements `< 10` and `below(k)` with
+-- `k <= 10` does too, inline or `let`-bound.  The structural self-call
+-- hypothesis is read at the self-call's own actuals (`clamp(t, n)` is
+-- `_ <= n`), a tuple component is substituted the same way, and a proved
+-- local `fn` lends a relational entry over its own parameters.  Each was an
+-- unreflectable-subject skip before (an entry naming a parameter was never a
+-- fact at a call), so `cap verified` rejected this module.  Under `cap
+-- verified`, exit 0 means every obligation PROVED.  Reject twin: reject/t401.
+mod RelationalElementReturn do
+  cap verified
+  fn sum_small(xs : List({Int | _ < 10})) : Int do 0 end
+  fn sum_le10(xs : List({Int | _ <= 10})) : Int do 0 end
+  fn need_lt(xs : List({Int | _ < n}), n : Int) : Int do 0 end
+  fn below(n : Int) : List({Int | _ < n}) do [n - 1, n - 2] end
+  fn literal() : Int do sum_small(below(10)) end
+  fn bounded(k : {Int | _ <= 10}) : Int do
+    let ys = below(k)
+    sum_small(ys) + sum_small(below(k))
+  end
+  fn both_sides(n : Int) : Int do need_lt(below(n), n) end
+  fn clamp(xs : List(Int), n : Int) : List({Int | _ <= n}) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> if h <= n do Cons(h, clamp(t, n)) else Cons(n, clamp(t, n)) end
+    end
+  end
+  fn clamped(ys : List(Int)) : Int do sum_le10(clamp(ys, 10)) end
+  fn split(n : Int) : (List({Int | _ < n}), List({Int | _ >= n})) do ([n - 1], [n]) end
+  fn halves() : Int do
+    let (lo, hi) = split(10)
+    sum_small(lo)
+  end
+  fn local(k : {Int | _ <= 10}) : Int do
+    fn bl(n : Int) : List({Int | _ < n}) do [n - 1] end
+    sum_small(bl(k))
+  end
+end

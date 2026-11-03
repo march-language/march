@@ -50,7 +50,8 @@ let find_march_doc_root () =
 (* Command                                                             *)
 (* ------------------------------------------------------------------ *)
 
-let run ?(output_dir = "doc") ?(include_private = false) ?(stdlib_only = false) () =
+let run ?(output_dir = "doc") ?(include_private = false) ?(stdlib_only = false)
+    ?(try_it = false) ?(site_base = "") () =
   match find_march_doc_root () with
   | None ->
     Error "march_doc archive not found. Install it with: forge install march-doc"
@@ -60,6 +61,8 @@ let run ?(output_dir = "doc") ?(include_private = false) ?(stdlib_only = false) 
       ["-o"; output_dir]
       @ (if include_private then ["--private"] else [])
       @ (if stdlib_only then ["--stdlib"] else [])
+      @ (if try_it then ["--try-it"] else [])
+      @ (if site_base <> "" then ["--site-base"; site_base] else [])
     in
     let task_file = Filename.concat root "forge/doc.march" in
     let lib_paths = Archive_store.lib_paths_for_root root in

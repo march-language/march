@@ -1,0 +1,103 @@
+-- Regression: owned-call drop fusion, a dying variable at several positions
+-- of one call (specs/progress/2026-10-07-owned-call-dup-arg.md).
+--
+-- Inside an owned clone (`dd$own0`, `mg$own0`), the row `h` is owned and
+-- dies at a call that passes it at TWO borrowed positions.  The first
+-- version of owned-call drop fusion handed over only variables passed once,
+-- so such a call kept `drop h` after it: in `mg`/`mf` the clone's mutual
+-- tail call became real recursion and a 1 000 000-row walk overflowed the
+-- stack (the original functions, with the feature off, loop).  Now the
+-- clone gets every position the variable occupies, one dup per extra
+-- position, and no drop is left after the call.
+--
+-- `og`/`of` pass the row at an owned AND a borrowed position.  That shape
+-- keeps its post-call drop in the clone and the original alike (borrow
+-- inference already makes `og` own its list, so the base pipeline recurses
+-- there too); it is here for the accounting.  Every shape must print what
+-- the interpreter prints, and the churn loop must not leak.
+mod Main do
+  needs IO.Console
+
+  pfn rows(i : Int, acc : List(List(Int))) : List(List(Int)) do
+    if i <= 0 do acc else rows(i - 1, Cons(Cons(i, Nil), acc)) end
+  end
+
+  -- Every row is the same list (rc > 1 through the owned walk).
+  pfn same_rows(i : Int, row : List(Int), acc : List(List(Int))) : List(List(Int)) do
+    if i <= 0 do acc else same_rows(i - 1, row, Cons(row, acc)) end
+  end
+
+  pfn head0(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(h, _) -> h
+    end
+  end
+
+  pfn llen(xs : List(List(Int)), n : Int) : Int do
+    match xs do
+      Nil -> n
+      Cons(_, t) -> llen(t, n + 1)
+    end
+  end
+
+  -- Self loop: the row `h` goes to two borrowed positions.
+  pfn dd(x : List(List(Int)), y : List(Int), z : List(Int), n : Int) : Int do
+    match x do
+      Nil -> n + head0(y) - head0(z)
+      Cons(h, t) -> dd(t, h, h, n + 1)
+    end
+  end
+
+  -- Mutual loop: the same, through a second function.
+  pfn mg(x : List(List(Int)), n : Int) : Int do
+    match x do
+      Nil -> n
+      Cons(h, t) -> mf(t, h, h, n + 1)
+    end
+  end
+
+  pfn mf(a : List(List(Int)), b : List(Int), c : List(Int), n : Int) : Int do
+    mg(a, n + head0(b) - head0(c))
+  end
+
+  -- Owned + borrowed: `of` owns `a` (it stores it) and only reads `b`.
+  pfn og(x : List(List(Int)), n : Int) : Int do
+    match x do
+      Nil -> n
+      Cons(h, t) -> of(h, h, t, n + 1)
+    end
+  end
+
+  pfn of(a : List(Int), b : List(Int), rest : List(List(Int)), n : Int) : Int do
+    og(rest, n + head0(b) - llen(Cons(a, Nil), 0) + 1)
+  end
+
+  pfn churn(k : Int, acc : Int) : Int do
+    if k <= 0 do acc
+    else
+      let s = Cons(k, Nil)
+      let r = dd(rows(40, Nil), s, s, 0) + mg(rows(40, Nil), 0) + og(rows(40, Nil), 0)
+        + mg(same_rows(10, Cons(1, Nil), Nil), 0) + head0(s)
+      churn(k - 1, acc + r)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let e = Nil
+    println("self: " ++ int_to_string(dd(rows(1000000, Nil), e, e, 0)))
+    println("mutual: " ++ int_to_string(mg(rows(1000000, Nil), 0)))
+    -- Not a loop with the feature off either (og owns its list), so short.
+    println("owned+borrowed: " ++ int_to_string(og(rows(5000, Nil), 0)))
+    let row = Cons(7, Nil)
+    println("shared rows: " ++ int_to_string(mg(same_rows(100000, row, Nil), 0))
+      ++ " " ++ int_to_string(dd(same_rows(1000, row, Nil), row, row, 0))
+      ++ " " ++ int_to_string(head0(row)))
+    let kept = rows(1000, Nil)
+    println("kept: " ++ int_to_string(mg(kept, 0)) ++ " " ++ int_to_string(llen(kept, 0)))
+    let before = live_allocs()
+    let r = churn(300, 0)
+    let grew = live_allocs() - before
+    println("loop: " ++ int_to_string(r) ++ ", flat: " ++ bool_to_string(grew < 50))
+  end
+end

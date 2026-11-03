@@ -1,0 +1,6 @@
+record=600
+json=4
+int=8
+record20k=3000000
+json20k=20000
+int20k=40000

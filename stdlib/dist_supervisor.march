@@ -6,7 +6,7 @@
 --
 -- Restart strategies (matching local supervisor semantics):
 --   Permanent  — always restart, regardless of exit reason.
---   Transient  — restart only on abnormal exit (Crash or Killed), not Normal.
+--   Transient  — restart only on abnormal exit (Crash, Killed or NodeDown), not Normal.
 --   Temporary  — never restart.
 --
 -- Supervision strategies (applied to the child set as a whole):
@@ -44,13 +44,24 @@ mod DistSupervisor do
     children     : List(ChildState)   -- in start order (important for RestForOne)
   }
 
+  doc "A supervisor using strategy [strat] with no children yet."
   fn make(strat : SupervisionStrategy) : State do
     { sup_strategy: strat, children: Nil }
   end
 
   -- ── Restart decision ────────────────────────────────────────────────────────
 
-  -- Should this child be restarted given the exit reason?
+  doc """
+  Whether a child with restart policy [restart] should be restarted after it
+  went down with [reason]: `Permanent` always, `Temporary` never, `Transient`
+  on every reason except `Normal` (so `Crash`, `Killed` and `NodeDown` all
+  restart it).
+
+  ## Examples
+
+      DistSupervisor.should_restart(Transient, DistLink.Normal)     -- false
+      DistSupervisor.should_restart(Transient, DistLink.NodeDown)   -- true
+  """
   fn should_restart(restart : RestartStrategy, reason : DistLink.DownReason) : Bool do
     match restart do
       Permanent -> true
@@ -69,8 +80,19 @@ mod DistSupervisor do
     end
   end
 
-  -- Given a failed child (identified by index in the children list), return
-  -- the indices that need restarting under the given strategy.
+  doc """
+  The child indices (0-based, in start order) to restart when child
+  [failed_idx] of [n_children] fails: `OneForOne` restarts just
+  `[failed_idx]`, `OneForAll` every index `0..n_children-1`, `RestForOne`
+  `failed_idx..n_children-1`. [failed_idx] is not range-checked:
+  `OneForOne` returns it as given, and `RestForOne` returns `[]` when it is
+  at or past [n_children].
+
+  ## Examples
+
+      DistSupervisor.restart_indices(RestForOne, 1, 4)   -- [1, 2, 3]
+      DistSupervisor.restart_indices(OneForAll, 1, 3)    -- [0, 1, 2]
+  """
   fn restart_indices(strat : SupervisionStrategy, failed_idx : Int,
                       n_children : Int) : List(Int) do
     match strat do
@@ -83,7 +105,7 @@ mod DistSupervisor do
     end
   end
 
-  -- Find a child state by its MonitorRef (for matching incoming Down messages).
+  doc "The first child monitored under [ref], with its 0-based index in [children], or `None`. O(n)."
   fn find_child_by_ref(children : List(ChildState),
                         ref : DistLink.MonitorRef) : Option((Int, ChildState)) do
     find_child_by_ref_go(children, ref, 0)
@@ -102,7 +124,7 @@ mod DistSupervisor do
     end
   end
 
-  -- Update a single child in the list (by index) and return the new list.
+  doc "[children] with the element at index [idx] replaced by [new_child]; the list is returned unchanged when [idx] is negative or out of range."
   fn update_child(children : List(ChildState), idx : Int,
                    new_child : ChildState) : List(ChildState) do
     update_child_go(children, idx, new_child, 0)
@@ -123,8 +145,10 @@ mod DistSupervisor do
 
   -- ── Summary helpers ─────────────────────────────────────────────────────────
 
+  doc "The number of supervised children."
   fn child_count(s : State) : Int do List.length(s.children) end
 
+  doc "The supervised children, in start order (every child the state tracks; no liveness check is made)."
   fn live_children(s : State) : List(ChildState) do s.children end
 
 end

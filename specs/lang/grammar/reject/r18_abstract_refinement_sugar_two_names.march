@@ -1,0 +1,5 @@
+-- EXPECT-ERROR: I got stuck here
+-- `T[p]` takes exactly one abstract-refinement name.
+mod R18AbstractRefinementSugarTwoNames do
+  fn f(xs : List(a[p, q])) : Int do 0 end
+end

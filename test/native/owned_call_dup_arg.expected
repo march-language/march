@@ -1,0 +1,6 @@
+self: 1000000
+mutual: 1000000
+owned+borrowed: 12507500
+shared rows: 100000 1000 7
+kept: 1000 1000
+loop: 330150, flat: true

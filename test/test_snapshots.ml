@@ -43,19 +43,14 @@
         ("Option", "Result", "List") — everything else (including
         compiler-generated lambda/join-point/apply names like
         "$lam2$apply$0", which DO pin real lowering/defun shape) is kept.
-      - Determinism: [Lower.lower_module] and [Perceus.perceus] each reset
-        their own fresh-name counter at entry (see [Lower.reset_counter]/
-        [_lower_counter] and [Perceus._rc_fresh_ctr]), but
-        [Defun.lambda_counter] is intentionally a cross-call counter (so a
-        REPL session never reuses a UID) and does NOT reset itself — so a
-        test process compiling multiple corpus programs back-to-back would
-        make later programs' "$Clo_name$N"/"name$apply$N" suffixes depend on
-        how many lambdas every earlier program in the run defined. Each
-        dump call below resets it explicitly
-        ([March_tir.Defun.set_lambda_counter 0]) before defunctionalizing,
-        so every corpus program's snapshot is independent of run order —
-        verified by the Step-4 determinism check (3 repeated runs, byte
-        identical, including a run with a fresh isolated $HOME). *)
+      - Determinism: every name a pass mints is structural (B1,
+        specs/plans/incremental-codegen-cas-plan.md §14): a lambda is
+        [$lam<k>_<host>], its apply fn [<lam>$apply$<k>_<host>], a fused
+        helper [$fused_mf_<host>_<k>], so a dump depends only on the program
+        being lowered, never on what else this process lowered first.
+        [Lower.lower_module] and [Perceus.perceus] still reset their
+        function-local temp counters ($t<n>) at entry.  Verified by the
+        determinism canary below and the 3-run check at landing. *)
 
 let update_mode = Sys.getenv_opt "UPDATE_SNAPSHOTS" = Some "1"
 
@@ -185,16 +180,53 @@ let render_module (m : March_tir.Tir.tir_module) =
 
 (* TIR verifier (A1, lib/tir/tir_verify.ml), always on here: this harness
    hand-rolls the pipeline instead of going through Contract_pipeline, so it
-   would otherwise never see the check.  A finding fails the case. *)
-let verified stage tir =
-  (match March_tir.Tir_verify.check ~stage tir with
+   explicitly shares Perceus's kind table and borrow map with the post-Perceus
+   RC-balance check.  A finding fails the case. *)
+let verified ?k_table ?borrow_map stage tir =
+  (match March_tir.Tir_verify.check ?k_table ?borrow_map ~stage tir with
    | [] -> ()
    | findings -> failwith (March_tir.Tir_verify.render ~stage findings));
   tir
 
+let verified_perceus ~k_table ~borrow_map tir =
+  verified ~k_table ~borrow_map "tir-perceus" tir
+
+let test_perceus_verifier_checks_rc_balance () =
+  let open March_tir.Tir in
+  let x = { v_name = "x"; v_ty = TString; v_lin = Unr } in
+  let f =
+    { fn_name = "double_drop";
+      fn_params = [x];
+      fn_ret_ty = TInt;
+      fn_body = ESeq (EDecRC (AVar x),
+                       ESeq (EDecRC (AVar x), EAtom (ALit (March_ast.Ast.LitInt 0))));
+      fn_kind = FnNormal }
+  in
+  let tir =
+    { tm_name = "SnapshotRc";
+      tm_fns = [f];
+      tm_types = [];
+      tm_externs = [];
+      tm_exports = [];
+      tm_tests = [];
+      tm_io_fns = [] }
+  in
+  let k_table = March_tir.Kind.of_module tir in
+  match verified_perceus ~k_table ~borrow_map:March_tir.Borrow.empty tir with
+  | _ -> Alcotest.fail "the Perceus snapshot verifier accepted a double release"
+  | exception Failure message ->
+    Alcotest.(check bool) "reports the RC over-release" true
+      (Test_helpers.contains "rc-balance/over-release: `x`" message)
+
 let dump_post_lower src =
-  March_tir.Defun.set_lambda_counter 0;
   render_module (verified "tir-lower" (Test_helpers.lower_module_typed src))
+
+let run_perceus tir =
+  let k_table = March_tir.Kind.of_module tir in
+  let borrow_map = March_tir.Borrow.infer_module ~k_table tir in
+  tir
+  |> March_tir.Perceus.perceus ~k_table ~borrow_map
+  |> verified_perceus ~k_table ~borrow_map
 
 (* TRMC runs post-lower / pre-mono, exactly as [Contract_pipeline] runs it,
    and it always runs — so these snapshots pin TRMC's emitted shape.  Before
@@ -203,12 +235,11 @@ let dump_post_lower src =
    zero snapshot lines, which reads as "nothing changed" when it actually
    meant "nothing was looking". *)
 let dump_post_perceus src =
-  March_tir.Defun.set_lambda_counter 0;
   let tir = verified "tir-lower" (Test_helpers.lower_module_typed src) in
   let tir = verified "tir-trmc" (March_tir.Trmc.transform_module tir) in
   let tir = verified "tir-mono" (March_tir.Mono.monomorphize tir) in
   let tir = verified "tir-defun" (March_tir.Defun.defunctionalize tir) in
-  let tir = verified "tir-perceus" (March_tir.Perceus.perceus tir) in
+  let tir = run_perceus tir in
   render_module tir
 
 (* ── Diffing ────────────────────────────────────────────────────────────
@@ -291,7 +322,6 @@ let metrics_corpus = [
 ]
 
 let dump_metrics src =
-  March_tir.Defun.set_lambda_counter 0;
   let buf = Buffer.create 256 in
   let line stage tir =
     Buffer.add_string buf
@@ -303,7 +333,7 @@ let dump_metrics src =
   let tir = line "tir-trmc" (March_tir.Trmc.transform_module tir) in
   let tir = line "tir-mono" (March_tir.Mono.monomorphize tir) in
   let tir = line "tir-defun" (March_tir.Defun.defunctionalize tir) in
-  ignore (line "tir-perceus" (March_tir.Perceus.perceus tir));
+  ignore (line "tir-perceus" (run_perceus tir));
   Buffer.contents buf
 
 let metrics_cases =
@@ -322,8 +352,7 @@ let metrics_cases =
 let test_opt_converges () =
   List.iter (fun (name, src_file) ->
     let src = read_file (src_path src_file) in
-    March_tir.Defun.set_lambda_counter 0;
-    let tir = Test_helpers.lower_module_typed src in
+      let tir = Test_helpers.lower_module_typed src in
     ignore (March_tir.Contract_pipeline.run ~opt:true tir);
     Alcotest.(check bool)
       (Printf.sprintf "%s: Opt converged (iterations: %d of 5)" name
@@ -357,5 +386,9 @@ let suites = [
   ("tir_snapshots_determinism", [
      Alcotest.test_case "dumps are stable across repeated in-process runs" `Quick
        test_double_run_determinism;
+   ]);
+  ("tir_snapshots_verify", [
+     Alcotest.test_case "post-Perceus snapshots run RC balance verification" `Quick
+       test_perceus_verifier_checks_rc_balance;
    ]);
 ]

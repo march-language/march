@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: (accumulator-base-unproved:
+-- Accumulator invariants (2026-10-18, design
+-- specs/2026-10-18-fold-accumulator-invariants-design.md phase 1), a base that
+-- fails the demand: the step `acc + x` keeps `_ > 0`, but the initial value
+-- `0` does not have it, and on an empty list `0` is the result.  All sources
+-- or nothing: a proved step with an unproved base proves nothing.  A skip,
+-- an error under `cap verified`.  Rejected before too (a parametric-source
+-- skip); it pins the reason.  Accept twin: accept/t380.
+mod FoldAccumulatorBaseFails do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn summed(pos : List({Int | _ > 0})) : Int do
+    need_pos(List.fold_left(pos, 0, fn (acc, x) -> acc + x))
+  end
+end

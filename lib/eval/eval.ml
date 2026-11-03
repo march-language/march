@@ -515,8 +515,16 @@ let handle_os_signal (osnum : int) : unit =
     | None ->
       (* Unwatched: Term/Int fall back to graceful shutdown.  Hup/Usr1/Usr2
          handlers are only installed while watched (removed on unwatch), so
-         this branch runs for Term/Int in practice. *)
-      if code = 0 || code = 1 then shutdown_requested := true
+         this branch runs for Term/Int in practice.  Graceful shutdown needs
+         a loop that polls the flag; with none running (plain compute in
+         `main`), or on a second delivery, exit the way the default action
+         does in compiled code — the flag alone left Ctrl+C and `timeout`
+         unable to stop an interpreted program. *)
+      if code = 0 || code = 1 then begin
+        if !Eval_prim.shutdown_consumers = 0 || !shutdown_requested then
+          exit (128 + if code = 0 then 15 else 2);
+        shutdown_requested := true
+      end
 
 (* ---- Logger global state ───────────────────────────────────────────
    Logger v2 keeps richer field values (Int, Float, Bool, Atom, String,
@@ -793,6 +801,10 @@ let get_march_stack () : march_frame list = !march_stack
 
 let clear_march_stack () : unit = march_stack := []
 
+let () = Eval_prim.march_stack_mark := (fun () ->
+    let saved = !march_stack in
+    fun () -> march_stack := saved)
+
 (** Global reduction context — None means reduction counting is disabled. *)
 let reduction_ctx : March_scheduler.Scheduler.reduction_ctx option ref = ref None
 
@@ -831,6 +843,84 @@ let check_reductions () : unit =
 
 (* Moved to eval_prim.ml; re-exported so [Eval.eval_error] keeps working. *)
 let eval_error = Eval_prim.eval_error
+
+(** Diagnostics: report a crash caught at a runtime boundary (the actor loop,
+    the top level) to the crash observers, before that boundary acts on it.
+    [exn] is what escaped.  Its frames are still on [march_stack] (a panic
+    leaves them for the backtrace), but each names the CALLEE at its call
+    site; they are re-paired into the compiled runtime's shape, where a frame
+    names the function the line is in, and [outer] names the outermost one
+    ("main", or the actor handler).  [base] is the stack depth at the
+    boundary's entry: an actor handler runs inside whatever pumped the
+    scheduler, whose frames are not the actor's.  The message drops the "panic: " /
+    "todo: " prefix the builtins add, as the compiled report carries the bare
+    message. *)
+let diag_report_crash ?(base = 0) ~(kind : int) ~(pid : int) ~(supervised : bool)
+    ~(outer : string) (exn : exn) : unit =
+  if !Eval_prim.diag_observers <> [] && not !Eval_prim.diag_dispatching then begin
+    let raw = match exn with
+      | Eval_error m -> m
+      | Match_failure m -> "match failure — " ^ m
+      | Assert_failure m -> m
+      | e -> Printexc.to_string e
+    in
+    let strip prefix s =
+      if String.starts_with ~prefix s then
+        String.sub s (String.length prefix) (String.length s - String.length prefix)
+      else s
+    in
+    let msg = strip "todo: " (strip "panic: " raw) in
+    (* A stdlib file as "stdlib/<name>.march", as the compiled backend names
+       it (March_tir.Provenance.display_file; this library does not link
+       march_tir). *)
+    let display_file file =
+      if Filename.basename (Filename.dirname file) = "stdlib"
+      then "stdlib/" ^ Filename.basename file else file in
+    let ctx = match exn, !Eval_prim.diag_raise_ctx with
+      | Eval_error m, Some (m', c) when m = m' -> c
+      | _ -> !Eval_prim.diag_ctx
+    in
+    let rec take n = function
+      | x :: rest when n > 0 -> x :: take (n - 1) rest
+      | _ -> []
+    in
+    let stack = take (List.length !march_stack - base) !march_stack in
+    let rec pair = function
+      | [] -> []
+      | [f] -> [(outer, f)]
+      | f :: (g :: _ as rest) -> (g.mf_name, f) :: pair rest
+    in
+    (* The innermost frames inside the prelude's panic/todo/unreachable
+       wrappers are the panic machinery, as march_panic's are compiled. *)
+    let rec drop_prelude = function
+      | (_, f) :: rest when Filename.basename f.mf_file = "prelude.march" ->
+        drop_prelude rest
+      | l -> l
+    in
+    let frames =
+      List.filter_map (fun (name, f) ->
+          if f.mf_file = "<none>" || f.mf_line <= 0 then None
+          else Some (VCon ("DiagFrame",
+                           [VString name; VString (display_file f.mf_file);
+                            VInt f.mf_line])))
+        (drop_prelude (pair stack))
+    in
+    let lst = List.fold_right (fun v acc -> VCon ("Cons", [v; acc]))
+        frames (VCon ("Nil", [])) in
+    (* The panic's call site, as the compiled backend records it
+       (march_panic_site): the innermost call outside the prelude, when it is
+       a call to panic / todo / unreachable.  A panic raised inside a prelude
+       helper (unwrap, ...) has none. *)
+    let site =
+      match List.find_opt (fun f ->
+          Filename.basename f.mf_file <> "prelude.march") stack with
+      | Some f when List.mem f.mf_name ["panic"; "todo"; "unreachable"]
+                    && f.mf_file <> "<none>" && f.mf_line > 0 ->
+        Some (display_file f.mf_file, f.mf_line)
+      | _ -> None
+    in
+    Eval_prim.diag_dispatch ~kind ~msg ~frames:lst ~pid ~supervised ~ctx ~site
+  end
 
 
 
@@ -964,20 +1054,9 @@ and match_list (pats : pattern list) (vs : value list) : (string * value) list o
    §4  Built-in environment
    ================================================================= *)
 
-let ctor_qualified_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
-
-(** Like [type_name_of_value], but a colliding [VCon]'s type resolves to its
-    declaring-module-qualified name (e.g. "NA.Thing") instead of the bare
-    short name, so a general-interface method call routes through
-    [iface_method_tbl] to the actual argument's impl rather than whichever
-    same-short-name type's impl happened to register last. Non-colliding
-    values (the common case) fall back to [type_name_of_value] unchanged. *)
-let dispatch_type_name_of_value = function
-  | VCon (tag, _) as v ->
-    (match Hashtbl.find_opt ctor_qualified_type_tbl tag with
-     | Some qualified -> Some qualified
-     | None -> type_name_of_value v)
-  | v -> type_name_of_value v
+(* [ctor_qualified_type_tbl] and [dispatch_type_name_of_value] live in
+   Eval_runtime, beside [type_name_of_value], so the `to_json` builtin can
+   route by a colliding value's qualified type too. *)
 
 (** Register every constructor of a [TDVariant] type in [ctor_type_tbl]
     (bare, as always) and, when [name_txt]'s short name collides (per
@@ -1047,6 +1126,7 @@ let value_to_string_pretty ?(width=80) ?(max_items=50) ?(max_depth=6) v =
       if String.length flat_v <= width - depth * 2 then flat_v
       else match v with
       | VRecord fields ->
+        let fields = sorted_record_fields fields in
         let pad = indent (depth * 2 + 2) in
         let close_pad = indent (depth * 2) in
         let strs = truncate_fields fields
@@ -2604,7 +2684,7 @@ let busy_actors : (int, unit) Hashtbl.t = Hashtbl.create 8
     Each pass iterates over all live actors; for each with a non-empty mailbox
     it pops one message, finds the matching [on Msg] handler, and runs it.
     Repeats until a full pass produces no work (all mailboxes empty). *)
-let run_scheduler () =
+let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
   let changed = ref true in
   while !changed && not !shutdown_requested do
     changed := false;
@@ -2721,6 +2801,7 @@ let run_scheduler () =
                  @ [("self", VPid pid)] @ !(inst.ai_env_ref)
                in
                Hashtbl.replace busy_actors pid ();
+               let stack_base = List.length (get_march_stack ()) in
                (match Fun.protect
                         ~finally:(fun () -> Hashtbl.remove busy_actors pid)
                         (fun () -> !eval_expr_hook handler_env handler.ah_body)
@@ -2756,6 +2837,10 @@ let run_scheduler () =
                   (* Handler raised an exception: crash the actor.
                      Clear the march stack so leaked frames from this handler
                      don't pollute the backtrace of the next crash. *)
+                  diag_report_crash ~base:stack_base
+                    ~kind:(if inst.ai_supervisor <> None then 1 else 0)
+                    ~pid ~supervised:(inst.ai_supervisor <> None)
+                    ~outer:msg_tag exn;
                   clear_march_stack ();
                   crash_actor pid (Printexc.to_string exn));
                current_pid := prev_pid
@@ -3612,7 +3697,30 @@ let rec eval_decl (env : env) (d : decl) : env =
        qualified lookups (EField) can find these bindings at call time
        even if the referencing module was evaluated before this one. *)
     List.iter (fun (k, v) -> Hashtbl.replace module_registry k v) prefixed;
-    prefixed @ env
+    (* A general-interface method dispatcher bound by an `impl` inside this
+       module (see the DImpl arm) is also exposed BARE to the enclosing
+       scope: interface methods are resolved by the argument's type, not by
+       the module the impl sits in, so `speak(NA.mk())` in the parent must
+       reach `impl Speak(NA.Thing)`.  Compiled code already resolves it that
+       way; without this the interpreter died "unbound variable: speak".
+       Never displaces a different outer binding of the same name. *)
+    let is_dispatcher_tag n =
+      String.length n > 10 && String.sub n 0 10 = "$dispatch$"
+    in
+    let bare_dispatchers = List.filter_map (fun (k, v) ->
+        match v with
+        | VBuiltin (tag, _) when is_dispatcher_tag tag && not (String.contains k '.') ->
+          (match List.assoc_opt k env with
+           | None -> Some (k, v)
+           | Some _ -> None)
+        | _ -> None) mod_env
+    in
+    let seen_bare = Hashtbl.create 4 in
+    let bare_dispatchers = List.filter (fun (k, _) ->
+        if Hashtbl.mem seen_bare k then false
+        else (Hashtbl.replace seen_bare k (); true)) bare_dispatchers
+    in
+    prefixed @ bare_dispatchers @ env
 
   | DImpl (idef, sp) ->
     (* Evaluate each impl method so they become callable at runtime.
@@ -3723,6 +3831,12 @@ let rec eval_decl (env : env) (d : decl) : env =
                the wrong method and recurses forever (neq → eq → neq). *)
             if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
               Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+            (* A Json codec of a same-short-name type also claims its
+               qualified slot, which the `to_json` builtin consults first via
+               [dispatch_type_name_of_value]: the bare slot above is
+               last-writer-wins across the colliding modules. *)
+            if is_json_iface && dispatch_type_name <> type_name then
+              Hashtbl.replace impl_tbl (idef.impl_iface.txt, dispatch_type_name) fn_val;
             (* General (non-builtin, non-Json) interface methods also go in the
                per-method dispatch table so a call routes by the first arg's
                runtime type, not the last-bound name (fixes multi-impl dispatch,
@@ -4306,7 +4420,9 @@ let run_module (m : module_) : unit =
   Sys.set_signal Sys.sigint  (Sys.Signal_handle handle_os_signal);
   match List.assoc_opt "__app_init__" env with
   | Some init_fn ->
-    (* App entry point: evaluate app body to get { spec, on_start, on_stop } *)
+    (* App entry point: evaluate app body to get { spec, on_start, on_stop }.
+       The whole lifecycle consumes SIGTERM/SIGINT gracefully (step 4). *)
+    Eval_prim.with_shutdown_consumer (fun () ->
     let app_record = apply init_fn [] in
     let spec = match app_record with
       | VRecord fields ->
@@ -4333,7 +4449,7 @@ let run_module (m : module_) : unit =
     if not (List.is_empty !app_spawn_order) then
       graceful_shutdown ();
     (* 5. Call on_stop hook (after tree is down) *)
-    call_hook_opt on_stop_opt
+    call_hook_opt on_stop_opt)
   | None ->
     match List.assoc_opt "main" env with
     | None   -> ()

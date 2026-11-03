@@ -163,16 +163,39 @@ let is_apply_fn (name : string) : bool =
   nl >= ml && scan 0
 
 (** The closure struct's TCon name for a lifted lambda, e.g.
-    [clo_struct_name ~fn_name:"foo" ~lam_uid:3 = "$Clo_foo$3"]. Mirrors
+    [clo_struct_name ~fn_name:"foo" ~lam_uid:"3_Main_g" = "$Clo_foo$3_Main_g"]. Mirrors
     defun.ml's inline [Printf.sprintf "$Clo_%s$%d" fn_name lam_uid]. *)
-let clo_struct_name ~(fn_name : string) ~(lam_uid : int) : string =
-  Printf.sprintf "$Clo_%s$%d" fn_name lam_uid
+let clo_struct_name ~(fn_name : string) ~(lam_uid : string) : string =
+  Printf.sprintf "$Clo_%s$%s" fn_name lam_uid
 
 (** The apply-wrapper fn name for a lifted lambda, e.g.
-    [apply_fn_name ~fn_name:"foo" ~lam_uid:3 = "foo$apply$3"]. Mirrors
+    [apply_fn_name ~fn_name:"foo" ~lam_uid:"3_Main_g" = "foo$apply$3_Main_g"]. Mirrors
     defun.ml's inline [Printf.sprintf "%s$apply$%d" fn_name lam_uid]. *)
-let apply_fn_name ~(fn_name : string) ~(lam_uid : int) : string =
-  Printf.sprintf "%s$apply$%d" fn_name lam_uid
+let apply_fn_name ~(fn_name : string) ~(lam_uid : string) : string =
+  Printf.sprintf "%s$apply$%s" fn_name lam_uid
+
+(** A lambda's uid (B1, specs/plans/incremental-codegen-cas-plan.md §14):
+    the ordinal [k] of the lambda among those of its top-level host fn, in
+    defun's traversal order, then the host spelled with ['_'] for every
+    ['$'] and ['.'] ([structural_tag]).  ["0_List_map_Int"] for the first
+    lambda of [List.map$Int].  The uid contains no ['$'], so
+    [Drop.apply_name_of_clo] can still split a closure struct's name at its
+    last ['$'], and no ['.']: about sixty name consumers take the text after
+    a name's last ['.'] as its short name or its module, and a uid ending
+    in [.main] made the entry thunk call a lambda.  ['_'] is the one other
+    character [Llvm_ctx.llvm_name] passes through unchanged (it rewrites
+    everything outside [a-zA-Z0-9_.$], and not at every reference).  Two
+    hosts that differ only in ['$'] vs ['.'] vs ['_'] at the same position
+    would share a tag; a lower-case module segment is impossible, so this
+    needs a function literally named like a mangled sibling, and the result
+    is a duplicate-symbol link error, never a silent mis-bind.
+    Structural: an edit to another function never renumbers it, which is
+    what lets a cached object keep binding to the right apply symbol. *)
+let structural_tag (s : string) : string =
+  String.map (fun c -> if c = '$' || c = '.' then '_' else c) s
+
+let lam_uid ~(host : string) (k : int) : string =
+  Printf.sprintf "%d_%s" k (structural_tag host)
 
 (** Inverse of [apply_fn_name]'s prefix: ["go$apply$3621"] → [Some "go"];
     [None] when [name] is not an apply-fn name.  Splits at the FIRST
@@ -725,6 +748,74 @@ let has_runtime_prefix (name : string) : bool =
     [__drop$<mangled type>].  A [$] guarantees no collision with a surface
     identifier (the lexer's [ident] rule admits no [$]). *)
 let drop_fn_prefix = "__drop$"
+
+(** The key [Drop] names a type's deep-drop function by
+    ([drop_fn_prefix ^ drop_type_key ty]); moved here from [Drop.mangle] so
+    [Dce] and the LLVM backend can name a record's drop function without
+    depending on [Drop]. *)
+let drop_type_key (ty : Tir.ty) : string =
+  let seen : (string, int) Hashtbl.t = Hashtbl.create 4 in
+  let var n =
+    match Hashtbl.find_opt seen n with
+    | Some k -> k
+    | None -> let k = Hashtbl.length seen in Hashtbl.replace seen n k; k in
+  let rec mangle (ty : Tir.ty) : string =
+    match ty with
+    | Tir.TInt -> "Int" | Tir.TFloat -> "Float" | Tir.TBool -> "Bool"
+    | Tir.TString -> "String" | Tir.TUnit -> "Unit"
+    | Tir.TTuple ts -> "T" ^ string_of_int (List.length ts)
+                       ^ "_" ^ String.concat "_" (List.map mangle ts)
+    | Tir.TRecord fs ->
+      (* Field names AND types, sorted, not merely the arity.  This key is the
+         memo key in [env.names] and the suffix of the synthesized function's
+         name, so a bare "R<n>" made every n-field record collide: the first
+         2-field record to be asked about decided the answer for all of them,
+         and a memoized negative (no heap children) then suppressed the drop
+         for a later { n : Int, s : String }, silently leaking its string.
+         Names are part of the identity because the drop projects fields by
+         name and TRecord's layout is name-sorted. *)
+      let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
+      "R" ^ string_of_int (List.length fs)
+      ^ "_" ^ String.concat "_"
+                (List.map (fun (n, t) -> n ^ "$" ^ mangle t) sorted)
+    | Tir.TCon (n, []) -> String.map (fun c -> if c = '.' then '_' else c) n
+    | Tir.TCon (n, args) ->
+      String.map (fun c -> if c = '.' then '_' else c) n
+      ^ "_" ^ String.concat "_" (List.map mangle args)
+    | Tir.TFn _ -> "Fn"
+    | Tir.TPtr _ -> "Ptr"
+    (* Lowering's placeholder [TVar "_"] is not a residual variable: it is
+       one fixed name, and [Kind] classifies it apart from the others
+       ([borrowable_of]).  Spelled as before, so it never shares a key (and
+       a memoized answer) with a real variable. *)
+    | Tir.TVar "_" -> "V_"
+    | Tir.TVar n -> "V" ^ string_of_int (var n)
+  in
+  mangle ty
+
+(** The TIR type of an atom as the LLVM backend reads it
+    ([Llvm_data.atom_tir_ty] is this function).  A record allocation's drop
+    key is computed from these types in [Drop], [Dce] and [Llvm_data], so they
+    must agree. *)
+let atom_ty : Tir.atom -> Tir.ty = function
+  | Tir.AVar v -> v.Tir.v_ty
+  | Tir.ALit (March_ast.Ast.LitInt _)    -> Tir.TInt
+  | Tir.ALit (March_ast.Ast.LitFloat _)  -> Tir.TFloat
+  | Tir.ALit (March_ast.Ast.LitBool _)   -> Tir.TBool
+  | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+  | Tir.ALit (March_ast.Ast.LitAtom _)   -> Tir.TCon ("Atom", [])
+  | Tir.ADefRef _ -> Tir.TVar "_"
+
+(** The deep-drop function of a record allocated with [fields] (name, type),
+    in any order: [Drop.run] synthesizes it for every record a function
+    allocates that owns a heap field, [Dce] keeps it alive through the
+    allocation, and the LLVM backend registers it with the runtime under the
+    record's shape id, so a release of the record through an ERASED type
+    ([march_decrc_erased]) is deep
+    (specs/progress/2026-10-12-erased-record-shallow-release.md). *)
+let record_drop_fn_name (fields : (string * Tir.ty) list) : string =
+  let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
+  drop_fn_prefix ^ drop_type_key (Tir.TRecord sorted)
 
 (** True if [name] is a synthesized deep-drop function.
 

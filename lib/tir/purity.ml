@@ -50,6 +50,7 @@ let impure_builtins = [
      "division by zero" / "modulo by zero"); "/" also covers float division,
      which traps on 0.0 via march_checked_fdiv — so it is impure too. *)
   "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+  "int_div_floor"; "int_mod_floor";
   "/"; "%";
 ]
 
@@ -69,6 +70,7 @@ let impure_builtins = [
 let impure_prefixes = [
   "task_"; "tcp_"; "tls_"; "http_"; "file_"; "dir_"; "process_"; "actor_";
   "vault_"; "dist_"; "signal_"; "ws_"; "logger_"; "ring_buf_"; "remote_";
+  "diag_";
   "csv_"; "dns_"; "socket_"; "udp_";
 ]
 
@@ -77,6 +79,8 @@ let impure_suffixes = [ "_set"; "_store" ]
 let impure_named = [
   (* diverging *)
   "panic"; "panic_"; "todo_"; "unreachable_";
+  (* records the next panic's call site: kept, in order, before that call *)
+  "__panic_site";
   (* random / time-derived *)
   "uuid_v7"; "uuid_v7_at";
   (* actors, monitors, supervision, capabilities *)
@@ -87,7 +91,7 @@ let impure_named = [
      no supervisor ever restarted a child *)
   "register_supervisor"; "register_supervisor_child";
   (* reads of mutable runtime state: not to be CSE'd or reordered *)
-  "self"; "is_alive"; "mailbox_size"; "get_actor_field"; "live_allocs"; "peak_rss_bytes";
+  "self"; "is_alive"; "mailbox_size"; "mailbox_backlog"; "get_actor_field"; "live_allocs"; "peak_rss_bytes";
   "sched_stat"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_inspect_store"; "register_actor_inspect"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds"; "reload_request";
   "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
   (* control constructs over effectful thunks *)

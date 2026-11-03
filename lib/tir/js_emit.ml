@@ -15,6 +15,17 @@
 
 (* ── Context ─────────────────────────────────────────────────────── *)
 
+(* Tail-call loop state for the function (or mutual-TCO group) currently
+   being emitted.  A tail call to a member is emitted as an assignment to the
+   $tco_aN parameter slots (and $tco_tag for a group) followed by
+   `continue __tco`, so self and mutual tail recursion run in constant stack.
+   None outside such a function and inside any nested JS function (an IIFE or
+   an ELetRec fn), where `continue __tco` would not reach the loop. *)
+type tco = {
+  tco_members : (string * int * Tir.var list) list;  (* name, tag, params *)
+  tco_mutual  : bool;
+}
+
 type ctx = {
   buf          : Buffer.t;
   mutable indent : int;
@@ -39,7 +50,7 @@ type ctx = {
   local_fns    : (string, unit) Hashtbl.t;
   (* ELetRec-local function names seen during emission — legitimate bare-call
      targets that are not in fn_names *)
-  unmapped     : (string, unit) Hashtbl.t;
+  unmapped     : (string, string) Hashtbl.t;
   (* direct-call names that resolve to nothing (not a user fn, local fn,
      extern, or mapped builtin): emitting them would produce a runtime
      ReferenceError, so emit_module raises Js_emit_error instead *)
@@ -52,6 +63,17 @@ type ctx = {
      pushed/popped around each ELet body. *)
   mutable shadow_ctr : int;
   (* monotonic counter minting the $sN suffix for shadowing rebindings *)
+  mutable tco : tco option;
+  (* tail-call loop target of the function being emitted (see [tco]) *)
+  reserved : (string, unit) Hashtbl.t;
+  (* JS names of variables being assigned by [emit_assign] right now: a
+     binding minted inside (an arm's `x`, an inner `let x`) must not take
+     one, or it would capture the assignment meant for the outer variable *)
+  mutable int_check : bool;
+  (* --js-int-check: integer + - * results are range-checked (see march_ck_int) *)
+  mutable src_file : string;
+  mutable cur_loc : string;
+  (* "Fn.name (file.march:LINE)" of the function being emitted, for diagnostics *)
 }
 
 let create_ctx ?(fn_lines=[]) () = {
@@ -71,6 +93,11 @@ let create_ctx ?(fn_lines=[]) () = {
   unmapped     = Hashtbl.create 4;
   name_env     = Hashtbl.create 16;
   shadow_ctr   = 0;
+  tco          = None;
+  reserved     = Hashtbl.create 8;
+  int_check    = false;
+  src_file     = "";
+  cur_loc      = "";
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -144,6 +171,12 @@ let js_string_lit s =
 let emit_literal ctx lit =
   let open March_ast.Ast in
   match lit with
+  | LitInt n when ctx.int_check && (n > 9007199254740991 || n < -9007199254740991) ->
+    (* --js-int-check: a literal (often a constant-folded product) that a
+       double can't hold exactly would silently round. *)
+    use_runtime ctx "march_ck_lit";
+    emit ctx (Printf.sprintf "march_ck_lit(%s, %s)"
+      (js_string_lit (string_of_int n)) (js_string_lit ctx.cur_loc))
   | LitInt n    -> emit ctx (string_of_int n)
   | LitFloat f  ->
     let s = string_of_float f in
@@ -174,10 +207,19 @@ let js_local ctx name =
     the outer binding, and the fresh inner id never collides with it (no
     temporal-dead-zone read of a same-named block-hoisted const). *)
 let fresh_local_name ctx name =
-  if Hashtbl.mem ctx.name_env name then begin
+  if Hashtbl.mem ctx.name_env name || Hashtbl.mem ctx.reserved (mangle name) then begin
     ctx.shadow_ctr <- ctx.shadow_ctr + 1;
     mangle name ^ "$s" ^ string_of_int ctx.shadow_ctr
   end else mangle name
+
+(* Run [f] with [js] reserved (see [ctx.reserved]); nested reservations of
+   the same name restore correctly. *)
+let with_reserved ctx js f =
+  let had = Hashtbl.mem ctx.reserved js in
+  Hashtbl.replace ctx.reserved js ();
+  let r = f () in
+  if not had then Hashtbl.remove ctx.reserved js;
+  r
 
 (** Install [js] as the current emission of source [name]; returns the previous
     mapping so [unbind_local] can restore it when the binding leaves scope. *)
@@ -220,6 +262,8 @@ let emit_atom ctx = function
       emit ctx (n ^ "$clo")
     end else if Hashtbl.mem ctx.fn_names v.Tir.v_name
        && not (Hashtbl.mem ctx.param_names v.Tir.v_name)
+       (* a let-bound local of the same name shadows the function *)
+       && not (Hashtbl.mem ctx.name_env v.Tir.v_name)
     then emit ctx (n ^ "$clo")
     (* Local binding: honour any active shadow-rename. *)
     else emit ctx (js_local ctx v.Tir.v_name)
@@ -528,6 +572,7 @@ let rec emit_val  ctx expr = emit_val_impl  ctx expr
 and     emit_stmts ctx expr = emit_stmts_impl ctx expr
 and     emit_case  ctx rv expr = emit_case_impl ctx rv expr
 and     emit_fn_decl ctx fn = emit_fn_decl_impl ctx fn
+and     emit_assign ctx rv expr = emit_assign_impl ctx rv expr
 
 (* ── Value emission ──────────────────────────────────────────────── *)
 
@@ -555,6 +600,57 @@ and emit_val_impl ctx expr =
          emit ctx "march_deep_eq(";
          emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")";
          if op = "!==" then emit ctx ")"
+       (* Int `/` truncates toward zero. The symbolic "/" reaches this inline
+          branch first, so the fallback's typed "/" arm below never ran and
+          `n / 2` emitted a plain JS `/` (7 / 2 printed 3.5). Either operand
+          being Int decides it: both sides have one type, and a negated
+          literal (`-7 / 2`) arrives as a temp whose recorded type may not be
+          TInt. `(a - a % b) / b` rather than `Math.trunc(a / b)`: the
+          remainder is exact, so the division is of an exact multiple and
+          exact everywhere within +-(2^53 - 1), where `a / b` can round up to
+          the next integer (march_int_div in march_runtime.mjs does the same).
+          Operands are atoms, so evaluating them twice is free. *)
+       | "/", [a; b]
+         when (match atom_ty a, atom_ty b with
+               | Tir.TInt, _ | _, Tir.TInt -> true | _ -> false) ->
+         emit ctx "(("; emit_atom ctx a; emit ctx " - ";
+         emit_atom ctx a; emit ctx " % "; emit_atom ctx b; emit ctx ") / ";
+         emit_atom ctx b; emit ctx ")"
+       (* --js-int-check: an Int + - * whose result leaves the doubles' exact
+          range throws, naming the enclosing function (TIR has no expression
+          positions). Operands are atoms, so evaluating them twice is free. *)
+       | ("+" | "-" | "*"), [a; b]
+         when ctx.int_check
+              && (match name with
+                  | "add_int" | "sub_int" | "mul_int" -> true
+                  | "+" | "-" | "*" ->
+                    (match atom_ty a, atom_ty b with
+                     | Tir.TInt, _ | _, Tir.TInt -> true | _ -> false)
+                  | _ -> false) ->
+         use_runtime ctx "march_ck_int";
+         emit ctx "march_ck_int(("; emit_atom ctx a; emit ctx (" " ^ op ^ " ");
+         emit_atom ctx b; emit ctx "), "; emit_atom ctx a;
+         emit ctx (", " ^ js_string_lit op ^ ", "); emit_atom ctx b;
+         emit ctx (", " ^ js_string_lit ctx.cur_loc ^ ")")
+       (* Int `+ - *` panic when the result leaves the 63-bit range, as on
+          the other backends (march_int_ovf in march_runtime.mjs).  Only
+          when an operand is known to be Int: the symbolic forms are
+          Int-or-Float, and a Float result must never be range-checked. *)
+       | ("+" | "-" | "*"), [a; b]
+         when (match name with
+               | "add_int" | "sub_int" | "mul_int" -> true
+               | "+" | "-" | "*" ->
+                 (match atom_ty a, atom_ty b with
+                  | Tir.TInt, _ | _, Tir.TInt -> true | _ -> false)
+               | _ -> false) ->
+         (* The in-range test is inline (atoms: recomputing the result is a
+            single add or multiply that V8 shares); only an overflow calls the
+            runtime, which throws. *)
+         use_runtime ctx "march_int_ovf";
+         let r () = emit ctx "("; emit_atom ctx a; emit ctx (" " ^ op ^ " "); emit_atom ctx b; emit ctx ")" in
+         emit ctx "("; r (); emit ctx " < 4611686018427387904 && "; r ();
+         emit ctx " >= -4611686018427387904 ? "; r (); emit ctx " : march_int_ovf("; r ();
+         emit ctx (match op with "+" -> ", 0))" | "-" -> ", 1))" | _ -> ", 2))")
        | _ ->
          emit ctx "(";
          emit_atom ctx (List.nth args 0);
@@ -563,6 +659,10 @@ and emit_val_impl ctx expr =
          emit ctx ")")
     | _ ->
       begin match name, args with
+      | ("neg_int" | "negate" | "-"), [a]
+        when name = "neg_int" || atom_ty a = Tir.TInt ->
+        use_runtime ctx "march_int_ovf";
+        emit ctx "march_int_ovf(-("; emit_atom ctx a; emit ctx "), 3)"
       | ("neg_int" | "neg_float" | "negate" | "-" | "-."), [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
       | ("not_bool" | "not"),  [a] -> emit ctx "(!"; emit_atom ctx a; emit ctx ")"
       | "div_int", [a; b] ->
@@ -604,7 +704,8 @@ and emit_val_impl ctx expr =
       | "string_is_empty", [a] ->
         emit ctx "("; emit_atom ctx a; emit ctx " === \"\")"
       | ("println" | "print_line"), [a] ->
-        emit ctx "console.log("; emit_atom ctx a; emit ctx ")"
+        use_runtime ctx "march_println";
+        emit ctx "march_println("; emit_atom ctx a; emit ctx ")"
       | "print", [a] ->
         use_runtime ctx "march_print";
         emit ctx "march_print("; emit_atom ctx a; emit ctx ")"
@@ -616,6 +717,8 @@ and emit_val_impl ctx expr =
         emit ctx "march_string_from_codepoint("; emit_atom ctx a; emit ctx ")"
       | "print_stderr", [a] ->
         emit ctx "console.error("; emit_atom ctx a; emit ctx ")"
+      (* The Diagnostics panic-site record: nothing to record in JS. *)
+      | "__panic_site", _ -> emit ctx "undefined"
       | ("panic" | "panic_" | "todo_" | "unreachable_"), _ ->
         let msg = if args = [] then "\"panic\""
                   else (let b = Buffer.create 16 in
@@ -632,6 +735,24 @@ and emit_val_impl ctx expr =
         emit ctx (Printf.sprintf "(!__eq_%s(" ty);
         emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx "))"
       (* Runtime-delegated builtins *)
+      (* Bitwise ops on values that fit in int32 (pixels, flags, masks — the
+         common case) inline to JS's own operators, which agree with the
+         63-bit semantics there; anything wider falls back to the exact,
+         checked runtime helper. Operands are atoms, so repeating them is free. *)
+      | ("int_and" | "int_or" | "int_xor" as n), [a; b] ->
+        let rt = "march_" ^ n in
+        let op = match n with "int_and" -> "&" | "int_or" -> "|" | _ -> "^" in
+        use_runtime ctx rt;
+        emit ctx "(("; emit_atom ctx a; emit ctx " | 0) === "; emit_atom ctx a;
+        emit ctx " && ("; emit_atom ctx b; emit ctx " | 0) === "; emit_atom ctx b;
+        emit ctx " ? ("; emit_atom ctx a; emit ctx (" " ^ op ^ " "); emit_atom ctx b;
+        emit ctx (") : " ^ rt ^ "("); emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx "))"
+      | "int_shr", [a; b] ->
+        use_runtime ctx "march_int_shr";
+        emit ctx "(("; emit_atom ctx a; emit ctx " | 0) === "; emit_atom ctx a;
+        emit ctx " && "; emit_atom ctx b; emit ctx " >= 0 && "; emit_atom ctx b;
+        emit ctx " < 32 ? ("; emit_atom ctx a; emit ctx " >> "; emit_atom ctx b;
+        emit ctx ") : march_int_shr("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx "))"
       | n, _ when (match n with
           | "string_to_int" | "string_to_float" | "string_to_lowercase"
           | "string_to_uppercase" | "string_trim" | "string_trim_start"
@@ -647,12 +768,22 @@ and emit_val_impl ctx expr =
           | "char_from_int" | "byte_to_char" | "char_to_int"
           | "char_is_digit" | "char_is_alphanumeric" | "char_is_whitespace"
           | "list_append" | "list_concat"
+          | "native_i32_arr_make" | "native_i32_arr_length"
+          | "native_i32_arr_get" | "native_i32_arr_set"
+          | "native_u8_arr_make" | "native_u8_arr_length"
+          | "native_u8_arr_get" | "native_u8_arr_set"
+          | "native_int_arr_make" | "native_int_arr_length"
+          | "native_int_arr_get" | "native_int_arr_set"
+          | "u8_arr_to_bytes"
+          | "process_argv"
           | "list_stable_sort_by" | "list_sort_by_int_key"
           (* Int builtins with 63-bit semantics — checked implementations in
              march_runtime.mjs (exact within ±2^53, throw beyond) *)
           | "int_and" | "int_or" | "int_xor" | "int_not"
           | "int_shl" | "int_shr" | "int_popcount"
           | "int_mod" | "int_div" | "int_mod_euclid" | "int_div_euclid"
+          | "int_mod_floor" | "int_div_floor"
+          | "int_wrapping_add" | "int_wrapping_sub" | "int_wrapping_mul"
             -> true | _ -> false) ->
         let rt = "march_" ^ n in
         use_runtime ctx rt;
@@ -717,7 +848,7 @@ and emit_val_impl ctx expr =
            if not (Hashtbl.mem ctx.fn_names name)
               && not (Hashtbl.mem ctx.local_fns name)
               && not (Hashtbl.mem ctx.param_names name)
-           then Hashtbl.replace ctx.unmapped name ();
+           then (if not (Hashtbl.mem ctx.unmapped name) then Hashtbl.replace ctx.unmapped name ctx.cur_loc);
            let is_async_callee = Hashtbl.mem ctx.async_fns name in
            if is_async_callee then emit ctx "(await ";
            emit ctx (mangle name ^ "(");
@@ -795,7 +926,10 @@ and emit_val_impl ctx expr =
     if has_async then emit ctx "(await (async () => {\n"
     else emit ctx "(() => {\n";
     ctx.indent <- ctx.indent + 1;
+    let saved_tco = ctx.tco in
+    ctx.tco <- None;
     emit_stmts ctx expr;
+    ctx.tco <- saved_tco;
     ctx.indent <- ctx.indent - 1;
     if has_async then (emit_indent ctx; emit ctx "})())")
     else (emit_indent ctx; emit ctx "})()")
@@ -831,6 +965,31 @@ and emit_val_impl ctx expr =
 and emit_stmts_impl ctx expr =
   match expr with
 
+  | Tir.EApp (f, args) when tco_member ctx f.Tir.v_name args <> None ->
+    emit_tail_jump ctx f.Tir.v_name args
+
+  | Tir.ELet (tmp, Tir.EApp (f, args), body)
+    when tco_member ctx f.Tir.v_name args <> None
+         && Llvm_tco.is_trivial_dec_chain_returning tmp.Tir.v_name body ->
+    (* Perceus's post-call DecRC wrapper around a tail call: the DecRCs are
+       no-ops in JS, so the call is the tail. *)
+    emit_tail_jump ctx f.Tir.v_name args
+
+  | Tir.ELet (v, e1, rest) when is_compound e1 && (match e1 with Tir.ECase _ -> false | _ -> true) ->
+    (* A let whose value is itself a let/seq: compute it as statements into
+       the binding, not through a closure (see [emit_assign]). *)
+    let name = v.Tir.v_name in
+    let js = fresh_local_name ctx name in
+    emit_indent ctx; emit ctx "{\n";
+    ctx.indent <- ctx.indent + 1;
+    emitl ctx ("let " ^ js ^ ";");
+    with_reserved ctx js (fun () -> emit_assign ctx js e1);
+    let prev = install_local ctx name js in
+    emit_stmts ctx rest;
+    unbind_local ctx name prev;
+    ctx.indent <- ctx.indent - 1;
+    emit_indent ctx; emit ctx "}\n"
+
   | Tir.ELet (v, (Tir.ECase _ as case_expr), rest) ->
     (* let v = match ... — emit switch that assigns to v.
        Wrap in a block so this binding can shadow an outer variable of the same
@@ -841,7 +1000,7 @@ and emit_stmts_impl ctx expr =
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
     emitl ctx ("let " ^ js ^ ";");
-    emit_case ctx (Some js) case_expr;
+    with_reserved ctx js (fun () -> emit_case ctx (Some js) case_expr);
     let prev = install_local ctx name js in
     emit_stmts ctx rest;
     unbind_local ctx name prev;
@@ -892,13 +1051,7 @@ and emit_stmts_impl ctx expr =
     emit_stmts ctx e1
 
   | Tir.ESeq (e1, e2) ->
-    (match e1 with
-     | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
-     | Tir.EFree _ | Tir.EReuse _ -> ()
-     | _ ->
-       emit_indent ctx;
-       emit_val ctx e1;
-       emit ctx ";\n");
+    emit_effect ctx e1;
     emit_stmts ctx e2
 
   | Tir.ECase _ ->
@@ -935,16 +1088,8 @@ and emit_case_impl ctx result_var expr =
     (* Helper: emit the result assignment or return for a branch body *)
     let emit_result body =
       match result_var with
-      | Some v ->
-        emit_indent ctx;
-        emit ctx (v ^ " = ");
-        emit_val ctx body;
-        emit ctx ";\n"
-      | None ->
-        emit_indent ctx;
-        emit ctx "return ";
-        emit_val ctx body;
-        emit ctx ";\n"
+      | Some v -> emit_assign ctx v body
+      | None -> emit_stmts ctx body
     in
     (* Tuples can appear as TTuple or as TCon("$TupleN", ...) or detected
        by the branch tag starting with "$Tuple". Use branch tags as the
@@ -969,34 +1114,37 @@ and emit_case_impl ctx result_var expr =
         in
         let binds = bind_br_vars ctx scrut_name br.Tir.br_vars in
         (match result_var with
-         | Some rv ->
-           emit_indent ctx; emit ctx (rv ^ " = ");
-           emit_val ctx br.Tir.br_body; emit ctx ";\n"
+         | Some rv -> emit_assign ctx rv br.Tir.br_body
          | None -> emit_stmts ctx br.Tir.br_body);
         unbind_br_vars ctx binds
       ) branches;
-      (match default with
-       | Some d ->
+      (* A tuple's one branch always matches (it only destructures), so the
+         default — the compiler's non-exhaustive throw — is reachable only
+         when there is no branch.  Emitted after a branch in assignment mode
+         it overwrote the branch's result with the throw. *)
+      (match default, branches with
+       | Some d, [] ->
          (match result_var with
-          | Some rv ->
-            emit_indent ctx; emit ctx (rv ^ " = ");
-            emit_val ctx d; emit ctx ";\n"
+          | Some rv -> emit_assign ctx rv d
           | None -> emit_stmts ctx d)
-       | None -> ())
+       | _ -> ())
     end else
     (* Also take the literal if/else path when the scrutinee's static type is
        ERASED (a TVar-typed tuple-field / ctor-payload binder — e.g. the `n` in a
        desugared multi-head fn `match (cells, n) do (cells, 0) -> … | (cells, n)
        -> …`) but every branch tag is an immediate literal (Int/Bool/Atom).
        Otherwise we emit `switch (n.$) { case "0": … }` on a raw number, whose
-       `.$` is `undefined`, so the base case is dead and the fn infinite-loops.
+       `.$` is `undefined`, so the base case is dead and the fn infinite-loops
+       (and a String field matched against literals never matched at all).
        Mirrors the native backend's all_imm_lit_tags (llvm_case.ml). *)
     let all_imm_lit_tags =
       branches <> [] &&
       List.for_all (fun br ->
         let t = br.Tir.br_tag in
         t = "true" || t = "false" || int_of_string_opt t <> None
-        || (String.length t > 0 && t.[0] = ':')) branches
+        (* atom, string (`"s"`, e.g. a tuple field matched against string
+           literals) and float (`#hex`) tags: never a constructor's *)
+        || (String.length t > 0 && (t.[0] = ':' || t.[0] = '"' || t.[0] = '#'))) branches
     in
     if is_literal_scrutinee_ty s_ty || all_imm_lit_tags then begin
       (* Literal/bool: if/else chain *)
@@ -1045,10 +1193,7 @@ and emit_case_impl ctx result_var expr =
             let binds = bind_br_vars ctx scrut_name br.Tir.br_vars in
             (match result_var with
              | Some rv ->
-               emit_indent ctx;
-               emit ctx (rv ^ " = ");
-               emit_val ctx br.Tir.br_body;
-               emit ctx ";\n";
+               emit_assign ctx rv br.Tir.br_body;
                emitl ctx "break;"
              | None ->
                (* Statement position: emit_stmts does not always end in a
@@ -1071,8 +1216,7 @@ and emit_case_impl ctx result_var expr =
            with_indent ctx (fun () ->
              match result_var with
              | Some rv ->
-               emit_indent ctx; emit ctx (rv ^ " = ");
-               emit_val ctx d; emit ctx ";\n";
+               emit_assign ctx rv d;
                emitl ctx "break;"
              | None -> emit_stmts ctx d
            )
@@ -1085,55 +1229,234 @@ and emit_case_impl ctx result_var expr =
 
 (* ── Function definition emission ───────────────────────────────── *)
 
+(* ── Assignment mode ──────────────────────────────────────────────
+
+   [emit_assign ctx rv e] emits statements that compute [e] and assign it to
+   the (already declared) JS variable [rv].  A compound expression in value
+   position (a let bound to a match, a let chain, an arm that binds) used to
+   become an immediately invoked closure, one per expression, which was ~40%
+   of a Herald frame; this keeps it in the enclosing function.  It never emits
+   a tail-call jump: nothing it emits is in tail position. *)
+and emit_assign_impl ctx rv expr =
+  match expr with
+  | Tir.ELet (v, e1, e2) ->
+    let name = v.Tir.v_name in
+    let js = fresh_local_name ctx name in
+    emit_indent ctx; emit ctx "{\n";
+    ctx.indent <- ctx.indent + 1;
+    if is_compound e1 then begin
+      emitl ctx ("let " ^ js ^ ";");
+      with_reserved ctx js (fun () -> emit_assign ctx js e1)
+    end else begin
+      emit_indent ctx;
+      emit ctx ("const " ^ js ^ " = ");
+      emit_val ctx e1;
+      emit ctx ";\n"
+    end;
+    let prev = install_local ctx name js in
+    emit_assign ctx rv e2;
+    unbind_local ctx name prev;
+    ctx.indent <- ctx.indent - 1;
+    emit_indent ctx; emit ctx "}\n"
+  | Tir.ELetRec (fns, body) ->
+    List.iter (fun (fn : Tir.fn_def) ->
+      Hashtbl.replace ctx.local_fns fn.Tir.fn_name ()) fns;
+    List.iter (emit_fn_decl ctx) fns;
+    emit_assign ctx rv body
+  | Tir.ESeq (e1, e2) when is_rc_noop_only e2 && not (is_rc_noop_only e1) ->
+    (* Perceus's self-call + post-DecRC shape: e1 is the value *)
+    emit_assign ctx rv e1
+  | Tir.ESeq (e1, e2) ->
+    emit_effect ctx e1;
+    emit_assign ctx rv e2
+  | Tir.ECase _ -> emit_case ctx (Some rv) expr
+  | Tir.EApp (f, args)
+    when (match f.Tir.v_name with
+          | "panic" | "panic_" | "todo_" | "unreachable_" -> true | _ -> false) ->
+    (* a panic needs no value: a throw statement, not a throwing closure *)
+    emit_indent ctx;
+    emit ctx "throw new Error(";
+    (match args with a :: _ -> emit_atom ctx a | [] -> emit ctx "\"panic\"");
+    emit ctx ");\n"
+  | e ->
+    emit_indent ctx;
+    emit ctx (rv ^ " = ");
+    emit_val ctx e;
+    emit ctx ";\n"
+
+(* An expression evaluated only for its effect: RC ops vanish; a compound one
+   is computed into a throwaway variable rather than a closure. *)
+and emit_effect ctx e =
+  match e with
+  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
+  | Tir.EFree _ | Tir.EReuse _ -> ()
+  | e when is_compound e ->
+    let tmp = fresh_local_name ctx "$eff" in
+    emit_indent ctx; emit ctx "{\n";
+    ctx.indent <- ctx.indent + 1;
+    emitl ctx ("let " ^ tmp ^ ";");
+    with_reserved ctx tmp (fun () -> emit_assign ctx tmp e);
+    ctx.indent <- ctx.indent - 1;
+    emit_indent ctx; emit ctx "}\n"
+  | e ->
+    emit_indent ctx;
+    emit_val ctx e;
+    emit ctx ";\n"
+
+and is_compound = function
+  | Tir.ECase _ | Tir.ELet _ | Tir.ELetRec _ | Tir.ESeq _ -> true
+  | _ -> false
+
 and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
+  let self_loop = Llvm_tco.has_self_tail_call fn.Tir.fn_name fn.Tir.fn_body in
+  let params = fn.Tir.fn_params in
+  let slot i = Printf.sprintf "$tco_a%d" i in
+  emit_fn_header ctx fn
+    (if self_loop then List.mapi (fun i _ -> slot i) params
+     else List.map (fun p -> mangle p.Tir.v_name) params);
+  let saved_tco = ctx.tco in
+  if self_loop then begin
+    ctx.tco <- Some { tco_members = [ (fn.Tir.fn_name, 0, params) ];
+                      tco_mutual = false };
+    with_indent ctx (fun () ->
+      emitl ctx "__tco: for (;;) {";
+      with_indent ctx (fun () ->
+        emit_fn_body ctx params ~slots:true fn.Tir.fn_body;
+        emitl ctx "return undefined;");
+      emitl ctx "}")
+  end else begin
+    ctx.tco <- None;
+    with_indent ctx (fun () -> emit_fn_body ctx params ~slots:false fn.Tir.fn_body)
+  end;
+  ctx.tco <- saved_tco;
+  emit_indent ctx;
+  emit ctx "}\n";
+  emit_clo_wrapper ctx fn
+
+(* `[async] function NAME(P0, P1, ...) {` with a source-map segment. *)
+and emit_fn_header ctx (fn : Tir.fn_def) (param_js : string list) =
   let fname = mangle fn.Tir.fn_name in
   let is_async = Hashtbl.mem ctx.async_fns fn.Tir.fn_name in
-  (* Record source map segment: current output line → source line for this fn *)
+  set_loc ctx fn;
   (match Hashtbl.find_opt ctx.fn_lines fn.Tir.fn_name with
    | Some src_line when src_line > 0 ->
      ctx.segments := (ctx.line, src_line - 1) :: !(ctx.segments)
    | _ -> ());
   emit_indent ctx;
   if is_async then emit ctx "async ";
-  emit ctx ("function " ^ fname ^ "(");
-  List.iteri (fun i p ->
-    if i > 0 then emit ctx ", ";
-    emit ctx (mangle p.Tir.v_name)) fn.Tir.fn_params;
-  emit ctx ") {\n";
+  emit ctx ("function " ^ fname ^ "(" ^ String.concat ", " param_js ^ ") {\n")
+
+and set_loc ctx (fn : Tir.fn_def) =
+  ctx.cur_loc <-
+    (match Hashtbl.find_opt ctx.fn_lines fn.Tir.fn_name with
+     | Some l when l > 0 ->
+       Printf.sprintf "%s (%s:%d)" fn.Tir.fn_name (Filename.basename ctx.src_file) l
+     | _ -> fn.Tir.fn_name)
+
+(* A function body in its own name scope.  With [slots], the params arrive in
+   $tco_aN and are bound to fresh consts first, so each loop iteration (and any
+   closure it builds) sees its own values. *)
+and emit_fn_body ctx (params : Tir.var list) ~slots body =
   (* Register params so emit_atom won't add $clo suffix to param variables
      that happen to share a name with a module-level function. *)
   Hashtbl.clear ctx.param_names;
-  List.iter (fun p -> Hashtbl.replace ctx.param_names p.Tir.v_name ()) fn.Tir.fn_params;
+  List.iter (fun p -> Hashtbl.replace ctx.param_names p.Tir.v_name ()) params;
   (* Seed the shadow-rename scope with the params (identity mapping) and, for
      a nested (ELetRec) fn, SAVE the enclosing fn's local scope so it can be
      restored — a nested fn's body reaches outer values via $fv closure fields,
      never by their source names, so it only needs its own params in scope. *)
   let saved_names = Hashtbl.copy ctx.name_env in
   Hashtbl.clear ctx.name_env;
-  List.iter (fun p ->
-    Hashtbl.replace ctx.name_env p.Tir.v_name (mangle p.Tir.v_name))
-    fn.Tir.fn_params;
-  with_indent ctx (fun () -> emit_stmts ctx fn.Tir.fn_body);
+  List.iteri (fun i p ->
+    Hashtbl.replace ctx.name_env p.Tir.v_name (mangle p.Tir.v_name);
+    if slots then
+      emitl ctx (Printf.sprintf "const %s = $tco_a%d;" (mangle p.Tir.v_name) i))
+    params;
+  emit_stmts ctx body;
   Hashtbl.clear ctx.name_env;
   Hashtbl.iter (fun k v -> Hashtbl.replace ctx.name_env k v) saved_names;
-  Hashtbl.clear ctx.param_names;
+  Hashtbl.clear ctx.param_names
+
+(* Closure-protocol wrapper: allows this function to be used as a first-class
+   value via ECallPtr dispatch (f._0(f, args)).
+   $_ is the closure self-pointer (unused since top-level fns have no free vars).
+   Async fns get an async arrow so the $clo call also propagates the Promise. *)
+and emit_clo_wrapper ctx (fn : Tir.fn_def) =
+  let fname = mangle fn.Tir.fn_name in
+  let ps = List.map (fun p -> mangle p.Tir.v_name) fn.Tir.fn_params in
   emit_indent ctx;
-  emit ctx "}\n";
-  (* Closure-protocol wrapper: allows this function to be used as a first-class
-     value via ECallPtr dispatch (f._0(f, args)).
-     $_ is the closure self-pointer (unused since top-level fns have no free vars).
-     Async fns get an async arrow so the $clo call also propagates the Promise. *)
-  emit_indent ctx;
-  if is_async then
+  if Hashtbl.mem ctx.async_fns fn.Tir.fn_name then
     emit ctx ("const " ^ fname ^ "$clo = { _0: async ($_")
   else
     emit ctx ("const " ^ fname ^ "$clo = { _0: ($_");
-  List.iter (fun p -> emit ctx (", " ^ mangle p.Tir.v_name)) fn.Tir.fn_params;
-  emit ctx (") => " ^ fname ^ "(");
-  List.iteri (fun i p ->
-    if i > 0 then emit ctx ", ";
-    emit ctx (mangle p.Tir.v_name)) fn.Tir.fn_params;
-  emit ctx ") };\n\n"
+  List.iter (fun p -> emit ctx (", " ^ p)) ps;
+  emit ctx (") => " ^ fname ^ "(" ^ String.concat ", " ps ^ ") };\n\n")
+
+(* The loop member a call to [name] with [args] jumps to, if any. *)
+and tco_member ctx name args =
+  match ctx.tco with
+  | None -> None
+  | Some t ->
+    List.find_opt (fun (n, _, ps) ->
+      String.equal n name && List.length ps = List.length args) t.tco_members
+
+(* A tail call to a loop member: rebind the parameter slots and loop.  Args are
+   atoms naming consts (never the slots), so assigning in order is safe. *)
+and emit_tail_jump ctx name args =
+  match ctx.tco, tco_member ctx name args with
+  | Some t, Some (_, tag, _) ->
+    emitl ctx "{";
+    with_indent ctx (fun () ->
+      if t.tco_mutual then emitl ctx (Printf.sprintf "$tco_tag = %d;" tag);
+      List.iteri (fun i a ->
+        emit_indent ctx;
+        emit ctx (Printf.sprintf "$tco_a%d = " i);
+        emit_atom ctx a;
+        emit ctx ";\n") args;
+      emitl ctx "continue __tco;");
+    emitl ctx "}"
+  | _ -> failwith "emit_tail_jump: not a loop member"
+
+(* A mutual-TCO group: one dispatcher looping over a switch on $tco_tag (one
+   case per member, its body emitted with tail calls to any member as jumps),
+   plus a wrapper per member that enters the dispatcher at its tag. *)
+and emit_mutual_group ctx (group : Tir.fn_def list) =
+  let disp = "$mutco_" ^ mangle (List.hd group).Tir.fn_name in
+  let is_async = List.exists (fun fn -> Hashtbl.mem ctx.async_fns fn.Tir.fn_name) group in
+  let width = List.fold_left (fun m fn -> max m (List.length fn.Tir.fn_params)) 0 group in
+  let slots = List.init width (fun i -> Printf.sprintf "$tco_a%d" i) in
+  emit_indent ctx;
+  if is_async then emit ctx "async ";
+  emit ctx ("function " ^ disp ^ "(" ^ String.concat ", " ("$tco_tag" :: slots) ^ ") {\n");
+  let saved_tco = ctx.tco in
+  ctx.tco <- Some {
+    tco_members = List.mapi (fun i fn -> (fn.Tir.fn_name, i, fn.Tir.fn_params)) group;
+    tco_mutual = true };
+  with_indent ctx (fun () ->
+    emitl ctx "__tco: for (;;) {";
+    with_indent ctx (fun () ->
+      emitl ctx "switch ($tco_tag) {";
+      List.iteri (fun i fn ->
+        emitl ctx (Printf.sprintf "case %d: {" i);
+        set_loc ctx fn;
+        with_indent ctx (fun () ->
+          emit_fn_body ctx fn.Tir.fn_params ~slots:true fn.Tir.fn_body;
+          emitl ctx "return undefined;");
+        emitl ctx "}") group;
+      emitl ctx "}";
+      emitl ctx "throw new Error(\"mutual-TCO dispatch: bad tag\");");
+    emitl ctx "}");
+  ctx.tco <- saved_tco;
+  emitl ctx "}";
+  List.iteri (fun i fn ->
+    let ps = List.map (fun p -> mangle p.Tir.v_name) fn.Tir.fn_params in
+    let pad = List.init (width - List.length ps) (fun _ -> "undefined") in
+    emit_fn_header ctx fn ps;
+    with_indent ctx (fun () ->
+      emitl ctx ("return " ^ disp ^ "(" ^
+                 String.concat ", " (string_of_int i :: ps @ pad) ^ ");"));
+    emitl ctx "}";
+    emit_clo_wrapper ctx fn) group
 
 (* ── Structural equality ─────────────────────────────────────────── *)
 
@@ -1336,7 +1659,7 @@ const float_to_int    = { _0: ($_, x) => Math.trunc(x) };
 const float_truncate  = { _0: ($_, x) => Math.trunc(x) };
 const string_is_empty = { _0: ($_, x) => x === "" };
 const not_bool        = { _0: ($_, x) => !x };
-const negate_int      = { _0: ($_, x) => -x };
+const negate_int      = { _0: ($_, x) => march_int_ovf(-x, 3) };
 const negate_float    = { _0: ($_, x) => -x };
 const float_abs       = { _0: ($_, x) => Math.abs(x) };
 const float_floor     = { _0: ($_, x) => Math.floor(x) };
@@ -1352,8 +1675,10 @@ exception Js_emit_error of string list
     [fn_lines] maps TIR function names to 1-indexed source lines (from the AST).
     [source_file] is the path to the originating .march file (for source maps).
     Raises [Js_emit_error] when used C-backed externs are present (Chunk C). *)
-let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string * string option =
+let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir_module) : string * string option =
   let ctx = create_ctx ~fn_lines () in
+  ctx.int_check <- int_check;
+  ctx.src_file <- source_file;
   (* Pre-register all user-defined function names so emit_atom emits $clo versions *)
   List.iter (fun fn -> Hashtbl.replace ctx.fn_names fn.Tir.fn_name ()) m.Tir.tm_fns;
   (* Register externs separately for lazy tracking (not in fn_names to avoid
@@ -1367,7 +1692,16 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
   compute_async_fns ctx m.Tir.tm_fns;
   (* Top-level functions — populates used_externs via call-site tracking
      and records (output_line, source_line) segments for source maps *)
-  List.iter (emit_fn_decl ctx) m.Tir.tm_fns;
+  let groups =
+    List.filter (fun g -> List.length g >= 2) (Llvm_tco.tarjan_sccs m.Tir.tm_fns) in
+  let in_group name = List.exists (List.mem name) groups in
+  List.iter (fun g ->
+    emit_mutual_group ctx
+      (List.filter_map (fun n ->
+         List.find_opt (fun fn -> String.equal fn.Tir.fn_name n) m.Tir.tm_fns) g))
+    groups;
+  List.iter (fun fn -> if not (in_group fn.Tir.fn_name) then emit_fn_decl ctx fn)
+    m.Tir.tm_fns;
   let fns_js = Buffer.contents ctx.buf in
   let raw_segments = !(ctx.segments) in
   (* Emit extern bridges only for externs actually referenced in the emitted code *)
@@ -1390,7 +1724,7 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
      ReferenceError at runtime; fail the compile with a diagnostic instead. *)
   let unmapped_names =
     List.sort String.compare
-      (Hashtbl.fold (fun k () acc -> k :: acc) ctx.unmapped []) in
+      (Hashtbl.fold (fun k _ acc -> k :: acc) ctx.unmapped []) in
   let unmapped_msgs = List.map (fun name ->
     match name with
     | "int_max_value" | "int_min_value" ->
@@ -1410,11 +1744,14 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
         name
     | _ ->
       Printf.sprintf
-        "error: builtin `%s` has no JavaScript-target implementation.\n\
+        "error: builtin `%s` has no JavaScript-target implementation%s.\n\
          The compiled call would throw ReferenceError at runtime. Add a\n\
          mapping in lib/tir/js_emit.ml (+ runtime/march_runtime.mjs if it\n\
          needs a helper), or build a native/wasm target."
         name
+        (match Hashtbl.find_opt ctx.unmapped name with
+         | Some loc when loc <> "" -> " (called from " ^ loc ^ ")"
+         | _ -> "")
   ) unmapped_names in
   if extern_msgs <> [] || unmapped_msgs <> [] then
     raise (Js_emit_error (extern_msgs @ unmapped_msgs));
@@ -1431,9 +1768,12 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
      whether the compiled code already uses them directly. *)
   Hashtbl.replace ctx.runtime_uses "march_float_to_string" ();
   Hashtbl.replace ctx.runtime_uses "march_string_byte_length" ();
+  Hashtbl.replace ctx.runtime_uses "march_int_ovf" ();   (* negate_int *)
   let int_rt_builtins2 =   (* two-argument runtime-backed int builtins *)
     [ "int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr";
-      "int_mod"; "int_div"; "int_mod_euclid"; "int_div_euclid" ] in
+      "int_mod"; "int_div"; "int_mod_euclid"; "int_div_euclid";
+      "int_mod_floor"; "int_div_floor";
+      "int_wrapping_add"; "int_wrapping_sub"; "int_wrapping_mul" ] in
   let int_rt_builtins1 = [ "int_not"; "int_popcount" ] in
   List.iter (fun n -> Hashtbl.replace ctx.runtime_uses ("march_" ^ n) ())
     (int_rt_builtins2 @ int_rt_builtins1);

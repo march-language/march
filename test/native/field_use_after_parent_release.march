@@ -1,0 +1,79 @@
+-- A field projected out of a record is a borrow of the record, and the record
+-- must outlive it.  Three shapes released the record first (compiled only;
+-- specs/progress/2026-10-08-perceus-parent-released-before-field-use.md):
+-- a string match on a field whose binder arm read the field after the record's
+-- release, a nested projection read after the record was consumed by a call,
+-- and a record update from a find result.  Each loops so a freed string is
+-- reused before it is read.
+mod FieldUseAfterParentRelease do
+  needs IO.Console
+
+  -- 1. String match on a field, binder arm.
+  type D = { tag : String, n : Int }
+
+  fn classify(d : D) : String do
+    match d.tag do
+      "known" ->
+        let a = int_to_string(d.n) ++ "a" ++ int_to_string(d.n * 3)
+        let b = a ++ int_to_string(d.n * 5) ++ a ++ int_to_string(d.n * 11)
+        let c = b ++ a ++ int_to_string(string_byte_length(b))
+        c ++ b ++ a
+      other -> "unknown " ++ other
+    end
+  end
+
+  fn classify_loop(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else
+      let s = classify({ tag: "t" ++ int_to_string(i * 7919), n: i })
+      let junk = "x" ++ int_to_string(i) ++ "yyyyyyyyyyyy"
+      classify_loop(i - 1, acc + string_byte_length(s) + string_byte_length(junk) - string_byte_length(junk))
+    end
+  end
+
+  -- 2. Nested projection, then the parent consumed by a call.
+  type Ap = { fingerprint : String, k : Int }
+  type Offer = { ap : Ap, sessions : List(Int) }
+
+  pfn active(o : Offer) : Int do
+    List.length(o.sessions)
+  end
+
+  pfn line(name : String, o : Offer) : String do
+    "offer " ++ name ++ " fp " ++ o.ap.fingerprint ++ " sessions " ++ int_to_string(active(o))
+  end
+
+  -- 3. Record update from a find result.
+  type Place = Here(String) | Nowhere
+  type Want = { w_name : String, w_place : Place, w_cap : Int }
+  type Run = { name : String, place : Place, cap : Int }
+
+  fn pick(r : Run, wants : List(Want)) : Run do
+    match List.find(wants, fn w -> w.w_name == r.name) do
+      None -> { r with place: Nowhere }
+      Some(w) -> { r with place: w.w_place, cap: if r.cap == 0 do 0 else w.w_cap end }
+    end
+  end
+
+  fn pick_loop(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else
+      let wants = [{ w_name: "a", w_place: Here("node-" ++ int_to_string(i)), w_cap: i }]
+      let r = pick({ name: "a", place: Nowhere, cap: i % 2 }, wants)
+      let n = match r.place do
+        Here(s) -> string_byte_length(s)
+        Nowhere -> 0
+      end
+      pick_loop(i - 1, acc + n + r.cap)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(classify({ tag: "tag-" ++ int_to_string(12345), n: 1 }))
+    println(int_to_string(classify_loop(20000, 0)))
+    List.each([1, 2, 3], fn i ->
+      println(line("role" ++ int_to_string(i),
+                   { ap: { fingerprint: "fp-" ++ int_to_string(i * 1000003), k: i }, sessions: [i, i + 1] })))
+    println(int_to_string(pick_loop(2000, 0)))
+  end
+end

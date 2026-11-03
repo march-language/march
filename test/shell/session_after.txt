@@ -1,0 +1,4 @@
+Actor.list(intro)
+let k = Actor.pid_from_int(intro, 1)
+send(k, Bump(100))
+Actor.inspect_state(debug, k, 500)

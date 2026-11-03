@@ -11,7 +11,7 @@
 
    The generated files are checked in to runtime/ (see the CAS
    runtime_identity digest in lib/cas/cas.ml, which hashes every
-   runtime/*.c and *.h into the compiled-binary cache key — a generated
+   runtime/**/*.c and *.h into the compiled-binary cache key — a generated
    file must physically exist there at link time, generate-at-build-time
    into a build directory is not an option).
 

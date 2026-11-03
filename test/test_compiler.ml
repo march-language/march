@@ -1013,6 +1013,29 @@ let test_tc_private_nested_member_diagnostic () =
   Alcotest.(check bool)
     "diagnostic names the private member, not 'Unknown module'" true says_private
 
+let test_tc_stdlib_module_name_wrong_case () =
+  (* `Bigint` is not a module (it is `BigInt`), but the stdlib loader's
+     filename guess `bigint.march` found BigInt's file and registered its
+     exports under the misspelling: the program typechecked, compiled code
+     ran it, and the interpreter died "unbound variable: Bigint.from_int". *)
+  let ctx = typecheck {|mod Main do
+    fn main() : String do BigInt.to_string(Bigint.from_int(3)) end
+  end|} in
+  Alcotest.(check bool) "misspelled-case stdlib module: rejected" true (has_errors ctx);
+  let suggests =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+      try ignore (Str.search_forward
+                    (Str.regexp_string "Unknown module `Bigint`. Did you mean `BigInt`?")
+                    d.message 0); true
+      with Not_found -> false)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "diagnostic suggests the declared name" true suggests;
+  let ok = typecheck {|mod Main do
+    fn main() : String do BigInt.to_string(BigInt.from_int(3)) end
+  end|} in
+  Alcotest.(check bool) "correct spelling still typechecks" false (has_errors ok)
+
 let test_tc_private_nested_member_name_collides_with_builtin () =
   (* Same bug as [test_tc_private_nested_member_diagnostic], but the private
      member's bare name ("hash") coincides with a globally-bound identifier
@@ -1674,6 +1697,69 @@ let test_impl_when_constraint_unsatisfied () =
     end
   end|} in
   Alcotest.(check bool) "impl when Eq(Color) but no Eq(Color) in scope: error" true (has_errors ctx)
+
+let test_conditional_impl_use_site () =
+  let source payload = Printf.sprintf {|mod Test do
+    type Box(a) = Box(a)
+    type Color = Red | Green
+    impl Eq(Box(a)) when Eq(a) do
+      fn eq(x, y) do true end
+    end
+    fn check(x : Box(%s), y : Box(%s)) do eq(x, y) end
+  end|} payload payload in
+  Alcotest.(check bool) "Eq(Box(Int)) satisfies its bound" false
+    (has_errors (typecheck (source "Int")));
+  Alcotest.(check bool) "Eq(Box(Color)) rejects its missing bound" true
+    (has_errors (typecheck (source "Color")));
+  let nested payload = Printf.sprintf {|mod Test do
+    type Box(a) = Box(a)
+    type Color = Red | Green
+    fn check(x : Box(Box(%s)), y : Box(Box(%s))) do eq(x, y) end
+    impl Eq(Box(a)) when Eq(a) do
+      fn eq(x, y) do true end
+    end
+  end|} payload payload in
+  Alcotest.(check bool) "forward nested bound succeeds" false
+    (has_errors (typecheck (nested "Int")));
+  Alcotest.(check bool) "forward nested bound rejects" true
+    (has_errors (typecheck (nested "Color")));
+  let cyclic = {|mod Test do
+    type Box(a) = Box(a)
+    impl Eq(Box(a)) when Eq(Box(a)) do
+      fn eq(x, y) do true end
+    end
+    fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
+  end|} in
+  Alcotest.(check bool) "a circular bound cannot prove itself" true
+    (has_errors (typecheck cyclic));
+  let expanding = {|mod Test do
+    type Box(a) = Box(a)
+    impl Eq(Box(a)) when Eq(Box(Box(a))) do
+      fn eq(x, y) do true end
+    end
+    fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
+  end|} in
+  Alcotest.(check bool) "an expanding bound terminates and rejects" true
+    (has_errors (typecheck expanding));
+  let duplicating = {|mod Test do
+    type Box(a) = Box(a)
+    impl Eq(Box(a)) when Eq(Box((a, a))) do
+      fn eq(x, y) do true end
+    end
+    fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
+  end|} in
+  Alcotest.(check bool) "a duplicating bound has bounded search size" true
+    (has_errors (typecheck duplicating));
+  let finite = {|mod Test do
+    type Box(a) = Box(a)
+    interface Bound(a) do fn bound: a -> Bool end
+    fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
+    impl Eq(Box(a)) when Bound(a) do fn eq(x, y) do true end end
+    impl Bound(Int) when Eq(Box(Bool)) do fn bound(x) do true end end
+    impl Bound(Bool) do fn bound(x) do true end end
+  end|} in
+  Alcotest.(check bool) "same-sized obligations can form a finite proof" false
+    (has_errors (typecheck finite))
 
 let test_interface_cross_module_dispatch () =
   (* A bare interface-method call from a DIFFERENT module than the one defining
@@ -4414,6 +4500,51 @@ let test_nested_actor_msg_ctor_qualified_from_parent () =
   Alcotest.(check bool) "the bare Set is still not exported to the parent" true
     (has_errors (typecheck (src "send(p, Set(1))")))
 
+(* Inside a NESTED module, an actor's message constructors are in scope for
+   the whole module, above the actor as well as below, as they always were in
+   the entry module (whose pass 1 registers every DActor).  Before 2026-10-12
+   the nested-module forward pass bound only fns, so a fn (or an earlier
+   actor's handler) naming a LATER actor's message was "I don't know a
+   constructor called `Zork`" -- the last four stdlib internal errors
+   (SessionNode's PeerGone/HostDown, ClusterNode's LocalDown), hidden because
+   stdlib diagnostics are dropped, while both backends resolved them. *)
+let test_nested_actor_msg_ctor_forward_reference () =
+  let src ~poke = Printf.sprintf {|mod Outer do
+    mod C do
+      type Rec = { ep : Pid({ n : Int }), k : Int }
+      fn poke_typed(p : Pid({ n : Int })) do
+        send(p, %s)
+      end
+      fn poke_rec(r : Rec) do
+        send(r.ep, Zork(r.k))
+      end
+      actor Early do
+        state { n : Int }
+        init { n: 0 }
+        on Go(k : Int) do
+          let _ = send(spawn(Pinger), Zork(k))
+          state
+        end
+      end
+      actor Pinger do
+        state { n : Int }
+        init { n: 0 }
+        on Zork(k : Int) do { n: state.n + k } end
+      end
+    end
+  end|} poke in
+  let ctx = typecheck (src ~poke:"Zork(1)") in
+  Alcotest.(check bool) "a message named above its actor resolves" false
+    (has_errors ctx);
+  (* It resolves to the HANDLER's signature, not to an unconstrained ctor. *)
+  Alcotest.(check bool) "a wrong payload type is still rejected" true
+    (has_error_with (typecheck (src ~poke:{|Zork("x")|})) "expected");
+  Alcotest.(check bool) "a wrong arity is still rejected" true
+    (has_error_with (typecheck (src ~poke:"Zork(1, 2)")) "expects 1 argument");
+  Alcotest.(check bool) "an undeclared message is still unknown" true
+    (has_error_with (typecheck (src ~poke:"Zonk(1)"))
+       "I don't know a constructor called `Zonk`")
+
 (* A nested actor spawned by its BARE name from OUTSIDE its declaring module:
    the referring key ("main") has no module prefix, so prefix-first resolution
    cannot reach "Sub.Weeble".  A bare ALIAS node forwards it — without that,
@@ -4959,6 +5090,75 @@ let test_letfn_two_distinct_errors_both_report () =
   Alcotest.(check int) "distinct Bool/Int error still reported"
     1 (count_errors_matching ctx "expected `Bool` but got `Int`.")
 
+(* ── duplicate_binder (2026-10-21) ──────────────────────────────────────
+   One parameter list, or one pattern, may bind each name only once.  Before
+   the rule the two backends disagreed about which argument a doubled name
+   was (`fn (a, a) -> a` applied to (1, 2): interpreter 1, compiled 2), so
+   the typechecker rejects the program instead of picking one.  Curried
+   lambdas are separate scopes and keep shadowing; `_` is exempt; the
+   alternatives of an or-pattern each bind the same names by design. *)
+
+(* The [duplicate_binder] diagnostics, as (line, col) of their spans. *)
+let duplicate_binder_sites ctx =
+  List.filter_map (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.code = March_errors.Errors.Code.duplicate_binder
+      then Some (d.span.March_ast.Ast.start_line, d.span.March_ast.Ast.start_col)
+      else None)
+    (March_errors.Errors.sorted ctx)
+
+let dup_wrap body = Printf.sprintf {|mod M do
+  needs IO.Console
+  type P = Pair(Int, Int)
+%s
+  fn main(_cap_console : Cap(IO.Console)) do () end
+end|} body
+
+let test_duplicate_binder_rejects () =
+  let case label body expected =
+    let ctx = typecheck (dup_wrap body) in
+    Alcotest.(check (list (pair int int))) label expected (duplicate_binder_sites ctx)
+  in
+  (* Each site is the SECOND binder: line 4 is the first line of [body]. *)
+  case "lambda parameter list"
+    "  fn f() do\n    let h = fn (a, a) -> a\n    h(1, 2)\n  end" [ (5, 19) ];
+  case "named fn parameter list"
+    "  fn two(a : Int, a : Int) : Int do a end" [ (4, 18) ];
+  case "multi-clause fn head"
+    "  fn pick(0, a, a) : Int do a end\n  fn pick(_, a, b) : Int do a + b end"
+    [ (4, 16) ];
+  case "tuple pattern in match"
+    "  fn f() do\n    match (1, 2) do\n      (a, a) -> a\n    end\n  end" [ (6, 10) ];
+  case "tuple pattern in let"
+    "  fn f() do\n    let (b, b) = (3, 4)\n    b\n  end" [ (5, 12) ];
+  case "constructor pattern"
+    "  fn f() do\n    match Pair(5, 6) do\n      Pair(x, x) -> x\n    end\n  end"
+    [ (6, 14) ];
+  case "as-pattern rebinding an inner name"
+    "  fn f() do\n    match Pair(5, 6) do\n      Pair(x, _) as x -> 0\n    end\n  end"
+    [ (6, 20) ];
+  case "local named fn"
+    "  fn f() do\n    fn g(a, a) do a end\n    g(1, 2)\n  end" [ (5, 12) ];
+  case "three binders: each repeat reported"
+    "  fn f() do\n    let h = fn (a, a, a) -> a\n    h(1, 2, 3)\n  end"
+    [ (5, 19); (5, 22) ]
+
+let test_duplicate_binder_accepts () =
+  let case label body =
+    let ctx = typecheck (dup_wrap body) in
+    Alcotest.(check (list (pair int int))) label [] (duplicate_binder_sites ctx);
+    Alcotest.(check bool) (label ^ ": no errors") false (has_errors ctx)
+  in
+  case "curried lambdas shadow"
+    "  fn f() : Int do\n    let g = fn a -> fn a -> a\n    let g1 = g(1)\n    g1(2)\n  end";
+  case "inner lambda shadows an outer parameter"
+    "  fn f(a : Int, b : Int) : Int do\n    let h = fn a -> a + b\n    h(a)\n  end";
+  case "match arm shadows a parameter"
+    "  fn f(a : Int) : Int do\n    match a do\n      a -> a\n    end\n  end";
+  case "wildcards repeat"
+    "  fn f() : Int do\n    let h = fn (_, _) -> 0\n    match (1, 2) do\n      (_, _) -> h(1, 2)\n    end\n  end";
+  case "or-pattern alternatives bind the same name"
+    "  fn f() : Int do\n    match (1, 0) do\n      (a, 0) | (0, a) -> a\n      _ -> 9\n    end\n  end"
+
 (* A tuple is Eq when every component is (2026-10-06): no impl can be written
    for every arity, and both backends compare tuples component-wise. *)
 let test_tuple_eq_structural_accepts () =
@@ -4983,6 +5183,34 @@ let test_tuple_eq_component_without_eq_rejects () =
   end|} in
   Alcotest.(check bool) "tuple with a non-Eq component rejected" true
     (count_errors_matching ctx "`(Int, Hue)` does not implement interface `Eq`." >= 1)
+
+(* A tuple is Ord when every component is (2026-10-07), lexicographically. *)
+let test_tuple_ord_structural_accepts () =
+  let ctx = typecheck {|mod M do
+  needs IO.Console
+    fn main(_cap_console : Cap(IO.Console)) do
+      let a = (1, "x") < (1, "y")
+      let b = compare(((1, "s"), 2.5), ((1, "s"), 2.0)) > 0
+      let c = (1, 2, 3) >= (1, 2, 3)
+      if a && b && c do println("y") else println("n") end
+    end
+  end|} in
+  Alcotest.(check bool) "tuple of Ord components accepted" false (has_errors ctx)
+
+(* ...and only then: a component without Ord still rejects the tuple, for the
+   operators and for `compare`. *)
+let test_tuple_ord_component_without_ord_rejects () =
+  let ctx = typecheck {|mod M do
+  needs IO.Console
+    type Hue = Rood | Bloo
+    fn main(_cap_console : Cap(IO.Console)) do
+      if (1, Rood) < (1, Bloo) do println("y") else println("n") end
+      println(int_to_string(compare((Rood, 1), (Bloo, 2))))
+    end
+  end|} in
+  Alcotest.(check bool) "tuple with a non-Ord component rejected" true
+    (count_errors_matching ctx "`(Int, Hue)` does not implement interface `Ord`." >= 1
+     && count_errors_matching ctx "`(Hue, Int)` does not implement interface `Ord`." >= 1)
 
 (* ── Finding 15: generic when-constraint re-checked at call sites ───────── *)
 
@@ -6462,6 +6690,43 @@ let has_message_containing ctx needle =
     let rec scan i = i + nl <= ml && (String.sub m i nl = needle || scan (i + 1)) in
     scan 0)
     ctx.March_errors.Errors.diagnostics
+
+(* A non-regular ("nested") datatype is rejected at its declaration.  It used
+   to typecheck and run interpreted, but every compiled pass that synthesises
+   per-instance code (deep drop first) expanded Nest(Int) -> Nest(List(Int))
+   -> ... forever, so `--compile` and `--dump-tir` hung with no diagnostic.
+   Regular recursion -- own params, swapped params, a fixed argument, a
+   container of itself -- stays accepted.
+   specs/progress/2026-10-12-nonregular-type-compiler-hang.md *)
+let test_nonregular_type_rejected () =
+  let ctx = typecheck {|mod Main do
+    type Nest(a) = Z(a) | S(Nest(List(a)))
+    fn main() : Int do
+      match S(S(Z([[1]]))) do
+        Z(_) -> 0
+        S(_) -> 1
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested datatype is rejected" true (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names the type and the cause" true
+    (has_message_containing ctx
+       "type `Nest` refers to itself at a growing type argument");
+  let mutual = typecheck {|mod Main do
+    type A(a) = A1(a) | A2(B(List(a)))
+    type B(a) = B1(A(a))
+    fn main() : Int do 0 end
+  end|} in
+  Alcotest.(check bool) "growth through a second type is rejected" true
+    (has_message_containing mutual "type `A` refers to itself at a growing");
+  let regular = typecheck {|mod Main do
+    type T(a) = Leaf(a) | TNode(T(Int))
+    type Rose(a) = Rose(a, List(Rose(a)))
+    type Swap(a, b) = Nil2 | Cons2(a, Swap(b, a))
+    fn main() : Int do 0 end
+  end|} in
+  Alcotest.(check bool) "regular recursive types are accepted" false
+    (has_errors regular)
 
 let test_cross_module_private_fn_rejected () =
   let ctx = typecheck {|mod Main do
@@ -11596,6 +11861,32 @@ let test_check4_cyclic_import_importee_later () =
   Alcotest.(check bool) "importee AFTER, pure reference: error (fail-closed, whole set)"
     true (has_cap_needs_error (src ~importee_later:true pure))
 
+(* The fail-closed deferred Check 4 above and Check 2 ("declared but no
+   function requires") must not contradict each other.  Importee declared
+   later, pure reference only: Check 4 requires the importee's whole set, so
+   the importer adds [needs IO.Console] — and Check 2 used to call that
+   [needs] unused (its own functions demand nothing), with an autofix that
+   deletes it and re-breaks the build.  Hit by a test module importing
+   Bastion's IslandSocket for its pure registry functions. *)
+let test_check4_deferred_needs_not_unused () =
+  let beta = {|mod CapOrdProbeBeta do
+    needs IO.Console
+    import CapOrdProbeAlpha
+    fn capordprobebeta_pure(x : Int) : Int do x * 2 end
+    fn capordprobebeta_noisy(m : String) : Unit do print(m) end
+  end|} in
+  let alpha = {|mod CapOrdProbeAlpha do
+    needs IO.Console
+    import CapOrdProbeBeta
+    fn alpha_uses(x : Int) : Int do capordprobebeta_pure(x) end
+  end|} in
+  let src = Printf.sprintf "mod CapOrdRoot do\n  %s\n  %s\n  fn main() : Int do 0 end\nend" alpha beta in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "importee AFTER, pure reference, needs declared: no Check 4 error"
+    false (has_message_containing ctx "which requires");
+  Alcotest.(check bool) "importee AFTER, pure reference, needs declared: not reported unused"
+    false (has_message_containing ctx "but no function requires")
+
 (* ── Closing the [record_fn_caps] coverage gap (2026-08-06) ──────────────
    Until this fix [record_fn_caps] recorded an own(...) entry for [DFn]s,
    actor handlers and [DExtern]s only.  Module-level [DLet] bodies, interface
@@ -12112,16 +12403,16 @@ let test_ordinary_unused_param_still_warned () =
   Alcotest.(check bool) "an ordinary unused parameter still warns"
     true (has_warning_with ctx "Unused variable `x`")
 
-(* ── Annotated type variable fixed by the body (warning) ──────────────────
-   specs/progress/2026-09-22-annotated-tyvar-fixed-warning.md: a signature
-   type variable is an ordinary unification variable, so a body can fix it
-   (`fn bad(xs : List(a)) : List(a) do [0 - 5] end` is `List(Int) ->
-   List(Int)`); the warning names that at the definition instead of leaving
-   it to surface as a mismatch at some caller. *)
+(* ── Annotated type variable fixed by the body (error) ────────────────────
+   specs/progress/2026-09-22-annotated-tyvar-fixed-warning.md introduced it as
+   a warning; specs/progress/2026-10-11-annotated-tyvars-rigid.md made
+   annotation type variables rigid, so it is an error: a body that fixes a
+   signature variable (`fn bad(xs : List(a)) : List(a) do [0 - 5] end`) is
+   rejected at the definition instead of leaving it to surface as a mismatch
+   at some caller. (Helper names keep "warnings" for history.) *)
 let tyvar_fixed_warnings ctx =
   List.filter (fun (d : March_errors.Errors.diagnostic) ->
-      d.severity = March_errors.Errors.Warning
-      && d.code = "annotated_tyvar_fixed")
+      d.code = "annotated_tyvar_fixed")
     ctx.March_errors.Errors.diagnostics
 
 let test_tyvar_fixed_concrete_warns () =
@@ -12133,14 +12424,15 @@ let test_tyvar_fixed_concrete_warns () =
   match tyvar_fixed_warnings ctx with
   | [ d ] ->
     Alcotest.(check bool) "names the variable, the function and the type" true
-      (has_warning_with ctx "type variable `a` in `bad`'s signature is not generic: the body fixes it to `Int`");
+      (has_error_with ctx "type variable `a` in `bad`'s signature is not generic: the body fixes it to `Int`");
     Alcotest.(check (pair int int)) "points at the variable in the signature"
       (2, 21) (d.span.start_line, d.span.start_col);
     Alcotest.(check bool) "hints at writing the concrete type" true
       (List.exists (fun n -> n = "hint: write `Int` in place of `a` if that is \
                                   what you mean, or make the body generic in `a`.")
          d.notes);
-    Alcotest.(check bool) "a warning, not an error" false (has_errors ctx)
+    Alcotest.(check bool) "an error (rigid annotation variables)" true
+      (d.severity = March_errors.Errors.Error)
   | ds -> Alcotest.failf "expected exactly one tyvar warning, got %d" (List.length ds)
 
 let test_tyvar_generic_does_not_warn () =
@@ -12183,7 +12475,7 @@ let test_tyvar_aliased_warns () =
   Alcotest.(check int) "one warning, on the later variable" 1
     (List.length (tyvar_fixed_warnings ctx));
   Alcotest.(check bool) "names both variables" true
-    (has_warning_with ctx "type variables `a` and `b` in `second`'s signature are not independent")
+    (has_error_with ctx "type variables `a` and `b` in `second`'s signature are not independent")
 
 let test_tyvar_fixed_to_function_type_warns () =
   (* The variable is fixed to a type that still MENTIONS variables (`b -> b`),
@@ -12194,16 +12486,16 @@ let test_tyvar_fixed_to_function_type_warns () =
   let ctx = typecheck {|mod TvFn do
     fn apply_it(f : a, x : b) : b do f(x) end
   end|} in
-  Alcotest.(check bool) "no error: the signature merely over-claims" false (has_errors ctx);
+  Alcotest.(check bool) "an error: the signature over-claims" true (has_errors ctx);
   match tyvar_fixed_warnings ctx with
   | [ d ] ->
     (* The fixing type prints with a fresh-counter variable name (`b -> b`,
        `j2 -> j2`, … depending on what was checked before), so match the
        stable prefix and assert the arrow shape separately. *)
     Alcotest.(check bool) "names the variable and the function" true
-      (has_warning_with ctx "type variable `a` in `apply_it`'s signature is not generic: the body fixes it to");
+      (has_error_with ctx "type variable `a` in `apply_it`'s signature is not generic: the body fixes it to");
     Alcotest.(check bool) "the fixing type is an arrow" true
-      (has_warning_with ctx " -> ");
+      (has_error_with ctx " -> ");
     Alcotest.(check bool) "hint does not try to name internal variables" true
       (List.exists (fun n -> n = "hint: write the type the body needs in place \
                                   of `a`, or make the body generic in `a`.")
@@ -15568,10 +15860,12 @@ let assert_stdlib_file_typechecks_cleanly name =
    One todo per class is filed under specs/todos/2026-09-22-stdlib-*.md.  The
    ratchet is two-sided on purpose: fixing a file FAILS this test until its
    count comes down here, so the table cannot quietly describe a fixed tree. *)
-let stdlib_known_internal_errors = [
-  (* file, errors -- see specs/progress/2026-09-22-stdlib-internal-type-errors.md *)
-  "cluster_node.march", 1;
-  "session_node.march", 3;
+let stdlib_known_internal_errors : (string * int) list = [
+  (* file, errors -- see specs/progress/2026-09-22-stdlib-internal-type-errors.md.
+     Empty since 2026-10-12: the last four (actor message constructors named
+     above their actor in a nested module) are fixed, see
+     specs/progress/2026-09-22-stdlib-distributed-module-errors.md.  A new
+     row here is a regression to be fixed, not recorded. *)
 ]
 
 let test_stdlib_internal_errors_ratchet () =
@@ -17383,6 +17677,151 @@ let test_curried_lambda_pair_then_arg_ok () =
   end|} in
   Alcotest.(check bool) "(pair) -> Int -> Int: no error" false (has_errors ctx)
 
+(* Callback call-arity (2026-10-12, specs/progress/2026-10-12-two-arg-fn-
+   accepted-as-curried.md): `fn add(a, b)` and `fn a -> fn b -> …` share the
+   curried type `a -> b -> c`, but a closure is always called with exactly the
+   arguments at the call site, so passing one where the callee applies its
+   parameter the other way typechecked and then failed at runtime. *)
+let callarity_prelude = {|
+    pfn ap2(f, x, y) do
+      let g = f(x)
+      g(y)
+    end
+    pfn both(f, x, y) do f(x, y) end
+    pfn add(a : Int, b : Int) : Int do a + b end
+|}
+
+let test_callarity_two_arg_fn_to_curried_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do ap2(add, 1, 2) end
+  end|}) in
+  Alcotest.(check bool) "named 2-arg fn as curried: error" true
+    (has_error_with ctx "`add` takes 2 arguments, but `ap2` calls its parameter `f` with 1 argument");
+  Alcotest.(check bool) "suggests a curried wrapper" true
+    (has_error_with ctx "fn a -> fn b -> add(a, b)")
+
+let test_callarity_two_arg_lambda_to_curried_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do ap2(fn (a, b) -> a + b, 1, 2) end
+  end|}) in
+  Alcotest.(check bool) "2-arg lambda as curried: error" true
+    (has_error_with ctx "This lambda takes 2 arguments, but `ap2` calls")
+
+let test_callarity_curried_lambda_to_two_arg_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do both(fn a -> fn b -> a + b, 1, 2) end
+  end|}) in
+  Alcotest.(check bool) "curried lambda called with 2 args: error" true
+    (has_error_with ctx "This lambda takes 1 argument, but `both` calls its parameter `f` with 2 arguments")
+
+(* The Map.insert shape: the parameter is only applied inside a helper it is
+   handed to, from inside a lambda. *)
+let test_callarity_inherited_through_helper_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    pfn cmp_eq(cmp, a, b) do
+      let ab = cmp(a)
+      not ab(b)
+    end
+    fn ins(x : Int, cmp) do
+      let eq = fn (a, b) -> cmp_eq(cmp, a, b)
+      eq(x, x)
+    end
+    pfn lt(a : Int, b : Int) : Bool do a < b end
+    fn main() : Bool do
+      let lt2 = fn (a, b) -> a < b
+      ins(1, lt) && ins(2, lt2)
+    end
+  end|}) in
+  Alcotest.(check bool) "named fn through helper: error" true
+    (has_error_with ctx "`lt` takes 2 arguments, but `ins` calls its parameter `cmp` with 1 argument");
+  Alcotest.(check bool) "let-bound lambda through helper: error" true
+    (has_error_with ctx "`lt2` (a lambda) takes 2 arguments")
+
+let test_callarity_matching_shapes_ok () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    pfn add_c(a : Int) do fn b -> a + b end
+    fn main() : Int do
+      ap2(fn a -> fn b -> a + b, 1, 2) + ap2(add_c, 1, 2)
+        + both(add, 1, 2) + both(fn (a, b) -> a + b, 1, 2)
+    end
+  end|}) in
+  Alcotest.(check bool) "matching callback arities: no error" false (has_errors ctx)
+
+(* A parameter rebound before it is applied is a different value: its calls
+   say nothing about the argument. *)
+let test_callarity_shadowed_param_ignored () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    pfn shadow(f, x) do
+      let f = fn a -> fn b -> a + b
+      let g = f(x)
+      g(x)
+    end
+    fn main() : Int do shadow(add, 1) end
+  end|}) in
+  Alcotest.(check bool) "shadowed parameter: no callback-arity error" false
+    (has_error_with ctx "calls its parameter")
+
+(* 2026-10-13: a `let h = add` alias is `add` itself. Calling it with the
+   wrong count (`h(1)` then the result) and passing it as a curried callback
+   were both accepted, then panicked interpreted / SIGSEGV'd compiled. *)
+let test_callarity_fn_alias_direct_call_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do
+      let h = add
+      let g = h(1)
+      g(2)
+    end
+  end|}) in
+  Alcotest.(check bool) "alias under-applied: error" true
+    (has_error_with ctx "`h` is bound to `add`, which takes 2 arguments, but is called with 1 argument");
+  Alcotest.(check bool) "no cascade on the result" false
+    (has_error_with ctx "is not a function")
+
+let test_callarity_fn_alias_as_callback_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do
+      let h = add
+      let f = fn a -> fn b -> a + b
+      let g = f
+      ap2(h, 1, 2) + both(g, 1, 2)
+    end
+  end|}) in
+  Alcotest.(check bool) "fn alias as curried callback: error" true
+    (has_error_with ctx "`h` (bound to `add`) takes 2 arguments, but `ap2` calls its parameter `f` with 1 argument");
+  Alcotest.(check bool) "lambda alias as 2-arg callback: error" true
+    (has_error_with ctx "`g` (a lambda) takes 1 argument, but `both` calls its parameter `f` with 2 arguments")
+
+(* A let-bound lambda as the CALLEE: its parameters' call-arities are
+   computed from its body, like a module fn's. *)
+let test_callarity_let_lambda_callee_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do
+      let ap = fn (f, x, y) ->
+        let g = f(x)
+        g(y)
+      let ap_via = fn (f, x, y) -> ap2(f, x, y)
+      ap(add, 1, 2) + ap_via(add, 1, 2)
+    end
+  end|}) in
+  Alcotest.(check bool) "lambda callee applying curried: error" true
+    (has_error_with ctx "`add` takes 2 arguments, but `ap` calls its parameter `f` with 1 argument");
+  Alcotest.(check bool) "lambda callee handing on to ap2: error" true
+    (has_error_with ctx "`add` takes 2 arguments, but `ap_via` calls its parameter `f` with 1 argument")
+
+let test_callarity_aliases_matching_ok () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do
+      let h = add
+      let k = List.length
+      let f = fn a -> fn b -> a + b
+      let g = f
+      let r = g(1)
+      let ap = fn (cb, x, y) -> cb(x, y)
+      h(1, 2) + k([1]) + r(2) + both(h, 1, 2) + ap2(g, 1, 2) + ap(add, 1, 2)
+    end
+  end|}) in
+  Alcotest.(check bool) "matching aliases / lambda callee: no error" false (has_errors ctx)
+
 let compiler_suites =
   [
       sigil_interp_suite;
@@ -17397,8 +17836,15 @@ let compiler_suites =
       ("prog_argv", Test_prog_argv.tests);
       ("compile_ll_race", Test_compile_ll_race.tests);
       ("post_tir_cache", Test_post_tir_cache.tests);
+      ("cas_report_bypass", Test_cas_report_bypass.tests);
+      ("cas_b7", Test_cas_b7.tests);
+      ("link_deps", Test_link_deps.tests);
+      ("static_link", Test_static_link.tests);
+      ("shell_ident", Test_shell_ident.tests);
+      ("shell_triple", Test_shell_triple.tests);
       ("cap_package", Test_cap_package.tests);
       ("cap_scope", Test_cap_scope.tests);
+      ("cap_fn_bounds", Test_cap_fn_bounds.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
       ("alloc_contract", Test_alloc_contract.tests);
       ("portable_closures", Test_portable.tests);
@@ -17406,9 +17852,12 @@ let compiler_suites =
       ("cap_dict", Test_cap_dict.tests);
       ("endpoints", Test_endpoints.tests);
       ("topology_flag", Test_topology_flag.tests);
+      ("march_query", Test_march_query.tests);
+      ("shell_line", Test_shell_line.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
       ("cap_sandbox_profile", Test_cap_sandbox_profile.tests);
       ("cap_sandbox_runtime", Test_cap_sandbox_runtime.tests);
+      ("hcr_closure_codegen", Test_hcr_closure_codegen.tests);
       ( "match_diagnostics",
         [
           Alcotest.test_case "or-pattern binding accepted" `Quick
@@ -17683,6 +18132,7 @@ let compiler_suites =
           Alcotest.test_case "add fn"              `Quick test_tc_fn_add;
           Alcotest.test_case "dotted sibling module order" `Quick test_tc_dotted_sibling_module_order;
           Alcotest.test_case "private nested member diagnostic" `Quick test_tc_private_nested_member_diagnostic;
+          Alcotest.test_case "stdlib module name wrong case" `Quick test_tc_stdlib_module_name_wrong_case;
           Alcotest.test_case "private nested member name collides with builtin" `Quick test_tc_private_nested_member_name_collides_with_builtin;
           Alcotest.test_case "bad if condition"    `Quick test_tc_if_bad_cond;
           Alcotest.test_case "annotated return"    `Quick test_tc_annotated_fn;
@@ -17725,6 +18175,7 @@ let compiler_suites =
           Alcotest.test_case "ctor lexical preference: lookup_ctor returns own-module candidate directly" `Quick test_ctor_lexical_preference_directly_inspects_lookup_ctor;
           Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
           Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;
+          Alcotest.test_case "conditional impl use site"    `Quick test_conditional_impl_use_site;
           Alcotest.test_case "cross-module dispatch"        `Quick test_interface_cross_module_dispatch;
           Alcotest.test_case "cross-module record dispatch" `Quick test_interface_cross_module_dispatch_record;
           Alcotest.test_case "test keywords as idents"      `Quick test_test_keywords_as_identifiers;
@@ -17760,6 +18211,7 @@ let compiler_suites =
           Alcotest.test_case "qualified Show.show call"      `Quick test_qualified_show_call;
           (* Modules widening slice 2, Task 1: cross-module visibility gate *)
           Alcotest.test_case "cross-module private pfn rejected" `Quick test_cross_module_private_fn_rejected;
+          Alcotest.test_case "non-regular (nested) datatype rejected" `Quick test_nonregular_type_rejected;
           Alcotest.test_case "cross-module public fn accepted"   `Quick test_cross_module_public_fn_accepted;
           (* Regression: qualified type path `Mod.Type` ≡ bare `Type` *)
           Alcotest.test_case "qualified opaque type unifies with bare" `Quick test_qualified_opaque_type_unifies_bare;
@@ -17904,6 +18356,7 @@ let compiler_suites =
           Alcotest.test_case "same-named actors: spawned one still rejected" `Quick test_same_named_actors_spawned_one_still_rejected;
           Alcotest.test_case "nested actor bare spawn from entry: charged" `Quick test_nested_actor_bare_spawn_from_entry_is_charged;
           Alcotest.test_case "nested actor message ctor, qualified, from parent" `Quick test_nested_actor_msg_ctor_qualified_from_parent;
+          Alcotest.test_case "nested actor message ctor named above its actor" `Quick test_nested_actor_msg_ctor_forward_reference;
           (* item 1380: Cap(IO.NetListen) body-scan enforcement *)
           Alcotest.test_case "tcp_listen body, no needs: warns NetListen"   `Quick test_netlisten_body_missing_needs_warns;
           Alcotest.test_case "tcp_listen body, needs NetListen: no warning" `Quick test_netlisten_body_with_needs_no_warning;
@@ -18280,6 +18733,7 @@ let compiler_suites =
           Alcotest.test_case "a pure sibling does not inherit the module's caps"     `Quick test_transitive_cap_pure_sibling_unaffected;
           Alcotest.test_case "a cap propagates through a function passed as a value" `Quick test_transitive_cap_through_value_reference;
           Alcotest.test_case "mutually recursive functions reach a fixpoint"         `Quick test_transitive_cap_mutual_recursion_fixpoint;
+          Alcotest.test_case "deferred Check 4 needs are not reported unused"   `Quick test_check4_deferred_needs_not_unused;
           Alcotest.test_case "a dotted nested-module reference resolves"             `Quick test_transitive_cap_nested_module_dotted_refs;
           Alcotest.test_case "a param shadowing a sibling fn fabricates no edge"     `Quick test_transitive_cap_param_shadowing_sibling_fn;
           Alcotest.test_case "union over a module's functions matches module level"  `Quick test_transitive_cap_union_matches_module_level;
@@ -18467,11 +18921,17 @@ let compiler_suites =
           Alcotest.test_case "finding 13: mismatch reported exactly once"    `Quick test_letfn_ret_annot_mismatch_single_diagnostic;
           Alcotest.test_case "finding 13: two distinct errors both report"   `Quick test_letfn_two_distinct_errors_both_report;
         ] );
+      ( "duplicate_binder", [
+          Alcotest.test_case "a name bound twice in one binding is rejected" `Quick test_duplicate_binder_rejects;
+          Alcotest.test_case "shadowing, wildcards and or-patterns accepted" `Quick test_duplicate_binder_accepts;
+        ] );
       ( "generic_when_constraints", [
           Alcotest.test_case "finding 15: unsatisfied generic bound rejects"  `Quick test_generic_when_constraint_unsatisfied_rejects;
           Alcotest.test_case "finding 15: satisfied generic bound accepts"    `Quick test_generic_when_constraint_satisfied_accepts;
           Alcotest.test_case "tuple of Eq components is Eq"                   `Quick test_tuple_eq_structural_accepts;
           Alcotest.test_case "tuple with a non-Eq component is not Eq"        `Quick test_tuple_eq_component_without_eq_rejects;
+          Alcotest.test_case "tuple of Ord components is Ord"                  `Quick test_tuple_ord_structural_accepts;
+          Alcotest.test_case "tuple with a non-Ord component is not Ord"        `Quick test_tuple_ord_component_without_ord_rejects;
           Alcotest.test_case "finding 15: unconstrained generic accepts"      `Quick test_generic_no_constraint_accepts;
         ] );
       ( "test_body_constraints", [
@@ -18603,6 +19063,18 @@ let compiler_suites =
         ] );
       ( "sha256_builtin_type", [
           Alcotest.test_case "sha256(Bytes) : String, not Bytes"               `Quick test_sha256_builtin_returns_string;
+        ] );
+      ( "callback_call_arity", [
+          Alcotest.test_case "2-arg fn where applied curried: error"            `Quick test_callarity_two_arg_fn_to_curried_errors;
+          Alcotest.test_case "2-arg lambda where applied curried: error"        `Quick test_callarity_two_arg_lambda_to_curried_errors;
+          Alcotest.test_case "curried lambda where applied to 2 args: error"   `Quick test_callarity_curried_lambda_to_two_arg_errors;
+          Alcotest.test_case "inherited through a helper (Map.insert): error"   `Quick test_callarity_inherited_through_helper_errors;
+          Alcotest.test_case "matching shapes: no error"                        `Quick test_callarity_matching_shapes_ok;
+          Alcotest.test_case "shadowed parameter: ignored"                      `Quick test_callarity_shadowed_param_ignored;
+          Alcotest.test_case "fn alias called with wrong count: error"         `Quick test_callarity_fn_alias_direct_call_errors;
+          Alcotest.test_case "fn / lambda alias as callback: error"            `Quick test_callarity_fn_alias_as_callback_errors;
+          Alcotest.test_case "let-bound lambda callee: error"                  `Quick test_callarity_let_lambda_callee_errors;
+          Alcotest.test_case "matching aliases / lambda callee: no error"      `Quick test_callarity_aliases_matching_ok;
         ] );
       ( "curried_lambda_over_tuple", [
           Alcotest.test_case "fn (_, w) over a pair (silent case): error"       `Quick test_curried_lambda_over_pair_silent_case_errors;

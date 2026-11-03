@@ -298,7 +298,7 @@ let native_runtime_sources dir =
       else
         match List.filter (( <> ) "") (String.split_on_char ' ' line
                                        |> List.concat_map (String.split_on_char '\t')) with
-        | f :: role :: _ when List.mem role [ "core"; "http"; "hcr"; "unit-test-only" ] ->
+        | f :: role :: _ when List.mem role [ "core"; "codec"; "http"; "hcr"; "unit-test-only" ] ->
           Some (f, role)
         | _ -> None)
 
@@ -390,7 +390,10 @@ let test_declares_match_runtime_definitions () =
       let src = Filename.concat rt f in
       let ll = Filename.concat tmp (Filename.remove_extension f ^ ".ll") in
       let err = Filename.concat tmp (Filename.remove_extension f ^ ".err") in
-      let cmd = Printf.sprintf "clang -S -emit-llvm -O0 -w -I %s%s -o %s %s 2> %s"
+      (* The codec files (march_compress_zstd.c, march_compress_brotli.c) as
+         their stubs: the same prototypes, and no zstd/brotli headers needed. *)
+      let cmd = Printf.sprintf
+          "clang -S -emit-llvm -O0 -w -DMARCH_ZSTD_STUB -DMARCH_BROTLI_STUB -I %s%s -o %s %s 2> %s"
           (Filename.quote rt) (openssl_include ()) (Filename.quote ll)
           (Filename.quote src) (Filename.quote err) in
       if Sys.command cmd <> 0 then

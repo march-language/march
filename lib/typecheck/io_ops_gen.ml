@@ -179,7 +179,27 @@ let is_dispatch_name (n : string) : bool =
     it is why an un-mocked program behaves exactly as before. *)
 let dispatch_wrapper (cap : string) (op : string) (op_ty : ty) : string option =
   match flatten_arrow op_ty with
-  | ([], _) -> None   (* not a function: nothing to wrap *)
+  | ([], ret) ->
+    (* An operation typed as a bare VALUE ([process_cwd : String]) is still
+       called — `process_cwd()` — and [Cap_passing] still rewrites that call to
+       this wrapper, because it has a dictionary field ([dict_fields] keeps
+       it).  So it must be generated: skipping it left every `--test` build
+       that merely emitted `Process.argv()` (bastion's CLI `main`) with an
+       undefined `__march_dispatch_process_argv`.  The field holds the mocked
+       value itself, not a closure. *)
+    Some
+      (Printf.sprintf
+         "  pfn %s(c : Cap(%s)) : %s do\n\
+         \    match cap_dict(c) do\n\
+         \      Some(d) ->\n\
+         \        match d.%s do\n\
+         \          Some(v) -> v\n\
+         \          None    -> %s()\n\
+         \        end\n\
+         \      None -> %s()\n\
+         \    end\n\
+         \  end\n"
+         (dispatch_name op) cap (march_ty ret) op op op)
   | (args, ret) ->
     (* A zero-arg builtin has the shape [TArrow (TTuple [], r)], so its single
        "argument" is unit: the wrapper takes no parameter of its own, calls the

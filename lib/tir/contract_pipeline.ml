@@ -25,6 +25,10 @@ type result = {
   k_table : Kind.table;
   (** The per-type table the passes reasoned against, rebound to [final]'s
       type list — hand it to the emitter (specs/2026-09-10-type-kinds-design.md). *)
+  borrow_map : Borrow.borrow_map;
+  (** The converged parameter modes Perceus placed RC against (with any
+      owned clones' rows).  A hot-reload slot's ABI hash folds them in
+      ([March_cas.Hash.hcr_sig_hash]). *)
 }
 
 let island_suffixes = ["render"; "update"; "init"]
@@ -53,6 +57,15 @@ let nativearr_fusion_env_disabled : bool Lazy.t =
       | Some ("1" | "true" | "yes") -> true
       | _ -> false)
 
+(** Escape hatch: [MARCH_NO_OWNED_CALLS=1] turns off owned-call drop fusion
+    (Perceus redirecting a borrowed call whose argument dies there to an owned
+    clone of the callee) for A/B runs and bisection.  Read once per process;
+    part of the CAS key (bin/main.ml). *)
+let owned_calls_env_disabled : bool Lazy.t =
+  lazy (match Sys.getenv_opt "MARCH_NO_OWNED_CALLS" with
+      | Some ("1" | "true" | "yes") -> true
+      | _ -> false)
+
 let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(after_fusion = fun _ -> ()) ?(before_perceus = fun ~k_table:_ _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
@@ -74,8 +87,13 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      and the input is checked first as "tir-lower" (the driver's own
      tir-lower snap is a dump hook, not part of this pipeline). *)
   let verify = Tir_verify.enabled () in
+  (* The kind table and borrow map, from the point the pipeline computes them
+     (after Defun, before Perceus): check 2 and check 3 read them. *)
+  let verify_k = ref None and verify_borrow = ref None in
   let verify_stage name tir =
-    if verify then Tir_verify.enforce ~stage:name ?iface_methods tir in
+    if verify then
+      Tir_verify.enforce ~stage:name ?iface_methods ?k_table:!verify_k
+        ?borrow_map:!verify_borrow tir in
   verify_stage "tir-lower" tir;
   let snap name tir =
     Provenance.sweep ~pass:name tir; verify_stage name tir; snap name tir in
@@ -153,11 +171,12 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     if stubs = [] then tir
     else { tir with Tir.tm_exports = tir.Tir.tm_exports @ stubs }
   in
-  let tir = if opt then Fusion.run ~changed:(ref false) tir else tir in
+  let tir = if opt && Pass_switch.on "fusion" then Fusion.run ~changed:(ref false) tir else tir in
   (* NativeArray map/map2 chain fusion (body substitution).  Native/wasm only:
      JS has no NativeArray codegen, so there is nothing to win there. *)
   let tir =
     if opt && (not is_js) && not (Lazy.force nativearr_fusion_env_disabled)
+       && Pass_switch.on "nativearr-fusion"
     then Fusion.run_nativearr tir else tir in
   snap "tir-fusion" tir;
   stamp_tir "fusion" tir;
@@ -165,6 +184,36 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let tir = Defun.defunctionalize tir in
   snap "tir-defun" tir;
   stamp_tir "defun" tir;
+  (* Early DCE: drop what the entry points cannot reach before the passes
+     below run on it.  Without it every program carries the whole prepended
+     stdlib (~9,000 fns) through Perceus, Drop, Escape and the Opt loop, only
+     for the DCE at the end to keep a few dozen; that was ~40% of a small
+     program's compile.  Defun is [Dce]'s stated precondition.  The roots are
+     the final DCE's plus the [extra_roots] and NoAlloc functions that block
+     pins after Escape, and the targets of [remote_ref_hashes] (the driver
+     hashes those from the pre-opt TIR although nothing calls them), so this
+     keeps a superset of what that DCE keeps;
+     [tm_exports] is restored because it is also an ABI fact other passes
+     read.  Off under hot reload and for JS (both have their own reachability
+     rules) and when the optimizer is off. *)
+  let tir =
+    if not (opt && hot_reload = None && (not is_js) && Pass_switch.on "dce-early")
+    then tir
+    else begin
+      let wanted = Hashtbl.create 16 in
+      List.iter (fun n -> Hashtbl.replace wanted n ())
+        (extra_roots @ Dce.remote_ref_targets tir);
+      let pins = List.filter_map (fun (fn : Tir.fn_def) ->
+          let n = fn.Tir.fn_name in
+          if Hashtbl.mem wanted n
+             || Hashtbl.mem wanted (Tir_names.strip_specialization_suffix n)
+             || Alloc_contract.has_noalloc_policy fn
+          then Some n else None) tir.Tir.tm_fns in
+      let pruned = Dce.prune_unreachable
+          { tir with Tir.tm_exports = tir.Tir.tm_exports @ pins } in
+      { pruned with Tir.tm_exports = tir.Tir.tm_exports }
+    end
+  in
   (* The per-type table is decided here — after Mono (which instantiates
      generic variants) and Defun (which adds the closure structs), so the
      decision is made on the type list the remaining passes see, and BEFORE
@@ -178,6 +227,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
       ~unboxing:(not is_js && not (Lazy.force unboxing_env_disabled))
       ~collision_set tir.Tir.tm_types
   in
+  verify_k := Some k0;
   (* Portable closures (specs/2026-10-07-portable-closures-design.md): a
      closure handed to a many-call parallel combinator must not capture a
      native resource handle.  Here, right after Defun and the table build,
@@ -197,21 +247,22 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      which the HCR identity machinery does not track) and with
      MARCH_NO_HOF_SPEC=1. *)
   let hof_spec_on =
-    opt && (not is_js) && hot_reload = None && not (Lazy.force hof_spec_env_disabled) in
+    opt && (not is_js) && hot_reload = None && not (Lazy.force hof_spec_env_disabled)
+    && Pass_switch.on "hof-spec" in
   let tir = if hof_spec_on then Hof_spec.specialize tir else tir in
   snap "tir-hof-spec" tir;
-  let tir = if opt then Known_call.run ~changed:(ref false) tir else tir in
+  let tir = if opt && Pass_switch.on "known-call-pre" then Known_call.run ~changed:(ref false) tir else tir in
   snap "tir-known-call" tir;
   (* Beta-ADT: reduce case-of-known-constructor before Perceus so that the
      EAlloc is DCE'd before RC insertion. *)
-  let tir = if opt then Beta_adt.run ~changed:(ref false) tir else tir in
+  let tir = if opt && Pass_switch.on "beta-adt-pre" then Beta_adt.run ~changed:(ref false) tir else tir in
   snap "tir-beta-adt-pre" tir;
   (* P1 Layer 1: alpha-merge let-floating on RC-free TIR.  Must run BEFORE
      Perceus so RC is inserted once for the hoisted binding. *)
-  let tir = if opt then Join_points.run_pre ~changed:(ref false) tir else tir in
+  let tir = if opt && Pass_switch.on "join-points-pre" then Join_points.run_pre ~changed:(ref false) tir else tir in
   snap "tir-join-points-pre" tir;
   (* Pre-Perceus simplify: folds that are only sound before RC insertion. *)
-  let tir = if opt then Simplify.run ~pre_perceus:true ~changed:(ref false) tir else tir in
+  let tir = if opt && Pass_switch.on "simplify-pre" then Simplify.run ~pre_perceus:true ~changed:(ref false) tir else tir in
   snap "tir-simplify-pre" tir;
   before_perceus ~k_table:k0 tir;
   (* Computed ONCE here and shared: [Perceus] places its RC ops against this
@@ -219,8 +270,23 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      be taken against the SAME one — re-deriving it after RC insertion could
      disagree.  See [Escape]'s module doc. *)
   let borrow_map = Borrow.infer_module ~k_table:k0 tir in
-  let tir = Perceus.perceus ~k_table:k0 ~borrow_map
+  (* Owned-call drop fusion: a call whose dying argument sits at a borrowed
+     position goes to an owned clone of the callee instead of being followed
+     by a deep drop (see [Perceus_core.owned_calls]).  The map handed on is
+     extended with each clone's modes, so Drop and Escape — and Escape's
+     promotion-through-a-borrowed-callee verdict in particular — judge a
+     clone's owned positions as owned.  Off for JS (GC'd runtime), under hot
+     reload (a clone is a second copy of a body the HCR identity machinery
+     does not track, as for Hof_spec), unoptimised, and with
+     MARCH_NO_OWNED_CALLS=1. *)
+  let owned_calls =
+    opt && (not is_js) && hot_reload = None
+    && not (Lazy.force owned_calls_env_disabled) in
+  let tir, borrow_map = Perceus.perceus_owned ~owned_calls ~k_table:k0 ~borrow_map
       ~heap_lambdas:(hot_reload <> None) tir in
+  (* The verifier judges every later stage against the map that includes the
+     owned clones' modes. *)
+  verify_borrow := Some borrow_map;
   snap "tir-perceus" tir;
   stamp_tir "perceus" tir;
   (* Deep-drop synthesis (lib/tir/drop.ml).  Skipped for the JS target, whose
@@ -266,7 +332,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let opt_snap = match opt_snap with
     | Some f -> (fun name m -> verify_stage name m; f name m)
     | None -> snap in
-  let tir = if opt then Opt.run ~snap:opt_snap ~hot_reload tir else tir in
+  let tir = if opt && Pass_switch.on "opt" then Opt.run ~snap:opt_snap ~hot_reload tir else tir in
   (* Prune functions unreachable from the entry points BEFORE LLVM emit, even
      when the optimizer is disabled: a linkability requirement, not an
      optimization (see the comment at this call's original site). *)
@@ -307,7 +373,8 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let contract_diags =
     portable_diags @ Alloc_contract.check ~decls ~allocating ~retaining ~opt tir in
   stamp_tir "alloc-contract" tir;
-  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table }
+  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table;
+    borrow_map }
 
 (** The allocation contracts, judged without emitting anything: what `march
     --check` and `march check` run when the program carries an obligation

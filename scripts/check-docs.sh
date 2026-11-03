@@ -52,6 +52,13 @@ lint_docs() {
     echo .claude/skills/march-lang/SKILL.md
     echo .claude/skills/march-debug/SKILL.md
     echo .claude/skills/steward/SKILL.md
+    echo .claude/skills/compiler-rc/SKILL.md
+    echo .claude/skills/compiler-builtin/SKILL.md
+    echo .claude/skills/march-test/SKILL.md
+    echo .claude/skills/march-docs/SKILL.md
+    echo .claude/skills/forge-search/SKILL.md
+    echo .claude/skills/forge-add/SKILL.md
+    echo .claude/commands/build-test.md
   } | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done \
     | grep -vE '/plans/|/superpowers/'   # historical/plan corpora & vendored plugin docs are not current-truth
 }

@@ -1,0 +1,32 @@
+-- The app of control_leaderless_flat: a topology app with no roles whose
+-- start hook counts this node's live heap objects over a window and prints
+-- the growth. Every node runs the control plane's Agent; with no candidate
+-- in the cluster it never finds a leader and retries every 5 s, while SWIM
+-- and the registry keep exchanging frames.
+mod LeakApp do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+  needs IO.Spawn
+  needs IO.Mut
+  needs Session.Live
+  needs ClusterNode.Live
+
+  -- Long enough for the cluster to form and every startup table to exist.
+  pfn warm_ms() : Int do 10000 end
+  pfn window_ms() : Int do 30000 end
+
+  pfn measure() : Int do
+    sleep_ms(warm_ms())
+    let a0 = live_allocs()
+    sleep_ms(window_ms())
+    let a1 = live_allocs()
+    println("probe: grew " ++ int_to_string(a1 - a0) ++ " objects in " ++ int_to_string(window_ms() / 1000) ++ " s")
+    0
+  end
+
+  fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : () do
+    let _ = task_spawn(fn _ -> measure())
+    println("app: started")
+  end
+end

@@ -90,6 +90,10 @@ let display_tag (tag : string) : string =
   | Some i -> String.sub tag (i + 1) (String.length tag - i - 1)
   | None -> tag
 
+(** A record's fields in display order: sorted by field name (stable). *)
+let sorted_record_fields (fields : (string * 'a) list) : (string * 'a) list =
+  List.stable_sort (fun (a, _) (b, _) -> String.compare a b) fields
+
 let rec value_to_string v =
   match v with
   | VInt n    -> string_of_int n
@@ -104,8 +108,14 @@ let rec value_to_string v =
   | VTuple vs ->
     "(" ^ String.concat ", " (List.map value_to_string vs) ^ ")"
   | VRecord fields ->
+    (* Fields print sorted by name, whatever order the literal wrote them in:
+       compiled code lays a record out sorted by field name and has no other
+       order to recover, so this is the only order both backends can agree
+       on, and two values of one type no longer print differently.
+       specs/progress/2026-10-11-record-print-order-and-anon-record-show.md *)
     "{ " ^ String.concat ", "
-      (List.map (fun (k, v) -> k ^ ": " ^ value_to_string v) fields)
+      (List.map (fun (k, v) -> k ^ ": " ^ value_to_string v)
+         (sorted_record_fields fields))
     ^ " }"
   | VCon ("Nil", []) -> "[]"
   | VCon ("Cons", _) as v when is_list_value v ->
@@ -359,6 +369,18 @@ let dyn_sup_vpid_map   : (int, string) Hashtbl.t = Hashtbl.create 4
 let live_proc_tbl : (int, in_channel * out_channel * int) Hashtbl.t = Hashtbl.create 8
 
 let live_proc_next_id : int ref = ref 0
+
+(** The Err message of a Process.* spawn builtin for a [Unix_error] raised
+    by function [fn].  A command that cannot be executed (not found, not
+    executable) is "cannot execute <cmd>: <strerror>", the same text the
+    compiled runtime builds from posix_spawnp's return value; any other OS
+    error (a failed pipe) is its bare message. *)
+let process_spawn_error (cmd : string) (fn : string) (err : Unix.error) : string =
+  match fn with
+  | "create_process" | "open_process_args" | "open_process_args_in"
+  | "execv" | "execvp" | "execve" | "execvpe" ->
+    "cannot execute " ^ cmd ^ ": " ^ Unix.error_message err
+  | _ -> Unix.error_message err
 
 (** Monotonic start time for sys_uptime_ms calculations. *)
 let process_start_time : float = Unix.gettimeofday ()
@@ -661,6 +683,61 @@ let vault_shard_for (k : string) (shards : vault_shard array) : vault_shard =
 (* Pattern matching                                                    *)
 (* ------------------------------------------------------------------ *)
 
+(** March [Int] is 63-bit. The interpreter stores it in an OCaml [int], which is
+    63-bit natively but only 32-bit under js_of_ocaml (the browser REPL,
+    js/march_browser.ml). There a result that leaves the host range would
+    silently wrap to a value native March never produces, so on a narrow host
+    the Int builtins check and raise [int_overflow] instead. On native builds
+    [narrow_int] is [false] and every helper below is the plain operator. *)
+let narrow_int = Sys.int_size < 63
+
+let int_overflow op =
+  eval_error
+    "%s: this result does not fit the browser REPL's %d-bit Int; native March uses 63-bit Int"
+    op Sys.int_size
+
+(** `+ - *` and negation on Int panic when the result leaves the range
+    (specs/lang/type-system.md, "Int width and overflow"), with the message
+    the compiled ([march_int_overflow]) and JS backends raise.  On a native
+    host the range is OCaml's own 63-bit [int], so the host overflow test is
+    the March one; on a narrow host it reports the host limit instead. *)
+let arith_overflow op verb =
+  if narrow_int then int_overflow op
+  else eval_error "attempt to %s with overflow" verb
+
+let int_add a b =
+  let r = a + b in
+  if (a >= 0) = (b >= 0) && (r >= 0) <> (a >= 0)
+  then arith_overflow "+" "add" else r
+
+let int_sub a b =
+  let r = a - b in
+  if (a >= 0) <> (b >= 0) && (r >= 0) <> (a >= 0)
+  then arith_overflow "-" "subtract" else r
+
+let int_mul a b =
+  let r = a * b in
+  if a <> 0
+     && (r / a <> b || (a = -1 && b = min_int) || (b = -1 && a = min_int))
+  then arith_overflow "*" "multiply" else r
+
+let int_neg a =
+  if a = min_int then arith_overflow "negate" "negate" else ~- a
+
+(** The explicit wrapping forms (int_wrapping_add/sub/mul): modulo 2^63 on a
+    native host, which is OCaml's own [int] arithmetic.  A narrow host cannot
+    represent the 63-bit result, so there they keep the host-limit check. *)
+let int_wrapping_add a b = if narrow_int then int_add a b else a + b
+let int_wrapping_sub a b = if narrow_int then int_sub a b else a - b
+let int_wrapping_mul a b = if narrow_int then int_mul a b else a * b
+
+(** [Float.to_int], raising [int_overflow op] when [f] is outside the host Int
+    range on a narrow host. *)
+let int_of_float_checked op f =
+  if narrow_int && not (Float.is_nan f)
+     && (f >= Float.of_int max_int +. 1. || f < Float.of_int min_int)
+  then int_overflow op else Float.to_int f
+
 let arith_num iop fop name = VBuiltin (name, function
     | [VInt a;   VInt b]   -> VInt   (iop a b)
     | [VFloat a; VFloat b] -> VFloat (fop a b)
@@ -680,6 +757,53 @@ let type_name_of_value = function
     let key = String.concat "," (List.sort String.compare field_names) in
     Hashtbl.find_opt record_type_tbl key
   | _         -> None
+
+let ctor_qualified_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
+
+(** Like [type_name_of_value], but a colliding [VCon]'s type resolves to its
+    declaring-module-qualified name (e.g. "NA.Thing") instead of the bare
+    short name, so a general-interface method call routes through
+    [iface_method_tbl] to the actual argument's impl rather than whichever
+    same-short-name type's impl happened to register last. Non-colliding
+    values (the common case) fall back to [type_name_of_value] unchanged. *)
+let dispatch_type_name_of_value = function
+  | VCon (tag, _) as v ->
+    (match Hashtbl.find_opt ctor_qualified_type_tbl tag with
+     | Some qualified -> Some qualified
+     | None -> type_name_of_value v)
+  | v -> type_name_of_value v
+
+(** Lexicographic order of two tuples: the first component pair that
+    differs decides, each compared as [compare] would (a total order on
+    Float, the component type's own [Ord] impl for an ADT). The prelude's
+    [impl Ord((a, b))] .. 5-tuples are the compiled side of the same rule.
+    [None] when a component pair has no order here (no [Ord] impl). *)
+let rec tuple_compare (xs : value list) (ys : value list) : int option =
+  match xs, ys with
+  | [], [] -> Some 0
+  | x :: xs', y :: ys' ->
+    (match ord_compare_value x y with
+     | Some 0 -> tuple_compare xs' ys'
+     | r -> r)
+  | _ -> None
+
+and ord_compare_value (a : value) (b : value) : int option =
+  match a, b with
+  | VInt x, VInt y -> Some (Int.compare x y)
+  | VFloat x, VFloat y -> Some (Float.compare x y)
+  | VString x, VString y -> Some (String.compare x y)
+  | VBool x, VBool y -> Some (Bool.compare x y)
+  | VTuple xs, VTuple ys -> tuple_compare xs ys
+  | _ ->
+    (match type_name_of_value a with
+     | Some tname ->
+       (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
+        | Some cmp_fn ->
+          (match !iface_dispatch_hook cmp_fn [a; b] with
+           | VInt n -> Some n
+           | _ -> None)
+        | None -> None)
+     | None -> None)
 
 let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
     | [VInt a;    VInt b]    -> VBool (op_i a b)
@@ -703,7 +827,11 @@ let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
          VBool (if name = "==" then a = b else a <> b))
     | [a; b] when (name = "<" || name = "<=" || name = ">" || name = ">=") ->
       (* For ordering operators, look up the Ord impl if available. *)
-      let cmp_result = match type_name_of_value a with
+      let cmp_result = match a, b with
+        | VTuple xs, VTuple ys ->
+          Option.map (fun n -> VInt n) (tuple_compare xs ys)
+        | _ ->
+        match type_name_of_value a with
         | Some tname ->
           (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
            | Some cmp_fn -> Some (!iface_dispatch_hook cmp_fn [a; b])

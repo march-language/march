@@ -68,3 +68,20 @@ let store ~root key (r : Solver.result) : unit =
   mkdir_p (Filename.dirname p);
   Out_channel.with_open_bin p (fun oc ->
       Out_channel.output_string oc (string_of_result r))
+
+(* Reflection stage 2 (I8): the unsat core of a proof, beside its verdict, so
+   a warm-cache proof names the same definitions in `uses:` as a cold one.
+   One literal per line. *)
+let store_core ~root key (core : string list) : unit =
+  let p = path_for ~root key ^ ".core" in
+  mkdir_p (Filename.dirname p);
+  Out_channel.with_open_bin p (fun oc -> Out_channel.output_string oc (String.concat "\n" core))
+
+let lookup_core ~root key : string list option =
+  let p = path_for ~root key ^ ".core" in
+  if Sys.file_exists p then
+    Some
+      (In_channel.with_open_bin p In_channel.input_all
+      |> String.split_on_char '\n'
+      |> List.filter (( <> ) ""))
+  else None

@@ -158,3 +158,75 @@ mod Foo do let x : Int = 42 end
         (type_constructor
           (type_constructor)))
       value: (integer))))
+
+================================================================================
+opaque attribute (reflection: keep a body out of the logic)
+================================================================================
+
+mod M do
+  @[opaque]
+  fn inc(n : Int) : Int do n + 1 end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (attribute)
+    (function_def
+      name: (identifier)
+      (fn_param
+        (named_param
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor))))
+      return_type: (type_constructor
+        (type_constructor))
+      body: (block_body
+        (additive_expression
+          left: (identifier)
+          right: (integer))))))
+
+================================================================================
+Function with a needs bound
+================================================================================
+mod Foo do
+fn log(s : String) : Unit needs IO.Console, IO.Clock do s end
+fn len(s : String) needs () do s end
+end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (named_param
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor))))
+      return_type: (type_constructor
+        (type_constructor))
+      (fn_needs
+        (module_path
+          (type_identifier)
+          (type_identifier))
+        (module_path
+          (type_identifier)
+          (type_identifier)))
+      body: (block_body
+        (identifier)))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (named_param
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor))))
+      (fn_needs)
+      body: (block_body
+        (identifier)))))

@@ -1,5 +1,7 @@
 -- Path module: pure path manipulation (no I/O).
 -- All operations are pure string functions.
+--
+-- doc: try
 
 mod Path do
 

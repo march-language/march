@@ -17,17 +17,22 @@
 -- Pure API:
 --   new_state/0               — empty PresenceState
 --   track_state/5             — add a (pid, meta) entry for (topic, key)
---   untrack_state/3           — remove entries for (topic, key, pid)
+--   untrack_state/4           — remove entries for (topic, key, pid)
 --   list_state/2              — get Map(key, PresenceEntry) for a topic
 --   entry_metas/1             — get the List(PresenceMeta) from an entry
 --   meta_pid/1                — extract pid from a PresenceMeta
 --   meta_data/1               — extract data string from a PresenceMeta
 --   count_presences/2         — number of distinct keys present on a topic
+--   is_present/3, connection_count/3
+--   join_diff_json/2, leave_diff_json/2 — presence_diff payloads
 --
 -- Runtime helpers (require actor runtime):
---   track/3   — track(socket, key, meta_json) using the current channel pid
---   untrack/2 — untrack(socket, key) for the current channel pid
---   list/1    — list(topic) → list of (key, meta_json) pairs
+--   track/3   — track(socket, key, meta_json): broadcast a join diff
+--   untrack/3 — untrack(socket, key, meta_json): broadcast a leave diff
+-- Neither updates a PresenceState; the caller keeps that with
+-- track_state/untrack_state.
+--
+-- doc: try
 
 mod Presence do
 
@@ -38,17 +43,38 @@ mod Presence do
   --   data — JSON-encoded metadata string (e.g. {"name":"Alice","online_at":0})
   type PresenceMeta = PresenceMeta(Int, String)
 
-  doc "Construct a PresenceMeta."
+  doc """
+  One connection's presence: the channel `pid` and its JSON metadata.
+
+  ## Examples
+
+      march> Presence.make_meta(7, "{}")
+      PresenceMeta(7, "{}")
+  """
   fn make_meta(pid, data_json) do
     PresenceMeta(pid, data_json)
   end
 
-  doc "Extract the pid from a PresenceMeta."
+  doc """
+  The channel pid of a PresenceMeta.
+
+  ## Examples
+
+      march> Presence.meta_pid(Presence.make_meta(7, "{}"))
+      7
+  """
   fn meta_pid(m) do
     match m do | PresenceMeta(p, _) -> p end
   end
 
-  doc "Extract the data string from a PresenceMeta."
+  doc """
+  The JSON metadata string of a PresenceMeta.
+
+  ## Examples
+
+      march> Presence.meta_data(Presence.make_meta(7, "{\"device\":\"phone\"}"))
+      "{\"device\":\"phone\"}"
+  """
   fn meta_data(m) do
     match m do | PresenceMeta(_, d) -> d end
   end
@@ -59,17 +85,36 @@ mod Presence do
   -- Holds a list of PresenceMeta (one per active device/connection).
   type PresenceEntry = PresenceEntry(List(PresenceMeta))
 
-  doc "Construct a PresenceEntry with a list of metas."
+  doc """
+  A PresenceEntry holding `metas` (one per connection).
+
+  ## Examples
+
+      march> Presence.entry_metas(Presence.make_entry([Presence.make_meta(1, "{}")]))
+      [PresenceMeta(1, "{}")]
+  """
   fn make_entry(metas) do
     PresenceEntry(metas)
   end
 
-  doc "Return the list of PresenceMeta from a PresenceEntry."
+  doc """
+  The metas of an entry; `track_state` puts the newest connection first.
+
+  ## Examples
+
+      march> Presence.entry_metas(Presence.make_entry([]))
+      []
+  """
   fn entry_metas(e) do
     match e do | PresenceEntry(ms) -> ms end
   end
 
-  doc "Number of active connections for this entry."
+  doc """
+  Number of connections (metas) in this entry. O(n).
+
+      Presence.entry_count(Presence.make_entry([Presence.make_meta(1, "{}"), Presence.make_meta(2, "{}")]))
+      -- 2
+  """
   fn entry_count(e) do
     list_len_pr(entry_metas(e))
   end
@@ -80,7 +125,14 @@ mod Presence do
   -- Both levels use String keys with the standard string comparator.
   type PresenceState = PresenceState(Map(String, Map(String, PresenceEntry)))
 
-  doc "Create an empty PresenceState."
+  doc """
+  An empty PresenceState: nobody is present on any topic.
+
+  ## Examples
+
+      march> Presence.count_presences(Presence.new_state(), "room:lobby")
+      0
+  """
   fn new_state() do
     PresenceState(Map.empty())
   end
@@ -125,6 +177,13 @@ mod Presence do
   Add a presence entry for `key` on `topic` with the given channel `pid` and
   `meta_json` metadata string.  Returns the updated state.
   Multiple calls with different pids add multiple entries (multi-device support).
+  The new meta is prepended to the key's list. Tracking the same pid twice
+  adds a second meta for it (both are removed by one `untrack_state`).
+
+      let s = Presence.track_state(Presence.new_state(), "room:lobby", "alice", 7, "{}")
+      let s2 = Presence.track_state(s, "room:lobby", "alice", 8, "{}")
+      Presence.count_presences(s2, "room:lobby")             -- 1
+      Presence.connection_count(s2, "room:lobby", "alice")   -- 2
   """
   fn track_state(pst, topic, key, pid, meta_json) do
     match pst do
@@ -147,7 +206,16 @@ mod Presence do
   doc """
   Remove all presence metas for `pid` under `key` on `topic`.
   If the entry becomes empty, the key is removed from the topic map.
-  Returns the updated state.
+  Returns the updated state; unchanged when the key is not present (an
+  unknown pid under a present key re-stores the same entry).
+
+      let s = Presence.track_state(Presence.new_state(), "room:lobby", "alice", 7, "{}")
+      Presence.is_present(Presence.untrack_state(s, "room:lobby", "alice", 7), "room:lobby", "alice")   -- false
+
+  ## Examples
+
+      march> Presence.count_presences(Presence.untrack_state(Presence.new_state(), "room:lobby", "alice", 7), "room:lobby")
+      0
   """
   fn untrack_state(pst, topic, key, pid) do
     match pst do
@@ -174,7 +242,13 @@ mod Presence do
 
   doc """
   Return the Map(key, PresenceEntry) for `topic`.
-  Empty map if no one is present.
+  Empty map if no one is present. A topic whose last key was untracked stays
+  in the state with an empty map.
+
+  ## Examples
+
+      march> Map.size(Presence.list_state(Presence.new_state(), "room:lobby"))
+      0
   """
   fn list_state(pst, topic) do
     match pst do
@@ -187,7 +261,13 @@ mod Presence do
   end
 
   doc """
-  Number of distinct user keys currently present on `topic`.
+  Number of distinct user keys currently present on `topic` (a user on
+  several devices counts once).
+
+  ## Examples
+
+      march> Presence.count_presences(Presence.new_state(), "room:lobby")
+      0
   """
   fn count_presences(pst, topic) do
     Map.size(list_state(pst, topic))
@@ -195,6 +275,11 @@ mod Presence do
 
   doc """
   True when `key` has at least one active presence on `topic`.
+
+  ## Examples
+
+      march> Presence.is_present(Presence.new_state(), "room:lobby", "alice")
+      false
   """
   fn is_present(pst, topic, key) do
     let inner = list_state(pst, topic)
@@ -207,6 +292,12 @@ mod Presence do
   doc """
   Number of active connections (metas) for `key` on `topic`.
   Useful for multi-device detection (> 1 means multiple devices).
+  0 when the key is not present.
+
+  ## Examples
+
+      march> Presence.connection_count(Presence.new_state(), "room:lobby", "alice")
+      0
   """
   fn connection_count(pst, topic, key) do
     let inner = list_state(pst, topic)
@@ -221,6 +312,12 @@ mod Presence do
   doc """
   Build a JSON presence-diff string for a single join event.
   Format: {"joins":{"key":{"metas":[meta_json]}},"leaves":{}}
+  The key is escaped for `"` and backslash; `meta_json` is embedded verbatim.
+
+  ## Examples
+
+      march> Presence.join_diff_json("alice", "{}")
+      "{\"joins\":{\"alice\":{\"metas\":[{}]}},\"leaves\":{}}"
   """
   fn join_diff_json(key, meta_json) do
     string_concat(
@@ -237,6 +334,12 @@ mod Presence do
   doc """
   Build a JSON presence-diff string for a single leave event.
   Format: {"joins":{},"leaves":{"key":{"metas":[meta_json]}}}
+  The key is escaped for `"` and backslash; `meta_json` is embedded verbatim.
+
+  ## Examples
+
+      march> Presence.leave_diff_json("alice", "{}")
+      "{\"joins\":{},\"leaves\":{\"alice\":{\"metas\":[{}]}}}"
   """
   fn leave_diff_json(key, meta_json) do
     string_concat(
@@ -259,9 +362,13 @@ mod Presence do
   -- These require a running Channel socket with a channel_pid.
 
   doc """
-  Track the current user on the socket's topic.
-  Sends a presence-diff broadcast via PubSub for the join event.
+  Track the current user on the socket's topic: casts a
+  `ChannelBroadcast(topic, "presence_diff", join_diff_json(key, meta_json))`
+  to the socket's channel pid. It does not touch any PresenceState; keep one
+  with `track_state`.
   Requires actor runtime and a running PubSub.
+
+      Presence.track(sock, "alice", "{\"device\":\"phone\"}")
   """
   fn track(sock, key, meta_json) do
     let topic = Channel.socket_topic(sock)
@@ -272,10 +379,14 @@ mod Presence do
   end
 
   doc """
-  Untrack the current user from the socket's topic.
-  Sends a presence-diff broadcast for the leave event only if this was the
-  user's last connection (single-device cleanup is the caller's responsibility).
+  Untrack the current user from the socket's topic: casts a
+  `ChannelBroadcast(topic, "presence_diff", leave_diff_json(key, meta_json))`
+  to the socket's channel pid. It ALWAYS broadcasts the leave: it does not
+  check whether this was the user's last connection, and it does not touch
+  any PresenceState (use `untrack_state` and `connection_count` for that).
   Requires actor runtime.
+
+      Presence.untrack(sock, "alice", "{\"device\":\"phone\"}")
   """
   fn untrack(sock, key, meta_json) do
     let topic = Channel.socket_topic(sock)

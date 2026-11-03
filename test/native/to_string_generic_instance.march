@@ -1,0 +1,72 @@
+-- Regression: compiled `to_string` printed a newtype or niche value in a
+-- type-variable slot of a user generic type as its payload: `Box(Meters(9))`
+-- printed `Box(9)`, `Box(NoName)` printed `Box(nil)`, and a Bool in such a
+-- slot printed `1`.  The constructor-name descriptor had one row per
+-- declaration, and a field of type `a` got the generic token, which has
+-- nothing to read for a value with no heap cell.
+--
+-- The descriptor (lib/tir/llvm_ctor_desc.ml) now adds an INSTANCE row for a
+-- generic type applied to ground arguments, with the arguments substituted
+-- into its fields.  The same rows serve a top-level `to_string`, a field of a
+-- declared type, a List/Option element, interpolation, `inspect` and `~H`.
+--
+-- Run interpreted AND compiled against the SAME .expected.
+mod Main do
+  needs IO.Console
+
+  type Meters = Meters(Int)
+  type Flag = Flag(Bool)
+  type MaybeName = NoName | Named(String)
+  type Shape = Circle(Int) | Square(Int)
+  type Box(a) = Box(a)
+  type Pair(a, b) = Pair(a, b) | Empty
+  type Opt(a) = Nada | Has(a)
+  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
+  type Tagged(a) = Tagged(Int, a)
+  type Bag = Bag(List(Meters), Opt(Flag))
+  type Rec = { b : Box(Meters), p : Pair(Bool, MaybeName) }
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    -- newtype / niche / scalar in a type-variable slot
+    println(to_string(Box(Meters(9))))
+    println(to_string(Box(MaybeName.Named("x"))))
+    println(to_string(Box(MaybeName.NoName)))
+    println(to_string(Box(Box(Meters(3)))))
+    println(to_string(Box(true)))
+    println(to_string(Box(2.5)))
+    println(to_string(Box(())))
+    println(to_string(Box(Square(4))))
+    println(to_string(Pair(Meters(1), MaybeName.Named("y"))))
+    println(to_string(Pair(Flag(false), 2.5)))
+    println(to_string(Pair(4, "s")))
+    let e : Pair(Meters, Int) = Empty
+    println(to_string(e))
+    -- a recursive generic type
+    println(to_string(Node(Leaf, Meters(5), Node(Leaf, Meters(6), Leaf))))
+    -- a generic niche (no row of its own before) and a boxed one
+    println(to_string(Has(4)))
+    println(to_string(Has(Meters(4))))
+    println(to_string(Has(true)))
+    let n : Opt(Meters) = Nada
+    println(to_string(n))
+    println(to_string(Has("s")))
+    println(to_string(Has(1.5)))
+    -- a concrete field next to a type-variable one
+    println(to_string(Tagged(1, Flag(true))))
+    -- a declared field of an applied generic type
+    println(to_string(Bag([Meters(1), Meters(2)], Has(Flag(true)))))
+    let r : Rec = { b: Box(Meters(7)), p: Pair(false, MaybeName.NoName) }
+    println(to_string(r))
+    -- through prelude containers
+    println(to_string([Box(Meters(2))]))
+    println(to_string(Some(Box(MaybeName.NoName))))
+    println(to_string([Has(Meters(1)), Nada]))
+    -- interpolation, inspect, ~H
+    let b = Box(Meters(11))
+    let t = Tagged(2, MaybeName.Named("<b>"))
+    println("b=${b} t=${t}")
+    println(inspect(b))
+    println(inspect(Has(Flag(false))))
+    println(IOList.to_string(~H"<p>${b} ${t}</p>"))
+  end
+end

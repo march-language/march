@@ -1,0 +1,83 @@
+-- Leak guard for a Float box reached through a NESTED pattern.
+--
+-- `Some(Some(f))` over `Option(Option(Float))` compiles to a case on a
+-- pattern-compiler temporary whose branch tag is QUALIFIED ("Option.Some").
+-- lib/tir/llvm_data.ml's resolve_ctor_fields looked that tag up verbatim in
+-- poly_ctors (keyed by the bare ctor name), missed, and fell back to the
+-- declared `'a` field. The inner slot's Float box was then treated as an
+-- ordinary heap field -- moved to a binder whose type needs no drop, or
+-- incremented on the shared path -- and nobody ever released it: one leaked
+-- box per match (found by the LSan pass of scripts/native-sanitize-sweep.sh,
+-- in nested_option_float_match).
+--
+-- The shared leg matches a still-live value twice: a release that fired while
+-- the cell survives would hand the second match a freed box, so its printed
+-- sum is the double-free witness.
+--
+-- SIGNAL: live_allocs() deltas over 2,000 iterations; each must be 0.
+mod NestedFloatPatternLeakProbe do
+  needs IO.Console
+
+  pfn oof(o : Option(Option(Float))) : Float do
+    match o do
+      Some(Some(f)) -> f
+      Some(_x) -> 0.5
+      None -> 0.0
+    end
+  end
+
+  pfn rof(r : Result(Option(Float), String)) : Float do
+    match r do
+      Ok(Some(f)) -> f
+      Ok(_x) -> 0.5
+      Err(_) -> 0.0 -. 1.0
+    end
+  end
+
+  pfn generic_inner(o : Option(Option(a)), d : a) : a do
+    match o do
+      Some(Some(v)) -> v
+      Some(_x) -> d
+      None -> d
+    end
+  end
+
+  pfn unique_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let x = int_to_float(n)
+      let a = oof(Some(Some(x)))
+      let b = rof(Ok(Some(x)))
+      let c = generic_inner(Some(Some(x)), 0.0)
+      unique_leg(n - 1, acc +. a +. b +. c)
+    end
+  end
+
+  pfn shared_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let o = Some(Some(0.25))
+      let a = match o do
+        Some(Some(f)) -> f
+        _ -> 9.0
+      end
+      let b = match o do
+        Some(Some(g)) -> g
+        _ -> 9.0
+      end
+      shared_leg(n - 1, acc +. a +. b)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    println("unique=" ++ float_to_string(unique_leg(4, 0.0)))
+    println("shared=" ++ float_to_string(shared_leg(4, 0.0)))
+    let b0 = live_allocs()
+    let u = unique_leg(2000, 0.0)
+    let b1 = live_allocs()
+    let s = shared_leg(2000, 0.0)
+    let b2 = live_allocs()
+    println("unique2k=" ++ float_to_string(u) ++ " leaked=" ++ int_to_string(b1 - b0))
+    println("shared2k=" ++ float_to_string(s) ++ " leaked=" ++ int_to_string(b2 - b1))
+  end
+end

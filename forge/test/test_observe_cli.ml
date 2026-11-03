@@ -45,11 +45,52 @@ let test_render_top () =
   Alcotest.(check bool) "row for pid 2" true (contains frame "queue");
   Alcotest.(check bool) "column header" true (contains frame "MBOX")
 
+let test_top_supervision () =
+  let child = `Assoc [ "pid", `Int 7; "value", `Int 16384; "type", `String "Counter"; "names", `List [];
+                        "status", `String "waiting"; "mbox", `Int 0; "stack_bytes", `Int 16384;
+                        "crashes", `Int 0; "child_crashes", `Int 0; "children", `Int 0;
+                        "link", `String "supervised"; "parent", `Int 3; "parent_type", `String "Sup";
+                        "spawned_by", `Null; "supervisor", `Null ] in
+  let sup = `Assoc [ "pid", `Int 3; "value", `Int 16384; "type", `String "Sup"; "names", `List [ `String "boss" ];
+                      "status", `String "waiting"; "mbox", `Int 0; "stack_bytes", `Int 16384;
+                      "crashes", `Int 0; "child_crashes", `Int 2; "children", `Int 4;
+                      "link", `String "none"; "parent", `Null; "parent_type", `Null; "spawned_by", `Null;
+                      "supervisor", `Assoc [ "strategy", `String "one_for_one"; "max_restarts", `Int 5;
+                                             "window_secs", `Int 60; "restarts_held", `Int 1 ] ] in
+  let twig = `Assoc [ "pid", `Int 9; "value", `Int 0; "type", `Null; "names", `List []; "status", `String "waiting";
+                      "mbox", `Int 0; "link", `String "spawned"; "parent", `Null; "spawned_by", `Int 3 ] in
+  let c = Cmd_observe.top_row_line child and s = Cmd_observe.top_row_line sup
+  and t = Cmd_observe.top_row_line twig in
+  Alcotest.(check bool) "a supervised child names its supervisor and type" true
+    (contains c "supervised" && contains c "3 (Sup)" && not (contains c "kids"));
+  Alcotest.(check bool) "a supervisor shows policy, restarts held/max and crashes" true
+    (contains s "one_for_one 1/5 in 60s, 4 kids" && contains s "boss");
+  Alcotest.(check bool) "crashes column adds the children's" true (contains s "       2  none");
+  Alcotest.(check bool) "an unsupervised spawned actor names its spawner; old nodes' missing fields read 0" true
+    (contains t "spawned by 3" && contains t "spawned")
+
 let test_status_json () =
   let j = Cmd_observe.summary_json (Cmd_observe.reply_summary (fixture "mailbox_growth_critical")) in
   let s = Yojson.Safe.to_string j in
   Alcotest.(check bool) "deepest in JSON" true (contains s "\"deepest\":{\"pid\":2");
   Alcotest.(check bool) "queued in JSON" true (contains s "\"queued\":5000")
+
+(* The early refusals of a trace request with actor events: they are decided
+   before any key is read, so they need no node and no deploy key. *)
+let test_trace_event_refusals () =
+  let start ?(fns = "-") ?(events = []) ?(pids = []) () =
+    Cmd_observe.Trace_start { fns; limit = Cmd_observe.Max_events 10; ring = None; events; pids } in
+  let refused name d part =
+    match Cmd_observe.debug_request d with
+    | Error m -> Alcotest.(check bool) (name ^ ": " ^ m) true (contains m part)
+    | Ok _ -> Alcotest.fail (name ^ ": was not refused") in
+  refused "events without pids" (start ~events:[ "sent" ] ()) "--pids";
+  refused "pids without events" (start ~fns:"tick" ~pids:[ 1 ] ()) "--events";
+  refused "nine pids" (start ~events:[ "sent" ] ~pids:[ 1; 2; 3; 4; 5; 6; 7; 8; 9 ] ()) "1 to 8";
+  refused "a negative pid" (start ~events:[ "sent" ] ~pids:[ -1 ] ()) "non-negative";
+  refused "an unknown kind" (start ~events:[ "sent"; "bogus" ] ~pids:[ 1 ] ()) "at most once";
+  refused "a repeated kind" (start ~events:[ "sent"; "sent" ] ~pids:[ 1 ] ()) "at most once";
+  refused "nothing to watch" (start ()) "boundary function names"
 
 let () =
   Alcotest.run "observe_cli" [
@@ -59,6 +100,10 @@ let () =
     ];
     "render", [
       Alcotest.test_case "top frame" `Quick test_render_top;
+      Alcotest.test_case "top supervision columns" `Quick test_top_supervision;
       Alcotest.test_case "status JSON" `Quick test_status_json;
+    ];
+    "trace", [
+      Alcotest.test_case "actor-event requests the client refuses" `Quick test_trace_event_refusals;
     ];
   ]

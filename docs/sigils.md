@@ -140,9 +140,18 @@ errors rather than silently-wrong output:
                              --        is expected...
 ~H"<${tag}>x</${tag}>"       -- error: Cannot interpolate an element name...
 ~H"<!-- ${x} -->"            -- error: Cannot interpolate inside an HTML comment...
+~H"<a href=\"${s}://${host}\">x</a>"
+                             -- error: A literal `:` right after an interpolation
+                             --        at the start of a URL lets the interpolated
+                             --        value choose the URL's scheme...
 ~H"<div class=\"${x}"         -- error: This ~H template does not end in a
                              --        well-formed state...
 ```
+
+The `href` one is a scheme check that cannot see its whole scheme: `s` is checked
+alone (`javascript` has no colon, so it looks like a relative link), and the
+template's `:` would then make it the scheme. Build the URL first and interpolate it
+as one value, or write the scheme literally (`href="https://${host}/"`).
 
 The last one catches a template that stops mid-tag or mid-attribute: whatever you
 concatenate after it would be spliced into that position.

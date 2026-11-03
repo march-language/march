@@ -1,0 +1,20 @@
+mod C2c do
+  type Nat = Z | S(Nat)
+
+  @[measure]
+  fn pos_nat(n : Nat) : Bool do
+    match n do
+      Z -> false
+      S(_) -> true
+    end
+  end
+
+  fn needp(n : {Nat | pos_nat(_) == true}) : Int do 0 end
+  fn needq(n : Nat) : {Int | pos_nat(n) || _ == 0} do 0 end
+
+  fn main() : Unit do
+    let _ = needp(S(Z))
+    let _ = needp(Z)
+    ()
+  end
+end

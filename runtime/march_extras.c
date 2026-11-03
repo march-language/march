@@ -235,6 +235,7 @@ static void b64_decode_init(void) {
 static void *bytes_wrap(void *payload) {
     void *b = march_alloc(16 + 8);       /* hdr(16) + ptr(8) */
     /* tag stays 0 = Bytes ctor */
+    ((march_hdr *)b)->pad = march_bytes_type_id();
     *(void **)((char *)b + 16) = payload;
     return b;
 }
@@ -473,10 +474,10 @@ void *march_sha1_bytes(void *b) {
  * one of those negative ids (impossible: len >= 0). */
 static int is_bytes_value(void *v) {
     static int32_t id_q = 0, id_bare = 0;
-    if (id_q == 0) id_q = march_type_id_of_name("Bytes.Bytes");
-    if (id_bare == 0) id_bare = march_type_id_of_name("Bytes");
     const march_hdr *h = (const march_hdr *)v;
-    return h->tag == 0 && (h->pad == 0 || h->pad == id_q || h->pad == id_bare);
+    return h->tag == 0 && (h->pad == 0
+                           || h->pad == march_type_id_memo(&id_q, "Bytes.Bytes")
+                           || h->pad == march_type_id_memo(&id_bare, "Bytes"));
 }
 
 /* Raw bytes of a String or a Bytes value (malloc'd; caller frees). */
@@ -1918,6 +1919,31 @@ void * march_vault_reap(void *handle, void *key_val) {
     return r;
 }
 
+/* Release the values [key]'s shard has stopped holding with a plain
+ * [march_decrc] each.  Only for a table the RUNTIME owns whose values need
+ * no typed drop: the actor registry, whose values are actor records (the
+ * actor's own death releases its state, so one decrc is the whole release).
+ * Nothing reaps such a table from March, so every buried value used to stay
+ * in the graveyard for the life of the process: one actor record per
+ * registration that was dropped, unregistered or overwritten. */
+void march_vault_release_dead(void *handle, void *key_val) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return; }
+    char *key = vault_key_cstr(key_val);
+    uint32_t h = vault_hash(key);
+    free(key);
+    vault_shard *sh = vault_shard_for(vd, h);
+    if (atomic_load_explicit(&sh->ndead, memory_order_relaxed) != 0) {
+        int64_t n;
+        vault_wr_lock(&sh->lock);
+        void **d = vault_take_dead(sh, &n);
+        vault_wr_unlock(&sh->lock);
+        for (int64_t i = 0; i < n; i++) march_decrc(d[i]);
+        free(d);
+    }
+    vault_leave(handle, st);
+}
+
 int64_t march_vault_size(void *handle) {
     unsigned st; vault_data *vd = vault_enter(handle, &st);
     if (vd == VAULT_CLOSED) { vault_leave(handle, st); return 0; }
@@ -2653,6 +2679,22 @@ void march_repl_set(int64_t slot, int64_t val) {
     march_repl_slots[(size_t)slot] = val;
 }
 
+/* The release of each slot's value, when the fragment that stored it gave
+ * one: its type's deep drop (the remote shell's init fragments, see
+ * lib/tir/llvm_repl.ml emit_repl_expr).  A slot is untyped here, so a
+ * release must come from code that knows the type: march_decrc frees only
+ * the top cell of a list or record, and a Float slot holds raw IEEE bits that
+ * IS_HEAP_PTR cannot tell from a pointer.  NULL for a scalar slot. */
+static void (*march_repl_slot_drops[MARCH_REPL_NSLOTS])(void *);
+
+void march_repl_set_drop(int64_t slot, void (*drop)(void *)) {
+    march_repl_slot_drops[(size_t)slot] = drop;
+}
+
+void (*march_repl_get_drop(int64_t slot))(void *) {
+    return march_repl_slot_drops[(size_t)slot];
+}
+
 /* ── Record shape registry + record introspection builtins ───────────────
  *
  * Native records are heap cells with tag 0 and fields stored SORTED BY NAME
@@ -2702,6 +2744,11 @@ typedef struct {
     int64_t  *name_lens;
     char     *kinds;      /* one of 'i','f','p','g' per field */
     char     *desc;       /* owned canonical descriptor string */
+    /* The compiler's deep drop for records of this shape, or NULL.  Set once
+     * by march_record_register_drops for a descriptor that names one (its
+     * "#__drop$R.." suffix, which also makes the shape id distinct per field
+     * TYPES); read by march_decrc_erased. */
+    _Atomic(void *) drop;
 } march_record_shape;
 
 /* Shape registry.  Writers ([march_record_shape_intern]) hold [rec_shape_mu];
@@ -2773,11 +2820,16 @@ int32_t march_record_shape_intern(const char *desc) {
 }
 
 /* Called by compiled code after every record allocation.  [cache] is a
- * per-shape module global that memoizes the interned id (benign race: the
- * intern is idempotent). */
+ * per-shape module global that memoizes the interned id (racy by design:
+ * the intern is idempotent). */
 void march_record_set_shape(void *rec, const char *desc, int32_t *cache) {
-    int32_t id = *cache;
-    if (id == 0) { id = march_record_shape_intern(desc); *cache = id; }
+    /* Relaxed atomics: the same plain ldr/str, but the idempotent race is
+     * not a C data race (and not a TSAN report). */
+    int32_t id = __atomic_load_n(cache, __ATOMIC_RELAXED);
+    if (id == 0) {
+        id = march_record_shape_intern(desc);
+        __atomic_store_n(cache, id, __ATOMIC_RELAXED);
+    }
     ((march_hdr *)rec)->pad = id;
 }
 
@@ -2785,6 +2837,58 @@ static march_record_shape *rec_shape_of(void *rec) {
     int32_t id = ((march_hdr *)rec)->pad;
     if (id <= 0 || id > __atomic_load_n(&rec_shape_count, __ATOMIC_ACQUIRE)) return NULL;
     return __atomic_load_n(&rec_shape_table, __ATOMIC_ACQUIRE)[id - 1];
+}
+
+/* ── Deep release of a record through an erased type ──────────────────────
+ * A record released where its static type is a type variable (a lambda's
+ * erased parameter, an element released by a generic container's drop) is a
+ * bare release that names no layout, so it freed the cell and leaked every
+ * heap field (a String name, a List).  The compiler tags the shape of each
+ * record type that owns a heap field with that type's deep drop
+ * (Llvm_data.shape_desc_with_drop) and registers the pair from main's
+ * prologue; an erased release of a record cell with such a shape runs the
+ * drop, which releases the cell and, when that freed it, its fields.
+ * Anything else is released exactly as before.  Lookups take no lock: a
+ * shape's drop is written once, before the scheduler starts, and a record
+ * of that shape is built by code that runs after it.
+ * specs/progress/2026-10-12-erased-record-shallow-release.md */
+typedef void (*march_rec_drop_fn)(void *rec);
+
+void march_record_register_drops(void **triples, int64_t n) {
+    for (int64_t i = 0; i < n; i++) {
+        const char *desc  = (const char *)triples[3 * i];
+        int32_t    *cache = (int32_t *)triples[3 * i + 1];
+        void       *drop  = triples[3 * i + 2];
+        int32_t id = __atomic_load_n(cache, __ATOMIC_RELAXED);
+        if (id == 0) {
+            id = march_record_shape_intern(desc);
+            __atomic_store_n(cache, id, __ATOMIC_RELAXED);
+        }
+        march_record_shape *s =
+            __atomic_load_n(&rec_shape_table, __ATOMIC_ACQUIRE)[id - 1];
+        atomic_store_explicit(&s->drop, drop, memory_order_release);
+    }
+}
+
+static march_rec_drop_fn rec_erased_drop(void *p) {
+    march_hdr *h = (march_hdr *)p;
+    if (h->tag != 0 || h->pad <= 0) return NULL;
+    int32_t id = h->pad;
+    if (id > __atomic_load_n(&rec_shape_count, __ATOMIC_ACQUIRE)) return NULL;
+    march_record_shape *s = __atomic_load_n(&rec_shape_table, __ATOMIC_ACQUIRE)[id - 1];
+    return (march_rec_drop_fn)atomic_load_explicit(&s->drop, memory_order_acquire);
+}
+
+void march_decrc_erased(void *p) {
+    if (!IS_HEAP_PTR(p)) return;
+    march_rec_drop_fn drop = rec_erased_drop(p);
+    if (drop) drop(p); else march_decrc(p);
+}
+
+void march_decrc_erased_local(void *p) {
+    if (!IS_HEAP_PTR(p)) return;
+    march_rec_drop_fn drop = rec_erased_drop(p);
+    if (drop) drop(p); else march_decrc_local(p);
 }
 
 static int64_t rec_field_raw(void *rec, int32_t i) {
@@ -3216,7 +3320,12 @@ void *march_get_actor_field(void *pid, void *name) {
      * None: handing its raw bits back as a value was an unchecked cast (and
      * an unowned reference). */
     if (s->kinds[i] != 'i') return NULL;
-    int64_t raw = rec_field_raw(pid, i);
+    /* A relaxed atomic load (the same `ldr` as a plain one): this reads
+     * another actor's live state from outside it, and a supervisor's
+     * child-pid word is stored by the runtime from whichever thread ran
+     * the restart (march_runtime.c, sup_slot_publish). */
+    int64_t raw = __atomic_load_n((int64_t *)((char *)pid + 16 + (size_t)i * 8),
+                                  __ATOMIC_RELAXED);
     return (void *)(intptr_t)((raw << 1) | 1);
 }
 
@@ -3497,14 +3606,30 @@ void *march_html_auto_escape(void *v) {
  *
  * Descriptor grammar (tab-separated, newline-terminated lines):
  *
- *   T \t <local id> \t <V|R> \t <TypeName>       start a type
+ *   T \t <local id> \t <V|R|N|X>[*] \t <TypeName>   start a type
  *   C \t <tag> \t <CtorName> \t <f1,f2,...>      a variant constructor
  *   F \t <FieldName> \t <f>                      a record field, slot order
  *
+ * V and R are heap cells read by their tag.  N (newtype) and X (non-generic
+ * niche) have NO cell: an N value IS its one constructor's payload, and an X
+ * value is raw 0 for its nullary constructor and the payload for the other.
+ * Their rows' field tokens describe the payload WORD, which the allocator
+ * tags for a scalar payload (lib/tir/llvm_emit_alloc.ml), hence I and B.
+ *
+ * U is a tuple cell: one C row (empty name) whose fields are the elements,
+ * read whatever the cell's tag, rendered "(a, b)".  Only ever an instance.
+ *
+ * A kind followed by '*' is an INSTANCE of a generic type (`Box(Meters)`):
+ * its rows are the declaration's with the type arguments substituted, so a
+ * type-variable slot carries the argument's token instead of 'p'.  An
+ * instance is reached only through its local id, never through a header id.
+ *
  * A field token is one character, optionally followed by a decimal id:
  *   i  raw i64 Int          b  raw i64 Bool        u  Unit
+ *   I  tagged Int (v<<1|1)  B  tagged Bool
  *   f  raw double bits      s  march_string ptr    p  generic ptr slot
- *   A<id>  pointer to a cell of the type with that LOCAL id
+ *   A<id>  value of the type with that LOCAL id (a cell for V/R; the
+ *          wrapper's own word for N/X)
  *
  * These MUST agree with [Llvm_ctx.llvm_field_ty] — the slot representation a
  * boxed constructor actually stores — and with lib/tir/llvm_ctor_desc.ml,
@@ -3532,7 +3657,9 @@ typedef struct {
     march_ctor_field *fields;
 } march_ctor_row;
 typedef struct {
-    char kind;                /* 'V' variant, 'R' record */
+    char kind;                /* 'V' variant, 'R' record, 'N' newtype, 'X' niche,
+                                 'U' tuple */
+    char inst;                /* 1: an instance row (kind written "V*" etc.) */
     char *name;
     int32_t nrows;
     march_ctor_row *rows;
@@ -3624,13 +3751,11 @@ static int32_t ctor_type_index_for_hdr(void *v) {
  * is itself the entry module; the emitter hashes whichever it has. */
 static int32_t iolist_type_id(void) {
     static int32_t id = 0;
-    if (id == 0) id = march_type_id_of_name("IOList.IOList");
-    return id;
+    return march_type_id_memo(&id, "IOList.IOList");
 }
 static int32_t iolist_type_id_bare(void) {
     static int32_t id = 0;
-    if (id == 0) id = march_type_id_of_name("IOList");
-    return id;
+    return march_type_id_memo(&id, "IOList");
 }
 static int is_iolist_type_id(int32_t tid) {
     return tid == iolist_type_id() || tid == iolist_type_id_bare();
@@ -3715,8 +3840,16 @@ int32_t march_ctor_table_ensure(const char *desc, int32_t *cache) {
             if (local < 1 || local > ntypes) { cur = NULL; p = eol + 1; continue; }
             cur = &ctor_types[base + local - 1];
             cur->kind = *f2;
+            cur->inst = f2[1] == '*';
             cur->name = ctor_strndup(f3, (size_t)(eol - f3));
-            ctor_id_put(march_type_id_of_name(cur->name), base + local, cur->name);
+            /* Only a cell can carry a header id; registering a cell-less
+             * N/X type would let a stamped cell of a same-named type from
+             * another unit resolve to rows that do not read cells.  An
+             * instance row is never registered: the header id names the
+             * declaration, and an instance's substituted tokens would misread
+             * a cell of any other instance. */
+            if ((cur->kind == 'V' || cur->kind == 'R') && !cur->inst)
+                ctor_id_put(march_type_id_of_name(cur->name), base + local, cur->name);
             int32_t nrows = 0;
             for (const char *q = eol + 1; *q && *q != 'T'; ) {
                 const char *e2 = strchr(q, '\n');
@@ -3843,6 +3976,13 @@ static void ctor_render_field(ctor_buf *b, int64_t raw, march_ctor_field f, int 
             break;
         }
         case 'b': cb_putz(b, raw ? "true" : "false"); break;
+        case 'I': {
+            char tmp[24];
+            int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)(raw >> 1));
+            cb_puts(b, tmp, (size_t)n);
+            break;
+        }
+        case 'B': cb_putz(b, (raw >> 1) ? "true" : "false"); break;
         case 'u': cb_putz(b, "()"); break;
         case 'f': {
             double d;
@@ -3934,8 +4074,39 @@ static void ctor_put_generic(ctor_buf *b, void *v, int nohook, int repr) {
  * interpreter's value_to_string, which `~H` uses); 0 is `to_string`/Show,
  * which renders a string bare where its container has a Show impl and
  * switches to repr beneath any container that does not. */
+/* An N (newtype) or X (niche) value: no cell, so the constructor is decided
+ * by the type (N) or by whether the word is raw 0 (X), never by a header.
+ * Always repr form: neither has an element-showing Show impl, so the
+ * interpreter renders it with value_to_string, which quotes nested strings. */
+static void ctor_render_wrapper(ctor_buf *b, void *v, march_ctor_type *t, int depth) {
+    int64_t raw = (int64_t)(uintptr_t)v;
+    march_ctor_row *row = NULL;
+    for (int32_t i = 0; i < t->nrows && !row; i++) {
+        march_ctor_row *r = &t->rows[i];
+        if (t->kind == 'N' ? r->nfields == 1 : (r->nfields == 0) == (raw == 0))
+            row = r;
+    }
+    if (!row) { ctor_put_generic(b, v, 1, 1); return; }
+    cb_putz(b, row->name);
+    if (row->nfields == 0) return;
+    cb_putc(b, '(');
+    ctor_render_field(b, raw, row->fields[0], depth + 1, 1);
+    cb_putc(b, ')');
+}
+
+static int ctor_type_is_wrapper(int32_t type_id) {
+    if (type_id <= 0 || type_id > ctor_type_count) return 0;
+    char k = ctor_types[type_id - 1].kind;
+    return k == 'N' || k == 'X';
+}
+
 static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int repr) {
     if (depth >= CTOR_MAX_DEPTH) { cb_putz(b, "..."); return; }
+    /* Before any header read: a wrapper's word is a payload (or 0). */
+    if (ctor_type_is_wrapper(type_id)) {
+        ctor_render_wrapper(b, v, &ctor_types[type_id - 1], depth);
+        return;
+    }
     if (type_id <= 0 || type_id > ctor_type_count || !IS_HEAP_PTR(v)) {
         ctor_put_generic(b, v, 0, repr);
         return;
@@ -3945,7 +4116,12 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int re
      * flow the static type did not see) trust the cell. */
     {
         int32_t hdr = ctor_type_index_for_hdr(v);
-        if (hdr > 0 && hdr != type_id) type_id = hdr;
+        /* ...except that an INSTANCE row of the cell's own type is the more
+         * precise answer: the header names only the declaration. */
+        if (hdr > 0 && hdr != type_id
+            && !(ctor_types[type_id - 1].inst && ctor_types[type_id - 1].name
+                 && strcmp(ctor_types[type_id - 1].name, ctor_types[hdr - 1].name) == 0))
+            type_id = hdr;
     }
     march_ctor_type *t = &ctor_types[type_id - 1];
     if (!t->name) { ctor_put_generic(b, v, 1, repr); return; }
@@ -3969,6 +4145,17 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int re
                               depth, repr);
         }
         cb_putz(b, " }");
+        return;
+    }
+    if (t->kind == 'U') {
+        if (t->nrows < 1) { ctor_put_generic(b, v, 1, repr); return; }
+        march_ctor_row *r = &t->rows[0];
+        cb_putc(b, '(');
+        for (int32_t i = 0; i < r->nfields; i++) {
+            if (i) cb_putz(b, ", ");
+            ctor_render_field(b, ctor_slot(v, i), r->fields[i], depth + 1, repr);
+        }
+        cb_putc(b, ')');
         return;
     }
     march_ctor_row *row = ctor_row_for_tag(t, tag);
@@ -4015,7 +4202,8 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int re
  * builtin is reached, so the static type here is always one with NO Show
  * impl, and Show falls back to repr for it. */
 void *march_value_to_string_typed(void *v, int32_t type_id) {
-    if (!v || !IS_HEAP_PTR(v)) return march_value_to_string(v);
+    if ((!v || !IS_HEAP_PTR(v)) && !ctor_type_is_wrapper(type_id))
+        return march_value_to_string(v);
     ctor_buf b = { NULL, 0, 0 };
     ctor_render(&b, v, type_id, 0, 1);
     void *s = march_string_lit(b.p ? b.p : "", (int64_t)b.len);

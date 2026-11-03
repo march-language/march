@@ -8,12 +8,12 @@
  (names test_forge test_resolver test_solver test_cas_package test_patch
         test_api_surface test_properties test_regression test_cap_binary test_cap_inspect
         test_audit test_audit_inferred test_add_cap_gate test_cap_package test_dep_dir test_dep_cache_versions test_cluster
-        test_observe_client test_diagnose test_observe_cli)
+        test_observe_client test_diagnose test_observe_cli test_observe_tui)
  (modules test_forge test_resolver test_solver test_cas_package test_patch
           test_api_surface test_properties test_regression test_cap_binary test_cap_inspect
           test_audit test_audit_inferred test_add_cap_gate test_cap_package test_dep_dir test_dep_cache_versions test_cluster
-          test_observe_client test_diagnose test_observe_cli)
- (deps ../../bin/main.exe (source_tree fixtures/diagnose))
+          test_observe_client test_diagnose test_observe_cli test_observe_tui)
+ (deps ../../bin/main.exe (source_tree fixtures/diagnose) (source_tree fixtures/observe_tui))
  (libraries march_forge march_search march_caps str alcotest unix qcheck-core qcheck-alcotest march_cas
             march_ed25519))
 
@@ -234,7 +234,9 @@
     (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (setenv UPGRADE_FIXTURES_DIR fixtures/upgrade
-       (run %{exe:test_upgrade_from.exe}))))))))
+       ; Every case at once, 3 at a time (run_cases_parallel.sh): one after
+       ; another they were the `rest` CI shard's long pole (913 s).
+       (run bash %{dep:run_cases_parallel.sh} %{exe:test_upgrade_from.exe}))))))))
 
 ; test_hcr_manifest_diff.ml: a one-line edit to a topology app's function, or
 ; to a top-level function of the entry module, flags exactly that function in
@@ -299,3 +301,34 @@
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (setenv TOPOLOGY_APP_DIR %{workspace_root}/examples/topology_app
        (run %{exe:test_deploy_e2e.exe}))))))))
+
+; test_release_build.ml: `forge release build` and the bin/<app> launcher
+; (R9). Real native compiles, a real node started with `sh bin/<app> daemon`.
+; test_procs's hermetic shape plus the just-built forge for the CLI-shape case.
+(executable
+ (name test_release_build)
+ (modules test_release_build)
+ (libraries march_forge alcotest unix str))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv FORGE_TEST_BIN %{bin:forge}
+    (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+     (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+      (run %{exe:test_release_build.exe})))))))
+
+; test_so_exports_symbol.ml: Cmd_deploy_hot.so_exports_symbol, the check
+; `forge deploy hot` uses to find a patch's migrate_state, on a real
+; cc-built .so (macOS's `nm -D` printed nothing, so it was always false).
+(test
+ (name test_so_exports_symbol)
+ (modules test_so_exports_symbol)
+ (libraries march_forge alcotest unix))
+
+(test
+ (name test_schema_baseline)
+ (modules test_schema_baseline)
+ (libraries march_forge alcotest unix str yojson))

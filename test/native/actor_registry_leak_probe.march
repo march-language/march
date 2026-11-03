@@ -1,0 +1,87 @@
+-- The named actor registry leaked two objects per registration, compiled:
+--   * actor_register / actor_unregister / actor_whereis were classified as
+--     OWNING their arguments, but the runtime only reads them (the table
+--     keeps its own copy of the name and its own reference to the actor), so
+--     every registration leaked the name string and a reference to the actor
+--     record, and every unregister / whereis leaked its name;
+--   * the registry is a Vault the runtime owns, and a Vault buries a value
+--     it stops holding until a typed caller reaps it. Nothing reaps the
+--     registry, so every dropped, unregistered or overwritten entry kept its
+--     actor record for the life of the process.
+-- Each line checks that 200 iterations leave fewer than 5 objects behind
+-- (death is asynchronous, so the last actor may still be on its way out;
+-- RED before: 401 / 400 / 201 left, all three lines false). The name is SHARED: it is read again after
+-- every registry call that borrows it, so a release of a reference the
+-- registry does not own would be a use-after-free under ASAN or a wrong
+-- length here.
+mod ActorRegistryLeakProbe do
+  needs IO
+  needs IO.Console
+  needs Actor.Introspect
+
+  actor W do
+    state { n : Int }
+    init  { n: 0 }
+    on Tick(k : Int) do { n: state.n + k } end
+  end
+
+  -- Registered, then killed: the dying actor's retire drops the entry.
+  pfn retired(i : Int) : Int do
+    let w = spawn(W)
+    let name = "w" ++ int_to_string(i)
+    let ok = Actor.register(w, name)
+    kill(w)
+    string_length(name) + (if ok do 1 else 0 end)
+  end
+
+  -- Registered, looked up and unregistered while alive, then killed.
+  pfn unregistered(intro : Cap(Actor.Introspect), i : Int) : Int do
+    let w = spawn(W)
+    let name = "u" ++ int_to_string(i)
+    let _ = Actor.register(w, name)
+    let found = match Actor.whereis(intro, name) do
+      Some(p) -> if is_alive(p) do 1 else 0 end
+      None -> 0
+    end
+    let gone = Actor.unregister(name)
+    kill(w)
+    string_length(name) + found + (if gone do 1 else 0 end)
+  end
+
+  -- One name for every actor: each registration after a death overwrites
+  -- the stale entry the dead actor left (or finds it already retired).
+  pfn overwritten(i : Int) : Int do
+    let w = spawn(W)
+    let name = "same"
+    let ok = Actor.register(w, name)
+    kill(w)
+    sleep_ms(1)
+    i * 0 + string_length(name) + (if ok do 1 else 0 end)
+  end
+
+  pfn times(n : Int, f : (Int) -> Int, acc : Int) : Int do
+    if n <= 0 do acc else times(n - 1, f, acc + f(n)) end
+  end
+
+  pfn settle(a0 : Int, tries : Int) : Int do
+    sleep_ms(20)
+    let d = live_allocs() - a0
+    if d < 5 || tries <= 0 do d else settle(a0, tries - 1) end
+  end
+
+  pfn probe(name : String, f : (Int) -> Int) : () do
+    let _ = times(5, f, 0)
+    sleep_ms(50)
+    let a0 = live_allocs()
+    let total = times(200, f, 0)
+    println(name ++ ": total " ++ int_to_string(total) ++ ", released "
+            ++ bool_to_string(settle(a0, 250) < 5))
+  end
+
+  fn main(io : Cap(IO)) : () do
+    let intro = Actor.introspect(io)
+    probe("registered then killed", fn i -> retired(i))
+    probe("looked up and unregistered", fn i -> unregistered(intro, i))
+    probe("one name, overwritten", fn i -> overwritten(i))
+  end
+end

@@ -135,15 +135,19 @@ let test_tir_names_fv_field_round_trip () =
     (March_tir.Tir_names.is_fv_field "name")
 
 let test_tir_names_clo_struct () =
-  let n = March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:3 in
-  Alcotest.(check string) "clo_struct_name" "$Clo_foo$3" n;
+  let n = March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:"3_Main_host" in
+  Alcotest.(check string) "clo_struct_name" "$Clo_foo$3_Main_host" n;
   Alcotest.(check bool) "is_clo_struct" true (March_tir.Tir_names.is_clo_struct n);
   Alcotest.(check bool) "not is_clo_struct Option" false
     (March_tir.Tir_names.is_clo_struct "Option")
 
 let test_tir_names_apply_fn () =
-  let n = March_tir.Tir_names.apply_fn_name ~fn_name:"foo" ~lam_uid:3 in
-  Alcotest.(check string) "apply_fn_name" "foo$apply$3" n;
+  let n = March_tir.Tir_names.apply_fn_name ~fn_name:"foo" ~lam_uid:"3_Main_host" in
+  Alcotest.(check string) "apply_fn_name" "foo$apply$3_Main_host" n;
+  (* The uid is structural: ordinal, then the host with '$' and '.' spelled
+     '_' (no '.': consumers read a name's text after its last '.'). *)
+  Alcotest.(check string) "lam_uid" "2_List_map_Int"
+    (March_tir.Tir_names.lam_uid ~host:"List.map$Int" 2);
   Alcotest.(check bool) "is_apply_fn" true (March_tir.Tir_names.is_apply_fn n);
   Alcotest.(check bool) "not is_apply_fn plain" false
     (March_tir.Tir_names.is_apply_fn "foo");
@@ -435,6 +439,57 @@ let test_unboxed_aggregate_rc_predicates () =
    box would be a fresh rc=1 cell no one owns — [needs_rc] is false for the
    aggregate, so Perceus emits no caller-side drop.  Keeping the type boxed end
    to end removes the question. *)
+(* A scalar-only single-constructor type declared in a NESTED module gets the
+   unboxed layout too (specs/progress/2026-10-11-module-unboxed-aggregates.md).
+   Lowering registers it as [Geo.Vec3] and builds it under the short key
+   [Vec3.Vec3]; the kind table used to answer the short spelling Boxed, so
+   every module-declared aggregate was a heap cell.  The RED control is the
+   same program compiled with unboxing off, as in
+   [test_unboxed_aggregate_boxed_control]. *)
+let module_vec3_src = {|mod UB do
+  needs IO.Console
+  mod Geo do
+    type Vec3 = Vec3(Float, Float, Float)
+    fn forward(yaw : Float, pitch : Float) : Vec3 do
+      Vec3(0.0 -. yaw, pitch, yaw *. pitch)
+    end
+    fn vx(v : Vec3) : Float do
+      match v do
+        Vec3(x, _, _) -> x
+      end
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(Geo.vx(Geo.forward(1.0, 2.0))))
+  end
+end|}
+
+let test_module_unboxed_aggregate () =
+  let ir = emit_tco_opt_ir module_vec3_src in
+  Alcotest.(check bool) "the struct type is declared under the qualified name" true
+    (ir_contains ir "%ub.Geo_Vec3 = type { double, double, double }");
+  Alcotest.(check bool) "constructed with insertvalue" true
+    (ir_contains ir "insertvalue %ub.Geo_Vec3");
+  Alcotest.(check bool) "destructured with extractvalue" true
+    (ir_contains ir "extractvalue %ub.Geo_Vec3");
+  Alcotest.(check int) "no march_alloc call anywhere in the module" 0
+    (ir_count ir "call ptr @march_alloc(")
+
+(* A C-built module type keeps its boxed layout under both spellings even
+   though its shape is unboxable: [process_spawn_async] builds
+   [Process.LiveProcess] as a tag-0 cell with two int64 fields. *)
+let test_module_unboxed_c_built_stays_boxed () =
+  let open March_tir in
+  let defs = [ Tir.TDVariant ("Process.LiveProcess", [ ("LiveProcess", [Tir.TInt; Tir.TInt]) ]);
+               Tir.TDVariant ("Geo.P2", [ ("P2", [Tir.TInt; Tir.TInt]) ]) ] in
+  let t = Kind.build ~collision_set:(Collision_set.compute defs) defs in
+  let is_unboxed n = match (Kind.of_ty t (Tir.TCon (n, []))).Kind.repr with
+    | Kind.Unboxed _ -> true | _ -> false in
+  Alcotest.(check bool) "LiveProcess Boxed (short)" false (is_unboxed "LiveProcess");
+  Alcotest.(check bool) "LiveProcess Boxed (qualified)" false (is_unboxed "Process.LiveProcess");
+  Alcotest.(check bool) "P2 Unboxed (short)" true (is_unboxed "P2");
+  Alcotest.(check bool) "P2 Unboxed (qualified)" true (is_unboxed "Geo.P2")
+
 let test_unboxed_aggregate_ffi_type_stays_boxed () =
   let open March_tir.Tir in
   let td = TDVariant ("Vec3", [("Vec3", [TFloat; TFloat; TFloat])]) in
@@ -638,8 +693,9 @@ let test_unboxed_aggregate_multi_arm_joins_are_struct () =
    fusion.ml's own gensym convention. *)
 
 (** True if [name] matches fusion.ml's gensym convention: "$fused_" followed
-    by one of the three generator tags ("mf"/"ff"/"mff") then "_" and a
-    counter. Mirrors fusion.ml's [gensym] (`Printf.sprintf "$fused_%s_%d"`) —
+    by one of the three generator tags ("mf"/"ff"/"mff") then "_", the host
+    (with '$' and '.' spelled '_'), "_" and an ordinal. Mirrors fusion.ml's
+    [gensym] (`Printf.sprintf "$fused_%s_%s_%d"`) —
     kept local to this test (not a Tir_names contract: fusion.ml's synthesized
     names have no consumer that name-sniffs them, per the Wave 3 Task 3
     report, so there is nothing in Tir_names to centralize here). *)
@@ -653,8 +709,13 @@ let is_fusion_gensym_name (name : string) : bool =
     let rest = strip_prefix "$fused_" name in
     List.exists (fun tag ->
       has_prefix (tag ^ "_") rest &&
-      (let ctr = strip_prefix (tag ^ "_") rest in
-       ctr <> "" && String.for_all (fun c -> c >= '0' && c <= '9') ctr)
+      (let rest = strip_prefix (tag ^ "_") rest in
+       match String.rindex_opt rest '_' with
+       | Some i ->
+         let host = String.sub rest 0 i
+         and ctr = String.sub rest (i + 1) (String.length rest - i - 1) in
+         host <> "" && ctr <> "" && String.for_all (fun c -> c >= '0' && c <= '9') ctr
+       | None -> false)
     ) ["mf"; "ff"; "mff"]
 
 (** Cross-check, over a fused module: every fn whose name matches the
@@ -1017,10 +1078,11 @@ let test_actor_handler_binder_shadows_toplevel_fn () =
     end
   end|} in
   (* The bug emitted the function's address as a call argument. Match the
-     ARGUMENT form (comma-preceded) so this cannot alias the `define` line. *)
+     ARGUMENT form (comma-preceded) so this cannot alias the `define` line,
+     and leave out the function table, whose entry for Helper.text has it. *)
   Alcotest.(check bool)
     "handler binder is not replaced by the imported Helper.text function"
-    false (ir_contains ir ", ptr @Helper.text")
+    false (ir_contains (ir_outside_fn_table ir) ", ptr @Helper.text")
 
 (** Finding 20 follow-up (adversarial-review Critical, fixed): the actor-struct
     always-in-place gate must be STRUCTURAL (does this type's field 0 carry
@@ -1535,6 +1597,62 @@ let test_deep_drop_of_borrowed_container () =
   Alcotest.(check bool)
     "deep drop: walks the spine as a TCO loop, not C-stack recursion (a 150K-element list must not overflow)"
     true (ir_contains drop_ir "br label %tco_loop")
+
+(** Drop glue for a type with a residual type variable is named by the
+    variable's POSITION ([__drop$List_V0]), not by its typechecker id
+    ([__drop$List_V_53272]).  The id comes from a global fresh-variable
+    counter, so the symbol moved whenever more (or less) was inferred before,
+    exactly the cascade B1 removed for every other minted name
+    (specs/progress/2026-10-07-drop-glue-name-carries-tvar-id.md).  Compiling
+    the same program twice in one process advances that counter, which is the
+    "unrelated edit" here: the two drop-glue symbol sets must be identical. *)
+let test_drop_glue_name_is_structural () =
+  let src = {|mod Test do
+  needs IO.Console
+  pfn outer(n : Int) : List(Int) do
+    fn ascend(nd, stk) do
+      match stk do
+      Nil -> nd
+      Cons(frame, rest) -> do
+        let (c, s) = frame
+        ascend(Cons(s, c), rest)
+      end
+      end
+    end
+    fn descend(k, path) do
+      if k == 0 do ascend(Nil, path)
+      else descend(k - 1, Cons(([k, k], k), path)) end
+    end
+    descend(n, Nil)
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(int_to_string(List.length(outer(5))))
+  end
+end|} in
+  let drop_syms ir =
+    let re = Str.regexp "@__drop\\$[A-Za-z0-9_$]+" in
+    let rec go i acc =
+      match Str.search_forward re ir i with
+      | j -> let m = Str.matched_string ir in
+        go (j + String.length m)
+          (if List.mem m acc then acc else m :: acc)
+      | exception Not_found -> List.sort compare acc in
+    go 0 [] in
+  let first = drop_syms (emit_tco_opt_ir src) in
+  let second = drop_syms (emit_tco_opt_ir src) in
+  let tvar_named =
+    List.filter (fun m ->
+        try ignore (Str.search_forward (Str.regexp "V_[0-9]") m 0); true
+        with Not_found -> false) first in
+  Alcotest.(check bool)
+    "drop glue: the program has drop glue for a residual-type-variable type"
+    true (List.exists (fun m -> ir_contains m "_V") first);
+  Alcotest.(check (list string))
+    "drop glue: the same program gets the same drop symbols on a second compile"
+    first second;
+  Alcotest.(check (list string))
+    "drop glue: no symbol spells a type variable by its typechecker id"
+    [] tvar_named
 
 (** Final-review regression: [has_non_tail_group_call]'s dec-chain-wrapper
     arm used to recognise [ELet (tmp, EApp (f, _), dec-chain-returning-tmp)]
@@ -2520,7 +2638,7 @@ let test_repl_jit_topfn_first_class_value () =
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-           fn_clauses = [clause]; fn_bounds = [] } in
+           fn_clauses = [clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
          { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
            mod_decls = fn_decls @ [DFn (main_def, s)] }
        in
@@ -2663,7 +2781,7 @@ let test_repl_jit_capture_free_closure_no_leak () =
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-           fn_clauses = [clause]; fn_bounds = [] } in
+           fn_clauses = [clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
          { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
            mod_decls = fn_decls @ [DFn (main_def, s)] }
        in
@@ -2746,7 +2864,7 @@ let test_repl_jit_stdlib_list_length () =
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-           fn_clauses = [main_clause]; fn_bounds = [] } in
+           fn_clauses = [main_clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
        in
@@ -2900,7 +3018,7 @@ let test_repl_list_literal () =
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-           fn_clauses = [clause]; fn_bounds = [] } in
+           fn_clauses = [clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
        in
@@ -2944,7 +3062,7 @@ let test_repl_stdlib_on_list () =
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-           fn_clauses = [clause]; fn_bounds = [] } in
+           fn_clauses = [clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
        in
@@ -3052,7 +3170,7 @@ let test_repl_stdlib_chain () =
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-           fn_clauses = [clause]; fn_bounds = [] } in
+           fn_clauses = [clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
        in
@@ -3209,7 +3327,7 @@ let test_repl_jit_list_display () =
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-           fn_clauses = [clause]; fn_bounds = [] } in
+           fn_clauses = [clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
        in
@@ -3351,7 +3469,7 @@ let test_repl_list_literal_with_bigint () =
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-           fn_clauses = [clause]; fn_bounds = [] } in
+           fn_clauses = [clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
        in
@@ -3417,7 +3535,7 @@ let test_repl_list_literal_with_precompile_bigint () =
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
-           fn_clauses = [clause]; fn_bounds = [] } in
+           fn_clauses = [clause]; fn_bounds = []; fn_attr_args = []; fn_needs = None } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
        in
@@ -4235,16 +4353,19 @@ let test_simplify_zero_div_lit () =
     (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 0)))
     (March_tir.Tir.show_expr (first_body m'))
 
+(* `x * 2` is NOT rewritten to `x + x` (2026-10-30): the two panic on
+   overflow with different messages, and the interpreter reports the
+   multiply ("attempt to multiply with overflow"). *)
 let test_simplify_strength_reduce () =
   let changed = ref false in
   let x = avar "x" March_tir.Tir.TInt in
   let m = mk_module [mk_fn "f" (app "*" [x; ilit 2])] in
   let m' = March_tir.Simplify.run ~changed m in
-  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check bool) "unchanged" false !changed;
   (match first_body m' with
-   | March_tir.Tir.ELet (_, March_tir.Tir.EApp (f, _), _) ->
-     Alcotest.(check string) "strength reduce to add" "+" f.March_tir.Tir.v_name
-   | _ -> Alcotest.fail "expected ELet wrapping EApp(+)")
+   | March_tir.Tir.EApp (f, _) ->
+     Alcotest.(check string) "x * 2 stays a multiply" "*" f.March_tir.Tir.v_name
+   | _ -> Alcotest.fail "expected EApp(*)")
 
 let test_simplify_float_add_zero () =
   let changed = ref false in
@@ -5787,9 +5908,9 @@ let test_known_call_is_clo_name_matches_tir_names () =
   in
   let representative_names =
     (* Every shape [Tir_names.clo_struct_name] can actually produce. *)
-    [ March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:0;
-      March_tir.Tir_names.clo_struct_name ~fn_name:"bar" ~lam_uid:42;
-      March_tir.Tir_names.clo_struct_name ~fn_name:"" ~lam_uid:7;
+    [ March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:"0_Main_f";
+      March_tir.Tir_names.clo_struct_name ~fn_name:"bar" ~lam_uid:"42_List_map_Int";
+      March_tir.Tir_names.clo_struct_name ~fn_name:"" ~lam_uid:"7_top";
       (* Non-closure names, must be false under both. *)
       "Option"; "List"; "$fv1"; "$Tuple2"; "main" ]
   in
@@ -8317,7 +8438,8 @@ let test_compiled_actor_init_params_ir_shape () =
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
   let tir = March_tir.Lower.lower_module ~type_map m in
   (* Through Defun: the respawn thunk is a lambda that Defun lifts into a
-     top-level `$respawnN$apply$M` function, which is what the IR names. *)
+     top-level `$respawn<k>_<Actor>_spawn$apply$<k>_<host>` function (B1
+     structural names), which is what the IR names. *)
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
   let k_table = March_tir.Kind.of_module tir in
@@ -8336,7 +8458,7 @@ let test_compiled_actor_init_params_ir_shape () =
   Alcotest.(check bool) "no zero-arg spawn glue for an actor with init params" false
     (has "define ptr @Worker_spawn() {");
   Alcotest.(check bool) "a respawn thunk is lifted for the child with init args" true
-    (has "define ptr @.respawn[0-9]*.apply");   (* `$respawnN$apply$M` *)
+    (has "define ptr @[^ (]*respawn[0-9]*[^ (]*apply");   (* `$respawn0_Sup_spawn$apply$…` *)
   Alcotest.(check bool) "register_child is called" true
     (has "call void @march_actor_register_child")
 
@@ -9378,7 +9500,7 @@ let test_compile_local_shadows_builtin_still_gets_rc_ops () =
   Alcotest.(check bool) "at least one SSA temp loads %kill.addr" true
     (ssa_temps_loading_kill_addr <> []);
   let rc_call_re =
-    Str.regexp "call void @march_\\(decrc_local\\|incrc_local\\|free\\|incrc\\|decrc\\)(ptr %\\([A-Za-z0-9_$]+\\))"
+    Str.regexp "call void @march_\\(decrc_local\\|decrc_erased_local\\|decrc_erased\\|incrc_local\\|free\\|incrc\\|decrc\\)(ptr %\\([A-Za-z0-9_$]+\\))"
   in
   let rc_call_args =
     let rec go i acc =
@@ -9587,6 +9709,41 @@ let test_simd_vector_ir () =
     (ir_contains ir "llvm.vector.reduce.fadd");
   Alcotest.(check bool) "no runtime-call fallthrough for simd_f32x4_add" false
     (ir_contains ir "call ptr @simd_f32x4_add")
+
+(** [simd_<lane>_load] BORROWS its array (2026-10-11).  It was classified owned
+    while its lowering (a bounds check + a plain vector load) never released
+    the array, so Perceus dup'd the array before every load and nothing
+    dropped it: an atomic +1 per iteration of every SIMD index loop, and an
+    array that could never be freed once loaded from (a 400 x 1 MB loop peaked
+    at 411 MB RSS; 8 MB after).  Pinned on the IR of a self-tail-recursive
+    index loop: its array parameter must carry no RC op at all.  [_store]
+    stays owned -- it consumes the array FBIP-style -- and the classification
+    half below keeps that from being flipped along with [_load]. *)
+let test_simd_load_borrows_array () =
+  let ir = emit_actor_ir {|mod Test do
+    fn dot_loop(a, i : Int, limit : Int, acc) do
+      if i >= limit do acc
+      else
+        let va = simd_f32x4_load(a, i)
+        dot_loop(a, i + 4, limit, simd_f32x4_add(va, acc))
+      end
+    end
+  end|} in
+  let start = Str.search_forward (Str.regexp_string "@dot_loop(") ir 0 in
+  let stop = Str.search_forward (Str.regexp_string "\n}\n") ir start in
+  let body = String.sub ir start (stop - start) in
+  Alcotest.(check bool) "dot_loop lowers the load inline" true
+    (ir_contains body "load <4 x float>");
+  Alcotest.(check int) "no incrc in the index loop" 0
+    (ir_count body "incrc");
+  Alcotest.(check int) "no decrc in the index loop" 0
+    (ir_count body "decrc");
+  List.iter (fun lane ->
+      Alcotest.(check bool) (Printf.sprintf "simd_%s_load borrows its array" lane) true
+        (March_tir.Borrow.is_extern_borrowed (Printf.sprintf "simd_%s_load" lane) 0);
+      Alcotest.(check bool) (Printf.sprintf "simd_%s_store owns its array" lane) false
+        (March_tir.Borrow.is_extern_borrowed (Printf.sprintf "simd_%s_store" lane) 0))
+    [ "f32x4"; "f64x2"; "i32x4"; "i64x2"; "u8x16" ]
 
 (** Phase 4: send() should push to mailbox, NOT dispatch inline.
     After send(), mailbox_size = 1 and state is unchanged. *)
@@ -10405,6 +10562,65 @@ let test_hcr_entry_point_not_a_reloadable_slot () =
     (ir_contains ir "@march_dispatch_enter")
 
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
+
+(* An interpreted program stuck in plain computation must die on SIGTERM
+   (exit 143, like the compiled binary's default action).  The interpreter's
+   unwatched SIGTERM/SIGINT handler only set the graceful-shutdown flag, which
+   nothing polls outside the actor scheduler / HTTP loop, so `timeout` and
+   Ctrl+C could not stop `march spin.march`. *)
+let test_interp_sigterm_stops_compute_loop () =
+  let main_exe = find_main_exe () in
+  let project_root = march_project_root () in
+  let tmp = Filename.temp_file "march_sigterm" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "spin.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod Spin do\n\
+    \  needs IO.Console\n\
+    \  fn spin(n : Int) : Int do\n\
+    \    if n == 0 do 0 else spin(n + 1) end\n\
+    \  end\n\
+    \  fn main(_c : Cap(IO.Console)) do\n\
+    \    println(\"spinning\")\n\
+    \    println(int_to_string(spin(1)))\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let out_path = Filename.concat tmp "out.txt" in
+  let out_fd = Unix.openfile out_path [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o644 in
+  let null_fd = Unix.openfile "/dev/null" [Unix.O_RDWR] 0 in
+  let cwd = Sys.getcwd () in
+  Sys.chdir project_root;
+  let pid =
+    Fun.protect ~finally:(fun () -> Sys.chdir cwd) (fun () ->
+      Unix.create_process main_exe [| main_exe; src |] null_fd out_fd null_fd)
+  in
+  Unix.close out_fd;
+  Unix.close null_fd;
+  let read_out () = try read_file_contents out_path with Sys_error _ -> "" in
+  (* Wait (up to 60 s: stdlib load on a loaded box) for main to be running. *)
+  let deadline = Unix.gettimeofday () +. 60.0 in
+  while not (String.length (read_out ()) > 0) && Unix.gettimeofday () < deadline do
+    Unix.sleepf 0.1
+  done;
+  Unix.kill pid Sys.sigterm;
+  let rec wait_exit tries =
+    match Unix.waitpid [Unix.WNOHANG] pid with
+    | 0, _ when tries > 0 -> Unix.sleepf 0.1; wait_exit (tries - 1)
+    | 0, _ ->
+      (* Still alive after 10 s: the bug.  SIGHUP (unhandled, so fatal)
+         reaps it without leaving a spinning process behind. *)
+      Unix.kill pid Sys.sighup;
+      ignore (Unix.waitpid [] pid);
+      None
+    | _, st -> Some st
+  in
+  let status = wait_exit 100 in
+  Alcotest.(check string) "main started" "spinning\n" (read_out ());
+  Alcotest.(check bool) "SIGTERM ends the interpreted compute loop with 143" true
+    (status = Some (Unix.WEXITED 143))
 
 (* ── Guard-exhaustion fallthrough (B3) ─────────────────────────────────────
    A guarded match where every guard fails must panic, not silently return
@@ -12895,6 +13111,43 @@ let test_compiled_no_opt_prunes_unreachable () =
       true
       (run_out = "hi\nEXIT:0")
 
+(** duplicate_binder (2026-10-21): a name bound twice in ONE parameter list or
+    pattern is now a typecheck error, because the backends disagreed about it
+    (`fn (a, a) -> a` at (1, 2): interpreter 1, compiled 2).  What stays legal
+    is shadowing ACROSS scopes, and both backends must agree on it: a curried
+    lambda's inner binder, a lambda parameter shadowing an enclosing one, a
+    match arm rebinding a parameter, and an or-pattern's alternatives binding
+    the same name. *)
+let test_shadowing_across_scopes_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_shadow_scopes"
+    ~src:"mod ShadowScopes do\n\
+         \  needs IO.Console\n\
+         \  fn rebind(a : Int) : Int do\n\
+         \    match a + 1 do\n\
+         \      a -> a * 10\n\
+         \    end\n\
+         \  end\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \    let g = fn a -> fn a -> a\n\
+         \    let g1 = g(1)\n\
+         \    println(int_to_string(g1(2)))\n\
+         \    let b = 5\n\
+         \    let h = fn b -> b + 100\n\
+         \    println(int_to_string(h(7) + b))\n\
+         \    println(int_to_string(rebind(3)))\n\
+         \    let w = fn (_, _) -> 9\n\
+         \    println(int_to_string(w(1, 2)))\n\
+         \    let r = match (0, 4) do\n\
+         \      (a, 0) | (0, a) -> a\n\
+         \      _ -> 99\n\
+         \    end\n\
+         \    println(int_to_string(r))\n\
+         \  end\n\
+          end\n"
+    ~expected:"2\n112\n40\n9\n4"
+    ()
+
 (** String.from_codepoint/to_codepoints must be usable COMPILED (2026-07-14,
     restored 2026-07-24 from lost commit 4a1c2ee3).  They were interpreter-only
     builtin wrappers: string_from_codepoint / string_to_codepoints exist in
@@ -13035,8 +13288,36 @@ let test_compiled_int_mod_euclid_parity () =
     ~expected:"[1, 2, 2, 1]"
     ()
 
-(** March Int is 63-bit and wraps modulo 2^63 on BOTH backends
-    (specs/lang/type-system.md, "Int width and overflow").  Pre-fix the
+(** int_div_floor / int_mod_floor: compiled output must match the interpreter
+    in all four sign quadrants, and the INLINE path (a positive literal divisor:
+    sdiv + srem + select) must agree with the HELPER path (a divisor held in a
+    variable, which calls march_checked_ifloordiv/ifloormod).  Both appear in
+    each row, so a wrong inline correction shows up as two differing columns.
+    The negative-divisor rows are where floor and Euclidean division differ. *)
+let test_compiled_int_floor_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_div_floor"
+    ~src:"mod IntFloorParity do\n\
+    \  needs IO.Console\n\
+         \  fn vd(a : Int, b : Int) : Int do int_div_floor(a, b) end\n\
+         \  fn vm(a : Int, b : Int) : Int do int_mod_floor(a, b) end\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \    println([int_div_floor(23, 7), vd(23, 7), int_div_floor(-23, 7), vd(-23, 7), \
+                        int_div_floor(23, -7), int_div_floor(-23, -7), int_div_floor(7, -2)])\n\
+         \    println([int_mod_floor(23, 7), vm(23, 7), int_mod_floor(-23, 7), vm(-23, 7), \
+                        int_mod_floor(23, -7), int_mod_floor(-23, -7), int_mod_floor(7, -2)])\n\
+         \    println([int_div_floor(-1, 86400), vd(-1, 86400), int_mod_floor(-1, 86400), vm(-1, 86400), \
+                        int_div_floor(-86400, 86400), int_div_floor(-86401, 86400)])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[3, 3, -4, -4, -4, 3, -4]\n[2, 2, 5, 5, -5, -2, -1]\n[-1, -1, 86399, 86399, -1, -2]"
+    ()
+
+(** March Int is 63-bit on BOTH backends, and the explicit wrapping forms
+    (int_wrapping_add/sub/mul) and the builtins that still wrap reduce
+    modulo 2^63 identically (specs/lang/type-system.md, "Int width and
+    overflow"; `+ - *` themselves panic on overflow since 2026-10-30, see
+    [test_compiled_int_overflow_trap_parity]).  Pre-fix the
     compiled backend did 64-bit i64 arithmetic in registers, so
     `max + max` printed 9223372036854775806 compiled and -2 interpreted, and
     the same value read back out of a List or a closure was 63-bit again
@@ -13061,13 +13342,13 @@ let test_compiled_int_overflow_parity () =
     \    let one = NativeArray.get_int(arr, 4)\n\
     \    let three = NativeArray.get_int(arr, 5)\n\
     \    let s62 = NativeArray.get_int(arr, 6)\n\
-    \    println([mx + mx, mx + one, mn - one, mx * three, 0 - mn, mn / m1, mn % m1])\n\
-    \    println([int_max_value(), int_min_value(), int_max_value() + one])\n\
+    \    println([int_wrapping_add(mx, mx), int_wrapping_add(mx, one), int_wrapping_sub(mn, one), int_wrapping_mul(mx, three), int_wrapping_sub(0, mn), mn / m1, mn % m1])\n\
+    \    println([int_max_value(), int_min_value(), int_wrapping_add(int_max_value(), one)])\n\
     \    println([int_div(mn, m1), int_abs(mn), int_pow(three, 40), int_pow(m1, 63)])\n\
     \    println([int_shl(one, s62), int_shl(mx, one), int_shr(m8, one), int_shr(mn, s62), int_shr(m8, 2)])\n\
     \    println([int_popcount(m1), int_popcount(mn), int_popcount(mx), int_not(mx), int_xor(mn, m1)])\n\
-    \    println(apply(fn y -> y + one, mx))\n\
-    \    println([mx + mx == m1 - one, mx + one < 0])\n\
+    \    println(apply(fn y -> int_wrapping_add(y, one), mx))\n\
+    \    println([int_wrapping_add(mx, mx) == m1 - one, int_wrapping_add(mx, one) < 0])\n\
     \  end\n\
      end\n"
     ~expected:"[-2, -4611686018427387904, 4611686018427387903, 4611686018427387901, \
@@ -13079,6 +13360,92 @@ let test_compiled_int_overflow_parity () =
                -4611686018427387904\n\
                [true, true]"
     ()
+
+(** `--target js` runs the documented SUBSET of `Int` (owner decision
+    2026-10-11, specs/progress/2026-09-30-js-backend-int-63-bit-semantics.md;
+    specs/lang/type-system.md, "Int on the JavaScript target"): an `Int` is a
+    JS number, so values within +-(2^53 - 1) agree with the interpreter on
+    every operation, and the overflow edges that
+    [test_compiled_int_overflow_parity] pins are deliberately NOT compared
+    here. The first block must match the interpreter line for line (and pins
+    two JS fixes that came with the decision: Int `/` truncates, `7 / 2` used
+    to print 3.5, and `int_shr`/`int_popcount` follow the 63-bit rules,
+    `int_shr(-8, 1)` used to throw and `int_popcount(-1)` was 62). The tail
+    is JS-only: past 2^53 `+` rounds instead of wrapping, and the checked
+    builtins throw a RangeError instead of returning a wrong value.
+    Operands come out of a list so no constant folding (which uses 63-bit
+    arithmetic) can hide the JS behaviour. Skipped when node is absent. *)
+let test_js_int_subset_parity () =
+  let name = "march_js_int_subset" in
+  let src =
+    "mod JsIntSubset do\n\
+    \  needs IO.Console\n\
+    \  pfn at(xs : List(Int), i : Int) : Int do\n\
+    \    match xs do\n\
+    \      Nil -> 0\n\
+    \      Cons(h, t) -> if i == 0 do h else at(t, i - 1) end\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let arr = [9007199254740991, 1, 2, -7, 52, -8, 3]\n\
+    \    let big = at(arr, 0)\n\
+    \    let one = at(arr, 1)\n\
+    \    let two = at(arr, 2)\n\
+    \    let m7 = at(arr, 3)\n\
+    \    let s52 = at(arr, 4)\n\
+    \    let m8 = at(arr, 5)\n\
+    \    let three = at(arr, 6)\n\
+    \    println([big, big - one + one, 0 - big, big / three, big % three])\n\
+    \    println([7 / two, m7 / two, m7 % two, int_div(m7, two), int_mod_euclid(m7, three), int_div_euclid(m7, two)])\n\
+    \    println([int_and(big, 255), int_or(4294967296, one), int_xor(-1, 5), int_not(5), int_not(0 - big)])\n\
+    \    println([int_shl(one, s52), int_shr(big, one), int_shr(m8, one), int_shr(m7, two), int_popcount(255), int_popcount(-1), int_popcount(big)])\n\
+    \    println([big + two, int_pow(two, 53) + one])\n\
+    \    println(int_shl(big, two))\n\
+    \  end\n\
+     end\n" in
+  let subset =
+    "[9007199254740991, 9007199254740991, -9007199254740991, 3002399751580330, 1]\n\
+     [3, -3, -1, -3, 2, -4]\n\
+     [255, 4294967297, -6, -6, 9007199254740990]\n\
+     [4503599627370496, 4503599627370495, -4, -2, 8, 63, 53]\n" in
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  (* Interpreter: the reference. Its overflow lines wrap modulo 2^63 and are
+     asserted only to show what the JS tail below departs from. *)
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>/dev/null"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote src_path)) in
+  Alcotest.(check string) (name ^ ": interpreter output")
+    (subset ^ "[9007199254740993, 9007199254740993]\n36028797018963964")
+    interp_out;
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS Int subset parity)"
+  else begin
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js compile failed (rc=%d):\n%s" name crc cout;
+    let (_, js_out) = run_capture (Printf.sprintf "node %s 2>&1; echo EXIT:$?"
+        (Filename.quote mjs)) in
+    (* The subset: identical to the interpreter. *)
+    Alcotest.(check bool)
+      (name ^ ": JS output starts with the interpreter's in-range lines (got: "
+       ^ js_out ^ ")")
+      true (String.starts_with ~prefix:subset js_out);
+    let tail = String.sub js_out (String.length subset)
+        (String.length js_out - String.length subset) in
+    (* Outside the subset (the todo's overflow edges, skipped on purpose):
+       `+` past 2^53 rounds to the nearest double, and a checked builtin whose
+       result leaves +-(2^53 - 1) throws. *)
+    Alcotest.(check bool)
+      (name ^ ": JS rounds past 2^53 (got: " ^ tail ^ ")")
+      true (String.starts_with ~prefix:"[9007199254740992, 9007199254740992]\n" tail);
+    Alcotest.(check bool)
+      (name ^ ": JS int_shl past 2^53 throws a RangeError and exits 1 (got: "
+       ^ tail ^ ")")
+      true (ir_contains tail "RangeError: int_shl: result 36028797018963964 overflows"
+            && ir_contains tail "EXIT:1")
+  end
 
 (** TRMC's EAllocHole on the FRESH-allocation path, after the allocator's free
     lists have been filled with freed cons cells.  march_alloc is a plain
@@ -13120,9 +13487,10 @@ let test_compiled_trmc_hole_fresh_after_churn () =
     ()
 
 (** Lazy normalisation (2026-10-02, specs/progress/2026-10-02-lazy-int63-
-    normalisation.md): compiled `+ - *` / negate leave their i64 result BARE
-    and a user function returns it bare; the 63-bit reduction happens where
-    the value is observed.  Every observation point that is reached through
+    normalisation.md): a wrapping op leaves its i64 result BARE and a user
+    function returns it bare; the 63-bit reduction happens where the value
+    is observed.  Since 2026-10-30 `+ - *` are checked and always in range,
+    so the bare producer here is int_wrapping_add.  Every observation point that is reached through
     a bare value is exercised here with an operand that actually overflows,
     so a missed point shows up as the raw 64-bit value: a caller's compare
     and int-literal match on a bare call result, the checked division
@@ -13136,9 +13504,9 @@ let test_compiled_int_overflow_lazy_norm_parity () =
     ~name:"march_int_overflow_lazy"
     ~src:"mod IntOverflowLazy do\n\
     \  needs IO.Console\n\
-    \  fn big(x : Int) : Int do x + x end\n\
-    \  fn big2(x : Int) : Int do x + x + 2 end\n\
-    \  fn pick(b : Bool, x : Int) : Int do if b do x + x else x - x end end\n\
+    \  fn big(x : Int) : Int do int_wrapping_add(x, x) end\n\
+    \  fn big2(x : Int) : Int do int_wrapping_add(int_wrapping_add(x, x), 2) end\n\
+    \  fn pick(b : Bool, x : Int) : Int do if b do int_wrapping_add(x, x) else x - x end end\n\
     \  fn main(_cap_console : Cap(IO.Console)) do\n\
     \    let arr = NativeArray.from_list_int([4611686018427387903, 1, 2, 0])\n\
     \    let mx = NativeArray.get_int(arr, 0)\n\
@@ -13156,8 +13524,8 @@ let test_compiled_int_overflow_lazy_norm_parity () =
     \    println([pick(true, mx) + one, pick(false, mx), big2(mx)])\n\
     \    let arr2 = NativeArray.set_int(arr, 3, big(mx))\n\
     \    println(NativeArray.get_int(arr2, 3))\n\
-    \    println(NativeArray.get_int(NativeArray.map_int(arr, fn x -> x + x), 0))\n\
-    \    println(Array.to_list(Array.sort_by_key(Array.from_list([mx, one]), fn x -> x + x)))\n\
+    \    println(NativeArray.get_int(NativeArray.map_int(arr, fn x -> int_wrapping_add(x, x)), 0))\n\
+    \    println(Array.to_list(Array.sort_by_key(Array.from_list([mx, one]), fn x -> int_wrapping_add(x, x))))\n\
     \    println([big(mx)])\n\
     \  end\n\
      end\n"
@@ -13171,6 +13539,130 @@ let test_compiled_int_overflow_lazy_norm_parity () =
                [4611686018427387903, 1]\n\
                [-2]"
     ()
+
+(** Int `+`, `-`, `*` and unary negation panic when the result leaves the
+    63-bit range [-2^62, 2^62) (decided 2026-09-29; specs/lang/type-system.md,
+    "Int width and overflow"), with the same message on both backends:
+    "attempt to add|subtract|multiply|negate with overflow".  Each row is one
+    boundary, caught with __try_call_val so the interpreter's line is the
+    reference; the in-range neighbours of every boundary must NOT panic.
+    Operands come out of a NativeIntArr so neither the TIR constant folder
+    nor LLVM can see them, except the `lit` row, which pins that the folder
+    leaves an overflowing literal sum to panic at run time; `x * 2` pins that
+    the simplifier no longer rewrites it to `x + x` (whose message differs);
+    the fold row runs `+` as a first-class value. *)
+let test_compiled_int_overflow_trap_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_overflow_trap"
+    ~src:"mod IntOverflowTrap do\n\
+    \  needs IO.Console\n\
+    \  fn show(r) : String do\n\
+    \    match r do\n\
+    \      Ok(v) -> int_to_string(v)\n\
+    \      Err(e) -> e\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let arr = NativeArray.from_list_int([4611686018427387903, -4611686018427387903, 1, 2, 2147483648, 3])\n\
+    \    let mx = NativeArray.get_int(arr, 0)\n\
+    \    let mn = NativeArray.get_int(arr, 1) - 1\n\
+    \    let one = NativeArray.get_int(arr, 2)\n\
+    \    let two = NativeArray.get_int(arr, 3)\n\
+    \    let p31 = NativeArray.get_int(arr, 4)\n\
+    \    let three = NativeArray.get_int(arr, 5)\n\
+    \    println(show(__try_call_val(fn _ -> mx + one)))\n\
+    \    println(show(__try_call_val(fn _ -> mx + 0)))\n\
+    \    println(show(__try_call_val(fn _ -> mn + (0 - one))))\n\
+    \    println(show(__try_call_val(fn _ -> mn + 0)))\n\
+    \    println(show(__try_call_val(fn _ -> mn - one)))\n\
+    \    println(show(__try_call_val(fn _ -> mx - (0 - one))))\n\
+    \    println(show(__try_call_val(fn _ -> (mx - one) - (0 - one))))\n\
+    \    println(show(__try_call_val(fn _ -> mx * two)))\n\
+    \    println(show(__try_call_val(fn _ -> mn * (0 - one))))\n\
+    \    println(show(__try_call_val(fn _ -> mn * one)))\n\
+    \    println(show(__try_call_val(fn _ -> p31 * p31)))\n\
+    \    println(show(__try_call_val(fn _ -> (0 - p31) * p31)))\n\
+    \    println(show(__try_call_val(fn _ -> p31 * (p31 * three))))\n\
+    \    println(show(__try_call_val(fn _ -> -mn)))\n\
+    \    println(show(__try_call_val(fn _ -> -mx)))\n\
+    \    println(show(__try_call_val(fn _ -> 4611686018427387903 + 1)))\n\
+    \    println(show(__try_call_val(fn _ -> List.fold_left([mx, one], 0, fn (a, b) -> a + b))))\n\
+    \    println(show(__try_call_val(fn _ -> int_wrapping_add(mx, one))))\n\
+    \    println(show(__try_call_val(fn _ -> int_wrapping_sub(mn, one))))\n\
+    \    println(show(__try_call_val(fn _ -> int_wrapping_mul(p31, p31))))\n\
+    \  end\n\
+     end\n"
+    ~expected:"attempt to add with overflow\n\
+               4611686018427387903\n\
+               attempt to add with overflow\n\
+               -4611686018427387904\n\
+               attempt to subtract with overflow\n\
+               attempt to subtract with overflow\n\
+               4611686018427387903\n\
+               attempt to multiply with overflow\n\
+               attempt to multiply with overflow\n\
+               -4611686018427387904\n\
+               attempt to multiply with overflow\n\
+               -4611686018427387904\n\
+               attempt to multiply with overflow\n\
+               attempt to negate with overflow\n\
+               -4611686018427387903\n\
+               attempt to add with overflow\n\
+               attempt to add with overflow\n\
+               -4611686018427387904\n\
+               4611686018427387903\n\
+               -4611686018427387904"
+    ()
+
+(** An overflow nobody catches ends the program like any panic, with its
+    message, on all three backends: the interpreter, compiled code (stderr
+    "panic: ..."), and --target js (an uncaught Error).  The JS operands are
+    powers of two, exact in a double, so the 63-bit boundary is reachable
+    there (2^61 + 2^61 = 2^62).  The JS half is skipped when node is absent. *)
+let test_int_overflow_uncaught_panic () =
+  List.iter (fun (name, expr, msg) ->
+    let src = Printf.sprintf
+      "mod OverflowUncaught do\n\
+      \  needs IO.Console\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \    let xs = [2305843009213693952, 2]\n\
+      \    let h = List.head(xs)\n\
+      \    println(\"before\")\n\
+      \    println(int_to_string(%s))\n\
+      \    println(\"after\")\n\
+      \  end\n\
+       end\n" expr in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let ok out = ir_contains out "before" && ir_contains out msg
+                 && not (ir_contains out "after") && ir_contains out "EXIT:1" in
+    let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1; echo EXIT:$?"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src_path)) in
+    Alcotest.(check bool) (name ^ ": interpreter panics with " ^ msg ^ " (got: " ^ interp_out ^ ")")
+      true (ok interp_out);
+    let bin = Filename.concat tmp (name ^ "bin") in
+    (match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+             ~main_exe ~bin ~src:src_path () with
+     | None -> ()
+     | Some bin ->
+       let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+       Alcotest.(check bool) (name ^ ": compiled panics with " ^ msg ^ " (got: " ^ run_out ^ ")")
+         true (ok run_out && ir_contains run_out ("panic: " ^ msg)));
+    if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+      print_endline "  SKIP: node not on PATH (JS Int overflow panic)"
+    else begin
+      let mjs = Filename.concat tmp (name ^ ".mjs") in
+      let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+          (Filename.quote project_root) (Filename.quote main_exe)
+          (Filename.quote mjs) (Filename.quote src_path)) in
+      if crc <> 0 then Alcotest.failf "%s: --target js compile failed (rc=%d):\n%s" name crc cout;
+      let (_, js_out) = run_capture (Printf.sprintf "node %s 2>&1; echo EXIT:$?"
+          (Filename.quote mjs)) in
+      Alcotest.(check bool) (name ^ ": JS throws " ^ msg ^ " (got: " ^ js_out ^ ")")
+        true (ok js_out && ir_contains js_out ("Error: " ^ msg))
+    end)
+    [ ("march_ovf_add", "h + h", "attempt to add with overflow");
+      ("march_ovf_mul", "h * 2", "attempt to multiply with overflow");
+      ("march_ovf_neg", "-(0 - h - h)", "attempt to negate with overflow") ]
 
 (** A shift count outside [0, 62] (and a negative int_pow exponent) panics
     on both backends with the interpreter's message.  Compiled, a non-literal
@@ -14285,14 +14777,15 @@ let test_module_qualified_pattern_qualifier_is_stdlib_type_compiled () =
 
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
-    These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
+    These four strings began as verbatim copies of llvm_emit.ml's deleted
     hand-written preamble blob (the [Buffer.add_string buf {| ... |}]
     literals that used to sit inside [emit_preamble], before Wave 3 Task 4
     replaced them with [Llvm_builtins.emit_preamble] generating the same
     text from the declarative builtin table). They are kept here ONLY as a
     regression golden — this test's entire job is to fail loudly the
     moment [Llvm_builtins]'s generated preamble stops matching this
-    literal byte-for-byte.
+    literal byte-for-byte. The HCR ABI v5 declaration additions are reflected
+    here intentionally; existing declaration order remains covered.
 
     DELETE THIS GOLDEN (and loosen the test) only when someone
     DELIBERATELY changes the preamble's content/order/whitespace — at that
@@ -14303,6 +14796,10 @@ let golden_preamble_core : string = {|; Runtime declarations
 declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)
 declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)
 declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)
+declare ptr @march_dispatch_enter_work_compatible(i32 %name_id, ptr %expected_sig, ptr %out_version)
+declare void @march_dispatch_reserve_main()
+declare void @march_dispatch_leave_unit(i32, i32)
+declare void @march_dispatch_set_initial_on_stop(i32, ptr)
 declare void @march_dispatch_leave(i32 %name_id, i32 %version)
 declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)
 declare i32  @march_dispatch_publish_epoch(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind, i32 %epoch)
@@ -14310,7 +14807,7 @@ declare void @march_dispatch_init(i32 %n_slots)
 declare void @march_dispatch_register_name(i32, ptr)
 declare i32  @march_dispatch_name_to_id(ptr, ptr)
 declare void @march_reload_server_start(ptr)
-declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)
+declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id, i32 %build_epoch)
 declare void @march_actor_set_call_tags(ptr %actor, ptr %tags, i64 %n)
 declare ptr  @getenv(ptr)
 declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)
@@ -14322,6 +14819,14 @@ declare void @march_decrc_local(ptr %p)
 declare i64  @march_decrc_local_freed(ptr %p)
 declare void @march_clo_param_own(ptr %p)
 declare void @march_clo_release(ptr %p)
+declare void @march_clo_capture_epoch(ptr %p)
+declare void @march_clo_forget_epoch(ptr %p)
+declare void @march_clo_frame_enter(ptr %p)
+declare void @march_frame_leave()
+declare void @march_frame_own_closure(ptr)
+declare void @march_frame_disown_closure(ptr)
+declare void @march_decrc_erased(ptr %p)
+declare void @march_decrc_erased_local(ptr %p)
 declare ptr  @march_clo_float_arg(ptr %p)
 declare void @march_free(ptr %p)
 declare ptr  @march_tco_defer_push(ptr %buf, ptr %release, ptr %v)
@@ -14377,6 +14882,8 @@ declare i64    @march_checked_idiv(i64 %a, i64 %b)
 declare i64    @march_checked_imod(i64 %a, i64 %b)
 declare i64    @march_checked_emod(i64 %a, i64 %b)
 declare i64    @march_checked_ediv(i64 %a, i64 %b)
+declare i64    @march_checked_ifloordiv(i64 %a, i64 %b)
+declare i64    @march_checked_ifloormod(i64 %a, i64 %b)
 ; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
 declare i64    @march_checked_div_op(i64 %a, i64 %b)
 declare i64    @march_checked_mod_op(i64 %a, i64 %b)
@@ -14504,6 +15011,12 @@ declare ptr  @march_ed25519_seed_keypair(ptr %seed)
 declare ptr  @march_ed25519_sign(ptr %sk, ptr %msg)
 declare i64  @march_ed25519_verify(ptr %pk, ptr %msg, ptr %sig)
 declare ptr  @march_x25519(ptr %k, ptr %u)
+declare ptr  @march_mlkem768_keypair(ptr %seed)
+declare ptr  @march_mlkem768_encaps(ptr %pk, ptr %coins)
+declare ptr  @march_mlkem768_decaps(ptr %sk, ptr %ct)
+declare ptr  @march_mldsa65_keypair(ptr %seed)
+declare ptr  @march_mldsa65_sign(ptr %sk, ptr %msg, ptr %rnd)
+declare i64  @march_mldsa65_verify(ptr %pk, ptr %msg, ptr %sig)
 declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)
 declare ptr  @march_base64_encode(ptr %b)
 declare ptr  @march_base64_decode(ptr %s)
@@ -14544,7 +15057,11 @@ declare i64  @march_remote_check_march(ptr %impl_hash, ptr %sig_hash)
 declare ptr  @march_remote_invoke_march(ptr %impl_hash, ptr %args)
 ; Integer math helpers
 declare i64  @march_int_pow(i64 %base, i64 %exp)
+declare void @march_int_overflow(i64 %op, ptr %file, i64 %line) cold noreturn
 ; LLVM intrinsics
+declare {i64, i1} @llvm.sadd.with.overflow.i64(i64 %a, i64 %b)
+declare {i64, i1} @llvm.ssub.with.overflow.i64(i64 %a, i64 %b)
+declare {i64, i1} @llvm.smul.with.overflow.i64(i64 %a, i64 %b)
 declare i64  @llvm.ctpop.i64(i64 %val)
 declare i64  @llvm.abs.i64(i64 %val, i1 %is_int_min_poison)
 declare ptr  @llvm.stacksave()
@@ -14568,6 +15085,12 @@ declare ptr  @march_logger_appender_names()
 declare ptr  @march_logger_set_module_level(ptr %module, i64 %level)
 declare ptr  @march_logger_clear_module_level(ptr %module)
 declare i64  @march_logger_module_level(ptr %module)
+; Diagnostics crash observers
+declare i64  @march_diag_observe(ptr %cb)
+declare ptr  @march_diag_unobserve(i64 %id)
+declare ptr  @march_diag_context_get()
+declare ptr  @march_diag_context_set(ptr %ctx)
+declare ptr  @march_panic_site(ptr %file, i64 %line)
 ; REPL JIT persistent variable slot table (march_extras.c)
 declare i64  @march_repl_get(i64 %slot)
 declare void @march_repl_set(i64 %slot, i64 %val)
@@ -14629,6 +15152,7 @@ declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body
 declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline, ptr %release)
 declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
 declare void @march_http_server_wait(i64 %handle)
+declare void @march_http_server_bind_host(ptr %host)
 declare void @march_ws_handshake(i64 %fd, ptr %key)
 declare ptr  @march_ws_recv(i64 %fd)
 declare void @march_ws_send(i64 %fd, ptr %frame)
@@ -14686,6 +15210,9 @@ declare void @march_tls_close(i64 %ssl_handle)
 declare void @march_tls_ctx_free(i64 %ctx_handle)
 declare ptr  @march_tls_negotiated_alpn(i64 %ssl_handle)
 declare ptr  @march_tls_peer_cn(i64 %ssl_handle)
+declare ptr  @march_tls_ctx_set_groups(i64 %ctx_handle, ptr %groups)
+declare ptr  @march_tls_negotiated_group(i64 %ssl_handle)
+declare i64  @march_tls_pq_available()
 ; TypedArray builtins
 declare ptr  @march_typed_array_create(i64 %len, ptr %default_val)
 declare ptr  @march_typed_array_from_list(ptr %list)
@@ -14826,6 +15353,7 @@ declare i64  @march_dist_monitor_forget_node_str(ptr %node)
 declare void @march_dist_monitor_ack_pid(i64 %target_pid, i64 %watcher_pid)
 declare void @march_dist_monitor_register_pid(i64 %target_pid, ptr %node, i64 %watcher_pid, i64 %fd)
 declare i64  @march_mailbox_size(ptr %pid)
+declare i64  @march_mailbox_backlog(ptr %pid)
 declare i64  @march_sched_stat(i64 %which)
 declare ptr  @march_observe_query(ptr %line)
 declare void @march_observe_count_send()
@@ -14966,7 +15494,7 @@ let test_builtin_group_total () =
          (fun c -> March_tir.Llvm_emit.builtin_group c = g)
          March_tir.Builtin_name.all)
   in
-  Alcotest.(check int) "arith" 22 (count March_tir.Llvm_emit.Bg_arith);
+  Alcotest.(check int) "arith" 27 (count March_tir.Llvm_emit.Bg_arith);
   Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
   Alcotest.(check int) "record" 18 (count March_tir.Llvm_emit.Bg_record)
 
@@ -14981,7 +15509,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 65
+  Alcotest.(check int) "constructor count" 70
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)
@@ -16378,8 +16906,530 @@ let test_tir_verify_enforce_raises () =
     Alcotest.(check string) "stage carried" "tir-x" stage;
     Alcotest.(check int) "one finding" 1 (List.length fs)
 
+(* ── TIR verifier, check 2 (types): prove each rule red on hand-broken TIR ── *)
+
+let tv_types_has ?(k = true) needle m =
+  let k_table = if k then Some (March_tir.Kind.of_module m) else None in
+  List.exists (fun (_, s) -> Test_helpers.contains needle s)
+    (March_tir.Tir_verify.check ~stage:"tir-perceus" ?k_table ~rc:false m)
+
+let test_tir_verify_types_arity () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TInt in
+  let m = TV.modl [
+      TV.fn "callee" ~params:[x] (EAtom (AVar x));
+      TV.fn "main" (EApp (TV.v "callee" (TFn ([TInt], TInt)), [TV.int 1; TV.int 2])) ] in
+  Alcotest.(check bool) "a call with the wrong argument count is reported" true
+    (tv_types_has "call to `callee` passes 2 argument(s); it takes 1" m)
+
+let test_tir_verify_types_repr () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TInt in
+  let m = TV.modl [
+      TV.fn "callee" ~params:[x] (EAtom (AVar x));
+      TV.fn "main" (EApp (TV.v "callee" (TFn ([TInt], TInt)),
+                          [ALit (March_ast.Ast.LitFloat 1.5)])) ] in
+  Alcotest.(check bool) "a Float passed for an Int parameter is reported" true
+    (tv_types_has "argument 1 of `callee`" m);
+  Alcotest.(check bool) "... only with the kind table" false
+    (tv_types_has ~k:false "argument 1 of `callee`" m)
+
+let test_tir_verify_types_case_arity () =
+  let open March_tir.Tir in
+  let o = TV.v "o" (TCon ("Opt", [])) in
+  let a = TV.v "a" TInt and b = TV.v "b" TInt in
+  let m = { (TV.modl [ TV.fn "f" ~params:[o]
+                         (ECase (AVar o,
+                                 [ { br_tag = "Some"; br_vars = [a; b]; br_body = EAtom (AVar a) } ],
+                                 Some (EAtom (TV.int 0)))) ])
+            with tm_types = [ TDVariant ("Opt", [ ("None", []); ("Some", [TInt]) ]) ] } in
+  Alcotest.(check bool) "a branch binding more variables than its constructor has fields" true
+    (tv_types_has "case branch `Some` binds 2 variable(s); constructor `Some` of `Opt` has 1 field(s)" m)
+
+let test_tir_verify_types_field () =
+  let open March_tir.Tir in
+  let r = TV.v "r" (TRecord [ ("a", TInt) ]) in
+  let m = TV.modl [ TV.fn "f" ~params:[r] (EField (AVar r, "nope")) ] in
+  Alcotest.(check bool) "a projection of a field the record does not have" true
+    (tv_types_has "field `nope` is projected from the record" m);
+  let c = TV.v "c" (TCon ("Cfg", [])) in
+  let m2 = { (TV.modl [ TV.fn "g" ~params:[c] (EField (AVar c, "port")) ])
+             with tm_types = [ TDRecord ("Cfg", [ ("host", TString) ]) ] } in
+  Alcotest.(check bool) "... and of a named record type" true
+    (tv_types_has "field `port` is projected from the record type `Cfg`" m2)
+
+let test_tir_verify_types_named_tvar () =
+  let open March_tir.Tir in
+  let x = TV.v "x" (TVar "a") in
+  let m = TV.modl [ TV.fn "f" ~params:[x] (EAtom (TV.int 0)) ] in
+  Alcotest.(check bool) "a source-named type variable after mono" true
+    (tv_types_has "a named type variable survived monomorphisation" m);
+  let y = TV.v "y" (TVar "_3") in
+  let m2 = TV.modl [ TV.fn "g" ~params:[y] (EAtom (TV.int 0)) ] in
+  Alcotest.(check bool) "an erased ('_N) type variable is not" false
+    (tv_types_has "named type variable" m2);
+  Alcotest.(check bool) "... and neither is anything before mono" false
+    (List.exists (fun (_, s) -> Test_helpers.contains "named type variable" s)
+       (March_tir.Tir_verify.check ~stage:"tir-lower" ~rc:false m))
+
+(* ── TIR verifier, check 5 (pass contracts): Defun's postconditions ───── *)
+
+let tv_contract_has ~stage needle m =
+  List.exists (fun s -> Test_helpers.contains needle s)
+    (List.map snd (March_tir.Tir_verify.check ~stage ~rc:false m))
+
+(* A lambda creation site is [letrec f = .. in f].  Defun replaces each with an
+   allocation of its closure struct, so one at or after tir-defun is a lambda
+   Defun missed. *)
+let test_tir_verify_contract_lambda_survives_defun () =
+  let open March_tir.Tir in
+  let lam = TV.fn "lam" ~params:[ TV.v "x" TInt ] (EAtom (AVar (TV.v "x" TInt))) in
+  let site = ELetRec ([ lam ], EAtom (AVar (TV.v "lam" (TFn ([ TInt ], TInt))))) in
+  let m = TV.modl [ TV.fn "f" site ] in
+  Alcotest.(check bool) "reported at tir-defun" true
+    (tv_contract_has ~stage:"tir-defun" "survived Defun as a letrec creation site" m);
+  Alcotest.(check bool) "... and at tir-perceus" true
+    (tv_contract_has ~stage:"tir-perceus" "survived Defun" m);
+  Alcotest.(check bool) "... but not before Defun, where lambdas are expected" false
+    (tv_contract_has ~stage:"tir-mono" "survived Defun" m);
+  (* a local function that is not a creation site (several functions, or a
+     body that is not the function itself) is not a lambda *)
+  let not_site = ELetRec ([ lam ], EAtom (TV.int 0)) in
+  Alcotest.(check bool) "a letrec whose body is not the function is not a creation site" false
+    (tv_contract_has ~stage:"tir-defun" "survived Defun"
+       (TV.modl [ TV.fn "g" not_site ]))
+
+(* A name bound locally (parameter, let, branch binder) that is called is a
+   closure pointer: Defun makes it an indirect call even when a top-level
+   function shares its name. *)
+let test_tir_verify_contract_local_call_is_indirect () =
+  let open March_tir.Tir in
+  let g = TV.v "g" (TFn ([ TInt ], TInt)) in
+  let m = TV.modl [
+      TV.fn "g" ~params:[ TV.v "n" TInt ] (EAtom (AVar (TV.v "n" TInt)));
+      (* the parameter [g] shadows the top-level [g]; calling it directly would
+         link to the top-level function *)
+      TV.fn "h" ~params:[ g ] (EApp (g, [ TV.int 1 ])) ] in
+  Alcotest.(check bool) "a direct call through a local binding is reported" true
+    (tv_contract_has ~stage:"tir-defun" "called directly after Defun" m);
+  let ok = TV.modl [
+      TV.fn "g" ~params:[ TV.v "n" TInt ] (EAtom (AVar (TV.v "n" TInt)));
+      TV.fn "h" ~params:[ g ] (ECallPtr (AVar g, [ TV.int 1 ])) ] in
+  Alcotest.(check bool) "the same call as ECallPtr is clean" false
+    (tv_contract_has ~stage:"tir-defun" "called directly after Defun" ok);
+  Alcotest.(check bool) "before Defun a local call is expected" false
+    (tv_contract_has ~stage:"tir-mono" "called directly after Defun" m)
+
+(* Inline must not insert a callee's free reference to a top-level function
+   beneath a caller binder of the same name: the reference would then mean
+   the binder.  [g]'s body calls the top-level [f]; [h] has a parameter named
+   [f] and calls [g].  Inlining [g] into [h] as-is turns [f(x)] into a call
+   through [h]'s parameter (a compiled-only wrong value: a lambda calling a
+   top-level [f], inlined into List.map's clone whose callback parameter is
+   [f]; specs/progress/2026-10-11-inline-capture-guard.md).
+   The Defun contract reports exactly that shape, so it is the oracle here. *)
+let test_inline_does_not_capture_toplevel_name () =
+  let open March_tir.Tir in
+  let int_fn = TFn ([ TInt ], TInt) in
+  let m_ = TV.v "m" TInt and x = TV.v "x" TInt and y = TV.v "y" TInt in
+  let f_top = { (TV.fn "f" ~params:[ m_ ]
+                   (EApp (TV.v "+" (TFn ([ TInt; TInt ], TInt)), [ AVar m_; TV.int 1 ])))
+                with fn_ret_ty = TInt } in
+  let g = TV.fn "g" ~params:[ x ] (EApp (TV.v "f" int_fn, [ AVar x ])) in
+  let h = TV.fn "h" ~params:[ TV.v "f" int_fn; y ] (EApp (TV.v "g" int_fn, [ AVar y ])) in
+  let m = TV.modl [ f_top; g; h ] in
+  Alcotest.(check (list string)) "the input is clean" []
+    (List.filter (fun s -> Test_helpers.contains "[contract]" s)
+       (List.map snd (March_tir.Tir_verify.check ~stage:"tir-opt-1-inline" ~rc:false m)));
+  let changed = ref false in
+  let m' = March_tir.Inline.run ~changed m in
+  Alcotest.(check (list string)) "after Inline, no call through h's parameter f" []
+    (List.filter (fun s -> Test_helpers.contains "[contract]" s)
+       (List.map snd (March_tir.Tir_verify.check ~stage:"tir-opt-1-inline" ~rc:false m')))
+
+(* ── TIR verifier, check 4 (representation invariants, at emission) ──── *)
+
+let c4_has needle fs = List.exists (fun (_, s) -> Test_helpers.contains needle s) fs
+
+(* 4a: the repr audit's conditions.  Recording is forced on the way
+   emit_module forces it under --verify-tir. *)
+let test_check4_mixed_families () =
+  let module C = March_tir.Llvm_ctx in
+  let record ty payload family site = C.repr_audit_record ~ty ~payload ~family ~site in
+  let flagged entries =
+    Hashtbl.reset C._repr_audit;
+    let saved = !C.repr_audit_forced in
+    C.repr_audit_forced := true;
+    Fun.protect ~finally:(fun () -> C.repr_audit_forced := saved; Hashtbl.reset C._repr_audit)
+      (fun () -> List.iter (fun (t, p, f, s) -> record t p f s) entries;
+        March_tir.Llvm_toplevel.repr_mix_findings (C.repr_audit_flagged ())) in
+  Alcotest.(check bool) "one payload, two families: reported" true
+    (c4_has "repr/mixed: `Opt` is encoded as Boxed and Niche (same-payload conflict)"
+       (flagged [ ("Opt", "Int", "Niche", "alloc"); ("Opt", "Int", "Boxed", "case") ]));
+  Alcotest.(check bool) "a site with no payload disagreeing: reported" true
+    (c4_has "unknown-payload site disagrees"
+       (flagged [ ("Opt", "Int", "Niche", "alloc"); ("Opt", "?", "Boxed", "case") ]));
+  Alcotest.(check (list (pair string string))) "different payloads may differ (Option(Int) niche, Option(Float) boxed)" []
+    (flagged [ ("Opt", "Int", "Niche", "alloc"); ("Opt", "Float", "Boxed", "alloc") ]);
+  Alcotest.(check (list (pair string string))) "one family: clean" []
+    (flagged [ ("Opt", "Int", "Niche", "alloc"); ("Opt", "Int", "Niche", "case") ]);
+  (* not forced, no MARCH_REPR_AUDIT: nothing is recorded *)
+  Hashtbl.reset C._repr_audit;
+  C.repr_audit_forced := false;
+  if Sys.getenv_opt "MARCH_REPR_AUDIT" = None then begin
+    record "Opt" "Int" "Niche" "alloc"; record "Opt" "Int" "Boxed" "case";
+    Alcotest.(check int) "unforced recording is off" 0 (Hashtbl.length C._repr_audit)
+  end
+
+let c4_collision_set () =
+  let cs = Hashtbl.create 4 in
+  Hashtbl.replace cs "Color" [ "A.Color"; "B.Color" ];
+  cs
+
+(* 4b: a type in a collision group is Boxed at every site. *)
+let test_check4_collision_must_be_boxed () =
+  let collision_set = c4_collision_set () in
+  let f = March_tir.Llvm_toplevel.collision_repr_findings ~collision_set in
+  Alcotest.(check bool) "a colliding type encoded as a niche: reported" true
+    (c4_has "collision: `A.Color` shares its short name"
+       (f [ ("A.Color", [ ("?", "Niche", "alloc-some:A.Color.Some in main") ]) ]));
+  Alcotest.(check bool) "... also through its bare short name" true
+    (c4_has "collision: `Color`" (f [ ("Color", [ ("?", "Unboxed", "case in main") ]) ]));
+  Alcotest.(check (list (pair string string))) "a colliding type encoded Boxed: clean" []
+    (f [ ("A.Color", [ ("?", "Boxed", "alloc") ]) ]);
+  Alcotest.(check (list (pair string string))) "a non-colliding niche: clean" []
+    (f [ ("Shade", [ ("Int", "Niche", "alloc") ]) ])
+
+(* 4c: the group's constructor tags are in the collision range and distinct. *)
+let test_check4_collision_tags () =
+  let collision_set = c4_collision_set () in
+  let base = March_tir.Llvm_builtins.collision_tag_base in
+  let ctors = function
+    | "A.Color" -> Some [ "Red"; "Green" ] | "B.Color" -> Some [ "Red" ] | _ -> None in
+  let run tags =
+    March_tir.Llvm_toplevel.collision_tag_findings ~collision_set ~ctors
+      ~tag_of:(fun k -> List.assoc_opt k tags) in
+  Alcotest.(check (list (pair string string))) "distinct tags in range: clean" []
+    (run [ ("A.Color.Red", base); ("A.Color.Green", base + 1); ("B.Color.Red", base + 2) ]);
+  Alcotest.(check bool) "two modules' Red sharing a tag: reported" true
+    (c4_has "`A.Color.Red` and `B.Color.Red` share tag"
+       (run [ ("A.Color.Red", base); ("A.Color.Green", base + 1); ("B.Color.Red", base) ]));
+  Alcotest.(check bool) "an ordinary (index) tag in a collision group: reported" true
+    (c4_has "has tag 0x0, outside the collision range"
+       (run [ ("A.Color.Red", 0); ("A.Color.Green", base + 1); ("B.Color.Red", base + 2) ]))
+
+(* ── TIR verifier, check 3 (RC balance) ──────────────────────────────── *)
+
+let tv_rc ?(leaks = false) m =
+  let k_table = March_tir.Kind.of_module m in
+  (* every parameter owned: inference over hand-written post-Perceus TIR
+     would read [dec_rc] as a non-consuming use and call it borrowed *)
+  let borrow_map = March_tir.Borrow.empty in
+  List.map snd (March_tir.Tir_verify_rc.check ~stage:"tir-perceus" ~leaks ~k_table ~borrow_map m)
+
+let tv_rc_has ?leaks needle m =
+  List.exists (fun s -> Test_helpers.contains needle s) (tv_rc ?leaks m)
+
+let tv_seq a b = March_tir.Tir.ESeq (a, b)
+
+let test_tir_verify_rc_balanced () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TString in
+  let m = TV.modl [ TV.fn "f" ~params:[x] (tv_seq (EDecRC (AVar x)) (EAtom (TV.int 0))) ] in
+  Alcotest.(check (list string)) "an owned parameter released once: clean" [] (tv_rc m)
+
+let test_tir_verify_rc_double_release () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TString in
+  let m = TV.modl [ TV.fn "f" ~params:[x]
+                      (tv_seq (EDecRC (AVar x)) (tv_seq (EDecRC (AVar x)) (EAtom (TV.int 0)))) ] in
+  Alcotest.(check bool) "a second dec_rc is an over-release" true
+    (tv_rc_has "rc-balance/over-release: `x`" m)
+
+let test_tir_verify_rc_use_after_release () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TString and s = TV.v "s" TString in
+  let m = TV.modl [
+      TV.fn "len" ~params:[s] (tv_seq (EDecRC (AVar s)) (EAtom (TV.int 1)));
+      TV.fn "f" ~params:[x]
+        (tv_seq (EDecRC (AVar x)) (EApp (TV.v "len" (TFn ([TString], TInt)), [AVar x]))) ] in
+  Alcotest.(check bool) "passing a released value to a call is a use after release" true
+    (tv_rc_has "rc-balance/use-after-release: `x`" m)
+
+let test_tir_verify_rc_leak () =
+  let open March_tir.Tir in
+  let s = TV.v "s" TString in
+  let mk = { (TV.fn "mk" (EAtom (ALit (March_ast.Ast.LitString "a")))) with fn_ret_ty = TString } in
+  let m = TV.modl [ mk;
+                    TV.fn "f" (ELet (s, EApp (TV.v "mk" (TFn ([], TString)), []), EAtom (TV.int 0))) ] in
+  Alcotest.(check bool) "a fresh value never released leaks, when leaks are asked for" true
+    (tv_rc_has ~leaks:true "rc-balance/leak: `s`" m);
+  Alcotest.(check (list string)) "... and is silent otherwise" [] (tv_rc m)
+
+let test_tir_verify_rc_case_arms_join () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TString and b = TV.v "b" TBool in
+  let m = TV.modl [ TV.fn "f" ~params:[b; x]
+                      (ECase (AVar b,
+                              [ { br_tag = "True"; br_vars = [];
+                                  br_body = tv_seq (EDecRC (AVar x)) (EAtom (TV.int 1)) };
+                                { br_tag = "False"; br_vars = [];
+                                  br_body = tv_seq (EDecRC (AVar x))
+                                      (tv_seq (EDecRC (AVar x)) (EAtom (TV.int 2))) } ],
+                              None)) ] in
+  Alcotest.(check bool) "an over-release on one arm is reported on that arm's path" true
+    (tv_rc_has "on path `case b: False`" m)
+
+(* The three Perceus bugs check 3 found (specs/progress/
+   2026-10-08-perceus-parent-released-before-field-use.md), through the real
+   pipeline.  Before the fix each reported a use-after-release (and each
+   compiled program printed garbage or crashed); now none may. *)
+let rc_pipeline_findings ?(opt = true) src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let saved = !March_tir.Tir_verify.rc_flag in
+  March_tir.Tir_verify.rc_flag := true;
+  Fun.protect ~finally:(fun () -> March_tir.Tir_verify.rc_flag := saved) (fun () ->
+      match March_tir.Contract_pipeline.run ~iface_methods ~opt tir with
+      | _ -> []
+      | exception March_tir.Tir_verify.Failed (_, fs) -> List.map snd fs)
+
+let rc_bug_string_case = {|mod StrCase do
+  type D = { tag : String, n : Int }
+  fn classify(d : D) : String do
+    match d.tag do
+      "known" ->
+        let a = int_to_string(d.n) ++ "a" ++ int_to_string(d.n * 3)
+        let b = a ++ int_to_string(d.n * 5) ++ a ++ int_to_string(d.n * 11)
+        let c = b ++ a ++ int_to_string(string_byte_length(b))
+        c ++ b ++ a
+      other -> "unknown " ++ other
+    end
+  end
+  fn main() : Int do
+    string_byte_length(classify({ tag: "tag-" ++ int_to_string(12345), n: 1 }))
+  end
+end|}
+
+let rc_bug_nested_projection = {|mod Nested do
+  type Ap = { fingerprint : String, k : Int }
+  type Offer = { ap : Ap, sessions : Int }
+  pfn active(o : Offer) : Int do o.sessions end
+  pfn line(name : String, o : Offer) : String do
+    "offer " ++ name ++ " fp " ++ o.ap.fingerprint ++ " sessions " ++ int_to_string(active(o))
+  end
+  fn main() : Int do
+    string_byte_length(line("r", { ap: { fingerprint: "fp-" ++ int_to_string(7), k: 1 }, sessions: 2 }))
+  end
+end|}
+
+let rc_bug_record_update = {|mod Shape3 do
+  type Place = Here(String) | Nowhere
+  type Want = { w_name : String, w_place : Place, w_cap : Int }
+  type Run = { name : String, place : Place, cap : Int }
+  type WL = WNil | WCons(Want, WL)
+  type MW = NoW | SomeW(Want)
+  fn find(ws : WL, n : String) : MW do
+    match ws do
+      WNil -> NoW
+      WCons(w, rest) -> if w.w_name == n do SomeW(w) else find(rest, n) end
+    end
+  end
+  fn pick(r : Run, wants : WL) : Run do
+    match find(wants, r.name) do
+      NoW -> { r with place: Nowhere }
+      SomeW(w) -> { r with place: w.w_place, cap: if r.cap == 0 do 0 else w.w_cap end }
+    end
+  end
+  fn main() : Int do
+    let r = pick({ name: "a", place: Nowhere, cap: 1 },
+                 WCons({ w_name: "a", w_place: Here("node-" ++ int_to_string(3)), w_cap: 3 }, WNil))
+    r.cap
+  end
+end|}
+
+(* A local recursive helper under TRMC calls itself through its closure; with
+   the optimiser off Known_call has not made that call direct: the recursion
+   is a [call_ptr go$dps(.., $trmc)], whose last argument
+   is the destination cell, borrowed by protocol.  Check 3 once counted it as
+   consumed and reported an over-release in every list-producing stdlib
+   function under [--no-opt]. *)
+let rc_trmc_src = {|mod Trmc do
+  type L = N | C(Int, L)
+  fn dbl_all(xs : L) : L do
+    fn go(ys : L) : L do
+      match ys do
+        N -> N
+        C(h, t) -> C(h * 2, go(t))
+      end
+    end
+    go(xs)
+  end
+  fn main() : Int do
+    match dbl_all(C(1, C(2, N))) do
+      N -> 0
+      C(h, _) -> h
+    end
+  end
+end|}
+
+let test_tir_verify_rc_indirect_dps_call () =
+  List.iter (fun opt ->
+      Alcotest.(check (list string))
+        (Printf.sprintf "no RC finding for an indirect $dps call (opt=%b)" opt) []
+        (List.filter (fun s -> Test_helpers.contains "rc-balance" s)
+           (rc_pipeline_findings ~opt rc_trmc_src)))
+    [ false; true ]
+
+let test_tir_verify_rc_perceus_bugs_fixed () =
+  List.iter (fun (what, fn_name, src) ->
+      let fs = rc_pipeline_findings src in
+      Alcotest.(check (list string)) (what ^ ": no RC finding in `" ^ fn_name ^ "`") []
+        (List.filter (fun s -> Test_helpers.contains "rc-balance" s) fs))
+    [ ("string match on a field", "classify", rc_bug_string_case);
+      ("nested projection, parent consumed", "line", rc_bug_nested_projection);
+      ("record update from a find result", "pick", rc_bug_record_update) ]
+
+(* Leak findings (check 3 with [~leaks:true]) for the named functions, judged
+   on the real pipeline's tir-perceus module.  Unoptimised, so the borrow map
+   Perceus used is exactly [Borrow.infer_module] on its input (no owned-call
+   clones). *)
+let rc_leak_findings src fns =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let pre = ref None and post = ref None in
+  ignore (March_tir.Contract_pipeline.run ~iface_methods ~opt:false
+            ~before_perceus:(fun ~k_table t -> pre := Some (k_table, t))
+            ~snap:(fun name t -> if name = "tir-perceus" then post := Some t) tir);
+  match !pre, !post with
+  | Some (k_table, before), Some after ->
+    let borrow_map = March_tir.Borrow.infer_module ~k_table before in
+    List.filter_map (fun (fn, msg) -> if List.mem fn fns then Some msg else None)
+      (March_tir.Tir_verify_rc.check ~stage:"tir-perceus" ~leaks:true ~k_table ~borrow_map after)
+  | _ -> [ "the pipeline never reached tir-perceus" ]
+
+(* The 2026-10-12 leak sweep (specs/progress/2026-10-12-verifier-leak-sweep.md).
+   [has], [str_or], [both]: shapes the checker reported though Perceus was
+   right: a discarded unit result, the nullary arm of a niche Option at a
+   join, and [Some(i)] of a tagged Option(Int).  [keeps_new], [stmt_case],
+   [go]: real leaks it found, each now dropped by Perceus. *)
+let rc_leak_sweep_src = {|mod Sweep do
+  type St = { me : String, fd : Int }
+  type Ln = { node_id : String, dialer : String }
+  type S = { label : Option(String), style : String }
+  pfn note(s : String) : () do if string_byte_length(s) > 99 do () else () end end
+  fn opt_int(n : Int) : Option(Int) do if n > 0 do Some(n) else None end end
+  fn opt_str(n : Int) : Option(String) do if n > 0 do Some(int_to_string(n)) else None end end
+  fn has(n : Int) : Bool do
+    match opt_int(n) do
+      Some(_) -> true
+      None -> false
+    end
+  end
+  fn str_or(n : Int, d : String) : String do
+    let v = match opt_str(n) do
+      Some(s) -> s
+      None -> d
+    end
+    v
+  end
+  fn both(n : Int) : Int do
+    let s = int_to_string(n)
+    note(s)
+    n
+  end
+  fn keeps_new(st : St, l : Ln) : Bool do
+    let lower = if st.me < l.node_id do st.me else l.node_id end
+    l.dialer == lower
+  end
+  pfn touch(n : Int) : Int do n + 1 end
+  fn stmt_case(n : Int) : Int do
+    let st = { me: int_to_string(n), fd: n - 1 }
+    if st.fd >= 0 do touch(st.fd) else 0 end
+    n * 2
+  end
+  fn go(lst : List(S)) : List(String) do
+    match lst do
+      Nil -> Nil
+      Cons(s, rest) ->
+        match s.label do
+          None -> go(rest)
+          Some(lbl) -> Cons(lbl ++ s.style, go(rest))
+        end
+    end
+  end
+  fn main() : Int do
+    let st = { me: "a", fd: 1 }
+    let k = if keeps_new(st, { node_id: "b", dialer: "a" }) do 1 else 0 end
+    let g = go(Cons({ label: Some("x"), style: "y" }, Nil))
+    k + stmt_case(3) + both(2) + string_byte_length(str_or(1, "d")) + List.length(g)
+      + (if has(1) do 1 else 0 end)
+  end
+end|}
+
+let test_tir_verify_rc_leak_sweep () =
+  Alcotest.(check (list string)) "no leak finding in the sweep's shapes" []
+    (rc_leak_findings rc_leak_sweep_src
+       [ "has"; "str_or"; "both"; "keeps_new"; "stmt_case"; "go"; "go$dps" ])
+
+(* ── Dce.prune_unreachable ~roots (the remote shell's fragments) ─────────
+
+   A REPL or shell fragment lowers together with the program it attaches to,
+   and the program's library modules each declare a `main` (forge task
+   modules).  Default roots keep every function named `main` or `*.main`, so
+   `1 + 41` carried ~196 functions of forgepm's build tasks and declared their
+   file and process capabilities, which the node's policy then refused.
+   `~roots` replaces the defaults with the fragment's own entry. *)
+let test_prune_roots_ignores_other_mains () =
+  let entry = mk_fn "main" (app "helper" []) in
+  let helper = mk_fn "helper" (ilit 1 |> fun a -> March_tir.Tir.EAtom a) in
+  let task = mk_fn "Forge.Task.main" (app "task_only" []) in
+  let task_only = mk_fn "task_only" (March_tir.Tir.EAtom (ilit 2)) in
+  let m = mk_module [ entry; helper; task; task_only ] in
+  let names m = List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name) m.March_tir.Tir.tm_fns in
+  Alcotest.(check (list string)) "default roots keep every main"
+    [ "Forge.Task.main"; "helper"; "main"; "task_only" ]
+    (List.sort compare (names (March_tir.Dce.prune_unreachable m)));
+  Alcotest.(check (list string)) "~roots keeps the entry and what it reaches"
+    [ "helper"; "main" ]
+    (List.sort compare (names (March_tir.Dce.prune_unreachable ~roots:[ "main" ] m)))
+
+let test_prune_roots_keeps_exports () =
+  let entry = mk_fn "main" (March_tir.Tir.EAtom (ilit 1)) in
+  let kept = mk_fn "kept" (March_tir.Tir.EAtom (ilit 2)) in
+  let m = { (mk_module [ entry; kept ]) with March_tir.Tir.tm_exports = [ "kept" ] } in
+  Alcotest.(check (list string)) "tm_exports stay roots under ~roots"
+    [ "kept"; "main" ]
+    (List.sort compare
+       (List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name)
+          (March_tir.Dce.prune_unreachable ~roots:[ "main" ] m).March_tir.Tir.tm_fns))
+
+let prune_roots_tests =
+  [ ( "prune_roots",
+      [ Alcotest.test_case "a fragment's roots ignore other mains" `Quick
+          test_prune_roots_ignores_other_mains;
+        Alcotest.test_case "exports stay roots" `Quick test_prune_roots_keeps_exports ] ) ]
+
+(* Strings are March heap objects.  In native builds [march_obj_malloc] routes
+   them to mimalloc, whose objects take [march_free_any]'s inline fast path.
+   Keep this source-level contract explicit: libc [malloc] here silently puts
+   every string release back on the provenance slow path. *)
+let test_string_alloc_uses_march_allocator () =
+  let path = Filename.concat (march_project_root ()) "runtime/march_runtime.c" in
+  let source = read_file_contents path in
+  Alcotest.(check bool) "march_string_alloc routes through march_obj_malloc" true
+    (Test_helpers.contains "march_string *s = march_obj_malloc" source)
+
 let codegen_suites =
   [
+      ( "string_allocator", [
+          Alcotest.test_case "strings use the March object allocator" `Quick
+            test_string_alloc_uses_march_allocator;
+        ] );
       ( "tir_verify", [
           Alcotest.test_case "clean module has no findings" `Quick test_tir_verify_clean_module;
           Alcotest.test_case "unbound variable (RED)" `Quick test_tir_verify_unbound_var;
@@ -16387,6 +17437,25 @@ let codegen_suites =
           Alcotest.test_case "ECallPtr through a non-function (RED)" `Quick test_tir_verify_callptr_non_function;
           Alcotest.test_case "duplicate names, dangling ADefRef (RED)" `Quick test_tir_verify_duplicate_and_defref;
           Alcotest.test_case "enforce raises Failed" `Quick test_tir_verify_enforce_raises;
+          Alcotest.test_case "types: call arity (RED)" `Quick test_tir_verify_types_arity;
+          Alcotest.test_case "types: argument representation (RED)" `Quick test_tir_verify_types_repr;
+          Alcotest.test_case "types: case binder count (RED)" `Quick test_tir_verify_types_case_arity;
+          Alcotest.test_case "types: missing field (RED)" `Quick test_tir_verify_types_field;
+          Alcotest.test_case "types: named tvar after mono (RED)" `Quick test_tir_verify_types_named_tvar;
+          Alcotest.test_case "contract: lambda survives Defun (RED)" `Quick test_tir_verify_contract_lambda_survives_defun;
+          Alcotest.test_case "contract: local call must be indirect (RED)" `Quick test_tir_verify_contract_local_call_is_indirect;
+          Alcotest.test_case "Inline does not capture a top-level name (RED)" `Quick test_inline_does_not_capture_toplevel_name;
+          Alcotest.test_case "check 4: mixed encoding families (RED)" `Quick test_check4_mixed_families;
+          Alcotest.test_case "check 4: colliding type must be Boxed (RED)" `Quick test_check4_collision_must_be_boxed;
+          Alcotest.test_case "check 4: collision tags (RED)" `Quick test_check4_collision_tags;
+          Alcotest.test_case "rc: balanced owned param is clean" `Quick test_tir_verify_rc_balanced;
+          Alcotest.test_case "rc: double release (RED)" `Quick test_tir_verify_rc_double_release;
+          Alcotest.test_case "rc: use after release (RED)" `Quick test_tir_verify_rc_use_after_release;
+          Alcotest.test_case "rc: leak, opt-in (RED)" `Quick test_tir_verify_rc_leak;
+          Alcotest.test_case "rc: per-arm path (RED)" `Quick test_tir_verify_rc_case_arms_join;
+          Alcotest.test_case "rc: perceus parent-released-before-field-use fixed" `Quick test_tir_verify_rc_perceus_bugs_fixed;
+          Alcotest.test_case "rc: indirect $dps call borrows its destination" `Quick test_tir_verify_rc_indirect_dps_call;
+          Alcotest.test_case "rc: leak sweep shapes are clean" `Quick test_tir_verify_rc_leak_sweep;
         ]);
       ( "vectorize_check", [
           Alcotest.test_case "module loads, misuse case reports one diagnostic" `Quick
@@ -16469,6 +17538,8 @@ let codegen_suites =
           Alcotest.test_case "compiled branch-built aggregate loop does not leak" `Slow
             test_unboxed_aggregate_branch_join_no_leak_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
+          Alcotest.test_case "module-declared aggregate is unboxed" `Quick test_module_unboxed_aggregate;
+          Alcotest.test_case "C-built module aggregate stays boxed" `Quick test_module_unboxed_c_built_stays_boxed;
         ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
@@ -16509,6 +17580,8 @@ let codegen_suites =
             `Quick test_tco_self_dup_arg_decref_on_live_path;
           Alcotest.test_case "deep drop: never-destructured container releases its children"
             `Quick test_deep_drop_of_borrowed_container;
+          Alcotest.test_case "drop glue: name spells a residual type variable by position"
+            `Quick test_drop_glue_name_is_structural;
           Alcotest.test_case "final-review: non-tail dec-chain-wrapped group call rejected"
             `Quick test_mutual_tco_non_tail_dec_chain_wrapped_no_loop;
           Alcotest.test_case "B8: reduction check present in mutual loop"
@@ -16648,7 +17721,7 @@ let codegen_suites =
         Alcotest.test_case "div_one"           `Quick test_simplify_div_one;
         Alcotest.test_case "zero_div"          `Quick test_simplify_zero_div;
         Alcotest.test_case "zero_div_lit"      `Quick test_simplify_zero_div_lit;
-        Alcotest.test_case "strength_reduce"   `Quick test_simplify_strength_reduce;
+        Alcotest.test_case "no x*2 -> x+x"     `Quick test_simplify_strength_reduce;
         Alcotest.test_case "float_add_zero"    `Quick test_simplify_float_add_zero;
         Alcotest.test_case "bool_and_true"     `Quick test_simplify_bool_and_true;
         Alcotest.test_case "str_concat_empty_rhs" `Quick test_simplify_string_concat_empty_rhs;
@@ -17007,6 +18080,7 @@ let codegen_suites =
           Alcotest.test_case "float arr IR" `Quick (with_reset test_native_float_arr_ir);
           Alcotest.test_case "narrow arr IR" `Quick (with_reset test_native_narrow_arr_ir);
           Alcotest.test_case "simd vector IR" `Quick (with_reset test_simd_vector_ir);
+          Alcotest.test_case "simd load borrows its array" `Quick (with_reset test_simd_load_borrows_array);
         ] );
       ( "tasks",
         [
@@ -17092,6 +18166,10 @@ let codegen_suites =
           Alcotest.test_case "leaf change: only leaf reload hash changes" `Quick test_hcr_leaf_change_only_changes_leaf_reload_hash;
           Alcotest.test_case "transitive CAS hash still propagates"       `Quick test_hcr_transitive_hash_still_propagates_for_cas;
           Alcotest.test_case "entry point excluded from reloadable slots" `Quick test_hcr_entry_point_not_a_reloadable_slot;
+        ] );
+      ( "interp_signal", [
+          Alcotest.test_case "SIGTERM stops an interpreted compute loop" `Quick
+            test_interp_sigterm_stops_compute_loop;
         ] );
       ( "guard_exhaustion_codegen", [
           Alcotest.test_case "compiled guard exhaustion panics (B3)" `Quick
@@ -17246,10 +18324,18 @@ let codegen_suites =
             test_compiled_no_opt_prunes_unreachable;
           Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick
             test_compiled_int_div_euclid_parity;
+          Alcotest.test_case "compiled int_div_floor/int_mod_floor parity (inline vs helper)" `Quick
+            test_compiled_int_floor_parity;
           Alcotest.test_case "compiled int_mod_euclid parity (negative divisor)" `Quick
             test_compiled_int_mod_euclid_parity;
-          Alcotest.test_case "compiled Int is 63-bit and wraps (overflow edge parity)" `Quick
+          Alcotest.test_case "compiled Int is 63-bit; int_wrapping_* wrap (overflow edge parity)" `Quick
             test_compiled_int_overflow_parity;
+          Alcotest.test_case "Int + - * and negation panic on overflow at every boundary (compiled = interpreter)" `Quick
+            test_compiled_int_overflow_trap_parity;
+          Alcotest.test_case "uncaught Int overflow panics with its message, exit 1 (interp, compiled, JS)" `Quick
+            test_int_overflow_uncaught_panic;
+          Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
+            test_js_int_subset_parity;
           Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick
             test_compiled_int_overflow_lazy_norm_parity;
           Alcotest.test_case "compiled TRMC hole fresh path after heap churn (march_alloc is malloc)" `Quick
@@ -17345,6 +18431,10 @@ let codegen_suites =
           Alcotest.test_case "string_to_codepoints/string_from_codepoint builtins link and match interp" `Quick
             test_compiled_string_codepoint_builtin_parity;
         ] );
+      ( "duplicate_binder", [
+          Alcotest.test_case "shadowing across scopes: interp and compiled agree" `Quick
+            test_shadowing_across_scopes_parity;
+        ] );
       ( "unix_time_ms", [
           Alcotest.test_case "unix_time_ms builtin links and matches interp" `Quick
             test_compiled_unix_time_ms_parity;
@@ -17438,6 +18528,7 @@ let codegen_suites =
   @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
   @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
   @ Test_trmc.suites (* TRMC Phase 1: tail-recursion-modulo-cons eligibility *)
+  @ prune_roots_tests
   @ Test_provenance.suites (* A2: provenance side table + --debug-info *)
   @ Test_kind.suites (* type kinds: the per-type table (specs/2026-09-10-type-kinds-design.md) *)
   @ Test_rc_trace.suites (* --rc-trace site ids + scripts/gc-trace-report.py (plan §8 A3) *)

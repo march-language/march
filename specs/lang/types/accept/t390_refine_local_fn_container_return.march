@@ -1,0 +1,40 @@
+-- Element refinements, a local `fn` with a container return (2026-10-18,
+-- design specs/2026-10-18-element-flow-followups-design.md phase 3): a
+-- block-level `fn two(n) : List({Int | _ > 0})` is checked exactly like a
+-- top-level one (every tail element is an obligation, with the facts in scope
+-- at the tail, so `[n, m]` after `let m = n + 1` proves), and once every tail
+-- is PROVED its later calls in the block carry the entry: `sum_pos(two(k))`,
+-- a `let`-bound result, and a top-level function whose tail is the local's
+-- call (`via_local`), which is then lent to ITS callers.  A local's scalar
+-- return tail gets the scalar demand hook too (`Option.unwrap_or(p, 1)`).
+-- Before, the tails filed nothing and every call was an unreflectable-subject
+-- skip, so `cap verified` rejected this module.  Under `cap verified`, exit 0
+-- means every obligation PROVED.  Reject twin: reject/t391.
+mod LocalContainerReturn do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn direct(k : {Int | _ > 0}) : Int do
+    fn two(n : {Int | _ > 0}) : List({Int | _ > 0}) do [n, n + 1] end
+    sum_pos(two(k))
+  end
+  fn let_bound(k : {Int | _ > 0}) : Int do
+    fn two(n : {Int | _ > 0}) : List({Int | _ > 0}) do
+      let m = n + 1
+      [n, m]
+    end
+    let ys = two(k)
+    sum_pos(ys)
+  end
+  fn via_local(b : Bool, k : {Int | _ > 0}) : List({Int | _ > 0}) do
+    if b do [1] else
+      fn one(n : {Int | _ > 0}) : List({Int | _ > 0}) do [n] end
+      one(k)
+    end
+  end
+  fn caller(k : {Int | _ > 0}) : Int do sum_pos(via_local(true, k)) end
+  fn scalar_tail(o : Option({Int | _ > 0})) : Int do
+    fn pick(p : Option({Int | _ > 0})) : {Int | _ > 0} do Option.unwrap_or(p, 1) end
+    need_pos(pick(o))
+  end
+end

@@ -1,0 +1,23 @@
+-- Relational element refinements, one namespace (2026-10-18, design
+-- specs/2026-10-18-element-flow-followups-design.md phase 0): an element
+-- slot naming a parameter (`List({Int | _ < n})`) is read at the CALL's
+-- actuals, never in the caller's namespace.  Every demand below is PROVED,
+-- so `cap verified` accepts the module.  `need_lt(ys, 200)` and
+-- `need_lt(ys, k)` were false VIOLATIONS before (the callee's `n` was read
+-- as a free name); the named binder `x` must not capture the actual `x`.
+-- Reject twins: t326 (z1), t327 (z2), t328 (z3), t329 (z4), t330 (z5).
+mod RelElemNamespace do
+  cap verified
+  fn need_lt(xs : List({Int | _ < n}), n : Int) : Int do 0 end
+  fn need_lt2(xs : List({x : Int | x < n}), n : Int) : Int do 0 end
+  fn need_neg(k : {Int | _ < 0}) : Int do k end
+  fn wide(ys : List({Int | _ < 5})) : Int do need_lt(ys, 200) end
+  fn lit() : Int do need_lt([5], 10) end
+  fn same(n : Int, ys : List({Int | _ < n})) : Int do need_lt(ys, n + 1) end
+  fn refined(k : {Int | _ >= 60}, ys : List({Int | _ < 60})) : Int do need_lt(ys, k) end
+  fn binder(x : Int, ys : List({Int | _ < x})) : Int do need_lt2(ys, x) end
+  fn below(n : Int) : List({Int | _ < n}) do [n - 1, n - 2] end
+  fn negs(n : Int, xs : List({Int | _ < n})) : List(Int) do
+    if n <= 0 do List.map(xs, fn y -> need_neg(y)) else [] end
+  end
+end

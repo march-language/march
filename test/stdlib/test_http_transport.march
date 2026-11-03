@@ -6,8 +6,11 @@
 
 mod TestHttpTransport do
 
--- Local mirror of HttpTransport.TransportError (private in HttpTransport).
--- Constructors are structurally matched at runtime by name.
+  needs IO.NetConnect
+  needs IO.NetConnect.TLS
+
+-- Local error values exercise the constructor shape independently of the
+-- transport. Tests of HttpTransport itself use its qualified constructors.
 ptype TransportError =
   ConnectionRefused(String)
   | ConnTimeout(String)
@@ -25,6 +28,7 @@ pfn show_error(e) do
   RecvError(s)         -> "recv:" ++ s
   ConnParseError(s)    -> "parse:" ++ s
   Closed               -> "closed"
+  SchemeNotSupported(s) -> "scheme:" ++ s
   end
 end
 
@@ -104,21 +108,21 @@ describe "TransportError pattern matching" do
   end
 end
 
-describe "https scheme guard" do
-  test "request rejects https request with SchemeNotSupported" do
-    let req = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
+describe "https transport dispatch" do
+  test "request sends https through TLS instead of rejecting its scheme" do
+    let req = Request(Get, SchemeHttps, "127.0.0.1", Some(1), "/", None, Nil, "")
     match HttpTransport.request(req) do
-    Err(SchemeNotSupported(_)) -> ()
-    Err(_) -> assert false
-    Ok(_)  -> assert false
+    Err(HttpTransport.SchemeNotSupported(_)) -> assert false
+    Err(_) -> assert true
+    Ok(_) -> assert true
     end
   end
 
-  test "simple_get rejects https URL with SchemeNotSupported" do
-    match HttpTransport.simple_get("https://example.com/") do
-    Err(SchemeNotSupported(_)) -> ()
-    Err(_) -> assert false
-    Ok(_)  -> assert false
+  test "simple_get sends https through TLS instead of rejecting its scheme" do
+    match HttpTransport.simple_get("https://127.0.0.1:1/") do
+    Err(HttpTransport.SchemeNotSupported(_)) -> assert false
+    Err(_) -> assert true
+    Ok(_) -> assert true
     end
   end
 
@@ -126,7 +130,7 @@ describe "https scheme guard" do
     -- fd=-1 is invalid but we never reach tcp_send because of the early check.
     let req = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
     match HttpTransport.request_on(-1, req) do
-    Err(SchemeNotSupported(_)) -> ()
+    Err(HttpTransport.SchemeNotSupported(_)) -> ()
     Err(_) -> assert false
     Ok(_)  -> assert false
     end
@@ -135,7 +139,7 @@ describe "https scheme guard" do
   test "stream_request_on rejects https request with SchemeNotSupported" do
     let req = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
     match HttpTransport.stream_request_on(-1, req, fn _ -> ()) do
-    Err(SchemeNotSupported(_)) -> ()
+    Err(HttpTransport.SchemeNotSupported(_)) -> ()
     Err(_) -> assert false
     Ok(_)  -> assert false
     end
@@ -144,7 +148,7 @@ describe "https scheme guard" do
   test "connect rejects https request with SchemeNotSupported" do
     let req = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
     match HttpTransport.connect(req) do
-    Err(SchemeNotSupported(_)) -> ()
+    Err(HttpTransport.SchemeNotSupported(_)) -> ()
     Err(_) -> assert false
     Ok(_)  -> assert false
     end

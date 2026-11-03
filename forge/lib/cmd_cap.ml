@@ -594,6 +594,9 @@ let cap_run ~bin ~args ~allow_only () =
   match Cap_binary.read bin with
   | Error e -> Error e
   | Ok t ->
+  match Cap_binary.scope_decls t with
+  | Error e -> Error (Printf.sprintf "%s: %s" bin e)
+  | Ok scopes ->
     let caps = match allow_only with Some l -> l | None -> t.Cap_binary.caps in
     let advisory =
       List.filter
@@ -641,7 +644,15 @@ let cap_run ~bin ~args ~allow_only () =
            Printf.eprintf "forge cap run: %s is ADVISORY — %s\n%!" c why
          | Cap_sandbox.Enforced -> ())
       advisory;
-    (match Cap_sandbox.run ~caps ~binary:bin ~args with
+    (* Declared path scopes from the binary's manifest.  Applied even under
+       --allow-only: a scope only NARROWS a granted class, so a binary's own
+       claim can make its sandbox tighter, never looser.  A declared scope is
+       enough for enforcement — the sandbox blocks everything outside it, so
+       it needs no proof from emitted code. *)
+    List.iter
+      (fun n -> Printf.eprintf "forge cap run: %s\n%!" n)
+      (Cap_sandbox.scope_notes ~caps ~scopes);
+    (match Cap_sandbox.run ~scopes ~caps ~binary:bin ~args () with
      | Error e -> Error e
      | Ok 0 -> Ok ()
      | Ok rc -> Error (Printf.sprintf "process exited %d" rc))

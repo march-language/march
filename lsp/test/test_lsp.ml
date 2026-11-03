@@ -30,6 +30,7 @@ open Test_lsp_depot
 
 let () =
   Alcotest.run "march-lsp" [
+    "refine-diagnostics", Test_lsp_refine.tests;
     "cross-file", [
       "interface resolves across files", `Quick, test_cross_file_interface_resolves;
       "unknown interface still errors",  `Quick, test_unknown_interface_still_errors;
@@ -327,6 +328,7 @@ let () =
       "then -> do",                    `Quick, test_fix_adapter_then_to_do;
       "not offered off the range",     `Quick, test_fix_adapter_not_offered_off_range;
       "`;` -> line break",             `Quick, test_fix_adapter_semicolon;
+      "echoed diagnostic not doubled", `Quick, test_fix_adapter_echoed_diag_not_doubled;
       "fn _ arity fix edits the lambda", `Quick, test_fix_adapter_lambda_arity_edits_the_lambda;
     ];
     "code actions: make-linear", [
@@ -354,6 +356,14 @@ let () =
       "used private fn: no warning",              `Quick, test_used_private_fn_no_warning;
       "unreachable after panic: warning emitted", `Quick, test_unreachable_code_after_panic_warning;
       "unused_fns field populated correctly",     `Quick, test_unused_fns_field_populated;
+    ];
+    "termination code actions", [
+      "x == 0 -> x <= 0 round-trips",           `Quick, test_term_action_eq_zero;
+      "@[diverges] replaces @[decreases]",      `Quick, test_term_action_diverges_replaces_decreases;
+      "@[diverges] inserted under cap total",   `Quick, test_term_action_diverges_inserts;
+      "@[decreases(..)] read from the note",    `Quick, test_term_action_decreases_frame;
+      "@[decreases(..)] inferred (cap total)",  `Quick, test_term_action_decreases_inferred;
+      "@[decreases(..)] replaces a failing one", `Quick, test_term_action_decreases_replaces;
     ];
     "P1.8: assign to _", [
       "action offered for unused binding",      `Quick, test_assign_to_underscore_offered;
@@ -451,6 +461,13 @@ let () =
     "suggest-refinement code action", [
       "offered on a function with an annotated param", `Quick, test_refine_action_offered_on_annotated_param;
       "absent when every param is already refined",    `Quick, test_refine_action_absent_when_all_params_refined;
+    ];
+    "infer-refinements code action", [
+      "offered on a function",                         `Quick, test_infer_action_offered;
+      "editor edit bytes equal --refine-infer-apply",  `Quick, test_infer_action_bytes_equal_cli;
+      "caller-impacting precondition needs confirmation", `Quick, test_infer_needs_confirmation;
+      "per-function action matches the qualified name", `Quick, test_infer_per_fn_qualified;
+      "depends_on is followed, external callers withheld", `Quick, test_infer_depends_and_external;
     ];
     "perf insights phase 2: indirect calls + recursive alloc", [
       "calling a parameter is indirect",              `Quick, test_perf_indirect_call_on_param;

@@ -1,0 +1,25 @@
+-- NativeArray on the JS target: NativeI32Arr is an Int32Array, NativeU8Arr a
+-- Uint8Array, NativeIntArr a Float64Array. Values wrap exactly as the native
+-- runtime's (i32: mod 2^32 two's complement, sign-extended on read; u8: mod
+-- 2^8), and u8_arr_to_bytes gives the same Bytes. Expected output is the
+-- native target's.
+mod JsNativeArrays do
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let a = NativeArray.set_i32(NativeArray.set_i32(NativeArray.make_i32(4, 7), 0, 4294967295), 3, 2147483648)
+    println(int_to_string(NativeArray.length_i32(a)))
+    println(int_to_string(NativeArray.get_i32(a, 0)) ++ " " ++ int_to_string(NativeArray.get_i32(a, 1)) ++ " " ++ int_to_string(NativeArray.get_i32(a, 3)))
+    let u = NativeArray.set_u8(NativeArray.set_u8(NativeArray.make_u8(3, 255), 0, 256), 2, 65)
+    println(int_to_string(NativeArray.length_u8(u)))
+    println(int_to_string(NativeArray.get_u8(u, 0)) ++ " " ++ int_to_string(NativeArray.get_u8(u, 1)) ++ " " ++ int_to_string(NativeArray.get_u8(u, 2)))
+    let n = NativeArray.set_int(NativeArray.make_int(2, -3), 1, 9007199254740991)
+    println(int_to_string(NativeArray.length_int(n)) ++ " " ++ int_to_string(NativeArray.get_int(n, 0)) ++ " " ++ int_to_string(NativeArray.get_int(n, 1)))
+    -- ASCII bytes here; js_binary_string covers bytes >= 128.
+    let b = Bytes.from_u8_arr(NativeArray.set_u8(NativeArray.set_u8(NativeArray.make_u8(2, 0), 0, 72), 1, 105))
+    println(int_to_string(Bytes.length(b)))
+    println(String.join(List.map(Bytes.to_list(b), int_to_string), ","))
+    let e = NativeArray.make_i32(0, 1)
+    println(int_to_string(NativeArray.length_i32(e)))
+  end
+end

@@ -1,0 +1,26 @@
+-- Regression: the interpreter printed a record's fields in the order its
+-- literal wrote them, while compiled code prints them sorted by field name
+-- (records are laid out sorted).  So `{ z: 1, y: 2 }` printed differently
+-- in each backend, and two values of one declared type could print
+-- differently interpreted.  Both now print fields sorted by name.  The
+-- literals below are deliberately written UNSORTED.
+--
+-- Run interpreted AND compiled against the SAME .expected.
+mod Main do
+  needs IO.Console
+
+  type R = { b : Int, a : Int }
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let r : R = { b: 1, a: 2 }
+    println(to_string(r))
+    let r2 : R = { a: 3, b: 4 }
+    println(to_string(r2))
+    println(to_string({ z: 1, y: 2 }))
+    println(to_string([{ z: "s", m: true, a: 1.5 }]))
+    println(to_string(Some({ outer: { q: 1, p: 2 }, inner: [3] })))
+    let x = { c: 3, b: 2 }
+    println("x=${x}")
+    println(inspect({ y: "q", x: 0 }))
+  end
+end

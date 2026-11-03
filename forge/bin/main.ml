@@ -18,7 +18,7 @@ let known_builtin_names =
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "audit"; "ffi"; "fix"; "help";
-    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host"; "observe"; "diagnose"; "top"; "status" ]
+    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host"; "observe"; "diagnose"; "top"; "status"; "query" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
@@ -176,6 +176,14 @@ let build_cmd =
                  cross-compile a dynamic-glibc Linux binary via $(b,zig cc). \
                  Use $(b,js) to emit an ES module (.mjs) for browsers and Node.js.")
   in
+  (* D26: after a successful build of a topology app, warn about each pool
+     whose derived caps widen relative to a recorded deploy. *)
+  let report binary =
+    (match Project.load () with
+     | Ok proj -> List.iter prerr_endline (Pool_caps.build_warnings ~proj ())
+     | Error _ -> ());
+    Printf.printf "built: %s\n%!" binary
+  in
   let run r d f pkg tgt =
     let cwd = Sys.getcwd () in
     match Workspace.find_root cwd with
@@ -185,18 +193,18 @@ let build_cmd =
         (match Workspace.run_for_members ~root ~members ~package:pkg
                  (fun () ->
                     match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f ?target:tgt () with
-                    | Ok binary -> Printf.printf "built: %s\n%!" binary; Ok ()
+                    | Ok binary -> report binary; Ok ()
                     | Error m   -> Error m) with
          | Ok ()   -> ()
          | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1)
       else begin
         match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f ?target:tgt () with
-        | Ok binary -> Printf.printf "built: %s\n%!" binary
+        | Ok binary -> report binary
         | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
       end
     | _ ->
       match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f ?target:tgt () with
-      | Ok binary -> Printf.printf "built: %s\n%!" binary
+      | Ok binary -> report binary
       | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "build" ~doc:"Build the current project")
@@ -318,6 +326,12 @@ let test_cmd =
     Arg.(value & flag & info ["release"]
            ~doc:"Compile test binary with -O2 instead of the default -O0 (slower build, faster test runtime)")
   in
+  let reflection_parity =
+    Arg.(value & flag & info ["reflection-parity"]
+           ~doc:"After the tests pass, compare every reflected function's logic definition with the \
+                 interpreter on generated inputs, boundary Ints included (refinement reflection's \
+                 parity net); fail on a mismatch or an interpreter failure")
+  in
   let files =
     Arg.(value & pos_all string [] &
          info [] ~docv:"FILE" ~doc:"Test files to run (default: all test files under test/)")
@@ -332,7 +346,7 @@ let test_cmd =
                  test's own checks fail or the reload servers report dropped messages, \
                  hard-deadline kills or lost markers. Runs instead of the unit tests.")
   in
-  let run v c f s sp r fs pkg up =
+  let run v c f s sp r rp fs pkg up =
     match up with
     | Some ref_ ->
       (match Upgrade_test.run ~ref_ () with
@@ -345,14 +359,14 @@ let test_cmd =
       let members = Workspace.members_from_root root in
       if members <> [] then
         handle (Workspace.run_for_members ~root ~members ~package:pkg
-                  (fun () -> Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ()))
+                  (fun () -> Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~reflection_parity:rp ~files:fs ()))
       else
-        handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ())
+        handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~reflection_parity:rp ~files:fs ())
     | _ ->
-      handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ())
+      handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~reflection_parity:rp ~files:fs ())
   in
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
-    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ release $ files $ workspace_package_flag $ upgrade_from)
+    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ release $ reflection_parity $ files $ workspace_package_flag $ upgrade_from)
 
 (* ------------------------------------------------------------------ forge lint *)
 
@@ -407,12 +421,33 @@ let refine_cmd =
            ~doc:"Propose RETURN refinements instead: the contract that lets a \
                  function's CALLERS discharge their obligations. Preconditions \
                  propagate up the call graph; postconditions propagate down.") in
-  let run t a ap fx po b =
-    if t = "" && not a then begin
-      Printf.eprintf "error: forge refine needs a function name, or --all\n%!";
-      exit 1
-    end;
-    handle_msg (Cmd_refine.run ~all:a ~apply:ap ~fixpoint:fx ~postconditions:po ~budget:b ~target:t ())
+  let infer =
+    Arg.(value & flag & info ["infer"]
+           ~doc:"Propose every refinement the checker can verify, module-wide (march --refine-infer), \
+                 and an @[decreases(...)] metric for recursion it cannot show to terminate; \
+                 with --apply, write them and re-check") in
+  let diff =
+    Arg.(value & flag & info ["diff"] ~doc:"With --infer: print the edits as a diff without writing") in
+  let apply_public =
+    Arg.(value & flag & info ["apply-public"]
+           ~doc:"With --infer --apply: also write preconditions on public functions with no \
+                 caller in the project (a library's API; its callers are elsewhere)") in
+  let allow_caller_violations =
+    Arg.(value & flag & info ["allow-caller-violations"]
+           ~doc:"With --infer: accept a precondition that turns an existing caller into a \
+                 violation (the caller is then yours to fix)") in
+  let run t a ap fx po b inf df apub acv =
+    if inf || fx then
+      handle_msg
+        (Cmd_refine.run ~infer:inf ~diff:df ~apply:ap ~fixpoint:fx ~apply_public:apub
+           ~allow_caller_violations:acv ~target:t ())
+    else begin
+      if t = "" && not a then begin
+        Printf.eprintf "error: forge refine needs a function name, or --all\n%!";
+        exit 1
+      end;
+      handle_msg (Cmd_refine.run ~all:a ~apply:ap ~fixpoint:fx ~postconditions:po ~budget:b ~target:t ())
+    end
   in
   Cmd.v
     (Cmd.info "refine"
@@ -423,7 +458,7 @@ let refine_cmd =
                   A suggestion is only made when the checker itself proves the \
                   obligations under it, so `march check` after --apply agrees \
                   with what was printed." ])
-    Term.(const run $ target $ all $ apply $ fixpoint $ postconditions $ budget)
+    Term.(const run $ target $ all $ apply $ fixpoint $ postconditions $ budget $ infer $ diff $ apply_public $ allow_caller_violations)
 
 (* -------------------------------------------------------------- forge refactor *)
 
@@ -527,8 +562,18 @@ let deps_update_cmd =
     Term.(const run $ name)
 
 let deps_cmd =
+  let accept_caps =
+    Arg.(value & flag & info ["accept-caps"]
+           ~doc:"Keep a dependency change that asks for capabilities \
+                 forge.caps.lock does not grant, and record the new set. \
+                 Without it, such a change (a version edited in forge.toml, \
+                 say) is refused and forge.lock is left as it was. Installing \
+                 what forge.lock already says is never gated.")
+  in
   let install_term =
-    Term.(const (fun () -> handle (Cmd_deps.run ())) $ const ())
+    Term.(const (fun ac ->
+        handle (Cmd_audit.deps_with_gate ~accept:ac ~resolve:Cmd_deps.run))
+          $ accept_caps)
   in
   Cmd.group ~default:install_term
     (Cmd.info "deps" ~doc:"Install and manage project dependencies")
@@ -886,9 +931,41 @@ let release_cmd =
     Arg.(value & opt string "patch" &
          info ["bump"] ~docv:"KIND" ~doc:"Version bump for the release: patch|minor|major.")
   in
-  let run b = handle (Cmd_release.run ~bump:b ()) in
-  Cmd.v (Cmd.info "release" ~doc:"Guarded release: clean tree -> build -> test -> bump + tag")
-    Term.(const run $ bump)
+  let tag_run b = handle (Cmd_release.run ~bump:b ()) in
+  let tag_doc = "Guarded release: clean tree -> build -> test -> bump + tag" in
+  let tag_term = Term.(const tag_run $ bump) in
+  let tag_cmd = Cmd.v (Cmd.info "tag" ~doc:tag_doc) tag_term in
+  let build_cmd =
+    let target =
+      Arg.(value & opt (some string) None &
+           info ["target"] ~docv:"T"
+             ~doc:"Cross target (linux/amd64, linux/arm64; needs zig), as $(b,forge build --target). \
+                   Default: this machine.")
+    in
+    let profile =
+      Arg.(value & opt string "release" &
+           info ["profile"] ~docv:"P"
+             ~doc:"$(b,release) (default, $(b,--opt 2)) or $(b,debug).")
+    in
+    let tar = Arg.(value & flag & info ["tar"] ~doc:"Also write the tarball next to the directory.") in
+    let run target profile tar =
+      match Cmd_release_build.build ?target ~profile ~tar () with
+      | Ok (dir, tarball) ->
+        Printf.printf "release: %s\n%!" dir;
+        Option.iter (Printf.printf "release: %s\n%!") tarball
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    in
+    Cmd.v (Cmd.info "build"
+             ~doc:"Build the app and lay out a self-contained release directory \
+                   .march/release/APP-VERSION-TARGET/ with a bin/APP launcher (start, daemon, \
+                   stop, restart, pid, version, ping, status, rpc, shell, observe, diagnose)")
+      Term.(const run $ target $ profile $ tar)
+  in
+  Cmd.group ~default:tag_term
+    (Cmd.info "release"
+       ~doc:"Release: $(b,forge release build) lays out a deployable bundle; \
+             $(b,forge release) [--bump] (or $(b,tag)) is the guarded clean-tree -> build -> test -> bump + tag")
+    [build_cmd; tag_cmd]
 
 (* ------------------------------------------------------------- forge bench *)
 
@@ -954,9 +1031,21 @@ let doc_cmd =
   let stdlib_only =
     Arg.(value & flag & info ["stdlib"] ~doc:"Document stdlib only (skip project sources)")
   in
-  let run o p s = handle (Cmd_doc.run ~output_dir:o ~include_private:p ~stdlib_only:s ()) in
+  let try_it =
+    Arg.(value & flag & info ["try-it"]
+           ~doc:"Add \"Try it\" buttons that run opted-in examples in an in-browser REPL \
+                 (modules marked $(b,doc: try), fences tagged $(b,march try)); \
+                 the REPL is loaded from $(b,--site-base)/assets/march-repl.js")
+  in
+  let site_base =
+    Arg.(value & opt string "" & info ["site-base"] ~docv:"PATH"
+           ~doc:"Site root the in-browser REPL assets are served under, for $(b,--try-it) \
+                 (default: the site root)")
+  in
+  let run o p s t b =
+    handle (Cmd_doc.run ~output_dir:o ~include_private:p ~stdlib_only:s ~try_it:t ~site_base:b ()) in
   Cmd.v (Cmd.info "doc" ~doc:"Generate HTML documentation from March source files")
-    Term.(const run $ output $ private_ $ stdlib_only)
+    Term.(const run $ output $ private_ $ stdlib_only $ try_it $ site_base)
 
 (* --------------------------------------------------------------- forge notebook *)
 
@@ -1030,6 +1119,55 @@ let phases_cmd =
   Cmd.v (Cmd.info "phases"
            ~doc:"Serve the phase viewer for --dump-phases output at http://localhost:PORT")
     Term.(const run $ port)
+
+(* ------------------------------------------------------------------ forge query *)
+
+let query_cmd =
+  let args =
+    Arg.(value & pos_all string [] &
+         info [] ~docv:"QUERY"
+           ~doc:"The query and its arguments, then an optional $(b,.march) file \
+                 (default: the project's entry file): $(b,fn NAME), $(b,origin NAME), \
+                 $(b,callers NAME), $(b,callees NAME), $(b,repr TYPE), $(b,verify), \
+                 $(b,key), $(b,why-miss). Compiler flags go after $(b,--).")
+  in
+  let release =
+    Arg.(value & flag & info ["release"]
+           ~doc:"Ask about the release build ($(b,--opt 2)), as $(b,forge build --release)")
+  in
+  let target =
+    Arg.(value & opt (some string) None &
+         info ["target"] ~docv:"TARGET"
+           ~doc:"Ask about the build for this target, as $(b,forge build --target)")
+  in
+  let at =
+    Arg.(value & opt (some string) None &
+         info ["at"] ~docv:"PASS"
+           ~doc:"With $(b,fn): show the function as it was after this pass")
+  in
+  let json =
+    Arg.(value & flag & info ["json"] ~doc:"Print one JSON object instead of text")
+  in
+  let run args r tgt at j =
+    handle (Cmd_query.run ~release:r ?target:tgt ?at ~json:j args)
+  in
+  Cmd.v (Cmd.info "query"
+           ~doc:"Ask the compiler one question about the project's build (march query)"
+           ~man:[
+             `S Manpage.s_description;
+             `P "Runs $(b,march query) with the project's entry file, library path and \
+                 build flags, so the answer describes the build $(b,forge build) would run. \
+                 Nothing is built, written or downloaded.";
+             `S Manpage.s_examples;
+             `Pre "  forge query fn Server.handle               # a function, at the last pass that changed it\n\
+                  \  forge query fn Server.handle --at tir-perceus\n\
+                  \  forge query origin Server.handle\\$apply\\$3   # where a lambda's apply fn came from\n\
+                  \  forge query callers Server.handle\n\
+                  \  forge query verify --json                  # the TIR verifier over every stage\n\
+                  \  forge query why-miss --release             # why the release build is not cached\n\
+                  \  forge query fn main src/app.march -- --no-opt";
+           ])
+    Term.(const run $ args $ release $ target $ at $ json)
 
 (* --------------------------------------------------------------- forge cap *)
 
@@ -1298,7 +1436,9 @@ let deploy_hot_cmd =
          info ["grant-cap"] ~docv:"CAP"
            ~doc:"Authorize a specific capability widening (repeatable). Each occurrence \
                  permits one capability (or anything it subsumes) that the running \
-                 version did not previously hold.")
+                 version did not previously hold: a changed function's caps, a role's \
+                 closure, or a topology pool's derived caps (for every pool that widens \
+                 to it).")
   in
   let no_cap_gate =
     Arg.(value & flag &
@@ -1308,15 +1448,21 @@ let deploy_hot_cmd =
                  against a server that predates capability admission, or to \
                  deliberately bypass the gate.")
   in
-  let run o s target prefix e c t grant_caps no_cap_gate =
+  let old_schemas =
+    Arg.(value & opt string "" & info ["old-schemas"] ~docv:"PATH"
+      ~doc:"Explicit running schema baseline for servers without SCHEMAS reporting.")
+  in
+  let run o s target prefix e c t grant_caps no_cap_gate old_schemas =
     ignore target; ignore prefix;
+    (* D26: a topology app's derived pool caps go through the same gate. *)
+    let pool_gate proj ~env = Pool_caps.deploy_gate ~proj ~env ~grant_caps () in
     let result =
       if e = "" && c = 0 then
         (* Single-server fast path (backward compat) *)
-        Cmd_deploy_hot.deploy ~output:o ~so:s ~grant_caps ~no_cap_gate ()
+        Cmd_deploy_hot.deploy ~output:o ~so:s ~old_schemas ~grant_caps ~no_cap_gate ~pool_gate ()
       else
-        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~env:e ~canary:c ~timeout_ms:t
-          ~grant_caps ~no_cap_gate ()
+        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~old_schemas ~env:e ~canary:c ~timeout_ms:t
+          ~grant_caps ~no_cap_gate ~pool_gate ()
     in
     match result with
     | Ok () -> ()
@@ -1324,7 +1470,7 @@ let deploy_hot_cmd =
   in
   Cmd.v (Cmd.info "hot"
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
-  Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate)
+  Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate $ old_schemas)
 
 let deploy_term =
   let env_arg =
@@ -1428,27 +1574,36 @@ let shell_target_args =
     Arg.(value & opt int 10_000 & info ["timeout-ms"] ~docv:"MS"
            ~doc:"How long each input may run on the node (default 10000, max 30000).")
   in
-  (socket, env_name, timeout_ms)
+  let force =
+    Arg.(value & flag & info ["force"]
+           ~doc:"Run an input that reaches declarations differing from the node's build, \
+                 when it is read-only (no capability beyond IO.Console, IO.Clock, IO.Random \
+                 and IO.FileRead; no send, spawn, kill, call or register; no Actor.Debug). \
+                 Never when a type it reaches differs. The input runs this checkout's \
+                 code, prints a warning naming the differences, marks the session [skew], \
+                 and is audited on the node with skew:1.")
+  in
+  (socket, env_name, timeout_ms, force)
 
 let shell_cmd =
-  let socket, env_name, timeout_ms = shell_target_args in
-  let run socket env timeout_ms = exit (Cmd_shell.shell ~socket ~env ~timeout_ms ()) in
+  let socket, env_name, timeout_ms, force = shell_target_args in
+  let run socket env timeout_ms force = exit (Cmd_shell.shell ~socket ~env ~timeout_ms ~force ()) in
   Cmd.v (Cmd.info "shell"
            ~doc:"A remote shell on a running node: each input is compiled against this project, \
                  signed with the deploy key, and run on the node (a --hot-reload --signing-pubkey \
                  build whose MARCH_SHELL_POLICY lists the capabilities inputs may use). A deploy \
                  ends the session.")
-    Term.(const run $ socket $ env_name $ timeout_ms)
+    Term.(const run $ socket $ env_name $ timeout_ms $ force)
 
 let rpc_cmd =
-  let socket, env_name, timeout_ms = shell_target_args in
+  let socket, env_name, timeout_ms, force = shell_target_args in
   let expr = Arg.(required & pos 0 (some string) None & info [] ~docv:"EXPR"
                     ~doc:"One input, as typed at $(b,forge shell).") in
-  let run socket env timeout_ms expr = exit (Cmd_shell.rpc ~socket ~env ~timeout_ms expr) in
+  let run socket env timeout_ms force expr = exit (Cmd_shell.rpc ~socket ~env ~timeout_ms ~force expr) in
   Cmd.v (Cmd.info "rpc"
            ~doc:"Run one input on a running node and print its result (see $(b,forge shell)); \
                  exit 1 if it did not run.")
-    Term.(const run $ socket $ env_name $ timeout_ms $ expr)
+    Term.(const run $ socket $ env_name $ timeout_ms $ force $ expr)
 
 let observe_cmd =
   let words =
@@ -1495,27 +1650,152 @@ let observe_cmd =
            ~doc:"With $(b,--state): how long the actor has to answer (default 1000, max 8000; \
                  forge waits at most 10 s for the reply).")
   in
-  let run words sections json socket env state crashes_full n timeout_ms =
-    let debug = match state, crashes_full with
-      | Some _, true -> None
-      | Some pid, false -> Some (Cmd_observe.State { pid; timeout_ms })
-      | None, true -> Some (Cmd_observe.Crashes_full n)
-      | None, false -> Some Cmd_observe.No_debug in
+  let trace_start =
+    Arg.(value & opt (some string) None & info ["trace-start"] ~docv:"FNS"
+           ~doc:"Start a bounded trace (R8): the comma-separated boundary \
+                 function names FNS of a $(b,--hot-reload) build ($(b,-) for none, with \
+                 $(b,--events)). A limit is required: \
+                 $(b,--max-events) N (stops itself after exactly N events) or $(b,--rate) \
+                 N/SECS. Events carry the caller's pid, the function, the code epoch and the \
+                 time, never arguments. The signed debug verb $(b,TRACE_START); the session \
+                 ends by itself after 10 minutes, or 1 minute without a drain.")
+  in
+  let max_events =
+    Arg.(value & opt (some int) None & info ["max-events"] ~docv:"N"
+           ~doc:"With $(b,--trace-start): stop after exactly N events (1..65536).")
+  in
+  let rate =
+    Arg.(value & opt (some string) None & info ["rate"] ~docv:"N/SECS"
+           ~doc:"With $(b,--trace-start): keep at most N events per SECS seconds and count the rest as dropped.")
+  in
+  let trace_events =
+    Arg.(value & opt (some string) None & info ["events"] ~docv:"KINDS"
+           ~doc:"With $(b,--trace-start): also record actor events of these kinds (comma-separated: \
+                 sent, received, spawned, exited, dropped) for the actors named by $(b,--pids), which \
+                 is required with it. Events carry pids, a message's constructor tag, a reason and \
+                 the time, never a message's contents. Boundary functions are then optional: give \
+                 $(b,-) as FNS for none.")
+  in
+  let trace_pids =
+    Arg.(value & opt (some string) None & info ["pids"] ~docv:"PIDS"
+           ~doc:"With $(b,--events): the one to eight live actors to watch, as comma-separated pid \
+                 numbers (what $(b,forge observe) panels and $(b,pid_to_int) show). An event is \
+                 kept when its pid or its peer is one of them. There is no all-actors form.")
+  in
+  let trace_drain =
+    Arg.(value & opt (some int) None & info ["trace-drain"] ~docv:"SESSION"
+           ~doc:"Take the events a trace session has recorded so far ($(b,TRACE_DRAIN)).")
+  in
+  let trace_stop =
+    Arg.(value & opt (some int) None & info ["trace-stop"] ~docv:"SESSION"
+           ~doc:"Stop and free a trace session ($(b,TRACE_STOP)).")
+  in
+  let dump =
+    Arg.(value & opt (some string) None & info ["dump"; "from-dump"] ~docv:"FILE"
+           ~doc:"Read a crash dump (written by a node started with MARCH_CRASH_DUMP=FILE when it \
+                 panicked) instead of asking a node: the same panels, with the live-only ones \
+                 greyed. On a terminal the interactive view; with $(b,--panel) one panel as \
+                 text, with $(b,--json) the dump's snapshot, otherwise every panel as text.")
+  in
+  let panel =
+    Arg.(value & opt (some string) None & info ["panel"] ~docv:"NAME"
+           ~doc:"Print one panel as text and exit (system, load, actors, actor, supervision, \
+                 names, epochs, cluster, crashes); for a live node and for $(b,--dump).")
+  in
+  let sort =
+    Arg.(value & opt string "mbox" & info ["sort"] ~docv:"ATTR"
+           ~doc:"With $(b,--panel actors): rank by mbox (default), stack, crashes, slices, \
+                 msgs_in or msgs_out.")
+  in
+  let pid =
+    Arg.(value & opt (some int) None & info ["pid"] ~docv:"PID"
+           ~doc:"With $(b,--panel actor): the actor to show.")
+  in
+  let tui =
+    Arg.(value & flag & info ["tui"]
+           ~doc:"Open the interactive view (the default when stdout is a terminal and no request \
+                 or $(b,--json) is given): panels for System, Load, Actors, Actor, Supervision, \
+                 Names, Epochs, Cluster and Crashes, fed by a $(b,WATCH) stream. Keys: q quit, \
+                 1-9 or Tab switch panel, arrows and PgUp/PgDn select, Enter open the actor, \
+                 s sort, n next node, r refresh.")
+  in
+  let interval =
+    Arg.(value & opt int 1000 & info ["interval"] ~docv:"MS"
+           ~doc:"The interactive view's refresh period (default 1000, at least 250).")
+  in
+  let run words sections json socket env state crashes_full n timeout_ms
+      trace_start max_events rate trace_events trace_pids trace_drain trace_stop
+      dump panel sort pid tui interval =
+    let limit = match max_events, rate with
+      | Some n, None -> Ok (Some (Cmd_observe.Max_events n))
+      | None, Some r ->
+        (match String.split_on_char '/' r with
+         | [ a; b ] ->
+           (match int_of_string_opt a, int_of_string_opt b with
+            | Some a, Some b -> Ok (Some (Cmd_observe.Rate (a, b)))
+            | _ -> Error "observe: --rate wants N/SECS, e.g. 100/1")
+         | _ -> Error "observe: --rate wants N/SECS, e.g. 100/1")
+      | None, None -> Ok None
+      | Some _, Some _ -> Error "observe: give --max-events or --rate, not both" in
+    let events = match trace_events with
+      | None -> [] | Some e -> List.filter (fun k -> k <> "") (String.split_on_char ',' e) in
+    let pids_parsed = match trace_pids with
+      | None -> Ok []
+      | Some p ->
+        let parts = List.filter (fun k -> k <> "") (String.split_on_char ',' p) in
+        let ns = List.filter_map int_of_string_opt parts in
+        if List.length ns <> List.length parts || parts = [] then
+          Error "observe: --pids wants comma-separated pid numbers, e.g. 12,40"
+        else Ok ns in
+    let pids = match pids_parsed with Ok ns -> ns | Error _ -> [] in
+    let limit = match limit, pids_parsed with
+      | Error m, _ | _, Error m -> Error m
+      | Ok _, Ok _ when trace_start = None && (trace_events <> None || trace_pids <> None) ->
+        Error "observe: --events and --pids go with --trace-start"
+      | l, Ok _ -> l in
+    let picked = List.filter_map Fun.id [
+        Option.map (fun pid -> Cmd_observe.State { pid; timeout_ms }) state;
+        (if crashes_full then Some (Cmd_observe.Crashes_full n) else None);
+        (match trace_start, limit with
+         | Some fns, Ok (Some limit) -> Some (Cmd_observe.Trace_start { fns; limit; ring = None; events; pids })
+         | _ -> None);
+        Option.map (fun session -> Cmd_observe.Trace_drain { session; max = n }) trace_drain;
+        Option.map (fun s -> Cmd_observe.Trace_stop s) trace_stop ] in
+    let debug = match picked, trace_start, limit with
+      | _, _, Error m -> Error m
+      | _, Some _, Ok None -> Error "observe: --trace-start needs a limit: --max-events N or --rate N/SECS"
+      | [], _, _ -> Ok Cmd_observe.No_debug
+      | [ d ], _, _ -> Ok d
+      | _ -> Error "observe: give one of --state, --crashes-full, --trace-start, --trace-drain, --trace-stop" in
+    let plain = words = [] && sections = [] && picked = [] && trace_start = None in
     match debug with
-    | None -> handle (Error "observe: give --state or --crashes-full, not both")
-    | Some debug -> handle (Cmd_observe.run ~debug ~socket ~env ~json ~words ~sections ())
+    | Error m -> handle (Error m)
+    | Ok debug ->
+      match dump, panel with
+      | Some file, _ when plain -> handle (Cmd_observe_view.run_dump ~file ~panel ~sort ~json)
+      | Some _, _ -> handle (Error "observe: --dump reads a file: give it alone, or with --panel/--json")
+      | None, Some name when plain && not json ->
+        handle (Cmd_observe_view.run_panel ~socket ~env ~panel:name ~sort ~pid)
+      | None, _ when plain && not json && (tui || Observe_tui_live.interactive ()) ->
+        handle (Cmd_observe_view.run_live ~socket ~env ~interval_ms:interval
+                  ~panel:(Option.value panel ~default:"system"))
+      | None, _ -> handle (Cmd_observe.run ~debug ~socket ~env ~json ~words ~sections ())
   in
   Cmd.v (Cmd.info "observe"
            ~doc:"Ask a running node what it is doing: its actors, supervision tree, names, \
-                 schedulers, memory and code epochs, from the node's read-only observe socket; \
-                 with $(b,--state) or $(b,--crashes-full), a signed debug request")
-    Term.(const run $ words $ sections $ json $ socket $ env_name $ state $ crashes_full $ n $ timeout_ms)
+                 schedulers, memory and code epochs, from the node's read-only observe socket \
+                 (an interactive view on a terminal, JSON otherwise); read a crash dump with \
+                 $(b,--dump); with $(b,--state), $(b,--crashes-full) or $(b,--trace-start), a \
+                 signed debug request")
+    Term.(const run $ words $ sections $ json $ socket $ env_name $ state $ crashes_full $ n $ timeout_ms
+          $ trace_start $ max_events $ rate $ trace_events $ trace_pids $ trace_drain $ trace_stop
+          $ dump $ panel $ sort $ pid $ tui $ interval)
 
 let top_cmd =
   let sort =
     Arg.(value & opt string "mbox" & info ["sort"] ~docv:"ATTR"
-           ~doc:"Rank by mbox (default), crashes, slices, msgs_in or msgs_out; the last three \
-                 rank the change over $(b,--window).")
+           ~doc:"Rank by mbox (default), stack (committed machine-stack bytes), crashes, slices, \
+                 msgs_in or msgs_out; the last three rank the change over $(b,--window).")
   in
   let n = Arg.(value & opt int 20 & info ["n"; "count"] ~docv:"N" ~doc:"Rows to show (default 20).") in
   let window =
@@ -1523,6 +1803,11 @@ let top_cmd =
            ~doc:"Window for the rate sorts, and their refresh (default 1000).")
   in
   let once = Arg.(value & flag & info ["once"] ~doc:"Print one frame and exit (for scripts).") in
+  let json =
+    Arg.(value & flag & info ["json"]
+           ~doc:"Print the node's TOP reply as one JSON line and exit (every row carries its \
+                 supervision: link, parent, parent_type, supervisor policy).")
+  in
   let socket =
     Arg.(value & opt (some string) None & info ["socket"] ~docv:"PATH"
            ~doc:"A local observe socket instead of the first forge.toml host.")
@@ -1531,13 +1816,14 @@ let top_cmd =
     Arg.(value & opt string "" & info ["env"] ~docv:"NAME"
            ~doc:"The [[hot-reload.env]] entry to watch (the first one named NAME).")
   in
-  let run sort n window once socket env_name =
-    handle (Cmd_observe.run_top ~socket ~env:env_name ~sort ~n ~window_ms:window ~once ())
+  let run sort n window once json socket env_name =
+    handle (Cmd_observe.run_top ~socket ~env:env_name ~sort ~n ~window_ms:window ~once ~json ())
   in
   Cmd.v (Cmd.info "top"
-           ~doc:"Watch a running node's busiest actors: mailbox depth, crashes, or message and \
-                 dispatch rates, refreshed in place")
-    Term.(const run $ sort $ n $ window $ once $ socket $ env_name)
+           ~doc:"Watch a running node's biggest or busiest actors with their supervision: mailbox \
+                 depth, stack, crashes, or message and dispatch rates, refreshed in place \
+                 ($(b,--once) for one table)")
+    Term.(const run $ sort $ n $ window $ once $ json $ socket $ env_name)
 
 let status_cmd =
   let json = Arg.(value & flag & info ["json"] ~doc:"One JSON document instead of text.") in
@@ -1576,15 +1862,24 @@ let diagnose_cmd =
     Arg.(value & opt string "" & info ["env"] ~docv:"NAME"
            ~doc:"Only the [[hot-reload.env]] entries named NAME.")
   in
-  let run window dump json socket env_name =
-    exit (Cmd_observe.run_diagnose ~socket ~env:env_name ~json ~window_ms:window ~dump ())
+  let from_dump =
+    Arg.(value & opt (some string) None & info ["from-dump"] ~docv:"FILE"
+           ~doc:"Check a crash dump (MARCH_CRASH_DUMP=FILE) instead of a live node: one snapshot, \
+                 so the checks that compare two (growth, climb) find nothing; crash loops, \
+                 over-limit mailboxes, saturated schedulers and stuck epochs are still found. \
+                 (A different thing from $(b,--dump), which writes snapshots out.)")
+  in
+  let run window dump json socket env_name from_dump =
+    match from_dump with
+    | Some file -> exit (Cmd_observe_view.run_diagnose_dump ~file ~json)
+    | None -> exit (Cmd_observe.run_diagnose ~socket ~env:env_name ~json ~window_ms:window ~dump ())
   in
   Cmd.v (Cmd.info "diagnose"
            ~doc:"Check a running node for known trouble (growing mailboxes, saturated schedulers, \
                  crash loops, heap climbing, stuck epochs) over a window; exit 0 nothing found, \
                  1 warnings, 2 critical, 3 unreachable"
            ~exits:Cmd.Exit.defaults)
-    Term.(const run $ window $ dump $ json $ socket $ env_name)
+    Term.(const run $ window $ dump $ json $ socket $ env_name $ from_dump)
 
 (* -------------------------------------------------------- forge hot-reload *)
 
@@ -1703,6 +1998,10 @@ let cluster_cert_cmd =
                      ~doc:"Comma-separated role permissions, each Proto.Role:offer or Proto.Role:initiate") in
   let flags = Arg.(value & opt string "" & info ["flags"] ~docv:"LIST"
                      ~doc:"Comma-separated flags (raw_send)") in
+  let agent = Arg.(value & flag & info ["control-agent"]
+                     ~doc:"Grant Ctl.Agent:initiate in addition to --roles") in
+  let candidate = Arg.(value & flag & info ["control-candidate"]
+                         ~doc:"Grant Ctl.Agent:initiate and Ctl.Control:offer in addition to --roles") in
   let days = Arg.(value & opt int 90 & info ["days"] ~docv:"N" ~doc:"Validity in days (default: 90)") in
   let seconds = Arg.(value & opt (some int) None & info ["seconds"] ~docv:"N"
                        ~doc:"Validity in seconds, overriding --days (short-lived certificates, tests)") in
@@ -1711,11 +2010,12 @@ let cluster_cert_cmd =
   let out = Arg.(value & opt string "." & info ["out"] ~docv:"DIR" ~doc:"Directory to write NODE.cert/NODE.key into") in
   Cmd.v (Cmd.info "cert" ~doc:"Issue a node certificate signed by the operator key (with --deliver, \
                                 also replace it live on the running node: --node-key is then required)")
-    Term.(const (fun n r f d s td p ok nk o dl ->
+    Term.(const (fun n r f a c d s td p ok nk o dl ->
+      let r = Cmd_cluster.control_roles ~roles:r ~agent:a ~candidate:c in
       let deliver = Option.map (fun d cert -> Cmd_cluster.deliver_items d { Control_release.certs = [ (n, cert) ]; revokes = [] }) dl in
       handle_msg (Cmd_cluster.run_cert ~name:n ~roles:r ~flags:f ~days:d ~seconds:s ~trust_domain:td
                     ~pool:p ~operator_key:ok ~node_key:nk ~out_dir:o ?deliver ()))
-          $ name $ roles $ flags $ days $ seconds $ cluster_trust_domain $ cluster_pool
+          $ name $ roles $ flags $ agent $ candidate $ days $ seconds $ cluster_trust_domain $ cluster_pool
           $ cluster_operator_key $ node_key $ out $ cluster_deliver)
 
 let cluster_revoke_cmd =
@@ -1823,7 +2123,14 @@ let topology_gen_cmd =
            ~doc:"Write the generated files under DIR instead of printing them \
                  (built-in generators only).")
   in
-  let run env target out =
+  let release_dir =
+    Arg.(value & opt (some string) None &
+         info ["release-dir"] ~docv:"DIR"
+           ~doc:"systemd only: the unit runs $(b,DIR/bin/APP start), the launcher of a \
+                 $(b,forge release build) bundle installed at DIR on the host, instead of \
+                 /opt/march/APP/APP.")
+  in
+  let run env target out release_dir =
     match topology_load_checked env with
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
     | Ok (proj, t, index, _) ->
@@ -1831,7 +2138,7 @@ let topology_gen_cmd =
       match Topology.export_of_json json with
       | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
       | Ok ex ->
-        match Topology.Gen.builtin ~project:proj.Project.name target ex with
+        match Topology.Gen.builtin ?release_dir ~project:proj.Project.name target ex with
         | Some files -> Topology.Gen.emit ?out files
         | None ->
           match Cli_ext.external_subcommand ~known:Topology.Gen.builtins
@@ -1847,7 +2154,7 @@ let topology_gen_cmd =
   Cmd.v (Cmd.info "gen"
            ~doc:"Generate deployment files from the topology: a built-in target or \
                  a forge-topology-<target> plugin")
-    Term.(const run $ topology_env $ target $ out)
+    Term.(const run $ topology_env $ target $ out $ release_dir)
 
 let topology_status_cmd =
   let run env =
@@ -2018,7 +2325,7 @@ let () =
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd; retire_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
-      licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
+      licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; query_cmd;
       cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; shell_cmd; rpc_cmd; observe_cmd; diagnose_cmd; top_cmd; status_cmd; topology_cmd; cluster_cmd; host_cmd; completions_cmd; help_cmd ]
   in
   let main =

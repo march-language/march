@@ -27,10 +27,21 @@ let target ~(socket : string option) ~(env : string) (proj : Project.project)
         Error (Printf.sprintf "shell: %d hosts match; pick one with --env (%s)"
                  (List.length hs) (String.concat ", " (List.map (fun h -> h.Hosts.name) hs)))
 
+(** The [march --shell] command line, after the MARCH_LIB_PATH prefix.
+    [force]: --shell-force (run a read-only input that reaches declarations
+    differing from the node's build). *)
+let march_args ~(sock : string) ~(timeout_ms : int) ~(force : bool)
+    ~(inputs : string option) ~(entry : string) : string =
+  Printf.sprintf "march --shell %s --shell-timeout-ms %d%s%s %s"
+    (Filename.quote sock) timeout_ms
+    (if force then " --shell-force" else "")
+    (match inputs with Some f -> " --shell-inputs " ^ Filename.quote f | None -> "")
+    (Filename.quote entry)
+
 (** Run [march --shell] on [h]'s shell socket.  [inputs]: a file of inputs
     (forge rpc), else the terminal. *)
 let run_on ~(proj : Project.project) ~(h : Hosts.host) ~(timeout_ms : int)
-    ~(inputs : string option) : int =
+    ?(force = false) ~(inputs : string option) () : int =
   match Project.entry proj with
   | Error m -> prerr_endline ("shell: " ^ m); 1
   | Ok entry ->
@@ -45,24 +56,21 @@ let run_on ~(proj : Project.project) ~(h : Hosts.host) ~(timeout_ms : int)
           (fun () -> f local)
       end in
     with_socket (fun sock ->
-        let cmd =
-          Printf.sprintf "%smarch --shell %s --shell-timeout-ms %d%s %s"
-            lib_env (Filename.quote sock) timeout_ms
-            (match inputs with Some f -> " --shell-inputs " ^ Filename.quote f | None -> "")
-            (Filename.quote entry) in
+        let cmd = lib_env ^ march_args ~sock ~timeout_ms ~force ~inputs ~entry in
         match Sys.command cmd with
         | n -> n)
 
-let shell ~(socket : string option) ~(env : string) ~(timeout_ms : int) () : int =
+let shell ~(socket : string option) ~(env : string) ~(timeout_ms : int) ?(force = false) () : int =
   match Project.load () with
   | Error m -> prerr_endline m; 1
   | Ok proj ->
     match target ~socket ~env proj with
     | Error m -> prerr_endline m; 1
-    | Ok h -> run_on ~proj ~h ~timeout_ms ~inputs:None
+    | Ok h -> run_on ~proj ~h ~timeout_ms ~force ~inputs:None ()
 
 (** One input, printed, exit 0 when it ran and 1 otherwise. *)
-let rpc ~(socket : string option) ~(env : string) ~(timeout_ms : int) (expr : string) : int =
+let rpc ~(socket : string option) ~(env : string) ~(timeout_ms : int) ?(force = false)
+    (expr : string) : int =
   if String.contains expr '\n' then (prerr_endline "rpc: one line of input"; 1)
   else
     match Project.load () with
@@ -74,4 +82,4 @@ let rpc ~(socket : string option) ~(env : string) ~(timeout_ms : int) (expr : st
         let f = Filename.temp_file "forge_rpc" ".txt" in
         Out_channel.with_open_bin f (fun oc -> output_string oc (expr ^ "\n"));
         Fun.protect ~finally:(fun () -> try Sys.remove f with _ -> ())
-          (fun () -> run_on ~proj ~h ~timeout_ms ~inputs:(Some f))
+          (fun () -> run_on ~proj ~h ~timeout_ms ~force ~inputs:(Some f) ())

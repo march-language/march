@@ -255,6 +255,7 @@
     .ck-repl-title {
       margin-left: 10px; font-family: 'JetBrains Mono', monospace;
       font-size: 11px; color: var(--text-faint); flex: 1; letter-spacing: 0.04em;
+      min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .ck-repl-close {
       background: none; border: 1px solid var(--border); color: var(--text-faint);
@@ -418,6 +419,8 @@
      data-base="{{ site.baseurl }}" data-ver="{{ site.time | date: '%s' }}">
   <div class="ck-repl-header">
     <span class="ck-repl-title">march — interactive</span>
+    <button class="ck-repl-close" id="ck-repl-clear" title="Clear the screen; definitions stay (Ctrl+L)">clear</button>
+    <button class="ck-repl-close" id="ck-repl-reset" title="Clear the screen and forget every definition">reset</button>
     <button class="ck-repl-close" id="ck-repl-close">close</button>
   </div>
   <div class="ck-repl-history" id="ck-repl-history">

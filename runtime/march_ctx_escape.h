@@ -42,11 +42,18 @@
 #define MARCH_ESC_CSS_DECL      7
 #define MARCH_ESC_CSS_URL       8
 #define MARCH_ESC_JS_EXPR       9
-#define MARCH_ESC__COUNT        10
+#define MARCH_ESC_URL_PATH      10
+#define MARCH_ESC__COUNT        11
 
 /* What a URL that failed the scheme allowlist is replaced with. Chosen to be
  * inert in every context: it navigates nowhere and executes nothing. */
 #define MARCH_URL_UNSAFE_REPLACEMENT "about:invalid#zSoyz"
+
+/* What a URL PATH hole whose value is nothing but dots is replaced with. Such
+ * a value is a dot segment (`/users/${id}/edit` with id = `..` resolves to
+ * `/edit`), and no percent-encoding prevents that -- the URL parser reads
+ * `%2e` as `.`. MARCH_ESC_URL_PATH only. */
+#define MARCH_URL_DOT_SEGMENT_REPLACEMENT "zSoyz"
 
 /* Escape [src, src+len) under [escaper_id], writing to [out].
  *

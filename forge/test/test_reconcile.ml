@@ -541,7 +541,7 @@ let test_ping_closed_peer () =
 
 let test_drift () =
   let fm name h = { Cmd_deploy_hot.fn_name = name; fn_impl_hash = h; fn_sig_hash = ""; fn_callers = [];
-                    fn_caps = []; fn_has_caps = true } in
+                    fn_caps = []; fn_has_caps = true; fn_type_sig = ""; fn_modes = ""; fn_logic = "" } in
   let desired = { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None; slots = None;
                   functions = [ fm "App.f" "abc123"; fm "App.g" "zzz"; fm "App.new" "n" ]; roles = [] } in
   let slot name h = { Cmd_deploy_hot.ds_id = 0; ds_name = name; ds_impl_hash = h; ds_activated_at = 0L;
@@ -632,8 +632,9 @@ let test_identity_checks () =
     | Error m -> Alcotest.(check bool) (what ^ ": " ^ m) true (contains m what)
     | Ok () -> Alcotest.failf "%s mismatch accepted" what in
   ok (Cmd_deploy_hot.check_identity ~manifest:(v2 ()) ~info);
-  (* what a real server answers: the triple quoted (march_reload.c) *)
-  ok (Cmd_deploy_hot.check_identity ~manifest:(v2 ())
+  (* Server ABI identifiers are canonical, so a quoted triple is a mismatch
+     rather than a spelling that deploy preflight normalizes away. *)
+  bad "HCR ABI" (Cmd_deploy_hot.check_identity ~manifest:(v2 ())
         ~info:{ info with abi = "march-hcr-v2;triple=\"aarch64-unknown-linux-gnu\";ptr=8" });
   bad "target" (Cmd_deploy_hot.check_identity ~manifest:(v2 ~target:"linux/amd64" ()) ~info);
   bad "HCR ABI" (Cmd_deploy_hot.check_identity ~manifest:(v2 ~abi:"march-hcr-v3;triple=x;ptr=8" ()) ~info);
@@ -678,6 +679,169 @@ let test_run_preflights_identity () =
    | Ok _ -> Alcotest.fail "a patch for another target was deployed");
   Alcotest.(check string) "only HCR_INFO reached the server" "HCR_INFO\n" (read_file log)
 
+(* ── toolchain upgrade across an HCR ABI bump (2026-10-13) ──────────────── *)
+
+(** A server built by an older toolchain (its HCR ABI id has a lower
+    version, same triple) refuses a newer patch at the preflight, before any
+    upload, and the message says to restart once.  This is what an operator
+    sees on the first hot deploy after upgrading to a toolchain whose slot
+    sig_hash folds in borrow modes (march-hcr-v4) against a v3 server. *)
+let test_upgrade_refused_with_restart_advice () =
+  let v3 = "march-hcr-v3;triple=aarch64-unknown-linux-gnu;ptr=8"
+  and v4 = "march-hcr-v4;triple=aarch64-unknown-linux-gnu;ptr=8" in
+  (match Cmd_deploy_hot.check_identity ~manifest:(v2 ~abi:v4 ()) ~info:{ info with abi = v3 } with
+   | Error m ->
+     List.iter (fun frag -> Alcotest.(check bool) (frag ^ " in: " ^ m) true (contains m frag))
+       [ "older March toolchain (HCR ABI " ^ v3 ^ ")"; "borrow modes"; "nothing was deployed";
+         "Restart the server once on a base build from this toolchain" ]
+   | Ok () -> Alcotest.fail "a v4 patch was accepted by a v3 server");
+  (match Cmd_deploy_hot.check_identity ~manifest:(v2 ~abi:v3 ()) ~info:{ info with abi = v4 } with
+   | Error m -> Alcotest.(check bool) m true (contains m "rebuild the patch with the toolchain that built the server")
+   | Ok () -> Alcotest.fail "a v3 patch was accepted by a v4 server");
+  let v5 = "march-hcr-v5;triple=aarch64-unknown-linux-gnu;ptr=8" in
+  (match Cmd_deploy_hot.check_identity ~manifest:(v2 ~abi:v5 ()) ~info:{ info with abi = v4 } with
+   | Error m ->
+     List.iter (fun frag -> Alcotest.(check bool) (frag ^ " in: " ^ m) true (contains m frag))
+       [ "per-frame routing"; "Restart the server once"; "nothing was deployed" ]
+   | Ok () -> Alcotest.fail "a v5 patch was accepted by a v4 server");
+  (* End to end against a server that answers an older ABI. *)
+  let dir = short_tmp () in
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let sock = Filename.concat dir "u.sock" and log = Filename.concat dir "u.log" in
+  let server = fake_hcr_server ~pk ~log sock in
+  reaping [ server ] @@ fun () ->
+  let r = Cmd_deploy_hot.run ~tunnel:false ~ssh_host:"n" ~remote_socket:sock ~signing_pubkey:"" ~sk
+      ~manifest:(v2 ~abi:"march-hcr-v3;triple=aarch64-unknown-linux-gnu;ptr=8" ())
+      ~so_path:"/nonexistent.so" () in
+  (try ignore (Unix.waitpid [] server) with Unix.Unix_error _ -> ());
+  (match r with
+   | Error m -> Alcotest.(check bool) m true (contains m "Restart the server once")
+   | Ok _ -> Alcotest.fail "a patch from a newer toolchain was deployed into an older server");
+  Alcotest.(check string) "only HCR_INFO reached the server" "HCR_INFO\n" (read_file log)
+
+(* ── parameter borrow modes in the slot sig_hash (2026-10-13) ─────────────── *)
+
+let abi_fn ~tsig ~modes =
+  { Cmd_deploy_hot.fn_name = "App.count"; fn_impl_hash = "i";
+    fn_sig_hash = March_cas.Hash.hcr_sig_hash ~sig_hash:tsig ~modes;
+    fn_callers = [ "App.serve" ]; fn_caps = []; fn_has_caps = true; fn_type_sig = tsig; fn_modes = modes; fn_logic = "" }
+
+let abi_slot sig_h =
+  { Cmd_deploy_hot.slot_id = 1; slot_name = "App.count"; slot_impl_hash = "old";
+    slot_sig_hash = sig_h; slot_callers = [] }
+
+let test_borrow_mode_changes () =
+  let tsig = String.make 64 'a' in
+  let h modes = March_cas.Hash.hcr_sig_hash ~sig_hash:tsig ~modes in
+  Alcotest.(check bool) "the modes are in the hash" true (h "bo" <> h "oo");
+  let changes ~running fm =
+    Cmd_deploy_hot.mode_changes ~slot_of:(fun _ -> Some (abi_slot running)) ~to_activate:[ fm ] in
+  (* borrowed -> owned: the use-after-free direction *)
+  Alcotest.(check (list (pair string (list string)))) "borrowed -> owned named"
+    [ ("App.count", [ "parameter 2 of App.count changed from borrowed to owned" ]) ]
+    (changes ~running:(h "ob") (abi_fn ~tsig ~modes:"oo"));
+  (* owned -> borrowed: the leak direction *)
+  Alcotest.(check (list (pair string (list string)))) "owned -> borrowed named"
+    [ ("App.count", [ "parameter 1 of App.count changed from owned to borrowed" ]) ]
+    (changes ~running:(h "oo") (abi_fn ~tsig ~modes:"bo"));
+  Alcotest.(check (list (pair string (list string)))) "same modes: no change" []
+    (changes ~running:(h "bo") (abi_fn ~tsig ~modes:"bo"));
+  (* A type change (another type hash) is not a mode change: the
+     coordinated-upgrade gate handles it as before. *)
+  Alcotest.(check (list (pair string (list string)))) "a type change is not a mode change" []
+    (changes ~running:(March_cas.Hash.hcr_sig_hash ~sig_hash:(String.make 64 'b') ~modes:"oo")
+       (abi_fn ~tsig ~modes:"bo"));
+  Alcotest.(check (list (pair string (list string)))) "a manifest without tsig=/modes=: unknown" []
+    (changes ~running:(h "oo") { (abi_fn ~tsig ~modes:"bo") with fn_type_sig = ""; fn_modes = ""; fn_logic = "" });
+  let msg = Cmd_deploy_hot.mode_change_refusal (changes ~running:(h "ob") (abi_fn ~tsig ~modes:"oo")) in
+  Alcotest.(check bool) msg true (contains msg "Deploy this build with a restart");
+  (* the manifest fields *)
+  let root = tmp_root () in
+  let path = Filename.concat root "m" in
+  write_file path (Printf.sprintf "# march-hcr-manifest v2\n# cas_hash cc\n\
+                                   App.count ii %s callers:App.serve tsig=%s modes=bo caps=\nApp.old ii ss caps=\n"
+                     (h "bo") tsig);
+  match Cmd_deploy_hot.parse_manifest path with
+  | Ok m ->
+    (match m.functions with
+     | [ f; g ] ->
+       Alcotest.(check string) "tsig=" tsig f.fn_type_sig;
+       Alcotest.(check string) "modes=" "bo" f.fn_modes;
+       Alcotest.(check (list string)) "callers still read" [ "App.serve" ] f.fn_callers;
+       Alcotest.(check string) "an older line has none" "" g.fn_modes
+     | _ -> Alcotest.fail "two functions expected")
+  | Error e -> Alcotest.fail e
+
+(* ── reflected bodies in the slot sig_hash (refinement reflection I9, 2026-10-31) ── *)
+
+let test_logic_changes () =
+  let tsig = String.make 64 'a' in
+  let slot ~logic = March_cas.Hash.hcr_slot_sig_hash ~sig_hash:tsig ~modes:"o" ~logic in
+  let fm ~logic =
+    { (abi_fn ~tsig ~modes:"o") with fn_sig_hash = slot ~logic; fn_logic = logic } in
+  let manifest fns =
+    { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None;
+      stdlib_hash = None; slots = None; functions = fns; roles = [] } in
+  let changes ?prior ~running f =
+    Cmd_deploy_hot.logic_changes ~prior ~slot_of:(fun _ -> Some (abi_slot running)) ~to_activate:[ f ] in
+  let l1 = String.make 64 '1' and l2 = String.make 64 '2' in
+  Alcotest.(check bool) "an unreflected slot hash is unchanged" true
+    (slot ~logic:"-" = March_cas.Hash.hcr_sig_hash ~sig_hash:tsig ~modes:"o");
+  Alcotest.(check bool) "the logic hash is in a reflected slot hash" true (slot ~logic:l1 <> slot ~logic:l2);
+  (* a body-only patch to a reflected function: refused, with or without
+     the running build's manifest *)
+  Alcotest.(check int) "reflected body edit (no prior)" 1 (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:l2)));
+  Alcotest.(check int) "reflected body edit (prior)" 1
+    (List.length (changes ~prior:(manifest [ fm ~logic:l1 ]) ~running:(slot ~logic:l1) (fm ~logic:l2)));
+  (* reflected -> @[opaque] is a logic change too (the old callers' proofs) *)
+  Alcotest.(check int) "reflected -> opaque (prior)" 1
+    (List.length (changes ~prior:(manifest [ fm ~logic:l1 ]) ~running:(slot ~logic:l1) (fm ~logic:"")));
+  (* reflected -> unreflected (@[opaque], an effect, a callee that stopped
+     being reflected) with NO running manifest: the running slot hash is not
+     the plain hash of the patch's type and modes, which a type change in a
+     coordinated upgrade also gives -- the two cannot be told apart.  Not
+     refused (the patch build re-checks every caller against the new code,
+     and refusing broke coordinated type changes); a warning names it. *)
+  let unknowns ~running f =
+    Cmd_deploy_hot.logic_unknowns ~prior:None ~slot_of:(fun _ -> Some (abi_slot running)) ~to_activate:[ f ] in
+  Alcotest.(check int) "reflected -> unreflected (no prior): not refused" 0
+    (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:"")));
+  Alcotest.(check int) "reflected -> unreflected, `-` (no prior): not refused" 0
+    (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:"-")));
+  Alcotest.(check int) "reflected -> unreflected (no prior): warned" 1
+    (List.length (unknowns ~running:(slot ~logic:l1) (fm ~logic:"-")));
+  Alcotest.(check int) "a type change (no prior): warned the same way" 1
+    (List.length
+       (unknowns ~running:(March_cas.Hash.hcr_sig_hash ~sig_hash:(String.make 64 'b') ~modes:"o") (fm ~logic:"-")));
+  Alcotest.(check int) "an unchanged slot: no warning" 0
+    (List.length (unknowns ~running:(slot ~logic:"-") (fm ~logic:"-")));
+  Alcotest.(check int) "with the running manifest: no warning" 0
+    (List.length
+       (Cmd_deploy_hot.logic_unknowns ~prior:(Some (manifest [ fm ~logic:l1 ]))
+          ~slot_of:(fun _ -> Some (abi_slot (slot ~logic:l1))) ~to_activate:[ fm ~logic:"-" ]));
+  (* an @[opaque] function's body edit: same slot hash, nothing to say *)
+  Alcotest.(check int) "opaque body edit" 0 (List.length (changes ~running:(slot ~logic:"-") (fm ~logic:"")));
+  Alcotest.(check int) "unchanged reflected body" 0 (List.length (changes ~running:(slot ~logic:l1) (fm ~logic:l1)));
+  (* a mode change stays the mode gate's business *)
+  Alcotest.(check int) "a mode change is not a logic change" 0
+    (List.length
+       (changes ~running:(March_cas.Hash.hcr_slot_sig_hash ~sig_hash:tsig ~modes:"b" ~logic:l1) (fm ~logic:l1)));
+  let msg = Cmd_deploy_hot.logic_change_refusal (changes ~running:(slot ~logic:l1) (fm ~logic:l2)) in
+  Alcotest.(check bool) msg true
+    (contains msg "the body of `App.count` is part of its callers' proofs; redeploy, or mark it `@[opaque]`");
+  (* the manifest field *)
+  let root = tmp_root () in
+  let path = Filename.concat root "m" in
+  write_file path (Printf.sprintf "# march-hcr-manifest v2\n# cas_hash cc\n\
+                                   App.count ii %s tsig=%s modes=o logic=%s caps=\nApp.old ii ss caps=\n"
+                     (slot ~logic:l1) tsig l1);
+  match Cmd_deploy_hot.parse_manifest path with
+  | Ok { functions = [ f; g ]; _ } ->
+    Alcotest.(check string) "logic=" l1 f.fn_logic;
+    Alcotest.(check string) "an older line has none" "" g.fn_logic
+  | Ok _ -> Alcotest.fail "two functions expected"
+  | Error e -> Alcotest.fail e
+
 let () =
   Alcotest.run "reconcile" [
     ("diff", [
@@ -709,5 +873,8 @@ let () =
         Alcotest.test_case "manifest vs HCR_INFO, host target vs manifest" `Quick test_identity_checks;
         Alcotest.test_case "# hcr_abi is parsed" `Quick test_manifest_reads_hcr_abi;
         Alcotest.test_case "deploy hot refuses another target before uploading" `Quick test_run_preflights_identity;
+        Alcotest.test_case "a newer toolchain's patch into an older server: refused, restart once" `Quick test_upgrade_refused_with_restart_advice;
+        Alcotest.test_case "a parameter borrow-mode change is recognised and named" `Quick test_borrow_mode_changes;
+        Alcotest.test_case "a reflected function's body change is refused (sound_hcr)" `Quick test_logic_changes;
       ]);
   ]

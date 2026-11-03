@@ -2,43 +2,118 @@
 --
 -- Wraps the built-in char_* primitives for idiomatic use.
 -- All predicates return Bool; conversions preserve the char type.
+--
+-- March has no separate Char type or 'c' literal: a "char" here is a
+-- one-byte String such as "a". Every function taking a char except
+-- `to_string` expects exactly one byte; the interpreter raises a runtime
+-- error for an empty or longer string, while compiled code inspects only
+-- the first byte.
+-- Classification is ASCII-only.
+--
+-- doc: try
 
 mod Char do
 
-  doc "Returns true if c is an ASCII letter (a-z or A-Z)."
+  doc """
+  Returns true if c is an ASCII letter (a-z or A-Z).
+
+  ## Examples
+
+      march> Char.is_alpha("q")
+      true
+      march> Char.is_alpha("1")
+      false
+  """
   fn is_alpha(c : String) : Bool do
     let n = char_to_int(c)
     (n >= 65 && n <= 90) || (n >= 97 && n <= 122)
   end
 
-  doc "Returns true if c is an ASCII digit (0-9)."
+  doc """
+  Returns true if c is an ASCII digit (0-9).
+
+  ## Examples
+
+      march> Char.is_digit("7")
+      true
+      march> Char.is_digit("x")
+      false
+  """
   fn is_digit(c : String) : Bool do
     char_is_digit(c)
   end
 
-  doc "Returns true if c is an ASCII letter or digit."
+  doc """
+  Returns true if c is an ASCII letter or digit. Underscore and other
+  punctuation are not alphanumeric.
+
+  ## Examples
+
+      march> Char.is_alphanumeric("Z")
+      true
+      march> Char.is_alphanumeric("_")
+      false
+  """
   fn is_alphanumeric(c : String) : Bool do
     char_is_alphanumeric(c)
   end
 
-  doc "Returns true if c is an ASCII uppercase letter (A-Z)."
+  doc """
+  Returns true if c is an ASCII uppercase letter (A-Z).
+
+  ## Examples
+
+      march> Char.is_upper("A")
+      true
+      march> Char.is_upper("a")
+      false
+  """
   fn is_upper(c : String) : Bool do
     let n = char_to_int(c)
     n >= 65 && n <= 90
   end
 
-  doc "Returns true if c is an ASCII lowercase letter (a-z)."
+  doc """
+  Returns true if c is an ASCII lowercase letter (a-z).
+
+  ## Examples
+
+      march> Char.is_lower("a")
+      true
+      march> Char.is_lower("1")
+      false
+  """
   fn is_lower(c : String) : Bool do
     let n = char_to_int(c)
     n >= 97 && n <= 122
   end
 
-  doc "Returns true if c is an ASCII whitespace character (space, tab, newline, etc.)."
+  doc """
+  Returns true if c is a space, tab, newline or carriage return. Other
+  control characters (form feed, vertical tab) are not whitespace here.
+
+  ## Examples
+
+      march> Char.is_whitespace("\t")
+      true
+      march> Char.is_whitespace("x")
+      false
+  """
   fn is_whitespace(c : String) : Bool do
     char_is_whitespace(c)
   end
 
-  doc "Converts c to uppercase. Non-alphabetic chars are returned unchanged."
+  doc """
+  Converts an ASCII lowercase letter to uppercase. Any other char is
+  returned unchanged.
+
+  ## Examples
+
+      march> Char.to_upper("q")
+      "Q"
+      march> Char.to_upper("3")
+      "3"
+  """
   fn to_upper(c : String) : String do
     let n = char_to_int(c)
     if n >= 97 && n <= 122 do char_from_int(n - 32)
@@ -46,7 +121,17 @@ mod Char do
     end
   end
 
-  doc "Converts c to lowercase. Non-alphabetic chars are returned unchanged."
+  doc """
+  Converts an ASCII uppercase letter to lowercase. Any other char is
+  returned unchanged.
+
+  ## Examples
+
+      march> Char.to_lower("Q")
+      "q"
+      march> Char.to_lower("!")
+      "!"
+  """
   fn to_lower(c : String) : String do
     let n = char_to_int(c)
     if n >= 65 && n <= 90 do char_from_int(n + 32)
@@ -54,27 +139,77 @@ mod Char do
     end
   end
 
-  doc "Returns the value (0-255) of the first byte of c. A byte, not a code point: for multi-byte UTF-8 text this is the leading byte only."
+  doc """
+  Returns the byte value (0-255) of the one-byte string c. A byte, not a
+  code point: use `String.to_codepoints` for Unicode text. On an empty or
+  multi-byte string the interpreter raises a runtime error, while compiled
+  code returns the leading byte (0 for "").
+
+  ## Examples
+
+      march> Char.to_int("A")
+      65
+      march> Char.to_int("0")
+      48
+  """
   fn to_int(c : String) : Int do
     char_to_int(c)
   end
 
-  doc "Returns the one-byte string for byte value n, taken modulo 256 (so 256 yields byte 0, and -1 yields byte 255). A byte, not a code point: build a multi-byte UTF-8 character one byte at a time."
+  doc """
+  Returns the one-byte string for byte value n, taken modulo 256 (so 256
+  yields byte 0, and -1 yields byte 255). A byte, not a code point: use
+  `String.from_codepoint` to build a Unicode character.
+
+  ## Examples
+
+      march> Char.from_int(97)
+      "a"
+      march> Char.from_int(353)
+      "a"
+  """
   fn from_int(n : Int) : String do
     char_from_int(n)
   end
 
-  doc "Returns a single-character string containing c."
+  doc """
+  Returns c as a String. Since a char already is a String this returns it
+  unchanged (any length; no check that c is a single character).
+
+  ## Examples
+
+      march> Char.to_string("x")
+      "x"
+  """
   fn to_string(c : String) : String do
     string_from_chars(Cons(c, Nil))
   end
 
-  doc "Returns true if c is ASCII (code point 0-127)."
+  doc """
+  Returns true if c is an ASCII byte (0-127).
+
+  ## Examples
+
+      march> Char.is_ascii("~")
+      true
+      march> Char.is_ascii(Char.from_int(200))
+      false
+  """
   fn is_ascii(c : String) : Bool do
     char_to_int(c) < 128
   end
 
-  doc "Returns true if c is a printable ASCII character (code point 32-126)."
+  doc """
+  Returns true if c is a printable ASCII character (byte 32-126, space
+  included). Control characters such as newline and tab are not printable.
+
+  ## Examples
+
+      march> Char.is_printable(" ")
+      true
+      march> Char.is_printable("\n")
+      false
+  """
   fn is_printable(c : String) : Bool do
     let n = char_to_int(c)
     n >= 32 && n <= 126
@@ -85,6 +220,13 @@ mod Char do
   or `None` if `c` is not an ASCII digit.  Prefer this safe variant
   when the input comes from user data (file, network, form) — it's
   the "lookup-miss → Option" arm of the stdlib error-signaling policy.
+
+  ## Examples
+
+      march> Char.digit_value_opt("7")
+      Some(7)
+      march> Char.digit_value_opt("x")
+      None
   """
   fn digit_value_opt(c : String) : Option(Int) do
     if char_is_digit(c) do
@@ -98,6 +240,11 @@ mod Char do
   Returns the numeric value of a digit character (0-9). Panics if not
   a digit — use `digit_value_opt` for the fallible variant when the
   input may not be a digit.
+
+  ## Examples
+
+      march> Char.digit_value("9")
+      9
   """
   fn digit_value(c : String) : Int do
     if char_is_digit(c) do
@@ -110,7 +257,16 @@ mod Char do
   doc """
   Returns the hex value of a hex digit (0-9, a-f, A-F) as `Some(n)`,
   or `None` if `c` is not a hex digit.  Safe variant for parsing
-  untrusted hex strings.
+  untrusted hex strings. Upper and lower case letters give the same value.
+
+  ## Examples
+
+      march> Char.hex_digit_value_opt("f")
+      Some(15)
+      march> Char.hex_digit_value_opt("A")
+      Some(10)
+      march> Char.hex_digit_value_opt("g")
+      None
   """
   fn hex_digit_value_opt(c : String) : Option(Int) do
     if char_is_digit(c) do
@@ -132,6 +288,13 @@ mod Char do
   Returns the hex value of a hex digit (0-9, a-f, A-F). Panics if not
   a hex digit — use `hex_digit_value_opt` when the input might not be
   hex.
+
+  ## Examples
+
+      march> Char.hex_digit_value("B")
+      11
+      march> Char.hex_digit_value("3")
+      3
   """
   fn hex_digit_value(c : String) : Int do
     match hex_digit_value_opt(c) do
@@ -140,7 +303,16 @@ mod Char do
     end
   end
 
-  doc "Returns true if c is a hex digit (0-9, a-f, A-F)."
+  doc """
+  Returns true if c is a hex digit (0-9, a-f, A-F).
+
+  ## Examples
+
+      march> Char.is_hex_digit("e")
+      true
+      march> Char.is_hex_digit("x")
+      false
+  """
   fn is_hex_digit(c : String) : Bool do
     char_is_digit(c) ||
     (char_to_int(c) >= 97 && char_to_int(c) <= 102) ||

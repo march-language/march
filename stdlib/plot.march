@@ -8,6 +8,8 @@
 --     |> Plot.add_series(Plot.line_series(xs, ys))
 --     |> Plot.set_title("My Chart")
 --     |> Plot.to_svg
+--
+-- doc: try
 
 mod Plot do
 
@@ -95,6 +97,19 @@ mod Plot do
 
   -- ---- Construction ----
 
+  doc """
+  An empty 640x480 plot: no title, no series, 60px margin, axes
+  auto-ranged from the data with 5 target ticks, legend and grid off.
+
+  ## Examples
+
+      march> let p = Plot.new()
+      march> p.width
+      640
+      march> let p = Plot.new()
+      march> List.length(p.series)
+      0
+  """
   fn new() : Plot do
     {
       title: None,
@@ -109,6 +124,15 @@ mod Plot do
     }
   end
 
+  doc """
+  Like `new()` but with the given width and height in pixels.
+
+  ## Examples
+
+      march> let big = Plot.new_sized(800, 600)
+      march> (big.width, big.height)
+      (800, 600)
+  """
   fn new_sized(w : Int, h : Int) : Plot do
     let p = new()
     { p with width: w, height: h }
@@ -116,6 +140,17 @@ mod Plot do
 
   -- ---- Series factories ----
 
+  doc """
+  A line series through the points `zip(xs, ys)`, drawn as one SVG
+  polyline in data order (points are not sorted by x). Unpaired trailing
+  values of the longer list are ignored. Its colour is assigned when it
+  is added to a plot.
+
+  ## Examples
+
+      march> (Plot.line_series([0.0, 1.0], [2.0, 3.0])).ys == [2.0, 3.0]
+      true
+  """
   fn line_series(xs : List(Float), ys : List(Float)) : Series do
     {
       kind: Line,
@@ -126,6 +161,15 @@ mod Plot do
     }
   end
 
+  doc """
+  A scatter series: one circle (radius 4px) per point of `zip(xs, ys)`.
+  Unpaired trailing values of the longer list are ignored.
+
+  ## Examples
+
+      march> (Plot.scatter_series([1.0], [5.0])).xs == [1.0]
+      true
+  """
   fn scatter_series(xs : List(Float), ys : List(Float)) : Series do
     {
       kind: Scatter,
@@ -136,6 +180,21 @@ mod Plot do
     }
   end
 
+  doc """
+  A bar series with one bar per value, placed at x = 0.0, 1.0, 2.0, ...
+  (one position per element of `labels`). Bars rise from y = 0 (negative
+  values hang below it). Note: only the number of `labels` is used; the
+  label strings themselves are not rendered on the axis.
+
+  ## Examples
+
+      march> let bars = Plot.bar_series(["a", "b", "c"], [3.0, 1.0, 2.0])
+      march> bars.xs == [0.0, 1.0, 2.0]
+      true
+      march> let bars = Plot.bar_series(["a", "b", "c"], [3.0, 1.0, 2.0])
+      march> bars.ys == [3.0, 1.0, 2.0]
+      true
+  """
   fn bar_series(labels : List(String), values : List(Float)) : Series do
     let n = List.length(labels)
     fn make_indices(i : Int, acc : List(Float)) : List(Float) do
@@ -151,6 +210,22 @@ mod Plot do
     }
   end
 
+  doc """
+  Bin `values` into `bins` equal-width bins spanning `[min, max]` and
+  return a bar series of the counts, at x = 0.0 .. bins - 1. The maximum
+  value falls into the last bin. When all values are equal every value
+  lands in bin 0. An empty `values` list (or `bins <= 0`) gives a series
+  with no bars. O(n log n + n * bins).
+
+  ## Examples
+
+      march> (Plot.histogram_series([1.0, 2.0, 2.5, 4.0], 3)).ys == [1.0, 2.0, 1.0]
+      true
+      march> (Plot.histogram_series([5.0, 5.0], 2)).ys == [2.0, 0.0]
+      true
+      march> (Plot.histogram_series([], 3)).ys
+      []
+  """
   fn histogram_series(values : List(Float), bins : Int) : Series do
     let sorted = Sort.timsort_by(values, fn a -> fn b -> a <= b)
     fn list_first(lst : List(Float)) : Option(Float) do
@@ -225,50 +300,151 @@ mod Plot do
     { s with style: default_style(idx) }
   end
 
+  doc """
+  Append series `s` to `p` (drawn after, i.e. on top of, earlier series).
+  The series is recoloured from the 10-colour palette by its position in
+  the plot, overriding its previous style.
+
+  ## Examples
+
+      march> let bars = Plot.bar_series(["a", "b", "c"], [3.0, 1.0, 2.0])
+      march> let two = Plot.new() |> Plot.add_series(Plot.line_series([0.0], [1.0])) |> Plot.add_series(bars)
+      march> List.map(two.series, fn s -> s.style.line_color.r)
+      [31, 255]
+  """
   fn add_series(p : Plot, s : Series) : Plot do
     let idx = series_count(p)
     let colored = color_series(s, idx)
     { p with series: List.append(p.series, Cons(colored, Nil)) }
   end
 
+  doc """
+  Like `add_series`, but also sets the series label shown by the legend
+  (see `with_legend`).
+
+  ## Examples
+
+      march> let bars = Plot.bar_series(["a", "b", "c"], [3.0, 1.0, 2.0])
+      march> let lp = Plot.new() |> Plot.add_labeled_series(bars, "sales")
+      march> List.map(lp.series, fn s -> s.label)
+      [Some("sales")]
+  """
   fn add_labeled_series(p : Plot, s : Series, lbl : String) : Plot do
     let idx = series_count(p)
     let colored = color_series({ s with label: Some(lbl) }, idx)
     { p with series: List.append(p.series, Cons(colored, Nil)) }
   end
 
+  doc """
+  Set the title drawn centred above the plot (escaped for SVG).
+
+  ## Examples
+
+      march> let p = Plot.new()
+      march> (Plot.set_title(p, "Revenue")).title
+      Some("Revenue")
+  """
   fn set_title(p : Plot, t : String) : Plot do
     { p with title: Some(t) }
   end
 
+  doc """
+  Set the x-axis label, drawn centred under the x-axis tick labels.
+
+  ## Examples
+
+      march> let p = Plot.new()
+      march> (Plot.set_xlabel(p, "time")).x_axis.label
+      Some("time")
+  """
   fn set_xlabel(p : Plot, l : String) : Plot do
     let ax = p.x_axis
     { p with x_axis: { ax with label: Some(l) } }
   end
 
+  doc """
+  Set the y-axis label, drawn rotated to the left of the y-axis.
+
+  ## Examples
+
+      march> let p = Plot.new()
+      march> (Plot.set_ylabel(p, "count")).y_axis.label
+      Some("count")
+  """
   fn set_ylabel(p : Plot, l : String) : Plot do
     let ay = p.y_axis
     { p with y_axis: { ay with label: Some(l) } }
   end
 
+  doc """
+  Fix the x-axis data range to `[lo, hi]` instead of auto-ranging. Auto
+  ranges take the data min/max and pad each side by 5% of the span (0.5
+  when the span is zero); a fixed range is used as given. Points outside
+  the range are not clipped.
+
+  ## Examples
+
+      march> let p = Plot.new()
+      march> ((Plot.set_x_range(p, 0.0, 10.0)).x_axis.data_max) == Some(10.0)
+      true
+  """
   fn set_x_range(p : Plot, lo : Float, hi : Float) : Plot do
     let ax = p.x_axis
     { p with x_axis: { ax with data_min: Some(lo), data_max: Some(hi) } }
   end
 
+  doc """
+  Fix the y-axis data range to `[lo, hi]` instead of auto-ranging (see
+  `set_x_range`).
+
+  ## Examples
+
+      march> let p = Plot.new()
+      march> ((Plot.set_y_range(p, 0.0, 1.0)).y_axis.data_min) == Some(0.0)
+      true
+  """
   fn set_y_range(p : Plot, lo : Float, hi : Float) : Plot do
     let ay = p.y_axis
     { p with y_axis: { ay with data_min: Some(lo), data_max: Some(hi) } }
   end
 
+  doc """
+  Set the SVG width and height in pixels.
+
+  ## Examples
+
+      march> let p = Plot.new()
+      march> let sized = Plot.set_size(p, 320, 240)
+      march> (sized.width, sized.height)
+      (320, 240)
+  """
   fn set_size(p : Plot, w : Int, h : Int) : Plot do
     { p with width: w, height: h }
   end
 
+  doc """
+  Turn on light dashed grid lines at every axis tick.
+
+  ## Examples
+
+      march> let p = Plot.new()
+      march> (Plot.with_grid(p)).show_grid
+      true
+  """
   fn with_grid(p : Plot) : Plot do
     { p with show_grid: true }
   end
 
+  doc """
+  Turn on the legend, drawn to the right of the plot area. Only series
+  with a label (see `add_labeled_series`) appear in it.
+
+  ## Examples
+
+      march> let p = Plot.new()
+      march> (Plot.with_legend(p)).show_legend
+      true
+  """
   fn with_legend(p : Plot) : Plot do
     { p with show_legend: true }
   end
@@ -639,6 +815,23 @@ mod Plot do
 
   -- ---- Main render ----
 
+  doc """
+  Render `p` as a self-contained SVG document string (`<svg ...>` through
+  `</svg>`): white background, plot-area border, optional grid, axes with
+  "nice" ticks (steps of 1, 2 or 5 times a power of ten), the series, the
+  title and the optional legend. Coordinates and tick labels are written
+  with two decimals (truncated). Title, axis and legend text is
+  XML-escaped.
+
+  ## Examples
+
+      march> let p = Plot.new()
+      march> String.starts_with(Plot.to_svg(p), "<svg")
+      true
+      march> let p = Plot.new()
+      march> String.contains(Plot.to_svg(Plot.set_title(p, "a<b")), "a&lt;b")
+      true
+  """
   fn to_svg(p : Plot) : String do
     let w  = p.width
     let h  = p.height
@@ -709,8 +902,16 @@ mod Plot do
   end
 
   doc """
-  Render `p` to SVG and write it to `path`. Fails with the `File.FileError`
-  the write reported (`NotFound`, `Permission`, `IsDirectory`, `IoError`, ...).
+  Render `p` to SVG and write it to `path`, replacing any existing file.
+  Fails with the `File.FileError` the write reported (`NotFound`,
+  `Permission`, `IsDirectory`, `IoError`, ...).
+
+  ## Examples
+
+      Plot.new()
+        |> Plot.add_series(Plot.line_series([0.0, 1.0, 2.0], [1.0, 4.0, 9.0]))
+        |> Plot.set_title("Squares")
+        |> Plot.save("squares.svg")
   """
   fn save(p : Plot, path : String) : Result(Unit, File.FileError) do
     match File.write(path, to_svg(p)) do
@@ -721,18 +922,51 @@ mod Plot do
 
   -- ---- Quick helpers ----
 
+  doc """
+  Shortcut: the SVG of a default plot with one line series.
+
+  ## Examples
+
+      march> String.contains(Plot.quick_line([0.0, 1.0], [0.0, 1.0]), "<polyline")
+      true
+  """
   fn quick_line(xs : List(Float), ys : List(Float)) : String do
     new() |> add_series(line_series(xs, ys)) |> to_svg
   end
 
+  doc """
+  Shortcut: the SVG of a default plot with one scatter series.
+
+  ## Examples
+
+      march> String.contains(Plot.quick_scatter([1.0, 2.0], [2.0, 3.0]), "<circle")
+      true
+  """
   fn quick_scatter(xs : List(Float), ys : List(Float)) : String do
     new() |> add_series(scatter_series(xs, ys)) |> to_svg
   end
 
+  doc """
+  Shortcut: the SVG of a default plot with one bar series (see
+  `bar_series`; the labels are not drawn).
+
+  ## Examples
+
+      march> String.ends_with(Plot.quick_bar(["a", "b"], [1.0, 2.0]), "</svg>")
+      true
+  """
   fn quick_bar(labels : List(String), values : List(Float)) : String do
     new() |> add_series(bar_series(labels, values)) |> to_svg
   end
 
+  doc """
+  Shortcut: the SVG of a default plot with one `histogram_series(values, bins)`.
+
+  ## Examples
+
+      march> String.contains(Plot.quick_histogram([1.0, 2.0, 2.0, 3.0], 2), "<rect")
+      true
+  """
   fn quick_histogram(values : List(Float), bins : Int) : String do
     new() |> add_series(histogram_series(values, bins)) |> to_svg
   end

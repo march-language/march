@@ -1,17 +1,97 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+---
+layout: docs
+title: Linear Types
+nav_order: 5.4
+permalink: /docs/linear-types/
+---
+
+> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Linear and Affine Types
 
-March's type system tracks ownership through **linear** and **affine** qualifiers. These let the compiler catch resource leaks and use-after-free bugs **at compile time** — not at runtime, and not by relying on a garbage collector.
+A **linear** value must be used exactly once: not zero times, not twice. An
+**affine** value may be used at most once: it can be dropped, but not used twice.
+March tracks both in the type system, so forgetting to close a handle, closing it
+twice, or using it after it has been handed off is a compile error. Nothing is checked
+at runtime, and nothing is tracked by a garbage collector.
+
+Linearity is the discipline behind three other things on this site. Typestate handles
+(`File(Open)`, `File(Closed)`) are `always_linear` types with a state parameter.
+Session-typed channels are linear endpoints whose type advances at every step. And a
+linear value is, by construction, uniquely owned, which is the fact the memory model's
+in-place reuse relies on.
+
+This page covers the qualifiers and where they apply: parameters and `let` bindings,
+record fields and actor state, closures and wildcards, generic code, the two linear
+collections (`LinearMap`, `RingBuf`), and the FFI `resource` form.
+
+## On this page
+
+**Start here**
+
+- [Which qualifier do I need?](#which-qualifier-do-i-need)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [The Problem They Solve](#the-problem-they-solve)
+- [Linear vs Affine](#linear-vs-affine)
+- [Linear Values](#linear-values) and [linear `let` bindings](#linear-let-bindings)
+- [Affine Values](#affine-values)
+
+**Where linearity reaches**
+
+- [Linear Record Fields](#linear-record-fields)
+- [always_linear Types](#always_linear-types)
+- [Linear Types and Actors](#linear-types-and-actors)
+- [Session Types](#session-types)
+- [Capabilities as Linear Types](#capabilities-as-linear-types)
+- [FFI and Native Resources](#ffi-and-native-resources)
+- [Linear Values in Closures, Containers, and Generic Code](#linear-values-in-closures-containers-and-generic-code)
+
+**Linear collections**
+
+- [Keyed Collections of Linear Values: `LinearMap`](#keyed-collections-of-linear-values-linearmap)
+- [A Single-Owner Buffer: `RingBuf`](#a-single-owner-buffer-ringbuf)
+
+**Rules and rationale**
+
+- [Linearity and Memory](#linearity-and-memory)
+- [Practical Rules](#practical-rules)
+- [Why Both?](#why-both)
+- [See also](#see-also)
+
+## Which qualifier do I need?
+
+| The value is | Write | What the compiler then rejects |
+|---|---|---|
+| A resource with mandatory cleanup: a file handle, a connection, a lock | `linear h : Handle` on a parameter, or `linear let h = …` | Dropping it, or using it twice |
+| An optional-use token you must not use twice | `cap : affine NetworkCap` | Using it twice; dropping it is fine |
+| A type whose every value is a resource | `always_linear type Token = …` | Dropping or duplicating any value of the type, with no per-site keyword |
+| A handle that moves through states | `always_linear type File(s)` with `tag` states; see [Capabilities: typestate]({{ site.baseurl }}/docs/capabilities/#typestate-tracking-resource-lifecycle) | Operations in the wrong state or order |
+| One of many linear values, looked up by key | `LinearMap(k, v)` | Losing a value in a `Map`, which copies on read and drops on overwrite |
+| A fixed buffer written in place | `RingBuf(a)` | Aliasing the buffer |
+| A C-owned pointer | `resource` plus a `consume` parameter on the freeing extern | A double free |
+
+Ordinary values need no qualifier. The default is unrestricted: copied, dropped and
+reused freely.
+
+## How it fits with the rest of March
+
+| Concept | Where linearity meets it | Chapter |
+|---|---|---|
+| **Capabilities and typestate** | A typestate handle is an `always_linear` type with a phantom state; `transitions` blocks declare which functions move it. A `linear` capability parameter forces the caller to give the capability up. | [Capabilities]({{ site.baseurl }}/docs/capabilities/#typestate-tracking-resource-lifecycle) |
+| **Session types** | An endpoint is linear: each `send`/`recv` consumes it and returns the advanced one, and an endpoint at `End` must be closed. | [Session Types]({{ site.baseurl }}/docs/session-types/) |
+| **Memory model** | A linear value has one owner by construction, so Perceus can elide reference-count traffic and reuse its cell in place. | [Memory Model]({{ site.baseurl }}/docs/memory-model/) |
+| **Actors** | A `send` is the consuming use; actor state owns its linear fields for the turn; `LinearMap` holds per-session state in an actor. | [Actors]({{ site.baseurl }}/docs/actors/) |
+| **Safety by construction** | Linearity is the second of three orthogonal layers, beside capabilities and refinements. | [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/) |
+| **FFI** | `resource` and `consume` make ownership transfer across a C boundary explicit. | [FFI]({{ site.baseurl }}/docs/ffi/) |
 
 ---
 
 ## The Problem They Solve
 
 Consider a file handle or database connection. These resources must be:
-1. **Used** — you shouldn't open a file and forget to read or close it
-2. **Closed exactly once** — closing twice is a bug
-3. **Not shared** — concurrent access through the same raw handle leads to data corruption
+1. **Used**: you shouldn't open a file and forget to read or close it
+2. **Closed exactly once**: closing twice is a bug
+3. **Not shared**: concurrent access through the same raw handle leads to data corruption
 
 In most languages, these are programmer responsibilities enforced by convention and code review. In March, the type system enforces them.
 
@@ -21,7 +101,7 @@ In most languages, these are programmer responsibilities enforced by convention 
 
 | Qualifier | Usage count | Meaning |
 |-----------|-------------|---------|
-| `linear` | **Exactly once** | Must be used — dropping it is a compile error |
+| `linear` | **Exactly once** | Must be used; dropping it is a compile error |
 | `affine` | **At most once** | May be dropped (unused), but cannot be used twice |
 
 Both prevent **duplicating** (using twice). Linear additionally prevents **discarding** (never using).
@@ -43,8 +123,13 @@ If you forget to use a linear value, the compiler reports an error:
 
 ```march
 fn bad(linear h : Handle) : () do
-  ()    -- error: linear value `h` must be used
+  ()
 end
+```
+
+```
+The linear value `h` was never used.
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
 ```
 
 If you try to use it twice:
@@ -52,9 +137,20 @@ If you try to use it twice:
 ```march
 fn also_bad(linear h : Handle) : () do
   close(h)
-  close(h)   -- error: linear value `h` used more than once
+  close(h)
 end
 ```
+
+```
+The linear value `h` is used more than once here.
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+```
+
+(Both verified live, 2026-07-10; these are the exact diagnostics; corpus
+witnesses `specs/lang/types/reject/t58` and `t60`.) The stdlib's own
+`Handle` type (`stdlib/handle.march`) is always linear, even without the
+`linear` keyword; a plain type of your own that happens to be called `Handle`
+is not. See [`always_linear` types](#always_linear-types) below.
 
 ### Linear Let Bindings
 
@@ -66,27 +162,39 @@ fn read_file(path : String) : String do
 end
 ```
 
-The `linear let` annotation tells the compiler this binding has linear semantics. You don't need to annotate everything — the type of `open_file` already carries the linear constraint.
+The `linear let` annotation tells the compiler this binding has linear semantics. You can also get it from a type annotation on the binding (`let h : linear Handle = ...`) or from the callee: a plain `let h = open_file(p)` with `open_file : ... -> linear Handle` is tracked as linear too, so dropping `h` rejects with `` The linear value `h` was never used. `` (finding L8, fixed; corpus witness `reject/t78`).
 
 ---
 
 ## Affine Values
 
-An affine type may be used zero or one times. This is useful for values that have a cleanup operation but where "not using" is acceptable (e.g., an optional connection):
+An affine type may be used zero or one times. This is useful for values that have a cleanup operation but where "not using" is acceptable (e.g., an optional connection).
+
+**Spelling:** `affine` works as a type modifier inside the annotation
+(`cap : affine NetworkCap`, below) and as a parameter keyword
+(`fn f(affine cap : NetworkCap)`, finding L1, fixed; corpus witness
+`accept/t80`). There is no `affine let`:
 
 ```march
-fn maybe_connect(affine cap : NetworkCap) : () do
-  -- OK to drop cap without using it
+fn maybe_connect(cap : affine NetworkCap, should_connect : Bool) : () do
   if should_connect do
     connect(cap)
   else
-    ()
+    ()    -- OK: no error when cap goes unused on this path
   end
-  -- No error if cap goes unused on the else path
 end
 ```
 
-The key property: you still cannot use an affine value twice.
+The key property: you still cannot use an affine value twice. The second use
+rejects with:
+
+```
+The affine value `cap` is used more than once here.
+Affine values may be used at most once.
+```
+
+(Verified live; corpus witnesses `accept/t66` (affine drop accepted) and
+`reject/t64` (affine double-use rejected).)
 
 ---
 
@@ -101,38 +209,146 @@ type Resource = {
 }
 ```
 
-The compiler tracks each linear field independently. Accessing `r.fd` consumes that field — you cannot access it again.
+The compiler tracks each linear field independently, and the record **owns**
+its linear fields. A field whose type is an `always_linear` type is a linear
+field too, with no qualifier needed. The rules:
+
+1. **Accessing a field moves it out.** `r.fd` consumes that field; a second
+   access rejects with `` The linear value `r.fd` is used more than once here. ``
+2. **Using the whole record moves every field it still holds.** Passing `r` to
+   a function, returning it, or storing it hands its linear fields on too. So
+   consuming `r.fd` and then passing `r` along, or passing `r` along twice, is
+   a double use of `r.fd`.
+3. **`{ r with … }` keeps every field it doesn't replace.** After consuming
+   `r.fd`, write `{ r with fd: new_fd }`; `{ r with metadata: "x" }` would carry
+   the consumed `fd` into the new record, and is rejected with a note saying so.
+4. **Every linear field must be consumed by the end of the record's scope**,
+   by one of the three moves above. Otherwise it leaks: `` The linear value
+   `r.fd` was never used. ``
+5. **Reading an ordinary field moves nothing.** `r.metadata` never consumes
+   `r.fd`.
+
+This works the same for `let`-bound and parameter-bound records (a double
+field access on a parameter was once only a warning; finding L3, fixed), and
+for an actor's `state`; see [Linear Types and Actors](#linear-types-and-actors).
+Corpus witnesses: `reject/t63`, `reject/t77`, `reject/t216`–`t222`,
+`accept/t223`.
+
+One more note: **arithmetic on linear primitive fields works** (e.g.
+`r.count + 1` for a `linear count : Int` field), but only since 2026-07-10:
+previously the linearity wrapper leaked into `Num` resolution and rejected even
+a single, correct use (finding L2, fixed). Corpus witness: `accept/t67`.
+
+---
+
+## always_linear Types
+
+The per-site qualifiers above have a whole-type sibling: `always_linear type`
+declares a type where **every** binding is automatically tracked as linear;
+no `linear` keyword needed at any use site. This is the primary mechanism for
+typestate resource handles (the stdlib's `Handle` in `stdlib/handle.march` is
+the canonical example, combined with `tag` phantom states):
+
+```march
+always_linear type Token = Token(Int)
+
+fn main() : () do
+  let t = Token(1)
+  ()    -- error: The linear value `t` was never used.
+end
+```
+
+See `surface-syntax.md`'s always_linear/`tag` section for the full typestate
+pattern, and `core-march-types.md` §2.9.1 for the promotion rule. Three
+standard-library types are `always_linear`: `Handle`, `LinearMap` (below) and
+the builtin `RingBuf` (below), the last registered by the typechecker itself
+since it has no declaring module.
+
+> **Same-named types don't inherit linearity.** Whether a type is
+> `always_linear` is resolved against the type the name actually refers to,
+> so a plain type of your own called `Handle` is an ordinary type, even though
+> the stdlib's `Handle` is linear (finding L4, fixed; corpus witnesses
+> `accept/t81`, `accept/t194`).
 
 ---
 
 ## Linearity and Memory
 
-Linearity isn't only about correctness — it's the strongest case for March's
-in-place memory model. A `linear` value has **reference count 1 by
-construction**: the type system guarantees exactly one owner, so the compiler
-never has to emit a single reference-count adjustment for it. At the value's last
-use, it is simply freed — no scan, no count to check. This is the cleanest
-[Perceus]({{ site.baseurl }}/docs/memory-model/) case there is.
+*This section is about performance, not correctness; skip to [Linear Types and
+Actors](#linear-types-and-actors) for the safety picture.*
 
-The same guarantee makes actor message passing **zero-copy**. Sending an ordinary
-value to another actor copies its bytes (so the two heaps stay disjoint). A
-`linear` value can't be aliased, so sending it *transfers ownership* instead:
-the runtime hands the pointer over and adjusts bookkeeping, with no bytes copied.
-Uniqueness turns "send" from a copy into a move.
+Linearity isn't only about correctness; it also feeds March's in-place
+memory model. Normally the compiler has to track "is anyone else still holding
+onto this value?" before it can safely reuse or drop its memory; a `linear`
+value answers that question for free: it has a single owner by construction, which the
+compiled backend exploits as an **optimization**: the linearity flag on a TIR
+variable (`v_lin`) lets Perceus elide reference-count traffic where uniqueness
+is guaranteed. (A `send` of a linear message compiles to an ordinary
+`march_send`: the zero-copy ownership-transfer move belongs to the
+per-process arena runtime, which is not linked into compiled programs yet.)
+These are performance facts, not semantic ones: linearity is
+**compile-time-erased**, and neither backend re-checks it at runtime (see
+`core-march.md` §4.12; golden witness `g41_linear_annotations_erased`). See
+[Perceus]({{ site.baseurl }}/docs/memory-model/) for the memory model.
 
 ---
 
 ## Linear Types and Actors
 
-Actors communicate by message passing. For safety, a linear value cannot be sent as a message directly — sending would require copying, and copying a linear value violates the uniqueness guarantee.
+`send(pid, msg)` ([Actors](actors.md)) delivers a message to another actor asynchronously. Sending a
+linear value to an actor **is allowed, and the send is the consuming use**:
 
-The actor system uses session types (see below) for typed communication channels where linear values can be transferred safely via `Send`/`Recv` channel handles.
+```march
+linear let r : Res = R(7)
+send(pid, StoreRes(r))   -- consumes r
+take(r)                   -- error: The linear value `r` is used more than once here.
+```
+
+(Verified live; corpus witnesses `accept/t68` + `reject/t66`. Earlier
+versions of this chapter claimed a linear value "cannot be sent as a message
+directly"; that was never true, and it contradicted the zero-copy-move
+paragraph above; finding L6, resolved as this doc fix.) On the compiled backend the
+transfer is a zero-copy move; interpreted, it is an ordinary handoff; either
+way the type system prevents you from touching the value after the send.
+
+**An actor's state holds linear values the same way a record does.** A
+handler's `state` owns the state's linear fields (an `always_linear`-typed
+field, or one written `linear`) for the turn, under the record rules above.
+The two shapes to know:
+
+```march
+actor Ep do
+  state { st : Token, n : Int }        -- Token is always_linear
+  init  { st: new_token(), n: 0 }
+  on Step() do
+    { state with st: advance(state.st) }    -- OK: consumed and replaced
+  end
+  on Oops() do
+    let k = spend(state.st)
+    { state with n: k }                     -- error: the update keeps the old `st`
+  end
+end
+```
+
+A handler that returns a brand-new record must consume the old linear fields
+first, or they leak. A linear value arriving as a handler **parameter** is
+tracked too: it must be consumed, or stored into the returned state. Corpus
+witnesses: `reject/t195`–`t196`, `reject/t216`, `reject/t217`, `reject/t222`,
+`accept/t197`, `accept/t223`.
+
+For richer typed interaction patterns, the channel system below layers
+session types on top of the same linearity infrastructure.
 
 ---
 
 ## Session Types
 
-Session types use binary typed channels — the two endpoints have **dual** types. If one end sends, the other must receive.
+March also uses linearity to enforce **conversation protocols** between two
+parties: a strict two-party "who sends what, in what order" agreement, checked
+at compile time. This is linear types applied to a channel instead of a file
+handle.
+
+Session types use binary typed channels: the two endpoints have **dual** types. If one end sends, the other must receive.
 
 Define a protocol:
 
@@ -166,28 +382,52 @@ fn server_side(ch : Chan(Server, Transfer)) : () do
 end
 ```
 
-The channel endpoints are linear — each `Chan.send`/`Chan.recv` operation
+The channel endpoints are linear: each `Chan.send`/`Chan.recv` operation
 consumes the old endpoint and returns a new one representing the next step of
-the protocol. The compiler verifies the full protocol is followed.
+the protocol.
 
-> **What session types catch:** sending when you should receive, receiving the
-> wrong type, abandoning a conversation half-finished, or letting the two ends
-> drift out of step — all become compile errors. See
-> [Session Types]({{ site.baseurl }}/docs/session-types/) for the full protocol
-> syntax and duality rules.
+> **What session types catch, and the current enforcement scope:** sending
+> when you should receive, receiving the wrong type, and reusing a consumed
+> endpoint (a `let`-bound continuation *or* a channel parameter) are compile
+> errors, and so is dropping an endpoint that has reached `End` without
+> calling `Chan.close` (`` Session channel `ch3` reached `End` but was never
+> closed. ``). One shape still slips through (the F7 residual, logged in
+> `specs/todos/`): abandoning a channel *mid*-protocol, before it reaches
+> `End`, typechecks and runs cleanly. An endpoint is tracked as affine plus
+> that must-close-at-`End` rule, not as fully linear. See
+> [Session Types]({{ site.baseurl }}/docs/session-types/) for the full protocol syntax, duality
+> rules and the precise guarantees.
 
 ---
 
 ## Capabilities as Linear Types
 
-Capabilities (see [capabilities]({{ site.baseurl }}/docs/capabilities/)) use linear types to ensure a capability token cannot be forged or duplicated:
+*A `Cap(X)` value is proof that code may perform the effect `X`, such as
+`Cap(IO.Network)` for opening sockets; see [Capabilities](capabilities.md).*
+
+`Cap(X)` is, by default, an **ordinary unrestricted type**: `cap_narrow` is
+free and side-effect-free, and a plain `Cap(X)` value can be passed to as
+many callees as you like (see `core-march-types.md` §2.8, and
+[Capabilities]({{ site.baseurl }}/docs/capabilities/)). Preventing a
+capability from being *forged* is a separate mechanism: proof capabilities
+are created only through the gated `mint_cap` primitive, not through
+linearity (see `core-march-types.md` §2.8.13). What you *can* do is apply the
+ordinary `linear` qualifier to a capability parameter, exactly as to any
+other value, when a function should force its caller to give up the
+capability for good:
 
 ```march
-fn read_secret(linear cap : Cap(Vault)) : String do
-  Vault.read(cap, "secret_key")
-  -- cap is consumed; caller must obtain a new one for further operations
+fn narrow_once(linear cap : Cap(IO)) : Cap(IO.FileRead) do
+  cap_narrow(cap)   -- consumes cap; the caller cannot reuse it afterward
 end
 ```
+
+(Verified live, 2026-07-22. An earlier version of this section used a
+`Cap(Vault)`/`Vault.read` example and claimed linearity is what stops
+capability forging; neither held up: `Vault` is a stdlib module, not a
+capability namespace, `Vault`'s real API is `Vault.get`/`Vault.set`, not
+`read`, and `Cap(Vault)` is rejected with `` `Cap(Vault)` used in module
+`Main` but `Vault` is not declared in `needs` ``.)
 
 Capability narrowing attenuates a capability to a sub-capability:
 
@@ -200,32 +440,212 @@ end
 
 ---
 
-## FFI and Linear Pointers
+## FFI and Native Resources
 
-When calling C code, raw pointers are typed as `linear Ptr(a)`:
+*This section matters only when binding to a C library; otherwise skip to
+[Practical Rules](#practical-rules).*
+
+There is no `Ptr` type in March, and no `linear Ptr(a)` spelling. The actual
+mechanism for safe manual memory management across the FFI boundary is the
+`resource` declaration together with the `consume` parameter mode. A
+`resource` type is an opaque native handle that Perceus reference-counts like
+any other value, invoking its destructor automatically when the last
+reference is dropped; `consume` on an extern parameter transfers ownership
+into that call so the compiler does not *also* auto-drop the binding
+afterward (which would double-free):
 
 ```march
-extern "libc": Cap(LibC) do
-  fn malloc(n : Int) : linear Ptr(a)
-  fn free(linear ptr : Ptr(a)) : ()
+mod Bindings do
+  needs IO.Foreign
+  needs IO.FileSystem
+
+  resource Buffer
+
+  extern "libc": Cap(IO.FileSystem) do
+    fn buffer_alloc(n : Int) : Buffer
+    fn buffer_free(consume buf : Buffer) : ()
+  end
 end
 ```
 
-This makes memory management explicit in the type — you cannot forget to `free` a `linear Ptr`, and you cannot `free` it twice.
+This makes the ownership transfer explicit in the type: `buffer_free`
+consumes `buf`, so a later use of `buf` in the same scope is a compile
+error, the same double-use rejection this chapter has covered throughout.
+(Verified live, 2026-07-22; corrects an earlier sketch that used a
+fictitious `Ptr(a)` type and a `Cap(LibC)` capability namespace; neither
+exists. See `test/native/ffi_resource.march` for a full worked example with
+the `consume` mode.)
+
+---
+
+## Linear Values in Closures, Containers, and Generic Code
+
+A linear value has to stay traceable wherever it goes, so four more places
+enforce the rule:
+
+- **Closures can't capture one.** A closure may run any number of times, so
+  `run(fn () -> sink(s))` with an outer linear `s` is rejected (`` The linear
+  value `s` cannot be captured by a closure ``), whether the closure is bound
+  with `let`, passed straight to a function, or written as a local
+  `fn … end`. Pass the value in as a parameter instead. A lambda's or local
+  fn's own linear parameters must be consumed by the end of its body, just like
+  a top-level function's (`reject/t198`–`t201`, `t208`–`t210`).
+- **`_` can't discard one.** `let _ = token`, `let (a, _) = pair_of_tokens`,
+  a `_ ->` arm on a linear value, or `fn _ -> …` receiving one all drop a
+  value that must be consumed, and so does a `_` over something that *holds*
+  one (`let (_, n) = (Some(token), 1)`). Discarding a non-linear part
+  (`Token(_)`) is fine, and so is a `_` arm that ends in `panic(…)`
+  (`reject/t203`–`t206`, `t256`). This holds however the value became linear:
+  not only when its *type* says so, but also when only its *binding* does —
+  a `linear x : a` parameter or a `linear let` local, whose type stays a plain
+  type variable or `Int`. `let _ = x` on one of those is rejected too
+  (`` This `_` discards the linear value `x` ``), so no generic function can
+  launder a linear value away by binding it to a wildcard (`reject/t281`).
+  The one exception is a session endpoint: a `Chan` has its own, narrower
+  must-close rule (only an endpoint at `End` must be closed — see
+  [session-types.md](session-types.md)), so dropping one mid-protocol stays
+  legal (`accept/t282`).
+- **Renaming one moves the obligation.** `let h2 = h` consumes `h` and makes
+  `h2` linear in its place, even when `h` is linear only because of its
+  binding (a `linear h : Res` parameter of a plain type): `h2` must then be
+  consumed exactly once, so a rename can't launder a value any more than a `_`
+  can (`reject/t285`, `accept/t286`).
+- **A container holding one is linear itself.** A tuple, list or ADT value
+  with a linear value inside (`(token, 1)`, `Some(token)`, `[token]`) must be
+  used exactly once, like the value it holds. Records are the exception: their
+  fields are tracked one by one, as above (`reject/t233`–`t234`). Taking the
+  container apart consumes it, and each part is then judged by its own type:
+  in `let (n, t) = (1, token)`, `t` is linear and `n` is an ordinary `Int`
+  (`accept/t257`).
+- **Generic functions must opt in.** A type variable is unrestricted: a generic
+  function may drop or duplicate a value of that type. So passing a linear
+  value to one is an error unless the function marks that parameter
+  `linear`, which makes the body use it exactly once:
+
+  ```march
+  fn dup(x) do (x, x) end              -- dup(token): rejected, dup may duplicate
+  fn id(linear x : a) : a do x end     -- id(token): fine, x is checked linear
+  ```
+
+  Constructors (`Some`, tuples, your own ADTs) store each argument once and need
+  nothing; neither do operators, nor functions whose type variable appears only
+  in what they return. Most stdlib generics have not opted in, so
+  `List.length([token])` is rejected: it would drop the token
+  (`reject/t229`–`t231`, `accept/t232`).
+
+An unannotated parameter is tracked as soon as its body fixes its type to a
+linear one: `fn g(st) do sink(st) + sink(st) end` is rejected just like the
+annotated form (`reject/t212`–`t214`).
+
+---
+
+## Keyed Collections of Linear Values: `LinearMap`
+
+`Map` can't hold a linear value: `Map.get` copies the value out while the map
+keeps it, and `Map.insert` over an existing key drops the old one, so
+`Map.insert(m, k, token)` is rejected. The stdlib's `LinearMap(k, v)` is the
+map for values that must be used exactly once, such as the per-session state an
+actor hosting several sessions keeps (one `Parked_<Role>` per session id).
+
+- **Every operation consumes the map and hands it back.** `put(m, k, v)`
+  returns `(Option(v), LinearMap)`, where the option is the value it displaced
+  (the caller must consume it); `take(m, k)` is the only way a value comes out;
+  `size`, `member` and `keys` return their answer beside the map.
+- **`LinearMap` is `always_linear`.** Every binding must be consumed, even an
+  empty map's. It ends in `drain(m, acc, f)` (each value goes through `f`,
+  which must consume it), `to_list(m)`, or `dispose(m)`, which returns `Ok(())`
+  for an empty map and hands a non-empty one back in `Err`. Nothing is lost and
+  nothing panics.
+- **Slots for the take-and-put-back turn.** `take_slot(m, k)` returns the
+  value and a `LinearSlot`: the map with a hole at `k`. `fill(slot, v)` puts a
+  value back (it cannot displace one) and `vacate(slot)` leaves the key empty.
+- **Keys are ordinary values.** They are hashed, compared and copied, so a
+  linear key type is rejected. Equality comes from the comparator given to
+  `empty(cmp)` (`empty_int()` and `empty_string()` supply one), stored in the
+  map.
+
+In actor state the map is a linear field, so every handler that reads it must
+store one back:
+
+```march
+actor Host do
+  state { sessions : LinearMap(Int, Session) }
+  init  { sessions: LinearMap.empty_int() }
+  on Step(sid : Int) do
+    match LinearMap.take_slot(state.sessions, sid) do
+      (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+      (Some(s), slot) -> { state with sessions: LinearMap.fill(slot, advance(s)) }
+    end
+  end
+end
+```
+
+The checks are at every use site (`accept/t247`–`t248`, `reject/t249`–`t255`).
+The module's own function bodies are a small reviewed kernel over `Map`: they
+carry `@[trusted_linear(v)]`, which lets callers pass linear values for `v`
+without the body being checked to use each one once. That attribute is
+reserved for the standard library (`reject/t259`); user code opts a parameter
+in with `linear x : a`, whose body is checked.
+
+---
+
+## A Single-Owner Buffer: `RingBuf`
+
+`RingBuf(a)` is a fixed-capacity circular buffer that writes in place, which
+is what makes it O(1) and allocation-free after `make`. Since 2026-10-06 it is
+`always_linear` (before that, every alias saw every `push`, and only a
+message-payload denylist kept a buffer on one thread; closures, user types,
+generic helpers, `Vault.set` and module-level `let`s all got around it). Every
+operation consumes the buffer: a mutator hands it back (`push`, `clear`), a
+reader returns its answer beside it (`pop`, `get`, `peek_oldest`,
+`peek_newest`, `size`, `cap`, `is_empty`, `is_full`, `snapshot`), and a
+terminator ends it (`to_list`, `drop`). Rebind on every call. In actor state the
+buffer is a linear field, the `LinearMap` idiom:
+
+```march
+actor Recent do
+  state { buf : RingBuf(Int) }
+  init  { buf: RingBuf.make(64) }
+
+  on Seen(x : Int) do
+    { state with buf: RingBuf.push(state.buf, x) }
+  end
+
+  on Dump() do
+    let (items, buf) = RingBuf.snapshot(state.buf)
+    println(show(items))
+    { state with buf: buf }
+  end
+end
+```
+
+A send or a `spawn` argument is a consuming use, so a buffer can *move* to
+another actor (`send(worker, Take(rb))`); it can never be aliased. Elements
+are ordinary values: a buffer silently overwrites its oldest element, so it
+cannot hold a value that must itself be consumed, and `RingBuf.make` of a
+linear element type is rejected by the generic-parameter rule. The eight
+programs that used to get around the denylist are `reject/t300`–`t307`; the
+idioms that must work are `accept/t296`–`t297`.
 
 ---
 
 ## Practical Rules
 
-1. **Use `linear` for resources with mandatory cleanup** — file handles, database connections, exclusive locks, capabilities you must return.
+1. **Use `linear` for resources with mandatory cleanup**: file handles, database connections, exclusive locks, capabilities you must return.
 
-2. **Use `affine` for optional-use tokens** — things you might or might not use, but definitely shouldn't use twice.
+2. **Use `affine` for optional-use tokens**: things you might or might not use, but definitely shouldn't use twice.
 
-3. **Ordinary values need no qualifier** — the default is unrestricted (can be copied, dropped, used many times).
+3. **Ordinary values need no qualifier**: the default is unrestricted (can be copied, dropped, used many times).
 
-4. **Pattern matching on a linear value consumes it** — each branch must use it in a compatible way.
+4. **Branches must agree.** A linear value that one branch of an `if`, `match` or `match do` consumes must be consumed by every branch that returns; a branch that ends in `panic(…)` never returns and doesn't count. The early `Err` return of `let?` is a branch too, so consume linear values before a `let?` that could skip them. Affine values and session-channel endpoints may still be dropped on a branch.
 
-5. **Linear fields in records** — accessing the field consumes it; you must use or explicitly drop each linear field.
+5. **Linear fields in records are owned by the record**: accessing one moves it out, using the record whole moves them all, `{ r with … }` keeps the ones it doesn't replace, and each must be consumed by the end of the record's scope.
+
+6. **Closures, wildcards and generic code don't get a pass**: a closure can't capture a linear value, `_` can't discard one, a tuple/list/ADT holding one is linear too, and a generic function receives one only through a parameter marked `linear`.
+
+7. **Keep many linear values in a `LinearMap`**, not a `Map`: take a value out, use it, put the next one back. A `RingBuf` is linear too: thread it through every call and end it with `to_list` or `drop`.
+
+8. **A linear value cannot be a module-level `let`.** A module-level value is shared by every function and every actor, so it can never be consumed exactly once; `let rb = RingBuf.make(8)` at module level (or a `Handle`, or a `LinearMap`) is rejected with `` `rb` has the linear type `RingBuf(Int)`, so it cannot be a module-level `let` ``. Create it where it is used, or keep it in an actor's state (`reject/t305`).
 
 ---
 
@@ -236,13 +656,21 @@ Many systems have only one kind of linear type. March has both because they solv
 - `linear` ensures you can't **forget** to do something (close, release, respond)
 - `affine` ensures you can't **duplicate** something, while allowing graceful abandonment
 
-For example, a session channel must be completed (linear — you can't just drop it midway through a protocol). But an optional permission token might be affine — the operation is valid with or without it.
+For example, a session channel is *meant* to be completed; it is linear by
+construction (though note the F7 residual above: an endpoint must be closed
+once it reaches `End`, but abandoning a channel midway is not rejected today). An optional permission token
+might be affine: the operation is valid with or without it.
 
 ---
 
-## Next Steps
+## See also
 
-- [Type System](types.md) — the broader type system context
-- [Refinement Types](refinement-types.md) — the other compile-time safety layer: value predicates checked by an SMT solver
-- [Actors](actors.md) — how linear types interact with actor message passing
-- [Pattern Matching](pattern-matching.md) — destructuring linear values
+- [Type System](type-system.md): the broader type system context
+- `core-march-types.md` §2.9: the rule-by-rule static-semantics account of everything in this chapter (with `typecheck.ml` citations and the conformance corpus)
+- `core-march.md` §4.12: linearity at runtime (there is none: annotations are compile-time-erased; golden witness `g41`)
+- [Refinement Types](refinement-types.md): the other compile-time safety layer: value predicates checked by an SMT solver
+- [Actors](actors.md): how linear types interact with actor message passing
+- [Pattern Matching](pattern-matching.md): destructuring linear values
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/#typestate-tracking-resource-lifecycle): typestate handles built on `always_linear`
+- [Session Types]({{ site.baseurl }}/docs/session-types/): the full protocol syntax and guarantees
+- [Memory Model]({{ site.baseurl }}/docs/memory-model/): what unique ownership buys at runtime

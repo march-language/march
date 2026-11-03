@@ -266,7 +266,29 @@ let rec mangle_ty : Tir.ty -> string = function
 let mangle_name (base : string) (tys : Tir.ty list) : string =
   match tys with
   | [] -> base
-  | _  -> Tir_names.specialize_mangle base (String.concat "$" (List.map mangle_ty tys))
+  | _  ->
+    (* A residual type variable is named by its position among the
+       specialisation's type arguments ([$V_0], [$V_1], first appearance
+       wins), never by the typechecker's fresh-var id (B1): that id depends
+       on how much was inferred before, so the same specialisation got a
+       different symbol after an unrelated edit.  [mangle_ty] itself keeps
+       the raw name: [record_to_typename] uses it as a process-local key. *)
+    let seen : (string, int) Hashtbl.t = Hashtbl.create 4 in
+    let rec canon : Tir.ty -> Tir.ty = function
+      | Tir.TVar name ->
+        let i = match Hashtbl.find_opt seen name with
+          | Some i -> i
+          | None -> let i = Hashtbl.length seen in Hashtbl.replace seen name i; i in
+        Tir.TVar (string_of_int i)
+      | Tir.TTuple ts -> Tir.TTuple (List.map canon ts)
+      | Tir.TRecord fs -> Tir.TRecord (List.map (fun (n, t) -> (n, canon t)) fs)
+      | Tir.TCon (n, args) -> Tir.TCon (n, List.map canon args)
+      | Tir.TFn (ps, r) -> Tir.TFn (List.map canon ps, canon r)
+      | Tir.TPtr t -> Tir.TPtr (canon t)
+      | t -> t
+    in
+    Tir_names.specialize_mangle base
+      (String.concat "$" (List.map (fun t -> mangle_ty (canon t)) tys))
 
 (* ── Type matching (poly → concrete → subst) ────────────────────── *)
 
@@ -783,6 +805,29 @@ let rec rewrite_calls
        `List.length(xs)` runs the user's `go` and returns garbage. *)
     if SSet.mem orig_name shadowed then expr
     else
+    (* `<` / `<=` / `>` / `>=` on two TUPLES: the order is the prelude's
+       lexicographic `impl Ord((a, b))` (2..5-tuples), so route the operator
+       through the prelude's `__tuple_lt` & co. (`compare(a, b) <op> 0`),
+       specialised here like any generic call, which in turn specialises each
+       component's own `compare`.  Done in Mono, not at lowering, because a
+       generic `fn lt(a, b) do a < b end` only learns that [a] is a tuple
+       here.  Left to the emitter, a tuple operand is a plain `ptr` and fell
+       to `march_poly_compare`, which has no static type to order a heap cell
+       by and returns 0: every tuple `<` was false. *)
+    let tuple_ord_helper =
+      match orig_name, first_arg_ty args with
+      | ("<" | "<=" | ">" | ">="), Tir.TTuple (_ :: _) when List.length args = 2 ->
+        let h = match orig_name with
+          | "<" -> "__tuple_lt" | "<=" -> "__tuple_le"
+          | ">" -> "__tuple_gt" | _ -> "__tuple_ge" in
+        if Hashtbl.mem fn_table h then Some h else None
+      | _ -> None
+    in
+    (match tuple_ord_helper with
+    | Some h ->
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename
+        shadowed (Tir.EApp ({ f_var with Tir.v_name = h }, args))
+    | None ->
     (match Hashtbl.find_opt fn_table orig_name with
      | None ->
        (* Not in fn_table (builtin or external).  Before giving up, check if
@@ -850,7 +895,20 @@ let rec rewrite_calls
                     don't cause missed lookups. *)
                  let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
                  let key = mangle_ty (Tir.TRecord sorted) in
-                 Hashtbl.find_opt record_to_typename key
+                 (match Hashtbl.find_opt record_to_typename key with
+                  | Some n -> Some n
+                  (* A record no declaration names (`[{ a: 1 }]`'s element,
+                     reaching the List/Option Show impl's inner `show`) is
+                     still a CONCRETE type: nothing implements `Show` for it,
+                     so `show` must take the `to_string` fallback below, which
+                     prints it through the record descriptor.  Left [None] it
+                     fell to the single-impl sentinel, found six impls, and
+                     the bare `show` reached codegen as an "ambiguous
+                     interface-method call".  Only for `show`: another
+                     method keeps the single-impl fallback it had. *)
+                  | None when method_suffix orig_name = "show"
+                           || orig_name = "to_string" -> Some "$Record"
+                  | None -> None)
                (* TIR primitive types are distinct constructors from TCon.
                   After subst_ty {K→TString}, arg_ty = TString, not TCon("String",[]).
                   Without these cases, iface dispatch (e.g. hash → march_hash_string)
@@ -998,7 +1056,7 @@ let rec rewrite_calls
          let f_var' = { f_var with Tir.v_name = mangled;
                                    v_ty = subst_ty subst f_var.Tir.v_ty } in
          Tir.EApp (f_var', args)
-       end)
+       end))
   (* ECallPtr: if the callee is a known top-level fn, ensure it's discovered *)
   | Tir.ECallPtr (fn_atom, args) ->
     (match fn_atom with

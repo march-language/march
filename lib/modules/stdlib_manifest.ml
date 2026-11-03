@@ -88,6 +88,7 @@ let stdlib_file_list = [
   "consistent_hash.march";
   "work_dispatch.march";
   "logger.march";
+  "diagnostics.march";
   "actor.march";
   "scheduler.march";
   "flow.march";
@@ -95,6 +96,7 @@ let stdlib_file_list = [
   "json_stream.march";
   "recon.march";
   "diagnose.march";
+  "trace.march";
   "regex.march";
   "datetime.march";
   "queue.march";
@@ -125,6 +127,9 @@ let stdlib_file_list = [
   "sorted_set.march";
   "range.march";
   "crypto.march";
+  (* post-quantum KEM / signatures over runtime/pqc.c; need Crypto.random_bytes *)
+  "ml_kem.march";
+  "ml_dsa.march";
   "base64.march";
   "native_array.march";
   "simd.march";
@@ -197,7 +202,10 @@ let stdlib_file_list = [
   "topology.march";
   (* the control plane's release format, executor and Ctl protocols (dd step
      12a): after session_node, whose generated runners its protocols use. *)
-  "control.march"
+  "control.march";
+  (* the remote shell's result renderer (bin/shell_render_gen.ml generates
+     calls to it): after map, set and array, whose to_list it uses. *)
+  "shell_render.march"
 ]
 
 let js_only_stdlib_file_list = ["dom.march"; "canvas.march"; "audio.march"]

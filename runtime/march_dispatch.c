@@ -1,37 +1,53 @@
 /* march_dispatch.c — Hot Code Reload versioned dispatch table (HCR Phase 2/4).
  * See march_dispatch.h and specs/hot-code-reload.md Part 3. */
 #include "march_dispatch.h"
+#include "march_trace.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
-/* dlclose for hot-patch handle GC.  Guard so the file compiles on non-POSIX. */
-#if defined(__linux__) || defined(__APPLE__)
-#include <dlfcn.h>
-#define MARCH_HAS_DLCLOSE 1
-#else
-#define MARCH_HAS_DLCLOSE 0
-#endif
-
-/* Test seam: when set, slot_dlclose calls this INSTEAD of dlclose, so a unit
- * test can observe the exact moment a handle is released (and what a reader
- * can still reach at that moment) without loading real shared objects. */
+/* Test seam: when set, slot_release_handle calls this INSTEAD of retiring the
+ * handle, so a unit test can observe the exact moment the ring lets go of a
+ * handle (and what a reader can still reach at that moment) without loading
+ * real shared objects. */
 static void (*g_close_hook)(void *handle) = NULL;
 
 void march_dispatch_set_close_hook(void (*hook)(void *handle)) {
     g_close_hook = hook;
 }
 
-static void slot_dlclose(void *handle) {
+/* A patch image is NEVER unmapped.  When the ring reclaims a version, only
+ * the slot's bookkeeping is recycled; the .so stays mapped for the life of
+ * the process.  A version's `refs` counts calls in progress, but its image
+ * is also reachable from values it handed out and nothing counts: closures
+ * (apply code pointer at +16, kept in actor state, a Vault, a callback),
+ * immortal statics, and the capture-release entries its __march_init put in
+ * the runtime's closure-drop table (march_clo_register_drops), whose keys
+ * are never removed.  dlclose'ing it turned any later call of such a closure
+ * into a jump into unmapped code (SIGSEGV, pc == fault address).  Cost: one
+ * mapped image per deploy, until restart.
+ * specs/progress/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md */
+static _Atomic(uint64_t) g_retained_images = 0;
+
+uint64_t march_dispatch_retained_images(void) {
+    return atomic_load_explicit(&g_retained_images, memory_order_relaxed);
+}
+
+void march_dispatch_retain_image(void *handle) {
+    if (!handle) return;
+    atomic_fetch_add_explicit(&g_retained_images, 1, memory_order_relaxed);
+    /* Deliberately no dlclose: see above. */
+}
+
+static void slot_release_handle(void *handle) {
     if (!handle) return;
     if (g_close_hook) { g_close_hook(handle); return; }
-#if MARCH_HAS_DLCLOSE
-    dlclose(handle);
-#endif
+    march_dispatch_retain_image(handle);
 }
 
 typedef struct {
+    void             (*on_stop_fn)(void *);
     void              *fn_ptr;          /* native code or trampoline thunk */
     _Atomic(uint64_t)  refs;            /* callers currently pinned to THIS version */
     char               impl_hash[65];   /* 64 hex chars + NUL */
@@ -59,6 +75,12 @@ typedef struct {
 
 typedef struct {
     _Atomic(uint32_t) current;                        /* live ring index */
+    _Atomic(uint32_t) traced;                         /* R8: bit i set = trace session i watches
+                                                         this slot.  Shares a cache line with
+                                                         `current` (it fills what was padding),
+                                                         so the check costs no extra load of a
+                                                         new line.  Written by march_trace.c
+                                                         only. */
     MarchFnVersion    ring[MARCH_MAX_LIVE_VERSIONS];
     char              baseline_impl_hash[65];          /* Phase 4: set on first publish, never changed */
     long long         activated_at_ms;                 /* Phase 7: Unix ms of last ACTIVATE */
@@ -165,9 +187,11 @@ void march_dispatch_shutdown(void) {
     for (uint32_t i = 0; i < n; i++) {
         free(slots[i].callers_str);
         slots[i].callers_str = NULL;
-        /* Release any live .so handles (server shutdown path). */
+        /* Let go of any live .so handles (server shutdown path).  They stay
+         * mapped (slot_release_handle): exit handlers and other threads can
+         * still drop or call a closure a patch built. */
         for (uint32_t v = 0; v < MARCH_MAX_LIVE_VERSIONS; v++) {
-            slot_dlclose(slots[i].ring[v].handle);
+            slot_release_handle(slots[i].ring[v].handle);
             slots[i].ring[v].handle = NULL;
         }
     }
@@ -299,14 +323,16 @@ int march_dispatch_stage(uint32_t name_id, void *fn_ptr,
         if (idx < 0) return -1;
         MarchFnVersion *old = &s->ring[idx];
         if (reclaim) {
-            /* Retire, THEN re-check refs, THEN dlclose.  The refs==0 test in
-             * pick_ring_slot is only a filter: a reader (enter/enter_gen)
-             * that passed its live-check just before it can still pin
-             * afterwards, and its post-pin re-validation would pass as long
-             * as `live` is still 1 -- handing it a fn_ptr into a .so we are
-             * about to unload.  So store live=0 first; after that, any reader
-             * that pins either shows up in the refs re-check below or sees
-             * live==0 on re-validation and backs out without touching fn_ptr.
+            /* Retire, THEN re-check refs, THEN recycle the slot.  The refs==0
+             * test in pick_ring_slot is only a filter: a reader
+             * (enter/enter_gen) that passed its live-check just before it can
+             * still pin afterwards, and its post-pin re-validation would pass
+             * as long as `live` is still 1 -- handing it a version whose slot
+             * we are about to rewrite (the image itself stays mapped:
+             * slot_release_handle).  So store live=0 first; after that, any
+             * reader that pins either shows up in the refs re-check below or
+             * sees live==0 on re-validation and backs out without touching
+             * fn_ptr.
              *
              * This is a store-buffering (Dekker) pair: we store `live` then
              * load `refs`; the reader RMWs `refs` then loads `live`.
@@ -323,7 +349,7 @@ int march_dispatch_stage(uint32_t name_id, void *fn_ptr,
         }
         /* A free slot can still hold the handle of a version retired while a
          * racing reader held it (the -1 above, on an earlier stage). */
-        slot_dlclose(old->handle);
+        slot_release_handle(old->handle);
         old->handle = NULL;
     }
 
@@ -355,6 +381,7 @@ int march_dispatch_stage(uint32_t name_id, void *fn_ptr,
        slot by its previous occupant's epoch (#551's fix, kept by
        construction). */
     atomic_store_explicit(&v->epoch, epoch, memory_order_relaxed);
+    v->on_stop_fn = NULL;
     v->keep_for_older = 0;
     v->staged = 1;
     return idx;
@@ -403,6 +430,23 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
     return publish_impl(name_id, fn_ptr, impl_hash, sig_hash, kind, NULL);
 }
 
+/* Trace hook (R8).  WEAK so a C harness that links only this file (test_dispatch)
+ * still builds; the driver links march_trace.c, whose definition wins. */
+__attribute__((weak)) void march_trace_hit(uint32_t name_id, uint32_t mask, uint32_t epoch) {
+    (void)name_id; (void)mask; (void)epoch;
+}
+
+/* Set the session bits in [set] and clear those in [clear] on slot
+ * [name_id]'s trace mask.  The new mask, or -1 for a slot that does not
+ * exist.  Only march_trace.c calls this. */
+int march_dispatch_trace_mask(uint32_t name_id, uint32_t set, uint32_t clear) {
+    if (name_id >= atomic_load_explicit(&g_n_slots, memory_order_acquire)) return -1;
+    MarchDispatchSlot *s = &atomic_load_explicit(&g_slots, memory_order_acquire)[name_id];
+    if (set) atomic_fetch_or_explicit(&s->traced, set, memory_order_seq_cst);
+    if (clear) atomic_fetch_and_explicit(&s->traced, ~clear, memory_order_seq_cst);
+    return (int)atomic_load_explicit(&s->traced, memory_order_relaxed);
+}
+
 void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version) {
     /* Acquire-load the gate: a non-zero count synchronises-with the release
        store in march_dispatch_init, so g_slots below is guaranteed published. */
@@ -438,6 +482,12 @@ void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version) {
         if (out_version) *out_version = 0;
         return NULL;
     }
+    { /* R8: see march_dispatch_enter_gen. */
+        uint32_t tm = atomic_load_explicit(&s->traced, memory_order_relaxed);
+        if (__builtin_expect(tm != 0, 0))
+            march_trace_hit(name_id, tm,
+                            atomic_load_explicit(&s->ring[v].epoch, memory_order_relaxed));
+    }
     if (out_version) *out_version = v;
     return s->ring[v].fn_ptr;
 }
@@ -462,10 +512,33 @@ void *march_dispatch_enter_version(uint32_t name_id, uint32_t version,
     return v->fn_ptr;
 }
 
+static void frame_dispatch_leave(uint32_t name_id, uint32_t version);
+
+void march_dispatch_leave_unit(uint32_t name_id, uint32_t version) {
+    frame_dispatch_leave(name_id, version);
+    march_dispatch_leave(name_id, version);
+}
+
 void march_dispatch_leave(uint32_t name_id, uint32_t version) {
     if (name_id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return;
     atomic_fetch_sub_explicit(&g_slots[name_id].ring[version].refs, 1,
                               memory_order_acq_rel);
+}
+
+void march_dispatch_set_on_stop(uint32_t id, uint32_t version, void (*fn)(void *)) {
+    if (id < g_n_slots && version < MARCH_MAX_LIVE_VERSIONS)
+        g_slots[id].ring[version].on_stop_fn = fn;
+}
+void march_dispatch_set_initial_on_stop(uint32_t id, void (*fn)(void *)) {
+    march_dispatch_set_on_stop(id, march_dispatch_current(id), fn);
+}
+void (*march_dispatch_on_stop(uint32_t id, uint32_t version))(void *) {
+    if (id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return NULL;
+    return g_slots[id].ring[version].on_stop_fn;
+}
+int march_dispatch_has_on_stop(uint32_t id) {
+    if (id >= g_n_slots) return 0;
+    return g_slots[id].ring[march_dispatch_current(id)].on_stop_fn != NULL;
 }
 
 uint32_t march_dispatch_current(uint32_t name_id) {
@@ -535,8 +608,9 @@ const char *march_dispatch_callers(uint32_t name_id) {
     return g_slots[name_id].callers_str;
 }
 
-/* Store the dlopen handle for a ring slot so it can be dlclosed when the slot
- * is reclaimed.  Called by the ACTIVATE handler after a successful publish.
+/* Store the dlopen handle for a ring slot so the slot can let go of it when
+ * it is reclaimed (retained, never dlclose'd: slot_release_handle).  Called
+ * by the ACTIVATE handler after a successful publish.
  * Baseline publishes (from the main binary's startup code) never call this —
  * their slots keep handle = NULL (calloc'd to zero). */
 void march_dispatch_set_handle(uint32_t name_id, uint32_t version, void *handle) {
@@ -615,6 +689,11 @@ void *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
         if (out_version) *out_version = 0;
         return NULL;
     }
+    { /* R8: one relaxed load of a word on the line `current` is on, and a
+         never-taken branch while no trace session watches this slot. */
+        uint32_t tm = atomic_load_explicit(&s->traced, memory_order_relaxed);
+        if (__builtin_expect(tm != 0, 0)) march_trace_hit(name_id, tm, best_ep);
+    }
     if (out_version) *out_version = v;
     return s->ring[v].fn_ptr;
 }
@@ -635,6 +714,19 @@ static _Atomic(uint64_t) g_epoch_pins[MARCH_EPOCH_PIN_SLOTS] = {
     ((uint64_t)MARCH_EPOCH_BASE << 32) | 1u    /* the current role's pin */
 };
 static _Atomic(uint32_t) g_current_epoch = MARCH_EPOCH_BASE;
+
+static _Atomic int g_main_reservation;
+void march_dispatch_reserve_main(void) {
+    if (!atomic_exchange_explicit(&g_main_reservation, 1, memory_order_acq_rel)
+            && march_epoch_pin(MARCH_EPOCH_BASE) != 0) {
+        fputs("march: baseline main epoch retired before startup replay\n", stderr);
+        abort();
+    }
+}
+void march_dispatch_release_main_reservation(void) {
+    if (atomic_exchange_explicit(&g_main_reservation, 0, memory_order_acq_rel))
+        march_epoch_unpin(MARCH_EPOCH_BASE);
+}
 
 uint32_t march_epoch_current(void) {
     return atomic_load_explicit(&g_current_epoch, memory_order_acquire);
@@ -738,10 +830,139 @@ void march_epoch_reset_for_test(void) {
  * dispatch table link on its own (test/test_dispatch.c) -- the same weak
  * discipline as march_signal_drain in march_scheduler.c. */
 __attribute__((weak)) uint32_t march_sched_current_epoch(void) { return 0; }
+__attribute__((weak)) uint32_t march_sched_work_epoch(void) { return 0; }
 
+/* Heap nodes, rather than pointers into C frames: longjmp and task reaping
+ * may run after those stack frames have ceased to exist. */
+typedef struct march_code_frame {
+    struct march_code_frame *previous;
+    uint32_t epoch, slot, version;
+    int dispatch;
+    void *owned_closure;
+    uint32_t owned_closure_refs;
+} march_code_frame;
+static _Thread_local void *foreign_frames;
+__attribute__((weak)) void **march_sched_frame_slot(void) { return &foreign_frames; }
+
+void *march_frame_mark(void) { return *march_sched_frame_slot(); }
+uint32_t march_frame_epoch(void) {
+    march_code_frame *f = march_frame_mark();
+    return f ? f->epoch : 0;
+}
+void march_frame_enter(uint32_t epoch) {
+    void **head = march_sched_frame_slot();
+    if (!epoch) epoch = march_sched_current_epoch();
+    if (!epoch) {
+        do { epoch = march_epoch_current(); } while (march_epoch_pin(epoch) != 0);
+    } else if (march_epoch_pin(epoch) != 0) {
+        fputs("march: cannot enter retired code epoch\n", stderr);
+        abort();
+    }
+    march_code_frame *f = calloc(1, sizeof(*f));
+    if (!f) abort();
+    f->previous = *head;
+    f->epoch = epoch;
+    *head = f;
+}
+__attribute__((weak)) void march_frame_drop_closure(void *closure) { (void)closure; }
+void march_frame_own_closure(void *closure) {
+    if (!closure) return;
+    march_code_frame *f = march_frame_mark();
+    if (!f || (f->owned_closure && f->owned_closure != closure)) abort();
+    f->owned_closure = closure;
+    f->owned_closure_refs++;
+}
+void march_frame_disown_closure(void *closure) {
+    march_code_frame *f = march_frame_mark();
+    if (closure && f && f->owned_closure == closure && f->owned_closure_refs > 0
+            && --f->owned_closure_refs == 0)
+        f->owned_closure = NULL;
+}
+static void frame_pop(void **head) {
+    march_code_frame *f = *head;
+    if (!f) return;
+    /* Cleanup executes under this frame's routing epoch too. Clear owned
+     * resources first so a destructor that unwinds cannot release twice. */
+    void *closure = f->owned_closure;
+    uint32_t refs = f->owned_closure_refs;
+    f->owned_closure = NULL;
+    f->owned_closure_refs = 0;
+    for (uint32_t i = 0; i < refs; i++) march_frame_drop_closure(closure);
+    *head = f->previous;
+    if (f->dispatch && f->slot < g_n_slots)
+        atomic_fetch_sub_explicit(&g_slots[f->slot].ring[f->version].refs,
+                                  1, memory_order_acq_rel);
+    march_epoch_unpin(f->epoch);
+    free(f);
+}
+void march_frame_leave(void) { frame_pop(march_sched_frame_slot()); }
+void march_frame_unwind(void *mark) {
+    void **head = march_sched_frame_slot();
+    while (*head != mark) {
+        if (!*head) { fputs("march: invalid code frame watermark\n", stderr); abort(); }
+        frame_pop(head);
+    }
+}
+void march_frame_clear(void **head) { while (*head) frame_pop(head); }
+static void frame_dispatch_leave(uint32_t slot, uint32_t version) {
+    march_code_frame *f = march_frame_mark();
+    if (f && f->dispatch && f->slot == slot && f->version == version) {
+        f->dispatch = 0; /* the public leave releases the direct ref */
+        march_frame_leave();
+    }
+}
 void *march_dispatch_enter_unit(uint32_t name_id, uint32_t *out_version) {
-    return march_dispatch_enter_gen(name_id, march_sched_current_epoch(),
-                                    out_version);
+    march_frame_enter(0);
+    march_code_frame *f = march_frame_mark();
+    uint32_t version;
+    void *fn = march_dispatch_enter_gen(name_id, f->epoch, &version);
+    if (out_version) *out_version = version;
+    if (!fn) { march_frame_leave(); return NULL; }
+    f->dispatch = 1;
+    f->slot = name_id;
+    f->version = version;
+    return fn;
+}
+
+void *march_dispatch_enter_work_compatible(uint32_t name_id,
+                                          const char *expected_sig_hash,
+                                          uint32_t *out_version) {
+    uint32_t epoch = march_sched_work_epoch();
+    if (!epoch || !expected_sig_hash || !expected_sig_hash[0]) return NULL;
+    /* The proc pins this epoch; retain it for the adapter even when an
+     * enclosing saved closure is running under an older epoch. */
+    march_frame_enter(epoch);
+    march_code_frame *f = march_frame_mark();
+    uint32_t version;
+    void *fn = march_dispatch_enter_gen(name_id, epoch, &version);
+    if (!fn) { march_frame_leave(); return NULL; }
+    /* The acquired reference prevents reuse of the ABI fields while checked. */
+    if (strcmp(g_slots[name_id].ring[version].sig_hash, expected_sig_hash) != 0) {
+        march_dispatch_leave(name_id, version);
+        march_frame_leave();
+        return NULL;
+    }
+    f->dispatch = 1; f->slot = name_id; f->version = version;
+    if (out_version) *out_version = version;
+    return fn;
+}
+
+void *march_dispatch_enter_version_frame(uint32_t id, uint32_t version,
+                                         uint32_t *out_version) {
+    void *fn = march_dispatch_enter_version(id, version, out_version);
+    if (!fn) return NULL;
+    uint32_t epoch = march_dispatch_epoch(id, version);
+    /* Old-format messages may outlive the epoch. If its dependencies are
+     * already retired, report unavailable so the mailbox policy drops it. */
+    if (epoch && march_epoch_pin(epoch) != 0) {
+        atomic_fetch_sub_explicit(&g_slots[id].ring[version].refs, 1, memory_order_acq_rel);
+        return NULL;
+    }
+    march_frame_enter(epoch);
+    if (epoch) march_epoch_unpin(epoch);
+    march_code_frame *f = march_frame_mark();
+    f->dispatch = 1; f->slot = id; f->version = version;
+    return fn;
 }
 
 void march_dispatch_set_msg_schema_epoch(uint32_t name_id, uint32_t epoch) {

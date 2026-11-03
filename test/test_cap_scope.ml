@@ -88,6 +88,32 @@ let test_is_scopable () =
         false (S.is_scopable c))
     [ "IO.Network"; "IO.Console"; "IO.Process"; "IO" ]
 
+(* The scope manifest embedded in binaries for `forge cap run`. *)
+let test_effective_scopes () =
+  let eff decls k = S.effective_scopes ~decls k in
+  let opt = Alcotest.(option (list string)) in
+  Alcotest.check opt "no related declaration => not narrowed" None
+    (eff [ ("IO.Console", None) ] "IO.FileRead");
+  Alcotest.check opt "scoped write narrows writes" (Some [ "/srv/out" ])
+    (eff [ ("IO.FileWrite", Some "/srv/x/../out/") ] "IO.FileWrite");
+  Alcotest.check opt "a write scope does not narrow reads" None
+    (eff [ ("IO.FileWrite", Some "/srv") ] "IO.FileRead");
+  Alcotest.check opt "IO.FileSystem scope narrows reads too" (Some [ "/srv" ])
+    (eff [ ("IO.FileSystem", Some "/srv") ] "IO.FileRead");
+  Alcotest.check opt "union of scopes" (Some [ "/a"; "/b" ])
+    (eff [ ("IO.FileRead", Some "/b"); ("IO.FileRead", Some "/a") ] "IO.FileRead");
+  Alcotest.check opt "one unscoped related grant => not narrowed" None
+    (eff [ ("IO.FileRead", Some "/a"); ("IO", None) ] "IO.FileRead")
+
+let test_manifest_json () =
+  Alcotest.(check (option string)) "unscoped program => no manifest" None
+    (S.manifest_json [ ("IO.FileRead", None); ("IO.Console", None) ]);
+  Alcotest.(check (option string)) "scoped => manifest, unrelated caps dropped"
+    (Some
+       {|{"v":1,"scopes":[{"cap":"IO","scope":null},{"cap":"IO.FileWrite","scope":"/srv/a\"b"}]}|})
+    (S.manifest_json
+       [ ("IO.Console", None); ("IO.FileWrite", Some "/srv/a\"b/"); ("IO", None) ])
+
 let tests =
   [
     Alcotest.test_case "normalize" `Quick test_normalize;
@@ -101,6 +127,9 @@ let tests =
       test_scope_subsumption_both_directions;
     Alcotest.test_case "only filesystem caps are scopable" `Quick
       test_is_scopable;
+    Alcotest.test_case "effective scopes per OS class" `Quick
+      test_effective_scopes;
+    Alcotest.test_case "scope manifest json" `Quick test_manifest_json;
   ]
 
 (* ── The static check, end to end through the real compiler ───────────

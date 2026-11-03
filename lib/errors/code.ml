@@ -26,6 +26,8 @@ let annotated_tyvar_fixed = "annotated_tyvar_fixed"
 let arity_mismatch = "arity_mismatch"
 let attribute_no_effect = "attribute_no_effect"
 let builtin_arity = "builtin_arity"
+let cap_bound = "cap_bound"
+let cap_bound_needs = "cap_bound_needs"
 let cap_ceiling = "cap_ceiling"
 let cap_deserialize = "cap_deserialize"
 let cap_dict_misuse = "cap_dict_misuse"
@@ -38,12 +40,15 @@ let cap_needs = "cap_needs"
 let cap_root_broad = "cap_root_broad"
 let cap_scope_violation = "cap_scope_violation"
 let cap_widen = "cap_widen"
+let callback_arity_mismatch = "callback_arity_mismatch"
 let codec_missing = "codec_missing"
 let constructor_arity = "constructor_arity"
 let curried_lambda_over_tuple = "curried_lambda_over_tuple"
 let deterministic_violation = "deterministic_violation"
+let diverges_conflict = "diverges_conflict"
 let division_by_zero = "division_by_zero"
 let duplicate_actor = "duplicate_actor"
+let duplicate_binder = "duplicate_binder"
 let duplicate_constructor = "duplicate_constructor"
 let duplicate_field = "duplicate_field"
 let duplicate_handler = "duplicate_handler"
@@ -57,11 +62,14 @@ let extern_needs_foreign = "extern_needs_foreign"
 let field_access_non_record = "field_access_non_record"
 let import_cap_missing = "import_cap_missing"
 let internal_error = "internal_error"
+let int_overflow = "int_overflow"
 let invalid_cap_scope = "invalid_cap_scope"
+let invalid_decreases = "invalid_decreases"
 let invalid_measure = "invalid_measure"
 let invalid_type_bound = "invalid_type_bound"
 let io_not_allowed = "io_not_allowed"
 let island_missing_fn = "island_missing_fn"
+let json_derive_name_collision = "json_derive_name_collision"
 let let_question_last = "let_question_last"
 let let_star_bad_flat_map = "let_star_bad_flat_map"
 let let_star_last = "let_star_last"
@@ -95,6 +103,7 @@ let no_extern_violation = "no_extern_violation"
 let no_panic_violation = "no_panic_violation"
 let non_exhaustive_match = "non_exhaustive_match"
 let non_tail_recursion = "non_tail_recursion"
+let nonregular_type = "nonregular_type"
 let not_a_function = "not_a_function"
 let not_a_nat = "not_a_nat"
 let not_a_variant = "not_a_variant"
@@ -105,6 +114,7 @@ let pid_serialize = "pid_serialize"
 let pipe_into_match = "pipe_into_match"
 let pipe_match_pattern = "pipe_match_pattern"
 let portable_capture = "portable_capture"
+let predicate_eq_structural = "predicate_eq_structural"
 let prelude_collision = "prelude_collision"
 let proof_cap_foreign = "proof_cap_foreign"
 let proof_cap_mint_private = "proof_cap_mint_private"
@@ -127,6 +137,8 @@ let refinement_ignored = "refinement_ignored"
 let refinement_unchecked = "refinement_unchecked"
 let refinement_unverified = "refinement_unverified"
 let refinement_violated = "refinement_violated"
+let reflect_conflict = "reflect_conflict"
+let reflect_inconsistent = "reflect_inconsistent"
 let remote_actor_unroutable = "remote_actor_unroutable"
 let reserved_type_name = "reserved_type_name"
 let return_refinement_violated = "return_refinement_violated"
@@ -137,6 +149,7 @@ let role_needs_invalid = "role_needs_invalid"
 let root_cap_reference = "root_cap_reference"
 let satisfy_missing_fn = "satisfy_missing_fn"
 let semicolon_separator = "semicolon_separator"
+let send_wrong_actor = "send_wrong_actor"
 let session_choice_label = "session_choice_label"
 let session_not_closed = "session_not_closed"
 let session_offer_nonexhaustive = "session_offer_nonexhaustive"
@@ -157,6 +170,7 @@ let syntax_error = "syntax_error"
 let template_fragment_position = "template_fragment_position"
 let template_unsafe_interpolation = "template_unsafe_interpolation"
 let template_unterminated = "template_unterminated"
+let termination_unproved = "termination_unproved"
 let then_keyword = "then_keyword"
 let transition_via_mismatch = "transition_via_mismatch"
 let trusted_linear_invalid = "trusted_linear_invalid"
@@ -167,6 +181,7 @@ let typed_hole = "typed_hole"
 let unbound_variable = "unbound_variable"
 let undeclared_requirement = "undeclared_requirement"
 let undeclared_transition = "undeclared_transition"
+let unknown_attribute = "unknown_attribute"
 let unknown_capability = "unknown_capability"
 let unknown_constructor = "unknown_constructor"
 let unknown_derive = "unknown_derive"
@@ -196,6 +211,8 @@ let all = [
   arity_mismatch;
   attribute_no_effect;
   builtin_arity;
+  cap_bound;
+  cap_bound_needs;
   cap_ceiling;
   cap_deserialize;
   cap_dict_misuse;
@@ -208,12 +225,15 @@ let all = [
   cap_root_broad;
   cap_scope_violation;
   cap_widen;
+  callback_arity_mismatch;
   codec_missing;
   constructor_arity;
   curried_lambda_over_tuple;
   deterministic_violation;
+  diverges_conflict;
   division_by_zero;
   duplicate_actor;
+  duplicate_binder;
   duplicate_constructor;
   duplicate_field;
   duplicate_handler;
@@ -227,11 +247,14 @@ let all = [
   field_access_non_record;
   import_cap_missing;
   internal_error;
+  int_overflow;
   invalid_cap_scope;
+  invalid_decreases;
   invalid_measure;
   invalid_type_bound;
   io_not_allowed;
   island_missing_fn;
+  json_derive_name_collision;
   let_question_last;
   let_star_bad_flat_map;
   let_star_last;
@@ -265,6 +288,7 @@ let all = [
   no_panic_violation;
   non_exhaustive_match;
   non_tail_recursion;
+  nonregular_type;
   not_a_function;
   not_a_nat;
   not_a_variant;
@@ -275,6 +299,7 @@ let all = [
   pipe_into_match;
   pipe_match_pattern;
   portable_capture;
+  predicate_eq_structural;
   prelude_collision;
   proof_cap_foreign;
   proof_cap_mint_private;
@@ -297,6 +322,8 @@ let all = [
   refinement_unchecked;
   refinement_unverified;
   refinement_violated;
+  reflect_conflict;
+  reflect_inconsistent;
   remote_actor_unroutable;
   reserved_type_name;
   return_refinement_violated;
@@ -307,6 +334,7 @@ let all = [
   root_cap_reference;
   satisfy_missing_fn;
   semicolon_separator;
+  send_wrong_actor;
   session_choice_label;
   session_not_closed;
   session_offer_nonexhaustive;
@@ -327,6 +355,7 @@ let all = [
   template_fragment_position;
   template_unsafe_interpolation;
   template_unterminated;
+  termination_unproved;
   then_keyword;
   transition_via_mismatch;
   trusted_linear_invalid;
@@ -337,6 +366,7 @@ let all = [
   unbound_variable;
   undeclared_requirement;
   undeclared_transition;
+  unknown_attribute;
   unknown_capability;
   unknown_constructor;
   unknown_derive;

@@ -165,6 +165,40 @@ let manifest_at data off =
       Error "manifest: length field exceeds file size"
     else Ok (String.sub data (p + 4) len)
 
+(* Declared path scopes from the manifest's "scopes" array (emitted by the
+   compiler from Cap_scope.manifest_json).  No manifest, or a manifest from
+   a writer without the key, is Ok [] — an old binary keeps its unscoped
+   behaviour.  A malformed array is an Error rather than [] so a broken
+   claim is reported instead of silently widening to "any path". *)
+let scope_decls (t : t) : ((string * string option) list, string) result =
+  match t.manifest with
+  | None -> Ok []
+  | Some j -> (
+      match Yojson.Safe.from_string j with
+      | exception Yojson.Json_error e -> Error ("manifest: invalid JSON: " ^ e)
+      | `Assoc kvs -> (
+          match List.assoc_opt "scopes" kvs with
+          | None -> Ok []
+          | Some (`List entries) ->
+              let entry = function
+                | `Assoc e -> (
+                    match (List.assoc_opt "cap" e, List.assoc_opt "scope" e) with
+                    | Some (`String c), (None | Some `Null) -> Ok (c, None)
+                    | Some (`String c), Some (`String s)
+                      when March_caps.Cap_scope.is_absolute s ->
+                        Ok (c, Some (March_caps.Cap_scope.normalize s))
+                    | _ -> Error "manifest: malformed scope entry")
+                | _ -> Error "manifest: malformed scope entry"
+              in
+              List.fold_right
+                (fun e acc ->
+                  match (entry e, acc) with
+                  | Ok x, Ok l -> Ok (x :: l)
+                  | (Error _ as err), _ | _, (Error _ as err) -> err)
+                entries (Ok [])
+          | Some _ -> Error "manifest: \"scopes\" is not a list")
+      | _ -> Error "manifest: not a JSON object")
+
 (* ── classification ─────────────────────────────────────────────────── *)
 
 let read path : (t, string) result =

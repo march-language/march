@@ -42,6 +42,64 @@ let fresh_name (prefix : string) : string =
 
 let reset_counter () = _lower_counter := 0
 
+(* ── Structural names for nested functions (B1) ──────────────────────────
+   Every function minted while lowering a body (a lambda, an `own(...)` drop
+   callback, a match join point, a respawn thunk) is named after its HOST,
+   the function whose body it appears in, plus a per-(host, kind) ordinal:
+   [$lam0_Mod_outer], [$lam0__lam0_Mod_outer] (nested), [$jp2_Mod_outer].
+   The ordinal counts occurrences inside that host in lowering order, so an
+   edit to one function never renumbers another's helpers; a global counter
+   did (specs/plans/incremental-codegen-cas-plan.md §14).  Defun, Fusion and
+   Hof_spec derive their symbols from these, so the symbols a cached object
+   binds to are stable across edits elsewhere in the module.
+
+   The shape keeps everything a name used to say: it still starts with
+   ['$'] (synthetic), and it contains no ['.'] ([Tir_names.structural_tag]),
+   so [Hot_reload.module_of_name] still finds no module in it.  That rule
+   ("everything before the last ['.']") decides capability attribution and
+   which functions are hot-reload slots versus bare helpers; a first cut
+   named lambdas [Mod.outer$lam0] and changed both.
+
+   [_fragment_scope] is the REPL's per-fragment prefix (["$repl7."]): each
+   fragment lowers its own [main], and without the scope two fragments'
+   [main$lam0] would be one symbol in two shared objects. *)
+let _fragment_scope = ref ""
+let set_fragment_scope (s : string) = _fragment_scope := s
+let _current_host : string option ref = ref None
+let _nested_ordinals : (string * string, int) Hashtbl.t = Hashtbl.create 64
+
+let reset_hosts () =
+  _current_host := None;
+  Hashtbl.reset _nested_ordinals
+
+(** The host name for a top-level fn [fn] of the module with [mod_prefix]
+    (["Mod."] or [""]). *)
+let host_name ~(mod_prefix : string) (fn : string) : string =
+  !_fragment_scope ^ mod_prefix ^ fn
+
+let with_host (h : string) (f : unit -> 'a) : 'a =
+  let saved = !_current_host in
+  _current_host := Some h;
+  Fun.protect ~finally:(fun () -> _current_host := saved) f
+
+(** The current host, or a module-level stand-in for the few bodies lowered
+    outside any function (module-level lets). *)
+let current_host ~(mod_prefix : string) () : string =
+  match !_current_host with
+  | Some h -> h
+  | None -> !_fragment_scope ^ mod_prefix ^ "$top"
+
+(** [fresh_nested_name ~host "lam"] = ["<host>$lam<k>"], [k] the number of
+    ["lam"]s already minted in [host]. *)
+let fresh_nested_name ~(host : string) (prefix : string) : string =
+  let k = Option.value ~default:0 (Hashtbl.find_opt _nested_ordinals (host, prefix)) in
+  Hashtbl.replace _nested_ordinals (host, prefix) (k + 1);
+  (* Still tick the temp counter, as the old [fresh_name "lam"] did: a
+     function-local [$t<n>] never reaches a symbol, and keeping its numbering
+     unchanged keeps the snapshot and IR diffs of this rename symbol-only. *)
+  incr _lower_counter;
+  Printf.sprintf "$%s%d_%s" prefix k (Tir_names.structural_tag host)
+
 let fresh_var ?(lin = Tir.Unr) (ty : Tir.ty) : Tir.var =
   { v_name = fresh_name "t"; v_ty = ty; v_lin = lin }
 
@@ -255,6 +313,39 @@ let module_ctor_type (module_prefix : string) (ctor_name : string)
     [ctor_name]. See [type_ctor_tbl]. *)
 let type_declares_ctor (type_name : string) (ctor_name : string) : bool =
   Hashtbl.mem type_ctor_tbl (type_name, ctor_name)
+
+(** The module-qualified ctor key ("OrderedMap.Tree.Node") for [ctor_name] of
+    type [type_name] when it is constructed or matched BARE inside module
+    [env.mod_prefix], that module declares the type itself, AND a BARE-named
+    type of the same short name also exists (the entry module's own types, and
+    the builtin Option/Result/List, are registered unqualified).  [None]
+    otherwise: the bare "Type.Ctor" key is kept.
+
+    The static [Tir.ty] stays the bare [TCon "Tree"] for both declarations
+    ([Collision_set]'s "TCon stays bare" invariant), so the bare key
+    "Tree.Node" a stdlib module builds for its OWN type is an EXACT
+    [ctor_info] hit on the entry module's same-named type: a user
+    `type Tree = Leaf | Node(Tree, Int, Tree)` hijacked every construction and
+    match of stdlib OrderedMap.Tree (wrong tag, wrong field count: an ICE
+    "constructor Tree.Node has 3 field(s) but field index 3 was requested").
+    Without a bare-named twin the bare key has no exact hit and
+    [Llvm_data.ctor_entry]'s suffix resolver finds the module's own
+    qualified entry; that path (and the cross-module [ptype] hand-offs that
+    rely on it, see [shared_ctor_collision_tbl]) is left alone. *)
+let own_module_ctor_key ?prefix (env : env) (type_name : string)
+    (ctor_name : string) : string option =
+  (* [prefix]: a written module qualifier ("OrderedMap." of
+     `OrderedMap.Node(..)`), in place of the lexical [env.mod_prefix]. *)
+  let prefix = Option.value prefix ~default:env.mod_prefix in
+  if prefix = "" || String.contains type_name '.' then None
+  else
+    let own = prefix ^ type_name in
+    match Hashtbl.find_opt env.collision_set type_name with
+    | Some names
+      when List.mem type_name names && List.mem own names
+           && module_ctor_type prefix ctor_name = Some type_name ->
+      Some (own ^ "." ^ ctor_name)
+    | _ -> None
 
 (** Resolve constructor identity for the runtime-reserved local-monitor type
     short names without letting a module-qualified user declaration collapse

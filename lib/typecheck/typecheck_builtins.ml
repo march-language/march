@@ -283,6 +283,7 @@ let builtin_cap_table : (string * string) list = [
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
+  ("http_server_bind_host", "IO.NetListen");
   (* IO.Process *)
   ("process_env",           "IO.Process");
   ("process_set_env",       "IO.Process");
@@ -345,6 +346,8 @@ let builtin_cap_table : (string * string) list = [
   ("tls_write",             "IO.NetConnect.TLS");
   ("tls_negotiated_alpn",   "IO.NetConnect.TLS");
   ("tls_peer_cn",           "IO.NetConnect.TLS");
+  ("tls_ctx_set_groups",    "IO.NetConnect.TLS");
+  ("tls_negotiated_group",  "IO.NetConnect.TLS");
 ]
 
 (** The names a module DECLARES directly (bare [DFn]s and top-level [DLet]
@@ -787,10 +790,17 @@ let builtin_bindings : (string * scheme) list =
     (* Int primitives *)
     ("int_abs",         Mono (TArrow (t_int,   t_int)));
     ("int_pow",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    (* Modulo-2^63 arithmetic, for hashes and checksums: `+ - *` panic on
+       overflow (type-system.md, "Int width and overflow"). *)
+    ("int_wrapping_add", Mono (TArrow (t_int,  TArrow (t_int, t_int))));
+    ("int_wrapping_sub", Mono (TArrow (t_int,  TArrow (t_int, t_int))));
+    ("int_wrapping_mul", Mono (TArrow (t_int,  TArrow (t_int, t_int))));
     ("int_div",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
     ("int_mod",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
     ("int_div_euclid",  Mono (TArrow (t_int,   TArrow (t_int, t_int))));
     ("int_mod_euclid",  Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_div_floor",   Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_mod_floor",   Mono (TArrow (t_int,   TArrow (t_int, t_int))));
     ("int_to_float",    Mono (TArrow (t_int,   t_float)));
     ("int_max_value",   Mono (TArrow (t_unit,  t_int)));
     ("int_min_value",   Mono (TArrow (t_unit,  t_int)));
@@ -994,6 +1004,9 @@ let builtin_bindings : (string * scheme) list =
     ("monitor",      poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (TCon ("Pid", [b]), t_int))));
     ("demonitor",    Mono (TArrow (t_int, t_unit)));
     ("mailbox_size", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_int)));
+    (* mailbox_size plus the messages an Actor.call the actor is blocked in
+       holds off its mailbox: the work waiting for it. *)
+    ("mailbox_backlog", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_int)));
     (* Observe plan R4: ask an actor for its rendered state (stdlib-only;
        Actor.inspect_state is the API).  Err is "self", "dead", "timeout",
        "busy" or the answerer's reason. *)
@@ -1244,6 +1257,8 @@ let builtin_bindings : (string * scheme) list =
     (* http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline_fn) -> Int (pid) *)
     ("http_server_spawn_n",     poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (TArrow (a, a), t_int)))))));
     ("http_server_wait",        Mono (TArrow (t_int, t_unit)));
+    (* http_server_bind_host(host) -> Unit: the IPv4 address later listens bind to *)
+    ("http_server_bind_host",   Mono (TArrow (t_string, t_unit)));
     (* WebSocket builtins — WsFrame and SelectResult declared in websocket.march *)
     ("ws_recv",   Mono (TArrow (t_int, TCon ("WsFrame", []))));
     ("ws_send",   Mono (TArrow (t_int, TArrow (TCon ("WsFrame", []), t_unit))));
@@ -1339,6 +1354,13 @@ let builtin_bindings : (string * scheme) list =
     ("logger_register_appender",
        poly1 (fun a -> TArrow (t_string, TArrow (a, t_unit))));
     ("logger_remove_appender",   Mono (TArrow (t_string, t_unit)));
+    (* Diagnostics crash observers (stdlib/diagnostics.march).  Polymorphic
+       like the appender pipeline above: Diagnostics.DiagCrash and the
+       context's DiagnosticValue are stdlib types the call sites fix. *)
+    ("diag_observe",     poly1 (fun a -> TArrow (TArrow (a, t_unit), t_int)));
+    ("diag_unobserve",   Mono (TArrow (t_int, t_unit)));
+    ("diag_context_get", poly1 (fun a -> a));
+    ("diag_context_set", poly1 (fun a -> TArrow (a, t_unit)));
     ("logger_clear_appenders",   Mono t_unit);
     ("logger_appender_names",    Mono (t_list t_string));
     ("logger_dispatch",
@@ -1408,6 +1430,19 @@ let builtin_bindings : (string * scheme) list =
         TArrow (TCon ("Bytes", []), t_bool)))));
     ("x25519",          Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
         TCon ("Bytes", [])))));
+    (* ML-KEM-768 / ML-DSA-65 (runtime/march_pqc.c). Randomness is an
+       argument; a wrong-length argument or rejected key gives EMPTY Bytes
+       (verify: false). stdlib/ml_kem.march and ml_dsa.march check. *)
+    ("mlkem768_keypair", Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
+    ("mlkem768_encaps",  Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TCon ("Bytes", [])))));
+    ("mlkem768_decaps",  Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TCon ("Bytes", [])))));
+    ("mldsa65_keypair",  Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
+    ("mldsa65_sign",     Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TArrow (TCon ("Bytes", []), TCon ("Bytes", []))))));
+    ("mldsa65_verify",   Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TArrow (TCon ("Bytes", []), t_bool)))));
     ("pbkdf2_sha256",   Mono (TArrow (t_string, TArrow (TCon ("Bytes", []),
         TArrow (t_int, TArrow (t_int,
         TCon ("Result", [TCon ("Bytes", []); t_string])))))));
@@ -1716,6 +1751,12 @@ let builtin_bindings : (string * scheme) list =
     ("tls_ctx_free",         Mono (TArrow (t_int, t_unit)));
     ("tls_negotiated_alpn",  Mono (TArrow (t_int, t_option t_string)));
     ("tls_peer_cn",          Mono (TArrow (t_int, t_option t_string)));
+    (* Key-exchange groups (runtime/march_tls.c): replace a context's list,
+       read the agreed group, and ask whether the linked OpenSSL has the
+       hybrid post-quantum X25519MLKEM768 that new contexts offer first. *)
+    ("tls_ctx_set_groups",   Mono (TArrow (t_int, TArrow (t_string, t_result t_int t_string))));
+    ("tls_negotiated_group", Mono (TArrow (t_int, t_option t_string)));
+    ("tls_pq_available",     Mono (TArrow (t_unit, t_bool)));
     (* HTML template builtins — generated by ~H sigil desugar *)
     (* html_auto_escape: ∀a. a -> String
        Accepts any value: Html.Safe, IOList, String, or other (escaped).
@@ -2055,6 +2096,32 @@ let builtin_ctors : (string * ctor_info) list =
     ("Down",        down_ci);   ("Down.Down",         down_ci);
   ]
 
+(* Every type name the base environment can produce: the built-in type
+   table, the built-in constructors' types, and every [TCon] head anywhere in
+   a built-in signature (`CancelToken`, `TimerRef`, … are named only there).
+   Derived, not hand-kept, so a new builtin signature is covered by
+   construction. *)
+let builtin_type_names : string list =
+  let acc = Hashtbl.create 64 in
+  let add n = Hashtbl.replace acc n () in
+  let rec walk (t : ty) =
+    match t with
+    | TCon (n, args) -> add n; List.iter walk args
+    | TArrow (a, b) -> walk a; walk b
+    | TTuple ts -> List.iter walk ts
+    | TRecord fs -> List.iter (fun (_, t) -> walk t) fs
+    | TLin (_, t) | TRefine (t, _, _) -> walk t
+    | TNatOp (_, a, b) -> walk a; walk b
+    | TVar r -> (match !r with Link t -> walk t | Unbound _ -> ())
+    | TNat _ | TChan _ | TError -> ()
+  in
+  let scheme = function Mono t -> walk t | Poly (_, _, t) -> walk t in
+  List.iter (fun (n, _) -> add n) builtin_types;
+  List.iter (fun (_, ci) -> add ci.ci_type) builtin_ctors;
+  List.iter (fun (_, sc) -> scheme sc) builtin_bindings;
+  List.iter (fun (_, sc) -> scheme sc) builtin_interface_bindings;
+  List.sort compare (Hashtbl.fold (fun n () l -> n :: l) acc [])
+
 let base_env errors type_map =
   let env = make_env errors type_map in
   let env = bind_vars builtin_bindings env in
@@ -2070,6 +2137,5 @@ let base_env errors type_map =
                    let lst = Option.value ~default:[] (StrMap.find_opt k m) in
                    (* Built-ins carry [dummy_span]; the coherence check reads it
                       to phrase a user-impl-over-builtin conflict specially. *)
-                   StrMap.add k ((v, Ast.dummy_span, None) :: lst) m) StrMap.empty builtin_impls;
+                   StrMap.add k ((v, Ast.dummy_span, None, []) :: lst) m) StrMap.empty builtin_impls;
   }
-

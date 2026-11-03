@@ -1,0 +1,37 @@
+-- Two-argument abstract refinements (2026-10-21, multi-arg design
+-- specs/2026-10-18-abstract-refinements-multi-arg-design.md phase 2, long
+-- form).  A definer on a curried callback chain, `keep : ({x : k | true}) ->
+-- ({y : v | true}) -> {Bool | _ == p(x, y)}`, and the relation it fixes over
+-- two sibling slots of the return, `Assoc({x : k | true}, {y : v | p(x, y)})`:
+-- every kept entry (x, y) satisfies p(x, y).  Every obligation below is
+-- PROVED, so `cap verified` accepts the module:
+--   a1  `filt`'s own body proves its relational return (`keep(k, v)` is
+--       `$abs_p(k, v)`; the recursive tails take the structural hypothesis);
+--   a2  a value demand: `fn (_k, v) -> v > 0` instantiates p, projected;
+--   rel a relational demand `y > x` from `fn (k, v) -> v > k`;
+--   m5  projection with a fresh key: `k > 0 && v > k` gives `v > 0`;
+--   neg a negative occurrence: `need_neg`'s parameter obliges the argument's
+--       entries to meet the instantiated relation;
+--   a4  passing a callable for a two-argument definer owes nothing.
+-- Reject twin: t456 (a too-weak lambda).
+mod TwoArgAbstract do
+  cap verified
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end
+  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+  fn filt(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)})
+      : Assoc({x : k | true}, {y : v | p(x, y)}) do
+    match a do
+      ANil -> ANil
+      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end
+    end
+  end
+  fn need_neg(_a : Assoc({x : k | true}, {y : v | p(x, y)}),
+              _keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}) : Int do 0 end
+  fn count(_a : Assoc(k, v), _keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}) : Int do 0 end
+  fn a2(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (_k, v) -> v > 0)) end
+  fn rel(a : Assoc(Int, Int)) : Int do need_arel(filt(a, fn (k, v) -> v > k)) end
+  fn m5(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (k, v) -> k > 0 && v > k)) end
+  fn neg() : Int do need_neg(ACons(1, 2, ACons(3, 7, ANil)), fn (k, v) -> v > k) end
+  fn a4(a : Assoc(Int, Int)) : Int do count(a, fn (k, v) -> v > k) end
+end

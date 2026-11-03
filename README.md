@@ -24,6 +24,8 @@ end
 - Records with functional update syntax (`{ r with field: value }`)
 - Polymorphic functions monomorphized at compile time (no boxing overhead)
 - Linear and affine types for ownership, safe mutation, and actor message-passing isolation
+- Refinement types checked by an SMT solver (z3): `{Int | _ > 0}`, set measures over collections (`elts`, `keys`, `card`), and abstract refinements, so `List.filter`, `List.partition`, `Deque.filter` and friends keep what their predicate proves; element facts flow through lambdas, local functions, tuple components and relational returns (`List({Int | _ < n})`), and a demand on a fold's result is checked as the accumulator's invariant
+- Capabilities: effects are values (`Cap(IO.FileRead)`), declared with `needs` and checked as a ceiling on the whole program
 
 **Syntax**
 - `fn name(x, y) do ... end`: named functions
@@ -52,9 +54,21 @@ end
 - Structured concurrency via `Task`: `Task.async`, `Task.await`, `Task.race`, `Task.any`, `Task.all_settled`, `Task.scope`
 - Cancellation tokens: `task_cancel_token_new`, `task_cancel`, `task_is_cancelled`, `task_spawn_with_cancel`, `task_cancel_by_id`
 
+**Distribution**
+- Choreographies: an `@[endpoints] protocol` is one global description of an interaction, projected to a typed endpoint API for every role, so a role that sends the wrong message or skips a step is a compile error
+- `ClusterNode`: SWIM membership, one authenticated connection pair per peer, a global name registry, cross-node monitors, and node certificates
+- `SessionNode` runs a choreography's roles on separate nodes; an actor can host a role
+- Topology apps and `forge deploy`: place roles on pools in `topology.toml`, then roll a build out pool by pool
+- Hot code reload: each actor, task and session keeps the code epoch it started under, and state migrates in order
+
+**Operating a running node**
+- `forge shell`: a REPL connected to a live node, which can spawn the program's own actors
+- `forge observe`, `forge top`, `forge diagnose`: actors, mailboxes, crash dumps and leak checks on a running node
+- `Trace`: bounded tracing of boundary calls and actor events; `WHICH` / `SOURCE` show which code a node is running
+
 ## FBIP: Functional But In-Place
 
-One of March's most distinctive performance features is **FBIP (Functional But In-Place)**, derived from the [Perceus reference counting paper](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/). March code that recursively transforms a data structure can automatically run as fast as (or faster than) equivalent imperative C code that mutates in-place.
+One of March's most distinctive performance features is **FBIP (Functional But In-Place)**, derived from the [Perceus reference counting paper](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/). March code that recursively transforms a uniquely-owned data structure reuses its memory in place, with no allocation on the reuse path and no annotations.
 
 ### How it works
 
@@ -82,17 +96,22 @@ With FBIP active, after the initial tree is built, every subsequent pass of `inc
 
 ### Benchmark: `bench/tree_transform.march`
 
-Depth-20 binary tree (1,048,576 leaves), 100 passes of `inc_leaves`:
+Depth-20 binary tree (1,048,576 leaves), 100 passes of `inc_leaves`. Median of 10 runs,
+Apple M3 Max, `--opt 2`, from [`bench/RESULTS.md`](bench/RESULTS.md) (2026-07-24):
 
-| Implementation | Time | Allocations per pass |
+| Implementation | Median | Allocations per pass |
 |---|---|---|
-| March (FBIP off, before the fix) | 11.0 s | 2 × 2^20 = 2M |
-| C (`malloc` / `free`) | 8.8 s | 2 × 2^20 = 2M |
-| Rust (`Box`) | 9.5 s | 2 × 2^20 = 2M |
-| OCaml (GC) | ~3.65 s | 2 × 2^20 = 2M (amortized) |
-| **March (FBIP on)** | **1.3 s** | 0 (after pass 1) |
+| Rust (`rustc -O`, `Box`) | 4902 ms | 2 × 2^20 = 2M |
+| OCaml (`ocamlopt`) | 3670 ms | 2 × 2^20 = 2M |
+| Elixir (BEAM) | 2369 ms | 2 × 2^20 = 2M |
+| **March (FBIP)** | **579 ms** | 0 (after pass 1) |
 
-March is **7× faster than C** on this benchmark, not because C is slow, but because `malloc`/`free` carry real overhead (bookkeeping, potential locks, cache pressure). 200M allocator calls across 100 passes add up. March avoids all of them with in-place reuse.
+Read this as in-place reuse against allocation, not as March against those languages in
+general. The Rust, OCaml and Elixir programs (`bench/rust/`, `bench/ocaml/`, `bench/elixir/`)
+build a fresh tree every pass; a Rust version that mutates through `&mut`, or a C version
+that reuses nodes, is not benchmarked. On the other workloads in the same table March is
+behind: fib(40), binary-trees(15) and list-ops(1M) are all faster in Rust or OCaml. With FBIP
+reuse disabled (a regression fixed 2026-07-24) this benchmark took 3842 ms, slower than OCaml.
 
 ### What patterns benefit
 
@@ -317,6 +336,7 @@ forge version                # print the current version
 forge version patch          # 1.2.3 -> 1.2.4 (rewrites [package].version)
 forge version minor --tag    # bump, commit, and tag vX.Y.Z (needs a clean tree)
 forge release                # clean tree -> build -> test -> bump + tag
+forge release build --tar    # a self-contained bundle with a bin/<app> launcher
 ```
 
 `forge fmt --check` and `forge lint` (which exits non-zero on errors) round out the CI checks.
@@ -497,7 +517,7 @@ lib/
   errors/errors.ml       diagnostic type (Error/Warning/Hint + span)
   search/search.ml       Hoogle-style type/name search engine
   refine/                refinement-types Z3 bridge
-stdlib/                  130 March stdlib modules (list, map, http, json, crypto,
+stdlib/                  135 March stdlib modules (list, map, http, json, crypto,
                          distributed-OTP actors, DataFrame, ...)
 runtime/                 C runtime (alloc, RC, scheduler, HTTP, TLS, WASM)
 forge/                   build tool (new, build, run, test, deps, publish, ...)

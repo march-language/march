@@ -12,6 +12,11 @@ expected `Pid(a)` but got `Int`. [type_mismatch]
 
 18 |       Some(p) -> is_alive(p)
                       ^^^^^^^^^^^
+
+    `p` was bound here as `Int`:
+
+18 |       Some(p) -> is_alive(p)
+                ^
     run `march --explain type_mismatch`
 
 

@@ -27,8 +27,26 @@ mod WebSocket do
   -- "non-exhaustive pattern match" — and a WebSocket.Conn returned from
   -- `upgrade` was a different type from the HttpServer.Conn going in.
 
-  -- Upgrade a conn to websocket. Handler is called after handshake.
-  -- Validates upgrade headers, marks conn as halted with WebSocketUpgrade.
+  doc """
+  Mark an `HttpServer.Conn` for upgrade to a WebSocket. Returns the conn
+  with status 101, response headers and body cleared, halted, and
+  `WebSocketUpgrade(handler)` set; after the pipeline returns, the server
+  runtime performs the handshake and calls `handler(socket)`.
+
+  This function does not itself check the request's `Upgrade` /
+  `Sec-WebSocket-Key` headers, nor whether the conn was already halted
+  (an earlier response is overwritten); do that in the plug first.
+
+  ## Examples
+
+      fn ws_plug(conn) do
+        if HttpServer.path(conn) == "/ws" do
+          WebSocket.upgrade(conn, echo_loop)
+        else
+          conn
+        end
+      end
+  """
   fn upgrade(conn, handler) do
     match conn do
     Conn(fd, m, p, pi, qs, rh, rb, _, _, _, _, assigns, _) ->
@@ -37,27 +55,76 @@ mod WebSocket do
     end
   end
 
-  -- Receive a frame (blocks until one arrives)
+  doc """
+  Receive the next frame, parking the calling task until one arrives.
+  Returns `TextFrame(s)`, `BinaryFrame(s)`, `Ping`, `Pong` or
+  `Close(code, reason)`. A read error or peer disconnect yields
+  `Close(1001, "going away")`; a frame over 16 MiB likewise; an unknown
+  opcode (including continuation frames of a fragmented message) yields
+  `Close(1002, "unknown opcode")`. Pings are not answered automatically.
+
+  ## Examples
+
+      fn echo_loop(socket) do
+        match WebSocket.recv(socket) do
+          TextFrame(s) ->
+            WebSocket.send_frame(socket, TextFrame(s))
+            echo_loop(socket)
+          Ping ->
+            WebSocket.send_frame(socket, Pong)
+            echo_loop(socket)
+          Close(_, _) -> ()
+          _ -> echo_loop(socket)
+        end
+      end
+  """
   fn recv(socket) do
     match socket do
     WsSocket(fd) -> ws_recv(fd)
     end
   end
 
-  -- Send a frame
+  doc """
+  Send one frame (server to client, unmasked) on the socket. Returns `()`.
+
+  ## Examples
+
+      WebSocket.send_frame(socket, TextFrame("hello"))
+  """
   fn send_frame(socket, frame) do
     match socket do
     WsSocket(fd) -> ws_send(fd, frame)
     end
   end
 
-  -- Send a close frame
+  doc """
+  Send a `Close(code, reason)` frame (e.g. 1000 for a normal closure). The
+  handler should then return; the runtime closes the TCP connection.
+
+  ## Examples
+
+      WebSocket.close(socket, 1000, "bye")
+  """
   fn close(socket, code, reason) do
     send_frame(socket, Close(code, reason))
   end
 
-  -- Multiplex: wait on socket OR actor mailbox OR timeout.
-  -- Returns WsData(frame), ActorMsg, or Timeout.
+  doc """
+  Wait up to `timeout_ms` milliseconds for a frame. Returns `WsData(frame)`
+  (the frame as `recv` would give it) or `Timeout`; a `timeout_ms` of 0 or
+  less waits indefinitely. A wait error is reported as `Timeout`.
+
+  `ActorMsg` is part of the result type, but this function passes no actor
+  notification pipe to the runtime, so it is never returned here.
+
+  ## Examples
+
+      match WebSocket.select(socket, 30000) do
+        WsData(TextFrame(s)) -> handle(s)
+        WsData(_) -> ()
+        _ -> WebSocket.send_frame(socket, Ping)
+      end
+  """
   fn select(socket, timeout_ms) do
     match socket do
     WsSocket(fd) -> ws_select(fd, 0, timeout_ms)

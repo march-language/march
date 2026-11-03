@@ -1,0 +1,60 @@
+-- Two-node harness, scenario "session_refused": node-a runs role A. Its
+-- first session finds role B's endpoint by name on node-b, but the name is
+-- stale (node-b bound it to an actor with no session route, as a party that
+-- already ended leaves a name behind until its unregistration reaches us),
+-- so node-b refuses A's message with DELIVERY_FAILED. A must fail at once,
+-- not wait for ever on a reply that cannot come. Its second session is a
+-- normal one. See scenario.sh.
+mod SessionRefusedA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Echo_A.S_send_Msg_A_B_1, n : Int) : Echo_A.Yield do
+    Echo_A.recv_Msg_B_A_1(s, Echo_A.send_Msg_A_B_1(s, st, n), fn (_m, st1) -> Echo_A.close(s, st1))
+  end
+
+  pfn await_name(h : Cap(ClusterNode.Live), name : String, left : Int) : Bool do
+    if Option.is_some(ClusterNode.lookup(h, name)) do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      await_name(h, name, left - 50)
+    end end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "refused-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
+        if await_name(h, "session:refused-1/2", 120000) do () else panic("node-a: the stale name never arrived") end
+        match Echo_Run.cluster_A(c, h, "refused-1", fn (s, st) -> role_a(s, st, 1)) do
+          Ok(_) -> println("A: session to a stale endpoint failed: false (it finished)")
+          Err(e) ->
+            let why = Echo_Run.error_message(e)
+            IO.warn("A: refused-1: " ++ why)
+            println("A: session to a stale endpoint failed: true")
+            println("A: the failure names the refusal: " ++ (if String.contains(why, "refused by node") do "true" else "false (" ++ why ++ ")" end))
+        end
+        match Echo_Run.cluster_A(c, h, "refused-2", fn (s, st) -> role_a(s, st, 2)) do
+          Ok(_) -> println("A: next session finished")
+          Err(e) -> println("A: next session failed: " ++ Echo_Run.error_message(e))
+        end
+        ClusterNode.stop(h)
+    end
+  end
+end

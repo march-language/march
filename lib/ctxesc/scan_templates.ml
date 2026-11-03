@@ -32,7 +32,7 @@ let diff_mode = ref false
    already covered by test_ctx_escape.c. *)
 let probes_for (e : C.escaper) =
   match e with
-  | C.EscUrlComponent ->
+  | C.EscUrlComponent | C.EscUrlPath ->
     [ "bastion"; "march_doc"; "0.2.3"; "readme"; "before"; "a b"; "x/y" ]
   | C.EscUrlWhole ->
     [ "/packages/bastion"; "/admin/users"; "https://example.com/a?b=c"; "#frag";

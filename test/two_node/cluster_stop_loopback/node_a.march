@@ -31,7 +31,7 @@ mod ClusterStopLoopback do
   end
 
   pfn visible(h : Cap(ClusterNode.Live), o : SessionNode.Offer, left : Int) : () do
-    if ClusterNode.lookup(h, o.name) != None do ()
+    if Option.is_some(ClusterNode.lookup(h, o.name)) do ()
     else if left <= 0 do panic("the offer never became visible") else
       sleep_ms(20)
       visible(h, o, left - 20)
@@ -64,7 +64,7 @@ mod ClusterStopLoopback do
               Err(e) -> println("before stop: " ++ Echo_Run.error_message(e))
             end
             let running = sinks()
-            println("queue to self before stop: " ++ (if ClusterNode.queue_for(h, own) == None do "none" else "some" end))
+            println("queue to self before stop: " ++ (if Option.is_none(ClusterNode.queue_for(h, own)) do "none" else "some" end))
             -- Stop ends the loopback, a connection like any other: every
             -- session party is told its peers on this node are gone (a party
             -- left waiting for frames the closed loopback refused kept the
@@ -75,7 +75,7 @@ mod ClusterStopLoopback do
             ClusterNode.stop(h)
             println("peers on this node told at stop: " ++ Vault.get_or(told, "own", "nothing"))
             ClusterNode.off_peer_closed(h, closer)
-            println("queue to self after stop: " ++ (if ClusterNode.queue_for(h, own) == None do "none" else "some" end))
+            println("queue to self after stop: " ++ (if Option.is_none(ClusterNode.queue_for(h, own)) do "none" else "some" end))
             println("loopback sink released: " ++ bool_to_string(wait_sinks(running - 1, 3000) == running - 1))
             let to = ClusterNode.global_pid(h, 1)
             match ClusterNode.send_msg(h, to, "Probe", Nil, NodeQueue.DropNew) do

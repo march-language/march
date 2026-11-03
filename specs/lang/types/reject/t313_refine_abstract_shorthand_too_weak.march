@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: abstract-refinement-too-weak
+-- Abstract refinements, phase 4: the shorthand-declared combinator of t312
+-- with a lambda too weak for the demand (`y >= 0` admits 0).  A too-weak
+-- skip, which `cap verified` makes this error.  Accept companion: accept/t312.
+mod AbsShorthandWeak do
+  cap verified
+  fn keep_all(xs : List(a), keep : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do Cons(h, keep_all(t, keep)) else keep_all(t, keep) end
+    end
+  end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn go(ys : List(Int)) : Int do sum_pos(keep_all(ys, fn y -> y >= 0)) end
+end

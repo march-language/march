@@ -1,0 +1,18 @@
+mod B1 do
+  @[measure]
+  fn cat(xs : List(Int), ys : List(Int)) : List(Int) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, cat(t, ys))
+    end
+  end
+
+  fn law(xs : List(Int), ys : List(Int)) : {Unit | len(cat(xs, ys)) == len(xs) + len(ys)} do
+    ()
+  end
+
+  fn main() : Unit do
+    let _ = law(Nil, Nil)
+    ()
+  end
+end

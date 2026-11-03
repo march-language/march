@@ -109,6 +109,19 @@ type reason =
      source ever runs depends on the caller's data (`List.map([], f)` is
      fine). *)
   | Parametric_source_unproved of string
+  (* The same discharge for a type variable a callback also CONSUMES (an
+     accumulator: `fold_left`'s `b`, design 2026-10-18 fold-accumulator
+     invariants §3.4), split by which half failed.  [Accumulator_base_unproved]:
+     a value the accumulator starts from (the initial value, or the elements
+     of a `reduce`) was not proved to meet the demand.
+     [Accumulator_step_unproved]: the callback, assuming the demand of every
+     parameter typed with the variable, was not proved to return a value
+     meeting it (or the rule declined that callback; the payload says why).
+     Never a violation: a failing base can be harmless on a non-empty list, a
+     failing step harmless on an empty one, and a true property need not be
+     inductive (§3.5).  Payload is the rendered account. *)
+  | Accumulator_base_unproved of string
+  | Accumulator_step_unproved of string
   (* The solver REFUTED the goal on some path (its negation was valid under
      the facts the checker built), but no concrete input could be found that
      makes the function actually return a value violating the predicate.  A
@@ -118,6 +131,12 @@ type reason =
      ([Refine_post.check_post_induction]), whose refutations carry no
      diagnostic of their own. *)
   | Refuted_unconfirmed
+  (* A TERMINATION obligation ([Termination]) the solver did not prove: the
+     recursive call is not shown to decrease the metric (termination design
+     §3.4).  The payload is the counterexample the solver gave, rendered
+     (`n = -1`), or "" when it gave none.  Never a [Violated]: recursion not
+     shown to decrease is not a runtime contract failure. *)
+  | Not_decreasing of string
   (* A call to a combinator with an abstract refinement (design 2026-09-20
      §3.3): the predicate instantiated from the passed lambda does not imply
      the demand.  Never a violation — whether a weaker predicate ever admits a
@@ -129,6 +148,15 @@ type reason =
      mentioning another name, or a callee whose own body is not proved to
      return elements satisfying it (§3.1).  Payload says which. *)
   | Abstract_uninstantiated of string
+  (* Reflection (specs/2026-10-29-refinement-reflection-design.md §3.9, D15):
+     stage 2 of the two-stage discharge ran and did not prove the goal.
+     [Reflect_fuel]: its query held a reflected call that unfolding PRODUCED
+     and did not unfold in turn (single unfolding, D12); the payload names
+     its function.  [Reflect_budget]: the query had more reflected calls than
+     the per-query cap of unfoldings (32), so some were dropped.  Budget takes
+     precedence over fuel. *)
+  | Reflect_fuel of string
+  | Reflect_budget
 
 (* [Trusted]: the obligation was [Skipped] for some ordinary reason, but the
    enclosing function carries `@[trusted]`, so under `cap verified` it is
@@ -164,8 +192,18 @@ type verdict = Proved | Violated | Trusted | Skipped of reason
    [Division] is its own kind rather than a [Precondition] with a synthetic
    callee because both `cap verified` escalation and `--refine-report` branch
    on kind; folding it into [Precondition] would silently change what those
-   two do for every module that already contains a division. *)
-type kind = Precondition | Postcondition | Division
+   two do for every module that already contains a division.
+
+   [Termination]: a recursive call's metric checked to decrease (termination
+   design §3.4), [callee] naming the CALLED function.  Its own kind for the
+   [Division] reason verbatim: `cap verified` escalates only the termination
+   obligations of an annotated function (decision D2), and folding them into
+   [Precondition] would change both consumers for every recursive module.
+
+   [Overflow]: a `cap no_panic` Int `+ - *` or negation checked to stay in
+   [-2^62, 2^62) by [Overflow_safety]; [callee] names the operator.  Its own
+   kind for the same reason as [Division]. *)
+type kind = Precondition | Postcondition | Division | Termination | Overflow
 
 type t =
   { span : March_ast.Ast.span
@@ -173,6 +211,12 @@ type t =
   ; predicate : string
   ; verdict : verdict
   ; kind : kind
+  ; inst : string option
+    (* The predicate re-spelled in the CALLER's scope (formals replaced by the
+       call's actuals) when every free formal maps to an actual that is a plain
+       variable or a literal; [None] otherwise.  Record-only: no verdict reads
+       it.  Inference mines it as a candidate for the caller's own parameter
+       (design 2026-10-20 §1.3, "demand transport"). *)
   }
 
 let log : t list ref = ref []
@@ -204,7 +248,14 @@ let by_span : (March_ast.Ast.span, t list) Hashtbl.t = Hashtbl.create 64
    [Refine_check.check_module] calls [reset] at its top.  Leaking an entry
    across modules would let a later module read a `Proved` that was never
    established for it, which is strictly worse than reading nothing. *)
-let reset () = log := []; Hashtbl.reset by_span
+(* Reflection §2.4: the definitions a stage-2 proof used (its unsat core,
+   mapped from assumption literals to function names), by obligation.  Filled
+   by [record] from [March_refine.Refine.last_core], which the proving
+   discharge just set; printed as the `uses:` column of
+   `--refine-report-sites=all`. *)
+let uses_tbl : (March_ast.Ast.span * string * string, string list) Hashtbl.t = Hashtbl.create 16
+
+let reset () = log := []; Hashtbl.reset by_span; Hashtbl.reset uses_tbl
 
 (* Run [f] against a SCRATCH ledger+index, then put the real ones back.
 
@@ -240,11 +291,43 @@ let with_scratch (f : unit -> 'a) : 'a =
   | v -> restore (); v
   | exception e -> restore (); raise e
 
+let uses_key (o : t) = (o.span, o.callee, o.predicate)
+
+let uses_of (o : t) : string list = Option.value ~default:[] (Hashtbl.find_opt uses_tbl (uses_key o))
+
+let set_uses (o : t) (u : string list) : unit = if u <> [] then Hashtbl.replace uses_tbl (uses_key o) u
+
 let record (o : t) : unit =
+  (if o.verdict = Proved && !March_refine.Refine.last_core <> [] then
+     let names =
+       List.filter_map Reflect_state.literal_function !March_refine.Refine.last_core
+       |> List.sort_uniq compare
+     in
+     set_uses o names);
   log := o :: !log;
   Hashtbl.replace by_span o.span (o :: Option.value ~default:[] (Hashtbl.find_opt by_span o.span))
 
 let all () : t list = List.rev !log
+
+(* Undo every [record] since the ledger was [saved] (a physical suffix of it):
+   the two-stage discharge (reflection §4.4) runs an obligation twice and
+   keeps one stage's records.  Each removed record is the head of its span's
+   index entry, since records are pushed in order.  Returns the removed
+   records oldest first.  [uses_tbl] is left alone: the caller decides whose
+   `uses:` survive. *)
+let rollback_to (saved : t list) : t list =
+  let removed = ref [] in
+  while !log != saved && !log <> [] do
+    match !log with
+    | o :: rest ->
+      log := rest;
+      removed := o :: !removed;
+      (match Hashtbl.find_opt by_span o.span with
+       | Some (x :: xs) when x == o -> if xs = [] then Hashtbl.remove by_span o.span else Hashtbl.replace by_span o.span xs
+       | _ -> ())
+    | [] -> ()
+  done;
+  !removed
 
 (* Every obligation recorded at [span], in the order they were recorded.  One
    call site can raise several — one per refined parameter — so this is a list,
@@ -299,9 +382,14 @@ let reason_name = function
   | Opaque_application _ -> "opaque-application"
   | Partial_conjunct _ -> "partial-conjunct"
   | Parametric_source_unproved _ -> "parametric-source-unproved"
+  | Accumulator_base_unproved _ -> "accumulator-base-unproved"
+  | Accumulator_step_unproved _ -> "accumulator-step-unproved"
   | Refuted_unconfirmed -> "refuted-unconfirmed"
+  | Not_decreasing _ -> "not-decreasing"
   | Abstract_too_weak _ -> "abstract-refinement-too-weak"
   | Abstract_uninstantiated _ -> "abstract-refinement-uninstantiated"
+  | Reflect_fuel _ -> "reflect-fuel"
+  | Reflect_budget -> "reflect-budget"
 
 (* One clause of plain English per reason, for the `cap verified` error text.
    [reason_name] alone is a debug-report slug; once a reason reaches a USER it
@@ -340,11 +428,23 @@ let reason_detail = function
       (String.concat " and " (List.map (Printf.sprintf "`%s`") held))
       (String.concat " and " (List.map (Printf.sprintf "`%s`") missing))
   | Parametric_source_unproved what -> what
+  | Accumulator_base_unproved what -> what
+  | Accumulator_step_unproved what -> what
   | Refuted_unconfirmed ->
     "the solver refuted the predicate on some path, but no concrete input was \
      found on which the function returns a value violating it"
+  | Not_decreasing "" -> "the recursive call is not shown to decrease the metric"
+  | Not_decreasing cx -> Printf.sprintf "the recursive call is not shown to decrease the metric: e.g. %s" cx
   | Abstract_too_weak what -> what
   | Abstract_uninstantiated what -> what
+  | Reflect_fuel f ->
+    Printf.sprintf
+      "the proof may need more unfolding of `%s`; add a lemma call or `assert`, or raise \
+       `@[reflect(fuel: N)]`"
+      f
+  | Reflect_budget ->
+    "the query has more reflected calls than the checker unfolds in one query (32); split the \
+     predicate or add an `assert`"
 
 (* Deliberately still a 3-tuple: (proved, violated, skips-by-reason).  Every
    existing caller destructures it that way, and [Trusted] does not belong in
@@ -375,3 +475,18 @@ let summary () =
         Hashtbl.replace skips name (1 + Option.value ~default:0 (Hashtbl.find_opt skips name)))
     !log;
   (!proved, !violated, Hashtbl.fold (fun name n acc -> (name, n) :: acc) skips [])
+
+(* The `by kind:` line of `--refine-report` (bin/main.ml), here so it can be
+   tested.  The termination count (termination design §6) is printed only
+   when there is one: such obligations exist only for an `@[decreases]`
+   function or under `--termination-report`, so every other report keeps the
+   exact line it always had.  The overflow count follows the same rule: only a
+   `cap no_panic` module with Int arithmetic has any. *)
+let by_kind_line (os : t list) : string =
+  let count k = List.length (List.filter (fun o -> o.kind = k) os) in
+  let termination = count Termination in
+  let overflow = count Overflow in
+  Printf.sprintf "  by kind: %d precondition, %d postcondition, %d division%s%s" (count Precondition)
+    (count Postcondition) (count Division)
+    (if termination > 0 then Printf.sprintf ", %d termination" termination else "")
+    (if overflow > 0 then Printf.sprintf ", %d overflow" overflow else "")

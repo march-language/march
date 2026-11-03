@@ -1,0 +1,1 @@
+{"severity":"warning","file":"errors/predicate_eq_structural_1.march","start_line":12,"start_col":19,"end_line":12,"end_col":31,"message":"`==` in a refinement means structural equality; `P` has a hand-written `Eq`, which this predicate does not use.","code":"predicate_eq_structural","fix":null,"labels":[],"notes":[]}

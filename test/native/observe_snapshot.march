@@ -69,17 +69,39 @@ mod Main do
     end
   end
 
+  -- Block (up to k polls of 5 ms) until the crashed child's pid has left
+  -- Actor.list and the actor count is back to n: its supervisor has handled the
+  -- exit and started the replacement.
+  fn wait_restart(intro, dead : Int, n : Int, k : Int) do
+    if k <= 0 do ()
+    else
+      let ps = Actor.list(intro)
+      if List.length(ps) == n && List.all(ps, fn p -> pid_to_int(p) != dead) do ()
+      else
+        sleep_ms(5)
+        wait_restart(intro, dead, n, k - 1)
+      end
+    end
+  end
+
   fn main(io : Cap(IO)) do
     let intro = Actor.introspect(io)
     let s1 = spawn(Sup)
+    let before = List.length(Actor.list(intro))
     -- Crash one supervised child of s1 (children are spawned before their
     -- supervisor, so the lowest pid is one); s1 restarts it under a new pid.
     -- The checker finds the dead pid itself, as the gap in the pid range.
     -- (Not get_actor_field(s1, "a"): that does not compile under
     -- --hot-reload, which the type-name leg needs.)
+    -- main waits for the restart before spawning anything else: the restarted
+    -- child's pid is the next free one, so without the wait it depended on how
+    -- far main's later spawns had got, and so did every row after it in
+    -- test/native/forge_top.expected.
     match Actor.list(intro) do
-      Cons(first, _) -> send(first, Boom())
-      Nil -> None
+      Cons(first, _) ->
+        let _ = send(first, Boom())
+        wait_restart(intro, pid_to_int(first), before, 2000)
+      Nil -> ()
     end
     let _s2 = spawn(Sup)
     let _s3 = spawn(Sup)

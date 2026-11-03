@@ -40,10 +40,15 @@ mod Swim do
     | Gossip(Member)                  -- disseminate a member status update
   derive Eq for Action
 
+  doc "Protocol tunables, durations in ms: [indirect_k] is the number of helpers asked to ping indirectly."
   fn config(ack_timeout_ms : Int, suspect_timeout_ms : Int, indirect_k : Int) : Config do
     { ack_timeout_ms: ack_timeout_ms, suspect_timeout_ms: suspect_timeout_ms, indirect_k: indirect_k }
   end
 
+  doc """
+  A fresh SWIM state for node [me] at [incarnation] over the member view
+  [members]: no probe in flight and no suspect timers armed.
+  """
   fn make(me : String, incarnation : Int, members : Members, config : Config) : State do
     { me: me, incarnation: incarnation, members: members, config: config,
       probe: None, suspect_deadlines: Map.empty() }
@@ -57,15 +62,28 @@ mod Swim do
     end
   end
 
-  -- Begin a protocol period: directly ping [target] (a random Alive member the
-  -- caller injects). Replaces any in-flight probe.
+  doc """
+  Begin a protocol period by directly pinging [target] (a random Alive member
+  the caller injects), stamped [now]. Replaces any in-flight probe, without
+  suspecting its target. Returns the new state and `SendPing(target)`.
+
+  ## Examples
+
+      let s = Swim.make("me", 0, members, Swim.config(500, 5000, 3))
+      Swim.begin_period(s, 1000, "n2")
+      -- (s with probe {target: "n2", sent_at: 1000}, SendPing("n2"))
+  """
   fn begin_period(s : State, now : Int, target : String) : (State, Action) do
     let p = { target: target, sent_at: now, indirect_sent: false, acked: false }
     let out = ({ s with probe: Some(p) }, SendPing(target))
     out
   end
 
-  -- Record an ack for [from]; clears the in-flight probe iff it matches.
+  doc """
+  Record an ack from [from]: when it matches the in-flight probe's target the
+  probe is marked acked (it stays in place until `end_period`). An ack from any
+  other node, or with no probe in flight, leaves the state unchanged.
+  """
   fn on_ack(s : State, from : String) : State do
     match s.probe do
       None -> s
@@ -86,9 +104,15 @@ mod Swim do
     end
   end
 
-  -- Escalate an overdue direct ping to k-way indirect ping-req via [helpers]
-  -- (random Alive members != target, injected by the caller). Emits one
-  -- SendPingReq per helper and marks the probe so it escalates only once.
+  doc """
+  Escalate an overdue direct ping to k-way indirect ping-req through [helpers]
+  (random Alive members other than the target, injected by the caller). When
+  the probe is unacked, not yet escalated, and at least `ack_timeout_ms` old
+  at [now], emits one `SendPingReq(helper, target)` per helper and marks the
+  probe so it escalates at most once. Otherwise (no probe, acked, already
+  escalated, or not yet overdue) returns the state unchanged and `Nil`. An
+  empty [helpers] still marks the probe escalated.
+  """
   fn escalate_indirect(s : State, now : Int, helpers : List(String)) : (State, List(Action)) do
     match s.probe do
       None -> (s, Nil)
@@ -107,9 +131,13 @@ mod Swim do
     end
   end
 
-  -- End the protocol period. If the probe was never acked, mark its target
-  -- Suspect at the target's current incarnation, arm the suspect→dead timer, and
-  -- gossip the Suspect. Always clears the probe for the next period.
+  doc """
+  End the protocol period and clear the probe. If the probe was never acked,
+  its target is marked Suspect at its current incarnation (0 if unknown, which
+  also adds it to the view), its suspect timer is armed for
+  `now + suspect_timeout_ms`, and the Suspect is returned as one `Gossip`.
+  With no probe, or an acked one, returns `Nil` actions.
+  """
   fn end_period(s : State, now : Int) : (State, List(Action)) do
     match s.probe do
       None -> (s, Nil)
@@ -128,8 +156,11 @@ mod Swim do
     end
   end
 
-  -- Promote every Suspect whose suspect timer has expired (deadline <= now) to
-  -- Dead, gossiping each. Returns the updated state and the Dead gossips.
+  doc """
+  Promote every node whose suspect timer has expired (deadline <= [now]) to
+  Dead at its current incarnation, disarm its timer, and return one `Gossip`
+  per promotion. Expired timers are visited in unspecified order.
+  """
   fn expire_suspects(s : State, now : Int) : (State, List(Action)) do
     let entries = Map.entries(s.suspect_deadlines)
     let expired = List.filter(entries, fn (kv) ->
@@ -149,9 +180,11 @@ mod Swim do
       end)
   end
 
-  -- Fold a gossiped member update into our view. A higher-incarnation Alive
-  -- refutes a local Suspect/Dead — when the winner is Alive again, cancel its
-  -- pending suspect timer.
+  doc """
+  Fold a gossiped member update into the view (CRDT merge). If the resulting
+  winner for that node is Alive, its pending suspect timer is cancelled, so a
+  higher-incarnation Alive refutes a local Suspect. Produces no actions.
+  """
   fn on_gossip(s : State, member : Member) : State do
     let members2 = Membership.observe(s.members, member)
     let s2 = { s with members: members2 }
@@ -165,10 +198,13 @@ mod Swim do
     end
   end
 
-  -- Suspect [id] now, at its current incarnation, and arm its suspect timer:
-  -- what a closed connection means to the node service (a hint, not a
-  -- verdict -- specs/progress/2026-09-18-cluster-node-service.md). A member
-  -- that is already Suspect or Dead, or unknown, or ourselves, is left alone.
+  doc """
+  Suspect [id] now at its current incarnation and arm its suspect timer
+  (`now + suspect_timeout_ms`), returning the Suspect as one `Gossip`. This is
+  what a closed connection means to the node service: a hint, not a verdict.
+  A member that is already Suspect or Dead, an unknown id, or [id] equal to
+  ourselves is left alone (`Nil` actions).
+  """
   fn suspect_member(s : State, now : Int, id : String) : (State, List(Action)) do
     if id == s.me do
       (s, Nil)
@@ -189,8 +225,12 @@ mod Swim do
     end
   end
 
-  -- If we have been suspected or declared dead in our own view, refute by
-  -- bumping our incarnation above the accusation and re-announcing Alive.
+  doc """
+  If our own entry in the view is Suspect or Dead, refute it: bump our
+  incarnation to one above both our own and the accusation's, record ourselves
+  Alive at it, and return the Alive as `Some(Gossip(...))`. Returns `None`
+  (state unchanged) when we are Alive or absent from our own view.
+  """
   fn refute(s : State) : (State, Option(Action)) do
     match Membership.get(s.members, s.me) do
       None -> (s, None)

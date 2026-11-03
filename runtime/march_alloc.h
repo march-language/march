@@ -52,6 +52,8 @@ void  march_free_any(void *p);
 void *march_realloc_any(void *p, size_t n);
 
 #ifdef MARCH_ALLOC_DEFINE_SHIMS
+#include <stdatomic.h>
+#include <stdint.h>
 /* The real libc entry points, reached by symbol name because `free` and
  * `realloc` are macros in this TU. */
 #define MARCH_ALLOC_STR2(x) #x
@@ -61,13 +63,59 @@ extern void  march_libc_free(void *)
 extern void *march_libc_realloc(void *, size_t)
     __asm__(MARCH_ALLOC_STR(__USER_LABEL_PREFIX__) "realloc");
 
-void march_free_any(void *p) {
-    if (p && mi_is_in_heap_region(p)) mi_free(p);
+/* Fast path for the provenance test: the bounds of mimalloc's FIRST arena
+ * (arena id 1), where every March object lives until the heap outgrows it
+ * (mimalloc reserves 1 GiB arenas).  mi_is_in_heap_region is an out-of-line
+ * walk of the arena table plus a segment-map lookup; for a pointer inside
+ * arena 1 it answers yes by exactly this comparison
+ * (_mi_arena_contains: start <= p < start + mi_arena_block_size(count), the
+ * same span mi_arena_area reports), so testing it inline first changes no
+ * answer, only the cost: ~10% of bench/binary_trees on an M3.
+ *
+ * The bounds are learnt lazily by whichever free first takes the slow path
+ * after the arena exists, and are written with no ordering on purpose: the
+ * unset state is the EMPTY range [UINTPTR_MAX, 0), so a reader that sees only
+ * one of the two stores sees [lo, 0) or [UINTPTR_MAX, hi), both empty, and
+ * falls back to the full test.  Arenas are never unmapped while the process
+ * runs (mimalloc's destroy_on_exit is off), so the bounds never go stale. */
+static _Atomic uintptr_t march_mi_arena_lo = UINTPTR_MAX;
+static _Atomic uintptr_t march_mi_arena_hi = 0;
+
+static inline int march_mi_in_first_arena(const void *p) {
+    uintptr_t a = (uintptr_t)p;
+    return a >= atomic_load_explicit(&march_mi_arena_lo, memory_order_relaxed)
+        && a <  atomic_load_explicit(&march_mi_arena_hi, memory_order_relaxed);
+}
+
+__attribute__((noinline))
+static int march_mi_owns_slow(const void *p) {
+    if (!mi_is_in_heap_region(p)) return 0;
+    if (atomic_load_explicit(&march_mi_arena_hi, memory_order_relaxed) == 0) {
+        size_t sz = 0;
+        void *start = mi_arena_area(1, &sz);
+        if (start && sz) {
+            atomic_store_explicit(&march_mi_arena_lo, (uintptr_t)start, memory_order_relaxed);
+            atomic_store_explicit(&march_mi_arena_hi, (uintptr_t)start + sz, memory_order_relaxed);
+        }
+    }
+    return 1;
+}
+
+__attribute__((noinline))
+static void march_free_any_slow(void *p) {
+    if (p && march_mi_owns_slow(p)) mi_free(p);
     else march_libc_free(p);
 }
 
+/* Both arms are tail calls, so an inlined free() needs no stack frame. */
+void march_free_any(void *p) {
+    if (__builtin_expect(march_mi_in_first_arena(p), 1)) mi_free(p);
+    else march_free_any_slow(p);
+}
+
 void *march_realloc_any(void *p, size_t n) {
-    if (p && mi_is_in_heap_region(p)) return mi_realloc(p, n);
+    if (march_mi_in_first_arena(p) || (p && march_mi_owns_slow(p)))
+        return mi_realloc(p, n);
     return march_libc_realloc(p, n);
 }
 #endif /* MARCH_ALLOC_DEFINE_SHIMS */

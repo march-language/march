@@ -282,6 +282,12 @@ exception Yield
 type march_frame = { mf_name : string; mf_file : string; mf_line : int; }
 val get_march_stack : unit -> march_frame list
 val clear_march_stack : unit -> unit
+
+(** Report a crash caught at a runtime boundary to the Diagnostics crash
+    observers (kind 0 Panic, 1 ActorCrashed); [outer] names the outermost
+    function of the backtrace.  A no-op with no observer registered. *)
+val diag_report_crash :
+  ?base:int -> kind:int -> pid:int -> supervised:bool -> outer:string -> exn -> unit
 val set_reduction_counting : bool -> unit
 val arm_reduction_budget : int -> unit
 val reductions_used : int -> int

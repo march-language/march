@@ -23,6 +23,8 @@
 --   encode_string(String)              -> JsonValue
 --   encode_array(List(JsonValue))      -> JsonValue
 --   encode_object(List((String, JsonValue))) -> JsonValue
+--
+-- doc: try
 
 mod Json do
 
@@ -498,10 +500,14 @@ mod Json do
   Parse a JSON string into a JsonValue.
   Returns Ok(value) on success, Err(message) on parse error.
 
-      Json.parse("null")           -- Ok(Null)
-      Json.parse("42")             -- Ok(Number(42.0))
-      Json.parse("[1, 2, 3]")      -- Ok(Array([Number(1.0), ...]))
-      Json.parse("{\"x\": 1}")     -- Ok(Object([("x", Number(1.0))]))
+      march> Json.parse("null")
+      Ok(Null)
+      march> Json.parse("42") == Ok(Number(42.0))
+      true
+      march> Json.parse("[1, 2, 3]") == Ok(Array([Number(1.0), Number(2.0), Number(3.0)]))
+      true
+      march> Json.parse("{\"x\": 1}") == Ok(Object([("x", Number(1.0))]))
+      true
   """
   fn parse(s) do
     match parse_value(s, 0) do
@@ -517,10 +523,14 @@ mod Json do
   doc """
   Convert a JsonValue to its JSON string representation.
 
-      Json.to_string(Null)         -- "null"
-      Json.to_string(Bool(true))   -- "true"
-      Json.to_string(Number(3.14)) -- "3.14"
-      Json.to_string(Str("hi"))    -- "\"hi\""
+      march> Json.to_string(Null)
+      "null"
+      march> Json.to_string(Bool(true))
+      "true"
+      march> Json.to_string(Number(3.14))
+      "3.14"
+      march> Json.to_string(Str("hi"))
+      "\"hi\""
   """
   fn to_string(jv) do
     match jv do
@@ -550,8 +560,10 @@ mod Json do
   Returns Some(value) if found, or None otherwise.
   If jv is not an Object, returns None.
 
-      Json.get(Object([("x", Number(1.0))]), "x") -- Some(Number(1.0))
-      Json.get(Null, "x")                          -- None
+      march> Json.get(Object([("x", Number(1.0))]), "x") == Some(Number(1.0))
+      true
+      march> Json.get(Null, "x")
+      None
   """
   fn get(jv : JsonValue, key : String) : Option(JsonValue) do
     match jv do
@@ -579,8 +591,10 @@ mod Json do
   record decoder, which destructures `Object(kvs)` once and then looks up
   each field by name without re-matching the wrapper each time.
 
-      Json.get_field([("x", Number(1.0))], "x") -- Some(Number(1.0))
-      Json.get_field([], "x")                    -- None
+      march> Json.get_field([("x", Number(1.0))], "x") == Some(Number(1.0))
+      true
+      march> Json.get_field([], "x")
+      None
   """
   fn get_field(kvs : List((String, JsonValue)), key : String) : Option(JsonValue) do
     match kvs do
@@ -597,7 +611,12 @@ mod Json do
   Nested field access: traverse a path of keys into nested JSON Objects.
   Returns Some(value) if the full path exists, or None if any step fails.
 
-      Json.get_in(obj, ["a", "b", "c"]) -- equivalent to obj.a.b.c
+      march> let obj = Object([("a", Object([("b", Object([("c", Bool(true))]))]))])
+      march> Json.get_in(obj, ["a", "b", "c"])  -- equivalent to obj.a.b.c
+      Some(Bool(true))
+      march> let obj = Object([("a", Object([("b", Object([("c", Bool(true))]))]))])
+      march> Json.get_in(obj, ["a", "x"])
+      None
 
   Object-only.  For paths that include array indices, use `get_path`.
   """
@@ -621,10 +640,10 @@ mod Json do
   Returns Some(value) if in range, or None otherwise (also None if jv
   is not an Array, or if i is negative).
 
-      Json.get_at(Array([Number(1.0), Number(2.0)]), 1)
-      -- Some(Number(2.0))
-      Json.get_at(Array([Number(1.0)]), 5)
-      -- None
+      march> Json.get_at(Array([Number(1.0), Number(2.0)]), 1) == Some(Number(2.0))
+      true
+      march> Json.get_at(Array([Number(1.0)]), 5)
+      None
   """
   fn get_at(jv : JsonValue, i : Int) : Option(JsonValue) do
     match jv do
@@ -650,8 +669,20 @@ mod Json do
   array index.  Returns Some(value) if the full path exists, or None
   if any step fails.
 
-      Json.get_path(jv, [Key("items"), Index(0), Key("name")])
-      -- equivalent to jv.items[0].name
+  Write `JsonPath.Key` when `Key` alone is ambiguous with another type's
+  constructor in scope.
+
+  ## Examples
+
+      march> let jv = Json.encode_object([("items", Json.encode_array([Json.encode_object([("name", Json.encode_string("pen"))])]))])
+      march> Json.get_path(jv, [JsonPath.Key("items"), Index(0), JsonPath.Key("name")]) == Some(Json.encode_string("pen"))
+      true
+      march> let jv = Json.encode_object([("items", Json.encode_array([Json.encode_object([("name", Json.encode_string("pen"))])]))])
+      march> Json.get_path(jv, [JsonPath.Key("items"), Index(3)])
+      None
+      march> let jv = Json.encode_object([("items", Json.encode_array([Json.encode_object([("name", Json.encode_string("pen"))])]))])
+      march> Json.get_path(jv, []) == Some(jv)
+      true
   """
   fn get_path(jv : JsonValue, path : List(JsonPath)) : Option(JsonValue) do
     match path do
@@ -669,35 +700,114 @@ mod Json do
     end
   end
 
-  doc "Construct a JSON null value."
+  doc """
+  Construct a JSON null value (the `Null` constructor).
+
+  ## Examples
+
+      march> Json.to_string(Json.encode_null())
+      "null"
+  """
   fn encode_null() do Null end
 
-  doc "Construct a JSON boolean value."
+  doc """
+  Construct a JSON boolean value (the `Bool` constructor).
+
+  ## Examples
+
+      march> Json.to_string(Json.encode_bool(false))
+      "false"
+  """
   fn encode_bool(b) do Bool(b) end
 
-  doc "Construct a JSON number value from a Float."
+  doc """
+  Construct a JSON number value from a Float. `to_string` prints a
+  Float with no fractional part without a decimal point.
+
+  ## Examples
+
+      march> Json.to_string(Json.encode_number(2.5))
+      "2.5"
+      march> Json.to_string(Json.encode_number(2.0))
+      "2"
+  """
   fn encode_number(f) do Number(f) end
 
-  doc "Construct a JSON number value from an Int."
+  doc """
+  Construct a JSON number value from an Int. JSON has a single number
+  type, so the Int is converted to a Float (`Number(int_to_float(n))`);
+  integers beyond 2^53 lose precision.
+
+  ## Examples
+
+      march> Json.encode_int(3) == Json.encode_number(3.0)
+      true
+      march> Json.to_string(Json.encode_int(-7))
+      "-7"
+  """
   fn encode_int(n) do Number(int_to_float(n)) end
 
-  doc "Construct a JSON string value."
+  doc """
+  Construct a JSON string value. Escaping happens later, in `to_string`.
+
+  ## Examples
+
+      march> Json.to_string(Json.encode_string("a\"b"))
+      "\"a\\\"b\""
+  """
   fn encode_string(s) do Str(s) end
 
-  doc "Construct a JSON array value."
+  doc """
+  Construct a JSON array value from a list of values.
+
+  ## Examples
+
+      march> Json.to_string(Json.encode_array([Json.encode_bool(true), Json.encode_null()]))
+      "[true,null]"
+      march> Json.to_string(Json.encode_array([]))
+      "[]"
+  """
   fn encode_array(xs) do Array(xs) end
 
-  doc "Construct a JSON object value from a list of (key, value) pairs."
+  doc """
+  Construct a JSON object value from a list of (key, value) pairs. The
+  order is kept and duplicate keys are not removed; `get` returns the
+  first occurrence.
+
+  ## Examples
+
+      march> Json.to_string(Json.encode_object([("a", Json.encode_int(1)), ("b", Json.encode_null())]))
+      "{\"a\":1,\"b\":null}"
+      march> Json.get(Json.encode_object([("k", Json.encode_int(1)), ("k", Json.encode_int(2))]), "k") == Some(Json.encode_int(1))
+      true
+  """
   fn encode_object(kvs) do Object(kvs) end
 
-  doc "Push `step` onto the front of a DecodeError's path, as a decoder does when it descends."
+  doc """
+  Push `step` onto the front of a DecodeError's path, as a decoder does
+  when it descends: an error raised inside field `id` and then wrapped
+  by the caller decoding element 0 renders as `$[0].id`.
+
+  ## Examples
+
+      march> Json.decode_error_to_string(Json.decode_error_under(JPathIndex(0), DecodeError("expected Int", [JPathField("id")], -1)))
+      "$[0].id: expected Int"
+  """
   fn decode_error_under(step, e) do
     match e do
     DecodeError(msg, path, off) -> DecodeError(msg, Cons(step, path), off)
     end
   end
 
-  doc "Attach an absolute byte offset to a DecodeError."
+  doc """
+  Attach an absolute byte offset to a DecodeError, replacing any offset
+  it already carried. A negative offset means "unknown".
+
+  ## Examples
+
+      march> Json.decode_error_to_string(Json.decode_error_at(4096, DecodeError("expected Int", [JPathField("id")], -1)))
+      "$.id (byte 4096): expected Int"
+  """
   fn decode_error_at(off, e) do
     match e do
     DecodeError(msg, path, _) -> DecodeError(msg, path, off)
@@ -719,7 +829,15 @@ mod Json do
 
   doc """
   Render a `DecodeError` as `$.users[3].id: expected Int`, with the byte
-  offset when known: `$.id (byte 4096): expected Int`.
+  offset when known (non-negative): `$.id (byte 4096): expected Int`.
+  An empty path renders as `$`.
+
+  ## Examples
+
+      march> Json.decode_error_to_string(DecodeError("expected Int", [JPathField("users"), JPathIndex(3), JPathField("id")], -1))
+      "$.users[3].id: expected Int"
+      march> Json.decode_error_to_string(DecodeError("expected Object", [], 0))
+      "$ (byte 0): expected Object"
   """
   fn decode_error_to_string(e) do
     match e do

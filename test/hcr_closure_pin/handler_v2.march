@@ -1,0 +1,8 @@
+    -- v2: a closure shape the base does not have, with heap captures (a
+    -- String and a List), so a patch that does not register its
+    -- capture-release function leaks them on every dropped closure.
+    fn mk(conn: PinConn): Int -> Int do
+      let p = conn.path
+      let hs = conn.headers
+      fn x -> x + string_length(p) + List.length(hs) * 1000
+    end

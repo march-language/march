@@ -1,0 +1,12 @@
+mod G2 do
+  type P = P(Int, Int)
+  derive Eq for P
+
+  fn need(p : {P | _ == P(1, 2)}) : Int do 0 end
+
+  fn main() : Unit do
+    let _ = need(P(1, 2))
+    let _ = need(P(1, 3))
+    ()
+  end
+end

@@ -152,7 +152,51 @@ let sbpl_baseline =
    (allow ipc-posix-shm)\n\
    (allow iokit-open)\n"
 
-let profile_for ~caps ~binary =
+(* ── declared path scopes ─────────────────────────────────────────── *)
+
+(* Resolve a lexically-normalized scope against THIS machine's filesystem:
+   realpath the longest existing prefix and re-append the rest.  Both
+   backends match after symlink resolution (Seatbelt subpaths; bwrap bind
+   sources), so a lexical "/tmp/x" would match nothing on macOS, where /tmp
+   is a symlink.  The scope itself often does not exist yet — writing new
+   files under it is the common case — hence the prefix walk.  Mirrors
+   march_scope_resolve in runtime/march_runtime.c (the --cap-sandbox half). *)
+let resolve_scope (scope : string) : string =
+  let scope = March_caps.Cap_scope.normalize scope in
+  let segs = List.filter (( <> ) "") (String.split_on_char '/' scope) in
+  let rec go prefix rest =
+    (* prefix: existing-candidate segments, rest: segments to re-append *)
+    let p = "/" ^ String.concat "/" prefix in
+    match Unix.realpath p with
+    | r ->
+      if rest = [] then r
+      else (if r = "/" then "" else r) ^ "/" ^ String.concat "/" rest
+    | exception Unix.Unix_error _ -> (
+        match List.rev prefix with
+        | [] -> scope
+        | last :: before -> go (List.rev before) (last :: rest))
+  in
+  go segs []
+
+(* Effective scopes for one OS class: [None] = not narrowed. *)
+let class_scopes ~scopes klass =
+  match March_caps.Cap_scope.effective_scopes ~decls:scopes klass with
+  | None -> None
+  | Some l -> Some (List.sort_uniq String.compare (List.map resolve_scope l))
+
+(* SBPL string literal: only quote and backslash are special. *)
+let sbpl_string s =
+  let b = Buffer.create (String.length s + 2) in
+  Buffer.add_char b '"';
+  String.iter
+    (fun c ->
+       if c = '"' || c = '\\' then Buffer.add_char b '\\';
+       Buffer.add_char b c)
+    s;
+  Buffer.add_char b '"';
+  Buffer.contents b
+
+let profile_for ?(scopes = []) ~caps ~binary () =
   let b = Buffer.create 512 in
   Buffer.add_string b "(version 1)\n";
   (* DENY-DEFAULT allow-list: anything the capability set does not grant, and
@@ -166,8 +210,22 @@ let profile_for ~caps ~binary =
      file-read*, but stated explicitly so tightening reads later cannot
      silently make the binary unlaunchable. *)
   Buffer.add_string b (Printf.sprintf "(allow file-read* (literal %S))\n" binary);
-  if holds_under caps "IO.FileWrite" then
-    Buffer.add_string b "(allow file-write*)\n";
+  (* Declared write scopes narrow the grant to subpaths.  This ENFORCES:
+     file-write is not in the baseline, so an out-of-scope write is refused
+     (the same mechanism --cap-sandbox measured both ways).  Read scopes are
+     not applied here: file-read* is baseline (dyld), so a scoped read allow
+     would be decorative — IO.FileRead stays Advisory on this backend. *)
+  if holds_under caps "IO.FileWrite" then begin
+    match class_scopes ~scopes "IO.FileWrite" with
+    | None -> Buffer.add_string b "(allow file-write*)\n"
+    | Some ws ->
+      List.iter
+        (fun w ->
+           Buffer.add_string b
+             (Printf.sprintf "(allow file-write* (subpath %s))\n"
+                (sbpl_string w)))
+        ws
+  end;
   (* Split by direction rather than network*: holds_under is bidirectional, so
      IO.NetConnect alone would otherwise open network-bind too.  Measured on
      macOS 26: a connect-only client (DNS, TCP, TLS) needs network-outbound
@@ -193,36 +251,62 @@ let profile_for ~caps ~binary =
    rather than being denied by a policy that could have holes. *)
 let loader_paths = [ "/usr"; "/lib"; "/lib64"; "/bin"; "/sbin"; "/etc/ld.so.cache" ]
 
-let bwrap_args ?(binary = "") ~caps () =
+let bwrap_args ?(binary = "") ?(scopes = []) ~caps () =
   let a = ref [] in
   let add x = a := x :: !a in
   let reads = holds_under caps "IO.FileRead" in
   let writes = holds_under caps "IO.FileWrite" in
+  (* Declared path scopes (the binary's manifest).  Only a HELD class is
+     narrowed; a withheld class stays withheld whatever the manifest says. *)
+  let read_scopes = if reads then class_scopes ~scopes "IO.FileRead" else None in
+  let write_scopes =
+    if writes then class_scopes ~scopes "IO.FileWrite" else None in
   let uses_tmpfs = ref false in
+  let allow_list () =
+    (* Read NOT granted (or granted only within scopes): an ALLOW-LIST
+       namespace containing only the loader's paths and the binary itself.
+       Verified on Linux 6.12 — /etc/hosts reads DENIED while an explicitly
+       bound path still reads OK.  This is the scoping macOS cannot do,
+       because dyld must map /usr/lib before any user code exists. *)
+    List.iter
+      (fun p -> add (Printf.sprintf "--ro-bind-try %s %s" p p))
+      loader_paths;
+    add "--dev /dev";
+    add "--proc /proc";
+    add "--tmpfs /tmp";
+    uses_tmpfs := true
+  in
+  let ro_root () =
+    (* Whole filesystem visible but read-only; a writable /tmp keeps the
+       runtime's scratch space working, so a failure means the withheld
+       capability and not incidental breakage. *)
+    add "--ro-bind / /";
+    add "--tmpfs /tmp";
+    add "--dev /dev";
+    add "--proc /proc";
+    uses_tmpfs := true
+  in
+  (* [bind_reads]: whether the read scopes are bound.  Not when writes are
+     held UNSCOPED — that needs the whole tree writable (--dev-bind / /), and
+     an unrestricted write grant implies reading anything it can write, so
+     the read scope is not enforceable there ([scope_notes] reports it). *)
+  let bind_reads = ref false in
   (match (reads, writes) with
-   | true, true -> add "--dev-bind / /"
-   | true, false ->
-     (* Whole filesystem visible but read-only; a writable /tmp keeps the
-        runtime's scratch space working, so a failure means the withheld
-        capability and not incidental breakage. *)
-     add "--ro-bind / /";
-     add "--tmpfs /tmp";
-     add "--dev /dev";
-     add "--proc /proc";
-     uses_tmpfs := true
-   | false, _ ->
-     (* Read NOT granted: build an ALLOW-LIST namespace containing only the
-        loader's paths and the binary itself.  Verified on Linux 6.12 —
-        /etc/hosts reads DENIED while an explicitly bound path still reads
-        OK.  This is the scoping macOS cannot do, because dyld must map
-        /usr/lib before any user code exists. *)
-     List.iter
-       (fun p -> add (Printf.sprintf "--ro-bind-try %s %s" p p))
-       loader_paths;
-     add "--dev /dev";
-     add "--proc /proc";
-     add "--tmpfs /tmp";
-     uses_tmpfs := true);
+   | true, true when write_scopes = None -> add "--dev-bind / /"
+   | true, _ when read_scopes <> None -> allow_list (); bind_reads := true
+   | true, _ -> ro_root ()  (* reads unscoped; writes scoped or withheld *)
+   | false, _ -> allow_list ());
+  (* Scope binds go AFTER every tmpfs (like the binary, below), so a scope
+     under /tmp is not masked.  Read-only binds first, then writable ones:
+     a writable scope nested in a read scope must end up writable.  -try
+     skips a scope that does not exist yet: bwrap cannot bind a missing
+     source, so a scope directory must exist before the program starts. *)
+  let bind flag s =
+    add (Printf.sprintf "%s %s %s" flag (Filename.quote s) (Filename.quote s))
+  in
+  if !bind_reads then
+    Option.iter (List.iter (bind "--ro-bind-try")) read_scopes;
+  Option.iter (List.iter (bind "--bind-try")) write_scopes;
   (* Bind the target AFTER any tmpfs.  A tmpfs mounted over /tmp masks
      everything beneath it — including the binary itself when it lives
      there — so binding earlier makes the program unlaunchable
@@ -237,7 +321,40 @@ let bwrap_args ?(binary = "") ~caps () =
   if not (holds_under caps "IO.Process") then add "--unshare-pid";
   List.rev !a
 
-let run ~caps ~binary ~args =
+(* What the declared scopes do on this backend, for [forge cap run] to print
+   before running, so a scope that is NOT enforced never reads as one that
+   is (the same false-assurance rule as the Advisory caps). *)
+let scope_notes ~caps ~scopes =
+  let reads = holds_under caps "IO.FileRead" in
+  let writes = holds_under caps "IO.FileWrite" in
+  let rs = if reads then class_scopes ~scopes "IO.FileRead" else None in
+  let ws = if writes then class_scopes ~scopes "IO.FileWrite" else None in
+  let show l = String.concat ", " l in
+  let notes = ref [] in
+  let note s = notes := s :: !notes in
+  (match ws with
+   | Some l when backend <> Unavailable ->
+     note (Printf.sprintf "IO.FileWrite scoped to %s (enforced)" (show l))
+   | _ -> ());
+  (match (rs, backend) with
+   | Some l, Bwrap when writes && ws = None ->
+     note
+       (Printf.sprintf
+          "IO.FileRead scope %s is NOT enforced: IO.FileWrite is granted \
+           unscoped, which needs the whole filesystem mounted"
+          (show l))
+   | Some l, Bwrap ->
+     note (Printf.sprintf "IO.FileRead scoped to %s (enforced)" (show l))
+   | Some l, Sbpl ->
+     note
+       (Printf.sprintf
+          "IO.FileRead scope %s is ADVISORY on this backend (the loader must \
+           read system libraries first)"
+          (show l))
+   | _ -> ());
+  List.rev !notes
+
+let run ?(scopes = []) ~caps ~binary ~args () =
   let quoted_args = String.concat " " (List.map Filename.quote args) in
   match backend with
   | Unavailable ->
@@ -245,7 +362,7 @@ let run ~caps ~binary ~args =
       "capability enforcement is not available on this platform (no \
        sandbox-exec or bwrap); refusing to run unsandboxed"
   | Sbpl ->
-    let profile = profile_for ~caps ~binary in
+    let profile = profile_for ~scopes ~caps ~binary () in
     let path = Filename.temp_file "march_cap" ".sb" in
     let oc = open_out path in
     output_string oc profile;
@@ -260,7 +377,7 @@ let run ~caps ~binary ~args =
   | Bwrap ->
     let cmd =
       Printf.sprintf "bwrap %s %s %s"
-        (String.concat " " (bwrap_args ~binary ~caps ()))
+        (String.concat " " (bwrap_args ~binary ~scopes ~caps ()))
         (Filename.quote binary) quoted_args
     in
     Ok (Sys.command cmd)

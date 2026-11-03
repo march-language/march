@@ -1,0 +1,21 @@
+-- A `let` local named like a module-level function is the local on the JS
+-- target, not that function's closure (`{ o with x: px }` stored `px$clo`
+-- when the module also had `fn px`). Parameters already were.
+mod JsLocalShadowsFn do
+  needs IO.Console
+
+  type P = { x : Int, y : Int }
+
+  pfn px(n : Int) : Int do if n <= 0 do 0 else 100 + px(n - 1) end end
+
+  pfn moved(o : P, flip : Bool) : P do
+    let px = if flip do 10 - o.x else o.x + 1 end
+    { o with x: px }
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let p = moved({ x: 3, y: 4 }, false)
+    let q = moved({ x: 3, y: 4 }, true)
+    println(int_to_string(p.x) ++ " " ++ int_to_string(q.x) ++ " " ++ int_to_string(px(2) + px(0)))
+  end
+end

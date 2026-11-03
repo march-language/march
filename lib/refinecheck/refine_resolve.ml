@@ -235,6 +235,37 @@ let cb_add_binding (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (cb :
      | _ -> cb)
   | _ -> cb
 
+(* ── Annotated accumulators (fold-invariants design phase 4) ──────────────
+   A fold-shaped call `g(…, fn (acc : {T | I}, x) -> …)` whose annotated
+   accumulator [I] the walk PROVED to be an invariant (base and step,
+   [Refine_check.annotated_invariant]) returns a value meeting [I]: the
+   call's result is a [b] the callee held, and every one of those met [I]
+   (the design's §2.2 induction, with [I] for the demand).  Filled by
+   [Refine_check.visit] when it reaches the call, keyed by the lambda's span
+   and checked against the lambda itself (physical equality), so a copy of
+   the lambda substituted into another scope never matches; an unproved
+   annotation is removed.  Cleared at the top of every function's walk
+   ([Refine_check.visit_fn]), so an entry is only ever read by the walk that
+   proved it, after the call was visited (a `let`-bound result; an inline
+   use is checked before its arguments are visited and goes through the
+   scalar demand entry instead).  A pure lookup: [postcond_of] stays
+   solver-free. *)
+let annotated_acc_facts : (A.span, A.expr * (string * A.expr * string option)) Hashtbl.t =
+  Hashtbl.create 16
+
+let annotated_acc_fact (args : A.expr list) : (string * A.expr * string option) option =
+  if Hashtbl.length annotated_acc_facts = 0 then None
+  else
+    List.find_map
+      (fun a ->
+        match a with
+        | A.ELam (_, _, sp) ->
+          (match Hashtbl.find_opt annotated_acc_facts sp with
+           | Some (lam, r) when lam == a -> Some r
+           | _ -> None)
+        | _ -> None)
+      args
+
 (* Resolve a call name and its actual arguments to the callee's return
    refinement, expressed entirely in the CALLER's namespace, or None.  This is
    the single place the usability filter is applied, so both use sites (a
@@ -260,32 +291,22 @@ let cb_add_binding (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (cb :
 
    The third component of the result is the returned value's SMT sort ([None]
    for Int); see [fn_sig.ret_sort] for why every consumer must branch on it. *)
-let postcond_of ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t)
-    (fname : string) (args : A.expr list) : (string * A.expr * string option) option =
-  (* A callee the callee ENV knows — a refined callback parameter with a
-     refined codomain, a local `fn` or `let`-bound lambda whose return was
-     proved — carries a postcondition too (P3 design §1b).  Name resolution
-     first, exactly as [visit]'s [EApp] arm orders them; the env only when
-     the name resolves to nothing. *)
-  let resolved =
-    match resolve_call_arity ctx defs fname (List.length args) with
-    | Some (Some sg) -> Some (Some sg)
-    | Some None -> Some None
-    | None -> (match List.assoc_opt fname cb with Some sg -> Some (Some sg) | None -> None)
-  in
-  match resolved with
-  (* A BUILTIN resolves to nothing at all — it has no [fn_def] — so its
-     contract, if it has one, comes from the table instead.  Checked after
-     name resolution and the callee env, never before: a user function or a
-     local binding that happens to share a builtin's spelling is the one the
-     call actually reaches, and its contract must win.  The predicate is
-     [Closed] by construction (the table admits only `_`-only predicates), so
-     there are no actuals to substitute and no arity to agree on. *)
-  | None when builtin_ret_refinement fname <> None ->
-    (match builtin_ret_refinement fname with
-     | Some (b, p) -> Some (b, p, None)
-     | None -> None)
-  | Some (Some sg) ->
+(* A relational return's NAMED binder renamed to `_` before the actuals go
+   in.  Every consumer reads both the binder and `_` as the returned value,
+   so an actual that is a caller variable spelled like the binder (`inc(r)`
+   against `{r : Int | r > x}`) would otherwise become the returned value
+   too: `r > r`, a false assumption that proved anything (demand chains,
+   2026-10-24).  `_` is no March variable, so no actual can mention it.  The
+   element path ([Refine_check.instantiate_entry]) applies the same rule. *)
+let binder_apart (b : string) (p : A.expr) : string * A.expr =
+  if b = "_" then (b, p)
+  else ("_", subst_params [ (b, A.EVar { A.txt = "_"; A.span = A.dummy_span }) ] p)
+
+(* [sg]'s declared return instantiated at the call's actuals [args]: the
+   [postcond_of_declared] rule for a resolved callee, shared with the
+   induction hypothesis of termination phase 3 ([Refine_post.ih_at]), which
+   names its callee by the call's span rather than by resolution. *)
+let instantiate_ret (sg : fn_sig) (args : A.expr list) : (string * A.expr * string option) option =
     (match sg.ret with
      | Some (b, p) ->
        let srt = sg.ret_sort in
@@ -303,11 +324,61 @@ let postcond_of ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) 
                  | "_", _ | _, None -> None
                  | n, Some a -> Some (n, a))
           in
-          if List.for_all (fun p -> List.mem_assoc p env) ps then
+          (* A formal spelled twice (`fn two(a : Int, a : Int)`) has no one
+             actual: the interpreter binds the first, compiled code the last
+             (review C3), so the positional substitution means nothing. *)
+          let twice p = List.length (List.filter (( = ) p) sg.param_names) > 1 in
+          if List.exists twice ps then None
+          else if List.for_all (fun p -> List.mem_assoc p env) ps then
+            let b, p = binder_apart b p in
             Some (b, subst_params env p, srt)
           else None)
      | _ -> None)
+
+let postcond_of_declared ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t)
+    (fname : string) (args : A.expr list) : (string * A.expr * string option) option =
+  (* A callee the callee ENV knows — a refined callback parameter with a
+     refined codomain, a local `fn` or `let`-bound lambda whose return was
+     proved — carries a postcondition too (P3 design §1b).  Name resolution
+     first, exactly as [visit]'s [EApp] arm orders them; the env only when
+     the name resolves to nothing. *)
+  let resolved =
+    match resolve_call_arity ctx defs fname (List.length args) with
+    | Some (Some sg) -> Some (Some sg)
+    | Some None -> Some None
+    | None ->
+      (match List.assoc_opt fname cb with
+       (* A callback CHAIN's signature ([chain_sig_of_ty], a definer of
+          several arguments) gives a fact to a FULL call only: a partial
+          call `keep(k)` is a function value, and gets none, whichever
+          binders the definition names (review C2's minor). *)
+       | Some sg when List.length sg.param_names >= 2 && List.length sg.param_names <> List.length args ->
+         Some None
+       | Some sg -> Some (Some sg)
+       | None -> None)
+  in
+  match resolved with
+  (* A BUILTIN resolves to nothing at all — it has no [fn_def] — so its
+     contract, if it has one, comes from the table instead.  Checked after
+     name resolution and the callee env, never before: a user function or a
+     local binding that happens to share a builtin's spelling is the one the
+     call actually reaches, and its contract must win.  The predicate is
+     [Closed] by construction (the table admits only `_`-only predicates), so
+     there are no actuals to substitute and no arity to agree on. *)
+  | None when builtin_ret_refinement fname <> None ->
+    (match builtin_ret_refinement fname with
+     | Some (b, p) -> Some (b, p, None)
+     | None -> None)
+  | Some (Some sg) -> instantiate_ret sg args
   | _ -> None
+
+(* A callee's proved declared return first; failing that, a proved annotated
+   accumulator's invariant ([annotated_acc_facts]). *)
+let postcond_of ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t)
+    (fname : string) (args : A.expr list) : (string * A.expr * string option) option =
+  match postcond_of_declared ~cb ctx defs fname args with
+  | Some r -> Some r
+  | None -> annotated_acc_fact args
 
 (* =================================================================
    §13 Reflecting actual arguments: fields, records, scalars
@@ -366,8 +437,8 @@ let rec selector_reduce (term : Smt.term) : Smt.term =
    axioms that would cause Z3 to return `unknown` instead of sat/unsat. *)
 let rec concrete_len (term : Smt.term) : int option =
   match ctor_view (selector_reduce term) with
-  | Some ("Nil", []) -> Some 0
-  | Some ("Cons", [ _h; t ]) -> Option.map (( + ) 1) (concrete_len t)
+  | Some (c, []) when c = list_nil () -> Some 0
+  | Some (c, [ _h; t ]) when c = list_cons () -> Option.map (( + ) 1) (concrete_len t)
   | _ -> None
 
 (* Try to evaluate an axiom measure on a concrete SMT term.
@@ -534,6 +605,10 @@ let rec reflect_scalar
     ?(foreign_measure_call : (string -> string -> A.expr list -> Smt.term option) option)
     ?(foreign_field :
         (string -> string -> (Smt.term * (string * Smt.sort) list) option) option)
+    (* The caller's list-length term for a list expression (`len$xs`, a
+       literal's count, `len$t + 1` for `Cons(h, t)`), for `List.length(e)` in
+       actual position — see that arm below.  Unset: no such reflection. *)
+    ?(foreign_len : (A.expr -> Smt.term option) option)
     ?(sort : Smt.sort = Smt.SInt) (sc : scope) (actual : A.expr)
   : (Smt.term * (string * Smt.sort) list * Smt.term list) option =
   let foreign_var = Option.value foreign_var ~default:(fun _ -> None) in
@@ -619,9 +694,9 @@ let rec reflect_scalar
      `float-sort-gate`). *)
   | A.EApp (A.EVar { A.txt = ("+" | "-") as op; _ }, [ a; b ], _) when sort = Smt.SInt ->
     (match
-       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ~sort sc
+       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len ~sort sc
          a,
-       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ~sort sc
+       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len ~sort sc
          b
      with
      | Some (ta, da, aa), Some (tb, db, ab) ->
@@ -632,7 +707,7 @@ let rec reflect_scalar
     (match a, b with
      | A.ELit (A.LitInt k, _), e | e, A.ELit (A.LitInt k, _) ->
        (match
-          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field
+          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len
             ~sort sc e
         with
         | Some (te, de, ae) -> Some (Smt.MulLit (k, te), de, ae)
@@ -648,13 +723,59 @@ let rec reflect_scalar
         reported. *)
      | _ ->
        (match
-          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field
+          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len
             ~sort sc a,
-          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field
+          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len
             ~sort sc b
         with
         | Some (ta, da, aa), Some (tb, db, ab) -> Some (Smt.Mul (ta, tb), da @ db, aa @ ab)
         | _ -> plain actual))
+  (* `List.length(e)` as an ACTUAL (gap L4): the `len` measure alias a guard
+     already gets ([measure_alias]), applied at an argument, so
+     `need_nn(List.length(xs))` reflects to `len$xs` — the symbol a guard on
+     `List.length(xs)` and a `len(xs)` promise both use.  Same gate as the
+     guard (the stdlib's own `List.length`, alias not withdrawn), Int sort
+     only.  `List.length` has no postcondition, so a [None] from the caller
+     costs nothing: [plain] is what the call arm below would reach too. *)
+  | A.EApp (A.EVar { A.txt = "List.length"; _ }, [ a ], _)
+    when sort = Smt.SInt && measure_alias "List.length" = Some "len" && foreign_len <> None ->
+    (match (Option.get foreign_len) a with
+     | Some t -> Some (t, [], [])
+     | None -> plain actual)
+  (* Reflection stage 2 (§3.7): a call of a REFLECTED function is its logic
+     symbol applied to its reflected arguments, each at the sort of the
+     parameter it fills (a type variable left open for [resolve_sorts]).
+     Stage 1 never reaches this arm. *)
+  | A.EApp (A.EVar _, (_ :: _ as cargs), csp)
+    when Reflect_state.stage2_call_at csp ->
+    let sym = Option.get (Reflect_state.resolve_site csp) in
+    let fs = Option.get (Reflect_state.sig_of sym) in
+    let rec elemize (s : Smt.sort) =
+      match s with
+      | Smt.SParam _ -> Smt.sdata "Elem"
+      | Smt.SData (n, xs) -> Smt.SData (n, List.map elemize xs)
+      | Smt.SSet e -> Smt.SSet (elemize e)
+      | s -> s
+    in
+    if List.length cargs <> List.length fs.Reflect_state.fs_params then plain actual
+    else
+      let parts =
+        List.map2
+          (fun a p ->
+            match a with
+            | A.EVar { A.txt = x; _ } when not (List.mem_assoc x sc) -> Some (Smt.Const x, [ (x, elemize p) ], [])
+            | _ ->
+              reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ?foreign_len
+                ~sort:(elemize p) sc a)
+          cargs fs.Reflect_state.fs_params
+      in
+      if List.exists Option.is_none parts then plain actual
+      else
+        let parts = List.map Option.get parts in
+        Some
+          ( Smt.App (sym, List.map (fun (t, _, _) -> t) parts),
+            List.concat_map (fun (_, d, _) -> d) parts,
+            List.concat_map (fun (_, _, a) -> a) parts )
   (* A direct named call: stand its result up as a fresh constant carrying the
      callee's declared postcondition.  `.` is a legal SMT-LIB simple-symbol
      character, so a qualified name needs no mangling. *)

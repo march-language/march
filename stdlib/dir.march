@@ -53,6 +53,11 @@ mod Dir do
   doc """
   Create a single directory.  Fails if the parent does not exist or if
   `path` already exists; use `mkdir_p/1` for "mkdir -p" semantics.
+  Returns `Ok(:ok)` or `Err(FileError)`.
+
+  ## Examples
+
+      Dir.mkdir("build")
   """
   fn mkdir(path) do
     dir_mkdir(path)
@@ -61,6 +66,10 @@ mod Dir do
   doc """
   Create a directory and any missing intermediate parents (POSIX
   `mkdir -p`).  Succeeds silently if the target already exists.
+
+  ## Examples
+
+      Dir.mkdir_p("build/cache/objects")
   """
   fn mkdir_p(path) do
     dir_mkdir_p(path)
@@ -70,6 +79,10 @@ mod Dir do
   Remove an empty directory.  Use `rm_rf/1` to recursively remove a
   populated directory tree.  Returns `Err(NotEmpty(path))` when called
   on a non-empty directory.
+
+  ## Examples
+
+      Dir.rmdir("build/empty")
   """
   fn rmdir(path) do
     dir_rmdir(path)
@@ -80,6 +93,10 @@ mod Dir do
   removed but their targets are left intact.  Refuses to operate on
   `"/"` or `""` and returns `Err` instead — destructive enough that an
   accidental call deserves to fail loudly.
+
+  ## Examples
+
+      if Dir.exists("build") do Dir.rm_rf("build") else Ok(:ok) end
   """
   fn rm_rf(path) do
     dir_rm_rf(path)

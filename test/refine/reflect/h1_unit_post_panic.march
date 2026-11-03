@@ -1,0 +1,18 @@
+mod H1 do
+  fn bogus(n : Int) : {Unit | n == n + 1} do
+    panic("never")
+  end
+
+  fn spin(n : Int) : {Unit | n == n + 1} do
+    spin(n)
+  end
+
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+
+  fn main() : Unit do
+    let _ = bogus(1)
+    let _ = spin(1)
+    let _ = need_pos(0 - 5)
+    ()
+  end
+end

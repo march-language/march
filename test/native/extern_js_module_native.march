@@ -1,0 +1,17 @@
+-- A module may declare JS-module externs (a library's browser backend) and
+-- still be compiled natively when nothing native calls them: their symbol
+-- names must be valid C/LLVM identifiers, not "./x.mjs_fn".
+mod JsModuleExternNative do
+  needs IO.Console
+  needs IO.Foreign
+
+  extern "./some_backend.mjs" : Cap(IO.Foreign) do
+    fn js_only(x : Int) : Int
+  end
+
+  pfn browser_path(x : Int) : Int do js_only(x) end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("ok")
+  end
+end

@@ -40,3 +40,30 @@ val is_scopable : string -> bool
 (** Whether a capability accepts a scope at all. Only filesystem capabilities
     do; a scope elsewhere is rejected rather than ignored, because an ignored
     scope reads as enforcement that is not there. *)
+
+(** {1 Scope manifest}
+
+    A compiled binary carries its DECLARED filesystem scopes in a manifest
+    blob, [MARCHCAP\x01<u32 le length><json>], which forge's [Cap_binary]
+    reads back so [forge cap run] can narrow its external sandbox to them.
+    A declared scope is a claim, not a proof, and for enforcement a claim is
+    enough. The sandbox blocks everything outside it, so a binary that
+    under-states its scope only breaks itself. *)
+
+val effective_scopes :
+  decls:(string * string option) list -> string -> string list option
+(** [effective_scopes ~decls klass] — the directories an OS-level class
+    ([IO.FileRead] or [IO.FileWrite]) is narrowed to by [decls]. A
+    declaration counts when its capability is an ancestor or a descendant of
+    [klass], so [IO.FileSystem("/srv")] scopes both reads and writes. [None]
+    (no narrowing) when no declaration is related, or when any related one is
+    unscoped: one unrestricted grant means any path, so narrowing would be a
+    lie. Scopes come back normalized, sorted and de-duplicated. *)
+
+val manifest_json : (string * string option) list -> string option
+(** [manifest_json decls] — the JSON body of the scope manifest,
+    [{"v":1,"scopes":[{"cap":"IO.FileWrite","scope":"/srv"},
+    {"cap":"IO","scope":null}]}]. Keeps only declarations related to a
+    filesystem class, unscoped ones included, so the reader can see that an
+    unrestricted grant overrides a scope. [None] when none of them carries a
+    scope: an unscoped program gets no manifest, and its IR is unchanged. *)

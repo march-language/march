@@ -1,0 +1,42 @@
+-- Index-loop benchmark: Int `+ - *` in a counted loop, the shape the
+-- 2026-10-30 Int overflow trap puts a check into on every iteration.
+--
+--   1. a pure arithmetic loop (index arithmetic + a multiply-accumulate);
+--   2. an indexed read loop over a NativeArray (i + 1, acc + get(i)).
+--
+-- Every intermediate stays far inside the 63-bit range, so the result is the
+-- same with or without overflow checks; only the time moves.
+-- Usage: march --compile --opt 2 bench/index_loop.march -o /tmp/index_loop && /tmp/index_loop
+
+mod IndexLoop do
+  needs IO.Console
+
+pfn arith(i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else arith(i + 1, n, acc + (i % 1000) * 3 - (i % 7)) end
+end
+
+pfn indexed(arr, i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else indexed(arr, i + 1, n, acc + native_int_arr_get(arr, i)) end
+end
+
+pfn fill(arr, i : Int, n : Int) do
+  if i >= n do arr
+  else fill(native_int_arr_set(arr, i, i % 1000), i + 1, n) end
+end
+
+pfn repeat(arr, k : Int, n : Int, acc : Int) : Int do
+  if k == 0 do acc
+  else repeat(arr, k - 1, n, acc + indexed(arr, 0, n, 0)) end
+end
+
+pfn main(_cap_console : Cap(IO.Console)) : Unit do
+  let a = arith(0, 300000000, 0)
+  let n = 1000000
+  let arr = fill(native_int_arr_make(n, 0), 0, n)
+  let b = repeat(arr, 200, n, 0)
+  println(int_to_string(a + b))
+end
+
+end

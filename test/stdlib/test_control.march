@@ -9,6 +9,22 @@ mod TestControl do
 
   -- ── fixtures ─────────────────────────────────────────────────────────────
 
+  -- A chunk size the refinement checker cannot see through.
+  pfn chunk_size(s : String) : Int do
+    match string_to_int(s) do
+    Some(n) -> n
+    None -> 1
+    end
+  end
+
+  -- The panic message of `Control.chunks(hex, size)`, or "no panic".
+  pfn chunks_err(hex : String, size : Int) : String do
+    match __try_call_val(fn _ -> List.length(Control.chunks(hex, size))) do
+    Ok(_) -> "no panic"
+    Err(m) -> m
+    end
+  end
+
   fn release_text() do
     "release v1\n"
     ++ "seq      42\n"
@@ -650,6 +666,49 @@ mod TestControl do
       assert (res.ok && res.detail == "applied")
     end
 
+    -- specs/progress/2026-10-04-lab-control-topology-step-races-report.md:
+    -- the reload server takes a TOPOLOGY line synchronously, but the node
+    -- reports the digest only once its placement loop has re-read the file
+    -- (next MARCH_PLACEMENT_TICK_MS). A topology step waits for that.
+    test "a topology step waits for the runner to apply the digest" do
+      let r = rel()
+      let o = Control.order(r, step_n(3), "r1")
+      let rep = report(find_node(cluster(), "r1"))
+      let v = Vault.new("test_control_topo_lag")
+      Vault.set(v, "reports", 0)
+      -- The node reports the topology from its third report on: the check
+      -- before relaying, the first after it, and then the runner's tick.
+      let ops = { report: fn ->
+          let k = Vault.get_or(v, "reports", 0) + 1
+          let _ = Vault.set(v, "reports", k)
+          if k >= 3 do { rep with topology: "t42" } else { rep with topology: "-" } end,
+        has: fn _ -> true, request: fn _ -> "OK topology" }
+      let res = Control.agent_apply(ops, o)
+      assert (res.ok && res.detail == "applied")
+    end
+
+    test "a topology step the runner never applies fails once the wait is over" do
+      let r = rel()
+      let o = Control.order(r, step_n(3), "r1")
+      let rep = { report(find_node(cluster(), "r1")) with topology: "-" }
+      let res = Control.agent_apply_within(ops_for(rep, "OK topology"), o, 120, 40)
+      assert (not(res.ok) && String.starts_with(res.detail, "the node accepted every line"))
+    end
+
+    test "a non-topology step does not wait: one report after the relay" do
+      let r = rel()
+      let o = Control.order(r, head(r.steps), "r1")
+      let rep = report(find_node(cluster(), "r1"))
+      let v = Vault.new("test_control_no_wait")
+      Vault.set(v, "reports", 0)
+      let ops = { report: fn ->
+          let _ = Vault.set(v, "reports", Vault.get_or(v, "reports", 0) + 1)
+          rep,
+        has: fn _ -> true, request: fn _ -> "OK" }
+      let res = Control.agent_apply_within(ops, o, 60000, 1000)
+      assert (not(res.ok) && Vault.get_or(v, "reports", 0) == 2)
+    end
+
     test "orders carry hashes and the step's signed lines, not bytes" do
       let r = rel()
       let o = Control.order(r, head(tail(tail(r.steps))), "w1")
@@ -818,6 +877,19 @@ mod TestControl do
       assert (List.map(cs, fn c -> c.last) == [false, false, true])
       assert (Control.chunks("", 4) == [{ offset: 0, data: "", last: true }])
       assert (Control.chunks("0123", 4) == [{ offset: 0, data: "0123", last: true }])
+      assert (List.map(Control.chunks("abcdef", 1), fn c -> c.data) == ["a", "b", "c", "d", "e", "f"])
+    end
+
+    -- A size of 0 used to hang (chunks_from advanced `off` by `size`, so
+    -- it never moved) and a negative size walked `off` backwards forever.
+    -- `chunk_size` hides the value from the refinement checker, which
+    -- rejects a literal 0 or -1 at compile time; the runtime guard is what
+    -- such a computed size reaches.
+    test "a size that is not positive panics instead of hanging" do
+      let msg = "panic: Control.chunks: size must be positive"
+      assert (chunks_err("abcdef", chunk_size("0")) == msg)
+      assert (chunks_err("abcdef", chunk_size("-2")) == msg)
+      assert (chunks_err("", chunk_size("0")) == msg)
     end
   end
 

@@ -333,9 +333,15 @@ let walk_fn (sites : site list ref) ~(fn_origin : fn_origin) (fd : A.fn_def) : u
       List.iteri
         (fun idx (p : A.fn_param) ->
           match p with
-          | A.FPNamed p -> Option.iter (start sites ~fn_origin:(Some fn_origin) (Param (fn_name, idx))) p.A.param_ty
+          (* [~origin_fn] at a parameter too, for one reason only: the
+             [Type_arg] rule reads an abstract-refinement slot
+             (`acc : List(a[p])`, an accumulator helper's) under the
+             function's own abstract refinements, as the checker does at a
+             self-call; no other rule consults it for a [Param] site. *)
+          | A.FPNamed p ->
+            Option.iter (start sites ~origin_fn:(Some fd) ~fn_origin:(Some fn_origin) (Param (fn_name, idx))) p.A.param_ty
           | A.FPDefault (p, default_expr) ->
-            Option.iter (start sites ~fn_origin:(Some fn_origin) (Param (fn_name, idx))) p.A.param_ty;
+            Option.iter (start sites ~origin_fn:(Some fd) ~fn_origin:(Some fn_origin) (Param (fn_name, idx))) p.A.param_ty;
             walk_expr sites default_expr
           | A.FPPat _ -> ())
         c.A.fc_params;
@@ -512,6 +518,46 @@ let inert_signature_verdict (warning_name : string) (subject : string) (site : s
           for %s -- this is itself a finding, not a guess"
          warning_name subject)
 
+(* Does [t] hold the refinement whose predicate sits at [sp]? *)
+let rec ty_holds_pred_at (sp : A.span) (t : A.ty) : bool =
+  match t with
+  | A.TyRefine (b, _, pred) -> expr_span pred = sp || ty_holds_pred_at sp b
+  | A.TyCon (_, ts) | A.TyTuple ts -> List.exists (ty_holds_pred_at sp) ts
+  | A.TyArrow (a, b) -> ty_holds_pred_at sp a || ty_holds_pred_at sp b
+  | A.TyRecord fs -> List.exists (fun (_, t) -> ty_holds_pred_at sp t) fs
+  | A.TyLinear (_, t) -> ty_holds_pred_at sp t
+  | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> false
+
+(* The declared type the [Type_arg] rule asks [elem_refinement] about: the
+   site's origin type, except that a TUPLE return is modelled per component
+   ([Refine_scope.ret_elems_of_ty], leftovers design 2026-10-18 §5.1), so a
+   site there is asked about its OWN component.  A refinement in a component
+   that is not an element return (`(Task({Int | p}), …)`) stays unenforced. *)
+let type_arg_subject (site : site) : A.ty =
+  let rec strip (t : A.ty) =
+    match t with A.TyRefine (b, _, _) | A.TyLinear (_, b) -> strip b | t -> t
+  in
+  match site.origin, strip site.origin_ty with
+  | Return _, A.TyTuple ts ->
+    (match List.find_opt (ty_holds_pred_at site.span) ts with Some c -> c | None -> site.origin_ty)
+  | _ -> site.origin_ty
+
+(* [Refine_post.callback_sig_of_ty] of the site's arrow, read under the
+   site's function's abstract refinements, as the checker reads it
+   ([cb_add_param] inside that function's walk): a callback CHAIN is a
+   signature only as a definer of one of them (review C2, 2026-10-21).  A
+   block-level `fn`'s site is read under none, the conservative answer the
+   [Type_arg] rule below gives it too. *)
+let site_callback_sig (site : site) : Refine_post.fn_sig option =
+  let saved = !Refine_post.current_abstracts in
+  Refine_post.current_abstracts :=
+    (match site.origin_fn, site.fn_origin with
+     | _, Some Local_fn -> []
+     | Some fd, _ -> Refine_abstract.names ~is_known:Refine_post.known_predicate_fn fd
+     | None, _ -> []);
+  Fun.protect ~finally:(fun () -> Refine_post.current_abstracts := saved)
+    (fun () -> Refine_post.callback_sig_of_ty site.origin_ty)
+
 let classify (site : site) : disposition =
   match site.origin with
   (* Rule 2, tried FIRST: a `sig` / `extern` / `interface` entry's WHOLE
@@ -526,6 +572,15 @@ let classify (site : site) : disposition =
   | Iface_method name ->
     inert_signature_verdict "warn_iface_method_refinement"
       (Printf.sprintf "the interface signature of `%s`" name) site
+  (* A RELATION between element slots that is not well-formed (multi-arg
+     design §1.4, W2/W4) is dropped by [Refine_scope.elem_app], so it is
+     neither assumed nor obliged anywhere; [Refine_check.warn_predicate_ty]
+     warns `refinement_unchecked` at exactly this predicate.  A well-formed
+     relation is one contract site like a slot, enforced by the rule below. *)
+  | (Param _ | Return _ | Let_annot _ | Field _ | Variant_arg _ | Actor_handler_param _)
+    when site.position = Type_arg
+         && List.exists (fun (sp, _) -> sp = site.span) (Refine_post.relation_issues_deep site.origin_ty) ->
+    Inert_warned "refinement_unchecked: this relation between element slots is not checked, and the warning fires at it"
   (* Container subtyping (2026-09-13): a refinement one layer down inside a
      `List(…)` / `Option(…)` type argument, at a parameter, return, `let`
      annotation or field, IS enforced — every value flowing into the
@@ -538,16 +593,30 @@ let classify (site : site) : disposition =
      only inside that function's own walk ([Refine_scope.abstract_tyvar_slot]):
      it is proved there, and instantiated at every call by
      [Refine_check.abstract_flow].  So ask [elem_refinement] under that
-     function's abstract refinements, exactly as the checker does. *)
-  | (Param _ | Return _ | Let_annot _ | Field _)
+     function's abstract refinements, exactly as the checker does.
+     A variant constructor's argument joined the list on 2026-10-29: its
+     element slots are obliged at every `W(xs)` since then ([visit]'s [ECon]
+     arm, [Refine_check.check_field_elements]), as a record field's are; an
+     actor handler's parameter likewise, at every construction of its
+     message ([Refine_check.check_arg_elements]). *)
+  | (Param _ | Return _ | Let_annot _ | Field _ | Variant_arg _ | Actor_handler_param _)
     when site.position = Type_arg
          && (let saved = !Refine_post.current_abstracts in
              Refine_post.current_abstracts :=
-               (match site.origin_fn with
-                | Some fd -> Refine_abstract.names ~is_known:Refine_post.known_predicate_fn fd
-                | None -> []);
+               (match site.origin_fn, site.fn_origin with
+                (* A block-level `fn`'s element slots are read by the checker
+                   under the ENCLOSING function's abstract refinements
+                   ([Refine_check.visit_local_fn]), which this site does not
+                   carry; asking under none is the conservative answer: a
+                   concrete slot (`List({Int | _ > 0})`, whose every tail is
+                   an element obligation since 2026-10-18, element-flow
+                   phase 3) is Enforced, an abstract one reports
+                   unenforced. *)
+                | _, Some Local_fn -> []
+                | Some fd, _ -> Refine_abstract.names ~is_known:Refine_post.known_predicate_fn fd
+                | None, _ -> []);
              Fun.protect ~finally:(fun () -> Refine_post.current_abstracts := saved)
-               (fun () -> Refine_post.elem_refinement (Some site.origin_ty) <> None)) ->
+               (fun () -> Refine_post.elem_refinement (Some (type_arg_subject site)) <> None)) ->
     Enforced
   (* Arrow DOMAIN at a function or lambda parameter (P3 design §1a): a call
      through the parameter is checked against the domain refinement via the
@@ -560,7 +629,7 @@ let classify (site : site) : disposition =
      never a declared arrow type. *)
   | (Param _ | Lambda_param _)
     when site.position = Arrow_domain
-         && Refine_post.callback_sig_of_ty site.origin_ty <> None ->
+         && site_callback_sig site <> None ->
     Enforced
   (* Arrow CODOMAIN at a function or lambda parameter (P3 design §1b/§1c):
      the codomain refinement is the callback's postcondition inside the
@@ -568,7 +637,7 @@ let classify (site : site) : disposition =
      callable passed at the pass site ([check_pass_sites]'s covariant half). *)
   | (Param _ | Lambda_param _)
     when site.position = Arrow_codomain
-         && (match Refine_post.callback_sig_of_ty site.origin_ty with
+         && (match site_callback_sig site with
              | Some { ret = Some _; _ } -> true
              | _ -> false) ->
     Enforced
@@ -654,19 +723,18 @@ let classify (site : site) : disposition =
       (* [Refine_post.return_refinement_checked] is [check_fn_post_verdict]'s
          own routing: a `{List(_) | …}` return whose predicate has no
          `elts`/`keys` goes to Tier 2 (not the direct path), and Tier 2 checks
-         only a constructor-literal body or a match on a parameter with a
-         DECLARED ADT type — [post_induction_shape] alone accepts the
-         signature whatever the body is. *)
+         every body of a signature [post_induction_shape] accepts (since
+         2026-10-24; before, only a constructor literal or a parameter
+         match).  A signature it declines files a recorded skip. *)
       if Refine_post.return_refinement_checked fd then Enforced
       else
         Unenforced
           "the return refinement is routed to no path that checks it: it matches \
            neither return_refine_ext's direct bases (Int, Bool, Float, String, a \
            registered record, or a List predicate using elts/keys) nor a Tier 2 \
-           induction shape check_post_induction actually checks (a single \
-           guardless clause returning a non-record ADT with a usable predicate \
-           and a measure declared over it, whose body is a constructor literal \
-           or a match on a parameter of declared ADT type) -- sensitive to \
+           signature check_post_induction accepts (a single guardless clause \
+           returning a non-record ADT with a usable predicate and a measure \
+           declared over it); it files a recorded skip -- sensitive to \
            --no-measure-axioms, which empties measure_preamble_sorts"))
   | Let_annot _ -> (
     match Refine_post.refined_scope_ty (Some site.origin_ty) with

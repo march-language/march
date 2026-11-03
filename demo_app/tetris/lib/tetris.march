@@ -24,6 +24,7 @@
 -- as a JS double, no truncation anywhere in the chain.
 mod Tetris do
   needs IO.Clock
+  needs IO.Foreign
 
   fn int_list_to_string(xs: List(Int)) : String do
     String.join(List.map(xs, fn x -> int_to_string(x)), ",")
@@ -482,7 +483,7 @@ mod Tetris do
     end
   end
 
-  fn main(_cap_clock : Cap(IO.Clock)) : Unit do
+  fn main(_cap_clock : Cap(IO.Clock), _cap_foreign : Cap(IO.Foreign)) : Unit do
     match Js.Dom.find("board") do
       None -> ()
       Some(board_el) ->

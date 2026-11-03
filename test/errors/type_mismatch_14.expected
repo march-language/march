@@ -12,6 +12,11 @@ expected `Pid(a)` but got `Int`. [type_mismatch]
 
 20 |       Some(p) -> println(bool_to_string(is_alive(p)))
                                              ^^^^^^^^^^^
+
+    `p` was bound here as `Int`:
+
+20 |       Some(p) -> println(bool_to_string(is_alive(p)))
+                ^
     run `march --explain type_mismatch`
 
 

@@ -3,10 +3,13 @@
 # Stock is offered on node-b AND node-c; Ledger is hosted in an actor on
 # node-c only. Each work node's certificate names both work roles and
 # node-a's names Shop:initiate, as `forge host init` issues them. In the lab
-# (specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md)
 # every session whose Stock ran on another node than the Ledger stalled after
 # its first message; here those are the sessions whose Stock lands on node-b.
-# node-a's twelve sessions (three rounds of four at once) must all finish.
+# node-a's twelve sessions (three rounds of four at once) must all finish,
+# and none may fail. The cause was a party checking a peer's certificate
+# before its node had a link to that peer's node (round 1, while node-b and
+# node-c link up): ~1 run in 4 under load before the fix
+# (specs/progress/2026-10-12-cert-mode-offer-to-offer-session-hang.md).
 forge="${FORGE_BIN:-$root/_build/default/forge/bin/main.exe}"
 [ -x "$forge" ] || fail "forge not built: $forge (dune build forge/bin/main.exe)"
 export PKI="$work/pki"

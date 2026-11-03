@@ -52,5 +52,10 @@ val reset : unit -> unit
 (** Find the stdlib directory, searching several candidates. *)
 val find_stdlib_dir : unit -> string option
 
-(** Find the stdlib .march file path for a module name. *)
+(** Find the stdlib .march file path for a module name.  The file must
+    declare that module: the CamelCase->snake_case filename guess alone is
+    not enough (`Bigint` guesses `bigint.march`, which declares `BigInt`). *)
 val find_stdlib_file : string -> string option
+
+(** The module name a stdlib file declares (its first top-level `mod`). *)
+val declared_module_of_file : string -> string option

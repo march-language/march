@@ -22,7 +22,8 @@ module Smt = March_refine.Smt
 module Refine = March_refine.Refine
 module Err = March_errors.Errors
 
-let div_ops = [ "/"; "%"; "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid" ]
+let div_ops = [ "/"; "%"; "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+                "int_div_floor"; "int_mod_floor" ]
 
 (* ── Syntactic non-zero check (no Z3) ──────────────────────────────────── *)
 
@@ -169,20 +170,43 @@ type dctx = {
 
 let dctx_empty = { path = []; shadowed = []; lets = [] }
 
-(* Retire [names] from every channel. *)
+(* The variable names an expression's reflectable spine mentions: every [EVar]
+   reached through applications and annotations, call heads included.  An
+   over-approximation, which is the safe direction for its one use below. *)
+let rec spine_vars (e : A.expr) (acc : string list) : string list =
+  match e with
+  | A.EVar { A.txt = x; _ } -> x :: acc
+  | A.EApp (f, args, _) -> List.fold_left (fun acc a -> spine_vars a acc) (spine_vars f acc) args
+  | A.EAnnot (inner, _, _) -> spine_vars inner acc
+  | _ -> acc
+
+let mentions_any (names : string list) (rhs : A.expr) : bool =
+  List.exists (fun x -> List.mem x names) (spine_vars rhs [])
+
+(* Retire [names] from every channel.  A [lets] entry goes too when its
+   right-hand side MENTIONS a retired name: the equation `a = x + 1` is
+   reflected with `x` as a bare constant, which after `let x = 0` would mean
+   the NEW `x`. *)
 let retire (names : string list) (c : dctx) : dctx =
   if names = [] then c
   else
     { path = Refine_check.path_shadow c.path names
     ; shadowed = names @ c.shadowed
-    ; lets = List.filter (fun (n, _) -> not (List.mem n names)) c.lets }
+    ; lets =
+        List.filter
+          (fun (n, rhs) -> not (List.mem n names) && not (mentions_any names rhs))
+          c.lets }
 
 (* `let n = rhs`: retire the old [n] everywhere, then record the new value.
    [n] joins [shadowed] because any refinement or guard about the OUTER `n` is
-   now stale; the fresh [lets] entry is what the checker may use instead. *)
+   now stale; the fresh [lets] entry is what the checker may use instead.
+
+   Not when [rhs] mentions [n] itself: `let d = d - 1` reflected as an
+   equation is `d = d - 1`, which no integer satisfies, so every goal under it
+   was vacuously proved and `10 / d` passed with `d` the old `1`. *)
 let bind_let (n : string) (rhs : A.expr) (c : dctx) : dctx =
   let c = retire [ n ] c in
-  { c with lets = (n, rhs) :: c.lets }
+  if mentions_any [ n ] rhs then c else { c with lets = (n, rhs) :: c.lets }
 
 (* Names an [A.ELam] / [A.ELetFn] parameter list binds. *)
 let lam_param_names (ps : A.param list) : string list =
@@ -200,16 +224,18 @@ let stmt_binding (c : dctx) (stmt : A.expr) : dctx =
   | A.ELetFn (n, _, _, _, _) -> retire [ n.A.txt ] c
   | _ -> c
 
-(* Calls [f span divisor_expr ctx] for every integer division/modulo site. *)
-let rec iter_div_sites
-    (f : A.span -> A.expr -> dctx -> unit) (c : dctx) (e : A.expr) : unit =
-  let go e = iter_div_sites f c e in
-  let under names e = iter_div_sites f (retire names c) e in
+(* Calls [f e ctx] for every expression [e] that [site] selects, then keeps
+   walking into [e]'s children.  Shared with [Overflow_safety], whose sites are
+   the Int `+ - *` and negations rather than divisions: both passes need the
+   same shadowing discipline, so there is one walker. *)
+let rec iter_sites
+    ~(site : A.expr -> bool) (f : A.expr -> dctx -> unit) (c : dctx) (e : A.expr)
+  : unit =
+  let walk f c e = iter_sites ~site f c e in
+  let go e = walk f c e in
+  let under names e = walk f (retire names c) e in
+  if site e then f e c;
   match e with
-  | A.EApp (A.EVar { A.txt = op; _ }, [ lhs; rhs ], sp) when List.mem op div_ops ->
-    f sp rhs c;
-    go lhs;
-    go rhs
   | A.EApp (fn, args, _) ->
     go fn; List.iter go args
   | A.ECon (_, args, _) | A.ETuple (args, _) | A.EAtom (_, args, _) ->
@@ -228,7 +254,7 @@ let rec iter_div_sites
   | A.EBlock (es, _) ->
     ignore
       (List.fold_left
-         (fun c stmt -> iter_div_sites f c stmt; stmt_binding c stmt)
+         (fun c stmt -> walk f c stmt; stmt_binding c stmt)
          c es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.EMatch (scrut, arms, _) ->
@@ -237,23 +263,23 @@ let rec iter_div_sites
       (fun (arm : A.branch) ->
         (* Pattern binders are in scope for the guard as well as the body. *)
         let ac = retire (Refine_check.pat_binders arm.A.branch_pat) c in
-        Option.iter (iter_div_sites f ac) arm.A.branch_guard;
+        Option.iter (walk f ac) arm.A.branch_guard;
         let ac =
           match arm.A.branch_guard with
           | Some g -> { ac with path = (g, false) :: ac.path }
           | None -> ac
         in
-        iter_div_sites f ac arm.A.branch_body)
+        walk f ac arm.A.branch_body)
       arms
   | A.EIf (cond, t, e, _) ->
     go cond;
-    iter_div_sites f { c with path = (cond, false) :: c.path } t;
-    iter_div_sites f { c with path = (cond, true) :: c.path } e
+    walk f { c with path = (cond, false) :: c.path } t;
+    walk f { c with path = (cond, true) :: c.path } e
   | A.ECond (arms, _) ->
     List.iter
       (fun (cond, b) ->
         go cond;
-        iter_div_sites f { c with path = (cond, false) :: c.path } b)
+        walk f { c with path = (cond, false) :: c.path } b)
       arms
   | A.EField (inner, _, _) -> go inner
   | A.EPipe (a, b, _) -> go a; go b
@@ -270,6 +296,18 @@ let rec iter_div_sites
   | A.EDbg (e_opt, _) -> Option.iter go e_opt
   | A.ESigil (_, inner, _) -> go inner
   | A.EVar _ | A.ELit _ | A.EHole _ | A.EResultRef _ -> ()
+
+(* Calls [f span divisor_expr ctx] for every integer division/modulo site. *)
+let iter_div_sites (f : A.span -> A.expr -> dctx -> unit) (c : dctx) (e : A.expr) : unit =
+  iter_sites
+    ~site:(function
+      | A.EApp (A.EVar { A.txt = op; _ }, [ _; _ ], _) -> List.mem op div_ops
+      | _ -> false)
+    (fun e c ->
+      match e with
+      | A.EApp (_, [ _; rhs ], sp) -> f sp rhs c
+      | _ -> ())
+    c e
 
 (* ── Per-divisor VC ─────────────────────────────────────────────────────── *)
 
@@ -406,7 +444,7 @@ let rec check_var_divisor ~root errctx span var_name all_params (c : dctx) =
   in
   Obligation.record
     { Obligation.span; callee = var_name; predicate = "_ != 0"; verdict
-    ; kind = Obligation.Division }
+    ; kind = Obligation.Division; inst = None }
 
 and check_var_divisor_inner ~root errctx span var_name all_params (c : dctx) =
   let params =
@@ -589,22 +627,23 @@ let check_clause ~root errctx (clause : A.fn_clause) : unit =
     init
     clause.A.fc_body
 
-let check_fn ~root errctx (fd : A.fn_def) : unit =
-  List.iter (check_clause ~root errctx) fd.A.fn_clauses
+(* The module walk below is parameterised by the per-clause check, so
+   [Overflow_safety] covers exactly the declarations this pass does. *)
+let check_fn ~clause (fd : A.fn_def) : unit = List.iter clause fd.A.fn_clauses
 
 (* A body that is not a function clause — a top-level `let`, an actor handler,
    a `test` body.  [params] carries whatever bindings ARE in scope (an actor
    handler's parameters may be refined); everything else is empty, so the
    divisor can only be discharged by a literal, a path condition, or a `let`
    value collected from the body itself. *)
-let check_body ~root errctx (params : A.fn_param list) (body : A.expr) : unit =
-  check_clause ~root errctx
+let check_body ~clause (params : A.fn_param list) (body : A.expr) : unit =
+  clause
     { A.fc_params = params; A.fc_guard = None; A.fc_body = body;
       A.fc_span = A.dummy_span; A.fc_params_span = A.dummy_span }
 
 (* ── Module-level walk ──────────────────────────────────────────────────── *)
 
-let rec check_decls ~root errctx (decls : A.decl list) : unit =
+let rec check_decls_with ~clause (decls : A.decl list) : unit =
   let no_panic =
     List.exists
       (function A.DOpts (opts, _) -> List.mem "no_panic" opts | _ -> false)
@@ -615,7 +654,7 @@ let rec check_decls ~root errctx (decls : A.decl list) : unit =
      refinement on an impl method may discharge a division HERE only if the
      same rule made it visible to callers THERE. *)
   let adoptable = Refine_check.adoptable_impl_methods decls in
-  List.iter (check_decl ~root errctx ~no_panic ~adoptable) decls
+  List.iter (check_decl ~clause ~no_panic ~adoptable) decls
 
 (* One declaration.  Every constructor of [A.decl] is named — there is NO
    wildcard, deliberately.  This walk used to descend only into [DFn] and
@@ -624,18 +663,18 @@ let rec check_decls ~root errctx (decls : A.decl list) : unit =
    `100 / n` in an impl body passed `--check` silently and then panicked with
    "division by zero" at run time.  Exhaustive, a 25th decl form is a COMPILE
    ERROR here rather than another silent hole. *)
-and check_decl ~root errctx ~no_panic ~adoptable (d : A.decl) : unit =
-  let body params e = if no_panic then check_body ~root errctx params e in
+and check_decl ~clause ~no_panic ~adoptable (d : A.decl) : unit =
+  let body params e = if no_panic then check_body ~clause params e in
   let expr e = body [] e in
   match d with
-  | A.DFn (fd, _) -> if no_panic then check_fn ~root errctx fd
+  | A.DFn (fd, _) -> if no_panic then check_fn ~clause fd
   (* A nested module re-derives its own `cap` directive: capabilities do not
      inherit inward (bin/main.ml prepends the whole stdlib as sibling DMods). *)
-  | A.DMod (_, _, inner_decls, _) -> check_decls ~root errctx inner_decls
+  | A.DMod (_, _, inner_decls, _) -> check_decls_with ~clause inner_decls
   (* A `describe` block is part of its module's scope, so unlike DMod it
      INHERITS [no_panic] rather than re-deriving it from its own decl list —
      which carries no `cap` directive and would silently disable the check. *)
-  | A.DDescribe (_, ds, _) -> List.iter (check_decl ~root errctx ~no_panic ~adoptable) ds
+  | A.DDescribe (_, ds, _) -> List.iter (check_decl ~clause ~no_panic ~adoptable) ds
   (* A divisor refinement declared on an `impl` method is a fact only if some
      caller is obliged to establish it.  When the method name is ambiguous (a
      `fn` owns it, or two impls define it) nothing obliges anyone, so the
@@ -647,7 +686,7 @@ and check_decl ~root errctx ~no_panic ~adoptable (d : A.decl) : unit =
     if no_panic then
       List.iter
         (fun ((mn : A.name), (fd : A.fn_def)) ->
-          check_fn ~root errctx
+          check_fn ~clause
             (if List.mem mn.A.txt adoptable then fd
              else Refine_check.strip_param_refinements fd))
         idf.A.impl_methods
@@ -685,6 +724,9 @@ and check_decl ~root errctx ~no_panic ~adoptable (d : A.decl) : unit =
   | A.DSatisfy _             (* likewise desugared into DImpl *)
   | A.DUse _                 (* import: no expressions *)
   | A.DAlias _ -> ()         (* alias: no expressions *)
+
+let check_decls ~root errctx (decls : A.decl list) : unit =
+  check_decls_with ~clause:(check_clause ~root errctx) decls
 
 let check_module ?(root = Sys.getcwd ()) (errctx : Err.ctx) (m : A.module_) : unit =
   (* No-op when [Refine_check.check_module] already registered this module

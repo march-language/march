@@ -47,6 +47,8 @@
 --   let store = Config.new_store("my_test_store")
 --   Config.store_put(store, port, 4000)
 --   Config.store_get(store, port)
+--
+-- doc: try
 
 mod Config do
   needs IO.Mut
@@ -112,19 +114,79 @@ mod Config do
     end
   end
 
-  doc "Codec for `Int` values."
+  doc """
+  Codec for `Int` values.
+
+  ## Examples
+
+      march> let s = Config.new_store("codec_int_demo")
+      march> let k = Config.key(:myapp, :workers, Config.int())
+      march> Config.store_put(s, k, 4)
+      march> let s = Config.new_store("codec_int_demo")
+      march> let k = Config.key(:myapp, :workers, Config.int())
+      march> Config.store_get(s, k)
+      Some(4)
+  """
   fn int() : Codec(Int) do Codec("Int", fn n -> CfgInt(n), decode_int) end
 
-  doc "Codec for `Float` values."
+  doc """
+  Codec for `Float` values.
+
+  ## Examples
+
+      march> let s = Config.new_store("codec_float_demo")
+      march> let k = Config.key(:myapp, :ratio, Config.float())
+      march> Config.store_put(s, k, 0.5)
+      march> let s = Config.new_store("codec_float_demo")
+      march> let k = Config.key(:myapp, :ratio, Config.float())
+      march> Config.store_get(s, k)
+      Some(0.5)
+  """
   fn float() : Codec(Float) do Codec("Float", fn f -> CfgFloat(f), decode_float) end
 
-  doc "Codec for `String` values."
+  doc """
+  Codec for `String` values.
+
+  ## Examples
+
+      march> let s = Config.new_store("codec_string_demo")
+      march> let k = Config.key(:myapp, :name, Config.string())
+      march> Config.store_put(s, k, "demo")
+      march> let s = Config.new_store("codec_string_demo")
+      march> let k = Config.key(:myapp, :name, Config.string())
+      march> Config.store_get(s, k)
+      Some("demo")
+  """
   fn string() : Codec(String) do Codec("String", fn s -> CfgString(s), decode_string) end
 
-  doc "Codec for `Bool` values."
+  doc """
+  Codec for `Bool` values.
+
+  ## Examples
+
+      march> let s = Config.new_store("codec_bool_demo")
+      march> let k = Config.key(:myapp, :debug, Config.bool())
+      march> Config.store_put(s, k, true)
+      march> let s = Config.new_store("codec_bool_demo")
+      march> let k = Config.key(:myapp, :debug, Config.bool())
+      march> Config.store_get(s, k)
+      Some(true)
+  """
   fn bool() : Codec(Bool) do Codec("Bool", fn b -> CfgBool(b), decode_bool) end
 
-  doc "Codec for `Atom` values."
+  doc """
+  Codec for `Atom` values.
+
+  ## Examples
+
+      march> let s = Config.new_store("codec_atom_demo")
+      march> let k = Config.key(:myapp, :mode, Config.atom())
+      march> Config.store_put(s, k, :fast)
+      march> let s = Config.new_store("codec_atom_demo")
+      march> let k = Config.key(:myapp, :mode, Config.atom())
+      march> Config.store_get(s, k)
+      Some(:fast)
+  """
   fn atom() : Codec(Atom) do Codec("Atom", fn a -> CfgAtom(a), decode_atom) end
 
   pfn decode_all(ds : List(Value), dec : Value -> Option(v), acc : List(v)) : Option(List(v)) do
@@ -140,7 +202,17 @@ mod Config do
 
   doc """
   Codec for a list whose elements use `elem`. Decoding fails (`None`) unless
-  every element decodes.
+  every element decodes. Its type name is `"List(" ++ elem's name ++ ")"`.
+
+  ## Examples
+
+      march> let s = Config.new_store("codec_list_demo")
+      march> let k = Config.key(:myapp, :tags, Config.list(Config.atom()))
+      march> Config.store_put(s, k, [:a, :b])
+      march> let s = Config.new_store("codec_list_demo")
+      march> let k = Config.key(:myapp, :tags, Config.list(Config.atom()))
+      march> Config.store_get(s, k)
+      Some([:a, :b])
   """
   fn list(elem : Codec(v)) : Codec(List(v)) do
     match elem do
@@ -187,7 +259,17 @@ mod Config do
     Codec(name, encode, decode)
   end
 
-  doc "The type name of a stored `Value`, as shown in `KeyWrongType`."
+  doc """
+  The type name of a stored `Value`, as shown in `KeyWrongType`. A list is
+  just `"List"`, whatever its elements.
+
+  ## Examples
+
+      march> Config.value_type_name(Config.CfgInt(1))
+      "Int"
+      march> Config.value_type_name(Config.CfgList([Config.CfgBool(true)]))
+      "List"
+  """
   fn value_type_name(d : Value) : String do
     match d do
       CfgInt(_)    -> "Int"
@@ -203,7 +285,13 @@ mod Config do
 
   doc """
   A typed key for the 2-level path `(ns, name)`. The codec fixes the value
-  type: `Config.key(:myapp, :port, Config.int()) : Key(Int)`.
+  type: `Config.key(:myapp, :port, Config.int()) : Key(Int)`. Building a key
+  stores nothing; two keys with the same atoms share one path.
+
+  ## Examples
+
+      march> Config.path(Config.key(:test, :port, Config.int()))
+      ":test/:port"
   """
   fn key(ns : Atom, name : Atom, c : Codec(v)) : Key(v) do
     Key(to_string(ns) ++ "/" ++ to_string(name), c)
@@ -212,19 +300,41 @@ mod Config do
   doc """
   A typed key for the 3-level path `(ns, section, name)`:
   `Config.key_in(:myapp, :db, :host, Config.string()) : Key(String)`.
+
+  ## Examples
+
+      march> Config.path(Config.key_in(:test, :dev, :host, Config.string()))
+      ":test/:dev/:host"
   """
   fn key_in(ns : Atom, section : Atom, name : Atom, c : Codec(v)) : Key(v) do
     Key(to_string(ns) ++ "/" ++ to_string(section) ++ "/" ++ to_string(name), c)
   end
 
-  doc "The key's path as stored, e.g. `\":myapp/:port\"`."
+  doc """
+  The key's path as stored: the atoms (each with its leading `:`) joined
+  by `/`, e.g. `":myapp/:port"`.
+
+  ## Examples
+
+      march> Config.path(Config.endpoint_port_key())
+      ":bastion/:port"
+  """
   fn path(k : Key(v)) : String do
     match k do
       Key(p, _) -> p
     end
   end
 
-  doc "Render an `Error` as a one-line message."
+  doc """
+  Render an `Error` as a one-line message.
+
+  ## Examples
+
+      march> Config.error_to_string(Config.KeyMissing(":myapp/:port"))
+      "Config: key :myapp/:port not set"
+      march> Config.error_to_string(Config.KeyWrongType(":myapp/:port", "Int", "String"))
+      "Config: key :myapp/:port holds a value of type String, expected Int"
+  """
   fn error_to_string(e : Error) : String do
     match e do
       KeyMissing(p) -> "Config: key " ++ p ++ " not set"
@@ -274,7 +384,19 @@ mod Config do
 
   -- ── put / get ─────────────────────────────────────────────────────────────
 
-  doc "Store `value` under `key` in the global config table."
+  doc """
+  Store `value` under `key` in the global config table, replacing any
+  previous value at that path (whatever its type). The table is
+  process-wide and lives until the program exits.
+
+  ## Examples
+
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> Config.put(port, 4000)
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> Config.get_with_default(port, 0)
+      4000
+  """
   fn put(k : Key(v), value : v) : Unit do
     table_put(global_table(), k, value)
   end
@@ -283,6 +405,17 @@ mod Config do
   Look up `key`. Returns `Some(value)`, or `None` when the key is unset OR
   holds a value written through a key of another type. Use `fetch` to tell
   the two apart.
+
+  ## Examples
+
+      march> let host = Config.key(:myapp, :host, Config.string())
+      march> Config.put(host, "localhost")
+      march> let host = Config.key(:myapp, :host, Config.string())
+      march> Option.unwrap_or(Config.get(host), "unset")
+      "localhost"
+      march> let host = Config.key(:myapp, :host, Config.string())
+      march> Config.get(Config.key(:myapp, :host, Config.int()))
+      None
   """
   fn get(k : Key(v)) : Option(v) do
     result_to_option(table_fetch(global_table(), k))
@@ -290,13 +423,40 @@ mod Config do
 
   doc """
   Look up `key`, returning `Ok(value)`, `Err(KeyMissing(path))`, or
-  `Err(KeyWrongType(path, expected, found))`.
+  `Err(KeyWrongType(path, expected, found))`, where `expected` is the
+  reading codec's type name and `found` the stored value's
+  (`value_type_name`). Reading the `:test/:port` Int stored in the example below
+  through a String key gives `Err(KeyWrongType(":test/:port", "String", "Int"))`.
+
+  ## Examples
+
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> let k = Config.key(:test, :port, Config.int())
+      march> Config.fetch(k)
+      Err(KeyMissing(":test/:port"))
+      march> let k = Config.key(:test, :port, Config.int())
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> Config.put(k, 8080)
+      march> let k = Config.key(:test, :port, Config.int())
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> Result.unwrap_or(Config.fetch(k), 0)
+      8080
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> Result.is_err(Config.fetch(Config.key(:test, :port, Config.string())))
+      true
   """
   fn fetch(k : Key(v)) : Result(v, Error) do
     table_fetch(global_table(), k)
   end
 
-  doc "Get `key`'s value, or `default_val` when it is unset or of another type."
+  doc """
+  Get `key`'s value, or `default_val` when it is unset or of another type.
+
+  ## Examples
+
+      march> Config.get_with_default(Config.key(:myapp, :timeout, Config.int()), 30)
+      30
+  """
   fn get_with_default(k : Key(v), default_val : v) : v do
     match get(k) do
       Some(x) -> x
@@ -308,6 +468,16 @@ mod Config do
   Get a required configuration value. Panics with the `error_to_string`
   message when the key is unset or holds a value of another type; use
   `fetch` for a recoverable read.
+
+  ## Examples
+
+      march> let host = Config.key(:myapp, :host, Config.string())
+      march> let db = Config.key(:test, :host, Config.string())
+      march> Config.put(db, "db.local")
+      march> let host = Config.key(:myapp, :host, Config.string())
+      march> let db = Config.key(:test, :host, Config.string())
+      march> Config.require(db)
+      "db.local"
   """
   fn require(k : Key(v)) : v do
     match fetch(k) do
@@ -320,7 +490,18 @@ mod Config do
 
   doc """
   Load a String value from an environment variable and store it under `key`.
-  Uses default if the env var is not set. Returns the value stored.
+  Uses `default_val` if the env var is not set (a set-but-empty variable
+  stores `""`). Always stores, overwriting any previous value; returns the
+  value stored.
+
+  ## Examples
+
+      march> let secret = Config.key(:myapp, :secret, Config.string())
+      march> Config.from_env(secret, "MARCH_DOCTEST_NEVER_SET", "dev-secret")
+      "dev-secret"
+      march> let secret = Config.key(:myapp, :secret, Config.string())
+      march> Config.get_with_default(secret, "")
+      "dev-secret"
   """
   fn from_env(k : Key(String), env_var : String, default_val : String) : String do
     let value = match process_env(env_var) do
@@ -333,8 +514,13 @@ mod Config do
 
   doc """
   Load an Int value from an environment variable and store it under `key`.
-  Parses the string as an integer; uses default if absent or unparseable.
-  Returns the value stored.
+  Parses the string as an integer; uses `default_val` if absent or
+  unparseable. Always stores; returns the value stored.
+
+  ## Examples
+
+      march> Config.from_env_int(Config.key(:myapp, :workers, Config.int()), "MARCH_DOCTEST_NEVER_SET", 4)
+      4
   """
   fn from_env_int(k : Key(Int), env_var : String, default_val : Int) : Int do
     let value = match process_env(env_var) do
@@ -351,8 +537,14 @@ mod Config do
 
   doc """
   Load a Bool value from an environment variable and store it under `key`.
-  "true", "1", "yes" are parsed as true; uses default if absent.
-  Returns the value stored.
+  Exactly "true", "1" and "yes" (case-sensitive) are parsed as true; any
+  other value that is set (including "TRUE" or "") stores false. Uses
+  `default_val` only when the variable is absent. Returns the value stored.
+
+  ## Examples
+
+      march> Config.from_env_bool(Config.key(:myapp, :verbose, Config.bool()), "MARCH_DOCTEST_NEVER_SET", true)
+      true
   """
   fn from_env_bool(k : Key(Bool), env_var : String, default_val : Bool) : Bool do
     let value = match process_env(env_var) do
@@ -367,8 +559,13 @@ mod Config do
 
   doc """
   Returns the current application environment as an atom.
-  Reads the MARCH_ENV environment variable; defaults to :dev.
-  Possible values: :dev, :test, :prod.
+  Reads the MARCH_ENV environment variable: "prod" gives :prod, "test"
+  gives :test, and anything else (including unset) gives :dev.
+
+      match Config.env() do
+        :prod -> enable_caching()
+        _     -> ()
+      end
   """
   fn env() do
     match process_env("MARCH_ENV") do
@@ -380,7 +577,7 @@ mod Config do
     end
   end
 
-  doc "True if the current environment is :dev."
+  doc "True unless MARCH_ENV is \"prod\" or \"test\" (so an unset or unrecognised MARCH_ENV counts as :dev)."
   fn is_dev() do
     match process_env("MARCH_ENV") do
     Some("prod") -> false
@@ -389,7 +586,7 @@ mod Config do
     end
   end
 
-  doc "True if the current environment is :test."
+  doc "True if MARCH_ENV is exactly \"test\"."
   fn is_test() do
     match process_env("MARCH_ENV") do
     Some("test") -> true
@@ -397,7 +594,7 @@ mod Config do
     end
   end
 
-  doc "True if the current environment is :prod."
+  doc "True if MARCH_ENV is exactly \"prod\"."
   fn is_prod() do
     match process_env("MARCH_ENV") do
     Some("prod") -> true
@@ -411,7 +608,21 @@ mod Config do
   Validate a config value with a predicate function.
   Returns Ok(value) if the key is set and the predicate returns true;
   otherwise Err with the `error_to_string` message for an unset or wrong-typed
-  key, or "Config: validation failed".
+  key, or "Config: validation failed" when the predicate rejects the value.
+
+  ## Examples
+
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> let p = Config.key_in(:myapp, :http, :port, Config.int())
+      march> Config.put(p, 8080)
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> let p = Config.key_in(:myapp, :http, :port, Config.int())
+      march> Config.validate(p, fn n -> n > 0 && n < 65536)
+      Ok(8080)
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> let p = Config.key_in(:myapp, :http, :port, Config.int())
+      march> Result.is_err(Config.validate(p, fn n -> n < 1024))
+      true
   """
   fn validate(k : Key(v), predicate : v -> Bool) : Result(v, String) do
     match fetch(k) do
@@ -422,19 +633,46 @@ mod Config do
 
   -- ── Endpoint config ───────────────────────────────────────────────────────
 
-  doc "The key `put_endpoint` stores the HTTP port under: `(:bastion, :port)`."
+  doc """
+  The key `put_endpoint` stores the HTTP port under: `(:bastion, :port)`.
+
+  ## Examples
+
+      march> Config.path(Config.endpoint_port_key())
+      ":bastion/:port"
+  """
   fn endpoint_port_key() : Key(Int) do key(:bastion, :port, int()) end
 
-  doc "The key `put_endpoint` stores the host under: `(:bastion, :host)`."
+  doc """
+  The key `put_endpoint` stores the host under: `(:bastion, :host)`.
+
+  ## Examples
+
+      march> Config.path(Config.endpoint_host_key())
+      ":bastion/:host"
+  """
   fn endpoint_host_key() : Key(String) do key(:bastion, :host, string()) end
 
-  doc "The key `put_endpoint` stores the secret under: `(:bastion, :secret_key_base)`."
+  doc """
+  The key `put_endpoint` stores the secret under: `(:bastion, :secret_key_base)`.
+
+  ## Examples
+
+      march> Config.path(Config.secret_key_base_key())
+      ":bastion/:secret_key_base"
+  """
   fn secret_key_base_key() : Key(String) do key(:bastion, :secret_key_base, string()) end
 
   doc """
-  Store web endpoint configuration.
+  Store web endpoint configuration (port, host and secret key base) in the
+  global table under the `endpoint_*_key()` keys.
   Typically called during application startup.
-    Config.put_endpoint(4000, "localhost", secret)
+
+  ## Examples
+
+      march> Config.put_endpoint(4000, "localhost", "s3cret")
+      march> (Config.endpoint_port(80), Config.endpoint_host("0.0.0.0"))
+      (4000, "localhost")
   """
   fn put_endpoint(port : Int, host : String, secret : String) : Unit do
     put(endpoint_port_key(), port)
@@ -442,17 +680,44 @@ mod Config do
     put(secret_key_base_key(), secret)
   end
 
-  doc "Get the configured HTTP port. Returns default_port if not set."
+  doc """
+  Get the configured HTTP port (`endpoint_port_key()`). Returns
+  `default_port` if not set.
+
+  ## Examples
+
+      march> Config.put(Config.endpoint_port_key(), 8443)
+      march> Config.endpoint_port(80)
+      8443
+  """
   fn endpoint_port(default_port : Int) : Int do
     get_with_default(endpoint_port_key(), default_port)
   end
 
-  doc "Get the configured host. Returns default_host if not set."
+  doc """
+  Get the configured host (`endpoint_host_key()`). Returns `default_host`
+  if not set.
+
+  ## Examples
+
+      march> Config.put(Config.endpoint_host_key(), "example.test")
+      march> Config.endpoint_host("localhost")
+      "example.test"
+  """
   fn endpoint_host(default_host : String) : String do
     get_with_default(endpoint_host_key(), default_host)
   end
 
-  doc "Get the secret key base. Returns empty string if not configured."
+  doc """
+  Get the secret key base (`secret_key_base_key()`). Returns `""` if not
+  configured.
+
+  ## Examples
+
+      march> Config.put(Config.secret_key_base_key(), "s3cret")
+      march> Config.secret_key_base()
+      "s3cret"
+  """
   fn secret_key_base() : String do
     get_with_default(secret_key_base_key(), "")
   end
@@ -464,6 +729,19 @@ mod Config do
   Useful for testing or multi-tenant configurations.
   Returns a store handle holding tagged `Value`s; use it with `store_put`,
   `store_get` and `store_fetch` and the same typed keys as the global table.
+  Calling it again with the same name returns the same store, contents
+  included.
+
+  ## Examples
+
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> let k = Config.key(:myapp, :port, Config.int())
+      march> let store = Config.new_store("new_store_demo")
+      march> Config.store_put(store, k, 1)
+      march> let k = Config.key(:myapp, :port, Config.int())
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> Option.unwrap_or(Config.store_get(Config.new_store("new_store_demo"), k), 0)
+      1
   """
   fn new_store(name : String) : Vault(Value) do
     match vault_whereis(name) do
@@ -472,7 +750,23 @@ mod Config do
     end
   end
 
-  doc "Store `value` under `key` in a named config store."
+  doc """
+  Store `value` under `key` in a named config store; the global table is
+  not touched.
+
+  ## Examples
+
+      march> let k = Config.key(:myapp, :retries, Config.int())
+      march> let store = Config.new_store("store_put_demo")
+      march> Config.store_put(store, k, 3)
+      march> let k = Config.key(:myapp, :retries, Config.int())
+      march> let store = Config.new_store("store_put_demo")
+      march> Option.unwrap_or(Config.store_get(store, k), 0)
+      3
+      march> let k = Config.key(:myapp, :retries, Config.int())
+      march> Option.is_none(Config.get(k))
+      true
+  """
   fn store_put(store : Vault(Value), k : Key(v), value : v) : Unit do
     table_put(store, k, value)
   end
@@ -480,12 +774,27 @@ mod Config do
   doc """
   Look up `key` in a named config store. `None` when unset or of another type
   (see `get`).
+
+  ## Examples
+
+      march> let store = Config.new_store("store_get_demo")
+      march> Config.store_get(store, Config.key(:myapp, :limit, Config.int()))
+      None
   """
   fn store_get(store : Vault(Value), k : Key(v)) : Option(v) do
     result_to_option(table_fetch(store, k))
   end
 
-  doc "Look up `key` in a named config store, with an `Error` on failure (see `fetch`)."
+  doc """
+  Look up `key` in a named config store, with an `Error` on failure (see `fetch`).
+
+  ## Examples
+
+      march> let host = Config.key(:myapp, :host, Config.string())
+      march> let store = Config.new_store("store_fetch_demo")
+      march> Config.store_fetch(store, Config.key(:test, :host, Config.string()))
+      Err(KeyMissing(":test/:host"))
+  """
   fn store_fetch(store : Vault(Value), k : Key(v)) : Result(v, Error) do
     table_fetch(store, k)
   end

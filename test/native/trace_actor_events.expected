@@ -1,0 +1,33 @@
+events without pids: PidsRequired
+nine pids: BadRequest
+pid that is not an actor: UnknownPid
+negative pid: BadRequest
+pids without events: BadRequest
+nothing to watch: BadRequest
+events, limit 0: LimitOutOfRange
+events, rate secs 0: LimitOutOfRange
+flow: sent=2 received=1 spawned=1 exited=0 dropped=0
+main sent to p: pid=-1 peer is p: true
+p received: pid is p: true
+sent and received carry the same tag: true
+spawned: parent is p: true
+p sent to the child it spawned: true
+child is not p: true
+every event has a time: true
+kind filter: total=1 received=1
+traffic of another actor: events=0
+send to the named actor: sent=1 received=1
+main is -1: true
+calls-only session: actor_events=0 calls=1
+count(2): actor_events=2 calls=0 recorded=2 dropped=0 rate_dropped=0 done=true why=count
+count(2) after more traffic: actor_events=0 calls=0 recorded=2 dropped=0 rate_dropped=0 done=true why=count
+rate(3,60): kept=3 recorded=3 over budget counted=true done=false
+exited: total=3
+killed: killed
+stopped: normal
+crashed: crash
+send to dead: refused
+dropped: n=1 reason=dead recipient is z: true sender is main: true
+full mailbox: dropped events >= 4: true reason=full
+fresh session after stop: 1
+done

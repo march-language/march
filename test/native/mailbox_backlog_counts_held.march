@@ -1,0 +1,69 @@
+-- An actor blocked in an Actor.call sets aside the messages that arrive while
+-- it waits (they go back on the mailbox after the reply), so mailbox_size
+-- reads 0 for it. mailbox_backlog counts them, and Actor.top_by_mailbox /
+-- Actor.over_mailbox rank by it: the actor stuck in a slow call with work
+-- piling up is the one they find
+-- (specs/progress/2026-10-11-actor-call-held-messages-invisible-to-mailbox-count.md).
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  type AskReq = AskReq
+
+  actor Sink do
+    state { n : Int }
+    init  { n: 0 }
+    -- Never replies.
+    on Ask(_reply_to) do
+      state
+    end
+  end
+
+  actor Caller do
+    state { n : Int }
+    init  { n: 0 }
+    on Stall(sink) do
+      match Actor.call(sink, AskReq, 1500) do
+        Ok(_) -> state
+        Err(_) -> state
+      end
+    end
+    on Bump(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  fn burst(c, k : Int) do
+    if k > 0 do
+      let _ = send(c, Bump(1))
+      burst(c, k - 1)
+    else
+      ()
+    end
+  end
+
+  fn depth_of(rows : List((Pid(a), Int)), p : Pid(a)) : Int do
+    match List.find(rows, fn r -> match r do (q, _) -> pid_to_int(q) == pid_to_int(p) end) do
+      Some((_, d)) -> d
+      None -> -1
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
+    let sink = spawn(Sink)
+    let caller = spawn(Caller)
+    let _ = send(caller, Stall(sink))
+    sleep_ms(50)
+    burst(caller, 150)
+    sleep_ms(300)
+    println("mailbox_size: " ++ int_to_string(mailbox_size(caller)))
+    println("mailbox_backlog: " ++ int_to_string(mailbox_backlog(caller)))
+    println("over_mailbox(100): " ++ int_to_string(depth_of(Actor.over_mailbox(c, 100), caller)))
+    match Actor.top_by_mailbox(c, 1) do
+      Cons((p, d), _) -> println("top: caller=" ++ bool_to_string(pid_to_int(p) == pid_to_int(caller)) ++ " depth=" ++ int_to_string(d))
+      Nil -> println("top: none")
+    end
+  end
+end

@@ -1,0 +1,8 @@
+6 actors; trees below, supervisors first
+1 Boss [boss]   waiting  mbox 0  1 kids  crashes(1h) 3
+  +- 4 Fragile   waiting  mbox 0
+6 Maker [maker]   waiting  mbox 0  2 kids
+  +- 7 Twig   waiting  mbox 0
+  +- 8 Twig   waiting  mbox 0
+
+1 actors with no supervisor and no children (see Actors): 5

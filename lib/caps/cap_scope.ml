@@ -47,3 +47,52 @@ let is_scopable (cap : string) : bool =
   match cap with
   | "IO.FileRead" | "IO.FileWrite" | "IO.FileSystem" -> true
   | _ -> false
+
+(* ── Scope manifest (embedded in compiled binaries) ─────────────────── *)
+
+let fs_classes = [ "IO.FileRead"; "IO.FileWrite" ]
+
+(* Both lattice directions: an ancestor grant (IO.FileSystem, IO) covers the
+   class, and a descendant would still need the class open. *)
+let related klass cap =
+  Cap_lattice.cap_subsumes cap klass || Cap_lattice.cap_subsumes klass cap
+
+let effective_scopes ~(decls : (string * string option) list) (klass : string)
+    : string list option =
+  let relevant = List.filter (fun (c, _) -> related klass c) decls in
+  if relevant = [] || List.exists (fun (_, sc) -> sc = None) relevant then None
+  else
+    Some
+      (List.sort_uniq String.compare
+         (List.filter_map (fun (_, sc) -> Option.map normalize sc) relevant))
+
+let json_string (s : string) : string =
+  let b = Buffer.create (String.length s + 2) in
+  Buffer.add_char b '"';
+  String.iter
+    (fun c ->
+      match c with
+      | '"' -> Buffer.add_string b "\\\""
+      | '\\' -> Buffer.add_string b "\\\\"
+      | c when Char.code c < 0x20 || Char.code c = 0x7f ->
+          Buffer.add_string b (Printf.sprintf "\\u%04x" (Char.code c))
+      | c -> Buffer.add_char b c)
+    s;
+  Buffer.add_char b '"';
+  Buffer.contents b
+
+let manifest_json (decls : (string * string option) list) : string option =
+  let fs =
+    List.filter (fun (c, _) -> List.exists (fun k -> related k c) fs_classes) decls
+    |> List.map (fun (c, sc) -> (c, Option.map normalize sc))
+    |> List.sort_uniq compare
+  in
+  if not (List.exists (fun (_, sc) -> sc <> None) fs) then None
+  else
+    let entry (c, sc) =
+      Printf.sprintf {|{"cap":%s,"scope":%s}|} (json_string c)
+        (match sc with None -> "null" | Some s -> json_string s)
+    in
+    Some
+      (Printf.sprintf {|{"v":1,"scopes":[%s]}|}
+         (String.concat "," (List.map entry fs)))

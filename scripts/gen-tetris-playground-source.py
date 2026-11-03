@@ -10,14 +10,18 @@ see demo_app/tetris/forge.toml's path dependency) is nested INSIDE
 `mod Tetris do ... end` here rather than being a sibling top-level mod.
 
 Run from the project (worktree) root:
-    python3 scripts/gen-tetris-playground-source.py
+    python3 scripts/gen-tetris-playground-source.py [DEST]
+DEST defaults to docs/assets/tetris/tetris-source.march.txt;
+scripts/build-browser-repl.sh passes a staging path.
 """
 import os
+import sys
 
 ROOT = os.getcwd()
 LOGIC_PATH = os.path.join(ROOT, "demo_app", "tetris_logic", "lib", "tetris_logic.march")
 TETRIS_PATH = os.path.join(ROOT, "demo_app", "tetris", "lib", "tetris.march")
-DEST = os.path.join(ROOT, "docs", "assets", "tetris", "tetris-source.march.txt")
+DEST = (sys.argv[1] if len(sys.argv) > 1
+        else os.path.join(ROOT, "docs", "assets", "tetris", "tetris-source.march.txt"))
 
 
 def main():

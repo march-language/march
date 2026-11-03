@@ -6,7 +6,7 @@ March provides expressive pattern matching through `match` expressions and funct
 
 ## Implementation Status
 
-**Complete.** Pattern matching is fully implemented from parsing through LLVM code generation. **Exhaustiveness checking IS implemented** — a Maranget-style usefulness algorithm (`find_missing_mc` / `check_exhaustiveness` in `lib/typecheck/typecheck.ml`) emits a **compile-time Warning** for non-exhaustive matches, naming a missing case. Redundant (unreachable) arms are reported by `check_redundant_arms`. The exhaustiveness check is **skipped when any arm has a `when` guard** (coverage becomes undecidable). A still-unmatched value at runtime falls through to a match-failure path.
+**Complete.** Pattern matching is fully implemented from parsing through LLVM code generation. **Exhaustiveness checking IS implemented**: a Maranget-style usefulness algorithm (`find_missing_mc` / `check_exhaustiveness` in `lib/typecheck/typecheck.ml`) emits a **compile-time Warning** for non-exhaustive matches, naming a missing case. Redundant (unreachable) arms are reported by `check_redundant_arms`. The exhaustiveness check is **skipped when any arm has a `when` guard** (coverage becomes undecidable). A still-unmatched value at runtime falls through to a match-failure path.
 
 **Syntax note:** Match expressions use `do ... end`, not `with`:
 ```march
@@ -14,7 +14,7 @@ match expr do
   Pat -> body
 end
 ```
-Arms do not require a leading `|`. (This document's older examples used `match ... with`, which is **not** valid March syntax — they have been corrected.)
+Arms do not require a leading `|`. (This document's older examples used `match ... with`, which is **not** valid March syntax; they have been corrected.)
 
 ## Source Files & Line References
 
@@ -98,7 +98,7 @@ let rec infer_pattern env (pat : Ast.pattern)
 - `check_exhaustiveness env span scrut_ty branches` runs this during declaration checking and emits a **`Warning`** (not an error) naming the missing case, e.g. *"Non-exhaustive pattern match — missing case: `Some(_)`"*, with a note suggesting a catch-all `_ -> ...`.
 - `check_redundant_arms env scrut_ty branches` emits a Warning (`code = "redundant_arm"`) for arms that can never match.
 
-**Guard handling:** `check_exhaustiveness` first tests whether any branch carries a `when` guard; if so, it **skips** the check entirely, because guard-conditioned coverage is undecidable.
+**Guard handling:** `check_exhaustiveness` first tests whether any branch has a `when` guard; if so, it **skips** the check entirely, because guard-conditioned coverage is undecidable.
 
 **Practical implication:** A non-exhaustive `match` compiles (with a warning); to silence it, add a `_ -> ...` catch-all or cover all constructors.
 

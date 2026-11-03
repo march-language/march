@@ -1,0 +1,46 @@
+march shell: 2 declarations here differ from the node's build (evens, type Shade); inputs that reach them are refused unless read-only (--shell-force)
+warning: --shell-force: this read-only input runs this checkout's code, which differs from the node's build:
+  evens differs
+[0, 2, 4]
+c : Pid(a)
+f : Int -> Int
+error: this input reaches code that differs from the node's build:
+  evens differs
+  --shell-force runs such an input only when it is read-only, and this one is not:
+    calls march_send
+error: this input reaches code that differs from the node's build:
+  evens differs
+  --shell-force runs such an input only when it is read-only, and this one is not:
+    calls march_actor_set_mbox_limit
+error: this input reaches code that differs from the node's build:
+  evens differs
+  --shell-force runs such an input only when it is read-only, and this one is not:
+    calls march_actor_inspect
+    uses Actor.Debug
+error: this input reaches code that differs from the node's build:
+  evens differs
+  --shell-force runs such an input only when it is read-only, and this one is not:
+    calls march_file_write
+    uses IO.FileWrite
+error: this input reaches code that differs from the node's build:
+  evens differs
+  --shell-force runs such an input only when it is read-only, and this one is not:
+    uses `f`, an earlier binding that may hold a closure
+error: this input reaches code that differs from the node's build:
+  Shade has constructor tags Dark=0,Light=1 here, Light=0,Dark=1 on the node
+  evens differs
+  type Shade differs
+  (--shell-force never overrides a differing type or constructor numbering)
+warning: --shell-force: this read-only input runs this checkout's code, which differs from the node's build:
+  evens differs
+** refused: policy IO.Clock
+Ok({ n: 1 })
+4
+exit=1
+audit:
+"src":"evens(4)","skew":1,"result":"ok"
+"src":"let c = Actor.pid_from_int(intro, 0)","result":"ok"
+"src":"let f = fn x -> x + 1","result":"ok"
+"src":"nap() + List.length(evens(2))","skew":1,"result":"policy"
+"src":"Actor.inspect_state(debug, c, 500)","result":"ok"
+"src":"2 + 2","result":"ok"

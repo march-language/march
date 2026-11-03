@@ -7,7 +7,105 @@ permalink: /docs/tooling/
 
 # Tooling
 
-March ships with a build tool, an LSP server, and a tree-sitter grammar for editor syntax highlighting.
+`forge` is March's project tool: it creates, builds, runs, tests, lints and formats a
+project, manages its dependencies and toolchains, searches the standard library, and
+deploys and observes a running node. Beside it March ships `march-lsp`, a language
+server built on the compiler's own pipeline, a tree-sitter grammar for editors, a
+time-travel debugger, and the compiler's own analysis commands.
+
+This page is the command reference. Each section is one command or one family of
+commands with its flags and what they do; the index below groups them by what you are
+trying to do, and the table after it goes from a task to the command.
+
+## On this page
+
+**Start here**
+
+- [Installing forge](#installing-forge)
+- [Which command do I need?](#which-command-do-i-need)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+
+**Everyday**
+
+- [forge: Build Tool](#forge-build-tool): [creating a project](#creating-a-project), [building and running](#building-and-running), [GUI apps](#gui-apps-main-on-the-process-main-thread), [JavaScript backend](#javascript-backend), [cross-compiling to Linux](#cross-compiling-to-linux), [static binaries](#static-binaries), [checking types](#checking-types), [asking the compiler questions](#asking-the-compiler-questions), [auto-fixing diagnostics](#auto-fixing-diagnostics), [testing](#testing), [linting](#linting), [watch mode](#watch-mode), [formatting](#formatting), [cleaning](#cleaning-build-artifacts), [REPL](#interactive-mode-repl)
+
+**Finding things**
+
+- [forge search: Hoogle-style Search](#forge-search-hoogle-style-search)
+- [AI assistant search: spec-search Claude Skill](#ai-assistant-search--spec-search-claude-skill)
+
+**Safety tooling**
+
+- [forge refine: Suggest a refinement type](#forge-refine-suggest-a-refinement-type)
+- [forge cap: Capability and typestate inspection](#forge-cap-capability-and-typestate-inspection)
+- [Dependency Capability Audit](#dependency-capability-audit)
+- [License Audit](#license-audit)
+
+**Dependencies and toolchains**
+
+- [Dependency Management](#dependency-management): [adding](#adding-dependencies), [updating](#updating-dependencies), [the lock file](#lock-file), [offline builds](#offline-builds), [semver](#semver-constraints), [the tree](#dependency-tree)
+- [Archive Management](#archive-management)
+- [Toolchain Management](#toolchain-management)
+
+**Changing and documenting code**
+
+- [Refactoring](#refactoring)
+- [Documentation Generation](#documentation-generation)
+- [Notebooks](#notebooks)
+
+**Deploying and operating**
+
+- [forge topology: the topology file](#forge-topology-the-topology-file)
+- [Hot Code Reload](#hot-code-reload)
+- [forge observe: what a running node is doing](#forge-observe-what-a-running-node-is-doing)
+- [Versioning and Release](#versioning-and-release): [bumping](#inspect-and-bump-versions), [the release pipeline](#guarded-release-pipeline), [release bundles](#release-bundles-forge-release-build), [publishing](#publishing)
+
+**Editors and debugging**
+
+- [LSP Server](#lsp-server)
+- [Zed Editor](#zed-editor)
+- [Time-Travel Debugger](#time-travel-debugger)
+- [Compiler Analysis](#compiler-analysis)
+- [Shell Completions](#shell-completions)
+
+**Reference**
+
+- [Environment Variables](#environment-variables)
+- [See also](#see-also)
+
+## Which command do I need?
+
+| You want to | Run |
+|---|---|
+| Start a project | `forge new my_app`, or `forge init` in an existing directory |
+| Build, run, test | `forge build`, `forge run`, `forge test`; add `--compiled` or `--release` for native builds |
+| Typecheck without building | `forge check` |
+| Rebuild on every save | `forge watch`, `forge watch test`, `forge watch run` |
+| Apply the fixes the compiler already knows | `forge fix` |
+| Find a function by name, type or docstring | `forge search "map"`, `forge search --type "List(a) -> (a -> b) -> List(b)"` |
+| Understand what the compiler did to a function | `forge query fn Name`, `forge query origin`, `forge query why-miss` |
+| Add a dependency, or see what it would newly be allowed to do | `forge add`, `forge audit`, `forge outdated` |
+| Get refinement contracts proposed, or written | `forge refine --infer --diff`, `forge refine --infer --apply`; one function: `forge refine fn_name` |
+| See what a binary may do, or run it in a sandbox | `forge cap inspect`, `forge cap run` |
+| Rename or move a declaration across the project | `forge refactor rename`, `forge refactor move` |
+| Build for Linux from a Mac | `forge build --target linux/amd64` |
+| Compile to JavaScript | `march --target js` or `forge build --target js` |
+| Deploy to a running server without restarting | `forge deploy hot`; with a topology, `forge deploy --env prod` |
+| See what a running node is doing | `forge status`, `forge diagnose`, `forge top`, `forge observe` |
+| Cut a release | `forge release`, `forge release build` |
+| Switch compiler versions | `forge toolchain use`, `forge toolchain pin` |
+
+## How it fits with the rest of March
+
+| Concept | The tooling for it | Chapter |
+|---|---|---|
+| **Capabilities** | `forge cap query` and `inspect`, `forge cap run`, `forge audit`, and the `needs` lines `forge fix` inserts. | [Capabilities]({{ site.baseurl }}/docs/capabilities/), [Capability Audit](capability-audit.md), [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) |
+| **Refinement types** | `forge refine --infer` proposes and writes every contract the checker can verify; `--refine-report` and `--refine-audit` say what was checked. | [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) |
+| **Hot code reload and topology** | `forge deploy hot`, `forge deploy --env`, `forge host init`, `forge topology`. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/), [Topology](topology.md) |
+| **Observing a running node** | `forge status`, `diagnose`, `top`, `observe`, `shell`. | [Observe](observe.md) |
+| **Memory model** | `forge query repr`, `forge phases`, the GC trace viewer, and the editor's reuse hints. | [Memory Model]({{ site.baseurl }}/docs/memory-model/) |
+| **Editors** | `march-lsp` features, per-editor setup, the DAP debugger. | [LSP & Editors]({{ site.baseurl }}/docs/lsp/) |
+| **Testing** | `forge test` flags, property tests and seeds. | [Property Testing](property-testing.md) |
 
 ---
 
@@ -31,7 +129,7 @@ forge search "map"
 
 ## forge: Build Tool
 
-`forge` is the official project manager for March.
+`forge` is the project manager. The subsections below cover the everyday commands.
 
 ### Creating a Project
 
@@ -144,6 +242,8 @@ node dist/app.mjs
 # Skip runtime copy (e.g. build tool manages it)
 march --target js --no-copy-runtime -o dist/app.mjs src/app.march
 ```
+
+**`Int` is a subset on this target.** An `Int` is a JS number, exact only within ±(2^53 - 1). Inside that range arithmetic, division and the `int_*` bitwise builtins give the same answers as a native build. Past it, `+`, `-` and `*` round instead of wrapping at 63 bits, the `int_*` builtins throw a `RangeError`, and `int_max_value()`/`int_min_value()` do not compile. See [Int on the JavaScript target]({{ site.baseurl }}/docs/types/#int-on-the-javascript-target) for the full list.
 
 The JS backend auto-loads `dom.march` from stdlib, so `Js.Dom.*` functions are available without any extra imports in JS builds:
 
@@ -270,6 +370,47 @@ Correctness is guarded by a differential test that cross-compiles a corpus and
 checks each program's output against the native build to the exact byte, so a
 codegen regression on a cross target is caught in CI.
 
+### Static binaries
+
+A compiled program links only the runtime libraries it uses: one that never uses TLS
+does not load OpenSSL, and one that never uses `Compress` loads no compression library.
+`--static` goes further and makes the binary self-contained:
+
+```bash
+march --compile --static app.march -o app
+```
+
+- **Linux:** a fully static executable with no shared-library dependencies, which runs in a
+  `scratch` or distroless image. It links against musl, so it builds on a musl host such as
+  Alpine (`apk add clang build-base openssl-dev openssl-libs-static zlib-static zstd-static
+  brotli-static libucontext-dev`). On a glibc host it is refused: a static glibc binary
+  still depends on the host for name-service lookups, iconv and `dlopen`.
+- **macOS:** a fully static executable is not possible (`libSystem` is always dynamic), so
+  `--static` means the binary loads nothing outside `/usr/lib` and `/System`. OpenSSL, zstd
+  and brotli come from Homebrew's static archives, so the binary runs on a Mac without
+  Homebrew.
+
+The compiler checks the result after linking and refuses a binary that still loads a
+library outside that set (for example through `--ffi-link`). A library the program needs
+whose static archive is missing is an error naming the package to install. `--static`
+cannot be combined with `--hot-reload` (hot patches are loaded with `dlopen`) or
+`--compile-so`, and not yet with `--target`.
+
+**TLS certificates.** A static binary carries no CA bundle. Point it at one with OpenSSL's
+standard variables, `SSL_CERT_FILE` (a bundle file) or `SSL_CERT_DIR` (a directory), and copy
+the bundle into a `scratch` image:
+
+```dockerfile
+FROM scratch
+COPY --from=alpine:3.21 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY app /app
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENTRYPOINT ["/app"]
+```
+
+A binary that links OpenSSL statically contains it, so distribute OpenSSL's license
+(Apache-2.0) with it; the compiler prints a reminder when it does.
+
 ### Checking Types
 
 `forge check` typechecks every `.march` file in the project without producing a binary. It's fast; use it for pre-commit checks or continuous editor feedback:
@@ -279,6 +420,45 @@ forge check
 ```
 
 This catches type errors in every file under `lib/` (including orphaned modules that aren't reachable from the entry point), without paying for codegen or linking.
+
+### Asking the Compiler Questions
+
+`forge query` asks the compiler one question about your project's build and prints the answer. It is for the moments `forge build` can't explain: why a function compiles to what it does, where a generated name came from, or why a build wasn't cached. It runs the compile up to the point it can answer, then stops. Nothing is built, linked, or written to the build cache.
+
+```sh
+forge query fn Server.handle                 # the passes that changed it, and its body at the last one
+forge query fn Server.handle --at tir-perceus   # its body after one named pass
+forge query origin 'Server.handle$apply$3'   # where an emitted function came from
+forge query callers Server.handle            # who references it in the final IR
+forge query callees Server.handle            # what it references
+forge query repr Server.Conn                 # how each instance of a type is represented, and why
+forge query verify                           # run the IR verifier over every compiler stage
+forge query key                              # both build-cache keys and every input that fed them
+forge query why-miss                         # which input changed since the last successful build
+```
+
+| Query | Answers |
+|---|---|
+| `fn NAME` | The passes that changed `NAME` and its specialisations, and its body after the last (or `--at PASS`) |
+| `origin NAME` | Source span, host function, and the specialisation or lambda it derives from |
+| `callers NAME`, `callees NAME` | The final call graph, one level |
+| `repr TYPE` | Whether each instance of `TYPE` is boxed, unboxed, a niche, or a newtype, and the reason |
+| `verify` | The compiler's internal consistency checks over every stage, as findings instead of a crash |
+| `key` | The source-level and post-TIR cache keys, whether each is cached, and each input behind them |
+| `why-miss` | Which input changed since the last successful build, and which cache layer the next build will hit |
+
+With no file named, a query is about the project's entry file; name a `.march` file to ask about that one instead. `--json` prints one JSON object. `--release` and `--target T` ask about the build that `forge build --release` or `--target T` would run, and the project's library path, `[ffi]` flags, topology digest (once a build has written one) and protocol baselines are passed as `forge build` passes them. That is why `forge query key` agrees with a real build: after `forge build`, it reports the same post-TIR key as cached. Anything after `--` goes to the compiler unchanged:
+
+```sh
+forge query fn main -- --no-opt     # the same question, with the optimiser off
+```
+
+Two things to know when reading an answer:
+
+- **A name the optimiser inlined is not in the final IR.** `fn` and `origin` then report the last stage that had it. Add `-- --no-opt` to keep it.
+- **`why-miss` needs one successful build first.** It compares against the record of the last build of that file, so run `forge build` once and ask again.
+
+A query never builds a `[ffi.rust]` crate, runs a preprocessor, writes a protocol baseline, or downloads a toolchain. A library project has no entry file, so name one: `forge query verify lib/parser.march`. Outside a project, `forge query verify FILE` works on a single file. `march query` is the same interface without the project: `march query fn NAME FILE`.
 
 ### Auto-fixing Diagnostics
 
@@ -511,8 +691,12 @@ sqlite3 ~/.claude/skills/spec-search/spec-search.db "SELECT * FROM meta;"
 
 ## forge refine: Suggest a refinement type
 
-`forge refine <fn>` proposes the parameter refinement that discharges the
-refinement obligations a function's body leaves unproven. If `n` is passed to a
+`forge refine --infer` proposes every refinement contract the checker can verify,
+across the whole project, and with `--apply` writes them (see
+[Infer every contract](#infer-every-contract-forge-refine---infer) below).
+`forge refine <fn>` is the older, per-function form: it proposes the parameter
+refinement that discharges the refinement obligations a function's body leaves
+unproven. If `n` is passed to a
 callee declaring `{Int | _ > 0}`, the contract `n` itself has to carry is the
 thing the tool works out for you:
 
@@ -520,13 +704,11 @@ thing the tool works out for you:
 forge refine split           # one function (bare or qualified name)
 forge refine split --apply   # write the annotation into the source
 forge refine --all           # sweep every function in the project
-forge refine --all --apply --fixpoint   # …and keep going until nothing changes
 ```
 
 A contract only becomes visible to a *caller* once the callee bears it, so one
-`--apply` pass propagates exactly one call hop. `--fixpoint` repeats until a round
-applies no change (bounded at 10 rounds; hitting the bound is reported as such, not
-mistaken for convergence).
+`--all --apply` pass propagates exactly one call hop. Pass `--infer` to search to
+a fixpoint instead (`--fixpoint` is now an alias of `--infer`).
 
 ```
 lib/text.march:10  split
@@ -575,6 +757,88 @@ functions happen to be visited first.
 In an editor, the same inference is available as the **"Suggest a refinement
 type for `f`"** code action on a function's name; accepting it applies the
 identical edit.
+
+### Infer every contract: `forge refine --infer`
+
+```sh
+forge refine --infer                    # dry run: what it would propose, refuse, and why
+forge refine --infer --diff             # the edits as a diff; nothing is written
+forge refine --infer --apply            # write them, then re-check the project
+forge refine --infer --apply --apply-public            # also public fns with no caller in the project
+forge refine --infer --allow-caller-violations         # accept a precondition that breaks a caller
+```
+
+`--infer` covers every kind of refinement the checker can verify:
+- scalar and relational preconditions (`b : {Int | _ != 0}`, `i : {Int | _ < n}`);
+- return contracts, including one relating the result to a parameter (`inc(x : Int) : {Int | _ > x}`);
+- element contracts (`xs : List({Int | _ > 0})`, element and tuple returns, each slot of a `Map`,
+  `Deque.Deque`), and a relation between two slots a caller demands (`Assoc({x : Int | true}, {y : Int | y > x})`);
+- abstract refinements for `filter`-shaped helpers (`pred : a -> Bool[p]` with `List(a[p])`, and
+  two-argument `keep : k -> v -> Bool[p]` with `Assoc(k[p], v[p])`);
+- fold accumulator invariants (`fold_left` and `fold_right` steps);
+- termination metrics: `@[decreases(100 - n)]` for a recursive function the checker
+  could not show to terminate, chosen from at most 8 candidates (each `Int` parameter,
+  `b - i` for a counter climbing to a bound, `len(xs)`, and pairs of those), each
+  checked at every recursive call. A metric for a local `fn` is shown but not written,
+  since a local `fn` takes no attribute.
+
+It searches to a fixpoint over the call graph in one run, callees first. Returns go before
+preconditions: a proved return costs no caller anything, while a precondition moves the
+obligation to every caller.
+
+```
+inferred refinements: 2 proposed, 0 refused; user skips 2 -> 0 (101 probes, 2 rounds)
+  positives (lib/scores.march:8)  return/elem : List({Int | _ > 0})  [element-return, closes 1]
+  report (lib/scores.march:12)  param n : {Int | _ > 0}  [precondition, closes 1]
+inferred metrics: 1 proposed, 0 not inferred
+  up (lib/scores.march:20)  @[decreases(100 - n)]  [termination, class B, 1 of 1 candidate checked]
+applied 3 proposal(s) to 1 file(s); the re-check matches the prediction
+```
+
+A metric is written in front of the function's `fn`, on the same line
+(`@[decreases(100 - n)] fn up(n : Int) : Int do`). A function no candidate works
+for is listed as `no metric inferred`, with how many candidates were checked.
+
+What each outcome means:
+
+- **Proposed.** The real checker proves the contract, it closes at least one unproven
+  obligation, and it opens none and creates no violation.
+- **`refused (caller-violation)`.** A precondition that would turn an existing call into a
+  violation. The call is named so you can fix it, or pass `--allow-caller-violations` to
+  accept the contract anyway; a contract no value satisfies is still rejected.
+- **`rejected (vacuous-branch)`.** A precondition that closes its sites only by making
+  their branch unreachable, as `n : {Int | _ <= j}` does for the `else` of
+  `if j >= n do v else Array.set(v, j, …) end`. It is not a contract, so it is not
+  proposed. The line names the site.
+- **`external callers`.** A precondition on a public function with no caller in the project
+  is shown but not written: in a library, its real callers are elsewhere. `--apply-public`
+  writes it too.
+- **No inference for a file.** The file is named, with the compiler's reason: it does not
+  typecheck, or the `march` on `PATH` is too old to know `--refine-infer`. Nothing is
+  proposed for a program that does not typecheck.
+
+The project is checked as **one unit**, so a caller in another file counts. If the project
+does not check as a unit, each file is tried on its own.
+
+**`--apply` cannot leave a half-applied project.** After writing, it re-checks and compares
+the result with what it predicted. On any difference it puts every file back and exits
+with status 3. That is a bug in the inference, never something to reconcile by hand; please
+report it with the file. A second run after a successful `--apply` proposes nothing.
+
+The same inference is available from the compiler and the editor:
+- `march --check --refine-infer FILE`, with `--refine-infer-diff` and
+  `--refine-infer-apply`;
+- `--refine-infer-json` emits JSON (version 1, with byte-range edits);
+- `--refine-infer-kinds k1,k4` restricts the kinds (`decreases` names the termination
+  metrics);
+- `--refine-infer-budget N` caps the probes (default 3000);
+- `--refine-report --refine-infer` adds a line showing the ledger as it will be once the
+  proposals are applied;
+- in the editor, the code actions **"Infer refinements for `f`"** and **"Infer refinements
+  in this file"** apply the same bytes.
+
+See [Refinement Types]({{ site.baseurl }}/docs/refinement-types/), section "Module-wide
+inference".
 
 ---
 
@@ -629,22 +893,41 @@ forge cap run --allow-only IO.Console ./untrusted          # run untrusted code 
 
 ---
 
-## forge topology: the topology file
+## Dependency Capability Audit
 
-`forge topology check` validates a `topology.toml` (which function or actor serves each protocol role, which pools of nodes serve which roles, hosts per environment) against your sources with `file:line` errors, and runs automatically in `forge build`, `forge run` and `forge deploy hot`. `forge topology export --json` prints the digested topology with the pool connectivity graph; `forge topology gen systemd|ufw|do-firewall|compose` writes deployment files from it, and any `forge-topology-<target>` on `PATH` is a generator plugin. See the [Topology](topology.md) page.
-
-## forge observe: what a running node is doing
-
-A compiled program started with `MARCH_OBSERVE_SOCKET=<path>` (or with `MARCH_HOT_RELOAD_SOCKET`, which puts the observe socket at `<path>.observe`) answers read-only questions about itself on that owner-only socket: its actors and mailboxes, supervision tree, names, schedulers, memory, crashes and hot-reload epochs. It never shows message contents or panic text.
-
-```bash
-forge observe --socket /tmp/app.observe actors mbox 10   # one request, the JSON reply
-forge top --env web --sort msgs_in                      # the busiest actors, redrawn in place
-forge diagnose --env web                                # known trouble; exit 0/1/2/3
-forge status                                            # every node at a glance
+```sh
+forge audit --record                             # record each dependency's capability set (forge.caps.lock)
+forge audit                                      # exit 1 if a dependency gained authority
+forge audit --inferred                           # infer each set from the code (`march caps`), not `needs`
+forge audit --inferred --allow-unanalyzable      # gate on the deps that typecheck; list the rest
+forge add <name> ... --accept-caps               # keep a new dep that widens the baseline
+forge deps --accept-caps                         # keep a hand-edited upgrade that widens it
 ```
 
-From inside a program, the `Recon` and `Diagnose` stdlib modules ask the same questions. [Observing a running node](observe.md) is the operator's guide: every verb and field, the forge commands' flags and exit codes, what each `forge diagnose` finding means and what to do about it, and a worked incident.
+`forge add`, `forge deps` and `forge outdated` use the baseline too: an add, or
+a `forge deps` after a hand edit to `forge.toml`, that brings in new authority
+is refused unless `--accept-caps`, and `forge outdated` shows what each
+available upgrade would newly ask for. Installing what `forge.lock` already
+says is never gated.
+
+`--inferred` needs a toolchain whose `march` supports `caps` (0.3.0 or later)
+and stops with the toolchain's path and version if it does not. It caches
+each dependency's result under `.forge/audit-cache/`, so only changed
+dependencies are re-analyzed. A dependency that does not typecheck fails the
+audit unless `--allow-unanalyzable` is given, and it is listed with the
+compiler's reason either way. See [Capability Audit](capability-audit.md).
+
+---
+
+## License Audit
+
+```sh
+forge licenses             # list each dependency and its declared license
+forge licenses --json      # JSON output for tooling
+forge licenses --strict    # exit non-zero if any dependency has no license
+```
+
+---
 
 ## Dependency Management
 
@@ -750,6 +1033,74 @@ forge why depot    # show all paths that pull in `depot`
 
 ---
 
+## Archive Management
+
+Archives are globally installed forge extensions: tools, task runners, and generators.
+
+```sh
+# Install from the registry or a git URL
+forge install march_doc
+forge install scroll
+forge install https://github.com/march-language/my_tool
+forge install --force scroll     # reinstall even if already installed
+
+# Remove an archive
+forge uninstall march_doc
+
+# List installed archives
+forge archives
+
+# Update installed archives
+forge update                     # update all
+forge update march_doc           # update one
+
+# Verify archive integrity
+forge verify                     # verify all
+forge verify march_doc           # verify one
+```
+
+Archive tasks are invoked as `forge <archive>.<task>`:
+
+```sh
+forge march_doc.build    # run the `build` task of march_doc
+```
+
+---
+
+## Toolchain Management
+
+`forge toolchain` manages installed March compiler versions.
+
+```sh
+# List installed toolchains
+forge toolchain list
+
+# List available versions from GitHub releases
+forge toolchain list --remote
+
+# Install a specific version
+forge toolchain install v0.6.0
+forge toolchain install nightly          # latest nightly
+forge toolchain install nightly-20251201
+
+# Switch the active toolchain
+forge toolchain use v0.6.0
+
+# Pin this project to a specific version (writes .march-version)
+forge toolchain pin v0.6.0
+
+# Show which toolchain resolves for the current directory
+forge toolchain which
+
+# Remove an installed toolchain
+forge toolchain uninstall v0.2.0
+
+# Install the latest stable and make it active
+forge upgrade
+```
+
+---
+
 ## Refactoring
 
 `forge refactor` provides project-wide, parser-based refactorings. All subcommands accept `--dry-run` / `-n` to preview changes without writing any files.
@@ -850,6 +1201,12 @@ forge notebook --no-open
 
 ---
 
+## forge topology: the topology file
+
+`forge topology check` validates a `topology.toml` (which function or actor serves each protocol role, which pools of nodes serve which roles, hosts per environment) against your sources with `file:line` errors, and runs automatically in `forge build`, `forge run` and `forge deploy hot`. `forge topology export --json` prints the digested topology with the pool connectivity graph; `forge topology gen systemd|ufw|do-firewall|compose` writes deployment files from it, and any `forge-topology-<target>` on `PATH` is a generator plugin. See the [Topology](topology.md) page.
+
+---
+
 ## Hot Code Reload
 
 `forge deploy hot` deploys new code to a running server without restarting the process. Actors keep running and their state is preserved; only changed functions are uploaded and activated.
@@ -877,6 +1234,21 @@ See [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) for the full gui
 
 ---
 
+## forge observe: what a running node is doing
+
+A compiled program started with `MARCH_OBSERVE_SOCKET=<path>` (or with `MARCH_HOT_RELOAD_SOCKET`, which puts the observe socket at `<path>.observe`) answers read-only questions about itself on that owner-only socket: its actors and mailboxes, supervision tree, names, schedulers, memory, crashes and hot-reload epochs. It never shows message contents or panic text.
+
+```bash
+forge observe --socket /tmp/app.observe actors mbox 10   # one request, the JSON reply
+forge top --env web --sort msgs_in                      # the busiest actors, redrawn in place
+forge diagnose --env web                                # known trouble; exit 0/1/2/3
+forge status                                            # every node at a glance
+```
+
+From inside a program, the `Recon` and `Diagnose` stdlib modules ask the same questions. [Observing a running node](observe.md) is the operator's guide: every verb and field, the forge commands' flags and exit codes, what each `forge diagnose` finding means and what to do about it, and a worked incident.
+
+---
+
 ## Versioning and Release
 
 ### Inspect and Bump Versions
@@ -900,7 +1272,45 @@ forge version patch --tag
 forge release                # patch bump (default)
 forge release --bump minor
 forge release --bump major
+forge release tag --bump minor   # the same, spelled as the subcommand
 ```
+
+### Release bundles: `forge release build`
+
+`forge release build [--target T] [--profile release|debug] [--tar]` builds the app and lays out a self-contained directory, `.march/release/<app>-<version>-<target>/`, that you copy to a host and run with nothing but a POSIX shell:
+
+```text
+bin/<app>                 launcher (POSIX sh)
+lib/<app>                 the binary (the hot-reload baseline when [hot-reload] is set)
+lib/<app>.hcr_manifest    from a --compile-so build of the same source (hot-reload only)
+lib/<app>.schemas.json    its actor schemas (hot-reload only, when there are actors)
+lib/patches/              reserved for the host's patch stack
+etc/topology.json         the exported topology (when the project has a topology.toml)
+etc/policy, etc/debug_policy, etc/shell_policy   MARCH_DEPLOY_POLICY / MARCH_DEBUG_POLICY / MARCH_SHELL_POLICY
+etc/pubkey                the [hot-reload] public key
+etc/env                   NAME=VALUE defaults the launcher applies (never overriding the environment)
+RELEASE                   name, version, target, profile, cas_hash, hot_reload, compiler, built_at
+```
+
+`--target linux/amd64` (or `linux/arm64`) cross-builds like `forge build --target` (needs `zig` and the cross sysroot). The policy files start empty (nothing allowed); a project can ship its own in `release/etc/{policy,debug_policy,shell_policy,env}`, which the build copies in. `etc/env` also carries `MARCH_STOP_GRACE`, the topology's soft drain deadline in seconds.
+
+The launcher, `bin/<app> <verb>`:
+
+| Verb | Does |
+|---|---|
+| `start [args]` | run the node in the foreground (pidfile in `run/`) |
+| `daemon [args]` | start detached, wait until the observe socket answers; output in `log/` |
+| `stop` | SIGTERM, then SIGKILL after `MARCH_STOP_GRACE` seconds. A drained stop needs the deploy key: use `forge deploy --drain` |
+| `restart` | `stop`, then `daemon` |
+| `pid` | the node's pid (exit 1 if not running) |
+| `version` | the `RELEASE` file and, if running, the node's code epoch |
+| `ping`, `status` | ask the node's observe socket (`PING`; `EPOCHS` and `MEM`) |
+| `rpc`, `shell`, `observe`, `diagnose` | `exec forge <verb> --socket ...` when `forge` is on the host, else print what to run from an operator machine |
+| `eval` | not available yet (needs a fresh `march` process; says so) |
+
+The node's sockets are `run/<app>.sock` (reload; its shell socket is `.shell`) and `run/<app>.sock.observe`. Override the directories with `MARCH_RUN_DIR` / `MARCH_LOG_DIR` (a Unix socket path must stay under about 100 bytes). `start`, `daemon`, `stop` and `restart` refuse to run as a user other than the owner of the release directory (`MARCH_ALLOW_ANY_USER=1` overrides). The host needs POSIX `sh` and `awk`, plus, for `ping`/`status`/`version`'s epoch and the `daemon` readiness wait, one of `nc -U`, `socat` or `python3`.
+
+`forge topology gen systemd --release-dir /opt/app/current` points each unit's `ExecStart` at `/opt/app/current/bin/<app> start`.
 
 ### Publishing
 
@@ -913,119 +1323,6 @@ forge publish --old-source ../my_lib-v1.0        # enforce semver against old AP
 ```
 
 When `--old-source` is provided, forge computes the API surface diff and errors if the declared version bump is too small (e.g. a breaking change requires a major bump).
-
----
-
-## Archive Management
-
-Archives are globally installed forge extensions: tools, task runners, and generators.
-
-```sh
-# Install from the registry or a git URL
-forge install march_doc
-forge install scroll
-forge install https://github.com/march-language/my_tool
-forge install --force scroll     # reinstall even if already installed
-
-# Remove an archive
-forge uninstall march_doc
-
-# List installed archives
-forge archives
-
-# Update installed archives
-forge update                     # update all
-forge update march_doc           # update one
-
-# Verify archive integrity
-forge verify                     # verify all
-forge verify march_doc           # verify one
-```
-
-Archive tasks are invoked as `forge <archive>.<task>`:
-
-```sh
-forge march_doc.build    # run the `build` task of march_doc
-```
-
----
-
-## Toolchain Management
-
-`forge toolchain` manages installed March compiler versions.
-
-```sh
-# List installed toolchains
-forge toolchain list
-
-# List available versions from GitHub releases
-forge toolchain list --remote
-
-# Install a specific version
-forge toolchain install v0.4.0
-forge toolchain install nightly          # latest nightly
-forge toolchain install nightly-20251201
-
-# Switch the active toolchain
-forge toolchain use v0.4.0
-
-# Pin this project to a specific version (writes .march-version)
-forge toolchain pin v0.4.0
-
-# Show which toolchain resolves for the current directory
-forge toolchain which
-
-# Remove an installed toolchain
-forge toolchain uninstall v0.2.0
-
-# Install the latest stable and make it active
-forge upgrade
-```
-
----
-
-## License Audit
-
-```sh
-forge licenses             # list each dependency and its declared license
-forge licenses --json      # JSON output for tooling
-forge licenses --strict    # exit non-zero if any dependency has no license
-```
-
----
-
-## Dependency Capability Audit
-
-```sh
-forge audit --record                             # record each dependency's capability set (forge.caps.lock)
-forge audit                                      # exit 1 if a dependency gained authority
-forge audit --inferred                           # infer each set from the code (`march caps`), not `needs`
-forge audit --inferred --allow-unanalyzable      # gate on the deps that typecheck; list the rest
-forge add <name> ... --accept-caps               # keep a new dep that widens the baseline
-```
-
-`forge add` and `forge outdated` use the baseline too: an add that brings in
-new authority is refused unless `--accept-caps`, and `forge outdated` shows
-what each available upgrade would newly ask for.
-
-`--inferred` needs a toolchain whose `march` supports `caps` (0.3.0 or later)
-and stops with the toolchain's path and version if it does not. It caches
-each dependency's result under `.forge/audit-cache/`, so only changed
-dependencies are re-analyzed. A dependency that does not typecheck fails the
-audit unless `--allow-unanalyzable` is given, and it is listed with the
-compiler's reason either way. See [Capability Audit](capability-audit.md).
-
----
-
-## Shell Completions
-
-Generate a completion script for your shell and source it:
-
-```sh
-forge completions bash >> ~/.bashrc
-forge completions zsh  >> ~/.zshrc
-forge completions fish > ~/.config/fish/completions/forge.fish
-```
 
 ---
 
@@ -1181,6 +1478,18 @@ Each `bench/*.march` file is a standalone benchmark program with a `main()` func
 
 ---
 
+## Shell Completions
+
+Generate a completion script for your shell and source it:
+
+```sh
+forge completions bash >> ~/.bashrc
+forge completions zsh  >> ~/.zshrc
+forge completions fish > ~/.config/fish/completions/forge.fish
+```
+
+---
+
 ## Environment Variables
 
 | Variable | Effect |
@@ -1194,8 +1503,11 @@ Each `bench/*.march` file is a standalone benchmark program with a `main()` func
 
 ---
 
-## Next Steps
+## See also
 
 - [Getting Started](getting-started.md): set up your first project with forge
 - [REPL](repl.md): interactive exploration
 - [Standard Library](stdlib.md): what you can search with `forge search`
+- [Observing a running node](observe.md): the operator's guide behind `forge status`, `diagnose`, `top` and `observe`
+- [Hot Code Reload](hot-code-reload.md): the full `forge deploy` story
+- [Capability Audit](capability-audit.md): `forge audit` and `forge cap inspect` in depth

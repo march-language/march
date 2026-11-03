@@ -53,7 +53,7 @@ mod ActorMailboxAlarm do
     println("top(10) covers all: " ++ int_to_string(List.length(Actor.top_by_mailbox(intro, 10))))
 
     println("over(-1) is everyone: " ++ int_to_string(List.length(Actor.over_mailbox(intro, -1))))
-    println("over(1000000) is empty: " ++ bool_to_string(Actor.over_mailbox(intro, 1000000) == Nil))
+    println("over(1000000) is empty: " ++ bool_to_string(List.is_empty(Actor.over_mailbox(intro, 1000000))))
     let hot = Actor.over_mailbox(intro, 10)
     println("over(10) at most one: " ++ bool_to_string(List.length(hot) <= 1))
     println("over(10) depths all > 10: " ++ bool_to_string(

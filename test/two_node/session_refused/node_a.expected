@@ -1,0 +1,4 @@
+A: next session finished
+A: session to a stale endpoint failed: true
+A: the failure names the refusal: true
+node-a: up

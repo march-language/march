@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: (accumulator-base-unproved:
+-- Accumulator invariants, phase 2 (2026-10-18, design
+-- specs/2026-10-18-fold-accumulator-invariants-design.md phase 2), an
+-- initial list that fails the element demand: the step `Cons(x, acc)` keeps
+-- `List({Int | _ > 0})`, but `[0]` does not meet it, and it is the result on
+-- `[]`.  All sources or nothing.  A skip, an error under `cap verified`.
+-- Rejected before too (an unreflectable-subject skip); it pins the reason.
+-- Accept twin: accept/t420.
+mod FoldContainerBaseFails do
+  cap verified
+  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end
+  fn rev(pos : List({Int | _ > 0})) : Int do
+    sum_pos(List.fold_left(pos, [0], fn (acc, x) -> Cons(x, acc)))
+  end
+end

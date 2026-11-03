@@ -3054,7 +3054,7 @@ let test_cas_cache_hit () =
   let tmp_dir = Filename.temp_file "march_cas_test_" "" in
   Sys.remove tmp_dir;
   Unix.mkdir tmp_dir 0o755;
-  let store = March_cas.Cas.create ~project_root:tmp_dir in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:tmp_dir () in
   let compile_count = ref 0 in
   let fake_compile _scc =
     incr compile_count;
@@ -3084,6 +3084,7 @@ let test_cas_cache_hit () =
     in ()
   ) sccs;
   let second_count = !compile_count in
+  ignore (Sys.command ("rm -rf " ^ Filename.quote tmp_dir));
   Alcotest.(check bool) "first pass: compile called" true (first_count > 0);
   Alcotest.(check int)  "second pass: all cache hits (compile=0)" 0 second_count
 
@@ -10958,6 +10959,66 @@ let test_compiled_file_dir_err_are_real_fileerrors () =
         interp_line compiled_line)
       (List.combine cases interp_lines) compiled_lines
 
+(* ── Harness: parallel_cases bodies may assert concurrently ────────────────
+   Every Alcotest assertion with a message prints through ONE shared Format
+   formatter; on OCaml 5.5.1 two domains doing it at once raise
+   "Format: Unsynchronized access to formatter" out of a body (CI run
+   40142534056, adversarial-regressions case 33). Test_helpers.Alcotest
+   serialises that printing. This drives the racy path hard: 8 bodies on 8
+   domains, each asserting in a tight loop through every printing assertion,
+   several rounds. Without the lock it fails on 5.5.1 within the first
+   round (see specs/progress/2026-10-25-test-parallel-format-race.md). *)
+let test_harness_parallel_asserts_no_format_race () =
+  for _round = 1 to 4 do
+    let body () =
+      for i = 1 to 250 do
+        Alcotest.(check int) "harness: concurrent check" i i;
+        Alcotest.check' Alcotest.bool ~msg:"harness: concurrent check'"
+          ~expected:true ~actual:true;
+        Alcotest.check_raises "harness: concurrent check_raises" Exit
+          (fun () -> raise Exit);
+        Alcotest.match_raises "harness: concurrent match_raises"
+          (fun e -> e = Not_found) (fun () -> raise Not_found)
+      done
+    in
+    let cases =
+      parallel_cases ~jobs:8
+        (List.init 8 (fun i -> (Printf.sprintf "body %d" i, `Quick, body)))
+    in
+    List.iter (fun (_, _, run) -> run ()) cases
+  done
+
+(* A failing assertion inside a batch body still fails with its own message,
+   reported at the caller's line rather than inside the Test_helpers shadow
+   (which the real check's own callsite guess would name). *)
+let test_harness_parallel_failure_keeps_message () =
+  let cases =
+    parallel_cases ~jobs:4
+      (List.init 4 (fun i ->
+         (Printf.sprintf "body %d" i, `Quick, fun () ->
+            (* Not a tail call: a tail-called check's frame-2 guess (the
+               shadow's, like alcotest's own) lands on whoever ran the body. *)
+            Alcotest.(check int) "harness: deliberate mismatch" 1 (if i = 2 then 2 else 1);
+            ignore (Sys.opaque_identity i))))
+  in
+  List.iteri (fun i (_, _, run) ->
+    match run () with
+    | () -> if i = 2 then Alcotest.fail "body 2 should have failed"
+    | exception e ->
+      (* alcotest registers a Printexc printer for its Check_error. *)
+      let msg = Printexc.to_string e in
+      let has sub =
+        let n = String.length sub and m = String.length msg in
+        let rec go k = k + n <= m && (String.sub msg k n = sub || go (k + 1)) in
+        go 0
+      in
+      if i <> 2 then Alcotest.failf "body %d failed unexpectedly: %s" i msg;
+      if not (has "harness: deliberate mismatch") then
+        Alcotest.failf "failure lost its message: %s" msg;
+      if not (has "test_stdlib_suite.ml") then
+        Alcotest.failf "failure location is not the caller's line: %s" msg)
+    cases
+
 (* Regression (P0, perceus.ml same_arity): the FBIP arity check compared a
    TCon's TYPE-PARAMETER count against the new constructor's FIELD count.  A
    dead binding's dec carries its raw declared type, so a dead 1-field
@@ -12027,13 +12088,219 @@ let test_hcr_migrate_msg_converts_real_old_message () =
           true (c "converted" > 0);
         Alcotest.(check int) "nothing dropped" 0 (c "dropped");
         Alcotest.(check int) "no marker live: Tally moved" 0 (c "markers_live");
-        (* The fully drained deploy: no epoch other than the current one may
-           still pin a unit. *)
+        (* Tally and feed have advanced; baseline main intentionally retains
+           its entry epoch until it returns. No other old pin may remain. *)
         let old = List.filter (fun (_, n, current) -> not current && n > 0) (R.pins_epochs pins) in
-        Alcotest.(check (list (pair int int))) "no old epoch still pinned" []
+        Alcotest.(check (list (pair int int))) "only baseline main retains the old epoch" [(1, 1)]
           (List.map (fun (e, n, _) -> (e, n)) old))
   | _ -> ()
 
+
+(* A hot patch that flips a boundary parameter between borrowed and owned
+   (specs/progress/2026-10-13-hcr-borrow-mode-not-in-sig-hash.md; the HCR
+   Phase 0 spike's E2).  The source signature of [count] never changes; its
+   body decides the mode: v1 only reads the list (borrowed), [owned] stores
+   it (owned).  [serve], compiled against v1, keeps using the list after the
+   call, so an accepted owned patch is a use-after-free.  [body] changes the
+   body but keeps the mode. *)
+let borrow_flip_src variant =
+  let count_body = match variant with
+    | `V1 -> "    match hs do\n      Nil -> 0\n      Cons(h, _) -> 1 + string_length(h)\n    end\n"
+    | `Body -> "    match hs do\n      Nil -> 0\n      Cons(h, _) -> 2 + string_length(h)\n    end\n"
+    | `Owned -> "    let l = [hs, hs]\n    List.length(l) + 1\n"
+  in
+  "mod Main do\n\
+  \  needs IO\n\
+  \  fn count(hs : List(String)) : Int do\n"
+  ^ count_body
+  ^ "  end\n\
+  \  fn serve(i : Int, n : Int, acc : Int) : Int do\n\
+  \    if i >= n do acc else\n\
+  \      let hs = [int_to_string(i), \"bb\"]\n\
+  \      let c = count(hs)\n\
+  \      let after = List.length(hs)\n\
+  \      sleep_ms(5)\n\
+  \      serve(i + 1, n, acc + c + after)\n\
+  \    end\n\
+  \  end\n\
+  \  fn main(_io : Cap(IO)) do\n\
+  \    println(\"serving\")\n\
+  \    let r = serve(0, 60000, 0)\n\
+  \    println(\"served \" ++ int_to_string(r))\n\
+  \  end\n\
+   end\n"
+
+let test_hcr_borrow_flip_refused_end_to_end () =
+  let module H = March_forge.Cmd_deploy_hot in
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let pk_b64 = March_ed25519.Ed25519.pk_to_base64 pk in
+  let base = build_role_fixture ~tag:"bfbase"
+      ~extra_args:("--hot-reload Main --signing-pubkey " ^ Filename.quote pk_b64)
+      (borrow_flip_src `V1) in
+  let so tag v = build_role_fixture ~tag ~extra_args:"--hot-reload Main --compile-so" (borrow_flip_src v) in
+  match base, so "bfv1" `V1, so "bfbody" `Body, so "bfowned" `Owned with
+  | Some (dir, bin), Some (_, v1), Some (_, body), Some (_, owned) ->
+    let manifest p = match H.parse_manifest (p ^ ".hcr_manifest") with
+      | Ok m -> m | Error e -> Alcotest.fail e in
+    let sock = Printf.sprintf "/tmp/march_bflip_%d.sock" (Unix.getpid ()) in
+    let log = Filename.concat dir "server.log" in
+    with_reload_server ~dir ~bin ~sock ~extra_env:[||] (fun pid ->
+        (match e2e_connect sock with
+         | None -> Alcotest.failf "reload server never listened on %s (see %s)" sock log
+         | Some fd -> Unix.close fd);
+        let deploy so_path =
+          H.run ~tunnel:false ~ssh_host:"local" ~remote_socket:sock
+            ~signing_pubkey:pk_b64 ~sk ~manifest:(manifest so_path) ~so_path () in
+        let alive () = match Unix.waitpid [ Unix.WNOHANG ] pid with (0, _) -> true | _ -> false in
+        let refused_for_mode e =
+          Alcotest.(check bool) ("refused naming the change: " ^ e) true
+            (contains "parameter 1 of count changed from borrowed to owned" e) in
+        (* The running version's sig_hash for [count], from ABI_QUERY. *)
+        let slot_sig () =
+          match e2e_connect sock with
+          | None -> Alcotest.fail "ABI_QUERY: no connection"
+          | Some fd ->
+            let conn = H.conn_of_fd fd in
+            H.send_line conn "ABI_QUERY";
+            let slots = H.parse_abi_query conn in
+            Unix.close fd;
+            (match List.find_opt (fun s -> s.H.slot_name = "count") slots with
+             | Some s -> s.H.slot_sig_hash
+             | None -> Alcotest.fail "no slot for count")
+        in
+        let count_sig so_path =
+          (List.find (fun f -> f.H.fn_name = "count") (manifest so_path).H.functions).H.fn_sig_hash in
+        (* 1. The unchanged build: nothing to deploy. *)
+        (match deploy v1 with
+         | Ok _ -> ()
+         | Error e -> Alcotest.failf "the unchanged build was refused: %s\n%s" e (read_file_contents log));
+        (* 2. The flip against the baseline: refused before activation. *)
+        (match deploy owned with
+         | Ok _ -> Alcotest.failf "the borrowed->owned patch was ACCEPTED against the baseline\n%s"
+                     (read_file_contents log)
+         | Error e -> refused_for_mode e);
+        Alcotest.(check string) "after the refusal count still runs v1's ABI" (count_sig v1) (slot_sig ());
+        Alcotest.(check bool) "the owned patch's count has another sig_hash than v1's" true
+          (count_sig owned <> count_sig v1);
+        Alcotest.(check string) "a body-only change keeps the sig_hash" (count_sig v1) (count_sig body);
+        (* 3. A body-only change deploys. *)
+        (match deploy body with
+         | Ok _ -> ()
+         | Error e -> Alcotest.failf "the body-only patch was refused: %s\n%s" e (read_file_contents log));
+        Alcotest.(check string) "the activated patch's sig_hash is recorded, not (none)"
+          (count_sig body) (slot_sig ());
+        (* 4. The flip against a patched slot: refused too. *)
+        (match deploy owned with
+         | Ok _ -> Alcotest.failf "the borrowed->owned patch was ACCEPTED against a patched slot\n%s"
+                     (read_file_contents log)
+         | Error e -> refused_for_mode e);
+        Unix.sleepf 0.5;
+        if not (alive ()) then
+          Alcotest.failf "the server died after the deploys:\n%s" (read_file_contents log))
+  | _ -> ()
+
+(* A running old main and closure must retain the old call ABI, while an
+   actor past its marker uses the coordinated replacement and its on_stop. *)
+let frame_pin_src version =
+  let count = match version with
+    | 1 -> "fn count(x : Int) : Int do x + 100 end\nfn calc() : Int do count(1) end\n"
+    | 2 -> "fn count(x : Int, y : Int) : Int do x + y end\nfn calc() : Int do count(1, 200) end\n"
+    | _ -> "fn count(x : Int, y : Int) : Int do x + y + 100 end\nfn calc() : Int do count(1, 200) end\n" in
+  let state = match version with
+    | 1 -> "state { count : Int }\ninit { count: 0 }"
+    | 2 -> "state { count : Int, label : String }\ninit { count: 0, label: \"fresh\" }"
+    | _ -> "state { count : Int, label : String, extra : Int }\ninit { count: 0, label: \"fresh3\", extra: 0 }" in
+  let stop = match version with
+    | 1 -> "println(\"stop-old \" ++ int_to_string(state.count))"
+    | 2 -> "println(\"stop-new \" ++ state.label)"
+    | _ -> "println(\"stop-third \" ++ state.label ++ \":\" ++ int_to_string(state.extra))" in
+  let migration = match version with
+    | 1 -> ""
+    | 2 -> "fn probe_migrate_state(old : { count : Int }) : { count : Int, label : String } do { count: old.count, label: \"migrated\" } end\n"
+    | _ -> "fn probe_migrate_state(old : { count : Int, label : String }) : { count : Int, label : String, extra : Int } do { count: old.count, label: old.label ++ \"-v3\", extra: 42 } end\n" in
+  "mod Main do\nneeds IO\n" ^ count ^ "actor Probe do\n" ^ state
+  ^ "\non Tick() do\nprintln(\"fresh-\" ++ int_to_string(calc()))\nstate\nend\non_stop do\n"
+  ^ stop ^ "\nend\nend\n" ^ migration
+  ^ "fn hold_frame(done : String, step : Int -> ()) : () do\nif File.exists(done) do () else\nstep(0)\nhold_frame(done, step)\nend\nend\n"
+  ^ "fn main(_io : Cap(IO)) do\nlet a = spawn(Probe)\nprintln(\"frame-ready\")\n"
+  ^ "let step = fn mark -> do\nif calc() != 101 do panic(\"old frame crossed ABI\") else () end\nif mark == 1 do println(\"old-closure-101\") else () end\nsend(a, Tick())\nsleep_ms(50)\nend\n"
+  ^ "hold_frame(Env.require(\"MARCH_FRAME_FINISH\"), step)\nstep(1)\n"
+  ^ "if calc() != 101 do panic(\"old main crossed ABI\") else println(\"old-main-101\") end\n"
+  ^ "let _ = Actor.stop(a, 1000)\nprintln(\"frame-done\")\nend\nend\n"
+
+let test_hcr_running_frame_signature_change () =
+  let module H = March_forge.Cmd_deploy_hot in
+  let pk, sk = March_ed25519.Ed25519.keygen () in
+  let pk_b64 = March_ed25519.Ed25519.pk_to_base64 pk in
+  let base = build_role_fixture ~tag:"framebase"
+      ~extra_args:("--hot-reload Main --signing-pubkey " ^ Filename.quote pk_b64)
+      (frame_pin_src 1) in
+  let patch = build_role_fixture ~tag:"framepatch"
+      ~extra_args:"--hot-reload Main --compile-so" (frame_pin_src 2) in
+  let third = build_role_fixture ~tag:"framepatch3"
+      ~extra_args:"--hot-reload Main --compile-so" (frame_pin_src 3) in
+  match base, patch, third with
+  | Some (dir, bin), Some (_, so_path), Some (_, third_path) ->
+    let manifest path = match H.parse_manifest (path ^ ".hcr_manifest") with
+      | Ok m -> m | Error e -> Alcotest.fail e in
+    let sock = Printf.sprintf "/tmp/march_frames_%d.sock" (Unix.getpid ()) in
+    let log = Filename.concat dir "server.log" in
+    let finish = Filename.concat dir "frame.finish" in
+    let extra_env = [| "MARCH_FRAME_FINISH=" ^ finish |] in
+    let reset_finish () = if Sys.file_exists finish then Sys.remove finish in
+    let verify () =
+      (* Fixture lifetime is controlled by evidence, not how long two
+         uploads/activations happen to take on a loaded runner. *)
+      let current = Unix.gettimeofday () +. 5. in
+      while Unix.gettimeofday () < current
+            && not (contains "fresh-301" (read_file_contents log)) do Unix.sleepf 0.01 done;
+      Alcotest.(check bool) "actor reached third version before releasing old frames" true
+        (contains "fresh-301" (read_file_contents log));
+      Out_channel.with_open_text finish (fun oc -> output_string oc "done\n");
+      let deadline = Unix.gettimeofday () +. 15. in
+      while Unix.gettimeofday () < deadline
+            && not (contains "frame-done" (read_file_contents log)) do Unix.sleepf 0.05 done;
+      let output = read_file_contents log in
+      Alcotest.(check bool) ("old frame survives: " ^ output) true (contains "frame-done" output);
+      Alcotest.(check bool) "old closure ABI never crosses" false (contains "old frame crossed ABI" output);
+      Alcotest.(check bool) "old main ABI never crosses" false (contains "old main crossed ABI" output);
+      Alcotest.(check bool) "old main resumes its original ABI" true (contains "old-main-101" output);
+      Alcotest.(check bool) "saved closure still calls its original ABI at finish" true
+        (contains "old-closure-101" output);
+      Alcotest.(check bool) "eligible actor calls newest ABI" true (contains "fresh-301" output);
+      Alcotest.(check bool) "new callback sees both migrations" true (contains "stop-third migrated-v3:42" output);
+      Alcotest.(check bool) "old callback never runs on new state" false (contains "stop-old" output)
+    in
+    reset_finish ();
+    with_reload_server ~dir ~bin ~sock ~extra_env (fun _pid ->
+      (match e2e_connect sock with
+       | None -> Alcotest.fail "frame test server did not listen"
+       | Some fd -> Unix.close fd);
+      let ready = Unix.gettimeofday () +. 5. in
+      while Unix.gettimeofday () < ready
+            && not (contains "frame-ready" (read_file_contents log)) do Unix.sleepf 0.01 done;
+      Alcotest.(check bool) "old frame entered before deploy" true
+        (contains "frame-ready" (read_file_contents log));
+      let deploy so_path =
+        match H.run ~tunnel:false ~ssh_host:"local" ~remote_socket:sock
+            ~signing_pubkey:pk_b64 ~sk ~manifest:(manifest so_path) ~so_path () with
+        | Ok _ -> ()
+        | Error e -> Alcotest.failf "coordinated frame deploy refused: %s\n%s" e (read_file_contents log)
+      in
+      deploy so_path;
+      let second = Unix.gettimeofday () +. 5. in
+      while Unix.gettimeofday () < second
+            && not (contains "fresh-201" (read_file_contents log)) do Unix.sleepf 0.01 done;
+      Alcotest.(check bool) "actor reached second version" true (contains "fresh-201" (read_file_contents log));
+      deploy third_path;
+      verify ());
+    (* The executable's main is still baseline code after persisted replay.
+       Its entry reservation must predate restoring the newer current epoch. *)
+    Out_channel.with_open_text log (fun _ -> ());
+    reset_finish ();
+    with_reload_server ~dir ~bin ~sock ~extra_env (fun _ -> verify ())
+
+  | _ -> ()
 
 let test_hcr_manifest_actor_handler_caps_populated () =
   let main_exe = find_main_exe () in
@@ -12601,9 +12868,13 @@ let test_concat_chain_values () =
    from two different C shims: runtime/march_compress.c compiled,
    lib/eval/compress_stubs.c interpreted). Also covers the streaming path,
    whose Seq annotations could never typecheck, and a round-trip so the Ok arm
-   of the mapping is exercised compiled. zstd/brotli may be built without their
-   library, in which case the decoder reports Io("... not available ..."),
-   which is folded into the expected line rather than failing the test. *)
+   of the mapping is exercised compiled. The interpreter's zstd/brotli may be
+   built without their library, in which case the decoder reports
+   Io("... not available ..."), which is folded into the expected line rather
+   than failing the test. A compiled program that reaches a codec the host
+   lacks no longer builds at all (static-output design, Stage 3), so on such a
+   host the compiled half fails to compile rather than printing "unavailable";
+   every CI leg installs both libraries. *)
 let test_compress_decode_error_structured_both_backends () =
   let src =
     "mod CompressErr do\n\
@@ -12879,8 +13150,13 @@ let test_sanitize_modes_do_not_share_cas_artifact () =
       count_files (Filename.concat tmp ".march/cas/artifacts-v2") in
     let compile mode =
       let bin = Filename.concat tmp ("bin_" ^ mode) in
-      let cmd = Printf.sprintf "cd %s && MARCH_SANITIZE=%s %s --compile -o %s %s"
-          (Filename.quote tmp) mode (Filename.quote main_exe)
+      (* Private HOME: the compiler also writes through to / reads from the
+         user-global ~/.march/cas, which would serve this fixed-content
+         program's artifact on every run after the first. *)
+      let cmd = Printf.sprintf
+          "cd %s && HOME=%s MARCH_SANITIZE=%s %s --compile -o %s %s"
+          (Filename.quote tmp) (Filename.quote (Filename.concat tmp "home"))
+          mode (Filename.quote main_exe)
           (Filename.quote bin) (Filename.quote src) in
       let (rc, out) = run_capture cmd in
       if rc <> 0 then
@@ -12907,7 +13183,8 @@ let test_sanitize_modes_do_not_share_cas_artifact () =
     Alcotest.(check bool) "control: repeating =thread hits the cache" true
       (compile "thread");
     Alcotest.(check int) "control: a cache hit stores nothing new"
-      after_address (artifacts ())
+      after_address (artifacts ());
+    ignore (Sys.command ("rm -rf " ^ Filename.quote tmp))
   end
 
 (* IO.read_byte: reads raw stdin bytes one at a time, returns -1 on EOF.
@@ -15242,6 +15519,12 @@ let stdlib_suites =
          run_stdlib's wall time (CI audit, 2026-10-07). [serial] keeps
          inline the cases that run forge in-process (global compiler state)
          or that time an HTTP server and would flake under parallel load. *)
+      ("test-harness", [
+        Alcotest.test_case "parallel_cases: bodies assert concurrently without a Format race" `Quick
+          test_harness_parallel_asserts_no_format_race;
+        Alcotest.test_case "parallel_cases: a failing body keeps its message and caller location" `Quick
+          test_harness_parallel_failure_keeps_message;
+      ]);
       ("adversarial-regressions", parallel_slow
          ~serial:[
            "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call";
@@ -15344,6 +15627,10 @@ let stdlib_suites =
           test_cas_hit_restores_so_sidecars;
         Alcotest.test_case "HCR migrate_msg: a compiled deploy converts a real old-format message (Tally Add|Legacy -> Add)" `Slow
           test_hcr_migrate_msg_converts_real_old_message;
+        Alcotest.test_case "HCR: a patch that flips a parameter borrowed->owned is refused; body-only and unchanged builds deploy" `Slow
+          test_hcr_borrow_flip_refused_end_to_end;
+        Alcotest.test_case "HCR: running frames retain old ABI; migrated actors and on_stop use replacement" `Slow
+          test_hcr_running_frame_signature_change;
         Alcotest.test_case "HCR manifest: disjoint fn caps stay separate, not the whole-artifact union (granularity revision)" `Slow
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow

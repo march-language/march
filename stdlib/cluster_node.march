@@ -300,6 +300,11 @@ mod ClusterNode do
     end
   end
 
+  doc """
+  The node id a node named [name] runs under (`NodeIdentity.name_id`):
+  deterministic, so any node can compute a peer's id from its name. It is
+  what `node_id` answers for a node started with that name.
+  """
   -- A node's id: the hash of its public key (NodeIdentity.derive_id). Every
   -- caller in the stdlib still passes "pk-" ++ name for the key; real keys
   -- are an open question of the design.
@@ -390,6 +395,11 @@ mod ClusterNode do
   type SecurityEvent = HandshakeRejected(String, String) | FrameRejected(String, Int) | RawSendRefused(String, String)
                      | CertReplaced(String, String) | CertRefused(String, String)
 
+  doc """
+  A one-line, human-readable description of security event [ev], for logs:
+  e.g. `HandshakeRejected("10.0.0.2:9100", "bad proof")` gives
+  `"handshake with 10.0.0.2:9100 rejected: bad proof"`.
+  """
   fn security_text(ev : SecurityEvent) : String do
     match ev do
       HandshakeRejected(who, why) -> "handshake with " ++ who ++ " rejected: " ++ why
@@ -400,10 +410,16 @@ mod ClusterNode do
     end
   end
 
+  doc "The `NodeInfo` subscribers see for membership entry [m]: its id, name, address, creation and incarnation."
   fn info_of(m : Member) : NodeInfo do
     { node_id: m.node_id, name: m.name, addr: m.addr, creation: m.creation, incarnation: m.incarnation }
   end
 
+  doc """
+  A one-line description of membership event [ev], naming the node by its
+  name: `"<name> up"`, `"<name> suspect"`, `"<name> dead: <why>"` or
+  `"<name> rejoined"`.
+  """
   fn event_text(ev : NodeEvent) : String do
     match ev do
       NodeUp(i) -> i.name ++ " up"
@@ -452,7 +468,9 @@ mod ClusterNode do
     revs : List(NodeCert.SignedRevocation), -- every operator-signed revocation known here
     cert_dead : Map(String, String),     -- peers dropped for their certificate -> why
     rotated : Bool,                      -- this node's certificate was replaced since start
-    reg_swept_at : Int                   -- when the registry's tombstones were last collected
+    reg_swept_at : Int,                  -- when the registry's tombstones were last collected
+    remembered : Int,                    -- peer member views that held THIS node stale (`self_stale`)
+    reg_synced : Bool                    -- a peer's registry merged here, or no seeds to wait for
   }
 
   -- What a watcher of a name sees. `Lost` goes to watchers on the node that
@@ -473,6 +491,13 @@ mod ClusterNode do
     | Named(String, NameEvent)   -- tell every watcher of this name
     | Unwatch(Int)               -- stop the Down-watcher with this pid
 
+  doc """
+  The pure core's initial state for a node configured by [cfg]: a membership
+  holding only this node (Alive, incarnation 1), no links, an empty registry
+  replica, and those of `cfg.revocations` the operator signed (the rest are
+  dropped). [seed] seeds SWIM's probe-order randomness. Registry sync counts
+  as done at once when `cfg.seeds` is empty.
+  """
   fn core_new(cfg : CnConfig, seed : Int) : CnState do
     let me = node_id_of(cfg.name)
     let self_m = Membership.member(me, cfg.name, cfg.advertise, cfg.creation, Alive, 1)
@@ -482,7 +507,7 @@ mod ClusterNode do
       pending: Nil, relays: Map.empty(), refused: Nil, seed_ids: Map.empty(), rejoining: Nil, stopped: false,
       reg: GlobalRegistry.empty(), regs: Map.empty(), vis: Map.empty(), certs: Map.empty(),
       revs: List.filter(cfg.revocations, fn r -> Result.is_ok(check_revocation(cfg, r))), cert_dead: Map.empty(),
-      rotated: false, reg_swept_at: 0 }
+      rotated: false, reg_swept_at: 0, remembered: 0, reg_synced: List.is_empty(cfg.seeds) }
   end
 
   -- ── revocation and expiry ──────────────────────────────────────────────
@@ -497,13 +522,21 @@ mod ClusterNode do
   -- each new one to every linked peer. Only the operator's signature makes
   -- one count, so a member cannot revoke another.
 
+  doc "The REVOCATIONS control-frame tag, 15."
   fn tag_revocations() : Int do 15 end
 
+  doc "Encode [rs] as a REVOCATIONS control frame (msgpack `[15, [bin, ...]]`); the inverse of `decode_revocations`."
   fn encode_revocations(rs : List(NodeCert.SignedRevocation)) : List(Int) do
     Msgpack.encode(Msgpack.array([Msgpack.int(tag_revocations()),
       Msgpack.array(List.map(rs, fn r -> Msgpack.bin(NodeCert.revocation_to_bytes(r))))]))
   end
 
+  doc """
+  The signed revocations in a REVOCATIONS [frame]. Lenient: an entry that
+  does not decode is skipped, and a frame that is not a REVOCATIONS frame
+  gives the empty list. Signatures are NOT checked here
+  (`check_revocation` does that).
+  """
   fn decode_revocations(frame : List(Int)) : List(NodeCert.SignedRevocation) do
     match Msgpack.decode(frame) do
       Ok(Msgpack.Array([Msgpack.Int(15), Msgpack.Array(bins)])) ->
@@ -523,8 +556,12 @@ mod ClusterNode do
     end
   end
 
-  -- Is [r] signed by this cluster's operator? (Shared-secret nodes have no
-  -- operator and accept no revocations.)
+  doc """
+  Is [r] signed by this cluster's operator? `Ok(revocation)` when it
+  verifies against the operator key in `cfg.auth`, else `Err(why)`. Always
+  `Err` on a shared-secret node: it has no operator and accepts no
+  revocations.
+  """
   fn check_revocation(cfg : CnConfig, r : NodeCert.SignedRevocation) : Result(NodeCert.Revocation, String) do
     match operator_key(cfg) do
       None -> Err("this node runs in shared-secret mode; revocations need certificate mode")
@@ -532,6 +569,7 @@ mod ClusterNode do
     end
   end
 
+  doc "The (verified) revocations the core knows, newest first."
   fn core_revocations(st : CnState) : List(NodeCert.Revocation) do List.map(st.revs, fn r -> r.rev) end
 
   doc """
@@ -583,8 +621,10 @@ mod ClusterNode do
   end
 
   doc """
-  The certificate peer [id] presented in its latest verified handshake
-  (certificate mode); what `peer_cert` answers and step 11b checks.
+  Record [cert], the certificate peer [id] presented in its latest verified
+  handshake (certificate mode), replacing any earlier one; what `peer_cert`
+  answers and step 11b checks. `None` (shared-secret mode) leaves [st]
+  unchanged.
   """
   fn core_peer_cert(st : CnState, id : String, cert : Option(NodeCert.Cert)) : CnState do
     match cert do
@@ -618,6 +658,7 @@ mod ClusterNode do
   -- the frame and drops the link when the old certificate expires; the
   -- redial then handshakes under the new one (sessions on it are lost).
 
+  doc "The CERT_UPDATE control-frame tag, 16."
   fn tag_cert_update() : Int do 16 end
 
   -- The proof is bound to the LINK (security review, dd step 12b): it also
@@ -646,6 +687,11 @@ mod ClusterNode do
                  Bytes.from_list(NodeCert.to_bytes(signed)))
   end
 
+  doc """
+  Encode a v2 CERT_UPDATE frame (msgpack `[16, "v2", counter, cert, proof]`)
+  from an already-made [proof]; `sign_cert_update` makes the proof and calls
+  this. The inverse of `decode_cert_update`.
+  """
   fn encode_cert_update(signed : NodeCert.Signed, counter : Int, proof : Bytes) : List(Int) do
     Msgpack.encode(Msgpack.array([Msgpack.int(tag_cert_update()), Msgpack.str("v2"), Msgpack.int(counter),
                                   Msgpack.bin(NodeCert.to_bytes(signed)), Msgpack.bin(Bytes.to_list(proof))]))
@@ -760,8 +806,10 @@ mod ClusterNode do
     end
   end
 
+  doc "Every member in the core's SWIM view, in any status, this node included."
   fn core_members(st : CnState) : List(Member) do Membership.members(st.driver.swim.members) end
 
+  doc "The core's membership entry for node [id], or None if it has never heard of it."
   fn core_member(st : CnState, id : String) : Option(Member) do Membership.get(st.driver.swim.members, id) end
 
   pfn linked_ids(st : CnState) : List(String) do Map.keys(st.links) end
@@ -935,11 +983,6 @@ mod ClusterNode do
         match pair do (dest, bytes) -> Send(dest, bytes) end))
   end
 
-  doc """
-  One tick at [now]: fold the queued SWIM events and step the driver (its
-  actions become control frames to linked peers), derive the member events,
-  and plan the dials this tick allows.
-  """
   -- Expire the registry's tombstones (GlobalRegistry.collect_tombstones), at
   -- most once a minute and at least four times per grace period: each pass
   -- walks the whole registry, and a tombstone outlives its grace by at most
@@ -952,6 +995,14 @@ mod ClusterNode do
     end
   end
 
+  doc """
+  One tick at [now] (unix ms): recheck peers' certificates (dropping expired
+  or revoked ones), fold the queued SWIM events and step the driver (its
+  actions become control frames to linked peers), derive the member events,
+  plan the dials this tick allows, collect expired registry tombstones, send
+  an anti-entropy REGISTRY_SYNC_REQ to the peers due one, and report changes
+  to visible name bindings. Returns the new state and the effects to perform.
+  """
   fn core_tick(st0 : CnState, now : Int) : (CnState, List(CnEffect)) do
     let (st, cert_effs) = core_check_certs(st0, now / 1000)
     let before = st.driver.swim.members
@@ -981,8 +1032,11 @@ mod ClusterNode do
                 let swept = collect_tombstones(st4, now)
                 let ae_peers = List.filter(SwimDriver.anti_entropy_peers(swept.driver, now), fn id -> is_linked(swept, id))
                 let st5 = if List.is_empty(ae_peers) do swept else { swept with driver: SwimDriver.bump_anti_entropy(swept.driver, now) } end
-                let req = NetKernel.encode_registry_sync_req(GlobalRegistry.root_hash(st5.reg))
-                let ae = List.map(ae_peers, fn id -> Send(id, req))
+                -- The root hash hashes every entry: only when a REQ goes out.
+                let ae = if List.is_empty(ae_peers) do Nil else
+                  let req = NetKernel.encode_registry_sync_req(GlobalRegistry.root_hash(st5.reg))
+                  List.map(ae_peers, fn id -> Send(id, req))
+                end
                 match refresh_names(st5) do
                   (st6, name_effs) ->
                     let out = (st6, List.append(cert_effs, List.append(frames, List.append(ev_effs, List.append(dials, List.append(ae, name_effs))))))
@@ -1185,7 +1239,9 @@ mod ClusterNode do
       end
     else if tag == 14 do
       match SwimDriver.decode_members_sync(frame) do
-        Ok(ms) -> (List.fold_left(ms, st, fn (s, m) -> queue(s, SwimDriver.GossipFrame(m))), Nil)
+        Ok(ms) ->
+          let st1 = if List.any(ms, fn m -> self_stale(st, m)) do { st with remembered: st.remembered + 1 } else st end
+          (List.fold_left(ms, st1, fn (s, m) -> queue(s, SwimDriver.GossipFrame(m))), Nil)
         Err(_) -> (st, Nil)
       end
     else if tag == 5 || tag == 6 do
@@ -1230,8 +1286,36 @@ mod ClusterNode do
     end end end end end
   end
 
+  -- Does [m], from a peer's member view (the MEMBERS_SYNC a peer sends when a
+  -- link comes up), show THIS node as the peer last knew it before a
+  -- restart (an earlier creation) or as Dead at this creation (a restart
+  -- that kept its creation, or a heal after the peer declared us dead)?
+  -- Either way that peer reports our coming back as `NodeRejoined` and
+  -- treats us as settling (Topology), so we mirror it (`rejoined_at`).
+  pfn self_stale(st : CnState, m : Member) : Bool do
+    if m.node_id != st.me || m.creation <= 0 do false
+    else if m.creation < st.cfg.creation do true
+    else if m.creation == st.cfg.creation do
+      match m.status do
+        Dead -> true
+        _ -> false
+      end
+    else false end end end
+  end
+
+  doc "How many peer member views have shown this node as rejoining (`self_stale`); for tests of the core."
+  fn core_remembered(st : CnState) : Int do st.remembered end
+
+  doc "Has a peer's registry been merged here (or did this node start with no seeds to wait for)? For tests of the core."
+  fn core_reg_synced(st : CnState) : Bool do st.reg_synced end
+
   -- ── names ──────────────────────────────────────────────────────────────
 
+  doc """
+  The visible binding of [name] as last computed by the core (hidden
+  bindings, whose holder is Dead or restarted, give None); the pure
+  counterpart of `lookup`.
+  """
   fn core_lookup(st : CnState, name : String) : Option(GlobalPid.Pid) do
     Map.get(st.vis, name, Map.str_cmp)
   end
@@ -1371,7 +1455,10 @@ mod ClusterNode do
   -- by forgetting local registrations another holder has taken (Lost).
   pfn refresh_names(st : CnState) : (CnState, List(CnEffect)) do
     let new_vis = visible_map(st)
-    let names = List.dedup(List.append(Map.keys(st.vis), Map.keys(new_vis)))
+    -- Each name once: List.dedup only drops ADJACENT duplicates, and a name
+    -- in both maps is not adjacent to itself in the appended key lists.
+    let added = List.filter(Map.keys(new_vis), fn k -> not(Map.contains_key(st.vis, k, Map.str_cmp)))
+    let names = List.append(Map.keys(st.vis), added)
     let out = List.fold_left(names, (st, Nil), fn (acc, name) ->
       match acc do
         (s, effs) ->
@@ -1428,11 +1515,29 @@ mod ClusterNode do
     end
   end
 
-  -- Frames carrying registry leaves to every linked peer.
+  -- Frames carrying registry leaves to every linked peer: a REGISTRY_SYNC_RESP
+  -- whose root is `push_root()`, not this replica's root hash. A receiver
+  -- merges the leaves and does not answer. Answering a push with the whole
+  -- registry (what a root mismatch did, and still does for a node that
+  -- predates this) made every name change under session churn cost two full
+  -- dumps of the registry, tombstones included: the two nodes' roots almost
+  -- never match while names change on both, so the dumps ping-ponged, and the
+  -- registry grows by two names per session until its tombstones expire
+  -- (3 h). 400 back-to-back sessions slowed to ~1 s each, with millions of
+  -- transient objects per node. A lost push is still repaired: the link-up
+  -- sync and the periodic anti-entropy (REQ/RESP with real roots) send
+  -- everything.
   pfn push_leaves(st : CnState, leaves : List((String, GlobalRegistry.Entry))) : List(CnEffect) do
-    let bytes = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(st.reg), leaves)
-    List.map(linked_ids(st), fn id -> Send(id, bytes))
+    match linked_ids(st) do
+      Nil -> Nil
+      ids ->
+        let bytes = NetKernel.encode_registry_sync_resp(push_root(), leaves)
+        List.map(ids, fn id -> Send(id, bytes))
+    end
   end
+
+  -- Never a root hash (those are hex digests, or "" for an empty registry).
+  pfn push_root() : String do "push" end
 
   pfn leaf(st : CnState, name : String) : List((String, GlobalRegistry.Entry)) do
     match GlobalRegistry.entry(st.reg, name) do
@@ -1563,16 +1668,23 @@ mod ClusterNode do
       match NetKernel.decode_registry_sync_resp(frame) do
         Err(_) -> (st, Nil)
         Ok((rh, leaves)) ->
-          let merged = GlobalRegistry.diff_entries(st.reg, rh, stamp_leaves(st, from, leaves))
-          match retire_stale({ st with reg: merged }) do
+          let pushed = rh == push_root()
+          let stamped = stamp_leaves(st, from, leaves)
+          let merged = if pushed do
+            List.fold_left(stamped, st.reg, fn (acc, kv) -> match kv do (name, e) -> GlobalRegistry.observe(acc, name, e) end)
+          else GlobalRegistry.diff_entries(st.reg, rh, stamped) end
+          match retire_stale({ st with reg: merged, reg_synced: true }) do
             (st2, retired) ->
-              let mine = GlobalRegistry.root_hash(st2.reg)
-              -- Answer with everything when the sender's state (its root) is
-              -- not what we now hold, so it can merge ours: two rounds at most,
-              -- since after merging both hold the join.
-              let reply = if mine != rh do
-                Cons(Send(from, NetKernel.encode_registry_sync_resp(mine, GlobalRegistry.all_entries(st2.reg))), Nil)
-              else Nil end
+              -- Answer a full sync with everything when the sender's state (its
+              -- root) is not what we now hold, so it can merge ours: two rounds
+              -- at most, since after merging both hold the join. A push (a
+              -- few leaves, `push_root`) is never answered: see push_leaves.
+              let reply = if pushed do Nil else
+                let mine = GlobalRegistry.root_hash(st2.reg)
+                if mine != rh do
+                  Cons(Send(from, NetKernel.encode_registry_sync_resp(mine, GlobalRegistry.all_entries(st2.reg))), Nil)
+                else Nil end
+              end
               let retire_push = List.flat_map(retired, fn n -> push_leaves(st2, leaf(st2, n)))
               match refresh_names(st2) do
                 (st3, effs) ->
@@ -1627,7 +1739,7 @@ mod ClusterNode do
                   routes : Vault(NodeSend.Delivery -> Result((), String)),
                   closes : Vault(String -> String -> Unit),
                   downs : Vault(DistLink.DownReason -> Unit), fired : Vault(List(Int)),
-                  failed : Vault(Int -> String -> Unit),
+                  failed : Vault(Int -> String -> Unit), sfailed : Vault(String -> String -> Unit),
                   certs : Vault(NodeCert.Cert), sec : Vault(SecurityEvent -> Unit),
                   revs : Vault(NodeCert.Revocation), op_pub : Bytes,
                   auth : Vault(ClusterAuth.Auth), strs : Vault(String), registrants : Vault(String) }
@@ -1664,6 +1776,7 @@ mod ClusterNode do
                  downs: Vault.new("cluster_node_unset_downs"),
                  fired: Vault.new("cluster_node_unset_fired"),
                  failed: Vault.new("cluster_node_unset_failed"),
+                 sfailed: Vault.new("cluster_node_unset_sfailed"),
                  certs: Vault.new("cluster_node_unset_certs"),
                  sec: Vault.new("cluster_node_unset_sec"),
                  revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty(),
@@ -1873,6 +1986,8 @@ mod ClusterNode do
       if l.dfd >= 0 do NetKernel.forget(l.dfd) else () end
       discard(send(pid_of_int(l.cw), CtlClose()))
       let qk = "q" ++ int_to_string(l.cfd)
+      -- Before the fds close: a new connection may reuse the number.
+      Vault.drop(h.meta, data_closed_key(l))
       match Vault.get(h.qs, qk) do
         Some(w) ->
           Vault.drop(h.qs, qk)
@@ -1948,6 +2063,15 @@ mod ClusterNode do
         -- The data reader reads the cause when its connection ends, and
         -- tells the routes; set before the sockets are shut.
         Vault.set(h.causes, "c" ++ int_to_string(l.cfd), why)
+        -- Off the mirror NOW, not at the `mirror` after this step's
+        -- effects: a session forming meanwhile on another scheduler took
+        -- the dropped pair's queue from `session_queue_for`, and its reader
+        -- could tell the close handlers before that session installed its
+        -- own, and its `recheck_links` still saw the pair as current.
+        match Vault.get(h.links, l.node_id) do
+          Some(cur) -> if cur.gen == l.gen do Vault.drop(h.links, l.node_id) else () end
+          None -> ()
+        end
         drop_link(l)
         release_link(h, l, 3)
       Discard(l) ->
@@ -1999,6 +2123,13 @@ mod ClusterNode do
     let stale = List.length(List.filter(GlobalRegistry.all_entries(st.reg), fn kv ->
       match kv do (_n, e) -> e.present && e.node_id == st.me && e.creation != st.cfg.creation end))
     let _ = Vault.set(h.meta, "stale_bindings", stale)
+    let _ = Vault.set(h.meta, "reg_synced", if st.reg_synced do 1 else 0 end)
+    -- When a peer last showed this node as rejoining: stamped here, on the
+    -- step that counted it (the core has no clock).
+    let _ = if st.remembered > Vault.get_or(h.meta, "remembered", 0) do
+      Vault.set(h.meta, "remembered", st.remembered)
+      Vault.set(h.meta, "rejoined_at", unix_time_ms())
+    else () end
     let _ = List.map(Vault.keys(h.names), fn k ->
       if Map.contains_key(st.vis, k, Map.str_cmp) do () else Vault.drop(h.names, k) end)
     discard(List.map(Map.entries(st.vis), fn kv -> match kv do (k, p) -> Vault.set(h.names, k, p) end))
@@ -2152,6 +2283,24 @@ mod ClusterNode do
     end
   end
 
+  -- A DELIVERY_FAILED from [from_node] for our frame [seq]: a session
+  -- frame's (a negative seq, `session_seq`) goes to the session that sent it
+  -- (`on_session_failed`), anything else to the node's handler
+  -- (`on_delivery_failed`).
+  pfn delivery_failed(h : CnHandle, from_node : String, seq : Int, reason : String) : () do
+    if seq < 0 do
+      match Vault.get(h.sfailed, int_to_string(session_seq_key(seq))) do
+        Some(f) -> f(from_node, reason)
+        None -> ()
+      end
+    else
+      match Vault.get(h.failed, "f") do
+        Some(f) -> f(seq, reason)
+        None -> ()
+      end
+    end
+  end
+
   pfn control_frame(node, h : CnHandle, l : CnLink, tag : Int, frame : List(Int)) : () do
     if tag == 7 do
       match DistLink.decode_req(frame) do
@@ -2163,10 +2312,7 @@ mod ClusterNode do
     else if tag == 10 do
       match NodeSend.decode_failed(frame) do
         Ok((seq, reason)) ->
-          match Vault.get(h.failed, "f") do
-            Some(f) -> f(seq, reason)
-            None -> ()
-          end
+          delivery_failed(h, l.node_id, seq, reason)
         Err(_) -> ()
       end
     else if tag == 11 do
@@ -2211,12 +2357,20 @@ mod ClusterNode do
         send(node, MoveReader(1, l, frame, rest))
         0
       None ->
+        -- No session may link to this connection from here on: mark it
+        -- BEFORE the close handlers run (`h_queue_for`). Its queue stays in
+        -- `h.qs` until every reader has released it (`release_link`), so a
+        -- session forming in between got the dead queue and missed the
+        -- close it was told before it subscribed.
+        Vault.set(h.meta, data_closed_key(l), 1)
         data_closed(h, l)
         send(node, LinkClosed(l.node_id, l.gen))
         release_link(h, l, 3)
         0
     end
   end
+
+  pfn data_closed_key(l : CnLink) : String do "dc" ++ int_to_string(l.cfd) end
 
   pfn data_closed(h : CnHandle, l : CnLink) : () do
     let why = Vault.get_or(h.causes, "c" ++ int_to_string(l.cfd), "connection lost")
@@ -2286,7 +2440,7 @@ mod ClusterNode do
   -- ends (None) or this task's epoch is draining at or after [not_before]:
   -- then Some((frame, rest)), the frame just read (not yet handled) and the
   -- bytes read past it.
-  pfn read_link(fd : Int, buf : List(Int), not_before : Int, on_frame : Int -> List(Int) -> ())
+  @[diverges] pfn read_link(fd : Int, buf : List(Int), not_before : Int, on_frame : Int -> List(Int) -> ())
       : Option((List(Int), List(Int))) do
     match NetKernel.recv_frame(fd, buf) do
       Err(_) -> None
@@ -2308,11 +2462,7 @@ mod ClusterNode do
   -- by the first `start` (a later node's handle replaces it: the loopback
   -- handler is per node, the writer pids are not).
   pfn delivery_failed_hook(h : CnHandle, conn : Int, seq : Int, reason : String) : () do
-    if conn < 0 do
-      match Vault.get(h.failed, "f") do
-        Some(f) -> f(seq, reason)
-        None -> ()
-      end
+    if conn < 0 do delivery_failed(h, h.node_id, seq, reason)
     else
       discard(send(pid_of_int(conn), CtlWrite(NodeSend.encode_failed(seq, reason))))
     end
@@ -2445,7 +2595,7 @@ mod ClusterNode do
     end
   end
 
-  pfn accept_loop(node, h : CnHandle, cfg : CnConfig, me : NodeIdentity.Identity, listen_fd : Int, meta : Vault(Int),
+  @[diverges] pfn accept_loop(node, h : CnHandle, cfg : CnConfig, me : NodeIdentity.Identity, listen_fd : Int, meta : Vault(Int),
                   not_before : Int) : Int do
     match tcp_accept(listen_fd) do
       Err(_) -> 0
@@ -2465,7 +2615,7 @@ mod ClusterNode do
     end
   end
 
-  pfn tick_loop(node, h : CnHandle, files : Option(CertFiles), tick_ms : Int, not_before : Int) : Int do
+  @[diverges] pfn tick_loop(node, h : CnHandle, files : Option(CertFiles), tick_ms : Int, not_before : Int) : Int do
     sleep_ms(tick_ms)
     if Vault.get(h.meta, "stopped") != None do
       0
@@ -2567,6 +2717,8 @@ mod ClusterNode do
     on_peer_closed     : (String -> String -> Unit) -> Int,
     off_peer_closed    : Int -> (),
     on_delivery_failed : (Int -> String -> Unit) -> (),
+    on_session_failed  : Int -> (String -> String -> Unit) -> (),
+    off_session_failed : Int -> (),
     monitor_remote     : GlobalPid.Pid -> (DistLink.DownReason -> Unit) -> Result(Int, String),
     demonitor_remote   : GlobalPid.Pid -> Int -> (),
     peer_cert          : String -> Option(NodeCert.Cert),
@@ -2578,6 +2730,8 @@ mod ClusterNode do
     replace_cert       : String -> String -> Result(NodeCert.Cert, String),
     on_security_event  : (SecurityEvent -> Unit) -> Int,
     off_security_event : Int -> (),
+    registry_synced    : () -> Bool,
+    rejoined_at        : () -> Option(Int),
     handshake          : Int -> String -> Int -> Result(NetKernel.Authed, String)
   }
 
@@ -2631,6 +2785,8 @@ mod ClusterNode do
       on_peer_closed: fn _ -> unsupported("on_peer_closed"),
       off_peer_closed: fn _ -> unsupported("off_peer_closed"),
       on_delivery_failed: fn _ -> unsupported("on_delivery_failed"),
+      on_session_failed: fn (_, _) -> unsupported("on_session_failed"),
+      off_session_failed: fn _ -> unsupported("off_session_failed"),
       monitor_remote: fn (_, _) -> unsupported("monitor_remote"),
       demonitor_remote: fn (_, _) -> unsupported("demonitor_remote"),
       peer_cert: fn _ -> unsupported("peer_cert"),
@@ -2642,6 +2798,10 @@ mod ClusterNode do
       replace_cert: fn (_, _) -> unsupported("replace_cert"),
       on_security_event: fn _ -> unsupported("on_security_event"),
       off_security_event: fn _ -> unsupported("off_security_event"),
+      -- Not panics: Topology.place reads both, and a fake cluster is one
+      -- that has synced and that no peer remembers.
+      registry_synced: fn _ -> true,
+      rejoined_at: fn _ -> None,
       handshake: fn (_, _, _) -> Err("ClusterNode: handshake is not supported by this capability") }
   end
 
@@ -2676,6 +2836,8 @@ mod ClusterNode do
       on_peer_closed: fn f -> h_on_peer_closed(h, f),
       off_peer_closed: fn id -> Vault.drop(h.closes, int_to_string(id)),
       on_delivery_failed: fn f -> Vault.set(h.failed, "f", f),
+      on_session_failed: fn (key, f) -> Vault.set(h.sfailed, int_to_string(key), f),
+      off_session_failed: fn key -> Vault.drop(h.sfailed, int_to_string(key)),
       monitor_remote: fn (target, on_down) -> h_monitor_remote(h, target, on_down),
       demonitor_remote: fn (target, r) -> Vault.drop(h.downs, mkey(target.node_id, target.local_pid) ++ int_to_string(r)),
       peer_cert: fn id -> Vault.get(h.certs, id),
@@ -2687,6 +2849,8 @@ mod ClusterNode do
       replace_cert: fn (cert_text, key_hex) -> h_replace_cert(h, cert_text, key_hex),
       on_security_event: fn f -> h_on_security_event(h, f),
       off_security_event: fn id -> Vault.drop(h.sec, int_to_string(id)),
+      registry_synced: fn _ -> Vault.get_or(h.meta, "reg_synced", 0) != 0,
+      rejoined_at: fn _ -> Vault.get(h.meta, "rejoined_at"),
       handshake: fn (fd, role, timeout_ms) -> h_handshake(h, fd, role, timeout_ms) }
   end
 
@@ -2798,7 +2962,7 @@ mod ClusterNode do
   `Ok`. The same pid registering again is allowed. On `Ok` the caller owns
   the claim and must send the `Register` that releases it.
   """
-  fn reserve(names : Vault(GlobalPid.Pid), claims : Vault(Int), node_id : String, creation : Int,
+  @[diverges] fn reserve(names : Vault(GlobalPid.Pid), claims : Vault(Int), node_id : String, creation : Int,
              name : String, p : Int) : Result((), RegisterError) do
     let claimed = if Vault.put_new(claims, name, p) do Ok(true)
       else
@@ -2880,10 +3044,15 @@ mod ClusterNode do
     match Vault.get(h.links, node_id) do
       None -> None
       Some(l) ->
+        -- A connection whose data reader has ended is no route, though the
+        -- node actor has not dropped it yet: a session party linking to it
+        -- would subscribe to its close after the close was told
+        -- (specs/progress/2026-10-15-session-links-dead-connection.md).
+        if Vault.get(h.meta, data_closed_key(l)) != None do None else
         match Vault.get(h.qs, "q" ++ int_to_string(l.cfd)) do
           Some(w) -> Some((pid_of_int(w), l.dfd))
           None -> None
-        end
+        end end
     end end
   end
 
@@ -3122,6 +3291,7 @@ mod ClusterNode do
                   downs: Vault.new("cluster_node_downs_" ++ tag),
                   fired: Vault.new("cluster_node_fired_" ++ tag),
                   failed: Vault.new("cluster_node_failed_" ++ tag),
+                  sfailed: Vault.new("cluster_node_sfailed_" ++ tag),
                   certs: Vault.new("cluster_node_certs_" ++ tag),
                   sec: Vault.new("cluster_node_sec_" ++ tag),
                   revs: Vault.new("cluster_node_revs_" ++ tag),
@@ -3188,6 +3358,7 @@ mod ClusterNode do
     d.subscribe(on_event)
   end
 
+  doc "Remove the `subscribe` callback with id [id]; an unknown id is a no-op."
   fn unsubscribe(c : Cap(ClusterNode.Live), id : Int) : () do
     let d = ops(c)
     d.unsubscribe(id)
@@ -3311,9 +3482,32 @@ mod ClusterNode do
     d.watch(name, on_event)
   end
 
+  doc "Remove the `watch` callback with id [id] (whatever name it watched); an unknown id is a no-op."
   fn unwatch(c : Cap(ClusterNode.Live), id : Int) : () do
     let d = ops(c)
     d.unwatch(id)
+  end
+
+  doc """
+  Has this node merged a peer's registry replica yet (the sync a peer sends
+  when a link comes up)? Always true for a node started with no seeds: it
+  has no one to wait for. Until then this node's view of the names (and of
+  Topology's eligibility markers) is its own alone.
+  """
+  fn registry_synced(c : Cap(ClusterNode.Live)) : Bool do
+    let d = ops(c)
+    d.registry_synced(())
+  end
+
+  doc """
+  When (unix ms) a peer last showed this node as rejoining: its member view
+  held this node at an earlier creation (a restart) or Dead (a restart that
+  kept its creation, a heal). That peer reports the node's return as
+  `NodeRejoined` and lets it settle before counting it; None if no peer has.
+  """
+  fn rejoined_at(c : Cap(ClusterNode.Live)) : Option(Int) do
+    let d = ops(c)
+    d.rejoined_at(())
   end
 
   doc "How many present bindings of this node's from an earlier creation the replica holds (0 once retired)."
@@ -3322,6 +3516,11 @@ mod ClusterNode do
     d.stale_bindings(())
   end
 
+  doc """
+  A one-line description of name event [ev], naming the holder by node id:
+  `"<name> bound to <node_id>"`, `"<name> unbound"` or
+  `"<name> lost to <node_id>"`.
+  """
   fn name_event_text(ev : NameEvent) : String do
     match ev do
       Bound(n, p) -> n ++ " bound to " ++ p.node_id
@@ -3412,6 +3611,11 @@ mod ClusterNode do
     d.route_session(pid, deliver)
   end
 
+  doc """
+  Remove the route installed under [key] (from `route`, `route_type` or
+  `route_session`); an unknown key is a no-op. Later messages for it find no
+  route (and go back to the sender as DELIVERY_FAILED).
+  """
   fn unroute(c : Cap(ClusterNode.Live), key : String) : () do
     let d = ops(c)
     d.unroute(key)
@@ -3428,15 +3632,60 @@ mod ClusterNode do
     d.on_peer_closed(f)
   end
 
+  doc "Remove the `on_peer_closed` callback with id [id]; an unknown id is a no-op."
   fn off_peer_closed(c : Cap(ClusterNode.Live), id : Int) : () do
     let d = ops(c)
     d.off_peer_closed(id)
   end
 
-  doc "Call [f](seq, reason) for every DELIVERY_FAILED a peer sends back."
+  doc """
+  Call [f](seq, reason) for every DELIVERY_FAILED a peer sends back, except
+  for a session's frames (a negative seq, `session_seq`): those go to the
+  session's own handler (`on_session_failed`).
+  """
   fn on_delivery_failed(c : Cap(ClusterNode.Live), f : Int -> String -> Unit) : () do
     let d = ops(c)
     d.on_delivery_failed(f)
+  end
+
+  pfn session_seq_span() : Int do 16777216 end
+
+  doc """
+  The wire seq of the [n]th frame a session sends under [key] (> 0, never
+  reused in this process: SessionNode draws it from a process-wide
+  counter, so a late refusal of an ended session's frame finds no handler
+  rather than another session's). Negative, so it never collides with a user's own seqs: a
+  DELIVERY_FAILED for it goes to the handler `on_session_failed` installed
+  under [key], not to `on_delivery_failed`'s.
+  """
+  fn session_seq(key : Int, n : Int) : Int do
+    0 - (key * session_seq_span() + n % session_seq_span())
+  end
+
+  doc "The key a `session_seq` was made under."
+  fn session_seq_key(seq : Int) : Int do
+    (0 - seq) / session_seq_span()
+  end
+
+  doc """
+  Call [f](peer_node_id, reason) for every DELIVERY_FAILED a peer sends back
+  for a frame sent with a `session_seq` under [key] (a frame the peer could
+  not route: its endpoint is gone, a stale creation, or refused). Replaces
+  any handler under [key]; `off_session_failed` removes it.
+  """
+  fn on_session_failed(c : Cap(ClusterNode.Live), key : Int, f : String -> String -> Unit) : () do
+    let d = ops(c)
+    d.on_session_failed(key, f)
+  end
+
+  doc """
+  Remove the `on_session_failed` handler under [key]; an unknown key is a
+  no-op. A later DELIVERY_FAILED for that key's seqs then finds no handler
+  and is dropped.
+  """
+  fn off_session_failed(c : Cap(ClusterNode.Live), key : Int) : () do
+    let d = ops(c)
+    d.off_session_failed(key)
   end
 
   doc """
@@ -3450,6 +3699,12 @@ mod ClusterNode do
     d.monitor_remote(target, on_down)
   end
 
+  doc """
+  Cancel the `monitor_remote` of [target] whose ref is [r] (the `Ok` value
+  `monitor_remote` returned): its `on_down` callback is removed here, so a
+  later fire for it is ignored. Local only: no message goes to [target]'s
+  node. An unknown ref is a no-op.
+  """
   fn demonitor_remote(c : Cap(ClusterNode.Live), target : GlobalPid.Pid, r : Int) : () do
     let d = ops(c)
     d.demonitor_remote(target, r)
@@ -3517,10 +3772,11 @@ mod ClusterNode do
   end
 
   doc """
-  May a node that presented [cert] play role [role] of protocol [proto] in
-  [mode] ("offer" or "initiate")? Always Ok on a shared-secret node; on a
-  certificate node, `SessionAP.authorize` against the peer's certificate
-  (None: the peer presented none). What SessionNode's access points check
+  May node [id] play role [role] of protocol [proto] in [mode] ("offer" or
+  "initiate")? Always Ok on a shared-secret node; on a certificate node,
+  `SessionAP.authorize` against [id]'s certificate (this node's own when
+  [id] is this node, else the peer's verified one; `Err` when the peer
+  presented none). What SessionNode's access points check
   when a session forms.
   """
   fn authorize_peer(c : Cap(ClusterNode.Live), id : String, proto : String, role : String,
@@ -3536,15 +3792,21 @@ mod ClusterNode do
   end
 
   doc """
-  Call [f] on every security event: a handshake refused (the peer's
-  certificate did not verify, it runs in the other mode, the wrong secret,
-  ...). Returns an id for `off_security_event`.
+  Call [f] on every security event (see `SecurityEvent`): a handshake
+  refused (the peer's certificate did not verify, it runs in the other mode,
+  the wrong secret, ...), a frame that failed its MAC, a raw send refused,
+  and a certificate replaced or a replacement refused. Returns an id for
+  `off_security_event`.
+
+      let id = ClusterNode.on_security_event(node, fn ev ->
+        println(ClusterNode.security_text(ev)))
   """
   fn on_security_event(c : Cap(ClusterNode.Live), f : SecurityEvent -> Unit) : Int do
     let d = ops(c)
     d.on_security_event(f)
   end
 
+  doc "Remove the `on_security_event` callback with id [id]; an unknown id is a no-op."
   fn off_security_event(c : Cap(ClusterNode.Live), id : Int) : () do
     let d = ops(c)
     d.off_security_event(id)

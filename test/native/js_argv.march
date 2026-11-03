@@ -1,0 +1,10 @@
+-- process_argv on the JS target: Node's arguments after the script (the dune
+-- rule runs `node js_argv.mjs one two`); [] in a browser.
+mod JsArgv do
+  needs IO.Console
+  needs IO.Process
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) : Unit do
+    println(String.join(process_argv(), ","))
+  end
+end

@@ -1,0 +1,44 @@
+ok: the patch build wrote a manifest
+ok: HELP: WHICH is observe tier, SOURCE debug tier
+ok: WHICH: a 64-hex impl_hash
+ok: WHICH: the baseline is running (not patched, activated_at 0)
+ok: WHICH: a different function has its own hash
+ok: WHICH of a name that is not a slot: not_found
+ok: WHICH with no name: bad_args
+ok: WHICH with a path in the name: bad_args
+ok: the program saw the same hash in-process (Recon.which)
+ok: Recon.which of a name that is not a slot: not_found
+ok: SOURCE with no policy entry: policy
+ok: SOURCE signed by another key: bad_signature
+ok: SOURCE with a garbage signature: bad_signature
+ok: SOURCE 'local' on the socket is not a way past the signature: refused
+ok: SOURCE with its name changed after signing: bad_signature
+ok: SOURCE: the baseline's body
+ok: SOURCE: the declaration only, not its neighbours
+ok: SOURCE: another function's own text
+ok: SOURCE: the same signed request again: replay
+ok: SOURCE of a name that is not a slot: not_found
+ok: SOURCE of a path: bad_args
+ok: SOURCE of an absolute path: bad_args
+ok: SOURCE with no name: bad_args
+ok: SOURCE with a second name: bad_args
+ok: SOURCE with another argument: bad_args
+ok: Recon.source in-process, once the policy allows it: the baseline's body
+ok: CAS_PUT kind:source: an upper-case hash is refused
+ok: CAS_PUT kind:source: a short hash is refused
+ok: CAS_PUT kind:source: a text over the limit is refused
+ok: CAS_PUT kind:source: an empty text is refused
+ok: CAS_PUT kind:source stored nothing as an artifact
+ok: the deploy activated one function
+ok: the deploy uploaded source for the policy that allows it
+ok: WHICH after the deploy: a new hash, patched, the baseline remembered
+ok: WHICH after the deploy: activated_at is set
+ok: WHICH after the deploy: the untouched function keeps its hash
+ok: SOURCE after the deploy: the new body
+ok: the new text reached the node's own store (uploaded, not shared)
+ok: SOURCE of the function the deploy did not touch: still its own text
+ok: SOURCE once the policy drops it: policy
+ok: WHICH needs no policy
+ok: every signed SOURCE attempt is audited, in order
+ok: audit lines for an accepted SOURCE name the function
+ok: the in-process Recon.source is audited, as in-process

@@ -660,7 +660,10 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
                  of it and keeps it for the supervisor's lifetime, and
                  `march_respawn_child` incs it before each call because every
                  apply function drops the closure it is handed. *)
-              let respawn_name = Lower_state.fresh_name "respawn" in
+              let respawn_name =
+                Lower_state.fresh_nested_name
+                  ~host:(Lower_state.host_name ~mod_prefix:"" (name ^ Tir_names.actor_spawn_suffix))
+                  "respawn" in
               let fn_var : Tir.var =
                 { v_name = respawn_name; v_ty = Tir.TFn ([], Tir.TPtr Tir.TUnit); v_lin = Tir.Unr } in
               let fd : Tir.fn_def = {

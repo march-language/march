@@ -24,6 +24,8 @@
 --   1. `CheckConfig.seed` passed to `Check.all_with`
 --   2. `MARCH_PROP_SEED` environment variable (set by `forge test --seed=N`)
 --   3. current Unix time
+--
+-- doc: try
 
 mod Check do
 
@@ -33,8 +35,22 @@ mod Check do
                         max_shrink_steps : Int, max_size : Int }
 
   doc """
-  Sensible defaults: 100 runs, size grows to 100, up to 1000 shrink steps,
-  seed picked from env or clock.
+  Sensible defaults: 100 runs, a size hint growing linearly from 0 to 100
+  across the runs, up to 1000 shrink steps, and `seed: None` (so the seed
+  comes from `MARCH_PROP_SEED` or the clock). Override fields with a record
+  update.
+
+  ## Examples
+
+      march> let cfg = Check.default_config()
+      march> cfg.num_runs
+      100
+      march> let cfg = Check.default_config()
+      march> cfg.seed
+      None
+      march> let cfg = Check.default_config()
+      march> { cfg with num_runs: 10 }.num_runs
+      10
   """
   fn default_config() : CheckConfig do
     { num_runs: 100, seed: None, max_shrink_steps: 1000, max_size: 100 }
@@ -69,11 +85,19 @@ mod Check do
   -- ---- Property execution (with exception catching) ----
 
   doc """
-  Run a property with a value, catching any runtime failure.
+  Run a property on one value, catching any runtime failure.
   Returns:
     Ok(true)  — property held
     Ok(false) — property returned false
-    Err(msg)  — property raised (assert, panic, match failure, etc.)
+    Err(msg)  — property raised (assert, panic, match failure, etc.);
+                `msg` is the runtime error text
+
+  ## Examples
+
+      march> Result.unwrap_or(Check.try_prop(fn x -> x > 0, 5), false)
+      true
+      march> Check.try_prop(fn x -> 10 / x > 0, 0)
+      Err("division by zero")
   """
   fn try_prop(prop : a -> Bool, value : a) : Result(Bool, String) do
     __try_call(fn _ -> prop(value))
@@ -166,16 +190,31 @@ mod Check do
   -- ---- Public API ----
 
   doc """
-  Run a property with default config (100 runs).  Panics with a formatted
-  counterexample on failure, which the test runner catches and reports.
+  Run a property with `default_config()` (100 runs). Returns `()` when the
+  property holds on every generated value; otherwise shrinks the failing
+  input and panics with a report (counterexample, reason, shrink steps,
+  seed), which the test runner catches and reports. Does nothing when
+  `MARCH_SKIP_PROPERTIES=1`. Random (seeded from `MARCH_PROP_SEED` or the
+  clock), so not a REPL example:
+
+      Check.all(Gen.list(Gen.int(-100, 100)), fn xs ->
+        List.reverse(List.reverse(xs)) == xs
+      )
   """
   fn all(g, prop) do
     all_with(g, prop, default_config())
   end
 
   doc """
-  Run a property with explicit config.  Use to override run count, seed,
-  or shrink budget.  Example:
+  Run a property with an explicit config. Use to override the run count,
+  seed, size cap or shrink budget. Run `i` (0-based) gets size hint
+  `i * max_size / (num_runs - 1)` (just `max_size` when `num_runs <= 1`).
+  On the first failing run the input's shrink tree is walked greedily
+  (first failing child at each level, at most `max_shrink_steps` steps)
+  and the call panics with the report described in `all`. Returns `()` if
+  every run passes, or immediately if `MARCH_SKIP_PROPERTIES=1`.
+  Seed: `config.seed`, else `MARCH_PROP_SEED` (falling back to the clock
+  when unset or not an integer), else the current Unix time in seconds.
 
       Check.all_with(gen, prop, { Check.default_config() with seed: Some(42) })
   """

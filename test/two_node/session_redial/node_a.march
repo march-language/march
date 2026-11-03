@@ -1,0 +1,51 @@
+-- Two-node harness, scenario "session_redial": node-a runs role A. Its first
+-- session registers and is then frozen (SIGSTOP) before it finds B; while
+-- it is frozen, B's party forms against it and ends when node-b declares
+-- node-a dead and drops their pair; on SIGCONT the nodes redial. The
+-- session must end (fail), on BOTH sides, never hang; the second session,
+-- over the new pair, must finish. See scenario.sh.
+mod SessionRedialA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Echo_A.S_send_Msg_A_B_1, n : Int) : Echo_A.Yield do
+    Echo_A.recv_Msg_B_A_1(s, Echo_A.send_Msg_A_B_1(s, st, n), fn (_m, st1) -> Echo_A.close(s, st1))
+  end
+
+  fn main(c : Cap(IO)) do
+    let base = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "redial-secret", 1)
+    let suspect_ms = Env.get_int("REDIAL_SUSPECT_MS", 0)
+    let cfg = if suspect_ms > 0 do { base with swim: Swim.config(500, suspect_ms, 2) } else base end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
+        println("A: registering")
+        match Echo_Run.cluster_A(c, h, "redial-1", fn (s, st) -> role_a(s, st, 1)) do
+          Ok(_) -> println("A: cut-off session failed: false (it finished)")
+          Err(e) ->
+            IO.warn("A: redial-1: " ++ Echo_Run.error_message(e))
+            println("A: cut-off session failed: true")
+        end
+        match Echo_Run.cluster_A(c, h, "redial-2", fn (s, st) -> role_a(s, st, 2)) do
+          Ok(_) -> println("A: next session finished")
+          Err(e) -> println("A: next session failed: " ++ Echo_Run.error_message(e))
+        end
+        ClusterNode.stop(h)
+    end
+  end
+end

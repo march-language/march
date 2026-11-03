@@ -1,0 +1,2 @@
+topology: draining node-b (soft 10000 ms, hard 30000 ms)
+topology: second signal: stopping node-b now with 1 session(s) still running

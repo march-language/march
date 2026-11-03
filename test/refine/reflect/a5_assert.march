@@ -1,0 +1,17 @@
+mod A5 do
+  fn cat(xs : List(Int), ys : List(Int)) : List(Int) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, cat(t, ys))
+    end
+  end
+
+  fn need2(xs : {List(Int) | len(_) == 2}) : Int do 0 end
+
+  fn main() : Unit do
+    let a = cat(Cons(1, Nil), Cons(2, Nil))
+    assert List.length(a) == 2
+    let _ = need2(a)
+    ()
+  end
+end

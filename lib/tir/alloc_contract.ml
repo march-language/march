@@ -189,9 +189,12 @@ let rec describe = function
    Classification is by what the runtime does; unclear ⇒ allocating. *)
 let named_builtin_allocates : Builtin_name.t -> bool = function
   | Builtin_name.Int_abs | Builtin_name.Int_div | Builtin_name.Int_div_euclid
+  | Builtin_name.Int_div_floor | Builtin_name.Int_mod_floor
   | Builtin_name.Int_max_value | Builtin_name.Int_min_value | Builtin_name.Int_mod
   | Builtin_name.Int_mod_euclid | Builtin_name.Int_not | Builtin_name.Int_popcount
   | Builtin_name.Int_pow | Builtin_name.Negate | Builtin_name.Not
+  | Builtin_name.Int_wrapping_add | Builtin_name.Int_wrapping_mul
+  | Builtin_name.Int_wrapping_sub
   | Builtin_name.Pmap_threshold | Builtin_name.Task_is_cancelled
   | Builtin_name.Task_reductions | Builtin_name.Signal_raise_self
   (* Inline IEEE-754 constants and `fcmp` predicates: no call, no heap. *)
@@ -247,6 +250,8 @@ let scalar_builtins = [
      constant), and the match fall-through lower_match inserts calls `panic_`
      — without this entry every `match` would fail its contract. *)
   "panic"; "panic_"; "todo_"; "unreachable_"; "process_exit";
+  (* Stores a literal's address and a line on the proc; allocates nothing. *)
+  "__panic_site";
   (* Reference counting and freeing, not allocating: [Drop.run] synthesizes a
      call to [march_decrc_freed] inside every generated __drop$T helper, so
      without this entry any function that drops an owned value fails. *)
@@ -600,9 +605,12 @@ let named_builtin_retains : Builtin_name.t -> bool = function
   | Builtin_name.Int_to_string | Builtin_name.To_string
   | Builtin_name.Html_auto_escape | Builtin_name.Html_escape_ctx
   | Builtin_name.Int_abs | Builtin_name.Int_div | Builtin_name.Int_div_euclid
+  | Builtin_name.Int_div_floor | Builtin_name.Int_mod_floor
   | Builtin_name.Int_max_value | Builtin_name.Int_min_value | Builtin_name.Int_mod
   | Builtin_name.Int_mod_euclid | Builtin_name.Int_not | Builtin_name.Int_popcount
   | Builtin_name.Int_pow | Builtin_name.Negate | Builtin_name.Not
+  | Builtin_name.Int_wrapping_add | Builtin_name.Int_wrapping_mul
+  | Builtin_name.Int_wrapping_sub
   | Builtin_name.Pmap_threshold | Builtin_name.Task_is_cancelled
   | Builtin_name.Task_reductions | Builtin_name.Signal_raise_self
   | Builtin_name.Float_epsilon | Builtin_name.Float_infinity

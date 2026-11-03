@@ -1,35 +1,104 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+---
+layout: docs
+title: Memory Model
+nav_order: 5.8
+permalink: /docs/memory-model/
+---
 
-# Memory Model — How FBIP Works
+> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
-March's headline promise is **functional code that runs in place**: you write
-pure transformations over immutable data, and the compiler turns them into
-mutation when it can prove no one will notice. There is no tracing garbage
-collector, no stop-the-world pause, and — in the common "transform and return"
-case — no allocation at all. This page explains the mechanism end to end.
+# Memory Model: How FBIP Works
 
-The two ingredients are **Perceus reference counting** (deterministic, compiled
-in) and **FBIP — Functional But In-Place** (the reuse optimization that rides on
-top of it). The same uniqueness property that makes FBIP work also makes
-*parallel* FBIP lock-free.
+March compiles pure transformations over immutable data into in-place mutation
+wherever it can prove that no one could observe the difference. There is no tracing
+garbage collector and no stop-the-world pause. In the common "transform and return"
+case there is no allocation at all: the cell you matched on becomes the cell you
+return. This page explains that mechanism end to end.
+
+Two ingredients do the work. **Perceus** is deterministic reference counting: the
+compiler inserts increments and decrements only where ownership changes, so a value
+is freed at its last use, at a program point you can see. **FBIP** ("functional but
+in-place") is the reuse rule built on top of it: when a dying value's count is one and
+a new value of the same shape is being built, the new value takes the old cell.
+
+The promise is **deterministic, not pauseless**. Freeing is real work that happens
+inline, and releasing a large structure costs time proportional to its size. The
+difference from a tracing collector is not that the work disappears; it is that you
+choose when it happens, and it is the same every run.
+
+## On this page
+
+**Start here**
+
+- [When this matters](#when-this-matters)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [Perceus: deterministic reference counting](#perceus-deterministic-reference-counting)
+- [Uniqueness = RC 1](#uniqueness--rc-1)
+- [FBIP: a worked before/after](#fbip-a-worked-beforeafter)
+- [When reuse fires vs. falls back](#when-reuse-fires-vs-falls-back)
+
+**Writing for it**
+
+- [Writing allocation-free code](#writing-allocation-free-code) and [small scalar aggregates](#small-scalar-aggregates-never-reach-the-heap-at-all)
+- [Parallel FBIP needs no locks](#parallel-fbip-needs-no-locks)
+- [Mutable builtins: the rule](#mutable-builtins-the-rule)
+
+**The costs and the edges**
+
+- [Where this sits in the bigger picture](#where-this-sits-in-the-bigger-picture)
+- [Drop cascades: freeing is work you scheduled](#drop-cascades-freeing-is-work-you-scheduled)
+- [Cycles: not collected, and not reachable from ordinary code](#cycles-not-collected-and-not-reachable-from-ordinary-code)
+- [Conformance status](#conformance-status)
+- [See also](#see-also)
+
+## When this matters
+
+You never write reuse directives; the compiler chooses. This page matters when you are
+tuning a hot path, reading the editor's performance hints, pinning a function with
+`@[no_alloc]`, or wondering why a p99 is worse than a p50.
+
+| You want to | Do |
+|---|---|
+| See whether a hot function allocates | Turn on the LSP's performance hints: `♻ in-place`, `⧉ copied`, `⚡ stack-allocated` |
+| Make a `⧉ copied` go away | Consume the value you transform; do not read the old binding after the rebuild |
+| Keep a function allocation-free for good | `@[no_alloc]`, or `@[no_alloc(transient)]` when it allocates but retains nothing |
+| Keep a whole module allocation-free | `cap no_alloc`; see [Capabilities]({{ site.baseurl }}/docs/capabilities/#cap-no_alloc-no-heap-allocation) |
+| Keep a small vector of scalars out of the heap | One constructor, two to four `Int`/`Float`/`Bool` fields |
+| Move a big free out of a latency-critical section | Drop it earlier, or hand it to a task with a loose deadline |
+| Guarantee a value has one owner | Make it `linear`; see [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
+
+## How it fits with the rest of March
+
+| Concept | Where the memory model meets it | Chapter |
+|---|---|---|
+| **Linear types** | A `linear` value is the strongest FBIP case: one owner by the type, not by inference. | [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
+| **Capabilities** | `cap no_alloc` and `@[no_alloc]` are judged on the compiled form, after reuse and stack promotion. | [Capabilities]({{ site.baseurl }}/docs/capabilities/#cap-no_alloc-no-heap-allocation) |
+| **Actors and parallelism** | Disjoint subtrees of a uniquely owned value can be rewritten on different cores with no lock; a `send` of a linear value is a move. | [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/), [Actors]({{ site.baseurl }}/docs/actors/) |
+| **Editor** | The inlay hints and code lenses that show each reuse decision. | [LSP & Editors]({{ site.baseurl }}/docs/lsp/) |
+| **Compiler internals** | Object headers, tagged scalars, the inline-aggregate class, and the RC contract. | [Value Representation]({{ site.baseurl }}/docs/value-representation/) |
+| **Observing a running node** | `MEM`'s `live_objects` and the `rc.climb` finding are this model seen from outside. | [Observe]({{ site.baseurl }}/docs/observe/) |
 
 ---
 
 ## Perceus: deterministic reference counting
 
-Every heap value carries a small reference count (RC). The classic problem with
+Every heap value includes a small **reference count (RC)**: a running count of
+how many places in the program currently hold a pointer to it. The classic problem with
 reference counting is throughput: naively, every time a value is passed,
 returned, or bound, you pay an increment, and every time a reference dies you pay
-a decrement. **Perceus** eliminates almost all of that cost with a compile-time
-dataflow analysis that inserts `inc` and `dec` operations *precisely* at the
-points where ownership actually changes — and then fuses, cancels, and elides
-them:
+a decrement, and those add up fast.
+
+**Perceus** eliminates almost all of that cost. Instead of inserting an
+`inc`/`dec` around every single use, a compile-time dataflow analysis traces
+where each value is created and where it is used for the last time, inserts
+`inc` and `dec` operations *only* at the points where ownership actually
+changes, and then fuses, cancels, and elides as many of them as it can:
 
 - A function that receives a value and immediately returns a transformed version
-  often needs **no increment at all** — the caller's reference is transferred.
-- An `inc` followed by a `dec` on the same path provably cancels, and both are
-  removed.
-- What survives is only the genuinely uncertain residue.
+  often needs **no increment at all**: the caller's reference is transferred.
+- An `inc` followed by a `dec` on the same path cancels (a fact the analysis
+  can prove) and both are removed.
+- What remains is only the truly uncertain residue.
 
 The result is *deterministic* memory management. Because the `dec` that frees a
 value is **emitted by the compiler at that value's last use**, deallocation
@@ -38,12 +107,15 @@ happens at a known program point:
 | | Tracing GC (e.g. OCaml's minor/major) | Perceus RC |
 |---|---|---|
 | When memory is freed | Later, when a collection runs | At the value's last use, in line |
-| Pause | Stop-the-world (or concurrent barriers) | None — no scan ever happens |
+| Who chooses the moment | The collector | Your code's control flow |
+| Cost of a free | Amortized into collection cycles | Paid inline, proportional to the data being released |
+| Worst-case stall | A collection over live data you didn't choose | A drop cascade over a structure you did |
 | Write barriers | On every pointer store | None (immutable-by-default has no stores) |
-| Predictability | Depends on heap pressure | Compile-time, per-value |
+| Predictability | Depends on heap pressure | Compile-time, per-value, identical every run |
 
-No scan. No pause. No write barriers. Freeing is just a `dec` the compiler
-already wrote into the code.
+No scan, no write barriers, and no collector deciding when to interrupt you.
+Freeing is just a `dec` the compiler already wrote into the code, which is
+exactly why its cost lands where that `dec` is, and not somewhere convenient.
 
 ---
 
@@ -51,21 +123,21 @@ already wrote into the code.
 
 The key fact Perceus exploits at runtime is simple: **when a value's last use
 sees RC == 1, that value is uniquely owned.** No other reference exists, so
-nothing else can ever observe it again. Its memory is about to become garbage.
+no part of the program can observe it again. Its memory is about to become garbage.
 
 If, *at that same point*, the program is allocating a new value **of the same
 shape** (same constructor arity / size class), the runtime skips the allocator
 entirely and **reuses the dying value's memory for the new one**. One uniqueness
-check replaces an allocator round-trip — and the new value lands at the same
+check replaces an allocator round-trip, and the new value lands at the same
 address, so it stays hot in cache.
 
-This is the whole trick. FBIP is just this rule applied to constructor rewrites.
+FBIP is this rule applied to constructor rewrites.
 
 ---
 
 ## FBIP: a worked before/after
 
-Here is the canonical example — incrementing every leaf of a binary tree:
+The canonical example increments every leaf of a binary tree:
 
 ```march
 mod TreeDemo do
@@ -100,7 +172,7 @@ a full second tree and then free the first.
 
 **What the compiler actually emits.** When `inc_leaves` owns `t` uniquely (the
 caller transferred its only reference), Perceus knows that the moment the `match`
-scrutinizes a `Node(l, r)`, that `Node` cell is dying — its RC is 1 and its last
+scrutinizes a `Node(l, r)`, that `Node` cell is dying: its RC is 1 and its last
 use is right here. The rebuild `Node(inc_leaves(l), inc_leaves(r))` has the
 *same shape* as the cell being matched, so instead of allocating, the compiler
 **reuses the matched cell in place**:
@@ -117,22 +189,25 @@ before  (functional reading):           after  (what runs):
 Conceptually the optimized form is `reuse t as Node(l', r')`: the `Node(l, r)`
 you matched and the `Node(...)` you build are the *same heap cell*, with its
 fields rewritten. Across the whole tree, a transform that looks like it allocates
-N nodes allocates **zero** after the first pass — it walks the existing tree and
+N nodes allocates **zero** after the first pass: it walks the existing tree and
 overwrites it.
 
 **Why this is safe.** Immutability is what makes the rewrite invisible. Because
 no other reference to the old `Node` can exist (RC == 1) *and* March values are
 immutable (no aliased reference could have stashed a pointer into the old cell to
 observe later), there is no observer to fool. The language semantics say "old
-value gone, new value fresh"; the runtime says "same bytes, rewritten." Both
+value gone, new value fresh"; the runtime states "same bytes, rewritten." Both
 agree because no one else is looking.
 
-> This is why `tree_transform` (the FBIP benchmark) runs roughly 15× faster than
-> the equivalent C that allocates and frees a fresh tree each pass, and several
-> times faster than OCaml's tracing GC: it does no allocator work at all in
-> steady state.
+> This is why [`tree_transform`](https://github.com/march-language/march/blob/main/bench/tree_transform.march)
+> (the FBIP benchmark) runs about 6× faster than the OCaml version and about 8×
+> faster than the Rust version, both of which allocate a fresh tree each pass
+> (OCaml under its tracing GC): March does no allocator work at all in steady
+> state. See the
+> [benchmark results](https://github.com/march-language/march/blob/main/bench/RESULTS.md)
+> for the full numbers.
 
-**Try it.** The `TreeDemo` module above is runnable — this cell builds the sample
+**Try it.** The `TreeDemo` module above is runnable: this cell builds the sample
 tree `Node(Leaf(1), Node(Leaf(2), Leaf(3)))`, runs `inc_leaves`, and sums the
 result. The leaves `1, 2, 3` become `2, 3, 4`, so the total is `9`:
 
@@ -150,37 +225,37 @@ allocation when it can't:
 
 | Situation | Outcome |
 |---|---|
-| Matched value is uniquely owned (RC == 1) and the rebuild matches its shape | **Reuse in place** — no allocation |
-| Matched value is **shared** (RC > 1 — someone else still holds it) | **Allocate fresh**, leave the shared value untouched |
+| Matched value is uniquely owned (RC == 1) and the rebuild matches its shape | **Reuse in place** (no allocation) |
+| Matched value is **shared** (RC > 1; someone else still retains it) | **Allocate fresh**, leave the shared value untouched |
 | No same-shape value is dying at this allocation point | **Allocate fresh** |
 
 The crucial property: **the fallback is automatic and always correct.** If a
-value is shared, mutating it in place *would* be observable — so Perceus simply
+value is shared, mutating it in place *would* be observable, so Perceus simply
 doesn't. It allocates a new value and decrements the shared one's count. You
 never get a wrong answer from a missed reuse; you only get an allocation. A
 fallback is a performance characteristic, **never a bug**.
 
 This is also why you can reason about reuse locally: sharing a value (keeping the
 old binding around, storing it in two places) is exactly what *disables* reuse at
-that site, and the compiler quietly does the safe thing.
+that site, and the compiler does the safe thing with no visible sign.
 
 ---
 
 ## Writing allocation-free code
 
-You don't write reuse directives — the compiler decides. But you can *see* its
+You do not write reuse directives; the compiler chooses. But you can *see* its
 decisions and steer them. The [LSP]({{ site.baseurl }}/docs/lsp/) reports, as
 inlay hints and per-function code lenses:
 
-- `♻ in-place` — FBIP fired: this value was reused without allocating.
-- `⧉ copied` — a value had to be copied (it was shared, so reuse couldn't fire).
-- `⚡ stack-allocated` — the value never reached the heap at all.
+- `♻ in-place`: FBIP fired: this value was reused without allocating.
+- `⧉ copied`: a value had to be copied (it was shared, so reuse couldn't fire).
+- `⚡ stack-allocated`: the value never reached the heap at all.
 
 **The practical loop:**
 
 1. Turn on performance annotations (`march.inlayHints.performanceAnnotations`).
 2. Scan a hot function. `♻` and `⚡` are good. A `⧉ copied` *inside a hot loop*
-   is a refactor target — that's an allocation you can probably remove.
+   is a refactor target: that's an allocation you can probably remove.
 3. Rewrite so the value you transform is **consumed**, not aliased.
 
 **The rules that keep reuse firing:**
@@ -188,7 +263,7 @@ inlay hints and per-function code lenses:
 - **Consume the value you transform.** Destructure it and rebuild from the
   pieces; don't read the original again afterward.
 - **Don't reuse the old binding after rebuilding.** A second use of the old value
-  pushes its RC above 1 at the rebuild point — reuse can't fire.
+  pushes its RC above 1 at the rebuild point; reuse can't fire.
 - **Keep the constructor shape and arity matched.** Reuse needs the dying cell
   and the new cell to be the same size class.
 
@@ -218,15 +293,128 @@ pfn bump_reused(b : Box) : Box do
 end
 ```
 
-If `bump_copied` genuinely needs the old field, read it *before* you rebuild
+**Pinning the result with a contract.** Once a hot function shows only `♻` and
+`⚡`, you can make the compiler keep it that way:
+
+<!-- scroll:skip -->
+```march
+@[no_alloc]
+pfn bump_reused(b : Box) : Box do
+  match b do
+  Box(x, y) -> Box(x + 1, y)
+  end
+end
+```
+
+`@[no_alloc]` is checked on the compiled form, after reuse and stack promotion
+have been decided, so the reusing version above passes and the `⧉ copied`
+version does not. A later edit that reintroduces an allocation — here or in
+anything the function calls — fails the build instead of silently regressing.
+`@[no_alloc(warn)]` reports the same finding as a warning, and
+`@[no_alloc(assume)]` marks a wrapper around an unknown closure or an `extern`
+as trusted. `forge fix --contracts` adds the attribute to every function the
+compiler has already verified. Two caveats worth knowing: a nullary
+constructor of a variant that also has payload-carrying cases (`Nil` in
+`List`) is a real heap cell today, so returning a fresh one fails the
+contract, and a `Float` stored into a generic field is boxed, which counts.
+
+**When "nothing survives" is the real property.** A frame loop, a request
+handler, a tick — code that allocates freely and frees it all again before it
+returns — has a property `@[no_alloc]` cannot express. `@[no_alloc(transient)]`
+does:
+
+<!-- scroll:skip -->
+```march
+@[no_alloc(transient)]
+pfn width(i : Int) : Int do
+  String.byte_size(describe(i))     -- `describe` allocates a String
+end
+```
+
+`describe` really does allocate, so the bare form rejects `width`. The
+transient form accepts it: the String is gone by the time `width` returns. The
+question it asks is where a value *ends up*, not whether one was made. It fails
+when the function returns something it allocated, writes one into an object it
+did not allocate, or hands one to an actor, a `Vault`, a spawned task, an
+`extern`, or a call through an unknown closure — and when anything it calls
+does.
+
+One thing it deliberately does **not** cover: an amortized growth path. A
+buffer that reallocates its storage and keeps the new storage has *retained*
+that storage — it reaches a value the function returns — so `transient` rejects
+it just as the bare form does. If you want a growable buffer inside a hot loop,
+the answer is to hoist it out of the loop, not to relabel the contract.
+
+`forge fix --contracts` inserts whichever form actually holds: `@[no_alloc]`
+where a function allocates nothing at all, `@[no_alloc(transient)]` where it
+allocates but retains nothing. The editor's quick fix and the `✓` lens name the
+form too.
+
+**Promotion sees through a call.** `⚡ stack-allocated` used to stop at every
+call boundary: passing a value to any function meant it might escape. It now
+also fires when the only thing done with a value is to hand it to a function in
+the same program that provably does not keep the pointer — one that
+destructures it, reads its fields and returns something else. Storing it,
+returning it, capturing it in a closure, sending it to an actor, or handing it
+to an `extern` all still count as escaping, and a closure passed to its own
+apply function is never promoted.
+
+If `bump_copied` truly needs the old field, read it *before* you rebuild
 (bind `x` in the same `match`, then return it) rather than matching `b` a second
-time — that collapses the two uses into one and reuse fires again.
+time; that collapses the two uses into one and reuse fires again.
+
+
+### Small scalar aggregates never reach the heap at all
+
+Reuse and stack promotion both work on a cell that *exists*. A third case
+skips the cell entirely: a variant with **one constructor whose fields are all
+`Int`, `Float` or `Bool`**, with two to four of them, is represented inline —
+in registers, not on the heap.
+
+<!-- scroll:skip -->
+```march
+type Vec3 = Vec3(Float, Float, Float)
+
+@[no_alloc]
+fn forward(yaw : Float, pitch : Float) : Vec3 do
+  let cp = Math.cos(pitch)
+  Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)
+end
+```
+
+`forward` builds its result from three scalars, so there is no dying `Vec3`
+for reuse to take over and nothing for stack promotion to keep in the frame —
+it used to be an unconditional allocation, and could not carry `@[no_alloc]`.
+As three doubles in registers it allocates nothing, and the contract holds
+through any caller that only reads it back.
+
+Two things to know about the boundary:
+
+- **A heap slot is eight bytes wide**, so wherever such a value is *stored* —
+  a constructor or record field, a tuple element, something a closure
+  captures, a message to an actor, an argument to an `extern` — it is boxed
+  into the ordinary cell on the way in and unboxed on the way out. Behaviour
+  is unchanged, but that box is a real allocation and `@[no_alloc]` reports it
+  ("a `Vec3` is boxed here (it crosses an erased slot)"). Keeping a hot
+  function's aggregates in locals, parameters and returns keeps them off the
+  heap.
+- **The class is exact**: add a `String` field, a fifth field, or a second
+  constructor and the type goes back to being an ordinary heap value. That is
+  a representation change with a visible performance consequence, so it is
+  worth knowing which side of the line a hot type sits on.
+
+Compiler internals, including why the class stops where it does:
+[Value Representation]({{ site.baseurl }}/docs/value-representation/) §7.5.
 
 ---
 
 ## Parallel FBIP needs no locks
 
-The uniqueness that powers FBIP also makes it **lock-free across cores**.
+Normally, running code on two threads at once means you need locks or atomic
+operations to stop them from corrupting the same memory at the same time; even
+something as simple as two threads incrementing the same reference count needs
+synchronization, or you can lose an update. The uniqueness that powers FBIP
+sidesteps this and makes it **lock-free across cores**.
 
 Consider summing or transforming the two children of a tree in parallel:
 
@@ -236,18 +424,63 @@ Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
 ```
 
 `l` and `r` are **disjoint subtrees**. When the parent `Node` is uniquely owned,
-each child is uniquely owned within its own branch — RC == 1 in its own context.
+each child is uniquely owned within its own branch: RC == 1 in its own context.
 Hand `l` to one core and `r` to another and each rewrites its subtree in place
-with **nothing to synchronize**: there is no shared cell two cores could both
+with **no state to synchronize**: there is no shared cell two cores could both
 touch, so there's no lock, no atomic RC traffic, no contention. Uniqueness *is*
 the disjointness proof.
 
 This is exactly the property the `parallel` benchmark relies on: sibling subtrees
 have independent RC chains, so in-place reuse stays correct on both sides with no
-locking. The same idea scales to actor message passing — see the
+locking.
+
+One ordering detail makes the "RC == 1, so write in place" step sound when the
+other reference *was* held by another thread a moment ago. Dropping a reference
+is an acquire-release decrement (`march_decrc`), which releases that thread's
+last reads of the object. The sole-ownership test on the writer's side is an
+**acquire** load (`march_rc_is_unique` in the C runtime, `load atomic …
+acquire` in emitted code), so the in-place write that follows is ordered after
+those reads. With a relaxed load the pair would be a data race under the C11
+model, invisible on x86 and covered by a control dependency on arm64 in
+practice, but a race all the same; it is the same reason Rust's `Arc::get_mut`
+uses `Acquire`. The cost is nothing on x86-64 (an acquire load is a plain
+`mov`) and one `ldar` instead of `ldr` on arm64. Native arrays, which are
+copy-on-write values that may be sent and captured by tasks, lean on this
+directly; FBIP reuse of any value has the same shape. The same idea scales to actor message passing; see the
 [parallelism](/docs/parallel-collections/) guide, and
 [linear types]({{ site.baseurl }}/docs/linear-types/) for the ownership-transfer
 ("zero-copy send") case where a `linear` value is *guaranteed* RC == 1.
+
+---
+
+## Mutable builtins: the rule
+
+Everything above assumes that a value with two live references is never
+written through one of them. Three facts keep that true: ordinary data is
+immutable, actors share nothing, and in-place updates happen only when a value
+has one owner (RC == 1, read with an acquire load). A builtin type whose
+operations write memory has to fit one of two shapes, or it breaks all three:
+
+> A builtin type whose operations write memory another March reference could
+> observe must be either **`always_linear`** (every operation consumes the
+> value and hands it back; `RingBuf`), or **copy-on-write gated on sole
+> ownership** (`march_rc_is_unique`; the `NativeArray` backing types). A type
+> that is neither must be listed in `non_sendable_types`
+> (`lib/typecheck/typecheck_exhaustive.ml`), and adding the first such type
+> requires Parts A and B of
+> `specs/plans/2026-09-25-send-data-race-freedom-plan.md` first: a general
+> `Send` check that follows the type through user types, record fields and
+> closure captures.
+
+The list is empty, and a unit test (`test/test_typecheck_send.ml`) fails the
+build if a name is added while that check is absent, so the rule is enforced
+by the build, not by memory. The structural judgement the check would need,
+`is_send`, already exists beside the list with no roots to find: the first
+entry ever added is followed through ADTs, records and type arguments from
+day one. Until 2026-10-06 the list held `RingBuf` (then shared mutable state;
+now linear) and the five native array types (always copy-on-write; listed by
+analogy); eight ways around the list are the typing corpus's
+`reject/t300`–`t307`.
 
 ---
 
@@ -255,30 +488,141 @@ locking. The same idea scales to actor message passing — see the
 
 FBIP is one layer of a stratified memory model. The others reinforce it:
 
-- **`linear` / `affine` values** have statically known lifetimes — the compiler
-  inserts `free` at the last use with zero RC bookkeeping (see
-  [linear types]({{ site.baseurl }}/docs/linear-types/)). A `linear` value is
-  the *strongest* FBIP case: RC == 1 by construction.
+- **[`linear` / `affine` values]({{ site.baseurl }}/docs/linear-types/)** have
+  statically known lifetimes: the compiler knows, from the type alone, *exactly*
+  where each one is used for the last time, so it inserts `free` there directly
+  with zero RC bookkeeping. A `linear` value is the *strongest* FBIP case:
+  RC == 1 by construction, guaranteed by the type system rather than inferred by
+  the compiler.
 - **Immutable-by-default** means pointer fields are never written after
-  construction, which is what eliminates write barriers — and what makes in-place
+  construction, which is what eliminates write barriers, and what makes in-place
   reuse unobservable.
-- **Whole-program monomorphization and defunctionalization** make types concrete
-  and remove heap-allocated closures, so escape analysis can stack-allocate the
-  many values that never outlive their call (`⚡ stack-allocated`).
+- **Whole-program monomorphization and defunctionalization**, two compile-time
+  passes that turn generic, closure-using code into plain, concrete code (a
+  separate copy of a generic function per concrete type it's used with; closures
+  turned into ordinary data instead of heap-allocated function values), make
+  types concrete and remove heap-allocated closures. That lets escape analysis
+  prove that many values never outlive the call that created them and
+  stack-allocate them (`⚡ stack-allocated`).
 
 The net effect: most values never touch the heap, the ones that do are usually
 reused rather than reallocated, and the residual frees are deterministic `dec`
-operations the compiler already wrote — not a collector you have to wait for.
+operations the compiler already wrote, not a collector you have to wait for.
 
 ---
 
-## Next Steps
+## Drop cascades: freeing is work you scheduled
 
-- [Linear Types]({{ site.baseurl }}/docs/linear-types/) — ownership that
+Deterministic does not mean free. When the last reference to a structure dies,
+its children's references die with it, and *that work happens right there*.
+
+March frees an aggregate in one of two ways. Usually the structure is
+**destructured**: a `match` arm that owns the value it matched on releases the
+box and hands the children to the extracted bindings, so the cost is spread
+across the traversal you were doing anyway. But when a structure is released
+**without** being taken apart (you borrowed it, or ignored it, and the owner
+simply drops it at the end of its scope), the compiler synthesizes a deep-drop
+function for its type (`lib/tir/drop.ml`) and calls that instead. In TIR it
+looks like this (conceptually: free this cell, then drop its element, then drop
+the rest):
+
+```
+fn __drop$List(x : List(String)) : Unit =
+  case x of
+  | Nil()      -> dec_rc x
+  | Cons(h, t) -> dec_rc x ; __drop$String(h) ; __drop$List(t)
+```
+
+So dropping a one-million-element list walks one million cells. The practical consequences:
+
+- **Cost is proportional to what actually dies**, not to heap size and not to
+  how much data is still live. A drop of a shared structure (RC > 1: someone
+  else still retains it) is O(1); only the last owner pays the walk.
+- **It is not a stack overflow risk.** The recursive drop is in tail position,
+  so it is turned into a loop by `llvm_tco.ml`; long spines iterate rather than
+  recurse.
+- **The stall is schedulable.** Because the release point is a program point you
+  can see, you can move it: drop a large structure before a latency-critical
+  section rather than inside one, or hand it to a task with a loose deadline.
+  That option is the actual advantage over a tracing GC: not the absence of
+  work, but the ability to place it.
+- **It shows up in tail latency if you ignore it.** A request handler that
+  builds and releases a large intermediate structure pays that walk inside the
+  request. This is the single most likely reason a p99 looks poorer than a p50 in
+  otherwise allocation-light March code.
+
+---
+
+## Cycles: not collected, and not reachable from ordinary code
+
+**March has no cycle collector.** Perceus is reference counting, and reference
+counting cannot reclaim a reference cycle: each object in the loop is still
+referenced, so no count can fall to zero. If one were to form, it would leak:
+silently and permanently, with no diagnostic.
+
+The reason this is not a practical hazard is that the language makes cycles hard
+to construct rather than cleaning them up afterwards:
+
+- **Immutable data cannot close a cycle.** A cycle needs a back-pointer written
+  into an already-constructed value. March values are built once and never
+  mutated, so ordinary data forms trees and DAGs, never cycles.
+- **Linear values cannot participate in one.** A cycle requires at least two
+  references to the same value; `linear` means exactly one owner.
+- **Actors do not share pointers.** Inter-actor references are capabilities, not
+  raw pointers into another actor's heap, so there is no material a cross-actor
+  cycle could be made of.
+
+Two caveats. First, this is a *design argument*, not a mechanized proof:
+the separate [march-lean](https://github.com/march-language/march-lean) repository
+is a Lean 4 differential oracle for the type checker (capability lattice, linearity,
+tail calls and an inference oracle, compared against `march --emit-core-ast`) with
+kernel-checked laws for the capability checker's verdict algebra, but nothing in it
+covers Perceus, FBIP or this no-cycles argument (the fuller metatheory is still a plan:
+`specs/lean4-metatheory-plan.md`), and there is no runtime detector that would tell you
+if it were wrong. Second, the argument covers user-level
+data; the runtime does construct self-referential shapes internally (a
+self-recursive closure captures itself), and those are handled by
+compiler-inserted drops on specific paths rather than by reference counting
+by itself. That infrastructure is exercised by the test suite, not by a general
+collector, so the residual risk lives in the compiler, not in your code.
+
+`specs/gc_design.md` sketches a deferred per-actor cycle collector for a future
+in which March exposes unrestricted mutable values. No such collector is
+implemented today, and no code needs it today.
+
+---
+
+## Conformance status
+
+Two of this page's operational claims are now mechanically checked
+(widening slice 11; reference in `core-march.md` §4.16, `core-march-types.md`
+§2.13). Unlike every other conformance-tested topic, there's no `eval.ml`
+behavior to diff against here (the interpreter does no explicit
+refcounting at all), so verification instead pins the compiled backend's
+own post-Perceus IR against a committed snapshot and additionally checks
+the compiled binary under `MARCH_SANITIZE=1` (ASan+UBSan).
+
+Golden `g45_dual_position_borrow` witnesses the **dual-position** case this
+page doesn't call out explicitly: a value passed to the same call at both
+an owned and a borrowed position gets exactly one dup/drop pair, not zero
+(underflow) or two (leak); verified interp==compiled, against
+`test/snapshots/perceus/mixed_owned_borrowed_args.expected`, and clean
+under the sanitizer. FBIP/reuse and the atomic-RC design (which this page
+does not sketch) are explicitly OUT of scope for now: reuse needs a "preserves
+semantics" proof beyond today's arity check, and atomic RC mode-selection
+(`specs/atomic-rc-design.md`) remains an undesigned draft, not implemented.
+
+---
+
+## See also
+
+- [Linear Types]({{ site.baseurl }}/docs/linear-types/): ownership that
   guarantees RC == 1, and zero-copy actor sends.
-- [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/) —
+- [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/):
   how the safety layers stack on one function.
-- [Parallelism](/docs/parallel-collections/) — the scheduler that runs
+- [Parallelism](/docs/parallel-collections/): the scheduler that runs
   disjoint, uniquely-owned subtrees across cores.
-- [LSP & Editors]({{ site.baseurl }}/docs/lsp/) — turning on the `♻ / ⧉ / ⚡`
+- [LSP & Editors]({{ site.baseurl }}/docs/lsp/): turning on the `♻ / ⧉ / ⚡`
   performance hints.
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/#cap-no_alloc-no-heap-allocation): `cap no_alloc` for a whole module.
+- [Value Representation]({{ site.baseurl }}/docs/value-representation/): the compiler-internals view of headers, tags and the inline-aggregate class.

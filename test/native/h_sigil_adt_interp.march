@@ -28,15 +28,17 @@
 -- variant or record type whose repr is Boxed or Unboxed, so `.expected` is now
 -- the interpreter's own rendering for those lines.
 --
--- FOUR PLACEHOLDERS REMAIN, and each is a specific, still-open residual — not
--- a line to "fix up" by editing .expected:
---   some/none      Option is NICHE-encoded: `Some(x)` IS `x` and `None` is
---                  null, so there is no wrapper cell to name.
---   record/tuple   an anonymous record literal and a tuple literal have no
---                  declared type name for the table to key on.
---   poly_*         the genuinely undecidable TVar case this file was written
---                  for; it needs a runtime type id, which is exactly
---                  specs/todos/2026-08-05-boxed-adt-type-id.md.
+-- As of 2026-10-11 the table also describes instances of generic types
+-- (`Option(String)`, a niche: `Some(x)` IS `x` and `None` is null, so it is
+-- named from the static type, not a cell) and structural records and tuples
+-- (specs/progress/2026-10-11-to-string-newtype-in-generic-slot.md,
+-- specs/progress/2026-10-11-compiled-to-string-anonymous-record.md), so the
+-- some/none/record/tuple lines are the interpreter's rendering too.  The
+-- record literal is written in field-name order because compiled code prints
+-- fields sorted (specs/todos/2026-10-11-record-print-order-and-anon-record-show.md).
+--
+-- The poly_* lines are the genuinely undecidable TVar case this file was
+-- written for; ADTs there name themselves through their header type id.
 
 mod HSigilAdtInterp do
   needs IO.Console
@@ -107,7 +109,7 @@ mod HSigilAdtInterp do
     -- Measured on main: <p><script>alert(1)</script></p>
     let l = Cons("<script>alert(1)</script>", Nil)
     println("list=" ++ IOList.to_string(~H"<p>${l}</p>"))
-    let rec = { name: "<script>", age: 3 }
+    let rec = { age: 3, name: "<script>" }
     println("record=" ++ IOList.to_string(~H"<p>${rec}</p>"))
     let tup = ("<script>", 7)
     println("tuple=" ++ IOList.to_string(~H"<p>${tup}</p>"))

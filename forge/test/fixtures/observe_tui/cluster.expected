@@ -1,0 +1,7 @@
+available: true
+published_at_ms: 1791743838084
+self: web-1
+3 members
+node=web-1 state=alive incarnation=4 load=0.31 load_age_ms=400
+node=web-2 state=alive incarnation=2 load=0.18 load_age_ms=900
+node=web-3 state=suspect incarnation=7 load=0 load_age_ms=14000

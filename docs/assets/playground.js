@@ -19,5 +19,6 @@
   window.pgLoad     = function (code)        { repl.load(code); };
   window.pgLoadThen = function (setup, code) { repl.loadThen(setup, code); };
   window.pgSubmit   = function ()            { repl.submit(); };
+  window.pgClear    = function ()            { repl.clear(); };
   window.pgReset    = function ()            { repl.reset(); };
 })();

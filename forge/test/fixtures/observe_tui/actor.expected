@@ -1,0 +1,17 @@
+actor 1  alive
+type           Boss
+names          boss
+status         waiting
+mailbox        0 queued (0 user), 0 held, limit 0 (unbounded)
+traffic        in 0, out 0, dispatches 1
+stack          16.0 KiB
+code epoch     1 (capability epoch 0)
+scheduler      7
+pinned         false   draining false
+crashes (1h)   own 0, children's 3
+supervised by  nobody
+children       4
+spawned        -
+restart policy one_for_one, 3 of 10 restarts within 60 s
+
+state and message queue need the debug tier: forge observe --state PID
