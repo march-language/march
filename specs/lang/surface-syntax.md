@@ -409,7 +409,8 @@ end
 
 Checking is definite-failure: it flags only what can *never* hold, so there
 are no false positives, and silence means "not disproved", never "verified".
-It runs only when `z3` is on `PATH`. A predicate calling a name the checker
+It uses the z3 that ships with the toolchain (or `MARCH_Z3`, or a `z3` on `PATH`), and
+warns once (`solver_unavailable`) when none can be used. A predicate calling a name the checker
 does not know produces a **warning** rather than silently enforcing no check at all.
 
 `Float` predicates are **comparisons only**; float *arithmetic* in a predicate

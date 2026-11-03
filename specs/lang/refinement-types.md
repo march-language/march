@@ -24,9 +24,21 @@ correct code, at the price that silence does not mean "proved". The page's
 tooling sections show how to tell the two apart, and `cap verified` turns
 silence into an error for a module that wants a guarantee.
 
-> **Requires Z3.** Refinement checking runs only when the `z3` solver is on your
-> `PATH`. Without it, the predicates type-check as their base type and no
-> refinement diagnostics are produced (the build still succeeds).
+> **The solver.** Refinements are proved by the z3 SMT solver, pinned to the
+> version in `z3.version` (4.16.0). Every release archive ships it at
+> `libexec/z3`, so a fresh install needs nothing else. March looks for z3 in
+> `MARCH_Z3`, then next to the running `march`, then on `PATH`. If none can be
+> used, the build still succeeds, the predicates type-check as their base type,
+> and a program with refinements of its own gets one
+> [`solver_unavailable`]({{ site.baseurl }}/docs/errors/solver_unavailable/)
+> warning saying why; another z3 version is used, with a
+> [`solver_version_mismatch`]({{ site.baseurl }}/docs/errors/solver_version_mismatch/)
+> warning.
+>
+> Each query runs under a fixed resource limit (z3's `rlimit`, a count of solver
+> steps), not a time limit, so a verdict does not depend on how busy the machine
+> is, and the same on every platform. A project with a known-hard proof can raise
+> it with `march --refine-rlimit N` or `[refine] rlimit = N` in `forge.toml`.
 
 > **What's new (October 2026).** Refinements now reach further into
 > containers, callbacks and folds:
@@ -6535,7 +6547,7 @@ edges:
   `let`-bound selectors) instead of `declare-fun` + forall axioms
   (`measure_definition`, 2026-09-14). Under the quantified encoding z3 answered
   every *satisfiable* query over such a measure `unknown (incomplete
-  quantifiers)` only at the 3 s per-query timeout, so a single contracted
+  quantifiers)` only at the 3 s per-query timeout then in force, so a single contracted
   `Array.get` in the stdlib cost ~1 min of cold checking per program; the
   definition decides the same query in ~30 ms in both directions. Recursive
   and set-valued measures keep the axioms.

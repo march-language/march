@@ -73,6 +73,19 @@ jobs:
       # with no `--platform` and no QEMU. Do not reintroduce either without
       # also changing the `os:` of the leg you are doing it for — they only
       # ever made sense together.
+      # The pinned z3 (z3.version), built from source by scripts/install-z3.sh
+      # and shipped as libexec/z3.  Cached per platform, version and recipe:
+      # a cold z3 build is the longest step in this job.  The Linux build is
+      # static (musl, inside the Alpine container below), because z3's own
+      # Linux downloads link glibc and would not run everywhere the static
+      # `march` does (specs/2026-11-02-bundled-z3-design.md).
+      - name: Restore the pinned z3
+        id: z3-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .z3-release
+          key: z3-release-${{ matrix.platform }}-${{ hashFiles('z3.version', 'scripts/install-z3.sh') }}
+
       - name: Build in Alpine container (Linux)
         if: matrix.alpine
         uses: addnab/docker-run-action@v3
@@ -99,7 +112,8 @@ jobs:
               zlib-dev zlib-static zstd-dev zstd-static \
               libxml2-dev libxml2-static \
               openssl-dev openssl-libs-static \
-              g++ libstdc++-dev
+              g++ libstdc++-dev \
+              cmake python3 curl
             # /work is the host checkout bind-mounted in; it is owned by the
             # runner user (uid 1001) while this container runs as root, so git
             # refuses it as "dubious ownership" and every plumbing command exits
@@ -134,6 +148,8 @@ jobs:
               $(for f in $B3_SIMD; do echo "${f%.*}.o"; done)
             cp blake3.h /usr/include/blake3.h
             cd /work
+            # The pinned z3, static (a no-op when the cache step restored it).
+            scripts/install-z3.sh /work/.z3-release --static
             # NOT covered by .github/actions/opam-deps (which the macOS leg
             # below uses): this runs inside an ephemeral Alpine container
             # and creates a GLOBAL switch in the container's own opam root, not
@@ -167,6 +183,11 @@ jobs:
             # The JS target's runtime, copied next to every `--target js` output.
             cp runtime/*.mjs _dist/runtime/
             cp LICENSE _dist/ 2>/dev/null || true
+            # The bundled z3: libexec/, not bin/, so putting the toolchain's
+            # bin/ on PATH never shadows a z3 of the user's own.
+            mkdir -p _dist/libexec _dist/licenses
+            cp .z3-release/z3 _dist/libexec/z3
+            cp .z3-release/LICENSE.txt _dist/licenses/z3-LICENSE.txt
 
       # --- macOS: built on the runner host ---
 
@@ -213,6 +234,10 @@ jobs:
             ar rcs "$(brew --prefix)/lib/libblake3.a" \
               blake3.o blake3_dispatch.o blake3_portable.o blake3_neon.o )
 
+      - name: Build the pinned z3 (macOS)
+        if: "!matrix.alpine"
+        run: scripts/install-z3.sh "$PWD/.z3-release"
+
       - name: Build (macOS)
         if: "!matrix.static"
         run: |
@@ -229,6 +254,17 @@ jobs:
           # JS runtime: see the Linux leg above.
           cp runtime/*.mjs _dist/runtime/
           cp LICENSE _dist/ 2>/dev/null || true
+          # The bundled z3: see the Linux leg above.
+          mkdir -p _dist/libexec _dist/licenses
+          cp .z3-release/z3 _dist/libexec/z3
+          cp .z3-release/LICENSE.txt _dist/licenses/z3-LICENSE.txt
+
+      - name: Save the pinned z3
+        if: steps.z3-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .z3-release
+          key: ${{ steps.z3-cache.outputs.cache-primary-key }}
 
       # --- Package ---
 
@@ -245,8 +281,7 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for b in march forge; do
-            p="_dist/bin/$b"
+          for p in _dist/bin/march _dist/bin/forge _dist/libexec/z3 _dist/licenses/z3-LICENSE.txt; do
             if [ ! -f "$p" ]; then
               echo "::error::${{ matrix.platform }}: $p is MISSING — the build did not produce it, or the copy into _dist failed. Refusing to publish an archive with no compiler in it." >&2
               fail=1
@@ -307,6 +342,25 @@ jobs:
             echo "::error::${{ matrix.platform }}: the compiled smoke program printed '$out', expected 'smoke 3'." >&2
             exit 1; }
           echo "  ok: compiled and ran with the packaged compiler ($out)"
+          # The bundled z3 proves a refinement on a fresh install: no MARCH_Z3,
+          # no z3 on PATH, so only libexec/z3 can do it.  Without a solver this
+          # program builds with a solver_unavailable warning; with one, the
+          # violation (x < 0 passed where n >= 0 is required) is an error.
+          cat > "$work/refine.march" <<'MARCH'
+          mod RefineSmoke do
+            fn take(n : {Int | _ >= 0}) : Int do n end
+            fn f(x : {Int | _ < 0}) : Int do take(x) end
+          end
+          MARCH
+          if env -u MARCH_Z3 -u MARCH_RUNTIME_DIR -u MARCH_STDLIB HOME="$work/home" PATH=/usr/bin:/bin \
+               "$dist/bin/march" --check "$work/refine.march" > refine.log 2>&1; then
+            echo "::error::${{ matrix.platform }}: the packaged compiler accepted a refinement violation: the bundled z3 was not used." >&2
+            cat refine.log >&2; exit 1
+          fi
+          grep -q "refinement_violated" refine.log && ! grep -q "solver_" refine.log || {
+            echo "::error::${{ matrix.platform }}: expected one refinement_violated error and no solver_* warning from the bundled z3." >&2
+            cat refine.log >&2; exit 1; }
+          echo "  ok: the bundled z3 proved the refinement check ($("$dist/libexec/z3" --version))"
           # v0.7.0 shipped without runtime/*.mjs, so every `--target js` build
           # from the archive failed in node with ERR_MODULE_NOT_FOUND.
           mkdir -p "$work/js"
@@ -331,26 +385,28 @@ jobs:
           set -euo pipefail
           fail=0
           for image in alpine:3.21 debian:stable-slim; do
-            for b in march forge; do
+            for b in bin/march bin/forge libexec/z3; do
               echo "--- $b in $image ---"
               # --entrypoint, not `sh -c`: debian:stable-slim has a shell but a
               # distroless-style image need not, and the point is to depend on
               # nothing in the image but the kernel.
-              if out=$(docker run --rm --entrypoint "/dist/bin/$b" \
+              if out=$(docker run --rm --entrypoint "/dist/$b" \
                          -v "$PWD/_dist:/dist:ro" "$image" --version 2>&1); then
                 echo "  ok: $out"
               else
-                echo "::error::${{ matrix.platform }}: _dist/bin/$b does not run in a bare ${image} — the archive is labelled static but is not. See the readelf output below." >&2
+                echo "::error::${{ matrix.platform }}: _dist/$b does not run in a bare ${image} — the archive is labelled static but is not. See the readelf output below." >&2
                 echo "$out" >&2
                 fail=1
               fi
             done
           done
           echo "--- readelf -d (should list no NEEDED entries) ---"
-          readelf -d _dist/bin/march | grep NEEDED && {
-            echo "::error::${{ matrix.platform }}: _dist/bin/march has NEEDED entries; it is not statically linked." >&2
-            fail=1
-          } || echo "  none — statically linked"
+          for b in bin/march libexec/z3; do
+            readelf -d "_dist/$b" | grep NEEDED && {
+              echo "::error::${{ matrix.platform }}: _dist/$b has NEEDED entries; it is not statically linked." >&2
+              fail=1
+            } || echo "  $b: none — statically linked"
+          done
           exit $fail
 
       # `march --compile --static` (static-output design, Stage 4:
@@ -427,6 +483,7 @@ jobs:
           if command -v strip &> /dev/null; then
             strip _dist/bin/march || true
             strip _dist/bin/forge || true
+            strip _dist/libexec/z3 || true
           fi
 
       - name: Package archive

@@ -103,6 +103,11 @@ type project = {
       build, in declaration order *)
   js_deps       : (string * string) list;  (** [js_deps] name = "version": npm packages for JS target builds *)
   hot_reload    : hot_reload_config option;  (** [hot-reload] section (Phase 4) *)
+  refine_rlimit : int option;
+  (** [refine] rlimit = N: the per-query z3 resource limit, for a project with a
+      known-hard proof.  Passed to every [march] forge runs, as
+      [MARCH_REFINE_RLIMIT] in {!Cmd_build.lib_path_env}.  It is part of the
+      refinement cache keys, so changing it never replays an old verdict. *)
   contracts_no_alloc : string list;
   (** [contracts] no_alloc = ["Dsp.*", "Audio.mix"]: module/function globs that
       `forge fix --contracts` treats as in scope even without in-place reuse.
@@ -265,6 +270,7 @@ let known_keys_of_section (name : string) : string list option =
            "target"; "module_prefix"; "compact_after" ]
   | "hot-reload.env" -> Some [ "name"; "ssh_host"; "socket"; "public_key" ]
   | "contracts" -> Some [ "no_alloc" ]
+  | "refine" -> Some [ "rlimit" ]
   | _ when has_prefix "archive.task." -> Some [ "command"; "module"; "doc" ]
   | _ when has_prefix "patch." -> Some dep_table_keys
   | _ when List.exists has_prefix
@@ -437,11 +443,19 @@ let load_from root =
   in
   let contracts_no_alloc =
     Toml.get_string_list (Toml.get_section doc "contracts") "no_alloc" in
+  let refine_rlimit =
+    match Toml.get_string (Toml.get_section doc "refine") "rlimit" with
+    | None -> None
+    | Some s -> (
+      match int_of_string_opt (String.trim s) with
+      | Some n when n > 0 -> Some n
+      | _ -> failwith "forge.toml: [refine] rlimit must be a positive integer")
+  in
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; entrypoint; js_entrypoint; march_req; license; repository; homepage;
     pin_main; deps; dev_deps; dev_only_deps; test_deps; patches; archive_tasks; archive_deps;
     preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps; hot_reload;
-    contracts_no_alloc }
+    refine_rlimit; contracts_no_alloc }
 
 (** The project's entry file: [package] entrypoint when set, else the first
     of lib/<name>.march and src/<name>.march that exists. Every command that

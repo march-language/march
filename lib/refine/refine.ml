@@ -1,7 +1,8 @@
 (* Top-level discharge: cache lookup -> shared solver -> cache store, mapping the
    raw solver verdict to a caller-facing outcome.  The solver is created lazily
    and shared across the run; if z3 is unavailable the result is Unverified and
-   is NOT cached (z3 may be installed before the next build). *)
+   is NOT cached (z3 may be installed before the next build); neither is a
+   query z3 rejected, or one whose solver hung or died. *)
 
 type outcome =
   | Verified                          (* goal proved (unsat of its negation) *)
@@ -40,20 +41,67 @@ let get_solver () : Solver.t option =
 (* One check against a live solver.  A broken pipe / EOF / garbage verdict all
    mean the z3 child is dead or wedged: reap it and clear the slot so the
    caller can respawn (supervised restart). *)
-let try_check ?(assume = []) ?timeout_ms ~preamble (s : Solver.t) (vc : Smt.vc) : Solver.result option =
-  try Some (Solver.check ~preamble ~assume ?timeout_ms s vc)
-  with End_of_file | Sys_error _ | Failure _ | Unix.Unix_error (_, _, _) ->
+(* Set when z3 died or stopped answering during this run; the run report
+   turns it into the solver_unavailable warning. *)
+let solver_failure : string option ref = ref None
+
+(* Whether this run asked z3 anything (a VC-cache miss reached the solver);
+   the z3 warning is only for runs whose verdicts depended on z3. *)
+let queried = ref false
+
+(* Queries that reached the solver this run, and those that got no answer
+   (z3 missing, or it died or hung on them). *)
+let queries_asked = ref 0
+
+let queries_unanswered = ref 0
+
+(** The z3 report for this run: [None] when no query reached the solver;
+    otherwise its health, where a z3 that died or hung mid-run is [Broken]
+    with that reason. *)
+let run_report () : Solver.health option =
+  if not !queried then None
+  else
+    match (Solver.health (), !solver_failure) with
+    | ((Solver.Missing _ | Solver.Broken _) as h), _ -> Some h
+    | (Solver.Healthy { path; _ } | Solver.Mismatch { path; _ }), Some reason ->
+        Some (Solver.Broken { path; reason })
+    | h, None -> Some h
+
+(** Whether z3 could not be used at all this run (missing, or broken from
+    the start), as opposed to failing partway: only then is every undecided
+    obligation the solver's absence. *)
+let solver_unusable () : bool =
+  !queried && (match Solver.health () with Solver.Missing _ | Solver.Broken _ -> true | _ -> false)
+
+(* Hangs since the last answer.  One hung query costs only itself (a starved
+   query on a loaded machine), but a z3 that hangs on every query would cost a
+   backstop per query for the whole run, so after [max_hangs] in a row with no
+   answer between them z3 is given up on for the run. *)
+let consecutive_hangs = ref 0
+
+let max_hangs = 3
+
+let try_check ?(assume = []) ~preamble (s : Solver.t) (vc : Smt.vc)
+    : (Solver.result, [ `Hung | `Died ]) result =
+  let fail reason why =
+    solver_failure := Some reason;
     shared_solver := None;
     Solver.close s;
-    None
+    Error why
+  in
+  match Solver.check ~preamble ~assume s vc with
+  | r -> consecutive_hangs := 0; Ok r
+  | exception Solver.Hung ->
+      incr consecutive_hangs;
+      let e = fail "stopped responding" `Hung in
+      if !consecutive_hangs >= max_hangs then shared_solver := Some None;
+      e
+  | exception (End_of_file | Sys_error _ | Failure _ | Unix.Unix_error (_, _, _)) -> fail "exited mid-run" `Died
 
 (* ── Ground fast path ──────────────────────────────────────────────────────
    A call with literal arguments reaches the solver as a CLOSED goal — no
-   symbols, e.g. `(>= 8 0)` for `Crypto.random_hex(8)`.  Asking z3 is not just
-   wasted work: the query runs under the per-query wall-clock timeout, so on a
-   loaded machine even `8 >= 0` can come back `unknown`, which surfaces as a
-   spurious "precondition … was NOT verified (solver-undecided)" hint on a
-   literal argument.
+   symbols, e.g. `(>= 8 0)` for `Crypto.random_hex(8)`.  Asking z3 is wasted
+   work (a process round trip and a reset per query).
 
    [ground_eval] evaluates the Int/Bool fragment exactly as SMT-LIB defines
    it, returning [None] for anything else (a symbol, a function application,
@@ -126,16 +174,18 @@ let ground_verified (vc : Smt.vc) : bool =
    A stage-2 query carries one Bool ASSUMPTION LITERAL per unfolding (a
    declared constant named [stage2_literal_prefix]...), each unfolding
    asserted as `lit => equation`.  It is checked with `check-sat-assuming`
-   over those literals, under its own 1 s timeout, and a proof's unsat core
-   (the literals it used) is left in [last_core] and cached beside the
+   over those literals, under its own (smaller) rlimit, and a proof's unsat
+   core (the literals it used) is left in [last_core] and cached beside the
    verdict, so a warm proof reports the same `uses:` as a cold one.  An
-   `unknown` is remembered IN PROCESS only ([stage2_unknown]), keyed by the
-   VC text, z3's identity and the timeout: never written to disk, so the
-   rule that no `unknown` is persisted still holds, while a re-check in the
-   same process does not pay the same timeout twice. *)
+   `unknown` is also remembered in process ([stage2_unknown]), keyed by the
+   VC text, z3's version and the rlimit, so a re-check in the same process
+   does not pay for the same query twice. *)
 let stage2_literal_prefix = "|$ru_"
 
-let stage2_timeout_ms = 1000
+(* The per-query limits live in [Solver]; these are the same refs. *)
+let default_rlimit = Solver.default_rlimit
+
+let stage2_rlimit = Solver.stage2_rlimit
 
 (** The literals of the last stage-2 proof ([[]] after any other discharge). *)
 let last_core : string list ref = ref []
@@ -157,16 +207,20 @@ let stage2_literals (vc : Smt.vc) : string list =
    Set by [March_refinecheck.Refine_reflect]; the default admits everything. *)
 let well_formed : (string -> Smt.vc -> bool) ref = ref (fun _ _ -> true)
 
+(* A verdict is stored only from a z3 with an identity (a version that
+   probed): one whose `--version` fails would store under the "noz3" key, to
+   be served to a later run that has no z3 at all. *)
+let storable () = Solver.identity () <> None
+
 let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
   last_core := [];
   if ground_verified vc then Verified else
   if not (!well_formed preamble vc) then Unverified else
   let assume = stage2_literals vc in
-  let timeout_ms = if assume = [] then None else Some stage2_timeout_ms in
   let key = Vc_cache.key_of_vc ~preamble vc in
   let neg_key =
     if assume = [] then ""
-    else key ^ "/" ^ (match Solver.find_z3 () with Some p -> p | None -> "") ^ "/" ^ string_of_int stage2_timeout_ms
+    else key (* already carries the z3 version and the limits *)
   in
   if assume <> [] && Hashtbl.mem stage2_unknown neg_key
      && Sys.getenv_opt "MARCH_REFLECT_PERTURB" <> Some "no-negcache" then begin
@@ -181,57 +235,57 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
         r
     | None -> (
         if assume <> [] then incr stage2_queries;
+        queried := true;
+        incr queries_asked;
         let checked =
           match get_solver () with
           | None -> None (* z3 unavailable; do not cache *)
           | Some s -> (
-              match try_check ~assume ?timeout_ms ~preamble s vc with
-              | Some r -> Some r
-              | None -> (
+              match try_check ~assume ~preamble s vc with
+              | Ok r -> Some r
+              | Error `Hung ->
+                  (* The query outlived the backstop.  Retrying it would only
+                     hang again, so it costs itself alone: unanswered and not
+                     cached, and the next query gets a fresh z3. *)
+                  None
+              | Error `Died -> (
                   (* Solver died mid-run: restart once.  If the replacement
                      also fails, mark z3 unavailable for the rest of the run
                      rather than respawning per VC. *)
                   match get_solver () with
                   | None -> None
                   | Some s2 -> (
-                      match try_check ~assume ?timeout_ms ~preamble s2 vc with
-                      | Some r -> Some r
-                      | None ->
+                      match try_check ~assume ~preamble s2 vc with
+                      | Ok r -> Some r
+                      | Error `Hung -> None
+                      | Error `Died ->
                           shared_solver := Some None;
                           None)))
         in
+        if checked = None then incr queries_unanswered;
         match checked with
+        | Some Solver.Rejected ->
+            (* z3 rejected the query: a compiler bug's encoding, not an
+               answer.  Never cached, so the fix to the encoding is not masked
+               by a warm cache. *)
+            Solver.Rejected
         | Some Solver.Unknown ->
-            (* Do NOT cache `unknown`.  It is the absence of an answer rather
-               than an answer about fixed SMT text, and persisting it is
-               actively harmful in two ways:
-
-               - It is nondeterministic.  The solver runs under a wall-clock
-                 timeout (Solver.create sets :timeout), so a loaded machine can
-                 turn a decidable VC into `unknown` — and caching freezes that
-                 accident into the project's cache for every later build.
-               - Since the resync fix, a MALFORMED VC also yields `unknown`.
-                 Caching that makes a compiler bug's "silently unchecked"
-                 verdict outlive the fix to the compiler bug — which is exactly
-                 how a warm cache masked two refinement regression tests.
-
-               Not caching costs only re-asking the VCs nobody could decide,
-               which are precisely the ones where re-asking might now succeed:
-               a quieter machine, a newer z3, or a fixed encoding.  Genuine
-               verdicts (unsat / sat-with-model) are facts about fixed text and
-               are still cached, so the hot path is unaffected. *)
+            (* An `unknown` under the rlimit is an answer about fixed text, a
+               fixed z3 and a fixed limit (all in the key), so it is cached
+               like any other verdict. *)
+            if storable () then Vc_cache.store ~root key Solver.Unknown;
             if assume <> [] then Hashtbl.replace stage2_unknown neg_key ();
             Solver.Unknown
         | Some r ->
-            Vc_cache.store ~root key r;
+            if storable () then Vc_cache.store ~root key r;
             if assume <> [] && r = Solver.Unsat then begin
               last_core := !Solver.last_core;
-              Vc_cache.store_core ~root key !last_core
+              if storable () then Vc_cache.store_core ~root key !last_core
             end;
             r
-        | None -> Solver.Unknown)
+        | None -> Solver.Rejected)
   in
   match result with
   | Solver.Unsat -> Verified
   | Solver.Sat model -> Refuted model
-  | Solver.Unknown -> Unverified
+  | Solver.Unknown | Solver.Rejected -> Unverified
