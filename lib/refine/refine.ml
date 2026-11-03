@@ -49,6 +49,12 @@ let solver_failure : string option ref = ref None
    the z3 warning is only for runs whose verdicts depended on z3. *)
 let queried = ref false
 
+(* Queries that reached the solver this run, and those that got no answer
+   (z3 missing, or it died or hung on them). *)
+let queries_asked = ref 0
+
+let queries_unanswered = ref 0
+
 (** The z3 report for this run: [None] when no query reached the solver;
     otherwise its health, where a z3 that died or hung mid-run is [Broken]
     with that reason. *)
@@ -61,6 +67,20 @@ let run_report () : Solver.health option =
         Some (Solver.Broken { path; reason })
     | h, None -> Some h
 
+(** Whether z3 could not be used at all this run (missing, or broken from
+    the start), as opposed to failing partway: only then is every undecided
+    obligation the solver's absence. *)
+let solver_unusable () : bool =
+  !queried && (match Solver.health () with Solver.Missing _ | Solver.Broken _ -> true | _ -> false)
+
+(* Hangs since the last answer.  One hung query costs only itself (a starved
+   query on a loaded machine), but a z3 that hangs on every query would cost a
+   backstop per query for the whole run, so after [max_hangs] in a row with no
+   answer between them z3 is given up on for the run. *)
+let consecutive_hangs = ref 0
+
+let max_hangs = 3
+
 let try_check ?(assume = []) ~preamble (s : Solver.t) (vc : Smt.vc)
     : (Solver.result, [ `Hung | `Died ]) result =
   let fail reason why =
@@ -69,9 +89,14 @@ let try_check ?(assume = []) ~preamble (s : Solver.t) (vc : Smt.vc)
     Solver.close s;
     Error why
   in
-  try Ok (Solver.check ~preamble ~assume s vc) with
-  | Solver.Hung -> fail "stopped responding" `Hung
-  | End_of_file | Sys_error _ | Failure _ | Unix.Unix_error (_, _, _) -> fail "exited mid-run" `Died
+  match Solver.check ~preamble ~assume s vc with
+  | r -> consecutive_hangs := 0; Ok r
+  | exception Solver.Hung ->
+      incr consecutive_hangs;
+      let e = fail "stopped responding" `Hung in
+      if !consecutive_hangs >= max_hangs then shared_solver := Some None;
+      e
+  | exception (End_of_file | Sys_error _ | Failure _ | Unix.Unix_error (_, _, _)) -> fail "exited mid-run" `Died
 
 (* ── Ground fast path ──────────────────────────────────────────────────────
    A call with literal arguments reaches the solver as a CLOSED goal — no
@@ -182,6 +207,11 @@ let stage2_literals (vc : Smt.vc) : string list =
    Set by [March_refinecheck.Refine_reflect]; the default admits everything. *)
 let well_formed : (string -> Smt.vc -> bool) ref = ref (fun _ _ -> true)
 
+(* A verdict is stored only from a z3 with an identity (a version that
+   probed): one whose `--version` fails would store under the "noz3" key, to
+   be served to a later run that has no z3 at all. *)
+let storable () = Solver.identity () <> None
+
 let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
   last_core := [];
   if ground_verified vc then Verified else
@@ -206,6 +236,7 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
     | None -> (
         if assume <> [] then incr stage2_queries;
         queried := true;
+        incr queries_asked;
         let checked =
           match get_solver () with
           | None -> None (* z3 unavailable; do not cache *)
@@ -231,6 +262,7 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
                           shared_solver := Some None;
                           None)))
         in
+        if checked = None then incr queries_unanswered;
         match checked with
         | Some Solver.Rejected ->
             (* z3 rejected the query: a compiler bug's encoding, not an
@@ -241,14 +273,14 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
             (* An `unknown` under the rlimit is an answer about fixed text, a
                fixed z3 and a fixed limit (all in the key), so it is cached
                like any other verdict. *)
-            Vc_cache.store ~root key Solver.Unknown;
+            if storable () then Vc_cache.store ~root key Solver.Unknown;
             if assume <> [] then Hashtbl.replace stage2_unknown neg_key ();
             Solver.Unknown
         | Some r ->
-            Vc_cache.store ~root key r;
+            if storable () then Vc_cache.store ~root key r;
             if assume <> [] && r = Solver.Unsat then begin
               last_core := !Solver.last_core;
-              Vc_cache.store_core ~root key !last_core
+              if storable () then Vc_cache.store_core ~root key !last_core
             end;
             r
         | None -> Solver.Rejected)

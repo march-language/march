@@ -5,7 +5,7 @@
 (* z3's stdout, read through our own buffer rather than an in_channel so the
    hang backstop can tell "a line is already buffered" from "must wait on the
    fd": an in_channel hides how much it has buffered. *)
-type reader = { fd : Unix.file_descr; buf : Bytes.t; mutable pos : int; mutable len : int }
+type reader = { fd : Unix.file_descr; mutable buf : Bytes.t; mutable pos : int; mutable len : int }
 
 type t = { ic : reader; oc : out_channel; pid : int }
 
@@ -343,7 +343,12 @@ let rec input_line (r : reader) : string =
         Bytes.blit r.buf r.pos r.buf 0 r.len;
         r.pos <- 0
       end;
-      if r.len = Bytes.length r.buf then failwith "refine: z3 line too long";
+      (* A line longer than the buffer (a large model value): grow it. *)
+      if r.len = Bytes.length r.buf then begin
+        let bigger = Bytes.create (2 * Bytes.length r.buf) in
+        Bytes.blit r.buf 0 bigger 0 r.len;
+        r.buf <- bigger
+      end;
       let rec wait () =
         let left = !deadline -. Unix.gettimeofday () in
         if left <= 0. then raise Hung;

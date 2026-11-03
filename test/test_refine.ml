@@ -131,6 +131,37 @@ let contains s sub =
   let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
   go 0
 
+(* Fake z3s for the solver-failure cases: a script in its own temp dir. *)
+let write_fake_z3 prefix body =
+  let dir = Filename.temp_file prefix "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  let fake = Filename.concat dir "z3" in
+  Out_channel.with_open_bin fake (fun oc -> output_string oc ("#!/bin/sh\n" ^ body ^ "\n"));
+  Unix.chmod fake 0o755;
+  fake
+
+let with_fake_z3 ?(backstop_ms = "1000") fake f =
+  Refine.shutdown ();
+  Refine.shared_solver := None;
+  Unix.putenv "MARCH_Z3" fake;
+  Unix.putenv "MARCH_Z3_BACKSTOP_MS" backstop_ms;
+  Unix.putenv "XDG_CACHE_HOME" (Filename.concat (Filename.dirname fake) "cache");
+  Fun.protect
+    ~finally:(fun () ->
+      Refine.shutdown ();
+      Refine.shared_solver := None;
+      Refine.solver_failure := None;
+      Unix.putenv "MARCH_Z3" "";
+      Unix.putenv "MARCH_Z3_BACKSTOP_MS" "";
+      Unix.putenv "XDG_CACHE_HOME" "")
+    f
+
+let numbered_vc n : Smt.vc =
+  { decls = [ ("d", Smt.SInt) ];
+    assumptions = [ Smt.Gt (Smt.Const "d", Smt.IntLit n) ];
+    goal = Smt.Ne (Smt.Const "d", Smt.IntLit 0) }
+
 let rlimit_suite =
   [ with_solver "rlimit_exhaustion_is_unknown" (fun s ->
         let once () = Solver.check ~rlimit:3000 s cubic_vc in
@@ -225,7 +256,58 @@ let rlimit_suite =
             Alcotest.(check bool) "a hung query is not cached" true
               (Vc_cache.lookup ~root (Vc_cache.key_of_vc (vc "hangme" 1)) = None);
             Alcotest.(check (option string)) "recorded for the warning"
-              (Some "stopped responding") !Refine.solver_failure)) ]
+              (Some "stopped responding") !Refine.solver_failure));
+    (* A z3 that hangs on EVERY query must not cost a backstop per query for
+       the whole run: after three hangs in a row with no answer between them,
+       z3 is given up on for the run. *)
+    Alcotest.test_case "a_wedged_z3_is_given_up_on" `Quick (fun () ->
+        let fake = write_fake_z3 "march_z3_wedged"
+            "[ \"$1\" = --version ] && { echo 'Z3 version 4.16.0 - 64 bit'; exit 0; }\ncat > /dev/null" in
+        let root = Filename.concat (Filename.dirname fake) "root" in
+        with_fake_z3 ~backstop_ms:"300" fake (fun () ->
+            let t0 = Unix.gettimeofday () in
+            for n = 1 to 8 do
+              match Refine.discharge ~root (numbered_vc n) with
+              | Refine.Unverified -> ()
+              | _ -> Alcotest.fail "a wedged z3 cannot verify"
+            done;
+            let dt = Unix.gettimeofday () -. t0 in
+            Alcotest.(check bool)
+              (Printf.sprintf "8 queries cost about 3 backstops, not 8 (took %.1f s)" dt)
+              true (dt < 2.0)));
+    (* A z3 that answers queries but whose `--version` fails has no identity:
+       its verdicts must not be stored (they would sit under the "noz3" key and
+       be served, silently, to a later run that has no z3 at all). *)
+    Alcotest.test_case "no_identity_no_cache_write" `Quick (fun () ->
+        let fake = write_fake_z3 "march_z3_noversion"
+            "[ \"$1\" = --version ] && exit 1\nwhile read l; do case \"$l\" in \"(check-sat\"*) echo unsat;; esac; done" in
+        let root = Filename.concat (Filename.dirname fake) "root" in
+        with_fake_z3 fake (fun () ->
+            (match Refine.discharge ~root (numbered_vc 1) with
+             | Refine.Verified -> ()
+             | _ -> Alcotest.fail "the fake answers unsat");
+            Alcotest.(check bool) "nothing stored" false
+              (Sys.file_exists (Vc_cache.cache_dir ~root))));
+    (* One line of z3 output longer than the reader's 64 KB buffer (a large
+       model value) must be read, not treated as a dead solver. *)
+    Alcotest.test_case "a_long_model_line_is_read" `Quick (fun () ->
+        let big = String.make 100_000 '7' in
+        let fake = write_fake_z3 "march_z3_longline"
+            (Printf.sprintf
+               "[ \"$1\" = --version ] && { echo 'Z3 version 4.16.0 - 64 bit'; exit 0; }\n\
+                while read l; do case \"$l\" in \"(check-sat\"*) echo sat;; \"(get-model\"*) \
+                echo '('; echo '  (define-fun d () Int %s)'; echo ')';; esac; done" big) in
+        with_fake_z3 fake (fun () ->
+            match Solver.create () with
+            | None -> Alcotest.fail "fake did not start"
+            | Some s ->
+                let r = try Some (Solver.check s sample_vc) with _ -> None in
+                Solver.close s;
+                match r with
+                | Some (Solver.Sat m) ->
+                    Alcotest.(check (option int)) "the whole value" (Some 100_000)
+                      (Option.map String.length (List.assoc_opt "d" m))
+                | _ -> Alcotest.fail "the long line was not read")) ]
 
 let solver_suite =
   [ with_solver "valid VC is unsat (verified)" (fun s ->
