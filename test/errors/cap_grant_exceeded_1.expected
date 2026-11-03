@@ -17,5 +17,6 @@ help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_fil
 
 23 |   fn main(cap : Cap(IO.Console)) : () do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain cap_grant_exceeded`
 
 

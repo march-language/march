@@ -1,0 +1,14 @@
+exit: 1
+-- ERROR ------------------ errors/io_not_allowed_2.march
+
+migrate_state must be IO-free [io_not_allowed]
+`counter_migrate_state` calls capabilities that need `IO.Console`.
+migrate_state runs during the hot-migration window, before user messages.
+hint: move side effects into a normal handler that runs after migration completes.
+
+10 |   fn counter_migrate_state(old : Int) : Int do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain io_not_allowed`
+
+

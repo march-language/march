@@ -1,0 +1,14 @@
+mod Main do
+  needs IO.Console
+
+  type Priority = Low | Mid | High
+
+  pfn max_of(a : Priority, b : Priority) : Priority do
+    if a < b do b else a end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let p = max_of(Low, High)
+    if p == High do println("high") else println("not high") end
+  end
+end

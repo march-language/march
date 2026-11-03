@@ -7,5 +7,6 @@ help: `Cap(IO.FileWrite)` is not below `Cap(IO.Console)` in the capability latti
 30 |     let narrowed = cap_narrow(c)
                         ^^^^^^^^^^^^^
 
+    run `march --explain cap_widen`
 
 

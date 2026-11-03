@@ -7,5 +7,6 @@ hint: `to_json` places no constraint on the type it produces, so it would fabric
 20 |     println(to_json(cap))
                  ^^^^^^^^^^^^
 
+    run `march --explain cap_deserialize`
 
 

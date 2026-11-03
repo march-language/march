@@ -53,6 +53,27 @@ git log is authoritative for exact commits.
   protocol. The editor (LSP) drops the same ones.
 - Diagnostics: a capability grant error (`cap_grant_exceeded`) now points at the call that needs
   the capability and labels each call on the way from `main`, instead of naming the chain in prose.
+- Diagnostics: `missing_impl` points at the operator or call that needs the implementation (`a < b`,
+  `same(x, y)`) instead of the enclosing function, labels a generic function's `when Eq(a)` bound,
+  and, for a type declared in the file, offers `derive Eq for T` (also `Ord`, `Show`, `Hash`) as a
+  machine fix.
+- Diagnostics: actor errors name actors, not their state records or generated message types:
+  `send_wrong_actor` says "this pid is an actor `B`" and lists `B`'s messages; a wrong message
+  payload says it is a message of actor `A` and points at the handler's parameter; a misspelt field
+  in `{ state with … }` says it is `A`'s state and suggests the field (with a fix); a handler that
+  does not return the state is reported in plain words, pointing at what it returns. A constructor
+  shared by an actor message and another type no longer suggests the uncallable `A_Msg.X` spelling.
+- Diagnostics: `role_grant_exceeded` points at the use and labels the callback and each call on
+  the way, like `cap_grant_exceeded`; in a `cap no_panic` module, a panic reached through several
+  of its functions is reported once, at the panic, with a label on each caller.
+- Diagnostics: `overlapping_impl` no longer prints a garbage position (`<none>:29:266475457`) for a
+  generated implementation, and is dropped when `json_derive_name_collision` already explains it.
+
+### Documentation
+
+- `march --explain` pages for `cap_grant_exceeded`, `cap_ceiling`, `cap_widen`, `cap_deserialize`,
+  `proof_cap_return`, `proof_cap_mint_private`, `io_not_allowed`, `send_wrong_actor`,
+  `actor_handler_state_type` and `codec_missing`.
 
 - **Native compiles are about 45% faster for small programs.** Code the program
   cannot reach (most of the prepended stdlib) is now dropped right after

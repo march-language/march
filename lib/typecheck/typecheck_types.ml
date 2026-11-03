@@ -139,6 +139,12 @@ type constraint_ =
   | CADTBound of string * ty
   | CTNatBound of ty
 
+(** Where a pending constraint came from: the variable whose instantiation
+    produced it (an operator like [<], or a call to a generic function) and
+    that use's span, so [missing_impl] can point at the use instead of the
+    enclosing declaration. *)
+type constraint_site = { cs_span : Ast.span; cs_name : string }
+
 (** A type scheme encodes Hindley-Milner polymorphism.
     [Poly(ids, cs, ty)] represents ∀(α₁ … αₙ). τ where the αᵢ are the
     [Unbound] variable ids that are quantified, and [cs] are class

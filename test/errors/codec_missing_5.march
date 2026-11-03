@@ -1,0 +1,14 @@
+mod Main do
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.Mut
+
+  type Job = { id : Int }
+
+  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+    let peer : Peer = { node_id: "w", identity: NodeIdentity.make("w", "pk", 1), fd: 3, data_fd: -1 }
+    let job : Job = { id: 7 }
+    let _ = Node.send(peer, GlobalPid.make("w", 1, 1), job)
+    ()
+  end
+end

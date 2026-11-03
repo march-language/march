@@ -1,0 +1,58 @@
+---
+layout: docs
+title: "cap_widen"
+permalink: /docs/errors/cap_widen/
+---
+
+# `cap_widen`: `cap_narrow` was asked to produce a capability its input does not cover
+
+`cap_narrow(c)` turns a capability into a smaller one: `Cap(IO)` into
+`Cap(IO.Console)`, `Cap(IO.FileSystem)` into `Cap(IO.FileRead)`. The result
+type must be at or below the input in the capability lattice. Asking for a
+sibling or a parent (`Cap(IO.Console)` to `Cap(IO.FileWrite)`) is rejected.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.Console
+  needs IO.FileWrite
+
+  pfn as_writer(c : Cap(IO.Console)) : Cap(IO.FileWrite) do
+    cap_narrow(c)
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    let _w = as_writer(c)
+    println("done")
+  end
+end
+```
+
+## The fix
+
+Narrow from a capability that covers the target, here by granting `main` the
+parent `Cap(IO)`:
+
+```march
+mod Main do
+  needs IO
+
+  pfn as_writer(c : Cap(IO)) : Cap(IO.FileWrite) do
+    cap_narrow(c)
+  end
+
+  fn main(c : Cap(IO)) do
+    let _w = as_writer(c)
+    println("done")
+  end
+end
+```
+
+## Why the rule exists
+
+Capabilities can only be passed on or attenuated, never amplified. If
+`cap_narrow` could move sideways, any code holding the console could write
+files, and a function's signature would no longer bound what it can do.
+
+See also: [the language reference](../capabilities.md).

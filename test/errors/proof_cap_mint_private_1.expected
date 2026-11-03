@@ -8,5 +8,6 @@ hint: make this function public, or accept `Cap(Db.Migrated)` as a parameter and
 17 |   pfn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+    run `march --explain proof_cap_mint_private`
 
 
