@@ -15,7 +15,7 @@ module TC  = March_typecheck.Typecheck
 (* Types                                                               *)
 (* ------------------------------------------------------------------ *)
 
-type kind = Fn | Type_ | Constructor
+type kind = Fn | Type_ | Constructor | Lemma
 
 type entry = {
   name        : string;
@@ -27,6 +27,8 @@ type entry = {
   line        : int;
   params      : (string * string) list;
   return_type : string option;
+  law         : (string * string list) option;
+    (** A [Lemma]'s theorem as written and the functions it calls. *)
 }
 
 type ref_entry = {
@@ -62,8 +64,11 @@ type index = {
     returns "no results found" (exit 0) forever until `--rebuild` is passed
     by hand. Don't repeat the mistake of reasoning "schema is unchanged, no
     bump needed" — a content-format change is just as cache-poisoning as a
-    schema change and must bump this constant too. *)
-let current_index_version = 3
+    schema change and must bump this constant too.
+
+    Bumped to 4 for lemmas: an `@[lemma]` is a [Lemma] entry carrying its
+    theorem ([law]), so `--law` and a name search can find it. *)
+let current_index_version = 4
 
 let ref_kind_to_string = function
   | `Call    -> "call"
@@ -276,6 +281,25 @@ let make_fn_signature ~module_name (fn : Ast.fn_def) (params : (string * string)
   "(" ^ param_sig ^ ")" ^
   (match ret with Some r -> " -> " ^ r | None -> "")
 
+(* Source texts already read, for lemma theorems (one read per file). *)
+let source_texts : (string, string) Hashtbl.t = Hashtbl.create 16
+
+let source_text file =
+  match Hashtbl.find_opt source_texts file with
+  | Some t -> t
+  | None ->
+    let t = try In_channel.with_open_bin file In_channel.input_all with Sys_error _ -> "" in
+    Hashtbl.replace source_texts file t;
+    t
+
+(* An `@[lemma]`'s theorem as written and the functions it calls. *)
+let law_of ~file (fn : Ast.fn_def) : (string * string list) option =
+  if not (List.mem "lemma" fn.fn_attrs) then None
+  else
+    match March_ast.Lemma_source.parts (source_text file) fn with
+    | Some (_, theorem) -> Some (theorem, March_ast.Lemma_source.calls theorem)
+    | None -> None
+
 let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
   match decl with
   | Ast.DFn (fn, span) ->
@@ -287,16 +311,18 @@ let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
     let ast_ret = Option.map ast_pp fn.fn_ret_ty in
     let (params, ret) = resolve_fn_types type_map fn ast_params ast_ret in
     let signature = make_fn_signature ~module_name fn params ret in
+    let law = law_of ~file fn in
     let entry = {
       name        = fn.fn_name.txt;
       module_name;
-      kind        = Fn;
+      kind        = (if law = None then Fn else Lemma);
       signature;
       doc         = fn.fn_doc;
       file;
       line        = span.Ast.start_line;
       params;
       return_type = ret;
+      law;
     } in
     entry :: acc
 
@@ -314,6 +340,7 @@ let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
       line        = span.Ast.start_line;
       params      = [];
       return_type = None;
+      law         = None;
     } in
     let ctor_entries = match typedef with
       | Ast.TDVariant variants ->
@@ -334,6 +361,7 @@ let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
             line        = v.var_name.span.Ast.start_line;
             params      = List.mapi (fun i t -> (string_of_int i, pp t)) v.var_args;
             return_type = Some name.txt;
+            law         = None;
           }
         ) variants
       | _ -> []
@@ -531,6 +559,42 @@ let contains_substr haystack needle =
 (* Search functions                                                    *)
 (* ------------------------------------------------------------------ *)
 
+(* Does [e]'s theorem call [ql] (normalized; bare, or qualified as written)? *)
+let law_calls (e : entry) (ql : string) : bool =
+  match e.law with
+  | None -> false
+  | Some (_, calls) ->
+    List.exists
+      (fun c ->
+        let c = normalize c in
+        c = ql
+        || (match String.rindex_opt c '.' with
+            | Some k -> String.sub c (k + 1) (String.length c - k - 1) = ql
+            | None -> false))
+      calls
+
+(* [s] lowercased with every space removed, so `rev(rev(xs))` matches
+   `rev( rev(xs) )`. *)
+let squash s = String.concat "" (String.split_on_char ' ' (normalize s))
+
+(** Search the theorems of lemmas: a lemma matches when its theorem contains
+    [phrase] (ignoring case and spaces), or calls a function named
+    [phrase]. *)
+let search_laws (idx : index) (phrase : string) : (entry * float) list =
+  let q = squash phrase in
+  if q = "" then []
+  else
+    List.filter_map
+      (fun e ->
+        match e.law with
+        | None -> None
+        | Some (theorem, _) ->
+          if contains_substr (squash theorem) q then Some (e, 1.0)
+          else if law_calls e (normalize (String.trim phrase)) then Some (e, 0.9)
+          else None)
+      idx.entries
+    |> List.sort (fun (_, s1) (_, s2) -> compare s2 s1)
+
 (** Search by function/type name.  Uses substring + Levenshtein fuzzy match. *)
 let search_name (idx : index) (query : string) : (entry * float) list =
   if String.length query = 0 then
@@ -541,6 +605,9 @@ let search_name (idx : index) (query : string) : (entry * float) list =
       let nl = normalize entry.name in
       if nl = ql then
         Some (entry, 1.0)
+      else if law_calls entry ql then
+        (* A lemma whose theorem calls the function searched for. *)
+        Some (entry, 0.75)
       else if contains_substr nl ql then
         Some (entry, 0.8)
       else begin
@@ -701,9 +768,10 @@ let search_combined (idx : index)
     ?(name : string option)
     ?(type_sig : string option)
     ?(doc_query : string option)
+    ?(law_query : string option)
     () : (entry * float) list =
-  match name, type_sig, doc_query with
-  | None, None, None ->
+  match name, type_sig, doc_query, law_query with
+  | None, None, None, None ->
     List.map (fun e -> (e, 1.0)) idx.entries
   | _ ->
     (* Build score maps for each active mode *)
@@ -718,6 +786,7 @@ let search_combined (idx : index)
     let name_tbl  = Option.map (fun q -> make_map (search_name idx q)) name in
     let type_tbl  = Option.map (fun q -> make_map (search_type idx q)) type_sig in
     let doc_tbl   = Option.map (fun q -> make_map (search_docs idx q)) doc_query in
+    let law_tbl   = Option.map (fun q -> make_map (search_laws idx q)) law_query in
     List.filter_map (fun entry ->
       let key = (entry.module_name, entry.name, entry.line) in
       let score = ref 0.0 in
@@ -734,6 +803,7 @@ let search_combined (idx : index)
       check name_tbl;
       check type_tbl;
       check doc_tbl;
+      check law_tbl;
       if !pass && !count > 0 then
         Some (entry, !score /. float_of_int !count)
       else None
@@ -788,10 +858,12 @@ let kind_to_string = function
   | Fn          -> "fn"
   | Type_       -> "type"
   | Constructor -> "constructor"
+  | Lemma       -> "lemma"
 
 let kind_of_string = function
   | "type"        -> Type_
   | "constructor" -> Constructor
+  | "lemma"       -> Lemma
   | _             -> Fn
 
 let entry_to_json (e : entry) : Yojson.Basic.t =
@@ -806,6 +878,10 @@ let entry_to_json (e : entry) : Yojson.Basic.t =
     "params",      `List (List.map (fun (n, t) ->
                      `Assoc ["name", `String n; "type", `String t]) e.params);
     "return_type", (match e.return_type with None -> `Null | Some s -> `String s);
+    "law",         (match e.law with
+                    | None -> `Null
+                    | Some (t, calls) ->
+                      `Assoc [ "theorem", `String t; "calls", `List (List.map (fun c -> `String c) calls) ]);
   ]
 
 let entry_of_json (j : Yojson.Basic.t) : entry =
@@ -822,6 +898,11 @@ let entry_of_json (j : Yojson.Basic.t) : entry =
                        (p |> member "name" |> to_string,
                         p |> member "type" |> to_string)));
     return_type = j |> member "return_type" |> to_string_option;
+    law         = (match j |> member "law" with
+                   | `Null -> None
+                   | l ->
+                     Some (l |> member "theorem" |> to_string,
+                           l |> member "calls" |> to_list |> List.map to_string));
   }
 
 let ref_entry_to_json (r : ref_entry) : Yojson.Basic.t =
@@ -882,6 +963,15 @@ let index_from_json (s : string) : index =
 (* Output formatting                                                   *)
 (* ------------------------------------------------------------------ *)
 
+(* A lemma's law and the functions it is about: `law: P  (about: f, g)`. *)
+let law_line (e : entry) : string option =
+  match e.law with
+  | None -> None
+  | Some (theorem, calls) ->
+    Some
+      (Printf.sprintf "law: %s%s" theorem
+         (if calls = [] then "" else "  (about: " ^ String.concat ", " calls ^ ")"))
+
 (** Format an entry as plain text (no color). Used for piped/LLM output. *)
 let format_entry (e : entry) : string =
   let loc = Printf.sprintf "%s:%d" e.file e.line in
@@ -890,6 +980,8 @@ let format_entry (e : entry) : string =
     else e.module_name ^ "." ^ e.name
   in
   let headline = Printf.sprintf "%s  %s  %s" name_part e.signature loc in
+  let headline =
+    match law_line e with Some l -> headline ^ "\n  " ^ l | None -> headline in
   match e.doc with
   | None     -> headline
   | Some doc ->
@@ -926,6 +1018,9 @@ let format_results_colored (results : (entry * float) list) : unit =
       Printf.printf "%s%s%s%s%s\n"
         name_colored (String.make gap ' ') dim loc reset;
       Printf.printf "  %s%s%s\n" green e.signature reset;
+      (match law_line e with
+       | Some l -> Printf.printf "  %s\n" l
+       | None -> ());
       (match e.doc with
        | None -> ()
        | Some d ->

@@ -1528,6 +1528,56 @@ The logic's `Int` is mathematical (D8): a lemma such as
 `{Unit | inc(n) > n}` proves, although at the maximum `Int` the program's `inc`
 overflows. Overflow obligations come in a later phase.
 
+**Lemmas in `forge test`.** Every `forge test` also tests the lemmas of each
+project source file that has one (`march --check --lemma-test FILE` does the
+same for one file). Each lemma's theorem is evaluated on generated inputs:
+boundary `Int`s, then 100 random draws from a fixed seed (20261031, printed in
+the report). An input outside a refined parameter is skipped. The report has
+one `lemma-test` line per lemma:
+
+- an **unproved** lemma becomes a property test. A false theorem is a
+  `COUNTEREXAMPLE` with the input, and the run fails. Otherwise the line says
+  `tested, not proved: N inputs`.
+- an **admitted** lemma is checked again in the interpreter and in a small
+  compiled program. The checker proved it, so if it is false in either, the
+  compiler or runtime has a bug: `FALSE` or `COMPILED-FALSE`, and the run
+  fails.
+- an `Int` overflow is reported as `overflow?`, not as a counterexample (the
+  logic's `Int` has no bounds). A lemma whose parameter type has no generator
+  (a `String`, a `Float`, a record) is `not-tested`.
+
+The tests are separate programs. Your build still removes every lemma.
+
+**Laws in the docs and in search.** `forge doc` lists, under each function,
+the lemmas whose theorem calls it, under the heading "Laws", with the theorem
+as written. `forge search --law TEXT` finds lemmas whose theorem contains TEXT
+(case and spaces ignored) or calls a function named TEXT, and a plain name
+search for a function also finds the lemmas about it.
+
+**Lemmas as a contract for changes.** A lemma states a law the code must keep,
+and the checker re-proves it on every build. To make a broken law fail the
+build, put the lemmas in a `cap verified` module, where `lemma_unproved` is an
+error, not a warning:
+
+```march
+mod ListLaws do
+  cap verified
+  -- cat and rev as above
+  @[lemma]
+  fn cat_nil(xs : List(a)) : {Unit | cat(xs, Nil) == xs} do
+    match xs do
+      Nil -> ()
+      Cons(_, t) -> cat_nil(t)
+    end
+  end
+end
+```
+
+A change to `cat` that breaks `cat(xs, Nil) == xs` now stops the build, and
+`forge test` prints an input that shows it. This is useful when someone else,
+for example a coding agent, changes the code: the lemmas say what must still
+hold, and the build checks it.
+
 ### Constant functions as bounds
 
 A bound does not have to be a literal. A **zero-argument function whose body is

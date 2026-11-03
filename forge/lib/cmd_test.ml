@@ -216,6 +216,55 @@ let run_reflection_parity ~lib_path_env (files : string list) : (unit, string) r
            [ Printf.sprintf "reflection parity: the check failed (no parity verdict) in %s"
                (String.concat ", " failed) ]))
 
+(** Lemma tests (specs/todos/2026-11-02-lemma-uses-beyond-refinement.md ideas
+    1 and 2), run by every `forge test` after the tests pass.  Each project
+    source that declares a `@[lemma]` is checked with
+    `march --check --lemma-test`: an unproved lemma's theorem is evaluated on
+    generated inputs (a counterexample fails the run; otherwise it is
+    "tested, not proved"), and an admitted one's in the interpreter and a
+    compiled program (false in either fails the run: a compiler or runtime
+    bug).  The `lemma-test` lines are printed per file.  A file with no lemma
+    costs nothing. *)
+let declares_lemma f =
+  match In_channel.with_open_bin f In_channel.input_all with
+  | text -> List.exists (fun l -> String.trim l = "@[lemma]") (String.split_on_char '\n' text)
+  | exception Sys_error _ -> false
+
+let run_lemma_tests ~lib_path_env (files : string list) : (unit, string) result =
+  let verdicts =
+    List.filter_map
+      (fun f ->
+        if not (declares_lemma f) then None
+        else begin
+          Printf.printf "lemma tests: %s\n%!" f;
+          let out = Filename.temp_file "forge_lemma" ".out" in
+          let code =
+            Sys.command (Printf.sprintf "%smarch --check --lemma-test %s >%s 2>&1"
+                           lib_path_env (Filename.quote f) (Filename.quote out)) in
+          let text = try In_channel.with_open_bin out In_channel.input_all with Sys_error _ -> "" in
+          (try Sys.remove out with Sys_error _ -> ());
+          let lines = String.split_on_char '\n' text in
+          List.iter (fun l -> if String.starts_with ~prefix:"lemma-test" l then print_endline l) lines;
+          if code = 0 then Some (f, `Ok)
+          else if List.exists (fun l -> String.starts_with ~prefix:"lemma-test: RED" l) lines then Some (f, `Red)
+          else begin
+            List.iter (fun l -> if not (String.starts_with ~prefix:"lemma-test" l) then prerr_endline l) lines;
+            Some (f, `Check_failed)
+          end
+        end)
+      files
+  in
+  let pick k = List.filter_map (fun (f, v) -> if v = k then Some f else None) verdicts in
+  match pick `Red, pick `Check_failed with
+  | [], [] -> Ok ()
+  | red, failed ->
+    Error
+      (String.concat "; "
+         ((if red = [] then [] else [ Printf.sprintf "lemma tests RED in %s" (String.concat ", " red) ])
+         @
+         if failed = [] then []
+         else [ Printf.sprintf "lemma tests: the check failed in %s" (String.concat ", " failed) ]))
+
 (** Run forge test for a given list of test files (after directory expansion). *)
 let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(release=false) ?(reflection_parity=false) test_files =
   (* coverage is only supported on the interpreter path *)
@@ -243,7 +292,12 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
         run_reflection_parity ~lib_path_env (project_sources proj.Project.root)
       | r -> r
     in
-    with_parity @@
+    let with_lemmas r =
+      match r with
+      | Ok () -> run_lemma_tests ~lib_path_env (project_sources proj.Project.root)
+      | r -> r
+    in
+    with_lemmas @@ with_parity @@
     if use_interp then
       (* Link the same FFI shims as the compiled path below (and `forge build`)
          so interpreter-mode tests that call into [[ffi]] code don't fail with
