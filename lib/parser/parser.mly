@@ -567,6 +567,16 @@ fn_attr:
      design §2.5: keep a function's body out of the logic) needs its own
      production, exactly like `transient` above. *)
   | AT; LBRACKET; OPAQUE; RBRACKET { ("opaque", []) }
+  (* `@[reflect(fuel: N)]` (reflection design §3.8, F15): the one labelled
+     attribute payload.  An INT cannot start a type, so `name : INT` is not
+     read as an annotation. *)
+  | AT; LBRACKET; name = LOWER_IDENT; LPAREN; key = LOWER_IDENT; COLON; n = INT; RPAREN; RBRACKET
+      { if name = "reflect" && key = "fuel" then ("reflect:fuel:" ^ string_of_int n, [])
+        else
+          error_raise
+            (Printf.sprintf
+               "`@[%s(%s: ...)]`: only `@[reflect(fuel: N)]` takes a labelled argument." name key)
+            None $startpos(key) }
 
 decl:
   (* `module Name do` (D4): the token filter mints MODULE_KW for `module`

@@ -24793,7 +24793,7 @@ let infer_fixpoint_suite =
         (* Until specs/progress/2026-10-24-refine-demand-chains.md this pinned
            the gap: b's return not proposed, a not-true rejection at b. *)
         infer_run
-          (m "C1" "  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn go() : Int do need_pos(b(3)) end\n")
+          (m "C1" "  @[opaque]\n  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn go() : Int do need_pos(b(3)) end\n")
           (fun r ->
             Alcotest.check sp "a and b" [ ("a", "{Int | _ > 0}"); ("b", "{Int | _ > 0}") ] (List.sort compare (props r));
             Alcotest.(check bool) "no not-true rejection for b" false
@@ -27192,7 +27192,7 @@ let demand_chains_suite =
            test saw no callee contract). *)
         let sp = Alcotest.(list (pair string string)) in
         infer_run
-          (m "  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn main() : Int do need_pos(b(3)) end\n")
+          (m "  @[opaque]\n  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn main() : Int do need_pos(b(3)) end\n")
           (fun r ->
             Alcotest.check sp "a and b" [ ("a", "{Int | _ > 0}"); ("b", "{Int | _ > 0}") ]
               (List.sort compare (props r))));
@@ -29020,6 +29020,8 @@ let () =
       ("reflect-unfold", Test_refine_unfold.suite @ Test_refine_unfold.soundness @ Test_refine_unfold.review @ Test_refine_unfold.review2 @ Test_refine_unfold.review3 @ Test_refine_unfold.identical);
       ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr);
       ("reflect-parity", Test_refine_reflect1b.parity);
+      ("reflect-fuel", Test_refine_fuel.tests);
+      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);

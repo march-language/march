@@ -598,8 +598,19 @@ class march_server =
           let doc_str  = Analysis.query_doc_name_at a ~line ~utf16_char in
           let perf_str = Analysis.query_perf_insight_at a ~line ~utf16_char in
           let ts_str   = Analysis.query_typestate_hover_at a ~line ~utf16_char in
+          let lemma_str =
+            Analysis.query_lemma_hover_at a ~line ~utf16_char
+            |> Option.map (fun (n, p) ->
+                let status =
+                  match Refine_diag.lemma_admitted n with
+                  | Some true -> "proved"
+                  | Some false -> "not proved: calls to it give no facts"
+                  | None -> "not checked yet"
+                in
+                Printf.sprintf "lemma `%s`: `%s` (%s)" n p status) in
           let parts   = List.filter_map Fun.id [
             Option.map (fun ty -> Printf.sprintf "```march\n%s\n```" ty) ty_str;
+            Option.map (fun l  -> "---\n" ^ l) lemma_str;
             Option.map (fun d  -> "---\n" ^ d) doc_str;
             Option.map (fun p  -> "---\n" ^ p) perf_str;
             Option.map (fun ts -> "---\n" ^ ts) ts_str;

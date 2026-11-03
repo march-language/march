@@ -314,7 +314,17 @@ let report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided expe
   Err.report env.errors
     { Err.severity = Error; span; message = headline;
       labels;
-      notes = occurs_note @ why_note @ mismatch_note @ session_hint @ common_hint @ same_name_note;
+      (* At most one "likely cause" hint: an occurs failure explains the
+         whole error on its own (stacking "did you mean to pass this as a
+         callback?" under it contradicted it), and the more specific
+         session / same-name explanations pre-empt the generic one. *)
+      notes =
+        (if occurs_violation then occurs_note
+         else
+           why_note @ mismatch_note
+           @ (match session_hint, same_name_note with
+              | (_ :: _ as h), _ | [], (_ :: _ as h) -> h
+              | [], [] -> common_hint));
       code = Err.Code.type_mismatch; fix = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).

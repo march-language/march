@@ -182,6 +182,85 @@ let sorted ctx =
           if c <> 0 then c else compare a.message b.message)
     ctx.diagnostics
 
+(* ── Cascade suppression ──────────────────────────────────────────────
+
+   One root cause, one report (specs/plans/2026-11-02-diagnostics-depth-plan.md
+   §X3).  Each rule drops a diagnostic that only restates, or follows from,
+   another one in the same set:
+
+   - a [type_mismatch] on the exact span of a [callback_arity_mismatch]: the
+     arity error already says what is wrong with that argument;
+   - an [unused_binding] for `x` when an [unbound_variable] error suggests
+     `x`: the binder is unused because its use is misspelled;
+   - [cap_grant] and [cap_root_broad] while any error outside the capability
+     checks exists: the grant `main` needs is computed from a program that
+     does not typecheck yet;
+   - a [cap_ceiling:X] when a [cap_needs:X] error reports the same missing
+     `needs` (it points at the use, the ceiling at the module header, and
+     the two carry the same fix). *)
+let slug_of_code c =
+  match String.index_opt c ':' with Some i -> String.sub c 0 i | None -> c
+
+let first_backticked s =
+  match String.index_opt s '`' with
+  | None -> None
+  | Some a ->
+    (match String.index_from_opt s (a + 1) '`' with
+     | Some b -> Some (String.sub s (a + 1) (b - a - 1))
+     | None -> None)
+
+let contains_sub hay needle =
+  let hl = String.length hay and nl = String.length needle in
+  let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+  nl = 0 || go 0
+
+let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
+    (ds : diagnostic list) : diagnostic list =
+  (* Only a diagnostic the user is shown may suppress another: the driver
+     hides errors in stdlib files, and a hidden error suppressing the only
+     visible one would turn a rejected program into an accepted one. *)
+  let is_err d = d.severity = Error && visible d in
+  let has_slug sl d = slug_of_code d.code = sl in
+  (* The capability checks' codes: every code naming `cap` (`cap_needs`,
+     `import_cap_missing`, `root_cap_reference`, …) except
+     `linear_captured`, plus the grant and `needs` codes that don't. *)
+  let capability_slug sl =
+    (contains_sub sl "cap" && not (contains_sub sl "captured"))
+    || contains_sub sl "role_grant"
+    || List.mem sl [ "extern_needs_foreign"; "io_not_allowed"; "unused_needs" ] in
+  let non_cap_error =
+    List.exists (fun d -> is_err d && not (capability_slug (slug_of_code d.code))) ds in
+  let arity_spans =
+    List.filter_map (fun d ->
+        if is_err d && has_slug "callback_arity_mismatch" d then Some d.span else None) ds in
+  let unbound_msgs =
+    List.filter_map (fun d ->
+        if is_err d && has_slug "unbound_variable" d then Some d.message else None) ds in
+  let needs_codes =
+    List.filter_map (fun d ->
+        if is_err d && has_slug "cap_needs" d then Some d.code else None) ds in
+  let kept = List.filter (fun d ->
+      let sl = slug_of_code d.code in
+      not (
+        (sl = "type_mismatch" && List.mem d.span arity_spans)
+        || (sl = "unused_binding"
+            && (match first_backticked d.message with
+                | Some x ->
+                  let dym = "Did you mean `" ^ x ^ "`?" in
+                  List.exists (fun m -> contains_sub m dym) unbound_msgs
+                | None -> false))
+        || ((sl = "cap_grant" || sl = "cap_root_broad") && non_cap_error)
+        || (sl = "cap_ceiling"
+            && (match String.index_opt d.code ':' with
+                | Some i ->
+                  let arg = String.sub d.code i (String.length d.code - i) in
+                  List.mem ("cap_needs" ^ arg) needs_codes
+                | None -> false))))
+    ds in
+  (* Every rule names a visible error that stays, so this cannot fire; it
+     guards the exit code against a future rule that forgets to. *)
+  if List.exists is_err ds && not (List.exists is_err kept) then ds else kept
+
 (** Render a diagnostic with source context.
     Shows the relevant source line with a caret underline pointing at the span.
 

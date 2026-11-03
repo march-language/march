@@ -40,10 +40,12 @@ let gaps =
           run ~args:"--check --refine-report-sites=all"
             ("mod N do\n" ^ cat
            ^ {|  fn need2(xs : {List(Int) | len(_) == 2}) : Int do 0 end
-  fn go() : Int do need2(cat(Cons(1, Nil), Cons(2, Nil))) end
+  fn go(xs : List(Int)) : Int do need2(cat(xs, Cons(2, Nil))) end
 end
 |})
         in
+        (* `xs` unknown: the produced `cat(Cons_1(xs), ..)` is undecided, so
+           it is not unfolded (phase 4 proves the literal `cat([1], [2])`). *)
         expect out ~line:9 ~callee:"need2" "skip:reflect-fuel";
         match List.filter (fun b -> contains b "`need2` was NOT verified") (hint_blocks out) with
         | [] -> Alcotest.failf "no refinement_unverified hint for need2:\n%s" out
@@ -260,9 +262,10 @@ end
         if not (line_for qs1) then Alcotest.fail "before: no D17 line for small";
         if def_hash out2 "small" <> None then Alcotest.failf "small must not be reflected after the edit:\n%s" out2;
         if line_for qs2 then Alcotest.fail "after: a D17 line still names small";
-        (* Proving it needs `g`'s body too (depth 1): reflect-fuel, but the
-           query ran and keyed on small. *)
-        expect out1 ~line:6 ~callee:"need_small" "skip:reflect-fuel";
+        (* Proving it needs `g`'s body too, one decided step deeper (phase 4:
+           proved; phase 1 stopped at depth 0 with reflect-fuel).  The query
+           ran and keyed on small either way. *)
+        expect out1 ~line:6 ~callee:"need_small" "proved";
         not_proved out2 ~line:6 ~callee:"need_small") ]
 
 (* ── I9: hot code reload (§7.2) ─────────────────────────────────────────── *)

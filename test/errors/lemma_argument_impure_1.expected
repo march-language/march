@@ -1,0 +1,20 @@
+exit: 1
+-- WARNING ----------- errors/lemma_argument_impure_1.march
+
+Warning: function `cat` is structurally recursive but not tail-recursive. If the recursive call is the direct argument of a constructor in tail position, tail-recursion-modulo-cons compiles it to a loop with no extra stack (it always runs). Otherwise it uses O(depth) stack space and deep input can overflow the stack — consider an accumulator parameter. [non_tail_recursion]
+
+7 |       Cons(h, t) -> Cons(h, cat(t, ys))
+                                ^^^^^^^^^^
+
+
+
+-- ERROR ----------- errors/lemma_argument_impure_1.march
+
+the argument of this call of the lemma `cat_nil` is not a pure term: lemma calls are removed before the program runs, so erasing it would also erase `noisy_list`. Bind it to a name first. [lemma_argument_impure]
+
+25 |     cat_nil(noisy_list())
+         ^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain lemma_argument_impure`
+
+

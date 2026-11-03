@@ -29,6 +29,17 @@ let compile_module_to_js ~source_file ~fn_lines (m : March_ast.Ast.module_) :
            | _ -> None)
          diags)
   else
+    (* Lemma erasure (reflection design §4.5), after typechecking. *)
+    let m =
+      { m with
+        March_ast.Ast.mod_decls =
+          March_desugar.Lemma_erase.erase_module
+            ~reserved:
+              (March_desugar.Lemma_erase.reserved_by
+                 (List.map fst March_typecheck.Typecheck_builtins.builtin_bindings
+                  @ List.map fst March_typecheck.Typecheck_builtins.builtin_interface_bindings))
+            m.March_ast.Ast.mod_decls }
+    in
     let tir = March_tir.Lower.lower_module ~type_map m in
     let iface_methods = March_tir.Lower.get_iface_methods () in
     let tir = March_tir.Mono.monomorphize ~iface_methods tir in

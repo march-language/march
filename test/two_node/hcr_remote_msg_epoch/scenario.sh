@@ -22,8 +22,7 @@ export CLUSTER_STOP_FILE="$work/stop"
 export DEPLOYED_FILE="$work/deployed"
 
 COMPILE_FLAGS_b="--hot-reload Recv --signing-pubkey $pk"
-compile a
-compile b
+compile a b
 
 # The patch, and version 1 built the same way for its schema and manifest
 # sidecars: the deploy compares the two to learn that Sink's message type

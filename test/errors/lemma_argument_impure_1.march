@@ -1,0 +1,28 @@
+mod Main do
+  needs IO.Console
+
+  fn cat(xs : List(Int), ys : List(Int)) : List(Int) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, cat(t, ys))
+    end
+  end
+
+  @[lemma]
+  fn cat_nil(xs : List(Int)) : {Unit | cat(xs, Nil) == xs} do
+    match xs do
+      Nil -> ()
+      Cons(_, t) -> cat_nil(t)
+    end
+  end
+
+  fn noisy_list() : List(Int) do
+    println("building")
+    Cons(1, Nil)
+  end
+
+  fn main(_cap : Cap(IO.Console)) : Int do
+    cat_nil(noisy_list())
+    0
+  end
+end

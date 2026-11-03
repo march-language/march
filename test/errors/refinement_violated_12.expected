@@ -3,7 +3,7 @@ exit: 1
 
 refinement violation: index must be less than the list's length [refinement_violated]
 argument `n` of `List.nth` does not satisfy precondition `_ < len(xs)`
-note: guard the call (e.g. `if _ >= 0 && _ < len(xs) do …`) or pass a value known to satisfy it
+note: this value never satisfies it; pass one that does
 
 21 |     List.nth([1, 2, 3], 7)
          ^^^^^^^^^^^^^^^^^^^^^^

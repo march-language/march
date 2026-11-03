@@ -3,7 +3,7 @@ exit: 1
 
 refinement violation: index must not be negative [refinement_violated]
 argument `n` of `List.nth` does not satisfy precondition `_ >= 0`
-note: guard the call (e.g. `if _ >= 0 && _ < len(xs) do …`) or pass a value known to satisfy it
+note: this value never satisfies it; pass one that does
 
 7 |     List.nth([10, 20, 30], -1)
         ^^^^^^^^^^^^^^^^^^^^^^^^^^

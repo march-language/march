@@ -25,12 +25,34 @@ git log is authoritative for exact commits.
   conjunct with `else`: `{Int | _ >= 0 else "index must not be negative" &&
   _ < len(xs) else "index must be less than the list's length"}`. A call that
   breaks a conjunct now leads with its message and names that conjunct alone
-  (`argument `n` of `List.nth` does not satisfy `_ >= 0``), and the hint for a
+  (`argument `n` of `List.nth` does not satisfy precondition `_ >= 0``), and the hint for a
   call the checker cannot prove carries the message of the conjunct it could
   not establish. `else` binds tighter than `&&`; a conjunct without a message is
   reported as before. The stdlib's two-sided bounds carry messages: `List.nth`,
   `Array.get`/`set`, the `Simd` lane accessors, `DateTime.fixed_zone` and
   `fixed_zone_hm`, `Random.bernoulli`, and `Stats.percentile`/`quantile`.
+- **Refinement proofs take decided steps (fuel).** The checker now expands a
+  reflected call that another call's definition produces when its branch is already
+  decided (its argument is a constructor, or known to equal one), up to a per-function
+  fuel, default 2. So `len(cat([1], [2])) == 2` and `rev(rev(xs)) == xs` (with its
+  lemmas, no intermediate `assert`s) now prove. `@[reflect(fuel: N)]` sets the fuel
+  from 1 to 8, and `@[reflect]` asserts a function is reflected: the new error
+  `invalid_reflect` names why when it is not. Some calls that used to be skipped as
+  `reflect-fuel` are now proved or, where the contract is really broken, reported as
+  violations.
+
+- **Lemmas: `@[lemma]` proofs for refinement types.** A lemma states a theorem in its
+  result type, `{Unit | P}`, and proves it with ordinary code: `match` and `if` for
+  cases, a recursive call as the induction hypothesis, calls of other lemmas, and
+  `assert` for intermediate steps. A proved lemma's theorem becomes a fact after each
+  call, so `cat_nil(xs)` lets the checker know `cat(xs, Nil) == xs`. A lemma that does
+  not prove gives no facts and draws `lemma_unproved`. Lemmas never run: every lemma
+  and lemma call is removed before the program is built or interpreted, whether or not
+  it was proved, so a program behaves exactly as it would without them. New
+  diagnostics: `invalid_lemma`, `lemma_unproved`, `lemma_unproved_call`,
+  `lemma_argument_impure`. The editor re-checks a file when a lemma it uses changes or
+  stops proving, and shows a lemma's theorem on hover.
+
 - **Parallel combinators reject closures that capture a native handle.** A
   lambda passed to `List.pmap`, `List.pfilter`, `List.preduce`, the
   `Parallel.*` family or `Task.async_stream` may no longer capture a
@@ -44,14 +66,37 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: follow-on errors are dropped when another error already explains them: the type
+  mismatch after a callback-arity error, "unused variable `x`" next to a misspelled use of `x`,
+  `cap_grant` while the program has other errors, and `cap_ceiling` alongside the matching
+  `cap_needs`.
+
 - **Native compiles are about 45% faster for small programs.** Code the program
   cannot reach (most of the prepended stdlib) is now dropped right after
   defunctionalization instead of after the optimizer, so Perceus, drop, escape
   and the optimizer no longer run over ~9,000 unused functions. Programs are
   the same apart from some inlining choices, which now count only reachable
   callers. `--disable-pass dce-early` turns it off.
+- **`--hot-reload` builds are about twice as fast.** A hot-reload server build
+  now links the precompiled C runtime (only the four files that read its
+  signing key and HCR identity are compiled per build), builds its HCR
+  manifest once instead of twice, reuses typecheck's role-capability solve,
+  and the refcount-inlining rewrite no longer allocates per character. The
+  emitted program is unchanged.
 
 ### Fixed
+
+- **No more false refinement violations for container elements and passed functions.**
+  When an element refinement could not be translated for the solver (for example one that
+  calls an `@[opaque]` function), or when a proof stopped at a reflected call it did not
+  expand, the checker could report `refinement_violated` with a made-up element value for a
+  program that cannot fail. These are now reported as unverified (a skip), not violations.
+- `march --check` no longer accepts a misspelled module whose member names a builtin
+  (`Lsit.length(xs)`): it reports "Unknown module `Lsit`. Did you mean `List`?" instead of
+  failing at run time.
+- Diagnostics: the `List.filter(fn (x, y) -> …)` hint suggests a one-parameter function instead of
+  a curried one; an infinite-type error no longer stacks contradictory notes; refinement errors on
+  callbacks no longer show `$cb_arg`, and their guard suggestion uses the real argument.
 
 - **`--target js` byte strings are fast in Safari.** Each byte access on a long string
   (`byte_at`, `byte_length`, `slice`) looked up its cached byte view by comparing strings
