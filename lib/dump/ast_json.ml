@@ -519,6 +519,14 @@ let rec expr_to_json (e : expr) : string =
       ("span", span_to_json span);
       rty;
     ]
+  | ERefineMsg (inner, msg, span) ->
+    Dump.json_obj [
+      ("kind", Dump.json_string "ERefineMsg");
+      ("message", Dump.json_string msg);
+      ("predicate", expr_to_json inner);
+      ("span", span_to_json span);
+      rty;
+    ]
 
 and param_to_json (p : param) : string =
   Dump.json_obj [

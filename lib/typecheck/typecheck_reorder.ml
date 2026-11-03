@@ -159,6 +159,7 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
     | Ast.EPipe (l, r, _) -> ex l; ex r
     | Ast.EAssert (e, _) -> ex e
     | Ast.ESigil (_, c, _) -> ex c
+    | Ast.ERefineMsg (c, _, _) -> ex c
   in
   let fn_param (fp : Ast.fn_param) =
     match fp with
@@ -270,6 +271,7 @@ let unqualified_module_deps
     | Ast.EPipe (l, r, _) -> ex l; ex r
     | Ast.EAssert (e, _) -> ex e
     | Ast.ESigil (_, c, _) -> ex c
+    | Ast.ERefineMsg (c, _, _) -> ex c
   in
   let decl (d : Ast.decl) =
     match d with

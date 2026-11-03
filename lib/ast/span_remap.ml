@@ -133,6 +133,8 @@ let rec remap_expr tbl = function
     Ast.EAssert (remap_expr tbl e, remap_span tbl sp)
   | Ast.ESigil (c, e, sp) ->
     Ast.ESigil (c, remap_expr tbl e, remap_span tbl sp)
+  | Ast.ERefineMsg (e, c, sp) ->
+    Ast.ERefineMsg (remap_expr tbl e, c, remap_span tbl sp)
 
 and remap_param tbl (p : Ast.param) : Ast.param =
   { p with param_name = remap_name tbl p.param_name }

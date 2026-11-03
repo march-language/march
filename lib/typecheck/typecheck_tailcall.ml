@@ -191,6 +191,7 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
          (StringSet.diff fn_names (collect_pattern_vars pat)) c)
   | Ast.EAssert (ex, _) -> collect_direct_fn_calls fn_names ex
   | Ast.ESigil (_, content, _) -> collect_direct_fn_calls fn_names content
+  | Ast.ERefineMsg (content, _, _) -> collect_direct_fn_calls fn_names content
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
   | Ast.EDbg (None, _)       -> StringSet.empty
 
@@ -595,6 +596,7 @@ let rec check_tail_position
       chk false names params smaller "right-hand side of `let*`" r
     | Ast.EAssert (ex, _)     -> chk false names params smaller "assert expression" ex
     | Ast.ESigil (_, content, _) -> chk false names params smaller "sigil content" content
+    | Ast.ERefineMsg (content, _, _) -> chk false names params smaller "refinement predicate" content
     (* ── leaves ── *)
     | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ | Ast.EHole _
     | Ast.EResultRef _ -> ()

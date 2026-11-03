@@ -1,0 +1,13 @@
+mod Main do
+  needs IO.Console
+  needs IO.FileWrite
+
+  pfn as_writer(c : Cap(IO.Console)) : Cap(IO.FileWrite) do
+    cap_narrow(c)
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    let _w = as_writer(c)
+    println("done")
+  end
+end

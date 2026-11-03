@@ -255,26 +255,67 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
       fixpoint panicky' site_map'
   in
   let (all_panicky, site_map) = fixpoint seed_panicky seed_site_map in
+  (* One report per panic site, as a trace (diagnostics-depth plan §X3, §X7):
+     a function that only reaches the panic through another one of this
+     module's functions is not a second error but a hop on the way to it,
+     shown as a label at its call.  [terminal f] is the directly-panicking
+     function [f]'s chain ends at. *)
+  let rec terminal seen f =
+    match StrMap.find_opt f site_map with
+    | Some (_, _, `Direct) -> Some f
+    | Some (callee, _, `Transitive) when not (List.mem callee seen) -> terminal (callee :: seen) callee
+    | _ -> None
+  in
   List.iter (fun (fn_name, _calls, fn_span) ->
     if StringSet.mem fn_name all_panicky then begin
       match StrMap.find_opt fn_name site_map with
       | None -> ()
       | Some (site_name, site_span, kind) ->
         let mod_name = env.current_module in
-        let msg = match kind with
-          | `Direct ->
-            let suggestion = panic_surface_suggestion site_name in
-            Printf.sprintf
-              "`%s` in `mod %s` (declared `cap no_panic`) calls `%s`, which can panic.%s"
-              fn_name mod_name site_name suggestion
-          | `Transitive ->
-            Printf.sprintf
-              "`%s` in `mod %s` (declared `cap no_panic`) transitively calls `%s`, \
-               which can panic."
-              fn_name mod_name site_name
-        in
-        let _ = fn_span in
-        Err.error ~code:Err.Code.no_panic_violation errors ~span:site_span msg
+        (match kind with
+         | `Direct ->
+           let suggestion = panic_surface_suggestion site_name in
+           let callers =
+             List.filter_map (fun (caller, calls, _) ->
+                 match StrMap.find_opt caller site_map with
+                 | Some (callee, csp, `Transitive)
+                   when terminal [caller] caller = Some fn_name
+                        && csp.Ast.file = site_span.Ast.file ->
+                   (* The first call to [callee] in source order. *)
+                   let first = List.fold_left (fun (best : Ast.span) (n, (sp : Ast.span)) ->
+                       if n = callee && sp.Ast.file = best.Ast.file
+                          && (sp.Ast.start_line, sp.Ast.start_col)
+                             < (best.Ast.start_line, best.Ast.start_col)
+                       then sp else best) csp calls in
+                   Some (first, caller, callee)
+                 | _ -> None) fn_entries
+             |> List.sort compare
+           in
+           let labels = List.map (fun (csp, caller, callee) ->
+               { Err.lbl_span = csp;
+                 lbl_message = Printf.sprintf "`%s` reaches it through `%s` here" caller callee })
+               callers in
+           let also = match callers with
+             | [] -> ""
+             | cs ->
+               Printf.sprintf "\n%s in this module reach%s it too."
+                 (String.concat ", " (List.map (fun (_, c, _) -> "`" ^ c ^ "`") cs))
+                 (if List.length cs = 1 then "es" else "")
+           in
+           Err.report errors
+             { Err.severity = Err.Error; span = site_span; labels; notes = [];
+               code = Err.Code.no_panic_violation; fix = None;
+               message = Printf.sprintf
+                   "`%s` in `mod %s` (declared `cap no_panic`) calls `%s`, which can panic.%s%s"
+                   fn_name mod_name site_name also suggestion }
+         | `Transitive when terminal [fn_name] fn_name <> None -> ()
+         | `Transitive ->
+           Err.error ~code:Err.Code.no_panic_violation errors ~span:site_span
+             (Printf.sprintf
+                "`%s` in `mod %s` (declared `cap no_panic`) transitively calls `%s`, \
+                 which can panic."
+                fn_name mod_name site_name));
+        let _ = fn_span in ()
     end
   ) fn_entries;
   (* A NON-exhaustive `match` lowers to a runtime "no matching clause" panic, so

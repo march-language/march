@@ -19,6 +19,8 @@
 #                                       shard 1 also runs the node_discovery soak
 #   conformance   (ubuntu)              @types-check, @grammar-check, @vault-scale, docs, @demo
 #   tree-sitter   (ubuntu)              tree-sitter-march/ parses what the compiler accepts
+#   refine-agreement (gate ubuntu) ── × darwin-arm64 | linux-x86_64 | linux-aarch64
+#                                       ── compare: refinement verdicts agree across platforms
 #   sanitize-gate (ubuntu) × 3          ASAN: golden + curated native (shard 1) + two-node 1/3..3/3
 #   ocaml-build   (ubuntu) ─┬─ property-tests × 3
 #                           ├─ cross-linux-oracle
@@ -118,7 +120,8 @@ jobs:
       # shard (~10s) rather than tracking which suite that test lives in.
       # 20 for the macOS leg's cold cache; see the comment in macos-checks.
       - name: Set up toolchain
-        timeout-minutes: 20
+        # 40: a cold opam switch plus a cold pinned-z3 build (march-setup).
+        timeout-minutes: 40
         uses: ./.github/actions/march-setup
         with:
           cross-tools: "true"
@@ -259,7 +262,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       - name: Build
@@ -360,12 +364,13 @@ jobs:
   # runs in parallel besides. ~72s locally for 43 benches, compile-dominated.
   bench-gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 40  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       - name: Benchmark output gate (not part of runtest)
@@ -384,12 +389,13 @@ jobs:
   # never compares against them. Design: specs/2026-10-14-browser-repl-bundle-design.md.
   browser-repl:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       - name: Build the browser artifacts from this commit
@@ -450,12 +456,13 @@ jobs:
   # The macOS leg cost a macOS slot (5 for the whole org) per run.
   conformance:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       - name: Static-semantics conformance corpus (slow lane, not part of runtest)
@@ -769,7 +776,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       - name: AddressSanitizer gate (RC/UAF guard) — shard ${{ matrix.shard }}/3
@@ -813,7 +821,7 @@ jobs:
   # second leg is a one-line change.
   ocaml-build:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 40  # +20 for a cold pinned-z3 build (march-setup)
     strategy:
       fail-fast: false
       matrix:
@@ -822,7 +830,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       # forge/bin/main.exe is here for the determinism job: its topology_app
@@ -1338,7 +1347,7 @@ jobs:
   # regex-escaped, so a new group runs here without anyone editing this.
   macos-checks:
     runs-on: macos-26
-    timeout-minutes: 48
+    timeout-minutes: 68  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
 
@@ -1348,7 +1357,8 @@ jobs:
       # run that took the step past 12 during the save, so the cache was never
       # written and every later run would be cold too.
       - name: Set up toolchain
-        timeout-minutes: 20
+        # 40: a cold opam switch plus a cold pinned-z3 build (march-setup).
+        timeout-minutes: 40
         uses: ./.github/actions/march-setup
 
       - name: Build compiler + property tests
@@ -1389,3 +1399,107 @@ jobs:
         run: |
           eval $(opam env)
           dune build @vault-scale
+
+  # Cross-platform refinement agreement (specs/2026-11-02-bundled-z3-design.md,
+  # "cross-platform agreement is enforced"): with the pinned z3 and its
+  # deterministic rlimit, every refinement verdict in the corpus (test/native,
+  # the conformance corpus, and the stdlib sites every run reports) must be the
+  # same on all three tier-1 platforms.  Each leg writes its verdicts with
+  # scripts/refine-verdicts.sh; refine-agreement-compare fails on any line that
+  # differs.  It runs on pushes to main, and on pull requests that touch the
+  # refinement checker or the z3 pin (the gate job decides, so a PR that does
+  # not costs one short Ubuntu job, not a macOS slot).
+  refine-agreement-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      # The PR's file list from the API, not a checkout: a full-history fetch
+      # of this repository takes longer than this job's whole budget.
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          changed=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename' \
+            | grep -E '^(lib/refine/|lib/refinecheck/|z3\.version$|scripts/install-z3\.sh$|scripts/refine-verdicts\.sh$)' || true)
+          if [ -n "$changed" ]; then
+            echo "refine/z3 files changed:"; echo "$changed"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no refine/z3 change; skipping the agreement legs"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  refine-agreement:
+    needs: [refine-agreement-gate]
+    if: needs.refine-agreement-gate.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-26, platform: darwin-arm64 }
+          - { os: ubuntu-24.04, platform: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, platform: linux-aarch64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+
+      # Includes the pinned z3 (built from source on a cache miss).
+      - name: Set up toolchain
+        timeout-minutes: 30
+        uses: ./.github/actions/march-setup
+
+      - name: Build the compiler
+        timeout-minutes: 15
+        run: |
+          eval $(opam env)
+          dune build --root . bin/main.exe
+
+      - name: Refinement verdicts (${{ matrix.platform }})
+        timeout-minutes: 30
+        run: |
+          z3 --version
+          scripts/refine-verdicts.sh "$RUNNER_TEMP/verdicts"
+          cp "$RUNNER_TEMP/verdicts/verdicts.txt" "verdicts-${{ matrix.platform }}.txt"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: refine-verdicts-${{ matrix.platform }}
+          path: verdicts-${{ matrix.platform }}.txt
+
+  refine-agreement-compare:
+    needs: [refine-agreement]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: refine-verdicts-*
+          merge-multiple: true
+      - name: Every platform reached the same verdicts
+        run: |
+          set -uo pipefail
+          ls -la verdicts-*.txt
+          base=verdicts-linux-x86_64.txt
+          fail=0
+          # An empty or tiny file would "agree" with another one vacuously.
+          for f in verdicts-*.txt; do
+            n=$(wc -l < "$f")
+            [ "$n" -ge 1000 ] || { echo "::error::$f has only $n verdicts: that leg did not check the corpus"; fail=1; }
+          done
+          for f in verdicts-darwin-arm64.txt verdicts-linux-aarch64.txt; do
+            if ! diff -u "$base" "$f" > diff.txt; then
+              echo "::error::refinement verdicts differ between linux-x86_64 and ${f#verdicts-} (same z3, same rlimit): $(grep -c '^[-+][^-+]' diff.txt) lines"
+              head -200 diff.txt
+              fail=1
+            else
+              echo "ok: ${f#verdicts-} agrees with linux-x86_64 ($(wc -l < "$f") verdicts)"
+            fi
+          done
+          exit $fail

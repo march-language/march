@@ -70,6 +70,7 @@ let rec expr_binders (acc : SS.t) (e : expr) : SS.t =
   | EIf (c, t, f, _) -> go (go (go acc c) t) f
   | ECond (arms, _) -> List.fold_left (fun acc (c, b) -> go (go acc c) b) acc arms
   | EPipe (a, b, _) | ESend (a, b, _) -> go (go acc a) b
+  | ERefineMsg (x, _, _) -> go acc x
 
 let fn_binders (acc : SS.t) (fd : fn_def) : SS.t =
   List.fold_left
@@ -172,6 +173,7 @@ let rec erase_expr (env : env) (e : expr) : expr =
   | EAssert (x, sp) -> EAssert (ex x, sp)
   | EAtom (a, args, sp) -> EAtom (a, List.map ex args, sp)
   | ESigil (s, x, sp) -> ESigil (s, ex x, sp)
+  | ERefineMsg (x, msg, sp) -> ERefineMsg (ex x, msg, sp)
   | ELit _ | EVar _ | EHole _ | EResultRef _ | EDbg (None, _) -> e
 
 let erase_fn env (fd : fn_def) : fn_def =
@@ -248,6 +250,7 @@ let rec mentions (n : string) (decls : decl list) : bool =
     | EField (x, _, _) | EAnnot (x, _, _) | ESpawn (x, _) | EAssert (x, _) | ESigil (_, x, _) | EDbg (Some x, _) -> [ x ]
     | EIf (c, t, f, _) -> [ c; t; f ]
     | ECond (arms, _) -> List.concat_map (fun (c, b) -> [ c; b ]) arms
+    | ERefineMsg (x, _, _) -> [ x ]
   in
   let fn (fd : fn_def) =
     List.iter

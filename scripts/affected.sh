@@ -143,7 +143,13 @@ classify() {
       reason "$f" "eval, stdlib, stdlib_march, compiler" ;;
 
     # ── checkers and tooling libraries ────────────────────────────────────
-    lib/refinecheck/*|lib/refine/*)
+    lib/refine/*)
+      # The solver driver and its z3 lookup have their own suites
+      # (test/test_refine.ml, test/test_z3_lookup.ml) besides refinecheck's.
+      add SUITES refinecheck compiler errors; add ORACLES refine
+      add DUNE @test/runtest-test_refine @test/runtest-test_z3_lookup
+      reason "$f" "refinecheck, compiler, errors, test_refine, test_z3_lookup; refine oracle" ;;
+    lib/refinecheck/*)
       add SUITES refinecheck compiler errors; add ORACLES refine
       reason "$f" "refinecheck, compiler, errors; refine oracle" ;;
     lib/caps/*|lib/ctxesc/*|lib/effects/*|lib/cas/*|lib/driver/*)

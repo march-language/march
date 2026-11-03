@@ -2,10 +2,19 @@ exit: 1
 -- ERROR -------------------- errors/missing_impl_2.march
 
 `Hue` does not implement interface `Ord`. [missing_impl]
-Add `impl Ord(Hue) do ... end` to provide an implementation.
+`<` needs it here.
 
- 6 |   fn main() do
-       ^^^^^^^^^^^^
+9 |     println(if a < b do "y" else "n" end)
+                   ^^^^^
+
+    Add `derive Ord for Hue` after the type to get the structural one, or write `impl Ord(Hue) do ... end`.
 
 
 
+fix [missing_impl]:
+@@ after line 4 @@
+   type Hue = Rood | Bloo
++  derive Ord for Hue
+
+after fix: exit 1
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]

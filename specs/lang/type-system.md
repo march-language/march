@@ -685,7 +685,7 @@ argument.
 |---|---|---|
 | Constraint kind | Value predicates (`>= 0`, `!= 0`, `< len(xs)`) | Shape/dimension equality |
 | Base types | `Int`, `Bool` | `Nat` (non-negative integer) |
-| Solver | Z3 SMT (optional) | Type inference (always) |
+| Solver | Z3 SMT (bundled; pinned version) | Type inference (always) |
 | False positives | None (definite-failure only) | None |
 | HOF / dynamic dispatch | Not checked | Checked |
 | Incomplete by design? | Yes | No |

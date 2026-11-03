@@ -763,6 +763,7 @@ let rec flatten_pred_quals (e : expr) : expr =
   | ELit _ | EVar _ | EHole _ | EResultRef _ -> e
   | ELam _ | ELetFn _ | ELetQ _ | ELetStar _ | ESend _ | ESpawn _ | EPipe _
   | ESigil _ | EAssert _ | EDbg _ -> e
+  | ERefineMsg (inner, msg, sp) -> ERefineMsg (go inner, msg, sp)
 
 (** Structural [ty] walk whose ONLY effect is calling [flatten_pred_quals] on
     every [TyRefine] predicate it finds — mirrors [Desugar.respan_ty]'s shape
@@ -788,7 +789,10 @@ let rec desugar_ty (t : ty) : ty =
   | TyNat _            -> t
   | TyNatOp (op, a, b) -> TyNatOp (op, desugar_ty a, desugar_ty b)
   | TyChan _           -> t
-  | TyRefine (t, n, e) -> TyRefine (desugar_ty t, n, flatten_pred_quals e)
+  | TyRefine (t, n, e) ->
+    (* Author-written conjunct messages leave the predicate here, for the
+       refinement checker's diagnostics only ([March_ast.Refine_msg]). *)
+    TyRefine (desugar_ty t, n, flatten_pred_quals (March_ast.Refine_msg.strip e))
 
 (** Desugar [EPipe (l, r, sp)] → [EApp (r, [l], sp)].
     Works recursively; all other nodes are walked to catch nested pipes. *)
@@ -1001,6 +1005,8 @@ let rec desugar_expr (e : expr) : expr =
 
   | EAssert (e, sp) ->
     EAssert (desugar_expr e, sp)
+
+  | ERefineMsg (inner, msg, sp) -> ERefineMsg (desugar_expr inner, msg, sp)
 
   | ESigil (name, content, sp) ->
     let content' = desugar_expr content in
@@ -1926,6 +1932,7 @@ let make_qualifier (prefix : string) (own_names : string list) =
     | EAssert (ex, sp)          -> EAssert (go bound ex, sp)
     | EAtom (a, args, sp)       -> EAtom (a, List.map (go bound) args, sp)
     | ESigil (s, ex, sp)        -> ESigil (s, go bound ex, sp)
+    | ERefineMsg (ex, s, sp)        -> ERefineMsg (go bound ex, s, sp)
     | ELit _ | EVar _ | EHole _ | EResultRef _ | EDbg (None, _) -> e
   and go_block bound = function
     | [] -> []
@@ -2118,6 +2125,7 @@ let strip_entry_self_qual ?(members_of : decl list option) (mod_name : string)
     | EAssert (ex, sp)          -> EAssert (rw ex, sp)
     | EAtom (a, args, sp)       -> EAtom (a, List.map rw args, sp)
     | ESigil (s, ex, sp)        -> ESigil (s, rw ex, sp)
+    | ERefineMsg (ex, s, sp)        -> ERefineMsg (rw ex, s, sp)
   in
   let rw_fn (def : fn_def) =
     { def with fn_clauses = List.map (fun c ->
@@ -2208,6 +2216,7 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
   (* Generated code's synthetic spans are salted with the module they are
      generated in (Desugar_derive.decl_salt). *)
   Desugar_derive.reset_salt_counts ();
+  March_ast.Refine_msg.begin_pass ();
   Desugar_derive.with_salt_scope m.mod_name.txt @@ fun () ->
   check_app_main_exclusivity errors m.mod_decls;
   check_main_signature errors m.mod_decls;
