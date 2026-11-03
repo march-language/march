@@ -53,6 +53,17 @@ git log is authoritative for exact commits.
   protocol. The editor (LSP) drops the same ones.
 - Diagnostics: a capability grant error (`cap_grant_exceeded`) now points at the call that needs
   the capability and labels each call on the way from `main`, instead of naming the chain in prose.
+- Diagnostics: capability errors say what is wrong in capability terms. Passing one capability
+  where another is needed (`Cap(IO.Console)` to a `Cap(IO.FileRead)` parameter) is a new
+  `cap_mismatch` error ("`read` needs file-read access, but `c` is the console capability"),
+  not a type mismatch, with one line placing the two in the lattice and a fix: `cap_narrow(c)`
+  when the capability contains the one needed, otherwise a new `main` parameter passed to the
+  call. A missing `needs` names the code and what it does ("the `Inc` handler of actor `Counter`
+  prints", "the body of role `Cons` writes a file") and points at that call. One missing
+  authority is one error: the `needs` error, `main`'s missing or too-narrow grant and the
+  capability mismatch for the same capability merge, and the merged fix carries every edit
+  (`--check-json` fixes may now be `{"kind":"multi","edits":[…]}`; `forge fix` and the editor
+  apply them). `cap_grant_exceeded` and `role_grant_exceeded` gain fixes that add the capability.
 
 - **Native compiles are about 45% faster for small programs.** Code the program
   cannot reach (most of the prepended stdlib) is now dropped right after

@@ -1,0 +1,18 @@
+-- One missing authority, two findings (diagnostics plan X3 merging, F1):
+-- `save` writes a file, the module declares no `needs IO.FileWrite`, and
+-- `main` is granted only the console.  One report at the `file_write`, with
+-- `main`'s grant as a label and both edits (the `needs` line and a
+-- `Cap(IO.FileWrite)` parameter on `main`) as one fix.
+mod Main do
+  needs IO.Console
+
+  fn save(n : Int) : () do
+    let _ = file_write("/tmp/n", int_to_string(n))
+    ()
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    save(1)
+    println("saved")
+  end
+end

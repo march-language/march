@@ -3928,7 +3928,7 @@ let test_missing_needs_reported_once_per_module () =
     end
   end|} in
   Alcotest.(check int) "one aggregated missing-needs error, not one per builtin"
-    1 (count_errors_with ctx "declares no matching `needs`");
+    1 (count_errors_with ctx "declares no `needs ");
   Alcotest.(check bool) "every missing capability is named"
     true (has_error_with ctx "IO.Console" && has_error_with ctx "IO.FileWrite")
 
@@ -4052,9 +4052,9 @@ let test_missing_needs_dedup_no_orphan_hint_main_cap_param () =
       false
       (contains_substring s "call to `file_write` requires `needs IO.FileWrite`");
     Alcotest.(check bool)
-      "Check 1's own error still names the Cap(IO) parameter"
+      "Check 1's own error (at the first use it covers) names the module and `needs IO`"
       true
-      (contains_substring s "used in module `ManyCaps`" && contains_substring s "needs IO")
+      (contains_substring s "but module `ManyCaps` declares no `needs IO`")
   end
 
 (* ── Final whole-branch review, Important 3: Check 1 / Check 1b overlap ───
@@ -4080,11 +4080,14 @@ let test_check1b_omits_caps_subsumed_by_check1 () =
       end
     end
   end|} in
+  (* Since diagnostics plan F1 Check 1's error points at the first body use
+     its capability covers ("`main` prints, but module `AggSubsumed` declares
+     no `needs IO`"), so the two are told apart by the capability named. *)
   Alcotest.(check bool) "Check 1's own `needs IO` demand still fires"
-    true (has_error_with ctx "not declared in `needs`");
+    true (has_error_with ctx "declares no `needs IO`.");
   Alcotest.(check int)
     "Check 1b's aggregated error is fully subsumed and does not also fire"
-    0 (count_errors_with ctx "declares no matching `needs`")
+    1 (count_errors_with ctx "declares no `needs ")
 
 (* The narrower half: when Check 1 demands a capability that covers only
    SOME of what Check 1b would otherwise report, the still-uncovered
@@ -4103,7 +4106,7 @@ let test_check1b_keeps_caps_not_subsumed_by_check1 () =
   end|} in
   Alcotest.(check int)
     "Check 1b still aggregates the capability Check 1 does not cover"
-    1 (count_errors_with ctx "declares no matching `needs`");
+    1 (count_errors_with ctx "declares no `needs IO.FileWrite`");
   Alcotest.(check bool) "the surviving capability is IO.FileWrite, not IO.Console"
     true (has_error_with ctx "IO.FileWrite")
 
@@ -4353,8 +4356,8 @@ let test_narrowed_cap_cannot_reach_wide_signature () =
       narrow(c)
     end
   end|} in
-  Alcotest.(check bool) "passing Cap(IO.NetListen) as Cap(IO) is a type error"
-    true (has_error_with ctx "expected `IO` but got `IO.NetListen`");
+  Alcotest.(check bool) "passing Cap(IO.NetListen) as Cap(IO) is a capability mismatch"
+    true (has_error_with ctx "`wants_io` needs full IO access, but `c` is the network-listen capability");
   Alcotest.(check bool) "the grant walk rejects it too, naming the cap"
     true (has_error_with ctx "granted `Cap(IO.NetListen)`, but the program reaches `IO`");
   Alcotest.(check bool) "and the chain main -> narrow -> wants_io"
@@ -13826,7 +13829,7 @@ let file_read_hints ctx =
 let test_cap_scan_local_shadow_accepted () =
   let ctx = check_cap_infer ("mod LocalShadow do" ^ local_shadow_fns ^ "end") in
   Alcotest.(check int) "no missing-needs error for calls through locals" 0
-    (count_errors_with ctx "declares no matching `needs`");
+    (count_errors_with ctx "declares no `needs ");
   Alcotest.(check bool) "no errors at all" false (has_errors ctx);
   Alcotest.(check int) "no cap_infer hint for calls through locals" 0
     (List.length (file_read_hints ctx))
@@ -13855,9 +13858,9 @@ let test_cap_scan_local_shadow_sibling_still_charged () =
   in
   let ctx = check_cap_infer src in
   Alcotest.(check int) "the real builtin call is still charged" 1
-    (count_errors_with ctx "declares no matching `needs`");
+    (count_errors_with ctx "declares no `needs ");
   Alcotest.(check bool) "and it names IO.FileRead" true
-    (has_error_with ctx "Cap(IO.FileRead)");
+    (has_error_with ctx "needs IO.FileRead");
   (match file_read_hints ctx with
    | [ d ] ->
      Alcotest.(check int) "the one cap_infer hint points at the real call"
@@ -13882,7 +13885,7 @@ let test_cap_scan_local_shadow_scope_ends () =
     end
   end|} in
   Alcotest.(check int) "the builtin call after the shadowing scopes is charged" 1
-    (count_errors_with ctx "declares no matching `needs`")
+    (count_errors_with ctx "declares no `needs ")
 
 let test_cap_chain_from_main () =
   let hints = cap_hint_messages {|mod CapChain do

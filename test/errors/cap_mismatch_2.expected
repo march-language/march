@@ -1,0 +1,29 @@
+exit: 1
+-- ERROR -------------------- errors/cap_mismatch_2.march
+
+`greet` needs console access, but `cap` is the full IO capability. [cap_mismatch]
+
+12 |     greet(cap, "march")
+               ^^^
+
+    `IO` contains `IO.Console`, but a capability is never narrowed implicitly.
+    help: pass `cap_narrow(cap)`, which narrows it to `Cap(IO.Console)`.
+
+    `greet` needs `Cap(IO.Console)`:
+
+12 |     greet(cap, "march")
+         ^^^^^^^^^^^^^^^^^^^
+
+    `cap` was bound here as `Cap(IO)`:
+
+11 |   fn main(cap : Cap(IO)) do
+               ^^^
+
+
+
+fix [cap_mismatch:IO.Console]:
+@@ lines 12-12 @@
+-    greet(cap, "march")
++    greet(cap_narrow(cap), "march")
+
+after fix: exit 0

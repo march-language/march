@@ -139,6 +139,21 @@ val actor_msg_type_name : string -> string
 
 (** [Some "<Actor>_Msg"] when the name is spelled `<Actor>.Msg` (scope not checked). *)
 val actor_msg_alias_target : string -> string option
+
+(** A capability value passed where a different capability is needed
+    (specs/plans/2026-11-02-diagnostics-depth-plan.md §F1): recorded by
+    [report_mismatch] when it reports [cap_mismatch], so the end-of-module
+    pass ([Typecheck.refine_capability_reports]) can name the callee and
+    attach a fix, which need the declarations. *)
+type cap_mismatch_site = {
+  cm_span : Typecheck_types.Ast.span;           (** the argument; the diagnostic's primary span *)
+  cm_call : Typecheck_types.Ast.span option;    (** the call, when the expectation is an argument *)
+  cm_arg_name : string option;  (** the argument, when it is a plain variable *)
+  cm_have : string;             (** the capability passed, e.g. ["IO.Console"] *)
+  cm_need : string;             (** the capability needed, e.g. ["IO.FileRead"] *)
+  cm_in_fn : string;            (** [current_decl] at the site ("Mod.fn") *)
+}
+
 type env = {
   vars : Typecheck_types.scheme StrMap.t;
   types : int StrMap.t;
@@ -231,6 +246,7 @@ type env = {
     (Typecheck_types.Ast.span *
      Typecheck_types.ty * bool * string)
     list ref;
+  cap_mismatch_sites : cap_mismatch_site list ref;
   cap_narrow_sites :
     (Typecheck_types.Ast.span *
      Typecheck_types.ty)

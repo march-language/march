@@ -1872,9 +1872,11 @@ let cli_role_grant_violation =
        let rc, out = check_cli violation_src in
        Alcotest.(check int) "exit code" 1 rc;
        Alcotest.(check bool) ("names the role, the cap and the chain (output: " ^ out ^ ")") true
-         (contains_text out "Role `Stream.Cons` is granted `Cap(IO.Console)`"
-          && contains_text out "reaches `IO.FileWrite`"
-          && contains_text out "body → cons → save"))
+         (* Diagnostics plan F1: the chain is a span trace now (the use,
+            then a label per call), not prose. *)
+         (contains_text out "the body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`"
+          && contains_text out "the body calls `cons` here"
+          && contains_text out "`cons` calls `save` here"))
 
 let cli_role_grant_named_body =
   Alcotest.test_case "CLI: a named function passed as the body is walked too" `Quick (fun () ->

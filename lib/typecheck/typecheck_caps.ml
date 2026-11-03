@@ -1235,13 +1235,20 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         bodies)
     decls;
 
-  let body_cap_uses : (string * Ast.span) list =
+  (* Each use carries the code it sits in, as the subject of a sentence
+     ("`greet`", "the `Inc` handler of actor `Counter`"), so the missing-`needs`
+     error can name it (specs/plans/2026-11-02-diagnostics-depth-plan.md §F1). *)
+  let body_cap_uses : (string * Ast.span * string) list =
     let all = List.concat_map (function
       | Ast.DFn (def, dfn_sp) ->
+        let subject =
+          Printf.sprintf "`%s`"
+            (match arity_mangled_base def.fn_name.txt with
+             | Some base -> base | None -> def.fn_name.txt) in
         let per_clause = List.map (fun clause ->
           List.filter_map (fun (call_name, call_span) ->
             match cap_of_builtin_call call_name with
-            | Some cap_name -> Some (cap_name, call_span)
+            | Some cap_name -> Some (cap_name, call_span, subject)
             | None -> None
           ) (March_ast.Calls.builtin_candidate_calls
                ~bound:(fn_clause_param_names clause) clause.Ast.fc_body)
@@ -1255,7 +1262,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
            [f$N] body, which the base-name alias below re-attaches to [f].
            Both routes are covered so neither can silently truncate. *)
         let own_caps =
-          List.concat_map (List.map fst) per_clause
+          List.concat_map (List.map (fun (c, _, _) -> c)) per_clause
           @ List.concat_map
               (fun (c : Ast.fn_clause) ->
                  List.concat_map (builtin_caps_of_expr ~bound:(fn_clause_param_names c))
@@ -1286,7 +1293,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       | Ast.DLet (_vis, b, _) ->
         List.filter_map (fun (call_name, call_span) ->
           match cap_of_builtin_call call_name with
-          | Some cap_name -> Some (cap_name, call_span)
+          | Some cap_name -> Some (cap_name, call_span, "this module-level `let`")
           | None -> None
         ) (March_ast.Calls.builtin_candidate_calls b.Ast.bind_expr)
       (* C1 fix (part 2): fold actor handler bodies into the SAME body-scan
@@ -1297,11 +1304,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          handlers already happened above in [used_caps]'s DActor branch (so
          it isn't duplicated here); this only needs to surface the
          (cap, span) pairs for the Check 1b/Check 2 diagnostics. *)
-      | Ast.DActor (_, _, actor, _) ->
+      | Ast.DActor (_, aname, actor, _) ->
         List.concat_map (fun (h : Ast.actor_handler) ->
+            let subject =
+              Printf.sprintf "the `%s` handler of actor `%s`" h.Ast.ah_msg.txt aname.Ast.txt in
             List.filter_map (fun (call_name, call_span) ->
               match cap_of_builtin_call call_name with
-              | Some cap_name -> Some (cap_name, call_span)
+              | Some cap_name -> Some (cap_name, call_span, subject)
               | None -> None
             ) (March_ast.Calls.builtin_candidate_calls
                  ~bound:(List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) h.Ast.ah_params)
@@ -1315,10 +1324,15 @@ let check_module_needs (env : env) (mod_name : Ast.name)
        user's) win the dedup below and carry a stdlib span, which the driver
        then filters out — generating the warning and discarding it.  See
        [stdlib_source_files]. *)
-    let all = List.filter (fun (_, sp) -> not (span_is_stdlib sp)) all in
-    List.fold_left (fun acc (cap_name, sp) ->
-      if List.mem_assoc cap_name acc then acc else (cap_name, sp) :: acc
-    ) [] all
+    let all = List.filter (fun (_, sp, _) -> not (span_is_stdlib sp)) all in
+    (* The first use of each capability, in source order. *)
+    let all =
+      List.stable_sort (fun (_, (a : Ast.span), _) (_, (b : Ast.span), _) ->
+          compare (a.start_line, a.start_col) (b.start_line, b.start_col)) all in
+    List.rev (List.fold_left (fun acc (cap_name, sp, subj) ->
+      if List.exists (fun (c, _, _) -> c = cap_name) acc then acc
+      else (cap_name, sp, subj) :: acc
+    ) [] all)
   in
   (* Extern-implied caps: any DExtern → needs IO.Foreign; any blocking extern fn → needs IO.Foreign.Blocking *)
   let extern_cap_uses : (string * Ast.span) list =
@@ -1350,6 +1364,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      IO` alone already covers all of them, so `forge fix` applying both
      diagnostics writes four lines where one suffices. *)
   let check1_demanded_caps = ref [] in
+  let check1_reported = ref [] in
   List.iter (fun (cap_path, _fn_name, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     let self_declared = match List.assoc_opt cap_path env.proof_caps with
@@ -1369,16 +1384,35 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             MPBreak; MPText "Only public functions of "; MPCode declaring_mod;
             MPText " can mint "; cap cap_path; MPText " — callers must receive it as a parameter." ])
       | None ->
-        Err.error_with_fix env.errors ~span:sp ~code:(Err.Code.with_arg Err.Code.cap_needs cap_path)
-          ~fix:(Err.FInsert {
+        let fix = Err.FInsert {
             after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
-            text = "  needs " ^ cap_path })
+            text = "  needs " ^ cap_path } in
+        let code = Err.Code.with_arg Err.Code.cap_needs cap_path in
+        (* A body in this module doing what the capability covers is the use
+           a reader should see first (§F1): the error points at it, and the
+           signature naming `Cap(X)` becomes a label. *)
+        (match List.find_opt (fun (c, _, _) -> cap_subsumes cap_path c) body_cap_uses with
+         | Some (c, use_sp, subject) when not (List.mem cap_path !check1_reported) ->
+           check1_reported := cap_path :: !check1_reported;
+           Err.report env.errors
+             { Err.severity = Err.Error; span = use_sp; code; fix = Some fix; notes = [];
+               labels = [ { Err.lbl_span = sp;
+                            lbl_message = Printf.sprintf "`Cap(%s)` is named here too" cap_path } ];
+               message =
+                 render_parts [
+                   MPText (subject ^ " " ^ March_caps.Cap_lattice.action c ^ ", but module ");
+                   MPCode mod_name.txt; MPText " declares no "; MPCode ("needs " ^ cap_path);
+                   MPText ".";
+                   MPBreak; MPText "help: add "; MPCode ("needs " ^ cap_path);
+                   MPText " to the module body." ] }
+         | _ ->
+        Err.error_with_fix env.errors ~span:sp ~code ~fix
           (render_parts [
             cap cap_path; MPText " used in module "; MPCode mod_name.txt;
             MPText " but "; MPCode cap_path; MPText " is not declared in ";
             MPCode "needs"; MPText ".";
             MPBreak; MPText "help: add "; MPCode ("needs " ^ cap_path);
-            MPText " to the module body." ])
+            MPText " to the module body." ]))
     end
   ) used_caps;
   (* Stdlib-only builtins used to be walked here beside Check 1b; the gate
@@ -1405,7 +1439,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      single diagnostic listing all of them with one multi-line insert fix —
      `forge fix` still applies it in one pass since it is one [FInsert]. *)
   let missing_needs =
-    List.filter_map (fun (cap_path, sp) ->
+    List.filter_map (fun (cap_path, sp, subject) ->
       let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
       let self_declared = match List.assoc_opt cap_path env.proof_caps with
         | Some dm -> dm = mod_name.txt
@@ -1420,44 +1454,36 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           !check1_demanded_caps
       in
       if not covered && not self_declared && not subsumed_by_check1
-      then Some (cap_path, sp) else None
+      then Some (cap_path, sp, subject) else None
     ) body_cap_uses
   in
   (match missing_needs with
    | [] -> ()
-   | first :: rest ->
-     (* [body_cap_uses] is not in source order (it is built by a fold that
-        prepends), so pick the earliest span explicitly rather than assuming
-        [first] is first in the file — the diagnostic must point at real
-        code, and "first accumulated" is not "first in the module". *)
-     let first_span =
-       List.fold_left (fun best (_, sp) ->
-         let open Ast in
-         if (sp.start_line, sp.start_col) < (best.start_line, best.start_col)
-         then sp else best
-       ) (snd first) rest
-     in
-     let caps = List.sort_uniq String.compare (List.map fst missing_needs) in
-     let show =
-       String.concat ", " (List.map (fun c -> Printf.sprintf "`Cap(%s)`" c) caps)
-     in
+   | (_ :: _) ->
+     (* [body_cap_uses] holds each capability's first use in source order,
+        so the head is the earliest offending call: the error points at real
+        code, and names what that code is and does (§F1). *)
+     let (first_cap, first_span, first_subject) = List.hd missing_needs in
+     let caps = List.sort_uniq String.compare (List.map (fun (c, _, _) -> c) missing_needs) in
+     let others = List.filter (fun c -> c <> first_cap) caps in
      (* Two renderings of the same capability set, for two different
         purposes: [fix_lines] is what `forge fix` literally splices into the
         module body (two-space indent, matching the module's own `needs`
         convention), and [display_lines] is what the diagnostic pane shows
         (eight-space indent, matching the sibling grant error's `fn main(...)`
-        help block at line ~13249 above — same visual precedent, not a new
-        style). Naming the capability set only ONCE in the prose (in [show])
-        and then showing the literal fix text, rather than also restating the
-        set in a second "needs X and needs Y and ..." sentence, was fix-round
-        feedback on this task: the set was previously spelled three times
-        across two different join styles (", " for the Cap(...) list, " and "
-        for the needs list), which got worse rather than better as the
-        module's missing-capability count grew. *)
+        help block). *)
      let fix_lines = String.concat "\n" (List.map (fun c -> "  needs " ^ c) caps) in
      let display_lines =
        String.concat "\n" (List.map (fun c -> "        needs " ^ c) caps)
      in
+     (* Every other capability's first use is a label saying what it does. *)
+     let labels =
+       List.filter_map (fun (c, sp, subject) ->
+           if c = first_cap then None
+           else Some { Err.lbl_span = sp;
+                       lbl_message = Printf.sprintf "%s %s here (`needs %s`)" subject
+                           (March_caps.Cap_lattice.action c) c })
+         missing_needs in
      (* [~code] tags this diagnostic with the exact missing capability set so
         that a presentation-layer consumer (bin/main.ml) can recognise when
         [Cap_infer]'s call-site hint is reporting a fact already covered by
@@ -1467,18 +1493,27 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         one Cap_infer might hint at), without either pass having to know
         about the other — see
         specs/progress/2026-08-10-capability-diagnostic-duplication.md and
-        specs/progress/2026-08-13-aggregate-missing-needs-diagnostics.md. *)
-     Err.error_with_fix env.errors ~span:first_span
-       ~code:(Err.Code.with_arg Err.Code.cap_needs (String.concat "," caps))
-       ~fix:(Err.FInsert {
-         after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
-         text = fix_lines })
-       (Printf.sprintf
-          "function bodies in `%s` call builtins that require %s, but `%s` \
-           declares no matching `needs`.\n\
-           hint: add these to the module body —\n\
-           %s"
-          mod_name.txt show mod_name.txt display_lines))
+        specs/progress/2026-08-13-aggregate-missing-needs-diagnostics.md.
+        The message keeps "but module `M`" for that consumer's module match. *)
+     Err.report env.errors
+       { Err.severity = Err.Error; span = first_span; labels; notes = [];
+         code = Err.Code.with_arg Err.Code.cap_needs (String.concat "," caps);
+         fix = Some (Err.FInsert {
+             after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
+             text = fix_lines });
+         message =
+           Printf.sprintf
+             "%s %s, but module `%s` declares no `needs %s`%s.\n\
+              hint: add %s to the module body —\n\
+              %s"
+             first_subject (March_caps.Cap_lattice.action first_cap) mod_name.txt first_cap
+             (match others with
+              | [] -> ""
+              | os ->
+                Printf.sprintf "; its code also reaches %s"
+                  (String.concat ", " (List.map (fun c -> Printf.sprintf "`Cap(%s)`" c) os)))
+             (if others = [] then "this" else "these")
+             display_lines })
   ;
   (* Check 1c: extern blocks imply IO.Foreign (and IO.Foreign.Blocking for blocking fns) — warning only *)
   List.iter (fun (cap_path, sp) ->
@@ -1547,7 +1582,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       find_span decls
     in
     let used = List.exists (fun (cap_path, _, _) -> cap_subsumes need cap_path) used_caps
-              || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) body_cap_uses
+              || List.exists (fun (cap_path, _, _) -> cap_subsumes need cap_path) body_cap_uses
               || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) extern_cap_uses
               || List.exists (fun (_, req_caps) ->
                    List.exists (fun req_cap -> cap_subsumes need req_cap) req_caps

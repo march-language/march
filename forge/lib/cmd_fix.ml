@@ -13,38 +13,49 @@ type fix_item = {
   fi_fix      : fix_kind;
 }
 
-let parse_fix_line line : fix_item option =
+let parse_fix_kind fix_j : fix_kind =
+  let open Yojson.Basic.Util in
+  match fix_j |> member "kind" |> to_string with
+  | "insert" ->
+    let after_line = fix_j |> member "after_line" |> to_int in
+    let text       = fix_j |> member "text"       |> to_string in
+    FInsert { after_line; text }
+  | "delete" ->
+    let start_line = fix_j |> member "start_line" |> to_int in
+    let end_line   = fix_j |> member "end_line"   |> to_int in
+    FDelete { start_line; end_line }
+  | "replace" ->
+    let start_line = fix_j |> member "start_line" |> to_int in
+    let start_col  = fix_j |> member "start_col"  |> to_int in
+    let end_line   = fix_j |> member "end_line"   |> to_int in
+    let end_col    = fix_j |> member "end_col"    |> to_int in
+    let text       = fix_j |> member "text"       |> to_string in
+    FReplace { start_line; start_col; end_line; end_col; text }
+  | _ -> raise Exit
+
+(* One item per edit: a multi-edit fix (`{"kind":"multi","edits":[…]}`, one
+   diagnostic whose repair touches two places, e.g. a `needs` line and
+   `main`'s grant) contributes each of its edits, all positioned against the
+   original file like any other fix's. *)
+let parse_fix_line line : fix_item list =
   try
     let j = Yojson.Basic.from_string line in
     let open Yojson.Basic.Util in
     let fix_j = j |> member "fix" in
-    if fix_j = `Null then None
+    if fix_j = `Null then []
     else begin
       let file = j |> member "file" |> to_string in
       let sev  = j |> member "severity" |> to_string in
       let msg  = j |> member "message" |> to_string in
-      let kind = fix_j |> member "kind" |> to_string in
-      let fix = match kind with
-        | "insert" ->
-          let after_line = fix_j |> member "after_line" |> to_int in
-          let text       = fix_j |> member "text"       |> to_string in
-          FInsert { after_line; text }
-        | "delete" ->
-          let start_line = fix_j |> member "start_line" |> to_int in
-          let end_line   = fix_j |> member "end_line"   |> to_int in
-          FDelete { start_line; end_line }
-        | "replace" ->
-          let start_line = fix_j |> member "start_line" |> to_int in
-          let start_col  = fix_j |> member "start_col"  |> to_int in
-          let end_line   = fix_j |> member "end_line"   |> to_int in
-          let end_col    = fix_j |> member "end_col"    |> to_int in
-          let text       = fix_j |> member "text"       |> to_string in
-          FReplace { start_line; start_col; end_line; end_col; text }
-        | _ -> raise Exit
+      let fixes =
+        match fix_j |> member "kind" |> to_string with
+        | "multi" -> List.map parse_fix_kind (fix_j |> member "edits" |> to_list)
+        | _ -> [ parse_fix_kind fix_j ]
       in
-      Some { fi_file = file; fi_severity = sev; fi_message = msg; fi_fix = fix }
+      List.map (fun fix ->
+          { fi_file = file; fi_severity = sev; fi_message = msg; fi_fix = fix }) fixes
     end
-  with _ -> None
+  with _ -> []
 
 (* [contracts] switches the input from the ordinary diagnostic stream
    (`march --check-json`) to the contract-generation one
@@ -84,9 +95,7 @@ let collect_all_fixes ?(contracts = false) ?(scope_globs = []) ~lib_path_env fil
     (try
       while true do
         let line = input_line ic in
-        (match parse_fix_line line with
-         | Some fi -> all_items := fi :: !all_items
-         | None -> ())
+        List.iter (fun fi -> all_items := fi :: !all_items) (parse_fix_line line)
       done
     with End_of_file -> ());
     ignore (Unix.close_process_in ic)
@@ -116,10 +125,13 @@ let write_lines path lines =
   close_out oc;
   Sys.rename tmp path
 
+(* (line, column): bottom-up, and right-to-left within a line, so two
+   replaces on one line (both edits of a multi-edit fix, say) each still
+   find their columns where the compiler computed them. *)
 let fix_sort_key = function
-  | FInsert { after_line; _ }    -> after_line
-  | FDelete { end_line; _ }      -> end_line
-  | FReplace { start_line; _ }   -> start_line
+  | FInsert { after_line; _ }    -> (after_line, max_int)
+  | FDelete { end_line; _ }      -> (end_line, max_int)
+  | FReplace { start_line; start_col; _ } -> (start_line, start_col)
 
 let dedup_fixes items =
   let seen = Hashtbl.create 16 in

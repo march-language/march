@@ -326,21 +326,24 @@ signature, is the same severity:
 
 ```
 $ march --check reader.march   # fn slurp(path) do file_read(path) end — no needs
--- ERROR -- function bodies in `Reader` call builtins that require `Cap(IO.FileRead)`, but `Reader` declares no matching `needs`.
-hint: add these to the module body —
+-- ERROR -- `slurp` reads a file, but module `Reader` declares no `needs IO.FileRead`.
+hint: add this to the module body —
         needs IO.FileRead
 $ echo $?
 1
 ```
 
-The error includes a machine-applicable fix, so `forge fix` will insert the
-`needs` line for you. Every offending capability in the module is collapsed
-into **one** diagnostic, not one per call site: a `main` that touches four
-undeclared capabilities gets a single error naming all four once, with one
-fix that inserts all four `needs` lines at once:
+The error points at the first call that needs the capability and names the code it is
+in and what it does: a function (`` `slurp` reads a file``), an actor handler
+(`` the `Inc` handler of actor `Counter` prints``) or a module-level `let`. It
+includes a machine-applicable fix, so `forge fix` will insert the `needs` line for
+you. Every offending capability in the module is collapsed into **one** diagnostic,
+not one per call site: a `main` that touches four undeclared capabilities gets a
+single error naming all four once (each other capability's first use is a label),
+with one fix that inserts all four `needs` lines at once:
 
 ```
--- ERROR -- function bodies in `Main` call builtins that require `Cap(IO.Console)`, `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`, but `Main` declares no matching `needs`.
+-- ERROR -- `main` prints, but module `Main` declares no `needs IO.Console`; its code also reaches `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`.
 hint: add these to the module body —
         needs IO.Console
         needs IO.FileWrite
@@ -411,8 +414,7 @@ This compiles as-is. Delete `needs IO.FileWrite` and it fails, not with a
 missing-parameter error but with the compiler naming the whole path:
 
 ```
-function bodies in `Logger` call builtins that require `Cap(IO.FileWrite)`, but
-`Logger` declares no matching `needs`.
+`log` writes a file, but module `Logger` declares no `needs IO.FileWrite`.
 ...
 reached from `main`: main → log_error → log
 ```

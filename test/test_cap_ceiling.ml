@@ -196,7 +196,7 @@ let rejects_naming name ~expect src =
 (* Route 1: a direct builtin call.  Warning-only without --cap-strict. *)
 let test_direct_builtin_route () =
   rejects_at_typecheck "direct builtin call"
-    ~expect:"declares no matching `needs`"
+    ~expect:"declares no `needs "
     {|
 mod CeilDirect do
   needs IO.Console
@@ -317,7 +317,7 @@ end
    opted in to anything. *)
 let test_dependency_exceeding_its_own_ceiling () =
   rejects_at_typecheck "dependency exceeds its declared needs"
-    ~expect:"declares no matching `needs`"
+    ~expect:"declares no `needs "
     {|
 mod CeilApp do
   needs IO.Console
@@ -405,7 +405,7 @@ end
    dropping deep modules from the ceiling. *)
 let test_doubly_nested_module_without_needs_is_still_caught () =
   rejects_at_typecheck "doubly-nested module missing needs"
-    ~expect:"declares no matching `needs`"
+    ~expect:"declares no `needs "
     {|
 mod CeilDeepBad do
   needs IO.Console
@@ -514,7 +514,7 @@ end
    reported against its (absent) `needs`. *)
 let test_console_use_without_needs_is_still_caught () =
   rejects_at_typecheck "undeclared console use"
-    ~expect:"declares no matching `needs`"
+    ~expect:"declares no `needs "
     {|
 mod CeilConsoleUndeclared do
   fn main() : () do
@@ -741,7 +741,7 @@ end
    the program now correctly requires the grant it always should have. *)
 let test_nested_actor_handler_violation_names_inner () =
   rejects_at_typecheck "nested actor handler without needs blames Inner"
-    ~expect:"`Inner` declares no matching `needs`"
+    ~expect:"module `Inner` declares no `needs "
     {|
 mod CeilActorOuter2 do
   mod Inner do

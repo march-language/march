@@ -19,6 +19,13 @@ type fix_kind =
   (** Delete full source lines [start_line]..[end_line] inclusive (1-indexed). *)
   | FReplace of { span : March_ast.Ast.span; text : string }
   (** Replace the text covered by [span] with [text] in-place. *)
+  | FMulti of fix_kind list
+  (** Several edits that make ONE fix (one root cause, one report:
+      specs/plans/2026-11-02-diagnostics-depth-plan.md §X3 / §F1), e.g. the
+      `needs` line and the grant edit for a missing authority.  Every edit's
+      positions are relative to the ORIGINAL source, as for separate fixes;
+      an applier sorts them bottom-up by (line, column).  Flat: build one
+      with {!multi_fix}, which never nests. *)
 
 type diagnostic = {
   severity : severity;
@@ -56,6 +63,22 @@ let take_parse_error_extra () =
   v
 
 let create () = { diagnostics = [] }
+
+(** The edits of a fix, flattened. *)
+let rec fix_edits = function
+  | FMulti fs -> List.concat_map fix_edits fs
+  | f -> [ f ]
+
+(** One fix made of every edit in [fixes] (flattened, exact duplicates
+    dropped); [None] when there are none, the edit itself when only one. *)
+let multi_fix (fixes : fix_kind option list) : fix_kind option =
+  let edits =
+    List.fold_left (fun acc f -> if List.mem f acc then acc else acc @ [ f ]) []
+      (List.concat_map (function None -> [] | Some f -> fix_edits f) fixes) in
+  match edits with
+  | [] -> None
+  | [ f ] -> Some f
+  | fs -> Some (FMulti fs)
 
 (* Some diagnostics get re-derived at every use of a declaration whose own
    definition is broken (e.g. instantiating a constructor re-resolves its
@@ -602,19 +625,27 @@ let render_diagnostic_json ?(related = true) (d : diagnostic) : string =
   let file    = json_string sp.March_ast.Ast.file in
   let msg     = json_string d.message in
   let code    = json_string d.code in
-  let fix_json = match d.fix with
-    | None -> "null"
-    | Some (FInsert { after_line; text }) ->
+  let rec edit_json = function
+    | FInsert { after_line; text } ->
       Printf.sprintf {|{"kind":"insert","after_line":%d,"text":%s}|}
         after_line (json_string text)
-    | Some (FDelete { start_line; end_line }) ->
+    | FDelete { start_line; end_line } ->
       Printf.sprintf {|{"kind":"delete","start_line":%d,"end_line":%d}|}
         start_line end_line
-    | Some (FReplace { span = rs; text }) ->
+    | FReplace { span = rs; text } ->
       Printf.sprintf {|{"kind":"replace","start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"text":%s}|}
         rs.March_ast.Ast.start_line rs.March_ast.Ast.start_col
         rs.March_ast.Ast.end_line   rs.March_ast.Ast.end_col
         (json_string text)
+    (* A multi-edit fix: {"kind":"multi","edits":[<insert|delete|replace>…]},
+       each edit's positions relative to the original source. *)
+    | FMulti fs ->
+      Printf.sprintf {|{"kind":"multi","edits":[%s]}|}
+        (String.concat "," (List.map edit_json (List.concat_map fix_edits fs)))
+  in
+  let fix_json = match d.fix with
+    | None -> "null"
+    | Some f -> edit_json f
   in
   let related_json =
     if not related then ""

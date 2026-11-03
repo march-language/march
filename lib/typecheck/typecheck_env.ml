@@ -225,6 +225,20 @@ let actor_msg_alias_target (name : string) : string option =
       | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1) in
     Some (actor_msg_type_name actor)
 
+(** A capability value passed where a different capability is needed
+    (specs/plans/2026-11-02-diagnostics-depth-plan.md §F1): recorded by
+    [report_mismatch] when it reports [cap_mismatch], so the end-of-module
+    pass ([Typecheck.refine_capability_reports]) can name the callee and
+    attach a fix, which need the declarations. *)
+type cap_mismatch_site = {
+  cm_span : Ast.span;           (** the argument; the diagnostic's primary span *)
+  cm_call : Ast.span option;    (** the call, when the expectation is an argument *)
+  cm_arg_name : string option;  (** the argument, when it is a plain variable *)
+  cm_have : string;             (** the capability passed, e.g. ["IO.Console"] *)
+  cm_need : string;             (** the capability needed, e.g. ["IO.FileRead"] *)
+  cm_in_fn : string;            (** [current_decl] at the site ("Mod.fn") *)
+}
+
 type env = {
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)
@@ -587,6 +601,8 @@ type env = {
       pinned result is [Cap(P)] with [P] a proof cap whose declaring module is
       [current_module] AND [cur_fn_public]; a proof cap from another module, a
       private fn, or a non-proof (IO) target is rejected. *)
+  cap_mismatch_sites : cap_mismatch_site list ref;
+  (** See [cap_mismatch_site]. *)
   cap_narrow_sites : (Ast.span * ty) list ref;
   (** Every [cap_narrow] application site, as (span, the INSTANTIATED arrow).
       Swept by [check_cap_narrow_sites] to enforce that the source capability
@@ -854,6 +870,7 @@ let make_env errors type_map = {
   cap_dict_sites = ref [];
   mint_cap_sites = ref [];
   cap_narrow_sites = ref [];
+  cap_mismatch_sites = ref [];
   json_cap_sites = ref [];
   node_send_sites = ref [];
   json_codecs = ref [];
