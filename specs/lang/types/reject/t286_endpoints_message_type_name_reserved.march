@@ -1,4 +1,4 @@
--- EXPECT-ERROR: Overlapping implementation
+-- EXPECT-ERROR: both derive Json
 mod Main do
   -- `@[endpoints] protocol P` reserves the type name `P_Message` (the message
   -- type inside the generated `P_Msg` module, named after its protocol since

@@ -1,0 +1,14 @@
+mod Counter do
+  needs IO.Console
+
+  actor CounterActor do
+    state { count : Int }
+    init { count: 0 }
+    on Inc(x : Int) do { count: state.count + x } end
+  end
+
+  fn counter_migrate_state(old : Int) : Int do
+    println("upgrading")
+    old + 1
+  end
+end

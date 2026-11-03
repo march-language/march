@@ -1,26 +1,24 @@
 exit: 1
 -- ERROR ---------------- errors/send_wrong_actor_2.march
 
-`Tally` is a message for `Labels`, but this pid points to an actor whose state is `{ n : Int }`, so the message would be dropped. [send_wrong_actor]
+`Tally` is a message for `Labels`, but this pid is an actor `Counter`, so the message would be dropped. [send_wrong_actor]
 `Tally` is also a handler of `Counter`, but a bare `Tally` resolves to `Labels`'s, and an actor message cannot be qualified by its actor; rename one of the two handlers.
 
 24 |     send(c, Tally(1))
                  ^^^^^^^^
 
+    `Counter` handles `Tally`.
+
+    actor `Counter` is declared here:
+
+9 |   actor Counter do
+            ^^^^^^^
+    run `march --explain send_wrong_actor`
 
 
 -- HINT ---------------- errors/send_wrong_actor_2.march
 
-Constructor `Tally` is defined by multiple types (Labels_Msg, Counter_Msg). Use a qualified form to disambiguate, e.g. `Labels_Msg.Tally`. [ambiguous_constructor]
-
-24 |     send(c, Tally(1))
-                 ^^^^^^^^
-
-
-
--- HINT ---------------- errors/send_wrong_actor_2.march
-
-Constructor `Tally` is defined by multiple types (Labels_Msg, Counter_Msg). Use a qualified form to disambiguate, e.g. `Labels_Msg.Tally`. [ambiguous_constructor]
+`Tally` is a message of more than one actor (`Labels`, `Counter`), and a message cannot be qualified by its actor; rename one of the handlers. [ambiguous_constructor]
 
 25 |     send(l, Tally(2))
                  ^^^^^^^^

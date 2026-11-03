@@ -7,5 +7,6 @@ help: `Cap(IO.FileWrite)` is not below `Cap(IO.FileRead)` in the capability latt
 18 |     cap_narrow(r)
          ^^^^^^^^^^^^^
 
+    run `march --explain cap_widen`
 
 

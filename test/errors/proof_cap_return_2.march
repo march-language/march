@@ -1,0 +1,17 @@
+mod Main do
+  needs IO
+  mod Db do
+    proof cap Ready
+  end
+
+  mod App do
+    needs IO
+    needs Db.Ready
+
+    fn pretend(c : Cap(IO)) : Cap(Db.Ready) do mint_cap(c) end
+  end
+
+  fn main(_c : Cap(IO)) do
+    ()
+  end
+end

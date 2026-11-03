@@ -1,0 +1,13 @@
+mod Main do
+  needs IO.Console
+
+  type Shape = Circle(Int) | Square(Int)
+
+  pfn count_of(xs : List(Shape), target : Shape) : Int do
+    List.length(List.filter(xs, fn x -> x == target))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(count_of([Circle(1), Square(2)], Circle(1))))
+  end
+end

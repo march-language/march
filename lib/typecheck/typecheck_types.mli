@@ -130,6 +130,7 @@ type constraint_ =
   | CInterface of string * ty
   | CADTBound of string * ty
   | CTNatBound of ty
+type constraint_site = { cs_span : Ast.span; cs_name : string; }
 type scheme = Mono of ty | Poly of int list * constraint_ list * ty
 val _counter : int ref
 val fresh_id : unit -> int

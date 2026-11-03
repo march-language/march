@@ -1,0 +1,23 @@
+exit: 1
+-- ERROR ----------------------- errors/cap_widen_4.march
+
+`Cap(IO.Console)` cannot be widened to `Cap(IO.FileWrite)` — `cap_narrow` only attenuates, so the source capability must subsume the target. [cap_widen]
+help: `Cap(IO.FileWrite)` is not below `Cap(IO.Console)` in the capability lattice. Receive it from a caller that holds an ancestor of it.
+
+6 |     cap_narrow(c)
+        ^^^^^^^^^^^^^
+
+    run `march --explain cap_widen`
+
+
+-- ERROR ----------------------- errors/cap_widen_4.march
+
+`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite` (reached from `main`: main → as_writer). The grant is a ceiling on the WHOLE program — declaring `needs IO.FileWrite` does not raise it. [cap_grant_exceeded]
+help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_filewrite : Cap(IO.FileWrite))`), or widen the whole grant to `Cap(IO)`, or remove the use.
+
+ 9 |   fn main(c : Cap(IO.Console)) do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain cap_grant_exceeded`
+
+
