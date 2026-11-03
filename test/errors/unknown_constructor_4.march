@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: `Stream_Prod` has no constructor `S_ned`.
+mod Main do
+  needs IO
+  needs Session.Live
+  -- Did-you-mean ranking (X8 tier 1): the session-state tokens
+  -- desugar_endpoints generates for a role (`Stream_Prod.S_end`, …) are
+  -- never offered as suggestions, though `S_end` is two edits from `S_ned`.
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let st = Stream_Prod.S_ned
+    ()
+  end
+end

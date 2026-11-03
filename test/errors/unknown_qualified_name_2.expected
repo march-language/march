@@ -13,22 +13,7 @@ Linear values must be consumed exactly once — did you mean to pass it somewher
 -- ERROR ---------- errors/unknown_qualified_name_2.march
 
 I don't know a constructor called `Stream_Prod.Secret`. [unknown_constructor]
-Did you mean one of:
-  • `Stream_Prod.Yield` — from type `Yield`
-  • `Stream_Prod.S_end` — from type `S_end`
-  • `Stream_Prod.Got_More` — from type `Received_Prod`
-  • `Stream_Prod.Got_Done` — from type `Received_Prod`
-  • `Stream_Message.More` — from type `Stream_Message`
-  • `Stream_Message.Done` — from type `Stream_Message`
-  • `Stream_Cons.Yield` — from type `Yield`
-  • `Stream_Cons.S_end` — from type `S_end`
-  • `Step.Expect_More` — from type `Step`
-  • `Step.Expect_Done` — from type `Step`
-  • `Step.Choose_more` — from type `Step`
-  • `Step.Choose_done` — from type `Step`
-  • `Stats.NormalUnbiased` — from type `QuantileMethod`
-  • `Stats.MedianUnbiased` — from type `QuantileMethod`
-  • `Stats.InvertedCdf` — from type `QuantileMethod`
+`Stream_Prod` has no constructor `Secret`.
 
 25 |       fn (_x, st2) -> Stream_Prod.Yield(Stream_Prod.Secret),
                                              ^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: Did you mean `Postal` (from type `Mail`)?
+mod Main do
+  -- Did-you-mean ranking (X8 tier 1): the annotation wants a `Mail`.
+  -- `Poss` (this module's `Tag`) and the stdlib's `Post` (of `Method`) are
+  -- one edit from `Posts`, `Postal` two; `Postal` is the one that fits, so it
+  -- is offered alone.
+  type Mail = Postal(Int) | Email(String)
+  type Tag = Poss(Int)
+
+  fn main() do
+    let m : Mail = Posts(1)
+    m
+  end
+end

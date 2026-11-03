@@ -46,6 +46,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: "did you mean" suggestions for an unknown constructor, actor message, variable or
+  record field are ranked by type. A candidate that fits what the position needs (the actor of
+  the pid in `send`, the annotated type, the field type) is shown alone, ahead of a closer
+  spelling that doesn't: `send(a, Pokee(1))` now suggests only `Poke`, "a message of actor
+  `A`", not `Post` and `Pong` from the HTTP modules. Stdlib constructors are offered only when
+  nothing in your own code is in range, compiler-generated names (session states such as
+  `S_end`) are never offered, and a misspelled record field gets a suggestion.
 - Diagnostics: follow-on errors are dropped when another error already explains them: the type
   mismatch after a callback-arity error, "unused variable `x`" next to a misspelled use of `x`,
   `cap_grant` while the program has other errors, `cap_ceiling` alongside the matching

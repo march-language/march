@@ -822,18 +822,10 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
      in
      match ci_opt with
      | None ->
-       let candidates = suggest_ctors name.txt env in
        let hint =
-         if candidates = [] then
-           qualified_error_msg name.txt env
-         else
-           let lines = List.map (fun (k, ty) ->
-               Printf.sprintf "  • `%s` — from type `%s`" k ty
-             ) candidates in
-           "Did you mean one of:\n" ^ String.concat "\n" lines
-       in
+         unknown_ctor_hint ?need:(Option.map (fun t -> NeedType t) expected) name.txt env in
        Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span
-         (Printf.sprintf "I don't know a constructor called `%s`.\n%s"
+         (Printf.sprintf "I don't know a constructor called `%s`.%s"
             name.txt hint);
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
        bindings, TError
@@ -1550,6 +1542,34 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
         | _ -> ()) ps args
   | Some _ -> ()
 
+(** What the expression being inferred is expected to be, for did-you-mean
+    ranking only (X8 tier 1; [Typecheck_env.suggest_need]).  [infer_expr] has
+    no expected type, so a caller that knows one ([check_expr]'s fallback to
+    inference, [send]'s message) records it here, keyed by the span of the
+    expression it is about to infer; the error path of that same expression
+    reads it with [suggest_need_at].  The key keeps a sub-expression from
+    seeing its parent's need.  It is read only when a name fails to resolve,
+    so it cannot change inference. *)
+let pending_suggest_need : (Ast.span * suggest_need) option ref = ref None
+
+let with_suggest_need (e : Ast.expr) (need : suggest_need) (f : unit -> 'a) : 'a =
+  match e with
+  | Ast.ECon _ | Ast.EVar _ | Ast.EField _ ->
+    let saved = !pending_suggest_need in
+    pending_suggest_need := Some (span_of_expr e, need);
+    Fun.protect ~finally:(fun () -> pending_suggest_need := saved) f
+  | _ -> f ()
+
+let suggest_need_at (sp : Ast.span) : suggest_need option =
+  match !pending_suggest_need with
+  | Some (s, n) when s = sp -> Some n
+  | _ -> None
+
+let suggest_type_at (sp : Ast.span) : ty option =
+  match suggest_need_at sp with
+  | Some (NeedType t) -> Some t
+  | _ -> None
+
 (** [send(pid, msg)]: reject a message the actor this pid points to cannot
     handle (finding 19, specs/lang/core-march-types.md §2.6.4).
 
@@ -1836,7 +1856,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   qualified_error_msg name.txt env
                 else begin
                   let base = Printf.sprintf "I cannot find `%s`." name.txt in
-                  match suggest_var_in_scope name.txt env with
+                  match suggest_var_in_scope ?need:(suggest_type_at name.span) name.txt env with
                   | Some s -> base ^ Printf.sprintf " Did you mean `%s`?" s
                   | None   -> base
                 end
@@ -2892,18 +2912,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | Some _ | None -> ());
        match ci_opt with
        | None ->
-         let candidates = suggest_ctors name.txt env in
-         let hint =
-           if candidates = [] then
-             qualified_error_msg name.txt env
-           else
-             let lines = List.map (fun (k, ty) ->
-                 Printf.sprintf "  • `%s` — from type `%s`" k ty
-               ) candidates in
-             "Did you mean one of:\n" ^ String.concat "\n" lines
-         in
+         let hint = unknown_ctor_hint ?need:(suggest_need_at sp) name.txt env in
          Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span
-           (Printf.sprintf "I don't know a constructor called `%s`.\n%s"
+           (Printf.sprintf "I don't know a constructor called `%s`.%s"
               name.txt hint);
          List.iter (fun a -> ignore (infer_expr env a)) args;
          TError
@@ -3065,9 +3076,12 @@ let rec infer_expr env (e : Ast.expr) : ty =
              | None ->
                Err.error ~code:Err.Code.unknown_record_field env.errors ~span:sp
                  (Printf.sprintf
-                    "This record does not have a field called `%s`.\n\
+                    "This record does not have a field called `%s`.%s\n\
                      The fields I know about are: %s"
                     fname
+                    (match suggest_field ~need:uty fname all_flds with
+                     | Some f -> Printf.sprintf " Did you mean `%s`?" f
+                     | None -> "")
                     (String.concat ", " (List.map fst all_flds)))
            ) update_tys;
          base_ty
@@ -3171,9 +3185,12 @@ let rec infer_expr env (e : Ast.expr) : ty =
           | None   ->
             Err.error ~code:Err.Code.unknown_record_field env.errors ~span:sp
               (Printf.sprintf
-                 "This record does not have a field called `%s`.\n\
+                 "This record does not have a field called `%s`.%s\n\
                   The fields I see are: %s"
                  name.txt
+                 (match suggest_field ?need:(suggest_type_at sp) name.txt flds with
+                  | Some f -> Printf.sprintf " Did you mean `%s`?" f
+                  | None -> "")
                  (String.concat ", " (List.map fst flds)));
             TError)
        | _ ->
@@ -3351,7 +3368,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
          registered with ci_params = []) never varies with payload and so
          could never see a mutable-buffer type nested in it; checking it
          here was a no-op regardless of what check_sendable's argument was. *)
-      let msg_ty = infer_expr env msg in
+      let msg_ty =
+        with_suggest_need msg (NeedSendTo pid_ty) (fun () -> infer_expr env msg) in
       check_send_target env ~span:(span_of_expr msg) pid_ty msg msg_ty;
       (* send() returns Option(Unit): Some(()) when the message was enqueued,
          None when the target actor is dead/unknown (fire-and-forget drop).
@@ -3786,7 +3804,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 
   (* All other expressions: infer then unify *)
   | _ ->
-    let inferred = infer_expr env e in
+    let inferred =
+      with_suggest_need e (NeedType expected) (fun () -> infer_expr env e) in
     unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected
 
 (** Thread function application through argument list, tracking arg index. *)
