@@ -14781,6 +14781,15 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_binary_string.expected js_binary_string.out)))
 
+; js_byte_view_cache — byte_at on a big string finds its cached byte view by key,
+; not by comparing contents (Safari compares a 3.5 MB string with itself in linear time).
+(rule
+ (targets js_byte_view_cache.out)
+ (deps march_runtime.mjs (file native/js_byte_view_cache.mjs))
+ (action (with-stdout-to js_byte_view_cache.out (run node native/js_byte_view_cache.mjs))))
+
+(rule (alias runtest) (action (diff native/js_byte_view_cache.expected js_byte_view_cache.out)))
+
 ; js_int_check — without --js-int-check, a product beyond 2^53 prints the rounded double (release output unchanged).
 (rule
  (targets js_int_check.mjs)
