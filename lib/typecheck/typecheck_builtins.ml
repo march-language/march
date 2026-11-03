@@ -478,11 +478,15 @@ let get_tvar_id = function
   | _ -> 0
 
 (** Build an [Ast.interface_def] for a builtin interface with a single
-    type parameter named "a". [methods] is a list of (method_name, surface_ty). *)
+    type parameter named "a". [methods] is a list of (method_name, surface_ty).
+    Every method is bounded by `needs ()`: showing, comparing, ordering and
+    hashing a value never perform I/O, so every impl is checked to be free of
+    it (specs/plans/2026-11-02-interface-needs-bounds.md, decided 2026-11-02).
+    The bound has no source span; [check_fn_bounds] reports at the impl. *)
 let mk_builtin_iface name methods =
   let mk_n txt = { Ast.txt; span = Ast.dummy_span } in
   let mk_method (mname, mty) =
-    { Ast.md_name = mk_n mname; md_ty = mty; md_default = None }
+    { Ast.md_name = mk_n mname; md_ty = mty; md_default = None; md_needs = Some ([], Ast.dummy_span) }
   in
   { Ast.iface_name        = mk_n name;
     iface_param           = mk_n "a";

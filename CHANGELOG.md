@@ -42,6 +42,12 @@ git log is authoritative for exact commits.
 
 ### Breaking changes
 
+- **`Show`, `Eq`, `Ord` and `Hash` impls may not perform I/O.** The four built-in
+  interfaces are bounded by `needs ()`, so a hand-written `show`, `eq`, `compare` or `hash`
+  that prints, logs, reads the clock or reaches any other capability is rejected at the
+  impl (`cap_bound`). Derived impls are unaffected, and no impl in the stdlib was. Move
+  such work out of the impl.
+
 - **Hot-reload ABI v5 requires a rebuilt base binary.** Per-frame routing and
   closure lifetime hooks are incompatible with older running servers. Forge
   refuses the patch before upload and explains the one-time restart requirement.
@@ -80,6 +86,14 @@ git log is authoritative for exact commits.
   function is handed is charged to whoever supplies it, and a call to a function value
   taken from a record, list or ref is refused under a bound narrower than `IO`. Impl
   methods take bounds too. See the capabilities reference, "Per-function bounds".
+
+- **Capability bounds on interface methods.** An interface method signature may declare
+  `needs …` after its type (`fn get : a -> Int needs IO.FileRead`). Every impl of the
+  method, in any module, and the interface's default body are checked against it
+  (`cap_bound`, naming the interface); an impl may declare a narrower bound of its own but
+  not a wider one (`cap_bound_iface`). The bound is never part of the method's type, so
+  callers and `when` constraints declare nothing new. See the interfaces reference,
+  "Capability bounds on methods".
 
 - **`--reflection-parity`: check the refinement checker's reading of your functions.**
   `forge test --reflection-parity` (or `march --check --reflect-parity`) runs every
@@ -617,6 +631,12 @@ git log is authoritative for exact commits.
   inferred, so well-typed callers are unaffected and nothing runs differently.
 
 ### Fixed
+
+- **An impl method in a nested module was charged nothing for the helpers it calls.**
+  The capability checks (the module ceiling, `main`'s grant, per-function bounds) resolved
+  a local reference from an impl method or interface default body against the wrong
+  scope, so in `mod B`, an `impl Show(T)` whose `show` called a `pfn log` that prints was
+  not charged `log`'s `IO.Console`. It is now.
 
 - **A type of yours with a constructor named like another type's no longer breaks
   refinement checking of that other type.** Declaring, say, `type Mb = Some(Int) |

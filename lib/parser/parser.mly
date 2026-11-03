@@ -1471,9 +1471,9 @@ interface_decl:
         $startpos($3) }
 
 method_sig:
-  | FN; name = lower_name; COLON; t = ty;
+  | FN; name = lower_name; COLON; t = ty; needs = option(fn_needs_clause);
     default = option(preceded_by_do_end(expr))
-    { { md_name = name; md_ty = t; md_default = default } }
+    { { md_name = name; md_ty = t; md_default = default; md_needs = needs } }
 
 %inline preceded_by_do_end(X):
   | DO; x = X; END { x }
