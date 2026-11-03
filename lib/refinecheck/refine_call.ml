@@ -3224,6 +3224,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                   ([Refine_check.check_elements]' [ECon] arm): the
                   parameters are the entry's fields, named in the label. *)
                | Argument, _ when entry_label <> None -> Option.get entry_label
+               (* A callback's synthetic parameter (`$cb_arg`, `$cb_arg2`,
+                  …) names nothing the user wrote. *)
+               | Argument, Some pname when pname <> "" && pname.[0] = '$' ->
+                 if List.length sg.param_names = 1 then
+                   Printf.sprintf "the argument passed to `%s`" callee
+                 else Printf.sprintf "argument %d of `%s`" (rp.idx + 1) callee
                | Argument, Some pname when pname <> "" ->
                  Printf.sprintf "argument `%s` of `%s`" pname callee
                | Argument, _ -> Printf.sprintf "argument %d of `%s`" (rp.idx + 1) callee
@@ -3289,10 +3295,25 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                    cx_str
                    (match subject with
                     | Argument ->
-                      Printf.sprintf
-                        "note: guard the call (e.g. `if %s do …`) or pass a value known to \
-                         satisfy it"
-                        (pred_str rp.pred)
+                      (* The guard is the predicate over the ARGUMENT, not
+                         over its binder (`if _ >= 0` is not March); a closed
+                         argument (`f(-3)`) can't be guarded at all. *)
+                      (match List.nth_opt args rp.idx with
+                       | Some arg when Witness.free_vars arg = [] ->
+                         "note: this value never satisfies it; pass one that does"
+                       | Some arg ->
+                         let binders =
+                           rp.binder :: "_"
+                           :: (match List.nth_opt sg.param_names rp.idx with
+                               | Some p -> [ p ] | None -> []) in
+                         let guard =
+                           subst_params (List.map (fun b -> (b, arg)) binders) rp.pred in
+                         Printf.sprintf
+                           "note: guard the call (e.g. `if %s do …`) or pass a value known to \
+                            satisfy it"
+                           (pred_str guard)
+                       | None ->
+                         "note: guard the call or pass a value known to satisfy it")
                     | Bound_expr ->
                       "note: a refined annotation on a `let` is CHECKED against the \
                        expression it annotates, not assumed — bind a value that satisfies \

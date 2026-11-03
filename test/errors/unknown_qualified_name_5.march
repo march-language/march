@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: Unknown module `Lsit`. Did you mean `List`?
+mod Main do
+  -- A misspelled module whose member names a builtin (`length`) used to pass
+  -- --check: the dot-suffix fallback stripped `Lsit.` and resolved the bare
+  -- builtin, so the program failed only at run time with "unbound variable:
+  -- Lsit.length" (specs/todos/2026-11-02-qualified-builtin-fallback-accepts-unknown-module.md).
+  needs IO.Console
+
+  fn count() : Int do
+    Lsit.length([1, 2])
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(count()))
+  end
+end

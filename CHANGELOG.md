@@ -46,6 +46,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: follow-on errors are dropped when another error already explains them: the type
+  mismatch after a callback-arity error, "unused variable `x`" next to a misspelled use of `x`,
+  `cap_grant` while the program has other errors, and `cap_ceiling` alongside the matching
+  `cap_needs`.
+
 - **Native compiles are about 45% faster for small programs.** Code the program
   cannot reach (most of the prepended stdlib) is now dropped right after
   defunctionalization instead of after the optimizer, so Perceus, drop, escape
@@ -60,6 +65,13 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- `march --check` no longer accepts a misspelled module whose member names a builtin
+  (`Lsit.length(xs)`): it reports "Unknown module `Lsit`. Did you mean `List`?" instead of
+  failing at run time.
+- Diagnostics: the `List.filter(fn (x, y) -> …)` hint suggests a one-parameter function instead of
+  a curried one; an infinite-type error no longer stacks contradictory notes; refinement errors on
+  callbacks no longer show `$cb_arg`, and their guard suggestion uses the real argument.
 
 - **`--target js` byte strings are fast in Safari.** Each byte access on a long string
   (`byte_at`, `byte_length`, `slice`) looked up its cached byte view by comparing strings

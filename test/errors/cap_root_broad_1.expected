@@ -3,7 +3,7 @@ errors/cap_root_broad_1.march:19:9: error: `Cap(IO)` cannot be deserialized — 
 hint: hold the capability in a separate value and pass it as a parameter, keeping `Loot` free of capability fields.
 -- HINT ------------------ errors/cap_root_broad_1.march
 
-this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
+this declaration uses `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
 
 18 |   type Loot = Loot(Cap(IO))
        ^^^^^^^^^^^^^^^^^^^^^^^^^

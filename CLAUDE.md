@@ -203,7 +203,11 @@ determinism).
 diagnostics with carets, labels, notes, `[slug]`, explain pointer, and each machine fix as a
 diff) and `.json.expected`. A program carrying `-- EXPECT-ERROR:` must also still contain that
 fragment. After an intentional message change: `UPDATE_ERRORS=1 ./_build/default/test/run_errors.exe -e`,
-then review `git diff test/errors/`. New reject programs and `--explain` pages are added by
+then review `git diff test/errors/`. `ERRORS_ONLY=cap_,type_mismatch_3` limits a run to cases whose
+name starts with one of the prefixes (the edit loop; the full run still gates). The run also
+lints each message for compiler-generated names the program never wrote (`$cb_arg`, `S_…`,
+`…_Msg`, `Cons`); known leaks are listed in `test/errors/internals-allowlist.txt`, which may only
+shrink. New reject programs and `--explain` pages are added by
 `scripts/seed-error-corpus.sh` (idempotent; never renames an existing case).
 
 ### Refactor oracles: prove a change moved no behaviour
