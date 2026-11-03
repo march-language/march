@@ -61,9 +61,17 @@ text (case and spaces ignored) or calls a function with that name. Each hit prin
 functions it is about (`law: rev(rev(xs)) == xs  (about: rev)`). A plain name search for a
 function also lists the lemmas about it.
 
+A query that is an expression is also a **shape**: a one-letter callee (`f`, `g`) stands for
+any function and any other identifier for any term, each consistently, so `f(f(x)) == x`
+finds every involution (`reverse(reverse(xs)) == xs`). Longer names, constructors and
+literals match themselves; `==` matches either way round; a shape may match one `&&`
+conjunct.
+
 ```bash
 forge search "" --law "rev(rev"
 forge search "" --law cat
+forge search "" --law "f(f(x)) == x"       # involutions, whatever they are called
+forge search "" --law "f(x, Nil) == x"     # right identities with Nil
 ```
 
 ### Combinations
