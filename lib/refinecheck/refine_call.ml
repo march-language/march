@@ -2227,7 +2227,13 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
         | Some (Some ty) -> adt_of_decl_ty ty
         | _ -> None
       in
-      let of_subject () = tc_adt_at (March_typecheck.Typecheck.span_of_expr subject) in
+      (* A synthesized subject at [A.dummy_span] (the measure path's name
+         lookup) has no type of its own: whatever the typechecker last
+         recorded there is not its type (review round 5). *)
+      let of_subject () =
+        let sp = March_typecheck.Typecheck.span_of_expr subject in
+        if sp = A.dummy_span then None else tc_adt_at sp
+      in
       match arg with
       | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" ->
         (match param_adt (Some rp.idx) with Some a -> Some a | None -> of_subject ())

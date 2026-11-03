@@ -338,3 +338,33 @@ refine` IDENTICAL against `8aaeb6176`, `refine-oracle.sh monotone` GREEN over 13
 0 moves. Probes (`ctor-review{,2,3,4}`): the only `proved` sites are the listed legitimate ones
 (`p10`, `p10b`, round-1 `t1`, `d1`-`d4`, `s2*`, `h3f`, `lp2`) and round 4's controls (`ct1c`,
 `msg1c`, `lp1`/`lp1n`'s `g(Z)`, `msg2`'s `_ > 0`).
+
+## Review round 5 (of 8312dbc6a)
+
+One false proof, also present at base `8aaeb6176`.
+
+- **C1: a builtin names a type qualified.** `csv_next_row : Int -> Csv.CsvRow`. The
+  typechecker canonicalizes `Csv.CsvRow` to the bare `CsvRow` at every use, so the
+  builtin's result unifies with any user `type CsvRow`. `Refine_encode.builtin_type_names`
+  dropped every dotted name. The stdlib's own `CsvRow` declaration normally makes a user
+  `CsvRow` conflated anyway, but an entry module named `Csv` shadows the stdlib's `Csv`
+  (`entry_shadows_stdlib`) and strips it. That left the user type with one declarant, and
+  `is_Zap(r)` was proved for a row `csv_next_row` returned. Interpreted, the contract
+  broke; compiled, the program took the wrong arm.
+  - **Fix:** a qualified builtin name is kept as its last segment, the name the
+    typechecker canonicalizes it to. The `IO.*` capability names are left out: they type
+    no value. Apart from those, `Csv.CsvRow` is the only qualified name in the derived
+    list, so no other proof is affected.
+  - **Test:** `ctor review5 csv2`, RED at 8312dbc6a and GREEN after the fix.
+- **Minor:** `resolve_measure`'s name lookup builds an `EVar` at `A.dummy_span`. For a
+  name that is neither the binder nor a parameter, `known_adt_of` read whatever type the
+  typechecker last recorded at that span. A subject at `A.dummy_span` now has no type. The
+  reviewer found no false proof through it.
+- **Not fixed (latent, documented by the reviewer):** desugared `__synth__` spans come from
+  a per-process counter, so a cached stdlib AST could in principle share one with a user
+  file. The current stdlib cache has none.
+- **Reviewer's other checks:** the untyped path is unreachable from production: only
+  `bin/` links the checker, and every `check_module` call passes `~type_map`; the LSP,
+  `forge refine` and `forge test --reflection-parity` run `march --check`. The VC cache key
+  hashes the full preamble, including datatype declarations. `$` is a legal SMT-LIB symbol
+  character.

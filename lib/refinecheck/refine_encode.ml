@@ -1743,9 +1743,19 @@ let seeded_builtin_names = [ "List"; "Option"; "Result" ]
    two types of one short name (a user `type DownReason`, `type Array`, …
    with the built-in).  A name the stdlib itself declares is the stdlib's
    declaration of that same nominal type and is not counted twice
-   ([stdlib_declared], pruned in [finalize_adt_canonical]). *)
+   ([stdlib_declared], pruned in [finalize_adt_canonical]).  A QUALIFIED
+   name is kept as its last segment, the bare name the typechecker
+   canonicalizes it to at every use (`csv_next_row : Int -> Csv.CsvRow`
+   unifies with any `CsvRow`; review round 5): dropping it left a user
+   `CsvRow` under an entry `mod Csv`, which strips the stdlib's declaration,
+   with one declarant.  The `IO.*` capability names are left out: they type
+   no value, and keeping them would only cost proofs on a user `Console`. *)
 let builtin_type_names : string list =
-  List.filter (fun n -> not (String.contains n '.')) March_typecheck.Typecheck_builtins.builtin_type_names
+  March_typecheck.Typecheck_builtins.builtin_type_names
+  |> List.filter_map (fun n ->
+         match String.split_on_char '.' n with
+         | "IO" :: _ -> None
+         | segs -> Some (List.nth segs (List.length segs - 1)))
   |> List.sort_uniq compare
 
 (* Short type names a STDLIB file declares (filled by [register_adt_names]). *)

@@ -1265,6 +1265,39 @@ end
    type name the refinement checker counts as a declarant.  The list is
    derived from the signatures; this pins that the derivation reaches names
    that appear ONLY there. *)
+(* ── Review round 5 (of 8312dbc6a) ───────────────────────────────────────────
+   A builtin whose signature names a type QUALIFIED (`csv_next_row : Int ->
+   Csv.CsvRow`) is canonicalized to the bare `CsvRow` by the typechecker at
+   every use, so its result unifies with any user `type CsvRow`.  The checker
+   dropped dotted builtin names, so under an entry module named `Csv` (which
+   strips the stdlib's own `CsvRow` declaration) the user type had one
+   declarant and its constructors resolved: `is_Zap(r)` was proved for a row
+   the builtin returned. *)
+let ctor_review5 =
+  [ gated "ctor review5 csv2: a user `CsvRow` under an entry `mod Csv` is conflated with the builtin's `Csv.CsvRow`" (fun () ->
+        let out =
+          run
+            {|mod Csv do
+  needs IO, IO.FileRead
+  type CsvRow = Zap | Zip
+  fn need(r : CsvRow, n : {Int | is_Zap(r)}) : Int do
+    match r do
+      Zap -> n
+      _ -> 0 - 99
+    end
+  end
+  fn go(h : Int) : Int do
+    let r = csv_next_row(h)
+    match r do
+      Zip -> 0
+      _ -> need(r, 7)
+    end
+  end
+end
+|}
+        in
+        not_proved out ~line:14 ~callee:"need") ]
+
 let builtin_names_cover_signatures =
   [ Alcotest.test_case "builtin_type_names covers types named only in builtin signatures" `Quick (fun () ->
         let names = March_typecheck.Typecheck_builtins.builtin_type_names in
