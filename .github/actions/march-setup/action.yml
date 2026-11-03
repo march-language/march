@@ -61,17 +61,30 @@ runs:
     # (@types-check), the refinecheck suite and the verdict-agreement job all
     # discharge their VCs with it; a distro z3 (Ubuntu's apt has 4.8.12)
     # proves different things and warns solver_version_mismatch.
+    #
+    # On Linux it is the SAME binary the release ships: built static (musl)
+    # inside alpine:3.21 with the release build's recipe, so the refinement
+    # suites and the agreement job test the z3 users run, not a glibc build of
+    # it.  A cold build takes ~15 min on a 4-vCPU runner (once per key); the
+    # callers' setup-step timeouts allow for it.
     - name: Restore the pinned z3
       id: z3-cache
       uses: actions/cache/restore@v6
       with:
         path: ~/.cache/march-z3
-        key: z3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('z3.version', 'scripts/install-z3.sh') }}
+        key: z3-${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('z3.version', 'scripts/install-z3.sh') }}
 
     - name: Build the pinned z3 (cache miss only) and put it on PATH
       shell: bash
       run: |
-        scripts/install-z3.sh "$HOME/.cache/march-z3"
+        mkdir -p "$HOME/.cache/march-z3"
+        if [ "$RUNNER_OS" = Linux ]; then
+          docker run --rm -v "$PWD:/work:ro" -v "$HOME/.cache/march-z3:/out" -w /work alpine:3.21 \
+            sh -euc 'apk add --no-cache bash build-base cmake python3 curl >/dev/null && bash scripts/install-z3.sh /out --static'
+        else
+          scripts/install-z3.sh "$HOME/.cache/march-z3"
+        fi
+        "$HOME/.cache/march-z3/z3" --version
         echo "$HOME/.cache/march-z3" >> "$GITHUB_PATH"
 
     - name: Save the pinned z3

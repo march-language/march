@@ -44,12 +44,12 @@ concurrency:
 jobs:
   regenerate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 50  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain (OCaml + cached opam deps + system libs)
-        timeout-minutes: 12
+        timeout-minutes: 30  # a cold pinned-z3 build (march-setup) takes ~15 min
         uses: ./.github/actions/march-setup
 
       - name: Rebuild the browser artifacts

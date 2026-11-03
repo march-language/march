@@ -46,7 +46,7 @@ jobs:
       # and installs the same system libraries. Previously this job did all
       # three inline and uncached, reinstalling all 46 opam packages every run.
       - name: Set up toolchain (OCaml + cached opam deps + system libs)
-        timeout-minutes: 12
+        timeout-minutes: 30  # a cold pinned-z3 build (march-setup) takes ~15 min
         uses: ./.github/actions/march-setup
 
       - name: Regenerate stdlib docs

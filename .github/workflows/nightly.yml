@@ -91,14 +91,14 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
     continue-on-error: true
-    timeout-minutes: 40
+    timeout-minutes: 60  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.gate.outputs.sha }}
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        timeout-minutes: 30  # a cold pinned-z3 build (march-setup) takes ~15 min
         uses: ./.github/actions/march-setup
 
       - name: Run quarantined goldens (informational — expected to be flaky)
@@ -153,14 +153,14 @@ jobs:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 65  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.gate.outputs.sha }}
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        timeout-minutes: 30  # a cold pinned-z3 build (march-setup) takes ~15 min
         uses: ./.github/actions/march-setup
 
       - name: Run test/stdlib/test_properties.march
@@ -182,14 +182,14 @@ jobs:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 50  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.gate.outputs.sha }}
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        timeout-minutes: 30  # a cold pinned-z3 build (march-setup) takes ~15 min
         uses: ./.github/actions/march-setup
 
       - name: Generate stdlib docs (march_doc compile + run smoke)

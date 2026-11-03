@@ -120,7 +120,8 @@ jobs:
       # shard (~10s) rather than tracking which suite that test lives in.
       # 20 for the macOS leg's cold cache; see the comment in macos-checks.
       - name: Set up toolchain
-        timeout-minutes: 20
+        # 40: a cold opam switch plus a cold pinned-z3 build (march-setup).
+        timeout-minutes: 40
         uses: ./.github/actions/march-setup
         with:
           cross-tools: "true"
@@ -261,7 +262,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       - name: Build
@@ -362,12 +364,13 @@ jobs:
   # runs in parallel besides. ~72s locally for 43 benches, compile-dominated.
   bench-gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 40  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       - name: Benchmark output gate (not part of runtest)
@@ -386,12 +389,13 @@ jobs:
   # never compares against them. Design: specs/2026-10-14-browser-repl-bundle-design.md.
   browser-repl:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       - name: Build the browser artifacts from this commit
@@ -452,12 +456,13 @@ jobs:
   # The macOS leg cost a macOS slot (5 for the whole org) per run.
   conformance:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       - name: Static-semantics conformance corpus (slow lane, not part of runtest)
@@ -771,7 +776,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       - name: AddressSanitizer gate (RC/UAF guard) — shard ${{ matrix.shard }}/3
@@ -815,7 +821,7 @@ jobs:
   # second leg is a one-line change.
   ocaml-build:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 40  # +20 for a cold pinned-z3 build (march-setup)
     strategy:
       fail-fast: false
       matrix:
@@ -824,7 +830,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up toolchain
-        timeout-minutes: 12
+        # 30, not 12: a cold pinned-z3 build (march-setup) takes ~15 min.
+        timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
       # forge/bin/main.exe is here for the determinism job: its topology_app
@@ -1340,7 +1347,7 @@ jobs:
   # regex-escaped, so a new group runs here without anyone editing this.
   macos-checks:
     runs-on: macos-26
-    timeout-minutes: 48
+    timeout-minutes: 68  # +20 for a cold pinned-z3 build (march-setup)
     steps:
       - uses: actions/checkout@v7
 
@@ -1350,7 +1357,8 @@ jobs:
       # run that took the step past 12 during the save, so the cache was never
       # written and every later run would be cold too.
       - name: Set up toolchain
-        timeout-minutes: 20
+        # 40: a cold opam switch plus a cold pinned-z3 build (march-setup).
+        timeout-minutes: 40
         uses: ./.github/actions/march-setup
 
       - name: Build compiler + property tests
