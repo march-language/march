@@ -33,7 +33,7 @@ let backstop_ms () : int =
    queries get their own, smaller limit. *)
 let base_rlimit = 3_000_000
 
-let base_stage2_rlimit = 1_000_000
+let base_stage2_rlimit = 50_000
 
 let default_rlimit = ref base_rlimit
 
