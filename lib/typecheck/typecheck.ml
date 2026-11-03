@@ -8764,12 +8764,29 @@ let solve_role_roots_full ?(decls = []) (env : env) : role_solve option =
   end
 
 (* The tuple view [role_capability_closures] reads. *)
+(* [check_role_grants]'s solve.  A hot-reload build asks again for the
+   manifest's ROLE lines ([role_capability_closures]), after typecheck has
+   finished with the env; the keyed roots and the own/refs/rows tables that
+   reads do not depend on [decls] (only [rs_type_mismatch] does), so the
+   second solve, ~3.5 s for a control-plane app, would repeat the first.
+   Keyed on the tables the solve reads, which every copy of an env shares
+   (the driver holds a copy of [final_env], not [final_env] itself). *)
+let role_solve_key (env : env) =
+  Obj.repr env.own_cap_closures, Obj.repr env.fn_refs, Obj.repr env.fn_row_bodies,
+  Obj.repr env.role_grants, Obj.repr env.stdlib_fns
+
+let last_role_solve : (Obj.t * Obj.t * Obj.t * Obj.t * Obj.t * role_solve option) option ref = ref None
+
 let solve_role_roots (env : env)
   : ((string * role_root) list
      * (string, string list) Hashtbl.t
      * (string, string list) Hashtbl.t
      * (string, March_caps.Cap_rows.row) Hashtbl.t) option =
-  Option.map (fun s -> (s.rs_keyed, s.rs_own, s.rs_refs, s.rs_rows)) (solve_role_roots_full env)
+  let (k1, k2, k3, k4, k5) = role_solve_key env in
+  let solved = match !last_role_solve with
+    | Some (a, b, c, d, e, s) when a == k1 && b == k2 && c == k3 && d == k4 && e == k5 -> s
+    | _ -> solve_role_roots_full env in
+  Option.map (fun s -> (s.rs_keyed, s.rs_own, s.rs_refs, s.rs_rows)) solved
 
 let check_role_grants (env : env) (decls : Ast.decl list) : unit =
   if Hashtbl.length env.role_grants = 0 then ()
@@ -8808,7 +8825,10 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                         proto role c show_main c (String.lowercase_ascii leaf) c c))
               caps)
          env.role_grants);
-    match solve_role_roots_full ~decls env with
+    let solved = solve_role_roots_full ~decls env in
+    (let (k1, k2, k3, k4, k5) = role_solve_key env in
+     last_role_solve := Some (k1, k2, k3, k4, k5, solved));
+    match solved with
     | None -> ()
     | Some { rs_keyed = keyed; rs_own = own; rs_refs = refs; rs_rows = rows; rs_synthetic = synthetic;
              rs_local_closures = local_closures; rs_held_pids = held_pids; rs_unresolved = unresolved;
