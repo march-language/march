@@ -4108,8 +4108,10 @@ let compile filename =
      span — see its doc comment above. Applied here, once, so every
      downstream consumer of [diags] (human-readable printing below,
      --check-json, --emit-core-ast) sees the same de-duplicated set. *)
-  let diags = dedupe_cap_hints (March_errors.Errors.sorted errors) in
   let is_user_file = user_diag ~filename ~user_files in
+  let diags =
+    March_errors.Errors.suppress_cascades ~visible:is_user_file
+      (dedupe_cap_hints (March_errors.Errors.sorted errors)) in
   (* The front-end half of --check's accept/reject condition (has_user_errors
      || has_resolve_errors || has_desugar_errors; a parse error never gets
      this far, [compile] exits at the parse step), hoisted
@@ -4949,8 +4951,12 @@ let compile filename =
           Printf.eprintf "march: %s\n" msg;
           exit 1
       end;
-      let make_hcr_manifest hr_impl_hashes hr_abi remote_sig_hashes ch =
-        if not !compile_so && !hot_reload_prefix = None then "" else begin
+      (* Everything but the header is independent of [ch], and a build asks
+         for the manifest twice (the post-TIR key folds in [hcr_manifest ""],
+         emission embeds [hcr_manifest ch]), so the per-function lines are
+         built once, when the first three arguments are applied. *)
+      let make_hcr_manifest hr_impl_hashes hr_abi remote_sig_hashes =
+        if not !compile_so && !hot_reload_prefix = None then (fun _ch -> "") else begin
           (* Per-fn OWN cap closures, keyed by qualified name ("Mod.fn").
              fn_own_capability_closures returns each function's own caps
              (body/sig/extern), WITHOUT the module-wide `needs` merge that
@@ -5065,40 +5071,6 @@ let compile filename =
             Hashtbl.replace callee_to_callers callee deduped
           ) callee_to_callers;
           let oc = Buffer.create 1024 in
-             (match March_tir.Hcr_abi.of_target target with
-              | Ok abi ->
-                Printf.bprintf oc
-                  "# march-hcr-manifest v2\n# cas_hash %s\n# target %s\n# hcr_abi %s\n# module_prefix %s\n"
-                  ch abi.canonical_target (March_tir.Hcr_abi.abi_id abi)
-                  (Option.value ~default:"" !hot_reload_prefix);
-                (* The standard library this artifact was compiled against:
-                   the digest of its source ([stdlib_source_hash], the same
-                   one that keys the CAS).  A stdlib actor has no dispatch
-                   slot (Hot_reload.is_slot_actor_dispatch), so a patch can
-                   never deliver a stdlib change; forge compares this line
-                   with the running build's and asks for a restart instead
-                   of activating nothing (deploy --plan, deploy hot). *)
-                (match stdlib_source_hash () with
-                 | Some (_, h, _) -> Printf.bprintf oc "# stdlib_hash %s\n" h
-                 | None -> ());
-                (* The patch's own dispatch slots ([Hot_reload.is_slot_fn]).
-                   A slot's impl_hash stops at a slot callee, so when the
-                   running build has no slot for one (a function new since
-                   its last restart: a patch calls its own copy of it),
-                   that callee's change is in no caller's hash; the deploy
-                   redeploys its callers to carry it
-                   (Cmd_deploy_hot.unslotted_carriers). *)
-                (match hr_config () with
-                 | Some cfg ->
-                   let slots =
-                     Hashtbl.fold (fun n _ acc ->
-                         if March_tir.Hot_reload.is_slot_fn cfg n then n :: acc else acc)
-                       hr_impl_hashes []
-                     |> List.sort String.compare in
-                   Printf.bprintf oc "# slots %s\n" (String.concat "," slots)
-                 | None -> ());
-              | Error _ ->
-                Printf.bprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
              List.iter (fun (name, impl_h) ->
                (* A capture-release function ([Drop.run]'s [$clodrop$<clo>]) is
                   reached only through the registry main fills at start-up; a
@@ -5147,6 +5119,44 @@ let compile filename =
                in
                Printf.bprintf oc "ROLE %s caps=%s%s\n" role (String.concat "," caps) via
              ) (March_typecheck.Typecheck.role_capability_closures typecheck_env);
+             let body = Buffer.contents oc in
+             fun ch ->
+             let oc = Buffer.create (String.length body + 1024) in
+             (match March_tir.Hcr_abi.of_target target with
+              | Ok abi ->
+                Printf.bprintf oc
+                  "# march-hcr-manifest v2\n# cas_hash %s\n# target %s\n# hcr_abi %s\n# module_prefix %s\n"
+                  ch abi.canonical_target (March_tir.Hcr_abi.abi_id abi)
+                  (Option.value ~default:"" !hot_reload_prefix);
+                (* The standard library this artifact was compiled against:
+                   the digest of its source ([stdlib_source_hash], the same
+                   one that keys the CAS).  A stdlib actor has no dispatch
+                   slot (Hot_reload.is_slot_actor_dispatch), so a patch can
+                   never deliver a stdlib change; forge compares this line
+                   with the running build's and asks for a restart instead
+                   of activating nothing (deploy --plan, deploy hot). *)
+                (match stdlib_source_hash () with
+                 | Some (_, h, _) -> Printf.bprintf oc "# stdlib_hash %s\n" h
+                 | None -> ());
+                (* The patch's own dispatch slots ([Hot_reload.is_slot_fn]).
+                   A slot's impl_hash stops at a slot callee, so when the
+                   running build has no slot for one (a function new since
+                   its last restart: a patch calls its own copy of it),
+                   that callee's change is in no caller's hash; the deploy
+                   redeploys its callers to carry it
+                   (Cmd_deploy_hot.unslotted_carriers). *)
+                (match hr_config () with
+                 | Some cfg ->
+                   let slots =
+                     Hashtbl.fold (fun n _ acc ->
+                         if March_tir.Hot_reload.is_slot_fn cfg n then n :: acc else acc)
+                       hr_impl_hashes []
+                     |> List.sort String.compare in
+                   Printf.bprintf oc "# slots %s\n" (String.concat "," slots)
+                 | None -> ());
+              | Error _ ->
+                Printf.bprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
+             Buffer.add_string oc body;
              Buffer.contents oc
         end in
       let hcr_schemas =
@@ -6182,25 +6192,30 @@ let compile filename =
                    never reach here at all;
                  - --compile-so: adds -fPIC to every runtime object;
                  - MARCH_HTTP_EVLOOP=1: -DMARCH_HTTP_USE_EVLOOP is read from
-                   march_http.h, so it changes more than march_http_evloop.c;
-                 - --hot-reload with --signing-pubkey: bakes
-                   -DMARCH_SIGNING_PUBKEY_HEX into march_reload.c.
+                   march_http.h, so it changes more than march_http_evloop.c.
+               A --hot-reload server build is eligible except for
+               [per_build_runtime_srcs], the files that read its
+               --signing-pubkey and HCR-identity -Ds: those stay sources on
+               the final command line, which still carries both -Ds.
                MARCH_NO_RUNTIME_CACHE=1 forces the fallback for A/B checks. *)
+            let per_build_runtime_srcs =
+              if signing_define = "" && hcr_identity_flags = "" then []
+              else [ "march_sig.c"; "march_reload.c"; "march_shell.c"; "march_hcr_identity.c" ] in
             let runtime_objs =
               let eligible =
                 (match xtarget with March_tir.Llvm_emit.Native -> true | _ -> false)
                 && not !compile_so
                 && evloop_flag = ""
-                && signing_define = ""
-                && !hot_reload_prefix = None
                 && Sys.getenv_opt "MARCH_NO_RUNTIME_CACHE" = None
               in
               if not eligible then None
               else begin
-                let srcs =
+                let all_srcs =
                   runtime
                   :: (String.split_on_char ' ' runtime_extra_c
                       |> List.filter (fun s -> s <> "")) in
+                let per_build src = List.mem (Filename.basename src) per_build_runtime_srcs in
+                let srcs = List.filter (fun src -> not (per_build src)) all_srcs in
                 (* Byte-identical to the compile half of the command below,
                    minus link-only/user-FFI pieces: -L/-l are inert under -c
                    (and -Wno-unused-command-line-argument is already passed),
@@ -6218,7 +6233,14 @@ let compile filename =
                     opt_flag dbg_flag san_flag arch_cflags section_cflags
                     openssl_flags2 compress_flags2 blake3_flags2 cap_sandbox_define in
                 match March_cas.Runtime_archive.ensure ~cc:cc_driver ~cflags ~sources:srcs with
-                | Ok objs -> Some objs
+                | Ok objs ->
+                  (* Each per-build source back where it sat, between the
+                     objects, so the link order is the monolithic one. *)
+                  let rec weave srcs objs = match srcs, objs with
+                    | src :: srcs, _ when per_build src -> src :: weave srcs objs
+                    | _ :: srcs, o :: objs -> o :: weave srcs objs
+                    | [], _ | _ :: _, [] -> objs in
+                  Some (weave all_srcs objs)
                 | Error msg ->
                   (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                      Printf.eprintf
@@ -6234,8 +6256,8 @@ let compile filename =
                that never reaches TLS or Compress links neither member and,
                with as-needed, records neither library.  Executables only, with
                the cached objects (runtime_objs' own eligibility: native, no
-               hot reload, no --compile-so, no event-loop or signing build):
-               a hot-reload server keeps the whole runtime, because a patch
+               --compile-so, no event-loop build), and not a hot-reload
+               server ([rdynamic_flag]): that keeps the whole runtime, because a patch
                .so resolves every runtime symbol against it (design D6).
                Every other member stays a loose object; see
                Runtime_archive.ensure_opt_archive for why. *)

@@ -714,6 +714,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
   let { root; errctx; postcond; path; lets; sc; re; binds; demand = _ } = cx in
+  scope_fact_dropped := false;
   (* A lemma body's pattern links (§4.3), read by stage 2 only; the `$link:`
      facts themselves translate to nothing, so stage 1 is unchanged. *)
   Reflect_state.links :=
@@ -3193,8 +3194,18 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              violated; the scalar path, which never takes this shortcut,
              skipped it).  A goal and fact naming no caller variable are
              decided by the contracts alone, as before. *)
+          (* Not in stage 2 (reflection design §4.4; phase 4 review): a
+             reflected call left unfolded (past its fuel, an undecided guard,
+             the budget) is an uninterpreted symbol there, so a model may give
+             it any value, and "the goal can fail" is not a definite failure.
+             Such a goal takes the `¬G` discharge below, as a scalar does. *)
           let definite =
             match subject, first with
+            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ when !Reflect_state.arm_on -> false
+            (* A subject whose own refinement did not translate is
+               unconstrained here: `List({Int | _ > 5 && _ == one(0) + 4})`
+               with `one` opaque was reported violated at `elem = 0`. *)
+            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ when !scope_fact_dropped -> false
             | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ ->
               (not free_goal_name)
               && (goal_caller_names = []
@@ -3224,6 +3235,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                   ([Refine_check.check_elements]' [ECon] arm): the
                   parameters are the entry's fields, named in the label. *)
                | Argument, _ when entry_label <> None -> Option.get entry_label
+               (* A callback's synthetic parameter (`$cb_arg`, `$cb_arg2`,
+                  …) names nothing the user wrote. *)
+               | Argument, Some pname when pname <> "" && pname.[0] = '$' ->
+                 if List.length sg.param_names = 1 then
+                   Printf.sprintf "the argument passed to `%s`" callee
+                 else Printf.sprintf "argument %d of `%s`" (rp.idx + 1) callee
                | Argument, Some pname when pname <> "" ->
                  Printf.sprintf "argument `%s` of `%s`" pname callee
                | Argument, _ -> Printf.sprintf "argument %d of `%s`" (rp.idx + 1) callee
@@ -3289,10 +3306,25 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                    cx_str
                    (match subject with
                     | Argument ->
-                      Printf.sprintf
-                        "note: guard the call (e.g. `if %s do …`) or pass a value known to \
-                         satisfy it"
-                        (pred_str rp.pred)
+                      (* The guard is the predicate over the ARGUMENT, not
+                         over its binder (`if _ >= 0` is not March); a closed
+                         argument (`f(-3)`) can't be guarded at all. *)
+                      (match List.nth_opt args rp.idx with
+                       | Some arg when Witness.free_vars arg = [] ->
+                         "note: this value never satisfies it; pass one that does"
+                       | Some arg ->
+                         let binders =
+                           rp.binder :: "_"
+                           :: (match List.nth_opt sg.param_names rp.idx with
+                               | Some p -> [ p ] | None -> []) in
+                         let guard =
+                           subst_params (List.map (fun b -> (b, arg)) binders) rp.pred in
+                         Printf.sprintf
+                           "note: guard the call (e.g. `if %s do …`) or pass a value known to \
+                            satisfy it"
+                           (pred_str guard)
+                       | None ->
+                         "note: guard the call or pass a value known to satisfy it")
                     | Bound_expr ->
                       "note: a refined annotation on a `let` is CHECKED against the \
                        expression it annotates, not assumed — bind a value that satisfies \

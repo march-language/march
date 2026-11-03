@@ -1594,7 +1594,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
        && not (List.mem fn_name proof_cap_factories) then
       Err.hint ~code:Err.Code.cap_root_broad env.errors ~span:sp
         (render_parts [
-          MPText "this function takes "; cap "IO";
+          (* [fn_name] is "" for a type, extern, actor or interface. *)
+          MPText (if fn_name = "" then "this declaration uses " else "this function takes ");
+          cap "IO";
           MPText " (the root capability); consider narrowing to e.g. ";
           cap "IO.FileRead"; MPText " or "; cap "IO.Console";
           MPText " for least-privilege." ])

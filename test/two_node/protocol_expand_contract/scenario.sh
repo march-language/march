@@ -55,8 +55,7 @@ pk=$(cat "$work/keys/pk")
 
 COMPILE_FLAGS_a="--hot-reload ProtocolSplit --signing-pubkey $pk"
 COMPILE_FLAGS_b="--hot-reload ProtocolSplit --signing-pubkey $pk"
-compile a
-compile b
+compile a b
 
 # What runs: version 1's baseline (a deploy keeps it under
 # .forge/deploy/<env>/protocols/). Then version 2's two builds against it,

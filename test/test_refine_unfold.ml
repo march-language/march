@@ -196,7 +196,7 @@ end
 |})
         in
         expect out ~line:9 ~callee:"need_eq" "proved" ~uses:"cat");
-    gated "no_second_step: need2(cat([1], [2])) needs depth 1: reflect-fuel" (fun () ->
+    gated "a6 (phase 4): need2(cat([1], [2])) takes a decided second step: proved" (fun () ->
         let out =
           run
             ("mod N do\n" ^ cat
@@ -205,7 +205,9 @@ end
 end
 |})
         in
-        expect out ~line:9 ~callee:"need2" "skip:reflect-fuel");
+        (* Phase 1 stopped at depth 0 (reflect-fuel); phase 4's default fuel
+           2 unfolds the produced `cat(Nil, [2])`, whose guard is decided. *)
+        expect out ~line:9 ~callee:"need2" "proved" ~uses:"cat");
     gated "two_arg: count_ge reflected with two parameters" (fun () ->
         let out =
           run
@@ -223,7 +225,10 @@ end
 end
 |}
         in
-        expect out ~line:10 ~callee:"need_small" "skip:reflect-fuel";
+        (* count_ge([5], 3) is 1, so `_ < 1` really fails.  Phase 1 could not
+           take the second step (reflect-fuel); phase 4's decided step finds
+           the violation. *)
+        expect out ~line:10 ~callee:"need_small" "violated";
         expect out ~line:11 ~callee:"need_zero" "proved" ~uses:"count_ge");
     gated "list_result: rev1(Nil) == Nil, a datatype result sort" (fun () ->
         let out =

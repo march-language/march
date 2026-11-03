@@ -1,8 +1,8 @@
 exit: 1
 -- ERROR ------------- errors/refinement_violated_2.march
 
-refinement violation: argument `$cb_arg` of `f` does not satisfy precondition `_ >= 0` [refinement_violated]
-note: guard the call (e.g. `if _ >= 0 do …`) or pass a value known to satisfy it
+refinement violation: the argument passed to `f` does not satisfy precondition `_ >= 0` [refinement_violated]
+note: this value never satisfies it; pass one that does
 
 10 |   fn ap(f : ({Int | _ >= 0}) -> Int) : Int do f(-3) end
                                                    ^^^^^

@@ -1490,8 +1490,34 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
         | Some m, Some (what, n, span) when n >= 1 && n <> m ->
           let plural k = if k = 1 then "" else "s" in
           let vars = List.init n (fun i -> String.make 1 (Char.chr (97 + i mod 26))) in
+          (* The parameter's declared arrow depth: `f : b -> a -> b` (a fold)
+             is 2, `pred : a -> Bool` (a filter) is 1.  Only a parameter
+             whose type is itself curried at least [n] deep can take the
+             curried rewrite; for `pred` the fix is a function of [m]
+             parameters, and suggesting `fn a -> fn b -> …` was wrong. *)
+          let param_depth =
+            let sch_ty = match lookup_var fname env with
+              | Some (Mono t) | Some (Poly (_, _, t)) -> Some t
+              | None -> None in
+            let rec nth_param t k =
+              match repr t with
+              | TArrow (a, b) -> if k = 0 then Some a else nth_param b (k - 1)
+              | _ -> None in
+            let rec depth t =
+              match repr t with TArrow (_, b) -> 1 + depth b | _ -> 0 in
+            let idx =
+              let rec find i = function
+                | [] -> None
+                | (p, _) :: rest -> if p = pname then Some i else find (i + 1) rest in
+              find 0 ps in
+            match sch_ty, idx with
+            | Some t, Some i -> Option.map depth (nth_param t i)
+            | _ -> None
+          in
+          let curried_param =
+            match param_depth with Some d -> d >= n | None -> true in
           let hint =
-            if m = 1 && n >= 2 then
+            if m = 1 && n >= 2 && curried_param then
               Printf.sprintf
                 "`%s` applies `%s` one argument at a time (a curried \
                  function, `a -> b -> …`), and March has no partial \
@@ -1503,6 +1529,10 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
                      (String.concat " -> fn " vars) v.txt (String.concat ", " vars)
                  | _ ->
                    Printf.sprintf "fn %s -> …" (String.concat " -> fn " vars))
+            else if m = 1 && n >= 2 then
+              Printf.sprintf
+                "`%s` calls `%s` with one argument, so pass a function of \
+                 one parameter:\n    fn x -> …" fname pname
             else
               Printf.sprintf
                 "March functions are not curried: a function is always \
@@ -1779,7 +1809,26 @@ let rec infer_expr env (e : Ast.expr) : ty =
                 | Some sch -> Some sch
                 | None -> try_suffix rest)
            in
-           (match try_suffix name.txt with
+           (* A single-qualifier `Q.member` whose `Q` names nothing at all
+              (no registry module — the guard above —, no type, no in-file
+              module, no `Q.`-prefixed binding) is a misspelled module, not a
+              path to strip: stripping `Lsit.` off `Lsit.length` resolved the
+              builtin `length`, so the typo checked clean and failed only at
+              run time with "unbound variable: Lsit.length".  A qualifier
+              that names a TYPE keeps the fallback: `Int.to_string(n)` is
+              how programs spell the bare `to_string` on an Int. *)
+           let unknown_single_qualifier =
+             match split_qualified name.txt with
+             | Some (q, member) when not (String.contains member '.') ->
+               let prefix = q ^ "." in
+               not (StrMap.mem q env.types)
+               && not (StrMap.mem q env.records)
+               && not (StrMap.mem q env.ty_aliases)
+               && not (StrMap.mem q env.local_mods)
+               && not (StrMap.exists (fun k _ -> String.starts_with ~prefix k) env.vars)
+             | _ -> false
+           in
+           (match (if unknown_single_qualifier then None else try_suffix name.txt) with
             | Some sch -> instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
             | None ->
               let msg =
@@ -1792,7 +1841,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   | None   -> base
                 end
               in
-              Err.error ~code:Err.Code.unbound_variable env.errors ~span:name.span msg;
+              let code =
+                if String.contains name.txt '.' then Err.Code.unknown_qualified_name
+                else Err.Code.unbound_variable in
+              Err.error ~code env.errors ~span:name.span msg;
               TError))
 
     (* ── Type annotations ─────────────────────────────────────────── *)
@@ -8869,12 +8921,29 @@ let solve_role_roots_full ?(decls = []) (env : env) : role_solve option =
   end
 
 (* The tuple view [role_capability_closures] reads. *)
+(* [check_role_grants]'s solve.  A hot-reload build asks again for the
+   manifest's ROLE lines ([role_capability_closures]), after typecheck has
+   finished with the env; the keyed roots and the own/refs/rows tables that
+   reads do not depend on [decls] (only [rs_type_mismatch] does), so the
+   second solve, ~3.5 s for a control-plane app, would repeat the first.
+   Keyed on the tables the solve reads, which every copy of an env shares
+   (the driver holds a copy of [final_env], not [final_env] itself). *)
+let role_solve_key (env : env) =
+  Obj.repr env.own_cap_closures, Obj.repr env.fn_refs, Obj.repr env.fn_row_bodies,
+  Obj.repr env.role_grants, Obj.repr env.stdlib_fns
+
+let last_role_solve : (Obj.t * Obj.t * Obj.t * Obj.t * Obj.t * role_solve option) option ref = ref None
+
 let solve_role_roots (env : env)
   : ((string * role_root) list
      * (string, string list) Hashtbl.t
      * (string, string list) Hashtbl.t
      * (string, March_caps.Cap_rows.row) Hashtbl.t) option =
-  Option.map (fun s -> (s.rs_keyed, s.rs_own, s.rs_refs, s.rs_rows)) (solve_role_roots_full env)
+  let (k1, k2, k3, k4, k5) = role_solve_key env in
+  let solved = match !last_role_solve with
+    | Some (a, b, c, d, e, s) when a == k1 && b == k2 && c == k3 && d == k4 && e == k5 -> s
+    | _ -> solve_role_roots_full env in
+  Option.map (fun s -> (s.rs_keyed, s.rs_own, s.rs_refs, s.rs_rows)) solved
 
 let check_role_grants (env : env) (decls : Ast.decl list) : unit =
   if Hashtbl.length env.role_grants = 0 then ()
@@ -8913,7 +8982,10 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                         proto role c show_main c (String.lowercase_ascii leaf) c c))
               caps)
          env.role_grants);
-    match solve_role_roots_full ~decls env with
+    let solved = solve_role_roots_full ~decls env in
+    (let (k1, k2, k3, k4, k5) = role_solve_key env in
+     last_role_solve := Some (k1, k2, k3, k4, k5, solved));
+    match solved with
     | None -> ()
     | Some { rs_keyed = keyed; rs_own = own; rs_refs = refs; rs_rows = rows; rs_synthetic = synthetic;
              rs_local_closures = local_closures; rs_held_pids = held_pids; rs_unresolved = unresolved;

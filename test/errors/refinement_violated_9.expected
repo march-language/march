@@ -2,7 +2,7 @@ exit: 1
 -- ERROR ------------- errors/refinement_violated_9.march
 
 refinement violation: argument `o` of `inner` does not satisfy precondition `is_Some(_)` (e.g. p = None) [refinement_violated]
-note: guard the call (e.g. `if is_Some(_) do …`) or pass a value known to satisfy it
+note: guard the call (e.g. `if is_Some(p) do …`) or pass a value known to satisfy it
 
 33 |       None    -> inner(p)
                       ^^^^^^^^
