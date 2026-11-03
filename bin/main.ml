@@ -1948,6 +1948,14 @@ let report_z3 errors ~filename ~user_files =
         (Printf.sprintf
            "no z3 found (looked in MARCH_Z3, next to march at %s, and on PATH)."
            (Filename.dirname bundled))
+    | Some (March_refine.Solver.Broken { path; reason })
+      when not (March_refine.Refine.solver_unusable ()) ->
+      (* z3 worked, then died or hung: say what was lost, not that nothing
+         was checked. *)
+      March_errors.Errors.warning errors ~code:March_errors.Code.solver_unavailable ~span
+        (Printf.sprintf
+           "Some refinements were not checked: z3 at %s %s; %d of %d queries got no answer. %s"
+           path reason !March_refine.Refine.queries_unanswered !March_refine.Refine.queries_asked fix)
     | Some (March_refine.Solver.Broken { path; reason }) ->
       unavailable (Printf.sprintf "z3 at %s %s." path reason)
     | Some (March_refine.Solver.Mismatch { path; version; _ }) ->

@@ -409,10 +409,9 @@ let reason_detail = function
   | Sort_conflict -> "reflecting it would declare one symbol at two different sorts"
   | Float_sort_gate -> "the float wellsortedness gate rejected the formula"
   | Solver_undecided -> (
-    match March_refine.Refine.run_report () with
-    | Some (March_refine.Solver.Missing _ | March_refine.Solver.Broken _) ->
+    if March_refine.Refine.solver_unusable () then
       "the solver could not be run (see the solver_unavailable warning)"
-    | _ -> "the solver proved neither the predicate nor its negation")
+    else "the solver proved neither the predicate nor its negation")
   | Alias_withdrawn spelling ->
     Printf.sprintf
       "the guard uses `%s`, but this compilation unit also BINDS that name, so \

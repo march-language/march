@@ -277,8 +277,13 @@ let driver_suite =
               [ $n -ge 2 ] && { touch %s; exit 1; };; esac; done"
              Z3_pin.version marker marker);
         let rc, out = march_check ~march_z3:z3 (obligations 5) in
-        check_once "crash" ~rc ~expect_rc:0 out;
-        Alcotest.(check bool) "says it exited" true (contains out "exited mid-run"));
+        Alcotest.(check int) "exit code" 0 rc;
+        (* Two queries were answered: the warning says how many were not,
+           instead of claiming nothing was checked. *)
+        Alcotest.(check int) "one warning" 1 (count out "Some refinements were not checked");
+        Alcotest.(check int) "not the nothing-was-checked wording" 0 (count out unavailable);
+        Alcotest.(check bool) "says it exited" true (contains out "exited mid-run");
+        Alcotest.(check bool) "counts what was lost" true (contains out "queries got no answer"));
     Alcotest.test_case "version_mismatch_warns" `Quick (fun () ->
         match Lazy.force real_z3 with
         | None -> print_endline "[skip] no real z3 on PATH"
