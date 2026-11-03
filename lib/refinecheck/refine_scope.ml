@@ -524,6 +524,10 @@ let smt_of ?(vocab = true) ~resolve_var ~resolve_measure ?(resolve_field = fun _
 let rec pred_str (e : A.expr) : string =
   let binop op a b = pred_str a ^ " " ^ op ^ " " ^ pred_str b in
   match e with
+  (* Only an undesugared predicate still carries an author message
+     ([March_ast.Refine_msg]); the text is the conjunct's alone, so
+     [Refine_audit.desugar_dropped] matches it against the desugared copy. *)
+  | A.ERefineMsg (inner, _, _) -> pred_str inner
   | A.ELit (A.LitInt n, _) -> string_of_int n
   | A.ELit (A.LitBool b, _) -> if b then "true" else "false"
   (* `%h`-free rendering that always keeps the point, so `{Float | _ != 0.0}`
@@ -1184,7 +1188,7 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
   | A.ECond (arms, _) ->
     List.exists (fun (c, b) -> expr_mentions names c || expr_mentions names b) arms
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> expr_mentions names a || expr_mentions names b
-  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> expr_mentions names e
 
 (* Does the local function [n] ESCAPE in [e] — occur anywhere other than as
@@ -1241,7 +1245,7 @@ let rec name_escapes ?(pass_checked : string -> int -> bool = fun _ _ -> false) 
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ECond (arms, _) -> List.exists (fun (c, b) -> esc c || esc b) arms
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> esc a || esc b
-  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> esc e
 
 (* Does [e] mention [m] FREE — an occurrence not captured by an intervening
@@ -1303,7 +1307,7 @@ let rec expr_mentions_free (m : string) (e : A.expr) : bool =
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ECond (arms, _) -> List.exists (fun (c, b) -> free c || free b) arms
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
-  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> free e
 
 (* The path-context companion to [scope_shadow].  A path condition is recorded

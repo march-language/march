@@ -732,7 +732,7 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
             let b = pat_names p @ bound in
             fv b c
           | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
-          | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.EDbg (Some e, _) -> fv bound e
+          | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.ERefineMsg (e, _, _) | Ast.EDbg (Some e, _) -> fv bound e
         in
         fv [] e;
         (* Keep only locals (names not in the module/global env), de-duped, in use order. *)

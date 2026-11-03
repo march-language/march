@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/march-language/march/main/install.s
 
 The installer downloads the latest release into `~/.march`, verifies its checksum, and installs `march` and `forge` into `~/.march/bin`. Add that directory to your `PATH` (the installer prints the exact line). Use `MARCH_VERSION=nightly` for the latest nightly or `MARCH_VERSION=<tag>` to pin a version.
 
-The binaries are self-contained (macOS statically links `blake3`/`zstd`/`brotli`; Linux builds are static), so interpreting programs requires no extra setup. To use `march --compile`, install a C toolchain: `clang` + LLVM (macOS: `xcode-select --install`; Linux: e.g. `clang llvm`).
+The binaries are self-contained (macOS statically links `blake3`/`zstd`/`brotli`; Linux builds are static), so interpreting programs requires no extra setup. The archive also ships the z3 solver that checks refinement types (`libexec/z3`, pinned to the version in `z3.version`), so refinements are checked with nothing else to install. To use `march --compile`, install a C toolchain: `clang` + LLVM (macOS: `xcode-select --install`; Linux: e.g. `clang llvm`).
 
 Switch between installed versions with `forge`:
 
@@ -51,6 +51,7 @@ The rest of this page walks through building March's compiler, standard library,
 | OCaml | 5.5.1 | Set up via opam switch |
 | dune | 3.7+ | Build system (installed by opam) |
 | LLVM / clang | 18+ | Native code compilation |
+| z3 | the version in `z3.version` (4.16.0) | Refinement-type checking. A source build has no bundled `libexec/z3`: put z3 on `PATH` or set `MARCH_Z3`, or build the pinned one with `scripts/install-z3.sh ~/.local/z3`. Without it, refinements are not checked and the compiler says so (`solver_unavailable`). |
 | git | any | Clone the repository |
 
 ### macOS

@@ -513,6 +513,8 @@ let rec expr_inline = function
   | ESigil (name, content, _)     ->
     let inner = expr_inline content in
     Printf.sprintf "~%s%s" name inner
+  | ERefineMsg (inner, msg, sp)  ->
+    Printf.sprintf "%s else %s" (expr_inline inner) (expr_inline (ELit (LitString msg, sp)))
   | ECond _                     -> "match do ... end"
 
 (** Returns true if the expression must be rendered on multiple lines

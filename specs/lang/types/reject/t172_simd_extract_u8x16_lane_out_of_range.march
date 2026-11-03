@@ -1,4 +1,4 @@
--- EXPECT-ERROR: refinement violation: argument `i` of `Simd.extract_u8x16` does not satisfy precondition
+-- EXPECT-ERROR: argument `i` of `Simd.extract_u8x16` does not satisfy precondition `_ < 16`
 -- Refinement types (widening slice 12, §2.14), applied to Simd (2026-08-10 —
 -- specs/todos/2026-08-10-simd-vector-types.md Task 1). `Simd.extract_u8x16`'s
 -- lane index carries `{Int | 0 <= _ && _ < 16}` (stdlib/simd.march); a DIRECT

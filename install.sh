@@ -9,7 +9,7 @@
 # or MARCH_VERSION=nightly for the latest nightly.
 #
 # Layout (shared with `forge toolchain`):
-#   ~/.march/versions/<tag>/   extracted release (bin/ stdlib/ runtime/ LICENSE)
+#   ~/.march/versions/<tag>/   extracted release (bin/ stdlib/ runtime/ libexec/z3 licenses/ LICENSE)
 #   ~/.march/current        -> versions/<tag>     (active toolchain)
 #   ~/.march/bin/{march,forge}  wrapper scripts that exec through current/
 set -eu
