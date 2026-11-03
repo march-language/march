@@ -2317,6 +2317,8 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
   let decls = List.map (fun d ->
       inject_defaults interfaces (desugar_decl d)
     ) expanded in
+  (* Interface laws: one lemma per impl, over copies of its methods. *)
+  let decls = Interface_laws.expand decls in
   (* The entry file's own top-level mod name is unwrapped by TIR, so a
      source reference that self-qualifies with it (e.g. [Foo.bar] inside
      [mod Foo]) must have that leading segment stripped before qualification,

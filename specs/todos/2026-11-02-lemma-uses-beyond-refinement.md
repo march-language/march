@@ -11,19 +11,20 @@ Done on 2026-11-03 (`specs/progress/2026-11-03-lemma-tests-laws-search.md`): ide
 unproved lemma becomes a property test in `forge test`), idea 2 (admitted lemmas re-checked in
 the interpreter and a compiled program), idea 3 (status marks: march-language/march_doc#7), idea 4 (text, then shapes:
 `specs/progress/2026-11-03-law-shape-search.md`),
-and idea 10 (guidance); idea 5 for the open file's lemmas
-(`specs/progress/2026-11-03-lemma-refutation-and-rewrites.md`). What remains of them:
+and idea 10 (guidance); idea 5 (`specs/progress/2026-11-03-lemma-refutation-and-rewrites.md`,
+`specs/progress/2026-11-03-laws-across-files.md`), idea 6 (`specs/progress/2026-11-03-interface-laws.md`). What remains of them:
 
-5. **Proof-backed rewrites: other files' lemmas.** The LSP rewrite
-   (`specs/progress/2026-11-03-lemma-refutation-and-rewrites.md`) uses the open file's lemmas
-   only. The stdlib's (phase 3) and dependencies' need their admitted status too.
+6. **Interface laws: what is left.**
+   - Generated proofs for derived impls: `derive` only produces impls of the built-in
+     interfaces (`Eq`, `Ord`, `Show`, `Hash`, `Json`), which declare no laws, so there is
+     nothing to generate yet. A law over `Eq` would also meet D7 (`==` in the logic is
+     structural, a hand-written `eq` opaque). `satisfy` impls are already covered: they are
+     expanded before the laws are.
+   - The compiled side of `--lemma-test`: a generated lemma has no source text, so the
+     compiled harness skips it ("compiled not run"); the interpreter side runs.
 
 The open ideas:
 
-6. **Interface laws.** `interface Monoid` declares `combine_assoc` and `empty_left` as lemmas
-   that every `impl` must discharge, as proofs or at least as idea 1's tests. A derived impl
-   could carry generated proofs. This is blocked by D7 (a hand-written `eq` is opaque) for laws
-   over `Eq`.
 7. **Versioning by behaviour.** A package's lemmas are part of its public interface:
    `forge publish` checks that the new version still proves the previous version's lemmas, so
    breaking a published law is flagged as a breaking change. Related:

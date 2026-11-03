@@ -287,6 +287,9 @@ let rec drop_unreferenced (whole : decl list) (decls : decl list) : decl list =
     (fun d ->
       match d with
       | DFn (fd, _) when is_lemma fd && not (mentions fd.fn_name.txt whole) -> None
+      (* An impl method's copy for an interface law ([Interface_laws]): only
+         its lemmas used it. *)
+      | DFn (fd, _) when String.starts_with ~prefix:Interface_laws.copy_prefix fd.fn_name.txt -> None
       | DMod (n, v, inner, sp) -> Some (DMod (n, v, drop_unreferenced whole inner, sp))
       | DDescribe (s, inner, sp) -> Some (DDescribe (s, drop_unreferenced whole inner, sp))
       | d -> Some d)
