@@ -7,5 +7,6 @@ hint: add `derive Json for Ping` next to its declaration; the compiler then mint
 16 |     let _ = Node.enqueue(q, GlobalPid.make("b", 1, 1), p, NodeQueue.DropNew)
                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+    run `march --explain codec_missing`
 
 

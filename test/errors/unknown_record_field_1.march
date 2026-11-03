@@ -1,11 +1,14 @@
--- EXPECT-ERROR: Did you mean `count`?
 mod Main do
-  -- Did-you-mean ranking (X8 tier 1): `cont` is the closer spelling of
-  -- `conut`, but it is a `String` and the annotation wants an `Int`, which
-  -- `count` is.
-  fn main() do
-    let r = { count: 1, cont: "x" }
-    let n : Int = r.conut
-    n
+  needs IO.Console
+
+  actor Counter do
+    state { count : Int, label : String }
+    init { count: 0, label: "c" }
+    on Bump(k : Int) do { state with cuont: state.count + k } end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let c = spawn(Counter)
+    send(c, Bump(1))
   end
 end

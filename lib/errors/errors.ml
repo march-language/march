@@ -240,7 +240,12 @@ let sorted ctx =
      linearity and session errors: the generated role modules everything
      else is checked against are built from the invalid protocol, so those
      errors are its consequences (fix the protocol first);
-   - an error with no source position (line 0) beside a positioned one. *)
+   - an error with no source position (line 0) beside a positioned one;
+   - an [overlapping_impl] for `impl I(T)` when [json_derive_name_collision]
+     reports `T`: the two codecs overlap because the two types share a name,
+     which that error already says (with both sites);
+   - an [ambiguous_constructor] hint inside a [send_wrong_actor] error: that
+     error already says which actor the bare message resolves to. *)
 let slug_of_code = Code.slug_of
 
 let first_backticked s =
@@ -305,6 +310,13 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
     List.length (List.filter (fun d ->
         is_err d && (let sl = slug_of_code d.code in
                      String.length sl > 8 && String.sub sl 0 8 = "session_")) ds) in
+  let json_collisions =
+    List.filter_map (fun d ->
+        if is_err d && has_slug Code.json_derive_name_collision d then first_backticked d.message
+        else None) ds in
+  let wrong_actor_spans =
+    List.filter_map (fun d ->
+        if is_err d && has_slug Code.send_wrong_actor d then Some d.span else None) ds in
   let positioned_error = List.exists (fun d -> is_err d && d.span.start_line > 0) ds in
   let within (inner : March_ast.Ast.span) (outer : March_ast.Ast.span) =
     inner.file = outer.file
@@ -360,6 +372,10 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
             && List.exists (fun o -> within d.span o) proof_cap_spans)
         || (protocol_invalid && is_err d && protocol_follow_on sl)
         || (is_err d && d.span.start_line = 0 && positioned_error)
+        || (sl = Code.ambiguous_constructor
+            && List.exists (fun o -> within d.span o) wrong_actor_spans)
+        || (sl = Code.overlapping_impl
+            && List.exists (fun t -> contains_sub d.message ("(" ^ t ^ ")`")) json_collisions)
         || (sl = Code.cap_ceiling
             && (match String.index_opt d.code ':' with
                 | Some i ->

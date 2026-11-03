@@ -5292,8 +5292,10 @@ let test_test_body_eq_reported_at_test_not_next_fn () =
 end|} in
   Alcotest.(check int) "one Eq error" 1
     (count_errors_matching ctx "`Hue` does not implement interface `Eq`.");
-  Alcotest.(check (list int)) "pinned to the test (line 4), not `helper` (line 8)"
-    [4] (eq_error_lines ctx)
+  (* Reported at the `==` that needs the impl (diagnostics-depth plan §F6),
+     inside the test, not at `helper`. *)
+  Alcotest.(check (list int)) "pinned to the `==` in the test (line 5), not `helper` (line 8)"
+    [5] (eq_error_lines ctx)
 
 let test_test_body_eq_checked_without_later_fn () =
   let ctx = typecheck {|mod M do
