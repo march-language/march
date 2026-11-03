@@ -19,6 +19,15 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **Native compiles are about 45% faster for small programs.** Code the program
+  cannot reach (most of the prepended stdlib) is now dropped right after
+  defunctionalization instead of after the optimizer, so Perceus, drop, escape
+  and the optimizer no longer run over ~9,000 unused functions. Programs are
+  the same apart from some inlining choices, which now count only reachable
+  callers. `--disable-pass dce-early` turns it off.
+
 ### Fixed
 
 - **`--target js` byte strings are fast in Safari.** Each byte access on a long string
