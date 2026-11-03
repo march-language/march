@@ -86,7 +86,7 @@ Plan: `specs/plans/2026-11-02-reflection-phase2-lemmas-plan.md`.
   says only that it is not assumed.
 - **`stdlib_lemma_manifest`** belongs to phase 3, as the spec's table marks it.
 
-## Tests (group `reflect-lemma`, `test/test_refine_lemma.ml`; 32 cases)
+## Tests (group `reflect-lemma`, `test/test_refine_lemma.ml`; 35 cases)
 
 They cover:
 - L1-L5;
@@ -126,6 +126,27 @@ Perturbations recorded, each one RED:
 
 Not run: `scripts/browser-repl-smoke.js` with a lemma case (todo
 `2026-11-02-browser-repl-smoke-lemma-case`).
+
+## Soundness review, round 1 (fresh reviewer, 2026-11-03)
+
+Two confirmed findings, both fixed with a test that goes RED without the fix:
+
+- **F1, a false proof.** A lemma's theorem was checked at each tail under the names in scope there.
+  So `let n = 0` (or an inner `Cons(_, xs)`) made `{Unit | n == 0}` hold, the lemma was admitted,
+  and a caller's `need0(k)` was proved while `f(5)` passes 5.
+  - Fix: a lemma whose body binds a parameter's name again (`let`, pattern, lambda or local `fn`)
+    is `invalid_lemma` (L2).
+  - Tests: `sound_rebind_param`, `sound_rebind_pattern`.
+- **F2, erasure changed behaviour.** Erasure matched a call by its last segment, but the builtin
+  guard checked only bare names. A lemma named `which_children` therefore erased
+  `Supervisor.which_children(...)`: the interpreter panicked and the compiled program crashed.
+  - Fix: `Lemma_erase.reserved_by` reserves the last segment of every builtin key.
+  - Test: `erase_qualified_builtin`.
+
+One suspicion, not reproduced, was fixed defensively. Encoder fix 3 could give an unconstrained type
+parameter the sort `Bool`. That is a two-valued domain, where a quantifier-free equality goal can
+hold although it is false in general. The default now applies only when the query's single concrete
+sort is `Int`.
 
 ## Follow-ups filed
 

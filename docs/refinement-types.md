@@ -1516,7 +1516,8 @@ Anything else, such as a call that prints, is the error
 **What a lemma may be** (`invalid_lemma` otherwise):
 - its result type is `{Unit | P}`;
 - its body has no effects, no failure path and no `match` that might not
-  match;
+  match, and never binds a parameter's name again (a `let` or a pattern): the
+  theorem is about the parameters as passed in;
 - it calls only reflected functions, other lemmas, constructors, and builtins
   the logic knows;
 - if it is recursive, its recursion provably terminates;

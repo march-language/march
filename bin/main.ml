@@ -870,8 +870,10 @@ let print_refine_report_sites ~filename ~user_files () =
    verdict.  [lemma_env] is built over the whole program (stdlib included),
    so a name another declaration also binds is never erased. *)
 let lemma_reserved n =
-  List.mem_assoc n March_typecheck.Typecheck_builtins.builtin_bindings
-  || List.mem_assoc n March_typecheck.Typecheck_builtins.builtin_interface_bindings
+  March_desugar.Lemma_erase.reserved_by
+    (List.map fst March_typecheck.Typecheck_builtins.builtin_bindings
+     @ List.map fst March_typecheck.Typecheck_builtins.builtin_interface_bindings)
+    n
 
 let erase_lemmas_in ~(whole : March_ast.Ast.module_) (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
   let env = March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved whole.March_ast.Ast.mod_decls in

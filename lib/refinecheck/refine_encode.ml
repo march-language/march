@@ -4003,7 +4003,7 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
        parameter unconstrained, which would put it at `Elem` while the goal
        is at `Int`, and the two never meet.  Such a fact is parametric (no
        element operation pins its sort), so it holds at whichever sort the
-       query's other instances use; when they all use one scalar sort, the
+       query's other instances use; when they all use `Int`, the
        unconstrained parameters take it.  Stage 1 keeps `Elem`. *)
     if !Reflect_state.arm_on then begin
       let found = ref [] in
@@ -4011,8 +4011,12 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       List.iter
         (fun t -> match repr t with INamed (_, xs) -> List.iter note xs | t -> note t)
         !slots;
+      (* Only an infinite domain: a quantifier-free fact over an
+         uninterpreted sort keeps its truth at `Int`, but `Bool` has two
+         values, so a goal like `x == y || y == z || x == z` would hold
+         there and not in general (soundness review). *)
       match !found with
-      | [ c ] -> default_param := to_sort c
+      | [ IInt ] -> default_param := Smt.SInt
       | _ -> ()
     end;
     let queue = ref (List.rev !slots) in

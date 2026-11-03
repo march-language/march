@@ -14,8 +14,10 @@ numbered as in the message:
 - **L1.** Its result type is `{Unit | P}`, and `P` does not mention the unit value `_`.
 - **L2.** Its body is total and pure. It has no effects (`println`, `send`, `spawn`), no failure
   path (`panic`, `todo`, a typed hole, a division the checker can't prove safe), no `match`
-  that might not match, and no lambdas. An `assert` is allowed. Inside a lemma it is a step of
-  the proof, checked statically, never at run time.
+  that might not match, and no lambdas. It never binds a parameter's name again, with a `let` or
+  a pattern: the theorem is about the parameters as passed in, so `let n = 0` must not make
+  `n == 0` look true. An `assert` is allowed. Inside a lemma it is a step of the proof, checked
+  statically, never at run time.
 - **L3.** It calls only reflected functions, other lemmas, constructors, and the builtins the
   logic knows (arithmetic, comparisons on `Int` and `Float`, `&&`, `||`, `not`).
 - **L4.** If it is recursive, the checker can prove the recursion terminates. Its recursive call is

@@ -123,6 +123,15 @@ let rec scan acc (decls : decl list) =
       | _ -> (lemmas, others))
     acc decls
 
+(* A lemma name a builtin also spells, bare or as the last segment of a
+   qualified builtin (`Supervisor.which_children`; soundness review F2):
+   erasure matches a call by its last segment, so such a name is never
+   erased. *)
+let reserved_by (builtins : string list) : string -> bool =
+  let tbl = Hashtbl.create 512 in
+  List.iter (fun k -> Hashtbl.replace tbl (last_segment k) ()) builtins;
+  Hashtbl.mem tbl
+
 let env_of_decls ?(reserved : string -> bool = fun _ -> false) (decls : decl list) : env =
   let lemmas, others = scan (SS.empty, SS.empty) decls in
   { erasable = SS.filter (fun n -> not (SS.mem n others || reserved n)) lemmas }

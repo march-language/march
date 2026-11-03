@@ -93,6 +93,46 @@ end
         in
         expect_invalid out ~name:"a" ~rule:"L5";
         expect_invalid out ~name:"b" ~rule:"L5");
+    gated "sound_rebind_param: a lemma rebinding a parameter is L2, and its caller gets nothing (review F1)" (fun () ->
+        (* `let n = 0` made the theorem `n == 0` read the new `n` at the tail:
+           `l` was admitted and `need0(k)` proved, while `f(5)` passes 5. *)
+        let out =
+          run
+            {|mod N do
+  @[lemma]
+  fn l(n : Int) : {Unit | n == 0} do
+    let n = 0
+    ()
+  end
+  fn need0(x : {Int | _ == 0}) : Int do x end
+  fn f(k : Int) : Int do
+    l(k)
+    need0(k)
+  end
+end
+|}
+        in
+        expect_invalid out ~name:"l" ~rule:"L2";
+        U.not_proved out ~line:10 ~callee:"need0");
+    gated "sound_rebind_pattern: an inner pattern rebinding a parameter is L2 (review F1)" (fun () ->
+        let out =
+          run ~args:"--check"
+            ("mod N do\n" ^ cat
+           ^ {|  @[lemma]
+  fn l(xs : List(Int)) : {Unit | cat(xs, Nil) == Nil} do
+    match xs do
+      Nil -> ()
+      Cons(_, xs) ->
+        match xs do
+          Nil -> ()
+          Cons(_, _) -> ()
+        end
+    end
+  end
+end
+|})
+        in
+        expect_invalid out ~name:"l" ~rule:"L2");
     gated "lemma_ok: a well-formed lemma is neither invalid nor an unknown attribute" (fun () ->
         let out =
           run ~args:"--check"
@@ -550,6 +590,16 @@ end
         in
         if U.count_code out "lemma_argument_impure" <> 1 then
           Alcotest.failf "expected exactly one lemma_argument_impure (f's, not g's):\n%s" out);
+    gated "erase_qualified_builtin: a lemma named like a qualified builtin keeps its calls (review F2)" (fun () ->
+        let src ~lemma =
+          "mod N do\n  needs IO.Console\n"
+          ^ (if lemma then "  @[lemma]\n  fn which_children(n : Int) : {Unit | n == n} do () end\n" else "\n\n")
+          ^ "  fn main(_cap : Cap(IO.Console)) do\n    let kids = Supervisor.which_children(:nope)\n    println(int_to_string(List.length(kids)))\n  end\nend\n"
+        in
+        let a = output `Interp (src ~lemma:true) and b = output `Interp (src ~lemma:false) in
+        let last s = match List.rev (lines s) with l :: _ -> String.trim l | [] -> "" in
+        if last a <> "0" || last b <> "0" || contains a "panic" then
+          Alcotest.failf "the builtin call must survive erasure:\n--with--\n%s\n--without--\n%s" a b);
     gated "lemma_shadow: a non-lemma sharing a lemma's name keeps its calls" (fun () ->
         let src =
           {|mod Main do

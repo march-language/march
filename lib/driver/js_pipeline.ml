@@ -34,9 +34,10 @@ let compile_module_to_js ~source_file ~fn_lines (m : March_ast.Ast.module_) :
       { m with
         March_ast.Ast.mod_decls =
           March_desugar.Lemma_erase.erase_module
-            ~reserved:(fun n ->
-              List.mem_assoc n March_typecheck.Typecheck_builtins.builtin_bindings
-              || List.mem_assoc n March_typecheck.Typecheck_builtins.builtin_interface_bindings)
+            ~reserved:
+              (March_desugar.Lemma_erase.reserved_by
+                 (List.map fst March_typecheck.Typecheck_builtins.builtin_bindings
+                  @ List.map fst March_typecheck.Typecheck_builtins.builtin_interface_bindings))
             m.March_ast.Ast.mod_decls }
     in
     let tir = March_tir.Lower.lower_module ~type_map m in

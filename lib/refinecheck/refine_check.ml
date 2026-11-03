@@ -8147,6 +8147,42 @@ let lemma_post (fd : A.fn_def) : (string * A.expr, string) result =
     else Ok (bn, pred)
   | _ -> Error "its result type must be `{Unit | P}`, where `P` is the theorem"
 
+(* A name the body of [fd] binds again that is also one of its parameters
+   (soundness review F1): the theorem talks about the parameters' values at
+   entry, but each tail is checked under the names in scope there, so a
+   `let n = 0` or an inner `Cons(_, xs)` would be read as the parameter. *)
+let lemma_rebound_param (fd : A.fn_def) : string option =
+  let params =
+    List.concat_map
+      (fun (c : A.fn_clause) ->
+        List.concat_map
+          (function A.FPNamed p | A.FPDefault (p, _) -> [ p.A.param_name.A.txt ] | A.FPPat _ -> [])
+          c.A.fc_params)
+      fd.A.fn_clauses
+  in
+  let rec pat acc (p : A.pattern) =
+    match p with
+    | A.PatVar n -> n.A.txt :: acc
+    | A.PatAs (q, n, _) -> pat (n.A.txt :: acc) q
+    | A.PatCon (_, ps) | A.PatAtom (_, ps, _) | A.PatTuple (ps, _) | A.PatOr (ps, _) -> List.fold_left pat acc ps
+    | A.PatRecord (fs, _) -> List.fold_left (fun acc (_, q) -> pat acc q) acc fs
+    | A.PatWild _ | A.PatLit _ -> acc
+  in
+  let bound = ref [] in
+  let rec go (e : A.expr) =
+    (match e with
+     | A.ELet (b, _) -> bound := pat !bound b.A.bind_pat
+     | A.EMatch (_, brs, _) -> List.iter (fun (br : A.branch) -> bound := pat !bound br.A.branch_pat) brs
+     | A.ELam (ps, _, _) -> List.iter (fun (p : A.param) -> bound := p.A.param_name.A.txt :: !bound) ps
+     | A.ELetFn (n, ps, _, _, _) ->
+       bound := n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps @ !bound
+     | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> bound := pat !bound p
+     | _ -> ());
+    List.iter go (Refine_encode.children e)
+  in
+  List.iter (fun (c : A.fn_clause) -> go c.A.fc_body) fd.A.fn_clauses;
+  List.find_opt (fun p -> List.mem p !bound) params
+
 let warn_unknown_attributes errctx (decls : A.decl list) : unit =
   let check (fd : A.fn_def) =
     List.iter
@@ -9191,6 +9227,12 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       | None -> (
         match lemma_post fd with
         | Error why -> lemma_err fd 1 why
+        | Ok _ when lemma_rebound_param fd <> None ->
+          lemma_err fd 2
+            (Printf.sprintf
+               "it binds `%s` again; the theorem is about the parameter `%s` as passed in, so its body \
+                may not reuse that name (rename the inner binding)"
+               (Option.get (lemma_rebound_param fd)) (Option.get (lemma_rebound_param fd)))
         | Ok _ -> (
           match Hashtbl.find_opt Refine_reflect.lemma_blocked fd.A.fn_name.A.span with
           | Some (2, why) ->
