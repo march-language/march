@@ -77,6 +77,24 @@ val merge_seed : seed -> seed -> seed
     function may differ in arity only through desugar's arity mangling, where
     the longer list is the more informative one. *)
 
+val reaches_unknown :
+  ?scopes:(string, string) Hashtbl.t ->
+  known:(string, 'a) Hashtbl.t ->
+  refs:(string, string list) Hashtbl.t ->
+  seed_unknown:(string -> bool) ->
+  string ->
+  bool
+(** [reaches_unknown ~known ~refs ~seed_unknown root] is [solve]'s [unknown]
+    flag for [root], computed by walking only what [root] reaches: [root] or
+    a function it reaches through [refs] (resolved as [solve] resolves them,
+    against the functions in [known]) invokes a function value of
+    untraceable origin, per [seed_unknown].  [unknown] spreads only along
+    reference edges ([deps] never feed it), so this equals [solve]'s flag
+    without classifying every body in the program. *)
+
+val bodies_classified : int ref
+(** Count of [seed_of_bodies] calls, for tests. *)
+
 val seed_of_bodies : (string list * March_ast.Ast.expr) list -> seed
 (** [seed_of_bodies bodies] classifies each [(params, body)] pair exactly the
     way [Typecheck.record_fn_refs] pairs a clause's parameter names with its

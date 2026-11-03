@@ -590,6 +590,29 @@ let test_builtin_hash_bound () =
   end
 end|}
 
+(* Every program has bound points (the stdlib's impls of the built-in
+   Show/Eq/Ord/Hash, all `needs ()`), so the bound check runs on every
+   typecheck.  It must look only at what the bounded bodies reach: classifying
+   every function body in the program made each `--check` ~3x slower and timed
+   out CI's property tests. *)
+let test_bound_check_classifies_only_reached_bodies () =
+  (* 200 functions no bounded body reaches, beside one bounded impl. *)
+  let unrelated =
+    String.concat "\n"
+      (List.init 200 (fun i -> Printf.sprintf "  fn f%d(x : Int) : Int do x + %d end" i i))
+  in
+  let src = m (Printf.sprintf {|  type P = P(Int)
+  impl Show(P) do
+    fn show(p : P) : String do match p do P(n) -> int_to_string(n) end end
+  end
+%s|} unrelated) in
+  March_caps.Cap_rows.bodies_classified := 0;
+  clean "no violation" src;
+  let n = !March_caps.Cap_rows.bodies_classified in
+  Alcotest.(check bool)
+    (Printf.sprintf "classified %d bodies; the bounded impl reaches only a few" n)
+    true (n <= 20)
+
 let tests =
   [ Alcotest.test_case "direct reach" `Quick test_direct_reach
   ; Alcotest.test_case "transitive reach names the chain" `Quick test_transitive_reach_names_the_chain
@@ -629,4 +652,6 @@ let tests =
   ; Alcotest.test_case "narrowed impl reported once" `Quick test_narrowed_impl_reported_once
   ; Alcotest.test_case "qualified impl binds the named interface" `Quick test_qualified_impl_binds_the_named_interface
   ; Alcotest.test_case "built-in Hash bound" `Quick test_builtin_hash_bound
+  ; Alcotest.test_case "bound check classifies only reached bodies" `Quick
+      test_bound_check_classifies_only_reached_bodies
   ]
