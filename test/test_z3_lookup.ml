@@ -221,16 +221,16 @@ let count s sub =
 
 (* Run `march --check FILE` (or [flags]) in [cwd]; MARCH_Z3 unset unless
    given; PATH is /usr/bin:/bin plus [path_extra] (no z3 there). *)
-let march_check ?march_z3 ?(path_extra = []) ?(cwd = fresh_dir "cwd") ?(home = fresh_dir "home") src =
+let march_check ?(flags = "") ?(extra_env = "") ?march_z3 ?(path_extra = []) ?(cwd = fresh_dir "cwd") ?(home = fresh_dir "home") src =
   let file = Filename.concat cwd "m.march" in
   Out_channel.with_open_bin file (fun oc -> output_string oc src);
   let out = Filename.concat cwd "out.txt" in
   let env_z3 = match march_z3 with Some p -> "MARCH_Z3=" ^ Filename.quote p | None -> "" in
   let cmd =
-    Printf.sprintf "cd %s && /usr/bin/env -u MARCH_Z3 -u XDG_CACHE_HOME -u MARCH_REFINE_Z3_LOG HOME=%s PATH=%s %s %s --check m.march > %s 2>&1 < /dev/null"
+    Printf.sprintf "cd %s && /usr/bin/env -u MARCH_Z3 -u XDG_CACHE_HOME -u MARCH_REFINE_Z3_LOG -u MARCH_REFINE_RLIMIT HOME=%s PATH=%s %s %s %s --check%s m.march > %s 2>&1 < /dev/null"
       (Filename.quote cwd) (Filename.quote home)
       (Filename.quote (String.concat ":" (path_extra @ [ "/usr/bin"; "/bin" ])))
-      env_z3 (Filename.quote (Test_helpers.find_main_exe ())) (Filename.quote out)
+      env_z3 extra_env (Filename.quote (Test_helpers.find_main_exe ())) flags (Filename.quote out)
   in
   let rc = Sys.command cmd in
   (rc, In_channel.with_open_bin out In_channel.input_all)
@@ -307,6 +307,32 @@ let driver_suite =
         Alcotest.(check bool) "says the solver could not be run" true
           (contains out "the solver could not be run")) ]
 
+(* `--refine-rlimit N` / MARCH_REFINE_RLIMIT (what forge sets from
+   forge.toml's [refine] rlimit) replace the default per-query limit.  A
+   `cap verified` module turns "undecided" into an exit code. *)
+let verified_src =
+  "mod V do\n  cap verified\n  fn take(n : {Int | _ >= 0}) : Int do n end\n\
+  \  fn f(x : {Int | _ > 3}) : Int do take(x - 1) end\nend\n"
+
+let rlimit_suite =
+  let with_z3 f = match Lazy.force real_z3 with
+    | None -> print_endline "[skip] no real z3 on PATH"
+    | Some z3 -> f z3 in
+  [ Alcotest.test_case "refine_rlimit_flag_changes_verdict" `Quick (fun () ->
+        with_z3 (fun z3 ->
+            let rc, out = march_check ~march_z3:z3 verified_src in
+            Alcotest.(check int) ("default limit proves it\n" ^ out) 0 rc;
+            let rc, _ = march_check ~march_z3:z3 ~flags:" --refine-rlimit 1" verified_src in
+            Alcotest.(check int) "a limit of 1 cannot" 1 rc));
+    Alcotest.test_case "refine_rlimit_env_changes_verdict" `Quick (fun () ->
+        with_z3 (fun z3 ->
+            let rc, _ = march_check ~march_z3:z3 ~extra_env:"MARCH_REFINE_RLIMIT=1" verified_src in
+            Alcotest.(check int) "MARCH_REFINE_RLIMIT=1 cannot prove it" 1 rc));
+    Alcotest.test_case "refine_rlimit_rejects_zero" `Quick (fun () ->
+        let rc, out = march_check ~flags:" --refine-rlimit 0" hello in
+        Alcotest.(check int) "usage error" 2 rc;
+        Alcotest.(check bool) "says why" true (contains out "--refine-rlimit")) ]
+
 let () =
   Alcotest.run "z3_lookup"
-    [ ("lookup", lookup_suite); ("probe", probe_suite); ("driver", driver_suite) ]
+    [ ("lookup", lookup_suite); ("probe", probe_suite); ("driver", driver_suite); ("rlimit", rlimit_suite) ]

@@ -7196,6 +7196,11 @@ let () =
      " Print the fn-name -> origin provenance table after the TIR pipeline (with --emit-llvm/--compile/--dump-tir)");
     ("--shell",      Arg.String (fun p -> shell_socket := Some p),
      "<socket> A remote shell on the node serving <socket> (its `<reload socket>.shell`): typecheck the program once, then compile each input into a signed fragment the node runs");
+    ("--refine-rlimit",
+     Arg.Int (fun n ->
+         if n <= 0 then raise (Arg.Bad "march: --refine-rlimit wants a positive integer\n")
+         else March_refine.Solver.set_rlimit n),
+     "<n> The per-query z3 resource limit for refinement proofs (default: the measured one; MARCH_REFINE_RLIMIT also sets it)");
     ("--shell-timeout-ms", Arg.Int (fun n -> shell_timeout_ms := n),
      "<ms> With --shell: how long each input may run on the node (default 10000, max 30000)");
     ("--shell-inputs", Arg.String (fun f -> shell_inputs := Some (In_channel.with_open_bin f In_channel.input_all)),

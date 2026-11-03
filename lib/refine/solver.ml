@@ -31,9 +31,25 @@ let backstop_ms () : int =
    time).  The values are measured against the corpus and the stdlib
    (specs/progress/2026-11-02-z3-rlimit-measurement.md).  Stage-2 reflection
    queries get their own, smaller limit. *)
-let default_rlimit = ref 3_000_000
+let base_rlimit = 3_000_000
 
-let stage2_rlimit = ref 1_000_000
+let base_stage2_rlimit = 1_000_000
+
+let default_rlimit = ref base_rlimit
+
+let stage2_rlimit = ref base_stage2_rlimit
+
+(* A project's override (`--refine-rlimit N`, or MARCH_REFINE_RLIMIT, which
+   forge sets from forge.toml's [refine] rlimit) sets the main limit; the
+   stage-2 limit keeps its ratio to it. *)
+let set_rlimit (n : int) : unit =
+  default_rlimit := n;
+  stage2_rlimit := max 1 (n / base_rlimit * base_stage2_rlimit + n mod base_rlimit * base_stage2_rlimit / base_rlimit)
+
+let () =
+  match Sys.getenv_opt "MARCH_REFINE_RLIMIT" with
+  | Some s -> (match int_of_string_opt (String.trim s) with Some n when n > 0 -> set_rlimit n | _ -> ())
+  | None -> ()
 
 (* ── Lookup ────────────────────────────────────────────────────────────────
    One lookup, used by the CLI, forge (which runs march) and the editor's
