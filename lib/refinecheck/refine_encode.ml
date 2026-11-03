@@ -3804,9 +3804,11 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
     | Smt.SParam i -> if i < Array.length params then params.(i) else fresh ()
     | Smt.SSet e -> ISet (of_sort ~params e)
   in
+  (* Stage 2 only: the sort an unconstrained type parameter takes (below). *)
+  let default_param : Smt.sort ref = ref (Smt.sdata "Elem") in
   let rec to_sort (t : isort) : Smt.sort =
     match repr t with
-    | IVar _ -> Smt.sdata "Elem"
+    | IVar _ -> !default_param
     | IInt -> Smt.SInt
     | IBool -> Smt.SBool
     | IFloat -> Smt.SFloat
@@ -3996,6 +3998,27 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
   List.iter (fun a -> ignore (infer a)) assumptions;
   if !conflict then None
   else begin
+    (* Stage 2 (reflection design §4.6): a fact with no element in it, such
+       as a proved `assert rev(Nil) == Nil`, leaves its instance's type
+       parameter unconstrained, which would put it at `Elem` while the goal
+       is at `Int`, and the two never meet.  Such a fact is parametric (no
+       element operation pins its sort), so it holds at whichever sort the
+       query's other instances use; when they all use `Int`, the
+       unconstrained parameters take it.  Stage 1 keeps `Elem`. *)
+    if !Reflect_state.arm_on then begin
+      let found = ref [] in
+      let note t = match repr t with IInt | IBool | IFloat as c -> if not (List.mem c !found) then found := c :: !found | _ -> () in
+      List.iter
+        (fun t -> match repr t with INamed (_, xs) -> List.iter note xs | t -> note t)
+        !slots;
+      (* Only an infinite domain: a quantifier-free fact over an
+         uninterpreted sort keeps its truth at `Int`, but `Bool` has two
+         values, so a goal like `x == y || y == z || x == z` would hold
+         there and not in general (soundness review). *)
+      match !found with
+      | [ IInt ] -> default_param := Smt.SInt
+      | _ -> ()
+    end;
     let queue = ref (List.rev !slots) in
     let pop () = match !queue with t :: rest -> queue := rest; t | [] -> fresh () in
     let instances = ref [] in
@@ -4312,6 +4335,22 @@ let resolve_sorts (decls : (string * Smt.sort) list) (goal : Smt.term)
      are settled so their constructor instances resolve with the rest. *)
   let decls, assumptions =
     if !Reflect_state.arm_on then !Reflect_state.unfold_hook decls goal assumptions else (decls, assumptions)
+  in
+  (* Stage 2: a lemma body's pattern links ([Reflect_state.links]) between
+     two constants the query declares, the scrutinee at a datatype sort.  A
+     link whose sorts disagree is dropped by the re-admission below, as any
+     ill-sorted assumption is. *)
+  let assumptions =
+    if not !Reflect_state.arm_on then assumptions
+    else
+      assumptions
+      @ List.filter_map
+          (fun (b, x, k, i) ->
+            match List.assoc_opt b decls, List.assoc_opt x decls with
+            | Some _, Some (Smt.SData _) ->
+              Some (Smt.Eq (Smt.Const b, Smt.App (Printf.sprintf "%s_%d" k i, [ Smt.Const x ])))
+            | _ -> None)
+          !Reflect_state.links
   in
   match resolve_sorts_exact decls goal assumptions with
   | Some r -> Some r

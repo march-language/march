@@ -459,7 +459,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
       let lexbuf = Lexing.from_string file_src in
       (match (try
         let m = March_parser.Parse.module_of_lexbuf lexbuf in
-        Some (March_desugar.Desugar.desugar_module m)
+        Some (let d = March_desugar.Desugar.desugar_module m in
+              { d with March_ast.Ast.mod_decls = March_desugar.Lemma_erase.blank_lemmas d.March_ast.Ast.mod_decls })
       with exn ->
         Printf.eprintf "parse error in %s: %s\n%!" path (Printexc.to_string exn); None) with
       | None -> None
@@ -842,7 +843,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         ~report:(fun rendered -> Printf.eprintf "%s\n%!" rendered) with
                | None | Some March_ast.Ast.ReplEOF -> ()
                | Some (March_ast.Ast.ReplDecl d) ->
-                 let d' = March_desugar.Desugar.desugar_decl d in
+                 let d' = March_desugar.Lemma_erase.blank_lemma_decl (March_desugar.Desugar.desugar_decl d) in
                  (* Auto-load user modules on `import Foo` / `import Foo.{bar}` etc.
                     Synthesise a dummy module containing just this declaration, run
                     resolve_imports (which finds Foo in the CWD), then process the
@@ -1338,7 +1339,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       let lexbuf = Lexing.from_string file_src in
       (match (try
         let m = March_parser.Parse.module_of_lexbuf lexbuf in
-        Some (March_desugar.Desugar.desugar_module m)
+        Some (let d = March_desugar.Desugar.desugar_module m in
+              { d with March_ast.Ast.mod_decls = March_desugar.Lemma_erase.blank_lemmas d.March_ast.Ast.mod_decls })
       with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
       | None -> None
       | Some desugared ->
@@ -1430,7 +1432,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                  (String.split_on_char '\n' rendered)) with
     | None | Some March_ast.Ast.ReplEOF -> ()
     | Some (March_ast.Ast.ReplDecl d) ->
-      let d' = March_desugar.Desugar.desugar_decl d in
+      let d' = March_desugar.Lemma_erase.blank_lemma_decl (March_desugar.Desugar.desugar_decl d) in
       (* Auto-load user modules on `import Foo` typed directly in the REPL. *)
       (match d' with
        | March_ast.Ast.DUse _ | March_ast.Ast.DAlias _ ->
@@ -2080,7 +2082,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                let lexbuf = Lexing.from_string file_src in
                (match (try
                  let m = March_parser.Parse.module_of_lexbuf lexbuf in
-                 Some (March_desugar.Desugar.desugar_module m)
+                 Some (let d = March_desugar.Desugar.desugar_module m in
+              { d with March_ast.Ast.mod_decls = March_desugar.Lemma_erase.blank_lemmas d.March_ast.Ast.mod_decls })
                with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
                | None -> ()
                | Some desugared ->

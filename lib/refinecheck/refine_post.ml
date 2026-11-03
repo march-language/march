@@ -2389,6 +2389,15 @@ let rec pred_mentions_elts (e : A.expr) : bool =
    never propagates anything. *)
 let is_assumed (fd : A.fn_def) : bool = List.mem "assume" fd.A.fn_attrs
 
+(* A lemma's theorem (reflection design §4.3) is checked by a walk of its body
+   ([Refine_check.lemma_scratch_verdict]), which sees its `assert`s and its
+   lemma calls; the tail engine here sees neither.  Installed by
+   [Refine_check] at module init; [false] (not proved) until then.  The
+   module path is the gate's ([checking_prefix]). *)
+let lemma_verdict : (root:string -> Err.ctx -> A.fn_def -> bool) ref = ref (fun ~root:_ _ _ -> false)
+
+let lemma_prefix : string ref = ref ""
+
 let assumed_return (fd : A.fn_def) : A.expr option =
   match Option.map unlinear fd.A.fn_ret_ty with
   | Some (A.TyRefine (_, _, pred)) -> Some pred
@@ -2405,7 +2414,8 @@ let assumed_return (fd : A.fn_def) : A.expr option =
    type with no declared measure -- is unchecked, and that one now files a
    recorded skip instead of nothing. *)
 let return_refinement_checked (fd : A.fn_def) : bool =
-  (is_assumed fd && assumed_return fd <> None)
+  List.mem "lemma" fd.A.fn_attrs
+  || (is_assumed fd && assumed_return fd <> None)
   ||
   match return_refine_ext fd with
   | None -> post_induction_shape fd <> None
@@ -2456,6 +2466,8 @@ let rec check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool
     with_post_lookup lookup (fun () -> check_fn_post_verdict_core ~root errctx ~emit fd)
 
 and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
+  if List.mem "lemma" fd.A.fn_attrs then !lemma_verdict ~root errctx fd
+  else
   match assumed_return fd with
   | Some pred when is_assumed fd ->
     if emit then
@@ -2688,6 +2700,7 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
     let ctx = { rctx0 with modpath = prefix } in
     let lookup = postcond_of ctx defs in
     checking_prefix := prefix;
+    lemma_prefix := prefix;
     with_tail_demand (!tail_demand_of ~root ctx defs) (fun () ->
         with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd))
   in

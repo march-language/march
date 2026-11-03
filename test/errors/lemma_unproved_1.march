@@ -1,0 +1,17 @@
+mod Main do
+  fn cat(xs : List(Int), ys : List(Int)) : List(Int) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, cat(t, ys))
+    end
+  end
+
+  @[lemma]
+  fn cat_nil(xs : List(Int)) : {Unit | cat(xs, Nil) == xs} do
+    ()
+  end
+
+  fn main() : Int do
+    0
+  end
+end

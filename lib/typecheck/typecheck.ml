@@ -5045,8 +5045,11 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                | Ast.FPPat _ -> [])
                clause.fc_params param_tys));
 
-      (* Warn about unrestricted params not referenced in the body *)
-      warn_unused_params env clause.fc_params clause.fc_body fn_span;
+      (* Warn about unrestricted params not referenced in the body.  Not for
+         a `@[lemma]`: it never runs, and a parameter its theorem names is
+         the point of it (reflection design §4.1). *)
+      if not (List.mem "lemma" def.fn_attrs) then
+        warn_unused_params env clause.fc_params clause.fc_body fn_span;
 
       (* Proof-cap forge value restriction across fn boundaries: if this fn's
          body is (or launders) a [cap_narrow] result (e.g.

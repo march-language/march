@@ -1,0 +1,21 @@
+exit: 0
+-- WARNING ------------- errors/lemma_unproved_call_1.march
+
+this call of the lemma `dbl_nonneg` gives no facts: its precondition is not proved here, and a lemma is never run, so there is no check to fall back on [lemma_unproved_call]
+
+10 |     dbl_nonneg(k)
+         ^^^^^^^^^^^^^
+
+    run `march --explain lemma_unproved_call`
+
+
+-- HINT ------------- errors/lemma_unproved_call_1.march
+
+precondition `_ >= 0` on `dbl_nonneg` was NOT verified here. [refinement_unverified]
+no fact the checker derived constrains `k`
+
+10 |     dbl_nonneg(k)
+         ^^^^^^^^^^^^^
+
+
+

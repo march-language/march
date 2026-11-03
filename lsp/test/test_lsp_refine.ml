@@ -189,5 +189,61 @@ let tests =
           ~util:(fun k -> Printf.sprintf
                     "mod Util do\n  type T = L | N(T, Int)\n  @[measure]\n  fn sz(t : T) : Int do\n    match t do\n      L -> 0\n      N(r, _) -> %d + sz(r)\n    end\n  end\n  fn need(t : {T | sz(_) > 0}) : Int do 1 end\nend\n" (if k = 1 then 1 else 0))
           ~app:"mod App do\n  fn go2() : Int do\n    Util.need(Util.N(Util.L, 3))\n  end\nend\n" ~violated_after:false);
-    Alcotest.test_case "lemma hook: empty until @[lemma] exists (phase 2)" `Quick (fun () ->
-        Alcotest.(check int) "no lemma key" 0 (List.length (R.lemma_key "app.march"))) ]
+    gated "lsp_lemma_invalidate: a dependency lemma that stops proving withdraws its caller's fact" (fun () ->
+        let util ~proved =
+          Printf.sprintf
+            {|mod Util do
+  fn cat(xs : List(Int), ys : List(Int)) : List(Int) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, cat(t, ys))
+    end
+  end
+  @[lemma]
+  fn cat_nil(xs : List(Int)) : {Unit | cat(xs, Nil) == xs} do
+    match xs do
+      Nil -> ()
+      Cons(_, t) -> %s
+    end
+  end
+end
+|}
+            (if proved then "cat_nil(t)" else "()")
+        in
+        let app =
+          {|mod App do
+  fn need_eq(a : List(Int), b : {List(Int) | _ == a}) : Int do 0 end
+  fn f(xs : List(Int)) : Int do
+    Util.cat_nil(xs)
+    need_eq(xs, Util.cat(xs, Nil))
+  end
+end
+|}
+        in
+        with_project (fun dir ->
+            write dir "util.march" (util ~proved:true);
+            write dir "app.march" app;
+            let app_path = Filename.concat dir "app.march" and util_path = Filename.concat dir "util.march" in
+            let before = R.check app_path in
+            if unverified before then Alcotest.fail "before the edit need_eq is proved through the lemma";
+            (match R.lemma_key app_path with
+             | [ (n, _, true) ] when n = "Util.cat_nil" -> ()
+             | k -> Alcotest.failf "app.march's key must hold Util.cat_nil, admitted; got %d entries" (List.length k));
+            write dir "util.march" (util ~proved:false);
+            match R.on_change util_path with
+            | [ (f, after) ] ->
+              Alcotest.(check string) "the dependent re-checked" (R.canon app_path) f;
+              if not (unverified after) then Alcotest.fail "after the edit need_eq is refinement_unverified";
+              if R.lemma_admitted "Util.cat_nil" <> Some false then Alcotest.fail "the lemma is reported unproved"
+            | rs -> Alcotest.failf "exactly app.march must be re-checked, got %d files" (List.length rs)));
+    Alcotest.test_case "lsp_lemma_hover: hovering a lemma call shows its theorem" `Quick (fun () ->
+        let src =
+          "mod T do\n  fn inc(n : Int) : Int do n + 1 end\n  @[lemma]\n  fn inc_gt(n : Int) : {Unit | inc(n) > n} do\n    ()\n  end\n  fn f(k : Int) : Int do\n    inc_gt(k)\n    k\n  end\nend\n"
+        in
+        let a = March_lsp_lib.Analysis.analyse ~filename:"test.march" ~src in
+        let line, col = Test_lsp_harness.pos_of src "inc_gt(k)" in
+        match March_lsp_lib.Analysis.query_lemma_hover_at a ~line ~utf16_char:(col + 1) with
+        | Some (n, p) ->
+          Alcotest.(check string) "name" "inc_gt" n;
+          Alcotest.(check string) "theorem" "inc(n) > n" p
+        | None -> Alcotest.fail "no lemma hover on the call") ]

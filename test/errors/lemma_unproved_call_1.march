@@ -1,0 +1,17 @@
+mod Main do
+  fn dbl(n : Int) : Int do n + n end
+
+  @[lemma]
+  fn dbl_nonneg(n : {Int | _ >= 0}) : {Unit | dbl(n) >= 0} do
+    ()
+  end
+
+  fn use_it(k : Int) : Int do
+    dbl_nonneg(k)
+    0
+  end
+
+  fn main() : Int do
+    use_it(3)
+  end
+end

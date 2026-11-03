@@ -89,6 +89,15 @@ let stage2_queries = ref 0
 
 let stage2_neg_hits = ref 0
 
+(** Pattern links in a lemma body (§4.3): inside `Cons(_, t) ->` on `xs`,
+    [(t, xs, "Cons", 1)] says `t = Cons_1(xs)`, which an induction step needs
+    to meet its hypothesis about `t` with the unfolding of `f(xs)`.  Set per
+    obligation from the path's `$link:` facts ([Refine_call]); stage 2 states
+    each one whose two names the query declares. *)
+let links : (string * string * string * int) list ref = ref []
+
+let link_prefix = "$link:"
+
 (** Filled by [Refine_reflect]: the stage-2 augmentation of a query, given
     its declarations, goal and assumptions BEFORE sort resolution. *)
 let unfold_hook :
