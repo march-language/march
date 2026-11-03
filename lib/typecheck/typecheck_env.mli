@@ -345,12 +345,25 @@ val resolve_qualified_var :
   string -> env -> env * Typecheck_types.scheme option
 val resolve_qualified_type : string -> env -> env * int option
 val resolve_qualified_ctor : string -> env -> env * ctor_info option
-val suggest_var_in_scope : string -> env -> string option
 val is_confirmed_private_qualified : string -> env -> bool
 val qualified_error_msg : string -> env -> string
 val all_ctors_named : string -> env -> string list
 val all_ctor_candidates_named : string -> env -> (string * string) list
-val suggest_ctors : string -> env -> (string * string) list
+
+(* Did-you-mean ranking (diagnostics-depth plan X8, tier 1): spelling
+   candidates ranked by a read-only structural fit to what the position
+   needs, then locality, then edit distance. See the implementation. *)
+type suggest_need =
+  | NeedType of Typecheck_types.ty
+  | NeedSendTo of Typecheck_types.ty
+val spelling_max_dist : int -> int
+val is_generated_name : ?ctor_type:string -> string -> bool
+val could_fit : Typecheck_types.ty -> Typecheck_types.ty -> bool
+val suggest_var_in_scope : ?need:Typecheck_types.ty -> string -> env -> string option
+val suggest_field :
+  ?need:Typecheck_types.ty -> string -> (string * Typecheck_types.ty) list -> string option
+val suggest_ctors : ?need:suggest_need -> string -> env -> (string * string) list
+val unknown_ctor_hint : ?need:suggest_need -> string -> env -> string
 (* The stdlib-only builtin table; see [Typecheck_builtins.stdlib_only]. *)
 val stdlib_only : (string * string) list ref
 
