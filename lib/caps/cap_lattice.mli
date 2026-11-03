@@ -30,3 +30,20 @@ val normalize : string list -> string list
     rooted at [IO] must be in the closed lattice; other roots are FFI
     capabilities and are legal unless their leaf names a real capability. *)
 val suggest_cap : string -> string option
+
+(** Words for capability diagnostics.  [access "IO.FileRead"] is
+    ["file-read access"]; [action "IO.Console"] is ["prints"] (what code
+    holding the capability does, for "this handler of actor `A` prints");
+    [the_capability "IO.Console"] is ["the console capability"].  A
+    capability outside the IO lattice falls back to its backticked name. *)
+val access : string -> string
+val action : string -> string
+val the_capability : string -> string
+
+(** [relation ~have ~need]: one sentence placing the two in the lattice, e.g.
+    "`IO.Console` and `IO.FileRead` are both parts of `IO`; neither contains
+    the other.", or the contains / contained-by forms. *)
+val relation : have:string -> need:string -> string
+
+(** [leaf "IO.FileRead"] is ["FileRead"]: the last dot-separated segment. *)
+val leaf : string -> string

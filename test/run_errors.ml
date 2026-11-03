@@ -139,7 +139,16 @@ let run_jobs (sources : (string * string) list) : (string, result) Hashtbl.t =
 
 let lines_of s = String.split_on_char '\n' s
 
-(* The fixes a `--check-json` run carries, in the order they appear. *)
+(* A fix's edits: a multi-edit fix ({"kind":"multi","edits":[...]}) is its
+   edits, every other fix is itself. *)
+let edits_of_fix (f : Yojson.Safe.t) : Yojson.Safe.t list =
+  let open Yojson.Safe.Util in
+  match member "kind" f with
+  | `String "multi" -> to_list (member "edits" f)
+  | _ -> [ f ]
+
+(* The fixes a `--check-json` run carries, in the order they appear, each
+   multi-edit fix as its edits. *)
 let fixes_of_json json : Yojson.Safe.t list =
   lines_of json
   |> List.filter (fun l -> String.trim l <> "")
@@ -147,6 +156,7 @@ let fixes_of_json json : Yojson.Safe.t list =
       match Yojson.Safe.from_string l with
       | j -> (match Yojson.Safe.Util.member "fix" j with `Null -> None | f -> Some f)
       | exception _ -> None)
+  |> List.concat_map edits_of_fix
 
 (* Apply every fix to [src], bottom-up so earlier line numbers stay valid,
    with forge/lib/cmd_fix.ml's semantics: an insert goes after its line, a
@@ -155,9 +165,10 @@ let fixes_of_json json : Yojson.Safe.t list =
 let apply_fixes ~src (fixes : Yojson.Safe.t list) : string =
   let open Yojson.Safe.Util in
   let int k f = member k f |> to_int in
+  (* (line, column), so two replaces on one line apply right to left. *)
   let key f = match member "kind" f |> to_string with
-    | "insert" -> int "after_line" f | "delete" -> int "end_line" f
-    | _ -> int "start_line" f in
+    | "insert" -> (int "after_line" f, max_int) | "delete" -> (int "end_line" f, max_int)
+    | _ -> (int "start_line" f, int "start_col" f) in
   let fixes = List.stable_sort (fun a b -> compare (key b) (key a)) fixes in
   let lines = ref (Array.of_list (lines_of src)) in
   List.iter (fun f ->
@@ -219,33 +230,41 @@ let render_fix ~src (j : Yojson.Safe.t) : string option =
     let buf = Buffer.create 128 in
     let code = member "code" j |> to_string in
     Printf.bprintf buf "fix [%s]:\n" code;
-    (match member "kind" fix |> to_string with
-     | "insert" ->
-       let after = member "after_line" fix |> to_int in
-       let text = member "text" fix |> to_string in
-       Printf.bprintf buf "@@ after line %d @@\n %s\n" after (line after);
-       List.iter (fun l -> Printf.bprintf buf "+%s\n" l) (lines_of text)
-     | "delete" ->
-       let s = member "start_line" fix |> to_int
-       and e = member "end_line" fix |> to_int in
-       Printf.bprintf buf "@@ lines %d-%d @@\n" s e;
-       for n = s to e do Printf.bprintf buf "-%s\n" (line n) done
-     | "replace" ->
-       let sl = member "start_line" fix |> to_int
-       and sc = member "start_col" fix |> to_int
-       and el = member "end_line" fix |> to_int
-       and ec = member "end_col" fix |> to_int
-       and text = member "text" fix |> to_string in
-       let first = line sl and last = line el in
-       let clip s n = String.sub s 0 (max 0 (min n (String.length s))) in
-       let from s n =
-         let n = max 0 (min n (String.length s)) in
-         String.sub s n (String.length s - n) in
-       let after = clip first sc ^ text ^ from last ec in
-       Printf.bprintf buf "@@ lines %d-%d @@\n" sl el;
-       for n = sl to el do Printf.bprintf buf "-%s\n" (line n) done;
-       List.iter (fun l -> Printf.bprintf buf "+%s\n" l) (lines_of after)
-     | k -> Printf.bprintf buf "(unknown fix kind %s)\n" k);
+    (* A multi-edit fix renders one hunk per edit, in source order. *)
+    let pos f = match member "kind" f |> to_string with
+      | "insert" -> (member "after_line" f |> to_int, max_int)
+      | "delete" -> (member "start_line" f |> to_int, 0)
+      | _ -> (member "start_line" f |> to_int, member "start_col" f |> to_int) in
+    let edits = List.stable_sort (fun a b -> compare (pos a) (pos b)) (edits_of_fix fix) in
+    List.iter (fun fix ->
+        match member "kind" fix |> to_string with
+        | "insert" ->
+          let after = member "after_line" fix |> to_int in
+          let text = member "text" fix |> to_string in
+          Printf.bprintf buf "@@ after line %d @@\n %s\n" after (line after);
+          List.iter (fun l -> Printf.bprintf buf "+%s\n" l) (lines_of text)
+        | "delete" ->
+          let s = member "start_line" fix |> to_int
+          and e = member "end_line" fix |> to_int in
+          Printf.bprintf buf "@@ lines %d-%d @@\n" s e;
+          for n = s to e do Printf.bprintf buf "-%s\n" (line n) done
+        | "replace" ->
+          let sl = member "start_line" fix |> to_int
+          and sc = member "start_col" fix |> to_int
+          and el = member "end_line" fix |> to_int
+          and ec = member "end_col" fix |> to_int
+          and text = member "text" fix |> to_string in
+          let first = line sl and last = line el in
+          let clip s n = String.sub s 0 (max 0 (min n (String.length s))) in
+          let from s n =
+            let n = max 0 (min n (String.length s)) in
+            String.sub s n (String.length s - n) in
+          let after = clip first sc ^ text ^ from last ec in
+          Printf.bprintf buf "@@ lines %d-%d @@\n" sl el;
+          for n = sl to el do Printf.bprintf buf "-%s\n" (line n) done;
+          List.iter (fun l -> Printf.bprintf buf "+%s\n" l) (lines_of after)
+        | k -> Printf.bprintf buf "(unknown fix kind %s)\n" k)
+      edits;
     Some (Buffer.contents buf)
 
 (* ── One corpus program ────────────────────────────────────────────────── *)

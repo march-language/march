@@ -1,0 +1,30 @@
+-- EXPECT-ERROR: Did you mean `Poke` (message of actor `A`)?
+mod Main do
+  -- Did-you-mean ranking (diagnostics-depth plan X8 tier 1): a typo'd
+  -- message in `send` is ranked by the pid's actor. `Pake` is one edit
+  -- further than `Poke` but in range; it is `B`'s message, and `a` is an
+  -- `A`, so only `Poke` is offered (it used to list `Post` of `Method`
+  -- and `Pong` of `WsFrame` first).
+  actor A do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Poke(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  actor B do
+    state { s : String }
+    init  { s: "" }
+
+    on Pake(k : Int) do
+      { s: int_to_string(k) }
+    end
+  end
+
+  fn main() do
+    let a = spawn(A)
+    send(a, Pokee(1))
+  end
+end

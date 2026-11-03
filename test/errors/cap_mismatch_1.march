@@ -1,0 +1,13 @@
+-- A capability passed where a different one is needed (diagnostics plan F1):
+-- `read` takes the file-read capability and `main` passes it the console one.
+-- One `cap_mismatch` error at the argument, the lattice line, and a fix that
+-- threads a `Cap(IO.FileRead)` from `main` (a new parameter, passed to `read`)
+-- plus the module's missing `needs IO.FileRead` -- not a `type_mismatch`
+-- between two unrelated-looking types plus a `cap_grant_exceeded`.
+mod Main do
+  needs IO.Console
+
+  fn read(c : Cap(IO.FileRead)) : String do "x" end
+
+  fn main(c : Cap(IO.Console)) do println(read(c)) end
+end

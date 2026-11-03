@@ -110,6 +110,13 @@ git log is authoritative for exact commits.
 - **CI uses the pinned z3 on every platform** (built from source and cached) instead of
   the package manager's, and a new `refine-agreement` job requires every refinement
   verdict to be the same on darwin-arm64, linux-x86_64 and linux-aarch64.
+- Diagnostics: "did you mean" suggestions for an unknown constructor, actor message, variable or
+  record field are ranked by type. A candidate that fits what the position needs (the actor of
+  the pid in `send`, the annotated type, the field type) is shown alone, ahead of a closer
+  spelling that doesn't: `send(a, Pokee(1))` now suggests only `Poke`, "a message of actor
+  `A`", not `Post` and `Pong` from the HTTP modules. Stdlib constructors are offered only when
+  nothing in your own code is in range, compiler-generated names (session states such as
+  `S_end`) are never offered, and a misspelled record field gets a suggestion.
 - Diagnostics: follow-on errors are dropped when another error already explains them: the type
   mismatch after a callback-arity error, "unused variable `x`" next to a misspelled use of `x`,
   `cap_grant` while the program has other errors, `cap_ceiling` alongside the matching
@@ -117,6 +124,17 @@ git log is authoritative for exact commits.
   protocol. The editor (LSP) drops the same ones.
 - Diagnostics: a capability grant error (`cap_grant_exceeded`) now points at the call that needs
   the capability and labels each call on the way from `main`, instead of naming the chain in prose.
+- Diagnostics: capability errors say what is wrong in capability terms. Passing one capability
+  where another is needed (`Cap(IO.Console)` to a `Cap(IO.FileRead)` parameter) is a new
+  `cap_mismatch` error ("`read` needs file-read access, but `c` is the console capability"),
+  not a type mismatch, with one line placing the two in the lattice and a fix: `cap_narrow(c)`
+  when the capability contains the one needed, otherwise a new `main` parameter passed to the
+  call. A missing `needs` names the code and what it does ("the `Inc` handler of actor `Counter`
+  prints", "the body of role `Cons` writes a file") and points at that call. One missing
+  authority is one error: the `needs` error, `main`'s missing or too-narrow grant and the
+  capability mismatch for the same capability merge, and the merged fix carries every edit
+  (`--check-json` fixes may now be `{"kind":"multi","edits":[…]}`; `forge fix` and the editor
+  apply them). `cap_grant_exceeded` and `role_grant_exceeded` gain fixes that add the capability.
 - Diagnostics: `missing_impl` points at the operator or call that needs the implementation (`a < b`,
   `same(x, y)`) instead of the enclosing function, labels a generic function's `when Eq(a)` bound,
   and, for a type declared in the file, offers `derive Eq for T` (also `Ord`, `Show`, `Hash`) as a

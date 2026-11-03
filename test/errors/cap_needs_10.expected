@@ -1,0 +1,34 @@
+exit: 1
+-- ERROR ---------------------- errors/cap_needs_10.march
+
+`save` writes a file, but module `Main` declares no `needs IO.FileWrite`, and `main` is granted only `Cap(IO.Console)`. [cap_needs]
+hint: add this to the module body —
+        needs IO.FileWrite
+and give `main` a `Cap(IO.FileWrite)` parameter: `fn main(…, _cap_filewrite : Cap(IO.FileWrite))`.
+
+10 |     let _ = file_write("/tmp/n", int_to_string(n))
+                 ^^^^^^^^^^
+
+
+    `main` calls `save` here:
+
+15 |     save(1)
+         ^^^^
+
+    `main` is granted only `Cap(IO.Console)` here:
+
+14 |   fn main(c : Cap(IO.Console)) do
+              ^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain cap_needs`
+
+
+
+fix [cap_needs:IO.FileWrite]:
+@@ after line 6 @@
+ mod Main do
++  needs IO.FileWrite
+@@ lines 14-14 @@
+-  fn main(c : Cap(IO.Console)) do
++  fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+
+after fix: exit 0

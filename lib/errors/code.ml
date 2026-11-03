@@ -36,6 +36,7 @@ let cap_dict_type = "cap_dict_type"
 let cap_grant = "cap_grant"
 let cap_grant_exceeded = "cap_grant_exceeded"
 let cap_impl_invalid = "cap_impl_invalid"
+let cap_mismatch = "cap_mismatch"
 let cap_narrow_invalid = "cap_narrow_invalid"
 let cap_needs = "cap_needs"
 let cap_root_broad = "cap_root_broad"
@@ -229,6 +230,7 @@ let all = [
   cap_grant;
   cap_grant_exceeded;
   cap_impl_invalid;
+  cap_mismatch;
   cap_narrow_invalid;
   cap_needs;
   cap_root_broad;

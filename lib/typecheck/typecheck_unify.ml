@@ -64,8 +64,82 @@ let format_ty_for_error t =
     "\n    " ^ String.concat "\n    " (String.split_on_char '\n' (pp_ty_pretty ~indent:4 ~width:60 t))
   else "`" ^ flat ^ "`"
 
+(** A capability passed where a different one is needed
+    (specs/plans/2026-11-02-diagnostics-depth-plan.md §F1).  [unify] reaches
+    this from the [Cap] argument it recursed into, so [have]/[need] are the
+    two IO-lattice names and [p] the whole capability-valued expression.
+    Reported as [cap_mismatch], not as a type mismatch between two
+    unrelated-looking types, with one line of the lattice and the way out;
+    [Typecheck.refine_capability_reports] later names the callee and attaches
+    the fix, which need the declarations.  Recorded in
+    [env.cap_mismatch_sites] for that pass. *)
+let report_cap_mismatch env ~span ~reason ~(p : provided) ~have ~need =
+  let module L = March_caps.Cap_lattice in
+  let call = match reason with
+    | Some (RFnArg (sp, _)) -> Some sp
+    | _ -> None in
+  let subject = match call with Some _ -> "this call" | None -> "this" in
+  let arg = match p.p_name with
+    | Some n -> Printf.sprintf "`%s` is" n
+    | None -> "this is" in
+  let arg_text = match p.p_name with Some n -> n | None -> "the capability" in
+  let help =
+    if cap_subsumes have need then
+      Printf.sprintf "help: pass `cap_narrow(%s)`, which narrows it to `Cap(%s)`."
+        arg_text need
+    else
+      Printf.sprintf
+        "help: thread a `Cap(%s)` down from `main` (add a parameter for it) and \
+         pass that here." need
+  in
+  let labels =
+    (match call with
+     | Some csp when csp <> span ->
+       [ { Err.lbl_span = csp;
+           lbl_message = Printf.sprintf "%s needs `Cap(%s)`" subject need } ]
+     | _ -> [])
+    @ (match p.p_name with
+        | Some n ->
+          (match StrMap.find_opt n env.binder_spans with
+           | Some bsp when bsp <> span && bsp <> p.p_span ->
+             [ { Err.lbl_span = bsp;
+                 lbl_message = Printf.sprintf "`%s` was bound here as `Cap(%s)`" n have } ]
+           | _ -> [])
+        | None -> [])
+  in
+  env.cap_mismatch_sites :=
+    { cm_span = span; cm_call = call; cm_arg_name = p.p_name;
+      cm_have = have; cm_need = need; cm_in_fn = !(env.current_decl) }
+    :: !(env.cap_mismatch_sites);
+  Err.report env.errors
+    { Err.severity = Error; span;
+      message =
+        Printf.sprintf "%s needs %s, but %s %s." subject (L.access need) arg
+          (L.the_capability have);
+      labels;
+      notes = [ L.relation ~have ~need; help ];
+      code = Err.Code.with_arg Err.Code.cap_mismatch need; fix = None }
+
 (** Report a type mismatch with a conversational Elm-style message. *)
-let report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided expected found =
+let rec report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided expected found =
+  (* A capability for another capability: its own message (§F1). *)
+  let cap_pair =
+    match repr expected, repr found, provided with
+    | TCon (have, []), TCon (need, []), Some p
+      when (not occurs_violation) && have <> need
+           && cap_subsumes "IO" have && cap_subsumes "IO" need
+           && (match repr p.p_ty with
+               | TCon ("Cap", [ inner ]) ->
+                 (match repr inner with TCon (h, []) -> h = have | _ -> false)
+               | _ -> false) ->
+      Some (have, need, p)
+    | _ -> None
+  in
+  match cap_pair with
+  | Some (have, need, p) -> report_cap_mismatch env ~span ~reason ~p ~have ~need
+  | None -> report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected found
+
+and report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected found =
   (* Build headline, using pretty-printing for long types.
      Convention: `expected` = inferred type of the expression (what was provided);
                  `found`    = required type from context (what was needed).
