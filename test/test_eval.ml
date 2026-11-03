@@ -5583,8 +5583,33 @@ end|} in
   Alcotest.(check bool) "raw per-file hit count exceeds the walked total (the old bug)" true
     (count_unique_hits expr_hits ~file > total_e)
 
+(* `march test a.march b.march` runs the stdlib's doctests once per file in
+   one process.  Named Vaults are process-global in the interpreter, so
+   without a runtime reset per file the second file's `Vault.incr` doctests
+   saw the first file's counters (march_doc's CI: 63 failures). *)
+let test_march_test_fresh_runtime_per_file () =
+  let dir = Filename.temp_dir "march_test_reset" "" in
+  List.iter
+    (fun m ->
+      Out_channel.with_open_bin (Filename.concat dir ("test_" ^ m ^ ".march")) (fun oc ->
+          Printf.fprintf oc
+            "mod T%s do\n  describe \"t\" do\n    test \"one\" do\n      assert (1 == 1)\n    end\n  end\nend\n" m))
+    [ "A"; "B" ];
+  let out = Filename.concat dir "out.txt" in
+  let code =
+    Test_helpers.Sys.command
+      (Printf.sprintf "cd %s && HOME=%s %s test --filter=Vault.incr test_A.march test_B.march > %s 2>&1"
+         (Filename.quote dir) (Filename.quote dir) (Filename.quote (Test_helpers.find_main_exe ()))
+         (Filename.quote out))
+  in
+  let text = In_channel.with_open_bin out In_channel.input_all in
+  if code <> 0 || not (Test_helpers.contains "6 tests passed" text) then
+    Alcotest.failf "both files' Vault.incr doctests must pass (exit %d):\n%s" code text
+
 let eval_suites =
   [
+      ( "march_test_cli", [
+          Alcotest.test_case "fresh runtime per test file" `Quick test_march_test_fresh_runtime_per_file ] );
       ( "env_lookup", [
           Alcotest.test_case "innermost wins" `Quick test_lookup_shadowing_innermost_wins;
           Alcotest.test_case "missing raises" `Quick test_lookup_missing_raises;

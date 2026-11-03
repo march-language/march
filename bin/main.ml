@@ -2736,6 +2736,11 @@ let run_test_cmd args =
       March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved desugared.March_ast.Ast.mod_decls
     in
     let desugared = erase_lemmas desugared in
+    (* Each file starts from a fresh interpreter runtime: named Vaults (and
+       what is stored in them, such as Config values) are process-global, so
+       a second file's run of the same doctests would otherwise see the
+       first file's counters (`Vault.incr` returned 42, not 6). *)
+    March_eval.Eval.reset_scheduler_state ();
     (* Enable coverage tracking for this file's test run. *)
     if !coverage then begin
       March_coverage.Coverage.reset ();
