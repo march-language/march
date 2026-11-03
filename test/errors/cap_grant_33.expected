@@ -9,12 +9,3 @@ Match on the label first — `match lbl do :ok -> ... :err -> ... end` — and u
 
 
 
--- ERROR ---------------------- errors/cap_grant_33.march
-
-Chan.close: expected a channel endpoint but got `a`. [session_state_mismatch]
-
-32 |     Chan.close(cc3)
-         ^^^^^^^^^^^^^^^
-
-
-

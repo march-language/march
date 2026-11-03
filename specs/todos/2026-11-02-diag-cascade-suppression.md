@@ -6,3 +6,7 @@ Partly done 2026-11-02 (`specs/progress/2026-11-02-diag-hints-cascades-internals
 with four rules (arity→mismatch, typo→unused, cap_grant while other errors, cap_ceiling+cap_needs). Open: poison types,
 merging the reach-chain HINT into its error, the session/linearity follow-ons, the multi-error corpus review, and the
 LSP path.
+
+2026-11-03: the multi-error review, seven more rules and the LSP path landed
+(`specs/progress/2026-11-03-diag-x3-x4-finish-x7-traces.md`). Open: poison types (do before the
+choreography item), the swapped-pair mismatch on `x ++ "no"` (a blame question, §X1).

@@ -7,3 +7,6 @@ output for `$`, generated `S_`/`_Msg`/`_Run.` names and unwritten constructors. 
 Partly done 2026-11-02 (`specs/progress/2026-11-02-diag-hints-cascades-internals-lint.md`): the four hints above and
 the internals lint (`test/errors/internals-allowlist.txt`). Open: hint exclusivity beyond `type_mismatch`, and failing
 a case whose fix does not fix.
+
+Fix-must-fix check and its triage done 2026-11-03 (`specs/progress/2026-11-03-diag-x3-x4-finish-x7-traces.md`).
+What remains is the allowlisted leaks, which belong to the actor and choreography items.

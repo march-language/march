@@ -1780,8 +1780,12 @@ let suggest_var_in_scope (name : string) (env : env) : string option =
   let best      = ref None in
   let best_dist = ref max_int in
   StrMap.iter (fun k _ ->
-    (* Skip qualified names (Mod.member) — those are suggested elsewhere. *)
-    if not (String.contains k '.') then begin
+    (* Skip qualified names (Mod.member) — those are suggested elsewhere —
+       and operators: a one-letter `y` is one edit from `%`, which is no
+       spelling of a variable. *)
+    let is_ident k =
+      k <> "" && (match k.[0] with 'a'..'z' | 'A'..'Z' | '_' -> true | _ -> false) in
+    if not (String.contains k '.') && is_ident k then begin
       let d = edit_distance name_lo (String.lowercase_ascii k) in
       if d > 0 && d <= max_dist && d < !best_dist then begin
         best      := Some k;

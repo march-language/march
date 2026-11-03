@@ -11,12 +11,3 @@ Or-pattern alternatives must bind the same variables. [or_pattern_binding]
     Bind the same names in every alternative, split this into separate arms, or match the common shape and test the difference in a `when` guard.
 
 
--- ERROR -------------- errors/or_pattern_binding_1.march
-
-I cannot find `y`. Did you mean `%`? [unbound_variable]
-
-10 |       A(x) | B(y) -> x + y
-                              ^
-
-
-

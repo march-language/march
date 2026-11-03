@@ -10,3 +10,4 @@ mod M do
     println(int_to_string(nonempty("")))
   end
 end
+-- EXPECT-FIX-PARTIAL: the unused-parameter fix is right; the refinement violation is the case's subject
