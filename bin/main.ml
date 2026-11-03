@@ -1833,7 +1833,7 @@ let hr_store_sources ~(cfg : March_tir.Hot_reload.config) ~(store : March_cas.Ca
    refuted is not), so a z3-less run must not share a cache entry with one
    that has z3.  Only the absence is tagged, so a normal key is unchanged. *)
 let z3_cas_tag () =
-  if March_refine.Solver.find_z3 () = None then [ "noz3" ] else []
+  if Result.is_error (March_refine.Solver.find_z3 ()) then [ "noz3" ] else []
 
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []

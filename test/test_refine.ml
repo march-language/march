@@ -77,14 +77,17 @@ let with_solver name f =
 let bad_preamble = "(declare-const bogus NoSuchSort)"
 
 let resync_suite =
-  [ with_solver "a z3 error yields Unknown, not a wrong verdict" (fun s ->
+  [ with_solver "malformed_query_is_rejected" (fun s ->
         (* The verdict after an error is computed against an incomplete state,
            so it must never be trusted: under definite-failure a bogus `sat`
-           would be reported as a violation — a false positive. *)
+           would be reported as a violation — a false positive.  It is
+           [Rejected], not [Unknown]: an rlimit `unknown` is a deterministic
+           answer and is cached, a rejected query never is. *)
         match Solver.check ~preamble:bad_preamble s sample_vc with
-        | Solver.Unknown -> ()
-        | Solver.Unsat -> Alcotest.fail "expected unknown, got unsat"
-        | Solver.Sat _ -> Alcotest.fail "expected unknown, got sat");
+        | Solver.Rejected -> ()
+        | Solver.Unknown -> Alcotest.fail "expected rejected, got unknown"
+        | Solver.Unsat -> Alcotest.fail "expected rejected, got unsat"
+        | Solver.Sat _ -> Alcotest.fail "expected rejected, got sat");
 
     with_solver "the channel resyncs: a later VC still checks correctly" (fun s ->
         ignore (Solver.check ~preamble:bad_preamble s sample_vc);
@@ -93,7 +96,7 @@ let resync_suite =
         match Solver.check s sample_vc with
         | Solver.Unsat -> ()
         | Solver.Sat _ -> Alcotest.fail "desynced: expected unsat, got sat"
-        | Solver.Unknown -> Alcotest.fail "desynced: expected unsat, got unknown");
+        | Solver.Unknown | Solver.Rejected -> Alcotest.fail "desynced: expected unsat, got unknown");
 
     with_solver "a bad VC does not disable checking for later ones (Refine)" (fun s ->
         ignore s;
@@ -111,6 +114,119 @@ let resync_suite =
         | Refine.Verified -> ()
         | _ -> Alcotest.fail "later VC was silently left unchecked") ]
 
+(* x³ > y³ + 7 ∧ x·y = 1234567: nonlinear, so a small rlimit runs out.
+   Encoded as assumptions with a false goal, so check-sat asks exactly
+   whether the two can hold together. *)
+let cubic_vc : Smt.vc =
+  let x = Smt.Const "x" and y = Smt.Const "y" in
+  let cube t = Smt.Mul (t, Smt.Mul (t, t)) in
+  { decls = [ ("x", Smt.SInt); ("y", Smt.SInt) ];
+    assumptions =
+      [ Smt.Gt (cube x, Smt.Add (cube y, Smt.IntLit 7));
+        Smt.Eq (Smt.Mul (x, y), Smt.IntLit 1234567) ];
+    goal = Smt.BoolLit false }
+
+let contains s sub =
+  let n = String.length s and m = String.length sub in
+  let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+  go 0
+
+let rlimit_suite =
+  [ with_solver "rlimit_exhaustion_is_unknown" (fun s ->
+        let once () = Solver.check ~rlimit:3000 s cubic_vc in
+        (match once () with
+         | Solver.Unknown -> ()
+         | _ -> Alcotest.fail "expected unknown under rlimit 3000");
+        (* The same query again: the counter is reset per query, so the
+           verdict cannot depend on what ran before. *)
+        match once () with
+        | Solver.Unknown -> ()
+        | _ -> Alcotest.fail "rlimit verdict was not deterministic");
+    with_solver "rlimit_is_per_query" (fun s ->
+        (* A run of cheap queries must not exhaust a limit meant for one. *)
+        for _ = 1 to 30 do
+          match Solver.check ~rlimit:200_000 s sample_vc with
+          | Solver.Unsat -> ()
+          | _ -> Alcotest.fail "a cheap query ran out of rlimit: the counter is not reset per query"
+        done);
+    with_solver "no_timeout_option_sent" (fun s ->
+        let log = Filename.temp_file "march_z3_session" ".smt2" in
+        Unix.putenv "MARCH_REFINE_Z3_LOG" log;
+        Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_REFINE_Z3_LOG" "") (fun () ->
+            ignore (Solver.check s sample_vc));
+        let sent = In_channel.with_open_bin log In_channel.input_all in
+        Alcotest.(check bool) "sends :rlimit" true (contains sent ":rlimit");
+        Alcotest.(check bool) "sends (reset)" true (contains sent "(reset)");
+        Alcotest.(check bool) "no :timeout" false (contains sent ":timeout"));
+    Alcotest.test_case "hang_raises_hung" `Quick (fun () ->
+        let dir = Filename.temp_file "march_z3_hang" "" in
+        Sys.remove dir;
+        Unix.mkdir dir 0o755;
+        let fake = Filename.concat dir "z3" in
+        Out_channel.with_open_bin fake (fun oc ->
+            (* No exec: the shell keeps stdout open while cat swallows stdin, so
+               the driver sees silence, not end-of-file. *)
+            output_string oc "#!/bin/sh\ncat > /dev/null\n");
+        Unix.chmod fake 0o755;
+        Unix.putenv "MARCH_Z3" fake;
+        Unix.putenv "MARCH_Z3_BACKSTOP_MS" "500";
+        Fun.protect
+          ~finally:(fun () -> Unix.putenv "MARCH_Z3" ""; Unix.putenv "MARCH_Z3_BACKSTOP_MS" "")
+          (fun () ->
+            match Solver.create () with
+            | None -> Alcotest.fail "fake z3 did not start"
+            | Some s ->
+                let t0 = Unix.gettimeofday () in
+                let hung = try ignore (Solver.check s sample_vc); false with Solver.Hung -> true in
+                let dt = Unix.gettimeofday () -. t0 in
+                Solver.close s;
+                Alcotest.(check bool) "raises Hung" true hung;
+                Alcotest.(check bool) "within 2 s" true (dt < 2.0)));
+    (* A query that outlives the backstop costs only itself: it is not
+       retried (the same query would hang again), not cached, and the next
+       query gets a fresh z3.  Before, two hangs in a row disabled z3 for the
+       rest of the run, so one starved query on a loaded machine left every
+       later obligation unchecked. *)
+    Alcotest.test_case "a_hung_query_costs_only_itself" `Quick (fun () ->
+        let dir = Filename.temp_file "march_z3_hang1" "" in
+        Sys.remove dir;
+        Unix.mkdir dir 0o755;
+        let fake = Filename.concat dir "z3" in
+        (* Answers `unsat` to every query, except one that declares
+           `hangme`, where it stops reading and answering. *)
+        Out_channel.with_open_bin fake (fun oc ->
+            output_string oc
+              "#!/bin/sh\nh=0\nwhile read l; do case \"$l\" in *hangme*) h=1;; \"(check-sat)\"*) \
+               if [ $h = 1 ]; then cat > /dev/null; fi; echo unsat;; esac; done\n");
+        Unix.chmod fake 0o755;
+        let root = Filename.concat dir "root" in
+        let vc name n : Smt.vc =
+          { decls = [ (name, Smt.SInt) ];
+            assumptions = [ Smt.Gt (Smt.Const name, Smt.IntLit n) ];
+            goal = Smt.Ne (Smt.Const name, Smt.IntLit 0) }
+        in
+        Refine.shutdown ();
+        Unix.putenv "MARCH_Z3" fake;
+        (* Long enough that a fresh fake (a shell script) always answers in
+           time on a loaded machine; only `hangme` should outlive it. *)
+        Unix.putenv "MARCH_Z3_BACKSTOP_MS" "1000";
+        Fun.protect
+          ~finally:(fun () ->
+            Refine.shutdown ();
+            Refine.solver_failure := None;
+            Unix.putenv "MARCH_Z3" "";
+            Unix.putenv "MARCH_Z3_BACKSTOP_MS" "")
+          (fun () ->
+            let out v = match Refine.discharge ~root v with
+              | Refine.Verified -> "verified" | Refine.Refuted _ -> "refuted" | Refine.Unverified -> "unverified" in
+            Alcotest.(check string) "first hang" "unverified" (out (vc "hangme" 1));
+            Alcotest.(check string) "second hang" "unverified" (out (vc "hangme" 2));
+            Alcotest.(check string) "a later query is still checked" "verified" (out (vc "d" 3));
+            Alcotest.(check bool) "a hung query is not cached" true
+              (Vc_cache.lookup ~root (Vc_cache.key_of_vc (vc "hangme" 1)) = None);
+            Alcotest.(check (option string)) "recorded for the warning"
+              (Some "stopped responding") !Refine.solver_failure)) ]
+
 let solver_suite =
   [ with_solver "valid VC is unsat (verified)" (fun s ->
         let vc : Smt.vc =
@@ -121,7 +237,7 @@ let solver_suite =
         match Solver.check s vc with
         | Solver.Unsat -> ()
         | Solver.Sat _ -> Alcotest.fail "expected unsat, got sat"
-        | Solver.Unknown -> Alcotest.fail "expected unsat, got unknown");
+        | Solver.Unknown | Solver.Rejected -> Alcotest.fail "expected unsat, got unknown");
 
     with_solver "invalid VC is sat with d=0 counterexample" (fun s ->
         let vc : Smt.vc =
@@ -134,7 +250,7 @@ let solver_suite =
             Alcotest.(check (option string)) "d=0" (Some "0")
               (List.assoc_opt "d" model)
         | Solver.Unsat -> Alcotest.fail "expected sat, got unsat"
-        | Solver.Unknown -> Alcotest.fail "expected sat, got unknown");
+        | Solver.Unknown | Solver.Rejected -> Alcotest.fail "expected sat, got unknown");
 
     with_solver "two checks on one process are independent" (fun s ->
         let valid : Smt.vc =
@@ -181,17 +297,25 @@ let cache_suite =
        the resulting SKIP into the project's cache, where it silently outlived
        the compiler bug that caused it.  It is also nondeterministic — the
        solver runs under a wall-clock timeout, so machine load can decide it. *)
-    with_solver "an unknown verdict is NOT cached" (fun _s ->
+    with_solver "unknown_is_cached_rejected_is_not" (fun _s ->
         let unk_root =
           Filename.concat (Filename.get_temp_dir_name ())
             (Printf.sprintf "march_refine_unk_%d" (Unix.getpid ()))
         in
+        let saved = !Refine.default_rlimit in
+        Fun.protect ~finally:(fun () -> Refine.default_rlimit := saved) (fun () ->
+            Refine.default_rlimit := 3000;
+            (match Refine.discharge ~root:unk_root cubic_vc with
+             | Refine.Unverified -> ()
+             | _ -> Alcotest.fail "expected Unverified under rlimit 3000");
+            Alcotest.(check bool) "rlimit unknown is cached" true
+              (Vc_cache.lookup ~root:unk_root (Vc_cache.key_of_vc cubic_vc) = Some Solver.Unknown));
         let bad = "(declare-const bogus NoSuchSort)" in
         (match Refine.discharge ~root:unk_root ~preamble:bad vc with
          | Refine.Unverified -> ()
          | _ -> Alcotest.fail "expected Unverified from a malformed VC");
         Refine.shutdown ();
-        Alcotest.(check bool) "no cache entry" true
+        Alcotest.(check bool) "rejected is not cached" true
           (Vc_cache.lookup ~root:unk_root (Vc_cache.key_of_vc ~preamble:bad vc)
            = None));
 
@@ -207,15 +331,16 @@ let cache_suite =
         Alcotest.(check bool) "cache entry present" true
           (Vc_cache.lookup ~root:ok_root (Vc_cache.key_of_vc vc) <> None));
 
-    (* Caches written before the no-cache-unknown change still hold `unknown`
-       entries; serving one keeps a VC silently unchecked forever.  A stored
-       unknown must read back as a MISS. *)
-    Alcotest.test_case "a legacy stored unknown reads back as a miss" `Quick
+    (* Under an rlimit, `unknown` is a deterministic answer about fixed SMT
+       text, z3 version and limit, so a stored one is served.  Entries from
+       before the rlimit (when `unknown` could mean "the machine was busy")
+       sit under keys without the z3 identity and are never looked up. *)
+    Alcotest.test_case "a stored unknown is served" `Quick
       (fun () ->
         let key = Vc_cache.key_of_vc { vc with Smt.assumptions = [ Smt.BoolLit true ] } in
         Vc_cache.store ~root key Solver.Unknown;
-        Alcotest.(check bool) "reads as miss" true
-          (Vc_cache.lookup ~root key = None));
+        Alcotest.(check bool) "served" true
+          (Vc_cache.lookup ~root key = Some Solver.Unknown));
 
     Alcotest.test_case "round-trips a sat model" `Quick (fun () ->
         let key = "ff" ^ String.make 62 'a' in
@@ -420,6 +545,7 @@ let () =
       ("smt", smt_suite);
       ("model", model_suite);
       ("solver", solver_suite);
+      ("rlimit", rlimit_suite);
       ("solver-resync", resync_suite);
       ("cache", cache_suite);
       ("refine", refine_suite);

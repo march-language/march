@@ -1319,6 +1319,20 @@
  (modules test_refine)
  (libraries march_refine alcotest unix))
 
+; The one z3 lookup, the pinned-version probe and the health report
+; (specs/2026-11-02-bundled-z3-design.md).  z3_lookup_helper is copied into a
+; release-shaped install to exercise the exe-relative lookup.
+(executable
+ (name z3_lookup_helper)
+ (modules z3_lookup_helper)
+ (libraries march_refine))
+
+(test
+ (name test_z3_lookup)
+ (modules test_z3_lookup)
+ (deps z3_lookup_helper.exe)
+ (libraries march_refine alcotest unix))
+
 (test
  (name test_ast_calls)
  (modules test_ast_calls)
