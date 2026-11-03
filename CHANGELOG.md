@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Search laws by shape.** `forge search --law "f(f(x)) == x"` finds every lemma of that
+  form, whatever its functions are called: a one-letter callee stands for any function and
+  any other name for any term. `--law "f(x, Nil) == x"` finds right identities.
+
 - **A refinement can say what each half of it means.** Write a message after a
   conjunct with `else`: `{Int | _ >= 0 else "index must not be negative" &&
   _ < len(xs) else "index must be less than the list's length"}`. A call that

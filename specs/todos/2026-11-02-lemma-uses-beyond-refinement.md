@@ -9,17 +9,11 @@ This file records the ideas so none is lost. Split one into its own todo when it
 
 Done on 2026-11-03 (`specs/progress/2026-11-03-lemma-tests-laws-search.md`): idea 1 (an
 unproved lemma becomes a property test in `forge test`), idea 2 (admitted lemmas re-checked in
-the interpreter and a compiled program), idea 3 without status marks, idea 4 at the text level,
+the interpreter and a compiled program), idea 3 (status marks: march-language/march_doc#7), idea 4 (text, then shapes:
+`specs/progress/2026-11-03-law-shape-search.md`),
 and idea 10 (guidance); idea 5 for the open file's lemmas
 (`specs/progress/2026-11-03-lemma-refutation-and-rewrites.md`). What remains of them:
 
-3. **Laws in the docs: status marks.** `forge doc` lists the laws about each function
-   (march_doc), but not whether each is proved, tested or unproved. That needs the
-   `--reflect-deps` lemma rows (or `--lemma-test` lines) per file during `forge doc`, which
-   means a z3 check of every documented file.
-4. **Searching by law: shapes.** `forge search --law` matches theorem text and the functions
-   a theorem calls. Matching a law's shape (`f(f(x)) == x` finds every involution) is not
-   done.
 5. **Proof-backed rewrites: other files' lemmas.** The LSP rewrite
    (`specs/progress/2026-11-03-lemma-refutation-and-rewrites.md`) uses the open file's lemmas
    only. The stdlib's (phase 3) and dependencies' need their admitted status too.

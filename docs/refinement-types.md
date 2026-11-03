@@ -1629,7 +1629,10 @@ The tests are separate programs. Your build still removes every lemma.
 the lemmas whose theorem calls it, under the heading "Laws", with the theorem
 as written. `forge search --law TEXT` finds lemmas whose theorem contains TEXT
 (case and spaces ignored) or calls a function named TEXT, and a plain name
-search for a function also finds the lemmas about it.
+search for a function also finds the lemmas about it. TEXT can also be a
+shape: in `forge search --law "f(f(x)) == x"` the one-letter `f` stands for
+any function and `x` for any term, so it finds `reverse(reverse(xs)) == xs`
+whatever the functions are called.
 
 **Rewrites in the editor.** When a proved lemma's theorem is an equation,
 `lhs == rhs`, the editor offers to rewrite an expression of the shape `lhs`

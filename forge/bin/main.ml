@@ -692,7 +692,8 @@ let search_cmd =
     Arg.(value & opt string "" &
          info ["law"] ~docv:"TEXT"
            ~doc:"Search the theorems of @[lemma]s: TEXT appears in a theorem (case and spaces ignored), \
-                 or names a function a theorem calls")
+                 names a function a theorem calls, or is a shape such as `f(f(x)) == x` (a one-letter \
+                 callee is any function, other names any term)")
   in
   let callers =
     Arg.(value & opt string "" &
