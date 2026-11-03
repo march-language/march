@@ -115,11 +115,15 @@ let test_lock_single_writer () =
 
 (* ── push_topology ──────────────────────────────────────────────────────── *)
 
-(** A stand-in node: a shell that appends "hup" to [marks] on each SIGHUP. *)
+(** A stand-in node: a shell that appends "hup" to [marks] on each SIGHUP.
+    It writes [marks].ready once the trap is installed: a SIGHUP before that
+    kills the shell, so the caller waits for the file, not a fixed sleep
+    (0.3 s was not enough on a loaded machine). *)
 let spawn_node ~root name marks =
   let log = { Procs.dir = root; follow = None } in
   Procs.spawn ~name ~env:[]
-    ~argv:[| "sh"; "-c"; Printf.sprintf "trap 'echo hup >> %s' HUP; while :; do sleep 0.05; done" (Filename.quote marks) |]
+    ~argv:[| "sh"; "-c"; Printf.sprintf "trap 'echo hup >> %s' HUP; : > %s; while :; do sleep 0.05; done"
+               (Filename.quote marks) (Filename.quote (marks ^ ".ready")) |]
     ~log
 
 let test_push_signals_reporting_nodes () =
@@ -127,7 +131,8 @@ let test_push_signals_reporting_nodes () =
   let marks_a = Filename.concat root "a.marks" and marks_b = Filename.concat root "b.marks" in
   let pa = spawn_node ~root "a-1" marks_a and pb = spawn_node ~root "b-1" marks_b in
   Fun.protect ~finally:(fun () -> Procs.stop_all [ pa; pb ] ~grace_ms:500) (fun () ->
-      Unix.sleepf 0.3;  (* let each shell install its trap *)
+      if not (wait_until (fun () -> Sys.file_exists (marks_a ^ ".ready") && Sys.file_exists (marks_b ^ ".ready")))
+      then Alcotest.fail "a stand-in node never installed its SIGHUP trap";
       let na = node ~root ~pid:(Procs.pid pa) "a-1" and nb = node ~root ~pid:(Procs.pid pb) "b-1" in
       let dead = match Unix.fork () with 0 -> Unix._exit 0 | p -> ignore (Unix.waitpid [] p); p in
       let nc = node ~root ~pid:dead "c-1" in

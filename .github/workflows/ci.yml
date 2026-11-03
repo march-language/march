@@ -77,9 +77,18 @@ jobs:
   # finished in under 10. Each of those three is now its own shard, run
   # through its per-test alias; `rest` is `dune runtest` with
   # MARCH_CI_RUNTEST_SPLIT=1, which drops exactly those three stanzas (see the
-  # comment above the test runners in test/dune). Together the four shards run
-  # the same set as one `dune runtest`. If you add a fifth shard, gate its
+  # comment above the test runners in test/dune). Together the shards run
+  # the same set as one `dune runtest`. If you add a shard, gate its
   # stanza in test/dune the same way or it runs twice.
+  #
+  # `rest` was then the long pole (46 min, November 2026): CPU-bound on 4
+  # vCPUs, with forge/test's hot-reload suites (upgrade-from ~3500
+  # CPU-seconds over 7 cases, deploy-e2e ~970 s, hcr-manifest-diff,
+  # release_build, build_check) competing with test/'s fixture compiles and
+  # march-stdlib/errors. `forge` is `@forge/runtest` alone and `rest` is
+  # `@test/runtest @lsp/runtest`: only those three directories define tests,
+  # and `rest` fails if a dune file elsewhere starts to, so nothing can fall
+  # out of both. Linux only: one extra ~2 min setup on the 20-slot pool.
   #
   # Ubuntu only. macOS stays ONE `dune runtest` job (`all`): there the unsharded
   # run took ~32 min, off the critical path, and the same split measured 67
@@ -96,6 +105,7 @@ jobs:
           - { os: ubuntu-24.04, shard: refinecheck }
           - { os: ubuntu-24.04, shard: compiler }
           - { os: ubuntu-24.04, shard: rest }
+          - { os: ubuntu-24.04, shard: forge }
           - { os: macos-26,     shard: all }
     runs-on: ${{ matrix.os }}
     # Must stay above the Test step's 75 plus setup (20) and build (10).
@@ -165,7 +175,18 @@ jobs:
             codegen)     dune build @test/runtest-run_codegen ;;
             refinecheck) dune build @test/runtest-test_refinecheck ;;
             compiler)    dune build @test/runtest-run_compiler ;;
-            rest)        MARCH_CI_RUNTEST_SPLIT=1 dune runtest ;;
+            rest)
+              # `dune runtest` minus forge/ (the `forge` shard). A dune file
+              # declaring tests outside test/, lsp/ and forge/ would run in
+              # neither shard: refuse it here.
+              stray=$(git ls-files '*dune' | xargs grep -l -E '\(alias runtest\)|\(tests? |\(test$' \
+                | grep -v -E '^(test|lsp|forge)/' || true)
+              if [ -n "$stray" ]; then
+                echo "::error::tests declared outside test/, lsp/ and forge/, which no ubuntu shard runs: $stray"
+                exit 1
+              fi
+              MARCH_CI_RUNTEST_SPLIT=1 dune build @test/runtest @lsp/runtest ;;
+            forge)       dune build @forge/runtest ;;
             # macOS skips the suites whose answer does not depend on the OS
             # (refinecheck, golden diagnostics, LSP; see "CI sharding" in
             # test/dune), and runs only the OS-sensitive groups listed in
