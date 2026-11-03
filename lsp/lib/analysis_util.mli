@@ -230,6 +230,7 @@ val rename_at :
   t ->
   line:int -> character:int -> new_name:string -> Lsp.Types.TextEdit.t list
 val offset_of_pos : string -> int -> int -> int
+val span_byte_bounds : string -> Ast.span -> int * int
 val slice_span : string -> Ast.span -> string
 val indent_of_line : string -> int -> string
 val iter_decl_exprs : (Ast.expr -> unit) -> Ast.decl -> unit

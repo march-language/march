@@ -1457,7 +1457,18 @@ the induction hypothesis. The checker accepts it only when the recursion
 provably terminates (here it is structural, on the tail) and the recursive
 call meets the lemma's own preconditions. A lemma that proves is **admitted**.
 A lemma that does not draws `lemma_unproved` (an error under `cap verified`),
-and gives its callers nothing.
+and gives its callers nothing. A lemma whose theorem is false is an error,
+`refinement_violated`, with an input that shows it: the checker runs the
+theorem on the solver's counterexample, and reports it only when the theorem
+really is false there.
+
+```march
+@[lemma]
+fn nn(n : Int) : {Unit | n + n >= n} do
+  ()
+end
+-- error: the lemma `nn` is false: its theorem `n + n >= n` does not hold at n = -1
+```
 
 **Calling a lemma.** A call on its own line, or as `let _ = l(...)`, adds the
 theorem, instantiated at the call's arguments, as a fact for the rest of that
@@ -1572,6 +1583,12 @@ the lemmas whose theorem calls it, under the heading "Laws", with the theorem
 as written. `forge search --law TEXT` finds lemmas whose theorem contains TEXT
 (case and spaces ignored) or calls a function named TEXT, and a plain name
 search for a function also finds the lemmas about it.
+
+**Rewrites in the editor.** When a proved lemma's theorem is an equation,
+`lhs == rhs`, the editor offers to rewrite an expression of the shape `lhs`
+into `rhs`, and names the lemma. With `cat_nil` proved, the cursor on
+`cat(Cons(1, zs), Nil)` offers "Rewrite to `Cons(1, zs)`". Only proved lemmas
+are offered, and only left to right.
 
 **Lemmas as a contract for changes.** A lemma states a law the code must keep,
 and the checker re-proves it on every build. To make a broken law fail the

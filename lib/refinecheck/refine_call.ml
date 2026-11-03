@@ -108,6 +108,20 @@ let enclosing_fn_probe : (A.fn_def -> unit) option ref = ref None
    sites can never leak into this one's. *)
 let promoted_sites : (A.span * string * A.fn_def) list ref = ref []
 
+(* A lemma whose theorem the solver refuted (reflection design §4.3): set by
+   [Refine_check].  Given the lemma's name and the solver's model, it decodes
+   the model onto the lemma's parameters and evaluates the theorem in the
+   interpreter; [Some input] (rendered `n = -1`) when the theorem is false
+   there.  A lemma claims its theorem for every input inside its parameters'
+   refinements, so one such input is a definite failure, wherever in the body
+   the model came from. *)
+let lemma_counterexample : (string -> (string * string) list -> string option) ref = ref (fun _ _ -> None)
+
+(* Lemmas a confirmed counterexample refutes (name -> rendered input).  Only
+   recorded here; the verdict is left as it was, so the gate's rounds and L4
+   are unchanged, and the lemma pass reports it ([Refine_check]). *)
+let lemma_refuted : (string, string) Hashtbl.t = Hashtbl.create 8
+
 (* Does [e] ever APPLY the function spelled [name]?  Applications only: a bare
    mention (`let f = List.length`) is not a guard, and counting it would let an
    unrelated line decide what a call site is told. *)
@@ -3397,6 +3411,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                 same predicate the measure-alias gates use — an identity
                 supplied by the caller, never a path pattern; see its comment in
                 [Refine_encode]. *)
+             (match subject, model_of first with
+              | Lemma_goal, (_ :: _ as model) when callee <> "assert" && not (Hashtbl.mem lemma_refuted callee) -> (
+                match !lemma_counterexample callee model with
+                | Some at -> Hashtbl.replace lemma_refuted callee at
+                | None -> ())
+              | _ -> ());
              let promoted =
                match subject, !enclosing_fn, model_of first with
                | _ when is_stdlib_source_file span.A.file -> None

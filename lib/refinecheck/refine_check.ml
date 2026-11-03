@@ -7029,6 +7029,15 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
             (match Refine_post.assumed_return fd with Some p -> pred_str p | None -> "?")
             k n
         in
+        match Hashtbl.find_opt Refine_call.lemma_refuted lw.lw_name with
+        | Some at ->
+          (* The solver's model, run in the interpreter, makes the theorem
+             false: a definite failure, not an unproved one. *)
+          Err.error ~code:Err.Code.refinement_violated errctx ~span:fd.A.fn_name.A.span
+            (Printf.sprintf "the lemma `%s` is false: its theorem `%s` does not hold at %s" lw.lw_name
+               (match Refine_post.assumed_return fd with Some p -> pred_str p | None -> "?")
+               at)
+        | None ->
         if !strict_verified then Err.error ~code:Err.Code.lemma_unproved errctx ~span:fd.A.fn_name.A.span msg
         else Err.warning ~code:Err.Code.lemma_unproved errctx ~span:fd.A.fn_name.A.span msg
       end
@@ -9490,6 +9499,32 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   let ih_eligible : (A.span, unit) Hashtbl.t = Hashtbl.create 8 in
   lemma_rows := [];
   lemma_defs := [];
+  (* A refuted lemma theorem is confirmed by evaluating it, in the
+     interpreter, on the model's values for the lemma's parameters. *)
+  let lemmas_q = lemma_fns_q m.A.mod_decls in
+  Hashtbl.reset Refine_call.lemma_refuted;
+  Refine_call.lemma_counterexample :=
+    (fun name model ->
+      match List.find_opt (fun (q, (fd : A.fn_def)) -> q = name || fd.A.fn_name.A.txt = name) lemmas_q with
+      | None -> None
+      | Some (_, fd) -> (
+        match fd.A.fn_clauses, lemma_post fd with
+        | [ c ], Ok (_, p) -> (
+          match Witness.annotated_params (List.map Witness.clause_param c.A.fc_params) with
+          | Some params when List.for_all Witness.witness_safe_param params -> (
+            match Witness.decode_model ~params ~model with
+            | Some args when Witness.admissible ~params args -> (
+              match Witness.eval_classified ~bindings:args p with
+              | Witness.C_ret (March_eval.Eval_types.VBool false) ->
+                Some
+                  (String.concat ", "
+                     (List.map
+                        (fun (n, v) -> n ^ " = " ^ Option.value ~default:"?" (Witness.render_value v))
+                        args))
+              | _ -> None)
+            | _ -> None)
+          | _ -> None)
+        | _ -> None));
   lemma_called := [];
   gate_unverified_posts_ih ~root
     ~ih:(fun pending ->
