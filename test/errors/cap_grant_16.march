@@ -25,3 +25,4 @@ mod TakesTheRoot do
     println("took the root capability without being given it")
   end
 end
+-- EXPECT-FIX-PARTIAL: the grant fix is right; the program also references root_cap (root_cap_reference)

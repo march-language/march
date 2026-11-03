@@ -3267,7 +3267,12 @@ let analyse ~filename ~src : t =
     in
     let diags =
       let compiler_diags =
-        Err.sorted errors |> List.filter_map (diag_to_lsp ~filename)
+        (* The CLI's cascade rules (one root cause, one report), with the
+           same "only a shown diagnostic suppresses" condition: here a
+           diagnostic is shown when it maps into this document. *)
+        Err.sorted errors
+        |> Err.suppress_cascades ~visible:(fun d -> diag_to_lsp ~filename d <> None)
+        |> List.filter_map (diag_to_lsp ~filename)
       in
       (* The typechecker's own tail-call checker already reports every
          non-tail recursive call, at the same span, saying the same thing —

@@ -4543,7 +4543,22 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
 (** Emit unused-variable warnings for fn params not referenced in the body.
     The wildcard [_] and names starting with [_] are silently ignored. *)
 let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_span =
-  let used = free_vars_expr [] body in
+  (* A parameter a refinement names is used: in
+     `fn f(t : {Tree | size(t) < 1})` the predicate reads `t`, and the
+     `_t` rename this warning offered left `size(t)` unbound. *)
+  let rec refine_uses (t : Ast.ty) =
+    match t with
+    | Ast.TyRefine (b, _, pred) -> free_vars_expr [] pred @ refine_uses b
+    | Ast.TyCon (_, ts) | Ast.TyTuple ts -> List.concat_map refine_uses ts
+    | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> refine_uses a @ refine_uses b
+    | Ast.TyRecord fs -> List.concat_map (fun (_, t) -> refine_uses t) fs
+    | Ast.TyLinear (_, t) -> refine_uses t
+    | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> []
+  in
+  let param_tys = List.filter_map (function
+      | Ast.FPNamed p | Ast.FPDefault (p, _) -> p.param_ty
+      | Ast.FPPat _ -> None) params in
+  let used = free_vars_expr [] body @ List.concat_map refine_uses param_tys in
   (* A capability value is a runtime-erased grant token: it is normal, and
      often correct, for it never to be mentioned in the body. Warning on it
      made the right code noisy and pushed users to spell every grant `_cap`.
@@ -8124,6 +8139,51 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
          (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
     env.fn_bound_points
 
+(** A capability reach chain as source spans (specs/plans/
+    2026-11-02-diagnostics-depth-plan.md §X7): for [from :: chain], each hop
+    `k → r` becomes a label on the call to `r` inside `k`, and the last
+    function's call to a builtin needing [cap] is returned as the USE, the
+    span a reader should look at first.  Every span must sit in [file] (the
+    root's file): a span in a stdlib file is hidden by the driver, and a
+    primary span there would hide the whole error.  [None] when any hop or
+    the use can't be found, so the caller keeps its prose chain. *)
+let cap_chain_trace (decls : Ast.decl list) ~(file : string) ~(from : string)
+    ~(chain : string list) ~(cap : string) : (Ast.span * Err.label list) option =
+  let bare n = match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
+  let rec fns acc = function
+    | [] -> acc
+    | Ast.DFn (def, _) :: rest -> fns ((def.Ast.fn_name.txt, def) :: acc) rest
+    | Ast.DMod (_, _, inner, _) :: rest -> fns (fns acc inner) rest
+    | _ :: rest -> fns acc rest in
+  let table = List.rev (fns [] decls) in
+  let calls_of k =
+    match List.assoc_opt (bare k) table with
+    | None -> []
+    | Some def ->
+      List.concat_map (fun c -> List.rev (March_ast.Calls.calls_in_expr [] c.Ast.fc_body))
+        def.Ast.fn_clauses in
+  let in_file (sp : Ast.span) = sp.Ast.file = file in
+  let rec hops acc = function
+    | k :: (r :: _ as rest) ->
+      (match List.find_opt (fun (n, sp, _) -> bare n = bare r && in_file sp) (calls_of k) with
+       | Some (_, sp, _) ->
+         hops ({ Err.lbl_span = sp;
+                 lbl_message = Printf.sprintf "`%s` calls `%s` here" (bare k) (bare r) } :: acc)
+           rest
+       | None -> None)
+    | [ last ] ->
+      (match List.find_opt (fun (n, sp, _) ->
+           in_file sp
+           && (match List.assoc_opt n builtin_cap_table with
+               | Some c -> cap_subsumes cap c || cap_subsumes c cap
+               | None -> false))
+           (calls_of last) with
+       | Some (_, sp, _) -> Some (sp, List.rev acc)
+       | None -> None)
+    | [] -> None in
+  hops [] (from :: chain)
+
 let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
   (* [rows] lets the caller hand in an already-solved row table. Stage C made
      the flat closure a projection of that solve, and stage D added a second
@@ -8306,8 +8366,29 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
            let param_hint =
              Printf.sprintf "_cap_%s : Cap(%s)" (String.lowercase_ascii leaf) c
            in
-           Err.error ~code:Err.Code.cap_grant_exceeded env.errors ~span
-             (Printf.sprintf
+           let chain = cap_reach_chain env ~from:"main" ~cap:c in
+           (* §X7: with a trace, the error points at the use and labels each
+              call on the way and `main`'s grant; without one (a hop through
+              a function value, or a use in another file), it stays on
+              `main` with the prose chain. *)
+           let trace =
+             match chain with
+             | Some (_ :: _ as ch) ->
+               cap_chain_trace decls ~file:span.Ast.file ~from:"main" ~chain:ch ~cap:c
+             | _ -> None in
+           let primary, labels =
+             match trace with
+             | Some (use_sp, hop_labels) ->
+               use_sp,
+               hop_labels
+               @ [ { Err.lbl_span = span;
+                     lbl_message = Printf.sprintf "`main` is granted only %s here" show_grant } ]
+             | None -> span, [] in
+           Err.report env.errors
+             { Err.severity = Err.Error; span = primary; labels; notes = [];
+               code = Err.Code.cap_grant_exceeded; fix = None;
+               message =
+             Printf.sprintf
                 "`main` is granted %s, but the program reaches `%s`%s. \
                  The grant is a ceiling on the WHOLE program — declaring \
                  `needs %s` does not raise it.\n\
@@ -8322,12 +8403,13 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                    neither diagnostic elides today), `main` included as the
                    first frame, joined with `→`. Both read as a matched
                    pair, so they must render the same way. *)
-                (match cap_reach_chain env ~from:"main" ~cap:c with
-                 | Some (_ :: _ as chain) ->
+                (match trace, chain with
+                 | Some _, _ -> " here"
+                 | None, Some (_ :: _ as chain) ->
                    Printf.sprintf " (reached from `main`: %s)"
                      (render_cap_chain ("main" :: chain))
                  | _ -> "")
-                c c param_hint))
+                c c param_hint })
       (List.sort_uniq String.compare closure)
 
 (* ── Per-role grants: the same walk from more roots (distributed-deploys

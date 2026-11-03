@@ -1,14 +1,6 @@
 exit: 1
 -- ERROR ---------- errors/unknown_qualified_name_2.march
 
-I cannot find `Secret`. [unknown_qualified_name]
-
-    in code generated for this file by a `derive`, `@[endpoints]` or `@[remote]` declaration; the excerpt cannot be shown
-    run `march --explain unknown_qualified_name`
-
-
--- ERROR ---------- errors/unknown_qualified_name_2.march
-
 The linear value `st2` was never used. [linear_never_used]
 Linear values must be consumed exactly once — did you mean to pass it somewhere?
 

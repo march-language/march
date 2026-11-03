@@ -26,16 +26,6 @@ Warning: function `ins` is structurally recursive but not tail-recursive. If the
 
 
 
--- WARNING -------------- errors/non_tail_recursion_1.march
-
-Unused variable `t`. [unused_binding]
-Use `_` to mark intentionally unused params.
-
-42 |   fn needEmpty(t : {ITree | size(t) < 1}) : Int do 0 end
-                    ^
-
-
-
 -- ERROR -------------- errors/non_tail_recursion_1.march
 
 refinement violation: argument `t` of `needEmpty` does not satisfy precondition `size(t) < 1` [refinement_violated]
@@ -52,11 +42,3 @@ note: this value never satisfies it; pass one that does
     run `march --explain refinement_violated`
 
 
-
-fix [unused_binding]:
-@@ lines 42-42 @@
--  fn needEmpty(t : {ITree | size(t) < 1}) : Int do 0 end
-+  fn needEmpty(_t : {ITree | size(t) < 1}) : Int do 0 end
-
-after fix: exit 1
-Warning: function `size` is structurally recursive but not tail-recursive. If the recursive call is the direct argument of a constructor in tail position, tail-recursion-modulo-cons compiles it to a loop with no extra stack (it always runs). Otherwise it uses O(depth) stack space and deep input can overflow the stack — consider an accumulator parameter. [non_tail_recursion]
