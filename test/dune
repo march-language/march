@@ -1330,8 +1330,8 @@
 (test
  (name test_z3_lookup)
  (modules test_z3_lookup)
- (deps z3_lookup_helper.exe)
- (libraries march_refine alcotest unix))
+ (deps z3_lookup_helper.exe %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
+ (libraries march_refine march_test_helpers alcotest unix))
 
 (test
  (name test_ast_calls)

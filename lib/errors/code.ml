@@ -163,6 +163,8 @@ let set_measure_call = "set_measure_call"
 let set_refinement_type = "set_refinement_type"
 let sig_mismatch = "sig_mismatch"
 let sigil_interpolation = "sigil_interpolation"
+let solver_unavailable = "solver_unavailable"
+let solver_version_mismatch = "solver_version_mismatch"
 let spawn_computed_actor = "spawn_computed_actor"
 let stdlib_internal = "stdlib_internal"
 let syntax_error = "syntax_error"
@@ -347,6 +349,8 @@ let all = [
   set_refinement_type;
   sig_mismatch;
   sigil_interpolation;
+  solver_unavailable;
+  solver_version_mismatch;
   spawn_computed_actor;
   stdlib_internal;
   syntax_error;

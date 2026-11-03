@@ -42,8 +42,24 @@ let get_solver () : Solver.t option =
    mean the z3 child is dead or wedged: reap it and clear the slot so the
    caller can respawn (supervised restart). *)
 (* Set when z3 died or stopped answering during this run; the run report
-   turns it into the z3_unavailable warning. *)
+   turns it into the solver_unavailable warning. *)
 let solver_failure : string option ref = ref None
+
+(* Whether this run asked z3 anything (a VC-cache miss reached the solver);
+   the z3 warning is only for runs whose verdicts depended on z3. *)
+let queried = ref false
+
+(** The z3 report for this run: [None] when no query reached the solver;
+    otherwise its health, where a z3 that died or hung mid-run is [Broken]
+    with that reason. *)
+let run_report () : Solver.health option =
+  if not !queried then None
+  else
+    match (Solver.health (), !solver_failure) with
+    | ((Solver.Missing _ | Solver.Broken _) as h), _ -> Some h
+    | (Solver.Healthy { path; _ } | Solver.Mismatch { path; _ }), Some reason ->
+        Some (Solver.Broken { path; reason })
+    | h, None -> Some h
 
 let try_check ?(assume = []) ~preamble (s : Solver.t) (vc : Smt.vc)
     : (Solver.result, [ `Hung | `Died ]) result =
@@ -189,6 +205,7 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
         r
     | None -> (
         if assume <> [] then incr stage2_queries;
+        queried := true;
         let checked =
           match get_solver () with
           | None -> None (* z3 unavailable; do not cache *)

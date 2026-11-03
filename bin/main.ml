@@ -1832,6 +1832,48 @@ let hr_store_sources ~(cfg : March_tir.Hot_reload.config) ~(store : March_cas.Ca
    and the platform, or its absence ([Solver.cas_tag]; never runs z3). *)
 let z3_cas_tag () = March_refine.Solver.cas_tag ()
 
+(* One warning per run when z3 is missing, broken or not the pinned version
+   (specs/2026-11-02-bundled-z3-design.md), and only for a run with
+   refinement obligations in the user's own files: every run also checks the
+   stdlib's, which would otherwise make hello-world warn.  The span is the
+   entry file's first line, so it is shown (and replayed on a warm build) like
+   any user diagnostic. *)
+let report_z3 errors ~filename ~user_files =
+  let own (f : string) = f = filename || List.mem f user_files in
+  let user_obligation =
+    List.exists
+      (fun (o : March_refinecheck.Obligation.t) -> own o.span.March_ast.Ast.file)
+      (March_refinecheck.Obligation.all ())
+  in
+  if user_obligation then begin
+    let span =
+      { March_ast.Ast.file = filename; start_line = 1; start_col = 0; end_line = 1; end_col = 0 }
+    in
+    let pin = March_refine.Z3_pin.version in
+    let fix =
+      Printf.sprintf
+        "Reinstall the March toolchain (`forge toolchain install`), or set MARCH_Z3 to a z3 %s binary." pin
+    in
+    let unavailable msg =
+      March_errors.Errors.warning errors ~code:March_errors.Code.solver_unavailable ~span
+        ("Refinements were not checked: " ^ msg ^ " " ^ fix)
+    in
+    match March_refine.Refine.run_report () with
+    | None | Some (March_refine.Solver.Healthy _) -> ()
+    | Some (March_refine.Solver.Missing bundled) ->
+      unavailable
+        (Printf.sprintf
+           "no z3 found (looked in MARCH_Z3, next to march at %s, and on PATH)."
+           (Filename.dirname bundled))
+    | Some (March_refine.Solver.Broken { path; reason }) ->
+      unavailable (Printf.sprintf "z3 at %s %s." path reason)
+    | Some (March_refine.Solver.Mismatch { path; version; _ }) ->
+      March_errors.Errors.warning errors ~code:March_errors.Code.solver_version_mismatch ~span
+        (Printf.sprintf
+           "Using z3 %s from %s, but this toolchain is pinned to z3 %s; refinement verdicts may differ from CI."
+           version path pin)
+  end
+
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
 (* The sanitizer MARCH_SANITIZE selects, or [None] when it is unset.
@@ -2664,6 +2706,7 @@ let run_test_cmd args =
        index from a hypothesis module. Before [shutdown]: the probes need the
        solver. *)
     March_refinecheck.Precond_infer.attach_promoted_fixes errors desugared;
+    report_z3 errors ~filename ~user_files;
     (* Solving scope ends here: reap the shared z3 child now rather than
        holding an idle solver process for the rest of the run. *)
     March_refine.Refine.shutdown ();
@@ -3987,6 +4030,7 @@ let compile filename =
   (* Solving scope ends here: reap the shared z3 child now rather than holding
      an idle solver for the rest of the run (eval servers live indefinitely).
      --check-migration below lazily respawns; its child is reaped by at_exit. *)
+  report_z3 errors ~filename ~user_files;
   March_refine.Refine.shutdown ();
   stamp "typecheck";
   (* Allocation contracts (`cap no_alloc` modules and @[no_alloc] functions)
