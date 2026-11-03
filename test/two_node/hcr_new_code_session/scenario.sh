@@ -32,17 +32,18 @@ pk=$(cat "$work/keys/pk")
 
 COMPILE_FLAGS_a="--hot-reload Host --signing-pubkey $pk"
 COMPILE_FLAGS_b="--hot-reload Buy --signing-pubkey $pk"
-compile a
-compile b
+compile a b
 
 # Each node's version-2 patch, built in its own directory: a warm artifact
 # cache copies the .so without its manifest.
 for n in a b; do
   cp "$dir/node_${n}_v2.march" "$work/patch_$n/node_$n.march"
   mod=$( [ "$n" = a ] && echo Host || echo Buy )
-  (cd "$work/patch_$n" && "$MARCH" --compile --compile-so --hot-reload "$mod" \
-     -o "$work/patch_$n/v2.so" node_$n.march) \
-     > "$work/patch_$n.log" 2>&1 || { cat "$work/patch_$n.log" >&2; fail "node_${n}_v2.march did not build"; }
+  bg_build "$work/patch_$n" "$work/patch_$n.log" "node_${n}_v2.march" \
+    "$MARCH" --compile --compile-so --hot-reload "$mod" -o "$work/patch_$n/v2.so" node_$n.march
+done
+wait_builds
+for n in a b; do
   [ -f "$work/patch_$n/v2.so.hcr_manifest" ] || fail "no manifest for node-$n's patch"
 done
 

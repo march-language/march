@@ -62,6 +62,12 @@ git log is authoritative for exact commits.
   and the optimizer no longer run over ~9,000 unused functions. Programs are
   the same apart from some inlining choices, which now count only reachable
   callers. `--disable-pass dce-early` turns it off.
+- **`--hot-reload` builds are about twice as fast.** A hot-reload server build
+  now links the precompiled C runtime (only the four files that read its
+  signing key and HCR identity are compiled per build), builds its HCR
+  manifest once instead of twice, reuses typecheck's role-capability solve,
+  and the refcount-inlining rewrite no longer allocates per character. The
+  emitted program is unchanged.
 
 ### Fixed
 
