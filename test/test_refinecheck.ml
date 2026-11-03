@@ -10750,12 +10750,14 @@ let no_panic_proof_suite =
               end\n"))
 
   ; (* REGRESSION: `panic` keeps BOTH its syntactic ban and its transitive
-       fixpoint.  Same shape as the case above, opposite expectation — three
-       errors, because no contract exists or could exist for `panic`. *)
+       fixpoint.  Same shape as the case above, opposite expectation: the
+       callers are blamed too, because no contract exists or could exist for
+       `panic`.  Since the diagnostics-depth plan §X7 the blame is one error at
+       the panic naming both callers (each also a label), not three errors. *)
     Alcotest.test_case "cap no_panic: panic keeps its transitive blame" `Quick
       (fun () ->
-        let n =
-          has_no_panic_error_count
+        let ms =
+          no_panic_errors
             "mod TP do\n\
             \  cap no_panic\n\
             \  fn helper(x : Int) : Int do panic(\"boom\") end\n\
@@ -10763,7 +10765,10 @@ let no_panic_proof_suite =
             \  fn caller2(x : Int) : Int do helper(x) end\n\
              end\n"
         in
-        Alcotest.(check int) "direct site plus two transitive callers" 3 n)
+        Alcotest.(check int) "one error, at the direct site" 1 (List.length ms);
+        Alcotest.(check bool) "it names both transitive callers" true
+          (List.for_all (fun m -> contains m "`caller1`, `caller2` in this module reach it")
+             ms))
 
   ; (* ── Task 5: `Random.choice_weighted` (2026-08-05) ───────────────────
        Same shape as the `List.tail` trio above, over the real
@@ -11098,17 +11103,20 @@ let no_panic_proof_suite =
 
    These cases run the typechecker ALONE with the flag at its default, which is
    what those two pipelines do. *)
-let syntactic_no_panic_errors (src : string) : int =
+let syntactic_no_panic_messages (src : string) : string list =
   let m = March_desugar.Desugar.desugar_module (parse src) in
   (* Default, not set: a pipeline that forgets to opt in must get the
      conservative answer, so the absence of an assignment is the assertion. *)
   let errors, _ = March_typecheck.Typecheck.check_module m in
-  List.length
-    (List.filter
-       (fun (d : March_errors.Errors.diagnostic) ->
-         d.March_errors.Errors.severity = March_errors.Errors.Error
-         && contains d.March_errors.Errors.message "(declared `cap no_panic`)")
-       errors.March_errors.Errors.diagnostics)
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error
+         && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message else None)
+    errors.March_errors.Errors.diagnostics
+
+let syntactic_no_panic_errors (src : string) : int =
+  List.length (syntactic_no_panic_messages src)
 
 let syntactic_fallback_suite =
   [ Alcotest.test_case "an unguarded contracted call is still banned" `Quick
@@ -11144,19 +11152,25 @@ let syntactic_fallback_suite =
              \  fn f(o : Option(Int)) : Int do unwrap(o) end\n\
               end\n"))
 
-  ; (* And the OLD transitive blame is intact in this mode — three errors, the
-       pre-2026-08-05 behaviour, byte-for-byte what `march check` printed
-       before this task. *)
+  ; (* And the OLD transitive blame is intact in this mode: both callers are
+       blamed, as the pre-2026-08-05 behaviour did.  Since the diagnostics-depth
+       plan §X7 that is one error at the direct site naming both callers (each
+       also a label), not three errors. *)
     Alcotest.test_case "transitive blame is intact in the fallback" `Quick
       (fun () ->
-        Alcotest.(check int) "direct site plus two callers" 3
-          (syntactic_no_panic_errors
+        let ms =
+          syntactic_no_panic_messages
              "mod SF4 do\n\
              \  cap no_panic\n\
              \  fn helper(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
              \  fn caller1(xs : List(Int)) : List(Int) do helper(xs) end\n\
              \  fn caller2(xs : List(Int)) : List(Int) do helper(xs) end\n\
-              end\n"))
+              end\n"
+        in
+        Alcotest.(check int) "one error, at the direct site" 1 (List.length ms);
+        Alcotest.(check bool) "it names both callers" true
+          (List.for_all (fun m -> contains m "`caller1`, `caller2` in this module reach it")
+             ms))
 
   ; (* REJECT control: the fallback must not have become a blanket rejector. *)
     Alcotest.test_case "a safe cap no_panic module is silent in the fallback"
