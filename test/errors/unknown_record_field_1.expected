@@ -1,11 +1,18 @@
 exit: 1
 -- NAMING ----------- errors/unknown_record_field_1.march
 
-This record does not have a field called `conut`. Did you mean `count`? [unknown_record_field]
-The fields I see are: cont, count
+`Counter`'s state does not have a field called `cuont`. [unknown_record_field]
+Did you mean `count`?
 
-8 |     let n : Int = r.conut
-                      ^^^^^^^
+7 |     on Bump(k : Int) do { state with cuont: state.count + k } end
+                                         ^^^^^
 
 
 
+
+fix [unknown_record_field]:
+@@ lines 7-7 @@
+-    on Bump(k : Int) do { state with cuont: state.count + k } end
++    on Bump(k : Int) do { state with count: state.count + k } end
+
+after fix: exit 0

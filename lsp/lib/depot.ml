@@ -59,7 +59,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
   | Ast.ERecordUpdate (e2, fs, _) ->
     iter_expr f e2; List.iter (fun (_, e3) -> iter_expr f e3) fs
   | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _)
-  | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _)
+  | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _) | Ast.ERefineMsg (e2, _, _)
   | Ast.EDbg (Some e2, _) -> iter_expr f e2
   | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> iter_expr f r; iter_expr f c
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _

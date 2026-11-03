@@ -7,5 +7,6 @@ hint: add `derive Json for Ping` next to its declaration; the compiler then mint
 20 |     let _ = Node.send(peer, GlobalPid.make("b", 1, 1), p)
                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+    run `march --explain codec_missing`
 
 

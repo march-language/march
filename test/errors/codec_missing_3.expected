@@ -5,6 +5,7 @@ exit: 1
 hint: add `derive Json for Hit` next to its declaration; the compiler then mints the wire type tag from it, and a receiver decodes with `from_json`.
 
     in code generated for this file by a `derive`, `@[endpoints]` or `@[remote]` declaration; the excerpt cannot be shown
+    run `march --explain codec_missing`
 
 
 -- ACTOR ------------------- errors/codec_missing_3.march

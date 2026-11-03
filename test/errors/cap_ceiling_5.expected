@@ -1,0 +1,19 @@
+exit: 1
+-- CAPABILITY ---------------- errors/cap_ceiling_5.march
+
+Module `Config` uses `IO.FileRead` but does not declare `needs IO.FileRead`. [cap_ceiling]
+help: add `needs IO.FileRead` to the module body.
+
+5 |     needs IO.Console
+        ^^^^^^^^^^^^^^^^
+
+    run `march --explain cap_ceiling`
+
+
+
+fix [cap_ceiling:IO.FileRead]:
+@@ after line 5 @@
+     needs IO.Console
++    needs IO.FileRead
+
+after fix: exit 0

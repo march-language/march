@@ -194,6 +194,7 @@ and respan_expr (e : expr) : expr =
   | ELetStar (p, e1, e2, _) -> ELetStar (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
   | EAssert (e, _)       -> EAssert (respan_expr e, fresh_synthetic_span ())
   | ESigil (s, e, _)     -> ESigil (s, respan_expr e, fresh_synthetic_span ())
+  | ERefineMsg (e, s, _)     -> ERefineMsg (respan_expr e, s, fresh_synthetic_span ())
 
 and respan_param (p : param) : param =
   { param_name = respan_name p.param_name;

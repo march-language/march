@@ -16,6 +16,7 @@ hint: hold the capability in a separate value and pass it as a parameter, keepin
 19 |   derive Json for Loot
               ^^^^
 
+    run `march --explain cap_deserialize`
 
 
 -- CAPABILITY ------------- errors/cap_root_broad_1.march

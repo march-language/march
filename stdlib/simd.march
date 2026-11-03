@@ -69,7 +69,7 @@ mod Simd do
       march> (Simd.extract_f32x4(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0), 3)) == 4.0
       true
   """
-  fn extract_f32x4(v, i : {Int | 0 <= _ && _ < 4}) do simd_f32x4_extract(v, i) end
+  fn extract_f32x4(v, i : {Int | 0 <= _ else "lane index must not be negative" && _ < 4 else "lane index must be less than 4"}) do simd_f32x4_extract(v, i) end
   doc """
   A copy of [v] with lane [i] (0-3) set to [x], rounded to binary32. [v] is
   unchanged.
@@ -79,7 +79,7 @@ mod Simd do
       march> Simd.replace_f32x4(Simd.splat_f32x4(0.0), 3, 2.5) == Simd.make_f32x4(0.0, 0.0, 0.0, 2.5)
       true
   """
-  fn replace_f32x4(v, i : {Int | 0 <= _ && _ < 4}, x : Float) do simd_f32x4_replace(v, i, x) end
+  fn replace_f32x4(v, i : {Int | 0 <= _ else "lane index must not be negative" && _ < 4 else "lane index must be less than 4"}, x : Float) do simd_f32x4_replace(v, i, x) end
   doc """
   Load 4 lanes from the NativeF32Arr [arr], elements [i] to [i] + 3.
   Panics unless 0 <= [i] and [i] + 4 <= length.
@@ -351,7 +351,7 @@ mod Simd do
       march> (Simd.extract_f64x2(Simd.make_f64x2(1.5, -2.0), 1)) == -2.0
       true
   """
-  fn extract_f64x2(v, i : {Int | 0 <= _ && _ < 2}) do simd_f64x2_extract(v, i) end
+  fn extract_f64x2(v, i : {Int | 0 <= _ else "lane index must not be negative" && _ < 2 else "lane index must be less than 2"}) do simd_f64x2_extract(v, i) end
   doc """
   A copy of [v] with lane [i] (0-1) set to [x].
 
@@ -360,7 +360,7 @@ mod Simd do
       march> Simd.extract_f64x2(Simd.replace_f64x2(Simd.splat_f64x2(0.0), 1, 2.5), 1)
       2.5
   """
-  fn replace_f64x2(v, i : {Int | 0 <= _ && _ < 2}, x : Float) do simd_f64x2_replace(v, i, x) end
+  fn replace_f64x2(v, i : {Int | 0 <= _ else "lane index must not be negative" && _ < 2 else "lane index must be less than 2"}, x : Float) do simd_f64x2_replace(v, i, x) end
   doc """
   Load 2 lanes from the NativeFloatArr [arr], elements [i] and [i] + 1.
   Panics unless 0 <= [i] and [i] + 2 <= length.
@@ -618,7 +618,7 @@ mod Simd do
       march> Simd.extract_i32x4(Simd.make_i32x4(10, 20, 30, 40), 2)
       30
   """
-  fn extract_i32x4(v, i : {Int | 0 <= _ && _ < 4}) do simd_i32x4_extract(v, i) end
+  fn extract_i32x4(v, i : {Int | 0 <= _ else "lane index must not be negative" && _ < 4 else "lane index must be less than 4"}) do simd_i32x4_extract(v, i) end
   doc """
   A copy of [v] with lane [i] (0-3) set to [x], wrapped to 32 bits.
 
@@ -627,7 +627,7 @@ mod Simd do
       march> Simd.replace_i32x4(Simd.splat_i32x4(0), 2, 7) == Simd.make_i32x4(0, 0, 7, 0)
       true
   """
-  fn replace_i32x4(v, i : {Int | 0 <= _ && _ < 4}, x : Int) do simd_i32x4_replace(v, i, x) end
+  fn replace_i32x4(v, i : {Int | 0 <= _ else "lane index must not be negative" && _ < 4 else "lane index must be less than 4"}, x : Int) do simd_i32x4_replace(v, i, x) end
   doc """
   Load 4 lanes from the NativeI32Arr [arr], elements [i] to [i] + 3.
   Panics unless 0 <= [i] and [i] + 4 <= length.
@@ -887,7 +887,7 @@ mod Simd do
       march> Simd.extract_i64x2(Simd.make_i64x2(5, -6), 1)
       -6
   """
-  fn extract_i64x2(v, i : {Int | 0 <= _ && _ < 2}) do simd_i64x2_extract(v, i) end
+  fn extract_i64x2(v, i : {Int | 0 <= _ else "lane index must not be negative" && _ < 2 else "lane index must be less than 2"}) do simd_i64x2_extract(v, i) end
   doc """
   A copy of [v] with lane [i] (0-1) set to [x].
 
@@ -896,7 +896,7 @@ mod Simd do
       march> Simd.replace_i64x2(Simd.splat_i64x2(0), 1, 42) == Simd.make_i64x2(0, 42)
       true
   """
-  fn replace_i64x2(v, i : {Int | 0 <= _ && _ < 2}, x : Int) do simd_i64x2_replace(v, i, x) end
+  fn replace_i64x2(v, i : {Int | 0 <= _ else "lane index must not be negative" && _ < 2 else "lane index must be less than 2"}, x : Int) do simd_i64x2_replace(v, i, x) end
   doc """
   Load 2 lanes from the NativeIntArr [arr], elements [i] and [i] + 1.
   Panics unless 0 <= [i] and [i] + 2 <= length.
@@ -1152,7 +1152,7 @@ mod Simd do
       march> Simd.extract_u8x16(Simd.splat_u8x16(200), 15)
       200
   """
-  fn extract_u8x16(v, i : {Int | 0 <= _ && _ < 16}) do simd_u8x16_extract(v, i) end
+  fn extract_u8x16(v, i : {Int | 0 <= _ else "lane index must not be negative" && _ < 16 else "lane index must be less than 16"}) do simd_u8x16_extract(v, i) end
   doc """
   A copy of [v] with lane [i] (0-15) set to [x] mod 256.
 
@@ -1161,7 +1161,7 @@ mod Simd do
       march> Simd.extract_u8x16(Simd.replace_u8x16(Simd.splat_u8x16(0), 15, 257), 15)
       1
   """
-  fn replace_u8x16(v, i : {Int | 0 <= _ && _ < 16}, x : Int) do simd_u8x16_replace(v, i, x) end
+  fn replace_u8x16(v, i : {Int | 0 <= _ else "lane index must not be negative" && _ < 16 else "lane index must be less than 16"}, x : Int) do simd_u8x16_replace(v, i, x) end
   doc """
   Load 16 lanes from the NativeU8Arr [arr], elements [i] to [i] + 15.
   Panics unless 0 <= [i] and [i] + 16 <= length. Bytes.to_u8_arr turns a

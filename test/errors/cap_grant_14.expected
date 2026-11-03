@@ -21,6 +21,7 @@ hint: `from_json_events` places no constraint on the type it produces, so it wou
 17 |     let forged : Cap(IO) = from_json_events("[]")
                                 ^^^^^^^^^^^^^^^^^^^^^^
 
+    run `march --explain cap_deserialize`
 
 
 

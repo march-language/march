@@ -1,0 +1,18 @@
+exit: 1
+-- REFINEMENT ------- errors/refinement_violated_14.march
+
+refinement violation: index must not be negative [refinement_violated]
+argument `n` of `List.nth` does not satisfy precondition `_ >= 0`
+note: this value never satisfies it; pass one that does
+
+7 |     List.nth([10, 20, 30], -1)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+    this argument must satisfy `_ >= 0 && _ < len(xs)`:
+
+7 |     List.nth([10, 20, 30], -1)
+                               ^^
+    run `march --explain refinement_violated`
+
+

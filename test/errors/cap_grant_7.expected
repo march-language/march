@@ -5,7 +5,7 @@ This record does not have a field called `z`. [unknown_record_field]
 The fields I know about are: x, y
 
 6 |     let q = { p with z: 99 }
-                ^^^^^^^^^^^^^^^^
+                         ^
 
 
 

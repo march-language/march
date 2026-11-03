@@ -1,0 +1,23 @@
+exit: 1
+-- CONTRACT ----------- errors/no_panic_violation_4.march
+
+`check` in `mod Safe` (declared `cap no_panic`) calls `panic`, which can panic. [no_panic_violation]
+`validate`, `validate_all` in this module reach it too.
+
+Return an error value (`Result`, `Option`) instead of calling `panic`.
+
+5 |     if ok do true else panic("not ok") end
+                           ^^^^^
+
+
+    `validate` reaches it through `check` here:
+
+9 |     check(n > 0)
+        ^^^^^
+
+    `validate_all` reaches it through `validate` here:
+
+13 |     validate(a) && validate(b)
+         ^^^^^^^^
+
+

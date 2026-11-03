@@ -1,0 +1,17 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_24.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+12 |     send(c, Bump("one"))
+                      ^^^^^
+
+    `Bump` is a message of actor `Counter`, and its handler declares this argument's type.
+
+    the expected type comes from here:
+
+7 |     on Bump(k : Int) do { state with n: state.n + k } end
+                ^
+    run `march --explain type_mismatch`
+
+

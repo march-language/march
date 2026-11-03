@@ -261,7 +261,11 @@ type env = {
   level   : int;                           (** Current generalization level *)
   lin     : lin_entry list;                (** Linear/affine use tracking *)
   errors  : Err.ctx;
-  pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
+  pending_constraints : (constraint_ * constraint_site option) list ref;
+  (** Accumulated use-site constraints, each with the use that produced it *)
+  decl_sites : (string, Ast.span) Hashtbl.t;
+  (** ["fn|Iface"] -> the span of that function's [when Iface(..)] bound, so a
+      [missing_impl] at a call can say where the requirement comes from *)
   type_map : (Ast.span, ty) Hashtbl.t;
   json_derive_sites : (string * Ast.span) list;
   (** Every `derive Json` this env's check has seen, as (declaring-module-
@@ -819,7 +823,7 @@ let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   ty_aliases = StrMap.empty;
   level = 0; lin = [];
-  errors; pending_constraints = ref []; type_map; record_names_snapshot = []; json_derive_sites = [];
+  errors; pending_constraints = ref []; decl_sites = Hashtbl.create 16; type_map; record_names_snapshot = []; json_derive_sites = [];
   refs = ref []; current_decl = ref "";
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
@@ -2399,7 +2403,12 @@ let instantiate ?use_span ?use_name level env = function
         | CADTBound (n, t) -> CADTBound (n, inst t)
         | CTNatBound t -> CTNatBound (inst t)) cs
     in
-    env.pending_constraints := inst_cs @ !(env.pending_constraints);
+    let site = match use_span, use_name with
+      | Some cs_span, Some cs_name -> Some { cs_span; cs_name }
+      | _ -> None
+    in
+    env.pending_constraints :=
+      List.map (fun c -> (c, site)) inst_cs @ !(env.pending_constraints);
     (* A1 witnesses: record the scheme (deduped by ids) and, if this call
        site supplied a span, the instantiation's type-argument vector. The
        fresh vars in `subst` are ordinary unification vars; they resolve

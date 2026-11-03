@@ -8,6 +8,7 @@ hint: accept `Cap(Db.P)` as a parameter and pass it through, or call a factory i
 23 |     fn make(cap : Cap(IO)) : Cap(Db.P) do mint_cap(cap) end
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+    run `march --explain proof_cap_return`
 
 
 -- HINT: CAPABILITY ----- errors/proof_cap_return_1.march

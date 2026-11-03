@@ -1751,6 +1751,7 @@ let span_of_expr (e : expr) : span =
   | ELetQ (_, _, _, sp) | ELetStar (_, _, _, sp) -> sp
   | EAssert (_, sp) -> sp
   | ESigil (_, _, sp) -> sp
+  | ERefineMsg (_, _, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -2193,6 +2194,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | ESigil _ ->
     eval_error "sigil expression reached evaluator (should be desugared)"
+  | ERefineMsg _ ->
+    eval_error "refinement message reached evaluator (desugar strips it from predicates)"
 
   | EResultRef _ ->
     raise (Eval_error "EResultRef reached evaluator — substitution missing")

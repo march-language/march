@@ -1,0 +1,18 @@
+exit: 1
+-- ACTOR -------- errors/actor_handler_state_type_2.march
+
+The handler for `Deposit` must return `Total`'s new state, a `{ count : Int, sum : Int }`, but it returns an `Int`. [actor_handler_state_type]
+A handler's result replaces the actor's state for the next message.
+
+7 |     on Deposit(k : Int) do state.sum + k end
+           ^^^^^^^
+
+    Return the whole state, for example `{ state with … }`.
+
+    this is an `Int`:
+
+7 |     on Deposit(k : Int) do state.sum + k end
+                               ^^^^^^^^^^^^^
+    run `march --explain actor_handler_state_type`
+
+

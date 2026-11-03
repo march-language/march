@@ -295,6 +295,7 @@ let rec iter_sites
   | A.ESpawn (inner, _) -> go inner
   | A.EDbg (e_opt, _) -> Option.iter go e_opt
   | A.ESigil (_, inner, _) -> go inner
+  | A.ERefineMsg (inner, _, _) -> go inner
   | A.EVar _ | A.ELit _ | A.EHole _ | A.EResultRef _ -> ()
 
 (* Calls [f span divisor_expr ctx] for every integer division/modulo site. *)

@@ -1248,6 +1248,8 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
 
   | Ast.ESigil _ ->
     failwith "lower_expr: ESigil should be desugared before lowering"
+  | Ast.ERefineMsg _ ->
+    failwith "lower_expr: ERefineMsg only occurs in a refinement predicate, never lowered"
 
 (** Install this file's [lower_expr] into [Lower_match]'s forward ref.
     Breaks the [lower.ml] <-> [Lower_match] mutual-recursion cycle (see

@@ -9,5 +9,6 @@ hint: move side effects into a normal handler that runs after migration complete
 22 |   fn counter_migrate_state(old : Int) : Int do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+    run `march --explain io_not_allowed`
 
 

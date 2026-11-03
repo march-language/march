@@ -6,7 +6,12 @@ expected `Int` but got `String`. [type_mismatch]
 26 |     send(counter, Inc("not an int"))
                            ^^^^^^^^^^^^
 
-    Argument to constructor `Inc`.
+    `Inc` is a message of actor `Counter`, and its handler declares this argument's type.
+
+    the expected type comes from here:
+
+19 |     on Inc(x : Int) do
+                ^
     run `march --explain type_mismatch`
 
 

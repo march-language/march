@@ -237,6 +237,7 @@ let rename_expr tbl ~root cur =
     | EAssert (x, sp) -> EAssert (ex x, sp)
     | EAtom (a, args, sp) -> EAtom (a, List.map ex args, sp)
     | ESigil (s, x, sp) -> ESigil (s, ex x, sp)
+    | ERefineMsg (x, s, sp) -> ERefineMsg (ex x, s, sp)
     | ELit _ | EVar _ | EHole _ | EResultRef _ | EDbg (None, _) -> e
   and bind b =
     { b with bind_ty = Option.map ty b.bind_ty; bind_expr = ex b.bind_expr }

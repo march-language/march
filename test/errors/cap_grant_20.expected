@@ -1,7 +1,8 @@
 exit: 1
 -- REFINEMENT ----------------- errors/cap_grant_20.march
 
-refinement violation: argument `i` of `Simd.extract_u8x16` does not satisfy precondition `0 <= _ && _ < 16` [refinement_violated]
+refinement violation: lane index must be less than 16 [refinement_violated]
+argument `i` of `Simd.extract_u8x16` does not satisfy precondition `_ < 16`
 note: this value never satisfies it; pass one that does
 
 14 |     println(to_string(Simd.extract_u8x16(v, 16)))

@@ -124,6 +124,7 @@ type constraint_ =
   | CInterface of string * ty
   | CADTBound of string * ty
   | CTNatBound of ty
+type constraint_site = { cs_span : Ast.span; cs_name : string; }
 type scheme = Mono of ty | Poly of int list * constraint_ list * ty
 val _counter : int ref
 val fresh_var : int -> ty
@@ -254,7 +255,8 @@ type env = {
   level : int;
   lin : lin_entry list;
   errors : Err.ctx;
-  pending_constraints : constraint_ list ref;
+  pending_constraints : (constraint_ * constraint_site option) list ref;
+  decl_sites : (string, Ast.span) Hashtbl.t;
   type_map : (Ast.span, ty) Hashtbl.t;
   json_derive_sites : (string * Ast.span) list;
   record_names_snapshot : (string * string option) list;

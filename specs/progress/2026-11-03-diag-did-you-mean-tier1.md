@@ -33,6 +33,6 @@ What changed (`lib/typecheck/typecheck_env.ml`, the "Did-you-mean ranking" secti
 
 Corpus: `unknown_constructor_2` (the `Pokee` send, with a second actor's `Pake` in range),
 `_3` (annotation picks `Postal` over a nearer same-module `Poss` and stdlib `Post`), `_4`
-(`Stream_Prod.S_ned` offers no `S_end`), `unknown_record_field_1` (`conut` → `count : Int`, not
+(`Stream_Prod.S_ned` offers no `S_end`), `unknown_record_field_2` (`conut` → `count : Int`, not
 `cont : String`). Goldens moved: `unknown_constructor_1` (no more `LiveProcess`/`Limit.Rate`),
 `unknown_qualified_name_2` (15-line list → one sentence; its `S_end` allowlist line removed).

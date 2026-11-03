@@ -10750,12 +10750,14 @@ let no_panic_proof_suite =
               end\n"))
 
   ; (* REGRESSION: `panic` keeps BOTH its syntactic ban and its transitive
-       fixpoint.  Same shape as the case above, opposite expectation — three
-       errors, because no contract exists or could exist for `panic`. *)
+       fixpoint.  Same shape as the case above, opposite expectation: the
+       callers are blamed too, because no contract exists or could exist for
+       `panic`.  Since the diagnostics-depth plan §X7 the blame is one error at
+       the panic naming both callers (each also a label), not three errors. *)
     Alcotest.test_case "cap no_panic: panic keeps its transitive blame" `Quick
       (fun () ->
-        let n =
-          has_no_panic_error_count
+        let ms =
+          no_panic_errors
             "mod TP do\n\
             \  cap no_panic\n\
             \  fn helper(x : Int) : Int do panic(\"boom\") end\n\
@@ -10763,7 +10765,10 @@ let no_panic_proof_suite =
             \  fn caller2(x : Int) : Int do helper(x) end\n\
              end\n"
         in
-        Alcotest.(check int) "direct site plus two transitive callers" 3 n)
+        Alcotest.(check int) "one error, at the direct site" 1 (List.length ms);
+        Alcotest.(check bool) "it names both transitive callers" true
+          (List.for_all (fun m -> contains m "`caller1`, `caller2` in this module reach it")
+             ms))
 
   ; (* ── Task 5: `Random.choice_weighted` (2026-08-05) ───────────────────
        Same shape as the `List.tail` trio above, over the real
@@ -11098,17 +11103,20 @@ let no_panic_proof_suite =
 
    These cases run the typechecker ALONE with the flag at its default, which is
    what those two pipelines do. *)
-let syntactic_no_panic_errors (src : string) : int =
+let syntactic_no_panic_messages (src : string) : string list =
   let m = March_desugar.Desugar.desugar_module (parse src) in
   (* Default, not set: a pipeline that forgets to opt in must get the
      conservative answer, so the absence of an assignment is the assertion. *)
   let errors, _ = March_typecheck.Typecheck.check_module m in
-  List.length
-    (List.filter
-       (fun (d : March_errors.Errors.diagnostic) ->
-         d.March_errors.Errors.severity = March_errors.Errors.Error
-         && contains d.March_errors.Errors.message "(declared `cap no_panic`)")
-       errors.March_errors.Errors.diagnostics)
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error
+         && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message else None)
+    errors.March_errors.Errors.diagnostics
+
+let syntactic_no_panic_errors (src : string) : int =
+  List.length (syntactic_no_panic_messages src)
 
 let syntactic_fallback_suite =
   [ Alcotest.test_case "an unguarded contracted call is still banned" `Quick
@@ -11144,19 +11152,25 @@ let syntactic_fallback_suite =
              \  fn f(o : Option(Int)) : Int do unwrap(o) end\n\
               end\n"))
 
-  ; (* And the OLD transitive blame is intact in this mode — three errors, the
-       pre-2026-08-05 behaviour, byte-for-byte what `march check` printed
-       before this task. *)
+  ; (* And the OLD transitive blame is intact in this mode: both callers are
+       blamed, as the pre-2026-08-05 behaviour did.  Since the diagnostics-depth
+       plan §X7 that is one error at the direct site naming both callers (each
+       also a label), not three errors. *)
     Alcotest.test_case "transitive blame is intact in the fallback" `Quick
       (fun () ->
-        Alcotest.(check int) "direct site plus two callers" 3
-          (syntactic_no_panic_errors
+        let ms =
+          syntactic_no_panic_messages
              "mod SF4 do\n\
              \  cap no_panic\n\
              \  fn helper(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
              \  fn caller1(xs : List(Int)) : List(Int) do helper(xs) end\n\
              \  fn caller2(xs : List(Int)) : List(Int) do helper(xs) end\n\
-              end\n"))
+              end\n"
+        in
+        Alcotest.(check int) "one error, at the direct site" 1 (List.length ms);
+        Alcotest.(check bool) "it names both callers" true
+          (List.for_all (fun m -> contains m "`caller1`, `caller2` in this module reach it")
+             ms))
 
   ; (* REJECT control: the fallback must not have become a blanket rejector. *)
     Alcotest.test_case "a safe cap no_panic module is silent in the fallback"
@@ -28789,6 +28803,99 @@ let opaque_by_decl_suite =
         in
         Alcotest.check cg_ps "same(w)" [ cg_proved ] (slugs "same(…)" obs)) ]
 
+(* Author-written conjunct messages (`p else "msg"`, March_ast.Refine_msg):
+   the message for the conjunct a call breaks leads the diagnostic, which then
+   names that conjunct alone; an unproven call's hint carries the message of
+   the conjunct it could not establish; and a conjunct without one keeps the
+   wording every other refinement gets. *)
+let refine_messages_suite =
+  let at_decl =
+    "  fn at(xs : List(Int), n : {Int | _ >= 0 else \"index must not be negative\" \
+     && _ < len(xs) else \"index must be less than the list's length\"}) : Int do 0 end\n"
+  in
+  let prog body = "mod RM do\n" ^ at_decl ^ body ^ "end\n" in
+  let expect_error label src ~has ~lacks =
+    let text = refine_error_text_d src in
+    List.iter
+      (fun n -> Alcotest.(check bool) (label ^ ": has " ^ n) true (contains text n))
+      has;
+    List.iter
+      (fun n -> Alcotest.(check bool) (label ^ ": lacks " ^ n) false (contains text n))
+      lacks
+  in
+  [ gated "first conjunct broken: its message leads" (fun () ->
+        expect_error "neg" (prog "  fn go() : Int do at([10, 20], -1) end\n")
+          ~has:[ "refinement violation: index must not be negative\n";
+                 "argument `n` of `at` does not satisfy precondition `_ >= 0`" ]
+          ~lacks:[ "less than the list's length"; "precondition `_ >= 0 && _ < len(xs)`" ]);
+    gated "second conjunct broken: its message leads" (fun () ->
+        expect_error "far" (prog "  fn go() : Int do at([10, 20], 2) end\n")
+          ~has:[ "refinement violation: index must be less than the list's length\n";
+                 "argument `n` of `at` does not satisfy precondition `_ < len(xs)`" ]
+          ~lacks:[ "must not be negative" ]);
+    gated "binder form, single conjunct" (fun () ->
+        expect_error "div"
+          "mod RD do\n\
+          \  fn div(a : Int, b : {v : Int | v != 0 else \"the divisor must not be zero\"}) : Int do a end\n\
+          \  fn go() : Int do div(1, 0) end\n\
+           end\n"
+          ~has:[ "refinement violation: the divisor must not be zero\n";
+                 "argument `b` of `div` does not satisfy precondition `v != 0`" ]
+          ~lacks:[]);
+    gated "else binds tighter than &&: an unmessaged conjunct keeps the old text" (fun () ->
+        (* The message belongs to `_ < 10` only; breaking `_ >= 0` quotes the
+           whole predicate exactly as a refinement without messages does. *)
+        expect_error "tight"
+          "mod RT do\n\
+          \  fn small(n : {Int | _ >= 0 && _ < 10 else \"must be below 10\"}) : Int do n end\n\
+          \  fn go() : Int do small(-1) end\n\
+           end\n"
+          ~has:[ "argument `n` of `small` does not satisfy precondition `_ >= 0 && _ < 10`" ]
+          ~lacks:[ "must be below 10" ]);
+    gated "unproven call: the hint carries the missing conjunct's message" (fun () ->
+        let hints =
+          refine_hints_d
+            (prog "  fn go(xs : List(Int)) : Int do if List.length(xs) > 0 do at(xs, 3) else 0 end end\n")
+        in
+        Alcotest.(check bool) "hint" true
+          (List.exists
+             (fun h ->
+               contains h
+                 "`_ >= 0` established here; `_ < len(xs)` not: index must be less than the list's length")
+             hints));
+    Alcotest.test_case "a re-desugared file drops a deleted message" `Quick (fun () ->
+        (* The table is keyed by span, and a span outlives the text that was
+           there: re-desugaring the same file must not keep a message its
+           author has since removed. *)
+        let src_with =
+          "mod RP do\n  fn f(n : {Int | _ >= 0 else \"gone soon\"}) : Int do n end\nend\n"
+        and src_without = "mod RP do\n  fn f(n : {Int | _ >= 0             }) : Int do n end\nend\n" in
+        let conj_of (m : March_ast.Ast.module_) =
+          let rec find = function
+            | [] -> None
+            | March_ast.Ast.DFn (fd, _) :: rest -> (
+              match fd.March_ast.Ast.fn_clauses with
+              | c :: _ -> (
+                match c.March_ast.Ast.fc_params with
+                | March_ast.Ast.FPNamed
+                    { March_ast.Ast.param_ty = Some (March_ast.Ast.TyRefine (_, _, p)); _ }
+                  :: _ -> Some p
+                | _ -> find rest)
+              | [] -> find rest)
+            | March_ast.Ast.DMod (_, _, ds, _) :: rest -> (
+              match find ds with Some p -> Some p | None -> find rest)
+            | _ :: rest -> find rest
+          in
+          find m.March_ast.Ast.mod_decls
+        in
+        let msg src =
+          match conj_of (March_desugar.Desugar.desugar_module (parse src)) with
+          | Some p -> March_ast.Refine_msg.message_for p
+          | None -> Alcotest.fail "no refined parameter found"
+        in
+        Alcotest.(check (option string)) "with" (Some "gone soon") (msg src_with);
+        Alcotest.(check (option string)) "without" None (msg src_without)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -28985,4 +29092,5 @@ let () =
       ("p2-value-refs", p2_value_refs_suite);
       ("opaque-by-decl", opaque_by_decl_suite);
       ("stdlib-step-guards", stdlib_step_guard_suite);
+      ("refine-messages", refine_messages_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

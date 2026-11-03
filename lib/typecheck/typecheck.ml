@@ -717,6 +717,73 @@ let report_duplicate_pattern_binders env (pat : Ast.pattern) =
     if n.txt <> "_" then report_duplicate_binders env [pattern_binders inner; [n]]
   | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ | Ast.PatOr _ -> ()
 
+(** Why a constructor argument has the type it is checked against.  For an
+    actor's message the reader needs the actor and the handler: "`Bump` is a
+    message of actor `Counter`, and its handler declares this argument's
+    type.", with the handler's parameter as the expected type's origin. *)
+let ctor_arg_reason env (ci : ctor_info) ctor i =
+  let plain = RBuiltin (Printf.sprintf "Argument to constructor `%s`." ctor) in
+  let k = String.length ci.ci_type in
+  if not (ci.ci_is_actor_msg && k > 4 && String.sub ci.ci_type (k - 4) 4 = "_Msg") then plain
+  else
+    let actor = String.sub ci.ci_type 0 (k - 4) in
+    match Hashtbl.find_opt env.decl_sites (Printf.sprintf "msgparam:%s.%s|%d" actor ctor i) with
+    | Some psp ->
+      RBecause (RAnnotation psp,
+                Printf.sprintf "`%s` is a message of actor `%s`, and its handler declares \
+                                this argument's type." ctor actor)
+    | None -> RBuiltin (Printf.sprintf "`%s` is a message of actor `%s`." ctor actor)
+
+(** "an `Int`", "a `String`": a type with its article, for prose. *)
+let article_ty t =
+  let p = pp_ty t in
+  let an = p <> "" && (match p.[0] with 'A' | 'E' | 'I' | 'O' | 'U' -> true | _ -> false) in
+  Printf.sprintf "%s `%s`" (if an then "an" else "a") p
+
+(** The actor whose declaration encloses [sp] (a `{ state with … }` in one of
+    its handlers), from the ["actorbody:A"] sites [DActor] records. *)
+let actor_enclosing env (sp : Ast.span) =
+  let pfx = "actorbody:" in
+  let n = String.length pfx in
+  Hashtbl.fold (fun k (asp : Ast.span) acc ->
+      if acc = None && String.length k > n && String.sub k 0 n = pfx
+         && asp.Ast.file = sp.Ast.file
+         && (asp.Ast.start_line, asp.Ast.start_col) <= (sp.Ast.start_line, sp.Ast.start_col)
+         && (sp.Ast.end_line, sp.Ast.end_col) <= (asp.Ast.end_line, asp.Ast.end_col)
+      then Some (String.sub k n (String.length k - n)) else acc) env.decl_sites None
+
+(** The [ambiguous_constructor] hint for a constructor several types define.
+    An actor's message type is generated (`<Actor>_Msg`) and cannot be named
+    in a program, so it is described as the actor's message and never offered
+    as the qualifier; when every candidate is an actor message, the advice is
+    to rename a handler. *)
+let ambiguous_ctor_hint env ctor all_types =
+  let actor_of t =
+    let is_msg = match StrMap.find_opt ctor env.ctors with
+      | Some cis -> List.exists (fun (ci : ctor_info) -> ci.ci_type = t && ci.ci_is_actor_msg) cis
+      | None -> false
+    in
+    let k = String.length t in
+    if is_msg && k > 4 && String.sub t (k - 4) 4 = "_Msg" then Some (String.sub t 0 (k - 4))
+    else None
+  in
+  let describe t = match actor_of t with
+    | Some a -> Printf.sprintf "a message of actor `%s`" a
+    | None -> "`" ^ t ^ "`"
+  in
+  let listed = String.concat ", " (List.map describe all_types) in
+  match List.filter (fun t -> actor_of t = None) all_types with
+  | t :: _ ->
+    Printf.sprintf
+      "Constructor `%s` is defined by multiple types (%s). \
+       Use a qualified form to disambiguate, e.g. `%s.%s`." ctor listed t ctor
+  | [] ->
+    Printf.sprintf
+      "`%s` is a message of more than one actor (%s), and a message cannot be \
+       qualified by its actor; rename one of the handlers." ctor
+      (String.concat ", " (List.filter_map (fun t ->
+           Option.map (fun a -> "`" ^ a ^ "`") (actor_of t)) all_types))
+
 (** Infer the type that a pattern *expects*, and return the list of
     (name, scheme) bindings it introduces.
 
@@ -877,13 +944,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
            let all_types = all_ctors_named name.txt env in
            if List.length all_types > 1 then
              Err.hint ~code:Err.Code.ambiguous_constructor env.errors ~span:name.span
-               (Printf.sprintf
-                  "Constructor `%s` is defined by multiple types (%s). \
-                   Use a qualified form to disambiguate, e.g. `%s.%s`."
-                  name.txt
-                  (String.concat ", " all_types)
-                  (List.hd all_types)
-                  name.txt)
+               (ambiguous_ctor_hint env name.txt all_types)
          end
        end);
        let arg_tys, result_ty = instantiate_ctor env ci in
@@ -1677,13 +1738,53 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) (msg : Ast.expr) (msg
              Printf.sprintf "Send it to a pid spawned from `%s`, or send this actor one \
                              of its own messages." owner_name
          in
+         (* Name the pid's actor rather than its state record: the one actor
+            declared in this file whose state this pid's state can be. *)
+         let pid_actor =
+           match actor_ctors (fun _ _ -> true)
+                 |> List.filter (fun (a, ci) ->
+                     a <> owner_name
+                     && (match Hashtbl.find_opt env.decl_sites ("actor:" ^ a) with
+                         | Some asp -> asp.Ast.file = span.Ast.file
+                         | None -> false)
+                     && (match state_of ci a with
+                         | Some st -> could_be st pid_state
+                         | None -> false)) with
+           | [ (a, _) ] -> Some a
+           | _ -> None
+         in
+         let pid_desc = match pid_actor with
+           | Some a -> Printf.sprintf "this pid is an actor `%s`" a
+           | None -> Printf.sprintf "this pid points to an actor whose state is `%s`"
+                       (pp_ty (repr pid_state))
+         in
+         let labels, notes = match pid_actor with
+           | None -> [], []
+           | Some a ->
+             let own = StrMap.fold (fun cname cis acc ->
+                 if List.exists (fun (ci : ctor_info) ->
+                     ci.ci_is_actor_msg && ci.ci_type = a ^ msg_sfx) cis
+                 then cname :: acc else acc) env.ctors []
+                       |> List.sort_uniq String.compare in
+             let labels = match Hashtbl.find_opt env.decl_sites ("actor:" ^ a) with
+               | Some asp when asp.Ast.file = span.Ast.file && asp.Ast.start_line > 0 ->
+                 [ { Err.lbl_span = asp;
+                     lbl_message = Printf.sprintf "actor `%s` is declared here" a } ]
+               | _ -> []
+             in
+             let notes = match own with
+               | [] -> []
+               | ms -> [ Printf.sprintf "`%s` handles %s." a
+                           (String.concat ", " (List.map (fun m -> "`" ^ m ^ "`") ms)) ]
+             in
+             labels, notes
+         in
          Err.report env.errors
            { Err.severity = Err.Error; span;
              message = Printf.sprintf
-                 "%s is a message for `%s`, but this pid points to an actor whose \
-                  state is `%s`, so the message would be dropped.\n%s"
-                 what owner_name (pp_ty (repr pid_state)) advice;
-             labels = []; notes = [];
+                 "%s is a message for `%s`, but %s, so the message would be dropped.\n%s"
+                 what owner_name pid_desc advice;
+             labels; notes;
              code = Err.Code.send_wrong_actor; fix = None }
        end
      | _ -> ())
@@ -2947,13 +3048,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
              let all_types = all_ctors_named name.txt env in
              if List.length all_types > 1 then
                Err.hint ~code:Err.Code.ambiguous_constructor env.errors ~span:name.span
-                 (Printf.sprintf
-                    "Constructor `%s` is defined by multiple types (%s). \
-                     Use a qualified form to disambiguate, e.g. `%s.%s`."
-                    name.txt
-                    (String.concat ", " all_types)
-                    (List.hd all_types)
-                    name.txt)
+                 (ambiguous_ctor_hint env name.txt all_types)
            end
          end);
          let arg_tys, result_ty = instantiate_ctor env ci in
@@ -2967,11 +3062,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
            List.iter (fun a -> ignore (infer_expr env a)) args;
            TError
          end else begin
-           List.iter2 (fun arg arg_ty ->
-               check_expr env arg arg_ty
-                 ~reason:(Some (RBuiltin
-                   (Printf.sprintf "Argument to constructor `%s`." name.txt)))
-             ) args arg_tys;
+           List.iteri (fun i (arg, arg_ty) ->
+               check_expr env arg arg_ty ~reason:(Some (ctor_arg_reason env ci name.txt i))
+             ) (List.combine args arg_tys);
            (* Message-payload sendability. The overall constructor RESULT
               type (e.g. TCon("Worker_Msg", [])) can never carry this
               information -- actor message sum types are registered with
@@ -3062,11 +3155,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
            ~updated:(List.map (fun ((n : Ast.name), _) -> n.txt) updates) sp env
        | _ -> ());
       let update_tys =
-        List.map (fun (n, e) -> (n.Ast.txt, infer_expr env e)) updates
+        List.map (fun ((n : Ast.name), e) -> (n.Ast.txt, n.Ast.span, infer_expr env e)) updates
       in
       (match expand_record env (repr base_ty) with
        | Some (TRecord all_flds) ->
-         List.iter (fun (fname, uty) ->
+         List.iter (fun (fname, fsp, uty) ->
              match List.assoc_opt fname all_flds with
              | Some fty ->
                unify env ~span:sp
@@ -3074,15 +3167,29 @@ let rec infer_expr env (e : Ast.expr) : ty =
                    (Printf.sprintf "field `%s` must keep its original type" fname)))
                  fty uty
              | None ->
-               Err.error ~code:Err.Code.unknown_record_field env.errors ~span:sp
-                 (Printf.sprintf
-                    "This record does not have a field called `%s`.%s\n\
-                     The fields I know about are: %s"
-                    fname
-                    (match suggest_field ~need:uty fname all_flds with
-                     | Some f -> Printf.sprintf " Did you mean `%s`?" f
-                     | None -> "")
-                    (String.concat ", " (List.map fst all_flds)))
+               (* `{ state with … }` in a handler: say whose state it is. *)
+               let whose = match base with
+                 | Ast.EVar { txt = "state"; _ } ->
+                   (match actor_enclosing env sp with
+                    | Some a -> Printf.sprintf "`%s`'s state" a
+                    | None -> "This record")
+                 | _ -> "This record"
+               in
+               let guess = suggest_field ~need:uty fname all_flds in
+               let second = match guess with
+                 | Some g -> Printf.sprintf "Did you mean `%s`?" g
+                 | None -> Printf.sprintf "The fields I know about are: %s"
+                             (String.concat ", " (List.map fst all_flds))
+               in
+               let span = if fsp.Ast.start_line > 0 then fsp else sp in
+               Err.report env.errors
+                 { Err.severity = Err.Error; span;
+                   message = Printf.sprintf "%s does not have a field called `%s`.\n%s"
+                       whose fname second;
+                   labels = []; notes = [];
+                   code = Err.Code.unknown_record_field;
+                   fix = Option.map (fun g -> Err.FReplace { span = fsp; text = g })
+                       (if span == fsp then guess else None) }
            ) update_tys;
          base_ty
        | _ ->
@@ -3091,7 +3198,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (* Base type not yet known — build a partial record constraint *)
          let partial =
            TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b)
-                      update_tys) in
+                      (List.map (fun (n, _, t) -> (n, t)) update_tys)) in
          unify env ~span:sp base_ty partial;
          base_ty
        | other ->
@@ -3352,6 +3459,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
       failwith
         "March type checker: encountered ESigil — \
          the desugaring pass must run before type checking."
+    | Ast.ERefineMsg _ ->
+      failwith
+        "March type checker: encountered ERefineMsg — \
+         it only occurs in a refinement predicate, which desugar strips."
 
     (* ── Atoms ────────────────────────────────────────────────────── *)
     | Ast.EAtom (_, args, _) ->
@@ -3789,11 +3900,9 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
               name.txt n_expected n_got);
          List.iter (fun a -> ignore (infer_expr env a)) args
        end else begin
-         List.iter2 (fun arg arg_ty ->
-             check_expr env arg arg_ty
-               ~reason:(Some (RBuiltin
-                 (Printf.sprintf "Argument to constructor `%s`." name.txt)))
-           ) args arg_tys;
+         List.iteri (fun i (arg, arg_ty) ->
+             check_expr env arg arg_ty ~reason:(Some (ctor_arg_reason env ci name.txt i))
+           ) (List.combine args arg_tys);
          unify env ~span:sp ~reason result_ty expected
        end
      | None ->
@@ -5044,9 +5153,11 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       let class_constraints =
         match clause.fc_guard with
         | None -> []
-        | Some (Ast.ECon (iface_name, args, _))
+        | Some (Ast.ECon (iface_name, args, bound_sp))
           when StrMap.mem iface_name.txt env.interfaces ->
           (* It's a class constraint: Eq(a), Ord(b), etc. *)
+          Hashtbl.replace env.decl_sites
+            ("when:" ^ def.fn_name.txt ^ "|" ^ iface_name.txt) bound_sp;
           List.filter_map (fun arg ->
               match arg with
               | Ast.EVar v ->
@@ -5427,15 +5538,23 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
              && not (modules_distinct m_old head_type_module))
           lst with
   | Some (_, prev_sp, _, _) ->
+    (* A generated impl (a `derive`, `@[endpoints]`) carries a span with no
+       source file; naming its "position" printed `<none>:29:266475457`. *)
+    let where =
+      if prev_sp.Ast.file = "" || prev_sp.Ast.file = "<none>" then
+        "a generated implementation"
+      else
+        Printf.sprintf "the implementation at %s:%d:%d"
+          prev_sp.Ast.file prev_sp.Ast.start_line prev_sp.Ast.start_col
+    in
     Err.error ~code:Err.Code.overlapping_impl env.errors ~span:sp
       (Printf.sprintf
-         "Overlapping implementation: `impl %s(%s)` conflicts with the \
-          implementation at %s:%d:%d — their heads overlap.\n\
+         "Overlapping implementation: `impl %s(%s)` conflicts with %s — \
+          their heads overlap.\n\
           A type may implement an interface at most once (coherence). If you \
           meant a different behavior, wrap the type in a newtype and implement \
           the interface on that."
-         key (pp_ty inst_ty)
-         prev_sp.Ast.file prev_sp.Ast.start_line prev_sp.Ast.start_col);
+         key (pp_ty inst_ty) where);
     env   (* keep the first impl — deterministic *)
   | None ->
     (* No conflict. Register (unless our own same-span entry is already present
@@ -5593,6 +5712,72 @@ let interface_satisfied env iface target =
   in
   satisfies 0 [] iface target
 
+(** The line under a [missing_impl] headline that names the use needing the
+    impl: "`<` needs it here.", "The call to `same` needs it here." *)
+let missing_impl_use_line (site : constraint_site option) =
+  match site with
+  | Some { cs_name; _ } when cs_name <> "" ->
+    (match cs_name.[0] with
+     | 'a' .. 'z' | 'A' .. 'Z' | '_' -> Printf.sprintf "The call to `%s` needs it here." cs_name
+     | _ -> Printf.sprintf "`%s` needs it here." cs_name)
+  | _ -> ""
+
+(** Interfaces `derive` can write ([Desugar_derive]). *)
+let derivable_ifaces = [ "Eq"; "Ord"; "Show"; "Hash" ]
+
+(** [missing_impl] for a type that is not [Int]/[Float]/[String]: the type
+    does not implement [iface] ("Num", "Ord", or a user interface), reported at
+    the use that needed it.  When the type is declared in this file and the
+    interface is derivable, the fix is `derive Iface for T` after its
+    declaration; when the need comes from a generic function's
+    `when Iface(..)` bound, that bound is labelled. *)
+let report_missing_impl ?(builtin_class = false) env ~span ~site iface ty =
+  let tname = match repr ty with TCon (n, _) -> Some n | _ -> None in
+  let headline =
+    if builtin_class then Printf.sprintf "`%s` does not implement %s." (pp_ty ty) iface
+    else Printf.sprintf "`%s` does not implement interface `%s`." (pp_ty ty) iface
+  in
+  let msg = match missing_impl_use_line site with
+    | "" -> headline
+    | l -> headline ^ "\n" ^ l
+  in
+  let bound_label = match site with
+    | Some { cs_name; _ } ->
+      let bare = match String.rindex_opt cs_name '.' with
+        | Some i -> String.sub cs_name (i + 1) (String.length cs_name - i - 1)
+        | None -> cs_name
+      in
+      (match Hashtbl.find_opt env.decl_sites ("when:" ^ bare ^ "|" ^ iface) with
+       | Some bsp when bsp.Ast.file = span.Ast.file && bsp.Ast.start_line > 0 ->
+         [ { Err.lbl_span = bsp;
+             lbl_message = Printf.sprintf "`%s` requires `%s` here" bare iface } ]
+       | _ -> [])
+    | None -> []
+  in
+  let type_site = match tname with
+    | Some n ->
+      (match Hashtbl.find_opt env.decl_sites ("type:" ^ n) with
+       | Some tsp when tsp.Ast.file = span.Ast.file && tsp.Ast.start_line > 0 -> Some tsp
+       | _ -> None)
+    | None -> None
+  in
+  let name = Option.value tname ~default:(pp_ty ty) in
+  let fix, notes = match type_site with
+    | Some tsp when List.mem iface derivable_ifaces ->
+      let text = String.make (max 0 tsp.Ast.start_col) ' ' ^ "derive " ^ iface ^ " for " ^ name in
+      Some (Err.FInsert { after_line = tsp.Ast.end_line; text }),
+      [ Printf.sprintf "Add `derive %s for %s` after the type to get the structural one, \
+                        or write `impl %s(%s) do ... end`." iface name iface name ]
+    | _ when iface = "Num" ->
+      None, [ "Only `Int` and `Float` implement `Num`." ]
+    | _ ->
+      None, [ Printf.sprintf "Add `impl %s(%s) do ... end` to provide an implementation."
+                iface name ]
+  in
+  Err.report env.errors
+    { Err.severity = Err.Error; span; message = msg; labels = bound_label; notes;
+      code = Err.Code.missing_impl; fix }
+
 (** Discharge all pending Num/Ord/CInterface constraints accumulated during
     inference.  Called at each declaration boundary (DFn, DLet) to verify
     that constrained type variables were unified with a compatible type. *)
@@ -5615,7 +5800,14 @@ let discharge_constraints env span =
      the same storage variable), we only need to check the impl once.
      Uses pp_ty on the repr'd type as a canonical string key. *)
   let seen = Hashtbl.create 16 in
-  List.iter (fun c ->
+  let decl_span = span in
+  List.iter (fun (c, site) ->
+      (* Report at the use that needed the impl (the `<`, the call to a
+         generic function), not at the enclosing declaration. *)
+      let span = match site with
+        | Some { cs_span; _ } when cs_span.Ast.start_line > 0 -> cs_span
+        | _ -> decl_span
+      in
       let dominated = match c with
         | CInterface (name, t) ->
           let rt = strip_lin t in
@@ -5639,14 +5831,14 @@ let discharge_constraints env span =
             | COrd _ -> ()   (* String is Ord *)
             | _ ->
               Err.error ~code:Err.Code.missing_impl env.errors ~span
-                "String does not implement Num (only Int and Float do).")
+                (match missing_impl_use_line site with
+                 | "" -> "String does not implement Num (only Int and Float do)."
+                 | l -> "String does not implement Num (only Int and Float do).\n" ^ l))
          | TVar r ->
            (match c with
             | CNum _ -> r := Link (TCon ("Int", []))  (* numeric defaulting: unresolved Num → Int *)
             | _ -> ())  (* COrd unresolved — leave polymorphic *)
-         | _ ->
-           Err.error ~code:Err.Code.missing_impl env.errors ~span
-             (Printf.sprintf "`%s` does not implement %s." (pp_ty ty) kind))
+         | _ -> report_missing_impl ~builtin_class:true env ~span ~site kind ty)
       | CInterface (iface_name, t) ->
         let ty = strip_lin t in
         (match ty with
@@ -5683,11 +5875,7 @@ let discharge_constraints env span =
                | _ -> false
              in
              if not auto_satisfied then
-               Err.error ~code:Err.Code.missing_impl env.errors ~span
-                 (Printf.sprintf
-                    "`%s` does not implement interface `%s`.\n\
-                     Add `impl %s(%s) do ... end` to provide an implementation."
-                    (pp_ty ty) iface_name iface_name (pp_ty ty))
+               report_missing_impl env ~span ~site iface_name ty
            end)
       | CADTBound (adt_name, t) ->
         let ty = repr t in
@@ -5741,7 +5929,7 @@ let actor_handler_hints state_ty inferred_ty =
   | TRecord inferred_fields ->
     (match state_ty with
      | TRecord [] ->
-       ["The state has no fields: return an empty record `{}`."]
+       ["The state has no fields: return the empty record `{}`."]
      | TRecord state_fields ->
        let state_names    = List.map fst state_fields in
        let inferred_names = List.map fst inferred_fields in
@@ -5751,18 +5939,28 @@ let actor_handler_hints state_ty inferred_ty =
            match List.assoc_opt fname inferred_fields with
            | Some it when not (types_equal st it) ->
              Some (Printf.sprintf
-               "Field `%s` has type `%s`, but the state declares it as `%s`."
+               "Field `%s` is a `%s` here, but the state declares it as `%s`."
                fname (pp_ty (repr it)) (pp_ty (repr st)))
            | _ -> None) state_fields in
        List.map (fun n -> Printf.sprintf
-         "Field `%s` is not part of the actor's state: remove it, or add it \
-          to the state declaration." n) extra
+         "Field `%s` is not part of the state: remove it, or add it to the \
+          `state` declaration." n) extra
        @ List.map (fun n -> Printf.sprintf
-         "Field `%s` is missing from the returned record." n) missing
+         "Field `%s` is missing from the returned record; `{ state with … }` keeps \
+          the fields you don't change." n) missing
        @ wrong_type
      | _ -> [])
   | t ->
-    [Printf.sprintf "A handler must return a record matching the state, not `%s`." (pp_ty t)]
+    (* A handler returning a value of one field's type usually computed that
+       field's new value and forgot to put it back into the state. *)
+    (match state_ty with
+     | TRecord fields ->
+       (match List.filter (fun (_, ft) -> types_equal (repr ft) t) fields with
+        | [ (f, _) ] ->
+          [ Printf.sprintf
+              "If this is the new value of `%s`, return `{ state with %s: … }` with it." f f ]
+        | _ -> [ "Return the whole state, for example `{ state with … }`." ])
+     | _ -> [])
 
 (** Validate the island module protocol.
 
@@ -6372,6 +6570,7 @@ let rec check_decl env (d : Ast.decl) : env =
     bind_vars bindings' env
 
   | Ast.DType (_vis, name, params, typedef, _sp) ->
+    Hashtbl.replace env.decl_sites ("type:" ^ name.txt) _sp;
     let is_canonical_dist_link_down_reason =
       let nullary name (v : Ast.variant) =
         v.var_name.txt = name && v.var_args = []
@@ -6476,6 +6675,15 @@ let rec check_decl env (d : Ast.decl) : env =
        { env1 with ty_aliases = StrMap.add key (param_names, rhs) env1.ty_aliases })
 
   | Ast.DActor (_vis, name, actor, _sp) ->
+    Hashtbl.replace env.decl_sites ("actor:" ^ name.txt) name.span;
+    Hashtbl.replace env.decl_sites ("actorbody:" ^ name.txt) _sp;
+    (* Each handler parameter, so a message built with a wrong payload can
+       point at the parameter that fixes its type. *)
+    List.iter (fun (h : Ast.actor_handler) ->
+        List.iteri (fun i (p : Ast.param) ->
+            Hashtbl.replace env.decl_sites
+              (Printf.sprintf "msgparam:%s.%s|%d" name.txt h.ah_msg.txt i)
+              p.param_name.span) h.ah_params) actor.actor_handlers;
     (* Build the state record type from field declarations *)
     let state_ty =
       let tvars = ref [] in
@@ -6608,11 +6816,13 @@ let rec check_decl env (d : Ast.decl) : env =
             { severity = Error;
               span = h.ah_msg.span;
               message = Printf.sprintf
-                "The handler for `%s` in actor `%s` must return the actor's new \
-                 state, a `%s`, but returns `%s`."
+                "The handler for `%s` must return `%s`'s new state, a `%s`, \
+                 but it returns %s.\n\
+                 A handler's result replaces the actor's state for the next message."
                 h.ah_msg.txt name.txt
-                (pp_ty (repr state_ty)) (pp_ty (repr inferred));
-              labels = [];
+                (pp_ty (repr state_ty)) (article_ty (repr inferred));
+              labels = [ { Err.lbl_span = span_of_expr h.ah_body;
+                           lbl_message = "this is " ^ article_ty (repr inferred) } ];
               notes = actor_handler_hints (repr state_ty) (repr inferred);
               code = Err.Code.actor_handler_state_type; fix = None }
       ) actor.actor_handlers;
@@ -8196,20 +8406,20 @@ let cap_chain_trace ?root (decls : Ast.decl list) ~(file : string) ~(from : stri
     | Ast.DMod (_, _, inner, _) :: rest -> fns (fns acc inner) rest
     | _ :: rest -> fns acc rest in
   let table = List.rev (fns [] decls) in
-  (* [?root]: [from] is not a function but the code inside this span (a
-     role's body lambda), named [from] in the labels. *)
+  (* [root] = (how to name it, its expression): a chain that starts at a
+     callback (a role's `body`) rather than at a named function. *)
   let calls_of k =
     match root with
-    | Some rsp when k == from ->
-      List.filter (fun (_, _, app) -> span_within app rsp)
-        (List.rev (all_calls_in_decls decls))
+    | Some (_, e) when k = from -> List.rev (March_ast.Calls.calls_in_expr [] e)
     | _ ->
     match List.assoc_opt (bare k) table with
     | None -> []
     | Some def ->
       List.concat_map (fun c -> List.rev (March_ast.Calls.calls_in_expr [] c.Ast.fc_body))
         def.Ast.fn_clauses in
-  let who k = if root <> None && k == from then k else Printf.sprintf "`%s`" (bare k) in
+  let who k = match root with
+    | Some (what, _) when k = from -> what
+    | _ -> Printf.sprintf "`%s`" (bare k) in
   let in_file (sp : Ast.span) = sp.Ast.file = file in
   let rec hops acc = function
     | k :: (r :: _ as rest) ->
@@ -8794,7 +9004,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.EField (ex, _, _) -> go ex
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
-  | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) -> go ex
+  | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (_, _, _, body, _) -> go body
   | Ast.ELetQ (_, r, k, _) | Ast.ELetStar (_, r, k, _) -> go r; go k
@@ -8870,7 +9080,7 @@ let rec iter_expr_scoped (f : local_scope -> Ast.expr -> unit) (scope : local_sc
   | Ast.EField (ex, _, _) -> go ex
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
-  | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) -> go ex
+  | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (name, ps, _, body, _) ->
     (* outside a block: only its own body sees it *)
@@ -9379,10 +9589,23 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
              (fun c ->
                 if not (cap_subsumes "IO" c) || covered c || Hashtbl.mem type_mismatch k then ()
                 else
-                  let reach = cap_reach_chain ~own_caps:own ~fn_refs:refs env ~from:k ~cap:c in
+                  let raw_chain = cap_reach_chain ~own_caps:own ~fn_refs:refs env ~from:k ~cap:c in
+                  (* As a trace (plan §X7): the use is the primary span, the
+                     callback and each call on the way are labels.  A hop
+                     through a local closure or out of this file keeps the
+                     prose chain. *)
+                  let trace =
+                    match raw_chain with
+                    | Some (_ :: _ as chain)
+                      when not (List.exists (fun h -> Hashtbl.mem synthetic h) chain) ->
+                      cap_chain_trace ~root:("the " ^ r.rr_what, r.rr_expr) decls
+                        ~file:r.rr_span.Ast.file ~from:k ~chain ~cap:c
+                    | _ -> None
+                  in
                   let chain =
-                    match reach with
-                    | Some (_ :: _ as chain) ->
+                    match raw_chain, trace with
+                    | _, Some _ -> ""
+                    | Some (_ :: _ as chain), None ->
                       Printf.sprintf " (reached from the %s: %s)" r.rr_what
                         (render_cap_chain (r.rr_what :: List.map show_key chain))
                     | _ -> ""
@@ -9392,13 +9615,6 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                      is ("the body of role `Cons`") and does ("writes a
                      file"), and labels each hop, the callback and the
                      grant; without one it keeps the prose chain. *)
-                  let trace =
-                    match reach with
-                    | Some ch ->
-                      let what = "the " ^ r.rr_what in
-                      cap_chain_trace ~root:r.rr_span decls ~file:r.rr_span.Ast.file
-                        ~from:what ~chain:(List.map show_key ch) ~cap:c
-                    | None -> None in
                   let grant_sp =
                     match Hashtbl.find_opt env.role_grants (r.rr_proto, r.rr_role) with
                     | Some (_, sp) -> Some sp | None -> None in
@@ -10081,19 +10297,38 @@ let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
   List.iter (fun ((q, sp) as site) ->
       (match List.find_opt (fun (q', _) -> q' <> q && short q' = short q) !seen with
        | Some (q', sp') ->
+         (* A type inside a generated `<Name>_Msg` module (the message type an
+            `@[endpoints] protocol` or actor declares) is named by what
+            generated it, not by the generated module's name. *)
+         let describe q =
+           match String.rindex_opt q '.' with
+           | Some i ->
+             let m = String.sub q 0 i in
+             let m = match String.rindex_opt m '.' with
+               | Some j -> String.sub m (j + 1) (String.length m - j - 1)
+               | None -> m in
+             let k = String.length m in
+             if k > 4 && String.sub m (k - 4) 4 = "_Msg" then
+               Printf.sprintf "the message type `%s` generated for `%s`" (short q)
+                 (String.sub m 0 (k - 4))
+             else "`" ^ q ^ "`"
+           | None -> "`" ^ q ^ "`"
+         in
          Err.report errors
            { Err.severity = Err.Error; span = sp;
              message = Printf.sprintf
-                 "Two different types named `%s` both derive Json: `%s` (here) \
-                  and `%s` (at %s:%d:%d).\n\
+                 "Two different types named `%s` both derive Json: %s (here) \
+                  and %s (at %s:%d:%d).\n\
                   `from_json` picks its decoder by the result type's short name, \
                   so it cannot tell these two apart and would decode with the \
                   wrong one. Rename one of the types, or derive Json for only \
                   one of them."
-                 (short q) q q' sp'.Ast.file sp'.Ast.start_line sp'.Ast.start_col;
+                 (short q) (describe q) (describe q')
+                 sp'.Ast.file sp'.Ast.start_line sp'.Ast.start_col;
              labels = [{ Err.lbl_span = sp';
                          Err.lbl_message =
-                           Printf.sprintf "`%s` derives Json here" q' }];
+                           Printf.sprintf "%s derives Json here"
+                             (String.capitalize_ascii (describe q')) }];
              notes = [];
              code = Err.Code.json_derive_name_collision; fix = None }
        | None -> ());

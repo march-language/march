@@ -1,22 +1,30 @@
 (* Content-addressed verdict cache under <root>/.march/cas/vc/.
-   Key = BLAKE3 of the VC's canonical assertion block; the solver is consulted
+   Key = BLAKE3 of the z3 identity and the VC's canonical assertion block; the solver is consulted
    only on a miss.  Mirrors the git-style <prefix2>/<rest> layout used by the
    rest of the CAS. *)
 
 let key_of_vc ?(preamble = "") (vc : Smt.vc) : string =
-  March_cas.Blake3.hash_string (preamble ^ "\n" ^ Smt.assertion_block vc)
+  (* The z3 version, the limits and the platform ([Solver.identity]) are part
+     of the key, so an upgrade or a new limit never replays a verdict, and
+     entries from before they were (some holding a wall-clock `unknown`) are
+     unreachable. *)
+  let id = Option.value ~default:"noz3" (Solver.identity ()) in
+  March_cas.Blake3.hash_string ("vc2\n" ^ id ^ "\n" ^ preamble ^ "\n" ^ Smt.assertion_block vc)
 
 let string_of_result : Solver.result -> string = function
   | Solver.Unsat -> "unsat"
   | Solver.Unknown -> "unknown"
+  | Solver.Rejected -> "rejected"
   | Solver.Sat model ->
       "sat\n"
       ^ String.concat "\n" (List.map (fun (k, v) -> k ^ "\t" ^ v) model)
 
-let result_of_string (s : string) : Solver.result =
+(* [None] for a malformed or truncated entry: read as a miss, so a corrupt
+   file is re-asked rather than served. *)
+let result_of_string (s : string) : Solver.result option =
   match String.split_on_char '\n' s with
-  | "unsat" :: _ -> Solver.Unsat
-  | "unknown" :: _ -> Solver.Unknown
+  | "unsat" :: _ -> Some Solver.Unsat
+  | "unknown" :: _ -> Some Solver.Unknown
   | "sat" :: rest ->
       let model =
         List.filter_map
@@ -29,8 +37,8 @@ let result_of_string (s : string) : Solver.result =
             | None -> None)
           rest
       in
-      Solver.Sat model
-  | _ -> Solver.Unknown
+      Some (Solver.Sat model)
+  | _ -> None
 
 let cache_dir ~root =
   List.fold_left Filename.concat root [ ".march"; "cas"; "vc" ]
@@ -51,19 +59,11 @@ let path_for ~root key =
 
 let lookup ~root key : Solver.result option =
   let p = path_for ~root key in
-  if Sys.file_exists p then
-    match result_of_string (In_channel.with_open_bin p In_channel.input_all) with
-    (* Treat a stored `unknown` as a MISS.  Refine no longer writes these, but
-       caches created before that change still hold them, and an `unknown` is
-       the absence of an answer: serving it would keep a VC silently unchecked
-       on every future build with no way to tell.  Re-asking is cheap and may
-       now succeed.  [result_of_string] also falls back to Unknown on a
-       malformed/truncated entry, so this doubles as corruption recovery. *)
-    | Solver.Unknown -> None
-    | r -> Some r
+  if Sys.file_exists p then result_of_string (In_channel.with_open_bin p In_channel.input_all)
   else None
 
 let store ~root key (r : Solver.result) : unit =
+  if r <> Solver.Rejected then
   let p = path_for ~root key in
   mkdir_p (Filename.dirname p);
   Out_channel.with_open_bin p (fun oc ->

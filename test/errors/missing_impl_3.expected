@@ -2,10 +2,24 @@ exit: 1
 -- INTERFACE ---------------- errors/missing_impl_3.march
 
 `Hue` does not implement interface `Eq`. [missing_impl]
-Add `impl Eq(Hue) do ... end` to provide an implementation.
+The call to `same` needs it here.
 
-10 |   fn main() do
-       ^^^^^^^^^^^^
+11 |     if same(Rood, Rood) do println("y") else println("n") end
+            ^^^^
+
+    Add `derive Eq for Hue` after the type to get the structural one, or write `impl Eq(Hue) do ... end`.
+
+    `same` requires `Eq` here:
+
+9 |   fn same(a, b) when Eq(a) do a == b end
+                         ^^^^^
 
 
 
+fix [missing_impl]:
+@@ after line 4 @@
+   type Hue = Rood | Bloo
++  derive Eq for Hue
+
+after fix: exit 1
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]

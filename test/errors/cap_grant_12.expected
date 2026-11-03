@@ -21,6 +21,7 @@ hint: `from_json` places no constraint on the type it produces, so it would fabr
 47 |     let x = from_json("{}")
                  ^^^^^^^^^^^^^^^
 
+    run `march --explain cap_deserialize`
 
 
 

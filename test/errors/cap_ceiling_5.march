@@ -1,0 +1,17 @@
+mod Main do
+  needs IO.Console
+  needs IO.FileRead
+  mod Config do
+    needs IO.Console
+    fn motd() : String do
+      match File.read("/etc/motd") do
+        Ok(s) -> s
+        Err(_) -> ""
+      end
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead)) do
+    println(Config.motd())
+  end
+end

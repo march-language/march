@@ -1,0 +1,29 @@
+exit: 1
+-- CAPABILITY --------- errors/cap_grant_exceeded_3.march
+
+`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite` here. The grant is a ceiling on the WHOLE program — declaring `needs IO.FileWrite` does not raise it. [cap_grant_exceeded]
+help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_filewrite : Cap(IO.FileWrite))`), or widen the whole grant to `Cap(IO)`, or remove the use.
+
+6 |     let _ = file_write("/tmp/count", int_to_string(n))
+                ^^^^^^^^^^
+
+
+    `main` calls `save` here:
+
+11 |     save(1)
+         ^^^^
+
+    `main` is granted only `Cap(IO.Console)` here:
+
+10 |   fn main(_c : Cap(IO.Console)) do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain cap_grant_exceeded`
+
+
+
+fix [cap_grant_exceeded]:
+@@ lines 10-10 @@
+-  fn main(_c : Cap(IO.Console)) do
++  fn main(_c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+
+after fix: exit 0

@@ -248,3 +248,70 @@ mod Foo do fn f(xs : List(a[p]), k : a -> Bool[p]) : Int do 1 end end
         (type_constructor))
       body: (block_body
         (integer)))))
+
+================================================================================
+Refinement conjunct messages
+================================================================================
+mod M do
+fn at(xs : List(Int), n : {Int | _ >= 0 else "index must not be negative" && _ < len(xs) else "too far"}) : Int do
+0
+end
+fn div(b : {v : Int | v != 0 else "must not be zero"}) : Int do
+b
+end
+end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    (module_path
+      (type_identifier))
+    (function_def
+      (identifier)
+      (fn_param
+        (named_param
+          (identifier)
+          (type_application
+            (type_identifier)
+            (type_constructor
+              (type_constructor)))))
+      (fn_param
+        (named_param
+          (identifier)
+          (refinement_type
+            (type_constructor
+              (type_constructor))
+            (comparison_expression
+              (refinement_placeholder)
+              (integer))
+            (refinement_message
+              (string))
+            (comparison_expression
+              (refinement_placeholder)
+              (call_expression
+                (identifier)
+                (identifier)))
+            (refinement_message
+              (string)))))
+      (type_constructor
+        (type_constructor))
+      (block_body
+        (integer)))
+    (function_def
+      (identifier)
+      (fn_param
+        (named_param
+          (identifier)
+          (refinement_type
+            (identifier)
+            (type_constructor
+              (type_constructor))
+            (comparison_expression
+              (identifier)
+              (integer))
+            (refinement_message
+              (string)))))
+      (type_constructor
+        (type_constructor))
+      (block_body
+        (identifier)))))

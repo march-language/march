@@ -1,0 +1,13 @@
+exit: 1
+-- CAPABILITY ----- errors/proof_cap_mint_private_2.march
+
+The private function `migrate` in `Db` cannot mint `Cap(Db.Migrated)`. [proof_cap_mint_private]
+Only public functions of `Db` can construct `Cap(Db.Migrated)`.
+hint: make this function public, or accept `Cap(Db.Migrated)` as a parameter and pass it through.
+
+7 |     pfn migrate(c : Cap(IO)) : Cap(Db.Migrated) do
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain proof_cap_mint_private`
+
+

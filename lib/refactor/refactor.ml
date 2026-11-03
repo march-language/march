@@ -190,7 +190,7 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> expr a; expr b
     | Ast.EAnnot (e, t, _) -> expr e; ty t
     | Ast.EAtom (_, es, _) -> List.iter expr es
-    | Ast.ESpawn (e, _) | Ast.EAssert (e, _) | Ast.ESigil (_, e, _)
+    | Ast.ESpawn (e, _) | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.ERefineMsg (e, _, _)
     | Ast.EDbg (Some e, _) -> expr e
     | Ast.ELetFn (n, ps, rt, body, _) ->
       f SFn n; List.iter param ps;
@@ -627,7 +627,7 @@ and span_of_expr (e : Ast.expr) : Ast.span =
   | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
   | Ast.ELetQ (_, _, _, sp) | Ast.ELetStar (_, _, _, sp)
-  | Ast.EAssert (_, sp) | Ast.ESigil (_, _, sp) -> sp
+  | Ast.EAssert (_, sp) | Ast.ESigil (_, _, sp) | Ast.ERefineMsg (_, _, sp) -> sp
   | Ast.EVar n -> n.Ast.span
   | Ast.EResultRef _ -> Ast.dummy_span
 
@@ -731,7 +731,7 @@ let unshadowed_uses (targets : string list) (e : Ast.expr) : (string * Ast.span)
       walk bound r;
       walk bound c
     | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
-    | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.EDbg (Some e, _) -> walk bound e in
+    | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.ERefineMsg (e, _, _) | Ast.EDbg (Some e, _) -> walk bound e in
   walk [] e;
   !acc
 

@@ -7,7 +7,7 @@
 
     On-disk layout (shared with install.sh):
 
-      ~/.march/versions/<tag>/   extracted release (bin/ stdlib/ runtime/ LICENSE)
+      ~/.march/versions/<tag>/   extracted release (bin/ stdlib/ runtime/ libexec/z3 licenses/ LICENSE)
       ~/.march/current        -> versions/<tag>      (the active toolchain)
       ~/.march/bin/{march,forge}  wrapper scripts that exec through current/
 

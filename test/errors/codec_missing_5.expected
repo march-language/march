@@ -1,0 +1,12 @@
+exit: 1
+-- ACTOR ------------------- errors/codec_missing_5.march
+
+`Node.send` needs a JSON codec for `Job`, and none is derived. [codec_missing]
+hint: add `derive Json for Job` next to its declaration; the compiler then mints the wire type tag from it, and a receiver decodes with `from_json`.
+
+11 |     let _ = Node.send(peer, GlobalPid.make("w", 1, 1), job)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain codec_missing`
+
+

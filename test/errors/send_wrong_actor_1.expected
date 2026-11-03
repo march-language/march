@@ -1,11 +1,18 @@
 exit: 1
 -- ACTOR ---------------- errors/send_wrong_actor_1.march
 
-`Poke` is a message for `A`, but this pid points to an actor whose state is `{ s : String }`, so the message would be dropped. [send_wrong_actor]
+`Poke` is a message for `A`, but this pid is an actor `B`, so the message would be dropped. [send_wrong_actor]
 Send it to a pid spawned from `A`, or send this actor one of its own messages.
 
 25 |     send(b, Poke(1))
                  ^^^^^^^
 
+    `B` handles `Note`.
+
+    actor `B` is declared here:
+
+17 |   actor B do
+             ^
+    run `march --explain send_wrong_actor`
 
 

@@ -2,9 +2,10 @@ exit: 1
 -- INTERFACE ---------------- errors/missing_impl_1.march
 
 String does not implement Num (only Int and Float do). [missing_impl]
+`+` needs it here.
 
-4 |   fn main() do
-      ^^^^^^^^^^^^
+7 |     println(x + y)
+                ^^^^^
 
 
 

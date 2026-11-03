@@ -288,7 +288,13 @@ let lib_path_env ?(release=false) proj =
      Quote each path so a metachar in a project/dep path can't inject shell. *)
   let toolchain_pfx = match Toolchain.path_prefix () with Ok p -> p | Error _ -> "" in
   let quoted = String.concat ":" (List.map Filename.quote all_lib_paths) in
-  Printf.sprintf "%sMARCH_LIB_PATH=%s " toolchain_pfx quoted
+  (* [refine] rlimit reaches every march forge runs through this prefix. *)
+  let rlimit =
+    match proj.Project.refine_rlimit with
+    | Some n -> Printf.sprintf "MARCH_REFINE_RLIMIT=%d " n
+    | None -> ""
+  in
+  Printf.sprintf "%s%sMARCH_LIB_PATH=%s " toolchain_pfx rlimit quoted
 
 (** Online half of [deps_preflight]: re-hash every cached git/registry tree
     this command will use against forge.lock and, on a mismatch, re-fetch the
