@@ -493,7 +493,8 @@ let category_table : (string * string list) list = [
     measure_scalar_field; predicate_eq_structural; refinement_ignored;
     refinement_unchecked; refinement_unverified; refinement_violated;
     reflect_conflict; reflect_inconsistent; return_refinement_violated;
-    set_measure_call; set_refinement_type ];
+    set_measure_call; set_refinement_type; solver_unavailable;
+    solver_version_mismatch ];
   "RECURSION", [
     diverges_conflict; invalid_decreases; non_tail_recursion;
     termination_unproved ];
