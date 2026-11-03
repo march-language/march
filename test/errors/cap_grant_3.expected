@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------------------- errors/cap_grant_3.march
+-- TYPE MISMATCH --------------- errors/cap_grant_3.march
 
 Function `f` expects 1 argument, but got 2. [arity_mismatch]
 March has no partial application — a call must supply all arguments.

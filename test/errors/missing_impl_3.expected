@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------------- errors/missing_impl_3.march
+-- INTERFACE ---------------- errors/missing_impl_3.march
 
 `Hue` does not implement interface `Eq`. [missing_impl]
 Add `impl Eq(Hue) do ... end` to provide an implementation.

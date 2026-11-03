@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------- errors/type_mismatch_8.march
+-- TYPE MISMATCH ----------- errors/type_mismatch_8.march
 
 expected `Pid(a)` but got `Int`. [type_mismatch]
 

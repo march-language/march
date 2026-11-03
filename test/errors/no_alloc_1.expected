@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------------ errors/no_alloc_1.march
+-- CONTRACT --------------------- errors/no_alloc_1.march
 
 `make_pair` is in `cap no_alloc` module `NoAllocPair` but allocates. [no_alloc]
   In `make_pair`: a tuple is allocated here.

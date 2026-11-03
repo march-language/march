@@ -461,7 +461,7 @@ let run_capturing_stderr cmd =
   (rc, content)
 
 (** Count ERROR/WARNING diagnostic headers in captured compiler stderr.
-    Handles both the rich block format ("-- ERROR --- file") and the simple
+    Handles both the rich block format ("-- TYPE MISMATCH --- file") and the simple
     one-liner format ("file:line:col: error: msg"). *)
 let count_diagnostics content =
   let strip_ansi s =
@@ -487,12 +487,29 @@ let count_diagnostics content =
     done;
     !found
   in
+  (* A rendered header is `-- <TITLE> --…`, the title upper-case letters,
+     spaces and colons: an error's title is its category (`TYPE MISMATCH`,
+     `CAPABILITY`, …), a warning's starts `WARNING`, a hint's `HINT`
+     (lib/errors/errors.ml's [header_severity] is the same rule). *)
+  let header l =
+    let n = String.length l in
+    let rec title_end i =
+      if i < n && (match l.[i] with 'A' .. 'Z' | ' ' | ':' -> true | _ -> false)
+      then title_end (i + 1) else i in
+    if n < 6 || String.sub l 0 3 <> "-- " then None
+    else
+      let e = title_end 3 in
+      if e > 4 && e + 1 < n && l.[e] = '-' && l.[e + 1] = '-' && l.[e - 1] = ' '
+      then Some (String.sub l 3 (e - 4)) else None
+  in
   List.fold_left (fun (e, w) raw ->
     let l = strip_ansi raw in
-    let n = String.length l in
-    if   n >= 8  && String.sub l 0 8  = "-- ERROR"   then (e + 1, w)
-    else if n >= 10 && String.sub l 0 10 = "-- WARNING" then (e, w + 1)
-    else if has_sub l ": error: "   then (e + 1, w)
+    match header l with
+    | Some t when String.starts_with ~prefix:"WARNING" t -> (e, w + 1)
+    | Some t when String.starts_with ~prefix:"HINT" t -> (e, w)
+    | Some _ -> (e + 1, w)
+    | None ->
+    if has_sub l ": error: "   then (e + 1, w)
     else if has_sub l ": warning: " then (e, w + 1)
     else (e, w)
   ) (0, 0) (String.split_on_char '\n' content)

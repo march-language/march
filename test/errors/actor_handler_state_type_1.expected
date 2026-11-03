@@ -1,0 +1,11 @@
+exit: 1
+-- ACTOR -------- errors/actor_handler_state_type_1.march
+
+The handler for `Poke` in actor `A` must return the actor's new state, a `{ n : Int }`, but returns `Int`. [actor_handler_state_type]
+
+7 |     on Poke(k : Int) do state.n + k end
+           ^^^^
+
+    A handler must return a record matching the state, not `Int`.
+
+

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------------------- errors/cap_grant_6.march
+-- TYPE MISMATCH --------------- errors/cap_grant_6.march
 
 expected `(Int, Int)` but got `(Int, Int, Int)`. [type_mismatch]
 

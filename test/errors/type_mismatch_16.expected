@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------ errors/type_mismatch_16.march
+-- TYPE MISMATCH ---------- errors/type_mismatch_16.march
 
 expected `String` but got `Int`. [type_mismatch]
 

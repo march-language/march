@@ -1,1 +1,1 @@
-{"severity":"error","file":"errors/invalid_reflect_1.march","start_line":5,"start_col":5,"end_line":5,"end_col":10,"message":"`@[reflect]` on `noisy`: `noisy` is not reflected: it calls println","code":"invalid_reflect","fix":null,"labels":[],"notes":[]}
+{"severity":"error","file":"errors/invalid_reflect_1.march","start_line":5,"start_col":5,"end_line":5,"end_col":10,"message":"`@[reflect]` on `noisy`: `noisy` is not reflected: it calls println","code":"invalid_reflect","fix":null,"labels":[],"notes":[],"category":"REFINEMENT"}

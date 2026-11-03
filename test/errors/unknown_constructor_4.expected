@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------- errors/unknown_constructor_4.march
+-- NAMING ------------ errors/unknown_constructor_4.march
 
 I don't know a constructor called `Stream_Prod.S_ned`. [unknown_constructor]
 `Stream_Prod` has no constructor `S_ned`.

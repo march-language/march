@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------ errors/refinement_violated_12.march
+-- REFINEMENT ------- errors/refinement_violated_12.march
 
 refinement violation: argument `n` of `List.nth` does not satisfy precondition `_ >= 0 && _ < len(xs)` [refinement_violated]
 note: this value never satisfies it; pass one that does

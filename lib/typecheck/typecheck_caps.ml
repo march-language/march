@@ -284,7 +284,7 @@ let warn_unused_needs (env : env) (mod_name : string) (need : string) (need_sp :
       start_line = need_sp.March_ast.Ast.start_line;
       end_line   = need_sp.March_ast.Ast.end_line })
     (render_parts [
-      MPText "module "; MPCode mod_name; MPText " declares ";
+      MPText "Module "; MPCode mod_name; MPText " declares ";
       MPCode ("needs " ^ need); MPText " but no function requires ";
       MPCode ("Cap(" ^ need ^ ")"); MPText " or a sub-capability.";
       MPBreak; MPText "help: remove the unused capability declaration." ])
@@ -1400,7 +1400,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                             lbl_message = Printf.sprintf "`Cap(%s)` is named here too" cap_path } ];
                message =
                  render_parts [
-                   MPText (subject ^ " " ^ March_caps.Cap_lattice.action c ^ ", but module ");
+                   MPText (String.capitalize_ascii subject ^ " " ^ March_caps.Cap_lattice.action c ^ ", but module ");
                    MPCode mod_name.txt; MPText " declares no "; MPCode ("needs " ^ cap_path);
                    MPText ".";
                    MPBreak; MPText "help: add "; MPCode ("needs " ^ cap_path);
@@ -1506,7 +1506,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
              "%s %s, but module `%s` declares no `needs %s`%s.\n\
               hint: add %s to the module body —\n\
               %s"
-             first_subject (March_caps.Cap_lattice.action first_cap) mod_name.txt first_cap
+             (String.capitalize_ascii first_subject) (March_caps.Cap_lattice.action first_cap) mod_name.txt first_cap
              (match others with
               | [] -> ""
               | os ->
@@ -1524,7 +1524,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
           text = "  needs " ^ cap_path })
         (render_parts [
-          MPText "extern block in "; MPCode mod_name.txt;
+          MPText "The extern block in "; MPCode mod_name.txt;
           MPText " requires "; cap cap_path;
           MPText " but "; MPCode mod_name.txt; MPText " does not declare ";
           MPCode ("needs " ^ cap_path); MPText ".";
@@ -1630,7 +1630,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       Err.hint ~code:Err.Code.cap_root_broad env.errors ~span:sp
         (render_parts [
           (* [fn_name] is "" for a type, extern, actor or interface. *)
-          MPText (if fn_name = "" then "this declaration uses " else "this function takes ");
+          MPText (if fn_name = "" then "This declaration uses " else "This function takes ");
           cap "IO";
           MPText " (the root capability); consider narrowing to e.g. ";
           cap "IO.FileRead"; MPText " or "; cap "IO.Console";
@@ -1663,7 +1663,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
            if not covered then
              Err.error ~code:Err.Code.import_cap_missing env.errors ~span:sp
                (render_parts [
-                 MPText "module "; MPCode mod_name.txt; MPText " imports ";
+                 MPText "Module "; MPCode mod_name.txt; MPText " imports ";
                  MPCode imported; MPText " which requires "; cap req_cap;
                  MPText ", but "; MPCode req_cap; MPText " is not declared in ";
                  MPCode "needs"; MPText ".";
@@ -1719,7 +1719,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             if declaring_mod = mod_name.txt then
               Err.error ~code:Err.Code.proof_cap_mint_private env.errors ~span:sp
                 (render_parts [
-                  MPText "private function "; MPCode def.fn_name.txt;
+                  MPText "The private function "; MPCode def.fn_name.txt;
                   MPText " in "; MPCode declaring_mod;
                   MPText " cannot mint "; cap cap_path; MPText ".";
                   MPBreak; MPText "Only public functions of "; MPCode declaring_mod;
@@ -1729,7 +1729,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             else
               Err.error ~code:Err.Code.proof_cap_return env.errors ~span:sp
                 (render_parts [
-                  MPText "function "; MPCode def.fn_name.txt;
+                  MPText "The function "; MPCode def.fn_name.txt;
                   MPText " returns "; cap cap_path;
                   MPText " but "; cap cap_path; MPText " is a proof capability declared in ";
                   MPCode declaring_mod; MPText ".";
@@ -1773,7 +1773,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               | _ -> "?" in
             Err.error ~code:Err.Code.realtime_mixed env.errors ~span:sp
               (render_parts [
-                MPText "function "; MPCode def.fn_name.txt;
+                MPText "The function "; MPCode def.fn_name.txt;
                 MPText " takes "; MPCode "Tagged(_, Realtime)";
                 MPText " but also takes "; MPCode ("Cap(" ^ cap_name ^ ")");
                 MPText ".";
@@ -1808,7 +1808,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     if own_caps <> [] then
       Err.error ~code:Err.Code.io_not_allowed env.errors ~span:sp
         (render_parts [
-          MPText (what ^ " must be IO-free"); MPBreak;
+          MPCode what; MPText " must be IO-free."; MPBreak;
           MPCode qname; MPText " calls capabilities that need ";
           MPCode (String.concat ", " own_caps); MPText ".";
           MPBreak; MPText (if is_msg
@@ -2552,7 +2552,7 @@ let check_deferred_imports (env : env) : unit =
         then
           Err.error ~code:Err.Code.import_cap_missing env.errors ~span:sp
             (render_parts [
-              MPText "module "; MPCode importer; MPText " imports ";
+              MPText "Module "; MPCode importer; MPText " imports ";
               MPCode imported; MPText " which requires "; cap req_cap;
               MPText ", but "; MPCode req_cap; MPText " is not declared in ";
               MPCode "needs"; MPText ".";

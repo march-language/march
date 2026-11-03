@@ -1,7 +1,7 @@
 exit: 1
--- ERROR ----------------------- errors/cap_needs_9.march
+-- CAPABILITY ------------------ errors/cap_needs_9.march
 
-the `Inc` handler of actor `Counter` prints, but module `Main` declares no `needs IO.Console`, and `main` is granted nothing. [cap_needs]
+The `Inc` handler of actor `Counter` prints, but module `Main` declares no `needs IO.Console`, and `main` is granted nothing. [cap_needs]
 hint: add this to the module body —
         needs IO.Console
 and give `main` the grant —

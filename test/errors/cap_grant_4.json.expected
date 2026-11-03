@@ -1,1 +1,1 @@
-{"severity":"error","file":"errors/cap_grant_4.march","start_line":7,"start_col":12,"end_line":7,"end_col":24,"message":"Constructor `Circle` expects 1 argument(s) but I got 2.","code":"constructor_arity","fix":null,"labels":[],"notes":[]}
+{"severity":"error","file":"errors/cap_grant_4.march","start_line":7,"start_col":12,"end_line":7,"end_col":24,"message":"Constructor `Circle` expects 1 argument(s) but I got 2.","code":"constructor_arity","fix":null,"labels":[],"notes":[],"category":"TYPE MISMATCH"}

@@ -1,1 +1,1 @@
-{"severity":"error","file":"errors/cap_grant_25.march","start_line":26,"start_col":22,"end_line":26,"end_col":34,"message":"expected `Int` but got `String`.","code":"type_mismatch","fix":null,"labels":[],"notes":["Argument to constructor `Inc`."]}
+{"severity":"error","file":"errors/cap_grant_25.march","start_line":26,"start_col":22,"end_line":26,"end_col":34,"message":"expected `Int` but got `String`.","code":"type_mismatch","fix":null,"labels":[],"notes":["Argument to constructor `Inc`."],"category":"TYPE MISMATCH"}

@@ -43,6 +43,28 @@ and label = {
   lbl_message : string;
 }
 
+(** A positioned rejection raised from a pass that has no diagnostic
+    accumulator to report into (lowering, for one).  The driver catches it
+    once and prints it with the standard renderer, so it gets the same
+    header, caret, code and explain pointer as every other diagnostic;
+    nothing prints a raw `file:line:col: error: …` line (plan §X5). *)
+exception Diagnostic_exn of diagnostic
+
+(** A diagnostic record with no labels, notes or fix. *)
+let make ?(severity = Error) ?(notes = []) ~code ~span message =
+  { severity; span; message; labels = []; notes; code; fix = None }
+
+(** One line, [file:line:col: error: message [slug]], for the generic
+    catch-alls that only have [Printexc.to_string] (the REPL, a test). *)
+let () =
+  Printexc.register_printer (function
+    | Diagnostic_exn d ->
+      Some (Printf.sprintf "%s:%d:%d: %s: %s [%s]" d.span.March_ast.Ast.file
+              d.span.March_ast.Ast.start_line d.span.March_ast.Ast.start_col
+              (match d.severity with Error -> "error" | Warning -> "warning" | Hint -> "hint")
+              d.message (Code.slug_of d.code))
+    | _ -> None)
+
 (** Accumulator for diagnostics — allows error recovery. *)
 type ctx = { mutable diagnostics : diagnostic list }
 
@@ -399,7 +421,7 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
     Shows the relevant source line with a caret underline pointing at the span.
 
     Format (Elm-inspired):
-      -- ERROR ---------- filename
+      -- TYPE MISMATCH ---------- filename    (the title: [header_title])
       <blank>
       message
       <blank>
@@ -436,19 +458,46 @@ let explain_hint (d : diagnostic) =
     "\n" ^ fmt_note (Printf.sprintf "    run `march --explain %s`" slug)
   end
 
+(** The title of a diagnostic's header: its code's category for an error
+    (`TYPE MISMATCH`), the severity and the category for a warning or hint
+    (`WARNING: UNUSED`), so the severity of a non-error is never lost. *)
+let header_title (d : diagnostic) =
+  let cat = Code.category d.code in
+  match d.severity with
+  | Error -> cat
+  | Warning -> if cat = "ERROR" then "WARNING" else "WARNING: " ^ cat
+  | Hint -> if cat = "ERROR" then "HINT" else "HINT: " ^ cat
+
+(** Whether [line] (ANSI colour already stripped) is a rendered header, and
+    of which severity: `-- <TITLE> --…`, the title upper-case letters,
+    spaces and colons.  For tools that count diagnostics in rendered output
+    (forge's build summary keeps its own copy of this rule). *)
+let header_severity (line : string) : severity option =
+  let n = String.length line in
+  let rec title_end i =
+    if i < n && (match line.[i] with 'A' .. 'Z' | ' ' | ':' -> true | _ -> false)
+    then title_end (i + 1) else i in
+  if n < 6 || String.sub line 0 3 <> "-- " then None
+  else
+    let e = title_end 3 in
+    if e > 4 && e + 1 < n && line.[e] = '-' && line.[e + 1] = '-' && line.[e - 1] = ' ' then
+      let title = String.sub line 3 (e - 4) in
+      if String.starts_with ~prefix:"WARNING" title then Some Warning
+      else if String.starts_with ~prefix:"HINT" title then Some Hint
+      else Some Error
+    else None
+
 let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
-  let sev_str = match d.severity with
-    | Error   -> "ERROR"
-    | Warning -> "WARNING"
-    | Hint    -> "HINT"
-  in
+  let sev_str = header_title d in
   let line  = d.span.March_ast.Ast.start_line in
   let col   = d.span.March_ast.Ast.start_col in
   let eline = d.span.March_ast.Ast.end_line in
   let ecol  = d.span.March_ast.Ast.end_col in
   (* Header bar *)
   let loc_str = if filename = "" then "" else " " ^ filename in
-  let dashes  = String.make (max 2 (48 - String.length loc_str)) '-' in
+  (* As wide as the old `-- ERROR ---- file` header whatever the title, down
+     to a minimum of two dashes. *)
+  let dashes  = String.make (max 2 (53 - String.length sev_str - String.length loc_str)) '-' in
   let header =
     if not !use_color then "-- " ^ sev_str ^ " " ^ dashes ^ loc_str
     else
@@ -663,9 +712,15 @@ let render_diagnostic_json ?(related = true) (d : diagnostic) : string =
         (String.concat "," (List.map label d.labels))
         (String.concat "," (List.map json_string d.notes))
   in
+  (* [category] (plan §X5) is appended, so every existing field keeps its
+     place, and rides with [labels]/[notes]: [~related:false]'s versioned
+     --emit-core-ast document stays byte-stable. *)
+  let category_json =
+    if not related then ""
+    else Printf.sprintf {|,"category":%s|} (json_string (Code.category d.code)) in
   Printf.sprintf
-    {|{"severity":%s,"file":%s,"start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"message":%s,"code":%s,"fix":%s%s}|}
+    {|{"severity":%s,"file":%s,"start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"message":%s,"code":%s,"fix":%s%s%s}|}
     (json_string sev) file
     sp.March_ast.Ast.start_line sp.March_ast.Ast.start_col
     sp.March_ast.Ast.end_line   sp.March_ast.Ast.end_col
-    msg code fix_json related_json
+    msg code fix_json related_json category_json

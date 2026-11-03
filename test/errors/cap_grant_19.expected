@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_19.march
+-- REFINEMENT ----------------- errors/cap_grant_19.march
 
 refinement violation: argument `i` of `Simd.extract_f32x4` does not satisfy precondition `0 <= _ && _ < 4` [refinement_violated]
 note: this value never satisfies it; pass one that does

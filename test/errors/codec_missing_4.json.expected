@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/codec_missing_4.march","start_line":15,"start_col":2,"end_line":18,"end_col":5,"message":"Protocol `P`: the message `A -> B : Thing` carries `Thing`, which has no JSON codec. Every payload crosses the network as JSON: add `derive Json for Thing`.","code":"codec_missing","fix":null,"labels":[],"notes":[],"category":"ACTOR"}

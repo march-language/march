@@ -403,12 +403,13 @@ let check_contracts ?type_map ~opt ~(user_decls : Alloc_contract.decl_info list)
        with
        | (Out_of_memory | Stack_overflow) as e -> raise e
        | Failure msg -> Error msg
+       (* A positioned lowering rejection: [Printexc.to_string] gives it as
+          one "file:line:col: error: … [slug]" line (errors.ml's printer). *)
        | e -> Error (Printexc.to_string e))
     with
     | Ok diags -> diags
     | Error why ->
-      (* Keep the reason to one line: a positioned lowering rejection is
-         already "file:line:col: error: ...". *)
+      (* Keep the reason to one line. *)
       let why = match String.index_opt why '\n' with
         | Some i -> String.sub why 0 i | None -> why in
       Alloc_contract.unchecked_warnings ~why user_decls

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------- errors/unknown_qualified_name_3.march
+-- NAMING --------- errors/unknown_qualified_name_3.march
 
 Function `secret` is private to module `A`. [unknown_qualified_name]
 

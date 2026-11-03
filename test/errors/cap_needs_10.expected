@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_needs_10.march
+-- CAPABILITY ----------------- errors/cap_needs_10.march
 
 `save` writes a file, but module `Main` declares no `needs IO.FileWrite`, and `main` is granted only `Cap(IO.Console)`. [cap_needs]
 hint: add this to the module body —

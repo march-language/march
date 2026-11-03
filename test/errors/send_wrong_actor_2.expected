@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------- errors/send_wrong_actor_2.march
+-- ACTOR ---------------- errors/send_wrong_actor_2.march
 
 `Tally` is a message for `Labels`, but this pid points to an actor whose state is `{ n : Int }`, so the message would be dropped. [send_wrong_actor]
 `Tally` is also a handler of `Counter`, but a bare `Tally` resolves to `Labels`'s, and an actor message cannot be qualified by its actor; rename one of the two handlers.
@@ -9,7 +9,7 @@ exit: 1
 
 
 
--- HINT ---------------- errors/send_wrong_actor_2.march
+-- HINT: NAMING --------- errors/send_wrong_actor_2.march
 
 Constructor `Tally` is defined by multiple types (Labels_Msg, Counter_Msg). Use a qualified form to disambiguate, e.g. `Labels_Msg.Tally`. [ambiguous_constructor]
 
@@ -18,7 +18,7 @@ Constructor `Tally` is defined by multiple types (Labels_Msg, Counter_Msg). Use 
 
 
 
--- HINT ---------------- errors/send_wrong_actor_2.march
+-- HINT: NAMING --------- errors/send_wrong_actor_2.march
 
 Constructor `Tally` is defined by multiple types (Labels_Msg, Counter_Msg). Use a qualified form to disambiguate, e.g. `Labels_Msg.Tally`. [ambiguous_constructor]
 

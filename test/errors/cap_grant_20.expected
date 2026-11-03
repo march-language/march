@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_20.march
+-- REFINEMENT ----------------- errors/cap_grant_20.march
 
 refinement violation: argument `i` of `Simd.extract_u8x16` does not satisfy precondition `0 <= _ && _ < 16` [refinement_violated]
 note: this value never satisfies it; pass one that does

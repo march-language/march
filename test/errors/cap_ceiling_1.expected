@@ -1,5 +1,5 @@
 exit: 1
--- ERROR --------------------- errors/cap_ceiling_1.march
+-- CAPABILITY ---------------- errors/cap_ceiling_1.march
 
 `show` prints, but module `Report` declares no `needs IO.Console`. [cap_needs]
 hint: add this to the module body —

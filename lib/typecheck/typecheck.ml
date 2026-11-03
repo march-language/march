@@ -1733,7 +1733,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          when not (StringSet.mem name.txt env.gated_shadowed)
            && not (span_is_stdlib name.span) ->
          Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
-           (Printf.sprintf "`%s` is internal to the standard library; %s" name.txt hint)
+           (Printf.sprintf "`%s` is internal to the standard library; %s." name.txt hint)
        | _ -> ());
       (match lookup_var name.txt env with
        | Some sch ->
@@ -5741,7 +5741,7 @@ let actor_handler_hints state_ty inferred_ty =
   | TRecord inferred_fields ->
     (match state_ty with
      | TRecord [] ->
-       ["the state has no fields — return an empty record {}"]
+       ["The state has no fields: return an empty record `{}`."]
      | TRecord state_fields ->
        let state_names    = List.map fst state_fields in
        let inferred_names = List.map fst inferred_fields in
@@ -5751,18 +5751,18 @@ let actor_handler_hints state_ty inferred_ty =
            match List.assoc_opt fname inferred_fields with
            | Some it when not (types_equal st it) ->
              Some (Printf.sprintf
-               "field '%s' has type %s but state declares it as %s"
+               "Field `%s` has type `%s`, but the state declares it as `%s`."
                fname (pp_ty (repr it)) (pp_ty (repr st)))
            | _ -> None) state_fields in
        List.map (fun n -> Printf.sprintf
-         "field '%s' is not part of the actor state \
-          — remove it, or add it to the state declaration" n) extra
+         "Field `%s` is not part of the actor's state: remove it, or add it \
+          to the state declaration." n) extra
        @ List.map (fun n -> Printf.sprintf
-         "field '%s' is missing from the returned record" n) missing
+         "Field `%s` is missing from the returned record." n) missing
        @ wrong_type
      | _ -> [])
   | t ->
-    [Printf.sprintf "handler must return a record matching the state, not %s" (pp_ty t)]
+    [Printf.sprintf "A handler must return a record matching the state, not `%s`." (pp_ty t)]
 
 (** Validate the island module protocol.
 
@@ -6608,9 +6608,8 @@ let rec check_decl env (d : Ast.decl) : env =
             { severity = Error;
               span = h.ah_msg.span;
               message = Printf.sprintf
-                "handler '%s' in actor '%s' must return the state type\
-                 \n  expected: %s\
-                 \n  got:      %s"
+                "The handler for `%s` in actor `%s` must return the actor's new \
+                 state, a `%s`, but returns `%s`."
                 h.ah_msg.txt name.txt
                 (pp_ty (repr state_ty)) (pp_ty (repr inferred));
               labels = [];
@@ -9425,7 +9424,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                              | None -> []);
                         message =
                           Printf.sprintf
-                            "the %s of role `%s` %s, but the role is granted only %s \
+                            "The %s of role `%s` %s, but the role is granted only %s \
                              (`role %s needs %s`). A role's grant bounds everything its code \
                              reaches, as `main`'s grant bounds the program.\n\
                              help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
@@ -9861,7 +9860,7 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
               let sp = span_of owner in
               let msg =
                 Printf.sprintf
-                  "module `%s` uses `%s` but does not declare `needs %s`.\n\
+                  "Module `%s` uses `%s` but does not declare `needs %s`.\n\
                    help: add `needs %s` to the module body."
                   owner c c c
               in

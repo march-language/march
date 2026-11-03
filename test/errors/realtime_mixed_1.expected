@@ -1,7 +1,7 @@
 exit: 1
--- ERROR ------------------ errors/realtime_mixed_1.march
+-- CONTRACT --------------- errors/realtime_mixed_1.march
 
-function `step` takes `Tagged(_, Realtime)` but also takes `Cap(IO)`. [realtime_mixed]
+The function `step` takes `Tagged(_, Realtime)` but also takes `Cap(IO)`. [realtime_mixed]
 Realtime functions cannot hold `Cap(IO)` — allocation, IO, and panic are excluded from realtime contexts.
 hint: remove `Cap(IO)`
 

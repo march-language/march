@@ -721,8 +721,8 @@ let lemma_tests =
             (List.exists
                (fun l -> contains l "[lemma_unproved]" && contains l "`count_cat`")
                (lines out)
-            && contains out "-- ERROR")
+            && contains out "-- REFINEMENT ")
         then Alcotest.failf "an unproved lemma in a verified module is an error:\n%s" out;
         let out = run (src "") in
         expect_unproved out "count_cat";
-        if contains out "-- ERROR" then Alcotest.failf "outside `cap verified` it is a warning:\n%s" out) ]
+        if contains out "-- REFINEMENT " then Alcotest.failf "outside `cap verified` it is a warning:\n%s" out) ]

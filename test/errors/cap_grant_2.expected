@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------------------- errors/cap_grant_2.march
+-- NAMING ---------------------- errors/cap_grant_2.march
 
 I cannot find `undefined_var`. [unbound_variable]
 

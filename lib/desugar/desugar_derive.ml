@@ -1222,7 +1222,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
     Err.error ~code:Err.Code.unknown_derive errors ~span:iface_span
       (Printf.sprintf
          "Unknown derive target `%s` for type `%s`.\n\
-          Supported interfaces: Eq, Show, Hash, Ord, Json"
+          Supported interfaces: Eq, Show, Hash, Ord, Json."
          iface type_name.txt);
     []
 
@@ -1279,7 +1279,7 @@ let expand_satisfy
           | None ->
             Err.error ~code:Err.Code.satisfy_missing_fn errors ~span:sp
               (Printf.sprintf
-                 "satisfy %s for %s: no function `%s` found in scope."
+                 "`satisfy %s for %s`: no function `%s` found in scope."
                  iface_n.txt type_n.txt md.md_name.txt);
             None
           | Some fn_def ->

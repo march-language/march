@@ -1,5 +1,5 @@
 exit: 1
--- ERROR --------- errors/missing_superclass_impl_1.march
+-- INTERFACE ----- errors/missing_superclass_impl_1.march
 
 Cannot implement `Greet(Dog)`: required superclass `Speak(Dog)` is not satisfied. [missing_superclass_impl]
 Add `impl Speak(Dog) do ... end` before this implementation.

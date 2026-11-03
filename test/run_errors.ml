@@ -316,7 +316,19 @@ let render results name =
           && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') slug
         | _ -> false
       in
-      let headline = List.find_opt is_headline (lines_of err) in
+      (* The first headline of an ERROR block: a warning or hint block
+         (`-- WARNING: …`, `-- HINT: …`) can render ahead of it. *)
+      let headline =
+        let rec go in_error = function
+          | [] -> None
+          | l :: rest when String.starts_with ~prefix:"-- " l ->
+            go (not (String.starts_with ~prefix:"-- WARNING" l
+                     || String.starts_with ~prefix:"-- HINT" l)) rest
+          | l :: rest -> if in_error && is_headline l then Some l else go in_error rest
+        in
+        match go true (lines_of err) with
+        | Some h -> Some h
+        | None -> List.find_opt is_headline (lines_of err) in
       Printf.sprintf "\nafter fix: exit %d%s\n" code
         (match headline with
          | Some h when code <> 0 -> "\n" ^ String.trim h
@@ -417,6 +429,94 @@ let check_internals ~src name human =
                         test/errors/internals-allowlist.txt" name t name t)
     allowed
 
+(* The house-style lint (specs/plans/2026-11-02-diagnostics-depth-plan.md
+   §X5), over each `--check-json` diagnostic's message and notes:
+
+   - [quote]: a code name is in backticks, never in quotes (`'Poke'`):
+     no `'ident'` outside a backticked span, in the message or a note;
+   - [capital]: the headline (the message's first line) starts with an
+     upper-case letter or a backticked name;
+   - [period]: the headline ends a sentence (`.`, `?`, `!` or `:`);
+   - [prefix]: the message does not repeat its severity (`Warning: …`), which
+     the header already shows.
+
+   Codes still to fix are listed in [style-allowlist.txt] as
+   `<slug> <rule>`.  That file may only shrink: the full run fails on an
+   entry no case violates any more, so a fix removes its line. *)
+let style_rules = [ "quote"; "capital"; "period"; "prefix" ]
+
+let strip_backticked s =
+  let b = Buffer.create (String.length s) in
+  let inside = ref false in
+  String.iter (fun c ->
+      if c = '`' then inside := not !inside
+      else if not !inside then Buffer.add_char b c) s;
+  Buffer.contents b
+
+let has_quoted_ident s =
+  let s = strip_backticked s in
+  let n = String.length s in
+  let is_start c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_' in
+  let is_id c = is_start c || (c >= '0' && c <= '9') || c = '.' in
+  let rec go i =
+    if i >= n then false
+    else if s.[i] = '\'' && (i = 0 || not (is_id s.[i - 1]))
+            && i + 1 < n && is_start s.[i + 1] then
+      let j = ref (i + 1) in
+      while !j < n && is_id s.[!j] do incr j done;
+      (!j < n && s.[!j] = '\'') || go (i + 1)
+    else go (i + 1)
+  in
+  go 0
+
+(* [(slug, rule, headline)] for every violation in a case's JSON output. *)
+let style_violations (json : string) : (string * string * string) list =
+  let open Yojson.Safe.Util in
+  lines_of json
+  |> List.filter (fun l -> String.trim l <> "")
+  |> List.concat_map (fun l ->
+      match Yojson.Safe.from_string l with
+      | exception _ -> []
+      | j ->
+        let msg = member "message" j |> to_string in
+        let notes = match member "notes" j with
+          | `List ns -> List.filter_map (function `String s -> Some s | _ -> None) ns
+          | _ -> [] in
+        let code = member "code" j |> to_string in
+        let slug = match String.index_opt code ':' with
+          | Some i -> String.sub code 0 i | None -> code in
+        let head = String.trim (List.hd (lines_of msg)) in
+        let n = String.length head in
+        let starts p = String.length head >= String.length p
+                       && String.lowercase_ascii (String.sub head 0 (String.length p)) = p in
+        List.filter_map (fun (rule, bad) -> if bad then Some (slug, rule, head) else None)
+          [ ("quote", List.exists has_quoted_ident (msg :: notes));
+            ("capital", n = 0 || not ((head.[0] >= 'A' && head.[0] <= 'Z') || head.[0] = '`'));
+            ("period", n = 0 || not (String.contains ".?!:" head.[n - 1]));
+            ("prefix", List.exists starts [ "warning:"; "error:"; "hint:" ]) ])
+
+let style_allowlist = lazy (
+  let f = Filename.concat (errors_dir ()) "style-allowlist.txt" in
+  if not (Sys.file_exists f) then []
+  else
+    lines_of (read_file f)
+    |> List.filter_map (fun l ->
+        let l = String.trim l in
+        if l = "" || l.[0] = '#' then None
+        else match String.split_on_char ' ' l |> List.filter (( <> ) "") with
+          | [ slug; rule ] when List.mem rule style_rules -> Some (slug, rule)
+          | _ -> failwith ("style-allowlist.txt: bad line: " ^ l)))
+
+let check_style name json =
+  let allowed = Lazy.force style_allowlist in
+  match List.filter (fun (s, r, _) -> not (List.mem (s, r) allowed))
+          (style_violations json) with
+  | [] -> ()
+  | vs ->
+    Alcotest.failf "%s: house-style lint (see run_errors.ml):\n%s" name
+      (String.concat "\n"
+         (List.map (fun (s, r, h) -> Printf.sprintf "  [%s] %s: %s" s r h) vs))
+
 (* A machine fix must fix (plan §X4): a case whose fixes leave the program
    still rejected fails, unless its source says why with
    `-- EXPECT-FIX-PARTIAL: <reason>` (the program has a second, independent
@@ -467,6 +567,7 @@ let check results name () =
     cmp "--check-json" exp_j json
   end;
   check_internals ~src name human;
+  check_style name json;
   check_fix_fixes ~src name (Hashtbl.find (Lazy.force results) name)
 
 (* [ERRORS_ONLY=cap_,linear_used_twice_6] runs only the cases whose name
@@ -495,4 +596,21 @@ let () =
   let cases =
     List.map (fun n -> Alcotest.test_case n `Quick (check results n)) names
   in
+  (* The style allowlist may only shrink: on a full run, an entry that no
+     case violates any more fails. *)
+  let style_current () =
+    if only = None then begin
+      let seen =
+        List.concat_map (fun n ->
+            List.map (fun (s, r, _) -> (s, r))
+              (style_violations (Hashtbl.find (Lazy.force results) n).json))
+          names in
+      List.iter (fun (s, r) ->
+          if not (List.mem (s, r) seen) then
+            Alcotest.failf "no case violates `%s %s` any more; remove it from \
+                            test/errors/style-allowlist.txt" s r)
+        (Lazy.force style_allowlist)
+    end
+  in
+  let cases = cases @ [ Alcotest.test_case "style allowlist is current" `Quick style_current ] in
   Alcotest.run "errors" [ ("golden diagnostics", cases) ]

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------ errors/pure_violation_1.march
+-- CONTRACT --------------- errors/pure_violation_1.march
 
 `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects. [pure_violation]
 
@@ -10,7 +10,7 @@ Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module.
 
 
 
--- ERROR ------------------ errors/pure_violation_1.march
+-- TYPE MISMATCH ---------- errors/pure_violation_1.march
 
 expected `String` but got `FileError`. [type_mismatch]
 

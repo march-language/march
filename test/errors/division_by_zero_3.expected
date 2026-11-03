@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------- errors/division_by_zero_3.march
+-- REFINEMENT ----------- errors/division_by_zero_3.march
 
 division by zero literal in `cap no_panic` module. [division_by_zero]
 

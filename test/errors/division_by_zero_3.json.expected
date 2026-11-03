@@ -1,1 +1,1 @@
-{"severity":"error","file":"errors/division_by_zero_3.march","start_line":33,"start_col":6,"end_line":33,"end_col":12,"message":"division by zero literal in `cap no_panic` module.","code":"division_by_zero","fix":null,"labels":[],"notes":[]}
+{"severity":"error","file":"errors/division_by_zero_3.march","start_line":33,"start_col":6,"end_line":33,"end_col":12,"message":"division by zero literal in `cap no_panic` module.","code":"division_by_zero","fix":null,"labels":[],"notes":[],"category":"REFINEMENT"}

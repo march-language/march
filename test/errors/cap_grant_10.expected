@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_10.march
+-- REFINEMENT ----------------- errors/cap_grant_10.march
 
 refinement violation: argument `x` of `sqrtish` does not satisfy precondition `_ >= 0.0` [refinement_violated]
 note: this value never satisfies it; pass one that does

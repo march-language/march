@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------- errors/annotated_tyvar_fixed_1.march
+-- TYPE MISMATCH --- errors/annotated_tyvar_fixed_1.march
 
 The type variables `a` and `b` in `launder`'s signature are not independent: the body makes `b` the same type as `a`. [annotated_tyvar_fixed]
 
@@ -9,7 +9,7 @@ The type variables `a` and `b` in `launder`'s signature are not independent: the
     hint: write `a` in place of `b` if they are meant to be the same type, or make the body generic in each.
 
 
--- ERROR ----------- errors/annotated_tyvar_fixed_1.march
+-- TYPE MISMATCH --- errors/annotated_tyvar_fixed_1.march
 
 expected `String` but got `Int`. [type_mismatch]
 

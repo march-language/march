@@ -1,5 +1,5 @@
 exit: 1
--- ERROR --------------- errors/unknown_interface_1.march
+-- INTERFACE ----------- errors/unknown_interface_1.march
 
 Unknown interface `NotDeclared` — is it declared above this impl? [unknown_interface]
 

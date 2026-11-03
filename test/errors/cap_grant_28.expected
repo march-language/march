@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_28.march
+-- LINEARITY ------------------ errors/cap_grant_28.march
 
 The linear value `cc2` is used more than once here. [linear_used_twice]
 Linear values must be consumed exactly once — they cannot be copied or ignored.

@@ -8198,7 +8198,7 @@ let warn_unknown_attributes errctx (decls : A.decl list) : unit =
             |> List.sort (fun x y -> compare (edit_distance x name) (edit_distance y name))
           in
           Err.warning ~code:Err.Code.unknown_attribute errctx ~span:fd.A.fn_name.A.span
-            (Printf.sprintf "unknown attribute `@[%s]` on `%s`: it is ignored.%s" name
+            (Printf.sprintf "Unknown attribute `@[%s]` on `%s`: it is ignored.%s" name
                fd.A.fn_name.A.txt
                (match near with
                 | k :: _ -> Printf.sprintf "\nnote: did you mean `@[%s]`?" k
@@ -9604,7 +9604,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       in
       List.iter
         (fun (span, msg) ->
-          Err.error ~code:Err.Code.invalid_decreases errctx ~span ("@[decreases]: " ^ msg))
+          Err.error ~code:Err.Code.invalid_decreases errctx ~span ("`@[decreases]`: " ^ msg))
         pl.Refine_term.pl_invalid;
       List.iter
         (fun u ->

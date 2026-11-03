@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_32.march
+-- PROTOCOL ------------------- errors/cap_grant_32.march
 
 Chan.new: protocol `Tri` has 3 roles but Chan.new needs exactly 2. Use MPST.new for multi-party protocols. [session_role_count]
 

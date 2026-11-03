@@ -1,5 +1,5 @@
 exit: 0
--- WARNING ------------ errors/termination_unproved_1.march
+-- WARNING: RECURSION -- errors/termination_unproved_1.march
 
 `down` is not shown to terminate: the recursive call `down(n - 1)` is not shown to decrease `n`: e.g. n = -1 [termination_unproved]
 note: the exit `n == 0` misses a negative `n`; `n <= 0` covers it.

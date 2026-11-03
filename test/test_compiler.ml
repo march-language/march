@@ -12188,7 +12188,7 @@ let test_migrate_state_file_write_error () =
   let all_text = List.concat_map (fun d ->
     d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
   Alcotest.(check bool) "error mentions migrate_state must be IO-free" true
-    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "migrate_state must be io-free") all_text)
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "`migrate_state` must be io-free") all_text)
 
 (* migrate_state calling println -> IO-free error. *)
 let test_migrate_state_println_error () =
@@ -12204,7 +12204,7 @@ let test_migrate_state_println_error () =
   let all_text = List.concat_map (fun d ->
     d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
   Alcotest.(check bool) "error mentions migrate_state must be IO-free" true
-    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "migrate_state must be io-free") all_text)
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "`migrate_state` must be io-free") all_text)
 
 (* migrate_state whose OWN signature is Cap(IO.Foreign)-implied via an extern
    block sharing the naming convention -> IO-free error (extern-implied cap). *)
@@ -12220,7 +12220,7 @@ let test_migrate_state_extern_error () =
   let all_text = List.concat_map (fun d ->
     d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
   Alcotest.(check bool) "error mentions migrate_state must be IO-free" true
-    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "migrate_state must be io-free") all_text)
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "`migrate_state` must be io-free") all_text)
 
 (* THE crux test: a pure migrate_state in a module that DOES declare a
    module-level `needs IO.Console` (as if for its handlers) must compile
@@ -12296,7 +12296,7 @@ end|}) in
   Alcotest.(check bool) "migrate_msg calling println: compile error" true (has_errors ctx);
   Alcotest.(check bool) "error says migrate_msg must be IO-free" true
     (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m)
-                     "migrate_msg must be io-free") (diag_texts ctx))
+                     "`migrate_msg` must be io-free") (diag_texts ctx))
 
 let test_migrate_msg_shape_error () =
   let ctx = typecheck ("mod App do" ^ migrate_msg_actor ^ {|
@@ -14380,8 +14380,38 @@ let render_parse_err src =
 let test_parse_error_has_error_header () =
   let src = "mod Test do\n  fn f(x) do\n    if x then 1 end\n  end\nend" in
   let output = render_parse_err src in
-  Alcotest.(check bool) "#7 parse error header is -- ERROR not -- PARSE ERROR" true
-    (_contains_substr output "-- ERROR ")
+  (* Since plan §X5 an error's header names its category: SYNTAX. *)
+  Alcotest.(check bool) "#7 parse error header is -- SYNTAX not -- PARSE ERROR" true
+    (_contains_substr output "-- SYNTAX ")
+
+(* Plan §X5: every registered code has exactly one category (its header
+   title), and [header_severity] reads a rendered header back. *)
+let test_every_code_has_one_category () =
+  let module C = March_errors.Code in
+  List.iter (fun code ->
+      let n = List.length (List.filter (fun (_, cs) -> List.mem code cs) C.category_table) in
+      if n <> 1 then
+        Alcotest.failf "code `%s` is in %d categories of Code.category_table (want 1)" code n)
+    C.all;
+  List.iter (fun (_, cs) ->
+      List.iter (fun c ->
+          if not (List.mem c C.all) then
+            Alcotest.failf "Code.category_table lists `%s`, which is not in Code.all" c) cs)
+    C.category_table;
+  let module E = March_errors.Errors in
+  let sev = Alcotest.testable (fun ppf -> function
+      | None -> Format.pp_print_string ppf "None"
+      | Some E.Error -> Format.pp_print_string ppf "Error"
+      | Some E.Warning -> Format.pp_print_string ppf "Warning"
+      | Some E.Hint -> Format.pp_print_string ppf "Hint") ( = ) in
+  List.iter (fun (line, want) ->
+      Alcotest.check sev line want (E.header_severity line))
+    [ ("-- TYPE MISMATCH ------ errors/a.march", Some E.Error);
+      ("-- ERROR --", Some E.Error);
+      ("-- WARNING: UNUSED ---- a.march", Some E.Warning);
+      ("-- HINT: REFINEMENT --", Some E.Hint);
+      ("-- a March comment", None);
+      ("12 | -- TYPE MISMATCH --", None) ]
 
 let test_parse_error_then_note_do_end () =
   let src = "mod Test do\n  fn f(x) do\n    if x then 1 end\n  end\nend" in
@@ -18896,7 +18926,8 @@ let compiler_suites =
           Alcotest.test_case "#6 guarded arm: no redundancy warning"        `Quick test_guarded_arm_no_redundant_warning;
           Alcotest.test_case "#6 non-redundant match: no warning"           `Quick test_non_redundant_no_warning;
           Alcotest.test_case "#8 qualified error has notes not inline"      `Quick test_qualified_error_uses_notes;
-          Alcotest.test_case "#7 parse error uses -- ERROR header"          `Quick test_parse_error_has_error_header;
+          Alcotest.test_case "#7 parse error uses -- SYNTAX header"          `Quick test_parse_error_has_error_header;
+          Alcotest.test_case "X5: every code has one category"             `Quick test_every_code_has_one_category;
           Alcotest.test_case "parse caret: `then` points at `then`"          `Quick test_parse_caret_then;
           Alcotest.test_case "parse caret: else-if chain missing `end`"      `Quick test_parse_caret_else_if_missing_end;
           Alcotest.test_case "parse caret: mod missing `do`"                 `Quick test_parse_caret_mod_missing_do;
