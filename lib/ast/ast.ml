@@ -449,6 +449,11 @@ and method_decl = {
   md_name : name;
   md_ty : ty;                            (** Method type signature *)
   md_default : expr option;              (** Optional default implementation *)
+  md_needs : (name list list * span) option;
+    (** [fn m : t needs A.B, C]: a capability bound every impl of [m] (and
+        the default body) is checked against.  Same shape as [fn_needs].  A
+        check on impls only, never part of [m]'s type, so it threads nothing
+        through callers or [when] constraints. *)
 }
 
 (** Interface implementation:

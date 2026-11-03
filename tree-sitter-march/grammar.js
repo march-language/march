@@ -107,9 +107,11 @@ module.exports = grammar({
       $.setup_all_decl,
     ),
 
-    // @[name], @[name(arg)], @name(arg), @invariant(expr), @[opaque]
-    // (`opaque` is a keyword, so it is spelled out beside the identifier).
+    // @[name], @[name(arg)], @name(arg), @invariant(expr), @[opaque],
+    // @[reflect(fuel: N)] (`opaque` is a keyword, so it is spelled out beside
+    // the identifier; `fuel: N` is the one labelled payload).
     attribute: $ => seq('@', choice(
+      seq('[', $.identifier, '(', $.identifier, ':', $.integer, ')', ']'),
       seq('[', choice($.identifier, 'opaque'), optional(seq('(', commaSep($._expr), ')')), ']'),
       seq($.identifier, '(', commaSep($._expr), ')'),
     )),
@@ -436,6 +438,7 @@ module.exports = grammar({
     ),
     method_sig: $ => seq(
       'fn', field('name', $.identifier), ':', field('type', $._type),
+      optional($.fn_needs),
       optional(seq('do', field('default', $._expr), 'end')),
     ),
 

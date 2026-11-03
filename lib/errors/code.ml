@@ -28,6 +28,7 @@ let attribute_no_effect = "attribute_no_effect"
 let builtin_arity = "builtin_arity"
 let cap_bound = "cap_bound"
 let cap_bound_needs = "cap_bound_needs"
+let cap_bound_iface = "cap_bound_iface"
 let cap_ceiling = "cap_ceiling"
 let cap_deserialize = "cap_deserialize"
 let cap_dict_misuse = "cap_dict_misuse"
@@ -65,11 +66,16 @@ let internal_error = "internal_error"
 let int_overflow = "int_overflow"
 let invalid_cap_scope = "invalid_cap_scope"
 let invalid_decreases = "invalid_decreases"
+let invalid_lemma = "invalid_lemma"
 let invalid_measure = "invalid_measure"
+let invalid_reflect = "invalid_reflect"
 let invalid_type_bound = "invalid_type_bound"
 let io_not_allowed = "io_not_allowed"
 let island_missing_fn = "island_missing_fn"
 let json_derive_name_collision = "json_derive_name_collision"
+let lemma_argument_impure = "lemma_argument_impure"
+let lemma_unproved = "lemma_unproved"
+let lemma_unproved_call = "lemma_unproved_call"
 let let_question_last = "let_question_last"
 let let_star_bad_flat_map = "let_star_bad_flat_map"
 let let_star_last = "let_star_last"
@@ -113,6 +119,7 @@ let parse_error = "parse_error"
 let pid_serialize = "pid_serialize"
 let pipe_into_match = "pipe_into_match"
 let pipe_match_pattern = "pipe_match_pattern"
+let portable_capture = "portable_capture"
 let predicate_eq_structural = "predicate_eq_structural"
 let prelude_collision = "prelude_collision"
 let proof_cap_foreign = "proof_cap_foreign"
@@ -214,6 +221,7 @@ let all = [
   builtin_arity;
   cap_bound;
   cap_bound_needs;
+  cap_bound_iface;
   cap_ceiling;
   cap_deserialize;
   cap_dict_misuse;
@@ -251,11 +259,16 @@ let all = [
   int_overflow;
   invalid_cap_scope;
   invalid_decreases;
+  invalid_lemma;
   invalid_measure;
+  invalid_reflect;
   invalid_type_bound;
   io_not_allowed;
   island_missing_fn;
   json_derive_name_collision;
+  lemma_argument_impure;
+  lemma_unproved;
+  lemma_unproved_call;
   let_question_last;
   let_star_bad_flat_map;
   let_star_last;
@@ -299,6 +312,7 @@ let all = [
   pid_serialize;
   pipe_into_match;
   pipe_match_pattern;
+  portable_capture;
   predicate_eq_structural;
   prelude_collision;
   proof_cap_foreign;

@@ -437,8 +437,8 @@ let rec selector_reduce (term : Smt.term) : Smt.term =
    axioms that would cause Z3 to return `unknown` instead of sat/unsat. *)
 let rec concrete_len (term : Smt.term) : int option =
   match ctor_view (selector_reduce term) with
-  | Some ("Nil", []) -> Some 0
-  | Some ("Cons", [ _h; t ]) -> Option.map (( + ) 1) (concrete_len t)
+  | Some (c, []) when c = list_nil () -> Some 0
+  | Some (c, [ _h; t ]) when c = list_cons () -> Option.map (( + ) 1) (concrete_len t)
   | _ -> None
 
 (* Try to evaluate an axiom measure on a concrete SMT term.
@@ -595,6 +595,12 @@ let reflect_record_literal ?(opaque : (Smt.sort -> Smt.term) option)
    Defaulting both to [None] keeps every other caller byte-identical: only the
    call-site builder, which owns the caller namespace (sorts, string/record
    registries, the measure memo), passes them. *)
+(* Set when a refined local's own fact did not translate and was left out of
+   the query (phase 4 review): the constant is then unconstrained, so a model
+   of it is not a counterexample the program can reach.  Read and reset by
+   [Refine_call]'s definite-failure rule. *)
+let scope_fact_dropped = ref false
+
 let rec reflect_scalar
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     ?(foreign_var : (string -> (Smt.term * (string * Smt.sort)) option) option)
@@ -668,7 +674,9 @@ let rec reflect_scalar
        let assumptions =
          match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure ~resolve_measure_call:foreign_measure_call q with
          | Some qa -> [ qa ]
-         | None -> []
+         | None ->
+           scope_fact_dropped := true;
+           []
        in
        Some (xc, (x, sort) :: !extra, assumptions)
      | Some _ | None ->

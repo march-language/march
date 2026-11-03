@@ -8,3 +8,4 @@ mod M do
 
   fn g() do 0 end
 end
+-- EXPECT-FIX-PARTIAL: the syntax fix is right; the program's arithmetic on a Result is a separate type error

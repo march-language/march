@@ -54,6 +54,18 @@ forge search --callers ClusterNode.start
 Use it before deleting or renaming a declaration, and before grepping to check whether something
 is still used.
 
+### By law (`--law`)
+
+Searches the theorems of `@[lemma]`s, as written: a lemma matches when its theorem contains the
+text (case and spaces ignored) or calls a function with that name. Each hit prints its law and the
+functions it is about (`law: rev(rev(xs)) == xs  (about: rev)`). A plain name search for a
+function also lists the lemmas about it.
+
+```bash
+forge search "" --law "rev(rev"
+forge search "" --law cat
+```
+
 ### Combinations
 
 You can combine modes — e.g. a doc search narrowed by a name fragment:
@@ -70,6 +82,7 @@ forge search -d "decode" Json
 | `--plain` | Plain text, no colours (for piping or an agent) |
 | `--json` | JSON output (for tooling) |
 | `--callers=NAME` | Reverse-reference search (above) |
+| `--law=TEXT` | Search lemma theorems (above) |
 | `--rebuild` | Rebuild the index (run this after installing new deps) |
 
 ## Workflow

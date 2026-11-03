@@ -854,6 +854,7 @@ let print_refine_report_sites ~filename ~user_files () =
           | March_refinecheck.Obligation.Division -> "division"
           | March_refinecheck.Obligation.Termination -> "termination"
           | March_refinecheck.Obligation.Overflow -> "overflow"
+          | March_refinecheck.Obligation.Assertion -> "assertion"
         in
         Printf.eprintf "skip\t%s\t%s:%d:%d\t%s\t%s\t%s\t%s\n"
           (if is_user_span span then "user" else "stdlib")
@@ -863,6 +864,25 @@ let print_refine_report_sites ~filename ~user_files () =
           kind o.callee o.predicate
       | _ -> ())
     (March_refinecheck.Obligation.all ())
+
+(* Lemma erasure (reflection design §4.5): every path that runs code removes
+   `@[lemma]` calls and bodies after typechecking, independent of any proof
+   verdict.  [lemma_env] is built over the whole program (stdlib included),
+   so a name another declaration also binds is never erased. *)
+let lemma_reserved n =
+  March_desugar.Lemma_erase.reserved_by
+    (List.map fst March_typecheck.Typecheck_builtins.builtin_bindings
+     @ List.map fst March_typecheck.Typecheck_builtins.builtin_interface_bindings)
+    n
+
+let erase_lemmas_in ~(whole : March_ast.Ast.module_) (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+  let env = March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved whole.March_ast.Ast.mod_decls in
+  { m with March_ast.Ast.mod_decls = March_desugar.Lemma_erase.erase_module_with env m.March_ast.Ast.mod_decls }
+
+let erase_lemmas (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+  { m with
+    March_ast.Ast.mod_decls =
+      March_desugar.Lemma_erase.erase_module ~reserved:lemma_reserved m.March_ast.Ast.mod_decls }
 
 (* --refine-report-sites=all (reflection design §6.1): one line per
    obligation of any verdict, so a run can be compared site by site against a
@@ -886,6 +906,7 @@ let print_refine_report_sites_all ~filename ~user_files () =
         | O.Division -> "division"
         | O.Termination -> "termination"
         | O.Overflow -> "overflow"
+        | O.Assertion -> "assertion"
       in
       let slice = if is_user_span span then "user" else "stdlib" in
       let loc =
@@ -1007,7 +1028,26 @@ let print_reflect_deps ~filename ~entry_mod ~user_files () =
   let cdefs =
     List.filter_map (crow "reflect-cdef") (Array.to_list (Lazy.force !RS.contract_defs)) |> List.sort_uniq compare in
   let cdeps = List.filter_map (crow "reflect-cdep") (RS.contract_reach filename) |> List.sort_uniq compare in
-  List.iter prerr_endline (defs @ deps @ cdefs @ cdeps)
+  (* Lemmas (phase 2): a lemma's text and whether it was admitted, so a
+     dependency lemma that changes or stops proving re-checks its callers. *)
+  let lemma_hash (_, _, d, admitted) = Printf.sprintf "lemma:%s:%s" d (if admitted then "admitted" else "unproved") in
+  let rows = !March_refinecheck.Refine_check.lemma_rows in
+  let ldefs =
+    List.filter_map
+      (fun ((file, name, _, _) as r) -> if user_file file then Some (line "lemma-def" file name (lemma_hash r)) else None)
+      rows
+    |> List.sort_uniq compare
+  in
+  let ldeps =
+    List.filter_map
+      (fun (file, name) ->
+        match List.find_opt (fun (f, n, _, _) -> f = file && n = name) rows with
+        | Some r when user_file file -> Some (line "lemma-dep" file name (lemma_hash r))
+        | _ -> None)
+      !March_refinecheck.Refine_check.lemma_called
+    |> List.sort_uniq compare
+  in
+  List.iter prerr_endline (defs @ deps @ cdefs @ cdeps @ ldefs @ ldeps)
 
 (* --reflect-parity (reflection §9.2, D16): the parity net over the
    reflected functions of user code; its lines on stderr, exit 1 on RED (a
@@ -1021,6 +1061,49 @@ let run_reflect_parity ~filename ~user_files () =
     prerr_endline "parity: RED (a reflected function's logic definition disagrees with the program; this is a compiler bug)";
     exit 1
   end
+
+(* --lemma-test (specs/todos/2026-11-02-lemma-uses-beyond-refinement.md
+   ideas 1 and 2): every lemma of the entry file has its theorem evaluated
+   on the parity net's inputs in the interpreter, and each admitted one again
+   in a compiled harness program.  Its lines on stderr; exit 1 on RED (a
+   counterexample to an unproved lemma, or a proved one false somewhere). *)
+let run_lemma_test ~filename ~entry_mod () =
+  let compile_run src =
+    let dir = Filename.temp_dir "march_lemma_test_" "" in
+    let entry = Filename.concat dir "lemma_harness.march" in
+    Out_channel.with_open_bin entry (fun oc -> output_string oc src);
+    let read f = try In_channel.with_open_bin f In_channel.input_all with Sys_error _ -> "" in
+    (* The entry file's directory joins the library path, so the harness's
+       `use` finds its module (a directory already listed is not repeated). *)
+    let real d = try Unix.realpath d with Unix.Unix_error _ -> d in
+    let own = real (Filename.dirname filename) in
+    let lib =
+      match Sys.getenv_opt "MARCH_LIB_PATH" with
+      | Some l -> List.filter (( <> ) "") (String.split_on_char ':' l)
+      | None -> []
+    in
+    let lib = if List.exists (fun d -> real d = own) lib then lib else lib @ [ own ] in
+    let exe = Filename.concat dir "lemma_harness" in
+    let cout = Filename.concat dir "compile.out" and rout = Filename.concat dir "run.out" in
+    let code =
+      Sys.command
+        (Printf.sprintf "MARCH_LIB_PATH=%s %s --compile --opt 0 -o %s %s >%s 2>&1"
+           (Filename.quote (String.concat ":" lib)) (Filename.quote Sys.executable_name)
+           (Filename.quote exe) (Filename.quote entry) (Filename.quote cout))
+    in
+    if code <> 0 then begin
+      let out = read cout in
+      prerr_endline "lemma-test: the compiled harness did not compile:";
+      List.iter (fun l -> if l <> "" then prerr_endline ("lemma-test:   " ^ l)) (String.split_on_char '\n' out);
+      `Compile_failed out
+    end
+    else
+      let rc = Sys.command (Printf.sprintf "%s >%s 2>&1" (Filename.quote exe) (Filename.quote rout)) in
+      `Ran (rc, read rout)
+  in
+  let lines, red = March_refinecheck.Lemma_test.run ~filename ~entry_mod ~compile_run () in
+  List.iter prerr_endline lines;
+  if red then exit 1
 
 (* --refine-audit: every declared refinement occurrence
    ([March_refinecheck.Refine_audit.sites]), classified
@@ -2679,6 +2762,7 @@ let run_test_cmd args =
     if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
     if !reflect_deps then print_reflect_deps ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ~user_files ();
     if !reflect_parity then run_reflect_parity ~filename ~user_files ();
+    if !lemma_test then run_lemma_test ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ();
     if !reflect_report then
       print_reflect_report ~filename ~user_files ~type_map
         ~recheck:(fun () ->
@@ -2732,6 +2816,15 @@ let run_test_cmd args =
      | Some h when is_user_file h ->
        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file h)
      | Some _ | None -> ());
+    let lemma_env =
+      March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved desugared.March_ast.Ast.mod_decls
+    in
+    let desugared = erase_lemmas desugared in
+    (* Each file starts from a fresh interpreter runtime: named Vaults (and
+       what is stored in them, such as Config values) are process-global, so
+       a second file's run of the same doctests would otherwise see the
+       first file's counters (`Vault.incr` returned 42, not 6). *)
+    March_eval.Eval.reset_scheduler_state ();
     (* Enable coverage tracking for this file's test run. *)
     if !coverage then begin
       March_coverage.Coverage.reset ();
@@ -2780,7 +2873,7 @@ let run_test_cmd args =
         | Error _ ->
           failwith ("doctest parse error in: " ^ src)
       in
-      March_desugar.Desugar.desugar_expr expr
+      March_desugar.Lemma_erase.erase_expr lemma_env (March_desugar.Desugar.desugar_expr expr)
     in
     let (dt_total, dt_failed, dt_failures) =
       if !verbose then
@@ -3400,7 +3493,7 @@ let compile filename =
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
       || !termination_report || !reflect_report || !refine_report_sites_all
-      || !reflect_deps || !reflect_parity
+      || !reflect_deps || !reflect_parity || !lemma_test
       || !report_contracts
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
@@ -3974,6 +4067,7 @@ let compile filename =
   if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
   if !reflect_deps then print_reflect_deps ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ~user_files ();
   if !reflect_parity then run_reflect_parity ~filename ~user_files ();
+  if !lemma_test then run_lemma_test ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ();
   if !reflect_report then
     print_reflect_report ~filename ~user_files ~type_map
       ~recheck:(fun () ->
@@ -4033,6 +4127,10 @@ let compile filename =
   report_z3 errors ~filename ~user_files;
   March_refine.Refine.shutdown ();
   stamp "typecheck";
+  (* Lemma erasure (§4.5): after the refinement checker, before anything
+     lowers, interprets or JIT-compiles the program. *)
+  let user_only_desugared = erase_lemmas_in ~whole:desugared user_only_desugared in
+  let desugared = erase_lemmas desugared in
   (* Allocation contracts (`cap no_alloc` modules and @[no_alloc] functions)
      are judged on lowered TIR.  --check lowers on demand for them (below);
      the interpreter and --jit never lower, so they give one
@@ -4056,8 +4154,10 @@ let compile filename =
      span — see its doc comment above. Applied here, once, so every
      downstream consumer of [diags] (human-readable printing below,
      --check-json, --emit-core-ast) sees the same de-duplicated set. *)
-  let diags = dedupe_cap_hints (March_errors.Errors.sorted errors) in
   let is_user_file = user_diag ~filename ~user_files in
+  let diags =
+    March_errors.Errors.suppress_cascades ~visible:is_user_file
+      (dedupe_cap_hints (March_errors.Errors.sorted errors)) in
   (* The front-end half of --check's accept/reject condition (has_user_errors
      || has_resolve_errors || has_desugar_errors; a parse error never gets
      this far, [compile] exits at the parse step), hoisted
@@ -4897,8 +4997,12 @@ let compile filename =
           Printf.eprintf "march: %s\n" msg;
           exit 1
       end;
-      let make_hcr_manifest hr_impl_hashes hr_abi remote_sig_hashes ch =
-        if not !compile_so && !hot_reload_prefix = None then "" else begin
+      (* Everything but the header is independent of [ch], and a build asks
+         for the manifest twice (the post-TIR key folds in [hcr_manifest ""],
+         emission embeds [hcr_manifest ch]), so the per-function lines are
+         built once, when the first three arguments are applied. *)
+      let make_hcr_manifest hr_impl_hashes hr_abi remote_sig_hashes =
+        if not !compile_so && !hot_reload_prefix = None then (fun _ch -> "") else begin
           (* Per-fn OWN cap closures, keyed by qualified name ("Mod.fn").
              fn_own_capability_closures returns each function's own caps
              (body/sig/extern), WITHOUT the module-wide `needs` merge that
@@ -5013,40 +5117,6 @@ let compile filename =
             Hashtbl.replace callee_to_callers callee deduped
           ) callee_to_callers;
           let oc = Buffer.create 1024 in
-             (match March_tir.Hcr_abi.of_target target with
-              | Ok abi ->
-                Printf.bprintf oc
-                  "# march-hcr-manifest v2\n# cas_hash %s\n# target %s\n# hcr_abi %s\n# module_prefix %s\n"
-                  ch abi.canonical_target (March_tir.Hcr_abi.abi_id abi)
-                  (Option.value ~default:"" !hot_reload_prefix);
-                (* The standard library this artifact was compiled against:
-                   the digest of its source ([stdlib_source_hash], the same
-                   one that keys the CAS).  A stdlib actor has no dispatch
-                   slot (Hot_reload.is_slot_actor_dispatch), so a patch can
-                   never deliver a stdlib change; forge compares this line
-                   with the running build's and asks for a restart instead
-                   of activating nothing (deploy --plan, deploy hot). *)
-                (match stdlib_source_hash () with
-                 | Some (_, h, _) -> Printf.bprintf oc "# stdlib_hash %s\n" h
-                 | None -> ());
-                (* The patch's own dispatch slots ([Hot_reload.is_slot_fn]).
-                   A slot's impl_hash stops at a slot callee, so when the
-                   running build has no slot for one (a function new since
-                   its last restart: a patch calls its own copy of it),
-                   that callee's change is in no caller's hash; the deploy
-                   redeploys its callers to carry it
-                   (Cmd_deploy_hot.unslotted_carriers). *)
-                (match hr_config () with
-                 | Some cfg ->
-                   let slots =
-                     Hashtbl.fold (fun n _ acc ->
-                         if March_tir.Hot_reload.is_slot_fn cfg n then n :: acc else acc)
-                       hr_impl_hashes []
-                     |> List.sort String.compare in
-                   Printf.bprintf oc "# slots %s\n" (String.concat "," slots)
-                 | None -> ());
-              | Error _ ->
-                Printf.bprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
              List.iter (fun (name, impl_h) ->
                (* A capture-release function ([Drop.run]'s [$clodrop$<clo>]) is
                   reached only through the registry main fills at start-up; a
@@ -5095,6 +5165,44 @@ let compile filename =
                in
                Printf.bprintf oc "ROLE %s caps=%s%s\n" role (String.concat "," caps) via
              ) (March_typecheck.Typecheck.role_capability_closures typecheck_env);
+             let body = Buffer.contents oc in
+             fun ch ->
+             let oc = Buffer.create (String.length body + 1024) in
+             (match March_tir.Hcr_abi.of_target target with
+              | Ok abi ->
+                Printf.bprintf oc
+                  "# march-hcr-manifest v2\n# cas_hash %s\n# target %s\n# hcr_abi %s\n# module_prefix %s\n"
+                  ch abi.canonical_target (March_tir.Hcr_abi.abi_id abi)
+                  (Option.value ~default:"" !hot_reload_prefix);
+                (* The standard library this artifact was compiled against:
+                   the digest of its source ([stdlib_source_hash], the same
+                   one that keys the CAS).  A stdlib actor has no dispatch
+                   slot (Hot_reload.is_slot_actor_dispatch), so a patch can
+                   never deliver a stdlib change; forge compares this line
+                   with the running build's and asks for a restart instead
+                   of activating nothing (deploy --plan, deploy hot). *)
+                (match stdlib_source_hash () with
+                 | Some (_, h, _) -> Printf.bprintf oc "# stdlib_hash %s\n" h
+                 | None -> ());
+                (* The patch's own dispatch slots ([Hot_reload.is_slot_fn]).
+                   A slot's impl_hash stops at a slot callee, so when the
+                   running build has no slot for one (a function new since
+                   its last restart: a patch calls its own copy of it),
+                   that callee's change is in no caller's hash; the deploy
+                   redeploys its callers to carry it
+                   (Cmd_deploy_hot.unslotted_carriers). *)
+                (match hr_config () with
+                 | Some cfg ->
+                   let slots =
+                     Hashtbl.fold (fun n _ acc ->
+                         if March_tir.Hot_reload.is_slot_fn cfg n then n :: acc else acc)
+                       hr_impl_hashes []
+                     |> List.sort String.compare in
+                   Printf.bprintf oc "# slots %s\n" (String.concat "," slots)
+                 | None -> ());
+              | Error _ ->
+                Printf.bprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
+             Buffer.add_string oc body;
              Buffer.contents oc
         end in
       let hcr_schemas =
@@ -6130,25 +6238,30 @@ let compile filename =
                    never reach here at all;
                  - --compile-so: adds -fPIC to every runtime object;
                  - MARCH_HTTP_EVLOOP=1: -DMARCH_HTTP_USE_EVLOOP is read from
-                   march_http.h, so it changes more than march_http_evloop.c;
-                 - --hot-reload with --signing-pubkey: bakes
-                   -DMARCH_SIGNING_PUBKEY_HEX into march_reload.c.
+                   march_http.h, so it changes more than march_http_evloop.c.
+               A --hot-reload server build is eligible except for
+               [per_build_runtime_srcs], the files that read its
+               --signing-pubkey and HCR-identity -Ds: those stay sources on
+               the final command line, which still carries both -Ds.
                MARCH_NO_RUNTIME_CACHE=1 forces the fallback for A/B checks. *)
+            let per_build_runtime_srcs =
+              if signing_define = "" && hcr_identity_flags = "" then []
+              else [ "march_sig.c"; "march_reload.c"; "march_shell.c"; "march_hcr_identity.c" ] in
             let runtime_objs =
               let eligible =
                 (match xtarget with March_tir.Llvm_emit.Native -> true | _ -> false)
                 && not !compile_so
                 && evloop_flag = ""
-                && signing_define = ""
-                && !hot_reload_prefix = None
                 && Sys.getenv_opt "MARCH_NO_RUNTIME_CACHE" = None
               in
               if not eligible then None
               else begin
-                let srcs =
+                let all_srcs =
                   runtime
                   :: (String.split_on_char ' ' runtime_extra_c
                       |> List.filter (fun s -> s <> "")) in
+                let per_build src = List.mem (Filename.basename src) per_build_runtime_srcs in
+                let srcs = List.filter (fun src -> not (per_build src)) all_srcs in
                 (* Byte-identical to the compile half of the command below,
                    minus link-only/user-FFI pieces: -L/-l are inert under -c
                    (and -Wno-unused-command-line-argument is already passed),
@@ -6166,7 +6279,14 @@ let compile filename =
                     opt_flag dbg_flag san_flag arch_cflags section_cflags
                     openssl_flags2 compress_flags2 blake3_flags2 cap_sandbox_define in
                 match March_cas.Runtime_archive.ensure ~cc:cc_driver ~cflags ~sources:srcs with
-                | Ok objs -> Some objs
+                | Ok objs ->
+                  (* Each per-build source back where it sat, between the
+                     objects, so the link order is the monolithic one. *)
+                  let rec weave srcs objs = match srcs, objs with
+                    | src :: srcs, _ when per_build src -> src :: weave srcs objs
+                    | _ :: srcs, o :: objs -> o :: weave srcs objs
+                    | [], _ | _ :: _, [] -> objs in
+                  Some (weave all_srcs objs)
                 | Error msg ->
                   (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                      Printf.eprintf
@@ -6182,8 +6302,8 @@ let compile filename =
                that never reaches TLS or Compress links neither member and,
                with as-needed, records neither library.  Executables only, with
                the cached objects (runtime_objs' own eligibility: native, no
-               hot reload, no --compile-so, no event-loop or signing build):
-               a hot-reload server keeps the whole runtime, because a patch
+               --compile-so, no event-loop build), and not a hot-reload
+               server ([rdynamic_flag]): that keeps the whole runtime, because a patch
                .so resolves every runtime symbol against it (design D6).
                Every other member stays a loose object; see
                Runtime_archive.ensure_opt_archive for why. *)
@@ -7140,6 +7260,12 @@ let () =
         March_parser.Parse.module_of_lexbuf lexbuf in
       let desugared = March_desugar.Desugar.desugar_module module_ast in
       let stdlib_decls = load_stdlib () in
+      (* No typecheck here, so erase straight after desugaring (§4.5). *)
+      let desugared =
+        erase_lemmas_in
+          ~whole:{ desugared with March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
+          desugared
+      in
       if not (is_shipped_stdlib_file path) then
         check_no_prelude_collision ~stdlib_decls desugared;
       let combined =
@@ -7295,6 +7421,8 @@ let () =
      " Print the D17 logic hash of every reflected user function (reflect-def) and of every reflected function a stage-2 query of the check unfolded (reflect-dep), and the contract hash of every user function (reflect-cdef) and of every function of another user file the file reaches through calls (reflect-cdep); changes no verdict");
     ("--reflect-parity", Arg.Set reflect_parity,
      " Compare each reflected user function's logic definition with the interpreter on generated inputs (boundary Ints included); exit 1 on a mismatch or an interpreter failure");
+    ("--lemma-test", Arg.Set lemma_test,
+     " Evaluate each lemma's theorem on generated inputs: an unproved lemma in the interpreter (a property test: exit 1 on a counterexample), an admitted one in the interpreter and a compiled program (exit 1 if it is false in either: a compiler or runtime bug)");
     ("--reflect-report", Arg.Set reflect_report,
      " Print one line per user function: reflected (its body usable in predicates, from phase 1 of reflection) or the first rule that blocks it; changes no verdict");
     ("--refine-audit", Arg.Set refine_audit,

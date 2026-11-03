@@ -314,7 +314,17 @@ let report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided expe
   Err.report env.errors
     { Err.severity = Error; span; message = headline;
       labels;
-      notes = occurs_note @ why_note @ mismatch_note @ session_hint @ common_hint @ same_name_note;
+      (* At most one "likely cause" hint: an occurs failure explains the
+         whole error on its own (stacking "did you mean to pass this as a
+         callback?" under it contradicted it), and the more specific
+         session / same-name explanations pre-empt the generic one. *)
+      notes =
+        (if occurs_violation then occurs_note
+         else
+           why_note @ mismatch_note
+           @ (match session_hint, same_name_note with
+              | (_ :: _ as h), _ | [], (_ :: _ as h) -> h
+              | [], [] -> common_hint));
       code = Err.Code.type_mismatch; fix = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).
@@ -650,16 +660,10 @@ let expanding_aliases : string list ref = ref []
     for an actor whose message constructors are in scope, and no real type of
     that name exists. *)
 let actor_msg_alias env (name : string) : string option =
-  let sfx = ".Msg" in
-  let n = String.length name and k = String.length sfx in
-  if n <= k || String.sub name (n - k) k <> sfx || lookup_type name env <> None
-  then None
-  else
-    let prefix = String.sub name 0 (n - k) in
-    let actor = match String.rindex_opt prefix '.' with
-      | None -> prefix
-      | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1) in
-    let target = actor ^ "_Msg" in
+  match actor_msg_alias_target name with
+  | None -> None
+  | Some _ when lookup_type name env <> None -> None
+  | Some target ->
     if StrMap.exists (fun _ cis ->
         List.exists (fun ci -> ci.ci_is_actor_msg && ci.ci_type = target) cis)
         env.ctors

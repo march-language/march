@@ -232,6 +232,11 @@ type ref_record = {
   ref_file : string;
   ref_line : int;
 }
+type bound_origin =
+  | Fn_decl
+  | Iface_method of { iface : string; impl_ty : string option }
+  | Impl_method of { iface : string; impl_ty : string }
+type fn_bound = { fb_caps : string list; fb_span : Ast.span; fb_site : Ast.span; fb_origin : bound_origin }
 type env = {
   vars : scheme StrMap.t;
   types : int StrMap.t;
@@ -307,11 +312,12 @@ type env = {
   body_cap_closures : (string, string list) Hashtbl.t;
   stdlib_fns : (string, unit) Hashtbl.t;
   ceiling_extra_roots : (string, unit) Hashtbl.t;
+  fn_scopes : (string, string) Hashtbl.t;
   fn_refs : (string, string list) Hashtbl.t;
   fn_row_bodies : (string, (string list * Ast.expr) list) Hashtbl.t;
   role_grants : (string * string, string list * Ast.span) Hashtbl.t;
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
-  fn_bound_points : (string, string list * Ast.span) Hashtbl.t;
+  fn_bound_points : (string, fn_bound) Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts : (session_ty ref * (string * session_ty) list) list ref;
   offer_labels :

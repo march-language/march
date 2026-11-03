@@ -182,6 +182,196 @@ let sorted ctx =
           if c <> 0 then c else compare a.message b.message)
     ctx.diagnostics
 
+(* ── Cascade suppression ──────────────────────────────────────────────
+
+   One root cause, one report (specs/plans/2026-11-02-diagnostics-depth-plan.md
+   §X3).  Each rule drops a diagnostic that only restates, or follows from,
+   another one in the same set:
+
+   - a [type_mismatch] on the exact span of a [callback_arity_mismatch]: the
+     arity error already says what is wrong with that argument;
+   - an [unused_binding] for `x` when an [unbound_variable] error suggests
+     `x`: the binder is unused because its use is misspelled;
+   - an [unused_binding] for `x` when [linear_never_used] reports `x`: the
+     linearity error says the same thing, and its `_x` fix does not satisfy
+     linearity;
+   - an [unbound_variable] for `y` on the arm of an [or_pattern_binding]
+     error naming `y`: the name is unbound because only some alternatives
+     bind it;
+   - [cap_grant] and [cap_root_broad] while any error outside the capability
+     checks exists: the grant `main` needs is computed from a program that
+     does not typecheck yet;
+   - a [cap_ceiling:X] when a [cap_needs:X] error reports the same missing
+     `needs` (it points at the use, the ceiling at the module header, and
+     the two carry the same fix), or when [import_cap_missing] reports the
+     same `X` for an import;
+   - an exact duplicate (same code, span and message), and a second
+     [type_mismatch] on the very span of an earlier one;
+   - a [session_state_mismatch] "expected a channel endpoint but got `a`"
+     while another session error exists: the channel's type was lost by the
+     earlier error, not by this call;
+   - a [mint_cap_invalid] inside the span of a [proof_cap_mint_private] /
+     [proof_cap_return]: the specific rule already reports that mint;
+   - while a protocol definition is invalid ([role_needs_invalid],
+     [protocol_invalid], [endpoints_label_invalid]), the type, constructor,
+     linearity and session errors: the generated role modules everything
+     else is checked against are built from the invalid protocol, so those
+     errors are its consequences (fix the protocol first);
+   - an error with no source position (line 0) beside a positioned one. *)
+let slug_of_code = Code.slug_of
+
+let first_backticked s =
+  match String.index_opt s '`' with
+  | None -> None
+  | Some a ->
+    (match String.index_from_opt s (a + 1) '`' with
+     | Some b -> Some (String.sub s (a + 1) (b - a - 1))
+     | None -> None)
+
+let contains_sub hay needle =
+  let hl = String.length hay and nl = String.length needle in
+  let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+  nl = 0 || go 0
+
+let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
+    (ds : diagnostic list) : diagnostic list =
+  (* Only a diagnostic the user is shown may suppress another: the driver
+     hides errors in stdlib files, and a hidden error suppressing the only
+     visible one would turn a rejected program into an accepted one. *)
+  let is_err d = d.severity = Error && visible d in
+  let has_slug sl d = slug_of_code d.code = sl in
+  (* The capability checks' codes: every code naming `cap` (`cap_needs`,
+     `import_cap_missing`, `root_cap_reference`, …) except
+     `linear_captured`, plus the grant and `needs` codes that don't. *)
+  let capability_slug sl =
+    (contains_sub sl "cap" && not (contains_sub sl "captured"))
+    || contains_sub sl "role_grant"
+    || List.mem sl [ Code.extern_needs_foreign; Code.io_not_allowed; Code.unused_needs ] in
+  let non_cap_error =
+    List.exists (fun d -> is_err d && not (capability_slug (slug_of_code d.code))) ds in
+  let arity_spans =
+    List.filter_map (fun d ->
+        if is_err d && has_slug Code.callback_arity_mismatch d then Some d.span else None) ds in
+  let unbound_msgs =
+    List.filter_map (fun d ->
+        if is_err d && has_slug Code.unbound_variable d then Some d.message else None) ds in
+  let or_pattern_msgs =
+    List.filter_map (fun d ->
+        if is_err d && has_slug Code.or_pattern_binding d then Some d else None) ds in
+  let never_used =
+    List.filter_map (fun d ->
+        if is_err d && has_slug Code.linear_never_used d then first_backticked d.message
+        else None) ds in
+  let import_missing_msgs =
+    List.filter_map (fun d ->
+        if is_err d && has_slug Code.import_cap_missing d then Some d.message else None) ds in
+  let proof_cap_spans =
+    List.filter_map (fun d ->
+        if is_err d && (has_slug Code.proof_cap_mint_private d || has_slug Code.proof_cap_return d)
+        then Some d.span else None) ds in
+  let protocol_invalid =
+    List.exists (fun d ->
+        is_err d
+        && List.mem (slug_of_code d.code)
+             [ Code.role_needs_invalid; Code.protocol_invalid; Code.endpoints_label_invalid ]) ds in
+  let protocol_follow_on sl =
+    List.mem sl [ Code.type_mismatch; Code.unknown_constructor; Code.unknown_qualified_name ]
+    || (String.length sl > 7 && String.sub sl 0 7 = "linear_")
+    || (String.length sl > 8 && String.sub sl 0 8 = "session_") in
+  let session_errors =
+    List.length (List.filter (fun d ->
+        is_err d && (let sl = slug_of_code d.code in
+                     String.length sl > 8 && String.sub sl 0 8 = "session_")) ds) in
+  let positioned_error = List.exists (fun d -> is_err d && d.span.start_line > 0) ds in
+  let within (inner : March_ast.Ast.span) (outer : March_ast.Ast.span) =
+    inner.file = outer.file
+    && (inner.start_line, inner.start_col) >= (outer.start_line, outer.start_col)
+    && (inner.end_line, inner.end_col) <= (outer.end_line, outer.end_col) in
+  let needs_codes =
+    List.filter_map (fun d ->
+        if is_err d && has_slug Code.cap_needs d then Some d.code else None) ds in
+  (* Exact duplicates go; [type_mismatch]es on one span merge into the first,
+     which takes the others' notes and labels: for `let? x = f()` one says
+     "the declared return type of `bad`" and the other states the `let?`
+     rule, and the reader needs both, once. *)
+  let ds =
+    let key d =
+      if slug_of_code d.code = Code.type_mismatch then (d.code, d.span, "")
+      else (d.code, d.span, d.message) in
+    let merged = Hashtbl.create 16 in
+    let order = ref [] in
+    List.iter (fun d ->
+        match Hashtbl.find_opt merged (key d) with
+        | None -> Hashtbl.replace merged (key d) d; order := key d :: !order
+        | Some b ->
+          let add xs ys = xs @ List.filter (fun y -> not (List.mem y xs)) ys in
+          Hashtbl.replace merged (key d)
+            { b with notes = add b.notes d.notes; labels = add b.labels d.labels;
+                     fix = (match b.fix with None -> d.fix | f -> f) }) ds;
+    List.rev_map (fun k -> Hashtbl.find merged k) !order in
+  let kept = List.filter (fun d ->
+      let sl = slug_of_code d.code in
+      not (
+        (sl = Code.type_mismatch && List.mem d.span arity_spans)
+        || (sl = Code.unused_binding
+            && (match first_backticked d.message with
+                | Some x ->
+                  let dym = "Did you mean `" ^ x ^ "`?" in
+                  List.exists (fun m -> contains_sub m dym) unbound_msgs
+                  || List.mem x never_used
+                | None -> false))
+        || (sl = Code.unbound_variable
+            && (match first_backticked d.message with
+                | Some y ->
+                  List.exists (fun (o : diagnostic) ->
+                      o.span.start_line <= d.span.start_line
+                      && d.span.start_line <= o.span.end_line + 1
+                      && List.exists (fun n -> contains_sub n ("`" ^ y ^ "`"))
+                           (o.message :: o.notes))
+                    or_pattern_msgs
+                | None -> false))
+        || ((sl = Code.cap_grant || sl = Code.cap_root_broad) && non_cap_error)
+        || (sl = Code.session_state_mismatch && session_errors > 1
+            && contains_sub d.message "expected a channel endpoint but got `")
+        || (sl = Code.mint_cap_invalid
+            && List.exists (fun o -> within d.span o) proof_cap_spans)
+        || (protocol_invalid && is_err d && protocol_follow_on sl)
+        || (is_err d && d.span.start_line = 0 && positioned_error)
+        || (sl = Code.cap_ceiling
+            && (match String.index_opt d.code ':' with
+                | Some i ->
+                  let cap = String.sub d.code (i + 1) (String.length d.code - i - 1) in
+                  List.exists (fun m -> contains_sub m ("`" ^ cap ^ "` is not declared"))
+                    import_missing_msgs
+                | None -> false))
+        || (sl = Code.cap_ceiling
+            && (match String.index_opt d.code ':' with
+                | Some i ->
+                  let arg = String.sub d.code i (String.length d.code - i) in
+                  List.mem (Code.cap_needs ^ arg) needs_codes
+                | None -> false))))
+    ds in
+  (* A dropped diagnostic's fix must not be lost: a [cap_ceiling:X] dropped
+     for an [import_cap_missing] about `X` hands its `needs X` insert to that
+     error when it has none. *)
+  let kept =
+    List.map (fun k ->
+        if is_err k && has_slug Code.import_cap_missing k && k.fix = None then
+          match List.find_opt (fun d ->
+              has_slug Code.cap_ceiling d && d.fix <> None
+              && not (List.memq d kept)
+              && (match String.index_opt d.code ':' with
+                  | Some i ->
+                    let cap = String.sub d.code (i + 1) (String.length d.code - i - 1) in
+                    contains_sub k.message ("`" ^ cap ^ "` is not declared")
+                  | None -> false)) ds with
+          | Some d -> { k with fix = d.fix }
+          | None -> k
+        else k) kept in
+  (* Every rule names a visible error that stays, so this cannot fire; it
+     guards the exit code against a future rule that forgets to. *)
+  if List.exists is_err ds && not (List.exists is_err kept) then ds else kept
+
 (** Render a diagnostic with source context.
     Shows the relevant source line with a caret underline pointing at the span.
 

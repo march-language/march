@@ -310,6 +310,116 @@ let render results name =
   in
   (src, human, r.json)
 
+(* The internals lint (specs/plans/2026-11-02-diagnostics-depth-plan.md §X4):
+   a message must not name what the program never wrote.  Scanned: every
+   backticked token on a prose line of the rendered output (source snippet
+   lines, `N | …`, and caret lines echo the program and are skipped).
+   Flagged, word by word, unless the word occurs in the program's own source:
+   a `$`-prefixed synthetic binder (`$cb_arg`, `$elem`), a generated session
+   state (`S_…`), a generated actor message type (`…_Msg`), and the list
+   constructors `Cons` / `Nil`.  Known leaks still to fix are listed in
+   [internals-allowlist.txt] as `<case> <token>`; that file may only shrink:
+   a listed leak that no longer occurs fails too, so a fix removes its line. *)
+let backticked line =
+  let rec go i acc =
+    match String.index_from_opt line i '`' with
+    | None -> List.rev acc
+    | Some a ->
+      (match String.index_from_opt line (a + 1) '`' with
+       | None -> List.rev acc
+       | Some b -> go (b + 1) (String.sub line (a + 1) (b - a - 1) :: acc))
+  in
+  go 0 []
+
+let is_snippet_line l =
+  let t = String.trim l in
+  t = ""
+  || String.for_all (fun c -> c = '^' || c = ' ' || c = '~') t
+  || (match String.index_opt t '|' with
+      | Some i when i > 0 ->
+        String.for_all (fun c -> (c >= '0' && c <= '9') || c = ' ')
+          (String.sub t 0 i)
+      | _ -> false)
+
+let internal_words ~src tok =
+  let words =
+    String.split_on_char ' ' tok
+    |> List.concat_map (String.split_on_char '(')
+    |> List.concat_map (String.split_on_char '.')
+    |> List.concat_map (String.split_on_char ',')
+    |> List.concat_map (String.split_on_char ')')
+  in
+  let n = String.length in
+  List.filter (fun w ->
+      ((n w > 1 && w.[0] = '$')
+       || (n w > 2 && String.sub w 0 2 = "S_")
+       || (n w > 4 && String.sub w (n w - 4) 4 = "_Msg")
+       || w = "Cons" || w = "Nil")
+      && not (contains src w))
+    words
+
+(* Per word, not per token: a role the program names `Cons` makes
+   `Stream.Cons` fine. *)
+let internal_leaks ~src (rendered : string) : string list =
+  lines_of rendered
+  |> List.filter (fun l -> not (is_snippet_line l))
+  |> List.concat_map backticked
+  |> List.concat_map (internal_words ~src)
+  |> List.sort_uniq compare
+
+let internals_allowlist = lazy (
+  let f = Filename.concat (errors_dir ()) "internals-allowlist.txt" in
+  if not (Sys.file_exists f) then []
+  else
+    lines_of (read_file f)
+    |> List.filter_map (fun l ->
+        let l = String.trim l in
+        if l = "" || l.[0] = '#' then None
+        else match String.index_opt l ' ' with
+          | Some i ->
+            Some (String.sub l 0 i,
+                  String.trim (String.sub l (i + 1) (String.length l - i - 1)))
+          | None -> None))
+
+let check_internals ~src name human =
+  let leaks = internal_leaks ~src human in
+  let allowed =
+    List.filter_map (fun (c, t) -> if c = name then Some t else None)
+      (Lazy.force internals_allowlist) in
+  (match List.filter (fun t -> not (List.mem t allowed)) leaks with
+   | [] -> ()
+   | ts ->
+     Alcotest.failf "%s: the message names %s, which the program never \
+                     wrote (internals lint, see run_errors.ml)" name
+       (String.concat ", " (List.map (Printf.sprintf "`%s`") ts)));
+  List.iter (fun t ->
+      if not (List.mem t leaks) then
+        Alcotest.failf "%s: `%s` no longer leaks; remove `%s %s` from \
+                        test/errors/internals-allowlist.txt" name t name t)
+    allowed
+
+(* A machine fix must fix (plan §X4): a case whose fixes leave the program
+   still rejected fails, unless its source says why with
+   `-- EXPECT-FIX-PARTIAL: <reason>` (the program has a second, independent
+   error the fix is not about).  A case carrying the marker whose fixes do
+   reach exit 0 fails too, so a stale marker can't hide a later regression. *)
+let fix_partial_marker = "-- EXPECT-FIX-PARTIAL:"
+
+let check_fix_fixes ~src name (r : result) =
+  let partial = contains src fix_partial_marker in
+  match r.after with
+  | Some (code, _) when code <> 0 && not partial ->
+    Alcotest.failf "%s: applying its machine fixes leaves the program rejected \
+                    (exit %d). Fix the fix, or mark the case with %S and the \
+                    reason the program still fails" name code fix_partial_marker
+  | Some (0, _) when partial ->
+    Alcotest.failf "%s: its fixes now make the program check; remove its %S line"
+      name fix_partial_marker
+  | None when partial ->
+    Alcotest.failf "%s: it offers no machine fix; remove its %S line"
+      name fix_partial_marker
+  | _ -> ()
+
 let check results name () =
   let (src, human, json) = render (Lazy.force results) name in
   let base = Filename.concat (errors_dir ()) name in
@@ -336,13 +446,28 @@ let check results name () =
     in
     cmp "rendered diagnostics" exp_h human;
     cmp "--check-json" exp_j json
-  end
+  end;
+  check_internals ~src name human;
+  check_fix_fixes ~src name (Hashtbl.find (Lazy.force results) name)
+
+(* [ERRORS_ONLY=cap_,linear_used_twice_6] runs only the cases whose name
+   starts with one of the comma-separated prefixes: the whole corpus is a
+   few minutes on an idle machine, and a change that can reach a few codes
+   needs only those during the edit loop.  The full run still gates. *)
+let only =
+  match Sys.getenv_opt "ERRORS_ONLY" with
+  | None | Some "" -> None
+  | Some s -> Some (List.filter (( <> ) "") (String.split_on_char ',' s))
 
 let corpus () =
   Sys.readdir (errors_dir ())
   |> Array.to_list
   |> List.filter (fun f -> Filename.check_suffix f ".march")
   |> List.map Filename.remove_extension
+  |> List.filter (fun n ->
+      match only with
+      | None -> true
+      | Some ps -> List.exists (fun prefix -> String.starts_with ~prefix n) ps)
   |> List.sort compare
 
 let () =

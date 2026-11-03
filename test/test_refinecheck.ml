@@ -12979,7 +12979,7 @@ module Audit_fixture = struct
         iface_param = nm "a";
         iface_superclasses = [];
         iface_assoc_types = [];
-        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None } ] }
+        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None; md_needs = None } ] }
     in
     (* [DImpl]: an [impl] block for a DIFFERENT interface than [Runner]
        above, so its [Impl_ty] site and its method's [Param]/[Return] sites
@@ -13253,7 +13253,7 @@ let audit_arrow_signature_suite =
             iface_param = nm "a";
             iface_superclasses = [];
             iface_assoc_types = [];
-            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None } ] }
+            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None; md_needs = None } ] }
         in
         let labels = Audit_fixture.labels [ A.DInterface (idf, dummy) ] in
         Alcotest.(check (list (triple string string (pair string int))))
@@ -23502,22 +23502,26 @@ let module_qualified_measure_and_sort_suite =
         ""
       ]
   in
+  (* Since 2026-11-02 (constructor registry, review round 2) both are SKIPS:
+     the typechecker conflates two types of one short name (`Tree` here and
+     the stdlib's `OrderedMap.Tree`), so a value typed `Tree` may be either
+     declarant's and the measure over it is not axiomatised (its arms'
+     constructors resolve through a conflated type).  Both proofs this suite
+     used to pin were therefore not safe; see
+     specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md and
+     specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md.
+     What still holds, and is pinned: the collision makes neither call a
+     proof nor a violation. *)
   [ gated
       "a user's own top-level Tree, colliding with the real stdlib OrderedMap.Tree \
-       once its whole stdlib is prepended, proves a literal member"
+       once its whole stdlib is prepended, is skipped, not proved (short-name conflation)"
       (fun () ->
-        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
+        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
           (ledger_counts3_with_ordered_map (fixture ~pred:"member(3, tree_elts(_))")));
 
-    gated "...and refutes a literal that is not a member, not merely skipping" (fun () ->
-        (* Refuted, but a set-valued measure has no interpreter meaning, so
-           the refutation cannot be REPRODUCED and is a `refuted-unconfirmed`
-           skip rather than a violation (a Tier 2 violation now always comes
-           with an error; see [tier2_ledger_agrees_suite]).  The reason is what
-           still distinguishes "refuted" from "merely skipping". *)
+    gated "...and a literal that is not a member is skipped too, not proved" (fun () ->
         Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
-          (ledger_counts3_with_ordered_map (fixture ~pred:"member(99, tree_elts(_))"));
-        Alcotest.(check bool) "the skip is a refutation" true (has_refuted_unconfirmed ()));
+          (ledger_counts3_with_ordered_map (fixture ~pred:"member(99, tree_elts(_))")));
   ]
 
 (* ── Generic set-measure instances (P3, 2026-09-15) ────────────────────────
@@ -24789,7 +24793,7 @@ let infer_fixpoint_suite =
         (* Until specs/progress/2026-10-24-refine-demand-chains.md this pinned
            the gap: b's return not proposed, a not-true rejection at b. *)
         infer_run
-          (m "C1" "  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn go() : Int do need_pos(b(3)) end\n")
+          (m "C1" "  @[opaque]\n  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn go() : Int do need_pos(b(3)) end\n")
           (fun r ->
             Alcotest.check sp "a and b" [ ("a", "{Int | _ > 0}"); ("b", "{Int | _ > 0}") ] (List.sort compare (props r));
             Alcotest.(check bool) "no not-true rejection for b" false
@@ -27188,7 +27192,7 @@ let demand_chains_suite =
            test saw no callee contract). *)
         let sp = Alcotest.(list (pair string string)) in
         infer_run
-          (m "  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn main() : Int do need_pos(b(3)) end\n")
+          (m "  @[opaque]\n  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn main() : Int do need_pos(b(3)) end\n")
           (fun r ->
             Alcotest.check sp "a and b" [ ("a", "{Int | _ > 0}"); ("b", "{Int | _ > 0}") ]
               (List.sort compare (props r))));
@@ -28923,6 +28927,9 @@ let () =
       ("reflect-unfold", Test_refine_unfold.suite @ Test_refine_unfold.soundness @ Test_refine_unfold.review @ Test_refine_unfold.review2 @ Test_refine_unfold.review3 @ Test_refine_unfold.identical);
       ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr);
       ("reflect-parity", Test_refine_reflect1b.parity);
+      ("reflect-fuel", Test_refine_fuel.tests);
+      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests);
+      ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);
       ("termination-ih", Test_refine_term.ih_suite);

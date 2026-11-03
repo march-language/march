@@ -321,6 +321,21 @@ prebuilt_current() {
 }
 
 compile() {
+  # Several nodes: compiled at once, each from its own directory (the
+  # compiler's cwd holds its CAS, which concurrent compiles must not share).
+  # A failing one has already reported itself through fail.
+  if [ "$#" -gt 1 ]; then
+    local m p pids="" bad=0
+    for m in "$@"; do
+      [ -x "$work/node_$m" ] && continue
+      mkdir -p "$work/build_$m"
+      (cd "$work/build_$m" && compile "$m") &
+      pids="$pids $!"
+    done
+    for p in $pids; do wait "$p" || bad=1; done
+    [ "$bad" = 0 ] || exit 1
+    return
+  fi
   local n=$1
   [ -x "$work/node_$n" ] && return
   # Compile a COPY: `march --compile` writes <source>.ll beside the source,
@@ -339,6 +354,33 @@ compile() {
   # shellcheck disable=SC2086 # the flags are words, split on purpose
   "$MARCH" --compile ${!flags_var:-} -o "$work/node_$n" "$work/node_$n.march" > "$work/compile_$n.log" 2>&1 \
     || { cat "$work/compile_$n.log" >&2; fail "node_$n.march did not compile"; }
+}
+
+# bg_build <dir> <log> <what> <command...>: run a build in <dir> in the
+# background, its output in <log>; wait_builds joins every one started and
+# fails naming each that failed, after printing its log.  For a scenario's
+# independent hot-reload builds (a baseline and its patches), which run ~1
+# min each on CI and were the serial bulk of the control_* and hcr_*
+# scenarios.  At most TWO_NODE_JOBS (default 4) at once: one takes ~1.5 GB.
+bg_pids=(); bg_logs=(); bg_whats=()
+bg_running() {
+  local p n=0
+  for p in ${bg_pids[@]+"${bg_pids[@]}"}; do kill -0 "$p" 2>/dev/null && n=$((n + 1)); done
+  echo "$n"
+}
+bg_build() {
+  local d=$1 log=$2 what=$3; shift 3
+  while [ "$(bg_running)" -ge "${TWO_NODE_JOBS:-4}" ]; do sleep 0.2; done
+  (cd "$d" && "$@") > "$log" 2>&1 &
+  bg_pids+=("$!"); bg_logs+=("$log"); bg_whats+=("$what")
+}
+wait_builds() {
+  local i failed=""
+  for i in ${bg_pids[@]+"${!bg_pids[@]}"}; do
+    wait "${bg_pids[$i]}" || { cat "${bg_logs[$i]}" >&2; failed="$failed ${bg_whats[$i]}"; }
+  done
+  bg_pids=(); bg_logs=(); bg_whats=()
+  [ -z "$failed" ] || fail "did not build:$failed"
 }
 
 # Did the node-b just launched die on its bind()?  True only for that: a
@@ -372,7 +414,10 @@ start_node() {
   # bug (cert_direct, 2026-10-02). Every COMPILE_FLAGS_<x> is set before a
   # scenario's first start_node, and compile is once-only, so this changes
   # no node's binary, only when it is built.
-  for m in a b c; do [ -f "$dir/node_$m.march" ] && compile "$m"; done
+  local nodes=""
+  for m in a b c; do [ -f "$dir/node_$m.march" ] && nodes="$nodes $m"; done
+  # shellcheck disable=SC2086 # one word per node
+  compile $nodes
   compile "$n"
   if [ "$n" = b ]; then
     local tries=1

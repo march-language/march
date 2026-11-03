@@ -478,11 +478,15 @@ let get_tvar_id = function
   | _ -> 0
 
 (** Build an [Ast.interface_def] for a builtin interface with a single
-    type parameter named "a". [methods] is a list of (method_name, surface_ty). *)
+    type parameter named "a". [methods] is a list of (method_name, surface_ty).
+    Every method is bounded by `needs ()`: showing, comparing, ordering and
+    hashing a value never perform I/O, so every impl is checked to be free of
+    it (specs/plans/2026-11-02-interface-needs-bounds.md, decided 2026-11-02).
+    The bound has no source span; [check_fn_bounds] reports at the impl. *)
 let mk_builtin_iface name methods =
   let mk_n txt = { Ast.txt; span = Ast.dummy_span } in
   let mk_method (mname, mty) =
-    { Ast.md_name = mk_n mname; md_ty = mty; md_default = None }
+    { Ast.md_name = mk_n mname; md_ty = mty; md_default = None; md_needs = Some ([], Ast.dummy_span) }
   in
   { Ast.iface_name        = mk_n name;
     iface_param           = mk_n "a";
@@ -2095,6 +2099,32 @@ let builtin_ctors : (string * ctor_info) list =
     ("Crash",       crash_ci);  ("DownReason.Crash",  crash_ci);
     ("Down",        down_ci);   ("Down.Down",         down_ci);
   ]
+
+(* Every type name the base environment can produce: the built-in type
+   table, the built-in constructors' types, and every [TCon] head anywhere in
+   a built-in signature (`CancelToken`, `TimerRef`, … are named only there).
+   Derived, not hand-kept, so a new builtin signature is covered by
+   construction. *)
+let builtin_type_names : string list =
+  let acc = Hashtbl.create 64 in
+  let add n = Hashtbl.replace acc n () in
+  let rec walk (t : ty) =
+    match t with
+    | TCon (n, args) -> add n; List.iter walk args
+    | TArrow (a, b) -> walk a; walk b
+    | TTuple ts -> List.iter walk ts
+    | TRecord fs -> List.iter (fun (_, t) -> walk t) fs
+    | TLin (_, t) | TRefine (t, _, _) -> walk t
+    | TNatOp (_, a, b) -> walk a; walk b
+    | TVar r -> (match !r with Link t -> walk t | Unbound _ -> ())
+    | TNat _ | TChan _ | TError -> ()
+  in
+  let scheme = function Mono t -> walk t | Poly (_, _, t) -> walk t in
+  List.iter (fun (n, _) -> add n) builtin_types;
+  List.iter (fun (_, ci) -> add ci.ci_type) builtin_ctors;
+  List.iter (fun (_, sc) -> scheme sc) builtin_bindings;
+  List.iter (fun (_, sc) -> scheme sc) builtin_interface_bindings;
+  List.sort compare (Hashtbl.fold (fun n () l -> n :: l) acc [])
 
 let base_env errors type_map =
   let env = make_env errors type_map in

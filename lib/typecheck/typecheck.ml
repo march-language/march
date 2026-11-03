@@ -1490,8 +1490,34 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
         | Some m, Some (what, n, span) when n >= 1 && n <> m ->
           let plural k = if k = 1 then "" else "s" in
           let vars = List.init n (fun i -> String.make 1 (Char.chr (97 + i mod 26))) in
+          (* The parameter's declared arrow depth: `f : b -> a -> b` (a fold)
+             is 2, `pred : a -> Bool` (a filter) is 1.  Only a parameter
+             whose type is itself curried at least [n] deep can take the
+             curried rewrite; for `pred` the fix is a function of [m]
+             parameters, and suggesting `fn a -> fn b -> …` was wrong. *)
+          let param_depth =
+            let sch_ty = match lookup_var fname env with
+              | Some (Mono t) | Some (Poly (_, _, t)) -> Some t
+              | None -> None in
+            let rec nth_param t k =
+              match repr t with
+              | TArrow (a, b) -> if k = 0 then Some a else nth_param b (k - 1)
+              | _ -> None in
+            let rec depth t =
+              match repr t with TArrow (_, b) -> 1 + depth b | _ -> 0 in
+            let idx =
+              let rec find i = function
+                | [] -> None
+                | (p, _) :: rest -> if p = pname then Some i else find (i + 1) rest in
+              find 0 ps in
+            match sch_ty, idx with
+            | Some t, Some i -> Option.map depth (nth_param t i)
+            | _ -> None
+          in
+          let curried_param =
+            match param_depth with Some d -> d >= n | None -> true in
           let hint =
-            if m = 1 && n >= 2 then
+            if m = 1 && n >= 2 && curried_param then
               Printf.sprintf
                 "`%s` applies `%s` one argument at a time (a curried \
                  function, `a -> b -> …`), and March has no partial \
@@ -1503,6 +1529,10 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
                      (String.concat " -> fn " vars) v.txt (String.concat ", " vars)
                  | _ ->
                    Printf.sprintf "fn %s -> …" (String.concat " -> fn " vars))
+            else if m = 1 && n >= 2 then
+              Printf.sprintf
+                "`%s` calls `%s` with one argument, so pass a function of \
+                 one parameter:\n    fn x -> …" fname pname
             else
               Printf.sprintf
                 "March functions are not curried: a function is always \
@@ -1779,7 +1809,26 @@ let rec infer_expr env (e : Ast.expr) : ty =
                 | Some sch -> Some sch
                 | None -> try_suffix rest)
            in
-           (match try_suffix name.txt with
+           (* A single-qualifier `Q.member` whose `Q` names nothing at all
+              (no registry module — the guard above —, no type, no in-file
+              module, no `Q.`-prefixed binding) is a misspelled module, not a
+              path to strip: stripping `Lsit.` off `Lsit.length` resolved the
+              builtin `length`, so the typo checked clean and failed only at
+              run time with "unbound variable: Lsit.length".  A qualifier
+              that names a TYPE keeps the fallback: `Int.to_string(n)` is
+              how programs spell the bare `to_string` on an Int. *)
+           let unknown_single_qualifier =
+             match split_qualified name.txt with
+             | Some (q, member) when not (String.contains member '.') ->
+               let prefix = q ^ "." in
+               not (StrMap.mem q env.types)
+               && not (StrMap.mem q env.records)
+               && not (StrMap.mem q env.ty_aliases)
+               && not (StrMap.mem q env.local_mods)
+               && not (StrMap.exists (fun k _ -> String.starts_with ~prefix k) env.vars)
+             | _ -> false
+           in
+           (match (if unknown_single_qualifier then None else try_suffix name.txt) with
             | Some sch -> instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
             | None ->
               let msg =
@@ -1792,7 +1841,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   | None   -> base
                 end
               in
-              Err.error ~code:Err.Code.unbound_variable env.errors ~span:name.span msg;
+              let code =
+                if String.contains name.txt '.' then Err.Code.unknown_qualified_name
+                else Err.Code.unbound_variable in
+              Err.error ~code env.errors ~span:name.span msg;
               TError))
 
     (* ── Type annotations ─────────────────────────────────────────── *)
@@ -4491,7 +4543,22 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
 (** Emit unused-variable warnings for fn params not referenced in the body.
     The wildcard [_] and names starting with [_] are silently ignored. *)
 let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_span =
-  let used = free_vars_expr [] body in
+  (* A parameter a refinement names is used: in
+     `fn f(t : {Tree | size(t) < 1})` the predicate reads `t`, and the
+     `_t` rename this warning offered left `size(t)` unbound. *)
+  let rec refine_uses (t : Ast.ty) =
+    match t with
+    | Ast.TyRefine (b, _, pred) -> free_vars_expr [] pred @ refine_uses b
+    | Ast.TyCon (_, ts) | Ast.TyTuple ts -> List.concat_map refine_uses ts
+    | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> refine_uses a @ refine_uses b
+    | Ast.TyRecord fs -> List.concat_map (fun (_, t) -> refine_uses t) fs
+    | Ast.TyLinear (_, t) -> refine_uses t
+    | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> []
+  in
+  let param_tys = List.filter_map (function
+      | Ast.FPNamed p | Ast.FPDefault (p, _) -> p.param_ty
+      | Ast.FPPat _ -> None) params in
+  let used = free_vars_expr [] body @ List.concat_map refine_uses param_tys in
   (* A capability value is a runtime-erased grant token: it is normal, and
      often correct, for it never to be mentioned in the body. Warning on it
      made the right code noisy and pushed users to spell every grant `_cap`.
@@ -5045,8 +5112,11 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                | Ast.FPPat _ -> [])
                clause.fc_params param_tys));
 
-      (* Warn about unrestricted params not referenced in the body *)
-      warn_unused_params env clause.fc_params clause.fc_body fn_span;
+      (* Warn about unrestricted params not referenced in the body.  Not for
+         a `@[lemma]`: it never runs, and a parameter its theorem names is
+         the point of it (reflection design §4.1). *)
+      if not (List.mem "lemma" def.fn_attrs) then
+        warn_unused_params env clause.fc_params clause.fc_body fn_span;
 
       (* Proof-cap forge value restriction across fn boundaries: if this fn's
          body is (or launders) a [cap_narrow] result (e.g.
@@ -6138,7 +6208,7 @@ let register_actor_ctors ~ci_module env (name : Ast.name) (actor : Ast.actor_def
             Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
                         span = p.param_name.span }
         ) h.ah_params in
-      let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+      let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                  ci_arg_tys = arg_tys; ci_module; ci_vis = Ast.Public;
                  ci_is_actor_msg = true } in
       { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
@@ -7897,11 +7967,7 @@ let cap_reach_chain ?own_caps ?fn_refs (env : env) ~(from : string) ~(cap : stri
       let path = if k = from then path else path @ [ k ] in
       if k <> from && holds k then result := Some path
       else
-        let prefix =
-          match String.rindex_opt k '.' with
-          | Some i -> String.sub k 0 (i + 1)
-          | None -> ""
-        in
+        let prefix = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes k in
         List.iter
           (fun r ->
              let known n =
@@ -7930,45 +7996,193 @@ let cap_reach_chain ?own_caps ?fn_refs (env : env) ~(from : string) ~(cap : stri
      caller can be charged for what it does; a bound short of all of `IO` is
      refused rather than certified. *)
 let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env : env) : unit =
+  (* [rows] is the caps-only solve.  A bound point's [unknown] flag is
+     computed by walking only what that point reaches, classifying only the
+     bodies on the way: every program has bound points (the stdlib's impls of
+     the built-in Show/Eq/Ord/Hash), and solving rows for the whole program
+     made every typecheck ~3x slower. *)
+  let seed_unknown =
+    let memo = Hashtbl.create 64 in
+    fun k ->
+      match Hashtbl.find_opt memo k with
+      | Some b -> b
+      | None ->
+        let b =
+          match Hashtbl.find_opt env.fn_row_bodies k with
+          | Some bodies -> (March_caps.Cap_rows.seed_of_bodies bodies).March_caps.Cap_rows.sd_unknown
+          | None -> false
+        in
+        Hashtbl.replace memo k b;
+        b
+  in
+  let with_unknown ~rows ~refs =
+    let out = Hashtbl.create (Hashtbl.length env.fn_bound_points) in
+    Hashtbl.iter
+      (fun qname _ ->
+         let row =
+           Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows qname)
+         in
+         let unknown =
+           March_caps.Cap_rows.reaches_unknown ~scopes:env.fn_scopes ~known:rows ~refs
+             ~seed_unknown qname
+         in
+         Hashtbl.replace out qname { row with March_caps.Cap_rows.unknown })
+      env.fn_bound_points;
+    out
+  in
+  let violates bound (row : March_caps.Cap_rows.row) =
+    (row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound))
+    || List.exists
+         (fun c -> cap_subsumes "IO" c && not (List.exists (fun b -> cap_subsumes b c) bound))
+         row.March_caps.Cap_rows.caps
+  in
+  (* A generic impl reaches every impl of its method through the dispatch
+     node, so one impl over its interface's bound would be reported again at
+     each generic impl.  Judge every bound against rows solved WITHOUT edges
+     into a violating impl or default body: a violation reached only through
+     another one is that one's, and is reported there, once.  Callers' rows
+     (the module ceiling, [main]'s grant) are untouched. *)
+  let bound_rows = with_unknown ~rows ~refs:env.fn_refs in
+  let violators = Hashtbl.create 8 in
   Hashtbl.iter
-    (fun qname (bound, span) ->
+    (fun qname { fb_caps; fb_origin; _ } ->
+       match fb_origin with
+       | Iface_method _ | Impl_method _ ->
+         let row =
+           Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt bound_rows qname)
+         in
+         if violates fb_caps row then Hashtbl.replace violators qname ()
+       | Fn_decl -> ())
+    env.fn_bound_points;
+  let rows, chain_refs =
+    if Hashtbl.length violators = 0 then (bound_rows, env.fn_refs)
+    else begin
+      let refs = Hashtbl.create (Hashtbl.length env.fn_refs) in
+      Hashtbl.iter
+        (fun k rs -> Hashtbl.replace refs k (List.filter (fun r -> not (Hashtbl.mem violators r)) rs))
+        env.fn_refs;
+      let rows = fn_capability_rows_tbl ~with_rows:false { env with fn_refs = refs } in
+      (with_unknown ~rows ~refs, refs)
+    end
+  in
+  Hashtbl.iter
+    (fun qname { fb_caps = bound; fb_span; fb_site; fb_origin } ->
        let row =
          Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows qname)
        in
+       (* A built-in interface's bound has no source: report at the impl. *)
+       let builtin = fb_span = Ast.dummy_span in
+       let span = if builtin then fb_site else fb_span in
        let leaf =
          match String.rindex_opt qname '.' with
          | Some i -> String.sub qname (i + 1) (String.length qname - i - 1)
          | None -> qname
        in
        let shown = if bound = [] then "()" else String.concat ", " bound in
+       (* Who is bounded, and by what: a function by its own clause, an impl
+          method or default body by its interface's.  The [Fn_decl] wording is
+          phase 1's, unchanged. *)
+       let who, by =
+         match fb_origin with
+         | Fn_decl -> (Printf.sprintf "`%s`" leaf, Printf.sprintf "`needs %s`" shown)
+         | Iface_method { iface; impl_ty = Some ty } ->
+           ( Printf.sprintf "`%s` in `impl %s(%s)`" leaf iface ty,
+             Printf.sprintf "%sinterface `%s`'s `needs %s`"
+               (if builtin then "built-in " else "") iface shown )
+         | Iface_method { iface; impl_ty = None } ->
+           ( Printf.sprintf "the default `%s` of interface `%s`" leaf iface,
+             Printf.sprintf "`needs %s`" shown )
+         | Impl_method { iface; impl_ty } ->
+           ( Printf.sprintf "`%s` in `impl %s(%s)`" leaf iface impl_ty,
+             Printf.sprintf "its own `needs %s`" shown )
+       in
        let covered c = List.exists (fun b -> cap_subsumes b c) bound in
        if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) then
          Err.error ~code:Err.Code.cap_bound env.errors ~span
            (Printf.sprintf
-              "`%s` is bounded by `needs %s`, but its body invokes a function \
+              "%s is bounded by %s, but its body invokes a function \
                value whose origin the capability analysis cannot trace (one taken \
                from a record field, a list or a ref), so nothing can be charged \
-               for what that call does and the bound cannot be certified.\n\
-               help: pass the function in as a parameter or call it by name, or \
-               bound `%s` by `needs IO`."
-              leaf shown leaf);
+               for what that call does and the bound cannot be certified.\n%s"
+              who by
+              (match fb_origin with
+               | Fn_decl ->
+                 Printf.sprintf
+                   "help: pass the function in as a parameter or call it by name, or \
+                    bound `%s` by `needs IO`." leaf
+               | Iface_method _ | Impl_method _ ->
+                 "help: pass the function in as a parameter or call it by name."));
        List.iter
          (fun c ->
             if not (cap_subsumes "IO" c) || covered c then ()
             else
               let via =
-                match cap_reach_chain env ~from:qname ~cap:c with
+                match cap_reach_chain ~fn_refs:chain_refs env ~from:qname ~cap:c with
                 | Some (_ :: _ as chain) ->
                   Printf.sprintf " (via %s)" (render_cap_chain chain)
                 | _ -> ""
               in
+              let help =
+                match fb_origin with
+                | Fn_decl -> Printf.sprintf "help: add `%s` to the bound, or remove the use." c
+                | Iface_method _ ->
+                  "help: remove the use; widening the interface's bound changes it \
+                   for every impl and every caller."
+                | Impl_method { iface; _ } ->
+                  Printf.sprintf
+                    "help: remove the use, or widen the impl's bound (it must stay \
+                     within interface `%s`'s)." iface
+              in
               Err.error ~code:Err.Code.cap_bound env.errors ~span
-                (Printf.sprintf
-                   "`%s` is bounded by `needs %s`, but reaches `%s`%s.\n\
-                    help: add `%s` to the bound, or remove the use."
-                   leaf shown c via c))
+                (Printf.sprintf "%s is bounded by %s, but reaches `%s`%s.\n%s"
+                   who by c via help))
          (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
     env.fn_bound_points
+
+(** A capability reach chain as source spans (specs/plans/
+    2026-11-02-diagnostics-depth-plan.md §X7): for [from :: chain], each hop
+    `k → r` becomes a label on the call to `r` inside `k`, and the last
+    function's call to a builtin needing [cap] is returned as the USE, the
+    span a reader should look at first.  Every span must sit in [file] (the
+    root's file): a span in a stdlib file is hidden by the driver, and a
+    primary span there would hide the whole error.  [None] when any hop or
+    the use can't be found, so the caller keeps its prose chain. *)
+let cap_chain_trace (decls : Ast.decl list) ~(file : string) ~(from : string)
+    ~(chain : string list) ~(cap : string) : (Ast.span * Err.label list) option =
+  let bare n = match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
+  let rec fns acc = function
+    | [] -> acc
+    | Ast.DFn (def, _) :: rest -> fns ((def.Ast.fn_name.txt, def) :: acc) rest
+    | Ast.DMod (_, _, inner, _) :: rest -> fns (fns acc inner) rest
+    | _ :: rest -> fns acc rest in
+  let table = List.rev (fns [] decls) in
+  let calls_of k =
+    match List.assoc_opt (bare k) table with
+    | None -> []
+    | Some def ->
+      List.concat_map (fun c -> List.rev (March_ast.Calls.calls_in_expr [] c.Ast.fc_body))
+        def.Ast.fn_clauses in
+  let in_file (sp : Ast.span) = sp.Ast.file = file in
+  let rec hops acc = function
+    | k :: (r :: _ as rest) ->
+      (match List.find_opt (fun (n, sp, _) -> bare n = bare r && in_file sp) (calls_of k) with
+       | Some (_, sp, _) ->
+         hops ({ Err.lbl_span = sp;
+                 lbl_message = Printf.sprintf "`%s` calls `%s` here" (bare k) (bare r) } :: acc)
+           rest
+       | None -> None)
+    | [ last ] ->
+      (match List.find_opt (fun (n, sp, _) ->
+           in_file sp
+           && (match List.assoc_opt n builtin_cap_table with
+               | Some c -> cap_subsumes cap c || cap_subsumes c cap
+               | None -> false))
+           (calls_of last) with
+       | Some (_, sp, _) -> Some (sp, List.rev acc)
+       | None -> None)
+    | [] -> None in
+  hops [] (from :: chain)
 
 let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
   (* [rows] lets the caller hand in an already-solved row table. Stage C made
@@ -8152,8 +8366,29 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
            let param_hint =
              Printf.sprintf "_cap_%s : Cap(%s)" (String.lowercase_ascii leaf) c
            in
-           Err.error ~code:Err.Code.cap_grant_exceeded env.errors ~span
-             (Printf.sprintf
+           let chain = cap_reach_chain env ~from:"main" ~cap:c in
+           (* §X7: with a trace, the error points at the use and labels each
+              call on the way and `main`'s grant; without one (a hop through
+              a function value, or a use in another file), it stays on
+              `main` with the prose chain. *)
+           let trace =
+             match chain with
+             | Some (_ :: _ as ch) ->
+               cap_chain_trace decls ~file:span.Ast.file ~from:"main" ~chain:ch ~cap:c
+             | _ -> None in
+           let primary, labels =
+             match trace with
+             | Some (use_sp, hop_labels) ->
+               use_sp,
+               hop_labels
+               @ [ { Err.lbl_span = span;
+                     lbl_message = Printf.sprintf "`main` is granted only %s here" show_grant } ]
+             | None -> span, [] in
+           Err.report env.errors
+             { Err.severity = Err.Error; span = primary; labels; notes = [];
+               code = Err.Code.cap_grant_exceeded; fix = None;
+               message =
+             Printf.sprintf
                 "`main` is granted %s, but the program reaches `%s`%s. \
                  The grant is a ceiling on the WHOLE program — declaring \
                  `needs %s` does not raise it.\n\
@@ -8168,12 +8403,13 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                    neither diagnostic elides today), `main` included as the
                    first frame, joined with `→`. Both read as a matched
                    pair, so they must render the same way. *)
-                (match cap_reach_chain env ~from:"main" ~cap:c with
-                 | Some (_ :: _ as chain) ->
+                (match trace, chain with
+                 | Some _, _ -> " here"
+                 | None, Some (_ :: _ as chain) ->
                    Printf.sprintf " (reached from `main`: %s)"
                      (render_cap_chain ("main" :: chain))
                  | _ -> "")
-                c c param_hint))
+                c c param_hint })
       (List.sort_uniq String.compare closure)
 
 (* ── Per-role grants: the same walk from more roots (distributed-deploys
@@ -8522,7 +8758,7 @@ let call_site_args (env : env) ~(callee : string) (i : int) : (string * local_sc
 let rec resolve_root_value (env : env) ~(depth : int) ~(owner : string) (scope : local_scope) (e : Ast.expr)
   : root_value list =
   let known_fn n =
-    let prefix = match String.rindex_opt owner '.' with Some i -> String.sub owner 0 (i + 1) | None -> "" in
+    let prefix = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes owner in
     Hashtbl.mem env.own_cap_closures (prefix ^ n) || Hashtbl.mem env.own_cap_closures n
   in
   match e with
@@ -8654,7 +8890,7 @@ let solve_role_roots_full ?(decls = []) (env : env) : role_solve option =
       in
       List.iter (collect "") decls;
       let declared_caps_of ~owner n =
-        let prefix = match String.rindex_opt owner '.' with Some i -> String.sub owner 0 (i + 1) | None -> "" in
+        let prefix = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes owner in
         match Hashtbl.find_opt declared_io_caps (prefix ^ n) with
         | Some cs -> Some cs
         | None -> Hashtbl.find_opt declared_io_caps n
@@ -8756,7 +8992,10 @@ let solve_role_roots_full ?(decls = []) (env : env) : role_solve option =
                | RVUnknown why -> push unresolved k why)
              (resolve_root_value env ~depth:8 ~owner:r.rr_owner r.rr_scope r.rr_expr))
         keyed;
-      let rows = March_caps.Cap_rows.solve ~with_rows:true ~own_caps:own ~refs ~seeds () in
+      let rows =
+        March_caps.Cap_rows.solve ~with_rows:true ~scopes:env.fn_scopes ~own_caps:own ~refs
+          ~seeds ()
+      in
       Some
         { rs_keyed = keyed; rs_own = own; rs_refs = refs; rs_rows = rows; rs_synthetic = synthetic;
           rs_local_closures = local_closures; rs_held_pids = held_pids; rs_unresolved = unresolved;
@@ -8764,12 +9003,29 @@ let solve_role_roots_full ?(decls = []) (env : env) : role_solve option =
   end
 
 (* The tuple view [role_capability_closures] reads. *)
+(* [check_role_grants]'s solve.  A hot-reload build asks again for the
+   manifest's ROLE lines ([role_capability_closures]), after typecheck has
+   finished with the env; the keyed roots and the own/refs/rows tables that
+   reads do not depend on [decls] (only [rs_type_mismatch] does), so the
+   second solve, ~3.5 s for a control-plane app, would repeat the first.
+   Keyed on the tables the solve reads, which every copy of an env shares
+   (the driver holds a copy of [final_env], not [final_env] itself). *)
+let role_solve_key (env : env) =
+  Obj.repr env.own_cap_closures, Obj.repr env.fn_refs, Obj.repr env.fn_row_bodies,
+  Obj.repr env.role_grants, Obj.repr env.stdlib_fns
+
+let last_role_solve : (Obj.t * Obj.t * Obj.t * Obj.t * Obj.t * role_solve option) option ref = ref None
+
 let solve_role_roots (env : env)
   : ((string * role_root) list
      * (string, string list) Hashtbl.t
      * (string, string list) Hashtbl.t
      * (string, March_caps.Cap_rows.row) Hashtbl.t) option =
-  Option.map (fun s -> (s.rs_keyed, s.rs_own, s.rs_refs, s.rs_rows)) (solve_role_roots_full env)
+  let (k1, k2, k3, k4, k5) = role_solve_key env in
+  let solved = match !last_role_solve with
+    | Some (a, b, c, d, e, s) when a == k1 && b == k2 && c == k3 && d == k4 && e == k5 -> s
+    | _ -> solve_role_roots_full env in
+  Option.map (fun s -> (s.rs_keyed, s.rs_own, s.rs_refs, s.rs_rows)) solved
 
 let check_role_grants (env : env) (decls : Ast.decl list) : unit =
   if Hashtbl.length env.role_grants = 0 then ()
@@ -8808,7 +9064,10 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                         proto role c show_main c (String.lowercase_ascii leaf) c c))
               caps)
          env.role_grants);
-    match solve_role_roots_full ~decls env with
+    let solved = solve_role_roots_full ~decls env in
+    (let (k1, k2, k3, k4, k5) = role_solve_key env in
+     last_role_solve := Some (k1, k2, k3, k4, k5, solved));
+    match solved with
     | None -> ()
     | Some { rs_keyed = keyed; rs_own = own; rs_refs = refs; rs_rows = rows; rs_synthetic = synthetic;
              rs_local_closures = local_closures; rs_held_pids = held_pids; rs_unresolved = unresolved;
@@ -8889,11 +9148,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
          authority. *)
       if !dump_role_authority then begin
         let resolve owner r =
-          let qualified =
-            match String.rindex_opt owner '.' with
-            | Some i -> String.sub owner 0 i ^ "." ^ r
-            | None -> r
-          in
+          let qualified = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes owner ^ r in
           if Hashtbl.mem rows qualified then Some qualified
           else if Hashtbl.mem rows r then Some r
           else None
@@ -9780,7 +10035,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                   Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
                               span = p.param_name.span }
               ) h.ah_params in
-            let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+            let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
@@ -9870,13 +10125,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      [~with_rows:false] keeps this call at the caps-only fixpoint, which is
      what [check_main_grant] actually reads — this was the pre-stage-C cost
      and stays that with stage C gone. *)
-  (* Rows (deps/unknown) are read only by [check_fn_bounds]; solving them only
-     when some function declares a bound keeps every other `--check` at the
-     caps-only fixpoint cost. *)
-  let cap_rows =
-    fn_capability_rows_tbl
-      ~with_rows:(Hashtbl.length final_env.fn_bound_points > 0) final_env
-  in
+  (* Caps only: [check_fn_bounds] computes its bound points' [unknown] flags
+     itself, from what each one reaches, and nothing reads [deps]. *)
+  let cap_rows = fn_capability_rows_tbl ~with_rows:false final_env in
   dump_cap_rows final_env;
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
   check_fn_bounds ~rows:cap_rows final_env;
@@ -10167,7 +10418,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                   Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
                               span = p.param_name.span }
               ) h.ah_params in
-            let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+            let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }

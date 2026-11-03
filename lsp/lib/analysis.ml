@@ -3267,7 +3267,12 @@ let analyse ~filename ~src : t =
     in
     let diags =
       let compiler_diags =
-        Err.sorted errors |> List.filter_map (diag_to_lsp ~filename)
+        (* The CLI's cascade rules (one root cause, one report), with the
+           same "only a shown diagnostic suppresses" condition: here a
+           diagnostic is shown when it maps into this document. *)
+        Err.sorted errors
+        |> Err.suppress_cascades ~visible:(fun d -> diag_to_lsp ~filename d <> None)
+        |> List.filter_map (diag_to_lsp ~filename)
       in
       (* The typechecker's own tail-call checker already reports every
          non-tail recursive call, at the same span, saying the same thing —
@@ -5193,6 +5198,30 @@ let byte_col_of (a : t) ~line ~utf16_char =
 
 let query_type_at (a : t) ~line ~utf16_char =
   type_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+(* A call of a `@[lemma]` declared in this file (reflection design §4): its
+   name and its theorem as written. *)
+let lemma_hover_at (a : t) ~line ~character : (string * string) option =
+  match name_at a ~line ~character with
+  | None -> None
+  | Some name -> (
+    let short = match String.rindex_opt name '.' with Some i -> String.sub name (i + 1) (String.length name - i - 1) | None -> name in
+    let rec find ds =
+      List.find_map
+        (function
+          | Ast.DFn (fd, _) when fd.Ast.fn_name.Ast.txt = short && List.mem "lemma" fd.Ast.fn_attrs -> Some fd
+          | Ast.DMod (_, _, inner, _) -> find inner
+          | _ -> None)
+        ds
+    in
+    match find a.decls with
+    | Some { Ast.fn_ret_ty = Some (Ast.TyRefine (_, _, pred)); fn_name; _ } ->
+      let txt = Analysis_util.slice_span a.src (March_typecheck.Typecheck.span_of_expr pred) in
+      if txt = "" then None else Some (fn_name.Ast.txt, txt)
+    | _ -> None)
+
+let query_lemma_hover_at (a : t) ~line ~utf16_char =
+  lemma_hover_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
 
 let query_doc_name_at (a : t) ~line ~utf16_char =
   doc_name_at a ~line ~character:(byte_col_of a ~line ~utf16_char)

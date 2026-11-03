@@ -151,6 +151,14 @@ let pos_lt (a : A.span) (b : A.span) = compare (a.A.start_line, a.A.start_col) (
 
 type ev = { ev_rule : int; ev_text : string; ev_span : A.span }
 
+(** Lemmas (§4.2) the last [analyze] found invalid under L2 or L3, by
+    declaring span: (2 or 3, the first offending event's text). *)
+let lemma_blocked : (A.span, int * string) Hashtbl.t = Hashtbl.create 16
+
+(** L5: each site the last [analyze] found naming a lemma as a value, with
+    the lemma's name. *)
+let lemma_value_uses : (A.span * string) list ref = ref []
+
 type bind = { k_var : bool;  (** a value ([false]: a local [fn]) *) k_owner : A.span  (** the unit that bound it *) }
 
 let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
@@ -614,8 +622,12 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
   let refl = Array.map (fun evs -> evs = []) local in
   (* EqOK: R2-R7 (§3.5, C4): an [impl Eq] method's own R1 does not apply. *)
   let eqok = Array.map (List.for_all (fun e -> e.ev_rule < 2 || e.ev_rule > 7)) local in
+  (* A call of a lemma is `()` in the logic (§4.5, I2): it is erased before the
+     program runs, so it neither blocks its caller nor needs a definition. *)
   let dep_ok (d, _) =
-    match d with `Refl v -> refl.(v) | `Eq ids -> List.for_all (fun i -> eqok.(i)) ids
+    match d with
+    | `Refl v -> refl.(v) || List.mem "lemma" (unit_ v).RT.u_attrs
+    | `Eq ids -> List.for_all (fun i -> eqok.(i)) ids
   in
   let changed = ref true in
   while !changed do
@@ -743,6 +755,68 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
            | _ -> [])
          u.RT.u_params)
   in
+  (* ── Lemmas (§4.2): L2 and L3 over the same events ───────────────────────
+     A lemma never runs, so the rules that keep a reflected body total and
+     pure (R3, R4, R5, R7) apply to it, except that its `assert` is a static
+     obligation (L2); its callees must be reflected functions, other lemmas,
+     constructors or R6 builtins (L3).  R8's "returns Unit" is the point of a
+     lemma and does not apply. *)
+  Hashtbl.reset lemma_blocked;
+  lemma_value_uses := [];
+  let is_lemma v = List.mem "lemma" (unit_ v).RT.u_attrs in
+  Array.iter
+    (fun (u : RT.unit_) ->
+      let i = u.RT.u_id in
+      if is_lemma i then begin
+        (* `==` inside a lemma's `assert` is the predicate's logical
+           equality (§3.5), never a call of `eq`. *)
+        let asserts = ref [] in
+        List.iter
+          (fun (c : RT.owner) ->
+            Refine_encode.iter_all (function A.EAssert (_, sp) -> asserts := sp :: !asserts | _ -> ()) c.RT.o_body)
+          u.RT.u_clauses;
+        let in_assert (sp : A.span) =
+          List.exists
+            (fun (a : A.span) ->
+              sp.A.file = a.A.file
+              && compare (sp.A.start_line, sp.A.start_col) (a.A.start_line, a.A.start_col) >= 0
+              && compare (sp.A.end_line, sp.A.end_col) (a.A.end_line, a.A.end_col) <= 0)
+            !asserts
+        in
+        let l2 =
+          List.filter
+            (fun e -> List.mem e.ev_rule [ 3; 4; 5; 7 ] && e.ev_text <> "has a runtime `assert`")
+            local.(i)
+        in
+        let l3 =
+          List.filter (fun e -> e.ev_rule = 6) local.(i)
+          @ List.filter_map
+              (fun ((d, (s : RT.site)) as dd) ->
+                match d with
+                | `Refl v when refl.(v) || is_lemma v -> None
+                | `Refl v ->
+                  Some { ev_rule = 6; ev_text = Printf.sprintf "calls %s, which is not reflected" (unit_ v).RT.u_name;
+                         ev_span = s.RT.s_span }
+                | `Eq _ when dep_ok dd || in_assert s.RT.s_span -> None
+                | `Eq _ ->
+                  Some { ev_rule = 6; ev_text = Printf.sprintf "uses %s on a type whose `eq` is not total" s.RT.s_name;
+                         ev_span = s.RT.s_span })
+              deps.(i)
+        in
+        match (first l2, first l3) with
+        | Some e, _ -> Hashtbl.replace lemma_blocked u.RT.u_span (2, e.ev_text)
+        | None, Some e -> Hashtbl.replace lemma_blocked u.RT.u_span (3, e.ev_text)
+        | None, None -> ()
+      end)
+    g.RT.units;
+  (* L5: a lemma named as a value. *)
+  List.iter
+    (fun (s : RT.site) ->
+      match s.RT.s_target with
+      | RT.S_unit v when (not s.RT.s_call) && is_lemma v ->
+        lemma_value_uses := (s.RT.s_span, (unit_ v).RT.u_name) :: !lemma_value_uses
+      | _ -> ())
+    g.RT.sites;
   Array.to_list g.RT.units
   |> List.filter_map (fun (u : RT.unit_) ->
          match (u.RT.u_kind, origin_of u) with
@@ -836,7 +910,23 @@ type template = {
   t_eqs : (string * string) list;
       (** each type the body uses program [==] at, with its §3.5 reading
           ([structural] or [opaque]): part of the D17 hash (I8) *)
+  t_fuel : int;
+      (** how deep a chain through this function's calls is unfolded (§3.8):
+          [@[reflect(fuel: N)]], else [default_fuel] *)
 }
+
+(* §3.8, D14. *)
+let default_fuel = 2
+
+(* The fuel an attribute list sets, [@[reflect(fuel: N)]] as
+   ["reflect:fuel:N"]. *)
+let fuel_of_attrs (attrs : string list) : int option =
+  List.find_map
+    (fun a ->
+      match String.split_on_char ':' a with
+      | [ "reflect"; "fuel"; n ] -> int_of_string_opt n
+      | _ -> None)
+    attrs
 
 (* The types a body's [==] was read at while its template is built. *)
 let eq_seen : (string * string) list ref = ref []
@@ -920,10 +1010,142 @@ let perturb_false = ref (perturb = Some "false-unfold")
 (* The per-query cap on unfoldings (§3.9). *)
 let budget = if perturb = Some "budget-64" then 64 else 32
 
-(* §3.6 + §3.7: one unfolding per reflected call of the query (the goal, then
-   the assumptions in order: the depth-0 frontier).  Each call's guarded
-   equations are asserted behind one assumption literal, which names the
-   function in the unsat core (the [uses:] note). *)
+(* ── Decided guards (§3.8, D13) ──────────────────────────────────────────
+   Which arm of a produced call holds, read syntactically from the query's
+   facts, never with a solver query.  The answer only chooses which arm's
+   equation to add and when to stop: every equation added is still guarded
+   by its own arm conditions and the domain guard, exactly as a depth-0 one,
+   so a wrong answer costs a proof, never makes one. *)
+
+(* `<ctor>_<i>`: a selector's constructor and field index. *)
+let selector_of (f : string) : (string * int) option =
+  match String.rindex_opt f '_' with
+  | None -> None
+  | Some i -> (
+    let c = String.sub f 0 i and idx = String.sub f (i + 1) (String.length f - i - 1) in
+    match int_of_string_opt idx with
+    | Some k when Hashtbl.mem RE.ctor_field_sorts c -> Some (c, k)
+    | _ -> None)
+
+type facts = {
+  vals : (Smt.term, Smt.term) Hashtbl.t;  (** a term's known value: a constructor term, a literal, or an earlier unfolding's result *)
+  tags : (Smt.term, string) Hashtbl.t;  (** a term's known constructor, from a tester fact *)
+  holds : (Smt.term, bool) Hashtbl.t;  (** a top-level assumption, or its negation *)
+}
+
+let rec ground_int (t : Smt.term) : int option =
+  match t with
+  | Smt.IntLit n -> Some n
+  | Smt.Add (a, b) -> Option.bind (ground_int a) (fun x -> Option.map (( + ) x) (ground_int b))
+  | Smt.Sub (a, b) -> Option.bind (ground_int a) (fun x -> Option.map (fun y -> x - y) (ground_int b))
+  | Smt.MulLit (k, a) -> Option.map (( * ) k) (ground_int a)
+  | Smt.Neg a -> Option.map (fun x -> -x) (ground_int a)
+  | _ -> None
+
+(* [t] rewritten by what is known, at most [n] steps deep. *)
+let rec norm (st : facts) (n : int) (t : Smt.term) : Smt.term =
+  if n <= 0 then t
+  else
+    let known () = match Hashtbl.find_opt st.vals t with Some v when v <> t -> norm st (n - 1) v | _ -> t in
+    match t with
+    | Smt.App (f, [ u ]) -> (
+      match selector_of f with
+      | Some (k, i) -> (
+        match norm st (n - 1) u with
+        | Smt.Ctor (k', _, args) when k' = k -> (
+          match List.nth_opt args i with Some a -> norm st (n - 1) a | None -> t)
+        | _ -> known ())
+      | None -> known ())
+    | _ -> (
+      match ground_int t with Some k -> Smt.IntLit k | None -> known ())
+
+let rec decide (st : facts) (c : Smt.term) : bool option =
+  let n = 12 in
+  match Hashtbl.find_opt st.holds c with
+  | Some b -> Some b
+  | None -> (
+    match c with
+    | Smt.BoolLit b -> Some b
+    | Smt.Not a -> Option.map not (decide st a)
+    | Smt.And (a, b) -> (
+      match decide st a, decide st b with
+      | Some false, _ | _, Some false -> Some false
+      | Some true, Some true -> Some true
+      | _ -> None)
+    | Smt.Or (a, b) -> (
+      match decide st a, decide st b with
+      | Some true, _ | _, Some true -> Some true
+      | Some false, Some false -> Some false
+      | _ -> None)
+    | Smt.IsCtor (k, s) -> (
+      match norm st n s with
+      | Smt.Ctor (k', _, _) -> Some (k = k')
+      | s' -> (
+        match Hashtbl.find_opt st.tags s', Hashtbl.find_opt st.tags s with
+        | Some k', _ | None, Some k' -> Some (k = k')
+        | None, None -> None))
+    | Smt.Eq (a, b) -> (
+      match norm st n a, norm st n b with
+      | Smt.Ctor (k, _, _), Smt.Ctor (k', _, _) when k <> k' -> Some false
+      | Smt.IntLit x, Smt.IntLit y -> Some (x = y)
+      | Smt.BoolLit x, Smt.BoolLit y -> Some (x = y)
+      | a', b' when a' = b' -> Some true
+      | _ -> None)
+    | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b) -> (
+      match norm st n a, norm st n b with
+      | Smt.IntLit x, Smt.IntLit y ->
+        Some
+          (match c with
+           | Smt.Lt _ -> x < y
+           | Smt.Le _ -> x <= y
+           | Smt.Gt _ -> x > y
+           | _ -> x >= y)
+      | _ -> None)
+    | t -> (
+      match norm st n t with
+      | Smt.BoolLit b -> Some b
+      | t' when t' <> t -> decide st t'
+      | _ -> None))
+
+let rec conjuncts (t : Smt.term) = match t with Smt.And (a, b) -> conjuncts a @ conjuncts b | t -> [ t ]
+
+let facts_of (assumptions : Smt.term list) : facts =
+  let st = { vals = Hashtbl.create 32; tags = Hashtbl.create 16; holds = Hashtbl.create 32 } in
+  let is_value = function Smt.Ctor _ | Smt.IntLit _ | Smt.BoolLit _ -> true | _ -> false in
+  List.iter
+    (fun c ->
+      Hashtbl.replace st.holds c true;
+      match c with
+      | Smt.Not a -> Hashtbl.replace st.holds a false
+      | Smt.IsCtor (k, s) -> Hashtbl.replace st.tags s k
+      | Smt.Eq (a, b) when is_value b && not (is_value a) -> Hashtbl.replace st.vals a b
+      | Smt.Eq (a, b) when is_value a && not (is_value b) -> Hashtbl.replace st.vals b a
+      | _ -> ())
+    (List.concat_map conjuncts assumptions);
+  st
+
+(* The one arm whose conditions hold, every earlier arm's failing ([None]:
+   not decided). *)
+let decided_arm (st : facts) (cases : (Smt.term list * Smt.term) list) : (Smt.term list * Smt.term) option =
+  let rec go = function
+    | [] -> None
+    | ((conds, _) as arm) :: rest -> (
+      match List.map (decide st) conds with
+      | ds when List.for_all (( = ) (Some true)) ds -> Some arm
+      | ds when List.exists (( = ) (Some false)) ds -> go rest
+      | _ -> None)
+  in
+  go cases
+
+(* §3.6-§3.8: unfold the query's reflected calls.  Depth 0 is every call of
+   the query (the goal, then the assumptions in order), each with all its
+   guarded equations, as phase 1 has it (D12).  A call an unfolding produces
+   is at the next depth; it is unfolded, breadth first, only while its depth
+   is below its function's fuel and its guard is decided (D13, D14), and then
+   with the decided arm's equation only.  Every unfolding's equations are
+   asserted behind one assumption literal, which names the function in the
+   unsat core (the [uses:] note).  At most [budget] unfoldings per query
+   (§3.9). *)
 let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : Smt.term list) =
   let seen = ref [] in
   let frontier =
@@ -945,56 +1167,149 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
     end
     else frontier
   in
+  let st = facts_of assumptions in
+  let count = ref 0 in
   let lits = ref [] and facts = ref [] in
-  List.iteri
-    (fun k (f, args) ->
-      Hashtbl.replace RS.check_frontier f ();
-      let tp = Hashtbl.find templates f in
-      let env = List.mapi (fun i a -> (param_const i, a)) args in
-      let pre = if perturb = Some "no-guard" then [] else List.map (subst env) tp.t_pre in
-      let lhs = Smt.App (f, args) in
-      let eqs =
-        List.map
-          (fun (conds, res) ->
-            let res = subst env res and conds = List.map (subst env) conds in
-            (* A call the unfolding PRODUCES is not unfolded again (D12). *)
-            List.iter
-              (fun (g, gargs) ->
-                if not (List.mem (g, gargs) frontier) then begin
-                  RS.fuel_pending := true;
-                  if !RS.fuel_fn = "" then RS.fuel_fn := (Hashtbl.find templates g).t_name
-                end)
-              (List.fold_left reflected_apps [] (res :: conds));
-            let g = pre @ conds in
-            let eq = Smt.Eq (lhs, res) in
-            if g = [] then eq else Smt.Implies (conj g, eq))
-          tp.t_cases
+  (* Unfold [f(args)] with [cases] (all of them at depth 0, the decided arm
+     deeper); returns the reflected calls its equations mention. *)
+  let emit (f, args) cases =
+    Hashtbl.replace RS.check_frontier f ();
+    let tp = Hashtbl.find templates f in
+    let env = List.mapi (fun i a -> (param_const i, a)) args in
+    let pre = if perturb = Some "no-guard" then [] else List.map (subst env) tp.t_pre in
+    let lhs = Smt.App (f, args) in
+    let produced = ref [] in
+    let eqs =
+      List.map
+        (fun (conds, res) ->
+          let res = subst env res and conds = List.map (subst env) conds in
+          produced := List.fold_left reflected_apps !produced (res :: conds);
+          let g = pre @ conds in
+          let eq = Smt.Eq (lhs, res) in
+          if g = [] then eq else Smt.Implies (conj g, eq))
+        cases
+    in
+    let lit = Printf.sprintf "|%s%d:%s|" RS.literal_prefix !count tp.t_name in
+    incr count;
+    Hashtbl.replace RS.literal_owner lit tp.t_name;
+    lits := (lit, Smt.SBool) :: !lits;
+    (* Test-only perturbation (the I7 control): every unfolding asserts
+       [false], so stage 2 proves anything it is asked. *)
+    let body = if !perturb_false then Smt.BoolLit false else conj eqs in
+    facts := Smt.Implies (Smt.Const lit, body) :: !facts;
+    List.rev !produced
+  in
+  (* A decided call's value, for the guards of the calls after it. *)
+  let learn (f, args) =
+    let tp = Hashtbl.find templates f in
+    let env = List.mapi (fun i a -> (param_const i, a)) args in
+    let inst = List.map (fun (conds, res) -> (List.map (subst env) conds, subst env res)) tp.t_cases in
+    match decided_arm st inst with
+    | Some (_, res) -> Hashtbl.replace st.vals (Smt.App (f, args)) res
+    | None -> ()
+  in
+  let next =
+    List.concat_map
+      (fun (f, args) ->
+        let tp = Hashtbl.find templates f in
+        learn (f, args);
+        emit (f, args) tp.t_cases)
+      frontier
+  in
+  (* Deeper levels: each round unfolds every pending call it can decide;
+     what an unfolding learns may decide another, so a level is retried until
+     a round makes no progress. *)
+  let rec level depth (pending : (string * Smt.term list) list) =
+    let pending =
+      List.sort_uniq compare (List.filter (fun k -> not (List.mem k !seen)) pending)
+    in
+    if pending <> [] then begin
+      let out_next = ref [] in
+      let rec rounds (todo : (string * Smt.term list) list) =
+        let progressed = ref false in
+        let left =
+          List.filter
+            (fun ((f, args) as k) ->
+              let tp = Hashtbl.find templates f in
+              if List.mem k !seen then false
+              else if depth >= tp.t_fuel || !count >= budget then true
+              else
+                let env = List.mapi (fun i a -> (param_const i, a)) args in
+                let inst = List.map (fun (conds, res) -> (List.map (subst env) conds, subst env res)) tp.t_cases in
+                match decided_arm st inst with
+                | None -> true
+                | Some (conds, res) ->
+                  progressed := true;
+                  seen := k :: !seen;
+                  Hashtbl.replace st.vals (Smt.App (f, args)) res;
+                  (* The arm's conditions stay in its implication, over the
+                     template's own (unsubstituted) case. *)
+                  let arm =
+                    List.find (fun (c, r) -> List.map (subst env) c = conds && subst env r = res) tp.t_cases
+                  in
+                  out_next := emit k [ arm ] @ !out_next;
+                  false)
+            todo
+        in
+        if !progressed && left <> [] then rounds left else left
       in
-      let lit = Printf.sprintf "|%s%d:%s|" RS.literal_prefix k tp.t_name in
-      Hashtbl.replace RS.literal_owner lit tp.t_name;
-      lits := (lit, Smt.SBool) :: !lits;
-      (* Test-only perturbation (the I7 control): every unfolding asserts
-         [false], so stage 2 proves anything it is asked. *)
-      let body = if !perturb_false then Smt.BoolLit false else conj eqs in
-      facts := Smt.Implies (Smt.Const lit, body) :: !facts)
-    frontier;
+      let left = rounds pending in
+      (* What stays is over fuel, over budget, or undecided (§3.9). *)
+      List.iter
+        (fun (f, args) ->
+          let tp = Hashtbl.find templates f in
+          if !count >= budget && depth < tp.t_fuel then RS.budget_hit := true;
+          RS.fuel_pending := true;
+          if !RS.fuel_fn = "" then RS.fuel_fn := tp.t_name;
+          ignore args)
+        left;
+      level (depth + 1) !out_next
+    end
+  in
+  level 1 next;
   (decls @ List.rev !lits, assumptions @ List.rev !facts)
 
 (* ── Sorts of a signature (§3.2, §3.3) ──────────────────────────────────── *)
 
-(* The one datatype a constructor NAME belongs to, or [Decline] when two
-   registered datatypes declare it (review audit): the SMT constructor,
-   tester and selectors are keyed by that name, so an ambiguous one could be
-   read at the wrong datatype.  Never guess. *)
-let unique_ctor_adt (c : string) : string =
-  match Hashtbl.fold (fun adt cs acc -> if List.mem c cs then adt :: acc else acc) RE.adt_ctors [] with
-  | [ adt ] -> adt
-  (* Test-only: the RED control of the ambiguity rule (pick one). *)
-  | adt :: _ when Sys.getenv_opt "MARCH_REFLECT_PERTURB" = Some "ctor-guess" -> adt
-  | _ -> raise Decline
+(* The datatype a typechecker type names, when it pins exactly ONE: a short
+   type name two modules declare (`A.T`, `B.T`) is not decided here, and a
+   record is not a variant.  [None] = not known. *)
+let adt_of_ty (t : T.ty) : string option = RE.adt_of_tc_ty t
+
+(* A SOURCE constructor name as (datatype, SMT constructor) (2026-11-02,
+   specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md):
+   by [adt], the type the checker knows the value has, when it knows one
+   (and then the constructor must be one of that datatype's); else by the
+   name alone when exactly one datatype declares it, and then only in a
+   CONSTRUCTION ([~construct]): a pattern or tester on a value of unknown
+   type declines (review round 4).  Anything else — an ambiguous name with
+   no type, a type that does not declare it — raises [Decline].  Never
+   guess. *)
+let resolve_ctor ?(construct = false) ?(adt : string option) (c : string) : string * string =
+  match adt with
+  | Some a -> (match RE.ctor_of_adt a c with Some s -> (a, s) | None -> raise Decline)
+  | None when not construct && not (RE.untyped_harness ()) -> raise Decline
+  | None -> (
+    match RE.unique_ctor c with
+    | Some p -> p
+    | None -> (
+      match Hashtbl.find_opt RE.ctor_decls c with
+      (* Test-only: the RED control of the ambiguity rule (pick one). *)
+      | Some (a :: _) when Sys.getenv_opt "MARCH_REFLECT_PERTURB" = Some "ctor-guess" ->
+        (a, RE.ctor_smt_name a c)
+      | _ -> raise Decline))
+
+(* The datatype a field of SMT constructor [smt] holds at index [i], when it
+   is one: the sub-subject's type for a nested constructor pattern. *)
+let field_adt (smt : string) (i : int) : string option =
+  match List.nth_opt (try Hashtbl.find RE.ctor_field_sorts_poly smt with Not_found -> []) i with
+  (* A field type whose short name two declarants share is KNOWN but
+     conflated: never a key a constructor resolves through (review round 2). *)
+  | Some (Smt.SData (a, _)) when Hashtbl.mem RE.ambiguous_adts a -> Some RE.ambiguous_adt_sentinel
+  | Some (Smt.SData (a, _)) when Hashtbl.mem RE.adt_ctors a -> Some a
+  | _ -> None
 
 let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
-  let short n = match String.rindex_opt n '.' with Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
   let rec go (t : T.ty) =
     match T.repr t with
     | T.TCon ("Int", []) -> Smt.SInt
@@ -1013,10 +1328,14 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
     | T.TCon (n, args) ->
       (* Two declared types of one short name (`A.T`, `B.T`): which one the
          short name denotes is not decided here.  Decline. *)
-      (match Hashtbl.find_opt RE.adt_decl_paths ("M_" ^ short n) with
-       | Some (_ :: _ :: _) -> raise Decline
-       | _ -> ());
-      let adt = RE.adt_sort_name (short n) in
+      (* The same resolution as a constructor's ([RE.adt_of_type_name],
+         review round 4): a conflated short name, an inexact qualified one,
+         or a type that is no registered variant declines. *)
+      let adt =
+        match RE.adt_of_type_name n with
+        | Some a when a <> RE.ambiguous_adt_sentinel -> a
+        | _ -> raise Decline
+      in
       (match Hashtbl.find_opt RE.adt_ctors adt with
        | Some [ ctor ] when Hashtbl.mem RE.ctor_field_names ctor -> raise Decline (* a record *)
        | Some _ ->
@@ -1056,9 +1375,13 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
     | [ ([], t) ] -> t
     | _ -> raise Decline)
   | A.EIf (cnd, a, b, _) -> Smt.Ite (v cnd, v a, v b)
-  | A.ECon (ctor, args, _) when Hashtbl.mem RE.ctor_field_sorts ctor.A.txt ->
+  | A.ECon (ctor, args, sp) when RE.is_source_ctor ctor.A.txt ->
+    (* Resolved by the expression's own type (2026-11-02). *)
+    let adt, k = resolve_ctor ~construct:true ?adt:(Option.bind (c.c_ty sp) adt_of_ty) ctor.A.txt in
     let ts = List.map v args in
-    RE.ctor_term (unique_ctor_adt ctor.A.txt) ctor.A.txt ts
+    if List.length ts <> List.length (try Hashtbl.find RE.ctor_field_sorts k with Not_found -> []) then
+      raise Decline;
+    RE.ctor_term adt k ts
   | A.EApp (A.EVar f, args, sp) -> (
     (* The same rule as [note] (third review C1): an ambiguous site has no
        single callee, in every branch below. *)
@@ -1076,6 +1399,19 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
     | Some (RT.S_builtin | RT.S_impls _) -> builtin c env nm args
     | _ -> raise Decline)
   | _ -> raise Decline
+
+(* A statement-position call of a lemma, `l(..)` or `let _ = l(..)`: erased
+   before the program runs, so it is `()` in a reflected body (§4.5, I2). *)
+and lemma_stmt (c : tctx) (e : A.expr) : bool =
+  let call =
+    match e with
+    | A.EApp (A.EVar _, _, sp) -> Some sp
+    | A.ELet ({ A.bind_pat = A.PatWild _; bind_expr = A.EApp (A.EVar _, _, sp); _ }, _) -> Some sp
+    | _ -> None
+  in
+  match Option.bind call (Hashtbl.find_opt c.c_sites) with
+  | Some { RT.s_target = RT.S_unit u; _ } -> List.mem "lemma" c.c_unit.(u).RT.u_attrs
+  | _ -> false
 
 and builtin c env nm args =
   let v = tr_val c env in
@@ -1117,6 +1453,7 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
   match e with
   | A.EAnnot (x, _, _) -> tr_case c env x
   | A.EBlock ([ x ], _) -> tr_case c env x
+  | A.EBlock (stmt :: (_ :: _ as rest), sp) when lemma_stmt c stmt -> tr_case c env (A.EBlock (rest, sp))
   | A.EBlock (A.ELet (b, _) :: rest, sp) -> (
     match b.A.bind_pat with
     | A.PatVar x -> tr_case c ((x.A.txt, tr_val c env b.A.bind_expr) :: env) (A.EBlock (rest, sp))
@@ -1133,6 +1470,9 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
       | A.ETuple (xs, _) -> List.map (tr_val c env) xs
       | x -> [ tr_val c env x ]
     in
+    (* Each subject's datatype, from its type, for its constructor patterns. *)
+    let adt_of x = Option.bind (c.c_ty (T.span_of_expr x)) adt_of_ty in
+    let adts = match scrut with A.ETuple (xs, _) -> List.map adt_of xs | x -> [ adt_of x ] in
     let tupled = match scrut with A.ETuple _ -> true | _ -> false in
     let prior = ref [] in
     List.concat_map
@@ -1141,12 +1481,12 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
           match tupled, br.A.branch_pat with
           | true, A.PatTuple (ps, _) when List.length ps = List.length subjects ->
             List.fold_left2
-              (fun (cs, bs) p s ->
-                let c', b' = pat p s in
+              (fun (cs, bs) p (s, adt) ->
+                let c', b' = pat ?adt p s in
                 (cs @ c', bs @ b'))
-              ([], []) ps subjects
+              ([], []) ps (List.combine subjects adts)
           | true, A.PatWild _ -> ([], [])
-          | false, p -> pat p (List.hd subjects)
+          | false, p -> pat ?adt:(List.hd adts) p (List.hd subjects)
           | _ -> raise Decline
         in
         let env' = binds @ env in
@@ -1159,23 +1499,24 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
   | e -> [ ([], tr_val c env e) ]
 
 (* A pattern over a subject term: its conditions and bindings. *)
-and pat (p : A.pattern) (s : Smt.term) : Smt.term list * (string * Smt.term) list =
+(* [adt]: the subject's datatype, when its type pins one ([adt_of_ty]). *)
+and pat ?(adt : string option) (p : A.pattern) (s : Smt.term) : Smt.term list * (string * Smt.term) list =
   match p with
   | A.PatWild _ -> ([], [])
   | A.PatVar x -> ([], [ (x.A.txt, s) ])
   | A.PatAs (q, x, _) ->
-    let cs, bs = pat q s in
+    let cs, bs = pat ?adt q s in
     (cs, (x.A.txt, s) :: bs)
   | A.PatLit (A.LitInt n, _) -> ([ Smt.Eq (s, Smt.IntLit n) ], [])
   | A.PatLit (A.LitBool b, _) -> ([ (if b then s else Smt.Not s) ], [])
-  | A.PatCon (ctor, ps) when Hashtbl.mem RE.ctor_field_sorts ctor.A.txt ->
-    ignore (unique_ctor_adt ctor.A.txt);
-    let n = List.length (Hashtbl.find RE.ctor_field_sorts ctor.A.txt) in
+  | A.PatCon (ctor, ps) when RE.is_source_ctor ctor.A.txt ->
+    let _, k = resolve_ctor ?adt ctor.A.txt in
+    let n = List.length (try Hashtbl.find RE.ctor_field_sorts k with Not_found -> raise Decline) in
     if List.length ps <> n then raise Decline;
     let sub =
-      List.mapi (fun i q -> pat q (Smt.App (Printf.sprintf "%s_%d" ctor.A.txt i, [ s ]))) ps
+      List.mapi (fun i q -> pat ?adt:(field_adt k i) q (Smt.App (Printf.sprintf "%s_%d" k i, [ s ]))) ps
     in
-    (Smt.IsCtor (ctor.A.txt, s) :: List.concat_map fst sub, List.concat_map snd sub)
+    (Smt.IsCtor (k, s) :: List.concat_map fst sub, List.concat_map snd sub)
   | _ -> raise Decline
 
 (* The guard of an unfolding (§3.6): each parameter refinement, over the
@@ -1214,7 +1555,23 @@ let pre_of (u : RT.unit_) (psorts : Smt.sort list) : Smt.term list =
                  Refine_scope.smt_of ~resolve_var:var ~resolve_measure:measure
                    ~resolve_tester:(fun ctor a ->
                      match a with
-                     | A.EVar x -> ignore (unique_ctor_adt ctor); Option.map (fun t -> Smt.IsCtor (ctor, t)) (var x.A.txt)
+                     | A.EVar x ->
+                       (* The tester's constructor, by the parameter's sort. *)
+                       let adt =
+                         match var x.A.txt with
+                         | Some (Smt.Const pc) ->
+                           (match List.find_index (fun j -> param_const j = pc) (List.init (List.length psorts) Fun.id) with
+                            | Some j ->
+                              (match List.nth_opt psorts j with
+                               | Some (Smt.SData (a, _)) -> Some a
+                               (* A known sort that is no datatype (review round 3). *)
+                               | Some _ -> Some RE.ambiguous_adt_sentinel
+                               | None -> None)
+                            | None -> None)
+                         | _ -> None
+                       in
+                       let _, k = resolve_ctor ?adt ctor in
+                       Option.map (fun t -> Smt.IsCtor (k, t)) (var x.A.txt)
                      | _ -> None)
                    pred
                with
@@ -1489,7 +1846,11 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
               ~finally:(fun () -> RS.arm_on := saved; RS.active := saved_active)
               (fun () -> pre_of u ptys)
           in
-          Hashtbl.replace templates sym { t_cases = cases; t_pre = pre; t_name = u.RT.u_name; t_eqs = eqs }
+          let fuel =
+            match fuel_of_attrs u.RT.u_attrs with Some n when n >= 1 && n <= 8 -> n | _ -> default_fuel
+          in
+          Hashtbl.replace templates sym
+            { t_cases = cases; t_pre = pre; t_name = u.RT.u_name; t_eqs = eqs; t_fuel = fuel }
         with Decline | Not_found | Invalid_argument _ | Failure _ -> ())
       | _ -> ())
     g.RT.units;

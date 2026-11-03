@@ -10,12 +10,3 @@ hint: remove `Cap(IO)`
 
 
 
--- HINT ------------------ errors/realtime_mixed_1.march
-
-this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
-
-20 |   fn step(_deadline : Tagged(Int, Realtime), _cap : Cap(IO)) : Int do
-       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-
-

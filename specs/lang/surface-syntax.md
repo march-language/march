@@ -923,12 +923,17 @@ needs IO.Network, IO.Clock
 
 fn log(msg : String) : Unit needs IO.Console do println(msg) end
 fn size(s : String) : Int needs () do string_byte_length(s) end
+
+interface Store(a) do
+  fn get : a -> Int needs IO.FileRead   -- every impl of get is held to this
+end
 ```
 
 A `needs` line declares capability requirements for the module. A `needs` clause in a
 function header, after the return type, bounds that function: everything it reaches must
 be covered by the clause, and the clause by the module's `needs`. `needs ()` is the empty
-bound. See [Capabilities]({{ site.baseurl }}/docs/capabilities/#per-function-bounds).
+bound. On an interface method signature, after the type, it bounds every impl of that
+method instead. See [Capabilities]({{ site.baseurl }}/docs/capabilities/#per-function-bounds).
 
 ---
 

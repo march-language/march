@@ -5847,6 +5847,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "fn_needs",
+          "named": true
+        }
+      ]
     }
   },
   {

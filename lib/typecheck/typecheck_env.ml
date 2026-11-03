@@ -183,6 +183,48 @@ type ref_record = {
 let qualify_ref_name (modname : string) (name : string) : string =
   if modname = "" then name else modname ^ "." ^ name
 
+(** Where a per-function capability bound came from.  [Fn_decl] is written
+    on the function itself (phase 1); [Iface_method] is inherited from an
+    interface method's [needs] ([impl_ty = None] for the interface's own
+    default body); [Impl_method] is an impl method's own bound, which lies
+    within its interface's.  The diagnostic wording depends on it, and every
+    origin but [Fn_decl] is an impl or default body reached through a dispatch
+    node, which [check_fn_bounds] reports only where a violation is. *)
+type bound_origin =
+  | Fn_decl
+  | Iface_method of { iface : string; impl_ty : string option }
+  | Impl_method of { iface : string; impl_ty : string }
+
+(** A bound to check: its capability paths, the span of the [needs] clause
+    that set it (the interface's, for an inherited bound), the bounded
+    declaration's own span, and its origin. *)
+type fn_bound = {
+  fb_caps : string list;
+  fb_span : Ast.span;
+  fb_site : Ast.span;  (** the bounded declaration's name: reported at when [fb_span] has no source (a built-in interface) *)
+  fb_origin : bound_origin;
+}
+
+(** The type the typechecker synthesises for actor [actor]'s messages: every
+    handler's message constructor has this [ci_type].  The one spelling every
+    site uses (and the refinement checker, which counts it as a declarant of
+    that type name). *)
+let actor_msg_type_name (actor : string) : string = actor ^ "_Msg"
+
+(** The SPELLING half of the `<Actor>.Msg` alias ([Typecheck_unify.actor_msg_alias]
+    adds the scope checks): [Some "<Actor>_Msg"] when [name] is `<Actor>.Msg`
+    or `M.<Actor>.Msg`. *)
+let actor_msg_alias_target (name : string) : string option =
+  let sfx = ".Msg" in
+  let n = String.length name and k = String.length sfx in
+  if n <= k || String.sub name (n - k) k <> sfx then None
+  else
+    let prefix = String.sub name 0 (n - k) in
+    let actor = match String.rindex_opt prefix '.' with
+      | None -> prefix
+      | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1) in
+    Some (actor_msg_type_name actor)
+
 type env = {
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)
@@ -660,6 +702,12 @@ type env = {
       reachability walk with these, a module-level `let` reaching a
       stdlib-mediated capability would be pruned as "unreachable from main" and
       the ceiling would miss it — a violation `--compile` still catches. *)
+  fn_scopes : (string, string) Hashtbl.t;
+  (** Module scope ("Mod.Sub", or "" for the entry module) of each capability
+      key whose scope is NOT the part before its last ['.']: an impl method
+      ([<scope>.<Iface>$<Ty>.<m>]) or interface default body.  Read through
+      [Cap_rows.ref_prefix] by every reference resolver; without it a nested
+      module's impl was charged nothing for its local helpers. *)
   fn_refs : (string, string list) Hashtbl.t;
   (** Per-function REFERENCE edges: fully-qualified function name ("Mod.fn",
       or the BARE name for a top-level function of the entry module — the same
@@ -713,10 +761,10 @@ type env = {
       still populated — Task 8 reads it to attribute a whole-program grant
       violation to the user's call chain — but nothing currently checks it.
       [main] is excluded regardless — [check_main_grant] owns it. *)
-  fn_bound_points : (string, string list * Ast.span) Hashtbl.t;
+  fn_bound_points : (string, fn_bound) Hashtbl.t;
   (** Functions declaring a per-function capability bound
-      ([fn f(x) needs IO.Console do]) — qualified name (the [cap_qname]
-      convention) → (the bound's capability paths, the bound's span).
+      ([fn f(x) needs IO.Console do]) or inheriting one from an interface
+      method — qualified name (the [cap_qname] convention) → [fn_bound].
       Recorded by [check_module_needs]; read by [check_fn_bounds], which holds
       each function's row under its bound.  Shared (mutated in place) across
       every env copy.  See specs/plans/2026-11-01-per-function-needs-bounds.md. *)
@@ -817,6 +865,7 @@ let make_env errors type_map = {
   body_cap_closures = Hashtbl.create 64;
   stdlib_fns = Hashtbl.create 64;
   ceiling_extra_roots = Hashtbl.create 16;
+  fn_scopes = Hashtbl.create 16;
   fn_refs = Hashtbl.create 64;
   fn_row_bodies = Hashtbl.create 64;
   role_grants = Hashtbl.create 8;
@@ -1760,8 +1809,12 @@ let suggest_var_in_scope (name : string) (env : env) : string option =
   let best      = ref None in
   let best_dist = ref max_int in
   StrMap.iter (fun k _ ->
-    (* Skip qualified names (Mod.member) — those are suggested elsewhere. *)
-    if not (String.contains k '.') then begin
+    (* Skip qualified names (Mod.member) — those are suggested elsewhere —
+       and operators: a one-letter `y` is one edit from `%`, which is no
+       spelling of a variable. *)
+    let is_ident k =
+      k <> "" && (match k.[0] with 'a'..'z' | 'A'..'Z' | '_' -> true | _ -> false) in
+    if not (String.contains k '.') && is_ident k then begin
       let d = edit_distance name_lo (String.lowercase_ascii k) in
       if d > 0 && d <= max_dist && d < !best_dist then begin
         best      := Some k;

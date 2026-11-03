@@ -203,7 +203,7 @@ type verdict = Proved | Violated | Trusted | Skipped of reason
    [Overflow]: a `cap no_panic` Int `+ - *` or negation checked to stay in
    [-2^62, 2^62) by [Overflow_safety]; [callee] names the operator.  Its own
    kind for the same reason as [Division]. *)
-type kind = Precondition | Postcondition | Division | Termination | Overflow
+type kind = Precondition | Postcondition | Division | Termination | Overflow | Assertion
 
 type t =
   { span : March_ast.Ast.span
@@ -490,7 +490,9 @@ let by_kind_line (os : t list) : string =
   let count k = List.length (List.filter (fun o -> o.kind = k) os) in
   let termination = count Termination in
   let overflow = count Overflow in
-  Printf.sprintf "  by kind: %d precondition, %d postcondition, %d division%s%s" (count Precondition)
+  let assertion = count Assertion in
+  Printf.sprintf "  by kind: %d precondition, %d postcondition, %d division%s%s%s" (count Precondition)
     (count Postcondition) (count Division)
     (if termination > 0 then Printf.sprintf ", %d termination" termination else "")
     (if overflow > 0 then Printf.sprintf ", %d overflow" overflow else "")
+    (if assertion > 0 then Printf.sprintf ", %d assertion" assertion else "")

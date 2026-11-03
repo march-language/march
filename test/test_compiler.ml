@@ -13087,8 +13087,17 @@ let test_grant_violation_names_the_user_module () =
       println(helper("/etc/passwd"))
     end
   end|} in
-  Alcotest.(check bool) "the chain names `main` and the user's own function"
-    true (has_error_with ctx "reached from `main`: main \xe2\x86\x92 helper")
+  (* Since the X7 traces (specs/plans/2026-11-02-diagnostics-depth-plan.md),
+     a chain that stays in the user's file is shown as spans: the error sits
+     on the use (`file_read`, line 4) and each call on the way is a label. *)
+  let d =
+    List.find (fun (d : March_errors.Errors.diagnostic) ->
+        March_errors.Errors.slug_of_code d.code = "cap_grant_exceeded")
+      ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check int) "the error points at the use" 4 d.span.March_ast.Ast.start_line;
+  Alcotest.(check bool) "a label names `main` calling the user's own function" true
+    (List.exists (fun (l : March_errors.Errors.label) ->
+         l.lbl_message = "`main` calls `helper` here") d.labels)
 
 let test_grant_full_io_accepts_everything () =
   (* `needs IO` is Check 1's requirement for the Cap(IO) SIGNATURE — the
@@ -17847,6 +17856,7 @@ let compiler_suites =
       ("cap_fn_bounds", Test_cap_fn_bounds.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
       ("alloc_contract", Test_alloc_contract.tests);
+      ("portable_closures", Test_portable.tests);
       ("cap_unforgeable", Test_cap_unforgeable.tests);
       ("cap_dict", Test_cap_dict.tests);
       ("endpoints", Test_endpoints.tests);

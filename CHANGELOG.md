@@ -35,6 +35,51 @@ git log is authoritative for exact commits.
 - **`--refine-rlimit N` and `[refine] rlimit = N` in `forge.toml`** raise the per-query
   solver limit for a project with a known-hard proof. forge passes the setting to every
   `march` it runs.
+- **Refinement proofs take decided steps (fuel).** The checker now expands a
+  reflected call that another call's definition produces when its branch is already
+  decided (its argument is a constructor, or known to equal one), up to a per-function
+  fuel, default 2. So `len(cat([1], [2])) == 2` and `rev(rev(xs)) == xs` (with its
+  lemmas, no intermediate `assert`s) now prove. `@[reflect(fuel: N)]` sets the fuel
+  from 1 to 8, and `@[reflect]` asserts a function is reflected: the new error
+  `invalid_reflect` names why when it is not. Some calls that used to be skipped as
+  `reflect-fuel` are now proved or, where the contract is really broken, reported as
+  violations.
+
+- **Lemmas: `@[lemma]` proofs for refinement types.** A lemma states a theorem in its
+  result type, `{Unit | P}`, and proves it with ordinary code: `match` and `if` for
+  cases, a recursive call as the induction hypothesis, calls of other lemmas, and
+  `assert` for intermediate steps. A proved lemma's theorem becomes a fact after each
+  call, so `cat_nil(xs)` lets the checker know `cat(xs, Nil) == xs`. A lemma that does
+  not prove gives no facts and draws `lemma_unproved`. Lemmas never run: every lemma
+  and lemma call is removed before the program is built or interpreted, whether or not
+  it was proved, so a program behaves exactly as it would without them. New
+  diagnostics: `invalid_lemma`, `lemma_unproved`, `lemma_unproved_call`,
+  `lemma_argument_impure`. The editor re-checks a file when a lemma it uses changes or
+  stops proving, and shows a lemma's theorem on hover.
+
+- **`forge test` tests lemmas.** Each project file with an `@[lemma]` is checked with
+  the new `march --check --lemma-test`, which evaluates every lemma's theorem on
+  generated inputs (boundary Ints and 100 draws from a fixed, printed seed). An unproved
+  lemma becomes a property test: a false theorem prints a concrete counterexample and
+  fails the run, and a true one reports "tested, not proved: N inputs". A proved lemma is
+  checked again in the interpreter and in a compiled program; if it is false in either,
+  that is a compiler or runtime bug, and the run fails.
+
+- **Laws in `forge doc` and `forge search`.** A function's API page lists, under
+  "Laws", the lemmas whose theorem calls it, with the theorem as written (march_doc).
+  `forge search --law TEXT` finds lemmas by the text of their theorem or by a function
+  they mention, and a name search for a function also finds the lemmas about it.
+
+- **Parallel combinators reject closures that capture a native handle.** A
+  lambda passed to `List.pmap`, `List.pfilter`, `List.preduce`, the
+  `Parallel.*` family or `Task.async_stream` may no longer capture a
+  `resource` value from an `extern` library, directly or inside a record,
+  variant, list or tuple, since nothing says the C library is safe to call
+  from several threads. The check follows the lambda through your own
+  functions that pass it on, and reports at the function, naming the
+  variable and the combinator (`portable_capture`). Create the handle inside
+  the lambda, or use the sequential version. `task_spawn` and `Task.async`
+  are unaffected.
 
 ### Changed
 
@@ -50,10 +95,74 @@ git log is authoritative for exact commits.
 - **CI uses the pinned z3 on every platform** (built from source and cached) instead of
   the package manager's, and a new `refine-agreement` job requires every refinement
   verdict to be the same on darwin-arm64, linux-x86_64 and linux-aarch64.
+- Diagnostics: follow-on errors are dropped when another error already explains them: the type
+  mismatch after a callback-arity error, "unused variable `x`" next to a misspelled use of `x`,
+  `cap_grant` while the program has other errors, `cap_ceiling` alongside the matching
+  `cap_needs`, duplicate reports, and the type and constructor errors that follow from an invalid
+  protocol. The editor (LSP) drops the same ones.
+- Diagnostics: a capability grant error (`cap_grant_exceeded`) now points at the call that needs
+  the capability and labels each call on the way from `main`, instead of naming the chain in prose.
+
+- **Native compiles are about 45% faster for small programs.** Code the program
+  cannot reach (most of the prepended stdlib) is now dropped right after
+  defunctionalization instead of after the optimizer, so Perceus, drop, escape
+  and the optimizer no longer run over ~9,000 unused functions. Programs are
+  the same apart from some inlining choices, which now count only reachable
+  callers. `--disable-pass dce-early` turns it off.
+- **`--hot-reload` builds are about twice as fast.** A hot-reload server build
+  now links the precompiled C runtime (only the four files that read its
+  signing key and HCR identity are compiled per build), builds its HCR
+  manifest once instead of twice, reuses typecheck's role-capability solve,
+  and the refcount-inlining rewrite no longer allocates per character. The
+  emitted program is unchanged.
+
+### Fixed
+
+- **`march test` with several files no longer leaks Vault state between them.** Named
+  Vaults (and the Config values stored in them) lived for the whole process, so when one
+  `march test` run covered several files, the stdlib's own `Vault` and `Config` doctests,
+  which run once per file, saw counters and keys from the previous file and failed
+  (`forge test --coverage` in a project with several test files). Each file now starts from
+  a fresh interpreter runtime.
+
+- **No more false refinement violations for container elements and passed functions.**
+  When an element refinement could not be translated for the solver (for example one that
+  calls an `@[opaque]` function), or when a proof stopped at a reflected call it did not
+  expand, the checker could report `refinement_violated` with a made-up element value for a
+  program that cannot fail. These are now reported as unverified (a skip), not violations.
+- `march --check` no longer accepts a misspelled module whose member names a builtin
+  (`Lsit.length(xs)`): it reports "Unknown module `Lsit`. Did you mean `List`?" instead of
+  failing at run time.
+- Diagnostics: the `List.filter(fn (x, y) -> …)` hint suggests a one-parameter function instead of
+  a curried one; an infinite-type error no longer stacks contradictory notes; refinement errors on
+  callbacks no longer show `$cb_arg`, and their guard suggestion uses the real argument.
+- A parameter that only its refinement mentions (`fn f(t : {Tree | size(t) < 1})`) is no longer
+  reported as unused, with a fix that broke the refinement.
+
+- **`--target js` byte strings are fast in Safari.** Each byte access on a long string
+  (`byte_at`, `byte_length`, `slice`) looked up its cached byte view by comparing strings
+  with `===`, which JavaScriptCore does in time linear in the string's length, even for a
+  string and itself. A game decoding a 3.5 MB world file never finished loading in
+  Safari. The cache is now a `Map` keyed by the string, holding at most one string of
+  each length so older V8 (which hashes long strings by length) doesn't compare them
+  either.
+
+### Documentation
+
+- **Lemmas as a contract for changes.** The refinement-types chapter and the
+  `march-lang`, `march-test` and `forge-search` agent skills explain how to state a law
+  as a lemma in a `cap verified` module, where an unproved lemma is a build error, so a
+  change that breaks the law fails the build.
 
 ## [0.7.0] - 2026-11-02
 
 ### Breaking changes
+
+- **`Show`, `Eq`, `Ord` and `Hash` impls may not perform I/O.** The four built-in
+  interfaces are bounded by `needs ()`, so a hand-written `show`, `eq`, `compare` or `hash`
+  that prints, logs, reads the clock or reaches any other capability is rejected at the
+  impl (`cap_bound`). Derived impls are unaffected, and no impl in the stdlib was. Move
+  such work out of the impl.
 
 - **Hot-reload ABI v5 requires a rebuilt base binary.** Per-frame routing and
   closure lifetime hooks are incompatible with older running servers. Forge
@@ -93,6 +202,14 @@ git log is authoritative for exact commits.
   function is handed is charged to whoever supplies it, and a call to a function value
   taken from a record, list or ref is refused under a bound narrower than `IO`. Impl
   methods take bounds too. See the capabilities reference, "Per-function bounds".
+
+- **Capability bounds on interface methods.** An interface method signature may declare
+  `needs …` after its type (`fn get : a -> Int needs IO.FileRead`). Every impl of the
+  method, in any module, and the interface's default body are checked against it
+  (`cap_bound`, naming the interface); an impl may declare a narrower bound of its own but
+  not a wider one (`cap_bound_iface`). The bound is never part of the method's type, so
+  callers and `when` constraints declare nothing new. See the interfaces reference,
+  "Capability bounds on methods".
 
 - **`--reflection-parity`: check the refinement checker's reading of your functions.**
   `forge test --reflection-parity` (or `march --check --reflect-parity`) runs every
@@ -631,6 +748,24 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **An impl method in a nested module was charged nothing for the helpers it calls.**
+  The capability checks (the module ceiling, `main`'s grant, per-function bounds) resolved
+  a local reference from an impl method or interface default body against the wrong
+  scope, so in `mod B`, an `impl Show(T)` whose `show` called a `pfn log` that prints was
+  not charged `log`'s `IO.Console`. It is now.
+
+- **A type of yours with a constructor named like another type's no longer breaks
+  refinement checking of that other type.** Declaring, say, `type Mb = Some(Int) |
+  None` used to make the refinement checker model every built-in `Option` value with
+  an `Int` payload, so checks involving `Option` were skipped, and the standard
+  `Option` functions were never unfolded in such a program. Each type now keeps its
+  own constructors; a `Some(…)`, a `match` arm or an `is_Some(x)` refers to the
+  constructor of the type the checker knows the value has, and is skipped (never
+  guessed) when that type is not known. Because the typechecker currently treats two
+  types of the same name in different modules as one type, the checker also skips
+  constructor facts about any type whose name another module (or a built-in type)
+  shares; several such facts used to be "proved" although the program could violate
+  them at run time.
 - **A `refinement_unverified` hint re-labelled `reflect-fuel` or `reflect-budget` now
   names that reason** instead of the first attempt's.
 - **`cap no_panic` accepted a division by a `let` that rebinds its own name.** In

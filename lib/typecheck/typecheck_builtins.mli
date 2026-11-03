@@ -57,6 +57,13 @@ val note_stdlib_decls : Ast.decl list -> unit
 (** The one "is this a stdlib file?" predicate: [span_is_stdlib], the
     stdlib-only builtin gate and the driver's diagnostic filter all use it. *)
 val file_is_stdlib : string -> bool
+
+(** The names of every built-in type of the base environment
+    ([builtin_types]), for a consumer that must know which short type names
+    the typechecker already gives a meaning to (the refinement checker counts
+    each as a declarant of its name: a user type of the same short name is
+    conflated with it). *)
+val builtin_type_names : string list
 val span_is_stdlib : Ast.span -> bool
 
 (** Builtins only the standard library may reference, with the suggestion

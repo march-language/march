@@ -1386,8 +1386,10 @@ let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
     Some (adt_sort (adt_sort_name txt))
   | _ -> None
 
-let ctor_belongs (ctor : string) (adt : string) : bool =
-  match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor cs | None -> false
+(* Does datatype [adt] declare SOURCE constructor [ctor]?  ([ctor_k] is its
+   SMT name there, 2026-11-02.) *)
+let ctor_belongs (ctor : string) (adt : string) : bool = ctor_of_adt adt ctor <> None
+let ctor_k (ctor : string) (adt : string) : string = Option.get (ctor_of_adt adt ctor)
 
 (* The FULL solver-free acceptance test [check_post_induction] applies before
    it ever builds a VC: the outer shape match (a refined ADT-non-record
@@ -1792,7 +1794,8 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
               | A.EVar { A.txt = x; _ } ->
                 if declare x (adt_sort d) then Some (Smt.Const x) else None
               | A.ECon (ct, args, _) when ctor_belongs ct.A.txt d ->
-                let fs = try Hashtbl.find ctor_field_sorts ct.A.txt with Not_found -> [] in
+                let k = ctor_k ct.A.txt d in
+                let fs = try Hashtbl.find ctor_field_sorts k with Not_found -> [] in
                 if List.length fs <> List.length args then None
                 else
                   List.fold_right2
@@ -1801,7 +1804,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                       | Some t, Some ts -> Some (t :: ts)
                       | _ -> None)
                     args fs (Some [])
-                  |> Option.map (fun ts -> ctor_term d ct.A.txt ts)
+                  |> Option.map (fun ts -> ctor_term d k ts)
               (* ── THE INDUCTION HYPOTHESIS ─────────────────────────────────
                  A self-recursive call returning this datatype.  It becomes a
                  fresh opaque constant; the postcondition is assumed ABOUT that
@@ -2254,7 +2257,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                         | Smt.SData (sub_adt, _) when ctor_belongs ct.A.txt sub_adt -> (
                           incr pat_ctr;
                           let n = Printf.sprintf "$p%d" !pat_ctr in
-                          match flatten n sub_adt ct.A.txt sub with
+                          match flatten n sub_adt (ctor_k ct.A.txt sub_adt) sub with
                           | Some (bs, eqs) -> Some (n, (n, fs) :: bs, eqs)
                           | None -> None)
                         | _ -> None)
@@ -2312,7 +2315,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
               in
               match br.A.branch_pat with
               | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
-                match flatten mparam madt ct.A.txt subpats with
+                match flatten mparam madt (ctor_k ct.A.txt madt) subpats with
                 | None -> reject ()
                 | Some (binder_sorts, equations) ->
                   (* A binder that reuses a parameter's name would be
@@ -2386,6 +2389,15 @@ let rec pred_mentions_elts (e : A.expr) : bool =
    never propagates anything. *)
 let is_assumed (fd : A.fn_def) : bool = List.mem "assume" fd.A.fn_attrs
 
+(* A lemma's theorem (reflection design §4.3) is checked by a walk of its body
+   ([Refine_check.lemma_scratch_verdict]), which sees its `assert`s and its
+   lemma calls; the tail engine here sees neither.  Installed by
+   [Refine_check] at module init; [false] (not proved) until then.  The
+   module path is the gate's ([checking_prefix]). *)
+let lemma_verdict : (root:string -> Err.ctx -> A.fn_def -> bool) ref = ref (fun ~root:_ _ _ -> false)
+
+let lemma_prefix : string ref = ref ""
+
 let assumed_return (fd : A.fn_def) : A.expr option =
   match Option.map unlinear fd.A.fn_ret_ty with
   | Some (A.TyRefine (_, _, pred)) -> Some pred
@@ -2402,7 +2414,8 @@ let assumed_return (fd : A.fn_def) : A.expr option =
    type with no declared measure -- is unchecked, and that one now files a
    recorded skip instead of nothing. *)
 let return_refinement_checked (fd : A.fn_def) : bool =
-  (is_assumed fd && assumed_return fd <> None)
+  List.mem "lemma" fd.A.fn_attrs
+  || (is_assumed fd && assumed_return fd <> None)
   ||
   match return_refine_ext fd with
   | None -> post_induction_shape fd <> None
@@ -2453,6 +2466,8 @@ let rec check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool
     with_post_lookup lookup (fun () -> check_fn_post_verdict_core ~root errctx ~emit fd)
 
 and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
+  if List.mem "lemma" fd.A.fn_attrs then !lemma_verdict ~root errctx fd
+  else
   match assumed_return fd with
   | Some pred when is_assumed fd ->
     if emit then
@@ -2685,6 +2700,7 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
     let ctx = { rctx0 with modpath = prefix } in
     let lookup = postcond_of ctx defs in
     checking_prefix := prefix;
+    lemma_prefix := prefix;
     with_tail_demand (!tail_demand_of ~root ctx defs) (fun () ->
         with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd))
   in

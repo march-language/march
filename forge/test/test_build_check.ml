@@ -824,6 +824,42 @@ let test_parity_mismatch_is_red () =
       | Ok () -> Alcotest.fail "swap-arms must make the net RED"
       | Error e -> if not (contains e "parity RED") then Alcotest.failf "a mismatch is parity RED: %s" e)
 
+(** Lemma tests in `forge test` (specs/todos/2026-11-02-lemma-uses-beyond-refinement.md
+    ideas 1 and 2): an unproved, false lemma fails the run with a
+    counterexample; an unproved, true one passes as "tested, not proved"; a
+    file with no lemma is not checked at all. *)
+let lemma_count =
+  "  fn count(xs : List(a)) : Int do\n    match xs do\n      Nil -> 0\n      Cons(_, t) -> 1 + count(t)\n    end\n  end\n"
+
+let test_lemma_counterexample_fails () =
+  with_parity_dir (fun dir ->
+      let f = Filename.concat dir "short.march" in
+      write_file f
+        ("mod Short do\n" ^ lemma_count
+       ^ "  @[lemma]\n  fn short(xs : List(a)) : {Unit | count(xs) <= 2} do\n    ()\n  end\nend\n");
+      match Cmd_test.run_lemma_tests ~lib_path_env:"" [ f ] with
+      | Ok () -> Alcotest.fail "a counterexample must fail the run"
+      | Error e -> if not (contains e "lemma tests RED") then Alcotest.failf "a counterexample is lemma RED: %s" e)
+
+let test_lemma_true_unproved_passes () =
+  with_parity_dir (fun dir ->
+      let f = Filename.concat dir "short.march" in
+      write_file f
+        ("mod Short do\n" ^ lemma_count
+       ^ "  @[lemma]\n  fn nonneg(xs : List(a)) : {Unit | count(xs) >= 0 || count(xs) == 0 - 1} do\n    ()\n  end\nend\n");
+      match Cmd_test.run_lemma_tests ~lib_path_env:"" [ f ] with
+      | Ok () -> ()
+      | Error e -> Alcotest.failf "a true lemma passes: %s" e)
+
+let test_lemma_no_lemma_skips () =
+  with_parity_dir (fun dir ->
+      (* A file that does not even check: with no `@[lemma]` line it is never run. *)
+      let f = Filename.concat dir "bad.march" in
+      write_file f "mod Bad do\n  -- mentions @[lemma] only in a comment\n  fn f() : Int do undefined_name end\nend\n";
+      match Cmd_test.run_lemma_tests ~lib_path_env:"" [ f ] with
+      | Ok () -> ()
+      | Error e -> Alcotest.failf "a file with no lemma is skipped: %s" e)
+
 (* --------------------------------------------------------------- forge run *)
 
 (** [forge run] (INTERPRETED) must pass forge.toml's [[ffi]] sources through to
@@ -941,6 +977,9 @@ let () =
         test_parity_check_failure_is_not_parity_red;
       Alcotest.test_case "--reflection-parity: a mismatch is parity RED" `Quick test_parity_mismatch_is_red;
       Alcotest.test_case "--reflection-parity: comparing nothing fails" `Quick test_parity_nothing_compared_fails;
+      Alcotest.test_case "lemma tests: a counterexample fails the run" `Quick test_lemma_counterexample_fails;
+      Alcotest.test_case "lemma tests: a true unproved lemma passes" `Quick test_lemma_true_unproved_passes;
+      Alcotest.test_case "lemma tests: a file with no lemma is skipped" `Quick test_lemma_no_lemma_skips;
     ];
     "forge run", [
       Alcotest.test_case "interpreted run passes [ffi] sources to the compiler" `Quick

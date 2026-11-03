@@ -1,0 +1,14 @@
+# Known leaks of compiler-generated names in rendered diagnostics, checked by
+# the internals lint in test/run_errors.ml. One `<case> <word>` per line.
+# This file may only shrink: when a fix stops a leak, the lint fails until
+# its line is removed here.
+#
+# Generated actor/protocol message types (`<Name>_Msg`):
+# specs/todos/2026-11-02-diag-actor-messages.md
+linear_mixed_consumption_5 Host_Msg
+send_wrong_actor_2 Labels_Msg
+overlapping_impl_1 Stream_Msg
+# Generated session states (`S_<step>`):
+# specs/todos/2026-11-02-diag-choreography-session-messages.md
+linear_used_twice_6 S_end
+unknown_qualified_name_2 S_end

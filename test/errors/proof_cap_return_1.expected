@@ -19,13 +19,3 @@ this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. 
 
 
 
--- ERROR ---------------- errors/proof_cap_return_1.march
-
-mint_cap `Cap(Db.P)` is only allowed inside a public function of its declaring module `Db`. [mint_cap_invalid]
-hint: to obtain `Cap(Db.P)` elsewhere, receive it as a parameter and pass it through, or call a public factory in `Db`.
-
-23 |     fn make(cap : Cap(IO)) : Cap(Db.P) do mint_cap(cap) end
-                                               ^^^^^^^^^^^^^
-
-
-

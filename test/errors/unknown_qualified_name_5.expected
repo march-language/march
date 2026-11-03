@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR ---------- errors/unknown_qualified_name_5.march
+
+Unknown module `Lsit`. Did you mean `List`? [unknown_qualified_name]
+
+10 |     Lsit.length([1, 2])
+         ^^^^^^^^^^^
+
+    run `march --explain unknown_qualified_name`
+
+

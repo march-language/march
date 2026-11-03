@@ -10,10 +10,10 @@ for version in 1 2 3; do
   source=$dir/node_a_v$version.march
   [ "$version" = 1 ] && source=$dir/node_a.march
   cp "$source" "$work/v$version/patch.march"
-  (cd "$work/v$version" && "$MARCH" --compile --compile-so --hot-reload Rollback \
-    -o patch.so patch.march) > "$work/v$version/build.log" 2>&1 \
-    || { cat "$work/v$version/build.log" >&2; fail "patch compile"; }
+  bg_build "$work/v$version" "$work/v$version/build.log" "patch v$version" \
+    "$MARCH" --compile --compile-so --hot-reload Rollback -o patch.so patch.march
 done
+wait_builds
 socks=$(mktemp -d /tmp/hcr-rb.XXXXXX)
 export MARCH_HOT_RELOAD_SOCKET=$socks/a.sock
 start_node a

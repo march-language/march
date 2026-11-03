@@ -37,8 +37,8 @@
 
     Lemmas (phase 2): a dependency lemma a file calls belongs in the key too,
     with its post hash, its body hash and whether it was admitted, so a lemma
-    that stops proving withdraws its callers' facts.  [lemma_key] is that
-    hook; it is empty until `@[lemma]` exists. *)
+    that stops proving withdraws its callers' facts: the compiler prints
+    `lemma-def` / `lemma-dep` rows whose hash carries both ([lemma_key]). *)
 
 type diag = {
   d_code : string;
@@ -106,9 +106,9 @@ let parse ~(file : string) (stdout : string) (stderr : string) : result =
              Some { dep_file = canon f; dep_name = n; dep_hash = h }
            | _ -> None)
   in
-  let defs = rows "reflect-def" @ rows "reflect-cdef" in
+  let defs = rows "reflect-def" @ rows "reflect-cdef" @ rows "lemma-def" in
   let deps =
-    if not (key_on_core ()) then rows "reflect-dep" @ rows "reflect-cdep"
+    if not (key_on_core ()) then rows "reflect-dep" @ rows "reflect-cdep" @ rows "lemma-dep"
     else
       (* `uses: f, g` of the user's proved rows, matched to the frontier rows
          by name. *)
@@ -130,9 +130,34 @@ let last : (string, result) Hashtbl.t = Hashtbl.create 16
 (** How many refinement checks ran (tests count re-checks). *)
 let runs = ref 0
 
-(** Phase 2's hook: the dependency lemmas a file's last check called (post
-    hash, body hash, admitted).  Always empty in phase 1. *)
-let lemma_key (_file : string) : (string * string * bool) list = []
+(* A lemma row's hash is `lemma:<digest>:admitted|unproved`. *)
+let lemma_of (d : dep) : (string * string * bool) option =
+  match String.split_on_char ':' d.dep_hash with
+  | [ "lemma"; digest; status ] -> Some (d.dep_name, digest, status = "admitted")
+  | _ -> None
+
+(** The dependency lemmas a file's last check called: (qualified name,
+    digest of its theorem and body, admitted).  They are part of the key
+    ([r_deps]), so a dependency lemma that changes or stops proving re-checks
+    its callers ([stale_dependents]). *)
+let lemma_key (file : string) : (string * string * bool) list =
+  match Hashtbl.find_opt last (canon file) with
+  | Some r -> List.filter_map lemma_of r.r_deps
+  | None -> []
+
+(** Whether the last check of any file proved the lemma [name] (its bare
+    or qualified name): [None] when no check reported it. *)
+let lemma_admitted (name : string) : bool option =
+  let matches n = n = name || String.ends_with ~suffix:("." ^ name) n in
+  Hashtbl.fold
+    (fun _ r acc ->
+      match acc with
+      | Some _ -> acc
+      | None ->
+        List.find_map
+          (fun d -> match lemma_of d with Some (n, _, a) when matches n -> Some a | _ -> None)
+          (r.r_defs @ r.r_deps))
+    last None
 
 let command ~(file : string) =
   Printf.sprintf "cd %s && MARCH_LIB_PATH=%s %s --check --check-json --reflect-deps%s %s"
