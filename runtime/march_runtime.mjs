@@ -105,8 +105,12 @@ function march_encode_bytes(s) {
 // The last few strings' byte views (null: every code unit is one byte), keyed by
 // the string itself: a Map hashes a string once and keeps the hash, where `===`
 // compares contents (JavaScriptCore does so even for a string and itself, which
-// made every byte_at on a 3.5 MB string cost ~150 us in Safari).
+// made every byte_at on a 3.5 MB string cost ~150 us in Safari). At most one
+// string of each length: V8 before Node 26 hashes a string over 16K units by its
+// length alone, so two cached strings of one length would share a bucket and
+// every hit could compare their contents.
 const march_view_cache = new Map();
+const march_view_by_len = new Map();
 function march_byte_view(s) {
   if (s.length < 32) {
     for (let i = 0; i < s.length; i++) if (!march_unit_is_byte(s.charCodeAt(i))) return march_encode_bytes(s);
@@ -116,8 +120,15 @@ function march_byte_view(s) {
   if (hit !== undefined) return hit;
   let v = null;
   for (let i = 0; i < s.length; i++) if (!march_unit_is_byte(s.charCodeAt(i))) { v = march_encode_bytes(s); break; }
+  const same = march_view_by_len.get(s.length);
+  if (same !== undefined) march_view_cache.delete(same);
   march_view_cache.set(s, v);
-  if (march_view_cache.size > 4) march_view_cache.delete(march_view_cache.keys().next().value);
+  march_view_by_len.set(s.length, s);
+  if (march_view_cache.size > 4) {
+    const old = march_view_cache.keys().next().value;
+    march_view_cache.delete(old);
+    march_view_by_len.delete(old.length);
+  }
   return v;
 }
 

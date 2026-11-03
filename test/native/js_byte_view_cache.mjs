@@ -1,14 +1,15 @@
 // js_byte_view_cache — a byte view's cache lookup must not compare string contents.
 // JavaScriptCore compares a multi-megabyte string with itself in time linear in its
 // length, so the old `===` scan made every byte_at on a 3.5 MB world file cost ~150 us
-// in Safari and loading it never finished. Four cached strings of one length make V8
-// pay the same way (each miss compares every byte), so this fails under node too.
+// in Safari and loading it never finished. Four strings of one length make V8 pay
+// the same way: the `===` scan compares every byte of each one it passes, and V8
+// before Node 26 hashes them alike, so a Map holding all four compares them too.
 import { march_string_byte_at } from "../march_runtime.mjs";
 
 const n = 2_000_000;
 const make = (last) => "é".repeat(n - 1) + last;   // non-byte units, so each needs a view
 const [s, a, b, c] = ["a", "b", "c", "d"].map(make);
-for (const t of [s, a, b, c]) march_string_byte_at(t, 0);   // cache holds all four; s is oldest
+for (const t of [s, a, b, c]) march_string_byte_at(t, 0);   // s is the oldest
 
 const t0 = performance.now();
 let sum = 0;

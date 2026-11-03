@@ -34,8 +34,9 @@ git log is authoritative for exact commits.
   (`byte_at`, `byte_length`, `slice`) looked up its cached byte view by comparing strings
   with `===`, which JavaScriptCore does in time linear in the string's length, even for a
   string and itself. A game decoding a 3.5 MB world file never finished loading in
-  Safari. The cache is now a `Map` keyed by the string, which also stops V8 comparing
-  every byte of same-length strings on a miss.
+  Safari. The cache is now a `Map` keyed by the string, holding at most one string of
+  each length so older V8 (which hashes long strings by length) doesn't compare them
+  either.
 
 ## [0.7.0] - 2026-11-02
 
