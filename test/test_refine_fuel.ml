@@ -90,6 +90,39 @@ end
 |}
         in
         U.not_proved out ~line:5 ~callee:"need_m1");
+    gated "sound_definite_stage2: a model of an unfolded-past-fuel call is not a violation (review)" (fun () ->
+        (* `cnt` of any 3-element list is 3, so no element can fail; the
+           stage-2 model gave the depth-2 `cnt([2])` a free value and the
+           element shortcut called that a definite failure. *)
+        let out =
+          run
+            {|mod N do
+  fn cnt(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + cnt(t)
+    end
+  end
+  fn need_all(xs : List({v : Int | cnt(Cons(v, Cons(1, Cons(2, Nil)))) == 3})) : Int do 0 end
+  fn go(ys : List({Int | _ > 0})) : Int do need_all(ys) end
+end
+|}
+        in
+        if code out "refinement_violated" then Alcotest.failf "no violation: the program cannot fail:\n%s" out);
+    gated "sound_dropped_fact: an element fact that does not translate is not a free element (review)" (fun () ->
+        (* `_ > 5 && _ == one(0) + 4` with `one` opaque: the fact was dropped
+           whole, `$elem` went free, and `elem = 0` was reported. *)
+        let out =
+          run
+            {|mod N do
+  @[opaque]
+  fn one(x : Int) : Int do 1 end
+  fn need_all(xs : List({Int | _ > 0})) : Int do 0 end
+  fn go3(ys : List({Int | _ > 5 && _ == one(0) + 4})) : Int do need_all(ys) end
+end
+|}
+        in
+        if code out "refinement_violated" then Alcotest.failf "no violation: every element is > 5:\n%s" out);
     gated "fuel_cap: fuel above 8 is invalid_reflect" (fun () ->
         let out = run ~args:"--check" "mod N do\n  @[reflect(fuel: 9)]\n  fn a(n : Int) : Int do n end\nend\n" in
         if not (invalid_reflect out "a") then Alcotest.failf "expected invalid_reflect:\n%s" out);

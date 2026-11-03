@@ -65,6 +65,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **No more false refinement violations for container elements and passed functions.**
+  When an element refinement could not be translated for the solver (for example one that
+  calls an `@[opaque]` function), or when a proof stopped at a reflected call it did not
+  expand, the checker could report `refinement_violated` with a made-up element value for a
+  program that cannot fail. These are now reported as unverified (a skip), not violations.
+
 - **`--target js` byte strings are fast in Safari.** Each byte access on a long string
   (`byte_at`, `byte_length`, `slice`) looked up its cached byte view by comparing strings
   with `===`, which JavaScriptCore does in time linear in the string's length, even for a

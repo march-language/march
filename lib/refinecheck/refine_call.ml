@@ -714,6 +714,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
   let { root; errctx; postcond; path; lets; sc; re; binds; demand = _ } = cx in
+  scope_fact_dropped := false;
   (* A lemma body's pattern links (§4.3), read by stage 2 only; the `$link:`
      facts themselves translate to nothing, so stage 1 is unchanged. *)
   Reflect_state.links :=
@@ -3193,8 +3194,18 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              violated; the scalar path, which never takes this shortcut,
              skipped it).  A goal and fact naming no caller variable are
              decided by the contracts alone, as before. *)
+          (* Not in stage 2 (reflection design §4.4; phase 4 review): a
+             reflected call left unfolded (past its fuel, an undecided guard,
+             the budget) is an uninterpreted symbol there, so a model may give
+             it any value, and "the goal can fail" is not a definite failure.
+             Such a goal takes the `¬G` discharge below, as a scalar does. *)
           let definite =
             match subject, first with
+            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ when !Reflect_state.arm_on -> false
+            (* A subject whose own refinement did not translate is
+               unconstrained here: `List({Int | _ > 5 && _ == one(0) + 4})`
+               with `one` opaque was reported violated at `elem = 0`. *)
+            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ when !scope_fact_dropped -> false
             | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ ->
               (not free_goal_name)
               && (goal_caller_names = []

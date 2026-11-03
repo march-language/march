@@ -83,3 +83,33 @@ Perturbations, each RED:
 - `sound_cache`: `need_small` under `small(n)` is now **proved** (one decided step into `g`).
 - `infer C1` (two copies): reflection now proves `need_pos(b(3))` outright, leaving nothing to
   infer. `a` is made `@[opaque]` so the tests still exercise the demand chain.
+
+## Soundness review, round 1 (fresh reviewer, 2026-11-03)
+
+The reviewer found **no false proof**. It confirmed the safety claim in the code: the arm recovered
+by `List.find` is exactly the decided one, and the arm's conditions and the domain guard stay in
+every implication. `resolve_sorts` only ever drops a whole `Implies(lit, ..)` assumption, never a
+guard. `st.vals` is never asserted. `norm` is bounded, and `rounds`/`level` terminate.
+
+It did find a **false `violated`**. This was already on main and the phase 2 base, and the fuel
+limit is one way to reach it. It is fixed here, with two tests that go RED without the fix:
+
+- **Stage 2.** The element and callback definite-failure shortcut (`Element_domain`,
+  `Callback_domain`, `Callback_codomain` in `refine_call.ml`) took the first satisfying model as a
+  real failure. In stage 2 that model can give any value to a reflected call left unfolded (past
+  its fuel, undecided, or over budget).
+  - Example: `List({v : Int | cnt(Cons(v, Cons(1, Cons(2, Nil)))) == 3})` was reported violated at
+    `elem = 17702`.
+  - Fix: the shortcut is off in stage 2, and such a goal takes the ordinary `¬G` discharge.
+  - Test: `sound_definite_stage2`.
+- **Stage 1.** A refined local whose own fact does not translate was silently left unconstrained
+  (`reflect_scalar`), and the same shortcut then reported a model of it.
+  - Example: `List({Int | _ > 5 && _ == one(0) + 4})` with `one` `@[opaque]` was reported violated
+    at `elem = 0`.
+  - Fix: `Refine_resolve.scope_fact_dropped` records the drop, and the shortcut does not apply.
+  - Test: `sound_dropped_fact`.
+
+Suspicions recorded, not changed:
+- Element refinements are not part of the unfolding guard `pre`. This is harmless while only
+  structurally certified functions are unfolded.
+- A NaN literal in a template would make the arm recovery raise. No source syntax produces one.
