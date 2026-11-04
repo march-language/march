@@ -1851,11 +1851,11 @@ let is_list_literal_cons (name : Ast.name) args sp =
 (** The innermost part of [e] whose recorded type is apart from what [exp]
     says it should be, with its path (outermost first), or [None]. *)
 let rec locate_literal_part env (e : Ast.expr) (exp : ty) (path : string list)
-  : (Ast.span * string list) option =
-  let part_apart (p : Ast.expr) pexp =
+  : (Ast.span * string list * ty * ty) option =
+  let part_ty (p : Ast.expr) pexp =
     match Hashtbl.find_opt env.type_map (span_of_expr p) with
-    | Some t -> types_apart env 0 t pexp
-    | None -> false in
+    | Some t when types_apart env 0 t pexp -> Some t
+    | _ -> None in
   let first_apart parts =
     List.find_map (fun (p, pexp, seg) ->
         match seg with
@@ -1865,12 +1865,13 @@ let rec locate_literal_part env (e : Ast.expr) (exp : ty) (path : string list)
              elements have spans of their own). *)
           locate_literal_part env p pexp path
         | Some s ->
-          if not (part_apart p pexp) then None
-          else
+          match part_ty p pexp with
+          | None -> None
+          | Some t ->
             let path' = path @ [ s ] in
             match locate_literal_part env p pexp path' with
             | Some _ as deeper -> deeper
-            | None -> Some (span_of_expr p, path'))
+            | None -> Some (span_of_expr p, path', t, pexp))
       parts in
   match e with
   | Ast.ECon (name, (_ :: _ as args), sp) ->
@@ -1930,7 +1931,7 @@ let relocate_literal_mismatch env ~mark ~reason (e : Ast.expr) sp (expected : ty
      | None -> ()
      | Some d ->
        match locate_literal_part env e expected [] with
-       | Some (psp, (_ :: _ as path)) when psp <> sp ->
+       | Some (psp, (_ :: _ as path), pty, pexp) when psp <> sp ->
          let segs = List.rev path in
          let path_note = Printf.sprintf "In %s." (String.concat " of " segs) in
          (* "Argument to constructor `C`." is what the path now says (and,
@@ -1950,7 +1951,21 @@ let relocate_literal_mismatch env ~mark ~reason (e : Ast.expr) sp (expected : ty
                | Some rsp -> d.Err.labels @ [ { Err.lbl_span = rsp; lbl_message = origin_lbl } ]
                | None -> d.Err.labels))
            | _ -> (notes, d.Err.labels) in
-         let d' = { d with Err.span = psp; notes = path_note :: notes; labels } in
+         (* The headline is about this part, not the whole literal: its own
+            pair, with a diff when the part differs further in (§X2). *)
+         let diff_note = "The types differ here:" in
+         let notes = List.filter (fun n ->
+             not (String.length n >= String.length diff_note
+                  && String.sub n 0 (String.length diff_note) = diff_note)) notes in
+         let message, notes =
+           match diff_mismatch_message env ~provided:pty ~required:pexp with
+           | Some (h, note) -> (h, notes @ [ note ])
+           | None ->
+             (Printf.sprintf "expected %s but got %s."
+                (format_ty_for_error pexp) (format_ty_for_error pty),
+              notes @ List.filter (fun h -> not (List.mem h notes))
+                        (common_mismatch_hint pty pexp)) in
+         let d' = { d with Err.span = psp; message; notes = path_note :: notes; labels } in
          (* A wrong list element trips the [Cons] chain at more than one
             level, each a mismatch on the literal's span; they are all this
             one part's consequences, so only the moved one stays. *)
@@ -10538,6 +10553,12 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      seeding from an existing env — a seeded check re-walks the bodies it
      cares about and re-records what it finds. *)
   March_ast.Json_dispatch.reset ();
+  (* Type-variable letters in messages are assigned on first print from a
+     process-wide table.  A cold run typechecks the stdlib first and can
+     print one of its variables, so the user's first variable came out `b`
+     where a warm run (stdlib from the cache) said `a`.  Each check starts
+     lettering afresh; messages already rendered keep their text. *)
+  reset_tvar_display_names ();
   (* Same discipline for the display-only record-name index: start from the
      seed's snapshot (stdlib's names when seeded from the stdlib env; nothing
      for a from-scratch check), never from whatever the previous check in this

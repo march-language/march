@@ -1,0 +1,21 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_34.march
+
+expected `(List(String), Map(String, Float))` but got `(List(Int), Map(String, Int))`. [type_mismatch]
+
+7 |     show(stats())
+             ^^^^^^^
+
+    This is argument #1 of a function call.
+    The types differ here:
+        (List(Int), Map(String, Int))
+              ^^^ expected `String`
+                                ^^^ expected `Float`
+
+    the expected type comes from here:
+
+7 |     show(stats())
+        ^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

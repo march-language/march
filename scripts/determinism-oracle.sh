@@ -34,6 +34,12 @@
 # force a red: compiling conditions 3/4 against a stdlib copy with one extra
 # lambda shifts every counter after it.
 #
+# A second leg covers diagnostics: every test/errors program is run with
+# `--check` under the same four conditions, and the rendered text (stdout and
+# stderr) and exit status must be identical.  It found type-variable letters
+# that depended on cache warmth (`Pid(b)` cold, `Pid(a)` warm; specs/progress/
+# 2026-11-04-type-var-letters-cold-vs-warm-cache.md).
+#
 # The corpus is ir-oracle's (test/native, test/snapshots/src, bench) plus
 # examples/topology_app compiled with its `--topology` digest.  topology_app is
 # the program the known drift (#805) showed on: the ir-oracle corpus alone was
@@ -44,7 +50,8 @@
 # LOUDLY, since a run without it cannot see that drift class.
 #
 #   scripts/determinism-oracle.sh                    # --corpus small (snapshots + topology_app, ~30 programs)
-#   scripts/determinism-oracle.sh --corpus all       # + test/native + bench (~420 programs; CI)
+#   scripts/determinism-oracle.sh --corpus all       # + test/native + bench + test/errors (~770 programs; CI)
+#   scripts/determinism-oracle.sh --corpus errors    # the --check leg alone (test/errors, ~345 programs)
 #   scripts/determinism-oracle.sh --corpus all --shard 1/2   # shard K of N (1-based), CI runs two
 #   scripts/determinism-oracle.sh --self-test        # must print RED: proves the oracle can fail
 #   scripts/determinism-oracle.sh -j 8 -w /tmp/det   # parallelism / keep the work dir
@@ -78,11 +85,12 @@ export MARCH_STDLIB="${MARCH_STDLIB:-$ROOT/stdlib}"
 # ── internal per-program worker (invoked via xargs; not for users) ───────────
 # usage: determinism-oracle.sh --one <workdir> <argsfile>
 # The args file has three lines: tag, source path, extra compiler flags
-# (possibly empty).  One file per program keeps xargs' whitespace splitting
+# (possibly empty), and an optional fourth, `check` for the diagnostic leg.  One file per program keeps xargs' whitespace splitting
 # away from paths and flags.
 if [ "${1:-}" = "--one" ]; then
   WORK="$2"; args="$3"
   tag="$(sed -n 1p "$args")"; src="$(sed -n 2p "$args")"; flags="$(sed -n 3p "$args")"
+  mode="$(sed -n 4p "$args")"
   base="$(basename "$src" .march)"
   out="$WORK/out/$tag"
   rm -rf "$out"; mkdir -p "$out"
@@ -98,6 +106,13 @@ if [ "${1:-}" = "--one" ]; then
   stdlib_b="${MARCH_DET_PERTURB_STDLIB:-}"
   run_cond() { # <n> <cwd> <home> <stdlib-override-or-empty>
     local n="$1" cwd="$2" home="$3" sl="$4" rc
+    if [ "$mode" = check ]; then
+      # A rejected program exits 1; the status is part of the output compared.
+      (cd "$cwd" && env HOME="$home" ${sl:+"MARCH_STDLIB=$sl"} "$EXE" --check "$base.march") >"$out/$n.txt" 2>&1
+      echo "exit $?" >> "$out/$n.txt"
+      echo ok > "$out/$n.status"
+      return
+    fi
     rm -f "$cwd/$base.ll" "$cwd/$base.hashes"
     # $flags is deliberately unquoted: it is a space-separated flag list
     # (e.g. `--topology /abs/path.json`), never a user path with spaces.
@@ -149,8 +164,9 @@ if [ "${1:-}" = "--one" ]; then
   fi
   # Condition 1 is the reference; a program is OK only if 2, 3 and 4 all
   # match it in both files.  Report the first mismatch with its first line.
+  exts="ll hashes"; [ "$mode" = check ] && exts=txt
   for n in 2 3 4; do
-    for ext in ll hashes; do
+    for ext in $exts; do
       if ! cmp -s "$out/1.$ext" "$out/$n.$ext"; then
         first="$(diff "$out/1.$ext" "$out/$n.$ext" | grep '^[<>]' | head -1)"
         echo "FAIL  $tag  conditions (1,$n) .$ext differ; first: $first" > "$out/result"
@@ -175,7 +191,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1 (see --help)"; exit 2 ;;
   esac
 done
-case "$CORPUS" in small|all) ;; *) echo "FATAL: --corpus must be small or all, got: $CORPUS"; exit 2 ;; esac
+case "$CORPUS" in small|all|errors) ;; *) echo "FATAL: --corpus must be small, all or errors, got: $CORPUS"; exit 2 ;; esac
 if [ -n "$SHARD" ]; then
   [[ $SHARD =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ] \
     || { echo "FATAL: --shard takes K/N with 1 <= K <= N, got: $SHARD"; exit 2; }
@@ -228,13 +244,21 @@ fi
 
 # ── corpus (shared with ir-oracle.sh; keep the globs in step) ───────────────
 ARGS="$WORK/args"; rm -rf "$ARGS"; mkdir -p "$ARGS"
-add_program() { # <tag> <src> <flags>
-  printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$ARGS/$1"
+add_program() { # <tag> <src> <flags> [check]
+  printf '%s\n%s\n%s\n%s\n' "$1" "$2" "$3" "${4:-}" > "$ARGS/$1"
 }
 if [ "$CORPUS" = all ]; then
   globs="$ROOT/test/native/*.march $ROOT/test/snapshots/src/*.march $ROOT/bench/*.march"
+elif [ "$CORPUS" = errors ]; then
+  globs=""
 else
   globs="$ROOT/test/snapshots/src/*.march"
+fi
+if [ "$CORPUS" = all ] || [ "$CORPUS" = errors ]; then
+  for f in "$ROOT"/test/errors/*.march; do
+    [ -e "$f" ] || continue
+    add_program "errors_$(basename "$f" .march)" "$f" "" check
+  done
 fi
 for f in $globs; do
   [ -e "$f" ] || continue
@@ -245,7 +269,9 @@ done
 # the digest `forge topology check` writes (it holds no absolute paths), and
 # the compiler takes it as --topology.  Stage the project once; the four
 # conditions share the digest path exactly as they share the stdlib path.
-if [ -x "$FORGE" ]; then
+if [ "$CORPUS" = errors ]; then
+  :  # the diagnostic leg alone
+elif [ -x "$FORGE" ]; then
   d="$WORK/topology_app"; rm -rf "$d"; mkdir -p "$d"
   cp "$ROOT/examples/topology_app/topology.toml" "$ROOT/examples/topology_app/forge.toml" "$d/"
   cp -R "$ROOT/examples/topology_app/src" "$d/src"

@@ -1,12 +1,15 @@
 exit: 1
 -- TYPE MISMATCH ---------- errors/type_mismatch_17.march
 
-expected `Int` but got `String`. [type_mismatch]
+expected `Box(Int)` but got `Box(String)`. [type_mismatch]
 
 24 |     fn attack() : Int do unbox_int(id(Box("hi"))) end
                                         ^^^^^^^^^^^^^
 
     This is argument #1 of a function call.
+    The types differ here:
+        Box(String)
+            ^^^^^^ expected `Int`
 
     the expected type comes from here:
 

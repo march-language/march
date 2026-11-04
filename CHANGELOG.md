@@ -134,6 +134,14 @@ git log is authoritative for exact commits.
   underlines `string_to_int(s)`) and names the path to it ("In a list element of the `ports`
   field of …"), instead of underlining the whole literal with "Argument to constructor `Cons`".
 
+- Diagnostics: a type mismatch deep inside two types now reports the whole pair, with a note
+  that prints the provided type and puts a caret under each part that differs, instead of
+  naming only the innermost pair. Passing a `Result(List(Int), String)` for a
+  `Result(List(String), String)` used to say "expected `String` but got `Int`" and suggest
+  `int_to_string`; it now says "expected `Result(List(String), String)` but got
+  `Result(List(Int), String)`" and marks the `Int`. Long types hide the parts that match
+  (`{ ports : List(Int), … }`).
+
 - **Refinement verdicts no longer depend on machine load.** Each z3 query runs under a
   fixed resource limit (`rlimit`: 3,000,000 steps, about four times the costliest proof in the
   corpus and stdlib, and 50,000 for stage-2 reflection queries) instead of a 3-second wall-clock
@@ -220,6 +228,10 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- A type variable in an error message no longer changes letter depending on whether the
+  compiler's cache is warm (`Pid(b)` on a first run, `Pid(a)` after); each check now letters its
+  variables from `a`.
 
 - **Refinement proofs know that `x / -1` wraps at the smallest `Int`.** `-4611686018427387904 / -1`
   returns `-4611686018427387904` (the one place Int arithmetic still wraps), but the checker

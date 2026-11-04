@@ -1,12 +1,15 @@
 exit: 1
 -- TYPE MISMATCH ---------- errors/type_mismatch_23.march
 
-expected `Int` but got `String`. [type_mismatch]
+expected `List(Int)` but got `List(String)`. [type_mismatch]
 
 9 |     println(int_to_string(count(names)))
                                     ^^^^^
 
     This is argument #1 of a function call.
+    The types differ here:
+        List(String)
+             ^^^^^^ expected `Int`
 
     the expected type comes from here:
 
