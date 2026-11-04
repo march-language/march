@@ -229,6 +229,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A type variable in an error message no longer changes letter depending on whether the
+  compiler's cache is warm (`Pid(b)` on a first run, `Pid(a)` after); each check now letters its
+  variables from `a`.
+
 - **Refinement proofs know that `x / -1` wraps at the smallest `Int`.** `-4611686018427387904 / -1`
   returns `-4611686018427387904` (the one place Int arithmetic still wraps), but the checker
   read it as `4611686018427387904`, so `need_pos(x / -1)` with `x < 0` (directly or through a

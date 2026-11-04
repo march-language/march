@@ -10553,6 +10553,12 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      seeding from an existing env — a seeded check re-walks the bodies it
      cares about and re-records what it finds. *)
   March_ast.Json_dispatch.reset ();
+  (* Type-variable letters in messages are assigned on first print from a
+     process-wide table.  A cold run typechecks the stdlib first and can
+     print one of its variables, so the user's first variable came out `b`
+     where a warm run (stdlib from the cache) said `a`.  Each check starts
+     lettering afresh; messages already rendered keep their text. *)
+  reset_tvar_display_names ();
   (* Same discipline for the display-only record-name index: start from the
      seed's snapshot (stdlib's names when seeded from the stdlib env; nothing
      for a from-scratch check), never from whatever the previous check in this
