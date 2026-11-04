@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: In the `port` field.
+-- REJECT (§X1 slice 2): the lambda's result is a record literal, so the caret narrows to its wrong field.
+mod Cfgs do
+  type Cfg = { name : String, port : Int }
+  fn cfgs(xs : List(Int)) : List(Cfg) do
+    List.map(xs, fn _ -> { name: "s", port: "80" })
+  end
+  fn main() : Int do 0 end
+end

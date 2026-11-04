@@ -134,6 +134,11 @@ git log is authoritative for exact commits.
   underlines `string_to_int(s)`) and names the path to it ("In a list element of the `ports`
   field of …"), instead of underlining the whole literal with "Argument to constructor `Cons`".
 
+- Diagnostics: a lambda whose result is wrong is blamed at its body, not at the call it is passed
+  to. `List.map(xs, fn x -> x + 1)` where a `List(String)` is expected now underlines `x + 1`
+  and says `List.map`'s `b` is this function's result; a record or tuple result narrows to its
+  wrong field or component.
+
 - Diagnostics: a type mismatch deep inside two types now reports the whole pair, with a note
   that prints the provided type and puts a caret under each part that differs, instead of
   naming only the innermost pair. Passing a `Result(List(Int), String)` for a
