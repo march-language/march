@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+-- REJECT (§X3 poison): `List.append`'s `a` is bound to `Int` by the first list, so `["a"]` fails;
+-- the result `List(a)` shares that variable, so it is poisoned and the `map` below reports nothing more.
+mod Cascade do
+  fn total() : Int do
+    let xs = List.append([1, 2], ["a"])
+    let ys = List.map(xs, fn x -> x ++ "!")
+    List.length(ys)
+  end
+  fn main() : Int do 0 end
+end

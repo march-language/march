@@ -40,34 +40,6 @@ silence into an error for a module that wants a guarantee.
 > is, and the same on every platform. A project with a known-hard proof can raise
 > it with `march --refine-rlimit N` or `[refine] rlimit = N` in `forge.toml`.
 
-> **What's new (October 2026).** Refinements now reach further into
-> containers, callbacks and folds:
->
-> - **2026-10-18. Fold accumulator invariants.** A demand on a fold's result
->   is checked as the invariant its accumulator keeps. You can also state the
->   invariant yourself by annotating the accumulator. See
->   [Folds](#folds-an-accumulator-invariant) and
->   [An annotated accumulator](#an-annotated-accumulator).
-> - **2026-10-21. Relational element refinements.** One slot of a type can
->   mention another slot, so you can say "every value is bigger than its key".
->   See [Relational element refinements](#relational-element-refinements).
-> - **2026-10-21. Two-argument abstract refinements.** A filter whose callback
->   looks at a key and a value together now carries what the callback decided.
->   `Map.filter` carries this fact. It is assumed, and a runtime property test
->   checks it. See [Two arguments](#two-arguments-a-relation-between-sibling-slots).
-> - **2026-10-21. More stdlib functions carry element facts.** `Hamt.fold` and
->   `Enum.scan` carry the fold invariant. `Queue`'s functions pass element
->   refinements through. See [which stdlib folds carry it](#folds-an-accumulator-invariant).
-> - **2026-10-21. Module-wide inference.** `march --refine-infer` and
->   `forge refine --infer` propose every kind of refinement the checker can
->   verify. See [Module-wide inference](#module-wide-inference-march---refine-infer-and-forge-refine---infer).
-> - **2026-10-22. A name bound twice is a type error.** A lambda, function or
->   pattern that binds the same name twice is rejected as
->   [`duplicate_binder`]({{ site.baseurl }}/docs/errors/duplicate_binder/).
->
-> The gaps these features still have are listed under
-> [Limitations](#open-gaps-in-element-and-abstract-refinements).
-
 ## On this page
 
 **Start here**
@@ -76,6 +48,8 @@ silence into an error for a module that wants a guarantee.
 - [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
 - [The Problem They Solve](#the-problem-they-solve)
 - [Syntax](#syntax)
+  - [A message for each half of a contract](#a-message-for-each-half-of-a-contract)
+  - [Refinements inside containers, callbacks and folds](#refinements-inside-containers-callbacks-and-folds)
 - [How Checking Works: Definite Failure](#how-checking-works-definite-failure)
 - [Counterexamples: the failing input, in source terms](#counterexamples-the-failing-input-in-source-terms)
 - [Path Sensitivity: Guards Establish Facts](#path-sensitivity-guards-establish-facts)
@@ -87,6 +61,7 @@ silence into an error for a module that wants a guarantee.
 **Refining each kind of value**
 
 - [Measures: Refining over Data Structures](#measures-refining-over-data-structures)
+  - [Reflection: your functions in predicates](#reflection-your-functions-in-predicates)
   - [Lemmas: proving what one unfolding cannot](#lemmas-proving-what-one-unfolding-cannot)
 - [String Refinements](#string-refinements)
 - [Set Refinements](#set-refinements)
@@ -103,6 +78,7 @@ silence into an error for a module that wants a guarantee.
 **Finding out what was actually checked**
 
 - [Counting the obligations: `--refine-report`](#counting-the-obligations---refine-report)
+- [Termination: `--termination-report`](#termination---termination-report)
 - [Which functions are reflected: `--reflect-report`](#which-functions-are-reflected---reflect-report)
 - [Getting a contract proposed for you: `forge refine`](#getting-a-contract-proposed-for-you-forge-refine)
   - [Module-wide inference: `march --refine-infer` and `forge refine --infer`](#module-wide-inference-march---refine-infer-and-forge-refine---infer)
@@ -114,6 +90,7 @@ silence into an error for a module that wants a guarantee.
 
 - [`cap verified`: turning silence into an error](#cap-verified-turning-silence-into-an-error)
 - [`cap no_panic`: Divisions That Can't Panic](#cap-no_panic--divisions-that-cant-panic)
+- [`cap total`: requiring termination](#requiring-termination-cap-total)
 
 **Limits and status**
 
@@ -132,13 +109,21 @@ the docs, and the compiler enforces it at every call.
 
 | You want to | Reach for |
 |---|---|
-| Reject a bad argument at the call site | A refined parameter: `i : {Int | _ >= 0 && _ < len(xs)}` |
+| Reject a bad argument at the call site | A refined parameter: `i : {Int \| _ >= 0 && _ < len(xs)}` |
 | Promise something about a result | A refined return type: `: {Int | _ >= 0}` |
+| Give a broken contract a message in the caller's terms | [`else "…"` on a conjunct](#a-message-for-each-half-of-a-contract) |
 | Talk about a list's length, a record's fields, or your own data | A [measure](#measures-refining-over-data-structures) |
+| Call your own pure function inside a predicate | [Reflection](#reflection-your-functions-in-predicates): `if is_small(n) do need_small(n) …` |
+| Prove a fact that needs induction | A [`@[lemma]`](#lemmas-proving-what-one-unfolding-cannot), whose theorem is a fact after each call |
 | Say which elements a collection holds | [Set](#set-refinements) and [element](#element-refinements-refining-what-a-container-holds) refinements |
+| Relate one slot to another ("every value is bigger than its key") | A [relational element refinement](#relational-element-refinements) |
+| Keep what a `filter` callback decided in its result | An [abstract refinement](#abstract-refinements-filter-keeps-what-its-predicate-says), with [one argument or two](#two-arguments-a-relation-between-sibling-slots) |
+| State what a fold's accumulator keeps true | A [fold invariant](#folds-an-accumulator-invariant), or an [annotated accumulator](#an-annotated-accumulator) |
 | Say which constructor an ADT value is | A [constructor tag](#constructor-tags-refining-over-adt-variants) |
 | Make unproven contracts an error, not silence | [`cap verified`](#cap-verified-turning-silence-into-an-error) |
 | Prove no division in a module can panic | [`cap no_panic`](#cap-no_panic--divisions-that-cant-panic) |
+| Prove every function in a module terminates | [`--termination-report`](#termination---termination-report) and [`cap total`](#requiring-termination-cap-total) |
+| Have contracts proposed for an existing module | [`march --refine-infer` and `forge refine --infer`](#module-wide-inference-march---refine-infer-and-forge-refine---infer) |
 | Find out whether a contract is checked at all | [`--refine-report`](#counting-the-obligations---refine-report) and the [coverage audit](#coverage-audit-does-the-checker-even-look-at-this-refinement) |
 
 Do not refine every `Int`. Many March APIs clamp defensively and have no real

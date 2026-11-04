@@ -1459,17 +1459,29 @@ let deploy_hot_cmd =
     Arg.(value & opt string "" & info ["old-schemas"] ~docv:"PATH"
       ~doc:"Explicit running schema baseline for servers without SCHEMAS reporting.")
   in
-  let run o s target prefix e c t grant_caps no_cap_gate old_schemas =
+  let accept_unproved =
+    Arg.(value & opt_all string [] &
+         info ["accept-unproved"] ~docv:"ACTOR.LAW"
+           ~doc:"Deploy even though this migration law was not proved (repeatable, or \
+                 comma-separated): $(b,Counter.state) for an actor's state contract, \
+                 $(b,Counter.Inc) for a handler's parameter refinements, or $(b,Counter) \
+                 for all of an actor's laws. A counterexample still refuses the deploy.")
+  in
+  let run o s target prefix e c t grant_caps no_cap_gate old_schemas accept_unproved =
     ignore target; ignore prefix;
+    let accept_unproved =
+      List.concat_map (fun a -> List.filter (( <> ) "") (String.split_on_char ',' a))
+        accept_unproved in
     (* D26: a topology app's derived pool caps go through the same gate. *)
     let pool_gate proj ~env = Pool_caps.deploy_gate ~proj ~env ~grant_caps () in
     let result =
       if e = "" && c = 0 then
         (* Single-server fast path (backward compat) *)
-        Cmd_deploy_hot.deploy ~output:o ~so:s ~old_schemas ~grant_caps ~no_cap_gate ~pool_gate ()
+        Cmd_deploy_hot.deploy ~output:o ~so:s ~old_schemas ~grant_caps ~no_cap_gate ~pool_gate
+          ~accept_unproved ()
       else
         Cmd_deploy_hot.deploy_env ~output:o ~so:s ~old_schemas ~env:e ~canary:c ~timeout_ms:t
-          ~grant_caps ~no_cap_gate ~pool_gate ()
+          ~grant_caps ~no_cap_gate ~pool_gate ~accept_unproved ()
     in
     match result with
     | Ok () -> ()
@@ -1477,7 +1489,7 @@ let deploy_hot_cmd =
   in
   Cmd.v (Cmd.info "hot"
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
-  Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate $ old_schemas)
+  Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate $ old_schemas $ accept_unproved)
 
 let deploy_term =
   let env_arg =

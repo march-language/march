@@ -146,7 +146,10 @@ mod Random do
   end
 
   doc """
-  Generate a random integer in [lo, hi] (inclusive). Spans up to 2^52.
+  Generate a random integer in [lo, hi] (inclusive), for any `lo <= hi`, up
+  to the whole Int range. A span of at most 2^52 takes one `next_int` draw;
+  a wider one draws 62 bits at a time and retries the draws that fall
+  outside the span (each try succeeds with probability at least 1/2).
   Requires `lo <= hi`: when `hi == lo - 1` the modulus is zero and it
   panics (`int_mod: division by zero`); a smaller `hi` gives meaningless results.
   Returns `(value, new_rng)`.
@@ -157,8 +160,51 @@ mod Random do
       -- die is one of 1..6
   """
   fn range(rng : Rng, lo : Int, hi : Int) : (Int, Rng) do
-    let (raw, rng2) = next_int(rng)
-    (lo + int_mod(raw, hi - lo + 1), rng2)
+    -- `hi - lo` overflows when the span is 2^62 or more; the wrapped
+    -- difference is then negative.
+    let span = int_wrapping_sub(hi, lo)
+    if lo > hi || (span >= 0 && span < 1048576 * (65536 * 65536)) do
+      let (raw, rng2) = next_int(rng)
+      (lo + int_mod(raw, hi - lo + 1), rng2)
+    else if span >= 0 do range_wide(rng, lo, span, smear_right(span))
+    else range_full(rng, lo, hi)
+    end end
+  end
+
+  -- 62 uniform bits in [0, 2^62), plus one more bit (0 or 1), from two
+  -- next_int draws (31 bits of each; bit 31 of the first is the extra bit).
+  pfn next62(rng : Rng) : (Int, Int, Rng) do
+    let (a, rng2) = next_int(rng)
+    let (b, rng3) = next_int(rng2)
+    let low31 = 65536 * 32768 - 1
+    let bits = int_and(a, low31) * (65536 * 32768) + int_and(b, low31)
+    (bits, int_and(int_shr(a, 31), 1), rng3)
+  end
+
+  -- The smallest all-ones mask covering x (x >= 0).
+  pfn smear_right(x : Int) : Int do
+    let x = int_or(x, int_shr(x, 1))
+    let x = int_or(x, int_shr(x, 2))
+    let x = int_or(x, int_shr(x, 4))
+    let x = int_or(x, int_shr(x, 8))
+    let x = int_or(x, int_shr(x, 16))
+    int_or(x, int_shr(x, 32))
+  end
+
+  -- lo + [0, span] for 2^52 <= span < 2^62: mask 62 bits down to span's
+  -- width and retry until the draw is within span.
+  pfn range_wide(rng : Rng, lo : Int, span : Int, mask : Int) : (Int, Rng) do
+    let (bits, _, rng2) = next62(rng)
+    let x = int_and(bits, mask)
+    if x <= span do (lo + x, rng2) else range_wide(rng2, lo, span, mask) end
+  end
+
+  -- [lo, hi] spanning 2^62 or more: a uniform draw over the whole Int range
+  -- (the extra bit picks the sign half), retried until it lands inside.
+  pfn range_full(rng : Rng, lo : Int, hi : Int) : (Int, Rng) do
+    let (bits, sign, rng2) = next62(rng)
+    let x = if sign == 1 do bits else -1 - bits end
+    if x >= lo && x <= hi do (x, rng2) else range_full(rng2, lo, hi) end
   end
 
   doc """

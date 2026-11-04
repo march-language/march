@@ -138,10 +138,27 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`forge deploy hot` refuses a migration law it can't prove, instead of letting it through.**
+  An unproved or unchecked law (a predicate the schema can't record, an `@invariant` outside
+  the supported grammar, a baseline from a compiler older than the contract check) refuses the
+  deploy, unless it is named with `--accept-unproved <Actor>.state`, `<Actor>.<Handler>` or
+  `<Actor>`. A counterexample always refuses. A missing compiler (`MARCH_BIN`) is now a
+  refusal, not a silent skip. An unsupported `@invariant` is recorded instead of dropped.
+
+- Diagnostics: a call whose argument has the wrong type no longer makes every later use of its
+  result fail too. `List.append([1, 2], ["a"])` reports `"a"` once; its result is no longer taken
+  to be a `List(Int)` that the next line then misuses. A result the function declares outright,
+  like `parse : String -> Option(Int)`, is kept, so its own checks still run.
+
 - Diagnostics: a type mismatch inside a constructor or a list, tuple or record literal now points
   at the part that is wrong (`[1, 2, "three"]` underlines `"three"`, `Ok(string_to_int(s))`
   underlines `string_to_int(s)`) and names the path to it ("In a list element of the `ports`
   field of …"), instead of underlining the whole literal with "Argument to constructor `Cons`".
+
+- Diagnostics: a lambda whose result is wrong is blamed at its body, not at the call it is passed
+  to. `List.map(xs, fn x -> x + 1)` where a `List(String)` is expected now underlines `x + 1`
+  and says `List.map`'s `b` is this function's result; a record or tuple result narrows to its
+  wrong field or component.
 
 - Diagnostics: a type mismatch deep inside two types now reports the whole pair, with a note
   that prints the provided type and puts a caret under each part that differs, instead of
@@ -216,6 +233,10 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- The Refinement Types chapter (`/docs/refinement-types/`) drops its dated "What's new" box. Its
+  "When to use refinements" table now points at refinement messages, reflection, lemmas,
+  relational element refinements, abstract refinements, fold invariants, termination (`cap total`)
+  and `--refine-infer`, and "On this page" lists those sections too.
 - A new Lemmas guide (`specs/lang/lemmas.md`, `/docs/lemmas/` on the site): writing `@[lemma]` proofs by induction,
   `assert` steps and fuel, using lemmas with refinements, and what `forge test`, `forge doc`,
   `forge search --law` and the editor do with them.
@@ -244,6 +265,22 @@ git log is authoritative for exact commits.
   already proved a call's precondition. The result is now checked with them, and a contract
   proved this way is a fact at the function's callers. Other refined result types don't use
   these facts yet.
+- **`Random.range` (and so `Gen.int`) works for any span.** A range wider than the largest Int,
+  such as `Gen.int(-4611686018427387903, 4611686018427387903)`, panicked with "attempt to
+  subtract with overflow" since Int arithmetic began checking for overflow. A range wider
+  than 2^52 never panicked but only produced values in its bottom 2^52. Both now draw
+  uniformly over the whole span. Spans up to 2^52 give the same values for the same seed as before.
+- **A hot deploy can no longer tighten an actor's contract unproved.** A state field's
+  refinement, a handler parameter's and the `@invariant` were not part of the deploy schema
+  (the refinements were erased, and an `@invariant` was only checked against a
+  `migrate_state`). So a deploy that only strengthened one went through unchecked, and the
+  new handlers' proofs rested on a fact the live actors didn't meet: a division "proved" safe
+  by `count >= 1` could divide a live `count: 0`. The schema now records them, and
+  `forge deploy hot` proves the running version's contracts imply the new ones, for the state
+  (through `migrate_state`, or as it is when the fields are unchanged) and for each handler
+  parameter. The `migrate_state` check itself now proves a correct migration and refutes a
+  wrong one with a counterexample; before, it did neither, because the synthesised state type
+  was ambiguous with the actor's own.
 
 - A type variable in an error message no longer changes letter depending on whether the
   compiler's cache is warm (`Pid(b)` on a first run, `Pid(a)` after); each check now letters its

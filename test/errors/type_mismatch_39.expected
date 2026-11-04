@@ -1,0 +1,18 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_39.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+6 |     let xs = List.append([1, 2], ["a"])
+                                      ^^^
+
+    In a list element.
+    This is argument #2 of a function call.
+
+    the expected type comes from here:
+
+6 |     let xs = List.append([1, 2], ["a"])
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

@@ -1,0 +1,10 @@
+Tally: contracts=1
+Tally: invariant=(count >= 1)
+Tally: field count refine=(count >= 1)
+Tally: handler Bump refines=['(p0 > 5)']
+Tally: handler Span refines=[None, '(p1 >= p0)']
+Odd: contracts=1
+Odd: invariant_unsupported=True
+Odd: refine_unsupported=True
+Odd: field count refine=None
+Odd: handler Poke refines=None

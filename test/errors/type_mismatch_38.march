@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+-- REJECT (§X1 slice 2, guard): `fold_left`'s accumulator type is decided by its initial value as well as the lambda, so neither is singled out and the call keeps the error.
+mod Total do
+  fn total(xs : List(Int)) : Int do
+    List.fold_left(xs, "", fn (acc, _) -> acc)
+  end
+  fn main() : Int do 0 end
+end

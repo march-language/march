@@ -5,11 +5,16 @@
     this module to decide whether a hot swap requires a migrate_state function and
     whether the state change is compat-policy-safe. *)
 
-type field = { name: string; ty: string }
+(** [refine]: the field's refinement as a predicate over the state's bare
+    field names, as @invariant is written (`(count >= 0)`). *)
+type field = { name: string; ty: string; refine: string option }
 
 (** One message constructor: a handler of the actor, or a constructor of a
     migrate_msg's old type.  [params] are the schema type strings. *)
-type ctor = { cname: string; params: string list }
+type ctor = { cname: string; params: string list;
+              refines: string option list }
+(** [refines]: per parameter, its refinement over the positional names
+    [p0], [p1], ...; [] when none is refined (or an older compiler). *)
 
 type actor_schema = {
   compat: string;            (* "full" | "forward" | "any" *)
@@ -17,6 +22,8 @@ type actor_schema = {
   state_fields: field list;
   handlers: ctor list option;          (* DD step 6: None = an older compiler *)
   migrate_msg_from: ctor list option;  (* the old type <actor>_migrate_msg takes *)
+  contracts: bool;           (* written by a compiler that records refinements *)
+  unsupported: bool;         (* a refinement or @invariant it could not write down *)
 }
 
 (** The deploy changed the actor's message type (D30, plan 6.3): a handler
@@ -44,7 +51,11 @@ let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
   let open Yojson.Safe.Util in
   let ctors value = value |> to_list |> List.map (fun c ->
       { cname = c |> member "name" |> to_string;
-        params = c |> member "params" |> to_list |> List.map to_string }) in
+        params = c |> member "params" |> to_list |> List.map to_string;
+        refines = (match member "refines" c with
+            | `Null -> []
+            | v -> v |> to_list |> List.map to_string_option) }) in
+  let flag key j = match member key j with `Bool b -> b | _ -> false in
   let optional key decode j = match member key j with
     | `Null -> None | value -> Some (decode value) in
   json |> to_assoc |> List.map (fun (actor, j) ->
@@ -52,11 +63,14 @@ let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
         | `Null -> "full" | v -> to_string v in
       let state_fields = member "state_fields" j |> to_list |> List.map (fun f ->
           { name = f |> member "name" |> to_string;
-            ty = f |> member "ty" |> to_string }) in
+            ty = f |> member "ty" |> to_string;
+            refine = f |> member "refine" |> to_string_option }) in
       actor, { compat; state_fields;
                invariant = optional "invariant" to_string j;
                handlers = optional "handlers" ctors j;
-               migrate_msg_from = optional "migrate_msg_from" ctors j })
+               migrate_msg_from = optional "migrate_msg_from" ctors j;
+               contracts = (match member "contracts" j with `Null -> false | _ -> true);
+               unsupported = flag "refine_unsupported" j || flag "invariant_unsupported" j })
 
 let parse_schemas_file path =
   if not (Sys.file_exists path) then []
@@ -69,12 +83,12 @@ let parse_schemas_file path =
 let diff_actor (old_s : actor_schema) (new_s : actor_schema) : field_change list =
   let old_map = List.map (fun f -> (f.name, f.ty)) old_s.state_fields in
   let new_map = List.map (fun f -> (f.name, f.ty)) new_s.state_fields in
-  let removed = List.filter_map (fun (name, ty) ->
-      if not (List.mem_assoc name new_map) then Some (FieldRemoved { name; ty })
-      else None) old_map in
-  let added = List.filter_map (fun (name, ty) ->
-      if not (List.mem_assoc name old_map) then Some (FieldAdded { name; ty })
-      else None) new_map in
+  let removed = List.filter_map (fun f ->
+      if not (List.mem_assoc f.name new_map) then Some (FieldRemoved f)
+      else None) old_s.state_fields in
+  let added = List.filter_map (fun f ->
+      if not (List.mem_assoc f.name old_map) then Some (FieldAdded f)
+      else None) new_s.state_fields in
   let changed = List.filter_map (fun (name, old_ty) ->
       match List.assoc_opt name new_map with
       | Some new_ty when new_ty <> old_ty ->

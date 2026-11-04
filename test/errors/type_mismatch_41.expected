@@ -1,0 +1,33 @@
+exit: 1
+-- WARNING: PATTERN ------- errors/type_mismatch_41.march
+
+Non-exhaustive pattern match — missing case: None. [non_exhaustive_match]
+
+7 |     match parse(n) do
+              ^^^^^^^^^^^
+
+    Add a branch for this case, or use `_ -> ...` as a catch-all.
+
+
+-- TYPE MISMATCH ---------- errors/type_mismatch_41.march
+
+expected `String` but got `Int`. [type_mismatch]
+
+7 |     match parse(n) do
+                    ^
+
+    This is argument #1 of a function call.
+    Use `int_to_string(x)` to convert an Int to a String.
+
+    the expected type comes from here:
+
+7 |     match parse(n) do
+              ^^^^^^^^
+
+    `n` was bound here as `Int`:
+
+6 |   fn first(n : Int) : Int do
+               ^
+    run `march --explain type_mismatch`
+
+

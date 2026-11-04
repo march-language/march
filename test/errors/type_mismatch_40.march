@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+-- REJECT (§X3 poison): the default `"none"` fails against `Option(Int)`'s `a`; the result `a` is
+-- poisoned, so `p ++ "!"` is not reported as a second, contradicting mismatch.
+mod Default do
+  fn label() : String do
+    let p = Option.unwrap_or(Some(1), "none")
+    p ++ "!"
+  end
+  fn main() : Int do 0 end
+end
