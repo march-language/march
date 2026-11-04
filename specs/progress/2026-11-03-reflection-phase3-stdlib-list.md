@@ -59,7 +59,13 @@ phases 2 (lemmas, #1061) and 4 (fuel, #1065).
    obligations as `unreflectable-predicate`. There the theorems' unqualified `reverse` and `take`
    are ambiguous with the prelude's own definitions. In every real program (stdlib prepended) all
    13 prove. These are new obligations, not regressions.
-5. **Filter.** Reflecting `filter` itself waits for phase 5 (function values), as the spec rules.
+5. **The `len$x = $len(x)` bridge is added only to a query that mentions `$len`.** Added to
+   every stage-2 query with a list constant, it made each compile about 15x slower in the
+   refinement check (a trivial `--check` went from 2.2 s to 31.9 s; the train's two-node
+   precompile from 5-10 to 22-25 minutes), because z3 instantiated `$len`'s axioms for each
+   list constant. Where `$len` does not occur, the bridge only defines a fresh symbol, so
+   leaving it out loses no proof: every verdict is identical, and all 13 lemmas still prove.
+6. **Filter.** Reflecting `filter` itself waits for phase 5 (function values), as the spec rules.
    The length contract is its substitute.
 
 ## Tests (group `reflect-stdlib-list`, `test/test_refine_stdlib_list.ml`; 9 cases)

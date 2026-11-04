@@ -4355,9 +4355,22 @@ let resolve_sorts (decls : (string * Smt.sort) list) (goal : Smt.term)
   (* Stage 2: a list constant's memoized length `len$x` is `$len(x)`, the
      measure the unfoldings of a reflected call's length (`len(append(xs,
      ys))`) are stated in; without it `len(xs)` and `len(append(Nil, ys))`
-     never meet.  It is `len`'s meaning, so it holds of every list. *)
+     never meet.  It is `len`'s meaning, so it holds of every list.  It is
+     added only to a query that already mentions `$len`: elsewhere it connects
+     nothing, and on every stage-2 query it made each compile ~15x slower
+     (z3 instantiating `$len`'s axioms for each list constant). *)
+  let mentions_len () =
+    let needle = "(" ^ list_len_measure ^ " " in
+    let has t =
+      let s = Smt.render t in
+      let n = String.length needle and l = String.length s in
+      let rec go i = i + n <= l && (String.sub s i n = needle || go (i + 1)) in
+      go 0
+    in
+    has goal || List.exists has assumptions
+  in
   let assumptions =
-    if not !Reflect_state.arm_on then assumptions
+    if not !Reflect_state.arm_on || not (mentions_len ()) then assumptions
     else
       assumptions
       @ List.filter_map
