@@ -1257,3 +1257,33 @@ let name_clashes =
         in
         if not (unproved out "tag_zero" || refuted out "tag_zero") then
           Alcotest.failf "tag(Reply(c, v)) == 0 is false:\n%s" out) ]
+
+(* ── A `match` or `if` in a `let`'s right-hand side unfolds ───────────────
+   todo 2026-10-31-reflection-encoder-gaps ("a `match` in a non-tail value
+   position"): the block is translated once per case of the right-hand side
+   ([Refine_reflect.tr_case]). *)
+let let_match_src =
+  {|mod LM do
+  type Lq = Ez | Cz(Int, Lq)
+  fn depth2(l : Lq) : Int do
+    let a = if l == Ez do 0 else 1 end
+    let b = match l do
+      Ez -> 10
+      Cz(x, _) -> x
+    end
+    a + b
+  end
+|}
+
+let let_match =
+  [ gated "let_match: a body whose `let`s branch unfolds per case" (fun () ->
+        let out =
+          run
+            (let_match_src
+           ^ "  @[lemma]\n  fn d_ez(u : Int) : {Unit | depth2(Ez) == 10} do () end\n  @[lemma]\n  fn d_cz(x : Int) : {Unit | depth2(Cz(x, Ez)) == x + 1} do () end\nend\n")
+        in
+        expect_admitted out "d_ez";
+        expect_admitted out "d_cz");
+    gated "let_match_red: a false theorem about it is not proved" (fun () ->
+        let out = run (let_match_src ^ "  @[lemma]\n  fn d_bad(x : Int) : {Unit | depth2(Cz(x, Ez)) == x} do () end\nend\n") in
+        if not (unproved out "d_bad" || refuted out "d_bad") then Alcotest.failf "d_bad is false:\n%s" out) ]
