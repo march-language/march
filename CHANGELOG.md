@@ -259,6 +259,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Random.range` (and so `Gen.int`) works for any span.** A range wider than the largest Int,
+  such as `Gen.int(-4611686018427387903, 4611686018427387903)`, panicked with "attempt to
+  subtract with overflow" since Int arithmetic began checking for overflow. A range wider
+  than 2^52 never panicked but only produced values in its bottom 2^52. Both now draw
+  uniformly over the whole span. Spans up to 2^52 give the same values for the same seed as before.
 - **A hot deploy can no longer tighten an actor's contract unproved.** A state field's
   refinement, a handler parameter's and the `@invariant` were not part of the deploy schema
   (the refinements were erased, and an `@invariant` was only checked against a
