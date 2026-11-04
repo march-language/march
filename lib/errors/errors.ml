@@ -258,8 +258,8 @@ let sorted ctx =
    - a [mint_cap_invalid] inside the span of a [proof_cap_mint_private] /
      [proof_cap_return]: the specific rule already reports that mint;
    - while a protocol definition is invalid ([role_needs_invalid],
-     [protocol_invalid], [endpoints_label_invalid]), the type, constructor,
-     linearity and session errors: the generated role modules everything
+     [protocol_invalid], [endpoints_label_invalid]), the type, step-order,
+     constructor, linearity and session errors: the generated role modules everything
      else is checked against are built from the invalid protocol, so those
      errors are its consequences (fix the protocol first);
    - an error with no source position (line 0) beside a positioned one;
@@ -325,7 +325,8 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
         && List.mem (slug_of_code d.code)
              [ Code.role_needs_invalid; Code.protocol_invalid; Code.endpoints_label_invalid ]) ds in
   let protocol_follow_on sl =
-    List.mem sl [ Code.type_mismatch; Code.unknown_constructor; Code.unknown_qualified_name ]
+    List.mem sl [ Code.type_mismatch; Code.protocol_step_order; Code.unknown_constructor;
+                  Code.unknown_qualified_name ]
     || (String.length sl > 7 && String.sub sl 0 7 = "linear_")
     || (String.length sl > 8 && String.sub sl 0 8 = "session_") in
   let session_errors =

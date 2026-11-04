@@ -15,44 +15,42 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
     run `march --explain linear_used_twice`
 
 
--- TYPE MISMATCH ------- errors/linear_used_twice_6.march
+-- PROTOCOL ------------ errors/linear_used_twice_6.march
 
-expected `S_end` but got `S_send_Msg_Prod_Cons_1`. [type_mismatch]
+Role `Prod` tries to close the conversation here, but at this point protocol `Stream` says it must send an `Int` to `Cons`. [protocol_step_order]
 
 21 |     let _ = Stream_Prod.offer_more_done(s, a, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
                                                                                         ^^^
 
-    This is argument #2 of a function call.
-    Both are states of a generated protocol role: `S_send_Msg_Prod_Cons_1` is the state the role is in before that step, and this call is a different step. Either the protocol takes the steps in another order, or this body is written for a different role than the one it is run as (`run_<Role>` and `<Role>.register` decide which).
+    Take that step with `Stream_Prod.send_Msg_Prod_Cons_1` first.
 
-    the expected type comes from here:
+    `Prod` is here: it must send an `Int` to `Cons`:
 
-21 |     let _ = Stream_Prod.offer_more_done(s, a, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
-                                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+8 |       Prod -> Cons : Int
+          ^^^^
 
-    `st2` was bound here as `S_send_Msg_Prod_Cons_1`:
+    `st2` is the state bound here:
 
 21 |     let _ = Stream_Prod.offer_more_done(s, a, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
                                                            ^^^
-    run `march --explain type_mismatch`
+    run `march --explain protocol_step_order`
 
 
--- TYPE MISMATCH ------- errors/linear_used_twice_6.march
+-- PROTOCOL ------------ errors/linear_used_twice_6.march
 
-expected `S_end` but got `S_send_Msg_Prod_Cons_1`. [type_mismatch]
+Role `Prod` tries to close the conversation here, but at this point protocol `Stream` says it must send an `Int` to `Cons`. [protocol_step_order]
 
 22 |     Stream_Prod.offer_more_done(s, b, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
                                                                                 ^^^
 
-    This is argument #2 of a function call.
-    Both are states of a generated protocol role: `S_send_Msg_Prod_Cons_1` is the state the role is in before that step, and this call is a different step. Either the protocol takes the steps in another order, or this body is written for a different role than the one it is run as (`run_<Role>` and `<Role>.register` decide which).
+    Take that step with `Stream_Prod.send_Msg_Prod_Cons_1` first.
 
-    the expected type comes from here:
+    `Prod` is here: it must send an `Int` to `Cons`:
 
-22 |     Stream_Prod.offer_more_done(s, b, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
-                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+8 |       Prod -> Cons : Int
+          ^^^^
 
-    `st2` was bound here as `S_send_Msg_Prod_Cons_1`:
+    `st2` is the state bound here:
 
 22 |     Stream_Prod.offer_more_done(s, b, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
                                                    ^^^

@@ -135,6 +135,7 @@ let protocol_invalid = "protocol_invalid"
 let protocol_projection = "protocol_projection"
 let protocol_same_participants = "protocol_same_participants"
 let protocol_single_participant = "protocol_single_participant"
+let protocol_step_order = "protocol_step_order"
 let protocol_unlabelled_step = "protocol_unlabelled_step"
 let pure_violation = "pure_violation"
 let realtime_mixed = "realtime_mixed"
@@ -331,6 +332,7 @@ let all = [
   protocol_projection;
   protocol_same_participants;
   protocol_single_participant;
+  protocol_step_order;
   protocol_unlabelled_step;
   pure_violation;
   realtime_mixed;
@@ -480,7 +482,8 @@ let category_table : (string * string list) list = [
     duplicate_protocol; endpoints_label_invalid; endpoints_name_clash;
     protocol_crash_branches; protocol_empty; protocol_expand_invalid;
     protocol_invalid; protocol_projection; protocol_same_participants;
-    protocol_single_participant; protocol_unlabelled_step; role_needs_invalid;
+    protocol_single_participant; protocol_step_order; protocol_unlabelled_step;
+    role_needs_invalid;
     session_choice_label; session_not_closed; session_offer_nonexhaustive;
     session_offer_unrefined; session_protocol_arg; session_role_count;
     session_role_mismatch; session_state_mismatch; session_type_mismatch;

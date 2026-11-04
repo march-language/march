@@ -5,6 +5,9 @@ protocol/role header, not the step, with no fix. Target: a generated-state → p
 `desugar_endpoints`, errors in protocol terms with a "you are here" excerpt, poisoned follow-ons, step-level
 spans, `or crash` fix. specs/plans/2026-11-02-diagnostics-depth-plan.md §F3.
 
-2026-11-04: §X3 closed (`specs/progress/2026-11-04-diag-x3-poison-call-results.md`). Its one leftover
-is here: a role body's out-of-order step reports `linear_used_twice` plus `S_end` mismatches
-(`test/errors/linear_used_twice_6`); poisoning the step's generated state should absorb them.
+2026-11-04: first slice landed (`specs/progress/2026-11-04-diag-f3-protocol-step-order.md`): a
+generated-state → protocol-step map and `protocol_step_order` in protocol terms with a "you are
+here" label. (The `linear_used_twice_6` follow-ons the §X3 note pointed at turned out to be genuine
+out-of-order closes.) Open: mechanisms 3–6 of §F3 — `Chan.*` wording and poisoning, step-level spans
+and an `or crash` fix for the well-formedness errors, the role-body cases beyond step order, and
+explain pages for the other protocol codes.
