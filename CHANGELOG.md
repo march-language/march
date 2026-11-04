@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`--refine-infer` proposes lemma calls.** At a call the refinement checker could not finish
+  because the proof needs more unfolding of a function, `march --check --refine-infer` and
+  `forge refine --infer` look for a lemma, yours or the standard library's, whose theorem is
+  about a call in the arguments. For `need_same(xs, List.reverse(List.reverse(xs)))` it proposes
+  `List.reverse_reverse(xs)`. Every candidate is checked by checking the program again with the
+  call in it, and `--refine-infer-apply` writes the call above the statement. When no lemma
+  closes the call, it prints the lemma that would, for you to prove. `--refine-infer-kinds=lemma`
+  selects this kind on its own; the JSON output gains `lemma_calls` and `lemma_none`.
+
 - **`List` ships lemmas about its own functions.** `List.append_nil`, `append_assoc`,
   `len_append`, `reverse_append`, `reverse_reverse`, `len_reverse`, `len_take`, `len_drop`
   and `take_drop` can be called from any program to give the refinement checker that

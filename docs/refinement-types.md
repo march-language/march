@@ -1747,6 +1747,15 @@ the open file, a project file it uses, or the stdlib (those the stdlib's
 functions qualified in the rewrite (`List.append(..)`). Only proved lemmas
 are offered, and only left to right.
 
+**Lemma calls proposed for you.** At a call the hint says may need more
+unfolding, `--refine-infer` looks for a lemma call that closes it, among your
+lemmas and the standard library's, and checks each candidate by checking the
+program again with the call in it. It proposes the call with its arguments
+(`List.reverse_reverse(xs)`), which `--refine-infer-apply` writes above the
+statement. When none closes it, it prints the lemma that would, with the
+theorem the call needs, for you to prove. See
+[Which lemma to call]({{ site.baseurl }}/docs/lemmas/#which-lemma-to-call---refine-infer).
+
 **Lemmas as a contract for changes.** A lemma states a law the code must keep,
 and the checker re-proves it on every build. To make a broken law fail the
 build, put the lemmas in a `cap verified` module, where `lemma_unproved` is an
@@ -5331,6 +5340,7 @@ user code. It covers every kind of refinement the checker can verify:
 | abstract | `pred : a -> Bool[p]` with `: List(a[p])`, `Option(a[p])`, `Deque.Deque(a[p])`, or `partition`'s `(List(a[p]), List({a \| !p(_)}))`; two arguments, `keep : k -> v -> Bool[p]` with `: Assoc(k[p], v[p])` |
 | fold accumulator | `fn (acc : {Int \| _ > 0}, x) -> …`, a `fold_right` step's `fn (x, acc : …)`, any literal or `Int`/`Float` parameter as the initial value |
 | termination metric | `@[decreases(100 - n)]` on a recursive function nothing certified (see "Inferring a metric") |
+| lemma call | `List.reverse_reverse(xs)` above a call reflection could not finish, or a lemma to prove (see "Lemmas: proving what one unfolding cannot") |
 
 **Where candidates come from.** The program is mined first:
 
@@ -5418,8 +5428,8 @@ forge refine --infer --apply    # write them, then re-check
   the proposals are applied. For a `cap verified` module, it also says how
   many of the module's errors they close.
 - `--refine-infer-kinds` restricts the kinds, as in `--refine-infer-kinds k1,k4`.
-  The kind `decreases` names the termination metrics; a list without it infers
-  none.
+  The kind `decreases` names the termination metrics, and `lemma` the lemma
+  calls; a list without one infers none of that kind.
 - `--refine-infer-budget N` caps the probes. The default is 3000.
 - `--allow-caller-violations` accepts a refused precondition.
 

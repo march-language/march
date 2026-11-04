@@ -1328,6 +1328,13 @@ let infer_applicable (p : March_refinecheck.Refine_infer.proposal)
         in
         if List.exists overlaps accepted then Some "apply-by-hand" else None)
 
+(* The insertion `--refine-infer-apply` makes for a lemma call (reflection
+   phase 7): the call on its own line before its statement. *)
+let lemma_edit_range src (l : March_refinecheck.Refine_infer.lproposal) =
+  let module RI = March_refinecheck.Refine_infer in
+  March_refactor.Refine_edit.insert_statement ~src ~line:l.RI.lp_stmt.March_ast.Ast.start_line
+    ~col:l.RI.lp_stmt.March_ast.Ast.start_col ~stmt:l.RI.lp_call
+
 let apply_refine_infer ~filename (r : March_refinecheck.Refine_infer.result) =
   let module RI = March_refinecheck.Refine_infer in
   let module IS = March_refinecheck.Infer_slot in
@@ -1365,6 +1372,19 @@ let apply_refine_infer ~filename (r : March_refinecheck.Refine_infer.result) =
           | None -> ())
       end)
     r.RI.decreases;
+  List.iter
+    (fun (l : RI.lproposal) ->
+      if l.RI.lp_apply = None then begin
+        let file = l.RI.lp_stmt.March_ast.Ast.file in
+        match read_file_opt file with
+        | None -> ()
+        | Some src -> (
+          match lemma_edit_range src l with
+          | Some e ->
+            Hashtbl.replace by_file file (src, e :: (match Hashtbl.find_opt by_file file with Some (_, es) -> es | None -> []))
+          | None -> ())
+      end)
+    r.RI.lemma_calls;
   let changed =
     Hashtbl.fold
       (fun f (src, es) acc ->
@@ -1380,6 +1400,7 @@ let apply_refine_infer ~filename (r : March_refinecheck.Refine_infer.result) =
   in
   let applied =
     List.length r.RI.proposals + List.length (List.filter (fun (d : RI.dproposal) -> d.RI.d_apply = None) r.RI.decreases)
+    + List.length (List.filter (fun (l : RI.lproposal) -> l.RI.lp_apply = None) r.RI.lemma_calls)
   in
   if !refine_infer_diff then List.iter (fun (f, a, b) -> print_region_diff f a b) changed;
   if !refine_infer_apply && changed <> [] then begin
@@ -1438,11 +1459,22 @@ let print_refine_infer ~filename ~user_files desugared =
     | None -> Some "apply-by-hand"
     | Some src -> ( match decreases_edit_range src d with Some _ -> None | None -> Some "apply-by-hand")
   in
+  (* `lemma` names the lemma calls of reflection phase 7 among the kinds. *)
+  let lemmas =
+    match !refine_infer_kinds with
+    | None -> true
+    | Some ks -> List.exists (fun k -> String.trim k = "lemma") (String.split_on_char ',' ks)
+  in
+  let applicable_lemmas (l : RI.lproposal) =
+    match read_file_opt l.RI.lp_stmt.March_ast.Ast.file with
+    | None -> Some "apply-by-hand"
+    | Some src -> ( match lemma_edit_range src l with Some _ -> None | None -> Some "apply-by-hand")
+  in
   let r =
     RI.run ~root:(Sys.getcwd ()) ~kinds ~budget:!refine_infer_budget
       ~allow_caller_violations:!allow_caller_violations ~stdlib:!refine_infer_stdlib ~decreases
       ?applicable:(if !refine_infer_apply || !refine_infer_diff then Some infer_applicable else None)
-      ~applicable_decreases ~is_user desugared
+      ~applicable_decreases ~lemmas ~applicable_lemmas ~is_user desugared
   in
   (* JSON `edit`: the same splice `--refine-infer-apply` performs, as the
      minimal byte range against the ORIGINAL file (so every edit is
@@ -1461,7 +1493,15 @@ let print_refine_infer ~filename ~user_files desugared =
       | None -> None
       | Some src -> Option.map (fun (a, b, t) -> (file, a, b, t)) (decreases_edit_range src d)
   in
-  if !refine_infer_json then print_endline (IJ.to_string ~edit_of ~dedit_of r)
+  let ledit_of (l : RI.lproposal) =
+    if l.RI.lp_apply <> None then None
+    else
+      let file = l.RI.lp_stmt.March_ast.Ast.file in
+      match read_file_opt file with
+      | None -> None
+      | Some src -> Option.map (fun (a, b, t) -> (file, a, b, t)) (lemma_edit_range src l)
+  in
+  if !refine_infer_json then print_endline (IJ.to_string ~edit_of ~dedit_of ~ledit_of r)
   else begin
     let skips snap = List.length (List.filter (fun (_, v) -> match v with March_refinecheck.Obligation.Skipped _ -> true | _ -> false) snap) in
     Printf.printf "inferred refinements: %d proposed, %d refused; user skips %d -> %d (%d probes, %d rounds)\n"
@@ -1523,6 +1563,46 @@ let print_refine_infer ~filename ~user_files desugared =
           Printf.printf "  %s (%s:%d): no metric inferred, class %s (%s)\n" n.RI.n_fn n.RI.n_span.March_ast.Ast.file
             n.RI.n_span.March_ast.Ast.start_line n.RI.n_class (candidates n.RI.n_checked n.RI.n_total))
         r.RI.decreases_none
+    end;
+    (* Reflection phase 7: the lemma calls inferred for obligations stage 2
+       stopped short of, and the obligations none was found for. *)
+    if r.RI.lemma_calls <> [] || r.RI.lemma_none <> [] then begin
+      let module Ob = March_refinecheck.Obligation in
+      let candidates n t =
+        Printf.sprintf "%d of %d candidate%s checked%s" n t (if t = 1 then "" else "s")
+          (if t > RI.max_lemma_candidates then Printf.sprintf ": the cap of %d was reached" RI.max_lemma_candidates
+           else "")
+      in
+      let what (o : Ob.t) =
+        Printf.sprintf "%s `%s` on `%s`"
+          (match o.Ob.kind with Ob.Postcondition -> "postcondition" | _ -> "precondition")
+          o.Ob.predicate o.Ob.callee
+      in
+      Printf.printf "inferred lemma calls: %d proposed, %d not inferred\n" (List.length r.RI.lemma_calls)
+        (List.length r.RI.lemma_none);
+      List.iter
+        (fun (l : RI.lproposal) ->
+          let sp = l.RI.lp_stmt in
+          Printf.printf "  %s (%s:%d)  %s  [closes the %s, %s]%s\n" l.RI.lp_fn sp.March_ast.Ast.file
+            sp.March_ast.Ast.start_line l.RI.lp_call (what l.RI.lp_target)
+            (candidates l.RI.lp_checked l.RI.lp_total)
+            (match l.RI.lp_apply with
+             | None -> ""
+             | Some _ -> "  (apply by hand: the statement does not start its own line)"))
+        r.RI.lemma_calls;
+      List.iter
+        (fun (n : RI.lnone) ->
+          let sp = n.RI.ln_target.Ob.span in
+          Printf.printf "  %s (%s:%d): no lemma call inferred for the %s (%s)\n" n.RI.ln_fn sp.March_ast.Ast.file
+            sp.March_ast.Ast.start_line (what n.RI.ln_target) (candidates n.RI.ln_checked n.RI.ln_total);
+          match n.RI.ln_skeleton with
+          | None -> ()
+          | Some (text, call) ->
+            Printf.printf
+              "    a lemma stating this would close it (checked; not applied, prove it first), called as `%s` before line %d:\n%s\n"
+              call sp.March_ast.Ast.start_line
+              (String.concat "\n" (List.map (fun l -> "      " ^ l) (String.split_on_char '\n' text))))
+        r.RI.lemma_none
     end;
     (* `--refine-report --refine-infer` (design §4.5): the ledger as it will be
        once the proposals are applied, in the report's own words. *)
@@ -7457,7 +7537,7 @@ let () =
      " Propose every refinement the checker can verify (scalar, element, relational, abstract, accumulator, termination metric), module-wide");
     ("--refine-infer-json", Arg.Set refine_infer_json, " Emit --refine-infer results as JSON v1 on stdout");
     ("--refine-infer-kinds", Arg.String (fun s -> refine_infer_kinds := Some s),
-     "<k1,..,k7,decreases>  Restrict --refine-infer to these candidate kinds (decreases: termination metrics)");
+     "<k1,..,k7,decreases,lemma>  Restrict --refine-infer to these candidate kinds (decreases: termination metrics; lemma: lemma calls)");
     ("--refine-infer-budget", Arg.Set_int refine_infer_budget, "<N>  Global probe budget for --refine-infer (default 3000)");
     ("--refine-infer-stdlib", Arg.Set refine_infer_stdlib, " Let --refine-infer also target stdlib functions");
     ("--allow-caller-violations", Arg.Set allow_caller_violations,
