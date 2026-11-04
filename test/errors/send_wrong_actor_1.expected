@@ -1,7 +1,7 @@
 exit: 1
 -- ACTOR ---------------- errors/send_wrong_actor_1.march
 
-`Poke` is a message for `A`, but this pid is an actor `B`, so the message would be dropped. [send_wrong_actor]
+`Poke` is a message for `A`, but this pid is an actor `B` (spawned on line 24), so the message would be dropped. [send_wrong_actor]
 Send it to a pid spawned from `A`, or send this actor one of its own messages.
 
 25 |     send(b, Poke(1))
@@ -9,10 +9,10 @@ Send it to a pid spawned from `A`, or send this actor one of its own messages.
 
     `B` handles `Note`.
 
-    actor `B` is declared here:
+    `b` is spawned from `B` here:
 
-17 |   actor B do
-             ^
+24 |     let b = spawn(B)
+                 ^^^^^^^^
     run `march --explain send_wrong_actor`
 
 

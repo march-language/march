@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: `helper` is a function, not an actor, so `spawn` cannot start it.
+-- `spawn` takes an actor's name. A function name used to reach TIR lowering
+-- and fail there ("`helper_spawn` ... is not a function in scope").
+mod Main do
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do { state with n: state.n + k } end
+  end
+
+  fn helper() do 1 end
+
+  fn main(_c : Cap(IO.Console)) do
+    let p = spawn(helper)
+    send(p, Bump(1))
+    ()
+  end
+end

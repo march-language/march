@@ -1,0 +1,18 @@
+exit: 1
+-- NAMING ------------ errors/unknown_constructor_5.march
+
+I don't know an actor called `Countr`. [unknown_constructor]
+Did you mean `Counter`?
+
+14 |     let p = spawn(Countr)
+                       ^^^^^^
+
+
+
+
+fix [unknown_constructor]:
+@@ lines 14-14 @@
+-    let p = spawn(Countr)
++    let p = spawn(Counter)
+
+after fix: exit 0

@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/spawn_not_actor_2.march","start_line":11,"start_col":18,"end_line":11,"end_col":21,"message":"`Job` is a constructor of type `Job`, not an actor, so `spawn` cannot start it.\n`spawn` takes the name of an `actor` declaration, like `spawn(Counter)`.","code":"spawn_not_actor","fix":null,"labels":[],"notes":[],"category":"ACTOR"}

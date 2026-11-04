@@ -234,6 +234,8 @@ type env = {
   actor_init_sigs : (string, (string * Typecheck_types.ty) list) Hashtbl.t;
   (** Actor name -> its `init(p : T, …)` parameters (D24); [] for the bare
       form.  Shared hashtable, written by [DActor], read at `spawn` sites. *)
+  actor_names : (string, unit) Hashtbl.t;
+  (** Every declared actor's name, bare and module-qualified. *)
   cap_narrow_factory_fns :
     (string, Typecheck_types.Ast.span) Hashtbl.t;
   cap_dicts : (string * string) list;
@@ -359,6 +361,9 @@ type suggest_need =
   | NeedType of Typecheck_types.ty
   | NeedSendTo of Typecheck_types.ty
 val spelling_max_dist : int -> int
+
+(** [Some "A"] for an actor's generated message type [A_Msg]. *)
+val actor_of_msg_type : string -> string option
 val is_generated_name : ?ctor_type:string -> string -> bool
 val could_fit : Typecheck_types.ty -> Typecheck_types.ty -> bool
 val suggest_var_in_scope : ?need:Typecheck_types.ty -> string -> env -> string option

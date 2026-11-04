@@ -1,4 +1,4 @@
--- EXPECT-ERROR: `@[remote] dispatch` needs a JSON codec for `Hit`
+-- EXPECT-ERROR: receives `Bump` from other nodes as a `Hit`, which has no JSON codec
 -- `@[remote]` on an actor (2026-09-15, lib/desugar/desugar_remote.ml)
 -- generates a dispatch that routes a typed remote delivery to each handler
 -- taking one annotated parameter. The wire tag comes from that parameter's

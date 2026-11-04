@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/parse_error_18.march","start_line":17,"start_col":15,"end_line":17,"end_col":27,"message":"I don't recognize `strategy one_for_none`","code":"parse_error","fix":null,"labels":[],"notes":["A supervise block's `strategy` is `one_for_one`, `one_for_all` or `rest_for_one`."],"category":"SYNTAX"}

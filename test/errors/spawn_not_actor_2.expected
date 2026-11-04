@@ -1,0 +1,12 @@
+exit: 1
+-- ACTOR ----------------- errors/spawn_not_actor_2.march
+
+`Job` is a constructor of type `Job`, not an actor, so `spawn` cannot start it. [spawn_not_actor]
+`spawn` takes the name of an `actor` declaration, like `spawn(Counter)`.
+
+11 |     let _ = spawn(Job)
+                       ^^^
+
+    run `march --explain spawn_not_actor`
+
+

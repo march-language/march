@@ -1631,6 +1631,80 @@ let suggest_type_at (sp : Ast.span) : ty option =
   | Some (NeedType t) -> Some t
   | _ -> None
 
+(** What a name written as `spawn`'s actor (or a supervise block's child) is
+    when it is certainly not an actor: [Some "a constructor of type `T`"],
+    [Some "a message of actor `A`"] or [Some "a function"].  An actor's own
+    name is a nullary constructor whose parent type is itself and is no
+    declared type; a name bound to a [Pid] is an actor too.  [None] for an
+    actor, and for a name nothing declares (lookup reports that one). *)
+let spawn_non_actor env (name : string) : string option =
+  let bare = match split_qualified name with Some (_, m) -> m | None -> name in
+  let is_pid = match StrMap.find_opt name env.vars with
+    | Some sch -> (match instantiate env.level env sch with
+        | TCon ("Pid", _) -> true | _ -> false)
+    | None -> false in
+  (* A declared actor; failing that (an actor known only through another
+     module's exports), a nullary constructor that is its own parent type and
+     no declared type. *)
+  let actor_name_ctor (ci : ctor_info) =
+    Hashtbl.mem env.actor_names name || Hashtbl.mem env.actor_names bare
+    || (not ci.ci_is_actor_msg && ci.ci_arg_tys = [] && ci.ci_type = bare
+        && not (StrMap.mem ci.ci_type env.types)) in
+  if is_pid then None
+  else match StrMap.find_opt name env.ctors with
+    | Some cis when List.exists actor_name_ctor cis -> None
+    | Some (ci :: _) ->
+      Some (match ci.ci_is_actor_msg, actor_of_msg_type ci.ci_type with
+          | true, Some a -> Printf.sprintf "a message of actor `%s`" a
+          | _ -> Printf.sprintf "a constructor of type `%s`" ci.ci_type)
+    | Some [] | None ->
+      (match StrMap.find_opt name env.vars with
+       | Some _ -> Some (if StrMap.mem name env.fn_arities then "a function" else "a value")
+       | None -> None)
+
+(** The actor closest in spelling to [name], for a `spawn` or supervise
+    child that names nothing: actor name constructors only. *)
+let suggest_actor_name env (name : string) : string option =
+  let actors = StrMap.fold (fun k cis acc ->
+      if spawn_non_actor env k = None
+      && List.exists (fun (ci : ctor_info) ->
+          not ci.ci_is_actor_msg && ci.ci_arg_tys = [] && ci.ci_type = k) cis
+      then (k, t_unit) :: acc else acc) env.ctors [] in
+  suggest_field name actors
+
+(** The error for `spawn`'s actor or a supervise block's child [n] that is
+    not an actor, or names nothing; [false] when [n] is an actor. *)
+let report_not_actor env ~(where : string) (n : Ast.name) : bool =
+  match spawn_non_actor env n.txt with
+  | Some what ->
+    Err.error ~code:Err.Code.spawn_not_actor env.errors ~span:n.span
+      (Printf.sprintf
+         "`%s` is %s, not an actor, so %s cannot start it.\n\
+          %s takes the name of an `actor` declaration, like `spawn(Counter)`."
+         n.txt what where (String.capitalize_ascii where));
+    true
+  | None ->
+    let known = StrMap.mem n.txt env.ctors || StrMap.mem n.txt env.vars in
+    if known then false
+    else begin
+      let guess = suggest_actor_name env n.txt in
+      let second = match guess with
+        | Some g -> Printf.sprintf "\nDid you mean `%s`?" g
+        | None -> "" in
+      Err.report env.errors
+        { Err.severity = Err.Error; span = n.span;
+          message = Printf.sprintf "I don't know an actor called `%s`.%s" n.txt second;
+          labels = []; notes = [];
+          code = Err.Code.unknown_constructor;
+          fix = Option.map (fun g -> Err.FReplace { span = n.span; text = g }) guess };
+      true
+    end
+
+(** Where `let x = spawn(A)` bound [x]: the key [check_send_target] reads to
+    point at the spawn that produced a pid. *)
+let spawn_site_key (binder : Ast.span) =
+  Printf.sprintf "spawnat:%s:%d:%d" binder.Ast.file binder.Ast.start_line binder.Ast.start_col
+
 (** [send(pid, msg)]: reject a message the actor this pid points to cannot
     handle (finding 19, specs/lang/core-march-types.md §2.6.4).
 
@@ -1654,7 +1728,7 @@ let suggest_type_at (sp : Ast.span) : ty option =
     handler anyway, while compiled code drops it.  When another actor with that
     handler fits the pid, the error says so; no qualified spelling selects an
     actor's message today, so the advice is to rename one handler. *)
-let check_send_target env ~(span : Ast.span) (pid_ty : ty) (msg : Ast.expr) (msg_ty : ty) : unit =
+let check_send_target env ~(span : Ast.span) (pid_ty : ty) ?pid_expr (msg : Ast.expr) (msg_ty : ty) : unit =
   let rec could_be a b =
     match repr a, repr b with
     | TVar _, _ | _, TVar _ -> true
@@ -1753,9 +1827,22 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) (msg : Ast.expr) (msg
            | [ (a, _) ] -> Some a
            | _ -> None
          in
-         let pid_desc = match pid_actor with
-           | Some a -> Printf.sprintf "this pid is an actor `%s`" a
-           | None -> Printf.sprintf "this pid points to an actor whose state is `%s`"
+         let spawn_site = match pid_expr with
+           | Some (Ast.EVar x) ->
+             (match StrMap.find_opt x.txt env.binder_spans with
+              | Some bsp ->
+                (match Hashtbl.find_opt env.decl_sites (spawn_site_key bsp) with
+                 | Some ssp when ssp.Ast.file = span.Ast.file && ssp.Ast.start_line > 0 ->
+                   Some (x.txt, ssp)
+                 | _ -> None)
+              | None -> None)
+           | _ -> None
+         in
+         let pid_desc = match pid_actor, spawn_site with
+           | Some a, Some (_, ssp) ->
+             Printf.sprintf "this pid is an actor `%s` (spawned on line %d)" a ssp.Ast.start_line
+           | Some a, None -> Printf.sprintf "this pid is an actor `%s`" a
+           | None, _ -> Printf.sprintf "this pid points to an actor whose state is `%s`"
                        (pp_ty (repr pid_state))
          in
          let labels, notes = match pid_actor with
@@ -1766,11 +1853,18 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) (msg : Ast.expr) (msg
                      ci.ci_is_actor_msg && ci.ci_type = a ^ msg_sfx) cis
                  then cname :: acc else acc) env.ctors []
                        |> List.sort_uniq String.compare in
-             let labels = match Hashtbl.find_opt env.decl_sites ("actor:" ^ a) with
-               | Some asp when asp.Ast.file = span.Ast.file && asp.Ast.start_line > 0 ->
-                 [ { Err.lbl_span = asp;
-                     lbl_message = Printf.sprintf "actor `%s` is declared here" a } ]
-               | _ -> []
+             (* The `spawn` that produced the pid when it is a `let` binder's
+                 right-hand side; the actor's declaration otherwise. *)
+             let labels = match spawn_site with
+               | Some (x, ssp) ->
+                 [ { Err.lbl_span = ssp;
+                     lbl_message = Printf.sprintf "`%s` is spawned from `%s` here" x a } ]
+               | None ->
+                 match Hashtbl.find_opt env.decl_sites ("actor:" ^ a) with
+                 | Some asp when asp.Ast.file = span.Ast.file && asp.Ast.start_line > 0 ->
+                   [ { Err.lbl_span = asp;
+                       lbl_message = Printf.sprintf "actor `%s` is declared here" a } ]
+                 | _ -> []
              in
              let notes = match own with
                | [] -> []
@@ -3798,7 +3892,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          here was a no-op regardless of what check_sendable's argument was. *)
       let msg_ty =
         with_suggest_need msg (NeedSendTo pid_ty) (fun () -> infer_expr env msg) in
-      check_send_target env ~span:(span_of_expr msg) pid_ty msg msg_ty;
+      check_send_target env ~span:(span_of_expr msg) ~pid_expr:cap pid_ty msg msg_ty;
       (* send() returns Option(Unit): Some(()) when the message was enqueued,
          None when the target actor is dead/unknown (fire-and-forget drop).
          This is the ACTUAL contract of both backends — the interpreter's ESend
@@ -3821,8 +3915,16 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | Ast.ECon (n, (_ :: _ as args), csp) -> (Ast.ECon (n, [], csp), args)
         | other -> (other, [])
       in
-      ignore (infer_expr env actor);
+      (* A name that is not an actor (a type's constructor, a function) or
+         that nothing declares gets the actor-worded error here, not the
+         constructor-arity or unknown-constructor one [infer_expr] would give. *)
+      let not_actor = match actor with
+        | Ast.ECon (n, [], _) | Ast.EVar n -> report_not_actor env ~where:"`spawn`" n
+        | _ -> false in
+      if not not_actor then ignore (infer_expr env actor);
       (match actor with
+       | (Ast.ECon (_, [], _) | Ast.EVar _) when not_actor ->
+         List.iter (fun a -> ignore (infer_expr env a)) init_args
        | Ast.ECon (n, [], _) | Ast.EVar n ->
          check_spawn_args env ~site_span:sp
            ~spelling:(Printf.sprintf "`spawn(%s%s)`" n.txt
@@ -4594,7 +4696,11 @@ and infer_block env exprs =
        the RHS type rather than the enclosing block's return type. *)
     Hashtbl.replace env.type_map sp (repr rhs_ty);
     (match b.bind_pat with
-     | Ast.PatVar name -> Hashtbl.replace env.type_map name.span (repr rhs_ty)
+     | Ast.PatVar name ->
+       Hashtbl.replace env.type_map name.span (repr rhs_ty);
+       (match b.bind_expr with
+        | Ast.ESpawn (_, ssp) -> Hashtbl.replace env.decl_sites (spawn_site_key name.span) ssp
+        | _ -> ())
      | _ -> ());
     (* Generalise the binding if it's a simple variable — let-polymorphism.
        Use env.level (not env.level - 1) as the generalization threshold: only
@@ -6773,6 +6879,8 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
     IDENTICAL entries so [add_ctor] dedups the second registration instead of
     making every message constructor "defined by multiple types". *)
 let register_actor_ctors ~ci_module env (name : Ast.name) (actor : Ast.actor_def) =
+  Hashtbl.replace env.actor_names name.txt ();
+  if ci_module <> "" then Hashtbl.replace env.actor_names (ci_module ^ "." ^ name.txt) ();
   let env = { env with ctors =
     add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module; ci_vis = Ast.Public;
                         ci_is_actor_msg = false }
@@ -7046,6 +7154,16 @@ let rec check_decl env (d : Ast.decl) : env =
             Hashtbl.replace env.decl_sites
               (Printf.sprintf "msgparam:%s.%s|%d" name.txt h.ah_msg.txt i)
               p.param_name.span) h.ah_params) actor.actor_handlers;
+    (* An `@[remote]` actor's routable handlers (one parameter annotated with
+       a named type): their dispatch is generated, so a missing codec for the
+       payload type is reported at the annotation the user wrote. *)
+    if actor.actor_remote then
+      List.iter (fun (h : Ast.actor_handler) ->
+          match h.ah_params with
+          | [ { param_ty = Some (Ast.TyCon (tn, [])); _ } ] ->
+            Hashtbl.replace env.decl_sites
+              (Printf.sprintf "remotepayload:%s.%s:%s" name.txt h.ah_msg.txt tn.txt) tn.span
+          | _ -> ()) actor.actor_handlers;
     (* Build the state record type from field declarations *)
     let state_ty =
       let tvars = ref [] in
@@ -7063,13 +7181,19 @@ let rec check_decl env (d : Ast.decl) : env =
     (* Check for duplicate handler names — two `on Msg(...)` arms for the
        same message name is always a programmer error. *)
     let _ = List.fold_left (fun seen (h : Ast.actor_handler) ->
-        if List.mem h.ah_msg.txt seen then
-          Err.error ~code:Err.Code.duplicate_handler env.errors ~span:h.ah_msg.span
-            (Printf.sprintf
-               "actor '%s' defines handler '%s' more than once;\
-                \nremove the duplicate or rename one of them"
-               name.txt h.ah_msg.txt);
-        h.ah_msg.txt :: seen
+        (match List.assoc_opt h.ah_msg.txt seen with
+         | Some (first : Ast.span) ->
+           Err.report env.errors
+             { Err.severity = Err.Error; span = h.ah_msg.span;
+               message = Printf.sprintf
+                   "Actor `%s` has a second handler for `%s`, and a message reaches only one.\n\
+                    Remove one of the two, or rename one and send it under its new name."
+                   name.txt h.ah_msg.txt;
+               labels = [ { Err.lbl_span = first;
+                            lbl_message = Printf.sprintf "the first `%s` handler is here" h.ah_msg.txt } ];
+               notes = []; code = Err.Code.duplicate_handler; fix = None }
+         | None -> ());
+        (h.ah_msg.txt, h.ah_msg.span) :: seen
       ) [] actor.actor_handlers in
     (* Register actor name as a zero-arg constructor (so spawn(ActorName) typechecks)
        and message constructors so ECon lookups succeed.
@@ -7114,8 +7238,34 @@ let rec check_decl env (d : Ast.decl) : env =
     (match actor.actor_supervise with
      | None -> ()
      | Some sc ->
+       let state_fields = List.map (fun (f : Ast.field) -> f.fld_name.txt) actor.actor_state in
        List.iter (fun (sf : Ast.supervise_field) ->
+           (* The child's pid is kept in the supervisor's state field
+              [sf_name]; both backends look it up by name. *)
+           if not (List.mem sf.sf_name.txt state_fields) then begin
+             let child = match sf.sf_ty with
+               | Ast.TyCon (c, []) -> Printf.sprintf "the `%s` child's pid" c.txt
+               | _ -> "this child's pid" in
+             let guess = suggest_field sf.sf_name.txt
+                 (List.map (fun f -> (f, t_unit)) state_fields) in
+             Err.report env.errors
+               { Err.severity = Err.Error; span = sf.sf_name.span;
+                 message = Printf.sprintf
+                     "`%s`'s state does not have a field called `%s` to hold %s.\n%s"
+                     name.txt sf.sf_name.txt child
+                     (match guess with
+                      | Some g -> Printf.sprintf "Did you mean `%s`?" g
+                      | None ->
+                        Printf.sprintf "A supervisor keeps each child's pid in one of its \
+                                        state fields; add `%s : Int` to its `state { … }`."
+                          sf.sf_name.txt);
+                 labels = []; notes = [];
+                 code = Err.Code.supervise_field_missing;
+                 fix = Option.map (fun g -> Err.FReplace { span = sf.sf_name.span; text = g }) guess }
+           end;
            match sf.sf_ty with
+           | Ast.TyCon (child, []) when report_not_actor env ~where:"this supervise block" child ->
+             List.iter (fun a -> ignore (infer_expr init_env a)) sf.sf_init_args
            | Ast.TyCon (child, []) ->
              with_no_caller init_env (fun () ->
                check_spawn_args init_env ~site_span:sf.sf_name.span
@@ -10961,6 +11111,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
         (* Register actor name as a zero-arg constructor and message ctors.
            Same arity fix as in check_decl: include unannotated params as
            unique TyVar placeholders so constructor arity is always correct. *)
+        Hashtbl.replace env.actor_names name.txt ();
+        Hashtbl.replace env.actor_names (m.Ast.mod_name.txt ^ "." ^ name.txt) ();
         let env1 = { env with ctors =
           add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                               ci_is_actor_msg = false }
@@ -11345,6 +11497,8 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
            { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
          | _ -> env1)
       | Ast.DActor (_, name, actor, _) ->
+        Hashtbl.replace env.actor_names name.txt ();
+        Hashtbl.replace env.actor_names (m.Ast.mod_name.txt ^ "." ^ name.txt) ();
         let env1 = { env with ctors =
           add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                               ci_is_actor_msg = false }

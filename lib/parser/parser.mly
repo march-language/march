@@ -180,6 +180,16 @@
         { Lexing.pos_fname = ""; pos_lnum = sp.start_line;
           pos_bol = 0; pos_cnum = sp.start_col }
 
+  (* A misspelt strategy is a lower-case word in [restart_strategy_tok]'s
+     place; name the three it can be rather than "I got stuck here". *)
+  let mk_strategy_word (w : string) (sp : span) : restart_strategy =
+    error_raise
+      (Printf.sprintf "I don't recognize `strategy %s`" w)
+      (Some "A supervise block's `strategy` is `one_for_one`, `one_for_all` \
+             or `rest_for_one`.")
+      { Lexing.pos_fname = ""; pos_lnum = sp.start_line;
+        pos_bol = 0; pos_cnum = sp.start_col }
+
   let mk_child_spec (child : string) (mods : child_modifier list)
       (pos : Lexing.position) : restart_type * shutdown_spec =
     let restart = ref None and shutdown = ref None in
@@ -1162,6 +1172,7 @@ restart_strategy_tok:
   | ONE_FOR_ONE  { OneForOne }
   | ONE_FOR_ALL  { OneForAll }
   | REST_FOR_ONE { RestForOne }
+  | w = lower_name { mk_strategy_word w.txt w.span }
 
 actor_handler:
   | ON; msg = upper_name; LPAREN; params = separated_list(COMMA, param); RPAREN;

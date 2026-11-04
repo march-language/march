@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: `Bump` is a message of actor `Counter`, not an actor
+-- A message constructor in `spawn`: the actor is `Counter`.
+mod Main do
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do { state with n: state.n + k } end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let _ = spawn(Bump)
+    ()
+  end
+end

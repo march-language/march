@@ -1,0 +1,29 @@
+-- EXPECT-ERROR: `Pool`'s state does not have a field called `wroker` to hold the `Worker` child's pid.
+-- A supervisor keeps each child's pid in the state field the child line
+-- names. A field that is not in `state { … }` used to pass the checker and
+-- stop the compiler with "internal error while lowering to TIR: supervise
+-- field wroker not found in actor state".
+mod Main do
+  needs IO.Console
+
+  actor Worker do
+    state { n : Int }
+    init { n: 0 }
+    on Tick() do { state with n: state.n + 1 } end
+  end
+
+  actor Pool do
+    state { worker : Int }
+    init { worker: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 30
+      Worker wroker
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let _ = spawn(Pool)
+    ()
+  end
+end
