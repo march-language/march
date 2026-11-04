@@ -1127,3 +1127,97 @@ let hypotheses =
         if not (contains out "[refinement_violated]" || contains out "[lemma_unproved_call]") then
           Alcotest.failf "calling h4 on a value that breaks okz is reported:\n%s" out) ]
 
+(* ── A lemma call gives its fact from any always-evaluated position ────────
+   todo 2026-11-02-lemma-facts-from-non-statement-calls
+   ([Refine_check.inner_lemma_facts]).  `cnt(l) >= 0` needs induction, so
+   only the lemma's fact proves `need(cnt(l), _)`. *)
+let pos_mod body =
+  {|mod P do
+  type L = Nil0 | C(Int, L)
+  fn cnt(l : L) : Int do
+    match l do
+      Nil0 -> 0
+      C(_, k) -> 1 + cnt(k)
+    end
+  end
+  fn need(k : {Int | _ >= 0}, n : Int) : Int do k end
+  @[lemma]
+  fn cnt_nn(l : L) : {Unit | cnt(l) >= 0} do
+    match l do
+      Nil0 -> ()
+      C(_, k) -> cnt_nn(k)
+    end
+  end
+|}
+  ^ body ^ "end\n"
+
+(* The verdicts of the `need` preconditions in [out]. *)
+let need_rows out =
+  List.filter_map
+    (fun l ->
+      if contains l "\tprecondition\tneed\t" || contains l "\tprecondition\tneed" then
+        match String.split_on_char '\t' l with s :: _ -> Some s | [] -> None
+      else None)
+    (lines out)
+
+let lemma_positions =
+  [ gated "pos_proved: a named `let`, a nested block, a tuple element and an `if` condition" (fun () ->
+        let out =
+          run
+            (pos_mod
+               {|  fn named_let(l : L) : Int do
+    let u = cnt_nn(l)
+    need(cnt(l), 0)
+  end
+  fn in_block(l : L) : Int do
+    let x = do
+      cnt_nn(l)
+      1
+    end
+    need(cnt(l), x)
+  end
+  fn in_arg(l : L) : Int do
+    let p = (cnt_nn(l), 3)
+    need(cnt(l), 0)
+  end
+  fn in_cond(l : L) : Int do
+    if do cnt_nn(l) true end do need(cnt(l), 0) else 0 end
+  end
+|})
+        in
+        let rows = need_rows out in
+        if List.length rows <> 4 || List.exists (( <> ) "proved") rows then
+          Alcotest.failf "want 4 proved `need` rows:\n%s" out);
+    gated "pos_red: no fact from a branch, a lambda, a rebound name, `&&`'s right side, or no lemma" (fun () ->
+        let out =
+          run
+            (pos_mod
+               {|  fn base(l : L) : Int do
+    need(cnt(l), 0)
+  end
+  fn in_branch(l : L, b : Bool) : Int do
+    let y = if b do cnt_nn(l) else () end
+    need(cnt(l), 0)
+  end
+  fn in_lambda(l : L) : Int do
+    let f = fn x -> cnt_nn(l)
+    need(cnt(l), 0)
+  end
+  fn rebound(l : L) : Int do
+    let l2 = l
+    let z = do
+      let l = Nil0
+      cnt_nn(l)
+      1
+    end
+    need(cnt(l2), z)
+  end
+  fn short(l : L, b : Bool) : Int do
+    let q = b && do cnt_nn(l) true end
+    need(cnt(l), 0)
+  end
+|})
+        in
+        let rows = need_rows out in
+        if List.length rows <> 5 || List.mem "proved" rows then
+          Alcotest.failf "want 5 unproved `need` rows:\n%s" out) ]

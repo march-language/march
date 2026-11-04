@@ -4941,7 +4941,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
    precondition obligations are in the ledger.  The checker's resolution of
    the name must reach the very lemma the graph does: its signature carries
    that lemma's theorem (physical identity). *)
-and lemma_call_facts ~root errctx defs (ctx : rctx) path lets sc re cb ce (e : A.expr) : (A.expr * bool) list =
+and lemma_call_facts ~root errctx defs (ctx : rctx) ?(quiet = false) path lets sc re cb ce (e : A.expr) :
+    (A.expr * bool) list =
   ignore (root, path, lets, sc, re, cb, ce);
   match stmt_call e with
   | Some (A.EApp (A.EVar f, args, sp)) -> (
@@ -4977,12 +4978,53 @@ and lemma_call_facts ~root errctx defs (ctx : rctx) path lets sc re cb ce (e : A
                    a lemma is never run, so there is no check to fall back on"
                   f.A.txt
               in
-              if !strict_verified then Err.error ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg
+              if quiet then ()
+              else if !strict_verified then Err.error ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg
               else Err.warning ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg;
               []
             end)
         | _ -> [])))
   | _ -> []
+
+(* The facts of the lemma calls [e] always evaluates, wherever they sit in it
+   (todo 2026-11-02-lemma-facts-from-non-statement-calls): an argument, a
+   `let` right-hand side (a named `let u = l(..)` too), a nested block's
+   statements, an `if` condition or a `match` scrutinee.  Never a call under a
+   branch, a lambda or the right operand of `&&`/`||`, which may not run.  [e]
+   has been walked, so each call's preconditions are in the ledger, and each
+   fact follows [lemma_call_facts]'s rules.  A fact naming anything [e] binds
+   (or [extra] names) is dropped: it would be about the inner binding. *)
+and inner_lemma_facts ~root errctx defs (ctx : rctx) ?(quiet = false) ?(extra = []) path lets sc re cb ce
+    (e : A.expr) : (A.expr * bool) list =
+  let bound = Refine_param.binder_occurrences [] e @ extra in
+  (* Each call with whether its warning was already given: a nested block's
+     statement-position call is warned by that block's own walk. *)
+  let rec calls ~stmt acc (e : A.expr) =
+    match e with
+    | A.EApp (A.EVar { A.txt = "&&" | "||"; _ }, a :: _, _) -> calls ~stmt:false acc a
+    | A.EApp (A.EVar _, args, sp) ->
+      let acc = List.fold_left (calls ~stmt:false) acc args in
+      if Hashtbl.mem lemma_call_sites sp then (e, stmt) :: acc else acc
+    | A.EApp (f, args, _) -> List.fold_left (calls ~stmt:false) (calls ~stmt:false acc f) args
+    | A.EBlock (es, _) ->
+      List.fold_left
+        (fun acc s ->
+          match s with
+          | A.ELet ({ A.bind_pat = A.PatWild _; bind_expr = c; _ }, _) -> calls ~stmt:true acc c
+          | _ -> calls ~stmt:true acc s)
+        acc es
+    | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.fold_left (calls ~stmt:false) acc es
+    | A.ELet (b, _) -> calls ~stmt:false acc b.A.bind_expr
+    | A.EIf (c, _, _, _) -> calls ~stmt:false acc c
+    | A.EMatch (x, _, _) | A.EField (x, _, _) | A.EAnnot (x, _, _) -> calls ~stmt:false acc x
+    | _ -> acc
+  in
+  List.concat_map
+    (fun (c, warned) ->
+      List.filter
+        (fun (p, _) -> not (expr_mentions bound p))
+        (lemma_call_facts ~root errctx defs ctx ~quiet:(quiet || warned) path lets sc re cb ce c))
+    (List.rev (calls ~stmt:false [] e))
 
 (* A static `assert p` inside a lemma (I5): an [Assertion] obligation, and a
    fact for the rest of the block only when proved. *)
@@ -5336,6 +5378,16 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                tag_opaque path' (untied @ if pinned then [] else names)
              | A.ELetFn (n, _, _, _, _) -> tag_opaque path' [ n.A.txt ]
              | _ -> path'
+           in
+           (* …and the lemma calls inside the statement (an argument, a
+              right-hand side, a nested block), as a statement-position call
+              gives its own above. *)
+           let path' =
+             match stmt_call e with
+             | Some (A.EApp (_, _, sp)) when Hashtbl.mem lemma_call_sites sp -> path'
+             | _ ->
+               let extra = match e with A.ELet (b, _) -> pat_binders b.A.bind_pat | _ -> [] in
+               inner_lemma_facts ~root errctx defs ctx ~extra path lets sc re cb ce e @ path'
            in
            (* The laundering channel: retire first (both the key and any entry
               whose RHS mentions a rebound name — see [launder]), then record a
@@ -5961,6 +6013,9 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
       [] branches
   | A.EIf (c, t, e, _) ->
     go c;
+    (* A lemma call in the condition ran before either branch; its warning,
+       if any, is given where the `if` ends a statement. *)
+    let path = inner_lemma_facts ~root errctx defs ctx ~quiet:true path lets sc re cb ce c @ path in
     go_path ((c, false) :: path) t;
     go_path ((c, true) :: path) e
   | A.ECond (arms, _) ->
