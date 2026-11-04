@@ -1710,6 +1710,10 @@ lambda is closed over reflectable terms gets a specialised logic function `g$k` 
 inlined. Then `List.filter` is reflected. Its own soundness table covers captures,
 partial application, recursion through the value, and the parity net per specialisation.
 
+**Built (2026-11-03):** plan `specs/plans/2026-11-03-reflection-phase5-fnvalues-plan.md`,
+progress `specs/progress/2026-11-03-reflection-phase5-fnvalues.md`. The `sound_fnvalue` row of
+§9.1 flipped on purpose: `apply` is specialised and `twice` reflected.
+
 ### Phase 6: Int overflow (D8)
 
 Decide the Int model for reflected bodies: either a 63-bit wrap encoding (bit-vectors or `mod`

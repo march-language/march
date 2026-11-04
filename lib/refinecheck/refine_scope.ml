@@ -477,6 +477,7 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
     end
     else
       let sym = Option.get (Reflect_state.resolve_site csp) in
+      let args = Reflect_state.args_at csp args in
       let arity = match Reflect_state.sig_of sym with Some s -> List.length s.Reflect_state.fs_params | None -> -1 in
       if List.length args <> arity then Error e
       else

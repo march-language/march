@@ -18750,7 +18750,10 @@ let fold_invariants_1_suite =
           m "  fn h(ys : List(Int), lo : Int) : {Int | _ >= lo} do foldl(ys, lo, fn (a, x) -> if x > a do x else a end) end\n"
         in
         Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
-        Alcotest.(check (list string)) "unreflectable-subject" [ "unreflectable-subject" ] (reasons src));
+        (* Reflection phase 5: the call of `foldl` with a lambda now has a
+           definition, so the subject translates in stage 2 and the skip is
+           the unfolding it would need (the list is unknown). *)
+        Alcotest.(check (list string)) "reflect-fuel" [ "reflect-fuel" ] (reasons src));
 
     (* ── Guards: each blocks a specific proof ──────────────────────────── *)
     case "guard: an accumulator's own refinement is not assumed when it does not hold" (fun () ->
@@ -18829,9 +18832,10 @@ let fold_invariants_1_suite =
           m "  fn k1(xs : List(a), z : b, f : b -> a -> b) : b do 0 - 5 end\n\
              \  fn go(ys : List(Int)) : Int do need_nn(k1(ys, 0, fn (a, x) -> a + 1)) end\n"
         in
-        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
-        Alcotest.(check (list string)) "not parametric" param (reasons src);
-        Alcotest.(check bool) "naming parametricity" true (has_detail "is not known to be parametric" src));
+        (* Reflection phase 5: `k1(..)` has a definition (`0 - 5`), so the
+           demand is refuted outright: `need_nn(-5)`.  The fold hypothesis
+           still gives nothing (no proof). *)
+        Alcotest.check t3 "violated" (0, 1, 0) (l3 src));
 
     case "impostor: a fold that hands the step a b it built" (fun () ->
         let src =
@@ -18933,8 +18937,9 @@ let fold_invariants_1_suite =
           m "  fn k9(z : b, f : b -> b, g : Int -> b) : b do f(g(3)) end\n\
              \  fn go(n : Int) : Int do need_nn(k9(0, fn a -> a + 1, fn _w -> 0 - 5)) end\n"
         in
-        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
-        Alcotest.(check (list string)) "a base skip" base (reasons src);
+        (* Reflection phase 5: the call has a definition, `f(g(3))` is -4,
+           so the demand is refuted outright; the hypothesis gives no proof. *)
+        Alcotest.check t3 "violated" (0, 1, 0) (l3 src);
         Alcotest.check t3 "control: fn _w -> 5 proves" (1, 0, 0)
           (l3
              (m "  fn k9(z : b, f : b -> b, g : Int -> b) : b do f(g(3)) end\n\
@@ -29037,6 +29042,7 @@ let () =
       ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr);
       ("reflect-parity", Test_refine_reflect1b.parity);
       ("reflect-fuel", Test_refine_fuel.tests);
+      ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
       ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
