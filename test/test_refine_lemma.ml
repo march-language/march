@@ -226,14 +226,27 @@ end
         expect_unproved out "bad";
         U.expect out ~line:9 ~callee:"ok" "proved" ~uses:"pos";
         expect_admitted out "ok");
-    gated "known_overflow: `inc(n) > n` proves (D8: Int is mathematical; a known gap)" (fun () ->
-        (* A KNOWN GAP, pinned on purpose (§9.1): at the maximum Int, `inc`
-           overflows at run time.  The Int-overflow phase must flip this test. *)
+    gated "known_overflow, flipped on purpose (phase 6): `inc(n) > n` proves, and is sound by the trap" (fun () ->
+        (* Phase 6 (D8) ruled the logic's Int stays mathematical: since 0.7.0
+           `+` panics on overflow, so `inc` never RETURNS a value that breaks
+           the lemma.  Until phase 6 this was pinned as a known gap; now the
+           test also shows the program stops at the largest Int instead of
+           returning (the interpreter here; the compiled trap has its own
+           parity tests, specs/progress/2026-10-30-int-overflow-trap.md). *)
         let out =
           run
             "mod N do\n  fn inc(n : Int) : Int do n + 1 end\n  @[lemma]\n  fn l(n : Int) : {Unit | inc(n) > n} do\n    ()\n  end\nend\n"
         in
-        U.expect out ~line:5 ~callee:"l" "proved" ~uses:"inc");
+        U.expect out ~line:5 ~callee:"l" "proved" ~uses:"inc";
+        let ran =
+          run ~args:""
+            ("mod N do\n" ^ console
+           ^ "  fn inc(n : Int) : Int do n + 1 end\n\
+             \  fn main(_c : Cap(IO.Console)) do\n    println(int_to_string(inc(4611686018427387903)))\n  end\nend\n")
+        in
+        if not (contains ran "attempt to add with overflow") then
+          Alcotest.failf "inc at the largest Int must panic, not return:\n%s" ran;
+        if contains ran "-4611686018427387904" then Alcotest.failf "inc wrapped:\n%s" ran);
     gated "assert_runtime: an assert outside a lemma keeps today's meaning" (fun () ->
         let out =
           run

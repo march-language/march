@@ -222,7 +222,22 @@ let truncating_division ~(op : string) ~(nonneg_dividend : bool) (a : Smt.term)
     | false, `Term t -> Smt.Mod (x, t)
   in
   if nonneg_dividend then euclid a
-  else Smt.Ite (Smt.Ge (a, Smt.IntLit 0), euclid a, Smt.Neg (euclid (Smt.Neg a)))
+  else
+    let trunc = Smt.Ite (Smt.Ge (a, Smt.IntLit 0), euclid a, Smt.Neg (euclid (Smt.Neg a))) in
+    (* The one wrap left in Int arithmetic (reflection phase 6, D8): `/` on
+       the smallest Int by -1 returns the smallest Int in both backends, not
+       2^62 (specs/lang/type-system.md, "Int width and overflow").  `+ - *`
+       and negation panic instead, so they need nothing; `%` gives 0, the
+       mathematical value.  A non-negative dividend (above) is never the
+       smallest Int, and a literal divisor other than -1 never wraps.
+       Test-only [div-wrap-off] is this rule's RED control. *)
+    let min_int = Smt.IntLit Stdlib.min_int in
+    if op <> "/" || Sys.getenv_opt "MARCH_REFLECT_PERTURB" = Some "div-wrap-off" then trunc
+    else
+      match divisor with
+      | `Lit k when k <> -1 -> trunc
+      | `Lit _ -> Smt.Ite (Smt.Eq (a, min_int), min_int, trunc)
+      | `Term d -> Smt.Ite (Smt.And (Smt.Eq (a, min_int), Smt.Eq (d, Smt.IntLit (-1))), min_int, trunc)
 
 (* The condition under which evaluating the reflected Boolean term [t]
    divides by no zero: [None] when it is trivially true (no [Smt.Div]/
