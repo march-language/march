@@ -929,8 +929,8 @@ let print_refine_report_sites_all ~filename ~user_files () =
    (lib/refinecheck/refine_reflect.ml).  Run AFTER [Division_safety], whose
    [Division] verdicts R4 reads from the ledger.  Inert: nothing else reads
    the analysis. *)
-let print_reflect_report ~filename ~user_files ~type_map ~(recheck : unit -> unit)
-    (m : March_ast.Ast.module_) =
+let reflect_rows ~type_map ~(recheck : unit -> unit)
+    (m : March_ast.Ast.module_) : March_refinecheck.Refine_reflect.row list =
   let module RR = March_refinecheck.Refine_reflect in
   let module RT = March_refinecheck.Refine_term in
   (* R2 needs a certificate for every recursive SCC of user code, which the
@@ -958,10 +958,6 @@ let print_reflect_report ~filename ~user_files ~type_map ~(recheck : unit -> uni
   in
   let module O = March_refinecheck.Obligation in
   let module RE = March_refinecheck.Refine_encode in
-  let is_user_span (span : March_ast.Ast.span) =
-    let f = span.March_ast.Ast.file in
-    f = filename || f = "" || f = "<unknown>" || List.mem f user_files
-  in
   let t =
     March_refinecheck.Refine_term.analyze ~type_map
       ~file_mod:m.March_ast.Ast.mod_name.March_ast.Ast.txt m.March_ast.Ast.mod_decls
@@ -982,8 +978,26 @@ let print_reflect_report ~filename ~user_files ~type_map ~(recheck : unit -> uni
       vocab = (fun s -> s = "len" || List.mem s RE.set_vocabulary || RE.ctor_of_tester s <> None);
       pred_fn = (fun s -> s = "len" || RE.known_predicate_fn s) }
   in
+  RR.analyze inputs t m.March_ast.Ast.mod_decls
+
+let user_span ~filename ~user_files (span : March_ast.Ast.span) =
+  let f = span.March_ast.Ast.file in
+  f = filename || f = "" || f = "<unknown>" || List.mem f user_files
+
+let print_reflect_report ~filename ~user_files ~type_map ~recheck m =
   List.iter prerr_endline
-    (RR.report_lines ~is_user:is_user_span (RR.analyze inputs t m.March_ast.Ast.mod_decls))
+    (March_refinecheck.Refine_reflect.report_lines ~is_user:(user_span ~filename ~user_files)
+       (reflect_rows ~type_map ~recheck m))
+
+(* --law-coverage (specs/2026-11-04-law-coverage-design.md §4): the lemma table
+   is read BEFORE [reflect_rows], whose re-check would rebuild it. *)
+let print_law_coverage ~filename ~user_files ~type_map ~recheck ~file_mod m =
+  let lemmas = !March_refinecheck.Refine_check.lemma_defs in
+  let rows = reflect_rows ~type_map ~recheck m in
+  List.iter prerr_endline
+    (March_refinecheck.Law_coverage.report_lines
+       (March_refinecheck.Law_coverage.entries ~file_mod ~rows ~lemmas ~decls:m.March_ast.Ast.mod_decls
+          ~is_user:(user_span ~filename ~user_files)))
 
 (* --reflect-deps (reflection §7.2): the D17 hash of every reflected user
    function, then of every reflected function in the frontier of a stage-2
@@ -2856,6 +2870,15 @@ let run_test_cmd args =
             ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls ~type_map
             (March_errors.Errors.create ()) desugared)
         desugared;
+    if !law_coverage then
+      print_law_coverage ~filename ~user_files ~type_map
+        ~file_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt
+        ~recheck:(fun () ->
+          March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
+            ~stdlib_files:(stdlib_span_files stdlib_decls)
+            ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls ~type_map
+            (March_errors.Errors.create ()) desugared)
+        desugared;
     (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
        refinement contract are admitted when their call site's PRECONDITION was
        actually discharged, rather than banned by name.  It must run here, after
@@ -3578,7 +3601,7 @@ let compile filename =
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
       || !termination_report || !reflect_report || !refine_report_sites_all
-      || !reflect_deps || !reflect_parity || !emit_lemma_manifest || !lemma_test
+      || !reflect_deps || !reflect_parity || !emit_lemma_manifest || !lemma_test || !law_coverage
       || !report_contracts
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
@@ -4161,6 +4184,15 @@ let compile filename =
   if !lemma_test then run_lemma_test ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ();
   if !reflect_report then
     print_reflect_report ~filename ~user_files ~type_map
+      ~recheck:(fun () ->
+        March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
+          ~stdlib_files:(stdlib_span_files stdlib_decls)
+          ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls ~type_map
+          (March_errors.Errors.create ()) desugared)
+      desugared;
+  if !law_coverage then
+    print_law_coverage ~filename ~user_files ~type_map
+      ~file_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt
       ~recheck:(fun () ->
         March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
           ~stdlib_files:(stdlib_span_files stdlib_decls)
@@ -7525,6 +7557,8 @@ let () =
      " Compare each reflected user function's logic definition with the interpreter on generated inputs (boundary Ints included); exit 1 on a mismatch or an interpreter failure");
     ("--lemma-test", Arg.Set lemma_test,
      " Evaluate each lemma's theorem on generated inputs: an unproved lemma in the interpreter (a property test: exit 1 on a counterexample), an admitted one in the interpreter and a compiled program (exit 1 if it is false in either: a compiler or runtime bug)");
+    ("--law-coverage", Arg.Set law_coverage,
+     " Print, per user module, which pure (reflected) functions an admitted law's theorem calls, which only unproved laws do, and which none; changes no verdict");
     ("--reflect-report", Arg.Set reflect_report,
      " Print one line per user function: reflected (its body usable in predicates, from phase 1 of reflection) or the first rule that blocks it; changes no verdict");
     ("--refine-audit", Arg.Set refine_audit,

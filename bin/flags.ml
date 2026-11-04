@@ -145,6 +145,11 @@ let emit_lemma_manifest = ref false
    interpreter failure.  Changes no verdict. *)
 let reflect_parity = ref false
 let lemma_test = ref false
+(* --law-coverage: after the check, one block per user module listing its pure
+   (reflected) functions by whether an admitted law's theorem calls them
+   (lib/refinecheck/law_coverage.ml, specs/2026-11-04-law-coverage-design.md).
+   Report-only. *)
+let law_coverage = ref false
 (* --refine-audit: print every declared refinement occurrence the checker
    never enforces (Unenforced) or only warns about (Inert_warned), plus a
    three-bucket summary. Read-only: changes no verdict, emits no diagnostic.
