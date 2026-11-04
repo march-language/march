@@ -1263,7 +1263,8 @@ to annotate.
 - Every `match` in it **covers every case**, guarded arms included.
 - It calls only reflected functions, constructors, and the arithmetic,
   comparison and Boolean operators.
-- It takes no function as a parameter and makes no lambda.
+- It takes no function as a parameter and makes no lambda, except as described
+  under [Functions that take functions](#functions-that-take-functions) below.
 - Its parameters and result are `Int`, `Bool`, data types (lists, options,
   your own types) or type variables, and it does not return `Unit`.
 - It is not marked `@[opaque]`, `@[assume]` or `@[trusted]`, and its name is not
@@ -1380,6 +1381,56 @@ fn g(n : Int) : Int do
 end
 ```
 
+#### Functions that take functions
+
+A function such as `List.filter` or `List.map` takes a function as an argument,
+so it has no single definition. Each **call** of it with a lambda, or with the
+name of a reflected function, does: the checker puts the lambda's body in place
+of the parameter and gets a definition for that one call. So a function that
+filters or maps with a lambda is reflected:
+
+```march
+fn pos(xs : List(Int)) : List(Int) do List.filter(xs, fn x -> x > 0) end
+fn need_eq(a : List(Int), b : {List(Int) | _ == a}) : Int do 0 end
+
+need_eq(Cons(1, Nil), List.filter(Cons(1, Nil), fn x -> x > 0))   -- proved
+need_eq(Cons(2, Nil), List.map(Cons(1, Nil), fn x -> x + 1))       -- proved
+```
+
+A lambda may read the caller's variables. They become extra arguments of that
+call's definition, so `above(xs, 3)` and `above(xs, 7)` are kept apart:
+
+```march
+fn above(xs : List(Int), k : Int) : List(Int) do List.filter(xs, fn x -> x > k) end
+```
+
+The function taking the function (call it `g`, with function parameter `p`) is
+used this way when:
+- every use of `p` in `g`'s body is a call `p(...)`, or passes `p` on in the same
+  position of `g`'s own recursive call (`filter(t, pred)`);
+- nothing in `g`'s body is named `p` again, and `g` makes no lambda itself;
+- `p`'s parameter types carry no refinement (`p : {Int | _ > 0} -> Bool` is not
+  used this way; an abstract refinement `a -> Bool[p]` is fine);
+- `g` passes every other rule above, and is not part of a group of mutually
+  recursive functions.
+
+The argument at each such call must be:
+- a lambda with the right number of parameters, none of them refined, whose
+  body has no effect, cannot fail, makes no lambda, divides only by non-zero
+  literals, and calls only reflected functions;
+- or the name of a reflected top-level function.
+
+A lambda bound by `let`, a local `fn`, a function parameter, or a function
+returned by a call (`List.filter(xs, make_pred(3))`) is not used: its
+definition is not fixed where the call is written. Recursion through a lambda
+is the caller's: in `fn bad(n) = hd(List.map([n], fn x -> bad(x) + 1))` the
+lambda's call of `bad` is `bad` calling itself, which does not terminate, so
+`bad` is not reflected.
+
+A predicate cannot call `g` itself (it cannot hold a lambda). `--reflect-report`
+lists `g` as `specialised`, with the number of calls that got a definition. The
+fuel of those calls is `g`'s: `@[reflect(fuel: N)]` on `g` is accepted.
+
 **A body is part of its callers' proofs.** When a caller's proof uses a
 reflected function's definition, an edit to that body can change the proof.
 Nothing stale survives such an edit:
@@ -1411,7 +1462,9 @@ Nothing stale survives such an edit:
 **Checking the checker: `--reflection-parity`.** `forge test
 --reflection-parity` (or `march --check --reflect-parity file.march`) runs each
 reflected function both ways on generated inputs: by its logic definition and
-by the interpreter. The inputs include `0`, `1`, `-1`, the largest and smallest
+by the interpreter. Each call of a function that takes functions is checked
+too, as the call itself (`List.filter[m.march:3:4]`), with its lambda's
+captured variables among the inputs. The inputs include `0`, `1`, `-1`, the largest and smallest
 `Int` and their neighbours. Any disagreement, or a reflected function that
 panics on an input in its domain, fails the run: that is a compiler bug.
 A function whose arithmetic overflows at the boundary is reported `overflow?`,
@@ -5113,7 +5166,11 @@ The rules, in the order the report checks them:
   total and pure. Any other interface call (`show`, string interpolation, a
   user `compare`) blocks.
 - **R7**: no function values: no lambda, no function-typed parameter, no
-  function passed or stored as a value.
+  function passed or stored as a value. The exception is a call of a function
+  that takes functions with a lambda or a reflected function's name
+  ([Functions that take functions](#functions-that-take-functions)); the
+  function taking them is listed `specialised`, with how many of its calls got
+  a definition.
 - **R8**: every parameter and the result have a solver sort; a function
   returning `Unit` is not reflected.
 - **R9**: not marked `@[trusted]`, `@[assume]` or `@[opaque]`.

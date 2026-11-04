@@ -623,27 +623,30 @@ end
             if not (List.exists (fun l -> contains l ("\t" ^ f ^ "\tno\tR6:")) (lines out)) then
               Alcotest.failf "%s must be blocked by R6:\n%s" f out)
           [ "same_p"; "same_q"; "same_r" ]);
-    gated "sound_fnvalue: function values in a body block reflection (R7)" (fun () ->
+    gated "sound_fnvalue: function values block reflection (R7), except a specialised call (phase 5)" (fun () ->
         let out =
           run ~args:"--check --reflect-report"
             {|mod Sfv do
   fn apply(f : Int -> Int, x : Int) : Int do f(x) end
   fn twice(x : Int) : List(Int) do List.map(Cons(x, Nil), fn y -> y + 1) end
+  fn pass_on(xs : List(Int), f : Int -> Int) : Int do List.length(List.map(xs, f)) end
+  fn sa(f : Int -> Int, g : (Int -> Int) -> Int) : Int do g(f) end
 end
 |}
         in
+        (* Phase 5 (D10), on purpose: `apply` has a definition at each call
+           with a lambda, and `twice`'s call of `List.map` with one is
+           reflected.  A function passed on to another, or applied to a
+           function, still blocks. *)
+        if not (List.exists (fun l -> contains l "\tapply\tspecialised\t") (lines out)) then
+          Alcotest.failf "apply is specialised:\n%s" out;
+        if not (List.exists (fun l -> contains l "\ttwice\treflected\t") (lines out)) then
+          Alcotest.failf "twice is reflected:\n%s" out;
         List.iter
           (fun f ->
             if not (List.exists (fun l -> contains l ("\t" ^ f ^ "\tno\tR7:")) (lines out)) then
               Alcotest.failf "%s must be blocked by R7:\n%s" f out)
-          [ "apply" ];
-        (* `twice`'s first blocker in R-order is R6 (`List.map` takes a
-           function value, so it is itself not reflected); R7 is its lambda. *)
-        List.iter
-          (fun f ->
-            if not (List.exists (fun l -> contains l ("\t" ^ f ^ "\tno\tR")) (lines out)) then
-              Alcotest.failf "%s must not be reflected:\n%s" f out)
-          [ "twice" ]);
+          [ "pass_on"; "sa" ]);
     gated "sound_dispatch: show, interpolation and compare on a user impl block reflection" (fun () ->
         let out =
           run ~args:"--check --reflect-report"

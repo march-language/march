@@ -54,9 +54,93 @@ type inputs = {
 
 type blocker = { b_rule : int; b_text : string; b_span : A.span }
 
-type verdict = Reflected of string list  (** the unfolding guards (§3.6) *) | Blocked of blocker
+type verdict =
+  | Reflected of string list  (** the unfolding guards (§3.6) *)
+  | Blocked of blocker
+  | Specialised of int  (** phase 5: a function taking functions, specialised at this many call sites *)
 
 type row = { r_name : string; r_span : A.span; r_verdict : verdict; r_top : bool }
+
+(* ── Phase 5 (D10): specialisation per call site ────────────────────────────
+   A unit [g] whose function parameters only flow into calls [p(..)] and into
+   the same position of its own recursive call has no definition of its own,
+   but each call [g(xs, fn x -> e)] does: [g]'s body with the lambda put in
+   place of [p] (plan: specs/plans/2026-11-03-reflection-phase5-fnvalues-plan.md). *)
+
+(** A function argument a specialised call passes. *)
+type fn_arg =
+  | F_lambda of A.param list * A.expr * A.span  (** a lambda literal: parameters, body, its span *)
+  | F_named of int * A.span  (** a top-level function the graph resolved at this name *)
+
+type spec_site = {
+  ss_callee : int;
+  ss_caller : int;
+  ss_span : A.span;  (** the call's span *)
+  ss_args : A.expr list;
+  ss_fn : (int * fn_arg) list;  (** each function parameter's position, and its argument *)
+}
+
+(** Units whose function parameters can be specialised, by unit id: each such
+    parameter's position, name and call arity (when [g] calls it). *)
+let spec_params : (int, (int * string * int option) list) Hashtbl.t = Hashtbl.create 16
+
+(** The call sites the last [analyze] specialises, by call span: accepted
+    arguments, a specialised callee, and every lambda total and pure. *)
+let spec_sites : (A.span, spec_site) Hashtbl.t = Hashtbl.create 16
+
+(** Specialised units by declaring span ([@[reflect]] accepts them). *)
+let specialised : (A.span, unit) Hashtbl.t = Hashtbl.create 16
+
+(* Test-only perturbations of phase 5, each the RED control of one rule of the
+   plan's soundness table. *)
+let spec_perturb (k : string) = Sys.getenv_opt "MARCH_REFLECT_PERTURB" = Some k
+
+(* A refinement that constrains something: the abstract-refinement definer
+   [a -> Bool[p]] parses with the domain [{x : a | true}], which does not. *)
+let rec has_refine (t : A.ty) =
+  match t with
+  | A.TyRefine (b, _, A.ELit (A.LitBool true, _)) -> has_refine b
+  | A.TyRefine _ -> true
+  | A.TyCon (_, args) | A.TyTuple args -> List.exists has_refine args
+  | A.TyArrow (a, b) | A.TyNatOp (_, a, b) -> has_refine a || has_refine b
+  | A.TyRecord fs -> List.exists (fun (_, t) -> has_refine t) fs
+  | A.TyLinear (_, t) -> has_refine t
+  | A.TyVar _ | A.TyNat _ | A.TyChan _ -> false
+
+(* Every name a binder anywhere in [e] introduces. *)
+let binders_in (e : A.expr) : string list =
+  let acc = ref [] in
+  let params ps = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+  Refine_encode.iter_all
+    (function
+      | A.ELet (b, _) -> acc := RT.pat_vars b.A.bind_pat @ !acc
+      | A.EMatch (_, brs, _) -> List.iter (fun (br : A.branch) -> acc := RT.pat_vars br.A.branch_pat @ !acc) brs
+      | A.ELam (ps, _, _) -> acc := params ps @ !acc
+      | A.ELetFn (n, ps, _, _, _) -> acc := (n.A.txt :: params ps) @ !acc
+      | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> acc := RT.pat_vars p @ !acc
+      | _ -> ())
+    e;
+  !acc
+
+let has_lambda (e : A.expr) =
+  let r = ref false in
+  Refine_encode.iter_all (function A.ELam _ | A.ELetFn _ | A.ELetStar _ -> r := true | _ -> ()) e;
+  !r
+
+(* Every [/] and [%] divides by a non-zero literal. *)
+let literal_divisions (e : A.expr) =
+  let r = ref true in
+  Refine_encode.iter_all
+    (function
+      | A.EApp (A.EVar { A.txt = "/" | "%"; _ }, [ _; d ], _) when Refine_encode.nonzero_int_literal d = None -> r := false
+      | _ -> ())
+    e;
+  !r
+
+let span_within (a : A.span) (b : A.span) =
+  a.A.file = b.A.file
+  && compare (a.A.start_line, a.A.start_col) (b.A.start_line, b.A.start_col) >= 0
+  && compare (a.A.end_line, a.A.end_col) (b.A.end_line, b.A.end_col) <= 0
 
 (* ── The §2.3 table ─────────────────────────────────────────────────────── *)
 
@@ -395,6 +479,17 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
      ([Refine_term.graph.pred_sites]): R8 reads them by site (phase 1b). *)
   let pred_site_tbl : (A.span, RT.site_target) Hashtbl.t = Hashtbl.create 64 in
   List.iter (fun (sp, tgt) -> Hashtbl.replace pred_site_tbl sp tgt) g.RT.pred_sites;
+  (* Phase 5: the lambdas and function names a specialised call passes
+     (filled below, before [site_events] runs), and each accepted call's
+     arguments by call span. *)
+  let accepted_lam : (A.span, unit) Hashtbl.t = Hashtbl.create 16 in
+  let accepted_ref : (A.span, unit) Hashtbl.t = Hashtbl.create 16 in
+  let site_spec : (A.span, (int * fn_arg) list) Hashtbl.t = Hashtbl.create 16 in
+  let is_fn_param (u : RT.unit_) nm =
+    match Hashtbl.find_opt spec_params u.RT.u_id with
+    | Some fps -> List.exists (fun (_, p, _) -> p = nm) fps
+    | None -> false
+  in
   (* [`Refl v]: v must be reflected; [`Eq ids]: each must pass R2-R7 with its
      callees ([==], §3.5). *)
   let site_events (u : RT.unit_) : ev list =
@@ -414,6 +509,7 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
                                                                  | [ { RT.o_params = _ :: _; _ } ] -> true
                                                                  | _ -> false) ->
             add 6 (Printf.sprintf "reads the top-level `let` %s, which is not reflected" nm) sp
+          | _ when Hashtbl.mem accepted_ref sp -> ()
           | _ -> add 7 (Printf.sprintf "names %s as a value" nm) sp
         end
         else if Hashtbl.mem g.RT.ambiguous sp then
@@ -423,6 +519,9 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
           add 6 (Printf.sprintf "calls %s, a name more than one declaration could denote" nm) sp
         else
           match s.RT.s_target with
+          (* A call of the specialised unit's own function parameter: the
+             lambda's body, at each specialisation (phase 5). *)
+          | RT.S_value when is_fn_param u nm -> ()
           | RT.S_value ->
             add 7
               (if nm = "" then "calls through a function value"
@@ -432,6 +531,22 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
           | RT.S_unresolved -> add 6 (Printf.sprintf "calls %s, which the checker cannot resolve" nm) sp
           | RT.S_unit v when is_len_unit v -> ()
           | RT.S_unit v when ident <> None && (is_effect nm || List.mem nm fail_builtins) -> ignore v
+          | RT.S_unit v when Hashtbl.mem spec_params v && v <> u.RT.u_id -> (
+            (* Phase 5: a call of a specialisable unit.  Each function
+               argument must be a lambda or a function the graph resolved;
+               a named one must itself be reflected. *)
+            match Hashtbl.find_opt site_spec sp with
+            | Some fa ->
+              deps.(u.RT.u_id) <- (`Refl v, s) :: deps.(u.RT.u_id);
+              List.iter
+                (function
+                  | _, F_named (f, _) -> deps.(u.RT.u_id) <- (`Refl f, s) :: deps.(u.RT.u_id)
+                  | _, F_lambda _ -> ())
+                fa
+            | None ->
+              add 7
+                (Printf.sprintf "passes %s a function value that is not a lambda or a function's name" nm)
+                sp)
           | RT.S_unit v -> deps.(u.RT.u_id) <- (`Refl v, s) :: deps.(u.RT.u_id)
           | RT.S_impls ids when List.mem nm eq_ops ->
             if ids <> [] then deps.(u.RT.u_id) <- (`Eq ids, s) :: deps.(u.RT.u_id)
@@ -479,6 +594,140 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
     in
     (ast, typed)
   in
+  (* ── Phase 5 (D10): which units specialise, which calls are accepted ──── *)
+  Hashtbl.reset spec_params;
+  Hashtbl.reset spec_sites;
+  Hashtbl.reset specialised;
+  let call_at : (A.span, RT.site) Hashtbl.t = Hashtbl.create 256 in
+  let ref_at : (A.span, RT.site) Hashtbl.t = Hashtbl.create 64 in
+  List.iter (fun (s : RT.site) -> Hashtbl.replace (if s.RT.s_call then call_at else ref_at) s.RT.s_span s) g.RT.sites;
+  let is_arrow_param u i =
+    match param_ty u i with Some a, _ when ast_is_arrow a -> true | _, Some t when ty_is_arrow t -> true | _ -> false
+  in
+  (* A refinement on what a function parameter is called with: a lambda's
+     body could rely on it, so the parameter is not specialised.  The
+     result's abstract refinement ([Bool[p]]) is the lambda's promise and
+     does not matter here. *)
+  let rec domain_refined (t : A.ty) =
+    match t with
+    | A.TyRefine (b, _, A.ELit (A.LitBool true, _)) -> domain_refined b
+    | A.TyRefine _ -> true
+    | A.TyLinear (_, b) -> domain_refined b
+    | A.TyArrow (a, b) -> has_refine a || (match b with A.TyArrow _ -> domain_refined b | _ -> false)
+    | _ -> false
+  in
+  Array.iter
+    (fun (u : RT.unit_) ->
+      let fps = List.filter_map (fun i -> if is_arrow_param u i then Some i else None) (List.init (List.length u.RT.u_params) Fun.id) in
+      if fps <> [] && not (List.mem "lemma" u.RT.u_attrs) then
+        match u.RT.u_clauses with
+        | [ c ] when g.RT.sccs.(g.RT.scc_of.(u.RT.u_id)) = [ u.RT.u_id ] -> (
+          let named = List.map (fun i -> (i, List.nth c.RT.o_params i)) fps in
+          if List.for_all (fun (_, n) -> n <> None) named then begin
+            let fps = List.map (fun (i, n) -> (i, Option.get n)) named in
+            let names = List.map snd fps in
+            let ok =
+              ref
+                ((not (has_lambda c.RT.o_body))
+                 && not (List.exists (fun b -> List.mem b names) (binders_in c.RT.o_body)))
+            in
+            List.iter
+              (fun (i, _) ->
+                match List.nth_opt u.RT.u_param_tys i with Some (Some a) when domain_refined a -> ok := false | _ -> ())
+              fps;
+            let arity = Hashtbl.create 4 in
+            let self_call sp =
+              (not (Hashtbl.mem g.RT.ambiguous sp))
+              && match Hashtbl.find_opt call_at sp with Some { RT.s_target = RT.S_unit v; _ } -> v = u.RT.u_id | _ -> false
+            in
+            (* Every occurrence of a function parameter is a call of it, or
+               the same position of a call of [u] itself. *)
+            let rec occ (e : A.expr) =
+              match e with
+              | A.EVar v when List.mem v.A.txt names -> ok := false
+              | A.EApp (A.EVar f, args, _) when List.mem f.A.txt names ->
+                let k = List.length args in
+                (match Hashtbl.find_opt arity f.A.txt with
+                 | Some k' when k' <> k -> ok := false
+                 | _ -> Hashtbl.replace arity f.A.txt k);
+                List.iter occ args
+              | A.EApp (A.EVar _, args, sp) when self_call sp ->
+                List.iteri
+                  (fun i a ->
+                    match List.assoc_opt i fps, a with
+                    | Some p, A.EVar v when v.A.txt = p -> ()
+                    | Some _, A.EVar v when spec_perturb "spec-any-position" && List.mem v.A.txt names -> ()
+                    | Some _, _ -> ok := false
+                    | None, a -> occ a)
+                  args
+              | e -> List.iter occ (Refine_encode.children e)
+            in
+            occ c.RT.o_body;
+            if !ok then
+              Hashtbl.replace spec_params u.RT.u_id
+                (List.map (fun (i, p) -> (i, p, Hashtbl.find_opt arity p)) fps)
+          end)
+        | _ -> ())
+    g.RT.units;
+  (* The function [n] names, when the graph resolved THIS occurrence to a
+     top-level unit (never by spelling: a local value of that name has no
+     site, review lesson of phase 1a). *)
+  let named_fn (n : A.name) : int option =
+    if spec_perturb "spec-by-spelling" then
+      (* Test-only: the RED control, a lookup by bare name. *)
+      List.find_map
+        (fun (v : RT.unit_) -> if v.RT.u_kind = RT.Top && RT.bare v.RT.u_name = n.A.txt then Some v.RT.u_id else None)
+        (Array.to_list g.RT.units)
+    else if Hashtbl.mem g.RT.ambiguous n.A.span then None
+    else
+      match Hashtbl.find_opt ref_at n.A.span with
+      | Some { RT.s_target = RT.S_unit f; _ } when (unit_ f).RT.u_kind = RT.Top -> Some f
+      | _ -> None
+  in
+  List.iter
+    (fun (s : RT.site) ->
+      match s.RT.s_target with
+      | RT.S_unit v
+        when s.RT.s_call && v <> s.RT.s_src && Hashtbl.mem spec_params v && not (Hashtbl.mem g.RT.ambiguous s.RT.s_span) ->
+        let args = Array.of_list s.RT.s_args in
+        let one (i, _, ar) =
+          if i >= Array.length args then None
+          else
+            match args.(i) with
+            | A.ELam (ps, body, lsp)
+              when (match ar with Some k -> List.length ps = k | None -> true)
+                   && List.for_all
+                        (fun (p : A.param) -> match p.A.param_ty with Some t -> not (has_refine t) | None -> true)
+                        ps
+                   && (not (has_lambda body))
+                   && literal_divisions body ->
+              Some (i, F_lambda (ps, body, lsp))
+            | A.EVar n -> (
+              match named_fn n with
+              | Some f
+                when (not (Hashtbl.mem spec_params f))
+                     && (match ar with Some k -> List.length (unit_ f).RT.u_params = k | None -> false) ->
+                Some (i, F_named (f, n.A.span))
+              | _ -> None)
+            | _ -> None
+        in
+        let got = List.map one (Hashtbl.find spec_params v) in
+        if List.for_all Option.is_some got then begin
+          let fa = List.map Option.get got in
+          Hashtbl.replace site_spec s.RT.s_span fa;
+          List.iter
+            (function
+              | _, F_lambda (_, _, lsp) -> Hashtbl.replace accepted_lam lsp ()
+              | _, F_named (_, sp) -> Hashtbl.replace accepted_ref sp ())
+            fa
+        end
+      | _ -> ())
+    g.RT.sites;
+  (* An accepted lambda is not R7's "contains a lambda": its body is the
+     caller's code, and its own events stay the caller's. *)
+  Hashtbl.filter_map_inplace
+    (fun _ e -> if e.ev_rule = 7 && e.ev_text = "contains a lambda" && Hashtbl.mem accepted_lam e.ev_span then None else Some e)
+    events;
   let unit_events (u : RT.unit_) : ev list =
     let evs = ref (Hashtbl.find_all events u.RT.u_span) in
     let add rule text span = evs := { ev_rule = rule; ev_text = text; ev_span = span } :: !evs in
@@ -495,6 +744,14 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
     if RT.is_recursive g u.RT.u_id then begin
       match cert_of u with
       | "structural" | "metric" -> ()
+      | _
+        when spec_perturb "spec-lambda-own-unit"
+             && List.for_all
+                  (fun (e : RT.edge) ->
+                    g.RT.scc_of.(e.RT.e_dst) <> g.RT.scc_of.(u.RT.u_id) || e.RT.e_kind = RT.Lambda)
+                  g.RT.out.(u.RT.u_id) ->
+        (* Test-only: the RED control of recursion through a lambda. *)
+        ()
       | c -> add 2 c sp
     end
     else if RT.is_diverges u then add 2 "diverges" sp;
@@ -503,6 +760,7 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
       (fun i p ->
         let nm = match p with Some s -> s | None -> Printf.sprintf "#%d" (i + 1) in
         match param_ty u i with
+        | _ when Hashtbl.mem spec_params u.RT.u_id -> ()  (* specialised per call site (phase 5) *)
         | Some a, _ when ast_is_arrow a -> add 7 (Printf.sprintf "takes a function-typed parameter %s" nm) sp
         | _, Some t when ty_is_arrow t -> add 7 (Printf.sprintf "takes a function-typed parameter %s" nm) sp
         | _ -> ())
@@ -817,6 +1075,33 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
         lemma_value_uses := (s.RT.s_span, (unit_ v).RT.u_name) :: !lemma_value_uses
       | _ -> ())
     g.RT.sites;
+  (* Phase 5: the calls that are specialised.  The callee passed every rule
+     but R7's, each named argument is reflected, and each lambda is total and
+     pure on its own: its events and dependencies, which are its caller's,
+     those inside its span (a reflected caller has none at all). *)
+  let lam_ok owner (lsp : A.span) =
+    refl.(owner)
+    || spec_perturb "spec-skip-lambda-check"
+    || List.for_all (fun e -> not (span_within e.ev_span lsp)) local.(owner)
+       && List.for_all (fun ((_, (s : RT.site)) as d) -> (not (span_within s.RT.s_span lsp)) || dep_ok d) deps.(owner)
+  in
+  let counts = Hashtbl.create 16 in
+  Hashtbl.iter
+    (fun sp fa ->
+      let s = Hashtbl.find call_at sp in
+      match s.RT.s_target with
+      | RT.S_unit v
+        when refl.(v)
+             && List.for_all
+                  (function
+                    | _, F_named (f, _) -> refl.(f) && not (List.mem "lemma" (unit_ f).RT.u_attrs)
+                    | _, F_lambda (_, _, lsp) -> lam_ok s.RT.s_src lsp)
+                  fa ->
+        Hashtbl.replace spec_sites sp
+          { ss_callee = v; ss_caller = s.RT.s_src; ss_span = sp; ss_args = s.RT.s_args; ss_fn = fa };
+        Hashtbl.replace counts v (1 + Option.value ~default:0 (Hashtbl.find_opt counts v))
+      | _ -> ())
+    site_spec;
   Array.to_list g.RT.units
   |> List.filter_map (fun (u : RT.unit_) ->
          match (u.RT.u_kind, origin_of u) with
@@ -824,6 +1109,9 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
          | _ ->
            let v =
              match reason u.RT.u_id with
+             | None when Hashtbl.mem spec_params u.RT.u_id ->
+               Hashtbl.replace specialised u.RT.u_span ();
+               Specialised (Option.value ~default:0 (Hashtbl.find_opt counts u.RT.u_id))
              | None -> Reflected (guards u)
              | Some b -> Blocked b
            in
@@ -857,6 +1145,9 @@ let report_lines ?(is_user : A.span -> bool = fun _ -> true) (rows : row list) :
     | Blocked b ->
       Printf.sprintf "reflect\t%s\t%s\tno\tR%d:%s (%s)" (span_str r.r_span) r.r_name b.b_rule b.b_text
         (span_str b.b_span)
+    | Specialised k ->
+      Printf.sprintf "reflect\t%s\t%s\tspecialised\t%d call site%s" (span_str r.r_span) r.r_name k
+        (if k = 1 then "" else "s")
   in
   let refl = List.filter (fun r -> match r.r_verdict with Reflected _ -> true | _ -> false) rows in
   let count p = List.length (List.filter p rows) in
@@ -1358,7 +1649,24 @@ type tctx = {
   c_eq_structural : T.ty -> bool;  (** program [==] at this type is SMT [=] (§3.5) *)
   c_unit : RT.unit_ array;
   c_ambiguous : A.span -> bool;  (** [Refine_term.graph.ambiguous] *)
+  c_spec : spec_ctx option;  (** translating a specialisation's body (phase 5) *)
 }
+
+(* A specialisation's body (phase 5): [g]'s function parameters stand for the
+   call's arguments.  Each is bound in the environment to a SENTINEL constant
+   ([$fn:<name>]) that only a call of it, or the same position of [g]'s own
+   recursive call, may meet; anything else that reaches one declines. *)
+and spec_ctx = {
+  sc_self : int;  (** [g]'s unit *)
+  sc_sym : string;  (** this specialisation's symbol *)
+  sc_fn : (string * fn_arg) list;  (** function parameter -> the call's argument *)
+  sc_fnpos : (int * string) list;  (** its position *)
+  sc_caps : (string * Smt.term) list;  (** each capture of the lambdas -> its parameter *)
+}
+
+let sentinel p = Smt.Const ("$fn:" ^ p)
+
+let is_sentinel = function Smt.Const k -> String.starts_with ~prefix:"$fn:" k | _ -> false
 
 let is_int_ty = function Some t -> (match T.repr t with T.TCon ("Int", []) -> true | _ -> false) | None -> false
 
@@ -1367,7 +1675,8 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
   match e with
   | A.ELit (A.LitInt n, _) -> Smt.IntLit n
   | A.ELit (A.LitBool b, _) -> Smt.BoolLit b
-  | A.EVar x -> ( match List.assoc_opt x.A.txt env with Some t -> t | None -> raise Decline)
+  | A.EVar x -> (
+    match List.assoc_opt x.A.txt env with Some t when not (is_sentinel t) -> t | _ -> raise Decline)
   | A.EAnnot (x, _, _) -> v x
   | A.EBlock ([ x ], _) -> v x
   | A.EBlock (_ :: _, _) | A.EMatch _ -> (
@@ -1389,6 +1698,45 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
     let site = Hashtbl.find_opt c.c_sites sp in
     let nm = f.A.txt in
     let target = Option.map (fun (s : RT.site) -> s.RT.s_target) site in
+    match List.assoc_opt nm env, c.c_spec, target with
+    (* Phase 5: a call of [g]'s function parameter is the call's argument
+       applied: a lambda's body under its own scope (its parameters and its
+       captures, never [g]'s names), or the named function's symbol. *)
+    | Some (Smt.Const k as t), Some sc, _ when is_sentinel t -> (
+      let p = String.sub k 4 (String.length k - 4) in
+      let targs = List.map v args in
+      match List.assoc_opt p sc.sc_fn with
+      | Some (F_lambda (ps, body, _)) ->
+        if List.length ps <> List.length targs then raise Decline;
+        let env' = List.combine (List.map (fun (q : A.param) -> q.A.param_name.A.txt) ps) targs @ sc.sc_caps in
+        tr_val { c with c_spec = None } env' body
+      | Some (F_named (fu, _)) -> (
+        match c.c_sym_of_unit fu with Some sym -> Smt.App (sym, targs) | None -> raise Decline)
+      | None -> raise Decline)
+    | Some t, _, _ when is_sentinel t -> raise Decline
+    (* [g]'s own recursive call, each function parameter in its own place:
+       the same specialisation. *)
+    | _, Some sc, Some (RT.S_unit u) when u = sc.sc_self ->
+      List.iteri
+        (fun i a ->
+          match List.assoc_opt i sc.sc_fnpos, a with
+          | Some p, A.EVar x -> (
+            match List.assoc_opt x.A.txt env with
+            | Some t when t = sentinel p -> ()
+            | Some t when spec_perturb "spec-any-position" && is_sentinel t -> ()
+            | _ -> raise Decline)
+          | Some _, _ -> raise Decline
+          | None, _ -> ())
+        args;
+      let nonfn = List.filteri (fun i _ -> not (List.mem_assoc i sc.sc_fnpos)) args in
+      Smt.App (sc.sc_sym, List.map v nonfn @ List.map snd sc.sc_caps)
+    (* A specialised call: its symbol over the expressions [site_args]
+       recorded, captures included, translated in this scope. *)
+    | _, _, Some (RT.S_unit _) when Hashtbl.mem RS.site_args sp -> (
+      match RS.resolve_site sp with
+      | Some sym -> Smt.App (sym, List.map v (Hashtbl.find RS.site_args sp))
+      | None -> raise Decline)
+    | _, _, _ ->
     match target with
     | Some (RT.S_unit u) when c.c_len_unit u -> (
       match args with [ a ] -> Smt.App (RE.list_len_measure, [ v a ]) | _ -> raise Decline)
@@ -1600,6 +1948,14 @@ let install_errors : (A.span * string) list ref = ref []
     lists the ones that did not, review round 1). *)
 let reflected_fns : (string * string) list ref = ref []
 
+(** Phase 5: each specialisation's symbol -> its call site and the names of
+    its captures, for the parity net. *)
+let spec_meta : (string, spec_site * string list) Hashtbl.t = Hashtbl.create 16
+
+(** The termination graph's units of the last [install] (the parity net names
+    a specialisation's callee and named arguments through it). *)
+let last_units : RT.unit_ array ref = ref [||]
+
 let debug_registered = ref false
 
 (* Every reflected logic symbol a query applies is declared by its preamble
@@ -1635,6 +1991,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   reflected_fns := [];
   Hashtbl.reset RS.blocked_by_name;
   let g = t.RT.graph in
+  last_units := g.RT.units;
   let ne = Hashtbl.create 64 in
   List.iter (fun sp -> Hashtbl.replace ne sp ()) !March_typecheck.Typecheck.last_nonexhaustive_match_spans;
   let inputs =
@@ -1648,14 +2005,23 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   let rows = analyze inputs t decls in
   let refl_spans = Hashtbl.create 64 in
   reflected_fns :=
-    List.filter_map (fun r -> match r.r_verdict with Reflected _ -> Some (r.r_name, r.r_span.A.file) | Blocked _ -> None) rows;
+    List.filter_map
+      (fun r -> match r.r_verdict with Reflected _ -> Some (r.r_name, r.r_span.A.file) | Blocked _ | Specialised _ -> None)
+      rows;
   List.iter
     (fun r ->
       match r.r_verdict with
       | Reflected _ -> Hashtbl.replace refl_spans r.r_span ()
       | Blocked b ->
         Hashtbl.replace encoder_blocked r.r_span (Printf.sprintf "R%d:%s" b.b_rule b.b_text);
-        if not (String.contains r.r_name '/') then Hashtbl.replace RS.blocked_by_name r.r_name (b.b_text, b.b_span))
+        if not (String.contains r.r_name '/') then Hashtbl.replace RS.blocked_by_name r.r_name (b.b_text, b.b_span)
+      | Specialised _ ->
+        (* Phase 5: no definition of its own, so not reflected for every
+           reader that asks (a predicate, a lemma argument), only each of its
+           specialised calls is. *)
+        let why = "takes a function, so only its calls with a lambda or a function's name are reflected" in
+        Hashtbl.replace encoder_blocked r.r_span ("R7:" ^ why);
+        if not (String.contains r.r_name '/') then Hashtbl.replace RS.blocked_by_name r.r_name (why, r.r_span))
     rows;
   let ty_at sp = match type_map with Some tm -> Hashtbl.find_opt tm sp | None -> None in
   (* §3.1: the mangled, injective symbol of each reflected unit. *)
@@ -1764,7 +2130,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   in
   let ctx =
     { c_sites = sites; c_sym_of_unit = (fun v -> sym_of.(v)); c_ty = ty_at; c_len_unit = len_unit;
-      c_eq_structural = structural_ty []; c_unit = g.RT.units; c_ambiguous = Hashtbl.mem g.RT.ambiguous }
+      c_eq_structural = structural_ty []; c_unit = g.RT.units; c_ambiguous = Hashtbl.mem g.RT.ambiguous; c_spec = None }
   in
   (* Signatures (§3.2, §3.3). *)
   let axiom_tier = Hashtbl.create 8 in
@@ -1813,6 +2179,98 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     (fun (s : RT.site) -> match s.RT.s_target with RT.S_unit v when s.RT.s_call -> note s.RT.s_span v | _ -> ())
     g.RT.sites;
   List.iter (fun (sp, tgt) -> match tgt with RT.S_unit v -> note sp v | _ -> ()) g.RT.pred_sites;
+  (* Phase 5: one symbol per specialised call site.  Its parameters are the
+     callee's non-function parameters, then the lambdas' captures; its sorts
+     are the call's own (§3.2).  Registered before any template, since a
+     reflected caller's body translates the call through it. *)
+  Hashtbl.reset spec_meta;
+  let ref_sites = Hashtbl.create 64 in
+  List.iter (fun (s : RT.site) -> if not s.RT.s_call then Hashtbl.replace ref_sites s.RT.s_span ()) g.RT.sites;
+  (* A lambda's captures: the names its body reads that it does not bind and
+     the graph did not resolve to a function (no site), in order. *)
+  let captures (fa : (int * fn_arg) list) : (string * A.expr) list =
+    let acc = ref [] in
+    let rec go bound (e : A.expr) =
+      match e with
+      | A.EVar x ->
+        if (not (List.mem x.A.txt bound)) && (not (Hashtbl.mem ref_sites x.A.span)) && not (List.mem_assoc x.A.txt !acc)
+        then acc := (x.A.txt, e) :: !acc
+      | A.EApp (A.EVar _, args, sp)
+        when (match Hashtbl.find_opt sites sp with Some { RT.s_target = RT.S_value; _ } | None -> false | Some _ -> true) ->
+        List.iter (go bound) args
+      | A.EMatch (sc, brs, _) ->
+        go bound sc;
+        List.iter
+          (fun (br : A.branch) ->
+            let b = RT.pat_vars br.A.branch_pat @ bound in
+            Option.iter (go b) br.A.branch_guard;
+            go b br.A.branch_body)
+          brs
+      | A.EBlock (es, _) ->
+        ignore
+          (List.fold_left
+             (fun b (x : A.expr) ->
+               match x with
+               | A.ELet (lb, _) -> go b lb.A.bind_expr; RT.pat_vars lb.A.bind_pat @ b
+               | x -> go b x; b)
+             bound es)
+      | A.ELet (lb, _) -> go bound lb.A.bind_expr
+      | A.ELam (ps, body, _) -> go (List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps @ bound) body
+      | A.ELetQ (p, r, k, _) | A.ELetStar (p, r, k, _) -> go bound r; go (RT.pat_vars p @ bound) k
+      | e -> List.iter (go bound) (RE.children e)
+    in
+    List.iter (function _, F_lambda (ps, body, _) -> go (List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps) body | _ -> ()) fa;
+    List.rev !acc
+  in
+  let unit_path (u : RT.unit_) =
+    Printf.sprintf "%s#%s:%d:%d" u.RT.u_name (Filename.basename u.RT.u_span.A.file) u.RT.u_span.A.start_line
+      u.RT.u_span.A.start_col
+  in
+  let spec_defs =
+    Hashtbl.fold (fun _ ss acc -> ss :: acc) spec_sites []
+    |> List.sort (fun a b -> compare (span_str a.ss_span) (span_str b.ss_span))
+    |> List.filter_map (fun ss ->
+           try
+             let gu = g.RT.units.(ss.ss_callee) in
+             let fnpos = List.map fst ss.ss_fn in
+             let nonfn = List.filteri (fun i _ -> not (List.mem i fnpos)) ss.ss_args in
+             let caps = captures ss.ss_fn in
+             let vars = ref [] in
+             let sort_of e = match ty_at (T.span_of_expr e) with Some t -> poly_sort vars t | None -> raise Decline in
+             let ptys = List.map sort_of nonfn @ List.map (fun (_, e) -> sort_of e) caps in
+             let ret = match ty_at ss.ss_span with Some t -> poly_sort vars t | None -> raise Decline in
+             if ptys = [] then raise Decline;
+             let origin = origin_of_file ~user_files gu.RT.u_span.A.file in
+             let at = ss.ss_span in
+             let sym =
+               if spec_perturb "spec-key-by-callee" then Printf.sprintf "|r:%s:%s$spec|" origin (unit_path gu)
+               else
+                 Printf.sprintf "|r:%s:%s$spec:%s#%s:%d:%d|" origin (unit_path gu)
+                   g.RT.units.(ss.ss_caller).RT.u_name (Filename.basename at.A.file) at.A.start_line at.A.start_col
+             in
+             let name =
+               Printf.sprintf "%s[%s:%d:%d]" gu.RT.u_name (Filename.basename at.A.file) at.A.start_line at.A.start_col
+             in
+             let fs = { RS.fs_sym = sym; fs_name = name; fs_params = ptys; fs_ret = ret; fs_nvars = List.length !vars } in
+             Some (sym, ss, fs, nonfn @ List.map snd caps, List.map fst caps)
+           with Decline | Not_found | Invalid_argument _ | Failure _ -> None)
+  in
+  (* Two call sites one symbol (a basename shared by two directories): the
+     §3.1 duplicate check.  Neither is specialised.  (Test-only
+     [spec-key-by-callee] shares one on purpose: the first template wins.) *)
+  let spec_defs =
+    if spec_perturb "spec-key-by-callee" then spec_defs
+    else List.filter (fun (sym, _, _, _, _) -> List.length (List.filter (fun (s, _, _, _, _) -> s = sym) spec_defs) = 1) spec_defs
+  in
+  List.iter
+    (fun (sym, ss, fs, args, caps) ->
+      if not (Hashtbl.mem RS.syms sym) then begin
+        RS.register fs;
+        Hashtbl.replace spec_meta sym (ss, caps)
+      end;
+      Hashtbl.replace RS.call_sym ss.ss_span sym;
+      Hashtbl.replace RS.site_args ss.ss_span args)
+    spec_defs;
   (* Templates (§3.4, §3.6). *)
   Array.iter
     (fun (u : RT.unit_) ->
@@ -1854,6 +2312,62 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
         with Decline | Not_found | Invalid_argument _ | Failure _ -> ())
       | _ -> ())
     g.RT.units;
+  (* Phase 5: each specialisation's template, [g]'s body with its function
+     parameters standing for the call's arguments (ruling 5). *)
+  Hashtbl.iter
+    (fun sym ((ss : spec_site), caps) ->
+      try
+        let gu = g.RT.units.(ss.ss_callee) in
+        let fs = Hashtbl.find RS.syms sym in
+        let c = match gu.RT.u_clauses with [ c ] -> c | _ -> raise Decline in
+        let pname i = match List.nth c.RT.o_params i with Some n -> n | None -> raise Decline in
+        let nonfn_idx = List.filter (fun i -> not (List.mem_assoc i ss.ss_fn)) (List.init (List.length c.RT.o_params) Fun.id) in
+        let nn = List.length nonfn_idx in
+        let names =
+          List.mapi
+            (fun i _ ->
+              let n = pname i in
+              if List.mem_assoc i ss.ss_fn then (n, sentinel n)
+              else
+                match List.find_index (( = ) i) nonfn_idx with
+                | Some k -> (n, Smt.Const (param_const k))
+                | None -> raise Decline)
+            c.RT.o_params
+        in
+        if List.length (List.sort_uniq compare (List.map fst names)) <> List.length names then raise Decline;
+        (* A refinement on a function parameter itself would not be part of
+           the guard below: decline rather than drop it. *)
+        List.iter
+          (fun (i, _) -> match List.nth_opt gu.RT.u_param_tys i with Some (Some (A.TyRefine _)) -> raise Decline | _ -> ())
+          ss.ss_fn;
+        let capterms =
+          List.mapi (fun j n -> (n, if spec_perturb "spec-capture-zero" then Smt.IntLit 0 else Smt.Const (param_const (nn + j)))) caps
+        in
+        let sc =
+          { sc_self = ss.ss_callee; sc_sym = sym;
+            sc_fn = List.map (fun (i, fa) -> (pname i, fa)) ss.ss_fn;
+            sc_fnpos = List.map (fun (i, _) -> (i, pname i)) ss.ss_fn;
+            sc_caps = capterms }
+        in
+        eq_seen := [];
+        let cases = tr_case { ctx with c_spec = Some sc } names c.RT.o_body in
+        let cases = if spec_perturb "spec-swap-arms" then swap_arms cases else cases in
+        let eqs = List.sort_uniq compare !eq_seen in
+        (* The domain guard: [g]'s refinements on its non-function
+           parameters, renumbered to this symbol's. *)
+        let pick l = List.map (fun i -> List.nth l i) nonfn_idx in
+        let fake = { gu with RT.u_params = pick gu.RT.u_params; u_param_tys = pick gu.RT.u_param_tys } in
+        let psorts = List.filteri (fun i _ -> i < nn) fs.RS.fs_params in
+        let pre =
+          let saved = !RS.arm_on and saved_active = !RS.active in
+          RS.arm_on := true;
+          RS.active := true;
+          Fun.protect ~finally:(fun () -> RS.arm_on := saved; RS.active := saved_active) (fun () -> pre_of fake psorts)
+        in
+        let fuel = match fuel_of_attrs gu.RT.u_attrs with Some n when n >= 1 && n <= 8 -> n | _ -> default_fuel in
+        Hashtbl.replace templates sym { t_cases = cases; t_pre = pre; t_name = fs.RS.fs_name; t_eqs = eqs; t_fuel = fuel }
+      with Decline | Not_found | Invalid_argument _ | Failure _ -> ())
+    spec_meta;
   (* The D17 hash of every reflected function (§7.1, I8). *)
   let file_cache : (string, string option) Hashtbl.t = Hashtbl.create 16 in
   let file_text f =
@@ -1904,7 +2418,9 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     | t -> map_term canon t
   in
   let guards_of = Hashtbl.create 64 in
-  List.iter (fun r -> match r.r_verdict with Reflected gs -> Hashtbl.replace guards_of r.r_span gs | Blocked _ -> ()) rows;
+  List.iter
+    (fun r -> match r.r_verdict with Reflected gs -> Hashtbl.replace guards_of r.r_span gs | Blocked _ | Specialised _ -> ())
+    rows;
   Array.iter
     (fun (u : RT.unit_) ->
       match sym_of.(u.RT.u_id) with
@@ -1939,6 +2455,57 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
         Hashtbl.replace RS.logic_by_name u.RT.u_name (List.sort compare ((u.RT.u_span.A.file, h) :: prev))
       | _ -> ())
     g.RT.units;
+  (* Phase 5: a specialisation's D17 hash covers [g]'s source, each function
+     argument's (a lambda's text, a named function's own logic hash) and the
+     template.  Its origin is [g], and [g]'s display name gets a logic hash of
+     its own body, so a hot patch of [g] is refused when a proof used one of
+     its specialisations (§7.2), and an edit to the lambda moves the hash. *)
+  let span_text (sp : A.span) =
+    match file_text sp.A.file with
+    | None -> ""
+    | Some text ->
+      let offset (line, col) =
+        let rec go i l = if l >= line then Some i else match String.index_from_opt text i '\n' with Some j -> go (j + 1) (l + 1) | None -> None in
+        Option.map (fun i -> i + col) (go 0 1)
+      in
+      (match offset (sp.A.start_line, sp.A.start_col), offset (sp.A.end_line, sp.A.end_col) with
+       | Some a, Some b when a >= 0 && b >= a && b <= String.length text -> String.sub text a (b - a)
+       | _ -> "")
+  in
+  Hashtbl.iter
+    (fun sym ((ss : spec_site), _) ->
+      let gu = g.RT.units.(ss.ss_callee) in
+      let gsrc = Option.value ~default:"" (source_of gu) in
+      let args =
+        List.map
+          (function
+            | i, F_lambda (_, _, lsp) -> Printf.sprintf "arg %d lambda %s" i (span_text lsp)
+            | i, F_named (f, _) ->
+              let fh = match sym_of.(f) with Some fsym -> Option.value ~default:"-" (Hashtbl.find_opt RS.logic_hash fsym) | None -> "-" in
+              Printf.sprintf "arg %d named %s %s" i g.RT.units.(f).RT.u_name fh)
+          ss.ss_fn
+      in
+      let defn =
+        match Hashtbl.find_opt templates sym with
+        | None -> "uninterpreted"
+        | Some tp ->
+          String.concat "\000"
+            (List.map (fun t -> "pre " ^ Smt.render (canon t)) tp.t_pre
+            @ List.map
+                (fun (cs, r) ->
+                  "case " ^ String.concat " & " (List.map (fun c -> Smt.render (canon c)) cs) ^ " => " ^ Smt.render (canon r))
+                tp.t_cases
+            @ List.map (fun (t, k) -> "eq " ^ t ^ " " ^ k) tp.t_eqs)
+      in
+      Hashtbl.replace RS.logic_hash sym
+        (March_cas.Blake3.hash_string (String.concat "\000" ([ "march-reflect-spec-v1"; gsrc ] @ args @ [ defn ])));
+      Hashtbl.replace RS.sym_origin sym (gu.RT.u_name, gu.RT.u_span.A.file);
+      let prev = Option.value ~default:[] (Hashtbl.find_opt RS.logic_by_name gu.RT.u_name) in
+      if not (List.mem_assoc gu.RT.u_span.A.file prev) then
+        Hashtbl.replace RS.logic_by_name gu.RT.u_name
+          (List.sort compare
+             ((gu.RT.u_span.A.file, March_cas.Blake3.hash_string ("march-reflect-specialised-v1\000" ^ gsrc)) :: prev)))
+    spec_meta;
   (* The contract hash of every unit (review round 1): its head's text up to
      its last clause's body, its attributes, and whether it is reflected
      (with its unfolding guards).  A multi-clause function's earlier bodies

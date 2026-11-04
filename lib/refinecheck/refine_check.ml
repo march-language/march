@@ -5216,6 +5216,17 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                let names = pat_binders b.A.bind_pat in
                let lets = launder_shadow lets names in
                (match b.A.bind_pat, b.A.bind_expr with
+                (* Not when the RHS reads the name it binds (`let k =
+                   f(k)`, or a lambda capturing `k`): the entry is read at
+                   the obligation, where `k` is already the new binding, so
+                   `k == f(k)` would be about the wrong value (review of
+                   reflection phase 5; [push_tuple_projs] has the same rule).
+                   [expr_mentions] looks inside lambda bodies. *)
+                | A.PatVar n, (A.EApp _ as rhs)
+                  when expr_mentions [ n.A.txt ] rhs
+                       (* Test-only: the RED control of this rule. *)
+                       && Sys.getenv_opt "MARCH_REFLECT_PERTURB" <> Some "let-self-ref" ->
+                  lets
                 | A.PatVar n, (A.EApp _ as rhs) -> (n.A.txt, rhs) :: lets
                 (* `let (yes, no) = g(…)`: each component, as a projection of
                    the call (leftovers design 2026-10-18 §5.4). *)
@@ -9264,6 +9275,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         | Some why -> bad why
         | None -> (
           match reflect_blocker fd with
+          (* Phase 5: a function taking functions is in the logic at each
+             specialised call, with this fuel. *)
+          | Some _ when Hashtbl.mem Refine_reflect.specialised span -> ()
           | Some (_, txt) -> bad (Printf.sprintf "`%s` is not reflected: it %s" name (blocker_text txt))
           | None -> ()))
     (reflect_fns m.A.mod_decls);
