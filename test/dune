@@ -6955,6 +6955,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_init_params_schema.expected native_actor_init_params_schema.out)))
 
+; ── HCR deploy gate: the .schemas.json writer records refinements ─────────
+; ── (a state field's, a handler parameter's over p0, p1, ...) and marks ────
+; ── what it cannot write down, so forge refuses instead of reading absence. ─
+; specs/progress/2026-11-04-hcr-refinement-variance-check.md; the
+; checker side is test_refinecheck's hcr-variance group.
+(rule
+ (targets native_hcr_schema_contracts.so native_hcr_schema_contracts.so.schemas.json
+          native_hcr_schema_contracts.so.hcr_manifest native_hcr_schema_contracts.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_reclaim.c) (file ../runtime/march_reclaim.h) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/hcr_schema_contracts.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --compile-so --hot-reload SchemaContracts
+        -o native_hcr_schema_contracts.so native/hcr_schema_contracts.march)
+   (with-stdout-to native_hcr_schema_contracts.out
+    (run python3 %{dep:check_hcr_schema_contracts.py} native_hcr_schema_contracts.so.schemas.json)))))
+
+(rule
+ (alias runtest)
+ (action (diff native/hcr_schema_contracts.expected native_hcr_schema_contracts.out)))
+
 ; ── Regression: rest_for_one — crashing a middle child must restart it and
 ; every child declared AFTER it, but leave earlier siblings untouched.
 (rule

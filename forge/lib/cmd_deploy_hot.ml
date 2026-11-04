@@ -1539,7 +1539,7 @@ let deploy_connected (_conn : conn) ~signing_pubkey:_ ~sk:_ ~manifest:_
 let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
     ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="")
     ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=([] : string list))
-    ?(no_cap_gate=false) () =
+    ?(no_cap_gate=false) ?(accept_unproved=([] : string list)) () =
   without_sigpipe @@ fun () ->
   let new_schemas_path = if new_schemas_path = "" then so_path ^ ".schemas.json"
     else new_schemas_path in
@@ -1963,15 +1963,46 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
             Option.value (Sys.getenv_opt "MARCH_BIN")
               ~default:(Filename.concat (Sys.getcwd ()) "_build/default/bin/main.exe")
           in
+          (* Any contract the running version or the new one records
+             (an @invariant, a state field's refinement, a handler
+             parameter's, or one that could not be written down) needs the
+             check: a deploy that only strengthens one must prove the old
+             contract implies the new one
+             (specs/todos/2026-11-04-hcr-refinement-strengthening-unchecked.md). *)
+          let has_contract (_, (s : Schema_diff.actor_schema)) =
+            s.invariant <> None || s.unsupported
+            || List.exists (fun (f : Schema_diff.field) -> f.refine <> None) s.state_fields
+            || List.exists (fun (h : Schema_diff.ctor) -> List.exists Option.is_some h.refines)
+                 (Option.value ~default:[] s.handlers)
+          in
           let needs_vc_check =
-            List.exists (fun (_, s) -> s.Schema_diff.invariant <> None) new_schemas
+            List.exists has_contract new_schemas || List.exists has_contract old_schemas
           in
           if needs_vc_check && old_schemas_path <> "" && new_schemas_path <> ""
-             && entry_path <> "" && Sys.file_exists march_bin then begin
-            let cmd = Printf.sprintf "%s --check-migration --prior-schema %s --new-schema %s %s"
+             && entry_path = "" then begin
+            Unix.close fd;
+            raise (Failure "an actor contract needs the migration check, but the build's \
+                            entry file is unknown — deploy aborted")
+          end;
+          if needs_vc_check && old_schemas_path <> "" && new_schemas_path <> ""
+             && not (Sys.file_exists march_bin) then begin
+            (* Never skipped silently: the check is what makes the contracts
+               the new code assumes true of the live state. *)
+            Unix.close fd;
+            raise (Failure (Printf.sprintf
+                              "an actor contract needs the migration check, but the compiler \
+                               was not found at %s (set MARCH_BIN) — deploy aborted" march_bin))
+          end;
+          if needs_vc_check && old_schemas_path <> "" && new_schemas_path <> "" then begin
+            if accept_unproved <> [] then
+              Printf.eprintf "warning: --accept-unproved %s: these laws may deploy unproved\n%!"
+                (String.concat "," accept_unproved);
+            let cmd = Printf.sprintf "%s --check-migration --prior-schema %s --new-schema %s%s %s"
                 (Filename.quote march_bin)
                 (Filename.quote old_schemas_path)
                 (Filename.quote new_schemas_path)
+                (if accept_unproved = [] then ""
+                 else " --accept-unproved " ^ Filename.quote (String.concat "," accept_unproved))
                 (Filename.quote entry_path)
             in
             (match Unix.system cmd with
@@ -2481,6 +2512,7 @@ let no_pool_gate : pool_gate = fun _ ~env:_ -> Ok (fun () -> ())
     skipped).  This allows cross-compiled artifacts (e.g. built in Docker for
     a remote Linux host) to be deployed without a local rebuild. *)
 let deploy ?(output="") ?(so="") ?(old_schemas="") ?(grant_caps=([] : string list)) ?(no_cap_gate=false)
+    ?(accept_unproved=([] : string list))
     ?(pool_gate = no_pool_gate) ()
     : (unit, string) result =
   (* Load project *)
@@ -2568,6 +2600,7 @@ let deploy ?(output="") ?(so="") ?(old_schemas="") ?(grant_caps=([] : string lis
                   ~old_manifest_path:prev_manifest_path
                   ~grant_caps
                   ~no_cap_gate
+                  ~accept_unproved
                   ()
               in
               (* After successful deploy, save new schemas as the baseline for next time *)
@@ -2619,7 +2652,8 @@ let ping_server ~ssh_host ~remote_socket : bool =
     instead of calling GET_EPOCH on the server. *)
 let deploy_one ?(tunnel = true) ~(host : Hosts.host) ~sk ~manifest ~so_path
     ~old_schemas_path ~new_schemas_path ?(entry_path="") ?(old_manifest_path="")
-    ?(provided_epoch=0) ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ()
+    ?(provided_epoch=0) ?(grant_caps=([] : string list)) ?(no_cap_gate=false)
+    ?(accept_unproved=([] : string list)) ()
     : (int, string) result =
   let label = Printf.sprintf "%s [%s]" host.Hosts.ssh host.Hosts.name in
   Printf.printf "\n── %s\n%!" label;
@@ -2632,6 +2666,7 @@ let deploy_one ?(tunnel = true) ~(host : Hosts.host) ~sk ~manifest ~so_path
     ~provided_epoch
     ~grant_caps
     ~no_cap_gate
+    ~accept_unproved
     ()
 
 let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
@@ -2653,7 +2688,8 @@ let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
     - [canary]: if > 0, deploy to the first n servers, health-check, then roll out to rest.
     - [timeout_ms]: canary health-check window in milliseconds (default 30 000). *)
 let deploy_env ?(output="") ?(so="") ?(old_schemas="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
-    ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ?(pool_gate = no_pool_gate) ()
+    ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ?(pool_gate = no_pool_gate)
+    ?(accept_unproved=([] : string list)) ()
     : (unit, string) result =
   match Project.load () with
   | Error m -> Error m
@@ -2746,7 +2782,7 @@ let deploy_env ?(output="") ?(so="") ?(old_schemas="") ?(env="") ?(canary=0) ?(t
                 deploy_one ~host ~sk ~manifest ~so_path:so_path2
                   ~old_schemas_path:(if old_schemas = "" then prev_schemas_path else old_schemas)
                   ~new_schemas_path ~entry_path ~old_manifest_path:prev_manifest_path
-                  ~provided_epoch:shared_epoch ~grant_caps ~no_cap_gate ()
+                  ~provided_epoch:shared_epoch ~grant_caps ~no_cap_gate ~accept_unproved ()
               in
               (* Every host, each reported; one after another (Hosts.run_on). *)
               let simultaneous_deploy hosts = Hosts.run_on ~strategy:`All hosts deploy_step in

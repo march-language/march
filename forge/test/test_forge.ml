@@ -1974,7 +1974,7 @@ let test_schema_handlers_and_message_diff () =
     (List.map show (Option.get s.Schema_diff.migrate_msg_from));
   Alcotest.(check (list string)) "state fields still parsed" ["n"]
     (List.map (fun (f : Schema_diff.field) -> f.name) s.Schema_diff.state_fields);
-  let c n ps = { Schema_diff.cname = n; params = ps } in
+  let c n ps = { Schema_diff.cname = n; params = ps; refines = [] } in
   let old_h = [ c "Add" ["Int"]; c "Show" [] ] in
   Alcotest.(check bool) "adding a handler is not a message change" false
     (Schema_diff.messages_changed ~old_h ~new_h:(old_h @ [ c "Reset" [] ]));
@@ -1984,7 +1984,7 @@ let test_schema_handlers_and_message_diff () =
     (Schema_diff.messages_changed ~old_h ~new_h:[ c "Add" ["String"]; c "Show" [] ])
 
 let test_migrate_msg_stub () =
-  let c n ps = { Schema_diff.cname = n; params = ps } in
+  let c n ps = { Schema_diff.cname = n; params = ps; refines = [] } in
   let stub = Cmd_deploy_hot.migrate_msg_stub ~actor:"Counter"
       ~old_h:[ c "Add" ["Int"]; c "Show" [] ]
       ~new_h:[ c "Add" ["Int"]; c "Reset" [] ] () in

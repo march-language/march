@@ -4502,6 +4502,39 @@ let compile filename =
     in
     let actor_invariant_map : (string * March_ast.Ast.expr) list =
       collect_actor_invariant [] desugared.March_ast.Ast.mod_decls in
+    (* Each actor's declaration, so the schema writer can record the
+       refinements the TIR types below have already erased (a state field's
+       `{Int | _ >= 0}`, a handler parameter's).  forge's deploy gate proves
+       the running version's contracts imply the new one's
+       (specs/todos/2026-11-04-hcr-refinement-strengthening-unchecked.md);
+       without them a deploy that only strengthens a refinement looks like
+       no change at all.  Keyed by module path joined with "__" (the TIR
+       state record's prefix) ahead of the bare name, as the lookups below
+       try the full key first. *)
+    let actor_defs : (string * March_ast.Ast.actor_def) list =
+      let rec walk path acc (decls : March_ast.Ast.decl list) =
+        List.fold_left (fun acc d ->
+            match d with
+            | March_ast.Ast.DActor (_, name, adef, _) ->
+              let bare = name.March_ast.Ast.txt in
+              let full = if path = "" then bare else path ^ "__" ^ bare in
+              (full, adef) :: acc
+            | March_ast.Ast.DMod (m, _, inner, _) ->
+              let p = if path = "" then m.March_ast.Ast.txt
+                else path ^ "__" ^ m.March_ast.Ast.txt in
+              walk p acc inner
+            | _ -> acc
+          ) acc decls
+      in
+      let full = List.rev (walk "" [] desugared.March_ast.Ast.mod_decls) in
+      let bare = List.map (fun (k, a) ->
+          let b = match String.rindex_opt k '_' with
+            | Some i when i > 0 && k.[i - 1] = '_' ->
+              String.sub k (i + 1) (String.length k - i - 1)
+            | _ -> k in
+          (b, a)) full in
+      full @ bare
+    in
     let actor_schemas : (string * (string * March_tir.Tir.ty) list) list =
       if Option.is_some !hot_reload_prefix then
         List.filter_map (fun td ->
@@ -5246,14 +5279,77 @@ let compile filename =
               fn_name ^ "(" ^ pred_to_string arg ^ ")"
             | _ -> raise (Invalid_argument "pred_to_string")
           in
+          (* A refinement's predicate with its binder (and, for a handler
+             parameter, its sibling parameters) renamed by [env]: the shape
+             [pred_to_string] accepts, so anything outside it is left alone
+             and rejected there. *)
+          let rec rename env (e : March_ast.Ast.expr) : March_ast.Ast.expr =
+            let open March_ast.Ast in
+            match e with
+            | EVar v -> (match List.assoc_opt v.txt env with
+                | Some n -> EVar { v with txt = n } | None -> e)
+            | EField (b, f, sp) -> EField (rename env b, f, sp)
+            | EApp (f, args, sp) -> EApp (f, List.map (rename env) args, sp)
+            | other -> other
+          in
+          let rec refinement_of (t : March_ast.Ast.ty) =
+            match t with
+            | March_ast.Ast.TyRefine (_, b, p) ->
+              Some ((match b with Some n -> n.March_ast.Ast.txt | None -> "_"), p)
+            | March_ast.Ast.TyLinear (_, t) -> refinement_of t
+            | _ -> None
+          in
+          (* [Some s] the predicate text, [None] unrefined; [unsupported] is
+             set when a refinement exists but cannot be written down, so the
+             deploy gate refuses instead of reading it as absent. *)
+          let render unsupported ~own env (t : March_ast.Ast.ty option) =
+            match Option.bind t refinement_of with
+            | None -> None
+            | Some (b, p) ->
+              (try Some (pred_to_string (rename ((b, own) :: env) p))
+               with Invalid_argument _ -> unsupported := true; None)
+          in
+          (* State field refinements as predicates over bare field names, as
+             @invariant is written; handler parameter refinements over the
+             positional names p0, p1, ... so a renamed parameter compares
+             equal across versions. *)
+          let field_refines (adef : March_ast.Ast.actor_def) unsupported =
+            List.map (fun (f : March_ast.Ast.field) ->
+                let n = f.March_ast.Ast.fld_name.March_ast.Ast.txt in
+                (n, render unsupported ~own:n [] (Some f.March_ast.Ast.fld_ty)))
+              adef.March_ast.Ast.actor_state
+          in
+          let handler_refines (adef : March_ast.Ast.actor_def) unsupported =
+            List.map (fun (h : March_ast.Ast.actor_handler) ->
+                let names = List.mapi (fun i (p : March_ast.Ast.param) ->
+                    (p.March_ast.Ast.param_name.March_ast.Ast.txt, Printf.sprintf "p%d" i))
+                    h.March_ast.Ast.ah_params in
+                (h.March_ast.Ast.ah_msg.March_ast.Ast.txt,
+                 List.mapi (fun i (p : March_ast.Ast.param) ->
+                     render unsupported ~own:(Printf.sprintf "p%d" i) names
+                       p.March_ast.Ast.param_ty)
+                   h.March_ast.Ast.ah_params))
+              adef.March_ast.Ast.actor_handlers
+          in
           let oc = Buffer.create 1024 in
             Printf.bprintf oc "{\n";
             List.iteri (fun i (actor_name, fields) ->
+                let adef = List.assoc_opt actor_name actor_defs in
+                let unsupported = ref false in
+                let frefs = match adef with
+                  | Some a -> field_refines a unsupported | None -> [] in
+                let hrefs = match adef with
+                  | Some a -> handler_refines a unsupported | None -> [] in
                 let field_lines =
                   if fields = [] then "[]"
                   else "[\n" ^
                     String.concat ",\n" (List.map (fun (fname, fty) ->
-                      Printf.sprintf {|      {"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
+                      match Option.join (List.assoc_opt fname frefs) with
+                      | Some r ->
+                        Printf.sprintf {|      {"name":%S,"ty":%S,"refine":%S}|} fname
+                          (ty_to_schema_str fty) r
+                      | None ->
+                        Printf.sprintf {|      {"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
                     ) fields) ^ "\n    ]"
                 in
                 let compat = Option.value ~default:"full"
@@ -5263,25 +5359,44 @@ let compile filename =
                   | Some e ->
                     (try Printf.sprintf "    \"invariant\": %S,\n" (pred_to_string e)
                      with Invalid_argument _ ->
+                       (* Recorded, not dropped: forge's deploy gate refuses an
+                          actor whose invariant it cannot check. *)
                        Printf.eprintf
-                         "warning: @invariant on %s contains unsupported expression; omitting\n"
+                         "warning: @invariant on %s contains unsupported expression; \
+                          a hot deploy of it will be refused\n"
                          actor_name;
-                       "")
+                       "    \"invariant_unsupported\": true,\n")
                 in
+                (* [contracts] marks a schema written by a compiler that records
+                   refinements, so a baseline without it is known not to say. *)
+                let contracts_line =
+                  "    \"contracts\": 1,\n"
+                  ^ (if !unsupported then "    \"refine_unsupported\": true,\n" else "") in
                 let ctor_list ctors =
                   "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
                       Printf.sprintf {|{"name":%S,"params":[%s]}|} cn
                         (String.concat "," (List.map (fun t ->
                              Printf.sprintf "%S" (ty_to_schema_str t)) tys))) ctors) ^ "]" in
+                let handler_list ctors =
+                  "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
+                      let params = String.concat "," (List.map (fun t ->
+                          Printf.sprintf "%S" (ty_to_schema_str t)) tys) in
+                      match List.assoc_opt cn hrefs with
+                      | Some rs when List.exists Option.is_some rs ->
+                        Printf.sprintf {|{"name":%S,"params":[%s],"refines":[%s]}|} cn params
+                          (String.concat "," (List.map (function
+                               | Some r -> Printf.sprintf "%S" r | None -> "null") rs))
+                      | _ -> Printf.sprintf {|{"name":%S,"params":[%s]}|} cn params) ctors)
+                  ^ "]" in
                 let handlers_line = match List.assoc_opt actor_name actor_handlers with
                   | None -> ""
-                  | Some c -> Printf.sprintf "    \"handlers\": %s,\n" (ctor_list c) in
+                  | Some c -> Printf.sprintf "    \"handlers\": %s,\n" (handler_list c) in
                 let mm_line = match List.assoc_opt actor_name actor_migrate_msg_from with
                   | None -> ""
                   | Some c -> Printf.sprintf "    \"migrate_msg_from\": %s,\n" (ctor_list c) in
                 Printf.bprintf oc
-                  "  %S: {\n    \"compat\": %S,\n%s%s%s    \"state_fields\": %s\n  }%s\n"
-                  actor_name compat invariant_line handlers_line mm_line field_lines
+                  "  %S: {\n    \"compat\": %S,\n%s%s%s%s    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat contracts_line invariant_line handlers_line mm_line field_lines
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.bprintf oc "}\n";
@@ -7499,6 +7614,10 @@ let () =
      "<path>  Prior .schemas.json for --check-migration");
     ("--new-schema", Arg.Set_string new_schema_path,
      "<path>  New .schemas.json for --check-migration");
+    ("--accept-unproved",
+     Arg.String (fun s ->
+         accept_unproved := !accept_unproved @ List.filter (( <> ) "") (String.split_on_char ',' s)),
+     "<Actor.law,...>  Let --check-migration pass these deploy-gate laws unproved (a counterexample still fails)");
     ("--emit-core-ast", Arg.String (fun f -> emit_core_ast_file := Some f),
      " <file.march>  Emit desugared core AST + verdict + diagnostics as JSON to stdout");
   ] in

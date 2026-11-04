@@ -40,9 +40,10 @@ let replace_fn name impl fns = List.map (fun (f : Cmd_deploy_hot.fn_manifest) ->
 
 let schema ?(compat = "full") ?handlers ?migrate_msg_from fields =
   { Schema_diff.compat; invariant = None;
-    state_fields = List.map (fun (name, ty) -> { Schema_diff.name; ty }) fields; handlers; migrate_msg_from }
+    state_fields = List.map (fun (name, ty) -> { Schema_diff.name; ty; refine = None }) fields; handlers; migrate_msg_from;
+    contracts = true; unsupported = false }
 
-let ctor cname params = { Schema_diff.cname; params }
+let ctor cname params = { Schema_diff.cname; params; refines = [] }
 
 let topology_text = {|
 [roles]
