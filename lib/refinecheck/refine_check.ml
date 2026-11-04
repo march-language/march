@@ -299,6 +299,51 @@ let params_field_facts ~(span : A.span) (ps : A.param list) : (A.expr * bool) li
       | None -> [])
     ps
 
+(* A refined parameter's conjunct that calls a function, `okz(_)` or
+   `!okz(_)`, read over the parameter (`_` and the declared binder become its
+   name): a path fact for the body.  The scope channels load only the measures
+   and constructor tests of a datatype value's promise, so such a conjunct was
+   dropped and a lemma could not use its own hypothesis (todo
+   2026-11-04-lemma-hypothesis-reflected-call-not-assumed).  A path fact that is
+   a Bool call is reflected, and unfolded by stage 2, like any `if okz(g)`.
+   Every call site is obliged to establish it, as for any refined parameter.
+   The call keeps its span, which is what resolves it to its logic symbol. *)
+(* `is_Some`, `is_Cons`: a constructor tester, which the tester loader owns.  It
+   deliberately fires only for the goal's own constructor (test `compose-tag`). *)
+let is_ctor_tester (f : string) : bool =
+  String.length f > 3 && String.sub f 0 3 = "is_"
+  && match f.[3] with 'A' .. 'Z' -> true | _ -> false
+
+let fnparams_call_facts (ps : A.fn_param list) : (A.expr * bool) list =
+  List.concat_map
+    (function
+      | A.FPNamed p | A.FPDefault (p, _) -> (
+        match Option.map unlinear p.A.param_ty with
+        | Some (A.TyRefine (_, binder, pred)) ->
+          let x = p.A.param_name.A.txt and self = binder_name binder in
+          let rec sub (e : A.expr) : A.expr =
+            match e with
+            | A.EVar n when n.A.txt = "_" || n.A.txt = self -> A.EVar { n with A.txt = x }
+            | A.EApp (f, args, sp) -> A.EApp (f, List.map sub args, sp)
+            | A.ECon (c, args, sp) -> A.ECon (c, List.map sub args, sp)
+            | A.ETuple (es, sp) -> A.ETuple (List.map sub es, sp)
+            | A.EField (e, n, sp) -> A.EField (sub e, n, sp)
+            | e -> e
+          in
+          List.filter_map
+            (fun conj ->
+              let call = match conj with A.EApp (A.EVar { A.txt = "not"; _ }, [ c ], _) -> c | c -> c in
+              match call with
+              | A.EApp (A.EVar { A.txt = f; _ }, _ :: _, _)
+                when (not (List.mem f predicate_operators)) && (not (is_measure_app f))
+                     && not (is_ctor_tester f) ->
+                Some (sub conj, false)
+              | _ -> None)
+            (pred_conjuncts pred)
+        | _ -> [])
+      | A.FPPat _ -> [])
+    ps
+
 let fnparams_field_facts ~(span : A.span) (ps : A.fn_param list) : (A.expr * bool) list =
   params_field_facts ~span
     (List.filter_map (function A.FPNamed p | A.FPDefault (p, _) -> Some p | A.FPPat _ -> None) ps)
@@ -4710,6 +4755,13 @@ let lemma_walk : lemma_walk option ref = ref None
 let post_walk_span : A.span option ref = ref None
 let post_walk_ok = ref false
 
+(* Walking a valid lemma's body, theorem or not: [ih_prepare]'s calls-only walk
+   checks a recursive lemma call's preconditions with no [lemma_walk], and
+   those need the same match-arm selector links (§4.3) the theorem walk has,
+   or a hypothesis like `okz(g)` never reaches `okz(k)` and the induction
+   hypothesis is withheld. *)
+let lemma_body : bool ref = ref false
+
 (** Lemmas that passed L1-L3 and L5 in this module, by declaring span. *)
 let lemma_valid : (A.span, unit) Hashtbl.t = Hashtbl.create 16
 
@@ -5580,8 +5632,8 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
             let links =
               (* Inside a lemma (§4.3): each component bound by name, as a
                  selector of the scrutinee, for stage 2. *)
-              match !lemma_walk, resolve_tested_ctor subj_adt ctor.A.txt, br.A.branch_pat with
-              | Some _, Some (_, k), A.PatCon (_, ps) ->
+              match !lemma_walk <> None || !lemma_body, resolve_tested_ctor subj_adt ctor.A.txt, br.A.branch_pat with
+              | true, Some (_, k), A.PatCon (_, ps) ->
                 List.concat
                   (List.mapi
                      (fun i (q : A.pattern) ->
@@ -6996,7 +7048,8 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
       with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
           with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd))
     end;
-    let saved_lemma_walk = !lemma_walk in
+    let saved_lemma_walk = !lemma_walk and saved_lemma_body = !lemma_body in
+    lemma_body := is_lemma fd && Hashtbl.mem lemma_valid fd.A.fn_name.A.span;
     lemma_walk :=
       (if post_walk then
          match Refine_post.return_refine_ext fd, fd.A.fn_ret_ty, fd.A.fn_clauses with
@@ -7017,7 +7070,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
            Some { lw_name = fd.A.fn_name.A.txt; lw_sig = sg; lw_args = args; lw_tails = lemma_tails c.A.fc_body;
                   lw_verdicts = []; lw_ret = false }
          | _ -> None);
-    Fun.protect ~finally:(fun () -> lemma_walk := saved_lemma_walk) @@ fun () ->
+    Fun.protect ~finally:(fun () -> lemma_walk := saved_lemma_walk; lemma_body := saved_lemma_body) @@ fun () ->
     let walked =
       if manifest_lemma then { fd with A.fn_clauses = [] }
       else if assume_params then fd
@@ -7131,6 +7184,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         (* A record-typed parameter's refined fields are facts here: every
            construction of that record was obliged to establish them. *)
         let path = path @ fnparams_field_facts ~span:c.A.fc_span c.A.fc_params in
+        let path = path @ fnparams_call_facts c.A.fc_params in
         let saved_demand = !ret_elem_demand and saved_hyp = !elem_ret_hyp in
         ret_elem_demand :=
           (match demand with

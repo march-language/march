@@ -939,3 +939,191 @@ let iface_laws =
         in
         if not (contains out "An interface can declare laws") then
           Alcotest.failf "expected the law-syntax error:\n%s" out) ]
+
+(* A refined parameter whose predicate calls a reflected function is the
+   lemma's hypothesis (todo 2026-11-04-lemma-hypothesis-reflected-call-not-assumed):
+   `fn h(g : {G | okz(_)}) : {Unit | okz(g)}` used to be `lemma_unproved`
+   (skip reflect-fuel), its hypothesis never assumed. *)
+let hyp_defs =
+  {|  type G = GEnd | GMsg(Int, G)
+  fn okz(g : G) : Bool do
+    match g do
+      GEnd -> true
+      GMsg(s, k) -> s == 0 && okz(k)
+    end
+  end
+  fn cnt(g : G) : Int do
+    match g do
+      GEnd -> 0
+      GMsg(s, k) -> s + cnt(k)
+    end
+  end
+|}
+
+let project_dual_src =
+  {|  type Local = LEnd | LSend(Int, Local) | LRecv(Int, Local) | LChoose(Int, Local, Int, Local) | LOffer(Int, Local, Int, Local) | LRec(Local) | LVar(Int)
+
+  fn dual(l : Local) : Local do
+    match l do
+      LEnd -> LEnd
+      LSend(t, k) -> LRecv(t, dual(k))
+      LRecv(t, k) -> LSend(t, dual(k))
+      LChoose(a, x, b, y) -> LOffer(a, dual(x), b, dual(y))
+      LOffer(a, x, b, y) -> LChoose(a, dual(x), b, dual(y))
+      LRec(k) -> LRec(dual(k))
+      LVar(i) -> LVar(i)
+    end
+  end
+
+  @[lemma]
+  fn dual_dual(l : Local) : {Unit | dual(dual(l)) == l} do
+    match l do
+      LEnd -> ()
+      LSend(_, k) -> dual_dual(k)
+      LRecv(_, k) -> dual_dual(k)
+      LChoose(_, x, _, y) ->
+        dual_dual(x)
+        dual_dual(y)
+      LOffer(_, x, _, y) ->
+        dual_dual(x)
+        dual_dual(y)
+      LRec(k) -> dual_dual(k)
+      LVar(_) -> ()
+    end
+  end
+
+  -- Global protocol, roles as Int
+  type Global = GEnd | GMsg(Int, Int, Int, Global) | GChoice(Int, Int, Global, Int, Global) | GLoop(Global) | GVar(Int)
+
+  fn project(g : Global, r : Int) : Local do
+    match g do
+      GEnd -> LEnd
+      GMsg(s, d, t, k) ->
+        if s == r do LSend(t, project(k, r))
+        else if d == r do LRecv(t, project(k, r))
+        else project(k, r) end end
+      GChoice(c, a, x, b, y) ->
+        if c == r do LChoose(a, project(x, r), b, project(y, r))
+        else LOffer(a, project(x, r), b, project(y, r)) end
+      GLoop(k) -> LRec(project(k, r))
+      GVar(i) -> LVar(i)
+    end
+  end
+
+  -- every message and choice is between a and b
+  fn binary(g : Global, a : Int, b : Int) : Bool do
+    match g do
+      GEnd -> true
+      GMsg(s, d, _, k) -> ((s == a && d == b) || (s == b && d == a)) && binary(k, a, b)
+      GChoice(c, _, x, _, y) -> (c == a || c == b) && binary(x, a, b) && binary(y, a, b)
+      GLoop(k) -> binary(k, a, b)
+      GVar(_) -> true
+    end
+  end
+
+  @[lemma]
+  fn project_dual(a : Int, b : {Int | _ != a}, g : {Global | binary(_, a, b)}) : {Unit | project(g, b) == dual(project(g, a))} do
+    match g do
+      GEnd -> ()
+      GMsg(_, _, _, k) -> project_dual(a, b, k)
+      GChoice(_, _, x, _, y) ->
+        project_dual(a, b, x)
+        project_dual(a, b, y)
+      GLoop(k) -> project_dual(a, b, k)
+      GVar(_) -> ()
+    end
+  end
+
+|}
+
+let hyp_mod body = "mod H do\n" ^ hyp_defs ^ body ^ "end\n"
+
+let hypotheses =
+  [ gated "hyp_reflected_call: a hypothesis that calls a reflected function is assumed" (fun () ->
+        let out = run (hyp_mod "  @[lemma]\n  fn h4(g : {G | okz(_)}) : {Unit | okz(g)} do () end\n") in
+        expect_admitted out "h4");
+    gated "hyp_red_control: without the hypothesis the same theorem is not proved" (fun () ->
+        let out = run (hyp_mod "  @[lemma]\n  fn h4n(g : G) : {Unit | okz(g)} do () end\n") in
+        if not (unproved out "h4n" || refuted out "h4n") then
+          Alcotest.failf "with no hypothesis okz(g) does not follow:\n%s" out);
+    gated "hyp_spellings: the binder and the parameter's own name are the same hypothesis" (fun () ->
+        let out =
+          run
+            (hyp_mod
+               "  @[lemma]\n  fn hv(g : {v : G | okz(v)}) : {Unit | okz(g)} do () end\n  @[lemma]\n  fn hg(g : {G | okz(g)}) : {Unit | okz(g)} do () end\n")
+        in
+        expect_admitted out "hv";
+        expect_admitted out "hg");
+    gated "hyp_negated: a negated call is a hypothesis too" (fun () ->
+        let out = run (hyp_mod "  @[lemma]\n  fn hn(g : {G | !okz(_)}) : {Unit | !okz(g)} do () end\n") in
+        expect_admitted out "hn");
+    gated "hyp_inductive: the hypothesis proves the recursive call's precondition and the step" (fun () ->
+        let out =
+          run
+            (hyp_mod
+               {|  @[lemma]
+  fn okz_cnt(g : {G | okz(_)}) : {Unit | cnt(g) == 0} do
+    match g do
+      GEnd -> ()
+      GMsg(_, k) -> okz_cnt(k)
+    end
+  end
+|})
+        in
+        expect_admitted out "okz_cnt");
+    gated "hyp_callee_spellings: a callee's `okz(_)`, `okz(v)` and `okz(g)` are one precondition in stage 2" (fun () ->
+        let out =
+          run
+            (hyp_mod
+               {|  fn need_u(g : {G | okz(_)}) : Int do 0 end
+  fn need_v(g : {v : G | okz(v)}) : Int do 0 end
+  fn need_g(g : {G | okz(g)}) : Int do 0 end
+  @[lemma]
+  fn lem(g : {G | okz(_)}) : {Unit | okz(g)} do
+    match g do
+      GEnd -> ()
+      GMsg(s, k) ->
+        let _ = need_u(k)
+        let _ = need_v(k)
+        let _ = need_g(k)
+        ()
+    end
+  end
+|})
+        in
+        List.iter
+          (fun callee ->
+            if
+              not
+                (List.exists
+                   (fun l ->
+                     match String.split_on_char '\t' l with
+                     | "proved" :: "user" :: _ :: "precondition" :: c :: _ -> c = callee
+                     | _ -> false)
+                   (lines out))
+            then Alcotest.failf "the precondition of %s at k is proved:\n%s" callee out)
+          [ "need_u"; "need_v"; "need_g" ]);
+    gated "hyp_project_dual: a binary protocol's projections are duals, from the hypothesis (design §2 P1)" (fun () ->
+        let out = run ("mod P do\n" ^ project_dual_src ^ "end\n") in
+        expect_admitted out "project_dual";
+        (* RED control: without `binary(_, a, b)` the law is false (a third role's message). *)
+        let weak = Str.global_replace (Str.regexp_string "g : {Global | binary(_, a, b)})") "g : Global)" project_dual_src in
+        let out2 = run ("mod P do\n" ^ weak ^ "end\n") in
+        if not (unproved out2 "project_dual" || refuted out2 "project_dual") then
+          Alcotest.failf "without the hypothesis project_dual is not proved:\n%s" out2);
+    gated "hyp_caller_obliged: a caller must still establish the hypothesis" (fun () ->
+        let out =
+          run
+            (hyp_mod
+               {|  @[lemma]
+  fn h4(g : {G | okz(_)}) : {Unit | okz(g)} do () end
+  fn use_bad() : Int do
+    h4(GMsg(1, GEnd))
+    0
+  end
+|})
+        in
+        expect_admitted out "h4";
+        if not (contains out "[refinement_violated]" || contains out "[lemma_unproved_call]") then
+          Alcotest.failf "calling h4 on a value that breaks okz is reported:\n%s" out) ]
+

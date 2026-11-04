@@ -513,6 +513,40 @@ never runs, so the checker's only safe choice is to give nothing.
 [`lemma_unproved_call`]({{ site.baseurl }}/docs/errors/lemma_unproved_call/) is a warning, and an
 error under `cap verified`.
 
+A hypothesis can call your own functions, and an inductive proof can rely on it. Here
+`okz(g)` says every message in `g` carries 0, and the lemma uses it twice: to prove the
+recursive call's hypothesis `okz(k)`, and in the step itself (the message's own `s` is 0):
+
+```march
+mod Main do
+  type G = GEnd | GMsg(Int, G)
+
+  fn okz(g : G) : Bool do
+    match g do
+      GEnd -> true
+      GMsg(s, k) -> s == 0 && okz(k)
+    end
+  end
+
+  fn cnt(g : G) : Int do
+    match g do
+      GEnd -> 0
+      GMsg(s, k) -> s + cnt(k)
+    end
+  end
+
+  @[lemma]
+  fn okz_cnt(g : {G | okz(_)}) : {Unit | cnt(g) == 0} do
+    match g do
+      GEnd -> ()
+      GMsg(_, k) -> okz_cnt(k)
+    end
+  end
+
+  fn main() : Int do 0 end
+end
+```
+
 ## A fact stays in its branch
 
 A lemma's fact holds where the call is, and in what comes after it in the same block. It

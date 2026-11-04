@@ -301,6 +301,10 @@ git log is authoritative for exact commits.
   block's `Wroker w` (no such actor) or `Worker wx` (no field `wx` in the supervisor's state)
   stopped the compiler with an internal error; the second is now `supervise_field_missing`, with
   a did-you-mean and a fix.
+- **A lemma can use a hypothesis that calls your own function.** `fn h(g : {G | okz(_)}) :
+  {Unit | okz(g)}` was `lemma_unproved`: a refined parameter whose predicate calls a reflected
+  function was never assumed. It is now, in the theorem and for the recursive calls of an
+  inductive proof, and a callee's `okz(_)` precondition reads the same as `okz(g)`.
 - **`Random.range` (and so `Gen.int`) works for any span.** A range wider than the largest Int,
   such as `Gen.int(-4611686018427387903, 4611686018427387903)`, panicked with "attempt to
   subtract with overflow" since Int arithmetic began checking for overflow. A range wider
