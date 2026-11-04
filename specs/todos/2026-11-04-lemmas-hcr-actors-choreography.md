@@ -8,8 +8,9 @@ the compiler-owned laws proved once in the stdlib.
 Phases (design §7):
 
 - **A0.** Close the HCR variance hole: refinements in `.schemas.json`, old ⇒ new checks at
-  deploy, unproved refused unless overridden with an audited flag, no silent skips (todo
-  `2026-11-04-hcr-refinement-strengthening-unchecked`, P1).
+  deploy, unproved refused unless overridden with an audited flag, no silent skips. Landed in PR #1100 (progress
+  `2026-11-04-hcr-refinement-variance-check`); reply covariance, H2 and the audit-log
+  override remain.
 - **A.** Never silent: `@invariant` outside the grammar is an error (todo
   `2026-11-04-invariant-unsupported-expression-silently-dropped`). Field refinements of an
   anonymous-record `migrate_state` parameter reach `old.f`. Actor message constructors are
