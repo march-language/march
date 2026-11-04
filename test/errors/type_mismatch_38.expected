@@ -1,0 +1,17 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_38.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+5 |     List.fold_left(xs, "", fn (acc, _) -> acc)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    This is the declared return type of `total`.
+
+    the expected type comes from here:
+
+4 |   fn total(xs : List(Int)) : Int do
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+
