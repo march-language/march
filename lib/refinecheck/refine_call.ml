@@ -2160,6 +2160,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
         when Reflect_state.stage2_call_at csp -> (
         let sym = Option.get (Reflect_state.resolve_site csp) in
         let fs = Option.get (Reflect_state.sig_of sym) in
+        let cargs = Reflect_state.args_at csp cargs in
         let rec elemize (s : Smt.sort) =
           match s with
           | Smt.SParam _ -> Smt.sdata "Elem"
