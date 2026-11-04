@@ -1342,11 +1342,20 @@ An `Eq` that prints, panics or loops stops the function from being reflected.
 
 **`Int` is mathematical.** The checker reasons about `Int` as the unbounded
 integers. At run time `Int` is 63 bits, and `+`, `-`, `*` and negation stop the
-program with a panic when the result does not fit. So a fact such as
-`inc(n) > n` holds wherever the program actually gets past the call; at the
-largest `Int` the call panics instead. The checker does not yet prove that no
-overflow happens: a reflected function counts as unable to fail even though its
-arithmetic can overflow.
+program with a panic when the result does not fit. So the program never holds a
+value the checker's arithmetic disagrees with: a fact such as `inc(n) > n` holds
+wherever the program gets past the call, and at the largest `Int` the call panics
+instead of returning. That is why a reflected function may overflow and still be
+reflected: an overflow is a panic, never a wrong value.
+
+The one operator that still wraps is `/` on the smallest `Int` by `-1`, which
+returns the smallest `Int`. The checker reads `/` that way too:
+`x / -1` is `-x`, except at the smallest `Int`, where it is the smallest `Int`. So
+from `x < 0` the checker does not conclude `x / -1 > 0`.
+
+The checker does not prove that no overflow happens. A module that must not
+panic says `cap no_panic`, and then every `+`, `-`, `*` and negation has to be
+proved in range ([Capabilities]({{ site.baseurl }}/docs/capabilities/)).
 
 **Seeing what is reflected.** `march --check --reflect-report file.march`
 prints one row per function: `reflected`, or the first rule that blocks it.
@@ -1414,8 +1423,9 @@ reflected function both ways on generated inputs: by its logic definition and
 by the interpreter. The inputs include `0`, `1`, `-1`, the largest and smallest
 `Int` and their neighbours. Any disagreement, or a reflected function that
 panics on an input in its domain, fails the run: that is a compiler bug.
-A function whose arithmetic overflows at the boundary is reported `overflow?`,
-since the checker treats `Int` as unbounded (above). A reflected function the
+A function whose arithmetic overflows at the boundary is reported `overflow?`:
+the interpreter stopped with an overflow there, so that input has no value to
+compare (above). A reflected function the
 net cannot run by its definition (a `Float` comparison, a parameter type with
 no generator) is listed `not-compared` with the reason. A file whose ordinary
 check fails is reported as a check failure, not a parity failure. A run that
@@ -5104,7 +5114,8 @@ The rules, in the order the report checks them:
   `println`.
 - **R4**: it cannot fail: no `panic`, no runtime `assert`, and every `/` or `%`
   by something other than a non-zero literal has its division obligation
-  proved (in a `cap no_panic` module).
+  proved (in a `cap no_panic` module). An `Int` overflow is allowed: it panics,
+  so it never gives a value the checker disagrees with.
 - **R5**: every `match` covers all cases, including a guarded match whose
   unguarded arms do not cover.
 - **R6**: every callee is itself reflected, or a builtin the solver understands

@@ -172,6 +172,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinement proofs know that `x / -1` wraps at the smallest `Int`.** `-4611686018427387904 / -1`
+  returns `-4611686018427387904` (the one place Int arithmetic still wraps), but the checker
+  read it as `4611686018427387904`, so `need_pos(x / -1)` with `x < 0` (directly or through a
+  reflected function) could be proved. The checker now reads `/` exactly as the program runs
+  it. The reference explains why the other Int operators need no such care: since 0.7.0 they
+  panic on overflow instead of returning a wrong value. A zero-argument function used as a
+  constant in a predicate (`_ > limit()`) whose arithmetic overflows is no longer folded to
+  the wrapped number: calling it panics, so it is not a constant.
+
 - **A false lemma is an error, not a warning.** A lemma whose theorem is false at some
   input, such as `{Unit | n + n >= n}` at `n = -1`, was reported only as
   `lemma_unproved` unless the theorem was false at every input. The checker now runs the

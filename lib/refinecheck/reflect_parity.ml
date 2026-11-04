@@ -88,6 +88,9 @@ let euclid x k =
   if k = 0 then raise (Unsupported "division by zero in the logic");
   let ak = if k = min_int then raise Logic_overflow else abs k in
   let r = ((x mod ak) + ak) mod ak in
+  (* OCaml wraps `min_int / -1` to [min_int]; the logic's quotient is 2^62,
+     which this evaluator cannot hold (phase 6). *)
+  if x - r = min_int && k = -1 then raise Logic_overflow;
   let q = (x - r) / k in
   (q, r)
 

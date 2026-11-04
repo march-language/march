@@ -2636,9 +2636,22 @@ let rec fold_const_body (lookup : string -> (const_val, string) result) (e : A.e
       "is not built only from literals, `+ - * negate`, `&& || not`, and other \
        zero-argument constant functions"
   in
-  let int2 f a b =
+  (* Reflection phase 6: `+ - *` and negation panic out of range, so a
+     body whose arithmetic overflows has no value.  OCaml's wrapped result
+     would be a constant the program never returns (review of phase 6:
+     `max * 3` folded to `max - 2`). *)
+  let overflow = Error "overflows Int, so calling it panics" in
+  let checked op x y =
+    match op with
+    | `Add -> let r = x + y in if (x >= 0) = (y >= 0) && (r >= 0) <> (x >= 0) then None else Some r
+    | `Sub -> let r = x - y in if (x >= 0) <> (y >= 0) && (r >= 0) <> (x >= 0) then None else Some r
+    | `Mul ->
+      let r = x * y in
+      if x <> 0 && (r / x <> y || (x = -1 && y = min_int) || (y = -1 && x = min_int)) then None else Some r
+  in
+  let int2 op a b =
     match go a, go b with
-    | Ok (CInt x), Ok (CInt y) -> Ok (CInt (f x y))
+    | Ok (CInt x), Ok (CInt y) -> (match checked op x y with Some r -> Ok (CInt r) | None -> overflow)
     | (Error _ as err), _ | _, (Error _ as err) -> err
     | _ -> generic
   in
@@ -2652,11 +2665,15 @@ let rec fold_const_body (lookup : string -> (const_val, string) result) (e : A.e
   | A.ELit (A.LitInt n, _) -> Ok (CInt n)
   | A.ELit (A.LitBool b, _) -> Ok (CBool b)
   | A.EAnnot (inner, _, _) -> go inner
-  | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> int2 ( + ) a b
-  | A.EApp (A.EVar { A.txt = "-"; _ }, [ a; b ], _) -> int2 ( - ) a b
-  | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) -> int2 ( * ) a b
+  | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> int2 `Add a b
+  | A.EApp (A.EVar { A.txt = "-"; _ }, [ a; b ], _) -> int2 `Sub a b
+  | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) -> int2 `Mul a b
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp ->
-    (match go a with Ok (CInt x) -> Ok (CInt (-x)) | Error _ as err -> err | _ -> generic)
+    (match go a with
+     | Ok (CInt x) when x = min_int -> overflow
+     | Ok (CInt x) -> Ok (CInt (-x))
+     | Error _ as err -> err
+     | _ -> generic)
   | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> bool2 ( && ) a b
   | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> bool2 ( || ) a b
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) ->
