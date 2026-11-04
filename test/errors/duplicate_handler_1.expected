@@ -1,0 +1,16 @@
+exit: 1
+-- ACTOR --------------- errors/duplicate_handler_1.march
+
+Actor `Counter` has a second handler for `Bump`, and a message reaches only one. [duplicate_handler]
+Remove one of the two, or rename one and send it under its new name.
+
+11 |     on Bump(k : Int) do { state with n: state.n - k } end
+            ^^^^
+
+
+    the first `Bump` handler is here:
+
+10 |     on Bump(k : Int) do { state with n: state.n + k } end
+            ^^^^
+
+

@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: `Job` is a constructor of type `Job`, not an actor
+-- A type's constructor in `spawn` used to be reported as a constructor-arity
+-- error ("expects 1 argument(s) but I got 0"), which sent the reader to the
+-- wrong fix.
+mod Main do
+  needs IO.Console
+
+  type Job = Job(Int)
+
+  fn main(_c : Cap(IO.Console)) do
+    let _ = spawn(Job)
+    ()
+  end
+end

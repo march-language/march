@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/spawn_not_actor_3.march","start_line":13,"start_col":18,"end_line":13,"end_col":22,"message":"`Bump` is a message of actor `Counter`, not an actor, so `spawn` cannot start it.\n`spawn` takes the name of an `actor` declaration, like `spawn(Counter)`.","code":"spawn_not_actor","fix":null,"labels":[],"notes":[],"category":"ACTOR"}

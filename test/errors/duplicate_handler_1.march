@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: Actor `Counter` has a second handler for `Bump`
+-- Two `on Bump` arms: a message reaches one, so the other is dead code.
+-- The error labels the first.
+mod Main do
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do { state with n: state.n + k } end
+    on Bump(k : Int) do { state with n: state.n - k } end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let p = spawn(Counter)
+    send(p, Bump(1))
+    ()
+  end
+end

@@ -1,0 +1,12 @@
+exit: 1
+-- ACTOR ----------------- errors/spawn_not_actor_3.march
+
+`Bump` is a message of actor `Counter`, not an actor, so `spawn` cannot start it. [spawn_not_actor]
+`spawn` takes the name of an `actor` declaration, like `spawn(Counter)`.
+
+13 |     let _ = spawn(Bump)
+                       ^^^^
+
+    run `march --explain spawn_not_actor`
+
+

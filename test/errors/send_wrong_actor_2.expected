@@ -1,7 +1,7 @@
 exit: 1
 -- ACTOR ---------------- errors/send_wrong_actor_2.march
 
-`Tally` is a message for `Labels`, but this pid is an actor `Counter`, so the message would be dropped. [send_wrong_actor]
+`Tally` is a message for `Labels`, but this pid is an actor `Counter` (spawned on line 22), so the message would be dropped. [send_wrong_actor]
 `Tally` is also a handler of `Counter`, but a bare `Tally` resolves to `Labels`'s, and an actor message cannot be qualified by its actor; rename one of the two handlers.
 
 24 |     send(c, Tally(1))
@@ -9,10 +9,10 @@ exit: 1
 
     `Counter` handles `Tally`.
 
-    actor `Counter` is declared here:
+    `c` is spawned from `Counter` here:
 
-9 |   actor Counter do
-            ^^^^^^^
+22 |     let c = spawn(Counter)
+                 ^^^^^^^^^^^^^^
     run `march --explain send_wrong_actor`
 
 

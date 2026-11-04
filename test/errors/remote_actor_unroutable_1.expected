@@ -1,10 +1,26 @@
 exit: 1
 -- ACTOR --------- errors/remote_actor_unroutable_1.march
 
-`@[remote]` actor `Counter` has no handler a remote message can reach. A routable handler takes exactly one parameter annotated with a declared type that derives Json, e.g. `on Bump(h : Hit)`. [remote_actor_unroutable]
+The `@[remote]` actor `Counter` has no handler a remote message can reach. [remote_actor_unroutable]
+A routable handler takes one parameter annotated with a declared type that derives Json, like `on Bump(h : Hit)`.
 
- 9 |   actor Counter do
-       ^^^^^^^^^^^^^^^^
+9 |   actor Counter do
+            ^^^^^^^
 
+
+    `Set` takes a builtin `Int`, which has no wire tag:
+
+12 |     on Set(n : Int) do
+            ^^^
+
+    `Add` takes 2 parameters:
+
+15 |     on Add(a : Int, b : Int) do
+            ^^^
+
+    `Reset` takes no parameter:
+
+18 |     on Reset() do
+            ^^^^^
 
 

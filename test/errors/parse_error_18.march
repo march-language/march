@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: I don't recognize `strategy one_for_none`
+-- A misspelt restart strategy names the three it can be, instead of
+-- "I got stuck here".
+mod Main do
+  needs IO.Console
+
+  actor Worker do
+    state { n : Int }
+    init { n: 0 }
+    on Tick() do { state with n: state.n + 1 } end
+  end
+
+  actor Pool do
+    state { w : Int }
+    init { w: 0 }
+    supervise do
+      strategy one_for_none
+      max_restarts 5 within 30
+      Worker w
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let _ = spawn(Pool)
+    ()
+  end
+end

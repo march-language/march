@@ -219,13 +219,33 @@ let rec expand (errors : Err.ctx) (decls : decl list) : decl list =
   let out =
     List.concat_map
       (function
-        | DActor (_, name, adef, span) as d when adef.actor_remote ->
+        | DActor (_, name, adef, _) as d when adef.actor_remote ->
           (match routable adef with
            | [] ->
-             Err.error ~code:Err.Code.remote_actor_unroutable errors ~span
-               (Printf.sprintf
-                  "`@[remote]` actor `%s` has no handler a remote message can reach. A routable handler takes exactly one parameter annotated with a declared type that derives Json, e.g. `on Bump(h : Hit)`."
-                  name.txt);
+             (* Say, on each handler, which part of the rule it misses. *)
+             let why (h : actor_handler) =
+               match h.ah_params with
+               | [] -> "takes no parameter"
+               | [ { param_ty = None; param_name; _ } ] ->
+                 Printf.sprintf "`%s` has no type annotation" param_name.txt
+               | [ { param_ty = Some (TyCon (tn, [])); _ } ] ->
+                 Printf.sprintf "takes a builtin `%s`, which has no wire tag" tn.txt
+               | [ _ ] -> "takes a type with arguments, which has no wire tag"
+               | ps -> Printf.sprintf "takes %d parameters" (List.length ps)
+             in
+             Err.report errors
+               { Err.severity = Err.Error; span = name.span;
+                 message =
+                   Printf.sprintf
+                     "The `@[remote]` actor `%s` has no handler a remote message can reach.\n\
+                      A routable handler takes one parameter annotated with a declared type \
+                      that derives Json, like `on Bump(h : Hit)`."
+                     name.txt;
+                 labels = List.map (fun (h : actor_handler) ->
+                     { Err.lbl_span = h.ah_msg.span;
+                       lbl_message = Printf.sprintf "`%s` %s" h.ah_msg.txt (why h) })
+                     adef.actor_handlers;
+                 notes = []; code = Err.Code.remote_actor_unroutable; fix = None };
              [ d ]
            | routes ->
              let m = DMod (n (name.txt ^ "_Remote"), Public,

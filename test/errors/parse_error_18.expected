@@ -1,0 +1,10 @@
+exit: 1
+-- SYNTAX ------------------- errors/parse_error_18.march
+
+I don't recognize `strategy one_for_none` [parse_error]
+
+17 |       strategy one_for_none
+                    ^^^^^^^^^^^^
+
+    A supervise block's `strategy` is `one_for_one`, `one_for_all` or `rest_for_one`.
+    run `march --explain parse_error`
