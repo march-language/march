@@ -956,6 +956,9 @@ jobs:
     # 60-minute step limit on every main push, so a push now runs the full
     # corpus as two shards (`--shard K/2`, ~250 programs each, ~30 min).
     # Pull requests run the small corpus as the one shard.
+    # 2026-11-04: `--corpus all` also runs the `--check` leg over test/errors
+    # (~340 programs at ~6.5 CPU-s each, measured locally), about 5 more
+    # minutes per shard at the dev box's speed.
     strategy:
       fail-fast: false
       matrix:
