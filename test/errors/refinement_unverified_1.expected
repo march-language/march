@@ -4,7 +4,7 @@ exit: 1
 `cap verified` module: cannot verify return type constraint `_ >= 0` on `mk` (unreflectable-subject: the return expression `av(z)` could not be translated to SMT, so no goal was built) [refinement_unverified]
 note: strengthen the return expression so the checker can see it satisfies this contract, rewrite the predicate into the fragment the checker supports, or remove `cap verified` from this module — it asks for every obligation to be discharged
 
-41 |   fn mk(z : Int) : {Int | _ >= 0} do
+45 |   fn mk(z : Int) : {Int | _ >= 0} do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 

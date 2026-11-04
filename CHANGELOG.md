@@ -287,6 +287,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A refined `Int` result now uses the facts before it.** `fn grow(n : {Int | _ >= 0}) :
+  {Int | _ >= n}` used to stay unverified when its body was `let r = n + n` then `r`, or a
+  lemma call `twice_grows(n)` then `twice(n)`, or `assert n >= 0` then `n + n`. The same facts
+  already proved a call's precondition. The result is now checked with them, and a contract
+  proved this way is a fact at the function's callers. Other refined result types don't use
+  these facts yet.
 - **`spawn` of something that is not an actor, and a supervise child line naming no actor or a
   missing state field, are compile errors.** `spawn(helper)` for a function, or `spawn(Job)` for
   a type's constructor, passed the checker and failed when compiled ("`helper_spawn` is not a
