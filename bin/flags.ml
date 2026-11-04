@@ -248,3 +248,6 @@ let target_str     = ref "native"  (* --target: native | wasm64-wasi | wasm32-wa
 let check_migration   = ref false
 let prior_schema_path = ref ""
 let new_schema_path   = ref ""
+(* --accept-unproved: the deploy-gate laws ("Actor.state", "Actor.Handler")
+   a --check-migration may leave unproved without failing. *)
+let accept_unproved : string list ref = ref []

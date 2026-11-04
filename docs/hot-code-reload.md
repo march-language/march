@@ -50,6 +50,7 @@ need to drain traffic before a routine code push. Some edge cases are still open
 - [Actor state migration](#actor-state-migration): [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
 - [Compatibility annotations](#compatibility-annotations)
 - [Verifying migration soundness with `@invariant`](#verifying-migration-soundness-with-invariant) and [what `@invariant` accepts](#what-expressions-are-allowed-in-invariant)
+- [Contracts across versions](#contracts-across-versions): a deploy may loosen a refinement, never tighten it unproved
 - [Deploying signature changes](#deploying-signature-changes)
 - [Independent deploy pace (epoch-tagged dispatch)](#independent-deploy-pace-epoch-tagged-dispatch)
 
@@ -707,13 +708,53 @@ Invariant predicates support:
 
 Invariants can only reference the actor's own state fields. External function calls and heap allocation are not allowed in predicates.
 
-> **Write an unsupported expression and the invariant is silently skipped, not
-> rejected.** If an `@invariant` predicate falls outside this grammar, the compiler
-> prints a `warning: @invariant on <actor> contains unsupported expression; omitting` at
-> build time and drops the invariant entirely; `forge deploy hot` then proceeds with
-> **no SMT verification at all** for that actor, not a rejected deploy. `@invariant` is
-> enforced only for predicates in the table above, so treat that compiler warning as
-> something to look for, not something you can ignore.
+An `@invariant` outside this grammar can't be checked, so a hot deploy of that actor is
+**refused**. The build warns `@invariant on <actor> contains unsupported expression; a hot
+deploy of it will be refused`. The same goes for a state-field or handler-parameter
+refinement the schema can't record (a call with more than one argument, for example).
+`--accept-unproved <Actor>` deploys it anyway (see below).
+
+## Contracts across versions
+
+The new code's handlers *assume* the refinements it declares: a state field's
+(`count : {Int | _ >= 1}`), a handler parameter's (`on Bump(n : {Int | _ > 5})`) and the
+`@invariant`. A live actor's state, and the messages already queued for it or still being
+sent from code on an older epoch, were only ever checked against the *running* version's
+contracts. So `forge deploy hot` proves, for every actor, that **the running version's
+contracts imply the new ones**:
+
+| What | Law | When it is checked |
+|---|---|---|
+| The state | old field refinements and `@invariant` imply the new ones | with a `migrate_state`: of its result, from the old state; without one and with the same fields: of the state as it is |
+| A handler's parameters | each old parameter refinement implies the new one | when the message type is unchanged (otherwise `migrate_msg` converts every old message) |
+
+Loosening a contract always passes. Tightening one is refused unless it follows from the
+old contract, or a `migrate_state` re-establishes it:
+
+```
+migration: Tally.state: REFUSED, not proved that (count >= 0) implies (count >= 1) (the running version's contract must imply the new one; pass --accept-unproved Tally.state to deploy anyway)
+migration: Tally.Bump: REFUSED, not proved that parameter 0: (p0 > 0) implies (p0 > 5) (the running version's contract must imply the new one; pass --accept-unproved Tally.Bump to deploy anyway)
+error: migration VC failed — deploy aborted
+```
+
+Before this check, a deploy like this one went through unchecked. The refinements weren't
+part of the schema at all, so it looked like no change. The new handlers' proofs then
+rested on a fact the live actors didn't meet: a division "proved" safe by `count >= 1`
+could still divide by zero.
+
+**What refuses a deploy.** A migration that a counterexample shows breaks the new contract
+always does. A law that is not proved, or not checked (a predicate the schema could not
+record, a running version built by a compiler older than this check, a contract on a handler
+whose messages `migrate_msg` converts), refuses the deploy too, unless you name it:
+
+```bash
+forge deploy hot --accept-unproved Tally.state
+```
+
+`--accept-unproved` takes `<Actor>.state`, `<Actor>.<Handler>`, or `<Actor>` for all of an
+actor's laws, repeated or comma-separated. A counterexample can't be accepted. When an actor
+has any contract, the check needs the compiler: if `MARCH_BIN` isn't set and no
+`_build/default/bin/main.exe` is found, the deploy is refused rather than skipped.
 
 ---
 

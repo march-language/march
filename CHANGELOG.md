@@ -138,6 +138,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`forge deploy hot` refuses a migration law it can't prove, instead of letting it through.**
+  An unproved or unchecked law (a predicate the schema can't record, an `@invariant` outside
+  the supported grammar, a baseline from a compiler older than the contract check) refuses the
+  deploy, unless it is named with `--accept-unproved <Actor>.state`, `<Actor>.<Handler>` or
+  `<Actor>`. A counterexample always refuses. A missing compiler (`MARCH_BIN`) is now a
+  refusal, not a silent skip. An unsupported `@invariant` is recorded instead of dropped.
+
 - Diagnostics: a call whose argument has the wrong type no longer makes every later use of its
   result fail too. `List.append([1, 2], ["a"])` reports `"a"` once; its result is no longer taken
   to be a `List(Int)` that the next line then misuses. A result the function declares outright,
@@ -251,6 +258,18 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **A hot deploy can no longer tighten an actor's contract unproved.** A state field's
+  refinement, a handler parameter's and the `@invariant` were not part of the deploy schema
+  (the refinements were erased, and an `@invariant` was only checked against a
+  `migrate_state`). So a deploy that only strengthened one went through unchecked, and the
+  new handlers' proofs rested on a fact the live actors didn't meet: a division "proved" safe
+  by `count >= 1` could divide a live `count: 0`. The schema now records them, and
+  `forge deploy hot` proves the running version's contracts imply the new ones, for the state
+  (through `migrate_state`, or as it is when the fields are unchanged) and for each handler
+  parameter. The `migrate_state` check itself now proves a correct migration and refutes a
+  wrong one with a counterexample; before, it did neither, because the synthesised state type
+  was ambiguous with the actor's own.
 
 - A type variable in an error message no longer changes letter depending on whether the
   compiler's cache is warm (`Pid(b)` on a first run, `Pid(a)` after); each check now letters its
