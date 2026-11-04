@@ -138,6 +138,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: a call whose argument has the wrong type no longer makes every later use of its
+  result fail too. `List.append([1, 2], ["a"])` reports `"a"` once; its result is no longer taken
+  to be a `List(Int)` that the next line then misuses. A result the function declares outright,
+  like `parse : String -> Option(Int)`, is kept, so its own checks still run.
+
 - Diagnostics: a type mismatch inside a constructor or a list, tuple or record literal now points
   at the part that is wrong (`[1, 2, "three"]` underlines `"three"`, `Ok(string_to_int(s))`
   underlines `string_to_int(s)`) and names the path to it ("In a list element of the `ports`
