@@ -125,6 +125,35 @@ test "range covers full bounds" do
   assert has_zero && has_one
 end
 
+test "range wider than 2^52 stays in bounds and reaches its top half" do
+  -- lo + 2^52 was the most this span ever produced before wide spans were
+  -- handled.
+  let lo = 0
+  let hi = 65536 * 65536 * 65536 * 8192 - 1 + 65536 * 65536 * 65536 * 8192
+  let vals = gen_ranges(Random.seed(5), lo, hi, 200, Nil)
+  let in_bounds = List.all(vals, fn v -> v >= lo && v <= hi)
+  let big = List.any(vals, fn v -> v > 1048576 * (65536 * 65536))
+  assert in_bounds && big
+end
+
+test "range over (almost) the whole Int range does not overflow" do
+  -- hi - lo + 1 exceeds the largest Int here; this used to panic with
+  -- "attempt to subtract with overflow".
+  let hi = 65536 * 65536 * 65536 * 8192 - 1 + 65536 * 65536 * 65536 * 8192
+  let lo = 0 - hi
+  let vals = gen_ranges(Random.seed(9), lo, hi, 200, Nil)
+  let in_bounds = List.all(vals, fn v -> v >= lo && v <= hi)
+  let neg = List.any(vals, fn v -> v < 0 - 1048576 * (65536 * 65536))
+  let pos = List.any(vals, fn v -> v > 1048576 * (65536 * 65536))
+  assert in_bounds && neg && pos
+end
+
+test "range with a narrow span is unchanged by wide-span support" do
+  let (v, _) = Random.range(Random.seed(42), 0, 100)
+  let (raw, _) = Random.next_int(Random.seed(42))
+  assert v == int_mod(raw, 101)
+end
+
 -- ---- shuffle ----
 
 test "shuffle preserves length" do
