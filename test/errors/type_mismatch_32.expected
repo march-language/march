@@ -1,0 +1,25 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_32.march
+
+expected `Result(List(String), String)` but got `Result(List(Int), String)`. [type_mismatch]
+
+8 |     take(r)
+             ^
+
+    This is argument #1 of a function call.
+    The types differ here:
+        Result(List(Int), String)
+                    ^^^ expected `String`
+
+    the expected type comes from here:
+
+8 |     take(r)
+        ^^^^^^^
+
+    `r` was bound here as `Result(List(Int), String)`:
+
+7 |     let r = parse("x")
+            ^
+    run `march --explain type_mismatch`
+
+

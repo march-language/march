@@ -1,4 +1,4 @@
--- EXPECT-ERROR: expected `{ x : Int }` but got `{ s : String }`
+-- EXPECT-ERROR: expected `Pid({ x : Int })` but got `Pid({ s : String })`
 mod Main do
   -- REJECT: two DIFFERENT actors' pids cannot share one list -- `spawn(A)` is
   -- `Pid[{x: Int}]` and `spawn(B)` is `Pid[{s: String}]`, so the Cons cell's

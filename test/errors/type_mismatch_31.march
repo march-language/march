@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: expected `{ ports : List(String), … }` but got `{ ports : List(Int), … }`
+-- REJECT (§X2): a long record differing in one field prints only that field, with a caret under the part.
+mod Rec do
+  type Cfg = { name : String, ports : List(Int), tags : List(String), debug : Bool, retries : Int }
+  type Want = { name : String, ports : List(String), tags : List(String), debug : Bool, retries : Int }
+  fn load() : Cfg do
+    { name: "x", ports: [1], tags: ["a"], debug: true, retries: 3 }
+  end
+  fn use_it(_c : Want) : Int do 1 end
+  fn main() : Int do
+    let c = load()
+    use_it(c)
+  end
+end

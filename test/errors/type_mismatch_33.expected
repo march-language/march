@@ -1,0 +1,20 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_33.march
+
+expected `Int -> String -> Bool` but got `Int -> Int -> Bool`. [type_mismatch]
+
+7 |     apply(check, 1)
+              ^^^^^
+
+    This is argument #1 of a function call.
+    The types differ here:
+        Int -> Int -> Bool
+               ^^^ expected `String`
+
+    the expected type comes from here:
+
+7 |     apply(check, 1)
+        ^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+
