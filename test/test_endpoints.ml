@@ -2167,7 +2167,8 @@ let cli_role_grant_wrong_cap_type =
        let rc, out = check_cli src in
        Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
        Alcotest.(check bool) ("the type names both caps, and the walk adds nothing (output: " ^ out ^ ")") true
-         (contains_text out "expected `IO.Console` but got `IO.FileWrite`"
+         (contains_text out "Cap(IO.Console)" && contains_text out "Cap(IO.FileWrite)"
+          && contains_text out "expected `IO.Console`"
           && not (contains_text out "Role `Stream.Cons` is granted")))
 
 (* Review finding 2026-09-24-dd-review-role-authority-report-omits-local-closures:

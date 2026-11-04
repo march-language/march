@@ -15670,7 +15670,7 @@ let test_entry_qual_forges_proof_cap () =
     fn attack(cap : Cap(IO)) : Int do consume(Main.id(cap)) end
   end|} in
   Alcotest.(check bool) "Main.id forging Cap(IO) -> Cap(Db.P): mismatch caught" true
-    (count_errors_matching ctx "expected `Db.P` but got `IO`." >= 1)
+    (count_errors_matching ctx "expected `Cap(Db.P)` but got `Cap(IO)`." >= 1)
 
 let test_entry_qual_distinct_tvar_launders () =
   (* C2 variant: an ANNOTATED but distinct-tvar helper `fn f(x:a):b do x` gets a

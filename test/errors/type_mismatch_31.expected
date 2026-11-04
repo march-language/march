@@ -1,0 +1,25 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_31.march
+
+expected `{ ports : List(String), … }` but got `{ ports : List(Int), … }`. [type_mismatch]
+
+12 |     use_it(c)
+                ^
+
+    This is argument #1 of a function call.
+    The types differ here:
+        { ports : List(Int), … }
+                       ^^^ expected `String`
+
+    the expected type comes from here:
+
+12 |     use_it(c)
+         ^^^^^^^^^
+
+    `c` was bound here as `{ debug : Bool, name : String, ports : List(Int), retries : Int, tags : List(String) }`:
+
+11 |     let c = load()
+             ^
+    run `march --explain type_mismatch`
+
+

@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: expected `(List(String), Map(String, Float))` but got `(List(Int), Map(String, Int))`
+-- REJECT (§X2): two parts differ; each gets its own caret.
+mod Two do
+  fn stats() : (List(Int), Map(String, Int)) do ([1], Map.empty()) end
+  fn show(_p : (List(String), Map(String, Float))) : Int do 1 end
+  fn main() : Int do
+    show(stats())
+  end
+end

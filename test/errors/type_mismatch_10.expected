@@ -1,13 +1,15 @@
 exit: 1
 -- TYPE MISMATCH ---------- errors/type_mismatch_10.march
 
-expected `String` but got `Int`. [type_mismatch]
+expected `Dog -> String` but got `Dog -> Int`. [type_mismatch]
 
 11 |     fn speak(self) do
             ^^^^^
 
     `speak` in `impl Speak` must match the interface signature
-    Use `int_to_string(x)` to convert an Int to a String.
+    The types differ here:
+        Dog -> Int
+               ^^^ expected `String`
     run `march --explain type_mismatch`
 
 

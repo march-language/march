@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: expected `Int -> String -> Bool` but got `Int -> Int -> Bool`
+-- REJECT (§X2): a function passed where another is needed differs in its second parameter.
+mod Fun do
+  fn apply(f : Int -> String -> Bool, x : Int) : Bool do f(x, "a") end
+  fn check(a : Int, b : Int) : Bool do a == b end
+  fn main() : Bool do
+    apply(check, 1)
+  end
+end

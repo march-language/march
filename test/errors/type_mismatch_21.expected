@@ -1,12 +1,15 @@
 exit: 1
 -- TYPE MISMATCH ---------- errors/type_mismatch_21.march
 
-expected `{ x : Int }` but got `{ s : String }`. [type_mismatch]
+expected `Pid({ x : Int })` but got `Pid({ s : String })`. [type_mismatch]
 
 24 |     let _bad = Cons(pa, Cons(pb, Nil))
                                   ^^
 
     In argument 1 of `Cons`.
+    The types differ here:
+        Pid({ s : String })
+            ^^^^^^^^^^^^^^ expected `{ x : Int }`
     Field `s` is present in the value provided, but the expected type has no such field.
     run `march --explain type_mismatch`
 
