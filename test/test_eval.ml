@@ -5606,10 +5606,42 @@ let test_march_test_fresh_runtime_per_file () =
   if code <> 0 || not (Test_helpers.contains "6 tests passed" text) then
     Alcotest.failf "both files' Vault.incr doctests must pass (exit %d):\n%s" code text
 
+(* An impl in one file of an interface declared in another takes the
+   interface's default methods.  [Desugar.inject_defaults] runs per file and
+   never saw the interface, so the default was unbound at run time
+   ("unbound variable: twice"); [Desugar.link_program] injects it once the
+   program is joined.  Interpreted and compiled. *)
+let test_default_method_across_files () =
+  let dir = Filename.temp_dir "march_default_xfile" "" in
+  let lib = Filename.concat dir "lib" in
+  Unix.mkdir lib 0o755;
+  Out_channel.with_open_bin (Filename.concat lib "alg.march") (fun oc ->
+      output_string oc
+        "mod Alg do\n  interface Sem(a) do\n    fn combine : a -> a -> a\n    fn twice : a -> a do\n      fn x -> combine(x, x)\n    end\n  end\nend\n");
+  Out_channel.with_open_bin (Filename.concat dir "run.march") (fun oc ->
+      output_string oc
+        "mod Run do\n  needs IO.Console\n  use Alg.*\n  impl Sem(Int) do\n    fn combine(x, y) do x + y end\n  end\n  fn main(_cap : Cap(IO.Console)) do\n    println(int_to_string(twice(21)))\n  end\nend\n");
+  let exe = Filename.quote (Test_helpers.find_main_exe ()) in
+  let sh cmd =
+    let out = Filename.concat dir "out.txt" in
+    let code =
+      Test_helpers.Sys.command
+        (Printf.sprintf "cd %s && HOME=%s MARCH_LIB_PATH=%s %s > %s 2>&1" (Filename.quote dir) (Filename.quote dir)
+           (Filename.quote lib) cmd (Filename.quote out))
+    in
+    (code, In_channel.with_open_bin out In_channel.input_all)
+  in
+  let last s = match List.rev (List.filter (( <> ) "") (String.split_on_char '\n' s)) with l :: _ -> String.trim l | [] -> "" in
+  let code, out = sh (exe ^ " run.march") in
+  if code <> 0 || last out <> "42" then Alcotest.failf "interpreted: expected 42 (exit %d):\n%s" code out;
+  let code, out = sh (exe ^ " --compile -o prog run.march && ./prog") in
+  if code <> 0 || last out <> "42" then Alcotest.failf "compiled: expected 42 (exit %d):\n%s" code out
+
 let eval_suites =
   [
       ( "march_test_cli", [
-          Alcotest.test_case "fresh runtime per test file" `Quick test_march_test_fresh_runtime_per_file ] );
+          Alcotest.test_case "fresh runtime per test file" `Quick test_march_test_fresh_runtime_per_file;
+          Alcotest.test_case "default method of an impl in another file" `Quick test_default_method_across_files ] );
       ( "env_lookup", [
           Alcotest.test_case "innermost wins" `Quick test_lookup_shadowing_innermost_wins;
           Alcotest.test_case "missing raises" `Quick test_lookup_missing_raises;

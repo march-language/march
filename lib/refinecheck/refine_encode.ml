@@ -1792,6 +1792,15 @@ let short_name_conflated (short : string) : bool =
         && (not (List.mem short seeded_builtin_names))
         && not (Hashtbl.mem stdlib_declared short))
 
+(** The module paths declaring the type [short] when its short name is
+    conflated ([short_name_conflated]), for a diagnostic; [] otherwise. *)
+let conflated_declarants (short : string) : string list =
+  if not (short_name_conflated short) then []
+  else
+    match Hashtbl.find_opt adt_decl_paths ("M_" ^ short) with
+    | Some entries -> List.sort_uniq compare (List.map fst entries)
+    | None -> []
+
 (* bare "M_<name>" -> the qualified key [adt_sort_name] should resolve it to,
    when that bare name was ambiguous.  Only holds entries for AMBIGUOUS
    names — an unambiguous name is filed under its own bare key directly (see

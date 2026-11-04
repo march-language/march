@@ -33,7 +33,8 @@ another file).
 Tests (`lsp/test/test_lsp_refine.ml`): `lsp_lemma_rewrite_imported` (a forge project's
 `lib/`), `lsp_lemma_rewrite_stdlib` (a listed lemma is a rule; an unlisted one is not).
 
-## Found on the way (filed)
+## Found on the way
 
-- `specs/todos/2026-11-03-cross-file-default-method-unbound.md`
-- `specs/todos/2026-11-03-unused-import-ignores-impl-interface.md`
+A default method of a cross-file impl unbound at run time, and `use M.*` read as unused
+when only an interface of `M` is used: both fixed in
+`specs/progress/2026-11-03-lemma-tooling-bugfixes.md`.
