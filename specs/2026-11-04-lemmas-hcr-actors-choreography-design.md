@@ -46,8 +46,8 @@ this into rules; the phase order in §7 follows it.
 | Actors | **linking the model to the C runtime** | trace conformance against `MARCH_TRACE` events (M8): tested, not proved |
 | Actors | message refcount ownership | **not a lemma.** It's a property of Perceus and the runtime, checked by `--rc-trace` and `scripts/check-actor-rc-stores.sh`. §4.6 states it as a law and says why |
 
-**A soundness hole in HCR today** (P4, §3.3; todo
-`2026-11-04-hcr-refinement-strengthening-unchecked`, P1): refinements are erased from
+**A soundness hole in HCR today** (P4, §3.3; fixed by phase A0, PR #1100,
+progress `2026-11-04-hcr-refinement-variance-check`): refinements are erased from
 `.schemas.json`. So a deploy that only strengthens a state field's refinement, a handler
 parameter's or an `@invariant` is neither migrated nor checked, and the new handlers' proofs
 rest on an assumption the live state doesn't meet. Fixing it needs no lemmas, only implications
@@ -207,7 +207,7 @@ type Env = Msg(Int, Int) | Down(Int) | RReply(Int, Int)   -- sender+payload, mon
     `count + n >= 0`: the shared name withdrew the `n > 0` assumption.
 
 **P4, a refinement-only change across a deploy: unchecked, and unsound.** The full
-reproduction is in todo `2026-11-04-hcr-refinement-strengthening-unchecked`. Two
+reproduction is in progress entry `2026-11-04-hcr-refinement-variance-check` (PR #1100). Two
 `--compile --compile-so --hot-reload Main` builds differ only in `count : {Int | _ >= 0}`
 becoming `_ >= 1`, and `on Bump(n : {Int | _ > 0})` becoming `_ > 5`. Their `.schemas.json`
 are byte-identical. With `@invariant(count >= 0)` becoming `count >= 1` they differ only in
@@ -601,7 +601,7 @@ edit.
 | G5 | a field refinement on an anonymous-record parameter reaches `old.f` | H1, H5 | small to medium |
 | M1 | block facts reach a function's return contract and a handler's result obligation | H4, H1 with lemmas | medium; todo `2026-11-03-return-contract-ignores-block-facts` |
 | M2 | `@invariant` elaborates to a reflected `<actor>_inv(state) : Bool`, which may call reflected functions. The baseline's invariant is already the migration's hypothesis in `--check-migration`; this keeps that and widens the vocabulary | H1, H3 | medium |
-| M9 | refinements and reply refinements in `.schemas.json`; the deploy-time variance check (§3.3) | the P4 soundness hole; H2 for unchanged messages | small to medium; todo `2026-11-04-hcr-refinement-strengthening-unchecked` |
+| M9 | refinements and reply refinements in `.schemas.json`; the deploy-time variance check (§3.3) | the P4 soundness hole; H2 for unchanged messages | small to medium; landed as A0, PR #1100 (reply refinements still open) |
 | M10 | dry-run `migrate_state` on copies of the live states before `ACTIVATE`; a contract check on each converted message | undecided migrations, checked on real data | medium; runtime and reload server |
 | M11 | derived migrations for mechanical schema diffs, each derivation rule proved once | fewer hand-written migrations | medium |
 | M3 | `<Actor>.step(state, msg) : State`, a reflected function from the handlers whose state result does not depend on an effect's value (`send`/`println` in statement position erased in the logic copy; `receive`, `Actor.call` results, `self()` block). Needs its own soundness table and RED controls, as phase 5's had | H3, handler invariants stated as lemmas | large |
