@@ -11,7 +11,7 @@ fn List.maximum_int(xs : List(Int)) : Int =
 case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
-__panic_site("stdlib/list.march", 1191);
+__panic_site("stdlib/list.march", 1195);
 panic("List.maximum_int: empty list")
   Cons($f491, $f492) -> dec_rc xs;
 let t : '_ = $f492 in
@@ -27,7 +27,7 @@ fn List.minimum_int(xs : List(Int)) : Int =
 case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
-__panic_site("stdlib/list.march", 1170);
+__panic_site("stdlib/list.march", 1174);
 panic("List.minimum_int: empty list")
   Cons($f478, $f479) -> dec_rc xs;
 let t : '_ = $f479 in

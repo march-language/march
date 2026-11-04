@@ -65,7 +65,16 @@ phases 2 (lemmas, #1061) and 4 (fuel, #1065).
    precompile from 5-10 to 22-25 minutes), because z3 instantiated `$len`'s axioms for each
    list constant. Where `$len` does not occur, the bridge only defines a fresh symbol, so
    leaving it out loses no proof: every verdict is identical, and all 13 lemmas still prove.
-6. **Filter.** Reflecting `filter` itself waits for phase 5 (function values), as the spec rules.
+6. **The lift needed two fixes on the path that loads a stdlib module without a type map**
+   (`Lower`'s lazy loader, which the TIR snapshot harness reaches; real compiles lower the
+   merged, typechecked stdlib and were not affected, ir-oracle identical over 515 programs):
+   - the loader now runs lemma erasure, as the driver does, so no `@[lemma]` body is lowered
+     (the test helpers `lower_module_typed`/`mono_module` erase too);
+   - mono maps a self-call whose argument types are all erased (`reverse_onto(t, Cons(h, acc))`,
+     where the loader records no types) to the specialization being built. It used to fall back
+     to the generic body, which kept `'a` and failed the TIR verifier after mono. The old local
+     `go` never met this because a closure is specialized with its enclosing function.
+7. **Filter.** Reflecting `filter` itself waits for phase 5 (function values), as the spec rules.
    The length contract is its substitute.
 
 ## Tests (group `reflect-stdlib-list`, `test/test_refine_stdlib_list.ml`; 9 cases)

@@ -552,6 +552,15 @@ let ensure_atom_fns fn_table done_set worklist atoms =
 let shadow_params (shadowed : SSet.t) (params : Tir.var list) : SSet.t =
   List.fold_left (fun s (p : Tir.var) -> SSet.add p.Tir.v_name s) shadowed params
 
+(** The specialization whose body [rewrite_calls] is rewriting:
+    (original name, specialized name, its substitution).  A self-call whose
+    argument types are all erased (`'_`, as in a stdlib module the lowerer
+    loaded without a type map: `reverse_onto(t, Cons(h, acc))` binds `t` and
+    builds the `Cons` with no recorded type) yields no substitution of its
+    own; it is the same instance, so it calls this specialization instead of
+    the generic body (which would keep its type variables to the end). *)
+let current_spec : (string * string * ty_subst) option ref = ref None
+
 (** Rewrite all [EApp] and [ELetRec] calls in [expr] that target
     polymorphic functions, replacing them with calls to the
     specialized (mangled) version and enqueuing the specialization
@@ -1038,6 +1047,15 @@ let rec rewrite_calls
           bare-`None` link failure and the 512-specialization mono-limit blowup
           (each dangling id counts as a new specialization of the same fn). *)
        let subst = default_residual_in_subst (build_subst orig_fn arg_tys) in
+       let self_spec =
+         match !current_spec with
+         | Some (o, target, (_ :: _ as sub)) when subst = [] && o = orig_name -> Some (target, sub)
+         | _ -> None
+       in
+       match self_spec with
+       | Some (target, sub) ->
+         Tir.EApp ({ f_var with Tir.v_name = target; v_ty = subst_ty sub f_var.Tir.v_ty }, args)
+       | None ->
        if subst = [] then begin
          (* No specialization needed (monomorphic or unresolved TVar args) —
             but still enqueue to ensure the function is emitted.  Matches the
@@ -1534,9 +1552,11 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
            than a stale row-poly var (see [refine_field_types]). *)
         let refined_body = refine_field_types fn'.Tir.fn_body in
         (* Rewrite calls in the body, enqueuing new specializations *)
+        current_spec := Some (orig_name, target_name, subst);
         let body' = rewrite_calls fn_table done_set worklist
                       iface_methods record_to_typename
                       (shadow_params SSet.empty fn'.Tir.fn_params) refined_body in
+        current_spec := None;
         result := { fn' with Tir.fn_body = body' } :: !result
       end
     end
