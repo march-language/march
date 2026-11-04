@@ -212,6 +212,10 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- The Refinement Types chapter (`/docs/refinement-types/`) drops its dated "What's new" box. Its
+  "When to use refinements" table now points at refinement messages, reflection, lemmas,
+  relational element refinements, abstract refinements, fold invariants, termination (`cap total`)
+  and `--refine-infer`, and "On this page" lists those sections too.
 - A new Lemmas guide (`specs/lang/lemmas.md`, `/docs/lemmas/` on the site): writing `@[lemma]` proofs by induction,
   `assert` steps and fuel, using lemmas with refinements, and what `forge test`, `forge doc`,
   `forge search --law` and the editor do with them.
