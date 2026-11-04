@@ -4141,6 +4141,12 @@ let compile filename =
   (* Lemma erasure (§4.5): after the refinement checker, before anything
      lowers, interprets or JIT-compiles the program. *)
   let user_only_desugared = erase_lemmas_in ~whole:desugared user_only_desugared in
+  (* The shell's identity table hashes source regions that run from one
+     declaration to the next, so it must see the declarations the node's
+     build hashed (before erasure, see "The shell's identity table" above):
+     erasure drops lemma declarations, which moves where the one before them
+     (the stdlib's `impl Eq(List(a))`) ends. *)
+  let shell_client_decls = desugared.March_ast.Ast.mod_decls in
   let desugared = erase_lemmas desugared in
   (* Allocation contracts (`cap no_alloc` modules and @[no_alloc] functions)
      are judged on lowered TIR.  --check lowers on demand for them (below);
@@ -4245,7 +4251,7 @@ let compile filename =
   (match !shell_socket with
    | Some socket ->
      if frontend_rejected then exit 1;
-     Shell_cmd.run ~socket ~program:desugared ~type_map ~tc_env:typecheck_env
+     Shell_cmd.run ~socket ~program:desugared ~ident_decls:shell_client_decls ~type_map ~tc_env:typecheck_env
        ~timeout_ms:!shell_timeout_ms ~force:!shell_force ~inputs:!shell_inputs
    | None -> ());
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in

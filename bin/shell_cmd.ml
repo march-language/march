@@ -506,8 +506,10 @@ let handle s line =
       let expr, lim = split_limit line in
       eval_expr s expr ~limit:(Option.value lim ~default:s.limit)
 
-(* Entry point from the driver.  [socket] is the node's `<reload>.shell`. *)
-let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(force : bool)
+(* Entry point from the driver.  [socket] is the node's `<reload>.shell`.
+   [ident_decls] are [program]'s declarations before lemma erasure: the
+   identity table hashes those, as the node's build did. *)
+let run ~socket ~(program : Ast.module_) ~(ident_decls : Ast.decl list) ~type_map ~tc_env ~timeout_ms ~(force : bool)
     ~(inputs : string option) =
   let sk = match March_forge.Cmd_hot_reload.read_sk_raw () with
     | Ok sk -> sk
@@ -532,7 +534,7 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(force :
       match words r with
       | [ "OK"; b64 ] -> Ok (b64_decode b64)
       | _ -> Error r in
-    match March_jit.Shell_ident.fetch_check ~ask program.Ast.mod_decls with
+    match March_jit.Shell_ident.fetch_check ~ask ident_decls with
     | Ok c ->
       (match March_jit.Shell_ident.differing c with
        | [] -> ()
