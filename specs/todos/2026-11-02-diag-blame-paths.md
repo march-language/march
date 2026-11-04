@@ -6,3 +6,7 @@ output: specs/plans/2026-11-02-diagnostics-depth-plan.md §X1. Acceptance: caret
 2026-11-03: first slice landed (constructors, list/tuple/record literals, path notes):
 `specs/progress/2026-11-03-diag-x1-blame-literals-and-ctors.md` (diagnostics only; typing untouched). Open: lambda bodies inside calls,
 `if`/`cond` branches against a known type, and the swapped pair on `x ++ "no"`.
+
+2026-11-04: second slice landed (lambda bodies inside calls):
+`specs/progress/2026-11-04-diag-x1-lambda-bodies.md`. Open: `if`/`cond` branches against a known
+type, and the swapped pair on `x ++ "no"`.

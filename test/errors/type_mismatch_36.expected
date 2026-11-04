@@ -1,0 +1,19 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_36.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+6 |     List.map(xs, fn _ -> { name: "s", port: "80" })
+                                                ^^^^
+
+    In the `port` field.
+    `List.map` has type `List(a) -> (a -> b) -> List(b)`, and this function's result is its `b`.
+    This is the declared return type of `cfgs`.
+
+    the expected type comes from here:
+
+5 |   fn cfgs(xs : List(Int)) : List(Cfg) do
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

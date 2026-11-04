@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`--refine-infer` proposes lemma calls.** At a call the refinement checker could not finish
+  because the proof needs more unfolding of a function, `march --check --refine-infer` and
+  `forge refine --infer` look for a lemma, yours or the standard library's, whose theorem is
+  about a call in the arguments. For `need_same(xs, List.reverse(List.reverse(xs)))` it proposes
+  `List.reverse_reverse(xs)`. Every candidate is checked by checking the program again with the
+  call in it, and `--refine-infer-apply` writes the call above the statement. When no lemma
+  closes the call, it prints the lemma that would, for you to prove. `--refine-infer-kinds=lemma`
+  selects this kind on its own; the JSON output gains `lemma_calls` and `lemma_none`.
+
 - **`List` ships lemmas about its own functions.** `List.append_nil`, `append_assoc`,
   `len_append`, `reverse_append`, `reverse_reverse`, `len_reverse`, `len_take`, `len_drop`
   and `take_drop` can be called from any program to give the refinement checker that
@@ -136,10 +145,20 @@ git log is authoritative for exact commits.
   `<Actor>`. A counterexample always refuses. A missing compiler (`MARCH_BIN`) is now a
   refusal, not a silent skip. An unsupported `@invariant` is recorded instead of dropped.
 
+- Diagnostics: a call whose argument has the wrong type no longer makes every later use of its
+  result fail too. `List.append([1, 2], ["a"])` reports `"a"` once; its result is no longer taken
+  to be a `List(Int)` that the next line then misuses. A result the function declares outright,
+  like `parse : String -> Option(Int)`, is kept, so its own checks still run.
+
 - Diagnostics: a type mismatch inside a constructor or a list, tuple or record literal now points
   at the part that is wrong (`[1, 2, "three"]` underlines `"three"`, `Ok(string_to_int(s))`
   underlines `string_to_int(s)`) and names the path to it ("In a list element of the `ports`
   field of …"), instead of underlining the whole literal with "Argument to constructor `Cons`".
+
+- Diagnostics: a lambda whose result is wrong is blamed at its body, not at the call it is passed
+  to. `List.map(xs, fn x -> x + 1)` where a `List(String)` is expected now underlines `x + 1`
+  and says `List.map`'s `b` is this function's result; a record or tuple result narrows to its
+  wrong field or component.
 
 - Diagnostics: a type mismatch deep inside two types now reports the whole pair, with a note
   that prints the provided type and puts a caret under each part that differs, instead of
@@ -214,6 +233,10 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- The Refinement Types chapter (`/docs/refinement-types/`) drops its dated "What's new" box. Its
+  "When to use refinements" table now points at refinement messages, reflection, lemmas,
+  relational element refinements, abstract refinements, fold invariants, termination (`cap total`)
+  and `--refine-infer`, and "On this page" lists those sections too.
 - A new Lemmas guide (`specs/lang/lemmas.md`, `/docs/lemmas/` on the site): writing `@[lemma]` proofs by induction,
   `assert` steps and fuel, using lemmas with refinements, and what `forge test`, `forge doc`,
   `forge search --law` and the editor do with them.

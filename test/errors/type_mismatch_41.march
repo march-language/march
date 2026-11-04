@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: Non-exhaustive pattern match
+-- REJECT (§X3 poison, guard): `parse` declares its result `Option(Int)` outright, so a wrong argument
+-- does not poison it, and the `match` over it is still checked: the missing `None` is its own error.
+mod Declared do
+  fn parse(s : String) : Option(Int) do Some(string_length(s)) end
+  fn first(n : Int) : Int do
+    match parse(n) do
+      Some(x) -> x
+    end
+  end
+  fn main() : Int do 0 end
+end

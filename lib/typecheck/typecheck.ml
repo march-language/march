@@ -1979,6 +1979,134 @@ let relocate_literal_mismatch env ~mark ~reason (e : Ast.expr) sp (expected : ty
        | _ -> ())
   | _ -> ()
 
+(** The part of [t] at [path], seeing through linearity and nominal records. *)
+let rec type_at env t path =
+  match path, strip_lin t with
+  | [], t -> Some t
+  | DArg (_, i) :: rest, TCon (_, args) when i <= List.length args ->
+    type_at env (List.nth args (i - 1)) rest
+  | DComp i :: rest, TTuple ts when i <= List.length ts -> type_at env (List.nth ts (i - 1)) rest
+  | DField n :: rest, (TRecord flds) ->
+    Option.bind (List.assoc_opt n flds) (fun t -> type_at env t rest)
+  | DField _ :: _, (TCon _ as tc) ->
+    (match expand_nominal_record env tc with
+     | Some (TRecord _ as r) -> type_at env r path | _ -> None)
+  | DParam :: rest, TArrow (a, _) -> type_at env a rest
+  | DResult :: rest, TArrow (_, b) -> type_at env b rest
+  | _ -> None
+
+(** Move the type mismatch [check_expr] just reported on call [e] (span
+    [sp], inferred [inferred]) into the body of the one lambda argument
+    that decides the wrong part (§X1, slice 2).  `List.map(xs, fn x -> x + 1)`
+    against `List(String)`: [map]'s scheme returns `List(b)`, and only the
+    lambda's result is `b`, so `x + 1` is what is wrong.  Read-only: the
+    callee's generic scheme says which type variable the differing part of
+    the result is, and the move happens only when exactly one argument
+    mentions that variable, as a lambda's result. *)
+let relocate_callback_mismatch env ~mark (e : Ast.expr) sp inferred expected =
+  match e with
+  | Ast.EApp (Ast.EVar fname, (_ :: _ as args), _) ->
+    (match lookup_var fname.txt env with
+     | Some (Poly (ids, _, sty)) ->
+       let rec fresh l = if l == mark then [] else match l with [] -> [] | d :: r -> d :: fresh r in
+       let added = fresh env.errors.Err.diagnostics in
+       let is_mismatch (d : Err.diagnostic) =
+         d.Err.span = sp && Err.slug_of_code d.Err.code = Err.Code.type_mismatch in
+       (match List.find_opt is_mismatch added with
+        | None -> ()
+        | Some d ->
+          (* Peel one arrow per argument: the parameters and the result. *)
+          let rec peel n t acc = if n = 0 then Some (List.rev acc, t) else
+              match strip_lin t with
+              | TArrow (a, b) -> peel (n - 1) b (a :: acc) | _ -> None in
+          let generic t = match strip_lin t with
+            | TVar { contents = Unbound (id, _) } when List.mem id ids -> Some id | _ -> None in
+          let rec mentions id t = match repr t with
+            | TVar { contents = Unbound (i, _) } -> i = id
+            | TCon (_, ts) | TTuple ts -> List.exists (mentions id) ts
+            | TRecord fs -> List.exists (fun (_, t) -> mentions id t) fs
+            | TArrow (a, b) -> mentions id a || mentions id b
+            | TLin (_, t) -> mentions id t
+            | _ -> false in
+          (* Walk the scheme's result along [path] to the first generic
+             variable on it: the variable, and the path from it on. *)
+          let rec var_on t path = match generic t, path with
+            | Some id, _ -> Some (id, path)
+            | None, [] -> None
+            | None, step :: rest ->
+              Option.bind (type_at env t [ step ]) (fun t' -> var_on t' rest) in
+          (match peel (List.length args) sty [], type_diffs env inferred expected with
+           | Some (params, res), { td_path; _ } :: _ ->
+             (match var_on res td_path with
+              | Some (v, below) ->
+                let decides (p, a) = match a with
+                  | Ast.ELam (lps, body, _) ->
+                    (match peel (List.length lps) p [] with
+                     | Some (lparams, lres) when generic lres = Some v
+                                                && not (List.exists (mentions v) lparams) ->
+                       Some body
+                     | _ -> None)
+                  | _ -> None in
+                let pairs = List.combine params args in
+                (match List.filter_map decides pairs with
+                 | [ body ] when List.length (List.filter (fun (p, _) -> mentions v p) pairs) = 1 ->
+                   let last = match body with
+                     | Ast.EBlock ((_ :: _ as es), _) -> List.nth es (List.length es - 1)
+                     | b -> b in
+                   let bsp = span_of_expr last in
+                   let above = List.filteri (fun i _ -> i < List.length td_path - List.length below) td_path in
+                   (match Hashtbl.find_opt env.type_map bsp, type_at env expected above with
+                    | Some bty, Some want when bsp <> sp ->
+                      (* A literal result narrows further, to its wrong part (slice 1). *)
+                      let bsp, bty, want, path_note =
+                        match locate_literal_part env last want [] with
+                        | Some (psp, (_ :: _ as path), pty, pexp) when psp <> bsp ->
+                          (psp, pty, pexp,
+                           [ Printf.sprintf "In %s." (String.concat " of " (List.rev path)) ])
+                        | _ -> (bsp, bty, want, []) in
+                      let message, diff_note =
+                        match diff_mismatch_message env ~provided:bty ~required:want with
+                        | Some (h, n) -> (h, [ n ])
+                        | None ->
+                          (Printf.sprintf "expected %s but got %s."
+                             (format_ty_for_error want) (format_ty_for_error bty),
+                           common_mismatch_hint bty want) in
+                      (* The signature's own variables, lettered from `a` in order
+                         of appearance, so the note reads on its own. *)
+                      let letters = ref [] in
+                      let rec named t = match repr t with
+                        | TVar { contents = Unbound (id, _) } when List.mem id ids ->
+                          let l = match List.assoc_opt id !letters with
+                            | Some l -> l
+                            | None ->
+                              let l = String.make 1 (Char.chr (Char.code 'a' + List.length !letters mod 26)) in
+                              letters := !letters @ [ (id, l) ]; l in
+                          TCon (l, [])
+                        | TCon (n, ts) -> TCon (n, List.map named ts)
+                        | TTuple ts -> TTuple (List.map named ts)
+                        | TRecord fs -> TRecord (List.map (fun (n, t) -> (n, named t)) fs)
+                        | TArrow (a, b) -> let a' = named a in TArrow (a', named b)
+                        | TLin (l, t) -> TLin (l, named t)
+                        | t -> t in
+                      let sig_s = pp_ty (named sty) in
+                      let why = Printf.sprintf
+                          "`%s` has type `%s`, and this function's result is its `%s`."
+                          fname.txt sig_s (List.assoc v !letters) in
+                      let x2 = "The types differ here:" in
+                      let keep n = not (String.length n >= String.length x2
+                                        && String.sub n 0 (String.length x2) = x2)
+                                   && not (List.mem n (common_mismatch_hint inferred expected)) in
+                      let d' = { d with Err.span = bsp; message;
+                                        notes = path_note @ (why :: List.filter keep d.Err.notes) @ diff_note } in
+                      env.errors.Err.diagnostics <-
+                        List.map (fun x -> if x == d then d' else x) env.errors.Err.diagnostics
+                    | _ -> ())
+                 | _ -> ())
+              | None -> ())
+           | _ -> ()))
+     | _ -> ())
+  | _ -> ()
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -4107,7 +4235,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     let inferred =
       with_suggest_need e (NeedType expected) (fun () -> infer_expr env e) in
     unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected;
-    relocate_literal_mismatch env ~mark ~reason e sp expected
+    relocate_literal_mismatch env ~mark ~reason e sp expected;
+    relocate_callback_mismatch env ~mark e sp inferred expected
 
 (** Thread function application through argument list, tracking arg index. *)
 and infer_app env span f_ty args idx =
@@ -4128,8 +4257,47 @@ and infer_app env span f_ty args idx =
        ret_ty
      | _ -> t)
   | arg :: rest, TArrow (param_ty, ret_ty) ->
+    let mark = env.errors.Err.diagnostics in
+    (* The parameter's type variables, bound or not: an earlier argument may
+       already have bound one (`List.append([1], ["a"])` binds `a` to `Int`
+       before `["a"]` is checked), which is how the cascade starts. *)
+    let param_vars =
+      let acc = ref [] in
+      let rec walk t = match t with
+        | TVar ({ contents = Unbound _ } as r) -> acc := r :: !acc
+        | TVar ({ contents = Link t' } as r) -> acc := r :: !acc; walk t'
+        | TCon (_, ts) | TTuple ts -> List.iter walk ts
+        | TRecord fs -> List.iter (fun (_, t) -> walk t) fs
+        | TArrow (a, b) -> walk a; walk b
+        | TLin (_, t) | TRefine (t, _, _) -> walk t
+        | _ -> () in
+      walk param_ty; !acc in
     check_expr env arg param_ty
       ~reason:(Some (RFnArg (span, idx)));
+    (* Poison (§X3): when an argument fails its type check and the call's
+       result shares a type variable with that parameter, the variable is
+       now bound to whatever the failed check left it, so the result is
+       [TError] and absorbs what it meets.  `need_int(id(Box("hi")))` then
+       reports the argument, not also every later use of `id`'s result.  A
+       result the callee declares outright (`parse : String -> Option(Int)`)
+       is kept, so a `match` over it still checks exhaustiveness and a field
+       of it still checks its type, as independent errors.  Only a type
+       mismatch counts: a capability, linearity or visibility error in the
+       argument says nothing about the result's type. *)
+    let rec shares t = match t with
+      | TVar r -> List.memq r param_vars || (match !r with Link t' -> shares t' | _ -> false)
+      | TCon (_, ts) | TTuple ts -> List.exists shares ts
+      | TRecord fs -> List.exists (fun (_, t) -> shares t) fs
+      | TArrow (a, b) -> shares a || shares b
+      | TLin (_, t) | TRefine (t, _, _) -> shares t
+      | _ -> false in
+    let failed =
+      param_vars <> [] && shares ret_ty
+      && (let rec any l = l != mark && (match l with
+          | [] -> false
+          | (d : Err.diagnostic) :: r ->
+            Err.slug_of_code d.Err.code = Err.Code.type_mismatch || any r) in
+          any env.errors.Err.diagnostics) in
     (* Proof-cap forge taint: if this argument laundered a [cap_narrow] result
        (its type — now unified with [param_ty] — carries a tagged cap-producer
        var), taint [ret_ty].  This closes the launder-through-a-polymorphic-fn
@@ -4140,7 +4308,8 @@ and infer_app env span f_ty args idx =
        same fn is unaffected. *)
     if ty_has_tagged_cap_producer env param_ty then
       tag_cap_producer_result env ret_ty span;
-    infer_app env span ret_ty rest (idx + 1)
+    let result = infer_app env span ret_ty rest (idx + 1) in
+    if failed then TError else result
   | arg :: rest, TVar _ ->
     (* f_ty not yet known — constrain it *)
     let arg_ty = infer_expr env arg in

@@ -66,6 +66,7 @@ let in_body (s : IS.slot) (sp : A.span) =
 
 let to_string ?(edit_of : RI.proposal -> (string * int * int * string) option = fun _ -> None)
     ?(dedit_of : RI.dproposal -> (string * int * int * string) option = fun _ -> None)
+    ?(ledit_of : RI.lproposal -> (string * int * int * string) option = fun _ -> None)
     (r : RI.result) : string =
   let violations snap = List.length (List.filter (fun (_, v) -> v = Obligation.Violated) snap) in
   let proposals =
@@ -146,9 +147,44 @@ let to_string ?(edit_of : RI.proposal -> (string * int * int * string) option = 
         (arr (List.map dp (by_pos (fun (d : RI.dproposal) -> d.RI.d_span) r.RI.decreases)))
         (arr (List.map dn (by_pos (fun (n : RI.dnone) -> n.RI.n_span) r.RI.decreases_none)))
   in
+  (* Reflection phase 7: present only when there is something to say. *)
+  let lemma_calls =
+    if r.RI.lemma_calls = [] && r.RI.lemma_none = [] then ""
+    else
+      let edit_json = function
+        | Some (file, start, stop, text) ->
+          Printf.sprintf "{\"file\": %s, \"start\": %d, \"end\": %d, \"text\": %s}" (str file) start stop (str text)
+        | None -> "null"
+      in
+      let target (o : Obligation.t) =
+        site_obj o.Obligation.span
+          [ ("kind", str (match o.Obligation.kind with Obligation.Postcondition -> "postcondition" | _ -> "precondition"));
+            ("callee", str o.Obligation.callee); ("predicate", str o.Obligation.predicate) ]
+      in
+      let lp (l : RI.lproposal) =
+        let f, ln, c = pos l.RI.lp_stmt in
+        Printf.sprintf
+          "{\"kind\": \"lemma\", \"fn\": %s, \"file\": %s, \"line\": %d, \"col\": %d, \"lemma\": %s, \"call\": %s, \"closes\": %s, \"checked\": %d, \"candidates\": %d, \"not_applied\": %s, \"edit\": %s}"
+          (str l.RI.lp_fn) (str f) ln c (str l.RI.lp_lemma) (str l.RI.lp_call) (target l.RI.lp_target) l.RI.lp_checked
+          l.RI.lp_total
+          (match l.RI.lp_apply with Some w -> str w | None -> "null")
+          (edit_json (ledit_of l))
+      in
+      let ln (n : RI.lnone) =
+        Printf.sprintf "{\"fn\": %s, \"target\": %s, \"checked\": %d, \"candidates\": %d, \"skeleton\": %s}"
+          (str n.RI.ln_fn) (target n.RI.ln_target) n.RI.ln_checked n.RI.ln_total
+          (match n.RI.ln_skeleton with
+           | None -> "null"
+           | Some (text, call) -> Printf.sprintf "{\"lemma\": %s, \"call\": %s}" (str text) (str call))
+      in
+      let by_pos sp_of xs = List.sort (fun a b -> compare (pos (sp_of a)) (pos (sp_of b))) xs in
+      Printf.sprintf ", \"lemma_calls\": %s, \"lemma_none\": %s"
+        (arr (List.map lp (by_pos (fun (l : RI.lproposal) -> l.RI.lp_stmt) r.RI.lemma_calls)))
+        (arr (List.map ln (by_pos (fun (n : RI.lnone) -> n.RI.ln_target.Obligation.span) r.RI.lemma_none)))
+  in
   Printf.sprintf
     "{\"version\": 1, \"summary\": {\"user_skips_before\": %d, \"user_skips_after\": %d, \"violations_before\": %d, \"violations_after\": %d, \"accepted\": %d, \"rejected\": %d, \"refused\": %d, \"probes\": %d, \"rounds\": %d, \"budget_exhausted\": %s}, \"proposals\": %s, \"rejected\": %s, \"refused\": %s, \"notes\": %s%s}"
     (LD.debt r.RI.before - violations r.RI.before) (LD.debt r.RI.after - violations r.RI.after)
     (violations r.RI.before) (violations r.RI.after)
     (List.length r.RI.proposals) (List.length r.RI.rejected) (List.length r.RI.refused) r.RI.probes r.RI.rounds
-    (arr budget_ex) (arr (List.map proposal proposals)) (arr rejected) (arr refused) (arr notes) decreases
+    (arr budget_ex) (arr (List.map proposal proposals)) (arr rejected) (arr refused) (arr notes) (decreases ^ lemma_calls)
