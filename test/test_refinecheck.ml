@@ -15214,6 +15214,47 @@ let stored_field_suite =
         Alcotest.(check bool) "f(1)" false
           (has_refine_error_d (prog ~extra:lin (main "    f(1)\n"))));
 
+    (* Gap G5 (specs/2026-11-04-lemmas-hcr-actors-choreography-design.md):
+       a refined field of an ANONYMOUS-record parameter was neither assumed
+       by the callee nor obliged at a caller (--refine-audit: "below the
+       outermost position").  Refine_anon lifts it to a refinement on the
+       parameter over a synthetic record sort. *)
+    gated "an anonymous-record parameter's refined field is assumed" (fun () ->
+        Alcotest.(check bool) "need(r.v) from r : { v : {Int | _ > 0} }" false
+          (has_refine_error_d
+             (prog "  fn f(r : { v : {Int | _ > 0} }) : Int do need(r.v) end\n"));
+        Alcotest.(check bool) "a field refinement naming a sibling field" false
+          (has_refine_error_d
+             (prog "  fn f(r : { lo : Int, hi : {Int | _ > lo} }) : Int do need(r.hi - r.lo) end\n"));
+        Alcotest.(check bool) "a field refinement naming its own binder" false
+          (has_refine_error_d
+             (prog "  fn f(r : { n : {Int | n > 3} }) : Int do need(r.n - 3) end\n")));
+
+    gated "a record parameter's refinement is a fact at a call, retired on rebinding" (fun () ->
+        let t = "  type T = { v : Int }\n" in
+        Alcotest.(check bool) "need(r.v) from r : {T | _.v > 0}" false
+          (has_refine_error_d (prog ~extra:t "  fn f(r : {T | _.v > 0}) : Int do need(r.v) end\n"));
+        Alcotest.(check bool) "not after `let r = { v: 0 }`" true
+          (has_refine_error_d
+             (prog ~extra:t "  fn f(r : {T | _.v > 0}) : Int do\n    let r = { v: 0 }\n    need(r.v)\n  end\n"));
+        Alcotest.(check bool) "nor for a lifted anonymous record" true
+          (has_refine_error_d
+             (prog "  fn f(r : { v : {Int | _ > 0} }) : Int do\n    let r = { v: 0 }\n    need(r.v)\n  end\n")));
+
+    gated "an anonymous-record parameter's refined field is obliged at the caller" (fun () ->
+        let f = "  fn f(r : { v : {Int | _ > 0} }) : Int do r.v end\n" in
+        Alcotest.(check bool) "f({ v: 0 })" true
+          (has_refine_error_d (prog ~extra:f (main "    f({ v: 0 })\n")));
+        Alcotest.(check bool) "f({ v: 2 })" false
+          (has_refine_error_d (prog ~extra:f (main "    f({ v: 2 })\n"))));
+
+    gated "a declared type's literal is typed as before beside a same-shaped parameter" (fun () ->
+        let extra = box ^ "  fn f(r : { v : {Int | _ > 5} }) : Int do r.v end\n" in
+        Alcotest.(check bool) "{ v: 0 } is still obliged as a Box" true
+          (has_refine_error_d (prog ~extra (main "    let b = { v: 0 }\n    b.v\n")));
+        Alcotest.(check bool) "{ v: 1 } is still a fine Box" false
+          (has_refine_error_d (prog ~extra (main "    let b = { v: 1 }\n    b.v\n"))));
+
     gated "two record types of one shape make a bare literal ambiguous: fail closed" (fun () ->
         let extra = box ^ "  type Box2 = { v : Int }\n" in
         Alcotest.(check bool) "{ v: 0 } is not obliged" false
@@ -28916,10 +28957,13 @@ let refine_messages_suite =
    case runs in a fresh cwd: the VC cache lives under <cwd>/.march/cas. *)
 
 let hcr_schema ?(contracts = true) ?(unsupported = false) ?invariant ?(handlers = "")
-    (fields : (string * string * string option) list) =
+    ?(accepted = []) (fields : (string * string * string option) list) =
   Printf.sprintf
-    {|{"Tally": {"compat": "full",%s%s%s%s "state_fields": [%s]}}|}
+    {|{"Tally": {"compat": "full",%s%s%s%s%s "state_fields": [%s]}}|}
     (if contracts then {| "contracts": 1,|} else "")
+    (if accepted = [] then ""
+     else Printf.sprintf {| "accepted_unproved": [%s],|}
+         (String.concat ", " (List.map (Printf.sprintf "%S") accepted)))
     (if unsupported then {| "refine_unsupported": true,|} else "")
     (match invariant with Some i -> Printf.sprintf {| "invariant": %S,|} i | None -> "")
     (if handlers = "" then "" else Printf.sprintf {| "handlers": [%s],|} handlers)
@@ -29009,6 +29053,44 @@ let hcr_variance_suite =
     Alcotest.test_case "a baseline that predates contracts is refused" `Quick (fun () ->
         hcr_expect ~rc:1 ~has:[ "Tally: REFUSED, not checked: the running version's schema predates" ]
           (hcr_check (hcr_schema ~contracts:false (st None)) (hcr_schema (st (Some "(count >= 0)")))));
+    (* The override built into the patch (march --accept-unproved at
+       compile time), which is the one the server audits, counts without a
+       command-line flag, and only for the laws it names. *)
+    gated "override built into the patch accepted" (fun () ->
+        hcr_expect ~rc:0 ~has:[ "Tally.state: not proved that"; "accepted by --accept-unproved" ]
+          (hcr_check (hcr_schema (st (Some "(count >= 0)")))
+             (hcr_schema ~accepted:[ "state" ] (st (Some "(count >= 1)")))));
+    gated "override built into the patch covers only its law" (fun () ->
+        hcr_expect ~rc:1 ~has:[ "Tally.Bump: REFUSED"; "Tally.state: not proved that" ]
+          (hcr_check (hcr_schema ~handlers:(hcr_bump "(p0 > 0)") (st (Some "(count >= 0)")))
+             (hcr_schema ~accepted:[ "state" ] ~handlers:(hcr_bump "(p0 > 5)")
+                (st (Some "(count >= 1)")))));
+    gated "override built into the patch for the whole actor" (fun () ->
+        hcr_expect ~rc:0 ~has:[ "Tally.Bump: not proved that"; "Tally.state: not proved that" ]
+          (hcr_check (hcr_schema ~handlers:(hcr_bump "(p0 > 0)") (st (Some "(count >= 0)")))
+             (hcr_schema ~accepted:[ "*" ] ~handlers:(hcr_bump "(p0 > 5)")
+                (st (Some "(count >= 1)")))));
+    (* The writer side, compiled twice in one cwd: the second build must not
+       be served the first one's cached sidecar without the override.  Both
+       cache keys cover it (hr_cas_tag for the source-level key; the
+       post-TIR key already differs, since it sees the emitted schemas), so
+       removing either one alone leaves this green. *)
+    Alcotest.test_case "--accept-unproved is written into the patch's schemas" `Quick (fun () ->
+        let dir = Filename.temp_dir "hcr_accept" "" in
+        let src_p = Filename.concat dir "app.march" in
+        let oc = open_out src_p in output_string oc hcr_tally_src; close_out oc;
+        let build extra =
+          let so = Filename.concat dir "p.so" in
+          let rc, _, err = run_march_on_env ~cwd:dir []
+              ([ "--compile"; "--compile-so"; "--hot-reload"; "Main" ] @ extra @ [ "-o"; so ]) src_p in
+          Alcotest.(check int) ("compile; stderr:\n" ^ err) 0 rc;
+          read_whole_file (so ^ ".schemas.json") in
+        let plain = build [] in
+        Alcotest.(check bool) "no override, no accepted_unproved" false
+          (contains plain "accepted_unproved");
+        let accepted = build [ "--accept-unproved"; "Tally.state,Tally.Bump,Other" ] in
+        if not (contains accepted {|"accepted_unproved": ["Bump", "state"]|}) then
+          Alcotest.failf "sidecar lacks the accepted laws:\n%s" accepted);
     (* The migrate_state path: proved once the return type is the actor's
        own state sort (a synthesised `State` of the same field set made the
        literal ambiguous, so before this a correct migration never proved

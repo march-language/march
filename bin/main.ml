@@ -2045,8 +2045,100 @@ let report_z3 errors ~filename ~user_files =
            version path pin)
   end
 
+(* An @invariant or refinement predicate as the HCR schema records it, for
+   forge's deploy gate (schema_migration.ml re-parses it).  The grammar is
+   docs/hot-code-reload.md's "What expressions are allowed in @invariant";
+   anything outside it raises [Invalid_argument]. *)
+let rec hcr_pred_to_string (e : March_ast.Ast.expr) : string =
+  let open March_ast.Ast in
+  match e with
+  | ELit (LitInt n, _)    -> string_of_int n
+  | ELit (LitBool b, _)   -> if b then "true" else "false"
+  | EVar { txt; _ }       -> txt
+  | EField (base, field, _) ->
+    hcr_pred_to_string base ^ "." ^ field.txt
+  (* Binary operators: &&, ||, arithmetic, comparisons *)
+  | EApp (EVar { txt = ("&&"|"||"|"+"|"-"|"*"|"/"|"%"
+                       |"=="|"!="|"<"|">"|"<="|">=" as op); _ },
+          [l; r], _) ->
+    "(" ^ hcr_pred_to_string l ^ " " ^ op ^ " " ^ hcr_pred_to_string r ^ ")"
+  (* Unary operators *)
+  | EApp (EVar { txt = "not"; _ }, [inner], _) ->
+    "!(" ^ hcr_pred_to_string inner ^ ")"
+  | EApp (EVar { txt = "negate"; _ }, [inner], _) ->
+    "-" ^ hcr_pred_to_string inner
+  (* Single-argument measure/function calls *)
+  | EApp (EVar { txt = fn_name; _ }, [arg], _) ->
+    fn_name ^ "(" ^ hcr_pred_to_string arg ^ ")"
+  | _ -> raise (Invalid_argument "pred_to_string")
+
+(* The first sub-expression of [e] outside [hcr_pred_to_string]'s grammar. *)
+let rec hcr_pred_unsupported (e : March_ast.Ast.expr) : March_ast.Ast.expr option =
+  let open March_ast.Ast in
+  match e with
+  | ELit ((LitInt _ | LitBool _), _) | EVar _ -> None
+  | EField (base, _, _) -> hcr_pred_unsupported base
+  | EApp (EVar { txt = ("&&"|"||"|"+"|"-"|"*"|"/"|"%"
+                       |"=="|"!="|"<"|">"|"<="|">="); _ }, [l; r], _) ->
+    (match hcr_pred_unsupported l with None -> hcr_pred_unsupported r | some -> some)
+  | EApp (EVar _, [inner], _) -> hcr_pred_unsupported inner
+  | _ -> Some e
+
+(* G3 (specs/2026-11-04-lemmas-hcr-actors-choreography-design.md): an
+   @invariant the deploy gate cannot read would make every hot deploy of
+   its actor refused, so a --hot-reload build says so at the invariant: an
+   error, or a warning when --accept-unproved names the actor (or
+   <Actor>.state), which signs that override into the image. *)
+let hcr_invariant_diags (decls : March_ast.Ast.decl list) : March_errors.Errors.diagnostic list =
+  let errors = March_errors.Errors.create () in
+  let rec walk (decls : March_ast.Ast.decl list) =
+    List.iter (fun (d : March_ast.Ast.decl) ->
+        match d with
+        | March_ast.Ast.DActor (_, name, adef, _) ->
+          (match adef.March_ast.Ast.actor_invariant with
+           | None -> ()
+           | Some inv ->
+             match hcr_pred_unsupported inv with
+             | None -> ()
+             | Some bad ->
+               let actor = name.March_ast.Ast.txt in
+               let law = actor ^ ".state" in
+               let accepted = List.mem actor !accept_unproved || List.mem law !accept_unproved in
+               let span = March_typecheck.Typecheck_types.span_of_expr bad in
+               let msg = Printf.sprintf
+                   "the `@invariant` of `%s` can't be checked across a hot deploy" actor in
+               let notes = [
+                 "forge deploy hot proves that the running version's invariant implies the \
+                  new one, and it reads only comparisons, arithmetic, `&&`, `||`, `not`, \
+                  field access and one-argument measures such as `len`";
+                 (if accepted then
+                    Printf.sprintf "--accept-unproved names `%s`: this build's deploys go \
+                                    out with that law unproved, and the reload server's \
+                                    audit log records it" law
+                  else
+                    Printf.sprintf "every deploy of `%s` would be refused; to build it \
+                                    anyway, pass `--accept-unproved %s`, which signs the \
+                                    override into the patch and is audited" actor law) ] in
+               let add = if accepted then March_errors.Errors.warning else March_errors.Errors.error in
+               add errors ~code:March_errors.Code.invariant_not_deploy_checkable ~span msg;
+               (match errors.March_errors.Errors.diagnostics with
+                | d :: rest -> errors.March_errors.Errors.diagnostics <-
+                    { d with March_errors.Errors.notes = d.March_errors.Errors.notes @ notes } :: rest
+                | [] -> ()))
+        | March_ast.Ast.DMod (_, _, inner, _) -> walk inner
+        | _ -> ()) decls in
+  walk decls;
+  List.rev errors.March_errors.Errors.diagnostics
+
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
-let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
+let hr_cas_tag () = match !hot_reload_prefix with
+  | Some p ->
+    (* --accept-unproved is written into the image's schemas (the server
+       audits it), so a build with a different override is a different
+       artifact. *)
+    ("hr:" ^ p) :: (if !accept_unproved = [] then []
+                    else ["accept-unproved:" ^ String.concat "," (List.sort_uniq compare !accept_unproved)])
+  | None -> []
 (* The sanitizer MARCH_SANITIZE selects, or [None] when it is unset.
    [Some "thread"] is TSAN; every other value (1, address, "", ...) is
    ASAN+UBSan.  THE one reading of MARCH_SANITIZE: the clang flag
@@ -4334,6 +4426,13 @@ let compile filename =
      Shell_cmd.run ~socket ~program:desugared ~ident_decls:shell_client_decls ~type_map ~tc_env:typecheck_env
        ~timeout_ms:!shell_timeout_ms ~force:!shell_force ~inputs:!shell_inputs
    | None -> ());
+  (if !hot_reload_prefix <> None && not frontend_rejected then begin
+     let ds = List.filter is_user_file (hcr_invariant_diags desugared.March_ast.Ast.mod_decls) in
+     List.iter (fun d ->
+         emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))) ds;
+     if List.exists (fun (d : March_errors.Errors.diagnostic) ->
+         d.severity = March_errors.Errors.Error) ds then exit 1
+   end);
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
   (if !do_compile && !cap_sandbox && !hot_reload_prefix <> None && not frontend_rejected then begin
     let caps = own_caps_of_this_module ~stdlib_files:(stdlib_span_files stdlib_decls)
@@ -5336,29 +5435,20 @@ let compile filename =
              Buffer.contents oc
         end in
       let hcr_schemas =
-          let rec pred_to_string (e : March_ast.Ast.expr) : string =
-            let open March_ast.Ast in
-            match e with
-            | ELit (LitInt n, _)    -> string_of_int n
-            | ELit (LitBool b, _)   -> if b then "true" else "false"
-            | EVar { txt; _ }       -> txt
-            | EField (base, field, _) ->
-              pred_to_string base ^ "." ^ field.txt
-            (* Binary operators: &&, ||, arithmetic, comparisons *)
-            | EApp (EVar { txt = ("&&"|"||"|"+"|"-"|"*"|"/"|"%"
-                                 |"=="|"!="|"<"|">"|"<="|">=" as op); _ },
-                    [l; r], _) ->
-              "(" ^ pred_to_string l ^ " " ^ op ^ " " ^ pred_to_string r ^ ")"
-            (* Unary operators *)
-            | EApp (EVar { txt = "not"; _ }, [inner], _) ->
-              "!(" ^ pred_to_string inner ^ ")"
-            | EApp (EVar { txt = "negate"; _ }, [inner], _) ->
-              "-" ^ pred_to_string inner
-            (* Single-argument measure/function calls *)
-            | EApp (EVar { txt = fn_name; _ }, [arg], _) ->
-              fn_name ^ "(" ^ pred_to_string arg ^ ")"
-            | _ -> raise (Invalid_argument "pred_to_string")
-          in
+          (* The laws --accept-unproved names for one actor, as written into
+             its schema: "state", a handler name, or "*" for every law.  The
+             image is signed, so the server's audit line for the activation
+             records the override (it copies this list). *)
+          let accepted_laws actor =
+            List.sort_uniq compare (List.filter_map (fun e ->
+                if e = actor then Some "*"
+                else
+                  let pre = actor ^ "." in
+                  let n = String.length pre in
+                  if String.length e > n && String.sub e 0 n = pre
+                  then Some (String.sub e n (String.length e - n)) else None)
+                !accept_unproved) in
+          let pred_to_string = hcr_pred_to_string in
           (* A refinement's predicate with its binder (and, for a handler
              parameter, its sibling parameters) renamed by [env]: the shape
              [pred_to_string] accepts, so anything outside it is left alone
@@ -5440,18 +5530,20 @@ let compile filename =
                     (try Printf.sprintf "    \"invariant\": %S,\n" (pred_to_string e)
                      with Invalid_argument _ ->
                        (* Recorded, not dropped: forge's deploy gate refuses an
-                          actor whose invariant it cannot check. *)
-                       Printf.eprintf
-                         "warning: @invariant on %s contains unsupported expression; \
-                          a hot deploy of it will be refused\n"
-                         actor_name;
+                          actor whose invariant it cannot check.  The build
+                          already said so at the invariant
+                          (hcr_invariant_diags). *)
                        "    \"invariant_unsupported\": true,\n")
                 in
                 (* [contracts] marks a schema written by a compiler that records
                    refinements, so a baseline without it is known not to say. *)
                 let contracts_line =
                   "    \"contracts\": 1,\n"
-                  ^ (if !unsupported then "    \"refine_unsupported\": true,\n" else "") in
+                  ^ (if !unsupported then "    \"refine_unsupported\": true,\n" else "")
+                  ^ (match accepted_laws actor_name with
+                     | [] -> ""
+                     | ls -> Printf.sprintf "    \"accepted_unproved\": [%s],\n"
+                               (String.concat ", " (List.map (Printf.sprintf "%S") ls))) in
                 let ctor_list ctors =
                   "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
                       Printf.sprintf {|{"name":%S,"params":[%s]}|} cn

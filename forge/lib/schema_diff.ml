@@ -24,6 +24,7 @@ type actor_schema = {
   migrate_msg_from: ctor list option;  (* the old type <actor>_migrate_msg takes *)
   contracts: bool;           (* written by a compiler that records refinements *)
   unsupported: bool;         (* a refinement or @invariant it could not write down *)
+  accepted: string list;     (* laws built with --accept-unproved: "state", a handler, or "*" *)
 }
 
 (** The deploy changed the actor's message type (D30, plan 6.3): a handler
@@ -34,6 +35,20 @@ let messages_changed ~(old_h : ctor list) ~(new_h : ctor list) : bool =
       match List.find_opt (fun n -> n.cname = o.cname) new_h with
       | None -> true
       | Some n -> n.params <> o.params) old_h
+
+(** The laws of [laws] ("Actor.law" or "Actor") that the new build's
+    schemas do not carry in [accepted_unproved].  forge deploys an override
+    only when the patch carries it, because the signed image is what the
+    server's audit line copies. *)
+let unembedded_overrides (schemas : (string * actor_schema) list) (laws : string list)
+  : string list =
+  List.filter (fun law ->
+      let actor, rest = match String.index_opt law '.' with
+        | Some i -> String.sub law 0 i, String.sub law (i + 1) (String.length law - i - 1)
+        | None -> law, "*" in
+      match List.assoc_opt actor schemas with
+      | Some s -> not (List.mem rest s.accepted || List.mem "*" s.accepted)
+      | None -> true) laws
 
 type field_change =
   | FieldAdded   of field
@@ -70,7 +85,9 @@ let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
                handlers = optional "handlers" ctors j;
                migrate_msg_from = optional "migrate_msg_from" ctors j;
                contracts = (match member "contracts" j with `Null -> false | _ -> true);
-               unsupported = flag "refine_unsupported" j || flag "invariant_unsupported" j })
+               unsupported = flag "refine_unsupported" j || flag "invariant_unsupported" j;
+               accepted = (match member "accepted_unproved" j with
+                   | `Null -> [] | v -> v |> to_list |> List.map to_string) })
 
 let parse_schemas_file path =
   if not (Sys.file_exists path) then []

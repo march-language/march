@@ -32,7 +32,9 @@ int64_t test_fn_epoch(void) { return 42 + (int64_t)g_epoch * 0; }
 int64_t test_fn_digest(void) { return 42; }
 #endif
 
-const char __march_hcr_schemas[] = "{\"Counter\":{\"compat\":\"full\",\"state_fields\":[{\"name\":\"n\",\"ty\":\"Int\"}]},\"Other\":{\"compat\":\"any\",\"state_fields\":[]}}";
+/* Counter was built with --accept-unproved Counter.state (spaced as a
+ * hand-written sidecar might be): its activation's audit line records it. */
+const char __march_hcr_schemas[] = "{\"Counter\":{\"compat\":\"full\",\"accepted_unproved\": [ \"state\",\n \"Bump\" ],\"state_fields\":[{\"name\":\"n\",\"ty\":\"Int\"}]},\"Other\":{\"compat\":\"any\",\"state_fields\":[]}}";
 const char __march_hcr_manifest[] = "patch manifest\n";
 int64_t Counter_dispatch(void) { return 42; }
 

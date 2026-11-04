@@ -15,7 +15,7 @@ for actor in ("Tally", "Odd"):
         print(f"{actor}: MISSING")
         continue
     print(f"{actor}: contracts={s.get('contracts')}")
-    for key in ("invariant", "invariant_unsupported", "refine_unsupported"):
+    for key in ("invariant", "invariant_unsupported", "refine_unsupported", "accepted_unproved"):
         if key in s:
             print(f"{actor}: {key}={s[key]}")
     for f in s["state_fields"]:

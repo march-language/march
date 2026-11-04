@@ -2030,6 +2030,21 @@ What counts as a **fact** about a record argument:
   fact is recorded against a *name*, so a `let`, a `let?`, a lambda parameter
   or a `match` binder that rebinds that name retires it.
 
+**An anonymous record parameter may refine its fields directly.** The two
+signatures below say the same thing, and both are checked the same way: the
+body assumes the fields' refinements, and each caller must establish them.
+
+```march
+fn serve(c : { port : {Int | _ >= 1}, retries : Int }) : Int do c.port end
+fn serve2(c : {v : Config | v.port >= 1}) : Int do c.port end
+
+serve({ port: 0, retries: 3 })      -- error: `_.port >= 1` can never hold
+```
+
+A field's refinement may name a sibling field (`{ lo : Int, hi : {Int | _ > lo} }`
+is `hi > lo`). A refinement nested below a field's top level (`xs : List({Int | _ > 0})`)
+isn't lifted this way.
+
 Everything else about a record is **skipped**:
 
 - an **unrefined record variable with no guard on the field**: no fact is
