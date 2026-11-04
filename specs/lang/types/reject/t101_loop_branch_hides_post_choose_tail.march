@@ -1,4 +1,4 @@
--- EXPECT-ERROR: can never run in this one
+-- EXPECT-ERROR: can never run in the `choose` branch that ends in a `loop`
 mod Main do
   -- Session-types final review, Finding 4 (2026-07-27) -- a blind spot created
   -- by the INTERACTION of Task 1 and Task 2.

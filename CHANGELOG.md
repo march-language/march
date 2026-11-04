@@ -151,6 +151,10 @@ git log is authoritative for exact commits.
   point protocol `Stream` says it must receive an `Int` from `Prod`", with a label on that
   protocol step and the generated function that takes it, instead of a mismatch between two
   generated state names (`S_choose_more_done`, `S_recv_Msg_Prod_Cons_1`).
+- Diagnostics: a protocol step that can never run, because it comes after a `loop`, is underlined
+  itself, with a label on the loop, instead of the whole `protocol`. A receive from a role that
+  `may crash` without an `or crash do ... end` branch now comes with a fix that inserts one, telling
+  each remaining role from the detecting role.
 
 - **`forge deploy hot` refuses a migration law it can't prove, instead of letting it through.**
   An unproved or unchecked law (a predicate the schema can't record, an `@invariant` outside
