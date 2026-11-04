@@ -1,8 +1,8 @@
 # HCR deploy gate: contracts across versions (2026-11-04)
 
-Phase A0 of `specs/2026-11-04-lemmas-hcr-actors-choreography-design.md` (§3.3). Closes
-`specs/todos/2026-11-04-hcr-refinement-strengthening-unchecked.md`, filed with that design in
-the same day's PR.
+Phase A0 of `specs/2026-11-04-lemmas-hcr-actors-choreography-design.md` (§3.3). Closes the
+`2026-11-04-hcr-refinement-strengthening-unchecked` todo, which this PR files (with the §3.3
+design that missed #1094's merge) and removes.
 
 ## The hole
 
