@@ -112,6 +112,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: a type mismatch inside a constructor or a list, tuple or record literal now points
+  at the part that is wrong (`[1, 2, "three"]` underlines `"three"`, `Ok(string_to_int(s))`
+  underlines `string_to_int(s)`) and names the path to it ("In a list element of the `ports`
+  field of …"), instead of underlining the whole literal with "Argument to constructor `Cons`".
+
 - **Refinement verdicts no longer depend on machine load.** Each z3 query runs under a
   fixed resource limit (`rlimit`: 3,000,000 steps, about four times the costliest proof in the
   corpus and stdlib, and 50,000 for stage-2 reflection queries) instead of a 3-second wall-clock

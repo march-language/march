@@ -1,0 +1,18 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_26.march
+
+expected `Int` but got `Option(Int)`. [type_mismatch]
+
+5 |     Ok(string_to_int(s))
+           ^^^^^^^^^^^^^^^^
+
+    In the argument of `Ok`.
+    This is the declared return type of `parse`.
+
+    the expected type comes from here:
+
+4 |   fn parse(s : String) : Result(Int, String) do
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

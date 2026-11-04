@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: In a list element.
+-- Blame placement (specs/plans/2026-11-02-diagnostics-depth-plan.md §X1): a let annotation's expected type reaches the elements too.
+mod T do
+  fn f() : Int do
+    let xs : List(Int) = [1, "two"]
+    0
+  end
+end
