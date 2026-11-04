@@ -60,6 +60,35 @@ type dproposal = {
 (** An uncertified SCC member for which no candidate proved. *)
 type dnone = { n_fn : string; n_span : A.span; n_class : string; n_checked : int; n_total : int }
 
+(** A lemma call inferred for one skipped obligation: the statement [lp_call]
+    inserted before the statement at [lp_stmt], checked to prove the
+    obligation, then confirmed with every other applied one. *)
+type lproposal = {
+  lp_fn : string;  (** the enclosing function, qualified *)
+  lp_target : Ob.t;  (** the obligation it closes *)
+  lp_lemma : string;  (** the lemma, as called *)
+  lp_call : string;  (** the statement, as March source *)
+  lp_stmt : A.span;  (** the statement it goes before *)
+  lp_expr : A.expr;  (** the same call, as written into the tree *)
+  lp_checked : int;  (** candidates checked, this one included *)
+  lp_total : int;  (** candidates found *)
+  lp_apply : string option;
+      (** [None]: written by [--refine-infer-apply]; else why not
+          ([apply-by-hand]: the statement does not start its own line). *)
+}
+
+(** A skipped obligation for which no candidate proved, with the lemma whose
+    statement would close it when one was found: checked by assuming that
+    statement (an [assert] before the statement) and re-checking.  It is
+    never written by [--refine-infer-apply]: the lemma is not proved. *)
+type lnone = {
+  ln_fn : string;
+  ln_target : Ob.t;
+  ln_checked : int;
+  ln_total : int;
+  ln_skeleton : (string * string) option;  (** the lemma's text, and its call *)
+}
+
 type result = {
   decreases : dproposal list;
   decreases_none : dnone list;
@@ -73,6 +102,8 @@ type result = {
     (* Raw user-code (skipped, violated) obligation counts of the final
        hypothesis tree — what `--check --refine-report` will print once the
        proposals are applied (the snapshot dedupes sites; the report does not). *)
+  lemma_calls : lproposal list;
+  lemma_none : lnone list;
   probes : int;
   rounds : int;
 }
@@ -307,13 +338,241 @@ let infer_decreases ~root ~(is_target : A.span -> bool) ~(is_user : A.span -> bo
   in
   (props, nones, ledger)
 
+(* ── Lemma calls (reflection phase 7) ────────────────────────────────────── *)
+
+module IL = Infer_lemma
+
+(* The source text of [sp], or [None] when its file cannot be read. *)
+let source_cache : (string, string option) Hashtbl.t = Hashtbl.create 4
+
+let source_of (file : string) =
+  match Hashtbl.find_opt source_cache file with
+  | Some s -> s
+  | None ->
+    let s = try Some (In_channel.with_open_bin file In_channel.input_all) with Sys_error _ -> None in
+    Hashtbl.replace source_cache file s;
+    s
+
+let offset_of (src : string) (line : int) (col : int) : int option =
+  let rec go i l =
+    if l <= 1 then Some (i + col)
+    else match String.index_from_opt src i '\n' with Some j -> go (j + 1) (l - 1) | None -> None
+  in
+  match go 0 line with Some o when o >= 0 && o <= String.length src -> Some o | _ -> None
+
+let text_of (sp : A.span) : string option =
+  match source_of sp.A.file with
+  | None -> None
+  | Some src -> (
+    match offset_of src sp.A.start_line sp.A.start_col, offset_of src sp.A.end_line sp.A.end_col with
+    | Some a, Some b when b >= a -> Some (String.sub src a (b - a))
+    | _ -> None)
+
+let max_lemma_candidates = 8
+
+let same_key (a : Ob.t) (b : Ob.t) =
+  a.Ob.span = b.Ob.span && a.Ob.kind = b.Ob.kind && a.Ob.callee = b.Ob.callee && a.Ob.predicate = b.Ob.predicate
+
+(* How the call names the lemma from the site: the short name inside the
+   lemma's own file, the qualified name elsewhere. *)
+let lemma_spelling (l : IL.lemma) (site_file : string) =
+  if l.IL.l_fd.A.fn_name.A.span.A.file = site_file then IL.last_seg l.IL.l_name else l.IL.l_name
+
+(* Write the statement [e] into [decls] before the statement holding [sp]. *)
+let install_stmt (decls : A.decl list) (sp : A.span) (e : A.expr) : A.decl list =
+  match IL.find_site decls sp with
+  | None -> decls
+  | Some s ->
+    let q = PI.qualified_of s.IL.fn in
+    let fd = snd s.IL.fn in
+    let fd' =
+      { fd with
+        A.fn_clauses =
+          List.mapi
+            (fun i (fc : A.fn_clause) -> if i = s.IL.clause then { fc with A.fc_body = s.IL.rebuild e } else fc)
+            fd.A.fn_clauses }
+    in
+    replace_fn [] q fd' decls
+
+let install_lemma_call (decls : A.decl list) (p : lproposal) : A.decl list =
+  install_stmt decls p.lp_target.Ob.span p.lp_expr
+
+let infer_lemmas ~root ~(is_user : A.span -> bool) ~(applicable : lproposal -> string option) (m : A.module_)
+    (decls : A.decl list) : lproposal list * lnone list * A.decl list * (LD.snapshot * (int * int)) option =
+  let type_map = !Refine_encode.call_type_map in
+  let stdlib_files = !RC.stdlib_source_files in
+  let saved_infer = !Refine_term.infer and saved_demand = !Refine_term.infer_demand in
+  (* One real check of [decls]: the number of errors it reported. *)
+  let check decls =
+    Refine_term.infer := false;
+    Refine_term.infer_demand := None;
+    let errctx = March_errors.Errors.create () in
+    Fun.protect
+      ~finally:(fun () ->
+        Refine_term.infer := saved_infer;
+        Refine_term.infer_demand := saved_demand)
+      (fun () -> RC.check_module ~root ~stdlib_files ?type_map errctx { m with A.mod_decls = decls });
+    List.length
+      (List.filter (fun (d : March_errors.Errors.diagnostic) -> d.March_errors.Errors.severity = March_errors.Errors.Error)
+         errctx.March_errors.Errors.diagnostics)
+  in
+  let proved_keys () =
+    List.filter (fun (o : Ob.t) -> is_user o.Ob.span && o.Ob.verdict = Ob.Proved) (Ob.all ())
+  in
+  let verdict_of (t : Ob.t) =
+    List.find_map
+      (fun (o : Ob.t) -> if same_key o t then Some o.Ob.verdict else None)
+      (Ob.obligations_at t.Ob.span)
+  in
+  let counts () =
+    List.fold_left
+      (fun (sk, vi) (o : Ob.t) ->
+        if not (is_user o.Ob.span) then (sk, vi)
+        else match o.Ob.verdict with Ob.Skipped _ -> (sk + 1, vi) | Ob.Violated -> (sk, vi + 1) | _ -> (sk, vi))
+      (0, 0) (Ob.all ())
+  in
+  Hashtbl.reset source_cache;
+  Fun.protect ~finally:(fun () -> Witness.set_module m) @@ fun () ->
+  let base_errors = check decls in
+  let targets =
+    List.sort_uniq
+      (fun (a : Ob.t) (b : Ob.t) -> compare (a.Ob.span, a.Ob.predicate) (b.Ob.span, b.Ob.predicate))
+      (List.filter (IL.is_target ~is_user) (Ob.all ()))
+  in
+  if targets = [] then ([], [], decls, None)
+  else begin
+    let base_proved = proved_keys () in
+    let lemmas = List.filter_map IL.lemma_of !RC.lemma_defs in
+    (* Does [decls'] prove [t] with the call at [call_sp] giving its fact, and
+       lose no proof and add no error? *)
+    let helps decls' (t : Ob.t) (call_sp : A.span) =
+      let errs = check decls' in
+      errs <= base_errors
+      && verdict_of t = Some Ob.Proved
+      && Hashtbl.mem RC.lemma_fact_spans call_sp
+      && (let now = proved_keys () in
+          List.for_all (fun b -> List.exists (same_key b) now) base_proved)
+    in
+    let fresh = ref 0 in
+    let fresh_span (stmt_sp : A.span) =
+      incr fresh;
+      let c = - !fresh in
+      { stmt_sp with A.start_col = c; end_col = c; end_line = stmt_sp.A.start_line }
+    in
+    (* The skeleton for [t], when assuming its statement proves [t]; each
+       gets a name no other skeleton of this run has. *)
+    let named = ref [] in
+    let skeleton s (t : Ob.t) stmt_sp =
+      match IL.skeleton_of ~text_of ~avoid:!named decls s t with
+      | None -> None
+      | Some sk ->
+        named := sk.IL.sk_name :: !named;
+        let a = A.EAssert (sk.IL.sk_goal, fresh_span stmt_sp) in
+        let errs = check (install_stmt decls t.Ob.span a) in
+        if errs <= base_errors && verdict_of t = Some Ob.Proved
+           && (let now = proved_keys () in List.for_all (fun b -> List.exists (same_key b) now) base_proved)
+        then Some (IL.skeleton_text sk, IL.skeleton_call sk)
+        else None
+    in
+    let props = ref [] and nones = ref [] in
+    List.iter
+      (fun (t : Ob.t) ->
+        match IL.find_site decls t.Ob.span with
+        | None -> ()
+        | Some s ->
+          let pool = IL.pool s t in
+          let stmt_sp = IL.span_of s.IL.stmt in
+          (* In the lemma's own file the short name is tried first, then the
+             qualified one (a lemma in a nested module of the same file). *)
+          let spellings (l : IL.lemma) =
+            let short = lemma_spelling l stmt_sp.A.file in
+            if short = l.IL.l_name then [ short ] else [ short; l.IL.l_name ]
+          in
+          let cands =
+            List.concat_map
+              (fun (l : IL.lemma) ->
+                List.concat_map (fun args -> List.map (fun n -> (l, n, args)) (spellings l)) (IL.matches l ~scope:s.IL.scope pool))
+              lemmas
+          in
+          let total = List.length cands in
+          let fn = PI.qualified_of s.IL.fn in
+          let none k =
+            nones :=
+              { ln_fn = fn; ln_target = t; ln_checked = k; ln_total = total; ln_skeleton = skeleton s t stmt_sp }
+              :: !nones
+          in
+          let rec try_ k = function
+            | [] -> none k
+            | _ when k >= max_lemma_candidates -> none k
+            | ((_ : IL.lemma), name, args) :: rest -> (
+              let texts = List.map (fun a -> text_of (IL.span_of a)) args in
+              (* A term spanning lines is not written into one statement. *)
+              if List.exists (function None -> true | Some t -> String.contains t '\n') texts then try_ k rest
+              else begin
+                let call_sp = fresh_span stmt_sp in
+                let e = A.EApp (A.EVar { A.txt = name; span = call_sp }, args, call_sp) in
+                let p =
+                  { lp_fn = fn; lp_target = t; lp_lemma = name;
+                    lp_call = Printf.sprintf "%s(%s)" name (String.concat ", " (List.filter_map Fun.id texts));
+                    lp_stmt = stmt_sp; lp_expr = e; lp_checked = k + 1; lp_total = total; lp_apply = None }
+                in
+                if helps (install_lemma_call decls p) t call_sp then props := p :: !props else try_ (k + 1) rest
+              end)
+          in
+          try_ 0 cands)
+      targets;
+    (* One call per statement: a second target the same call closes reuses it. *)
+    let props =
+      List.fold_left
+        (fun acc (p : lproposal) ->
+          if List.exists (fun (q : lproposal) -> q.lp_stmt = p.lp_stmt && q.lp_call = p.lp_call) acc then acc
+          else acc @ [ p ])
+        [] (List.rev !props)
+    in
+    let props = List.map (fun p -> { p with lp_apply = applicable p }) props in
+    let install ps = List.fold_left install_lemma_call decls ps in
+    let rec confirm ps tries =
+      if ps = [] then ([], decls, None)
+      else
+        let decls' = install ps in
+        let errs = check decls' in
+        let bad =
+          List.filter
+            (fun (p : lproposal) ->
+              verdict_of p.lp_target <> Some Ob.Proved
+              || not (Hashtbl.mem RC.lemma_fact_spans (match p.lp_expr with A.EApp (_, _, sp) -> sp | _ -> A.dummy_span)))
+            ps
+        in
+        if errs <= base_errors && bad = [] then (ps, decls', Some (LD.snapshot ~is_user (), counts ()))
+        else if tries = 0 then ([], decls, None)
+        else confirm (List.filter (fun p -> not (List.memq p bad)) ps) (tries - 1)
+    in
+    let applied = List.filter (fun p -> p.lp_apply = None) props in
+    let kept, decls', ledger = confirm applied 3 in
+    let unconfirmed = List.filter (fun p -> p.lp_apply = None && not (List.memq p kept)) props in
+    let props = List.filter (fun p -> not (List.memq p unconfirmed)) props in
+    let nones =
+      List.rev !nones
+      @ List.map
+          (fun p ->
+            { ln_fn = p.lp_fn; ln_target = p.lp_target; ln_checked = p.lp_checked; ln_total = p.lp_total;
+              ln_skeleton = None })
+          unconfirmed
+    in
+    (props, nones, decls', ledger)
+  end
+
 let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
     ?(rounds = default_rounds) ?(allow_caller_violations = false) ?(stdlib = false)
     ?(decreases = true)
     ?(applicable : proposal -> accepted:proposal list -> string option = fun _ ~accepted:_ -> None)
     ?(applicable_decreases : dproposal -> string option = fun _ -> None)
+    ?(lemmas = true) ?(applicable_lemmas : lproposal -> string option = fun _ -> None)
     ~(is_user : A.span -> bool) (m : A.module_) : result =
   let is_target sp = stdlib || is_user sp in
+  (* Lemma calls are searched only when the caller's check skipped something
+     at reflection's frontier (phase 7, ruling 1): no other program pays. *)
+  let lemmas = lemmas && List.exists (Infer_lemma.is_target ~is_user) (Ob.all ()) in
   Ob.with_scratch @@ fun () ->
   let saved_defs = Hashtbl.copy Refine_param.fn_defs_tbl in
   let saved_proved = Hashtbl.copy Refine_param.elem_ret_proved in
@@ -641,6 +900,12 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
         else match o.Ob.verdict with Ob.Skipped _ -> (sk + 1, vi) | Ob.Violated -> (sk, vi + 1) | _ -> (sk, vi))
       (0, 0) after_obs
   in
+  (* Lemma calls (reflection phase 7), on the contracts proved above; the
+     metric search then re-checks a tree that has them. *)
+  let lprops, lnones, ldecls, lledger =
+    if lemmas then infer_lemmas ~root ~is_user ~applicable:applicable_lemmas m !decls else ([], [], !decls, None)
+  in
+  decls := ldecls;
   (* Termination phase 5, last: a metric costs no caller anything, and the
      search reads the contracts proved above. *)
   let dprops, dnones, dledger =
@@ -648,7 +913,9 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
     else ([], [], None)
   in
   let after, after_counts =
-    match dledger with Some (snap, counts) -> (snap, counts) | None -> (after, after_counts)
+    match dledger, lledger with
+    | Some (snap, counts), _ | None, Some (snap, counts) -> (snap, counts)
+    | None, None -> (after, after_counts)
   in
   (* A refusal found again in a later round is the same refusal. *)
   let dedupe_refused rs =
@@ -661,6 +928,8 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
   in
   { decreases = dprops;
     decreases_none = dnones;
+    lemma_calls = lprops;
+    lemma_none = lnones;
     proposals = List.rev !proposals;
     rejected = List.rev !rejected;
     refused = dedupe_refused (List.rev !refused);

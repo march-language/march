@@ -1328,6 +1328,13 @@ let infer_applicable (p : March_refinecheck.Refine_infer.proposal)
         in
         if List.exists overlaps accepted then Some "apply-by-hand" else None)
 
+(* The insertion `--refine-infer-apply` makes for a lemma call (reflection
+   phase 7): the call on its own line before its statement. *)
+let lemma_edit_range src (l : March_refinecheck.Refine_infer.lproposal) =
+  let module RI = March_refinecheck.Refine_infer in
+  March_refactor.Refine_edit.insert_statement ~src ~line:l.RI.lp_stmt.March_ast.Ast.start_line
+    ~col:l.RI.lp_stmt.March_ast.Ast.start_col ~stmt:l.RI.lp_call
+
 let apply_refine_infer ~filename (r : March_refinecheck.Refine_infer.result) =
   let module RI = March_refinecheck.Refine_infer in
   let module IS = March_refinecheck.Infer_slot in
@@ -1365,6 +1372,19 @@ let apply_refine_infer ~filename (r : March_refinecheck.Refine_infer.result) =
           | None -> ())
       end)
     r.RI.decreases;
+  List.iter
+    (fun (l : RI.lproposal) ->
+      if l.RI.lp_apply = None then begin
+        let file = l.RI.lp_stmt.March_ast.Ast.file in
+        match read_file_opt file with
+        | None -> ()
+        | Some src -> (
+          match lemma_edit_range src l with
+          | Some e ->
+            Hashtbl.replace by_file file (src, e :: (match Hashtbl.find_opt by_file file with Some (_, es) -> es | None -> []))
+          | None -> ())
+      end)
+    r.RI.lemma_calls;
   let changed =
     Hashtbl.fold
       (fun f (src, es) acc ->
@@ -1380,6 +1400,7 @@ let apply_refine_infer ~filename (r : March_refinecheck.Refine_infer.result) =
   in
   let applied =
     List.length r.RI.proposals + List.length (List.filter (fun (d : RI.dproposal) -> d.RI.d_apply = None) r.RI.decreases)
+    + List.length (List.filter (fun (l : RI.lproposal) -> l.RI.lp_apply = None) r.RI.lemma_calls)
   in
   if !refine_infer_diff then List.iter (fun (f, a, b) -> print_region_diff f a b) changed;
   if !refine_infer_apply && changed <> [] then begin
@@ -1438,11 +1459,22 @@ let print_refine_infer ~filename ~user_files desugared =
     | None -> Some "apply-by-hand"
     | Some src -> ( match decreases_edit_range src d with Some _ -> None | None -> Some "apply-by-hand")
   in
+  (* `lemma` names the lemma calls of reflection phase 7 among the kinds. *)
+  let lemmas =
+    match !refine_infer_kinds with
+    | None -> true
+    | Some ks -> List.exists (fun k -> String.trim k = "lemma") (String.split_on_char ',' ks)
+  in
+  let applicable_lemmas (l : RI.lproposal) =
+    match read_file_opt l.RI.lp_stmt.March_ast.Ast.file with
+    | None -> Some "apply-by-hand"
+    | Some src -> ( match lemma_edit_range src l with Some _ -> None | None -> Some "apply-by-hand")
+  in
   let r =
     RI.run ~root:(Sys.getcwd ()) ~kinds ~budget:!refine_infer_budget
       ~allow_caller_violations:!allow_caller_violations ~stdlib:!refine_infer_stdlib ~decreases
       ?applicable:(if !refine_infer_apply || !refine_infer_diff then Some infer_applicable else None)
-      ~applicable_decreases ~is_user desugared
+      ~applicable_decreases ~lemmas ~applicable_lemmas ~is_user desugared
   in
   (* JSON `edit`: the same splice `--refine-infer-apply` performs, as the
      minimal byte range against the ORIGINAL file (so every edit is
@@ -1461,7 +1493,15 @@ let print_refine_infer ~filename ~user_files desugared =
       | None -> None
       | Some src -> Option.map (fun (a, b, t) -> (file, a, b, t)) (decreases_edit_range src d)
   in
-  if !refine_infer_json then print_endline (IJ.to_string ~edit_of ~dedit_of r)
+  let ledit_of (l : RI.lproposal) =
+    if l.RI.lp_apply <> None then None
+    else
+      let file = l.RI.lp_stmt.March_ast.Ast.file in
+      match read_file_opt file with
+      | None -> None
+      | Some src -> Option.map (fun (a, b, t) -> (file, a, b, t)) (lemma_edit_range src l)
+  in
+  if !refine_infer_json then print_endline (IJ.to_string ~edit_of ~dedit_of ~ledit_of r)
   else begin
     let skips snap = List.length (List.filter (fun (_, v) -> match v with March_refinecheck.Obligation.Skipped _ -> true | _ -> false) snap) in
     Printf.printf "inferred refinements: %d proposed, %d refused; user skips %d -> %d (%d probes, %d rounds)\n"
@@ -1523,6 +1563,46 @@ let print_refine_infer ~filename ~user_files desugared =
           Printf.printf "  %s (%s:%d): no metric inferred, class %s (%s)\n" n.RI.n_fn n.RI.n_span.March_ast.Ast.file
             n.RI.n_span.March_ast.Ast.start_line n.RI.n_class (candidates n.RI.n_checked n.RI.n_total))
         r.RI.decreases_none
+    end;
+    (* Reflection phase 7: the lemma calls inferred for obligations stage 2
+       stopped short of, and the obligations none was found for. *)
+    if r.RI.lemma_calls <> [] || r.RI.lemma_none <> [] then begin
+      let module Ob = March_refinecheck.Obligation in
+      let candidates n t =
+        Printf.sprintf "%d of %d candidate%s checked%s" n t (if t = 1 then "" else "s")
+          (if t > RI.max_lemma_candidates then Printf.sprintf ": the cap of %d was reached" RI.max_lemma_candidates
+           else "")
+      in
+      let what (o : Ob.t) =
+        Printf.sprintf "%s `%s` on `%s`"
+          (match o.Ob.kind with Ob.Postcondition -> "postcondition" | _ -> "precondition")
+          o.Ob.predicate o.Ob.callee
+      in
+      Printf.printf "inferred lemma calls: %d proposed, %d not inferred\n" (List.length r.RI.lemma_calls)
+        (List.length r.RI.lemma_none);
+      List.iter
+        (fun (l : RI.lproposal) ->
+          let sp = l.RI.lp_stmt in
+          Printf.printf "  %s (%s:%d)  %s  [closes the %s, %s]%s\n" l.RI.lp_fn sp.March_ast.Ast.file
+            sp.March_ast.Ast.start_line l.RI.lp_call (what l.RI.lp_target)
+            (candidates l.RI.lp_checked l.RI.lp_total)
+            (match l.RI.lp_apply with
+             | None -> ""
+             | Some _ -> "  (apply by hand: the statement does not start its own line)"))
+        r.RI.lemma_calls;
+      List.iter
+        (fun (n : RI.lnone) ->
+          let sp = n.RI.ln_target.Ob.span in
+          Printf.printf "  %s (%s:%d): no lemma call inferred for the %s (%s)\n" n.RI.ln_fn sp.March_ast.Ast.file
+            sp.March_ast.Ast.start_line (what n.RI.ln_target) (candidates n.RI.ln_checked n.RI.ln_total);
+          match n.RI.ln_skeleton with
+          | None -> ()
+          | Some (text, call) ->
+            Printf.printf
+              "    a lemma stating this would close it (checked; not applied, prove it first), called as `%s` before line %d:\n%s\n"
+              call sp.March_ast.Ast.start_line
+              (String.concat "\n" (List.map (fun l -> "      " ^ l) (String.split_on_char '\n' text))))
+        r.RI.lemma_none
     end;
     (* `--refine-report --refine-infer` (design §4.5): the ledger as it will be
        once the proposals are applied, in the report's own words. *)
@@ -4502,6 +4582,39 @@ let compile filename =
     in
     let actor_invariant_map : (string * March_ast.Ast.expr) list =
       collect_actor_invariant [] desugared.March_ast.Ast.mod_decls in
+    (* Each actor's declaration, so the schema writer can record the
+       refinements the TIR types below have already erased (a state field's
+       `{Int | _ >= 0}`, a handler parameter's).  forge's deploy gate proves
+       the running version's contracts imply the new one's
+       (specs/todos/2026-11-04-hcr-refinement-strengthening-unchecked.md);
+       without them a deploy that only strengthens a refinement looks like
+       no change at all.  Keyed by module path joined with "__" (the TIR
+       state record's prefix) ahead of the bare name, as the lookups below
+       try the full key first. *)
+    let actor_defs : (string * March_ast.Ast.actor_def) list =
+      let rec walk path acc (decls : March_ast.Ast.decl list) =
+        List.fold_left (fun acc d ->
+            match d with
+            | March_ast.Ast.DActor (_, name, adef, _) ->
+              let bare = name.March_ast.Ast.txt in
+              let full = if path = "" then bare else path ^ "__" ^ bare in
+              (full, adef) :: acc
+            | March_ast.Ast.DMod (m, _, inner, _) ->
+              let p = if path = "" then m.March_ast.Ast.txt
+                else path ^ "__" ^ m.March_ast.Ast.txt in
+              walk p acc inner
+            | _ -> acc
+          ) acc decls
+      in
+      let full = List.rev (walk "" [] desugared.March_ast.Ast.mod_decls) in
+      let bare = List.map (fun (k, a) ->
+          let b = match String.rindex_opt k '_' with
+            | Some i when i > 0 && k.[i - 1] = '_' ->
+              String.sub k (i + 1) (String.length k - i - 1)
+            | _ -> k in
+          (b, a)) full in
+      full @ bare
+    in
     let actor_schemas : (string * (string * March_tir.Tir.ty) list) list =
       if Option.is_some !hot_reload_prefix then
         List.filter_map (fun td ->
@@ -5246,14 +5359,77 @@ let compile filename =
               fn_name ^ "(" ^ pred_to_string arg ^ ")"
             | _ -> raise (Invalid_argument "pred_to_string")
           in
+          (* A refinement's predicate with its binder (and, for a handler
+             parameter, its sibling parameters) renamed by [env]: the shape
+             [pred_to_string] accepts, so anything outside it is left alone
+             and rejected there. *)
+          let rec rename env (e : March_ast.Ast.expr) : March_ast.Ast.expr =
+            let open March_ast.Ast in
+            match e with
+            | EVar v -> (match List.assoc_opt v.txt env with
+                | Some n -> EVar { v with txt = n } | None -> e)
+            | EField (b, f, sp) -> EField (rename env b, f, sp)
+            | EApp (f, args, sp) -> EApp (f, List.map (rename env) args, sp)
+            | other -> other
+          in
+          let rec refinement_of (t : March_ast.Ast.ty) =
+            match t with
+            | March_ast.Ast.TyRefine (_, b, p) ->
+              Some ((match b with Some n -> n.March_ast.Ast.txt | None -> "_"), p)
+            | March_ast.Ast.TyLinear (_, t) -> refinement_of t
+            | _ -> None
+          in
+          (* [Some s] the predicate text, [None] unrefined; [unsupported] is
+             set when a refinement exists but cannot be written down, so the
+             deploy gate refuses instead of reading it as absent. *)
+          let render unsupported ~own env (t : March_ast.Ast.ty option) =
+            match Option.bind t refinement_of with
+            | None -> None
+            | Some (b, p) ->
+              (try Some (pred_to_string (rename ((b, own) :: env) p))
+               with Invalid_argument _ -> unsupported := true; None)
+          in
+          (* State field refinements as predicates over bare field names, as
+             @invariant is written; handler parameter refinements over the
+             positional names p0, p1, ... so a renamed parameter compares
+             equal across versions. *)
+          let field_refines (adef : March_ast.Ast.actor_def) unsupported =
+            List.map (fun (f : March_ast.Ast.field) ->
+                let n = f.March_ast.Ast.fld_name.March_ast.Ast.txt in
+                (n, render unsupported ~own:n [] (Some f.March_ast.Ast.fld_ty)))
+              adef.March_ast.Ast.actor_state
+          in
+          let handler_refines (adef : March_ast.Ast.actor_def) unsupported =
+            List.map (fun (h : March_ast.Ast.actor_handler) ->
+                let names = List.mapi (fun i (p : March_ast.Ast.param) ->
+                    (p.March_ast.Ast.param_name.March_ast.Ast.txt, Printf.sprintf "p%d" i))
+                    h.March_ast.Ast.ah_params in
+                (h.March_ast.Ast.ah_msg.March_ast.Ast.txt,
+                 List.mapi (fun i (p : March_ast.Ast.param) ->
+                     render unsupported ~own:(Printf.sprintf "p%d" i) names
+                       p.March_ast.Ast.param_ty)
+                   h.March_ast.Ast.ah_params))
+              adef.March_ast.Ast.actor_handlers
+          in
           let oc = Buffer.create 1024 in
             Printf.bprintf oc "{\n";
             List.iteri (fun i (actor_name, fields) ->
+                let adef = List.assoc_opt actor_name actor_defs in
+                let unsupported = ref false in
+                let frefs = match adef with
+                  | Some a -> field_refines a unsupported | None -> [] in
+                let hrefs = match adef with
+                  | Some a -> handler_refines a unsupported | None -> [] in
                 let field_lines =
                   if fields = [] then "[]"
                   else "[\n" ^
                     String.concat ",\n" (List.map (fun (fname, fty) ->
-                      Printf.sprintf {|      {"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
+                      match Option.join (List.assoc_opt fname frefs) with
+                      | Some r ->
+                        Printf.sprintf {|      {"name":%S,"ty":%S,"refine":%S}|} fname
+                          (ty_to_schema_str fty) r
+                      | None ->
+                        Printf.sprintf {|      {"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
                     ) fields) ^ "\n    ]"
                 in
                 let compat = Option.value ~default:"full"
@@ -5263,25 +5439,44 @@ let compile filename =
                   | Some e ->
                     (try Printf.sprintf "    \"invariant\": %S,\n" (pred_to_string e)
                      with Invalid_argument _ ->
+                       (* Recorded, not dropped: forge's deploy gate refuses an
+                          actor whose invariant it cannot check. *)
                        Printf.eprintf
-                         "warning: @invariant on %s contains unsupported expression; omitting\n"
+                         "warning: @invariant on %s contains unsupported expression; \
+                          a hot deploy of it will be refused\n"
                          actor_name;
-                       "")
+                       "    \"invariant_unsupported\": true,\n")
                 in
+                (* [contracts] marks a schema written by a compiler that records
+                   refinements, so a baseline without it is known not to say. *)
+                let contracts_line =
+                  "    \"contracts\": 1,\n"
+                  ^ (if !unsupported then "    \"refine_unsupported\": true,\n" else "") in
                 let ctor_list ctors =
                   "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
                       Printf.sprintf {|{"name":%S,"params":[%s]}|} cn
                         (String.concat "," (List.map (fun t ->
                              Printf.sprintf "%S" (ty_to_schema_str t)) tys))) ctors) ^ "]" in
+                let handler_list ctors =
+                  "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
+                      let params = String.concat "," (List.map (fun t ->
+                          Printf.sprintf "%S" (ty_to_schema_str t)) tys) in
+                      match List.assoc_opt cn hrefs with
+                      | Some rs when List.exists Option.is_some rs ->
+                        Printf.sprintf {|{"name":%S,"params":[%s],"refines":[%s]}|} cn params
+                          (String.concat "," (List.map (function
+                               | Some r -> Printf.sprintf "%S" r | None -> "null") rs))
+                      | _ -> Printf.sprintf {|{"name":%S,"params":[%s]}|} cn params) ctors)
+                  ^ "]" in
                 let handlers_line = match List.assoc_opt actor_name actor_handlers with
                   | None -> ""
-                  | Some c -> Printf.sprintf "    \"handlers\": %s,\n" (ctor_list c) in
+                  | Some c -> Printf.sprintf "    \"handlers\": %s,\n" (handler_list c) in
                 let mm_line = match List.assoc_opt actor_name actor_migrate_msg_from with
                   | None -> ""
                   | Some c -> Printf.sprintf "    \"migrate_msg_from\": %s,\n" (ctor_list c) in
                 Printf.bprintf oc
-                  "  %S: {\n    \"compat\": %S,\n%s%s%s    \"state_fields\": %s\n  }%s\n"
-                  actor_name compat invariant_line handlers_line mm_line field_lines
+                  "  %S: {\n    \"compat\": %S,\n%s%s%s%s    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat contracts_line invariant_line handlers_line mm_line field_lines
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.bprintf oc "}\n";
@@ -7463,7 +7658,7 @@ let () =
      " Propose every refinement the checker can verify (scalar, element, relational, abstract, accumulator, termination metric), module-wide");
     ("--refine-infer-json", Arg.Set refine_infer_json, " Emit --refine-infer results as JSON v1 on stdout");
     ("--refine-infer-kinds", Arg.String (fun s -> refine_infer_kinds := Some s),
-     "<k1,..,k7,decreases>  Restrict --refine-infer to these candidate kinds (decreases: termination metrics)");
+     "<k1,..,k7,decreases,lemma>  Restrict --refine-infer to these candidate kinds (decreases: termination metrics; lemma: lemma calls)");
     ("--refine-infer-budget", Arg.Set_int refine_infer_budget, "<N>  Global probe budget for --refine-infer (default 3000)");
     ("--refine-infer-stdlib", Arg.Set refine_infer_stdlib, " Let --refine-infer also target stdlib functions");
     ("--allow-caller-violations", Arg.Set allow_caller_violations,
@@ -7499,6 +7694,10 @@ let () =
      "<path>  Prior .schemas.json for --check-migration");
     ("--new-schema", Arg.Set_string new_schema_path,
      "<path>  New .schemas.json for --check-migration");
+    ("--accept-unproved",
+     Arg.String (fun s ->
+         accept_unproved := !accept_unproved @ List.filter (( <> ) "") (String.split_on_char ',' s)),
+     "<Actor.law,...>  Let --check-migration pass these deploy-gate laws unproved (a counterexample still fails)");
     ("--emit-core-ast", Arg.String (fun f -> emit_core_ast_file := Some f),
      " <file.march>  Emit desugared core AST + verdict + diagnostics as JSON to stdout");
   ] in

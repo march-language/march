@@ -310,8 +310,12 @@ val manifest_off : bool ref
 val manifest_rows : (string * string) list ref
 
 (** The last checked module's valid lemmas (no L1-L5 error): qualified name,
-    definition, admitted.  Read by [Lemma_test]. *)
+    definition, admitted.  Read by [Lemma_test] and lemma-call inference. *)
 val lemma_defs : (string * A.fn_def * bool) list ref
+
+(** The lemma calls whose fact the last check added, by call span.  Lemma-call
+    inference reads it to know an inserted call gave its fact. *)
+val lemma_fact_spans : (A.span, unit) Hashtbl.t
 
 (** L1: a lemma's declared result is [{Unit | P}] with [P] not mentioning the
     unit value; [Ok (binder, P)], or [Error why]. *)

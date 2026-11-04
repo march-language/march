@@ -7,11 +7,17 @@ the compiler-owned laws proved once in the stdlib.
 
 Phases (design §7):
 
+- **A0.** Close the HCR variance hole: refinements in `.schemas.json`, old ⇒ new checks at
+  deploy, unproved refused unless overridden with an audited flag, no silent skips. Landed in PR #1100 (progress
+  `2026-11-04-hcr-refinement-variance-check`); reply covariance, H2 and the audit-log
+  override remain.
 - **A.** Never silent: `@invariant` outside the grammar is an error (todo
   `2026-11-04-invariant-unsupported-expression-silently-dropped`). Field refinements of an
   anonymous-record `migrate_state` parameter reach `old.f`. Actor message constructors are
   resolved by datatype (todo `2026-10-15-actor-message-ctor-cannot-be-qualified`). HCR
   counterexamples for the migration obligations.
+- **A2.** Dry-run `migrate_state` on copies of the live states before `ACTIVATE`; derive
+  mechanical migrations from the schema diff, each derivation rule proved once.
 - **B.** `march --check --guarantees` / `forge hot-reload check`: one labelled line per actor
   and protocol (`proved`, `proved (model) · tested (runtime)`,
   `proved (spec) · validated (compiler)`, `assumed`).

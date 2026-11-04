@@ -28903,9 +28903,141 @@ let refine_messages_suite =
         Alcotest.(check (option string)) "with" (Some "gone soon") (msg src_with);
         Alcotest.(check (option string)) "without" None (msg src_without)) ]
 
+(* ── HCR deploy gate: a deploy's contracts must not get stronger unproved ──
+   `march --check-migration` over hand-written `.schemas.json` pairs, the
+   shape the `--compile-so --hot-reload` writer emits (pinned separately by
+   test/native/hcr_schema_contracts).  Before the gate, a deploy that only
+   strengthened a state field's refinement, a handler parameter's or an
+   @invariant passed: its schemas were byte-identical, or `--check-migration`
+   found no migrate_state and checked nothing, so the new handlers' proofs
+   rested on an assumption the live state did not meet
+   (specs/todos/2026-11-04-hcr-refinement-strengthening-unchecked.md; the RED
+   case below, `strengthened state refused`, exited 0 on b86c86a63).  Each
+   case runs in a fresh cwd: the VC cache lives under <cwd>/.march/cas. *)
+
+let hcr_schema ?(contracts = true) ?(unsupported = false) ?invariant ?(handlers = "")
+    (fields : (string * string * string option) list) =
+  Printf.sprintf
+    {|{"Tally": {"compat": "full",%s%s%s%s "state_fields": [%s]}}|}
+    (if contracts then {| "contracts": 1,|} else "")
+    (if unsupported then {| "refine_unsupported": true,|} else "")
+    (match invariant with Some i -> Printf.sprintf {| "invariant": %S,|} i | None -> "")
+    (if handlers = "" then "" else Printf.sprintf {| "handlers": [%s],|} handlers)
+    (String.concat ", "
+       (List.map (fun (n, t, r) ->
+            match r with
+            | Some r -> Printf.sprintf {|{"name":%S,"ty":%S,"refine":%S}|} n t r
+            | None -> Printf.sprintf {|{"name":%S,"ty":%S}|} n t)
+          fields))
+
+let hcr_bump r = Printf.sprintf {|{"name":"Bump","params":["Int"],"refines":[%S]}|} r
+
+let hcr_tally_src =
+  {|mod Main do
+  actor Tally do
+    state { count : Int }
+    init  { count: 1 }
+    on Bump(n : Int) do { state with count: state.count + n } end
+  end
+  fn main() : Int do 0 end
+end
+|}
+
+(* Runs `--check-migration` from [prior] to [next] (schema JSON text) over
+   [src]; returns the exit code and the `migration:` lines. *)
+let hcr_check ?(src = hcr_tally_src) ?(extra = []) (prior : string) (next : string) =
+  let dir = Filename.temp_dir "hcr_variance" "" in
+  let write name text =
+    let path = Filename.concat dir name in
+    let oc = open_out path in
+    output_string oc text; close_out oc; path in
+  let old_p = write "old.json" prior and new_p = write "new.json" next in
+  let src_p = write "app.march" src in
+  let rc, _out, err =
+    run_march_on_env ~cwd:dir []
+      ([ "--check-migration"; "--prior-schema"; old_p; "--new-schema"; new_p ] @ extra) src_p in
+  let lines = List.filter (fun l -> String.length l > 10 && String.sub l 0 10 = "migration:")
+      (String.split_on_char '\n' err) in
+  (rc, lines, err)
+
+let hcr_expect ~rc ~has (got_rc, lines, err) =
+  Alcotest.(check int) ("exit code; stderr:\n" ^ err) rc got_rc;
+  List.iter (fun frag ->
+      if not (List.exists (fun l -> contains l frag) lines) then
+        Alcotest.failf "no migration line contains %S; got:\n%s" frag (String.concat "\n" lines))
+    has
+
+let hcr_variance_suite =
+  let st r = [ ("count", "Int", r) ] in
+  [ gated "strengthened state refused" (fun () ->
+        hcr_expect ~rc:1 ~has:[ "Tally.state: REFUSED, not proved that (count >= 0) implies (count >= 1)" ]
+          (hcr_check (hcr_schema (st (Some "(count >= 0)"))) (hcr_schema (st (Some "(count >= 1)")))));
+    gated "strengthened invariant without migrate_state refused" (fun () ->
+        hcr_expect ~rc:1 ~has:[ "Tally.state: REFUSED" ]
+          (hcr_check (hcr_schema ~invariant:"(count >= 0)" (st None))
+             (hcr_schema ~invariant:"(count >= 1)" (st None))));
+    gated "weakened state proved" (fun () ->
+        hcr_expect ~rc:0 ~has:[ "Tally.state: proved" ]
+          (hcr_check (hcr_schema (st (Some "(count >= 1)"))) (hcr_schema (st (Some "(count >= 0)")))));
+    gated "equivalent state proved" (fun () ->
+        hcr_expect ~rc:0 ~has:[ "Tally.state: proved" ]
+          (hcr_check (hcr_schema (st (Some "(count >= 1)"))) (hcr_schema (st (Some "(count > 0)")))));
+    Alcotest.test_case "unchanged state needs no solver" `Quick (fun () ->
+        hcr_expect ~rc:0 ~has:[ "Tally.state: unchanged" ]
+          (hcr_check (hcr_schema (st (Some "(count >= 0)"))) (hcr_schema (st (Some "(count >= 0)")))));
+    gated "strengthened handler parameter refused" (fun () ->
+        hcr_expect ~rc:1
+          ~has:[ "Tally.Bump: REFUSED, not proved that parameter 0: (p0 > 0) implies (p0 > 5)" ]
+          (hcr_check (hcr_schema ~handlers:(hcr_bump "(p0 > 0)") (st None))
+             (hcr_schema ~handlers:(hcr_bump "(p0 > 5)") (st None))));
+    gated "weakened handler parameter proved" (fun () ->
+        hcr_expect ~rc:0 ~has:[ "Tally.Bump: proved" ]
+          (hcr_check (hcr_schema ~handlers:(hcr_bump "(p0 > 5)") (st None))
+             (hcr_schema ~handlers:(hcr_bump "(p0 > 0)") (st None))));
+    gated "accept-unproved lets the named law through" (fun () ->
+        hcr_expect ~rc:0 ~has:[ "Tally.state: not proved that"; "accepted by --accept-unproved" ]
+          (hcr_check ~extra:[ "--accept-unproved"; "Tally.state" ]
+             (hcr_schema (st (Some "(count >= 0)"))) (hcr_schema (st (Some "(count >= 1)")))));
+    gated "accept-unproved names one law, not the others" (fun () ->
+        hcr_expect ~rc:1 ~has:[ "Tally.Bump: REFUSED" ]
+          (hcr_check ~extra:[ "--accept-unproved"; "Tally.state" ]
+             (hcr_schema ~handlers:(hcr_bump "(p0 > 0)") (st (Some "(count >= 0)")))
+             (hcr_schema ~handlers:(hcr_bump "(p0 > 5)") (st (Some "(count >= 1)")))));
+    Alcotest.test_case "an unrecordable refinement is refused, not skipped" `Quick (fun () ->
+        hcr_expect ~rc:1 ~has:[ "Tally: REFUSED, not checked" ]
+          (hcr_check (hcr_schema (st None)) (hcr_schema ~unsupported:true (st None))));
+    Alcotest.test_case "a baseline that predates contracts is refused" `Quick (fun () ->
+        hcr_expect ~rc:1 ~has:[ "Tally: REFUSED, not checked: the running version's schema predates" ]
+          (hcr_check (hcr_schema ~contracts:false (st None)) (hcr_schema (st (Some "(count >= 0)")))));
+    (* The migrate_state path: proved once the return type is the actor's
+       own state sort (a synthesised `State` of the same field set made the
+       literal ambiguous, so before this a correct migration never proved
+       and a wrong one was never refuted). *)
+    gated "migrate_state preserving the invariant proved" (fun () ->
+        let src ret = Printf.sprintf {|mod Main do
+  actor Tally do
+    state { count : Int, history : List(Int) }
+    init  { count: 0, history: Nil }
+    on Bump(n : Int) do { count: state.count + 1, history: Cons(n, state.history) } end
+  end
+  fn tally_migrate_state(old : { count : Int }) : { count : Int, history : List(Int) } do
+    %s
+  end
+  fn main() : Int do 0 end
+end
+|} ret in
+        let prior = hcr_schema ~invariant:"(count >= 0)" (st None) in
+        let next = hcr_schema ~invariant:"((count >= 0) && (len(history) == count))"
+            [ ("count", "Int", None); ("history", "List(Int)", None) ] in
+        hcr_expect ~rc:0 ~has:[ "Tally.state: proved" ]
+          (hcr_check ~src:(src "{ count: 0, history: Nil }") prior next);
+        hcr_expect ~rc:1 ~has:[ "Tally.state: REFUSED, a counterexample exists" ]
+          (hcr_check ~src:(src "{ count: old.count, history: Nil }") prior next)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
+      ("hcr-variance", hcr_variance_suite);
       ("bounds-a2", a2_suite);
       ("path-sensitivity", path_suite);
       ("postconditions", post_suite);
@@ -29043,6 +29175,7 @@ let () =
       ("reflect-parity", Test_refine_reflect1b.parity);
       ("reflect-fuel", Test_refine_fuel.tests);
       ("reflect-stdlib-list", Test_refine_stdlib_list.tests);
+      ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
       ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws);

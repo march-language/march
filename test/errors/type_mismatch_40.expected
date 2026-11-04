@@ -1,0 +1,17 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_40.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+6 |     let p = Option.unwrap_or(Some(1), "none")
+                                          ^^^^^^
+
+    This is argument #2 of a function call.
+
+    the expected type comes from here:
+
+6 |     let p = Option.unwrap_or(Some(1), "none")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

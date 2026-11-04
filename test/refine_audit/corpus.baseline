@@ -274,6 +274,8 @@ native_hcr_e2e_patch: coverage audit (user + stdlib): 214 enforced, 0 inert (war
 native_hcr_e2e_patch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_hcr_e2e_server: coverage audit (user + stdlib): 214 enforced, 0 inert (warned), 0 unenforced
 native_hcr_e2e_server: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_hcr_schema_contracts: coverage audit (user + stdlib): 218 enforced, 0 inert (warned), 0 unenforced
+native_hcr_schema_contracts: coverage audit (user code): 4 enforced, 0 inert (warned), 0 unenforced
 native_hcr_smoke: coverage audit (user + stdlib): 214 enforced, 0 inert (warned), 0 unenforced
 native_hcr_smoke: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_hof_spec_closures: coverage audit (user + stdlib): 214 enforced, 0 inert (warned), 0 unenforced

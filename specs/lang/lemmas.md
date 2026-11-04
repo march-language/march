@@ -57,6 +57,7 @@ chapter has the reference summary.
 - [Arguments must be pure](#arguments-must-be-pure)
 - [`cap verified`: proofs required](#cap-verified-proofs-required)
 - [Lemmas from the standard library](#lemmas-from-the-standard-library)
+- [Which lemma to call: `--refine-infer`](#which-lemma-to-call---refine-infer)
 
 **Lemmas beyond refinements**
 
@@ -631,11 +632,60 @@ This module builds. Replace the body of `cat_nil` with `()` and the build fails 
 
 ## Lemmas from the standard library
 
-**Coming with the stdlib List lemmas.** Proved lemmas about `List` (`List.len_append`,
-`List.reverse_reverse`, `List.take_drop` and others) are being added to the standard library,
-with a manifest, `stdlib/lemmas.verified`, of the ones that are proved. They are not on
-`main` yet. Once they land, you call them like your own lemmas, and you won't need to
-re-prove `reverse(reverse(xs)) == xs` in every project.
+The standard library proves lemmas about `List`: `List.append_nil`, `List.append_assoc`,
+`List.len_append`, `List.reverse_reverse`, `List.reverse_append`, `List.len_reverse`,
+`List.len_take`, `List.len_drop` and `List.take_drop`. You call them like your own lemmas, so
+you don't need to re-prove `reverse(reverse(xs)) == xs` in every project. The manifest
+`stdlib/lemmas.verified` lists the ones that are proved; a listed lemma is admitted without
+re-proving it on every build.
+
+## Which lemma to call: `--refine-infer`
+
+When a call is not verified and the hint says the proof may need more unfolding of a function,
+`march --check --refine-infer` (and `forge refine --infer`) looks for a lemma call that closes
+it. A candidate is a lemma, yours or the standard library's, whose theorem mentions a call
+appearing in the arguments, or in a `let` they read. Each one is checked by putting the call in
+your program and checking it again. It is proposed only if the call proves the obligation, its
+own preconditions prove, and nothing that was proved before stops proving. At most 8 candidates
+are checked for each call.
+
+```march
+fn need_same(a : List(Int), b : {List(Int) | b == a}) : Int do 0 end
+
+fn use_it(xs : List(Int)) : Int do
+  need_same(xs, List.reverse(List.reverse(xs)))
+end
+```
+
+```
+$ march --check --refine-infer use.march
+inferred lemma calls: 1 proposed, 0 not inferred
+  use_it (use.march:4)  List.reverse_reverse(xs)  [closes the precondition `b == a` on `need_same`, 1 of 4 candidates checked]
+```
+
+`--refine-infer-apply` writes the call on its own line above the statement, then checks the file
+again. A call it can't write that way (the statement shares its line with a match arrow, say)
+is listed with "apply by hand".
+
+When no lemma closes it, the tool prints the lemma that would. Its theorem is what the call
+needs, with every `let` replaced by its right-hand side, over the function's own parameters.
+Here `use_it` calls a `rev` of your own, which no lemma is about:
+
+```
+  use_it (use.march:4): no lemma call inferred for the precondition `b == a` on `need_same` (0 of 0 candidates checked)
+    a lemma stating this would close it (checked; not applied, prove it first), called as `use_it_lemma(xs)` before line 4:
+      @[lemma]
+      fn use_it_lemma(xs : List(Int)) : {Unit | rev(rev(xs)) == xs} do
+        ()
+      end
+```
+
+"Checked" here means the obligation proves when the theorem is assumed at that point. The
+skeleton is never written for you: its body is `()`, which proves nothing. Write the proof
+(see [Induction: a recursive call](#induction-a-recursive-call)), then call it.
+
+Two limits: the tool proposes calls only for a call's precondition, not for a function's own
+return contract (see the last section), and only one call per obligation.
 
 ---
 

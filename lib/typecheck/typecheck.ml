@@ -4257,8 +4257,47 @@ and infer_app env span f_ty args idx =
        ret_ty
      | _ -> t)
   | arg :: rest, TArrow (param_ty, ret_ty) ->
+    let mark = env.errors.Err.diagnostics in
+    (* The parameter's type variables, bound or not: an earlier argument may
+       already have bound one (`List.append([1], ["a"])` binds `a` to `Int`
+       before `["a"]` is checked), which is how the cascade starts. *)
+    let param_vars =
+      let acc = ref [] in
+      let rec walk t = match t with
+        | TVar ({ contents = Unbound _ } as r) -> acc := r :: !acc
+        | TVar ({ contents = Link t' } as r) -> acc := r :: !acc; walk t'
+        | TCon (_, ts) | TTuple ts -> List.iter walk ts
+        | TRecord fs -> List.iter (fun (_, t) -> walk t) fs
+        | TArrow (a, b) -> walk a; walk b
+        | TLin (_, t) | TRefine (t, _, _) -> walk t
+        | _ -> () in
+      walk param_ty; !acc in
     check_expr env arg param_ty
       ~reason:(Some (RFnArg (span, idx)));
+    (* Poison (§X3): when an argument fails its type check and the call's
+       result shares a type variable with that parameter, the variable is
+       now bound to whatever the failed check left it, so the result is
+       [TError] and absorbs what it meets.  `need_int(id(Box("hi")))` then
+       reports the argument, not also every later use of `id`'s result.  A
+       result the callee declares outright (`parse : String -> Option(Int)`)
+       is kept, so a `match` over it still checks exhaustiveness and a field
+       of it still checks its type, as independent errors.  Only a type
+       mismatch counts: a capability, linearity or visibility error in the
+       argument says nothing about the result's type. *)
+    let rec shares t = match t with
+      | TVar r -> List.memq r param_vars || (match !r with Link t' -> shares t' | _ -> false)
+      | TCon (_, ts) | TTuple ts -> List.exists shares ts
+      | TRecord fs -> List.exists (fun (_, t) -> shares t) fs
+      | TArrow (a, b) -> shares a || shares b
+      | TLin (_, t) | TRefine (t, _, _) -> shares t
+      | _ -> false in
+    let failed =
+      param_vars <> [] && shares ret_ty
+      && (let rec any l = l != mark && (match l with
+          | [] -> false
+          | (d : Err.diagnostic) :: r ->
+            Err.slug_of_code d.Err.code = Err.Code.type_mismatch || any r) in
+          any env.errors.Err.diagnostics) in
     (* Proof-cap forge taint: if this argument laundered a [cap_narrow] result
        (its type — now unified with [param_ty] — carries a tagged cap-producer
        var), taint [ret_ty].  This closes the launder-through-a-polymorphic-fn
@@ -4269,7 +4308,8 @@ and infer_app env span f_ty args idx =
        same fn is unaffected. *)
     if ty_has_tagged_cap_producer env param_ty then
       tag_cap_producer_result env ret_ty span;
-    infer_app env span ret_ty rest (idx + 1)
+    let result = infer_app env span ret_ty rest (idx + 1) in
+    if failed then TError else result
   | arg :: rest, TVar _ ->
     (* f_ty not yet known — constrain it *)
     let arg_ty = infer_expr env arg in

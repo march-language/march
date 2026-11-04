@@ -1,0 +1,31 @@
+-- The .schemas.json writer records the refinements the TIR types erase,
+-- so forge's deploy gate can prove the running version's contracts imply
+-- the new ones (specs/todos/2026-11-04-hcr-refinement-strengthening-unchecked.md).
+mod SchemaContracts do
+  fn lo(a : Int, b : Int) : Int do if a < b do a else b end end
+
+  -- A state field refinement, a handler parameter refinement (written over
+  -- positional names: `n` and `m` become p0 and p1), and an @invariant.
+  @invariant(count >= 1)
+  actor Tally do
+    state { count : {Int | _ >= 1} }
+    init  { count: 1 }
+    on Bump(n : {Int | _ > 5}) do
+      { state with count: state.count + n }
+    end
+    on Span(n : Int, m : {Int | _ >= n}) do
+      { state with count: state.count + m - n }
+    end
+  end
+
+  -- Predicates the schema cannot write down: recorded as unsupported, so a
+  -- deploy is refused instead of reading them as absent.
+  @invariant(lo(count, 2) >= 1)
+  actor Odd do
+    state { count : {Int | lo(_, 3) >= 1} }
+    init  { count: 1 }
+    on Poke() do state end
+  end
+
+  fn main() : Int do 0 end
+end
