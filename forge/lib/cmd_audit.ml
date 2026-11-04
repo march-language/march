@@ -950,47 +950,58 @@ let current_caps ~inferred (proj : Project.project) name : string list option =
 let laws_flags ~laws ~strength : (unit, string) result =
   if strength && not laws then Error "--strength only applies with --laws" else Ok ()
 
-(** The law coverage report of [files]: for each, a [law coverage: <file>]
-    header and the `law coverage` block lines of
-    `march --check --law-coverage [--law-strength] <file>` run under
-    [lib_path_env].  Every run loads the whole package through
-    [lib_path_env], so a law in one file covers a function in another.  A
-    to-do list, not a gate: [Error] only when a file's check itself fails. *)
-let law_report ?(display = Fun.id) ~lib_path_env ~strength (files : string list) : (string list, string) result =
-  let per_file =
-    List.map
-      (fun f ->
-        let out = Filename.temp_file "forge_laws" ".out" in
-        let code =
-          Sys.command
-            (Printf.sprintf "%smarch --check --law-coverage%s %s >%s 2>&1" lib_path_env
-               (if strength then " --law-strength" else "") (Filename.quote f) (Filename.quote out))
-        in
-        let text = try In_channel.with_open_bin out In_channel.input_all with Sys_error _ -> "" in
-        (try Sys.remove out with Sys_error _ -> ());
-        let lines = String.split_on_char '\n' text in
-        (* The report's own lines, not the check's diagnostics (whose source
-           excerpts and carets are indented too). *)
-        let report_prefixes =
-          [ "law coverage: "; "  uncovered ("; "  unproved only  "; "  covered  "; "  impl "; "  higher-order ";
-            "    strength: "; "    survives: " ]
-        in
-        let block =
-          List.filter (fun l -> List.exists (fun prefix -> String.starts_with ~prefix l) report_prefixes) lines
-        in
-        (f, code, block, lines))
-      files
-  in
-  match List.filter (fun (_, code, _, _) -> code <> 0) per_file with
-  | [] -> Ok (List.concat_map (fun (f, _, block, _) -> ("law coverage: " ^ display f) :: block) per_file)
-  | failed ->
-    List.iter (fun (_, _, _, lines) -> List.iter prerr_endline lines) failed;
-    Error
-      (Printf.sprintf "law coverage: the check failed in %s"
-         (String.concat ", " (List.map (fun (f, _, _, _) -> display f) failed)))
+(* The module a source file declares: its first top-level `mod Name do`. *)
+let module_of_file (f : string) : string option =
+  match In_channel.with_open_bin f In_channel.input_all with
+  | exception Sys_error _ -> None
+  | text ->
+    List.find_map
+      (fun l ->
+        match String.split_on_char ' ' l with
+        | "mod" :: name :: "do" :: _ when name <> "" -> Some name
+        | _ -> None)
+      (String.split_on_char '\n' text)
 
-(** [forge audit --laws]: the report over the package's own `lib/` and `src/`
-    files, with both directories on the lib path.  Needs no
+(** The law coverage report of [files], one block per module.  A file's own
+    check sees only the laws of the modules it uses, so the package is
+    checked through ONE generated entry that uses every module of [files]
+    (all on [lib_path_env]) with `march --check --law-coverage-all
+    [--law-strength]`: every law of the package is loaded, and every module's
+    block counts them all.  A to-do list, not a gate: [Error] only when the
+    check itself fails. *)
+let law_report ?(display = Fun.id) ~lib_path_env ~strength (files : string list) : (string list, string) result =
+  let mods = List.sort_uniq compare (List.filter_map module_of_file files) in
+  let dir = Filename.temp_dir "forge_laws" "" in
+  let entry = Filename.concat dir "forge_law_audit.march" in
+  Out_channel.with_open_bin entry (fun oc ->
+      output_string oc "mod ForgeLawAudit do\n";
+      List.iter (fun m -> Printf.fprintf oc "  use %s\n" m) mods;
+      output_string oc "end\n");
+  let out = Filename.concat dir "out" in
+  let code =
+    Sys.command
+      (Printf.sprintf "%smarch --check --law-coverage-all%s %s >%s 2>&1" lib_path_env
+         (if strength then " --law-strength" else "") (Filename.quote entry) (Filename.quote out))
+  in
+  let text = try In_channel.with_open_bin out In_channel.input_all with Sys_error _ -> "" in
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)));
+  let lines = String.split_on_char '\n' text in
+  if code <> 0 then begin
+    List.iter prerr_endline lines;
+    Error
+      (Printf.sprintf "law coverage: the check failed in %s" (String.concat ", " (List.map display files)))
+  end
+  else
+    (* The report's own lines, not the check's diagnostics (whose source
+       excerpts and carets are indented too). *)
+    let report_prefixes =
+      [ "law coverage: "; "  uncovered ("; "  unproved only  "; "  covered  "; "  impl "; "  higher-order ";
+        "    strength: "; "    survives: " ]
+    in
+    Ok (List.filter (fun l -> List.exists (fun prefix -> String.starts_with ~prefix l) report_prefixes) lines)
+
+(** [forge audit --laws]: the report over the modules of the package's own
+    `lib/` and `src/` files, with both directories on the lib path.  Needs no
     [forge.caps.lock]; exits 0 unless a check fails. *)
 let run_laws ~strength () : (int, string) result =
   match Project.load () with

@@ -212,6 +212,16 @@ let judge ~(module_ : A.module_) ~(name : string) ~(laws : (string * A.fn_def * 
           (fun () ->
             W.set_module module_;
             let orig = results () in
+            (* Each law on the unedited function: only a law that holds there can
+               judge an edit, and an edit survives only when every such law still
+               holds on at least as many inputs.  A law that holds on fewer inputs
+               under the edit was cut short (the edit loops or fails where the
+               original returned) and decides nothing. *)
+            let baseline =
+              List.filter_map
+                (fun l -> match (LT.test_lemma ~with_len:true ~file:"" l).LT.l_verdict with LT.Held n -> Some (l, n) | _ -> None)
+                laws
+            in
             let judged = ref 0 and total = ref 0 and undecided = ref 0 and survivors = ref [] and partial = ref None in
             List.iter
               (fun (e : edit) ->
@@ -229,9 +239,9 @@ let judge ~(module_ : A.module_) ~(name : string) ~(laws : (string * A.fn_def * 
                       if deciding = [] then incr undecided
                       else if List.for_all (fun (o, n) -> n = Some o) deciding then ()
                       else begin
-                        let vs = List.map (fun l -> (LT.test_lemma ~with_len:true ~file:"" l).LT.l_verdict) laws in
-                        if List.exists (function LT.False_at _ -> true | _ -> false) vs then incr total
-                        else if vs <> [] && List.for_all (function LT.Held _ -> true | _ -> false) vs then begin
+                        let vs = List.map (fun (l, n0) -> ((LT.test_lemma ~with_len:true ~file:"" l).LT.l_verdict, n0)) baseline in
+                        if List.exists (function LT.False_at _, _ -> true | _ -> false) vs then incr total
+                        else if vs <> [] && List.for_all (function LT.Held n, n0 -> n >= n0 | _ -> false) vs then begin
                           incr total;
                           survivors := e :: !survivors
                         end

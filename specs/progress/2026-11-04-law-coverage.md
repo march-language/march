@@ -16,10 +16,16 @@ Design: `specs/2026-11-04-law-coverage-design.md`. Plan: `specs/plans/2026-11-04
   literal, swap two match arms' results, drop the recursive call, change a comparison), each
   judged in the witness interpreter on the parity net's inputs: dropped when it changes no
   result, killed when a covering law is false on some input, surviving when every law holds,
-  undecided otherwise. Budget `MARCH_LAW_STRENGTH_MS` (5000) per function.
-- **`forge audit --laws [--strength]`** (`forge/lib/cmd_audit.ml`): the report for every `lib/` and
-  `src/` file, both on the lib path so laws pool across the package; no `forge.caps.lock`; exits
-  0 unless a check fails.
+  undecided otherwise. Each covering law is first run on the unedited function; only a law that
+  holds there judges, and an edit survives only when every such law still holds on at least as
+  many inputs (an edit that loops or fails where the original returned is undecided, not a
+  survivor). Budget `MARCH_LAW_STRENGTH_MS` (5000) per function.
+- **`forge audit --laws [--strength]`** (`forge/lib/cmd_audit.ml`): one check of a generated entry
+  that `use`s every module of the package's `lib/` and `src/` files (both on the lib path), run
+  with `--law-coverage-all`, so every law of the package is loaded and every module's block
+  counts them all; no `forge.caps.lock`; exits 0 unless the check fails.
+- `--law-coverage` lists the entry file's functions only; `--law-coverage-all` every user file
+  the check loaded, each named by its own module path.
 - `--reflect-report`'s row computation is split out (`reflect_rows` in `bin/main.ml`) and shared.
 
 ## Rulings made while building (my calls)
@@ -53,6 +59,8 @@ Uncovered in `List`: `head_opt`, `tail_opt`, `nth_opt`, `length`, `is_empty`, `s
 `product_int`. Checking a stdlib file as the entry file reports `invalid_lemma` (3) and
 `lemma_unproved` (4) with or without the new flags (the stdlib is also loaded as the
 stdlib), so `reverse` shows "unproved only" there although `len_reverse` is admitted in user
-programs; the counts undercount `List` accordingly. `reverse_onto` reached the 5 s budget
-(`partial (budget), 1 of 3 edits judged`); its surviving edit swaps `reverse_onto`'s
-arguments.
+programs; the counts undercount `List` accordingly. `reverse_onto` reaches the 5 s budget
+(`partial (budget), 1 of 3 edits judged`); with `MARCH_LAW_STRENGTH_MS=60000` it reads
+`0 of 1 edits survive (1 undecided)`: the undecided edit swaps `reverse_onto`'s arguments,
+which loops. (Before the final review's fix, that loop was misread as a survivor.) `append`
+(`0 of 2`) and `drop` (`0 of 7`) have no surviving edit.

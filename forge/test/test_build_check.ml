@@ -877,17 +877,31 @@ let test_audit_laws_pooled () =
       | Error e -> Alcotest.failf "the report runs: %s" e
       | Ok lines ->
         let text = String.concat "\n" lines in
-        if not (List.mem ("law coverage: " ^ a) lines) then Alcotest.failf "a header per file:\n%s" text;
-        if not (List.exists (fun l -> String.starts_with ~prefix:"  covered  cat  " l && contains l "(cat_nil)") lines)
-        then Alcotest.failf "a law in b.march covers cat in a.march:\n%s" text;
-        if not (List.exists (String.starts_with ~prefix:"  uncovered (public)  other  ") lines) then
-          Alcotest.failf "other is uncovered:\n%s" text)
+        (* One block per module, each listing only its own functions. *)
+        let block header =
+          let rec skip = function
+            | [] -> []
+            | l :: rest when String.starts_with ~prefix:header l -> take rest
+            | _ :: rest -> skip rest
+          and take = function l :: rest when String.starts_with ~prefix:"  " l -> l :: take rest | _ -> [] in
+          skip lines
+        in
+        let a_block = block "law coverage: A: " and b_block = block "law coverage: B: " in
+        if not (List.exists (fun l -> String.starts_with ~prefix:"  covered  cat  " l && contains l "(cat_nil)") a_block)
+        then Alcotest.failf "a law in b.march covers cat in A's own block:\n%s" text;
+        if not (List.exists (String.starts_with ~prefix:"  uncovered (public)  other  ") a_block) then
+          Alcotest.failf "other is uncovered:\n%s" text;
+        if List.exists (fun l -> contains l "  cat  ") b_block then Alcotest.failf "B's block does not list cat:\n%s" text;
+        if List.exists (fun l -> contains l "uncovered (public)  cat  ") lines then
+          Alcotest.failf "cat is never reported uncovered:\n%s" text;
+        if contains text "B.A" then Alcotest.failf "no module is named B.A:\n%s" text)
 
 let test_audit_laws_check_failure () =
   with_parity_dir (fun dir ->
       let a = Filename.concat dir "a.march" in
       write_file a "mod A do\n  fn f() : Int do undefined_name end\nend\n";
-      match Cmd_audit.law_report ~lib_path_env:"" ~strength:false [ a ] with
+      let lib_path_env = Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote dir) in
+      match Cmd_audit.law_report ~lib_path_env ~strength:false [ a ] with
       | Ok _ -> Alcotest.fail "a file that does not check fails the report"
       | Error e -> if not (contains e "the check failed in") then Alcotest.failf "names the failing file: %s" e)
 

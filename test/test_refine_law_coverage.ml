@@ -234,6 +234,87 @@ let strength_tests =
               Alcotest.failf "an entry that is not covered has no strength:\n%s" out)
           recs) ]
 
+let review_fix_tests =
+  [ gated "divergent_edit_not_survivor: an edit that makes the function loop does not survive" (fun () ->
+        (* `ro(Cons(h, acc), t)` (its arguments swapped) never terminates on a
+           non-empty list; its length law holds only on the inputs that do not
+           reach that, which must not make it a survivor. *)
+        let out =
+          strength
+            {|mod D do
+  fn ro(lst : List(Int), acc : List(Int)) : List(Int) do
+    match lst do
+      Nil -> acc
+      Cons(h, t) -> ro(t, Cons(h, acc))
+    end
+  end
+  @[lemma]
+  fn len_ro(xs : List(Int), acc : List(Int)) : {Unit | len(ro(xs, acc)) == len(xs) + len(acc)} do
+    match xs do
+      Nil -> ()
+      Cons(h, t) -> len_ro(t, Cons(h, acc))
+    end
+  end
+end
+|}
+        in
+        if contains out "survives: swap the arguments of `ro`" then
+          Alcotest.failf "a diverging edit was reported as surviving:\n%s" out);
+    gated "no_change_not_strong: no behaviour-changing edit never reads as zero survivors" (fun () ->
+        let out =
+          strength
+            (m
+               {|  fn one(a : Int, b : Int) : List(Int) do Cons(a + b, Nil) end
+  @[lemma]
+  fn one_def(a : Int, b : Int) : {Unit | one(a, b) == Cons(a + b, Nil)} do () end
+|})
+        in
+        (* `one`'s edits: swapping the operands of `+` (equivalent, dropped) and
+           swapping `Cons`'s fields (ill-typed, not judged). *)
+        let b = strength_block out ~label:"covered" "one" in
+        Alcotest.(check (list string)) "no edit changed it" [ "    strength: no edit changed its behaviour" ] b);
+    gated "impl_unproved_shown: an impl whose law is not proved says so" (fun () ->
+        let src =
+          m
+            {|  interface Monoid(a) do
+    fn combine : a -> a -> a
+    @[lemma]
+    fn combine_assoc(x : a, y : a, z : a) : {Unit | combine(combine(x, y), z) == combine(x, combine(y, z))}
+  end
+  impl Monoid(Int) do
+    fn combine(x, y) do
+      if x < 0 do y else x + y end
+    end
+  end
+|}
+        in
+        let out = coverage src in
+        expect out "  impl Monoid for Int: combine  unproved only  ";
+        let json = coverage ~args:"--check --law-coverage-json" src in
+        let open Yojson.Safe.Util in
+        let r =
+          List.find_map
+            (fun l ->
+              if String.starts_with ~prefix:"{\"kind\":\"law-coverage\"" l then Some (Yojson.Safe.from_string l) else None)
+            (lines json)
+        in
+        match r with
+        | None -> Alcotest.failf "no record:\n%s" json
+        | Some j ->
+          Alcotest.(check string) "status" "unproved-only" (member "status" j |> to_string);
+          if member "impl" j = `Null then Alcotest.fail "the impl is named");
+    gated "imported_module_named_by_its_own_path: --law-coverage-all names a library module by its own path" (fun () ->
+        let lib = [ ("a.march", "mod A do\n" ^ "  fn cat(xs : List(a), ys : List(a)) : List(a) do\n    match xs do\n      Nil -> ys\n      Cons(h, t) -> Cons(h, cat(t, ys))\n    end\n  end\nend\n") ] in
+        let src =
+          "mod B do\n  use A\n  @[lemma]\n  fn cat_nil(xs : List(a)) : {Unit | A.cat(xs, Nil) == xs} do\n    match xs do\n      Nil -> ()\n      Cons(_, t) -> cat_nil(t)\n    end\n  end\nend\n"
+        in
+        let only = U.run_lib ~args:"--check --law-coverage" ~lib src in
+        if contains only "  cat  " then Alcotest.failf "--law-coverage reports only the entry file:\n%s" only;
+        let all = U.run_lib ~args:"--check --law-coverage-all" ~lib src in
+        expect all "law coverage: A: 1 of 1 pure functions have a law";
+        ends_with all "  covered  cat  " "(cat_nil)";
+        if contains all "B.A" then Alcotest.failf "the library module keeps its own name:\n%s" all) ]
+
 let rev_only_bad =
   {|  @[lemma]
   fn bad(xs : List(a)) : {Unit | rev(xs) == xs} do () end
@@ -350,4 +431,4 @@ let tests =
           Alcotest.(check string) "module" "M" (member "module" j |> to_string);
           Alcotest.(check bool) "public" true (member "public" j |> to_bool);
           if member "impl" j <> `Null then Alcotest.fail "impl is null for a plain function") ]
-  @ edit_tests @ strength_tests
+  @ edit_tests @ strength_tests @ review_fix_tests

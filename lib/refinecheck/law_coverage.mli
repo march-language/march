@@ -37,9 +37,12 @@ val theorem_calls : March_ast.Ast.fn_def -> string list
     module; [lemmas]: [!Refine_check.lemma_defs] (qualified name, definition,
     admitted); [decls]: the checked module's declarations (the stdlib's are
     prepended to them, and resolve a theorem's calls; only functions whose
-    span [is_user] accepts are listed); [file_mod]: the user module's name. *)
+    span [is_user] accepts are listed); [file_mod]: the user module's name,
+    [entry_file] its file (functions of other loaded files are named by their
+    own module path). *)
 val entries :
   file_mod:string ->
+  entry_file:string ->
   rows:Refine_reflect.row list ->
   lemmas:(string * March_ast.Ast.fn_def * bool) list ->
   decls:March_ast.Ast.decl list ->

@@ -996,7 +996,10 @@ let print_law_coverage ~filename ~user_files ~type_map ~recheck ~file_mod m =
   let lemmas = !March_refinecheck.Refine_check.lemma_defs in
   let rows = reflect_rows ~type_map ~recheck m in
   let entries =
-    LC.entries ~file_mod ~rows ~lemmas ~decls:m.March_ast.Ast.mod_decls ~is_user:(user_span ~filename ~user_files)
+    LC.entries ~file_mod ~entry_file:filename ~rows ~lemmas ~decls:m.March_ast.Ast.mod_decls
+      ~is_user:
+        (if !law_coverage_all then user_span ~filename ~user_files
+         else fun sp -> sp.March_ast.Ast.file = filename)
   in
   (* --law-strength (§5): an edit typechecks when each pair of sites it puts
      in each other's place has one type in the checked module's type map. *)
@@ -7594,6 +7597,8 @@ let () =
      " As --law-coverage, one JSON object per function on stdout");
     ("--law-strength", Arg.Unit (fun () -> law_coverage := true; law_strength := true),
      " With --law-coverage, the body edits each covered function's laws still accept (MARCH_LAW_STRENGTH_MS budget per function, default 5000)");
+    ("--law-coverage-all", Arg.Unit (fun () -> law_coverage := true; law_coverage_all := true),
+     " As --law-coverage, for every user file the check loaded, not only the entry file");
     ("--law-coverage", Arg.Set law_coverage,
      " Print, per user module, which pure (reflected) functions an admitted law's theorem calls, which only unproved laws do, and which none; changes no verdict");
     ("--reflect-report", Arg.Set reflect_report,

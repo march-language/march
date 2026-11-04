@@ -95,7 +95,7 @@ let rec impls ?(prefix = "") (ds : A.decl list) : (string * string * A.ty * (A.n
       | _ -> [])
     ds
 
-let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list =
+let entries ~file_mod ~entry_file ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list =
   let all = fns decls in
   let user = List.filter (fun (_, _, (fd : A.fn_def)) -> is_user fd.A.fn_name.A.span) all in
   let universe = Hashtbl.create 256 in
@@ -158,7 +158,12 @@ let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list
     | Some (RR.Specialised _) -> Some Higher_order
     | _ -> None
   in
-  let module_of prefix = let inner = strip_dot prefix in if inner = "" then file_mod else file_mod ^ "." ^ inner in
+  (* The entry file's declarations are its module's (`M`, `M.Inner`); another
+     loaded file's are named by their own module path (`A`). *)
+  let module_of (sp : A.span) prefix =
+    let inner = strip_dot prefix in
+    if sp.A.file <> entry_file then inner else if inner = "" then file_mod else file_mod ^ "." ^ inner
+  in
   (* An impl method appears only through its copy, which exists only for an
      interface that declares laws. *)
   let impl_entries =
@@ -174,7 +179,7 @@ let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list
               | Some (_, _, cfd) ->
                 Option.map
                   (fun e_status ->
-                    { e_module = module_of prefix; e_name = mn.A.txt; e_public = true; e_span = mn.A.span; e_status;
+                    { e_module = module_of mn.A.span prefix; e_name = mn.A.txt; e_public = true; e_span = mn.A.span; e_status;
                       e_impl = Some (iface, ty_text ty); e_qname = cq; e_fd = cfd;
                       e_laws = Option.value ~default:[] (Hashtbl.find_opt law_q cq) })
                   (status_of cq cfd))
@@ -189,7 +194,7 @@ let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list
         let e_status = status_of q fd in
         Option.map
           (fun e_status ->
-            { e_module = module_of prefix;
+            { e_module = module_of fd.A.fn_name.A.span prefix;
               e_name = fd.A.fn_name.A.txt;
               e_public = fd.A.fn_vis = A.Public;
               e_span = fd.A.fn_name.A.span;
@@ -211,6 +216,10 @@ let strength_lines (v : Law_strength.verdict) : string list =
     let head =
       match v.v_partial with
       | Some (n, m) -> Printf.sprintf "    strength: partial (budget), %d of %d edits judged" n m
+      | None when v.v_total = 0 ->
+        (* Never "0 of 0 survive": that would read as laws that pin it down. *)
+        if v.v_undecided = 0 then "    strength: no edit changed its behaviour"
+        else Printf.sprintf "    strength: no edit could be decided (%d undecided)" v.v_undecided
       | None ->
         Printf.sprintf "    strength: %d of %d edits survive%s" (List.length v.v_survivors) v.v_total
           (if v.v_undecided = 0 then "" else Printf.sprintf " (%d undecided)" v.v_undecided)
@@ -246,7 +255,12 @@ let report_lines ?(strength = fun _ -> None) (es : entry list) : string list =
       @ List.concat_map
           (fun e ->
             let i, t = Option.get e.e_impl in
-            row ~sep:" " (Printf.sprintf "impl %s for %s:" i t) e (laws e) :: under e)
+            let status =
+              match e.e_status with Covered _ -> "covered" | Unproved_only _ -> "unproved only" | _ -> "uncovered"
+            in
+            Printf.sprintf "  impl %s for %s: %s  %s  %s%s" i t e.e_name status (loc e.e_span)
+              (match laws e with [] -> "" | ls -> "  (" ^ String.concat ", " ls ^ ")")
+            :: under e)
           impl_es
       @ List.map (fun e -> row "higher-order (no laws possible yet)" e []) ho)
     modules
@@ -262,7 +276,6 @@ let json_lines ?(strength = fun _ -> None) (es : entry list) : string list =
         | Covered c -> ("covered", c, [])
         | Higher_order -> ("higher-order", [], [])
       in
-      let status = if e.e_impl <> None then "impl-method" else status in
       Printf.sprintf
         "{\"kind\":\"law-coverage\",\"module\":%s,\"fn\":%s,\"public\":%b,\"file\":%s,\"line\":%d,\"status\":%s,\"covered_by\":%s,\"unproved_by\":%s,\"impl\":%s,\"strength\":%s}"
         (str e.e_module) (str e.e_name) e.e_public (str e.e_span.A.file) e.e_span.A.start_line (str status)

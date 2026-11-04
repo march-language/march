@@ -820,10 +820,11 @@ law coverage: M: 1 of 3 pure functions have a law (1 more only by unproved laws)
 ```
 
 A function that takes a function (`map2`) is listed apart and left out of the count: a lemma
-cannot yet take a function as a parameter. An `impl` method is listed under its impl
-(`impl Monoid for Int: combine`) when its interface declares laws, covered by them
-(`combine_assoc (via Monoid)`). `--law-coverage-json` prints one JSON object per function
-instead.
+cannot yet take a function as a parameter. An `impl` method is listed under its impl when its
+interface declares laws, with whether they are proved for it
+(`impl Monoid for Int: combine  covered  m.march:8  (combine_assoc (via Monoid))`, or
+`unproved only`). The report lists the file's own functions; `--law-coverage-all` lists every
+user file the check loaded. `--law-coverage-json` prints one JSON object per function instead.
 
 **Covered is not the same as pinned down.** `--law-strength` makes small edits to each covered
 function's body, one at a time (return a parameter unchanged, swap two arguments, change a
@@ -840,14 +841,16 @@ behaviour the laws leave open:
 
 `len_rev` says `rev` keeps the length, which returning `xs` unchanged also does. A law like
 `rev(cat(xs, ys)) == cat(rev(ys), rev(xs))` rules that edit out. Edits that do not change
-what the function returns (swapping the operands of `+`) are dropped, not reported. A function
+what the function returns (swapping the operands of `+`) are dropped, not reported; when every
+edit is, the line says `strength: no edit changed its behaviour`. An edit that makes the function
+loop or fail where it returned before does not survive: a law that holds on fewer inputs under
+the edit decides nothing. A function
 whose parameters have no input generator says `strength: not run (no input generator)`, and
 each function gets 5 seconds (`MARCH_LAW_STRENGTH_MS`), after which it says
 `strength: partial (budget)`.
 
-`forge audit --laws` prints the same report for every source file of a package, with laws from
-all of them counted (a law in `b.march` covers a function in `a.march`); `--strength` adds the
-edits. It needs no `forge.caps.lock` and exits 0: it is a to-do list, not a gate.
+`forge audit --laws` prints the same report for every module of a package, checked together, so
+a law in `b.march` covers a function in `a.march`; `--strength` adds the edits. It needs no `forge.caps.lock` and exits 0: it is a to-do list, not a gate.
 
 ## Lemmas as a spec for code someone else writes
 

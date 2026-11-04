@@ -36,7 +36,8 @@ git log is authoritative for exact commits.
   separately), and `--law-coverage-json` gives the same as JSON. `--law-strength` adds, for
   each covered function, the small edits to its body (return a parameter, swap arguments,
   change a literal or comparison, swap match arms, drop the recursive call) that every law
-  covering it still accepts. `forge audit --laws [--strength]` runs it over a package.
+  covering it still accepts. `--law-coverage-all` reports every user file the check loaded,
+  and `forge audit --laws [--strength]` runs it over a whole package at once.
 - **`List` ships lemmas about its own functions.** `List.append_nil`, `append_assoc`,
   `len_append`, `reverse_append`, `reverse_reverse`, `len_reverse`, `len_take`, `len_drop`
   and `take_drop` can be called from any program to give the refinement checker that
