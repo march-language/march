@@ -1,0 +1,12 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_29.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+6 |     Ok([{ name: "a", ports: [1] }, { name: "b", ports: ["x"] }])
+                                                            ^^^
+
+    In a list element of the `ports` field of a list element.
+    run `march --explain type_mismatch`
+
+

@@ -1,0 +1,18 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_28.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+6 |     { name: "a", age: "old" }
+                          ^^^^^
+
+    In the `age` field.
+    This is the declared return type of `f`.
+
+    the expected type comes from here:
+
+5 |   fn f() : P do
+      ^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

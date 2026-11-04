@@ -4739,6 +4739,44 @@ let read_manifest (path : string) : (string * string) list =
            | _ -> None)
   | exception Sys_error _ -> []
 
+(* A parameter type of the program function [f] whose short name is
+   conflated with another declaration ([Refine_encode.conflated_declarants]):
+   the type and the modules declaring it. *)
+let conflated_param_type (f : string) : (string * string list) option =
+  match !Witness.current_module with
+  | None -> None
+  | Some m ->
+    let rec find ds =
+      List.find_map
+        (function
+          | A.DFn (fd, _) when fd.A.fn_name.A.txt = f -> Some fd
+          | A.DMod (_, _, inner, _) -> find inner
+          | _ -> None)
+        ds
+    in
+    let rec tys (t : A.ty) : string list =
+      match t with
+      | A.TyCon (n, args) -> n.A.txt :: List.concat_map tys args
+      | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> tys b
+      | A.TyTuple ts -> List.concat_map tys ts
+      | _ -> []
+    in
+    Option.bind (find m.A.mod_decls) (fun (fd : A.fn_def) ->
+        let names =
+          List.concat_map
+            (fun (c : A.fn_clause) ->
+              List.concat_map
+                (function A.FPNamed p | A.FPDefault (p, _) -> Option.fold ~none:[] ~some:tys p.A.param_ty | A.FPPat _ -> [])
+                c.A.fc_params)
+            fd.A.fn_clauses
+        in
+        List.find_map
+          (fun n ->
+            match Refine_encode.conflated_declarants n with
+            | [] -> None
+            | paths -> Some (n, paths))
+          names)
+
 let is_lemma (fd : A.fn_def) = List.mem "lemma" fd.A.fn_attrs
 
 (** Every call of a lemma in this module, by call span: the lemma it reaches,
@@ -6303,6 +6341,19 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
                   note: a function is usable in a predicate when it terminates, has no effects, \
                   cannot fail, and calls only such functions."
                  f why at.A.start_line)
+          | _ when conflated_param_type f <> None ->
+            (* The function is reflectable, but one of its parameter types
+               shares its short name with another declaration (often a
+               stdlib one): the logic cannot tell the two apart, so it uses
+               neither.  Say so, rather than "not a measure". *)
+            let ty, paths = Option.get (conflated_param_type f) in
+            Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
+              (Printf.sprintf
+                 "`%s` cannot be used in this refinement predicate, so the refinement is not \
+                  checked: its parameter type `%s` has the same name as a type declared in %s, \
+                  and the checker cannot tell them apart. Rename your type."
+                 f ty
+                 (String.concat " and " (List.map (fun p -> if p = "" then "your module" else "`" ^ p ^ "`") paths)))
           | _ ->
             Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
               (Printf.sprintf

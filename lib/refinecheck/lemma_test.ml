@@ -168,22 +168,88 @@ let test_lemma ~(file : string) (qname, (fd : A.fn_def), admitted) : result =
     false one.  [entry_mod] is the entry file's module; the lemma's own
     module is imported with `use`.  Returns the source and the lemmas it
     covers, each with the inputs it runs. *)
+(* A type as March source (the shapes a parameter type takes). *)
+let rec ty_source (t : A.ty) : string =
+  match t with
+  | A.TyCon (n, []) -> n.A.txt
+  | A.TyCon (n, args) -> n.A.txt ^ "(" ^ String.concat ", " (List.map ty_source args) ^ ")"
+  | A.TyVar n -> n.A.txt
+  | A.TyTuple ts -> "(" ^ String.concat ", " (List.map ty_source ts) ^ ")"
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> ty_source b
+  | _ -> "_"
+
+(* An interface law's lemma for one impl ([March_desugar.Interface_laws],
+   named `<law>__<Iface>_<Type>`) has no source text of its own.  Its parts
+   come from the law as written in the interface (whose method calls then
+   dispatch to the impl, in the compiled program, by the parameter types)
+   with the generated lemma's parameter types (the impl's type).  Also the
+   module to `use` for the interface's methods. *)
+let generated_parts (r : result) : (string * string * string option) option =
+  match !W.current_module with
+  | None -> None
+  | Some m -> (
+    let bare = match String.rindex_opt r.l_name '.' with Some i -> String.sub r.l_name (i + 1) (String.length r.l_name - i - 1) | None -> r.l_name in
+    let law_of_name =
+      let n = String.length bare in
+      let rec cut i = if i + 1 >= n then None else if bare.[i] = '_' && bare.[i + 1] = '_' then Some (String.sub bare 0 i) else cut (i + 1) in
+      cut 0
+    in
+    let rec find path ds =
+      List.find_map
+        (function
+          | A.DInterface (idef, _) -> (
+            match List.find_opt (fun (l : A.fn_def) -> Some l.A.fn_name.A.txt = law_of_name) idef.A.iface_laws with
+            | Some l -> Some (path, l)
+            | None -> None)
+          | A.DMod (n, _, inner, _) -> find (if path = "" then n.A.txt else path ^ "." ^ n.A.txt) inner
+          | _ -> None)
+        ds
+    in
+    match find "" m.A.mod_decls, r.l_fd.A.fn_clauses with
+    | Some (path, law), [ c ] -> (
+      let text = try In_channel.with_open_bin law.A.fn_name.A.span.A.file In_channel.input_all with Sys_error _ -> "" in
+      match March_ast.Lemma_source.parts text law with
+      | None -> None
+      | Some (_, theorem) ->
+        let law_names =
+          match law.A.fn_clauses with
+          | lc :: _ -> List.map (fun fp -> fst (W.clause_param fp)) lc.A.fc_params
+          | [] -> []
+        in
+        let tys = List.map (fun fp -> snd (W.clause_param fp)) c.A.fc_params in
+        if List.length law_names <> List.length tys || List.exists Option.is_none tys then None
+        else
+          let params =
+            String.concat ", " (List.map2 (fun n t -> n ^ " : " ^ ty_source (Option.get t)) law_names tys)
+          in
+          Some (params, theorem, if path = "" then None else Some path))
+    | _ -> None)
+
 let harness ~(entry_mod : string) ~(text : string) (results : result list) :
     string * (result * (string * V.value) list list) list =
   let covered =
     List.filter_map
       (fun r ->
-        match r.l_verdict, March_ast.Lemma_source.parts text r.l_fd with
-        | Held _, Some parts when r.l_admitted && r.l_decided <> [] ->
+        let parts =
+          match March_ast.Lemma_source.parts text r.l_fd with
+          | Some p -> Some (p, None)
+          | None -> Option.map (fun (ps, th, u) -> ((ps, th), u)) (generated_parts r)
+        in
+        match r.l_verdict, parts with
+        | Held _, Some (parts, extra) when r.l_admitted && r.l_decided <> [] ->
           let ins = List.filteri (fun i _ -> i < compiled_inputs) r.l_decided in
-          Some (r, parts, ins)
+          Some (r, parts, ins, extra)
         | _ -> None)
       results
   in
   let modpath r =
     match String.rindex_opt r.l_name '.' with Some i -> entry_mod ^ "." ^ String.sub r.l_name 0 i | None -> entry_mod
   in
-  let uses = List.sort_uniq compare (List.map (fun (r, _, _) -> modpath r) covered) in
+  let uses =
+    List.sort_uniq compare
+      (List.concat_map (fun (r, _, _, extra) -> modpath r :: Option.to_list extra) covered)
+  in
+  let covered = List.map (fun (r, parts, ins, _) -> (r, parts, ins)) covered in
   let neg = perturb () = Some "compiled" in
   let b = Buffer.create 1024 in
   Buffer.add_string b "mod LemmaHarness do\n";
