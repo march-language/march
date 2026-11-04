@@ -5,7 +5,14 @@ module RR = Refine_reflect
 
 type status = Uncovered | Unproved_only of string list | Covered of string list | Higher_order
 
-type entry = { e_module : string; e_name : string; e_public : bool; e_span : A.span; e_status : status }
+type entry = {
+  e_module : string;
+  e_name : string;
+  e_public : bool;
+  e_span : A.span;
+  e_status : status;
+  e_impl : (string * string) option;
+}
 
 (* A call head as written: `f`, or `M.f` for a qualified call (parsed either as
    a dotted variable or as a field of a constructor/variable path). *)
@@ -51,6 +58,40 @@ let prefixes (p : string) : string list =
 
 let last_segment s = match String.rindex_opt s '.' with Some i -> String.sub s (i + 1) (String.length s - i - 1) | None -> s
 
+(* The generated names of [lib/desugar/interface_laws.ml]: an impl method's copy
+   is `__law_<m>__<tag>`, a law's lemma `<law>__<tag>`, with <tag> =
+   `<Iface>_<type tag>`.  Mirrored here (refinecheck does not depend on desugar). *)
+let rec ty_tag (t : A.ty) : string =
+  match t with
+  | A.TyCon (n, []) -> String.map (fun c -> if c = '.' then '_' else c) n.A.txt
+  | A.TyCon (n, args) -> String.concat "_" (ty_tag (A.TyCon (n, [])) :: List.map ty_tag args)
+  | A.TyVar n -> n.A.txt
+  | A.TyTuple ts -> String.concat "_" ("T" :: List.map ty_tag ts)
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> ty_tag b
+  | _ -> "T"
+
+let rec ty_text (t : A.ty) : string =
+  match t with
+  | A.TyCon (n, []) -> n.A.txt
+  | A.TyCon (n, args) -> n.A.txt ^ "(" ^ String.concat ", " (List.map ty_text args) ^ ")"
+  | A.TyVar n -> n.A.txt
+  | A.TyTuple ts -> "(" ^ String.concat ", " (List.map ty_text ts) ^ ")"
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> ty_text b
+  | _ -> "_"
+
+let copy_prefix = "__law_"
+
+(* Every impl of [ds]: (module prefix, interface (bare), impl type, its non-lemma methods). *)
+let rec impls ?(prefix = "") (ds : A.decl list) : (string * string * A.ty * (A.name * A.fn_def) list) list =
+  List.concat_map
+    (function
+      | A.DImpl (idef, _) ->
+        [ (prefix, last_segment idef.A.impl_iface.A.txt, idef.A.impl_ty,
+           List.filter (fun (_, (fd : A.fn_def)) -> not (List.mem "lemma" fd.A.fn_attrs)) idef.A.impl_methods) ]
+      | A.DMod (n, _, inner, _) -> impls ~prefix:(prefix ^ n.A.txt ^ ".") inner
+      | _ -> [])
+    ds
+
 let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list =
   let all = fns decls in
   let user = List.filter (fun (_, _, (fd : A.fn_def)) -> is_user fd.A.fn_name.A.span) all in
@@ -69,6 +110,21 @@ let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list
       if String.contains h '.' then None
       else match List.filter (fun q -> last_segment q = h) user_names with [ q ] -> Some q | _ -> None)
   in
+  let impl_list = impls decls in
+  (* tag -> interface, for naming a generated law `<law> (via <Iface>)` *)
+  let law_tags = Hashtbl.create 8 in
+  List.iter (fun (_, iface, ty, _) -> Hashtbl.replace law_tags (iface ^ "_" ^ ty_tag ty) iface) impl_list;
+  (* `<law>__<Iface>_<T>` -> `<law> (via <Iface>)`, for a generated law. *)
+  let law_display b =
+    let n = String.length b in
+    let rec find i = if i + 1 >= n then None else if b.[i] = '_' && b.[i + 1] = '_' then Some i else find (i + 1) in
+    match find 1 with
+    | Some i -> (
+      match Hashtbl.find_opt law_tags (String.sub b (i + 2) (n - i - 2)) with
+      | Some iface -> Printf.sprintf "%s (via %s)" (String.sub b 0 i) iface
+      | None -> b)
+    | None -> b
+  in
   let by_fn = Hashtbl.create 64 in
   List.iter
     (fun (lq, (fd : A.fn_def), admitted) ->
@@ -77,37 +133,65 @@ let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list
           match resolve lq h with
           | Some q ->
             let a, u = Option.value ~default:([], []) (Hashtbl.find_opt by_fn q) in
-            let l = last_segment lq in
+            let l = law_display (last_segment lq) in
             Hashtbl.replace by_fn q (if admitted then (a @ [ l ], u) else (a, u @ [ l ]))
           | None -> ())
         (theorem_calls fd))
     lemmas;
   let verdict_at = Hashtbl.create 64 in
-  List.iter (fun (r : RR.row) -> if r.RR.r_top && is_user r.RR.r_span then Hashtbl.replace verdict_at r.RR.r_span r.RR.r_verdict) rows;
+  (* Every top-level verdict, by span: an impl method's copy has a synthetic
+     span (file `<none>`), and whether its row is user code is decided by the
+     impl method's own span below. *)
+  List.iter (fun (r : RR.row) -> if r.RR.r_top then Hashtbl.replace verdict_at r.RR.r_span r.RR.r_verdict) rows;
+  let status_of q (fd : A.fn_def) =
+    match Hashtbl.find_opt verdict_at fd.A.fn_name.A.span with
+    | Some (RR.Reflected _) -> (
+      match Hashtbl.find_opt by_fn q with
+      | Some ((_ :: _ as a), _) -> Some (Covered a)
+      | Some ([], (_ :: _ as u)) -> Some (Unproved_only u)
+      | _ -> Some Uncovered)
+    | Some (RR.Specialised _) -> Some Higher_order
+    | _ -> None
+  in
+  let module_of prefix = let inner = strip_dot prefix in if inner = "" then file_mod else file_mod ^ "." ^ inner in
+  (* An impl method appears only through its copy, which exists only for an
+     interface that declares laws. *)
+  let impl_entries =
+    List.concat_map
+      (fun (prefix, iface, ty, methods) ->
+        List.filter_map
+          (fun ((mn : A.name), (mfd : A.fn_def)) ->
+            if not (is_user mfd.A.fn_name.A.span || is_user mn.A.span) then None
+            else
+              let cq = prefix ^ copy_prefix ^ mn.A.txt ^ "__" ^ iface ^ "_" ^ ty_tag ty in
+              match List.find_opt (fun (q, _, _) -> q = cq) all with
+              | None -> None
+              | Some (_, _, cfd) ->
+                Option.map
+                  (fun e_status ->
+                    { e_module = module_of prefix; e_name = mn.A.txt; e_public = true; e_span = mn.A.span; e_status;
+                      e_impl = Some (iface, ty_text ty) })
+                  (status_of cq cfd))
+          methods)
+      impl_list
+  in
+  let is_copy (fd : A.fn_def) = String.starts_with ~prefix:copy_prefix fd.A.fn_name.A.txt in
   List.filter_map
     (fun (q, prefix, (fd : A.fn_def)) ->
-      if List.mem "lemma" fd.A.fn_attrs then None
+      if List.mem "lemma" fd.A.fn_attrs || is_copy fd then None
       else
-        let e_status =
-          match Hashtbl.find_opt verdict_at fd.A.fn_name.A.span with
-          | Some (RR.Reflected _) -> (
-            match Hashtbl.find_opt by_fn q with
-            | Some ((_ :: _ as a), _) -> Some (Covered a)
-            | Some ([], (_ :: _ as u)) -> Some (Unproved_only u)
-            | _ -> Some Uncovered)
-          | Some (RR.Specialised _) -> Some Higher_order
-          | _ -> None
-        in
+        let e_status = status_of q fd in
         Option.map
           (fun e_status ->
-            let inner = strip_dot prefix in
-            { e_module = (if inner = "" then file_mod else file_mod ^ "." ^ inner);
+            { e_module = module_of prefix;
               e_name = fd.A.fn_name.A.txt;
               e_public = fd.A.fn_vis = A.Public;
               e_span = fd.A.fn_name.A.span;
-              e_status })
+              e_status;
+              e_impl = None })
           e_status)
     user
+  @ impl_entries
 
 let loc (sp : A.span) = Printf.sprintf "%s:%d" (Filename.basename sp.A.file) sp.A.start_line
 
@@ -115,7 +199,9 @@ let report_lines (es : entry list) : string list =
   let modules = List.fold_left (fun acc e -> if List.mem e.e_module acc then acc else acc @ [ e.e_module ]) [] es in
   List.concat_map
     (fun md ->
-      let es = List.filter (fun e -> e.e_module = md) es in
+      let all_es = List.filter (fun e -> e.e_module = md) es in
+      let es = List.filter (fun e -> e.e_impl = None) all_es in
+      let impl_es = List.filter (fun e -> e.e_impl <> None) all_es in
       let pick f = List.filter f es in
       let uncov_pub = pick (fun e -> e.e_status = Uncovered && e.e_public)
       and uncov_priv = pick (fun e -> e.e_status = Uncovered && not e.e_public)
@@ -124,8 +210,8 @@ let report_lines (es : entry list) : string list =
       and ho = pick (fun e -> e.e_status = Higher_order) in
       let pure = List.length uncov_pub + List.length uncov_priv + List.length unproved + List.length covered in
       let more = if unproved = [] then "" else Printf.sprintf " (%d more only by unproved laws)" (List.length unproved) in
-      let row label e laws =
-        Printf.sprintf "  %s  %s  %s%s" label e.e_name (loc e.e_span)
+      let row ?(sep = "  ") label e laws =
+        Printf.sprintf "  %s%s%s  %s%s" label sep e.e_name (loc e.e_span)
           (match laws with [] -> "" | ls -> "  (" ^ String.concat ", " ls ^ ")")
       in
       let laws e = match e.e_status with Covered l | Unproved_only l -> l | _ -> [] in
@@ -134,5 +220,31 @@ let report_lines (es : entry list) : string list =
       @ List.map (fun e -> row "uncovered (private)" e []) uncov_priv
       @ List.map (fun e -> row "unproved only" e (laws e)) unproved
       @ List.map (fun e -> row "covered" e (laws e)) covered
+      @ List.map
+          (fun e ->
+            let i, t = Option.get e.e_impl in
+            row ~sep:" " (Printf.sprintf "impl %s for %s:" i t) e (laws e))
+          impl_es
       @ List.map (fun e -> row "higher-order (no laws possible yet)" e []) ho)
     modules
+
+let json_lines (es : entry list) : string list =
+  let str = Infer_json.str and arr = Infer_json.arr in
+  List.map
+    (fun e ->
+      let status, cov, unp =
+        match e.e_status with
+        | Uncovered -> ("uncovered", [], [])
+        | Unproved_only u -> ("unproved-only", [], u)
+        | Covered c -> ("covered", c, [])
+        | Higher_order -> ("higher-order", [], [])
+      in
+      let status = if e.e_impl <> None then "impl-method" else status in
+      Printf.sprintf
+        "{\"kind\":\"law-coverage\",\"module\":%s,\"fn\":%s,\"public\":%b,\"file\":%s,\"line\":%d,\"status\":%s,\"covered_by\":%s,\"unproved_by\":%s,\"impl\":%s}"
+        (str e.e_module) (str e.e_name) e.e_public (str e.e_span.A.file) e.e_span.A.start_line (str status)
+        (arr (List.map str cov)) (arr (List.map str unp))
+        (match e.e_impl with
+         | None -> "null"
+         | Some (i, t) -> Printf.sprintf "{\"interface\":%s,\"type\":%s}" (str i) (str t)))
+    es

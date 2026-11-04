@@ -104,4 +104,46 @@ let tests =
         expect b "law coverage: M: ");
     gated "absent_without_flag: plain --check prints no report" (fun () ->
         let out = coverage ~args:"--check" (m (L.defs4_6 ^ L.cat_nil)) in
-        if contains out "law coverage" then Alcotest.failf "no report without the flag:\n%s" out) ]
+        if contains out "law coverage" then Alcotest.failf "no report without the flag:\n%s" out);
+    gated "impl_method_covered: an impl's method is covered via its interface's law" (fun () ->
+        let out = coverage (m L.monoid) in
+        ends_with out "  impl Monoid for Int: combine  " "(combine_assoc (via Monoid))";
+        List.iter
+          (fun l -> if contains l "__law_" then Alcotest.failf "a generated copy leaked into the report: %S" l)
+          (lines out));
+    gated "impl_without_laws: an impl of a law-less interface has no rows" (fun () ->
+        let src =
+          m
+            {|  interface Sized(a) do
+    fn size : a -> Int
+  end
+  impl Sized(Int) do
+    fn size(x) do x end
+  end
+  fn f(n : Int) : Int do n + 1 end
+|}
+        in
+        let out = coverage src in
+        expect_no out "  impl ";
+        expect out "  uncovered (public)  f  ");
+    gated "json_shape: --law-coverage-json prints one record per function" (fun () ->
+        let out = coverage ~args:"--check --law-coverage-json" (m (L.defs4_6 ^ L.cat_nil)) in
+        let recs =
+          List.filter_map
+            (fun l ->
+              if String.starts_with ~prefix:"{\"kind\":\"law-coverage\"" l then Some (Yojson.Safe.from_string l)
+              else None)
+            (lines out)
+        in
+        let find name =
+          List.find_opt (fun j -> Yojson.Safe.Util.(member "fn" j |> to_string) = name) recs
+        in
+        match find "cat" with
+        | None -> Alcotest.failf "no record for cat:\n%s" out
+        | Some j ->
+          let open Yojson.Safe.Util in
+          Alcotest.(check string) "status" "covered" (member "status" j |> to_string);
+          Alcotest.(check (list string)) "covered_by" [ "cat_nil" ] (member "covered_by" j |> to_list |> List.map to_string);
+          Alcotest.(check string) "module" "M" (member "module" j |> to_string);
+          Alcotest.(check bool) "public" true (member "public" j |> to_bool);
+          if member "impl" j <> `Null then Alcotest.fail "impl is null for a plain function") ]

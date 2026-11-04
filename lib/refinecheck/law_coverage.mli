@@ -20,6 +20,9 @@ type entry = {
   e_public : bool;
   e_span : March_ast.Ast.span;
   e_status : status;
+  e_impl : (string * string) option;
+      (** an impl method: (interface, impl type); its laws are the
+          interface's, generated per impl, named `<law> (via <Iface>)` *)
 }
 
 (** The call heads of a lemma's theorem, as written (`cat`, `List.append`),
@@ -42,3 +45,6 @@ val entries :
 
 (** The text report, one block per module (§4). *)
 val report_lines : entry list -> string list
+
+(** One `{"kind":"law-coverage",...}` JSON object per entry (§4). *)
+val json_lines : entry list -> string list
