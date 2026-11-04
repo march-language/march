@@ -5039,18 +5039,28 @@ and check_spawn_args env ~site_span ~spelling (actor_name : string)
                (List.map (fun (p, t) -> Printf.sprintf "%s : %s" p (pp_ty (repr t))) sig_))
       in
       let plural n = if n = 1 then "" else "s" in
-      Err.error ~code:Err.Code.actor_init_arity env.errors ~span:site_span
+      let labels = match Hashtbl.find_opt env.decl_sites ("actorinit:" ^ actor_name) with
+        | Some isp ->
+          [ { Err.lbl_span = isp;
+              lbl_message =
+                if sig_ = [] then Printf.sprintf "`%s`'s `init` takes no parameters" actor_name
+                else Printf.sprintf "`%s`'s `init` parameter%s" actor_name (plural n_sig) } ]
+        | None -> [] in
+      Err.report env.errors
+        { Err.severity = Err.Error; span = site_span; labels; notes = [];
+          code = Err.Code.actor_init_arity; fix = None;
+          message =
         (if sig_ = [] then
            Printf.sprintf
-             "actor `%s` declares no `init` parameters, but %s supplies %d argument%s.\n\
+             "Actor `%s` declares no `init` parameters, but %s supplies %d argument%s.\n\
               Its init is `%s`; to take a value at spawn time, declare the \
               parameters: `init(config : Config) { … }`."
              actor_name spelling n_args (plural n_args) show_sig
          else
            Printf.sprintf
-             "actor `%s`'s init takes %d argument%s, but %s supplies %d.\n\
+             "Actor `%s`'s init takes %d argument%s, but %s supplies %d.\n\
               Its signature is `%s`."
-             actor_name n_sig (plural n_sig) spelling n_args show_sig)
+             actor_name n_sig (plural n_sig) spelling n_args show_sig) }
     end else
       List.iter2 (fun a (p, t) ->
           check_expr env a t
@@ -7219,6 +7229,19 @@ let rec check_decl env (d : Ast.decl) : env =
           (p.param_name.txt, t)) actor.actor_init_params
     in
     Hashtbl.replace env.actor_init_sigs name.txt init_sig;
+    (* Where `init` is declared, for the spawn-arity error's label: its
+       parameter list (first name to the last type's name when that is a
+       plain one), or the init expression for the bare form. *)
+    Hashtbl.replace env.decl_sites ("actorinit:" ^ name.txt)
+      (match actor.actor_init_params with
+       | [] -> span_of_expr actor.actor_init
+       | (first : Ast.param) :: _ ->
+         let last = List.nth actor.actor_init_params (List.length actor.actor_init_params - 1) in
+         let stop = match last.param_ty with
+           | Some (Ast.TyCon (tn, [])) -> tn.span
+           | _ -> last.param_name.span in
+         { first.param_name.span with
+           Ast.end_line = stop.end_line; end_col = stop.end_col });
     report_duplicate_params env actor.actor_init_params;
     let init_env =
       List.fold_left2

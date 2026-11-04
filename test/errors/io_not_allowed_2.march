@@ -1,7 +1,7 @@
-mod Counter do
+mod App do
   needs IO.Console
 
-  actor CounterActor do
+  actor Counter do
     state { count : Int }
     init { count: 0 }
     on Inc(x : Int) do { count: state.count + x } end

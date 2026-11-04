@@ -242,6 +242,11 @@ git log is authoritative for exact commits.
   labels the first. A misspelt actor in `spawn` or in a supervise block reads "I don't know an
   actor called `Countr`. Did you mean `Counter`?", and a misspelt `strategy` lists the three it
   can be.
+- Diagnostics: a missing JSON codec for `Node.send` / `Node.enqueue` gives its advice ("Add
+  `derive Json for Ping` next to its declaration.") as a note, like the `@[remote]` case. A
+  `migrate_state` / `migrate_msg` that does IO names the actor it migrates ("`counter_migrate_state`
+  migrates actor `Counter`'s state, and `migrate_state` must be IO-free, …") and moves its advice
+  to a note. A `spawn` whose argument count does not match the actor's `init` labels the `init`.
 - Diagnostics: `role_grant_exceeded` points at the use and labels the callback and each call on
   the way, like `cap_grant_exceeded`; in a `cap no_panic` module, a panic reached through several
   of its functions is reported once, at the panic, with a label on each caller.

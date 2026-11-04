@@ -1806,16 +1806,39 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         nl >= sl && String.sub qname (nl - sl) sl = sfx in
       has "_migrate_msg" || has "_migrate_msg__hcr" in
     let what = if is_msg then "migrate_msg" else "migrate_state" in
+    (* The actor it migrates, by the runtime's convention
+       (llvm_toplevel.ml): `counter_migrate_state` is `Counter`'s. *)
+    let actor =
+      let bare = match String.rindex_opt qname '.' with
+        | Some i -> String.sub qname (i + 1) (String.length qname - i - 1)
+        | None -> qname in
+      let sfx = List.find_opt (fun sfx ->
+          let nl = String.length bare and sl = String.length sfx in
+          nl > sl && String.sub bare (nl - sl) sl = sfx)
+          [ "_migrate_msg__hcr"; "_migrate_msg"; "_migrate_state" ] in
+      match sfx with
+      | Some sfx -> Some (String.capitalize_ascii
+                            (String.sub bare 0 (String.length bare - String.length sfx)))
+      | None -> None in
     if own_caps <> [] then
-      Err.error ~code:Err.Code.io_not_allowed env.errors ~span:sp
-        (render_parts [
-          MPCode what; MPText " must be IO-free."; MPBreak;
-          MPCode qname; MPText " calls capabilities that need ";
-          MPCode (String.concat ", " own_caps); MPText ".";
-          MPBreak; MPText (if is_msg
-                           then "migrate_msg runs inside the actor's receive loop, converting a message that is already queued."
-                           else "migrate_state runs during the hot-migration window, before user messages.");
-          MPBreak; MPText "hint: move side effects into a normal handler that runs after migration completes." ])
+      Err.report env.errors
+        { Err.severity = Err.Error; span = sp; labels = [];
+          code = Err.Code.io_not_allowed; fix = None;
+          message = render_parts (
+              [ MPCode qname ]
+              @ (match actor with
+                  | Some a -> [ MPText " migrates actor "; MPCode a;
+                                MPText (if is_msg then "'s queued messages, and " else "'s state, and ") ]
+                  | None -> [ MPText " is a hot-reload migration, and " ])
+              @ [ MPCode what; MPText " must be IO-free, but it calls capabilities that need ";
+                  MPCode (String.concat ", " own_caps); MPText ".";
+                  MPBreak; MPText (if is_msg
+                                   then "A message migration runs inside the actor's receive loop, converting a message that is already queued."
+                                   else "A state migration runs during the hot-migration window, before user messages.") ]);
+          notes = [ render_parts (
+              [ MPText "Move the side effects into a handler" ]
+              @ (match actor with Some a -> [ MPText " of "; MPCode a ] | None -> [])
+              @ [ MPText ", which runs after the migration completes." ]) ] }
   in
   (* The shape the runtime relies on (DD step 6, plan II.4.8): exactly one
      parameter, annotated with the OLD message type, and an annotated
@@ -2270,13 +2293,16 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
       | Some msg_ty ->
         (match json_dispatch_head env msg_ty with
          | None ->
-           Err.error ~code:Err.Code.codec_missing env.errors ~span:sp
-             (render_parts [
-               MPCode callee; MPText " cannot choose a codec for a message of type ";
-               MPCode (pp_ty (repr msg_ty)); MPText ".";
-               MPBreak;
-               MPText "hint: the message must be a declared type with "; MPCode "derive Json";
-               MPText " -- the compiler mints the wire type tag from that declaration's name."])
+           Err.report env.errors
+             { Err.severity = Err.Error; span = sp; labels = [];
+               code = Err.Code.codec_missing; fix = None;
+               message = render_parts [
+                   MPCode callee; MPText " cannot choose a codec for a message of type ";
+                   MPCode (pp_ty (repr msg_ty)); MPText ".";
+                   MPBreak;
+                   MPText "A remote message crosses the network as JSON, and the name of its declared type is its wire tag."];
+               notes = [ render_parts [
+                   MPText "Send a value of a declared type with "; MPCode "derive Json"; MPText "."] ] }
          | Some name ->
            let s = short name in
            if has_json_codec s then begin
@@ -2286,14 +2312,18 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
            else if callee = "@[remote] dispatch" then
              remote_codec_missing sp s
            else
-             Err.error ~code:Err.Code.codec_missing env.errors ~span:sp
-               (render_parts [
-                 MPCode callee; MPText " needs a JSON codec for ";
-                 MPCode s; MPText ", and none is derived.";
-                 MPBreak;
-                 MPText "hint: add "; MPCode ("derive Json for " ^ s);
-                 MPText " next to its declaration; the compiler then mints the wire type tag from it, and a receiver decodes with ";
-                 MPCode "from_json"; MPText "."]))
+             Err.report env.errors
+               { Err.severity = Err.Error; span = sp; labels = [];
+                 code = Err.Code.codec_missing; fix = None;
+                 message = render_parts [
+                     MPCode callee; MPText " needs a JSON codec for ";
+                     MPCode s; MPText ", and none is derived.";
+                     MPBreak;
+                     MPText "A remote message crosses the network as JSON, and its type's name is its wire tag; a receiver decodes it with ";
+                     MPCode "from_json"; MPText "."];
+                 notes = [ render_parts [
+                     MPText "Add "; MPCode ("derive Json for " ^ s);
+                     MPText " next to its declaration."] ] })
     ) !(env.node_send_sites)
 
 (** Validate every `proof cap X with T` clause.  Deferred rather than checked
