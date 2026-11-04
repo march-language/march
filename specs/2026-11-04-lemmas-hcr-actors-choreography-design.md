@@ -39,11 +39,19 @@ this into rules; the phase order in §7 follows it.
 |---|---|---|
 | HCR | migration simulation (H3); a handler invariant whose proof needs a lemma (H4) | handlers as reflected state-transition functions (M3), block facts at a handler's result (M1, todo `2026-11-03-return-contract-ignores-block-facts`) |
 | HCR | messages surviving two type changes (H6) | composing `migrate_msg`s (M7). Today the runtime drops such a message (`hcr_route_slow`) |
-| HCR | the old version's invariant as the migration's hypothesis | baseline invariants from `.schemas.json` (M2) |
+| HCR | a refinement or invariant that only gets stronger (a **soundness hole today**, §3.3) | refinements in `.schemas.json` and a variance check at deploy (M9) |
+| HCR | an invariant that calls the user's own functions | `@invariant` elaborated to a reflected predicate (M2). The old invariant as the migration's hypothesis **already exists** in `--check-migration` |
 | Choreography | the projections compose back to the global protocol (C4); deadlock freedom (C5) | first-order configuration semantics in a stdlib theory module (M5), no new solver features |
 | Choreography | **linking any of it to the compiler** | translation validation of the two OCaml projectors against the March spec (M6) |
 | Actors | **linking the model to the C runtime** | trace conformance against `MARCH_TRACE` events (M8): tested, not proved |
 | Actors | message refcount ownership | **not a lemma.** It's a property of Perceus and the runtime, checked by `--rc-trace` and `scripts/check-actor-rc-stores.sh`. §4.6 states it as a law and says why |
+
+**A soundness hole in HCR today** (P4, §3.3; todo
+`2026-11-04-hcr-refinement-strengthening-unchecked`, P1): refinements are erased from
+`.schemas.json`. So a deploy that only strengthens a state field's refinement, a handler
+parameter's or an `@invariant` is neither migrated nor checked, and the new handlers' proofs
+rest on an assumption the live state doesn't meet. Fixing it needs no lemmas, only implications
+between two versions' predicates, and it comes first in §7.
 
 **Four gaps the probes turned up** in the lemma machinery itself. All four hurt any user, not
 only these areas. Each is filed as its own todo:
@@ -198,6 +206,15 @@ type Env = Msg(Int, Int) | Down(Int) | RReply(Int, Int)   -- sender+payload, mon
   - While the name was shared, the handler's own body was `solver-undecided` on
     `count + n >= 0`: the shared name withdrew the `n > 0` assumption.
 
+**P4, a refinement-only change across a deploy: unchecked, and unsound.** The full
+reproduction is in todo `2026-11-04-hcr-refinement-strengthening-unchecked`. Two
+`--compile --compile-so --hot-reload Main` builds differ only in `count : {Int | _ >= 0}`
+becoming `_ >= 1`, and `on Bump(n : {Int | _ > 0})` becoming `_ > 5`. Their `.schemas.json`
+are byte-identical. With `@invariant(count >= 0)` becoming `count >= 1` they differ only in
+that line, and `--check-migration` exits 0 silently (there is no `migrate_state` to check).
+`per(total, state.count)` with `b : {Int | _ != 0}` is unverified in v1 and proved in v2,
+from an assumption a live v1 actor at `count: 0` breaks. A live reload server was not run.
+
 ## 3. Hot code reload
 
 ### 3.1 Where the statements live
@@ -214,7 +231,66 @@ type Env = Msg(Int, Int) | Down(Int) | RReply(Int, Int)   -- sender+payload, mon
 HCR is the area closest to today's machinery: **the migration functions are ordinary March
 code**, so a lemma about them is about the code that runs. No model or bridge is needed.
 
-### 3.2 Candidate lemmas
+### 3.2 What a deploy rejects today
+
+`forge deploy hot` (`forge/lib/cmd_deploy_hot.ml`, "Gap #3") runs
+`march --check-migration` (`bin/schema_migration.ml`). That patches each `migrate_state` to
+assume the baseline's `@invariant` and to guarantee the new one, and checks it. The deploy is
+refused only when that produces an **error**.
+
+| Situation | Today |
+|---|---|
+| a counterexample: `migrate_state` breaks the new invariant | refused |
+| the checker can't decide | accepted (`refinement_unverified` is a warning outside `cap verified`; from reading the code) |
+| an `@invariant` the parser doesn't accept | accepted ("unparseable predicate: conservatively accept"); G3 for the build side |
+| an invariant or refinement made stronger, with no `migrate_state` | accepted, nothing checked (P4) |
+| a `migrate_msg` that breaks the new handler's contract | accepted: no deploy-time check reads handler refinements |
+| `MARCH_BIN` unset and no `_build/default/bin/main.exe` in the cwd | the whole check is skipped, silently |
+
+### 3.3 The deploy gate this plan adopts
+
+A deploy is the moment of most risk, so the gate is stricter than a build:
+
+1. **Variance (M9), first because it is a soundness fix.** `.schemas.json` carries each
+   state field's refinement, each handler parameter's refinement, the reply refinement of a
+   call handler, and the `@invariant`. Then for each actor:
+   - **State with unchanged shape and no `migrate_state`:** prove old refinement and old
+     invariant ⇒ new ones. This is the identity migration, checked as `--check-migration`
+     already checks a written one.
+   - **State with a `migrate_state`:** as today, but the hypothesis also includes the old
+     field refinements.
+   - **A message whose type is unchanged:** prove old parameter refinement ⇒ new parameter
+     refinement. Contravariant: old-epoch senders and queued messages were only checked
+     against the old contract.
+   - **A changed message:** H2 (`migrate_msg`'s results against the new contract).
+   - **A call handler's reply:** prove new reply refinement ⇒ old reply refinement.
+     Covariant: an old-epoch caller still relies on the old one.
+
+   Each is an implication between two predicates in the existing logic. No lemma or new
+   reflection is needed when the predicates are in today's vocabulary.
+2. **Refuse what isn't proved.** A counterexample is always a refusal, with the input. An
+   undecided check is a refusal by default. `forge deploy hot --accept-unproved <Actor>.<law>`
+   overrides it, and the override is written to the deploy audit log (as `DRAIN` requests
+   are), so shipping an unproved migration is a decision someone made and can find later.
+3. **Check the live data when the proof is undecided (M10).** `migrate_state` is pure and
+   IO-free, so before `ACTIVATE` the server can run the new build's migration on a copy of
+   every live actor's state and evaluate the new refinements and invariant. Any failure
+   refuses the deploy and names the actor. That turns "unproved for all inputs" into "checked
+   on every input that will actually run". The copy matters: the dry run holds an extra
+   reference, so Perceus can't reuse the old state's cell in place. Messages that arrive
+   later can't be checked ahead of time. At conversion, a `migrate_msg` result that fails the
+   new handler's contract is dropped and reported, like a `None`. The report line is
+   `checked on live data (N actors)`, never `proved`.
+4. **Never skip silently.** A missing compiler, an unparseable predicate, or an actor whose
+   schema can't be read refuses the deploy, naming what is missing.
+
+**Fewer migrations to prove (M11).** Most migrations are mechanical: add a field with a
+default, rename a field, keep a message unchanged. Derive those from the schema diff, building
+on `forge hot-reload migrate-msg-stub`, which already writes the identity cases. Prove each
+derivation rule once, in the compiler's own test suite, so the user writes, and proves, only
+the migrations that need judgement.
+
+### 3.4 Candidate lemmas
 
 Below, `Inv` is a reflected `fn tally_inv(s : TallyState) : Bool` (what M2 lets `@invariant`
 elaborate to), and `OldInv` is the same for the old shape.
@@ -228,12 +304,13 @@ fn migrate_preserves_inv(old : V1.State)
   : {Unit | !old_inv(old) || tally_inv(tally_migrate_state(old))} do ... end
 ```
 
-Today the docs say `forge deploy hot` proves this for the `@invariant` grammar's table
-(comparisons, `len`, field access). In-compiler, the new state's field refinements are
-obliged at the migration's result and don't prove (P3, G5). Missing:
+Today `forge deploy hot` checks this through `--check-migration`, with the baseline's
+invariant as the hypothesis (§3.2), for the `@invariant` grammar's table (comparisons, `len`,
+field access). In an ordinary build, the new state's field refinements are obliged at the
+migration's result and don't prove (P3, G5). Missing:
 - G5, field refinements of the old record reaching `old.f`;
-- M2, an `@invariant` that may call reflected functions, plus the *old* invariant as
-  hypothesis;
+- M2, an `@invariant` that may call reflected functions;
+- M9, the old field refinements as hypotheses too;
 - M1, if the migration's proof needs a lemma call.
 
 Once those land the compiler generates H1 per actor. The user never sees it unless it fails,
@@ -523,7 +600,10 @@ edit.
 | G4 | actor message constructors resolved by datatype; a qualified spelling; contracts not withdrawn for a constructor shared by an old type and the actor | H2 in the common case | medium; todo `2026-10-15-actor-message-ctor-cannot-be-qualified`, ctor registry `#1056` |
 | G5 | a field refinement on an anonymous-record parameter reaches `old.f` | H1, H5 | small to medium |
 | M1 | block facts reach a function's return contract and a handler's result obligation | H4, H1 with lemmas | medium; todo `2026-11-03-return-contract-ignores-block-facts` |
-| M2 | `@invariant` elaborates to a reflected `<actor>_inv(state) : Bool`, which may call reflected functions; the baseline's invariant (from `.schemas.json`) is the migration's hypothesis | H1, H3 | medium |
+| M2 | `@invariant` elaborates to a reflected `<actor>_inv(state) : Bool`, which may call reflected functions. The baseline's invariant is already the migration's hypothesis in `--check-migration`; this keeps that and widens the vocabulary | H1, H3 | medium |
+| M9 | refinements and reply refinements in `.schemas.json`; the deploy-time variance check (§3.3) | the P4 soundness hole; H2 for unchanged messages | small to medium; todo `2026-11-04-hcr-refinement-strengthening-unchecked` |
+| M10 | dry-run `migrate_state` on copies of the live states before `ACTIVATE`; a contract check on each converted message | undecided migrations, checked on real data | medium; runtime and reload server |
+| M11 | derived migrations for mechanical schema diffs, each derivation rule proved once | fewer hand-written migrations | medium |
 | M3 | `<Actor>.step(state, msg) : State`, a reflected function from the handlers whose state result does not depend on an effect's value (`send`/`println` in statement position erased in the logic copy; `receive`, `Actor.call` results, `self()` block). Needs its own soundness table and RED controls, as phase 5's had | H3, handler invariants stated as lemmas | large |
 | M5 | `Session.Theory`: `Global`, `Local`, `project`, `merge`, `restrict`, `config`, `run`, `schedule`; mutual-SCC lemmas probed first | C1-C6 | medium (code), large (proofs) |
 | M6 | translation validation: emit each protocol and both projectors' outputs as `Session.Theory` values; check by interpreter evaluation | the link from C1-C6 to the compiler | medium |
@@ -536,11 +616,19 @@ Each phase follows the reflection design's conventions (§10 there): a fixture t
 without the rule, ledger triples asserted (never exit codes), a progress file, a
 `CHANGELOG.md` bullet, and `specs/lang/` updated, then `scripts/gen-lang-docs.py`.
 
+**Phase A0: close the variance hole.** M9 and §3.3 items 1, 2 and 4. Done when P4's pair of
+builds is refused with a counterexample (`count = 0`), the same pair with a proving
+`migrate_state` is accepted, and an undecided check is refused unless overridden, with the
+override in the audit log.
+
 **Phase A: never silent, and the honest failures (tier 2 works).** G3, G5, G4, and HCR
 counterexamples for H1 and H2 (reuse lemma refutation). Then H1 and H2 run on every build of
-an actor with `migrate_*` (not only at `forge deploy hot`), so the editor shows them. Done
-when P3's two skips become a proof (correct migration) or a counterexample (the probe's
-unsafe `Bump`), and an unsupported `@invariant` is an error.
+an actor with `migrate_*` (not only at `forge deploy hot`), so the editor shows them. The
+baseline is taken from the last deployed build's `.schemas.json` (`forge hot-reload status`
+knows it). Done when P3's two skips become a proof (correct migration) or a counterexample
+(the probe's unsafe `Bump`), and an unsupported `@invariant` is an error.
+
+**Phase A2: live-data checks and derived migrations.** M10, then M11.
 
 **Phase B: the guarantee report.** `march --check --guarantees` and `forge hot-reload check`
 print one line per actor and protocol in §1.2's vocabulary. This phase is cheap and makes
@@ -561,7 +649,7 @@ also what H4 needs. G1 and G2 are small and could go earlier if a phase above tr
 they are listed here because no app-developer guarantee depends on them once the compiler
 writes the lemmas itself.
 
-**Phase F: simulation and deploy depth.** M2's baseline invariants, M3 handler reflection,
+**Phase F: simulation and deploy depth.** M2's reflected invariants, M3 handler reflection,
 H3 behind `@compat(simulation)`, H5 rollback round trip, M7 with H6, and C6's tag check at
 deploy.
 
@@ -570,13 +658,16 @@ deploy.
 1. **H3's opt-in.** Is the simulation law the default (and a migration that resets a field
    says so), or opt-in? The default is the stronger guarantee, but many correct migrations
    would fail it.
-2. **Where the old version comes from.** H3 and M2 need the old handlers and invariant. Is
-   the baseline `.schemas.json` enough (invariant text and handler shapes), or does the deploy
-   checker need the old source (the old build's logic symbols, D17 hashes)?
-3. **C5's synchronous claim.** The per-connection FIFO plus "hold until asked" argument should
+2. **Where the old version comes from.** M9 needs only predicates, which `.schemas.json` can
+   carry as text, as it already carries the invariant. H3 needs the old *handlers* as logic
+   symbols. Is that the old build's D17-hashed templates shipped in the sidecar, or the old
+   source?
+3. **The `--accept-unproved` override.** Per actor and law, as proposed, or per deploy? And
+   does a node that holds a release require it to be signed like `ACTIVATE`?
+4. **C5's synchronous claim.** The per-connection FIFO plus "hold until asked" argument should
    be a theorem of `Session.Theory` (asynchronous semantics simulated by synchronous on
    well-formed protocols), not an assumption. Is that worth phase C, or is M8 conformance
    enough at first?
-4. **One projector or two.** Once M6 validates both OCaml projectors against the same spec,
+5. **One projector or two.** Once M6 validates both OCaml projectors against the same spec,
    should `typecheck_session.ml` call `desugar_endpoints.ml`'s (or the reverse), so that there
    is one implementation to validate?
