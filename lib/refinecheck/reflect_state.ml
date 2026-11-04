@@ -63,6 +63,17 @@ let call_sym : (March_ast.Ast.span, string) Hashtbl.t = Hashtbl.create 256
 
 let resolve_site (sp : March_ast.Ast.span) : string option = Hashtbl.find_opt call_sym sp
 
+(** Phase 5 (D10): a specialised call site -> the expressions its logic symbol
+    is applied to.  A call [g(xs, fn x -> x > k)] specialised as [g$k] passes
+    [xs] and the lambda's capture [k], not the lambda: the call's own
+    arguments are not the symbol's.  Filled by [Refine_reflect.install]. *)
+let site_args : (March_ast.Ast.span, March_ast.Ast.expr list) Hashtbl.t = Hashtbl.create 16
+
+(** The arguments the symbol at [sp] is applied to: [args], the call's own,
+    unless the site is specialised. *)
+let args_at (sp : March_ast.Ast.span) (args : March_ast.Ast.expr list) : March_ast.Ast.expr list =
+  match Hashtbl.find_opt site_args sp with Some a -> a | None -> args
+
 (** Instance symbol -> (argument sorts, result sort), filled by
     [resolve_sorts] when it renames a base symbol to an instance; read by the
     declaration preamble. *)
@@ -265,6 +276,7 @@ let reset () =
   confirmed := false;
   Hashtbl.reset syms;
   Hashtbl.reset call_sym;
+  Hashtbl.reset site_args;
   Hashtbl.reset instances;
   Hashtbl.reset literal_owner;
   ()

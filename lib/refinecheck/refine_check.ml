@@ -4705,6 +4705,78 @@ let lemma_walk : lemma_walk option ref = ref None
 (** Lemmas that passed L1-L3 and L5 in this module, by declaring span. *)
 let lemma_valid : (A.span, unit) Hashtbl.t = Hashtbl.create 16
 
+(* ── The stdlib lemma manifest (reflection design §10 phase 3, I10) ──────
+   `stdlib/lemmas.verified` lists each shipped lemma that proved, with a
+   digest of the text of every file its theorem and proof reach.  A stdlib
+   lemma whose entry still matches is admitted without re-proving it, so a
+   user program does not pay for the stdlib's proofs on every check.  Any
+   edit to a file it reaches changes the digest, and the lemma is proved
+   again; a test regenerates the manifest and fails when it is stale. *)
+
+(** Lemmas the manifest admitted in this module, by declaring span. *)
+let lemma_manifest_ok : (A.span, unit) Hashtbl.t = Hashtbl.create 16
+
+(** Each lemma's manifest digest in this module, by declaring span. *)
+let lemma_digest : (A.span, string) Hashtbl.t = Hashtbl.create 16
+
+(** Set by `--emit-lemma-manifest`: prove every lemma, admit none from the
+    manifest. *)
+let manifest_off = ref false
+
+let manifest_name = "lemmas.verified"
+
+(** The stdlib lemmas the last module admitted, with their digests: the
+    manifest `--emit-lemma-manifest` prints. *)
+let manifest_rows : (string * string) list ref = ref []
+
+let read_manifest (path : string) : (string * string) list =
+  match In_channel.with_open_bin path In_channel.input_all with
+  | text ->
+    String.split_on_char '\n' text
+    |> List.filter_map (fun l ->
+           match String.split_on_char '\t' l with
+           | [ q; d ] when q <> "" && q.[0] <> '#' -> Some (q, d)
+           | _ -> None)
+  | exception Sys_error _ -> []
+
+(* A parameter type of the program function [f] whose short name is
+   conflated with another declaration ([Refine_encode.conflated_declarants]):
+   the type and the modules declaring it. *)
+let conflated_param_type (f : string) : (string * string list) option =
+  match !Witness.current_module with
+  | None -> None
+  | Some m ->
+    let rec find ds =
+      List.find_map
+        (function
+          | A.DFn (fd, _) when fd.A.fn_name.A.txt = f -> Some fd
+          | A.DMod (_, _, inner, _) -> find inner
+          | _ -> None)
+        ds
+    in
+    let rec tys (t : A.ty) : string list =
+      match t with
+      | A.TyCon (n, args) -> n.A.txt :: List.concat_map tys args
+      | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> tys b
+      | A.TyTuple ts -> List.concat_map tys ts
+      | _ -> []
+    in
+    Option.bind (find m.A.mod_decls) (fun (fd : A.fn_def) ->
+        let names =
+          List.concat_map
+            (fun (c : A.fn_clause) ->
+              List.concat_map
+                (function A.FPNamed p | A.FPDefault (p, _) -> Option.fold ~none:[] ~some:tys p.A.param_ty | A.FPPat _ -> [])
+                c.A.fc_params)
+            fd.A.fn_clauses
+        in
+        List.find_map
+          (fun n ->
+            match Refine_encode.conflated_declarants n with
+            | [] -> None
+            | paths -> Some (n, paths))
+          names)
+
 let is_lemma (fd : A.fn_def) = List.mem "lemma" fd.A.fn_attrs
 
 (** Every call of a lemma in this module, by call span: the lemma it reaches,
@@ -5216,6 +5288,17 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                let names = pat_binders b.A.bind_pat in
                let lets = launder_shadow lets names in
                (match b.A.bind_pat, b.A.bind_expr with
+                (* Not when the RHS reads the name it binds (`let k =
+                   f(k)`, or a lambda capturing `k`): the entry is read at
+                   the obligation, where `k` is already the new binding, so
+                   `k == f(k)` would be about the wrong value (review of
+                   reflection phase 5; [push_tuple_projs] has the same rule).
+                   [expr_mentions] looks inside lambda bodies. *)
+                | A.PatVar n, (A.EApp _ as rhs)
+                  when expr_mentions [ n.A.txt ] rhs
+                       (* Test-only: the RED control of this rule. *)
+                       && Sys.getenv_opt "MARCH_REFLECT_PERTURB" <> Some "let-self-ref" ->
+                  lets
                 | A.PatVar n, (A.EApp _ as rhs) -> (n.A.txt, rhs) :: lets
                 (* `let (yes, no) = g(…)`: each component, as a projection of
                    the call (leftovers design 2026-10-18 §5.4). *)
@@ -6258,6 +6341,19 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
                   note: a function is usable in a predicate when it terminates, has no effects, \
                   cannot fail, and calls only such functions."
                  f why at.A.start_line)
+          | _ when conflated_param_type f <> None ->
+            (* The function is reflectable, but one of its parameter types
+               shares its short name with another declaration (often a
+               stdlib one): the logic cannot tell the two apart, so it uses
+               neither.  Say so, rather than "not a measure". *)
+            let ty, paths = Option.get (conflated_param_type f) in
+            Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
+              (Printf.sprintf
+                 "`%s` cannot be used in this refinement predicate, so the refinement is not \
+                  checked: its parameter type `%s` has the same name as a type declared in %s, \
+                  and the checker cannot tell them apart. Rename your type."
+                 f ty
+                 (String.concat " and " (List.map (fun p -> if p = "" then "your module" else "`" ^ p ^ "`") paths)))
           | _ ->
             Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
               (Printf.sprintf
@@ -6872,6 +6968,15 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
     (* [ih_prepare]'s calls-only walk needs a lemma's call obligations, not
        its theorem. *)
     let lemma = is_lemma fd && Hashtbl.mem lemma_valid fd.A.fn_name.A.span && not !calls_only_walk in
+    (* A stdlib lemma the manifest admitted: its theorem is recorded trusted
+       and its body is not walked again. *)
+    let manifest_lemma = lemma && Hashtbl.mem lemma_manifest_ok fd.A.fn_name.A.span in
+    if manifest_lemma then
+      Obligation.record
+        { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
+        ; predicate = (match Refine_post.assumed_return fd with Some p -> pred_str p | None -> "?")
+        ; verdict = Obligation.Trusted; kind = Obligation.Postcondition; inst = None };
+    let lemma = lemma && not manifest_lemma in
     if (not !calls_only_walk) && not (is_lemma fd) then
       with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
           with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
@@ -6887,7 +6992,11 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
                   lw_verdicts = [] }
          | _ -> None);
     Fun.protect ~finally:(fun () -> lemma_walk := saved_lemma_walk) @@ fun () ->
-    let walked = if assume_params then fd else strip_param_refinements fd in
+    let walked =
+      if manifest_lemma then { fd with A.fn_clauses = [] }
+      else if assume_params then fd
+      else strip_param_refinements fd
+    in
     last_elem_return_proved := ret_elems_of_ty fd.A.fn_ret_ty <> None;
     (* An ASSUMED element return (§7.2): one `trusted` postcondition per
        entry at the definition, and no tail is walked for it. *)
@@ -7047,7 +7156,8 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
 (* The gate's verdict for a lemma ([Refine_post.lemma_verdict]): a silent walk
    of its body, as [term_scratch_walk] runs one, proved iff every tail is. *)
 let lemma_scratch_verdict ~root defs (fd : A.fn_def) : bool =
-  Hashtbl.mem lemma_valid fd.A.fn_name.A.span
+  Hashtbl.mem lemma_manifest_ok fd.A.fn_name.A.span
+  || Hashtbl.mem lemma_valid fd.A.fn_name.A.span
   &&
   let saved_acc = Hashtbl.copy annotated_acc_facts in
   let saved_ctr = !ret_ctr and saved_budget = !Witness.wall_budget in
@@ -9264,6 +9374,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         | Some why -> bad why
         | None -> (
           match reflect_blocker fd with
+          (* Phase 5: a function taking functions is in the logic at each
+             specialised call, with this fuel. *)
+          | Some _ when Hashtbl.mem Refine_reflect.specialised span -> ()
           | Some (_, txt) -> bad (Printf.sprintf "`%s` is not reflected: it %s" name (blocker_text txt))
           | None -> ()))
     (reflect_fns m.A.mod_decls);
@@ -9325,6 +9438,94 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         (Printf.sprintf "the lemma `%s` is used as a value (L5): a lemma has no runtime existence, so it \
                          can only be called" name))
     (List.rev !Refine_reflect.lemma_value_uses);
+  (* The manifest (above): digests of every lemma, admission of the stdlib
+     ones whose entry matches. *)
+  Hashtbl.reset lemma_manifest_ok;
+  Hashtbl.reset lemma_digest;
+  (match lemma_fns_q m.A.mod_decls with
+   | [] -> ()
+   | lemmas ->
+     let g = (Lazy.force term).Refine_term.graph in
+     let file_text = Hashtbl.create 8 in
+     let text f =
+       match Hashtbl.find_opt file_text f with
+       | Some t -> t
+       | None ->
+         let t = try In_channel.with_open_bin f In_channel.input_all with Sys_error _ -> "<unreadable " ^ f ^ ">" in
+         Hashtbl.replace file_text f t;
+         t
+     in
+     let manifests = Hashtbl.create 2 in
+     let manifest_for file =
+       let path =
+         match Sys.getenv_opt "MARCH_LEMMA_MANIFEST" with
+         | Some p when p <> "" -> p
+         | _ -> Filename.concat (Filename.dirname file) manifest_name
+       in
+       match Hashtbl.find_opt manifests path with
+       | Some m -> m
+       | None ->
+         let m = read_manifest path in
+         Hashtbl.replace manifests path m;
+         m
+     in
+     List.iter
+       (fun (qname, (fd : A.fn_def)) ->
+         let sp = fd.A.fn_name.A.span in
+         match Refine_term.unit_at g sp with
+         | None -> ()
+         | Some u ->
+           (* Every unit the lemma's body calls (its asserts included, which
+              are sites but not edges) or its theorem names, and what those
+              reach. *)
+           let body_end =
+             match fd.A.fn_clauses with
+             | c :: _ -> (March_typecheck.Typecheck.span_of_expr c.A.fc_body).A.start_line
+             | [] -> sp.A.start_line
+           in
+           let direct =
+             List.filter_map
+               (fun (st : Refine_term.site) ->
+                 match st.Refine_term.s_target with
+                 | Refine_term.S_unit v when st.Refine_term.s_src = u.Refine_term.u_id -> Some v
+                 | _ -> None)
+               g.Refine_term.sites
+             @ List.filter_map
+                 (fun ((psp : A.span), tgt) ->
+                   match tgt with
+                   | Refine_term.S_unit v
+                     when psp.A.file = sp.A.file && psp.A.start_line >= sp.A.start_line
+                          && psp.A.start_line <= body_end -> Some v
+                   | _ -> None)
+                 g.Refine_term.pred_sites
+           in
+           let sccs =
+             List.concat_map
+               (fun v ->
+                 let si = g.Refine_term.scc_of.(v) in
+                 si :: Refine_term.reachable_sccs g si)
+               (u.Refine_term.u_id :: direct)
+           in
+           let files =
+             sp.A.file
+             :: List.concat_map
+                  (fun si -> List.map (fun v -> g.Refine_term.units.(v).Refine_term.u_span.A.file) g.Refine_term.sccs.(si))
+                  sccs
+             |> List.sort_uniq compare
+           in
+           let digest =
+             Digest.to_hex
+               (Digest.string
+                  (String.concat "\x00"
+                     (qname :: List.map (fun f -> Filename.basename f ^ "\x00" ^ text f) files)))
+           in
+           Hashtbl.replace lemma_digest sp digest;
+           if (not !manifest_off)
+              && March_typecheck.Typecheck_builtins.file_is_stdlib sp.A.file
+              && Hashtbl.mem lemma_valid sp
+              && List.mem (qname, digest) (manifest_for sp.A.file)
+           then Hashtbl.replace lemma_manifest_ok sp ())
+       lemmas);
   (* §4.5: erasing a lemma call erases its arguments, so each must be a
      reflectable term, one with no effect that always finishes: a variable, a
      literal, a constructor or tuple of such terms, or a call of a reflected
@@ -9537,6 +9738,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
           | _ -> None)
         | _ -> None));
   lemma_called := [];
+  manifest_rows := [];
   gate_unverified_posts_ih ~root
     ~ih:(fun pending ->
       let groups = ih_prepare ~root ?type_map term defs m.A.mod_decls pending in
@@ -9569,6 +9771,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       let qname = match List.find_opt (fun (_, f) -> f == fd) (lemma_fns_q m.A.mod_decls) with Some (q, _) -> q | None -> fd.A.fn_name.A.txt in
       let digest = Digest.to_hex (Digest.string (Marshal.to_string (fd.A.fn_ret_ty, fd.A.fn_clauses) [ Marshal.No_sharing ])) in
       lemma_rows := (sp.A.file, qname, digest, admitted && Hashtbl.mem lemma_valid sp) :: !lemma_rows;
+      if admitted && Hashtbl.mem lemma_valid sp && March_typecheck.Typecheck_builtins.file_is_stdlib sp.A.file then
+        Option.iter (fun d -> manifest_rows := (qname, d) :: !manifest_rows) (Hashtbl.find_opt lemma_digest sp);
       if Hashtbl.fold (fun _ (l : A.fn_def) acc -> acc || l == fd) lemma_call_sites false then
         lemma_called := (sp.A.file, qname) :: !lemma_called;
       if Hashtbl.mem lemma_valid sp && recursive && (not admitted) && not (Hashtbl.mem ih_eligible sp) then begin

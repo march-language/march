@@ -1264,7 +1264,8 @@ to annotate.
 - Every `match` in it **covers every case**, guarded arms included.
 - It calls only reflected functions, constructors, and the arithmetic,
   comparison and Boolean operators.
-- It takes no function as a parameter and makes no lambda.
+- It takes no function as a parameter and makes no lambda, except as described
+  under [Functions that take functions](#functions-that-take-functions) below.
 - Its parameters and result are `Int`, `Bool`, data types (lists, options,
   your own types) or type variables, and it does not return `Unit`.
 - It is not marked `@[opaque]`, `@[assume]` or `@[trusted]`, and its name is not
@@ -1343,11 +1344,20 @@ An `Eq` that prints, panics or loops stops the function from being reflected.
 
 **`Int` is mathematical.** The checker reasons about `Int` as the unbounded
 integers. At run time `Int` is 63 bits, and `+`, `-`, `*` and negation stop the
-program with a panic when the result does not fit. So a fact such as
-`inc(n) > n` holds wherever the program actually gets past the call; at the
-largest `Int` the call panics instead. The checker does not yet prove that no
-overflow happens: a reflected function counts as unable to fail even though its
-arithmetic can overflow.
+program with a panic when the result does not fit. So the program never holds a
+value the checker's arithmetic disagrees with: a fact such as `inc(n) > n` holds
+wherever the program gets past the call, and at the largest `Int` the call panics
+instead of returning. That is why a reflected function may overflow and still be
+reflected: an overflow is a panic, never a wrong value.
+
+The one operator that still wraps is `/` on the smallest `Int` by `-1`, which
+returns the smallest `Int`. The checker reads `/` that way too:
+`x / -1` is `-x`, except at the smallest `Int`, where it is the smallest `Int`. So
+from `x < 0` the checker does not conclude `x / -1 > 0`.
+
+The checker does not prove that no overflow happens. A module that must not
+panic says `cap no_panic`, and then every `+`, `-`, `*` and negation has to be
+proved in range ([Capabilities]({{ site.baseurl }}/docs/capabilities/)).
 
 **Seeing what is reflected.** `march --check --reflect-report file.march`
 prints one row per function: `reflected`, or the first rule that blocks it.
@@ -1381,6 +1391,56 @@ fn g(n : Int) : Int do
 end
 ```
 
+#### Functions that take functions
+
+A function such as `List.filter` or `List.map` takes a function as an argument,
+so it has no single definition. Each **call** of it with a lambda, or with the
+name of a reflected function, does: the checker puts the lambda's body in place
+of the parameter and gets a definition for that one call. So a function that
+filters or maps with a lambda is reflected:
+
+```march
+fn pos(xs : List(Int)) : List(Int) do List.filter(xs, fn x -> x > 0) end
+fn need_eq(a : List(Int), b : {List(Int) | _ == a}) : Int do 0 end
+
+need_eq(Cons(1, Nil), List.filter(Cons(1, Nil), fn x -> x > 0))   -- proved
+need_eq(Cons(2, Nil), List.map(Cons(1, Nil), fn x -> x + 1))       -- proved
+```
+
+A lambda may read the caller's variables. They become extra arguments of that
+call's definition, so `above(xs, 3)` and `above(xs, 7)` are kept apart:
+
+```march
+fn above(xs : List(Int), k : Int) : List(Int) do List.filter(xs, fn x -> x > k) end
+```
+
+The function taking the function (call it `g`, with function parameter `p`) is
+used this way when:
+- every use of `p` in `g`'s body is a call `p(...)`, or passes `p` on in the same
+  position of `g`'s own recursive call (`filter(t, pred)`);
+- nothing in `g`'s body is named `p` again, and `g` makes no lambda itself;
+- `p`'s parameter types carry no refinement (`p : {Int | _ > 0} -> Bool` is not
+  used this way; an abstract refinement `a -> Bool[p]` is fine);
+- `g` passes every other rule above, and is not part of a group of mutually
+  recursive functions.
+
+The argument at each such call must be:
+- a lambda with the right number of parameters, none of them refined, whose
+  body has no effect, cannot fail, makes no lambda, divides only by non-zero
+  literals, and calls only reflected functions;
+- or the name of a reflected top-level function.
+
+A lambda bound by `let`, a local `fn`, a function parameter, or a function
+returned by a call (`List.filter(xs, make_pred(3))`) is not used: its
+definition is not fixed where the call is written. Recursion through a lambda
+is the caller's: in `fn bad(n) = hd(List.map([n], fn x -> bad(x) + 1))` the
+lambda's call of `bad` is `bad` calling itself, which does not terminate, so
+`bad` is not reflected.
+
+A predicate cannot call `g` itself (it cannot hold a lambda). `--reflect-report`
+lists `g` as `specialised`, with the number of calls that got a definition. The
+fuel of those calls is `g`'s: `@[reflect(fuel: N)]` on `g` is accepted.
+
 **A body is part of its callers' proofs.** When a caller's proof uses a
 reflected function's definition, an edit to that body can change the proof.
 Nothing stale survives such an edit:
@@ -1412,11 +1472,14 @@ Nothing stale survives such an edit:
 **Checking the checker: `--reflection-parity`.** `forge test
 --reflection-parity` (or `march --check --reflect-parity file.march`) runs each
 reflected function both ways on generated inputs: by its logic definition and
-by the interpreter. The inputs include `0`, `1`, `-1`, the largest and smallest
+by the interpreter. Each call of a function that takes functions is checked
+too, as the call itself (`List.filter[m.march:3:4]`), with its lambda's
+captured variables among the inputs. The inputs include `0`, `1`, `-1`, the largest and smallest
 `Int` and their neighbours. Any disagreement, or a reflected function that
 panics on an input in its domain, fails the run: that is a compiler bug.
-A function whose arithmetic overflows at the boundary is reported `overflow?`,
-since the checker treats `Int` as unbounded (above). A reflected function the
+A function whose arithmetic overflows at the boundary is reported `overflow?`:
+the interpreter stopped with an overflow there, so that input has no value to
+compare (above). A reflected function the
 net cannot run by its definition (a `Float` comparison, a parameter type with
 no generator) is listed `not-compared` with the reason. A file whose ordinary
 check fails is reported as a check failure, not a parity failure. A run that
@@ -1594,6 +1657,42 @@ arguments are removed with it, each argument must be a **pure term**: a
 variable, a literal, a constructor, or a call of a reflected function.
 Anything else, such as a call that prints, is the error
 `lemma_argument_impure`. Bind such a value to a name first.
+
+**Lemmas the standard library ships.** `List` comes with lemmas about its own
+functions. Call them like any lemma, qualified: `List.len_append(a, b)`. They
+are already proved, so a check does not prove them again (see below).
+
+| Lemma | Theorem |
+|---|---|
+| `List.append_nil(xs)` | `append(xs, Nil) == xs` |
+| `List.append_assoc(xs, ys, zs)` | `append(append(xs, ys), zs) == append(xs, append(ys, zs))` |
+| `List.len_append(xs, ys)` | `len(append(xs, ys)) == len(xs) + len(ys)` |
+| `List.reverse_append(xs, ys)` | `reverse(append(xs, ys)) == append(reverse(ys), reverse(xs))` |
+| `List.reverse_reverse(xs)` | `reverse(reverse(xs)) == xs` |
+| `List.len_reverse(xs)` | `len(reverse(xs)) == len(xs)` |
+| `List.len_take(xs, n)`, for `0 <= n <= len(xs)` | `len(take(xs, n)) == n` |
+| `List.len_drop(xs, n)`, for `0 <= n <= len(xs)` | `len(drop(xs, n)) == len(xs) - n` |
+| `List.take_drop(xs, n)` | `append(take(xs, n), drop(xs, n)) == xs` |
+
+```march
+fn need3(xs : {List(Int) | len(_) == 3}) : Int do 0 end
+
+fn f(a : {List(Int) | len(_) == 1}, b : {List(Int) | len(_) == 2}) : Int do
+  List.len_append(a, b)
+  need3(List.append(a, b))   -- proved
+end
+```
+
+`List.filter`'s result also has a proved length contract,
+`len(_) <= len(xs)`, alongside the existing one about its elements.
+
+**The stdlib's lemmas are proved once.** `stdlib/lemmas.verified` records each
+shipped lemma that proved, with a digest of the text of every file its
+theorem and proof reach. While a lemma's line still matches, the checker
+admits it without proving it again, so a program does not pay for the
+stdlib's proofs on every check. An edit to any file a lemma reaches changes
+its digest, and the lemma is proved again. `scripts/gen-lemma-manifest.sh`
+regenerates the file, and a test fails when it is stale.
 
 **What a lemma may be** (`invalid_lemma` otherwise):
 - its result type is `{Unit | P}`;
@@ -5115,7 +5214,8 @@ The rules, in the order the report checks them:
   `println`.
 - **R4**: it cannot fail: no `panic`, no runtime `assert`, and every `/` or `%`
   by something other than a non-zero literal has its division obligation
-  proved (in a `cap no_panic` module).
+  proved (in a `cap no_panic` module). An `Int` overflow is allowed: it panics,
+  so it never gives a value the checker disagrees with.
 - **R5**: every `match` covers all cases, including a guarded match whose
   unguarded arms do not cover.
 - **R6**: every callee is itself reflected, or a builtin the solver understands
@@ -5124,7 +5224,11 @@ The rules, in the order the report checks them:
   total and pure. Any other interface call (`show`, string interpolation, a
   user `compare`) blocks.
 - **R7**: no function values: no lambda, no function-typed parameter, no
-  function passed or stored as a value.
+  function passed or stored as a value. The exception is a call of a function
+  that takes functions with a lambda or a reflected function's name
+  ([Functions that take functions](#functions-that-take-functions)); the
+  function taking them is listed `specialised`, with how many of its calls got
+  a definition.
 - **R8**: every parameter and the result have a solver sort; a function
   returning `Unit` is not reflected.
 - **R9**: not marked `@[trusted]`, `@[assume]` or `@[opaque]`.

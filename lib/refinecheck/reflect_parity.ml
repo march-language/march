@@ -88,6 +88,9 @@ let euclid x k =
   if k = 0 then raise (Unsupported "division by zero in the logic");
   let ak = if k = min_int then raise Logic_overflow else abs k in
   let r = ((x mod ak) + ak) mod ak in
+  (* OCaml wraps `min_int / -1` to [min_int]; the logic's quotient is 2^62,
+     which this evaluator cannot hold (phase 6). *)
+  if x - r = min_int && k = -1 then raise Logic_overflow;
   let q = (x - r) / k in
   (q, r)
 
@@ -308,8 +311,12 @@ type result = { p_name : string; p_file : string; p_compared : int; p_outcome : 
 let input_str args = "(" ^ String.concat ", " (List.map show args) ^ ")"
 
 (* One function over its inputs; the first RED input decides, then the first
-   overflow, else agreement over every compared input. *)
-let check_fn ~(sym : string) ~(name : string) ~(file : string) (fs : RS.fsig) : result =
+   overflow, else agreement over every compared input.  [program] runs the
+   program side on one input ([call_fn_classified] of [name] by default). *)
+let rec check_fn ?program ~(sym : string) ~(name : string) ~(file : string) (fs : RS.fsig) : result =
+  let program =
+    match program with Some p -> p | None -> fun args -> Witness.call_fn_classified ~name ~args:(List.map to_value args)
+  in
   let mk compared o = { p_name = name; p_file = file; p_compared = compared; p_outcome = o } in
   match inputs name fs.RS.fs_params with
   | None -> mk 0 (Not_compared "a parameter sort has no generator")
@@ -328,7 +335,7 @@ let check_fn ~(sym : string) ~(name : string) ~(file : string) (fs : RS.fsig) : 
           match logic with
           | `V None -> () (* outside pre_f: not an input of the definition *)
           | _ -> (
-            match Witness.call_fn_classified ~name ~args:(List.map to_value args) with
+            match program args with
             | Witness.C_overflow m ->
               if !over = None then over := Some (Printf.sprintf "%s at %s" m (input_str args))
             | Witness.C_panic m -> red := Some (Interp_failure (Printf.sprintf "panics (%s) at %s" m (input_str args)))
@@ -373,6 +380,58 @@ let check_fn ~(sym : string) ~(name : string) ~(file : string) (fs : RS.fsig) : 
       if !compared > 0 then mk !compared Agree
       else mk 0 (Not_compared (Option.value ~default:"no input inside the domain" !why_not))
 
+(* Phase 5: a specialisation [g$k] against the interpreter running the call
+   it stands for, [g(args, <the lambda>)] with the lambda's captures bound to
+   the generated values (its parameters are [g]'s non-function arguments,
+   then the captures). *)
+and check_spec ~(sym : string) (fs : RS.fsig) ((ss : Refine_reflect.spec_site), (caps : string list)) : result =
+  let file = ss.Refine_reflect.ss_span.A.file in
+  let name = fs.RS.fs_name in
+  let g = !Refine_reflect.last_units in
+  let unit_name i = if i < Array.length g then Some g.(i).Refine_term.u_name else None in
+  let nfn = List.length ss.Refine_reflect.ss_args - List.length ss.Refine_reflect.ss_fn in
+  let sp = ss.Refine_reflect.ss_span in
+  let program args =
+    match Witness.module_env (), Option.bind (unit_name ss.Refine_reflect.ss_callee) (fun n -> Some n) with
+    | Some env, Some gname -> (
+      match Witness.lookup_fn env gname with
+      | None -> Witness.C_not_run ("the interpreter has no single binding for " ^ gname)
+      | Some gv -> (
+        let vals = List.map to_value args in
+        let pvals = List.filteri (fun i _ -> i < nfn) vals and cvals = List.filteri (fun i _ -> i >= nfn) vals in
+        let k = ref 0 in
+        let named = ref [] in
+        let call_args =
+          List.mapi
+            (fun i _ ->
+              match List.assoc_opt i ss.Refine_reflect.ss_fn with
+              | Some (Refine_reflect.F_lambda (ps, body, lsp)) -> Some (A.ELam (ps, body, lsp))
+              | Some (Refine_reflect.F_named (f, _)) -> (
+                match Option.bind (unit_name f) (Witness.lookup_fn env) with
+                | Some fv ->
+                  let b = Printf.sprintf "$parity_f%d" i in
+                  named := (b, fv) :: !named;
+                  Some (A.EVar { A.txt = b; A.span = sp })
+                | None -> None)
+              | None ->
+                let b = Printf.sprintf "$parity_a%d" !k in
+                incr k;
+                Some (A.EVar { A.txt = b; A.span = sp }))
+            ss.Refine_reflect.ss_args
+        in
+        if List.exists Option.is_none call_args then Witness.C_not_run "a named function argument has no binding"
+        else
+          let bindings =
+            (("$parity_g", gv) :: !named)
+            @ List.mapi (fun i v -> (Printf.sprintf "$parity_a%d" i, v)) pvals
+            @ List.combine caps cvals
+          in
+          Witness.eval_classified ~bindings
+            (A.EApp (A.EVar { A.txt = "$parity_g"; A.span = sp }, List.map Option.get call_args, sp))))
+    | _ -> Witness.C_not_run "the interpreter environment could not be built"
+  in
+  check_fn ~program ~sym ~name ~file fs
+
 (** The net over every reflected function [is_user] accepts (top-level ones:
     a local [f/go] has no name the interpreter binds).  Returns the report
     lines and whether the net is RED. *)
@@ -381,7 +440,8 @@ let run ~(is_user : string -> bool) () : string list * bool =
   let fns =
     Hashtbl.fold
       (fun sym (name, file) acc ->
-        if is_user file && not (String.contains name '/') then
+        if Hashtbl.mem Refine_reflect.spec_meta sym then acc
+        else if is_user file && not (String.contains name '/') then
           (Some sym, name, file, if Hashtbl.mem Refine_reflect.templates sym then RS.sig_of sym else None) :: acc
         else acc)
       RS.sym_origin []
@@ -416,6 +476,24 @@ let run ~(is_user : string -> bool) () : string list * bool =
                  | Some sym when Hashtbl.mem Refine_reflect.templates sym -> "no logic signature"
                  | Some _ -> "no logic definition (the encoder declined the body; its symbol is uninterpreted)") })
       fns
+  in
+  (* Phase 5: every specialisation at a call site [is_user] accepts. *)
+  let results =
+    results
+    @ (Hashtbl.fold
+         (fun sym (((ss : Refine_reflect.spec_site), _) as meta) acc ->
+           if is_user ss.Refine_reflect.ss_span.A.file then (sym, meta) :: acc else acc)
+         Refine_reflect.spec_meta []
+      |> List.sort compare
+      |> List.map (fun (sym, meta) ->
+             match RS.sig_of sym with
+             | Some fs when Hashtbl.mem Refine_reflect.templates sym -> check_spec ~sym fs meta
+             | Some fs ->
+               { p_name = fs.RS.fs_name; p_file = (fst meta).Refine_reflect.ss_span.A.file; p_compared = 0;
+                 p_outcome = Not_compared "no logic definition (the encoder declined the specialised body)" }
+             | None ->
+               { p_name = sym; p_file = (fst meta).Refine_reflect.ss_span.A.file; p_compared = 0;
+                 p_outcome = Not_compared "no logic signature" }))
   in
   let line r =
     let status, detail =

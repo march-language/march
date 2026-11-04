@@ -223,15 +223,26 @@ let find_fn name (m : March_tir.Tir.tir_module) =
   List.find (fun (f : March_tir.Tir.fn_def) -> f.fn_name = name) m.tm_fns
 
 (** Parse, desugar, typecheck, and lower a March module using the real type_map. *)
+(* Lemma erasure, as every driver path runs it after typechecking
+   (bin/main.ml [erase_lemmas]): a `@[lemma]` never reaches lowering, so the
+   TIR these helpers build is the TIR a real compile lowers. *)
+let erase_lemmas (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+  let reserved =
+    March_desugar.Lemma_erase.reserved_by
+      (List.map fst March_typecheck.Typecheck_builtins.builtin_bindings
+       @ List.map fst March_typecheck.Typecheck_builtins.builtin_interface_bindings)
+  in
+  { m with March_ast.Ast.mod_decls = March_desugar.Lemma_erase.erase_module ~reserved m.March_ast.Ast.mod_decls }
+
 let lower_module_typed src =
   let m = parse_and_desugar src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
-  March_tir.Lower.lower_module ~type_map m
+  March_tir.Lower.lower_module ~type_map (erase_lemmas m)
 
 let mono_module src =
   let m = parse_and_desugar src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
-  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Lower.lower_module ~type_map (erase_lemmas m) in
   March_tir.Mono.monomorphize tir
 
 let repl_type_of expr_src =

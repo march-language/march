@@ -208,7 +208,8 @@ end
         (* A function passing ITSELF is a reference edge, so its SCC is not
            certified: R2 precedes R7. *)
         blocked out "h" "R2:unproved:reference";
-        blocked out "apply" "R7:takes a function-typed parameter f";
+        (* Phase 5: `apply` is specialised at each call with a lambda. *)
+        expect out "apply" ~verdict:"specialised" ~detail:"0 call sites";
         blocked out "twice" "R7:contains a lambda";
         blocked out "h2" "R7:names inc as a value");
     gated "report_dispatch: show, interpolation and compare on a user impl are R6" (fun () ->

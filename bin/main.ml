@@ -2716,7 +2716,7 @@ let run_test_cmd args =
     let desugared =
       { desugared with
         March_ast.Ast.mod_decls =
-          March_desugar.Interface_laws.expand_program (extra_decls @ desugared.March_ast.Ast.mod_decls) }
+          March_desugar.Desugar.link_program (extra_decls @ desugared.March_ast.Ast.mod_decls) }
     in
     let stdlib_decls = load_stdlib () in
     if not (is_shipped_stdlib_file filename) then
@@ -3498,7 +3498,7 @@ let compile filename =
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
       || !termination_report || !reflect_report || !refine_report_sites_all
-      || !reflect_deps || !reflect_parity || !lemma_test
+      || !reflect_deps || !reflect_parity || !emit_lemma_manifest || !lemma_test
       || !report_contracts
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
@@ -3826,7 +3826,7 @@ let compile filename =
   let desugared =
     { desugared with
       March_ast.Ast.mod_decls =
-        March_desugar.Interface_laws.expand_program (extra_decls @ desugared.March_ast.Ast.mod_decls) }
+        March_desugar.Desugar.link_program (extra_decls @ desugared.March_ast.Ast.mod_decls) }
   in
   (* Snapshot of the user's own decls (entry file + resolved imports) BEFORE
      stdlib gets prepended below.  Used to typecheck against the cached
@@ -4068,6 +4068,15 @@ let compile filename =
   March_refinecheck.Overflow_safety.check_module ~type_map errors desugared;
   if !refine_report_sites_all then print_refine_report_sites_all ~filename ~user_files ();
   if !reflect_deps then print_reflect_deps ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ~user_files ();
+  if !emit_lemma_manifest then begin
+    print_string
+      "# The stdlib lemmas the refinement checker proved, with a digest of every file each one's\n\
+       # theorem and proof reach (reflection design, phase 3).  A stdlib lemma whose line\n\
+       # still matches is admitted without re-proving it.  Regenerate with\n\
+       # scripts/gen-lemma-manifest.sh; a test fails when this file is stale.\n";
+    List.iter (fun (q, d) -> Printf.printf "%s\t%s\n" q d)
+      (List.sort_uniq compare !March_refinecheck.Refine_check.manifest_rows)
+  end;
   if !reflect_parity then run_reflect_parity ~filename ~user_files ();
   if !lemma_test then run_lemma_test ~filename ~entry_mod:module_ast.March_ast.Ast.mod_name.March_ast.Ast.txt ();
   if !reflect_report then
@@ -6844,7 +6853,7 @@ let run_check_cmd ?(emit_caps = false) files =
     | _ -> true
   ) all_decls in
   (* Interface laws whose impl and interface are in different files. *)
-  let all_decls = March_desugar.Interface_laws.expand_program all_decls in
+  let all_decls = March_desugar.Desugar.link_program all_decls in
   (* If a checked file's own module name shadows a stdlib module (e.g. a
      project's own `mod Crypto do` — the exact scenario [compile]'s
      [extern_mod_names] below already guards against for the single-file
@@ -7421,6 +7430,9 @@ let () =
      " Print one line per skipped refinement obligation: file:line:col, reason, callee, predicate");
     ("--refine-report-sites=all", Arg.Set refine_report_sites_all,
      " Print one line per refinement obligation of any verdict (proved, skip, violated, trusted): file:line:col, kind, callee, predicate");
+    ("--emit-lemma-manifest",
+     Arg.Unit (fun () -> emit_lemma_manifest := true; March_refinecheck.Refine_check.manifest_off := true),
+     " Prove every stdlib lemma (ignoring stdlib/lemmas.verified) and print the manifest of those that proved (scripts/gen-lemma-manifest.sh)");
     ("--reflect-deps", Arg.Set reflect_deps,
      " Print the D17 logic hash of every reflected user function (reflect-def) and of every reflected function a stage-2 query of the check unfolded (reflect-dep), and the contract hash of every user function (reflect-cdef) and of every function of another user file the file reaches through calls (reflect-cdep); changes no verdict");
     ("--reflect-parity", Arg.Set reflect_parity,

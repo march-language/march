@@ -186,6 +186,15 @@ let two_stage ?(ok : ('a -> bool) option) ~(errctx : Err.ctx) (run : unit -> 'a)
         List.iter (fun (o : Obligation.t) -> Hashtbl.remove Obligation.uses_tbl (Obligation.uses_key o)) o2;
         let override (o : Obligation.t) =
           match o.Obligation.verdict with
+          (* A stage-1 diagnosis that names which part of a callback failed
+             is more use than "more unfolding" (phase 5: a call of a fold
+             with a lambda now reaches stage 2, where the rest of the list is
+             always left unfolded). *)
+          | Obligation.Skipped
+              ( Obligation.Accumulator_base_unproved _ | Obligation.Accumulator_step_unproved _
+              | Obligation.Parametric_source_unproved _ | Obligation.Abstract_too_weak _
+              | Obligation.Abstract_uninstantiated _ ) ->
+            o
           | Obligation.Skipped _ when budget -> { o with Obligation.verdict = Obligation.Skipped Obligation.Reflect_budget }
           | Obligation.Skipped _ when fuel ->
             let f = if !RS.fuel_fn <> "" then !RS.fuel_fn else match frontier_names with f :: _ -> f | [] -> "a reflected function" in

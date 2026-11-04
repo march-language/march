@@ -98,7 +98,7 @@ p{margin:8px 0}
 /* Item content */
 .name{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:var(--bright);font-weight:600}
 .sig{font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;color:var(--dim);flex:1;margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.laws h4{margin:12px 0 4px;font-size:13px;color:var(--dim)}.laws ul{margin:0;padding-left:18px}.law-by{color:var(--dim);font-size:12px}
+.laws h4{margin:12px 0 4px;font-size:13px;color:var(--dim)}.laws ul{margin:0;padding-left:18px}.law-by{color:var(--dim);font-size:12px}.law-st{font-size:11px;padding:1px 6px;border-radius:8px;border:1px solid var(--bdr);color:var(--dim)}.law-ok{color:var(--acc)}
 .ib{padding:18px 20px;border-top:1px solid var(--bdr);display:none;font-size:14px;color:var(--text);line-height:1.7}
 .ib.open{display:block}
 
@@ -224,6 +224,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="List.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="List.html">List</a></div><div class="sb-sub"><a class="sl" href="List.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a>
 <a class="sl" href="List.html#fn-any"><span class="sb-kind" style="color:var(--fn)">F</span>any</a>
 <a class="sl" href="List.html#fn-append"><span class="sb-kind" style="color:var(--fn)">F</span>append</a>
+<a class="sl" href="List.html#fn-append_assoc"><span class="sb-kind" style="color:var(--fn)">F</span>append_assoc</a>
+<a class="sl" href="List.html#fn-append_nil"><span class="sb-kind" style="color:var(--fn)">F</span>append_nil</a>
 <a class="sl" href="List.html#fn-chunks"><span class="sb-kind" style="color:var(--fn)">F</span>chunks</a>
 <a class="sl" href="List.html#fn-concat"><span class="sb-kind" style="color:var(--fn)">F</span>concat</a>
 <a class="sl" href="List.html#fn-dedup"><span class="sb-kind" style="color:var(--fn)">F</span>dedup</a>
@@ -245,6 +247,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="List.html#fn-intersperse"><span class="sb-kind" style="color:var(--fn)">F</span>intersperse</a>
 <a class="sl" href="List.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="List.html#fn-last"><span class="sb-kind" style="color:var(--fn)">F</span>last</a>
+<a class="sl" href="List.html#fn-len_append"><span class="sb-kind" style="color:var(--fn)">F</span>len_append</a>
+<a class="sl" href="List.html#fn-len_drop"><span class="sb-kind" style="color:var(--fn)">F</span>len_drop</a>
+<a class="sl" href="List.html#fn-len_reverse"><span class="sb-kind" style="color:var(--fn)">F</span>len_reverse</a>
+<a class="sl" href="List.html#fn-len_reverse_onto"><span class="sb-kind" style="color:var(--fn)">F</span>len_reverse_onto</a>
+<a class="sl" href="List.html#fn-len_take"><span class="sb-kind" style="color:var(--fn)">F</span>len_take</a>
+<a class="sl" href="List.html#fn-len_take_onto"><span class="sb-kind" style="color:var(--fn)">F</span>len_take_onto</a>
 <a class="sl" href="List.html#fn-length"><span class="sb-kind" style="color:var(--fn)">F</span>length</a>
 <a class="sl" href="List.html#fn-map"><span class="sb-kind" style="color:var(--fn)">F</span>map</a>
 <a class="sl" href="List.html#fn-maximum_int"><span class="sb-kind" style="color:var(--fn)">F</span>maximum_int</a>
@@ -262,6 +270,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="List.html#fn-range_step"><span class="sb-kind" style="color:var(--fn)">F</span>range_step</a>
 <a class="sl" href="List.html#fn-repeat"><span class="sb-kind" style="color:var(--fn)">F</span>repeat</a>
 <a class="sl" href="List.html#fn-reverse"><span class="sb-kind" style="color:var(--fn)">F</span>reverse</a>
+<a class="sl" href="List.html#fn-reverse_append"><span class="sb-kind" style="color:var(--fn)">F</span>reverse_append</a>
+<a class="sl" href="List.html#fn-reverse_onto_append"><span class="sb-kind" style="color:var(--fn)">F</span>reverse_onto_append</a>
+<a class="sl" href="List.html#fn-reverse_reverse"><span class="sb-kind" style="color:var(--fn)">F</span>reverse_reverse</a>
 <a class="sl" href="List.html#fn-scan_left"><span class="sb-kind" style="color:var(--fn)">F</span>scan_left</a>
 <a class="sl" href="List.html#fn-singleton"><span class="sb-kind" style="color:var(--fn)">F</span>singleton</a>
 <a class="sl" href="List.html#fn-sort_by"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by</a>
@@ -270,6 +281,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="List.html#fn-tail"><span class="sb-kind" style="color:var(--fn)">F</span>tail</a>
 <a class="sl" href="List.html#fn-tail_opt"><span class="sb-kind" style="color:var(--fn)">F</span>tail_opt</a>
 <a class="sl" href="List.html#fn-take"><span class="sb-kind" style="color:var(--fn)">F</span>take</a>
+<a class="sl" href="List.html#fn-take_drop"><span class="sb-kind" style="color:var(--fn)">F</span>take_drop</a>
+<a class="sl" href="List.html#fn-take_onto_drop"><span class="sb-kind" style="color:var(--fn)">F</span>take_onto_drop</a>
 <a class="sl" href="List.html#fn-take_while"><span class="sb-kind" style="color:var(--fn)">F</span>take_while</a>
 <a class="sl" href="List.html#fn-unzip"><span class="sb-kind" style="color:var(--fn)">F</span>unzip</a>
 <a class="sl" href="List.html#fn-zip"><span class="sb-kind" style="color:var(--fn)">F</span>zip</a>
@@ -362,7 +375,11 @@ march&gt; <span class="tok-ty">List</span>.any([], <span class="tok-kw">fn</span
 List.append([], [1, 2])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.append([<span class="tok-num">1</span>, <span class="tok-num">2</span>], [<span class="tok-num">3</span>, <span class="tok-num">4</span>, <span class="tok-num">5</span>])
 [<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>, <span class="tok-num">5</span>]
 march&gt; <span class="tok-ty">List</span>.append([], [<span class="tok-num">1</span>, <span class="tok-num">2</span>])
-[<span class="tok-num">1</span>, <span class="tok-num">2</span>]</code></pre></div></div>
+[<span class="tok-num">1</span>, <span class="tok-num">2</span>]</code></pre><div class="laws"><h4>Laws</h4><ul><li><code>append(xs, Nil) == xs</code> <span class="law-by">(lemma <code>append_nil</code>)</span> <span class="law-st law-ok">proved</span></li>
+<li><code>len(append(xs, ys)) == len(xs) + len(ys)</code> <span class="law-by">(lemma <code>len_append</code>)</span> <span class="law-st law-ok">proved</span></li>
+<li><code>append(take(xs, n), drop(xs, n)) == xs</code> <span class="law-by">(lemma <code>take_drop</code>)</span> <span class="law-st">not proved</span></li></ul></div></div></div>
+<div class="item" id="fn-append_assoc"><div class="ih"><span class="badge bfn">fn</span><span class="name">append_assoc</span><span class="sig">append_assoc(xs : List(a), ys : List(a), zs : List(a))</span><a class="anchor-link" href="#fn-append_assoc" title="Link">#</a></div><div class="ib"><p><code>append</code> is associative.</p></div></div>
+<div class="item" id="fn-append_nil"><div class="ih"><span class="badge bfn">fn</span><span class="name">append_nil</span><span class="sig">append_nil(xs : List(a)) : {Unit | append(xs, Nil) == xs}</span><a class="anchor-link" href="#fn-append_nil" title="Link">#</a></div><div class="ib"><p><code>append(xs, Nil) == xs</code>.</p></div></div>
 <div class="item" id="fn-chunks"><div class="ih"><span class="badge bfn">fn</span><span class="name">chunks</span><span class="sig">chunks(xs : List(a), size : {Int | _ &gt; 0}) : List(List(a))</span><a class="anchor-link" href="#fn-chunks" title="Link">#</a></div><div class="ib"><p>Splits the list into consecutive chunks of <code>size</code> elements; the last chunk holds the remainder and may be shorter. Returns [] for an empty list. <code>size</code> must be positive (<code>{Int | _ &gt; 0}</code>); panics otherwise.</p><h3>Examples</h3><pre data-try="List.chunks([1, 2, 3, 4, 5], 2)
 List.chunks([1, 2], 5)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.chunks([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>, <span class="tok-num">5</span>], <span class="tok-num">2</span>)
 [[<span class="tok-num">1</span>, <span class="tok-num">2</span>], [<span class="tok-num">3</span>, <span class="tok-num">4</span>], [<span class="tok-num">5</span>]]
@@ -385,7 +402,8 @@ List.drop([1, 2, 3], 0)" data-try-kind="transcript"><code>march&gt; <span class=
 march&gt; <span class="tok-ty">List</span>.drop([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>], <span class="tok-num">10</span>)
 []
 march&gt; <span class="tok-ty">List</span>.drop([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>], <span class="tok-num">0</span>)
-[<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>]</code></pre></div></div>
+[<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>]</code></pre><div class="laws"><h4>Laws</h4><ul><li><code>_ &gt;= 0 &amp;&amp; _ &lt;= len(xs)}) : {Unit | len(drop(xs, n)) == len(xs) - n</code> <span class="law-by">(lemma <code>len_drop</code>)</span> <span class="law-st law-ok">proved</span></li>
+<li><code>append(take(xs, n), drop(xs, n)) == xs</code> <span class="law-by">(lemma <code>take_drop</code>)</span> <span class="law-st">not proved</span></li></ul></div></div></div>
 <div class="item" id="fn-drop_last"><div class="ih"><span class="badge bfn">fn</span><span class="name">drop_last</span><span class="sig">drop_last(xs : List(a)) : List(a)</span><a class="anchor-link" href="#fn-drop_last" title="Link">#</a></div><div class="ib"><p>Returns all elements except the last. Returns [] for empty or singleton lists (no panic).</p><h3>Examples</h3><pre data-try="List.drop_last([1, 2, 3])
 List.drop_last([1])
 List.drop_last([])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.drop_last([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>])
@@ -405,7 +423,7 @@ march&gt; <span class="tok-ty">List</span>.drop_while([<span class="tok-num">1</
 []</code></pre></div></div>
 <div class="item" id="fn-enumerate"><div class="ih"><span class="badge bfn">fn</span><span class="name">enumerate</span><span class="sig">enumerate(xs : List(a)) : List((Int, a))</span><a class="anchor-link" href="#fn-enumerate" title="Link">#</a></div><div class="ib"><p>Pairs each element with its 0-based index: [a, b] -&gt; [(0, a), (1, b)].</p><h3>Examples</h3><pre data-try="List.enumerate([&quot;a&quot;, &quot;b&quot;])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.enumerate([<span class="tok-str">&quot;a&quot;</span>, <span class="tok-str">&quot;b&quot;</span>])
 [(<span class="tok-num">0</span>, <span class="tok-str">&quot;a&quot;</span>), (<span class="tok-num">1</span>, <span class="tok-str">&quot;b&quot;</span>)]</code></pre></div></div>
-<div class="item" id="fn-filter"><div class="ih"><span class="badge bfn">fn</span><span class="name">filter</span><span class="sig">filter(xs : List(a), pred : a -&gt; Bool[p]) : {List(a[p]) | subset(elts(_), elts(xs))}</span><a class="anchor-link" href="#fn-filter" title="Link">#</a></div><div class="ib"><p>Returns only elements satisfying <code>pred</code>.</p><p>The result's elements are known to satisfy the predicate: with <code>sum_pos(xs : List({Int | _ &gt; 0}))</code>, <code>sum_pos(List.filter(ys, fn y -&gt; y &gt; 0))</code> is proved. <code>p</code> is an abstract refinement, instantiated from the lambda at each call.</p><h3>Examples</h3><pre data-try="List.filter([1, 2, 3, 4, 5], fn x -&gt; x &gt; 2)
+<div class="item" id="fn-filter"><div class="ih"><span class="badge bfn">fn</span><span class="name">filter</span><span class="sig">filter(xs : List(a), pred : a -&gt; Bool[p]) : {List(a[p]) | subset(elts(_), elts(xs)) &amp;&amp; len(_) &lt;= len(xs)}</span><a class="anchor-link" href="#fn-filter" title="Link">#</a></div><div class="ib"><p>Returns only elements satisfying <code>pred</code>.</p><p>The result's elements are known to satisfy the predicate: with <code>sum_pos(xs : List({Int | _ &gt; 0}))</code>, <code>sum_pos(List.filter(ys, fn y -&gt; y &gt; 0))</code> is proved. <code>p</code> is an abstract refinement, instantiated from the lambda at each call.</p><h3>Examples</h3><pre data-try="List.filter([1, 2, 3, 4, 5], fn x -&gt; x &gt; 2)
 List.filter([&quot;foo&quot;, &quot;&quot;, &quot;bar&quot;, &quot;&quot;], fn s -&gt; !String.is_empty(s))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.filter([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>, <span class="tok-num">5</span>], <span class="tok-kw">fn</span> x -&gt; x &gt; <span class="tok-num">2</span>)
 [<span class="tok-num">3</span>, <span class="tok-num">4</span>, <span class="tok-num">5</span>]
 
@@ -461,6 +479,12 @@ march&gt; <span class="tok-ty">List</span>.is_empty([<span class="tok-num">0</sp
 <span class="tok-kw">false</span></code></pre></div></div>
 <div class="item" id="fn-last"><div class="ih"><span class="badge bfn">fn</span><span class="name">last</span><span class="sig">last(xs : {List(a) | len(_) &gt; 0}) : a</span><a class="anchor-link" href="#fn-last" title="Link">#</a></div><div class="ib"><p>Returns the last element, walking the whole list (O(n)). Panics on an empty list.</p><h3>Examples</h3><pre data-try="List.last([1, 2, 3])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.last([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>])
 <span class="tok-num">3</span></code></pre></div></div>
+<div class="item" id="fn-len_append"><div class="ih"><span class="badge bfn">fn</span><span class="name">len_append</span><span class="sig">len_append(xs : List(a), ys : List(a)) : {Unit | len(append(xs, ys)) == len(xs) + len(ys)}</span><a class="anchor-link" href="#fn-len_append" title="Link">#</a></div><div class="ib"><p>The length of <code>append(xs, ys)</code> is the sum of the lengths.</p></div></div>
+<div class="item" id="fn-len_drop"><div class="ih"><span class="badge bfn">fn</span><span class="name">len_drop</span><span class="sig">len_drop(xs : List(a), n : {Int | _ &gt;= 0 &amp;&amp; _ &lt;= len(xs)}) : {Unit | len(drop(xs, n)) == len(xs) - n}</span><a class="anchor-link" href="#fn-len_drop" title="Link">#</a></div><div class="ib"><p><code>drop(xs, n)</code> has <code>len(xs) - n</code> elements when <code>0 &lt;= n &lt;= len(xs)</code>.</p></div></div>
+<div class="item" id="fn-len_reverse"><div class="ih"><span class="badge bfn">fn</span><span class="name">len_reverse</span><span class="sig">len_reverse(xs : List(a)) : {Unit | len(reverse(xs)) == len(xs)}</span><a class="anchor-link" href="#fn-len_reverse" title="Link">#</a></div><div class="ib"><p>Reversing keeps the length.</p></div></div>
+<div class="item" id="fn-len_reverse_onto"><div class="ih"><span class="badge bfn">fn</span><span class="name">len_reverse_onto</span><span class="sig">len_reverse_onto(xs : List(a), acc : List(a)) : {Unit | len(reverse_onto(xs, acc)) == len(xs) + len(acc)}</span><a class="anchor-link" href="#fn-len_reverse_onto" title="Link">#</a></div><div class="ib"><p>The length of <code>reverse_onto(xs, acc)</code> is the sum of the lengths.</p></div></div>
+<div class="item" id="fn-len_take"><div class="ih"><span class="badge bfn">fn</span><span class="name">len_take</span><span class="sig">len_take(xs : List(a), n : {Int | _ &gt;= 0 &amp;&amp; _ &lt;= len(xs)}) : {Unit | len(take(xs, n)) == n}</span><a class="anchor-link" href="#fn-len_take" title="Link">#</a></div><div class="ib"><p><code>take(xs, n)</code> has <code>n</code> elements when <code>0 &lt;= n &lt;= len(xs)</code>.</p></div></div>
+<div class="item" id="fn-len_take_onto"><div class="ih"><span class="badge bfn">fn</span><span class="name">len_take_onto</span><span class="sig">len_take_onto(xs : List(a), k : {Int | _ &gt;= 0 &amp;&amp; _ &lt;= len(xs)}, acc : List(a))</span><a class="anchor-link" href="#fn-len_take_onto" title="Link">#</a></div><div class="ib"><p><code>take</code>'s loop: <code>k</code> more elements onto the accumulator.</p></div></div>
 <div class="item" id="fn-length"><div class="ih"><span class="badge bfn">fn</span><span class="name">length</span><span class="sig">length(xs : List(a)) : Int</span><a class="anchor-link" href="#fn-length" title="Link">#</a></div><div class="ib"><p>Returns the number of elements in the list.</p><h3>Examples</h3><pre data-try="List.length([1, 2, 3])
 List.length([])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.length([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>])
 <span class="tok-num">3</span>
@@ -540,7 +564,11 @@ march&gt; <span class="tok-ty">List</span>.repeat(<span class="tok-str">&quot;x&
 List.reverse([])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.reverse([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>])
 [<span class="tok-num">3</span>, <span class="tok-num">2</span>, <span class="tok-num">1</span>]
 march&gt; <span class="tok-ty">List</span>.reverse([])
-[]</code></pre></div></div>
+[]</code></pre><div class="laws"><h4>Laws</h4><ul><li><code>reverse(reverse(xs)) == xs</code> <span class="law-by">(lemma <code>reverse_reverse</code>)</span> <span class="law-st">not proved</span></li>
+<li><code>len(reverse(xs)) == len(xs)</code> <span class="law-by">(lemma <code>len_reverse</code>)</span> <span class="law-st">not proved</span></li></ul></div></div></div>
+<div class="item" id="fn-reverse_append"><div class="ih"><span class="badge bfn">fn</span><span class="name">reverse_append</span><span class="sig">reverse_append(xs : List(a), ys : List(a))</span><a class="anchor-link" href="#fn-reverse_append" title="Link">#</a></div><div class="ib"><p>Reversing a concatenation reverses the parts and swaps them.</p></div></div>
+<div class="item" id="fn-reverse_onto_append"><div class="ih"><span class="badge bfn">fn</span><span class="name">reverse_onto_append</span><span class="sig">reverse_onto_append(xs : List(a), acc : List(a))</span><a class="anchor-link" href="#fn-reverse_onto_append" title="Link">#</a></div><div class="ib"><p><code>reverse</code>'s loop onto an accumulator is the reversal followed by the accumulator.</p></div></div>
+<div class="item" id="fn-reverse_reverse"><div class="ih"><span class="badge bfn">fn</span><span class="name">reverse_reverse</span><span class="sig">reverse_reverse(xs : List(a)) : {Unit | reverse(reverse(xs)) == xs}</span><a class="anchor-link" href="#fn-reverse_reverse" title="Link">#</a></div><div class="ib"><p><code>reverse(reverse(xs)) == xs</code>.</p></div></div>
 <div class="item" id="fn-scan_left"><div class="ih"><span class="badge bfn">fn</span><span class="name">scan_left</span><span class="sig">scan_left(xs : List(a), acc : b, f : b -&gt; a -&gt; b) : List(b)</span><a class="anchor-link" href="#fn-scan_left" title="Link">#</a></div><div class="ib"><p>Like <code>fold_left</code> but returns every accumulator value, starting with the initial <code>acc</code>, so the result has one more element than <code>xs</code>; its last element is what <code>fold_left</code> would return.</p><h3>Examples</h3><pre data-try="List.scan_left([1, 2, 3], 0, fn (acc, x) -&gt; acc + x)
 List.scan_left([], 5, fn (acc, x) -&gt; acc + x)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.scan_left([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>], <span class="tok-num">0</span>, <span class="tok-kw">fn</span> (acc, x) -&gt; acc + x)
 [<span class="tok-num">0</span>, <span class="tok-num">1</span>, <span class="tok-num">3</span>, <span class="tok-num">6</span>]
@@ -595,7 +623,10 @@ List.take([1, 2, 3], -1)" data-try-kind="transcript"><code>march&gt; <span class
 march&gt; <span class="tok-ty">List</span>.take([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>], <span class="tok-num">5</span>)
 [<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>]
 march&gt; <span class="tok-ty">List</span>.take([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>], -<span class="tok-num">1</span>)
-[]</code></pre></div></div>
+[]</code></pre><div class="laws"><h4>Laws</h4><ul><li><code>_ &gt;= 0 &amp;&amp; _ &lt;= len(xs)}) : {Unit | len(take(xs, n)) == n</code> <span class="law-by">(lemma <code>len_take</code>)</span> <span class="law-st">not proved</span></li>
+<li><code>append(take(xs, n), drop(xs, n)) == xs</code> <span class="law-by">(lemma <code>take_drop</code>)</span> <span class="law-st">not proved</span></li></ul></div></div></div>
+<div class="item" id="fn-take_drop"><div class="ih"><span class="badge bfn">fn</span><span class="name">take_drop</span><span class="sig">take_drop(xs : List(a), n : Int) : {Unit | append(take(xs, n), drop(xs, n)) == xs}</span><a class="anchor-link" href="#fn-take_drop" title="Link">#</a></div><div class="ib"><p><code>append(take(xs, n), drop(xs, n)) == xs</code>.</p></div></div>
+<div class="item" id="fn-take_onto_drop"><div class="ih"><span class="badge bfn">fn</span><span class="name">take_onto_drop</span><span class="sig">take_onto_drop(xs : List(a), k : Int, acc : List(a))</span><a class="anchor-link" href="#fn-take_onto_drop" title="Link">#</a></div><div class="ib"><p><code>take</code>'s loop and <code>drop</code> split a list at the same place.</p></div></div>
 <div class="item" id="fn-take_while"><div class="ih"><span class="badge bfn">fn</span><span class="name">take_while</span><span class="sig">take_while(xs : List(a), pred : a -&gt; Bool[p]) : List(a[p])</span><a class="anchor-link" href="#fn-take_while" title="Link">#</a></div><div class="ib"><p>Returns the longest prefix of elements satisfying <code>pred</code>, stopping at the first element that fails. Every element of the result is known to satisfy <code>pred</code> (an abstract refinement <code>p</code>, as for <code>filter</code>).</p><h3>Examples</h3><pre data-try="List.take_while([1, 2, 5, 1], fn x -&gt; x &lt; 3)
 List.take_while([5, 1], fn x -&gt; x &lt; 3)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.take_while([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">5</span>, <span class="tok-num">1</span>], <span class="tok-kw">fn</span> x -&gt; x &lt; <span class="tok-num">3</span>)
 [<span class="tok-num">1</span>, <span class="tok-num">2</span>]

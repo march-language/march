@@ -3494,6 +3494,50 @@ let test_no_warn_import_used () =
   end|} in
   Alcotest.(check bool) "used import no warn" false (has_unused_warning ctx)
 
+(* `use M.*` whose only use is an interface of M: an `impl` of it or a
+   `when` constraint on it.  The interface names were never tracked, so the
+   import read as unused (specs/todos/2026-11-03-unused-import-ignores-impl-interface.md). *)
+let test_no_warn_use_for_impl () =
+  let ctx = typecheck {|mod Test do
+    mod Alg do
+      interface Monoid(a) do
+        fn combine : a -> a -> a
+      end
+    end
+    use Alg.*
+    impl Monoid(Int) do
+      fn combine(x, y) do x + y end
+    end
+    fn main() do 0 end
+  end|} in
+  Alcotest.(check bool) "use for an impl's interface no warn" false (has_unused_warning ctx)
+
+let test_no_warn_use_for_when () =
+  let ctx = typecheck {|mod Test do
+    mod Alg do
+      interface Monoid(a) do
+        fn combine : a -> a -> a
+      end
+    end
+    use Alg.*
+    fn twice(x : a) : a when Monoid(a) do combine(x, x) end
+    fn main() do 0 end
+  end|} in
+  Alcotest.(check bool) "use for a when constraint no warn" false (has_unused_warning ctx)
+
+let test_warn_use_interface_only_unused () =
+  (* An interface-only module that nothing uses is now reported too. *)
+  let ctx = typecheck {|mod Test do
+    mod Alg do
+      interface Monoid(a) do
+        fn combine : a -> a -> a
+      end
+    end
+    use Alg.*
+    fn main() do 0 end
+  end|} in
+  Alcotest.(check bool) "unused interface-only import warns" true (has_unused_warning ctx)
+
 (* ── Phase 1: pub/private visibility tests ────────────────────────────── *)
 
 (* fn in nested mod is accessible from outside *)
@@ -14859,6 +14903,9 @@ let stdlib_suites =
         (* ── Unused import/alias warnings ───────────────────────────── *)
         Alcotest.test_case "warn unused alias"          `Quick test_warn_unused_alias;
         Alcotest.test_case "warn unused import specific" `Quick test_warn_unused_import_specific;
+        Alcotest.test_case "no warn: use for an impl's interface" `Quick test_no_warn_use_for_impl;
+        Alcotest.test_case "no warn: use for a when constraint" `Quick test_no_warn_use_for_when;
+        Alcotest.test_case "warn: unused interface-only import" `Quick test_warn_use_interface_only_unused;
         Alcotest.test_case "warn unused import all"      `Quick test_warn_unused_import_all;
         Alcotest.test_case "no warn when import used"    `Quick test_no_warn_import_used;
         (* Phase 1: visibility *)
