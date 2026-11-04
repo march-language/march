@@ -31,6 +31,61 @@ let ends_with out prefix suffix =
   | Some l -> Alcotest.failf "line %S should end %S" l suffix
   | None -> Alcotest.failf "no line starting %S in:\n%s" prefix out
 
+(* The definition named [name] in [src] (a `mod M do .. end`), parsed only. *)
+let parsed_fn src name : March_ast.Ast.fn_def =
+  match March_parser.Parse.module_ src with
+  | Error _ -> Alcotest.failf "does not parse:\n%s" src
+  | Ok m -> (
+    match
+      List.find_map
+        (function
+          | March_ast.Ast.DFn (fd, _) when fd.March_ast.Ast.fn_name.March_ast.Ast.txt = name -> Some fd
+          | _ -> None)
+        m.March_ast.Ast.mod_decls
+    with
+    | Some fd -> fd
+    | None -> Alcotest.failf "no fn %s" name)
+
+let descs fd = List.map (fun (e : March_refinecheck.Law_strength.edit) -> e.March_refinecheck.Law_strength.ed_desc) (March_refinecheck.Law_strength.edits fd)
+
+let edit_tests =
+  [ Alcotest.test_case "edits_reverse: return-a-parameter and drop-the-recursive-call" `Quick (fun () ->
+        let ds = descs (parsed_fn (m L.defs4_6) "rev") in
+        List.iter
+          (fun d -> if not (List.mem d ds) then Alcotest.failf "missing edit %S in [%s]" d (String.concat "; " ds))
+          [ "return `xs` unchanged"; "drop the recursive call" ]);
+    Alcotest.test_case "edits_deterministic: two calls agree" `Quick (fun () ->
+        let fd = parsed_fn (m L.defs4_6) "cat" in
+        Alcotest.(check (list string)) "same edits" (descs fd) (descs fd));
+    Alcotest.test_case "edits_cap: at most 20 edits" `Quick (fun () ->
+        let body = String.concat " + " (List.init 30 (fun i -> string_of_int (i + 2))) in
+        let fd = parsed_fn (m (Printf.sprintf "  fn f(n : Int) : Int do n + %s end\n" body)) "f" in
+        Alcotest.(check int) "capped" 20 (List.length (March_refinecheck.Law_strength.edits fd)));
+    Alcotest.test_case "edits_no_self: every edit changes the definition" `Quick (fun () ->
+        let fd = parsed_fn (m L.defs4_6) "cat" in
+        List.iter
+          (fun (e : March_refinecheck.Law_strength.edit) ->
+            if e.March_refinecheck.Law_strength.ed_fn = fd then
+              Alcotest.failf "edit %S changed nothing" e.March_refinecheck.Law_strength.ed_desc)
+          (March_refinecheck.Law_strength.edits fd));
+    Alcotest.test_case "edits_kinds: literal, comparison and arm edits are worded as specified" `Quick (fun () ->
+        let fd =
+          parsed_fn
+            (m
+               {|  fn g(n : Int) : Int do
+    match n < 0 do
+      true -> 0
+      false -> n
+    end
+  end
+|})
+            "g"
+        in
+        let ds = descs fd in
+        List.iter
+          (fun d -> if not (List.mem d ds) then Alcotest.failf "missing edit %S in [%s]" d (String.concat "; " ds))
+          [ "change 0 to 1"; "change `<` to `<=`"; "swap the results of two match arms"; "return `n` unchanged" ]) ]
+
 let rev_only_bad =
   {|  @[lemma]
   fn bad(xs : List(a)) : {Unit | rev(xs) == xs} do () end
@@ -147,3 +202,4 @@ let tests =
           Alcotest.(check string) "module" "M" (member "module" j |> to_string);
           Alcotest.(check bool) "public" true (member "public" j |> to_bool);
           if member "impl" j <> `Null then Alcotest.fail "impl is null for a plain function") ]
+  @ edit_tests
