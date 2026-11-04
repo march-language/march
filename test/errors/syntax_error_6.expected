@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------------- errors/syntax_error_6.march
+-- SYNTAX ------------------- errors/syntax_error_6.march
 
 This `with` (line 4) has no matching `end`. [syntax_error]
 

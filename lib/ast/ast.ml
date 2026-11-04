@@ -445,6 +445,10 @@ and interface_def = {
   iface_superclasses : (name * ty list) list;  (** Superclass constraints *)
   iface_assoc_types : assoc_type_decl list;    (** Associated type declarations *)
   iface_methods : method_decl list;
+  iface_laws : fn_def list;
+    (** Laws: [@[lemma] fn name(params) : {Unit | P}] with no body.  Every
+        impl must satisfy each one ([Interface_laws] turns it into a lemma
+        per impl). *)
 }
 
 and assoc_type_decl = {

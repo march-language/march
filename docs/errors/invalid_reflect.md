@@ -64,4 +64,4 @@ Reflection is automatic, so a function can stop being reflected without anyone n
 proof that used its definition then turns into a skip. `@[reflect]` lets the author say "this must
 stay in the logic", and the compiler holds the code to it.
 
-See also: [the language reference](../refinement-types.md), `invalid_measure`, `reflect_conflict`.
+See also: [the language reference](../refinement-types.md), [the lemmas guide](../lemmas.md), `invalid_measure`, `reflect_conflict`.

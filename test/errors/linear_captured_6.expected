@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------------- errors/linear_captured_6.march
+-- LINEARITY ------------- errors/linear_captured_6.march
 
 The linear value `rb` cannot be captured by a closure. [linear_captured]
 A closure may be called multiple times, which would violate the exactly-once guarantee.
@@ -10,7 +10,7 @@ Pass `rb` as a parameter to the closure instead.
 
 
 
--- ERROR ----------------- errors/linear_captured_6.march
+-- LINEARITY ------------- errors/linear_captured_6.march
 
 This `_` discards a linear value of type `RingBuf(Int)`. [linear_discarded]
 Linear values must be consumed exactly once. Bind it to a name and pass it to something that consumes it.

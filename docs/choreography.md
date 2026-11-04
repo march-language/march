@@ -926,12 +926,24 @@ actor behind `host`) and requires every capability in that reach to sit under th
 grant, exactly as `main`'s grant bounds the program:
 
 ```
-Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the
-body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body:
-body → cons → save). A role's grant bounds everything its code reaches, as `main`'s
-grant bounds the program.
+The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`
+(`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as
+`main`'s grant bounds the program.
 help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
+
+26 |     let _ = file_write("/tmp/n", int_to_string(n))
+                 ^^^^^^^^^^
+    the body calls `cons` here:            (line 38)
+    `cons` calls `save` here:              (line 32)
+    the body of role `Cons`, passed to `Stream_Run.run_Cons`
+    role `Cons` is granted only `Cap(IO.Console)` here:  role Cons needs IO.Console
 ```
+
+The error points at the call that needs the authority and labels each call on the way
+to it; its fix adds the capability to the role's `needs` line. When the chain passes
+through a value the walk cannot place in the source (a body bound with `let`, say), the
+error stays on the callback and names the chain in prose instead (`(reached from the
+body: body → wipe)`).
 
 The root of the walk is the *value* that reaches the body parameter, not the expression
 at the call. A body bound with `let` in the calling function, a body passed in through a

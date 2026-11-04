@@ -311,8 +311,8 @@ from it that needs a capability you have not declared:
 
 ```
 $ march --check caller.march   # `use`s a module needing Cap(IO.Network), no `needs IO.Network` of its own
--- ERROR --
-module `Caller` imports `Server` which requires `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`.
+-- CAPABILITY --
+Module `Caller` imports `Server` which requires `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`.
 help: add `needs IO.Network` to the module body.
 $ echo $?
 1
@@ -326,21 +326,24 @@ signature, is the same severity:
 
 ```
 $ march --check reader.march   # fn slurp(path) do file_read(path) end — no needs
--- ERROR -- function bodies in `Reader` call builtins that require `Cap(IO.FileRead)`, but `Reader` declares no matching `needs`.
-hint: add these to the module body —
+-- CAPABILITY -- `slurp` reads a file, but module `Reader` declares no `needs IO.FileRead`.
+hint: add this to the module body —
         needs IO.FileRead
 $ echo $?
 1
 ```
 
-The error includes a machine-applicable fix, so `forge fix` will insert the
-`needs` line for you. Every offending capability in the module is collapsed
-into **one** diagnostic, not one per call site: a `main` that touches four
-undeclared capabilities gets a single error naming all four once, with one
-fix that inserts all four `needs` lines at once:
+The error points at the first call that needs the capability and names the code it is
+in and what it does: a function (`` `slurp` reads a file``), an actor handler
+(`` the `Inc` handler of actor `Counter` prints``) or a module-level `let`. It
+includes a machine-applicable fix, so `forge fix` will insert the `needs` line for
+you. Every offending capability in the module is collapsed into **one** diagnostic,
+not one per call site: a `main` that touches four undeclared capabilities gets a
+single error naming all four once (each other capability's first use is a label),
+with one fix that inserts all four `needs` lines at once:
 
 ```
--- ERROR -- function bodies in `Main` call builtins that require `Cap(IO.Console)`, `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`, but `Main` declares no matching `needs`.
+-- CAPABILITY -- `main` prints, but module `Main` declares no `needs IO.Console`; its code also reaches `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`.
 hint: add these to the module body —
         needs IO.Console
         needs IO.FileWrite
@@ -411,8 +414,7 @@ This compiles as-is. Delete `needs IO.FileWrite` and it fails, not with a
 missing-parameter error but with the compiler naming the whole path:
 
 ```
-function bodies in `Logger` call builtins that require `Cap(IO.FileWrite)`, but
-`Logger` declares no matching `needs`.
+`log` writes a file, but module `Logger` declares no `needs IO.FileWrite`.
 ...
 reached from `main`: main → log_error → log
 ```
@@ -447,8 +449,10 @@ accepted if you would rather say it explicitly.
 
 ```
 $ march --compile -o app app.march
--- CAPABILITY CEILING --
-module `HostileDep` uses `IO.FileRead` but does not declare `needs IO.FileRead`
+-- CAPABILITY ------------------------------------ dep.march
+
+Module `HostileDep` uses `IO.FileRead` but does not declare `needs IO.FileRead`. [cap_ceiling]
+help: add `needs IO.FileRead` to the module body.
 
 1 capability ceiling violation(s). Every module's emitted code must stay
 within its own `needs`.
@@ -891,7 +895,7 @@ A module with `cap pure` bans every call to a builtin that performs any side eff
 
 ```
 $ march --check leaky_pure.march   # cap pure; fn write(...) : Result(Unit, String) do file_write(path, contents) end
--- ERROR -- `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects.
+-- CONTRACT -- `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects.
 $ echo $?
 1
 ```
@@ -912,7 +916,7 @@ end
 
 ```
 $ march --check clock_leak.march   # cap deterministic; calls unix_time_ms(())
--- ERROR -- `now` in `mod DetLeak` (declared `cap deterministic`) calls `unix_time_ms`, which is non-deterministic.
+-- CONTRACT -- `now` in `mod DetLeak` (declared `cap deterministic`) calls `unix_time_ms`, which is non-deterministic.
 $ echo $?
 1
 ```

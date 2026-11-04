@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------- errors/protocol_invalid_1.march
+-- PROTOCOL ------------- errors/protocol_invalid_1.march
 
 Protocol `Q`: this `choose` branch ends in a `loop`, but the protocol continues after the `choose` — those following steps are projected into EVERY branch, so they can never run in this one. Move them inside the branches that can reach them. [protocol_invalid]
 

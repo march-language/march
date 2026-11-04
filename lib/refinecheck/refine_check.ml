@@ -5250,6 +5250,17 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                let names = pat_binders b.A.bind_pat in
                let lets = launder_shadow lets names in
                (match b.A.bind_pat, b.A.bind_expr with
+                (* Not when the RHS reads the name it binds (`let k =
+                   f(k)`, or a lambda capturing `k`): the entry is read at
+                   the obligation, where `k` is already the new binding, so
+                   `k == f(k)` would be about the wrong value (review of
+                   reflection phase 5; [push_tuple_projs] has the same rule).
+                   [expr_mentions] looks inside lambda bodies. *)
+                | A.PatVar n, (A.EApp _ as rhs)
+                  when expr_mentions [ n.A.txt ] rhs
+                       (* Test-only: the RED control of this rule. *)
+                       && Sys.getenv_opt "MARCH_REFLECT_PERTURB" <> Some "let-self-ref" ->
+                  lets
                 | A.PatVar n, (A.EApp _ as rhs) -> (n.A.txt, rhs) :: lets
                 (* `let (yes, no) = g(…)`: each component, as a projection of
                    the call (leftovers design 2026-10-18 §5.4). *)
@@ -7077,6 +7088,15 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
             (match Refine_post.assumed_return fd with Some p -> pred_str p | None -> "?")
             k n
         in
+        match Hashtbl.find_opt Refine_call.lemma_refuted lw.lw_name with
+        | Some at ->
+          (* The solver's model, run in the interpreter, makes the theorem
+             false: a definite failure, not an unproved one. *)
+          Err.error ~code:Err.Code.refinement_violated errctx ~span:fd.A.fn_name.A.span
+            (Printf.sprintf "the lemma `%s` is false: its theorem `%s` does not hold at %s" lw.lw_name
+               (match Refine_post.assumed_return fd with Some p -> pred_str p | None -> "?")
+               at)
+        | None ->
         if !strict_verified then Err.error ~code:Err.Code.lemma_unproved errctx ~span:fd.A.fn_name.A.span msg
         else Err.warning ~code:Err.Code.lemma_unproved errctx ~span:fd.A.fn_name.A.span msg
       end
@@ -7114,7 +7134,17 @@ let lemma_scratch_verdict ~root defs (fd : A.fn_def) : bool =
           let errs = Err.create () in
           let ctx = { rctx0 with modpath = !Refine_post.lemma_prefix } in
           visit_fn ~root errs defs ctx fd;
-          result := not (List.exists (fun (d : Err.diagnostic) -> d.Err.code = Err.Code.lemma_unproved) (Err.sorted errs))));
+          (* A refuted theorem draws `refinement_violated` instead of
+             `lemma_unproved` (both at the lemma's name): not proved either.
+             Looking for `lemma_unproved` alone admitted a refuted lemma, and
+             its false theorem became a fact for every caller. *)
+          result :=
+            not
+              (List.exists
+                 (fun (d : Err.diagnostic) ->
+                   d.Err.code = Err.Code.lemma_unproved
+                   || (d.Err.code = Err.Code.refinement_violated && d.Err.span = fd.A.fn_name.A.span))
+                 (Err.sorted errs))));
   !result
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
@@ -8247,7 +8277,7 @@ let warn_unknown_attributes errctx (decls : A.decl list) : unit =
             |> List.sort (fun x y -> compare (edit_distance x name) (edit_distance y name))
           in
           Err.warning ~code:Err.Code.unknown_attribute errctx ~span:fd.A.fn_name.A.span
-            (Printf.sprintf "unknown attribute `@[%s]` on `%s`: it is ignored.%s" name
+            (Printf.sprintf "Unknown attribute `@[%s]` on `%s`: it is ignored.%s" name
                fd.A.fn_name.A.txt
                (match near with
                 | k :: _ -> Printf.sprintf "\nnote: did you mean `@[%s]`?" k
@@ -9293,6 +9323,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         | Some why -> bad why
         | None -> (
           match reflect_blocker fd with
+          (* Phase 5: a function taking functions is in the logic at each
+             specialised call, with this fuel. *)
+          | Some _ when Hashtbl.mem Refine_reflect.specialised span -> ()
           | Some (_, txt) -> bad (Printf.sprintf "`%s` is not reflected: it %s" name (blocker_text txt))
           | None -> ()))
     (reflect_fns m.A.mod_decls);
@@ -9627,6 +9660,32 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   let ih_eligible : (A.span, unit) Hashtbl.t = Hashtbl.create 8 in
   lemma_rows := [];
   lemma_defs := [];
+  (* A refuted lemma theorem is confirmed by evaluating it, in the
+     interpreter, on the model's values for the lemma's parameters. *)
+  let lemmas_q = lemma_fns_q m.A.mod_decls in
+  Hashtbl.reset Refine_call.lemma_refuted;
+  Refine_call.lemma_counterexample :=
+    (fun name model ->
+      match List.find_opt (fun (q, (fd : A.fn_def)) -> q = name || fd.A.fn_name.A.txt = name) lemmas_q with
+      | None -> None
+      | Some (_, fd) -> (
+        match fd.A.fn_clauses, lemma_post fd with
+        | [ c ], Ok (_, p) -> (
+          match Witness.annotated_params (List.map Witness.clause_param c.A.fc_params) with
+          | Some params when List.for_all Witness.witness_safe_param params -> (
+            match Witness.decode_model ~params ~model with
+            | Some args when Witness.admissible ~params args -> (
+              match Witness.eval_classified ~bindings:args p with
+              | Witness.C_ret (March_eval.Eval_types.VBool false) ->
+                Some
+                  (String.concat ", "
+                     (List.map
+                        (fun (n, v) -> n ^ " = " ^ Option.value ~default:"?" (Witness.render_value v))
+                        args))
+              | _ -> None)
+            | _ -> None)
+          | _ -> None)
+        | _ -> None));
   lemma_called := [];
   manifest_rows := [];
   gate_unverified_posts_ih ~root
@@ -9744,7 +9803,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       in
       List.iter
         (fun (span, msg) ->
-          Err.error ~code:Err.Code.invalid_decreases errctx ~span ("@[decreases]: " ^ msg))
+          Err.error ~code:Err.Code.invalid_decreases errctx ~span ("`@[decreases]`: " ^ msg))
         pl.Refine_term.pl_invalid;
       List.iter
         (fun u ->

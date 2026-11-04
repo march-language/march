@@ -1,0 +1,46 @@
+exit: 1
+-- CAPABILITY --------------- errors/cap_mismatch_1.march
+
+`read` needs file-read access, but `c` is the console capability. [cap_mismatch]
+
+12 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
+                                                    ^
+
+    `IO.Console` and `IO.FileRead` are both parts of `IO`; neither contains the other.
+    help: give `main` a `Cap(IO.FileRead)` parameter and pass it to `read`.
+    and add `needs IO.FileRead` to the module.
+
+    `read` needs `Cap(IO.FileRead)`:
+
+12 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
+                                               ^^^^^^^
+
+    `c` was bound here as `Cap(IO.Console)`:
+
+12 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
+               ^
+
+    `Cap(IO.FileRead)` is named here, and the module declares no `needs IO.FileRead`:
+
+10 |   fn read(c : Cap(IO.FileRead)) : String do "x" end
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `main` is granted only `Cap(IO.Console)` here:
+
+12 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
+              ^^^^^^^^^^^^^^^^^^^^^
+
+
+
+fix [cap_mismatch:IO.FileRead]:
+@@ after line 7 @@
+ mod Main do
++  needs IO.FileRead
+@@ lines 12-12 @@
+-  fn main(c : Cap(IO.Console)) do println(read(c)) end
++  fn main(c : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) do println(read(c)) end
+@@ lines 12-12 @@
+-  fn main(c : Cap(IO.Console)) do println(read(c)) end
++  fn main(c : Cap(IO.Console)) do println(read(_cap_fileread)) end
+
+after fix: exit 0

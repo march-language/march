@@ -8,4 +8,3 @@
 # Generated session states (`S_<step>`):
 # specs/todos/2026-11-02-diag-choreography-session-messages.md
 linear_used_twice_6 S_end
-unknown_qualified_name_2 S_end

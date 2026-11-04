@@ -1,4 +1,4 @@
--- EXPECT-ERROR: module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`
+-- EXPECT-ERROR: Module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`
 -- Capabilities widening, Task 2 -- Check 4 (transitive `use`), the REJECT
 -- side. Companion to accept/t49 with the `needs IO.Mut` line removed.
 -- `Vault` (`stdlib/vault.march:26`) declares `needs IO.Mut`; `Main` `use`s

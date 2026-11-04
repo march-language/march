@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_20.march
+-- REFINEMENT ----------------- errors/cap_grant_20.march
 
 refinement violation: lane index must be less than 16 [refinement_violated]
 argument `i` of `Simd.extract_u8x16` does not satisfy precondition `_ < 16`

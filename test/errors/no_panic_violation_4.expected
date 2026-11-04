@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------- errors/no_panic_violation_4.march
+-- CONTRACT ----------- errors/no_panic_violation_4.march
 
 `check` in `mod Safe` (declared `cap no_panic`) calls `panic`, which can panic. [no_panic_violation]
 `validate`, `validate_all` in this module reach it too.

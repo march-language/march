@@ -1,0 +1,20 @@
+-- IO in an actor handler, in a module with no `needs` and a `main` granted
+-- nothing (diagnostics plan F1): one report, at the `println`, naming the
+-- handler ("the `Inc` handler of actor `Counter` prints"), with `main`'s
+-- missing grant as a label and both edits (the `needs` line and the grant)
+-- as one fix.
+mod Main do
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+    on Inc(x : Int) do
+      println("bump")
+      { count: state.count + x }
+    end
+  end
+
+  fn main() do
+    let p = spawn(Counter)
+    send(p, Inc(1))
+  end
+end

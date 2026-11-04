@@ -1,7 +1,16 @@
 exit: 1
-errors/cap_grant_13.march:16:9: error: `Cap(IO.FileWrite)` cannot be deserialized — a capability may only be received, never constructed, so `Handle` cannot derive Json. [cap_deserialize]
+-- CAPABILITY ----------------- errors/cap_grant_13.march
+
+`Cap(IO.FileWrite)` cannot be deserialized — a capability may only be received, never constructed, so `Handle` cannot derive Json. [cap_deserialize]
 hint: hold the capability in a separate value and pass it as a parameter, keeping `Handle` free of capability fields.
--- ERROR ---------------------- errors/cap_grant_13.march
+
+16 |   derive Json for Handle
+              ^^^^
+
+    run `march --explain cap_deserialize`
+
+
+-- CAPABILITY ----------------- errors/cap_grant_13.march
 
 `main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
 help: declare the grant `main` actually needs —
@@ -22,4 +31,4 @@ fix [cap_grant]:
 +  fn main(_cap_console : Cap(IO.Console)) do
 
 after fix: exit 1
-errors/cap_grant_13.march:16:9: error: `Cap(IO.FileWrite)` cannot be deserialized — a capability may only be received, never constructed, so `Handle` cannot derive Json. [cap_deserialize]
+`Cap(IO.FileWrite)` cannot be deserialized — a capability may only be received, never constructed, so `Handle` cannot derive Json. [cap_deserialize]

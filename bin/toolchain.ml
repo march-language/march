@@ -13,16 +13,6 @@
 
 (* Decode URL-safe base64 (with or without padding) to bytes.
  * Returns Some bytes_string on success, None on invalid input. *)
-(* Label a desugar diagnostic by its ACTUAL severity. Both desugar printers
-   hardcoded "error:", which was harmless only while desugar emitted nothing but
-   errors. It now also emits a warning (the redundant-CSRF-token one), and a
-   warning printed as "error:" misleads people and any tooling that greps the
-   output. The exit decision is unchanged -- it still keys off has_errors. *)
-let severity_word (sev : March_errors.Errors.severity) : string =
-  match sev with
-  | March_errors.Errors.Error -> "error"
-  | March_errors.Errors.Warning -> "warning"
-  | March_errors.Errors.Hint -> "hint"
 
 (* Reject a bare top-level function name shared between prelude.march and the
    entry module BEFORE the two decl lists are concatenated below (or, at the
@@ -59,10 +49,12 @@ let check_no_prelude_collision_decls ~(stdlib_decls : March_ast.Ast.decl list)
     ~iface_method_arities:March_typecheck.Typecheck.prelude_collision_iface_arities
     ~entry_decls errors;
   if March_errors.Errors.has_errors errors then begin
+    (* The standard renderer, against the file the span points into
+       (plan §X5: no raw `file:line:col: error:` lines). *)
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
-        Printf.eprintf "%s:%d:%d: %s: %s\n"
-          d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-          d.span.March_ast.Ast.start_col (severity_word d.severity) d.message
+        let f = d.span.March_ast.Ast.file in
+        let src = try In_channel.with_open_bin f In_channel.input_all with _ -> "" in
+        Printf.eprintf "%s\n\n\n" (March_errors.Errors.render_diagnostic ~src ~filename:f d)
       ) (March_errors.Errors.sorted errors);
     exit 1
   end
@@ -157,14 +149,20 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
        | Some j -> Some (String.sub rest 0 j)
        | None -> None)
   in
-  (* Check 1b's aggregated error: "function bodies in `M` call builtins
-     that require ...". Check 1's per-Cap(X)-parameter error: "`Cap(X)` used
-     in module `M` but ...". Both anchors are tried in turn — a diagnostic's
+  (* Check 1b's aggregated error ("... prints, but module `M` declares no
+     `needs X`"; "function bodies in `M` call builtins that require ..."
+     before F1). Check 1's per-Cap(X)-parameter error: "`Cap(X)` used
+     in module `M` but ...". The anchors are tried in turn — a diagnostic's
      message matches at most one of them. *)
   let error_module (d : E.diagnostic) =
     match name_after ~marker:"bodies in `" d.E.message with
     | Some m -> Some m
-    | None -> name_after ~marker:"used in module `" d.E.message
+    | None ->
+      (match name_after ~marker:"used in module `" d.E.message with
+       | Some m -> Some m
+       (* The use-site form: "the `Inc` handler of actor `A` prints, but
+          module `M` declares no `needs X`" (diagnostics plan F1). *)
+       | None -> name_after ~marker:"but module `" d.E.message)
   in
   (* Cap_infer's hint: "call to `f` requires `needs X` — add `needs X` to
      module `M`...". *)
@@ -232,6 +230,11 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
   List.map (fun (d : E.diagnostic) ->
       match List.filter_map (fun (e, n) -> if e == d then Some n else None) !chain_notes with
       | [] -> d
+      (* An error that already labels each call on the way (the X7 trace a
+         merged grant finding brings) shows the chain as spans; the prose
+         chain would say it twice. *)
+      | _ when List.exists (fun (l : E.label) ->
+          find_substring ~needle:" calls `" l.E.lbl_message <> None) d.E.labels -> d
       | ns -> { d with E.notes = d.E.notes @ List.rev ns })
     kept
 

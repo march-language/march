@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------ errors/unknown_method_1.march
+-- INTERFACE -------------- errors/unknown_method_1.march
 
 Interface `Speak` does not declare a method `bark`. [unknown_method]
 

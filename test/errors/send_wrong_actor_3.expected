@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------- errors/send_wrong_actor_3.march
+-- ACTOR ---------------- errors/send_wrong_actor_3.march
 
 `Bump` is a message for `Counter`, but this pid is an actor `Log`, so the message would be dropped. [send_wrong_actor]
 Send it to a pid spawned from `Counter`, or send this actor one of its own messages.

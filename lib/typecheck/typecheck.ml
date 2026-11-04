@@ -752,31 +752,6 @@ let actor_enclosing env (sp : Ast.span) =
          && (sp.Ast.end_line, sp.Ast.end_col) <= (asp.Ast.end_line, asp.Ast.end_col)
       then Some (String.sub k n (String.length k - n)) else acc) env.decl_sites None
 
-(** The field a misspelt [name] most likely meant: the unique closest one
-    within edit distance 2 (and under half the name's length). *)
-let closest_field name fields =
-  let dist a b =
-    let la = String.length a and lb = String.length b in
-    let row = Array.init (lb + 1) Fun.id in
-    for i = 1 to la do
-      let prev = ref row.(0) in
-      row.(0) <- i;
-      for j = 1 to lb do
-        let cur = row.(j) in
-        row.(j) <- min (min (row.(j) + 1) (row.(j - 1) + 1))
-            (!prev + if a.[i - 1] = b.[j - 1] then 0 else 1);
-        prev := cur
-      done
-    done;
-    row.(lb)
-  in
-  let scored = List.filter_map (fun f ->
-      let d = dist name f in
-      if d <= 2 && d * 2 < max (String.length name) 2 then Some (d, f) else None) fields in
-  match List.sort compare scored with
-  | (d, f) :: rest when not (List.exists (fun (d', _) -> d' = d) rest) -> Some f
-  | _ -> None
-
 (** The [ambiguous_constructor] hint for a constructor several types define.
     An actor's message type is generated (`<Actor>_Msg`) and cannot be named
     in a program, so it is described as the actor's message and never offered
@@ -914,18 +889,10 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
      in
      match ci_opt with
      | None ->
-       let candidates = suggest_ctors name.txt env in
        let hint =
-         if candidates = [] then
-           qualified_error_msg name.txt env
-         else
-           let lines = List.map (fun (k, ty) ->
-               Printf.sprintf "  • `%s` — from type `%s`" k ty
-             ) candidates in
-           "Did you mean one of:\n" ^ String.concat "\n" lines
-       in
+         unknown_ctor_hint ?need:(Option.map (fun t -> NeedType t) expected) name.txt env in
        Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span
-         (Printf.sprintf "I don't know a constructor called `%s`.\n%s"
+         (Printf.sprintf "I don't know a constructor called `%s`.%s"
             name.txt hint);
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
        bindings, TError
@@ -1636,6 +1603,34 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
         | _ -> ()) ps args
   | Some _ -> ()
 
+(** What the expression being inferred is expected to be, for did-you-mean
+    ranking only (X8 tier 1; [Typecheck_env.suggest_need]).  [infer_expr] has
+    no expected type, so a caller that knows one ([check_expr]'s fallback to
+    inference, [send]'s message) records it here, keyed by the span of the
+    expression it is about to infer; the error path of that same expression
+    reads it with [suggest_need_at].  The key keeps a sub-expression from
+    seeing its parent's need.  It is read only when a name fails to resolve,
+    so it cannot change inference. *)
+let pending_suggest_need : (Ast.span * suggest_need) option ref = ref None
+
+let with_suggest_need (e : Ast.expr) (need : suggest_need) (f : unit -> 'a) : 'a =
+  match e with
+  | Ast.ECon _ | Ast.EVar _ | Ast.EField _ ->
+    let saved = !pending_suggest_need in
+    pending_suggest_need := Some (span_of_expr e, need);
+    Fun.protect ~finally:(fun () -> pending_suggest_need := saved) f
+  | _ -> f ()
+
+let suggest_need_at (sp : Ast.span) : suggest_need option =
+  match !pending_suggest_need with
+  | Some (s, n) when s = sp -> Some n
+  | _ -> None
+
+let suggest_type_at (sp : Ast.span) : ty option =
+  match suggest_need_at sp with
+  | Some (NeedType t) -> Some t
+  | _ -> None
+
 (** [send(pid, msg)]: reject a message the actor this pid points to cannot
     handle (finding 19, specs/lang/core-march-types.md §2.6.4).
 
@@ -1839,7 +1834,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          when not (StringSet.mem name.txt env.gated_shadowed)
            && not (span_is_stdlib name.span) ->
          Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
-           (Printf.sprintf "`%s` is internal to the standard library; %s" name.txt hint)
+           (Printf.sprintf "`%s` is internal to the standard library; %s." name.txt hint)
        | _ -> ());
       (match lookup_var name.txt env with
        | Some sch ->
@@ -1962,7 +1957,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   qualified_error_msg name.txt env
                 else begin
                   let base = Printf.sprintf "I cannot find `%s`." name.txt in
-                  match suggest_var_in_scope name.txt env with
+                  match suggest_var_in_scope ?need:(suggest_type_at name.span) name.txt env with
                   | Some s -> base ^ Printf.sprintf " Did you mean `%s`?" s
                   | None   -> base
                 end
@@ -3018,18 +3013,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | Some _ | None -> ());
        match ci_opt with
        | None ->
-         let candidates = suggest_ctors name.txt env in
-         let hint =
-           if candidates = [] then
-             qualified_error_msg name.txt env
-           else
-             let lines = List.map (fun (k, ty) ->
-                 Printf.sprintf "  • `%s` — from type `%s`" k ty
-               ) candidates in
-             "Did you mean one of:\n" ^ String.concat "\n" lines
-         in
+         let hint = unknown_ctor_hint ?need:(suggest_need_at sp) name.txt env in
          Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span
-           (Printf.sprintf "I don't know a constructor called `%s`.\n%s"
+           (Printf.sprintf "I don't know a constructor called `%s`.%s"
               name.txt hint);
          List.iter (fun a -> ignore (infer_expr env a)) args;
          TError
@@ -3189,7 +3175,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                     | None -> "This record")
                  | _ -> "This record"
                in
-               let guess = closest_field fname (List.map fst all_flds) in
+               let guess = suggest_field ~need:uty fname all_flds in
                let second = match guess with
                  | Some g -> Printf.sprintf "Did you mean `%s`?" g
                  | None -> Printf.sprintf "The fields I know about are: %s"
@@ -3306,9 +3292,12 @@ let rec infer_expr env (e : Ast.expr) : ty =
           | None   ->
             Err.error ~code:Err.Code.unknown_record_field env.errors ~span:sp
               (Printf.sprintf
-                 "This record does not have a field called `%s`.\n\
+                 "This record does not have a field called `%s`.%s\n\
                   The fields I see are: %s"
                  name.txt
+                 (match suggest_field ?need:(suggest_type_at sp) name.txt flds with
+                  | Some f -> Printf.sprintf " Did you mean `%s`?" f
+                  | None -> "")
                  (String.concat ", " (List.map fst flds)));
             TError)
        | _ ->
@@ -3490,7 +3479,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
          registered with ci_params = []) never varies with payload and so
          could never see a mutable-buffer type nested in it; checking it
          here was a no-op regardless of what check_sendable's argument was. *)
-      let msg_ty = infer_expr env msg in
+      let msg_ty =
+        with_suggest_need msg (NeedSendTo pid_ty) (fun () -> infer_expr env msg) in
       check_send_target env ~span:(span_of_expr msg) pid_ty msg msg_ty;
       (* send() returns Option(Unit): Some(()) when the message was enqueued,
          None when the target actor is dead/unknown (fire-and-forget drop).
@@ -3923,7 +3913,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 
   (* All other expressions: infer then unify *)
   | _ ->
-    let inferred = infer_expr env e in
+    let inferred =
+      with_suggest_need e (NeedType expected) (fun () -> infer_expr env e) in
     unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected
 
 (** Thread function application through argument list, tracking arg index. *)
@@ -8376,6 +8367,27 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
          (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
     env.fn_bound_points
 
+let span_within (inner : Ast.span) (outer : Ast.span) =
+  inner.Ast.file = outer.Ast.file
+  && (inner.Ast.start_line, inner.Ast.start_col) >= (outer.Ast.start_line, outer.Ast.start_col)
+  && (inner.Ast.end_line, inner.Ast.end_col) <= (outer.Ast.end_line, outer.Ast.end_col)
+
+(* Every call in every function, handler and top-level `let` of [decls]
+   (nested modules included), as [Calls.calls_in_expr] reports them. *)
+let all_calls_in_decls (decls : Ast.decl list) : (string * Ast.span * Ast.span) list =
+  let rec go acc = function
+    | [] -> acc
+    | Ast.DFn (def, _) :: rest ->
+      go (List.fold_left (fun a c -> March_ast.Calls.calls_in_expr a c.Ast.fc_body) acc
+            def.Ast.fn_clauses) rest
+    | Ast.DLet (_, b, _) :: rest -> go (March_ast.Calls.calls_in_expr acc b.Ast.bind_expr) rest
+    | Ast.DActor (_, _, actor, _) :: rest ->
+      go (List.fold_left (fun a (h : Ast.actor_handler) ->
+          March_ast.Calls.calls_in_expr a h.Ast.ah_body) acc (Ast.actor_body_handlers actor)) rest
+    | Ast.DMod (_, _, inner, _) :: rest -> go (go acc inner) rest
+    | _ :: rest -> go acc rest in
+  go [] decls
+
 (** A capability reach chain as source spans (specs/plans/
     2026-11-02-diagnostics-depth-plan.md §X7): for [from :: chain], each hop
     `k → r` becomes a label on the call to `r` inside `k`, and the last
@@ -8429,6 +8441,185 @@ let cap_chain_trace ?root (decls : Ast.decl list) ~(file : string) ~(from : stri
     | [] -> None in
   hops [] (from :: chain)
 
+(* ── One report per missing authority (specs/plans/2026-11-02-
+   diagnostics-depth-plan.md §X3 "Merging", §F1) ──────────────────────────
+
+   The capability checks run one after another and each reports what it
+   finds: the `needs` scan ([Typecheck_caps.check_module_needs]), the grant
+   walk ([check_main_grant]) and the capability-for-capability argument
+   ([Typecheck_unify.report_cap_mismatch], during body checking).  When two
+   of them are about the same missing authority, the later one folds itself
+   into the earlier report — a label at its span, a sentence, and its edit
+   as a second hunk of the same fix — instead of reporting again.  These
+   helpers edit the accumulated diagnostics in place. *)
+
+let cap_diag_find (ctx : Err.ctx) (p : Err.diagnostic -> bool) : Err.diagnostic option =
+  List.find_opt (fun (d : Err.diagnostic) -> d.Err.severity = Err.Error && p d)
+    (List.rev ctx.Err.diagnostics)
+
+let cap_diag_replace (ctx : Err.ctx) (old_d : Err.diagnostic) (new_d : Err.diagnostic) =
+  ctx.Err.diagnostics <-
+    List.map (fun d -> if d == old_d then new_d else d) ctx.Err.diagnostics
+
+let cap_diag_remove (ctx : Err.ctx) (old_d : Err.diagnostic) =
+  ctx.Err.diagnostics <- List.filter (fun d -> d != old_d) ctx.Err.diagnostics
+
+(* The capabilities a [cap_needs:A,B] code names. *)
+let cap_code_caps (code : string) : string list =
+  match String.index_opt code ':' with
+  | Some i -> String.split_on_char ',' (String.sub code (i + 1) (String.length code - i - 1))
+  | None -> []
+
+(* A missing-`needs` error that points at a use ("… prints, but module `M`
+   declares no `needs X`."), the form a grant finding can fold into. *)
+let is_use_needs_diag (d : Err.diagnostic) =
+  Err.Code.slug_of d.Err.code = Err.Code.cap_needs
+  && Err.contains_sub d.Err.message ", but module `"
+
+(* [message]'s first line without its final period, and the rest. *)
+let split_headline (message : string) : string * string =
+  let head, rest =
+    match String.index_opt message '\n' with
+    | Some i -> String.sub message 0 i, String.sub message i (String.length message - i)
+    | None -> message, "" in
+  let n = String.length head in
+  ((if n > 0 && head.[n - 1] = '.' then String.sub head 0 (n - 1) else head), rest)
+
+let cap_param_name (cap : string) =
+  (* `_cap_` prefix, never the bare leaf: `IO.Spawn` would give `spawn`, a
+     reserved keyword (see [check_main_grant]). *)
+  "_cap_" ^ String.lowercase_ascii (March_caps.Cap_lattice.leaf cap)
+
+(* An edit adding [name : Cap(cap)] as the last parameter of a one-line
+   parameter list [params] ("(…)"): an empty replace just before its `)`. *)
+let add_param_fix ~(params : Ast.span) ~(empty : bool) ~(name : string) ~(cap : string)
+  : Err.fix_kind option =
+  if params.Ast.start_line <> params.Ast.end_line || params.Ast.end_col < 1 then None
+  else
+    let at = { params with Ast.start_col = params.Ast.end_col - 1;
+                           end_col = params.Ast.end_col - 1 } in
+    Some (Err.FReplace { span = at;
+                         text = Printf.sprintf "%s%s : Cap(%s)" (if empty then "" else ", ") name cap })
+
+(* The top-level `main`'s first clause. *)
+let main_clause_of (decls : Ast.decl list) : Ast.fn_clause option =
+  List.find_map (function
+      | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" ->
+        (match def.Ast.fn_clauses with c :: _ -> Some c | [] -> None)
+      | _ -> None) decls
+
+(** The [cap_mismatch] errors [Typecheck_unify.report_cap_mismatch] reported
+    while bodies were checked, given what needs the declarations: the
+    callee's name ("`read` needs file-read access, …"), and a fix.
+
+    - The capability passed CONTAINS the one needed (`Cap(IO)` for
+      `Cap(IO.Console)`): pass `cap_narrow(c)`.
+    - Otherwise, when the call is in `main`: thread the capability from
+      `main`, by giving it a `Cap(X)` parameter (unless it has one) and
+      passing that.  The missing `needs X` error for the same capability
+      (the callee's signature names `Cap(X)`) folds in as a second hunk.
+    - Anywhere else threading means changing every caller in between, which
+      is not mechanical; the error keeps its help line and has no fix. *)
+let refine_cap_mismatches (env : env) (decls : Ast.decl list) : unit =
+  let module L = March_caps.Cap_lattice in
+  let sites = List.rev !(env.cap_mismatch_sites) in
+  if sites <> [] then begin
+    let calls = lazy (all_calls_in_decls decls) in
+    let main_clause = main_clause_of decls in
+    List.iter (fun (site : cap_mismatch_site) ->
+        let code = Err.Code.with_arg Err.Code.cap_mismatch site.cm_need in
+        match cap_diag_find env.errors (fun d -> d.Err.code = code && d.Err.span = site.cm_span) with
+        | None -> ()
+        | Some d ->
+          let callee =
+            match site.cm_call with
+            | None -> None
+            | Some csp ->
+              List.find_map (fun (n, _, app) -> if app = csp then Some (L.leaf n) else None)
+                (Lazy.force calls) in
+          let subject = match callee, site.cm_call with
+            | Some f, _ -> Printf.sprintf "`%s`" f
+            | None, Some _ -> "this call"
+            | None, None -> "this" in
+          let arg = match site.cm_arg_name with
+            | Some n -> Printf.sprintf "`%s` is" n | None -> "this is" in
+          let to_callee = match callee with Some f -> Printf.sprintf " to `%s`" f | None -> " here" in
+          let have = site.cm_have and need = site.cm_need in
+          let in_main =
+            match main_clause with
+            | Some c -> span_within site.cm_span c.Ast.fc_span
+            | None -> false in
+          let fix, help =
+            if cap_subsumes have need then
+              match site.cm_arg_name with
+              | Some n ->
+                Some (Err.FReplace { span = site.cm_span; text = Printf.sprintf "cap_narrow(%s)" n }),
+                Printf.sprintf "help: pass `cap_narrow(%s)`, which narrows it to `Cap(%s)`." n need
+              | None -> None, List.nth d.Err.notes (List.length d.Err.notes - 1)
+            else
+              match main_clause with
+              | Some c when in_main ->
+                let existing =
+                  List.find_map (function
+                      | Ast.FPNamed p | Ast.FPDefault (p, _) ->
+                        (match p.Ast.param_ty with
+                         | Some ty when March_caps.Cap_surface_ty.caps_in_ty ty = [ need ] ->
+                           Some p.Ast.param_name.Ast.txt
+                         | _ -> None)
+                      | Ast.FPPat _ -> None) c.Ast.fc_params in
+                let name = Option.value existing ~default:(cap_param_name need) in
+                let add =
+                  if existing <> None then Some None
+                  else Option.map Option.some
+                      (add_param_fix ~params:c.Ast.fc_params_span ~empty:(c.Ast.fc_params = [])
+                         ~name ~cap:need) in
+                (match add with
+                 | None -> None, List.nth d.Err.notes (List.length d.Err.notes - 1)
+                 | Some add ->
+                   Err.multi_fix [ Some (Err.FReplace { span = site.cm_span; text = name }); add ],
+                   (if existing <> None then
+                      Printf.sprintf "help: `main` already holds `%s : Cap(%s)`; pass that%s."
+                        name need to_callee
+                    else
+                      Printf.sprintf "help: give `main` a `Cap(%s)` parameter and pass it%s." need to_callee))
+              | _ -> None, List.nth d.Err.notes (List.length d.Err.notes - 1)
+          in
+          let labels =
+            List.map (fun (l : Err.label) ->
+                if Some l.Err.lbl_span = site.cm_call then
+                  { l with Err.lbl_message = Printf.sprintf "%s needs `Cap(%s)`" subject need }
+                else l) d.Err.labels in
+          let d' =
+            { d with
+              Err.message =
+                Printf.sprintf "%s needs %s, but %s %s." subject (L.access need) arg
+                  (L.the_capability have);
+              labels;
+              notes = [ L.relation ~have ~need; help ];
+              fix } in
+          (* The callee's signature naming `Cap(X)` in a module without
+             `needs X`: the same missing authority, so one report. *)
+          let d' =
+            if fix = None then d'
+            else
+              match cap_diag_find env.errors (fun n ->
+                  n.Err.code = Err.Code.with_arg Err.Code.cap_needs need && n.Err.fix <> None) with
+              | Some n ->
+                cap_diag_remove env.errors n;
+                { d' with
+                  Err.labels = d'.Err.labels
+                               @ [ { Err.lbl_span = n.Err.span;
+                                     lbl_message =
+                                       Printf.sprintf "`Cap(%s)` is named here, and the module declares no `needs %s`"
+                                         need need } ];
+                  notes = d'.Err.notes @ [ Printf.sprintf "and add `needs %s` to the module." need ];
+                  fix = Err.multi_fix [ n.Err.fix; d'.Err.fix ] }
+              | None -> d'
+          in
+          cap_diag_replace env.errors d d')
+      sites
+  end
+
 let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
   (* [rows] lets the caller hand in an already-solved row table. Stage C made
      the flat closure a projection of that solve, and stage D added a second
@@ -8473,9 +8664,9 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
         | _ -> None)
       decls
   in
-  let main_grant : (string list * Ast.span) option =
+  let main_grant : (string list * Ast.span * Ast.span) option =
     match main_site with
-    | Some ((_ :: _ as grants), span, _) -> Some (grants, span)
+    | Some ((_ :: _ as grants), span, params_span) -> Some (grants, span, params_span)
     | _ -> None
   in
   let solved = lazy (match rows with
@@ -8546,9 +8737,30 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
             The span has to be [fc_params_span] specifically — `main`'s NAME
             span would yield `fn main(…)() : ()`, and the clause span covers
             the body. That is why `fn_clause` grew the field. *)
+         let grant_fix =
+           Err.FReplace { span = params_span; text = Printf.sprintf "(%s)" suggested } in
+         (* §X3: a module missing `needs X` for code `main` reaches, with
+            `main` granted nothing, is one missing authority: fold the grant
+            into that error (its label, its sentence, its hunk). *)
+         match cap_diag_find env.errors (fun d ->
+             is_use_needs_diag d
+             && List.exists (fun c -> List.mem c named) (cap_code_caps d.Err.code)) with
+         | Some d ->
+           let head, rest = split_headline d.Err.message in
+           cap_diag_replace env.errors d
+             { d with
+               Err.message =
+                 Printf.sprintf "%s, and `main` is granted nothing.%s\n\
+                                 and give `main` the grant —\n\
+                                \        fn main(%s) : ()"
+                   head rest suggested;
+               labels = d.Err.labels
+                        @ [ { Err.lbl_span = params_span;
+                              lbl_message = "`main` is granted nothing here" } ];
+               fix = Err.multi_fix [ d.Err.fix; Some grant_fix ] }
+         | None ->
          Err.error_with_fix ~code:Err.Code.cap_grant env.errors ~span
-           ~fix:(Err.FReplace
-                   { span = params_span; text = Printf.sprintf "(%s)" suggested })
+           ~fix:grant_fix
            (Printf.sprintf
               "`main` performs IO but declares no grant. The program reaches \
                %s; a `main` with no capability parameter is granted nothing.\n\
@@ -8560,7 +8772,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
    | _ -> ());
   match main_grant with
   | None -> ()
-  | Some (grants, span) ->
+  | Some (grants, span, params_span) ->
     let closure =
       match Hashtbl.find_opt (closures_tbl ()) "main" with
       | Some caps -> caps
@@ -8629,9 +8841,42 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                @ [ { Err.lbl_span = span;
                      lbl_message = Printf.sprintf "`main` is granted only %s here" show_grant } ]
              | None -> span, [] in
+           let grant_label =
+             { Err.lbl_span = params_span;
+               lbl_message = Printf.sprintf "`main` is granted only %s here" show_grant } in
+           (* The edit that grants it: one more `Cap(c)` parameter. *)
+           let param_fix =
+             add_param_fix ~params:params_span ~empty:false ~name:(cap_param_name c) ~cap:c in
+           (* §X3: the same missing authority already reported — a capability
+              passed for `c` whose fix threads a `Cap(c)` from `main`, or a
+              use in a module missing `needs c` — takes this as a label, a
+              sentence and (for the latter) a hunk, instead of a second error. *)
+           match
+             cap_diag_find env.errors (fun d ->
+                 d.Err.code = Err.Code.with_arg Err.Code.cap_mismatch c && d.Err.fix <> None),
+             cap_diag_find env.errors (fun d ->
+                 is_use_needs_diag d && List.mem c (cap_code_caps d.Err.code))
+           with
+           | Some d, _ ->
+             cap_diag_replace env.errors d
+               { d with Err.labels = d.Err.labels @ [ grant_label ] }
+           | None, Some d when param_fix <> None ->
+             let head, rest = split_headline d.Err.message in
+             let hops = match trace with
+               | Some (use_sp, hop_labels) when use_sp = d.Err.span -> hop_labels
+               | _ -> [] in
+             cap_diag_replace env.errors d
+               { d with
+                 Err.message =
+                   Printf.sprintf "%s, and `main` is granted only %s.%s\n\
+                                   and give `main` a `Cap(%s)` parameter: `fn main(…, %s)`."
+                     head show_grant rest c param_hint;
+                 labels = d.Err.labels @ hops @ [ grant_label ];
+                 fix = Err.multi_fix [ d.Err.fix; param_fix ] }
+           | _ ->
            Err.report env.errors
              { Err.severity = Err.Error; span = primary; labels; notes = [];
-               code = Err.Code.cap_grant_exceeded; fix = None;
+               code = Err.Code.cap_grant_exceeded; fix = param_fix;
                message =
              Printf.sprintf
                 "`main` is granted %s, but the program reaches `%s`%s. \
@@ -9365,24 +9610,51 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                         (render_cap_chain (r.rr_what :: List.map show_key chain))
                     | _ -> ""
                   in
-                  let span, labels = match trace with
-                    | Some (use, hops) ->
-                      use,
-                      { Err.lbl_span = r.rr_span;
-                        lbl_message = Printf.sprintf "%s is granted only %s" (label r) show_grant }
-                      :: hops
-                    | None -> r.rr_span, []
-                  in
-                  Err.report env.errors
-                    { Err.severity = Err.Error; span; labels; notes = [];
-                      code = Err.Code.role_grant_exceeded; fix = None;
-                      message = Printf.sprintf
+                  (* §X7/§F1: with a trace inside the callback the error points
+                     at the call that needs the authority, says what the code
+                     is ("the body of role `Cons`") and does ("writes a
+                     file"), and labels each hop, the callback and the
+                     grant; without one it keeps the prose chain. *)
+                  let grant_sp =
+                    match Hashtbl.find_opt env.role_grants (r.rr_proto, r.rr_role) with
+                    | Some (_, sp) -> Some sp | None -> None in
+                  match trace with
+                  | Some (use_sp, hops) ->
+                    (* No fix: widening the role's `needs` line changes the
+                       body's signature too (one `Cap` per granted path, D34),
+                       so the edit alone leaves the program rejected. *)
+                    let fix = None in
+                    Err.report env.errors
+                      { Err.severity = Err.Error; span = use_sp; code = Err.Code.role_grant_exceeded;
+                        notes = []; fix;
+                        labels =
+                          hops
+                          @ [ { Err.lbl_span = r.rr_span;
+                                lbl_message = Printf.sprintf "the %s of role `%s`, passed to `%s`"
+                                    r.rr_what r.rr_role r.rr_front } ]
+                          @ (match grant_sp with
+                             | Some sp ->
+                               [ { Err.lbl_span = sp;
+                                   lbl_message = Printf.sprintf "role `%s` is granted only %s here"
+                                       r.rr_role show_grant } ]
+                             | None -> []);
+                        message =
+                          Printf.sprintf
+                            "The %s of role `%s` %s, but the role is granted only %s \
+                             (`role %s needs %s`). A role's grant bounds everything its code \
+                             reaches, as `main`'s grant bounds the program.\n\
+                             help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
+                            r.rr_what r.rr_role (March_caps.Cap_lattice.action c) show_grant
+                            r.rr_role (String.concat ", " r.rr_grant) c r.rr_role r.rr_proto }
+                  | None ->
+                  Err.error ~code:Err.Code.role_grant_exceeded env.errors ~span:r.rr_span
+                    (Printf.sprintf
                        "Role `%s.%s` is granted %s (`role %s needs %s`), but %s reaches `%s`%s. \
                         A role's grant bounds everything its code reaches, as `main`'s grant bounds \
                         the program.\n\
                         help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
                        r.rr_proto r.rr_role show_grant r.rr_role (String.concat ", " r.rr_grant)
-                       (label r) c chain c r.rr_role r.rr_proto })
+                       (label r) c chain c r.rr_role r.rr_proto))
              (List.sort_uniq String.compare (caps_of k));
            (* Not statically known: the callback itself, a local it invokes,
               or (the solver's `unknown`) a value of untraceable origin that
@@ -9804,7 +10076,7 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
               let sp = span_of owner in
               let msg =
                 Printf.sprintf
-                  "module `%s` uses `%s` but does not declare `needs %s`.\n\
+                  "Module `%s` uses `%s` but does not declare `needs %s`.\n\
                    help: add `needs %s` to the module body."
                   owner c c c
               in
@@ -10417,6 +10689,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      itself, from what each one reaches, and nothing reads [deps]. *)
   let cap_rows = fn_capability_rows_tbl ~with_rows:false final_env in
   dump_cap_rows final_env;
+  refine_cap_mismatches final_env m.Ast.mod_decls;
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
   check_fn_bounds ~rows:cap_rows final_env;
   (* Per-role grants: the same walk from each runner-entry callback, bounded

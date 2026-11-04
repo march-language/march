@@ -19,6 +19,13 @@ type fix_kind =
   (** Delete full source lines [start_line]..[end_line] inclusive (1-indexed). *)
   | FReplace of { span : March_ast.Ast.span; text : string }
   (** Replace the text covered by [span] with [text] in-place. *)
+  | FMulti of fix_kind list
+  (** Several edits that make ONE fix (one root cause, one report:
+      specs/plans/2026-11-02-diagnostics-depth-plan.md §X3 / §F1), e.g. the
+      `needs` line and the grant edit for a missing authority.  Every edit's
+      positions are relative to the ORIGINAL source, as for separate fixes;
+      an applier sorts them bottom-up by (line, column).  Flat: build one
+      with {!multi_fix}, which never nests. *)
 
 type diagnostic = {
   severity : severity;
@@ -35,6 +42,28 @@ and label = {
   lbl_span : March_ast.Ast.span;
   lbl_message : string;
 }
+
+(** A positioned rejection raised from a pass that has no diagnostic
+    accumulator to report into (lowering, for one).  The driver catches it
+    once and prints it with the standard renderer, so it gets the same
+    header, caret, code and explain pointer as every other diagnostic;
+    nothing prints a raw `file:line:col: error: …` line (plan §X5). *)
+exception Diagnostic_exn of diagnostic
+
+(** A diagnostic record with no labels, notes or fix. *)
+let make ?(severity = Error) ?(notes = []) ~code ~span message =
+  { severity; span; message; labels = []; notes; code; fix = None }
+
+(** One line, [file:line:col: error: message [slug]], for the generic
+    catch-alls that only have [Printexc.to_string] (the REPL, a test). *)
+let () =
+  Printexc.register_printer (function
+    | Diagnostic_exn d ->
+      Some (Printf.sprintf "%s:%d:%d: %s: %s [%s]" d.span.March_ast.Ast.file
+              d.span.March_ast.Ast.start_line d.span.March_ast.Ast.start_col
+              (match d.severity with Error -> "error" | Warning -> "warning" | Hint -> "hint")
+              d.message (Code.slug_of d.code))
+    | _ -> None)
 
 (** Accumulator for diagnostics — allows error recovery. *)
 type ctx = { mutable diagnostics : diagnostic list }
@@ -56,6 +85,22 @@ let take_parse_error_extra () =
   v
 
 let create () = { diagnostics = [] }
+
+(** The edits of a fix, flattened. *)
+let rec fix_edits = function
+  | FMulti fs -> List.concat_map fix_edits fs
+  | f -> [ f ]
+
+(** One fix made of every edit in [fixes] (flattened, exact duplicates
+    dropped); [None] when there are none, the edit itself when only one. *)
+let multi_fix (fixes : fix_kind option list) : fix_kind option =
+  let edits =
+    List.fold_left (fun acc f -> if List.mem f acc then acc else acc @ [ f ]) []
+      (List.concat_map (function None -> [] | Some f -> fix_edits f) fixes) in
+  match edits with
+  | [] -> None
+  | [ f ] -> Some f
+  | fs -> Some (FMulti fs)
 
 (* Some diagnostics get re-derived at every use of a declaration whose own
    definition is broken (e.g. instantiating a constructor re-resolves its
@@ -392,7 +437,7 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
     Shows the relevant source line with a caret underline pointing at the span.
 
     Format (Elm-inspired):
-      -- ERROR ---------- filename
+      -- TYPE MISMATCH ---------- filename    (the title: [header_title])
       <blank>
       message
       <blank>
@@ -429,19 +474,46 @@ let explain_hint (d : diagnostic) =
     "\n" ^ fmt_note (Printf.sprintf "    run `march --explain %s`" slug)
   end
 
+(** The title of a diagnostic's header: its code's category for an error
+    (`TYPE MISMATCH`), the severity and the category for a warning or hint
+    (`WARNING: UNUSED`), so the severity of a non-error is never lost. *)
+let header_title (d : diagnostic) =
+  let cat = Code.category d.code in
+  match d.severity with
+  | Error -> cat
+  | Warning -> if cat = "ERROR" then "WARNING" else "WARNING: " ^ cat
+  | Hint -> if cat = "ERROR" then "HINT" else "HINT: " ^ cat
+
+(** Whether [line] (ANSI colour already stripped) is a rendered header, and
+    of which severity: `-- <TITLE> --…`, the title upper-case letters,
+    spaces and colons.  For tools that count diagnostics in rendered output
+    (forge's build summary keeps its own copy of this rule). *)
+let header_severity (line : string) : severity option =
+  let n = String.length line in
+  let rec title_end i =
+    if i < n && (match line.[i] with 'A' .. 'Z' | ' ' | ':' -> true | _ -> false)
+    then title_end (i + 1) else i in
+  if n < 6 || String.sub line 0 3 <> "-- " then None
+  else
+    let e = title_end 3 in
+    if e > 4 && e + 1 < n && line.[e] = '-' && line.[e + 1] = '-' && line.[e - 1] = ' ' then
+      let title = String.sub line 3 (e - 4) in
+      if String.starts_with ~prefix:"WARNING" title then Some Warning
+      else if String.starts_with ~prefix:"HINT" title then Some Hint
+      else Some Error
+    else None
+
 let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
-  let sev_str = match d.severity with
-    | Error   -> "ERROR"
-    | Warning -> "WARNING"
-    | Hint    -> "HINT"
-  in
+  let sev_str = header_title d in
   let line  = d.span.March_ast.Ast.start_line in
   let col   = d.span.March_ast.Ast.start_col in
   let eline = d.span.March_ast.Ast.end_line in
   let ecol  = d.span.March_ast.Ast.end_col in
   (* Header bar *)
   let loc_str = if filename = "" then "" else " " ^ filename in
-  let dashes  = String.make (max 2 (48 - String.length loc_str)) '-' in
+  (* As wide as the old `-- ERROR ---- file` header whatever the title, down
+     to a minimum of two dashes. *)
+  let dashes  = String.make (max 2 (53 - String.length sev_str - String.length loc_str)) '-' in
   let header =
     if not !use_color then "-- " ^ sev_str ^ " " ^ dashes ^ loc_str
     else
@@ -618,19 +690,27 @@ let render_diagnostic_json ?(related = true) (d : diagnostic) : string =
   let file    = json_string sp.March_ast.Ast.file in
   let msg     = json_string d.message in
   let code    = json_string d.code in
-  let fix_json = match d.fix with
-    | None -> "null"
-    | Some (FInsert { after_line; text }) ->
+  let rec edit_json = function
+    | FInsert { after_line; text } ->
       Printf.sprintf {|{"kind":"insert","after_line":%d,"text":%s}|}
         after_line (json_string text)
-    | Some (FDelete { start_line; end_line }) ->
+    | FDelete { start_line; end_line } ->
       Printf.sprintf {|{"kind":"delete","start_line":%d,"end_line":%d}|}
         start_line end_line
-    | Some (FReplace { span = rs; text }) ->
+    | FReplace { span = rs; text } ->
       Printf.sprintf {|{"kind":"replace","start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"text":%s}|}
         rs.March_ast.Ast.start_line rs.March_ast.Ast.start_col
         rs.March_ast.Ast.end_line   rs.March_ast.Ast.end_col
         (json_string text)
+    (* A multi-edit fix: {"kind":"multi","edits":[<insert|delete|replace>…]},
+       each edit's positions relative to the original source. *)
+    | FMulti fs ->
+      Printf.sprintf {|{"kind":"multi","edits":[%s]}|}
+        (String.concat "," (List.map edit_json (List.concat_map fix_edits fs)))
+  in
+  let fix_json = match d.fix with
+    | None -> "null"
+    | Some f -> edit_json f
   in
   let related_json =
     if not related then ""
@@ -648,9 +728,15 @@ let render_diagnostic_json ?(related = true) (d : diagnostic) : string =
         (String.concat "," (List.map label d.labels))
         (String.concat "," (List.map json_string d.notes))
   in
+  (* [category] (plan §X5) is appended, so every existing field keeps its
+     place, and rides with [labels]/[notes]: [~related:false]'s versioned
+     --emit-core-ast document stays byte-stable. *)
+  let category_json =
+    if not related then ""
+    else Printf.sprintf {|,"category":%s|} (json_string (Code.category d.code)) in
   Printf.sprintf
-    {|{"severity":%s,"file":%s,"start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"message":%s,"code":%s,"fix":%s%s}|}
+    {|{"severity":%s,"file":%s,"start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"message":%s,"code":%s,"fix":%s%s%s}|}
     (json_string sev) file
     sp.March_ast.Ast.start_line sp.March_ast.Ast.start_col
     sp.March_ast.Ast.end_line   sp.March_ast.Ast.end_col
-    msg code fix_json related_json
+    msg code fix_json related_json category_json

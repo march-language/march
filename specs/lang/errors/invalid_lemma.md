@@ -71,4 +71,4 @@ closes one way to "prove" something false:
 - an induction hypothesis over a recursion that may not terminate is circular (L4);
 - a lemma used as a value would need to exist at run time (L5).
 
-See also: [the language reference](../refinement-types.md), `lemma_unproved`, `invalid_measure`.
+See also: [the language reference](../refinement-types.md), [the lemmas guide](../lemmas.md), `lemma_unproved`, `invalid_measure`.

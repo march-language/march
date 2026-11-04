@@ -28,6 +28,9 @@ git log is authoritative for exact commits.
   `List.len_append(a, b)`. They cost nothing at run time. They are proved once and recorded in
   `stdlib/lemmas.verified`, so a check does not prove them again. `List.filter` also gains a
   proved `len(_) <= len(xs)` contract.
+- **Search laws by shape.** `forge search --law "f(f(x)) == x"` finds every lemma of that
+  form, whatever its functions are called: a one-letter callee stands for any function and
+  any other name for any term. `--law "f(x, Nil) == x"` finds right identities.
 
 - **A refinement can say what each half of it means.** Write a message after a
   conjunct with `else`: `{Int | _ >= 0 else "index must not be negative" &&
@@ -53,6 +56,21 @@ git log is authoritative for exact commits.
 - **`--refine-rlimit N` and `[refine] rlimit = N` in `forge.toml`** raise the per-query
   solver limit for a project with a known-hard proof. forge passes the setting to every
   `march` it runs.
+- **Interface laws.** An interface can declare laws, written as `@[lemma]` signatures
+  with no body (`@[lemma] fn combine_assoc(x : a, y : a, z : a) : {Unit | ...}`). The
+  checker checks each law for every `impl`, using that impl's methods (and the
+  interface's defaults): a proved law is silent, a broken one is an error with a
+  counterexample, and one it cannot prove is `lemma_unproved` and is tested by
+  `forge test`. An impl can supply a proof as a `@[lemma]` with the law's name. Impls in
+  other files and methods that take `Unit` are covered. Laws never run.
+
+- **Lemma rewrites in the editor.** When a proved `@[lemma]` states an equation
+  `lhs == rhs`, the language server offers a code action that rewrites an expression of
+  the shape `lhs` into `rhs`, named after the lemma ("Rewrite to `Cons(1, zs)` (by the
+  proved lemma `cat_nil`)"). Unproved lemmas offer nothing. Lemmas of imported project
+  files and of the stdlib (listed in `stdlib/lemmas.verified`) are offered too, with their
+  module's functions qualified.
+
 - **Refinement proofs take decided steps (fuel).** The checker now expands a
   reflected call that another call's definition produces when its branch is already
   decided (its argument is a constructor, or known to equal one), up to a per-function
@@ -62,6 +80,15 @@ git log is authoritative for exact commits.
   `invalid_reflect` names why when it is not. Some calls that used to be skipped as
   `reflect-fuel` are now proved or, where the contract is really broken, reported as
   violations.
+- **Refinement proofs see through `List.filter` and `List.map` with a lambda.** A call
+  of a function that takes a function, given a lambda or a reflected function's name,
+  now has a definition of its own: the function's body with the lambda put in. So
+  `fn pos(xs) = List.filter(xs, fn x -> x > 0)` is reflected, and
+  `need_eq([1], List.filter([1], fn x -> x > 0))` proves. A lambda may read the
+  caller's variables. `--reflect-report` lists the function taking functions as
+  `specialised`, and `--reflect-parity` checks each such call against the
+  interpreter. A `let`-bound lambda, a function parameter or a function returned by a
+  call is not used this way.
 
 - **Lemmas: `@[lemma]` proofs for refinement types.** A lemma states a theorem in its
   result type, `{Unit | P}`, and proves it with ordinary code: `match` and `if` for
@@ -113,6 +140,23 @@ git log is authoritative for exact commits.
 - **CI uses the pinned z3 on every platform** (built from source and cached) instead of
   the package manager's, and a new `refine-agreement` job requires every refinement
   verdict to be the same on darwin-arm64, linux-x86_64 and linux-aarch64.
+- Diagnostics: a rendered diagnostic's header names its category instead of a bare `ERROR`:
+  `-- TYPE MISMATCH ----`, `-- CAPABILITY ----`, `-- PROTOCOL ----`, and for a warning or hint
+  `-- WARNING: UNUSED ----` / `-- HINT: REFINEMENT ----`. `--check-json` objects gain a
+  `category` field (existing fields unchanged). Errors found while expanding `derive`,
+  `satisfy`, `@[endpoints]` and `@[remote]`, and the compiled backend's "interpreter-only"
+  rejections, are no longer raw `file:line:col: error:` lines: they render like every other
+  diagnostic (source excerpt, caret, code) and appear in `--check-json`. Messages follow one house
+  style (backticks, capitalised, full sentences), checked by the error corpus; e.g. a handler that
+  returns the wrong type now says "The handler for `Poke` in actor `A` must return the actor's
+  new state, a `{ n : Int }`, but returns `Int`."
+- Diagnostics: "did you mean" suggestions for an unknown constructor, actor message, variable or
+  record field are ranked by type. A candidate that fits what the position needs (the actor of
+  the pid in `send`, the annotated type, the field type) is shown alone, ahead of a closer
+  spelling that doesn't: `send(a, Pokee(1))` now suggests only `Poke`, "a message of actor
+  `A`", not `Post` and `Pong` from the HTTP modules. Stdlib constructors are offered only when
+  nothing in your own code is in range, compiler-generated names (session states such as
+  `S_end`) are never offered, and a misspelled record field gets a suggestion.
 - Diagnostics: follow-on errors are dropped when another error already explains them: the type
   mismatch after a callback-arity error, "unused variable `x`" next to a misspelled use of `x`,
   `cap_grant` while the program has other errors, `cap_ceiling` alongside the matching
@@ -120,6 +164,17 @@ git log is authoritative for exact commits.
   protocol. The editor (LSP) drops the same ones.
 - Diagnostics: a capability grant error (`cap_grant_exceeded`) now points at the call that needs
   the capability and labels each call on the way from `main`, instead of naming the chain in prose.
+- Diagnostics: capability errors say what is wrong in capability terms. Passing one capability
+  where another is needed (`Cap(IO.Console)` to a `Cap(IO.FileRead)` parameter) is a new
+  `cap_mismatch` error ("`read` needs file-read access, but `c` is the console capability"),
+  not a type mismatch, with one line placing the two in the lattice and a fix: `cap_narrow(c)`
+  when the capability contains the one needed, otherwise a new `main` parameter passed to the
+  call. A missing `needs` names the code and what it does ("the `Inc` handler of actor `Counter`
+  prints", "the body of role `Cons` writes a file") and points at that call. One missing
+  authority is one error: the `needs` error, `main`'s missing or too-narrow grant and the
+  capability mismatch for the same capability merge, and the merged fix carries every edit
+  (`--check-json` fixes may now be `{"kind":"multi","edits":[…]}`; `forge fix` and the editor
+  apply them). `cap_grant_exceeded` and `role_grant_exceeded` gain fixes that add the capability.
 - Diagnostics: `missing_impl` points at the operator or call that needs the implementation (`a < b`,
   `same(x, y)`) instead of the enclosing function, labels a generic function's `when Eq(a)` bound,
   and, for a type declared in the file, offers `derive Eq for T` (also `Ord`, `Show`, `Hash`) as a
@@ -138,6 +193,9 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- A new Lemmas guide (`specs/lang/lemmas.md`, `/docs/lemmas/` on the site): writing `@[lemma]` proofs by induction,
+  `assert` steps and fuel, using lemmas with refinements, and what `forge test`, `forge doc`,
+  `forge search --law` and the editor do with them.
 - `march --explain` pages for `cap_grant_exceeded`, `cap_ceiling`, `cap_widen`, `cap_deserialize`,
   `proof_cap_return`, `proof_cap_mint_private`, `io_not_allowed`, `send_wrong_actor`,
   `actor_handler_state_type` and `codec_missing`.
@@ -156,6 +214,17 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **A refinement proof no longer reads `let k = f(k)` as an equation about the new `k`.**
+  A `let` whose right-hand side used the name it rebinds (`let k = gt5(k)`, or a lambda
+  reading `k`) gave the checker the fact `k == gt5(k)` about the new `k`, which could prove
+  a false precondition. Such a `let` now gives no fact about the call.
+
+- **A false lemma is an error, not a warning.** A lemma whose theorem is false at some
+  input, such as `{Unit | n + n >= n}` at `n = -1`, was reported only as
+  `lemma_unproved` unless the theorem was false at every input. The checker now runs the
+  theorem on the solver's counterexample and, when it is false there, reports
+  `refinement_violated` with that input.
 
 - **`march test` with several files no longer leaks Vault state between them.** Named
   Vaults (and the Config values stored in them) lived for the whole process, so when one

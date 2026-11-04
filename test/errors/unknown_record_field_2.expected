@@ -1,0 +1,11 @@
+exit: 1
+-- NAMING ----------- errors/unknown_record_field_2.march
+
+This record does not have a field called `conut`. Did you mean `count`? [unknown_record_field]
+The fields I see are: cont, count
+
+8 |     let n : Int = r.conut
+                      ^^^^^^^
+
+
+

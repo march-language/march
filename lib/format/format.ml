@@ -1058,7 +1058,16 @@ and emit_decl ctx = function
                       (fmt_needs m.md_needs));
           indented ctx (fun () -> emit_body ctx def);
           line ctx "end"
-      ) iface.iface_methods
+      ) iface.iface_methods;
+      (* Laws: `@[lemma] fn name(params) : {Unit | P}`, no body. *)
+      List.iter (fun (law : fn_def) ->
+        List.iter (fun a -> line ctx (Printf.sprintf "@[%s]" a)) law.fn_attrs;
+        let ps = match law.fn_clauses with
+          | c :: _ -> String.concat ", " (List.map fmt_fn_param c.fc_params)
+          | [] -> "" in
+        let ret = match law.fn_ret_ty with Some t -> " : " ^ fmt_ty t | None -> "" in
+        line ctx (Printf.sprintf "fn %s(%s)%s" law.fn_name.txt ps ret)
+      ) iface.iface_laws
     );
     line ctx "end"
 

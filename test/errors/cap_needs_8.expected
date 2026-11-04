@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------------------- errors/cap_needs_8.march
+-- CAPABILITY ------------------ errors/cap_needs_8.march
 
 `Cap(IO.FileWrite)` used in module `Store` but `IO.FileWrite` is not declared in `needs`. [cap_needs]
 help: add `needs IO.FileWrite` to the module body.

@@ -577,19 +577,117 @@ let law_calls (e : entry) (ql : string) : bool =
    `rev( rev(xs) )`. *)
 let squash s = String.concat "" (String.split_on_char ' ' (normalize s))
 
+(* ── Search by a law's shape ───────────────────────────────────────────
+
+   A query such as `f(f(x)) == x` is a pattern over theorems: a one-letter
+   callee (`f`, `g`, `h`) stands for any function, consistently; any other
+   identifier stands for any subterm, consistently; longer callee names,
+   constructors, literals and operators match themselves (a callee by its
+   last segment, so `reverse` matches `List.reverse`).  `==` and `!=` match
+   either way round.  A query matches a theorem, or one `&&` conjunct of it.
+   So `f(f(x)) == x` finds `reverse(reverse(xs)) == xs` and
+   `negate(negate(n)) == n`. *)
+
+let parse_expr (s : string) : Ast.expr option =
+  match March_parser.Parse.expr s with Ok e -> Some e | Error _ -> None | exception _ -> None
+
+let last_seg s = match String.rindex_opt s '.' with Some i -> String.sub s (i + 1) (String.length s - i - 1) | None -> s
+
+(* A span-free rendering, to decide that two subterms are the same. *)
+let rec canon (e : Ast.expr) : string =
+  match e with
+  | Ast.EVar n -> last_seg n.Ast.txt
+  | Ast.ELit (l, _) -> (match l with
+      | Ast.LitInt n -> string_of_int n
+      | Ast.LitBool b -> string_of_bool b
+      | Ast.LitString s -> "\"" ^ s ^ "\""
+      | _ -> "<lit>")
+  | Ast.ECon (c, args, _) -> last_seg c.Ast.txt ^ "(" ^ String.concat "," (List.map canon args) ^ ")"
+  | Ast.EApp (f, args, _) -> canon f ^ "(" ^ String.concat "," (List.map canon args) ^ ")"
+  | Ast.ETuple (es, _) -> "(" ^ String.concat "," (List.map canon es) ^ ")"
+  | Ast.EField (r, n, _) -> canon r ^ "." ^ n.Ast.txt
+  | _ -> "<expr>"
+
+let is_fn_var s = String.length s = 1 && s.[0] >= 'a' && s.[0] <= 'z'
+
+let is_ident s = s <> "" && (match s.[0] with 'a' .. 'z' | '_' -> true | _ -> false)
+
+let head_name (f : Ast.expr) = match f with
+  | Ast.EVar n -> Some n.Ast.txt
+  | Ast.EField _ -> Some (canon f)
+  | _ -> None
+
+(* Bindings: term variables to [canon] text, function variables to names. *)
+let rec shape_match terms fns (p : Ast.expr) (t : Ast.expr) =
+  match p, t with
+  | Ast.EVar v, _ when is_ident v.Ast.txt && not (String.contains v.Ast.txt '.') -> (
+    let c = canon t in
+    match List.assoc_opt v.Ast.txt terms with
+    | None -> Some ((v.Ast.txt, c) :: terms, fns)
+    | Some c0 -> if c0 = c then Some (terms, fns) else None)
+  | Ast.ELit (l1, _), Ast.ELit (l2, _) -> if l1 = l2 then Some (terms, fns) else None
+  | Ast.ECon (c1, a1, _), Ast.ECon (c2, a2, _) ->
+    if last_seg c1.Ast.txt = last_seg c2.Ast.txt && List.length a1 = List.length a2 then args terms fns a1 a2 else None
+  | Ast.EApp (f1, a1, _), Ast.EApp (f2, a2, _) when List.length a1 = List.length a2 -> (
+    match head_name f1, head_name f2 with
+    | Some n1, Some n2 ->
+      let alt () =
+        (* `==` / `!=` are symmetric. *)
+        match n1, a1, a2 with
+        | ("==" | "!="), [ x; y ], [ u; v ] when n1 = n2 -> args terms fns [ x; y ] [ v; u ]
+        | _ -> None
+      in
+      let head =
+        if is_fn_var n1 then
+          match List.assoc_opt n1 fns with
+          | None -> if is_ident (last_seg n2) then Some (terms, (n1, last_seg n2) :: fns) else None
+          | Some n -> if n = last_seg n2 then Some (terms, fns) else None
+        else if last_seg n1 = last_seg n2 then Some (terms, fns)
+        else None
+      in
+      (match Option.bind head (fun (terms, fns) -> args terms fns a1 a2) with
+       | Some r -> Some r
+       | None -> if head = None then None else alt ())
+    | _ -> None)
+  | _ -> None
+
+and args terms fns a1 a2 =
+  List.fold_left2 (fun acc p t -> Option.bind acc (fun (terms, fns) -> shape_match terms fns p t)) (Some (terms, fns)) a1 a2
+
+let rec conjuncts (e : Ast.expr) =
+  match e with
+  | Ast.EApp (Ast.EVar { Ast.txt = "&&"; _ }, [ a; b ], _) -> conjuncts a @ conjuncts b
+  | e -> [ e ]
+
+(** Does the theorem text [theorem] have the shape [pattern] (whole, or one
+    conjunct)? *)
+let has_shape (pattern : Ast.expr) (theorem : string) : bool =
+  match parse_expr theorem with
+  | None -> false
+  | Some t -> List.exists (fun c -> shape_match [] [] pattern c <> None) (t :: conjuncts t)
+
+(* A query is a shape when it parses as a call or an operator application:
+   a bare word is a name or a phrase, not a pattern. *)
+let shape_of_query (q : string) : Ast.expr option =
+  match parse_expr q with
+  | Some (Ast.EApp _ as e) -> Some e
+  | _ -> None
+
 (** Search the theorems of lemmas: a lemma matches when its theorem contains
-    [phrase] (ignoring case and spaces), or calls a function named
-    [phrase]. *)
+    [phrase] (ignoring case and spaces), has the shape [phrase] when it is
+    an expression ([has_shape]), or calls a function named [phrase]. *)
 let search_laws (idx : index) (phrase : string) : (entry * float) list =
   let q = squash phrase in
   if q = "" then []
   else
+    let shape = shape_of_query phrase in
     List.filter_map
       (fun e ->
         match e.law with
         | None -> None
         | Some (theorem, _) ->
           if contains_substr (squash theorem) q then Some (e, 1.0)
+          else if (match shape with Some p -> has_shape p theorem | None -> false) then Some (e, 0.95)
           else if law_calls e (normalize (String.trim phrase)) then Some (e, 0.9)
           else None)
       idx.entries

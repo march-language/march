@@ -225,6 +225,20 @@ let actor_msg_alias_target (name : string) : string option =
       | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1) in
     Some (actor_msg_type_name actor)
 
+(** A capability value passed where a different capability is needed
+    (specs/plans/2026-11-02-diagnostics-depth-plan.md §F1): recorded by
+    [report_mismatch] when it reports [cap_mismatch], so the end-of-module
+    pass ([Typecheck.refine_capability_reports]) can name the callee and
+    attach a fix, which need the declarations. *)
+type cap_mismatch_site = {
+  cm_span : Ast.span;           (** the argument; the diagnostic's primary span *)
+  cm_call : Ast.span option;    (** the call, when the expectation is an argument *)
+  cm_arg_name : string option;  (** the argument, when it is a plain variable *)
+  cm_have : string;             (** the capability passed, e.g. ["IO.Console"] *)
+  cm_need : string;             (** the capability needed, e.g. ["IO.FileRead"] *)
+  cm_in_fn : string;            (** [current_decl] at the site ("Mod.fn") *)
+}
+
 type env = {
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)
@@ -591,6 +605,8 @@ type env = {
       pinned result is [Cap(P)] with [P] a proof cap whose declaring module is
       [current_module] AND [cur_fn_public]; a proof cap from another module, a
       private fn, or a non-proof (IO) target is rejected. *)
+  cap_mismatch_sites : cap_mismatch_site list ref;
+  (** See [cap_mismatch_site]. *)
   cap_narrow_sites : (Ast.span * ty) list ref;
   (** Every [cap_narrow] application site, as (span, the INSTANTIATED arrow).
       Swept by [check_cap_narrow_sites] to enforce that the source capability
@@ -858,6 +874,7 @@ let make_env errors type_map = {
   cap_dict_sites = ref [];
   mint_cap_sites = ref [];
   cap_narrow_sites = ref [];
+  cap_mismatch_sites = ref [];
   json_cap_sites = ref [];
   node_send_sites = ref [];
   json_codecs = ref [];
@@ -1805,29 +1822,6 @@ let resolve_qualified_ctor (name : string) (env : env) : env * ctor_info option 
       let env' = load_module_into_env mod_name exports env in
       env', lookup_ctor name env'
 
-(** Suggest a variable name close to [name] from [env.vars].
-    Returns the closest match with edit distance ≤ 2 that isn't a qualified name. *)
-let suggest_var_in_scope (name : string) (env : env) : string option =
-  let name_lo   = String.lowercase_ascii name in
-  let max_dist  = if String.length name <= 3 then 1 else 2 in
-  let best      = ref None in
-  let best_dist = ref max_int in
-  StrMap.iter (fun k _ ->
-    (* Skip qualified names (Mod.member) — those are suggested elsewhere —
-       and operators: a one-letter `y` is one edit from `%`, which is no
-       spelling of a variable. *)
-    let is_ident k =
-      k <> "" && (match k.[0] with 'a'..'z' | 'A'..'Z' | '_' -> true | _ -> false) in
-    if not (String.contains k '.') && is_ident k then begin
-      let d = edit_distance name_lo (String.lowercase_ascii k) in
-      if d > 0 && d <= max_dist && d < !best_dist then begin
-        best      := Some k;
-        best_dist := d
-      end
-    end
-  ) env.vars;
-  !best
-
 (** True if [name] is a dotted qualified reference (`Mod.member`) whose
     `member` is CONFIRMED private — either an in-file nested module's `pfn` /
     private `let` (via [env.local_mods]) or a private export of a module
@@ -1919,27 +1913,254 @@ let all_ctor_candidates_named (name : string) (env : env) : (string * string) li
         else begin Hashtbl.add seen key (); Some key end
       ) cis
 
-(** Suggest constructors close to [name]: case-insensitive match or first-2-char
-    prefix match with length difference ≤ 2. Returns [(ctor_name, type_name)]. *)
-let suggest_ctors (name : string) (env : env) : (string * string) list =
-  let name_lo = String.lowercase_ascii name in
-  let seen = Hashtbl.create 8 in
-  StrMap.fold (fun k cis acc ->
-    let k_lo = String.lowercase_ascii k in
-    let close =
-      k_lo = name_lo ||
-      (String.length name_lo >= 2 && String.length k_lo >= 2 &&
-       String.sub k_lo 0 2 = String.sub name_lo 0 2 &&
-       abs (String.length k - String.length name) <= 2)
-    in
-    if not close then acc
+(* ── Did-you-mean ranking (diagnostics-depth plan X8, tier 1) ──────────
+   Every spelling suggestion (unknown variable, constructor, actor message,
+   record field) goes through the same three steps:
+
+   1. Spelling: keep the names within [spelling_max_dist] of the typo
+      (case-insensitive edit distance <= 2, or <= 1/3 of the length), minus
+      the compiler's own generated names ([is_generated_name]).
+   2. Fit: compare each candidate's type with the type this position needs
+      ([suggest_need], supplied by the caller) using [could_fit], a
+      structural, read-only match in which an unresolved type variable is a
+      wildcard.  Nothing is unified, so a suggestion never binds a variable
+      and inference is identical with or without it.
+   3. Rank by fit, then locality (the current module; other user code and
+      the prelude; stdlib modules), then edit distance, then name.  When a
+      candidate fits, only fitting candidates are shown; stdlib-module
+      candidates are dropped when anything closer to home is in range. *)
+
+(** What the position of an unknown name needs: its expected type (an
+    annotation, a parameter, a constructor argument), or the pid of the
+    [send(pid, _)] whose message the name is. *)
+type suggest_need =
+  | NeedType of ty
+  | NeedSendTo of ty
+
+(** Largest edit distance a spelling candidate may be from a typo of length
+    [n]: 1 for names of up to 3 letters, otherwise 2, or a third of the
+    length for long names. *)
+let spelling_max_dist (n : int) : int =
+  if n <= 3 then 1 else max 2 (n / 3)
+
+(** Names the compiler generates and the user never wrote: desugar's
+    [$]-mangled names ([greet$1]) and the session-state tokens
+    [desugar_endpoints] generates per protocol role ([S_end],
+    [S_send_Msg_Prod_Cons_1], …; constructor and type share the [S_] name,
+    so a constructor is generated when both its name and its type start with
+    [S_]). *)
+let is_generated_name ?(ctor_type = "") (member : string) : bool =
+  let s_prefixed x = String.length x > 2 && String.sub x 0 2 = "S_" in
+  String.contains member '$'
+  || (s_prefixed member && (ctor_type = "" || s_prefixed ctor_type))
+
+(** Could [a] and [b] be the same type?  Structural and read-only: a type
+    variable (or an error type) matches anything and nothing is bound, so
+    this is safe on live inference types from an error path. *)
+let rec could_fit (a : ty) (b : ty) : bool =
+  match repr a, repr b with
+  | (TVar _ | TError), _ | _, (TVar _ | TError) -> true
+  | TLin (_, x), y | y, TLin (_, x) -> could_fit x y
+  | TCon (na, aa), TCon (nb, ab) ->
+    na = nb && List.length aa = List.length ab && List.for_all2 could_fit aa ab
+  | TArrow (a1, r1), TArrow (a2, r2) -> could_fit a1 a2 && could_fit r1 r2
+  | TTuple aa, TTuple ab ->
+    List.length aa = List.length ab && List.for_all2 could_fit aa ab
+  | TRecord fa, TRecord fb ->
+    List.length fa = List.length fb
+    && List.for_all2 (fun (na, ta) (nb, tb) -> na = nb && could_fit ta tb) fa fb
+  | TNat x, TNat y -> x = y
+  | _ -> false
+
+(** A scheme's type with its quantified variables left as (wildcard) type
+    variables: no instantiation, so no fresh variables are minted. *)
+let scheme_body = function Mono t | Poly (_, _, t) -> t
+
+(** [Some "A"] for an actor's generated message type [A_Msg]. *)
+let actor_of_msg_type (t : string) : string option =
+  let sfx = "_Msg" in
+  let n = String.length t and k = String.length sfx in
+  if n > k && String.sub t (n - k) k = sfx then Some (String.sub t 0 (n - k)) else None
+
+(** Does constructor [ci] fit [need]?  [None] when the position says nothing
+    (no need, or an unresolved expected type).  For [send(pid, _)] the
+    candidate must be a message of an actor whose state could be the pid's
+    (mirrors [check_send_target]: [DActor] binds the actor name to
+    [Pid(state)]). *)
+let ctor_fits_need (env : env) (ci : ctor_info) (need : suggest_need option) : bool option =
+  match need with
+  | None -> None
+  | Some (NeedType t) ->
+    (match repr t with
+     | TVar _ | TError -> None
+     | TCon (tn, _) -> Some (ci.ci_type = tn)
+     | _ -> Some false)
+  | Some (NeedSendTo pid_ty) ->
+    if not ci.ci_is_actor_msg then Some false
     else
-      List.fold_left (fun acc ci ->
-        let key = k ^ "/" ^ ci.ci_type in
-        if Hashtbl.mem seen key then acc
-        else begin Hashtbl.add seen key (); (k, ci.ci_type) :: acc end
-      ) acc cis
-  ) env.ctors []
+      (match repr pid_ty, actor_of_msg_type ci.ci_type with
+       | TCon ("Pid", [pid_state]), Some actor ->
+         let keys = actor :: (if ci.ci_module = "" then [] else [ci.ci_module ^ "." ^ actor]) in
+         (match List.find_map (fun k ->
+              match StrMap.find_opt k env.vars with
+              | Some sch ->
+                (match repr (scheme_body sch) with
+                 | TCon ("Pid", [s]) -> Some s
+                 | _ -> None)
+              | None -> None) keys with
+          | Some s -> Some (could_fit s pid_state)
+          | None -> Some true)
+       | _ -> Some true)
+
+(** 0: the current module; 1: other user code and the prelude; 2: a stdlib
+    module (a standard-library [.march] file declares it). *)
+let module_locality =
+  let memo : (string, bool) Hashtbl.t = Hashtbl.create 16 in
+  fun (env : env) (m : string) ->
+    if m <> "" && m = env.current_module then 0
+    else if m = "" then 1
+    else
+      let is_std = match Hashtbl.find_opt memo m with
+        | Some b -> b
+        | None ->
+          let b = (try March_modules.Module_registry.find_stdlib_file m <> None
+                   with _ -> false) in
+          Hashtbl.replace memo m b; b
+      in
+      if is_std then 2 else 1
+
+(** Rank spelling candidates [(spelling, distance, fits, locality, payload)]:
+    keep only the fitting ones when any fits, drop stdlib-module ones
+    (locality 2) when anything else is left, then order by fit, locality,
+    distance and spelling. *)
+let rank_candidates (cands : (string * int * bool option * int * 'a) list)
+  : (string * int * bool option * int * 'a) list =
+  let fitting = List.filter (fun (_, _, f, _, _) -> f = Some true) cands in
+  let cands = if fitting <> [] then fitting else cands in
+  let near = List.filter (fun (_, _, _, l, _) -> l < 2) cands in
+  let cands = if near <> [] then near else cands in
+  let fit_rank = function Some true -> 0 | None -> 1 | Some false -> 2 in
+  List.stable_sort (fun (n1, d1, f1, l1, _) (n2, d2, f2, l2, _) ->
+      compare (fit_rank f1, l1, d1, n1) (fit_rank f2, l2, d2, n2)) cands
+
+(** Fit of a candidate of type [cand_ty] to the expected type [need]. *)
+let ty_fits_need (cand_ty : ty) (need : ty option) : bool option =
+  match need with
+  | None -> None
+  | Some t ->
+    (match repr t with
+     | TVar _ | TError -> None
+     | _ -> Some (could_fit cand_ty t))
+
+(** Suggest a variable close to [name] from [env.vars], ranked by fit to the
+    expected type [need].  Qualified names (Mod.member) are suggested by
+    [qualified_error_msg]; operators are skipped (a one-letter `y` is one
+    edit from `%`, which is no spelling of a variable). *)
+let suggest_var_in_scope ?need (name : string) (env : env) : string option =
+  let name_lo  = String.lowercase_ascii name in
+  let max_dist = spelling_max_dist (String.length name) in
+  let is_ident k =
+    k <> "" && (match k.[0] with 'a'..'z' | 'A'..'Z' | '_' -> true | _ -> false) in
+  let cands =
+    StrMap.fold (fun k sch acc ->
+        if String.contains k '.' || not (is_ident k) || is_generated_name k then acc
+        else
+          let d = edit_distance name_lo (String.lowercase_ascii k) in
+          if d > 0 && d <= max_dist && d < String.length name then
+            (k, d, ty_fits_need (scheme_body sch) need, 1, ()) :: acc
+          else acc) env.vars []
+  in
+  match rank_candidates cands with
+  | (k, _, _, _, ()) :: _ -> Some k
+  | [] -> None
+
+(** Suggest a field of [flds] close to [name], ranked by fit of the field's
+    type to [need] (the type the access must produce, or the type of the
+    value a record update assigns). *)
+let suggest_field ?need (name : string) (flds : (string * ty) list) : string option =
+  let name_lo  = String.lowercase_ascii name in
+  let max_dist = spelling_max_dist (String.length name) in
+  let cands = List.filter_map (fun (f, fty) ->
+      let d = edit_distance name_lo (String.lowercase_ascii f) in
+      if d > 0 && d <= max_dist && d < String.length name then Some (f, d, ty_fits_need fty need, 1, ())
+      else None) flds in
+  match rank_candidates cands with
+  | (f, _, _, _, ()) :: _ -> Some f
+  | [] -> None
+
+(** Suggest constructors close to [name], ranked by fit to [need]; at most
+    five.  Returns [(spelling, origin)], where origin reads "from type `T`",
+    or "message of actor `A`" for an actor message (its type [A_Msg] is
+    generated).  A qualified [Q.m] is matched against [Q]'s constructors
+    only; a bare name against every constructor's last component. *)
+let suggest_ctors ?need (name : string) (env : env) : (string * string) list =
+  let qual, member = match split_qualified name with
+    | Some (q, m) -> Some q, m
+    | None -> None, name in
+  let member_lo = String.lowercase_ascii member in
+  let max_dist = spelling_max_dist (String.length member) in
+  let seen = Hashtbl.create 8 in
+  let cands =
+    StrMap.fold (fun k cis acc ->
+        let kq, km = match split_qualified k with
+          | Some (q, m) -> Some q, m
+          | None -> None, k in
+        let in_scope = match qual with None -> true | Some q -> kq = Some q in
+        let d = edit_distance member_lo (String.lowercase_ascii km) in
+        if not in_scope || k = name || d > max_dist || d >= String.length member then acc
+        else
+          List.fold_left (fun acc ci ->
+              let key = (km, ci.ci_type, ci.ci_module) in
+              if is_generated_name ~ctor_type:ci.ci_type km || Hashtbl.mem seen key then acc
+              else begin
+                Hashtbl.add seen key ();
+                (* A bare reference gets the bare spelling when that names
+                   this same constructor; otherwise the qualified key. *)
+                let display =
+                  if qual = None
+                  && (match StrMap.find_opt km env.ctors with
+                      | Some cs -> List.exists (fun c ->
+                          c.ci_type = ci.ci_type && c.ci_module = ci.ci_module) cs
+                      | None -> false)
+                  then km else k in
+                (display, d, ctor_fits_need env ci need,
+                 module_locality env ci.ci_module, ci) :: acc
+              end) acc cis)
+      env.ctors []
+  in
+  let origin (ci : ctor_info) =
+    match ci.ci_is_actor_msg, actor_of_msg_type ci.ci_type with
+    | true, Some a -> Printf.sprintf "message of actor `%s`" a
+    | _ -> Printf.sprintf "from type `%s`" ci.ci_type in
+  let shown = Hashtbl.create 8 in
+  rank_candidates cands
+  |> List.filter_map (fun (disp, _, _, _, ci) ->
+      let line = (disp, origin ci) in
+      if Hashtbl.mem shown line then None
+      else (Hashtbl.add shown line (); Some line))
+  |> List.filteri (fun i _ -> i < 5)
+
+(** The rest of an [unknown_constructor] error after its first sentence: a
+    newline and the ranked suggestions, or why nothing is offered for a
+    qualified name; empty for a bare name with no candidate in range. *)
+let unknown_ctor_hint ?need (name : string) (env : env) : string =
+  match suggest_ctors ?need name env with
+  | [] ->
+    (* A qualifier that owns constructors (an in-file or generated module the
+       registry does not know) is no unknown module: say what is missing. *)
+    (match split_qualified name with
+     | Some (q, m)
+       when StrMap.exists (fun k _ ->
+           match split_qualified k with Some (kq, _) -> kq = q | None -> false)
+           env.ctors ->
+       Printf.sprintf "\n`%s` has no constructor `%s`." q m
+     | Some _ -> "\n" ^ qualified_error_msg name env
+     | None -> "")
+  | [ (k, origin) ] -> Printf.sprintf "\nDid you mean `%s` (%s)?" k origin
+  | cands ->
+    "\nDid you mean one of:\n"
+    ^ String.concat "\n"
+        (List.map (fun (k, origin) -> Printf.sprintf "  • `%s` — %s" k origin) cands)
 
 (* Binding a value name SHADOWS any same-named module fn for the direct-call
    arity check ([fn_arities], consulted at the EApp rule): a param/let/pattern

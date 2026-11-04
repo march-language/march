@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------------------- errors/cap_needs_6.march
+-- CAPABILITY ------------------ errors/cap_needs_6.march
 
 `Cap(IO.Network)` used in module `Server` but `IO.Network` is not declared in `needs`. [cap_needs]
 help: add `needs IO.Network` to the module body.

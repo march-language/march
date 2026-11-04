@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------------------- errors/cap_grant_1.march
+-- CAPABILITY ------------------ errors/cap_grant_1.march
 
 `main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
 help: declare the grant `main` actually needs —

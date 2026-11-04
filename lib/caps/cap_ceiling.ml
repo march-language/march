@@ -49,7 +49,7 @@ let check ~module_caps ~module_spans ~attribution ~caps =
 let describe = function
   | Undeclared { cap; owner; span = _ } ->
     Printf.sprintf
-      "module `%s` uses `%s` but does not declare `needs %s`" owner cap cap
+      "Module `%s` uses `%s` but does not declare `needs %s`." owner cap cap
   (* Do NOT name a single cause here.  This message used to end "— it is
      reached only through indirect calls, whose callee is not statically
      known", asserting the one cause the check could imagine.  Every
@@ -68,5 +68,5 @@ let describe = function
        causes: the capability is reached only through an indirect call whose \
        callee is not statically known, or attribution has a gap for this \
        route — if adding the `needs` line does not resolve it, the route is \
-       the compiler's gap, not your program's; please report it"
+       the compiler's gap, not your program's; please report it."
       cap

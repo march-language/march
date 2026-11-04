@@ -1,0 +1,11 @@
+exit: 1
+-- NAMING ------------ errors/unknown_constructor_3.march
+
+I don't know a constructor called `Posts`. [unknown_constructor]
+Did you mean `Postal` (from type `Mail`)?
+
+11 |     let m : Mail = Posts(1)
+                        ^^^^^^^^
+
+
+

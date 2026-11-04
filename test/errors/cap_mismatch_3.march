@@ -1,0 +1,17 @@
+-- A capability CONTAINED BY the one needed (diagnostics plan F1): the
+-- file-read capability passed where the whole file-system one is needed.  A
+-- part does not carry the rest of its parent; the fix threads a
+-- `Cap(IO.FileSystem)` from `main`.
+mod Main do
+  needs IO.FileRead
+  needs IO.FileSystem
+
+  fn tidy(fs : Cap(IO.FileSystem), path : String) : String do
+    path
+  end
+
+  fn main(fr : Cap(IO.FileRead)) do
+    let _ = tidy(fr, "/tmp/x")
+    ()
+  end
+end

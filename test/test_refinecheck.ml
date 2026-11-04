@@ -10750,12 +10750,14 @@ let no_panic_proof_suite =
               end\n"))
 
   ; (* REGRESSION: `panic` keeps BOTH its syntactic ban and its transitive
-       fixpoint.  Same shape as the case above, opposite expectation — three
-       errors, because no contract exists or could exist for `panic`. *)
+       fixpoint.  Same shape as the case above, opposite expectation: the
+       callers are blamed too, because no contract exists or could exist for
+       `panic`.  Since the diagnostics-depth plan §X7 the blame is one error at
+       the panic naming both callers (each also a label), not three errors. *)
     Alcotest.test_case "cap no_panic: panic keeps its transitive blame" `Quick
       (fun () ->
-        let n =
-          has_no_panic_error_count
+        let ms =
+          no_panic_errors
             "mod TP do\n\
             \  cap no_panic\n\
             \  fn helper(x : Int) : Int do panic(\"boom\") end\n\
@@ -10763,7 +10765,10 @@ let no_panic_proof_suite =
             \  fn caller2(x : Int) : Int do helper(x) end\n\
              end\n"
         in
-        Alcotest.(check int) "direct site plus two transitive callers" 3 n)
+        Alcotest.(check int) "one error, at the direct site" 1 (List.length ms);
+        Alcotest.(check bool) "it names both transitive callers" true
+          (List.for_all (fun m -> contains m "`caller1`, `caller2` in this module reach it")
+             ms))
 
   ; (* ── Task 5: `Random.choice_weighted` (2026-08-05) ───────────────────
        Same shape as the `List.tail` trio above, over the real
@@ -11098,17 +11103,20 @@ let no_panic_proof_suite =
 
    These cases run the typechecker ALONE with the flag at its default, which is
    what those two pipelines do. *)
-let syntactic_no_panic_errors (src : string) : int =
+let syntactic_no_panic_messages (src : string) : string list =
   let m = March_desugar.Desugar.desugar_module (parse src) in
   (* Default, not set: a pipeline that forgets to opt in must get the
      conservative answer, so the absence of an assignment is the assertion. *)
   let errors, _ = March_typecheck.Typecheck.check_module m in
-  List.length
-    (List.filter
-       (fun (d : March_errors.Errors.diagnostic) ->
-         d.March_errors.Errors.severity = March_errors.Errors.Error
-         && contains d.March_errors.Errors.message "(declared `cap no_panic`)")
-       errors.March_errors.Errors.diagnostics)
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error
+         && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message else None)
+    errors.March_errors.Errors.diagnostics
+
+let syntactic_no_panic_errors (src : string) : int =
+  List.length (syntactic_no_panic_messages src)
 
 let syntactic_fallback_suite =
   [ Alcotest.test_case "an unguarded contracted call is still banned" `Quick
@@ -11144,19 +11152,25 @@ let syntactic_fallback_suite =
              \  fn f(o : Option(Int)) : Int do unwrap(o) end\n\
               end\n"))
 
-  ; (* And the OLD transitive blame is intact in this mode — three errors, the
-       pre-2026-08-05 behaviour, byte-for-byte what `march check` printed
-       before this task. *)
+  ; (* And the OLD transitive blame is intact in this mode: both callers are
+       blamed, as the pre-2026-08-05 behaviour did.  Since the diagnostics-depth
+       plan §X7 that is one error at the direct site naming both callers (each
+       also a label), not three errors. *)
     Alcotest.test_case "transitive blame is intact in the fallback" `Quick
       (fun () ->
-        Alcotest.(check int) "direct site plus two callers" 3
-          (syntactic_no_panic_errors
+        let ms =
+          syntactic_no_panic_messages
              "mod SF4 do\n\
              \  cap no_panic\n\
              \  fn helper(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
              \  fn caller1(xs : List(Int)) : List(Int) do helper(xs) end\n\
              \  fn caller2(xs : List(Int)) : List(Int) do helper(xs) end\n\
-              end\n"))
+              end\n"
+        in
+        Alcotest.(check int) "one error, at the direct site" 1 (List.length ms);
+        Alcotest.(check bool) "it names both callers" true
+          (List.for_all (fun m -> contains m "`caller1`, `caller2` in this module reach it")
+             ms))
 
   ; (* REJECT control: the fallback must not have become a blanket rejector. *)
     Alcotest.test_case "a safe cap no_panic module is silent in the fallback"
@@ -12979,7 +12993,8 @@ module Audit_fixture = struct
         iface_param = nm "a";
         iface_superclasses = [];
         iface_assoc_types = [];
-        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None; md_needs = None } ] }
+        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None; md_needs = None } ];
+        iface_laws = [] }
     in
     (* [DImpl]: an [impl] block for a DIFFERENT interface than [Runner]
        above, so its [Impl_ty] site and its method's [Param]/[Return] sites
@@ -13253,7 +13268,8 @@ let audit_arrow_signature_suite =
             iface_param = nm "a";
             iface_superclasses = [];
             iface_assoc_types = [];
-            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None; md_needs = None } ] }
+            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None; md_needs = None } ];
+            iface_laws = [] }
         in
         let labels = Audit_fixture.labels [ A.DInterface (idf, dummy) ] in
         Alcotest.(check (list (triple string string (pair string int))))
@@ -18734,7 +18750,10 @@ let fold_invariants_1_suite =
           m "  fn h(ys : List(Int), lo : Int) : {Int | _ >= lo} do foldl(ys, lo, fn (a, x) -> if x > a do x else a end) end\n"
         in
         Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
-        Alcotest.(check (list string)) "unreflectable-subject" [ "unreflectable-subject" ] (reasons src));
+        (* Reflection phase 5: the call of `foldl` with a lambda now has a
+           definition, so the subject translates in stage 2 and the skip is
+           the unfolding it would need (the list is unknown). *)
+        Alcotest.(check (list string)) "reflect-fuel" [ "reflect-fuel" ] (reasons src));
 
     (* ── Guards: each blocks a specific proof ──────────────────────────── *)
     case "guard: an accumulator's own refinement is not assumed when it does not hold" (fun () ->
@@ -18813,9 +18832,10 @@ let fold_invariants_1_suite =
           m "  fn k1(xs : List(a), z : b, f : b -> a -> b) : b do 0 - 5 end\n\
              \  fn go(ys : List(Int)) : Int do need_nn(k1(ys, 0, fn (a, x) -> a + 1)) end\n"
         in
-        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
-        Alcotest.(check (list string)) "not parametric" param (reasons src);
-        Alcotest.(check bool) "naming parametricity" true (has_detail "is not known to be parametric" src));
+        (* Reflection phase 5: `k1(..)` has a definition (`0 - 5`), so the
+           demand is refuted outright: `need_nn(-5)`.  The fold hypothesis
+           still gives nothing (no proof). *)
+        Alcotest.check t3 "violated" (0, 1, 0) (l3 src));
 
     case "impostor: a fold that hands the step a b it built" (fun () ->
         let src =
@@ -18917,8 +18937,9 @@ let fold_invariants_1_suite =
           m "  fn k9(z : b, f : b -> b, g : Int -> b) : b do f(g(3)) end\n\
              \  fn go(n : Int) : Int do need_nn(k9(0, fn a -> a + 1, fn _w -> 0 - 5)) end\n"
         in
-        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
-        Alcotest.(check (list string)) "a base skip" base (reasons src);
+        (* Reflection phase 5: the call has a definition, `f(g(3))` is -4,
+           so the demand is refuted outright; the hypothesis gives no proof. *)
+        Alcotest.check t3 "violated" (0, 1, 0) (l3 src);
         Alcotest.check t3 "control: fn _w -> 5 proves" (1, 0, 0)
           (l3
              (m "  fn k9(z : b, f : b -> b, g : Int -> b) : b do f(g(3)) end\n\
@@ -29022,7 +29043,8 @@ let () =
       ("reflect-parity", Test_refine_reflect1b.parity);
       ("reflect-fuel", Test_refine_fuel.tests);
       ("reflect-stdlib-list", Test_refine_stdlib_list.tests);
-      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests);
+      ("reflect-spec", Test_refine_spec.tests);
+      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);

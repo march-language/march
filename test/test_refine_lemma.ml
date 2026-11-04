@@ -148,6 +148,18 @@ let unproved out name =
 let expect_unproved out name =
   if not (unproved out name) then Alcotest.failf "expected lemma_unproved on `%s`:\n%s" name out
 
+(* The lemma is reported false: a confirmed counterexample (the solver's
+   model, run in the interpreter), [refinement_violated] at the lemma. *)
+let refuted out name =
+  List.exists
+    (fun l -> contains l "[refinement_violated]" && contains l ("the lemma `" ^ name ^ "` is false"))
+    (lines out)
+
+let expect_refuted out name ~at =
+  if not (refuted out name && contains out ("does not hold at " ^ at)) then
+    Alcotest.failf "expected `%s` refuted at %s:\n%s" name at out;
+  if unproved out name then Alcotest.failf "a refuted lemma is not also merely unproved:\n%s" out
+
 (* Admitted: no lemma_unproved or invalid_lemma, at least one theorem row,
    and every theorem row proved (a lemma that was never walked has none). *)
 let expect_admitted out name =
@@ -423,8 +435,8 @@ let l4 =
           run ~args:"--check"
             "mod N do\n  @[lemma]\n  fn bad2(n : Int) : {Unit | n < 0} do\n    if n == 0 do () else bad2(n - 1) end\n  end\nend\n"
         in
-        if not (invalid_lemma out ~name:"bad2" ~rule:"L4" || unproved out "bad2") then
-          Alcotest.failf "bad2 must be invalid (L4) or unproved:\n%s" out;
+        if not (invalid_lemma out ~name:"bad2" ~rule:"L4" || unproved out "bad2" || refuted out "bad2") then
+          Alcotest.failf "bad2 must be invalid (L4), unproved or refuted:\n%s" out;
         let out =
           run
             "mod N do\n  @[lemma]\n  fn good(n : Int) : {Unit | n <= 0 || n > 0} do\n    if n <= 0 do () else good(n - 1) end\n  end\nend\n"
@@ -713,6 +725,34 @@ let lemma_tests =
            erases every lemma (sound_erase_ir pins the IR). *)
         let out = run ~args:"--check" ("mod N do\n" ^ defs4_6 ^ cat_nil ^ "end\n") in
         if contains out "lemma-test" then Alcotest.failf "no lemma test without the flag:\n%s" out);
+    gated "lemma_refuted: a theorem false at some input is refinement_violated, with the input" (fun () ->
+        (* Both are false at n = -1 and true at n >= 0, so `¬P` is not valid and
+           the definite-failure rule alone skipped them as `lemma_unproved`.
+           `twice` is a reflected call: its model comes from stage 2. *)
+        let out =
+          run
+            "mod N do\n  fn twice(n : Int) : Int do n + n end\n  @[lemma]\n  fn nn(n : Int) : {Unit | twice(n) >= n} do\n    ()\n  end\n  @[lemma]\n  fn mm(n : Int) : {Unit | n + n >= n} do\n    ()\n  end\nend\n"
+        in
+        expect_refuted out "nn" ~at:"n = -";
+        expect_refuted out "mm" ~at:"n = -";
+        (* A refuted lemma is not admitted: its callers get no fact from it.
+           `need_nn(k)` after `mm(k)` must not be proved (k = -1 refutes it). *)
+        let out =
+          run
+            "mod N do\n  fn need_nn(n : {Int | _ + _ >= _}) : Int do n end\n  @[lemma]\n  fn mm(n : Int) : {Unit | n + n >= n} do\n    ()\n  end\n  fn f(k : Int) : Int do\n    mm(k)\n    need_nn(k)\n  end\nend\n"
+        in
+        expect_refuted out "mm" ~at:"n = -";
+        U.not_proved out ~line:9 ~callee:"need_nn";
+        (* Control: true but needing induction stays unproved, not refuted. *)
+        let out = run ("mod N do\n" ^ defs4_6 ^ count_fn ^ count_cat ^ "end\n") in
+        expect_unproved out "count_cat";
+        if refuted out "count_cat" then Alcotest.failf "a true lemma is never refuted:\n%s" out;
+        (* A refined parameter: the model must satisfy it to count. *)
+        let out =
+          run
+            "mod N do\n  @[lemma]\n  fn pos_ok(n : {Int | _ >= 0}) : {Unit | n + n >= n} do\n    ()\n  end\nend\n"
+        in
+        if refuted out "pos_ok" then Alcotest.failf "no counterexample inside the refinement:\n%s" out);
     gated "verified_unproved: in a `cap verified` module an unproved lemma is an error (idea 10)" (fun () ->
         let src cap = "mod N do\n" ^ cap ^ defs4_6 ^ count_fn ^ count_cat ^ "end\n" in
         let out = run (src "  cap verified\n") in
@@ -721,8 +761,145 @@ let lemma_tests =
             (List.exists
                (fun l -> contains l "[lemma_unproved]" && contains l "`count_cat`")
                (lines out)
-            && contains out "-- ERROR")
+            && contains out "-- REFINEMENT ")
         then Alcotest.failf "an unproved lemma in a verified module is an error:\n%s" out;
         let out = run (src "") in
         expect_unproved out "count_cat";
-        if contains out "-- ERROR" then Alcotest.failf "outside `cap verified` it is a warning:\n%s" out) ]
+        if contains out "-- REFINEMENT " then Alcotest.failf "outside `cap verified` it is a warning:\n%s" out) ]
+
+(* ── Interface laws (idea 6): an interface's `@[lemma]` signature is one lemma
+   per impl, over copies of the impl's methods ([Interface_laws]) ──────── *)
+
+(* The lemma-def status ("admitted" / "unproved") of the generated lemma
+   [name], from `--reflect-deps`. *)
+let lemma_def_status out name =
+  List.find_map
+    (fun l ->
+      match String.split_on_char '\t' l with
+      | [ "lemma-def"; _; q; h ] when q = name || String.ends_with ~suffix:("." ^ name) q -> (
+        match List.rev (String.split_on_char ':' h) with s :: _ -> Some s | [] -> None)
+      | _ -> None)
+    (lines out)
+
+let expect_status out name status =
+  match lemma_def_status out name with
+  | Some s when s = status -> ()
+  | s -> Alcotest.failf "expected `%s` %s, got %s:\n%s" name status (Option.value ~default:"no row" s) out
+
+let monoid =
+  {|  interface Monoid(a) do
+    fn combine : a -> a -> a
+    @[lemma]
+    fn combine_assoc(x : a, y : a, z : a) : {Unit | combine(combine(x, y), z) == combine(x, combine(y, z))}
+  end
+  impl Monoid(Int) do
+    fn combine(x, y) do x + y end
+  end
+|}
+
+let joinable ~proof =
+  {|  interface Joinable(a) do
+    fn join : a -> a -> a
+    fn none : a -> a
+    @[lemma]
+    fn join_none(x : a) : {Unit | join(x, none(x)) == x}
+  end
+  impl Joinable(List(a)) do
+    fn join(xs, ys) do
+      match xs do
+        Nil -> ys
+        Cons(h, t) -> Cons(h, join(t, ys))
+      end
+    end
+    fn none(_xs) do Nil end
+|}
+  ^ (if proof then
+       {|    @[lemma]
+    fn join_none(xs) do
+      match xs do
+        Nil -> ()
+        Cons(_, t) -> join_none(t)
+      end
+    end
+|}
+     else "")
+  ^ "  end\n"
+
+let iface_laws =
+  [ gated "iface_law_proved: a law an impl satisfies is admitted for that impl" (fun () ->
+        let out = run ~args:"--check --reflect-deps" ("mod N do\n" ^ monoid ^ "end\n") in
+        expect_status out "combine_assoc__Monoid_Int" "admitted";
+        if contains out "-- REFINEMENT " || contains out "[lemma_unproved]" then
+          Alcotest.failf "a satisfied law draws nothing:\n%s" out);
+    gated "iface_law_refuted: an impl that breaks a law is refinement_violated, with an input" (fun () ->
+        let out =
+          run ~args:"--check --reflect-deps"
+            ("mod N do\n" ^ monoid
+           ^ "  type Box = Box(Int)\n  impl Monoid(Box) do\n    fn combine(p, q) do\n      match p do\n        Box(a) -> match q do\n          Box(b) -> Box(a - b)\n        end\n      end\n    end\n  end\nend\n")
+        in
+        expect_refuted out "combine_assoc__Monoid_Box" ~at:"x = Box(";
+        (* The message reads the theorem as written, not the generated names. *)
+        if not (contains out "its theorem `combine(combine(x, y), z) == combine(x, combine(y, z))`") then
+          Alcotest.failf "the theorem prints as written:\n%s" out;
+        expect_status out "combine_assoc__Monoid_Box" "unproved";
+        expect_status out "combine_assoc__Monoid_Int" "admitted");
+    gated "iface_law_proof: an impl's own `@[lemma]` of the law's name is its proof" (fun () ->
+        let out = run ~args:"--check --reflect-deps" ("mod N do\n" ^ joinable ~proof:true ^ "end\n") in
+        expect_status out "join_none__Joinable_List_a" "admitted";
+        (* Without the proof the law needs induction it does not get. *)
+        let out = run ~args:"--check --reflect-deps" ("mod N do\n" ^ joinable ~proof:false ^ "end\n") in
+        expect_unproved out "join_none__Joinable_List_a";
+        expect_status out "join_none__Joinable_List_a" "unproved");
+    gated "iface_law_verified: under `cap verified` an unproved law is an error" (fun () ->
+        let out = run ~args:"--check" ("mod N do\n  cap verified\n" ^ joinable ~proof:false ^ "end\n") in
+        if not (unproved out "join_none__Joinable_List_a" && contains out "-- REFINEMENT ") then
+          Alcotest.failf "an unproved law in a verified module is an error:\n%s" out);
+    gated "iface_law_lemma_test: `--lemma-test` tests each impl's law" (fun () ->
+        let out = run ~args:"--check --lemma-test" ("mod N do\n" ^ joinable ~proof:false ^ "end\n") in
+        expect_row out "join_none__Joinable_List_a" ~status:"tested" ~detail:"tested, not proved: ");
+    gated "iface_law_erased: laws and the method copies never run" (fun () ->
+        let src =
+          "mod N do\n  needs IO.Console\n" ^ joinable ~proof:true
+          ^ "  fn main(_cap : Cap(IO.Console)) do\n    println(int_to_string(List.length(join([1, 2], [3]))))\n  end\nend\n"
+        in
+        List.iter
+          (fun mode ->
+            let out = output mode src in
+            match List.rev (lines out) with
+            | l :: _ when String.trim l = "3" -> ()
+            | _ -> Alcotest.failf "the program prints 3:\n%s" out)
+          [ `Interp; `Compiled ];
+        let ir = ll src in
+        if contains ir "__law_" || contains ir "join_none" then Alcotest.fail "the law's code reaches the IR");
+    gated "iface_law_cross_file: an impl of an interface declared in another file is checked" (fun () ->
+        let algebra =
+          "mod Algebra do\n  interface Monoid(a) do\n    fn combine : a -> a -> a\n    @[lemma]\n    fn combine_assoc(x : a, y : a, z : a) : {Unit | combine(combine(x, y), z) == combine(x, combine(y, z))}\n  end\nend\n"
+        in
+        let out =
+          U.run_lib ~args:"--check --reflect-deps" ~lib:[ ("algebra.march", algebra) ]
+            "mod Main do\n  use Algebra.*\n  type Box = Box(Int)\n  impl Monoid(Int) do\n    fn combine(x, y) do x + y end\n  end\n  impl Monoid(Box) do\n    fn combine(p, q) do\n      match p do\n        Box(a) -> match q do\n          Box(b) -> Box(a - b)\n        end\n      end\n    end\n  end\nend\n"
+        in
+        expect_status out "combine_assoc__Monoid_Int" "admitted";
+        expect_refuted out "combine_assoc__Monoid_Box" ~at:"x = Box(");
+    gated "iface_law_default_unit: a default method, and a method called with `()`" (fun () ->
+        let sem =
+          "  interface Sem(a) do\n    fn combine : a -> a -> a\n    fn twice : a -> a do\n      fn x -> combine(x, x)\n    end\n    fn unit : Unit -> a\n    @[lemma]\n    fn twice_def(x : a) : {Unit | twice(x) == combine(x, x)}\n    @[lemma]\n    fn unit_left(x : a) : {Unit | combine(unit(()), x) == x}\n  end\n"
+        in
+        let impl = "  impl Sem(Int) do\n    fn combine(x, y) do x + y end\n    fn unit(_u) do 0 end\n  end\n" in
+        let out = run ~args:"--check --reflect-deps" ("mod N do\n" ^ sem ^ impl ^ "end\n") in
+        expect_status out "twice_def__Sem_Int" "admitted";
+        expect_status out "unit_left__Sem_Int" "admitted";
+        (* The impl in another file: the default is not injected there. *)
+        let out =
+          U.run_lib ~args:"--check --reflect-deps" ~lib:[ ("alg.march", "mod Alg do\n" ^ sem ^ "end\n") ]
+            ("mod Main do\n  use Alg.*\n" ^ impl ^ "end\n")
+        in
+        expect_status out "twice_def__Sem_Int" "admitted";
+        expect_status out "unit_left__Sem_Int" "admitted");
+    gated "iface_law_syntax: a body-less interface `fn` must be a `@[lemma]`" (fun () ->
+        let out =
+          run ~args:"--check"
+            "mod N do\n  interface I(a) do\n    @[opaque]\n    fn l(x : a) : {Unit | x == x}\n  end\nend\n"
+        in
+        if not (contains out "An interface can declare laws") then
+          Alcotest.failf "expected the law-syntax error:\n%s" out) ]

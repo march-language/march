@@ -1872,10 +1872,9 @@ let cli_role_grant_violation =
        let rc, out = check_cli violation_src in
        Alcotest.(check int) "exit code" 1 rc;
        Alcotest.(check bool) ("names the role, the cap and the chain (output: " ^ out ^ ")") true
-         (contains_text out "Role `Stream.Cons` is granted `Cap(IO.Console)`"
-          && contains_text out "reaches `IO.FileWrite`"
-          (* The chain is a trace (diagnostics-depth plan §X7): a label on
-             each call from the body to the use. *)
+         (* Diagnostics plan F1: the chain is a span trace now (the use,
+            then a label per call), not prose. *)
+         (contains_text out "The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`"
           && contains_text out "the body calls `cons` here"
           && contains_text out "`cons` calls `save` here"))
 
@@ -2238,7 +2237,7 @@ end
            Alcotest.(check bool) (cap ^ ": names the grant (output: " ^ out ^ ")") true
              (contains_text out ("`role Cons needs " ^ cap ^ "` names a capability that is not under `IO`")
               && contains_text out ("role Cons needs " ^ cap));
-           let errors = List.length (List.filter (fun l -> contains_text l "-- ERROR") (String.split_on_char '\n' out)) in
+           let errors = List.length (List.filter (fun l -> March_errors.Errors.header_severity l = Some March_errors.Errors.Error) (String.split_on_char '\n' out)) in
            Alcotest.(check int) (cap ^ ": exactly one error (output: " ^ out ^ ")") 1 errors;
            Alcotest.(check bool) (cap ^ ": nothing from generated code (output: " ^ out ^ ")") false
              (contains_text out "in code generated for this file"))

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------- errors/division_by_zero_1.march
+-- REFINEMENT ----------- errors/division_by_zero_1.march
 
 division by `n` in `cap no_panic` module may be by zero — no refinement proves `n ≠ 0`. [division_by_zero]
 

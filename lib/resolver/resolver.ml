@@ -363,7 +363,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
     else if Hashtbl.mem in_progress mod_name then begin
       errors := (mod_name, from_span,
         Printf.sprintf
-          "Circular import: module `%s` imports itself (directly or transitively)"
+          "Circular import: module `%s` imports itself (directly or transitively)."
           mod_name) :: !errors;
       []
     end else begin
@@ -374,7 +374,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
           if not (List.mem mod_name stdlib_module_names) then
             errors := (mod_name, from_span,
               Printf.sprintf
-                "Module `%s` not found (looked for `%s` in the source directory)"
+                "Module `%s` not found (looked for `%s` in the source directory)."
                 mod_name (module_name_to_filename mod_name)) :: !errors;
           []
         | Some file_path ->
@@ -390,7 +390,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
               try read_file file_path
               with Sys_error msg ->
                 errors := (mod_name, from_span,
-                  Printf.sprintf "Cannot read `%s`: %s" file_path msg) :: !errors;
+                  Printf.sprintf "Cannot read `%s`: %s." file_path msg) :: !errors;
                 ""
             in
             if src <> "" then loaded_srcs := src :: !loaded_srcs;

@@ -157,6 +157,7 @@ string was sanitized"): that is an opaque type's job, see
 | **Standard library** | Stdlib functions such as `List.head`, `List.nth` and `Option.unwrap` carry refinement contracts, so a user call site is checked against them. | [Standard Library](standard-library.md) |
 | **Linear types** | The other compile-time safety layer: linearity tracks *use*, refinements track *value*. | [Linear Types](linear-types.md) |
 | **Safety by construction** | Refinements are one of three orthogonal layers, beside capabilities and typestate. | [Safety by Construction](safety-by-construction.md) |
+| **Lemmas** | A `@[lemma]` proves what one unfolding cannot (induction); a proved lemma's theorem is a fact after each call. | [Lemmas]({{ site.baseurl }}/docs/lemmas/) |
 | **Tooling** | `forge refine` proposes a contract; `--refine-report` and `--refine-audit` say what was proved, skipped, or never looked at. | [Tooling](https://github.com/march-language/march/blob/main/docs/tooling.md) |
 
 ---
@@ -1263,7 +1264,8 @@ to annotate.
 - Every `match` in it **covers every case**, guarded arms included.
 - It calls only reflected functions, constructors, and the arithmetic,
   comparison and Boolean operators.
-- It takes no function as a parameter and makes no lambda.
+- It takes no function as a parameter and makes no lambda, except as described
+  under [Functions that take functions](#functions-that-take-functions) below.
 - Its parameters and result are `Int`, `Bool`, data types (lists, options,
   your own types) or type variables, and it does not return `Unit`.
 - It is not marked `@[opaque]`, `@[assume]` or `@[trusted]`, and its name is not
@@ -1380,6 +1382,56 @@ fn g(n : Int) : Int do
 end
 ```
 
+#### Functions that take functions
+
+A function such as `List.filter` or `List.map` takes a function as an argument,
+so it has no single definition. Each **call** of it with a lambda, or with the
+name of a reflected function, does: the checker puts the lambda's body in place
+of the parameter and gets a definition for that one call. So a function that
+filters or maps with a lambda is reflected:
+
+```march
+fn pos(xs : List(Int)) : List(Int) do List.filter(xs, fn x -> x > 0) end
+fn need_eq(a : List(Int), b : {List(Int) | _ == a}) : Int do 0 end
+
+need_eq(Cons(1, Nil), List.filter(Cons(1, Nil), fn x -> x > 0))   -- proved
+need_eq(Cons(2, Nil), List.map(Cons(1, Nil), fn x -> x + 1))       -- proved
+```
+
+A lambda may read the caller's variables. They become extra arguments of that
+call's definition, so `above(xs, 3)` and `above(xs, 7)` are kept apart:
+
+```march
+fn above(xs : List(Int), k : Int) : List(Int) do List.filter(xs, fn x -> x > k) end
+```
+
+The function taking the function (call it `g`, with function parameter `p`) is
+used this way when:
+- every use of `p` in `g`'s body is a call `p(...)`, or passes `p` on in the same
+  position of `g`'s own recursive call (`filter(t, pred)`);
+- nothing in `g`'s body is named `p` again, and `g` makes no lambda itself;
+- `p`'s parameter types carry no refinement (`p : {Int | _ > 0} -> Bool` is not
+  used this way; an abstract refinement `a -> Bool[p]` is fine);
+- `g` passes every other rule above, and is not part of a group of mutually
+  recursive functions.
+
+The argument at each such call must be:
+- a lambda with the right number of parameters, none of them refined, whose
+  body has no effect, cannot fail, makes no lambda, divides only by non-zero
+  literals, and calls only reflected functions;
+- or the name of a reflected top-level function.
+
+A lambda bound by `let`, a local `fn`, a function parameter, or a function
+returned by a call (`List.filter(xs, make_pred(3))`) is not used: its
+definition is not fixed where the call is written. Recursion through a lambda
+is the caller's: in `fn bad(n) = hd(List.map([n], fn x -> bad(x) + 1))` the
+lambda's call of `bad` is `bad` calling itself, which does not terminate, so
+`bad` is not reflected.
+
+A predicate cannot call `g` itself (it cannot hold a lambda). `--reflect-report`
+lists `g` as `specialised`, with the number of calls that got a definition. The
+fuel of those calls is `g`'s: `@[reflect(fuel: N)]` on `g` is accepted.
+
 **A body is part of its callers' proofs.** When a caller's proof uses a
 reflected function's definition, an edit to that body can change the proof.
 Nothing stale survives such an edit:
@@ -1411,7 +1463,9 @@ Nothing stale survives such an edit:
 **Checking the checker: `--reflection-parity`.** `forge test
 --reflection-parity` (or `march --check --reflect-parity file.march`) runs each
 reflected function both ways on generated inputs: by its logic definition and
-by the interpreter. The inputs include `0`, `1`, `-1`, the largest and smallest
+by the interpreter. Each call of a function that takes functions is checked
+too, as the call itself (`List.filter[m.march:3:4]`), with its lambda's
+captured variables among the inputs. The inputs include `0`, `1`, `-1`, the largest and smallest
 `Int` and their neighbours. Any disagreement, or a reflected function that
 panics on an input in its domain, fails the run: that is a compiler bug.
 A function whose arithmetic overflows at the boundary is reported `overflow?`,
@@ -1465,6 +1519,10 @@ The checker expands only steps the facts decide. That is enough for
 `cat(xs, Nil) == xs` with `xs` unknown, which is true for every list and needs
 induction to show. A **lemma** is how you supply that proof.
 
+This section is the reference summary. [Lemmas]({{ site.baseurl }}/docs/lemmas/) is the
+full guide: writing proofs step by step, reading `lemma_unproved`, fuel, and what
+`forge test`, `forge doc`, `forge search --law` and the editor do with lemmas.
+
 A lemma is a function marked `@[lemma]`. Its result type is `{Unit | P}`: `P`
 is the theorem, and the body is the proof. The proof uses only what March
 already has:
@@ -1504,7 +1562,18 @@ the induction hypothesis. The checker accepts it only when the recursion
 provably terminates (here it is structural, on the tail) and the recursive
 call meets the lemma's own preconditions. A lemma that proves is **admitted**.
 A lemma that does not draws `lemma_unproved` (an error under `cap verified`),
-and gives its callers nothing.
+and gives its callers nothing. A lemma whose theorem is false is an error,
+`refinement_violated`, with an input that shows it: the checker runs the
+theorem on the solver's counterexample, and reports it only when the theorem
+really is false there.
+
+```march
+@[lemma]
+fn nn(n : Int) : {Unit | n + n >= n} do
+  ()
+end
+-- error: the lemma `nn` is false: its theorem `n + n >= n` does not hold at n = -1
+```
 
 **Calling a lemma.** A call on its own line, or as `let _ = l(...)`, adds the
 theorem, instantiated at the call's arguments, as a fact for the rest of that
@@ -1654,7 +1723,19 @@ The tests are separate programs. Your build still removes every lemma.
 the lemmas whose theorem calls it, under the heading "Laws", with the theorem
 as written. `forge search --law TEXT` finds lemmas whose theorem contains TEXT
 (case and spaces ignored) or calls a function named TEXT, and a plain name
-search for a function also finds the lemmas about it.
+search for a function also finds the lemmas about it. TEXT can also be a
+shape: in `forge search --law "f(f(x)) == x"` the one-letter `f` stands for
+any function and `x` for any term, so it finds `reverse(reverse(xs)) == xs`
+whatever the functions are called.
+
+**Rewrites in the editor.** When a proved lemma's theorem is an equation,
+`lhs == rhs`, the editor offers to rewrite an expression of the shape `lhs`
+into `rhs`, and names the lemma. With `cat_nil` proved, the cursor on
+`cat(Cons(1, zs), Nil)` offers "Rewrite to `Cons(1, zs)`". The lemmas can be in
+the open file, a project file it uses, or the stdlib (those the stdlib's
+`lemmas.verified` lists); a lemma from another module has that module's
+functions qualified in the rewrite (`List.append(..)`). Only proved lemmas
+are offered, and only left to right.
 
 **Lemmas as a contract for changes.** A lemma states a law the code must keep,
 and the checker re-proves it on every build. To make a broken law fail the
@@ -4429,7 +4510,7 @@ Two generated examples, one per reason:
 ```
 $ march --check test/native/simd_lane_panic.march
 
--- HINT -- test/native/simd_lane_panic.march
+-- HINT: REFINEMENT -- test/native/simd_lane_panic.march
 
 precondition `0 <= _ && _ < 4` on `Simd.extract_i32x4` was NOT verified here.
 the argument `lane(1)` could not be translated to SMT, so no goal was built
@@ -4458,7 +4539,7 @@ end
 ```
 $ march --check up_doc.march
 
--- WARNING -- up_doc.march
+-- WARNING: REFINEMENT -- up_doc.march
 
 `is_prime` is not a measure or known predicate, so this refinement is not checked. Annotate the function `@[measure]`, or use a supported predicate.
 
@@ -4467,7 +4548,7 @@ $ march --check up_doc.march
 
 
 
--- HINT -- up_doc.march
+-- HINT: REFINEMENT -- up_doc.march
 
 precondition `is_prime(_)` on `f` was NOT verified here.
 the predicate's `is_prime(_)` has no SMT translation
@@ -4488,7 +4569,7 @@ error; see [the alias-withdrawal note](#a-withdrawn-alias-names-itself) below.
 ```
 $ march --check <file>
 
--- HINT -- <file>
+-- HINT: REFINEMENT -- <file>
 
 precondition `len(_) > 0` on `head` was NOT verified here.
 no fact the checker derived constrains `ys`
@@ -4500,7 +4581,7 @@ no fact the checker derived constrains `ys`
 The residual reasons still print the longer canned paragraph, unchanged:
 
 ```
--- HINT -- <file>
+-- HINT: REFINEMENT -- <file>
 
 precondition `len(_) > 0` on `head_of` was NOT verified here.
 reason: solver-undecided — the solver proved neither the predicate nor its negation
@@ -4929,7 +5010,7 @@ would silently do nothing. The checker warns about it (`unknown_attribute`),
 with a suggestion when the name is close to a known one:
 
 ```
-warning: unknown attribute `@[decrease]` on `f`: it is ignored.
+warning: Unknown attribute `@[decrease]` on `f`: it is ignored.
 note: did you mean `@[decreases]`?
 ```
 
@@ -5132,7 +5213,11 @@ The rules, in the order the report checks them:
   total and pure. Any other interface call (`show`, string interpolation, a
   user `compare`) blocks.
 - **R7**: no function values: no lambda, no function-typed parameter, no
-  function passed or stored as a value.
+  function passed or stored as a value. The exception is a call of a function
+  that takes functions with a lambda or a reflected function's name
+  ([Functions that take functions](#functions-that-take-functions)); the
+  function taking them is listed `specialised`, with how many of its calls got
+  a definition.
 - **R8**: every parameter and the result have a solver sort; a function
   returning `Unit` is not reflected.
 - **R9**: not marked `@[trusted]`, `@[assume]` or `@[opaque]`.
@@ -6719,5 +6804,6 @@ golden corpus itself remains 46/46 MATCH.
 - [Type System](type-system.md): the types refinements attach to
 - [Linear Types](linear-types.md): the other compile-time safety layer
 - [Pattern Matching](pattern-matching.md): `match` guards feed path sensitivity
+- [Lemmas]({{ site.baseurl }}/docs/lemmas/): proving what one unfolding cannot, with `@[lemma]`
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/): `cap no_panic` and `cap verified` beside the other behavioral caps
 - [Safety by Construction](safety-by-construction.md): refinements as one of three layers

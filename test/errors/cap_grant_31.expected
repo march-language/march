@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_31.march
+-- PROTOCOL ------------------- errors/cap_grant_31.march
 
 Session channel `cc2` reached `End` but was never closed. [session_not_closed]
 A channel at `End` must be passed to `Chan.close` — dropping it leaks the endpoint.

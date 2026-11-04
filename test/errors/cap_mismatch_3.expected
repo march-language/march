@@ -1,0 +1,37 @@
+exit: 1
+-- CAPABILITY --------------- errors/cap_mismatch_3.march
+
+`tidy` needs file-system access, but `fr` is the file-read capability. [cap_mismatch]
+
+14 |     let _ = tidy(fr, "/tmp/x")
+                      ^^
+
+    `IO.FileRead` is a part of `IO.FileSystem`; it does not carry the rest of `IO.FileSystem`.
+    help: give `main` a `Cap(IO.FileSystem)` parameter and pass it to `tidy`.
+
+    `tidy` needs `Cap(IO.FileSystem)`:
+
+14 |     let _ = tidy(fr, "/tmp/x")
+                 ^^^^^^^^^^^^^^^^^^
+
+    `fr` was bound here as `Cap(IO.FileRead)`:
+
+13 |   fn main(fr : Cap(IO.FileRead)) do
+               ^^
+
+    `main` is granted only `Cap(IO.FileRead)` here:
+
+13 |   fn main(fr : Cap(IO.FileRead)) do
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+fix [cap_mismatch:IO.FileSystem]:
+@@ lines 13-13 @@
+-  fn main(fr : Cap(IO.FileRead)) do
++  fn main(fr : Cap(IO.FileRead), _cap_filesystem : Cap(IO.FileSystem)) do
+@@ lines 14-14 @@
+-    let _ = tidy(fr, "/tmp/x")
++    let _ = tidy(_cap_filesystem, "/tmp/x")
+
+after fix: exit 0

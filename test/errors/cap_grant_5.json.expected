@@ -1,1 +1,1 @@
-{"severity":"error","file":"errors/cap_grant_5.march","start_line":6,"start_col":26,"end_line":6,"end_col":29,"message":"This record does not have a field called `z`.\nThe fields I see are: x, y","code":"unknown_record_field","fix":null,"labels":[],"notes":[]}
+{"severity":"error","file":"errors/cap_grant_5.march","start_line":6,"start_col":26,"end_line":6,"end_col":29,"message":"This record does not have a field called `z`.\nThe fields I see are: x, y","code":"unknown_record_field","fix":null,"labels":[],"notes":[],"category":"NAMING"}

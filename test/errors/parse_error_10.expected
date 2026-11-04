@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------------- errors/parse_error_10.march
+-- SYNTAX ------------------- errors/parse_error_10.march
 
 A `let*` binding can't have a type annotation — its type is inferred from the right-hand side. [parse_error]
 

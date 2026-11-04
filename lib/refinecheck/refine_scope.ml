@@ -462,6 +462,7 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
     end
     else
       let sym = Option.get (Reflect_state.resolve_site csp) in
+      let args = Reflect_state.args_at csp args in
       let arity = match Reflect_state.sig_of sym with Some s -> List.length s.Reflect_state.fs_params | None -> -1 in
       if List.length args <> arity then Error e
       else
@@ -521,6 +522,17 @@ let smt_of ?(vocab = true) ~resolve_var ~resolve_measure ?(resolve_field = fun _
    ================================================================= *)
 
 (* User-facing infix rendering of a predicate (best-effort). *)
+(* An impl method's copy for an interface law (`__law_<method>__<impl>`,
+   [March_desugar.Interface_laws]) reads back as the method's own name. *)
+let law_method_display (s : string) : string =
+  let p = "__law_" in
+  if String.starts_with ~prefix:p s then
+    let rest = String.sub s (String.length p) (String.length s - String.length p) in
+    let n = String.length rest in
+    let rec cut i = if i + 1 >= n then rest else if rest.[i] = '_' && rest.[i + 1] = '_' then String.sub rest 0 i else cut (i + 1) in
+    cut 0
+  else s
+
 let rec pred_str (e : A.expr) : string =
   let binop op a b = pred_str a ^ " " ^ op ^ " " ^ pred_str b in
   match e with
@@ -549,7 +561,7 @@ let rec pred_str (e : A.expr) : string =
   | A.ECon ({ A.txt = ctor; _ }, [], _) -> ctor
   | A.ECon ({ A.txt = ctor; _ }, args, _) ->
     ctor ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
-  | A.EVar { A.txt; _ } -> if txt = set_empty_literal then "empty" else txt
+  | A.EVar { A.txt; _ } -> if txt = set_empty_literal then "empty" else law_method_display txt
   | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str recv ^ "." ^ fname
   | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
                              | "+" | "-" | "*" | "/" | "%" | "+." | "-." | "*." | "/.") as op; _ },
@@ -573,7 +585,8 @@ let rec pred_str (e : A.expr) : string =
   | A.EApp (A.EVar { A.txt = f; _ }, args, _)
     when f <> ""
          && (match f.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) ->
-    f ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
+    law_method_display f ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
+  | A.ETuple ([], _) -> "()"
   | _ -> "<predicate>"
 
 (* Why a `/`/`%` leaf did not reflect, for the `unreflectable-predicate`

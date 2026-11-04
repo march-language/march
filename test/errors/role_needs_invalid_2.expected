@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------- errors/role_needs_invalid_2.march
+-- PROTOCOL ----------- errors/role_needs_invalid_2.march
 
 Protocol `Logging`: `L` is not declared `may crash`, so `L -> I : ...` cannot have a crash branch. [role_needs_invalid]
 

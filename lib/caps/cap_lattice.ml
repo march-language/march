@@ -151,3 +151,64 @@ let suggest_cap cap =
         | (d, k) :: _ when d <= 3 -> Some k
         | _ -> Some "IO"
   end
+
+(* ── Words for diagnostics (specs/plans/2026-11-02-diagnostics-depth-plan.md
+   §F1) ──────────────────────────────────────────────────────────────────
+
+   One row per lattice node: the authority as a noun ("file-read"), as what
+   code holding it does ("reads a file").  A capability outside the table (an
+   FFI or proof root) falls back to its own name. *)
+let words : (string * (string * string)) list = [
+  ("IO",                  ("full IO",          "performs IO"));
+  ("IO.Console",          ("console",          "prints"));
+  ("IO.FileSystem",       ("file-system",      "uses the file system"));
+  ("IO.FileRead",         ("file-read",        "reads a file"));
+  ("IO.FileWrite",        ("file-write",       "writes a file"));
+  ("IO.Network",          ("network",          "uses the network"));
+  ("IO.NetConnect",       ("network-connect",  "opens a network connection"));
+  ("IO.NetListen",        ("network-listen",   "listens on the network"));
+  ("IO.Process",          ("process",          "runs a process"));
+  ("IO.Clock",            ("clock",            "reads the clock"));
+  ("IO.Random",           ("randomness",       "draws random numbers"));
+  ("IO.Signal",           ("signal",           "handles signals"));
+  ("IO.Database",         ("database",         "talks to a database"));
+  ("IO.Spawn",            ("spawn",            "spawns a task"));
+  ("IO.Mut",              ("mutation",         "mutates shared state"));
+  ("IO.Telemetry",        ("telemetry",        "emits telemetry"));
+  ("IO.NetConnect.TLS",   ("TLS",              "opens a TLS connection"));
+  ("IO.WebSocket",        ("WebSocket",        "opens a WebSocket"));
+  ("IO.Foreign",          ("foreign-code",     "calls foreign code"));
+  ("IO.Foreign.Blocking", ("blocking foreign-code", "calls blocking foreign code"));
+]
+
+let access cap =
+  match List.assoc_opt cap words with
+  | Some (noun, _) -> noun ^ " access"
+  | None -> Printf.sprintf "`%s` access" cap
+
+let action cap =
+  match List.assoc_opt cap words with
+  | Some (_, verb) -> verb
+  | None -> Printf.sprintf "uses `%s`" cap
+
+let the_capability cap =
+  match List.assoc_opt cap words with
+  | Some (noun, _) -> Printf.sprintf "the %s capability" noun
+  | None -> Printf.sprintf "the `%s` capability" cap
+
+let relation ~have ~need =
+  if have = need then Printf.sprintf "`%s` is `%s`." have need
+  else if cap_subsumes have need then
+    Printf.sprintf
+      "`%s` contains `%s`, but a capability is never narrowed implicitly." have need
+  else if cap_subsumes need have then
+    Printf.sprintf "`%s` is a part of `%s`; it does not carry the rest of `%s`."
+      have need need
+  else
+    let common =
+      List.find_opt (fun a -> List.mem a (cap_ancestors need)) (cap_ancestors have) in
+    match common with
+    | Some lca ->
+      Printf.sprintf "`%s` and `%s` are both parts of `%s`; neither contains the other."
+        have need lca
+    | None -> Printf.sprintf "`%s` and `%s` are unrelated capabilities." have need

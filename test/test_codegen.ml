@@ -16695,7 +16695,7 @@ let test_compiled_interpreter_only_supervisor_dsl_rejected () =
     Alcotest.(check bool) "diagnostic names the interpreter-only DSL" true
       (ir_contains output "only the interpreter runs");
     Alcotest.(check bool) "diagnostic carries the March span, not a C symbol" true
-      (ir_contains output "worker_dsl.march:");
+      (ir_contains output "worker_dsl.march" && ir_contains output "[compiled_unsupported]");
     Alcotest.(check bool) "no link-time symbol error" false
       (ir_contains output "Undefined symbols")
 
@@ -16762,7 +16762,7 @@ let test_compiled_interpreter_only_builtins_rejected () =
         Alcotest.(check bool) (name ^ ": diagnostic gives its reason") true
           (ir_contains output reason_fragment);
         Alcotest.(check bool) (name ^ ": diagnostic carries the March span") true
-          (ir_contains output (tag ^ ".march:")))
+          (ir_contains output (tag ^ ".march") && ir_contains output "[compiled_unsupported]"))
     [ ("Supervisor.stop_child", "Supervisor.stop_child(:pool, 3)",
        "dynamic supervisor");
       ("Supervisor.which_children", "Supervisor.which_children(:pool)",
@@ -16783,7 +16783,7 @@ let test_compiled_first_class_tap_rejected () =
     Alcotest.(check bool) "names tap and the fix" true
       (ir_contains output "`tap` can only be called directly");
     Alcotest.(check bool) "carries the March span" true
-      (ir_contains output "tap_value.march:")
+      (ir_contains output "tap_value.march" && ir_contains output "[compiled_unsupported]")
 
 (** `to_json` on a type with no JsonTo impl, in a program where NOTHING
     derives Json: the missing-impl check only ran when some impl existed, so
