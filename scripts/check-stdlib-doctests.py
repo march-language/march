@@ -220,7 +220,11 @@ def run_program(bin_path, code, want):
         proc = subprocess.run([os.path.abspath(bin_path), src], cwd=d,
                               capture_output=True, text=True, timeout=180,
                               env={**os.environ, "HOME": d})
-    if proc.returncode != 0 or "-- ERROR" in proc.stdout + proc.stderr:
+    # An error's rendered header is `-- <CATEGORY> --…` (`-- TYPE MISMATCH`,
+    # `-- ERROR` for an uncategorised code); a warning's or hint's title
+    # starts `WARNING` / `HINT`.
+    if proc.returncode != 0 or re.search(r"^-- (?!WARNING|HINT)[A-Z][A-Z :]* --",
+                                         proc.stdout + proc.stderr, re.M):
         detail = (proc.stdout + proc.stderr).strip().splitlines()
         return f"exited {proc.returncode}: " + " | ".join(detail[:6])
     if want is not None and proc.stdout.strip() != want.strip():

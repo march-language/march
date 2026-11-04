@@ -1,5 +1,5 @@
 exit: 1
--- HINT ------ errors/protocol_same_participants_5.march
+-- HINT: PROTOCOL -- errors/protocol_same_participants_5.march
 
 Protocol `E` involves the same participants as `D2`. If these are dual protocols (one for each direction), this is expected. Otherwise, consider merging them. [protocol_same_participants]
 
@@ -8,7 +8,7 @@ Protocol `E` involves the same participants as `D2`. If these are dual protocols
 
 
 
--- ERROR ------ errors/protocol_same_participants_5.march
+-- PROTOCOL --- errors/protocol_same_participants_5.march
 
 This channel came from `Chan.offer`, and the protocol's branches continue differently, so I don't know which one the peer chose. [session_offer_unrefined]
 Match on the label first — `match lbl do :ok -> ... :err -> ... end` — and use the channel inside each arm.

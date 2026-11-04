@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------ errors/type_mismatch_12.march
+-- PROTOCOL --------------- errors/type_mismatch_12.march
 
 Protocol `Logging`: `L` cannot tell whether `C` crashed: the crash branch must begin, for `L`, with a message from `I` to `L`. [role_needs_invalid]
 

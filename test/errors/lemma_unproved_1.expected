@@ -1,14 +1,14 @@
 exit: 0
--- WARNING ------------------ errors/lemma_unproved_1.march
+-- WARNING: RECURSION ----- errors/lemma_unproved_1.march
 
-Warning: function `cat` is structurally recursive but not tail-recursive. If the recursive call is the direct argument of a constructor in tail position, tail-recursion-modulo-cons compiles it to a loop with no extra stack (it always runs). Otherwise it uses O(depth) stack space and deep input can overflow the stack — consider an accumulator parameter. [non_tail_recursion]
+Function `cat` is structurally recursive but not tail-recursive. If the recursive call is the direct argument of a constructor in tail position, tail-recursion-modulo-cons compiles it to a loop with no extra stack (it always runs). Otherwise it uses O(depth) stack space and deep input can overflow the stack — consider an accumulator parameter. [non_tail_recursion]
 
 5 |       Cons(h, t) -> Cons(h, cat(t, ys))
                                 ^^^^^^^^^^
 
 
 
--- WARNING ------------------ errors/lemma_unproved_1.march
+-- WARNING: REFINEMENT ---- errors/lemma_unproved_1.march
 
 the lemma `cat_nil` is not proved: its theorem `cat(xs, Nil) == xs` was shown on 0 of the 1 paths through its body, so calls to it give no facts [lemma_unproved]
 

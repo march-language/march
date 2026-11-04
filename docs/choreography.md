@@ -926,7 +926,7 @@ actor behind `host`) and requires every capability in that reach to sit under th
 grant, exactly as `main`'s grant bounds the program:
 
 ```
-the body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`
+The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`
 (`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as
 `main`'s grant bounds the program.
 help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.

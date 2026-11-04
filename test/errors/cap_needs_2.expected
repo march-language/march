@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------------------- errors/cap_needs_2.march
+-- CAPABILITY ------------------ errors/cap_needs_2.march
 
 `Cap(IO.NetConnect)` used in module `VariantCap` but `IO.NetConnect` is not declared in `needs`. [cap_needs]
 help: add `needs IO.NetConnect` to the module body.
@@ -10,7 +10,7 @@ help: add `needs IO.NetConnect` to the module body.
     run `march --explain cap_needs`
 
 
--- ERROR ----------------------- errors/cap_needs_2.march
+-- CAPABILITY ------------------ errors/cap_needs_2.march
 
 `main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
 help: declare the grant `main` actually needs —

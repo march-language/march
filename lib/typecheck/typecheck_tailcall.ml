@@ -436,7 +436,7 @@ let rec check_tail_position
           if is_arithmetic then
             Err.warning ~code:Err.Code.non_tail_recursion errors ~span:sp
               (Printf.sprintf
-                 "Warning: function `%s` is structurally recursive but not \
+                 "Function `%s` is structurally recursive but not \
                   tail-recursive. Consider using an accumulator parameter \
                   for O(n) performance."
                  fn_name)
@@ -458,7 +458,7 @@ let rec check_tail_position
                attached, and no flag is recommended. *)
             Err.warning ~code:Err.Code.non_tail_recursion errors ~span:sp
               (Printf.sprintf
-                 "Warning: function `%s` is structurally recursive but not \
+                 "Function `%s` is structurally recursive but not \
                   tail-recursive. If the recursive call is the direct argument \
                   of a constructor in tail position, tail-recursion-modulo-cons \
                   compiles it to a loop with no extra stack (it always runs). \

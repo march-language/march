@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------------- errors/parse_error_15.march
+-- SYNTAX ------------------- errors/parse_error_15.march
 
 A file may have only one top-level `mod`; everything else must live inside it. [parse_error]
 

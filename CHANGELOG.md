@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Search laws by shape.** `forge search --law "f(f(x)) == x"` finds every lemma of that
+  form, whatever its functions are called: a one-letter callee stands for any function and
+  any other name for any term. `--law "f(x, Nil) == x"` finds right identities.
+
 - **A refinement can say what each half of it means.** Write a message after a
   conjunct with `else`: `{Int | _ >= 0 else "index must not be negative" &&
   _ < len(xs) else "index must be less than the list's length"}`. A call that
@@ -45,10 +49,20 @@ git log is authoritative for exact commits.
 - **`--refine-rlimit N` and `[refine] rlimit = N` in `forge.toml`** raise the per-query
   solver limit for a project with a known-hard proof. forge passes the setting to every
   `march` it runs.
+- **Interface laws.** An interface can declare laws, written as `@[lemma]` signatures
+  with no body (`@[lemma] fn combine_assoc(x : a, y : a, z : a) : {Unit | ...}`). The
+  checker checks each law for every `impl`, using that impl's methods (and the
+  interface's defaults): a proved law is silent, a broken one is an error with a
+  counterexample, and one it cannot prove is `lemma_unproved` and is tested by
+  `forge test`. An impl can supply a proof as a `@[lemma]` with the law's name. Impls in
+  other files and methods that take `Unit` are covered. Laws never run.
+
 - **Lemma rewrites in the editor.** When a proved `@[lemma]` states an equation
   `lhs == rhs`, the language server offers a code action that rewrites an expression of
   the shape `lhs` into `rhs`, named after the lemma ("Rewrite to `Cons(1, zs)` (by the
-  proved lemma `cat_nil`)"). Unproved lemmas offer nothing.
+  proved lemma `cat_nil`)"). Unproved lemmas offer nothing. Lemmas of imported project
+  files and of the stdlib (listed in `stdlib/lemmas.verified`) are offered too, with their
+  module's functions qualified.
 
 - **Refinement proofs take decided steps (fuel).** The checker now expands a
   reflected call that another call's definition produces when its branch is already
@@ -110,6 +124,16 @@ git log is authoritative for exact commits.
 - **CI uses the pinned z3 on every platform** (built from source and cached) instead of
   the package manager's, and a new `refine-agreement` job requires every refinement
   verdict to be the same on darwin-arm64, linux-x86_64 and linux-aarch64.
+- Diagnostics: a rendered diagnostic's header names its category instead of a bare `ERROR`:
+  `-- TYPE MISMATCH ----`, `-- CAPABILITY ----`, `-- PROTOCOL ----`, and for a warning or hint
+  `-- WARNING: UNUSED ----` / `-- HINT: REFINEMENT ----`. `--check-json` objects gain a
+  `category` field (existing fields unchanged). Errors found while expanding `derive`,
+  `satisfy`, `@[endpoints]` and `@[remote]`, and the compiled backend's "interpreter-only"
+  rejections, are no longer raw `file:line:col: error:` lines: they render like every other
+  diagnostic (source excerpt, caret, code) and appear in `--check-json`. Messages follow one house
+  style (backticks, capitalised, full sentences), checked by the error corpus; e.g. a handler that
+  returns the wrong type now says "The handler for `Poke` in actor `A` must return the actor's
+  new state, a `{ n : Int }`, but returns `Int`."
 - Diagnostics: "did you mean" suggestions for an unknown constructor, actor message, variable or
   record field are ranked by type. A candidate that fits what the position needs (the actor of
   the pid in `send`, the annotated type, the field type) is shown alone, ahead of a closer
@@ -153,6 +177,9 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- A new Lemmas guide (`specs/lang/lemmas.md`, `/docs/lemmas/` on the site): writing `@[lemma]` proofs by induction,
+  `assert` steps and fuel, using lemmas with refinements, and what `forge test`, `forge doc`,
+  `forge search --law` and the editor do with them.
 - `march --explain` pages for `cap_grant_exceeded`, `cap_ceiling`, `cap_widen`, `cap_deserialize`,
   `proof_cap_return`, `proof_cap_mint_private`, `io_not_allowed`, `send_wrong_actor`,
   `actor_handler_state_type` and `codec_missing`.

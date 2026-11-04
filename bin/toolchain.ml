@@ -13,16 +13,6 @@
 
 (* Decode URL-safe base64 (with or without padding) to bytes.
  * Returns Some bytes_string on success, None on invalid input. *)
-(* Label a desugar diagnostic by its ACTUAL severity. Both desugar printers
-   hardcoded "error:", which was harmless only while desugar emitted nothing but
-   errors. It now also emits a warning (the redundant-CSRF-token one), and a
-   warning printed as "error:" misleads people and any tooling that greps the
-   output. The exit decision is unchanged -- it still keys off has_errors. *)
-let severity_word (sev : March_errors.Errors.severity) : string =
-  match sev with
-  | March_errors.Errors.Error -> "error"
-  | March_errors.Errors.Warning -> "warning"
-  | March_errors.Errors.Hint -> "hint"
 
 (* Reject a bare top-level function name shared between prelude.march and the
    entry module BEFORE the two decl lists are concatenated below (or, at the
@@ -59,10 +49,12 @@ let check_no_prelude_collision_decls ~(stdlib_decls : March_ast.Ast.decl list)
     ~iface_method_arities:March_typecheck.Typecheck.prelude_collision_iface_arities
     ~entry_decls errors;
   if March_errors.Errors.has_errors errors then begin
+    (* The standard renderer, against the file the span points into
+       (plan §X5: no raw `file:line:col: error:` lines). *)
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
-        Printf.eprintf "%s:%d:%d: %s: %s\n"
-          d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-          d.span.March_ast.Ast.start_col (severity_word d.severity) d.message
+        let f = d.span.March_ast.Ast.file in
+        let src = try In_channel.with_open_bin f In_channel.input_all with _ -> "" in
+        Printf.eprintf "%s\n\n\n" (March_errors.Errors.render_diagnostic ~src ~filename:f d)
       ) (March_errors.Errors.sorted errors);
     exit 1
   end

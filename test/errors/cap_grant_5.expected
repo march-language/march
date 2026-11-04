@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ----------------------- errors/cap_grant_5.march
+-- NAMING ---------------------- errors/cap_grant_5.march
 
 This record does not have a field called `z`. [unknown_record_field]
 The fields I see are: x, y

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------ errors/refinement_violated_13.march
+-- REFINEMENT ------- errors/refinement_violated_13.march
 
 refinement violation: the expected function type's domain, where `take_n` is passed, does not satisfy its parameter refinement `_ >= 0` (e.g. (cb_x) = -1) [refinement_violated]
 note: a function is passed where a function type is expected only if that type's domain implies the function's own parameter refinement for EVERY value — refine the expected domain so it implies `_ >= 0`, or weaken the passed function's refinement

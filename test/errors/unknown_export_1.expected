@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------ errors/unknown_export_1.march
+-- NAMING ----------------- errors/unknown_export_1.march
 
 Module `Array` does not export `lst_rev`. [unknown_export]
 

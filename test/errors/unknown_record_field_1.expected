@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------ errors/unknown_record_field_1.march
+-- NAMING ----------- errors/unknown_record_field_1.march
 
 `Counter`'s state does not have a field called `cuont`. [unknown_record_field]
 Did you mean `count`?

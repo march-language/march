@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------------- errors/cap_grant_19.march
+-- REFINEMENT ----------------- errors/cap_grant_19.march
 
 refinement violation: lane index must be less than 4 [refinement_violated]
 argument `i` of `Simd.extract_f32x4` does not satisfy precondition `_ < 4`

@@ -2554,6 +2554,12 @@ let analyse ~filename ~src : t =
        per edit, layered on top via the incremental path. This replaces
        re-running the whole-module typechecker over [stdlib @ deps @ user] on
        every keystroke. *)
+    (* Interface laws whose interface is in an imported file. *)
+    let desugared =
+      { desugared with
+        Ast.mod_decls =
+          March_desugar.Interface_laws.expand_program ~context:extra_decls desugared.Ast.mod_decls }
+    in
     let base      = Typecheck_cache.base_env () in
     let with_deps = Typecheck_cache.deps_env base ~deps:extra_decls in
     let scratch   = Typecheck_cache.derive with_deps in
@@ -2886,7 +2892,12 @@ let analyse ~filename ~src : t =
           if d.span = sp &&
              String.length d.message >= plen &&
              String.sub d.message 0 plen = prefix
-          then Some (String.sub d.message plen (String.length d.message - plen))
+          then
+            (* The message ends its sentence with a period (house style,
+               plan §X5); the case is what comes before it. *)
+            let rest = String.sub d.message plen (String.length d.message - plen) in
+            let n = String.length rest in
+            Some (if n > 0 && rest.[n - 1] = '.' then String.sub rest 0 (n - 1) else rest)
           else None
         ) (March_errors.Errors.sorted errors)
     in

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------- errors/codec_missing_5.march
+-- ACTOR ------------------- errors/codec_missing_5.march
 
 `Node.send` needs a JSON codec for `Job`, and none is derived. [codec_missing]
 hint: add `derive Json for Job` next to its declaration; the compiler then mints the wire type tag from it, and a receiver decodes with `from_json`.

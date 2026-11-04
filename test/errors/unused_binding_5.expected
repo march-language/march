@@ -1,5 +1,5 @@
 exit: 1
--- WARNING ------------------ errors/unused_binding_5.march
+-- WARNING: UNUSED -------- errors/unused_binding_5.march
 
 Unused variable `xs`. [unused_binding]
 Use `_` to mark intentionally unused params.
@@ -9,7 +9,7 @@ Use `_` to mark intentionally unused params.
 
 
 
--- ERROR ------------------ errors/unused_binding_5.march
+-- REFINEMENT ------------- errors/unused_binding_5.march
 
 refinement violation: bound expression does not satisfy type annotation `len(_) > 0` [refinement_violated]
 note: a refined annotation on a `let` is CHECKED against the expression it annotates, not assumed — bind a value that satisfies it, or weaken the annotation
@@ -20,7 +20,7 @@ note: a refined annotation on a `let` is CHECKED against the expression it annot
     run `march --explain refinement_violated`
 
 
--- HINT ------------------ errors/unused_binding_5.march
+-- HINT: REFINEMENT ------- errors/unused_binding_5.march
 
 precondition `len(_) > 0` on `inner` was NOT verified here. [refinement_unverified]
 no fact the checker derived constrains `ys`

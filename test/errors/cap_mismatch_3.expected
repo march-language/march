@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------------- errors/cap_mismatch_3.march
+-- CAPABILITY --------------- errors/cap_mismatch_3.march
 
 `tidy` needs file-system access, but `fr` is the file-read capability. [cap_mismatch]
 

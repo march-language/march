@@ -1834,7 +1834,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          when not (StringSet.mem name.txt env.gated_shadowed)
            && not (span_is_stdlib name.span) ->
          Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
-           (Printf.sprintf "`%s` is internal to the standard library; %s" name.txt hint)
+           (Printf.sprintf "`%s` is internal to the standard library; %s." name.txt hint)
        | _ -> ());
       (match lookup_var name.txt env with
        | Some sch ->
@@ -9640,7 +9640,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                              | None -> []);
                         message =
                           Printf.sprintf
-                            "the %s of role `%s` %s, but the role is granted only %s \
+                            "The %s of role `%s` %s, but the role is granted only %s \
                              (`role %s needs %s`). A role's grant bounds everything its code \
                              reaches, as `main`'s grant bounds the program.\n\
                              help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
@@ -10076,7 +10076,7 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
               let sp = span_of owner in
               let msg =
                 Printf.sprintf
-                  "module `%s` uses `%s` but does not declare `needs %s`.\n\
+                  "Module `%s` uses `%s` but does not declare `needs %s`.\n\
                    help: add `needs %s` to the module body."
                   owner c c c
               in

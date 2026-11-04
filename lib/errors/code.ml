@@ -44,6 +44,7 @@ let cap_scope_violation = "cap_scope_violation"
 let cap_widen = "cap_widen"
 let callback_arity_mismatch = "callback_arity_mismatch"
 let codec_missing = "codec_missing"
+let compiled_unsupported = "compiled_unsupported"
 let constructor_arity = "constructor_arity"
 let curried_lambda_over_tuple = "curried_lambda_over_tuple"
 let deterministic_violation = "deterministic_violation"
@@ -63,6 +64,7 @@ let extern_cap_missing = "extern_cap_missing"
 let extern_needs_foreign = "extern_needs_foreign"
 let field_access_non_record = "field_access_non_record"
 let import_cap_missing = "import_cap_missing"
+let import_unresolved = "import_unresolved"
 let internal_error = "internal_error"
 let int_overflow = "int_overflow"
 let invalid_cap_scope = "invalid_cap_scope"
@@ -238,6 +240,7 @@ let all = [
   cap_widen;
   callback_arity_mismatch;
   codec_missing;
+  compiled_unsupported;
   constructor_arity;
   curried_lambda_over_tuple;
   deterministic_violation;
@@ -257,6 +260,7 @@ let all = [
   extern_needs_foreign;
   field_access_non_record;
   import_cap_missing;
+  import_unresolved;
   internal_error;
   int_overflow;
   invalid_cap_scope;
@@ -412,3 +416,105 @@ let slug_of code =
   match String.index_opt code ':' with
   | Some i -> String.sub code 0 i
   | None -> code
+
+(* ── Categories ────────────────────────────────────────────────────────
+
+   Every code belongs to one category, the title of its rendered header
+   (`-- TYPE MISMATCH ------ file`, Elm's convention; plan §X5), and the
+   `category` field of its `--check-json` object.  A small, fixed set: a
+   reader should know from the header which part of the language objected,
+   not which compiler pass did.  A warning or hint keeps its severity in the
+   title (`-- WARNING: UNUSED --`, `-- HINT: REFINEMENT --`).
+
+   Adding a code: add it to exactly one list below.  test_compiler's
+   "every code has one category" case checks [all] against this table. *)
+
+let category_table : (string * string list) list = [
+  "SYNTAX", [
+    curried_lambda_over_tuple; elif_keyword; let_question_last; let_star_last;
+    lex_error; module_keyword; parse_error; pipe_into_match; pipe_match_pattern;
+    semicolon_separator; sigil_interpolation; syntax_error;
+    template_fragment_position; template_unsafe_interpolation;
+    template_unterminated; then_keyword ];
+  "NAMING", [
+    ambiguous_constructor; duplicate_binder; duplicate_constructor;
+    duplicate_field; import_unresolved; prelude_collision; reserved_type_name; unbound_variable;
+    unknown_constructor; unknown_export; unknown_qualified_name;
+    unknown_record_field ];
+  "TYPE MISMATCH", [
+    annotated_tyvar_fixed; arity_mismatch; builtin_arity;
+    callback_arity_mismatch; constructor_arity; field_access_non_record;
+    let_star_bad_flat_map; main_signature; not_a_function; not_a_nat;
+    not_a_variant; record_update_non_record; sig_mismatch; type_arity;
+    type_mismatch ];
+  "TYPE", [
+    invalid_type_bound; let_star_no_flat_map; let_star_unknown_type;
+    nonregular_type; recursive_type_alias; typed_hole; unsendable_type ];
+  "INTERFACE", [
+    json_derive_name_collision; missing_impl; missing_method;
+    missing_superclass_impl; overlapping_impl; satisfy_missing_fn;
+    unknown_derive; unknown_interface; unknown_method; unsatisfied_constraint ];
+  "PATTERN", [
+    empty_match; non_exhaustive_match; or_pattern_binding; redundant_arm ];
+  "CAPABILITY", [
+    cap_bound; cap_bound_needs; cap_bound_iface; cap_ceiling; cap_deserialize;
+    cap_dict_misuse; cap_dict_type; cap_grant; cap_grant_exceeded;
+    cap_impl_invalid; cap_mismatch; cap_narrow_invalid; cap_needs;
+    cap_root_broad; cap_scope_violation; cap_widen; extern_cap_missing;
+    extern_needs_foreign; import_cap_missing; invalid_cap_scope;
+    io_not_allowed; mint_cap_invalid; proof_cap_foreign;
+    proof_cap_mint_private; proof_cap_return; role_grant_exceeded;
+    role_grant_too_wide; role_grant_unverified; root_cap_reference;
+    undeclared_requirement; unknown_capability; unused_needs ];
+  "LINEARITY", [
+    linear_captured; linear_discarded; linear_field_untracked;
+    linear_generic_param; linear_mixed_consumption; linear_module_let;
+    linear_never_used; linear_unconsumed_early_return; linear_used_twice;
+    portable_capture; trusted_linear_invalid; trusted_linear_reserved ];
+  "ACTOR", [
+    actor_handler_state_type; actor_init_arity; codec_missing;
+    duplicate_actor; duplicate_handler; island_missing_fn; migrate_msg_shape;
+    pid_serialize; remote_actor_unroutable; send_wrong_actor;
+    spawn_computed_actor ];
+  "PROTOCOL", [
+    duplicate_protocol; endpoints_label_invalid; endpoints_name_clash;
+    protocol_crash_branches; protocol_empty; protocol_expand_invalid;
+    protocol_invalid; protocol_projection; protocol_same_participants;
+    protocol_single_participant; protocol_unlabelled_step; role_needs_invalid;
+    session_choice_label; session_not_closed; session_offer_nonexhaustive;
+    session_offer_unrefined; session_protocol_arg; session_role_count;
+    session_role_mismatch; session_state_mismatch; session_type_mismatch;
+    session_unreachable_branch; transition_via_mismatch;
+    undeclared_transition; unknown_protocol; unknown_role; unknown_session_op ];
+  "REFINEMENT", [
+    abstract_refinement_misuse; abstract_refinement_unused; division_by_zero;
+    int_overflow; invalid_lemma; invalid_measure; invalid_reflect;
+    lemma_argument_impure; lemma_unproved; lemma_unproved_call;
+    measure_scalar_field; predicate_eq_structural; refinement_ignored;
+    refinement_unchecked; refinement_unverified; refinement_violated;
+    reflect_conflict; reflect_inconsistent; return_refinement_violated;
+    set_measure_call; set_refinement_type; solver_unavailable;
+    solver_version_mismatch ];
+  "RECURSION", [
+    diverges_conflict; invalid_decreases; non_tail_recursion;
+    termination_unproved ];
+  "CONTRACT", [
+    deterministic_violation; no_alloc; no_alloc_candidate; no_alloc_policy;
+    no_alloc_transient; no_alloc_unchecked; no_extern_violation;
+    no_panic_violation; pure_violation; realtime_mixed; vectorize_failed ];
+  "UNUSED", [ unused_binding; unused_import ];
+  "PROGRAM", [
+    attribute_no_effect; compiled_unsupported; internal_error; main_and_app;
+    redundant_csrf_token; stdlib_internal; unknown_attribute ];
+]
+
+(** The category of a code (its slug; an argument after `:` is ignored).
+    [None] only for a string that is not a registered code. *)
+let category_opt code =
+  let slug = slug_of code in
+  List.find_map (fun (cat, codes) -> if List.mem slug codes then Some cat else None)
+    category_table
+
+(** The category of a code; ["ERROR"] for an unregistered string, so a
+    renderer never fails on one. *)
+let category code = Option.value (category_opt code) ~default:"ERROR"

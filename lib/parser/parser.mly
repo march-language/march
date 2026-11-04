@@ -1466,19 +1466,43 @@ transition_arm:
 interface_decl:
   | INTERFACE; name = upper_name; LPAREN; param = lower_name; RPAREN;
     superclasses = loption(preceded(REQUIRES, separated_nonempty_list(COMMA, constraint_expr)));
-    DO; methods = list(method_sig); END
+    DO; items = list(iface_item); END
     { DInterface ({
         iface_name = name;
         iface_param = param;
         iface_superclasses = superclasses;
         iface_assoc_types = [];
-        iface_methods = methods;
+        iface_methods = List.filter_map (function `M m -> Some m | `L _ -> None) items;
+        iface_laws = List.filter_map (function `L l -> Some l | `M _ -> None) items;
       }, mk_span ($loc)) }
   | INTERFACE; _n = upper_name; error
     { error_raise
         "Interfaces need a type parameter in parentheses:"
         (Some "interface Name(a) do\n    fn method: a -> a\nend")
         $startpos($3) }
+
+iface_item:
+  | m = method_sig { `M m }
+  | l = iface_law { `L l }
+
+(** A law: `@[lemma] fn name(params) : {Unit | P}`, a lemma with no body,
+    that every impl of the interface must satisfy. *)
+iface_law:
+  | attrs_args = nonempty_list(fn_attr); FN; name = lower_name;
+    _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN; ret = ret_annot
+    { let attrs = List.map fst attrs_args in
+      if not (List.mem "lemma" attrs) then
+        error_raise
+          "An interface can declare laws, written as `@[lemma]` signatures with no body:"
+          (Some "interface Monoid(a) do\n    @[lemma]\n    fn combine_assoc(x : a, y : a, z : a) : {Unit | combine(combine(x, y), z) == combine(x, combine(y, z))}\nend")
+          $startpos(attrs_args);
+      { fn_name = name; fn_vis = Public; fn_doc = None; fn_attrs = attrs;
+        fn_ret_ty = Some ret;
+        fn_clauses = [{ fc_params = params; fc_guard = None;
+                        fc_body = ETuple ([], mk_span ($loc));
+                        fc_span = mk_span ($loc);
+                        fc_params_span = mk_span ($startpos(_lp), $endpos(_rp)) }];
+        fn_bounds = []; fn_attr_args = attr_args_of attrs_args; fn_needs = None } }
 
 method_sig:
   | FN; name = lower_name; COLON; t = ty; needs = option(fn_needs_clause);
@@ -1494,7 +1518,7 @@ method_sig:
 impl_decl:
   | IMPL; iface_path = upper_dot_path; LPAREN; t = ty; RPAREN;
     constraints = loption(preceded(WHEN, separated_nonempty_list(COMMA, constraint_expr)));
-    DO; methods = list(fn_decl); END
+    DO; methods = list(impl_item); END
     { let iface = let joined = String.concat "." (List.map (fun n -> n.txt) iface_path) in
                   mk_name joined $loc(iface_path) in
       DImpl ({
@@ -1512,6 +1536,16 @@ impl_decl:
         "Implementations need a type argument in parentheses:"
         (Some "impl InterfaceName(ConcreteType) do\n    fn method(x) do ... end\nend")
         $startpos($3) }
+
+(** An impl method, or an attributed one: `@[lemma] fn law(..) do .. end` is
+    the impl's proof of the interface's law of that name. *)
+impl_item:
+  | d = fn_decl { d }
+  | attrs_args = nonempty_list(fn_attr); d = fn_decl
+    { match d with
+      | DFn (def, span) ->
+        DFn ({ def with fn_attrs = List.map fst attrs_args; fn_attr_args = attr_args_of attrs_args }, span)
+      | d -> d }
 
 constraint_expr:
   | path = upper_dot_path; LPAREN; t = ty; RPAREN

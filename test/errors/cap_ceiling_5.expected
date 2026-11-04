@@ -1,7 +1,7 @@
 exit: 1
--- ERROR --------------------- errors/cap_ceiling_5.march
+-- CAPABILITY ---------------- errors/cap_ceiling_5.march
 
-module `Config` uses `IO.FileRead` but does not declare `needs IO.FileRead`. [cap_ceiling]
+Module `Config` uses `IO.FileRead` but does not declare `needs IO.FileRead`. [cap_ceiling]
 help: add `needs IO.FileRead` to the module body.
 
 5 |     needs IO.Console

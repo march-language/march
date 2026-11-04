@@ -2701,25 +2701,22 @@ let run_test_cmd args =
     let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
     if March_errors.Errors.has_errors desugar_errors then begin
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
-          Printf.eprintf "%s:%d:%d: %s: %s\n"
-            d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-            d.span.March_ast.Ast.start_col (severity_word d.severity)
-            (March_errors.Errors.headline_with_code d)
+          Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
         ) (March_errors.Errors.sorted desugar_errors);
       exit 1
     end;
     let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
     if resolve_errors <> [] then begin
       List.iter (fun (_mod_name, span, msg) ->
-          Printf.eprintf "%s:%d:%d: error: %s\n"
-            span.March_ast.Ast.file span.March_ast.Ast.start_line
-            span.March_ast.Ast.start_col msg
+          Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file
+            (March_errors.Errors.make ~code:March_errors.Code.import_unresolved ~span msg))
         ) resolve_errors;
       exit 1
     end;
     let desugared =
       { desugared with
-        March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
+        March_ast.Ast.mod_decls =
+          March_desugar.Interface_laws.expand_program (extra_decls @ desugared.March_ast.Ast.mod_decls) }
     in
     let stdlib_decls = load_stdlib () in
     if not (is_shipped_stdlib_file filename) then
@@ -3776,12 +3773,9 @@ let compile filename =
   (* Desugar *)
   let desugar_errors = March_errors.Errors.create () in
   let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
-  List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      emit_diag_text (Printf.sprintf "%s:%d:%d: %s: %s\n"
-        d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-        d.span.March_ast.Ast.start_col (severity_word d.severity)
-        (March_errors.Errors.headline_with_code d))
-    ) (March_errors.Errors.sorted desugar_errors);
+  (* Desugar's diagnostics are not printed here: they join the typechecker's
+     below (before cascade suppression), so they are rendered, sorted, put
+     in --check-json and suppressed like every other diagnostic (plan §X5). *)
   let has_desugar_errors = March_errors.Errors.has_errors desugar_errors in
   stamp "desugar";
   (* Capture user AST before stdlib injection — used by -dump-phases *)
@@ -3808,9 +3802,8 @@ let compile filename =
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
   let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
   List.iter (fun (_mod_name, span, msg) ->
-      Printf.eprintf "%s:%d:%d: error: %s\n"
-        span.March_ast.Ast.file span.March_ast.Ast.start_line
-        span.March_ast.Ast.start_col msg
+      emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file
+        (March_errors.Errors.make ~code:March_errors.Code.import_unresolved ~span msg)))
     ) resolve_errors;
   let has_resolve_errors = resolve_errors <> [] in
   (* --topology: check the digest against what is loaded and, when the entry
@@ -3832,7 +3825,8 @@ let compile filename =
   in
   let desugared =
     { desugared with
-      March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
+      March_ast.Ast.mod_decls =
+        March_desugar.Interface_laws.expand_program (extra_decls @ desugared.March_ast.Ast.mod_decls) }
   in
   (* Snapshot of the user's own decls (entry file + resolved imports) BEFORE
      stdlib gets prepended below.  Used to typecheck against the cached
@@ -4163,6 +4157,7 @@ let compile filename =
      downstream consumer of [diags] (human-readable printing below,
      --check-json, --emit-core-ast) sees the same de-duplicated set. *)
   let is_user_file = user_diag ~filename ~user_files in
+  List.iter (March_errors.Errors.report errors) (List.rev desugar_errors.diagnostics);
   let diags =
     March_errors.Errors.suppress_cascades ~visible:is_user_file
       (dedupe_cap_hints (March_errors.Errors.sorted errors)) in
@@ -4375,18 +4370,17 @@ let compile filename =
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
     let tir =
       try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) desugared
-      with Failure msg ->
-        (* A lowering failure is either a positioned rejection of something
-           the compiled backend does not support (message already of the form
-           `file:line:col: error: ...`, e.g. the interpreter-only supervisor
-           DSL) or an internal invariant violation. Either way the user should
-           see one clean line and rc=1, not `Fatal error: exception Failure`
-           plus a backtrace and rc=2. *)
-        let is_positioned =
-          try ignore (Str.search_forward (Str.regexp_string ": error: ") msg 0); true
-          with Not_found -> false in
-        if is_positioned then Printf.eprintf "%s\n%!" msg
-        else Printf.eprintf "march: internal error while lowering to TIR: %s\n%!" msg;
+      with
+      | March_errors.Errors.Diagnostic_exn d ->
+        (* A positioned rejection of something the compiled backend does not
+           support (e.g. the interpreter-only supervisor DSL): rendered like
+           every other diagnostic, rc=1. *)
+        emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d));
+        exit 1
+      | Failure msg ->
+        (* An internal invariant violation: one clean line and rc=1, not
+           `Fatal error: exception Failure` plus a backtrace and rc=2. *)
+        Printf.eprintf "march: internal error while lowering to TIR: %s\n%!" msg;
         exit 1
     in
     (* Capability-passing analysis dump.  Immediately after lowering is the one
@@ -4756,7 +4750,7 @@ let compile filename =
                   file's source, and print line 0 of the WRONG file. Fail
                   back to the bespoke, file-less rendering instead — never
                   a crash, never a diagnostic pointing at unrelated code. *)
-               Printf.eprintf "-- CAPABILITY CEILING --\n%s\n\n"
+               Printf.eprintf "-- CAPABILITY --\n%s\n\n"
                  (March_caps.Cap_ceiling.describe v)
              | March_caps.Cap_ceiling.Undeclared { cap; owner; span } ->
                let is_header =
@@ -4772,11 +4766,11 @@ let compile filename =
                    after_line = span.March_ast.Ast.start_line;
                    text = String.make indent ' ' ^ "needs " ^ cap })
                  (Printf.sprintf
-                    "module `%s` uses `%s` but does not declare `needs %s`.\n\
+                    "Module `%s` uses `%s` but does not declare `needs %s`.\n\
                      help: add `needs %s` to the module body."
                     owner cap cap cap)
              | March_caps.Cap_ceiling.Unattributed _ ->
-               Printf.eprintf "-- CAPABILITY CEILING --\n%s\n\n"
+               Printf.eprintf "-- CAPABILITY --\n%s\n\n"
                  (March_caps.Cap_ceiling.describe v))
           violations;
         List.iter (fun (d : March_errors.Errors.diagnostic) ->
@@ -6849,6 +6843,8 @@ let run_check_cmd ?(emit_caps = false) files =
       else begin Hashtbl.add seen_mod_names mn (); true end
     | _ -> true
   ) all_decls in
+  (* Interface laws whose impl and interface are in different files. *)
+  let all_decls = March_desugar.Interface_laws.expand_program all_decls in
   (* If a checked file's own module name shadows a stdlib module (e.g. a
      project's own `mod Crypto do` — the exact scenario [compile]'s
      [extern_mod_names] below already guards against for the single-file

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------------- errors/cap_mismatch_2.march
+-- CAPABILITY --------------- errors/cap_mismatch_2.march
 
 `greet` needs console access, but `cap` is the full IO capability. [cap_mismatch]
 

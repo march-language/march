@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------------- errors/parse_error_13.march
+-- SYNTAX ------------------- errors/parse_error_13.march
 
 This `match` (line 4) needs its own `end`: the `end` on line 7 belongs to an outer block. [parse_error]
 

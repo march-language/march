@@ -275,3 +275,105 @@ end
           body: (block_body
             (string)))))))
 
+================================================================================
+Interface law and an impl proof
+================================================================================
+
+interface Monoid(a) do
+  fn combine : a -> a -> a
+  @[lemma]
+  fn combine_assoc(x : a, y : a, z : a) : {Unit | combine(combine(x, y), z) == combine(x, combine(y, z))}
+end
+
+impl Monoid(Int) do
+  fn combine(x, y) do x + y end
+  @[lemma]
+  fn combine_assoc(x, y, z) do () end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (interface_def
+    (type_identifier)
+    (type_variable
+      (type_variable))
+    (method_sig
+      (identifier)
+      (arrow_type
+        (type_variable
+          (type_variable))
+        (arrow_type
+          (type_variable
+            (type_variable))
+          (type_variable
+            (type_variable)))))
+    (law_sig
+      (attribute
+        (identifier))
+      (identifier)
+      (fn_param
+        (named_param
+          (identifier)
+          (type_variable
+            (type_variable))))
+      (fn_param
+        (named_param
+          (identifier)
+          (type_variable
+            (type_variable))))
+      (fn_param
+        (named_param
+          (identifier)
+          (type_variable
+            (type_variable))))
+      (refinement_type
+        (type_constructor
+          (type_constructor))
+        (comparison_expression
+          (call_expression
+            (identifier)
+            (call_expression
+              (identifier)
+              (identifier)
+              (identifier))
+            (identifier))
+          (call_expression
+            (identifier)
+            (identifier)
+            (call_expression
+              (identifier)
+              (identifier)
+              (identifier)))))))
+  (impl_def
+    (module_path
+      (type_identifier))
+    (type_constructor
+      (type_constructor))
+    (function_def
+      (identifier)
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      (block_body
+        (additive_expression
+          (identifier)
+          (identifier))))
+    (attribute
+      (identifier))
+    (function_def
+      (identifier)
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      (block_body
+        (unit_expression)))))

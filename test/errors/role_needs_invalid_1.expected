@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------- errors/role_needs_invalid_1.march
+-- PROTOCOL ----------- errors/role_needs_invalid_1.march
 
 Protocol `Logging`: `C` may crash, so `C -> I : ...` needs `or crash do ... end`: what does `I` do if `C` crashes before sending? [role_needs_invalid]
 

@@ -293,7 +293,8 @@ let code_actions_for (a : Analysis.t) _uri (range : Lsp.Types.Range.t)
   in
   (* Outbound: remap edit ranges back to UTF-16 for the client. *)
   ((Analysis.code_actions_at a ~line ~character ~diagnostics ()
-    @ Lemma_rewrite.actions a ~line ~character ~admitted:Refine_diag.lemma_admitted)
+    @ Lemma_rewrite.actions ~stdlib:(Stdlib_cache.load ()) a ~line ~character
+        ~admitted:Refine_diag.lemma_admitted)
    |> List.map (Pos.remap_code_action a.Analysis.doc))
   @ bundle_actions a ~line ~character
 

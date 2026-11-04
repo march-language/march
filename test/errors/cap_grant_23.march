@@ -1,4 +1,4 @@
--- EXPECT-ERROR: satisfy Named for Person: no function `name` found in scope.
+-- EXPECT-ERROR: `satisfy Named for Person`: no function `name` found in scope.
 mod M do
   needs IO.Console
   -- `satisfy Iface for Type` requires an EXISTING same-named top-level `fn`
@@ -20,4 +20,3 @@ mod M do
     println("unreachable")
   end
 end
--- EXPECT-FIX-PARTIAL: the grant fix is right; the program's satisfy names a missing fn (satisfy_missing_fn), a later stage

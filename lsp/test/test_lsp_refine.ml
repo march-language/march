@@ -78,6 +78,15 @@ let contract_case ~(util : int -> string) ~(app : string) ~(violated_after : boo
 let gated name f =
   Alcotest.test_case name `Quick (fun () -> if z3_available () then f () else Alcotest.skip ())
 
+let lst_src =
+  "mod Lst do\n  fn cat(xs : List(Int), ys : List(Int)) : List(Int) do\n    match xs do\n      Nil -> ys\n      Cons(h, t) -> Cons(h, cat(t, ys))\n    end\n  end\n  fn rev(xs : List(Int)) : List(Int) do\n    match xs do\n      Nil -> Nil\n      Cons(h, t) -> cat(rev(t), Cons(h, Nil))\n    end\n  end\n  @[lemma]\n  fn rev_cat(xs : List(Int), ys : List(Int)) : {Unit | rev(cat(xs, ys)) == cat(rev(ys), rev(xs))} do\n    ()\n  end\nend\n"
+
+let title_at (a : March_lsp_lib.Analysis.t) src needle ~admitted ~stdlib =
+  let line, col = Test_lsp_harness.pos_of src needle in
+  List.map
+    (fun (ca : Test_lsp_harness.Lsp.Types.CodeAction.t) -> ca.Test_lsp_harness.Lsp.Types.CodeAction.title)
+    (March_lsp_lib.Lemma_rewrite.actions ~stdlib a ~line ~character:(col + 1) ~admitted)
+
 let tests =
   [ gated "lsp_invalidate: a dependency's reflected body edit re-checks app.march, with no edit to it" (fun () ->
         with_project (fun dir ->
@@ -272,4 +281,45 @@ end
         if acts ~admitted:(fun _ -> None) "cat(Cons(1, zs), Nil)" <> [] then
           Alcotest.fail "an unchecked lemma offers no rewrite";
         (* `cat(zs, zs)` is not an instance of `cat(xs, Nil)`. *)
-        if acts ~admitted:proved "cat(zs, zs)" <> [] then Alcotest.fail "no rewrite where the left side does not match") ]
+        if acts ~admitted:proved "cat(zs, zs)" <> [] then Alcotest.fail "no rewrite where the left side does not match");
+    Alcotest.test_case "lsp_lemma_rewrite_imported: a proved lemma of an imported file, its functions qualified" `Quick (fun () ->
+        (* A forge project: the analysis resolves imports from its lib/. *)
+        let dir = Filename.temp_dir "lemma_rw" "" in
+        write dir "forge.toml" "[package]\nname = \"rw\"\nversion = \"0.1.0\"\n";
+        Unix.mkdir (Filename.concat dir "lib") 0o755;
+        write (Filename.concat dir "lib") "lst.march" lst_src;
+        let src = "mod Main do\n  fn f(a : List(Int), b : List(Int)) : List(Int) do\n    Lst.rev(Lst.cat(a, b))\n  end\nend\n" in
+        write (Filename.concat dir "lib") "main.march" src;
+        let a = March_lsp_lib.Analysis.analyse ~filename:(Filename.concat (Filename.concat dir "lib") "main.march") ~src in
+        let titles = title_at a src "Lst.rev(Lst.cat" ~stdlib:[] ~admitted:(fun n -> if n = "rev_cat" then Some true else None) in
+        Alcotest.(check (list string)) "qualified rhs"
+          [ "Rewrite to `Lst.cat(Lst.rev(b), Lst.rev(a))` (by the proved lemma `Lst.rev_cat`)" ] titles;
+        if title_at a src "Lst.rev(Lst.cat" ~stdlib:[] ~admitted:(fun _ -> Some false) <> [] then
+          Alcotest.fail "an unproved imported lemma offers nothing");
+    Alcotest.test_case "lsp_lemma_rewrite_stdlib: a stdlib lemma the manifest lists is a rule" `Quick (fun () ->
+        let dir = Filename.temp_dir "lemma_std" "" in
+        write dir "lemmas.verified" "# manifest\nLst.rev_cat\tabc\n";
+        let saved = !March_lsp_lib.Stdlib_cache.stdlib_dir in
+        March_lsp_lib.Stdlib_cache.set_stdlib_dir (fun () -> Some dir);
+        March_lsp_lib.Lemma_rewrite.stdlib_manifest := None;
+        Fun.protect
+          ~finally:(fun () ->
+            March_lsp_lib.Stdlib_cache.set_stdlib_dir saved;
+            March_lsp_lib.Lemma_rewrite.stdlib_manifest := None)
+          (fun () ->
+            let f = Filename.concat dir "lst.march" in
+            write dir "lst.march" lst_src;
+            let stdlib = [ March_ast.Ast.DMod (March_ast.Ast.{ txt = "Lst"; span = { dummy_span with file = f } }, March_ast.Ast.Public,
+                                               (match March_parser.Parse.module_ ~filename:f lst_src with
+                                                | Ok m -> m.March_ast.Ast.mod_decls
+                                                | _ -> []), March_ast.Ast.{ dummy_span with file = f }) ] in
+            let src = "mod Main do\n  fn f(a : List(Int), b : List(Int)) : List(Int) do\n    Lst.rev(Lst.cat(a, b))\n  end\nend\n" in
+            let a = March_lsp_lib.Analysis.analyse ~filename:"main.march" ~src in
+            let titles = title_at a src "Lst.rev(Lst.cat" ~stdlib ~admitted:(fun _ -> None) in
+            Alcotest.(check (list string)) "stdlib rule"
+              [ "Rewrite to `Lst.cat(Lst.rev(b), Lst.rev(a))` (by the proved lemma `Lst.rev_cat`)" ] titles;
+            (* Not in the manifest: not a rule. *)
+            write dir "lemmas.verified" "# manifest\n";
+            March_lsp_lib.Lemma_rewrite.stdlib_manifest := None;
+            if title_at a src "Lst.rev(Lst.cat" ~stdlib ~admitted:(fun _ -> None) <> [] then
+              Alcotest.fail "an unlisted stdlib lemma offers nothing")) ]

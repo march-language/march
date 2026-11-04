@@ -12993,7 +12993,8 @@ module Audit_fixture = struct
         iface_param = nm "a";
         iface_superclasses = [];
         iface_assoc_types = [];
-        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None; md_needs = None } ] }
+        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None; md_needs = None } ];
+        iface_laws = [] }
     in
     (* [DImpl]: an [impl] block for a DIFFERENT interface than [Runner]
        above, so its [Impl_ty] site and its method's [Param]/[Return] sites
@@ -13267,7 +13268,8 @@ let audit_arrow_signature_suite =
             iface_param = nm "a";
             iface_superclasses = [];
             iface_assoc_types = [];
-            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None; md_needs = None } ] }
+            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None; md_needs = None } ];
+            iface_laws = [] }
         in
         let labels = Audit_fixture.labels [ A.DInterface (idf, dummy) ] in
         Alcotest.(check (list (triple string string (pair string int))))
@@ -29035,7 +29037,7 @@ let () =
       ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr);
       ("reflect-parity", Test_refine_reflect1b.parity);
       ("reflect-fuel", Test_refine_fuel.tests);
-      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests);
+      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);

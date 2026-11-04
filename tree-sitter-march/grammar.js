@@ -443,8 +443,16 @@ module.exports = grammar({
       '(', field('param', $.type_variable), ')',
       optional(seq(choice(':', 'requires'), commaSep1($.superclass_constraint))),
       'do',
-      repeat(choice($.method_sig, $.function_def)),
+      repeat(choice($.method_sig, $.function_def, $.law_sig)),
       'end',
+    ),
+    // A law: `@[lemma] fn name(params) : {Unit | P}`, a lemma with no body
+    // that every impl must satisfy.
+    law_sig: $ => seq(
+      repeat1($.attribute),
+      'fn', field('name', $.identifier),
+      '(', optional(commaSep($.fn_param)), ')',
+      ':', field('return_type', $._type),
     ),
     superclass_constraint: $ => seq(
       $.module_path,
@@ -465,7 +473,7 @@ module.exports = grammar({
       optional(seq('for', field('for_type', $._type))),
       optional(seq('when', commaSep1($.superclass_constraint))),
       'do',
-      repeat($.function_def),
+      repeat(choice($.attribute, $.function_def)),
       'end',
     ),
 

@@ -57,6 +57,7 @@ CHAPTERS = {
     "choreography.md": "choreography.md",
     "clustering.md": "clustering.md",
     "interfaces.md": "interfaces.md",
+    "lemmas.md": "lemmas.md",
     "linear-types.md": "linear-types.md",
     "memory-model.md": "memory-model.md",
     "modules.md": "modules.md",

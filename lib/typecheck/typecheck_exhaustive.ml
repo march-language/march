@@ -756,7 +756,7 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
        | ex :: _ ->
          Err.report env.errors
            { Err.severity = Warning; span;
-             message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex;
+             message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s." ex;
              labels  = [];
              notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
              code    = Err.Code.non_exhaustive_match; fix = None }

@@ -120,10 +120,10 @@ let rec lower_to_atom_k (env : env) (e : Ast.expr) (k : Tir.atom -> Tir.expr) : 
   | Ast.EVar { txt = "tap"; span; _ }
     when not (Hashtbl.mem !_current_module_fns "tap")
          && not (Hashtbl.mem _fn_param_types "tap") ->
-    failwith (Printf.sprintf
-      "%s:%d:%d: error: `tap` can only be called directly in a compiled \
-       program, not passed as a value; write `fn x -> tap(x)` instead."
-      span.Ast.file span.Ast.start_line span.Ast.start_col)
+    raise (March_errors.Errors.Diagnostic_exn
+             (March_errors.Errors.make ~code:March_errors.Errors.Code.compiled_unsupported ~span
+                "`tap` can only be called directly in a compiled program, not \
+                 passed as a value; write `fn x -> tap(x)` instead."))
   | Ast.EVar { txt = name; span; _ } ->
     let name = resolve_use_alias env name in
     (match String.index_opt name '.' with
@@ -497,9 +497,10 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     when List.mem name interpreter_only_builtins
          && not (Hashtbl.mem !_current_module_fns name)
          && not (Lower_state.is_local_binding name) ->
-    failwith (Printf.sprintf "%s:%d:%d: error: `%s` %s"
-      span.Ast.file span.Ast.start_line span.Ast.start_col name
-      (List.assoc name interpreter_only_builtin_reasons))
+    raise (March_errors.Errors.Diagnostic_exn
+             (March_errors.Errors.make ~code:March_errors.Errors.Code.compiled_unsupported ~span
+                (Printf.sprintf "`%s` %s" name
+                   (List.assoc name interpreter_only_builtin_reasons))))
   (* --- panic / todo / unreachable: record the call site first, so a
      Diagnostics crash report can say where the panic was called (Rust's
      track_caller for the three diverging prelude functions; march_runtime.c's

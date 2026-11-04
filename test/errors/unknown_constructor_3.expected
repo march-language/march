@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------- errors/unknown_constructor_3.march
+-- NAMING ------------ errors/unknown_constructor_3.march
 
 I don't know a constructor called `Posts`. [unknown_constructor]
 Did you mean `Postal` (from type `Mail`)?

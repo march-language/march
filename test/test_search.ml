@@ -1084,6 +1084,18 @@ let lemma_tests = [
     let idx = lemma_index () in
     Alcotest.(check (list string)) "phrase" [ "rev_rev" ] (names (Search.search_laws idx "rev( rev(xs) )"));
     Alcotest.(check (list string)) "no match" [] (names (Search.search_laws idx "reverse")));
+  Alcotest.test_case "--law with a shape finds laws by their form, not their names" `Quick (fun () ->
+    let idx = lemma_index () in
+    let laws q = names (Search.search_laws idx q) in
+    (* An involution: a one-letter callee is any function, `x` any term. *)
+    Alcotest.(check (list string)) "f(f(x)) == x" [ "rev_rev" ] (laws "f(f(x)) == x");
+    Alcotest.(check (list string)) "== either way round" [ "rev_rev" ] (laws "x == f(f(x))");
+    Alcotest.(check (list string)) "a right identity" [ "cat_nil" ] (laws "f(x, Nil) == x");
+    (* A longer name matches itself only. *)
+    Alcotest.(check (list string)) "named callee" [ "cat_nil" ] (laws "cat(y, Nil) == y");
+    Alcotest.(check (list string)) "no shape" [] (laws "f(f(x)) == f(x)");
+    (* A term variable is consistent: `x` must be the same subterm twice. *)
+    Alcotest.(check (list string)) "consistent variable" [] (laws "f(x, x) == x"));
   Alcotest.test_case "--law with a function name finds the lemmas whose theorem calls it" `Quick (fun () ->
     let idx = lemma_index () in
     Alcotest.(check (list string)) "cat" [ "cat_nil" ]
