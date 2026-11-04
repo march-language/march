@@ -2558,7 +2558,7 @@ let analyse ~filename ~src : t =
     let desugared =
       { desugared with
         Ast.mod_decls =
-          March_desugar.Interface_laws.expand_program ~context:extra_decls desugared.Ast.mod_decls }
+          March_desugar.Desugar.link_program ~context:extra_decls desugared.Ast.mod_decls }
     in
     let base      = Typecheck_cache.base_env () in
     let with_deps = Typecheck_cache.deps_env base ~deps:extra_decls in

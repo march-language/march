@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: In the `age` field.
+-- Blame placement (specs/plans/2026-11-02-diagnostics-depth-plan.md §X1): the caret is on the field, not the record literal.
+mod T do
+  type P = { name : String, age : Int }
+  fn f() : P do
+    { name: "a", age: "old" }
+  end
+end

@@ -55,7 +55,8 @@ git log is authoritative for exact commits.
   interface's defaults): a proved law is silent, a broken one is an error with a
   counterexample, and one it cannot prove is `lemma_unproved` and is tested by
   `forge test`. An impl can supply a proof as a `@[lemma]` with the law's name. Impls in
-  other files and methods that take `Unit` are covered. Laws never run.
+  other files and methods that take `Unit` are covered. `forge test` runs a proved law
+  compiled too, through the real impl. Laws never run in your program.
 
 - **Lemma rewrites in the editor.** When a proved `@[lemma]` states an equation
   `lhs == rhs`, the language server offers a code action that rewrites an expression of
@@ -120,6 +121,11 @@ git log is authoritative for exact commits.
   are unaffected.
 
 ### Changed
+
+- Diagnostics: a type mismatch inside a constructor or a list, tuple or record literal now points
+  at the part that is wrong (`[1, 2, "three"]` underlines `"three"`, `Ok(string_to_int(s))`
+  underlines `string_to_int(s)`) and names the path to it ("In a list element of the `ports`
+  field of …"), instead of underlining the whole literal with "Argument to constructor `Cons`".
 
 - **Refinement verdicts no longer depend on machine load.** Each z3 query runs under a
   fixed resource limit (`rlimit`: 3,000,000 steps, about four times the costliest proof in the
@@ -208,6 +214,26 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinement proofs know that `x / -1` wraps at the smallest `Int`.** `-4611686018427387904 / -1`
+  returns `-4611686018427387904` (the one place Int arithmetic still wraps), but the checker
+  read it as `4611686018427387904`, so `need_pos(x / -1)` with `x < 0` (directly or through a
+  reflected function) could be proved. The checker now reads `/` exactly as the program runs
+  it. The reference explains why the other Int operators need no such care: since 0.7.0 they
+  panic on overflow instead of returning a wrong value. A zero-argument function used as a
+  constant in a predicate (`_ > limit()`) whose arithmetic overflows is no longer folded to
+  the wrapped number: calling it panics, so it is not a constant.
+- **Default methods work for an impl in another file.** When an `impl` lives in a
+  different file from its interface, a method it takes from the interface's default was
+  unbound at run time ("unbound variable: twice"). Defaults are now added once the whole
+  program is loaded.
+- **`use M.*` used only for an interface is no longer "unused".** An import whose only use
+  is an `impl` of one of its interfaces, or a `when M(a)` constraint, drew
+  `unused_import`. An import of an interface-only module that nothing uses is now
+  reported.
+- **A clearer warning when a type's name clashes with the stdlib's.** A function over a
+  type such as `Tree`, which the stdlib's `OrderedMap` also declares, cannot be used in a
+  refinement or lemma. The warning now says that and asks you to rename the type, instead
+  of "not a measure or known predicate".
 - **A refinement proof no longer reads `let k = f(k)` as an equation about the new `k`.**
   A `let` whose right-hand side used the name it rebinds (`let k = gt5(k)`, or a lambda
   reading `k`) gave the checker the fact `k == gt5(k)` about the new `k`, which could prove

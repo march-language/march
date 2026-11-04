@@ -226,14 +226,27 @@ end
         expect_unproved out "bad";
         U.expect out ~line:9 ~callee:"ok" "proved" ~uses:"pos";
         expect_admitted out "ok");
-    gated "known_overflow: `inc(n) > n` proves (D8: Int is mathematical; a known gap)" (fun () ->
-        (* A KNOWN GAP, pinned on purpose (§9.1): at the maximum Int, `inc`
-           overflows at run time.  The Int-overflow phase must flip this test. *)
+    gated "known_overflow, flipped on purpose (phase 6): `inc(n) > n` proves, and is sound by the trap" (fun () ->
+        (* Phase 6 (D8) ruled the logic's Int stays mathematical: since 0.7.0
+           `+` panics on overflow, so `inc` never RETURNS a value that breaks
+           the lemma.  Until phase 6 this was pinned as a known gap; now the
+           test also shows the program stops at the largest Int instead of
+           returning (the interpreter here; the compiled trap has its own
+           parity tests, specs/progress/2026-10-30-int-overflow-trap.md). *)
         let out =
           run
             "mod N do\n  fn inc(n : Int) : Int do n + 1 end\n  @[lemma]\n  fn l(n : Int) : {Unit | inc(n) > n} do\n    ()\n  end\nend\n"
         in
-        U.expect out ~line:5 ~callee:"l" "proved" ~uses:"inc");
+        U.expect out ~line:5 ~callee:"l" "proved" ~uses:"inc";
+        let ran =
+          run ~args:""
+            ("mod N do\n" ^ console
+           ^ "  fn inc(n : Int) : Int do n + 1 end\n\
+             \  fn main(_c : Cap(IO.Console)) do\n    println(int_to_string(inc(4611686018427387903)))\n  end\nend\n")
+        in
+        if not (contains ran "attempt to add with overflow") then
+          Alcotest.failf "inc at the largest Int must panic, not return:\n%s" ran;
+        if contains ran "-4611686018427387904" then Alcotest.failf "inc wrapped:\n%s" ran);
     gated "assert_runtime: an assert outside a lemma keeps today's meaning" (fun () ->
         let out =
           run
@@ -856,7 +869,14 @@ let iface_laws =
           Alcotest.failf "an unproved law in a verified module is an error:\n%s" out);
     gated "iface_law_lemma_test: `--lemma-test` tests each impl's law" (fun () ->
         let out = run ~args:"--check --lemma-test" ("mod N do\n" ^ joinable ~proof:false ^ "end\n") in
-        expect_row out "join_none__Joinable_List_a" ~status:"tested" ~detail:"tested, not proved: ");
+        expect_row out "join_none__Joinable_List_a" ~status:"tested" ~detail:"tested, not proved: ";
+        (* A proved law is also run compiled, through the real impl: its
+           theorem as written in the interface, at the impl's type. *)
+        let src = "mod N do\n" ^ monoid ^ "end\n" in
+        let out = run ~args:"--check --lemma-test" src in
+        expect_row out "combine_assoc__Monoid_Int" ~status:"holds" ~detail:" compiled";
+        let out = run ~env:"MARCH_LEMMA_TEST_PERTURB=compiled" ~args:"--check --lemma-test" src in
+        expect_row out "combine_assoc__Monoid_Int" ~status:"COMPILED-FALSE" ~detail:"false in the compiled program");
     gated "iface_law_erased: laws and the method copies never run" (fun () ->
         let src =
           "mod N do\n  needs IO.Console\n" ^ joinable ~proof:true
@@ -896,6 +916,22 @@ let iface_laws =
         in
         expect_status out "twice_def__Sem_Int" "admitted";
         expect_status out "unit_left__Sem_Int" "admitted");
+    gated "conflated_type: a parameter type that shares a stdlib type's name is named in the warning" (fun () ->
+        (* `Tree` is also `OrderedMap.Tree`: the logic cannot tell them apart,
+           so `k` cannot be used, and the warning says why (it used to say
+           "not a measure or known predicate"). *)
+        let src ty =
+          Printf.sprintf
+            "mod N do\n  type %s = Leaf | Node(%s, Int, %s)\n  fn k(t : %s) : Int do\n    match t do\n      Leaf -> 0\n      Node(_, _, _) -> 1\n    end\n  end\n  @[lemma]\n  fn l(t : %s) : {Unit | k(t) >= 0} do\n    ()\n  end\nend\n"
+            ty ty ty ty ty
+        in
+        let out = run ~args:"--check --reflect-deps" (src "Tree") in
+        if not (contains out "its parameter type `Tree` has the same name as a type declared in" && contains out "`OrderedMap`") then
+          Alcotest.failf "expected the name-clash warning:\n%s" out;
+        if contains out "is not a measure or known predicate" then Alcotest.failf "not the generic warning:\n%s" out;
+        (* Renamed, the same lemma proves. *)
+        let out = run ~args:"--check --reflect-deps" (src "Bush") in
+        expect_status out "l" "admitted");
     gated "iface_law_syntax: a body-less interface `fn` must be a `@[lemma]`" (fun () ->
         let out =
           run ~args:"--check"

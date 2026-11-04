@@ -1380,7 +1380,7 @@ Three loads the first draft missed (review I10), and what bounds each:
 | a **lemma proved through a failure path** | h1's `bogus`: a `panic` arm makes the post vacuous, and the lemma never runs to catch it | L2 | `sound_lemma_panic`: `@[lemma] fn bogus(n : Int) : {Unit \| n == n + 1} do panic("x") end` is `invalid_lemma` (2) |
 | **removing lemma calls changing behaviour** | an erased argument's effect disappears | §4.5: arguments must be reflectable terms; lemmas are total, so erasing the call removes no effect and no divergence | `sound_erase_ir`: each phase-2 fixture is compiled with and without its lemma calls and lemma declarations (textually removed): `--emit-llvm` byte-identical and `--dump-impl-hashes` identical; `lemma(println_and_return(xs))` is `lemma_argument_impure`. `scripts/ir-oracle.sh` IDENTICAL over the corpus (2) |
 | a **stale cache after a body edit** | a warm VC cache answering for the old body | §7.1 | `sound_cache`: `inc(n) = n + 1`, caller `need(inc(1))` with `{_ == 2}` proved; edit `inc` to `n + 2` with the same project cache; the call must be **violated**; and a body edit that changes only reflectability (adding a `println` to a callee) must change the D17 line (1) |
-| **Int overflow** (D8) | `{Unit \| inc(n) > n}` is true in the logic and false at the maximum `Int` (F18) | out of scope by D8; documented in the reference; a todo files the overflow phase (§10.3) | `known_overflow`: from phase 2 on, that lemma **proves**, and the test asserts it, labelled as a known gap, so the overflow phase must flip it on purpose (2) |
+| **Int overflow** (D8) | `{Unit \| inc(n) > n}` is true in the logic and false at the maximum `Int` (F18) | since 0.7.0 `+ - *` panic on overflow, so no returned value contradicts it; `/` at `-2^62 / -1`, the one wrap left, is encoded exactly (phase 6) | `known_overflow`: proves, now labelled sound, with the run-time panic at the maximum `Int` asserted; `div_min_neg1`: `need_pos(x / -1)` from `x < 0` does not prove (6) |
 | **builtins that run user impls** | `to_string`, interpolation, `show`, `compare`, `<` on a user `Ord`, `hash`: a "builtin" whose meaning is user code | R6 counts them as calls, through TERM's dispatch edges; none is in the R6 table | `sound_dispatch`: `f(x : T) = string_byte_length("${x}")`, `g(x : T) = show(x)`, `h(a : T, b : T) = compare(a, b)` with a user `impl` each: none reflected (1) |
 | a **call outside the refined domain** (C1) | `p(n : {Int \| _ >= 0}) = if n >= 0 do true else not p(n) end` is certified `metric` (probe r1). Unguarded, the frontier term `p(0 - 1)` unfolds to `p$r(-1) = not p$r(-1)`, a contradiction | §3.6: every equation is guarded by `pre_f(args)` | `sound_domain`: `@[lemma] fn bad(n : Int) : {Unit \| p(0 - 1) \|\| n == n + 1} do () end` must **not** prove (`lemma_unproved`). Control: `@[lemma] fn ok() : {Unit \| p(1)} do () end` proves (2) |
 | a **guarded match that can fall through** (C2) | `match xs do Cons(h, _) when h > 0 -> h  Nil -> 0 end` has no `non_exhaustive_match` warning (probe r2), yet panics on `[-1]`. A last-arm default would assert `guarded$r([-1]) = 0` | R5 reads `nonexhaustive_match_spans`; §3.4 never makes the last arm a default | `sound_guarded`: `guarded` is not reflected (`R5: a guarded match may not match`); with a final `_ -> 0` arm it is reflected, and `need_eq(guarded(Cons(0 - 1, Nil)), 0)` proves. And `lemma(guarded(Cons(0 - 1, Nil)))` is `lemma_argument_impure` (1) |
@@ -1436,7 +1436,10 @@ nothing checks today.
   reaches ordinary arithmetic (hashes, checksums) that nobody annotated. The parity check's
   boundary inputs (§9.2) **detect** such functions and `--reflect-report` marks them `overflow?`,
   but nothing **prevents** a proof that relies on unbounded arithmetic. The overflow phase decides
-  the fix.
+  the fix. **Settled by phase 6 (2026-11-03):** since 0.7.0 an overflowing `+ - *` panics, so a
+  reflected function's definition agrees with the program at every input where it returns; `/`
+  at `-2^62 / -1` is encoded exactly. Not claimed: that no overflow happens (that is
+  `cap no_panic`'s job).
 - **Float and String content** (D9). Both are opaque, so nothing is claimed beyond length.
 - **Stack depth.** A reflected function may still overflow the stack at run time. Its definition
   is still its mathematical meaning.
@@ -1716,6 +1719,12 @@ progress `specs/progress/2026-11-03-reflection-phase5-fnvalues.md`. The `sound_f
 Decide the Int model for reflected bodies: either a 63-bit wrap encoding (bit-vectors or `mod`
 arithmetic) for reflected arithmetic only, or an overflow obligation at every reflected `+ - *`
 in the program. The `known_overflow` test flips. Bit operations can then join the R6 table.
+
+**Built (2026-11-03), and the ruling:** neither option. Since 0.7.0 `+ - *` and negation panic
+on overflow, so the mathematical model is exact wherever the program returns; the one operator
+of the R6 table that still wraps, `/` at `-2^62 / -1`, is now encoded exactly. Bit operations
+stay out of the R6 table. Plan `specs/plans/2026-11-03-reflection-phase6-overflow-plan.md`,
+progress `specs/progress/2026-11-03-reflection-phase6-overflow.md`.
 
 ### Phase 7: `--refine-infer` proposes lemma calls (D19)
 

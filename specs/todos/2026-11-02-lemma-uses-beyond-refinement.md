@@ -12,16 +12,8 @@ unproved lemma becomes a property test in `forge test`), idea 2 (admitted lemmas
 the interpreter and a compiled program), idea 3 (status marks: march-language/march_doc#7), idea 4 (text, then shapes:
 `specs/progress/2026-11-03-law-shape-search.md`),
 and idea 10 (guidance); idea 5 (`specs/progress/2026-11-03-lemma-refutation-and-rewrites.md`,
-`specs/progress/2026-11-03-laws-across-files.md`), idea 6 (`specs/progress/2026-11-03-interface-laws.md`). What remains of them:
-
-6. **Interface laws: what is left.**
-   - Generated proofs for derived impls: `derive` only produces impls of the built-in
-     interfaces (`Eq`, `Ord`, `Show`, `Hash`, `Json`), which declare no laws, so there is
-     nothing to generate yet. A law over `Eq` would also meet D7 (`==` in the logic is
-     structural, a hand-written `eq` opaque). `satisfy` impls are already covered: they are
-     expanded before the laws are.
-   - The compiled side of `--lemma-test`: a generated lemma has no source text, so the
-     compiled harness skips it ("compiled not run"); the interpreter side runs.
+`specs/progress/2026-11-03-laws-across-files.md`), idea 6 (`specs/progress/2026-11-03-interface-laws.md`,
+`specs/progress/2026-11-03-lemma-tooling-bugfixes.md`). Nothing of those remains open.
 
 The open ideas:
 

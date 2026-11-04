@@ -1402,6 +1402,40 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
        else DImpl ({ idef with impl_methods = idef.impl_methods @ extra_methods }, sp))
   | _ -> d
 
+(** The whole program, after each file was desugared alone: an impl of an
+    interface declared in another file gets that interface's defaults (which
+    [inject_defaults] could not see in the impl's own file), then
+    [Interface_laws.expand_program].  [context] is the other files'
+    declarations when the caller keeps them apart (the LSP). *)
+let link_program ?(context : decl list = []) (decls : decl list) : decl list =
+  let rec ifaces ds =
+    List.concat_map
+      (function
+        | DInterface (idef, _) -> [ (idef.iface_name.txt, idef) ]
+        | DMod (_, _, inner, _) -> ifaces inner
+        | _ -> [])
+      ds
+  in
+  let all = ifaces (context @ decls) in
+  let bare s = match String.rindex_opt s '.' with Some i -> String.sub s (i + 1) (String.length s - i - 1) | None -> s in
+  let rec go ds =
+    List.map
+      (function
+        | DImpl (idef, sp) ->
+          (* By the interface's bare name: `impl Alg.Sem(..)` and a `use`d
+             `impl Sem(..)` both find `Sem`. *)
+          inject_defaults (List.map (fun (n, i) -> (bare n, i)) all)
+            (DImpl ({ idef with impl_iface = { idef.impl_iface with txt = bare idef.impl_iface.txt } }, sp))
+          |> (function
+              | DImpl (idef', sp) -> DImpl ({ idef' with impl_iface = idef.impl_iface }, sp)
+              | d -> d)
+        | DMod (n, v, inner, sp) -> DMod (n, v, go inner, sp)
+        | d -> d)
+      ds
+  in
+  let decls = if all = [] then decls else go decls in
+  Interface_laws.expand_program ~context decls
+
 (* ── Derive expansion (moved to [Desugar_derive]) ─────────────────────────
    The band that lived here — [collect_type_defs] through [expand_satisfy],
    including [derive_impl] and the span-uniquification machinery — moved
