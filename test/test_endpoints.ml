@@ -863,7 +863,7 @@ let payload_nested_no_codec = bad_desugar "a payload type nested in a List still
   end
 |})
 
-let wrong_order = bad "closing at the loop head is a type error (order)" "expected `S_end` but got `S_send_Msg_Prod_Cons_1`" (wrap (stream ^ {|
+let wrong_order = bad "closing at the loop head is a type error (order)" "tries to close the conversation here, but at this point protocol `Stream` says it must send an `Int` to `Cons`" (wrap (stream ^ {|
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1) : Stream_Prod.Yield do
     Stream_Prod.close(s, st)
   end
@@ -1284,7 +1284,7 @@ let crash_roles_ok = ok "all three roles of Logging typecheck against the genera
 (* The crash callback's state is the crash branch's, not the normal one's:
    sending the normal `Read` to L from it is a type error. *)
 let crash_state_is_the_branch = bad "the crash callback cannot take the normal continuation's step"
-    "expected `S_send_Msg_I_L_2` but got `S_send_Msg_I_L_1`" (wrap (logging ^ {|
+    "tries to send a `String` to `L` (the step on line 13) here, but at this point protocol `Logging` says it must send a `String` to `L` (the step on line 11)" (wrap (logging ^ {|
   pfn role_i(s : Cap(Session.Live), st : Logging_I.S_recv_Msg_C_I_1) : Logging_I.Yield do
     Logging_I.recv_Msg_C_I_1(s, st,
       fn (read, st2) -> Logging_I.recv_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st2, read), fn (r, st4) ->
@@ -2451,7 +2451,7 @@ let two_step_branch_ok = ok "both roles driven through a multi-step choose branc
 |}))
 
 let two_step_branch_skip = bad "skipping a choose branch's second step is a type error"
-  "expected `S_recv_Msg_B_A_1` but got `S_send_Tick`" (wrap (two_step_branch ^ {|
+  "tries to receive a `String` from `B` here, but at this point protocol `Tick` says it must send an `Int` to `B`" (wrap (two_step_branch ^ {|
   pfn a(s : Cap(Session.Live), st : Tick_A.S_choose_go_no) : Tick_A.Yield do
     let st1 = Tick_A.choose_go(s, st, 1)
     Tick_A.recv_Msg_B_A_1(s, st1, fn (_reply, st3) -> Tick_A.close(s, st3))

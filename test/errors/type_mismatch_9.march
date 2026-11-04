@@ -1,4 +1,4 @@
--- EXPECT-ERROR: expected `S_end` but got `S_send_Msg_Prod_Cons_1`
+-- EXPECT-ERROR: tries to close the conversation here, but at this point protocol `Stream` says it must send an `Int` to `Cons`
 mod Main do
   needs IO
   needs Session.Live

@@ -146,6 +146,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: a choreography role body that takes a step out of order is reported in protocol
+  terms (`protocol_step_order`): "Role `Cons` tries to choose `more` or `done` here, but at this
+  point protocol `Stream` says it must receive an `Int` from `Prod`", with a label on that
+  protocol step and the generated function that takes it, instead of a mismatch between two
+  generated state names (`S_choose_more_done`, `S_recv_Msg_Prod_Cons_1`).
+
 - **`forge deploy hot` refuses a migration law it can't prove, instead of letting it through.**
   An unproved or unchecked law (a predicate the schema can't record, an `@invariant` outside
   the supported grammar, a baseline from a compiler older than the contract check) refuses the

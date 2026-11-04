@@ -1,0 +1,22 @@
+exit: 1
+-- PROTOCOL ---------- errors/protocol_step_order_1.march
+
+Role `Cons` tries to choose `more` or `done` here, but at this point protocol `Stream` says it must receive an `Int` from `Prod`. [protocol_step_order]
+
+19 |     Stream_Cons.close(s, Stream_Cons.choose_done(s, st, true))
+                                                         ^^
+
+    Take that step with `Stream_Cons.recv_Msg_Prod_Cons_1` first.
+
+    `Cons` is here: it must receive an `Int` from `Prod`:
+
+10 |       Prod -> Cons : Int
+           ^^^^
+
+    `st` is the state bound here:
+
+18 |   pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1) : Stream_Cons.Yield do
+                                       ^^
+    run `march --explain protocol_step_order`
+
+
