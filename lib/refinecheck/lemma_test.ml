@@ -82,7 +82,25 @@ let show_input (bs : (string * V.value) list) =
 (* The module-environment bindings of the lemma's own module under their
    bare names: a nested module's members are bound as "M.f", and the
    theorem names them as written inside "M". *)
-let aliases (qname : string) : (string * V.value) list =
+(* The logic's `len` (a measure: a list's length, a string's) has no binding in
+   the interpreter, so a theorem over it is never decided.  Law strength binds
+   it ([with_len]); `--lemma-test` does not yet, since its compiled harness has
+   no `len` either.  Bound only when the module defines no `len` of its own. *)
+let len_builtin () : (string * V.value) list =
+  let defined = match W.module_env () with Some env -> List.mem_assoc "len" env | None -> false in
+  if defined then []
+  else
+    [ ( "len",
+        V.VBuiltin
+          ( "len",
+            function
+            | [ V.VString s ] -> V.VInt (String.length s)
+            | [ v ] -> (match W.list_len v with Some n -> V.VInt n | None -> failwith "len: not a list")
+            | _ -> failwith "len: one argument" ) ) ]
+
+let aliases ?(with_len = false) (qname : string) : (string * V.value) list =
+  (if with_len then len_builtin () else [])
+  @
   match String.rindex_opt qname '.' with
   | None -> []
   | Some i -> (
@@ -97,7 +115,7 @@ let aliases (qname : string) : (string * V.value) list =
           else None)
         env)
 
-let test_lemma ~(file : string) (qname, (fd : A.fn_def), admitted) : result =
+let test_lemma ?(with_len = false) ~(file : string) (qname, (fd : A.fn_def), admitted) : result =
   let mk ?overflow ?(decided = []) v =
     { l_name = qname; l_file = file; l_admitted = admitted; l_verdict = v; l_overflow = overflow;
       l_decided = decided; l_fd = fd }
@@ -114,7 +132,7 @@ let test_lemma ~(file : string) (qname, (fd : A.fn_def), admitted) : result =
       | Some ins ->
         let seen = Hashtbl.create 64 in
         let ins = List.filter (fun (_, a) -> if Hashtbl.mem seen a then false else (Hashtbl.add seen a (); true)) ins in
-        let alias = aliases qname in
+        let alias = aliases ~with_len qname in
         let held = ref 0 and false_at = ref None and overflow = ref None and why = ref None and decided = ref [] in
         let note r = if !why = None then why := Some r in
         let flip = admitted && perturb () = Some "interp" in

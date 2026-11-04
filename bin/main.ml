@@ -992,14 +992,45 @@ let print_reflect_report ~filename ~user_files ~type_map ~recheck m =
 (* --law-coverage (specs/2026-11-04-law-coverage-design.md §4): the lemma table
    is read BEFORE [reflect_rows], whose re-check would rebuild it. *)
 let print_law_coverage ~filename ~user_files ~type_map ~recheck ~file_mod m =
+  let module LC = March_refinecheck.Law_coverage in
   let lemmas = !March_refinecheck.Refine_check.lemma_defs in
   let rows = reflect_rows ~type_map ~recheck m in
   let entries =
-    March_refinecheck.Law_coverage.entries ~file_mod ~rows ~lemmas ~decls:m.March_ast.Ast.mod_decls
-      ~is_user:(user_span ~filename ~user_files)
+    LC.entries ~file_mod ~rows ~lemmas ~decls:m.March_ast.Ast.mod_decls ~is_user:(user_span ~filename ~user_files)
   in
-  if !law_coverage_json then List.iter print_endline (March_refinecheck.Law_coverage.json_lines entries)
-  else List.iter prerr_endline (March_refinecheck.Law_coverage.report_lines entries)
+  (* --law-strength (§5): an edit typechecks when each pair of sites it puts
+     in each other's place has one type in the checked module's type map. *)
+  let strength =
+    if not !law_strength then fun _ -> None
+    else begin
+      let ty_at sp =
+        Option.map
+          (fun t -> March_typecheck.Typecheck.pp_ty (March_typecheck.Typecheck.repr t))
+          (Hashtbl.find_opt type_map sp)
+      in
+      let typecheck (e : March_refinecheck.Law_strength.edit) =
+        List.for_all
+          (fun (a, b) -> match ty_at a, ty_at b with Some x, Some y -> x = y | _ -> false)
+          e.March_refinecheck.Law_strength.ed_same_type
+      in
+      let laws_of names = List.filter (fun (q, _, _) -> List.mem q names) lemmas in
+      let verdicts =
+        List.filter_map
+          (fun (e : LC.entry) ->
+            match e.LC.e_status with
+            | LC.Covered _ ->
+              Some
+                ( e,
+                  March_refinecheck.Law_strength.judge ~module_:m ~name:e.LC.e_qname ~laws:(laws_of e.LC.e_laws)
+                    ~typecheck e.LC.e_fd )
+            | _ -> None)
+          entries
+      in
+      fun e -> List.assq_opt e verdicts
+    end
+  in
+  if !law_coverage_json then List.iter print_endline (LC.json_lines ~strength entries)
+  else List.iter prerr_endline (LC.report_lines ~strength entries)
 
 (* --reflect-deps (reflection §7.2): the D17 hash of every reflected user
    function, then of every reflected function in the frontier of a stage-2
@@ -7561,6 +7592,8 @@ let () =
      " Evaluate each lemma's theorem on generated inputs: an unproved lemma in the interpreter (a property test: exit 1 on a counterexample), an admitted one in the interpreter and a compiled program (exit 1 if it is false in either: a compiler or runtime bug)");
     ("--law-coverage-json", Arg.Unit (fun () -> law_coverage := true; law_coverage_json := true),
      " As --law-coverage, one JSON object per function on stdout");
+    ("--law-strength", Arg.Unit (fun () -> law_coverage := true; law_strength := true),
+     " With --law-coverage, the body edits each covered function's laws still accept (MARCH_LAW_STRENGTH_MS budget per function, default 5000)");
     ("--law-coverage", Arg.Set law_coverage,
      " Print, per user module, which pure (reflected) functions an admitted law's theorem calls, which only unproved laws do, and which none; changes no verdict");
     ("--reflect-report", Arg.Set reflect_report,

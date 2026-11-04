@@ -152,6 +152,9 @@ let lemma_test = ref false
 let law_coverage = ref false
 (* --law-coverage-json: the same entries as JSON lines on stdout (implies --law-coverage). *)
 let law_coverage_json = ref false
+(* --law-strength: with the coverage report, the body edits each covered function's
+   laws still accept (lib/refinecheck/law_strength.ml; implies --law-coverage). *)
+let law_strength = ref false
 (* --refine-audit: print every declared refinement occurrence the checker
    never enforces (Unenforced) or only warns about (Inert_warned), plus a
    three-bucket summary. Read-only: changes no verdict, emits no diagnostic.

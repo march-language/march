@@ -23,6 +23,9 @@ type entry = {
   e_impl : (string * string) option;
       (** an impl method: (interface, impl type); its laws are the
           interface's, generated per impl, named `<law> (via <Iface>)` *)
+  e_qname : string;  (** how the witness interpreter calls it (an impl method: its copy) *)
+  e_fd : March_ast.Ast.fn_def;  (** its definition (an impl method: its copy) *)
+  e_laws : string list;  (** the qualified names of the admitted laws covering it *)
 }
 
 (** The call heads of a lemma's theorem, as written (`cat`, `List.append`),
@@ -43,8 +46,9 @@ val entries :
   is_user:(March_ast.Ast.span -> bool) ->
   entry list
 
-(** The text report, one block per module (§4). *)
-val report_lines : entry list -> string list
+(** The text report, one block per module (§4), with [strength]'s verdict
+    (§5) under each covered row it gives one for. *)
+val report_lines : ?strength:(entry -> Law_strength.verdict option) -> entry list -> string list
 
 (** One `{"kind":"law-coverage",...}` JSON object per entry (§4). *)
-val json_lines : entry list -> string list
+val json_lines : ?strength:(entry -> Law_strength.verdict option) -> entry list -> string list

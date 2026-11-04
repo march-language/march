@@ -86,6 +86,154 @@ let edit_tests =
           (fun d -> if not (List.mem d ds) then Alcotest.failf "missing edit %S in [%s]" d (String.concat "; " ds))
           [ "change 0 to 1"; "change `<` to `<=`"; "swap the results of two match arms"; "return `n` unchanged" ]) ]
 
+let len_cat =
+  {|  @[lemma]
+  fn len_cat(xs : List(a), ys : List(a)) : {Unit | len(cat(xs, ys)) == len(xs) + len(ys)} do
+    match xs do
+      Nil -> ()
+      Cons(_, t) -> len_cat(t, ys)
+    end
+  end
+|}
+
+let len_rev =
+  {|  @[lemma]
+  fn len_rev(xs : List(a)) : {Unit | len(rev(xs)) == len(xs)} do
+    match xs do
+      Nil -> ()
+      Cons(h, t) ->
+        len_rev(t)
+        len_cat(rev(t), Cons(h, Nil))
+    end
+  end
+|}
+
+let strength ?(env = "") src = U.run ~env ~args:"--check --law-strength" src
+
+(* The strength lines printed under the row for [fn] (label "covered" or an impl). *)
+let strength_block out ~label fn =
+  let ls = lines out in
+  let rec skip = function
+    | [] -> []
+    | l :: rest when String.starts_with ~prefix:(Printf.sprintf "  %s  %s  " label fn) l -> take rest
+    | _ :: rest -> skip rest
+  and take = function l :: rest when String.starts_with ~prefix:"    " l -> l :: take rest | _ -> [] in
+  skip ls
+
+let weak_reverse = m ("  fn lonely(n : Int) : Int do n end\n" ^ L.defs4_6 ^ len_cat ^ len_rev)
+
+let strength_tests =
+  [ gated "weak_reverse: a length law leaves `rev` returning its input unchanged" (fun () ->
+        let out = strength weak_reverse in
+        let b = strength_block out ~label:"covered" "rev" in
+        if not (List.exists (String.starts_with ~prefix:"    survives: return `xs` unchanged") b) then
+          Alcotest.failf "expected the identity edit to survive len_rev:\n%s" out;
+        (* `Cons(h, cat(t, ys))` with its fields swapped does not typecheck: never judged. *)
+        if contains out "swap the fields of `Cons`" then Alcotest.failf "an ill-typed edit was judged:\n%s" out);
+    gated "still_weak_with_involution: an involution law keeps the identity edit" (fun () ->
+        let out =
+          strength
+            (m
+               {|  fn neg(n : Int) : Int do 0 - n end
+  @[lemma]
+  fn neg_neg(n : Int) : {Unit | neg(neg(n)) == n} do () end
+|})
+        in
+        let b = strength_block out ~label:"covered" "neg" in
+        if not (List.exists (String.starts_with ~prefix:"    survives: return `n` unchanged") b) then
+          Alcotest.failf "neg(neg(n)) == n holds for the identity, so the edit survives:\n%s" out);
+    gated "killed_by_rev_cat: rev_cat rules out the identity edit" (fun () ->
+        let out = strength (m (L.defs4_6 ^ len_cat ^ len_rev ^ L.cat_nil ^ L.cat_assoc ^ L.rev_cat)) in
+        let b = strength_block out ~label:"covered" "rev" in
+        if b = [] then Alcotest.failf "no strength lines for rev:\n%s" out;
+        if List.exists (String.starts_with ~prefix:"    survives: return `xs` unchanged") b then
+          Alcotest.failf "rev_cat is false for the identity, so the edit is killed:\n%s" out);
+    gated "equivalent_dropped: swapping the operands of `+` changes nothing and is not reported" (fun () ->
+        let out =
+          strength
+            (m
+               {|  fn add2(a : Int, b : Int) : Int do a + b end
+  @[lemma]
+  fn add2_def(a : Int, b : Int) : {Unit | add2(a, b) == a + b} do () end
+|})
+        in
+        if contains out "swap the arguments of `+`" then Alcotest.failf "an equivalent edit was reported:\n%s" out;
+        if strength_block out ~label:"covered" "add2" = [] then Alcotest.failf "no strength lines for add2:\n%s" out);
+    Alcotest.test_case "no_generator: a parameter sort with no generator is not run" `Quick (fun () ->
+        (* A reflected function whose parameters have no generator has laws the
+           checker cannot admit either (an opaque sort), so this is pinned on
+           [judge] and the report directly. *)
+        let fd =
+          parsed_fn (m "  fn first(p : (Int, Int)) : Int do\n    match p do\n      (a, _) -> a\n    end\n  end\n") "first"
+        in
+        let module LS = March_refinecheck.Law_strength in
+        let module LC = March_refinecheck.Law_coverage in
+        let dummy = { March_ast.Ast.mod_name = fd.March_ast.Ast.fn_name; mod_decls = [] } in
+        let v = LS.judge ~module_:dummy ~name:"first" ~laws:[] ~typecheck:(fun _ -> true) fd in
+        Alcotest.(check bool) "not run" true v.LS.v_no_gen;
+        let e =
+          { LC.e_module = "M"; e_name = "first"; e_public = true; e_span = fd.March_ast.Ast.fn_name.March_ast.Ast.span;
+            e_status = LC.Covered [ "law" ]; e_impl = None; e_qname = "first"; e_fd = fd; e_laws = [ "law" ] }
+        in
+        let ls = LC.report_lines ~strength:(fun _ -> Some v) [ e ] in
+        if not (List.mem "    strength: not run (no input generator)" ls) then
+          Alcotest.failf "no not-run line in:\n%s" (String.concat "\n" ls);
+        if List.exists (fun l -> contains l "0 of 0") ls then Alcotest.failf "reads as zero survivors:\n%s" (String.concat "\n" ls));
+    gated "budget_partial: a tiny budget gives a partial verdict" (fun () ->
+        let out = strength ~env:"MARCH_LAW_STRENGTH_MS=1" weak_reverse in
+        let b = strength_block out ~label:"covered" "rev" in
+        if not (List.exists (String.starts_with ~prefix:"    strength: partial (budget), ") b) then
+          Alcotest.failf "expected a partial verdict:\n%s" out);
+    gated "recursive_edit_calls_itself: the edited copy recurses into itself" (fun () ->
+        let out =
+          strength
+            (m
+               {|  fn count(xs : List(a)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + count(t)
+    end
+  end
+  @[lemma]
+  fn count_cons(x : a, xs : List(a)) : {Unit | count(Cons(x, xs)) == 1 + count(xs)} do () end
+|})
+        in
+        let b = strength_block out ~label:"covered" "count" in
+        if not (List.exists (String.starts_with ~prefix:"    survives: change 0 to 1") b) then
+          Alcotest.failf "with the edit recursing into itself, count_cons still holds:\n%s" out);
+    gated "strength_then_lemma_test: strength leaves --lemma-test unchanged" (fun () ->
+        let lt out = List.filter (String.starts_with ~prefix:"lemma-test") (lines out) in
+        let a = U.run ~args:"--check --lemma-test" weak_reverse in
+        let b = U.run ~args:"--check --law-strength --lemma-test" weak_reverse in
+        Alcotest.(check (list string)) "lemma-test lines" (lt a) (lt b));
+    gated "strength_deterministic: two runs agree" (fun () ->
+        let a = strength weak_reverse and b = strength weak_reverse in
+        Alcotest.(check (list string)) "same report"
+          (List.filter (fun l -> String.starts_with ~prefix:"law coverage" l || String.starts_with ~prefix:"  " l) (lines a))
+          (List.filter (fun l -> String.starts_with ~prefix:"law coverage" l || String.starts_with ~prefix:"  " l) (lines b)));
+    gated "strength_json: the strength object on covered entries" (fun () ->
+        let out = U.run ~args:"--check --law-coverage-json --law-strength" weak_reverse in
+        let recs =
+          List.filter_map
+            (fun l ->
+              if String.starts_with ~prefix:"{\"kind\":\"law-coverage\"" l then Some (Yojson.Safe.from_string l) else None)
+            (lines out)
+        in
+        let open Yojson.Safe.Util in
+        let rev = List.find (fun j -> member "fn" j |> to_string = "rev") recs in
+        let st = member "strength" rev in
+        if st = `Null then Alcotest.failf "no strength on rev:\n%s" out;
+        if not (List.exists (fun sv -> member "desc" sv |> to_string = "return `xs` unchanged") (member "survivors" st |> to_list))
+        then Alcotest.failf "survivors lack the identity edit:\n%s" out;
+        ignore (member "total" st |> to_int);
+        ignore (member "undecided" st |> to_int);
+        if member "no_generator" st |> to_bool then Alcotest.fail "rev has a generator";
+        List.iter
+          (fun j ->
+            if member "status" j |> to_string <> "covered" && member "strength" j <> `Null then
+              Alcotest.failf "an entry that is not covered has no strength:\n%s" out)
+          recs) ]
+
 let rev_only_bad =
   {|  @[lemma]
   fn bad(xs : List(a)) : {Unit | rev(xs) == xs} do () end
@@ -202,4 +350,4 @@ let tests =
           Alcotest.(check string) "module" "M" (member "module" j |> to_string);
           Alcotest.(check bool) "public" true (member "public" j |> to_bool);
           if member "impl" j <> `Null then Alcotest.fail "impl is null for a plain function") ]
-  @ edit_tests
+  @ edit_tests @ strength_tests

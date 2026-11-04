@@ -12,6 +12,9 @@ type entry = {
   e_span : A.span;
   e_status : status;
   e_impl : (string * string) option;
+  e_qname : string;
+  e_fd : A.fn_def;
+  e_laws : string list;
 }
 
 (* A call head as written: `f`, or `M.f` for a qualified call (parsed either as
@@ -126,6 +129,7 @@ let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list
     | None -> b
   in
   let by_fn = Hashtbl.create 64 in
+  let law_q = Hashtbl.create 64 in
   List.iter
     (fun (lq, (fd : A.fn_def), admitted) ->
       List.iter
@@ -134,7 +138,8 @@ let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list
           | Some q ->
             let a, u = Option.value ~default:([], []) (Hashtbl.find_opt by_fn q) in
             let l = law_display (last_segment lq) in
-            Hashtbl.replace by_fn q (if admitted then (a @ [ l ], u) else (a, u @ [ l ]))
+            Hashtbl.replace by_fn q (if admitted then (a @ [ l ], u) else (a, u @ [ l ]));
+            if admitted then Hashtbl.replace law_q q (Option.value ~default:[] (Hashtbl.find_opt law_q q) @ [ lq ])
           | None -> ())
         (theorem_calls fd))
     lemmas;
@@ -170,7 +175,8 @@ let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list
                 Option.map
                   (fun e_status ->
                     { e_module = module_of prefix; e_name = mn.A.txt; e_public = true; e_span = mn.A.span; e_status;
-                      e_impl = Some (iface, ty_text ty) })
+                      e_impl = Some (iface, ty_text ty); e_qname = cq; e_fd = cfd;
+                      e_laws = Option.value ~default:[] (Hashtbl.find_opt law_q cq) })
                   (status_of cq cfd))
           methods)
       impl_list
@@ -188,14 +194,30 @@ let entries ~file_mod ~(rows : RR.row list) ~lemmas ~decls ~is_user : entry list
               e_public = fd.A.fn_vis = A.Public;
               e_span = fd.A.fn_name.A.span;
               e_status;
-              e_impl = None })
+              e_impl = None;
+              e_qname = q;
+              e_fd = fd;
+              e_laws = Option.value ~default:[] (Hashtbl.find_opt law_q q) })
           e_status)
     user
   @ impl_entries
 
 let loc (sp : A.span) = Printf.sprintf "%s:%d" (Filename.basename sp.A.file) sp.A.start_line
 
-let report_lines (es : entry list) : string list =
+let strength_lines (v : Law_strength.verdict) : string list =
+  let open Law_strength in
+  if v.v_no_gen then [ "    strength: not run (no input generator)" ]
+  else
+    let head =
+      match v.v_partial with
+      | Some (n, m) -> Printf.sprintf "    strength: partial (budget), %d of %d edits judged" n m
+      | None ->
+        Printf.sprintf "    strength: %d of %d edits survive%s" (List.length v.v_survivors) v.v_total
+          (if v.v_undecided = 0 then "" else Printf.sprintf " (%d undecided)" v.v_undecided)
+    in
+    head :: List.map (fun e -> Printf.sprintf "    survives: %s  %s" e.ed_desc (loc e.ed_span)) v.v_survivors
+
+let report_lines ?(strength = fun _ -> None) (es : entry list) : string list =
   let modules = List.fold_left (fun acc e -> if List.mem e.e_module acc then acc else acc @ [ e.e_module ]) [] es in
   List.concat_map
     (fun md ->
@@ -215,20 +237,21 @@ let report_lines (es : entry list) : string list =
           (match laws with [] -> "" | ls -> "  (" ^ String.concat ", " ls ^ ")")
       in
       let laws e = match e.e_status with Covered l | Unproved_only l -> l | _ -> [] in
+      let under e = match strength e with Some v -> strength_lines v | None -> [] in
       (Printf.sprintf "law coverage: %s: %d of %d pure functions have a law%s" md (List.length covered) pure more)
       :: List.map (fun e -> row "uncovered (public)" e []) uncov_pub
       @ List.map (fun e -> row "uncovered (private)" e []) uncov_priv
       @ List.map (fun e -> row "unproved only" e (laws e)) unproved
-      @ List.map (fun e -> row "covered" e (laws e)) covered
-      @ List.map
+      @ List.concat_map (fun e -> row "covered" e (laws e) :: under e) covered
+      @ List.concat_map
           (fun e ->
             let i, t = Option.get e.e_impl in
-            row ~sep:" " (Printf.sprintf "impl %s for %s:" i t) e (laws e))
+            row ~sep:" " (Printf.sprintf "impl %s for %s:" i t) e (laws e) :: under e)
           impl_es
       @ List.map (fun e -> row "higher-order (no laws possible yet)" e []) ho)
     modules
 
-let json_lines (es : entry list) : string list =
+let json_lines ?(strength = fun _ -> None) (es : entry list) : string list =
   let str = Infer_json.str and arr = Infer_json.arr in
   List.map
     (fun e ->
@@ -241,10 +264,24 @@ let json_lines (es : entry list) : string list =
       in
       let status = if e.e_impl <> None then "impl-method" else status in
       Printf.sprintf
-        "{\"kind\":\"law-coverage\",\"module\":%s,\"fn\":%s,\"public\":%b,\"file\":%s,\"line\":%d,\"status\":%s,\"covered_by\":%s,\"unproved_by\":%s,\"impl\":%s}"
+        "{\"kind\":\"law-coverage\",\"module\":%s,\"fn\":%s,\"public\":%b,\"file\":%s,\"line\":%d,\"status\":%s,\"covered_by\":%s,\"unproved_by\":%s,\"impl\":%s,\"strength\":%s}"
         (str e.e_module) (str e.e_name) e.e_public (str e.e_span.A.file) e.e_span.A.start_line (str status)
         (arr (List.map str cov)) (arr (List.map str unp))
         (match e.e_impl with
          | None -> "null"
-         | Some (i, t) -> Printf.sprintf "{\"interface\":%s,\"type\":%s}" (str i) (str t)))
+         | Some (i, t) -> Printf.sprintf "{\"interface\":%s,\"type\":%s}" (str i) (str t))
+        (match strength e with
+         | None -> "null"
+         | Some v ->
+           let open Law_strength in
+           Printf.sprintf "{\"total\":%d,\"survivors\":%s,\"undecided\":%d,\"partial\":%s,\"no_generator\":%b}" v.v_total
+             (arr
+                (List.map
+                   (fun ed -> Printf.sprintf "{\"desc\":%s,\"line\":%d}" (str ed.ed_desc) ed.ed_span.A.start_line)
+                   v.v_survivors))
+             v.v_undecided
+             (match v.v_partial with
+              | None -> "null"
+              | Some (n, m) -> Printf.sprintf "{\"judged\":%d,\"of\":%d}" n m)
+             v.v_no_gen))
     es
