@@ -1315,8 +1315,29 @@ let audit_cmd =
                  aside. Lets a project adopt the gate before its whole \
                  dependency graph typechecks.")
   in
-  let run r inferred allow_unanalyzable =
-    match Cmd_audit.run ~record_mode:r ~inferred ~allow_unanalyzable () with
+  let laws =
+    Arg.(value & flag &
+         info ["laws"]
+           ~doc:"Instead of the capability audit, report law coverage for the \
+                 package's own source files: which pure functions no admitted \
+                 law covers. Needs no forge.caps.lock; exits 0 unless a check \
+                 fails.")
+  in
+  let strength =
+    Arg.(value & flag &
+         info ["strength"]
+           ~doc:"With $(b,--laws): also list the small edits to each covered \
+                 function's body that every law covering it still accepts.")
+  in
+  let run r inferred allow_unanalyzable laws strength =
+    let result =
+      match Cmd_audit.laws_flags ~laws ~strength with
+      | Error e -> Error e
+      | Ok () ->
+        if laws then Cmd_audit.run_laws ~strength ()
+        else Cmd_audit.run ~record_mode:r ~inferred ~allow_unanalyzable ()
+    in
+    match result with
     | Ok code -> exit code
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
@@ -1351,8 +1372,14 @@ let audit_cmd =
              `S "TYPICAL USE";
              `P "forge audit --record   # accept the current set, commit forge.caps.lock";
              `P "forge audit            # in CI: fail if a dependency gained authority";
+             `S "LAW COVERAGE";
+             `P "$(b,forge audit --laws) lists, for each of the package's own \
+                 source files, its pure functions by whether an admitted \
+                 $(b,@[lemma]) covers them: a to-do list of the functions \
+                 worth writing laws for. $(b,--strength) adds, for each \
+                 covered function, the body edits its laws still accept.";
            ])
-    Term.(const run $ record $ inferred $ allow_unanalyzable)
+    Term.(const run $ record $ inferred $ allow_unanalyzable $ laws $ strength)
 
 (* --------------------------------------------------------- forge ffi -------- *)
 
