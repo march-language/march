@@ -8,17 +8,19 @@
 -- module with an undischargeable return contract exited 0.
 --
 -- `mk` declares `{Int | _ >= 0}` as its return type over a body the checker
--- cannot decide: `av` carries no contract, so its result reflects to an
--- unconstrained constant, while `|z|` really is non-negative on every input
+-- cannot decide: `av` carries no contract and is `@[opaque]`, so its result
+-- reflects to an unconstrained constant, while `|z|` really is non-negative on every input
 -- so the witness battery finds no counterexample either.
 --
 -- Finding a body that stays undecided is harder than it looks, and this
--- fixture has now been re-based twice. The original `z` became a
+-- fixture has now been re-based three times. The original `z` became a
 -- witness-CONFIRMED violation (2026-08-30) -- a different, stronger error
 -- that no longer mentions `cap verified`. Its replacement `z * z + 1`
 -- became PROVED (2026-09-16) when the predicate translator started
--- reflecting non-linear products. An uncontracted callee is the shape that
--- survives both: unprovable because the checker cannot see through it, and
+-- reflecting non-linear products. An uncontracted callee survived both until
+-- 2026-11-04, when a result contract started unfolding a reflected call in
+-- its body; `@[opaque]` on `av` keeps it a black box. That shape survives all
+-- three: unprovable because the checker cannot see through it, and
 -- unrefutable because the contract is actually true. The obligation is
 -- therefore SKIPPED
 -- -- and under `cap verified` that skip is now an error,
@@ -34,6 +36,7 @@ mod T134 do
 
   cap verified
 
+  @[opaque]
   fn av(z : Int) : Int do
     if z < 0 do 0 - z else z end
   end
