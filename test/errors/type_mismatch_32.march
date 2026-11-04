@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: expected `Result(List(String), String)` but got `Result(List(Int), String)`
+-- REJECT (§X2): the difference is two levels in; the whole pair is reported, with a caret under `Int`.
+mod Nest do
+  fn parse(_s : String) : Result(List(Int), String) do Ok([1]) end
+  fn take(_r : Result(List(String), String)) : Int do 1 end
+  fn main() : Int do
+    let r = parse("x")
+    take(r)
+  end
+end

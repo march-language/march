@@ -15,7 +15,7 @@
     specs/2026-09-11-correctness-fixes-design.md §4):
 
     - [expand_record_ref] moves as a closed unit: its declaration, its single
-      read site (inside [unify]) and its installation are all three in this
+      read site ([expand_nominal_record], beside it) and its installation are all three in this
       file, in that order.  [Typecheck_unify] initialises strictly before
       [Typecheck], so the install still precedes every possible read.
 
@@ -31,7 +31,8 @@
       no longer covers the new effect and the hazard is live again: say so in
       that change.
     - The three CODE sites of the record-expansion hook — its declaration, the
-      single dereference inside [unify], and its installation — must all be in
+      single dereference ([expand_nominal_record], which [unify] and the
+      mismatch diff call), and its installation — must all be in
       this file, in that order.  Grep this file for line-initial
       [let expand_record_ref], for a dereference of it, and for its
       line-initial installation; three hits, no others anywhere in
@@ -120,10 +121,66 @@ let report_cap_mismatch env ~span ~reason ~(p : provided) ~have ~need =
       notes = [ L.relation ~have ~need; help ];
       code = Err.Code.with_arg Err.Code.cap_mismatch need; fix = None }
 
-(** Report a type mismatch with a conversational Elm-style message. *)
-let rec report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided expected found =
-  (* A capability for another capability: its own message (§F1). *)
-  let cap_pair =
+(** The first field that differs between a provided and a required record. *)
+let record_fields_note provided_flds required_flds =
+  (* [report_type_mismatch]'s [expected] holds what was PROVIDED and its
+     [found] what was REQUIRED — hence these names.  Getting this backwards is why an extra field used to be reported as a
+     missing one ("present in the expected type but missing in the found
+     type" for a field that was in the provided value and absent from the
+     required type).  Report both directions, surplus first, and name the
+     two sides in words rather than reusing the overloaded
+     "expected"/"found" pair. *)
+  let surplus = List.filter_map (fun (name, t1) ->
+    match List.assoc_opt name required_flds with
+    | Some t2 when pp_ty t1 <> pp_ty t2 ->
+      Some (Printf.sprintf "Field `%s` mismatches: expected `%s` but got `%s`."
+        name (pp_ty t2) (pp_ty t1))
+    | None ->
+      Some (Printf.sprintf
+              "Field `%s` is present in the value provided, but the \
+               expected type has no such field." name)
+    | _ -> None) provided_flds
+  in
+  let absent = List.filter_map (fun (name, _) ->
+    if List.mem_assoc name provided_flds then None
+    else
+      Some (Printf.sprintf
+              "Field `%s` is required by the expected type, but the value \
+               provided has no such field." name)) required_flds
+  in
+  match surplus @ absent with n :: _ -> [n] | [] -> []
+
+(** A hint for a frequently confused pair, [provided] where [required] was needed. *)
+let common_mismatch_hint provided required =
+  match repr provided, repr required with
+  | TCon ("Int", []), TCon ("Float", []) ->
+    (* User provided Int, Float was required *)
+    [ "Int and Float are distinct types in March.\n\
+       Use `int_to_float(x)` to convert, or write a Float literal like `1.0`." ]
+  | TCon ("Float", []), TCon ("Int", []) ->
+    (* User provided Float, Int was required *)
+    [ "Float and Int are distinct types in March.\n\
+       Use `float_to_int(x)` to truncate, or write an Int literal like `1`." ]
+  | TCon ("Int", []), TCon ("Bool", []) ->
+    (* Expression was Int but Bool was required *)
+    [ "March does not coerce Int to Bool.\n\
+       Try an explicit comparison, e.g. `x != 0`." ]
+  | TCon ("Int", []), TCon ("String", []) ->
+    (* Expression was Int but String was required *)
+    [ "Use `int_to_string(x)` to convert an Int to a String." ]
+  | TCon ("Float", []), TCon ("String", []) ->
+    (* Expression was Float but String was required *)
+    [ "Use `float_to_string(x)` to convert a Float to a String." ]
+  | TArrow _, _ ->
+    [ "This value is a function. Did you forget to apply it to its arguments?" ]
+  | _, TArrow _ ->
+    [ "A function was expected here.\n\
+       Did you mean to pass this as a callback?" ]
+  | _ -> []
+
+
+(* A capability for another capability: its own message (§F1). *)
+let cap_pair_of ~occurs_violation ?provided expected found =
     match repr expected, repr found, provided with
     | TCon (have, []), TCon (need, []), Some p
       when (not occurs_violation) && have <> need
@@ -134,12 +191,14 @@ let rec report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided 
                | _ -> false) ->
       Some (have, need, p)
     | _ -> None
-  in
-  match cap_pair with
+
+(** Report a type mismatch with a conversational Elm-style message. *)
+let rec report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided expected found =
+  match cap_pair_of ~occurs_violation ?provided expected found with
   | Some (have, need, p) -> report_cap_mismatch env ~span ~reason ~p ~have ~need
   | None -> report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected found
 
-and report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected found =
+and report_type_mismatch env ~span ~occurs_violation ~reason ?provided ?diff expected found =
   (* Build headline, using pretty-printing for long types.
      Convention: `expected` = inferred type of the expression (what was provided);
                  `found`    = required type from context (what was needed).
@@ -177,6 +236,9 @@ and report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected 
   let exp_str = fmt expected in
   let fnd_str = fmt found in
   let headline =
+    match diff with
+    | Some (h, _) -> h
+    | None ->
     if String.length (render expected) > 50 || String.length (render found) > 50 then
       Printf.sprintf "expected:\n    %s\nbut got:\n    %s"
         (String.concat "\n    " (String.split_on_char '\n' (pretty found)))
@@ -194,6 +256,9 @@ and report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected 
   (* Contextual hint: when both types share the same constructor but differ
      in one argument, identify which argument mismatches. *)
   let mismatch_note =
+    match diff with
+    | Some (_, note) -> [ note ]
+    | None ->
     match repr expected, repr found with
     | TCon (name1, args1), TCon (name2, args2)
       when name1 = name2 && List.length args1 = List.length args2 ->
@@ -205,33 +270,7 @@ and report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected 
              ordinal cname (pp_ty fnd_arg) (pp_ty exp_arg) ]
        | None -> [])
     | TRecord provided_flds, TRecord required_flds ->
-      (* Per the convention above, [expected] holds what was PROVIDED and
-         [found] holds what was REQUIRED — hence the local names.  Getting
-         this backwards is why an extra field used to be reported as a
-         missing one ("present in the expected type but missing in the found
-         type" for a field that was in the provided value and absent from the
-         required type).  Report both directions, surplus first, and name the
-         two sides in words rather than reusing the overloaded
-         "expected"/"found" pair. *)
-      let surplus = List.filter_map (fun (name, t1) ->
-        match List.assoc_opt name required_flds with
-        | Some t2 when pp_ty t1 <> pp_ty t2 ->
-          Some (Printf.sprintf "Field `%s` mismatches: expected `%s` but got `%s`."
-            name (pp_ty t2) (pp_ty t1))
-        | None ->
-          Some (Printf.sprintf
-                  "Field `%s` is present in the value provided, but the \
-                   expected type has no such field." name)
-        | _ -> None) provided_flds
-      in
-      let absent = List.filter_map (fun (name, _) ->
-        if List.mem_assoc name provided_flds then None
-        else
-          Some (Printf.sprintf
-                  "Field `%s` is required by the expected type, but the value \
-                   provided has no such field." name)) required_flds
-      in
-      (match surplus @ absent with n :: _ -> [n] | [] -> [])
+      record_fields_note provided_flds required_flds
     | _ -> []
   in
   (* Common-case hints for frequently-confused types.
@@ -266,32 +305,10 @@ and report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected 
           (short p) ]
     | _ -> []
   in
+  (* With a diff the two roots share a head, so these hints, about the
+     roots, don't apply; the ones for the parts would name the wrong value. *)
   let common_hint =
-    match repr expected, repr found with
-    | TCon ("Int", []), TCon ("Float", []) ->
-      (* User provided Int, Float was required *)
-      [ "Int and Float are distinct types in March.\n\
-         Use `int_to_float(x)` to convert, or write a Float literal like `1.0`." ]
-    | TCon ("Float", []), TCon ("Int", []) ->
-      (* User provided Float, Int was required *)
-      [ "Float and Int are distinct types in March.\n\
-         Use `float_to_int(x)` to truncate, or write an Int literal like `1`." ]
-    | TCon ("Int", []), TCon ("Bool", []) ->
-      (* Expression was Int but Bool was required *)
-      [ "March does not coerce Int to Bool.\n\
-         Try an explicit comparison, e.g. `x != 0`." ]
-    | TCon ("Int", []), TCon ("String", []) ->
-      (* Expression was Int but String was required *)
-      [ "Use `int_to_string(x)` to convert an Int to a String." ]
-    | TCon ("Float", []), TCon ("String", []) ->
-      (* Expression was Float but String was required *)
-      [ "Use `float_to_string(x)` to convert a Float to a String." ]
-    | TArrow _, _ ->
-      [ "This value is a function. Did you forget to apply it to its arguments?" ]
-    | _, TArrow _ ->
-      [ "A function was expected here.\n\
-         Did you mean to pass this as a callback?" ]
-    | _ -> []
+    if diff <> None then [] else common_mismatch_hint expected found
   in
   (* Same-printed-name explanation.  Two shapes reach here: a genuine
      global-namespace collision, and (commoner) a parameterised record type
@@ -491,10 +508,186 @@ let assert_trecord_sorted flds label =
 let expand_record_ref : (env -> ty -> ty option) ref =
   ref (fun _ _ -> None)
 
+(** The hook's one read site; [unify] and the mismatch diff below call it. *)
+let expand_nominal_record env t = !expand_record_ref env t
+
+(* -----------------------------------------------------------------
+   Structural type diffs (specs/plans/2026-11-02-diagnostics-depth-plan.md §X2).
+
+   When [unify] fails below the pair it was called on, the mismatch is
+   reported on the whole pair, with a note that prints the provided type and
+   puts a caret under each part that differs.  The parts are found by a
+   read-only walk over the two types after unification, so this changes
+   only what is reported, never what is inferred.
+   ----------------------------------------------------------------- *)
+
+(** One step from a type to one of its parts. *)
+type diff_step =
+  | DArg of string * int  (** argument [i] (from 1) of type constructor [name] *)
+  | DComp of int          (** tuple component [i] (from 1) *)
+  | DField of string      (** record field *)
+  | DParam                (** a function type's parameter *)
+  | DResult               (** a function type's result *)
+
+(** A part where the provided type and the required one plainly differ: the
+    path to it from the root (root first) and the two parts. *)
+type type_diff = { td_path : diff_step list; td_provided : ty; td_required : ty }
+
+let rec strip_lin t = match repr t with TLin (_, i) -> strip_lin i | t -> t
+
+(** The parts where [provided] and [required] differ.  One-sided like
+    [Typecheck.types_apart]: a type variable, an error or a channel never
+    differs, so a part is reported only when its heads plainly disagree. *)
+let type_diffs env provided required =
+  let rec go rpath a b acc =
+    let a = strip_lin a and b = strip_lin b in
+    let here () = { td_path = List.rev rpath; td_provided = a; td_required = b } :: acc in
+    match a, b with
+    | (TError | TVar _ | TChan _ | TNatOp _), _
+    | _, (TError | TVar _ | TChan _ | TNatOp _) -> acc
+    | TCon (n1, a1), TCon (n2, a2) when n1 = n2 && List.length a1 = List.length a2 ->
+      fst (List.fold_left2 (fun (acc, i) x y -> (go (DArg (n1, i) :: rpath) x y acc, i + 1))
+             (acc, 1) a1 a2)
+    | TTuple t1, TTuple t2 when List.length t1 = List.length t2 ->
+      fst (List.fold_left2 (fun (acc, i) x y -> (go (DComp i :: rpath) x y acc, i + 1))
+             (acc, 1) t1 t2)
+    | TRecord f1, TRecord f2 when List.map fst f1 = List.map fst f2 ->
+      List.fold_left2 (fun acc (n, x) (_, y) -> go (DField n :: rpath) x y acc) acc f1 f2
+    | TArrow (p1, r1), TArrow (p2, r2) ->
+      go (DResult :: rpath) r1 r2 (go (DParam :: rpath) p1 p2 acc)
+    | TNat n1, TNat n2 when n1 = n2 -> acc
+    | TCon _, TRecord _ ->
+      (match expand_nominal_record env a with
+       | Some (TRecord _ as a') -> go rpath a' b acc | _ -> here ())
+    | TRecord _, TCon _ ->
+      (match expand_nominal_record env b with
+       | Some (TRecord _ as b') -> go rpath a b' acc | _ -> here ())
+    | _ -> here ()
+  in
+  List.rev (go [] provided required [])
+
+(** Print [t] as [pp_ty] would, except that a part with a difference below
+    it is spelled out (a record by its fields, so a caret can point into
+    it), and, when [elide], a part with none prints as `…`.  Returns the text
+    and, for each path in [targets], the column and width of its part. *)
+let pp_ty_diff env ~elide ~targets t =
+  let buf = Buffer.create 64 in
+  let marks = ref [] in
+  (* Columns, not bytes: `…` is three bytes wide in UTF-8. *)
+  let col () =
+    let n = ref 0 in
+    String.iter (fun c -> if Char.code c land 0xC0 <> 0x80 then incr n) (Buffer.contents buf);
+    !n in
+  let add = Buffer.add_string buf in
+  let rec is_prefix p q = match p, q with
+    | [], _ -> true | x :: p', y :: q' -> x = y && is_prefix p' q' | _ -> false in
+  let rec go ?(parens = false) rpath t =
+    let path = List.rev rpath in
+    if List.mem path targets then begin
+      let start = col () in
+      add (pp_ty ~parens t);
+      marks := (path, (start, col () - start)) :: !marks
+    end
+    else if not (List.exists (is_prefix path) targets) then
+      add (if elide then "…" else pp_ty ~parens t)
+    else
+      match repr t with
+      | TLin (Ast.Linear, i) -> add "linear "; go ~parens:true rpath i
+      | TLin (Ast.Affine, i) -> add "affine "; go ~parens:true rpath i
+      | TLin (Ast.Unrestricted, i) -> go ~parens rpath i
+      | TCon (name, (_ :: _ as args)) ->
+        add name; add "(";
+        List.iteri (fun i a -> if i > 0 then add ", "; go (DArg (name, i + 1) :: rpath) a) args;
+        add ")"
+      | TTuple (_ :: _ as ts) ->
+        add "(";
+        List.iteri (fun i a -> if i > 0 then add ", "; go (DComp (i + 1) :: rpath) a) ts;
+        add ")"
+      | TRecord (_ :: _ as flds) ->
+        let shown = if not elide then flds else
+            List.filter (fun (n, _) ->
+                List.exists (is_prefix (path @ [ DField n ])) targets) flds in
+        add "{ ";
+        List.iteri (fun i (n, ft) ->
+            if i > 0 then add ", ";
+            add n; add " : "; go (DField n :: rpath) ft) shown;
+        if List.length shown < List.length flds then add ", …";
+        add " }"
+      | TCon _ as tc ->
+        (match expand_nominal_record env tc with
+         | Some (TRecord _ as r) -> go ~parens rpath r
+         | _ -> add (pp_ty ~parens tc))
+      | TArrow (a, b) ->
+        if parens then add "(";
+        go ~parens:true (DParam :: rpath) a; add " -> "; go (DResult :: rpath) b;
+        if parens then add ")"
+      | t -> add (pp_ty ~parens t)
+  in
+  go [] t;
+  (Buffer.contents buf, List.rev !marks)
+
+(** The headline and diff note for a mismatch between [provided] and
+    [required] that differ below the root, or [None] when no part plainly
+    differs.  The headline elides equal parts when either type is long. *)
+let diff_mismatch_message env ~provided ~required =
+  match type_diffs env provided required with
+  | [] | [ { td_path = []; _ } ] -> None  (* nothing, or the roots themselves *)
+  | diffs ->
+    let targets = List.map (fun d -> d.td_path) diffs in
+    let long = String.length (pp_ty provided) > 50 || String.length (pp_ty required) > 50 in
+    let got, marks = pp_ty_diff env ~elide:long ~targets provided in
+    let want, _ = pp_ty_diff env ~elide:long ~targets required in
+    let headline =
+      if String.length got > 60 || String.length want > 60 then
+        Printf.sprintf "expected:\n    %s\nbut got:\n    %s" want got
+      else Printf.sprintf "expected `%s` but got `%s`." want got in
+    let shown = List.filteri (fun i _ -> i < 3) diffs in
+    let carets = List.filter_map (fun d ->
+        match List.assoc_opt d.td_path marks with
+        | Some (c, w) ->
+          Some (Printf.sprintf "    %s%s expected `%s`" (String.make c ' ')
+                  (String.make (max 1 w) '^') (pp_ty d.td_required))
+        | None -> None) shown in
+    let more = List.length diffs - List.length shown in
+    let fields = match diffs with
+      | [ { td_provided = TRecord p; td_required = TRecord r; _ } ] -> record_fields_note p r
+      | _ -> [] in
+    let note =
+      String.concat "\n"
+        ([ "The types differ here:"; "    " ^ got ] @ carets
+         @ (if more > 0 then [ Printf.sprintf "    (and %d more)" more ] else [])
+         @ fields) in
+    Some (headline, note)
+
 (** Unify [t1] and [t2], reporting any mismatch to [env.errors].
     Uses [TError] as a recovery sentinel — if either side is [TError]
     the constraint is silently satisfied (the error was already reported). *)
 let rec unify env ~span ?(reason = None) ?provided t1 t2 =
+  let inner = ref [] in
+  unify_at env ~span ~reason ?provided ~inner ~depth:0 t1 t2;
+  match List.rev !inner with
+  | [] -> ()
+  | (p1, p2) :: _ ->
+    (* It failed below the root: report the whole pair, with a diff (§X2).
+       If no part plainly differs any more, fall back to the first inner
+       pair, as before. *)
+    match diff_mismatch_message env ~provided:t1 ~required:t2 with
+    | Some diff ->
+      report_type_mismatch env ~span ~occurs_violation:false ~reason ?provided ~diff t1 t2
+    | None -> report_mismatch env ~span ~reason ?provided p1 p2
+
+(** [unify]'s walk.  A plain mismatch below the root ([depth > 0]) is
+    collected in [inner] for [unify] to report once on the whole pair; an
+    occurs failure and a capability-for-capability pair keep their own
+    reports, at the part. *)
+and unify_at env ~span ~reason ?provided ~inner ~depth t1 t2 =
+  let unify env ~span ~reason ?provided a b =
+    unify_at env ~span ~reason ?provided ~inner ~depth:(depth + 1) a b in
+  let report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided a b =
+    if depth = 0 || occurs_violation
+       || cap_pair_of ~occurs_violation ?provided a b <> None then
+      report_mismatch env ~span ~occurs_violation ~reason ?provided a b
+    else inner := (a, b) :: !inner in
   let t1 = normalize_tnat t1 and t2 = normalize_tnat t2 in
   match t1, t2 with
   (* Error sentinel absorbs everything *)
@@ -607,7 +800,7 @@ let rec unify env ~span ?(reason = None) ?provided t1 t2 =
      opaque types stay nominal) and retry; fall back to a genuine mismatch if it
      does not name an unambiguous record. *)
   | (TCon _ as tc), (TRecord _ as tr) | (TRecord _ as tr), (TCon _ as tc) ->
-    (match !expand_record_ref env tc with
+    (match expand_nominal_record env tc with
      | Some (TRecord _ as expanded) -> unify env ~span ~reason ?provided expanded tr
      | _ -> report_mismatch env ~span ~reason ?provided t1 t2)
 

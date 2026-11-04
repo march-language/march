@@ -12,12 +12,15 @@ Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module.
 
 -- TYPE MISMATCH ---------- errors/pure_violation_1.march
 
-expected `String` but got `FileError`. [type_mismatch]
+expected `Result((), String)` but got `Result((), FileError)`. [type_mismatch]
 
 26 |     file_write(path, contents)
          ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     This is the declared return type of `write`.
+    The types differ here:
+        Result((), FileError)
+                   ^^^^^^^^^ expected `String`
 
     the expected type comes from here:
 
