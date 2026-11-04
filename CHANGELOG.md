@@ -73,6 +73,15 @@ git log is authoritative for exact commits.
   `invalid_reflect` names why when it is not. Some calls that used to be skipped as
   `reflect-fuel` are now proved or, where the contract is really broken, reported as
   violations.
+- **Refinement proofs see through `List.filter` and `List.map` with a lambda.** A call
+  of a function that takes a function, given a lambda or a reflected function's name,
+  now has a definition of its own: the function's body with the lambda put in. So
+  `fn pos(xs) = List.filter(xs, fn x -> x > 0)` is reflected, and
+  `need_eq([1], List.filter([1], fn x -> x > 0))` proves. A lambda may read the
+  caller's variables. `--reflect-report` lists the function taking functions as
+  `specialised`, and `--reflect-parity` checks each such call against the
+  interpreter. A `let`-bound lambda, a function parameter or a function returned by a
+  call is not used this way.
 
 - **Lemmas: `@[lemma]` proofs for refinement types.** A lemma states a theorem in its
   result type, `{Unit | P}`, and proves it with ordinary code: `match` and `if` for
@@ -198,6 +207,11 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **A refinement proof no longer reads `let k = f(k)` as an equation about the new `k`.**
+  A `let` whose right-hand side used the name it rebinds (`let k = gt5(k)`, or a lambda
+  reading `k`) gave the checker the fact `k == gt5(k)` about the new `k`, which could prove
+  a false precondition. Such a `let` now gives no fact about the call.
 
 - **A false lemma is an error, not a warning.** A lemma whose theorem is false at some
   input, such as `{Unit | n + n >= n}` at `n = -1`, was reported only as
