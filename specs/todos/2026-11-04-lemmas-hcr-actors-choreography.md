@@ -28,9 +28,11 @@ Phases (design §7):
 - **D.** `stdlib/actor_theory.march` (per-sender FIFO, `Actor.call` correlation, DOWN
   delivery: proved today on the model, design §2 P2), plus trace conformance against the
   runtime and RC-trace fixtures for each send path.
-- **E.** Lemma ergonomics: todos `2026-11-04-lemma-hypothesis-reflected-call-not-assumed`,
+- **E.** Lemma ergonomics: landed 2026-11-04 (progress
+  `2026-11-04-lemma-hypothesis-reflected-call-not-assumed`,
   `2026-11-04-unreflectable-predicate-hides-name-clash`,
-  `2026-11-03-return-contract-ignores-block-facts`.
+  `2026-11-04-return-contract-block-facts`); user type names the stdlib also declares
+  remain (todo `2026-11-03-reflect-type-name-clash-with-stdlib`).
 - **F.** Baseline invariants as migration hypotheses, handlers reflected as `<Actor>.step`,
   the migration-simulation law, rollback round trip, chained `migrate_msg`, tag checks at
   deploy.

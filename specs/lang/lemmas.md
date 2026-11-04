@@ -463,9 +463,24 @@ A lemma call on its own line (or `let _ = cat_nil(xs)`) adds the theorem, with t
 arguments in place of the parameters, as a fact for the rest of that block. The call
 `cat_nil(xs)` adds `cat(xs, Nil) == xs`; `cat_nil(ys)` would add `cat(ys, Nil) == ys`.
 
-Put the call before the place that needs the fact, in the same block. The fact is used by
-the calls that follow: their preconditions, and the refined arguments passed to them, as in
-[Your first lemma](#your-first-lemma).
+Put the call before the place that needs the fact. The fact is used by what follows: the
+preconditions of later calls, the refined arguments passed to them, as in
+[Your first lemma](#your-first-lemma), and the function's own refined `Int` result.
+
+The call doesn't have to be a statement of its own. A call that always runs before the
+place that needs the fact gives the fact there, wherever it sits:
+
+| The call is | Its fact reaches |
+|---|---|
+| A statement, or `let _ = l(..)` | the rest of the block |
+| A named `let u = l(..)`, or inside another `let`'s right-hand side | the rest of the block |
+| A statement of a nested `do ... end` block | the rest of that block, and the rest of the outer one |
+| An argument of an earlier call, or a tuple element | the statements after the one it is in |
+| Part of an `if` condition | both branches, and the statements after the `if` |
+
+A call that may not run gives nothing after it: one in an `if` or `match` branch (outside
+that branch), in a lambda, or on the right of `&&` or `||`. A fact that names a variable
+bound again after the call (`let l = Nil0`) is dropped, since it is about the old value.
 
 ## Hypotheses: refined parameters
 
@@ -956,6 +971,15 @@ build checks it, so a reviewer doesn't have to.
   Any other refined result (`fn flush(xs : List(Int)) : {List(Int) | _ == xs}`, a `Bool`, a
   record) does not use those facts yet. State the need at the call that has it, as
   `need_eq` does on this page.
+- **A lemma call inside a call's own arguments doesn't help that call.** In
+  `need(cnt(l), cnt_nn(l))`, the fact from `cnt_nn(l)` reaches the statements after this one,
+  not `need`'s own precondition: the checker reads a call's precondition before its
+  arguments. Call the lemma on the line before.
+- **A user type named like a stdlib type can't be used in a theorem.** A user `type Tree`
+  shares its short name with `OrderedMap.Tree`, and the checker cannot yet tell the two
+  apart, so a function over it isn't used in a theorem (the warning says so). Rename the type.
+  A user function or constructor named like a stdlib one (`fn unwrap`, a `Reply`
+  constructor) is fine: the call resolves to your own.
 - **`String`, `Bytes` and `Float` theorems are limited.** The logic treats `String` and
   `Bytes` contents as opaque, so a round-trip law such as `decode(encode(s)) == s` can't be
   proved yet. `forge test` can't generate `String` or `Float` inputs for a lemma either.
