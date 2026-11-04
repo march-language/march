@@ -1,4 +1,4 @@
--- EXPECT-ERROR: expected `Int` but got `String`
+-- EXPECT-ERROR: expected `Box(Int)` but got `Box(String)`
 -- Slice 6 (nested-module soundness), the ADT-arg witness -- the same nested
 -- unannotated `id`-launder as `reject/t51`, but the laundered value is an ADT
 -- payload: `Box("hi") : Box(String)` is coerced to `Box(Int)`. Pre-fix, the
