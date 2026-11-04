@@ -1,0 +1,19 @@
+exit: 1
+-- ACTOR --------- errors/supervise_field_missing_2.march
+
+`Pool`'s state does not have a field called `wroker` to hold the `Worker` child's pid. [supervise_field_missing]
+Did you mean `worker`?
+
+16 |       Worker wroker
+                  ^^^^^^
+
+    run `march --explain supervise_field_missing`
+
+
+
+fix [supervise_field_missing]:
+@@ lines 16-16 @@
+-      Worker wroker
++      Worker worker
+
+after fix: exit 0

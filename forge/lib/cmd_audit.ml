@@ -941,3 +941,80 @@ let current_caps ~inferred (proj : Project.project) name : string list option =
     (match collect ~inferred ~only:[ name ] proj with
      | Ok { deps = [ d ]; _ } when d.dc_installed -> Some d.dc_caps
      | _ -> None)
+
+(* ------------------------------------------------------------------ *)
+(*  --laws: law coverage (specs/2026-11-04-law-coverage-design.md §4)  *)
+(* ------------------------------------------------------------------ *)
+
+(** [--strength] refines the law report; alone it means nothing. *)
+let laws_flags ~laws ~strength : (unit, string) result =
+  if strength && not laws then Error "--strength only applies with --laws" else Ok ()
+
+(* The module a source file declares: its first top-level `mod Name do`. *)
+let module_of_file (f : string) : string option =
+  match In_channel.with_open_bin f In_channel.input_all with
+  | exception Sys_error _ -> None
+  | text ->
+    List.find_map
+      (fun l ->
+        match String.split_on_char ' ' l with
+        | "mod" :: name :: "do" :: _ when name <> "" -> Some name
+        | _ -> None)
+      (String.split_on_char '\n' text)
+
+(** The law coverage report of [files], one block per module.  A file's own
+    check sees only the laws of the modules it uses, so the package is
+    checked through ONE generated entry that uses every module of [files]
+    (all on [lib_path_env]) with `march --check --law-coverage-all
+    [--law-strength]`: every law of the package is loaded, and every module's
+    block counts them all.  A to-do list, not a gate: [Error] only when the
+    check itself fails. *)
+let law_report ?(display = Fun.id) ~lib_path_env ~strength (files : string list) : (string list, string) result =
+  let mods = List.sort_uniq compare (List.filter_map module_of_file files) in
+  let dir = Filename.temp_dir "forge_laws" "" in
+  let entry = Filename.concat dir "forge_law_audit.march" in
+  Out_channel.with_open_bin entry (fun oc ->
+      output_string oc "mod ForgeLawAudit do\n";
+      List.iter (fun m -> Printf.fprintf oc "  use %s\n" m) mods;
+      output_string oc "end\n");
+  let out = Filename.concat dir "out" in
+  let code =
+    Sys.command
+      (Printf.sprintf "%smarch --check --law-coverage-all%s %s >%s 2>&1" lib_path_env
+         (if strength then " --law-strength" else "") (Filename.quote entry) (Filename.quote out))
+  in
+  let text = try In_channel.with_open_bin out In_channel.input_all with Sys_error _ -> "" in
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)));
+  let lines = String.split_on_char '\n' text in
+  if code <> 0 then begin
+    List.iter prerr_endline lines;
+    Error
+      (Printf.sprintf "law coverage: the check failed in %s" (String.concat ", " (List.map display files)))
+  end
+  else
+    (* The report's own lines, not the check's diagnostics (whose source
+       excerpts and carets are indented too). *)
+    let report_prefixes =
+      [ "law coverage: "; "  uncovered ("; "  unproved only  "; "  covered  "; "  impl "; "  higher-order ";
+        "    strength: "; "    survives: " ]
+    in
+    Ok (List.filter (fun l -> List.exists (fun prefix -> String.starts_with ~prefix l) report_prefixes) lines)
+
+(** [forge audit --laws]: the report over the modules of the package's own
+    `lib/` and `src/` files, with both directories on the lib path.  Needs no
+    [forge.caps.lock]; exits 0 unless a check fails. *)
+let run_laws ~strength () : (int, string) result =
+  match Project.load () with
+  | Error e -> Error e
+  | Ok proj -> (
+    let _, _, lib_paths, toolchain_pfx = Cmd_test.project_env proj in
+    let src = Filename.concat proj.Project.root "src" in
+    let paths = lib_paths @ (if Sys.file_exists src then [ src ] else []) in
+    let lib_path_env = Printf.sprintf "%sMARCH_LIB_PATH=%s " toolchain_pfx (String.concat ":" paths) in
+    let root = proj.Project.root ^ Filename.dir_sep in
+    let display f =
+      if String.starts_with ~prefix:root f then String.sub f (String.length root) (String.length f - String.length root) else f
+    in
+    match law_report ~display ~lib_path_env ~strength (Cmd_test.project_sources proj.Project.root) with
+    | Ok lines -> List.iter print_endline lines; Ok 0
+    | Error e -> Error e)

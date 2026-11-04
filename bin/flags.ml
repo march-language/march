@@ -145,6 +145,19 @@ let emit_lemma_manifest = ref false
    interpreter failure.  Changes no verdict. *)
 let reflect_parity = ref false
 let lemma_test = ref false
+(* --law-coverage: after the check, one block per user module listing its pure
+   (reflected) functions by whether an admitted law's theorem calls them
+   (lib/refinecheck/law_coverage.ml, specs/2026-11-04-law-coverage-design.md).
+   Report-only. *)
+let law_coverage = ref false
+(* --law-coverage-json: the same entries as JSON lines on stdout (implies --law-coverage). *)
+let law_coverage_json = ref false
+(* --law-strength: with the coverage report, the body edits each covered function's
+   laws still accept (lib/refinecheck/law_strength.ml; implies --law-coverage). *)
+let law_strength = ref false
+(* --law-coverage-all: report every user file the check loaded, not only the entry
+   file (forge audit --laws checks a package through one entry that uses each module). *)
+let law_coverage_all = ref false
 (* --refine-audit: print every declared refinement occurrence the checker
    never enforces (Unenforced) or only warns about (Inert_warned), plus a
    three-bucket summary. Read-only: changes no verdict, emits no diagnostic.

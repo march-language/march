@@ -596,13 +596,36 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
        `Node.send` (whose codec contract this derive is) needs the refusal to
        be a compile-time one.  The cross-node identity is `GlobalPid.Pid`, a
        plain record that derives like any other. *)
-    Err.error ~code:Err.Code.pid_serialize errors ~span:iface_span
-      (Printf.sprintf
-         "`Pid` cannot be serialized — a local pid only names an actor on \
-          this node, so `%s` cannot derive Json.\n\
-          hint: carry a `GlobalPid.Pid` (node id, local pid, creation) in \
-          `%s` instead; it is a plain record and derives Json."
-         type_name.txt type_name.txt);
+    let mentions = March_caps.Cap_surface_ty.mentions_tycon "Pid" in
+    (* The field or constructor that carries the pid, to name and label. *)
+    let holder = match td with
+      | TDRecord fields ->
+        List.find_map (fun (f : field) ->
+            if mentions f.fld_ty then Some (Printf.sprintf "its field `%s`" f.fld_name.txt, f.fld_name)
+            else None) fields
+      | TDVariant variants ->
+        List.find_map (fun (v : variant) ->
+            if List.exists mentions v.var_args
+            then Some (Printf.sprintf "its constructor `%s`" v.var_name.txt, v.var_name)
+            else None) variants
+      | TDAlias _ -> None in
+    let what = match holder with Some (w, _) -> w | None -> "it" in
+    Err.report errors
+      { Err.severity = Err.Error; span = iface_span;
+        message = Printf.sprintf
+            "`%s` cannot derive Json, because %s holds a `Pid`.\n\
+             A local pid names an actor on this node only; on another node it \
+             would name whatever runs in that slot there."
+            type_name.txt what;
+        labels = (match holder with
+            | Some (_, nm) when nm.span.start_line > 0 ->
+              [ { Err.lbl_span = nm.span;
+                  lbl_message = Printf.sprintf "`%s` holds the pid" nm.txt } ]
+            | _ -> []);
+        notes = [ Printf.sprintf
+                    "Carry a `GlobalPid.Pid` (node id, local pid, creation) in `%s` \
+                     instead; it is a plain record and derives Json." type_name.txt ];
+        code = Err.Code.pid_serialize; fix = None };
     []
 
   | "Json" ->

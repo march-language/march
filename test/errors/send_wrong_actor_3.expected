@@ -1,7 +1,7 @@
 exit: 1
 -- ACTOR ---------------- errors/send_wrong_actor_3.march
 
-`Bump` is a message for `Counter`, but this pid is an actor `Log`, so the message would be dropped. [send_wrong_actor]
+`Bump` is a message for `Counter`, but this pid is an actor `Log` (spawned on line 17), so the message would be dropped. [send_wrong_actor]
 Send it to a pid spawned from `Counter`, or send this actor one of its own messages.
 
 18 |     send(log, Bump(1))
@@ -9,10 +9,10 @@ Send it to a pid spawned from `Counter`, or send this actor one of its own messa
 
     `Log` handles `Line`.
 
-    actor `Log` is declared here:
+    `log` is spawned from `Log` here:
 
-10 |   actor Log do
-             ^^^
+17 |     let log = spawn(Log)
+                   ^^^^^^^^^^
     run `march --explain send_wrong_actor`
 
 

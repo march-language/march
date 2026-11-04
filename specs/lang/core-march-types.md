@@ -2290,8 +2290,8 @@ The `DActor` arm performs, in order (`typecheck.ml:6742–6821`):
    This record type is the actor's *state type*, written `state_ty` below.
 
 2. **Duplicate-handler rejection (`:6752–6760`).** Two `on Msg(…)` arms with the
-   *same* message name are a hard error (`` actor '…' defines handler '…' more
-   than once ``), the only diagnostic the arm raises unconditionally.
+   *same* message name are a hard error (`` Actor `…` has a second handler for
+   `…` ``, labelling the first), the only diagnostic the arm raises unconditionally.
 
 3. **Constructor registration (`:6768–6784`).** Two kinds of constructor are
    added to the environment:

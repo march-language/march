@@ -559,6 +559,11 @@ type env = {
       `Child name(args)` spec to check the supplied arguments.  An actor with
       the bare `init { … }` form has the entry [].  Shared hashtable, like
       [cap_narrow_factory_fns], so every env copy sees it. *)
+  actor_names : (string, unit) Hashtbl.t;
+  (** Every declared actor's name, bare and module-qualified, recorded where
+      its name constructor is registered.  `spawn` and a supervise block's
+      child line read it to tell an actor from a type's constructor of the
+      same spelling.  Shared hashtable, like [actor_init_sigs]. *)
   cap_narrow_factory_fns : (string, Ast.span) Hashtbl.t;
   (** Names of user functions whose body IS (or launders) a [cap_narrow] result —
       a "cap-narrow factory" (e.g. `fn mk(cap) do cap_narrow(cap) end`).  A
@@ -867,6 +872,7 @@ let make_env errors type_map = {
   linear_generic_uses = Hashtbl.create 256;
   cap_producer_ivars = Hashtbl.create 16;
   actor_init_sigs = Hashtbl.create 16;
+  actor_names = Hashtbl.create 16;
   cap_narrow_factory_fns = Hashtbl.create 16;
   cap_dicts = [];
   cap_dict_decl_sites = ref [];

@@ -176,7 +176,9 @@ let sigil_interpolation = "sigil_interpolation"
 let solver_unavailable = "solver_unavailable"
 let solver_version_mismatch = "solver_version_mismatch"
 let spawn_computed_actor = "spawn_computed_actor"
+let spawn_not_actor = "spawn_not_actor"
 let stdlib_internal = "stdlib_internal"
+let supervise_field_missing = "supervise_field_missing"
 let syntax_error = "syntax_error"
 let template_fragment_position = "template_fragment_position"
 let template_unsafe_interpolation = "template_unsafe_interpolation"
@@ -372,7 +374,9 @@ let all = [
   solver_unavailable;
   solver_version_mismatch;
   spawn_computed_actor;
+  spawn_not_actor;
   stdlib_internal;
+  supervise_field_missing;
   syntax_error;
   template_fragment_position;
   template_unsafe_interpolation;
@@ -475,7 +479,7 @@ let category_table : (string * string list) list = [
     actor_handler_state_type; actor_init_arity; codec_missing;
     duplicate_actor; duplicate_handler; island_missing_fn; migrate_msg_shape;
     pid_serialize; remote_actor_unroutable; send_wrong_actor;
-    spawn_computed_actor ];
+    spawn_computed_actor; spawn_not_actor; supervise_field_missing ];
   "PROTOCOL", [
     duplicate_protocol; endpoints_label_invalid; endpoints_name_clash;
     protocol_crash_branches; protocol_empty; protocol_expand_invalid;

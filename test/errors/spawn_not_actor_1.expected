@@ -1,0 +1,12 @@
+exit: 1
+-- ACTOR ----------------- errors/spawn_not_actor_1.march
+
+`helper` is a function, not an actor, so `spawn` cannot start it. [spawn_not_actor]
+`spawn` takes the name of an `actor` declaration, like `spawn(Counter)`.
+
+16 |     let p = spawn(helper)
+                       ^^^^^^
+
+    run `march --explain spawn_not_actor`
+
+

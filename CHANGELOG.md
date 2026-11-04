@@ -30,6 +30,14 @@ git log is authoritative for exact commits.
   closes the call, it prints the lemma that would, for you to prove. `--refine-infer-kinds=lemma`
   selects this kind on its own; the JSON output gains `lemma_calls` and `lemma_none`.
 
+- **Law coverage: which pure functions have laws, and how tightly.**
+  `march --check --law-coverage FILE` lists a file's pure functions by whether a proved
+  lemma's theorem calls them (unproved laws are shown apart, higher-order functions listed
+  separately), and `--law-coverage-json` gives the same as JSON. `--law-strength` adds, for
+  each covered function, the small edits to its body (return a parameter, swap arguments,
+  change a literal or comparison, swap match arms, drop the recursive call) that every law
+  covering it still accepts. `--law-coverage-all` reports every user file the check loaded,
+  and `forge audit --laws [--strength]` runs it over a whole package at once.
 - **`List` ships lemmas about its own functions.** `List.append_nil`, `append_assoc`,
   `len_append`, `reverse_append`, `reverse_reverse`, `len_reverse`, `len_take`, `len_drop`
   and `take_drop` can be called from any program to give the refinement checker that
@@ -225,6 +233,15 @@ git log is authoritative for exact commits.
   in `{ state with … }` says it is `A`'s state and suggests the field (with a fix); a handler that
   does not return the state is reported in plain words, pointing at what it returns. A constructor
   shared by an actor message and another type no longer suggests the uncallable `A_Msg.X` spelling.
+- Diagnostics: the rest of the actor checks follow the same style. `send_wrong_actor` says where
+  the pid was spawned ("this pid is an actor `B` (spawned on line 24)") and labels that `spawn`.
+  A missing codec for an `@[remote]` handler's payload is reported once, at the handler's
+  annotation (`on Bump(h : Hit)`), instead of twice with no excerpt. `remote_actor_unroutable`
+  points at the actor's name and labels each handler with why a remote message cannot reach it.
+  `pid_serialize` names and labels the field holding the pid. A second handler for one message
+  labels the first. A misspelt actor in `spawn` or in a supervise block reads "I don't know an
+  actor called `Countr`. Did you mean `Counter`?", and a misspelt `strategy` lists the three it
+  can be.
 - Diagnostics: `role_grant_exceeded` points at the use and labels the callback and each call on
   the way, like `cap_grant_exceeded`; in a `cap no_panic` module, a panic reached through several
   of its functions is reported once, at the panic, with a label on each caller.
@@ -243,6 +260,7 @@ git log is authoritative for exact commits.
 - `march --explain` pages for `cap_grant_exceeded`, `cap_ceiling`, `cap_widen`, `cap_deserialize`,
   `proof_cap_return`, `proof_cap_mint_private`, `io_not_allowed`, `send_wrong_actor`,
   `actor_handler_state_type` and `codec_missing`.
+- `march --explain` pages for `spawn_not_actor` and `supervise_field_missing`.
 
 - **Native compiles are about 45% faster for small programs.** Code the program
   cannot reach (most of the prepended stdlib) is now dropped right after
@@ -265,6 +283,14 @@ git log is authoritative for exact commits.
   already proved a call's precondition. The result is now checked with them, and a contract
   proved this way is a fact at the function's callers. Other refined result types don't use
   these facts yet.
+- **`spawn` of something that is not an actor, and a supervise child line naming no actor or a
+  missing state field, are compile errors.** `spawn(helper)` for a function, or `spawn(Job)` for
+  a type's constructor, passed the checker and failed when compiled ("`helper_spawn` is not a
+  function in scope") or at run time; a constructor with arguments was reported as a
+  constructor-arity error. They are now `spawn_not_actor`, saying what the name is. A supervise
+  block's `Wroker w` (no such actor) or `Worker wx` (no field `wx` in the supervisor's state)
+  stopped the compiler with an internal error; the second is now `supervise_field_missing`, with
+  a did-you-mean and a fix.
 - **`Random.range` (and so `Gen.int`) works for any span.** A range wider than the largest Int,
   such as `Gen.int(-4611686018427387903, 4611686018427387903)`, panicked with "attempt to
   subtract with overflow" since Int arithmetic began checking for overflow. A range wider
