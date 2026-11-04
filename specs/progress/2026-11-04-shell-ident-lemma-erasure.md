@@ -30,3 +30,12 @@ erased program.
 |---|---|
 | `shell_link` on main before the fix | the extra "an impl of List.Eq" line (red) |
 | the five shell goldens after the fix (every golden that runs `--shell`) | all pass |
+
+## Refinement audit baselines
+
+#1081 also left `test/refine_audit/{corpus,holes}.baseline` stale. Every fixture's
+"user + stdlib" count rose by 16 enforced obligations (198 → 214; `stdlib_prelude` 204 → 220),
+with inert and unenforced unchanged. The `stdlib_list` fixture, which audits `stdlib/list.march`
+as user code, rose by the same 16 (34 → 50), so all of them are phase 3's new `List` lemmas and
+contracts. Regenerated with `UPDATE_SNAPSHOTS=1 test_refinecheck.exe test audit-baseline` against a
+freshly staged stdlib.
