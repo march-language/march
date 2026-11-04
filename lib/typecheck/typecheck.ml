@@ -4980,7 +4980,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
             | Ast.TyCon (n, []) ->
               if n.txt = "Nat" then Some (CTNatBound tv)
               else if StrMap.mem n.txt env.interfaces
-              then Some (CInterface (n.txt, tv))
+              then (record_use n.txt n.span env; Some (CInterface (n.txt, tv)))
               else begin
                 (* Validate that the ADT exists in scope *)
                 match lookup_type n.txt env with
@@ -5156,6 +5156,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
         | Some (Ast.ECon (iface_name, args, bound_sp))
           when StrMap.mem iface_name.txt env.interfaces ->
           (* It's a class constraint: Eq(a), Ord(b), etc. *)
+          record_use iface_name.txt iface_name.span env;
           Hashtbl.replace env.decl_sites
             ("when:" ^ def.fn_name.txt ^ "|" ^ iface_name.txt) bound_sp;
           List.filter_map (fun arg ->
@@ -7365,6 +7366,10 @@ let rec check_decl env (d : Ast.decl) : env =
       ) env' idef.iface_methods
 
   | Ast.DImpl (idef, _sp) ->
+    (* `impl Sem(Int)` uses the interface `Sem`: a `use Alg.*` that brought
+       it in is not unused. *)
+    record_use idef.impl_iface.txt idef.impl_iface.span env;
+    List.iter (fun ((n : Ast.name), _) -> record_use n.txt n.span env) idef.impl_constraints;
     (* Instantiate the impl type, sharing tvars so the 'when' constraints
        can reference the same type variables as the impl type itself. *)
     let tvars = ref [] in
@@ -7613,8 +7618,14 @@ let rec check_decl env (d : Ast.decl) : env =
           matching only the rebound short names produced false "unused import"
           warnings on modules that are used exclusively via qualified calls
           (common in wrapper modules whose own fns shadow the short names). *)
-       if matching <> [] then begin
-         let short_names = List.map fst matching in
+       (* The interfaces it brings in count as uses too (an `impl` of one
+          records its name). *)
+       let iface_shorts = StrMap.fold (fun k _ acc ->
+           let plen = String.length prefix in
+           if String.length k > plen && String.sub k 0 plen = prefix
+           then String.sub k plen (String.length k - plen) :: acc else acc) env.interfaces [] in
+       if matching <> [] || iface_shorts <> [] then begin
+         let short_names = List.map fst matching @ iface_shorts in
          let entry = { ie_span = sp
                      ; ie_desc = Printf.sprintf
                          "Unused import: nothing from `%s` is used.\n\

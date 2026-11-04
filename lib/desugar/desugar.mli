@@ -61,3 +61,9 @@ val flatten_pred_quals : March_ast.Ast.expr -> March_ast.Ast.expr
 val respan_ty : March_ast.Ast.ty -> March_ast.Ast.ty
 
 val check_main_signature : Err.ctx -> March_ast.Ast.decl list -> unit
+
+(** The program after each file was desugared alone: impls of interfaces from
+    other files get their defaults, then interface laws are expanded
+    ([Interface_laws.expand_program]).  [context]: the other files'
+    declarations when the caller keeps them apart. *)
+val link_program : ?context:March_ast.Ast.decl list -> March_ast.Ast.decl list -> March_ast.Ast.decl list

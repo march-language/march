@@ -55,7 +55,8 @@ git log is authoritative for exact commits.
   interface's defaults): a proved law is silent, a broken one is an error with a
   counterexample, and one it cannot prove is `lemma_unproved` and is tested by
   `forge test`. An impl can supply a proof as a `@[lemma]` with the law's name. Impls in
-  other files and methods that take `Unit` are covered. Laws never run.
+  other files and methods that take `Unit` are covered. `forge test` runs a proved law
+  compiled too, through the real impl. Laws never run in your program.
 
 - **Lemma rewrites in the editor.** When a proved `@[lemma]` states an equation
   `lhs == rhs`, the language server offers a code action that rewrites an expression of
@@ -198,6 +199,19 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **Default methods work for an impl in another file.** When an `impl` lives in a
+  different file from its interface, a method it takes from the interface's default was
+  unbound at run time ("unbound variable: twice"). Defaults are now added once the whole
+  program is loaded.
+- **`use M.*` used only for an interface is no longer "unused".** An import whose only use
+  is an `impl` of one of its interfaces, or a `when M(a)` constraint, drew
+  `unused_import`. An import of an interface-only module that nothing uses is now
+  reported.
+- **A clearer warning when a type's name clashes with the stdlib's.** A function over a
+  type such as `Tree`, which the stdlib's `OrderedMap` also declares, cannot be used in a
+  refinement or lemma. The warning now says that and asks you to rename the type, instead
+  of "not a measure or known predicate".
 
 - **A false lemma is an error, not a warning.** A lemma whose theorem is false at some
   input, such as `{Unit | n + n >= n}` at `n = -1`, was reported only as
