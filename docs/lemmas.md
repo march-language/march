@@ -685,7 +685,7 @@ skeleton is never written for you: its body is `()`, which proves nothing. Write
 (see [Induction: a recursive call](#induction-a-recursive-call)), then call it.
 
 Two limits: the tool proposes calls only for a call's precondition, not for a function's own
-return contract (see the last section), and only one call per obligation.
+return contract, and only one call per obligation.
 
 ---
 
@@ -858,11 +858,21 @@ build checks it, so a reviewer doesn't have to.
   them at once. It can't say "there exists" or nest a "for all" inside, and a caller gets
   the theorem only for the arguments of a call. To use a law at several values, call the
   lemma once for each.
-- **Facts reach later calls, not the function's own return contract.** A lemma call gives a
-  fact to the calls after it. A function whose own result type is refined
-  (`fn flush(xs : List(Int)) : {List(Int) | _ == xs}`) does not yet use facts from earlier
-  lines of its body, from a lemma call or otherwise. State the need at the call that has it,
-  as `need_eq` does on this page.
+- **Only an `Int` result contract uses the facts before it.** A function whose result type
+  is a refined `Int` is checked with the facts of its body: an earlier `let`, a lemma call or
+  `assert` before the result, and the unfolding of a reflected call as the result.
+
+  ```march
+  fn grow(n : {Int | _ >= 0}) : {Int | _ >= n} do
+    twice_grows(n)       -- a proved lemma {Unit | twice(n) >= n}
+    twice(n)             -- proved
+  end
+  ```
+
+  This needs one clause, and no `let` or pattern in the body may reuse a parameter's name.
+  Any other refined result (`fn flush(xs : List(Int)) : {List(Int) | _ == xs}`, a `Bool`, a
+  record) does not use those facts yet. State the need at the call that has it, as
+  `need_eq` does on this page.
 - **`String`, `Bytes` and `Float` theorems are limited.** The logic treats `String` and
   `Bytes` contents as opaque, so a round-trip law such as `decode(encode(s)) == s` can't be
   proved yet. `forge test` can't generate `String` or `Float` inputs for a lemma either.

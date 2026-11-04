@@ -238,6 +238,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A refined `Int` result now uses the facts before it.** `fn grow(n : {Int | _ >= 0}) :
+  {Int | _ >= n}` used to stay unverified when its body was `let r = n + n` then `r`, or a
+  lemma call `twice_grows(n)` then `twice(n)`, or `assert n >= 0` then `n + n`. The same facts
+  already proved a call's precondition. The result is now checked with them, and a contract
+  proved this way is a fact at the function's callers. Other refined result types don't use
+  these facts yet.
+
 - A type variable in an error message no longer changes letter depending on whether the
   compiler's cache is warm (`Pid(b)` on a first run, `Pid(a)` after); each check now letters its
   variables from `a`.

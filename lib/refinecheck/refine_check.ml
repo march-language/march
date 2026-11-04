@@ -4698,9 +4698,17 @@ type lemma_walk = {
   lw_args : A.expr list;
   mutable lw_tails : A.expr list;  (** not walked yet (physical identity) *)
   mutable lw_verdicts : Obligation.verdict list;
+  lw_ret : bool;
+      (** A function's own result contract ([Refine_post.post_walk_verdict]):
+          ["$t"] is the tail itself, not [0]. *)
 }
 
 let lemma_walk : lemma_walk option ref = ref None
+
+(* The function whose result contract [post_scratch_verdict] is walking (its
+   name's span), and whether every tail proved. *)
+let post_walk_span : A.span option ref = ref None
+let post_walk_ok = ref false
 
 (** Lemmas that passed L1-L3 and L5 in this module, by declaring span. *)
 let lemma_valid : (A.span, unit) Hashtbl.t = Hashtbl.create 16
@@ -4867,8 +4875,9 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     let cx = cx_of ~root errctx defs ctx (lemma_call_facts ~root errctx defs ctx path lets sc re cb ce e @ path)
         lets sc re cb ce in
     let out = ref None in
+    let args = if lw.lw_ret then e :: List.tl lw.lw_args else lw.lw_args in
     check_call cx ~span:(T.span_of_expr e) ~callee:lw.lw_name ~subject:Lemma_goal ~kind:Obligation.Postcondition
-      ~verdict_out:out lw.lw_sig lw.lw_args (List.hd lw.lw_sig.refined);
+      ~verdict_out:out lw.lw_sig args (List.hd lw.lw_sig.refined);
     lw.lw_verdicts <- Option.value ~default:(Obligation.Skipped Obligation.Solver_undecided) !out :: lw.lw_verdicts
   | _ -> visit_inner ~root errctx defs ctx path lets sc re cb ce e
 
@@ -5170,7 +5179,9 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                        | Some (A.EApp (_, _, sp)) -> Hashtbl.mem lemma_call_sites sp
                        | _ -> false) ->
                lemma_call_facts ~root errctx defs ctx path lets sc re cb ce e @ path
-             | A.EAssert (p, sp) when !lemma_walk <> None ->
+             (* A lemma is never run, so its `assert` is a fact only once
+                proved; a function's runs, also in its result walk. *)
+             | A.EAssert (p, sp) when (match !lemma_walk with Some lw -> not lw.lw_ret | None -> false) ->
                if lemma_assert ~root errctx defs ctx path lets sc re cb ce p sp then (p, false) :: path else path
              | A.EAssert (p, _) -> (p, false) :: path
              (* A `let` REBINDS its names: retire any fact about them first
@@ -6977,19 +6988,34 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         ; predicate = (match Refine_post.assumed_return fd with Some p -> pred_str p | None -> "?")
         ; verdict = Obligation.Trusted; kind = Obligation.Postcondition; inst = None };
     let lemma = lemma && not manifest_lemma in
-    if (not !calls_only_walk) && not (is_lemma fd) then
+    let post_walk = !post_walk_span = Some fd.A.fn_name.A.span in
+    if (not !calls_only_walk) && (not (is_lemma fd)) && not post_walk then begin
+      let saved_prefix = !Refine_post.lemma_prefix in
+      Refine_post.lemma_prefix := ctx.modpath;
+      Fun.protect ~finally:(fun () -> Refine_post.lemma_prefix := saved_prefix) @@ fun () ->
       with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
-          with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
+          with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd))
+    end;
     let saved_lemma_walk = !lemma_walk in
     lemma_walk :=
-      (if not lemma then None
+      (if post_walk then
+         match Refine_post.return_refine_ext fd, fd.A.fn_ret_ty, fd.A.fn_clauses with
+         | Some (binder, p, None), Some (A.TyRefine (base_ty, _, _)), [ c ] ->
+           let base = sig_of_fn fd in
+           let sg, args = goal_sig ~base base.param_names p in
+           let rp = { (List.hd sg.refined) with Refine_encode.binder } in
+           let sg = { sg with refined = [ rp ]; param_tys = Some base_ty :: List.tl sg.param_tys } in
+           Some { lw_name = fd.A.fn_name.A.txt; lw_sig = sg; lw_args = args; lw_tails = lemma_tails c.A.fc_body;
+                  lw_verdicts = []; lw_ret = true }
+         | _ -> None
+       else if not lemma then None
        else
          match Refine_post.assumed_return fd, fd.A.fn_clauses with
          | Some p, [ c ] ->
            let base = sig_of_fn fd in
            let sg, args = goal_sig ~base base.param_names p in
            Some { lw_name = fd.A.fn_name.A.txt; lw_sig = sg; lw_args = args; lw_tails = lemma_tails c.A.fc_body;
-                  lw_verdicts = [] }
+                  lw_verdicts = []; lw_ret = false }
          | _ -> None);
     Fun.protect ~finally:(fun () -> lemma_walk := saved_lemma_walk) @@ fun () ->
     let walked =
@@ -7127,6 +7153,9 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
          | None -> ()))
       walked.A.fn_clauses;
     match !lemma_walk with
+    | Some lw when lw.lw_ret ->
+      post_walk_ok := lw.lw_tails = [] && lw.lw_verdicts <> []
+                      && List.for_all (( = ) Obligation.Proved) lw.lw_verdicts
     | Some lw ->
       let n = List.length lw.lw_verdicts + List.length lw.lw_tails in
       let k = List.length (List.filter (( = ) Obligation.Proved) lw.lw_verdicts) in
@@ -7155,10 +7184,39 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
 
 (* The gate's verdict for a lemma ([Refine_post.lemma_verdict]): a silent walk
    of its body, as [term_scratch_walk] runs one, proved iff every tail is. *)
-let lemma_scratch_verdict ~root defs (fd : A.fn_def) : bool =
+let rec lemma_scratch_verdict ~root defs (fd : A.fn_def) : bool =
   Hashtbl.mem lemma_manifest_ok fd.A.fn_name.A.span
   || Hashtbl.mem lemma_valid fd.A.fn_name.A.span
+  && scratch_walk ~root defs fd (fun errs ->
+         (* A refuted theorem draws `refinement_violated` instead of
+            `lemma_unproved` (both at the lemma's name): not proved either.
+            Looking for `lemma_unproved` alone admitted a refuted lemma, and
+            its false theorem became a fact for every caller. *)
+         not
+           (List.exists
+              (fun (d : Err.diagnostic) ->
+                d.Err.code = Err.Code.lemma_unproved
+                || (d.Err.code = Err.Code.refinement_violated && d.Err.span = fd.A.fn_name.A.span))
+              (Err.sorted errs)))
+
+(* [Refine_post.post_walk_verdict]: the same silent walk, checking [fd]'s
+   `Int` result contract at every tail ([lw_ret]).  Only for a module-level
+   function: a block-local `fn` walked on its own would resolve its calls at
+   module level, so a sibling local `uor` shadowing the module's `uor` would
+   be read as the module's (its own check, [visit_local_fn], has the block's
+   context; the walk does not). *)
+and post_scratch_verdict ~root defs (fd : A.fn_def) : bool =
+  Hashtbl.fold (fun _ (_, (f : A.fn_def)) acc -> acc || f.A.fn_name.A.span = fd.A.fn_name.A.span) fn_defs_tbl false
   &&
+  let saved_span = !post_walk_span and saved_ok = !post_walk_ok in
+  Fun.protect ~finally:(fun () -> post_walk_span := saved_span; post_walk_ok := saved_ok) @@ fun () ->
+  post_walk_span := Some fd.A.fn_name.A.span;
+  post_walk_ok := false;
+  scratch_walk ~root defs fd (fun _ -> !post_walk_ok)
+
+(* A walk of [fd] that leaves nothing behind (ledger, diagnostics, the
+   walk's caches), answered by [result] over its diagnostics. *)
+and scratch_walk ~root defs (fd : A.fn_def) (result_of : Err.ctx -> bool) : bool =
   let saved_acc = Hashtbl.copy annotated_acc_facts in
   let saved_ctr = !ret_ctr and saved_budget = !Witness.wall_budget in
   let saved_mal = !March_refine.Solver.malformed_count
@@ -7185,17 +7243,7 @@ let lemma_scratch_verdict ~root defs (fd : A.fn_def) : bool =
           let errs = Err.create () in
           let ctx = { rctx0 with modpath = !Refine_post.lemma_prefix } in
           visit_fn ~root errs defs ctx fd;
-          (* A refuted theorem draws `refinement_violated` instead of
-             `lemma_unproved` (both at the lemma's name): not proved either.
-             Looking for `lemma_unproved` alone admitted a refuted lemma, and
-             its false theorem became a fact for every caller. *)
-          result :=
-            not
-              (List.exists
-                 (fun (d : Err.diagnostic) ->
-                   d.Err.code = Err.Code.lemma_unproved
-                   || (d.Err.code = Err.Code.refinement_violated && d.Err.span = fd.A.fn_name.A.span))
-                 (Err.sorted errs))));
+          result := result_of errs));
   !result
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
@@ -9705,9 +9753,11 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      and is cleared when this function returns. *)
   Hashtbl.reset ih_spans;
   Refine_post.lemma_verdict := (fun ~root _ fd -> lemma_scratch_verdict ~root defs fd);
+  Refine_post.post_walk_verdict := (fun ~root _ fd -> post_scratch_verdict ~root defs fd);
   Fun.protect ~finally:(fun () ->
       Hashtbl.reset ih_spans;
-      Refine_post.lemma_verdict := fun ~root:_ _ _ -> false) @@ fun () ->
+      Refine_post.lemma_verdict := (fun ~root:_ _ _ -> false);
+      Refine_post.post_walk_verdict := fun ~root:_ _ _ -> false) @@ fun () ->
   let ih_eligible : (A.span, unit) Hashtbl.t = Hashtbl.create 8 in
   lemma_rows := [];
   lemma_defs := [];
