@@ -1,0 +1,18 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_30.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+5 |     let xs : List(Int) = [1, "two"]
+                                 ^^^^^
+
+    In a list element.
+    I got this expectation from the type annotation.
+
+    the expected type comes from here:
+
+5 |     let xs : List(Int) = [1, "two"]
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

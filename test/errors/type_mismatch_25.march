@@ -1,0 +1,7 @@
+-- EXPECT-ERROR: In a list element.
+-- Blame placement (specs/plans/2026-11-02-diagnostics-depth-plan.md §X1): the caret is on the one wrong element, not the whole list.
+mod T do
+  fn f() : List(Int) do
+    [1, 2, "three", 4]
+  end
+end

@@ -1790,6 +1790,180 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) (msg : Ast.expr) (msg
      | _ -> ())
   | _ -> ()
 
+(* ── Blame placement inside literals (diagnostics plan §X1) ───────────
+
+   When a constructor application or a list / tuple / record literal fails
+   to fit the type it is checked against, unification reports the mismatch
+   on the whole literal ("Argument to constructor `Cons`" for a list).  This
+   moves that one diagnostic onto the innermost part that is wrong and names
+   the path to it ("In a list element of the `ports` field of …").
+
+   It is diagnostics only: typing has already happened and nothing here
+   binds a type variable.  Each part's type is read back from [type_map]
+   (where [infer_expr] / [check_expr] recorded it) and compared with the
+   part's expected type, which is computed from the expected type of the
+   whole by substitution, never by unification.  The comparison is
+   deliberately one-sided: two types are "apart" only when their heads
+   plainly differ (another constructor, arity, tuple width or field set);
+   anything undecided counts as fitting, so a correct part is never
+   blamed. *)
+
+(** Do [a] and [b] plainly disagree at some head?  [false] when unsure. *)
+let rec types_apart env depth (a : ty) (b : ty) : bool =
+  depth < 12 &&
+  let expand t = match repr t with
+    | TCon _ as c -> (match expand_record env c with Some r -> repr r | None -> c)
+    | t -> t in
+  match repr a, repr b with
+  | (TVar _ | TError), _ | _, (TVar _ | TError) -> false
+  | TLin (_, x), y | y, TLin (_, x) -> types_apart env (depth + 1) x y
+  | TCon (na, aa), TCon (nb, ab) ->
+    if na <> nb || List.length aa <> List.length ab then
+      (* Two names for one record shape are not apart. *)
+      (match expand a, expand b with
+       | (TRecord _ as ra), (TRecord _ as rb) -> types_apart env (depth + 1) ra rb
+       | _ -> true)
+    else List.exists2 (types_apart env (depth + 1)) aa ab
+  | TTuple aa, TTuple ab ->
+    List.length aa <> List.length ab || List.exists2 (types_apart env (depth + 1)) aa ab
+  | TArrow (a1, r1), TArrow (a2, r2) ->
+    types_apart env (depth + 1) a1 a2 || types_apart env (depth + 1) r1 r2
+  | TRecord fa, TRecord fb ->
+    List.map fst fa <> List.map fst fb
+    || List.exists2 (fun (_, x) (_, y) -> types_apart env (depth + 1) x y) fa fb
+  | (TCon _ | TRecord _), (TCon _ | TRecord _) ->
+    (match expand a, expand b with
+     | (TRecord _ as ra), (TRecord _ as rb) -> types_apart env (depth + 1) ra rb
+     | _ -> true)
+  | TCon _, (TTuple _ | TArrow _) | (TTuple _ | TArrow _), TCon _
+  | TTuple _, TArrow _ | TArrow _, TTuple _ -> true
+  | _ -> false
+
+(** A list literal is a chain of [Cons] nodes ending in [Nil] that all carry
+    the literal's span (the parser's desugaring), so its tail has the node's
+    own span; a written `Cons(x, Nil)` does not. *)
+let is_list_literal_cons (name : Ast.name) args sp =
+  name.txt = "Cons"
+  && (match args with
+      | [ _; Ast.ECon (t, _, tsp) ] -> (t.txt = "Cons" || t.txt = "Nil") && tsp = sp
+      | _ -> false)
+
+(** The innermost part of [e] whose recorded type is apart from what [exp]
+    says it should be, with its path (outermost first), or [None]. *)
+let rec locate_literal_part env (e : Ast.expr) (exp : ty) (path : string list)
+  : (Ast.span * string list) option =
+  let part_apart (p : Ast.expr) pexp =
+    match Hashtbl.find_opt env.type_map (span_of_expr p) with
+    | Some t -> types_apart env 0 t pexp
+    | None -> false in
+  let first_apart parts =
+    List.find_map (fun (p, pexp, seg) ->
+        match seg with
+        | None ->
+          (* A list literal's tail: every node of the literal shares one
+             span, so [type_map] can't tell them apart; walk on into it (its
+             elements have spans of their own). *)
+          locate_literal_part env p pexp path
+        | Some s ->
+          if not (part_apart p pexp) then None
+          else
+            let path' = path @ [ s ] in
+            match locate_literal_part env p pexp path' with
+            | Some _ as deeper -> deeper
+            | None -> Some (span_of_expr p, path'))
+      parts in
+  match e with
+  | Ast.ECon (name, (_ :: _ as args), sp) ->
+    let ci = match lookup_ctor_same_module name.txt env with
+      | Some _ as r -> r | None -> lookup_ctor name.txt env in
+    (match ci, repr exp with
+     | Some ci, TCon (tn, eargs)
+       when tn = ci.ci_type && List.length eargs = List.length ci.ci_params
+            && List.length args = List.length ci.ci_arg_tys ->
+       let saved = env.errors.Err.diagnostics in
+       let tvars = ref (List.combine ci.ci_params eargs) in
+       let arg_exps = List.map (surface_ty env ~tvars) ci.ci_arg_tys in
+       env.errors.Err.diagnostics <- saved;
+       let list_lit = is_list_literal_cons name args sp in
+       let n = List.length args in
+       first_apart (List.mapi (fun i (a, aexp) ->
+           let seg =
+             if list_lit then (if i = 0 then Some "a list element" else None)
+             else if n = 1 then Some (Printf.sprintf "the argument of `%s`" name.txt)
+             else Some (Printf.sprintf "argument %d of `%s`" (i + 1) name.txt) in
+           (a, aexp, seg)) (List.combine args arg_exps))
+     | _ -> None)
+  | Ast.ETuple ((_ :: _ :: _ as es), _) ->
+    (match repr exp with
+     | TTuple ts when List.length ts = List.length es ->
+       first_apart (List.mapi (fun i (p, t) ->
+           (p, t, Some (Printf.sprintf "component %d" (i + 1)))) (List.combine es ts))
+     | _ -> None)
+  | Ast.ERecord (flds, _) ->
+    (match expand_record env exp with
+     | Some (TRecord req) ->
+       first_apart (List.filter_map (fun ((n : Ast.name), fe) ->
+           Option.map (fun t -> (fe, t, Some (Printf.sprintf "the `%s` field" n.txt)))
+             (List.assoc_opt n.txt req)) flds)
+     | _ -> None)
+  | _ -> None
+
+(** Move the type mismatch [check_expr] just reported on literal [e] (span
+    [sp]) onto the part [locate_literal_part] finds, if any.  [mark] is the
+    diagnostic list before the check. *)
+let relocate_literal_mismatch env ~mark ~reason (e : Ast.expr) sp (expected : ty) =
+  let cons_tail_check =
+    (* A list literal's tail checked against its own [Cons]: the enclosing
+       check of the whole literal shares this span and knows where the
+       expected type came from, so it moves the diagnostic instead. *)
+    match e, reason with
+    | Ast.ECon (n, args, esp), Some r ->
+      is_list_literal_cons n args esp && string_of_reason r = "Argument to constructor `Cons`."
+    | _ -> false in
+  match e with
+  | _ when cons_tail_check -> ()
+  | Ast.ECon (_, _ :: _, _) | Ast.ETuple (_ :: _ :: _, _) | Ast.ERecord _ ->
+    let rec fresh l = if l == mark then [] else match l with [] -> [] | d :: r -> d :: fresh r in
+    let added = fresh env.errors.Err.diagnostics in
+    (match List.find_opt (fun (d : Err.diagnostic) ->
+         d.Err.span = sp && Err.slug_of_code d.Err.code = Err.Code.type_mismatch) added with
+     | None -> ()
+     | Some d ->
+       match locate_literal_part env e expected [] with
+       | Some (psp, (_ :: _ as path)) when psp <> sp ->
+         let segs = List.rev path in
+         let path_note = Printf.sprintf "In %s." (String.concat " of " segs) in
+         (* "Argument to constructor `C`." is what the path now says (and,
+            for a list, the desugaring talking). *)
+         let ctor_note = "Argument to constructor `" in
+         let notes = List.filter (fun n ->
+             not (String.length n >= String.length ctor_note
+                  && String.sub n 0 (String.length ctor_note) = ctor_note)) d.Err.notes in
+         let origin_lbl = "the expected type comes from here" in
+         let has_origin = List.exists (fun (l : Err.label) -> l.Err.lbl_message = origin_lbl) d.Err.labels in
+         let notes, labels =
+           match reason with
+           | Some r when not has_origin && span_of_reason r <> None ->
+             let n = string_of_reason r in
+             ((if List.mem n notes then notes else notes @ [ n ]),
+              (match span_of_reason r with
+               | Some rsp -> d.Err.labels @ [ { Err.lbl_span = rsp; lbl_message = origin_lbl } ]
+               | None -> d.Err.labels))
+           | _ -> (notes, d.Err.labels) in
+         let d' = { d with Err.span = psp; notes = path_note :: notes; labels } in
+         (* A wrong list element trips the [Cons] chain at more than one
+            level, each a mismatch on the literal's span; they are all this
+            one part's consequences, so only the moved one stays. *)
+         let echo (x : Err.diagnostic) =
+           x != d && List.memq x added && x.Err.span = sp
+           && Err.slug_of_code x.Err.code = Err.Code.type_mismatch in
+         env.errors.Err.diagnostics <-
+           List.filter_map (fun x ->
+               if x == d then Some d' else if echo x then None else Some x)
+             env.errors.Err.diagnostics
+       | _ -> ())
+  | _ -> ()
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -3911,11 +4085,14 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
        let inferred = infer_expr env e in
        unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected)
 
-  (* All other expressions: infer then unify *)
+  (* All other expressions: infer then unify.  A mismatch reported on a whole
+     constructor / literal is then moved onto its wrong part (§X1). *)
   | _ ->
+    let mark = env.errors.Err.diagnostics in
     let inferred =
       with_suggest_need e (NeedType expected) (fun () -> infer_expr env e) in
-    unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected
+    unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected;
+    relocate_literal_mismatch env ~mark ~reason e sp expected
 
 (** Thread function application through argument list, tracking arg index. *)
 and infer_app env span f_ty args idx =

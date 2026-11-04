@@ -1,0 +1,7 @@
+-- EXPECT-ERROR: In the argument of `Ok`.
+-- Blame placement (specs/plans/2026-11-02-diagnostics-depth-plan.md §X1): the constructor's argument is checked against Result's Int, so the caret is on string_to_int(s).
+mod T do
+  fn parse(s : String) : Result(Int, String) do
+    Ok(string_to_int(s))
+  end
+end
