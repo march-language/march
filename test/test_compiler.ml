@@ -3715,7 +3715,7 @@ let test_session_loop_branch_hides_post_choose_tail_error () =
     end
   end|} in
   Alcotest.(check bool) "loop-ending choose branch hides post-choose tail: error"
-    true (has_error_with ctx "can never run in this one")
+    true (has_error_with ctx "can never run in the `choose` branch that ends in a `loop`")
 
 (** SILENCE companion: the same protocol WITHOUT a trailing step must stay
     clean — the tail threading must not turn every loop-ending branch into an

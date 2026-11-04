@@ -138,6 +138,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: a protocol step that can never run, because it comes after a `loop`, is underlined
+  itself, with a label on the loop, instead of the whole `protocol`. A receive from a role that
+  `may crash` without an `or crash do ... end` branch now comes with a fix that inserts one, telling
+  each remaining role from the detecting role.
+
 - **`forge deploy hot` refuses a migration law it can't prove, instead of letting it through.**
   An unproved or unchecked law (a predicate the schema can't record, an `@invariant` outside
   the supported grammar, a baseline from a compiler older than the contract check) refuses the

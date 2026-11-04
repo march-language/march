@@ -1,10 +1,15 @@
 exit: 1
 -- PROTOCOL ------------- errors/protocol_invalid_4.march
 
-Protocol `Bad`: the steps after this `loop` can never run — a `loop` block repeats forever, so it must be the last step. [protocol_invalid]
+Protocol `Bad`: this step can never run — it comes after a `loop`, and a `loop` block repeats forever, so it must be the last step. [protocol_invalid]
 
-10 |   protocol Bad do
-       ^^^^^^^^^^^^^^^
+14 |     B -> A : Bool
+         ^
 
+
+    this `loop` repeats forever:
+
+12 |       A -> B : Int
+           ^
 
 
