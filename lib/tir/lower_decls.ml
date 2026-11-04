@@ -437,6 +437,21 @@ let () = Lower_state._ensure_module_lowered := (fun env mod_name ->
            { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
          let ast = March_parser.Parse.module_of_lexbuf lexbuf in
          let ast = March_desugar.Desugar.desugar_module ast in
+         (* Lemma erasure (reflection design §4.5), as the driver runs it over
+            the stdlib it merges: a module loaded here must not lower its
+            `@[lemma]` bodies either.  Those bodies call the module's
+            polymorphic helpers at an unconstrained type variable
+            (`reverse_onto(xs, Nil)`), which then survives monomorphisation. *)
+         let ast =
+           { ast with
+             mod_decls =
+               March_desugar.Lemma_erase.erase_module
+                 ~reserved:
+                   (March_desugar.Lemma_erase.reserved_by
+                      (List.map fst March_typecheck.Typecheck_builtins.builtin_bindings
+                       @ List.map fst March_typecheck.Typecheck_builtins.builtin_interface_bindings))
+                 ast.mod_decls }
+         in
          (* Lazily lowered from inside whatever body referenced it, possibly
             an entry fn's: a stdlib module's bare builtin name is the
             builtin, never the entry's same-named fn. *)

@@ -301,6 +301,14 @@ val lemma_rows : (string * string * string * bool) list ref
 (** The lemmas (file, qualified name) some call in the last module reaches. *)
 val lemma_called : (string * string) list ref
 
+(** Set by `--emit-lemma-manifest`: admit no stdlib lemma from
+    `stdlib/lemmas.verified`; prove them all. *)
+val manifest_off : bool ref
+
+(** The stdlib lemmas the last module admitted, as (qualified name, manifest
+    digest). *)
+val manifest_rows : (string * string) list ref
+
 (** The last checked module's valid lemmas (no L1-L5 error): qualified name,
     definition, admitted.  Read by [Lemma_test]. *)
 val lemma_defs : (string * A.fn_def * bool) list ref

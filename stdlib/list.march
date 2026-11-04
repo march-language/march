@@ -301,13 +301,15 @@ mod List do
       []
   """
   fn reverse(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
-    fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
-      match lst do
-      Nil        -> acc
-      Cons(h, t) -> go(t, Cons(h, acc))
-      end
+    reverse_onto(xs, Nil)
+  end
+
+  -- `reverse`'s loop, top-level so a lemma can name it (`reverse_onto_append`).
+  pfn reverse_onto(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+    match lst do
+    Nil        -> acc
+    Cons(h, t) -> reverse_onto(t, Cons(h, acc))
     end
-    go(xs, Nil)
   end
 
   doc """
@@ -419,7 +421,7 @@ mod List do
       march> List.filter(["foo", "", "bar", ""], fn s -> !String.is_empty(s))
       ["foo", "bar"]
   """
-  fn filter(xs : List(a), pred : a -> Bool[p]) : {List(a[p]) | subset(elts(_), elts(xs))} do
+  fn filter(xs : List(a), pred : a -> Bool[p]) : {List(a[p]) | subset(elts(_), elts(xs)) && len(_) <= len(xs)} do
     -- Natural style on purpose: TRMC makes it a single-traversal loop.
     match xs do
     Nil        -> Nil
@@ -845,14 +847,16 @@ mod List do
       []
   """
   fn take(xs : List(a), n : Int) : List(a) do
-    fn go(lst : List(a), k : Int, acc : List(a)) : List(a) do
-      if k <= 0 do reverse(acc)
-      else match lst do
-        Nil        -> reverse(acc)
-        Cons(h, t) -> go(t, k - 1, Cons(h, acc))
-        end end
-    end
-    go(xs, n, Nil)
+    take_onto(xs, n, Nil)
+  end
+
+  -- `take`'s loop, top-level so a lemma can name it (`len_take`).
+  pfn take_onto(lst : List(a), k : Int, acc : List(a)) : List(a) do
+    if k <= 0 do reverse(acc)
+    else match lst do
+      Nil        -> reverse(acc)
+      Cons(h, t) -> take_onto(t, k - 1, Cons(h, acc))
+      end end
   end
 
   doc """
@@ -1245,6 +1249,155 @@ mod List do
       _                           -> false
       end
     end
+  end
+
+  -- ---- Lemmas (refinement reflection, phase 3) ----
+  --
+  -- Theorems about the functions above, proved by the refinement checker and
+  -- erased before anything runs: calling one costs nothing at run time and
+  -- gives the caller its theorem as a fact.  See the "Lemmas" section of the
+  -- refinement-types reference.
+
+  doc "`append(xs, Nil) == xs`."
+  @[lemma]
+  fn append_nil(xs : List(a)) : {Unit | append(xs, Nil) == xs} do
+    match xs do
+    Nil        -> ()
+    Cons(_, t) -> append_nil(t)
+    end
+  end
+
+  doc "`append` is associative."
+  @[lemma]
+  fn append_assoc(xs : List(a), ys : List(a), zs : List(a))
+    : {Unit | append(append(xs, ys), zs) == append(xs, append(ys, zs))} do
+    match xs do
+    Nil        -> ()
+    Cons(_, t) -> append_assoc(t, ys, zs)
+    end
+  end
+
+  doc "The length of `append(xs, ys)` is the sum of the lengths."
+  @[lemma]
+  fn len_append(xs : List(a), ys : List(a)) : {Unit | len(append(xs, ys)) == len(xs) + len(ys)} do
+    match xs do
+    Nil        -> ()
+    Cons(_, t) -> len_append(t, ys)
+    end
+  end
+
+  doc "`reverse`'s loop onto an accumulator is the reversal followed by the accumulator."
+  @[lemma]
+  fn reverse_onto_append(xs : List(a), acc : List(a))
+    : {Unit | reverse_onto(xs, acc) == append(reverse_onto(xs, Nil), acc)} do
+    match xs do
+    Nil        -> ()
+    Cons(h, t) ->
+      reverse_onto_append(t, Cons(h, acc))
+      reverse_onto_append(t, Cons(h, Nil))
+      append_assoc(reverse_onto(t, Nil), Cons(h, Nil), acc)
+    end
+  end
+
+  doc "Reversing a concatenation reverses the parts and swaps them."
+  @[lemma]
+  fn reverse_append(xs : List(a), ys : List(a))
+    : {Unit | reverse(append(xs, ys)) == append(reverse(ys), reverse(xs))} do
+    match xs do
+    Nil        -> append_nil(reverse(ys))
+    Cons(h, t) ->
+      reverse_append(t, ys)
+      reverse_onto_append(append(t, ys), Cons(h, Nil))
+      reverse_onto_append(t, Cons(h, Nil))
+      append_assoc(reverse(ys), reverse(t), Cons(h, Nil))
+    end
+  end
+
+  doc "`reverse(reverse(xs)) == xs`."
+  @[lemma]
+  fn reverse_reverse(xs : List(a)) : {Unit | reverse(reverse(xs)) == xs} do
+    match xs do
+    Nil        -> ()
+    Cons(h, t) ->
+      reverse_reverse(t)
+      reverse_onto_append(t, Cons(h, Nil))
+      reverse_append(reverse(t), Cons(h, Nil))
+      -- Steps the default fuel (2) does not reach on its own.
+      assert reverse_onto(Cons(h, Nil), Nil) == Cons(h, Nil)
+      assert reverse(Cons(h, Nil)) == Cons(h, Nil)
+      assert append(Cons(h, Nil), t) == Cons(h, t)
+    end
+  end
+
+  doc "The length of `reverse_onto(xs, acc)` is the sum of the lengths."
+  @[lemma]
+  fn len_reverse_onto(xs : List(a), acc : List(a)) : {Unit | len(reverse_onto(xs, acc)) == len(xs) + len(acc)} do
+    match xs do
+    Nil        -> ()
+    Cons(h, t) -> len_reverse_onto(t, Cons(h, acc))
+    end
+  end
+
+  doc "Reversing keeps the length."
+  @[lemma]
+  fn len_reverse(xs : List(a)) : {Unit | len(reverse(xs)) == len(xs)} do
+    len_reverse_onto(xs, Nil)
+  end
+
+  doc "`take`'s loop: `k` more elements onto the accumulator."
+  @[lemma]
+  fn len_take_onto(xs : List(a), k : {Int | _ >= 0 && _ <= len(xs)}, acc : List(a))
+    : {Unit | len(take_onto(xs, k, acc)) == k + len(acc)} do
+    if k <= 0 do
+      len_reverse(acc)
+    else
+      match xs do
+      Nil        -> ()
+      Cons(h, t) -> len_take_onto(t, k - 1, Cons(h, acc))
+      end
+    end
+  end
+
+  doc "`take(xs, n)` has `n` elements when `0 <= n <= len(xs)`."
+  @[lemma]
+  fn len_take(xs : List(a), n : {Int | _ >= 0 && _ <= len(xs)}) : {Unit | len(take(xs, n)) == n} do
+    len_take_onto(xs, n, Nil)
+  end
+
+  doc "`drop(xs, n)` has `len(xs) - n` elements when `0 <= n <= len(xs)`."
+  @[lemma]
+  fn len_drop(xs : List(a), n : {Int | _ >= 0 && _ <= len(xs)}) : {Unit | len(drop(xs, n)) == len(xs) - n} do
+    if n <= 0 do
+      ()
+    else
+      match xs do
+      Nil        -> ()
+      Cons(_, t) -> len_drop(t, n - 1)
+      end
+    end
+  end
+
+  doc "`take`'s loop and `drop` split a list at the same place."
+  @[lemma]
+  fn take_onto_drop(xs : List(a), k : Int, acc : List(a))
+    : {Unit | append(take_onto(xs, k, acc), drop(xs, k)) == append(reverse(acc), xs)} do
+    if k <= 0 do
+      ()
+    else
+      match xs do
+      Nil        -> ()
+      Cons(h, t) ->
+        take_onto_drop(t, k - 1, Cons(h, acc))
+        reverse_onto_append(acc, Cons(h, Nil))
+        append_assoc(reverse(acc), Cons(h, Nil), t)
+      end
+    end
+  end
+
+  doc "`append(take(xs, n), drop(xs, n)) == xs`."
+  @[lemma]
+  fn take_drop(xs : List(a), n : Int) : {Unit | append(take(xs, n), drop(xs, n)) == xs} do
+    take_onto_drop(xs, n, Nil)
   end
 
 end

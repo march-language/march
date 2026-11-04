@@ -1658,6 +1658,42 @@ variable, a literal, a constructor, or a call of a reflected function.
 Anything else, such as a call that prints, is the error
 `lemma_argument_impure`. Bind such a value to a name first.
 
+**Lemmas the standard library ships.** `List` comes with lemmas about its own
+functions. Call them like any lemma, qualified: `List.len_append(a, b)`. They
+are already proved, so a check does not prove them again (see below).
+
+| Lemma | Theorem |
+|---|---|
+| `List.append_nil(xs)` | `append(xs, Nil) == xs` |
+| `List.append_assoc(xs, ys, zs)` | `append(append(xs, ys), zs) == append(xs, append(ys, zs))` |
+| `List.len_append(xs, ys)` | `len(append(xs, ys)) == len(xs) + len(ys)` |
+| `List.reverse_append(xs, ys)` | `reverse(append(xs, ys)) == append(reverse(ys), reverse(xs))` |
+| `List.reverse_reverse(xs)` | `reverse(reverse(xs)) == xs` |
+| `List.len_reverse(xs)` | `len(reverse(xs)) == len(xs)` |
+| `List.len_take(xs, n)`, for `0 <= n <= len(xs)` | `len(take(xs, n)) == n` |
+| `List.len_drop(xs, n)`, for `0 <= n <= len(xs)` | `len(drop(xs, n)) == len(xs) - n` |
+| `List.take_drop(xs, n)` | `append(take(xs, n), drop(xs, n)) == xs` |
+
+```march
+fn need3(xs : {List(Int) | len(_) == 3}) : Int do 0 end
+
+fn f(a : {List(Int) | len(_) == 1}, b : {List(Int) | len(_) == 2}) : Int do
+  List.len_append(a, b)
+  need3(List.append(a, b))   -- proved
+end
+```
+
+`List.filter`'s result also has a proved length contract,
+`len(_) <= len(xs)`, alongside the existing one about its elements.
+
+**The stdlib's lemmas are proved once.** `stdlib/lemmas.verified` records each
+shipped lemma that proved, with a digest of the text of every file its
+theorem and proof reach. While a lemma's line still matches, the checker
+admits it without proving it again, so a program does not pay for the
+stdlib's proofs on every check. An edit to any file a lemma reaches changes
+its digest, and the lemma is proved again. `scripts/gen-lemma-manifest.sh`
+regenerates the file, and a test fails when it is stale.
+
 **What a lemma may be** (`invalid_lemma` otherwise):
 - its result type is `{Unit | P}`;
 - its body has no effects, no failure path and no `match` that might not

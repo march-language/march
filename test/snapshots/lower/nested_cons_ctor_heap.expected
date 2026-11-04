@@ -1,6 +1,6 @@
 -- types (1) --
 type Row = Row(List(Int))
--- fns (57) --
+-- fns (59) --
 ## List.all
 fn List.all(xs : List('a), pred : ('a) -> Bool) : Bool =
   case xs of
@@ -41,7 +41,7 @@ fn List.chunks(xs : List('a), size : Int) : List(List('a)) =
 go in
 let $t398 : '_ = <=(size, 0) in
 case $t398 of
-  True() -> __panic_site("stdlib/list.march", 1017);
+  True() -> __panic_site("stdlib/list.march", 1021);
 panic("List.chunks: size must be positive")
   _ -> let $t399 : '_ = alloc Nil() in
 go(xs, $t399)
@@ -267,7 +267,7 @@ fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1191);
+  Nil() -> __panic_site("stdlib/list.march", 1195);
 panic("List.maximum_int: empty list")
   Cons($f492, $f493) -> let t : '_ = $f493 in
 let h : '_ = $f492 in
@@ -285,7 +285,7 @@ fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1170);
+  Nil() -> __panic_site("stdlib/list.march", 1174);
 panic("List.minimum_int: empty list")
   Cons($f479, $f480) -> let t : '_ = $f480 in
 let h : '_ = $f479 in
@@ -462,10 +462,18 @@ go(n, $t14)
 
 ## List.reverse
 fn List.reverse(xs : List('a)) : List('a) =
-  let go : (List('a), List('a)) -> List('a) = letrec [go] in
-go in
-let $t88 : '_ = alloc Nil() in
-go(xs, $t88)
+  let $t81 : '_ = alloc Nil() in
+List.reverse_onto(xs, $t81)
+
+## List.reverse_onto
+fn List.reverse_onto(lst : List('a), acc : List('a)) : List('a) =
+  case lst of
+  Nil() -> acc
+  Cons($f83, $f84) -> let t : '_ = $f84 in
+let h : '_ = $f83 in
+let $t82 : '_ = alloc Cons(h, acc) in
+List.reverse_onto(t, $t82)
+  _ -> panic("non-exhaustive pattern match")
 
 ## List.scan_left
 fn List.scan_left(xs : List('a), acc : 'b, f : ('b) -> ('a) -> 'b) : List('b) =
@@ -527,10 +535,22 @@ alloc Some(t)
 
 ## List.take
 fn List.take(xs : List('a), n : Int) : List('a) =
-  let go : (List('a), Int, List('a)) -> List('a) = letrec [go] in
-go in
-let $t338 : '_ = alloc Nil() in
-go(xs, n, $t338)
+  let $t329 : '_ = alloc Nil() in
+List.take_onto(xs, n, $t329)
+
+## List.take_onto
+fn List.take_onto(lst : List('a), k : Int, acc : List('a)) : List('a) =
+  let $t330 : '_ = <=(k, 0) in
+case $t330 of
+  True() -> List.reverse(acc)
+  _ -> case lst of
+  Nil() -> List.reverse(acc)
+  Cons($f333, $f334) -> let t : '_ = $f334 in
+let h : '_ = $f333 in
+let $t331 : '_ = -(k, 1) in
+let $t332 : '_ = alloc Cons(h, acc) in
+List.take_onto(t, $t331, $t332)
+  _ -> panic("non-exhaustive pattern match")
 
 ## List.take_while
 fn List.take_while(xs : List('a), pred : ('a) -> Bool) : List('a) =

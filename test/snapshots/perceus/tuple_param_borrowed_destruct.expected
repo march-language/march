@@ -1,11 +1,10 @@
--- types (7) --
+-- types (6) --
 type Bytes.Bytes = Bytes(String)
 closure $Clo_go$0_List_range(Ptr(Unit), Int)
 closure $Clo_go$0_List_sum_int(Ptr(Unit))
 closure $Clo_go$0_List_product_int(Ptr(Unit))
 closure $Clo_go$0_List_minimum_int(Ptr(Unit))
 closure $Clo_go$0_List_maximum_int(Ptr(Unit))
-closure $Clo_go$0_List_reverse_List_Int(Ptr(Unit))
 -- fns (85) --
 ## Bytes.b64_alphabet
 fn Bytes.b64_alphabet() : '_ =
@@ -632,7 +631,7 @@ fn List.maximum_int(xs : List(Int)) : Int =
 case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
-__panic_site("stdlib/list.march", 1191);
+__panic_site("stdlib/list.march", 1195);
 panic("List.maximum_int: empty list")
   Cons($f772, $f773) -> dec_rc xs;
 let t : '_ = $f773 in
@@ -648,7 +647,7 @@ fn List.minimum_int(xs : List(Int)) : Int =
 case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
-__panic_site("stdlib/list.march", 1170);
+__panic_site("stdlib/list.march", 1174);
 panic("List.minimum_int: empty list")
   Cons($f759, $f760) -> dec_rc xs;
 let t : '_ = $f760 in
@@ -717,9 +716,20 @@ List.range_step_go$dps(next, stop, step, $trmc1)
 
 ## List.reverse$List_Int
 fn List.reverse$List_Int(xs : List(Int)) : List(Int) =
-  let go : (List(Int), List(Int)) -> List(Int) = alloc $Clo_go$0_List_reverse_List_Int(go$apply$0_List_reverse_List_Int) in
-let $t368 : '_ = alloc Nil() in
-call_ptr go(xs, $t368)
+  let $t361 : '_ = alloc Nil() in
+List.reverse_onto$List_Int$List_Int(xs, $t361)
+
+## List.reverse_onto$List_Int$List_Int
+fn List.reverse_onto$List_Int$List_Int(lst : List(Int), acc : List(Int)) : List(Int) =
+  case lst of
+  Nil() -> acc
+  Cons($f363, $f364) -> let t : '_ = $f364 in
+let h : '_ = $f363 in
+let $t362 : '_ = inc_rc h;
+alloc Cons(h, acc) in
+List.reverse_onto$List_Int$List_Int(t, $t362)
+  _ -> dec_rc acc;
+panic("non-exhaustive pattern match")
 
 ## List.sum_int
 fn List.sum_int(xs : List(Int)) : Int =
@@ -747,7 +757,9 @@ fn String.decode_go(b : Bytes, n : Int, i : Int, acc : List(Int)) : List(Int) =
   let $t289 : '_ = >=(i, n) in
 case $t289 of
   True() -> dec_rc $t289;
-List.reverse$List_Int(acc)
+let $rc_22 : '_ = List.reverse$List_Int(acc) in
+dec_rc acc;
+$rc_22
   _ -> dec_rc $t289;
 let byte : '_ = Bytes.get(b, i) in
 let $t796 : '_ = <(byte, 128) in
@@ -761,9 +773,9 @@ let $t799 : '_ = <(byte, 224) in
 case $t799 of
   True() -> dec_rc $t799;
 let $t801 : '_ = let $t800 : '_ = +(i, 1) in
-let $rc_22 : '_ = <($t800, n) in
+let $rc_23 : '_ = <($t800, n) in
 dec_rc $t800;
-$rc_22 in
+$rc_23 in
 case $t801 of
   True() -> dec_rc $t801;
 let b2 : '_ = let $t802 : '_ = +(i, 1) in
@@ -784,9 +796,9 @@ let $t811 : '_ = <(byte, 240) in
 case $t811 of
   True() -> dec_rc $t811;
 let $t813 : '_ = let $t812 : '_ = +(i, 2) in
-let $rc_23 : '_ = <($t812, n) in
+let $rc_24 : '_ = <($t812, n) in
 dec_rc $t812;
-$rc_23 in
+$rc_24 in
 case $t813 of
   True() -> dec_rc $t813;
 let b2 : '_ = let $t814 : '_ = +(i, 1) in
@@ -809,9 +821,9 @@ let $t826 : '_ = alloc Cons(byte, acc) in
 String.decode_go(b, n, $t825, $t826)
   _ -> dec_rc $t811;
 let $t828 : '_ = let $t827 : '_ = +(i, 3) in
-let $rc_24 : '_ = <($t827, n) in
+let $rc_25 : '_ = <($t827, n) in
 dec_rc $t827;
-$rc_24 in
+$rc_25 in
 case $t828 of
   True() -> dec_rc $t828;
 let b2 : '_ = let $t829 : '_ = +(i, 1) in
@@ -1003,9 +1015,9 @@ fn String.to_codepoints(s : String) : List(Int) =
   let b : '_ = Bytes.from_string(s) in
 let $t846 : '_ = Bytes.length(b) in
 let $t847 : '_ = alloc Nil() in
-let $rc_25 : '_ = String.decode_go(b, $t846, 0, $t847) in
+let $rc_26 : '_ = String.decode_go(b, $t846, 0, $t847) in
 dec_rc b;
-$rc_25
+$rc_26
 
 ## String.to_float
 fn String.to_float(s : '_) : '_ =
@@ -1128,23 +1140,6 @@ let $t296 : '_ = inc_rc i;
 let $t297 : '_ = alloc Cons(i, acc) in
 call_ptr go($t296, $t297)
 
-## go$apply$0_List_reverse_List_Int
-fn go$apply$0_List_reverse_List_Int($clo : Ptr(Unit), lst : List(Int), acc : List(Int)) : List(Int) =
-  let go : (List(Int), List(Int)) -> List(Int) = $clo in
-case lst of
-  Nil() -> dec_rc lst;
-dec_rc go;
-acc
-  Cons($f362, $f363) -> dec_rc lst;
-let t : '_ = $f363 in
-let h : '_ = $f362 in
-let $t361 : '_ = alloc Cons(h, acc) in
-call_ptr go(t, $t361)
-  _ -> dec_rc lst;
-dec_rc go;
-dec_rc acc;
-panic("non-exhaustive pattern match")
-
 ## go$apply$0_List_sum_int
 fn go$apply$0_List_sum_int($clo : Ptr(Unit), lst : List(Int), acc : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
@@ -1166,9 +1161,9 @@ fn main(_cap_console : Cap(IO.Console)) : () =
   let pair : (String, String) = ("hello", "world") in
 let $t853 : String = let $t852 : Int = process_pairs(pair, 3, 0) in
 int_to_string($t852) in
-let $rc_27 : () = println($t853) in
+let $rc_28 : () = println($t853) in
 dec_rc $t853;
-$rc_27
+$rc_28
 
 ## process_pairs
 fn process_pairs(pair : (String, String), n : Int, acc : Int) : Int =
@@ -1190,7 +1185,7 @@ let x : String = $f1 in
 x
   _ -> dec_rc pair;
 panic("non-exhaustive pattern match") in
-let $rc_26 : Int = String.byte_size(a) in
+let $rc_27 : Int = String.byte_size(a) in
 dec_rc a;
-$rc_26
+$rc_27
 
