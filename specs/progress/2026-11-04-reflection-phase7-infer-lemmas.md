@@ -68,3 +68,4 @@ inferred lemma calls: 1 proposed, 0 not inferred
 | RED control: skeleton names ignore the ones already given this run | case 5 fails (`f_lemma_2(ys)` missing) |
 | RED control: `rebind`/`once` switched off | case 4 still passes: the `assert` re-check also refuses a goal built across a rebinding, so that case pins the behaviour, not that layer |
 | `scripts/run-tests.sh` (full, before merging main) | all suites pass except `audit-baseline` 0/1, the stdlib count drift (198 → 214 enforced) that #1088 regenerated on main |
+| `scripts/run-tests.sh` (full, after merging main at b86c86a63) | all 13 suite invocations pass |
