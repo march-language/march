@@ -301,3 +301,24 @@ let insert_fn_attribute ~(src : string) ~(line : int) ~(col : int) ~(fn : string
         else None
       in
       Option.map (fun k -> (k, k, attr ^ " ")) kw
+
+(** [insert_statement ~src ~line ~col ~stmt] places the statement [stmt] on a
+    line of its own directly before the statement that starts at 1-based
+    [line], 0-based [col], at the same indentation (lemma-call inference,
+    reflection phase 7).  Returns the insertion as a byte range of the
+    ORIGINAL text: [(ofs, ofs, stmt ^ "\n" ^ indent)].  [None] when anything
+    but blanks precedes [col] on that line: the statement does not start its
+    own line, and inserting there would need a block. *)
+let insert_statement ~(src : string) ~(line : int) ~(col : int) ~(stmt : string) : (int * int * string) option =
+  let rec line_start i l =
+    if l <= 1 then Some i
+    else match String.index_from_opt src i '\n' with Some j -> line_start (j + 1) (l - 1) | None -> None
+  in
+  match line_start 0 line with
+  | None -> None
+  | Some ls ->
+    let at = ls + col in
+    if at > String.length src then None
+    else
+      let indent = String.sub src ls col in
+      if String.for_all (fun c -> c = ' ' || c = '\t') indent then Some (at, at, stmt ^ "\n" ^ indent) else None

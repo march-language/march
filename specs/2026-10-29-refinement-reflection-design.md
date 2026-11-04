@@ -1732,6 +1732,12 @@ At a skipped obligation whose stage-2 query failed with a recursive frontier ter
 to an existing lemma whose post mentions that term, or offer a lemma skeleton. Every proposal is
 checked before it is offered, as TERM phase 5 does for metrics.
 
+**Built (2026-11-04):** plan `specs/plans/2026-11-04-reflection-phase7-infer-lemmas-plan.md`,
+progress `specs/progress/2026-11-04-reflection-phase7-infer-lemmas.md`. The frontier terms are
+taken from the call's source arguments, not from the stage-2 query. Only preconditions are
+targets, because a function's own postcondition does not see lemma facts. A skeleton is checked
+by assuming its theorem at the call.
+
 ---
 
 ## 11. Decisions
