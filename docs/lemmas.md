@@ -67,6 +67,7 @@ chapter has the reference summary.
 - [Finding laws: `forge search --law`](#finding-laws-forge-search---law)
 - [Rewrites in the editor](#rewrites-in-the-editor)
 - [Interface laws](#interface-laws)
+- [Which functions have laws: `--law-coverage`](#which-functions-have-laws---law-coverage)
 - [Lemmas as a spec for code someone else writes](#lemmas-as-a-spec-for-code-someone-else-writes)
 
 **Limits**
@@ -802,6 +803,51 @@ They need the language server's refinement checking, which is on with `MARCH_LSP
 **Not on `main` yet.** Laws declared on an interface (say, `combine` is associative for every
 `Monoid`), which each `impl` must prove, or at least pass as tests, are being built. This
 section will describe them when they land.
+
+## Which functions have laws: `--law-coverage`
+
+`march --check --law-coverage FILE` lists the file's **pure** functions (the ones the checker
+reflects: they terminate, have no effects and cannot fail) by whether a law covers them. A law
+**covers** a function when its theorem calls it; a call inside the proof does not count. Only
+a proved lemma covers anything: one that is not proved is listed apart.
+
+```
+law coverage: M: 1 of 3 pure functions have a law (1 more only by unproved laws)
+  uncovered (public)  zip  m.march:30
+  unproved only  rev  m.march:8  (rev_rev)
+  covered  cat  m.march:2  (cat_nil, cat_assoc)
+  higher-order (no laws possible yet)  map2  m.march:41
+```
+
+A function that takes a function (`map2`) is listed apart and left out of the count: a lemma
+cannot yet take a function as a parameter. An `impl` method is listed under its impl
+(`impl Monoid for Int: combine`) when its interface declares laws, covered by them
+(`combine_assoc (via Monoid)`). `--law-coverage-json` prints one JSON object per function
+instead.
+
+**Covered is not the same as pinned down.** `--law-strength` makes small edits to each covered
+function's body, one at a time (return a parameter unchanged, swap two arguments, change a
+literal or a comparison, swap two match arms' results, drop the recursive call), and runs its
+laws on generated inputs with the edit in place. An edit every law still accepts is
+behaviour the laws leave open:
+
+```
+  covered  rev  m.march:8  (len_rev)
+    strength: 3 of 3 edits survive
+    survives: return `xs` unchanged  m.march:8
+    survives: drop the recursive call  m.march:11
+```
+
+`len_rev` says `rev` keeps the length, which returning `xs` unchanged also does. A law like
+`rev(cat(xs, ys)) == cat(rev(ys), rev(xs))` rules that edit out. Edits that do not change
+what the function returns (swapping the operands of `+`) are dropped, not reported. A function
+whose parameters have no input generator says `strength: not run (no input generator)`, and
+each function gets 5 seconds (`MARCH_LAW_STRENGTH_MS`), after which it says
+`strength: partial (budget)`.
+
+`forge audit --laws` prints the same report for every source file of a package, with laws from
+all of them counted (a law in `b.march` covers a function in `a.march`); `--strength` adds the
+edits. It needs no `forge.caps.lock` and exits 0: it is a to-do list, not a gate.
 
 ## Lemmas as a spec for code someone else writes
 

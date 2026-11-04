@@ -30,6 +30,13 @@ git log is authoritative for exact commits.
   closes the call, it prints the lemma that would, for you to prove. `--refine-infer-kinds=lemma`
   selects this kind on its own; the JSON output gains `lemma_calls` and `lemma_none`.
 
+- **Law coverage: which pure functions have laws, and how tightly.**
+  `march --check --law-coverage FILE` lists a file's pure functions by whether a proved
+  lemma's theorem calls them (unproved laws are shown apart, higher-order functions listed
+  separately), and `--law-coverage-json` gives the same as JSON. `--law-strength` adds, for
+  each covered function, the small edits to its body (return a parameter, swap arguments,
+  change a literal or comparison, swap match arms, drop the recursive call) that every law
+  covering it still accepts. `forge audit --laws [--strength]` runs it over a package.
 - **`List` ships lemmas about its own functions.** `List.append_nil`, `append_assoc`,
   `len_append`, `reverse_append`, `reverse_reverse`, `len_reverse`, `len_take`, `len_drop`
   and `take_drop` can be called from any program to give the refinement checker that
