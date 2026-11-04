@@ -1,5 +1,5 @@
 exit: 1
--- ERROR -------------- errors/linear_used_twice_24.march
+-- LINEARITY ---------- errors/linear_used_twice_24.march
 
 The affine value `c` is used more than once here. [linear_used_twice]
 Affine values may be used at most once.

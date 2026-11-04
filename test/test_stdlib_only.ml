@@ -516,7 +516,7 @@ let calls =
     ("epoch_release", "epoch_release()") ]
 
 let expected_message name =
-  Printf.sprintf "`%s` is internal to the standard library; %s" name
+  Printf.sprintf "`%s` is internal to the standard library; %s." name
     (List.assoc name !TB.stdlib_only)
 
 let errors_of ~shape src =

@@ -1,1 +1,1 @@
-{"severity":"error","file":"errors/cap_grant_26.march","start_line":20,"start_col":14,"end_line":20,"end_col":37,"message":"Chan.choose: label `:maybe` is not a valid branch of this protocol.","code":"session_choice_label","fix":null,"labels":[],"notes":[]}
+{"severity":"error","file":"errors/cap_grant_26.march","start_line":20,"start_col":14,"end_line":20,"end_col":37,"message":"Chan.choose: label `:maybe` is not a valid branch of this protocol.","code":"session_choice_label","fix":null,"labels":[],"notes":[],"category":"PROTOCOL"}

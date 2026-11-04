@@ -1,5 +1,5 @@
 exit: 1
--- ERROR --------- errors/deterministic_violation_1.march
+-- CONTRACT ------ errors/deterministic_violation_1.march
 
 `ts` in `mod LeakyDet` (declared `cap deterministic`) calls `unix_time_ms`, which is non-deterministic. [deterministic_violation]
 

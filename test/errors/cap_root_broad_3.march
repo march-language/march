@@ -1,4 +1,4 @@
--- EXPECT-ERROR: cap_narrow cannot produce
+-- EXPECT-ERROR: `cap_narrow` cannot produce
 -- Slice 6 (proof caps), the cap_narrow FORGE -- `cap_narrow`'s builtin type is
 -- polymorphic (`Cap(IO) -> Cap(a)`), so at a `Cap(Db.P)`-typed call site it
 -- instantiated `a := Db.P` and minted a nominal proof capability from an

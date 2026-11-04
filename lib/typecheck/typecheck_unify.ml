@@ -523,7 +523,7 @@ let rec unify env ~span ?(reason = None) ?provided t1 t2 =
             let forge_error p =
               Err.error ~code:Err.Code.cap_narrow_invalid env.errors ~span:cn_sp
                 (render_parts [
-                  MPText "cap_narrow cannot produce "; MPCode ("Cap(" ^ p ^ ")");
+                  MPCode "cap_narrow"; MPText " cannot produce "; MPCode ("Cap(" ^ p ^ ")");
                   MPText " — "; MPCode ("Cap(" ^ p ^ ")");
                   MPText " is a proof capability, not an IO capability.";
                   MPBreak;

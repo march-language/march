@@ -1,7 +1,7 @@
 exit: 1
--- ERROR --------------------- errors/cap_ceiling_4.march
+-- CAPABILITY ---------------- errors/cap_ceiling_4.march
 
-module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`. [import_cap_missing]
+Module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`. [import_cap_missing]
 help: add `needs IO.Mut` to the module body.
 
 19 |   use Vault
@@ -9,7 +9,7 @@ help: add `needs IO.Mut` to the module body.
 
 
 
--- ERROR --------------------- errors/cap_ceiling_4.march
+-- CAPABILITY ---------------- errors/cap_ceiling_4.march
 
 `main` performs IO but declares no grant. The program reaches `IO.Mut`; a `main` with no capability parameter is granted nothing. [cap_grant]
 help: declare the grant `main` actually needs —

@@ -91,4 +91,4 @@ Lemmas are proofs, and proofs must not change what a program does. A rule that l
 the program would cost time at run time. A rule that removed them along with their arguments'
 effects would change behaviour. Requiring pure arguments avoids both.
 
-See also: [the language reference](../refinement-types.md), `invalid_lemma`.
+See also: [the language reference](../refinement-types.md), [the lemmas guide](../lemmas.md), `invalid_lemma`.

@@ -1,7 +1,7 @@
 exit: 1
--- ERROR --------------------- errors/cap_ceiling_3.march
+-- CAPABILITY ---------------- errors/cap_ceiling_3.march
 
-module `CeilApp` uses `IO.FileRead` but does not declare `needs IO.FileRead`. [cap_ceiling]
+Module `CeilApp` uses `IO.FileRead` but does not declare `needs IO.FileRead`. [cap_ceiling]
 help: add `needs IO.FileRead` to the module body.
 
 9 |   needs IO.Console

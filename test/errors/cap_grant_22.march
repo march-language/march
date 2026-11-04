@@ -16,4 +16,3 @@ mod M do
     println("unreachable")
   end
 end
--- EXPECT-FIX-PARTIAL: the grant fix is right; the program also derives an unknown target (unknown_derive), a later stage

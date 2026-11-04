@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------ errors/type_mismatch_26.march
+-- TYPE MISMATCH ---------- errors/type_mismatch_26.march
 
 expected `Int` but got `Option(Int)`. [type_mismatch]
 

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------- errors/unknown_qualified_name_1.march
+-- NAMING --------- errors/unknown_qualified_name_1.march
 
 Module `List` does not export `size`. [unknown_qualified_name]
 

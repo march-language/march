@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------ errors/missing_method_1.march
+-- INTERFACE -------------- errors/missing_method_1.march
 
 Missing method `greet` in `impl Speak(Dog)`. [missing_method]
 Interface `Speak` requires this method to be implemented.

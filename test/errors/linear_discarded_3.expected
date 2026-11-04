@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------- errors/linear_discarded_3.march
+-- LINEARITY ------------ errors/linear_discarded_3.march
 
 This `_` discards a linear value of type `S1`. [linear_discarded]
 Linear values must be consumed exactly once. Bind it to a name and pass it to something that consumes it.

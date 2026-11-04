@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------ errors/refinement_violated_14.march
+-- REFINEMENT ------- errors/refinement_violated_14.march
 
 refinement violation: index must not be negative [refinement_violated]
 argument `n` of `List.nth` does not satisfy precondition `_ >= 0`

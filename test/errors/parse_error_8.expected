@@ -1,5 +1,5 @@
 exit: 1
--- ERROR --------------------- errors/parse_error_8.march
+-- SYNTAX -------------------- errors/parse_error_8.march
 
 `f(...)(...)` is not a chained call — March functions are not curried. [parse_error]
 

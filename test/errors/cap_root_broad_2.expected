@@ -1,14 +1,14 @@
 exit: 1
--- ERROR ------------------ errors/cap_root_broad_2.march
+-- PROGRAM ---------------- errors/cap_root_broad_2.march
 
-`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`) [stdlib_internal]
+`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`). [stdlib_internal]
 
 43 |     match get_cap(pid_of_int(1)) do
                        ^^^^^^^^^^
 
 
 
--- ERROR ------------------ errors/cap_root_broad_2.march
+-- TYPE MISMATCH ---------- errors/cap_root_broad_2.march
 
 expected `Cap(IO)` but got `ActorCap(a)`. [type_mismatch]
 

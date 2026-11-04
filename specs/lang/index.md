@@ -82,6 +82,7 @@ document outside `specs/lang/` and linked from here rather than duplicated.
 | Type system (tutorial companion to core-march-types.md) | [`type-system.md`](type-system.md) | canonical |
 | Linear types | [`linear-types.md`](linear-types.md) | canonical |
 | Refinement types | [`refinement-types.md`](refinement-types.md) | canonical |
+| Lemmas (proofs as code, `@[lemma]`) | [`lemmas.md`](lemmas.md) | canonical |
 | Session types | [`session-types.md`](session-types.md) | canonical |
 | Choreography | [`choreography.md`](choreography.md) | canonical |
 | Capabilities | [`capabilities.md`](capabilities.md) | canonical |

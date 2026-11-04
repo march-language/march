@@ -35,8 +35,8 @@ cited by line**, and a conformance corpus keeps it accurate.
 The conformance mechanism differs from the operational side. There is only **one**
 typechecker (it runs before both `eval` and `--compile`), so there is no output to
 *differentially* diff. Instead the anchor is the compiler's own `--check` mode
-(`march --check file.march`: exit 0 = well-typed, exit 1 + a `-- ERROR --`
-diagnostic = rejected). The corpus (§3) is split into **`accept/`** programs
+(`march --check file.march`: exit 0 = well-typed, exit 1 + an error
+diagnostic, headed by its category such as `-- TYPE MISMATCH --` = rejected). The corpus (§3) is split into **`accept/`** programs
 (must typecheck) and **`reject/`** programs (must be rejected *with a specific
 error message*). This catches both a spec that misdescribes the typechecker and a
 typechecker regression.
@@ -1755,7 +1755,7 @@ live-captured (`reject/t23_derive_unknown_interface`):
 
 ```
 Unknown derive target `Frobnicate` for type `Color`.
-Supported interfaces: Eq, Show, Hash, Ord, Json
+Supported interfaces: Eq, Show, Hash, Ord, Json.
 ```
 
 - **`Eq`/`Show`/`Hash`/`Ord`** each produce exactly ONE `DImpl` via the local
@@ -1834,7 +1834,7 @@ expand_satisfy(iface_n, type_n) =
     | Some iface ->
         methods = filter_map (fun md ->
             match List.assoc_opt md.md_name fns with
-            | None    -> error "satisfy Iface for Type: no function `md_name` found in scope."; None
+            | None    -> error "`satisfy Iface for Type`: no function `md_name` found in scope."; None
             | Some fn -> Some(md.md_name, fn)
           ) iface.iface_methods
         if length methods < length iface.iface_methods then []      -- desugar.ml:1703
@@ -1859,7 +1859,7 @@ live this task:
 - **Missing function for a required method** (this task's
   `reject/t24_satisfy_missing_function`):
   ```
-  satisfy Named for Person: no function `name` found in scope.
+  `satisfy Named for Person`: no function `name` found in scope.
   ```
 
 **All-or-nothing: satisfy never emits a partial impl.** If even ONE method
@@ -2316,8 +2316,8 @@ The `DActor` arm performs, in order (`typecheck.ml:6742–6821`):
    bound to `state_ty` (`:6790`: the field is read as `state.field`, *not*
    `self.field`) and each declared message param is in scope (`:6792–6798`). The
    body's inferred type is then unified against `state_ty` (`:6805–6806`); a
-   mismatch produces the rich `` handler '…' in actor '…' must return the state
-   type `` diagnostic (`:6811–6819`); this is what enforces the convention that
+   mismatch produces the `actor_handler_state_type` diagnostic ("The handler
+   for `…` in actor `…` must return the actor's new state, …") (`:6811–6819`); this is what enforces the convention that
    a handler ends by returning the *new* state record.
 
 #### 2.6.2 `spawn`: resolved by literal actor name at compile time
@@ -3512,7 +3512,7 @@ module that `use`s `Vault` without declaring `needs IO.Mut` itself is
 rejected:
 
 ```
-module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`.
+Module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`.
 help: add `needs IO.Mut` to the module body.
 ```
 
@@ -3662,7 +3662,7 @@ Two new `accept/` programs (`t49`-`t50`) and one new `reject/` program
 - **`t39_transitive_use_missing_cap`**: companion to `t49` with the `needs
   IO.Mut` line removed: `Main` `use`s `Vault` but declares no `needs` at all,
   so `declared_needs = []` covers no cap and Check 4 raises. Pinned: ``
-  module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is
+  Module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is
   not declared in `needs` ``.
 
 `check_types.sh`: **89/89 (50 accept, 39 reject)**, exit 0.
@@ -4142,7 +4142,7 @@ program above now rejects:
 
 ```
 $ march --check leaky_pure.march     # cap pure module calling file_write(...) — POST-FIX transcript
--- ERROR --  `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects.
+-- CONTRACT --  `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects.
 $ echo $?
 1
 ```
@@ -4190,7 +4190,7 @@ live-verified:** the exact program above now rejects:
 
 ```
 $ march --check guarded_partial.march   # cap no_panic; match h do Rood -> 1 end — POST-FIX
--- ERROR --  `describe` in `mod Guarded` (declared `cap no_panic`) contains a non-exhaustive `match`, which panics at runtime when no clause matches.
+-- CONTRACT --  `describe` in `mod Guarded` (declared `cap no_panic`) contains a non-exhaustive `match`, which panics at runtime when no clause matches.
 $ echo $?
 1
 ```

@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/endpoints_label_invalid_1.march","start_line":12,"start_col":12,"end_line":12,"end_col":16,"message":"Protocol `P`: the branch label `go` already names this message (`Go`), so the step cannot carry a label of its own. Remove `item:`.","code":"endpoints_label_invalid","fix":null,"labels":[],"notes":[],"category":"PROTOCOL"}

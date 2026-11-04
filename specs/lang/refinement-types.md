@@ -157,6 +157,7 @@ string was sanitized"): that is an opaque type's job, see
 | **Standard library** | Stdlib functions such as `List.head`, `List.nth` and `Option.unwrap` carry refinement contracts, so a user call site is checked against them. | [Standard Library](standard-library.md) |
 | **Linear types** | The other compile-time safety layer: linearity tracks *use*, refinements track *value*. | [Linear Types](linear-types.md) |
 | **Safety by construction** | Refinements are one of three orthogonal layers, beside capabilities and typestate. | [Safety by Construction](safety-by-construction.md) |
+| **Lemmas** | A `@[lemma]` proves what one unfolding cannot (induction); a proved lemma's theorem is a fact after each call. | [Lemmas]({{ site.baseurl }}/docs/lemmas/) |
 | **Tooling** | `forge refine` proposes a contract; `--refine-report` and `--refine-audit` say what was proved, skipped, or never looked at. | [Tooling](https://github.com/march-language/march/blob/main/docs/tooling.md) |
 
 ---
@@ -1465,6 +1466,10 @@ The checker expands only steps the facts decide. That is enough for
 `cat(xs, Nil) == xs` with `xs` unknown, which is true for every list and needs
 induction to show. A **lemma** is how you supply that proof.
 
+This section is the reference summary. [Lemmas]({{ site.baseurl }}/docs/lemmas/) is the
+full guide: writing proofs step by step, reading `lemma_unproved`, fuel, and what
+`forge test`, `forge doc`, `forge search --law` and the editor do with lemmas.
+
 A lemma is a function marked `@[lemma]`. Its result type is `{Unit | P}`: `P`
 is the theorem, and the body is the proof. The proof uses only what March
 already has:
@@ -1629,12 +1634,18 @@ The tests are separate programs. Your build still removes every lemma.
 the lemmas whose theorem calls it, under the heading "Laws", with the theorem
 as written. `forge search --law TEXT` finds lemmas whose theorem contains TEXT
 (case and spaces ignored) or calls a function named TEXT, and a plain name
-search for a function also finds the lemmas about it.
+search for a function also finds the lemmas about it. TEXT can also be a
+shape: in `forge search --law "f(f(x)) == x"` the one-letter `f` stands for
+any function and `x` for any term, so it finds `reverse(reverse(xs)) == xs`
+whatever the functions are called.
 
 **Rewrites in the editor.** When a proved lemma's theorem is an equation,
 `lhs == rhs`, the editor offers to rewrite an expression of the shape `lhs`
 into `rhs`, and names the lemma. With `cat_nil` proved, the cursor on
-`cat(Cons(1, zs), Nil)` offers "Rewrite to `Cons(1, zs)`". Only proved lemmas
+`cat(Cons(1, zs), Nil)` offers "Rewrite to `Cons(1, zs)`". The lemmas can be in
+the open file, a project file it uses, or the stdlib (those the stdlib's
+`lemmas.verified` lists); a lemma from another module has that module's
+functions qualified in the rewrite (`List.append(..)`). Only proved lemmas
 are offered, and only left to right.
 
 **Lemmas as a contract for changes.** A lemma states a law the code must keep,
@@ -4410,7 +4421,7 @@ Two generated examples, one per reason:
 ```
 $ march --check test/native/simd_lane_panic.march
 
--- HINT -- test/native/simd_lane_panic.march
+-- HINT: REFINEMENT -- test/native/simd_lane_panic.march
 
 precondition `0 <= _ && _ < 4` on `Simd.extract_i32x4` was NOT verified here.
 the argument `lane(1)` could not be translated to SMT, so no goal was built
@@ -4439,7 +4450,7 @@ end
 ```
 $ march --check up_doc.march
 
--- WARNING -- up_doc.march
+-- WARNING: REFINEMENT -- up_doc.march
 
 `is_prime` is not a measure or known predicate, so this refinement is not checked. Annotate the function `@[measure]`, or use a supported predicate.
 
@@ -4448,7 +4459,7 @@ $ march --check up_doc.march
 
 
 
--- HINT -- up_doc.march
+-- HINT: REFINEMENT -- up_doc.march
 
 precondition `is_prime(_)` on `f` was NOT verified here.
 the predicate's `is_prime(_)` has no SMT translation
@@ -4469,7 +4480,7 @@ error; see [the alias-withdrawal note](#a-withdrawn-alias-names-itself) below.
 ```
 $ march --check <file>
 
--- HINT -- <file>
+-- HINT: REFINEMENT -- <file>
 
 precondition `len(_) > 0` on `head` was NOT verified here.
 no fact the checker derived constrains `ys`
@@ -4481,7 +4492,7 @@ no fact the checker derived constrains `ys`
 The residual reasons still print the longer canned paragraph, unchanged:
 
 ```
--- HINT -- <file>
+-- HINT: REFINEMENT -- <file>
 
 precondition `len(_) > 0` on `head_of` was NOT verified here.
 reason: solver-undecided — the solver proved neither the predicate nor its negation
@@ -4910,7 +4921,7 @@ would silently do nothing. The checker warns about it (`unknown_attribute`),
 with a suggestion when the name is close to a known one:
 
 ```
-warning: unknown attribute `@[decrease]` on `f`: it is ignored.
+warning: Unknown attribute `@[decrease]` on `f`: it is ignored.
 note: did you mean `@[decreases]`?
 ```
 
@@ -6700,5 +6711,6 @@ golden corpus itself remains 46/46 MATCH.
 - [Type System](type-system.md): the types refinements attach to
 - [Linear Types](linear-types.md): the other compile-time safety layer
 - [Pattern Matching](pattern-matching.md): `match` guards feed path sensitivity
+- [Lemmas]({{ site.baseurl }}/docs/lemmas/): proving what one unfolding cannot, with `@[lemma]`
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/): `cap no_panic` and `cap verified` beside the other behavioral caps
 - [Safety by Construction](safety-by-construction.md): refinements as one of three layers

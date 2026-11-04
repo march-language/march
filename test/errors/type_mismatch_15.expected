@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ------------------ errors/type_mismatch_15.march
+-- TYPE MISMATCH ---------- errors/type_mismatch_15.march
 
 expected `Int` but got `String`. [type_mismatch]
 
@@ -10,7 +10,7 @@ expected `Int` but got `String`. [type_mismatch]
     run `march --explain type_mismatch`
 
 
--- ERROR ------------------ errors/type_mismatch_15.march
+-- PROTOCOL --------------- errors/type_mismatch_15.march
 
 Chan.close: channel is at `Recv(Int, End)` but I expected `End`. [session_state_mismatch]
 
@@ -19,7 +19,7 @@ Chan.close: channel is at `Recv(Int, End)` but I expected `End`. [session_state_
 
 
 
--- ERROR ------------------ errors/type_mismatch_15.march
+-- PROTOCOL --------------- errors/type_mismatch_15.march
 
 Chan.close: channel is at `Recv(Int, Send(Int, End))` but I expected `End`. [session_state_mismatch]
 

@@ -1,5 +1,5 @@
 exit: 1
--- ERROR ---------------- errors/overlapping_impl_3.march
+-- INTERFACE ------------ errors/overlapping_impl_3.march
 
 Overlapping implementation: `impl Descr(Box(Int))` conflicts with the implementation at errors/overlapping_impl_3.march:13:7 — their heads overlap. [overlapping_impl]
 A type may implement an interface at most once (coherence). If you meant a different behavior, wrap the type in a newtype and implement the interface on that.

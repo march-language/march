@@ -73,4 +73,4 @@ A theorem proved under a hypothesis says nothing where the hypothesis is false. 
 with an unproved precondition would fail at run time, but a lemma call never runs. So the only
 safe choice is to give the caller nothing.
 
-See also: [the language reference](../refinement-types.md), `lemma_unproved`, `refinement_violated`.
+See also: [the language reference](../refinement-types.md), [the lemmas guide](../lemmas.md), `lemma_unproved`, `refinement_violated`.

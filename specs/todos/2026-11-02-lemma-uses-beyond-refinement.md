@@ -9,27 +9,22 @@ This file records the ideas so none is lost. Split one into its own todo when it
 
 Done on 2026-11-03 (`specs/progress/2026-11-03-lemma-tests-laws-search.md`): idea 1 (an
 unproved lemma becomes a property test in `forge test`), idea 2 (admitted lemmas re-checked in
-the interpreter and a compiled program), idea 3 without status marks, idea 4 at the text level,
-and idea 10 (guidance); idea 5 for the open file's lemmas
-(`specs/progress/2026-11-03-lemma-refutation-and-rewrites.md`). What remains of them:
+the interpreter and a compiled program), idea 3 (status marks: march-language/march_doc#7), idea 4 (text, then shapes:
+`specs/progress/2026-11-03-law-shape-search.md`),
+and idea 10 (guidance); idea 5 (`specs/progress/2026-11-03-lemma-refutation-and-rewrites.md`,
+`specs/progress/2026-11-03-laws-across-files.md`), idea 6 (`specs/progress/2026-11-03-interface-laws.md`). What remains of them:
 
-3. **Laws in the docs: status marks.** `forge doc` lists the laws about each function
-   (march_doc), but not whether each is proved, tested or unproved. That needs the
-   `--reflect-deps` lemma rows (or `--lemma-test` lines) per file during `forge doc`, which
-   means a z3 check of every documented file.
-4. **Searching by law: shapes.** `forge search --law` matches theorem text and the functions
-   a theorem calls. Matching a law's shape (`f(f(x)) == x` finds every involution) is not
-   done.
-5. **Proof-backed rewrites: other files' lemmas.** The LSP rewrite
-   (`specs/progress/2026-11-03-lemma-refutation-and-rewrites.md`) uses the open file's lemmas
-   only. The stdlib's (phase 3) and dependencies' need their admitted status too.
+6. **Interface laws: what is left.**
+   - Generated proofs for derived impls: `derive` only produces impls of the built-in
+     interfaces (`Eq`, `Ord`, `Show`, `Hash`, `Json`), which declare no laws, so there is
+     nothing to generate yet. A law over `Eq` would also meet D7 (`==` in the logic is
+     structural, a hand-written `eq` opaque). `satisfy` impls are already covered: they are
+     expanded before the laws are.
+   - The compiled side of `--lemma-test`: a generated lemma has no source text, so the
+     compiled harness skips it ("compiled not run"); the interpreter side runs.
 
 The open ideas:
 
-6. **Interface laws.** `interface Monoid` declares `combine_assoc` and `empty_left` as lemmas
-   that every `impl` must discharge, as proofs or at least as idea 1's tests. A derived impl
-   could carry generated proofs. This is blocked by D7 (a hand-written `eq` is opaque) for laws
-   over `Eq`.
 7. **Versioning by behaviour.** A package's lemmas are part of its public interface:
    `forge publish` checks that the new version still proves the previous version's lemmas, so
    breaking a published law is flagged as a breaking change. Related:

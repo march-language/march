@@ -84,4 +84,4 @@ A lemma never runs, so nothing at run time checks its theorem. Facts from an unp
 be assumptions without evidence, and one false assumption is enough to "prove" any refinement in
 the program.
 
-See also: [the language reference](../refinement-types.md), `invalid_lemma`, `lemma_unproved_call`.
+See also: [the language reference](../refinement-types.md), [the lemmas guide](../lemmas.md), `invalid_lemma`, `lemma_unproved_call`.
