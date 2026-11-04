@@ -67,12 +67,13 @@ the tail engine instead (`Refine_post.check_post`), which reads the path conditi
 
 | Check | Result |
 |---|---|
-| `return-block-facts` (9 cases: `let` result, lemma + reflected result, reflected result, `assert`, branches, false contract, rebound parameter, unproved lemma, propagation to a caller under `@[opaque]`) | 9/9 |
+| `return-block-facts` (10 cases: `let` result, lemma + reflected result, reflected result, `assert`, branches, false contract, rebound parameter, unproved lemma, block-local `fn` with a shadowing sibling, propagation to a caller under `@[opaque]`) | 10/10 |
 | RED: fallback switched off | cases 0–4 and 8 fail |
 | RED: rebinding guard removed | case 6 fails (`let n = n - 5; n` proved `_ >= n`) |
 | RED: propagation, fallback off (`@[opaque] grow` called as `need_ge(n, grow(n))`) | the caller row goes from `proved` to `unreflectable-subject` |
 | RED: the module-level guard removed | the new local-`fn` control fails, as does `elemflow-local-fn` 15 (`(3, 0, 0)`: the false result proved) |
 | `scripts/run-tests.sh` (full, first run) | 7 failures, each read. Four lending controls (`gap-let-call-tail` 3 and 6, `demand-chains` 2 and 3) now prove a TRUE contract by unfolding the callee; they get `@[opaque]` on the callee so they keep testing what the contract alone lends. `elemflow-local-fn` 15 was the local-`fn` bug above. Golden `refinement_unverified_1` proved its true contract; it is re-based with `@[opaque] av`, its fourth re-base, and the style-allowlist failure followed from it |
+| `scripts/oracle-base.sh refine` against merge-base 673ff42c04 | IDENTICAL (570 fixtures, 8145 lines) |
 
 ## Expectations that moved (each a true contract, now proved)
 - `gap-let-call-tail` 3 and 6 and `demand-chains` 2 and 3: `b`'s result follows from `a`'s body
