@@ -1221,3 +1221,39 @@ let lemma_positions =
         let rows = need_rows out in
         if List.length rows <> 5 || List.mem "proved" rows then
           Alcotest.failf "want 5 unproved `need` rows:\n%s" out) ]
+
+(* ── A user name the stdlib also declares ─────────────────────────────────
+   todo 2026-11-04-unreflectable-predicate-hides-name-clash: a user `fn
+   unwrap` beside the prelude's resolves to the file's own (the typechecker's
+   rule, [Refine_term]'s own-file preference); a user `Reply` beside
+   `Channel.HandleResult`'s resolves by the reflected parameter's datatype. *)
+let clash_mod body = "mod CL do\n" ^ body ^ "end\n"
+
+let clash_unwrap = "  fn unwrap(x : Int) : Int do x + 1 end\n"
+
+let clash_msg =
+  "  type Msg = Reply(Int, Int) | Other\n  fn tag(m : Msg) : Int do\n    match m do\n      Reply(_, _) -> 1\n      Other -> 0\n    end\n  end\n"
+
+let name_clashes =
+  [ gated "clash_fn: a user `unwrap` is its own, not the prelude's" (fun () ->
+        let out =
+          run (clash_mod (clash_unwrap ^ "  @[lemma]\n  fn unwrap_gt(x : Int) : {Unit | unwrap(x) > x} do () end\n"))
+        in
+        expect_admitted out "unwrap_gt");
+    gated "clash_fn_red: a false theorem about the user `unwrap` is not proved" (fun () ->
+        let out =
+          run (clash_mod (clash_unwrap ^ "  @[lemma]\n  fn unwrap_big(x : Int) : {Unit | unwrap(x) > x + 1} do () end\n"))
+        in
+        if not (unproved out "unwrap_big" || refuted out "unwrap_big") then
+          Alcotest.failf "unwrap(x) > x + 1 is false:\n%s" out);
+    gated "clash_ctor: a user `Reply` resolves by the parameter's datatype" (fun () ->
+        let out =
+          run (clash_mod (clash_msg ^ "  @[lemma]\n  fn tag_reply(c : Int, v : Int) : {Unit | tag(Reply(c, v)) == 1} do () end\n"))
+        in
+        expect_admitted out "tag_reply");
+    gated "clash_ctor_red: a false theorem over the user `Reply` is not proved" (fun () ->
+        let out =
+          run (clash_mod (clash_msg ^ "  @[lemma]\n  fn tag_zero(c : Int, v : Int) : {Unit | tag(Reply(c, v)) == 0} do () end\n"))
+        in
+        if not (unproved out "tag_zero" || refuted out "tag_zero") then
+          Alcotest.failf "tag(Reply(c, v)) == 0 is false:\n%s" out) ]

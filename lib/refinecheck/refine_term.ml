@@ -474,11 +474,16 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
      basename, line, column): two positions under one key is an ambiguity
      ([graph.ambiguous]).  [globals] keeps its last-wins entry. *)
   let reg_pos : (string, (string * int * int) list) Hashtbl.t = Hashtbl.create 256 in
+  (* …and each one's file and unit, for [lookup]'s own-file rule. *)
+  let reg_ids : (string, (string * int) list) Hashtbl.t = Hashtbl.create 256 in
   let register_key key (sp : A.span) id =
     Hashtbl.replace globals key id;
     let pos = (Filename.basename sp.A.file, sp.A.start_line, sp.A.start_col) in
     let old = Option.value ~default:[] (Hashtbl.find_opt reg_pos key) in
-    if not (List.mem pos old) then Hashtbl.replace reg_pos key (pos :: old)
+    if not (List.mem pos old) then begin
+      Hashtbl.replace reg_pos key (pos :: old);
+      Hashtbl.replace reg_ids key ((sp.A.file, id) :: Option.value ~default:[] (Hashtbl.find_opt reg_ids key))
+    end
   in
   (* Every module path registered ("A.B."), so an [alias] name that is also a
      module name in scope is seen. *)
@@ -651,6 +656,25 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
      `List.fold_left` to an entry file's unrelated top-level `fold_left`
      (measured: `Deque.fold_left` came out as a two-member SCC with it). *)
   let cur = ref { sc_path = ""; sc_aliases = []; sc_uses = [] } in
+  (* The file of the declaration being walked ("" when unknown). *)
+  let cur_file = ref "" in
+  (* A key two declarations share, where exactly one is in the walked
+     declaration's own (non-stdlib) file and every other is the stdlib's (a
+     user `fn unwrap` beside the prelude's): the typechecker resolves the
+     file's own, so this is no ambiguity.  Stdlib code still sees both. *)
+  let own_file_decl key =
+    let f = !cur_file in
+    if f = "" || March_typecheck.Typecheck_builtins.file_is_stdlib f then None
+    else
+      match Hashtbl.find_opt reg_ids key with
+      | Some ids -> (
+        match List.partition (fun (file, _) -> file = f) ids with
+        | [ (_, id) ], others
+          when others <> [] && List.for_all (fun (file, _) -> March_typecheck.Typecheck_builtins.file_is_stdlib file) others ->
+          Some id
+        | _ -> None)
+      | None -> None
+  in
   let candidates path =
     (* "A.B." -> ["A.B."; "A."; ""] *)
     let segs = String.split_on_char '.' path |> List.filter (( <> ) "") in
@@ -671,7 +695,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     | A.UseExcept ns -> not (List.exists (fun (m : A.name) -> m.A.txt = n) ns)
     | A.UseSingle -> false
   in
-  let lookup ?(track = false) tbl n =
+  let lookup ?(track = false) ?(prefer = fun _ -> None) tbl n =
     if track then begin
       (* An alias whose name is also a module visible here: which one a
          dotted name means is the typechecker's call, not ours. *)
@@ -695,6 +719,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       List.find_map
         (fun p ->
           match Hashtbl.find_opt tbl (p ^ n) with
+          | Some _ when prefer (p ^ n) <> None -> prefer (p ^ n)
           | Some r ->
             if track then begin
               (* Two declarations under this key, or a [use] at the same
@@ -770,9 +795,9 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     | Some (Var | Param) -> T_value
     | None -> (
       let found =
-        match lookup ~track:true globals n with
+        match lookup ~track:true ~prefer:own_file_decl globals n with
         | Some id -> Some id
-        | None when arity >= 0 -> lookup ~track:true globals (Printf.sprintf "%s$%d" n arity)
+        | None when arity >= 0 -> lookup ~track:true ~prefer:own_file_decl globals (Printf.sprintf "%s$%d" n arity)
         | None -> None
       in
       match found with
@@ -949,6 +974,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     (function
       | `Fn (id, (def : A.fn_def), scope) ->
         cur := scope;
+        cur_file := def.A.fn_name.A.span.A.file;
         set_measure := is_set_measure def;
         in_lemma := List.mem "lemma" def.A.fn_attrs;
         List.iter
@@ -963,6 +989,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
           def.A.fn_clauses
       | `Handler (id, (h : A.actor_handler), scope) ->
         cur := scope;
+        cur_file := "";
         set_measure := false;
         in_lemma := false;
         let params = List.map (fun (p : A.param) -> p.A.param_name.A.txt) h.A.ah_params in
@@ -972,6 +999,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
         walk ~src:id ~owner ~lam:false (bind_params (bind_vars SM.empty [ "state" ]) params) h.A.ah_body
       | `Expr (id, (owner : owner), scope) ->
         cur := scope;
+        cur_file := "";
         set_measure := false;
         in_lemma := false;
         walk ~src:id ~owner ~lam:false
