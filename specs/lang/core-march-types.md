@@ -2937,6 +2937,11 @@ success, return a FRESH `TChan (ref cont)` (a new mutable ref, not the same
 one), matching the linear discipline: the old endpoint value is gone, only
 the newly-returned one is live.
 
+> **2026-11-04 (diagnostics §F3):** the wrong-state messages quoted below were reworded to plain
+> terms, e.g. ``` `Chan.recv` can't receive here: at this point the channel must send an `Int`. ```,
+> with a note listing the steps left on the channel and a label on the protocol it follows
+> (`report_session_state` in `lib/typecheck/typecheck.ml`). The quotes below are the earlier text.
+
 - **`Chan.new(Proto)` (`typecheck.ml:4323–4362`).** Not itself a state
   transition (there is no incoming channel), but the entry point that
   MANUFACTURES the first `TChan` values: the sole argument must resolve to a

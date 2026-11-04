@@ -146,6 +146,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: a session-channel call at the wrong step of its protocol reads in plain terms:
+  "`Chan.send` can't send here: at this point the channel must receive an `Int`", with the steps
+  left on the channel and a label on the protocol it follows, instead of "channel is at
+  `Recv(Int, End)` but I expected `Send(T, ...)`". `march --explain session_state_mismatch` has a
+  page.
+
 - **`forge deploy hot` refuses a migration law it can't prove, instead of letting it through.**
   An unproved or unchecked law (a predicate the schema can't record, an `@invariant` outside
   the supported grammar, a baseline from a compiler older than the contract check) refuses the
