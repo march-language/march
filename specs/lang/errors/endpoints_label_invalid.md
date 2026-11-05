@@ -1,0 +1,68 @@
+---
+layout: docs
+title: "endpoints_label_invalid"
+permalink: /docs/errors/endpoints_label_invalid/
+---
+
+# `endpoints_label_invalid`: a message label on an `@[endpoints]` protocol step cannot be used
+
+In an `@[endpoints]` protocol, a lowercase label in front of a step
+(`item: A -> B : Int`) names the message, and the generated functions are
+named after it (`send_Item`, `recv_Item`). Some labels have nothing to name or
+would clash with a generated name. A label on the first step of a `choose`
+branch is one: the branch label already names that message. A label that
+starts with `msg_` is another: it has the shape of the names the compiler
+makes up for unlabelled steps. The error says which case applies and what to
+change.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Order do
+    choose by Buyer:
+      buy -> item: Buyer -> Shop : Int
+      skip -> Buyer -> Shop : Bool
+    end
+  end
+
+  fn main(c : Cap(IO)) do () end
+end
+```
+
+The `buy` branch label already names the first message of that branch
+(`Buy`), so `item:` has nothing left to name.
+
+## The fix
+
+Remove the step's own label. The branch label names the message:
+
+```march
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Order do
+    choose by Buyer:
+      buy -> Buyer -> Shop : Int
+      skip -> Buyer -> Shop : Bool
+    end
+  end
+
+  fn main(c : Cap(IO)) do () end
+end
+```
+
+## Why the rule exists
+
+Each message gets exactly one name, and the generated functions are
+called after it. Two names for one message, or a name that could collide with
+one the compiler made up, would make the generated API depend on which name
+won. The compiler refuses the label instead of silently ignoring it.
+
+See also: [messages and labels](../choreography.md#messages-and-labels).

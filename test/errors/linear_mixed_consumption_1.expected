@@ -38,7 +38,7 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
                       ^^
 
 
-    `rb` was already consumed here:
+    `rb` was already consumed here, in the `Some(cap)` arm:
 
 26 |         match send_checked(cap, RBJob(rb)) do
                                            ^^

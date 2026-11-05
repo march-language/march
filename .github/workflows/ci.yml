@@ -533,7 +533,22 @@ jobs:
           #   discharges List.pfilter's `chunks(xs, csize2)` — the one pure
           #   local-value-flow site in the stdlib.
           #
-          #   RAISED 2026-11-05, 42 -> 43, deliberately: the stdlib lemma
+          #   RAISED 2026-11-04, 42 -> 46, deliberately: stdlib/udp.march
+          #   (new, `cap verified`) proves four postconditions through
+          #   `List.length` (send_batch, send_batch_connected and send_many
+          #   return `len(payloads)`; open_sharded returns `n` sockets). In
+          #   every user program they prove (`march --check --refine-report
+          #   stdlib/udp.march`: 23 proved, 0 skipped). THIS file is the one
+          #   unit where they cannot: it defines `List.length`, which by
+          #   design withdraws the `List.length` -> `len` alias for the whole
+          #   unit. Attributed with --refine-report-sites: the 46 are main's
+          #   42 (aho_corasick 12, dataframe 22, decimal 1, rrb_vec 1, this
+          #   file 6) plus exactly those four udp.march sites. A spelling
+          #   that avoids the alias does not prove (a counting function's
+          #   `_ == len(xs)` is solver-undecided): see
+          #   specs/todos/2026-11-04-refine-result-payload-recursion.md.
+          #
+          #   RAISED 2026-11-05, 46 -> 47, deliberately: the stdlib lemma
           #   sweep S1 added `List.take_append`, whose theorem
           #   `take(append(xs, ys), len(xs)) == xs` is an unreflectable-
           #   predicate skip in THIS run only. Checked as user code,
@@ -543,7 +558,7 @@ jobs:
           #   from stdlib/lemmas.verified as trusted. Attributed by diffing
           #   the --refine-report-sites=all skip rows of this file against
           #   main's stdlib: that one row is the only new skip
-          #   (135 proved / 42 skipped -> 148 proved / 43 skipped).
+          #   (154 proved / 46 skipped -> 167 proved / 47 skipped).
           #
           #   Lower is better — this bound
           #   may only ever be revised DOWN. This is the check that is
@@ -564,7 +579,7 @@ jobs:
           #   guard_discharges.march, whose `user code` slice is 1 proved /
           #   0 violated / 0 skipped (measured 2026-07-29). Higher is better
           #   — this bound may only ever be revised UP.
-          baseline=43
+          baseline=47
           proved_floor=1
           floor_fixture=specs/lang/types/accept/t118_refine_length_guard_discharges.march
           dune build bin/main.exe

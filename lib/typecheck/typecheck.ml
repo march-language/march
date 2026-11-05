@@ -117,13 +117,22 @@ let lin_display_name n =
     between two sites: without the label the reader knows only that the value
     was already gone, not what took it. *)
 let report_double_use ?(notes = []) env ~lin le ~span =
+  if not !(le.le_poisoned) then
   let name = lin_display_name le.le_name in
   let labels =
     match !(le.le_first_use) with
     | None -> []
     | Some first ->
+      (* F5: say WHERE the first consumption sits when that is not plain
+         straight-line code: one arm of a `match`, one branch of an `if`, or
+         a closure body that runs once per iteration. *)
+      let where =
+        match List.assoc_opt first !(le.le_where) with
+        | Some w -> ", " ^ w
+        | None -> ""
+      in
       [{ Err.lbl_span = first;
-         Err.lbl_message = Printf.sprintf "`%s` was already consumed here" name }]
+         Err.lbl_message = Printf.sprintf "`%s` was already consumed here%s" name where }]
   in
   let message =
     match lin with
@@ -390,11 +399,26 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
     ) env bindings
 
 let report_linear_never_used env ~scope_span le =
-  Err.error ~code:Err.Code.linear_never_used env.errors ~span:scope_span
-    (Printf.sprintf
-       "The linear value `%s` was never used.\n\
-        Linear values must be consumed exactly once — did you \
-        mean to pass it somewhere?" (lin_display_name le.le_name))
+  if not !(le.le_poisoned) then
+  match !(le.le_exit) with
+  | [] ->
+    Err.error ~code:Err.Code.linear_never_used env.errors ~span:scope_span
+      (Printf.sprintf
+         "The linear value `%s` was never used.\n\
+          Linear values must be consumed exactly once — did you \
+          mean to pass it somewhere?" (lin_display_name le.le_name))
+  | labels ->
+    (* F5: it IS consumed, but only on paths that never return; name the
+       path that returns without consuming it ([join_linear_paths]). *)
+    Err.report env.errors
+      { Err.severity = Err.Error; span = scope_span;
+        message =
+          Printf.sprintf
+            "The linear value `%s` was never used on a path that returns.\n\
+             It is consumed only on paths that never return (they end in \
+             `panic`), so wherever the function does return the value is \
+             dropped. Consume it on that path too." (lin_display_name le.le_name);
+        labels; notes = []; code = Err.Code.linear_never_used; fix = None }
 
 (** After a scope closes, check that every in-scope linear var was used. *)
 let check_linear_all_consumed env ~scope_span in_scope_names =
@@ -567,7 +591,7 @@ let rec judge_pending ?(defer = true) env ~scope_span entries =
             | Some span -> report_double_use env ~lin le ~span
             | None -> ());
            (match !(le.le_mixed) with
-            | Some span when lin = Ast.Linear ->
+            | Some span when lin = Ast.Linear && not !(le.le_poisoned) ->
               Err.error ~code:Err.Code.linear_mixed_consumption env.errors ~span (mixed_message (lin_display_name le.le_name))
             | _ -> ());
            if lin = Ast.Linear && not !(le.le_used) then
@@ -753,10 +777,9 @@ let actor_enclosing env (sp : Ast.span) =
       then Some (String.sub k n (String.length k - n)) else acc) env.decl_sites None
 
 (** The [ambiguous_constructor] hint for a constructor several types define.
-    An actor's message type is generated (`<Actor>_Msg`) and cannot be named
-    in a program, so it is described as the actor's message and never offered
-    as the qualifier; when every candidate is an actor message, the advice is
-    to rename a handler. *)
+    An actor's message is described as the actor's message and qualified by
+    the actor (`Counter.Tally`, which [register_actor_ctors] registers), not
+    by its generated `<Actor>_Msg` type name. *)
 let ambiguous_ctor_hint env ctor all_types =
   let actor_of t =
     let is_msg = match StrMap.find_opt ctor env.ctors with
@@ -771,18 +794,20 @@ let ambiguous_ctor_hint env ctor all_types =
     | Some a -> Printf.sprintf "a message of actor `%s`" a
     | None -> "`" ^ t ^ "`"
   in
-  let listed = String.concat ", " (List.map describe all_types) in
-  match List.filter (fun t -> actor_of t = None) all_types with
-  | t :: _ ->
+  let qualified t =
+    Printf.sprintf "`%s.%s`" (Option.value ~default:t (actor_of t)) ctor in
+  let spellings = String.concat " or " (List.map qualified all_types) in
+  if List.for_all (fun t -> actor_of t <> None) all_types then
     Printf.sprintf
-      "Constructor `%s` is defined by multiple types (%s). \
-       Use a qualified form to disambiguate, e.g. `%s.%s`." ctor listed t ctor
-  | [] ->
-    Printf.sprintf
-      "`%s` is a message of more than one actor (%s), and a message cannot be \
-       qualified by its actor; rename one of the handlers." ctor
+      "`%s` is a message of more than one actor (%s); qualify it by its actor: %s." ctor
       (String.concat ", " (List.filter_map (fun t ->
            Option.map (fun a -> "`" ^ a ^ "`") (actor_of t)) all_types))
+      spellings
+  else
+    Printf.sprintf
+      "Constructor `%s` is defined by multiple types (%s). \
+       Use a qualified form to disambiguate: %s." ctor
+      (String.concat ", " (List.map describe all_types)) spellings
 
 (** Infer the type that a pattern *expects*, and return the list of
     (name, scheme) bindings it introduces.
@@ -1185,14 +1210,23 @@ let capture_snapshot env = List.map (fun le -> (le, !(le.le_used))) env.lin
     local [fn ... end], could capture a linear value and duplicate it. *)
 let check_captures env ~span snapshot =
   List.iter (fun (le, was_used) ->
-      if not was_used && !(le.le_used) && effective_lin env le <> Ast.Unrestricted then
+      if not was_used && !(le.le_used) && effective_lin env le <> Ast.Unrestricted then begin
+        (* F5: a later use of [le] is a double use whose first consumption
+           sits in this closure body, which runs once per call. *)
+        (match !(le.le_first_use) with
+         | Some sp when not (List.mem_assoc sp !(le.le_where)) ->
+           le.le_where :=
+             (sp, "inside a closure that can run more than once (each \
+                   iteration consumes it)") :: !(le.le_where)
+         | _ -> ());
         let name = lin_display_name le.le_name in
         Err.error ~code:Err.Code.linear_captured env.errors ~span
           (Printf.sprintf
              "The linear value `%s` cannot be captured by a closure.\n\
               A closure may be called multiple times, which would violate \
               the exactly-once guarantee.\n\
-              Pass `%s` as a parameter to the closure instead." name name))
+              Pass `%s` as a parameter to the closure instead." name name)
+      end)
     snapshot
 
 (* ── Linear discards by a wildcard ─────────────────────────────────── *)
@@ -1219,7 +1253,49 @@ let rec path_diverges (e : Ast.expr) =
 
 (* ── Linear values across branches ───────────────────────────────── *)
 
+(** A match arm's pattern as the user wrote it, for naming the arm in a
+    linearity label ("the `Some(v)` arm").  [None] when it would be too long
+    to read inline; the caller then names the arm by its line. *)
+let show_arm_pattern (p : Ast.pattern) : string option =
+  let lit = function
+    | Ast.LitInt n -> string_of_int n
+    | Ast.LitFloat f -> Printf.sprintf "%g" f
+    | Ast.LitString s -> Printf.sprintf "%S" s
+    | Ast.LitBool b -> string_of_bool b
+    | Ast.LitAtom a -> ":" ^ a
+  in
+  let rec go (p : Ast.pattern) =
+    match p with
+    | Ast.PatWild _ -> "_"
+    | Ast.PatVar n -> n.txt
+    | Ast.PatCon (n, []) -> n.txt
+    | Ast.PatCon (n, ps) -> n.txt ^ "(" ^ String.concat ", " (List.map go ps) ^ ")"
+    | Ast.PatAtom (a, [], _) -> ":" ^ a
+    | Ast.PatAtom (a, ps, _) -> ":" ^ a ^ "(" ^ String.concat ", " (List.map go ps) ^ ")"
+    | Ast.PatTuple (ps, _) -> "(" ^ String.concat ", " (List.map go ps) ^ ")"
+    | Ast.PatLit (l, _) -> lit l
+    | Ast.PatRecord (fs, _) ->
+      "{ " ^ String.concat ", " (List.map (fun ((n : Ast.name), fp) ->
+          match fp with
+          | Ast.PatVar v when v.txt = n.txt -> n.txt
+          | _ -> n.txt ^ ": " ^ go fp) fs) ^ " }"
+    | Ast.PatAs (p, n, _) -> go p ^ " as " ^ n.txt
+    | Ast.PatOr (ps, _) -> String.concat " | " (List.map go ps)
+  in
+  let s = go p in
+  if String.length s <= 40 && not (String.contains s '$') then Some s else None
+
+(** The noun phrase naming one arm of a [match]: "the `Some(v)` arm", or "the
+    arm on line N" for a pattern too long to quote. *)
+let describe_arm (br : Ast.branch) =
+  match show_arm_pattern br.branch_pat with
+  | Some p -> Printf.sprintf "the `%s` arm" p
+  | None ->
+    Printf.sprintf "the arm on line %d" (span_of_expr br.branch_body).Ast.start_line
+
+
 let report_mixed_consumption env ~span le ~consumed_at ~skipped =
+  if not !(le.le_poisoned) then
   let name = lin_display_name le.le_name in
   let labels =
     (match consumed_at with
@@ -1250,15 +1326,33 @@ let report_mixed_consumption env ~span le ~consumed_at ~skipped =
     reported here for a decided entry and recorded in [le_mixed] for a pending
     one, and the entry is then marked consumed so the scope's close does not
     add a second report. *)
-let join_linear_paths env ~span snapshot results =
-  let results = List.map (fun (body, flags) -> (body, Array.of_list flags)) results in
+let join_linear_paths ?all_note env ~span snapshot results =
+  let results =
+    List.map (fun (body, desc, flags) -> (body, desc, Array.of_list flags)) results in
   List.iteri (fun i (le, was, was_first) ->
-      let per_path = List.map (fun (body, flags) -> (body, flags.(i))) results in
-      let any_used = List.exists (fun (_, (u, _)) -> u) per_path in
-      let first_span = List.find_map (fun (_, (u, sp)) -> if u then sp else None) per_path in
+      let per_path = List.map (fun (body, desc, flags) -> (body, desc, flags.(i))) results in
+      let any_used = List.exists (fun (_, _, (u, _)) -> u) per_path in
+      let first_span = List.find_map (fun (_, _, (u, sp)) -> if u then sp else None) per_path in
       let union () =
         le.le_used := any_used;
         le.le_first_use := (if any_used then first_span else was_first)
+      in
+      (* F5: remember which path each consuming use sits on, for a later
+         "used more than once" label.  An inner construct has already said
+         where its own uses sit, and the innermost description is the one
+         that locates the use, so an existing entry is kept. *)
+      let note_where ~every =
+        List.iter (fun (_, desc, (u, sp)) ->
+            match desc, sp with
+            | Some d, Some sp when u && not (List.mem_assoc sp !(le.le_where)) ->
+              let w =
+                match all_note with
+                | Some n when every -> Printf.sprintf "in %s (%s)" d n
+                | _ -> "in " ^ d
+              in
+              le.le_where := (sp, w) :: !(le.le_where)
+            | _ -> ())
+          per_path
       in
       if was then begin
         le.le_used := true; le.le_first_use := was_first
@@ -1277,20 +1371,47 @@ let join_linear_paths env ~span snapshot results =
         in
         let strict = (le.le_pending <> None || le.le_lin = Ast.Linear) && not is_channel in
         let fall =
-          List.filter (fun (body, _) ->
+          List.filter (fun (body, _, _) ->
               match body with Some e -> not (path_diverges e) | None -> true)
             per_path
         in
-        let used_fall = List.filter (fun (_, (u, _)) -> u) fall in
+        let used_fall = List.filter (fun (_, _, (u, _)) -> u) fall in
+        let every_path =
+          List.length per_path > 1
+          && List.for_all (fun (_, _, (u, _)) -> u) per_path in
+        if any_used then note_where ~every:every_path;
         if not strict || fall = [] || not any_used
            || List.length used_fall = List.length fall then union ()
         else if used_fall = [] then begin
           (* Consumed only on paths that never return: nothing after them runs,
-             so on every path that does return it is still unconsumed. *)
+             so on every path that does return it is still unconsumed.  F5:
+             keep the paths for [report_linear_never_used] to name. *)
+          let name = lin_display_name le.le_name in
+          let consumed =
+            List.find_map (fun (_, _, (u, sp)) -> if u then sp else None) per_path in
+          let skipped =
+            List.find_map (fun (body, desc, _) ->
+                match body with Some e -> Some (e, desc) | None -> None) fall in
+          le.le_exit :=
+            (match consumed with
+             | Some sp ->
+               [ { Err.lbl_span = sp;
+                   Err.lbl_message =
+                     Printf.sprintf "`%s` is consumed here, but this path never returns" name } ]
+             | None -> [])
+            @ (match skipped with
+               | Some (e, desc) ->
+                 [ { Err.lbl_span = span_of_expr e;
+                     Err.lbl_message =
+                       Printf.sprintf "%s returns without consuming `%s`"
+                         (match desc with
+                          | Some d -> String.capitalize_ascii d
+                          | None -> "This path") name } ]
+               | None -> []);
           le.le_used := false; le.le_first_use := was_first
         end else begin
-          let consumed_at = match used_fall with (_, (_, sp)) :: _ -> sp | [] -> None in
-          let skipped = List.find_map (fun (body, (u, _)) -> if u then None else body) fall in
+          let consumed_at = match used_fall with (_, _, (_, sp)) :: _ -> sp | [] -> None in
+          let skipped = List.find_map (fun (body, _, (u, _)) -> if u then None else body) fall in
           (match le.le_pending with
            | Some _ -> if !(le.le_mixed) = None then le.le_mixed := Some span
            | None -> report_mixed_consumption env ~span le ~consumed_at ~skipped);
@@ -1801,13 +1922,11 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) ?pid_expr (msg : Ast.
          in
          let advice = match alternatives, ctor_name with
            | a :: _, Some c ->
-             ignore a;
              Printf.sprintf
-               "`%s` is also a handler of %s, but a bare `%s` resolves to `%s`'s, \
-                and an actor message cannot be qualified by its actor; rename \
-                one of the two handlers."
+               "`%s` is also a handler of %s, but a bare `%s` resolves to `%s`'s; \
+                qualify it by the actor: `%s.%s`."
                c (String.concat ", " (List.map (fun a -> "`" ^ a ^ "`") alternatives))
-               c owner_name
+               c owner_name a c
            | _ ->
              Printf.sprintf "Send it to a pid spawned from `%s`, or send this actor one \
                              of its own messages." owner_name
@@ -1849,7 +1968,8 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) ?pid_expr (msg : Ast.
            | None -> [], []
            | Some a ->
              let own = StrMap.fold (fun cname cis acc ->
-                 if List.exists (fun (ci : ctor_info) ->
+                 if not (String.contains cname '.')   (* bare keys, not `A.Msg` *)
+                 && List.exists (fun (ci : ctor_info) ->
                      ci.ci_is_actor_msg && ci.ci_type = a ^ msg_sfx) cis
                  then cname :: acc else acc) env.ctors []
                        |> List.sort_uniq String.compare in
@@ -2276,9 +2396,42 @@ let relocate_callback_mismatch env ~mark (e : Ast.expr) sp inferred expected =
      | _ -> ())
   | _ -> ()
 
+(** Poison (§X3, F5): [e] failed its type check, an error was reported
+    inside it, and its type came out [TError].  A linear value passed to it
+    directly (`snik(t)` with `snik` misspelled, `t.foo` on a non-record) has
+    an unknown fate, so no linearity error follows on it ([le_poisoned]).
+    Only DIRECT operands: in `sink(t) + "x"` the call `sink(t)` checked fine
+    and its consumption of [t] is real. *)
+let poison_linear_operands env (e : Ast.expr) =
+  let operands =
+    match e with
+    | Ast.EApp (_, args, _) | Ast.ECon (_, args, _) -> args
+    | Ast.EField (base, _, _) -> [ base ]
+    | _ -> []
+  in
+  let rec var_span (o : Ast.expr) =
+    match o with
+    | Ast.EVar _ | Ast.EField (Ast.EVar _, _, _) -> Some (span_of_expr o)
+    | Ast.EAnnot (inner, _, _) -> var_span inner
+    | _ -> None
+  in
+  let within (inner : Ast.span) (outer : Ast.span) =
+    inner.file = outer.file
+    && (inner.start_line, inner.start_col) >= (outer.start_line, outer.start_col)
+    && (inner.end_line, inner.end_col) <= (outer.end_line, outer.end_col)
+  in
+  let spans = List.filter_map var_span operands in
+  if spans <> [] then
+    List.iter (fun le ->
+        match !(le.le_first_use) with
+        | Some u when List.exists (within u) spans -> le.le_poisoned := true
+        | _ -> ())
+      env.lin
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
+  let errors_mark = env.errors.Err.diagnostics in
   let result =
     match e with
     (* ── Literals ─────────────────────────────────────────────────── *)
@@ -3404,6 +3557,58 @@ let rec infer_expr env (e : Ast.expr) : ty =
            if n <= 0 then t
            else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
          peel arity f_ty
+       | Some (name, arity, n_args, _), _, _
+         when n_args >= 2 && n_args < arity
+              && (match March_ast.Protocol_states.find_call name.txt with
+                  | Some i -> List.length i.ps_branches = arity - 2
+                  | None -> false) ->
+         (* An offer with a branch callback left out (§F3): name the branches
+            the protocol's choice has and the ones this call is missing. *)
+         let i = Option.get (March_ast.Protocol_states.find_call name.txt) in
+         List.iter (fun a -> ignore (infer_expr env a)) args;
+         let given = n_args - 2 in
+         let missing = List.filteri (fun k _ -> k >= given) i.ps_branches in
+         let ticks ls = match List.rev_map (fun (l, _) -> "`" ^ l ^ "`") ls with
+           | [] -> "" | [ l ] -> l
+           | last :: rest -> String.concat ", " (List.rev rest) ^ " and " ^ last in
+         let close_call = match String.rindex_opt i.ps_call '.' with
+           | Some k -> String.sub i.ps_call 0 k ^ ".close" | None -> "close" in
+         (* A missing branch after which the conversation ends has a body that
+            always fits: close it.  Any other needs the user's own code. *)
+         let fix = match args with
+           | Ast.EVar s :: _ :: _ when List.for_all snd missing ->
+             let last = span_of_expr (List.nth args (n_args - 1)) in
+             let text = String.concat "" (List.map (fun _ ->
+                 Printf.sprintf ", fn (_v, st) -> %s(%s, st)" close_call s.txt) missing) in
+             Some (Err.FReplace { span = { last with start_line = last.end_line;
+                                                     start_col = last.end_col };
+                                  text })
+           | _ -> None in
+         Err.report env.errors
+           { Err.severity = Err.Error; span = sp;
+             message = Printf.sprintf
+                 "`%s` takes one callback for each branch `%s` can choose in protocol `%s` (%s), \
+                  but this call leaves out %s."
+                 name.txt (match String.index_opt i.ps_doing '`' with
+                     | Some a -> (match String.index_from_opt i.ps_doing (a + 1) '`' with
+                         | Some b -> String.sub i.ps_doing (a + 1) (b - a - 1)
+                         | None -> "the other side")
+                     | None -> "the other side")
+                 i.ps_proto (ticks i.ps_branches) (ticks missing);
+             labels = (match i.ps_span with
+                 | Some csp -> [ { Err.lbl_span = csp;
+                                   Err.lbl_message = "the choice is declared here" } ]
+                 | None -> []);
+             notes = (if fix <> None then
+                        [ Printf.sprintf "After %s the conversation ends, so the fix closes it; \
+                                          put any other work for that branch before the `close`."
+                            (ticks missing) ]
+                      else
+                        [ Printf.sprintf "Add a callback `fn (value, next_state) -> ...` for %s, \
+                                          in the order the protocol lists the branches."
+                            (ticks missing) ]);
+             code = Err.Code.session_offer_nonexhaustive; fix };
+         TError
        | Some (name, arity, n_args, def_span), _, _ ->
          List.iter (fun a -> ignore (infer_expr env a)) args;
          Err.report env.errors
@@ -3440,7 +3645,19 @@ let rec infer_expr env (e : Ast.expr) : ty =
          TError
        | None, None, _ ->
          check_callback_arities env f args;
-         let res = infer_app env sp f_ty args 0 in
+         (* A generated protocol step's payload (§F3): a mismatch there names
+            the step and points at it, not at the call. *)
+         let payload = match f with
+           | Ast.EVar name ->
+             (match March_ast.Protocol_states.find_call name.txt with
+              | Some i when i.ps_branches = [] ->
+                let at = Option.value i.ps_span ~default:sp in
+                Some (2, RBecause (RFnArg (at, 2),
+                                   Printf.sprintf "This is the step's payload: protocol `%s` says `%s` must %s here."
+                                     i.ps_proto i.ps_role i.ps_doing))
+              | _ -> None)
+           | _ -> None in
+         let res = infer_app ?payload env sp f_ty args 0 in
          (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
             result — recorded in check_fn), taint the call's result so the unify
             hook fires when it is later bound to a proof cap.  This closes the
@@ -3847,9 +4064,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (* The two branches are mutually exclusive, so each may consume the same
          outer linear value once — the same rule match arms get. *)
       let r_then = ref TError and r_else = ref TError in
-      iter_paths_linear env ~span:_sp
-        [ (Some then_, fun () -> r_then := infer_expr env then_);
-          (Some else_, fun () -> r_else := infer_expr env else_) ];
+      iter_paths_linear ~all_note:"both branches consume it" env ~span:_sp
+        [ (Some then_, Some "the `if` branch", fun () -> r_then := infer_expr env then_);
+          (Some else_, Some "the `else` branch", fun () -> r_else := infer_expr env else_) ];
       let t_then = !r_then in
       let t_else = !r_else in
       (* Point primary error at the else branch; label points at then branch
@@ -3896,6 +4113,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
            let ty = infer_expr env body_e in
            results :=
              (Some body_e,
+              Some (Printf.sprintf "the arm on line %d" (span_of_expr body_e).Ast.start_line),
               List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot)
              :: !results;
            List.iter (fun (le, was, was_span) ->
@@ -3911,7 +4129,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
              let arm_ty = run_body body_e in
              unify env ~span:sp ~reason:(Some (RMatchArm sp)) result_ty arm_ty
            ) rest;
-         join_linear_paths env ~span:sp snapshot (List.rev !results);
+         join_linear_paths ~all_note:"every arm consumes it" env ~span:sp snapshot
+           (List.rev !results);
          result_ty)
 
     (* ── Pipes / Sigils — must be desugared before reaching us ───── *)
@@ -4109,7 +4328,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
              if not was && !(le.le_used) then
                match le.le_pending with
                | Some _ -> if !(le.le_mixed) = None then le.le_mixed := Some sp
-               | None when le.le_lin = Ast.Linear ->
+               | None when le.le_lin = Ast.Linear && not !(le.le_poisoned) ->
                  let name = lin_display_name le.le_name in
                  Err.error ~code:Err.Code.linear_unconsumed_early_return env.errors ~span:sp
                    (Printf.sprintf
@@ -4222,6 +4441,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
                `flat_map` — its type could not be determined here.";
             TError))
   in
+  if env.lin <> [] && (match repr result with TError -> true | _ -> false)
+     && Err.error_since env.errors errors_mark then
+    poison_linear_operands env e;
   Hashtbl.replace env.type_map (span_of_expr e) (repr result);
   result
 
@@ -4395,7 +4617,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     relocate_callback_mismatch env ~mark e sp inferred expected
 
 (** Thread function application through argument list, tracking arg index. *)
-and infer_app env span f_ty args idx =
+and infer_app ?payload env span f_ty args idx =
   match args, repr f_ty with
   | [], t ->
     (* A call written with empty parens — `f()`, i.e. zero surface arguments
@@ -4429,7 +4651,9 @@ and infer_app env span f_ty args idx =
         | _ -> () in
       walk param_ty; !acc in
     check_expr env arg param_ty
-      ~reason:(Some (RFnArg (span, idx)));
+      ~reason:(Some (match payload with
+          | Some (i, r) when i = idx -> r
+          | _ -> RFnArg (span, idx)));
     (* Poison (§X3): when an argument fails its type check and the call's
        result shares a type variable with that parameter, the variable is
        now bound to whatever the failed check left it, so the result is
@@ -4464,7 +4688,7 @@ and infer_app env span f_ty args idx =
        same fn is unaffected. *)
     if ty_has_tagged_cap_producer env param_ty then
       tag_cap_producer_result env ret_ty span;
-    let result = infer_app env span ret_ty rest (idx + 1) in
+    let result = infer_app ?payload env span ret_ty rest (idx + 1) in
     if failed then TError else result
   | arg :: rest, TVar _ ->
     (* f_ty not yet known — constrain it *)
@@ -4595,8 +4819,9 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
     mutable flag would otherwise raise across arms, while still catching a
     genuine double-use WITHIN a single arm. *)
 and iter_arms_linear env ~span (branches : Ast.branch list) (f : Ast.branch -> unit) : unit =
-  iter_paths_linear env ~span
-    (List.map (fun (br : Ast.branch) -> (Some br.branch_body, fun () -> f br)) branches)
+  iter_paths_linear ~all_note:"every arm consumes it" env ~span
+    (List.map (fun (br : Ast.branch) ->
+         (Some br.branch_body, Some (describe_arm br), fun () -> f br)) branches)
 
 (** The mutual-exclusion discipline itself, over an arbitrary list of paths.
     Every branching construct in the language shares it: [EMatch] arms via
@@ -4617,19 +4842,20 @@ and iter_arms_linear env ~span (branches : Ast.branch list) (f : Ast.branch -> u
     the first path to consume a value would leave its span behind, and a
     genuine double-use in a LATER path would point at a line in a sibling path
     that never ran on the same execution. *)
-and iter_paths_linear env ~span (paths : (Ast.expr option * (unit -> unit)) list) : unit =
+and iter_paths_linear ?all_note env ~span
+    (paths : (Ast.expr option * string option * (unit -> unit)) list) : unit =
   let snapshot =
     List.map (fun le -> (le, !(le.le_used), !(le.le_first_use))) env.lin
   in
   let results =
-    List.map (fun (body, run_path) ->
+    List.map (fun (body, desc, run_path) ->
         List.iter (fun (le, was, was_span) ->
             le.le_used := was; le.le_first_use := was_span) snapshot;
         run_path ();
-        (body, List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot))
+        (body, desc, List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot))
       paths
   in
-  join_linear_paths env ~span snapshot results
+  join_linear_paths ?all_note env ~span snapshot results
 
 (** Infer the result type of a match expression. *)
 and infer_match env span scrut scrut_ty branches =
@@ -6967,7 +7193,8 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
 
 (** Register actor [name] as a zero-arg constructor (so `spawn(Name)`
     typechecks) and each `on Msg(...)` handler as a constructor of
-    "<Name>_Msg", owned by module [ci_module].  ALL params are included,
+    "<Name>_Msg", owned by module [ci_module], under every key
+    [actor_msg_ctor_keys] lists.  ALL params are included,
     annotated or not, so constructor arity is always correct; an unannotated
     one gets a unique TyVar placeholder ("$p<i>_<Msg>") that instantiates to a
     fresh unification variable, so `send(pid, Msg(x))` typechecks even when
@@ -6995,7 +7222,9 @@ let register_actor_ctors ~ci_module env (name : Ast.name) (actor : Ast.actor_def
       let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                  ci_arg_tys = arg_tys; ci_module; ci_vis = Ast.Public;
                  ci_is_actor_msg = true } in
-      { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+      { acc_env with ctors =
+          List.fold_left (fun ctors k -> add_ctor k ci ctors) acc_env.ctors
+            (actor_msg_ctor_keys ~ci_module name.txt h.ah_msg.txt) }
     ) env actor.actor_handlers
 
 let rec check_decl env (d : Ast.decl) : env =
@@ -11257,7 +11486,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
             let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
-            { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+            { acc_env with ctors =
+                List.fold_left (fun ctors k -> add_ctor k ci ctors) acc_env.ctors
+                  (actor_msg_ctor_keys ~ci_module:m.Ast.mod_name.txt name.txt h.ah_msg.txt) }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
         { env with sigs = (name.txt, sdef) :: env.sigs }
@@ -11643,7 +11874,9 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
             let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
-            { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+            { acc_env with ctors =
+                List.fold_left (fun ctors k -> add_ctor k ci ctors) acc_env.ctors
+                  (actor_msg_ctor_keys ~ci_module:m.Ast.mod_name.txt name.txt h.ah_msg.txt) }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
         { env with sigs = (name.txt, sdef) :: env.sigs }

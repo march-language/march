@@ -194,6 +194,53 @@ let protocol_step_pair provided required =
     (match pairs with [ pair ] -> Some pair | _ -> None)
   | _ -> None
 
+(** A state of one role passed to another role's step (§F3): the body is
+    written against the wrong role module.  Only an unambiguous pair: every
+    role has an `S_end`, so two end states say nothing. *)
+let protocol_role_pair provided required =
+  match repr provided, repr required with
+  | TCon (p, []), TCon (r, []) when p <> r ->
+    let open March_ast.Protocol_states in
+    let pairs = List.concat_map (fun (here : info) ->
+        List.filter_map (fun (wanted : info) ->
+            if here.ps_proto = wanted.ps_proto && here.ps_role <> wanted.ps_role
+            then Some (here, wanted) else None) (find_all r)) (find_all p) in
+    (match pairs with [ pair ] -> Some pair | _ -> None)
+  | _ -> None
+
+(** A role body calling another role's step: which role the state belongs
+    to, which role the call is for, and the call this role takes instead. *)
+let report_protocol_wrong_role env ~span ~provided
+    ~(here : March_ast.Protocol_states.info) ~(wanted : March_ast.Protocol_states.info) =
+  let name = match provided with
+    | Some { p_name = Some n; _ } -> Some n
+    | _ -> None in
+  let subject = match name with Some n -> Printf.sprintf "`%s`" n | None -> "this state" in
+  let message = Printf.sprintf
+      "`%s` is a step of role `%s`, but %s belongs to role `%s` of protocol `%s`."
+      wanted.ps_call wanted.ps_role subject here.ps_role here.ps_proto in
+  let you_are_here = match here.ps_span with
+    | Some sp -> [ { Err.lbl_span = sp;
+                     lbl_message = Printf.sprintf "`%s` is here: it must %s" here.ps_role here.ps_doing } ]
+    | None -> [] in
+  let binder = match provided, name with
+    | Some { p_span; _ }, Some n ->
+      (match StrMap.find_opt n env.binder_spans with
+       | Some bsp when bsp <> span && bsp <> p_span ->
+         [ { Err.lbl_span = bsp; lbl_message = Printf.sprintf "`%s` is `%s`'s state, bound here" n here.ps_role } ]
+       | _ -> [])
+    | _ -> [] in
+  let module_of call = match String.rindex_opt call '.' with
+    | Some i -> String.sub call 0 i | None -> call in
+  Err.report env.errors
+    { Err.severity = Error; span; message;
+      labels = you_are_here @ binder;
+      notes = [ Printf.sprintf "At this point `%s` must %s: take that step with `%s`."
+                  here.ps_role here.ps_doing here.ps_call;
+                Printf.sprintf "If this body is meant to play `%s`, give it a `%s` state instead."
+                  wanted.ps_role (module_of wanted.ps_call) ];
+      code = Err.Code.protocol_wrong_role; fix = None }
+
 (** A role body taking a step the protocol does not allow at that point,
     said in protocol terms: what the call tries to do, what the role must do
     instead, a "you are here" label on that protocol step, and the function
@@ -250,6 +297,10 @@ and report_type_mismatch env ~span ~occurs_violation ~reason ?provided ?diff exp
   match protocol_step_pair expected found with
   | Some (here, wanted) when not occurs_violation ->
     report_protocol_step_order env ~span ~provided ~here ~wanted
+  | _ ->
+  match protocol_role_pair expected found with
+  | Some (here, wanted) when not occurs_violation ->
+    report_protocol_wrong_role env ~span ~provided ~here ~wanted
   | _ ->
   (* Build headline, using pretty-printing for long types.
      Convention: `expected` = inferred type of the expression (what was provided);
@@ -1462,7 +1513,8 @@ let bind_linear_field_sentinels varname ty env =
         | Some lin ->
           let key = varname ^ "#" ^ fname in
           let le = { le_name = key; le_lin = lin; le_used = ref false; le_first_use = ref None;
-                     le_pending = None; le_dup = ref None; le_mixed = ref None } in
+                     le_pending = None; le_dup = ref None; le_mixed = ref None;
+                     le_where = ref []; le_exit = ref []; le_poisoned = ref false } in
           { acc_env with lin = le :: acc_env.lin }
         | _ -> acc_env
       ) env flds

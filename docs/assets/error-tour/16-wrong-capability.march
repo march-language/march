@@ -1,0 +1,7 @@
+mod Main do
+  needs IO.Console
+
+  fn read(c : Cap(IO.FileRead)) : String do "x" end
+
+  fn main(c : Cap(IO.Console)) do println(read(c)) end
+end

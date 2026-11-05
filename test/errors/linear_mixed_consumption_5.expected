@@ -38,7 +38,7 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
 
 -- HINT: NAMING -- errors/linear_mixed_consumption_5.march
 
-Constructor `Close` is defined by multiple types (a message of actor `Host`, `WsFrame`). Use a qualified form to disambiguate, e.g. `WsFrame.Close`. [ambiguous_constructor]
+Constructor `Close` is defined by multiple types (a message of actor `Host`, `WsFrame`). Use a qualified form to disambiguate: `Host.Close` or `WsFrame.Close`. [ambiguous_constructor]
 
 21 |     send(h, Close(1))
                  ^^^^^^^^

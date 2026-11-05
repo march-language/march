@@ -12,9 +12,11 @@ design is `specs/2026-10-29-refinement-reflection-design.md`.
   every `/` or `%` by a non-literal blocks reflection.
 - **Float and String.** A function whose signature mentions either has no logic symbol (§2.3's
   opaque Float operators and distinct `$Str` literals are not built).
-- **Records and tuples** as parameters or results, `let` patterns other than a variable, and a
-  `match` in a non-tail value position: the body translator declines (the symbol stays
-  uninterpreted, no equations).
+- **Records and tuples** as parameters or results, and `let` patterns other than a variable:
+  the body translator declines (the symbol stays uninterpreted, no equations). (A `match` or
+  `if` as a `let`'s right-hand side unfolds since
+  `specs/progress/2026-11-04-reflection-let-match-value-position.md`; one nested inside an
+  expression, such as an argument, still declines.)
 - **`uses:` over-approximation.** When a stage-2 proof's unsat core names no unfolding
   (congruence, I8), `uses:` lists the whole frontier.
 - **Predicate display-name resolution in the propagation pre-pass.** A predicate's bare

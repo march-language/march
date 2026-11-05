@@ -1,0 +1,22 @@
+exit: 1
+-- LINEARITY ---------- errors/linear_never_used_26.march
+
+The linear value `c` was never used on a path that returns. [linear_never_used]
+It is consumed only on paths that never return (they end in `panic`), so wherever the function does return the value is dropped. Consume it on that path too.
+
+ 8 |   fn read(c : Conn, r : Result(Int, String)) : Int do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+    `c` is consumed here, but this path never returns:
+
+11 |         let _ = close(c)
+                           ^
+
+    The `Ok(v)` arm returns without consuming `c`:
+
+13 |       Ok(v) -> v
+                    ^
+    run `march --explain linear_never_used`
+
+

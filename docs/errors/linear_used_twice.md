@@ -9,7 +9,16 @@ permalink: /docs/errors/linear_used_twice/
 # `linear_used_twice`: a linear value is used more than once
 
 A value of a linear type is consumed twice. The second use is underlined,
-and a label points at the first.
+and a label points at the first. When the first consumption is not in
+straight-line code, the label also says where it sits: "in the `Some(v)`
+arm", "in the `else` branch" (with "every arm consumes it" when all of them
+do), or "inside a closure that can run more than once (each iteration
+consumes it)" for a closure body such as the function passed to `List.map`.
+
+No linearity error follows a value whose use sits directly inside an
+expression that already failed to typecheck (a misspelled function, a field
+access on a non-record): what that expression did with the value is unknown,
+and the type error is reported instead.
 
 ## A program that triggers it
 

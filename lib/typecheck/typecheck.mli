@@ -150,6 +150,9 @@ type lin_entry = {
   le_pending : ty option;
   le_dup : Ast.span option ref;
   le_mixed : Ast.span option ref;
+  le_where : (Ast.span * string) list ref;
+  le_exit : Err.label list ref;
+  le_poisoned : bool ref;
 }
 type ctor_info = {
   ci_type : string;

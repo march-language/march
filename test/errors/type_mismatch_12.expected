@@ -6,5 +6,6 @@ Protocol `Logging`: `L` cannot tell whether `C` crashed: the crash branch must b
 15 |     C -> I : String
          ^^^^^^^^^^^^^^^
 
+    run `march --explain role_needs_invalid`
 
 

@@ -5298,8 +5298,11 @@ typechecker that this document exists to pin down, not bugs:
     name resolves to one owner, so the interpreter (dispatching by name) runs
     the target's handler while compiled code drops the other actor's message.
     When the target's state differs that is now the `send_wrong_actor` error,
-    whose advice is to rename a handler, since no qualified spelling selects
-    an actor's message (`specs/todos/2026-10-15-actor-message-ctor-cannot-be-qualified.md`).
+    whose advice is the actor-qualified spelling (`Counter.Tally`), which
+    selects an actor's message since 2026-11-04
+    (`specs/progress/2026-10-15-actor-message-ctor-cannot-be-qualified.md`);
+    the interpreter still dispatches by name
+    (`specs/todos/2026-11-04-interp-actor-dispatch-by-name.md`).
     Progress entry: `specs/progress/2026-10-12-send-message-not-checked-against-pid-actor.md`.
     Cross-ref §2.6.4 and finding 18.
 

@@ -1,0 +1,13 @@
+mod Main do
+  needs IO.Console
+
+  fn save(n : Int) : () do
+    let _ = file_write("/tmp/n", int_to_string(n))
+    ()
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    save(1)
+    println("saved")
+  end
+end

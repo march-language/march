@@ -47,6 +47,23 @@ type lin_entry = {
   (** For a pending entry: the branch construct at which it was consumed on
       some paths that fall through but not on others.  Judged, like
       [le_dup], once the scope's close knows whether it is linear. *)
+  le_where : (Ast.span * string) list ref;
+  (** Where a consuming use sits, keyed by its span, when that is worth saying
+      in a "used more than once" label: "in the `Some(v)` arm", "in the `else`
+      branch", "inside a closure … each iteration consumes it".  Recorded by
+      the branch join and the capture check; keyed by span, so it needs no
+      save/restore across paths.  Innermost description wins. *)
+  le_exit : Err.label list ref;
+  (** Set by the branch join when the value was consumed only on paths that
+      never return: labels naming the fall-through path that left without
+      consuming it, for [linear_never_used] to point at instead of only the
+      binding. *)
+  le_poisoned : bool ref;
+  (** Set when a use of this value sits inside an expression whose type
+      check failed and came out [TError] (§X3 poison): `snik(t)` with `snik`
+      misspelled, or `t.foo` on a non-record.  The value's consumption is then
+      unknown, so no linearity error follows on it; the type error already
+      rejects the program. *)
 }
 
 (** Constructor info — populated from [DType] declarations.
@@ -210,6 +227,14 @@ type fn_bound = {
     site uses (and the refinement checker, which counts it as a declarant of
     that type name). *)
 let actor_msg_type_name (actor : string) : string = actor ^ "_Msg"
+
+(** The [env.ctors] keys an actor message constructor is registered under:
+    bare `<Msg>`, and the actor-qualified `<Actor>.<Msg>`, `<Actor>_Msg.<Msg>`
+    and (nested) `<Mod>.<Actor>.<Msg>`, so a message whose name another actor
+    or type shares can still be written unambiguously. *)
+let actor_msg_ctor_keys ~(ci_module : string) (actor : string) (msg : string) : string list =
+  msg :: (actor ^ "." ^ msg) :: (actor_msg_type_name actor ^ "." ^ msg)
+  :: (if ci_module = "" then [] else [ ci_module ^ "." ^ actor ^ "." ^ msg ])
 
 (** The SPELLING half of the `<Actor>.Msg` alias ([Typecheck_unify.actor_msg_alias]
     adds the scope checks): [Some "<Actor>_Msg"] when [name] is `<Actor>.Msg`
@@ -2273,7 +2298,8 @@ let bind_vars bindings env =
 (** Extend env with a new linear/affine variable. *)
 let bind_linear ?span name lin ty env =
   let le = { le_name = name; le_lin = lin; le_used = ref false; le_first_use = ref None;
-             le_pending = None; le_dup = ref None; le_mixed = ref None } in
+             le_pending = None; le_dup = ref None; le_mixed = ref None;
+             le_where = ref []; le_exit = ref []; le_poisoned = ref false } in
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
     gated_shadowed = note_gated_rebind name env.gated_shadowed;
@@ -2288,7 +2314,7 @@ let bind_linear ?span name lin ty env =
 let bind_pending ?span name ty env =
   let le = { le_name = name; le_lin = Ast.Unrestricted; le_used = ref false;
              le_first_use = ref None; le_pending = Some ty; le_dup = ref None;
-             le_mixed = ref None } in
+             le_mixed = ref None; le_where = ref []; le_exit = ref []; le_poisoned = ref false } in
   { (bind_var ?span name (Mono ty) env) with lin = le :: env.lin }
 
 (* =================================================================

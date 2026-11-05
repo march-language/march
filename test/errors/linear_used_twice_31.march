@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: the first use closed the conversation: no step can follow `close`
+-- REJECT (§F3): a step taken on a state already closed; one reuse error saying the conversation
+-- was closed, not also an out-of-order error telling the role to close first.
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Fan do
+    number: A -> C : Int
+    second: B -> C : Int
+    verdict: C -> A : Bool
+  end
+  pfn role_b(s : Cap(Session.Live), st : Fan_B.Entry) : Fan_B.Yield do
+    let st1 = Fan_B.send_Second(s, st, 9)
+    let _done = Fan_B.close(s, st1)
+    Fan_B.close(s, Fan_B.send_Second(s, st1, 10))
+  end
+  fn main(c : Cap(IO)) do () end
+end

@@ -1,0 +1,9 @@
+mod Main do
+  type Mail = Postal(Int) | Email(String)
+  type Tag = Poss(Int)
+
+  fn main() do
+    let m : Mail = Posts(1)
+    m
+  end
+end

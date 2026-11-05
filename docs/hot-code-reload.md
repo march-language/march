@@ -509,7 +509,7 @@ fn counter_migrate_msg(m : CounterMsgV.Msg) : Option(Counter.Msg) do
 end
 ```
 
-`Counter.Msg` names the actor's message type (the type its `on` handlers define). `forge hot-reload migrate-msg-stub Counter` writes this stub from the running version's handlers (add `--new <build>.so.schemas.json` to map kept handlers to themselves and removed or changed ones to `None`). The function is checked like `migrate_state`: it must be IO-free, take exactly one annotated parameter, return `Option(<Actor>.Msg)`, and match exhaustively. `forge deploy hot` refuses the deploy if its old type does not match the running version's handlers.
+`Counter.Msg` names the actor's message type (the type its `on` handlers define). When the old type and the actor share a message name, qualify the new one by the actor: `CounterMsgV.Inc(n) -> Some(Counter.Inc(n))`. `forge hot-reload migrate-msg-stub Counter` writes this stub from the running version's handlers (add `--new <build>.so.schemas.json` to map kept handlers to themselves and removed or changed ones to `None`). The function is checked like `migrate_state`: it must be IO-free, take exactly one annotated parameter, return `Option(<Actor>.Msg)`, and match exhaustively. `forge deploy hot` refuses the deploy if its old type does not match the running version's handlers.
 
 ### Drains
 

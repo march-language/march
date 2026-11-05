@@ -6,6 +6,7 @@ Protocol `Logging`: `C` has crashed, so it cannot take part in the crash branch 
 13 |     C -> I : String
          ^^^^^^^^^^^^^^^
 
+    run `march --explain role_needs_invalid`
 
 
 -- PROTOCOL ----------- errors/role_needs_invalid_3.march

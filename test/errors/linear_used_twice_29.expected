@@ -1,0 +1,28 @@
+exit: 1
+-- LINEARITY ---------- errors/linear_used_twice_29.march
+
+The linear value `c` cannot be captured by a closure. [linear_captured]
+A closure may be called multiple times, which would violate the exactly-once guarantee.
+Pass `c` as a parameter to the closure instead.
+
+10 |     let xs = List.map([1, 2, 3], fn x -> x + close(c))
+                                      ^^^^^^^^^^^^^^^^^^^^
+
+
+
+-- LINEARITY ---------- errors/linear_used_twice_29.march
+
+The linear value `c` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+11 |     close(c)
+               ^
+
+
+    `c` was already consumed here, inside a closure that can run more than once (each iteration consumes it):
+
+10 |     let xs = List.map([1, 2, 3], fn x -> x + close(c))
+                                                        ^
+    run `march --explain linear_used_twice`
+
+

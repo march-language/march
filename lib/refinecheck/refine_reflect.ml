@@ -1670,6 +1670,10 @@ let is_sentinel = function Smt.Const k -> String.starts_with ~prefix:"$fn:" k | 
 
 let is_int_ty = function Some t -> (match T.repr t with T.TCon ("Int", []) -> true | _ -> false) | None -> false
 
+(* The most cases a `let`'s right-hand side may split a body into ([tr_case]):
+   past it the body is declined, so one function's equations stay few. *)
+let max_let_cases = 16
+
 let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.term =
   let v = tr_val c env in
   match e with
@@ -1804,7 +1808,16 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
   | A.EBlock (stmt :: (_ :: _ as rest), sp) when lemma_stmt c stmt -> tr_case c env (A.EBlock (rest, sp))
   | A.EBlock (A.ELet (b, _) :: rest, sp) -> (
     match b.A.bind_pat with
-    | A.PatVar x -> tr_case c ((x.A.txt, tr_val c env b.A.bind_expr) :: env) (A.EBlock (rest, sp))
+    (* A right-hand side with several cases (a `match` or `if` in value
+       position): the rest of the block once per case, each under that case's
+       conditions, as a tail `match` is. *)
+    | A.PatVar x ->
+      let cases = tr_case c env b.A.bind_expr in
+      if List.length cases > max_let_cases then raise Decline;
+      List.concat_map
+        (fun (g, t) ->
+          List.map (fun (g', r) -> (g @ g', r)) (tr_case c ((x.A.txt, t) :: env) (A.EBlock (rest, sp))))
+        cases
     | _ -> raise Decline)
   | A.EBlock (A.ELetFn _ :: rest, sp) -> tr_case c env (A.EBlock (rest, sp))
   | A.EBlock (_, _) -> raise Decline

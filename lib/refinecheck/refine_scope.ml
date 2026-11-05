@@ -478,14 +478,24 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
     else
       let sym = Option.get (Reflect_state.resolve_site csp) in
       let args = Reflect_state.args_at csp args in
-      let arity = match Reflect_state.sig_of sym with Some s -> List.length s.Reflect_state.fs_params | None -> -1 in
-      if List.length args <> arity then Error e
+      let psorts = match Reflect_state.sig_of sym with Some s -> s.Reflect_state.fs_params | None -> [] in
+      if List.length args <> List.length psorts || psorts = [] then Error e
       else
+        (* A construction filling a parameter of a known datatype is that
+           datatype's constructor, though another declares the name too
+           (`Reply`, also `Channel.HandleResult`'s): no other reading of the
+           call is well-typed.  Never through a conflated short name. *)
         let rec all = function
           | [] -> Ok []
-          | a :: rest -> (match r a with Ok t -> Result.map (fun ts -> t :: ts) (all rest) | Error e -> Error e)
+          | a :: rest -> (match a with Ok t -> Result.map (fun ts -> t :: ts) (all rest) | Error e -> Error e)
+        and arg a p =
+          match a, p with
+          | A.ECon ({ A.txt = c; _ }, fargs, _), Smt.SData (adt, _)
+            when (not (Hashtbl.mem ambiguous_adts adt)) && ctor_of_adt adt c <> None ->
+            Result.map (ctor_term adt (Option.get (ctor_of_adt adt c))) (all (List.map r fargs))
+          | _ -> r a
         in
-        Result.map (fun ts -> Smt.App (sym, ts)) (all args)
+        Result.map (fun ts -> Smt.App (sym, ts)) (all (List.map2 arg args psorts))
   | _ -> Error e
 
 (* Every predicate and guard is marked once, here at the entry, so the
@@ -2553,6 +2563,12 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
   go "" decls;
   tbl
 
+(* The qualified key of actor [actor]'s handler [msg] in the table
+   [collect_handler_sigs] builds: `<Actor>_Msg.<Msg>`, the typechecker's name
+   for the actor's message type, dot, the message. *)
+let actor_msg_suffix = "_Msg"
+let handler_key (actor : string) (msg : string) : string = actor ^ actor_msg_suffix ^ "." ^ msg
+
 (* ── Actor handler contracts ───────────────────────────────────────────────
    `on Inc(n : {Int | n > 0}) do ... end` declares a contract on the MESSAGE
    `Inc(...)`: the typechecker registers each handler's message as an ordinary
@@ -2569,23 +2585,39 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
    [Refine_check.visit_decl]'s `DActor` arm) no handler body assuming.
    Failing closed costs silence; failing open would check a user variant
    `Inc(-1)` against an unrelated actor's predicate, the one failure this
-   subsystem must never have. *)
+   subsystem must never have.
+
+   Every refined handler is ALSO registered under `<Actor>_Msg.<Msg>`, clash
+   or not (gap G4 of specs/2026-11-04-lemmas-hcr-actors-choreography-design.md).
+   [Refine_check.handler_resolution] uses that key for a construction it can
+   attribute to one actor: written `Tally.Bump(..)`, or bare with a recorded
+   type `Tally_Msg`.  A shared name is then obliged per actor instead of
+   not at all.  The handler body still assumes only an unshared name (see
+   [Refine_check.visit_decl]'s `DActor` arm: the interpreter dispatches by
+   name).  Two actors of the same name (in different modules) withdraw the
+   qualified key too. *)
 let collect_handler_sigs (decls : A.decl list) : (string, fn_sig) Hashtbl.t =
   let handlers : (string, fn_sig) Hashtbl.t = Hashtbl.create 16 in
   let count : (string, int) Hashtbl.t = Hashtbl.create 16 in
   let ctors : (string, unit) Hashtbl.t = Hashtbl.create 16 in
   let bump n = Hashtbl.replace count n (1 + Option.value ~default:0 (Hashtbl.find_opt count n)) in
+  let qualified : (string, fn_sig) Hashtbl.t = Hashtbl.create 16 in
+  let actors : (string, int) Hashtbl.t = Hashtbl.create 8 in
   let rec go decls =
     List.iter
       (function
-        | A.DActor (_, _, ad, _) ->
+        | A.DActor (_, aname, ad, _) ->
+          Hashtbl.replace actors aname.A.txt
+            (1 + Option.value ~default:0 (Hashtbl.find_opt actors aname.A.txt));
           List.iter
             (fun (h : A.actor_handler) ->
               bump h.A.ah_msg.A.txt;
               let fd =
                 local_fn_def h.A.ah_msg h.A.ah_params None h.A.ah_body h.A.ah_msg.A.span
               in
-              Hashtbl.replace handlers h.A.ah_msg.A.txt (sig_of_fn fd))
+              let sg = sig_of_fn fd in
+              Hashtbl.replace handlers h.A.ah_msg.A.txt sg;
+              Hashtbl.replace qualified (handler_key aname.A.txt h.A.ah_msg.A.txt) sg)
             ad.A.actor_handlers
         | A.DType (_, _, _, A.TDVariant vs, _) | A.DAlwaysLinearType (_, _, _, A.TDVariant vs, _) ->
           List.iter (fun (v : A.variant) -> Hashtbl.replace ctors v.A.var_name.A.txt ()) vs
@@ -2605,6 +2637,12 @@ let collect_handler_sigs (decls : A.decl list) : (string, fn_sig) Hashtbl.t =
          && (sg.refined <> [] || has_elem_param sg) then
         Hashtbl.replace out n sg)
     handlers;
+  Hashtbl.iter
+    (fun k sg ->
+      let actor = String.sub k 0 (String.index k '.' - String.length actor_msg_suffix) in
+      if Hashtbl.find_opt actors actor = Some 1 && (sg.refined <> [] || has_elem_param sg) then
+        Hashtbl.replace out k sg)
+    qualified;
   out
 
 (* ── Stored-field contracts ────────────────────────────────────────────────

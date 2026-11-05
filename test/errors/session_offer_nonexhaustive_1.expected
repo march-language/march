@@ -7,5 +7,6 @@ The protocol's `offer` branches are: :ok, :err.
 29 |     match lbl do
                ^^^^^^
 
+    run `march --explain session_offer_nonexhaustive`
 
 

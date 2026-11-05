@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: in the `Some(v)` arm
+mod Main do
+  -- F5 (specs/plans/2026-11-02-diagnostics-depth-plan.md): when the first
+  -- consumption sits in one arm of a `match`, the label names the arm. `h` is
+  -- affine, so the `None` arm may drop it; the use after the `match` is a
+  -- double use only on the path through `Some(v)`.
+  type Res = R(Int)
+  fn close(affine h : Res) : Int do match h do R(n) -> n end end
+  fn step(affine h : Res, o : Option(Int)) : Int do
+    let n = match o do
+      Some(v) -> v + close(h)
+      None -> 0
+    end
+    n + close(h)
+  end
+  fn main() : Int do step(R(1), None) end
+end

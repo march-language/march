@@ -5925,3 +5925,5 @@ let base_env : env =
         | [VRingBuf _] -> VUnit
         | _ -> eval_error "ring_buf_drop: expected RingBuf"))
   ]
+  (* UDP datagrams: lib/eval/eval_udp.ml mirrors runtime/march_udp.c. *)
+  @ Eval_udp.builtins

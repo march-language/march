@@ -8,9 +8,12 @@
 // that fails to load (a missing js_of_ocaml primitive or browser global), a stdlib
 // module the browser list stopped loading, or a value-printer regression turns this
 // red. march_compile.js (the Tetris live compiler) must compile the Tetris
-// playground source with no errors.
+// playground source with no errors, and its marchCheck must print, for every program
+// the error playground offers (docs/_includes/error-playground.html), exactly what
+// docs/error-messages.md shows `march --check` printing for it.
 //
-// This tests the bundle, not documentation examples.
+// This tests the bundle, not documentation examples (the error-playground programs
+// are the one exception: the page promises they match the native compiler).
 //
 // Usage: node scripts/browser-repl-smoke.js [ASSETS_DIR]   (default: docs/assets)
 //        node scripts/browser-repl-smoke.js --print [ASSETS_DIR]
@@ -179,7 +182,31 @@ const errs = Array.from(out.errors || []);
 if (print) console.log(JSON.stringify({ compile: true, js_len: out.js ? out.js.length : null, errors: errs }));
 else if (!out.js || errs.length) { failures++; console.error(`FAIL marchCompileToJs: js=${out.js ? out.js.length : null} errors=${JSON.stringify(errs)}`); }
 
+// marchCheck, against the native `march --check` output docs/error-messages.md pins
+// (scripts/gen-error-tour.py). The header line names the file, which differs, and its
+// dashes pad that name to a fixed width; both are normalised away.
+let checkCases = 0;
+if (typeof comp.marchCheck !== 'function') { failures++; console.error('FAIL march_compile.js does not export marchCheck'); }
+else {
+  const docs = path.join(__dirname, '..', 'docs');
+  const page = fs.readFileSync(path.join(docs, 'error-messages.md'), 'utf8');
+  const include = fs.readFileSync(path.join(docs, '_includes', 'error-playground.html'), 'utf8');
+  const header = s => s.replace(/^(-- .*?) -+ \S+\.march$/gm, '$1 --- FILE').replace(/\s+$/, '');
+  for (const [, name] of include.matchAll(/<option value="([\w-]+)"/g)) {
+    checkCases++;
+    const m = page.match(new RegExp(`<!-- error-tour: ${name} -->\\n[\\s\\S]*?\`\`\`text\\n([\\s\\S]*?)\`\`\`\\n<!-- /error-tour -->`));
+    if (!m) { failures++; console.error(`FAIL marchCheck ${name}: no output block on docs/error-messages.md`); continue; }
+    const src = fs.readFileSync(path.join(docs, 'assets', 'error-tour', name + '.march'), 'utf8');
+    const r = comp.marchCheck(src);
+    if (print) { console.log(JSON.stringify({ check: name, rejected: r.rejected, output: r.output })); continue; }
+    if (!r.rejected || header(r.output) !== header(m[1])) {
+      failures++;
+      console.error(`FAIL marchCheck ${name}: rejected=${r.rejected} (if the native message changed on purpose, run scripts/gen-error-tour.py)\n--- expected (docs/error-messages.md)\n${m[1]}--- actual\n${r.output}`);
+    }
+  }
+}
+
 if (!print) {
   if (failures) { console.error(`browser-repl-smoke: ${failures} failure(s)`); process.exit(1); }
-  console.log(`browser-repl-smoke: ${CASES.length + TRANSCRIPT_CASES.length + 1} cases passed (${assets})`);
+  console.log(`browser-repl-smoke: ${CASES.length + TRANSCRIPT_CASES.length + 1 + checkCases} cases passed (${assets})`);
 }

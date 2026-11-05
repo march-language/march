@@ -6,5 +6,6 @@ Chan.new: protocol `Tri` has 3 roles but Chan.new needs exactly 2. Use MPST.new 
 18 |     let (x, y) = Chan.new(Tri)
                       ^^^^^^^^^^^^^
 
+    run `march --explain session_role_count`
 
 

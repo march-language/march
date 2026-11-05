@@ -6,5 +6,6 @@ Protocol `P`: the label `msg_A_B_1` would name the message `Msg_A_B_1`, which is
 11 |     msg_A_B_1: A -> B : Int
          ^^^^^^^^^
 
+    run `march --explain endpoints_label_invalid`
 
 

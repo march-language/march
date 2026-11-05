@@ -1,0 +1,153 @@
+-- bench/udp_flood.march: datagram rate over loopback through stdlib Udp.
+--
+--   lockstep: one task sends a batch of B datagrams (Udp.send_batch, one
+--     kernel transit per batch: sendmmsg+GSO on Linux) and then drains it
+--     (Udp.recv_batch, recvmmsg on Linux), so nothing can be lost and the
+--     count is exact. Measures the per-datagram syscall + copy cost.
+--   flood: a receiver task drains while the sender blasts unthrottled; the
+--     kernel drops whatever the receiver cannot keep up with, and
+--     Udp.stats reports those drops (Linux). Measures sustained rate.
+--
+-- Every number printed as `pps` or `ms` is timing; the `received` counts of
+-- the lockstep runs are exact. Compiled only:
+--   march --compile --opt 2 bench/udp_flood.march -o /tmp/udp_flood && /tmp/udp_flood
+mod UdpFloodBench do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+  needs IO.NetConnect
+  needs IO.Spawn
+
+  pfn payload(size : Int, i : Int) : String do
+    let tag = int_to_string(i)
+    tag ++ string_repeat("x", size - string_byte_length(tag))
+  end
+
+  pfn batch(size : Int, b : Int) : List(String) do
+    List.map(List.range(0, b), fn i -> payload(size, i))
+  end
+
+  pfn bytes_of(ds : List((Udp.UdpAddr, String)), acc : Int) : Int do
+    match ds do
+    Nil -> acc
+    Cons((_, p), rest) -> bytes_of(rest, acc + string_byte_length(p))
+    end
+  end
+
+  -- Receive exactly `want` datagrams (or give up after a quiet second).
+  pfn drain(rx : Udp.UdpSocket, want : Int, got : Int, bytes : Int) : (Int, Int) do
+    if got >= want do (got, bytes)
+    else
+      match Udp.recv_batch(rx, 1024, 2048, 1000) do
+      Ok(Nil) -> (got, bytes)
+      Ok(ds)  -> drain(rx, want, got + List.length(ds), bytes_of(ds, bytes))
+      Err(e)  -> panic(Udp.error_message(e))
+      end
+    end
+  end
+
+  pfn lockstep_loop(tx : Udp.UdpSocket, rx : Udp.UdpSocket, dst : Udp.UdpAddr, pkts : List(String),
+                    b : Int, rounds : Int, got : Int, bytes : Int) : (Int, Int) do
+    if rounds <= 0 do (got, bytes)
+    else
+      match Udp.send_batch(tx, dst, pkts) do
+      Err(e) -> panic(Udp.error_message(e))
+      Ok(_) ->
+        match drain(rx, b, 0, 0) do
+        (g, nb) -> lockstep_loop(tx, rx, dst, pkts, b, rounds - 1, got + g, bytes + nb)
+        end
+      end
+    end
+  end
+
+  pfn pair() : (Udp.UdpSocket, Udp.UdpSocket, Udp.UdpAddr) do
+    let rx = match Udp.open("127.0.0.1", 0) do
+      Ok(s) -> s
+      Err(e) -> panic(Udp.error_message(e))
+    end
+    let tx = match Udp.open("127.0.0.1", 0) do
+      Ok(s) -> s
+      Err(e) -> panic(Udp.error_message(e))
+    end
+    let port = match Udp.local_port(rx) do
+      Ok(p) -> p
+      Err(e) -> panic(Udp.error_message(e))
+    end
+    let dst = match Udp.resolve("127.0.0.1", port) do
+      Ok(a) -> a
+      Err(e) -> panic(Udp.error_message(e))
+    end
+    (tx, rx, dst)
+  end
+
+  pfn pps(n : Int, ms : Int) : Int do
+    if ms <= 0 do n * 1000 else n * 1000 / ms end
+  end
+
+  pfn lockstep(size : Int, b : Int, total : Int) : () do
+    match pair() do
+    (tx, rx, dst) ->
+      let pkts = batch(size, b)
+      let t0 = System.monotonic_time()
+      match lockstep_loop(tx, rx, dst, pkts, b, total / b, 0, 0) do
+      (got, bytes) ->
+        let ms = System.monotonic_time() - t0
+        println("lockstep " ++ int_to_string(size) ++ " B x" ++ int_to_string(b)
+          ++ ": received " ++ int_to_string(got) ++ " datagrams, " ++ int_to_string(bytes) ++ " bytes")
+        println("  TIME lockstep_" ++ int_to_string(size) ++ " " ++ int_to_string(ms) ++ " ms, "
+          ++ int_to_string(pps(got, ms)) ++ " pps")
+      end
+      Udp.close(tx)
+      Udp.close(rx)
+    end
+  end
+
+  pfn blast(tx : Udp.UdpSocket, dst : Udp.UdpAddr, pkts : List(String), rounds : Int) : () do
+    if rounds <= 0 do ()
+    else
+      match Udp.send_batch(tx, dst, pkts) do
+      Ok(_)  -> blast(tx, dst, pkts, rounds - 1)
+      Err(e) -> panic(Udp.error_message(e))
+      end
+    end
+  end
+
+  -- Count until `want` arrive or the line goes quiet for 300 ms.
+  pfn count_all(rx : Udp.UdpSocket, want : Int, got : Int) : Int do
+    if got >= want do got
+    else
+      match Udp.recv_batch(rx, 1024, 2048, 300) do
+      Ok(Nil) -> got
+      Ok(ds)  -> count_all(rx, want, got + List.length(ds))
+      Err(e)  -> panic(Udp.error_message(e))
+      end
+    end
+  end
+
+  pfn flood(size : Int, b : Int, total : Int) : () do
+    match pair() do
+    (tx, rx, dst) ->
+      let pkts = batch(size, b)
+      let t0 = System.monotonic_time()
+      let r = task_spawn(fn _ -> count_all(rx, total, 0))
+      blast(tx, dst, pkts, total / b)
+      let sent_ms = System.monotonic_time() - t0
+      let got = task_await_unwrap(r)
+      let ms = System.monotonic_time() - t0
+      let st = Udp.stats(rx)
+      println("flood " ++ int_to_string(size) ++ " B: TIME send " ++ int_to_string(sent_ms) ++ " ms, "
+        ++ int_to_string(pps(total, sent_ms)) ++ " pps offered; received " ++ int_to_string(got)
+        ++ " in " ++ int_to_string(ms) ++ " ms; kernel dropped " ++ int_to_string(st.rx_dropped)
+        ++ "; send stalls " ++ int_to_string(st.tx_stalls))
+      Udp.close(tx)
+      Udp.close(rx)
+    end
+  end
+
+  fn main(_cap : Cap(IO)) : () do
+    lockstep(64, 64, 64000)
+    lockstep(1200, 64, 32000)
+    flood(64, 64, 128000)
+    flood(1200, 64, 64000)
+  end
+end

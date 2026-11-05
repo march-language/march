@@ -4503,6 +4503,51 @@ let test_nested_actor_msg_ctor_qualified_from_parent () =
   Alcotest.(check bool) "the bare Set is still not exported to the parent" true
     (has_errors (typecheck (src "send(p, Set(1))")))
 
+(* An actor's message constructor qualified by its ACTOR (gap G4 of
+   specs/2026-11-04-lemmas-hcr-actors-choreography-design.md): `Counter.Tally`
+   and `Counter_Msg.Tally` select that actor's message when another actor (or
+   a variant) shares the name.  Before 2026-11-04 every such spelling was
+   `unknown_constructor` and the advice was to rename a handler.  Both
+   backends: test/native/actor_msg_qualified.march. *)
+let test_actor_msg_ctor_qualified_by_actor () =
+  let src ?(vote = "type Vote = Tally(Int) | Abstain") body = Printf.sprintf {|mod Two do
+    needs IO.Spawn
+    %s
+    actor Counter do
+      state { n : Int }
+      init { n: 0 }
+      on Tally(k : Int) do { n: state.n + k } end
+    end
+    actor Labels do
+      state { s : String }
+      init { s: "" }
+      on Tally(k : Int) do { s: int_to_string(k) } end
+    end
+    fn main(_s : Cap(IO.Spawn)) do
+      let c = spawn(Counter)
+      let l = spawn(Labels)
+      %s
+    end
+  end|} vote body in
+  let clean b = has_errors (typecheck (src b)) in
+  Alcotest.(check bool) "send(c, Counter.Tally(1)) typechecks" false (clean "send(c, Counter.Tally(1))");
+  Alcotest.(check bool) "send(l, Labels_Msg.Tally(1)) typechecks" false (clean "send(l, Labels_Msg.Tally(1))");
+  Alcotest.(check bool) "send(l, Two.Labels.Tally(1)) typechecks" false (clean "send(l, Two.Labels.Tally(1))");
+  Alcotest.(check bool) "a Labels.Msg annotation accepts Labels.Tally" false
+    (clean "let m : Labels.Msg = Labels.Tally(2)\n      send(l, m)");
+  Alcotest.(check bool) "the qualified message keeps the handler's payload type" true
+    (has_error_with (typecheck (src {|send(c, Counter.Tally("x"))|})) "expected");
+  Alcotest.(check bool) "another actor's qualified message is still send_wrong_actor" true
+    (has_error_with (typecheck (src "send(c, Labels.Tally(1))")) "would be dropped");
+  (* Without the variant, a bare `Tally` resolves to one actor's message; the
+     advice for the other names the qualified spelling. *)
+  Alcotest.(check bool) "the bare send's advice names the qualified spelling" true
+    (List.exists
+       (fun (d : March_errors.Errors.diagnostic) ->
+         List.exists (fun m -> contains_substring m "`Counter.Tally`")
+           (d.March_errors.Errors.message :: d.March_errors.Errors.notes))
+       (March_errors.Errors.sorted (typecheck (src ~vote:"" "send(c, Tally(1))"))))
+
 (* Inside a NESTED module, an actor's message constructors are in scope for
    the whole module, above the actor as well as below, as they always were in
    the entry module (whose pass 1 registers every DActor).  Before 2026-10-12
@@ -18401,6 +18446,7 @@ let compiler_suites =
           Alcotest.test_case "nested actor bare spawn from entry: charged" `Quick test_nested_actor_bare_spawn_from_entry_is_charged;
           Alcotest.test_case "nested actor message ctor, qualified, from parent" `Quick test_nested_actor_msg_ctor_qualified_from_parent;
           Alcotest.test_case "nested actor message ctor named above its actor" `Quick test_nested_actor_msg_ctor_forward_reference;
+          Alcotest.test_case "actor message ctor qualified by its actor" `Quick test_actor_msg_ctor_qualified_by_actor;
           (* item 1380: Cap(IO.NetListen) body-scan enforcement *)
           Alcotest.test_case "tcp_listen body, no needs: warns NetListen"   `Quick test_netlisten_body_missing_needs_warns;
           Alcotest.test_case "tcp_listen body, needs NetListen: no warning" `Quick test_netlisten_body_with_needs_no_warning;

@@ -1,0 +1,23 @@
+mod Main do
+  type C = C
+  type S = S
+
+  protocol Lookup do
+    choose by S:
+      ok  -> S -> C : Int
+      err -> S -> C : String
+    end
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Lookup)
+    let sc2 = Chan.choose(sc, :ok)
+    Chan.close(Chan.send(sc2, 7))
+    let (label, cc2) = Chan.offer(cc)
+    match label do
+      :ok ->
+        let (_n, cc3) = Chan.recv(cc2)
+        Chan.close(cc3)
+    end
+  end
+end

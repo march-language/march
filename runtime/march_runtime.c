@@ -7859,11 +7859,17 @@ void march_set_actor_caps(void *actor, void *caps) {
     march_reclaim_exit();
 }
 
+/* Returns an OWNED reference: the meta keeps its own, and the dispatch's
+ * Perceus releases the one it reads (a dispatch arm that uses no capability
+ * `dec_rc`s `$caps`). Handing back the meta's reference instead freed the
+ * record on the second message to such an actor and underflowed on a later
+ * one, in every --test build (depot's Pool under conduit's suite). */
 void *march_actor_caps(void *actor) {
     march_reclaim_enter();   /* m: resolved and used inside */
     march_actor_meta *m = find_meta(actor);
     void *caps = m ? atomic_load_explicit(&m->spawn_cap, memory_order_acquire)
                    : NULL;
+    if (caps) march_incrc(caps);
     march_reclaim_exit();
     return caps;
 }
