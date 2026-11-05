@@ -2040,6 +2040,10 @@ let declared_logic_symbols (preamble : string) (vc : Smt.vc) : bool =
   List.iter walk (vc.Smt.goal :: vc.Smt.assumptions);
   !ok
 
+(** Certificates known before the walk: a metric certificate the previous
+    pass of [Refine_check.check_module] decided (R2). *)
+let seed_certs : (A.span, string) Hashtbl.t = Hashtbl.create 8
+
 let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t option) (t : RT.t)
     (decls : A.decl list) : unit =
   RS.reset ();
@@ -2053,7 +2057,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   let ne = Hashtbl.create 64 in
   List.iter (fun sp -> Hashtbl.replace ne sp ()) !March_typecheck.Typecheck.last_nonexhaustive_match_spans;
   let inputs =
-    { certs = (fun _ -> None);
+    { certs = Hashtbl.find_opt seed_certs;
       nonexhaustive = Hashtbl.mem ne;
       (* A non-literal divisor passes here and is decided on the translated
          template ([divisions_defined]): the ledger's verdict comes after. *)

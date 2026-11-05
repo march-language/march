@@ -1348,3 +1348,27 @@ let lemma_test_len =
         in
         expect_row out "short" ~status:"COUNTEREXAMPLE" ~detail:"xs = ";
         if not (red out) then Alcotest.failf "a counterexample makes the run RED:\n%s" out) ]
+
+(* Reflection R2: a function certified by a metric (`@[decreases]`), which
+   the walk decides after the encoder is built, is reflected. *)
+let metric_src =
+  {|mod MT do
+  @[decreases(n)]
+  @[reflect(fuel: 4)]
+  fn down(n : {Int | _ >= 0}) : Int do
+    if n == 0 do 0 else down(n - 1) + 1 end
+  end
+|}
+
+let metric_cert =
+  [ gated "metric_cert: a metric-certified function unfolds" (fun () ->
+        let out = run (metric_src ^ "  @[lemma]\n  fn d3(u : Int) : {Unit | down(3) == 3} do () end\nend\n") in
+        expect_admitted out "d3");
+    gated "metric_cert_red: a false theorem about it, and one with no certificate, do not prove" (fun () ->
+        let out = run (metric_src ^ "  @[lemma]\n  fn d_bad(u : Int) : {Unit | down(3) == 4} do () end\nend\n") in
+        if not (unproved out "d_bad" || refuted out "d_bad") then Alcotest.failf "d_bad is false:\n%s" out;
+        let spin =
+          "mod SP do\n  @[decreases(n)]\n  fn spin(n : Int) : Int do\n    if n == 0 do 0 else spin(n - 1) + 1 end\n  end\n  @[lemma]\n  fn s1(u : Int) : {Unit | spin(1) == 1} do () end\nend\n"
+        in
+        let out = run spin in
+        if not (unproved out "s1" || refuted out "s1") then Alcotest.failf "spin has no proved metric (n may be negative):\n%s" out) ]
