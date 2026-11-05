@@ -5,11 +5,10 @@ loses proofs).  (The `[P1]` constructor-registry bug filed here is fixed:
 Filed by phase 1b (`specs/progress/2026-10-31-reflection-phase1b.md`) from the 1a/1b todos; the
 design is `specs/2026-10-29-refinement-reflection-design.md`.
 
-- **Metric-certified functions (R2).** The encoder reads only the termination graph's own
-  certificate; a `metric` certificate is decided by the refinement walk, after the encoder is
-  built, so such a function (design probe r1's `p`) is not unfolded.
-- **Division by a non-literal (R4).** Its `Division` obligation is filed after the check, so
-  every `/` or `%` by a non-literal blocks reflection.
+(Metric-certified functions (R2) and division by a non-literal (R4) are encoded since
+`specs/progress/2026-11-05-reflection-metric-and-division.md`.  What is left of R4: a divisor
+shown non-zero only by the solver, such as a refinement `v * v > 0`, still declines.)
+
 - **Float and String.** A function whose signature mentions either has no logic symbol (§2.3's
   opaque Float operators and distinct `$Str` literals are not built).
 - **Records and tuples** as parameters or results, and `let` patterns other than a variable:

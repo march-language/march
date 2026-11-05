@@ -230,6 +230,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="List.html#fn-concat"><span class="sb-kind" style="color:var(--fn)">F</span>concat</a>
 <a class="sl" href="List.html#fn-dedup"><span class="sb-kind" style="color:var(--fn)">F</span>dedup</a>
 <a class="sl" href="List.html#fn-drop"><span class="sb-kind" style="color:var(--fn)">F</span>drop</a>
+<a class="sl" href="List.html#fn-drop_append"><span class="sb-kind" style="color:var(--fn)">F</span>drop_append</a>
 <a class="sl" href="List.html#fn-drop_last"><span class="sb-kind" style="color:var(--fn)">F</span>drop_last</a>
 <a class="sl" href="List.html#fn-drop_while"><span class="sb-kind" style="color:var(--fn)">F</span>drop_while</a>
 <a class="sl" href="List.html#fn-each"><span class="sb-kind" style="color:var(--fn)">F</span>each</a>
@@ -260,6 +261,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="List.html#fn-minimum_int"><span class="sb-kind" style="color:var(--fn)">F</span>minimum_int</a>
 <a class="sl" href="List.html#fn-nth"><span class="sb-kind" style="color:var(--fn)">F</span>nth</a>
 <a class="sl" href="List.html#fn-nth_opt"><span class="sb-kind" style="color:var(--fn)">F</span>nth_opt</a>
+<a class="sl" href="List.html#fn-nth_opt_append"><span class="sb-kind" style="color:var(--fn)">F</span>nth_opt_append</a>
 <a class="sl" href="List.html#fn-partition"><span class="sb-kind" style="color:var(--fn)">F</span>partition</a>
 <a class="sl" href="List.html#fn-pfilter"><span class="sb-kind" style="color:var(--fn)">F</span>pfilter</a>
 <a class="sl" href="List.html#fn-pmap"><span class="sb-kind" style="color:var(--fn)">F</span>pmap</a>
@@ -281,7 +283,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="List.html#fn-tail"><span class="sb-kind" style="color:var(--fn)">F</span>tail</a>
 <a class="sl" href="List.html#fn-tail_opt"><span class="sb-kind" style="color:var(--fn)">F</span>tail_opt</a>
 <a class="sl" href="List.html#fn-take"><span class="sb-kind" style="color:var(--fn)">F</span>take</a>
+<a class="sl" href="List.html#fn-take_append"><span class="sb-kind" style="color:var(--fn)">F</span>take_append</a>
 <a class="sl" href="List.html#fn-take_drop"><span class="sb-kind" style="color:var(--fn)">F</span>take_drop</a>
+<a class="sl" href="List.html#fn-take_onto_append"><span class="sb-kind" style="color:var(--fn)">F</span>take_onto_append</a>
 <a class="sl" href="List.html#fn-take_onto_drop"><span class="sb-kind" style="color:var(--fn)">F</span>take_onto_drop</a>
 <a class="sl" href="List.html#fn-take_while"><span class="sb-kind" style="color:var(--fn)">F</span>take_while</a>
 <a class="sl" href="List.html#fn-unzip"><span class="sb-kind" style="color:var(--fn)">F</span>unzip</a>
@@ -378,7 +382,9 @@ List.append([], [1, 2])" data-try-kind="transcript"><code>march&gt; <span class=
 march&gt; <span class="tok-ty">List</span>.append([], [<span class="tok-num">1</span>, <span class="tok-num">2</span>])
 [<span class="tok-num">1</span>, <span class="tok-num">2</span>]</code></pre><div class="laws"><h4>Laws</h4><ul><li><code>append(xs, Nil) == xs</code> <span class="law-by">(lemma <code>append_nil</code>)</span> <span class="law-st law-ok">proved</span></li>
 <li><code>len(append(xs, ys)) == len(xs) + len(ys)</code> <span class="law-by">(lemma <code>len_append</code>)</span> <span class="law-st law-ok">proved</span></li>
-<li><code>append(take(xs, n), drop(xs, n)) == xs</code> <span class="law-by">(lemma <code>take_drop</code>)</span> <span class="law-st">not proved</span></li></ul></div></div></div>
+<li><code>append(take(xs, n), drop(xs, n)) == xs</code> <span class="law-by">(lemma <code>take_drop</code>)</span> <span class="law-st">not proved</span></li>
+<li><code>take(append(xs, ys), len(xs)) == xs</code> <span class="law-by">(lemma <code>take_append</code>)</span> <span class="law-st">not proved</span></li>
+<li><code>drop(append(xs, ys), len(xs)) == ys</code> <span class="law-by">(lemma <code>drop_append</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
 <div class="item" id="fn-append_assoc"><div class="ih"><span class="badge bfn">fn</span><span class="name">append_assoc</span><span class="sig">append_assoc(xs : List(a), ys : List(a), zs : List(a))</span><a class="anchor-link" href="#fn-append_assoc" title="Link">#</a></div><div class="ib"><p><code>append</code> is associative.</p></div></div>
 <div class="item" id="fn-append_nil"><div class="ih"><span class="badge bfn">fn</span><span class="name">append_nil</span><span class="sig">append_nil(xs : List(a)) : {Unit | append(xs, Nil) == xs}</span><a class="anchor-link" href="#fn-append_nil" title="Link">#</a></div><div class="ib"><p><code>append(xs, Nil) == xs</code>.</p></div></div>
 <div class="item" id="fn-chunks"><div class="ih"><span class="badge bfn">fn</span><span class="name">chunks</span><span class="sig">chunks(xs : List(a), size : {Int | _ &gt; 0}) : List(List(a))</span><a class="anchor-link" href="#fn-chunks" title="Link">#</a></div><div class="ib"><p>Splits the list into consecutive chunks of <code>size</code> elements; the last chunk holds the remainder and may be shorter. Returns [] for an empty list. <code>size</code> must be positive (<code>{Int | _ &gt; 0}</code>); panics otherwise.</p><h3>Examples</h3><pre data-try="List.chunks([1, 2, 3, 4, 5], 2)
@@ -404,7 +410,9 @@ march&gt; <span class="tok-ty">List</span>.drop([<span class="tok-num">1</span>,
 []
 march&gt; <span class="tok-ty">List</span>.drop([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>], <span class="tok-num">0</span>)
 [<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>]</code></pre><div class="laws"><h4>Laws</h4><ul><li><code>_ &gt;= 0 &amp;&amp; _ &lt;= len(xs)}) : {Unit | len(drop(xs, n)) == len(xs) - n</code> <span class="law-by">(lemma <code>len_drop</code>)</span> <span class="law-st law-ok">proved</span></li>
-<li><code>append(take(xs, n), drop(xs, n)) == xs</code> <span class="law-by">(lemma <code>take_drop</code>)</span> <span class="law-st">not proved</span></li></ul></div></div></div>
+<li><code>append(take(xs, n), drop(xs, n)) == xs</code> <span class="law-by">(lemma <code>take_drop</code>)</span> <span class="law-st">not proved</span></li>
+<li><code>drop(append(xs, ys), len(xs)) == ys</code> <span class="law-by">(lemma <code>drop_append</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-drop_append"><div class="ih"><span class="badge bfn">fn</span><span class="name">drop_append</span><span class="sig">drop_append(xs : List(a), ys : List(a)) : {Unit | drop(append(xs, ys), len(xs)) == ys}</span><a class="anchor-link" href="#fn-drop_append" title="Link">#</a></div><div class="ib"><p><code>drop(append(xs, ys), len(xs)) == ys</code>.</p></div></div>
 <div class="item" id="fn-drop_last"><div class="ih"><span class="badge bfn">fn</span><span class="name">drop_last</span><span class="sig">drop_last(xs : List(a)) : List(a)</span><a class="anchor-link" href="#fn-drop_last" title="Link">#</a></div><div class="ib"><p>Returns all elements except the last. Returns [] for empty or singleton lists (no panic).</p><h3>Examples</h3><pre data-try="List.drop_last([1, 2, 3])
 List.drop_last([1])
 List.drop_last([])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.drop_last([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>])
@@ -519,6 +527,7 @@ march&gt; <span class="tok-ty">List</span>.nth_opt([<span class="tok-num">10</sp
 <span class="tok-ty">None</span>
 march&gt; <span class="tok-ty">List</span>.nth_opt([<span class="tok-num">10</span>, <span class="tok-num">20</span>, <span class="tok-num">30</span>], -<span class="tok-num">1</span>)
 <span class="tok-ty">None</span></code></pre></div></div>
+<div class="item" id="fn-nth_opt_append"><div class="ih"><span class="badge bfn">fn</span><span class="name">nth_opt_append</span><span class="sig">nth_opt_append(xs : List(a), ys : List(a), i : {Int | _ &gt;= 0 &amp;&amp; _ &lt; len(xs)})</span><a class="anchor-link" href="#fn-nth_opt_append" title="Link">#</a></div><div class="ib"><p><code>nth_opt(append(xs, ys), i) == nth_opt(xs, i)</code> for an index inside <code>xs</code>.</p></div></div>
 <div class="item" id="fn-partition"><div class="ih"><span class="badge bfn">fn</span><span class="name">partition</span><span class="sig">partition(xs : List(a), pred : a -&gt; Bool[p]) : (List(a[p]), List({a | !p(_)}))</span><a class="anchor-link" href="#fn-partition" title="Link">#</a></div><div class="ib"><p>Splits into (elements satisfying <code>pred</code>, elements not satisfying <code>pred</code>), each keeping the original order.  Every element of the first list satisfies <code>pred</code> and none of the second does: an abstract refinement <code>p</code>, as for <code>filter</code>, so <code>let (pos, neg) = List.partition(ys, fn y -&gt; y &gt; 0)</code> gives <code>pos</code> the element refinement <code>y &gt; 0</code> and <code>neg</code> the refinement <code>!(y &gt; 0)</code>.</p><h3>Examples</h3><pre data-try="List.partition([1, 2, 3, 4, 5], fn x -&gt; x % 2 == 1)
 List.partition([], fn x -&gt; x &gt; 0)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.partition([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>, <span class="tok-num">5</span>], <span class="tok-kw">fn</span> x -&gt; x % <span class="tok-num">2</span> == <span class="tok-num">1</span>)
 ([<span class="tok-num">1</span>, <span class="tok-num">3</span>, <span class="tok-num">5</span>], [<span class="tok-num">2</span>, <span class="tok-num">4</span>])
@@ -625,8 +634,11 @@ march&gt; <span class="tok-ty">List</span>.take([<span class="tok-num">1</span>,
 [<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>]
 march&gt; <span class="tok-ty">List</span>.take([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>], -<span class="tok-num">1</span>)
 []</code></pre><div class="laws"><h4>Laws</h4><ul><li><code>_ &gt;= 0 &amp;&amp; _ &lt;= len(xs)}) : {Unit | len(take(xs, n)) == n</code> <span class="law-by">(lemma <code>len_take</code>)</span> <span class="law-st">not proved</span></li>
-<li><code>append(take(xs, n), drop(xs, n)) == xs</code> <span class="law-by">(lemma <code>take_drop</code>)</span> <span class="law-st">not proved</span></li></ul></div></div></div>
+<li><code>append(take(xs, n), drop(xs, n)) == xs</code> <span class="law-by">(lemma <code>take_drop</code>)</span> <span class="law-st">not proved</span></li>
+<li><code>take(append(xs, ys), len(xs)) == xs</code> <span class="law-by">(lemma <code>take_append</code>)</span> <span class="law-st">not proved</span></li></ul></div></div></div>
+<div class="item" id="fn-take_append"><div class="ih"><span class="badge bfn">fn</span><span class="name">take_append</span><span class="sig">take_append(xs : List(a), ys : List(a)) : {Unit | take(append(xs, ys), len(xs)) == xs}</span><a class="anchor-link" href="#fn-take_append" title="Link">#</a></div><div class="ib"><p><code>take(append(xs, ys), len(xs)) == xs</code>.</p></div></div>
 <div class="item" id="fn-take_drop"><div class="ih"><span class="badge bfn">fn</span><span class="name">take_drop</span><span class="sig">take_drop(xs : List(a), n : Int) : {Unit | append(take(xs, n), drop(xs, n)) == xs}</span><a class="anchor-link" href="#fn-take_drop" title="Link">#</a></div><div class="ib"><p><code>append(take(xs, n), drop(xs, n)) == xs</code>.</p></div></div>
+<div class="item" id="fn-take_onto_append"><div class="ih"><span class="badge bfn">fn</span><span class="name">take_onto_append</span><span class="sig">take_onto_append(xs : List(a), ys : List(a), acc : List(a))</span><a class="anchor-link" href="#fn-take_onto_append" title="Link">#</a></div><div class="ib"><p><code>take_onto</code> over <code>append(xs, ys)</code> stops exactly at the end of <code>xs</code>: the accumulator lemma behind <code>take_append</code>.</p></div></div>
 <div class="item" id="fn-take_onto_drop"><div class="ih"><span class="badge bfn">fn</span><span class="name">take_onto_drop</span><span class="sig">take_onto_drop(xs : List(a), k : Int, acc : List(a))</span><a class="anchor-link" href="#fn-take_onto_drop" title="Link">#</a></div><div class="ib"><p><code>take</code>'s loop and <code>drop</code> split a list at the same place.</p></div></div>
 <div class="item" id="fn-take_while"><div class="ih"><span class="badge bfn">fn</span><span class="name">take_while</span><span class="sig">take_while(xs : List(a), pred : a -&gt; Bool[p]) : List(a[p])</span><a class="anchor-link" href="#fn-take_while" title="Link">#</a></div><div class="ib"><p>Returns the longest prefix of elements satisfying <code>pred</code>, stopping at the first element that fails. Every element of the result is known to satisfy <code>pred</code> (an abstract refinement <code>p</code>, as for <code>filter</code>).</p><h3>Examples</h3><pre data-try="List.take_while([1, 2, 5, 1], fn x -&gt; x &lt; 3)
 List.take_while([5, 1], fn x -&gt; x &lt; 3)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.take_while([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">5</span>, <span class="tok-num">1</span>], <span class="tok-kw">fn</span> x -&gt; x &lt; <span class="tok-num">3</span>)

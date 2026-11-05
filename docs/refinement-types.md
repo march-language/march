@@ -1679,6 +1679,9 @@ are already proved, so a check does not prove them again (see below).
 | `List.len_take(xs, n)`, for `0 <= n <= len(xs)` | `len(take(xs, n)) == n` |
 | `List.len_drop(xs, n)`, for `0 <= n <= len(xs)` | `len(drop(xs, n)) == len(xs) - n` |
 | `List.take_drop(xs, n)` | `append(take(xs, n), drop(xs, n)) == xs` |
+| `List.take_append(xs, ys)` | `take(append(xs, ys), len(xs)) == xs` |
+| `List.drop_append(xs, ys)` | `drop(append(xs, ys), len(xs)) == ys` |
+| `List.nth_opt_append(xs, ys, i)`, for `0 <= i < len(xs)` | `nth_opt(append(xs, ys), i) == nth_opt(xs, i)` |
 
 ```march
 fn need3(xs : {List(Int) | len(_) == 3}) : Int do 0 end
@@ -1688,6 +1691,12 @@ fn f(a : {List(Int) | len(_) == 1}, b : {List(Int) | len(_) == 2}) : Int do
   need3(List.append(a, b))   -- proved
 end
 ```
+
+`Math.min_int`, `Math.max_int` and `Math.clamp_int` have proved result types:
+`{Int | _ <= a && _ <= b && (_ == a || _ == b)}` for `min_int` (and dually for `max_int`),
+and `{Int | high < low || (_ >= low && _ <= high)}` for `clamp_int`, so a call with
+`low <= high` is known to be in range. The condition is in the result, not a precondition,
+so no existing call gains an obligation.
 
 `List.filter`'s result also has a proved length contract,
 `len(_) <= len(xs)`, alongside the existing one about its elements.
@@ -5227,7 +5236,7 @@ reflect report: 4 functions, 1 reflected
 reflect	prog.march:3:5	noisy	no	R3:calls println (prog.march:4:4)
 reflect	prog.march:7:5	mid	no	R6:calls noisy, which is not reflected (prog.march:7:27)
 reflect	prog.march:8:5	half	reflected	unfold
-reflect	prog.march:9:5	ratio	no	R4:division by b not proved (prog.march:9:38)
+reflect	prog.march:9:5	ratio	no	R4:divides by a value nothing shows is non-zero (prog.march:9:5)
   top-level: 1 of 4 reflected
   first blocker: R3=1 R4=1 R6=1
 ```
@@ -5239,13 +5248,20 @@ The rules, in the order the report checks them:
   reflected.
 - **R2**: it terminates. A recursive function needs a `structural` or `metric`
   certificate, the same one `--termination-report` prints; `trusted`,
-  `diverges` and `unproved` do not count.
+  `diverges` and `unproved` do not count. A `metric` certificate comes from
+  `@[decreases]`, and the checker only knows it once it has walked the module,
+  so a module with one is checked twice: the second time with the certificate.
 - **R3**: no effect: no `spawn`, `send`, `dbg`, or effectful builtin such as
   `println`.
 - **R4**: it cannot fail: no `panic`, no runtime `assert`, and every `/` or `%`
-  by something other than a non-zero literal has its division obligation
-  proved (in a `cap no_panic` module). An `Int` overflow is allowed: it panics,
-  so it never gives a value the checker disagrees with.
+  by something other than a non-zero literal divides by a value the function
+  itself shows is non-zero: a parameter refined `_ != 0`, `_ > 0` or `_ < 0`,
+  or a branch that has ruled zero out (`if b == 0 do 0 else a / b end`,
+  `b != 0 && a / b > 1`). The check reads those facts as written, without the
+  solver, so a refinement like `v * v > 0` does not count here. In a
+  `cap no_panic` module the division obligation the solver proved counts too.
+  An `Int` overflow is allowed: it panics, so it never gives a value the
+  checker disagrees with.
 - **R5**: every `match` covers all cases, including a guarded match whose
   unguarded arms do not cover.
 - **R6**: every callee is itself reflected, or a builtin the solver understands
