@@ -1,0 +1,22 @@
+-- EXPECT-ERROR: Role `Cons` tries to choose `more` or `done` here, but at this point protocol `Stream` says it must receive an `Int` from `Prod`
+-- REJECT (§F3): the consumer chooses before it has received the producer's `Int`; the error names the
+-- protocol step it skipped, with a "you are here" label on it, instead of two generated state names.
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1) : Stream_Cons.Yield do
+    Stream_Cons.close(s, Stream_Cons.choose_done(s, st, true))
+  end
+  fn main(c : Cap(IO)) do () end
+end

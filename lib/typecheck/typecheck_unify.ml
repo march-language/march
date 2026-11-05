@@ -179,6 +179,54 @@ let common_mismatch_hint provided required =
   | _ -> []
 
 
+(** Two states of one generated protocol role (§F3): the facts for the
+    state the value is in ([here]) and the one the call needs ([wanted]). *)
+let protocol_step_pair provided required =
+  match repr provided, repr required with
+  | TCon (p, []), TCon (r, []) when p <> r ->
+    (* The checker sees a role module's state names bare (`S_end`), and two
+       roles can share one; the pair belongs to the one role that has both. *)
+    let open March_ast.Protocol_states in
+    let pairs = List.concat_map (fun (here : info) ->
+        List.filter_map (fun (wanted : info) ->
+            if here.ps_proto = wanted.ps_proto && here.ps_role = wanted.ps_role
+            then Some (here, wanted) else None) (find_all r)) (find_all p) in
+    (match pairs with [ pair ] -> Some pair | _ -> None)
+  | _ -> None
+
+(** A role body taking a step the protocol does not allow at that point,
+    said in protocol terms: what the call tries to do, what the role must do
+    instead, a "you are here" label on that protocol step, and the function
+    that takes it.  No generated state name appears. *)
+let report_protocol_step_order env ~span ~provided
+    ~(here : March_ast.Protocol_states.info) ~(wanted : March_ast.Protocol_states.info) =
+  (* Two steps can read alike (two sends of a `String` to `L`); then each is
+     told apart by its line in the protocol. *)
+  let says (i : March_ast.Protocol_states.info) =
+    match i.ps_span with
+    | Some sp when here.ps_doing = wanted.ps_doing ->
+      Printf.sprintf "%s (the step on line %d)" i.ps_doing sp.Ast.start_line
+    | _ -> i.ps_doing in
+  let message = Printf.sprintf
+      "Role `%s` tries to %s here, but at this point protocol `%s` says it must %s."
+      here.ps_role (says wanted) here.ps_proto (says here) in
+  let you_are_here = match here.ps_span with
+    | Some sp -> [ { Err.lbl_span = sp;
+                     lbl_message = Printf.sprintf "`%s` is here: it must %s" here.ps_role here.ps_doing } ]
+    | None -> [] in
+  let binder = match provided with
+    | Some { p_name = Some n; p_span; _ } ->
+      (match StrMap.find_opt n env.binder_spans with
+       | Some bsp when bsp <> span && bsp <> p_span ->
+         [ { Err.lbl_span = bsp; lbl_message = Printf.sprintf "`%s` is the state bound here" n } ]
+       | _ -> [])
+    | _ -> [] in
+  Err.report env.errors
+    { Err.severity = Error; span; message;
+      labels = you_are_here @ binder;
+      notes = [ Printf.sprintf "Take that step with `%s` first." here.ps_call ];
+      code = Err.Code.protocol_step_order; fix = None }
+
 (* A capability for another capability: its own message (§F1). *)
 let cap_pair_of ~occurs_violation ?provided expected found =
     match repr expected, repr found, provided with
@@ -199,6 +247,10 @@ let rec report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided 
   | None -> report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected found
 
 and report_type_mismatch env ~span ~occurs_violation ~reason ?provided ?diff expected found =
+  match protocol_step_pair expected found with
+  | Some (here, wanted) when not occurs_violation ->
+    report_protocol_step_order env ~span ~provided ~here ~wanted
+  | _ ->
   (* Build headline, using pretty-printing for long types.
      Convention: `expected` = inferred type of the expression (what was provided);
                  `found`    = required type from context (what was needed).

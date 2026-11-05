@@ -6835,11 +6835,44 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
            if List.mem x.txt dead then
              err ~span:x.span (Printf.sprintf "`%s` has crashed, so it cannot take part in its own crash branch (%s)." x.txt (step_text s r)))
         [ s; r ];
-      if may_crash s.txt && not (List.mem s.txt dead) then
-        err ~span:s.span
-          (Printf.sprintf
-             "`%s` may crash, so %s needs `or crash do ... end`: what does `%s` do if `%s` crashes before sending?"
-             s.txt (step_text s r) r.txt s.txt);
+      if may_crash s.txt && not (List.mem s.txt dead) then begin
+        (* The fix: a crash branch that tells every role still in the
+           conversation, first, from the detector, as the crash rule requires;
+           each message carries the payload of that role's first message from
+           the detector in the normal continuation, or a `String`. *)
+        let rec msgs (steps : Ast.protocol_step list) = List.concat_map (function
+            | Ast.ProtoMsg (a, b, t, _) -> [ (a.Ast.txt, b.Ast.txt, t) ]
+            | Ast.ProtoLoop (inner, _) -> msgs inner
+            | Ast.ProtoChoice (_, brs) -> List.concat_map (fun (_, arm) -> msgs arm) brs
+            | Ast.ProtoCrashOr (inner, _, _) -> msgs [ inner ]
+            | _ -> []) steps in
+        let later = msgs (rest @ tail) in
+        let others = List.fold_left (fun acc (a, b, _) ->
+            List.fold_left (fun acc x ->
+                if x = s.txt || x = r.txt || List.mem x acc || List.mem x dead then acc else acc @ [ x ])
+              acc [ a; b ]) [] later in
+        let payload x = match List.find_opt (fun (a, b, _) -> a = r.txt && b = x) later with
+          | Some (_, _, t) -> Ast.show_ty t | None -> "String" in
+        let ind = String.make s.span.start_col ' ' in
+        let text = String.concat "\n"
+            ([ ind ^ "  or crash do" ]
+             @ List.map (fun x -> Printf.sprintf "%s    %s -> %s : %s" ind r.txt x (payload x)) others
+             @ [ ind ^ "  end" ]) in
+        Err.report env.errors
+          { Err.severity = Error; span = s.span;
+            message = Printf.sprintf
+                "Protocol `%s`: `%s` may crash, so %s needs `or crash do ... end`: what does `%s` do if `%s` crashes before sending?"
+                proto s.txt (step_text s r) r.txt s.txt;
+            labels = []; notes =
+              (if others = [] then []
+               else [ Printf.sprintf
+                        "The crash branch is the rest of the conversation when `%s` is gone. It must \
+                         begin, for %s, with a message from `%s`; the fix sends one each, for you to \
+                         change to what the conversation should do."
+                        s.txt (String.concat ", " (List.map (fun x -> "`" ^ x ^ "`") others)) r.txt ]);
+            code = Err.Code.role_needs_invalid;
+            fix = Some (Err.FInsert { after_line = s.span.end_line; text }) }
+      end;
       walk ~tail ~dead rest
     | Ast.ProtoCrashOr (inner, crash, csp) :: rest ->
       (match inner with
@@ -7812,23 +7845,42 @@ let rec check_decl env (d : Ast.decl) : env =
        branch), so a branch ending in a `loop` makes that projected tail
        unreachable just as surely as a written-out step would — walking each
        branch with `rest = []` and no tail missed exactly that case. *)
+    (* Where a step is written: its first role name, or its own span. *)
+    let rec step_span (st : Ast.protocol_step) = match st with
+      | Ast.ProtoMsg (s, _, _, _) -> Some s.Ast.span
+      | Ast.ProtoChoice (c, _) -> Some c.Ast.span
+      | Ast.ProtoLoop (inner, _) -> (match inner with x :: _ -> step_span x | [] -> None)
+      | Ast.ProtoStop sp | Ast.ProtoMayCrash (_, sp) | Ast.ProtoCrashOr (_, _, sp)
+      | Ast.ProtoRoleNeeds (_, _, sp) -> Some sp in
+    (* The caret on the first step that can never run, and a label on the
+       loop that makes it so (§F3); the whole protocol when neither has a
+       span. *)
+    let report_dead_after ~inner ~dead msg =
+      let first = match dead with x :: _ -> step_span x | [] -> None in
+      let loop_lbl = match inner with
+        | x :: _ -> (match step_span x with
+            | Some lsp -> [ { Err.lbl_span = lsp; lbl_message = "this `loop` repeats forever" } ]
+            | None -> [])
+        | [] -> [] in
+      Err.report env.errors
+        { Err.severity = Error; span = Option.value first ~default:sp; message = msg;
+          labels = loop_lbl; notes = []; code = Err.Code.protocol_invalid; fix = None } in
     let rec check_unreachable_after_loop ~tail steps =
       match steps with
       | Ast.ProtoLoop (inner, _) :: rest ->
         check_unreachable_after_loop ~tail:[] inner;
         if rest <> [] then
-          Err.error ~code:Err.Code.protocol_invalid env.errors ~span:sp
+          report_dead_after ~inner ~dead:rest
             (Printf.sprintf
-               "Protocol `%s`: the steps after this `loop` can never run — \
-                a `loop` block repeats forever, so it must be the last step."
+               "Protocol `%s`: this step can never run — it comes after a `loop`, \
+                and a `loop` block repeats forever, so it must be the last step."
                name.txt)
         else if tail <> [] then
-          Err.error ~code:Err.Code.protocol_invalid env.errors ~span:sp
+          report_dead_after ~inner ~dead:tail
             (Printf.sprintf
-               "Protocol `%s`: this `choose` branch ends in a `loop`, but the \
-                protocol continues after the `choose` — those following steps \
-                are projected into EVERY branch, so they can never run in this \
-                one. Move them inside the branches that can reach them."
+               "Protocol `%s`: this step can never run in the `choose` branch that \
+                ends in a `loop` — the steps after a `choose` are projected into \
+                EVERY branch. Move it inside the branches that can reach it."
                name.txt)
       | Ast.ProtoStop stop_sp :: rest ->
         (* `stop` projects to `SEnd` unconditionally (see [project_steps]),
