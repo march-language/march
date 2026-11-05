@@ -50,15 +50,21 @@ class PageLint(unittest.TestCase):
         self.assertEqual(bad, [])
 
 
-    def test_the_page_is_unpublished_while_its_deploy_chapter_is_missing(self):
-        # The opening promises a chapter on changing a running system. Until that chapter
-        # is written the site must not build this page at all (no URL, no search entry).
+    def test_the_page_promises_no_deploy_chapter_while_it_has_none(self):
+        # The page is published before its chapter on deploying to a running cluster is
+        # written. Until that chapter lands (the marker comment goes), nothing on the
+        # page may promise it or lean on what it would have introduced.
         page = (ROOT / "docs" / "protocol-to-cluster.md").read_text()
         front = page.split("---\n")[1]
+        self.assertNotIn("published: false", front)
+        self.assertIn("nav_order:", front)
         if "<!-- Chapter 5," in page:
-            self.assertIn("published: false", front)
-        else:
-            self.assertNotIn("published: false", front)
+            import re
+            visible = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+            for phrase in ("takes new code", "how the running system is changed",
+                           "automatic rollback", "without stopping"):
+                self.assertNotIn(phrase, visible, phrase)
+            self.assertIn("not written yet", visible)
 
     def test_the_page_does_not_claim_a_session_heartbeat(self):
         # The lab app runs on cluster nodes: the node is the failure detector there.

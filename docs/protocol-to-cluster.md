@@ -1,9 +1,9 @@
 ---
 layout: docs
 title: "From a Protocol to a Cluster"
+nav_order: 10.9
 permalink: /docs/protocol-to-cluster/
-published: false   # until chapter 5 lands (see the comment where it goes); preview with `jekyll serve --unpublished`
-description: "Sixteen lines of protocol, followed through the compiler into a running cluster that loses nodes, recovers, and takes new code without stopping."
+description: "Sixteen lines of protocol, followed through the compiler into a running cluster that loses machines and carries on."
 ---
 
 <!-- Hand-written page: the scrolling explainer for distributed March.
@@ -104,14 +104,15 @@ formats and no state machines, and nothing about which machine runs which role.<
 
 The compiler reads those lines and produces a typed program for each of the three roles.
 A role that speaks out of turn, skips a step or stops halfway does not compile. The
-programs it accepts run as a cluster that loses machines and carries on, and that takes
-new code while orders are still flowing.
+programs it accepts run as a cluster that loses machines and carries on.
 
 This page follows those {{ x.order.source | size }} lines the whole way: what they rule
-out, what the compiler makes of them, where the state lives, what happens when a machine
-dies, and how the running system is changed. The app is real. It is
+out, what the compiler makes of them, where the state lives, and what happens when a
+machine dies. The app is real. It is
 [`examples/lab_app`](https://github.com/march-language/march/tree/main/examples/lab_app),
-the one the [multi-host lab]({{ site.baseurl }}/docs/lab/) deploys.
+the one the [multi-host lab]({{ site.baseurl }}/docs/lab/) deploys. A further section, on
+deploying new code to the cluster while it runs, is not written yet;
+[Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) covers that ground meanwhile.
 
 ## What the declaration rules out
 
@@ -405,10 +406,12 @@ The lab has not been run again.
 <!-- Chapter 5, "Deploying while it runs", goes here. It is plan Task 13
      (specs/plans/2026-11-05-distributed-explainer-page-plan.md) and waits on the lab app
      gaining a canary step and a state migration
-     (specs/todos/2026-11-05-lab-app-canary-and-migration.md). Until it lands this page
-     has no `nav_order`, so the sidebar does not link it. Its simulation core and renderer
-     (sim-release.js, draw.release) and the mailbox's deploy marker are already built and
-     tested. -->
+     (specs/todos/2026-11-05-lab-app-canary-and-migration.md). Its simulation core and
+     renderer (sim-release.js, draw.release) and the mailbox's deploy marker are already
+     built and tested. The page is published without it, so until it lands nothing here
+     may promise it (test/explainer/test_budget.py checks). When it lands: restore the
+     opening's promise, put "no automatic rollback" back in the close, and delete the
+     "not written yet" sentence in the opening. -->
 
 ## What March does not do
 
@@ -419,8 +422,6 @@ away.
   starts another. Nothing replays it.
 - **An actor's state dies with the actor.** The Ledger's total starts again from 0 after
   a crash or a move. Durable state is yours to store.
-- **There is no automatic rollback.** A release that halts stays where it stopped.
-  Rolling back is a new release, which only you can sign.
 - **Roles run over the network only when compiled.** The interpreter checks the same
   types and runs the in-process test transport, but not the sockets.
 - **Every pair of roles that talk needs a direct connection.** There is no relaying

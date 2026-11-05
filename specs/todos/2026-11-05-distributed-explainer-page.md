@@ -5,12 +5,18 @@ Build the long-form docs page designed in
 20 minutes that follows `examples/lab_app` from its 16-line `protocol Order` to a running,
 failing-over, hot-deployed cluster, with pinned graphics that change as the reader scrolls.
 
-**Status (2026-11-05):** plan Tasks 1 to 12 and the non-publishing parts of Task 14 are
-built: the data generator, the scroll engine, the figures and simulations, the opening,
-chapters 1 to 4 and the close, with static fallback images. The page is at
-`docs/protocol-to-cluster.md` and has no `nav_order`, so the sidebar does not link it.
-Still open: chapter 5 (Task 13, blocked on the lab-app item below) and publishing (the
-`nav_order`, the `CHANGELOG.md` bullet, moving this file to `specs/progress/`).
+**Status (2026-11-05):** published without its deploy chapter. Built and live in the
+sidebar (Concurrency, after Choreography): the data generator, the scroll engine, the
+figures and simulations, a line-by-line walkthrough of the protocol, chapters 1 to 4 and
+the close, with generated fallback images. `CHANGELOG.md` has its bullet.
+
+Still open, which is why this file is not in `specs/progress/` yet:
+
+- chapter 5, "Deploying while it runs" (plan Task 13), blocked on the lab-app item below.
+  Its simulation core and renderer are built and tested. Until it lands the page says the
+  section is not written yet, and a test forbids the page from promising it;
+- the minors the branch review deferred (listed in the pull request);
+- not checked in a browser: reduced motion, JavaScript disabled, a timed read-through.
 
 The design lists what was measured (generated modules, state types
 and functions for `Order`; its fingerprint) and what still has to be verified before the
