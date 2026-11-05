@@ -158,6 +158,19 @@ class Facts(unittest.TestCase):
         self.assertEqual(p, {"heartbeat_s": 1, "silent_timeout_s": 10, "setup_s": 20,
                              "suspect_s": 3, "settle_s": 15, "drain_soft_ms": 3000, "drain_hard_ms": 8000})
 
+    def test_lab_run_is_read_from_its_progress_note(self):
+        run = gen.lab_run(ROOT)
+        self.assertEqual(run, {"date": "2026-10-05", "commit": "53d66f068", "failover_s": 1,
+                               "source": "specs/progress/2026-10-05-multi-host-lab.md"})
+
+    def test_lab_run_fails_when_the_note_no_longer_says_so(self):
+        with tempfile.TemporaryDirectory() as d:
+            note = Path(d) / "specs/progress/2026-10-05-multi-host-lab.md"
+            note.parent.mkdir(parents=True)
+            note.write_text("## Results (2026-10-05, main at 53d66f068, load 5-13)\nnothing about failover\n")
+            with self.assertRaises(SystemExit):
+                gen.lab_run(Path(d))
+
     def test_pinned_fact_fails_when_its_source_text_is_gone(self):
         with tempfile.TemporaryDirectory() as d:
             tmp_root = Path(d)

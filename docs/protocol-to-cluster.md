@@ -182,6 +182,84 @@ runs there.
 
 ## The cluster: nodes down and up
 
+{{ x.topology.ingress }} starts a Shop session for each order.
+{{ x.topology.stock_hosts | join: ", " }} each <em>offer</em> the Stock role, with room
+for {{ x.topology.stock_capacity }} sessions. One of
+{{ x.topology.books_hosts | join: " and " }} holds the single Ledger, with room for
+{{ x.topology.ledger_capacity }}. A session forms when the caller has found an offer for
+every role.
+
+What follows is a simulation. It obeys the rules March documents, at
+{{ x.sim.load_per_s }} sessions a second so there is something to see; the lab itself
+starts one every second or two.
+
+<section class="mx-scrolly" data-figure="cluster">
+<div class="mx-figure"><div class="mx-stage"></div></div>
+<div class="mx-steps">
+
+<div class="mx-step" data-state="steady">
+<p>A dot is a session being set up or finishing. A filled square is a session in
+progress: one square on the host playing Stock for it, and one on the Ledger.</p>
+<p>The caller tries the hosts in turn, so the work spreads without a load balancer.</p>
+</div>
+
+<div class="mx-step" data-state="full">
+<p>An offer has a capacity. Past it, the host answers "full" and the caller tries the
+next offer.</p>
+<p>Here the load is raised until the Ledger's {{ x.topology.ledger_capacity }} slots run
+out. There is one Ledger, so there is no next offer, and the caller gets
+<code>NoOffer</code> with what each offer said. It does not wait for a timeout.</p>
+</div>
+
+<div class="mx-step" data-state="stock-crash">
+<p>{{ x.topology.stock_hosts[0] }} crashes. Its connections close, so the sessions it
+was serving are cancelled at once.</p>
+<p>They are not resumed. A cancelled session is discarded and the caller starts another,
+which the two remaining hosts take. A reply the dead host had already sent is still
+delivered.</p>
+</div>
+
+<div class="mx-step" data-state="silent">
+<p>A machine that hangs is harder, because nothing closes. Two clocks run.</p>
+<p>Cluster membership gives up on {{ x.topology.stock_hosts[0] }} after
+{{ x.timings.suspect_s }} seconds, and callers stop trying it. The sessions already on
+it wait for their own heartbeat: a ping every {{ x.timings.heartbeat_s }} second, and
+cancellation after {{ x.timings.silent_timeout_s }} seconds of silence.</p>
+<div data-mx-inline="timeline:silent"></div>
+</div>
+
+<div class="mx-step" data-state="ledger-stop">
+<p>The host holding the Ledger stops. The topology asks for one Ledger on a host
+labelled <code>books</code>, so the other such host opens the offer once membership has
+given up on the first. Sessions are refused in between.</p>
+<p>The Ledger keeps a running total in memory, and the total does not move with the
+role. The new Ledger starts from 0.</p>
+</div>
+
+<div class="mx-step" data-state="return">
+<p>The stopped host comes back as a new incarnation, so nothing can reach it through
+an old session. It offers Stock again, and no other node had to coordinate that.</p>
+<p>It does not take the Ledger back. The lab checks this for a settle period of
+{{ x.timings.settle_s }} seconds.</p>
+</div>
+
+<div class="mx-step" data-state="no-offer">
+<p>Both <code>books</code> hosts are down. Nothing can play Ledger, so every caller gets
+<code>NoOffer</code> naming that role.</p>
+<p>Stock is still on offer, but a session needs every role before it starts. None runs
+half-formed.</p>
+</div>
+
+</div>
+</section>
+
+Each of these behaviours is tested on every pull request by a scenario under
+`test/two_node/`: `crash_before_send`, `crash_after_send`, `silent`, `session_refused`
+and `cluster_takeover`. They use other protocols on the same runtime. The lab scenario
+that covers failover for this app is run by hand; in its one recorded run
+({{ x.lab_run.date }}) the Ledger moved in {{ x.lab_run.failover_s }} second with no
+session failed.
+
 ## Deploying while it runs
 
 ## What March does not do

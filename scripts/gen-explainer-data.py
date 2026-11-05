@@ -324,6 +324,22 @@ def pinned_facts(root):
     return out
 
 
+LAB_NOTE = "specs/progress/2026-10-05-multi-host-lab.md"
+
+
+def lab_run(root):
+    """The one recorded run of the multi-host lab, read from its progress note. The lab
+    runs on demand, not in CI, so the page states when the number was measured."""
+    path = Path(root) / LAB_NOTE
+    text = path.read_text() if path.exists() else ""
+    for phrase in ("## Results (2026-10-05, main at 53d66f068",
+                   "the Ledger moved lab-4 -> lab-3 in 1 s with no session failed"):
+        if phrase not in text:
+            sys.exit(f"gen-explainer-data: {LAB_NOTE} no longer says {phrase!r}; "
+                     "check the lab's recorded results and update lab_run")
+    return {"date": "2026-10-05", "commit": "53d66f068", "failover_s": 1, "source": LAB_NOTE}
+
+
 # Chosen for legibility, not measured, and stated on the page as such: the lab's own
 # traffic is one session every one to two seconds, at which the cluster view would be
 # nearly empty and no node could ever be full.
@@ -443,6 +459,7 @@ def build(march):
         "topology": topology_facts(ROOT / "examples/lab_app/topology.toml",
                                    ROOT / "examples/lab_app/topology.lab.toml"),
         "sim": SIM,
+        "lab_run": lab_run(ROOT),
         "programs": run_programs(PROGRAMS, march),
         "excerpts": excerpts(LAB_APP),
     }

@@ -98,3 +98,17 @@ test('killing a dead host or reviving a live one changes nothing', () => {
   sim.revive(s, 0); assert.equal(s.hosts[0].status, 'up'); assert.equal(s.hosts[0].incarnation, 1);
   sim.kill(s, 0, 'crash'); const c = s.counters.cancelled; sim.kill(s, 0, 'crash'); assert.equal(s.counters.cancelled, c);
 });
+
+// Two different clocks: membership declares a silent host dead after `suspectS`, which
+// stops new sessions going there; the sessions already on it are cancelled by their own
+// heartbeat, after `silentS`.
+test('a silent host stops taking sessions at the suspect timeout but holds its own until the heartbeat cutoff', () => {
+  const s = sim.create({ ...cfg, silentS: 10 }); sim.advance(s, 10); const before = s.counters.cancelled;
+  sim.kill(s, 0, 'silent'); sim.advance(s, 3.5);
+  assert.equal(s.hosts[0].status, 'dead');
+  assert.equal(s.counters.cancelled, before);           // still held, frozen
+  assert.ok(used(s.hosts[0].stock) > 0);
+  sim.advance(s, 7);
+  assert.ok(s.counters.cancelled > before);
+  assert.equal(used(s.hosts[0].stock), 0);
+});

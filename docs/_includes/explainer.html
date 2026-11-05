@@ -114,9 +114,13 @@
 <script src="{{ site.baseurl }}/assets/explainer/scroll.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/story.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/figures.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/rng.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/sim-cluster.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/draw.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/chapters.js?v={{ site.time | date: '%s' }}"></script>
 <script>
   document.addEventListener('DOMContentLoaded', function () {
     window.MarchExplainer.mountAll(document, window.MARCH_EXPLAINER_DATA);
+    window.MarchExplainer.mountInline(document, window.MARCH_EXPLAINER_DATA);
   });
 </script>
