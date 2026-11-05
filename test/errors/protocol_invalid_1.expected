@@ -1,10 +1,15 @@
 exit: 1
 -- PROTOCOL ------------- errors/protocol_invalid_1.march
 
-Protocol `Q`: this `choose` branch ends in a `loop`, but the protocol continues after the `choose` — those following steps are projected into EVERY branch, so they can never run in this one. Move them inside the branches that can reach them. [protocol_invalid]
+Protocol `Q`: this step can never run in the `choose` branch that ends in a `loop` — the steps after a `choose` are projected into EVERY branch. Move it inside the branches that can reach it. [protocol_invalid]
 
-23 |   protocol Q do
-       ^^^^^^^^^^^^^
+28 |     C -> S : Bool
+         ^
 
+
+    this `loop` repeats forever:
+
+25 |       more -> loop do S -> C : Int end
+                           ^
 
 

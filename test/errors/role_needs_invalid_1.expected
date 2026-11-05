@@ -6,5 +6,15 @@ Protocol `Logging`: `C` may crash, so `C -> I : ...` needs `or crash do ... end`
 13 |     C -> I : String
          ^
 
+    The crash branch is the rest of the conversation when `C` is gone. It must begin, for `L`, with a message from `I`; the fix sends one each, for you to change to what the conversation should do.
 
 
+
+fix [role_needs_invalid]:
+@@ after line 13 @@
+     C -> I : String
++      or crash do
++        I -> L : String
++      end
+
+after fix: exit 0

@@ -73,6 +73,7 @@ let invalid_lemma = "invalid_lemma"
 let invalid_measure = "invalid_measure"
 let invalid_reflect = "invalid_reflect"
 let invalid_type_bound = "invalid_type_bound"
+let invariant_not_deploy_checkable = "invariant_not_deploy_checkable"
 let io_not_allowed = "io_not_allowed"
 let island_missing_fn = "island_missing_fn"
 let json_derive_name_collision = "json_derive_name_collision"
@@ -135,6 +136,7 @@ let protocol_invalid = "protocol_invalid"
 let protocol_projection = "protocol_projection"
 let protocol_same_participants = "protocol_same_participants"
 let protocol_single_participant = "protocol_single_participant"
+let protocol_step_order = "protocol_step_order"
 let protocol_unlabelled_step = "protocol_unlabelled_step"
 let pure_violation = "pure_violation"
 let realtime_mixed = "realtime_mixed"
@@ -271,6 +273,7 @@ let all = [
   invalid_measure;
   invalid_reflect;
   invalid_type_bound;
+  invariant_not_deploy_checkable;
   io_not_allowed;
   island_missing_fn;
   json_derive_name_collision;
@@ -333,6 +336,7 @@ let all = [
   protocol_projection;
   protocol_same_participants;
   protocol_single_participant;
+  protocol_step_order;
   protocol_unlabelled_step;
   pure_violation;
   realtime_mixed;
@@ -484,7 +488,8 @@ let category_table : (string * string list) list = [
     duplicate_protocol; endpoints_label_invalid; endpoints_name_clash;
     protocol_crash_branches; protocol_empty; protocol_expand_invalid;
     protocol_invalid; protocol_projection; protocol_same_participants;
-    protocol_single_participant; protocol_unlabelled_step; role_needs_invalid;
+    protocol_single_participant; protocol_step_order; protocol_unlabelled_step;
+    role_needs_invalid;
     session_choice_label; session_not_closed; session_offer_nonexhaustive;
     session_offer_unrefined; session_protocol_arg; session_role_count;
     session_role_mismatch; session_state_mismatch; session_type_mismatch;
@@ -493,6 +498,7 @@ let category_table : (string * string list) list = [
   "REFINEMENT", [
     abstract_refinement_misuse; abstract_refinement_unused; division_by_zero;
     int_overflow; invalid_lemma; invalid_measure; invalid_reflect;
+    invariant_not_deploy_checkable;
     lemma_argument_impure; lemma_unproved; lemma_unproved_call;
     measure_scalar_field; predicate_eq_structural; refinement_ignored;
     refinement_unchecked; refinement_unverified; refinement_violated;

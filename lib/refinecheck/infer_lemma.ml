@@ -12,10 +12,11 @@ module Ob = Obligation
 
 (* ── Targets (ruling 1) ─────────────────────────────────────────────────── *)
 
-(* A precondition only: a function's own postcondition is checked without the
-   facts of the lemma calls in its body (todo
-   specs/todos/2026-11-03-return-contract-ignores-block-facts.md), so no call
-   could close one. *)
+(* A precondition only.  An `Int` result contract now sees the lemma calls
+   before its tails ([Refine_post.post_walk_verdict],
+   specs/progress/2026-11-04-return-contract-block-facts.md), but its
+   obligation's span is the clause, not a tail, so [find_site] has no
+   statement to place a call before. *)
 let is_target ~(is_user : A.span -> bool) (o : Ob.t) =
   is_user o.Ob.span
   && o.Ob.kind = Ob.Precondition

@@ -2389,6 +2389,25 @@ let rec pred_mentions_elts (e : A.expr) : bool =
    never propagates anything. *)
 let is_assumed (fd : A.fn_def) : bool = List.mem "assume" fd.A.fn_attrs
 
+(* Every binder occurrence in [e], duplicates kept: `let` and `match`
+   patterns, local `fn` names and parameters, lambda parameters.
+   [structural_subvars] works by NAME over the whole body, so a component
+   name is trusted only when [ambiguous_names] says it is bound exactly once —
+   a second binder of the same spelling anywhere (`match zs do Cons(h2, t)`
+   after `match xs do Cons(h, t)`), or a parameter of that spelling, makes
+   some occurrence of it something other than the component. *)
+let rec binder_occurrences (acc : string list) (e : A.expr) : string list =
+  let acc =
+    match e with
+    | A.ELet (b, _) -> pat_binders b.A.bind_pat @ acc
+    | A.ELetFn (n, ps, _, _, _) -> n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps @ acc
+    | A.ELam (ps, _, _) -> List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps @ acc
+    | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> pat_binders p @ acc
+    | A.EMatch (_, brs, _) -> List.concat_map (fun (br : A.branch) -> pat_binders br.A.branch_pat) brs @ acc
+    | _ -> acc
+  in
+  List.fold_left binder_occurrences acc (children e)
+
 (* A lemma's theorem (reflection design §4.3) is checked by a walk of its body
    ([Refine_check.lemma_scratch_verdict]), which sees its `assert`s and its
    lemma calls; the tail engine here sees neither.  Installed by
@@ -2397,6 +2416,36 @@ let is_assumed (fd : A.fn_def) : bool = List.mem "assume" fd.A.fn_attrs
 let lemma_verdict : (root:string -> Err.ctx -> A.fn_def -> bool) ref = ref (fun ~root:_ _ _ -> false)
 
 let lemma_prefix : string ref = ref ""
+
+(* The same walk for an `Int` result contract the tail engine below left
+   unproved (todo 2026-11-03-return-contract-ignores-block-facts): the
+   predicate is checked at each tail as a call's precondition is, under the
+   facts the walk has there (earlier `let`s, lemma calls, `assert`s, and the
+   unfolding of a reflected call).  Installed by [Refine_check] at module
+   init; [false] until then.  The module path is [lemma_prefix]. *)
+let post_walk_verdict : (root:string -> Err.ctx -> A.fn_def -> bool) ref = ref (fun ~root:_ _ _ -> false)
+
+(* Does [fd]'s body have something the tail engine does not read, so the walk
+   could prove what the engine could not: a statement before a tail, or a tail
+   that calls a function.  One clause, and no parameter rebound in the body:
+   the walk reads the contract's parameter names at the tail, where a
+   rebinding would mean the inner value. *)
+let post_walk_candidate (fd : A.fn_def) : bool =
+  match fd.A.fn_clauses with
+  | [ c ] ->
+    let params = List.concat_map fnparam_binders c.A.fc_params in
+    let rec blind (e : A.expr) =
+      match e with
+      | A.EBlock (_ :: _ :: _, _) -> true
+      | A.EBlock ([ x ], _) -> blind x
+      | A.EIf (_, a, b, _) -> blind a || blind b
+      | A.EMatch (_, brs, _) -> List.exists (fun (br : A.branch) -> blind br.A.branch_body) brs
+      | A.EApp (A.EVar { A.txt = f; _ }, _, _) -> not (List.mem f predicate_operators)
+      | _ -> false
+    in
+    blind c.A.fc_body
+    && not (List.exists (fun n -> List.mem n params) (binder_occurrences [] c.A.fc_body))
+  | _ -> false
 
 let assumed_return (fd : A.fn_def) : A.expr option =
   match Option.map unlinear fd.A.fn_ret_ty with
@@ -2515,7 +2564,7 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
     in
     let string_ret = marker = Some str_sort in
     let list_ret = (match marker with Some s -> is_meas_sort s | None -> false) in
-    let clause_ok (c : A.fn_clause) =
+    let clause_ok ~emit (c : A.fn_clause) =
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
       let scalar_env =
         List.map (fun fp -> (param_name_of fp, scalar_sort_of_param_ty (param_ty_of fp)))
@@ -2591,8 +2640,23 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
              && acc)
            true ts
     in
-    fd.A.fn_clauses <> []
-    && List.fold_left (fun acc c -> clause_ok c && acc) true fd.A.fn_clauses
+    let engine ~emit =
+      fd.A.fn_clauses <> [] && List.fold_left (fun acc c -> clause_ok ~emit c && acc) true fd.A.fn_clauses
+    in
+    (* An `Int` result the engine cannot prove gets the walk's check: the
+       engine runs quietly first, so its skip and hint are filed only when
+       the walk does not prove it either. *)
+    if marker <> None || not (post_walk_candidate fd) then engine ~emit
+    else if engine ~emit:false then (if emit then ignore (engine ~emit:true); true)
+    else if !post_walk_verdict ~root errctx fd then begin
+      if emit then
+        Obligation.record
+          { Obligation.span = (List.hd fd.A.fn_clauses).A.fc_span; callee = fd.A.fn_name.A.txt
+          ; predicate = pred_str ret_pred; verdict = Obligation.Proved
+          ; kind = Obligation.Postcondition; inst = None };
+      true
+    end
+    else emit && engine ~emit:true
 
 let check_fn_post ~root errctx (fd : A.fn_def) : unit =
   ignore (check_fn_post_verdict ~root errctx fd)

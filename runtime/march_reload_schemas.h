@@ -69,6 +69,42 @@ static const char *schema_value_end(const char *p, int depth) {
     if (*p == 'e' || *p == 'E') { p++; if (*p == '+' || *p == '-') p++; if (!isdigit((unsigned char)*p)) return NULL; while (isdigit((unsigned char)*p)) p++; }
     return p;
 }
+/* The value of top-level member [key] of the JSON object at [obj], or NULL. */
+static const char *schema_member(const char *obj, const char *key) {
+    const char *p = schema_ws(obj);
+    if (*p != '{') return NULL;
+    p = schema_ws(p + 1);
+    size_t kn = strlen(key);
+    while (*p == '"') {
+        const char *ke = schema_string_end(p);
+        if (!ke) return NULL;
+        int hit = (size_t)(ke - p - 2) == kn && !strncmp(p + 1, key, kn);
+        p = schema_ws(ke);
+        if (*p++ != ':') return NULL;
+        p = schema_ws(p);
+        if (hit) return p;
+        p = schema_value_end(p, 0);
+        if (!p) return NULL;
+        p = schema_ws(p);
+        if (*p == ',') p = schema_ws(p + 1);
+    }
+    return NULL;
+}
+/* Write the JSON value at [v] on one line (whitespace outside strings dropped). */
+static void schema_write_compact(FILE *f, const char *v) {
+    const char *end = schema_value_end(v, 0);
+    if (!end) { fputs("null", f); return; }
+    int quoted = 0, escaped = 0;
+    for (const char *p = schema_ws(v); p < end; p++) {
+        if (quoted || !isspace((unsigned char)*p)) fputc(*p, f);
+        if (!escaped && *p == '"') quoted = !quoted;
+        if (quoted && !escaped && *p == '\\') escaped = 1; else escaped = 0;
+    }
+}
+/* The laws the activated image of [fn] (an actor's _dispatch) was built to
+ * deploy unproved (--accept-unproved), from its actor's schema; NULL when
+ * none.  The image is signed, so the audit line records a signed override. */
+static const char *schema_accepted_for(const char *fn);
 static void schemas_free(schema_entry *s) {
     while (s) { schema_entry *n = s->next; free(s->name); free(s->json); free(s); s = n; }
 }
@@ -110,6 +146,11 @@ static int schemas_extract(schema_entry **out, const char *json,
         if (*p == ',') p = schema_ws(p + 1);
     }
     return 1;
+}
+static const char *schema_accepted_for(const char *fn) {
+    for (const schema_entry *s = g_schemas; s; s = s->next)
+        if (schema_dispatch_matches(s->name, fn)) return schema_member(s->json, "accepted_unproved");
+    return NULL;
 }
 static void schemas_merge(schema_entry *updates) {
     while (updates) {

@@ -21,6 +21,7 @@ mod T135 do
 
   cap verified
 
+  @[opaque]
   fn av(z : Int) : Int do
     if z < 0 do 0 - z else z end
   end

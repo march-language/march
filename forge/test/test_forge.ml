@@ -1947,6 +1947,21 @@ let test_compact_schema_baseline () =
   Alcotest.(check (list string)) "compact baseline preserves fields" ["value"]
     (List.map (fun (f : Schema_diff.field) -> f.name) counter.state_fields)
 
+(* forge deploys an --accept-unproved override only when the patch was
+   built with it: the image's schemas are what the server audits. *)
+let test_overrides_must_be_built_in () =
+  let schemas = Schema_diff.parse_schemas_json (Yojson.Safe.from_string {|{
+  "Tally": {"compat": "full", "accepted_unproved": ["state"], "state_fields": []},
+  "Box":   {"compat": "full", "accepted_unproved": ["*"], "state_fields": []},
+  "Plain": {"compat": "full", "state_fields": []}
+}|}) in
+  Alcotest.(check (list string)) "accepted laws parsed" ["state"]
+    (List.assoc "Tally" schemas).Schema_diff.accepted;
+  Alcotest.(check (list string)) "only the laws the patch does not carry"
+    ["Tally.Bump"; "Tally"; "Plain.state"; "Gone.state"]
+    (Schema_diff.unembedded_overrides schemas
+       ["Tally.state"; "Tally.Bump"; "Tally"; "Box.state"; "Box"; "Plain.state"; "Gone.state"])
+
 let test_schema_handlers_and_message_diff () =
   let path = Filename.temp_file "schemas" ".json" in
   let oc = open_out path in
@@ -3457,6 +3472,7 @@ let () =
       Alcotest.test_case "schema response validation" `Quick test_schema_response_validation;
       Alcotest.test_case "compact server schema baseline" `Quick test_compact_schema_baseline;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
+      Alcotest.test_case "schemas: --accept-unproved must be built into the patch" `Quick test_overrides_must_be_built_in;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;
       Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;

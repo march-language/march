@@ -1576,6 +1576,24 @@ block. The fact stays inside the branch the call is in. If the lemma's
 parameters carry refinements, they are its hypotheses: each call has to prove
 them, and a call that can't gives no fact (`lemma_unproved_call`).
 
+**A function's own `Int` result sees the facts before it.** When the result
+type is a refined `Int` and the usual return check leaves it unproved, the
+checker walks the body and checks the result at each place it returns, as it
+checks a call's precondition there: with the lemma calls, `assert`s and `let`s
+before it, and a reflected call as the result unfolded.
+
+```march
+fn grow(n : {Int | _ >= 0}) : {Int | _ >= n} do
+  twice_grows(n)     -- a proved lemma {Unit | twice(n) >= n}
+  twice(n)           -- proved
+end
+```
+
+A contract proved this way is a fact at the function's callers, as any proved
+postcondition is. The walk needs one clause, and no binder in the body that
+reuses a parameter's name. Other refined result types (`List`, `Bool`,
+records) don't use these facts yet.
+
 **`assert` in a lemma is a proof step.** Outside lemmas, `assert` is checked
 at run time, and the checker assumes it afterwards. Inside a lemma nothing
 runs, so an `assert` is checked statically, and it is assumed afterwards **only
@@ -2029,6 +2047,21 @@ What counts as a **fact** about a record argument:
   Field facts obey the same rebinding rule as tag facts and scalar facts: a
   fact is recorded against a *name*, so a `let`, a `let?`, a lambda parameter
   or a `match` binder that rebinds that name retires it.
+
+**An anonymous record parameter may refine its fields directly.** The two
+signatures below say the same thing, and both are checked the same way: the
+body assumes the fields' refinements, and each caller must establish them.
+
+```march
+fn serve(c : { port : {Int | _ >= 1}, retries : Int }) : Int do c.port end
+fn serve2(c : {v : Config | v.port >= 1}) : Int do c.port end
+
+serve({ port: 0, retries: 3 })      -- error: `_.port >= 1` can never hold
+```
+
+A field's refinement may name a sibling field (`{ lo : Int, hi : {Int | _ > lo} }`
+is `hi > lo`). A refinement nested below a field's top level (`xs : List({Int | _ > 0})`)
+isn't lifted this way.
 
 Everything else about a record is **skipped**:
 

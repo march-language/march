@@ -15214,6 +15214,47 @@ let stored_field_suite =
         Alcotest.(check bool) "f(1)" false
           (has_refine_error_d (prog ~extra:lin (main "    f(1)\n"))));
 
+    (* Gap G5 (specs/2026-11-04-lemmas-hcr-actors-choreography-design.md):
+       a refined field of an ANONYMOUS-record parameter was neither assumed
+       by the callee nor obliged at a caller (--refine-audit: "below the
+       outermost position").  Refine_anon lifts it to a refinement on the
+       parameter over a synthetic record sort. *)
+    gated "an anonymous-record parameter's refined field is assumed" (fun () ->
+        Alcotest.(check bool) "need(r.v) from r : { v : {Int | _ > 0} }" false
+          (has_refine_error_d
+             (prog "  fn f(r : { v : {Int | _ > 0} }) : Int do need(r.v) end\n"));
+        Alcotest.(check bool) "a field refinement naming a sibling field" false
+          (has_refine_error_d
+             (prog "  fn f(r : { lo : Int, hi : {Int | _ > lo} }) : Int do need(r.hi - r.lo) end\n"));
+        Alcotest.(check bool) "a field refinement naming its own binder" false
+          (has_refine_error_d
+             (prog "  fn f(r : { n : {Int | n > 3} }) : Int do need(r.n - 3) end\n")));
+
+    gated "a record parameter's refinement is a fact at a call, retired on rebinding" (fun () ->
+        let t = "  type T = { v : Int }\n" in
+        Alcotest.(check bool) "need(r.v) from r : {T | _.v > 0}" false
+          (has_refine_error_d (prog ~extra:t "  fn f(r : {T | _.v > 0}) : Int do need(r.v) end\n"));
+        Alcotest.(check bool) "not after `let r = { v: 0 }`" true
+          (has_refine_error_d
+             (prog ~extra:t "  fn f(r : {T | _.v > 0}) : Int do\n    let r = { v: 0 }\n    need(r.v)\n  end\n"));
+        Alcotest.(check bool) "nor for a lifted anonymous record" true
+          (has_refine_error_d
+             (prog "  fn f(r : { v : {Int | _ > 0} }) : Int do\n    let r = { v: 0 }\n    need(r.v)\n  end\n")));
+
+    gated "an anonymous-record parameter's refined field is obliged at the caller" (fun () ->
+        let f = "  fn f(r : { v : {Int | _ > 0} }) : Int do r.v end\n" in
+        Alcotest.(check bool) "f({ v: 0 })" true
+          (has_refine_error_d (prog ~extra:f (main "    f({ v: 0 })\n")));
+        Alcotest.(check bool) "f({ v: 2 })" false
+          (has_refine_error_d (prog ~extra:f (main "    f({ v: 2 })\n"))));
+
+    gated "a declared type's literal is typed as before beside a same-shaped parameter" (fun () ->
+        let extra = box ^ "  fn f(r : { v : {Int | _ > 5} }) : Int do r.v end\n" in
+        Alcotest.(check bool) "{ v: 0 } is still obliged as a Box" true
+          (has_refine_error_d (prog ~extra (main "    let b = { v: 0 }\n    b.v\n")));
+        Alcotest.(check bool) "{ v: 1 } is still a fine Box" false
+          (has_refine_error_d (prog ~extra (main "    let b = { v: 1 }\n    b.v\n"))));
+
     gated "two record types of one shape make a bare literal ambiguous: fail closed" (fun () ->
         let extra = box ^ "  type Box2 = { v : Int }\n" in
         Alcotest.(check bool) "{ v: 0 } is not obliged" false
@@ -27082,14 +27123,16 @@ let demand_chains_suite =
     gated "C1 control: a weaker proved callee return does not prove the caller's" (fun () ->
         (* Base: b skipped:unreflectable-subject.  Now the fact `_ >= 0` is
            used and does not imply `_ > 0`: undecided, never proved. *)
-        let src = m "  fn a(x : {Int | _ > 0}) : {Int | _ >= 0} do x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
+        (* `@[opaque]`: unfolding `a` would prove `b` (it is true); this is
+           about what the contract alone gives. *)
+        let src = m "  @[opaque]\n  fn a(x : {Int | _ > 0}) : {Int | _ >= 0} do x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
         Alcotest.check vs "a" [ "proved" ] (post "a" src);
         Alcotest.check vs "b" [ "skipped:solver-undecided" ] (post "b" src));
     gated "C1 control: an UNPROVED callee return is not lent" (fun () ->
         (* Base: the same.  `a`'s `_ > 0` fails at x = 0, so it does not
            travel, and `b` (correct: its own x is positive) keeps the
            opaque-tail skip. *)
-        let src = m "  fn a(x : Int) : {Int | _ > 0} do x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
+        let src = m "  @[opaque]\n  fn a(x : Int) : {Int | _ > 0} do x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
         Alcotest.(check bool) "a not proved" false (List.mem "proved" (post "a" src));
         Alcotest.check vs "b" [ "skipped:unreflectable-subject" ] (post "b" src));
     gated "C1 reject control: a proved callee return that contradicts the caller's is a violation" (fun () ->
@@ -27823,7 +27866,9 @@ let gap_let_call_tail_suite =
           (post "b"
              (m "  @[assume]\n  fn a(x : Int) : {Int | _ > 0} do x * x + 1 end\n  fn b(x : Int) : {Int | _ > 0} do\n    let r = a(x)\n    r\n  end\n")));
     gated "control: an unproved callee return is not lent" (fun () ->
-        let src = m ("  fn a(x : Int) : {Int | _ > 0} do x end\n" ^ b "    let r = a(x)\n    r") in
+        (* `@[opaque]`: unfolding `a` would prove `b` (it is true), and this
+           control is about the contract alone. *)
+        let src = m ("  @[opaque]\n  fn a(x : Int) : {Int | _ > 0} do x end\n" ^ b "    let r = a(x)\n    r") in
         Alcotest.(check bool) "a not proved" false (List.mem "proved" (post "a" src));
         Alcotest.check vs "b" [ "skipped:solver-undecided" ] (post "b" src));
     gated "control: self-recursion never uses its own return" (fun () ->
@@ -27839,7 +27884,7 @@ let gap_let_call_tail_suite =
         (* a(x) >= 2 really, but the contract only says > 0: undecided, and
            the interpreter does not confirm the model (b(1) = 1). *)
         Alcotest.check vs "r - 1" [ "skipped:solver-undecided" ]
-          (post "b" (m (a_pos ^ b "    let r = a(x)\n    r - 1")));
+          (post "b" (m ("  @[opaque]\n" ^ a_pos ^ b "    let r = a(x)\n    r - 1")));
         Alcotest.check vs "a : {_ < 0}" [ "violated" ]
           (post "b"
              (m ("  fn a(x : {Int | _ > 0}) : {Int | _ < 0} do 0 - x end\n" ^ b "    let r = a(x)\n    r"))));
@@ -28916,10 +28961,13 @@ let refine_messages_suite =
    case runs in a fresh cwd: the VC cache lives under <cwd>/.march/cas. *)
 
 let hcr_schema ?(contracts = true) ?(unsupported = false) ?invariant ?(handlers = "")
-    (fields : (string * string * string option) list) =
+    ?(accepted = []) (fields : (string * string * string option) list) =
   Printf.sprintf
-    {|{"Tally": {"compat": "full",%s%s%s%s "state_fields": [%s]}}|}
+    {|{"Tally": {"compat": "full",%s%s%s%s%s "state_fields": [%s]}}|}
     (if contracts then {| "contracts": 1,|} else "")
+    (if accepted = [] then ""
+     else Printf.sprintf {| "accepted_unproved": [%s],|}
+         (String.concat ", " (List.map (Printf.sprintf "%S") accepted)))
     (if unsupported then {| "refine_unsupported": true,|} else "")
     (match invariant with Some i -> Printf.sprintf {| "invariant": %S,|} i | None -> "")
     (if handlers = "" then "" else Printf.sprintf {| "handlers": [%s],|} handlers)
@@ -29009,6 +29057,44 @@ let hcr_variance_suite =
     Alcotest.test_case "a baseline that predates contracts is refused" `Quick (fun () ->
         hcr_expect ~rc:1 ~has:[ "Tally: REFUSED, not checked: the running version's schema predates" ]
           (hcr_check (hcr_schema ~contracts:false (st None)) (hcr_schema (st (Some "(count >= 0)")))));
+    (* The override built into the patch (march --accept-unproved at
+       compile time), which is the one the server audits, counts without a
+       command-line flag, and only for the laws it names. *)
+    gated "override built into the patch accepted" (fun () ->
+        hcr_expect ~rc:0 ~has:[ "Tally.state: not proved that"; "accepted by --accept-unproved" ]
+          (hcr_check (hcr_schema (st (Some "(count >= 0)")))
+             (hcr_schema ~accepted:[ "state" ] (st (Some "(count >= 1)")))));
+    gated "override built into the patch covers only its law" (fun () ->
+        hcr_expect ~rc:1 ~has:[ "Tally.Bump: REFUSED"; "Tally.state: not proved that" ]
+          (hcr_check (hcr_schema ~handlers:(hcr_bump "(p0 > 0)") (st (Some "(count >= 0)")))
+             (hcr_schema ~accepted:[ "state" ] ~handlers:(hcr_bump "(p0 > 5)")
+                (st (Some "(count >= 1)")))));
+    gated "override built into the patch for the whole actor" (fun () ->
+        hcr_expect ~rc:0 ~has:[ "Tally.Bump: not proved that"; "Tally.state: not proved that" ]
+          (hcr_check (hcr_schema ~handlers:(hcr_bump "(p0 > 0)") (st (Some "(count >= 0)")))
+             (hcr_schema ~accepted:[ "*" ] ~handlers:(hcr_bump "(p0 > 5)")
+                (st (Some "(count >= 1)")))));
+    (* The writer side, compiled twice in one cwd: the second build must not
+       be served the first one's cached sidecar without the override.  Both
+       cache keys cover it (hr_cas_tag for the source-level key; the
+       post-TIR key already differs, since it sees the emitted schemas), so
+       removing either one alone leaves this green. *)
+    Alcotest.test_case "--accept-unproved is written into the patch's schemas" `Quick (fun () ->
+        let dir = Filename.temp_dir "hcr_accept" "" in
+        let src_p = Filename.concat dir "app.march" in
+        let oc = open_out src_p in output_string oc hcr_tally_src; close_out oc;
+        let build extra =
+          let so = Filename.concat dir "p.so" in
+          let rc, _, err = run_march_on_env ~cwd:dir []
+              ([ "--compile"; "--compile-so"; "--hot-reload"; "Main" ] @ extra @ [ "-o"; so ]) src_p in
+          Alcotest.(check int) ("compile; stderr:\n" ^ err) 0 rc;
+          read_whole_file (so ^ ".schemas.json") in
+        let plain = build [] in
+        Alcotest.(check bool) "no override, no accepted_unproved" false
+          (contains plain "accepted_unproved");
+        let accepted = build [ "--accept-unproved"; "Tally.state,Tally.Bump,Other" ] in
+        if not (contains accepted {|"accepted_unproved": ["Bump", "state"]|}) then
+          Alcotest.failf "sidecar lacks the accepted laws:\n%s" accepted);
     (* The migrate_state path: proved once the return type is the actor's
        own state sort (a synthesised `State` of the same field set made the
        literal ambiguous, so before this a correct migration never proved
@@ -29176,6 +29262,7 @@ let () =
       ("reflect-fuel", Test_refine_fuel.tests);
       ("reflect-stdlib-list", Test_refine_stdlib_list.tests);
       ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
+      ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);

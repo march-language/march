@@ -117,7 +117,7 @@ let agree ~expected ~tag root =
      Alcotest.(check string) "forge build compiled the same file" tag
        (run_capture binary)
    | Error e -> Alcotest.failf "forge build: %s" e);
-  match Cmd_deploy_hot.build_so ~proj ~output:(Filename.concat root "hot") with
+  match Cmd_deploy_hot.build_so ~accept_unproved:[] ~proj ~output:(Filename.concat root "hot") with
   | Ok (so_path, manifest_path) ->
     (* These projects have no [hot-reload] section: --compile-so alone must
        still publish usable deployment metadata, including on a cache hit. *)
@@ -133,7 +133,7 @@ let agree ~expected ~tag root =
     let sidecars = List.map (fun path -> path, In_channel.with_open_text path In_channel.input_all)
         [manifest_path; schema_path] in
     List.iter (fun (path, _) -> Sys.remove path) sidecars;
-    (match Cmd_deploy_hot.build_so ~proj ~output:(Filename.concat root "hot") with
+    (match Cmd_deploy_hot.build_so ~accept_unproved:[] ~proj ~output:(Filename.concat root "hot") with
      | Error e -> Alcotest.failf "cached deploy build step: %s" e
      | Ok _ ->
        List.iter (fun (path, expected) ->
@@ -170,7 +170,7 @@ let test_no_entry_is_one_error () =
       (match Cmd_run.resolve_entry () with
        | Ok _ -> Alcotest.fail "forge run found an entry"
        | Error e -> Alcotest.(check bool) ("forge run names both: " ^ e) true (names_both e));
-      match Cmd_deploy_hot.build_so ~proj ~output:"hot" with
+      match Cmd_deploy_hot.build_so ~accept_unproved:[] ~proj ~output:"hot" with
       | Ok _ -> Alcotest.fail "the deploy build step found an entry"
       | Error e -> Alcotest.(check bool) ("deploy names both: " ^ e) true (names_both e))
 
