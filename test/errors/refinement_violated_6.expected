@@ -7,6 +7,11 @@ note: this value never satisfies it; pass one that does
 14 |     List.head([])
          ^^^^^^^^^^^^^
 
+    `List.head_opt` is `List.head` without the requirement: it returns `Option` instead of panicking.
+        match List.head_opt([]) do
+          Some(v) -> …
+          None -> …
+        end
 
     this argument must satisfy `len(_) > 0`:
 

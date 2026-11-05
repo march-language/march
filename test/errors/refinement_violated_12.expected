@@ -8,6 +8,11 @@ note: this value never satisfies it; pass one that does
 21 |     List.nth([1, 2, 3], 7)
          ^^^^^^^^^^^^^^^^^^^^^^
 
+    `List.nth_opt` is `List.nth` without the requirement: it returns `Option` instead of panicking.
+        match List.nth_opt([1, 2, 3], 7) do
+          Some(v) -> …
+          None -> …
+        end
 
     this argument must satisfy `_ >= 0 && _ < len(xs)`:
 

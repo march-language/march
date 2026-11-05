@@ -1,0 +1,23 @@
+exit: 1
+-- REFINEMENT ------- errors/refinement_violated_17.march
+
+refinement violation: index must be less than the list's length [refinement_violated]
+argument `n` of `List.nth` does not satisfy precondition `_ < len(xs)`
+note: this value never satisfies it; pass one that does
+
+8 |     println(int_to_string(List.nth([1, 2, 3], 5)))
+                              ^^^^^^^^^^^^^^^^^^^^^^
+
+    `List.nth_opt` is `List.nth` without the requirement: it returns `Option` instead of panicking.
+        match List.nth_opt([1, 2, 3], 5) do
+          Some(v) -> …
+          None -> …
+        end
+
+    this argument must satisfy `_ >= 0 && _ < len(xs)`:
+
+8 |     println(int_to_string(List.nth([1, 2, 3], 5)))
+                                                  ^
+    run `march --explain refinement_violated`
+
+
