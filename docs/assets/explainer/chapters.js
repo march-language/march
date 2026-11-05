@@ -60,4 +60,42 @@
       },
     };
   });
+
+  // ── chapter 2: from the declaration to four machines ───────────────────────────
+  // source: the declaration. project: each role's own view, a segment per step (the
+  // role's linear types, drawn). modules / functions: what the compiler generates.
+  // typecheck: Stock stopped at its choice. grants, main: the generated code again.
+  // hosts: the machines the binaries land on.
+  function caption(s) { return '<p class="mx-caption">' + s + '</p>'; }
+
+  ME.registerFigure('fan-out', function (host, data) {
+    var order = data.order, current = null;
+    var views = {
+      source: function (w) { return F.fanOut(order, { width: w, stage: 'source' }); },
+      project: function (w) {
+        return order.roles.map(function (role) {
+          return caption(role) + F.strip({ labels: order.strips[role] }, { width: w, at: -1 });
+        }).join('');
+      },
+      modules: function (w) { return F.fanOut(order, { width: w, stage: 'modules' }); },
+      functions: function (w) { return F.fanOut(order, { width: w, stage: 'functions' }); },
+      typecheck: function (w) {
+        return caption('Stock, after it has received the order') +
+          F.strip({ labels: order.strips.Stock }, { width: w, at: 1 });
+      },
+      hosts: function (w) { return F.hosts(data.topology, { width: w }); },
+    };
+    views.grants = views.functions;
+    views.main = views.functions;
+
+    var fig = svgFigure(host, function (w) { return views[current](Math.min(w, 760)); });
+    return {
+      setState: function (state) {
+        if (state === current) return;
+        if (!views[state]) throw new Error('unknown state ' + state);
+        current = state;
+        fig.draw();
+      },
+    };
+  });
 })(typeof window !== 'undefined' ? window : globalThis);

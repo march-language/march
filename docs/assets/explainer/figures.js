@@ -39,26 +39,29 @@
     if (stage < 0) stage = STAGES.length - 1;
     var M = W < 600 ? 8 : 16, out = [], src = order.source;
 
-    // The declaration, one bar per line at its real length and indent.
+    // The declaration, one bar per line at its real length and indent. Under 600 px the
+    // whole figure is compact (thinner bars, one row of squares per module, no counts),
+    // so it fits a phone's pinned stage.
+    var wide = W >= 600, barH = wide ? 4 : 3, barPitch = wide ? 7 : 5;
     var longest = 0;
     src.forEach(function (l) { longest = Math.max(longest, l.length); });
     var cw = Math.min(4, (W - 2 * M) * 0.5 / longest);
-    var x0 = W < 600 ? M : (W - longest * cw) / 2;
+    var x0 = wide ? (W - longest * cw) / 2 : M;
     out.push(text('mx-label-strong', x0, 14, 'protocol Order: ' + plural(src.length, 'line')));
     src.forEach(function (l, i) {
       var indent = l.length - l.replace(/^ +/, '').length;
-      out.push(rect('mx-srcline', x0 + indent * cw, 24 + i * 7, Math.max(cw, (l.length - indent) * cw), 4));
+      out.push(rect('mx-srcline', x0 + indent * cw, 24 + i * barPitch, Math.max(cw, (l.length - indent) * cw), barH));
     });
-    var y = 24 + src.length * 7 + 6;
+    var y = 24 + src.length * barPitch + 6;
 
-    if (stage >= 1) {
-      var mods = order.modules, wide = W >= 600;
-      var gap = 12, colW = wide ? (W - 2 * M - (mods.length - 1) * gap) / mods.length : W - 2 * M;
+    if (stage >= 1 && wide) {
+      var mods = order.modules, gap = 12;
+      var colW = (W - 2 * M - (mods.length - 1) * gap) / mods.length;
       var perRow = Math.max(1, Math.floor(colW / 10));
-      var top = wide ? y + 26 : y + 8, bottom = top;
+      var top = y + 26, bottom = top;
       mods.forEach(function (m, k) {
-        var x = wide ? M + k * (colW + gap) : M, yy = top;
-        if (wide) out.push(line('mx-line', W / 2, y, x + colW / 2, y + 20));
+        var x = M + k * (colW + gap), yy = top;
+        out.push(line('mx-line', W / 2, y, x + colW / 2, y + 20));
         out.push(text('mx-label mx-mono', x, yy + 12, m.name));
         yy += 20;
         if (stage >= 2) {
@@ -73,14 +76,31 @@
         }
         if (stage >= 2) {
           var parts = [];
-          if (m.linear_states) parts.push(plural(m.linear_states, 'state'));
+          if (m.linear_states) parts.push(plural(m.linear_states, 'state type'));
           if (stage >= 3) parts.push(plural(m.functions, 'function'));
           parts.forEach(function (p, i) { out.push(text('mx-label', x, yy + 12 + i * 15, p)); });
           yy += parts.length * 15 + 4;
         }
-        if (wide) bottom = Math.max(bottom, yy); else { top = yy + 8; bottom = yy; }
+        bottom = Math.max(bottom, yy);
       });
       y = bottom + 6;
+    } else if (stage >= 1) {
+      var nPerRow = Math.max(1, Math.floor((W - 2 * M) / 7));
+      order.modules.forEach(function (m) {
+        y += 6;
+        out.push(text('mx-label mx-mono', M, y + 11, m.name));
+        if (stage >= 2) {
+          for (var s = 0; s < m.linear_states; s++) out.push(rect('mx-state', M + 100 + s * 13, y + 1, 10, 10));
+        }
+        y += 16;
+        if (stage >= 3) {
+          for (var f = 0; f < m.functions; f++) {
+            out.push(rect('mx-fn', M + (f % nPerRow) * 7, y + Math.floor(f / nPerRow) * 7, 5, 5));
+          }
+          y += Math.ceil(m.functions / nPerRow) * 7 + 2;
+        }
+      });
+      y += 4;
     }
     return open(W, y, 'The Order protocol and what the compiler generates from it') + out.join('') + '</svg>';
   }
@@ -172,7 +192,22 @@
     return open(W, Math.ceil(total / perRow) * pitch, 'One square per function in the binary') + out.join('') + '</svg>';
   }
 
-  var api = { fanOut: fanOut, stateMap: stateMap, strip: strip,
+  // ── the machines the programs land on ──────────────────────────────────────────
+  function hosts(topology, opts) {
+    var W = opts.width, M = 8, names = [topology.ingress].concat(topology.stock_hosts);
+    var perRow = W >= 600 ? names.length : 2, gap = 12;
+    var bw = (W - 2 * M - (perRow - 1) * gap) / perRow, bh = 70, out = [];
+    names.forEach(function (name, i) {
+      var x = M + (i % perRow) * (bw + gap), y = Math.floor(i / perRow) * (bh + gap);
+      out.push(rect('mx-host', x + 0.5, y + 0.5, bw - 1, bh - 1));
+      out.push(text('mx-label-strong', x + 10, y + 20, name));
+      out.push(text('mx-label', x + 10, y + 38, name === topology.ingress ? 'starts Shop' : 'offers Stock'));
+      if (topology.books_hosts.indexOf(name) >= 0) out.push(text('mx-label', x + 10, y + 55, 'may hold Ledger'));
+    });
+    return open(W, Math.ceil(names.length / perRow) * (bh + gap) - gap, 'The machines of the lab and the roles each one runs') + out.join('') + '</svg>';
+  }
+
+  var api = { fanOut: fanOut, stateMap: stateMap, strip: strip, hosts: hosts,
     detectionTimeline: detectionTimeline, functionSquares: functionSquares };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.MarchExplainer = root.MarchExplainer || {};

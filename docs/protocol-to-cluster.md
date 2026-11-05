@@ -99,6 +99,85 @@ how the compiler does it.
 
 ## What the compiler makes of it
 
+March has no separate checker for conversations. The compiler turns the declaration into
+ordinary types and functions, then lets the checks it already has do the work. These are
+its steps, in order.
+
+<section class="mx-scrolly" data-figure="fan-out">
+<div class="mx-figure"><div class="mx-stage"></div></div>
+<div class="mx-steps">
+
+<div class="mx-step" data-state="source">
+<p><strong>Parse.</strong> The <code>protocol</code> block is a declaration like a function
+or a type. <code>@[endpoints]</code> asks for typed code to be generated from it.</p>
+<p>Each bar is one of its {{ x.order.source | size }} lines, at its real length.</p>
+</div>
+
+<div class="mx-step" data-state="project">
+<p><strong>Project.</strong> Each role gets its own view: only the steps it takes. Shop's
+view has {{ x.order.strips.Shop | size }} steps, Stock's {{ x.order.strips.Stock | size }}
+and Ledger's {{ x.order.strips.Ledger | size }}.</p>
+<p>The views are checked against each other first. If one role would send while its peer
+is also sending, the protocol itself is rejected, before any role is written
+(<code>lib/typecheck/typecheck_session.ml</code>).</p>
+</div>
+
+<div class="mx-step" data-state="modules">
+<p><strong>Generate.</strong> While desugaring, the compiler writes
+{{ x.order.modules | size }} modules of ordinary March beside yours: one for the messages
+and their wire encoding, one for each role, and one that runs a role on a node
+(<code>lib/desugar/desugar_endpoints.ml</code>).</p>
+</div>
+
+<div class="mx-step" data-state="functions">
+<p>Every step of a role's view becomes its own <strong>linear type</strong>: a value that
+must be used exactly once. There are {{ x.order.conversation_states }} of them, and
+{{ x.order.linear_states | minus: x.order.conversation_states }} more for a session parked
+inside an actor.</p>
+<p>Every move is a function that consumes one state and returns the next. In all,
+{{ x.order.functions }} functions come out of the {{ x.order.source | size }} lines.</p>
+</div>
+
+<div class="mx-step" data-state="typecheck">
+<p><strong>Typecheck, as usual.</strong> Stock holds a value of type
+<code>S_choose_have_out</code>. Only <code>choose_have</code> and <code>choose_out</code>
+accept it. <code>send_Book</code> wants an <code>S_send_Book</code>, and only
+<code>choose_have</code> returns one.</p>
+<p>So order is enforced by an ordinary type mismatch, and exactly-once use by linearity.
+A table kept beside the types (<code>lib/ast/protocol_states.ml</code>) lets the error
+name roles and steps instead of generated types.</p>
+</div>
+
+<div class="mx-step" data-state="grants">
+<p>The line <code>role Stock needs IO.Mut</code> becomes a parameter. Stock's body is
+handed a capability for exactly that, and the compiler checks that everything the body
+reaches fits under it.</p>
+<pre><code class="language-march">{{ x.excerpts.stock_signature | escape }}</code></pre>
+<p>A role with no <code>needs</code> line is handed its session and nothing else.</p>
+</div>
+
+<div class="mx-step" data-state="main">
+<p><strong>Generate <code>main</code>.</strong> The lab app has none. A topology file says
+which pool of machines runs which role, and from it the compiler writes the entry point:
+start the node, narrow each pool's capabilities, open an offer for each role
+(<code>lib/desugar/desugar_topology.ml</code>).</p>
+</div>
+
+<div class="mx-step" data-state="hosts">
+<p><strong>Compile.</strong> From here it is the normal back half: typed IR, reference
+counting, LLVM, a native binary for each pool.</p>
+<p>The build also records the protocol's fingerprint,
+<code>{{ x.order.fingerprint | slice: 0, 8 }}…</code>, a digest of its roles, steps and
+payload types. Two nodes compare fingerprints before they exchange a message.</p>
+</div>
+
+</div>
+</section>
+
+The {{ x.order.source | size }} lines are now a typed program for each role, on
+{{ x.topology.stock_hosts | size | plus: 1 }} machines. The next two sections are what
+runs there.
+
 ## Inside one node: the actor
 
 ## The cluster: nodes down and up

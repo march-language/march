@@ -34,7 +34,8 @@
   }
   .mx-stage svg, .mx-stage canvas { display: block; max-width: 100%; }
   .mx-stage canvas { flex: 1 1 auto; min-height: 0; width: 100%; }
-  .mx-svg { display: flex; justify-content: center; }
+  .mx-svg { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .mx-svg .mx-caption { align-self: flex-start; margin: 6px 0 0; }
   .mx-fallback { display: block; width: 100%; height: auto; }
   .mx-live .mx-fallback { display: none; }
 
@@ -48,6 +49,11 @@
   .d-content .mx-step p { font-size: 15px; line-height: 1.7; color: var(--text); margin: 0 0 10px; }
   .d-content .mx-step p:last-child { margin-bottom: 0; }
   .d-content .mx-step pre { margin: 8px 0; font-size: 12.5px; }
+
+  /* This page's figures want more room than a prose page: let the column grow, and keep
+     the prose itself at a readable measure. */
+  .d-main:has(.mx-scrolly) { max-width: 1320px; }
+  .d-main:has(.mx-scrolly) .d-content > :not(.mx-scrolly) { max-width: 46rem; }
 
   @media (min-width: 1280px) {
     .mx-scrolly { grid-template-columns: 21rem minmax(0, 1fr); column-gap: 2.25rem; }
@@ -98,7 +104,8 @@
   .mx-ping    { fill: none; stroke: var(--text-muted); stroke-width: 1; }
   .mx-failed  { stroke: var(--mx-accent); stroke-width: 2; }
   .mx-accent-text { fill: var(--mx-accent); }
-  .mx-seg     { fill: none; stroke: var(--border); stroke-width: 1; }
+  .mx-host    { fill: none; stroke: var(--mx-ink); stroke-width: 1; }
+  .mx-seg     { fill: none; stroke: var(--mx-dim); stroke-width: 1; }
   .mx-seg.mx-done { fill: var(--border); }
   .mx-seg.mx-next { stroke: var(--mx-accent); stroke-width: 2; }
 </style>

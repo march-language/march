@@ -59,3 +59,48 @@ test('state map: repeating a state does not redraw from scratch', () => {
   const first = m.svg(); m.fig.setState('all', 0.5);
   assert.equal(m.svg(), first);
 });
+
+// ── chapter 2: the fan-out ──────────────────────────────────────────────────────
+const total = (svg, classes) => classes.reduce((n, c) => n + count(svg, c), 0);
+
+test('fan-out: source shows the declaration and nothing generated', () => {
+  const m = mount('fan-out'); m.fig.setState('source', 0);
+  assert.equal(count(m.svg(), 'mx-srcline'), data.order.source.length);
+  assert.equal(count(m.svg(), 'mx-fn') + count(m.svg(), 'mx-state'), 0);
+});
+
+test('fan-out: project shows one strip per role, a segment per step', () => {
+  const m = mount('fan-out'); m.fig.setState('project', 0);
+  const steps = Object.values(data.order.strips).reduce((n, s) => n + s.length, 0);
+  assert.equal(count(m.svg(), 'mx-seg'), steps);
+  for (const role of data.order.roles) assert.ok(m.svg().includes('>' + role + '<'), role);
+});
+
+test('fan-out: modules, then every state type and function', () => {
+  const m = mount('fan-out'); m.fig.setState('modules', 0);
+  assert.equal(count(m.svg(), 'mx-fn') + count(m.svg(), 'mx-state'), 0);
+  assert.ok(m.svg().includes('Order_Run'));
+  m.fig.setState('functions', 0);
+  assert.equal(count(m.svg(), 'mx-state'), data.order.linear_states);
+  assert.equal(count(m.svg(), 'mx-fn'), data.order.functions);
+});
+
+test('fan-out: typecheck shows Stock stopped at its choice', () => {
+  const m = mount('fan-out'); m.fig.setState('typecheck', 0);
+  assert.equal(count(m.svg(), 'mx-seg mx-done'), 1);
+  assert.equal(count(m.svg(), 'mx-seg mx-next'), 1);
+  assert.equal(total(m.svg(), ['mx-seg', 'mx-seg mx-done', 'mx-seg mx-next']), data.order.strips.Stock.length);
+});
+
+test('fan-out: hosts shows the four machines', () => {
+  const m = mount('fan-out'); m.fig.setState('hosts', 0);
+  assert.equal(count(m.svg(), 'mx-host'), 4);
+});
+
+test('fan-out: every card state draws something, in any order', () => {
+  for (const state of ['hosts', 'grants', 'main', 'typecheck', 'functions', 'modules', 'project', 'source']) {
+    const m = mount('fan-out', 343); m.fig.setState(state, 0);
+    assert.ok(m.svg().includes('<svg'), state);
+  }
+  assert.throws(() => mount('fan-out').fig.setState('nope', 0), /unknown state/);
+});

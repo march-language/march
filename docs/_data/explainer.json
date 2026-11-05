@@ -1,10 +1,14 @@
 {
+  "excerpts": {
+    "stock_signature": "fn stock(env : Env, s : Cap(Session.Live), m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield"
+  },
   "generated": {
-    "commit": "ac9c60bf0",
+    "commit": "8038b16f5",
     "date": "2026-11-05",
     "lab_app_sha256": "78ab2a20763ce435a2d7c590d921cfe491ed634fe02a63353b6933ef4651dbf2"
   },
   "order": {
+    "conversation_states": 12,
     "fingerprint": "fbc924928c002942943a81b564d2408d",
     "functions": 152,
     "linear_states": 15,
@@ -12,27 +16,47 @@
       {
         "functions": 18,
         "linear_states": 0,
-        "name": "Order_Msg"
+        "name": "Order_Msg",
+        "states": []
       },
       {
         "functions": 33,
         "linear_states": 5,
-        "name": "Order_Shop"
+        "name": "Order_Shop",
+        "states": [
+          "S_send_Want",
+          "S_offer_have_out",
+          "S_recv_Booked",
+          "S_end"
+        ]
       },
       {
         "functions": 37,
         "linear_states": 6,
-        "name": "Order_Stock"
+        "name": "Order_Stock",
+        "states": [
+          "S_recv_Want",
+          "S_choose_have_out",
+          "S_send_Book",
+          "S_send_Skip",
+          "S_end"
+        ]
       },
       {
         "functions": 26,
         "linear_states": 4,
-        "name": "Order_Ledger"
+        "name": "Order_Ledger",
+        "states": [
+          "S_offer_have_out",
+          "S_send_Booked",
+          "S_end"
+        ]
       },
       {
         "functions": 38,
         "linear_states": 0,
-        "name": "Order_Run"
+        "name": "Order_Run",
+        "states": []
       }
     ],
     "roles": [
@@ -58,6 +82,26 @@
       "  end",
       "end"
     ],
+    "strips": {
+      "Ledger": [
+        "offer have/out",
+        "send Booked",
+        "end"
+      ],
+      "Shop": [
+        "send Want",
+        "offer have/out",
+        "recv Booked",
+        "end"
+      ],
+      "Stock": [
+        "recv Want",
+        "choose have/out",
+        "send Book",
+        "send Skip",
+        "end"
+      ]
+    },
     "tags": [
       "Want",
       "Have",

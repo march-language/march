@@ -35,6 +35,32 @@ class OrderFacts(unittest.TestCase):
         self.assertEqual(facts["tags"], ["Want", "Have", "Book", "Booked", "Out", "Skip"])
         self.assertEqual(facts["roles"], ["Shop", "Stock", "Ledger"])
 
+    def test_state_types_split_into_conversation_states_and_parked_tokens(self):
+        facts = gen.order_facts(load("core-ast-order.json"), load("Order.json"))
+        self.assertEqual(facts["conversation_states"], 12)
+        self.assertEqual(facts["linear_states"] - facts["conversation_states"], 3)   # one Parked_<Role> each
+        shop = next(m for m in facts["modules"] if m["name"] == "Order_Shop")
+        self.assertEqual(shop["states"], ["S_send_Want", "S_offer_have_out", "S_recv_Booked", "S_end"])
+
+    def test_strips_are_the_generated_state_types(self):
+        s = gen.strips(load("core-ast-order.json"))
+        self.assertEqual(s["Shop"], ["send Want", "offer have/out", "recv Booked", "end"])
+        self.assertEqual(s["Stock"], ["recv Want", "choose have/out", "send Book", "send Skip", "end"])
+        self.assertEqual(s["Ledger"], ["offer have/out", "send Booked", "end"])
+
+    def test_strip_lengths_match_the_state_map_axes(self):
+        # two independent derivations of a role's positions must agree: the compiler's
+        # generated state types, and this script's own projection of the step tree
+        s = gen.strips(load("core-ast-order.json"))
+        axes, _ = gen.reachable(load("Order.json")["current"]["steps"], ["Shop", "Stock", "Ledger"])
+        self.assertEqual({r: len(v) for r, v in s.items()}, axes)
+
+    def test_stock_signature_shows_its_grant(self):
+        sig = gen.excerpts(ROOT / "examples/lab_app/src/lab_app.march")["stock_signature"]
+        self.assertTrue(sig.startswith("fn stock("))
+        self.assertIn("Cap(IO.Mut)", sig)
+        self.assertIn("Order_Stock.Entry", sig)
+
     def test_order_source_is_the_sixteen_lines(self):
         src = gen.order_source(ROOT / "examples/lab_app/src/lab_app.march")
         self.assertEqual(len(src), 16)

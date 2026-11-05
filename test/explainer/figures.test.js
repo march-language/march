@@ -95,12 +95,24 @@ test('strip marks steps done, the next step, and the rest', () => {
   assert.equal(count(svg, 'mx-seg'), 2);
 });
 
+test('hosts draws one box per machine', () => {
+  const svg = figures.hosts(data.topology, { width: 680 });
+  assert.equal(count(svg, 'mx-host'), 1 + data.topology.stock_hosts.length);
+  for (const h of [data.topology.ingress].concat(data.topology.stock_hosts)) assert.ok(svg.includes('>' + h + '<'), h);
+});
+
+test('hosts says which machines may hold the ledger', () => {
+  const svg = figures.hosts(data.topology, { width: 680 });
+  assert.equal((svg.match(/may hold Ledger/g) || []).length, data.topology.books_hosts.length);
+});
+
 test('a 320 px figure keeps every element inside its width', () => {
   assertInside(figures.fanOut(data.order, { width: 320, stage: 'functions' }), 320);
   assertInside(figures.stateMap(data.state_map, { width: 320, lit: 5 }), 320);
   assertInside(figures.functionSquares({ total_functions: 700, changed_functions: ['a'] }, { width: 320, showChanged: true }), 320);
   assertInside(figures.strip({ labels: ['send Want', 'recv Have', 'recv Booked', 'end'] }, { width: 320, at: 0 }), 320);
   assertInside(figures.detectionTimeline({ heartbeat_s: 1, silent_timeout_s: 10 }, { width: 320, mode: 'silent', elapsed: 10 }), 320);
+  assertInside(figures.hosts(data.topology, { width: 320 }), 320);
 });
 
 test('no figure carries a colour of its own', () => {

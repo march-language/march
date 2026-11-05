@@ -65,6 +65,47 @@ def _tags(steps, seen):
     return seen
 
 
+def _name(decl):
+    n = decl.get("name")
+    return n.get("txt") if isinstance(n, dict) else n
+
+
+def _state_types(module):
+    """A role module's conversation states: its always-linear types named `S_…`, in
+    declaration order. (Its other always-linear type, `Parked_<Role>`, is the token for a
+    session parked inside an actor.)"""
+    return [_name(x) for x in module["decls"]
+            if x["kind"] == "DAlwaysLinearType" and (_name(x) or "").startswith("S_")]
+
+
+def _step_label(state_type):
+    """`S_send_Want` -> "send Want"; `S_offer_have_out` -> "offer have/out"; `S_end` -> "end"."""
+    parts = state_type.split("_")[1:]
+    if parts == ["end"]:
+        return "end"
+    verb, rest = parts[0], parts[1:]
+    return verb + " " + ("/".join(rest) if verb in ("choose", "offer") else "_".join(rest))
+
+
+def strips(core_ast):
+    """Each role's steps in order, read off the state types the compiler generated for it:
+    the strip a card draws beside the code is the role's linear types, one per step."""
+    out = {}
+    for d in core_ast["module"]["decls"]:
+        if d.get("kind") == "DMod" and d["name"]["txt"].startswith(PROTOCOL + "_"):
+            states = _state_types(d)
+            if states:
+                out[d["name"]["txt"][len(PROTOCOL) + 1:]] = [_step_label(t) for t in states]
+    return out
+
+
+def excerpts(lab_app_path):
+    """Lines of the lab app the page quotes."""
+    lines = Path(lab_app_path).read_text().splitlines()
+    stock = next(l.strip() for l in lines if l.strip().startswith("fn stock("))
+    return {"stock_signature": stock[:-3] if stock.endswith(" do") else stock}
+
+
 def order_facts(core_ast, protocol_record):
     """What the compiler generated for the protocol: one entry per `Order_*` module with
     its linear state types and functions, the totals, and the protocol's fingerprint,
@@ -75,11 +116,13 @@ def order_facts(core_ast, protocol_record):
             kinds = [x["kind"] for x in d["decls"]]
             modules.append({"name": d["name"]["txt"],
                             "linear_states": kinds.count("DAlwaysLinearType"),
+                            "states": _state_types(d),
                             "functions": kinds.count("DFn")})
     cur = protocol_record["current"]
     return {
         "modules": modules,
         "linear_states": sum(m["linear_states"] for m in modules),
+        "conversation_states": sum(len(m["states"]) for m in modules),
         "functions": sum(m["functions"] for m in modules),
         "fingerprint": cur["fingerprint"],
         "roles": cur["roles"],
@@ -390,6 +433,7 @@ def build(march):
                             capture_output=True, text=True).stdout.strip()
     order = {"source": order_source(LAB_APP)}
     order.update(order_facts(core, record))
+    order["strips"] = strips(core)
     return {
         "generated": {"commit": commit, "date": datetime.date.today().isoformat(),
                       "lab_app_sha256": lab_app_sha256(LAB_APP)},
@@ -400,6 +444,7 @@ def build(march):
                                    ROOT / "examples/lab_app/topology.lab.toml"),
         "sim": SIM,
         "programs": run_programs(PROGRAMS, march),
+        "excerpts": excerpts(LAB_APP),
     }
 
 
