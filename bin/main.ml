@@ -7076,6 +7076,17 @@ let compile filename =
     in
     March_eval.Eval.clear_march_stack ();
     setup_interpreter_ffi ();
+    (* Actor message identity: the interpreter tags an actor message by its
+       checked type, so dispatch drops another actor's (or a variant's)
+       same-named message as compiled code does. *)
+    March_eval.Eval.ctor_type_of_span := (fun sp ->
+        match Hashtbl.find_opt type_map sp with
+        | Some t ->
+          (match March_typecheck.Typecheck.repr t with
+           | March_typecheck.Typecheck.TCon (n, _) -> Some n
+           | _ -> None)
+        | None -> None);
+    March_eval.Eval.typed_messages := true;
     (try
        (try March_eval.Eval.run_module desugared
         with

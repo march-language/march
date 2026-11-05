@@ -5294,15 +5294,16 @@ typechecker that this document exists to pin down, not bugs:
     `Pid`'s parameter is the actor's STRUCTURAL state record and cannot name
     the actor: a message for an actor whose state has the same shape as the
     target's still typechecks and is dropped at run time on both backends.
-    One backend split remains for a handler name two actors share: a bare
-    name resolves to one owner, so the interpreter (dispatching by name) runs
-    the target's handler while compiled code drops the other actor's message.
-    When the target's state differs that is now the `send_wrong_actor` error,
+    For a handler name two actors share, a bare name resolves to one owner;
+    when the target's state differs that is the `send_wrong_actor` error,
     whose advice is the actor-qualified spelling (`Counter.Tally`), which
     selects an actor's message since 2026-11-04
-    (`specs/progress/2026-10-15-actor-message-ctor-cannot-be-qualified.md`);
-    the interpreter still dispatches by name
-    (`specs/todos/2026-11-04-interp-actor-dispatch-by-name.md`).
+    (`specs/progress/2026-10-15-actor-message-ctor-cannot-be-qualified.md`).
+    The backend split this used to leave is closed: since 2026-11-05 the
+    interpreter tags an actor message by its checked type and drops another
+    actor's or a variant's same-named message, as compiled code does
+    (`specs/progress/2026-11-04-interp-actor-dispatch-by-name.md`,
+    `test/native/actor_shared_name_drop.march`).
     Progress entry: `specs/progress/2026-10-12-send-message-not-checked-against-pid-actor.md`.
     Cross-ref §2.6.4 and finding 18.
 

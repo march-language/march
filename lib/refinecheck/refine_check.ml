@@ -7578,13 +7578,15 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
            check.  The assumption below is documented as that boundary in
            specs/lang/refinement-types.md rather than withheld. *)
         let ps = List.map (fun p -> A.FPNamed p) h.A.ah_params in
-        (* Only a name no other handler or variant shares: a shared one is
-           still obliged per actor at every construction
-           ([handler_resolution]), but the interpreter dispatches a message by
-           its constructor NAME, so another actor's (or a variant's) value of
-           that name sent to this pid would run this handler unobliged
-           (todo 2026-11-04-interp-actor-dispatch-by-name). *)
-        let enforced = Hashtbl.mem !handler_sigs h.A.ah_msg.A.txt in
+        (* A name another actor or a variant shares counts too: every
+           construction of THIS actor's message is obliged, or recorded
+           skipped `message-unresolved` ([handler_resolution]), and both
+           backends drop another actor's or a variant's same-named value
+           sent to this pid (compiled: unique message tags; interpreter:
+           [Eval.handler_for_msg], since 2026-11-05). *)
+        let enforced =
+          Hashtbl.mem !handler_sigs h.A.ah_msg.A.txt
+          || Hashtbl.mem !handler_sigs (Refine_scope.handler_key aname.A.txt h.A.ah_msg.A.txt) in
         let assumed = if enforced then h.A.ah_params else strip_params_refinements h.A.ah_params in
         let sc = List.fold_left scope_add_fnparam [] (List.map (fun p -> A.FPNamed p) assumed) in
         let re = List.fold_left recenv_add_fnparam state_re ps in

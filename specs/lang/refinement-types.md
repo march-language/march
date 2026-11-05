@@ -5634,9 +5634,10 @@ position into a real contract, obligation and assumption together, is
   handler, and so is a bare `Inc(..)` whose checked type is `Counter`'s message
   type (`let m : Counter.Msg = Inc(..)`, or a `migrate_msg` result); a bare
   shared name with no recorded type is a recorded `message-unresolved` skip.
-  The body assumes the refinement only for an unshared name: the interpreter
-  dispatches a message by its name, so another value of that name sent to the
-  pid would reach the handler unobliged. A fresh state literal at a handler's
+  The body assumes the refinement, shared name or not: both backends run a
+  message only on its own actor, dropping another actor's or a variant's value
+  of the same name (the interpreter since 2026-11-05, by the message's checked
+  type). A fresh state literal at a handler's
   tail is checked with the assumed parameter refinements in scope. **Trust boundary:** a message arriving from a remote node was
   built by code this compiler did not check; the handler's assumption is
   stated here as that boundary, not enforced across it.

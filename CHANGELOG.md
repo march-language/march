@@ -361,6 +361,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The interpreter no longer runs another actor's message.** A variant, or another
+  actor's message of the same name, sent to an actor ran that actor's handler under
+  `march file.march`, while compiled code dropped it. The interpreter now drops it too,
+  so a refined handler parameter holds in the handler body even when another actor or a
+  type shares the message's name. Also, a dropped message no longer ends
+  `run_until_idle()` early with later messages still queued.
+
 - **An actor handler's fresh state literal uses its parameter refinements.** With
   `state { count : {Int | _ >= 0} }` and `on Bump(n : {Int | _ > 0})`, the result
   `{ count: state.count + n }` stayed unverified because the check at the handler's tail ran

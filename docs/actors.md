@@ -271,9 +271,9 @@ end
 
 A handler's parameter refinement is obliged at every construction of its message, shared
 name or not: through the written qualifier, or the construction's type
-([refinement types](refinement-types.md)). The handler body assumes the refinement only
-when no other handler or variant shares the name, because the interpreter dispatches a
-message by its name.
+([refinement types](refinement-types.md)), and the handler body assumes it. Both backends
+run a message only on its own actor: a variant or another actor's message of the same
+name, sent to the pid, is dropped.
 
 **A `send` is checked against the target, one side only.** When the pid's type shows
 its actor's state, a message of an actor with a different state is a compile error

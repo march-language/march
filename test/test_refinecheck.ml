@@ -15130,8 +15130,9 @@ let lambda_contract_suite =
    handler or a variant shares is resolved per actor (G4): by a written
    `Counter.Inc`, or by the construction's recorded type; where neither is
    available the contract is a recorded `message-unresolved` skip, never a
-   silent drop.  The handler body assumes only an unshared name, because the
-   interpreter dispatches by name.  The last cases pin that. *)
+   silent drop.  The handler body assumes the refinement either way: both
+   backends drop another actor's or a variant's same-named message.  The
+   last cases pin that. *)
 let actor_handler_suite =
   let actor body =
     "  actor Counter do\n\
@@ -15177,9 +15178,9 @@ let actor_handler_suite =
           (has_refine_error_typed
              (prog ~extra ~handler_body:plain_body
                 "    let t : Tok = Tok.Inc(0 - 1)\n    let _ = t\n    let _ = send(c, Inc(1))\n"));
-        (* …but the body does not assume it while the name is shared: the
-           interpreter routes a `Tok.Inc(-1)` sent to this pid by name. *)
-        Alcotest.(check bool) "…and the body does not assume n > 0 while shared" true
+        (* …and the body assumes it: both backends drop a `Tok.Inc(-1)`
+           sent to this pid (the interpreter since 2026-11-05). *)
+        Alcotest.(check bool) "…and the body assumes n > 0 while shared" false
           (has_refine_error_typed
              (prog ~extra ~handler_body:"      { state with value: need(n) }\n"
                 "    let _ = send(c, Counter.Inc(1))\n")));
