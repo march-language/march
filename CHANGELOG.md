@@ -29,6 +29,14 @@ git log is authoritative for exact commits.
   instead of renaming a handler. A refined handler parameter is now checked at every
   construction of a shared message name, by its qualifier or its type.
 
+- **More stdlib laws: `List.take_append`, `List.drop_append`, `List.nth_opt_append`, and
+  result types on `Math.min_int`, `max_int` and `clamp_int`.** The three lemmas state what
+  `take`, `drop` and `nth_opt` do on `append(xs, ys)` at `len(xs)` or an index inside `xs`;
+  calling one proves what unfolding runs out of fuel on. `min_int(a, b)` now has the type
+  `{Int | _ <= a && _ <= b && (_ == a || _ == b)}` (and dually `max_int`), and
+  `clamp_int(x, low, high)` is within `[low, high]` when `low <= high`; the condition is in the
+  result, so no existing call gains an obligation.
+
 - **A refinement on a field of an anonymous-record parameter is now checked.** In
   `fn f(r : { v : {Int | _ > 0} })` the body may assume `r.v > 0`, and each caller must
   establish it. Before, the refinement was ignored on both sides. Likewise

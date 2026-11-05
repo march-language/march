@@ -1400,4 +1400,42 @@ mod List do
     take_onto_drop(xs, n, Nil)
   end
 
+  doc "`take_onto` over `append(xs, ys)` stops exactly at the end of `xs`: the accumulator lemma behind `take_append`."
+  @[lemma]
+  fn take_onto_append(xs : List(a), ys : List(a), acc : List(a))
+    : {Unit | take_onto(append(xs, ys), len(xs), acc) == append(reverse(acc), xs)} do
+    match xs do
+    Nil        -> append_nil(reverse(acc))
+    Cons(h, t) ->
+      take_onto_append(t, ys, Cons(h, acc))
+      reverse_onto_append(acc, Cons(h, Nil))
+      append_assoc(reverse(acc), Cons(h, Nil), t)
+    end
+  end
+
+  doc "`take(append(xs, ys), len(xs)) == xs`."
+  @[lemma]
+  fn take_append(xs : List(a), ys : List(a)) : {Unit | take(append(xs, ys), len(xs)) == xs} do
+    take_onto_append(xs, ys, Nil)
+  end
+
+  doc "`drop(append(xs, ys), len(xs)) == ys`."
+  @[lemma]
+  fn drop_append(xs : List(a), ys : List(a)) : {Unit | drop(append(xs, ys), len(xs)) == ys} do
+    match xs do
+    Nil        -> ()
+    Cons(_, t) -> drop_append(t, ys)
+    end
+  end
+
+  doc "`nth_opt(append(xs, ys), i) == nth_opt(xs, i)` for an index inside `xs`."
+  @[lemma]
+  fn nth_opt_append(xs : List(a), ys : List(a), i : {Int | _ >= 0 && _ < len(xs)})
+    : {Unit | nth_opt(append(xs, ys), i) == nth_opt(xs, i)} do
+    match xs do
+    Nil        -> ()
+    Cons(_, t) -> if i == 0 do () else nth_opt_append(t, ys, i - 1) end
+    end
+  end
+
 end
