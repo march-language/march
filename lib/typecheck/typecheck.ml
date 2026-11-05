@@ -117,13 +117,22 @@ let lin_display_name n =
     between two sites: without the label the reader knows only that the value
     was already gone, not what took it. *)
 let report_double_use ?(notes = []) env ~lin le ~span =
+  if not !(le.le_poisoned) then
   let name = lin_display_name le.le_name in
   let labels =
     match !(le.le_first_use) with
     | None -> []
     | Some first ->
+      (* F5: say WHERE the first consumption sits when that is not plain
+         straight-line code: one arm of a `match`, one branch of an `if`, or
+         a closure body that runs once per iteration. *)
+      let where =
+        match List.assoc_opt first !(le.le_where) with
+        | Some w -> ", " ^ w
+        | None -> ""
+      in
       [{ Err.lbl_span = first;
-         Err.lbl_message = Printf.sprintf "`%s` was already consumed here" name }]
+         Err.lbl_message = Printf.sprintf "`%s` was already consumed here%s" name where }]
   in
   let message =
     match lin with
@@ -390,11 +399,26 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
     ) env bindings
 
 let report_linear_never_used env ~scope_span le =
-  Err.error ~code:Err.Code.linear_never_used env.errors ~span:scope_span
-    (Printf.sprintf
-       "The linear value `%s` was never used.\n\
-        Linear values must be consumed exactly once — did you \
-        mean to pass it somewhere?" (lin_display_name le.le_name))
+  if not !(le.le_poisoned) then
+  match !(le.le_exit) with
+  | [] ->
+    Err.error ~code:Err.Code.linear_never_used env.errors ~span:scope_span
+      (Printf.sprintf
+         "The linear value `%s` was never used.\n\
+          Linear values must be consumed exactly once — did you \
+          mean to pass it somewhere?" (lin_display_name le.le_name))
+  | labels ->
+    (* F5: it IS consumed, but only on paths that never return; name the
+       path that returns without consuming it ([join_linear_paths]). *)
+    Err.report env.errors
+      { Err.severity = Err.Error; span = scope_span;
+        message =
+          Printf.sprintf
+            "The linear value `%s` was never used on a path that returns.\n\
+             It is consumed only on paths that never return (they end in \
+             `panic`), so wherever the function does return the value is \
+             dropped. Consume it on that path too." (lin_display_name le.le_name);
+        labels; notes = []; code = Err.Code.linear_never_used; fix = None }
 
 (** After a scope closes, check that every in-scope linear var was used. *)
 let check_linear_all_consumed env ~scope_span in_scope_names =
@@ -567,7 +591,7 @@ let rec judge_pending ?(defer = true) env ~scope_span entries =
             | Some span -> report_double_use env ~lin le ~span
             | None -> ());
            (match !(le.le_mixed) with
-            | Some span when lin = Ast.Linear ->
+            | Some span when lin = Ast.Linear && not !(le.le_poisoned) ->
               Err.error ~code:Err.Code.linear_mixed_consumption env.errors ~span (mixed_message (lin_display_name le.le_name))
             | _ -> ());
            if lin = Ast.Linear && not !(le.le_used) then
@@ -1185,14 +1209,23 @@ let capture_snapshot env = List.map (fun le -> (le, !(le.le_used))) env.lin
     local [fn ... end], could capture a linear value and duplicate it. *)
 let check_captures env ~span snapshot =
   List.iter (fun (le, was_used) ->
-      if not was_used && !(le.le_used) && effective_lin env le <> Ast.Unrestricted then
+      if not was_used && !(le.le_used) && effective_lin env le <> Ast.Unrestricted then begin
+        (* F5: a later use of [le] is a double use whose first consumption
+           sits in this closure body, which runs once per call. *)
+        (match !(le.le_first_use) with
+         | Some sp when not (List.mem_assoc sp !(le.le_where)) ->
+           le.le_where :=
+             (sp, "inside a closure that can run more than once (each \
+                   iteration consumes it)") :: !(le.le_where)
+         | _ -> ());
         let name = lin_display_name le.le_name in
         Err.error ~code:Err.Code.linear_captured env.errors ~span
           (Printf.sprintf
              "The linear value `%s` cannot be captured by a closure.\n\
               A closure may be called multiple times, which would violate \
               the exactly-once guarantee.\n\
-              Pass `%s` as a parameter to the closure instead." name name))
+              Pass `%s` as a parameter to the closure instead." name name)
+      end)
     snapshot
 
 (* ── Linear discards by a wildcard ─────────────────────────────────── *)
@@ -1219,7 +1252,49 @@ let rec path_diverges (e : Ast.expr) =
 
 (* ── Linear values across branches ───────────────────────────────── *)
 
+(** A match arm's pattern as the user wrote it, for naming the arm in a
+    linearity label ("the `Some(v)` arm").  [None] when it would be too long
+    to read inline; the caller then names the arm by its line. *)
+let show_arm_pattern (p : Ast.pattern) : string option =
+  let lit = function
+    | Ast.LitInt n -> string_of_int n
+    | Ast.LitFloat f -> Printf.sprintf "%g" f
+    | Ast.LitString s -> Printf.sprintf "%S" s
+    | Ast.LitBool b -> string_of_bool b
+    | Ast.LitAtom a -> ":" ^ a
+  in
+  let rec go (p : Ast.pattern) =
+    match p with
+    | Ast.PatWild _ -> "_"
+    | Ast.PatVar n -> n.txt
+    | Ast.PatCon (n, []) -> n.txt
+    | Ast.PatCon (n, ps) -> n.txt ^ "(" ^ String.concat ", " (List.map go ps) ^ ")"
+    | Ast.PatAtom (a, [], _) -> ":" ^ a
+    | Ast.PatAtom (a, ps, _) -> ":" ^ a ^ "(" ^ String.concat ", " (List.map go ps) ^ ")"
+    | Ast.PatTuple (ps, _) -> "(" ^ String.concat ", " (List.map go ps) ^ ")"
+    | Ast.PatLit (l, _) -> lit l
+    | Ast.PatRecord (fs, _) ->
+      "{ " ^ String.concat ", " (List.map (fun ((n : Ast.name), fp) ->
+          match fp with
+          | Ast.PatVar v when v.txt = n.txt -> n.txt
+          | _ -> n.txt ^ ": " ^ go fp) fs) ^ " }"
+    | Ast.PatAs (p, n, _) -> go p ^ " as " ^ n.txt
+    | Ast.PatOr (ps, _) -> String.concat " | " (List.map go ps)
+  in
+  let s = go p in
+  if String.length s <= 40 && not (String.contains s '$') then Some s else None
+
+(** The noun phrase naming one arm of a [match]: "the `Some(v)` arm", or "the
+    arm on line N" for a pattern too long to quote. *)
+let describe_arm (br : Ast.branch) =
+  match show_arm_pattern br.branch_pat with
+  | Some p -> Printf.sprintf "the `%s` arm" p
+  | None ->
+    Printf.sprintf "the arm on line %d" (span_of_expr br.branch_body).Ast.start_line
+
+
 let report_mixed_consumption env ~span le ~consumed_at ~skipped =
+  if not !(le.le_poisoned) then
   let name = lin_display_name le.le_name in
   let labels =
     (match consumed_at with
@@ -1250,15 +1325,33 @@ let report_mixed_consumption env ~span le ~consumed_at ~skipped =
     reported here for a decided entry and recorded in [le_mixed] for a pending
     one, and the entry is then marked consumed so the scope's close does not
     add a second report. *)
-let join_linear_paths env ~span snapshot results =
-  let results = List.map (fun (body, flags) -> (body, Array.of_list flags)) results in
+let join_linear_paths ?all_note env ~span snapshot results =
+  let results =
+    List.map (fun (body, desc, flags) -> (body, desc, Array.of_list flags)) results in
   List.iteri (fun i (le, was, was_first) ->
-      let per_path = List.map (fun (body, flags) -> (body, flags.(i))) results in
-      let any_used = List.exists (fun (_, (u, _)) -> u) per_path in
-      let first_span = List.find_map (fun (_, (u, sp)) -> if u then sp else None) per_path in
+      let per_path = List.map (fun (body, desc, flags) -> (body, desc, flags.(i))) results in
+      let any_used = List.exists (fun (_, _, (u, _)) -> u) per_path in
+      let first_span = List.find_map (fun (_, _, (u, sp)) -> if u then sp else None) per_path in
       let union () =
         le.le_used := any_used;
         le.le_first_use := (if any_used then first_span else was_first)
+      in
+      (* F5: remember which path each consuming use sits on, for a later
+         "used more than once" label.  An inner construct has already said
+         where its own uses sit, and the innermost description is the one
+         that locates the use, so an existing entry is kept. *)
+      let note_where ~every =
+        List.iter (fun (_, desc, (u, sp)) ->
+            match desc, sp with
+            | Some d, Some sp when u && not (List.mem_assoc sp !(le.le_where)) ->
+              let w =
+                match all_note with
+                | Some n when every -> Printf.sprintf "in %s (%s)" d n
+                | _ -> "in " ^ d
+              in
+              le.le_where := (sp, w) :: !(le.le_where)
+            | _ -> ())
+          per_path
       in
       if was then begin
         le.le_used := true; le.le_first_use := was_first
@@ -1277,20 +1370,47 @@ let join_linear_paths env ~span snapshot results =
         in
         let strict = (le.le_pending <> None || le.le_lin = Ast.Linear) && not is_channel in
         let fall =
-          List.filter (fun (body, _) ->
+          List.filter (fun (body, _, _) ->
               match body with Some e -> not (path_diverges e) | None -> true)
             per_path
         in
-        let used_fall = List.filter (fun (_, (u, _)) -> u) fall in
+        let used_fall = List.filter (fun (_, _, (u, _)) -> u) fall in
+        let every_path =
+          List.length per_path > 1
+          && List.for_all (fun (_, _, (u, _)) -> u) per_path in
+        if any_used then note_where ~every:every_path;
         if not strict || fall = [] || not any_used
            || List.length used_fall = List.length fall then union ()
         else if used_fall = [] then begin
           (* Consumed only on paths that never return: nothing after them runs,
-             so on every path that does return it is still unconsumed. *)
+             so on every path that does return it is still unconsumed.  F5:
+             keep the paths for [report_linear_never_used] to name. *)
+          let name = lin_display_name le.le_name in
+          let consumed =
+            List.find_map (fun (_, _, (u, sp)) -> if u then sp else None) per_path in
+          let skipped =
+            List.find_map (fun (body, desc, _) ->
+                match body with Some e -> Some (e, desc) | None -> None) fall in
+          le.le_exit :=
+            (match consumed with
+             | Some sp ->
+               [ { Err.lbl_span = sp;
+                   Err.lbl_message =
+                     Printf.sprintf "`%s` is consumed here, but this path never returns" name } ]
+             | None -> [])
+            @ (match skipped with
+               | Some (e, desc) ->
+                 [ { Err.lbl_span = span_of_expr e;
+                     Err.lbl_message =
+                       Printf.sprintf "%s returns without consuming `%s`"
+                         (match desc with
+                          | Some d -> String.capitalize_ascii d
+                          | None -> "This path") name } ]
+               | None -> []);
           le.le_used := false; le.le_first_use := was_first
         end else begin
-          let consumed_at = match used_fall with (_, (_, sp)) :: _ -> sp | [] -> None in
-          let skipped = List.find_map (fun (body, (u, _)) -> if u then None else body) fall in
+          let consumed_at = match used_fall with (_, _, (_, sp)) :: _ -> sp | [] -> None in
+          let skipped = List.find_map (fun (body, _, (u, _)) -> if u then None else body) fall in
           (match le.le_pending with
            | Some _ -> if !(le.le_mixed) = None then le.le_mixed := Some span
            | None -> report_mixed_consumption env ~span le ~consumed_at ~skipped);
@@ -2201,9 +2321,42 @@ let relocate_callback_mismatch env ~mark (e : Ast.expr) sp inferred expected =
      | _ -> ())
   | _ -> ()
 
+(** Poison (§X3, F5): [e] failed its type check, an error was reported
+    inside it, and its type came out [TError].  A linear value passed to it
+    directly (`snik(t)` with `snik` misspelled, `t.foo` on a non-record) has
+    an unknown fate, so no linearity error follows on it ([le_poisoned]).
+    Only DIRECT operands: in `sink(t) + "x"` the call `sink(t)` checked fine
+    and its consumption of [t] is real. *)
+let poison_linear_operands env (e : Ast.expr) =
+  let operands =
+    match e with
+    | Ast.EApp (_, args, _) | Ast.ECon (_, args, _) -> args
+    | Ast.EField (base, _, _) -> [ base ]
+    | _ -> []
+  in
+  let rec var_span (o : Ast.expr) =
+    match o with
+    | Ast.EVar _ | Ast.EField (Ast.EVar _, _, _) -> Some (span_of_expr o)
+    | Ast.EAnnot (inner, _, _) -> var_span inner
+    | _ -> None
+  in
+  let within (inner : Ast.span) (outer : Ast.span) =
+    inner.file = outer.file
+    && (inner.start_line, inner.start_col) >= (outer.start_line, outer.start_col)
+    && (inner.end_line, inner.end_col) <= (outer.end_line, outer.end_col)
+  in
+  let spans = List.filter_map var_span operands in
+  if spans <> [] then
+    List.iter (fun le ->
+        match !(le.le_first_use) with
+        | Some u when List.exists (within u) spans -> le.le_poisoned := true
+        | _ -> ())
+      env.lin
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
+  let errors_mark = env.errors.Err.diagnostics in
   let result =
     match e with
     (* ── Literals ─────────────────────────────────────────────────── *)
@@ -3793,9 +3946,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (* The two branches are mutually exclusive, so each may consume the same
          outer linear value once — the same rule match arms get. *)
       let r_then = ref TError and r_else = ref TError in
-      iter_paths_linear env ~span:_sp
-        [ (Some then_, fun () -> r_then := infer_expr env then_);
-          (Some else_, fun () -> r_else := infer_expr env else_) ];
+      iter_paths_linear ~all_note:"both branches consume it" env ~span:_sp
+        [ (Some then_, Some "the `if` branch", fun () -> r_then := infer_expr env then_);
+          (Some else_, Some "the `else` branch", fun () -> r_else := infer_expr env else_) ];
       let t_then = !r_then in
       let t_else = !r_else in
       (* Point primary error at the else branch; label points at then branch
@@ -3842,6 +3995,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
            let ty = infer_expr env body_e in
            results :=
              (Some body_e,
+              Some (Printf.sprintf "the arm on line %d" (span_of_expr body_e).Ast.start_line),
               List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot)
              :: !results;
            List.iter (fun (le, was, was_span) ->
@@ -3857,7 +4011,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
              let arm_ty = run_body body_e in
              unify env ~span:sp ~reason:(Some (RMatchArm sp)) result_ty arm_ty
            ) rest;
-         join_linear_paths env ~span:sp snapshot (List.rev !results);
+         join_linear_paths ~all_note:"every arm consumes it" env ~span:sp snapshot
+           (List.rev !results);
          result_ty)
 
     (* ── Pipes / Sigils — must be desugared before reaching us ───── *)
@@ -4055,7 +4210,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
              if not was && !(le.le_used) then
                match le.le_pending with
                | Some _ -> if !(le.le_mixed) = None then le.le_mixed := Some sp
-               | None when le.le_lin = Ast.Linear ->
+               | None when le.le_lin = Ast.Linear && not !(le.le_poisoned) ->
                  let name = lin_display_name le.le_name in
                  Err.error ~code:Err.Code.linear_unconsumed_early_return env.errors ~span:sp
                    (Printf.sprintf
@@ -4168,6 +4323,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
                `flat_map` — its type could not be determined here.";
             TError))
   in
+  if env.lin <> [] && (match repr result with TError -> true | _ -> false)
+     && Err.error_since env.errors errors_mark then
+    poison_linear_operands env e;
   Hashtbl.replace env.type_map (span_of_expr e) (repr result);
   result
 
@@ -4541,8 +4699,9 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
     mutable flag would otherwise raise across arms, while still catching a
     genuine double-use WITHIN a single arm. *)
 and iter_arms_linear env ~span (branches : Ast.branch list) (f : Ast.branch -> unit) : unit =
-  iter_paths_linear env ~span
-    (List.map (fun (br : Ast.branch) -> (Some br.branch_body, fun () -> f br)) branches)
+  iter_paths_linear ~all_note:"every arm consumes it" env ~span
+    (List.map (fun (br : Ast.branch) ->
+         (Some br.branch_body, Some (describe_arm br), fun () -> f br)) branches)
 
 (** The mutual-exclusion discipline itself, over an arbitrary list of paths.
     Every branching construct in the language shares it: [EMatch] arms via
@@ -4563,19 +4722,20 @@ and iter_arms_linear env ~span (branches : Ast.branch list) (f : Ast.branch -> u
     the first path to consume a value would leave its span behind, and a
     genuine double-use in a LATER path would point at a line in a sibling path
     that never ran on the same execution. *)
-and iter_paths_linear env ~span (paths : (Ast.expr option * (unit -> unit)) list) : unit =
+and iter_paths_linear ?all_note env ~span
+    (paths : (Ast.expr option * string option * (unit -> unit)) list) : unit =
   let snapshot =
     List.map (fun le -> (le, !(le.le_used), !(le.le_first_use))) env.lin
   in
   let results =
-    List.map (fun (body, run_path) ->
+    List.map (fun (body, desc, run_path) ->
         List.iter (fun (le, was, was_span) ->
             le.le_used := was; le.le_first_use := was_span) snapshot;
         run_path ();
-        (body, List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot))
+        (body, desc, List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot))
       paths
   in
-  join_linear_paths env ~span snapshot results
+  join_linear_paths ?all_note env ~span snapshot results
 
 (** Infer the result type of a match expression. *)
 and infer_match env span scrut scrut_ty branches =

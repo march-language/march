@@ -146,6 +146,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: linearity errors say where the value went. The label "`h` was already consumed
+  here" now adds "in the `Some(v)` arm" or "in the `else` branch", plus "every arm consumes it" when
+  all of them do. For a closure body it adds "inside a closure that can run more than once (each
+  iteration consumes it)". A linear value consumed only on paths that end in `panic` is reported as
+  "never used on a path that returns". A label points at the arm or branch that returns without
+  consuming it. A value passed straight into an expression that failed to typecheck (`clsoe(c)`,
+  `c.foo`) no longer gets a linearity error on top of the type error.
 - Diagnostics: a choreography role body that takes a step out of order is reported in protocol
   terms (`protocol_step_order`): "Role `Cons` tries to choose `more` or `done` here, but at this
   point protocol `Stream` says it must receive an `Int` from `Prod`", with a label on that

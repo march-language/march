@@ -11,6 +11,13 @@ permalink: /docs/errors/linear_never_used/
 A value of a linear type was bound but never consumed. Linear values must
 be used exactly once; letting one go out of scope silently drops it.
 
+When the value is consumed, but only on paths that never return (an arm
+ending in `panic`), the error reads "was never used on a path that returns"
+and its labels point at that consumption and at the arm or branch that
+returns without consuming the value. Consume it on that path too. (A
+`let?` that returns early past an unconsumed value is reported separately,
+as `linear_unconsumed_early_return`.)
+
 ## A program that triggers it
 
 ```march
