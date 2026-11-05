@@ -411,7 +411,10 @@ and report_type_mismatch env ~span ~occurs_violation ~reason ?provided ?diff exp
   (* With a diff the two roots share a head, so these hints, about the
      roots, don't apply; the ones for the parts would name the wrong value. *)
   let common_hint =
-    if diff <> None then [] else common_mismatch_hint expected found
+    if diff <> None then [] else
+      match common_mismatch_hint expected found with
+      | [] -> Option.to_list (Typecheck_suggest.conversion_note env expected found)
+      | hs -> hs
   in
   (* Same-printed-name explanation.  Two shapes reach here: a genuine
      global-namespace collision, and (commoner) a parameterised record type

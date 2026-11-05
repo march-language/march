@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: average(List(Float)) : Float
+mod Main do
+  -- X8 tier 2: no name in scope is a spelling of `arith_mean`, but one function
+  -- in this module takes a `List(Float)` and returns the `Float` the
+  -- annotation asks for.
+  needs IO.Console
+
+  fn average(xs : List(Float)) : Float do
+    List.fold_left(xs, 0.0, fn (acc, x) -> acc +. x) /. int_to_float(List.length(xs))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let m : Float = arith_mean([1.0, 2.0, 4.5])
+    println(float_to_string(m))
+  end
+end

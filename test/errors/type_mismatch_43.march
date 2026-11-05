@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: The two arguments are the other way round
+mod Main do
+  -- X8 tier 2: `List.map` takes the list first.  Both arguments fail, and
+  -- the swap fits, so the first report says so and its fix swaps them.
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) do
+    let xs = [1, 2, 3]
+    let ys = List.map(fn x -> x * 2, xs)
+    println(int_to_string(List.length(ys)))
+  end
+end

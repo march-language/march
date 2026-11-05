@@ -549,6 +549,85 @@ let record_skip_obligation errctx ~(span : A.span) ~(callee : string) ~(predicat
          noun predicate callee (Obligation.reason_name reason) (Obligation.reason_detail reason)
          remedy)
 
+(* ── Total twins (diagnostics-depth plan X8, tier 3) ─────────────────────
+   When a call fails its callee's precondition, the same function without
+   the precondition is often right there: `List.head` / `List.head_opt`,
+   `List.nth` / `List.nth_opt`.  A twin is [f ^ "_opt"] where [f] resolves,
+   taking as many parameters as [f], refining none of them, and returning
+   `Option(R)` or `Result(R, _)` for [f]'s own return type [R].  It is a
+   lookup in the definition table (no solver call), made only after the
+   call has been reported. *)
+let total_twin (ctx : rctx) (fname : string) : (string * string) option =
+  let def_of n =
+    match resolve_key ctx n with
+    | Some key -> Option.map snd (Hashtbl.find_opt fn_defs_tbl key)
+    | None -> None in
+  let rec strip (t : A.ty) : A.ty =
+    match t with
+    | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> strip b
+    | A.TyCon (n, ts) -> A.TyCon ({ n with A.span = A.dummy_span }, List.map strip ts)
+    | A.TyVar n -> A.TyVar { n with A.span = A.dummy_span }
+    | A.TyArrow (a, b) -> A.TyArrow (strip a, strip b)
+    | A.TyTuple ts -> A.TyTuple (List.map strip ts)
+    | t -> t in
+  let arity (fd : A.fn_def) =
+    match fd.A.fn_clauses with c :: _ -> Some (List.length c.A.fc_params) | [] -> None in
+  let refines_a_param (fd : A.fn_def) =
+    List.exists (fun (c : A.fn_clause) ->
+        List.exists (function
+            | A.FPNamed { A.param_ty = Some t; _ } | A.FPDefault ({ A.param_ty = Some t; _ }, _) ->
+              let rec refined = function
+                | A.TyRefine _ -> true
+                | A.TyCon (_, ts) | A.TyTuple ts -> List.exists refined ts
+                | A.TyLinear (_, t) -> refined t
+                | _ -> false in
+              refined t
+            | _ -> false) c.A.fc_params) fd.A.fn_clauses in
+  let twin = fname ^ "_opt" in
+  match def_of fname, def_of twin with
+  | Some fd, Some td when arity fd <> None && arity fd = arity td && not (refines_a_param td) ->
+    (match fd.A.fn_ret_ty, td.A.fn_ret_ty with
+     | Some r, Some (A.TyCon ({ A.txt = ("Option" | "Result") as w; _ }, inner :: _))
+       when strip inner = strip r ->
+       Some (twin, w)
+     | _ -> None)
+  | _ -> None
+
+let add_total_twin_note (ctx : rctx) (errctx : Err.ctx) (mark : Err.diagnostic list)
+    ~(span : A.span) ~(fname : string) (args : A.expr list) : unit =
+  let rec fresh = function
+    | l when l == mark -> []
+    | [] -> []
+    | d :: r -> d :: fresh r in
+  let is_precond (d : Err.diagnostic) =
+    d.Err.span = span
+    && (let sl = Err.slug_of_code d.Err.code in
+        sl = Err.Code.refinement_violated || sl = Err.Code.undeclared_requirement) in
+  match List.filter is_precond (fresh errctx.Err.diagnostics) with
+  | [] -> ()
+  | reported ->
+    match total_twin ctx fname with
+    | None -> ()
+    | Some (twin, wrapper) ->
+      (* The arguments as the user wrote them; the printer's spelling
+         (`Nil` for `[]`) only when the source cannot be read. *)
+      let arg_text a =
+        match March_typecheck.Typecheck_suggest.text_of (T.span_of_expr a) with
+        | Some t when not (String.contains t '\n') -> t
+        | _ -> pred_str a in
+      let call = Printf.sprintf "%s(%s)" twin (String.concat ", " (List.map arg_text args)) in
+      let some, none = if wrapper = "Option" then "Some(v)", "None" else "Ok(v)", "Err(e)" in
+      let note = Printf.sprintf
+          "`%s` is `%s` without the requirement: it returns `%s` instead of panicking.\n\
+           \    match %s do\n\
+           \      %s -> …\n\
+           \      %s -> …\n\
+           \    end"
+          twin fname wrapper call some none in
+      errctx.Err.diagnostics <- List.map (fun (d : Err.diagnostic) ->
+          if List.memq d reported && not (List.mem note d.Err.notes)
+          then { d with Err.notes = d.Err.notes @ [ note ] } else d) errctx.Err.diagnostics
+
 let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : A.span)
     ~(callee_name : string)
     (callee_sg : fn_sig) (args : A.expr list) : unit =
@@ -5130,7 +5209,9 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (match callee with
      | Some sg ->
        let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
+       let mark = errctx.Err.diagnostics in
        List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
+       add_total_twin_note ctx errctx mark ~span:sp ~fname args;
        check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp ~callee_name:fname sg args;
        check_arg_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:fname sg args;
        check_pass_site_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp sg args

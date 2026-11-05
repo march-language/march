@@ -1,0 +1,14 @@
+exit: 1
+-- NAMING --------- errors/unknown_qualified_name_6.march
+
+Module `List` does not export `fodl`. [unknown_qualified_name]
+
+10 |     let s = List.fodl(xs, 0, fn (a, b) -> a + b)
+                 ^^^^^^^^^
+
+    These `List` functions take these arguments:
+        List.fold_left(List(a), b, b -> a -> b) : b
+        List.fold_right(List(a), b, a -> b -> b) : b
+    run `march --explain unknown_qualified_name`
+
+

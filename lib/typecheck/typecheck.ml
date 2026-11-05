@@ -1736,7 +1736,7 @@ let pending_suggest_need : (Ast.span * suggest_need) option ref = ref None
 
 let with_suggest_need (e : Ast.expr) (need : suggest_need) (f : unit -> 'a) : 'a =
   match e with
-  | Ast.ECon _ | Ast.EVar _ | Ast.EField _ ->
+  | Ast.ECon _ | Ast.EVar _ | Ast.EField _ | Ast.EApp _ ->
     let saved = !pending_suggest_need in
     pending_suggest_need := Some (span_of_expr e, need);
     Fun.protect ~finally:(fun () -> pending_suggest_need := saved) f
@@ -1751,6 +1751,79 @@ let suggest_type_at (sp : Ast.span) : ty option =
   match suggest_need_at sp with
   | Some (NeedType t) -> Some t
   | _ -> None
+
+(** The diagnostics reported since [mark] (newest first). *)
+let diags_since (env : env) (mark : Err.diagnostic list) : Err.diagnostic list =
+  let rec go = function
+    | l when l == mark -> []
+    | [] -> []
+    | d :: r -> d :: go r in
+  go env.errors.Err.diagnostics
+
+(** The report, made since [mark], that [name] is unknown, when it offered
+    no spelling: "I cannot find `f`." or "Module `Q` does not export `f`."
+    (X8 tier 2 adds the functions that fit the call to exactly these). *)
+let unknown_callee_diag (env : env) (name : Ast.name) (mark : Err.diagnostic list)
+  : Err.diagnostic option =
+  let plain = match split_qualified name.txt with
+    | Some (q, m) -> Printf.sprintf "Module `%s` does not export `%s`." q m
+    | None -> Printf.sprintf "I cannot find `%s`." name.txt in
+  List.find_opt (fun (d : Err.diagnostic) ->
+      d.Err.span = name.span && d.Err.message = plain
+      && (let sl = Err.slug_of_code d.Err.code in
+          sl = Err.Code.unbound_variable || sl = Err.Code.unknown_qualified_name))
+    (diags_since env mark)
+
+(** [inner] lies within [outer]. *)
+let span_within (inner : Ast.span) (outer : Ast.span) : bool =
+  inner.Ast.file = outer.Ast.file
+  && (inner.Ast.start_line, inner.Ast.start_col) >= (outer.Ast.start_line, outer.Ast.start_col)
+  && (inner.Ast.end_line, inner.Ast.end_col) <= (outer.Ast.end_line, outer.Ast.end_col)
+
+(** X8 tier 2, argument permutations: when a call of [name] reported a type
+    mismatch in its arguments (since [mark]) and the function takes the
+    same arguments in exactly one other order, say so on the first of those
+    reports, with the reordered call as its fix. *)
+let suggest_argument_order (env : env) (name : Ast.name) (args : Ast.expr list)
+    (mark : Err.diagnostic list) : unit =
+  if List.length args < 2 || String.contains name.txt '$' then ()
+  else
+    let arg_spans = List.map span_of_expr args in
+    let in_args (d : Err.diagnostic) =
+      Err.slug_of_code d.Err.code = Err.Code.type_mismatch
+      && List.exists (span_within d.Err.span) arg_spans in
+    match List.rev (List.filter in_args (diags_since env mark)) with
+    | [] -> ()
+    | first :: _ ->
+      match lookup_var name.txt env with
+      | None -> ()
+      | Some sch ->
+        match Typecheck_suggest.permutation env (scheme_body sch) args with
+        | None -> ()
+        | Some order ->
+          let texts = List.map Typecheck_suggest.text_of arg_spans in
+          let note, fix =
+            if List.exists Option.is_none texts
+            || List.exists (fun t -> String.contains (Option.get t) '\n') texts then
+              let positions = List.map (fun i -> Printf.sprintf "#%d" (i + 1)) order in
+              (Printf.sprintf "`%s` takes these arguments in another order: %s."
+                 name.txt (String.concat ", " positions), None)
+            else
+              let texts = Array.of_list (List.map Option.get texts) in
+              let reordered = String.concat ", " (List.map (fun i -> texts.(i)) order) in
+              let first_sp = List.hd arg_spans
+              and last_sp = List.nth arg_spans (List.length arg_spans - 1) in
+              let what = if List.length args = 2 then "The two arguments are the other way round"
+                else "These arguments are in the wrong order" in
+              (Printf.sprintf "%s: `%s(%s)` fits." what name.txt reordered,
+               Some (Err.FReplace { span = { first_sp with Ast.end_line = last_sp.Ast.end_line;
+                                                           end_col = last_sp.Ast.end_col };
+                                    text = reordered })) in
+          env.errors.Err.diagnostics <- List.map (fun (x : Err.diagnostic) ->
+              if x == first then
+                { x with Err.notes = x.Err.notes @ [ note ];
+                         fix = (match x.Err.fix with None -> fix | f -> f) }
+              else x) env.errors.Err.diagnostics
 
 (** What a name written as `spawn`'s actor (or a supervise block's child) is
     when it is certainly not an actor: [Some "a constructor of type `T`"],
@@ -3362,6 +3435,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
            | None -> f)
         | _ -> f
       in
+      (* X8 tier 2: what the call must produce, and the diagnostics before
+         the callee is inferred, so an unknown callee's report can be found
+         and given the functions that fit the call. *)
+      let call_need = suggest_type_at sp in
+      let mark_callee = env.errors.Err.diagnostics in
       let f_ty = infer_expr env f in
       (* An empty-parens call `f()` of a LOCAL value whose type is not yet
          known — typically an unannotated parameter, `fn apply(f) do f() end`
@@ -3643,6 +3721,29 @@ let rec infer_expr env (e : Ast.expr) : ty =
                Remove the `()` and use `%s` directly."
               name.txt (pp_ty (repr f_ty)) name.txt);
          TError
+       | None, None, _
+         when (match f with
+             | Ast.EVar name -> unknown_callee_diag env name mark_callee <> None
+             | _ -> false) ->
+         (* An unknown callee whose spelling matched nothing (X8 tier 2):
+            infer the arguments as the [TError] callee would, then name the
+            functions in scope that take them. *)
+         check_callback_arities env f args;
+         let name = match f with Ast.EVar n -> n | _ -> assert false in
+         let d = Option.get (unknown_callee_diag env name mark_callee) in
+         let arg_tys = List.map (fun a -> infer_expr env a) args in
+         let qual, member = match split_qualified name.txt with
+           | Some (q, m) -> Some q, m
+           | None -> None, name.txt in
+         let fits = Typecheck_suggest.search_by_call env ~qual ~name:member
+             ~arg_tys ~ret:call_need in
+         (match Typecheck_suggest.call_fits_note ~qual fits with
+          | Some note ->
+            env.errors.Err.diagnostics <- List.map (fun (x : Err.diagnostic) ->
+                if x == d then { x with Err.notes = x.Err.notes @ [ note ] } else x)
+                env.errors.Err.diagnostics
+          | None -> ());
+         TError
        | None, None, _ ->
          check_callback_arities env f args;
          (* A generated protocol step's payload (§F3): a mismatch there names
@@ -3657,7 +3758,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
                                      i.ps_proto i.ps_role i.ps_doing))
               | _ -> None)
            | _ -> None in
+         let mark_args = env.errors.Err.diagnostics in
          let res = infer_app ?payload env sp f_ty args 0 in
+         (match f with
+          | Ast.EVar name -> suggest_argument_order env name args mark_args
+          | _ -> ());
          (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
             result — recorded in check_fn), taint the call's result so the unify
             hook fires when it is later bound to a proof cap.  This closes the
