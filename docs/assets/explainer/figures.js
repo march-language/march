@@ -143,13 +143,18 @@
 
   // ── one role's remaining steps: the linear type, drawn ─────────────────────────
   function strip(automaton, opts) {
-    var W = opts.width, out = [], x = 0, y = 0, h = 22, gap = 5;
+    // A 12px monospace character is 7.2px wide. Each label is centred in its segment
+    // with 13px to spare on either side, and `textLength` holds it to that width even
+    // if the reader's monospace font is wider than the one this was measured with.
+    var W = opts.width, out = [], x = 0, y = 0, h = 28, gap = 9, CHAR = 7.2;
     automaton.labels.forEach(function (label, i) {
-      var w = Math.min(W, label.length * 7.4 + 18);     // 12px monospace is about 7.2px a character
-      if (x + w > W) { x = 0; y += h + gap; }
+      var w = Math.min(W, Math.ceil(label.length * 7.3) + 26);
+      if (x > 0 && x + w > W) { x = 0; y += h + gap; }
       var cls = i < opts.at ? 'mx-seg mx-done' : i === opts.at ? 'mx-seg mx-next' : 'mx-seg';
       out.push(rect(cls, x, y, w, h));
-      out.push(text('mx-label mx-mono', x + 8, y + 15, label));
+      out.push('<text class="mx-label mx-mono" x="' + r(x + w / 2) + '" y="' + r(y + h / 2 + 4) +
+        '" text-anchor="middle" textLength="' + r(Math.min(w - 12, label.length * CHAR)) +
+        '" lengthAdjust="spacingAndGlyphs">' + esc(label) + '</text>');
       x += w + gap;
     });
     return open(W, y + h, 'The steps this role may still take') + out.join('') + '</svg>';

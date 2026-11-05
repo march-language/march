@@ -95,6 +95,35 @@ test('strip marks steps done, the next step, and the rest', () => {
   assert.equal(count(svg, 'mx-seg'), 2);
 });
 
+test('strip: every label sits centred in its segment with room on both sides', () => {
+  const labels = ['recv Want', 'choose have/out', 'send Book', 'send Skip', 'end'];
+  const svg = figures.strip({ labels }, { width: 680, at: 1 });
+  const rects = [...svg.matchAll(/<rect class="mx-seg[^"]*" x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map((m) => m.slice(1).map(Number));
+  const texts = [...svg.matchAll(/<text class="[^"]*" x="([\d.]+)" y="([\d.]+)" text-anchor="middle"[^>]*>([^<]*)</g)].map((m) => [Number(m[1]), Number(m[2]), m[3]]);
+  assert.equal(rects.length, labels.length);
+  assert.equal(texts.length, labels.length);
+  const CHAR = 7.3;                                   // 12px monospace, with a little slack
+  labels.forEach((label, i) => {
+    const [x, y, w, h] = rects[i], [tx, , text] = texts[i];
+    assert.equal(text, label);
+    assert.ok(Math.abs(tx - (x + w / 2)) < 0.11, `${label} is not centred`);
+    assert.ok(w >= label.length * CHAR + 24, `${label}: ${w}px leaves under 12px each side`);
+    assert.ok(h >= 26, `${label}: ${h}px tall`);
+    if (i > 0 && rects[i - 1][1] === y) assert.ok(x - (rects[i - 1][0] + rects[i - 1][2]) >= 8, 'segments under 8px apart');
+  });
+});
+
+test('strip: a label is held to its measured width, whatever font the reader has', () => {
+  const svg = figures.strip({ labels: ['choose have/out'] }, { width: 680, at: 0 });
+  assert.match(svg, /textLength="[\d.]+" lengthAdjust="spacingAndGlyphs"/);
+});
+
+test('strip: segments wrap onto a new row instead of leaving the figure', () => {
+  const svg = figures.strip({ labels: ['recv Want', 'choose have/out', 'send Book', 'send Skip', 'end'] }, { width: 320, at: 0 });
+  const ys = new Set([...svg.matchAll(/<rect class="mx-seg[^"]*" x="[\d.]+" y="([\d.]+)"/g)].map((m) => m[1]));
+  assert.ok(ys.size >= 2);
+});
+
 test('hosts draws one box per machine', () => {
   const svg = figures.hosts(data.topology, { width: 680 });
   assert.equal(count(svg, 'mx-host'), 1 + data.topology.stock_hosts.length);
