@@ -50,7 +50,7 @@ at any of {{ x.state_map.axes.Shop }} positions in its view, Stock at
 written by hand could be at any combination of those at the same moment.
 
 <section class="mx-scrolly" data-figure="state-map">
-<div class="mx-figure"><div class="mx-stage"></div></div>
+<div class="mx-figure"><div class="mx-stage"><img class="mx-fallback" src="{{ site.baseurl }}/assets/explainer/fallback/state-map.svg" alt="A grid of 60 cells, one for every combination of the three roles' positions; the 14 the protocol can reach are filled."></div></div>
 <div class="mx-steps">
 
 <div class="mx-step" data-state="empty">
@@ -104,7 +104,7 @@ ordinary types and functions, then lets the checks it already has do the work. T
 its steps, in order.
 
 <section class="mx-scrolly" data-figure="fan-out">
-<div class="mx-figure"><div class="mx-stage"></div></div>
+<div class="mx-figure"><div class="mx-stage"><img class="mx-fallback" src="{{ site.baseurl }}/assets/explainer/fallback/fan-out.svg" alt="The 16 lines of the Order protocol above the five modules the compiler generates from them, with a square for each state type and each function."></div></div>
 <div class="mx-steps">
 
 <div class="mx-step" data-state="source">
@@ -186,7 +186,7 @@ head of the lab app's Ledger:
 <pre class="mx-code"><code class="language-march">{{ x.excerpts.ledger_actor | escape }}</code></pre>
 
 <section class="mx-scrolly" data-figure="mailbox">
-<div class="mx-figure"><div class="mx-stage"></div></div>
+<div class="mx-figure"><div class="mx-stage"><img class="mx-fallback" src="{{ site.baseurl }}/assets/explainer/fallback/mailbox.svg" alt="The Ledger actor: a queue of messages on the left, and on the right the actor with its running total and a square for each session parked in it."></div></div>
 <div class="mx-steps">
 
 <div class="mx-step" data-state="idle">
@@ -239,16 +239,16 @@ More on both halves of this: [Actors]({{ site.baseurl }}/docs/actors/) and
 {{ x.topology.ingress }} starts a Shop session for each order.
 {{ x.topology.stock_hosts | join: ", " }} each <em>offer</em> the Stock role, with room
 for {{ x.topology.stock_capacity }} sessions. One of
-{{ x.topology.books_hosts | join: " and " }} holds the single Ledger, with room for
-{{ x.topology.ledger_capacity }}. A session forms when the caller has found an offer for
-every role.
+{{ x.topology.books_hosts | join: " and " }} holds the single Ledger, which has room for
+{{ x.topology.ledger_capacity }} sessions. A session forms when the caller has found an
+offer for every role.
 
 What follows is a simulation. It obeys the rules March documents, at
 {{ x.sim.load_per_s }} sessions a second so there is something to see; the lab itself
 starts one every second or two.
 
 <section class="mx-scrolly" data-figure="cluster">
-<div class="mx-figure"><div class="mx-stage"></div></div>
+<div class="mx-figure"><div class="mx-stage"><img class="mx-fallback" src="{{ site.baseurl }}/assets/explainer/fallback/cluster.svg" alt="Four machines: lab-1 starting sessions, and three hosts with a square per session slot. The host that held the Ledger is marked dead and the Ledger is on another host."></div></div>
 <div class="mx-steps">
 
 <div class="mx-step" data-state="steady">
@@ -314,6 +314,33 @@ that covers failover for this app is run by hand; in its one recorded run
 ({{ x.lab_run.date }}) the Ledger moved in {{ x.lab_run.failover_s }} second with no
 session failed.
 
-## Deploying while it runs
+<!-- Chapter 5, "Deploying while it runs", goes here. It is plan Task 13
+     (specs/plans/2026-11-05-distributed-explainer-page-plan.md) and waits on the lab app
+     gaining a canary step and a state migration
+     (specs/todos/2026-11-05-lab-app-canary-and-migration.md). Until it lands this page
+     has no `nav_order`, so the sidebar does not link it. Its simulation core and renderer
+     (sim-release.js, draw.release) and the mailbox's deploy marker are already built and
+     tested. -->
 
 ## What March does not do
+
+Everything above comes with limits. These are the ones a reader is most likely to assume
+away.
+
+- **A failed session is not resumed.** It is cancelled and discarded, and the caller
+  starts another. Nothing replays it.
+- **An actor's state dies with the actor.** The Ledger's total starts again from 0 after
+  a crash or a move. Durable state is yours to store.
+- **There is no automatic rollback.** A release that halts stays where it stopped.
+  Rolling back is a new release, which only you can sign.
+- **Roles run over the network only when compiled.** The interpreter checks the same
+  types and runs the in-process test transport, but not the sockets.
+- **Every pair of roles that talk needs a direct connection.** There is no relaying
+  through a third node.
+
+The reference chapters go further on each part:
+[Choreography]({{ site.baseurl }}/docs/choreography/),
+[Session Types]({{ site.baseurl }}/docs/session-types/),
+[Clustering]({{ site.baseurl }}/docs/clustering/),
+[Topology]({{ site.baseurl }}/docs/topology/) and
+[Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/).

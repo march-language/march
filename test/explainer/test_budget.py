@@ -40,5 +40,15 @@ class Budget(unittest.TestCase):
             self.assertEqual(budget.main([str(page), "--max-cards", "2"]), 1)
 
 
+class PageLint(unittest.TestCase):
+    def test_no_generated_number_starts_a_line_before_a_full_stop(self):
+        # `{{ n }}. Text` at the start of a line renders as "64. Text", which Markdown
+        # turns into a numbered list and the sentence into its first item.
+        import re
+        page = (ROOT / "docs" / "protocol-to-cluster.md").read_text()
+        bad = [l for l in page.splitlines() if re.match(r"^\{\{[^}]*\}\}[.)]\s", l)]
+        self.assertEqual(bad, [])
+
+
 if __name__ == "__main__":
     unittest.main()

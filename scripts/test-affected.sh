@@ -34,6 +34,8 @@ expect checks "scripts/check-docs.sh" -- docs/types.md
 expect checks "scripts/check-explainer.sh" -- examples/lab_app/src/lab_app.march
 expect checks "scripts/check-docs.sh" -- examples/lab_app/src/lab_app.march
 expect checks "scripts/check-explainer.sh" -- docs/assets/explainer/scroll.js
+expect checks "scripts/check-explainer.sh" -- docs/protocol-to-cluster.md
+expect checks "scripts/check-explainer.sh" -- scripts/render-explainer-fallbacks.js
 expect suites "refinecheck" -- lib/refinecheck/refine_check.ml
 expect suites "!ALL" -- lib/refinecheck/refine_check.ml
 expect oracles "refine" -- lib/refinecheck/refine_check.ml

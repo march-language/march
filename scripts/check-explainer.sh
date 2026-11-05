@@ -16,6 +16,9 @@ python3 test/explainer/test_budget.py
 echo "== explainer: script tests =="
 node --test test/explainer/*.test.js
 
+echo "== explainer: static fallback images =="
+node scripts/render-explainer-fallbacks.js --check
+
 echo "== explainer: reading budget =="
 python3 scripts/check-explainer-budget.py docs/protocol-to-cluster.md
 

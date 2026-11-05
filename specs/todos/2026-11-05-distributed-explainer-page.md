@@ -5,7 +5,14 @@ Build the long-form docs page designed in
 20 minutes that follows `examples/lab_app` from its 16-line `protocol Order` to a running,
 failing-over, hot-deployed cluster, with pinned graphics that change as the reader scrolls.
 
-Nothing is built yet. The design lists what was measured (generated modules, state types
+**Status (2026-11-05):** plan Tasks 1 to 12 and the non-publishing parts of Task 14 are
+built: the data generator, the scroll engine, the figures and simulations, the opening,
+chapters 1 to 4 and the close, with static fallback images. The page is at
+`docs/protocol-to-cluster.md` and has no `nav_order`, so the sidebar does not link it.
+Still open: chapter 5 (Task 13, blocked on the lab-app item below) and publishing (the
+`nav_order`, the `CHANGELOG.md` bullet, moving this file to `specs/progress/`).
+
+The design lists what was measured (generated modules, state types
 and functions for `Order`; its fingerprint) and what still has to be verified before the
 chapter that depends on it is written:
 

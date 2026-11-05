@@ -102,7 +102,7 @@ classify() {
   local f="$1" o
   case "$f" in
     # ── the distributed explainer: generator, data, scripts and their tests ──
-    examples/lab_app/*|scripts/gen-explainer-data.py|docs/_data/explainer.json|docs/assets/explainer/*|test/explainer/*)
+    examples/lab_app/*|scripts/gen-explainer-data.py|scripts/render-explainer-fallbacks.js|scripts/check-explainer-budget.py|docs/_data/explainer.json|docs/assets/explainer/*|docs/_includes/explainer.html|docs/protocol-to-cluster.md|test/explainer/*)
       add CHECKS scripts/check-docs.sh scripts/check-explainer.sh; reason "$f" "explainer data + doc-lint" ;;
     # ── docs and design records: lint only ───────────────────────────────
     *.md|docs/*|specs/progress/*|specs/todos/*|specs/plans/*|specs/impl/*|specs/features/*)
