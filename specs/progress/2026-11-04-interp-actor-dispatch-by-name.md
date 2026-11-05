@@ -34,7 +34,11 @@ whose `<Actor>_Msg.<Msg>` contract is registered.
   whose name two actors, or an actor and a variant, share is dropped unless the
   interpreter built it itself (`Shutdown`, monitor `Down`, `$sys_inspect`). An unshared
   bare name still dispatches by name, and so does everything when no types were handed in
-  (the REPL, tests that skip the typechecker).
+  (the REPL, tests that skip the typechecker). `Actor.call`'s request is runtime-built
+  too: it is enqueued as `$call.<Handler>` (`runtime_call_prefix`) and dispatched by
+  name on that instance. Left bare, a handler named like any variant (`Get`, `Count`)
+  dropped every call, which the interpreter parity goldens `actor_call_late_reply`,
+  `actor_call_in_handler_keeps_messages` and `actor_registry_restart{,_batch}` caught.
 - **Found on the way.** Dropping a message did not mark scheduler progress, so a pass
   whose only work was a drop ended `run_until_idle` with later messages still queued.
 - **Refinements.** `Refine_check`'s `DActor` arm now lets a handler body assume its

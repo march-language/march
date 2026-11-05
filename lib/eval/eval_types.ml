@@ -132,3 +132,9 @@ and timer_entry = {
 (** Association-list environment mapping names to values. *)
 and env = (string * value) list
 
+
+(** Prefix [actor_call] puts on the request it enqueues (`$call.<Handler>`):
+    the runtime built it for one instance's own handler, so dispatch runs it
+    by name even where #1125's typed dispatch would drop a bare tag whose
+    name a variant or another actor shares (`Get`, `Count`). *)
+let runtime_call_prefix = "$call."

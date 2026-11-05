@@ -328,8 +328,16 @@ let msg_tag_of_con (bare : string) (sp : span) : string option =
       Some (tn ^ "." ^ bare)
     | _ -> None
 
-(** [tag] without a `<Actor>_Msg.` prefix [msg_tag_of_con] put there. *)
+(** The handler name of an [actor_call] request ([runtime_call_prefix]). *)
+let runtime_call_handler (tag : string) : string option =
+  let k = String.length runtime_call_prefix in
+  if String.length tag > k && String.sub tag 0 k = runtime_call_prefix
+  then Some (String.sub tag k (String.length tag - k)) else None
+
+(** [tag] without a `<Actor>_Msg.` prefix [msg_tag_of_con] put there, or the
+    [runtime_call_prefix] [actor_call] put there. *)
 let strip_msg_qual (tag : string) : string =
+  match runtime_call_handler tag with Some h -> h | None ->
   match String.rindex_opt tag '.' with
   | Some i when Hashtbl.mem msg_qualified_types (String.sub tag 0 i) ->
     String.sub tag (i + 1) (String.length tag - i - 1)
@@ -345,6 +353,7 @@ let runtime_built_msg (tag : string) : bool =
 let handler_for_msg (actor_name : string) (handlers : actor_handler list) (tag : string)
   : actor_handler option =
   let find n = List.find_opt (fun (h : actor_handler) -> h.ah_msg.txt = n) handlers in
+  match runtime_call_handler tag with Some h -> find h | None ->
   match String.rindex_opt tag '.' with
   | Some i when Hashtbl.mem msg_qualified_types (String.sub tag 0 i) ->
     let tn = String.sub tag 0 i in
@@ -2888,7 +2897,7 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
            | Some handler ->
              if List.length handler.ah_params <> List.length msg_args then
                Printf.eprintf "run_scheduler: handler '%s' arity mismatch for actor %d\n%!"
-                 msg_tag pid
+                 (strip_msg_qual msg_tag) pid
                (* Arity mismatch: message consumed but actor not crashed.
                   The message is lost and the actor continues with unchanged state.
                   This is intentional: a mismatch is a programming error, but crashing
@@ -2952,7 +2961,7 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
                   diag_report_crash ~base:stack_base
                     ~kind:(if inst.ai_supervisor <> None then 1 else 0)
                     ~pid ~supervised:(inst.ai_supervisor <> None)
-                    ~outer:msg_tag exn;
+                    ~outer:(strip_msg_qual msg_tag) exn;
                   clear_march_stack ();
                   crash_actor pid (Printexc.to_string exn));
                current_pid := prev_pid
