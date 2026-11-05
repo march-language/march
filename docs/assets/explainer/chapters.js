@@ -194,6 +194,44 @@
   }
   ME.canvasFigure = canvasFigure;
 
+  // ── chapter 3: inside one node, the Ledger actor ───────────────────────────────
+  function mailboxConfig(data, more) {
+    var m = data.sim.mailbox;
+    return Object.assign({ seed: data.sim.seed, arrivalS: m.arrival_s, serviceS: m.service_s,
+      migrateS: m.migrate_s, backlog: m.backlog, parked: m.parked, restartS: m.restart_s, holds: false }, more || {});
+  }
+
+  builders.mailbox = function (state, data) {
+    var sim = ME.simMailbox, cfg = mailboxConfig(data), crashAt = 7;
+    function crash(s) { sim.crash(s); }
+    var scripts = {
+      idle: { until: 1.5, actions: [] },
+      'one-at-a-time': { until: 4, actions: [] },
+      sessions: { until: crashAt, actions: [] },
+      crash: { until: crashAt + 0.5, actions: [{ at: crashAt, run: crash }] },
+      restart: { until: crashAt + cfg.restartS + 1, actions: [{ at: crashAt, run: crash }] },
+      'lost-total': { until: crashAt + cfg.restartS + 4, actions: [{ at: crashAt, run: crash }] },
+    };
+    if (!scripts[state]) throw new Error('unknown state ' + state);
+    // The crash card holds the actor down for as long as the reader stays on it; the
+    // restart belongs to the next card.
+    if (state === 'crash') cfg = mailboxConfig(data, { restartS: Infinity });
+    return runScript(sim, sim.create(cfg), scripts[state]);
+  };
+
+  ME.registerFigure('mailbox', function (host, data) {
+    var sim = ME.simMailbox;
+    return canvasFigure(host, {
+      build: function (state) { return ME.buildState('mailbox', state, data); },
+      step: sim.step,
+      settle: function (s) { sim.advance(s, 2); },
+      draw: ME.draw.mailbox,
+      counters: function (s) {
+        return [['Handled', s.total], ['Waiting', s.queue.length], ['Dropped', s.dropped, s.dropped > 0]];
+      },
+    });
+  });
+
   // ── chapter 4: the cluster ─────────────────────────────────────────────────────
   // Each script starts from the same seed. Host indices follow topology.stock_hosts;
   // the Ledger starts on the last `books` host.

@@ -55,6 +55,16 @@ class OrderFacts(unittest.TestCase):
         axes, _ = gen.reachable(load("Order.json")["current"]["steps"], ["Shop", "Stock", "Ledger"])
         self.assertEqual({r: len(v) for r, v in s.items()}, axes)
 
+    def test_ledger_excerpt_is_the_actor_head_with_its_comment(self):
+        ex = gen.excerpts(ROOT / "examples/lab_app/src/lab_app.march")["ledger_actor"]
+        lines = ex.splitlines()
+        self.assertTrue(lines[0].startswith("-- Order.Ledger"))
+        self.assertIn("starts again from 0", ex)
+        self.assertIn("actor LedgerActor do", lines)
+        self.assertIn("total : Int", ex)
+        self.assertTrue(lines[-1].startswith("  init("))
+        self.assertLessEqual(len(lines), 12)
+
     def test_stock_signature_shows_its_grant(self):
         sig = gen.excerpts(ROOT / "examples/lab_app/src/lab_app.march")["stock_signature"]
         self.assertTrue(sig.startswith("fn stock("))

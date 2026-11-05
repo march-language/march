@@ -103,7 +103,15 @@ def excerpts(lab_app_path):
     """Lines of the lab app the page quotes."""
     lines = Path(lab_app_path).read_text().splitlines()
     stock = next(l.strip() for l in lines if l.strip().startswith("fn stock("))
-    return {"stock_signature": stock[:-3] if stock.endswith(" do") else stock}
+    # The Ledger actor's head: the comment block above it, down to its `init` line.
+    actor = next(i for i, l in enumerate(lines) if l.strip() == "actor LedgerActor do")
+    first = actor
+    while first > 0 and lines[first - 1].strip().startswith("--"):
+        first -= 1
+    last = next(i for i in range(actor, len(lines)) if lines[i].strip().startswith("init("))
+    indent = len(lines[actor]) - len(lines[actor].lstrip())
+    return {"stock_signature": stock[:-3] if stock.endswith(" do") else stock,
+            "ledger_actor": "\n".join(l[indent:] for l in lines[first:last + 1]) + "\n"}
 
 
 def order_facts(core_ast, protocol_record):
@@ -343,7 +351,10 @@ def lab_run(root):
 # Chosen for legibility, not measured, and stated on the page as such: the lab's own
 # traffic is one session every one to two seconds, at which the cluster view would be
 # nearly empty and no node could ever be full.
-SIM = {"seed": 20261105, "load_per_s": 14, "session_s": [1.2, 2.8], "restart_s": 1}
+SIM = {"seed": 20261105, "load_per_s": 14, "session_s": [1.2, 2.8], "restart_s": 1,
+       # one actor and its mailbox: arrivals keep pace with handling, so a short queue stays visible
+       "mailbox": {"arrival_s": 0.45, "service_s": 0.45, "migrate_s": 1.2, "backlog": 7,
+                   "parked": 12, "restart_s": 2.5}}
 
 
 # ── inputs ─────────────────────────────────────────────────────────────────────

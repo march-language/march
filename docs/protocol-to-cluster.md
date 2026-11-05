@@ -180,6 +180,60 @@ runs there.
 
 ## Inside one node: the actor
 
+A node is one process. Inside it, the role that keeps state is an actor. This is the
+head of the lab app's Ledger:
+
+<pre class="mx-code"><code class="language-march">{{ x.excerpts.ledger_actor | escape }}</code></pre>
+
+<section class="mx-scrolly" data-figure="mailbox">
+<div class="mx-figure"><div class="mx-stage"></div></div>
+<div class="mx-steps">
+
+<div class="mx-step" data-state="idle">
+<p>An actor is a mailbox, a piece of state and a set of handlers. Messages for the
+Ledger queue in the order they arrive.</p>
+</div>
+
+<div class="mx-step" data-state="one-at-a-time">
+<p>It handles one message at a time, to the end, and the handler returns the next
+state. Nothing else can touch <code>total</code>, so there is no lock to take and no
+race to reason about.</p>
+<p>Other actors on the node run in parallel with it.</p>
+</div>
+
+<div class="mx-step" data-state="sessions">
+<p>Every open session's state lives inside this one actor, parked in a map keyed by
+session. A delivery takes its session out, takes the next step of the protocol, and
+parks it again.</p>
+<p>The parked state is a linear type, the same kind as in the last section. The actor
+cannot drop a session or use one twice by accident.</p>
+</div>
+
+<div class="mx-step" data-state="crash">
+<p>If a handler hits a bug, the actor crashes. It does not try to repair itself.</p>
+<p>Its mailbox and its state are gone, and the sessions parked in it are cancelled.
+Messages sent to it meanwhile are dropped.</p>
+</div>
+
+<div class="mx-step" data-state="restart">
+<p>The node's generated <code>main</code> watches the actors that host roles. When one
+dies it opens the offer again with a fresh actor, and the next session finds it. No
+other node is involved.</p>
+</div>
+
+<div class="mx-step" data-state="lost-total">
+<p>The fresh actor starts from <code>init</code>, so the total is back at 0. The same
+happens when the Ledger moves to another machine; the app's own comment says so.</p>
+<p>State that must outlive its actor has to be stored outside it. March does not do
+that for you.</p>
+</div>
+
+</div>
+</section>
+
+More on both halves of this: [Actors]({{ site.baseurl }}/docs/actors/) and
+[Supervision Trees]({{ site.baseurl }}/docs/supervision/).
+
 ## The cluster: nodes down and up
 
 {{ x.topology.ingress }} starts a Shop session for each order.

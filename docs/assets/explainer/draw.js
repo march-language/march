@@ -96,7 +96,64 @@
     });
   }
 
-  var api = { cluster: cluster };
+  // One actor: its mailbox on the left, flowing right, and the actor itself with its
+  // code version, its state, and a square per session parked inside it.
+  function mailbox(ctx, s, size, c) {
+    var W = size.width, H = size.height, narrow = W < 560;
+    ctx.clearRect(0, 0, W, H);
+    var boxW = narrow ? 150 : 230, boxH = Math.min(H - 2, narrow ? 150 : 190);
+    var bx = W - boxW - 1, by = Math.max(1, (H - boxH) / 2), laneY = by + boxH / 2;
+    var down = s.status !== 'up', sq = narrow ? 12 : 16, pitch = sq + (narrow ? 5 : 7);
+
+    // the mailbox lane
+    font(ctx, narrow ? 11 : 13); ctx.fillStyle = c.dim; ctx.textAlign = 'left';
+    ctx.fillText('mailbox', 2, laneY - sq - 8);
+    ctx.strokeStyle = c.dim; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(2, laneY + sq / 2 + 6.5); ctx.lineTo(bx - 8, laneY + sq / 2 + 6.5); ctx.stroke();
+    var head = bx - 14 - sq;
+    s.queue.forEach(function (m, i) {
+      var x = head - i * pitch;
+      if (x < 2) return;
+      if (m.kind === 'marker') {
+        ctx.strokeStyle = c.accent; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x + sq / 2, laneY - sq - 4); ctx.lineTo(x + sq / 2, laneY + sq / 2 + 4); ctx.stroke();
+        ctx.lineWidth = 1; ctx.fillStyle = c.accent; ctx.textAlign = 'center';
+        ctx.fillText('deploy', Math.max(22, x + sq / 2), laneY - sq - 10); ctx.textAlign = 'left';
+      } else if (m.epoch === 1) { ctx.fillStyle = c.ink; ctx.fillRect(x, laneY - sq / 2, sq, sq); }
+      else { ctx.strokeStyle = c.ink; ctx.strokeRect(x + 0.5, laneY - sq / 2 + 0.5, sq - 1, sq - 1); }
+    });
+
+    // the actor
+    ctx.strokeStyle = down || s.migrating ? c.accent : c.ink;
+    ctx.setLineDash(down ? [4, 3] : []);
+    ctx.strokeRect(bx + 0.5, by + 0.5, boxW - 1, boxH - 1);
+    ctx.setLineDash([]);
+    if (s.status === 'crashed') hatch(ctx, bx, by, boxW, boxH, c.accent);
+    var tx = bx + 12, ty = by + (narrow ? 20 : 26), lh = narrow ? 17 : 21;
+    font(ctx, narrow ? 12 : 14, '600'); ctx.fillStyle = down ? c.accent : c.ink;
+    ctx.fillText('Ledger actor', tx, ty);
+    font(ctx, narrow ? 11 : 13); ctx.fillStyle = down || s.migrating ? c.accent : c.dim;
+    ctx.fillText(s.status === 'crashed' ? 'crashed' : s.migrating ? 'migrating its state'
+      : s.held ? 'holding sessions: old code' : 'code version ' + s.version, tx, ty + lh);
+    ctx.fillStyle = c.ink;
+    ctx.fillText('total: ' + s.total, tx, ty + 2 * lh + 4);
+    if (s.restarts > 0 && !down) { ctx.fillStyle = c.dim; ctx.fillText('started again from 0', tx, ty + 3 * lh + 4); }
+
+    // the sessions parked inside it; the one being served is drawn in the accent
+    var cap = s.cfg.parked || 0, p = narrow ? 9 : 12, perRow = Math.max(1, Math.floor((boxW - 24) / p));
+    var py = by + boxH - 10 - Math.ceil(cap / perRow) * p;
+    if (cap) {
+      ctx.fillStyle = c.dim;
+      ctx.fillText('sessions parked: ' + s.parked, tx, py - 6);
+      for (var i = 0; i < cap; i++) {
+        var x = tx + (i % perRow) * p, y = py + Math.floor(i / perRow) * p;
+        if (i < s.parked) { ctx.fillStyle = i === s.serving ? c.accent : c.ink; ctx.fillRect(x, y, p - 3, p - 3); }
+        else { ctx.strokeStyle = c.dim; ctx.globalAlpha = 0.4; ctx.strokeRect(x + 0.5, y + 0.5, p - 4, p - 4); ctx.globalAlpha = 1; }
+      }
+    }
+  }
+
+  var api = { cluster: cluster, mailbox: mailbox };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.MarchExplainer = root.MarchExplainer || {};
   root.MarchExplainer.draw = Object.assign(root.MarchExplainer.draw || {}, api);

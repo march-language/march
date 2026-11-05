@@ -1,9 +1,10 @@
 {
   "excerpts": {
+    "ledger_actor": "-- Order.Ledger, bound to an actor: one per offer, spawned with the pool's\n-- environment; it keeps the running total across sessions, so a Ledger\n-- that moves to another node starts again from 0.\nactor LedgerActor do\n  state { total : Int, node : String, sessions : LinearMap(String, Order_Ledger.Parked_Ledger) }\n  init(env : Env) { total: 0, node: env.node, sessions: LinearMap.empty_string() }\n",
     "stock_signature": "fn stock(env : Env, s : Cap(Session.Live), m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield"
   },
   "generated": {
-    "commit": "327a64bfa",
+    "commit": "23f5a596d",
     "date": "2026-11-05",
     "lab_app_sha256": "78ab2a20763ce435a2d7c590d921cfe491ed634fe02a63353b6933ef4651dbf2"
   },
@@ -157,6 +158,14 @@
   },
   "sim": {
     "load_per_s": 14,
+    "mailbox": {
+      "arrival_s": 0.45,
+      "backlog": 7,
+      "migrate_s": 1.2,
+      "parked": 12,
+      "restart_s": 2.5,
+      "service_s": 0.45
+    },
     "restart_s": 1,
     "seed": 20261105,
     "session_s": [

@@ -8,6 +8,7 @@ require('../../docs/assets/explainer/story.js');
 require('../../docs/assets/explainer/figures.js');
 require('../../docs/assets/explainer/rng.js');
 require('../../docs/assets/explainer/sim-cluster.js');
+require('../../docs/assets/explainer/sim-mailbox.js');
 require('../../docs/assets/explainer/draw.js');
 require('../../docs/assets/explainer/chapters.js');
 const ME = globalThis.MarchExplainer;
@@ -227,4 +228,45 @@ test('inline figures are drawn into their placeholders', () => {
   assert.equal(count(el.innerHTML, 'mx-failed'), 1);
   assert.equal(count(crash.innerHTML, 'mx-ping'), 0);
   assert.match(bad.innerHTML, /mx-error/);
+});
+
+// ── chapter 3: the mailbox ──────────────────────────────────────────────────────
+const MAILBOX_STATES = ['idle', 'one-at-a-time', 'sessions', 'crash', 'restart', 'lost-total'];
+
+test('mailbox: every state is reachable from scratch and reproducible', () => {
+  for (const name of MAILBOX_STATES) {
+    const a = ME.buildState('mailbox', name, data), b = ME.buildState('mailbox', name, data);
+    assert.deepEqual([a.total, a.queue.length, a.status], [b.total, b.queue.length, b.status], name);
+  }
+  assert.throws(() => ME.buildState('mailbox', 'nope', data), /unknown state/);
+});
+
+test('mailbox: the crash card shows the actor down with nothing left', () => {
+  const s = ME.buildState('mailbox', 'crash', data);
+  assert.equal(s.status, 'crashed');
+  assert.equal(s.total + s.queue.length + s.parked, 0);
+});
+
+test('mailbox: the crash card stays crashed however long the reader stays on it', () => {
+  const s = ME.buildState('mailbox', 'crash', data);
+  ME.simMailbox.advance(s, 60);
+  assert.equal(s.status, 'crashed');           // the restart is the next card's to show
+});
+
+test('mailbox: after the restart the total is below what it was before the crash', () => {
+  const before = ME.buildState('mailbox', 'sessions', data);
+  const after = ME.buildState('mailbox', 'lost-total', data);
+  assert.equal(after.status, 'up');
+  assert.equal(after.restarts, 1);
+  assert.ok(after.total > 0 && after.total < before.total);
+});
+
+test('mailbox drawing: every state draws, and shows the total', () => {
+  for (const name of MAILBOX_STATES) {
+    for (const size of [{ width: 343, height: 230 }, { width: 700, height: 420 }]) {
+      const ctx = fakeCtx(), s = ME.buildState('mailbox', name, data);
+      assert.doesNotThrow(() => ME.draw.mailbox(ctx, s, size, colors), name);
+      assert.ok(ctx.calls.fillText.some((t) => t.includes('total')), name);
+    }
+  }
 });
