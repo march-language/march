@@ -333,6 +333,55 @@ def compiler_outputs(march):
     return core, record
 
 
+# ── the wrong programs of chapter 1 ────────────────────────────────────────────
+
+PROGRAMS = ROOT / "docs" / "assets" / "explainer" / "programs"
+
+# Where each wrong program's role stands, on the state map, when it makes its wrong move
+# (role order Shop, Stock, Ledger; positions are `project`'s state numbers). Each is a cell
+# the protocol reaches: the map marks the point at which the compiler stops the program.
+PROGRAM_CELLS = {
+    "skip_step": [1, 1, 0],            # Stock has received Want and must choose
+    "offer_misses_branch": [1, 3, 0],  # Stock has chosen `out`; Shop has no handler for it
+    "send_out_of_turn": [0, 0, 0],     # nothing has happened yet; Ledger must wait
+}
+
+
+def headline(output):
+    """The diagnostic's message line: the first non-empty line after the `-- KIND ---` header."""
+    lines = [l for l in output.splitlines() if l.strip()]
+    body = [l for l in lines if not l.startswith("-- ")]
+    return body[0].strip() if body else ""
+
+
+def role_body(source):
+    """The part of a wrong program a card shows: what lies between the protocol and
+    `fn main`, without its indent. The protocol itself is already on the page."""
+    lines = source.splitlines()
+    head = next(i for i, l in enumerate(lines) if l.strip() == f"protocol {PROTOCOL} do")
+    indent = len(lines[head]) - len(lines[head].lstrip())
+    end = next(i for i in range(head + 1, len(lines))
+               if lines[i].strip() == "end" and len(lines[i]) - len(lines[i].lstrip()) == indent)
+    stop = next(i for i in range(end + 1, len(lines)) if lines[i].strip().startswith("fn main"))
+    body = [l[indent:] for l in lines[end + 1:stop]]
+    return "\n".join(body).strip("\n") + "\n"
+
+
+def run_programs(directory, march):
+    """`march --check` on every program in `directory`, each from its own fresh directory
+    under a private HOME, so the header names a bare file and no cache shapes the output."""
+    out = {}
+    for path in sorted(Path(directory).glob("*.march")):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / path.name).write_text(path.read_text())
+            rc, stdout, stderr = run_march(march, ["--check", path.name], d)
+        text = (stdout + stderr).rstrip() + "\n"
+        out[path.stem] = {"source": path.read_text(), "output": text, "exit": rc,
+                          "headline": headline(text), "cell": PROGRAM_CELLS.get(path.stem),
+                          "body": role_body(path.read_text())}
+    return out
+
+
 # ── the data file ──────────────────────────────────────────────────────────────
 
 def build(march):
@@ -350,6 +399,7 @@ def build(march):
         "topology": topology_facts(ROOT / "examples/lab_app/topology.toml",
                                    ROOT / "examples/lab_app/topology.lab.toml"),
         "sim": SIM,
+        "programs": run_programs(PROGRAMS, march),
     }
 
 

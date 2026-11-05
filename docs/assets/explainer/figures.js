@@ -97,7 +97,8 @@
       return Math.min(36, (W - 2 * M - (perRow - 1) * blockGap) / (perRow * cols));
     }
     var perRow = blocks, pitch = pitchFor(perRow);
-    if (pitch < 16 && blocks > 2) { perRow = Math.ceil(blocks / 2); pitch = pitchFor(perRow); }
+    // Two rows of blocks when one row would leave the cells small.
+    if (pitch < 26 && blocks > 2) { perRow = Math.ceil(blocks / 2); pitch = pitchFor(perRow); }
     var cell = pitch - 3;
 
     var litKeys = {};

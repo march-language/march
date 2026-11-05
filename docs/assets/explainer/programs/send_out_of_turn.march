@@ -1,0 +1,28 @@
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Order do
+    role Stock needs IO.Mut
+    role Ledger needs IO.Console
+    loop do
+      want: Shop -> Stock : Int
+      choose by Stock:
+        have -> Stock -> Shop : String
+                book: Stock -> Ledger : Int
+                booked: Ledger -> Shop : String
+        out  -> Stock -> Shop : String
+                skip: Stock -> Ledger : Int
+                stop
+      end
+    end
+  end
+
+  -- Ledger confirms a booking nobody has asked it to make.
+  pfn ledger(s : Cap(Session.Live), c : Cap(IO.Console), st : Order_Ledger.Entry) : Order_Ledger.Yield do
+    ledger(s, c, Order_Ledger.send_Booked(s, st, "booked"))
+  end
+
+  fn main(_c : Cap(IO)) do () end
+end

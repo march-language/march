@@ -21,36 +21,42 @@
   :root.light { --mx-accent: #c0392b; }
 
   /* Figure and cards share one grid cell, so the figure is as tall as its cards and its
-     stage can stay pinned while they scroll past, at phone width too. */
+     stage can stay pinned while they scroll, at phone width too. In one column the stage
+     is pinned across the top and the cards pass behind it, so a tall card never covers
+     the drawing; from 1280 px the cards get a column of their own beside it. */
   .mx-scrolly { display: grid; margin: 2.5rem 0 3rem; }
   .mx-scrolly > .mx-figure, .mx-scrolly > .mx-steps { grid-area: 1 / 1; min-width: 0; }
+  .mx-scrolly > .mx-figure { z-index: 2; pointer-events: none; }
   .mx-stage {
-    position: sticky; top: 72px; height: min(58vh, 460px);
+    position: sticky; top: 60px; height: min(44vh, 400px); padding: 12px 0 10px;
     display: flex; flex-direction: column; justify-content: center;
-    background: var(--mx-paper);
+    background: var(--mx-paper); border-bottom: 1px solid var(--border); pointer-events: auto;
   }
-  .mx-stage svg, .mx-stage canvas { display: block; width: 100%; }
-  .mx-stage canvas { flex: 1 1 auto; min-height: 0; }
+  .mx-stage svg, .mx-stage canvas { display: block; max-width: 100%; }
+  .mx-stage canvas { flex: 1 1 auto; min-height: 0; width: 100%; }
+  .mx-svg { display: flex; justify-content: center; }
   .mx-fallback { display: block; width: 100%; height: auto; }
   .mx-live .mx-fallback { display: none; }
 
-  .mx-steps { position: relative; padding-top: 62vh; pointer-events: none; }
+  .mx-steps { position: relative; z-index: 1; padding-top: 54vh; }
   .mx-step {
-    pointer-events: auto; max-width: 34rem; margin: 0 0 62vh;
+    max-width: 34rem; margin: 0 0 42vh;
     padding: 14px 18px; border: 1px solid var(--border); border-radius: 8px;
-    background: var(--bg-code); opacity: 0.55; transition: opacity 0.2s;
+    background: var(--bg-code);
   }
-  .mx-step.mx-active { opacity: 1; }
-  .mx-step:last-child { margin-bottom: 30vh; }
+  .mx-step:last-child { margin-bottom: 20vh; }
   .d-content .mx-step p { font-size: 15px; line-height: 1.7; color: var(--text); margin: 0 0 10px; }
   .d-content .mx-step p:last-child { margin-bottom: 0; }
   .d-content .mx-step pre { margin: 8px 0; font-size: 12.5px; }
 
   @media (min-width: 1280px) {
-    .mx-scrolly { grid-template-columns: 19rem minmax(0, 1fr); column-gap: 2.25rem; }
+    .mx-scrolly { grid-template-columns: 21rem minmax(0, 1fr); column-gap: 2.25rem; }
     .mx-scrolly > .mx-steps  { grid-area: 1 / 1; padding-top: 22vh; }
     .mx-scrolly > .mx-figure { grid-area: 1 / 2; }
-    .mx-stage { height: min(70vh, 560px); }
+    .mx-stage { top: 72px; height: min(70vh, 560px); border-bottom: 0; }
+    .mx-step { margin-bottom: 62vh; opacity: 0.55; transition: opacity 0.2s; }
+    .mx-step.mx-active { opacity: 1; }
+    .mx-step:last-child { margin-bottom: 30vh; }
   }
 
   .mx-caption   { font-size: 12.5px; color: var(--text-faint); margin: 6px 0 0; }
@@ -67,6 +73,13 @@
     border: 1px solid var(--mx-accent); border-radius: 4px; padding: 6px 10px; margin: 8px 0 0;
   }
   .mx-code { margin: 1.25rem 0; }
+  .d-content .mx-step pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .d-content .mx-step .mx-diag {
+    font-family: "JetBrains Mono", monospace; font-size: 12.5px; line-height: 1.6;
+    color: var(--text); border-left: 2px solid var(--mx-accent); padding: 2px 0 2px 10px;
+  }
+  .mx-step details { margin: 6px 0 0; font-size: 13px; color: var(--text-muted); }
+  .mx-step details summary { cursor: pointer; }
 
   /* Figure parts. Colour comes only from these classes, never from the scripts. */
   .mx-ink     { fill: var(--mx-ink); }
@@ -94,6 +107,7 @@
 <script src="{{ site.baseurl }}/assets/explainer/scroll.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/story.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/figures.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/chapters.js?v={{ site.time | date: '%s' }}"></script>
 <script>
   document.addEventListener('DOMContentLoaded', function () {
     window.MarchExplainer.mountAll(document, window.MARCH_EXPLAINER_DATA);

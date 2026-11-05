@@ -43,6 +43,60 @@ the one the [multi-host lab]({{ site.baseurl }}/docs/lab/) deploys.
 
 ## What the declaration rules out
 
+{% assign reach = x.state_map.reachable | size %}
+Each role has its own view of the conversation: the steps it takes, in order. Shop can be
+at any of {{ x.state_map.axes.Shop }} positions in its view, Stock at
+{{ x.state_map.axes.Stock }} and Ledger at {{ x.state_map.axes.Ledger }}. Three programs
+written by hand could be at any combination of those at the same moment.
+
+<section class="mx-scrolly" data-figure="state-map">
+<div class="mx-figure"><div class="mx-stage"></div></div>
+<div class="mx-steps">
+
+<div class="mx-step" data-state="empty">
+<p>Here is every combination: {{ x.state_map.cells }} cells, one for each way the three
+positions can line up. Blocks are Shop's position, columns are Stock's, rows are Ledger's.</p>
+<p>Nothing stops ordinary networked programs from reaching any of them. Most are trouble:
+one side waiting for a message the other will never send, or both sides waiting.</p>
+</div>
+
+<div class="mx-step" data-state="path">
+<p>The protocol reaches {{ reach }} of them. They light in the order a run visits them,
+counting a role as moved once it has sent, even if its peer has not received yet.</p>
+<p>The other {{ x.state_map.cells | minus: reach }} cannot happen. A program that would
+get there does not compile.</p>
+</div>
+
+<div class="mx-step" data-state="skip">
+<p>Stock has the order and must now choose <code>have</code> or <code>out</code>. This
+version skips the choice and tells Ledger to book.</p>
+<pre><code class="language-march">{{ x.programs.skip_step.body | escape }}</code></pre>
+<p class="mx-diag">{{ x.programs.skip_step.headline | escape }}</p>
+<details><summary>What the compiler prints</summary><pre>{{ x.programs.skip_step.output | escape }}</pre></details>
+</div>
+
+<div class="mx-step" data-state="offer">
+<p>Stock may answer <code>out</code>. This Shop handles <code>have</code> and nothing else.</p>
+<pre><code class="language-march">{{ x.programs.offer_misses_branch.body | escape }}</code></pre>
+<p class="mx-diag">{{ x.programs.offer_misses_branch.headline | escape }}</p>
+<details><summary>What the compiler prints</summary><pre>{{ x.programs.offer_misses_branch.output | escape }}</pre></details>
+</div>
+
+<div class="mx-step" data-state="turn">
+<p>Ledger confirms a booking before anyone has asked for one.</p>
+<pre><code class="language-march">{{ x.programs.send_out_of_turn.body | escape }}</code></pre>
+<p class="mx-diag">{{ x.programs.send_out_of_turn.headline | escape }}</p>
+<details><summary>What the compiler prints</summary><pre>{{ x.programs.send_out_of_turn.output | escape }}</pre></details>
+<p>Each message is in the protocol's own terms: the role, what it tried, and what it must
+do at that point. The marked cell is where the program stood.</p>
+</div>
+
+</div>
+</section>
+
+None of these needed a test, a second machine or a timeout to find. The next section is
+how the compiler does it.
+
 ## What the compiler makes of it
 
 ## Inside one node: the actor

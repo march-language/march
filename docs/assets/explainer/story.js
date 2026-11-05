@@ -30,6 +30,8 @@
 
   // mount(host, data) -> { setState(state, progress) }
   ME.registerFigure = function (name, mount) { figures[name] = mount; };
+  // The registered mount function, so a figure can be driven without a page (tests).
+  ME.figureForTest = function (name) { return figures[name]; };
 
   ME.reducedMotion = function () {
     return typeof root.matchMedia === 'function' && root.matchMedia('(prefers-reduced-motion: reduce)').matches;

@@ -4,6 +4,7 @@ Run: python3 -m unittest test/explainer/test_gen.py -v
 """
 import importlib.util
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+MARCH = os.environ.get("MARCH_BIN") or str(ROOT / "_build" / "default" / "bin" / "main.exe")
 
 _spec = importlib.util.spec_from_file_location("gen_explainer_data", ROOT / "scripts" / "gen-explainer-data.py")
 gen = importlib.util.module_from_spec(_spec)
@@ -142,6 +144,32 @@ class Facts(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 gen.pinned_facts(tmp_root)
             self.assertIn("suspect_s", str(cm.exception))
+
+
+class Programs(unittest.TestCase):
+    @unittest.skipUnless(Path(MARCH).exists(), "no compiler built; run `dune build --root . bin/main.exe`")
+    def test_each_wrong_program_is_rejected_with_a_protocol_message(self):
+        progs = gen.run_programs(ROOT / "docs/assets/explainer/programs", MARCH)
+        self.assertEqual(sorted(progs), ["offer_misses_branch", "send_out_of_turn", "skip_step"])
+        for p in progs.values():
+            self.assertEqual(p["exit"], 1)
+            self.assertIn("Order", p["output"])
+            self.assertNotIn(str(ROOT), p["output"])     # no absolute paths leak into the page
+            self.assertIn("Order", p["headline"])
+            self.assertTrue(p["headline"].endswith("]"))  # the message line carries its code
+            self.assertIn("pfn ", p["body"])             # just the role body, for the card
+            self.assertNotIn("protocol Order", p["body"])
+            self.assertFalse(p["body"].startswith(" "))
+
+    def test_headline_is_the_message_line(self):
+        out = "-- PROTOCOL ---- x.march\n\nRole `A` tries to send here. [protocol_step_order]\n\n25 |   code\n"
+        self.assertEqual(gen.headline(out), "Role `A` tries to send here. [protocol_step_order]")
+
+    def test_each_program_is_placed_on_a_cell_the_protocol_reaches(self):
+        _, cells = gen.reachable(load("Order.json")["current"]["steps"], ["Shop", "Stock", "Ledger"])
+        self.assertEqual(sorted(gen.PROGRAM_CELLS), ["offer_misses_branch", "send_out_of_turn", "skip_step"])
+        for name, cell in gen.PROGRAM_CELLS.items():
+            self.assertIn(cell, cells, name)
 
 
 if __name__ == "__main__":
