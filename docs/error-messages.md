@@ -389,13 +389,13 @@ expected `String` but got `Int`. [type_mismatch]
 5 |     "item " ++ n
                    ^
 
-    This is argument #2 of a function call.
+    This is the right side of `++`, which joins two `String`s.
     Use `int_to_string(x)` to convert an Int to a String.
 
     the expected type comes from here:
 
 5 |     "item " ++ n
-        ^^^^^^^^^^^^
+        ^^^^^^^
 
     `n` was bound here as `Int`:
 
@@ -1442,6 +1442,11 @@ note: this value never satisfies it; pass one that does
 3 |     List.nth([1, 2, 3], 7)
         ^^^^^^^^^^^^^^^^^^^^^^
 
+    `List.nth_opt` is `List.nth` without the requirement: it returns `Option` instead of panicking.
+        match List.nth_opt([1, 2, 3], 7) do
+          Some(v) -> …
+          None -> …
+        end
 
     this argument must satisfy `_ >= 0 && _ < len(xs)`:
 
