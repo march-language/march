@@ -1000,6 +1000,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
            && (match r with
                | Obligation.Alias_withdrawn _ -> false
                | Obligation.Unconstrained_subject _
+               | Obligation.Message_unresolved _
                | Obligation.Opaque_application _
                | Obligation.Partial_conjunct _
                | Obligation.Parametric_source_unproved _
@@ -1034,6 +1035,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        | Obligation.Solver_undecided
        | Obligation.Sort_conflict
        | Obligation.Float_sort_gate -> unverified_hinted := true
+       | Obligation.Message_unresolved _
        | Obligation.Unconstrained_subject _
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
@@ -1050,6 +1052,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       let body =
         match r with
         | Obligation.Unconstrained_subject _
+        | Obligation.Message_unresolved _
         | Obligation.Opaque_application _
         | Obligation.Partial_conjunct _
         | Obligation.Parametric_source_unproved _

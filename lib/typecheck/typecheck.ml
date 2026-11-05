@@ -753,10 +753,9 @@ let actor_enclosing env (sp : Ast.span) =
       then Some (String.sub k n (String.length k - n)) else acc) env.decl_sites None
 
 (** The [ambiguous_constructor] hint for a constructor several types define.
-    An actor's message type is generated (`<Actor>_Msg`) and cannot be named
-    in a program, so it is described as the actor's message and never offered
-    as the qualifier; when every candidate is an actor message, the advice is
-    to rename a handler. *)
+    An actor's message is described as the actor's message and qualified by
+    the actor (`Counter.Tally`, which [register_actor_ctors] registers), not
+    by its generated `<Actor>_Msg` type name. *)
 let ambiguous_ctor_hint env ctor all_types =
   let actor_of t =
     let is_msg = match StrMap.find_opt ctor env.ctors with
@@ -771,18 +770,20 @@ let ambiguous_ctor_hint env ctor all_types =
     | Some a -> Printf.sprintf "a message of actor `%s`" a
     | None -> "`" ^ t ^ "`"
   in
-  let listed = String.concat ", " (List.map describe all_types) in
-  match List.filter (fun t -> actor_of t = None) all_types with
-  | t :: _ ->
+  let qualified t =
+    Printf.sprintf "`%s.%s`" (Option.value ~default:t (actor_of t)) ctor in
+  let spellings = String.concat " or " (List.map qualified all_types) in
+  if List.for_all (fun t -> actor_of t <> None) all_types then
     Printf.sprintf
-      "Constructor `%s` is defined by multiple types (%s). \
-       Use a qualified form to disambiguate, e.g. `%s.%s`." ctor listed t ctor
-  | [] ->
-    Printf.sprintf
-      "`%s` is a message of more than one actor (%s), and a message cannot be \
-       qualified by its actor; rename one of the handlers." ctor
+      "`%s` is a message of more than one actor (%s); qualify it by its actor: %s." ctor
       (String.concat ", " (List.filter_map (fun t ->
            Option.map (fun a -> "`" ^ a ^ "`") (actor_of t)) all_types))
+      spellings
+  else
+    Printf.sprintf
+      "Constructor `%s` is defined by multiple types (%s). \
+       Use a qualified form to disambiguate: %s." ctor
+      (String.concat ", " (List.map describe all_types)) spellings
 
 (** Infer the type that a pattern *expects*, and return the list of
     (name, scheme) bindings it introduces.
@@ -1801,13 +1802,11 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) ?pid_expr (msg : Ast.
          in
          let advice = match alternatives, ctor_name with
            | a :: _, Some c ->
-             ignore a;
              Printf.sprintf
-               "`%s` is also a handler of %s, but a bare `%s` resolves to `%s`'s, \
-                and an actor message cannot be qualified by its actor; rename \
-                one of the two handlers."
+               "`%s` is also a handler of %s, but a bare `%s` resolves to `%s`'s; \
+                qualify it by the actor: `%s.%s`."
                c (String.concat ", " (List.map (fun a -> "`" ^ a ^ "`") alternatives))
-               c owner_name
+               c owner_name a c
            | _ ->
              Printf.sprintf "Send it to a pid spawned from `%s`, or send this actor one \
                              of its own messages." owner_name
@@ -1849,7 +1848,8 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) ?pid_expr (msg : Ast.
            | None -> [], []
            | Some a ->
              let own = StrMap.fold (fun cname cis acc ->
-                 if List.exists (fun (ci : ctor_info) ->
+                 if not (String.contains cname '.')   (* bare keys, not `A.Msg` *)
+                 && List.exists (fun (ci : ctor_info) ->
                      ci.ci_is_actor_msg && ci.ci_type = a ^ msg_sfx) cis
                  then cname :: acc else acc) env.ctors []
                        |> List.sort_uniq String.compare in
@@ -6903,7 +6903,8 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
 
 (** Register actor [name] as a zero-arg constructor (so `spawn(Name)`
     typechecks) and each `on Msg(...)` handler as a constructor of
-    "<Name>_Msg", owned by module [ci_module].  ALL params are included,
+    "<Name>_Msg", owned by module [ci_module], under every key
+    [actor_msg_ctor_keys] lists.  ALL params are included,
     annotated or not, so constructor arity is always correct; an unannotated
     one gets a unique TyVar placeholder ("$p<i>_<Msg>") that instantiates to a
     fresh unification variable, so `send(pid, Msg(x))` typechecks even when
@@ -6931,7 +6932,9 @@ let register_actor_ctors ~ci_module env (name : Ast.name) (actor : Ast.actor_def
       let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                  ci_arg_tys = arg_tys; ci_module; ci_vis = Ast.Public;
                  ci_is_actor_msg = true } in
-      { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+      { acc_env with ctors =
+          List.fold_left (fun ctors k -> add_ctor k ci ctors) acc_env.ctors
+            (actor_msg_ctor_keys ~ci_module name.txt h.ah_msg.txt) }
     ) env actor.actor_handlers
 
 let rec check_decl env (d : Ast.decl) : env =
@@ -11180,7 +11183,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
             let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
-            { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+            { acc_env with ctors =
+                List.fold_left (fun ctors k -> add_ctor k ci ctors) acc_env.ctors
+                  (actor_msg_ctor_keys ~ci_module:m.Ast.mod_name.txt name.txt h.ah_msg.txt) }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
         { env with sigs = (name.txt, sdef) :: env.sigs }
@@ -11566,7 +11571,9 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
             let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
-            { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+            { acc_env with ctors =
+                List.fold_left (fun ctors k -> add_ctor k ci ctors) acc_env.ctors
+                  (actor_msg_ctor_keys ~ci_module:m.Ast.mod_name.txt name.txt h.ah_msg.txt) }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
         { env with sigs = (name.txt, sdef) :: env.sigs }

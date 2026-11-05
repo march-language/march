@@ -399,16 +399,54 @@ let check_impl_dispatch ~root errctx defs (ctx : rctx) path lets sc re ~(span : 
                   predicate fname (Obligation.reason_name reason) (Obligation.reason_detail reason)))
          preds)
 
-(* A constructor spelled `M.Inc` resolves by its last segment: handler
-   messages are registered by bare name program-wide (and any bare-name
-   clash has already withdrawn the entry), so the qualifier adds nothing. *)
-let handler_sig_of_ctor (c : string) : fn_sig option =
-  let bare =
-    match String.rindex_opt c '.' with
-    | Some i -> String.sub c (i + 1) (String.length c - i - 1)
-    | None -> c
-  in
-  Hashtbl.find_opt !handler_sigs bare
+(* Which handler contract the message construction [e] (spelled [c]) must
+   meet.  In order:
+   - a written actor qualifier, `Tally.Bump` or `Tally_Msg.Bump` (any module
+     prefix before it is ignored), selects that actor's handler;
+   - otherwise the construction's recorded type, when it is an actor message
+     type `Tally_Msg`, does;
+   - otherwise the bare name, when one handler owns it program-wide.
+   [`Unresolved] is a bare name that two actors (or an actor and a variant)
+   share and that refines a handler, built where no type was recorded: its
+   contract is recorded as skipped rather than guessed or dropped.  See
+   [Refine_scope.collect_handler_sigs]. *)
+let handler_resolution (e : A.expr) (c : string)
+  : [ `Sig of fn_sig | `Unresolved of fn_sig list | `None ] =
+  let segs = String.split_on_char '.' c in
+  let bare = List.nth segs (List.length segs - 1) in
+  let msg_suffix = Refine_scope.actor_msg_suffix in
+  let strip_suffix q =
+    let n = String.length q and k = String.length msg_suffix in
+    if n > k && String.sub q (n - k) k = msg_suffix then String.sub q 0 (n - k) else q in
+  let find actor = Hashtbl.find_opt !handler_sigs (Refine_scope.handler_key actor bare) in
+  let written =
+    match List.rev segs with
+    | _ :: q :: _ -> Option.map (fun sg -> `Sig sg) (find (strip_suffix q))
+    | _ -> None in
+  match written with
+  | Some r -> r
+  | None ->
+    let typed =
+      match receiver_type_of e with
+      | Some tn when tn <> strip_suffix tn ->
+        Some (match find (strip_suffix tn) with Some sg -> `Sig sg | None -> `None)
+      | Some _ -> Some `None   (* a variant's own constructor *)
+      | None -> None in
+    match typed with
+    | Some r -> r
+    | None ->
+      match Hashtbl.find_opt !handler_sigs bare with
+      | Some sg -> `Sig sg
+      | None ->
+        let tail = msg_suffix ^ "." ^ bare in
+        let tl = String.length tail in
+        let cands =
+          Hashtbl.fold
+            (fun k sg acc ->
+              let n = String.length k in
+              if n > tl && String.sub k (n - tl) tl = tail then sg :: acc else acc)
+            !handler_sigs [] in
+        if cands = [] then `None else `Unresolved cands
 
 (* The scope entry for the symbolic argument, when passing a callable with
    signature [gsg] as argument [i] of a callee with signature [callee_sg] is a
@@ -5062,14 +5100,30 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      message constructor is checked exactly like a call to the handler. *)
   | A.ECon (c, args, sp) ->
     let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
-    (match handler_sig_of_ctor c.A.txt with
-     | Some sg ->
+    (match handler_resolution e c.A.txt with
+     | `Unresolved cands ->
+       let reason = Obligation.Message_unresolved (bare_ctor c.A.txt) in
+       let preds =
+         List.sort_uniq compare
+           (List.concat_map (fun sg -> List.map (fun rp -> pred_str rp.pred) sg.refined) cands) in
+       List.iter
+         (fun predicate ->
+           Obligation.record
+             { Obligation.span = sp; callee = c.A.txt; predicate; verdict = Obligation.Skipped reason
+             ; kind = Obligation.Precondition; inst = None };
+           if !strict_verified then
+             Err.error ~code:Err.Code.refinement_unverified errctx ~span:sp
+               (Printf.sprintf
+                  "`cap verified` module: cannot verify precondition `%s` on `%s` (%s: %s)"
+                  predicate c.A.txt (Obligation.reason_name reason) (Obligation.reason_detail reason)))
+         preds
+     | `Sig sg ->
        List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined;
        (* …and its container parameters' ELEMENT refinements, read at this
           construction's arguments exactly as a call's are (the handler body
           assumes them; see [Refine_scope.collect_handler_sigs]). *)
        check_arg_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:c.A.txt sg args
-     | None ->
+     | `None ->
        (* …and a VARIANT constructor with a refined argument, the same way
           ([Refine_scope.collect_ctor_sigs]; the two tables never share a
           name, each having withdrawn it on the clash). *)
@@ -7342,10 +7396,13 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
     let actor_sort = adt_sort_name aname.A.txt in
     let state_re = [ ("state", actor_sort) ] in
     let state_facts = facts_of_recenv_entry ~span:aname.A.span ("state", actor_sort) in
-    let check_state_literal ~path (e : A.expr) =
+    (* [sc]: the handler's assumed parameter refinements; before 2026-11-04
+       this ran with an empty scope, so `on Bump(n : {Int | _ > 0})` could not
+       prove `{ count: state.count + n }` and the hint blamed nothing. *)
+    let check_state_literal ?(sc = []) ~path (e : A.expr) =
       match actor_sig, e with
       | Some sg, A.ERecord (fields, sp) ->
-        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets = []; sc = []; re = state_re; binds = ctx.binds; demand = None } in
+        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets = []; sc; re = state_re; binds = ctx.binds; demand = None } in
         let fs = List.map (fun ((n : A.name), v) -> (n.A.txt, v)) fields in
         check_ctor_fields cx ~span:sp ~callee:aname.A.txt sg fs ~only:None;
         (* The ELEMENT slots of the state's fields too — but only when the
@@ -7396,6 +7453,12 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
            check.  The assumption below is documented as that boundary in
            specs/lang/refinement-types.md rather than withheld. *)
         let ps = List.map (fun p -> A.FPNamed p) h.A.ah_params in
+        (* Only a name no other handler or variant shares: a shared one is
+           still obliged per actor at every construction
+           ([handler_resolution]), but the interpreter dispatches a message by
+           its constructor NAME, so another actor's (or a variant's) value of
+           that name sent to this pid would run this handler unobliged
+           (todo 2026-11-04-interp-actor-dispatch-by-name). *)
         let enforced = Hashtbl.mem !handler_sigs h.A.ah_msg.A.txt in
         let assumed = if enforced then h.A.ah_params else strip_params_refinements h.A.ah_params in
         let sc = List.fold_left scope_add_fnparam [] (List.map (fun p -> A.FPNamed p) assumed) in
@@ -7408,7 +7471,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         let path = state_facts @ fnparams_field_facts ~span:h.A.ah_msg.A.span ps in
         (* (2): a fresh state literal at a tail is a construction of THIS
            actor's state, whatever other record shares its field set. *)
-        List.iter (fun (p, t) -> check_state_literal ~path:p t) (tails path h.A.ah_body);
+        List.iter (fun (p, t) -> check_state_literal ~sc ~path:p t) (tails path h.A.ah_body);
         (* The parameters' ELEMENT refinements are assumed under the same
            rule as their scalar ones: only when the message is enforced.
            [strip_params_refinements] erases only an outermost refinement,

@@ -32,6 +32,8 @@ native_actor_message_record_leak_probe: coverage audit (user + stdlib): 214 enfo
 native_actor_message_record_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_monitor_down_reason: coverage audit (user + stdlib): 214 enforced, 0 inert (warned), 0 unenforced
 native_actor_monitor_down_reason: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_msg_qualified: coverage audit (user + stdlib): 214 enforced, 0 inert (warned), 0 unenforced
+native_actor_msg_qualified: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_nested_match_state_leak_probe: coverage audit (user + stdlib): 214 enforced, 0 inert (warned), 0 unenforced
 native_actor_nested_match_state_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_on_stop: coverage audit (user + stdlib): 214 enforced, 0 inert (warned), 0 unenforced

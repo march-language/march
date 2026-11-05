@@ -15,7 +15,10 @@ Phases (design §7):
   `2026-11-04-invariant-unsupported-expression-silently-dropped`). Field refinements of an
   anonymous-record `migrate_state` parameter reach `old.f`. Actor message constructors are
   resolved by datatype (todo `2026-10-15-actor-message-ctor-cannot-be-qualified`). HCR
-  counterexamples for the migration obligations.
+  counterexamples for the migration obligations. G4 landed half (progress
+  `2026-10-15-actor-message-ctor-cannot-be-qualified`): `<Actor>.<Msg>` resolves and a
+  shared name is obliged per actor; the handler body's assumption waits on todo
+  `2026-11-04-interp-actor-dispatch-by-name`.
 - **A2.** Dry-run `migrate_state` on copies of the live states before `ACTIVATE`; derive
   mechanical migrations from the schema diff, each derivation rule proved once.
 - **B.** `march --check --guarantees` / `forge hot-reload check`: one labelled line per actor

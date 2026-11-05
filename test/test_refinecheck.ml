@@ -15126,9 +15126,12 @@ let lambda_contract_suite =
 (* ── Actor handler contracts (plan phase 3) ───────────────────────────────
    `on Inc(n : {Int | n > 0})` obliges every CONSTRUCTION of `Inc(...)` in the
    module (send, call, or a message bound first), and the handler body
-   assumes `n > 0` exactly when that obligation is in force.  A bare-name
-   clash (another handler or a variant constructor named `Inc`) withdraws
-   both sides, fail closed — the last case pins that from both sides. *)
+   assumes `n > 0` exactly when that obligation is in force.  A name another
+   handler or a variant shares is resolved per actor (G4): by a written
+   `Counter.Inc`, or by the construction's recorded type; where neither is
+   available the contract is a recorded `message-unresolved` skip, never a
+   silent drop.  The handler body assumes only an unshared name, because the
+   interpreter dispatches by name.  The last cases pin that. *)
 let actor_handler_suite =
   let actor body =
     "  actor Counter do\n\
@@ -15158,15 +15161,70 @@ let actor_handler_suite =
           (has_refine_error_d
              (prog ~handler_body:"      { state with value: need(n) }\n" "    let _ = send(c, Inc(1))\n")));
 
-    gated "a clashing variant constructor withdraws BOTH obligation and assumption" (fun () ->
+    gated "a name a variant shares is obliged through the construction's type" (fun () ->
         let extra = "  type Tok = Inc(Int) | Dec(Int)\n" in
-        Alcotest.(check bool) "Inc(0 - 1) is not obliged (fail closed)" false
-          (has_refine_error_d
-             (prog ~extra ~handler_body:plain_body "    let _ = send(c, Inc(0 - 1))\n"));
-        Alcotest.(check bool) "…and the body no longer assumes n > 0" true
-          (has_refine_error_d
+        (* The annotation makes the bare `Inc` the actor's (a bare `Inc` with
+           no expected type is the typechecker's pick, hinted ambiguous). *)
+        Alcotest.(check bool) "let m : Counter.Msg = Inc(0 - 1): typed, violated" true
+          (has_refine_error_typed
+             (prog ~extra ~handler_body:plain_body
+                "    let m : Counter.Msg = Inc(0 - 1)\n    let _ = send(c, m)\n"));
+        Alcotest.(check bool) "let m : Counter.Msg = Inc(1)" false
+          (has_refine_error_typed
+             (prog ~extra ~handler_body:plain_body
+                "    let m : Counter.Msg = Inc(1)\n    let _ = send(c, m)\n"));
+        Alcotest.(check bool) "the variant's own Tok.Inc(0 - 1) is not the handler's" false
+          (has_refine_error_typed
+             (prog ~extra ~handler_body:plain_body
+                "    let t : Tok = Tok.Inc(0 - 1)\n    let _ = t\n    let _ = send(c, Inc(1))\n"));
+        (* …but the body does not assume it while the name is shared: the
+           interpreter routes a `Tok.Inc(-1)` sent to this pid by name. *)
+        Alcotest.(check bool) "…and the body does not assume n > 0 while shared" true
+          (has_refine_error_typed
              (prog ~extra ~handler_body:"      { state with value: need(n) }\n"
-                "    let _ = send(c, Inc(1))\n"))) ]
+                "    let _ = send(c, Counter.Inc(1))\n")));
+
+    gated "a written actor qualifier selects the handler, with no type map" (fun () ->
+        let extra = "  type Tok = Inc(Int) | Dec(Int)\n" in
+        Alcotest.(check bool) "Counter.Inc(0 - 1)" true
+          (has_refine_error_d
+             (prog ~extra ~handler_body:plain_body "    let _ = send(c, Counter.Inc(0 - 1))\n"));
+        Alcotest.(check bool) "Counter_Msg.Inc(0 - 1)" true
+          (has_refine_error_d
+             (prog ~extra ~handler_body:plain_body "    let _ = send(c, Counter_Msg.Inc(0 - 1))\n"));
+        Alcotest.(check bool) "Counter.Inc(1)" false
+          (has_refine_error_d
+             (prog ~extra ~handler_body:plain_body "    let _ = send(c, Counter.Inc(1))\n")));
+
+    gated "two actors sharing a handler name each keep their own contract" (fun () ->
+        let extra =
+          "  actor Ten do\n    state { value : Int }\n    init { value: 0 }\n\
+          \    on Inc(n : {Int | n > 10}) do { state with value: n } end\n  end\n" in
+        let p main = prog ~extra ~handler_body:plain_body ("    let t = spawn(Ten)\n" ^ main) in
+        Alcotest.(check bool) "Ten.Inc(5) violates n > 10" true
+          (has_refine_error_d (p "    let _ = send(t, Ten.Inc(5))\n"));
+        Alcotest.(check bool) "Counter.Inc(5) meets n > 0" false
+          (has_refine_error_d (p "    let _ = send(c, Counter.Inc(5))\n"));
+        Alcotest.(check bool) "typed: send(c, Counter.Inc(5)) and send(t, Ten.Inc(11))" false
+          (has_refine_error_typed
+             (p "    let _ = send(c, Counter.Inc(5))\n    let _ = send(t, Ten.Inc(11))\n")));
+
+    Alcotest.test_case "a shared bare name with no type recorded is a RECORDED skip" `Quick (fun () ->
+        let extra = "  type Tok = Inc(Int) | Dec(Int)\n" in
+        let src = prog ~extra ~handler_body:plain_body "    let _ = send(c, Inc(0 - 1))\n" in
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse src));
+        Alcotest.(check bool) "an error under `cap verified`" true
+          (March_errors.Errors.has_errors ctx);
+        Alcotest.(check bool) "recorded as message-unresolved" true
+          (List.exists
+             (fun (o : March_refinecheck.Obligation.t) ->
+               match o.March_refinecheck.Obligation.verdict with
+               | March_refinecheck.Obligation.Skipped (March_refinecheck.Obligation.Message_unresolved "Inc") -> true
+               | _ -> false)
+             (March_refinecheck.Obligation.all ()))) ]
 
 (* ── Stored-field contracts (plan phase 4) ────────────────────────────────
    A refined record field, variant argument, or actor state field is a
@@ -15229,6 +15287,13 @@ let stored_field_suite =
         in
         Alcotest.(check bool) "state.value + n keeps value >= 0" false
           (has_refine_error_d (prog (actor "{ state with value: state.value + n }")));
+        (* A fresh literal at the tail is checked with the handler's assumed
+           parameter refinements in scope (before 2026-11-04 it ran with none,
+           and `{ value: n }` was undecided). *)
+        Alcotest.(check bool) "{ value: n } keeps value >= 0 from n > 0" false
+          (has_refine_error_d (prog (actor "{ value: n }")));
+        Alcotest.(check bool) "{ value: n - 2 } can break it" true
+          (has_refine_error_d (prog (actor "{ value: n - 2 }")));
         Alcotest.(check bool) "state.value - 1 can break it" true
           (has_refine_error_d (prog (actor "{ state with value: state.value - 1 }")));
         (* The call is its own statement: as the update's actual it would be

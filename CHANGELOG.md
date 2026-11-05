@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **An actor's message can be qualified by its actor.** When two actors (or an actor and a
+  variant) share a message name, `Counter.Tally(1)` (also `Counter_Msg.Tally(1)`, and
+  `Outer.Counter.Tally(1)` for a nested actor) selects `Counter`'s message on both backends.
+  A `migrate_msg` that keeps a message's name can now write `Some(Tally.Bump(n))`. The
+  `ambiguous_constructor` and `send_wrong_actor` diagnostics suggest the qualified spelling
+  instead of renaming a handler. A refined handler parameter is now checked at every
+  construction of a shared message name, by its qualifier or its type.
+
 - **`--refine-infer` proposes lemma calls.** At a call the refinement checker could not finish
   because the proof needs more unfolding of a function, `march --check --refine-infer` and
   `forge refine --infer` look for a lemma, yours or the standard library's, whose theorem is
@@ -286,6 +294,11 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **An actor handler's fresh state literal uses its parameter refinements.** With
+  `state { count : {Int | _ >= 0} }` and `on Bump(n : {Int | _ > 0})`, the result
+  `{ count: state.count + n }` stayed unverified because the check at the handler's tail ran
+  without `n > 0`. It now proves.
 
 - **A refined `Int` result now uses the facts before it.** `fn grow(n : {Int | _ >= 0}) :
   {Int | _ >= n}` used to stay unverified when its body was `let r = n + n` then `r`, or a

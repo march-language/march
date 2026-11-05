@@ -1,0 +1,64 @@
+-- Actor messages qualified by their actor (gap G4 of
+-- specs/2026-11-04-lemmas-hcr-actors-choreography-design.md). Every handler
+-- below is named `Tally`, and so is a variant constructor. Before 2026-11-04
+-- a bare `Tally` resolved to one owner and every qualified spelling was
+-- `unknown_constructor`, so the only fix was renaming a handler. `Plus` and
+-- `Times` have the SAME state shape, the case where the interpreter (which
+-- dispatches by handler name) and compiled code (which drops another actor's
+-- message) used to disagree on a misresolved bare send.
+mod ActorMsgQualified do
+  needs IO.Console
+  needs IO.Spawn
+
+  type Vote = Tally(Int) | Abstain
+
+  actor Plus do
+    state { n : Int }
+    init  { n: 0 }
+    on Tally(k : Int) do { n: state.n + k } end
+  end
+
+  actor Times do
+    state { n : Int }
+    init  { n: 1 }
+    on Tally(k : Int) do { n: state.n * k } end
+  end
+
+  actor Words do
+    state { n : Int, s : String }
+    init  { n: 0, s: "" }
+    on Tally(k : Int) do { n: state.n + 1, s: state.s ++ int_to_string(k) } end
+  end
+
+  fn votes(v : Vote) : Int do
+    match v do
+      Tally(k) -> k
+      Abstain -> 0
+    end
+  end
+
+  fn field(p, name : String) : String do
+    match get_actor_field(p, name) do
+      Some(v) -> int_to_string(v)
+      None -> "<none>"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let plus = spawn(Plus)
+    let times = spawn(Times)
+    let words = spawn(Words)
+    send(plus, Plus.Tally(3))
+    send(times, Times.Tally(5))
+    send(plus, Plus_Msg.Tally(4))
+    send(times, ActorMsgQualified.Times.Tally(2))
+    send(words, Words.Tally(9))
+    let m : Times.Msg = Times.Tally(10)
+    send(times, m)
+    run_until_idle()
+    println("plus.n = " ++ field(plus, "n"))
+    println("times.n = " ++ field(times, "n"))
+    println("words.n = " ++ field(words, "n"))
+    println("vote = " ++ int_to_string(votes(Tally(7))))
+  end
+end

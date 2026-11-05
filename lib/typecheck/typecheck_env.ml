@@ -211,6 +211,14 @@ type fn_bound = {
     that type name). *)
 let actor_msg_type_name (actor : string) : string = actor ^ "_Msg"
 
+(** The [env.ctors] keys an actor message constructor is registered under:
+    bare `<Msg>`, and the actor-qualified `<Actor>.<Msg>`, `<Actor>_Msg.<Msg>`
+    and (nested) `<Mod>.<Actor>.<Msg>`, so a message whose name another actor
+    or type shares can still be written unambiguously. *)
+let actor_msg_ctor_keys ~(ci_module : string) (actor : string) (msg : string) : string list =
+  msg :: (actor ^ "." ^ msg) :: (actor_msg_type_name actor ^ "." ^ msg)
+  :: (if ci_module = "" then [] else [ ci_module ^ "." ^ actor ^ "." ^ msg ])
+
 (** The SPELLING half of the `<Actor>.Msg` alias ([Typecheck_unify.actor_msg_alias]
     adds the scope checks): [Some "<Actor>_Msg"] when [name] is `<Actor>.Msg`
     or `M.<Actor>.Msg`. *)
