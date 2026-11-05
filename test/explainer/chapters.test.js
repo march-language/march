@@ -16,15 +16,12 @@ const ME = globalThis.MarchExplainer;
 const data = JSON.parse(fs.readFileSync(path.join(__dirname, '../../docs/_data/explainer.json'), 'utf8'));
 const count = (svg, cls) => (svg.match(new RegExp('class="' + cls + '"', 'g')) || []).length;
 
-// A stage to mount into: remembers what the figure drew.
-function stage(width) {
-  const box = { innerHTML: '', className: '' };
-  return { clientWidth: width || 680, box, appendChild: () => {}, ownerDocument: { createElement: () => box } };
-}
+// A stage to mount into (test/explainer/fake-dom.js): read back what the figure built.
+const { stage } = require('./fake-dom.js');
 function mount(name, width) {
   const host = stage(width);
   const fig = ME.figureForTest(name)(host, data);
-  return { fig, svg: () => host.box.innerHTML };
+  return { fig, host, svg: () => host.innerHTML };
 }
 
 test('state map: empty shows every cell and none lit', () => {
@@ -86,8 +83,10 @@ test('fan-out: modules, then every state type and function', () => {
   assert.equal(count(m.svg(), 'mx-fn') + count(m.svg(), 'mx-state'), 0);
   assert.ok(m.svg().includes('Order_Run'));
   m.fig.setState('functions', 0);
-  assert.equal(count(m.svg(), 'mx-state'), data.order.linear_states);
-  assert.equal(count(m.svg(), 'mx-fn'), data.order.functions);
+  // what has just been added carries `mx-enter` beside its own class while it animates in
+  const has = (cls) => (m.svg().match(new RegExp('class="' + cls + '( mx-enter)?"', 'g')) || []).length;
+  assert.equal(has('mx-state'), data.order.linear_states);
+  assert.equal(has('mx-fn'), data.order.functions);
 });
 
 test('fan-out: typecheck shows Stock stopped at its choice', () => {

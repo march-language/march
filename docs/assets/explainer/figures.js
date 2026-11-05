@@ -59,29 +59,27 @@
       var colW = (W - 2 * M - (mods.length - 1) * gap) / mods.length;
       var perRow = Math.max(1, Math.floor(colW / 10));
       var top = y + 26, bottom = top;
+      // Every part of a column has a fixed place, whatever the stage, so a later stage
+      // only ever adds to what is already drawn: name, two caption lines, the state
+      // squares, then the function squares.
       mods.forEach(function (m, k) {
         var x = M + k * (colW + gap), yy = top;
         out.push(line('mx-line', W / 2, y, x + colW / 2, y + 20));
         out.push(text('mx-label mx-mono', x, yy + 12, m.name));
-        yy += 20;
+        if (stage >= 2 && m.linear_states) out.push(text('mx-label', x, yy + 28, plural(m.linear_states, 'state type')));
+        if (stage >= 3) out.push(text('mx-label', x, yy + 43, plural(m.functions, 'function')));
+        yy += 52;
         if (stage >= 2) {
           for (var s = 0; s < m.linear_states; s++) out.push(rect('mx-state', x + s * 15, yy, 12, 12));
-          yy += 18;
         }
+        yy += 18;
         if (stage >= 3) {
           for (var f = 0; f < m.functions; f++) {
             out.push(rect('mx-fn', x + (f % perRow) * 10, yy + Math.floor(f / perRow) * 10, 8, 8));
           }
-          yy += Math.ceil(m.functions / perRow) * 10 + 6;
+          yy += Math.ceil(m.functions / perRow) * 10;
         }
-        if (stage >= 2) {
-          var parts = [];
-          if (m.linear_states) parts.push(plural(m.linear_states, 'state type'));
-          if (stage >= 3) parts.push(plural(m.functions, 'function'));
-          parts.forEach(function (p, i) { out.push(text('mx-label', x, yy + 12 + i * 15, p)); });
-          yy += parts.length * 15 + 4;
-        }
-        bottom = Math.max(bottom, yy);
+        bottom = Math.max(bottom, stage >= 3 ? yy : stage >= 2 ? top + 70 : top + 20);
       });
       y = bottom + 6;
     } else if (stage >= 1) {
@@ -147,7 +145,7 @@
   function strip(automaton, opts) {
     var W = opts.width, out = [], x = 0, y = 0, h = 22, gap = 5;
     automaton.labels.forEach(function (label, i) {
-      var w = Math.min(W, label.length * 6.7 + 16);
+      var w = Math.min(W, label.length * 7.4 + 18);     // 12px monospace is about 7.2px a character
       if (x + w > W) { x = 0; y += h + gap; }
       var cls = i < opts.at ? 'mx-seg mx-done' : i === opts.at ? 'mx-seg mx-next' : 'mx-seg';
       out.push(rect(cls, x, y, w, h));

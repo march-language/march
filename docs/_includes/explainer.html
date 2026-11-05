@@ -31,11 +31,30 @@
     position: sticky; top: 60px; height: min(44vh, 400px); padding: 12px 0 10px;
     display: flex; flex-direction: column; justify-content: center;
     background: var(--mx-paper); border-bottom: 1px solid var(--border); pointer-events: auto;
+    overflow: hidden;   /* a drawing never runs over the cards; chapters.js scales it to fit */
   }
   .mx-stage svg, .mx-stage canvas { display: block; max-width: 100%; }
   .mx-stage canvas { flex: 1 1 auto; min-height: 0; width: 100%; }
   .mx-svg { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-  .mx-svg .mx-caption { align-self: flex-start; margin: 6px 0 0; }
+  .mx-slot { width: 100%; display: flex; flex-direction: column; align-items: center; }
+  .mx-slot .mx-caption { align-self: flex-start; margin: 6px 0 2px; }
+  /* A figure whose height changes from card to card is pinned to the top of its stage,
+     so what stays on screen does not move when something is added below it. */
+  .mx-stage.mx-top { justify-content: flex-start; }
+
+  /* Transitions between cards. An SVG figure changes in place: what stays may change
+     colour, what is new sweeps in, what is gone fades. A simulation that has to be
+     rebuilt (the reader went back, or jumped) fades out and in. */
+  .mx-stage canvas, .mx-counters { transition: opacity 0.16s ease; }
+  @media (prefers-reduced-motion: no-preference) {
+    .mx-svg rect, .mx-svg circle, .mx-svg line, .mx-svg text {
+      transition: fill 0.35s ease, stroke 0.35s ease, opacity 0.22s ease;
+    }
+    @keyframes mx-enter { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+    .mx-enter { animation: mx-enter 0.38s ease-out both; }
+    .mx-svg .mx-enter { transform-box: fill-box; }
+    .mx-exit { opacity: 0; }
+  }
   .mx-fallback { display: block; max-width: 100%; max-height: 100%; margin: 0 auto; object-fit: contain; border-radius: 6px; }
   .mx-live .mx-fallback { display: none; }
 
