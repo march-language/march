@@ -15,14 +15,20 @@ program and a ```text block with what `march --check` prints, so the page shows 
 the compiler says today rather than what someone once pasted. Everything outside the
 markers is hand-written prose and is left alone.
 
+It also writes docs/assets/error-tour/examples.json, {name: {file, source, output}} for
+every example on the page. The error playground shows an example's output from it the
+moment the example is picked, without loading the 2 MB compiler, and runs the
+compiler only once the program has been edited.
+
 Each program is checked from its own fresh directory under a private HOME, as
 `<name without its NN- prefix>.march`, so the header line names a file a reader can
 recognise and no cache under the repo or ~/.cache/march shapes the output. The
 refinement examples need z3 on PATH.
 
 Usage:
-  scripts/gen-error-tour.py            rewrite docs/error-messages.md in place
-  scripts/gen-error-tour.py --check    exit 1 if the page differs from what this
+  scripts/gen-error-tour.py            rewrite docs/error-messages.md and
+                                       examples.json in place
+  scripts/gen-error-tour.py --check    exit 1 if either differs from what this
                                        script would write
   MARCH_BIN=path                       compiler to run (default
                                        _build/default/bin/main.exe; build it first
@@ -37,8 +43,11 @@ import sys
 import tempfile
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+import json
+
 PAGE = os.path.join(ROOT, "docs", "error-messages.md")
 SRC_DIR = os.path.join(ROOT, "docs", "assets", "error-tour")
+INDEX = os.path.join(SRC_DIR, "examples.json")
 MARKER = re.compile(r"(<!-- error-tour: ([\w-]+) -->\n)(.*?)(<!-- /error-tour -->)", re.S)
 
 
@@ -57,19 +66,32 @@ def check_output(march_bin, name, home):
         shutil.rmtree(work)
     with open(src) as f:
         program = f.read()
-    return program, proc.stdout.rstrip() + "\n"
+    return shown, program, proc.stdout.rstrip() + "\n"
 
 
 def render(page, march_bin):
+    """Return (new page text, examples.json text)."""
     home = tempfile.mkdtemp(prefix="error-tour-home-")
+    examples = {}
     try:
         def fill(m):
-            program, output = check_output(march_bin, m.group(2), home)
+            name = m.group(2)
+            shown, program, output = check_output(march_bin, name, home)
+            examples[name] = {"file": shown, "source": program, "output": output}
             return (m.group(1) + "```march\n" + program + "```\n\n"
                     + "```text\n" + output + "```\n" + m.group(4))
-        return MARKER.sub(fill, page)
+        new = MARKER.sub(fill, page)
     finally:
         shutil.rmtree(home)
+    return new, json.dumps(examples, indent=1, sort_keys=True) + "\n"
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
 
 
 def main():
@@ -82,16 +104,18 @@ def main():
         sys.exit(f"error: no compiler at {march_bin}; run `dune build --root . bin/main.exe`")
     with open(PAGE) as f:
         page = f.read()
-    new = render(page, march_bin)
+    new, index = render(page, march_bin)
+    outputs = [(PAGE, page, new), (INDEX, read(INDEX), index)]
+    stale = [path for path, old, want in outputs if old != want]
     if check:
-        if new != page:
-            print(f"{os.path.relpath(PAGE, ROOT)} is stale: run scripts/gen-error-tour.py")
-            sys.exit(1)
-        return
-    if new != page:
-        with open(PAGE, "w") as f:
-            f.write(new)
-        print(f"wrote {os.path.relpath(PAGE, ROOT)}")
+        for path in stale:
+            print(f"{os.path.relpath(path, ROOT)} is stale: run scripts/gen-error-tour.py")
+        sys.exit(1 if stale else 0)
+    for path, old, want in outputs:
+        if old != want:
+            with open(path, "w") as f:
+                f.write(want)
+            print(f"wrote {os.path.relpath(path, ROOT)}")
 
 
 if __name__ == "__main__":

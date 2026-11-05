@@ -1,0 +1,172 @@
+{
+ "01-then": {
+  "file": "then.march",
+  "output": "-- SYNTAX ------------------------------------ then.march\n\nI don't recognize `then` here \u2014 March uses do/end blocks instead. [then_keyword]\n\n5 |     if n > 0 then 1 else 0 end\n                 ^^^^\n\n    if cond do\n        expr1\n    else\n        expr2\n    end\n    run `march --explain then_keyword`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  fn sign(n : Int) : Int do\n    if n > 0 then 1 else 0 end\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    println(int_to_string(sign(3)))\n  end\nend\n"
+ },
+ "02-if-without-else": {
+  "file": "if-without-else.march",
+  "output": "-- SYNTAX ------------------------- if-without-else.march\n\nMarch `if` expressions always need an `else` branch: [parse_error]\n\n5 |     end\n        ^^^\n\n    if cond do\n        expr1\n    else\n        expr2\n    end\n    run `march --explain parse_error`\n",
+  "source": "mod Main do\n  fn clamp(x : Int) : Int do\n    if x > 0 do\n      x\n    end\n  end\n\n  fn main() do\n    clamp(5)\n  end\nend\n"
+ },
+ "03-else-if-chain": {
+  "file": "else-if-chain.march",
+  "output": "-- SYNTAX --------------------------- else-if-chain.march\n\nThis `if` (line 3) needs its own `end`: the `end` on line 4 belongs to an outer block. [parse_error]\n\n3 |     if a do 1 else if b do 2 else 3 end\n        ^^\n\n    I only noticed at the end of the file.\n    `else if` is a nested `if` in the else position, so each `if` needs its own `end`: a two-branch chain ends `end end`, a three-branch chain `end end end`.\n    run `march --explain parse_error`\n",
+  "source": "mod Main do\n  fn pick(a : Bool, b : Bool) : Int do\n    if a do 1 else if b do 2 else 3 end\n  end\n\n  fn main() do\n    pick(false, true)\n  end\nend\n"
+ },
+ "04-semicolon": {
+  "file": "semicolon.march",
+  "output": "-- SYNTAX ------------------------------- semicolon.march\n\nUnexpected `;`: March separates expressions with newlines, not semicolons. [semicolon_separator]\n\n5 |     let x = 1; let y = 2\n                 ^\n\n    Put each expression on its own line.\n    run `march --explain semicolon_separator`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  fn total() : Int do\n    let x = 1; let y = 2\n    x + y\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    println(int_to_string(total()))\n  end\nend\n"
+ },
+ "05-curried-call": {
+  "file": "curried-call.march",
+  "output": "-- SYNTAX ---------------------------- curried-call.march\n\n`f(...)(...)` is not a chained call \u2014 March functions are not curried. [parse_error]\n\n7 |     adder(1)(2)\n                ^\n\n    Write `f(a, b)` for a multi-argument call, or put the second call on its own line if you meant two separate statements.\n    run `march --explain parse_error`\n",
+  "source": "mod Main do\n  fn adder(x : Int) do\n    fn (y) -> x + y\n  end\n\n  fn main() do\n    adder(1)(2)\n  end\nend\n"
+ },
+ "06-misspelled-module": {
+  "file": "misspelled-module.march",
+  "output": "-- NAMING ----------------------- misspelled-module.march\n\nUnknown module `Lsit`. Did you mean `List`? [unknown_qualified_name]\n\n5 |     Lsit.length([1, 2])\n        ^^^^^^^^^^^\n\n    run `march --explain unknown_qualified_name`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  fn count() : Int do\n    Lsit.length([1, 2])\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    println(int_to_string(count()))\n  end\nend\n"
+ },
+ "07-field-by-type": {
+  "file": "field-by-type.march",
+  "output": "-- NAMING --------------------------- field-by-type.march\n\nThis record does not have a field called `conut`. Did you mean `count`? [unknown_record_field]\nThe fields I see are: cont, count\n\n4 |     let n : Int = r.conut\n                      ^^^^^^^\n",
+  "source": "mod Main do\n  fn main() do\n    let r = { count: 1, cont: \"x\" }\n    let n : Int = r.conut\n    n\n  end\nend\n"
+ },
+ "08-constructor-by-type": {
+  "file": "constructor-by-type.march",
+  "output": "-- NAMING --------------------- constructor-by-type.march\n\nI don't know a constructor called `Posts`. [unknown_constructor]\nDid you mean `Postal` (from type `Mail`)?\n\n6 |     let m : Mail = Posts(1)\n                       ^^^^^^^^\n",
+  "source": "mod Main do\n  type Mail = Postal(Int) | Email(String)\n  type Tag = Poss(Int)\n\n  fn main() do\n    let m : Mail = Posts(1)\n    m\n  end\nend\n"
+ },
+ "09-string-plus-int": {
+  "file": "string-plus-int.march",
+  "output": "-- TYPE MISMATCH ------------------ string-plus-int.march\n\nexpected `String` but got `Int`. [type_mismatch]\n\n5 |     \"item \" ++ n\n                   ^\n\n    This is argument #2 of a function call.\n    Use `int_to_string(x)` to convert an Int to a String.\n\n    the expected type comes from here:\n\n5 |     \"item \" ++ n\n        ^^^^^^^^^^^^\n\n    `n` was bound here as `Int`:\n\n4 |   fn label(n : Int) : String do\n               ^\n    run `march --explain type_mismatch`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  fn label(n : Int) : String do\n    \"item \" ++ n\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    println(label(3))\n  end\nend\n"
+ },
+ "10-structural-diff": {
+  "file": "structural-diff.march",
+  "output": "-- TYPE MISMATCH ------------------ structural-diff.march\n\nexpected `List(Int)` but got `List(String)`. [type_mismatch]\n\n10 |     println(int_to_string(count(names)))\n                                     ^^^^^\n\n    This is argument #1 of a function call.\n    The types differ here:\n        List(String)\n             ^^^^^^ expected `Int`\n\n    the expected type comes from here:\n\n10 |     println(int_to_string(count(names)))\n                               ^^^^^^^^^^^^\n\n    `names` was bound here as `List(String)`:\n\n9 |     let names = [\"a\", \"b\"]\n            ^^^^^\n    run `march --explain type_mismatch`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  fn count(xs : List(Int)) : Int do\n    List.length(xs)\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    let names = [\"a\", \"b\"]\n    println(int_to_string(count(names)))\n  end\nend\n"
+ },
+ "11-no-partial-application": {
+  "file": "no-partial-application.march",
+  "output": "-- TYPE MISMATCH ----------- no-partial-application.march\n\n`add` is a lambda with 2 parameters, but is called with 1 argument. [arity_mismatch]\nMarch has no partial application \u2014 a call must supply all arguments.\n\n6 |     println(int_to_string(add(1)))\n                              ^^^^^^\n\n\n    bound here with 2 parameters:\n\n5 |     let add = fn (a, b) -> a + b\n                  ^^^^^^^^^^^^^^^^^^\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  fn main(_console : Cap(IO.Console)) do\n    let add = fn (a, b) -> a + b\n    println(int_to_string(add(1)))\n  end\nend\n"
+ },
+ "12-let-question": {
+  "file": "let-question.march",
+  "output": "-- TYPE MISMATCH --------------------- let-question.march\n\nexpected `Result(Int, String)` but got `Int`. [type_mismatch]\n\n5 |     let? x = parse()\n        ^^^^^^^^^^^^^^^^\n\n    This is the declared return type of `next`.\n    The code after `let?` must produce a Result with the same error type.\n\n    the expected type comes from here:\n\n4 |   fn next() : Result(Int, String) do\n      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    run `march --explain type_mismatch`\n",
+  "source": "mod Main do\n  fn parse() : Result(Int, String) do Ok(1) end\n\n  fn next() : Result(Int, String) do\n    let? x = parse()\n    x + 1\n  end\n\n  fn main() do\n    next()\n  end\nend\n"
+ },
+ "13-missing-impl": {
+  "file": "missing-impl.march",
+  "output": "-- INTERFACE ------------------------- missing-impl.march\n\n`Hue` does not implement interface `Ord`. [missing_impl]\n`<` needs it here.\n\n9 |     println(if a < b do \"less\" else \"not less\" end)\n                   ^^^^^\n\n    Add `derive Ord for Hue` after the type to get the structural one, or write `impl Ord(Hue) do ... end`.\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  type Hue = Red | Blue\n\n  fn main(_console : Cap(IO.Console)) do\n    let a = Red\n    let b = Blue\n    println(if a < b do \"less\" else \"not less\" end)\n  end\nend\n"
+ },
+ "14-main-no-grant": {
+  "file": "main-no-grant.march",
+  "output": "-- CAPABILITY ----------------------- main-no-grant.march\n\n`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]\nhelp: declare the grant `main` actually needs \u2014\n        fn main(_cap_console : Cap(IO.Console)) : ()\nor grant everything with `fn main(cap : Cap(IO))`.\n`forge fix` can apply this.\n\n4 |   fn main() do\n      ^^^^^^^^^^^^\n\n    run `march --explain cap_grant`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  fn main() do\n    println(\"hello\")\n  end\nend\n"
+ },
+ "15-missing-needs": {
+  "file": "missing-needs.march",
+  "output": "-- CAPABILITY ----------------------- missing-needs.march\n\n`save` writes a file, but module `Main` declares no `needs IO.FileWrite`, and `main` is granted only `Cap(IO.Console)`. [cap_needs]\nhint: add this to the module body \u2014\n        needs IO.FileWrite\nand give `main` a `Cap(IO.FileWrite)` parameter: `fn main(\u2026, _cap_filewrite : Cap(IO.FileWrite))`.\n\n5 |     let _ = file_write(\"/tmp/n\", int_to_string(n))\n                ^^^^^^^^^^\n\n\n    `main` calls `save` here:\n\n10 |     save(1)\n         ^^^^\n\n    `main` is granted only `Cap(IO.Console)` here:\n\n9 |   fn main(c : Cap(IO.Console)) do\n             ^^^^^^^^^^^^^^^^^^^^^\n    run `march --explain cap_needs`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  fn save(n : Int) : () do\n    let _ = file_write(\"/tmp/n\", int_to_string(n))\n    ()\n  end\n\n  fn main(c : Cap(IO.Console)) do\n    save(1)\n    println(\"saved\")\n  end\nend\n"
+ },
+ "16-wrong-capability": {
+  "file": "wrong-capability.march",
+  "output": "-- CAPABILITY -------------------- wrong-capability.march\n\n`read` needs file-read access, but `c` is the console capability. [cap_mismatch]\n\n6 |   fn main(c : Cap(IO.Console)) do println(read(c)) end\n                                                   ^\n\n    `IO.Console` and `IO.FileRead` are both parts of `IO`; neither contains the other.\n    help: give `main` a `Cap(IO.FileRead)` parameter and pass it to `read`.\n    and add `needs IO.FileRead` to the module.\n\n    `read` needs `Cap(IO.FileRead)`:\n\n6 |   fn main(c : Cap(IO.Console)) do println(read(c)) end\n                                              ^^^^^^^\n\n    `c` was bound here as `Cap(IO.Console)`:\n\n6 |   fn main(c : Cap(IO.Console)) do println(read(c)) end\n              ^\n\n    `Cap(IO.FileRead)` is named here, and the module declares no `needs IO.FileRead`:\n\n4 |   fn read(c : Cap(IO.FileRead)) : String do \"x\" end\n      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n    `main` is granted only `Cap(IO.Console)` here:\n\n6 |   fn main(c : Cap(IO.Console)) do println(read(c)) end\n             ^^^^^^^^^^^^^^^^^^^^^\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  fn read(c : Cap(IO.FileRead)) : String do \"x\" end\n\n  fn main(c : Cap(IO.Console)) do println(read(c)) end\nend\n"
+ },
+ "17-linear-used-twice": {
+  "file": "linear-used-twice.march",
+  "output": "-- LINEARITY -------------------- linear-used-twice.march\n\nThe linear value `t` is used more than once here. [linear_used_twice]\nLinear values must be consumed exactly once \u2014 they cannot be copied or ignored.\n\n12 |     println(int_to_string(consume(t) + consume(t)))\n                                                    ^\n\n\n    `t` was already consumed here:\n\n12 |     println(int_to_string(consume(t) + consume(t)))\n                                       ^\n    run `march --explain linear_used_twice`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  always_linear type Token = Token(Int)\n\n  fn consume(t : Token) : Int do\n    match t do Token(n) -> n end\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    let t = Token(1)\n    println(int_to_string(consume(t) + consume(t)))\n  end\nend\n"
+ },
+ "18-linear-some-branches": {
+  "file": "linear-some-branches.march",
+  "output": "-- LINEARITY ----------------- linear-some-branches.march\n\nThe linear value `t` is consumed on some branches but not others. [linear_mixed_consumption]\nOn a branch that doesn't consume it, the value is dropped. Consume it on every branch, or end that branch with `panic(\u2026)` if it never returns.\n\n12 |     let n = match 2 do\n                       ^^^^\n\n\n    `t` is consumed on this branch:\n\n13 |       1 -> consume(t)\n                        ^\n\n    but not on this one, where it is dropped:\n\n15 |       _ -> 0\n                ^\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  always_linear type Token = Token(Int)\n\n  fn consume(t : Token) : Int do\n    match t do Token(n) -> n end\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    let t = Token(1)\n    let n = match 2 do\n      1 -> consume(t)\n      2 -> consume(t) + 1\n      _ -> 0\n    end\n    println(int_to_string(n))\n  end\nend\n"
+ },
+ "19-linear-captured": {
+  "file": "linear-captured.march",
+  "output": "-- LINEARITY ---------------------- linear-captured.march\n\nThe linear value `t` cannot be captured by a closure. [linear_captured]\nA closure may be called multiple times, which would violate the exactly-once guarantee.\nPass `t` as a parameter to the closure instead.\n\n14 |     println(int_to_string(twice(fn () -> consume(t))))\n                                     ^^^^^^^^^^^^^^^^^^^\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  always_linear type Token = Token(Int)\n\n  fn consume(t : Token) : Int do\n    match t do Token(n) -> n end\n  end\n\n  fn twice(k : () -> Int) : Int do k() + k() end\n\n  fn main(_console : Cap(IO.Console)) do\n    let t = Token(1)\n    println(int_to_string(twice(fn () -> consume(t))))\n  end\nend\n"
+ },
+ "20-misspelled-actor": {
+  "file": "misspelled-actor.march",
+  "output": "-- NAMING ------------------------ misspelled-actor.march\n\nI don't know an actor called `Countr`. [unknown_constructor]\nDid you mean `Counter`?\n\n11 |     let p = spawn(Countr)\n                       ^^^^^^\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  actor Counter do\n    state { n : Int }\n    init { n: 0 }\n    on Bump(k : Int) do { state with n: state.n + k } end\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    let p = spawn(Countr)\n    send(p, Bump(1))\n  end\nend\n"
+ },
+ "21-message-argument": {
+  "file": "message-argument.march",
+  "output": "-- TYPE MISMATCH ----------------- message-argument.march\n\nexpected `Int` but got `String`. [type_mismatch]\n\n12 |     send(c, Bump(\"one\"))\n                      ^^^^^\n\n    `Bump` is a message of actor `Counter`, and its handler declares this argument's type.\n\n    the expected type comes from here:\n\n7 |     on Bump(k : Int) do { state with n: state.n + k } end\n                ^\n    run `march --explain type_mismatch`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  actor Counter do\n    state { n : Int }\n    init { n: 0 }\n    on Bump(k : Int) do { state with n: state.n + k } end\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    let c = spawn(Counter)\n    send(c, Bump(\"one\"))\n  end\nend\n"
+ },
+ "22-handler-returns-state": {
+  "file": "handler-returns-state.march",
+  "output": "-- ACTOR -------------------- handler-returns-state.march\n\nThe handler for `Bump` must return `Counter`'s new state, a `{ n : Int }`, but it returns an `Int`. [actor_handler_state_type]\nA handler's result replaces the actor's state for the next message.\n\n7 |     on Bump(k : Int) do state.n + k end\n           ^^^^\n\n    If this is the new value of `n`, return `{ state with n: \u2026 }` with it.\n\n    this is an `Int`:\n\n7 |     on Bump(k : Int) do state.n + k end\n                            ^^^^^^^^^^^\n    run `march --explain actor_handler_state_type`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  actor Counter do\n    state { n : Int }\n    init { n: 0 }\n    on Bump(k : Int) do state.n + k end\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    let c = spawn(Counter)\n    send(c, Bump(1))\n  end\nend\n"
+ },
+ "23-send-wrong-actor": {
+  "file": "send-wrong-actor.march",
+  "output": "-- ACTOR ------------------------- send-wrong-actor.march\n\n`Bump` is a message for `Counter`, but this pid is an actor `Log` (spawned on line 17), so the message would be dropped. [send_wrong_actor]\nSend it to a pid spawned from `Counter`, or send this actor one of its own messages.\n\n18 |     send(log, Bump(1))\n                   ^^^^^^^\n\n    `Log` handles `Note`.\n\n    `log` is spawned from `Log` here:\n\n17 |     let log = spawn(Log)\n                   ^^^^^^^^^^\n    run `march --explain send_wrong_actor`\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  actor Counter do\n    state { n : Int }\n    init { n: 0 }\n    on Bump(k : Int) do { state with n: state.n + k } end\n  end\n\n  actor Log do\n    state { last : String }\n    init { last: \"\" }\n    on Note(t : String) do { state with last: t } end\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    let log = spawn(Log)\n    send(log, Bump(1))\n  end\nend\n"
+ },
+ "24-channel-wrong-step": {
+  "file": "channel-wrong-step.march",
+  "output": "-- PROTOCOL -------------------- channel-wrong-step.march\n\n`Chan.send` can't send here: at this point the channel must receive an `Int`. [session_state_mismatch]\n\n13 |     let cc3 = Chan.send(cc2, 43)\n                   ^^^^^^^^^^^^^^^^^^\n\n    What is left on this channel: receive an `Int`, then close.\n\n    the channel is `Client`'s end of protocol `Echo`, declared here:\n\n5 |   protocol Echo do\n      ^^^^^^^^^^^^^^^^\n    run `march --explain session_state_mismatch`\n\n\n-- PROTOCOL -------------------- channel-wrong-step.march\n\n`Chan.close` can't close this channel here: at this point the channel must receive an `Int`. [session_state_mismatch]\n\n15 |     Chan.close(sc)\n         ^^^^^^^^^^^^^^\n\n    What is left on this channel: receive an `Int`, then send an `Int`, then close.\n\n    the channel is `Server`'s end of protocol `Echo`, declared here:\n\n5 |   protocol Echo do\n      ^^^^^^^^^^^^^^^^\n",
+  "source": "mod Main do\n  type Client = Client\n  type Server = Server\n\n  protocol Echo do\n    Client -> Server : Int\n    Server -> Client : Int\n  end\n\n  fn main() do\n    let (cc, sc) = Chan.new(Echo)\n    let cc2 = Chan.send(cc, 42)\n    let cc3 = Chan.send(cc2, 43)\n    Chan.close(cc3)\n    Chan.close(sc)\n  end\nend\n"
+ },
+ "25-offer-not-exhaustive": {
+  "file": "offer-not-exhaustive.march",
+  "output": "-- PROTOCOL ------------------ offer-not-exhaustive.march\n\nThis `match` doesn't handle every branch the peer can choose \u2014 missing: :err. [session_offer_nonexhaustive]\nThe protocol's `offer` branches are: :ok, :err.\n\n17 |     match label do\n               ^^^^^^^^\n",
+  "source": "mod Main do\n  type C = C\n  type S = S\n\n  protocol Lookup do\n    choose by S:\n      ok  -> S -> C : Int\n      err -> S -> C : String\n    end\n  end\n\n  fn main() do\n    let (cc, sc) = Chan.new(Lookup)\n    let sc2 = Chan.choose(sc, :ok)\n    Chan.close(Chan.send(sc2, 7))\n    let (label, cc2) = Chan.offer(cc)\n    match label do\n      :ok ->\n        let (_n, cc3) = Chan.recv(cc2)\n        Chan.close(cc3)\n    end\n  end\nend\n"
+ },
+ "26-step-after-loop": {
+  "file": "step-after-loop.march",
+  "output": "-- PROTOCOL ----------------------- step-after-loop.march\n\nProtocol `Ticker`: this step can never run \u2014 it comes after a `loop`, and a `loop` block repeats forever, so it must be the last step. [protocol_invalid]\n\n9 |     B -> A : Bool\n        ^\n\n\n    this `loop` repeats forever:\n\n7 |       A -> B : Int\n          ^\n",
+  "source": "mod Main do\n  type A = A\n  type B = B\n\n  protocol Ticker do\n    loop do\n      A -> B : Int\n    end\n    B -> A : Bool\n  end\n\n  fn main() do\n    ()\n  end\nend\n"
+ },
+ "27-may-crash": {
+  "file": "may-crash.march",
+  "output": "-- PROTOCOL ----------------------------- may-crash.march\n\nProtocol `Logging`: `C` may crash, so `C -> I : ...` needs `or crash do ... end`: what does `I` do if `C` crashes before sending? [role_needs_invalid]\n\n9 |     C -> I : String\n        ^\n\n    The crash branch is the rest of the conversation when `C` is gone. It must begin, for `L`, with a message from `I`; the fix sends one each, for you to change to what the conversation should do.\n",
+  "source": "mod Main do\n  needs IO\n  needs Session.Live\n\n  @[endpoints]\n  protocol Logging do\n    may crash C\n    L -> I : Int\n    C -> I : String\n    I -> L : String\n  end\n\n  fn main(_c : Cap(IO)) do () end\nend\n"
+ },
+ "28-role-skips-a-step": {
+  "file": "role-skips-a-step.march",
+  "output": "-- PROTOCOL --------------------- role-skips-a-step.march\n\nRole `Cons` tries to choose `more` or `done` here, but at this point protocol `Stream` says it must receive an `Int` from `Prod`. [protocol_step_order]\n\n18 |     Stream_Cons.close(s, Stream_Cons.choose_done(s, st, true))\n                                                         ^^\n\n    Take that step with `Stream_Cons.recv_Msg_Prod_Cons_1` first.\n\n    `Cons` is here: it must receive an `Int` from `Prod`:\n\n8 |       Prod -> Cons : Int\n          ^^^^\n\n    `st` is the state bound here:\n\n17 |   pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1) : Stream_Cons.Yield do\n                                       ^^\n    run `march --explain protocol_step_order`\n",
+  "source": "mod Main do\n  needs IO\n  needs Session.Live\n\n  @[endpoints]\n  protocol Stream do\n    loop do\n      Prod -> Cons : Int\n      choose by Cons:\n        more -> Cons -> Prod : Bool\n        done -> Cons -> Prod : Bool\n                stop\n      end\n    end\n  end\n\n  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1) : Stream_Cons.Yield do\n    Stream_Cons.close(s, Stream_Cons.choose_done(s, st, true))\n  end\n\n  fn main(_c : Cap(IO)) do () end\nend\n"
+ },
+ "29-role-grant": {
+  "file": "role-grant.march",
+  "output": "-- CAPABILITY -------------------------- role-grant.march\n\nThe body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)` (`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]\nhelp: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.\n\n21 |     let _ = file_write(\"/tmp/n\", int_to_string(n))\n                 ^^^^^^^^^^\n\n\n    the body calls `cons` here:\n\n33 |       fn (s, con, st) -> cons(s, con, st))\n                              ^^^^\n\n    `cons` calls `save` here:\n\n27 |       save(n)\n           ^^^^\n\n    the body of role `Cons`, passed to `Stream_Run.run_Cons`:\n\n33 |       fn (s, con, st) -> cons(s, con, st))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n    role `Cons` is granted only `Cap(IO.Console)` here:\n\n9 |     role Cons needs IO.Console\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^\n",
+  "source": "mod Main do\n  needs IO\n  needs IO.Console\n  needs IO.FileWrite\n  needs Session.Live\n\n  @[endpoints]\n  protocol Stream do\n    role Cons needs IO.Console\n    loop do\n      Prod -> Cons : Int\n      choose by Cons:\n        more -> Cons -> Prod : Bool\n        done -> Cons -> Prod : Bool\n                stop\n      end\n    end\n  end\n\n  pfn save(n : Int) : () do\n    let _ = file_write(\"/tmp/n\", int_to_string(n))\n    ()\n  end\n\n  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st : Stream_Cons.Entry) : Stream_Cons.Yield do\n    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->\n      save(n)\n      Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))\n  end\n\n  fn main(c : Cap(IO)) do\n    let _ = Stream_Run.run_Cons(c, \"cons\", \"secret\", Stream_Run.addrs_from_env(),\n      fn (s, con, st) -> cons(s, con, st))\n    ()\n  end\nend\n"
+ },
+ "30-index-out-of-range": {
+  "file": "index-out-of-range.march",
+  "output": "-- REFINEMENT ------------------ index-out-of-range.march\n\nrefinement violation: index must be less than the list's length [refinement_violated]\nargument `n` of `List.nth` does not satisfy precondition `_ < len(xs)`\nnote: this value never satisfies it; pass one that does\n\n3 |     List.nth([1, 2, 3], 7)\n        ^^^^^^^^^^^^^^^^^^^^^^\n\n\n    this argument must satisfy `_ >= 0 && _ < len(xs)`:\n\n3 |     List.nth([1, 2, 3], 7)\n                            ^\n    run `march --explain refinement_violated`\n",
+  "source": "mod Main do\n  fn third() : Int do\n    List.nth([1, 2, 3], 7)\n  end\n\n  fn main() : Int do\n    third()\n  end\nend\n"
+ },
+ "31-counterexample": {
+  "file": "counterexample.march",
+  "output": "-- REFINEMENT ---------------------- counterexample.march\n\nrefinement violation: argument `xs` of `head_of` does not satisfy precondition `len(_) > 0` (e.g. ys = []) [refinement_violated]\nnote: guard the call (e.g. `if len(ys) > 0 do \u2026`) or pass a value known to satisfy it\n\n11 |       head_of(ys)\n           ^^^^^^^^^^^\n\n\n    this argument must satisfy `len(_) > 0`:\n\n11 |       head_of(ys)\n                   ^^\n    run `march --explain refinement_violated`\n",
+  "source": "mod Main do\n  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do\n    match xs do\n      Cons(h, _) -> h\n      Nil        -> panic(\"empty\")\n    end\n  end\n\n  fn first_or_zero(ys : List(Int)) : Int do\n    if List.length(ys) == 0 do\n      head_of(ys)\n    else\n      0\n    end\n  end\n\n  fn main() : Int do\n    first_or_zero([1, 2, 3])\n  end\nend\n"
+ },
+ "32-return-refinement": {
+  "file": "return-refinement.march",
+  "output": "-- REFINEMENT ------------------- return-refinement.march\n\n`magnitude` does not satisfy its return type constraint on all code paths. [return_refinement_violated]\n\nThe return type requires:\n\n    _ >= 0\n\nA counterexample was found:\n\n    n = -1\n\n4 |   fn magnitude(n : Int) : {Int | _ >= 0} do\n      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n    Every branch must produce a return value satisfying `_ >= 0`.\n",
+  "source": "mod Main do\n  needs IO.Console\n\n  fn magnitude(n : Int) : {Int | _ >= 0} do\n    if n < 0 do n else 0 end\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    println(int_to_string(magnitude(-3)))\n  end\nend\n"
+ },
+ "33-termination": {
+  "file": "termination.march",
+  "output": "-- WARNING: RECURSION ----------------- termination.march\n\n`down` is not shown to terminate: the recursive call `down(n - 1)` is not shown to decrease `n`: e.g. n = -1 [termination_unproved]\nnote: the exit `n == 0` misses a negative `n`; `n <= 0` covers it.\nnote: a metric must stay at least 0 and fall at every recursive call (left to right, for several components). Guard the recursion (an exit such as `n <= 0`), refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall.\n\n4 |     if n == 0 do 0 else down(n - 1) end\n                            ^^^^^^^^^^^\n\n    run `march --explain termination_unproved`\n",
+  "source": "mod Main do\n  @[decreases(n)]\n  fn down(n : Int) : Int do\n    if n == 0 do 0 else down(n - 1) end\n  end\n\n  fn main() do\n    down(3)\n  end\nend\n"
+ },
+ "34-division-no-panic": {
+  "file": "division-no-panic.march",
+  "output": "-- REFINEMENT ------------------- division-no-panic.march\n\ndivision by `d` in `cap no_panic` module: refinement does not rule out zero (e.g. d = 0). [division_by_zero]\n\nUse `Math.checked_div` or `Math.checked_mod` to return `Option(Int)` instead of panicking, or annotate the divisor parameter with `{v : Int | v != 0}` (or `v > 0`) to prove it is safe.\n\n6 |     10 / d\n        ^^^^^^\n",
+  "source": "mod Main do\n  needs IO.Console\n  cap no_panic\n\n  fn scale(d : {v : Int | v * v >= 0}) : Int do\n    10 / d\n  end\n\n  fn main(_console : Cap(IO.Console)) do\n    println(int_to_string(scale(2)))\n  end\nend\n"
+ }
+}

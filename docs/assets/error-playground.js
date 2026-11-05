@@ -1,11 +1,14 @@
 /*
  * Error playground (docs/_includes/error-playground.html, on docs/error-messages.md).
  *
- * Loads an example from assets/error-tour/<name>.march into the editor and checks
- * it with window.marchCheck (js/march_browser_compile.ml), which runs the real
- * parser, desugarer and typechecker and returns the diagnostics rendered as
- * `march --check` prints them. The refinement checker needs z3, which a browser
- * does not have, so a refinement error is never reported here.
+ * Every example's program and the output the native `march --check` prints for it
+ * are in assets/error-tour/examples.json (scripts/gen-error-tour.py), so picking an
+ * example shows its output at once, with no compiler. Once the program is edited,
+ * Check runs window.marchCheck (js/march_browser_compile.ml): the real parser,
+ * desugarer and typechecker, rendering diagnostics as `march --check` does
+ * (scripts/browser-repl-smoke.js holds the two to the same text). The compiler
+ * (about 3 MB) starts downloading on the first edit. The refinement checker needs
+ * z3, which a browser does not have, so a refinement error is never reported here.
  *
  * Any element with data-error-example="<name>" (the "Try it" buttons on the page)
  * loads that example, checks it and scrolls the playground into view.
@@ -21,6 +24,8 @@
   var output = document.getElementById("ep-output");
   var status = document.getElementById("ep-status");
   var original = "";
+  var shown = "playground.march"; // file name the current example's header uses
+  var examples = null;            // examples.json, once fetched
   var compiler = null; // "loading" | "ready" | "failed"
   var waiting = [];
 
@@ -77,6 +82,13 @@
   }
 
   function check() {
+    // An unedited example: the output `march --check` printed for it when the page
+    // was generated, which the in-browser checker is tested to match.
+    if (examples && editor.value === original && examples[select.value] &&
+        examples[select.value].source === original) {
+      show(examples[select.value].output);
+      return;
+    }
     withCompiler(function () {
       if (typeof window.marchCheck !== "function") {
         info("This copy of the site's compiler bundle predates the in-browser checker. " +
@@ -84,28 +96,51 @@
              "`march --check` on the program locally.");
         return;
       }
-      var r;
-      try { r = window.marchCheck(editor.value); }
-      catch (e) { info("The checker crashed: " + e); return; }
-      if (r.output) show(r.output);
-      else output.innerHTML = '<span class="ep-ok">No errors. The program typechecks.</span>';
+      // Run the checker from a promise callback, not straight from the click or
+      // load event. Measured in Chromium (2026-11-05): the same marchCheck call took
+      // ~1,100 ms from any task (click, setTimeout, rAF, MessageChannel) and ~70 ms
+      // from a microtask. Node shows no such gap; the cause is not established.
+      var source = editor.value;
+      Promise.resolve().then(function () {
+        var r;
+        try { r = window.marchCheck(source, shown); }
+        catch (e) { info("The checker crashed: " + e); return; }
+        if (r.output) show(r.output);
+        else output.innerHTML = '<span class="ep-ok">No errors. The program typechecks.</span>';
+      });
     });
   }
 
+  var examplesReq = null;
+  function fetchExamples() {
+    if (!examplesReq) {
+      examplesReq = fetch(base + "/assets/error-tour/examples.json?v=" + ver)
+        .then(function (res) {
+          if (!res.ok) throw new Error(res.status + " " + res.statusText);
+          return res.json();
+        })
+        .then(function (j) { examples = j; return j; });
+    }
+    return examplesReq;
+  }
+
   function load(name, then) {
+    var put = function (ex) {
+      original = ex.source;
+      shown = ex.file;
+      editor.value = ex.source;
+      setStatus("");
+      if (then) then();
+    };
+    if (examples && examples[name]) { put(examples[name]); return; }
     setStatus("Loading example…");
-    fetch(base + "/assets/error-tour/" + name + ".march?v=" + ver)
-      .then(function (res) {
-        if (!res.ok) throw new Error(res.status + " " + res.statusText);
-        return res.text();
-      })
-      .then(function (src) {
-        original = src;
-        editor.value = src;
-        setStatus("");
-        if (then) then();
+    fetchExamples()
+      .then(function (j) {
+        if (!j[name]) throw new Error("no example named " + name);
+        put(j[name]);
       })
       .catch(function (e) {
+        examplesReq = null;
         setStatus("");
         info("Could not load the example: " + e.message);
       });
@@ -117,6 +152,10 @@
     editor.value = original;
     check();
   });
+
+  // Start fetching the compiler as soon as someone edits, so it is usually ready by
+  // the time they press Check.
+  editor.addEventListener("input", function () { withCompiler(function () {}); });
 
   editor.addEventListener("keydown", function (e) {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {

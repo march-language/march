@@ -2,7 +2,8 @@
     js_of_ocaml. Exposes:
 
       marchCompileToJs(source: string) -> { js: string|null, errors: string[] }
-      marchCheck(source: string)       -> { output: string, rejected: bool }
+      marchCheck(source: string, filename?: string)
+                                       -> { output: string, rejected: bool }
 
     Parses + desugars the given source, merges it with a curated stdlib
     bundle (loaded from window.marchStdlib, same convention as
@@ -123,8 +124,11 @@ let compile_to_js source =
     playground on docs/error-messages.md. It stops after the typechecker: the
     refinement passes need z3, which a browser does not have, so a refinement
     error is never reported here. Returns (rendered text, rejected). *)
-let check_source source =
-  let filename = "playground.march" in
+(* The stdlib never changes while the page is open: parse and desugar it once,
+   on the first check, not on every keystroke's worth of checking. *)
+let checker_stdlib = lazy (load_browser_stdlib ())
+
+let check_source ?(filename = "playground.march") source =
   (* One check is one `march --check` run: the explain pointer is shown once
      per code per run, so forget the codes the previous check showed. *)
   Hashtbl.reset March_errors.Errors.explain_hints_shown;
@@ -141,7 +145,7 @@ let check_source source =
      with
      | Error msg -> (msg, true)
      | Ok user_mod ->
-       let stdlib_decls = load_browser_stdlib () in
+       let stdlib_decls = Lazy.force checker_stdlib in
        March_typecheck.Typecheck_builtins.note_stdlib_decls stdlib_decls;
        let merged =
          { user_mod with
@@ -164,8 +168,10 @@ let check_source source =
 
 let () =
   Js.export "marchCheck"
-    (Js.wrap_callback (fun source_js ->
-       let (output, rejected) = check_source (Js.to_string source_js) in
+    (Js.wrap_callback (fun source_js filename_js ->
+       let filename =
+         Js.Optdef.case filename_js (fun () -> "playground.march") Js.to_string in
+       let (output, rejected) = check_source ~filename (Js.to_string source_js) in
        let obj = Js.Unsafe.obj [||] in
        Js.Unsafe.set obj (Js.string "output") (Js.string output);
        Js.Unsafe.set obj (Js.string "rejected") (Js.bool rejected);
