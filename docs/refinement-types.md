@@ -1676,6 +1676,9 @@ are already proved, so a check does not prove them again (see below).
 | `List.len_take(xs, n)`, for `0 <= n <= len(xs)` | `len(take(xs, n)) == n` |
 | `List.len_drop(xs, n)`, for `0 <= n <= len(xs)` | `len(drop(xs, n)) == len(xs) - n` |
 | `List.take_drop(xs, n)` | `append(take(xs, n), drop(xs, n)) == xs` |
+| `List.take_append(xs, ys)` | `take(append(xs, ys), len(xs)) == xs` |
+| `List.drop_append(xs, ys)` | `drop(append(xs, ys), len(xs)) == ys` |
+| `List.nth_opt_append(xs, ys, i)`, for `0 <= i < len(xs)` | `nth_opt(append(xs, ys), i) == nth_opt(xs, i)` |
 
 ```march
 fn need3(xs : {List(Int) | len(_) == 3}) : Int do 0 end
@@ -1685,6 +1688,12 @@ fn f(a : {List(Int) | len(_) == 1}, b : {List(Int) | len(_) == 2}) : Int do
   need3(List.append(a, b))   -- proved
 end
 ```
+
+`Math.min_int`, `Math.max_int` and `Math.clamp_int` have proved result types:
+`{Int | _ <= a && _ <= b && (_ == a || _ == b)}` for `min_int` (and dually for `max_int`),
+and `{Int | high < low || (_ >= low && _ <= high)}` for `clamp_int`, so a call with
+`low <= high` is known to be in range. The condition is in the result, not a precondition,
+so no existing call gains an obligation.
 
 `List.filter`'s result also has a proved length contract,
 `len(_) <= len(xs)`, alongside the existing one about its elements.
