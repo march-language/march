@@ -1,0 +1,9 @@
+mod Main do
+  fn adder(x : Int) do
+    fn (y) -> x + y
+  end
+
+  fn main() do
+    adder(1)(2)
+  end
+end

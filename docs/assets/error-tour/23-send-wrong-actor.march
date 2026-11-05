@@ -1,0 +1,20 @@
+mod Main do
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do { state with n: state.n + k } end
+  end
+
+  actor Log do
+    state { last : String }
+    init { last: "" }
+    on Note(t : String) do { state with last: t } end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    let log = spawn(Log)
+    send(log, Bump(1))
+  end
+end

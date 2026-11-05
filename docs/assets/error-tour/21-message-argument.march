@@ -1,0 +1,14 @@
+mod Main do
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do { state with n: state.n + k } end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    let c = spawn(Counter)
+    send(c, Bump("one"))
+  end
+end

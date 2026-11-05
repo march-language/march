@@ -1,0 +1,22 @@
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1) : Stream_Cons.Yield do
+    Stream_Cons.close(s, Stream_Cons.choose_done(s, st, true))
+  end
+
+  fn main(_c : Cap(IO)) do () end
+end

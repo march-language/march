@@ -1,0 +1,11 @@
+mod Main do
+  fn clamp(x : Int) : Int do
+    if x > 0 do
+      x
+    end
+  end
+
+  fn main() do
+    clamp(5)
+  end
+end

@@ -2,6 +2,7 @@
     js_of_ocaml. Exposes:
 
       marchCompileToJs(source: string) -> { js: string|null, errors: string[] }
+      marchCheck(source: string)       -> { output: string, rejected: bool }
 
     Parses + desugars the given source, merges it with a curated stdlib
     bundle (loaded from window.marchStdlib, same convention as
@@ -115,6 +116,60 @@ let compile_to_js source =
      with
      | Ok (js, _map) -> (Some js, [])
      | Error errs -> (None, errs))
+
+(** Typecheck user source and render its diagnostics the way `march --check`
+    prints them (bin/main.ml: each user-file diagnostic, cascades suppressed,
+    rendered with carets and followed by two blank lines), for the error-message
+    playground on docs/error-messages.md. It stops after the typechecker: the
+    refinement passes need z3, which a browser does not have, so a refinement
+    error is never reported here. Returns (rendered text, rejected). *)
+let check_source source =
+  let filename = "playground.march" in
+  (* One check is one `march --check` run: the explain pointer is shown once
+     per code per run, so forget the codes the previous check showed. *)
+  Hashtbl.reset March_errors.Errors.explain_hints_shown;
+  let render (d : March_errors.Errors.diagnostic) =
+    March_errors.Errors.render_diagnostic ~src:source ~filename d ^ "\n\n\n" in
+  match March_parser.Parse.module_ ~filename ~stuck:"" source with
+  | Error diags -> (String.concat "" (List.map render diags), true)
+  | Ok m ->
+    let desugar_errors = March_errors.Errors.create () in
+    (match
+       (try Ok (March_desugar.Desugar.desugar_module ~errors:desugar_errors m)
+        with March_errors.Errors.ParseError (msg, _hint, pos) ->
+          Error (Printf.sprintf "line %d: %s\n" pos.Lexing.pos_lnum msg))
+     with
+     | Error msg -> (msg, true)
+     | Ok user_mod ->
+       let stdlib_decls = load_browser_stdlib () in
+       March_typecheck.Typecheck_builtins.note_stdlib_decls stdlib_decls;
+       let merged =
+         { user_mod with
+           March_ast.Ast.mod_decls =
+             stdlib_decls @ user_mod.March_ast.Ast.mod_decls }
+       in
+       let errctx, _type_map, _env =
+         March_typecheck.Typecheck.check_module_full merged in
+       List.iter (March_errors.Errors.report errctx)
+         (List.rev desugar_errors.March_errors.Errors.diagnostics);
+       let visible (d : March_errors.Errors.diagnostic) =
+         d.span.March_ast.Ast.file = filename in
+       let diags =
+         List.filter visible
+           (March_errors.Errors.suppress_cascades ~visible
+              (March_errors.Errors.sorted errctx)) in
+       let rejected = List.exists (fun (d : March_errors.Errors.diagnostic) ->
+           d.severity = March_errors.Errors.Error) diags in
+       (String.concat "" (List.map render diags), rejected))
+
+let () =
+  Js.export "marchCheck"
+    (Js.wrap_callback (fun source_js ->
+       let (output, rejected) = check_source (Js.to_string source_js) in
+       let obj = Js.Unsafe.obj [||] in
+       Js.Unsafe.set obj (Js.string "output") (Js.string output);
+       Js.Unsafe.set obj (Js.string "rejected") (Js.bool rejected);
+       obj))
 
 let () =
   Js.export "marchCompileToJs"
