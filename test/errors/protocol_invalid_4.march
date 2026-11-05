@@ -1,4 +1,4 @@
--- EXPECT-ERROR: can never run
+-- EXPECT-ERROR: this step can never run — it comes after a `loop`
 mod Main do
   needs IO.Console
   -- Session types: a `loop` block repeats forever (`Rec X. S[X]`), so steps

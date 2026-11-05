@@ -19,7 +19,10 @@
 -- became PROVED (2026-09-16) when the predicate translator started
 -- reflecting non-linear products. An uncontracted callee is the shape that
 -- survives both: unprovable because the checker cannot see through it, and
--- unrefutable because the contract is actually true. The obligation is
+-- unrefutable because the contract is actually true. Since 2026-11-04 the
+-- checker unfolds a reflected call as a return value
+-- (specs/progress/2026-11-04-return-contract-block-facts.md), so `av` is
+-- `@[opaque]`: its body stays out of the proof. The obligation is
 -- therefore SKIPPED
 -- -- and under `cap verified` that skip is now an error,
 -- exactly as an undischarged precondition already was (see
@@ -34,6 +37,7 @@ mod T134 do
 
   cap verified
 
+  @[opaque]
   fn av(z : Int) : Int do
     if z < 0 do 0 - z else z end
   end

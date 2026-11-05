@@ -11,3 +11,7 @@ here" label. (The `linear_used_twice_6` follow-ons the §X3 note pointed at turn
 out-of-order closes.) Open: mechanisms 3–6 of §F3 — `Chan.*` wording and poisoning, step-level spans
 and an `or crash` fix for the well-formedness errors, the role-body cases beyond step order, and
 explain pages for the other protocol codes.
+
+2026-11-04: mechanism 4 landed (`specs/progress/2026-11-04-diag-f3-wellformed-spans-or-crash-fix.md`):
+the after-`loop` errors point at the dead step, and a missing crash branch gets an `or crash` fix.
+Open: mechanisms 3, 5 and 6.

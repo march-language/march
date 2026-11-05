@@ -230,25 +230,6 @@ let local_elem_ret_proved : fn_sig list ref = ref []
 (* Set while [Refine_check.gate_elem_returns] runs its scratch walks. *)
 let gating_elem_returns : bool ref = ref false
 
-(* Every binder occurrence in [e], duplicates kept: `let` and `match`
-   patterns, local `fn` names and parameters, lambda parameters.
-   [structural_subvars] works by NAME over the whole body, so a component
-   name is trusted only when [ambiguous_names] says it is bound exactly once —
-   a second binder of the same spelling anywhere (`match zs do Cons(h2, t)`
-   after `match xs do Cons(h, t)`), or a parameter of that spelling, makes
-   some occurrence of it something other than the component. *)
-let rec binder_occurrences (acc : string list) (e : A.expr) : string list =
-  let acc =
-    match e with
-    | A.ELet (b, _) -> pat_binders b.A.bind_pat @ acc
-    | A.ELetFn (n, ps, _, _, _) -> n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps @ acc
-    | A.ELam (ps, _, _) -> List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps @ acc
-    | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> pat_binders p @ acc
-    | A.EMatch (_, brs, _) -> List.concat_map (fun (br : A.branch) -> pat_binders br.A.branch_pat) brs @ acc
-    | _ -> acc
-  in
-  List.fold_left binder_occurrences acc (children e)
-
 (* The names a structural-component set must not trust for a clause with
    parameters [params] and body [body]: every parameter name, and every name
    bound more than once in the body. *)

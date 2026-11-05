@@ -27082,14 +27082,16 @@ let demand_chains_suite =
     gated "C1 control: a weaker proved callee return does not prove the caller's" (fun () ->
         (* Base: b skipped:unreflectable-subject.  Now the fact `_ >= 0` is
            used and does not imply `_ > 0`: undecided, never proved. *)
-        let src = m "  fn a(x : {Int | _ > 0}) : {Int | _ >= 0} do x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
+        (* `@[opaque]`: unfolding `a` would prove `b` (it is true); this is
+           about what the contract alone gives. *)
+        let src = m "  @[opaque]\n  fn a(x : {Int | _ > 0}) : {Int | _ >= 0} do x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
         Alcotest.check vs "a" [ "proved" ] (post "a" src);
         Alcotest.check vs "b" [ "skipped:solver-undecided" ] (post "b" src));
     gated "C1 control: an UNPROVED callee return is not lent" (fun () ->
         (* Base: the same.  `a`'s `_ > 0` fails at x = 0, so it does not
            travel, and `b` (correct: its own x is positive) keeps the
            opaque-tail skip. *)
-        let src = m "  fn a(x : Int) : {Int | _ > 0} do x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
+        let src = m "  @[opaque]\n  fn a(x : Int) : {Int | _ > 0} do x end\n  fn b(x : {Int | _ > 0}) : {Int | _ > 0} do a(x) end\n" in
         Alcotest.(check bool) "a not proved" false (List.mem "proved" (post "a" src));
         Alcotest.check vs "b" [ "skipped:unreflectable-subject" ] (post "b" src));
     gated "C1 reject control: a proved callee return that contradicts the caller's is a violation" (fun () ->
@@ -27823,7 +27825,9 @@ let gap_let_call_tail_suite =
           (post "b"
              (m "  @[assume]\n  fn a(x : Int) : {Int | _ > 0} do x * x + 1 end\n  fn b(x : Int) : {Int | _ > 0} do\n    let r = a(x)\n    r\n  end\n")));
     gated "control: an unproved callee return is not lent" (fun () ->
-        let src = m ("  fn a(x : Int) : {Int | _ > 0} do x end\n" ^ b "    let r = a(x)\n    r") in
+        (* `@[opaque]`: unfolding `a` would prove `b` (it is true), and this
+           control is about the contract alone. *)
+        let src = m ("  @[opaque]\n  fn a(x : Int) : {Int | _ > 0} do x end\n" ^ b "    let r = a(x)\n    r") in
         Alcotest.(check bool) "a not proved" false (List.mem "proved" (post "a" src));
         Alcotest.check vs "b" [ "skipped:solver-undecided" ] (post "b" src));
     gated "control: self-recursion never uses its own return" (fun () ->
@@ -27839,7 +27843,7 @@ let gap_let_call_tail_suite =
         (* a(x) >= 2 really, but the contract only says > 0: undecided, and
            the interpreter does not confirm the model (b(1) = 1). *)
         Alcotest.check vs "r - 1" [ "skipped:solver-undecided" ]
-          (post "b" (m (a_pos ^ b "    let r = a(x)\n    r - 1")));
+          (post "b" (m ("  @[opaque]\n" ^ a_pos ^ b "    let r = a(x)\n    r - 1")));
         Alcotest.check vs "a : {_ < 0}" [ "violated" ]
           (post "b"
              (m ("  fn a(x : {Int | _ > 0}) : {Int | _ < 0} do 0 - x end\n" ^ b "    let r = a(x)\n    r"))));
@@ -29176,6 +29180,7 @@ let () =
       ("reflect-fuel", Test_refine_fuel.tests);
       ("reflect-stdlib-list", Test_refine_stdlib_list.tests);
       ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
+      ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
