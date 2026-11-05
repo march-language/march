@@ -54,5 +54,12 @@ chain, block), `_46` (`match do` arm against the return type), `_47` (`match do`
 type), `_48` (guard: both branches agree), `_49` (record literal in a branch), `_50` (`+`).
 `type_mismatch_1`, `_2`, `_22` and `cap_grant_17` show the operand wording; `_2` the order.
 
+Types oracle against main: TIER1 differs only in `reject_t01_int_vs_string`, whose `diagnostics`
+array is reordered by the new sort (same entries; the rest of its core AST is identical). A first
+version also changed `stdlib_cluster_node` (a body typed `TError`) and `stdlib_net_kernel`: the `++`
+note rebuilt the diagnostic list on every `++` checked against a type, and X3's poisoning reads "an
+error was added" from the list's physical identity, so the copy looked like a new error. The note
+now rebuilds the list only when it changes a diagnostic; anything editing that list must do the same.
+
 Not done (no open item; small): an `if` whose expected type is a type variable bound later, and a
 `match` with patterns (already checked per arm in check mode).
