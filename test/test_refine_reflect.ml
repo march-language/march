@@ -177,13 +177,14 @@ end
         in
         blocked out "hd" "R5:non-exhaustive";
         blocked out "safe" "R4:calls panic");
-    gated "report_div: a literal divisor passes; an unproved one is R4 (ledger)" (fun () ->
+    gated "report_div: a literal divisor passes; an unguarded one is R4" (fun () ->
         let out =
           run
-            "mod Dv do\n  fn half(n : Int) : Int do n / 2 end\n  fn ratio(a : Int, b : Int) : Int do a / b end\nend\n"
+            "mod Dv do\n  fn half(n : Int) : Int do n / 2 end\n  fn ratio(a : Int, b : Int) : Int do a / b end\n  fn pos(a : Int, b : {Int | _ > 0}) : Int do a / b end\nend\n"
         in
         reflected out "half";
-        blocked out "ratio" "R4:division by b not proved");
+        reflected out "pos";
+        blocked out "ratio" "R4:divides by a value nothing shows is non-zero");
     gated "report_div: a PROVED Division obligation passes R4" (fun () ->
         let out =
           run

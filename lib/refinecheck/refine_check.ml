@@ -9242,7 +9242,7 @@ let record_inferred (t : Refine_term.t) res =
         g.RT.sccs.(si))
     res
 
-let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
+let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     ?(stdlib_files : string list = [])
     ?(audit : ((Refine_audit.site * Refine_audit.disposition) list -> unit) option)
     ?(pre_desugar_decls : A.decl list option)
@@ -10240,3 +10240,33 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     sink
       (List.map (fun s -> (s, Refine_audit.Unenforced dropped_reason)) dropped
       @ List.map (fun s -> (s, Refine_audit.classify s)) post_sites)
+
+(* Reflection R2 for a metric certificate.  The encoder is built before the
+   walk, and a metric certificate is decided after it, so a function whose
+   only blocker was the missing certificate is left out of the logic.  When
+   the walk certifies one, the module is checked again with that certificate
+   known to the encoder ([Refine_reflect.seed_certs]); the first pass's
+   diagnostics are dropped.  The certificate is a proof on its own (the first
+   pass decided it without the function's equation), so the second pass may
+   rely on it.  Only a module whose walk planned metrics (`@[decreases]`,
+   `cap total`, the termination report) can need it. *)
+let check_module ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map (errctx : Err.ctx)
+    (m : A.module_) : unit =
+  Hashtbl.reset Refine_reflect.seed_certs;
+  let before = errctx.Err.diagnostics in
+  check_module_pass ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map errctx m;
+  let late =
+    Hashtbl.fold
+      (fun sp c acc ->
+        match Hashtbl.find_opt Refine_reflect.encoder_blocked sp with
+        | Some txt when c = "metric" && String.starts_with ~prefix:"R2:" txt -> (sp, c) :: acc
+        | _ -> acc)
+      Refine_term.last_certs []
+  in
+  if late <> [] then begin
+    List.iter (fun (sp, c) -> Hashtbl.replace Refine_reflect.seed_certs sp c) late;
+    errctx.Err.diagnostics <- before;
+    Fun.protect
+      ~finally:(fun () -> Hashtbl.reset Refine_reflect.seed_certs)
+      (fun () -> check_module_pass ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map errctx m)
+  end

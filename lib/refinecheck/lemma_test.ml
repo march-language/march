@@ -83,9 +83,9 @@ let show_input (bs : (string * V.value) list) =
    bare names: a nested module's members are bound as "M.f", and the
    theorem names them as written inside "M". *)
 (* The logic's `len` (a measure: a list's length, a string's) has no binding in
-   the interpreter, so a theorem over it is never decided.  Law strength binds
-   it ([with_len]); `--lemma-test` does not yet, since its compiled harness has
-   no `len` either.  Bound only when the module defines no `len` of its own. *)
+   the interpreter, so it is bound here ([with_len]), and the compiled harness
+   declares one ([len_source]).  Bound only when the module defines no `len`
+   of its own. *)
 let len_builtin () : (string * V.value) list =
   let defined = match W.module_env () with Some env -> List.mem_assoc "len" env | None -> false in
   if defined then []
@@ -97,6 +97,20 @@ let len_builtin () : (string * V.value) list =
             | [ V.VString s ] -> V.VInt (String.length s)
             | [ v ] -> (match W.list_len v with Some n -> V.VInt n | None -> failwith "len: not a list")
             | _ -> failwith "len: one argument" ) ) ]
+
+(* The harness's `len`, one interface method over the two sorts the logic's
+   `len` measures. *)
+let len_source =
+  {|  interface LemmaLen(a) do
+    fn len : a -> Int
+  end
+  impl LemmaLen(String) do
+    fn len(s) do string_byte_length(s) end
+  end
+  impl LemmaLen(List(a)) do
+    fn len(xs) do List.length(xs) end
+  end
+|}
 
 let aliases ?(with_len = false) (qname : string) : (string * V.value) list =
   (if with_len then len_builtin () else [])
@@ -272,6 +286,17 @@ let harness ~(entry_mod : string) ~(text : string) (results : result list) :
   let b = Buffer.create 1024 in
   Buffer.add_string b "mod LemmaHarness do\n";
   List.iter (fun m -> Buffer.add_string b (Printf.sprintf "  use %s.*\n" m)) uses;
+  let mentions_len (th : string) =
+    let n = String.length th in
+    let rec at i =
+      i + 4 <= n
+      && ((String.sub th i 4 = "len(" && (i = 0 || not (match th.[i - 1] with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '.' -> true | _ -> false)))
+         || at (i + 1))
+    in
+    at 0
+  in
+  if List.exists (fun (_, (_, th), _) -> mentions_len th) covered && len_builtin () <> [] then
+    Buffer.add_string b len_source;
   List.iteri
     (fun i (_, (params, theorem), _) ->
       Buffer.add_string b (Printf.sprintf "  pfn lemma_law__%d(%s) : Bool do\n    %s\n  end\n" i params theorem))
@@ -314,7 +339,7 @@ let run ~(filename : string) ~(entry_mod : string) ?compile_run () : string list
     List.filter (fun (_, (fd : A.fn_def), _) -> fd.A.fn_name.A.span.A.file = filename) !Refine_check.lemma_defs
     |> List.sort (fun (a, _, _) (b, _, _) -> compare a b)
   in
-  let results = List.map (fun l -> RP.steps := 0; test_lemma ~file:filename l) lemmas in
+  let results = List.map (fun l -> RP.steps := 0; test_lemma ~with_len:true ~file:filename l) lemmas in
   let compiled : (string * compiled) list =
     match compile_run with
     | None -> []
