@@ -54,6 +54,16 @@ exception Diagnostic_exn of diagnostic
 let make ?(severity = Error) ?(notes = []) ~code ~span message =
   { severity; span; message; labels = []; notes; code; fix = None }
 
+(** Hint exclusivity (specs/plans/2026-11-02-diagnostics-depth-plan.md §X4):
+    a diagnostic gives at most one "likely cause".  [first_cause groups] is
+    the first non-empty group, so a caller lists its candidate explanations
+    most specific first and the rest are dropped, never stacked:
+    [first_cause [ occurs_note; session_hint; generic_hint ]]. *)
+let first_cause (groups : string list list) : string list =
+  match List.find_opt (fun g -> g <> []) groups with
+  | Some g -> g
+  | None -> []
+
 (** One line, [file:line:col: error: message [slug]], for the generic
     catch-alls that only have [Printexc.to_string] (the REPL, a test). *)
 let () =
@@ -267,7 +277,16 @@ let sorted ctx =
      reports `T`: the two codecs overlap because the two types share a name,
      which that error already says (with both sites);
    - an [ambiguous_constructor] hint inside a [send_wrong_actor] error: that
-     error already says which actor the bare message resolves to. *)
+     error already says which actor the bare message resolves to;
+   - any advisory HINT on the exact span of an error (§X4): the error is what
+     to fix there, and an advisory stacked on it can contradict its fix (a
+     `cap_root_broad` "narrow `Cap(IO)`" under a `cap_needs` "add `needs IO`");
+   - a [refinement_unverified] hint on the span of a [lemma_unproved_call]
+     warning, which already says the precondition is not proved there; the
+     warning takes over the precondition and the reason as one note.
+
+   Last, within each diagnostic that stays, a note that repeats an earlier
+   note or a line of the message is dropped (§X4: one hint, said once). *)
 let slug_of_code = Code.slug_of
 
 let first_backticked s =
@@ -282,6 +301,21 @@ let contains_sub hay needle =
   let hl = String.length hay and nl = String.length needle in
   let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
   nl = 0 || go 0
+
+(* A note that repeats an earlier note, or a line of the message, says the
+   same thing twice: drop it (whitespace-insensitive). *)
+let tidy_notes (d : diagnostic) : diagnostic =
+  let norm s =
+    String.split_on_char '\n' s |> List.map String.trim
+    |> List.filter (( <> ) "") |> String.concat " " in
+  let msg_lines = List.map String.trim (String.split_on_char '\n' d.message) in
+  let rec go seen = function
+    | [] -> []
+    | n :: rest ->
+      let k = norm n in
+      if k = "" || List.mem k seen || List.mem k msg_lines then go seen rest
+      else n :: go (k :: seen) rest in
+  { d with notes = go [] d.notes }
 
 let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
     (ds : diagnostic list) : diagnostic list =
@@ -349,6 +383,11 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
     List.filter_map (fun d ->
         if is_err d && has_slug Code.send_wrong_actor d then Some d.span else None) ds in
   let positioned_error = List.exists (fun d -> is_err d && d.span.start_line > 0) ds in
+  let error_spans = List.filter_map (fun d -> if is_err d then Some d.span else None) ds in
+  let lemma_call_spans =
+    List.filter_map (fun d ->
+        if d.severity <> Hint && visible d && has_slug Code.lemma_unproved_call d
+        then Some d.span else None) ds in
   let within (inner : March_ast.Ast.span) (outer : March_ast.Ast.span) =
     inner.file = outer.file
     && (inner.start_line, inner.start_col) >= (outer.start_line, outer.start_col)
@@ -407,6 +446,9 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
         || (is_err d && d.span.start_line = 0 && positioned_error)
         || (sl = Code.ambiguous_constructor
             && List.exists (fun o -> within d.span o) wrong_actor_spans)
+        || (d.severity = Hint && List.mem d.span error_spans)
+        || (sl = Code.refinement_unverified && d.severity = Hint
+            && List.mem d.span lemma_call_spans)
         || (sl = Code.overlapping_impl
             && List.exists (fun t -> contains_sub d.message ("(" ^ t ^ ")`")) json_collisions)
         || (sl = Code.cap_ceiling
@@ -459,6 +501,28 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
             { k with notes = k.notes @ [ note ] }
           | None -> k
         else k) kept in
+  (* The lemma warning takes over what the dropped [refinement_unverified]
+     hint knew: which precondition, and why it is not proved. *)
+  let kept =
+    List.map (fun k ->
+        if has_slug Code.lemma_unproved_call k && k.severity <> Hint then
+          match List.find_opt (fun d ->
+              has_slug Code.refinement_unverified d && d.severity = Hint
+              && d.span = k.span && not (List.memq d kept)) ds with
+          | Some d ->
+            let why = match String.split_on_char '\n' d.message with
+              | _ :: rest -> List.filter_map (fun l ->
+                  match String.trim l with "" -> None | l -> Some l) rest
+              | [] -> [] in
+            (match first_backticked d.message with
+             | Some p ->
+               let note = Printf.sprintf "Its precondition is `%s`%s." p
+                   (match why with [] -> "" | ws -> "; " ^ String.concat "; " ws) in
+               { k with notes = k.notes @ [ note ] }
+             | None -> k)
+          | None -> k
+        else k) kept in
+  let kept = List.map tidy_notes kept in
   (* Every rule names a visible error that stays, so this cannot fire; it
      guards the exit code against a future rule that forgets to. *)
   if List.exists is_err ds && not (List.exists is_err kept) then ds else kept

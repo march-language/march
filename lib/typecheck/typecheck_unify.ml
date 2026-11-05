@@ -513,12 +513,10 @@ and report_type_mismatch env ~span ~occurs_violation ~reason ?provided ?diff exp
          callback?" under it contradicted it), and the more specific
          session / same-name explanations pre-empt the generic one. *)
       notes =
-        (if occurs_violation then occurs_note
-         else
-           why_note @ mismatch_note
-           @ (match session_hint, same_name_note with
-              | (_ :: _ as h), _ | [], (_ :: _ as h) -> h
-              | [], [] -> common_hint));
+        Err.first_cause
+          [ occurs_note;
+            why_note @ mismatch_note
+            @ Err.first_cause [ session_hint; same_name_note; common_hint ] ];
       code = Err.Code.type_mismatch; fix = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).

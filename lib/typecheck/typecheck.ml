@@ -1986,10 +1986,15 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) ?pid_expr (msg : Ast.
                        lbl_message = Printf.sprintf "actor `%s` is declared here" a } ]
                  | _ -> []
              in
-             let notes = match own with
-               | [] -> []
-               | ms -> [ Printf.sprintf "`%s` handles %s." a
-                           (String.concat ", " (List.map (fun m -> "`" ^ m ^ "`") ms)) ]
+             (* One likely cause (§X4): when the advice already names this
+                actor's own handler of the same message, listing what the
+                actor handles only restates it. *)
+             let notes =
+               if List.mem a alternatives then []
+               else match own with
+                 | [] -> []
+                 | ms -> [ Printf.sprintf "`%s` handles %s." a
+                             (String.concat ", " (List.map (fun m -> "`" ^ m ^ "`") ms)) ]
              in
              labels, notes
          in
