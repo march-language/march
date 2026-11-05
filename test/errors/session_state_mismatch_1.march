@@ -1,4 +1,4 @@
--- EXPECT-ERROR: Chan.send: channel is at
+-- EXPECT-ERROR: `Chan.send` can't send here
 mod Main do
   -- Session-types widening, Task 3 -- send-at-wrong-state.
   -- `protocol Echo` gives `cc` the local type Send(Int, Recv(Int, End)).

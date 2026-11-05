@@ -11,5 +11,6 @@ Protocol `Bad`: this step can never run — it comes after a `loop`, and a `loop
 
 12 |       A -> B : Int
            ^
+    run `march --explain protocol_invalid`
 
 

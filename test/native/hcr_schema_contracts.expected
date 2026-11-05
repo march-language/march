@@ -6,5 +6,6 @@ Tally: handler Span refines=[None, '(p1 >= p0)']
 Odd: contracts=1
 Odd: invariant_unsupported=True
 Odd: refine_unsupported=True
+Odd: accepted_unproved=['state']
 Odd: field count refine=None
 Odd: handler Poke refines=None

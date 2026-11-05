@@ -1,0 +1,16 @@
+exit: 1
+-- ACTOR ---------------- errors/actor_init_arity_2.march
+
+Actor `Plain` declares no `init` parameters, but `spawn(Plain, …)` supplies 1 argument. [actor_init_arity]
+Its init is `init { … }`; to take a value at spawn time, declare the parameters: `init(config : Config) { … }`.
+
+10 |     let p = spawn(Plain, 5)
+                 ^^^^^^^^^^^^^^^
+
+
+    `Plain`'s `init` takes no parameters:
+
+5 |     init { n: 0 }
+             ^^^^^^^^
+
+

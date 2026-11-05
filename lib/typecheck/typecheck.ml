@@ -2193,6 +2193,81 @@ let relocate_literal_mismatch env ~mark ~reason (e : Ast.expr) sp (expected : ty
        | _ -> ())
   | _ -> ()
 
+(* -----------------------------------------------------------------
+   Session channels in plain terms (§F3, mechanism 3).
+   ----------------------------------------------------------------- *)
+
+let a_ty t =
+  let s = pp_ty t in
+  let art = match s.[0] with 'A' | 'E' | 'I' | 'O' | 'U' -> "an" | _ -> "a" | exception _ -> "a" in
+  Printf.sprintf "%s `%s`" art s
+
+let either_label bs =
+  match List.rev_map (fun (l, _) -> ":" ^ l) bs with
+  | [] -> "a branch"
+  | [ l ] -> "`" ^ l ^ "`"
+  | last :: rest -> String.concat ", " (List.rev_map (fun l -> "`" ^ l ^ "`") rest) ^ " or `" ^ last ^ "`"
+
+(** What a channel at [st] does next, as a verb phrase. *)
+let rec session_step_text st =
+  match st with
+  | SSend (t, _) -> "send " ^ a_ty t
+  | SRecv (t, _) -> "receive " ^ a_ty t
+  | SMSend (r, t, _) -> Printf.sprintf "send %s to `%s`" (a_ty t) r
+  | SMRecv (r, t, _) -> Printf.sprintf "receive %s from `%s`" (a_ty t) r
+  | SChoose bs -> "choose " ^ either_label bs
+  | SOffer bs | SOfferPending bs -> "wait for the other side to choose " ^ either_label bs
+  | SEnd -> "be closed with `Chan.close`"
+  | SRec _ -> session_step_text (unfold_srec st)
+  | SVar _ | SError -> "go on"
+
+(** The steps left on a channel at [st], up to a choice or four steps. *)
+let session_plan st =
+  let rec go n st acc =
+    if n = 0 then List.rev ("…" :: acc) else
+    match st with
+    | SSend (_, k) | SRecv (_, k) | SMSend (_, _, k) | SMRecv (_, _, k) ->
+      go (n - 1) k (session_step_text st :: acc)
+    | SRec _ -> go n (unfold_srec st) acc
+    | SEnd -> List.rev ("close" :: acc)
+    | _ -> List.rev (session_step_text st :: acc) in
+  String.concat ", then " (go 4 st [])
+
+(** The protocol and role a channel at [st] follows, when exactly one
+    protocol's projection has [st] as one of its states. *)
+let channel_origin env st =
+  let rec states seen t =
+    if List.exists (fun x -> x == t) seen then seen else
+    let seen = t :: seen in
+    match t with
+    | SSend (_, k) | SRecv (_, k) | SMSend (_, _, k) | SMRecv (_, _, k) -> states seen k
+    | SChoose bs | SOffer bs | SOfferPending bs -> List.fold_left (fun a (_, k) -> states a k) seen bs
+    | SRec (_, body) -> states (states seen body) (unfold_srec t)
+    | SEnd | SVar _ | SError -> seen in
+  let hits = StrMap.fold (fun pname (pi : proto_info) acc ->
+      List.fold_left (fun acc (role, proj) ->
+          if List.exists (fun x -> session_ty_exact_equal x st) (states [] proj)
+          then (pname, role, pi.pi_span) :: acc else acc) acc pi.pi_projections)
+      env.protocols [] in
+  match hits with [ h ] -> Some h | _ -> None
+
+(** A [Chan.*] call on a channel whose protocol is at another step:
+    [doing] is what the call does ("send", "close this channel"). *)
+let report_session_state env ~span ~op ~doing st =
+  let origin = channel_origin env st in
+  let labels = match origin with
+    | Some (pname, role, psp) ->
+      [ { Err.lbl_span = psp;
+          lbl_message = Printf.sprintf "the channel is `%s`'s end of protocol `%s`, declared here" role pname } ]
+    | None -> [] in
+  Err.report env.errors
+    { Err.severity = Error; span;
+      message = Printf.sprintf "`%s` can't %s here: at this point the channel must %s."
+          op doing (session_step_text st);
+      labels;
+      notes = [ "What is left on this channel: " ^ session_plan st ^ "." ];
+      code = Err.Code.session_state_mismatch; fix = None }
+
 (** The part of [t] at [path], seeing through linearity and nominal records. *)
 let rec type_at env t path =
   match path, strip_lin t with
@@ -2625,10 +2700,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
             TLin (Ast.Linear, TChan (ref cont))
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "Chan.send: channel is at `%s` but I expected `Send(T, ...)`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"Chan.send" ~doing:"send" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2654,10 +2726,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
             TTuple [payload_ty; TLin (Ast.Linear, TChan (ref cont))]
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "Chan.recv: channel is at `%s` but I expected `Recv(T, ...)`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"Chan.recv" ~doing:"receive" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2682,10 +2751,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
           | SEnd -> t_unit
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "Chan.close: channel is at `%s` but I expected `End`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"Chan.close" ~doing:"close this channel" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2728,10 +2794,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   TError))
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "Chan.choose: channel is at `%s` but I expected `Choose{...}`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"Chan.choose" ~doing:"choose a branch" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2784,10 +2847,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                TTuple [t_atom; TError])
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "Chan.offer: channel is at `%s` but I expected `Offer{...}`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"Chan.offer" ~doing:"wait for a choice" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2877,10 +2937,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                TLin (Ast.Linear, TChan (ref cont)))
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "MPST.send: channel is at `%s` but I expected `MSend(Role, T, ...)`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"MPST.send" ~doing:"send" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2925,10 +2982,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                TTuple [payload_ty; TLin (Ast.Linear, TChan (ref cont))])
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "MPST.recv: channel is at `%s` but I expected `MRecv(Role, T, ...)`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"MPST.recv" ~doing:"receive" other;
             TError)
        | TError -> TError
        | _ ->
@@ -3503,6 +3557,58 @@ let rec infer_expr env (e : Ast.expr) : ty =
            if n <= 0 then t
            else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
          peel arity f_ty
+       | Some (name, arity, n_args, _), _, _
+         when n_args >= 2 && n_args < arity
+              && (match March_ast.Protocol_states.find_call name.txt with
+                  | Some i -> List.length i.ps_branches = arity - 2
+                  | None -> false) ->
+         (* An offer with a branch callback left out (§F3): name the branches
+            the protocol's choice has and the ones this call is missing. *)
+         let i = Option.get (March_ast.Protocol_states.find_call name.txt) in
+         List.iter (fun a -> ignore (infer_expr env a)) args;
+         let given = n_args - 2 in
+         let missing = List.filteri (fun k _ -> k >= given) i.ps_branches in
+         let ticks ls = match List.rev_map (fun (l, _) -> "`" ^ l ^ "`") ls with
+           | [] -> "" | [ l ] -> l
+           | last :: rest -> String.concat ", " (List.rev rest) ^ " and " ^ last in
+         let close_call = match String.rindex_opt i.ps_call '.' with
+           | Some k -> String.sub i.ps_call 0 k ^ ".close" | None -> "close" in
+         (* A missing branch after which the conversation ends has a body that
+            always fits: close it.  Any other needs the user's own code. *)
+         let fix = match args with
+           | Ast.EVar s :: _ :: _ when List.for_all snd missing ->
+             let last = span_of_expr (List.nth args (n_args - 1)) in
+             let text = String.concat "" (List.map (fun _ ->
+                 Printf.sprintf ", fn (_v, st) -> %s(%s, st)" close_call s.txt) missing) in
+             Some (Err.FReplace { span = { last with start_line = last.end_line;
+                                                     start_col = last.end_col };
+                                  text })
+           | _ -> None in
+         Err.report env.errors
+           { Err.severity = Err.Error; span = sp;
+             message = Printf.sprintf
+                 "`%s` takes one callback for each branch `%s` can choose in protocol `%s` (%s), \
+                  but this call leaves out %s."
+                 name.txt (match String.index_opt i.ps_doing '`' with
+                     | Some a -> (match String.index_from_opt i.ps_doing (a + 1) '`' with
+                         | Some b -> String.sub i.ps_doing (a + 1) (b - a - 1)
+                         | None -> "the other side")
+                     | None -> "the other side")
+                 i.ps_proto (ticks i.ps_branches) (ticks missing);
+             labels = (match i.ps_span with
+                 | Some csp -> [ { Err.lbl_span = csp;
+                                   Err.lbl_message = "the choice is declared here" } ]
+                 | None -> []);
+             notes = (if fix <> None then
+                        [ Printf.sprintf "After %s the conversation ends, so the fix closes it; \
+                                          put any other work for that branch before the `close`."
+                            (ticks missing) ]
+                      else
+                        [ Printf.sprintf "Add a callback `fn (value, next_state) -> ...` for %s, \
+                                          in the order the protocol lists the branches."
+                            (ticks missing) ]);
+             code = Err.Code.session_offer_nonexhaustive; fix };
+         TError
        | Some (name, arity, n_args, def_span), _, _ ->
          List.iter (fun a -> ignore (infer_expr env a)) args;
          Err.report env.errors
@@ -3539,7 +3645,19 @@ let rec infer_expr env (e : Ast.expr) : ty =
          TError
        | None, None, _ ->
          check_callback_arities env f args;
-         let res = infer_app env sp f_ty args 0 in
+         (* A generated protocol step's payload (§F3): a mismatch there names
+            the step and points at it, not at the call. *)
+         let payload = match f with
+           | Ast.EVar name ->
+             (match March_ast.Protocol_states.find_call name.txt with
+              | Some i when i.ps_branches = [] ->
+                let at = Option.value i.ps_span ~default:sp in
+                Some (2, RBecause (RFnArg (at, 2),
+                                   Printf.sprintf "This is the step's payload: protocol `%s` says `%s` must %s here."
+                                     i.ps_proto i.ps_role i.ps_doing))
+              | _ -> None)
+           | _ -> None in
+         let res = infer_app ?payload env sp f_ty args 0 in
          (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
             result — recorded in check_fn), taint the call's result so the unify
             hook fires when it is later bound to a proof cap.  This closes the
@@ -4499,7 +4617,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     relocate_callback_mismatch env ~mark e sp inferred expected
 
 (** Thread function application through argument list, tracking arg index. *)
-and infer_app env span f_ty args idx =
+and infer_app ?payload env span f_ty args idx =
   match args, repr f_ty with
   | [], t ->
     (* A call written with empty parens — `f()`, i.e. zero surface arguments
@@ -4533,7 +4651,9 @@ and infer_app env span f_ty args idx =
         | _ -> () in
       walk param_ty; !acc in
     check_expr env arg param_ty
-      ~reason:(Some (RFnArg (span, idx)));
+      ~reason:(Some (match payload with
+          | Some (i, r) when i = idx -> r
+          | _ -> RFnArg (span, idx)));
     (* Poison (§X3): when an argument fails its type check and the call's
        result shares a type variable with that parameter, the variable is
        now bound to whatever the failed check left it, so the result is
@@ -4568,7 +4688,7 @@ and infer_app env span f_ty args idx =
        same fn is unaffected. *)
     if ty_has_tagged_cap_producer env param_ty then
       tag_cap_producer_result env ret_ty span;
-    let result = infer_app env span ret_ty rest (idx + 1) in
+    let result = infer_app ?payload env span ret_ty rest (idx + 1) in
     if failed then TError else result
   | arg :: rest, TVar _ ->
     (* f_ty not yet known — constrain it *)
@@ -5199,18 +5319,28 @@ and check_spawn_args env ~site_span ~spelling (actor_name : string)
                (List.map (fun (p, t) -> Printf.sprintf "%s : %s" p (pp_ty (repr t))) sig_))
       in
       let plural n = if n = 1 then "" else "s" in
-      Err.error ~code:Err.Code.actor_init_arity env.errors ~span:site_span
+      let labels = match Hashtbl.find_opt env.decl_sites ("actorinit:" ^ actor_name) with
+        | Some isp ->
+          [ { Err.lbl_span = isp;
+              lbl_message =
+                if sig_ = [] then Printf.sprintf "`%s`'s `init` takes no parameters" actor_name
+                else Printf.sprintf "`%s`'s `init` parameter%s" actor_name (plural n_sig) } ]
+        | None -> [] in
+      Err.report env.errors
+        { Err.severity = Err.Error; span = site_span; labels; notes = [];
+          code = Err.Code.actor_init_arity; fix = None;
+          message =
         (if sig_ = [] then
            Printf.sprintf
-             "actor `%s` declares no `init` parameters, but %s supplies %d argument%s.\n\
+             "Actor `%s` declares no `init` parameters, but %s supplies %d argument%s.\n\
               Its init is `%s`; to take a value at spawn time, declare the \
               parameters: `init(config : Config) { … }`."
              actor_name spelling n_args (plural n_args) show_sig
          else
            Printf.sprintf
-             "actor `%s`'s init takes %d argument%s, but %s supplies %d.\n\
+             "Actor `%s`'s init takes %d argument%s, but %s supplies %d.\n\
               Its signature is `%s`."
-             actor_name n_sig (plural n_sig) spelling n_args show_sig)
+             actor_name n_sig (plural n_sig) spelling n_args show_sig) }
     end else
       List.iter2 (fun a (p, t) ->
           check_expr env a t
@@ -7412,6 +7542,19 @@ let rec check_decl env (d : Ast.decl) : env =
           (p.param_name.txt, t)) actor.actor_init_params
     in
     Hashtbl.replace env.actor_init_sigs name.txt init_sig;
+    (* Where `init` is declared, for the spawn-arity error's label: its
+       parameter list (first name to the last type's name when that is a
+       plain one), or the init expression for the bare form. *)
+    Hashtbl.replace env.decl_sites ("actorinit:" ^ name.txt)
+      (match actor.actor_init_params with
+       | [] -> span_of_expr actor.actor_init
+       | (first : Ast.param) :: _ ->
+         let last = List.nth actor.actor_init_params (List.length actor.actor_init_params - 1) in
+         let stop = match last.param_ty with
+           | Some (Ast.TyCon (tn, [])) -> tn.span
+           | _ -> last.param_name.span in
+         { first.param_name.span with
+           Ast.end_line = stop.end_line; end_col = stop.end_col });
     report_duplicate_params env actor.actor_init_params;
     let init_env =
       List.fold_left2

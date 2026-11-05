@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: declares no `init` parameters
+mod App do
+  actor Plain do
+    state { n : Int }
+    init { n: 0 }
+    on Bump() do { n: state.n + 1 } end
+  end
+
+  fn main() do
+    let p = spawn(Plain, 5)
+    kill(p)
+  end
+end

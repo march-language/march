@@ -1,0 +1,65 @@
+---
+layout: docs
+title: "unknown_role"
+permalink: /docs/errors/unknown_role/
+---
+
+# `unknown_role`: a `Chan(Role, Protocol)` annotation names a role the protocol does not have
+
+A channel type `Chan(Role, Protocol)` is one role's end of a protocol. The
+role must be one the protocol's steps name. A role that does not appear in the
+protocol is this error. The message lists the roles the protocol has.
+
+## A program that triggers it
+
+```march
+mod Main do
+  type Client = Client
+  type Server = Server
+
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  fn serve(ch : Chan(Sever, Echo)) do
+    let (n, ch2) = Chan.recv(ch)
+    Chan.close(Chan.send(ch2, n))
+  end
+
+  fn main() do () end
+end
+```
+
+`Echo`'s roles are `Client` and `Server`. `Sever` is a typo, so the
+channel has no steps, and the operations on it fail as well.
+
+## The fix
+
+Name one of the protocol's roles:
+
+```march
+mod Main do
+  type Client = Client
+  type Server = Server
+
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  fn serve(ch : Chan(Server, Echo)) do
+    let (n, ch2) = Chan.recv(ch)
+    Chan.close(Chan.send(ch2, n))
+  end
+
+  fn main() do () end
+end
+```
+
+## Why the rule exists
+
+The compiler finds a channel's steps by taking the protocol from the
+named role's side. A role the protocol never mentions has no side to take.
+
+See also: [the `Chan` API](../session-types.md#the-chan-api).

@@ -158,7 +158,8 @@
  *   (default: ${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl).
  *   Fields: ts, type, fn, impl_hash, signer, cas_hash, caps, cap_root, result
  *   (caps/cap_root: ACTIVATE4 only, null for older protocols; see
- *   write_audit_log).
+ *   write_audit_log), and accepted_unproved on an "ok" line whose image was
+ *   built with --accept-unproved (the laws deployed without a proof).
  */
 #if defined(__linux__) || defined(__APPLE__)
 
@@ -822,6 +823,11 @@ static void json_write_str(FILE *f, const char *s, size_t n) {
 
 #include "march_reload_schemas.h"
 
+/* Set only around an activation's "ok" line: the image's accepted_unproved
+ * laws (schema_accepted_for), so the log answers "what was deployed without
+ * its contract proved, and by whom". */
+static const char *g_audit_accepted;
+
 /* Append one JSON line to the audit log. Path is $MARCH_AUDIT_LOG, or
  * ${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl by default.
  *
@@ -876,6 +882,11 @@ static void write_audit_log(const char *fn, const char *impl_hash,
         }
     } else {
         fputs("\"caps\":null,\"cap_root\":null,", f);
+    }
+    if (g_audit_accepted) {
+        fputs("\"accepted_unproved\":", f);
+        schema_write_compact(f, g_audit_accepted);
+        fputc(',', f);
     }
     fprintf(f, "\"result\":\"%s\"}\n", result);
     march_audit_close(f);
@@ -1192,7 +1203,9 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
             march_dispatch_set_activation(u[i].slot, ats, asigner);
             march_dispatch_set_callers(u[i].slot,
                 it[i].callers && it[i].callers[0] ? it[i].callers : NULL);
+            g_audit_accepted = schema_accepted_for(it[i].name);
             write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "ok");
+            g_audit_accepted = NULL;
         }
     }
     free(u);

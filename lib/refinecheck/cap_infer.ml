@@ -81,6 +81,15 @@ let cap_table : (string * string) list = [
   ("tcp_accept",            "IO.NetListen");
   ("tcp_accept_timeout",    "IO.NetListen");
   ("tcp_local_port",        "IO.NetListen");
+  ("udp_open",              "IO.NetConnect");
+  ("udp_resolve",           "IO.NetConnect");
+  ("udp_connect",           "IO.NetConnect");
+  ("udp_close",             "IO.NetConnect");
+  ("udp_local_addr",        "IO.NetConnect");
+  ("udp_stats",             "IO.NetConnect");
+  ("udp_send_batch",        "IO.NetConnect");
+  ("udp_send_many",         "IO.NetConnect");
+  ("udp_recv_batch",        "IO.NetConnect");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");

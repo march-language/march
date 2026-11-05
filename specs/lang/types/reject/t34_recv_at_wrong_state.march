@@ -1,4 +1,4 @@
--- EXPECT-ERROR: Chan.recv: channel is at
+-- EXPECT-ERROR: `Chan.recv` can't receive here
 mod Main do
   needs IO.Console
   -- Session-types widening, Task 3 -- recv-at-wrong-state.

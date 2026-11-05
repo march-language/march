@@ -1,0 +1,14 @@
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+    I -> L : String
+  end
+
+  fn main(_c : Cap(IO)) do () end
+end

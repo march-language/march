@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: two steps Client takes are named alike, so the role module would define `send_Line` twice
+-- REJECT (§F3): a label used twice by one role; one report per role, not one per generated variant
+-- (`recv_Line_or`, `recv_Line_or_drain`, the event API), and no step-order errors from the broken role code.
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Chat do
+    line: Client -> Server : String
+    reply: Server -> Client : String
+    line: Client -> Server : String
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

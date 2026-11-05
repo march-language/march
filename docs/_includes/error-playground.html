@@ -1,0 +1,131 @@
+<!--
+  March error playground
+  ======================
+  An editor pre-loaded with the programs from docs/assets/error-tour/, checked in the
+  browser by marchCheck (js/march_browser_compile.ml), which prints what
+  `march --check` prints. Loads docs/assets/march_stdlib.js and march_compile.js on
+  first use; both are built by scripts/build-browser-repl.sh (bot-owned).
+  Used by docs/error-messages.md. Logic in docs/assets/error-playground.js.
+-->
+
+<style>
+  .ep-wrap { margin: 2rem 0; }
+  .ep-bar {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin-bottom: 8px;
+  }
+  .ep-bar label { font-size: 13px; color: var(--text-muted); }
+  .ep-select, .ep-btn {
+    font-family: "JetBrains Mono", monospace; font-size: 12px;
+    background: var(--bg-code); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px; padding: 5px 10px;
+  }
+  .ep-select { flex: 1 1 260px; min-width: 0; }
+  .ep-btn { cursor: pointer; color: var(--accent); }
+  .ep-btn:hover { border-color: var(--accent); }
+  .ep-btn-quiet { color: var(--text-muted); }
+  .ep-panes { display: flex; flex-wrap: wrap; gap: 12px; }
+  .ep-pane {
+    flex: 1 1 380px; min-width: 0;
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    background: var(--bg-code);
+  }
+  .ep-pane-title {
+    font-size: 11px; letter-spacing: 0.04em; color: var(--text-faint);
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  .ep-editor, .ep-output {
+    display: block; width: 100%; box-sizing: border-box; margin: 0;
+    font-family: "JetBrains Mono", "Menlo", monospace; font-size: 12.5px; line-height: 1.5;
+    background: transparent; color: var(--text); border: 0; outline: none;
+    padding: 12px; height: 420px; overflow: auto; white-space: pre; tab-size: 2;
+  }
+  /* The page's `.d-content pre` box (border, margin, 20px padding) would nest a
+     second box inside the pane. */
+  .d-content .ep-pane pre.ep-output {
+    margin: 0; border: 0; border-radius: 0; background: transparent;
+    padding: 12px; font-size: 12.5px; line-height: 1.5;
+  }
+  .ep-editor { resize: vertical; }
+  .ep-output .ep-head  { color: var(--accent); font-weight: 500; }
+  .ep-output .ep-caret { color: #f87171; }
+  .ep-output .ep-ok    { color: #4ade80; }
+  .ep-output .ep-info  { color: var(--text-muted); font-style: italic; white-space: pre-wrap; }
+  .ep-status { font-size: 12px; color: var(--text-muted); }
+  .ep-try {
+    font-family: "JetBrains Mono", monospace; font-size: 11px; cursor: pointer;
+    background: transparent; color: var(--accent);
+    border: 1px solid var(--border); border-radius: 20px; padding: 2px 12px; margin-left: 4px;
+  }
+  .ep-try:hover { border-color: var(--accent); }
+  @media (max-width: 640px) {
+    .ep-editor, .ep-output { height: 300px; font-size: 12px; }
+  }
+</style>
+
+<div class="ep-wrap" id="ep-wrap" data-base="{{ site.baseurl }}" data-ver="{{ site.time | date: '%s' }}">
+  <div class="ep-bar">
+    <label for="ep-select">Example</label>
+    <select class="ep-select" id="ep-select">
+      <optgroup label="1 · Syntax">
+        <option value="01-then">then instead of do</option>
+        <option value="02-if-without-else">if without else</option>
+        <option value="03-else-if-chain">else if, one end short</option>
+        <option value="04-semicolon">semicolons</option>
+        <option value="05-curried-call">a curried call</option>
+      </optgroup>
+      <optgroup label="2 · Names">
+        <option value="07-field-by-type">misspelled record field</option>
+        <option value="08-constructor-by-type">misspelled constructor</option>
+      </optgroup>
+      <optgroup label="3 · Types">
+        <option value="09-string-plus-int">String ++ Int</option>
+        <option value="10-structural-diff">List(String) for List(Int)</option>
+        <option value="11-no-partial-application">too few arguments</option>
+        <option value="12-let-question">let? body is not a Result</option>
+        <option value="13-missing-impl">comparing a type with no Ord</option>
+      </optgroup>
+      <optgroup label="4 · Capabilities">
+        <option value="14-main-no-grant">main with no grant</option>
+        <option value="15-missing-needs">writing a file without needs</option>
+        <option value="16-wrong-capability">the wrong capability</option>
+      </optgroup>
+      <optgroup label="5 · Linearity">
+        <option value="17-linear-used-twice">used twice</option>
+        <option value="18-linear-some-branches">consumed on some branches</option>
+        <option value="19-linear-captured">captured by a closure</option>
+      </optgroup>
+      <optgroup label="6 · Actors">
+        <option value="20-misspelled-actor">misspelled actor</option>
+        <option value="21-message-argument">wrong message argument</option>
+        <option value="22-handler-returns-state">handler forgets the state</option>
+        <option value="23-send-wrong-actor">message to the wrong actor</option>
+      </optgroup>
+      <optgroup label="7 · Session channels">
+        <option value="24-channel-wrong-step">a step out of order</option>
+        <option value="25-offer-not-exhaustive">an offer left unhandled</option>
+      </optgroup>
+      <optgroup label="8 · Protocols">
+        <option value="26-step-after-loop">a step after a loop</option>
+        <option value="27-may-crash">a crash nobody handles</option>
+      </optgroup>
+    </select>
+    <button class="ep-btn" type="button" id="ep-check" title="Check (Ctrl+Enter)">Check</button>
+    <button class="ep-btn ep-btn-quiet" type="button" id="ep-revert" title="Put the example back as it was">Revert</button>
+    <span class="ep-status" id="ep-status"></span>
+  </div>
+  <div class="ep-panes">
+    <div class="ep-pane">
+      <div class="ep-pane-title"><span>PROGRAM</span><span>edit, then Ctrl+Enter</span></div>
+      <textarea class="ep-editor" id="ep-editor" spellcheck="false" autocomplete="off"
+                autocorrect="off" autocapitalize="off" aria-label="March program"></textarea>
+    </div>
+    <div class="ep-pane">
+      <div class="ep-pane-title"><span>march --check</span></div>
+      <pre class="ep-output" id="ep-output" aria-live="polite"></pre>
+    </div>
+  </div>
+</div>
+
+<script src="{{ site.baseurl }}/assets/error-playground.js?v={{ site.time | date: '%s' }}"></script>

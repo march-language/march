@@ -1,0 +1,17 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_42.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+14 |     let st1 = Fan_A.send_Number(s, st, "seven")
+                                            ^^^^^^^
+
+    This is the step's payload: protocol `Fan` says `A` must send an `Int` to `C` here.
+
+    the expected type comes from here:
+
+9 |     number: A -> C : Int
+                ^
+    run `march --explain type_mismatch`
+
+

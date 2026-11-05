@@ -6,6 +6,7 @@ Protocol `Logging`, role I: message `Read` is received in two states with differ
 11 |   protocol Logging do
        ^^^^^^^^^^^^^^^^^^^
 
+    run `march --explain endpoints_name_clash`
 
 
 -- PROTOCOL --------------- errors/type_mismatch_13.march
@@ -24,5 +25,6 @@ Protocol `Logging`: `choose by C` has a `crash` branch, so every other branch mu
 18 |       crash -> I -> L : String
            ^^^^^
 
+    run `march --explain role_needs_invalid`
 
 

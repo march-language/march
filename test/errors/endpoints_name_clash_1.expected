@@ -1,0 +1,20 @@
+exit: 1
+-- PROTOCOL --------- errors/endpoints_name_clash_1.march
+
+Protocol `Chat`, role Client: two steps Client takes are named alike, so the role module would define `send_Line` twice. A message name can be shared only by steps no single role takes both of. Rename one of them. [endpoints_name_clash]
+
+ 9 |   protocol Chat do
+       ^^^^^^^^^^^^^^^^
+
+    run `march --explain endpoints_name_clash`
+
+
+-- PROTOCOL --------- errors/endpoints_name_clash_1.march
+
+Protocol `Chat`, role Server: two steps Server takes are named alike, so the role module would define `recv_Line` twice. A message name can be shared only by steps no single role takes both of. Rename one of them. [endpoints_name_clash]
+
+ 9 |   protocol Chat do
+       ^^^^^^^^^^^^^^^^
+
+
+

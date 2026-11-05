@@ -1,0 +1,11 @@
+mod Main do
+  needs IO.Console
+
+  fn magnitude(n : Int) : {Int | _ >= 0} do
+    if n < 0 do n else 0 end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(magnitude(-3)))
+  end
+end

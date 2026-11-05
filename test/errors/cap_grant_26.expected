@@ -6,5 +6,6 @@ Chan.choose: label `:maybe` is not a valid branch of this protocol. [session_cho
 20 |     let cc2 = Chan.choose(cc, :maybe)
                    ^^^^^^^^^^^^^^^^^^^^^^^
 
+    run `march --explain session_choice_label`
 
 

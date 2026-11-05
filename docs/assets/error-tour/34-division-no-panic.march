@@ -1,0 +1,12 @@
+mod Main do
+  needs IO.Console
+  cap no_panic
+
+  fn scale(d : {v : Int | v * v >= 0}) : Int do
+    10 / d
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(scale(2)))
+  end
+end

@@ -1,0 +1,405 @@
+-- UDP datagram sockets, built for packet rate.
+--
+-- Every send and receive moves a BATCH of datagrams per kernel crossing:
+-- on Linux recvmmsg/sendmmsg plus UDP GSO (up to 64 equal-sized datagrams
+-- per transit) and opt-in GRO; elsewhere a nonblocking drain loop.  Waits
+-- park the green thread, never an OS thread, so one scheduler thread can
+-- serve many sockets.  For more than one core's worth of packets, open
+-- `open_sharded` sockets (SO_REUSEPORT) and give each its own task.
+--
+-- "Reliable" here means the socket layer never loses data on its own:
+-- sends wait for buffer space instead of dropping, and `stats` reports the
+-- datagrams the KERNEL dropped for lack of receive-buffer room, so a
+-- receiver that falls behind knows it.  UDP itself still delivers each
+-- datagram at most once, in any order, or not at all.
+--
+-- Packets are binary-safe Strings.  An `UdpAddr` is an opaque, comparable
+-- address value: get one from `resolve`, `local_addr` or a received
+-- datagram.
+--
+-- Public API:
+--   Udp.open(host, port)                         : Result(UdpSocket, UdpError)
+--   Udp.open_with(host, port, opts)              : Result(UdpSocket, UdpError)
+--   Udp.open_sharded(host, port, n, opts)        : Result(List(UdpSocket), UdpError)
+--   Udp.defaults()                               : UdpOptions
+--   Udp.resolve(host, port)                      : Result(UdpAddr, UdpError)
+--   Udp.connect(sock, addr)                      : Result((), UdpError)
+--   Udp.send_to(sock, addr, data)                : Result((), UdpError)
+--   Udp.send(sock, data)                         : Result((), UdpError)
+--   Udp.send_batch(sock, addr, payloads)         : Result(Int, UdpError)
+--   Udp.send_batch_connected(sock, payloads)     : Result(Int, UdpError)
+--   Udp.send_many(sock, [(addr, data)])          : Result(Int, UdpError)
+--   Udp.recv(sock, max_size, timeout_ms)         : Result(Option((UdpAddr, String)), UdpError)
+--   Udp.recv_batch(sock, max_msgs, max_size, ms) : Result(List((UdpAddr, String)), UdpError)
+--   Udp.local_addr(sock) / Udp.local_port(sock)
+--   Udp.addr_to_string(addr) / Udp.addr_port(addr)
+--   Udp.stats(sock)                              : UdpStats
+--   Udp.close(sock)                              : ()
+--   Udp.error_message(e)                         : String
+
+mod Udp do
+  needs IO.NetConnect
+  -- Every refinement contract below is proved, not just checked where it
+  -- can be: an obligation the checker cannot discharge is a compile error.
+  cap verified
+
+  type UdpError
+    = OpenFailed(String)
+    | ResolveFailed(String)
+    | ConnectFailed(String)
+    | SendFailed(String)
+    | RecvFailed(String)
+
+  -- An open UDP socket. Close it with `Udp.close`.
+  type UdpSocket = UdpSocket(Int)
+
+  -- An opaque IPv4 or IPv6 address and port; compare with `==`.
+  type UdpAddr = UdpAddr(String)
+
+  impl Eq(UdpAddr) do
+    fn eq(a, b) do
+      match (a, b) do (UdpAddr(x), UdpAddr(y)) -> x == y end
+    end
+  end
+
+  -- UdpSocket options for `open_with`.
+  --
+  -- - `reuse_addr`, `reuse_port`: SO_REUSEADDR / SO_REUSEPORT. `reuse_port`
+  --   lets several sockets bind one port; Linux spreads flows across them.
+  -- - `broadcast`: allow sending to a broadcast address.
+  -- - `gso`: batch equal-sized sends into one kernel transit (Linux; turned
+  --   off automatically if the kernel or NIC refuses it).
+  -- - `gro`: let the kernel coalesce a flow's received datagrams (Linux).
+  --   Datagrams still come back one by one; fewer syscalls deliver them.
+  -- - `recv_buffer`, `send_buffer`: requested socket buffer bytes (0 keeps
+  --   the OS default). Linux caps them at net.core.rmem_max / wmem_max unless
+  --   the process has CAP_NET_ADMIN; raise those sysctls for real receive
+  --   headroom, since a full receive buffer is where UDP loses packets.
+  type UdpOptions = {
+    reuse_addr:  Bool,
+    reuse_port:  Bool,
+    broadcast:   Bool,
+    gso:         Bool,
+    gro:         Bool,
+    recv_buffer: Int,
+    send_buffer: Int
+  }
+
+  -- Counters for a socket. `rx_dropped` is the kernel's count of datagrams
+  -- dropped because the receive buffer was full, as of the last receive
+  -- (Linux; -1 where the platform does not report it). `tx_stalls` counts the
+  -- times a send had to wait for buffer space instead of dropping.
+  type UdpStats = { rx_dropped: Int, tx_stalls: Int }
+
+  doc """
+  The defaults `open` uses: GSO on, GRO off, 8 MiB receive and send
+  buffers requested, no address reuse.
+
+  ## Examples
+
+      Udp.open_with("0.0.0.0", 9000, { Udp.defaults() with reuse_port: true })
+  """
+  fn defaults() : UdpOptions do
+    { reuse_addr: false, reuse_port: false, broadcast: false, gso: true, gro: false,
+      recv_buffer: 8388608, send_buffer: 8388608 }
+  end
+
+  doc """
+  A human-readable description of a UdpError.
+
+  ## Examples
+
+      Udp.error_message(SendFailed("boom"))  -- "send failed: boom"
+  """
+  fn error_message(e : UdpError) : String do
+    match e do
+    OpenFailed(m)    -> "open failed: " ++ m
+    ResolveFailed(m) -> "resolve failed: " ++ m
+    ConnectFailed(m) -> "connect failed: " ++ m
+    SendFailed(m)    -> "send failed: " ++ m
+    RecvFailed(m)    -> "receive failed: " ++ m
+    end
+  end
+
+  pfn flag(b : Bool, bit : {Int | _ > 0}) : {Int | _ >= 0 && _ <= bit} do
+    if b do bit else 0 end
+  end
+
+  -- The bit set udp_open decodes (runtime/march_udp.c UDP_OPT_*): five flags.
+  pfn opt_bits(o : UdpOptions) : {Int | _ >= 0 && _ <= 31} do
+    flag(o.reuse_addr, 1) + flag(o.reuse_port, 2) + flag(o.broadcast, 4) + flag(o.gro, 8)
+      + flag(o.gso == false, 16)
+  end
+
+  doc """
+  Bind a UDP socket with `defaults()`. host `""` or `"0.0.0.0"` is every
+  IPv4 interface, `"::"` every interface over IPv4 and IPv6; port 0 picks
+  a free port (see `local_port`).
+
+  ## Examples
+
+      let? sock = Udp.open("127.0.0.1", 0)
+  """
+  fn open(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}) : Result(UdpSocket, UdpError) do
+    open_with(host, port, defaults())
+  end
+
+  doc """
+  Bind a UDP socket with explicit options.
+
+  ## Examples
+
+      Udp.open_with("::", 5353, { Udp.defaults() with reuse_addr: true })
+  """
+  fn open_with(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}, opts : UdpOptions) : Result(UdpSocket, UdpError) do
+    match udp_open(host, port, opt_bits(opts), opts.recv_buffer, opts.send_buffer) do
+    Ok(fd)   -> Ok(UdpSocket(fd))
+    Err(msg) -> Err(OpenFailed(msg))
+    end
+  end
+
+  -- Opens n more after acc (newest first); on failure closes everything.
+  pfn open_more(host : String, port : {Int | _ >= 0 && _ <= 65535}, n : Int, opts : UdpOptions,
+                acc : List(UdpSocket)) : Result(List(UdpSocket), UdpError) do
+    if n <= 0 do Ok(List.reverse(acc))
+    else
+      match open_with(host, port, opts) do
+      Ok(s)  -> open_more(host, port, n - 1, opts, Cons(s, acc))
+      Err(e) ->
+        List.map(acc, fn s -> close(s))
+        Err(e)
+      end
+    end
+  end
+
+  doc """
+  Open `n` sockets on one port with SO_REUSEPORT, one per receiving task.
+  Linux hashes each flow to one socket, so n tasks each draining their own
+  socket scale across cores. Port 0 picks a free port for the first and
+  binds the rest to it. On failure every socket opened so far is closed.
+
+  ## Examples
+
+      let? socks = Udp.open_sharded("0.0.0.0", 9000, 4, Udp.defaults())
+  """
+  fn open_sharded(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}, n : {Int | _ > 0 else "open at least one shard"},
+                    opts : UdpOptions) : Result({List(UdpSocket) | len(_) == n}, UdpError) do
+    let o = { opts with reuse_port: true }
+    match open_with(host, port, o) do
+    Err(e) -> Err(e)
+    Ok(first) ->
+      match local_port(first) do
+      Err(e) ->
+        close(first)
+        Err(e)
+      Ok(p) ->
+        match open_more(host, p, n - 1, o, [first]) do
+        Err(e) -> Err(e)
+        -- open_more opens exactly n - 1 more on success. The length test
+        -- states that to the refinement checker, which does not carry a
+        -- Result payload's length out of a recursive call
+        -- (specs/todos/2026-11-04-refine-result-payload-recursion.md).
+        Ok(socks) ->
+          if List.length(socks) == n do Ok(socks)
+          else
+            List.map(socks, fn s -> close(s))
+            Err(OpenFailed("open_sharded: opened the wrong number of sockets"))
+          end
+        end
+      end
+    end
+  end
+
+  doc """
+  Look up host and pair it with port. IPv4 is preferred when the host has
+  both, so the address works from an IPv4 socket. Resolve once and reuse
+  the UdpAddr: sends take it without another lookup.
+
+  ## Examples
+
+      let? dst = Udp.resolve("127.0.0.1", 9000)
+  """
+  fn resolve(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}) : Result(UdpAddr, UdpError) do
+    match udp_resolve(host, port) do
+    Ok(a)    -> Ok(UdpAddr(a))
+    Err(msg) -> Err(ResolveFailed(msg))
+    end
+  end
+
+  doc """
+  Render an address: `"127.0.0.1:9000"`, `"[::1]:9000"`.
+  """
+  fn addr_to_string(a : UdpAddr) : String do
+    match a do UdpAddr(raw) -> udp_addr_to_string(raw) end
+  end
+
+  doc "The port of an address."
+  fn addr_port(a : UdpAddr) : {Int | _ >= 0 && _ <= 65535} do
+    match a do
+    UdpAddr(raw) ->
+      if string_byte_length(raw) < 3 do 0
+      else
+        let hi = string_byte_at(raw, 1)
+        let lo = string_byte_at(raw, 2)
+        if hi >= 0 && hi <= 255 && lo >= 0 && lo <= 255 do hi * 256 + lo else 0 end
+      end
+    end
+  end
+
+  doc "The address this socket is bound to."
+  fn local_addr(sock : UdpSocket) : Result(UdpAddr, UdpError) do
+    match sock do
+    UdpSocket(fd) ->
+      match udp_local_addr(fd) do
+      Ok(a)    -> Ok(UdpAddr(a))
+      Err(msg) -> Err(OpenFailed(msg))
+      end
+    end
+  end
+
+  doc "The port this socket is bound to (the one the OS picked for port 0)."
+  fn local_port(sock : UdpSocket) : Result({Int | _ >= 0 && _ <= 65535}, UdpError) do
+    match local_addr(sock) do
+    Ok(a)  -> Ok(addr_port(a))
+    Err(e) -> Err(e)
+    end
+  end
+
+  doc """
+  Fix the socket's peer. `send` and `send_batch_connected` then need no
+  address, the kernel skips a route lookup per datagram, only that peer's
+  datagrams are received, and an ICMP "port unreachable" surfaces as an
+  error on a later call instead of vanishing.
+  """
+  fn connect(sock : UdpSocket, a : UdpAddr) : Result((), UdpError) do
+    match (sock, a) do
+    (UdpSocket(fd), UdpAddr(raw)) ->
+      match udp_connect(fd, raw) do
+      Ok(_)    -> Ok(())
+      Err(msg) -> Err(ConnectFailed(msg))
+      end
+    end
+  end
+
+  -- udp_send_batch / udp_send_many answer Ok only once every datagram is
+  -- out (runtime/march_udp.c), so each send's Ok carries the count it was
+  -- handed: callers get `n == len(payloads)` as a proved fact.
+
+  doc """
+  Send every payload to `a`, in order, as one batch: the fast path. Waits
+  for buffer space rather than dropping. `Ok(n)` once all `n` are sent; a
+  hard failure (e.g. a payload over 65507 bytes) is `Err(SendFailed(msg))`
+  naming how many went out first.
+
+  ## Examples
+
+      let? n = Udp.send_batch(sock, dst, List.map(seqs, encode))
+  """
+  fn send_batch(sock : UdpSocket, a : UdpAddr, payloads : List(String)) : Result({Int | _ == len(payloads)}, UdpError) do
+    match (sock, a) do
+    (UdpSocket(fd), UdpAddr(raw)) ->
+      match udp_send_batch(fd, raw, payloads) do
+      Ok(_)    -> Ok(List.length(payloads))
+      Err(msg) -> Err(SendFailed(msg))
+      end
+    end
+  end
+
+  doc "`send_batch` to the connected peer (see `connect`)."
+  fn send_batch_connected(sock : UdpSocket, payloads : List(String)) : Result({Int | _ == len(payloads)}, UdpError) do
+    match sock do
+    UdpSocket(fd) ->
+      match udp_send_batch(fd, "", payloads) do
+      Ok(_)    -> Ok(List.length(payloads))
+      Err(msg) -> Err(SendFailed(msg))
+      end
+    end
+  end
+
+  doc """
+  Send a batch with a destination per datagram. Consecutive datagrams to
+  one destination still share a kernel transit.
+  """
+  fn send_many(sock : UdpSocket, pairs : List((UdpAddr, String))) : Result({Int | _ == len(pairs)}, UdpError) do
+    match sock do
+    UdpSocket(fd) ->
+      let raw = List.map(pairs, fn pr -> match pr do (UdpAddr(a), data) -> (a, data) end)
+      match udp_send_many(fd, raw) do
+      Ok(_)    -> Ok(List.length(pairs))
+      Err(msg) -> Err(SendFailed(msg))
+      end
+    end
+  end
+
+  doc "Send one datagram to `a`. Prefer `send_batch` for volume."
+  fn send_to(sock : UdpSocket, a : UdpAddr, data : String) : Result((), UdpError) do
+    match send_batch(sock, a, [data]) do
+    Ok(_)  -> Ok(())
+    Err(e) -> Err(e)
+    end
+  end
+
+  doc "Send one datagram to the connected peer."
+  fn send(sock : UdpSocket, data : String) : Result((), UdpError) do
+    match send_batch_connected(sock, [data]) do
+    Ok(_)  -> Ok(())
+    Err(e) -> Err(e)
+    end
+  end
+
+  pfn wrap_from(pr : (String, String)) : (UdpAddr, String) do
+    match pr do (raw, data) -> (UdpAddr(raw), data) end
+  end
+
+  doc """
+  Receive up to `max_msgs` datagrams, in arrival order, each as
+  `(from, payload)`. Whatever is already queued comes back at once;
+  otherwise the task parks until data arrives or `timeout_ms` passes
+  (0: do not wait; negative: wait for ever). A timeout is `Ok([])`. A
+  payload longer than `max_size` is truncated to it; 65535 never truncates.
+
+  ## Examples
+
+      match Udp.recv_batch(sock, 256, 2048, 100) do
+        Ok(dgrams) -> List.map(dgrams, handle)
+        Err(e)     -> println(Udp.error_message(e))
+      end
+  """
+  fn recv_batch(sock : UdpSocket, max_msgs : {Int | _ > 0 else "receive at least one datagram" && _ <= 1024 else "at most 1024 datagrams per batch"},
+                  max_size : {Int | _ > 0 else "max_size must be positive" && _ <= 65535 else "a datagram is at most 65535 bytes"}, timeout_ms : Int) : Result(List((UdpAddr, String)), UdpError) do
+    match sock do
+    UdpSocket(fd) ->
+      match udp_recv_batch(fd, max_msgs, max_size, timeout_ms) do
+      Ok(raw)  -> Ok(List.map(raw, wrap_from))
+      Err(msg) -> Err(UdpError.RecvFailed(msg))
+      end
+    end
+  end
+
+  doc """
+  Receive one datagram; `Ok(None)` if none arrives within `timeout_ms`.
+  Prefer `recv_batch` for volume.
+  """
+  fn recv(sock : UdpSocket, max_size : {Int | _ > 0 else "max_size must be positive" && _ <= 65535 else "a datagram is at most 65535 bytes"}, timeout_ms : Int) : Result(Option((UdpAddr, String)), UdpError) do
+    match recv_batch(sock, 1, max_size, timeout_ms) do
+    Ok(Cons(d, _)) -> Ok(Some(d))
+    Ok(Nil)        -> Ok(None)
+    Err(e)         -> Err(e)
+    end
+  end
+
+  doc "The socket's drop and backpressure counters (see `UdpStats`)."
+  fn stats(sock : UdpSocket) : UdpStats do
+    match sock do
+    UdpSocket(fd) ->
+      match udp_stats(fd) do
+      (d, s) -> { rx_dropped: d, tx_stalls: s }
+      end
+    end
+  end
+
+  doc "Close the socket."
+  fn close(sock : UdpSocket) : () do
+    match sock do UdpSocket(fd) -> udp_close(fd) end
+  end
+end
