@@ -24,6 +24,12 @@ jobs:
       - name: Lint docs for stale source pointers and stdlib counts
         run: scripts/check-docs.sh
 
+      # docs/protocol-to-cluster.md, the scrolling explainer: its data generator's
+      # tests (python3, on recorded fixtures) and its scripts' tests (node --test).
+      # Needs no compiler. scripts/check-docs.sh Check H guards the data's freshness.
+      - name: Test the distributed explainer's generator and scripts
+        run: scripts/check-explainer.sh
+
       # scripts/run-tests.sh is what CLAUDE.md tells everyone to run, so a bug in
       # how IT reports failures is invisible by construction -- the aggregate says
       # "FAILED" and nothing says which suite or why. This drives it against fake

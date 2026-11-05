@@ -12,4 +12,7 @@ cd "$(dirname "$0")/.."
 echo "== explainer: generator tests =="
 python3 test/explainer/test_gen.py
 
+echo "== explainer: script tests =="
+node --test test/explainer/*.test.js
+
 echo "explainer checks passed"
