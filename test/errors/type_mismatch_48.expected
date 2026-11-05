@@ -1,0 +1,17 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_48.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+5 |     if b do "yes" else "no" end
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    This is the declared return type of `answer`.
+
+    the expected type comes from here:
+
+4 |   fn answer(b : Bool) : Int do
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

@@ -6,14 +6,14 @@ expected `Bool` but got `Int`. [type_mismatch]
 5 |     println(int_to_string(1 && true))
                               ^
 
-    This is argument #1 of a function call.
+    This is the left side of `&&`, which takes two `Bool`s.
     March does not coerce Int to Bool.
     Try an explicit comparison, e.g. `x != 0`.
 
     the expected type comes from here:
 
 5 |     println(int_to_string(1 && true))
-                              ^^^^^^^^^
+                                   ^^^^
     run `march --explain type_mismatch`
 
 

@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+-- REJECT (§X1 slice 3): the `if` branch is the wrong one; the `else` branch agrees with the declared return type, so it is not blamed.
+mod Sign do
+  fn sign(n : Int) : Int do
+    if n >= 0 do "positive" else -1 end
+  end
+  fn main() : Int do sign(3) end
+end

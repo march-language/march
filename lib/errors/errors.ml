@@ -234,7 +234,14 @@ let sorted ctx =
         if c <> 0 then c
         else
           let c = compare (sev_rank a.severity) (sev_rank b.severity) in
-          if c <> 0 then c else compare a.message b.message)
+          if c <> 0 then c
+          else
+            (* Two reports starting at the same place: the narrower one
+               first.  In `x ++ "no"`, the operand `x` is the cause, and the
+               whole expression's mismatch reads as its consequence (§X1). *)
+            let c = compare (a.span.end_line, a.span.end_col)
+                (b.span.end_line, b.span.end_col) in
+            if c <> 0 then c else compare a.message b.message)
     ctx.diagnostics
 
 (* ── Cascade suppression ──────────────────────────────────────────────
