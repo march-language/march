@@ -1,19 +1,32 @@
 exit: 1
 -- PROTOCOL ------- errors/session_state_mismatch_3.march
 
-Chan.close: channel is at `Send(String, End)` but I expected `End`. [session_state_mismatch]
+`Chan.close` can't close this channel here: at this point the channel must send a `String`. [session_state_mismatch]
 
 33 |         Chan.close(cc4)
              ^^^^^^^^^^^^^^^
 
+    What is left on this channel: send a `String`, then close.
+
+    the channel is `Client`'s end of protocol `Tail`, declared here:
+
+14 |   protocol Tail do
+       ^^^^^^^^^^^^^^^^
+    run `march --explain session_state_mismatch`
 
 
 -- PROTOCOL ------- errors/session_state_mismatch_3.march
 
-Chan.close: channel is at `Send(String, End)` but I expected `End`. [session_state_mismatch]
+`Chan.close` can't close this channel here: at this point the channel must send a `String`. [session_state_mismatch]
 
 36 |         Chan.close(cc4)
              ^^^^^^^^^^^^^^^
 
+    What is left on this channel: send a `String`, then close.
+
+    the channel is `Client`'s end of protocol `Tail`, declared here:
+
+14 |   protocol Tail do
+       ^^^^^^^^^^^^^^^^
 
 

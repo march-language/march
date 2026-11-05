@@ -15,3 +15,8 @@ explain pages for the other protocol codes.
 2026-11-04: mechanism 4 landed (`specs/progress/2026-11-04-diag-f3-wellformed-spans-or-crash-fix.md`):
 the after-`loop` errors point at the dead step, and a missing crash branch gets an `or crash` fix.
 Open: mechanisms 3, 5 and 6.
+
+2026-11-04: mechanism 3 landed (`specs/progress/2026-11-04-diag-f3-session-channel-wording.md`): `Chan.*`
+wrong-state errors in plain terms with the steps left and the protocol they follow, and an explain
+page for `session_state_mismatch`. Open: mechanism 5 (role-body cases beyond step order) and 6
+(explain pages for the other protocol codes).
