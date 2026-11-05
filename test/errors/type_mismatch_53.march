@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: Use `bool_to_string(x)` to convert a `Bool` to a `String`.
+mod Main do
+  -- X8 tier 2: the conversion is found in scope by type and name, not by
+  -- a hand-written hint.
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) do
+    let ready = 3 > 2
+    let label : String = ready
+    println(label)
+  end
+end

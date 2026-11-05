@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: expected `String` but got `Int`
+-- REJECT (§X1 slice 3): an annotated `let` decides the `if`'s type; the `else` branch's `n` is blamed against it.
+mod Label do
+  fn label(n : Int) : String do
+    let s : String = if n > 0 do "positive" else n end
+    s
+  end
+  fn main() : String do label(3) end
+end

@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: `List.head_opt` is `List.head` without the requirement
+mod Main do
+  -- X8 tier 3: `first` propagates `List.head`'s requirement; besides
+  -- declaring it, the total twin `List.head_opt` is offered.
+  needs IO.Console
+
+  fn first(xs : List(Int)) : Int do
+    List.head(xs) + 1
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(first([1, 2, 3])))
+  end
+end

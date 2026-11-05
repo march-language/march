@@ -370,6 +370,11 @@ val spelling_max_dist : int -> int
 val actor_of_msg_type : string -> string option
 val is_generated_name : ?ctor_type:string -> string -> bool
 val could_fit : Typecheck_types.ty -> Typecheck_types.ty -> bool
+val scheme_body : Typecheck_types.scheme -> Typecheck_types.ty
+
+val module_locality : env -> string -> int
+(** 0: the current module; 1: other user code and the prelude; 2: a stdlib module. *)
+
 val suggest_var_in_scope : ?need:Typecheck_types.ty -> string -> env -> string option
 val suggest_field :
   ?need:Typecheck_types.ty -> string -> (string * Typecheck_types.ty) list -> string option

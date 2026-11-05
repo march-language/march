@@ -517,6 +517,69 @@ let check_style name json =
       (String.concat "\n"
          (List.map (fun (s, r, h) -> Printf.sprintf "  [%s] %s: %s" s r h) vs))
 
+(* The hint-exclusivity lint (specs/plans/2026-11-02-diagnostics-depth-plan.md
+   §X4): one diagnostic carries hints that agree, each said once.  Over each
+   case's `--check-json` diagnostics:
+
+   - [repeat]: a note repeats an earlier note or a line of the message;
+   - [help]: more than one `help:` / `hint:` line, i.e. two competing fixes
+     offered as separate advice (alternatives belong in one line);
+   - [did-you-mean]: more than one "Did you mean" suggestion;
+   - [convert]: more than one conversion hint (`Use `…` to convert`,
+     "does not coerce"): the type mismatch has one likely cause;
+   - [stacked]: a HINT on the exact span of an error, where the advisory can
+     contradict the error's own fix ([Errors.suppress_cascades] drops it).
+
+   No allowlist: the corpus is clean, and a new violation is a bug in the
+   hint selection, not something to record. *)
+let hint_violations (json : string) : string list =
+  let open Yojson.Safe.Util in
+  let ds =
+    lines_of json
+    |> List.filter_map (fun l ->
+        if String.trim l = "" then None
+        else match Yojson.Safe.from_string l with
+          | exception _ -> None
+          | j -> Some j) in
+  let span j = List.map (fun k -> member k j) [ "file"; "start_line"; "start_col"; "end_line"; "end_col" ] in
+  let sev j = match member "severity" j with `String s -> s | _ -> "" in
+  let error_spans = List.filter_map (fun j -> if sev j = "error" then Some (span j) else None) ds in
+  let norm s =
+    String.split_on_char '\n' s |> List.map String.trim
+    |> List.filter (( <> ) "") |> String.concat " " in
+  List.concat_map (fun j ->
+      let msg = match member "message" j with `String s -> s | _ -> "" in
+      let notes = match member "notes" j with
+        | `List ns -> List.filter_map (function `String s -> Some s | _ -> None) ns
+        | _ -> [] in
+      let code = match member "code" j with `String s -> s | _ -> "" in
+      let head = String.trim (List.hd (lines_of msg @ [ "" ])) in
+      let msg_lines = List.map String.trim (lines_of msg) in
+      let all_lines = msg_lines @ List.concat_map (fun n -> List.map String.trim (lines_of n)) notes in
+      let count p = List.length (List.filter p all_lines) in
+      let starts prefix l = String.starts_with ~prefix (String.lowercase_ascii l) in
+      let rec repeated seen = function
+        | [] -> false
+        | n :: rest ->
+          let k = norm n in
+          List.mem k seen || List.mem k msg_lines || repeated (k :: seen) rest in
+      List.filter_map (fun (rule, bad) ->
+          if bad then Some (Printf.sprintf "[%s] %s: %s" rule code head) else None)
+        [ ("repeat", repeated [] notes);
+          ("help", count (fun l -> starts "help:" l || starts "hint:" l) > 1);
+          ("did-you-mean", count (fun l -> contains l "Did you mean") > 1);
+          ("convert", count (fun l -> (contains l "Use `" && contains l "to convert")
+                                     || contains l "does not coerce") > 1);
+          ("stacked", sev j = "hint" && List.mem (span j) error_spans) ])
+    ds
+
+let check_hints name json =
+  match hint_violations json with
+  | [] -> ()
+  | vs ->
+    Alcotest.failf "%s: hint-exclusivity lint (see run_errors.ml):\n  %s" name
+      (String.concat "\n  " vs)
+
 (* A machine fix must fix (plan §X4): a case whose fixes leave the program
    still rejected fails, unless its source says why with
    `-- EXPECT-FIX-PARTIAL: <reason>` (the program has a second, independent
@@ -568,6 +631,7 @@ let check results name () =
   end;
   check_internals ~src name human;
   check_style name json;
+  check_hints name json;
   check_fix_fixes ~src name (Hashtbl.find (Lazy.force results) name)
 
 (* [ERRORS_ONLY=cap_,linear_used_twice_6] runs only the cases whose name

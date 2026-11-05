@@ -10,15 +10,6 @@ help: add `needs IO` to the module body.
     run `march --explain cap_needs`
 
 
--- HINT: CAPABILITY ------------ errors/cap_needs_7.march
-
-This function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
-
-14 |   fn listen(cap : Cap(IO), port : Int) : Int do
-       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-
-
 
 fix [cap_needs:IO]:
 @@ after line 11 @@

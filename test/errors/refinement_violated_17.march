@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: `List.nth_opt` is `List.nth` without the requirement
+mod Main do
+  -- X8 tier 3: index 5 of a three-element list fails `List.nth`'s
+  -- precondition; the total twin `List.nth_opt` is suggested.
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(List.nth([1, 2, 3], 5)))
+  end
+end

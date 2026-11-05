@@ -244,6 +244,17 @@ git log is authoritative for exact commits.
   and says `List.map`'s `b` is this function's result; a record or tuple result narrows to its
   wrong field or component.
 
+- Diagnostics: an `if` or `match do` whose type is known (a declared return type, an annotated
+  `let`, a parameter) blames the branch that disagrees with it. `if n >= 0 do "positive" else -1
+  end` in a function returning `Int` now underlines `"positive"` ("In the `if` branch.") instead
+  of the whole `if`, followed by a second error blaming `-1` for not matching it. An `else if`
+  chain reads as one `if`, and a `match do` arm that disagrees with the first arm is underlined
+  itself, with the two types the right way round. An operand of a binary operator is named as
+  one ("This is the left side of `++`, which joins two `String`s.", "This is the right side of
+  `+`, and both sides of `+` must have the same type.") instead of "argument #1 of a function
+  call", with the other operand as the origin, and is reported before a mismatch on the whole
+  expression that starts at the same place.
+
 - Diagnostics: a type mismatch deep inside two types now reports the whole pair, with a note
   that prints the provided type and puts a caret under each part that differs, instead of
   naming only the innermost pair. Passing a `Result(List(Int), String)` for a
@@ -281,6 +292,14 @@ git log is authoritative for exact commits.
   `A`", not `Post` and `Pong` from the HTTP modules. Stdlib constructors are offered only when
   nothing in your own code is in range, compiler-generated names (session states such as
   `S_end`) are never offered, and a misspelled record field gets a suggestion.
+- Diagnostics: when no name is a spelling of an unknown function, the functions in scope that
+  take the call's arguments are listed: `List.fodl(xs, 0, fn (a, b) -> a + b)` offers
+  `List.fold_left` and `List.fold_right` with their signatures. A call whose arguments fit in
+  another order says so, with the reordered call as a fix (`List.map(fn x -> x * 2, xs)`).
+  A mismatch between two plain types with no hand-written hint names an in-scope conversion
+  (`Use bool_to_string(x)…`, or your own `celsius_to_fahrenheit`). A call that fails
+  `List.head`'s or `List.nth`'s precondition suggests `head_opt` / `nth_opt` with the `match`
+  it needs. Suggestions never change type inference.
 - Diagnostics: follow-on errors are dropped when another error already explains them: the type
   mismatch after a callback-arity error, "unused variable `x`" next to a misspelled use of `x`,
   `cap_grant` while the program has other errors, `cap_ceiling` alongside the matching
@@ -496,6 +515,11 @@ git log is authoritative for exact commits.
 - Diagnostics: the `List.filter(fn (x, y) -> …)` hint suggests a one-parameter function instead of
   a curried one; an infinite-type error no longer stacks contradictory notes; refinement errors on
   callbacks no longer show `$cb_arg`, and their guard suggestion uses the real argument.
+- Diagnostics: a diagnostic's hints no longer repeat or contradict each other. A "consider
+  narrowing `Cap(IO)`" hint no longer sits on an error at the same place (it contradicted
+  `cap_needs`' "add `needs IO`"). An unproved lemma call is one warning, not a warning plus a hint
+  saying the same thing. `send_wrong_actor` no longer restates its qualify-it advice as a note.
+  `termination_unproved` no longer suggests the same exit twice, and names your own variable, not `n`.
 - A parameter that only its refinement mentions (`fn f(t : {Tree | size(t) < 1})`) is no longer
   reported as unused, with a fix that broke the refinement.
 

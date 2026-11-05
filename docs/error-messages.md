@@ -389,13 +389,13 @@ expected `String` but got `Int`. [type_mismatch]
 5 |     "item " ++ n
                    ^
 
-    This is argument #2 of a function call.
+    This is the right side of `++`, which joins two `String`s.
     Use `int_to_string(x)` to convert an Int to a String.
 
     the expected type comes from here:
 
 5 |     "item " ++ n
-        ^^^^^^^^^^^^
+        ^^^^^^^
 
     `n` was bound here as `Int`:
 
@@ -1442,6 +1442,11 @@ note: this value never satisfies it; pass one that does
 3 |     List.nth([1, 2, 3], 7)
         ^^^^^^^^^^^^^^^^^^^^^^
 
+    `List.nth_opt` is `List.nth` without the requirement: it returns `Option` instead of panicking.
+        match List.nth_opt([1, 2, 3], 7) do
+          Some(v) -> …
+          None -> …
+        end
 
     this argument must satisfy `_ >= 0 && _ < len(xs)`:
 
@@ -1569,7 +1574,7 @@ end
 
 `down` is not shown to terminate: the recursive call `down(n - 1)` is not shown to decrease `n`: e.g. n = -1 [termination_unproved]
 note: the exit `n == 0` misses a negative `n`; `n <= 0` covers it.
-note: a metric must stay at least 0 and fall at every recursive call (left to right, for several components). Guard the recursion (an exit such as `n <= 0`), refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall.
+note: a metric must stay at least 0 and fall at every recursive call (left to right, for several components). Otherwise refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall.
 
 4 |     if n == 0 do 0 else down(n - 1) end
                             ^^^^^^^^^^^
