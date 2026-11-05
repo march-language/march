@@ -8749,16 +8749,24 @@ let unproved_text (t : Refine_term.t) (certs : string array) fails (si : int) : 
   let un = g.Refine_term.units.(match annotated with u :: _ -> u | [] -> List.hd members) in
   let name = un.Refine_term.u_name in
   let cert = certs.(si) in
-  let note =
+  (* [guard] is the exit to suggest, named after the program's own metric;
+     [None] when a more specific note already proposes it (§X4: one cause,
+     not the same advice twice). *)
+  let note ~guard =
     "\nnote: a metric must stay at least 0 and fall at every recursive call (left to \
-     right, for several components). Guard the recursion (an exit such as `n <= 0`), \
-     refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall."
+     right, for several components). "
+    ^ (match guard with
+       | Some g ->
+         Printf.sprintf "Guard the recursion (%s), refine the parameter (`{Int | _ >= 0}`), \
+                         or write a metric that does fall." g
+       | None -> "Otherwise refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall.")
     ^
     (* Phase 5 fills [suggest_metric]; the LSP offers the note as an action. *)
     match !Refine_term.suggest_metric t si with
     | Some es -> Printf.sprintf "\nnote: try `@[decreases(%s)]`." (String.concat ", " (List.map pred_str es))
     | None -> ""
   in
+  let generic_guard = "an exit taken before the metric would go below 0" in
   match fails.(si) with
   | Some ((site : Refine_term.metric_site), v) ->
     let e = site.Refine_term.ms_edge in
@@ -8792,7 +8800,11 @@ let unproved_text (t : Refine_term.t) (certs : string array) fails (si : int) : 
     ( e.Refine_term.e_span,
       Printf.sprintf
         "`%s` is not shown to terminate: the recursive call `%s` is not shown to decrease `%s`%s%s%s"
-        name call (metric_str site.Refine_term.ms_caller_metric) why fix_note note )
+        name call (metric_str site.Refine_term.ms_caller_metric) why fix_note
+        (note ~guard:(match site.Refine_term.ms_caller_metric with
+             | _ when fix_note <> "" -> None
+             | [ A.EVar x ] -> Some (Printf.sprintf "an exit such as `%s <= 0`" x.A.txt)
+             | _ -> Some generic_guard)) )
   | None ->
     let r = if String.length cert > 9 then String.sub cert 9 (String.length cert - 9) else cert in
     let why =
@@ -8826,7 +8838,8 @@ let unproved_text (t : Refine_term.t) (certs : string array) fails (si : int) : 
         | "" -> "its recursion was not checked"
         | r -> r)
     in
-    (un.Refine_term.u_span, Printf.sprintf "`%s` is not shown to terminate: %s%s" name why note)
+    (un.Refine_term.u_span,
+     Printf.sprintf "`%s` is not shown to terminate: %s%s" name why (note ~guard:(Some generic_guard)))
 
 (* `termination_unproved` (§3.4) for each ANNOTATED SCC the certificate did
    not prove (decision D2: never for an unannotated one): a warning, or an

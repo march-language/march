@@ -486,6 +486,11 @@ git log is authoritative for exact commits.
 - Diagnostics: the `List.filter(fn (x, y) -> …)` hint suggests a one-parameter function instead of
   a curried one; an infinite-type error no longer stacks contradictory notes; refinement errors on
   callbacks no longer show `$cb_arg`, and their guard suggestion uses the real argument.
+- Diagnostics: a diagnostic's hints no longer repeat or contradict each other. A "consider
+  narrowing `Cap(IO)`" hint no longer sits on an error at the same place (it contradicted
+  `cap_needs`' "add `needs IO`"). An unproved lemma call is one warning, not a warning plus a hint
+  saying the same thing. `send_wrong_actor` no longer restates its qualify-it advice as a note.
+  `termination_unproved` no longer suggests the same exit twice, and names your own variable, not `n`.
 - A parameter that only its refinement mentions (`fn f(t : {Tree | size(t) < 1})`) is no longer
   reported as unused, with a fix that broke the refinement.
 
