@@ -1,0 +1,70 @@
+{
+  "generated": {
+    "commit": "7fb7147ea",
+    "date": "2026-11-05",
+    "lab_app_sha256": "78ab2a20763ce435a2d7c590d921cfe491ed634fe02a63353b6933ef4651dbf2"
+  },
+  "order": {
+    "fingerprint": "fbc924928c002942943a81b564d2408d",
+    "functions": 152,
+    "linear_states": 15,
+    "modules": [
+      {
+        "functions": 18,
+        "linear_states": 0,
+        "name": "Order_Msg"
+      },
+      {
+        "functions": 33,
+        "linear_states": 5,
+        "name": "Order_Shop"
+      },
+      {
+        "functions": 37,
+        "linear_states": 6,
+        "name": "Order_Stock"
+      },
+      {
+        "functions": 26,
+        "linear_states": 4,
+        "name": "Order_Ledger"
+      },
+      {
+        "functions": 38,
+        "linear_states": 0,
+        "name": "Order_Run"
+      }
+    ],
+    "roles": [
+      "Shop",
+      "Stock",
+      "Ledger"
+    ],
+    "source": [
+      "@[endpoints]",
+      "protocol Order do",
+      "  role Stock needs IO.Mut",
+      "  role Ledger needs IO.Console",
+      "  loop do",
+      "    want: Shop -> Stock : Int",
+      "    choose by Stock:",
+      "      have -> Stock -> Shop : String",
+      "              book: Stock -> Ledger : Int",
+      "              booked: Ledger -> Shop : String",
+      "      out  -> Stock -> Shop : String",
+      "              skip: Stock -> Ledger : Int",
+      "              stop",
+      "    end",
+      "  end",
+      "end"
+    ],
+    "tags": [
+      "Want",
+      "Have",
+      "Book",
+      "Booked",
+      "Out",
+      "Skip"
+    ]
+  }
+}

@@ -1,0 +1,640 @@
+{
+ "module": {
+  "decls": [
+   {
+    "decls": [
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DImpl"
+     },
+     {
+      "kind": "DImpl"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     }
+    ],
+    "kind": "DMod",
+    "name": {
+     "txt": "Order_Msg"
+    }
+   },
+   {
+    "decls": [
+     {
+      "kind": "DNeeds"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     }
+    ],
+    "kind": "DMod",
+    "name": {
+     "txt": "Order_Shop"
+    }
+   },
+   {
+    "decls": [
+     {
+      "kind": "DNeeds"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     }
+    ],
+    "kind": "DMod",
+    "name": {
+     "txt": "Order_Stock"
+    }
+   },
+   {
+    "decls": [
+     {
+      "kind": "DNeeds"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DAlwaysLinearType"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DType"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     }
+    ],
+    "kind": "DMod",
+    "name": {
+     "txt": "Order_Ledger"
+    }
+   },
+   {
+    "decls": [
+     {
+      "kind": "DNeeds"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     },
+     {
+      "kind": "DFn"
+     }
+    ],
+    "kind": "DMod",
+    "name": {
+     "txt": "Order_Run"
+    }
+   }
+  ]
+ }
+}
