@@ -99,16 +99,44 @@ test('killing a dead host or reviving a live one changes nothing', () => {
   sim.kill(s, 0, 'crash'); const c = s.counters.cancelled; sim.kill(s, 0, 'crash'); assert.equal(s.counters.cancelled, c);
 });
 
-// Two different clocks: membership declares a silent host dead after `suspectS`, which
-// stops new sessions going there; the sessions already on it are cancelled by their own
-// heartbeat, after `silentS`.
-test('a silent host stops taking sessions at the suspect timeout but holds its own until the heartbeat cutoff', () => {
-  const s = sim.create({ ...cfg, silentS: 10 }); sim.advance(s, 10); const before = s.counters.cancelled;
-  sim.kill(s, 0, 'silent'); sim.advance(s, 3.5);
+// Over a cluster node there is one failure detector, the node's own (SWIM), and no
+// session heartbeat: a hung host goes unnoticed until a probe fails, is suspected, and is
+// declared dead when the suspect timeout runs out. Its sessions are cancelled then.
+test('a silent host is unnoticed, then suspected, then dead, and its sessions go when it is declared dead', () => {
+  const s = sim.create({ ...cfg, noticeS: 1.5 }); sim.advance(s, 10); const before = s.counters.cancelled;
+  const held = used(s.hosts[0].stock);
+  assert.ok(held > 0);
+  sim.kill(s, 0, 'silent'); sim.advance(s, 1);
+  assert.equal(s.hosts[0].status, 'up');                 // nobody has noticed yet
+  assert.equal(used(s.hosts[0].stock), held);            // it takes nothing new and finishes nothing
+  sim.advance(s, 1); assert.equal(s.hosts[0].status, 'suspect');
+  sim.advance(s, 2); assert.equal(s.hosts[0].status, 'suspect'); assert.equal(s.counters.cancelled, before);
+  sim.advance(s, 1.2);
   assert.equal(s.hosts[0].status, 'dead');
-  assert.equal(s.counters.cancelled, before);           // still held, frozen
-  assert.ok(used(s.hosts[0].stock) > 0);
-  sim.advance(s, 7);
-  assert.ok(s.counters.cancelled > before);
+  assert.equal(s.counters.cancelled, before + held);
   assert.equal(used(s.hosts[0].stock), 0);
+});
+
+test('there is no second clock: nothing holds a dead host\'s sessions', () => {
+  const s = sim.create({ ...cfg, silentS: 10 });           // an option that no longer exists is ignored
+  sim.advance(s, 10); sim.kill(s, 0, 'silent'); sim.advance(s, 3.5);
+  assert.equal(s.hosts[0].status, 'dead');
+  assert.equal(used(s.hosts[0].stock), 0);
+});
+
+test('a returning books host takes the Ledger back once the settle period is over', () => {
+  const s = sim.create(cfg); sim.advance(s, 5); const first = s.ledger.host;
+  sim.kill(s, first, 'crash'); sim.advance(s, 4); const second = s.ledger.host;
+  sim.revive(s, first); sim.advance(s, 1.5);               // up again, as incarnation 2
+  assert.equal(s.hosts[first].status, 'up');
+  sim.advance(s, cfg.settleS - 2); assert.equal(s.ledger.host, second);   // not yet
+  const cancelled = s.counters.cancelled;
+  sim.advance(s, 3); assert.equal(s.ledger.host, first);                  // it ranks first again
+  assert.equal(s.counters.cancelled, cancelled);           // the move drains; nothing is cancelled
+  sim.advance(s, 6); assert.ok(s.counters.completed > 0);
+});
+
+test('a host that was never down does not wait out a settle period', () => {
+  const s = sim.create(cfg); sim.advance(s, 1);
+  assert.equal(s.ledger.host, 2);
 });

@@ -9,9 +9,10 @@ on the page is typed in by hand, so a compiler change shows up as a diff of the 
 
     scripts/gen-explainer-data.py                 regenerate the data file
     scripts/gen-explainer-data.py --check         exit 1 if a fresh run would differ
-    scripts/gen-explainer-data.py --check-inputs  exit 1 if examples/lab_app changed since
-                                                  the data was generated (needs no compiler;
-                                                  doc-lint Check H runs this)
+    scripts/gen-explainer-data.py --check-inputs  exit 1 if the lab app, its topology or a
+                                                  wrong program changed since the data was
+                                                  generated (needs no compiler; doc-lint
+                                                  Check H runs this)
 
 The compiler is $MARCH_BIN, or _build/default/bin/main.exe. Every compiler run happens in
 a fresh directory under a private HOME, so no cache shapes the output.
@@ -26,7 +27,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -283,6 +283,7 @@ def _host(entry):
 def topology_facts(toml_path, overlay_path):
     """Who runs what in the lab: the ingress host, the hosts that offer Stock, the hosts
     labelled `books` (one of which holds the Ledger), and the two roles' capacities."""
+    import tomllib   # Python 3.11+; imported here so `--check-inputs` runs on older ones
     base = tomllib.loads(Path(toml_path).read_text())
     overlay = tomllib.loads(Path(overlay_path).read_text())
     roles = base["roles"]
@@ -301,17 +302,20 @@ def topology_facts(toml_path, overlay_path):
 # Values the docs state in prose. Each entry names the file and the exact phrase that
 # states the value; if the phrase is gone, the value may have changed, and the generator
 # refuses to carry the old number onto the page.
+#
+# These are the CLUSTER runtime's numbers. The lab app runs on cluster nodes, where the
+# node itself (SWIM) is the only failure detector. The direct runner's session heartbeat
+# (a ping every second, failure after 10 s of silence) does not apply there and is
+# deliberately not here.
 PINNED = [
-    {"key": "heartbeat_s", "value": 1, "file": "specs/lang/choreography.md",
-     "must_contain": "each connection is pinged every second"},
-    {"key": "silent_timeout_s", "value": 10, "file": "specs/lang/choreography.md",
-     "must_contain": "a peer that sends nothing for 10"},
-    {"key": "setup_s", "value": 20, "file": "specs/lang/choreography.md",
-     "must_contain": "(`MARCH_SESSION_CONNECT_MS`, 20 seconds)"},
-    {"key": "suspect_s", "value": 3, "file": "docs/lab.md",
-     "must_contain": "SWIM suspect timeout (3 s)"},
-    {"key": "settle_s", "value": 15, "file": "docs/lab.md",
-     "must_contain": "15 s settle period"},
+    {"key": "swim_probe_s", "value": 1, "file": "specs/lang/clustering.md",
+     "must_contain": "SWIM probes every 1 s"},
+    {"key": "swim_ack_ms", "value": 500, "file": "specs/lang/clustering.md",
+     "must_contain": "waits 500 ms for an ack"},
+    {"key": "suspect_s", "value": 3, "file": "specs/lang/clustering.md",
+     "must_contain": "3 s for a suspect to refute"},
+    {"key": "settle_s", "value": 15, "file": "docs/topology.md",
+     "must_contain": "`MARCH_PLACEMENT_SETTLE_MS` (default 15000)"},
 ]
 
 
@@ -326,6 +330,7 @@ def pinned_facts(root):
             sys.exit(f"gen-explainer-data: pinned fact {e['key']} = {e['value']}: "
                      f"{e['file']} no longer says {e['must_contain']!r}; check the value and update PINNED")
         out[e["key"]] = e["value"]
+    import tomllib
     drain = tomllib.loads((root / "examples/lab_app/topology.toml").read_text())["drain"]
     out["drain_soft_ms"] = drain["soft_ms"]
     out["drain_hard_ms"] = drain["hard_ms"]
@@ -337,15 +342,19 @@ LAB_NOTE = "specs/progress/2026-10-05-multi-host-lab.md"
 
 def lab_run(root):
     """The one recorded run of the multi-host lab, read from its progress note. The lab
-    runs on demand, not in CI, so the page states when the number was measured."""
+    runs on demand, not in CI, so the page states when the number was measured, and that
+    the scenario it comes from did not pass: the Ledger moved in 1 s, but the returning
+    host took the role back at once and sessions stopped (bugs since fixed, and guarded
+    by the two-node scenario `topology_rejoin`)."""
     path = Path(root) / LAB_NOTE
     text = path.read_text() if path.exists() else ""
     for phrase in ("## Results (2026-10-05, main at 53d66f068",
-                   "the Ledger moved lab-4 -> lab-3 in 1 s with no session failed"):
+                   "XFAIL failover: the Ledger moved lab-4 -> lab-3 in 1 s with no session failed"):
         if phrase not in text:
             sys.exit(f"gen-explainer-data: {LAB_NOTE} no longer says {phrase!r}; "
                      "check the lab's recorded results and update lab_run")
-    return {"date": "2026-10-05", "commit": "53d66f068", "failover_s": 1, "source": LAB_NOTE}
+    return {"date": "2026-10-05", "commit": "53d66f068", "failover_s": 1,
+            "failover_result": "expected-fail", "source": LAB_NOTE}
 
 
 # Chosen for legibility, not measured, and stated on the page as such: the lab's own
@@ -359,14 +368,26 @@ SIM = {"seed": 20261105, "load_per_s": 14, "session_s": [1.2, 2.8], "restart_s":
 
 # ── inputs ─────────────────────────────────────────────────────────────────────
 
-def lab_app_sha256(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def input_files(root):
+    """Every file the data is read from, apart from the compiler itself and the prose
+    the pinned facts quote: the lab app, its topology, and the wrong programs."""
+    root = Path(root)
+    lab = root / "examples" / "lab_app"
+    return ([lab / "src" / "lab_app.march", lab / "topology.toml", lab / "topology.lab.toml"]
+            + sorted((root / "docs" / "assets" / "explainer" / "programs").glob("*.march")))
 
 
-def check_inputs(data_path, lab_app_path):
-    """True when the data file was generated from the lab app as it is now."""
+def inputs_sha256(root):
+    h = hashlib.sha256()
+    for f in input_files(root):
+        h.update(str(f.relative_to(root)).encode() + b"\0" + f.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def check_inputs(data_path, root):
+    """True when the data file was generated from the inputs as they are now."""
     data = json.loads(Path(data_path).read_text())
-    return data.get("generated", {}).get("lab_app_sha256") == lab_app_sha256(lab_app_path)
+    return data.get("generated", {}).get("inputs_sha256") == inputs_sha256(root)
 
 
 # ── running the compiler ───────────────────────────────────────────────────────
@@ -463,7 +484,7 @@ def build(march):
     order["strips"] = strips(core)
     return {
         "generated": {"commit": commit, "date": datetime.date.today().isoformat(),
-                      "lab_app_sha256": lab_app_sha256(LAB_APP)},
+                      "inputs_sha256": inputs_sha256(ROOT)},
         "order": order,
         "state_map": state_map(record["current"]["steps"], record["current"]["roles"]),
         "timings": pinned_facts(ROOT),
@@ -490,8 +511,9 @@ def _comparable(data):
 
 def main(argv):
     if "--check-inputs" in argv:
-        if not DATA.exists() or not check_inputs(DATA, LAB_APP):
-            print("explainer data is stale: examples/lab_app changed; run scripts/gen-explainer-data.py")
+        if not DATA.exists() or not check_inputs(DATA, ROOT):
+            print("explainer data is stale: examples/lab_app or docs/assets/explainer/programs changed; "
+                  "run scripts/gen-explainer-data.py")
             return 1
         return 0
     data = build(march_bin())

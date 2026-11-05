@@ -21,12 +21,15 @@ function fakeRoot(names) {
       classList: { toggle: () => {} },
       getBoundingClientRect: () => ({ top: 100 + i * 300, bottom: 400 + i * 300 }),
     }));
-    return {
+    const section = {
+      classes: [],
+      classList: { add: (c) => section.classes.push(c) },
       dataset: { figure: name },
       querySelector: (sel) => (sel === '.mx-stage' ? host : null),
       querySelectorAll: (sel) => (sel === '.mx-step' ? steps : []),
       steps,
     };
+    return section;
   });
   return { sections, querySelectorAll: (sel) => (sel === '.mx-scrolly' ? sections : []) };
 }
@@ -87,4 +90,25 @@ test('a figure whose setState throws later shows an error once and keeps going',
     requestAnimationFrame: (f) => frames.push(f) };
   assert.doesNotThrow(() => { ME.mountAll(root, {}, env); while (frames.length) frames.shift()(); });
   assert.match(fakeRoot.lastErrorText, /flaky: later/);
+});
+
+// The page must read as an article when a figure is not running: with JavaScript off, or
+// when a figure fails. The scrolling layout (cards dimmed and spaced a screen apart) is
+// therefore switched on per section, by a class, only once its figure is up.
+test('a section is switched to the scrolling layout only when its figure is running', () => {
+  ME.registerFigure('bad', () => { throw new Error('boom'); });
+  ME.registerFigure('good', () => ({ setState: () => {} }));
+  const root = fakeRoot(['bad', 'good']);
+  ME.mountAll(root, {});
+  assert.deepEqual(root.sections[1].classes, ['mx-on']);
+  assert.deepEqual(root.sections[0].classes, []);
+});
+
+test('a figure that cannot draw its first card keeps its static image and is not switched on', () => {
+  ME.registerFigure('nodata', () => ({ setState: () => { throw new Error('data.order is missing'); } }));
+  const root = fakeRoot(['nodata']);
+  ME.mountAll(root, {});
+  assert.match(fakeRoot.lastErrorText, /nodata: data.order is missing/);
+  assert.deepEqual(fakeRoot.hosts.nodata.classes, []);      // not `mx-live`: the fallback image stays
+  assert.deepEqual(root.sections[0].classes, []);
 });

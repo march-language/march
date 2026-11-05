@@ -20,27 +20,47 @@
   :root       { --mx-accent: #ff6b5e; --mx-ink: var(--text); --mx-dim: var(--text-faint); --mx-paper: var(--bg); }
   :root.light { --mx-accent: #c0392b; }
 
-  /* Figure and cards share one grid cell, so the figure is as tall as its cards and its
-     stage can stay pinned while they scroll, at phone width too. In one column the stage
-     is pinned across the top and the cards pass behind it, so a tall card never covers
-     the drawing; from 1280 px the cards get a column of their own beside it. */
-  .mx-scrolly { display: grid; margin: 2.5rem 0 3rem; }
-  .mx-scrolly > .mx-figure, .mx-scrolly > .mx-steps { grid-area: 1 / 1; min-width: 0; }
-  .mx-scrolly > .mx-figure { z-index: 2; pointer-events: none; }
-  .mx-stage {
-    position: sticky; top: 60px; height: min(44vh, 400px); padding: 12px 0 10px;
+  /* A section whose figure is not running (no JavaScript, or the figure failed) is laid
+     out as an article: its static image, then its cards at an ordinary spacing. */
+  .mx-scrolly { margin: 2rem 0 2.5rem; }
+  .mx-stage { padding: 12px 0 10px; background: var(--mx-paper); }
+  .mx-stage svg, .mx-stage canvas { display: block; max-width: 100%; }
+  .mx-fallback { display: block; max-width: 100%; max-height: 100%; margin: 0 auto; object-fit: contain; border-radius: 6px; }
+  .mx-live .mx-fallback { display: none; }
+  .mx-step {
+    max-width: 34rem; margin: 0 0 1rem;
+    padding: 14px 18px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-code);
+  }
+  .d-content .mx-step p { font-size: 15px; line-height: 1.7; color: var(--text); margin: 0 0 10px; }
+  .d-content .mx-step p:last-child { margin-bottom: 0; }
+  .d-content .mx-step pre { margin: 8px 0; font-size: 12.5px; }
+
+  /* Once its figure is running, story.js marks the section `mx-on` and the scrolling
+     layout applies. Figure and cards share one grid cell, so the figure is as tall as
+     its cards and its stage can stay pinned while they scroll, at phone width too. In
+     one column the stage is pinned across the top and the cards pass behind it, so a
+     tall card never covers the drawing; from 1280 px the cards get their own column. */
+  .mx-scrolly.mx-on { display: grid; margin: 2.5rem 0 3rem; }
+  .mx-on > .mx-figure, .mx-on > .mx-steps { grid-area: 1 / 1; min-width: 0; }
+  .mx-on > .mx-figure { z-index: 2; pointer-events: none; }
+  .mx-on .mx-stage {
+    position: sticky; top: 60px; height: min(44vh, 400px);
     display: flex; flex-direction: column; justify-content: center;
-    background: var(--mx-paper); border-bottom: 1px solid var(--border); pointer-events: auto;
+    border-bottom: 1px solid var(--border); pointer-events: auto;
     overflow: hidden;   /* a drawing never runs over the cards; chapters.js scales it to fit */
   }
-  .mx-stage svg, .mx-stage canvas { display: block; max-width: 100%; }
-  .mx-stage canvas { flex: 1 1 auto; min-height: 0; width: 100%; }
+  .mx-on .mx-stage canvas { flex: 1 1 auto; min-height: 0; width: 100%; }
   .mx-svg { display: flex; flex-direction: column; align-items: center; gap: 4px; }
   .mx-slot { width: 100%; display: flex; flex-direction: column; align-items: center; }
   .mx-slot .mx-caption { align-self: flex-start; margin: 6px 0 2px; }
   /* A figure whose height changes from card to card is pinned to the top of its stage,
      so what stays on screen does not move when something is added below it. */
-  .mx-stage.mx-top { justify-content: flex-start; }
+  .mx-on .mx-stage.mx-top { justify-content: flex-start; }
+
+  .mx-on .mx-steps { position: relative; z-index: 1; padding-top: 54vh; }
+  .mx-on .mx-step { margin-bottom: 42vh; }
+  .mx-on .mx-step:last-child { margin-bottom: 20vh; }
 
   /* Transitions between cards. An SVG figure changes in place: what stays may change
      colour, what is new sweeps in, what is gone fades. A simulation that has to be
@@ -55,19 +75,6 @@
     .mx-svg .mx-enter { transform-box: fill-box; }
     .mx-exit { opacity: 0; }
   }
-  .mx-fallback { display: block; max-width: 100%; max-height: 100%; margin: 0 auto; object-fit: contain; border-radius: 6px; }
-  .mx-live .mx-fallback { display: none; }
-
-  .mx-steps { position: relative; z-index: 1; padding-top: 54vh; }
-  .mx-step {
-    max-width: 34rem; margin: 0 0 42vh;
-    padding: 14px 18px; border: 1px solid var(--border); border-radius: 8px;
-    background: var(--bg-code);
-  }
-  .mx-step:last-child { margin-bottom: 20vh; }
-  .d-content .mx-step p { font-size: 15px; line-height: 1.7; color: var(--text); margin: 0 0 10px; }
-  .d-content .mx-step p:last-child { margin-bottom: 0; }
-  .d-content .mx-step pre { margin: 8px 0; font-size: 12.5px; }
 
   /* This page's figures want more room than a prose page: let the column grow, and keep
      the prose itself at a readable measure. */
@@ -75,13 +82,21 @@
   .d-main:has(.mx-scrolly) .d-content > :not(.mx-scrolly) { max-width: 46rem; }
 
   @media (min-width: 1280px) {
-    .mx-scrolly { grid-template-columns: 21rem minmax(0, 1fr); column-gap: 2.25rem; }
-    .mx-scrolly > .mx-steps  { grid-area: 1 / 1; padding-top: 22vh; }
-    .mx-scrolly > .mx-figure { grid-area: 1 / 2; }
-    .mx-stage { top: 72px; height: min(70vh, 560px); border-bottom: 0; }
-    .mx-step { margin-bottom: 62vh; opacity: 0.55; transition: opacity 0.2s; }
-    .mx-step.mx-active { opacity: 1; }
-    .mx-step:last-child { margin-bottom: 30vh; }
+    .mx-scrolly.mx-on { grid-template-columns: 21rem minmax(0, 1fr); column-gap: 2.25rem; }
+    .mx-on > .mx-steps  { grid-area: 1 / 1; padding-top: 22vh; }
+    .mx-on > .mx-figure { grid-area: 1 / 2; }
+    .mx-on .mx-stage { top: 72px; height: min(70vh, 560px); border-bottom: 0; }
+    .mx-on .mx-step { margin-bottom: 62vh; opacity: 0.55; transition: opacity 0.2s; }
+    .mx-on .mx-step.mx-active { opacity: 1; }
+    .mx-on .mx-step:last-child { margin-bottom: 30vh; }
+  }
+
+  /* A window too short to pin a figure above its cards (a phone on its side): leave the
+     figure in the flow at a readable height, above its cards. */
+  @media (max-height: 520px) and (max-width: 1279px) {
+    .mx-on .mx-stage { position: static; height: 300px; }
+    .mx-on .mx-steps { padding-top: 324px; }
+    .mx-on .mx-step { margin-bottom: 30vh; }
   }
 
   .mx-caption   { font-size: 12.5px; color: var(--text-faint); margin: 6px 0 0; }

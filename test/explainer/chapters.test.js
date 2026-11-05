@@ -128,7 +128,9 @@ test('cluster: the simulation is configured from the data file, not from literal
   assert.equal(s.hosts[0].stock.length, data.topology.stock_capacity);
   assert.equal(s.ledger.slots.length, data.topology.ledger_capacity);
   assert.equal(s.cfg.suspectS, data.timings.suspect_s);
-  assert.equal(s.cfg.silentS, data.timings.silent_timeout_s);
+  assert.equal(s.cfg.noticeS, 1.5);                     // a probe (1 s) and its ack (0.5 s)
+  assert.equal('silentS' in s.cfg, false);              // there is no session heartbeat on a cluster node
+  assert.equal(s.cfg.settleS, data.timings.settle_s);
   assert.equal(s.cfg.loadPerS, data.sim.load_per_s);
   assert.deepEqual(s.hosts.filter((h) => h.books).map((h) => h.id), data.topology.books_hosts);
 });
@@ -157,7 +159,7 @@ test('cluster: a stock crash cancels sessions and leaves two hosts serving', () 
 
 test('cluster: a silent host is still holding its sessions when the card shows it', () => {
   const s = ME.buildState('cluster', 'silent', data);
-  assert.ok(['suspect', 'dead'].includes(s.hosts[0].status));
+  assert.equal(s.hosts[0].status, 'suspect');
   assert.ok(usedSlots(s.hosts[0].stock) > 0);
   assert.equal(s.counters.cancelled, 0);
 });
@@ -224,7 +226,7 @@ test('inline figures are drawn into their placeholders', () => {
   const crash = { dataset: { mxInline: 'timeline:crash' }, clientWidth: 400, innerHTML: '' };
   const bad = { dataset: { mxInline: 'nope' }, clientWidth: 400, innerHTML: '' };
   ME.mountInline({ querySelectorAll: () => [el, crash, bad] }, data);
-  assert.equal(count(el.innerHTML, 'mx-ping'), data.timings.silent_timeout_s / data.timings.heartbeat_s - 1);
+  assert.equal(count(el.innerHTML, 'mx-ping'), 2);
   assert.equal(count(el.innerHTML, 'mx-failed'), 1);
   assert.equal(count(crash.innerHTML, 'mx-ping'), 0);
   assert.match(bad.innerHTML, /mx-error/);

@@ -2,6 +2,7 @@
 layout: docs
 title: "From a Protocol to a Cluster"
 permalink: /docs/protocol-to-cluster/
+published: false   # until chapter 5 lands (see the comment where it goes); preview with `jekyll serve --unpublished`
 description: "Sixteen lines of protocol, followed through the compiler into a running cluster that loses nodes, recovers, and takes new code without stopping."
 ---
 
@@ -22,6 +23,17 @@ description: "Sixteen lines of protocol, followed through the compiler into a ru
 {% assign x = site.data.explainer %}
 
 # From a Protocol to a Cluster
+
+Getting programs on different machines to cooperate is mostly a matter of agreement.
+Each side has to know whose turn it is, what the next message means, and what to do when
+the other side goes quiet. That agreement usually lives in a document, a set of
+integration tests and the heads of the people who wrote both ends. It holds until one end
+changes, or one machine dies halfway through a conversation.
+
+March puts the agreement in the program. You write the conversation once, the compiler
+checks every participant against it, and the runtime uses the same description to
+connect the machines and to end a conversation cleanly when one of them fails. This page
+follows one small system from that description to a running cluster.
 
 Three programs on four machines take orders, check stock and keep a ledger. This is
 everything that says how they talk to each other:
@@ -56,13 +68,14 @@ written by hand could be at any combination of those at the same moment.
 <div class="mx-step" data-state="empty">
 <p>Here is every combination: {{ x.state_map.cells }} cells, one for each way the three
 positions can line up. Blocks are Shop's position, columns are Stock's, rows are Ledger's.</p>
-<p>Nothing stops ordinary networked programs from reaching any of them. Most are trouble:
-one side waiting for a message the other will never send, or both sides waiting.</p>
+<p>Nothing stops ordinary networked programs from reaching any of them, including the
+ones where one side waits for a message the other will never send, or both sides wait.</p>
 </div>
 
 <div class="mx-step" data-state="path">
-<p>The protocol reaches {{ reach }} of them. They light in the order a run visits them,
-counting a role as moved once it has sent, even if its peer has not received yet.</p>
+<p>The protocol reaches {{ reach }} of them. They light in the order the protocol can
+first reach them, counting a role as moved once it has sent, even if its peer has not
+received yet.</p>
 <p>The other {{ x.state_map.cells | minus: reach }} cannot happen. A program that would
 get there does not compile.</p>
 </div>
@@ -117,8 +130,8 @@ or a type. <code>@[endpoints]</code> asks for typed code to be generated from it
 <p><strong>Project.</strong> Each role gets its own view: only the steps it takes. Shop's
 view has {{ x.order.strips.Shop | size }} steps, Stock's {{ x.order.strips.Stock | size }}
 and Ledger's {{ x.order.strips.Ledger | size }}.</p>
-<p>The views are checked against each other first. If one role would send while its peer
-is also sending, the protocol itself is rejected, before any role is written
+<p>The views are checked against each other before any role is written: every message
+one role sends must be one its peer is waiting to receive
 (<code>lib/typecheck/typecheck_session.ml</code>).</p>
 </div>
 
@@ -140,9 +153,9 @@ inside an actor.</p>
 
 <div class="mx-step" data-state="typecheck">
 <p><strong>Typecheck, as usual.</strong> Stock holds a value of type
-<code>S_choose_have_out</code>. Only <code>choose_have</code> and <code>choose_out</code>
-accept it. <code>send_Book</code> wants an <code>S_send_Book</code>, and only
-<code>choose_have</code> returns one.</p>
+<code>S_choose_have_out</code>. The only steps forward from it are
+<code>choose_have</code> and <code>choose_out</code>. <code>send_Book</code> wants an
+<code>S_send_Book</code>, and only <code>choose_have</code> returns one.</p>
 <p>So order is enforced by an ordinary type mismatch, and exactly-once use by linearity.
 A table kept beside the types (<code>lib/ast/protocol_states.ml</code>) lets the error
 name roles and steps instead of generated types.</p>
@@ -165,7 +178,8 @@ start the node, narrow each pool's capabilities, open an offer for each role
 
 <div class="mx-step" data-state="hosts">
 <p><strong>Compile.</strong> From here it is the normal back half: typed IR, reference
-counting, LLVM, a native binary for each pool.</p>
+counting, LLVM, a native binary. Pools that share a build run the same binary, and each
+machine is told which pool it is.</p>
 <p>The build also records the protocol's fingerprint,
 <code>{{ x.order.fingerprint | slice: 0, 8 }}…</code>, a digest of its roles, steps and
 payload types. Two nodes compare fingerprints before they exchange a message.</p>
@@ -274,11 +288,15 @@ delivered.</p>
 </div>
 
 <div class="mx-step" data-state="silent">
-<p>A machine that hangs is harder, because nothing closes. Two clocks run.</p>
-<p>Cluster membership gives up on {{ x.topology.stock_hosts[0] }} after
-{{ x.timings.suspect_s }} seconds, and callers stop trying it. The sessions already on
-it wait for their own heartbeat: a ping every {{ x.timings.heartbeat_s }} second, and
-cancellation after {{ x.timings.silent_timeout_s }} seconds of silence.</p>
+<p>A machine that hangs is harder, because nothing closes. The cluster node is the
+failure detector. It probes each peer every {{ x.timings.swim_probe_s }} second and waits
+{{ x.timings.swim_ack_ms }} ms for the answer. A peer that misses one is suspected, and
+has {{ x.timings.suspect_s }} seconds to show it is alive.</p>
+<p>Meanwhile {{ x.topology.stock_hosts[0] }}'s sessions are frozen and a caller that
+tries it moves on to the next host. When the time is up it is declared dead and its
+sessions are cancelled, with that as the cause: at most about
+{{ x.timings.swim_ack_ms | divided_by: 1000.0 | plus: x.timings.swim_probe_s | plus: x.timings.suspect_s }}
+seconds after it hung.</p>
 <div data-mx-inline="timeline:silent"></div>
 </div>
 
@@ -293,8 +311,10 @@ role. The new Ledger starts from 0.</p>
 <div class="mx-step" data-state="return">
 <p>The stopped host comes back as a new incarnation, so nothing can reach it through
 an old session. It offers Stock again, and no other node had to coordinate that.</p>
-<p>It does not take the Ledger back. The lab checks this for a settle period of
-{{ x.timings.settle_s }} seconds.</p>
+<p>It does not take the Ledger back at once. A node that rejoins counts for placement
+only after a settle period of {{ x.timings.settle_s }} seconds, so a host that keeps
+dropping out cannot pull a role back and forth. After that, if it still ranks first, the
+role returns to it, and the total starts from 0 a second time.</p>
 </div>
 
 <div class="mx-step" data-state="no-offer">
@@ -307,12 +327,20 @@ half-formed.</p>
 </div>
 </section>
 
-Each of these behaviours is tested on every pull request by a scenario under
-`test/two_node/`: `crash_before_send`, `crash_after_send`, `silent`, `session_refused`
-and `cluster_takeover`. They use other protocols on the same runtime. The lab scenario
-that covers failover for this app is run by hand; in its one recorded run
-({{ x.lab_run.date }}) the Ledger moved in {{ x.lab_run.failover_s }} second with no
-session failed.
+These behaviours are tested on every pull request by scenarios under `test/two_node/`,
+which run the same cluster runtime with other protocols: `cluster_ap_retry` (a full offer
+is passed over, and `NoOffer` when nothing is left), `cluster_crash` (a killed node is
+declared dead), `cluster_session_silent` (a hung node is declared dead and its session
+cancelled), `topology_move` (a single-holder role moves when its holder dies),
+`topology_rejoin` (the returning node waits out the settle period, then takes the role
+back) and `cluster_ap_restart` (a restarted node offers again and the next session finds
+it).
+
+The lab scenario that runs all of this on the app above is run by hand. Its one recorded
+run ({{ x.lab_run.date }}) did not pass: the Ledger moved in {{ x.lab_run.failover_s }}
+second with no session failed, but the returning host took the role back at once and
+sessions stopped. Those bugs have since been fixed and are guarded by `topology_rejoin`.
+The lab has not been run again.
 
 <!-- Chapter 5, "Deploying while it runs", goes here. It is plan Task 13
      (specs/plans/2026-11-05-distributed-explainer-page-plan.md) and waits on the lab app
@@ -344,3 +372,30 @@ The reference chapters go further on each part:
 [Clustering]({{ site.baseurl }}/docs/clustering/),
 [Topology]({{ site.baseurl }}/docs/topology/) and
 [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/).
+
+<details>
+<summary>How the numbers on this page were measured</summary>
+<p>Every number, excerpt and compiler message above is generated, not typed. One script
+regenerates them all, and this page was last generated at commit
+<code>{{ x.generated.commit }}</code> on {{ x.generated.date }}:</p>
+<pre>scripts/gen-explainer-data.py</pre>
+<ul>
+<li><strong>Modules, state types and functions:</strong>
+<code>march --emit-core-ast examples/lab_app/src/lab_app.march</code>, counting the
+declarations in each <code>Order_*</code> module.</li>
+<li><strong>Fingerprint and message tags:</strong>
+<code>march --check --emit-protocols DIR examples/lab_app/src/lab_app.march</code>, which
+writes <code>DIR/Order.json</code>.</li>
+<li><strong>Compiler messages:</strong> <code>march --check</code> on each program in
+<code>docs/assets/explainer/programs/</code>.</li>
+<li><strong>The {{ x.state_map.cells }} combinations and the {{ reach }} reachable
+ones:</strong> computed by the script from the step tree in <code>Order.json</code>.</li>
+<li><strong>Probe, ack and suspect times:</strong> the cluster node's defaults, from the
+Clustering chapter. <strong>Settle period:</strong> from the Topology chapter.
+<strong>Capacities and hosts:</strong> <code>examples/lab_app/topology.toml</code> and
+<code>topology.lab.toml</code>.</li>
+<li><strong>Simulations:</strong> seeded ({{ x.sim.seed }}), at {{ x.sim.load_per_s }}
+sessions a second. Their rules are tested in <code>test/explainer/</code>; they are not
+recordings.</li>
+</ul>
+</details>

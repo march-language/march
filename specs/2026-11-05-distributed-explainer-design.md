@@ -121,7 +121,8 @@ The stations, in order, as verified in the compiler source:
    phrased in protocol terms (`lib/ast/protocol_states.ml`).
 5. Generate `main` from the topology (`lib/desugar/desugar_topology.ml`): start the node,
    hand each pool its narrowed capabilities, open the offers.
-6. Compile to a native binary per pool through the normal back half.
+6. Compile to a native binary through the normal back half. Pools that share a build
+   share one binary; only an isolated pool gets its own.
 7. Record the protocol's fingerprint for the next build to compare against.
 
 Graphics:
@@ -160,10 +161,15 @@ Cards:
 - Steady state. Each node offers a role with a capacity; a full node answers "full" and
   the caller tries the next offer.
 - A Stock host crashes. Its sessions are cancelled, not resumed. Calls reroute.
-- Crash versus hang. A closed connection is noticed at once; a silent peer is declared
-  failed by the session heartbeat. The detection timeline is drawn to scale.
+- Crash versus hang. A closed connection is noticed at once. A hung host is noticed by
+  the cluster node's own failure detector (SWIM): a missed probe, then a suspect timeout,
+  then it is declared dead and its sessions are cancelled. The detection timeline is
+  drawn to scale. (Corrected after review: an earlier draft said "session heartbeat",
+  which applies to the direct runner only, not to cluster nodes.)
 - The Ledger host stops. Failover of a `count = 1` role to the other `books` host.
 - The node returns as a new incarnation and offers again; no other node coordinates it.
+  It does not count for placement until a settle period has passed; after that, if it
+  still ranks first, a single-holder role returns to it.
 - No node can take a role: the caller gets `NoOffer`.
 
 ### 5. Deploying while it runs
@@ -249,8 +255,8 @@ Measured at commit `eb8819a16` with a compiler built from this tree.
 | Generated functions | 152 (18, 33, 37, 26, 38) | same |
 | Fingerprint | `fbc924928c002942943a81b564d2408d` | `march --check --emit-protocols <dir>` writes `Order.json` |
 | Message tags | Want, Have, Book, Booked, Out, Skip | `Order.json` |
-| Session heartbeat | ping every 1 s, failed after 10 s of silence | choreography chapter, "When a role fails" |
-| Session setup time | 20 s | choreography chapter, "How a session forms" |
+| Failure detection on a cluster node | SWIM: probe every 1 s, 500 ms for the ack, 3 s for a suspect to refute | clustering chapter. The session heartbeat (1 s / 10 s) in the choreography chapter is the direct runner's and does not apply to cluster nodes, which the lab app uses |
+| Placement settle period | 15 s before a rejoining node counts again | topology chapter (`MARCH_PLACEMENT_SETTLE_MS`) |
 | Lab failover bound | SWIM suspect timeout 3 s plus a margin; 15 s settle period | `docs/lab.md`, `failover` scenario |
 | Lab drain deadlines | soft 3 s, hard 8 s | `examples/lab_app/topology.toml` |
 | Ledger total on a move | starts again from 0 | comment above `LedgerActor` in the lab app |
@@ -266,7 +272,8 @@ Measured at commit `eb8819a16` with a compiler built from this tree.
   since moved to `specs/progress/`, and one of those fixes was checked by a two-node test,
   not by a lab run. Nobody has re-run the lab since.
 - The one failover figure on record is from that run: the Ledger moved from lab-4 to lab-3
-  in 1 s with no session failed.
+  in 1 s with no session failed. The scenario still failed: the returning lab-4 took the
+  role back at once and sessions stopped. The page may quote the 1 s only with that.
 - No lab scenario covers a Stock-only crash, a hung peer, a full node or `NoOffer`. The
   two-node scenarios under `test/two_node/` cover several of these with other protocols
   (`crash_before_send`, `crash_after_send`, `silent`, `session_refused`).

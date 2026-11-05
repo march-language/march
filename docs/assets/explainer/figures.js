@@ -160,26 +160,32 @@
     return open(W, y + h, 'The steps this role may still take') + out.join('') + '</svg>';
   }
 
-  // ── how long a failed peer goes unnoticed, to scale ────────────────────────────
+  // ── how long a failed host goes unnoticed, to scale ────────────────────────────
+  // The cluster's failure detector is the node's own (SWIM): it probes each peer every
+  // `swim_probe_s`, waits `swim_ack_ms` for the ack, and gives a suspect `suspect_s` to
+  // refute before declaring it dead. A crash needs none of that: the connection closes.
   function detectionTimeline(timings, opts) {
-    var W = opts.width, T = timings.silent_timeout_s, hb = timings.heartbeat_s;
+    var W = opts.width, probe = timings.swim_probe_s, ack = timings.swim_ack_ms / 1000;
+    var suspectAt = probe + ack, T = suspectAt + timings.suspect_s;
     var M = 28, x0 = M, x1 = W - M, y = 44, scale = (x1 - x0) / T, out = [];
+    function secs(n) { return (Math.round(n * 10) / 10) + ' s'; }
     out.push(line('mx-line', x0, y, x1, y));
     out.push(circle('mx-ink', x0, y, 4));
     out.push(text('mx-label', x0, y + 24, '0 s', 'middle'));
-    out.push(text('mx-label', x1, y + 24, T + ' s', 'middle'));
     if (opts.mode === 'crash') {
       out.push(text('mx-label', x0 - 4, 16, 'Connection closes: noticed at once'));
       out.push(line('mx-failed', x0, y - 16, x0, y + 16));
     } else {
-      out.push(text('mx-label', x0 - 4, 16, 'Peer goes silent'));
-      for (var k = 1; k * hb < T && k * hb <= opts.elapsed; k++) out.push(circle('mx-ping', x0 + k * hb * scale, y, 3.5));
-      if (opts.elapsed >= T) {
-        out.push(text('mx-label mx-accent-text', x1 + 4, 16, 'Declared failed', 'end'));
-        out.push(line('mx-failed', x1, y - 16, x1, y + 16));
-      }
+      out.push(text('mx-label', x0 - 4, 16, 'Hangs'));
+      out.push(circle('mx-ping', x0 + probe * scale, y, 3.5));
+      out.push(circle('mx-ping', x0 + suspectAt * scale, y, 3.5));
+      out.push(text('mx-label', x0 + suspectAt * scale - 4, 16, 'Suspected'));
+      out.push(text('mx-label', x0 + suspectAt * scale, y + 24, secs(suspectAt), 'middle'));
+      out.push(text('mx-label mx-accent-text', x1 + 4, 16, 'Declared dead', 'end'));
+      out.push(line('mx-failed', x1, y - 16, x1, y + 16));
+      out.push(text('mx-label', x1, y + 24, secs(T), 'middle'));
     }
-    return open(W, y + 34, 'Time from a peer failing to its being declared failed') + out.join('') + '</svg>';
+    return open(W, y + 34, 'Time from a host failing to its being declared dead') + out.join('') + '</svg>';
   }
 
   // ── every function in the binary, and the ones a deploy changes ────────────────

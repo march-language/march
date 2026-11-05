@@ -59,20 +59,31 @@ test('state map marks a wrong cell that is not reachable', () => {
   assert.equal(count(svg, 'mx-cell') + count(svg, 'mx-cell mx-lit') + count(svg, 'mx-cell mx-wrong'), 9);
 });
 
-test('timeline has one ping per second up to the cutoff', () => {
-  const svg = figures.detectionTimeline({ heartbeat_s: 1, silent_timeout_s: 10 }, { width: 680, mode: 'silent', elapsed: 10 });
-  assert.equal(count(svg, 'mx-ping'), 9);
+// The cluster's failure detector is the node's own (SWIM): a probe every second, half a
+// second for the ack, then a suspect timeout. There is no session heartbeat to draw.
+const swim = { swim_probe_s: 1, swim_ack_ms: 500, suspect_s: 3 };
+
+test('timeline: a hung host is probed, suspected when no ack comes, and dead when the suspect timeout ends', () => {
+  const svg = figures.detectionTimeline(swim, { width: 680, mode: 'silent' });
+  assert.equal(count(svg, 'mx-ping'), 2);             // the probe, and the moment it goes unanswered
   assert.equal(count(svg, 'mx-failed'), 1);
+  assert.ok(svg.includes('>1.5 s<'), 'suspicion starts at probe + ack');
+  assert.ok(svg.includes('>4.5 s<'), 'declared dead at probe + ack + suspect timeout');
+  assert.equal(/heartbeat|10 s/.test(svg), false);
 });
 
-test('timeline part-way through shows the pings so far and no failure', () => {
-  const svg = figures.detectionTimeline({ heartbeat_s: 1, silent_timeout_s: 10 }, { width: 680, mode: 'silent', elapsed: 4.5 });
-  assert.equal(count(svg, 'mx-ping'), 4);
-  assert.equal(count(svg, 'mx-failed'), 0);
+test('timeline: the marks are placed to scale', () => {
+  const svg = figures.detectionTimeline(swim, { width: 680, mode: 'silent' });
+  const xs = [...svg.matchAll(/<circle class="mx-ping" cx="([\d.]+)"/g)].map((m) => Number(m[1]));
+  const end = Number(svg.match(/<line class="mx-failed" x1="([\d.]+)"/)[1]);
+  const start = Number(svg.match(/<circle class="mx-ink" cx="([\d.]+)"/)[1]);
+  const perSecond = (end - start) / 4.5;
+  assert.ok(Math.abs(xs[0] - (start + 1 * perSecond)) < 0.2);
+  assert.ok(Math.abs(xs[1] - (start + 1.5 * perSecond)) < 0.2);
 });
 
-test('a crash is noticed at once, with no pings', () => {
-  const svg = figures.detectionTimeline({ heartbeat_s: 1, silent_timeout_s: 10 }, { width: 680, mode: 'crash', elapsed: 10 });
+test('timeline: a crash is noticed at once, with no probes', () => {
+  const svg = figures.detectionTimeline(swim, { width: 680, mode: 'crash' });
   assert.equal(count(svg, 'mx-ping'), 0);
   assert.equal(count(svg, 'mx-failed'), 1);
 });
@@ -140,13 +151,13 @@ test('a 320 px figure keeps every element inside its width', () => {
   assertInside(figures.stateMap(data.state_map, { width: 320, lit: 5 }), 320);
   assertInside(figures.functionSquares({ total_functions: 700, changed_functions: ['a'] }, { width: 320, showChanged: true }), 320);
   assertInside(figures.strip({ labels: ['send Want', 'recv Have', 'recv Booked', 'end'] }, { width: 320, at: 0 }), 320);
-  assertInside(figures.detectionTimeline({ heartbeat_s: 1, silent_timeout_s: 10 }, { width: 320, mode: 'silent', elapsed: 10 }), 320);
+  assertInside(figures.detectionTimeline(swim, { width: 320, mode: 'silent' }), 320);
   assertInside(figures.hosts(data.topology, { width: 320 }), 320);
 });
 
 test('no figure carries a colour of its own', () => {
   const all = figures.fanOut(data.order, { width: 680, stage: 'functions' }) +
     figures.stateMap(data.state_map, { width: 680, lit: 5, wrong: [0, 0, 1] }) +
-    figures.detectionTimeline(data.timings, { width: 680, mode: 'silent', elapsed: 10 });
+    figures.detectionTimeline(swim, { width: 680, mode: 'silent' });
   assert.equal(/#[0-9a-fA-F]{3,6}\b|rgb\(|fill="(?!none)/.test(all), false);
 });

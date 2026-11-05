@@ -4,13 +4,14 @@
     "stock_signature": "fn stock(env : Env, s : Cap(Session.Live), m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield"
   },
   "generated": {
-    "commit": "23f5a596d",
+    "commit": "d5b092104",
     "date": "2026-11-05",
-    "lab_app_sha256": "78ab2a20763ce435a2d7c590d921cfe491ed634fe02a63353b6933ef4651dbf2"
+    "inputs_sha256": "cfdbd10a1837c5438ff4ad55c91ab72f73abbbae934feacf0394a163ca79d85b"
   },
   "lab_run": {
     "commit": "53d66f068",
     "date": "2026-10-05",
+    "failover_result": "expected-fail",
     "failover_s": 1,
     "source": "specs/progress/2026-10-05-multi-host-lab.md"
   },
@@ -333,11 +334,10 @@
   "timings": {
     "drain_hard_ms": 8000,
     "drain_soft_ms": 3000,
-    "heartbeat_s": 1,
     "settle_s": 15,
-    "setup_s": 20,
-    "silent_timeout_s": 10,
-    "suspect_s": 3
+    "suspect_s": 3,
+    "swim_ack_ms": 500,
+    "swim_probe_s": 1
   },
   "topology": {
     "books_hosts": [

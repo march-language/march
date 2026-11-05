@@ -149,12 +149,8 @@
 
   // A small figure inside a card: <div data-mx-inline="timeline:silent"></div>.
   var inline = {
-    'timeline:silent': function (w, data) {
-      return F.detectionTimeline(data.timings, { width: w, mode: 'silent', elapsed: data.timings.silent_timeout_s });
-    },
-    'timeline:crash': function (w, data) {
-      return F.detectionTimeline(data.timings, { width: w, mode: 'crash', elapsed: 0 });
-    },
+    'timeline:silent': function (w, data) { return F.detectionTimeline(data.timings, { width: w, mode: 'silent' }); },
+    'timeline:crash': function (w, data) { return F.detectionTimeline(data.timings, { width: w, mode: 'crash' }); },
   };
   ME.mountInline = function (rootEl, data) {
     Array.prototype.forEach.call(rootEl.querySelectorAll('[data-mx-inline]'), function (el) {
@@ -444,7 +440,9 @@
       seed: data.sim.seed, loadPerS: load || data.sim.load_per_s, sessionS: data.sim.session_s,
       stockCapacity: t.stock_capacity, ledgerCapacity: t.ledger_capacity,
       hosts: t.stock_hosts.map(function (id) { return { id: id, books: t.books_hosts.indexOf(id) >= 0 }; }),
-      suspectS: data.timings.suspect_s, silentS: data.timings.silent_timeout_s,
+      // one failure detector, the node's: a probe and its ack to notice, then the suspect timeout
+      noticeS: data.timings.swim_probe_s + data.timings.swim_ack_ms / 1000,
+      suspectS: data.timings.suspect_s,
       settleS: data.timings.settle_s, restartS: data.sim.restart_s, ingress: t.ingress,
     };
   }
@@ -467,7 +465,8 @@
       steady: { until: 8, actions: [] },
       full: { load: fullLoad(cfg), until: 10, actions: [] },
       'stock-crash': { until: 9.5, actions: [{ at: 8, run: kill(0, 'crash') }] },
-      silent: { until: 8 + cfg.suspectS + 1, actions: [{ at: 8, run: kill(0, 'silent') }] },
+      // shown once the host is under suspicion, its sessions frozen and not yet cancelled
+      silent: { until: 8 + cfg.noticeS + 1, actions: [{ at: 8, run: kill(0, 'silent') }] },
       'ledger-stop': { until: 8 + cfg.suspectS + 1.5, actions: [{ at: 8, run: kill(ledger, 'crash') }] },
       'return': { until: 8 + cfg.suspectS + cfg.restartS + 4,
         actions: [{ at: 8, run: kill(ledger, 'crash') }, { at: 8 + cfg.suspectS + 2, run: revive(ledger) }] },

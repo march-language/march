@@ -137,7 +137,7 @@ const holds = {
   full: (s) => { assert.ok(used(s.ledger.slots) >= 0.9 * s.ledger.slots.length); assert.ok(s.counters.refused > 0); },
   'stock-crash': (s) => { assert.equal(s.hosts[0].status, 'dead'); assert.ok(s.counters.cancelled > 0);
     assert.ok(s.hosts.slice(1).every((h) => h.status === 'up')); },
-  silent: (s) => { assert.ok(['suspect', 'dead'].includes(s.hosts[0].status)); assert.ok(used(s.hosts[0].stock) > 0);
+  silent: (s) => { assert.equal(s.hosts[0].status, 'suspect'); assert.ok(used(s.hosts[0].stock) > 0);
     assert.equal(s.counters.cancelled, 0); },
   'ledger-stop': (s) => { const b = books(s); assert.equal(s.hosts[b[b.length - 1]].status, 'dead'); assert.equal(s.ledger.host, b[0]); },
   'return': (s) => { const last = s.hosts.length - 1; assert.equal(s.hosts[last].status, 'up');
@@ -145,7 +145,8 @@ const holds = {
   'no-offer': (s) => { assert.equal(s.ledger.host, null); assert.ok(s.counters.refused > 0); },
 };
 // how long after arriving on a card its picture must hold
-const SETTLE = { full: 6, 'stock-crash': 5, silent: 7, 'ledger-stop': 8, 'return': 5, 'no-offer': 4 };
+// (the hang card is checked while the host is under suspicion: its sessions frozen, not yet cancelled)
+const SETTLE = { full: 6, 'stock-crash': 5, silent: 5.5, 'ledger-stop': 8, 'return': 5, 'no-offer': 4 };
 
 test('cluster: moving to the next card happens to the simulation on screen', () => {
   for (let i = 1; i < CLUSTER.length; i++) {
@@ -201,4 +202,20 @@ test('mailbox: each card carries on from the one before', () => {
 test('mailbox: going back is not done live', () => {
   const s = ME.buildState('mailbox', 'restart', data);
   assert.equal(ME.liveTransition('mailbox', 'restart', 'crash', s, data), false);
+});
+
+test('cluster: a hung host on screen is declared dead about 4.5 s after it hangs, and its sessions go then', () => {
+  const s = ME.buildState('cluster', 'silent', data);
+  const held = used(s.hosts[0].stock), total = data.timings.swim_probe_s + data.timings.swim_ack_ms / 1000 + data.timings.suspect_s;
+  assert.ok(held > 0);
+  ME.runLive('cluster', s, total);                      // the card opened 1 s into suspicion; this is well past the end
+  assert.equal(s.hosts[0].status, 'dead');
+  assert.equal(s.counters.cancelled, held);
+});
+
+test('cluster: the host that returned takes the Ledger back if the reader stays past the settle period', () => {
+  const s = ME.buildState('cluster', 'return', data), last = s.hosts.length - 1;
+  assert.notEqual(s.ledger.host, last);
+  ME.runLive('cluster', s, data.timings.settle_s);
+  assert.equal(s.ledger.host, last);
 });

@@ -12,8 +12,9 @@
 // figure must be able to show any state without having shown the ones before it, because
 // a reader can land mid-page (an anchor, a reload, a fast flick).
 //
-// A figure that throws, while mounting or later, gets a short located error box; its
-// static image stays visible and every other section still works.
+// A figure that throws, while mounting or on its first card, gets a short located error
+// box and keeps its static image; its section stays laid out as an article (no `mx-on`).
+// One that fails later reports once and keeps its last drawing. Other sections carry on.
 (function (root) {
   'use strict';
   var ME = root.MarchExplainer = root.MarchExplainer || {};
@@ -55,7 +56,6 @@
         showError(host, name, err);
         return;
       }
-      host.classList.add('mx-live');
 
       function apply(i, progress) {
         if (failed || i < 0 || i >= steps.length) return;
@@ -68,6 +68,9 @@
       }
 
       if (steps.length) apply(0, 0);
+      if (failed) return;                      // it could not draw: its static image stays, as an article
+      host.classList.add('mx-live');           // hides the static image
+      section.classList.add('mx-on');          // switches this section to the scrolling layout
       if (!env || !ME.scroll) return;
       ME.scroll.observeSteps(steps, {
         env: env,

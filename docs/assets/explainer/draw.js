@@ -33,10 +33,11 @@
 
   function hostTag(s, h, i) {
     var role = s.ledger.host === i ? 'Stock + Ledger' : 'Stock';
+    if (h.status === 'up' && h.silent) return 'not answering';
     if (h.status === 'up') return role + ', incarnation ' + h.incarnation;
-    if (h.status === 'suspect') return 'silent ' + Math.floor(s.t - h.since) + ' s';
+    if (h.status === 'suspect') return 'suspected, silent ' + Math.floor(s.t - h.since) + ' s';
     if (h.status === 'restarting') return 'restarting';
-    return h.silent ? 'dead to the cluster; its sessions still wait' : 'dead';
+    return 'dead';
   }
 
   // The cluster: the calling node on the left, the serving hosts on the right, each
@@ -65,10 +66,10 @@
 
     var entry = [];
     s.hosts.forEach(function (h, i) {
-      var y = 1 + i * (hostH + gap), bad = h.status === 'dead' || h.status === 'suspect';
+      var y = 1 + i * (hostH + gap), bad = h.status === 'dead' || h.status === 'suspect' || h.silent;
       entry.push({ x: hostX - 6, y: y + hostH / 2 });
       ctx.strokeStyle = bad ? c.accent : h.status === 'restarting' ? c.dim : c.ink;
-      ctx.setLineDash(h.status === 'up' ? [] : [4, 3]);
+      ctx.setLineDash(h.status === 'up' && !h.silent ? [] : [4, 3]);
       ctx.strokeRect(hostX + 0.5, y + 0.5, hostW - 1, hostH - 1);
       ctx.setLineDash([]);
       if (h.status === 'dead') hatch(ctx, hostX, y, hostW, hostH, c.accent);

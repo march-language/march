@@ -50,5 +50,22 @@ class PageLint(unittest.TestCase):
         self.assertEqual(bad, [])
 
 
+    def test_the_page_is_unpublished_while_its_deploy_chapter_is_missing(self):
+        # The opening promises a chapter on changing a running system. Until that chapter
+        # is written the site must not build this page at all (no URL, no search entry).
+        page = (ROOT / "docs" / "protocol-to-cluster.md").read_text()
+        front = page.split("---\n")[1]
+        if "<!-- Chapter 5," in page:
+            self.assertIn("published: false", front)
+        else:
+            self.assertNotIn("published: false", front)
+
+    def test_the_page_does_not_claim_a_session_heartbeat(self):
+        # The lab app runs on cluster nodes: the node is the failure detector there.
+        page = (ROOT / "docs" / "protocol-to-cluster.md").read_text()
+        self.assertNotIn("heartbeat", page)
+        self.assertNotIn("silent_timeout_s", page)
+
+
 if __name__ == "__main__":
     unittest.main()

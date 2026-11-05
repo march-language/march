@@ -80,23 +80,45 @@ class OrderFacts(unittest.TestCase):
 
 
 class InputGuard(unittest.TestCase):
-    def test_check_inputs_accepts_an_unchanged_lab_app(self):
+    def test_the_inputs_are_every_file_the_data_is_read_from(self):
+        names = [str(p.relative_to(ROOT)) for p in gen.input_files(ROOT)]
+        self.assertIn("examples/lab_app/src/lab_app.march", names)
+        self.assertIn("examples/lab_app/topology.toml", names)
+        self.assertIn("examples/lab_app/topology.lab.toml", names)
+        for prog in ("skip_step", "offer_misses_branch", "send_out_of_turn"):
+            self.assertIn(f"docs/assets/explainer/programs/{prog}.march", names)
+
+    def test_an_edited_wrong_program_makes_the_data_stale(self):
         with tempfile.TemporaryDirectory() as d:
-            lab = Path(d) / "lab_app.march"
-            shutil.copy(ROOT / "examples/lab_app/src/lab_app.march", lab)
-            data = Path(d) / "explainer.json"
-            data.write_text(json.dumps({"generated": {"lab_app_sha256": gen.lab_app_sha256(lab)}}))
-            self.assertTrue(gen.check_inputs(data, lab))
+            root = Path(d)
+            for f in gen.input_files(ROOT):
+                (root / f.relative_to(ROOT)).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(f, root / f.relative_to(ROOT))
+            digest = gen.inputs_sha256(root)
+            self.assertEqual(digest, gen.inputs_sha256(ROOT))
+            prog = root / "docs/assets/explainer/programs/skip_step.march"
+            prog.write_text(prog.read_text() + "-- an edit\n")
+            self.assertNotEqual(gen.inputs_sha256(root), digest)
+
+    def test_the_input_check_needs_nothing_newer_than_the_standard_library_of_python_3_9(self):
+        # doc-lint Check H runs `--check-inputs` on whatever python3 a contributor has;
+        # tomllib arrived in 3.11, so it may only be imported where TOML is actually read.
+        src = (ROOT / "scripts" / "gen-explainer-data.py").read_text()
+        top = src.split("\ndef ", 1)[0]
+        self.assertNotIn("import tomllib", top)
 
     def test_check_inputs_detects_an_edited_lab_app(self):
         with tempfile.TemporaryDirectory() as d:
-            lab = Path(d) / "lab_app.march"
-            shutil.copy(ROOT / "examples/lab_app/src/lab_app.march", lab)
-            data = Path(d) / "explainer.json"
-            data.write_text(json.dumps({"generated": {"lab_app_sha256": gen.lab_app_sha256(lab)}}))
-            with lab.open("a") as f:
+            root = Path(d)
+            for f in gen.input_files(ROOT):
+                (root / f.relative_to(ROOT)).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(f, root / f.relative_to(ROOT))
+            data = root / "explainer.json"
+            data.write_text(json.dumps({"generated": {"inputs_sha256": gen.inputs_sha256(root)}}))
+            self.assertTrue(gen.check_inputs(data, root))
+            with (root / "examples/lab_app/src/lab_app.march").open("a") as f:
                 f.write("-- an edit\n")
-            self.assertFalse(gen.check_inputs(data, lab))
+            self.assertFalse(gen.check_inputs(data, root))
 
 
 def msg(frm, to, tag):
@@ -118,6 +140,26 @@ class StateMap(unittest.TestCase):
         axes, cells = gen.reachable(LINE, ["Buyer", "Shop", "Ledger"])
         self.assertEqual(axes, {"Buyer": 3, "Shop": 5, "Ledger": 3})
         self.assertEqual(len(cells), 9)
+
+    def test_order_reaches_exactly_these_fourteen_cells(self):
+        # Checked by hand against the projections (Shop 4, Stock 5, Ledger 3 positions).
+        _, cells = gen.reachable(load("Order.json")["current"]["steps"], ["Shop", "Stock", "Ledger"])
+        self.assertEqual(cells, [[0, 0, 0], [1, 0, 0], [1, 0, 1], [1, 1, 0], [1, 2, 0], [1, 3, 0], [1, 4, 0],
+                                 [1, 4, 2], [2, 0, 0], [2, 0, 1], [2, 2, 0], [3, 3, 0], [3, 4, 0], [3, 4, 2]])
+
+    def test_a_choice_inside_a_loop(self):
+        # A asks; B answers yes (and the loop goes round) or no (and both stop).
+        steps = [{"loop": [msg("A", "B", "Ask"),
+                           {"choose": {"by": "B", "branches": [
+                               {"label": "yes", "steps": [msg("B", "A", "Yes")]},
+                               {"label": "no", "steps": [msg("B", "A", "No"), "stop"]}]}}]}]
+        a = gen.project(steps, "A")
+        self.assertEqual(a["edges"], {0: [(("send", "B", "Ask"), 1)],
+                                      1: [(("recv", "B", "Yes"), 0), (("recv", "B", "No"), 2)]})
+        self.assertEqual(a["final"], {2})
+        axes, cells = gen.reachable(steps, ["A", "B"])
+        self.assertEqual(axes, {"A": 3, "B": 3})
+        self.assertEqual(cells, [[0, 0], [1, 0], [1, 1], [1, 2], [2, 2]])
 
     def test_order_state_map_is_consistent(self):
         axes, cells = gen.reachable(load("Order.json")["current"]["steps"], ["Shop", "Stock", "Ledger"])
@@ -165,12 +207,20 @@ class Facts(unittest.TestCase):
 
     def test_pinned_facts_values(self):
         p = gen.pinned_facts(ROOT)
-        self.assertEqual(p, {"heartbeat_s": 1, "silent_timeout_s": 10, "setup_s": 20,
-                             "suspect_s": 3, "settle_s": 15, "drain_soft_ms": 3000, "drain_hard_ms": 8000})
+        # The lab app runs on cluster nodes, where the node (SWIM) is the only failure
+        # detector: the direct runner's session heartbeat (1 s / 10 s) does not apply and
+        # must not be on the page.
+        self.assertEqual(p, {"swim_probe_s": 1, "swim_ack_ms": 500, "suspect_s": 3, "settle_s": 15,
+                             "drain_soft_ms": 3000, "drain_hard_ms": 8000})
+        self.assertNotIn("heartbeat_s", p)
 
     def test_lab_run_is_read_from_its_progress_note(self):
         run = gen.lab_run(ROOT)
+        # The run's failover scenario FAILED (expected-fail): the Ledger moved in 1 s, but
+        # the returning host took the role back at once and sessions stopped. The page may
+        # quote the 1 s only alongside that.
         self.assertEqual(run, {"date": "2026-10-05", "commit": "53d66f068", "failover_s": 1,
+                               "failover_result": "expected-fail",
                                "source": "specs/progress/2026-10-05-multi-host-lab.md"})
 
     def test_lab_run_fails_when_the_note_no_longer_says_so(self):
@@ -188,8 +238,8 @@ class Facts(unittest.TestCase):
                 (tmp_root / rel).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(ROOT / rel, tmp_root / rel)
             self.assertEqual(gen.pinned_facts(tmp_root)["suspect_s"], 3)      # the copy is intact
-            lab = tmp_root / "docs/lab.md"
-            lab.write_text(lab.read_text().replace("SWIM suspect timeout (3 s)", "SWIM suspect timeout (5 s)"))
+            lab = tmp_root / "specs/lang/clustering.md"
+            lab.write_text(lab.read_text().replace("3 s for a suspect to refute", "5 s for a suspect to refute"))
             with self.assertRaises(SystemExit) as cm:
                 gen.pinned_facts(tmp_root)
             self.assertIn("suspect_s", str(cm.exception))

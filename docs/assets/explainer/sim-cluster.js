@@ -10,14 +10,19 @@
 //   - A caller tries the hosts in turn. A host that is full or not answering is passed
 //     over and the next one is tried; a host under suspicion is still tried, once, and the
 //     attempt bounces. With no Stock host left, or no Ledger, the session is refused.
-//   - A host that crashes loses its sessions at once (its connections close). A host that
-//     goes silent is on two clocks: membership declares it dead after `suspectS`, which
-//     stops callers trying it and moves the Ledger; the sessions already on it stay,
-//     frozen, until their own heartbeat gives up after `silentS` (default: `suspectS`),
-//     and are cancelled then. Cancelled sessions are not resumed.
-//   - The Ledger starts on the last `books` host. If that host dies, the role moves to
-//     another live `books` host `suspectS` after the failure. A returning host does not
-//     take it back.
+//   - A host that crashes loses its sessions at once (its connections close).
+//   - A host that hangs closes nothing. The node is the failure detector (SWIM); there
+//     is no session heartbeat. The hung host goes unnoticed for `noticeS` (a probe has to
+//     go unanswered), is then suspected for `suspectS`, and is then declared dead. Only
+//     then are its sessions cancelled. While it hangs it finishes nothing and takes
+//     nothing new: a caller's attempt bounces to the next host.
+//   - Cancelled sessions are not resumed.
+//   - The Ledger is held by the highest-ranked `books` host that counts: one that is up
+//     and has been since the start, or has been back for `settleS`. If the holder dies,
+//     the role moves `suspectS` after the failure. A host that returns does not count at
+//     once, so a flapping host cannot pull the role back and forth; once the settle
+//     period is over it ranks first again and takes the role back. That move drains: the
+//     sessions in progress finish where they are.
 //   - A revived host is up again after `restartS`, as its next incarnation, empty.
 (function (root) {
   'use strict';
@@ -32,7 +37,7 @@
   function create(cfg) {
     var hosts = cfg.hosts.map(function (h) {
       return { id: h.id, books: !!h.books, status: 'up', incarnation: 1, silent: false,
-        since: 0, stock: slots(cfg.stockCapacity) };
+        since: 0, upSince: null, stock: slots(cfg.stockCapacity) };   // upSince null: up from the start
     });
     var ledgerHost = null;
     hosts.forEach(function (h, i) { if (h.books) ledgerHost = i; });
@@ -45,7 +50,7 @@
     };
   }
 
-  function answering(h) { return h.status === 'up'; }
+  function answering(h) { return h.status === 'up' && !h.silent; }
   function tryable(h) { return h.status === 'up' || h.status === 'suspect'; }
 
   function ledgerReady(s) {
@@ -97,40 +102,51 @@
     });
   }
 
-  // Membership's verdict: no caller tries the host again, and the Ledger leaves it.
+  // The node's verdict on a host: no caller tries it again, its sessions are cancelled,
+  // and the Ledger leaves it.
   function declareDead(s, i) {
-    s.hosts[i].status = 'dead';
+    var h = s.hosts[i];
+    h.status = 'dead'; h.silent = false;
+    cancelOn(s, i);
     if (s.ledger.host === i) { s.ledger.host = null; s.ledger.slots = slots(s.cfg.ledgerCapacity); }
   }
 
-  // The sessions' own verdict: whatever the host still held is cancelled.
-  function dropSessions(s, i) {
-    s.hosts[i].silent = false;
-    cancelOn(s, i);
-  }
-
-  function silentLimit(s) { return s.cfg.silentS === undefined ? s.cfg.suspectS : s.cfg.silentS; }
-
   function kill(s, i, mode) {
     var h = s.hosts[i];
-    if (h.status !== 'up') return;
+    if (h.status !== 'up' || h.silent) return;
     h.since = s.t;
-    if (s.ledger.host === i) s.ledger.moveAt = s.t + s.cfg.suspectS;
-    if (mode === 'silent') { h.status = 'suspect'; h.silent = true; }
-    else { declareDead(s, i); dropSessions(s, i); }
+    if (mode === 'silent') {
+      h.silent = true;                                   // still 'up' to everyone else, for now
+      if (s.ledger.host === i) s.ledger.moveAt = s.t + (s.cfg.noticeS || 0) + s.cfg.suspectS;
+    } else {
+      if (s.ledger.host === i) s.ledger.moveAt = s.t + s.cfg.suspectS;
+      declareDead(s, i);
+    }
   }
 
   function revive(s, i) {
     var h = s.hosts[i];
-    if (h.status === 'up' || h.status === 'restarting') return;
-    if (h.status === 'suspect') declareDead(s, i);
-    if (h.silent) dropSessions(s, i);
+    if ((h.status === 'up' && !h.silent) || h.status === 'restarting') return;
+    if (h.status !== 'dead') declareDead(s, i);
     h.status = 'restarting'; h.since = s.t;
   }
 
+  // Does this host count for holding the Ledger?
+  function counts(s, h) {
+    return h.books && answering(h) && (h.upSince === null || s.t - h.upSince >= s.cfg.settleS);
+  }
+
+  // The Ledger belongs to the highest-ranked host that counts (the last `books` host
+  // ranks first). An empty seat is filled once the failure that emptied it is known;
+  // a higher-ranked host that has sat out its settle period takes the seat back.
   function placeLedger(s) {
-    for (var i = s.hosts.length - 1; i >= 0; i--) {
-      if (s.hosts[i].books && answering(s.hosts[i])) { s.ledger.host = i; s.ledger.moveAt = null; return; }
+    var best = null;
+    for (var i = s.hosts.length - 1; i >= 0 && best === null; i--) if (counts(s, s.hosts[i])) best = i;
+    if (best === null) return;
+    if (s.ledger.host === null) {
+      if (s.ledger.moveAt === null || s.t >= s.ledger.moveAt) { s.ledger.host = best; s.ledger.moveAt = null; }
+    } else if (best > s.ledger.host) {
+      s.ledger.host = best;                              // the old holder drains; nothing is cancelled
     }
   }
 
@@ -139,13 +155,14 @@
     s.t += dt;
 
     s.hosts.forEach(function (h, i) {
-      if (h.status === 'suspect' && s.t - h.since >= s.cfg.suspectS) declareDead(s, i);
-      if (h.silent && s.t - h.since >= silentLimit(s)) dropSessions(s, i);
+      var notice = s.cfg.noticeS || 0;
+      if (h.status === 'up' && h.silent && s.t - h.since >= notice) h.status = 'suspect';
+      if (h.status === 'suspect' && s.t - h.since >= notice + s.cfg.suspectS) declareDead(s, i);
       if (h.status === 'restarting' && s.t - h.since >= s.cfg.restartS) {
-        h.status = 'up'; h.incarnation += 1; h.stock = slots(s.cfg.stockCapacity);
+        h.status = 'up'; h.incarnation += 1; h.upSince = s.t; h.stock = slots(s.cfg.stockCapacity);
       }
     });
-    if (s.ledger.host === null && (s.ledger.moveAt === null || s.t >= s.ledger.moveAt)) placeLedger(s);
+    placeLedger(s);
 
     s.acc += dt * s.cfg.loadPerS;
     while (s.acc >= 1) {
