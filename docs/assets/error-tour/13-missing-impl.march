@@ -1,0 +1,11 @@
+mod Main do
+  needs IO.Console
+
+  type Hue = Red | Blue
+
+  fn main(_console : Cap(IO.Console)) do
+    let a = Red
+    let b = Blue
+    println(if a < b do "less" else "not less" end)
+  end
+end

@@ -6,5 +6,6 @@ Protocol `Logging`: `L` is not declared `may crash`, so `L -> I : ...` cannot ha
 12 |     L -> I : Int
          ^^^^^^^^^^^^
 
+    run `march --explain role_needs_invalid`
 
 

@@ -1994,15 +1994,26 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                                was not found at %s (set MARCH_BIN) — deploy aborted" march_bin))
           end;
           if needs_vc_check && old_schemas_path <> "" && new_schemas_path <> "" then begin
+            (* The override must be the one built into the patch, so the
+               server's audit line records it: a pre-built .so whose schemas
+               do not carry a named law is refused, not overridden here. *)
+            (match Schema_diff.unembedded_overrides new_schemas accept_unproved with
+             | [] -> ()
+             | missing ->
+               Unix.close fd;
+               raise (Failure (Printf.sprintf
+                                 "--accept-unproved %s is not built into the patch's schemas \
+                                  (rebuild it with forge, or march --accept-unproved, so the \
+                                  override is signed and audited) — deploy aborted"
+                                 (String.concat "," missing))));
             if accept_unproved <> [] then
-              Printf.eprintf "warning: --accept-unproved %s: these laws may deploy unproved\n%!"
+              Printf.eprintf "warning: --accept-unproved %s: these laws may deploy unproved; \
+                              the server's audit log records it\n%!"
                 (String.concat "," accept_unproved);
-            let cmd = Printf.sprintf "%s --check-migration --prior-schema %s --new-schema %s%s %s"
+            let cmd = Printf.sprintf "%s --check-migration --prior-schema %s --new-schema %s %s"
                 (Filename.quote march_bin)
                 (Filename.quote old_schemas_path)
                 (Filename.quote new_schemas_path)
-                (if accept_unproved = [] then ""
-                 else " --accept-unproved " ^ Filename.quote (String.concat "," accept_unproved))
                 (Filename.quote entry_path)
             in
             (match Unix.system cmd with
@@ -2462,7 +2473,8 @@ let run_status ?(env="") () : (unit, string) result =
 
 (* ─── Build step ─────────────────────────────────────────────────────────── *)
 
-let build_so_for ~(target : string option) ~proj ~output : (string * string, string) result =
+let build_so_for ~(accept_unproved : string list) ~(target : string option) ~proj ~output
+  : (string * string, string) result =
   let so_path = output ^ ".so" in
   let manifest_path = output ^ ".so.hcr_manifest" in
   let lib_env = Cmd_build.lib_path_env proj in
@@ -2483,8 +2495,13 @@ let build_so_for ~(target : string option) ~proj ~output : (string * string, str
   | Error e -> Error e
   | Ok entry ->
   let cmd = Printf.sprintf
-    "%smarch --compile --compile-so%s%s -o %s%s %s"
-    lib_env target_flag hcr_flags (Filename.quote so_path) ffi_flags (Filename.quote entry)
+    "%smarch --compile --compile-so%s%s%s -o %s%s %s"
+    lib_env target_flag hcr_flags
+    (* Built into the image's schemas, which are signed: the server's audit
+       line for the activation records the override. *)
+    (if accept_unproved = [] then ""
+     else " --accept-unproved " ^ Filename.quote (String.concat "," accept_unproved))
+    (Filename.quote so_path) ffi_flags (Filename.quote entry)
   in
   let rc = Sys.command cmd in
   if rc <> 0 then Error (Printf.sprintf "build failed (exit %d)" rc)
@@ -2494,7 +2511,8 @@ let build_so_for ~(target : string option) ~proj ~output : (string * string, str
     Ok (so_path, manifest_path)
 
 (** [build_so_for] with the project's own target ([hr_target]). *)
-let build_so ~proj ~output = build_so_for ~target:None ~proj ~output
+let build_so ~accept_unproved ~proj ~output =
+  build_so_for ~accept_unproved ~target:None ~proj ~output
 
 (* ─── Entry point ────────────────────────────────────────────────────────── *)
 
@@ -2557,7 +2575,7 @@ let deploy ?(output="") ?(so="") ?(old_schemas="") ?(grant_caps=([] : string lis
                 Ok (so_path, manifest_path)
             end else begin
               Printf.printf "Building hot-reload .so for %s...\n%!" proj.Project.name;
-              build_so ~proj ~output:(if output <> "" then output
+              build_so ~accept_unproved ~proj ~output:(if output <> "" then output
                 else Filename.concat (Filename.concat proj.Project.root ".march")
                        (proj.Project.name ^ "_hot"))
             end
@@ -2737,7 +2755,7 @@ let deploy_env ?(output="") ?(so="") ?(old_schemas="") ?(env="") ?(canary=0) ?(t
               else Ok (so_path, manifest_path)
             end else begin
               Printf.printf "Building hot-reload .so for %s...\n%!" proj.Project.name;
-              build_so ~proj ~output:out_prefix
+              build_so ~accept_unproved ~proj ~output:out_prefix
             end
           in
           match build_result with

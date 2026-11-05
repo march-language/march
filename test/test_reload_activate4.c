@@ -588,6 +588,13 @@ static void test_schema_baseline(void) {
     CHECK(strstr(resp, "Int") == NULL, "disconnect does not advance baseline");
     activate5(fd, "Counter_dispatch", 0, resp, sizeof(resp));
     CHECK(strncmp(resp, "OK ", 3) == 0, "schema actor activated");
+    {
+        char line[4096]; last_audit_line(line, sizeof(line));
+        CHECK(strstr(line, "\"fn\":\"Counter_dispatch\"") != NULL
+              && strstr(line, "\"accepted_unproved\":[\"state\",\"Bump\"],\"result\":\"ok\"") != NULL,
+              "audit: an image built with --accept-unproved records the laws, on one line");
+        if (g_failed) fprintf(stderr, "    audit line: %s", line);
+    }
     send_line(fd, "SCHEMAS"); read_resp(fd, resp, sizeof(resp));
     CHECK(strstr(resp, "Int") != NULL, "activation advances schema from patch artifact");
     CHECK(strstr(resp, "\"Other\":{\"compat\":\"full\",\"state_fields\":[]}") != NULL,
@@ -610,6 +617,11 @@ static void test_epoch_model_wait_pins_drain(void) {
     CHECK(march_epoch_pin(base) == 0, "a unit pinned at the base epoch");
     activate5(fd, "test_fn_epoch", 0, resp, sizeof(resp));
     CHECK(strncmp(resp, "OK ", 3) == 0, "first deploy activates");
+    {
+        char line[4096]; last_audit_line(line, sizeof(line));
+        CHECK(strstr(line, "accepted_unproved") == NULL,
+              "audit: a non-actor function's line carries no accepted_unproved");
+    }
     uint32_t e1 = march_epoch_current();
     CHECK(e1 > base, "and advances the epoch");
     CHECK(march_epoch_pin(e1) == 0, "a unit pinned at the first deploy's epoch");

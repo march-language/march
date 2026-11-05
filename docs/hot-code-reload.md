@@ -708,11 +708,13 @@ Invariant predicates support:
 
 Invariants can only reference the actor's own state fields. External function calls and heap allocation are not allowed in predicates.
 
-An `@invariant` outside this grammar can't be checked, so a hot deploy of that actor is
-**refused**. The build warns `@invariant on <actor> contains unsupported expression; a hot
-deploy of it will be refused`. The same goes for a state-field or handler-parameter
-refinement the schema can't record (a call with more than one argument, for example).
-`--accept-unproved <Actor>` deploys it anyway (see below).
+An `@invariant` outside this grammar can't be checked across a deploy, so a `--hot-reload`
+build stops with an error at the part it can't read
+(`invariant_not_deploy_checkable`). Building with `--accept-unproved <Actor>.state` (or
+`<Actor>`) turns it into a warning and signs that override into the patch, where the reload
+server's audit log records it (see below). A state-field or handler-parameter refinement
+the schema can't record (a call with more than one argument, for example) is not an error,
+but a deploy of that actor is **refused** unless the same override names it.
 
 ## Contracts across versions
 
@@ -755,6 +757,19 @@ forge deploy hot --accept-unproved Tally.state
 actor's laws, repeated or comma-separated. A counterexample can't be accepted. When an actor
 has any contract, the check needs the compiler: if `MARCH_BIN` isn't set and no
 `_build/default/bin/main.exe` is found, the deploy is refused rather than skipped.
+
+**The override is part of the patch, and the server logs it.** forge passes
+`--accept-unproved` to the build, and the compiler writes the accepted laws into the
+actor's schema in the signed image (`"accepted_unproved": ["state"]`, or `["*"]` for the
+whole actor). The server's audit line for the activation copies them:
+
+```json
+{"ts":…,"type":"activate","fn":"Tally_dispatch",…,"accepted_unproved":["state"],"result":"ok"}
+```
+
+So the audit log answers "what was deployed without its contract proved, and who signed
+it." A patch built elsewhere (`forge deploy hot --so …`) must be built with the same
+`march --accept-unproved …`: forge refuses an override the patch doesn't carry.
 
 ---
 
@@ -1068,7 +1083,7 @@ A grant names the capability, not the pool: it authorizes it for every pool that
 
 `--grant-cap <CAP>` is repeatable and subsumption-matched: `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. The granted capability becomes part of the deployed function's own signed capability set, so it can't be stripped or altered without breaking the signature; the server's audit log records who deployed which function, when, and with which capability set, so a widening is always traceable back to the person who authorized it.
 
-Each `ACTIVATE` appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`) with `ts`, `type` (`activate`, `restore` for a replay at start, `topology` for a topology push, `drain` for a `DRAIN` request, `release` for a release accepted or refused), `fn`, `impl_hash`, `signer`, `cas_hash`, `caps`, `cap_root` and `result`, plus `roles` (the role closures as received) for `ACTIVATE6`. `caps` is the deploy's capability list (`[]` for a capless artifact) and `cap_root` its signed root; both are `null` for deploys over pre-v4 protocols, which carry no capability data. They are recorded as received, so on a rejected request (`err_sig`, `err_cap_tamper`) they show what the request claimed, not a verified set. To find when a node last gained a capability: `jq -c 'select(.result == "ok" and (.caps // [] | index("IO.Network")))' audit.jsonl | tail -1`.
+Each `ACTIVATE` appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`) with `ts`, `type` (`activate`, `restore` for a replay at start, `topology` for a topology push, `drain` for a `DRAIN` request, `release` for a release accepted or refused), `fn`, `impl_hash`, `signer`, `cas_hash`, `caps`, `cap_root` and `result`, plus `roles` (the role closures as received) for `ACTIVATE6`, and `accepted_unproved` on an `ok` line whose image was built with `--accept-unproved` (the deploy-gate laws it went out without a proof; see [Contracts across versions](#contracts-across-versions)). `caps` is the deploy's capability list (`[]` for a capless artifact) and `cap_root` its signed root; both are `null` for deploys over pre-v4 protocols, which carry no capability data. They are recorded as received, so on a rejected request (`err_sig`, `err_cap_tamper`) they show what the request claimed, not a verified set. To find when a node last gained a capability: `jq -c 'select(.result == "ok" and (.caps // [] | index("IO.Network")))' audit.jsonl | tail -1`.
 
 ```sh
 forge deploy hot --grant-cap IO.FileWrite --grant-cap IO.Process --so v2.so

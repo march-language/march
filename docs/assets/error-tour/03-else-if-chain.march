@@ -1,0 +1,9 @@
+mod Main do
+  fn pick(a : Bool, b : Bool) : Int do
+    if a do 1 else if b do 2 else 3 end
+  end
+
+  fn main() do
+    pick(false, true)
+  end
+end

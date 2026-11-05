@@ -1,0 +1,16 @@
+exit: 1
+-- ACTOR ---------------- errors/actor_init_arity_1.march
+
+Actor `Counter`'s init takes 2 arguments, but `spawn(Counter, …)` supplies 1. [actor_init_arity]
+Its signature is `init(start : Int, label : String) { … }`.
+
+10 |     let c = spawn(Counter, 1)
+                 ^^^^^^^^^^^^^^^^^
+
+
+    `Counter`'s `init` parameters:
+
+5 |     init(start : Int, label : String) { value: start, label: label }
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+

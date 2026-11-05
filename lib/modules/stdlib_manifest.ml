@@ -71,6 +71,7 @@ let stdlib_file_list = [
   "yaml.march";
   "socket.march";
   "dns.march";
+  "udp.march";
   "process.march";
   "io.march";
   "system.march";

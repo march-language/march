@@ -1,19 +1,32 @@
 exit: 1
 -- PROTOCOL ------- errors/session_state_mismatch_1.march
 
-Chan.send: channel is at `Recv(Int, End)` but I expected `Send(T, ...)`. [session_state_mismatch]
+`Chan.send` can't send here: at this point the channel must receive an `Int`. [session_state_mismatch]
 
 20 |     let cc3 = Chan.send(cc2, 43)
                    ^^^^^^^^^^^^^^^^^^
 
+    What is left on this channel: receive an `Int`, then close.
+
+    the channel is `Client`'s end of protocol `Echo`, declared here:
+
+12 |   protocol Echo do
+       ^^^^^^^^^^^^^^^^
+    run `march --explain session_state_mismatch`
 
 
 -- PROTOCOL ------- errors/session_state_mismatch_1.march
 
-Chan.close: channel is at `Recv(Int, Send(Int, End))` but I expected `End`. [session_state_mismatch]
+`Chan.close` can't close this channel here: at this point the channel must receive an `Int`. [session_state_mismatch]
 
 22 |     Chan.close(sc)
          ^^^^^^^^^^^^^^
 
+    What is left on this channel: receive an `Int`, then send an `Int`, then close.
+
+    the channel is `Server`'s end of protocol `Echo`, declared here:
+
+12 |   protocol Echo do
+       ^^^^^^^^^^^^^^^^
 
 

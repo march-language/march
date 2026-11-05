@@ -1,0 +1,18 @@
+exit: 1
+-- LINEARITY ---------- errors/linear_used_twice_31.march
+
+The linear value `st1` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+16 |     Fan_B.close(s, Fan_B.send_Second(s, st1, 10))
+                                             ^^^
+
+    This is a protocol state, and the first use closed the conversation: no step can follow `close`.
+
+    `st1` was already consumed here:
+
+15 |     let _done = Fan_B.close(s, st1)
+                                    ^^^
+    run `march --explain linear_used_twice`
+
+

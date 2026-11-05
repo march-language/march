@@ -9,11 +9,13 @@ Phases (design §7):
 
 - **A0.** Close the HCR variance hole: refinements in `.schemas.json`, old ⇒ new checks at
   deploy, unproved refused unless overridden with an audited flag, no silent skips. Landed in PR #1100 (progress
-  `2026-11-04-hcr-refinement-variance-check`); reply covariance, H2 and the audit-log
-  override remain.
-- **A.** Never silent: `@invariant` outside the grammar is an error (todo
+  `2026-11-04-hcr-refinement-variance-check`); the audited override in progress
+  `2026-11-04-hcr-accept-unproved-audited`. Reply covariance waits on typed replies (todo
+  `2026-11-04-actor-call-reply-untyped`); H2 moves to phase A.
+- **A.** Never silent: `@invariant` outside the grammar is an error (done: progress
   `2026-11-04-invariant-unsupported-expression-silently-dropped`). Field refinements of an
-  anonymous-record `migrate_state` parameter reach `old.f`. Actor message constructors are
+  anonymous-record `migrate_state` parameter reach `old.f` (done: progress
+  `2026-11-04-anon-record-param-field-refinements`). Actor message constructors are
   resolved by datatype (todo `2026-10-15-actor-message-ctor-cannot-be-qualified`). HCR
   counterexamples for the migration obligations. G4 landed half (progress
   `2026-10-15-actor-message-ctor-cannot-be-qualified`): `<Actor>.<Msg>` resolves and a

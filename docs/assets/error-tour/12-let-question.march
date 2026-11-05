@@ -1,0 +1,12 @@
+mod Main do
+  fn parse() : Result(Int, String) do Ok(1) end
+
+  fn next() : Result(Int, String) do
+    let? x = parse()
+    x + 1
+  end
+
+  fn main() do
+    next()
+  end
+end

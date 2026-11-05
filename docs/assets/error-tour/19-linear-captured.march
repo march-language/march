@@ -1,0 +1,16 @@
+mod Main do
+  needs IO.Console
+
+  always_linear type Token = Token(Int)
+
+  fn consume(t : Token) : Int do
+    match t do Token(n) -> n end
+  end
+
+  fn twice(k : () -> Int) : Int do k() + k() end
+
+  fn main(_console : Cap(IO.Console)) do
+    let t = Token(1)
+    println(int_to_string(twice(fn () -> consume(t))))
+  end
+end

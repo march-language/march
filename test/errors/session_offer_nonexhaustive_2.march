@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: takes one callback for each branch `Cons` can choose in protocol `Stream` (`more` and `done`), but this call leaves out `done`
+-- REJECT (§F3): an offer with the `done` callback left out; the error lists the branches, and since
+-- the conversation ends after `done`, the fix adds a callback that closes it.
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) -> prod(s, st2, next + 1))
+  end
+  fn main(c : Cap(IO)) do () end
+end

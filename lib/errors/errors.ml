@@ -323,9 +323,11 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
     List.exists (fun d ->
         is_err d
         && List.mem (slug_of_code d.code)
-             [ Code.role_needs_invalid; Code.protocol_invalid; Code.endpoints_label_invalid ]) ds in
+             [ Code.role_needs_invalid; Code.protocol_invalid; Code.endpoints_label_invalid;
+               Code.endpoints_name_clash ]) ds in
   let protocol_follow_on sl =
-    List.mem sl [ Code.type_mismatch; Code.protocol_step_order; Code.unknown_constructor;
+    List.mem sl [ Code.type_mismatch; Code.protocol_step_order; Code.protocol_wrong_role;
+                  Code.unknown_constructor;
                   Code.unknown_qualified_name ]
     || (String.length sl > 7 && String.sub sl 0 7 = "linear_")
     || (String.length sl > 8 && String.sub sl 0 8 = "session_") in
@@ -337,6 +339,12 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
     List.filter_map (fun d ->
         if is_err d && has_slug Code.json_derive_name_collision d then first_backticked d.message
         else None) ds in
+  (* A protocol state used a second time: the step the second use takes is
+     out of order only because the first already took this one, so the
+     reuse is the error (§F3: `close(s, st)` then a step on `st`). *)
+  let used_twice_spans =
+    List.filter_map (fun d ->
+        if is_err d && has_slug Code.linear_used_twice d then Some d.span else None) ds in
   let wrong_actor_spans =
     List.filter_map (fun d ->
         if is_err d && has_slug Code.send_wrong_actor d then Some d.span else None) ds in
@@ -394,6 +402,8 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
         || (sl = Code.mint_cap_invalid
             && List.exists (fun o -> within d.span o) proof_cap_spans)
         || (protocol_invalid && is_err d && protocol_follow_on sl)
+        || ((sl = Code.protocol_step_order || sl = Code.protocol_wrong_role)
+            && List.mem d.span used_twice_spans)
         || (is_err d && d.span.start_line = 0 && positioned_error)
         || (sl = Code.ambiguous_constructor
             && List.exists (fun o -> within d.span o) wrong_actor_spans)
@@ -428,6 +438,25 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
                     contains_sub k.message ("`" ^ cap ^ "` is not declared")
                   | None -> false)) ds with
           | Some d -> { k with fix = d.fix }
+          | None -> k
+        else k) kept in
+  (* The reuse report takes over what the dropped step-order error knew: a
+     protocol state takes exactly one step, and `close` takes the last. *)
+  let kept =
+    List.map (fun k ->
+        if is_err k && has_slug Code.linear_used_twice k then
+          match List.find_opt (fun d ->
+              (has_slug Code.protocol_step_order d || has_slug Code.protocol_wrong_role d)
+              && d.span = k.span && not (List.memq d kept)) ds with
+          | Some d ->
+            let note =
+              if contains_sub d.message "must close the conversation" then
+                "This is a protocol state, and the first use closed the conversation: \
+                 no step can follow `close`."
+              else
+                "This is a protocol state, so it takes exactly one step: take the next \
+                 step with the state the first one returned." in
+            { k with notes = k.notes @ [ note ] }
           | None -> k
         else k) kept in
   (* Every rule names a visible error that stays, so this cannot fire; it

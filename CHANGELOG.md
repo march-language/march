@@ -29,6 +29,32 @@ git log is authoritative for exact commits.
   instead of renaming a handler. A refined handler parameter is now checked at every
   construction of a shared message name, by its qualifier or its type.
 
+- **A refinement on a field of an anonymous-record parameter is now checked.** In
+  `fn f(r : { v : {Int | _ > 0} })` the body may assume `r.v > 0`, and each caller must
+  establish it. Before, the refinement was ignored on both sides. Likewise
+  `fn f(r : {T | _.v > 0})` now gives its body the fact at a call's precondition, not only
+  at its result.
+- **A `--hot-reload` build rejects an `@invariant` the deploy gate can't read.** The error
+  (`invariant_not_deploy_checkable`) points at the unsupported part. `--accept-unproved
+  <Actor>.state` turns it into a warning and records the override in the patch. Before, the
+  build printed a one-line warning and the actor could never be hot-deployed.
+- **A hot deploy's `--accept-unproved` override is signed into the patch and audited.**
+  forge builds the patch with it, the compiler writes the accepted laws into the actor's
+  schema (`"accepted_unproved"`), and the reload server's audit line for the activation
+  records them, so `audit.jsonl` shows which laws went out without a proof. forge refuses an
+  override that a pre-built patch (`--so`) doesn't carry; rebuild it with
+  `march --accept-unproved …`.
+- **UDP in the standard library: `Udp`.** Datagram sockets built for packet rate. Every send
+  and receive moves a batch per kernel crossing: on Linux `recvmmsg`/`sendmmsg` plus UDP GSO
+  (up to 64 datagrams per transit) and opt-in GRO, elsewhere a nonblocking drain loop. On a
+  Linux loopback that is about 2.9M datagrams/s at 64 bytes, and 3.4M/s at 1200 bytes with
+  GRO. Waits park the task, not an OS thread. Sends wait for buffer space instead of
+  dropping; `Udp.stats` reports the datagrams the kernel dropped. `open_sharded` spreads
+  one port over several sockets (SO_REUSEPORT), and connected sockets report ICMP
+  port-unreachable. IPv4 and IPv6. `bench/udp_flood.march` measures it. The module is
+  `cap verified`: ports, batch sizes and shard counts are refined, so `Udp.open(h, 70000)` is
+  a compile error, and the counts `send_batch` and `open_sharded` return are proved.
+
 - **`--refine-infer` proposes lemma calls.** At a call the refinement checker could not finish
   because the proof needs more unfolding of a function, `march --check --refine-infer` and
   `forge refine --infer` look for a lemma, yours or the standard library's, whose theorem is
@@ -154,11 +180,28 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
+  of the wrong type names the step and points at its line in the protocol. A body calling another
+  role's functions says "`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B`"
+  (`protocol_wrong_role`) and names the step `B` takes instead. An offer with a branch callback
+  left out lists the protocol's branches and the missing ones, and when the conversation ends
+  after that branch, offers a fix that adds a callback closing it. A step on a state already
+  closed reports only the reuse, saying the conversation was closed. Two steps one role takes
+  under the same label are reported once per role, without follow-on errors from the generated
+  code. 24 more protocol and session error codes have a `march --explain` page.
+
+- Diagnostics: a session-channel call at the wrong step of its protocol reads in plain terms:
+  "`Chan.send` can't send here: at this point the channel must receive an `Int`", with the steps
+  left on the channel and a label on the protocol it follows, instead of "channel is at
+  `Recv(Int, End)` but I expected `Send(T, ...)`". `march --explain session_state_mismatch` has a
+  page.
+
 - Diagnostics: a choreography role body that takes a step out of order is reported in protocol
   terms (`protocol_step_order`): "Role `Cons` tries to choose `more` or `done` here, but at this
   point protocol `Stream` says it must receive an `Int` from `Prod`", with a label on that
   protocol step and the generated function that takes it, instead of a mismatch between two
   generated state names (`S_choose_more_done`, `S_recv_Msg_Prod_Cons_1`).
+
 - Diagnostics: a protocol step that can never run, because it comes after a `loop`, is underlined
   itself, with a label on the loop, instead of the whole `protocol`. A receive from a role that
   `may crash` without an `or crash do ... end` branch now comes with a fix that inserts one, telling
@@ -260,6 +303,11 @@ git log is authoritative for exact commits.
   labels the first. A misspelt actor in `spawn` or in a supervise block reads "I don't know an
   actor called `Countr`. Did you mean `Counter`?", and a misspelt `strategy` lists the three it
   can be.
+- Diagnostics: a missing JSON codec for `Node.send` / `Node.enqueue` gives its advice ("Add
+  `derive Json for Ping` next to its declaration.") as a note, like the `@[remote]` case. A
+  `migrate_state` / `migrate_msg` that does IO names the actor it migrates ("`counter_migrate_state`
+  migrates actor `Counter`'s state, and `migrate_state` must be IO-free, …") and moves its advice
+  to a note. A `spawn` whose argument count does not match the actor's `init` labels the `init`.
 - Diagnostics: `role_grant_exceeded` points at the use and labels the callback and each call on
   the way, like `cap_grant_exceeded`; in a `cap no_panic` module, a panic reached through several
   of its functions is reported once, at the panic, with a label on each caller.
@@ -268,6 +316,12 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- A new Error Messages tour (`/docs/error-messages/`): 34 real compiler errors, from syntax
+  slips through types, capabilities, linearity, actors, session channels, protocols and
+  refinements, each with what `march --check` prints today. An error playground on the page
+  comes loaded with 26 of them: edit one and check it again in the browser. The live compiler
+  bundle gains `marchCheck`, which prints a program's diagnostics as `march --check` does,
+  without the refinement checks (they need z3).
 - The Refinement Types chapter (`/docs/refinement-types/`) drops its dated "What's new" box. Its
   "When to use refinements" table now points at refinement messages, reflection, lemmas,
   relational element refinements, abstract refinements, fold invariants, termination (`cap total`)

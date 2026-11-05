@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: This is the step's payload: protocol `Fan` says `A` must send an `Int` to `C` here
+-- REJECT (§F3): a role sends a payload of the wrong type; the error names the protocol step and
+-- points at it, where the payload type is declared.
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Fan do
+    number: A -> C : Int
+    second: B -> C : Int
+    verdict: C -> A : Bool
+  end
+  pfn role_a(s : Cap(Session.Live), st : Fan_A.Entry) : Fan_A.Yield do
+    let st1 = Fan_A.send_Number(s, st, "seven")
+    Fan_A.recv_Verdict(s, st1, fn (_ok, st2) -> Fan_A.close(s, st2))
+  end
+  fn main(c : Cap(IO)) do () end
+end

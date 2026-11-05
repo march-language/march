@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: `Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B` of protocol `Fan`
+-- REJECT (§F3): a body for role `B` calls role `A`'s functions; the error says which role each
+-- side belongs to and the step `B` takes instead, not two generated state names.
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Fan do
+    number: A -> C : Int
+    second: B -> C : Int
+    verdict: C -> A : Bool
+  end
+  pfn role_b(s : Cap(Session.Live), st : Fan_B.Entry) : Fan_B.Yield do
+    let st1 = Fan_A.send_Number(s, st, 7)
+    Fan_A.recv_Verdict(s, st1, fn (_ok, st2) -> Fan_A.close(s, st2))
+  end
+  fn main(c : Cap(IO)) do () end
+end

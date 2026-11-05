@@ -895,10 +895,11 @@ let ensure_runtime_so () =
         let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
         let io_c      = Filename.concat runtime_dir "march_http_io.c" in
         let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
+        let udp_c     = Filename.concat runtime_dir "march_udp.c" in
         let tls_c     = Filename.concat runtime_dir "march_tls.c" in
-        Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s" http_c sha1_c base64_c
+        Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s%s" http_c sha1_c base64_c
           (opt_file simd_c) (opt_file sched_c) (opt_file resp_c)
-          (opt_file io_c) (opt_file evloop_c) (opt_file tls_c) (opt_file extras_c)
+          (opt_file io_c) (opt_file evloop_c) (opt_file udp_c) (opt_file tls_c) (opt_file extras_c)
           (opt_file compress_c ^ codec_files)
       else
         (* march_extras.c unconditionally references base64_encode (base64.c) and

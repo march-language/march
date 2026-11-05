@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: init takes 2 arguments, but `spawn(Counter, …)` supplies 1
+mod App do
+  actor Counter do
+    state { value : Int, label : String }
+    init(start : Int, label : String) { value: start, label: label }
+    on Bump() do { state with value: state.value + 1 } end
+  end
+
+  fn main() do
+    let c = spawn(Counter, 1)
+    kill(c)
+  end
+end
