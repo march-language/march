@@ -153,7 +153,69 @@
     }
   }
 
-  var api = { cluster: cluster, mailbox: mailbox };
+  // A release rolling out: the developer's machine, the calling node, and the hosts, each
+  // labelled with the code it runs. `packet` is simRelease.packet.
+  function release(ctx, s, size, c, packet) {
+    var W = size.width, H = size.height, narrow = W < 560;
+    ctx.clearRect(0, 0, W, H);
+    var n = s.hosts.length, gap = narrow ? 6 : 12;
+    var leftW = narrow ? 62 : 104, hostW = narrow ? Math.min(190, W - leftW - 50) : Math.min(260, W * 0.4);
+    var hostX = W - hostW - 1, hostH = Math.min(narrow ? 50 : 64, (H - 2 - gap * (n - 1)) / n);
+    var top = Math.max(1, (H - (n * hostH + (n - 1) * gap)) / 2);
+    var small = narrow ? 10 : 12, big = narrow ? 11 : 13;
+
+    function box(x, y, w, h, title, sub, color) {
+      ctx.strokeStyle = color; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+      font(ctx, big, '600'); ctx.fillStyle = color === c.dim ? c.ink : color; ctx.textAlign = 'left';
+      ctx.fillText(title, x + 8, y + (narrow ? 15 : 20));
+      font(ctx, small); ctx.fillStyle = color === c.ink ? c.dim : color;
+      ctx.fillText(sub, x + 8, y + (narrow ? 29 : 38));
+    }
+
+    var caller = { x: 0, y: top + 4, w: leftW, h: 46 }, forge = { x: 0, y: H - 47, w: leftW, h: 46 };
+    ctx.lineWidth = 1;
+    box(caller.x, caller.y, caller.w, caller.h, s.cfg.ingress || 'caller', 'starts calls', c.ink);
+    box(forge.x, forge.y, forge.w, forge.h, 'forge', 'your machine', c.dim);
+
+    var anchor = [];
+    s.hosts.forEach(function (h, i) {
+      var y = top + i * (hostH + gap), halted = s.phase === 'halted' && i === s.canaryHost;
+      anchor.push({ x: hostX - 6, y: y + hostH / 2, right: hostX + hostW - 10, top: y, bottom: y + hostH });
+      ctx.lineWidth = h.version === 2 ? 2.5 : 1;
+      var title = h.id + (i === s.cfg.leader ? ' · leader' : '');
+      box(hostX, y, hostW, hostH, title, halted ? 'failed its gate' : h.version === 2 ? 'new code' : 'old code',
+        halted ? c.accent : h.version === 2 ? c.ink : c.dim);
+      ctx.lineWidth = 1;
+      if (i === s.canaryHost && (s.phase === 'gate' || s.phase === 'halted')) {
+        var u = s.phase === 'halted' ? 1 : Math.min(1, s.phaseT / s.cfg.windowS);
+        ctx.fillStyle = s.phase === 'halted' ? c.accent : c.ink;
+        ctx.fillRect(hostX, y + hostH - 3, hostW * u, 3);
+      }
+    });
+
+    var from = { x: leftW + 4, y: caller.y + caller.h / 2 };
+    s.calls.forEach(function (call) {
+      if (call.phase === 'serve') return;
+      var u = Math.min(1, call.elapsed / call.dur), a = from, b = anchor[call.host], out = call.phase === 'out';
+      if (!out) { a = anchor[call.host]; b = from; }
+      ctx.fillStyle = out ? c.dim : call.version === 2 ? c.ink : c.dim;
+      ctx.beginPath();
+      ctx.arc(a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u + (out ? -3 : 4), out ? 1.5 : call.version === 2 ? 3 : 2, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    if (packet) {
+      var fromPt = packet.from === 'forge' ? { x: leftW + 2, y: forge.y + forge.h / 2 }
+        : { x: anchor[packet.from].right, y: packet.to > packet.from ? anchor[packet.from].bottom : anchor[packet.from].top };
+      var toPt = packet.from === 'forge' ? { x: anchor[packet.to].x, y: anchor[packet.to].y + 12 }
+        : { x: anchor[packet.to].right, y: packet.to > packet.from ? anchor[packet.to].top : anchor[packet.to].bottom };
+      var pu = Math.min(1, packet.u);
+      ctx.fillStyle = c.ink;
+      ctx.fillRect(fromPt.x + (toPt.x - fromPt.x) * pu - 4, fromPt.y + (toPt.y - fromPt.y) * pu - 4, 8, 8);
+    }
+  }
+
+  var api = { cluster: cluster, mailbox: mailbox, release: release };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.MarchExplainer = root.MarchExplainer || {};
   root.MarchExplainer.draw = Object.assign(root.MarchExplainer.draw || {}, api);

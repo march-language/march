@@ -9,6 +9,7 @@ require('../../docs/assets/explainer/figures.js');
 require('../../docs/assets/explainer/rng.js');
 require('../../docs/assets/explainer/sim-cluster.js');
 require('../../docs/assets/explainer/sim-mailbox.js');
+require('../../docs/assets/explainer/sim-release.js');
 require('../../docs/assets/explainer/draw.js');
 require('../../docs/assets/explainer/chapters.js');
 const ME = globalThis.MarchExplainer;
@@ -268,5 +269,25 @@ test('mailbox drawing: every state draws, and shows the total', () => {
       assert.doesNotThrow(() => ME.draw.mailbox(ctx, s, size, colors), name);
       assert.ok(ctx.calls.fillText.some((t) => t.includes('total')), name);
     }
+  }
+});
+
+// ── the release rollout (drawn in chapter 5) ────────────────────────────────────
+test('release drawing: every phase draws at phone and desktop sizes and names its hosts', () => {
+  const cfg = { seed: 1, hosts: data.topology.stock_hosts, leader: 0, canary: 1, windowS: 3, loadPerS: 8, sessionS: [0.8, 1.6] };
+  for (const fails of [false, true]) {
+    const s = ME.simRelease.create(cfg); ME.simRelease.advance(s, 2); ME.simRelease.start(s, { canaryFails: fails });
+    const seen = new Set();
+    for (let i = 0; i < 400; i++) {
+      ME.simRelease.step(s, 0.05);
+      if (seen.has(s.phase)) continue;
+      seen.add(s.phase);
+      for (const size of [{ width: 343, height: 240 }, { width: 700, height: 460 }]) {
+        const ctx = fakeCtx();
+        assert.doesNotThrow(() => ME.draw.release(ctx, s, size, colors, ME.simRelease.packet(s)), s.phase);
+        for (const id of cfg.hosts) assert.ok(ctx.calls.fillText.some((t) => t.includes(id)), id);
+      }
+    }
+    assert.ok(seen.has(fails ? 'halted' : 'complete'));
   }
 });
