@@ -1326,3 +1326,25 @@ let div_nonliteral =
         in
         if not (unproved out "b6" || refuted out "b6") then Alcotest.failf "bare divides by an unguarded b:\n%s" out;
         if not (unproved out "s_bad" || refuted out "s_bad") then Alcotest.failf "s_bad is false:\n%s" out) ]
+
+(* `--lemma-test` decides a theorem over the logic's `len`, in the
+   interpreter and in the compiled harness. *)
+let lemma_test_len =
+  [ gated "lemma_test_len: a `len` theorem is decided in both backends" (fun () ->
+        let out =
+          run ~args:"--check --lemma-test"
+            ("mod N do\n" ^ defs4_6
+           ^ "  @[lemma]\n  fn len_nil(ys : List(Int)) : {Unit | len(cat(Nil, ys)) == len(ys)} do () end\n  @[lemma]\n  fn len_cat(xs : List(Int), ys : List(Int)) : {Unit | len(cat(xs, ys)) == len(xs) + len(ys)} do () end\nend\n")
+        in
+        expect_row out "len_nil" ~status:"holds" ~detail:" compiled";
+        (match lemma_test_row out "len_cat" with
+         | Some (("tested" | "holds"), _) -> ()
+         | _ -> Alcotest.failf "len_cat is decided:\n%s" out);
+        if red out then Alcotest.failf "true lemmas are not RED:\n%s" out);
+    gated "lemma_test_len_red: a false `len` theorem gets a counterexample" (fun () ->
+        let out =
+          run ~args:"--check --lemma-test"
+            ("mod N do\n  @[lemma]\n  fn short(xs : List(Int)) : {Unit | len(xs) <= 2} do () end\nend\n")
+        in
+        expect_row out "short" ~status:"COUNTEREXAMPLE" ~detail:"xs = ";
+        if not (red out) then Alcotest.failf "a counterexample makes the run RED:\n%s" out) ]
