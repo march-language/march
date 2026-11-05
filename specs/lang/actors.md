@@ -1295,6 +1295,17 @@ for the scheduler and lowering internals, see the implementation reference
 
 ---
 
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the compiler prints for common actor mistakes, each with a program you can edit and re-check in the browser:
+
+- [Spawning a misspelled actor name]({{ site.baseurl }}/docs/error-messages/#misspelled-actor)
+- [A message sent with an argument of the wrong type]({{ site.baseurl }}/docs/error-messages/#message-argument)
+- [A handler that forgets to return the new state]({{ site.baseurl }}/docs/error-messages/#handler-returns-state)
+- [A message sent to an actor that does not handle it]({{ site.baseurl }}/docs/error-messages/#send-wrong-actor)
+
+---
+
 ## See also
 
 The concurrency and distribution docs form a journey: actors are the foundation, and each step below builds on them.

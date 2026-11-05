@@ -56,3 +56,10 @@ mismatch is reported where the two meet, with the origin of the expected
 side, so the fix is usually one call.
 
 See also: [the language reference](../types.md).
+
+## See it in the error tour
+
+- [A `String` where an `Int` is]({{ site.baseurl }}/docs/error-messages/#string-plus-int)
+- [Two types that differ in one place]({{ site.baseurl }}/docs/error-messages/#structural-diff)
+- [A `let?` whose body is not a `Result`]({{ site.baseurl }}/docs/error-messages/#let-question)
+- [The wrong argument in a message]({{ site.baseurl }}/docs/error-messages/#message-argument)

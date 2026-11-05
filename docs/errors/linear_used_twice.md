@@ -69,3 +69,7 @@ each believe they hold it, which is exactly the aliasing linearity exists to
 rule out.
 
 See also: [the language reference](../linear-types.md).
+
+## See it in the error tour
+
+- [Used twice]({{ site.baseurl }}/docs/error-messages/#linear-used-twice)

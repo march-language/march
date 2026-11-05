@@ -81,3 +81,7 @@ return refinement at its own recursive calls (the termination design,
 
 See also: [the language reference](../refinement-types.md), `invalid_decreases`,
 `diverges_conflict`.
+
+## See it in the error tour
+
+- [A recursion that may not stop]({{ site.baseurl }}/docs/error-messages/#termination)

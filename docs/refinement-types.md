@@ -6848,6 +6848,18 @@ golden corpus itself remains 46/46 MATCH.
 
 ---
 
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the refinement checker prints when it cannot prove a property, each with a program you can edit and re-check in the browser:
+
+- [An index that can be out of range]({{ site.baseurl }}/docs/error-messages/#index-out-of-range)
+- [A call that fails whenever its branch runs, with the counterexample the solver found]({{ site.baseurl }}/docs/error-messages/#counterexample)
+- [A return value that does not meet its refined return type]({{ site.baseurl }}/docs/error-messages/#return-refinement)
+- [A recursion the checker cannot prove terminates]({{ site.baseurl }}/docs/error-messages/#termination)
+- [A division that may be by zero in a `cap no_panic` module]({{ site.baseurl }}/docs/error-messages/#division-no-panic)
+
+---
+
 ## See also
 
 - [Type System](types.md): the types refinements attach to

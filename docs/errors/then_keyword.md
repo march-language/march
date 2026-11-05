@@ -52,3 +52,7 @@ explicit production for `then` so the message names the fix instead of
 reporting a generic parse failure.
 
 See also: [the language reference](https://github.com/march-language/march/blob/main/specs/lang/surface-syntax.md), `elif_keyword`.
+
+## See it in the error tour
+
+- [`then` instead of `do`]({{ site.baseurl }}/docs/error-messages/#then)
