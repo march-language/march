@@ -1,0 +1,100 @@
+<!--
+  The scrolling explainer (docs/protocol-to-cluster.md)
+  =====================================================
+  Styles, data and scripts for the page's pinned graphics. Every class this adds starts
+  with `mx-`. The data is docs/_data/explainer.json, written by
+  scripts/gen-explainer-data.py from the real compiler; it is inlined below for the
+  scripts and rendered into the page's prose with Liquid, so no number on the page is
+  typed by hand.
+
+  Scripts, in order: scroll.js (which card is active), story.js (figure registry), then
+  one file per kind of graphic. All plain scripts under docs/assets/explainer/, no build
+  step; their pure parts are tested by `node --test test/explainer/*.test.js`.
+
+  Design: specs/2026-11-05-distributed-explainer-design.md.
+-->
+
+<style>
+  /* One accent, for the single thing to look at on a card. Everything else is ink,
+     grey or hatching. */
+  :root       { --mx-accent: #ff6b5e; --mx-ink: var(--text); --mx-dim: var(--text-faint); --mx-paper: var(--bg); }
+  :root.light { --mx-accent: #c0392b; }
+
+  /* Figure and cards share one grid cell, so the figure is as tall as its cards and its
+     stage can stay pinned while they scroll past, at phone width too. */
+  .mx-scrolly { display: grid; margin: 2.5rem 0 3rem; }
+  .mx-scrolly > .mx-figure, .mx-scrolly > .mx-steps { grid-area: 1 / 1; min-width: 0; }
+  .mx-stage {
+    position: sticky; top: 72px; height: min(58vh, 460px);
+    display: flex; flex-direction: column; justify-content: center;
+    background: var(--mx-paper);
+  }
+  .mx-stage svg, .mx-stage canvas { display: block; width: 100%; }
+  .mx-stage canvas { flex: 1 1 auto; min-height: 0; }
+  .mx-fallback { display: block; width: 100%; height: auto; }
+  .mx-live .mx-fallback { display: none; }
+
+  .mx-steps { position: relative; padding-top: 62vh; pointer-events: none; }
+  .mx-step {
+    pointer-events: auto; max-width: 34rem; margin: 0 0 62vh;
+    padding: 14px 18px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-code); opacity: 0.55; transition: opacity 0.2s;
+  }
+  .mx-step.mx-active { opacity: 1; }
+  .mx-step:last-child { margin-bottom: 30vh; }
+  .d-content .mx-step p { font-size: 15px; line-height: 1.7; color: var(--text); margin: 0 0 10px; }
+  .d-content .mx-step p:last-child { margin-bottom: 0; }
+  .d-content .mx-step pre { margin: 8px 0; font-size: 12.5px; }
+
+  @media (min-width: 1280px) {
+    .mx-scrolly { grid-template-columns: 19rem minmax(0, 1fr); column-gap: 2.25rem; }
+    .mx-scrolly > .mx-steps  { grid-area: 1 / 1; padding-top: 22vh; }
+    .mx-scrolly > .mx-figure { grid-area: 1 / 2; }
+    .mx-stage { height: min(70vh, 560px); }
+  }
+
+  .mx-caption   { font-size: 12.5px; color: var(--text-faint); margin: 6px 0 0; }
+  .mx-sim-label {
+    align-self: flex-start; font-family: "JetBrains Mono", monospace; font-size: 11px;
+    color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 6px; margin: 0 0 6px;
+  }
+  .mx-counters { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12.5px; color: var(--text-muted); margin: 0 0 6px; }
+  .mx-counters b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .mx-counters .mx-hot b { color: var(--mx-accent); }
+  .mx-error {
+    font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--mx-accent);
+    border: 1px solid var(--mx-accent); border-radius: 4px; padding: 6px 10px; margin: 8px 0 0;
+  }
+  .mx-code { margin: 1.25rem 0; }
+
+  /* Figure parts. Colour comes only from these classes, never from the scripts. */
+  .mx-ink     { fill: var(--mx-ink); }
+  .mx-dim     { fill: var(--mx-dim); }
+  .mx-line    { stroke: var(--mx-dim); stroke-width: 1; fill: none; }
+  .mx-label   { fill: var(--text-muted); font: 12px system-ui, -apple-system, sans-serif; }
+  .mx-label-strong { fill: var(--text); font: 600 13px system-ui, -apple-system, sans-serif; }
+  .mx-mono    { font-family: "JetBrains Mono", monospace; }
+  .mx-srcline { fill: var(--mx-ink); }
+  .mx-state   { fill: var(--mx-accent); }
+  .mx-fn      { fill: var(--mx-dim); }
+  .mx-fn.mx-changed { fill: var(--mx-accent); }
+  .mx-cell    { fill: none; stroke: var(--border); stroke-width: 1; }
+  .mx-cell.mx-lit   { fill: var(--mx-ink); stroke: var(--mx-ink); }
+  .mx-cell.mx-wrong { fill: var(--mx-accent); stroke: var(--mx-accent); }
+  .mx-ping    { fill: none; stroke: var(--text-muted); stroke-width: 1; }
+  .mx-failed  { stroke: var(--mx-accent); stroke-width: 2; }
+  .mx-accent-text { fill: var(--mx-accent); }
+  .mx-seg     { fill: none; stroke: var(--border); stroke-width: 1; }
+  .mx-seg.mx-done { fill: var(--border); }
+  .mx-seg.mx-next { stroke: var(--mx-accent); stroke-width: 2; }
+</style>
+
+<script>window.MARCH_EXPLAINER_DATA = {{ site.data.explainer | jsonify | replace: '</', '<\/' }};</script>
+<script src="{{ site.baseurl }}/assets/explainer/scroll.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/story.js?v={{ site.time | date: '%s' }}"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    window.MarchExplainer.mountAll(document, window.MARCH_EXPLAINER_DATA);
+  });
+</script>
