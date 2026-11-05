@@ -452,6 +452,24 @@ else
   fail=1
 fi
 
+# ── Check H: the explainer's data vs the lab app it was generated from ──────────
+# docs/protocol-to-cluster.md shows numbers, excerpts and diagnostics that
+# scripts/gen-explainer-data.py measured on examples/lab_app and wrote to
+# docs/_data/explainer.json. The data records the lab app's hash; an edit to the lab
+# app without a regeneration would leave the page showing counts for a program that
+# no longer exists. Needs no compiler.
+echo
+echo "== Check H: docs/_data/explainer.json vs examples/lab_app =="
+if [ -f docs/_data/explainer.json ]; then
+  if python3 scripts/gen-explainer-data.py --check-inputs; then
+    echo "  ok — explainer data matches examples/lab_app"
+  else
+    fail=1
+  fi
+else
+  echo "  ok — no explainer data yet"
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "doc-lint FAILED — fix the references above, or add a doc-lint:ignore-* marker"
