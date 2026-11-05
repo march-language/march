@@ -6147,10 +6147,11 @@ let compile filename =
                 let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
                 let io_c      = Filename.concat runtime_dir "march_http_io.c" in
                 let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
+                let udp_c     = Filename.concat runtime_dir "march_udp.c" in
                 let tls_c2    = Filename.concat runtime_dir "march_tls.c" in
-                Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s" http_c sha1_c2 base64_c2
+                Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s%s" http_c sha1_c2 base64_c2
                   (opt_file2 simd_c) (opt_file2 sched_c2) (opt_file2 resp_c)
-                  (opt_file2 io_c) (opt_file2 evloop_c)
+                  (opt_file2 io_c) (opt_file2 evloop_c) (opt_file2 udp_c)
                   (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2 ^ codec_c2)
               else
                 (* march_extras.c references base64_encode (base64.c) and sha1

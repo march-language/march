@@ -36,6 +36,16 @@ git log is authoritative for exact commits.
   records them, so `audit.jsonl` shows which laws went out without a proof. forge refuses an
   override that a pre-built patch (`--so`) doesn't carry; rebuild it with
   `march --accept-unproved …`.
+- **UDP in the standard library: `Udp`.** Datagram sockets built for packet rate. Every send
+  and receive moves a batch per kernel crossing: on Linux `recvmmsg`/`sendmmsg` plus UDP GSO
+  (up to 64 datagrams per transit) and opt-in GRO, elsewhere a nonblocking drain loop. On a
+  Linux loopback that is about 2.9M datagrams/s at 64 bytes, and 3.4M/s at 1200 bytes with
+  GRO. Waits park the task, not an OS thread. Sends wait for buffer space instead of
+  dropping; `Udp.stats` reports the datagrams the kernel dropped. `open_sharded` spreads
+  one port over several sockets (SO_REUSEPORT), and connected sockets report ICMP
+  port-unreachable. IPv4 and IPv6. `bench/udp_flood.march` measures it. The module is
+  `cap verified`: ports, batch sizes and shard counts are refined, so `Udp.open(h, 70000)` is
+  a compile error, and the counts `send_batch` and `open_sharded` return are proved.
 
 - **`--refine-infer` proposes lemma calls.** At a call the refinement checker could not finish
   because the proof needs more unfolding of a function, `march --check --refine-infer` and

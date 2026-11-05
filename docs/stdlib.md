@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings generated from source, lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 135 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 136 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement: use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -587,6 +587,42 @@ serializers.
 
 ---
 
+## UDP
+
+`udp.march`: datagram sockets built for packet rate. Every call moves a batch:
+on Linux `recvmmsg`/`sendmmsg` plus UDP GSO (up to 64 equal-sized datagrams per
+kernel transit) and opt-in GRO; on other platforms a nonblocking drain loop.
+Waits park the calling task, not an OS thread.
+
+```march
+let? rx  = Udp.open("0.0.0.0", 9000)
+let? tx  = Udp.open("0.0.0.0", 0)
+let? dst = Udp.resolve("127.0.0.1", 9000)       -- resolve once, reuse
+let? n   = Udp.send_batch(tx, dst, payloads)    -- Result(Int, UdpError)
+let? ds  = Udp.recv_batch(rx, 256, 2048, 100)   -- List((UdpAddr, String)); Ok([]) on timeout
+Udp.stats(rx).rx_dropped                        -- kernel drops (Linux; -1 elsewhere)
+```
+
+Sends wait for buffer space instead of dropping, and `stats` reports what the
+kernel dropped for lack of receive-buffer room. UDP itself still delivers each
+datagram at most once, in any order. Packets are binary-safe `String`s;
+`UdpAddr` is opaque and comparable with `==`. To spread load across cores, use
+`Udp.open_sharded(host, port, n, opts)` (SO_REUSEPORT) and drain each socket
+in its own task. `Udp.connect` fixes a peer, which allows `send` /
+`send_batch_connected` and reports ICMP port-unreachable as a `RecvFailed`.
+Options (`Udp.defaults()`): `gso`, `gro`, `reuse_addr`, `reuse_port`,
+`broadcast`, `recv_buffer`, `send_buffer` (8 MiB requested; Linux caps
+requests at `net.core.rmem_max`/`wmem_max` without CAP_NET_ADMIN).
+
+The module is `cap verified`. Ports (`0..65535`), shard counts (`> 0`) and
+receive bounds (`1..1024` datagrams, `1..65535` bytes) are refined parameters,
+so a literal bad value is a compile error naming the bound. `send_batch` and
+`send_many` return exactly the number of datagrams handed in, `open_sharded`
+exactly `n` sockets, and `addr_port`/`local_port` a valid port, each a proved
+fact at the call site.
+
+---
+
 ## HTTP Client
 
 `http_client.march`: Make HTTP requests.
@@ -1102,6 +1138,7 @@ fails with `Err("tcp_recv_exact: timed out")` once it passes.
 | `Vault` | Process-local KV store |
 | `Http` | HTTP client |
 | `HttpServer` | HTTP/WebSocket server |
+| `Udp` | High-rate UDP datagram sockets (batched, GSO/GRO) |
 | `Task` | Structured concurrency |
 | `Seq` | Lazy sequences |
 | `IOList` | Lazy string builder |

@@ -77,6 +77,15 @@ let table : (string * string) list = [
   ("march_tcp_accept",             "IO.NetListen");
   ("march_tcp_accept_timeout",     "IO.NetListen");
   ("march_tcp_local_port",         "IO.NetListen");
+  ("march_udp_open",                      "IO.NetConnect");
+  ("march_udp_resolve",                   "IO.NetConnect");
+  ("march_udp_connect",                   "IO.NetConnect");
+  ("march_udp_close",                     "IO.NetConnect");
+  ("march_udp_local_addr",                "IO.NetConnect");
+  ("march_udp_stats",                     "IO.NetConnect");
+  ("march_udp_send_batch",                "IO.NetConnect");
+  ("march_udp_send_many",                 "IO.NetConnect");
+  ("march_udp_recv_batch",                "IO.NetConnect");
   ("march_http_server_listen",     "IO.NetListen");
   ("march_http_server_spawn_n",    "IO.NetListen");
   ("march_http_server_wait",       "IO.NetListen");

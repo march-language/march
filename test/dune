@@ -9325,6 +9325,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/credit_backpressure_loopback.expected native_credit_backpressure_loopback.out)))
 
+; ── udp_loopback: stdlib Udp end to end, compiled and interpreted, one golden ──
+(rule
+ (targets native_udp_loopback native_udp_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/udp_loopback.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_udp_loopback
+        native/udp_loopback.march)
+   (with-stdout-to native_udp_loopback.out
+        (system "./native_udp_loopback")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/udp_loopback.expected native_udp_loopback.out)))
+
+(rule
+ (targets interp_udp_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/udp_loopback.march))
+ (action
+  (with-stdout-to interp_udp_loopback.out
+    (run %{exe:../bin/main.exe} native/udp_loopback.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/udp_loopback.expected interp_udp_loopback.out)))
+
 ; ── tcp_accept_timeout: a listener nobody dials gives up ──
 (rule
  (targets native_tcp_accept_timeout native_tcp_accept_timeout.out)
