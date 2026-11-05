@@ -261,6 +261,10 @@ let target_str     = ref "native"  (* --target: native | wasm64-wasi | wasm32-wa
 let check_migration   = ref false
 let prior_schema_path = ref ""
 let new_schema_path   = ref ""
+(* --hcr-baseline: the deployed build's .schemas.json, whose contracts every
+   build's migrate_state / migrate_msg is checked against (H1/H2).  Empty =
+   look for forge's `.march/<name>_hot.so.schemas.json.prev`. *)
+let hcr_baseline_path = ref ""
 (* --accept-unproved: the deploy-gate laws ("Actor.state", "Actor.Handler")
    a --check-migration may leave unproved without failing. *)
 let accept_unproved : string list ref = ref []

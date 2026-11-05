@@ -431,3 +431,77 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
       exit 1
     end else
       exit 0
+
+(* ------------------------------------------------------------------ *)
+(* H1/H2 on every build: the deployed baseline                          *)
+(* ------------------------------------------------------------------ *)
+
+(* The deployed build's schemas: [--hcr-baseline], else the one file forge
+   keeps after a hot deploy, `<root>/.march/<name>_hot.so.schemas.json.prev`,
+   where <root> is the nearest ancestor of the source file holding a
+   forge.toml.  None found (or several, which would be a guess) leaves the
+   baseline empty: no deploy is known, and migrations are checked against
+   their declared parameter types alone. *)
+let find_baseline ~(filename : string) : string option =
+  if !hcr_baseline_path <> "" then Some !hcr_baseline_path
+  else
+    let abs =
+      if Filename.is_relative filename then Filename.concat (Sys.getcwd ()) filename
+      else filename
+    in
+    let rec root dir =
+      if Sys.file_exists (Filename.concat dir "forge.toml") then Some dir
+      else
+        let up = Filename.dirname dir in
+        if up = dir then None else root up
+    in
+    match root (Filename.dirname abs) with
+    | None -> None
+    | Some r ->
+      let dir = Filename.concat r ".march" in
+      let suffix = "_hot.so.schemas.json.prev" in
+      (match Sys.readdir dir with
+       | exception Sys_error _ -> None
+       | entries ->
+         (match
+            List.filter (fun e -> Filename.check_suffix e suffix) (Array.to_list entries)
+          with
+          | [ e ] -> Some (Filename.concat dir e)
+          | _ -> None))
+
+let load_baseline ~(filename : string) : unit =
+  let module Sd = March_forge.Schema_diff in
+  let module B = March_refinecheck.Hcr_baseline in
+  B.baseline :=
+    (match find_baseline ~filename with
+     | None -> []
+     | Some path ->
+       (match Sd.parse_schemas_file path with
+        | exception _ -> []
+        | schemas ->
+          List.map
+            (fun (name, (s : Sd.actor_schema)) ->
+              let fields =
+                List.filter_map
+                  (fun (f : Sd.field) ->
+                    Option.bind f.Sd.refine (fun t ->
+                        Option.map (fun p -> (f.Sd.name, p)) (parse_pred t)))
+                  s.Sd.state_fields
+              in
+              (* The invariant is split per field by [B.field_facts]; file it
+                 under a name no field has, so it is read but never mistaken
+                 for one field's own refinement. *)
+              let fields =
+                match Option.bind s.Sd.invariant parse_pred with
+                | Some p -> ("@invariant", p) :: fields
+                | None -> fields
+              in
+              let handlers =
+                List.map
+                  (fun (c : Sd.ctor) ->
+                    (c.Sd.cname, List.map (fun r -> Option.bind r parse_pred) c.Sd.refines))
+                  (Option.value ~default:[] s.Sd.handlers)
+              in
+              let field_names = List.map (fun (f : Sd.field) -> f.Sd.name) s.Sd.state_fields in
+              (name, { B.field_names; fields; handlers }))
+            schemas))

@@ -15123,6 +15123,124 @@ let lambda_contract_suite =
           (contains text "its parameter refinement `_ >= 0`");
         Alcotest.(check bool) "names the callable" true (contains text "take_n")) ]
 
+(* ── Hot-reload migrations: counterexamples, and the deployed baseline ─────
+   A `<actor>_migrate_state` / `_migrate_msg` runs on whatever the old build
+   left, so an obligation in it the checker cannot discharge is decided by
+   RUNNING the migration on small old values ([Witness.confirm_migration]),
+   and an input whose result the new build rejects is an error naming it.
+   The deployed build's contracts ([Hcr_baseline]) are hypotheses: they make
+   a migration prove, and they exclude an input the runtime cannot hand over
+   (lemmas design §3.4 H1/H2, phase A; the P3 probe). *)
+let hcr_migration_suite =
+  let prog ~state_param ~msg_arm =
+    "mod P3 do\n\
+    \  mod V1 do\n\
+    \    type Msg = Bump(Int) | Reset\n\
+    \  end\n\
+    \  actor Tally do\n\
+    \    state { count : {Int | _ >= 0}, hist : List(Int) }\n\
+    \    init { count: 0, hist: Nil }\n\
+    \    on Bump(n : {Int | _ > 0}) do\n\
+    \      { count: state.count, hist: state.hist }\n\
+    \    end\n\
+    \  end\n\
+    \  fn tally_migrate_state(old : " ^ state_param ^ ") do\n\
+    \    { count: old.count, hist: Nil }\n\
+    \  end\n\
+    \  fn tally_migrate_msg(m : V1.Msg) : Option(Tally.Msg) do\n\
+    \    match m do\n\
+    \      V1.Bump(n) -> " ^ msg_arm ^ "\n\
+    \      V1.Reset -> None\n\
+    \    end\n\
+    \  end\n\
+    end\n"
+  in
+  let unsafe = prog ~state_param:"{ count : Int }" ~msg_arm:"Some(Tally.Bump(n))" in
+  let safe =
+    prog ~state_param:"{ count : {Int | _ >= 0} }"
+      ~msg_arm:"if n > 0 do Some(Tally.Bump(n)) else None end"
+  in
+  let module B = March_refinecheck.Hcr_baseline in
+  let pred s = March_parser.Parse.expr_of_lexbuf (Lexing.from_string s) in
+  let with_baseline b f =
+    B.baseline := b;
+    Fun.protect ~finally:(fun () -> B.baseline := []) f
+  in
+  let errors src =
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    March_refinecheck.Obligation.reset ();
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    String.concat "\n"
+      (List.filter_map
+         (fun (d : March_errors.Errors.diagnostic) ->
+           if d.March_errors.Errors.severity = March_errors.Errors.Error then
+             Some d.March_errors.Errors.message
+           else None)
+         ctx.March_errors.Errors.diagnostics)
+  in
+  [ gated "an unsafe migrate_state is refuted with the old state" (fun () ->
+        let text = errors unsafe in
+        Alcotest.(check bool) "names the input and the result" true
+          (contains text "but tally_migrate_state({ count: -1 }) returns { count: -1, hist: [] }");
+        Alcotest.(check bool) "names the field" true (contains text "(field `count`)"));
+
+    gated "an unsafe migrate_msg is refuted with the old message" (fun () ->
+        Alcotest.(check bool) "V1.Bump(0) becomes a rejected Tally.Bump(0)" true
+          (contains (errors unsafe)
+             "but tally_migrate_msg(V1.Bump(0)) returns Some(Tally.Bump(0))"));
+
+    gated "a correct migration proves: no error, no skip in either function" (fun () ->
+        Alcotest.(check string) "no errors" "" (errors safe);
+        Alcotest.(check bool) "no skipped obligation on lines 13-18" false
+          (List.exists
+             (fun (o : March_refinecheck.Obligation.t) ->
+               let l = o.March_refinecheck.Obligation.span.March_ast.Ast.start_line in
+               l >= 13 && l <= 18
+               && (match o.March_refinecheck.Obligation.verdict with
+                   | March_refinecheck.Obligation.Skipped _ -> true | _ -> false))
+             (March_refinecheck.Obligation.all ())));
+
+    gated "the same shape outside a migration is not refuted by execution" (fun () ->
+        let renamed =
+          Str.global_replace (Str.regexp_string "tally_migrate_") "tally_convert_" unsafe
+        in
+        Alcotest.(check bool) "no counterexample for tally_convert_state" false
+          (contains (errors renamed) "returns"));
+
+    gated "the deployed field refinement is a hypothesis: migrate_state proves" (fun () ->
+        with_baseline
+          [ ("Tally", { B.field_names = [ "count" ]; fields = [ ("count", pred "count >= 0") ]; handlers = [] }) ]
+          (fun () ->
+            Alcotest.(check bool) "no state counterexample" false
+              (contains (errors unsafe) "tally_migrate_state(")));
+
+    gated "a deployed @invariant conjunct on one field is a hypothesis too" (fun () ->
+        with_baseline
+          [ ("Tally",
+             { B.field_names = [ "count"; "hist" ];
+               fields = [ ("@invariant", pred "count >= 0 && len(hist) >= 0") ];
+               handlers = [] }) ]
+          (fun () ->
+            Alcotest.(check bool) "no state counterexample" false
+              (contains (errors unsafe) "tally_migrate_state(")));
+
+    gated "an old message the deployed handler refused is not a counterexample" (fun () ->
+        with_baseline
+          [ ("Tally", { B.field_names = []; fields = []; handlers = [ ("Bump", [ Some (pred "p0 > 0") ]) ] }) ]
+          (fun () ->
+            Alcotest.(check bool) "no msg counterexample" false
+              (contains (errors unsafe) "tally_migrate_msg(")));
+
+    gated "an unrefined deployed field leaves the counterexample standing" (fun () ->
+        with_baseline
+          [ ("Tally", { B.field_names = [ "count" ]; fields = []; handlers = [ ("Bump", [ None ]) ] }) ]
+          (fun () ->
+            let text = errors unsafe in
+            Alcotest.(check bool) "state" true (contains text "tally_migrate_state({ count: -1 })");
+            Alcotest.(check bool) "msg" true (contains text "tally_migrate_msg(V1.Bump(0))"))) ]
+
 (* ── Actor handler contracts (plan phase 3) ───────────────────────────────
    `on Inc(n : {Int | n > 0})` obliges every CONSTRUCTION of `Inc(...)` in the
    module (send, call, or a message bound first), and the handler body
@@ -29282,6 +29400,7 @@ let () =
       ("local-fn-contract", local_fn_suite);
       ("lambda-contract", lambda_contract_suite);
       ("actor-handler-contract", actor_handler_suite);
+      ("hcr-migration", hcr_migration_suite);
       ("stored-field-contract", stored_field_suite);
       ("impl-dispatch", impl_dispatch_suite);
       ("silent-holes", silent_holes_suite);

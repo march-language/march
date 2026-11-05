@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Hot-reload migrations are checked on every build, with a counterexample.** When an
+  obligation in an `<actor>_migrate_state` or `<actor>_migrate_msg` can't be proved, the
+  compiler runs the migration on small old values. An input whose result the new actor
+  rejects is now an error that names it: `but tally_migrate_msg(V1.Bump(0)) returns
+  Some(Tally.Bump(0))`. Before, this was a "not verified" hint. When the project was
+  hot-deployed before, the running version's state refinements
+  (`.march/<name>_hot.so.schemas.json.prev`, or `--hcr-baseline <path>`) are assumed of
+  `migrate_state`'s record parameter. A migration that is correct for the running version
+  therefore proves, and an old message the running handler refused is never offered as a
+  counterexample.
 - **An actor's message can be qualified by its actor.** When two actors (or an actor and a
   variant) share a message name, `Counter.Tally(1)` (also `Counter_Msg.Tally(1)`, and
   `Outer.Counter.Tally(1)` for a nested actor) selects `Counter`'s message on both backends.

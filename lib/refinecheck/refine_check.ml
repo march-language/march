@@ -9259,6 +9259,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   let pre_desugar_decls = Option.map Refine_abstract.expand_markers pre_desugar_decls in
   (* An anonymous-record parameter's field refinements become a refinement
      on the parameter over a synthetic record sort (gap G5). *)
+  (* The deployed build's contracts are facts about a migration's input
+     (H1/H2): strengthen the old-record parameter before G5 lifts it. *)
+  let m = Hcr_baseline.strengthen m in
   let m = Refine_anon.lift m in
   call_type_map := type_map;
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
