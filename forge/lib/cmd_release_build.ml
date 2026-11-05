@@ -144,7 +144,7 @@ let build ?target ?(profile = "release") ?(tar = false) () : (string * string op
       let out = Filename.concat (Filename.concat (Filename.concat root ".march") "release-tmp")
           (app ^ "-" ^ label) in
       Project.mkdir_p (Filename.dirname out);
-      let* so, manifest = Cmd_deploy_hot.build_so_for ~target ~proj ~output:out in
+      let* so, manifest = Cmd_deploy_hot.build_so_for ~accept_unproved:[] ~target ~proj ~output:out in
       let schemas = so ^ ".schemas.json" in
       let* m = Cmd_deploy_hot.parse_manifest manifest in
       Ok (Some (manifest, (if Sys.file_exists schemas then Some schemas else None), m.Cmd_deploy_hot.cas_hash))

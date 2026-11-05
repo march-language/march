@@ -73,6 +73,7 @@ let invalid_lemma = "invalid_lemma"
 let invalid_measure = "invalid_measure"
 let invalid_reflect = "invalid_reflect"
 let invalid_type_bound = "invalid_type_bound"
+let invariant_not_deploy_checkable = "invariant_not_deploy_checkable"
 let io_not_allowed = "io_not_allowed"
 let island_missing_fn = "island_missing_fn"
 let json_derive_name_collision = "json_derive_name_collision"
@@ -272,6 +273,7 @@ let all = [
   invalid_measure;
   invalid_reflect;
   invalid_type_bound;
+  invariant_not_deploy_checkable;
   io_not_allowed;
   island_missing_fn;
   json_derive_name_collision;
@@ -496,6 +498,7 @@ let category_table : (string * string list) list = [
   "REFINEMENT", [
     abstract_refinement_misuse; abstract_refinement_unused; division_by_zero;
     int_overflow; invalid_lemma; invalid_measure; invalid_reflect;
+    invariant_not_deploy_checkable;
     lemma_argument_impure; lemma_unproved; lemma_unproved_call;
     measure_scalar_field; predicate_eq_structural; refinement_ignored;
     refinement_unchecked; refinement_unverified; refinement_violated;

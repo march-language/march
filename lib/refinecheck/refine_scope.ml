@@ -2710,7 +2710,14 @@ let collect_ctor_sigs (decls : A.decl list) : ctor_sigs =
     all;
   let by_fields = Hashtbl.create 32 in
   Hashtbl.iter
-    (fun key names -> match names with [ n ] -> Hashtbl.replace by_fields key n | _ -> ())
+    (fun key names ->
+      (* A synthetic anonymous-parameter record ([Refine_anon]) never takes a
+         shape a declared type already has: a literal typed before is typed
+         the same way. *)
+      let names =
+        if List.exists (fun n -> not (Refine_anon.is_synthetic n)) names
+        then List.filter (fun n -> not (Refine_anon.is_synthetic n)) names else names in
+      match names with [ n ] -> Hashtbl.replace by_fields key n | _ -> ())
     shapes;
   { by_ctor; by_fields }
 

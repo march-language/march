@@ -291,11 +291,27 @@ let facts_of_recenv_entry ~(span : A.span) ((x, sort) : string * string) : (A.ex
      | None -> [])
   | None -> []
 
+(* A record parameter's own refinement, `r : {T | _.v > 0}`, as a path fact
+   over `r`.  The scope fact alone reached a postcondition but not a call's
+   precondition (`need(r.v)` was solver-undecided while the same field
+   refinement stored on `T` proved), and it is what [Refine_anon] lifts an
+   anonymous record parameter's field refinements into. *)
+let record_param_refinement_facts (p : A.param) : (A.expr * bool) list =
+  match Option.map unlinear p.A.param_ty with
+  | Some (A.TyRefine (_, b, pred)) ->
+    let x = p.A.param_name in
+    let v = A.EVar { A.txt = x.A.txt; A.span = x.A.span } in
+    (* `_`, a declared binder, or the parameter's own name: every spelling
+       of the subject, as [Refine_scope.field_facts] reads them. *)
+    let env = ("_", v) :: (match b with Some b -> [ (b.A.txt, v) ] | None -> []) in
+    [ (subst_params env pred, false) ]
+  | _ -> []
+
 let params_field_facts ~(span : A.span) (ps : A.param list) : (A.expr * bool) list =
   List.concat_map
     (fun (p : A.param) ->
       match record_sort_of_ty p.A.param_ty with
-      | Some s -> facts_of_recenv_entry ~span (p.A.param_name.A.txt, s)
+      | Some s -> facts_of_recenv_entry ~span (p.A.param_name.A.txt, s) @ record_param_refinement_facts p
       | None -> [])
     ps
 
@@ -9069,6 +9085,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     if List.for_all2 ( == ) ds m.A.mod_decls then m else { m with A.mod_decls = ds }
   in
   let pre_desugar_decls = Option.map Refine_abstract.expand_markers pre_desugar_decls in
+  (* An anonymous-record parameter's field refinements become a refinement
+     on the parameter over a synthetic record sort (gap G5). *)
+  let m = Refine_anon.lift m in
   call_type_map := type_map;
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:

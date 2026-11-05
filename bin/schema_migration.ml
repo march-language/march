@@ -385,7 +385,15 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
     let accepted law =
       let actor = match String.index_opt law '.' with
         | Some i -> String.sub law 0 i | None -> law in
-      List.mem law !accept_unproved || List.mem actor !accept_unproved in
+      let rest = if String.length law > String.length actor
+        then String.sub law (String.length actor + 1)
+            (String.length law - String.length actor - 1) else "" in
+      (* Named on this command line, or built into the new image with
+         --accept-unproved, which is the override the server audits. *)
+      List.mem law !accept_unproved || List.mem actor !accept_unproved
+      || (match List.assoc_opt actor new_schemas with
+          | Some (s : Sd.actor_schema) -> List.mem "*" s.accepted || List.mem rest s.accepted
+          | None -> false) in
     let failed = ref false in
     let worst = Hashtbl.create 8 in
     List.iter (fun (law, v) ->

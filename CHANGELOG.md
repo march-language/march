@@ -21,6 +21,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A refinement on a field of an anonymous-record parameter is now checked.** In
+  `fn f(r : { v : {Int | _ > 0} })` the body may assume `r.v > 0`, and each caller must
+  establish it. Before, the refinement was ignored on both sides. Likewise
+  `fn f(r : {T | _.v > 0})` now gives its body the fact at a call's precondition, not only
+  at its result.
+- **A `--hot-reload` build rejects an `@invariant` the deploy gate can't read.** The error
+  (`invariant_not_deploy_checkable`) points at the unsupported part. `--accept-unproved
+  <Actor>.state` turns it into a warning and records the override in the patch. Before, the
+  build printed a one-line warning and the actor could never be hot-deployed.
+- **A hot deploy's `--accept-unproved` override is signed into the patch and audited.**
+  forge builds the patch with it, the compiler writes the accepted laws into the actor's
+  schema (`"accepted_unproved"`), and the reload server's audit line for the activation
+  records them, so `audit.jsonl` shows which laws went out without a proof. forge refuses an
+  override that a pre-built patch (`--so`) doesn't carry; rebuild it with
+  `march --accept-unproved …`.
+
 - **`--refine-infer` proposes lemma calls.** At a call the refinement checker could not finish
   because the proof needs more unfolding of a function, `march --check --refine-infer` and
   `forge refine --infer` look for a lemma, yours or the standard library's, whose theorem is

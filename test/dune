@@ -6975,7 +6975,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/hcr_schema_contracts.march))
  (action
   (progn
+   ; Odd's @invariant is outside the deploy gate's grammar, an error in a
+   ; --hot-reload build unless accepted: the override is then recorded too.
    (run %{exe:../bin/main.exe} --compile --compile-so --hot-reload SchemaContracts
+        --accept-unproved Odd.state
         -o native_hcr_schema_contracts.so native/hcr_schema_contracts.march)
    (with-stdout-to native_hcr_schema_contracts.out
     (run python3 %{dep:check_hcr_schema_contracts.py} native_hcr_schema_contracts.so.schemas.json)))))
