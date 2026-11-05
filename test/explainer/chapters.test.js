@@ -292,3 +292,30 @@ test('release drawing: every phase draws at phone and desktop sizes and names it
     assert.ok(seen.has(fails ? 'halted' : 'complete'));
   }
 });
+
+// ── the opening: the declaration, read line by line ─────────────────────────────
+test('declaration: each card picks out its own lines, in any order', () => {
+  const hl = (m) => (m.svg().match(/class="mx-codeline mx-hl"/g) || []).length;
+  const m = mount('declaration');
+  m.fig.setState('all', 0); assert.equal(hl(m), 0);
+  m.fig.setState('lines:8-10', 0); assert.equal(hl(m), 3);
+  m.fig.setState('lines:5', 0); assert.equal(hl(m), 1);
+  m.fig.setState('lines:1-2', 0); assert.equal(hl(m), 2);
+});
+
+test('declaration: a card that names lines the protocol does not have is an error', () => {
+  const m = mount('declaration');
+  assert.throws(() => m.fig.setState('lines:15-40', 0), /lines 15-40/);
+  assert.throws(() => m.fig.setState('lines:0-2', 0), /lines 0-2/);
+  assert.throws(() => m.fig.setState('nope', 0), /unknown state/);
+});
+
+test('declaration: the page\'s cards cover every line of the protocol exactly once', () => {
+  const page = fs.readFileSync(path.join(__dirname, '../../docs/protocol-to-cluster.md'), 'utf8');
+  const section = page.split('data-figure="declaration"')[1].split('</section>')[0];
+  const covered = [];
+  for (const m of section.matchAll(/data-state="lines:(\d+)(?:-(\d+))?"/g)) {
+    for (let i = Number(m[1]); i <= Number(m[2] || m[1]); i++) covered.push(i);
+  }
+  assert.deepEqual(covered, data.order.source.map((_, i) => i + 1));
+});

@@ -129,6 +129,58 @@ test('fan-out: the first drawing does not animate', () => {
   assert.equal(cells(host).filter((el) => el.className.split(' ').includes('mx-enter')).length, 0);
 });
 
+// ── filling the stage ───────────────────────────────────────────────────────────
+test('a figure smaller than its stage is scaled up to fill it, to a limit', () => {
+  assert.equal(ME.fitScale({ w: 350, h: 280 }, { w: 700, h: 420 }), 1.5);      // height is the limit
+  assert.equal(ME.fitScale({ w: 350, h: 100 }, { w: 525, h: 420 }), 1.5);      // width is the limit
+  assert.equal(ME.fitScale({ w: 100, h: 50 }, { w: 700, h: 500 }), 2.2);       // never past 2.2x
+});
+
+test('a figure larger than its stage is scaled down to fit, to a limit', () => {
+  assert.equal(ME.fitScale({ w: 680, h: 300 }, { w: 340, h: 400 }), 0.5);
+  assert.equal(ME.fitScale({ w: 680, h: 3000 }, { w: 680, h: 300 }), 0.4);     // never below 0.4x
+});
+
+test('a stage that has no size yet leaves the figure alone', () => {
+  assert.equal(ME.fitScale({ w: 680, h: 300 }, { w: 0, h: 0 }), 1);
+  assert.equal(ME.fitScale({ w: 680, h: 300 }, { w: NaN, h: undefined }), 1);
+});
+
+test('the natural size of a figure is its widest slot by the sum of its slots', () => {
+  const size = ME.naturalSize([
+    { id: 'a', svg: '<svg xmlns="x" width="680" height="300"></svg>' },
+    { id: 'b', caption: 'Stock', svg: '<svg xmlns="x" width="500" height="28"></svg>' },
+  ]);
+  assert.equal(size.w, 680);
+  assert.ok(size.h > 328 && size.h < 370);     // both heights, a caption line and a gap
+});
+
+test('fan-out: a stage of 520 px or more gets the full drawing, scaled; a narrower one the compact drawing', () => {
+  const full = ME.fanOutView('functions', data, 560)[0].svg;
+  assert.match(full, /^<svg[^>]* width="680"/);
+  assert.equal((full.match(/class="mx-line"/g) || []).length, data.order.modules.length);
+  const compact = ME.fanOutView('functions', data, 400)[0].svg;
+  assert.match(compact, /^<svg[^>]* width="400"/);
+  assert.equal((compact.match(/class="mx-line"/g) || []).length, 0);
+});
+
+test('fan-out: the layout is chosen for the shape of the stage', () => {
+  const widthOf = (w, h) => Number(ME.fanOutView('functions', data, w, h)[0].svg.match(/^<svg[^>]* width="([\d.]+)"/)[1]);
+  assert.equal(widthOf(900, 320), 680);            // wide and low: five modules in a row
+  assert.ok(widthOf(531, 536) < 500);              // nearly square: three to a row, drawn narrower
+  assert.equal(widthOf(400, 330), 400);            // a phone: the compact drawing
+});
+
+test('fan-out: one scale serves all its cards, so nothing changes size between them', () => {
+  for (const [w, h] of [[900, 320], [531, 536], [343, 330]]) {
+    const frame = ME.fanOutFrame(data, w, h);
+    for (const state of ['source', 'project', 'modules', 'functions', 'typecheck', 'grants', 'main', 'hosts']) {
+      const size = ME.naturalSize(ME.fanOutView(state, data, w, h));
+      assert.ok(size.w <= frame.w + 0.01 && size.h <= frame.h + 0.01, `${state} at ${w}x${h} is bigger than the frame`);
+    }
+  }
+});
+
 // ── simulations ─────────────────────────────────────────────────────────────────
 const CLUSTER = ['steady', 'full', 'stock-crash', 'silent', 'ledger-stop', 'return', 'no-offer'];
 const books = (s) => s.hosts.map((h, i) => (h.books ? i : -1)).filter((i) => i >= 0);

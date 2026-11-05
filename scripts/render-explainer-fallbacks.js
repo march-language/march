@@ -40,6 +40,8 @@ const STYLE = [
   `.mx-accent-text{fill:${PALETTE.accent}}`, `.mx-host{fill:none;stroke:${PALETTE.ink};stroke-width:1}`,
   `.mx-seg{fill:none;stroke:${PALETTE.dim};stroke-width:1}`, `.mx-done{fill:${PALETTE.border}}`,
   `.mx-next{stroke:${PALETTE.accent};stroke-width:2}`,
+  `.mx-codeline{fill:${PALETTE.ink};font-family:ui-monospace,Menlo,monospace;white-space:pre}`,
+  `.mx-off{fill:${PALETTE.dim}}`, `.mx-hl{fill:${PALETTE.ink}}`, `.mx-hlbar{fill:${PALETTE.accent}}`,
 ].join('');
 
 const r = (n) => Math.round(n * 10) / 10;
@@ -105,7 +107,7 @@ function svgContext(width, height) {
 }
 
 // The card each poster shows: one that carries the figure's point on its own.
-const POSTER = { 'state-map': 'all', 'fan-out': 'functions', mailbox: 'sessions', cluster: 'ledger-stop' };
+const POSTER = { declaration: 'all', 'state-map': 'all', 'fan-out': 'functions', mailbox: 'sessions', cluster: 'ledger-stop' };
 
 function posterState(figure, data) { return ME.buildState(figure, POSTER[figure], data); }
 
@@ -123,6 +125,7 @@ function canvasPoster(figure, data, height, label) {
 function renderAll(data) {
   const F = ME.figures, sm = data.state_map;
   return {
+    declaration: panel(F.declaration(data.order, { width: WIDTH, from: 0, to: 0 }), 14),
     'state-map': panel(F.stateMap(sm, { width: WIDTH, lit: sm.path.length }), 14),
     'fan-out': panel(F.fanOut(data.order, { width: WIDTH, stage: POSTER['fan-out'] }), 14),
     mailbox: canvasPoster('mailbox', data, 300, 'One actor: its mailbox, its state and the sessions parked in it'),

@@ -52,8 +52,9 @@
   }
   .mx-on .mx-stage canvas { flex: 1 1 auto; min-height: 0; width: 100%; }
   .mx-svg { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-  .mx-slot { width: 100%; display: flex; flex-direction: column; align-items: center; }
-  .mx-slot .mx-caption { align-self: flex-start; margin: 6px 0 2px; }
+  .mx-slot { display: flex; flex-direction: column; align-items: flex-start; }
+  .mx-slot .mx-caption { margin: 6px 0 2px; }
+  .mx-stage svg { max-width: none; }   /* figures are scaled by chapters.js, not squeezed */
   /* A figure whose height changes from card to card is pinned to the top of its stage,
      so what stays on screen does not move when something is added below it. */
   .mx-on .mx-stage.mx-top { justify-content: flex-start; }
@@ -139,6 +140,9 @@
   .mx-failed  { stroke: var(--mx-accent); stroke-width: 2; }
   .mx-accent-text { fill: var(--mx-accent); }
   .mx-host    { fill: none; stroke: var(--mx-ink); stroke-width: 1; }
+  .mx-codeline { fill: var(--mx-ink); font-family: "JetBrains Mono", monospace; white-space: pre; }
+  .mx-codeline.mx-off { fill: var(--mx-dim); }
+  .mx-hlbar   { fill: var(--mx-accent); }
   .mx-seg     { fill: none; stroke: var(--mx-dim); stroke-width: 1; }
   .mx-seg.mx-done { fill: var(--border); }
   .mx-seg.mx-next { stroke: var(--mx-accent); stroke-width: 2; }

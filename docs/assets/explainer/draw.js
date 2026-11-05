@@ -46,13 +46,13 @@
     var W = size.width, H = size.height, narrow = W < 560;
     ctx.clearRect(0, 0, W, H);
     var n = s.hosts.length, gap = narrow ? 6 : 10;
-    var leftW = narrow ? 54 : 96, hostX = narrow ? leftW + 46 : Math.max(leftW + 120, W * 0.42);
+    var leftW = narrow ? 54 : 96, hostX = narrow ? leftW + 46 : Math.max(leftW + 90, W * 0.3);
     var hostW = W - hostX - 2, hostH = (H - 2 - gap * (n - 1)) / n;
     // Sixteen slots to a row. The pitch is the largest that fits the box both ways: a
     // host holding the Ledger needs its Stock rows and its Ledger rows under its name.
     var perRow = 16, header = narrow ? 19 : 26;
     var rows = Math.ceil(s.cfg.stockCapacity / perRow) + Math.ceil(s.cfg.ledgerCapacity / perRow) + 0.4;
-    var pitch = Math.max(4, Math.min(20, Math.floor(Math.min((hostW - 16) / perRow, (hostH - header - 6) / rows))));
+    var pitch = Math.max(4, Math.min(30, Math.floor(Math.min((hostW - 16) / perRow, (hostH - header - 6) / rows))));
     var ledgerPerRow = perRow, stockPerRow = perRow;
 
     // the caller

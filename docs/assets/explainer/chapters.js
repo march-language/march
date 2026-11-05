@@ -54,6 +54,25 @@
     return d;
   };
 
+  // How big a figure is before any scaling: its widest slot, by all its slots stacked
+  // (a caption is a line of text, and slots are 4px apart).
+  ME.naturalSize = function (specs) {
+    var w = 0, h = 0;
+    specs.forEach(function (spec, i) {
+      var m = /^<svg[^>]* width="([\d.]+)" height="([\d.]+)"/.exec(spec.svg) || [0, 0, 0];
+      w = Math.max(w, Number(m[1]));
+      h += Number(m[2]) + (spec.caption ? 26 : 0) + (i ? 4 : 0);
+    });
+    return { w: w, h: h };
+  };
+
+  // The scale that makes a figure of `natural` size fill a stage of `room`, between
+  // 0.4x and 2.2x. A stage with no size yet (not laid out) leaves the figure alone.
+  ME.fitScale = function (natural, room) {
+    if (!(room.w > 40) || !(room.h > 40) || !(natural.w > 0) || !(natural.h > 0)) return 1;
+    return Math.max(0.4, Math.min(2.2, room.w / natural.w, room.h / natural.h));
+  };
+
   function later(fn, ms) {
     var t = root.setTimeout(fn, ms);
     if (t && typeof t.unref === 'function') t.unref();
@@ -67,7 +86,7 @@
     box.className = 'mx-svg';
     host.appendChild(box);
     if (opts && opts.top) host.classList.add('mx-top');
-    var slots = {}, drawnAt = null;
+    var slots = {}, drawnAt = null, natural = { w: 0, h: 0 };
 
     function makeSlot(spec, animate) {
       var wrap = doc.createElement('div');
@@ -112,11 +131,12 @@
 
     var api = {
       draw: function () {
-        var width = Math.max(280, host.clientWidth || 680);
-        var resized = drawnAt !== null && drawnAt !== width;
-        if (resized) { box.innerHTML = ''; slots = {}; }            // a new width is a new drawing
+        var width = Math.max(280, host.clientWidth || 680), height = host.clientHeight || 0;
+        var stageSize = width + 'x' + height;
+        var resized = drawnAt !== null && drawnAt !== stageSize;
+        if (resized) { box.innerHTML = ''; slots = {}; }            // a new stage is a new drawing
         var animate = drawnAt !== null && !resized && !ME.reducedMotion();
-        var specs = view(width), keep = {};
+        var specs = view(width, Math.max(0, height - 24)), keep = {};
         specs.forEach(function (spec) { keep[spec.id] = true; });
         Object.keys(slots).forEach(function (id) { if (!keep[id]) { slots[id].wrap.remove(); delete slots[id]; } });
         specs.forEach(function (spec) {
@@ -126,21 +146,20 @@
           if (slots[spec.id].cap && spec.caption) slots[spec.id].cap.textContent = spec.caption;
           apply(slots[spec.id], spec.svg, animate && !fresh);
         });
-        drawnAt = width;
+        drawnAt = stageSize;
+        natural = opts && opts.frame ? opts.frame(width, Math.max(0, height - 24)) : ME.naturalSize(specs);
         fit();
       },
     };
 
-    // A short stage (a phone on its side, a small window) may be lower than the drawing.
-    // Scale the drawing down to fit rather than let it run over the cards below.
+    // A figure is drawn at its own design size and then scaled, up or down, to fill
+    // the stage it is in: bigger on a desk, smaller on a phone held sideways, and never
+    // running over the cards below.
     function fit() {
       if (!box.style || typeof host.clientHeight !== 'number') return;
-      box.style.transform = '';
-      var room = host.clientHeight - 22, tall = box.scrollHeight;
-      if (room > 40 && tall > room) {
-        box.style.transformOrigin = 'top center';
-        box.style.transform = 'scale(' + Math.max(0.4, room / tall).toFixed(3) + ')';
-      }
+      var k = ME.fitScale(natural, { w: host.clientWidth, h: host.clientHeight - 24 });
+      box.style.transformOrigin = opts && opts.top ? 'top center' : 'center';
+      box.style.transform = k === 1 ? '' : 'scale(' + k.toFixed(3) + ')';
     }
     if (typeof root.ResizeObserver === 'function') new root.ResizeObserver(function () { if (drawnAt !== null) api.draw(); }).observe(host);
     return api;
@@ -160,6 +179,29 @@
     });
   };
 
+  // ── the opening: the declaration, read a few lines at a time ───────────────────
+  // A card's state is `lines:A-B` (or `lines:A`), the lines of the protocol it is
+  // about, or `all`.
+  ME.registerFigure('declaration', function (host, data) {
+    var total = data.order.source.length, from = 0, to = 0, current = null;
+    var fig = svgFigure(host, function (w) {
+      return [{ id: 'code', svg: F.declaration(data.order, { width: w, from: from, to: to }) }];
+    });
+    return {
+      setState: function (state) {
+        if (state === current) return;
+        var m = /^lines:(\d+)(?:-(\d+))?$/.exec(state);
+        if (state !== 'all' && !m) throw new Error('unknown state ' + state);
+        var a = m ? Number(m[1]) : 0, b = m ? Number(m[2] || m[1]) : 0;
+        if (m && (a < 1 || b > total || a > b)) {
+          throw new Error('lines ' + a + '-' + b + ' are not in a protocol of ' + total + ' lines');
+        }
+        from = a; to = b; current = state;
+        fig.draw();
+      },
+    };
+  });
+
   // ── chapter 1: the state map ───────────────────────────────────────────────────
   // empty: every cell, none lit. path: the reachable cells light in the order the
   // protocol reaches them. all: every reachable cell lit. skip / offer / turn: all lit,
@@ -169,8 +211,8 @@
   ME.registerFigure('state-map', function (host, data) {
     var sm = data.state_map, total = sm.path.length;
     var lit = 0, wrong = null, current = null, timer = null;
-    var fig = svgFigure(host, function (w) {
-      return [{ id: 'map', svg: F.stateMap(sm, { width: w, lit: lit, wrong: wrong }) }];
+    var fig = svgFigure(host, function (w, h) {
+      return [{ id: 'map', svg: F.stateMap(sm, { width: w, height: h, lit: lit, wrong: wrong }) }];
     });
 
     function stop() { if (timer !== null) { root.clearInterval(timer); timer = null; } }
@@ -212,9 +254,26 @@
   // The declaration stays on screen from `source` to `main`, and each card adds to it.
   // A phone's stage has no room for the declaration and the strips together, so there
   // the strips stand alone.
-  ME.fanOutView = function (state, data, width) {
-    var order = data.order, w = Math.min(width, 760), wide = w >= 600;
-    function code(stage) { return { id: 'code', svg: F.fanOut(order, { width: w, stage: stage }) }; }
+  // How to draw the fan-out for a stage of this shape. Under 520 px wide: the compact
+  // drawing, at the stage's own width. Otherwise the full drawing at a design size the
+  // page then scales: five modules in a row (680 wide), or three to a row (416 wide)
+  // when that can be scaled up further, as it can in a stage that is nearly square.
+  function fanOutLayout(data, width, height) {
+    if (width < 520) return { width: width, perRow: 0, wide: false };
+    var best = { width: 680, perRow: data.order.modules.length, wide: true };
+    if (!height) return best;
+    var bestK = -1;
+    [{ width: 680, perRow: data.order.modules.length }, { width: 416, perRow: 3 }].forEach(function (c) {
+      var m = /width="([\d.]+)" height="([\d.]+)"/.exec(F.fanOut(data.order, { width: c.width, perRow: c.perRow, stage: 'functions' }));
+      var k = Math.min(width / Number(m[1]), height / (Number(m[2]) + 60));    // room for a strip beneath
+      if (k > bestK + 1e-9) { bestK = k; best = { width: c.width, perRow: c.perRow, wide: true }; }
+    });
+    return best;
+  }
+
+  ME.fanOutView = function (state, data, width, height) {
+    var order = data.order, lay = fanOutLayout(data, width, height), wide = lay.wide, w = lay.width;
+    function code(stage) { return { id: 'code', svg: F.fanOut(order, { width: w, perRow: lay.perRow || undefined, stage: stage }) }; }
     function strip(role, at, caption) {
       return { id: 'strip-' + role, caption: caption || role, svg: F.strip({ labels: order.strips[role] }, { width: w, at: at }) };
     }
@@ -231,9 +290,22 @@
     }
   };
 
+  // The size the fan-out is scaled by: the largest any of its cards needs, so that the
+  // drawing is one size from the first card to the last.
+  var FAN_STATES = ['source', 'project', 'modules', 'functions', 'typecheck', 'grants', 'main', 'hosts'];
+  ME.fanOutFrame = function (data, width, height) {
+    var frame = { w: 0, h: 0 };
+    FAN_STATES.forEach(function (state) {
+      var size = ME.naturalSize(ME.fanOutView(state, data, width, height));
+      frame.w = Math.max(frame.w, size.w); frame.h = Math.max(frame.h, size.h);
+    });
+    return frame;
+  };
+
   ME.registerFigure('fan-out', function (host, data) {
     var current = null;
-    var fig = svgFigure(host, function (w) { return ME.fanOutView(current, data, w); }, { top: true });
+    var fig = svgFigure(host, function (w, h) { return ME.fanOutView(current, data, w, h); },
+      { top: true, frame: function (w, h) { return ME.fanOutFrame(data, w, h); } });
     return {
       setState: function (state) {
         if (state === current) return;
@@ -324,7 +396,18 @@
       if (!sim) return;
       measure();
       if (size.width < 10 || size.height < 10) return;
-      parts.draw(ctx, sim, size, colors());
+      // A drawing with a design size is drawn at that size and scaled to fill the canvas,
+      // centred, so it is as big as the stage allows.
+      var design = parts.design ? parts.design(size) : null;
+      if (design) {
+        var k = Math.min(2.2, size.width / design.width, size.height / design.height);
+        ctx.clearRect(0, 0, size.width, size.height);
+        ctx.save();
+        ctx.translate((size.width - design.width * k) / 2, (size.height - design.height * k) / 2);
+        ctx.scale(k, k);
+        parts.draw(ctx, sim, design, colors());
+        ctx.restore();
+      } else parts.draw(ctx, sim, size, colors());
       counters.innerHTML = parts.counters(sim).map(function (c) {
         return '<span' + (c[2] ? ' class="mx-hot"' : '') + '>' + c[0] + ' <b>' + c[1] + '</b></span>';
       }).join('');
@@ -422,6 +505,13 @@
     return canvasFigure(host, {
       figure: 'mailbox', data: data, settle: 2,
       draw: ME.draw.mailbox,
+      // drawn small and scaled up: one queue and one actor do not need many pixels
+      // The drawing is 230 high by design and takes whatever width that leaves it: the
+      // actor is scaled to the height of the stage and the mailbox gets the rest.
+      design: function (size) {
+        var k = Math.min(2.2, size.height / 230);
+        return { width: Math.max(343, size.width / k), height: 230 };
+      },
       counters: function (s) {
         return [['Handled', s.total], ['Waiting', s.queue.length], ['Dropped', s.dropped, s.dropped > 0]];
       },

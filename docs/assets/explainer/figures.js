@@ -31,6 +31,27 @@
   }
   function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
 
+  // ── the declaration itself, with some of its lines picked out ──────────────────
+  // One <text> per source line, indented as written. Lines `from`..`to` (1-based) are
+  // picked out and the rest dimmed; `from: 0` picks out none. Picking out lines moves
+  // nothing, so going from card to card only changes colours. The type shrinks to keep
+  // the longest line inside `width`.
+  function declaration(order, opts) {
+    var src = order.source, longest = 0;
+    src.forEach(function (l) { longest = Math.max(longest, l.length); });
+    var fs = Math.max(9, Math.min(15, Math.floor((opts.width - 26) / (longest * 0.6))));
+    var cw = fs * 0.6, lh = Math.round(fs * 1.62), pad = 13, out = [];
+    var any = opts.from >= 1;
+    if (any) out.push(rect('mx-hlbar', 0, (opts.from - 1) * lh + 3, 3, (opts.to - opts.from + 1) * lh));
+    src.forEach(function (l, i) {
+      var indent = l.length - l.replace(/^ +/, '').length;
+      var on = any && i + 1 >= opts.from && i + 1 <= opts.to;
+      out.push('<text class="mx-codeline' + (on ? ' mx-hl' : any ? ' mx-off' : '') + '" x="' + r(pad + indent * cw) +
+        '" y="' + r((i + 1) * lh - 3) + '" font-size="' + fs + '">' + esc(l.replace(/^ +/, '')) + '</text>');
+    });
+    return open(pad * 2 + longest * cw, src.length * lh + 6, 'The Order protocol, line by line') + out.join('') + '</svg>';
+  }
+
   // ── the fan-out: source lines -> generated modules -> state types -> functions ──
   var STAGES = ['source', 'modules', 'states', 'functions'];
 
@@ -42,7 +63,7 @@
     // The declaration, one bar per line at its real length and indent. Under 600 px the
     // whole figure is compact (thinner bars, one row of squares per module, no counts),
     // so it fits a phone's pinned stage.
-    var wide = W >= 600, barH = wide ? 4 : 3, barPitch = wide ? 7 : 5;
+    var wide = W >= 600 || !!opts.perRow, barH = wide ? 4 : 3, barPitch = wide ? 7 : 5;
     var longest = 0;
     src.forEach(function (l) { longest = Math.max(longest, l.length); });
     var cw = Math.min(4, (W - 2 * M) * 0.5 / longest);
@@ -55,31 +76,34 @@
     var y = 24 + src.length * barPitch + 6;
 
     if (stage >= 1 && wide) {
-      var mods = order.modules, gap = 12;
-      var colW = (W - 2 * M - (mods.length - 1) * gap) / mods.length;
-      var perRow = Math.max(1, Math.floor(colW / 10));
-      var top = y + 26, bottom = top;
-      // Every part of a column has a fixed place, whatever the stage, so a later stage
-      // only ever adds to what is already drawn: name, two caption lines, the state
-      // squares, then the function squares.
+      // Modules sit `perRow` to a row: all in one row for a wide stage, three to a row
+      // for one that is nearly square. Every part of a module has a fixed place whatever
+      // the stage, so a later stage only ever adds to what is already drawn: name, two
+      // caption lines, the state squares, then the function squares.
+      var mods = order.modules, gap = 12, per = opts.perRow || mods.length;
+      var colW = (W - 2 * M - (per - 1) * gap) / per;
+      var perRowSq = Math.max(1, Math.floor(colW / 10)), most = 0;
+      mods.forEach(function (m) { most = Math.max(most, Math.ceil(m.functions / perRowSq)); });
+      var blockH = 70 + most * 10 + 12, top = y + 26, bottom = top;
+      if (per === mods.length) {
+        mods.forEach(function (m, k) { out.push(line('mx-line', W / 2, y, M + k * (colW + gap) + colW / 2, y + 20)); });
+      } else out.push(line('mx-line', W / 2, y, W / 2, y + 14));
       mods.forEach(function (m, k) {
-        var x = M + k * (colW + gap), yy = top;
-        out.push(line('mx-line', W / 2, y, x + colW / 2, y + 20));
+        var x = M + (k % per) * (colW + gap), yy = top + Math.floor(k / per) * blockH;
         out.push(text('mx-label mx-mono', x, yy + 12, m.name));
         if (stage >= 2 && m.linear_states) out.push(text('mx-label', x, yy + 28, plural(m.linear_states, 'state type')));
         if (stage >= 3) out.push(text('mx-label', x, yy + 43, plural(m.functions, 'function')));
-        yy += 52;
         if (stage >= 2) {
-          for (var s = 0; s < m.linear_states; s++) out.push(rect('mx-state', x + s * 15, yy, 12, 12));
+          for (var s = 0; s < m.linear_states; s++) out.push(rect('mx-state', x + s * 15, yy + 52, 12, 12));
         }
-        yy += 18;
         if (stage >= 3) {
           for (var f = 0; f < m.functions; f++) {
-            out.push(rect('mx-fn', x + (f % perRow) * 10, yy + Math.floor(f / perRow) * 10, 8, 8));
+            out.push(rect('mx-fn', x + (f % perRowSq) * 10, yy + 70 + Math.floor(f / perRowSq) * 10, 8, 8));
           }
-          yy += Math.ceil(m.functions / perRow) * 10;
         }
-        bottom = Math.max(bottom, stage >= 3 ? yy : stage >= 2 ? top + 70 : top + 20);
+        var rowTop = top + Math.floor(k / per) * blockH;
+        bottom = Math.max(bottom, stage >= 3 ? rowTop + 70 + Math.ceil(m.functions / perRowSq) * 10
+          : stage >= 2 ? rowTop + 66 : rowTop + 18);
       });
       y = bottom + 6;
     } else if (stage >= 1) {
@@ -104,41 +128,46 @@
   }
 
   // ── the state map: one cell per combination of the roles' positions ────────────
+  // Drawn at one design size (the page scales a figure to fill its stage), exactly as
+  // wide as its cells. The blocks are arranged in whichever number of rows lets the
+  // figure be scaled up most in a stage of `opts.width` by `opts.height`.
   function stateMap(sm, opts) {
-    var W = opts.width, roles = sm.roles || Object.keys(sm.axes);
+    var roles = sm.roles || Object.keys(sm.axes);
     var dims = roles.map(function (role) { return sm.axes[role]; });
     var three = dims.length >= 3;
     var blocks = three ? dims[0] : 1, cols = three ? dims[1] : dims[0], rows = three ? dims[2] : dims[1];
-    var M = 8, blockGap = 14, labelH = three ? 18 : 0;
+    var M = 8, P = 36, cell = P - 3, blockGap = 16, labelH = three ? 18 : 0, blockH = rows * P + labelH + 10;
+    var room = { w: opts.width, h: opts.height || opts.width * 0.75 };
 
-    function pitchFor(perRow) {
-      return Math.min(36, (W - 2 * M - (perRow - 1) * blockGap) / (perRow * cols));
+    function size(perRow) {
+      return { w: 2 * M + perRow * cols * P - 3 + (perRow - 1) * blockGap, h: Math.ceil(blocks / perRow) * blockH + 18 };
     }
-    var perRow = blocks, pitch = pitchFor(perRow);
-    // Two rows of blocks when one row would leave the cells small.
-    if (pitch < 26 && blocks > 2) { perRow = Math.ceil(blocks / 2); pitch = pitchFor(perRow); }
-    var cell = pitch - 3;
+    var perRow = blocks, best = -1;
+    [blocks, Math.ceil(blocks / 2), 1].forEach(function (n) {
+      var sz = size(n), k = Math.min(room.w / sz.w, room.h / sz.h);
+      if (k > best + 1e-9) { best = k; perRow = n; }
+    });
 
     var litKeys = {};
     (sm.path || sm.reachable).slice(0, opts.lit).forEach(function (c) { litKeys[c.join(',')] = true; });
     var wrongKey = opts.wrong ? opts.wrong.join(',') : null;
 
-    var out = [], blockH = rows * pitch + labelH + 10;
+    var out = [];
     for (var b = 0; b < blocks; b++) {
-      var bx = M + (b % perRow) * (cols * pitch + blockGap), by = Math.floor(b / perRow) * blockH;
+      var bx = M + (b % perRow) * (cols * P + blockGap), by = Math.floor(b / perRow) * blockH;
       if (three) out.push(text('mx-label', bx, by + 12, roles[0] + ' at step ' + b));
       for (var c = 0; c < cols; c++) {
         for (var rw = 0; rw < rows; rw++) {
           var key = (three ? [b, c, rw] : [c, rw]).join(',');
           var cls = key === wrongKey ? 'mx-cell mx-wrong' : litKeys[key] ? 'mx-cell mx-lit' : 'mx-cell';
-          out.push(rect(cls, bx + c * pitch, by + labelH + rw * pitch, cell, cell));
+          out.push(rect(cls, bx + c * P, by + labelH + rw * P, cell, cell));
         }
       }
     }
-    var h = Math.ceil(blocks / perRow) * blockH;
+    var sz = size(perRow);
     var colRole = three ? roles[1] : roles[0], rowRole = three ? roles[2] : roles[1];
-    out.push(text('mx-label', M, h + 10, 'Across: ' + colRole + "'s step. Down: " + rowRole + "'s step."));
-    return open(W, h + 18, 'Every combination of the roles\' positions; the filled cells can happen') + out.join('') + '</svg>';
+    out.push(text('mx-label', M, sz.h - 8, 'Across: ' + colRole + "'s step. Down: " + rowRole + "'s step."));
+    return open(Math.max(sz.w, 290), sz.h, 'Every combination of the roles\' positions; the filled cells can happen') + out.join('') + '</svg>';
   }
 
   // ── one role's remaining steps: the linear type, drawn ─────────────────────────
@@ -146,7 +175,7 @@
     // A 12px monospace character is 7.2px wide. Each label is centred in its segment
     // with 13px to spare on either side, and `textLength` holds it to that width even
     // if the reader's monospace font is wider than the one this was measured with.
-    var W = opts.width, out = [], x = 0, y = 0, h = 28, gap = 9, CHAR = 7.2;
+    var W = opts.width, out = [], x = 0, y = 0, h = 28, gap = 9, CHAR = 7.2, right = 0;
     automaton.labels.forEach(function (label, i) {
       var w = Math.min(W, Math.ceil(label.length * 7.3) + 26);
       if (x > 0 && x + w > W) { x = 0; y += h + gap; }
@@ -155,9 +184,10 @@
       out.push('<text class="mx-label mx-mono" x="' + r(x + w / 2) + '" y="' + r(y + h / 2 + 4) +
         '" text-anchor="middle" textLength="' + r(Math.min(w - 12, label.length * CHAR)) +
         '" lengthAdjust="spacingAndGlyphs">' + esc(label) + '</text>');
+      right = Math.max(right, x + w);
       x += w + gap;
     });
-    return open(W, y + h, 'The steps this role may still take') + out.join('') + '</svg>';
+    return open(right, y + h, 'The steps this role may still take') + out.join('') + '</svg>';
   }
 
   // ── how long a failed host goes unnoticed, to scale ────────────────────────────
@@ -216,7 +246,7 @@
     return open(W, Math.ceil(names.length / perRow) * (bh + gap) - gap, 'The machines of the lab and the roles each one runs') + out.join('') + '</svg>';
   }
 
-  var api = { fanOut: fanOut, stateMap: stateMap, strip: strip, hosts: hosts,
+  var api = { declaration: declaration, fanOut: fanOut, stateMap: stateMap, strip: strip, hosts: hosts,
     detectionTimeline: detectionTimeline, functionSquares: functionSquares };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.MarchExplainer = root.MarchExplainer || {};

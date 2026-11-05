@@ -8,8 +8,10 @@ const data = JSON.parse(fs.readFileSync(path.join(__dirname, '../../docs/_data/e
 
 const count = (svg, cls) => (svg.match(new RegExp('class="' + cls + '"', 'g')) || []).length;
 
-// Every rect and line must sit inside the figure's own width and height.
-function assertInside(svg, width) {
+// Every rect must sit inside the figure's own width and height. A figure may be wider
+// than the stage it was asked to suit: the page scales it to fit (chapters.js).
+function assertInside(svg) {
+  const width = Number(svg.match(/<svg[^>]* width="([\d.]+)"/)[1]);
   const height = Number(svg.match(/<svg[^>]* height="([\d.]+)"/)[1]);
   for (const m of svg.matchAll(/<rect[^>]* x="(-?[\d.]+)" y="(-?[\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)) {
     const [x, y, w, h] = m.slice(1).map(Number);
@@ -50,6 +52,60 @@ test('state map for Order has one cell per combination and can light all reachab
   const svg = figures.stateMap(sm, { width: 680, lit: sm.reachable.length });
   assert.equal(count(svg, 'mx-cell') + count(svg, 'mx-cell mx-lit'), sm.cells);
   assert.equal(count(svg, 'mx-cell mx-lit'), sm.reachable.length);
+});
+
+// Figures are drawn at one design size and scaled by the page to fill their stage, so a
+// figure is exactly as big as its content, and lays itself out to suit the stage's shape.
+const rectsOf = (svg, cls) => [...svg.matchAll(new RegExp('<rect class="' + cls + '[^"]*" x="([\\d.]+)" y="([\\d.]+)" width="([\\d.]+)" height="([\\d.]+)"', 'g'))].map((m) => m.slice(1).map(Number));
+const svgSize = (svg) => [Number(svg.match(/<svg[^>]* width="([\d.]+)"/)[1]), Number(svg.match(/<svg[^>]* height="([\d.]+)"/)[1])];
+
+test('state map: cells are one size whatever stage it is drawn for', () => {
+  const sizes = [[320, 300], [700, 560], [1200, 400]].map(([width, height]) =>
+    rectsOf(figures.stateMap(data.state_map, { width, height, lit: 0 }), 'mx-cell')[0][2]);
+  assert.deepEqual(sizes, [sizes[0], sizes[0], sizes[0]]);
+  assert.ok(sizes[0] >= 30);
+});
+
+test('state map: the figure is as wide as its cells and no wider', () => {
+  const svg = figures.stateMap(data.state_map, { width: 700, height: 560, lit: 0 });
+  const right = Math.max(...rectsOf(svg, 'mx-cell').map(([x, , w]) => x + w));
+  assert.ok(svgSize(svg)[0] - right <= 12, 'empty margin on the right');
+});
+
+test('state map: blocks are arranged to suit the shape of the stage', () => {
+  const blockRows = (width, height) => new Set(rectsOf(figures.stateMap(data.state_map, { width, height, lit: 0 }), 'mx-cell').map(([, y]) => y)).size / data.state_map.axes.Ledger;
+  assert.equal(blockRows(700, 560), 2);        // a tall stage: two rows of two blocks
+  assert.equal(blockRows(1200, 220), 1);       // a wide, low one: four in a row
+  assert.equal(blockRows(343, 335), 2);        // a phone
+});
+
+test('fan-out: modules can be laid out three to a row, for a stage that is taller than it is wide', () => {
+  const nameRows = (svg) => new Set([...svg.matchAll(/<text class="mx-label mx-mono" x="[\d.]+" y="([\d.]+)">Order_/g)].map((m) => m[1])).size;
+  const five = figures.fanOut(data.order, { width: 680, stage: 'functions' });
+  const three = figures.fanOut(data.order, { width: 416, stage: 'functions', perRow: 3 });
+  assert.equal(nameRows(five), 1);
+  assert.equal(nameRows(three), 2);
+  assert.ok(svgSize(three)[1] > svgSize(five)[1]);
+  for (const svg of [five, three]) {
+    assert.equal(count(svg, 'mx-fn'), data.order.functions);
+    assert.equal(count(svg, 'mx-state'), data.order.linear_states);
+    assertInside(svg);
+  }
+});
+
+test('fan-out: three to a row also only ever adds between its stages', () => {
+  const keys = (stage) => new Set([...figures.fanOut(data.order, { width: 416, stage, perRow: 3 }).matchAll(/<(rect|text|line)[^>]*>/g)].map((m) => m[0].replace(/ class="[^"]*"/, '')));
+  const stages = ['source', 'modules', 'states', 'functions'];
+  for (let i = 1; i < stages.length; i++) {
+    const before = keys(stages[i - 1]), after = keys(stages[i]);
+    for (const k of before) assert.ok(after.has(k), `${stages[i]} moved or removed ${k}`);
+  }
+});
+
+test('strip: the figure is as wide as its longest row', () => {
+  const svg = figures.strip({ labels: ['recv Want', 'choose have/out', 'send Book', 'send Skip', 'end'] }, { width: 680, at: 0 });
+  const right = Math.max(...rectsOf(svg, 'mx-seg').map(([x, , w]) => x + w));
+  assert.ok(Math.abs(svgSize(svg)[0] - right) <= 1);
 });
 
 test('state map marks a wrong cell that is not reachable', () => {
@@ -106,6 +162,46 @@ test('strip marks steps done, the next step, and the rest', () => {
   assert.equal(count(svg, 'mx-seg'), 2);
 });
 
+// ── the declaration, line by line ───────────────────────────────────────────────
+const codeLines = (svg) => [...svg.matchAll(/<text class="(mx-codeline[^"]*)" x="([\d.]+)" y="([\d.]+)"[^>]*>([^<]*)</g)]
+  .map((m) => ({ cls: m[1], x: Number(m[2]), y: Number(m[3]), text: m[4].replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&') }));
+
+test('declaration: one line of text per source line, in order, indented as written', () => {
+  const lines = codeLines(figures.declaration(data.order, { width: 680, from: 0, to: 0 }));
+  assert.equal(lines.length, data.order.source.length);
+  lines.forEach((l, i) => assert.equal(l.text, data.order.source[i].trim()));
+  assert.ok(lines.every((l, i) => i === 0 || l.y > lines[i - 1].y));
+  const indent = (i) => data.order.source[i].length - data.order.source[i].trimStart().length;
+  for (let i = 1; i < lines.length; i++) {
+    if (indent(i) > indent(i - 1)) assert.ok(lines[i].x > lines[i - 1].x, `line ${i + 1} is not indented`);
+    if (indent(i) === indent(i - 1)) assert.equal(lines[i].x, lines[i - 1].x);
+  }
+  assert.ok(lines.every((l) => l.cls === 'mx-codeline'));      // nothing picked out
+});
+
+test('declaration: picking out lines 8 to 10 marks those three and dims the rest', () => {
+  const svg = figures.declaration(data.order, { width: 680, from: 8, to: 10 });
+  const lines = codeLines(svg);
+  assert.deepEqual(lines.filter((l) => l.cls === 'mx-codeline mx-hl').map((l) => l.text),
+    data.order.source.slice(7, 10).map((l) => l.trim()));
+  assert.equal(lines.filter((l) => l.cls === 'mx-codeline mx-off').length, data.order.source.length - 3);
+  assert.equal(count(svg, 'mx-hlbar'), 1);
+});
+
+test('declaration: picking out lines moves none of them', () => {
+  const plain = codeLines(figures.declaration(data.order, { width: 680, from: 0, to: 0 }));
+  const marked = codeLines(figures.declaration(data.order, { width: 680, from: 5, to: 5 }));
+  assert.deepEqual(marked.map((l) => [l.x, l.y]), plain.map((l) => [l.x, l.y]));
+});
+
+test('declaration: the type shrinks to fit a phone', () => {
+  const size = (w) => Number(figures.declaration(data.order, { width: w, from: 0, to: 0 }).match(/font-size="([\d.]+)"/)[1]);
+  assert.ok(size(320) < size(680));
+  assert.ok(size(320) >= 9);
+  const longest = Math.max(...data.order.source.map((l) => l.length));
+  assert.ok(longest * size(320) * 0.6 <= 320, 'the longest line is wider than the figure');
+});
+
 test('strip: every label sits centred in its segment with room on both sides', () => {
   const labels = ['recv Want', 'choose have/out', 'send Book', 'send Skip', 'end'];
   const svg = figures.strip({ labels }, { width: 680, at: 1 });
@@ -147,12 +243,12 @@ test('hosts says which machines may hold the ledger', () => {
 });
 
 test('a 320 px figure keeps every element inside its width', () => {
-  assertInside(figures.fanOut(data.order, { width: 320, stage: 'functions' }), 320);
-  assertInside(figures.stateMap(data.state_map, { width: 320, lit: 5 }), 320);
-  assertInside(figures.functionSquares({ total_functions: 700, changed_functions: ['a'] }, { width: 320, showChanged: true }), 320);
-  assertInside(figures.strip({ labels: ['send Want', 'recv Have', 'recv Booked', 'end'] }, { width: 320, at: 0 }), 320);
-  assertInside(figures.detectionTimeline(swim, { width: 320, mode: 'silent' }), 320);
-  assertInside(figures.hosts(data.topology, { width: 320 }), 320);
+  assertInside(figures.fanOut(data.order, { width: 320, stage: 'functions' }));
+  assertInside(figures.stateMap(data.state_map, { width: 320, lit: 5 }));
+  assertInside(figures.functionSquares({ total_functions: 700, changed_functions: ['a'] }, { width: 320, showChanged: true }));
+  assertInside(figures.strip({ labels: ['send Want', 'recv Have', 'recv Booked', 'end'] }, { width: 320, at: 0 }));
+  assertInside(figures.detectionTimeline(swim, { width: 320, mode: 'silent' }));
+  assertInside(figures.hosts(data.topology, { width: 320 }));
 });
 
 test('no figure carries a colour of its own', () => {

@@ -42,10 +42,70 @@ everything that says how they talk to each other:
 {% endfor %}</code></pre>
 
 It is {{ x.order.source | size }} lines, and it is the only place the conversation is
-written down. The compiler reads it and produces a typed program for each of the three
-roles. A role that speaks out of turn, skips a step or stops halfway does not compile.
-The programs it accepts run as a cluster that loses machines and carries on, and that
-takes new code while orders are still flowing.
+written down. It is dense, so here it is again a few lines at a time.
+
+<section class="mx-scrolly" data-figure="declaration">
+<div class="mx-figure"><div class="mx-stage"><img class="mx-fallback" src="{{ site.baseurl }}/assets/explainer/fallback/declaration.svg" alt="The 16 lines of the Order protocol, as shown in the code block above."></div></div>
+<div class="mx-steps">
+
+<div class="mx-step" data-state="lines:1-2">
+<p><code>protocol Order</code> names a conversation and describes it from above, once,
+for everyone in it.</p>
+<p><code>@[endpoints]</code> asks the compiler to generate the code each participant
+runs.</p>
+</div>
+
+<div class="mx-step" data-state="lines:3-4">
+<p>There are three roles: Shop, Stock and Ledger. A role exists because a step mentions
+it.</p>
+<p>These two lines say what a role's code may do besides talk. Stock may use shared
+mutable state, and Ledger may print. Shop is granted nothing.</p>
+</div>
+
+<div class="mx-step" data-state="lines:5">
+<p>The conversation repeats. One session carries order after order until a branch says
+<code>stop</code>.</p>
+<p>The top of the loop is also where a running session can be ended cleanly when new
+code is deployed.</p>
+</div>
+
+<div class="mx-step" data-state="lines:6">
+<p>A step: Shop sends Stock an <code>Int</code>, the item it wants.</p>
+<p>The label <code>want</code> names the message on the wire and the functions generated
+for it, <code>send_Want</code> and <code>recv_Want</code>.</p>
+</div>
+
+<div class="mx-step" data-state="lines:7">
+<p>A decision, and whose it is. Only Stock may choose. The other two have to be ready
+for either answer.</p>
+</div>
+
+<div class="mx-step" data-state="lines:8-10">
+<p>If Stock has the item, it tells Shop so and tells Ledger to book it, and Ledger
+confirms to Shop. Then the loop goes round.</p>
+<p>A branch must open with a message from the chooser. That message is how the others
+learn which way the choice went.</p>
+</div>
+
+<div class="mx-step" data-state="lines:11-13">
+<p>If Stock is out, it tells Shop, tells Ledger there is nothing to book, and
+<code>stop</code> ends the conversation for all three.</p>
+<p>Ledger is told either way, so it never waits for a booking that is not coming.</p>
+</div>
+
+<div class="mx-step" data-state="lines:14-16">
+<p>That is the whole agreement. There are no sockets in it, no retries, no message
+formats and no state machines, and nothing about which machine runs which role.</p>
+<p>Those come from the compiler, the runtime and a separate topology file.</p>
+</div>
+
+</div>
+</section>
+
+The compiler reads those lines and produces a typed program for each of the three roles.
+A role that speaks out of turn, skips a step or stops halfway does not compile. The
+programs it accepts run as a cluster that loses machines and carries on, and that takes
+new code while orders are still flowing.
 
 This page follows those {{ x.order.source | size }} lines the whole way: what they rule
 out, what the compiler makes of them, where the state lives, what happens when a machine
