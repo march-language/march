@@ -86,6 +86,141 @@ def order_facts(core_ast, protocol_record):
     }
 
 
+# ── the state map ──────────────────────────────────────────────────────────────
+#
+# Chapter 1 draws one cell for every combination of the roles' positions and lights the
+# cells the protocol can actually reach. A role's positions are the states of its local
+# view (its projection); reachability is asynchronous, as the runtime is: a role may have
+# sent before its peer has received. A message in flight does not get a cell of its own.
+
+def project(steps, role):
+    """One role's local view of the protocol, as an automaton:
+    {"start": 0, "edges": {state: [(("send"|"recv", peer, tag), next_state)]}, "final": {states}}.
+    States are numbered in first-visit order from the start."""
+    parent = {}
+
+    def find(x):
+        while parent.get(x, x) != x:
+            x = parent[x]
+        return x
+
+    counter = [0]
+    raw = []   # (from_state, action, to_state), before states are merged
+
+    def fresh():
+        counter[0] += 1
+        return counter[0]
+
+    def walk(seq, cur, exits):
+        """Walk `seq` from state `cur`; return the state after it, or None when control
+        never falls out of the end (a `stop`, or a loop nothing leaves)."""
+        for s in seq:
+            if cur is None:
+                return None
+            if s == "stop":
+                exits.append(cur)
+                return None
+            if "msg" in s:
+                m = s["msg"]
+                if m["from"] == role or m["to"] == role:
+                    action = ("send", m["to"], m["tag"]) if m["from"] == role else ("recv", m["from"], m["tag"])
+                    nxt = fresh()
+                    raw.append((cur, action, nxt))
+                    cur = nxt
+            elif "choose" in s:
+                ends = [walk(b["steps"], cur, exits) for b in s["choose"]["branches"]]
+                live = [e for e in ends if e is not None]
+                for e in live[1:]:
+                    parent[find(e)] = find(live[0])
+                cur = live[0] if live else None
+            elif "loop" in s:
+                loop_exits = []
+                end = walk(s["loop"], cur, loop_exits)
+                if end is not None:
+                    parent[find(end)] = find(cur)      # the body's end is the loop's entry
+                for e in loop_exits[1:]:
+                    parent[find(e)] = find(loop_exits[0])
+                cur = loop_exits[0] if loop_exits else None
+        return cur
+
+    top_exits = []
+    last = walk(steps, 0, top_exits)
+    finals = {find(x) for x in ([last] if last is not None else []) + top_exits}
+
+    merged = {}
+    for a, action, b in raw:
+        edge = (action, find(b))
+        if edge not in merged.setdefault(find(a), []):
+            merged[find(a)].append(edge)
+
+    number, order = {find(0): 0}, [find(0)]
+    for s in order:                                   # first-visit order
+        for _, t in merged.get(s, []):
+            if t not in number:
+                number[t] = len(number)
+                order.append(t)
+    return {"start": 0,
+            "edges": {number[s]: [(a, number[t]) for a, t in es] for s, es in merged.items() if s in number},
+            "final": {number[f] for f in finals if f in number}}
+
+
+def _automaton_size(a):
+    states = {a["start"]} | set(a["edges"]) | a["final"]
+    for es in a["edges"].values():
+        states |= {t for _, t in es}
+    return len(states)
+
+
+MAX_QUEUE = 8
+
+
+def explore(steps, roles):
+    """Every cell the protocol can reach, in the order a breadth-first run of the roles
+    first visits them. Exits if a queue grows past MAX_QUEUE (the protocol is not bounded)."""
+    autos = [project(steps, r) for r in roles]
+    start = (tuple(a["start"] for a in autos), ())
+    seen, frontier, cells = {start}, [start], []
+    while frontier:
+        nxt = []
+        for states, queues in frontier:
+            if list(states) not in cells:
+                cells.append(list(states))
+            q = dict(queues)
+            for i, role in enumerate(roles):
+                for (kind, peer, tag), target in autos[i]["edges"].get(states[i], []):
+                    q2 = dict(q)
+                    if kind == "send":
+                        q2[(role, peer)] = q.get((role, peer), ()) + (tag,)
+                        if len(q2[(role, peer)]) > MAX_QUEUE:
+                            sys.exit(f"gen-explainer-data: {role} -> {peer} queue passes {MAX_QUEUE}: the protocol is not bounded")
+                    else:
+                        waiting = q.get((peer, role), ())
+                        if not waiting or waiting[0] != tag:
+                            continue
+                        q2[(peer, role)] = waiting[1:]
+                    new_states = states[:i] + (target,) + states[i + 1:]
+                    config = (new_states, tuple(sorted((k, v) for k, v in q2.items() if v)))
+                    if config not in seen:
+                        seen.add(config)
+                        nxt.append(config)
+        frontier = nxt
+    return {r: _automaton_size(a) for r, a in zip(roles, autos)}, cells
+
+
+def reachable(steps, roles):
+    """(states per role, the reachable cells sorted)."""
+    axes, cells = explore(steps, roles)
+    return axes, sorted(cells)
+
+
+def state_map(steps, roles):
+    axes, path = explore(steps, roles)
+    total = 1
+    for n in axes.values():
+        total *= n
+    return {"axes": axes, "cells": total, "reachable": sorted(path), "path": path}
+
+
 # ── inputs ─────────────────────────────────────────────────────────────────────
 
 def lab_app_sha256(path):
@@ -144,6 +279,7 @@ def build(march):
         "generated": {"commit": commit, "date": datetime.date.today().isoformat(),
                       "lab_app_sha256": lab_app_sha256(LAB_APP)},
         "order": order,
+        "state_map": state_map(record["current"]["steps"], record["current"]["roles"]),
     }
 
 

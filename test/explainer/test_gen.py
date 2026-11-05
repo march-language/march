@@ -61,5 +61,52 @@ class InputGuard(unittest.TestCase):
             self.assertFalse(gen.check_inputs(data, lab))
 
 
+def msg(frm, to, tag):
+    return {"msg": {"from": frm, "to": to, "tag": tag, "payload": "Int"}}
+
+
+ECHO = [msg("A", "B", "Ping"), msg("B", "A", "Pong")]
+LINE = [msg("Buyer", "Shop", "Order"), msg("Shop", "Ledger", "Charge"),
+        msg("Ledger", "Shop", "Receipt"), msg("Shop", "Buyer", "Confirm")]
+
+
+class StateMap(unittest.TestCase):
+    def test_echo_reachable_cells(self):
+        axes, cells = gen.reachable(ECHO, ["A", "B"])
+        self.assertEqual(axes, {"A": 3, "B": 3})
+        self.assertEqual(cells, [[0, 0], [1, 0], [1, 1], [1, 2], [2, 2]])
+
+    def test_three_role_line_is_nine_of_forty_five(self):
+        axes, cells = gen.reachable(LINE, ["Buyer", "Shop", "Ledger"])
+        self.assertEqual(axes, {"Buyer": 3, "Shop": 5, "Ledger": 3})
+        self.assertEqual(len(cells), 9)
+
+    def test_order_state_map_is_consistent(self):
+        axes, cells = gen.reachable(load("Order.json")["current"]["steps"], ["Shop", "Stock", "Ledger"])
+        total = axes["Shop"] * axes["Stock"] * axes["Ledger"]
+        self.assertIn([0, 0, 0], cells)
+        self.assertLess(len(cells), total)
+        self.assertTrue(all(0 <= c[i] < n for c in cells for i, n in enumerate(axes.values())))
+
+    def test_loop_returns_to_its_first_state(self):
+        a = gen.project([{"loop": [msg("A", "B", "Tick")]}], "A")
+        self.assertEqual(a["edges"], {0: [(("send", "B", "Tick"), 0)]})   # one state, a self-loop
+        self.assertEqual(a["final"], set())
+
+    def test_stop_leaves_the_loop_for_a_final_state(self):
+        steps = [{"loop": [msg("A", "B", "Tick"), "stop"]}]
+        a = gen.project(steps, "A")
+        self.assertEqual(a["edges"], {0: [(("send", "B", "Tick"), 1)]})
+        self.assertEqual(a["final"], {1})
+
+    def test_a_role_outside_a_message_takes_no_step(self):
+        a = gen.project(ECHO, "C")
+        self.assertEqual((a["edges"], a["final"]), ({}, {0}))
+
+    def test_an_unbounded_protocol_is_refused(self):
+        with self.assertRaises(SystemExit):
+            gen.reachable([{"loop": [msg("A", "B", "Tick")]}], ["A", "B"])
+
+
 if __name__ == "__main__":
     unittest.main()
