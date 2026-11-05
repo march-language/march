@@ -860,6 +860,56 @@ let test_lemma_no_lemma_skips () =
       | Ok () -> ()
       | Error e -> Alcotest.failf "a file with no lemma is skipped: %s" e)
 
+(** [forge audit --laws] (specs/2026-11-04-law-coverage-design.md §4): law
+    coverage per package file, laws pooled across the package's files. *)
+let law_cat = "  fn cat(xs : List(a), ys : List(a)) : List(a) do\n    match xs do\n      Nil -> ys\n      Cons(h, t) -> Cons(h, cat(t, ys))\n    end\n  end\n  fn other(n : Int) : Int do n + 1 end\n"
+
+let law_cat_nil =
+  "  @[lemma]\n  fn cat_nil(xs : List(a)) : {Unit | A.cat(xs, Nil) == xs} do\n    match xs do\n      Nil -> ()\n      Cons(_, t) -> cat_nil(t)\n    end\n  end\n"
+
+let test_audit_laws_pooled () =
+  with_parity_dir (fun dir ->
+      let a = Filename.concat dir "a.march" and b = Filename.concat dir "b.march" in
+      write_file a ("mod A do\n" ^ law_cat ^ "end\n");
+      write_file b ("mod B do\n" ^ law_cat_nil ^ "end\n");
+      let lib_path_env = Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote dir) in
+      match Cmd_audit.law_report ~lib_path_env ~strength:false [ a; b ] with
+      | Error e -> Alcotest.failf "the report runs: %s" e
+      | Ok lines ->
+        let text = String.concat "\n" lines in
+        (* One block per module, each listing only its own functions. *)
+        let block header =
+          let rec skip = function
+            | [] -> []
+            | l :: rest when String.starts_with ~prefix:header l -> take rest
+            | _ :: rest -> skip rest
+          and take = function l :: rest when String.starts_with ~prefix:"  " l -> l :: take rest | _ -> [] in
+          skip lines
+        in
+        let a_block = block "law coverage: A: " and b_block = block "law coverage: B: " in
+        if not (List.exists (fun l -> String.starts_with ~prefix:"  covered  cat  " l && contains l "(cat_nil)") a_block)
+        then Alcotest.failf "a law in b.march covers cat in A's own block:\n%s" text;
+        if not (List.exists (String.starts_with ~prefix:"  uncovered (public)  other  ") a_block) then
+          Alcotest.failf "other is uncovered:\n%s" text;
+        if List.exists (fun l -> contains l "  cat  ") b_block then Alcotest.failf "B's block does not list cat:\n%s" text;
+        if List.exists (fun l -> contains l "uncovered (public)  cat  ") lines then
+          Alcotest.failf "cat is never reported uncovered:\n%s" text;
+        if contains text "B.A" then Alcotest.failf "no module is named B.A:\n%s" text)
+
+let test_audit_laws_check_failure () =
+  with_parity_dir (fun dir ->
+      let a = Filename.concat dir "a.march" in
+      write_file a "mod A do\n  fn f() : Int do undefined_name end\nend\n";
+      let lib_path_env = Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote dir) in
+      match Cmd_audit.law_report ~lib_path_env ~strength:false [ a ] with
+      | Ok _ -> Alcotest.fail "a file that does not check fails the report"
+      | Error e -> if not (contains e "the check failed in") then Alcotest.failf "names the failing file: %s" e)
+
+let test_audit_strength_needs_laws () =
+  match Cmd_audit.laws_flags ~laws:false ~strength:true with
+  | Ok () -> Alcotest.fail "--strength alone is refused"
+  | Error e -> if not (contains e "--strength only applies with --laws") then Alcotest.failf "message: %s" e
+
 (* --------------------------------------------------------------- forge run *)
 
 (** [forge run] (INTERPRETED) must pass forge.toml's [[ffi]] sources through to
@@ -980,6 +1030,9 @@ let () =
       Alcotest.test_case "lemma tests: a counterexample fails the run" `Quick test_lemma_counterexample_fails;
       Alcotest.test_case "lemma tests: a true unproved lemma passes" `Quick test_lemma_true_unproved_passes;
       Alcotest.test_case "lemma tests: a file with no lemma is skipped" `Quick test_lemma_no_lemma_skips;
+      Alcotest.test_case "audit --laws: laws pool across the package's files" `Quick test_audit_laws_pooled;
+      Alcotest.test_case "audit --laws: a file that does not check fails it" `Quick test_audit_laws_check_failure;
+      Alcotest.test_case "audit --laws: --strength needs --laws" `Quick test_audit_strength_needs_laws;
     ];
     "forge run", [
       Alcotest.test_case "interpreted run passes [ffi] sources to the compiler" `Quick

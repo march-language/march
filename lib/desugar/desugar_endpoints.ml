@@ -127,6 +127,11 @@ type astep =
 let capitalize s =
   if s = "" then s else String.capitalize_ascii s
 
+(** Where each message, and each `choose`, is written in its protocol:
+    [proto ^ "." ^ ctor], and [proto ^ ".choose." ^ labels] for a choice.
+    Filled by [annotate] for [record_states] (§F3); display only. *)
+let step_spans : (string, span) Hashtbl.t = Hashtbl.create 16
+
 (** Name every message.  A labelled step (`item: Prod -> Cons : Int`) is
     named after its label (`Item`), and a `choose` branch's head message
     after the branch label (`more` -> `More`); any other message after its
@@ -166,7 +171,10 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
   let rec go (steps : protocol_step list) : astep list =
     List.concat_map
       (function
-        | ProtoMsg (s, r, t, label) -> [ AMsg (s.txt, r.txt, t, ctor_of s.txt r.txt label) ]
+        | ProtoMsg (s, r, t, label) ->
+          let c = ctor_of s.txt r.txt label in
+          Hashtbl.replace step_spans (proto ^ "." ^ c) s.span;
+          [ AMsg (s.txt, r.txt, t, c) ]
         | ProtoLoop (inner, atomic) -> [ ALoop (atomic, go inner) ]
         | ProtoStop _ -> [ AStop ]
         (* `may crash` is a declaration, checked by the typechecker (rule 6);
@@ -185,6 +193,13 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
            | [ (AMsg _ as m) ] -> [ ACrashOr (m, go crash) ]
            | other -> other @ go crash)
         | ProtoChoice (chooser, branches) ->
+          Hashtbl.replace step_spans
+            (proto ^ ".choose." ^ String.concat "_" (List.map (fun ((l : name), _) -> l.txt) branches))
+            chooser.span;
+          List.iter (fun ((lbl : name), arm) -> match arm with
+              | (ProtoMsg (s, _, _, _) | ProtoCrashOr (ProtoMsg (s, _, _, _), _, _)) :: _ ->
+                Hashtbl.replace step_spans (proto ^ "." ^ capitalize lbl.txt) s.span
+              | _ -> ()) branches;
           [ AChoice
             (chooser.txt,
              List.map
@@ -799,6 +814,47 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) ?(hel
   DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode; try_decode ] @ role_fns @ peer_fns @ other_fns
                          @ [ role_names; fp; role_name; compat_fn; compat_by_role; role_fp ], sp)
 
+(** Record, for each generated state of [role], the step it stands for
+    ([March_ast.Protocol_states], §F3): what the role does there, the function
+    that does it, and where the protocol says so. *)
+let record_states ~proto ~role ~mname (names : (lty * string) list) =
+  let a_ty t =
+    let s = show_ty t in
+    let art = match s.[0] with 'A' | 'E' | 'I' | 'O' | 'U' -> "an" | _ -> "a" | exception _ -> "a" in
+    Printf.sprintf "%s `%s`" art s in
+  let labels brs = List.map (fun (l, _, _, _) -> l) brs in
+  let either ls = match List.rev ls with
+    | [] -> "" | [ l ] -> "`" ^ l ^ "`"
+    | last :: rest -> String.concat ", " (List.rev_map (fun l -> "`" ^ l ^ "`") rest) ^ " or `" ^ last ^ "`" in
+  let at ctor = Hashtbl.find_opt step_spans (proto ^ "." ^ ctor) in
+  List.iter (fun (node, this) ->
+      let doing, call, span = match node with
+        | LSend (to_, ctor, payload, _) ->
+          (Printf.sprintf "send %s to `%s`" (a_ty payload) to_, "send_" ^ ctor, at ctor)
+        | LRecv (from, ctor, payload, _) ->
+          (Printf.sprintf "receive %s from `%s`" (a_ty payload) from, "recv_" ^ ctor, at ctor)
+        | LChoose brs ->
+          let ls = List.map (fun (l, _, _, _, _) -> l) brs in
+          (Printf.sprintf "choose %s" (either ls), "choose_" ^ List.hd ls,
+           Hashtbl.find_opt step_spans (proto ^ ".choose." ^ String.concat "_" ls))
+        | LOffer (from, brs) ->
+          (Printf.sprintf "wait for `%s` to choose %s" from (either (labels brs)),
+           "offer_" ^ String.concat "_" (labels brs),
+           Hashtbl.find_opt step_spans (proto ^ ".choose." ^ String.concat "_" (labels brs)))
+        | LRecvCrash (from, [ (_, ctor, payload, _) ], _) ->
+          (Printf.sprintf "receive %s from `%s`, or learn that it crashed" (a_ty payload) from,
+           "recv_" ^ ctor, at ctor)
+        | LRecvCrash (from, brs, _) ->
+          (Printf.sprintf "wait for `%s` to choose %s, or learn that it crashed" from (either (labels brs)),
+           "offer_" ^ String.concat "_" (labels brs) ^ "_crash", None)
+        | LEnd -> ("close the conversation", "close", None)
+        | LRec _ | LVar _ -> ("", "", None) in
+      if doing <> "" then
+        March_ast.Protocol_states.record ~state:(mname ^ "." ^ this)
+          { ps_proto = proto; ps_role = role; ps_doing = doing;
+            ps_call = mname ^ "." ^ call; ps_span = span })
+    names
+
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
     transition, plus the unforgeable [Yield].  Also returns the name of the
     role's ENTRY state (what `register` yields), which `<P>_Run` types the
@@ -810,6 +866,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   let mname = proto ^ "_" ^ role in
   let msg = proto ^ "_Msg" in
   let names = state_names root in
+  record_states ~proto ~role ~mname names;
   let binders = binders_of root [] in
   (* D27 drain points: the state at the head of every loop that is not
      `loop atomic`.  A receive there is where an iteration BEGINS for this

@@ -1,18 +1,13 @@
 exit: 1
 -- ACTOR ------------------- errors/codec_missing_3.march
 
-`@[remote] dispatch` needs a JSON codec for `Hit`, and none is derived. [codec_missing]
-hint: add `derive Json for Hit` next to its declaration; the compiler then mints the wire type tag from it, and a receiver decodes with `from_json`.
+The `@[remote]` actor `Counter` receives `Bump` from other nodes as a `Hit`, which has no JSON codec. [codec_missing]
+A remote message crosses the network as JSON, and its type's name is its wire tag.
 
-    in code generated for this file by a `derive`, `@[endpoints]` or `@[remote]` declaration; the excerpt cannot be shown
+17 |     on Bump(h : Hit) do
+                     ^^^
+
+    Add `derive Json for Hit` next to its declaration.
     run `march --explain codec_missing`
-
-
--- ACTOR ------------------- errors/codec_missing_3.march
-
-`@[remote] dispatch` needs a JSON codec for `Hit`, and none is derived. [codec_missing]
-hint: add `derive Json for Hit` next to its declaration; the compiler then mints the wire type tag from it, and a receiver decodes with `from_json`.
-
-    in code generated for this file by a `derive`, `@[endpoints]` or `@[remote]` declaration; the excerpt cannot be shown
 
 

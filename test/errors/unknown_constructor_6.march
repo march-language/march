@@ -1,0 +1,29 @@
+-- EXPECT-ERROR: I don't know an actor called `Wroker`.
+-- A supervise block's child names an actor. A misspelt one used to be
+-- accepted by the checker and fail when the supervisor was built (compiled:
+-- "`Wroker_spawn` ... is not a function in scope"; interpreted: "unknown
+-- child actor 'Wroker'" at run time).
+mod Main do
+  needs IO.Console
+
+  actor Worker do
+    state { n : Int }
+    init { n: 0 }
+    on Tick() do { state with n: state.n + 1 } end
+  end
+
+  actor Pool do
+    state { w : Int }
+    init { w: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 30
+      Wroker w
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let _ = spawn(Pool)
+    ()
+  end
+end

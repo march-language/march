@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: I don't know an actor called `Countr`.
+-- A misspelt actor in `spawn`: said as an actor, and the suggestion is an
+-- actor (it used to read "Did you mean `Counter` (from type `Counter`)?").
+mod Main do
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do { state with n: state.n + k } end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let p = spawn(Countr)
+    send(p, Bump(1))
+    ()
+  end
+end

@@ -1,4 +1,4 @@
--- EXPECT-ERROR: `Pid` cannot be serialized
+-- EXPECT-ERROR: `Hello` cannot derive Json, because its field `from` holds a `Pid`
 -- `derive Json` refuses a type with a local `Pid` anywhere in it
 -- (2026-09-15): a pid is an index into THIS node's actor table, so a codec
 -- over it is a wrong-delivery route on any other node, not a serialization.
