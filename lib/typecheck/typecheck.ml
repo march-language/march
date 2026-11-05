@@ -2397,6 +2397,64 @@ let relocate_callback_mismatch env ~mark (e : Ast.expr) sp inferred expected =
   | _ -> ()
 
 (* -----------------------------------------------------------------
+   Operands of a binary operator (§X1, slice 3).
+   ----------------------------------------------------------------- *)
+
+let binary_operators =
+  [ "++"; "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/.";
+    "<"; "<="; ">"; ">="; "=="; "!="; "&&"; "||" ]
+
+(** The type a literal has on its face, if it is one. *)
+let literal_ty (e : Ast.expr) =
+  match e with
+  | Ast.ELit (Ast.LitInt _, _) -> Some t_int
+  | Ast.ELit (Ast.LitFloat _, _) -> Some t_float
+  | Ast.ELit (Ast.LitString _, _) -> Some t_string
+  | Ast.ELit (Ast.LitBool _, _) -> Some t_bool
+  | _ -> None
+
+(** The reason an operand of [op] (type [f_ty], operands [args]) is checked
+    against its parameter type: a side of an operator, not "argument #1 of a
+    function call".  The expected type's origin is the other operand when that
+    one is known to have it: always, for an operator whose sides share a type
+    variable (`x + "one"`: the left side decided it); for one with a fixed
+    type (`x ++ "no"`), when the other side is a literal of that type or was
+    already inferred as it. *)
+let operand_reason env op f_ty args =
+  let left, right = match args with [ l; r ] -> (l, r) | _ -> assert false in
+  let side idx = if idx = 0 then "left" else "right" in
+  (* Read now, before the left operand binds a shared variable. *)
+  let generic = match repr f_ty with
+    | TArrow (p, _) -> (match repr p with TVar _ -> true | _ -> false)
+    | _ -> false in
+  fun idx ->
+    let other = if idx = 0 then right else left in
+    let osp = span_of_expr other in
+    match repr f_ty with
+    | TArrow (p, _) ->
+      (match repr p with
+       | _ when generic ->
+         let text = Printf.sprintf
+             "This is the %s side of `%s`, and both sides of `%s` must have the same type."
+             (side idx) op op in
+         if idx = 1 then Some (RBecause (RFnArg (osp, idx), text)) else Some (RBuiltin text)
+       | pt ->
+         let text =
+           if op = "++" then
+             Printf.sprintf "This is the %s side of `++`, which joins two `String`s." (side idx)
+           else Printf.sprintf "This is the %s side of `%s`, which takes two `%s`s."
+               (side idx) op (pp_ty pt) in
+         let other_ty = match literal_ty other with
+           | Some t -> Some t
+           | None when idx = 1 -> Hashtbl.find_opt env.type_map osp
+           | None -> None in
+         (match other_ty with
+          | Some t when not (types_apart env 0 t pt) && (match repr t with TVar _ | TError -> false | _ -> true) ->
+            Some (RBecause (RFnArg (osp, idx), text))
+          | _ -> Some (RBuiltin text)))
+    | _ -> None
+
+(* -----------------------------------------------------------------
    `if` / `match do` branches against a known type (§X1, slice 3).
    ----------------------------------------------------------------- *)
 
@@ -3779,13 +3837,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
                        Some (RBecause (RFnArg (at, 2),
                                    Printf.sprintf "This is the step's payload: protocol `%s` says `%s` must %s here."
                                      i.ps_proto i.ps_role i.ps_doing)))
-              | _ when name.txt = "++" && List.length args = 2 ->
-                (* An operand of `++` is a side of an operator, not
-                   "argument #1 of a function call" (§X1). *)
-                Some (fun idx ->
-                    Some (RBuiltin (Printf.sprintf
-                            "This is the %s side of `++`, which joins two `String`s."
-                            (if idx = 0 then "left" else "right"))))
+              | _ when List.mem name.txt binary_operators && List.length args = 2 ->
+                Some (operand_reason env name.txt f_ty args)
               | _ -> None)
            | _ -> None in
          let res = infer_app ?payload env sp f_ty args 0 in

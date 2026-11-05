@@ -241,8 +241,11 @@ git log is authoritative for exact commits.
   end` in a function returning `Int` now underlines `"positive"` ("In the `if` branch.") instead
   of the whole `if`, followed by a second error blaming `-1` for not matching it. An `else if`
   chain reads as one `if`, and a `match do` arm that disagrees with the first arm is underlined
-  itself, with the two types the right way round. An operand of `++` says "This is the left side
-  of `++`, which joins two `String`s." instead of "argument #1 of a function call".
+  itself, with the two types the right way round. An operand of a binary operator is named as
+  one ("This is the left side of `++`, which joins two `String`s.", "This is the right side of
+  `+`, and both sides of `+` must have the same type.") instead of "argument #1 of a function
+  call", with the other operand as the origin, and is reported before a mismatch on the whole
+  expression that starts at the same place.
 
 - Diagnostics: a type mismatch deep inside two types now reports the whole pair, with a note
   that prints the provided type and puts a caret under each part that differs, instead of
