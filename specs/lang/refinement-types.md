@@ -1572,7 +1572,10 @@ end
 
 **Calling a lemma.** A call on its own line, or as `let _ = l(...)`, adds the
 theorem, instantiated at the call's arguments, as a fact for the rest of that
-block. The fact stays inside the branch the call is in. If the lemma's
+block, including the function's own refined `Int` result. A call elsewhere that
+always runs first (a named `let`, a nested block, an earlier argument, an `if`
+condition) gives the same fact; see [Lemmas]({{ site.baseurl }}/docs/lemmas/#a-call-gives-the-caller-a-fact).
+The fact stays inside the branch the call is in. If the lemma's
 parameters carry refinements, they are its hypotheses: each call has to prove
 them, and a call that can't gives no fact (`lemma_unproved_call`).
 

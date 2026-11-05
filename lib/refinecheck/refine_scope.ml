@@ -478,14 +478,24 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
     else
       let sym = Option.get (Reflect_state.resolve_site csp) in
       let args = Reflect_state.args_at csp args in
-      let arity = match Reflect_state.sig_of sym with Some s -> List.length s.Reflect_state.fs_params | None -> -1 in
-      if List.length args <> arity then Error e
+      let psorts = match Reflect_state.sig_of sym with Some s -> s.Reflect_state.fs_params | None -> [] in
+      if List.length args <> List.length psorts || psorts = [] then Error e
       else
+        (* A construction filling a parameter of a known datatype is that
+           datatype's constructor, though another declares the name too
+           (`Reply`, also `Channel.HandleResult`'s): no other reading of the
+           call is well-typed.  Never through a conflated short name. *)
         let rec all = function
           | [] -> Ok []
-          | a :: rest -> (match r a with Ok t -> Result.map (fun ts -> t :: ts) (all rest) | Error e -> Error e)
+          | a :: rest -> (match a with Ok t -> Result.map (fun ts -> t :: ts) (all rest) | Error e -> Error e)
+        and arg a p =
+          match a, p with
+          | A.ECon ({ A.txt = c; _ }, fargs, _), Smt.SData (adt, _)
+            when (not (Hashtbl.mem ambiguous_adts adt)) && ctor_of_adt adt c <> None ->
+            Result.map (ctor_term adt (Option.get (ctor_of_adt adt c))) (all (List.map r fargs))
+          | _ -> r a
         in
-        Result.map (fun ts -> Smt.App (sym, ts)) (all args)
+        Result.map (fun ts -> Smt.App (sym, ts)) (all (List.map2 arg args psorts))
   | _ -> Error e
 
 (* Every predicate and guard is marked once, here at the entry, so the

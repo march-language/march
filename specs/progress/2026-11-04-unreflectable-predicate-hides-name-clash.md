@@ -17,3 +17,22 @@ Fix in two steps:
    `specs/progress/2026-11-03-lemma-tooling-bugfixes.md` did for type names).
 2. Resolve the user's own declaration when the call site's module declares it (the
    typechecker's current-module rule).
+
+## Fixed (2026-11-04)
+
+The cause was resolution, not the message: both user functions were reflected.
+
+- **Functions.** The entry file's module is its top level, and the prelude's functions are
+  registered there too, so the key `unwrap` had two declarations and the theorem's call was
+  marked ambiguous. `Refine_term`'s lookup now prefers, for code in a non-stdlib file, the one
+  declaration in that file when every other declaration of the key is the stdlib's (the
+  typechecker's rule: `unwrap(Some(5))` in such a module is a type error). Stdlib code still
+  sees the ambiguity.
+- **Constructors.** A construction filling a reflected function's parameter whose datatype is
+  known (and not a conflated short name) is that datatype's constructor
+  (`Refine_scope.smt_of_r`'s reflected-call arm), so `tag(Reply(c, v))` proves with
+  `Channel.HandleResult`'s `Reply` declared.
+
+Types stay open: todo `2026-11-03-reflect-type-name-clash-with-stdlib`.
+
+Tests: `reflect-lemma` `clash_fn`, `clash_fn_red`, `clash_ctor`, `clash_ctor_red`.

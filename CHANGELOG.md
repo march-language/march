@@ -380,6 +380,22 @@ git log is authoritative for exact commits.
   block's `Wroker w` (no such actor) or `Worker wx` (no field `wx` in the supervisor's state)
   stopped the compiler with an internal error; the second is now `supervise_field_missing`, with
   a did-you-mean and a fix.
+- **A lemma call gives its fact from anywhere it always runs.** A named `let u = l(..)`, a
+  statement of a nested block, a tuple element or an earlier call's argument, or an `if`
+  condition now give the theorem to what follows, as a call on its own line does. A call in a
+  branch, a lambda, or on the right of `&&`/`||` still gives nothing outside it.
+- **A user function or constructor named like a stdlib one works in a theorem.** A lemma
+  about your own `fn unwrap` (the prelude has one) or over your own `Reply` constructor
+  (`Channel.HandleResult` has one) was `unreflectable-predicate`; the call now resolves to
+  your declaration, as the typechecker does. A user type named like a stdlib type (`Tree`)
+  still can't be used, and the warning still says to rename it.
+- **A reflected function whose `let` branches unfolds.** `let b = match l do ... end` (or an
+  `if`) inside a function a theorem calls used to leave the function without equations; its
+  body now unfolds once per case.
+- **A lemma can use a hypothesis that calls your own function.** `fn h(g : {G | okz(_)}) :
+  {Unit | okz(g)}` was `lemma_unproved`: a refined parameter whose predicate calls a reflected
+  function was never assumed. It is now, in the theorem and for the recursive calls of an
+  inductive proof, and a callee's `okz(_)` precondition reads the same as `okz(g)`.
 - **`Random.range` (and so `Gen.int`) works for any span.** A range wider than the largest Int,
   such as `Gen.int(-4611686018427387903, 4611686018427387903)`, panicked with "attempt to
   subtract with overflow" since Int arithmetic began checking for overflow. A range wider
