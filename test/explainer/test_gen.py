@@ -108,5 +108,32 @@ class StateMap(unittest.TestCase):
             gen.reachable([{"loop": [msg("A", "B", "Tick")]}], ["A", "B"])
 
 
+class Facts(unittest.TestCase):
+    def test_topology_facts(self):
+        t = gen.topology_facts(ROOT / "examples/lab_app/topology.toml", ROOT / "examples/lab_app/topology.lab.toml")
+        self.assertEqual((t["stock_capacity"], t["ledger_capacity"]), (32, 64))
+        self.assertEqual(t["stock_hosts"], ["lab-2", "lab-3", "lab-4"])
+        self.assertEqual(t["books_hosts"], ["lab-3", "lab-4"])
+        self.assertEqual(t["ingress"], "lab-1")
+
+    def test_pinned_facts_values(self):
+        p = gen.pinned_facts(ROOT)
+        self.assertEqual(p, {"heartbeat_s": 1, "silent_timeout_s": 10, "setup_s": 20,
+                             "suspect_s": 3, "settle_s": 15, "drain_soft_ms": 3000, "drain_hard_ms": 8000})
+
+    def test_pinned_fact_fails_when_its_source_text_is_gone(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp_root = Path(d)
+            for rel in {e["file"] for e in gen.PINNED} | {"examples/lab_app/topology.toml"}:
+                (tmp_root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(ROOT / rel, tmp_root / rel)
+            self.assertEqual(gen.pinned_facts(tmp_root)["suspect_s"], 3)      # the copy is intact
+            lab = tmp_root / "docs/lab.md"
+            lab.write_text(lab.read_text().replace("SWIM suspect timeout (3 s)", "SWIM suspect timeout (5 s)"))
+            with self.assertRaises(SystemExit) as cm:
+                gen.pinned_facts(tmp_root)
+            self.assertIn("suspect_s", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

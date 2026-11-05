@@ -1,6 +1,6 @@
 {
   "generated": {
-    "commit": "a01d04a04",
+    "commit": "52f257fd8",
     "date": "2026-11-05",
     "lab_app_sha256": "78ab2a20763ce435a2d7c590d921cfe491ed634fe02a63353b6933ef4651dbf2"
   },
@@ -65,6 +65,15 @@
       "Booked",
       "Out",
       "Skip"
+    ]
+  },
+  "sim": {
+    "load_per_s": 14,
+    "restart_s": 1,
+    "seed": 20261105,
+    "session_s": [
+      1.2,
+      2.8
     ]
   },
   "state_map": {
@@ -217,6 +226,29 @@
         4,
         2
       ]
+    ]
+  },
+  "timings": {
+    "drain_hard_ms": 8000,
+    "drain_soft_ms": 3000,
+    "heartbeat_s": 1,
+    "settle_s": 15,
+    "setup_s": 20,
+    "silent_timeout_s": 10,
+    "suspect_s": 3
+  },
+  "topology": {
+    "books_hosts": [
+      "lab-3",
+      "lab-4"
+    ],
+    "ingress": "lab-1",
+    "ledger_capacity": 64,
+    "stock_capacity": 32,
+    "stock_hosts": [
+      "lab-2",
+      "lab-3",
+      "lab-4"
     ]
   }
 }

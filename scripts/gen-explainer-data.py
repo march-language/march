@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -221,6 +222,71 @@ def state_map(steps, roles):
     return {"axes": axes, "cells": total, "reachable": sorted(path), "path": path}
 
 
+# ── timings, topology and the simulations' parameters ──────────────────────────
+
+def _host(entry):
+    h = entry["host"] if isinstance(entry, dict) else entry
+    return h.split("@")[-1]
+
+
+def topology_facts(toml_path, overlay_path):
+    """Who runs what in the lab: the ingress host, the hosts that offer Stock, the hosts
+    labelled `books` (one of which holds the Ledger), and the two roles' capacities."""
+    base = tomllib.loads(Path(toml_path).read_text())
+    overlay = tomllib.loads(Path(overlay_path).read_text())
+    roles = base["roles"]
+    stock_pool = next(name for name, pool in base["pool"].items()
+                      if f"{PROTOCOL}.Stock" in pool.get("serves", []))
+    work = overlay["pool"][stock_pool]["hosts"]
+    return {
+        "ingress": _host(overlay["pool"]["ingress"]["hosts"][0]),
+        "stock_hosts": [_host(h) for h in work],
+        "books_hosts": [_host(h) for h in work if isinstance(h, dict) and "books" in h.get("labels", [])],
+        "stock_capacity": roles[f"{PROTOCOL}.Stock"]["capacity"],
+        "ledger_capacity": roles[f"{PROTOCOL}.Ledger"]["capacity"],
+    }
+
+
+# Values the docs state in prose. Each entry names the file and the exact phrase that
+# states the value; if the phrase is gone, the value may have changed, and the generator
+# refuses to carry the old number onto the page.
+PINNED = [
+    {"key": "heartbeat_s", "value": 1, "file": "specs/lang/choreography.md",
+     "must_contain": "each connection is pinged every second"},
+    {"key": "silent_timeout_s", "value": 10, "file": "specs/lang/choreography.md",
+     "must_contain": "a peer that sends nothing for 10"},
+    {"key": "setup_s", "value": 20, "file": "specs/lang/choreography.md",
+     "must_contain": "(`MARCH_SESSION_CONNECT_MS`, 20 seconds)"},
+    {"key": "suspect_s", "value": 3, "file": "docs/lab.md",
+     "must_contain": "SWIM suspect timeout (3 s)"},
+    {"key": "settle_s", "value": 15, "file": "docs/lab.md",
+     "must_contain": "15 s settle period"},
+]
+
+
+def pinned_facts(root):
+    """The timings the page shows: the pinned values above, plus the drain deadlines read
+    from the lab app's topology."""
+    root = Path(root)
+    out = {}
+    for e in PINNED:
+        path = root / e["file"]
+        if not path.exists() or e["must_contain"] not in path.read_text():
+            sys.exit(f"gen-explainer-data: pinned fact {e['key']} = {e['value']}: "
+                     f"{e['file']} no longer says {e['must_contain']!r}; check the value and update PINNED")
+        out[e["key"]] = e["value"]
+    drain = tomllib.loads((root / "examples/lab_app/topology.toml").read_text())["drain"]
+    out["drain_soft_ms"] = drain["soft_ms"]
+    out["drain_hard_ms"] = drain["hard_ms"]
+    return out
+
+
+# Chosen for legibility, not measured, and stated on the page as such: the lab's own
+# traffic is one session every one to two seconds, at which the cluster view would be
+# nearly empty and no node could ever be full.
+SIM = {"seed": 20261105, "load_per_s": 14, "session_s": [1.2, 2.8], "restart_s": 1}
+
+
 # ── inputs ─────────────────────────────────────────────────────────────────────
 
 def lab_app_sha256(path):
@@ -280,6 +346,10 @@ def build(march):
                       "lab_app_sha256": lab_app_sha256(LAB_APP)},
         "order": order,
         "state_map": state_map(record["current"]["steps"], record["current"]["roles"]),
+        "timings": pinned_facts(ROOT),
+        "topology": topology_facts(ROOT / "examples/lab_app/topology.toml",
+                                   ROOT / "examples/lab_app/topology.lab.toml"),
+        "sim": SIM,
     }
 
 
