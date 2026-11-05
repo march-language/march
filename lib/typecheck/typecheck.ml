@@ -2073,6 +2073,81 @@ let relocate_literal_mismatch env ~mark ~reason (e : Ast.expr) sp (expected : ty
        | _ -> ())
   | _ -> ()
 
+(* -----------------------------------------------------------------
+   Session channels in plain terms (§F3, mechanism 3).
+   ----------------------------------------------------------------- *)
+
+let a_ty t =
+  let s = pp_ty t in
+  let art = match s.[0] with 'A' | 'E' | 'I' | 'O' | 'U' -> "an" | _ -> "a" | exception _ -> "a" in
+  Printf.sprintf "%s `%s`" art s
+
+let either_label bs =
+  match List.rev_map (fun (l, _) -> ":" ^ l) bs with
+  | [] -> "a branch"
+  | [ l ] -> "`" ^ l ^ "`"
+  | last :: rest -> String.concat ", " (List.rev_map (fun l -> "`" ^ l ^ "`") rest) ^ " or `" ^ last ^ "`"
+
+(** What a channel at [st] does next, as a verb phrase. *)
+let rec session_step_text st =
+  match st with
+  | SSend (t, _) -> "send " ^ a_ty t
+  | SRecv (t, _) -> "receive " ^ a_ty t
+  | SMSend (r, t, _) -> Printf.sprintf "send %s to `%s`" (a_ty t) r
+  | SMRecv (r, t, _) -> Printf.sprintf "receive %s from `%s`" (a_ty t) r
+  | SChoose bs -> "choose " ^ either_label bs
+  | SOffer bs | SOfferPending bs -> "wait for the other side to choose " ^ either_label bs
+  | SEnd -> "be closed with `Chan.close`"
+  | SRec _ -> session_step_text (unfold_srec st)
+  | SVar _ | SError -> "go on"
+
+(** The steps left on a channel at [st], up to a choice or four steps. *)
+let session_plan st =
+  let rec go n st acc =
+    if n = 0 then List.rev ("…" :: acc) else
+    match st with
+    | SSend (_, k) | SRecv (_, k) | SMSend (_, _, k) | SMRecv (_, _, k) ->
+      go (n - 1) k (session_step_text st :: acc)
+    | SRec _ -> go n (unfold_srec st) acc
+    | SEnd -> List.rev ("close" :: acc)
+    | _ -> List.rev (session_step_text st :: acc) in
+  String.concat ", then " (go 4 st [])
+
+(** The protocol and role a channel at [st] follows, when exactly one
+    protocol's projection has [st] as one of its states. *)
+let channel_origin env st =
+  let rec states seen t =
+    if List.exists (fun x -> x == t) seen then seen else
+    let seen = t :: seen in
+    match t with
+    | SSend (_, k) | SRecv (_, k) | SMSend (_, _, k) | SMRecv (_, _, k) -> states seen k
+    | SChoose bs | SOffer bs | SOfferPending bs -> List.fold_left (fun a (_, k) -> states a k) seen bs
+    | SRec (_, body) -> states (states seen body) (unfold_srec t)
+    | SEnd | SVar _ | SError -> seen in
+  let hits = StrMap.fold (fun pname (pi : proto_info) acc ->
+      List.fold_left (fun acc (role, proj) ->
+          if List.exists (fun x -> session_ty_exact_equal x st) (states [] proj)
+          then (pname, role, pi.pi_span) :: acc else acc) acc pi.pi_projections)
+      env.protocols [] in
+  match hits with [ h ] -> Some h | _ -> None
+
+(** A [Chan.*] call on a channel whose protocol is at another step:
+    [doing] is what the call does ("send", "close this channel"). *)
+let report_session_state env ~span ~op ~doing st =
+  let origin = channel_origin env st in
+  let labels = match origin with
+    | Some (pname, role, psp) ->
+      [ { Err.lbl_span = psp;
+          lbl_message = Printf.sprintf "the channel is `%s`'s end of protocol `%s`, declared here" role pname } ]
+    | None -> [] in
+  Err.report env.errors
+    { Err.severity = Error; span;
+      message = Printf.sprintf "`%s` can't %s here: at this point the channel must %s."
+          op doing (session_step_text st);
+      labels;
+      notes = [ "What is left on this channel: " ^ session_plan st ^ "." ];
+      code = Err.Code.session_state_mismatch; fix = None }
+
 (** The part of [t] at [path], seeing through linearity and nominal records. *)
 let rec type_at env t path =
   match path, strip_lin t with
@@ -2472,10 +2547,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
             TLin (Ast.Linear, TChan (ref cont))
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "Chan.send: channel is at `%s` but I expected `Send(T, ...)`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"Chan.send" ~doing:"send" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2501,10 +2573,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
             TTuple [payload_ty; TLin (Ast.Linear, TChan (ref cont))]
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "Chan.recv: channel is at `%s` but I expected `Recv(T, ...)`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"Chan.recv" ~doing:"receive" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2529,10 +2598,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
           | SEnd -> t_unit
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "Chan.close: channel is at `%s` but I expected `End`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"Chan.close" ~doing:"close this channel" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2575,10 +2641,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   TError))
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "Chan.choose: channel is at `%s` but I expected `Choose{...}`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"Chan.choose" ~doing:"choose a branch" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2631,10 +2694,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                TTuple [t_atom; TError])
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "Chan.offer: channel is at `%s` but I expected `Offer{...}`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"Chan.offer" ~doing:"wait for a choice" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2724,10 +2784,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                TLin (Ast.Linear, TChan (ref cont)))
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "MPST.send: channel is at `%s` but I expected `MSend(Role, T, ...)`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"MPST.send" ~doing:"send" other;
             TError)
        | TError -> TError
        | _ ->
@@ -2772,10 +2829,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                TTuple [payload_ty; TLin (Ast.Linear, TChan (ref cont))])
           | SError -> TError
           | other ->
-            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
-              (Printf.sprintf
-                 "MPST.recv: channel is at `%s` but I expected `MRecv(Role, T, ...)`."
-                 (pp_session_ty other));
+            report_session_state env ~span:sp ~op:"MPST.recv" ~doing:"receive" other;
             TError)
        | TError -> TError
        | _ ->

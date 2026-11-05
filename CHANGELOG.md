@@ -162,11 +162,18 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: a session-channel call at the wrong step of its protocol reads in plain terms:
+  "`Chan.send` can't send here: at this point the channel must receive an `Int`", with the steps
+  left on the channel and a label on the protocol it follows, instead of "channel is at
+  `Recv(Int, End)` but I expected `Send(T, ...)`". `march --explain session_state_mismatch` has a
+  page.
+
 - Diagnostics: a choreography role body that takes a step out of order is reported in protocol
   terms (`protocol_step_order`): "Role `Cons` tries to choose `more` or `done` here, but at this
   point protocol `Stream` says it must receive an `Int` from `Prod`", with a label on that
   protocol step and the generated function that takes it, instead of a mismatch between two
   generated state names (`S_choose_more_done`, `S_recv_Msg_Prod_Cons_1`).
+
 - Diagnostics: a protocol step that can never run, because it comes after a `loop`, is underlined
   itself, with a label on the loop, instead of the whole `protocol`. A receive from a role that
   `may crash` without an `or crash do ... end` branch now comes with a fix that inserts one, telling

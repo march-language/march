@@ -1,10 +1,17 @@
 exit: 1
 -- PROTOCOL ------- errors/session_state_mismatch_2.march
 
-Chan.close: channel is at `Recv(Int, End)` but I expected `End`. [session_state_mismatch]
+`Chan.close` can't close this channel here: at this point the channel must receive an `Int`. [session_state_mismatch]
 
 19 |     Chan.close(sc)
          ^^^^^^^^^^^^^^
 
+    What is left on this channel: receive an `Int`, then close.
+
+    the channel is `Server`'s end of protocol `Echo`, declared here:
+
+11 |   protocol Echo do
+       ^^^^^^^^^^^^^^^^
+    run `march --explain session_state_mismatch`
 
 

@@ -1,4 +1,4 @@
--- EXPECT-ERROR: Chan.close: channel is at
+-- EXPECT-ERROR: `Chan.close` can't close this channel here
 mod Main do
   -- Session types: a step AFTER a `choose ... end` block is part of every
   -- branch's continuation (project_steps' ProtoChoice arm, 2026-07-24 fix).
