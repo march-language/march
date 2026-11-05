@@ -277,6 +277,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled test builds no longer crash on an actor whose handlers use a capability.** In a
+  `--test` build (`forge test` compiled), an actor where one handler performs mockable IO and
+  others don't could abort after a couple of messages with "RC underflow" or a SIGBUS. depot's
+  connection `Pool` did, so every conduit test that reached Postgres crashed the run. Release
+  builds were not affected.
 - **`spawn` of something that is not an actor, and a supervise child line naming no actor or a
   missing state field, are compile errors.** `spawn(helper)` for a function, or `spawn(Job)` for
   a type's constructor, passed the checker and failed when compiled ("`helper_spawn` is not a
