@@ -56,3 +56,7 @@ caught in the lexer, at the character, because it would otherwise surface
 as an unhelpful "unexpected character".
 
 See also: [the language reference](https://github.com/march-language/march/blob/main/specs/lang/surface-syntax.md).
+
+## See it in the error tour
+
+- [Semicolons]({{ site.baseurl }}/docs/error-messages/#semicolon)

@@ -51,3 +51,8 @@ checker merely cannot decide is accepted unless the module is
 `cap verified`.
 
 See also: [the language reference](../refinement-types.md).
+
+## See it in the error tour
+
+- [An index that is out of range]({{ site.baseurl }}/docs/error-messages/#index-out-of-range)
+- [A guard that proves the opposite]({{ site.baseurl }}/docs/error-messages/#counterexample)

@@ -50,3 +50,9 @@ mechanical fix: `then_keyword` (`then` for `do`), `module_keyword`
 `semicolon_separator` (`;` between expressions).
 
 See also: [the language reference](https://github.com/march-language/march/blob/main/specs/lang/surface-syntax.md).
+
+## See it in the error tour
+
+- [An `if` without an `else`]({{ site.baseurl }}/docs/error-messages/#if-without-else)
+- [An `else if` chain one `end` short]({{ site.baseurl }}/docs/error-messages/#else-if-chain)
+- [A curried call]({{ site.baseurl }}/docs/error-messages/#curried-call)

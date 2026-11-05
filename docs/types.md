@@ -857,6 +857,21 @@ Types
 
 ---
 
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) walks through what the type checker prints for these mistakes, each with a program you can edit and re-check in the browser:
+
+- [A misspelled module name, and the "did you mean" that follows]({{ site.baseurl }}/docs/error-messages/#misspelled-module)
+- [A misspelled record field, matched against the fields the type has]({{ site.baseurl }}/docs/error-messages/#field-by-type)
+- [A misspelled constructor, matched against the variants the type has]({{ site.baseurl }}/docs/error-messages/#constructor-by-type)
+- [A `String` where an `Int` is expected]({{ site.baseurl }}/docs/error-messages/#string-plus-int)
+- [Two types that differ in one place, such as `List(Int)` and `List(String)`]({{ site.baseurl }}/docs/error-messages/#structural-diff)
+- [A call with too few arguments]({{ site.baseurl }}/docs/error-messages/#no-partial-application)
+- [A `let?` block whose last expression is not a `Result`]({{ site.baseurl }}/docs/error-messages/#let-question)
+- [Comparing values of a type that has no `Ord` implementation]({{ site.baseurl }}/docs/error-messages/#missing-impl)
+
+---
+
 ## Next Steps
 
 - [Pattern Matching](pattern-matching.md): destructuring all these types

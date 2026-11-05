@@ -1414,6 +1414,16 @@ end
 
 ---
 
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the compiler prints when a capability is missing or wrong, each with a program you can edit and re-check in the browser:
+
+- [A `main` that does I/O without being granted a capability]({{ site.baseurl }}/docs/error-messages/#main-no-grant)
+- [A module that writes a file without declaring `needs`]({{ site.baseurl }}/docs/error-messages/#missing-needs)
+- [Passing one capability where another is required]({{ site.baseurl }}/docs/error-messages/#wrong-capability)
+
+---
+
 ## See also
 
 - [Capability enforcement]({{ site.baseurl }}/docs/capability-enforcement/): turning the declared set into an OS sandbox, and hot-deploy admission control.

@@ -83,3 +83,7 @@ Typing each state separately turns that into a compile-time error at the call
 that goes out of order.
 
 See also: [writing each role](../choreography.md#step-3-write-each-role).
+
+## See it in the error tour
+
+- [A role that skips a step]({{ site.baseurl }}/docs/error-messages/#role-skips-a-step)

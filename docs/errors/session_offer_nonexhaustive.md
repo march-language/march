@@ -84,3 +84,7 @@ the peer picks that branch. Unlike an ordinary atom `match`, the set of labels
 is closed: the protocol lists them all.
 
 See also: [choice: `choose` and `offer`](../session-types.md#choice-choose-and-offer).
+
+## See it in the error tour
+
+- [An offer left unhandled]({{ site.baseurl }}/docs/error-messages/#offer-not-exhaustive)

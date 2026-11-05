@@ -75,3 +75,7 @@ lose data at run time. Typing the channel by its protocol step catches the
 mismatch at the call that goes out of order.
 
 See also: [the language reference](../choreography.md).
+
+## See it in the error tour
+
+- [A step out of order]({{ site.baseurl }}/docs/error-messages/#channel-wrong-step)
