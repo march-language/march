@@ -44,7 +44,7 @@ state the law in the signature, where a reader sees it.
 | The new lemmas and result types proved from scratch (`MARCH_LEMMA_MANIFEST=/dev/null`) | all `proved` |
 | `reflect-stdlib-list` with `reflect-stdlib-sweep` (incl. Slow: manifest fresh) | 17/17 |
 | `audit-baseline`, regenerated | +8 enforced on every fixture's `user + stdlib` slice (214 → 222). The `user code` slice moved only for `stdlib_list` (50 → 55: four lemmas and `nth_opt_append`'s index bound) and `stdlib_math` (0 → 3) |
-| CI `conformance` skip ceiling (`--check --stdlib-source --refine-report stdlib/list.march`, `user + stdlib`) | 135 proved / 42 skipped → 148 proved / 43 skipped. The one new skip row is `take_append`'s theorem (unreflectable-predicate). Checked as user code, `reverse` is ambiguous, so `take` is not reflected; `len_take` and `take_drop` already skip there for the same reason. Ceiling raised 42 → 43 in `ci.yml`, attributed in its comment |
+| CI `conformance` skip ceiling (`--check --stdlib-source --refine-report stdlib/list.march`, `user + stdlib`) | Against main at merge (with `udp.march`): 154 proved / 46 skipped → 167 proved / 47 skipped. The one new skip row is `take_append`'s theorem (unreflectable-predicate). Checked as user code, `reverse` is ambiguous, so `take` is not reflected; `len_take` and `take_drop` already skip there for the same reason. Ceiling raised 46 → 47 in `ci.yml`, attributed in its comment |
 
 ## Found on the way
 

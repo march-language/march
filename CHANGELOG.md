@@ -36,6 +36,7 @@ git log is authoritative for exact commits.
   `{Int | _ <= a && _ <= b && (_ == a || _ == b)}` (and dually `max_int`), and
   `clamp_int(x, low, high)` is within `[low, high]` when `low <= high`; the condition is in the
   result, so no existing call gains an obligation.
+
 - **A refinement on a field of an anonymous-record parameter is now checked.** In
   `fn f(r : { v : {Int | _ > 0} })` the body may assume `r.v > 0`, and each caller must
   establish it. Before, the refinement was ignored on both sides. Likewise
