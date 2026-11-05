@@ -6,5 +6,6 @@ Protocol `Logging`: `may crash D` names a role that is not in the protocol. [rol
 10 |     may crash D
                    ^
 
+    run `march --explain role_needs_invalid`
 
 

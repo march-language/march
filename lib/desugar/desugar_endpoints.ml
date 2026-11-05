@@ -849,10 +849,25 @@ let record_states ~proto ~role ~mname (names : (lty * string) list) =
            "offer_" ^ String.concat "_" (labels brs) ^ "_crash", None)
         | LEnd -> ("close the conversation", "close", None)
         | LRec _ | LVar _ -> ("", "", None) in
-      if doing <> "" then
-        March_ast.Protocol_states.record ~state:(mname ^ "." ^ this)
-          { ps_proto = proto; ps_role = role; ps_doing = doing;
-            ps_call = mname ^ "." ^ call; ps_span = span })
+      let branches = match node with
+        | LOffer (_, brs) -> List.map (fun (l, _, _, nx) -> (l, match nx with LEnd -> true | _ -> false)) brs
+        | _ -> [] in
+      let info = { March_ast.Protocol_states.ps_proto = proto; ps_role = role; ps_doing = doing;
+                   ps_call = mname ^ "." ^ call; ps_span = span; ps_branches = branches } in
+      if doing <> "" then begin
+        March_ast.Protocol_states.record ~state:(mname ^ "." ^ this) info;
+        (match node with
+         | LSend _ | LOffer _ -> March_ast.Protocol_states.record_call ~call:info.ps_call info
+         | LChoose brs ->
+           (* each `choose_<label>` sends that branch's head message *)
+           List.iter (fun (l, to_, ctor, payload, _) ->
+               March_ast.Protocol_states.record_call ~call:(mname ^ ".choose_" ^ l)
+                 { info with ps_doing = Printf.sprintf "choose `%s`, sending %s to `%s`" l (a_ty payload) to_;
+                             ps_call = mname ^ ".choose_" ^ l;
+                             ps_span = (match at ctor with Some sp -> Some sp | None -> span) })
+             brs
+         | _ -> ())
+      end)
     names
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
@@ -1169,19 +1184,24 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
      constructor in `<P>_Msg`); but a role that takes BOTH steps would get two
      functions of one name, the second silently shadowing the first.  Report
      it, the way the event API below reports one name received in two states. *)
+  (* One report per role: a clashing step also clashes in its `_or` and
+     `_or_drain` twins and in the event API, and those say nothing new. *)
+  let clash_reported = ref false in
   let () =
     let seen = Hashtbl.create 16 in
     List.iter
       (function
         | DFn (fd, _) ->
           let f = fd.fn_name.txt in
-          if Hashtbl.mem seen f then
+          if Hashtbl.mem seen f && not !clash_reported then begin
+            clash_reported := true;
             Err.error ~code:Err.Code.endpoints_name_clash errors ~span
               (Printf.sprintf
                  "Protocol `%s`, role %s: two steps %s takes are named alike, so the role module \
                   would define `%s` twice. A message name can be shared only by steps no single \
                   role takes both of. Rename one of them."
                  proto role role f)
+          end
           else Hashtbl.replace seen f ()
         | _ -> ())
       transitions
@@ -1240,13 +1260,15 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
               match List.assoc_opt ctor acc with
               | None -> acc @ [ (ctor, (payload, nx)) ]
               | Some (_, nx') ->
-                if nx <> nx' then
+                if nx <> nx' && not !clash_reported then begin
+                  clash_reported := true;
                   Err.error ~code:Err.Code.endpoints_name_clash errors ~span
                     (Printf.sprintf
                        "Protocol `%s`, role %s: message `%s` is received in two states with \
                         different continuations, so the event API cannot give it one \
                         constructor. Rename one of them."
                        proto role ctor);
+                end;
                 acc)
            acc arms)
       [] receiving

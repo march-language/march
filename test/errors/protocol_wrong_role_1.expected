@@ -1,0 +1,23 @@
+exit: 1
+-- PROTOCOL ---------- errors/protocol_wrong_role_1.march
+
+`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B` of protocol `Fan`. [protocol_wrong_role]
+
+14 |     let st1 = Fan_A.send_Number(s, st, 7)
+                                        ^^
+
+    At this point `B` must send an `Int` to `C`: take that step with `Fan_B.send_Second`.
+    If this body is meant to play `A`, give it a `Fan_A` state instead.
+
+    `B` is here: it must send an `Int` to `C`:
+
+10 |     second: B -> C : Int
+                 ^
+
+    `st` is `B`'s state, bound here:
+
+13 |   pfn role_b(s : Cap(Session.Live), st : Fan_B.Entry) : Fan_B.Yield do
+                                         ^^
+    run `march --explain protocol_wrong_role`
+
+

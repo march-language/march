@@ -3404,6 +3404,58 @@ let rec infer_expr env (e : Ast.expr) : ty =
            if n <= 0 then t
            else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
          peel arity f_ty
+       | Some (name, arity, n_args, _), _, _
+         when n_args >= 2 && n_args < arity
+              && (match March_ast.Protocol_states.find_call name.txt with
+                  | Some i -> List.length i.ps_branches = arity - 2
+                  | None -> false) ->
+         (* An offer with a branch callback left out (§F3): name the branches
+            the protocol's choice has and the ones this call is missing. *)
+         let i = Option.get (March_ast.Protocol_states.find_call name.txt) in
+         List.iter (fun a -> ignore (infer_expr env a)) args;
+         let given = n_args - 2 in
+         let missing = List.filteri (fun k _ -> k >= given) i.ps_branches in
+         let ticks ls = match List.rev_map (fun (l, _) -> "`" ^ l ^ "`") ls with
+           | [] -> "" | [ l ] -> l
+           | last :: rest -> String.concat ", " (List.rev rest) ^ " and " ^ last in
+         let close_call = match String.rindex_opt i.ps_call '.' with
+           | Some k -> String.sub i.ps_call 0 k ^ ".close" | None -> "close" in
+         (* A missing branch after which the conversation ends has a body that
+            always fits: close it.  Any other needs the user's own code. *)
+         let fix = match args with
+           | Ast.EVar s :: _ :: _ when List.for_all snd missing ->
+             let last = span_of_expr (List.nth args (n_args - 1)) in
+             let text = String.concat "" (List.map (fun _ ->
+                 Printf.sprintf ", fn (_v, st) -> %s(%s, st)" close_call s.txt) missing) in
+             Some (Err.FReplace { span = { last with start_line = last.end_line;
+                                                     start_col = last.end_col };
+                                  text })
+           | _ -> None in
+         Err.report env.errors
+           { Err.severity = Err.Error; span = sp;
+             message = Printf.sprintf
+                 "`%s` takes one callback for each branch `%s` can choose in protocol `%s` (%s), \
+                  but this call leaves out %s."
+                 name.txt (match String.index_opt i.ps_doing '`' with
+                     | Some a -> (match String.index_from_opt i.ps_doing (a + 1) '`' with
+                         | Some b -> String.sub i.ps_doing (a + 1) (b - a - 1)
+                         | None -> "the other side")
+                     | None -> "the other side")
+                 i.ps_proto (ticks i.ps_branches) (ticks missing);
+             labels = (match i.ps_span with
+                 | Some csp -> [ { Err.lbl_span = csp;
+                                   Err.lbl_message = "the choice is declared here" } ]
+                 | None -> []);
+             notes = (if fix <> None then
+                        [ Printf.sprintf "After %s the conversation ends, so the fix closes it; \
+                                          put any other work for that branch before the `close`."
+                            (ticks missing) ]
+                      else
+                        [ Printf.sprintf "Add a callback `fn (value, next_state) -> ...` for %s, \
+                                          in the order the protocol lists the branches."
+                            (ticks missing) ]);
+             code = Err.Code.session_offer_nonexhaustive; fix };
+         TError
        | Some (name, arity, n_args, def_span), _, _ ->
          List.iter (fun a -> ignore (infer_expr env a)) args;
          Err.report env.errors
@@ -3440,7 +3492,19 @@ let rec infer_expr env (e : Ast.expr) : ty =
          TError
        | None, None, _ ->
          check_callback_arities env f args;
-         let res = infer_app env sp f_ty args 0 in
+         (* A generated protocol step's payload (§F3): a mismatch there names
+            the step and points at it, not at the call. *)
+         let payload = match f with
+           | Ast.EVar name ->
+             (match March_ast.Protocol_states.find_call name.txt with
+              | Some i when i.ps_branches = [] ->
+                let at = Option.value i.ps_span ~default:sp in
+                Some (2, RBecause (RFnArg (at, 2),
+                                   Printf.sprintf "This is the step's payload: protocol `%s` says `%s` must %s here."
+                                     i.ps_proto i.ps_role i.ps_doing))
+              | _ -> None)
+           | _ -> None in
+         let res = infer_app ?payload env sp f_ty args 0 in
          (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
             result — recorded in check_fn), taint the call's result so the unify
             hook fires when it is later bound to a proof cap.  This closes the
@@ -4395,7 +4459,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     relocate_callback_mismatch env ~mark e sp inferred expected
 
 (** Thread function application through argument list, tracking arg index. *)
-and infer_app env span f_ty args idx =
+and infer_app ?payload env span f_ty args idx =
   match args, repr f_ty with
   | [], t ->
     (* A call written with empty parens — `f()`, i.e. zero surface arguments
@@ -4429,7 +4493,9 @@ and infer_app env span f_ty args idx =
         | _ -> () in
       walk param_ty; !acc in
     check_expr env arg param_ty
-      ~reason:(Some (RFnArg (span, idx)));
+      ~reason:(Some (match payload with
+          | Some (i, r) when i = idx -> r
+          | _ -> RFnArg (span, idx)));
     (* Poison (§X3): when an argument fails its type check and the call's
        result shares a type variable with that parameter, the variable is
        now bound to whatever the failed check left it, so the result is
@@ -4464,7 +4530,7 @@ and infer_app env span f_ty args idx =
        same fn is unaffected. *)
     if ty_has_tagged_cap_producer env param_ty then
       tag_cap_producer_result env ret_ty span;
-    let result = infer_app env span ret_ty rest (idx + 1) in
+    let result = infer_app ?payload env span ret_ty rest (idx + 1) in
     if failed then TError else result
   | arg :: rest, TVar _ ->
     (* f_ty not yet known — constrain it *)

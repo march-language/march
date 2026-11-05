@@ -6,5 +6,6 @@ Protocol `P`: the branch label `go` already names this message (`Go`), so the st
 12 |       go -> item: A -> B : Int
                  ^^^^
 
+    run `march --explain endpoints_label_invalid`
 
 

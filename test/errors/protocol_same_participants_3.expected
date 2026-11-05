@@ -6,6 +6,7 @@ Protocol `E` involves the same participants as `D2`. If these are dual protocols
 30 |   protocol E do
        ^^^^^^^^^^^^^
 
+    run `march --explain protocol_same_participants`
 
 
 -- PROTOCOL --- errors/protocol_same_participants_3.march
@@ -16,5 +17,6 @@ Match on the label first — `match lbl do :ok -> ... :err -> ... end` — and u
 42 |     let (v, cx) = f(cc2)
                          ^^^
 
+    run `march --explain session_offer_unrefined`
 
 

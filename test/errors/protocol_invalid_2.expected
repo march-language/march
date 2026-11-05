@@ -6,5 +6,6 @@ Protocol `Bad`: `stop` outside of a `loop` has no effect — the protocol alread
 15 |     stop
          ^^^^
 
+    run `march --explain protocol_invalid`
 
 
