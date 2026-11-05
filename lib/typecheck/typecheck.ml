@@ -2645,14 +2645,20 @@ let explain_concat_result env ~mark (e : Ast.expr) sp =
   match e with
   | Ast.EApp (Ast.EVar { txt = "++"; _ }, [ _; _ ], _) ->
     let note = "`++` joins two `String`s, so its result is a `String`." in
-    let added = errors_since env ~mark in
-    env.errors.Err.diagnostics <-
-      List.map (fun (d : Err.diagnostic) ->
-          if List.memq d added && d.Err.span = sp
-             && Err.slug_of_code d.Err.code = Err.Code.type_mismatch
-             && not (List.mem note d.Err.notes)
-          then { d with Err.notes = d.Err.notes @ [ note ] } else d)
-        env.errors.Err.diagnostics
+    let target (d : Err.diagnostic) =
+      d.Err.span = sp && Err.slug_of_code d.Err.code = Err.Code.type_mismatch
+      && not (List.mem note d.Err.notes) in
+    (* Rebuild the list only when there is something to change: callers
+       detect "an error was added" by the list's physical identity (§X3
+       poisoning), and a needless copy reads as a new error to them. *)
+    if List.exists target (errors_since env ~mark) then begin
+      let added = errors_since env ~mark in
+      env.errors.Err.diagnostics <-
+        List.map (fun (d : Err.diagnostic) ->
+            if List.memq d added && target d
+            then { d with Err.notes = d.Err.notes @ [ note ] } else d)
+          env.errors.Err.diagnostics
+    end
   | _ -> ()
 
 (** Poison (§X3, F5): [e] failed its type check, an error was reported
