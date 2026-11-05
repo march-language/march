@@ -7,5 +7,6 @@ Match on the label first — `match lbl do :ok -> ... :err -> ... end` — and u
 44 |         let (v, cc3) = Chan.recv(cc2)
                             ^^^^^^^^^^^^^^
 
+    run `march --explain session_offer_unrefined`
 
 

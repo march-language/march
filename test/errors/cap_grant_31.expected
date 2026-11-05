@@ -7,5 +7,6 @@ A channel at `End` must be passed to `Chan.close` — dropping it leaks the endp
 27 |     let cc2 = Chan.send(cc, 42)
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+    run `march --explain session_not_closed`
 
 

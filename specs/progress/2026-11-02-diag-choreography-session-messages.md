@@ -20,3 +20,9 @@ Open: mechanisms 3, 5 and 6.
 wrong-state errors in plain terms with the steps left and the protocol they follow, and an explain
 page for `session_state_mismatch`. Open: mechanism 5 (role-body cases beyond step order) and 6
 (explain pages for the other protocol codes).
+
+2026-11-04: mechanisms 5 and 6 landed (`specs/progress/2026-11-04-diag-f3-role-body-and-explain-pages.md`):
+wrong payload, wrong role (`protocol_wrong_role`), a missing offer branch with a closing fix, and
+use after `close`, one corpus case each; `--explain` pages for 24 of the 27 protocol and session
+codes. §F3 is done. Follow-ups filed: `2026-11-04-endpoints-cancel-label-collides`,
+`2026-11-04-choose-branch-head-from-non-chooser-accepted`.

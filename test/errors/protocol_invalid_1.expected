@@ -11,5 +11,6 @@ Protocol `Q`: this step can never run in the `choose` branch that ends in a `loo
 
 25 |       more -> loop do S -> C : Int end
                            ^
+    run `march --explain protocol_invalid`
 
 

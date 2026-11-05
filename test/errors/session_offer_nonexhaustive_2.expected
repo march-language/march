@@ -1,0 +1,24 @@
+exit: 1
+-- PROTOCOL -- errors/session_offer_nonexhaustive_2.march
+
+`Stream_Prod.offer_more_done` takes one callback for each branch `Cons` can choose in protocol `Stream` (`more` and `done`), but this call leaves out `done`. [session_offer_nonexhaustive]
+
+20 |     Stream_Prod.offer_more_done(s, st1,
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    After `done` the conversation ends, so the fix closes it; put any other work for that branch before the `close`.
+
+    the choice is declared here:
+
+11 |       choose by Cons:
+                     ^^^^
+    run `march --explain session_offer_nonexhaustive`
+
+
+
+fix [session_offer_nonexhaustive]:
+@@ lines 21-21 @@
+-      fn (_b, st2) -> prod(s, st2, next + 1))
++      fn (_b, st2) -> prod(s, st2, next + 1), fn (_v, st) -> Stream_Prod.close(s, st))
+
+after fix: exit 0

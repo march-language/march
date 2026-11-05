@@ -146,6 +146,16 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
+  of the wrong type names the step and points at its line in the protocol. A body calling another
+  role's functions says "`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B`"
+  (`protocol_wrong_role`) and names the step `B` takes instead. An offer with a branch callback
+  left out lists the protocol's branches and the missing ones, and when the conversation ends
+  after that branch, offers a fix that adds a callback closing it. A step on a state already
+  closed reports only the reuse, saying the conversation was closed. Two steps one role takes
+  under the same label are reported once per role, without follow-on errors from the generated
+  code. 24 more protocol and session error codes have a `march --explain` page.
+
 - Diagnostics: a session-channel call at the wrong step of its protocol reads in plain terms:
   "`Chan.send` can't send here: at this point the channel must receive an `Int`", with the steps
   left on the channel and a label on the protocol it follows, instead of "channel is at
