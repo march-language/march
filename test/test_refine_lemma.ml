@@ -1287,3 +1287,42 @@ let let_match =
     gated "let_match_red: a false theorem about it is not proved" (fun () ->
         let out = run (let_match_src ^ "  @[lemma]\n  fn d_bad(x : Int) : {Unit | depth2(Cz(x, Ez)) == x} do () end\nend\n") in
         if not (unproved out "d_bad" || refuted out "d_bad") then Alcotest.failf "d_bad is false:\n%s" out) ]
+
+(* Reflection R4: a body dividing by a non-literal is reflected when the
+   function's own parameter refinements and branch conditions show the
+   divisor non-zero. *)
+let div_src =
+  {|mod DV do
+  fn ratio(a : Int, b : {Int | _ != 0}) : Int do a / b end
+  fn md(a : Int, b : {Int | _ > 0}) : Int do a % b end
+  fn safe_div(a : Int, b : Int) : Int do
+    if b == 0 do 0 else a / b end
+  end
+  fn bare(a : Int, b : Int) : Int do a / b end
+|}
+
+let div_nonliteral =
+  [ gated "div_param: a divisor refined non-zero reflects" (fun () ->
+        let out =
+          run
+            (div_src
+           ^ "  @[lemma]\n  fn r6(u : Int) : {Unit | ratio(6, 2) == 3 && ratio(-7, 2) == -3} do () end\n  @[lemma]\n  fn m7(u : Int) : {Unit | md(-7, 2) == -1} do () end\nend\n")
+        in
+        expect_admitted out "r6";
+        expect_admitted out "m7");
+    gated "div_guard: a divisor guarded by `b == 0` reflects" (fun () ->
+        let out =
+          run
+            (div_src
+           ^ "  @[lemma]\n  fn s0(x : Int) : {Unit | safe_div(x, 0) == 0} do () end\n  @[lemma]\n  fn s7(u : Int) : {Unit | safe_div(7, -2) == -3} do () end\nend\n")
+        in
+        expect_admitted out "s0";
+        expect_admitted out "s7");
+    gated "div_red: an unguarded divisor and a false theorem do not prove" (fun () ->
+        let out =
+          run
+            (div_src
+           ^ "  @[lemma]\n  fn b6(u : Int) : {Unit | bare(6, 2) == 3} do () end\n  @[lemma]\n  fn s_bad(u : Int) : {Unit | safe_div(7, 2) == 4} do () end\nend\n")
+        in
+        if not (unproved out "b6" || refuted out "b6") then Alcotest.failf "bare divides by an unguarded b:\n%s" out;
+        if not (unproved out "s_bad" || refuted out "s_bad") then Alcotest.failf "s_bad is false:\n%s" out) ]

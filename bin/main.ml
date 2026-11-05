@@ -970,7 +970,10 @@ let reflect_rows ~type_map ~(recheck : unit -> unit)
       division =
         (fun sp ->
           match List.filter (fun (o : O.t) -> o.O.kind = O.Division) (O.obligations_at sp) with
-          | [] -> None
+          (* No ledger entry (a module without `cap no_panic`): the encoder
+             decided it on the template; its R4 verdict replaces the row's
+             below. *)
+          | [] -> Some O.Proved
           | os ->
             if List.for_all (fun (o : O.t) -> o.O.verdict = O.Proved) os then Some O.Proved
             else Some (List.hd os).O.verdict);
@@ -978,7 +981,13 @@ let reflect_rows ~type_map ~(recheck : unit -> unit)
       vocab = (fun s -> s = "len" || List.mem s RE.set_vocabulary || RE.ctor_of_tester s <> None);
       pred_fn = (fun s -> s = "len" || RE.known_predicate_fn s) }
   in
-  RR.analyze inputs t m.March_ast.Ast.mod_decls
+  List.map
+    (fun (r : RR.row) ->
+      match r.RR.r_verdict, Hashtbl.find_opt RR.encoder_blocked r.RR.r_span with
+      | RR.Reflected _, Some txt when String.length txt > 3 && String.sub txt 0 3 = "R4:" ->
+        { r with RR.r_verdict = RR.Blocked { RR.b_rule = 4; b_text = String.sub txt 3 (String.length txt - 3); b_span = r.RR.r_span } }
+      | _ -> r)
+    (RR.analyze inputs t m.March_ast.Ast.mod_decls)
 
 let user_span ~filename ~user_files (span : March_ast.Ast.span) =
   let f = span.March_ast.Ast.file in

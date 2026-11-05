@@ -1674,6 +1674,47 @@ let is_int_ty = function Some t -> (match T.repr t with T.TCon ("Int", []) -> tr
    past it the body is declined, so one function's equations stay few. *)
 let max_let_cases = 16
 
+(* R4 for a non-literal divisor, decided on the translated template: every
+   [Div]/[Mod] in a case must have a divisor its facts show non-zero.  The
+   facts are the parameter refinements ([pre]), the case's earlier guards,
+   and on the way down the conditions short-circuiting and [Ite] put in
+   force (`b == 0 || a / b > 0`, `if b == 0 do 0 else a / b end`).  Purely
+   structural, so it needs no solver and gives the same answer every run; a
+   divisor it cannot see is non-zero declines the template (sound: the
+   symbol stays uninterpreted). *)
+let divisions_defined (pre : Smt.term list) (cases : (Smt.term list * Smt.term) list) : bool =
+  let open Smt in
+  let rec conj = function And (a, b) -> conj a @ conj b | t -> [ t ] in
+  let nonzero_fact d f =
+    match f with
+    | Ne (x, IntLit 0) | Ne (IntLit 0, x) | Not (Eq (x, IntLit 0)) | Not (Eq (IntLit 0, x)) -> x = d
+    | Eq (x, IntLit k) | Eq (IntLit k, x) -> x = d && k <> 0
+    | Gt (x, IntLit k) | Lt (IntLit k, x) | Not (Le (x, IntLit k)) | Not (Ge (IntLit k, x)) -> x = d && k >= 0
+    | Ge (x, IntLit k) | Le (IntLit k, x) | Not (Lt (x, IntLit k)) | Not (Gt (IntLit k, x)) -> x = d && k >= 1
+    | Lt (x, IntLit k) | Gt (IntLit k, x) | Not (Ge (x, IntLit k)) | Not (Le (IntLit k, x)) -> x = d && k <= 0
+    | Le (x, IntLit k) | Ge (IntLit k, x) | Not (Gt (x, IntLit k)) | Not (Lt (IntLit k, x)) -> x = d && k <= -1
+    | _ -> false
+  in
+  let nonzero facts d =
+    match d with IntLit k -> k <> 0 | _ -> List.exists (nonzero_fact d) facts
+  in
+  let rec ok facts t =
+    let with_ f = conj f @ facts in
+    match t with
+    | Div (x, d) | Mod (x, d) -> nonzero facts d && ok facts x && ok facts d
+    | And (a, b) -> ok facts a && ok (with_ a) b
+    | Or (a, b) -> ok facts a && ok (with_ (Not a)) b
+    | Implies (a, b) -> ok facts a && ok (with_ a) b
+    | Ite (c, a, b) -> ok facts c && ok (with_ c) a && ok (with_ (Not c)) b
+    | _ -> List.for_all (ok facts) (children t)
+  in
+  (* Each guard is evaluated under the ones before it, the result under all. *)
+  let rec case facts = function
+    | [], r -> ok facts r
+    | g :: gs, r -> ok facts g && case (conj g @ facts) (gs, r)
+  in
+  List.for_all (ok []) pre && List.for_all (case (List.concat_map conj pre)) cases
+
 let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.term =
   let v = tr_val c env in
   match e with
@@ -1777,6 +1818,10 @@ and builtin c env nm args =
   | "negate", [ a ] when is_int_ty (ty_of a) -> Smt.Neg (v a)
   | (("/" | "%") as op), [ a; d ] when RE.nonzero_int_literal d <> None ->
     Refine_scope.truncating_division ~op ~nonneg_dividend:false (v a) (`Lit (Option.get (RE.nonzero_int_literal d)))
+  | (("/" | "%") as op), [ a; d ] ->
+    (* A non-literal divisor: [divisions_defined] proves it non-zero from the
+       function's own facts before the template is kept (R4). *)
+    Refine_scope.truncating_division ~op ~nonneg_dividend:false (v a) (`Term (v d))
   | "&&", [ a; b ] -> Smt.And (v a, v b)
   | "||", [ a; b ] -> Smt.Or (v a, v b)
   | "not", [ a ] -> Smt.Not (v a)
@@ -2010,7 +2055,9 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   let inputs =
     { certs = (fun _ -> None);
       nonexhaustive = Hashtbl.mem ne;
-      division = (fun _ -> None);
+      (* A non-literal divisor passes here and is decided on the translated
+         template ([divisions_defined]): the ledger's verdict comes after. *)
+      division = (fun _ -> Some Obligation.Proved);
       type_map;
       vocab = (fun s -> s = "len" || List.mem s RE.set_vocabulary || RE.ctor_of_tester s <> None);
       pred_fn = (fun s -> s = "len" || RE.known_predicate_fn s) }
@@ -2317,6 +2364,12 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
               ~finally:(fun () -> RS.arm_on := saved; RS.active := saved_active)
               (fun () -> pre_of u ptys)
           in
+          if not (divisions_defined pre cases) then begin
+            let why = "divides by a value its parameter refinements and conditions do not show non-zero" in
+            Hashtbl.replace encoder_blocked u.RT.u_span ("R4:" ^ why);
+            if not (String.contains u.RT.u_name '/') then Hashtbl.replace RS.blocked_by_name u.RT.u_name (why, u.RT.u_span);
+            raise Decline
+          end;
           let fuel =
             match fuel_of_attrs u.RT.u_attrs with Some n when n >= 1 && n <= 8 -> n | _ -> default_fuel
           in
