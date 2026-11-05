@@ -2,16 +2,20 @@
 # theorem and proof reach (reflection design, phase 3).  A stdlib lemma whose line
 # still matches is admitted without re-proving it.  Regenerate with
 # scripts/gen-lemma-manifest.sh; a test fails when this file is stale.
-List.append_assoc	396dac85f7c58cc76bb755b339e3b14a
-List.append_nil	4c8842ef3ee58e8e95f6f42e308846f7
-List.len_append	b6a5c07a18444c639ee0c8a945389edf
-List.len_drop	137e6147ee47ad84cf70a03259551c7d
-List.len_reverse	2d7e69cfacb4da32b5014828aa2e414d
-List.len_reverse_onto	0f9020998439a48bad412be3a8efd936
-List.len_take	fbf5678995f12b84cd15a90de4d9ce67
-List.len_take_onto	ee69959707b020ad917215b4c9793f05
-List.reverse_append	8f04ef0b49783c2d681827fddb13ab06
-List.reverse_onto_append	ac24342c5ad6f7667f85794dd85254f4
-List.reverse_reverse	a5055f213da9a6e68f29111597adf02a
-List.take_drop	499d3032bf047a32a12103327785c0e1
-List.take_onto_drop	e888990aaa3145bdae9017d37266dedb
+List.append_assoc	9c911204834853800af70b2a5953598b
+List.append_nil	3f2493354ab3bb13710358c7e025cd00
+List.drop_append	3a3c9c4b278f88c5a958b6dd87c7ceb9
+List.len_append	df782df971050e96be235fe4bfa54311
+List.len_drop	db1220c7dc38fad08ffe16b8adf3dcfb
+List.len_reverse	2a2a712e68d25e6d77bdd93fd9f927ed
+List.len_reverse_onto	c40d7e3acf73935f6cc807208883e41b
+List.len_take	360f3809fcd0721e93dd78db0f882cb2
+List.len_take_onto	4768cfd2d2c5fe293675b22cae3200ff
+List.nth_opt_append	0c05707028c4a475d399f552e9a7313e
+List.reverse_append	4c9981d34c78936af8ad854e2c3dccc9
+List.reverse_onto_append	26c92419781aca690f7d768efc86c5e7
+List.reverse_reverse	b06f0da60023389998b5137a68ca48a1
+List.take_append	129633d00ef5c4f93cbb30c0eb2a626e
+List.take_drop	fc6db0c2879f1feee8544d5fc9762f1f
+List.take_onto_append	b257e34c6a1e9d546302a3ee2db5a0d5
+List.take_onto_drop	01ba23f08619b8e39b8b4d8b13f7322b
