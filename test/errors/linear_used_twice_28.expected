@@ -1,0 +1,17 @@
+exit: 1
+-- LINEARITY ---------- errors/linear_used_twice_28.march
+
+The affine value `h` is used more than once here. [linear_used_twice]
+Affine values may be used at most once.
+
+14 |     n + close(h)
+                   ^
+
+
+    `h` was already consumed here, in the `Some(v)` arm:
+
+11 |       Some(v) -> v + close(h)
+                                ^
+    run `march --explain linear_used_twice`
+
+

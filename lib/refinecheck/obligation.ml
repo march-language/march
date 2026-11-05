@@ -83,6 +83,10 @@ type reason =
      call, rewrite the predicate) may be one they already applied.  Naming
      the non-linearity is the only actionable part. *)
   | Unconstrained_subject of string  (* the subject appears in no assumption *)
+  (* A bare actor-message constructor whose name another actor's handler or a
+     variant shares, built where the typechecker recorded no type, so which
+     handler's contract it must meet is unknown.  Payload: the message name. *)
+  | Message_unresolved of string
   | Nonlinear_goal                   (* the goal multiplies two non-literal terms *)
   | Opaque_application of string     (* goal names an undeclared function symbol *)
   (* The goal is a top-level conjunction and the per-conjunct discharge (over
@@ -381,6 +385,7 @@ let reason_name = function
      as many buckets as there are names.  The spelling belongs in the detail. *)
   | Alias_withdrawn _ -> "alias-withdrawn"
   | Unconstrained_subject _ -> "unconstrained-subject"
+  | Message_unresolved _ -> "message-unresolved"
   | Nonlinear_goal -> "nonlinear-goal"
   | Opaque_application _ -> "opaque-application"
   | Partial_conjunct _ -> "partial-conjunct"
@@ -423,6 +428,11 @@ let reason_detail = function
       spelling
   | Unconstrained_subject name ->
     Printf.sprintf "no fact the checker derived constrains `%s`" name
+  | Message_unresolved name ->
+    Printf.sprintf
+      "`%s` is a message of more than one actor (or also a variant), and no \
+       type was recorded here to say which; qualify it as `<Actor>.%s`"
+      name name
   | Nonlinear_goal ->
     "the goal multiplies two non-constant terms, and the solver is incomplete \
      on non-linear integer arithmetic"

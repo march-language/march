@@ -639,9 +639,10 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
      real) works.  The actor's dispatch reads it back — see [dispatch_caps]
      and the projection in [elaborate].
 
-     RC: [needs_rc (TRecord _)] is false, so the record itself is never
-     inc'd/dec'd — it is retained forever on the meta, matching the meta's own
-     leak-don't-free discipline.  The +1 on each capability now comes from the
+     RC: [set_actor_caps] consumes the record's one reference; the meta keeps
+     it forever, matching its own leak-don't-free discipline, and every
+     dispatch read takes a reference of its own (see the dispatch side in
+     [elaborate]).  The +1 on each capability now comes from the
      record build (Perceus dups an owned copy of every field into it), NOT
      from the builtin's owned argument as it did for the bare pointer; that is
      what lets a mock outlive the `with_cap` scope that supplied it. *)
@@ -833,13 +834,17 @@ let elaborate ?(dispatch = false) (m : T.tir_module) : T.tir_module =
                 uncaptured actor keeps release behaviour instead of a wild
                 field load.
 
-                RC: `$caps` MUST be typed [TRecord] — [needs_rc] false — so
-                Perceus never decs the retained record at scope end (a [TCon]
-                here would be a use-after-free on the second message).  The
-                `Some` payload moves into it without a dec of the scrutinee,
-                the same shape the `cap_dict` wrappers already exercise; each
-                projection is a borrowed-field var, dup'd when it escapes into
-                a handler call and never dec'd locally. *)
+                RC: records are refcounted ([Kind.needs_rc (TRecord _)] is
+                true), so Perceus may release `$caps` — it does in every arm
+                that uses no capability.  [march_actor_caps] therefore returns
+                an OWNED reference (it increfs; the meta keeps its own), and
+                the `None` arm's fresh record is owned too.  Returning the
+                meta's reference instead freed the record on the second
+                message and underflowed on a later one
+                (test/cap_mock/cap_mock_actor_many).  The `Some` payload moves
+                into `$caps` without a dec of the scrutinee (niche `Option`:
+                the same pointer); each projection is a borrowed-field var,
+                dup'd when it escapes into a handler call. *)
              let (extra_binds, wrap) =
                match actor_of_dispatch fd.T.fn_name, dispatch_caps need fd with
                | Some actor, (_ :: _ as caps) when Hashtbl.mem spawn_caps actor ->

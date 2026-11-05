@@ -1000,6 +1000,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
            && (match r with
                | Obligation.Alias_withdrawn _ -> false
                | Obligation.Unconstrained_subject _
+               | Obligation.Message_unresolved _
                | Obligation.Opaque_application _
                | Obligation.Partial_conjunct _
                | Obligation.Parametric_source_unproved _
@@ -1034,6 +1035,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        | Obligation.Solver_undecided
        | Obligation.Sort_conflict
        | Obligation.Float_sort_gate -> unverified_hinted := true
+       | Obligation.Message_unresolved _
        | Obligation.Unconstrained_subject _
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
@@ -1050,6 +1052,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       let body =
         match r with
         | Obligation.Unconstrained_subject _
+        | Obligation.Message_unresolved _
         | Obligation.Opaque_application _
         | Obligation.Partial_conjunct _
         | Obligation.Parametric_source_unproved _
@@ -1819,12 +1822,23 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       else if (not (is_self name)) && name_is_str name then
         (match actual_of_name name with Some a -> reflect_str name a | None -> None)
       else if is_self name then
+        (* Stage 2: a refined value of datatype type is its datatype sort, as
+           the named spelling below already is, so `okz(_)` meets a reflected
+           call over the actual exactly as `okz(g)` does (todo
+           2026-11-04-lemma-hypothesis-reflected-call-not-assumed). *)
+        let sort =
+          if not !Reflect_state.arm_on then self_scalar
+          else
+            match List.nth_opt sg.param_tys rp.idx with
+            | Some (Some ty) -> (match instance_sort_of_ty ty with Smt.SData (n, _) as s when n <> "Elem" -> s | _ -> self_scalar)
+            | _ -> self_scalar
+        in
         mark_self name
           (absorb
              (reflect_cached "$self" (fun () ->
                   reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
                     ~foreign_field:arg_resolve_field ~foreign_len
-                    ~sort:self_scalar sc self_actual)))
+                    ~sort sc self_actual)))
       else
         match actual_of_name name with
         | Some a ->

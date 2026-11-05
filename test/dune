@@ -838,6 +838,48 @@
  (deps    (file test_actor_registry_runner))
  (action  (run ./test_actor_registry_runner)))
 
+; ── march_actor_caps hands out an owned reference ─────────────────────────
+; The dispatch of an actor with spawn-captured capabilities (--test builds)
+; releases the record it reads in every capability-free arm, so each read
+; must be a new reference. Returning the meta's own freed the record on the
+; second message. Fake actor, no scheduler; same link set as
+; test_actor_registry_runner above.
+(rule
+ (targets test_actor_caps_runner)
+ (deps    test_actor_caps.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c
+          ../runtime/march_remote_registry.c
+          ; Every header these .c files include must be a declared dep: dune's
+          ; CI sandbox copies ONLY declared deps into the build dir, so an
+          ; undeclared header compiles fine locally (where the source tree is
+          ; visible) and fails in CI with "file not found". Globbing the whole
+          ; runtime header set is what keeps that from recurring per-header.
+          (glob_files ../runtime/*.h))
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_actor_caps.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_actor_caps_runner))
+ (action  (run ./test_actor_caps_runner)))
+
 
 ; ── HCR capability-lattice C table unit test ──────────────────────────────
 ; Verifies runtime/march_cap_lattice.{h,c} (generated from
@@ -3816,6 +3858,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff cap_mock/cap_mock_actor.expected cap_mock_actor.out)))
+
+; ── Capability capture survives MANY messages (test-only build) ──────────
+; cap_mock_actor sends each actor one message, from a program with a `main`.
+; Without a `main`, the dispatch releases the spawn-captured record in every
+; capability-free arm; when march_actor_caps returned the meta's own reference
+; the second message freed it and a later one underflowed (depot's Pool under
+; conduit's suite). Timing-dependent end to end; test_actor_caps_runner pins
+; the reference count itself.
+(rule
+ (targets cap_mock_actor_many_bin cap_mock_actor_many.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file cap_mock/cap_mock_actor_many.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o cap_mock_actor_many_bin
+        cap_mock/cap_mock_actor_many.march)
+   (with-stdout-to cap_mock_actor_many.out (system "./cap_mock_actor_many_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff cap_mock/cap_mock_actor_many.expected cap_mock_actor_many.out)))
 
 ; ── Capability mocking reaching an actor that performs TWO capabilities ───
 ; cap_mock_actor above pins capture at spawn for an actor over one capability.
@@ -9244,6 +9309,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/nested_actor_msg_from_parent.expected interp_nested_actor_msg_from_parent.out)))
+
+; ── Actor messages qualified by their actor (`Plus.Tally`, `Plus_Msg.Tally`) ──
+(rule
+ (targets native_actor_msg_qualified native_actor_msg_qualified.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_msg_qualified.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_msg_qualified
+        native/actor_msg_qualified.march)
+   (with-stdout-to native_actor_msg_qualified.out
+        (system "./native_actor_msg_qualified")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_msg_qualified.expected native_actor_msg_qualified.out)))
+
+(rule
+ (targets interp_actor_msg_qualified.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/actor_msg_qualified.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_actor_msg_qualified.out
+   (run %{exe:../bin/main.exe} native/actor_msg_qualified.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_msg_qualified.expected interp_actor_msg_qualified.out)))
 
 ; ── Same-named actors in sibling modules and at the root stay distinct ──
 (rule

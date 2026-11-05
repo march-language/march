@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: each iteration consumes it
+mod Main do
+  -- F5: a value consumed inside a closure body, here the per-element
+  -- function `List.map` runs, is consumed again on every iteration. The
+  -- capture is its own error; the later use names where the first went.
+  always_linear type Conn = Conn(Int)
+  fn close(c : Conn) : Int do match c do Conn(n) -> n end end
+  fn main() : Int do
+    let c = Conn(1)
+    let xs = List.map([1, 2, 3], fn x -> x + close(c))
+    close(c)
+  end
+end

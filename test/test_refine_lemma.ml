@@ -939,3 +939,351 @@ let iface_laws =
         in
         if not (contains out "An interface can declare laws") then
           Alcotest.failf "expected the law-syntax error:\n%s" out) ]
+
+(* A refined parameter whose predicate calls a reflected function is the
+   lemma's hypothesis (todo 2026-11-04-lemma-hypothesis-reflected-call-not-assumed):
+   `fn h(g : {G | okz(_)}) : {Unit | okz(g)}` used to be `lemma_unproved`
+   (skip reflect-fuel), its hypothesis never assumed. *)
+let hyp_defs =
+  {|  type G = GEnd | GMsg(Int, G)
+  fn okz(g : G) : Bool do
+    match g do
+      GEnd -> true
+      GMsg(s, k) -> s == 0 && okz(k)
+    end
+  end
+  fn cnt(g : G) : Int do
+    match g do
+      GEnd -> 0
+      GMsg(s, k) -> s + cnt(k)
+    end
+  end
+|}
+
+let project_dual_src =
+  {|  type Local = LEnd | LSend(Int, Local) | LRecv(Int, Local) | LChoose(Int, Local, Int, Local) | LOffer(Int, Local, Int, Local) | LRec(Local) | LVar(Int)
+
+  fn dual(l : Local) : Local do
+    match l do
+      LEnd -> LEnd
+      LSend(t, k) -> LRecv(t, dual(k))
+      LRecv(t, k) -> LSend(t, dual(k))
+      LChoose(a, x, b, y) -> LOffer(a, dual(x), b, dual(y))
+      LOffer(a, x, b, y) -> LChoose(a, dual(x), b, dual(y))
+      LRec(k) -> LRec(dual(k))
+      LVar(i) -> LVar(i)
+    end
+  end
+
+  @[lemma]
+  fn dual_dual(l : Local) : {Unit | dual(dual(l)) == l} do
+    match l do
+      LEnd -> ()
+      LSend(_, k) -> dual_dual(k)
+      LRecv(_, k) -> dual_dual(k)
+      LChoose(_, x, _, y) ->
+        dual_dual(x)
+        dual_dual(y)
+      LOffer(_, x, _, y) ->
+        dual_dual(x)
+        dual_dual(y)
+      LRec(k) -> dual_dual(k)
+      LVar(_) -> ()
+    end
+  end
+
+  -- Global protocol, roles as Int
+  type Global = GEnd | GMsg(Int, Int, Int, Global) | GChoice(Int, Int, Global, Int, Global) | GLoop(Global) | GVar(Int)
+
+  fn project(g : Global, r : Int) : Local do
+    match g do
+      GEnd -> LEnd
+      GMsg(s, d, t, k) ->
+        if s == r do LSend(t, project(k, r))
+        else if d == r do LRecv(t, project(k, r))
+        else project(k, r) end end
+      GChoice(c, a, x, b, y) ->
+        if c == r do LChoose(a, project(x, r), b, project(y, r))
+        else LOffer(a, project(x, r), b, project(y, r)) end
+      GLoop(k) -> LRec(project(k, r))
+      GVar(i) -> LVar(i)
+    end
+  end
+
+  -- every message and choice is between a and b
+  fn binary(g : Global, a : Int, b : Int) : Bool do
+    match g do
+      GEnd -> true
+      GMsg(s, d, _, k) -> ((s == a && d == b) || (s == b && d == a)) && binary(k, a, b)
+      GChoice(c, _, x, _, y) -> (c == a || c == b) && binary(x, a, b) && binary(y, a, b)
+      GLoop(k) -> binary(k, a, b)
+      GVar(_) -> true
+    end
+  end
+
+  @[lemma]
+  fn project_dual(a : Int, b : {Int | _ != a}, g : {Global | binary(_, a, b)}) : {Unit | project(g, b) == dual(project(g, a))} do
+    match g do
+      GEnd -> ()
+      GMsg(_, _, _, k) -> project_dual(a, b, k)
+      GChoice(_, _, x, _, y) ->
+        project_dual(a, b, x)
+        project_dual(a, b, y)
+      GLoop(k) -> project_dual(a, b, k)
+      GVar(_) -> ()
+    end
+  end
+
+|}
+
+let hyp_mod body = "mod H do\n" ^ hyp_defs ^ body ^ "end\n"
+
+let hypotheses =
+  [ gated "hyp_reflected_call: a hypothesis that calls a reflected function is assumed" (fun () ->
+        let out = run (hyp_mod "  @[lemma]\n  fn h4(g : {G | okz(_)}) : {Unit | okz(g)} do () end\n") in
+        expect_admitted out "h4");
+    gated "hyp_red_control: without the hypothesis the same theorem is not proved" (fun () ->
+        let out = run (hyp_mod "  @[lemma]\n  fn h4n(g : G) : {Unit | okz(g)} do () end\n") in
+        if not (unproved out "h4n" || refuted out "h4n") then
+          Alcotest.failf "with no hypothesis okz(g) does not follow:\n%s" out);
+    gated "hyp_spellings: the binder and the parameter's own name are the same hypothesis" (fun () ->
+        let out =
+          run
+            (hyp_mod
+               "  @[lemma]\n  fn hv(g : {v : G | okz(v)}) : {Unit | okz(g)} do () end\n  @[lemma]\n  fn hg(g : {G | okz(g)}) : {Unit | okz(g)} do () end\n")
+        in
+        expect_admitted out "hv";
+        expect_admitted out "hg");
+    gated "hyp_negated: a negated call is a hypothesis too" (fun () ->
+        let out = run (hyp_mod "  @[lemma]\n  fn hn(g : {G | !okz(_)}) : {Unit | !okz(g)} do () end\n") in
+        expect_admitted out "hn");
+    gated "hyp_inductive: the hypothesis proves the recursive call's precondition and the step" (fun () ->
+        let out =
+          run
+            (hyp_mod
+               {|  @[lemma]
+  fn okz_cnt(g : {G | okz(_)}) : {Unit | cnt(g) == 0} do
+    match g do
+      GEnd -> ()
+      GMsg(_, k) -> okz_cnt(k)
+    end
+  end
+|})
+        in
+        expect_admitted out "okz_cnt");
+    gated "hyp_callee_spellings: a callee's `okz(_)`, `okz(v)` and `okz(g)` are one precondition in stage 2" (fun () ->
+        let out =
+          run
+            (hyp_mod
+               {|  fn need_u(g : {G | okz(_)}) : Int do 0 end
+  fn need_v(g : {v : G | okz(v)}) : Int do 0 end
+  fn need_g(g : {G | okz(g)}) : Int do 0 end
+  @[lemma]
+  fn lem(g : {G | okz(_)}) : {Unit | okz(g)} do
+    match g do
+      GEnd -> ()
+      GMsg(s, k) ->
+        let _ = need_u(k)
+        let _ = need_v(k)
+        let _ = need_g(k)
+        ()
+    end
+  end
+|})
+        in
+        List.iter
+          (fun callee ->
+            if
+              not
+                (List.exists
+                   (fun l ->
+                     match String.split_on_char '\t' l with
+                     | "proved" :: "user" :: _ :: "precondition" :: c :: _ -> c = callee
+                     | _ -> false)
+                   (lines out))
+            then Alcotest.failf "the precondition of %s at k is proved:\n%s" callee out)
+          [ "need_u"; "need_v"; "need_g" ]);
+    gated "hyp_project_dual: a binary protocol's projections are duals, from the hypothesis (design §2 P1)" (fun () ->
+        let out = run ("mod P do\n" ^ project_dual_src ^ "end\n") in
+        expect_admitted out "project_dual";
+        (* RED control: without `binary(_, a, b)` the law is false (a third role's message). *)
+        let weak = Str.global_replace (Str.regexp_string "g : {Global | binary(_, a, b)})") "g : Global)" project_dual_src in
+        let out2 = run ("mod P do\n" ^ weak ^ "end\n") in
+        if not (unproved out2 "project_dual" || refuted out2 "project_dual") then
+          Alcotest.failf "without the hypothesis project_dual is not proved:\n%s" out2);
+    gated "hyp_caller_obliged: a caller must still establish the hypothesis" (fun () ->
+        let out =
+          run
+            (hyp_mod
+               {|  @[lemma]
+  fn h4(g : {G | okz(_)}) : {Unit | okz(g)} do () end
+  fn use_bad() : Int do
+    h4(GMsg(1, GEnd))
+    0
+  end
+|})
+        in
+        expect_admitted out "h4";
+        if not (contains out "[refinement_violated]" || contains out "[lemma_unproved_call]") then
+          Alcotest.failf "calling h4 on a value that breaks okz is reported:\n%s" out) ]
+
+(* ── A lemma call gives its fact from any always-evaluated position ────────
+   todo 2026-11-02-lemma-facts-from-non-statement-calls
+   ([Refine_check.inner_lemma_facts]).  `cnt(l) >= 0` needs induction, so
+   only the lemma's fact proves `need(cnt(l), _)`. *)
+let pos_mod body =
+  {|mod P do
+  type L = Nil0 | C(Int, L)
+  fn cnt(l : L) : Int do
+    match l do
+      Nil0 -> 0
+      C(_, k) -> 1 + cnt(k)
+    end
+  end
+  fn need(k : {Int | _ >= 0}, n : Int) : Int do k end
+  @[lemma]
+  fn cnt_nn(l : L) : {Unit | cnt(l) >= 0} do
+    match l do
+      Nil0 -> ()
+      C(_, k) -> cnt_nn(k)
+    end
+  end
+|}
+  ^ body ^ "end\n"
+
+(* The verdicts of the `need` preconditions in [out]. *)
+let need_rows out =
+  List.filter_map
+    (fun l ->
+      if contains l "\tprecondition\tneed\t" || contains l "\tprecondition\tneed" then
+        match String.split_on_char '\t' l with s :: _ -> Some s | [] -> None
+      else None)
+    (lines out)
+
+let lemma_positions =
+  [ gated "pos_proved: a named `let`, a nested block, a tuple element and an `if` condition" (fun () ->
+        let out =
+          run
+            (pos_mod
+               {|  fn named_let(l : L) : Int do
+    let u = cnt_nn(l)
+    need(cnt(l), 0)
+  end
+  fn in_block(l : L) : Int do
+    let x = do
+      cnt_nn(l)
+      1
+    end
+    need(cnt(l), x)
+  end
+  fn in_arg(l : L) : Int do
+    let p = (cnt_nn(l), 3)
+    need(cnt(l), 0)
+  end
+  fn in_cond(l : L) : Int do
+    if do cnt_nn(l) true end do need(cnt(l), 0) else 0 end
+  end
+|})
+        in
+        let rows = need_rows out in
+        if List.length rows <> 4 || List.exists (( <> ) "proved") rows then
+          Alcotest.failf "want 4 proved `need` rows:\n%s" out);
+    gated "pos_red: no fact from a branch, a lambda, a rebound name, `&&`'s right side, or no lemma" (fun () ->
+        let out =
+          run
+            (pos_mod
+               {|  fn base(l : L) : Int do
+    need(cnt(l), 0)
+  end
+  fn in_branch(l : L, b : Bool) : Int do
+    let y = if b do cnt_nn(l) else () end
+    need(cnt(l), 0)
+  end
+  fn in_lambda(l : L) : Int do
+    let f = fn x -> cnt_nn(l)
+    need(cnt(l), 0)
+  end
+  fn rebound(l : L) : Int do
+    let l2 = l
+    let z = do
+      let l = Nil0
+      cnt_nn(l)
+      1
+    end
+    need(cnt(l2), z)
+  end
+  fn short(l : L, b : Bool) : Int do
+    let q = b && do cnt_nn(l) true end
+    need(cnt(l), 0)
+  end
+|})
+        in
+        let rows = need_rows out in
+        if List.length rows <> 5 || List.mem "proved" rows then
+          Alcotest.failf "want 5 unproved `need` rows:\n%s" out) ]
+
+(* ── A user name the stdlib also declares ─────────────────────────────────
+   todo 2026-11-04-unreflectable-predicate-hides-name-clash: a user `fn
+   unwrap` beside the prelude's resolves to the file's own (the typechecker's
+   rule, [Refine_term]'s own-file preference); a user `Reply` beside
+   `Channel.HandleResult`'s resolves by the reflected parameter's datatype. *)
+let clash_mod body = "mod CL do\n" ^ body ^ "end\n"
+
+let clash_unwrap = "  fn unwrap(x : Int) : Int do x + 1 end\n"
+
+let clash_msg =
+  "  type Msg = Reply(Int, Int) | Other\n  fn tag(m : Msg) : Int do\n    match m do\n      Reply(_, _) -> 1\n      Other -> 0\n    end\n  end\n"
+
+let name_clashes =
+  [ gated "clash_fn: a user `unwrap` is its own, not the prelude's" (fun () ->
+        let out =
+          run (clash_mod (clash_unwrap ^ "  @[lemma]\n  fn unwrap_gt(x : Int) : {Unit | unwrap(x) > x} do () end\n"))
+        in
+        expect_admitted out "unwrap_gt");
+    gated "clash_fn_red: a false theorem about the user `unwrap` is not proved" (fun () ->
+        let out =
+          run (clash_mod (clash_unwrap ^ "  @[lemma]\n  fn unwrap_big(x : Int) : {Unit | unwrap(x) > x + 1} do () end\n"))
+        in
+        if not (unproved out "unwrap_big" || refuted out "unwrap_big") then
+          Alcotest.failf "unwrap(x) > x + 1 is false:\n%s" out);
+    gated "clash_ctor: a user `Reply` resolves by the parameter's datatype" (fun () ->
+        let out =
+          run (clash_mod (clash_msg ^ "  @[lemma]\n  fn tag_reply(c : Int, v : Int) : {Unit | tag(Reply(c, v)) == 1} do () end\n"))
+        in
+        expect_admitted out "tag_reply");
+    gated "clash_ctor_red: a false theorem over the user `Reply` is not proved" (fun () ->
+        let out =
+          run (clash_mod (clash_msg ^ "  @[lemma]\n  fn tag_zero(c : Int, v : Int) : {Unit | tag(Reply(c, v)) == 0} do () end\n"))
+        in
+        if not (unproved out "tag_zero" || refuted out "tag_zero") then
+          Alcotest.failf "tag(Reply(c, v)) == 0 is false:\n%s" out) ]
+
+(* ── A `match` or `if` in a `let`'s right-hand side unfolds ───────────────
+   todo 2026-10-31-reflection-encoder-gaps ("a `match` in a non-tail value
+   position"): the block is translated once per case of the right-hand side
+   ([Refine_reflect.tr_case]). *)
+let let_match_src =
+  {|mod LM do
+  type Lq = Ez | Cz(Int, Lq)
+  fn depth2(l : Lq) : Int do
+    let a = if l == Ez do 0 else 1 end
+    let b = match l do
+      Ez -> 10
+      Cz(x, _) -> x
+    end
+    a + b
+  end
+|}
+
+let let_match =
+  [ gated "let_match: a body whose `let`s branch unfolds per case" (fun () ->
+        let out =
+          run
+            (let_match_src
+           ^ "  @[lemma]\n  fn d_ez(u : Int) : {Unit | depth2(Ez) == 10} do () end\n  @[lemma]\n  fn d_cz(x : Int) : {Unit | depth2(Cz(x, Ez)) == x + 1} do () end\nend\n")
+        in
+        expect_admitted out "d_ez";
+        expect_admitted out "d_cz");
+    gated "let_match_red: a false theorem about it is not proved" (fun () ->
+        let out = run (let_match_src ^ "  @[lemma]\n  fn d_bad(x : Int) : {Unit | depth2(Cz(x, Ez)) == x} do () end\nend\n") in
+        if not (unproved out "d_bad" || refuted out "d_bad") then Alcotest.failf "d_bad is false:\n%s" out) ]

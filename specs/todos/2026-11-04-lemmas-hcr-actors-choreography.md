@@ -17,7 +17,10 @@ Phases (design §7):
   anonymous-record `migrate_state` parameter reach `old.f` (done: progress
   `2026-11-04-anon-record-param-field-refinements`). Actor message constructors are
   resolved by datatype (todo `2026-10-15-actor-message-ctor-cannot-be-qualified`). HCR
-  counterexamples for the migration obligations.
+  counterexamples for the migration obligations. G4 landed half (progress
+  `2026-10-15-actor-message-ctor-cannot-be-qualified`): `<Actor>.<Msg>` resolves and a
+  shared name is obliged per actor; the handler body's assumption waits on todo
+  `2026-11-04-interp-actor-dispatch-by-name`.
 - **A2.** Dry-run `migrate_state` on copies of the live states before `ACTIVATE`; derive
   mechanical migrations from the schema diff, each derivation rule proved once.
 - **B.** `march --check --guarantees` / `forge hot-reload check`: one labelled line per actor
@@ -30,9 +33,11 @@ Phases (design §7):
 - **D.** `stdlib/actor_theory.march` (per-sender FIFO, `Actor.call` correlation, DOWN
   delivery: proved today on the model, design §2 P2), plus trace conformance against the
   runtime and RC-trace fixtures for each send path.
-- **E.** Lemma ergonomics: todos `2026-11-04-lemma-hypothesis-reflected-call-not-assumed`,
+- **E.** Lemma ergonomics: landed 2026-11-04 (progress
+  `2026-11-04-lemma-hypothesis-reflected-call-not-assumed`,
   `2026-11-04-unreflectable-predicate-hides-name-clash`,
-  `2026-11-03-return-contract-ignores-block-facts`.
+  `2026-11-04-return-contract-block-facts`); user type names the stdlib also declares
+  remain (todo `2026-11-03-reflect-type-name-clash-with-stdlib`).
 - **F.** Baseline invariants as migration hypotheses, handlers reflected as `<Actor>.step`,
   the migration-simulation law, rollback round trip, chained `migrate_msg`, tag checks at
   deploy.

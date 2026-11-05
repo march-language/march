@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **An actor's message can be qualified by its actor.** When two actors (or an actor and a
+  variant) share a message name, `Counter.Tally(1)` (also `Counter_Msg.Tally(1)`, and
+  `Outer.Counter.Tally(1)` for a nested actor) selects `Counter`'s message on both backends.
+  A `migrate_msg` that keeps a message's name can now write `Some(Tally.Bump(n))`. The
+  `ambiguous_constructor` and `send_wrong_actor` diagnostics suggest the qualified spelling
+  instead of renaming a handler. A refined handler parameter is now checked at every
+  construction of a shared message name, by its qualifier or its type.
+
 - **A refinement on a field of an anonymous-record parameter is now checked.** In
   `fn f(r : { v : {Int | _ > 0} })` the body may assume `r.v > 0`, and each caller must
   establish it. Before, the refinement was ignored on both sides. Likewise
@@ -188,6 +196,13 @@ git log is authoritative for exact commits.
   `Recv(Int, End)` but I expected `Send(T, ...)`". `march --explain session_state_mismatch` has a
   page.
 
+- Diagnostics: linearity errors say where the value went. The label "`h` was already consumed
+  here" now adds "in the `Some(v)` arm" or "in the `else` branch", plus "every arm consumes it" when
+  all of them do. For a closure body it adds "inside a closure that can run more than once (each
+  iteration consumes it)". A linear value consumed only on paths that end in `panic` is reported as
+  "never used on a path that returns". A label points at the arm or branch that returns without
+  consuming it. A value passed straight into an expression that failed to typecheck (`clsoe(c)`,
+  `c.foo`) no longer gets a linearity error on top of the type error.
 - Diagnostics: a choreography role body that takes a step out of order is reported in protocol
   terms (`protocol_step_order`): "Role `Cons` tries to choose `more` or `done` here, but at this
   point protocol `Stream` says it must receive an `Int` from `Prod`", with a label on that
@@ -341,12 +356,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **An actor handler's fresh state literal uses its parameter refinements.** With
+  `state { count : {Int | _ >= 0} }` and `on Bump(n : {Int | _ > 0})`, the result
+  `{ count: state.count + n }` stayed unverified because the check at the handler's tail ran
+  without `n > 0`. It now proves.
+
 - **A refined `Int` result now uses the facts before it.** `fn grow(n : {Int | _ >= 0}) :
   {Int | _ >= n}` used to stay unverified when its body was `let r = n + n` then `r`, or a
   lemma call `twice_grows(n)` then `twice(n)`, or `assert n >= 0` then `n + n`. The same facts
   already proved a call's precondition. The result is now checked with them, and a contract
   proved this way is a fact at the function's callers. Other refined result types don't use
   these facts yet.
+- **Compiled test builds no longer crash on an actor whose handlers use a capability.** In a
+  `--test` build (`forge test` compiled), an actor where one handler performs mockable IO and
+  others don't could abort after a couple of messages with "RC underflow" or a SIGBUS. depot's
+  connection `Pool` did, so every conduit test that reached Postgres crashed the run. Release
+  builds were not affected.
 - **`spawn` of something that is not an actor, and a supervise child line naming no actor or a
   missing state field, are compile errors.** `spawn(helper)` for a function, or `spawn(Job)` for
   a type's constructor, passed the checker and failed when compiled ("`helper_spawn` is not a
@@ -355,6 +380,22 @@ git log is authoritative for exact commits.
   block's `Wroker w` (no such actor) or `Worker wx` (no field `wx` in the supervisor's state)
   stopped the compiler with an internal error; the second is now `supervise_field_missing`, with
   a did-you-mean and a fix.
+- **A lemma call gives its fact from anywhere it always runs.** A named `let u = l(..)`, a
+  statement of a nested block, a tuple element or an earlier call's argument, or an `if`
+  condition now give the theorem to what follows, as a call on its own line does. A call in a
+  branch, a lambda, or on the right of `&&`/`||` still gives nothing outside it.
+- **A user function or constructor named like a stdlib one works in a theorem.** A lemma
+  about your own `fn unwrap` (the prelude has one) or over your own `Reply` constructor
+  (`Channel.HandleResult` has one) was `unreflectable-predicate`; the call now resolves to
+  your declaration, as the typechecker does. A user type named like a stdlib type (`Tree`)
+  still can't be used, and the warning still says to rename it.
+- **A reflected function whose `let` branches unfolds.** `let b = match l do ... end` (or an
+  `if`) inside a function a theorem calls used to leave the function without equations; its
+  body now unfolds once per case.
+- **A lemma can use a hypothesis that calls your own function.** `fn h(g : {G | okz(_)}) :
+  {Unit | okz(g)}` was `lemma_unproved`: a refined parameter whose predicate calls a reflected
+  function was never assumed. It is now, in the theorem and for the recursive calls of an
+  inductive proof, and a callee's `okz(_)` precondition reads the same as `okz(g)`.
 - **`Random.range` (and so `Gen.int`) works for any span.** A range wider than the largest Int,
   such as `Gen.int(-4611686018427387903, 4611686018427387903)`, panicked with "attempt to
   subtract with overflow" since Int arithmetic began checking for overflow. A range wider
