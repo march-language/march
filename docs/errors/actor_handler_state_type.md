@@ -61,3 +61,7 @@ handler could return a different type, the next handler would run on a value
 that is not the state it was written against.
 
 See also: [the language reference](../actors.md).
+
+## See it in the error tour
+
+- [A handler that forgets to return the state]({{ site.baseurl }}/docs/error-messages/#handler-returns-state)

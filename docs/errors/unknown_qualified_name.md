@@ -43,3 +43,7 @@ no fallback to a global of the same name, so a misspelled or missing export
 is reported at the reference instead of failing at run time.
 
 See also: [the language reference](../modules.md).
+
+## See it in the error tour
+
+- [A misspelled module]({{ site.baseurl }}/docs/error-messages/#misspelled-module)

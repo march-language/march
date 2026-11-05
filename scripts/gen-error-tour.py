@@ -13,7 +13,11 @@ page marks each example's place with
 and this script rewrites what lies between the two markers: a ```march block with the
 program and a ```text block with what `march --check` prints, so the page shows what
 the compiler says today rather than what someone once pasted. Everything outside the
-markers is hand-written prose and is left alone.
+markers is hand-written prose and is left alone. That prose includes an
+`<a id="..."></a>` line before each example's `### ` heading: the language chapters
+link to it, and scripts/gen-lang-docs.py reads the `[code]` tags in each example's output
+to list the example on docs/errors/<code>.md. So after this script changes an example's
+output, run scripts/gen-lang-docs.py too (doc-lint Check F fails until you do).
 
 Each program is checked from its own fresh directory under a private HOME, as
 `<name without its NN- prefix>.march`, so the header line names a file a reader can

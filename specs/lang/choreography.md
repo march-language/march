@@ -1391,6 +1391,15 @@ node's (SWIM) and the heartbeat settings do not apply.
   fingerprint. Put role bodies in a nested module, or re-offer from a hosting actor's
   handler, which the deploy replaces.
 
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the compiler prints for a protocol or role that does not hold together, each with a program you can edit and re-check in the browser:
+
+- [A protocol step after a `loop` that never ends, so it can never run]({{ site.baseurl }}/docs/error-messages/#step-after-loop)
+- [A message from a role that `may crash`, with no plan for when it never arrives]({{ site.baseurl }}/docs/error-messages/#may-crash)
+- [A role implementation that skips a step of the protocol]({{ site.baseurl }}/docs/error-messages/#role-skips-a-step)
+- [A role whose code reaches past its own capability grant]({{ site.baseurl }}/docs/error-messages/#role-grant)
+
 ## See also
 
 - [Session types]({{ site.baseurl }}/docs/session-types/): the type rules behind the

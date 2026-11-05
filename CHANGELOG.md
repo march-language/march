@@ -337,6 +337,11 @@ git log is authoritative for exact commits.
   comes loaded with 26 of them: edit one and check it again in the browser. The live compiler
   bundle gains `marchCheck`, which prints a program's diagnostics as `march --check` does,
   without the refinement checks (they need z3).
+- The language chapters now point at the Error Messages tour. Types, Capabilities, Linear Types,
+  Actors, Session Types, Choreography and Refinement Types each end with an "Errors you'll see"
+  list linking to the tour examples for that area, and each `/docs/errors/<code>/` page that
+  has an example on the tour links to it under "See it in the error tour". Every tour example
+  has its own anchor (`/docs/error-messages/#counterexample`).
 - The Refinement Types chapter (`/docs/refinement-types/`) drops its dated "What's new" box. Its
   "When to use refinements" table now points at refinement messages, reflection, lemmas,
   relational element refinements, abstract refinements, fold invariants, termination (`cap total`)

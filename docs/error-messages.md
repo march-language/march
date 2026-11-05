@@ -65,6 +65,8 @@ expected `String` but got `Int`. [type_mismatch]              ← the message, a
 The first errors most people meet come from habits other languages taught: `then`,
 `elif`, semicolons, curried calls. March names the habit and shows the March form.
 
+<a id="then"></a>
+
 ### `then` instead of `do`
 
 <!-- error-tour: 01-then -->
@@ -101,6 +103,8 @@ I don't recognize `then` here — March uses do/end blocks instead. [then_keywor
 
 It recognises the keyword from another language and shows the whole `if` shape to copy.
 <button class="ep-try" data-error-example="01-then">Try it</button>
+
+<a id="if-without-else"></a>
 
 ### An `if` without an `else`
 
@@ -140,6 +144,8 @@ March `if` expressions always need an `else` branch: [parse_error]
 rule rather than "unexpected token `end`".
 <button class="ep-try" data-error-example="02-if-without-else">Try it</button>
 
+<a id="else-if-chain"></a>
+
 ### An `else if` chain one `end` short
 
 <!-- error-tour: 03-else-if-chain -->
@@ -174,6 +180,8 @@ A missing `end` is usually noticed far from where it belongs. This message point
 `end`s a chain needs.
 <button class="ep-try" data-error-example="03-else-if-chain">Try it</button>
 
+<a id="semicolon"></a>
+
 ### Semicolons
 
 <!-- error-tour: 04-semicolon -->
@@ -207,6 +215,8 @@ Unexpected `;`: March separates expressions with newlines, not semicolons. [semi
 
 The caret is on the `;` itself, and the note says what to write instead.
 <button class="ep-try" data-error-example="04-semicolon">Try it</button>
+
+<a id="curried-call"></a>
 
 ### A curried call
 
@@ -247,6 +257,8 @@ and gives the two things you probably meant.
 A misspelling gets a suggestion, and the suggestion is chosen by what fits, not only by
 spelling.
 
+<a id="misspelled-module"></a>
+
 ### A misspelled module
 
 <!-- error-tour: 06-misspelled-module -->
@@ -279,6 +291,8 @@ Unknown module `Lsit`. Did you mean `List`? [unknown_qualified_name]
 The suggestion comes from the standard library's modules. (The playground can't show
 this one: it suggests from the module files on disk, which a browser doesn't have.)
 
+<a id="field-by-type"></a>
+
 ### A misspelled record field
 
 <!-- error-tour: 07-field-by-type -->
@@ -306,6 +320,8 @@ The fields I see are: cont, count
 `cont` is the closer spelling, but it holds a `String` and the annotation wants an `Int`,
 so March suggests `count`. It also lists the fields the record does have.
 <button class="ep-try" data-error-example="07-field-by-type">Try it</button>
+
+<a id="constructor-by-type"></a>
 
 ### A misspelled constructor
 
@@ -345,6 +361,8 @@ comes from.
 A type error puts its caret on the subterm whose type is wrong, says where the expected
 type came from, and, when the two types share a structure, shows only the part that
 differs.
+
+<a id="string-plus-int"></a>
 
 ### A `String` where an `Int` is
 
@@ -390,6 +408,8 @@ expected `String` but got `Int`. [type_mismatch]
 The caret is on `n`, not on the whole `++`. Two labels show where `String` is required
 and where `n` got its type, and the note names the conversion function.
 <button class="ep-try" data-error-example="09-string-plus-int">Try it</button>
+
+<a id="structural-diff"></a>
 
 ### Two types that differ in one place
 
@@ -440,6 +460,8 @@ underlines just `String`. With a large record or nested type, this saves compari
 full.
 <button class="ep-try" data-error-example="10-structural-diff">Try it</button>
 
+<a id="no-partial-application"></a>
+
 ### Too few arguments
 
 <!-- error-tour: 11-no-partial-application -->
@@ -474,6 +496,8 @@ March has no partial application — a call must supply all arguments.
 Coming from a curried language, `add(1)` looks like partial application. The message says
 March has none, and shows where `add` got its two parameters.
 <button class="ep-try" data-error-example="11-no-partial-application">Try it</button>
+
+<a id="let-question"></a>
 
 ### A `let?` whose body is not a `Result`
 
@@ -515,6 +539,8 @@ expected `Result(Int, String)` but got `Int`. [type_mismatch]
 `let?` returns early on `Err`, so the rest of the function must produce a `Result` too.
 The note explains that rule instead of reporting a bare `Int` vs `Result` clash.
 <button class="ep-try" data-error-example="12-let-question">Try it</button>
+
+<a id="missing-impl"></a>
 
 ### Comparing a type that has no ordering
 
@@ -559,6 +585,8 @@ as parameters, and each module declares the ones it uses with `needs` (see
 [Capabilities](capabilities.md)). The errors talk about access in plain terms: "writes a
 file", "the console capability".
 
+<a id="main-no-grant"></a>
+
 ### `main` with no grant
 
 <!-- error-tour: 14-main-no-grant -->
@@ -591,6 +619,8 @@ or grant everything with `fn main(cap : Cap(IO))`.
 It works out which capability the program actually reaches and writes the narrowest
 signature for `main`. `forge fix` applies it.
 <button class="ep-try" data-error-example="14-main-no-grant">Try it</button>
+
+<a id="missing-needs"></a>
 
 ### Writing a file without saying so
 
@@ -640,6 +670,8 @@ Two things are missing: the module's `needs IO.FileWrite` line, and a grant on `
 They are reported as one error, with the call chain from `main` and both edits in the
 hint.
 <button class="ep-try" data-error-example="15-missing-needs">Try it</button>
+
+<a id="wrong-capability"></a>
 
 ### Passing the wrong capability
 
@@ -701,6 +733,8 @@ A linear value must be used exactly once: not copied, not dropped (see
 [Linear types](linear-types.md)). Each error points at both uses, or at the place the
 value was lost.
 
+<a id="linear-used-twice"></a>
+
 ### Used twice
 
 <!-- error-tour: 17-linear-used-twice -->
@@ -742,6 +776,8 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
 The caret is on the second use and a label marks the first, even though both are on the
 same line.
 <button class="ep-try" data-error-example="17-linear-used-twice">Try it</button>
+
+<a id="linear-some-branches"></a>
 
 ### Consumed on some branches only
 
@@ -794,6 +830,8 @@ It names a branch that consumes the token and one that silently drops it, and su
 `panic(…)` for a branch that never returns.
 <button class="ep-try" data-error-example="18-linear-some-branches">Try it</button>
 
+<a id="linear-captured"></a>
+
 ### Captured by a closure
 
 <!-- error-tour: 19-linear-captured -->
@@ -839,6 +877,8 @@ the value as a parameter).
 Actor errors use the actor's own words: its messages, its state, the pid you spawned (see
 [Actors](actors.md)).
 
+<a id="misspelled-actor"></a>
+
 ### A misspelled actor
 
 <!-- error-tour: 20-misspelled-actor -->
@@ -873,6 +913,8 @@ Did you mean `Counter`?
 Inside `spawn(…)` March is looking for an actor, so it calls `Countr` an actor and
 suggests one.
 <button class="ep-try" data-error-example="20-misspelled-actor">Try it</button>
+
+<a id="message-argument"></a>
 
 ### The wrong argument in a message
 
@@ -915,6 +957,8 @@ expected `Int` but got `String`. [type_mismatch]
 The expected type comes from the handler's parameter, so the label points into the actor
 at `k : Int`, not at a generated message type.
 <button class="ep-try" data-error-example="21-message-argument">Try it</button>
+
+<a id="handler-returns-state"></a>
 
 ### A handler that forgets to return the state
 
@@ -959,6 +1003,8 @@ A handler's result becomes the actor's next state. The message says so, and sinc
 handler returns an `Int` and the state has one `Int` field, it suggests
 `{ state with n: … }`.
 <button class="ep-try" data-error-example="22-handler-returns-state">Try it</button>
+
+<a id="send-wrong-actor"></a>
 
 ### A message sent to the wrong actor
 
@@ -1017,6 +1063,8 @@ actor does handle.
 A `protocol` gives each end of a channel a script of sends and receives (see
 [Session types](session-types.md)). The errors are phrased in terms of that script, not
 the session-type notation the checker uses internally.
+
+<a id="channel-wrong-step"></a>
 
 ### A step out of order
 
@@ -1079,6 +1127,8 @@ Each error says what the channel must do next and spells out the rest of its scr
 received anything.
 <button class="ep-try" data-error-example="24-channel-wrong-step">Try it</button>
 
+<a id="offer-not-exhaustive"></a>
+
 ### An offer left unhandled
 
 <!-- error-tour: 25-offer-not-exhaustive -->
@@ -1133,6 +1183,8 @@ A protocol is checked when you declare it, before any code runs it. With `@[endp
 March generates each role's API and checks that the role's code follows the protocol (see
 [Choreography](choreography.md)).
 
+<a id="step-after-loop"></a>
+
 ### A step that can never run
 
 <!-- error-tour: 26-step-after-loop -->
@@ -1175,6 +1227,8 @@ The message explains why the step is unreachable, and a label points at the loop
 never ends.
 <button class="ep-try" data-error-example="26-step-after-loop">Try it</button>
 
+<a id="may-crash"></a>
+
 ### A crash nobody handles
 
 <!-- error-tour: 27-may-crash -->
@@ -1212,6 +1266,8 @@ Once a role `may crash`, every message from it needs a plan for when it doesn't 
 The error asks the question the protocol must answer: what does `I` do if `C` crashes
 before sending? The machine fix adds an `or crash` branch for you to fill in.
 <button class="ep-try" data-error-example="27-may-crash">Try it</button>
+
+<a id="role-skips-a-step"></a>
 
 ### A role that skips a step
 
@@ -1268,6 +1324,8 @@ The role's code calls a generated function, but the error is about the protocol:
 `Cons` tried to do, the step it skipped (with a "you are here" label on the protocol
 line), and which function takes that step. (The playground can't load the session
 runtime this one needs.)
+
+<a id="role-grant"></a>
 
 ### A role reaching past its grant
 
@@ -1357,6 +1415,8 @@ solver (see [Refinement types](refinement-types.md)). When a proof fails, the er
 a concrete counterexample. These need z3, so the playground can't run them; install March
 to try them.
 
+<a id="index-out-of-range"></a>
+
 ### An index that is out of range
 
 <!-- error-tour: 30-index-out-of-range -->
@@ -1393,6 +1453,8 @@ note: this value never satisfies it; pass one that does
 
 `List.nth` requires an index below the list's length. The solver knows the literal list
 has three elements, so this call can never succeed, and the note says so.
+
+<a id="counterexample"></a>
 
 ### A guard that proves the opposite
 
@@ -1442,6 +1504,8 @@ Inside this branch `ys` is known to be empty, so the call fails whenever it runs
 counterexample (`ys = []`) shows when, and the note suggests the guard that would make it
 safe.
 
+<a id="return-refinement"></a>
+
 ### A return type that isn't met
 
 <!-- error-tour: 32-return-refinement -->
@@ -1482,6 +1546,8 @@ A counterexample was found:
 The function body is checked against its own return type, and the counterexample
 `n = -1` is an input that returns a negative number.
 
+<a id="termination"></a>
+
 ### A recursion that may not stop
 
 <!-- error-tour: 33-termination -->
@@ -1514,6 +1580,8 @@ note: a metric must stay at least 0 and fall at every recursive call (left to ri
 
 This one is a warning (the program still compiles). It finds the input that never
 reaches the base case (`n = -1`) and suggests the one-character fix, `n <= 0`.
+
+<a id="division-no-panic"></a>
 
 ### Division in a module that promised not to panic
 

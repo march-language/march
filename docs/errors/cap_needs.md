@@ -61,3 +61,7 @@ tells you every capability its code can exercise, and a reviewer or
 exceeds it would make the header a lie.
 
 See also: [the language reference](../capabilities.md).
+
+## See it in the error tour
+
+- [Writing a file without saying so]({{ site.baseurl }}/docs/error-messages/#missing-needs)

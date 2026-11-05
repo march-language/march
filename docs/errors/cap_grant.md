@@ -48,3 +48,7 @@ compile time. That only means something if a program with no grant really
 can do nothing, so undeclared IO is an error rather than an implicit `Cap(IO)`.
 
 See also: [the language reference](../capabilities.md).
+
+## See it in the error tour
+
+- [`main` with no grant]({{ site.baseurl }}/docs/error-messages/#main-no-grant)
