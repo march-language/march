@@ -1,0 +1,17 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_47.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+7 |       n > 80 -> "B"
+                    ^^^
+
+    All arms of a `match do` must return the same type.
+
+    the expected type comes from here:
+
+6 |       n > 90 -> 4
+                    ^
+    run `march --explain type_mismatch`
+
+

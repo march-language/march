@@ -2396,6 +2396,129 @@ let relocate_callback_mismatch env ~mark (e : Ast.expr) sp inferred expected =
      | _ -> ())
   | _ -> ()
 
+(* -----------------------------------------------------------------
+   `if` / `match do` branches against a known type (§X1, slice 3).
+   ----------------------------------------------------------------- *)
+
+let if_branches_note = "Both branches of an if expression must return the same type."
+let cond_arms_note = "All arms of a `match do` must return the same type."
+
+(** The diagnostics added since [mark], newest first. *)
+let errors_since env ~mark =
+  let rec fresh l = if l == mark then [] else match l with [] -> [] | d :: r -> d :: fresh r in
+  fresh env.errors.Err.diagnostics
+
+(** The expression a branch's value comes from: a block's last one. *)
+let rec branch_leaf (e : Ast.expr) =
+  match e with
+  | Ast.EBlock ((_ :: _ as es), _) -> branch_leaf (List.nth es (List.length es - 1))
+  | e -> e
+
+(** Report [provided] where [required] was needed, as [unify] would (with a
+    §X2 diff when they differ below the root), without unifying. *)
+let report_pair env ~span ~reason ~provided prov req =
+  match diff_mismatch_message env ~provided:prov ~required:req with
+  | Some diff ->
+    report_type_mismatch env ~span ~occurs_violation:false ~reason ~provided ~diff prov req
+  | None -> report_mismatch env ~span ~reason ~provided prov req
+
+(** The value positions of an `if` / `match do` in tail position, through
+    nested ones: each leaf expression with its path (outermost first) and the
+    span its branch-agreement check reports at. *)
+let rec branch_leaves ?(else_if = false) (e : Ast.expr) path =
+  let sub (b : Ast.expr) seg =
+    let leaf = branch_leaf b in
+    match leaf with
+    | Ast.EIf _ | Ast.ECond _ -> branch_leaves leaf (path @ [ seg ])
+    | _ -> [ (leaf, path @ [ seg ]) ] in
+  match e with
+  | Ast.EIf (_, t, f, _) ->
+    (* An `else if` chain reads as one `if`: its branches are named
+       `else if` and `else`, not an `else` of an `else`. *)
+    sub t (if else_if then "an `else if` branch" else "the `if` branch")
+    @ (match branch_leaf f with
+       | Ast.EIf _ as inner -> branch_leaves ~else_if:true inner path
+       | _ -> sub f "the `else` branch")
+  | Ast.ECond (arms, _) ->
+    let nth i = match i with
+      | 0 -> "first" | 1 -> "second" | 2 -> "third" | 3 -> "fourth" | 4 -> "fifth"
+      | i -> Printf.sprintf "%dth" (i + 1) in
+    List.concat_map (fun x -> x)
+      (List.mapi (fun i (_, b) -> sub b (Printf.sprintf "the %s arm" (nth i))) arms)
+  | _ -> []
+
+(** Move the type mismatch [check_expr] just reported on an `if` or
+    `match do` [e] (span [sp]) against a known [expected] onto the branches
+    that disagree with it.  `if b do "yes" else 2 end` in a function returning
+    `Int` used to underline the whole `if`, and then `2` for not matching
+    `"yes"`: the branch that is right.  Read-only, like the literal case:
+    each branch's type comes from [type_map]. *)
+let relocate_branch_mismatch env ~mark ~reason (e : Ast.expr) sp (expected : ty) =
+  match e, repr expected with
+  | (Ast.EIf _ | Ast.ECond _), (TCon _ | TTuple _ | TRecord _ | TArrow _) ->
+    let leaves = branch_leaves e [] in
+    let typed = List.filter_map (fun (l, path) ->
+        Option.map (fun t -> (l, path, t))
+          (Hashtbl.find_opt env.type_map (span_of_expr l))) leaves in
+    let apart = List.filter (fun (_, _, t) -> types_apart env 0 t expected) typed in
+    let added = errors_since env ~mark in
+    let leaf_spans = List.map (fun (l, _) -> span_of_expr l) leaves in
+    let agreement (d : Err.diagnostic) =
+      Err.slug_of_code d.Err.code = Err.Code.type_mismatch
+      && (List.mem if_branches_note d.Err.notes || List.mem cond_arms_note d.Err.notes)
+      && List.mem d.Err.span leaf_spans in
+    let outer (d : Err.diagnostic) =
+      d.Err.span = sp && Err.slug_of_code d.Err.code = Err.Code.type_mismatch in
+    let ours = List.filter (fun d -> agreement d || outer d) added in
+    (* Only when every leaf's type is known, some disagree, and either one
+       fits (so the others are plainly the wrong ones) or the branches also
+       disagree among themselves.  Branches that all agree on the wrong type
+       leave the error on the whole expression. *)
+    if List.length typed = List.length leaves && apart <> [] && ours <> []
+       && (List.length apart < List.length typed || List.exists agreement ours)
+    then begin
+      env.errors.Err.diagnostics <-
+        List.filter (fun x -> not (List.memq x ours)) env.errors.Err.diagnostics;
+      List.iter (fun (l, path, t) ->
+          let before = env.errors.Err.diagnostics in
+          (* A literal leaf narrows further, to its wrong part (slice 1). *)
+          let psp, pty, pexp, path =
+            match locate_literal_part env l expected [] with
+            | Some (psp, (_ :: _ as lpath), pty, pexp) when psp <> span_of_expr l ->
+              (psp, pty, pexp, path @ lpath)
+            | _ -> (span_of_expr l, t, expected, path) in
+          let provided =
+            if psp = span_of_expr l then provided_of_expr l t
+            else { p_span = psp; p_ty = pty; p_name = None } in
+          report_pair env ~span:psp ~reason ~provided pty pexp;
+          let note = Printf.sprintf "In %s." (String.concat " of " (List.rev path)) in
+          env.errors.Err.diagnostics <-
+            List.map (fun (x : Err.diagnostic) ->
+                if List.memq x (errors_since env ~mark:before)
+                then { x with Err.notes = note :: x.Err.notes } else x)
+              env.errors.Err.diagnostics)
+        apart
+    end
+  | _ -> ()
+
+(** A `++` whose result is not what its context needs (§X1): its operands
+    may each be wrong too, and those mismatches run the other way round
+    (`x ++ "no"` in an `Int` function: `x` is not a `String`, and the result
+    is not an `Int`), so say where the `String` comes from. *)
+let explain_concat_result env ~mark (e : Ast.expr) sp =
+  match e with
+  | Ast.EApp (Ast.EVar { txt = "++"; _ }, [ _; _ ], _) ->
+    let note = "`++` joins two `String`s, so its result is a `String`." in
+    let added = errors_since env ~mark in
+    env.errors.Err.diagnostics <-
+      List.map (fun (d : Err.diagnostic) ->
+          if List.memq d added && d.Err.span = sp
+             && Err.slug_of_code d.Err.code = Err.Code.type_mismatch
+             && not (List.mem note d.Err.notes)
+          then { d with Err.notes = d.Err.notes @ [ note ] } else d)
+        env.errors.Err.diagnostics
+  | _ -> ()
+
 (** Poison (§X3, F5): [e] failed its type check, an error was reported
     inside it, and its type came out [TError].  A linear value passed to it
     directly (`snik(t)` with `snik` misspelled, `t.foo` on a non-record) has
@@ -3652,9 +3775,17 @@ let rec infer_expr env (e : Ast.expr) : ty =
              (match March_ast.Protocol_states.find_call name.txt with
               | Some i when i.ps_branches = [] ->
                 let at = Option.value i.ps_span ~default:sp in
-                Some (2, RBecause (RFnArg (at, 2),
+                Some (fun idx -> if idx <> 2 then None else
+                       Some (RBecause (RFnArg (at, 2),
                                    Printf.sprintf "This is the step's payload: protocol `%s` says `%s` must %s here."
-                                     i.ps_proto i.ps_role i.ps_doing))
+                                     i.ps_proto i.ps_role i.ps_doing)))
+              | _ when name.txt = "++" && List.length args = 2 ->
+                (* An operand of `++` is a side of an operator, not
+                   "argument #1 of a function call" (§X1). *)
+                Some (fun idx ->
+                    Some (RBuiltin (Printf.sprintf
+                            "This is the %s side of `++`, which joins two `String`s."
+                            (if idx = 0 then "left" else "right"))))
               | _ -> None)
            | _ -> None in
          let res = infer_app ?payload env sp f_ty args 0 in
@@ -4071,8 +4202,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let t_else = !r_else in
       (* Point primary error at the else branch; label points at then branch
          (the source of the expected type), making both branches visible. *)
-      let then_sp = span_of_expr then_ in
-      let else_sp = span_of_expr else_ in
+      let then_sp = span_of_expr (branch_leaf then_) in
+      let else_sp = span_of_expr (branch_leaf else_) in
       unify env ~span:else_sp
         ~reason:(Some (RBecause (RMatchArm then_sp,
           "Both branches of an if expression must return the same type.")))
@@ -4127,7 +4258,24 @@ let rec infer_expr env (e : Ast.expr) : ty =
              check_expr env cond_e t_bool
                ~reason:(Some (RBuiltin "Each condition in `match do` must be Bool."));
              let arm_ty = run_body body_e in
-             unify env ~span:sp ~reason:(Some (RMatchArm sp)) result_ty arm_ty
+             (* Unify as before (the order decides which variable links to
+                which), but report a disagreement at this arm, against the
+                first arm's type (§X1): the whole `match do` was underlined,
+                with the two types the wrong way round. *)
+             let saved = env.errors.Err.diagnostics in
+             unify env ~span:sp ~reason:(Some (RMatchArm sp)) result_ty arm_ty;
+             let added = errors_since env ~mark:saved in
+             if added <> []
+                && List.for_all (fun (d : Err.diagnostic) ->
+                    d.Err.span = sp && Err.slug_of_code d.Err.code = Err.Code.type_mismatch) added
+             then begin
+               env.errors.Err.diagnostics <- saved;
+               let leaf = branch_leaf body_e in
+               report_pair env ~span:(span_of_expr leaf)
+                 ~reason:(Some (RBecause (RMatchArm (span_of_expr (branch_leaf first_body)),
+                                          cond_arms_note)))
+                 ~provided:(provided_of_expr leaf arm_ty) arm_ty result_ty
+             end
            ) rest;
          join_linear_paths ~all_note:"every arm consumes it" env ~span:sp snapshot
            (List.rev !results);
@@ -4614,7 +4762,9 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
       with_suggest_need e (NeedType expected) (fun () -> infer_expr env e) in
     unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected;
     relocate_literal_mismatch env ~mark ~reason e sp expected;
-    relocate_callback_mismatch env ~mark e sp inferred expected
+    relocate_callback_mismatch env ~mark e sp inferred expected;
+    relocate_branch_mismatch env ~mark ~reason e sp expected;
+    explain_concat_result env ~mark e sp
 
 (** Thread function application through argument list, tracking arg index. *)
 and infer_app ?payload env span f_ty args idx =
@@ -4652,8 +4802,8 @@ and infer_app ?payload env span f_ty args idx =
       walk param_ty; !acc in
     check_expr env arg param_ty
       ~reason:(Some (match payload with
-          | Some (i, r) when i = idx -> r
-          | _ -> RFnArg (span, idx)));
+          | Some f -> Option.value (f idx) ~default:(RFnArg (span, idx))
+          | None -> RFnArg (span, idx)));
     (* Poison (§X3): when an argument fails its type check and the call's
        result shares a type variable with that parameter, the variable is
        now bound to whatever the failed check left it, so the result is
