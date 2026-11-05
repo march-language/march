@@ -60,5 +60,14 @@ it states the fact to the checker). All repros: `cap verified` + `--check`.
    so `len(slots(k)) == k` cannot be stated. Neither `List.range` nor
    `List.repeat` carries a length postcondition for the same reason.
 
+4. **No `List.length`-free way to state a count.** The proofs lean on the
+   `List.length` -> `len` alias, which is withdrawn in a unit defining its own
+   `List.length` (CI's ratchet checks stdlib/list.march itself, so the four
+   udp.march count postconditions are skips there; the ceiling was raised
+   42 -> 46 for exactly them). A counting function does not prove its own
+   `{Int | _ == len(xs)}`, monomorphic or generic, `1 + count(t)` or
+   `let r = count(t)` then `r + 1` (solver-undecided / unreflectable-subject).
+
 Done when: `open_sharded`'s length test can be deleted with the module still
-`cap verified`, and the three repros above prove.
+`cap verified`, the repros above prove, and the ci.yml refinement ceiling
+can come back down by the four udp.march sites.
