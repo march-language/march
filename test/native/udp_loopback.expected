@@ -1,0 +1,24 @@
+bound port > 0: true
+addr renders: true
+recv: hello
+from == tx: true
+batch sent: 500
+batch received: 500, in order: true
+mixed sent: 8
+mixed sizes: 700,700,300,700,0,1,65000,5
+mixed intact: true
+oversize: SendFailed
+truncated to: 10
+send_many sent: 4
+rx got: one four
+rx2 got: two three
+connected: via connect
+unreachable peer: RecvFailed
+poll empty: 0
+quiet recv: None
+ipv6 addr renders: true
+ipv6 got: six | six again
+shards: 3, one port: true
+send stalls counted: true
+resolve failed: nope
+empty host: ResolveFailed

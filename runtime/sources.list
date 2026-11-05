@@ -40,6 +40,7 @@ march_http_parse_simd.c      http            -
 march_http_response.c        http            -
 march_http_io.c              http            -
 march_http_evloop.c          http            -
+march_udp.c                  http            -
 march_tls.c                  http            -
 march_dispatch.c             hcr             jit
 march_trace.c                hcr             jit

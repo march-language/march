@@ -193,6 +193,9 @@ let gated : (string * string * compare_mode) list = [
   (* frame throughput over a loopback cluster connection (sealed frames since
      distributed-deploys step 11a); ephemeral port, so safe to run here. *)
   "cluster_frames",      "", IgnoreTiming;
+  (* datagram rate through stdlib Udp over loopback, ephemeral ports. The
+     lockstep counts are exact; the flood lines are all measurement. *)
+  "udp_flood",           "", IgnoreTiming;
 ]
 
 (* Benches deliberately NOT gated, each with the reason. These bind fixed TCP
@@ -227,6 +230,8 @@ let timing_value_anchors : (string * string list) list = [
                      "payload 1024 B: received 2000 frames, 2048000 bytes";
                      "payload 16384 B: received 300 frames, 4915200 bytes"];
   "rrb_bench",      ["seq_sum=500000500000"; "par_sum=500000500000"];
+  "udp_flood",      ["lockstep 64 B x64: received 64000 datagrams, 4096000 bytes";
+                     "lockstep 1200 B x64: received 32000 datagrams, 38400000 bytes"];
 
   (* Added 2026-09-16, captured from a real run, never written from memory.
      Anchors are chosen to be the values a miscompile would move, and to

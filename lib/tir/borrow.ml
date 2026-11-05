@@ -277,6 +277,14 @@ let extern_borrow_table : (string * bool list) list = [
      and every send leaked its payload String — one per Postgres message
      depot sends (five per parameterized query). *)
   ("tcp_send_all",         [false; true]);
+  (* march_udp.c reads every String / List argument (copying addresses and
+     payload bytes into the syscall) and keeps nothing. *)
+  ("udp_open",             [true; false; false; false; false]);
+  ("udp_resolve",          [true; false]);
+  ("udp_addr_to_string",   [true]);
+  ("udp_connect",          [false; true]);
+  ("udp_send_batch",       [false; true; true]);
+  ("udp_send_many",        [false; true]);
     (* march_http_server_bind_host copies the host's bytes into a stack
        buffer for inet_pton and keeps nothing. *)
   ("http_server_bind_host", [true]);

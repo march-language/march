@@ -556,7 +556,7 @@ references inside interface method signatures and impl headers are not tracked
 
 ## 5. Stdlib Manifest
 
-135 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
+136 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
 below (use `forge search` to discover the rest):
 
 ### Auto-imported (Prelude)
@@ -667,6 +667,8 @@ Functions always in scope without `use`:
 **TLS** — `default_client_config`, `h2_client_config`, `server_config`, `client_ctx`, `server_ctx`, `connect`, `accept`, `read`, `write`, `close`, `ctx_free`, `negotiated_alpn`, `peer_cn`, `https_get`
 
 **WebSocket** — `new`, `send`, `receive`, `close`, `is_open`
+
+**Udp** — `open`, `open_with`, `open_sharded`, `defaults`, `resolve`, `connect`, `send_to`, `send`, `send_batch`, `send_batch_connected`, `send_many`, `recv`, `recv_batch`, `local_addr`, `local_port`, `addr_to_string`, `addr_port`, `stats`, `close`. Packets are `String`; types are `UdpSocket`/`UdpAddr`/`UdpOptions`/`UdpStats` (global type namespace)
 
 ### Actors / Concurrency
 
@@ -1239,7 +1241,7 @@ lib/tir/                    typed IR (lower/mono/defun/perceus/borrow/fusion/llv
 lib/jit/                    REPL JIT
 lib/errors/errors.ml        diagnostics
 lib/search/search.ml        Hoogle-style search
-stdlib/                     135 March stdlib modules
+stdlib/                     136 March stdlib modules
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool
 lsp/                        LSP server

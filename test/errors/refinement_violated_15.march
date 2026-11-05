@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: a port is at most 65535
+--
+-- A stdlib contract reaching user code: `Udp.open`'s port is refined to
+-- 0..65535 with an `else` message per bound (stdlib/udp.march), so a literal
+-- out-of-range port is a compile error in the caller's terms instead of a
+-- runtime `OpenFailed`. A port the checker cannot see is not flagged.
+mod UdpBadPort do
+  needs IO.NetConnect
+
+  fn main(_n : Cap(IO.NetConnect)) : () do
+    match Udp.open("127.0.0.1", 70000) do
+      Ok(s) -> Udp.close(s)
+      Err(_) -> ()
+    end
+  end
+end

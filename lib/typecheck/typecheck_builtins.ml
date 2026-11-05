@@ -280,6 +280,15 @@ let builtin_cap_table : (string * string) list = [
   ("tcp_accept",            "IO.NetListen");
   ("tcp_accept_timeout",    "IO.NetListen");
   ("tcp_local_port",        "IO.NetListen");
+  ("udp_open",              "IO.NetConnect");
+  ("udp_resolve",           "IO.NetConnect");
+  ("udp_connect",           "IO.NetConnect");
+  ("udp_close",             "IO.NetConnect");
+  ("udp_local_addr",        "IO.NetConnect");
+  ("udp_stats",             "IO.NetConnect");
+  ("udp_send_batch",        "IO.NetConnect");
+  ("udp_send_many",         "IO.NetConnect");
+  ("udp_recv_batch",        "IO.NetConnect");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
@@ -1215,6 +1224,19 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_send_all",            Mono (TArrow (t_int, TArrow (t_string, t_result t_unit t_string))));
     ("tcp_recv_all",            Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string t_string)))));
     ("tcp_close",               Mono (TArrow (t_int, t_unit)));
+    (* UDP datagrams: stdlib-only, reached through `Udp` (stdlib/udp.march,
+       runtime/march_udp.c).  Addresses are opaque encoded Strings; packets
+       are binary-safe Strings. *)
+    ("udp_open",           Mono (TArrow (t_string, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_int t_string)))))));
+    ("udp_resolve",        Mono (TArrow (t_string, TArrow (t_int, t_result t_string t_string))));
+    ("udp_addr_to_string", Mono (TArrow (t_string, t_string)));
+    ("udp_connect",        Mono (TArrow (t_int, TArrow (t_string, t_result t_unit t_string))));
+    ("udp_close",          Mono (TArrow (t_int, t_unit)));
+    ("udp_local_addr",     Mono (TArrow (t_int, t_result t_string t_string)));
+    ("udp_stats",          Mono (TArrow (t_int, TTuple [t_int; t_int])));
+    ("udp_send_batch",     Mono (TArrow (t_int, TArrow (t_string, TArrow (t_list t_string, t_result t_int t_string)))));
+    ("udp_send_many",      Mono (TArrow (t_int, TArrow (t_list (TTuple [t_string; t_string]), t_result t_int t_string))));
+    ("udp_recv_batch",     Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result (t_list (TTuple [t_string; t_string])) t_string))))));
     (* tcp_shutdown(fd): shutdown(SHUT_RDWR) without close -- wakes a reader parked on fd *)
     ("tcp_shutdown",            Mono (TArrow (t_int, t_unit)));
     (* sleep_ms(ms): park this green thread for ms, holding no scheduler thread *)
