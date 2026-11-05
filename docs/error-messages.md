@@ -1116,6 +1116,8 @@ The protocol's `offer` branches are: :ok, :err.
 
 17 |     match label do
                ^^^^^^^^
+
+    run `march --explain session_offer_nonexhaustive`
 ```
 <!-- /error-tour -->
 
@@ -1165,6 +1167,7 @@ Protocol `Ticker`: this step can never run — it comes after a `loop`, and a `l
 
 7 |       A -> B : Int
           ^
+    run `march --explain protocol_invalid`
 ```
 <!-- /error-tour -->
 
@@ -1201,6 +1204,7 @@ Protocol `Logging`: `C` may crash, so `C -> I : ...` needs `or crash do ... end`
         ^
 
     The crash branch is the rest of the conversation when `C` is gone. It must begin, for `L`, with a message from `I`; the fix sends one each, for you to change to what the conversation should do.
+    run `march --explain role_needs_invalid`
 ```
 <!-- /error-tour -->
 
