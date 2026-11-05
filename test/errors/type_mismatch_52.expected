@@ -1,5 +1,5 @@
 exit: 1
--- TYPE MISMATCH ---------- errors/type_mismatch_44.march
+-- TYPE MISMATCH ---------- errors/type_mismatch_52.march
 
 expected `Fahrenheit` but got `Celsius`. [type_mismatch]
 

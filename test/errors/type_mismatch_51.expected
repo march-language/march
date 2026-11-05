@@ -1,5 +1,5 @@
 exit: 1
--- TYPE MISMATCH ---------- errors/type_mismatch_43.march
+-- TYPE MISMATCH ---------- errors/type_mismatch_51.march
 
 expected `List(a)` but got `Int -> Int`. [type_mismatch]
 
@@ -17,7 +17,7 @@ expected `List(a)` but got `Int -> Int`. [type_mismatch]
     run `march --explain type_mismatch`
 
 
--- TYPE MISMATCH ---------- errors/type_mismatch_43.march
+-- TYPE MISMATCH ---------- errors/type_mismatch_51.march
 
 expected `a -> b` but got `List(Int)`. [type_mismatch]
 

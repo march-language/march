@@ -60,7 +60,7 @@ IDENTICAL against the merge base).
   solver call (`Refine_check.total_twin`).
 
 Corpus: `unknown_qualified_name_6` (`List.fodl`), `unbound_variable_1` (a bare unknown
-callee; the annotated `Float` picks `average` over the generic `head`), `type_mismatch_43`
+callee; the annotated `Float` picks `average` over the generic `head`), `type_mismatch_51`
 (`List.map` arguments swapped, with fix), `_44` (the program's own `celsius_to_fahrenheit`),
 `_45` (`bool_to_string`),
 `refinement_violated_16` / `_17` (`head_opt`, `nth_opt`), `undeclared_requirement_1`.
