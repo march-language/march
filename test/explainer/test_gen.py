@@ -88,6 +88,15 @@ class StateMap(unittest.TestCase):
         self.assertLess(len(cells), total)
         self.assertTrue(all(0 <= c[i] < n for c in cells for i, n in enumerate(axes.values())))
 
+    def test_state_map_records_the_role_order_of_its_cells(self):
+        # JSON object keys are written sorted, so `axes` alone loses the order the cell
+        # tuples are in; the figure reads it from `roles`.
+        sm = gen.state_map(load("Order.json")["current"]["steps"], ["Shop", "Stock", "Ledger"])
+        self.assertEqual(sm["roles"], ["Shop", "Stock", "Ledger"])
+        self.assertEqual(sm["cells"], sm["axes"]["Shop"] * sm["axes"]["Stock"] * sm["axes"]["Ledger"])
+        self.assertEqual(sm["path"][0], [0, 0, 0])
+        self.assertEqual(sorted(sm["path"]), sm["reachable"])
+
     def test_loop_returns_to_its_first_state(self):
         a = gen.project([{"loop": [msg("A", "B", "Tick")]}], "A")
         self.assertEqual(a["edges"], {0: [(("send", "B", "Tick"), 0)]})   # one state, a self-loop

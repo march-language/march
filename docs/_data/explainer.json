@@ -1,6 +1,6 @@
 {
   "generated": {
-    "commit": "52f257fd8",
+    "commit": "f89dd4675",
     "date": "2026-11-05",
     "lab_app_sha256": "78ab2a20763ce435a2d7c590d921cfe491ed634fe02a63353b6933ef4651dbf2"
   },
@@ -226,6 +226,11 @@
         4,
         2
       ]
+    ],
+    "roles": [
+      "Shop",
+      "Stock",
+      "Ledger"
     ]
   },
   "timings": {

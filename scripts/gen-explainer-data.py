@@ -219,7 +219,7 @@ def state_map(steps, roles):
     total = 1
     for n in axes.values():
         total *= n
-    return {"axes": axes, "cells": total, "reachable": sorted(path), "path": path}
+    return {"roles": list(roles), "axes": axes, "cells": total, "reachable": sorted(path), "path": path}
 
 
 # ── timings, topology and the simulations' parameters ──────────────────────────
