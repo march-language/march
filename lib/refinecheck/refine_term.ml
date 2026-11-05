@@ -719,7 +719,10 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       List.find_map
         (fun p ->
           match Hashtbl.find_opt tbl (p ^ n) with
-          | Some _ when prefer (p ^ n) <> None -> prefer (p ^ n)
+          (* A bare name only: a dotted one (`List.append` under a nested
+             `mod List`) is resolved differently by the two backends, so it
+             stays ambiguous (review C-A). *)
+          | Some _ when (not (String.contains n '.')) && prefer (p ^ n) <> None -> prefer (p ^ n)
           | Some r ->
             if track then begin
               (* Two declarations under this key, or a [use] at the same
