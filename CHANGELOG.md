@@ -365,6 +365,13 @@ git log is authoritative for exact commits.
   `state { count : {Int | _ >= 0} }` and `on Bump(n : {Int | _ > 0})`, the result
   `{ count: state.count + n }` stayed unverified because the check at the handler's tail ran
   without `n > 0`. It now proves.
+- **Lemmas can use functions that divide by a parameter, or that recurse by a metric.** A
+  function with `a / b` or `a % b` is now unfolded in proofs when its own parameter refinements
+  or conditions show `b` non-zero (`b : {Int | _ != 0}`, or `if b == 0 do 0 else a / b end`). A
+  recursive function certified by `@[decreases]` is unfolded too.
+- **`forge test` / `--lemma-test` decide theorems that use `len`.** They were `not-tested`
+  with "unbound variable: len"; `len` now means a list's length or a string's byte length in
+  the interpreter and in the compiled check.
 
 - **A refined `Int` result now uses the facts before it.** `fn grow(n : {Int | _ >= 0}) :
   {Int | _ >= n}` used to stay unverified when its body was `let r = n + n` then `r`, or a

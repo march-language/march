@@ -801,6 +801,8 @@ lemma-test: RED (1 lemma false on a concrete input)
 - An **admitted** lemma (`cat_nil`) is checked too; see the next section.
 - An `Int` overflow is reported as `overflow?`, not as a counterexample, because the proofs
   treat `Int` as unbounded ([below](#what-lemmas-dont-do-yet)).
+- A theorem may use the logic's `len` (a list's length, a string's length in bytes). The
+  test gives it the same meaning, in the interpreter and in the compiled check.
 - A lemma whose parameter type has no input generator (a `String`, a `Float`, a record) is
   `not-tested`.
 

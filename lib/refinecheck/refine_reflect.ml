@@ -2369,7 +2369,7 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
               (fun () -> pre_of u ptys)
           in
           if not (divisions_defined pre cases) then begin
-            let why = "divides by a value its parameter refinements and conditions do not show non-zero" in
+            let why = "divides by a value nothing shows is non-zero" in
             Hashtbl.replace encoder_blocked u.RT.u_span ("R4:" ^ why);
             if not (String.contains u.RT.u_name '/') then Hashtbl.replace RS.blocked_by_name u.RT.u_name (why, u.RT.u_span);
             raise Decline
