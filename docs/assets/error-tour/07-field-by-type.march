@@ -1,0 +1,7 @@
+mod Main do
+  fn main() do
+    let r = { count: 1, cont: "x" }
+    let n : Int = r.conut
+    n
+  end
+end

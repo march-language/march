@@ -308,6 +308,12 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- A new Error Messages tour (`/docs/error-messages/`): 34 real compiler errors, from syntax
+  slips through types, capabilities, linearity, actors, session channels, protocols and
+  refinements, each with what `march --check` prints today. An error playground on the page
+  comes loaded with 26 of them: edit one and check it again in the browser. The live compiler
+  bundle gains `marchCheck`, which prints a program's diagnostics as `march --check` does,
+  without the refinement checks (they need z3).
 - The Refinement Types chapter (`/docs/refinement-types/`) drops its dated "What's new" box. Its
   "When to use refinements" table now points at refinement messages, reflection, lemmas,
   relational element refinements, abstract refinements, fold invariants, termination (`cap total`)

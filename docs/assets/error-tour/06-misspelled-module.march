@@ -1,0 +1,11 @@
+mod Main do
+  needs IO.Console
+
+  fn count() : Int do
+    Lsit.length([1, 2])
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(count()))
+  end
+end

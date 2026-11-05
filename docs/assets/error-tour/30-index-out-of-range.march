@@ -1,0 +1,9 @@
+mod Main do
+  fn third() : Int do
+    List.nth([1, 2, 3], 7)
+  end
+
+  fn main() : Int do
+    third()
+  end
+end

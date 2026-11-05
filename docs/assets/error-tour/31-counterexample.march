@@ -1,0 +1,20 @@
+mod Main do
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+      Cons(h, _) -> h
+      Nil        -> panic("empty")
+    end
+  end
+
+  fn first_or_zero(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do
+      head_of(ys)
+    else
+      0
+    end
+  end
+
+  fn main() : Int do
+    first_or_zero([1, 2, 3])
+  end
+end

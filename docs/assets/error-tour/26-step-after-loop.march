@@ -1,0 +1,15 @@
+mod Main do
+  type A = A
+  type B = B
+
+  protocol Ticker do
+    loop do
+      A -> B : Int
+    end
+    B -> A : Bool
+  end
+
+  fn main() do
+    ()
+  end
+end
