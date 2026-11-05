@@ -254,8 +254,26 @@ stdlib type) already declares is ambiguous: writing `send(counter, Ping(…))` w
 stdlib also declares a `Ping` constructor is rejected (`Constructor \`Ping\` is defined by
 multiple types … Use a qualified form to disambiguate`). Pick message names unlikely to
 collide (e.g. `Increment`, `Poke`). Two actors that both declare a handler of the same
-name are the sharp case: a bare name resolves to only one of them, and no qualified
-spelling selects an actor's message today, so rename one of the handlers.
+name are the sharp case: a bare name resolves to only one of them. Qualify the message by
+its actor to select the other: `Counter.Tally(1)` (also `Counter_Msg.Tally(1)`, and
+`Outer.Counter.Tally(1)` from outside a nested module). The same spelling separates an
+actor's message from a variant constructor of the same name, which a `migrate_msg` that
+keeps a message's name needs:
+
+```march
+fn tally_migrate_msg(m : V1.Msg) : Option(Tally.Msg) do
+  match m do
+    V1.Bump(n) -> Some(Tally.Bump(n))
+    V1.Reset -> None
+  end
+end
+```
+
+A handler's parameter refinement is obliged at every construction of its message, shared
+name or not: through the written qualifier, or the construction's type
+([refinement types](refinement-types.md)). The handler body assumes the refinement only
+when no other handler or variant shares the name, because the interpreter dispatches a
+message by its name.
 
 **A `send` is checked against the target, one side only.** When the pid's type shows
 its actor's state, a message of an actor with a different state is a compile error

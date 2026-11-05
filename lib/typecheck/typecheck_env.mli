@@ -139,6 +139,7 @@ type fn_bound = {
 
 (** The type synthesised for an actor's messages ([actor ^ "_Msg"]). *)
 val actor_msg_type_name : string -> string
+val actor_msg_ctor_keys : ci_module:string -> string -> string -> string list
 
 (** [Some "<Actor>_Msg"] when the name is spelled `<Actor>.Msg` (scope not checked). *)
 val actor_msg_alias_target : string -> string option

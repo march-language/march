@@ -9245,6 +9245,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_actor_msg_from_parent.expected interp_nested_actor_msg_from_parent.out)))
 
+; ── Actor messages qualified by their actor (`Plus.Tally`, `Plus_Msg.Tally`) ──
+(rule
+ (targets native_actor_msg_qualified native_actor_msg_qualified.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_msg_qualified.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_msg_qualified
+        native/actor_msg_qualified.march)
+   (with-stdout-to native_actor_msg_qualified.out
+        (system "./native_actor_msg_qualified")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_msg_qualified.expected native_actor_msg_qualified.out)))
+
+(rule
+ (targets interp_actor_msg_qualified.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/actor_msg_qualified.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_actor_msg_qualified.out
+   (run %{exe:../bin/main.exe} native/actor_msg_qualified.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_msg_qualified.expected interp_actor_msg_qualified.out)))
+
 ; ── Same-named actors in sibling modules and at the root stay distinct ──
 (rule
  (targets native_nested_actor_same_name native_nested_actor_same_name.out)
