@@ -24,7 +24,7 @@ mod ClusterApRetryB do
   end
 
   fn session(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : Int do
-    match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
+    match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, n)) do
       Ok(_) -> 1
       Err(SessionNode.NoOffer(role, _)) ->
         println("Client: no access point would take role " ++ int_to_string(role))

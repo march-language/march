@@ -61,7 +61,7 @@ mod CertInitiateDeniedA do
         let name = "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ Checkout_Msg.fingerprint() ++ "/" ++ ClusterNode.node_id_of("node-b")
         if wait_name(h, name, 60000) do () else panic("node-a: node-b's offer never appeared") end
         println(me() ++ ": sees node-b's Checkout.Ledger offer")
-        match Checkout_Run.initiate_Client(c, h, fn (s, st) -> checkout(s, st)) do
+        match Checkout_Run.initiate_Client(h, fn (s, st) -> checkout(s, st)) do
           Ok(_) -> println(me() ++ ": Checkout session formed (wrong)")
           Err(e) -> println(me() ++ ": Checkout: " ++ Checkout_Run.error_message(e))
         end

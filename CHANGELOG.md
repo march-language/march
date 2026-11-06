@@ -198,6 +198,22 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Breaking:** the generated `@[endpoints]` entry points over a cluster node no longer take
+  the root capability. `<P>_Run.cluster_<R>`, `offer_<R>`, `initiate_<R>`, `offer_hosted_<R>`
+  and `cluster_hosted_<R>` take the node first: `Echo_Run.initiate_Client(node, body)`, where
+  it was `(io, node, body)`. A role with a grant line (`role Ledger needs IO.FileWrite`) takes
+  one capability per granted path after the node, which the caller supplies:
+  `Checkout_Run.offer_Ledger(node, fw, 64, body)`. A caller holding `Cap(IO)` writes
+  `cap_narrow(io)` there. To migrate, delete the first argument of each call, and add the
+  granted capabilities after the node for a role that has a grant. A program that plays its
+  roles over a cluster node therefore no longer needs `Cap(IO)` at all, and a topology pool
+  derives the capabilities its code uses: the `ingress` pool of `examples/lab_app` went from
+  `IO` to six narrow capabilities, none of them network or root. `run_<R>` and `host_<R>`,
+  which open their own connections, are unchanged. The `SessionNode` functions under these
+  (`run_cluster`, `offer_role`, `initiate`, `offer_hosted`, `start_offered_role` and the
+  hosted forms) lose their `io` parameter the same way, and `ClusterNode.attach_session(node,
+  ops)` is the new operation they use.
+
 - Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
   of the wrong type names the step and points at its line in the protocol. A body calling another
   role's functions says "`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B`"

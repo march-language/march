@@ -66,7 +66,7 @@ mod TopologyRejoinA do
         -- never offers the role at the cluster's start (see topology_move).
         wait_marker(h, Topology.marker("Ledger.Server", ClusterNode.node_id_of("node-b")), 60000)
         Topology.place(h, [ Topology.role("Ledger.Server", Topology.count(1),
-                              fn () -> Ledger_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st))) ])
+                              fn () -> Ledger_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st))) ])
         watch(h, me, false, false, unix_time_ms(), Env.require("TOPOLOGY_STOP_FILE"))
         println(me ++ ": stopping")
         Topology.stop(h)

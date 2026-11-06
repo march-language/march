@@ -73,7 +73,7 @@ mod TopologyMoveB do
           wait_marker(h, Topology.marker("Echo.Server", ClusterNode.node_id_of(other)), 60000)
         else () end
         Topology.place(h, [ Topology.role("Echo.Server", Topology.count(1),
-                              fn () -> Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st))) ])
+                              fn () -> Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st))) ])
         watch(h, me, false, false, unix_time_ms(), Env.require("TOPOLOGY_STOP_FILE"))
         println(me ++ ": stopping")
         Topology.stop(h)

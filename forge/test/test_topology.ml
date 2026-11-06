@@ -45,7 +45,7 @@ let shop_march = {|mod Shop do
       1
     end
     pfn helper(c) do
-      Checkout_Run.initiate_Client(c, 1, fn s -> s)
+      Checkout_Run.initiate_Client(1, fn s -> s)
     end
   end
 

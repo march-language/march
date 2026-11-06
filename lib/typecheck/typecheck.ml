@@ -10306,8 +10306,12 @@ type role_root = {
 
 (* The runner front a called name is, if any: (protocol, role, callback
    positions).  A hosted front's callbacks start at [start]; a body front's
-   is the last argument ([-1]). *)
-let role_front_of (name : string) : (string * string * [ `Body | `Hosted of int ]) option =
+   is the last argument ([-1]).  A CLUSTER hosted front (`offer_hosted_R`,
+   `cluster_hosted_R`) takes the role's grant as parameters after the node,
+   one per path, so its callbacks start that many places later:
+   [`Hosted_after_grant start] is the position with an empty grant. *)
+let role_front_of (name : string)
+  : (string * string * [ `Body | `Hosted of int | `Hosted_after_grant of int ]) option =
   match String.rindex_opt name '.' with
   | None -> None
   | Some i ->
@@ -10332,10 +10336,10 @@ let role_front_of (name : string) : (string * string * [ `Body | `Hosted of int 
       in
       (* longer prefixes first *)
       match strip "offer_hosted_" with
-      | Some r -> Some (proto, r, `Hosted 4)
+      | Some r -> Some (proto, r, `Hosted_after_grant 3)
       | None -> (
         match strip "cluster_hosted_" with
-        | Some r -> Some (proto, r, `Hosted 4)
+        | Some r -> Some (proto, r, `Hosted_after_grant 3)
         | None -> (
           match strip "host_" with
           | Some r -> Some (proto, strip_or r, `Hosted 5)
@@ -10387,7 +10391,11 @@ let find_role_roots (env : env) : role_root list =
                          match List.rev args with
                          | e :: _ -> root "body" None e
                          | [] -> ())
-                       | `Hosted start ->
+                       | (`Hosted _ | `Hosted_after_grant _) as k ->
+                         let start = match k with
+                           | `Hosted start -> start
+                           | `Hosted_after_grant start -> start + List.length grant
+                         in
                          let host = Option.bind (nth (start - 1)) host_of in
                          List.iteri
                            (fun j what -> Option.iter (root what host) (nth (start + j)))

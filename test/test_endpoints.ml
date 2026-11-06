@@ -1768,6 +1768,58 @@ let ungranted_body_type_unchanged =
          ("String -> " ^ session ^ " -> ()") (param_ty src "Stream_Run" "offer_hosted_Cons" "start");
        Alcotest.(check int) "no narrowing" 0 (narrow_count src "Stream_Run" "run_Cons"))
 
+(* ── the cluster fronts take what the runner needs, not `Cap(IO)` ─────── *)
+
+(** The parameter names of [f] in generated module [m], in order. *)
+let param_names src m f : string list =
+  let mod_ = parse_and_desugar src in
+  let decls =
+    List.find_map (function DMod (nm, _, ds, _) when nm.txt = m -> Some ds | _ -> None) mod_.mod_decls
+    |> Option.get
+  in
+  let fd = List.find_map (function DFn (fd, _) when fd.fn_name.txt = f -> Some fd | _ -> None) decls |> Option.get in
+  List.filter_map (function FPNamed pr -> Some pr.param_name.txt | _ -> None) (List.hd fd.fn_clauses).fc_params
+
+(* A front over a running cluster node is given the node, and the node can
+   attach a session itself (`ClusterNode.attach_session`), so the front has no
+   use for the root capability.  The role's grant is then the CALLER's to
+   hand over: one parameter per `needs` path, after the node, passed on to the
+   body unchanged.  A front that took `Cap(IO)` and narrowed it made every
+   program that plays a role hold the root capability. *)
+let cluster_fronts_take_no_root =
+  Alcotest.test_case "a cluster front takes the node and one Cap per granted path, never Cap(IO)" `Quick
+    (fun () ->
+       let src = wrap stream_granted in
+       let names f = param_names src "Stream_Run" f in
+       let g = [ "io_console"; "io_filewrite" ] in
+       let check f expected = Alcotest.(check (list string)) f expected (names f) in
+       check "cluster_Cons" ([ "node" ] @ g @ [ "session"; "body" ]);
+       check "offer_Cons" ([ "node" ] @ g @ [ "capacity"; "body" ]);
+       check "offer_work_Cons" ([ "node" ] @ g @ [ "capacity"; "body" ]);
+       check "__offer_work_start_Cons" ([ "node" ] @ g @ [ "session"; "abandoned"; "body" ]);
+       check "initiate_Cons" ([ "node" ] @ g @ [ "body" ]);
+       check "offer_hosted_Cons" ([ "node" ] @ g @ [ "capacity"; "host"; "start"; "deliver"; "cancel" ]);
+       check "offer_work_hosted_Cons" ([ "node" ] @ g @ [ "capacity"; "host"; "start"; "deliver"; "cancel" ]);
+       check "__offer_work_hosted_start_Cons"
+         ([ "node" ] @ g @ [ "session"; "abandoned"; "host"; "start"; "deliver"; "cancel" ]);
+       check "cluster_hosted_Cons" ([ "node" ] @ g @ [ "session"; "host"; "start"; "deliver"; "cancel" ]);
+       check "offer_Prod" [ "node"; "io_console"; "capacity"; "body" ];
+       Alcotest.(check string) "the grant parameter's type" "Cap(IO.FileWrite)"
+         (param_ty src "Stream_Run" "offer_Cons" "io_filewrite");
+       (* nothing to narrow from: the caps arrive as given *)
+       List.iter (fun f -> Alcotest.(check int) (f ^ " narrows nothing") 0 (narrow_count src "Stream_Run" f))
+         [ "cluster_Cons"; "offer_Cons"; "offer_work_Cons"; "__offer_work_start_Cons"; "initiate_Cons";
+           "offer_hosted_Cons"; "offer_work_hosted_Cons"; "__offer_work_hosted_start_Cons"; "cluster_hosted_Cons" ];
+       (* a role with no grant: the node and the front's own arguments *)
+       let plain = wrap stream in
+       Alcotest.(check (list string)) "ungranted offer" [ "node"; "capacity"; "body" ]
+         (param_names plain "Stream_Run" "offer_Cons");
+       Alcotest.(check (list string)) "ungranted initiate" [ "node"; "body" ]
+         (param_names plain "Stream_Run" "initiate_Cons");
+       (* the runner with connections of its own still starts from the root *)
+       Alcotest.(check (list string)) "run_Cons" [ "io"; "node_id"; "secret"; "addrs"; "body" ]
+         (names "run_Cons"))
+
 (* Against the real stdlib (`SessionNode` is not in the thin one): a body
    written with the grant typechecks at the runner, one written without it
    does not, and the error names the cap the body did not take. *)
@@ -1877,6 +1929,37 @@ let cli_role_grant_violation =
          (contains_text out "The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`"
           && contains_text out "the body calls `cons` here"
           && contains_text out "`cons` calls `save` here"))
+
+(* The same walk from the fronts over a cluster node.  The hosted ones pin
+   where the callbacks sit now that the grant's parameters come before them:
+   a walk that looked one place early would take `host` for `start` and find
+   nothing.  `offer_work_` and `offer_work_hosted_`, which only a topology
+   app's generated `main` calls, are not walked:
+   specs/todos/2026-11-05-topology-role-grant-unenforced.md. *)
+let cli_role_grant_cluster_fronts =
+  Alcotest.test_case "CLI: the grant is checked at the cluster fronts, hosted ones included" `Slow
+    (fun () ->
+       let with_call call =
+         let src = replace_all ~needle:"  needs Session.Live\n" ~by:"  needs Session.Live\n  needs ClusterNode.Live\n  needs IO.Spawn\n" violation_src in
+         let src = replace_all ~needle:"  fn main(c : Cap(IO)) do\n"
+             ~by:"  actor Host do\n    state { n : Int }\n    init { n: 0 }\n    on Ping() do state end\n  end\n  fn main(c : Cap(IO)) do\n    let node = ClusterNode.attach(c, ClusterNode.ops_stub(\"n\"))\n    let h = spawn(Host)\n" src in
+         replace_all
+           ~needle:"Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))"
+           ~by:call src
+       in
+       let body = "fn (s, con, st) -> cons(s, con, st)" in
+       let hosted = "h, fn (_sid, _s, _con) -> save(1), fn (_sid, _s, _f, _m, _e) -> (), fn (_sid, _s, _r, _w, _e) -> ()" in
+       List.iter
+         (fun (front, call) ->
+            let rc, out = check_cli (with_call call) in
+            Alcotest.(check int) (front ^ ": exit code (output: " ^ out ^ ")") 1 rc;
+            Alcotest.(check bool) (front ^ ": names the grant (output: " ^ out ^ ")") true
+              (contains_text out "the role is granted only `Cap(IO.Console)`"))
+         [ ("cluster_", "Stream_Run.cluster_Cons(node, cap_narrow(c), \"sid\", " ^ body ^ ")");
+           ("offer_", "Stream_Run.offer_Cons(node, cap_narrow(c), 4, " ^ body ^ ")");
+           ("initiate_", "Stream_Run.initiate_Cons(node, cap_narrow(c), " ^ body ^ ")");
+           ("offer_hosted_", "Stream_Run.offer_hosted_Cons(node, cap_narrow(c), 4, " ^ hosted ^ ")");
+           ("cluster_hosted_", "Stream_Run.cluster_hosted_Cons(node, cap_narrow(c), \"sid\", " ^ hosted ^ ")") ])
 
 let cli_role_grant_named_body =
   Alcotest.test_case "CLI: a named function passed as the body is walked too" `Quick (fun () ->
@@ -2702,13 +2785,13 @@ let tests =
     two_step_branch_shape; two_step_branch_ok; two_step_branch_skip;
     peers_shape; granted_peers_take_the_caps; chaos_user_payload_generator; peers_typecheck;
     cli_script_mismatch_panics; cli_script_runs_out_panics;
-    cli_role_grant_violation; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;
+    cli_role_grant_violation; cli_role_grant_cluster_fronts; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;
     cli_role_grant_hosted_actor; cli_dump_role_authority;
     cli_role_grant_let_bound_body; cli_role_grant_parameter_body; cli_role_grant_aliased_fn;
     cli_role_grant_local_closure; cli_role_grant_call_built_body; cli_role_grant_direct_builtin;
     cli_role_grant_unresolvable_body_warns; cli_role_grant_wrong_cap_type;
     cli_dump_role_authority_local_closures; cli_role_needs_non_io; cli_grants_not_in_program_fingerprint;
-    granted_body_type; ungranted_body_type_unchanged; cli_granted_body_ok; cli_granted_body_missing_caps;
+    granted_body_type; ungranted_body_type_unchanged; cluster_fronts_take_no_root; cli_granted_body_ok; cli_granted_body_missing_caps;
     grants_not_in_fingerprint; role_needs_ok; role_identifier_ok; role_needs_unknown_cap;
     role_needs_unknown_role; role_needs_twice; role_needs_after_message; role_needs_nested; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;
     cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;

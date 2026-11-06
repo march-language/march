@@ -53,7 +53,7 @@ mod UpgradeTraffic do
   -- of both answers) when it completed.
   pfn session(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int, between : Int -> Bool) : Option(Int) do
     let got = Vault.new("upgrade_traffic_" ++ int_to_string(n))
-    match Echo_Run.initiate_Client(io, node, fn (s, st) ->
+    match Echo_Run.initiate_Client(node, fn (s, st) ->
         Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, n), fn (a, st2) ->
           let _ = between(0)
           Echo_Client.recv_Answer2(s, Echo_Client.send_Ask2(s, st2, a), fn (b, st3) ->

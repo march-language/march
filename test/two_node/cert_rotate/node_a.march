@@ -108,7 +108,7 @@ mod CertRotateA do
             _ -> ()
           end)
         println(me() ++ ": up")
-        match Order_Run.offer_Shop(c, h, 4, fn (s, st) -> shop(s, st, stop)) do
+        match Order_Run.offer_Shop(h, 4, fn (s, st) -> shop(s, st, stop)) do
           Err(e) -> panic(Order_Run.error_message(e))
           Ok(o) ->
             wait_linked(h, 60000)

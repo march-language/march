@@ -55,11 +55,11 @@ mod ClusterStopLoopback do
       Err(e) -> panic(e)
       Ok(h) ->
         let own = ClusterNode.node_id(h)
-        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+        match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st)) do
           Err(e) -> panic(Echo_Run.error_message(e))
           Ok(_o) ->
             visible(h, _o, 10000)
-            match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, 1)) do
+            match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, 1)) do
               Ok(_) -> println("before stop: session done")
               Err(e) -> println("before stop: " ++ Echo_Run.error_message(e))
             end
@@ -82,7 +82,7 @@ mod ClusterStopLoopback do
               Ok(_) -> println("send to self after stop: queued")
               Err(_) -> println("send to self after stop: refused")
             end
-            match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, 2)) do
+            match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, 2)) do
               Ok(_) -> println("initiate after stop: session ran")
               Err(_) -> println("initiate after stop: refused")
             end

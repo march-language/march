@@ -2732,6 +2732,7 @@ mod ClusterNode do
     off_security_event : Int -> (),
     registry_synced    : () -> Bool,
     rejoined_at        : () -> Option(Int),
+    attach_session     : Session.Ops -> Cap(Session.Live),
     handshake          : Int -> String -> Int -> Result(NetKernel.Authed, String)
   }
 
@@ -2744,7 +2745,10 @@ mod ClusterNode do
   and hands the cap to code written against a real node.
   """
   fn attach(io : Cap(IO), ops : ClusterOps) : Cap(ClusterNode.Live) do
-    cap_impl(mint_cap(io), ops)
+    -- `attach_session` is filled in here and nowhere else, over whatever the
+    -- caller put in the field: it is the one use of the root capability a
+    -- node keeps (see `attach_session` below), so it must come from [io].
+    cap_impl(mint_cap(io), { ops with attach_session: fn sops -> Session.attach(io, sops) })
   end
 
   pfn unsupported(op : String) do
@@ -2802,6 +2806,9 @@ mod ClusterNode do
       -- that has synced and that no peer remembers.
       registry_synced: fn _ -> true,
       rejoined_at: fn _ -> None,
+      -- Replaced by `attach`, which is the only way a dictionary becomes a
+      -- capability.
+      attach_session: fn _ -> unsupported("attach_session"),
       handshake: fn (_, _, _) -> Err("ClusterNode: handshake is not supported by this capability") }
   end
 
@@ -2850,6 +2857,8 @@ mod ClusterNode do
       on_security_event: fn f -> h_on_security_event(h, f),
       off_security_event: fn id -> Vault.drop(h.sec, int_to_string(id)),
       registry_synced: fn _ -> Vault.get_or(h.meta, "reg_synced", 0) != 0,
+      -- `attach` puts the real one in: it holds the root capability, this does not.
+      attach_session: fn _ -> unsupported("attach_session"),
       rejoined_at: fn _ -> Vault.get(h.meta, "rejoined_at"),
       handshake: fn (fd, role, timeout_ms) -> h_handshake(h, fd, role, timeout_ms) }
   end
@@ -3340,6 +3349,22 @@ mod ClusterNode do
   fn stop(c : Cap(ClusterNode.Live)) : () do
     let d = ops(c)
     d.stop(())
+  end
+
+  doc """
+  Attach a session transport on this node's authority: the `Cap(Session.Live)`
+  that `Session.attach(io, ops)` would give, without the root capability.
+
+  A node was started (or attached) by a holder of `Cap(IO)`, and it keeps that
+  one power: to say a session's transport is attached. The session runners use
+  it (`SessionNode.run_cluster`, `offer_role`, `initiate`), so a program that
+  holds a running node can play a role without holding the root capability.
+  It grants nothing more: every operation on the result goes through [sops],
+  which the caller built.
+  """
+  fn attach_session(c : Cap(ClusterNode.Live), sops : Session.Ops) : Cap(Session.Live) do
+    let d = ops(c)
+    d.attach_session(sops)
   end
 
   doc "This node's id."
