@@ -25,6 +25,32 @@ git log is authoritative for exact commits.
   predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
   own function of that name is in scope, the checker now says so
   (`predicate_vocabulary_shadowed`) instead of silently using the built-in.
+- **`forge hot-reload check` / `march --check --guarantees` say what a build guarantees.**
+  One block per actor and protocol, each line labelled `proved`, `violated`, `not proved`,
+  `not checked`, `checked (compiler)` or `assumed`, with what it rests on: state refinements,
+  `@invariant`, handler contracts, `migrate_state` (derived or written, against the deployed
+  build when there is one), `migrate_msg`, protocol projection and deadlock freedom, and the
+  runtime. It changes no verdict. Two gaps are labelled `not checked` rather than left
+  silent: `@invariant` is not checked on `init` or handler results, and no proof covers a
+  protocol's deadlock freedom. See docs/hot-code-reload.md, "What a build guarantees".
+- **`--refine-infer` proposes a relation a function keeps from its argument to its result.**
+  For `bump(a : Assoc(Int, Int)) : Assoc(Int, Int)`, which adds 1 to each value, a caller
+  that needs `Assoc({x : Int | true}, {y : Int | y > x})` gets the type proposed on both the
+  parameter and the result, checked as one step and written as two edits.
+- **`--refine-infer-module M`** limits inference to one module (standard library or yours),
+  with progress lines on stderr. `scripts/refine-infer-stdlib-sweep.sh` uses it to run
+  inference over the whole standard library one module at a time, in parallel: 98 seconds
+  instead of 48 minutes.
+- **Adding a field to an actor's state no longer needs a `migrate_state`.** When a build
+  knows the running version's schema (forge's `.schemas.json.prev`, or `--hcr-baseline`) and
+  an actor's state only gained fields whose `init` values are constants, the compiler writes
+  the migration: kept fields are copied, new ones take their `init` value. It is checked like
+  a written one, including on the live state before `ACTIVATE`, and `forge deploy hot` says
+  `migrate_state derived from the running version's state (adds history from init)`. A
+  removed or retyped field, or an `init` value that reads an `init` parameter, still needs a
+  written migration, and the refusal now says which. If a kept field's refinement was also
+  tightened, the error points at that field with the running state that breaks it. See
+  docs/hot-code-reload.md, "Derived migrations".
 - **A failing test reads like a compile error.** A failed `assert`, `Check.all` property or
   panicking test body now prints a `-- TEST FAILURE --` report with the line under a caret,
   the same under `march test` and `forge test` (compiled). For `assert (a == b)` it labels
@@ -289,7 +315,29 @@ git log is authoritative for exact commits.
   there as a labelled excerpt, innermost first. It replaces the `panic: ...` line and the
   numbered stack trace, for panics, `todo`, failed assertions and run-time errors such as
   division by zero. `MARCH_BACKTRACE=full` still adds the standard library's calls. The exit
-  code is unchanged. Compiled programs still print `panic: ...` alone.
+  code is unchanged.
+- A compiled program that stops on an unhandled panic or run-time error now prints a report in
+  the same style in place of the single `panic: ...` line: what happened, the `panic` / `todo` /
+  `unreachable` call's source line with a caret, then the functions it was reached through,
+  each shown by its first line. A compiled program does not record the line of each call, and
+  the report says so. Source lines are read from the path given at compile time; when the file
+  is not there the report gives `file:line`. `MARCH_BACKTRACE=full` adds the standard library's
+  functions. The exit code is unchanged. Scripts that matched `panic: ` in a compiled program's
+  stderr need the new wording (`The program panicked: ...`).
+- Diagnostics, four messages that cost a second round of fixing:
+  - A syntax error in a program whose `main` prints with no `needs IO.Console` now says so in a
+    note. The compiler cannot check capabilities until the program parses, so that error used
+    to appear only after the syntax was fixed.
+  - A protocol state that is never used says what its role must do next and which function
+    takes that step; closing the conversation at the top of a protocol's `loop` says a
+    repeating branch comes back there and how to go round again.
+  - `may crash D` naming a role that is not in the protocol lists the protocol's roles, and a
+    crash branch on a role not declared `may crash` says to remove the branch.
+  - The guard a refinement error suggests for a `List` call uses `List.length(xs)`; it used
+    to print `len(xs)`, the refinement measure, which is not a function.
+- A failed `assert` outside a test prints its own report (the line and both operands), then
+  what it was reached through. Interpreted, it used to print that report inside a second
+  report's headline.
 - An unsupervised actor whose handler fails under the interpreter is now reported: the actor,
   the message it was handling with its arguments, the failing line, and its state at the time.
   The interpreter used to drop such a crash without printing anything.
@@ -489,6 +537,17 @@ git log is authoritative for exact commits.
   compiler message on the page is generated by `scripts/gen-explainer-data.py` from the
   real compiler, and doc-lint fails if the lab app changes without a regeneration. A
   section on deploying to the running cluster is still to come.
+- **A second scrolling explainer, on what a deploy is allowed to do**
+  ([What a Deploy Is Allowed to Do](docs/deploy-authority.md)). It follows one dependency
+  update to the lab app, a library that starts opening a socket, past each check that asks
+  what code can reach: a module's `needs` lines, the grant on `main`, `forge deps` against
+  the committed capability file, the capabilities the compiler derives for each pool of a
+  topology, the generated firewall, `forge deploy hot`'s widening gate, and the node's own
+  policy. The pinned figures are one square per module of the program, and an animated
+  topology: roles placed on machines from the file, sessions flowing, a machine stopped,
+  and a patch stopped at each gate. The topology is a simulation, labelled as one. Every
+  count and tool message is generated by `scripts/gen-authority-data.py` from the real
+  compiler and forge; the page says which one line it quotes from the reference instead.
 - A new Error Messages tour (`/docs/error-messages/`): 34 real compiler errors, from syntax
   slips through types, capabilities, linearity, actors, session channels, protocols and
   refinements, each with what `march --check` prints today. An error playground on the page
@@ -536,6 +595,26 @@ git log is authoritative for exact commits.
   message saying so that now names your function.
 - **No false "not checked" warning on a qualified predicate call that is checked.** A
   predicate calling `Inner.dbl(n)` was proved and still warned that it enforces nothing.
+- Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
+  operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
+  is known by its byte length, and distinct literals are distinct values; record field access,
+  literals, updates and patterns, and tuple construction and patterns, all translate.
+- **`--refine-infer` no longer skips programs that `--check` accepts.** A record named like a
+  standard-library one (`type NodeInfo`, `type Member`) left a type error inside the
+  standard library that `--check` never shows, and inference then printed only "skipped,
+  the program has errors". Inference now stops on the errors `--check` stops on, and a skip
+  names the first errors it stopped on.
+- **`forge refine --infer` prints each proposal once.** When the project does not check as
+  one unit, forge checks each file on its own and infers once over the files that check.
+  Before, it inferred once per file and printed the same proposals for every file (30 times
+  on a 31-file project).
+- **Less `--refine-infer` noise.** A recursive group with nothing to infer near it is no longer
+  noted `scc-unsupported`, and a field test such as `_.step != 0` is no longer tried on an
+  `Int` or `List` value.
+- **Two compiles of one project no longer risk a torn refinement verdict.** The verdict cache
+  under `.march/cas/vc` wrote each entry in place, so a `march --check` reading an entry
+  while another process wrote it could see half a counterexample. Entries are now written
+  to a temporary file and renamed into place.
 - **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
   (what `forge test` runs) treated a property that returned `false` as passing. Only a
   property that panicked or failed an `assert` was caught. Under `march test` it already

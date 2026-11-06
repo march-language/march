@@ -39,6 +39,12 @@ type actor = {
 
 let baseline : (string * actor) list ref = ref []
 
+(** The `<actor>_migrate_state` functions the compiler derived
+    (Desugar_migrate_derive, M11), with where each state field is declared.
+    A counterexample to one is reported at the field, in words that say the
+    user did not write the function.  Filled by the driver. *)
+let derived : (string * (string * A.span) list) list ref = ref []
+
 let ends_with ~suffix s =
   let n = String.length s and k = String.length suffix in
   n > k && String.sub s (n - k) k = suffix

@@ -177,18 +177,20 @@ and call f args =
 let boundary = [ 0; 1; -1; max_int; min_int; max_int - 1; min_int + 1 ]
 
 (* A data type's constructors (SMT names) with their field sorts at [args],
-   or [None] when a generator cannot be trusted: a record, a datatype whose
+   or [None] when a generator cannot be trusted: a datatype whose
    TYPE NAME two modules (or a module and a built-in) declare, so a field
    sort naming it may be the wrong declaration (review round 1 of
    2026-11-02, I1: `W1(Tq)` drew only the other `Tq`'s constructors, and the
    interpreter took them by name), or a constructor name another datatype
-   also declares (the interpreter's value carries the bare name only). *)
+   also declares (the interpreter's value carries the bare name only).  A
+   record is drawn like any one-constructor type and handed to the
+   interpreter as a record ([to_value]). *)
 let ctors_of (adt : string) (args : Smt.sort list) : (string * Smt.sort list) list option =
   match Hashtbl.find_opt RE.adt_ctors adt with
   | None | Some [] -> None
   | Some _ when Hashtbl.mem RE.ambiguous_adts adt -> None
   | Some cs ->
-    if List.exists (fun c -> Hashtbl.mem RE.ctor_field_names c || RE.ctor_display c <> c) cs then None
+    if List.exists (fun c -> RE.ctor_display c <> c) cs then None
     else
       let fields c =
         match Hashtbl.find_opt RE.ctor_field_sorts_poly c with
@@ -269,9 +271,18 @@ let inputs (name : string) (params : Smt.sort list) : (bool * lv list) list opti
 
 (* ── The program side ────────────────────────────────────────────────────── *)
 
+(* A tuple's or a record's constructor in the logic (§3.2) is a tuple or a
+   record in the interpreter. *)
+let is_tuple_ctor c xs = c = RE.tuple_ctor (List.length xs) && List.length xs >= 2
+
+let record_fields c = Hashtbl.find_opt RE.ctor_field_names c
+
 let rec to_value = function
   | LInt n -> V.VInt n
   | LBool b -> V.VBool b
+  | LCon (c, xs) when is_tuple_ctor c xs -> V.VTuple (List.map to_value xs)
+  | LCon (c, xs) when (match record_fields c with Some ns -> List.length ns = List.length xs | None -> false) ->
+    V.VRecord (List.combine (Option.get (record_fields c)) (List.map to_value xs))
   | LCon (c, xs) -> V.VCon (RE.ctor_display c, List.map to_value xs)
 
 (* A constructor tag the interpreter may qualify ([M.Some]). *)
@@ -281,6 +292,14 @@ let rec same (v : V.value) (l : lv) : bool option =
   match v, l with
   | V.VInt a, LInt b -> Some (a = b)
   | V.VBool a, LBool b -> Some (a = b)
+  | V.VTuple xs, LCon (d, ys) when is_tuple_ctor d ys -> all_same xs ys
+  | V.VRecord fs, LCon (d, ys) when record_fields d <> None -> (
+    let ns = Option.get (record_fields d) in
+    if List.length ns <> List.length ys || List.length fs <> List.length ns then Some false
+    else
+      match List.map (fun n -> List.assoc n fs) ns with
+      | xs -> all_same xs ys
+      | exception Not_found -> Some false)
   | V.VCon (c, xs), LCon (d, ys) ->
     if bare_tag c <> RE.ctor_display d || List.length xs <> List.length ys then Some false
     else
@@ -288,6 +307,10 @@ let rec same (v : V.value) (l : lv) : bool option =
         (fun acc x y -> match acc, same x y with Some true, r -> r | a, _ -> a)
         (Some true) xs ys
   | _ -> None
+
+and all_same xs ys =
+  if List.length xs <> List.length ys then Some false
+  else List.fold_left2 (fun acc x y -> match acc, same x y with Some true, r -> r | a, _ -> a) (Some true) xs ys
 
 let rec show_value (v : V.value) =
   match v with

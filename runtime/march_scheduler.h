@@ -466,6 +466,10 @@ typedef struct march_proc {
      * Read and cleared by the next march_panic on this proc. */
     void                      *diag_site_file;
     int64_t                    diag_site_line;
+    /* The call's columns on that line, 0-based: [col, end_col); end_col 0
+     * when the call runs past the line.  For the stderr report only. */
+    int64_t                    diag_site_col;
+    int64_t                    diag_site_end_col;
     _Atomic int                cancel_requested;
     /* The unified epoch model (D12/D33; specs/plans/2026-09-21-distributed-
      * authority-and-deploys-plan.md, II.4.1).  The code epoch this unit of

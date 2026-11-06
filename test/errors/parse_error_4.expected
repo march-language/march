@@ -11,4 +11,5 @@ March `if` expressions always need an `else` branch: [parse_error]
     else
         expr2
     end
+    After this is fixed, `main` will also need permission to print: add `needs IO.Console` to the module, and give `main` the grant, `fn main(_console : Cap(IO.Console))`.
     run `march --explain parse_error`

@@ -493,6 +493,21 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
           | A.ECon ({ A.txt = c; _ }, fargs, _), Smt.SData (adt, _)
             when (not (Hashtbl.mem ambiguous_adts adt)) && ctor_of_adt adt c <> None ->
             Result.map (ctor_term adt (Option.get (ctor_of_adt adt c))) (all (List.map r fargs))
+          (* A tuple literal at a tuple parameter, a record literal naming
+             every field at a record parameter: the datatype's constructor. *)
+          | A.ETuple ((_ :: _ :: _ as xs), _), Smt.SData (adt, _)
+            when adt = Printf.sprintf "$Tup%d" (List.length xs) ->
+            Result.map (ctor_term adt (tuple_ctor (List.length xs))) (all (List.map r xs))
+          | A.ERecord (fs, _), Smt.SData (adt, _) when not (Hashtbl.mem ambiguous_adts adt) -> (
+            match Hashtbl.find_opt adt_ctors adt with
+            | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor ->
+              let names = Hashtbl.find ctor_field_names ctor in
+              let given = List.map (fun ((n : A.name), _) -> n.A.txt) fs in
+              if List.sort compare given <> List.sort compare names then r a
+              else
+                Result.map (ctor_term adt ctor)
+                  (all (List.map (fun n -> r (snd (List.find (fun ((m : A.name), _) -> m.A.txt = n) fs))) names))
+            | _ -> r a)
           | _ -> r a
         in
         Result.map (fun ts -> Smt.App (sym, ts)) (all (List.map2 arg args psorts))

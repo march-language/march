@@ -336,6 +336,12 @@
     return !!(live[figure] && live[figure](from, to, s, data));
   };
 
+  // A simulation defined outside this file (chapters-authority.js): its core, how to
+  // build the picture a card opens on, and how to move on to the next card.
+  ME.registerSim = function (figure, parts) {
+    sims[figure] = parts.sim; builders[figure] = parts.build; live[figure] = parts.live;
+  };
+
   function runScript(sim, s, script) {
     script.actions.forEach(function (a) {
       sim.advance(s, a.at - s.t);

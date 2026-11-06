@@ -1251,8 +1251,9 @@ to annotate.
   comparison and Boolean operators.
 - It takes no function as a parameter and makes no lambda, except as described
   under [Functions that take functions](#functions-that-take-functions) below.
-- Its parameters and result are `Int`, `Bool`, data types (lists, options,
-  your own types) or type variables, and it does not return `Unit`.
+- Its parameters and result are `Int`, `Bool`, `Float`, `String`, data types
+  (lists, options, your own types), records, tuples or type variables, and it
+  does not return `Unit`.
 - It is not marked `@[opaque]`, `@[assume]` or `@[trusted]`, and its name is not
   one predicates already give a meaning (`len`, the set words, `is_<Ctor>`).
 
@@ -1289,6 +1290,31 @@ need(r)           -- proved
 
 Functions with several parameters, and functions that return a list or a
 `Bool`, are reflected like any other.
+
+**Floats, strings, records and tuples.**
+- **A `Float`** is a value the checker knows nothing about. Each float
+  operation (`+.`, `<`, `==` and the rest) is an unknown function of its
+  arguments. So `fn cls(f : Float, n : Int) : Int do if f < 0.0 do n else n end end`
+  gives `cls(f, 2) == 2`, but `hk(0.5) == 1` for
+  `fn hk(f : Float) : Int do if f < 1.0 do 1 else 2 end end` is not proved. Nothing
+  is ever concluded from what a float comparison returns, so NaN and `-0.0` cannot
+  mislead it.
+- **A `String`** is known only by its length in bytes (`len`, `string_byte_length`).
+  Each string literal in a body is one value with that length, different from
+  every other literal, and the same value as that literal in a predicate. With
+  `fn tag(n : Int) : String do if n > 0 do "a" else "b" end end`, both
+  `tag(1) == "a"` and `tag(1) != tag(0)` are proved.
+- **A record** is its declared type: `p.x`, `{ x: n, y: m }`, `{ p with x: n }`
+  and a `{ x, y }` pattern in a `match` or a `let` all translate. Records are
+  matched to their declared type by their field names, so a function over a
+  record is reflected only when exactly one declared record has those fields,
+  with those types, and that record takes no type parameters.
+- **A tuple** works the same way: `(a, b)` builds one, and a `(a, b)` pattern in a
+  `match` or a `let` takes one apart. A tuple or record literal may be passed to
+  a reflected function in a predicate: `sw((5, 2)) == 3`, `px({ x: 1, y: 2 }) == 3`.
+
+A variable of tuple or record type cannot be used in a predicate yet. So a lemma
+that takes a tuple parameter, such as `swap(swap(t)) == t`, is not proved.
 
 **Steps the facts decide, up to the fuel.** The checker uses each reflected
 call's definition at the arguments it sees. When that produces another call,

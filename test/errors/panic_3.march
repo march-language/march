@@ -1,0 +1,18 @@
+-- MARCH-MODE: run-compiled
+-- EXPECT-ERROR: The program reached a `todo`: parse the header
+-- A `todo` reached in a compiled program: the report quotes the `todo` call.
+mod Main do
+  needs IO.Console
+
+  fn parse(line : String) : Int do
+    if string_length(line) > 3 do
+      todo("parse the header")
+    else
+      0
+    end
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(parse("name: x")))
+  end
+end

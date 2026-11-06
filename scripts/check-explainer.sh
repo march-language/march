@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# check-explainer.sh: the tests behind docs/protocol-to-cluster.md, the scrolling
-# explainer for distributed March (specs/2026-11-05-distributed-explainer-design.md).
+# check-explainer.sh: the tests behind the scrolling explainers,
+# docs/protocol-to-cluster.md (specs/2026-11-05-distributed-explainer-design.md) and
+# docs/deploy-authority.md, which shares its machinery.
 #
 # Needs python3 and node, and no compiler: the generator's tests run on recorded
 # fixtures (test/explainer/fixtures/), and a test that needs the compiler skips itself
@@ -11,6 +12,7 @@ cd "$(dirname "$0")/.."
 
 echo "== explainer: generator tests =="
 python3 test/explainer/test_gen.py
+python3 test/explainer/test_gen_authority.py
 python3 test/explainer/test_budget.py
 
 echo "== explainer: script tests =="
@@ -21,5 +23,6 @@ node scripts/render-explainer-fallbacks.js --check
 
 echo "== explainer: reading budget =="
 python3 scripts/check-explainer-budget.py docs/protocol-to-cluster.md
+python3 scripts/check-explainer-budget.py docs/deploy-authority.md
 
 echo "explainer checks passed"

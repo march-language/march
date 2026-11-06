@@ -176,7 +176,12 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then ulimit -c unlimited; fi
           case "${{ matrix.shard }}" in
             codegen)     dune build @test/runtest-run_codegen ;;
-            refinecheck) dune build @test/runtest-test_refinecheck ;;
+            # One alcotest process kept one of the runner's 4 cores busy and
+            # took 50-77 min (November 2026). MARCH_TEST_PROCS runs its groups
+            # in that many child processes (Test_helpers.run_groups); the
+            # children print whole, then one summary line with the slowest
+            # groups. Not a new shard: no extra runner from the 20-slot pool.
+            refinecheck) MARCH_TEST_PROCS=$(nproc) dune build @test/runtest-test_refinecheck ;;
             compiler)    dune build @test/runtest-run_compiler ;;
             rest)
               # `dune runtest` minus forge/ (the `forge` shard). A dune file
@@ -766,6 +771,19 @@ jobs:
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             python3 scripts/gen-explainer-data.py --check
+
+      # docs/deploy-authority.md, the second explainer: module capabilities, compiler
+      # messages and what forge prints when a dependency, a pool or a deploy asks for
+      # more than it had (scripts/gen-authority-data.py). It runs forge as well as the
+      # compiler, so forge is built here.
+      - name: Check the deploy-authority explainer's generated data
+        timeout-minutes: 15
+        run: |
+          eval $(opam env)
+          dune build forge/bin/main.exe
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+          FORGE_BIN="$PWD/_build/default/forge/bin/main.exe" \
+            python3 scripts/gen-authority-data.py --check
 
       # Compiles every demo/*.march program (the `demo` alias in demo/dune).
       # Nothing else in CI builds demo/: at the 0.5.0 cut seven demos had

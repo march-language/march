@@ -1,0 +1,17 @@
+exit: 1
+-- RUNTIME ------------------------- errors/panic_3.march
+
+The program reached a `todo`: parse the header [panic]
+
+ 9 |       todo("parse the header")
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+    It was reached through these functions, innermost first:
+
+15 |   fn main(c : Cap(IO.Console)) do
+
+    Each line is where that function starts: a compiled program does not record
+    the line of each call, and leaves out functions the optimiser merged into
+    their callers. Run the program with `march` instead of compiling it to see
+    each call.
+

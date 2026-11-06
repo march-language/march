@@ -4,7 +4,7 @@ exit: 1
 refinement violation: index must not be negative [refinement_violated]
 argument `n` of `List.nth` does not satisfy precondition `_ >= 0`
 for example, when `i` is `-1`
-note: guard the call (e.g. `if i >= 0 && i < len(items) do List.nth(items, i) else … end`) or pass a value known to satisfy it
+note: guard the call (e.g. `if i >= 0 && i < List.length(items) do List.nth(items, i) else … end`) or pass a value known to satisfy it
 
 7 |     if i < 0 do List.nth(items, i) else 0 end
                     ^^^^^^^^^^^^^^^^^^

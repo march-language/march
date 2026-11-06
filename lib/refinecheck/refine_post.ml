@@ -662,6 +662,9 @@ let check_post_stage ~root errctx ~span ?(record_sort : string option = None)
         Hashtbl.iter
           (fun s' c' -> if s' <> s then assume := Smt.Ne (Smt.Const c, Smt.Const c') :: !assume)
           str_lit_tbl;
+        (* Stage 2: the same literal in a reflected body (D9). *)
+        if !Reflect_state.arm_on then
+          assume := Smt.Eq (Smt.Const c, Smt.App (Reflect_state.str_lit_sym s, [])) :: !assume;
         Some (Smt.Const c)
   in
   (* Scope names already declared into the `Str` sort by [scope_facts].  Both

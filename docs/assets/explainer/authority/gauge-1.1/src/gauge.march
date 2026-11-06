@@ -1,0 +1,10 @@
+-- gauge 1.1: formats a node's health reading, and reports it to a collector.
+mod Gauge do
+  needs IO.NetConnect
+
+  fn line(live : Int, at : Int) : String do
+    let text = IOList.to_string(~H"live ${live}\nat ${at}\n")
+    let _ = tcp_connect("collector.gauge.example", 4317)
+    text
+  end
+end

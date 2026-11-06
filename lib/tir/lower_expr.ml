@@ -521,11 +521,16 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
          && not (Lower_state.is_local_binding name) ->
     let site_var : Tir.var = {
       Tir.v_name = "__panic_site";
-      v_ty = Tir.TFn ([Tir.TString; Tir.TInt], Tir.TUnit);
+      v_ty = Tir.TFn ([Tir.TString; Tir.TInt; Tir.TInt; Tir.TInt], Tir.TUnit);
       v_lin = Tir.Unr } in
+    (* The call's columns on its first line, for the stderr report's caret;
+       end 0 when the call runs past that line. *)
+    let end_col = if sp.Ast.end_line = sp.Ast.start_line then sp.Ast.end_col else 0 in
     let site = Tir.EApp (site_var,
                          [Tir.ALit (Ast.LitString (Provenance.display_file sp.Ast.file));
-                          Tir.ALit (Ast.LitInt sp.Ast.start_line)]) in
+                          Tir.ALit (Ast.LitInt sp.Ast.start_line);
+                          Tir.ALit (Ast.LitInt sp.Ast.start_col);
+                          Tir.ALit (Ast.LitInt end_col)]) in
     let saved = !panic_site_lowering in
     panic_site_lowering := Some call;
     let lowered =

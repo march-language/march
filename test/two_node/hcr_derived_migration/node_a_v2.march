@@ -1,0 +1,23 @@
+mod Derived do
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Clock
+
+  actor Counter do
+    state { count : {Int | _ >= 0}, label : String, history : List(Int) }
+    init { count: 0, label: "v2", history: [] }
+    on Tick() do
+      { state with count: state.count + 1, history: Cons(state.count, state.history) }
+    end
+    on Report() do
+      println(state.label ++ " count: " ++ int_to_string(state.count)
+              ++ " history: " ++ int_to_string(List.length(state.history)))
+      state
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock)) : Unit do
+    let _ = spawn(Counter)
+    ()
+  end
+end

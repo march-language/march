@@ -482,6 +482,7 @@ end
 
 let in_dir src f =
   let dir = Filename.temp_dir "lemma_erase" "" in
+  Test_helpers.seed_vc_cache dir;
   Fun.protect ~finally:(fun () -> try U.remove_tree dir with _ -> ()) (fun () ->
       Out_channel.with_open_bin (Filename.concat dir "m.march") (fun oc -> output_string oc src);
       f dir)
@@ -1447,3 +1448,136 @@ let guard_call =
     gated "guard_call_red: an undecided guard stays undecided" (fun () ->
         let out = run (guard_call_src ^ "  @[lemma]\n  fn wn(x : Int) : {Unit | wrap(x) == 2} do () end\nend\n") in
         if not (unproved out "wn" || refuted out "wn") then Alcotest.failf "wrap(0) is 1:\n%s" out) ]
+
+(* Float (D9): a function over Floats reflects, every Float operation an
+   opaque symbol.  What does not depend on a Float operation's value
+   proves; what does (`f < 1.0` at 0.5) and IEEE equality (NaN) never do. *)
+let float_body_src =
+  {|mod FB do
+  fn hk(f : Float) : Int do 3 end
+  fn cls(f : Float, n : Int) : Int do if f < 0.0 do n else n end end
+  fn twice(f : Float) : Float do f +. f end
+  fn tk(f : Float) : Int do if twice(f) < 1.0 do 1 else 1 end end
+  fn hk2(f : Float) : Int do if f < 1.0 do 1 else 2 end end
+  fn same(a : Float, b : Float) : Bool do a == b end
+|}
+
+let float_body =
+  [ gated "float_body: a function over Floats reflects" (fun () ->
+        let out =
+          run
+            (float_body_src
+           ^ "  @[lemma]\n  fn l_hk(u : Int) : {Unit | hk(1.0) == 3} do () end\n  @[lemma]\n  fn l_cls(f : Float) : {Unit | cls(f, 2) == 2} do () end\n  @[lemma]\n  fn l_tk(f : Float) : {Unit | tk(f) == 1} do () end\nend\n")
+        in
+        expect_admitted out "l_hk";
+        expect_admitted out "l_cls";
+        expect_admitted out "l_tk");
+    gated "float_body_red: Float operations stay opaque, Float == is IEEE" (fun () ->
+        let out =
+          run
+            (float_body_src
+           ^ "  @[lemma]\n  fn l_hk2(u : Int) : {Unit | hk2(0.5) == 1} do () end\n  @[lemma]\n  fn l_same(f : Float) : {Unit | same(f, f)} do () end\n  @[lemma]\n  fn l_tw(f : Float) : {Unit | twice(f) == twice(f)} do () end\nend\n")
+        in
+        List.iter
+          (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
+          [ "l_hk2"; "l_same"; "l_tw" ]) ]
+
+(* String (D9): the opaque `$Str` with its byte length; a literal is one
+   constant per content, distinct from every other and shared with the
+   predicate's own spelling of it. *)
+let string_body_src =
+  {|mod SB do
+  fn greet(s : String) : Int do string_byte_length(s) + 1 end
+  fn lit(n : Int) : String do if n > 0 do "pos" else "negative" end end
+  fn tag(n : Int) : String do if n > 0 do "a" else "b" end end
+  fn same(a : String, b : String) : Bool do a == b end
+|}
+
+let string_body =
+  [ gated "string_body: a function over Strings reflects" (fun () ->
+        let out =
+          run
+            (string_body_src
+           ^ "  @[lemma]\n  fn l_greet(s : String) : {Unit | greet(s) > 0} do () end\n  @[lemma]\n  fn l_lit(u : Int) : {Unit | lit(1) != lit(0) && len(lit(0)) == 8} do () end\n  @[lemma]\n  fn l_tag(u : Int) : {Unit | tag(1) != tag(0) && tag(1) == \"a\"} do () end\n  @[lemma]\n  fn l_same(s : String) : {Unit | same(s, s)} do () end\nend\n")
+        in
+        expect_admitted out "l_greet";
+        expect_admitted out "l_lit";
+        expect_admitted out "l_tag";
+        expect_admitted out "l_same");
+    gated "string_body_red: a false theorem about a literal is not proved" (fun () ->
+        let out =
+          run
+            (string_body_src
+           ^ "  @[lemma]\n  fn l_bad(u : Int) : {Unit | tag(1) == tag(0)} do () end\n  @[lemma]\n  fn l_bad2(u : Int) : {Unit | tag(1) == \"b\"} do () end\n  @[lemma]\n  fn l_bad3(u : Int) : {Unit | len(lit(1)) == 8} do () end\nend\n")
+        in
+        List.iter
+          (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
+          [ "l_bad"; "l_bad2"; "l_bad3" ]) ]
+
+(* Records (§3.2): the declared record sort.  Field access is its selector,
+   a literal and an update its one constructor, a record pattern (in a
+   `match` or a `let`) its selectors. *)
+let record_body_src =
+  {|mod RB do
+  type Pt = { x : Int, y : Int }
+  fn px(p : Pt) : Int do p.x + p.y end
+  fn mk(n : Int) : Pt do { x: n, y: n + 1 } end
+  fn bump(p : Pt) : Pt do { p with x: p.x + 10 } end
+  fn sx(p : Pt) : Int do
+    let { x, y } = p
+    x - y
+  end
+  fn mx(p : Pt) : Int do match p do { x, y } -> x * 2 + y end end
+|}
+
+let record_body =
+  [ gated "record_body: functions over a record reflect" (fun () ->
+        let out =
+          run
+            (record_body_src
+           ^ "  @[lemma]\n  fn l_px(u : Int) : {Unit | px(mk(2)) == 5 && px({ x: 1, y: 2 }) == 3} do () end\n  @[lemma]\n  fn l_bump(n : Int) : {Unit | px(bump(mk(n))) == 2 * n + 11} do () end\n  @[lemma]\n  fn l_sx(n : Int) : {Unit | sx(mk(n)) == 0 - 1} do () end\n  @[lemma]\n  fn l_mx(u : Int) : {Unit | mx(mk(1)) == 4} do () end\nend\n")
+        in
+        List.iter (expect_admitted out) [ "l_px"; "l_bump"; "l_sx"; "l_mx" ]);
+    gated "record_body_red: an update that drops a field's value is not proved" (fun () ->
+        let out = run (record_body_src ^ "  @[lemma]\n  fn l_bad(n : Int) : {Unit | px(bump(mk(n))) == 2 * n + 1} do () end\nend\n") in
+        if not (unproved out "l_bad" || refuted out "l_bad") then Alcotest.failf "l_bad is false:\n%s" out) ]
+
+(* Tuples (§3.2): one datatype per arity, its constructor and selectors; a
+   tuple literal in a predicate at a tuple parameter is that constructor. *)
+let tuple_body_src =
+  {|mod TB do
+  fn sw(t : (Int, Int)) : Int do match t do (a, b) -> a - b end end
+  fn tl(n : Int) : Int do
+    let (a, b) = (n, n + 1)
+    a + b
+  end
+  fn pair(n : Int) : (Int, Int) do (n, n * 2) end
+  fn fst2(t : (Int, Int)) : Int do
+    let (a, _) = t
+    a
+  end
+  fn mixed(t : (Int, Bool)) : Int do
+    match t do
+      (n, true) -> n
+      (n, false) -> 0 - n
+    end
+  end
+|}
+
+let tuple_body =
+  [ gated "tuple_body: functions over tuples reflect" (fun () ->
+        let out =
+          run
+            (tuple_body_src
+           ^ "  @[lemma]\n  fn l_sw(u : Int) : {Unit | sw((5, 2)) == 3} do () end\n  @[lemma]\n  fn l_tl(n : Int) : {Unit | tl(n) == 2 * n + 1} do () end\n  @[lemma]\n  fn l_pair(n : Int) : {Unit | sw(pair(n)) == 0 - n && fst2(pair(n)) == n} do () end\n  @[lemma]\n  fn l_mixed(u : Int) : {Unit | mixed((3, false)) == 0 - 3} do () end\nend\n")
+        in
+        List.iter (expect_admitted out) [ "l_sw"; "l_tl"; "l_pair"; "l_mixed" ]);
+    gated "tuple_body_red: a false theorem about a tuple is not proved" (fun () ->
+        let out =
+          run
+            (tuple_body_src
+           ^ "  @[lemma]\n  fn l_bad(n : Int) : {Unit | sw(pair(n)) == n} do () end\n  @[lemma]\n  fn l_bad2(u : Int) : {Unit | mixed((3, true)) == 0 - 3} do () end\nend\n")
+        in
+        List.iter
+          (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
+          [ "l_bad"; "l_bad2" ]) ]

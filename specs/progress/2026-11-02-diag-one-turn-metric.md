@@ -59,3 +59,20 @@ limit of the intent check, not the message: its error is `json_derive_name_colli
 answer renames the user's `Stream_Message` type as the message says, which the check counts as a
 removed declaration. The other fixes (drop `@[endpoints]`, drop the derive) change what the program
 does. Overall: 346/391 → 363/391 (92.8%), counting the 17 against the 0 the previous run had.
+
+2026-11-06: a clean single run on main (400 cases, Haiku 5.5 subagents through
+`--prepare`/`--score`): **365/400 (91.2%)**, 11 intent, 24 rejected. The 24 by what was left
+after the answer: 7 where a syntax fix exposed `cap_needs` on a `main` that prints (the parser
+stops before capabilities are checked); 6 protocol cases where the next rule failed (3 closed
+the conversation in a branch that loops; 3 crash-declaration rules); 7 where the answer used a
+name that does not exist (one of them, `len(items)`, suggested by the compiler's own guard
+note); 4 others. The corpus was left as it is: layered errors are realistic.
+
+Then four message changes (`specs/progress/2026-11-06-diag-layered-errors.md`). Re-answering the
+16 cases whose prompt changed: 12 of the 13 that had failed are fixed, one (`parse_error_6`)
+now passes `--check` but fails the intent check, the 3 that passed still pass. **377/400
+(94.2%)**, 12 intent, 11 rejected. Still rejected: `cap_root_broad_2`/`_3`, `invalid_lemma_1` (a
+false lemma, no correct fix), `linear_captured_6`, `non_tail_recursion_2`, `pure_violation_1`
+(the mismatch names `FileError`, which cannot be written unqualified),
+`remote_actor_unroutable_1`, `stdlib_internal_1`, `syntax_error_6`, `type_mismatch_13`,
+`unknown_constructor_1`. The intent verdicts have not been read case by case.

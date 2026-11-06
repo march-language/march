@@ -1393,6 +1393,12 @@
  (modules test_caps)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
+;; test_refinecheck runs as ONE alcotest process unless MARCH_TEST_PROCS=N
+;; (N > 1) is set, as CI's refinecheck shard and scripts/run-tests.sh do: then
+;; its groups run in N child processes (Test_helpers.run_groups). Its
+;; compiler-driving cases start each fresh project with the stdlib's own
+;; verdicts already cached (Test_helpers.seed_vc_cache); the test program's
+;; obligations are still solved cold. MARCH_TEST_VC_SEED=0 turns that off.
 (test
  (name test_refinecheck)
  (enabled_if
