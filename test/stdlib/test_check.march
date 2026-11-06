@@ -66,18 +66,18 @@ mod TestCheck do
   test "same seed reproduces same failure" do
     -- Run twice with the same seed via all_with; each should find the
     -- same minimal counterexample.  We verify by catching the panic
-    -- via __try_call directly.
+    -- via __try_call directly.  Both runs go through ONE call site: the
+    -- failure report names the source line of the Check call, so two
+    -- call sites could never produce equal messages.
     let config = { Check.default_config() with seed: Some(12345), num_runs: 200 }
-    let r1 = __try_call(fn _ ->
-      let _ = Check.all_with(Gen.int(-100, 100), fn n -> n < 50, config)
-      -- __try_call is (Bool -> Bool); all_with panics before this is reached.
-      true
-    )
-    let r2 = __try_call(fn _ ->
-      let _ = Check.all_with(Gen.int(-100, 100), fn n -> n < 50, config)
-      -- __try_call is (Bool -> Bool); all_with panics before this is reached.
-      true
-    )
+    let run = fn ->
+      __try_call(fn _ ->
+        let _ = Check.all_with(Gen.int(-100, 100), fn n -> n < 50, config)
+        -- __try_call is (Bool -> Bool); all_with panics before this is reached.
+        true
+      )
+    let r1 = run()
+    let r2 = run()
     -- Both should be Err (property fails for n >= 50).
     match r1 do
     Ok(_)   -> Test.fail("expected r1 to fail")
