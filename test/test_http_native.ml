@@ -150,7 +150,7 @@ type server_ctx = {
   check_response  : string -> exp_status:int -> exp_body:string -> int * string * string -> unit;
 }
 
-let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> unit) =
+let with_compiled_server ?(extra_env = [||]) ~variant ~slug ~evloop ~server_src (k : server_ctx -> unit) =
   (* Without this, writing to a socket whose peer has just crashed kills THIS
      process with SIGPIPE — the test would die instead of reporting the dead
      server, which is the whole point of the exercise.  Ignoring it turns the
@@ -271,7 +271,8 @@ let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> u
     let env =
       Array.append (Unix.environment ())
         [| Printf.sprintf "MARCH_TEST_HTTP_PORT=%d" !port
-         ; (if evloop then "MARCH_HTTP_EVLOOP=1" else "MARCH_HTTP_EVLOOP=0") |] in
+         ; (if evloop then "MARCH_HTTP_EVLOOP=1" else "MARCH_HTTP_EVLOOP=0") |]
+      |> fun base -> Array.append base extra_env in
     let pid =
       Unix.create_process_env bin [| bin |] env Unix.stdin log_fd log_fd in
     Unix.close log_fd;
@@ -351,7 +352,11 @@ let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> u
      the OTHER variant's banner is the real regression, and still fails
      below. *)
   let banner_deadline = Unix.gettimeofday () +. 30.0 in
-  let want = if evloop then "(event-loop)" else "thread pool" in
+  (* The pool's sequential variant (MARCH_HTTP_SEQUENTIAL) starts no pool;
+     it announces "(sequential)" instead. *)
+  let sequential = Array.mem "MARCH_HTTP_SEQUENTIAL=1" extra_env in
+  let want =
+    if evloop then "(event-loop)" else if sequential then "(sequential)" else "thread pool" in
   let rec await_banner () =
     let b = read_log () in
     if find_from b want 0 <> None then b
@@ -360,7 +365,7 @@ let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> u
   in
   let banner = await_banner () in
   let saw_evloop = find_from banner "(event-loop)" 0 <> None in
-  let saw_pool   = find_from banner "thread pool"  0 <> None in
+  let saw_pool   = find_from banner want 0 <> None in
   if evloop && not saw_evloop then
     bail "asked for the EVENT LOOP but the server did not announce it — the \
           runtime implementation selector (march_http_evloop_enabled) is \

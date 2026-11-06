@@ -356,18 +356,6 @@ static void sweep_deadlines(int evfd) {
  * whose deadline moves with every read that brought bytes. Otherwise the
  * request's headers are still arriving: the header deadline runs from the
  * first byte and is NOT moved by later bytes (a slowloris drip). */
-/* Does buf hold a CRLFCRLF (end of a request's headers)? */
-static int has_header_end(const char *buf, size_t len) {
-    const char *p = buf, *end = buf + len;
-    while (end - p >= 4) {
-        const char *r = memchr(p, '\r', (size_t)(end - p - 3));
-        if (!r) return 0;
-        if (r[1] == '\n' && r[2] == '\r' && r[3] == '\n') return 1;
-        p = r + 1;
-    }
-    return 0;
-}
-
 static void update_read_phase(conn_state_t *c, int got_bytes, int dispatched) {
     if (c->rbuf_len == 0) {
         if (c->timed_phase != PH_IDLE || got_bytes) conn_set_phase(c, PH_IDLE);
@@ -378,7 +366,7 @@ static void update_read_phase(conn_state_t *c, int got_bytes, int dispatched) {
      * scan; a large upload would otherwise rescan its whole buffer on
      * every read. */
     int headers_done = (c->timed_phase == PH_BODY && !dispatched) ||
-                       has_header_end(c->rbuf, c->rbuf_len);
+                       march_http_has_header_end(c->rbuf, c->rbuf_len);
     if (headers_done) {
         if (c->timed_phase != PH_BODY || got_bytes) conn_set_phase(c, PH_BODY);
     } else if (c->timed_phase != PH_HEADERS) {

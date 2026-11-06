@@ -2017,6 +2017,69 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
  * are accepted instead of being rejected at the initial 64KB. */
 #define MAX_REQ_SIZE (32 * 1024 * 1024)
 
+/* macOS TCP_NOPUSH around pipelined batches is OFF. Darwin does not push
+ * queued data when TCP_NOPUSH is cleared, so a batch smaller than one
+ * segment can sit in the send queue with nothing in flight to trigger
+ * output: measured, a 50-request pipelined burst's 7200 response bytes
+ * stayed queued indefinitely once the socket became O_NONBLOCK for its
+ * deadlines. The batch is already gathered into one iovec and sent with one
+ * writev, so the cork bought nothing on macOS. Linux keeps TCP_CORK, whose
+ * clearing does flush. */
+#define MARCH_HTTP_POOL_NOPUSH 0
+
+/* ── Deadline-aware socket I/O for connection_thread ─────────────────── */
+/*
+ * The pool and sequential servers time each connection by phase, like the
+ * event loop (design: specs/2026-11-05-https-server-design.md, "Timeouts"):
+ * idle (keep-alive, no request bytes), headers (from the request's first
+ * byte), body and write (from the last progress). Every wait goes through
+ * march_sched_wait_fd with an absolute deadline: on the sequential server's
+ * green thread it parks, on a pool worker (an OS thread) it is a poll().
+ * SO_RCVTIMEO is not used: preemption's SA_RESTART signals defeat it, and a
+ * single receive timeout cannot express a deadline that does not move. The
+ * socket is O_NONBLOCK while it serves HTTP (MSG_DONTWAIT alone is not
+ * enough: Darwin's sendmsg blocks on a blocking socket regardless, measured)
+ * and is switched back to blocking before a WebSocket handler gets it, so
+ * WebSocket reads block with no timeout.
+ */
+
+/* 1 when fd is ready before deadline_ms (march_now_ms clock). */
+static int conn_wait(int fd, int want_write, int64_t deadline_ms) {
+    return march_sched_wait_fd(fd, want_write, deadline_ms) == MARCH_FDWAIT_READY;
+}
+
+/* writev the whole iovec, failing if progress_secs pass without a byte
+ * accepted (a client that stopped reading). */
+static int conn_writev(int fd, struct iovec *iov, int iovcnt) {
+    int64_t step = (int64_t)g_march_https.progress_secs * 1000;
+    int64_t deadline = march_now_ms() + step;
+    while (iovcnt > 0) {
+        ssize_t n = writev(fd, iov, iovcnt);     /* fd is O_NONBLOCK */
+        if (n < 0) {
+            int e = errno;
+            if (e == EINTR) continue;
+            if (e == EAGAIN || e == EWOULDBLOCK) {
+                if (!conn_wait(fd, 1, deadline)) return -1;
+                continue;
+            }
+            return -1;
+        }
+        deadline = march_now_ms() + step;
+        while (n > 0 && iovcnt > 0) {
+            if ((size_t)n >= iov->iov_len) {
+                n -= (ssize_t)iov->iov_len;
+                iov++;
+                iovcnt--;
+            } else {
+                iov->iov_base = (char *)iov->iov_base + n;
+                iov->iov_len -= (size_t)n;
+                n = 0;
+            }
+        }
+    }
+    return 0;
+}
+
 /* Each connection worker: keep-alive loop with HTTP pipelining support.
  * Reads into a persistent buffer, parses up to PIPELINE_BATCH requests
  * per recv(), batches all response iovecs into a single writev() call,
@@ -2048,11 +2111,13 @@ static void *connection_thread(void *arg) {
     }
 #endif
 
-    /* Receive timeout for idle keep-alive connections. */
-    {
-        struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    }
+    /* Phase clocks (march_now_ms): when the connection last went idle,
+     * when the buffered request's first byte arrived, the last read that
+     * brought bytes; and whether that request's headers are known complete
+     * (so a large body is not rescanned on every read). */
+    int64_t t_idle = march_now_ms(), t_first = 0, t_last = 0;
+    int     headers_done = 0;
+    march_set_nonblocking(fd);
 
     /* Closure apply fn — extracted once. */
     char        *clo = (char *)pipeline;
@@ -2110,7 +2175,7 @@ static void *connection_thread(void *arg) {
                 bresp.iov_count    = 0;
                 bresp.scratch_used = 0;
 
-#if defined(__APPLE__) && defined(TCP_NOPUSH)
+#if defined(__APPLE__) && defined(TCP_NOPUSH) && MARCH_HTTP_POOL_NOPUSH
                 if (do_cork) { int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
                                           &one, sizeof(one)); }
 #elif defined(__linux__) && defined(TCP_CORK)
@@ -2129,7 +2194,7 @@ static void *connection_thread(void *arg) {
 
                     if (!result_conn) {
                         if (batch_n > 0) {
-                            writev_all(fd, batch_iov, batch_n);
+                            conn_writev(fd, batch_iov, batch_n);
                             batch_n = 0;
                         }
                         march_http_release_conns(done_conns, &done_n);
@@ -2147,10 +2212,10 @@ static void *connection_thread(void *arg) {
                     if (upgrade_tag == 1) {
                         /* Flush pending batch before handing off to WS. */
                         if (batch_n > 0) {
-                            writev_all(fd, batch_iov, batch_n);
+                            conn_writev(fd, batch_iov, batch_n);
                             batch_n = 0;
                         }
-#if defined(__APPLE__) && defined(TCP_NOPUSH)
+#if defined(__APPLE__) && defined(TCP_NOPUSH) && MARCH_HTTP_POOL_NOPUSH
                         { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
                                                     &zero, sizeof(zero)); }
 #elif defined(__linux__) && defined(TCP_CORK)
@@ -2162,19 +2227,12 @@ static void *connection_thread(void *arg) {
                         void *ws_key =
                             find_ws_key_header(*(void **)(rc_p + 56));
                         if (ws_key) {
-                            /* The keep-alive SO_RCVTIMEO set at connection-thread
-                               startup (10s) still applies to this fd. Left in
-                               place, an idle WS connection's next recv() times
-                               out with EAGAIN/EWOULDBLOCK, which recv_exact()
-                               can't tell apart from a real close — the socket
-                               gets dropped with a spurious Close(1001, "going
-                               away") the moment the client goes quiet. Clear it
-                               so WS reads block indefinitely, same as the
-                               evloop server's ws_handler_thread does via
-                               fcntl(~O_NONBLOCK) before its handoff. */
-                            struct timeval ws_tv = { .tv_sec = 0, .tv_usec = 0 };
-                            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
-                                       &ws_tv, sizeof(ws_tv));
+                            /* Back to blocking, with no receive timeout (the
+                               deadlines above are waits, not socket options):
+                               an idle WebSocket's reads block until the peer
+                               sends or closes. */
+                            int fl = fcntl(fd, F_GETFL, 0);
+                            if (fl >= 0) fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
                             march_ws_handshake((int64_t)fd, ws_key);
                             void *ws_sock = march_alloc(16 + 8);
                             *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
@@ -2206,7 +2264,7 @@ static void *connection_thread(void *arg) {
                      * this never triggers; it guards against pathological
                      * responses with many headers. */
                     if (batch_n + bresp.iov_count > CONN_BATCH_IOV_MAX) {
-                        writev_all(fd, batch_iov, batch_n);
+                        conn_writev(fd, batch_iov, batch_n);
                         batch_n            = 0;
                         march_http_release_conns(done_conns, &done_n);
                         bresp.scratch_used = 0;
@@ -2224,11 +2282,11 @@ static void *connection_thread(void *arg) {
                 }
 
                 /* Single writev() for the entire batch. */
-                if (batch_n > 0) writev_all(fd, batch_iov, batch_n);
+                if (batch_n > 0) conn_writev(fd, batch_iov, batch_n);
                 march_http_release_conns(done_conns, &done_n);
 
                 /* Release TCP_NOPUSH / TCP_CORK → kernel flushes. */
-#if defined(__APPLE__) && defined(TCP_NOPUSH)
+#if defined(__APPLE__) && defined(TCP_NOPUSH) && MARCH_HTTP_POOL_NOPUSH
                 if (do_cork) { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
                                             &zero, sizeof(zero)); }
 #elif defined(__linux__) && defined(TCP_CORK)
@@ -2244,6 +2302,9 @@ static void *connection_thread(void *arg) {
             } else if (consumed >= buf_len) {
                 buf_len = 0;
             }
+            /* Requests went out: the next one's clocks start fresh. */
+            headers_done = 0;
+            t_idle = t_first = t_last = march_now_ms();
 
             if (!running) break;
         }
@@ -2274,8 +2335,27 @@ static void *connection_thread(void *arg) {
             buf_cap = new_cap;
             space   = buf_cap - buf_len;
         }
-        ssize_t n = recv(fd, buf + buf_len, space, 0);
-        if (n <= 0) break;  /* EOF, reset, or timeout */
+        /* Wait for bytes until this phase's deadline. */
+        if (buf_len > 0 && !headers_done)
+            headers_done = march_http_has_header_end(buf, buf_len);
+        int64_t deadline;
+        if (buf_len == 0)
+            deadline = t_idle + (int64_t)g_march_https.idle_secs * 1000;
+        else if (headers_done)
+            deadline = t_last + (int64_t)g_march_https.progress_secs * 1000;
+        else
+            deadline = t_first + (int64_t)g_march_https.header_secs * 1000;
+        if (!conn_wait(fd, 0, deadline)) break;      /* deadline passed */
+        ssize_t n = recv(fd, buf + buf_len, space, MSG_DONTWAIT);
+        if (n < 0) {
+            int e = errno;
+            if (e == EINTR || e == EAGAIN || e == EWOULDBLOCK) continue;
+            break;
+        }
+        if (n == 0) break;  /* EOF */
+        int64_t now = march_now_ms();
+        if (buf_len == 0) t_first = now;
+        t_last = now;
         buf_len += (size_t)n;
     }
 

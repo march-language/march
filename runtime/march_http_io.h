@@ -134,5 +134,8 @@ void conn_state_free(conn_state_t *c);
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 
+/* 1 if buf[0..len) contains CRLFCRLF, the end of a request's headers. */
+int march_http_has_header_end(const char *buf, size_t len);
+
 /* Set fd to O_NONBLOCK.  Returns 0 on success, -1 on error. */
 int march_set_nonblocking(int fd);

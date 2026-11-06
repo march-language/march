@@ -26,6 +26,19 @@ int march_set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+/* ── Header-end scan (both servers' header/body deadlines) ─────────────── */
+
+int march_http_has_header_end(const char *buf, size_t len) {
+    const char *p = buf, *end = buf + len;
+    while (end - p >= 4) {
+        const char *r = memchr(p, '\r', (size_t)(end - p - 3));
+        if (!r) return 0;
+        if (r[1] == '\n' && r[2] == '\r' && r[3] == '\n') return 1;
+        p = r + 1;
+    }
+    return 0;
+}
+
 /* ── Non-blocking recv ────────────────────────────────────────────────── */
 
 io_result_t march_recv_nonblocking(conn_state_t *c) {

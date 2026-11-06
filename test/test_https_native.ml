@@ -378,10 +378,18 @@ let deadline_cases =
     ("slow_reader_survives", d_slow_reader_survives);
     ("stalled_reader_cut", d_stalled_reader_cut) ]
 
-(** One compiled server per mode; every case runs against it in turn and
-    checks it is still alive. *)
-let run_deadlines ~mode ~evloop () =
-  Test_http_native.with_compiled_server ~variant:("deadlines, " ^ mode)
+(** The three server modes: the event loop (default), the thread pool, and
+    the pool's sequential variant, which serves on the accept loop's green
+    thread. Every runtime-behaviour group below runs over all three. *)
+let modes =
+  [ ("evloop", true, [||]);
+    ("pool", false, [||]);
+    ("sequential", false, [| "MARCH_HTTP_SEQUENTIAL=1" |]) ]
+
+(* One compiled server per mode; every case runs against it in turn and
+   checks it is still alive. *)
+let run_deadlines ~mode ~evloop ~extra_env () =
+  Test_http_native.with_compiled_server ~extra_env ~variant:("deadlines, " ^ mode)
     ~slug:("deadlines" ^ mode) ~evloop ~server_src:deadline_server_src (fun ctx ->
       List.iter (fun (name, f) -> f ctx; assert_alive ctx name) deadline_cases)
 
@@ -389,4 +397,7 @@ let suites =
   [ ( "https server (compiled, end-to-end)",
       [ Alcotest.test_case "config_errors" `Quick test_config_errors;
         Alcotest.test_case "listen_bad_cert_exits" `Quick test_listen_bad_cert_exits;
-        Alcotest.test_case "deadlines: event loop" `Quick (run_deadlines ~mode:"evloop" ~evloop:true) ] ) ]
+      ]
+      @ List.map (fun (mode, evloop, extra_env) ->
+          Alcotest.test_case ("deadlines: " ^ mode) `Quick
+            (run_deadlines ~mode ~evloop ~extra_env)) modes ) ]
