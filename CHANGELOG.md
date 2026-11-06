@@ -408,6 +408,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **More function bodies can be used in proofs.** A `match` used as a value (an argument or an
+  operand) is now unfolded. A divisor shown non-zero only by arithmetic, such as
+  `b : {Int | b * b > 0}`, now counts. A step through `if pos(n) do … end`, where `pos` is your
+  own function, is taken when the facts decide `pos(n)`.
+
 - **The interpreter no longer runs another actor's message.** A variant, or another
   actor's message of the same name, sent to an actor ran that actor's handler under
   `march file.march`, while compiled code dropped it. The interpreter now drops it too,
