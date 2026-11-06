@@ -1406,3 +1406,19 @@ let match_value =
     gated "match_value_red: a false theorem about it is not proved" (fun () ->
         let out = run (match_value_src ^ "  @[lemma]\n  fn tw_bad(u : Int) : {Unit | tw(Cz(0, Ez)) == 6} do () end\nend\n") in
         if not (unproved out "tw_bad" || refuted out "tw_bad") then Alcotest.failf "tw_bad is false:\n%s" out) ]
+
+(* R4 by the solver: a divisor refinement the structural check cannot read
+   (`b * b > 0` is `b != 0`) is decided by z3. *)
+let div_solver =
+  [ gated "div_solver: a nonlinear divisor refinement reflects through the solver" (fun () ->
+        let out =
+          run
+            "mod DS do\n  fn sq(a : Int, b : {Int | b * b > 0}) : Int do a / b end\n  @[lemma]\n  fn sq6(u : Int) : {Unit | sq(6, 2) == 3} do () end\nend\n"
+        in
+        expect_admitted out "sq6");
+    gated "div_solver_red: a refinement that allows zero does not" (fun () ->
+        let out =
+          run
+            "mod DS do\n  fn sq(a : Int, b : {Int | b * b >= 0}) : Int do a / b end\n  @[lemma]\n  fn sq6(u : Int) : {Unit | sq(6, 2) == 3} do () end\nend\n"
+        in
+        if not (unproved out "sq6" || refuted out "sq6") then Alcotest.failf "b may be zero:\n%s" out) ]

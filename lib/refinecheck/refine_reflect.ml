@@ -1674,6 +1674,31 @@ let is_int_ty = function Some t -> (match T.repr t with T.TCon ("Int", []) -> tr
    past it the body is declined, so one function's equations stay few. *)
 let max_let_cases = 16
 
+(* The solver's half of R4: [d] is non-zero under [facts], asked of z3 over
+   the integer parameters alone.  A fact over anything else (a datatype, a
+   call's symbol, a non-literal division) is dropped, which only weakens the
+   assumptions; a divisor over anything else is not asked. *)
+let solver_nonzero ~(int_consts : string list) (facts : Smt.term list) (d : Smt.term) : bool =
+  let open Smt in
+  let rec arith t =
+    match t with
+    | Const k -> List.mem k int_consts
+    | IntLit _ | BoolLit _ -> true
+    | Add _ | Sub _ | Mul _ | MulLit _ | DivLit _ | ModLit _ | Neg _ | Not _ | And _ | Or _ | Implies _ | Ite _
+    | Eq _ | Ne _ | Lt _ | Le _ | Gt _ | Ge _ ->
+      List.for_all arith (children t)
+    | _ -> false
+  in
+  arith d
+  && (let vc =
+        { decls = List.map (fun k -> (k, SInt)) int_consts;
+          assumptions = List.filter arith facts;
+          goal = Ne (d, IntLit 0) }
+      in
+      match March_refine.Refine.discharge ~root:(Sys.getcwd ()) vc with
+      | March_refine.Refine.Verified -> true
+      | _ -> false)
+
 (* R4 for a non-literal divisor, decided on the translated template: every
    [Div]/[Mod] in a case must have a divisor its facts show non-zero.  The
    facts are the parameter refinements ([pre]), the case's earlier guards,
@@ -1682,7 +1707,8 @@ let max_let_cases = 16
    structural, so it needs no solver and gives the same answer every run; a
    divisor it cannot see is non-zero declines the template (sound: the
    symbol stays uninterpreted). *)
-let divisions_defined (pre : Smt.term list) (cases : (Smt.term list * Smt.term) list) : bool =
+let divisions_defined ?(solver = fun (_ : Smt.term list) (_ : Smt.term) -> false) (pre : Smt.term list)
+    (cases : (Smt.term list * Smt.term) list) : bool =
   let open Smt in
   let rec conj = function And (a, b) -> conj a @ conj b | t -> [ t ] in
   let nonzero_fact d f =
@@ -1696,7 +1722,7 @@ let divisions_defined (pre : Smt.term list) (cases : (Smt.term list * Smt.term) 
     | _ -> false
   in
   let nonzero facts d =
-    match d with IntLit k -> k <> 0 | _ -> List.exists (nonzero_fact d) facts
+    match d with IntLit k -> k <> 0 | _ -> List.exists (nonzero_fact d) facts || solver facts d
   in
   let rec ok facts t =
     let with_ f = conj f @ facts in
@@ -2374,7 +2400,10 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
               ~finally:(fun () -> RS.arm_on := saved; RS.active := saved_active)
               (fun () -> pre_of u ptys)
           in
-          if not (divisions_defined pre cases) then begin
+          let int_consts =
+            List.concat (List.mapi (fun i s -> if s = Smt.SInt then [ param_const i ] else []) ptys)
+          in
+          if not (divisions_defined ~solver:(solver_nonzero ~int_consts) pre cases) then begin
             let why = "divides by a value nothing shows is non-zero" in
             Hashtbl.replace encoder_blocked u.RT.u_span ("R4:" ^ why);
             if not (String.contains u.RT.u_name '/') then Hashtbl.replace RS.blocked_by_name u.RT.u_name (why, u.RT.u_span);
