@@ -42,6 +42,7 @@
 #include <stdatomic.h>
 #include <assert.h>
 #include <time.h>
+#include <poll.h>
 
 /* ── WebSocket upgrade thread ─────────────────────────────────────────── */
 
@@ -49,6 +50,21 @@ typedef struct {
     int   fd;
     void *ws_closure;   /* March closure: WsSocket -> Unit */
 } ws_upgrade_arg_t;
+
+/* Close a WebSocket connection's fd; for wss://, first take its TLS session
+ * out of the registry (before the fd number can be reused), send a
+ * close_notify if the socket takes it at once, and free it. */
+static void ws_close_fd(int fd) {
+    march_tls_session_t *s = mts_registry_take(fd);
+    if (s) {
+        mts_shutdown(s);
+        char out[4096];
+        size_t n = mts_take_out(s, out, sizeof out);
+        if (n > 0) (void)send(fd, out, n, MSG_DONTWAIT);
+        mts_free(s);
+    }
+    close(fd);
+}
 
 /* Thread that runs the blocking WebSocket handler after upgrade.
  * Takes ownership of fd; closes it on exit. */
@@ -75,7 +91,7 @@ static void *ws_handler_thread(void *arg) {
      * March closure layout: [rc(8)|tag(4)|pad(4)|fn_ptr@16|captures...] */
     call_closure1(ws_closure, ws_sock);
 
-    close(fd);
+    ws_close_fd(fd);
     return NULL;
 }
 
@@ -438,6 +454,7 @@ static void detach_conn(int evfd, conn_state_t *c) {
     epoll_ctl(evfd, EPOLL_CTL_DEL, c->fd, NULL);
 #endif
     /* Do NOT close c->fd — the WebSocket thread takes ownership. */
+    march_tls_conn_free_out(c);
     march_http_release_conns(c->pending_release, &c->pending_release_n);
     conn_state_free(c);
 }
@@ -487,6 +504,23 @@ static int tls_send_or_defer(int evfd, conn_state_t *c, int keep_alive) {
     if (mts_is_established(c->tls)) conn_set_phase(c, PH_WRITE);
     arm_write(evfd, c);
     return 0;
+}
+
+/* Before a wss:// handoff: send every byte of ciphertext still owed on this
+ * connection, waiting for writability up to progress_secs. 1 when done. */
+static int tls_drain_before_handoff(conn_state_t *c) {
+    int64_t deadline = now_ms() + (int64_t)g_march_https.progress_secs * 1000;
+    for (;;) {
+        size_t sent = 0;
+        io_result_t f = march_tls_flush(c, &sent);
+        if (f == IO_COMPLETE) return 1;
+        if (f == IO_ERROR) return 0;
+        if (sent) deadline = now_ms() + (int64_t)g_march_https.progress_secs * 1000;
+        int64_t left = deadline - now_ms();
+        if (left <= 0) return 0;
+        struct pollfd p = { c->fd, POLLOUT, 0 };
+        if (poll(&p, 1, (int)left) < 0 && errno != EINTR) return 0;
+    }
 }
 
 /* Write a batch: plaintext connections writev it; TLS ones encrypt it into
@@ -606,17 +640,23 @@ static void handle_read(int evfd, conn_state_t *c) {
             char    *rc_p        = (char *)result_conn;
             void    *upgrade_val = *(void **)(rc_p + 112);
             int32_t  upgrade_tag = *(int32_t *)((char *)upgrade_val + 8);
-            if (upgrade_tag == 1 && c->tls) {
-                /* wss:// is wired up separately (Task 9 of the HTTPS plan);
-                 * until then an upgrade over TLS is refused by closing. */
-                march_http_release_conns(done_conns, &done_n);
-                march_http_release_conn(result_conn);
-                close_conn(evfd, c);
-                batch_ok = 0;
-                break;
-            }
             if (upgrade_tag == 1) {
-                if (batch_n > 0) { writev(c->fd, batch_iov, batch_n); }
+                if (c->tls) {
+                    /* wss://: the session stays registered under the fd and
+                     * moves to the WebSocket thread with it. Earlier responses
+                     * of this batch go out first, then the 101. */
+                    if (batch_n > 0) conn_out(c, batch_iov, batch_n);
+                    if (!tls_drain_before_handoff(c)) {
+                        march_http_release_conns(done_conns, &done_n);
+                        march_http_release_conn(result_conn);
+                        close_conn(evfd, c);
+                        batch_ok = 0;
+                        break;
+                    }
+                    c->tls = NULL;                 /* owned via the registry now */
+                } else if (batch_n > 0) {
+                    writev(c->fd, batch_iov, batch_n);
+                }
 
                 void *ws_closure = *(void **)((char *)upgrade_val + 16);
                 void *ws_key     = find_ws_key_header(*(void **)(rc_p + 56));
@@ -643,14 +683,14 @@ static void handle_read(int evfd, conn_state_t *c) {
                         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
                         if (pthread_create(&tid, &attr, ws_handler_thread, targ) != 0) {
                             free(targ);
-                            close(ws_fd);
+                            ws_close_fd(ws_fd);
                         }
                         pthread_attr_destroy(&attr);
                     } else {
-                        close(ws_fd);
+                        ws_close_fd(ws_fd);
                     }
                 } else {
-                    close(ws_fd);
+                    ws_close_fd(ws_fd);
                 }
 
                 march_http_release_conns(done_conns, &done_n);

@@ -2331,16 +2331,6 @@ static void *connection_thread(void *arg) {
                     void    *upgrade_val = *(void **)(rc_p + 112);
                     int32_t  upgrade_tag =
                         *(int32_t *)((char *)upgrade_val + 8);
-                    if (upgrade_tag == 1 && pc.tls) {
-                        /* wss:// is wired up separately (Task 9 of the
-                         * HTTPS plan); until then an upgrade over TLS
-                         * closes the connection. */
-                        if (batch_n > 0) { pconn_writev(&pc, batch_iov, batch_n); batch_n = 0; }
-                        march_http_release_conns(done_conns, &done_n);
-                        march_http_release_conn(result_conn);
-                        running = 0;
-                        break;
-                    }
                     if (upgrade_tag == 1) {
                         /* Flush pending batch before handing off to WS. */
                         if (batch_n > 0) {
@@ -2994,6 +2984,8 @@ void march_http_server_wait(int64_t handle) {
 
 /* ── WebSocket builtins ───────────────────────────────────────────────── */
 
+static int ws_send_bufs(int fd, const void *a, size_t al, const void *b, size_t bl);
+
 void march_ws_handshake(int64_t fd, void *key_string) {
     if (!key_string) return;
     march_string *key = (march_string *)key_string;
@@ -3018,7 +3010,7 @@ void march_ws_handshake(int64_t fd, void *key_string) {
         "Sec-WebSocket-Accept: %s\r\n\r\n",
         b64);
     if (n > 0)
-        send((int)fd, resp, (size_t)n, 0);
+        (void)ws_send_bufs((int)fd, resp, (size_t)n, NULL, 0);
 }
 
 /* recv_all_bytes: read exactly `n` bytes from fd into buf. Returns 0 on
@@ -3045,6 +3037,74 @@ static int recv_exact(int fd, uint8_t *buf, size_t n) {
     return 0;
 }
 
+/* ── WebSocket I/O over TLS (wss://) ──────────────────────────────────── */
+/*
+ * A WsSocket is only an fd, so the WebSocket functions find a wss://
+ * connection's TLS session in the fd registry (march_tls_server.c); a plain
+ * connection has none and keeps the raw socket path. A handler blocked in
+ * recv and another task sending on the same socket share the session:
+ *
+ *   recv: wait for the socket WITHOUT any lock, then lock -> feed -> read
+ *         -> unlock (already-decrypted bytes are served before waiting);
+ *   send: send_lock -> lock -> encrypt + take the ciphertext -> unlock ->
+ *         send it all -> send_unlock (one sender's frames never interleave
+ *         with another's on the wire, and the reader is never held up by a
+ *         slow send).
+ *
+ * The session lives until the connection's fd is closed by its server.
+ */
+static int ws_recv_exact(int fd, uint8_t *buf, size_t n) {
+    march_tls_session_t *s = mts_registry_get(fd);
+    if (!s) return recv_exact(fd, buf, n);
+    size_t got = 0;
+    while (got < n) {
+        size_t k = 0;
+        mts_lock(s);
+        mts_rc r = mts_read(s, buf + got, n - got, &k);
+        mts_unlock(s);
+        got += k;
+        if (k > 0) continue;
+        if (r == MTS_EOF || r == MTS_FAIL) return -1;
+        if (march_sched_wait_fd(fd, 0, 0) < 0) return -1;
+        char tmp[16384];
+        sigset_t saved;
+        march_block_preempt(&saved);
+        ssize_t m = recv(fd, tmp, sizeof tmp, MSG_DONTWAIT);
+        int e = m < 0 ? march_errno_now() : 0;     /* parked above */
+        march_unblock_preempt(&saved);
+        if (m < 0 && (e == EINTR || e == EAGAIN || e == EWOULDBLOCK)) continue;
+        if (m <= 0) return -1;
+        mts_lock(s);
+        int f = mts_feed(s, tmp, (size_t)m);
+        mts_unlock(s);
+        if (f != 0) return -1;
+    }
+    return 0;
+}
+
+/* Send a then b (either may be empty) as one unit. 0 ok, -1 on failure. */
+static int ws_send_bufs(int fd, const void *a, size_t al, const void *b, size_t bl) {
+    march_tls_session_t *s = mts_registry_get(fd);
+    if (!s) {
+        if (al && send_all_parked(fd, (const char *)a, al, NULL) < 0) return -1;
+        if (bl && send_all_parked(fd, (const char *)b, bl, NULL) < 0) return -1;
+        return 0;
+    }
+    mts_send_lock(s);
+    mts_lock(s);
+    int ok = (al == 0 || mts_write(s, a, al) == 0) && (bl == 0 || mts_write(s, b, bl) == 0);
+    size_t n = ok ? mts_out_len(s) : 0;
+    char *out = n ? (char *)malloc(n) : NULL;
+    if (out) n = mts_take_out(s, out, n);
+    mts_unlock(s);
+    int rc = -1;
+    if (ok && n == 0) rc = 0;
+    else if (ok && out) rc = send_all_parked(fd, out, n, NULL) < 0 ? -1 : 0;
+    free(out);
+    mts_send_unlock(s);
+    return rc;
+}
+
 /* WsFrame tag layout (matches March declaration order):
  *   TextFrame(String)   → tag 0, field[0] = String ptr
  *   BinaryFrame(String) → tag 1, field[0] = String ptr
@@ -3062,7 +3122,7 @@ void *march_ws_recv(int64_t fd) {
     uint8_t *payload = NULL;
 
     /* Read 2-byte frame header */
-    if (recv_exact(sock, hdr2, 2) < 0)
+    if (ws_recv_exact(sock, hdr2, 2) < 0)
         goto closed;
 
     int fin    = (hdr2[0] >> 7) & 1;
@@ -3074,11 +3134,11 @@ void *march_ws_recv(int64_t fd) {
     /* Extended payload length */
     if (payload_len == 126) {
         uint8_t ext[2];
-        if (recv_exact(sock, ext, 2) < 0) goto closed;
+        if (ws_recv_exact(sock, ext, 2) < 0) goto closed;
         payload_len = ((uint64_t)ext[0] << 8) | ext[1];
     } else if (payload_len == 127) {
         uint8_t ext[8];
-        if (recv_exact(sock, ext, 8) < 0) goto closed;
+        if (ws_recv_exact(sock, ext, 8) < 0) goto closed;
         payload_len = 0;
         for (int i = 0; i < 8; i++)
             payload_len = (payload_len << 8) | ext[i];
@@ -3087,7 +3147,7 @@ void *march_ws_recv(int64_t fd) {
     /* Masking key (clients always mask, servers never do) */
     uint8_t mask[4] = {0, 0, 0, 0};
     if (masked) {
-        if (recv_exact(sock, mask, 4) < 0) goto closed;
+        if (ws_recv_exact(sock, mask, 4) < 0) goto closed;
     }
 
     /* Read payload */
@@ -3095,7 +3155,7 @@ void *march_ws_recv(int64_t fd) {
         if (payload_len > 16 * 1024 * 1024) goto closed;  /* 16MB limit */
         payload = malloc(payload_len + 1);
         if (!payload) goto closed;
-        if (recv_exact(sock, payload, payload_len) < 0) {
+        if (ws_recv_exact(sock, payload, payload_len) < 0) {
             /* `closed:` frees payload — jumping straight there avoids a
                double-free (freeing here and again at the label). */
             goto closed;
@@ -3251,9 +3311,7 @@ void march_ws_send(int64_t fd, void *frame) {
         hdr_len = 10;
     }
 
-    (void)send_all_parked(sock, (const char *)frame_hdr, (size_t)hdr_len, NULL);
-    if (payload_len > 0)
-        (void)send_all_parked(sock, (const char *)payload, payload_len, NULL);
+    (void)ws_send_bufs(sock, frame_hdr, (size_t)hdr_len, payload, payload_len);
 
     (void)close_hdr;
 }
@@ -3282,7 +3340,14 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
     int fds[2] = { ws_fd, pipe_fd >= 0 ? pipe_fd : ws_fd };
     int64_t deadline = timeout_ms > 0 ? march_now_ms() + timeout_ms : 0;
     int pipe_ready = 0, ws_ready = 0;
-    for (;;) {
+    /* wss://: bytes the session already holds raise no socket readiness. */
+    march_tls_session_t *wss = mts_registry_get(ws_fd);
+    if (wss) {
+        mts_lock(wss);
+        ws_ready = mts_has_input(wss);
+        mts_unlock(wss);
+    }
+    for (; !ws_ready;) {
         int w = march_sched_wait_fds(fds, pipe_fd >= 0 ? 2 : 1, deadline);
         if (w <= 0) {
             /* Timeout, or an error: both were "Timeout" before. */

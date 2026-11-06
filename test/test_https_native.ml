@@ -481,6 +481,8 @@ let connect_port (ctx : Test_http_native.server_ctx) port =
 let https_server_src = {|mod HttpsE2e do
   needs IO.Process
   needs IO.NetListen
+  needs IO.WebSocket
+  needs IO.Spawn
 
   fn env_str(name) do
     match process_env(name) do
@@ -502,8 +504,35 @@ let https_server_src = {|mod HttpsE2e do
     end
   end
 
+  fn ws_echo_loop(socket) do
+    match WebSocket.recv(socket) do
+    TextFrame(msg) ->
+      WebSocket.send_frame(socket, TextFrame(msg))
+      ws_echo_loop(socket)
+    Close(_, _) -> ()
+    _ -> ws_echo_loop(socket)
+    end
+  end
+
+  fn push_loop(socket, i) do
+    if i > 200 do ()
+    else
+      WebSocket.send_frame(socket, TextFrame("push " ++ int_to_string(i)))
+      push_loop(socket, i + 1)
+    end
+  end
+
+  -- Another task pushes 200 frames while this handler sits in recv: two
+  -- threads on one connection at once.
+  fn ws_push(socket) do
+    let _t = Task.async(fn () -> push_loop(socket, 1))
+    ws_echo_loop(socket)
+  end
+
   fn router(conn) do
     match (HttpServer.method(conn), HttpServer.path_info(conn)) do
+    (:get, Cons("ws", Nil)) -> WebSocket.upgrade(conn, fn s -> ws_echo_loop(s))
+    (:get, Cons("wspush", Nil)) -> WebSocket.upgrade(conn, fn s -> ws_push(s))
     (:get, Cons("echo", Nil)) -> conn |> HttpServer.text(200, "echo:" ++ HttpServer.query_string(conn))
     (:get, Cons("scheme", Nil)) -> conn |> HttpServer.text(200, HttpServer.scheme(conn))
     (:get, Cons("big", Cons(n, Nil))) ->
@@ -521,15 +550,17 @@ let https_server_src = {|mod HttpsE2e do
 
   fn plain(conn) do
     match HttpServer.path_info(conn) do
+    Cons("ws", Nil) -> WebSocket.upgrade(conn, fn s -> ws_echo_loop(s))
     Cons("scheme", Nil) -> conn |> HttpServer.text(200, "plain:" ++ HttpServer.scheme(conn))
     _ -> conn |> HttpServer.text(200, "plain-pipeline")
     end
   end
 
-  fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process)) do
+  fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process), _w : Cap(IO.WebSocket), _s : Cap(IO.Spawn)) do
     HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
     |> HttpServer.tls(HttpServer.TlsFiles(env_str("MARCH_TEST_CERT"), env_str("MARCH_TEST_KEY")))
     |> HttpServer.tls_handshake_timeout(2)
+    |> HttpServer.idle_timeout(2)
     |> HttpServer.plain_listener(env_int("MARCH_TEST_PLAIN_PORT"), [plain])
     |> HttpServer.plug(router)
     |> HttpServer.listen()
@@ -668,6 +699,138 @@ let h_plain_own_pipeline (h : https_env) =
   one_shot h fd "plain_listener_own_pipeline" "/echo?x=1" ~status:200 ~body:"plain-pipeline";
   close_quietly fd
 
+(* ── A minimal WebSocket client (RFC 6455) over any byte stream ─────────── *)
+
+let ws_key = "dGhlIHNhbXBsZSBub25jZQ=="
+let ws_accept = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="     (* RFC 6455 section 1.3 example *)
+
+(* Read until [pending] holds at least [n] bytes. *)
+let rec ws_fill (ctx : Test_http_native.server_ctx) fd pending n ~deadline =
+  if String.length !pending < n then begin
+    let left = deadline -. Unix.gettimeofday () in
+    if left <= 0. then ctx.bail (Printf.sprintf "websocket: timed out waiting for %d bytes" n);
+    (match Unix.select [ fd ] [] [] left with
+     | [], _, _ -> ()
+     | _ ->
+       let b = Bytes.create 65536 in
+       (match Unix.read fd b 0 65536 with
+        | 0 -> ctx.bail "websocket: connection closed"
+        | k -> pending := !pending ^ Bytes.sub_string b 0 k
+        | exception Unix.Unix_error (e, _, _) -> ctx.bail ("websocket read: " ^ Unix.error_message e)));
+    ws_fill ctx fd pending n ~deadline
+  end
+
+let ws_upgrade (ctx : Test_http_native.server_ctx) fd path =
+  ctx.send fd (Printf.sprintf
+    "GET %s HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+     Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" path ws_key);
+  let pending = ref "" in
+  let deadline = Unix.gettimeofday () +. 20. in
+  let rec head () =
+    match Test_http_native.find_from !pending "\r\n\r\n" 0 with
+    | Some i -> i
+    | None -> ws_fill ctx fd pending (String.length !pending + 1) ~deadline; head () in
+  let h = head () in
+  let hdr = String.sub !pending 0 h in
+  if not (contains hdr "101") || not (contains hdr ws_accept) then
+    ctx.bail (Printf.sprintf "websocket upgrade of %s: bad response %S" path hdr);
+  pending := String.sub !pending (h + 4) (String.length !pending - h - 4);
+  pending
+
+let ws_send_text (ctx : Test_http_native.server_ctx) fd msg =
+  let n = String.length msg in
+  let b = Buffer.create (n + 14) in
+  Buffer.add_char b '\x81';
+  if n < 126 then Buffer.add_char b (Char.chr (0x80 lor n))
+  else if n < 65536 then begin
+    Buffer.add_char b (Char.chr (0x80 lor 126));
+    Buffer.add_char b (Char.chr (n lsr 8)); Buffer.add_char b (Char.chr (n land 0xff))
+  end else begin
+    Buffer.add_char b (Char.chr (0x80 lor 127));
+    for i = 7 downto 0 do Buffer.add_char b (Char.chr ((n lsr (8 * i)) land 0xff)) done
+  end;
+  let mask = "\x12\x34\x56\x78" in
+  Buffer.add_string b mask;
+  String.iteri (fun i c -> Buffer.add_char b (Char.chr (Char.code c lxor Char.code mask.[i land 3]))) msg;
+  ctx.send fd (Buffer.contents b)
+
+(* One unmasked server frame: (opcode, payload). *)
+let ws_read_frame (ctx : Test_http_native.server_ctx) fd pending ~deadline =
+  ws_fill ctx fd pending 2 ~deadline;
+  let b0 = Char.code !pending.[0] and b1 = Char.code !pending.[1] in
+  let len7 = b1 land 0x7f in
+  let hl, len =
+    if len7 < 126 then 2, len7
+    else if len7 = 126 then begin
+      ws_fill ctx fd pending 4 ~deadline;
+      4, (Char.code !pending.[2] lsl 8) lor Char.code !pending.[3]
+    end else begin
+      ws_fill ctx fd pending 10 ~deadline;
+      let v = ref 0 in
+      for i = 2 to 9 do v := (!v lsl 8) lor Char.code !pending.[i] done;
+      10, !v
+    end in
+  ws_fill ctx fd pending (hl + len) ~deadline;
+  let payload = String.sub !pending hl len in
+  pending := String.sub !pending (hl + len) (String.length !pending - hl - len);
+  (b0 land 0x0f, payload)
+
+let ws_expect_text ctx fd pending label want =
+  match ws_read_frame ctx fd pending ~deadline:(Unix.gettimeofday () +. 20.) with
+  | (1, got) when got = want -> ()
+  | (op, got) ->
+    ctx.Test_http_native.bail (Printf.sprintf "%s: want text %S, got opcode %d (%d bytes) %S" label
+                                 (if String.length want > 60 then String.sub want 0 60 ^ "..." else want)
+                                 op (String.length got)
+                                 (if String.length got > 60 then String.sub got 0 60 ^ "..." else got))
+
+let w_echo (h : https_env) =
+  let fd = tls_connect_or_bail h.ctx ~ca:h.pki.ca () in
+  let pending = ws_upgrade h.ctx fd "/ws" in
+  for i = 1 to 20 do
+    let m = Printf.sprintf "msg %d" i in
+    ws_send_text h.ctx fd m;
+    ws_expect_text h.ctx fd pending (Printf.sprintf "wss_echo %d/20" i) m
+  done;
+  tls_close fd
+
+let w_large_frame (h : https_env) =
+  let fd = tls_connect_or_bail h.ctx ~ca:h.pki.ca () in
+  let pending = ws_upgrade h.ctx fd "/ws" in
+  let m = String.init 100_000 (fun i -> Char.chr (97 + (i mod 26))) in
+  ws_send_text h.ctx fd m;
+  ws_expect_text h.ctx fd pending "wss_large_frame" m;
+  tls_close fd
+
+let w_idle (h : https_env) =
+  let fd = tls_connect_or_bail h.ctx ~ca:h.pki.ca () in
+  let pending = ws_upgrade h.ctx fd "/ws" in
+  Unix.sleepf 6.0;                         (* idle_timeout is 2 s *)
+  ws_send_text h.ctx fd "still here";
+  ws_expect_text h.ctx fd pending "wss_idle_outlives_idle_timeout" "still here";
+  tls_close fd
+
+let w_concurrent_push (h : https_env) =
+  let fd = tls_connect_or_bail h.ctx ~ca:h.pki.ca () in
+  let pending = ws_upgrade h.ctx fd "/wspush" in
+  let deadline = Unix.gettimeofday () +. 5. in
+  for i = 1 to 200 do
+    match ws_read_frame h.ctx fd pending ~deadline with
+    | (1, got) when got = Printf.sprintf "push %d" i -> ()
+    | (op, got) -> h.ctx.bail (Printf.sprintf "wss_concurrent_push: frame %d: opcode %d %S" i op got)
+  done;
+  tls_close fd
+
+let w_plain_unchanged (h : https_env) =
+  let fd = connect_port h.ctx h.plain_port in
+  let pending = ws_upgrade h.ctx fd "/ws" in
+  for i = 1 to 5 do
+    let m = Printf.sprintf "plain %d" i in
+    ws_send_text h.ctx fd m;
+    ws_expect_text h.ctx fd pending (Printf.sprintf "ws_plain_unchanged %d/5" i) m
+  done;
+  close_quietly fd
+
 let https_cases =
   [ ("https_basic", h_basic);
     ("https_keepalive_65", h_keepalive_65);
@@ -679,7 +842,12 @@ let https_cases =
     ("https_slow_reader_big", h_slow_reader_big);
     ("fd_reuse_plain_after_tls", h_fd_reuse);
     ("handshake_timeout", h_handshake_timeout);
-    ("plain_listener_own_pipeline", h_plain_own_pipeline) ]
+    ("plain_listener_own_pipeline", h_plain_own_pipeline);
+    ("wss_echo", w_echo);
+    ("wss_large_frame", w_large_frame);
+    ("wss_idle_outlives_idle_timeout", w_idle);
+    ("wss_concurrent_push", w_concurrent_push);
+    ("ws_plain_unchanged", w_plain_unchanged) ]
 
 let run_https ~mode ~evloop ~extra_env () =
   let dir = fresh_dir ("pki" ^ mode) in
