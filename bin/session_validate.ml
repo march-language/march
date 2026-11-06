@@ -3,9 +3,9 @@
 
     For each protocol of the entry file, each projector's view
     ([Typecheck_session.theory_view], [Desugar_endpoints.theory_view]) gives
-    the protocol as a [Global] and every role's projection as a [Local].
+    the protocol as a [SessionGlobal] and every role's projection as a [SessionLocal].
     The stdlib's [project], run in the interpreter on those ground terms,
-    must give the same [Local] ([Session.Theory.same]).  A role outside the
+    must give the same [SessionLocal] ([Session.Theory.same]).  A role outside the
     fragment (it is not told a choice: [Session.Theory.informed] is false)
     is not compared, and said so.
 

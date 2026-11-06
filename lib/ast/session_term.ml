@@ -1,5 +1,5 @@
 (** The terms of [Session.Theory] (stdlib/session_theory.march) in OCaml:
-    a protocol as a [Global], a role's projection as a [Local], over [Int]
+    a protocol as a [SessionGlobal], a role's projection as a [SessionLocal], over [Int]
     ids for roles, labels and payload types.
 
     The compiler has two projectors (the [Chan(Role, Proto)] typechecker,

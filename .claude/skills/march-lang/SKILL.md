@@ -670,7 +670,7 @@ Functions always in scope without `use`:
 
 **Udp** — `open`, `open_with`, `open_sharded`, `defaults`, `resolve`, `connect`, `send_to`, `send`, `send_batch`, `send_batch_connected`, `send_many`, `recv`, `recv_batch`, `local_addr`, `local_port`, `addr_to_string`, `addr_port`, `stats`, `close`. Packets are `String`; types are `UdpSocket`/`UdpAddr`/`UdpOptions`/`UdpStats` (global type namespace)
 
-**Session.Theory** — `project`, `project_bs`, `dual`, `erase`, `same`, `merge`, `informed`, `binary`; lemmas `dual_dual`, `project_dual`, `same_eq`. Types `Global`/`GBranches`/`Local`/`LBranches` over `Int` ids. The spec the compiler's protocol projectors are validated against (`--validate-projections`)
+**Session.Theory** — `project`, `project_bs`, `dual`, `erase`, `same`, `merge`, `informed`, `binary`; lemmas `dual_dual`, `project_dual`, `same_eq`. Types `SessionGlobal`/`SessionGBranches`/`SessionLocal`/`SessionLBranches` over `Int` ids. The spec the compiler's protocol projectors are validated against (`--validate-projections`)
 
 ### Actors / Concurrency
 

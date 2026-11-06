@@ -30,7 +30,7 @@ git log is authoritative for exact commits.
   them; what they compute is unchanged.
 
 - **`Session.Theory`: what a protocol means, as March code, with proved laws.** A new stdlib
-  module holds protocols (`Global`) and each role's part (`Local`), projection, duality, and
+  module holds protocols (`SessionGlobal`) and each role's part (`SessionLocal`), projection, duality, and
   lemmas proved once: duality is an involution, and a two-role protocol's projections are
   dual. The compiler checks both of its own projectors against `Session.Theory.project` for
   every protocol you write, by running it in the interpreter: `march --check --guarantees`

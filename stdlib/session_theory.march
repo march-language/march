@@ -10,7 +10,7 @@
 --
 -- Roles, labels and payload types are `Int` ids: the logic treats `String`
 -- contents as opaque, and the compiler maps names to ids when it emits a
--- protocol as a `Global`.
+-- protocol as a `SessionGlobal`.
 --
 -- A loop is `GLoop(body, after)`.  The body's end is `GVar(0)`, the loop's
 -- own back-edge (de Bruijn: the nearest enclosing loop); `after` is what a
@@ -20,31 +20,31 @@
 mod Session.Theory do
 
   -- A global protocol over role, label and payload ids.
-  type Global = GEnd
-              | GMsg(Int, Int, Int, Global)
-              | GChoice(Int, GBranches)
-              | GLoop(Global, Global)
+  type SessionGlobal = GEnd
+              | GMsg(Int, Int, Int, SessionGlobal)
+              | GChoice(Int, SessionGBranches)
+              | GLoop(SessionGlobal, SessionGlobal)
               | GVar(Int)
 
   -- A choice's labelled branches.
-  type GBranches = GBNil | GBCons(Int, Global, GBranches)
+  type SessionGBranches = GBNil | GBCons(Int, SessionGlobal, SessionGBranches)
 
   -- One role's view: send to or receive from a peer, choose or offer a label, loop.
-  type Local = LEnd
-             | LSend(Int, Int, Local)
-             | LRecv(Int, Int, Local)
-             | LChoose(LBranches)
-             | LOffer(LBranches)
-             | LRec(Local)
+  type SessionLocal = LEnd
+             | LSend(Int, Int, SessionLocal)
+             | LRecv(Int, Int, SessionLocal)
+             | LChoose(SessionLBranches)
+             | LOffer(SessionLBranches)
+             | LRec(SessionLocal)
              | LVar(Int)
 
   -- A local choice's labelled branches.
-  type LBranches = LBNil | LBCons(Int, Local, LBranches)
+  type SessionLBranches = LBNil | LBCons(Int, SessionLocal, SessionLBranches)
 
   -- ── duality ──────────────────────────────────────────────────────────
 
   doc "The other end of a conversation: every send a receive, every choice an offer."
-  fn dual(l : Local) : Local do
+  fn dual(l : SessionLocal) : SessionLocal do
     match l do
       LEnd -> LEnd
       LSend(p, t, k) -> LRecv(p, t, dual(k))
@@ -57,7 +57,7 @@ mod Session.Theory do
   end
 
   doc "`dual` on every branch."
-  fn dual_bs(bs : LBranches) : LBranches do
+  fn dual_bs(bs : SessionLBranches) : SessionLBranches do
     match bs do
       LBNil -> LBNil
       LBCons(lab, k, rest) -> LBCons(lab, dual(k), dual_bs(rest))
@@ -65,7 +65,7 @@ mod Session.Theory do
   end
 
   doc "`l` with every peer replaced by 0: a two-party conversation, where the peer is implied."
-  fn erase(l : Local) : Local do
+  fn erase(l : SessionLocal) : SessionLocal do
     match l do
       LEnd -> LEnd
       LSend(_, t, k) -> LSend(0, t, erase(k))
@@ -78,7 +78,7 @@ mod Session.Theory do
   end
 
   doc "`erase` on every branch."
-  fn erase_bs(bs : LBranches) : LBranches do
+  fn erase_bs(bs : SessionLBranches) : SessionLBranches do
     match bs do
       LBNil -> LBNil
       LBCons(lab, k, rest) -> LBCons(lab, erase(k), erase_bs(rest))
@@ -88,7 +88,7 @@ mod Session.Theory do
   -- ── projection ───────────────────────────────────────────────────────
 
   doc "Structural equality of local types, written out so the logic can use it (a derived `Eq` on a recursive type is not yet reflected)."
-  fn same(a : Local, b : Local) : Bool do
+  fn same(a : SessionLocal, b : SessionLocal) : Bool do
     match a do
       LEnd -> match b do
         LEnd -> true
@@ -122,7 +122,7 @@ mod Session.Theory do
   end
 
   doc "`same` on branch lists."
-  fn same_bs(xs : LBranches, ys : LBranches) : Bool do
+  fn same_bs(xs : SessionLBranches, ys : SessionLBranches) : Bool do
     match xs do
       LBNil -> match ys do
         LBNil -> true
@@ -136,7 +136,7 @@ mod Session.Theory do
   end
 
   doc "Whether every branch is `l`."
-  fn all_same(bs : LBranches, l : Local) : Bool do
+  fn all_same(bs : SessionLBranches, l : SessionLocal) : Bool do
     match bs do
       LBNil -> true
       LBCons(_, k, rest) -> same(k, l) && all_same(rest, l)
@@ -144,7 +144,7 @@ mod Session.Theory do
   end
 
   doc "A role that does not choose sees the branches merged: in a multiparty protocol, one branch when every branch is the same (it never learns the label), else an offer."
-  fn merge(bs : LBranches, multiparty : Bool) : Local do
+  fn merge(bs : SessionLBranches, multiparty : Bool) : SessionLocal do
     match bs do
       LBNil -> LOffer(LBNil)
       LBCons(_, first, rest) ->
@@ -153,7 +153,7 @@ mod Session.Theory do
   end
 
   doc "A loop's projection: no loop at all when the role takes no part in the body."
-  fn loop_of(body : Local, after : Local) : Local do
+  fn loop_of(body : SessionLocal, after : SessionLocal) : SessionLocal do
     match body do
       LVar(_) -> after
       LEnd -> LRec(body)
@@ -166,7 +166,7 @@ mod Session.Theory do
   end
 
   doc "Role `r`'s projection of `g`.  `multiparty` is true for more than two roles: only then may a non-chooser merge a choice's branches."
-  fn project(g : Global, r : Int, multiparty : Bool) : Local do
+  fn project(g : SessionGlobal, r : Int, multiparty : Bool) : SessionLocal do
     match g do
       GEnd -> LEnd
       GVar(i) -> LVar(i)
@@ -182,7 +182,7 @@ mod Session.Theory do
   end
 
   doc "`project` on every branch."
-  fn project_bs(bs : GBranches, r : Int, multiparty : Bool) : LBranches do
+  fn project_bs(bs : SessionGBranches, r : Int, multiparty : Bool) : SessionLBranches do
     match bs do
       GBNil -> LBNil
       GBCons(lab, k, rest) -> LBCons(lab, project(k, r, multiparty), project_bs(rest, r, multiparty))
@@ -190,7 +190,7 @@ mod Session.Theory do
   end
 
   doc "Every branch begins with a receive from `c`."
-  fn heads_from(bs : LBranches, c : Int) : Bool do
+  fn heads_from(bs : SessionLBranches, c : Int) : Bool do
     match bs do
       LBNil -> true
       LBCons(_, k, rest) ->
@@ -202,7 +202,7 @@ mod Session.Theory do
   end
 
   doc "A role that does not choose is told the choice: its branches are all the same, or each begins with the chooser's message."
-  fn told(bs : LBranches, c : Int) : Bool do
+  fn told(bs : SessionLBranches, c : Int) : Bool do
     match bs do
       LBNil -> true
       LBCons(_, first, rest) -> all_same(rest, first) || heads_from(bs, c)
@@ -210,7 +210,7 @@ mod Session.Theory do
   end
 
   doc "Role `r` learns every choice it must: in a multiparty protocol, a role whose branches differ receives the chooser's message first (a two-party offer is told by the label)."
-  fn informed(g : Global, r : Int, multiparty : Bool) : Bool do
+  fn informed(g : SessionGlobal, r : Int, multiparty : Bool) : Bool do
     match g do
       GEnd -> true
       GVar(_) -> true
@@ -222,7 +222,7 @@ mod Session.Theory do
   end
 
   doc "`informed` on every branch."
-  fn informed_bs(bs : GBranches, r : Int, multiparty : Bool) : Bool do
+  fn informed_bs(bs : SessionGBranches, r : Int, multiparty : Bool) : Bool do
     match bs do
       GBNil -> true
       GBCons(_, k, rest) -> informed(k, r, multiparty) && informed_bs(rest, r, multiparty)
@@ -232,7 +232,7 @@ mod Session.Theory do
   -- ── which protocols ──────────────────────────────────────────────────
 
   doc "Every message and choice of `g` is between roles `a` and `b`."
-  fn binary(g : Global, a : Int, b : Int) : Bool do
+  fn binary(g : SessionGlobal, a : Int, b : Int) : Bool do
     match g do
       GEnd -> true
       GVar(_) -> true
@@ -244,7 +244,7 @@ mod Session.Theory do
   end
 
   doc "`binary` on every branch."
-  fn binary_bs(bs : GBranches, a : Int, b : Int) : Bool do
+  fn binary_bs(bs : SessionGBranches, a : Int, b : Int) : Bool do
     match bs do
       GBNil -> true
       GBCons(_, k, rest) -> binary(k, a, b) && binary_bs(rest, a, b)
@@ -255,7 +255,7 @@ mod Session.Theory do
 
   doc "C1. Duality is an involution."
   @[lemma]
-  fn dual_dual(l : Local) : {Unit | dual(dual(l)) == l} do
+  fn dual_dual(l : SessionLocal) : {Unit | dual(dual(l)) == l} do
     match l do
       LEnd -> ()
       LSend(_, _, k) -> dual_dual(k)
@@ -269,7 +269,7 @@ mod Session.Theory do
 
   doc "C1 on every branch."
   @[lemma]
-  fn dual_dual_bs(bs : LBranches) : {Unit | dual_bs(dual_bs(bs)) == bs} do
+  fn dual_dual_bs(bs : SessionLBranches) : {Unit | dual_bs(dual_bs(bs)) == bs} do
     match bs do
       LBNil -> ()
       LBCons(_, k, rest) ->
@@ -280,7 +280,7 @@ mod Session.Theory do
 
   doc "Duality commutes with leaving out a loop no one takes part in."
   @[lemma]
-  fn dual_loop_of(body : Local, after : Local)
+  fn dual_loop_of(body : SessionLocal, after : SessionLocal)
     : {Unit | dual(loop_of(body, after)) == loop_of(dual(body), dual(after))} do
     match body do
       LVar(_) -> ()
@@ -295,7 +295,7 @@ mod Session.Theory do
 
   doc "`same` is structural equality."
   @[lemma]
-  fn same_eq(a : Local, b : Local) : {Unit | same(a, b) == (a == b)} do
+  fn same_eq(a : SessionLocal, b : SessionLocal) : {Unit | same(a, b) == (a == b)} do
     match a do
       LEnd -> ()
       LSend(_, _, k) -> match b do
@@ -324,7 +324,7 @@ mod Session.Theory do
 
   doc "`same_bs` is structural equality."
   @[lemma]
-  fn same_eq_bs(xs : LBranches, ys : LBranches) : {Unit | same_bs(xs, ys) == (xs == ys)} do
+  fn same_eq_bs(xs : SessionLBranches, ys : SessionLBranches) : {Unit | same_bs(xs, ys) == (xs == ys)} do
     match xs do
       LBNil -> ()
       LBCons(_, k, rest) -> match ys do
@@ -338,7 +338,7 @@ mod Session.Theory do
 
   doc "Erasing peers commutes with leaving out a loop no one takes part in."
   @[lemma]
-  fn erase_loop_of(body : Local, after : Local)
+  fn erase_loop_of(body : SessionLocal, after : SessionLocal)
     : {Unit | erase(loop_of(body, after)) == loop_of(erase(body), erase(after))} do
     match body do
       LVar(_) -> ()
@@ -353,7 +353,7 @@ mod Session.Theory do
 
   doc "In a binary protocol a choice is always offered, never merged."
   @[lemma]
-  fn merge_binary(bs : LBranches) : {Unit | merge(bs, false) == LOffer(bs)} do
+  fn merge_binary(bs : SessionLBranches) : {Unit | merge(bs, false) == LOffer(bs)} do
     match bs do
       LBNil -> ()
       LBCons(_, _, _) -> ()
@@ -362,7 +362,7 @@ mod Session.Theory do
 
   doc "C2. A binary protocol's two projections are dual (peers erased: each has one)."
   @[lemma]
-  fn project_dual(a : Int, b : {Int | _ != a}, g : Global)
+  fn project_dual(a : Int, b : {Int | _ != a}, g : SessionGlobal)
     : {Unit | !binary(g, a, b) || erase(project(g, b, false)) == dual(erase(project(g, a, false)))} do
     match g do
       GEnd -> ()
@@ -391,7 +391,7 @@ mod Session.Theory do
 
   doc "C2 on every branch."
   @[lemma]
-  fn project_dual_bs(a : Int, b : {Int | _ != a}, bs : GBranches)
+  fn project_dual_bs(a : Int, b : {Int | _ != a}, bs : SessionGBranches)
     : {Unit | !binary_bs(bs, a, b) || erase_bs(project_bs(bs, b, false)) == dual_bs(erase_bs(project_bs(bs, a, false)))} do
     match bs do
       GBNil -> ()

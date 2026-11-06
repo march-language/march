@@ -25526,6 +25526,20 @@ let session_theory_suite =
         Alcotest.(check int) "exit 0" 0 code;
         has out "projection Logging * (typecheck): not compared: a role that may crash";
         has out "projection Logging * (endpoints): not compared: a role that may crash");
+    Alcotest.test_case "a user type named like the theory's common words still typechecks" `Quick (fun () ->
+        (* March has one global type namespace: a stdlib type named `Global` or
+           `Local` made every user record of that name a type_mismatch, so
+           the theory's types carry a `Session` prefix. *)
+        let src =
+          "mod G do\n\
+          \  type Global = { x : Int, y : Option(Local) }\n\
+          \  type Local = { n : Int }\n\
+          \  fn take(g : Global) : Int do g.x end\n\
+          \  fn main() : Int do take({ x: 1, y: Some({ n: 2 }) }) end\n\
+          end\n"
+        in
+        let code, out = run_cli "--check" src in
+        Alcotest.(check int) (Printf.sprintf "accepted\n%s" out) 0 code);
     Alcotest.test_case "--guarantees: a validated projection inherits the theory's laws" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" protocols in
         has out "protocol Relay (2 roles): not checked\n";

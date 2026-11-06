@@ -1079,13 +1079,13 @@ SessionAP.permission("Checkout", "Ledger", SessionAP.initiate_mode())
 ### Session.Theory
 
 `session_theory.march`: what a protocol means, as March code, and laws proved about it.
-A protocol is a `Global`, a role's part a `Local` (role, label and payload ids are `Int`).
+A protocol is a `SessionGlobal`, a role's part a `SessionLocal` (role, label and payload ids are `Int`).
 The compiler checks its own projections against `project` (`march --check --guarantees`);
 see the choreography chapter, "What is proved about a protocol".
 
 ```march
-Session.Theory.project(g, role, multiparty)   -- Local
-Session.Theory.dual(l)                        -- Local: the other end
+Session.Theory.project(g, role, multiparty)   -- SessionLocal
+Session.Theory.dual(l)                        -- SessionLocal: the other end
 Session.Theory.same(a, b)                     -- Bool: structural equality
 Session.Theory.informed(g, role, multiparty)  -- Bool: the role is told every choice it must be
 Session.Theory.project_dual(a, b, g)          -- lemma: two-role projections are dual

@@ -12,12 +12,12 @@ protocol's projection `checked (compiler)`.
 
 ## Fix
 
-- **C0.** Lemmas over a mutual datatype pair with an n-ary branch list (`Local`/`LBranches`)
+- **C0.** Lemmas over a mutual datatype pair with an n-ary branch list (`SessionLocal`/`SessionLBranches`)
   prove, with a mutually recursive lemma pair as the induction; the binary-choice fallback is
   not needed.
-- **M5: `stdlib/session_theory.march` (`Session.Theory`).** `Global` (`GMsg`, `GChoice` over
-  `GBranches`, `GLoop(body, after)` with `GVar` de Bruijn back-edges, `GEnd`), `Local`
-  (`LSend`/`LRecv` with peer, `LChoose`/`LOffer` over `LBranches`, `LRec`, `LVar`), over `Int`
+- **M5: `stdlib/session_theory.march` (`Session.Theory`).** `SessionGlobal` (`GMsg`, `GChoice` over
+  `SessionGBranches`, `GLoop(body, after)` with `GVar` de Bruijn back-edges, `GEnd`), `SessionLocal`
+  (`LSend`/`LRecv` with peer, `LChoose`/`LOffer` over `SessionLBranches`, `LRec`, `LVar`), over `Int`
   ids. `project(g, r, multiparty)` with `merge` (multiparty only: identical branches merge,
   else an offer) and `loop_of` (a role not in a loop's body skips to `after`), exactly the two
   projectors' rules. `dual`, `erase` (peers to 0), `same`/`same_bs` (structural equality,
