@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: <- `A` can only close here
+-- REJECT (sequence diagram): a step on a state already closed; the reuse error's diagram marks the
+-- step taken again and the end of the conversation, where the state was closed.
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Relay do
+    first:  A -> B : Int
+    second: B -> C : Int
+    reply:  C -> A : Bool
+    third:  A -> B : String
+    fourth: B -> A : Bool
+  end
+  pfn role_a(s : Cap(Session.Live), st : Relay_A.Entry) : Relay_A.Yield do
+    let st1 = Relay_A.send_First(s, st, 1)
+    Relay_A.recv_Reply(s, st1, fn (_ok, st2) ->
+      let st3 = Relay_A.send_Third(s, st2, "x")
+      Relay_A.recv_Fourth(s, st3, fn (_b, st4) ->
+        let _done = Relay_A.close(s, st4)
+        Relay_A.recv_Fourth(s, st4, fn (_again, st5) -> Relay_A.close(s, st5))))
+  end
+  fn main(c : Cap(IO)) do () end
+end

@@ -30,6 +30,14 @@ git log is authoritative for exact commits.
   generation. On a 200,000-element list, making the map the last use cut peak memory from 29 MB
   to 10 MB.
 
+- **Protocol errors draw the conversation so far.** A role body that takes a step out of
+  order (`protocol_step_order`), calls another role's step (`protocol_wrong_role`), uses a
+  `Chan`/`MPST` channel at the wrong step (`session_state_mismatch`), or takes a step on a
+  state it already closed (`linear_used_twice`) now shows the protocol's steps up to that
+  point, with the role's own steps marked `done`, the step it must take next, and the one
+  it tried; a `loop` is drawn as one round and a `choose` as the branch taken, naming the
+  others. Long conversations keep three steps of context each way. `--check-json` carries
+  the diagram as a note.
 - **Hot-reload migrations are checked on every build, with a counterexample.** When an
   obligation in an `<actor>_migrate_state` or `<actor>_migrate_msg` can't be proved, the
   compiler runs the migration on small old values. An input whose result the new actor

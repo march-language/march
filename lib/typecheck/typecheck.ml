@@ -2312,7 +2312,9 @@ let session_plan st =
   String.concat ", then " (go 4 st [])
 
 (** The protocol and role a channel at [st] follows, when exactly one
-    protocol's projection has [st] as one of its states. *)
+    protocol's projection has [st] as one of its states, and where in the
+    protocol's steps that state is, when every state equal to it sits in
+    one place. *)
 let channel_origin env st =
   let rec states seen t =
     if List.exists (fun x -> x == t) seen then seen else
@@ -2325,7 +2327,12 @@ let channel_origin env st =
   let hits = StrMap.fold (fun pname (pi : proto_info) acc ->
       List.fold_left (fun acc (role, proj) ->
           if List.exists (fun x -> session_ty_exact_equal x st) (states [] proj)
-          then (pname, role, pi.pi_span) :: acc else acc) acc pi.pi_projections)
+          then begin
+            let places = List.sort_uniq compare (List.filter_map (fun (x, p) ->
+                if session_ty_exact_equal x st then Some p else None)
+                (Option.value ~default:[] (List.assoc_opt role pi.pi_positions))) in
+            (pname, role, pi.pi_span, (match places with [ p ] -> Some p | _ -> None)) :: acc
+          end else acc) acc pi.pi_projections)
       env.protocols [] in
   match hits with [ h ] -> Some h | _ -> None
 
@@ -2334,16 +2341,23 @@ let channel_origin env st =
 let report_session_state env ~span ~op ~doing st =
   let origin = channel_origin env st in
   let labels = match origin with
-    | Some (pname, role, psp) ->
+    | Some (pname, role, psp, _) ->
       [ { Err.lbl_span = psp;
           lbl_message = Printf.sprintf "the channel is `%s`'s end of protocol `%s`, declared here" role pname } ]
     | None -> [] in
+  (* The conversation drawn out to the step the channel is at.  The call
+     is not a step of the protocol, so nothing marks what it tried. *)
+  let diagram = match origin with
+    | Some (pname, role, _, Some p) ->
+      March_ast.Protocol_states.diagram ~proto:pname ~role
+        ~subject:(Printf.sprintf "`%s`" role) ~here:p ()
+    | _ -> None in
   Err.report env.errors
     { Err.severity = Error; span;
       message = Printf.sprintf "`%s` can't %s here: at this point the channel must %s."
           op doing (session_step_text st);
       labels;
-      notes = [ "What is left on this channel: " ^ session_plan st ^ "." ];
+      notes = ("What is left on this channel: " ^ session_plan st ^ ".") :: Option.to_list diagram;
       code = Err.Code.session_state_mismatch; fix = None }
 
 (** The part of [t] at [path], seeing through linearity and nominal records. *)
@@ -8454,7 +8468,7 @@ let rec check_decl env (d : Ast.decl) : env =
                 EVERY branch. Move it inside the branches that can reach it."
                name.txt)
       | Ast.ProtoStop stop_sp :: rest ->
-        (* `stop` projects to `SEnd` unconditionally (see [project_steps]),
+        (* `stop` projects to `SEnd` unconditionally (see [project_steps_at]),
            discarding both [rest] here and the enclosing [tail] — same
            unreachability shape as `loop`, just via early exit instead of
            looping forever. *)
@@ -8486,7 +8500,8 @@ let rec check_decl env (d : Ast.decl) : env =
     in
     check_unreachable_after_loop ~tail:[] pdef.proto_steps;
     (* Project the protocol onto each role and verify duality. *)
-    let projections = project_protocol env ~span:sp ~proto_name:name.txt pdef in
+    let projections, positions = project_protocol env ~span:sp ~proto_name:name.txt pdef in
+    March_ast.Protocol_states.record_protocol ~proto:name.txt pdef.proto_steps;
     let participants = List.map fst projections in
     if participants <> [] && List.length participants < 2 then
       Err.warning ~code:Err.Code.protocol_single_participant env.errors ~span:sp
@@ -8499,7 +8514,7 @@ let rec check_decl env (d : Ast.decl) : env =
        2026-07-24: it fired on every ordinary protocol, including the
        reference chapter's own Echo example). *)
     (* Check against previously-declared protocols for cross-protocol conflicts. *)
-    let pi = { pi_def = pdef; pi_projections = projections; pi_span = sp } in
+    let pi = { pi_def = pdef; pi_projections = projections; pi_span = sp; pi_positions = positions } in
     let new_env = { env with protocols = StrMap.add name.txt pi env.protocols } in
     (if StrMap.cardinal new_env.protocols > 1 then
        StrMap.iter (fun other_name other_pi ->

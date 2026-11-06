@@ -1127,6 +1127,77 @@ Each error says what the channel must do next and spells out the rest of its scr
 received anything.
 <button class="ep-try" data-error-example="24-channel-wrong-step">Try it</button>
 
+<a id="channel-close-early"></a>
+
+### A channel closed before its last step
+
+<!-- error-tour: 35-channel-close-early -->
+```march
+mod Main do
+  type Client = Client
+  type Server = Server
+
+  protocol Order do
+    Client -> Server : Int
+    choose by Server:
+      ok  -> Server -> Client : Bool
+      err -> Server -> Client : String
+    end
+    Client -> Server : String
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Order)
+    let cc2 = Chan.send(cc, 1)
+    let (_n, sc2) = Chan.recv(sc)
+    let sc3 = Chan.send(Chan.choose(sc2, :ok), true)
+    let (label, cc3) = Chan.offer(cc2)
+    match label do
+      :ok ->
+        let (_b, cc4) = Chan.recv(cc3)
+        Chan.close(cc4)
+      :err ->
+        let (_s, cc4) = Chan.recv(cc3)
+        Chan.close(Chan.send(cc4, "thanks"))
+    end
+    let (_t, sc4) = Chan.recv(sc3)
+    Chan.close(sc4)
+  end
+end
+```
+
+```text
+-- PROTOCOL ------------------- channel-close-early.march
+
+`Chan.close` can't close this channel here: at this point the channel must send a `String`. [session_state_mismatch]
+
+23 |         Chan.close(cc4)
+             ^^^^^^^^^^^^^^^
+
+    What is left on this channel: send a `String`, then close.
+    The conversation so far, in protocol `Order`:
+
+      Client -> Server : Int       done
+      choose by Server: ok | err   done
+      Client -> Server : String    <- `Client` must do this next
+
+    the channel is `Client`'s end of protocol `Order`, declared here:
+
+ 5 |   protocol Order do
+       ^^^^^^^^^^^^^^^^^
+    run `march --explain session_state_mismatch`
+```
+<!-- /error-tour -->
+
+When the protocol has more than two steps, the error also draws the conversation so far,
+one step per line in the order the protocol declares them. `done` marks the steps this end
+has already taken; a `choose` is drawn with all its branches when the channel has gone
+past it. The arrow on the right (`` <- `Client` must do this next ``) is where the channel is
+now, and the headline says what the call tried instead. Here the `ok` branch closes the
+client's end, but every branch of the `choose` leads to the client's last `String`. A
+two-step protocol like `Echo` above gets no diagram, because the headline already says
+everything it would.
+
 <a id="offer-not-exhaustive"></a>
 
 ### An offer left unhandled
@@ -1306,6 +1377,11 @@ Role `Cons` tries to choose `more` or `done` here, but at this point protocol `S
                                                          ^^
 
     Take that step with `Stream_Cons.recv_Msg_Prod_Cons_1` first.
+    The conversation so far, in protocol `Stream`:
+
+      loop do                         (repeats)
+        Prod -> Cons : Int            <- `Cons` must do this next
+        choose by Cons: more | done   <- `Cons` tried this
 
     `Cons` is here: it must receive an `Int` from `Prod`:
 
@@ -1324,6 +1400,88 @@ The role's code calls a generated function, but the error is about the protocol:
 `Cons` tried to do, the step it skipped (with a "you are here" label on the protocol
 line), and which function takes that step. (The playground can't load the session
 runtime this one needs.)
+
+The diagram draws the whole conversation, not only `Cons`'s side, up to the step that
+went wrong. Read it top to bottom. A `loop` is drawn as one round, marked `(repeats)`, with
+its steps indented under it. Two arrows sit in the right-hand column: one on the step
+`Cons` must take next and one on the step it tried, so the gap between them is what
+`Cons` skipped. A `choose` that `Cons` has not reached yet is drawn on one line with its
+branches (`more | done`).
+
+<a id="role-repeats-a-step"></a>
+
+### A role that repeats a step
+
+<!-- error-tour: 36-role-repeats-a-step -->
+```march
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Pump do
+    hello: A -> B : String
+    loop do
+      tick: A -> B : Int
+      tock: B -> A : Int
+      choose by A:
+        go   -> A -> B : Bool
+        quit -> A -> B : Bool
+                stop
+      end
+    end
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Pump_A.Entry) : Pump_A.Yield do
+    let st1 = Pump_A.send_Hello(s, st, "hi")
+    let st2 = Pump_A.send_Tick(s, st1, 1)
+    Pump_A.recv_Tock(s, st2, fn (_n, st3) ->
+      Pump_A.recv_Tock(s, Pump_A.send_Tick(s, st3, 2), fn (_m, st4) ->
+        Pump_A.close(s, Pump_A.choose_quit(s, st4, true))))
+  end
+
+  fn main(_c : Cap(IO)) do () end
+end
+```
+
+```text
+-- PROTOCOL ------------------- role-repeats-a-step.march
+
+Role `A` tries to send an `Int` to `B` here, but at this point protocol `Pump` says it must choose `go` or `quit`. [protocol_step_order]
+
+23 |       Pump_A.recv_Tock(s, Pump_A.send_Tick(s, st3, 2), fn (_m, st4) ->
+                                                   ^^^
+
+    Take that step with `Pump_A.choose_go` first.
+    The conversation so far, in protocol `Pump`:
+
+      hello: A -> B : String     done
+      loop do                    (repeats)
+        tick:  A -> B : Int      done   <- `A` tried this again
+        tock:  B -> A : Int      done
+        choose by A: go | quit   <- `A` must do this next
+
+    `A` is here: it must choose `go` or `quit`:
+
+11 |       choose by A:
+                     ^
+
+    `st3` is the state bound here:
+
+22 |     Pump_A.recv_Tock(s, st2, fn (_n, st3) ->
+                                          ^^^
+    run `march --explain protocol_step_order`
+```
+<!-- /error-tour -->
+
+Inside a loop, a role's next step can come earlier in the protocol than the one it just
+took. Here `A` went round again without choosing whether to go on. The diagram marks the
+steps of this round as `done` and the one `A` tried as `tried this again`. The `choose` it
+must make next is drawn on one line with its branches, since `A` has not picked one. Once
+a role is inside a branch, the diagram shows the branch it took and names the others in
+the right-hand column (`` other branch: `more` ``). A long conversation keeps three steps of
+context and shortens the rest to `… N earlier steps`. (The playground can't load the
+session runtime this one needs.)
 
 <a id="role-grant"></a>
 

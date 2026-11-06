@@ -8,6 +8,12 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
                                              ^^^
 
     This is a protocol state, and the first use closed the conversation: no step can follow `close`.
+    The conversation so far, in protocol `Fan`:
+
+      number:  A -> C : Int
+      second:  B -> C : Int    done   <- `B` tried this again
+      verdict: C -> A : Bool
+      (end of conversation)    <- `B` can only close here
 
     `st1` was already consumed here:
 

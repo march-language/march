@@ -1,0 +1,26 @@
+exit: 1
+-- PROTOCOL ---------- errors/protocol_wrong_role_2.march
+
+`Chain_C.send_S8` is a step of role `C`, but `st4` belongs to role `B` of protocol `Chain`. [protocol_wrong_role]
+
+23 |         let st5 = Chain_C.send_S8(s, st4, true)
+                                          ^^^
+
+    At this point `B` must send a `Bool` to `C`: take that step with `Chain_B.send_S7`.
+    If this body is meant to play `C`, give it a `Chain_C` state instead.
+    The conversation so far, in protocol `Chain`:
+
+      … 3 earlier steps
+      s4: A -> B : Int    done
+      s5: B -> C : Int    done
+      s6: C -> A : Int
+      s7: B -> C : Bool   <- `B` must do this next
+      s8: C -> B : Bool   <- `B` tried this, but it is `C`'s step
+
+    `B` is here: it must send a `Bool` to `C`:
+
+15 |     s7: B -> C : Bool
+             ^
+    run `march --explain protocol_wrong_role`
+
+

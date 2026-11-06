@@ -1,0 +1,28 @@
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Pump do
+    hello: A -> B : String
+    loop do
+      tick: A -> B : Int
+      tock: B -> A : Int
+      choose by A:
+        go   -> A -> B : Bool
+        quit -> A -> B : Bool
+                stop
+      end
+    end
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Pump_A.Entry) : Pump_A.Yield do
+    let st1 = Pump_A.send_Hello(s, st, "hi")
+    let st2 = Pump_A.send_Tick(s, st1, 1)
+    Pump_A.recv_Tock(s, st2, fn (_n, st3) ->
+      Pump_A.recv_Tock(s, Pump_A.send_Tick(s, st3, 2), fn (_m, st4) ->
+        Pump_A.close(s, Pump_A.choose_quit(s, st4, true))))
+  end
+
+  fn main(_c : Cap(IO)) do () end
+end
