@@ -60,6 +60,8 @@ native_actor_self: coverage audit (user + stdlib): 240 enforced, 0 inert (warned
 native_actor_self: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_send_to_self: coverage audit (user + stdlib): 240 enforced, 0 inert (warned), 0 unenforced
 native_actor_send_to_self: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_shared_name_drop: coverage audit (user + stdlib): 240 enforced, 0 inert (warned), 0 unenforced
+native_actor_shared_name_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_stash_become: coverage audit (user + stdlib): 240 enforced, 0 inert (warned), 0 unenforced
 native_actor_stash_become: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_state_released: coverage audit (user + stdlib): 240 enforced, 0 inert (warned), 0 unenforced
