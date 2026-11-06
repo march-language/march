@@ -255,6 +255,114 @@ let colliding_shared_ctor_type (module_prefix : string) (ctor_name : string)
   : string option =
   Hashtbl.find_opt colliding_ctor_type_by_module (module_prefix, ctor_name)
 
+(* ── Actor message identity ───────────────────────────────────────────────
+   A [VCon] carries only its tag, so dispatch by handler NAME let a variant
+   `Tok.Inc(-1)`, or another same-state actor's `Inc`, run this actor's `Inc`
+   handler, which compiled code (globally unique message tags) drops.  When
+   the driver hands in the typechecker's types ([ctor_type_of_span]), a
+   construction of an actor message whose name some handler uses is tagged
+   `<Actor>_Msg.<Msg>` ([msg_tag_of_con]); dispatch runs such a tag only on
+   its own actor and, for a name another actor or a variant shares, drops a
+   bare tag the interpreter did not build itself ([handler_for_msg]).
+   Patterns and printing see the bare name ([strip_msg_qual]).  Without
+   types (the REPL, tests that skip the typechecker) tags stay bare and
+   dispatch is by name, as before.  Todo
+   specs/progress/2026-11-04-interp-actor-dispatch-by-name.md. *)
+
+(** The constructor's checked type name at a span, set by the driver. *)
+let ctor_type_of_span : (span -> string option) ref = ref (fun _ -> None)
+
+(** True once the driver has set [ctor_type_of_span]. *)
+let typed_messages : bool ref = ref false
+
+(** handler name -> the actors (decl names) that define it. *)
+let handler_actors : (string, string list) Hashtbl.t = Hashtbl.create 16
+
+(** Every variant constructor name declared anywhere. *)
+let variant_ctor_names : (string, unit) Hashtbl.t = Hashtbl.create 64
+
+(** The `<Actor>_Msg` prefixes [msg_tag_of_con] has put on a tag. *)
+let msg_qualified_types : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+let actor_msg_suffix = "_Msg"
+
+let last_segment (s : string) : string =
+  match String.rindex_opt s '.' with
+  | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+  | None -> s
+
+(** The actor whose message type is [tn] (`Counter_Msg`, possibly
+    module-qualified), when [tn] names one. *)
+let actor_of_msg_type (tn : string) : string option =
+  let t = last_segment tn in
+  let n = String.length t and k = String.length actor_msg_suffix in
+  if n > k && String.sub t (n - k) k = actor_msg_suffix then
+    let a = String.sub t 0 (n - k) in
+    if Hashtbl.fold (fun _ owners acc -> acc || List.mem a owners) handler_actors false
+    then Some a else None
+  else None
+
+let note_actor_handlers (actor : string) (handlers : actor_handler list) : unit =
+  List.iter (fun (h : actor_handler) ->
+      let owners = Option.value ~default:[] (Hashtbl.find_opt handler_actors h.ah_msg.txt) in
+      if not (List.mem actor owners) then
+        Hashtbl.replace handler_actors h.ah_msg.txt (actor :: owners))
+    handlers
+
+(** A message name that two actors' handlers, or a handler and a variant,
+    share. *)
+let shared_msg_name (n : string) : bool =
+  match Hashtbl.find_opt handler_actors n with
+  | Some (_ :: _ :: _) -> true
+  | Some [ _ ] -> Hashtbl.mem variant_ctor_names n
+  | _ -> false
+
+(** The tag for constructor [bare] built at [sp], when it is an actor
+    message whose name a handler uses. *)
+let msg_tag_of_con (bare : string) (sp : span) : string option =
+  if not (Hashtbl.mem handler_actors bare) then None
+  else match !ctor_type_of_span sp with
+    | Some tn when actor_of_msg_type tn <> None ->
+      let tn = last_segment tn in
+      Hashtbl.replace msg_qualified_types tn ();
+      Some (tn ^ "." ^ bare)
+    | _ -> None
+
+(** The handler name of an [actor_call] request ([runtime_call_prefix]). *)
+let runtime_call_handler (tag : string) : string option =
+  let k = String.length runtime_call_prefix in
+  if String.length tag > k && String.sub tag 0 k = runtime_call_prefix
+  then Some (String.sub tag k (String.length tag - k)) else None
+
+(** [tag] without a `<Actor>_Msg.` prefix [msg_tag_of_con] put there, or the
+    [runtime_call_prefix] [actor_call] put there. *)
+let strip_msg_qual (tag : string) : string =
+  match runtime_call_handler tag with Some h -> h | None ->
+  match String.rindex_opt tag '.' with
+  | Some i when Hashtbl.mem msg_qualified_types (String.sub tag 0 i) ->
+    String.sub tag (i + 1) (String.length tag - i - 1)
+  | _ -> tag
+
+(** Messages the interpreter itself enqueues, always bare. *)
+let runtime_built_msg (tag : string) : bool =
+  tag = "Shutdown" || tag = "Down" || tag = "$sys_inspect"
+
+(** The handler of actor [actor_name] (its spawn name) that runs message
+    [tag]: a `<A>_Msg.<M>` tag only on actor [A]; a bare tag by name, unless
+    the name is shared and the interpreter did not build the message. *)
+let handler_for_msg (actor_name : string) (handlers : actor_handler list) (tag : string)
+  : actor_handler option =
+  let find n = List.find_opt (fun (h : actor_handler) -> h.ah_msg.txt = n) handlers in
+  match runtime_call_handler tag with Some h -> find h | None ->
+  match String.rindex_opt tag '.' with
+  | Some i when Hashtbl.mem msg_qualified_types (String.sub tag 0 i) ->
+    let tn = String.sub tag 0 i in
+    let m = String.sub tag (i + 1) (String.length tag - i - 1) in
+    if actor_of_msg_type tn = Some (last_segment actor_name) then find m else None
+  | _ ->
+    if !typed_messages && shared_msg_name tag && not (runtime_built_msg tag) then None
+    else find tag
+
 (** Populate [type_collision_set] AND [colliding_ctor_type_by_module] by
     walking [decls] recursively (descending into [DMod], accumulating a
     "Sub.Sub2." prefix the same way [module_stack]/[current_doc_prefix] do
@@ -989,7 +1097,7 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
         | Some short_type_name -> prefix ^ short_type_name ^ "." ^ bare_pat
         | None -> bare_pat
     in
-    if qualified_pat <> tag then None
+    if qualified_pat <> strip_msg_qual tag then None
     else if List.length pats <> List.length args then None
     else match_list pats args
 
@@ -1067,6 +1175,7 @@ and match_list (pats : pattern list) (vs : value list) : (string * value) list o
 let register_type_ctors (name_txt : string) (variants : variant list) : unit =
   List.iter (fun (v : variant) ->
       Hashtbl.replace ctor_type_tbl v.var_name.txt name_txt;
+      Hashtbl.replace variant_ctor_names v.var_name.txt ();
       if is_colliding_type_name name_txt then begin
         let module_prefix = current_doc_prefix () in
         let qualified_type = module_prefix ^ name_txt in
@@ -2013,7 +2122,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
      | exception (Eval_error _ | Match_failure _ | Assert_failure _ as e) -> raise e
      | exception e -> march_stack_pop (); raise e)
 
-  | ECon (name, args, _) ->  (* E-Con — core-march.md §4.2 *)
+  | ECon (name, args, con_sp) ->  (* E-Con — core-march.md §4.2 *)
     let arg_vals = List.map (eval_expr env) args in
     (* Strip any type qualifier from the constructor tag so that
        Result.Ok and Ok both produce VCon("Ok", …) at runtime. *)
@@ -2060,6 +2169,10 @@ and eval_expr_inner (env : env) (e : expr) : value =
         | Some short_type_name -> prefix ^ short_type_name ^ "." ^ bare_tag
         | None -> bare_tag
     in
+    let tag =
+      if String.equal tag bare_tag then
+        Option.value ~default:tag (msg_tag_of_con bare_tag con_sp)
+      else tag in
     VCon (tag, arg_vals)
 
   | ELam (params, body, _) ->  (* E-Lam — core-march.md §4.2 *)
@@ -2593,6 +2706,9 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear reg_names_pending;
   pending_timers := [];
   Hashtbl.clear actor_defs_tbl;
+  Hashtbl.reset handler_actors;
+  Hashtbl.reset variant_ctor_names;
+  Hashtbl.reset msg_qualified_types;
   Hashtbl.reset impl_tbl;
   Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
@@ -2771,15 +2887,17 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
             ("__drop__", [])
         in
         if msg_tag <> "__drop__" then
-          (match List.find_opt (fun h -> h.ah_msg.txt = msg_tag)
-                   inst.ai_def.actor_handlers with
+          (match handler_for_msg inst.ai_name inst.ai_def.actor_handlers msg_tag with
            | None ->
-             (* No handler for this message tag: silently drop *)
-             ()
+             (* No handler for this message (or another actor's, or a
+                variant, see [handler_for_msg]): drop it.  Consuming it is
+                progress: without [changed], a pass whose only work was a drop
+                ended [run_until_idle] with later messages still queued. *)
+             changed := true
            | Some handler ->
              if List.length handler.ah_params <> List.length msg_args then
                Printf.eprintf "run_scheduler: handler '%s' arity mismatch for actor %d\n%!"
-                 msg_tag pid
+                 (strip_msg_qual msg_tag) pid
                (* Arity mismatch: message consumed but actor not crashed.
                   The message is lost and the actor continues with unchanged state.
                   This is intentional: a mismatch is a programming error, but crashing
@@ -2843,7 +2961,7 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
                   diag_report_crash ~base:stack_base
                     ~kind:(if inst.ai_supervisor <> None then 1 else 0)
                     ~pid ~supervised:(inst.ai_supervisor <> None)
-                    ~outer:msg_tag exn;
+                    ~outer:(strip_msg_qual msg_tag) exn;
                   clear_march_stack ();
                   crash_actor pid (Printexc.to_string exn));
                current_pid := prev_pid
@@ -3329,8 +3447,7 @@ let shutdown_actor_pid (pid : int) : unit =
         | _                -> ("__drop__", [])
       in
       if msg_tag <> "__drop__" then begin
-        match List.find_opt (fun h -> h.ah_msg.txt = msg_tag)
-                inst.ai_def.actor_handlers with
+        match handler_for_msg inst.ai_name inst.ai_def.actor_handlers msg_tag with
         | None -> ()  (* No Shutdown handler: fall through to force-kill *)
         | Some handler ->
           if List.length handler.ah_params = List.length msg_args then begin
@@ -3528,6 +3645,7 @@ let rec eval_decl (env : env) (d : decl) : env =
        module — the desugar pass turns A.B into ECon("A.B") which becomes the
        actor_name used in ESpawn. *)
     let env_ref = ref env in
+    note_actor_handlers name.txt def.actor_handlers;
     Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
     let qual = current_doc_prefix () ^ name.txt in
     if qual <> name.txt then
@@ -4168,6 +4286,7 @@ let eval_module_env (m : module_) : env =
     | DActor (_, name, def, _) :: rest ->
       (* Register actor with the shared env_ref so handlers can call module fns.
          Also register qualified name for spawn(Mod.Actor) support. *)
+      note_actor_handlers name.txt def.actor_handlers;
       Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
       let qual = current_doc_prefix () ^ name.txt in
       if qual <> name.txt then

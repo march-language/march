@@ -296,19 +296,12 @@ end
 | [Examples](examples.md) | Runnable programs in `examples/`, one feature each |
 | Coming from [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md) | Mental-model maps for newcomers |
 
-### What 1.0 promises
+### Compatibility & platforms
 
 | Page | What it covers |
 |-------|---------------|
 | [Compatibility & Deprecation](compatibility.md) | What a 1.x release keeps working, how things are deprecated, stdlib stability tiers |
 | [Supported Platforms](platforms.md) | Tier 1 (darwin-arm64, linux-x86_64, linux-aarch64), tier 2 and tier 3, and what each means |
-| [Claim: Deploys & Distribution](claim-deploys.md) | Verified installs, pinned builds, deterministic output, static binaries, cluster deploys |
-| [Claim: Capabilities](claim-capabilities.md) | What `main`'s grant and `needs` guarantee; see also the [threat model](capability-threat-model.md) |
-| [Claim: Performance](claim-performance.md) | How speed is measured (same-machine A/B against the last release); targets still to be set |
-| [Claim: Refinement Types](claim-refinements.md) | What `cap verified` proves, and the trusted base it relies on |
-
-Each claim page states the guarantee, its assumptions, what is not claimed, and the CI check
-that defends it, including the checks that are still only planned.
 
 ### The language
 
@@ -376,5 +369,4 @@ that defends it, including the checks that are still only planned.
 
 | Guide | What it covers |
 |-------|---------------|
-| [Upgrading to 0.4.0](upgrading-to-0-4-0.md) | No breaking source changes; what moved |
-| [Upgrading to 0.3.0](upgrading-to-0-3-0.md) | The breaking changes in 0.3.0, one by one |
+| [Upgrading to 0.6.0](upgrading-to-0-6-0.md) | The changes from 0.5.x to 0.6.0 |

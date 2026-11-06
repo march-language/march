@@ -1,0 +1,52 @@
+-- A message whose NAME a target actor handles, but which is not that actor's
+-- message, is dropped on both backends (todo
+-- 2026-11-04-interp-actor-dispatch-by-name). `Tok.Inc` is a variant, and
+-- `Rival.Inc` belongs to an actor whose state has the same shape as
+-- `Counter`'s, so the typechecker's `send_wrong_actor` check cannot reject
+-- either send. Compiled code always dropped them (globally unique message
+-- tags); the interpreter used to dispatch by name and run `Counter`'s `Inc`.
+mod ActorSharedNameDrop do
+  needs IO.Console
+  needs IO.Spawn
+
+  type Tok = Inc(Int) | Dec(Int)
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Inc(k : Int) do { n: state.n + k } end
+  end
+
+  actor Rival do
+    state { n : Int }
+    init  { n: 0 }
+    on Inc(k : Int) do { n: state.n - k } end
+  end
+
+  fn forward(p, m) do send(p, m) end
+
+  fn field(p, name : String) : String do
+    match get_actor_field(p, name) do
+      Some(v) -> int_to_string(v)
+      None -> "<none>"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let c = spawn(Counter)
+    let o = spawn(Rival)
+    send(c, Counter.Inc(3))
+    forward(c, Tok.Inc(100))
+    forward(c, Rival.Inc(1000))
+    send(o, Rival.Inc(4))
+    send(c, Counter.Inc(5))
+    run_until_idle()
+    println("counter.n = " ++ field(c, "n"))
+    println("other.n = " ++ field(o, "n"))
+    let t : Tok = Tok.Inc(7)
+    match t do
+      Inc(k) -> println("tok inc " ++ int_to_string(k))
+      Dec(k) -> println("tok dec " ++ int_to_string(k))
+    end
+  end
+end

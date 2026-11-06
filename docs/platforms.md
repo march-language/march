@@ -20,7 +20,6 @@ release. The three tier-1 platforms were decided on 2026-10-30.
 | Prebuilt toolchain (`install.sh`, `forge toolchain`) | Yes | No | No |
 | Tested in CI | Yes (one gap, below) | No | No |
 | A bug on it blocks a release | Yes | No | No |
-| The four [1.0 claims]({{ site.baseurl }}/docs/claim-deploys/) apply | Yes | No | No |
 | Fixes accepted | Yes | Yes | Yes, as best effort |
 | Expected to work | Yes | Usually, built from source | Partly, or not at all |
 
@@ -78,5 +77,5 @@ holds back a release. The 1.0 plan lists WASM, Windows and Intel macOS as out of
 ## Moving a platform up a tier
 
 A platform moves to tier 1 when CI builds a prebuilt archive for it, runs the full test suite
-on it, and the four 1.0 claims hold there (including `--cap-sandbox`). A platform moves to
+on it, and `--cap-sandbox` works there. A platform moves to
 tier 2 when it builds from source and someone is willing to keep it building.
