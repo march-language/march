@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`--refine-infer` proposes a relation a function keeps from its argument to its result.**
+  For `bump(a : Assoc(Int, Int)) : Assoc(Int, Int)`, which adds 1 to each value, a caller
+  that needs `Assoc({x : Int | true}, {y : Int | y > x})` gets the type proposed on both the
+  parameter and the result, checked as one step and written as two edits.
+- **`--refine-infer-module M`** limits inference to one module (standard library or yours),
+  with progress lines on stderr. `scripts/refine-infer-stdlib-sweep.sh` uses it to run
+  inference over the whole standard library one module at a time, in parallel: 98 seconds
+  instead of 48 minutes.
 - **A failing test reads like a compile error.** A failed `assert`, `Check.all` property or
   panicking test body now prints a `-- TEST FAILURE --` report with the line under a caret,
   the same under `march test` and `forge test` (compiled). For `assert (a == b)` it labels
@@ -487,6 +495,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`--refine-infer` no longer skips programs that `--check` accepts.** A record named like a
+  standard-library one (`type NodeInfo`, `type Member`) left a type error inside the
+  standard library that `--check` never shows, and inference then printed only "skipped,
+  the program has errors". Inference now stops on the errors `--check` stops on, and a skip
+  names the first errors it stopped on.
+- **`forge refine --infer` prints each proposal once.** When the project does not check as
+  one unit, forge checks each file on its own and infers once over the files that check.
+  Before, it inferred once per file and printed the same proposals for every file (30 times
+  on a 31-file project).
+- **Less `--refine-infer` noise.** A recursive group with nothing to infer near it is no longer
+  noted `scc-unsupported`, and a field test such as `_.step != 0` is no longer tried on an
+  `Int` or `List` value.
 - **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
   (what `forge test` runs) treated a property that returned `false` as passing. Only a
   property that panicked or failed an `assert` was caught. Under `march test` it already
