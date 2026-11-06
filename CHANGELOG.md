@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Adding a field to an actor's state no longer needs a `migrate_state`.** When a build
+  knows the running version's schema (forge's `.schemas.json.prev`, or `--hcr-baseline`) and
+  an actor's state only gained fields whose `init` values are constants, the compiler writes
+  the migration: kept fields are copied, new ones take their `init` value. It is checked like
+  a written one, including on the live state before `ACTIVATE`, and `forge deploy hot` says
+  `migrate_state derived from the running version's state (adds history from init)`. A
+  removed or retyped field, or an `init` value that reads an `init` parameter, still needs a
+  written migration, and the refusal now says which. If a kept field's refinement was also
+  tightened, the error points at that field with the running state that breaks it. See
+  docs/hot-code-reload.md, "Derived migrations".
 - **A failing test reads like a compile error.** A failed `assert`, `Check.all` property or
   panicking test body now prints a `-- TEST FAILURE --` report with the line under a caret,
   the same under `march test` and `forge test` (compiled). For `assert (a == b)` it labels

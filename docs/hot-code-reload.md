@@ -477,6 +477,39 @@ end
 
 The naming convention is `<actor_name_lowercase>_migrate_state`. The parameter type is the **old** state shape; the return type is the **new** state shape. Every live actor of the type is migrated, however many there are.
 
+### Derived migrations: adding a field needs no `migrate_state`
+
+Most state changes only add fields. For those you write nothing: when a build knows the running version's schema, and an actor's state differs from it only by **added** fields, the compiler writes the `migrate_state` itself. Each kept field is copied; each new field takes its value from `init`.
+
+```march
+-- running:  state { count : Int }
+actor Counter do
+  state { count : Int, history : List(Int) }
+  init { count: 0, history: [] }
+  ...
+end
+-- no counter_migrate_state: the compiler derives
+--   { count: old.count, history: [] }
+```
+
+The running version's schema is the `.march/<name>_hot.so.schemas.json.prev` that `forge deploy hot` keeps, so a forge project needs no setup. Outside forge, pass it with `--hcr-baseline <file>`. `forge deploy hot` says when it used a derived migration:
+
+```
+actor Counter: migrate_state derived from the running version's state (adds history from init)
+```
+
+A derived migration is checked like one you wrote: the same refinement and `@invariant` proofs, the same counterexample search, and the same live-data check before `ACTIVATE`. Copying a field keeps whatever the running version guaranteed of it, and a new field's `init` value is checked against its refinement. Both rules are proved once in the compiler's test suite, so with unchanged refinements there is nothing left for you to prove. If you also tightened a kept field's refinement, the build fails at that field with the running state that breaks it, and asks you to write the migration.
+
+Nothing is derived when the change needs a decision. The deploy is then refused as before, and the refusal says why:
+
+| Change | Why it is not derived |
+|---|---|
+| A field was removed | dropping data is your call (a rename looks like a removal plus an addition; for now, write the migration) |
+| A field changed type | the old value has to be converted |
+| A new field's `init` value reads an `init` parameter, or `init` is not a record literal | there is no constant to give a running actor |
+
+A `migrate_state` you write always wins: the compiler derives one only when there is none. An actor declared in a nested module is not derived yet; write its migration by hand.
+
 ### Messages queued during a deploy
 
 A deploy can land while an actor still has messages waiting in its mailbox. Those messages were sent to the old code, and the actor's state still has the old shape, so they are handled by the **old** code.
@@ -594,7 +627,7 @@ Without a `migrate_state` function, `forge deploy hot` enforces strict compatibi
 @compat(full)
 actor Counter do ... end
 
--- Allow adding fields without migrate_state (new actors get init; old actors keep their field values)
+-- Allow adding fields with no migration at all (prefer a derived or written migrate_state)
 @compat(forward)
 actor Counter do ... end
 
@@ -606,10 +639,12 @@ actor Counter do ... end
 | Policy | What's allowed without `migrate_state` |
 |---|---|
 | `full` (default) | No changes; any change requires migration |
-| `forward` | Adding new fields (existing actors use default values from `init`) |
+| `forward` | Adding new fields |
 | `any` | Any change; no migration check |
 
-For production deployments, `full` with explicit `migrate_state` is safest. It means every state transition is intentional and reviewed.
+A [derived migration](#derived-migrations-adding-a-field-needs-no-migrate_state) counts as a `migrate_state` under every policy: adding fields with constant `init` values deploys under `full` too, because the migration exists and was checked. `forward` and `any` matter only where nothing could be derived, and there they let the deploy through with **no** migration, so a running actor keeps its old-shaped state. Prefer a migration.
+
+For production deployments, `full` is safest: every state transition then has a migration, written or derived, that the compiler checked.
 
 ---
 
