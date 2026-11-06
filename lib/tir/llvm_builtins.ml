@@ -123,7 +123,7 @@ let builtins : builtin list = [
      panic / todo / unreachable call: the call site a Diagnostics crash
      report gives as its location. *)
   { march_name = "__panic_site"; c_name = Some "march_panic_site"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_panic_site(ptr %file, i64 %line)" };
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_panic_site(ptr %file, i64 %line, i64 %col, i64 %end_col)" };
   (* Emitted by lowering, never written in source: a failed `assert`
      (Lower_expr's EAssert arm) and a test body's panic header
      (Lower_tests).  march_assert_fail panics with the rendered report

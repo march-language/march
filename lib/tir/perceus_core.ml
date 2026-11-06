@@ -1203,6 +1203,9 @@ let owned_call_redirect (env : env) (oc : owned_calls) (f : Tir.var)
       let name = owned_clone_name callee positions in
       if not (Hashtbl.mem oc.oc_clones name) then begin
         Hashtbl.replace oc.oc_clones name (callee, positions);
+        (* So a crash report names the clone as its source function. *)
+        Provenance.record name ~from:callee
+          ~derived:(Provenance.Clone_of (callee, "owned")) ~pass:"perceus" ();
         Queue.push (name, callee, positions) oc.oc_pending
       end;
       let handed_names =
