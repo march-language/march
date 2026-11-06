@@ -1,0 +1,31 @@
+-- The live-data migration check (M10): before ACTIVATE, the reload server
+-- runs the new build's migrate_state on a copy of every live state and
+-- checks the new state contract on the result.  v2's migration keeps
+-- count = 137, which its invariant rejects; the prover cannot decide
+-- `not_137` (it is not reflected), so only the live data shows it.  v2 is
+-- refused and the actor keeps running v1; v3's migration passes.
+mod MigCheck do
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Clock
+
+  actor Counter do
+    state { count : Int }
+    init { count: 0 }
+    on Tick() do { count: state.count + 1 } end
+    on Report() do
+      println("v1 count: " ++ int_to_string(state.count))
+      state
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock)) : Unit do
+    let counter = spawn(Counter)
+    List.each(List.range(0, 137), fn _ -> send(counter, Tick))
+    sleep_ms(300)
+    println("ready")
+    List.each(List.range(0, 150), fn _ -> sleep_ms(100))
+    send(counter, Report)
+    sleep_ms(500)
+  end
+end

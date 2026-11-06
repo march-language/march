@@ -2314,6 +2314,9 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
   (* Hot-reload `<actor>_migrate_msg` gets its C-ABI wrapper right after it
      (Desugar_migrate). *)
   let m = { m with mod_decls = Desugar_migrate.expand m.mod_decls } in
+  (* A `--hot-reload` build's `<actor>_migrate_state` gets the live-data
+     check the reload server runs before ACTIVATE (Desugar_migrate_check). *)
+  let m = { m with mod_decls = Desugar_migrate_check.expand m.mod_decls } in
   (* Collect interfaces and fns for satisfy expansion. *)
   let raw_ifaces = collect_interfaces m.mod_decls in
   let raw_fns    = collect_fns m.mod_decls in

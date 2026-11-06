@@ -4013,6 +4013,9 @@ let compile filename =
   in
   (* Desugar *)
   let desugar_errors = March_errors.Errors.create () in
+  (* A hot-reload build carries the live-data check for each state
+     migration (M10, Desugar_migrate_check). *)
+  March_desugar.Desugar_migrate_check.enabled := Option.is_some !hot_reload_prefix;
   let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
   (* Desugar's diagnostics are not printed here: they join the typechecker's
      below (before cascade suppression), so they are rendered, sorted, put

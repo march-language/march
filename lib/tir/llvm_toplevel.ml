@@ -1820,6 +1820,20 @@ let emit_module ~emit_expr
               actor ret (String.concat ", " ps) (Llvm_builtins.mangle_extern fname))
           end
         end;
+        (* M10: the live-data check Desugar_migrate_check generates beside
+           migrate_state, exported as @__migrate_check_<Actor> (ptr -> ptr:
+           the old state in, a String verdict out) for march_reload.c. *)
+        if Tir_names.is_migrate_check_name fname then begin
+          let sfx = Tir_names.migrate_check_suffix in
+          let before = String.sub fname 0 (flen - String.length sfx) in
+          let last = match String.rindex_opt before '.' with
+            | None -> before
+            | Some i -> String.sub before (i + 1) (String.length before - i - 1) in
+          if last <> "" then
+            Buffer.add_string ctx.Llvm_ctx.buf (Printf.sprintf
+              "@__migrate_check_%s = alias ptr (ptr), ptr @%s\n"
+              (String.capitalize_ascii last) (Llvm_builtins.mangle_extern fname))
+        end;
         if flen > migrate_suffix_len
            && String.sub fname (flen - migrate_suffix_len) migrate_suffix_len = migrate_suffix
         then begin
