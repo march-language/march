@@ -22,6 +22,7 @@
 
 mod Js.Canvas do
   needs Ffi
+  needs IO.Foreign
 
   -- Opaque handle to a CanvasRenderingContext2D.
   resource Context
