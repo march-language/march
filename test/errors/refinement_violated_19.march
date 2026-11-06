@@ -1,4 +1,4 @@
--- EXPECT-ERROR: if i >= 0 && i < len(items) do List.nth(items, i) else … end
+-- EXPECT-ERROR: if i >= 0 && i < List.length(items) do List.nth(items, i) else … end
 mod Main do
   -- §F4: the guard is the precondition read at the call's own arguments,
   -- the list parameter `xs` of `List.nth` included, so it names `items`.

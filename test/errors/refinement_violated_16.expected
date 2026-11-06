@@ -3,7 +3,7 @@ exit: 1
 
 refinement violation: argument `xs` of `List.head` does not satisfy precondition `len(_) > 0` [refinement_violated]
 for example, when `empty` is `[]`
-note: guard the call (e.g. `if len(empty) > 0 do List.head(empty) else … end`) or pass a value known to satisfy it
+note: guard the call (e.g. `if List.length(empty) > 0 do List.head(empty) else … end`) or pass a value known to satisfy it
 
 9 |     println(int_to_string(List.head(empty)))
                               ^^^^^^^^^^^^^^^^

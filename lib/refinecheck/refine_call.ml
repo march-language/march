@@ -1195,6 +1195,34 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
               | None -> "" )
           | _ -> ("a message the new handler rejects", "")
         in
+        let short = Witness.last_segment fname in
+        (match List.assoc_opt short !Hcr_baseline.derived with
+         | Some fields ->
+           (* A derived migration (M11): the user wrote no function, so the
+              error is about the state change, at the field. *)
+           let field = List.nth_opt sg.param_names rp.idx in
+           let span =
+             match Option.bind field (fun f -> List.assoc_opt f fields) with
+             | Some sp -> sp
+             | None -> span
+           in
+           Err.report errctx
+             { Err.severity = Err.Error; span; labels = []; code = Err.Code.refinement_violated;
+               fix = None;
+               message =
+                 display_measures
+                   (Printf.sprintf
+                      "A running `%s` can hold a state this version rejects.\n\n\
+                       `%s` requires  %s%s\n\
+                       but the running state %s would become %s"
+                      callee callee (pred_str rp.pred) where old ret);
+               notes =
+                 [ Printf.sprintf
+                     "the state only gained fields, so the compiler derived `%s`: it keeps \
+                      every old field and gives each new one its `init` value"
+                     short;
+                   Printf.sprintf "write `%s` yourself to convert the old values" short ] }
+         | None ->
         Err.error ~code:Err.Code.refinement_violated errctx ~span
           (display_measures
              (Printf.sprintf
@@ -1202,7 +1230,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                  `%s` requires  %s%s\n\
                  but %s(%s) returns %s"
                 (Witness.last_segment fname) what callee (pred_str rp.pred) where
-                (Witness.last_segment fname) old ret)))
+                (Witness.last_segment fname) old ret))))
     | _ -> note_plain verdict
   in
   match List.nth_opt args rp.idx with
@@ -3705,10 +3733,30 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                            | Some t when t <> "" && not (String.contains t '\n') -> t
                            | _ -> "…"
                          in
+                         (* The guard is code to paste: the measure `len`
+                            is not a function, so for a `List.` call spell
+                            it as the function that is. *)
+                         let code_guard g =
+                           if not (String.starts_with ~prefix:"List." call_text) then g
+                           else begin
+                             let n = String.length g in
+                             let buf = Buffer.create (n + 16) in
+                             let ident c = match c with
+                               | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '.' -> true
+                               | _ -> false in
+                             let i = ref 0 in
+                             while !i < n do
+                               if !i + 4 <= n && String.sub g !i 4 = "len("
+                                  && (!i = 0 || not (ident g.[!i - 1]))
+                               then (Buffer.add_string buf "List.length("; i := !i + 4)
+                               else (Buffer.add_char buf g.[!i]; incr i)
+                             done;
+                             Buffer.contents buf
+                           end in
                          Printf.sprintf
                            "note: guard the call (e.g. `if %s do %s else … end`) or pass a value \
                             known to satisfy it"
-                           (pred_str (over_args arg rp.pred)) call_text
+                           (code_guard (pred_str (over_args arg rp.pred))) call_text
                        | None ->
                          "note: guard the call or pass a value known to satisfy it")
                     | Bound_expr ->
