@@ -25,6 +25,10 @@ type actor_schema = {
   contracts: bool;           (* written by a compiler that records refinements *)
   unsupported: bool;         (* a refinement or @invariant it could not write down *)
   accepted: string list;     (* laws built with --accept-unproved: "state", a handler, or "*" *)
+  derived: string list option;
+  (* M11: Some fields = the compiler derived this build's migrate_state from
+     the deployed schema, the listed fields taking their `init` values *)
+  not_derived: string option;  (* why it could not, when the state changed *)
 }
 
 (** The deploy changed the actor's message type (D30, plan 6.3): a handler
@@ -87,7 +91,10 @@ let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
                contracts = (match member "contracts" j with `Null -> false | _ -> true);
                unsupported = flag "refine_unsupported" j || flag "invariant_unsupported" j;
                accepted = (match member "accepted_unproved" j with
-                   | `Null -> [] | v -> v |> to_list |> List.map to_string) })
+                   | `Null -> [] | v -> v |> to_list |> List.map to_string);
+               derived = optional "migrate_derived"
+                   (fun v -> v |> to_list |> List.map to_string) j;
+               not_derived = optional "migrate_not_derived" to_string j })
 
 let parse_schemas_file path =
   if not (Sys.file_exists path) then []
@@ -140,6 +147,24 @@ let check_compat (compat : string) (changes : field_change list) : (unit, string
       changes in
     Error (Printf.sprintf "@compat(full) violated: %s — provide migrate_state or add @compat(any)"
              (String.concat ", " desc))
+
+(** What to add to a refusal for a missing migrate_state: why the compiler
+    did not derive one, when the new build's schema says. *)
+let not_derived_note (new_schemas : (string * actor_schema) list) (actor : string) : string =
+  match List.assoc_opt actor new_schemas with
+  | Some { not_derived = Some why; _ } -> Printf.sprintf " (not derived: %s)" why
+  | _ -> ""
+
+(** The line announcing a derived migration, when [actor]'s was. *)
+let derived_note (new_schemas : (string * actor_schema) list) (actor : string) : string option =
+  match List.assoc_opt actor new_schemas with
+  | Some { derived = Some added; _ } ->
+    Some (Printf.sprintf "actor %s: migrate_state derived from the running version's state (%s)"
+            actor
+            (match added with
+             | [] -> "every field kept"
+             | fs -> "adds " ^ String.concat ", " fs ^ " from init"))
+  | _ -> None
 
 (** Compute diffs for all actors appearing in both old and new schemas. *)
 let diff_schemas

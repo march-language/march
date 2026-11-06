@@ -108,6 +108,7 @@ let fix_verify_source : string option ref = ref None
 let emit_core_ast_file : string option ref = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
 let refine_report  = ref false   (* --refine-report: print obligation-ledger proved/violated/skipped counts *)
+let guarantees     = ref false   (* --guarantees: per actor and protocol, what this build established (bin/guarantees.ml) *)
 (* --termination-report: one line per recursive unit with its termination
    class (Refine_term, specs/2026-10-26-termination-checking-design.md).
    Report-only: nothing else reads the analysis. *)

@@ -301,7 +301,10 @@ for runner in "${RUNNERS[@]}"; do
       echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
       record_failure "$runner" "z3 not found on PATH -- every z3-gated case would [SKIP] and still exit 0"
     fi
-    run_suite "$runner" "$RUNNER_ROOT/test/${runner}.exe"
+    # Its groups are independent and mostly wait on z3 or a compiler
+    # subprocess: run them in parallel child processes (Test_helpers.run_groups).
+    # MARCH_TEST_PROCS=1 runs the suite in one process as before.
+    run_suite "$runner" "$RUNNER_ROOT/test/${runner}.exe" "MARCH_TEST_PROCS=${MARCH_TEST_PROCS:-4}"
   elif [[ "$runner" == "test_jit" ]]; then
     # test_jit spawns bin/main.exe as a subprocess for REPL/--jit sessions
     # (see test/dune's `(test (name test_jit) ...)` stanza) and silently
