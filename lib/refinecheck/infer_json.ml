@@ -92,12 +92,14 @@ let to_string ?(edit_of : RI.proposal -> (string * int * int * string) option = 
       | None -> "null"
     in
     Printf.sprintf
-      "{\"id\": %s, \"round\": %d, \"kind\": %s, \"fn\": %s, \"file\": %s, \"line\": %d, \"col\": %d, \"slot\": %s, \"base\": %s, \"predicate\": %s, \"annotation\": %s, \"source\": %s, \"depends_on\": %s, \"external_callers\": %b, \"closes\": %s, \"caller_impact\": %s, \"edit\": %s}"
+      "{\"id\": %s, \"round\": %d, \"kind\": %s, \"fn\": %s, \"file\": %s, \"line\": %d, \"col\": %d, \"slot\": %s, \"base\": %s, \"predicate\": %s, \"annotation\": %s, \"source\": %s, \"depends_on\": %s, \"external_callers\": %b, \"closes\": %s, \"caller_impact\": %s, \"edit\": %s%s}"
       (str p.RI.id) p.RI.round (str (kind_text p.RI.slot)) (str p.RI.slot.IS.fn) (str f) l c
       (str (path_text p.RI.slot.IS.path))
       (str (Option.value (IS.render IS.Return p.RI.slot.IS.base) ~default:""))
       (str p.RI.pred) (str p.RI.annotation) (str (Infer_vocab.source_name p.RI.source))
       (arr (List.map str p.RI.depends_on)) p.RI.external_callers (arr closes) impact edit
+      (* Only on a joint relational proposal, so every other line is unchanged. *)
+      (match p.RI.joint_param with Some x -> Printf.sprintf ", \"joint_param\": %s" (str x) | None -> "")
   in
   let rejected =
     List.sort (fun (a, pa, _, _) (b, pb, _, _) -> compare (sort_key a pa) (sort_key b pb)) r.RI.rejected

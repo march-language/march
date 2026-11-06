@@ -195,6 +195,8 @@ let refine_infer_json      = ref false
 let refine_infer_kinds     : string option ref = ref None
 let refine_infer_budget    = ref March_refinecheck.Refine_infer.default_budget
 let refine_infer_stdlib    = ref false
+(* --refine-infer-module NAME (repeatable): target only the files declaring NAME. *)
+let refine_infer_modules   : string list ref = ref []
 let allow_caller_violations = ref false
 let apply_public           = ref false
 let refine_infer_apply     = ref false
