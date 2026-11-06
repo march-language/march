@@ -702,4 +702,6 @@ let suites =
       @ List.map (fun (mode, evloop, extra_env) ->
           Alcotest.test_case ("deadlines: " ^ mode) `Quick
             (run_deadlines ~mode ~evloop ~extra_env)) modes
-      @ [ Alcotest.test_case "https: evloop" `Quick (run_https ~mode:"evloop" ~evloop:true ~extra_env:[||]) ] ) ]
+      @ List.map (fun (mode, evloop, extra_env) ->
+          Alcotest.test_case ("https: " ^ mode) `Quick
+            (run_https ~mode ~evloop ~extra_env)) modes ) ]
