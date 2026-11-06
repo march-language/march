@@ -1372,3 +1372,75 @@ let metric_cert =
         in
         let out = run spin in
         if not (unproved out "s1" || refuted out "s1") then Alcotest.failf "spin has no proved metric (n may be negative):\n%s" out) ]
+
+(* A `match` in value position (an argument, an operand) unfolds as an
+   if-then-else chain over its cases. *)
+let match_value_src =
+  {|mod MV do
+  type Lq = Ez | Cz(Int, Lq)
+  fn plus1(n : Int) : Int do n + 1 end
+  fn sz(l : Lq) : Int do
+    plus1(match l do
+      Ez -> 0
+      Cz(x, _) -> x
+    end)
+  end
+  fn tw(l : Lq) : Int do
+    2 * (match l do
+      Ez -> 1
+      Cz(_, Ez) -> 2
+      Cz(_, _) -> 3
+    end)
+  end
+|}
+
+let match_value =
+  [ gated "match_value: a `match` as an argument or operand unfolds" (fun () ->
+        let out =
+          run
+            (match_value_src
+           ^ "  @[lemma]\n  fn sz5(u : Int) : {Unit | sz(Cz(5, Ez)) == 6 && sz(Ez) == 1} do () end\n  @[lemma]\n  fn tw3(u : Int) : {Unit | tw(Ez) == 2 && tw(Cz(0, Ez)) == 4 && tw(Cz(0, Cz(1, Ez))) == 6} do () end\nend\n")
+        in
+        expect_admitted out "sz5";
+        expect_admitted out "tw3");
+    gated "match_value_red: a false theorem about it is not proved" (fun () ->
+        let out = run (match_value_src ^ "  @[lemma]\n  fn tw_bad(u : Int) : {Unit | tw(Cz(0, Ez)) == 6} do () end\nend\n") in
+        if not (unproved out "tw_bad" || refuted out "tw_bad") then Alcotest.failf "tw_bad is false:\n%s" out) ]
+
+(* R4 by the solver: a divisor refinement the structural check cannot read
+   (`b * b > 0` is `b != 0`) is decided by z3. *)
+let div_solver =
+  [ gated "div_solver: a nonlinear divisor refinement reflects through the solver" (fun () ->
+        let out =
+          run
+            "mod DS do\n  fn sq(a : Int, b : {Int | b * b > 0}) : Int do a / b end\n  @[lemma]\n  fn sq6(u : Int) : {Unit | sq(6, 2) == 3} do () end\nend\n"
+        in
+        expect_admitted out "sq6");
+    gated "div_solver_red: a refinement that allows zero does not" (fun () ->
+        let out =
+          run
+            "mod DS do\n  fn sq(a : Int, b : {Int | b * b >= 0}) : Int do a / b end\n  @[lemma]\n  fn sq6(u : Int) : {Unit | sq(6, 2) == 3} do () end\nend\n"
+        in
+        if not (unproved out "sq6" || refuted out "sq6") then Alcotest.failf "b may be zero:\n%s" out) ]
+
+(* A guard that calls a reflected function is unfolded so the call it
+   guards can be decided. *)
+let guard_call_src =
+  {|mod GC do
+  fn pos(n : Int) : Bool do n > 0 end
+  fn sgn(n : Int) : Int do if pos(n) do 1 else 0 end end
+  fn wrap(n : Int) : Int do sgn(n) + 1 end
+|}
+
+let guard_call =
+  [ gated "guard_call: a guard's own call is unfolded to decide it" (fun () ->
+        let out =
+          run
+            (guard_call_src
+           ^ "  @[lemma]\n  fn w3(u : Int) : {Unit | wrap(3) == 2} do () end\n  @[lemma]\n  fn wv(x : {Int | _ > 0}) : {Unit | wrap(x) == 2} do () end\nend\n")
+        in
+        expect_admitted out "w3";
+        expect_admitted out "wv");
+    gated "guard_call_red: an undecided guard stays undecided" (fun () ->
+        let out = run (guard_call_src ^ "  @[lemma]\n  fn wn(x : Int) : {Unit | wrap(x) == 2} do () end\nend\n") in
+        if not (unproved out "wn" || refuted out "wn") then Alcotest.failf "wrap(0) is 1:\n%s" out) ]
