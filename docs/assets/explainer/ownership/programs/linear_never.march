@@ -1,0 +1,9 @@
+-- The linear tree, never used.
+mod Own do
+  type Tree = Leaf(Int) | Node(Tree, Tree)
+
+  fn main() : Int do
+    linear let t : Tree = Node(Leaf(1), Node(Leaf(2), Leaf(3)))
+    0
+  end
+end
