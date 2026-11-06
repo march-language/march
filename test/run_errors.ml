@@ -92,13 +92,28 @@ type result = { code : int; err : string; json : string;
                 mutable after_json : string
                 (** the [--check-json] of that same fixed program. *) }
 
-let script ~dir ~rel =
+(* A program carrying [-- MARCH-MODE: why-copies] is checked with
+   [--why-copies] / [--why-copies-json] instead of [--check] / [--check-json]:
+   its warnings come from the Perceus copy report
+   (specs/2026-11-05-why-copies-design.md), not the typechecker. *)
+let why_copies_marker = "-- MARCH-MODE: why-copies"
+
+let has_sub s sub =
+  let n = String.length s and m = String.length sub in
+  let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+  go 0
+
+let script ~dir ~rel ~src =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
   let home = Filename.quote (Lazy.force private_home) in
+  let human, json =
+    if has_sub src why_copies_marker then "--why-copies", "--why-copies-json"
+    else "--check", "--check-json" in
   Printf.sprintf
-    "cd %s && HOME=%s %s --check %s > check.out 2> check.err; echo $? > check.code; \
-     HOME=%s %s --check-json %s > json.out 2> /dev/null; true"
-    (Filename.quote dir) home exe (Filename.quote rel) home exe (Filename.quote rel)
+    "cd %s && HOME=%s %s %s %s > check.out 2> check.err; echo $? > check.code; \
+     HOME=%s %s %s %s > json.out 2> /dev/null; true"
+    (Filename.quote dir) home exe human (Filename.quote rel)
+    home exe json (Filename.quote rel)
 
 (* [run_jobs sources]: every (name, program text) checked in parallel;
    returns name -> result. *)
@@ -114,7 +129,7 @@ let run_jobs (sources : (string * string) list) : (string, result) Hashtbl.t =
     write_file (Filename.concat edir (name ^ ".march")) src;
     let rel = "errors/" ^ name ^ ".march" in
     let pid =
-      Unix.create_process "/bin/sh" [| "/bin/sh"; "-c"; script ~dir:tmp ~rel |]
+      Unix.create_process "/bin/sh" [| "/bin/sh"; "-c"; script ~dir:tmp ~rel ~src |]
         Unix.stdin Unix.stdout Unix.stderr in
     Hashtbl.replace running pid (name, tmp)
   in
@@ -617,6 +632,11 @@ let fixes_did_their_part (r : result) =
 
 let check_fix_fixes ~src name (r : result) =
   let partial = contains src fix_partial_marker in
+  (* A copy report exits 0 either way: its fix must make the copy go away. *)
+  (match r.after with
+   | Some (_, err) when contains src why_copies_marker && contains err "[copy_shared]" ->
+     Alcotest.failf "%s: applying its fixes still reports a copy" name
+   | _ -> ());
   match r.after with
   | Some (code, _) when code <> 0 && not partial && fixes_did_their_part r -> ()
   | Some (code, _) when code <> 0 && not partial ->

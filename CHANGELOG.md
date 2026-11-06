@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- `march --why-copies FILE` lists each place in your code where a function builds a new copy
+  of a list or tree instead of reusing it in place, because the value is still shared: used
+  again afterwards, also passed to the enclosing call, or captured by a closure. Each is a
+  `copy_shared` warning naming the call, the value and the reason, and when moving the later
+  use above the call is safe (its only later use, no side effects), it carries that move as a
+  fix for `forge fix`. `--why-copies-json` prints the same as NDJSON. Opt-in; stops before code
+  generation. On a 200,000-element list, making the map the last use cut peak memory from 29 MB
+  to 10 MB.
+
 - **Hot-reload migrations are checked on every build, with a counterexample.** When an
   obligation in an `<actor>_migrate_state` or `<actor>_migrate_msg` can't be proved, the
   compiler runs the migration on small old values. An input whose result the new actor
