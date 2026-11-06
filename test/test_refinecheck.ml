@@ -17349,23 +17349,37 @@ let element_only_ctor_suite =
         let uniq = viol ("mod P4au do\n" ^ st ^ "end\n") in
         Alcotest.(check int) (Printf.sprintf "unique: one violation [%s]" (show uniq)) 1 (List.length uniq));
 
-    gated "an unenforced message's body does not assume its element refinements" (fun () ->
-        (* Two actors both handle `Push`, so the name is withdrawn and no
-           construction is obliged; the bodies must then assume nothing.
-           Unfixed: both `need(h)` obligations proved from the unchecked
-           element facts. *)
+    gated "a shared element-only message is obliged per actor, and each body assumes it" (fun () ->
+        (* Two actors both handle `Push`.  Each construction is obliged
+           against its own actor (`A1.Push`, `A2.Push`), and both backends
+           drop a message built for the other actor (the interpreter since
+           2026-11-05, #1125), so each body assumes its element refinements:
+           both `need(h)` obligations prove.  Before #1125 the shared name
+           was withdrawn, nothing was obliged, and the bodies assumed
+           nothing. *)
         let actor name =
           "  actor " ^ name ^ " do\n    state { n : Int }\n    init { n: 0 }\n\
            \    on Push(xs : List({Int | _ > 0})) do\n\
            \      match xs do\n        Cons(h, _) -> { state with n: need(h) }\n        Nil -> state\n      end\n\
            \    end\n  end\n"
         in
-        let os =
-          List.filter (fun (c, _, _) -> c = "need")
-            (obs ("mod P4hc do\n  fn need(k : {Int | _ > 0}) : Int do k end\n" ^ actor "A1" ^ actor "A2" ^ "end\n"))
+        let src mk =
+          "mod P4hc do\n  fn need(k : {Int | _ > 0}) : Int do k end\n" ^ actor "A1" ^ actor "A2"
+          ^ "  fn mk() do " ^ mk ^ " end\nend\n"
         in
-        Alcotest.(check bool) (Printf.sprintf "need obligations exist, none proved [%s]" (show os)) true
-          (os <> [] && List.for_all (fun (_, v, _) -> v <> "proved") os));
+        let os = List.filter (fun (c, _, _) -> c = "need") (obs (src "A1.Push([3])")) in
+        Alcotest.(check bool) (Printf.sprintf "need obligations exist, all proved [%s]" (show os)) true
+          (os <> [] && List.for_all (fun (_, v, _) -> v = "proved") os);
+        let push v src =
+          List.filter (fun (c, v', _) ->
+              v' = v && String.length c >= 4 && String.sub c (String.length c - 4) 4 = "Push")
+            (obs src) in
+        Alcotest.(check bool) (Printf.sprintf "A1.Push([0 - 1]) violated [%s]" (show (obs (src "A1.Push([0 - 1])")))) true
+          (push "violated" (src "A1.Push([0 - 1])") <> []);
+        Alcotest.(check bool) (Printf.sprintf "A2.Push([0 - 1]) violated [%s]" (show (obs (src "A2.Push([0 - 1])")))) true
+          (push "violated" (src "A2.Push([0 - 1])") <> []);
+        Alcotest.(check bool) "A2.Push([3]) not violated" true
+          (push "violated" (src "A2.Push([3])") = []));
 
     (* --refine-audit agrees: a variant argument's element slot is now an
        enforced site, as a record field's already was.  Unfixed: Unenforced
