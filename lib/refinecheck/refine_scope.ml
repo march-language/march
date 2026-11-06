@@ -558,8 +558,44 @@ let law_method_display (s : string) : string =
     cut 0
   else s
 
+(* The binding level of a binary operator, as lib/parser/parser.mly's
+   [expr_or] .. [expr_mul] give it: [||] 1, [&&] 2, the comparisons 3 (not
+   associative), the additive operators 4, the multiplicative 5, all others
+   left-associative.  [pred_str] parenthesises by it, so a printed predicate
+   re-parses to the tree it came from (todo 2026-11-04-refine-pred-str-drops-
+   parens): `_ <= a && (_ == a || _ == b)` used to print without its
+   parentheses, which reads as a different predicate, and inference parses
+   this text back into candidates ([Infer_vocab.candidate_of_text]). *)
+let binop_level (op : string) : int option =
+  match op with
+  | "||" -> Some 1
+  | "&&" -> Some 2
+  | "==" | "!=" | "<" | "<=" | ">" | ">=" -> Some 3
+  | "+" | "-" | "+." | "-." -> Some 4
+  | "*" | "/" | "%" | "*." | "/." -> Some 5
+  | _ -> None
+
+(* The level of [e] when it prints as an infix operator application. *)
+let rec infix_level (e : A.expr) : int option =
+  match e with
+  | A.ERefineMsg (inner, _, _) -> infix_level inner
+  | A.EApp (A.EVar { A.txt = op; _ }, [ _; _ ], _) -> binop_level op
+  | _ -> None
+
 let rec pred_str (e : A.expr) : string =
-  let binop op a b = pred_str a ^ " " ^ op ^ " " ^ pred_str b in
+  let binop op a b =
+    let p = Option.value (binop_level op) ~default:0 in
+    (* A child binds looser than its parent, or as tightly but on the right
+       of a left-associative operator, or both are comparisons. *)
+    let side right child =
+      match infix_level child with
+      | Some c when c < p || (c = p && (right || p = 3)) -> "(" ^ pred_str child ^ ")"
+      | _ -> pred_str child
+    in
+    side false a ^ " " ^ op ^ " " ^ side true b
+  in
+  (* A prefix operator binds tighter than any infix one. *)
+  let prefix sym a = if infix_level a <> None then sym ^ "(" ^ pred_str a ^ ")" else sym ^ pred_str a in
   match e with
   (* Only an undesugared predicate still carries an author message
      ([March_ast.Refine_msg]); the text is the conjunct's alone, so
@@ -594,13 +630,9 @@ let rec pred_str (e : A.expr) : string =
     binop op a b
   (* `!` binds tighter than any infix operator, so `!(y > 0)` printed flat
      as `!y > 0` would name a different predicate (an instantiated `!p(_)`
-     slot is the common producer, leftovers design §3.2). *)
-  | A.EApp (A.EVar { A.txt = "not"; _ },
-            [ (A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
-                                       | "+" | "-" | "*" | "/" | "%"); _ }, [ _; _ ], _) as a) ], _) ->
-    "!(" ^ pred_str a ^ ")"
-  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp -> "-" ^ pred_str a
+     slot is the common producer, leftovers design §3.2).  Likewise `-`. *)
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> prefix "!" a
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp -> prefix "-" a
   (* Any other application of a plain IDENTIFIER — an unrecognised predicate
      such as `is_prime(_)`.  It reflects to nothing, so it is exactly the case
      `cap verified` reports, and rendering it `<predicate>` would name the
