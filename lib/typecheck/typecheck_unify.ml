@@ -291,10 +291,23 @@ let report_protocol_step_order env ~span ~provided
       March_ast.Protocol_states.diagram ~proto:here.ps_proto ~role:here.ps_role
         ~subject:(Printf.sprintf "`%s`" here.ps_role) ~here:p ?tried ()
     | None -> None in
+  (* Closing at the top of a `loop`: the usual cause is a branch that
+     repeats, whose callback closed where it should have gone round again. *)
+  let repeat_note =
+    match here.ps_pos with
+    | Some p when wanted.ps_doing = "close the conversation"
+                  && March_ast.Protocol_states.at_loop_start ~proto:here.ps_proto p ->
+      [ Printf.sprintf
+          "This state is the top of protocol `%s`'s `loop`, where a branch that repeats \
+           comes back to. To go round again, pass the state to a function that takes it \
+           as a parameter (usually `%s`'s own function, called again) instead of closing."
+          here.ps_proto here.ps_role ]
+    | _ -> [] in
   Err.report env.errors
     { Err.severity = Error; span; message;
       labels = you_are_here @ binder;
-      notes = Printf.sprintf "Take that step with `%s` first." here.ps_call :: Option.to_list diagram;
+      notes = Printf.sprintf "Take that step with `%s` first." here.ps_call
+              :: repeat_note @ Option.to_list diagram;
       code = Err.Code.protocol_step_order; fix = None }
 
 (* A capability for another capability: its own message (§F1). *)

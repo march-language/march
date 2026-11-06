@@ -6,3 +6,4 @@ I got stuck here: [syntax_error]
 4 |     println(1 < 2 < 3)
                       ^
 
+    After this is fixed, `main` will also need permission to print: add `needs IO.Console` to the module, and give `main` the grant, `fn main(_console : Cap(IO.Console))`.

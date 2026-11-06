@@ -50,6 +50,7 @@ need to drain traffic before a routine code push. Some edge cases are still open
 - [Actor state migration](#actor-state-migration): [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
 - [Compatibility annotations](#compatibility-annotations)
 - [Verifying migration soundness with `@invariant`](#verifying-migration-soundness-with-invariant) and [what `@invariant` accepts](#what-expressions-are-allowed-in-invariant)
+- [What a build guarantees: `forge hot-reload check`](#what-a-build-guarantees-forge-hot-reload-check)
 - [Contracts across versions](#contracts-across-versions): a deploy may loosen a refinement, never tighten it unproved
 - [Deploying signature changes](#deploying-signature-changes)
 - [Independent deploy pace (epoch-tagged dispatch)](#independent-deploy-pace-epoch-tagged-dispatch)
@@ -477,6 +478,39 @@ end
 
 The naming convention is `<actor_name_lowercase>_migrate_state`. The parameter type is the **old** state shape; the return type is the **new** state shape. Every live actor of the type is migrated, however many there are.
 
+### Derived migrations: adding a field needs no `migrate_state`
+
+Most state changes only add fields. For those you write nothing: when a build knows the running version's schema, and an actor's state differs from it only by **added** fields, the compiler writes the `migrate_state` itself. Each kept field is copied; each new field takes its value from `init`.
+
+```march
+-- running:  state { count : Int }
+actor Counter do
+  state { count : Int, history : List(Int) }
+  init { count: 0, history: [] }
+  ...
+end
+-- no counter_migrate_state: the compiler derives
+--   { count: old.count, history: [] }
+```
+
+The running version's schema is the `.march/<name>_hot.so.schemas.json.prev` that `forge deploy hot` keeps, so a forge project needs no setup. Outside forge, pass it with `--hcr-baseline <file>`. `forge deploy hot` says when it used a derived migration:
+
+```
+actor Counter: migrate_state derived from the running version's state (adds history from init)
+```
+
+A derived migration is checked like one you wrote: the same refinement and `@invariant` proofs, the same counterexample search, and the same live-data check before `ACTIVATE`. Copying a field keeps whatever the running version guaranteed of it, and a new field's `init` value is checked against its refinement. Both rules are proved once in the compiler's test suite, so with unchanged refinements there is nothing left for you to prove. If you also tightened a kept field's refinement, the build fails at that field with the running state that breaks it, and asks you to write the migration.
+
+Nothing is derived when the change needs a decision. The deploy is then refused as before, and the refusal says why:
+
+| Change | Why it is not derived |
+|---|---|
+| A field was removed | dropping data is your call (a rename looks like a removal plus an addition; for now, write the migration) |
+| A field changed type | the old value has to be converted |
+| A new field's `init` value reads an `init` parameter, or `init` is not a record literal | there is no constant to give a running actor |
+
+A `migrate_state` you write always wins: the compiler derives one only when there is none. An actor declared in a nested module is not derived yet; write its migration by hand.
+
 ### Messages queued during a deploy
 
 A deploy can land while an actor still has messages waiting in its mailbox. Those messages were sent to the old code, and the actor's state still has the old shape, so they are handled by the **old** code.
@@ -594,7 +628,7 @@ Without a `migrate_state` function, `forge deploy hot` enforces strict compatibi
 @compat(full)
 actor Counter do ... end
 
--- Allow adding fields without migrate_state (new actors get init; old actors keep their field values)
+-- Allow adding fields with no migration at all (prefer a derived or written migrate_state)
 @compat(forward)
 actor Counter do ... end
 
@@ -606,10 +640,12 @@ actor Counter do ... end
 | Policy | What's allowed without `migrate_state` |
 |---|---|
 | `full` (default) | No changes; any change requires migration |
-| `forward` | Adding new fields (existing actors use default values from `init`) |
+| `forward` | Adding new fields |
 | `any` | Any change; no migration check |
 
-For production deployments, `full` with explicit `migrate_state` is safest. It means every state transition is intentional and reviewed.
+A [derived migration](#derived-migrations-adding-a-field-needs-no-migrate_state) counts as a `migrate_state` under every policy: adding fields with constant `init` values deploys under `full` too, because the migration exists and was checked. `forward` and `any` matter only where nothing could be derived, and there they let the deploy through with **no** migration, so a running actor keeps its old-shaped state. Prefer a migration.
+
+For production deployments, `full` is safest: every state transition then has a migration, written or derived, that the compiler checked.
 
 ---
 
@@ -715,6 +751,41 @@ build stops with an error at the part it can't read
 server's audit log records it (see below). A state-field or handler-parameter refinement
 the schema can't record (a call with more than one argument, for example) is not an error,
 but a deploy of that actor is **refused** unless the same override names it.
+
+## What a build guarantees: `forge hot-reload check`
+
+`forge hot-reload check` (or `march --check --guarantees FILE`) prints one block per actor
+and protocol, saying what this build established and what it rests on. It runs the same
+check as `forge check`, against the last deploy's schema when there is one
+(`.march/<name>_hot.so.schemas.json.prev`), and changes no verdict: an error is still an
+error, with the same exit code.
+
+```
+actor Counter: not checked
+  state refinements        proved: 3 sites in init and handlers
+  @invariant               not checked: init and handler results are not checked against it; a hot deploy checks it on the migrated state
+  handler contracts        proved: 1 site where a message is built
+  migrate_state (derived)  proved: 1 site against the deployed build
+protocol Relay (2 roles): not checked
+  projection        checked (compiler): the two roles' projections are dual
+  deadlock freedom  not checked: no proof covers this protocol yet
+runtime: assumed
+  mailbox order, Actor.call replies, DOWN delivery  assumed: the runtime is trusted; nothing here proves it
+```
+
+| Label | Meaning |
+|---|---|
+| `proved` | The refinement checker proved every obligation of that kind in the code that runs. |
+| `violated` | It found a counterexample; the build reports it as an error too. |
+| `not proved` | Some obligation was neither proved nor refuted; the line gives the checker's reason. |
+| `not checked` | The program states a guarantee nothing checks yet. This line is the only place it is said. |
+| `checked (compiler)` | A compile-time check that is not a proof about a model (protocol projection). |
+| `assumed` | The trust boundary: the runtime, and messages from other nodes to an `@[remote]` actor. |
+
+A block's header is its weakest line, `assumed` aside. Two gaps are reported as
+`not checked` today: `@invariant` is used only across a hot deploy (as the migration's goal
+and, from the deployed build, as a hypothesis), and nothing yet proves a protocol free of
+deadlock.
 
 ## Contracts across versions
 

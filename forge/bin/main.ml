@@ -1996,10 +1996,22 @@ let hot_reload_migrate_msg_stub_cmd =
       | Ok path -> Printf.printf "wrote %s\n%!" path
       | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1) $ actor $ old_p $ new_p)
 
+let hot_reload_check_cmd =
+  Cmd.v (Cmd.info "check"
+           ~doc:"Print what this build establishes for each actor and protocol \
+                 (proved, violated, not proved, not checked, checked (compiler), assumed), \
+                 checked against the last deploy's schema when there is one")
+    Term.(const (fun () ->
+      match Cmd_deploy_hot.run_check () with
+      | Ok 0 -> ()
+      | Ok n -> exit n
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1) $ const ())
+
 let hot_reload_cmd =
   Cmd.group (Cmd.info "hot-reload" ~doc:"Hot code reload key management and status")
     [ hot_reload_keygen_cmd; hot_reload_show_pubkey_cmd; hot_reload_use_key_cmd;
-      hot_reload_init_cmd; hot_reload_status_cmd; hot_reload_migrate_msg_stub_cmd ]
+      hot_reload_init_cmd; hot_reload_status_cmd; hot_reload_migrate_msg_stub_cmd;
+      hot_reload_check_cmd ]
 
 (* ----------------------------------------------------------- forge cluster *)
 

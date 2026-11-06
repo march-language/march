@@ -29,6 +29,14 @@ git log is authoritative for exact commits.
   `minimum_int` and `maximum_int` moved to private top-level functions so the laws can name
   them; what they compute is unchanged.
 
+- **`forge hot-reload check` / `march --check --guarantees` say what a build guarantees.**
+  One block per actor and protocol, each line labelled `proved`, `violated`, `not proved`,
+  `not checked`, `checked (compiler)` or `assumed`, with what it rests on: state refinements,
+  `@invariant`, handler contracts, `migrate_state` (derived or written, against the deployed
+  build when there is one), `migrate_msg`, protocol projection and deadlock freedom, and the
+  runtime. It changes no verdict. Two gaps are labelled `not checked` rather than left
+  silent: `@invariant` is not checked on `init` or handler results, and no proof covers a
+  protocol's deadlock freedom. See docs/hot-code-reload.md, "What a build guarantees".
 - **`--refine-infer` proposes a relation a function keeps from its argument to its result.**
   For `bump(a : Assoc(Int, Int)) : Assoc(Int, Int)`, which adds 1 to each value, a caller
   that needs `Assoc({x : Int | true}, {y : Int | y > x})` gets the type proposed on both the
@@ -37,6 +45,16 @@ git log is authoritative for exact commits.
   with progress lines on stderr. `scripts/refine-infer-stdlib-sweep.sh` uses it to run
   inference over the whole standard library one module at a time, in parallel: 98 seconds
   instead of 48 minutes.
+- **Adding a field to an actor's state no longer needs a `migrate_state`.** When a build
+  knows the running version's schema (forge's `.schemas.json.prev`, or `--hcr-baseline`) and
+  an actor's state only gained fields whose `init` values are constants, the compiler writes
+  the migration: kept fields are copied, new ones take their `init` value. It is checked like
+  a written one, including on the live state before `ACTIVATE`, and `forge deploy hot` says
+  `migrate_state derived from the running version's state (adds history from init)`. A
+  removed or retyped field, or an `init` value that reads an `init` parameter, still needs a
+  written migration, and the refusal now says which. If a kept field's refinement was also
+  tightened, the error points at that field with the running state that breaks it. See
+  docs/hot-code-reload.md, "Derived migrations".
 - **A failing test reads like a compile error.** A failed `assert`, `Check.all` property or
   panicking test body now prints a `-- TEST FAILURE --` report with the line under a caret,
   the same under `march test` and `forge test` (compiled). For `assert (a == b)` it labels
@@ -310,6 +328,17 @@ git log is authoritative for exact commits.
   is not there the report gives `file:line`. `MARCH_BACKTRACE=full` adds the standard library's
   functions. The exit code is unchanged. Scripts that matched `panic: ` in a compiled program's
   stderr need the new wording (`The program panicked: ...`).
+- Diagnostics, four messages that cost a second round of fixing:
+  - A syntax error in a program whose `main` prints with no `needs IO.Console` now says so in a
+    note. The compiler cannot check capabilities until the program parses, so that error used
+    to appear only after the syntax was fixed.
+  - A protocol state that is never used says what its role must do next and which function
+    takes that step; closing the conversation at the top of a protocol's `loop` says a
+    repeating branch comes back there and how to go round again.
+  - `may crash D` naming a role that is not in the protocol lists the protocol's roles, and a
+    crash branch on a role not declared `may crash` says to remove the branch.
+  - The guard a refinement error suggests for a `List` call uses `List.length(xs)`; it used
+    to print `len(xs)`, the refinement measure, which is not a function.
 - A failed `assert` outside a test prints its own report (the line and both operands), then
   what it was reached through. Interpreted, it used to print that report inside a second
   report's headline.
