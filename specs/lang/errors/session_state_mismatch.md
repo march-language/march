@@ -12,7 +12,9 @@ is the step that side is at, and each `Chan.send`, `Chan.recv`, `Chan.choose`,
 protocol does not allow at that step, such as a second send where the protocol
 says receive, or a close before the last message, is this error. It says what
 the call tries, what the channel must do instead, the steps left on the
-channel, and which protocol and role the channel follows.
+channel, and which protocol and role the channel follows. For a protocol of
+more than two steps it also draws the conversation so far, marking the step
+the channel is at.
 
 ## A program that triggers it
 

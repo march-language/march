@@ -505,7 +505,10 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
               else
                 "This is a protocol state, so it takes exactly one step: take the next \
                  step with the state the first one returned." in
-            { k with notes = k.notes @ [ note ] }
+            (* ... and its diagram, which marks the step taken again. *)
+            let diagram = List.filter (fun n ->
+                String.starts_with ~prefix:"The conversation so far" n) d.notes in
+            { k with notes = k.notes @ [ note ] @ diagram }
           | None -> k
         else k) kept in
   (* The lemma warning takes over what the dropped [refinement_unverified]
@@ -631,7 +634,7 @@ let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
         (List.map (fun n ->
            let colored = fmt_note n in
            let note_lines = String.split_on_char '\n' colored in
-           String.concat "\n" (List.map (fun l -> "    " ^ l) note_lines)
+           String.concat "\n" (List.map (fun l -> if l = "" then l else "    " ^ l) note_lines)
          ) d.notes)
   in
   (* When no span info, just show the header and message. *)

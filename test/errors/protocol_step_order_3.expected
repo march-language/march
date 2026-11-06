@@ -1,0 +1,29 @@
+exit: 1
+-- PROTOCOL ---------- errors/protocol_step_order_3.march
+
+Role `C` tries to receive an `Int` from `S` here, but at this point protocol `Shop` says it must send a `Bool` to `S`. [protocol_step_order]
+
+20 |       fn (_item, st2) -> Shop_C.recv_Total(s, st2, fn (_n, st3) -> Shop_C.close(s, st3)),
+                                                   ^^^
+
+    Take that step with `Shop_C.send_Ack` first.
+    The conversation so far, in protocol `Shop`:
+
+      req:   C -> S : Int        done
+      choose by S: ok            other branch: `no`
+               S -> C : String   done
+        ack:   C -> S : Bool     <- `C` must do this next
+        total: S -> C : Int      <- `C` tried this
+
+    `C` is here: it must send a `Bool` to `S`:
+
+12 |             ack:   C -> S : Bool
+                        ^
+
+    `st2` is the state bound here:
+
+20 |       fn (_item, st2) -> Shop_C.recv_Total(s, st2, fn (_n, st3) -> Shop_C.close(s, st3)),
+                      ^^^
+    run `march --explain protocol_step_order`
+
+

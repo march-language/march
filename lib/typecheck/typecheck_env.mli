@@ -67,6 +67,7 @@ type proto_info = {
   pi_def : Typecheck_types.Ast.protocol_def;
   pi_projections : (string * Typecheck_types.session_ty) list;
   pi_span : Typecheck_types.Ast.span;
+  pi_positions : (string * (Typecheck_types.session_ty * March_ast.Protocol_states.pos) list) list;
 }
 module StrMap :
   sig

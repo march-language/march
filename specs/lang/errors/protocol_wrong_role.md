@@ -10,7 +10,8 @@ An `@[endpoints]` protocol generates one module per role, such as `Fan_A`
 and `Fan_B`, and each module's functions take that role's states only. Passing
 one role's state to another role's function is this error. It names the role
 the function belongs to, the role the state belongs to, and the step the
-state's role must take instead.
+state's role must take instead, and draws the conversation so far with both
+steps marked.
 
 ## A program that triggers it
 
