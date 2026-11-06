@@ -3533,11 +3533,11 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
      relation when one [Within] field holds every related slot (leftovers
      phase E's rule), and a recorded skip for any other shape. *)
   | A.ECon (k, args, _)
-    when (match ctor_of_adt (adt_sort_name container) k.A.txt with
+    when (match ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt with
           | Some kk -> Hashtbl.mem ctor_param_fields kk
           | None -> false) ->
     (* [container]'s own constructor of that name (2026-11-02). *)
-    let kk = Option.get (ctor_of_adt (adt_sort_name container) k.A.txt) in
+    let kk = Option.get (ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt) in
     let roles = Hashtbl.find ctor_param_fields kk in
     let fparams = Hashtbl.find_opt ctor_field_params kk in
     if List.length roles <> List.length args then true
@@ -6097,12 +6097,12 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
           | A.PatCon (k, subpats) ->
             (match container_entry_of_expr ctx defs cb ce_outer subj with
              | Some ({ cont = container; slots; _ } as entry)
-               when (match ctor_of_adt (adt_sort_name container) k.A.txt with
+               when (match ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt with
                      | Some kk -> (match Hashtbl.find_opt ctor_param_fields kk with
                                    | Some roles -> List.length roles = List.length subpats
                                    | None -> false)
                      | None -> false) ->
-               let kk = Option.get (ctor_of_adt (adt_sort_name container) k.A.txt) in
+               let kk = Option.get (ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt) in
                let roles = Hashtbl.find ctor_param_fields kk in
                (* Table-driven (P3 design §2a): a `PatVar` at a [Param i]
                   field takes slot [i] — a refined slot as a scope fact, a

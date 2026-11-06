@@ -2102,7 +2102,19 @@ let finalize_ctor_names () : unit =
         (* The bare key too, unless it IS an unambiguous declarant's key: a
            stray unqualified reference must not pick a constructor list. *)
         if not (List.exists (fun (_, key) -> key = bare && not (ambiguous key)) entries) then
-          Hashtbl.replace ambiguous_adts bare ()
+          Hashtbl.replace ambiguous_adts bare ();
+        (* And the declarant an arity-less lookup prefers when no declarant
+           sits at the top level ([adt_canonical], the first one registered:
+           usually the stdlib's).  A caller that resolves the name without the
+           reference's arity must not get that declarant's constructors for a
+           value of another one's type: `Tree(a)` in a nested user module took
+           `OrderedMap.Tree(k, v)`'s field roles and proved a plain `Int`
+           field positive (review C1 of 2026-11-06).  The arity-aware path
+           ([adt_sort_name ~arity]) is unaffected for every other declarant. *)
+        match Hashtbl.find_opt adt_canonical bare with
+        | Some preferred when not (List.exists (fun (p, _) -> p = "" || p = builtin_path) entries) ->
+          Hashtbl.replace ambiguous_adts preferred ()
+        | _ -> ()
       end)
     adt_decl_paths;
   let keys = List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) adt_ctors []) in

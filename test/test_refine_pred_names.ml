@@ -226,6 +226,20 @@ let arity =
         let out = U.run src in
         if List.exists (fun l -> U.contains l "\tproved\t" && U.contains l "\tneed_one\t" && U.contains l "m.march:10:") (U.lines out)
         then Alcotest.failf "a same-arity Option row was proved:\n%s" out);
+    gated "a nested user Tree(a) never takes OrderedMap's Tree field roles (review C1)" (fun () ->
+        (* No declarant at the top level, so an arity-less lookup's preferred
+           declarant is the stdlib's `Tree(k, v)`: its `Node` keeps the
+           element fact in field 1, here the user's plain `Int` `k`.  `k` must
+           not be proved positive; `v` (the real element) may. *)
+        let src field =
+          Printf.sprintf
+            "mod P1 do\n  mod A do\n    type Tree(a) = Leaf | Node(Tree(a), Int, a, Tree(a), Int)\n\
+            \    fn need(x : {Int | _ > 0}) : Int do x end\n\
+            \    fn f(t : Tree({Int | _ > 0})) : Int do\n      match t do\n\
+            \        Node(_, k, v, _, _) -> need(%s)\n        Leaf -> 1\n      end\n    end\n  end\nend\n"
+            field
+        in
+        U.not_proved (U.run (src "k")) ~line:7 ~callee:"A.need");
     gated "a user arity-0 Tree given an OrderedMap tree is still a type error" (fun () ->
         let src =
           "mod TreeUser do\n  type Tree = Leaf | Node(Tree, Int, Tree)\n\
