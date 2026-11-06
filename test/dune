@@ -3255,6 +3255,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/trace_boundary.expected native_trace_boundary.out)))
 
+;; The live-data migration check's generated functions (M10,
+;; lib/desugar/desugar_migrate_check.ml): `<actor>_migrate_state__check`'s
+;; verdicts and the guarded `<actor>_migrate_msg__hcr`, called directly from a
+;; --hot-reload build.  Compiled only: the functions exist only there.  The
+;; deploy path itself is test/two_node/hcr_migration_check.
+(rule
+ (targets hcr_migration_check_fns hcr_migration_check_fns.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file hcr_migration_check/check_fns.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --hot-reload CheckFns --accept-unproved Counter.state
+        -o hcr_migration_check_fns hcr_migration_check/check_fns.march)
+   (with-stdout-to hcr_migration_check_fns.out (system "./hcr_migration_check_fns")))))
+
+(rule
+ (alias runtest)
+ (action (diff hcr_migration_check/check_fns.expected hcr_migration_check_fns.out)))
+
 ;; Trace actor events (Sent / Received / Spawned / Exited / Dropped), the
 ;; pid filter, kind filter and limits.  Same policy file as trace_boundary.
 (rule

@@ -1,0 +1,6 @@
+count 5: ?@invariant: lo(count, limit) >= 0
+count 137: !count: not_137(c)
+count 200: !@invariant: not_200(count)
+Bump(9): Bump(9)
+Bump(137): Reset
+Reset: Reset

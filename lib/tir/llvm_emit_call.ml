@@ -416,6 +416,12 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
                   (specs/progress/2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md).
                   Mutual recursion through two slots still dispatches. *)
                && not (String.equal resolved_name ctx.hr_cur_fn)
+               (* The live-data migration check (M10) runs BEFORE its build
+                  is activated: a dispatched call would reach the running
+                  version's migrate_state and predicates, so its own calls
+                  stay inside its image.  What those call still dispatches
+                  (residual, specs/progress/2026-11-05-hcr-live-data-migration-check.md). *)
+               && not (Tir_names.is_migrate_check_name ctx.hr_cur_fn)
                && Hot_reload.Name_table.id_of ctx.hr_names resolved_name <> None)
     then begin
       (* 1-based; 0 = sentinel.  A patch .so resolves it by name at load
