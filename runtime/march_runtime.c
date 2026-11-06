@@ -10157,12 +10157,27 @@ static void inspect_reply(void *request, void *result) {
 /* Answer an inspect request between handlers: run the type's renderer under
  * a crash trap (a render that panics must not kill the actor) and reply
  * Ok(rendered) or Err(why). */
+static void actor_answer_migrate_check(march_actor_meta *meta, march_proc *self,
+                                       void *actor, void *request,
+                                       void *(*check)(void *));
+
 static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
                                  void *actor, void *request) {
     /* Not a message the program sent: take it back out of msgs_in. */
     if (self) atomic_store_explicit(&self->msgs_in,
         atomic_load_explicit(&self->msgs_in, memory_order_relaxed) - 1,
         memory_order_relaxed);
+    /* Field 2: a hot reload's live-data migration check (M10) instead of a
+     * render. */
+    void *(*check)(void *) = NULL;
+    {
+        void *raw = (void *)(uintptr_t)MARCH_FIELD(request, 2);
+        if (raw) memcpy(&check, &raw, sizeof(check));
+    }
+    if (check) {
+        actor_answer_migrate_check(meta, self, actor, request, check);
+        return;
+    }
     uint32_t reg_epoch = 0;
     void *clo = inspect_lookup((void *)(uintptr_t)((int64_t *)actor)[2], &reg_epoch);
     if (!clo || !self) {
@@ -10225,10 +10240,11 @@ void *march_actor_inspect(void *actor, int64_t timeout_ms) {
     MARCH_SET_TAG(reply_ref, MARCH_CALL_REPLY_TAG);
     MARCH_FIELD(reply_ref, 0) = (caller->pid << 1) | 1;
     MARCH_FIELD(reply_ref, 1) = corr;
-    void *request = march_alloc(32);
+    void *request = march_alloc(40);
     MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
     MARCH_FIELD(request, 0) = (int64_t)(uintptr_t)reply_ref;
     MARCH_FIELD(request, 1) = 0;
+    MARCH_FIELD(request, 2) = 0;   /* render, not a migration check */
     march_reclaim_enter();
     march_actor_meta *meta = find_meta(actor);
     march_proc *gt = meta ? meta_gt(meta) : NULL;
@@ -10269,10 +10285,11 @@ int march_actor_inspect_external(int64_t pid, int64_t timeout_ms, char **out) {
     pthread_mutex_init(&w->mu, NULL);
     pthread_cond_init(&w->cv, NULL);
     w->refs = 2;
-    void *request = march_alloc(32);
+    void *request = march_alloc(40);
     MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
     MARCH_FIELD(request, 0) = 0;
     MARCH_FIELD(request, 1) = (int64_t)(uintptr_t)w;
+    MARCH_FIELD(request, 2) = 0;   /* render, not a migration check */
     march_reclaim_enter();
     march_actor_meta *meta = find_meta(actor);
     march_proc *gt = meta ? meta_gt(meta) : NULL;
@@ -10302,6 +10319,164 @@ int march_actor_inspect_external(int64_t pid, int64_t timeout_ms, char **out) {
     if (!done) { *out = strdup("timeout"); return 0; }
     *out = text ? text : strdup("");
     return ok;
+}
+
+/* ── Hot reload M10: the live-data migration check ─────────────────────────
+ * specs/2026-11-04-lemmas-hcr-actors-choreography-design.md §3.3 item 3.
+ * Before ACTIVATE, the reload server runs the NEW build's
+ * __migrate_check_<Actor> (Desugar_migrate_check: migrate_state, then the new
+ * state contract) on a copy of every live actor's state.  It runs on the
+ * actor's own thread between handlers, as an inspect request does (field 2
+ * holds the check), so the state is never read mid-handler.  The state is
+ * incrc'd first: the check owns one reference and releases it, and Perceus
+ * cannot reuse the live record in place.  The answer is Ok(verdict), the
+ * String the check returned ("" holds, "!p" p fails, "?p; q" p and q were not
+ * evaluable), or Err(why) when nothing was checked yet ("behind": the actor
+ * has not reached the current epoch, so its state is not the deployed
+ * shape). */
+static void actor_answer_migrate_check(march_actor_meta *meta, march_proc *self,
+                                       void *actor, void *request,
+                                       void *(*check)(void *)) {
+    if (!self) { inspect_reply(request, mk_err_cstr("no scheduler")); return; }
+    if (meta->dispatch_name_id
+            && atomic_load_explicit(&self->code_epoch, memory_order_relaxed)
+               != march_epoch_current()) {
+        inspect_reply(request, mk_err_cstr("behind"));
+        return;
+    }
+    int64_t *a = (int64_t *)actor;
+    void *state = (void *)(uintptr_t)a[4];
+    void *frame_mark = march_frame_mark();
+    jmp_buf jb;
+    jmp_buf *saved_crash = self->crash_jmp;
+    self->crash_jmp = &jb;
+    void *result;
+    if (setjmp(jb) == 0) {
+        march_incrc(state);
+        void *verdict = check(state);
+        result = mk_ok(verdict);
+    } else {
+        /* The migration (or the contract) panicked on this state: a failed
+         * check, not an unanswered one.  The copy's reference may leak. */
+        march_frame_unwind(frame_mark);
+        const char *m = self->crash_message ? self->crash_message : "panic";
+        size_t mlen = self->crash_message ? self->crash_message_len : 5;
+        char buf[256];
+        snprintf(buf, sizeof buf, "!the migration panicked: %.*s",
+                 (int)(mlen > 200 ? 200 : mlen), m);
+        free(self->crash_message);
+        self->crash_message = NULL;
+        self->crash_message_len = 0;
+        result = mk_ok(march_string_lit(buf, (int64_t)strlen(buf)));
+    }
+    self->crash_jmp = saved_crash;
+    inspect_reply(request, result);
+}
+
+/* Ask one actor to run [check]; 1 sent ([*wp] the waiter to read), 0 the
+ * actor is gone. */
+static int migrate_check_send(march_actor_meta *m, void *(*check)(void *),
+                              inspect_waiter **wp) {
+    inspect_waiter *w = (inspect_waiter *)calloc(1, sizeof *w);
+    if (!w) return 0;
+    pthread_mutex_init(&w->mu, NULL);
+    pthread_cond_init(&w->cv, NULL);
+    w->refs = 2;
+    void *request = march_alloc(40);
+    MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
+    MARCH_FIELD(request, 0) = 0;
+    MARCH_FIELD(request, 1) = (int64_t)(uintptr_t)w;
+    void *raw; memcpy(&raw, &check, sizeof(raw));
+    MARCH_FIELD(request, 2) = (int64_t)(uintptr_t)raw;
+    march_reclaim_enter();
+    march_proc *gt = meta_gt(m);
+    int rc = gt ? march_sched_send_unlimited(gt, request) : MARCH_SEND_DEAD;
+    march_reclaim_exit();
+    if (rc != MARCH_SEND_OK) {
+        march_decrc(request);
+        w->refs = 1;
+        inspect_waiter_release(w);
+        return 0;
+    }
+    *wp = w;
+    return 1;
+}
+
+int march_hcr_migrate_check(uint32_t slot, void *(*check)(void *), int64_t timeout_ms,
+                            char *out, size_t outsz, int *n_checked, char *unchecked,
+                            size_t unchecked_sz) {
+    *n_checked = 0;
+    if (out && outsz) out[0] = '\0';
+    if (unchecked && unchecked_sz) unchecked[0] = '\0';
+    size_t n = 0;
+    hcr_target *t = hcr_snapshot(slot, &n);
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    int64_t deadline = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000 + timeout_ms;
+    int failed = 0;
+    for (size_t i = 0; i < n && !failed; i++) {
+        march_actor_meta *m = t[i].meta;
+        int64_t pid = pe_pid_or_0(m->pe);
+        for (;;) {
+            inspect_waiter *w = NULL;
+            if (!march_is_alive(m->actor) || !migrate_check_send(m, check, &w))
+                break;                                   /* gone: nothing to check */
+            struct timespec dl = { (time_t)(deadline / 1000), (long)(deadline % 1000) * 1000000 };
+            pthread_mutex_lock(&w->mu);
+            while (!w->done)
+                if (pthread_cond_timedwait(&w->cv, &w->mu, &dl) == ETIMEDOUT) break;
+            int done = w->done, ok = w->ok;
+            char *text = w->text;
+            w->text = NULL;
+            pthread_mutex_unlock(&w->mu);
+            inspect_waiter_release(w);
+            if (!done) {
+                snprintf(out, outsz, "pid:%lld timeout", (long long)pid);
+                failed = 1;
+                free(text);
+                break;
+            }
+            if (!ok) {
+                /* "busy" (asked inside a receive) or "behind" (not at the
+                 * current epoch yet): ask again until the deadline. */
+                int retry = text && (!strcmp(text, "busy") || !strcmp(text, "behind"));
+                if (retry) {
+                    free(text);
+                    clock_gettime(CLOCK_REALTIME, &now);
+                    if ((int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000 >= deadline) {
+                        snprintf(out, outsz, "pid:%lld timeout", (long long)pid);
+                        failed = 1;
+                        break;
+                    }
+                    struct timespec ms = { 0, 5 * 1000000 };
+                    nanosleep(&ms, NULL);
+                    continue;
+                }
+                if (text && !strcmp(text, "dead")) { free(text); break; }
+                snprintf(out, outsz, "pid:%lld %s", (long long)pid, text ? text : "no answer");
+                failed = 1;
+                free(text);
+                break;
+            }
+            /* Ok(verdict). */
+            if (text && text[0] == '!') {
+                snprintf(out, outsz, "pid:%lld %s", (long long)pid, text + 1);
+                failed = 1;
+            } else {
+                (*n_checked)++;
+                if (text && text[0] == '?' && unchecked && unchecked_sz)
+                    snprintf(unchecked, unchecked_sz, "%s", text + 1);
+            }
+            free(text);
+            break;
+        }
+    }
+    for (size_t i = 0; i < n; i++) {
+        march_decrc(t[i].meta->actor);
+        meta_put(t[i].meta);   /* hcr_snapshot's pin */
+    }
+    free(t);
+    return failed ? -1 : 0;
 }
 
 

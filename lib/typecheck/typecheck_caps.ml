@@ -122,6 +122,7 @@ let is_migrate_fn_name (fn_name : string) : bool =
   (* "_migrate_state", and the message-migration pair (DD step 6):
      "_migrate_msg" and its generated "_migrate_msg__hcr" wrapper. *)
   has "_migrate_state" || has "_migrate_msg" || has "_migrate_msg__hcr"
+  || has "_migrate_state__check"
 
 (** [fn_transitive_capability_closures_tbl env] is each function's capability set
     including everything it reaches through the reference graph:

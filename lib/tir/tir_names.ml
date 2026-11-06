@@ -619,6 +619,17 @@ let migrate_state_suffix = "_migrate_state"
 let migrate_msg_suffix = "_migrate_msg"
 let migrate_msg_wrapper_suffix = "_migrate_msg__hcr"
 
+(** The live-data check a `--hot-reload` build generates beside
+    `<actor>_migrate_state` (Desugar_migrate_check): exported as
+    [@__migrate_check_<Actor>], called by the reload server on a copy of
+    every live state before ACTIVATE.  Its parameter is pinned owned
+    (Borrow): the C caller hands it a reference. *)
+let migrate_check_suffix = "_migrate_state__check"
+
+let is_migrate_check_name (fn_name : string) : bool =
+  let nl = String.length fn_name and sl = String.length migrate_check_suffix in
+  nl >= sl && String.sub fn_name (nl - sl) sl = migrate_check_suffix
+
 let has_suffix sfx (fn_name : string) =
   let nl = String.length fn_name and sl = String.length sfx in
   nl >= sl && String.sub fn_name (nl - sl) sl = sfx
@@ -631,6 +642,7 @@ let is_migrate_fn_name (fn_name : string) : bool =
   has_suffix migrate_state_suffix fn_name
   || has_suffix migrate_msg_suffix fn_name
   || has_suffix migrate_msg_wrapper_suffix fn_name
+  || has_suffix migrate_check_suffix fn_name
 
 let is_migrate_msg_wrapper_name (fn_name : string) : bool =
   has_suffix migrate_msg_wrapper_suffix fn_name

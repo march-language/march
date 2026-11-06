@@ -821,6 +821,62 @@ refinement would have refused is not offered as a counterexample. Two things don
 baseline yet: a `migrate_state` parameter of a named record type, and the match binders of a
 `migrate_msg` in the proof (the running handler's refinement only filters the inputs tried).
 
+### Undecided migrations are checked on the live data
+
+When the checker can neither prove a migration nor find an input that breaks it (a predicate
+that calls a function the prover doesn't reflect, say), `forge deploy hot` refuses it unless
+`--accept-unproved` names it. An accepted migration is still checked, on the data it will
+actually meet. A `--hot-reload` build carries, beside each `<actor>_migrate_state` whose actor
+has a state contract, a function that runs the migration and evaluates the new field
+refinements and `@invariant` on the result. Before `ACTIVATE`, the reload server runs it on a
+copy of every live actor's state, on the actor's own thread between two of its handlers. Any
+failure refuses the deploy, naming the actor, and nothing changes: the actors keep running the
+old code.
+
+```march
+fn not_137(n : Int) : Bool do n != 137 end
+
+@invariant(not_137(count))
+actor Counter do
+  state { count : Int, label : String }
+  ...
+end
+
+fn counter_migrate_state(old : { count : Int }) : { count : Int, label : String } do
+  { count: old.count, label: "v2" }
+end
+```
+
+```
+  COMMIT_BATCH failed: ERR migration_check Counter pid:0 @invariant: not_137(count)
+  refused: Counter's new migrate_state fails on its live state (pid:0 @invariant: not_137(count)); nothing was activated
+```
+
+When every live state passes, the server's log says so:
+
+```
+[hcr] migrate check: Counter: checked on live data (3 actors)
+```
+
+That is weaker than a proof: it covers the states that exist when the deploy runs, not
+every state the migration could meet. A conjunct outside the deploy gate's grammar (see
+"What expressions are allowed in `@invariant`"), or one that calls a function not declared
+beside the actor, isn't evaluated. The log line names it (`not evaluable at run time:
+…`), and it is never dropped silently. An actor that doesn't answer within 5 seconds
+(`MARCH_HCR_MIGRATE_CHECK_MS` on the server) refuses the deploy too, as does a migration that
+panics on a live state. An actor still catching up to an earlier deploy is asked again until
+it has.
+
+Messages get the same treatment as they arrive. In a `--hot-reload` build, a message that
+`migrate_msg` converts but that fails the new handler's parameter refinements is dropped
+and counted, as a `None` is, instead of reaching a handler whose contract it breaks.
+
+Two limits. The check calls the new `migrate_state` and the predicates' functions in the new
+image, but a function *they* call that this deploy also changes still runs its running
+version during the check. And a state can still change between the check and the actor's
+switch to the new code: the check runs before `ACTIVATE`, and the actor keeps handling
+messages until it reaches its epoch marker.
+
 ---
 
 ## Deploying signature changes

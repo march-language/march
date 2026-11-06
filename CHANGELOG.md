@@ -59,6 +59,15 @@ git log is authoritative for exact commits.
   limited, and a failure is reported in one line: ``running `safe_div(10, 0)` panics:
   division by zero``. A definite `return_refinement_violated` shows the run too (`but
   bad(-1) returns -1.`). None of this changes which programs are accepted.
+- **A hot deploy checks an undecided migration on the live state before activating it.**
+  A `--hot-reload` build carries, beside each `<actor>_migrate_state` whose actor has field
+  refinements or an `@invariant`, a function that runs the migration and evaluates the new
+  contract. Before `ACTIVATE`, the reload server runs it on a copy of every live actor's
+  state. A failure refuses the deploy with the actor, its pid and the failing conjunct
+  (`ERR migration_check Counter pid:0 @invariant: not_137(count)`), and nothing changes. So
+  a migration accepted with `--accept-unproved` is still checked on the data it will meet.
+  A converted message that fails the new handler's refinements is dropped, like a `None`.
+  See docs/hot-code-reload.md, "Undecided migrations are checked on the live data".
 
 - **Hot-reload migrations are checked on every build, with a counterexample.** When an
   obligation in an `<actor>_migrate_state` or `<actor>_migrate_msg` can't be proved, the

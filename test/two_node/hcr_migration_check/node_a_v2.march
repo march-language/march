@@ -1,0 +1,27 @@
+mod MigCheck do
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Clock
+
+  fn not_137(n : Int) : Bool do n != 137 end
+
+  @invariant(not_137(count))
+  actor Counter do
+    state { count : Int, label : String }
+    init { count: 0, label: "v2" }
+    on Tick() do state end
+    on Report() do
+      println(state.label ++ " count: " ++ int_to_string(state.count))
+      state
+    end
+  end
+
+  fn counter_migrate_state(old : { count : Int }) : { count : Int, label : String } do
+    { count: old.count, label: "v2" }
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock)) : Unit do
+    let _ = spawn(Counter)
+    ()
+  end
+end
