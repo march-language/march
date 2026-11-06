@@ -90,6 +90,8 @@ prepare() {
   local f name d code
   for f in test/errors/*.march; do
     name="$(basename "$f" .march)"
+    # A case checked in another mode (a report flag, or run) is not a `--check` failure.
+    if grep -q '^-- MARCH-MODE:' "$f"; then continue; fi
     selected "$name" || continue
     d="$dir/$name"; mkdir -p "$d"
     grep -v -E '^[[:space:]]*--' "$f" > "$d/main.march" || true

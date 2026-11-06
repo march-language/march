@@ -11,7 +11,8 @@ page marks each example's place with
     <!-- /error-tour -->
 
 (or `<!-- error-tour: <name> --why-copies -->` for an example whose output comes from
-that report instead of `--check`)
+that report instead of `--check`, or `<!-- error-tour: <name> --run -->` for one that is
+run, showing the run-time failure it prints)
 and this script rewrites what lies between the two markers: a ```march block with the
 program and a ```text block with what `march --check` prints, so the page shows what
 the compiler says today rather than what someone once pasted. Everything outside the
@@ -49,7 +50,9 @@ MARKER = re.compile(r"(<!-- error-tour: ([\w-]+)((?: --[\w-]+)*) -->\n)(.*?)(<!-
 # Flags an example's marker may name in place of the default `--check`, as in
 # `<!-- error-tour: 35-copy-shared --why-copies -->`: reports that are not part of
 # an ordinary check. The playground only checks, so such an example is not listed in it.
-ALLOWED_FLAGS = {"--why-copies"}
+# `--run` is not a compiler flag: it means run the program (interpreted) and show what
+# it prints on stderr, for the run-time failure reports.
+ALLOWED_FLAGS = {"--why-copies", "--run"}
 
 
 def check_output(march_bin, name, home, flags=()):
@@ -61,9 +64,13 @@ def check_output(march_bin, name, home, flags=()):
     try:
         shutil.copy(src, os.path.join(work, shown))
         env = dict(os.environ, HOME=home)
-        mode = list(flags) or ["--check"]
+        mode = [f for f in flags if f != "--run"] if flags else ["--check"]
+        run = "--run" in flags
         proc = subprocess.run([march_bin, *mode, shown], cwd=work, env=env,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                              stdout=subprocess.DEVNULL if run else subprocess.PIPE,
+                              stderr=subprocess.PIPE if run else subprocess.STDOUT, text=True)
+        if run:
+            proc.stdout = proc.stderr
     finally:
         shutil.rmtree(work)
     with open(src) as f:

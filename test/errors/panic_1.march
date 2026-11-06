@@ -1,0 +1,22 @@
+-- MARCH-MODE: run
+-- EXPECT-ERROR: The program panicked: unknown product code: zz
+-- A panic two calls deep, one of them through a stdlib higher-order function:
+-- the report shows the panic's line, then each call that led there.
+mod Main do
+  needs IO.Console
+
+  fn price(code : String) : Int do
+    match code do
+    "a" -> 1
+    _ -> panic("unknown product code: " ++ code)
+    end
+  end
+
+  fn total(codes : List(String)) : Int do
+    List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(total(["a", "zz"])))
+  end
+end

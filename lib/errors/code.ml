@@ -216,6 +216,10 @@ let unused_import = "unused_import"
 let unused_needs = "unused_needs"
 let vectorize_failed = "vectorize_failed"
 let copy_shared = "copy_shared"
+(* Run-time failures the interpreter reports in the compile-error style. *)
+let panic = "panic"
+let runtime_error = "runtime_error"
+let actor_crashed = "actor_crashed"
 
 (** Every code above, sorted. *)
 let all = [
@@ -418,6 +422,9 @@ let all = [
   unused_needs;
   vectorize_failed;
   copy_shared;
+  panic;
+  runtime_error;
+  actor_crashed;
 ]
 
 (** [with_arg slug arg] is the code [slug ^ ":" ^ arg]. *)
@@ -517,6 +524,7 @@ let category_table : (string * string list) list = [
     no_alloc_transient; no_alloc_unchecked; no_extern_violation;
     no_panic_violation; pure_violation; realtime_mixed; vectorize_failed ];
   "COPY", [ copy_shared ];
+  "RUNTIME", [ panic; runtime_error; actor_crashed ];
   "UNUSED", [ unused_binding; unused_import ];
   "PROGRAM", [
     attribute_no_effect; compiled_unsupported; internal_error; main_and_app;

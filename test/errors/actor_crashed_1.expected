@@ -1,0 +1,12 @@
+exit: 0
+-- RUNTIME ----------------- errors/actor_crashed_1.march
+
+Actor `Counter` crashed while handling `Bump(-5)`: negative bump [actor_crashed]
+
+13 |       if k < 0 do panic("negative bump") else { state with n: state.n + k } end
+                       ^^^^^^^^^^^^^^^^^^^^^^
+
+    Its state when it crashed: { n: 1 }
+    Nothing supervises this `Counter`, so it stays dead and later messages to it are dropped. The rest of the program keeps running.
+
+

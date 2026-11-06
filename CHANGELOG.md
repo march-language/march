@@ -207,6 +207,16 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- A run-time failure in an interpreted program (`march FILE`) is now reported in the
+  compile-error style: what happened, the source line with a caret, then each call that led
+  there as a labelled excerpt, innermost first. It replaces the `panic: ...` line and the
+  numbered stack trace, for panics, `todo`, failed assertions and run-time errors such as
+  division by zero. `MARCH_BACKTRACE=full` still adds the standard library's calls. The exit
+  code is unchanged. Compiled programs still print `panic: ...` alone.
+- An unsupervised actor whose handler fails under the interpreter is now reported: the actor,
+  the message it was handling with its arguments, the failing line, and its state at the time.
+  The interpreter used to drop such a crash without printing anything.
+
 - Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
   of the wrong type names the step and points at its line in the protocol. A body calling another
   role's functions says "`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B`"
