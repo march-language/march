@@ -677,8 +677,7 @@ end
 ```
 
 This module builds. Replace the body of `cat_nil` with `()` and the build fails with
-`lemma_unproved`. What `cap verified` promises in full, and what it relies on, is on
-[Claim: Refinement Types]({{ site.baseurl }}/docs/claim-refinements/).
+`lemma_unproved`.
 
 ## Lemmas from the standard library
 
@@ -998,8 +997,6 @@ build checks it, so a reviewer doesn't have to.
 
 - [Refinement Types]({{ site.baseurl }}/docs/refinement-types/): the checker lemmas feed, and
   its [reference summary of lemmas]({{ site.baseurl }}/docs/refinement-types/#lemmas-proving-what-one-unfolding-cannot)
-- [Claim: Refinement Types]({{ site.baseurl }}/docs/claim-refinements/): what `cap verified`
-  promises, and the trusted base it rests on
 - [Pattern Matching]({{ site.baseurl }}/docs/pattern-matching/): `match`, which splits a proof
   into cases
 - Error pages: [`invalid_lemma`]({{ site.baseurl }}/docs/errors/invalid_lemma/),

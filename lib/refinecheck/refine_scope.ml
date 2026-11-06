@@ -2592,10 +2592,10 @@ let handler_key (actor : string) (msg : string) : string = actor ^ actor_msg_suf
    [Refine_check.handler_resolution] uses that key for a construction it can
    attribute to one actor: written `Tally.Bump(..)`, or bare with a recorded
    type `Tally_Msg`.  A shared name is then obliged per actor instead of
-   not at all.  The handler body still assumes only an unshared name (see
-   [Refine_check.visit_decl]'s `DActor` arm: the interpreter dispatches by
-   name).  Two actors of the same name (in different modules) withdraw the
-   qualified key too. *)
+   not at all, and the handler body assumes it (both backends drop another
+   actor's or a variant's same-named value; see [Refine_check.visit_decl]'s
+   `DActor` arm).  Two actors of the same name (in different modules)
+   withdraw the qualified key too. *)
 let collect_handler_sigs (decls : A.decl list) : (string, fn_sig) Hashtbl.t =
   let handlers : (string, fn_sig) Hashtbl.t = Hashtbl.create 16 in
   let count : (string, int) Hashtbl.t = Hashtbl.create 16 in

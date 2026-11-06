@@ -4539,7 +4539,7 @@ let base_env : env =
               | None ->
                 VCon ("Err", [VString "no reply (timeout or unhandled Call)"])
               | Some hname ->
-                mailbox_enqueue inst (VCon (hname, [VInt ref_id]));
+                mailbox_enqueue inst (VCon (runtime_call_prefix ^ hname, [VInt ref_id]));
                 !run_scheduler_hook ();
                 (* timeout_ms is a REAL wall-clock deadline, not decoration.
                    The interpreter's scheduler runs a handler to completion

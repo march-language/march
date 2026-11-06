@@ -346,6 +346,13 @@ val letstar_repl_bind :
   env ->
   March_ast.Ast.pattern ->
   March_ast.Ast.expr -> ((string * value) list, string) result
+
+(** Actor message identity: the driver sets the constructor's checked type
+    name at a span, and [typed_messages], before [run_module]; see the
+    "Actor message identity" comment in eval.ml. *)
+val ctor_type_of_span : (March_ast.Ast.span -> string option) ref
+val typed_messages : bool ref
+
 val run_module : March_ast.Ast.module_ -> unit
 type test_result = TestPass | TestFail of string | TestError of string
 val run_tests :

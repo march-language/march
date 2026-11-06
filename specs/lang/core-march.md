@@ -2107,7 +2107,9 @@ limitation.
 **cooperative drain loop**: repeatedly, until a full pass produces no work, it
 iterates over a snapshot of every live actor and, for each with a non-empty
 mailbox, pops one message, finds the `on Msg(…)` handler with the message tag that
-matches, binds `state` to the actor's current `ai_state` plus the message
+matches (when the driver typechecked the program, an actor message carries its actor,
+and another actor's or a variant's same-named message finds no handler and is
+dropped, as compiled; `handler_for_msg` in `eval.ml`), binds `state` to the actor's current `ai_state` plus the message
 payload as handler params, evaluates the handler body, and **replaces the
 actor's state with the handler's return value** (the new state record). A
 handler that raises `BlockedOnReceive` has its triggering message re-queued (no

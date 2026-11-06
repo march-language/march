@@ -119,8 +119,7 @@ Neither exists yet.
   The one change already designed is storing strings of up to 7 bytes inside the value with no
   allocation (`specs/plans/2026-07-27-string-sso.md`); it is not part of 1.0 (decided
   2026-10-31, after measuring at most a 2-8% gain on templating and JSON workloads).
-- **Speed.** Performance is covered by its own
-  [claim]({{ site.baseurl }}/docs/claim-performance/), not by this policy.
+- **Speed.** Performance is not covered by this policy.
 - **Platforms below tier 1** (see [Supported Platforms]({{ site.baseurl }}/docs/platforms/)),
   and the browser playground.
 

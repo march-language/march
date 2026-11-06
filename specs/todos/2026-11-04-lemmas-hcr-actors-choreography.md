@@ -17,10 +17,11 @@ Phases (design §7):
   anonymous-record `migrate_state` parameter reach `old.f` (done: progress
   `2026-11-04-anon-record-param-field-refinements`). Actor message constructors are
   resolved by datatype (todo `2026-10-15-actor-message-ctor-cannot-be-qualified`). HCR
-  counterexamples for the migration obligations. G4 landed half (progress
-  `2026-10-15-actor-message-ctor-cannot-be-qualified`): `<Actor>.<Msg>` resolves and a
-  shared name is obliged per actor; the handler body's assumption waits on todo
-  `2026-11-04-interp-actor-dispatch-by-name`. HCR counterexamples for H1/H2, run on every
+  counterexamples for the migration obligations. G4 done (progress
+  `2026-10-15-actor-message-ctor-cannot-be-qualified`,
+  `2026-11-04-interp-actor-dispatch-by-name`): `<Actor>.<Msg>` resolves, a shared name is
+  obliged per actor, and both backends drop a same-named foreign message, so the handler
+  body assumes its refinements. HCR counterexamples for H1/H2, run on every
   build against the deployed baseline: done (progress
   `2026-11-05-hcr-migration-counterexamples`); its residuals (named-record parameters,
   binder hypotheses for `migrate_msg`, multi-field invariants) carry into phase F.
