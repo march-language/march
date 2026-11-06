@@ -577,6 +577,9 @@ once in the standard library:
 |---|---|
 | `dual_dual` | the other end of the other end is the original |
 | `project_dual` | in a two-role protocol, each role's projection is the other's dual |
+| `pairwise` | for any two roles, what one does with the other is the dual of what the other does with it |
+| `compose` | run together, the roles' projections take every step of the protocol and all finish |
+| `progress` | deadlock freedom: while the protocol has a next step, the roles can take it |
 
 The compiler projects a protocol twice, in OCaml: once for `Chan(Role, Proto)` and once for
 `@[endpoints]`. `march --check --guarantees` (and `forge hot-reload check`) checks each
@@ -584,20 +587,34 @@ projection it built against `Session.Theory.project`, by running `project` in th
 on that protocol. When they agree, the laws hold for your protocol, and the report says so:
 
 ```
-protocol Relay (2 roles): not checked
-  projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual (Session.Theory.project_dual)
-  deadlock freedom  not checked: no proof covers this protocol yet
+protocol Ring (3 roles): proved (spec) · validated (compiler)
+  projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role
+  pairwise duality  proved (spec) · validated (compiler): what each pair of roles does with each other is dual (Session.Theory.pairwise)
+  deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, compose; synchronous delivery)
 ```
 
 A disagreement is a compiler bug, reported as `violated`. `march --validate-projections FILE`
-prints one line per protocol, projector and role, and exits 1 on a disagreement.
+prints one line per protocol, projector and role, and one `laws` line per protocol saying
+whether `pairwise`, `compose` and `progress` cover it; it exits 1 on a disagreement.
 
-Not covered yet, and labelled so:
+`pairwise`, `compose` and `progress` cover protocols in a fragment
+(`Session.Theory.in_fragment`):
 
-- a protocol with a crash branch or a role that may crash;
+- no `loop`;
+- no crash branch, and no role that may crash;
+- every `choose` sends its first message, from the chooser, to one role, and every other role
+  takes part in the branches the same way whichever is taken (it never needs the label);
+- delivery is synchronous: a message is one step of its sender and receiver together, which
+  is what the runner's per-connection order ([Message order and
+  backpressure](#message-order-and-backpressure)) gives a protocol in this fragment.
+
+A protocol outside the fragment is told which rule it misses, and its lines say
+`checked (compiler)` or `not checked`, never `proved`. Not covered yet:
+
+- loops, crash branches, and roles that may crash;
 - a role in a protocol of more than two roles that is not told which branch a `choose` took
-  (its branches differ and do not all begin with the chooser's message);
-- duality for more than two roles, and deadlock freedom.
+  (its branches differ and do not all begin with the chooser's message): its projection is
+  not compared at all.
 
 ## Running over a cluster node
 

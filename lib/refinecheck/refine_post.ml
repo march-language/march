@@ -2869,8 +2869,21 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
           end)
         groups;
       let todo = List.filter (fun (k, _, _, _) -> not (List.exists (fun (k', _, _, _) -> k' = k) !admitted)) todo in
+      (* An ordinary item is retried when it calls a contract admitted in
+         this round (a group above) or proved in the round before
+         ([fresh]; the first IH round has none: the IH-free rounds already
+         tried everything).  Without the second, an item waiting on an
+         ordinary item that [check] proved in the previous IH round was
+         never retried and stayed unadmitted although every path proved
+         (Session.Theory: `compose_msg` waits on `step_msg`, which waits on
+         the `present_config` group). *)
       let proved, rest =
-        List.partition (fun item -> (not (in_group item)) && eligible (Some (names_of !admitted)) item && check item) todo
+        List.partition
+          (fun item ->
+            (not (in_group item))
+            && ((fresh <> None && eligible fresh item) || eligible (Some (names_of !admitted)) item)
+            && check item)
+          todo
       in
       let progress = !admitted @ proved in
       if progress <> [] && rest <> [] then ih_rounds rest (Some (names_of progress))

@@ -25460,7 +25460,12 @@ let session_theory_suite =
             Alcotest.(check bool) (lemma ^ " is listed as proved") true
               (contains manifest ("Session.Theory." ^ lemma ^ "\t")))
           [ "dual_dual"; "dual_dual_bs"; "same_eq"; "same_eq_bs"; "dual_loop_of"; "erase_loop_of";
-            "merge_binary"; "project_dual"; "project_dual_bs" ]);
+            "merge_binary"; "project_dual"; "project_dual_bs";
+            (* C4 and C5 *)
+            "present_config"; "act_msg"; "apply_msg"; "step_msg"; "act_pick"; "apply_pick"; "step_pick";
+            "trace_bs_found"; "end_done"; "compose_msg"; "compose_pick"; "compose"; "compose_bs"; "progress";
+            (* C3 *)
+            "restrict_choice"; "collapse_dual"; "pairwise_choice"; "pairwise"; "pairwise_bs" ]);
     Alcotest.test_case "both projectors agree on two-role, three-role and loop/choice protocols" `Quick (fun () ->
         let code, out = run_cli "--validate-projections" protocols in
         Alcotest.(check int) "exit 0" 0 code;
@@ -25528,11 +25533,83 @@ let session_theory_suite =
         has out "projection Logging * (endpoints): not compared: a role that may crash");
     Alcotest.test_case "--guarantees: a validated projection inherits the theory's laws" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" protocols in
-        has out "protocol Relay (2 roles): not checked\n";
+        has out "protocol Relay (2 roles): proved (spec) · validated (compiler)\n";
         has out "projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual (Session.Theory.project_dual)";
-        has out "protocol Ring (3 roles): not checked\n";
-        has out "pairwise duality  checked (compiler): every send has the matching receive at its peer";
-        has out "deadlock freedom  not checked") ]
+        has out "protocol Ring (3 roles): proved (spec) · validated (compiler)\n";
+        has out "pairwise duality  proved (spec) · validated (compiler): what each pair of roles does with each other is dual (Session.Theory.pairwise)";
+        has out "deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, compose; synchronous delivery)";
+        (* A loop is outside the fragment the laws cover: said, not claimed. *)
+        has out "protocol Shop (2 roles): not checked\n";
+        has out "deadlock freedom  not checked: not proved: a loop (the laws cover loop-free protocols for now)");
+    Alcotest.test_case "--validate-projections: which protocols the laws cover" `Quick (fun () ->
+        let src =
+          "mod P do\n\
+          \  protocol Ring do\n\
+          \    X -> Y : String\n\
+          \    Y -> Z : String\n\
+          \    Z -> X : Int\n\
+          \  end\n\
+          \  protocol Blind do\n\
+          \    choose by A:\n\
+          \      go -> A -> B : Int\n\
+          \            B -> C : Int\n\
+          \      halt -> A -> B : String\n\
+          \              B -> C : String\n\
+          \    end\n\
+          \  end\n\
+          \  protocol Loop do\n\
+          \    loop do\n\
+          \      A -> B : Int\n\
+          \    end\n\
+          \  end\n\
+          end\n"
+        in
+        let code, out = run_cli "--validate-projections" src in
+        Alcotest.(check int) "exit 0" 0 code;
+        has out "laws Ring: in the fragment (pairwise duality, composition, deadlock freedom)";
+        has out "laws Blind: outside the fragment: a choice whose other roles do not all see the same branches";
+        has out "laws Loop: outside the fragment: a loop");
+    Alcotest.test_case "gate: a lemma waiting only on an ordinary lemma proved in an IH round is admitted" `Quick (fun () ->
+        (* add_z is an induction (admitted in an IH round); add_z2 calls it and
+           is proved in that round; add_z3 calls only add_z2.  Before the fix
+           the next IH round retried only items calling a group admitted in
+           that round, so add_z3 was never retried and stayed unproved
+           although its one path proves (refine_post.ml, ih_rounds). *)
+        let src =
+          "mod G do\n\
+          \  type N = Z | S(N)\n\
+          \  fn add(a : N, b : N) : N do\n\
+          \    match a do\n\
+          \      Z -> b\n\
+          \      S(k) -> S(add(k, b))\n\
+          \    end\n\
+          \  end\n\
+          \  @[lemma]\n\
+          \  fn add_z(a : N) : {Unit | add(a, Z) == a} do\n\
+          \    match a do\n\
+          \      Z -> ()\n\
+          \      S(k) -> add_z(k)\n\
+          \    end\n\
+          \  end\n\
+          \  @[lemma]\n\
+          \  fn add_z2(a : N) : {Unit | add(add(a, Z), Z) == a} do\n\
+          \    add_z(a)\n\
+          \  end\n\
+          \  @[lemma]\n\
+          \  fn add_z3(a : N) : {Unit | add(add(a, Z), Z) == a} do\n\
+          \    add_z2(a)\n\
+          \  end\n\
+          \  fn main() : Int do 0 end\n\
+          end\n"
+        in
+        let _, out = run_cli "--check --reflect-deps" src in
+        List.iter
+          (fun l ->
+            Alcotest.(check bool) (Printf.sprintf "%s admitted\n%s" l out) true
+              (List.exists
+                 (fun line -> contains line ("\tG." ^ l ^ "\t") && contains line ":admitted")
+                 (String.split_on_char '\n' out)))
+          [ "add_z"; "add_z2"; "add_z3" ]) ]
 
 (* `--guarantees` (lemmas phase B, bin/guarantees.ml): one labelled block per
    actor and protocol, read off the ledger after the check; it changes no
@@ -25585,7 +25662,7 @@ let guarantees_suite =
         let _, out = run_cli "--check --guarantees" src in
         has out "migrate_state";
         has out "against its parameter type (no deployed build known)");
-    Alcotest.test_case "protocols: projection checked, deadlock freedom not" `Quick (fun () ->
+    Alcotest.test_case "protocols: projection, pairwise duality and deadlock freedom validated" `Quick (fun () ->
         let src =
           "mod G do\n\
           \  protocol Relay do\n\
@@ -25601,11 +25678,11 @@ let guarantees_suite =
         in
         let code, out = run_cli "--check --guarantees" src in
         Alcotest.(check int) "accepted" 0 code;
-        has out "protocol Relay (2 roles): not checked\n";
+        has out "protocol Relay (2 roles): proved (spec) · validated (compiler)\n";
         has out "proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual";
-        has out "protocol Ring (3 roles): not checked\n";
-        has out "pairwise duality  checked (compiler): every send has the matching receive at its peer";
-        has out "deadlock freedom  not checked";
+        has out "protocol Ring (3 roles): proved (spec) · validated (compiler)\n";
+        has out "pairwise duality  proved (spec) · validated (compiler)";
+        has out "deadlock freedom  proved (spec) · validated (compiler)";
         Alcotest.(check bool) "no runtime block without actors" false (contains out "runtime:"));
     Alcotest.test_case "a derived migrate_state is told apart from the actor's own sites" `Quick (fun () ->
         (* The derived function sits under the actor's span with synthetic

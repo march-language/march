@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Protocols are proved deadlock-free.** `Session.Theory` now proves, once, that a
+  protocol's projections are pairwise dual for any two roles (`pairwise`), run together take
+  every step of the protocol and all finish (`compose`), and can always take the next step
+  (`progress`), for loop-free, crash-free protocols whose choices tell every role that needs
+  it. `march --check --guarantees` labels such a protocol's pairwise duality and deadlock
+  freedom `proved (spec) · validated (compiler)` once its projections are validated, and says
+  why not otherwise (`a loop`, …). See the choreography chapter, "What is proved about a
+  protocol".
 - **`Session.Theory`: what a protocol means, as March code, with proved laws.** A new stdlib
   module holds protocols (`Global`) and each role's part (`Local`), projection, duality, and
   lemmas proved once: duality is an involution, and a two-role protocol's projections are
@@ -590,6 +598,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A lemma that relied only on another lemma proved by induction-hypothesis rounds was never
+  admitted**, although every path proved: the checker's induction rounds retried an ordinary
+  lemma only when it called a group admitted in the same round, not one proved in the round
+  before, so calls to it gave no facts (`lemma_unproved` on a lemma whose report showed every
+  path proved).
 - Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
   operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
   is known by its byte length, and distinct literals are distinct values; record field access,
