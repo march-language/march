@@ -1310,6 +1310,11 @@ let infer_edit (src : string) (p : March_refinecheck.Refine_infer.proposal) : st
       | _ -> None)
     | _ -> None
   else
+    match p.March_refinecheck.Refine_infer.joint_param, slot.IS.path with
+    | Some x, IS.Return ->
+      (* A joint relational proposal: the parameter and the return. *)
+      Option.bind (RE.splice ~src ~line ~fn ~param:x ~annotation:ann) (fun src -> RE.splice_return ~src ~line ~fn ~annotation:ann)
+    | _ ->
     match slot.IS.path with
     | IS.Lambda_param { line; col; param } -> RE.splice_lambda_param ~src ~line ~col ~param ~annotation:ann
     | path -> (
@@ -1373,6 +1378,12 @@ let infer_applicable (p : March_refinecheck.Refine_infer.proposal)
     ~(accepted : March_refinecheck.Refine_infer.proposal list) : string option =
   let module RI = March_refinecheck.Refine_infer in
   if p.RI.external_callers && not !apply_public then Some "external-callers"
+  (* The stdlib is written only with --refine-infer-stdlib (design §4.3):
+     --refine-infer-module can make a stdlib function a target, never a file
+     to write. *)
+  else if (not !refine_infer_stdlib)
+          && List.mem (proposal_file p) !March_refinecheck.Refine_check.stdlib_source_files
+  then Some "stdlib-needs-refine-infer-stdlib"
   else
     let file = proposal_file p in
     match read_file_opt file with
@@ -1532,6 +1543,7 @@ let print_refine_infer ~filename ~user_files desugared =
   let r =
     RI.run ~root:(Sys.getcwd ()) ~kinds ~budget:!refine_infer_budget
       ~allow_caller_violations:!allow_caller_violations ~stdlib:!refine_infer_stdlib ~decreases
+      ~modules:!refine_infer_modules ~progress:(!refine_infer_stdlib || !refine_infer_modules <> [])
       ?applicable:(if !refine_infer_apply || !refine_infer_diff then Some infer_applicable else None)
       ~applicable_decreases ~lemmas ~applicable_lemmas ~is_user desugared
   in
@@ -1571,7 +1583,8 @@ let print_refine_infer ~filename ~user_files desugared =
         Printf.printf "  %s (%s:%d)  %s : %s  [%s, closes %d]%s\n" p.RI.slot.IS.fn sp.March_ast.Ast.file
           sp.March_ast.Ast.start_line (IJ.path_text p.RI.slot.IS.path) p.RI.annotation (IJ.kind_text p.RI.slot)
           (List.length p.RI.closes)
-          (if p.RI.external_callers && not !apply_public then "  (external callers: not applied without --apply-public)" else ""))
+          ((match p.RI.joint_param with Some x -> Printf.sprintf "  (with parameter %s)" x | None -> "")
+           ^ if p.RI.external_callers && not !apply_public then "  (external callers: not applied without --apply-public)" else ""))
       r.RI.proposals;
     List.iter
       (fun ((s : IS.slot), pred, (rf : March_refinecheck.Precond_infer.refusal)) ->
@@ -4285,7 +4298,18 @@ let compile filename =
      Taken BEFORE the refinement passes, whose own findings (an unproven
      obligation under `cap verified`, a violation) are exactly what inference
      is for and must not gate it. *)
-  let typed_ok = not (March_errors.Errors.has_errors errors) in
+  (* Gated on the errors `--check` rejects on: those in a user file.  A type
+     error located in a stdlib file is never printed and never fails `--check`
+     (a user record named like a stdlib one, e.g. `NodeInfo`, leaves one in
+     cluster_node.march), so gating on it skipped inference on a program the
+     user had nothing to fix in.  With --refine-infer-stdlib the stdlib is a
+     target, so its errors gate too, and the skip line names them. *)
+  let infer_gate_errors =
+    List.filter (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Error
+        && (!refine_infer_stdlib || !refine_infer_modules <> [] || user_diag ~filename ~user_files d))
+      (March_errors.Errors.sorted errors) in
+  let typed_ok = infer_gate_errors = [] in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   let audit_result = ref [] in
   (* --termination-report demands every recursive SCC of user code (design
@@ -4371,8 +4395,17 @@ let compile filename =
   (* Never propose on a program that does not check: the tree may be half
      typed, and a proposal would describe a program that does not exist. *)
   if (!refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff) then begin
-    if not typed_ok then
-      prerr_endline "--refine-infer: skipped, the program has errors (fix them first)"
+    if not typed_ok then begin
+      prerr_endline "--refine-infer: skipped, the program has errors (fix them first)";
+      (* Name where, so a skip is never the only line: the first three. *)
+      List.iteri (fun i (d : March_errors.Errors.diagnostic) ->
+          if i < 3 then
+            let msg = match String.index_opt d.message '\n' with
+              | Some j -> String.sub d.message 0 j | None -> d.message in
+            Printf.eprintf "  %s:%d: %s\n" d.span.March_ast.Ast.file
+              d.span.March_ast.Ast.start_line msg)
+        infer_gate_errors
+    end
     else print_refine_infer ~filename ~user_files desugared
   end;
   (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
@@ -7991,6 +8024,8 @@ let () =
      "<k1,..,k7,decreases,lemma>  Restrict --refine-infer to these candidate kinds (decreases: termination metrics; lemma: lemma calls)");
     ("--refine-infer-budget", Arg.Set_int refine_infer_budget, "<N>  Global probe budget for --refine-infer (default 3000)");
     ("--refine-infer-stdlib", Arg.Set refine_infer_stdlib, " Let --refine-infer also target stdlib functions");
+    ("--refine-infer-module", Arg.String (fun m -> refine_infer_modules := !refine_infer_modules @ [ m ]),
+     "<M>  Let --refine-infer target only module M's file (stdlib or not; repeatable): one bounded run per module of a stdlib sweep");
     ("--allow-caller-violations", Arg.Set allow_caller_violations,
      " Let --refine-infer propose a precondition that turns an existing caller into a violation");
     ("--refine-infer-apply", Arg.Set refine_infer_apply,
