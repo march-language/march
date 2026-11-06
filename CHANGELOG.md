@@ -198,6 +198,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Diagnostics: a `main` that performs IO without declaring a capability is now reported even
+  when the program has another error, listed after that error, so both can be fixed in one pass.
+  It used to stay hidden until the other error was fixed, then appear as a new error. The error
+  corpus's fix check now accepts a program whose fixes clear every error that has one, when the
+  errors left are the ones that offer no fix.
 - Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
   of the wrong type names the step and points at its line in the protocol. A body calling another
   role's functions says "`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B`"
