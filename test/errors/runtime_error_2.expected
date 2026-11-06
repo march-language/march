@@ -1,0 +1,14 @@
+exit: 1
+-- RUNTIME ----------------- errors/runtime_error_2.march
+
+The program stopped with a run-time error: division by zero [runtime_error]
+
+    It was reached through these functions, innermost first:
+
+10 |   fn main(c : Cap(IO.Console)) do
+
+    Each line is where that function starts: a compiled program does not record
+    the line of each call, and leaves out functions the optimiser merged into
+    their callers. Run the program with `march` instead of compiling it to see
+    each call.
+

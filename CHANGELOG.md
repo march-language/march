@@ -293,7 +293,18 @@ git log is authoritative for exact commits.
   there as a labelled excerpt, innermost first. It replaces the `panic: ...` line and the
   numbered stack trace, for panics, `todo`, failed assertions and run-time errors such as
   division by zero. `MARCH_BACKTRACE=full` still adds the standard library's calls. The exit
-  code is unchanged. Compiled programs still print `panic: ...` alone.
+  code is unchanged.
+- A compiled program that stops on an unhandled panic or run-time error now prints a report in
+  the same style in place of the single `panic: ...` line: what happened, the `panic` / `todo` /
+  `unreachable` call's source line with a caret, then the functions it was reached through,
+  each shown by its first line. A compiled program does not record the line of each call, and
+  the report says so. Source lines are read from the path given at compile time; when the file
+  is not there the report gives `file:line`. `MARCH_BACKTRACE=full` adds the standard library's
+  functions. The exit code is unchanged. Scripts that matched `panic: ` in a compiled program's
+  stderr need the new wording (`The program panicked: ...`).
+- A failed `assert` outside a test prints its own report (the line and both operands), then
+  what it was reached through. Interpreted, it used to print that report inside a second
+  report's headline.
 - An unsupervised actor whose handler fails under the interpreter is now reported: the actor,
   the message it was handling with its arguments, the failing line, and its state at the time.
   The interpreter used to drop such a crash without printing anything.
@@ -542,6 +553,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
+  operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
+  is known by its byte length, and distinct literals are distinct values; record field access,
+  literals, updates and patterns, and tuple construction and patterns, all translate.
 - **`--refine-infer` no longer skips programs that `--check` accepts.** A record named like a
   standard-library one (`type NodeInfo`, `type Member`) left a type error inside the
   standard library that `--check` never shows, and inference then printed only "skipped,
@@ -554,6 +569,10 @@ git log is authoritative for exact commits.
 - **Less `--refine-infer` noise.** A recursive group with nothing to infer near it is no longer
   noted `scc-unsupported`, and a field test such as `_.step != 0` is no longer tried on an
   `Int` or `List` value.
+- **Two compiles of one project no longer risk a torn refinement verdict.** The verdict cache
+  under `.march/cas/vc` wrote each entry in place, so a `march --check` reading an entry
+  while another process wrote it could see half a counterexample. Entries are now written
+  to a temporary file and renamed into place.
 - **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
   (what `forge test` runs) treated a property that returned `false` as passing. Only a
   property that panicked or failed an `assert` was caught. Under `march test` it already

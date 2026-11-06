@@ -41,7 +41,7 @@ fn List.chunks(xs : List('a), size : Int) : List(List('a)) =
 go in
 let $t398 : '_ = <=(size, 0) in
 case $t398 of
-  True() -> __panic_site("stdlib/list.march", 1021);
+  True() -> __panic_site("stdlib/list.march", 1021, 20, 63);
 panic("List.chunks: size must be positive")
   _ -> let $t399 : '_ = alloc Nil() in
 go(xs, $t399)
@@ -208,7 +208,7 @@ fn List.head(xs : List('a)) : 'a =
   case xs of
   Cons($f24, $f25) -> let h : '_ = $f24 in
 h
-  Nil() -> __panic_site("stdlib/list.march", 134);
+  Nil() -> __panic_site("stdlib/list.march", 134, 18, 48);
 panic("List.head: empty list")
   _ -> panic("non-exhaustive pattern match")
 
@@ -236,7 +236,7 @@ fn List.is_empty(xs : List('a)) : Bool =
 ## List.last
 fn List.last(xs : List('a)) : 'a =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 203);
+  Nil() -> __panic_site("stdlib/list.march", 203, 18, 48);
 panic("List.last: empty list")
   Cons($f48, $f49) -> case $f49 of
   Nil() -> let x : '_ = $f48 in
@@ -267,7 +267,7 @@ fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1195);
+  Nil() -> __panic_site("stdlib/list.march", 1195, 18, 55);
 panic("List.maximum_int: empty list")
   Cons($f492, $f493) -> let t : '_ = $f493 in
 let h : '_ = $f492 in
@@ -285,7 +285,7 @@ fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1174);
+  Nil() -> __panic_site("stdlib/list.march", 1174, 18, 55);
 panic("List.minimum_int: empty list")
   Cons($f479, $f480) -> let t : '_ = $f480 in
 let h : '_ = $f479 in
@@ -295,7 +295,7 @@ go(t, h)
 ## List.nth
 fn List.nth(xs : List('a), n : Int) : 'a =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 227);
+  Nil() -> __panic_site("stdlib/list.march", 227, 18, 56);
 panic("List.nth: index out of bounds")
   Cons($f60, $f61) -> let t : '_ = $f61 in
 let h : '_ = $f60 in
@@ -437,7 +437,7 @@ go($t18, $t19)
 fn List.range_step(start : Int, stop : Int, step : Int) : List(Int) =
   let $t20 : '_ = ==(step, 0) in
 case $t20 of
-  True() -> __panic_site("stdlib/list.march", 99);
+  True() -> __panic_site("stdlib/list.march", 99, 20, 67);
 panic("List.range_step: step must be non-zero")
   _ -> List.range_step_go(start, stop, step)
 
@@ -521,7 +521,7 @@ fn List.tail(xs : List('a)) : List('a) =
   case xs of
   Cons($f30, $f31) -> let t : '_ = $f31 in
 t
-  Nil() -> __panic_site("stdlib/list.march", 152);
+  Nil() -> __panic_site("stdlib/list.march", 152, 18, 48);
 panic("List.tail: empty list")
   _ -> panic("non-exhaustive pattern match")
 

@@ -97,9 +97,12 @@ type result = { code : int; err : string; json : string;
      report (specs/2026-11-05-why-copies-design.md);
    - [run]: the program is RUN (interpreted) and its stderr pinned: a
      run-time failure report (panic, run-time error, actor crash).  There is
-     no JSON form, so its [.json.expected] is empty. *)
+     no JSON form, so its [.json.expected] is empty;
+   - [run-compiled]: the same, for the compiled binary's report. *)
 let why_copies_marker = "-- MARCH-MODE: why-copies"
 let run_marker = "-- MARCH-MODE: run"
+(* The same, compiled: what the binary prints on an unhandled failure. *)
+let compiled_marker = "-- MARCH-MODE: run-compiled"
 
 let has_sub s sub =
   let n = String.length s and m = String.length sub in
@@ -111,7 +114,13 @@ let script ~dir ~rel ~src =
   let home = Filename.quote (Lazy.force private_home) in
   let rel = Filename.quote rel in
   let human, json =
-    if has_sub src run_marker then
+    if has_sub src compiled_marker then
+      (* Compile, then run the binary from the same directory, so the report
+         finds the source file it quotes.  [--opt 0]: which functions are
+         still on the stack must not depend on the C compiler's inliner. *)
+      Printf.sprintf "{ HOME=%s %s --compile --opt 0 -o prog.bin %s > /dev/null 2>&1 && ./prog.bin; }"
+        home exe rel, "true"
+    else if has_sub src run_marker then
       Printf.sprintf "HOME=%s %s %s" home exe rel, "true"
     else
       let h, j = if has_sub src why_copies_marker

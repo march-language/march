@@ -24615,6 +24615,7 @@ type infer_fixture = { fx_root : string; fx_m : March_ast.Ast.module_ }
 
 let with_infer_fixture ?(stdlib = false) (src : string) (f : infer_fixture -> 'a) : 'a =
   with_temp_root "infer" (fun root ->
+      Test_helpers.seed_vc_cache root;
       let m = March_desugar.Desugar.desugar_module (parse src) in
       (* [~stdlib]: `list.march` as a sibling module, the shape the driver
          produces, so `List.filter`'s signature is in the checker's defs. *)
@@ -25196,6 +25197,7 @@ let march_exe_rel () = Filename.concat (Filename.dirname Sys.executable_name) ".
 
 let run_cli args src =
   with_temp_root "infercli" (fun dir ->
+      Test_helpers.seed_vc_cache dir;
       let f = Filename.concat dir "m.march" in
       Out_channel.with_open_bin f (fun oc -> output_string oc src);
       let out = Filename.concat dir "out.txt" in
@@ -25217,6 +25219,7 @@ let run_cli_in ?(env = "") dir args =
 
 let with_src_dir src f =
   with_temp_root "inferapply" (fun dir ->
+      Test_helpers.seed_vc_cache dir;
       let file = Filename.concat dir "m.march" in
       Out_channel.with_open_bin file (fun oc -> output_string oc src);
       f dir (fun () -> In_channel.with_open_bin file In_channel.input_all))
@@ -29414,7 +29417,7 @@ end
           (hcr_check ~src:(src "{ count: old.count, history: Nil }") prior next)) ]
 
 let () =
-  Alcotest.run "march-refinecheck"
+  Test_helpers.run_groups "march-refinecheck"
     [ ("refinecheck", suite);
       ("hcr-variance", hcr_variance_suite);
       ("bounds-a2", a2_suite);
@@ -29561,7 +29564,7 @@ let () =
       ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
-      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call);
+      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);

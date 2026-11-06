@@ -2010,6 +2010,10 @@ The program panicked: unknown product code: zz [panic]
 ```
 <!-- /error-tour -->
 
+A compiled program prints the same header, headline and `panic` line. Below that it lists
+the functions the panic was reached through, each by its first line, because a compiled
+program doesn't record the line of each call.
+
 The first excerpt is the `panic` itself. Each one after it is a call on the way there:
 `price` was called from the function passed to `List.fold_left`, which `total` called,
 which `main` called. Calls inside the standard library are left out unless you set

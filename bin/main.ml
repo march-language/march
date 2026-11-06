@@ -7284,6 +7284,26 @@ let compile filename =
              print_march_backtrace ())
          (March_eval.Eval.get_march_stack ());
        exit 1
+     | March_eval.Eval.Assert_failure msg when String.starts_with ~prefix:"-- " msg ->
+       (* A failed `assert` carries its own rendered report (the line, the
+          operands; lib/errors/test_report.ml): print it as it is, then the
+          calls that led there. *)
+       Printf.eprintf "%s\n" msg;
+       let show_full = Sys.getenv_opt "MARCH_BACKTRACE" = Some "full" in
+       let calls = List.filter (fun (f : March_eval.Eval.march_frame) ->
+           f.March_eval.Eval.mf_file <> "<none>" && f.March_eval.Eval.mf_line > 0
+           && (show_full
+               || Filename.basename (Filename.dirname f.March_eval.Eval.mf_file) <> "stdlib"))
+           (March_eval.Eval.get_march_stack ()) in
+       if calls <> [] then begin
+         Printf.eprintf "\n    It was reached through these calls, innermost first:\n\n";
+         List.iteri (fun i (f : March_eval.Eval.march_frame) ->
+             if i < 8 then
+               Printf.eprintf "    `%s` was called at %s:%d\n" f.March_eval.Eval.mf_name
+                 f.March_eval.Eval.mf_file f.March_eval.Eval.mf_line) calls
+       end;
+       Printf.eprintf "\n%!";
+       exit 1
      | March_eval.Eval.Assert_failure msg ->
        report_runtime_failure ~code:March_errors.Code.panic
          ~headline:("An assertion failed: " ^ msg)
