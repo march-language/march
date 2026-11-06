@@ -9,7 +9,10 @@ Design: `specs/2026-11-04-stdlib-lemma-sweep-design.md` §3. Phase S1 shipped
   `reverse`. Check with ir-oracle (phase 3's normalising rename diff) and
   `bench/list_ops.march` at `--opt 2`.
 - **S3:** tuples as a predicate sort (`Tuple.swap` laws, `zip` / `unzip`), and qualified
-  `List.is_empty` (see `2026-11-03-reflect-type-name-clash-with-stdlib`).
+  `List.is_empty` (filed against `2026-11-03-reflect-type-name-clash-with-stdlib`, which
+  `specs/progress/2026-11-06-predicate-names.md` closed for names declared at different arities;
+  same-arity names wait on `2026-10-13-same-short-name-nested-types-unify`. Re-check whether
+  `List.is_empty` still declines before starting S3).
 
 Done when each law has a lemma or result type in the stdlib, admitted by `stdlib/lemmas.verified`,
 and a `reflect-stdlib-sweep` case shows a caller proving with it and not without it.

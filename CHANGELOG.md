@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A warning when a predicate means the built-in, not your function.** Inside a refinement
+  predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
+  own function of that name is in scope, the checker now says so
+  (`predicate_vocabulary_shadowed`) instead of silently using the built-in.
 - **A failing test reads like a compile error.** A failed `assert`, `Check.all` property or
   panicking test body now prints a `-- TEST FAILURE --` report with the line under a caret,
   the same under `march test` and `forge test` (compiled). For `assert (a == b)` it labels
@@ -523,6 +527,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinement reports keep a predicate's parentheses.** `_ <= a && (_ == a || _ == b)` printed
+  as `_ <= a && _ == a || _ == b`, which reads as a different predicate, and
+  `--refine-infer` read that text back. Printed predicates now re-parse to what you wrote.
+- **A type named like a standard-library type of another arity works in predicates.** A
+  `type Tree` of your own beside the standard library's `Tree(k, v)` made every predicate over
+  it unchecked. Types of the same name and the same number of parameters still are, with a
+  message saying so that now names your function.
+- **No false "not checked" warning on a qualified predicate call that is checked.** A
+  predicate calling `Inner.dbl(n)` was proved and still warned that it enforces nothing.
 - **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
   (what `forge test` runs) treated a property that returned `false` as passing. Only a
   property that panicked or failed an `assert` was caught. Under `march test` it already
