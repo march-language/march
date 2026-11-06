@@ -487,6 +487,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
+  operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
+  is known by its byte length, and distinct literals are distinct values; record field access,
+  literals, updates and patterns, and tuple construction and patterns, all translate.
 - **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
   (what `forge test` runs) treated a property that returned `false` as passing. Only a
   property that panicked or failed an `assert` was caught. Under `march test` it already
