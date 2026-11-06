@@ -767,6 +767,19 @@ jobs:
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             python3 scripts/gen-explainer-data.py --check
 
+      # docs/deploy-authority.md, the second explainer: module capabilities, compiler
+      # messages and what forge prints when a dependency, a pool or a deploy asks for
+      # more than it had (scripts/gen-authority-data.py). It runs forge as well as the
+      # compiler, so forge is built here.
+      - name: Check the deploy-authority explainer's generated data
+        timeout-minutes: 15
+        run: |
+          eval $(opam env)
+          dune build forge/bin/main.exe
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+          FORGE_BIN="$PWD/_build/default/forge/bin/main.exe" \
+            python3 scripts/gen-authority-data.py --check
+
       # Compiles every demo/*.march program (the `demo` alias in demo/dune).
       # Nothing else in CI builds demo/: at the 0.5.0 cut seven demos had
       # silently stopped compiling once the cluster transport began requiring
