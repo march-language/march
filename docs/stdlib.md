@@ -7,19 +7,65 @@ permalink: /docs/stdlib-guide/
 
 # Standard Library Guide
 
-> **Looking for the full API reference?** Every stdlib module, type, and function, with
-> signatures and docstrings generated from source, lives at **[/docs/stdlib/](/docs/stdlib/)**.
-> This page is a hand-written tour of the most commonly used modules.
+The standard library is the set of modules every March program can use with no
+dependency to add and no import to write: collections, strings, files, HTTP, JSON,
+cryptography, clustering and more, 136 modules in all. You call a function by its
+qualified name, `List.map` or `String.trim`, or bring names into scope with `import` or
+`use`. A few names, such as `panic`, `unwrap` and `head`, come from `Prelude` and are
+always in scope.
 
-March ships with 136 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+This page is a hand-written tour of the modules most programs use, with a few lines of
+example code for each. The [full API reference](/docs/stdlib/) lists every module, type
+and function, with signatures and docs generated from the source, and is searchable.
 
-All stdlib modules are available without any import statement: use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
+## On this page
 
----
+**Start here**
+
+- [What do I use for…?](#what-do-i-use-for)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+
+**Everyday modules**
+
+- [Prelude](#prelude-auto-imported), [List](#list), [String](#string), [Option](#option), [Result](#result), [Map](#map), [Set](#set), [Enum](#enum), [IO](#io)
+
+**More collections**
+
+- [HashMap](#hashmap), [LinearMap](#linearmap), [NativeArray and Simd](#nativearray-and-simd)
+
+**Data and text**
+
+- [JSON](#json), [URI](#uri), [UUID](#uuid), [Duration](#duration)
+
+**System**
+
+- [File System](#file-system), [System](#system), [Logger](#logger), [Vault](#vault)
+
+**Math and cryptography**
+
+- [Math](#math), [Crypto](#crypto), [MlKem and MlDsa](#mlkem-and-mldsa-post-quantum)
+
+**Networking**
+
+- [HTTP Client](#http-client), [TLS](#tls), [UDP](#udp)
+
+**JavaScript target**
+
+- [Js.Dom](#jsdom-js-only), [Js.Canvas](#jscanvas-js-only), [Js.Audio](#jsaudio-js-only)
+
+**Clustering**
+
+- [Distributed OTP](#distributed-otp-cluster-networking)
+
+**Reference**
+
+- [Module Quick Reference](#module-quick-reference)
+- [Errors you'll see](#errors-youll-see)
+- [See also](#see-also)
 
 ## What do I use for…?
 
-You know the task; this maps it to the module(s) that do it. (Don't see your task? The [full reference](/docs/stdlib/) is searchable.)
+Find your task in the left column; the middle column names the module that does it. If your task is not here, search the [full reference](/docs/stdlib/).
 
 | I want to… | Reach for | Recipe |
 |---|---|---|
@@ -41,41 +87,17 @@ You know the task; this maps it to the module(s) that do it. (Don't see your tas
 
 ---
 
-## NativeArray and Simd
+## How it fits with the rest of March
 
-For numeric hot loops (summing a column, scaling an array, scanning bytes),
-reach for `NativeArray` instead of `List`/`Array`. It's a flat, contiguous
-numeric array (`Int`/`Float`/`f32`/`i32`/`u8` element widths) that
-`march --compile` can auto-vectorize: `NativeArray.sum_float`,
-`NativeArray.map_int`, `NativeArray.map2_f32`, and friends compile to real
-SIMD instructions on a compiled build, no ceremony required.
-
-```march
-let arr = NativeArray.make_float(1_000_000, 0.0)
-let doubled = NativeArray.map_float(arr, fn x -> x *. 2.0)
-let total = NativeArray.sum_float(doubled)
-```
-
-`NativeArray.sort_int` sorts an `Int` array in place when nothing else holds
-it, and copies when something does. It is unstable, which no program can
-observe for plain numbers, and it recognises already-sorted, reversed and
-low-cardinality input instead of always paying `n log n`.
-`NativeArray.sort_float` does the same for `Float` arrays, ordering by IEEE 754
-`totalOrder`: NaNs get a fixed place at the ends, and `-0.0` sorts before
-`0.0`. `sort_i32` and `sort_f32` are the same sorts on 4-byte elements (f32 is
-not widened to f64 to sort), and `sort_u8` is a counting sort.
-
-When you need guaranteed vector codegen rather than an optimizer decision
-(cross-lane structure with masks and `select`, a fused multiply-add, or byte-level
-scanning), reach for the `Simd` module instead: five 128-bit vector types
-(`F32x4`, `F64x2`, `I32x4`, `I64x2`, `U8x16`) with 127 operations between
-them, register-resident in compiled code.
-
-See [SIMD & Native Arrays](/docs/simd/) for the full guide (what vectorizes,
-how to trigger it, the unvarnished performance story) and
-[SIMD Benchmarks](/docs/simd-benchmarks/) for the numbers, or jump straight
-to the API references: [`NativeArray`](/docs/stdlib/NativeArray.html),
-[`Simd`](/docs/stdlib/Simd.html).
+| Concept | Where the standard library meets it | Chapter |
+|---|---|---|
+| **Modules** | Every stdlib module is reached by its qualified name with no import; `import List, only: [map]` brings names into scope. | [Modules]({{ site.baseurl }}/docs/modules/) |
+| **Type system** | `Option` and `Result` are how the stdlib says a value may be absent or an operation may fail; `let?` propagates a `Result`. | [Type System]({{ site.baseurl }}/docs/types/#optiona) |
+| **Interfaces** | `Map` and `Set` keys need `Hash` and `Eq`, sorting uses `Ord`, and stdlib types already implement `Eq`, `Ord`, `Show` and `Hash`. | [Interfaces]({{ site.baseurl }}/docs/interfaces/) |
+| **Capabilities** | A function that reaches the outside world, such as reading a file or opening a socket, needs the matching capability, granted by `main`. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
+| **Linear types** | `LinearMap` holds linear values by key without copying or dropping them. | [Linear Types]({{ site.baseurl }}/docs/linear-types/#keyed-collections-of-linear-values-linearmap) |
+| **Parallelism** | `List.pmap`, `NativeArray` and `Simd` spread work across cores and vector lanes. | [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/), [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/) |
+| **Testing** | `Gen`, `Check` and `Test` are stdlib modules. | [Property Testing]({{ site.baseurl }}/docs/property-testing/) |
 
 ---
 
@@ -230,6 +252,61 @@ String.reverse("hello")             -- "olleh"
 
 ---
 
+## Option
+
+`option.march`: `Option(a) = None | Some(a)`.
+
+```march
+Option.map(Some(5), fn x -> x + 1)     -- Some(6)
+Option.map(None, fn x -> x + 1)        -- None
+Option.flat_map(Some(5), fn x -> if x > 3 do Some(x) else None end)
+Option.or_else(None, fn () -> Some(0)) -- Some(0)
+Option.unwrap_or(None, 0)              -- 0
+Option.unwrap_or_else(None, fn () -> compute())
+Option.is_some(Some(1))               -- true
+Option.is_none(None)                  -- true
+Option.to_list(Some(42))              -- [42]
+Option.to_list(None)                  -- []
+Option.filter(Some(5), fn x -> x > 3)  -- Some(5)
+Option.filter(Some(2), fn x -> x > 3)  -- None
+```
+
+---
+
+## Result
+
+`result.march`: `Result(a, e) = Ok(a) | Err(e)`.
+
+```march
+Result.map(Ok(5), fn x -> x + 1)      -- Ok(6)
+Result.map(Err("oops"), fn x -> x + 1) -- Err("oops")
+Result.map_err(Err("x"), String.to_uppercase) -- Err("X")
+Result.flat_map(Ok(5), fn x -> Ok(x * 2))   -- Ok(10)
+Result.or_else(Err("x"), fn e -> Ok(0))  -- Ok(0)
+Result.unwrap(Ok(42))                 -- 42  (panics on Err)
+Result.unwrap_or(Err("e"), 0)         -- 0
+Result.is_ok(Ok(1))                   -- true
+Result.is_err(Err("e"))               -- true
+Result.to_option(Ok(42))              -- Some(42)
+Result.to_option(Err("e"))            -- None
+```
+
+For lightweight error propagation in chains, use the `let?` binding instead of `Result.flat_map`:
+
+```march
+-- with Result.flat_map
+Result.flat_map(String.to_int(s), fn n -> Result.flat_map(fetch(n), fn v -> Ok(v + 1)))
+
+-- with let?
+fn run(s : String) : Result(Int, String) do
+  let? n = String.to_int(s)
+  let? v = fetch(n)
+  Ok(v + 1)
+end
+```
+
+---
+
 ## Map
 
 `map.march`: HAMT-backed persistent map. O(log n) amortized operations.
@@ -278,26 +355,79 @@ Map.to_list(m3)   -- [("a", 1), ("b", 2), ("c", 3)]
 
 ---
 
+## Set
 
-## LinearMap
-
-A map for **linear** values, which `Map` cannot hold (see
-[Linear Types](linear-types.md)). Every operation consumes the map and returns
-it; `take` is the only way a value comes out, and `put` returns the value it
-displaced. The map is itself linear, so it ends in `drain`, `to_list` or
-`dispose`.
+`set.march`: HAMT-backed persistent set. The set is always the **first**
+argument, and operations that need element identity take a trailing comparator
+`cmp : a -> a -> Bool` where `cmp(a)(b) = true` means `a < b` (same convention
+as `Map`).
 
 ```march
-let (old, m1) = LinearMap.put(LinearMap.empty_int(), 1, token)   -- old : Option(Token)
-let (got, m2) = LinearMap.take(m1, 1)                              -- got : Option(Token)
-let (n, m3)   = LinearMap.size(m2)
-let (got2, slot) = LinearMap.take_slot(m3, 2)   -- value out, hole at key 2
-let m4 = LinearMap.vacate(slot)                 -- or LinearMap.fill(slot, next)
-LinearMap.drain(m4, 0, fn (acc, k, t) -> acc + close(t))
+let cmp = fn a -> fn b -> a < b
+
+let s = Set.from_list([1, 2, 3, 4, 5], cmp)
+Set.contains(s, 3, cmp)    -- true
+Set.insert(s, 6, cmp)      -- {1,2,3,4,5,6}
+Set.remove(s, 3, cmp)      -- {1,2,4,5}
+Set.size(s)                -- 5
+Set.is_empty(Set.empty())  -- true
+
+let s1 = Set.from_list([1, 2, 3], cmp)
+let s2 = Set.from_list([2, 3, 4], cmp)
+Set.union(s1, s2, cmp)         -- {1,2,3,4}
+Set.intersection(s1, s2, cmp)  -- {2,3}
+Set.difference(s1, s2, cmp)    -- {1}
+Set.is_subset(s1, s2, cmp)     -- false
+
+Set.to_list(s)                       -- [1, 2, 3, 4, 5]
+Set.fold(s, 0, fn (acc, x) -> acc + x)  -- 15
 ```
 
-`LinearMap.empty(cmp)` takes a curried less-than comparator for the keys and
-stores it; `empty_int()` and `empty_string()` supply one. Keys must not be linear.
+---
+
+## Enum
+
+`enum.march`: Elixir-inspired lazy enumeration over any `Iterable`.
+
+```march
+Enum.map(items, fn x -> x * 2)
+Enum.filter(items, fn x -> x > 0)
+Enum.fold(items, 0, fn acc -> fn x -> acc + x)   -- combiner is curried
+Enum.sort_by(items, fn a -> fn b -> a < b)        -- comparator: a < b
+Enum.chunk_every(items, 3)     -- group into chunks of 3
+Enum.chunk_by([1, 1, 2, 2, 3], fn x -> x)  -- [(1, [1, 1]), (2, [2, 2]), (3, [3])]
+Enum.zip(items_a, items_b)
+Enum.dedup(items)              -- remove consecutive duplicates
+Enum.uniq(items)               -- remove all duplicates
+Enum.take_while(items, pred)
+Enum.drop_while(items, pred)
+Enum.sum(nums)
+Enum.product(nums)
+Enum.scan(items, 0, fn acc -> fn x -> acc + x)
+Enum.with_index(items)         -- [(x, 0), (y, 1), ...]
+Enum.frequencies(items)        -- List((a, Int)): count of each item
+Enum.min_by(items, fn x -> x.score)   -- Option(a)
+Enum.max_by(items, fn x -> x.score)   -- Option(a)
+```
+
+---
+
+## IO
+
+`io.march`: Explicit I/O operations.
+
+```march
+IO.puts("Hello, World!")         -- print with newline
+IO.write("no newline")           -- print without newline
+IO.warn("warning message")       -- print to stderr
+IO.read_line()                   -- read a line from stdin -> String
+IO.gets("> ")                    -- print prompt, read line
+IO.inspect(any_value)            -- pretty-prints and returns any_value unchanged (for piping)
+```
+
+The `println` and `print` builtins are also always available.
+
+---
 
 ## HashMap
 
@@ -354,210 +484,63 @@ HashMap.to_list(m2)  -- [("a", 1), ("b", 2), ("c", 3)] (hash order)
 
 ---
 
-## Set
+## LinearMap
 
-`set.march`: HAMT-backed persistent set. The set is always the **first**
-argument, and operations that need element identity take a trailing comparator
-`cmp : a -> a -> Bool` where `cmp(a)(b) = true` means `a < b` (same convention
-as `Map`).
+A map for **linear** values, which `Map` cannot hold (see
+[Linear Types](linear-types.md)). Every operation consumes the map and returns
+it; `take` is the only way a value comes out, and `put` returns the value it
+displaced. The map is itself linear, so it ends in `drain`, `to_list` or
+`dispose`.
 
 ```march
-let cmp = fn a -> fn b -> a < b
-
-let s = Set.from_list([1, 2, 3, 4, 5], cmp)
-Set.contains(s, 3, cmp)    -- true
-Set.insert(s, 6, cmp)      -- {1,2,3,4,5,6}
-Set.remove(s, 3, cmp)      -- {1,2,4,5}
-Set.size(s)                -- 5
-Set.is_empty(Set.empty())  -- true
-
-let s1 = Set.from_list([1, 2, 3], cmp)
-let s2 = Set.from_list([2, 3, 4], cmp)
-Set.union(s1, s2, cmp)         -- {1,2,3,4}
-Set.intersection(s1, s2, cmp)  -- {2,3}
-Set.difference(s1, s2, cmp)    -- {1}
-Set.is_subset(s1, s2, cmp)     -- false
-
-Set.to_list(s)                       -- [1, 2, 3, 4, 5]
-Set.fold(s, 0, fn (acc, x) -> acc + x)  -- 15
+let (old, m1) = LinearMap.put(LinearMap.empty_int(), 1, token)   -- old : Option(Token)
+let (got, m2) = LinearMap.take(m1, 1)                              -- got : Option(Token)
+let (n, m3)   = LinearMap.size(m2)
+let (got2, slot) = LinearMap.take_slot(m3, 2)   -- value out, hole at key 2
+let m4 = LinearMap.vacate(slot)                 -- or LinearMap.fill(slot, next)
+LinearMap.drain(m4, 0, fn (acc, k, t) -> acc + close(t))
 ```
+
+`LinearMap.empty(cmp)` takes a curried less-than comparator for the keys and
+stores it; `empty_int()` and `empty_string()` supply one. Keys must not be linear.
 
 ---
 
-## Option
+## NativeArray and Simd
 
-`option.march`: `Option(a) = None | Some(a)`.
-
-```march
-Option.map(Some(5), fn x -> x + 1)     -- Some(6)
-Option.map(None, fn x -> x + 1)        -- None
-Option.flat_map(Some(5), fn x -> if x > 3 do Some(x) else None end)
-Option.or_else(None, fn () -> Some(0)) -- Some(0)
-Option.unwrap_or(None, 0)              -- 0
-Option.unwrap_or_else(None, fn () -> compute())
-Option.is_some(Some(1))               -- true
-Option.is_none(None)                  -- true
-Option.to_list(Some(42))              -- [42]
-Option.to_list(None)                  -- []
-Option.filter(Some(5), fn x -> x > 3)  -- Some(5)
-Option.filter(Some(2), fn x -> x > 3)  -- None
-```
-
----
-
-## Result
-
-`result.march`: `Result(a, e) = Ok(a) | Err(e)`.
+For numeric hot loops (summing a column, scaling an array, scanning bytes),
+reach for `NativeArray` instead of `List`/`Array`. It's a flat, contiguous
+numeric array (`Int`/`Float`/`f32`/`i32`/`u8` element widths) that
+`march --compile` can auto-vectorize: `NativeArray.sum_float`,
+`NativeArray.map_int`, `NativeArray.map2_f32`, and friends compile to real
+SIMD instructions on a compiled build, no ceremony required.
 
 ```march
-Result.map(Ok(5), fn x -> x + 1)      -- Ok(6)
-Result.map(Err("oops"), fn x -> x + 1) -- Err("oops")
-Result.map_err(Err("x"), String.to_uppercase) -- Err("X")
-Result.flat_map(Ok(5), fn x -> Ok(x * 2))   -- Ok(10)
-Result.or_else(Err("x"), fn e -> Ok(0))  -- Ok(0)
-Result.unwrap(Ok(42))                 -- 42  (panics on Err)
-Result.unwrap_or(Err("e"), 0)         -- 0
-Result.is_ok(Ok(1))                   -- true
-Result.is_err(Err("e"))               -- true
-Result.to_option(Ok(42))              -- Some(42)
-Result.to_option(Err("e"))            -- None
+let arr = NativeArray.make_float(1_000_000, 0.0)
+let doubled = NativeArray.map_float(arr, fn x -> x *. 2.0)
+let total = NativeArray.sum_float(doubled)
 ```
 
-For lightweight error propagation in chains, use the `let?` binding instead of `Result.flat_map`:
+`NativeArray.sort_int` sorts an `Int` array in place when nothing else holds
+it, and copies when something does. It is unstable, which no program can
+observe for plain numbers, and it recognises already-sorted, reversed and
+low-cardinality input instead of always paying `n log n`.
+`NativeArray.sort_float` does the same for `Float` arrays, ordering by IEEE 754
+`totalOrder`: NaNs get a fixed place at the ends, and `-0.0` sorts before
+`0.0`. `sort_i32` and `sort_f32` are the same sorts on 4-byte elements (f32 is
+not widened to f64 to sort), and `sort_u8` is a counting sort.
 
-```march
--- with Result.flat_map
-Result.flat_map(String.to_int(s), fn n -> Result.flat_map(fetch(n), fn v -> Ok(v + 1)))
+When you need guaranteed vector codegen rather than an optimizer decision
+(cross-lane structure with masks and `select`, a fused multiply-add, or byte-level
+scanning), reach for the `Simd` module instead: five 128-bit vector types
+(`F32x4`, `F64x2`, `I32x4`, `I64x2`, `U8x16`) with 127 operations between
+them, register-resident in compiled code.
 
--- with let?
-fn run(s : String) : Result(Int, String) do
-  let? n = String.to_int(s)
-  let? v = fetch(n)
-  Ok(v + 1)
-end
-```
-
----
-
-## IO
-
-`io.march`: Explicit I/O operations.
-
-```march
-IO.puts("Hello, World!")         -- print with newline
-IO.write("no newline")           -- print without newline
-IO.warn("warning message")       -- print to stderr
-IO.read_line()                   -- read a line from stdin -> String
-IO.gets("> ")                    -- print prompt, read line
-IO.inspect(any_value)            -- pretty-prints and returns any_value unchanged (for piping)
-```
-
-The `println` and `print` builtins are also always available.
-
----
-
-## Math
-
-`math.march`: Mathematical functions.
-
-```march
-int_abs(-5)                  -- 5  (Int abs is a bare builtin, not under Math)
-Math.abs(-3.14)              -- 3.14  (Math.abs is Float-only)
-Math.min_int(3, 5)           -- 3
-Math.max_int(3, 5)           -- 5
-Math.clamp_int(15, 0, 10)    -- 10
-Math.sqrt(16.0)              -- 4.0
-Math.pow(2.0, 10.0)          -- 1024.0
-Math.exp(1.0)                -- 2.718...
-Math.log(Math.e())           -- 1.0
-Math.log2(8.0)                -- 3.0
-Math.log10(1000.0)           -- 3.0
-Math.floor(3.7)               -- 3.0
-Math.ceil(3.2)                -- 4.0
-Math.round(3.5)               -- 4.0
-Math.sin(Math.pi() /. 2.0)   -- 1.0
-Math.cos(0.0)                -- 1.0
-Math.pi()                    -- 3.14159...  (pi/e/tau are 0-arg functions — call with `()`)
-Math.e()                     -- 2.71828...
-float_infinity()             -- Float infinity  (bare builtin, not under Math)
-float_is_nan(float_nan())    -- true  (bare builtins; `0.0 /. 0.0` panics with "division by zero" rather than yielding NaN)
-```
-
----
-
-## Crypto
-
-`crypto.march`: Cryptographic primitives.
-
-```march
--- Hashing
-Crypto.sha256("hello")              -- hex string
-Crypto.sha512("hello")              -- hex string
-Crypto.hmac(:sha256, key, message)  -- HMAC; algo is :sha256 or :sha512
-
--- Password hashing (PBKDF2 under the hood; stores salt + iterations)
-let h = Crypto.hash_password("hunter2")     -- "pbkdf2:sha256:..." digest string
-Crypto.verify_password("hunter2", h)         -- true (constant-time)
-
--- Randomness
-Crypto.random_bytes(32)             -- Bytes of cryptographically random data
-Crypto.random_hex(16)               -- random hex string (32 chars)
-
--- Encoding
-Crypto.base64_encode("hello")       -- "aGVsbG8="
-Crypto.base64_decode("aGVsbG8=")    -- Ok(Bytes)
-Crypto.base64_url_encode("hello")   -- URL-safe Base64
-Crypto.base64_url_decode(s)         -- Ok(Bytes)
-
--- Constant-time comparison (use for secrets / MACs)
-Crypto.secure_compare(a, b)         -- Bool
-```
-
----
-
-## MlKem and MlDsa (post-quantum)
-
-`ml_kem.march`, `ml_dsa.march`: the NIST post-quantum standards, ML-KEM-768
-(FIPS 203) for key agreement and ML-DSA-65 (FIPS 204) for signatures. Keys,
-ciphertexts and signatures are `Bytes`. Both modules `needs IO.Random`.
-
-```march
--- Key agreement: the receiver publishes kp.public_key (1184 bytes)
-let kp = MlKem.keypair()
-match MlKem.encapsulate(kp.public_key) do         -- sender side
-  Ok((ct, secret)) ->                             -- send ct (1088 bytes)
-    MlKem.decapsulate(kp.secret_key, ct)          -- Ok(secret), receiver side
-  Err(e) -> Err(e)
-end
-
--- Signatures: hedged by default; sign_deterministic for the deterministic variant
-let sk = MlDsa.keypair()
-match MlDsa.sign(sk.secret_key, Bytes.from_string("msg")) do
-  Ok(s) -> MlDsa.verify(sk.public_key, Bytes.from_string("msg"), s)   -- true
-  Err(e) -> false
-end
-```
-
-Seeded variants (`MlKem.keypair_from_seed`, `MlKem.encapsulate_with_coins`,
-`MlDsa.keypair_from_seed`) reproduce published test vectors. A ciphertext made for
-another key does not fail to decapsulate: it yields an unrelated secret (ML-KEM's
-implicit rejection), so authenticate whatever you derive from it.
-
----
-
-## UUID
-
-`uuid.march`: UUID generation and parsing.
-
-```march
-UUID.v4()                     -- generate a random UUID (a `UUID` value, not a bare String)
-UUID.v5(namespace, name)      -- deterministic UUID from a UUID namespace + name
-UUID.parse("550e8400-...")    -- Result(UUID, Atom): Ok(UUID(...)) or Err(:invalid)
-UUID.to_string(uuid)          -- "550e8400-e29b-41d4-a716-446655440000"
-UUID.version(uuid)            -- 4
-UUID.is_valid("550e8400-...") -- true
-UUID.to_string(UUID.nil())    -- "00000000-0000-0000-0000-000000000000"
-```
+See [SIMD & Native Arrays](/docs/simd/) for the full guide (what vectorizes,
+how to trigger it, the unvarnished performance story) and
+[SIMD Benchmarks](/docs/simd-benchmarks/) for the numbers, or jump straight
+to the API references: [`NativeArray`](/docs/stdlib/NativeArray.html),
+[`Simd`](/docs/stdlib/Simd.html).
 
 ---
 
@@ -587,90 +570,56 @@ serializers.
 
 ---
 
-## UDP
+## URI
 
-`udp.march`: datagram sockets built for packet rate. Every call moves a batch:
-on Linux `recvmmsg`/`sendmmsg` plus UDP GSO (up to 64 equal-sized datagrams per
-kernel transit) and opt-in GRO; on other platforms a nonblocking drain loop.
-Waits park the calling task, not an OS thread.
+`uri.march`: URI parsing and construction. The module is `Uri` (not `URI`).
 
 ```march
-let? rx  = Udp.open("0.0.0.0", 9000)
-let? tx  = Udp.open("0.0.0.0", 0)
-let? dst = Udp.resolve("127.0.0.1", 9000)       -- resolve once, reuse
-let? n   = Udp.send_batch(tx, dst, payloads)    -- Result(Int, UdpError)
-let? ds  = Udp.recv_batch(rx, 256, 2048, 100)   -- List((UdpAddr, String)); Ok([]) on timeout
-Udp.stats(rx).rx_dropped                        -- kernel drops (Linux; -1 elsewhere)
-```
+let u = Uri.parse("https://example.com/path?k=v")
+-- URI(scheme, host, port, path, query, fragment) — a plain ADT value, not a Result
 
-Sends wait for buffer space instead of dropping, and `stats` reports what the
-kernel dropped for lack of receive-buffer room. UDP itself still delivers each
-datagram at most once, in any order. Packets are binary-safe `String`s;
-`UdpAddr` is opaque and comparable with `==`. To spread load across cores, use
-`Udp.open_sharded(host, port, n, opts)` (SO_REUSEPORT) and drain each socket
-in its own task. `Udp.connect` fixes a peer, which allows `send` /
-`send_batch_connected` and reports ICMP port-unreachable as a `RecvFailed`.
-Options (`Udp.defaults()`): `gso`, `gro`, `reuse_addr`, `reuse_port`,
-`broadcast`, `recv_buffer`, `send_buffer` (8 MiB requested; Linux caps
-requests at `net.core.rmem_max`/`wmem_max` without CAP_NET_ADMIN).
-
-The module is `cap verified`. Ports (`0..65535`), shard counts (`> 0`) and
-receive bounds (`1..1024` datagrams, `1..65535` bytes) are refined parameters,
-so a literal bad value is a compile error naming the bound. `send_batch` and
-`send_many` return exactly the number of datagrams handed in, `open_sharded`
-exactly `n` sockets, and `addr_port`/`local_port` a valid port, each a proved
-fact at the call site.
-
----
-
-## HTTP Client
-
-`http_client.march`: Make HTTP requests.
-
-`Http.get`/`Http.post`/etc are pure: they just parse a URL into a `Request`
-(`Result(Request(b), UrlError)`), no network I/O. Actually performing a
-request goes through an `HttpClient` client value:
-
-```march
-let client = HttpClient.new_client()
-
-let resp = HttpClient.get(client, "https://api.example.com/data")
-let resp = HttpClient.post(client, "https://api.example.com/data", body)
-
--- A custom method/headers request: build with Http, run with HttpClient.
-let req  = Result.unwrap(Http.put("https://api.example.com/items/1", json_body))
-let req2 = Http.set_header(req, "Content-Type", "application/json")
-let resp = HttpClient.run(client, req2)
-
-match resp do
-  Ok(r) ->
-    println("status: " ++ int_to_string(Http.response_status_code(r)))
-    println("body: "   ++ Http.response_body(r))
-  Err(e) ->
-    println("error")
-end
+Uri.scheme(u)                 -- "https"
+Uri.host(u)                   -- "example.com"
+Uri.path(u)                   -- "/path"
+Uri.query(u)                  -- "k=v"
+Uri.encode("hello world")     -- "hello%20world"
+Uri.decode("hello%20world")   -- "hello world"
+Uri.decode_query("k=v&a=b")   -- [("k", "v"), ("a", "b")]
 ```
 
 ---
 
-## TLS
+## UUID
 
-`tls.march`: TLS client and server over TCP descriptors (OpenSSL), used by
-`HttpClient` for HTTPS.
-
-**Post-quantum key exchange is on by default.** Every context offers the
-hybrid group X25519MLKEM768 (X25519 + ML-KEM-768) first, then X25519, P-256,
-P-384 and P-521, so a session with a peer that also supports it cannot be
-decrypted later by someone who records it now and has a quantum computer
-then. This needs OpenSSL 3.5 or later linked into the program; with an older
-OpenSSL the context keeps that library's default groups and every handshake
-still works, classically. Certificates and signatures stay classical.
+`uuid.march`: UUID generation and parsing.
 
 ```march
-Tls.post_quantum_available()            -- Bool: does the linked OpenSSL have ML-KEM?
-Tls.negotiated_group(conn)              -- Some("X25519MLKEM768"), Some("x25519"), ...
-Tls.is_post_quantum(conn)               -- Bool
-Tls.set_groups(ctx, ["X25519MLKEM768"]) -- require PQ; Err if the list is unknown
+UUID.v4()                     -- generate a random UUID (a `UUID` value, not a bare String)
+UUID.v5(namespace, name)      -- deterministic UUID from a UUID namespace + name
+UUID.parse("550e8400-...")    -- Result(UUID, Atom): Ok(UUID(...)) or Err(:invalid)
+UUID.to_string(uuid)          -- "550e8400-e29b-41d4-a716-446655440000"
+UUID.version(uuid)            -- 4
+UUID.is_valid("550e8400-...") -- true
+UUID.to_string(UUID.nil())    -- "00000000-0000-0000-0000-000000000000"
+```
+
+---
+
+## Duration
+
+`duration.march`: Time-span arithmetic.
+
+```march
+let d = Duration.seconds(30)
+let h = Duration.hours(2)
+let w = Duration.weeks(1)
+
+Duration.add(d, h)
+Duration.subtract(h, d)
+Duration.multiply(d, 3)
+Duration.compare(d, h)     -- Int: negative, 0, positive
+Duration.format(d)         -- "30 seconds"
+Duration.to_milliseconds(d)  -- 30000  (Duration.milliseconds(n) is a *constructor*, not this accessor)
 ```
 
 ---
@@ -771,68 +720,180 @@ handle from a *name* and so choose `v` rather than check it, and the
 
 ---
 
-## Enum
+## Math
 
-`enum.march`: Elixir-inspired lazy enumeration over any `Iterable`.
+`math.march`: Mathematical functions.
 
 ```march
-Enum.map(items, fn x -> x * 2)
-Enum.filter(items, fn x -> x > 0)
-Enum.fold(items, 0, fn acc -> fn x -> acc + x)   -- combiner is curried
-Enum.sort_by(items, fn a -> fn b -> a < b)        -- comparator: a < b
-Enum.chunk_every(items, 3)     -- group into chunks of 3
-Enum.chunk_by([1, 1, 2, 2, 3], fn x -> x)  -- [(1, [1, 1]), (2, [2, 2]), (3, [3])]
-Enum.zip(items_a, items_b)
-Enum.dedup(items)              -- remove consecutive duplicates
-Enum.uniq(items)               -- remove all duplicates
-Enum.take_while(items, pred)
-Enum.drop_while(items, pred)
-Enum.sum(nums)
-Enum.product(nums)
-Enum.scan(items, 0, fn acc -> fn x -> acc + x)
-Enum.with_index(items)         -- [(x, 0), (y, 1), ...]
-Enum.frequencies(items)        -- List((a, Int)): count of each item
-Enum.min_by(items, fn x -> x.score)   -- Option(a)
-Enum.max_by(items, fn x -> x.score)   -- Option(a)
+int_abs(-5)                  -- 5  (Int abs is a bare builtin, not under Math)
+Math.abs(-3.14)              -- 3.14  (Math.abs is Float-only)
+Math.min_int(3, 5)           -- 3
+Math.max_int(3, 5)           -- 5
+Math.clamp_int(15, 0, 10)    -- 10
+Math.sqrt(16.0)              -- 4.0
+Math.pow(2.0, 10.0)          -- 1024.0
+Math.exp(1.0)                -- 2.718...
+Math.log(Math.e())           -- 1.0
+Math.log2(8.0)                -- 3.0
+Math.log10(1000.0)           -- 3.0
+Math.floor(3.7)               -- 3.0
+Math.ceil(3.2)                -- 4.0
+Math.round(3.5)               -- 4.0
+Math.sin(Math.pi() /. 2.0)   -- 1.0
+Math.cos(0.0)                -- 1.0
+Math.pi()                    -- 3.14159...  (pi/e/tau are 0-arg functions — call with `()`)
+Math.e()                     -- 2.71828...
+float_infinity()             -- Float infinity  (bare builtin, not under Math)
+float_is_nan(float_nan())    -- true  (bare builtins; `0.0 /. 0.0` panics with "division by zero" rather than yielding NaN)
 ```
 
 ---
 
-## Duration
+## Crypto
 
-`duration.march`: Time-span arithmetic.
+`crypto.march`: Cryptographic primitives.
 
 ```march
-let d = Duration.seconds(30)
-let h = Duration.hours(2)
-let w = Duration.weeks(1)
+-- Hashing
+Crypto.sha256("hello")              -- hex string
+Crypto.sha512("hello")              -- hex string
+Crypto.hmac(:sha256, key, message)  -- HMAC; algo is :sha256 or :sha512
 
-Duration.add(d, h)
-Duration.subtract(h, d)
-Duration.multiply(d, 3)
-Duration.compare(d, h)     -- Int: negative, 0, positive
-Duration.format(d)         -- "30 seconds"
-Duration.to_milliseconds(d)  -- 30000  (Duration.milliseconds(n) is a *constructor*, not this accessor)
+-- Password hashing (PBKDF2 under the hood; stores salt + iterations)
+let h = Crypto.hash_password("hunter2")     -- "pbkdf2:sha256:..." digest string
+Crypto.verify_password("hunter2", h)         -- true (constant-time)
+
+-- Randomness
+Crypto.random_bytes(32)             -- Bytes of cryptographically random data
+Crypto.random_hex(16)               -- random hex string (32 chars)
+
+-- Encoding
+Crypto.base64_encode("hello")       -- "aGVsbG8="
+Crypto.base64_decode("aGVsbG8=")    -- Ok(Bytes)
+Crypto.base64_url_encode("hello")   -- URL-safe Base64
+Crypto.base64_url_decode(s)         -- Ok(Bytes)
+
+-- Constant-time comparison (use for secrets / MACs)
+Crypto.secure_compare(a, b)         -- Bool
 ```
 
 ---
 
-## URI
+## MlKem and MlDsa (post-quantum)
 
-`uri.march`: URI parsing and construction. The module is `Uri` (not `URI`).
+`ml_kem.march`, `ml_dsa.march`: the NIST post-quantum standards, ML-KEM-768
+(FIPS 203) for key agreement and ML-DSA-65 (FIPS 204) for signatures. Keys,
+ciphertexts and signatures are `Bytes`. Both modules `needs IO.Random`.
 
 ```march
-let u = Uri.parse("https://example.com/path?k=v")
--- URI(scheme, host, port, path, query, fragment) — a plain ADT value, not a Result
+-- Key agreement: the receiver publishes kp.public_key (1184 bytes)
+let kp = MlKem.keypair()
+match MlKem.encapsulate(kp.public_key) do         -- sender side
+  Ok((ct, secret)) ->                             -- send ct (1088 bytes)
+    MlKem.decapsulate(kp.secret_key, ct)          -- Ok(secret), receiver side
+  Err(e) -> Err(e)
+end
 
-Uri.scheme(u)                 -- "https"
-Uri.host(u)                   -- "example.com"
-Uri.path(u)                   -- "/path"
-Uri.query(u)                  -- "k=v"
-Uri.encode("hello world")     -- "hello%20world"
-Uri.decode("hello%20world")   -- "hello world"
-Uri.decode_query("k=v&a=b")   -- [("k", "v"), ("a", "b")]
+-- Signatures: hedged by default; sign_deterministic for the deterministic variant
+let sk = MlDsa.keypair()
+match MlDsa.sign(sk.secret_key, Bytes.from_string("msg")) do
+  Ok(s) -> MlDsa.verify(sk.public_key, Bytes.from_string("msg"), s)   -- true
+  Err(e) -> false
+end
 ```
+
+Seeded variants (`MlKem.keypair_from_seed`, `MlKem.encapsulate_with_coins`,
+`MlDsa.keypair_from_seed`) reproduce published test vectors. A ciphertext made for
+another key does not fail to decapsulate: it yields an unrelated secret (ML-KEM's
+implicit rejection), so authenticate whatever you derive from it.
+
+---
+
+## HTTP Client
+
+`http_client.march`: Make HTTP requests.
+
+`Http.get`/`Http.post`/etc are pure: they just parse a URL into a `Request`
+(`Result(Request(b), UrlError)`), no network I/O. Actually performing a
+request goes through an `HttpClient` client value:
+
+```march
+let client = HttpClient.new_client()
+
+let resp = HttpClient.get(client, "https://api.example.com/data")
+let resp = HttpClient.post(client, "https://api.example.com/data", body)
+
+-- A custom method/headers request: build with Http, run with HttpClient.
+let req  = Result.unwrap(Http.put("https://api.example.com/items/1", json_body))
+let req2 = Http.set_header(req, "Content-Type", "application/json")
+let resp = HttpClient.run(client, req2)
+
+match resp do
+  Ok(r) ->
+    println("status: " ++ int_to_string(Http.response_status_code(r)))
+    println("body: "   ++ Http.response_body(r))
+  Err(e) ->
+    println("error")
+end
+```
+
+---
+
+## TLS
+
+`tls.march`: TLS client and server over TCP descriptors (OpenSSL), used by
+`HttpClient` for HTTPS.
+
+**Post-quantum key exchange is on by default.** Every context offers the
+hybrid group X25519MLKEM768 (X25519 + ML-KEM-768) first, then X25519, P-256,
+P-384 and P-521, so a session with a peer that also supports it cannot be
+decrypted later by someone who records it now and has a quantum computer
+then. This needs OpenSSL 3.5 or later linked into the program; with an older
+OpenSSL the context keeps that library's default groups and every handshake
+still works, classically. Certificates and signatures stay classical.
+
+```march
+Tls.post_quantum_available()            -- Bool: does the linked OpenSSL have ML-KEM?
+Tls.negotiated_group(conn)              -- Some("X25519MLKEM768"), Some("x25519"), ...
+Tls.is_post_quantum(conn)               -- Bool
+Tls.set_groups(ctx, ["X25519MLKEM768"]) -- require PQ; Err if the list is unknown
+```
+
+---
+
+## UDP
+
+`udp.march`: datagram sockets built for packet rate. Every call moves a batch:
+on Linux `recvmmsg`/`sendmmsg` plus UDP GSO (up to 64 equal-sized datagrams per
+kernel transit) and opt-in GRO; on other platforms a nonblocking drain loop.
+Waits park the calling task, not an OS thread.
+
+```march
+let? rx  = Udp.open("0.0.0.0", 9000)
+let? tx  = Udp.open("0.0.0.0", 0)
+let? dst = Udp.resolve("127.0.0.1", 9000)       -- resolve once, reuse
+let? n   = Udp.send_batch(tx, dst, payloads)    -- Result(Int, UdpError)
+let? ds  = Udp.recv_batch(rx, 256, 2048, 100)   -- List((UdpAddr, String)); Ok([]) on timeout
+Udp.stats(rx).rx_dropped                        -- kernel drops (Linux; -1 elsewhere)
+```
+
+Sends wait for buffer space instead of dropping, and `stats` reports what the
+kernel dropped for lack of receive-buffer room. UDP itself still delivers each
+datagram at most once, in any order. Packets are binary-safe `String`s;
+`UdpAddr` is opaque and comparable with `==`. To spread load across cores, use
+`Udp.open_sharded(host, port, n, opts)` (SO_REUSEPORT) and drain each socket
+in its own task. `Udp.connect` fixes a peer, which allows `send` /
+`send_batch_connected` and reports ICMP port-unreachable as a `RecvFailed`.
+Options (`Udp.defaults()`): `gso`, `gro`, `reuse_addr`, `reuse_port`,
+`broadcast`, `recv_buffer`, `send_buffer` (8 MiB requested; Linux caps
+requests at `net.core.rmem_max`/`wmem_max` without CAP_NET_ADMIN).
+
+The module is `cap verified`. Ports (`0..65535`), shard counts (`> 0`) and
+receive bounds (`1..1024` datagrams, `1..65535` bytes) are refined parameters,
+so a literal bad value is a compile error naming the bound. `send_batch` and
+`send_many` return exactly the number of datagrams handed in, `open_sharded`
+exactly `n` sockets, and `addr_port`/`local_port` a valid port, each a proved
+fact at the call site.
 
 ---
 
@@ -1164,8 +1225,21 @@ fails with `Err("tcp_recv_exact: timed out")` once it passes.
 
 ---
 
-## Next Steps
+## Errors you'll see
 
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) walks through what the compiler and the runtime print for these mistakes, each with a program you can edit and re-check in the browser:
+
+- [A `let?` block whose last expression is not a `Result`]({{ site.baseurl }}/docs/error-messages/#let-question)
+- [Comparing values of a type that has no `Ord` implementation]({{ site.baseurl }}/docs/error-messages/#missing-impl)
+- [A run-time panic two calls deep; `unwrap(None)` and `head([])` panic the same way]({{ site.baseurl }}/docs/error-messages/#runtime-panic)
+- [A list that is copied because it is used again after `List.map`]({{ site.baseurl }}/docs/error-messages/#copy-shared)
+
+---
+
+## See also
+
+- [Full API reference](/docs/stdlib/): every module, type and function, generated from the source
+- [Cookbook]({{ site.baseurl }}/docs/cookbook/): task-sized recipes built on these modules
 - [Property Testing]({{ site.baseurl }}/docs/property-testing/): write property-based tests with `Gen` and `Check`
 - [REPL]({{ site.baseurl }}/docs/repl/): explore the stdlib interactively
 - [Interfaces]({{ site.baseurl }}/docs/interfaces/): how stdlib types implement interfaces

@@ -435,6 +435,15 @@ git log is authoritative for exact commits.
   table, a how-it-fits table, a grouped index, everyday types before the advanced ones, and
   See also in place of Next Steps. It no longer says recursive functions need annotations;
   inference handles them.
+- **Five more pages get the same first-reader layout:** [Module System](docs/modules.md),
+  [Sigils & Templating](docs/sigils.md), [Foreign Function Interface](docs/ffi.md),
+  [Stdlib Guide](docs/stdlib.md) and [Property Testing](docs/property-testing.md). Each
+  has a plain opener, a which-form table, a how-it-fits table linking the related
+  chapters, a grouped index with everyday sections first, Errors you'll see linking the
+  Error Messages tour and `--explain` pages where they apply, and See also in place of
+  Next Steps. Bodies are kept; the FFI page's first example now grants `main` the
+  capabilities it uses, so it type-checks, and the Modules page no longer describes
+  compiler internals or shows a stale error for a `ptype` constructor.
 - **Removed pages.** The four 1.0 claim pages (`claim-deploys`, `claim-capabilities`,
   `claim-performance`, `claim-refinements`), the 0.3.0, 0.4.0 and 0.5.0 upgrade guides, and
   the Findings list on the [Multi-host Lab](docs/lab.md) page. Links to them are gone; the

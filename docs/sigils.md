@@ -7,13 +7,62 @@ permalink: /docs/sigils/
 
 # Sigils & Templating
 
-Some kinds of text aren't really "just a string": a chunk of TOML, an HTML template, an
-XML document. March's **sigils** let you write that text as a literal, right in your
-source, and have the compiler hand it to a parser or template builder instead of
-treating it as a plain `String`. The most-used one, `~H`, builds HTML with
-**contextual auto-escaping**: every interpolation is escaped for the exact place it
-lands, worked out at compile time. The rest of this page starts with the general
-mechanism, then goes deep on `~H`.
+A sigil is a literal for text that is not just a string: a TOML config, an XML
+document, an HTML template. You write the text in your source behind a short prefix,
+`~toml"..."` or `~H"..."`, and the compiler hands it to a parser or a template builder
+instead of treating it as a plain `String`.
+
+`~H` is the sigil most code uses. It builds HTML and escapes every interpolated value
+for the exact place it lands: element content, an attribute, a URL, CSS or a script.
+The compiler works out each place at compile time, so you never choose the escaping,
+you cannot forget it, and a template that puts a value where no escaping is safe does
+not compile.
+
+This page covers the general mechanism and the three parsing sigils first, then `~H`
+in depth.
+
+## On this page
+
+**Start here**
+
+- [Which sigil do I need?](#which-sigil-do-i-need)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+
+**Parsing sigils**
+
+- [The general mechanism](#the-general-mechanism): `~toml`, `~xml`, `~yaml`, and why they take no interpolation
+
+**HTML templates with `~H`**
+
+- [The `~H` sigil](#the-h-sigil-html-templates)
+- [What happens where](#what-happens-where): the escaping for each position
+- [What will not compile](#what-will-not-compile)
+- [Trusted content, and why trust does not travel](#trusted-content-and-why-trust-does-not-travel)
+- [Composing templates](#composing-templates)
+- [A gotcha worth knowing: CSRF injection](#a-gotcha-worth-knowing-csrf-injection)
+
+**Reference**
+
+- [See also](#see-also)
+
+## Which sigil do I need?
+
+| You want | Write |
+|---|---|
+| A TOML, XML or YAML document written in your source | `~toml"""..."""`, `~xml"..."`, `~yaml"..."` |
+| To parse a document read at run time, or one that may be malformed | `Toml.parse`, `Xml.parse` or `Yaml.parse`, which return a `Result` |
+| An HTML fragment with values in it | `~H"<p>Hello, ${name}!</p>"` |
+| A rendered list inside a template | `Html.list(items, render_item)`, interpolated as one value |
+| Markup you built or checked yourself, inserted as is | `Html.trust_html(s)`, or the `trust_*` function for where it goes |
+| A full page with layouts and partials | The [HTML cookbook]({{ site.baseurl }}/docs/cookbook/html/) |
+
+## How it fits with the rest of March
+
+| Concept | Where sigils meet it | Chapter |
+|---|---|---|
+| **Type system** | `~toml` returns a `TomlValue`, an ordinary variant type; `~H` returns an `IOList`, so a template's type says it is markup, not a `String`. | [Type System]({{ site.baseurl }}/docs/types/) |
+| **Pattern matching** | Reading a parsed `TomlValue` or XML document is a `match` over its constructors. | [Pattern Matching]({{ site.baseurl }}/docs/pattern-matching/) |
+| **Standard library** | `~name"..."` is a call to `Sigil.name`; `Toml`, `Xml`, `Yaml`, `Html` and `IOList` are stdlib modules. | [Stdlib Guide]({{ site.baseurl }}/docs/stdlib-guide/) |
 
 ---
 
@@ -272,11 +321,13 @@ where no content is injected.
 
 ---
 
-## Next Steps
+## See also
 
-- [HTML cookbook]({{ site.baseurl }}/docs/cookbook/html/): this page covers the
-  mechanism; the cookbook shows you how to build a full page with it (layouts, partials,
-  a complete example).
-- [Type System](types.md): what `TomlValue` and friends look like as ordinary ADTs.
-- [Capabilities]({{ site.baseurl }}/docs/capabilities/): the permission system that
-  guards the file/network access templating code often sits next to.
+- [HTML cookbook]({{ site.baseurl }}/docs/cookbook/html/): a full page built from
+  these pieces, with layouts, partials and a user list
+- [Type System]({{ site.baseurl }}/docs/types/): `TomlValue` and friends are ordinary
+  variant types
+- [Pattern Matching]({{ site.baseurl }}/docs/pattern-matching/): taking a parsed
+  document apart
+- [Stdlib Guide]({{ site.baseurl }}/docs/stdlib-guide/): `Toml`, `Json`, `Html` and the
+  other modules a sigil calls into
