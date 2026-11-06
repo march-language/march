@@ -771,6 +771,56 @@ So the audit log answers "what was deployed without its contract proved, and who
 it." A patch built elsewhere (`forge deploy hot --so …`) must be built with the same
 `march --accept-unproved …`: forge refuses an override the patch doesn't carry.
 
+### Migrations are checked on every build
+
+You don't have to wait for `forge deploy hot` to find out that a migration is wrong.
+Every `march --check` and every build (so the editor too) checks each `<actor>_migrate_state`
+and `<actor>_migrate_msg` against the new actor's contracts. The checker can't always prove
+an obligation inside a migration. When it can't, it doesn't give up with a hint. The
+migration's parameter is every old value the runtime could hand it, so the compiler runs the
+migration on small old values and looks at what the new code would receive:
+
+```march
+fn tally_migrate_state(old : { count : Int }) do
+  { count: old.count, hist: Nil }          -- the new state needs count >= 0
+end
+
+fn tally_migrate_msg(m : V1.Msg) : Option(Tally.Msg) do
+  match m do
+    V1.Bump(n) -> Some(Tally.Bump(n))      -- the new handler needs n > 0
+    V1.Reset -> None
+  end
+end
+```
+
+```
+`tally_migrate_state` can produce a state the new actor rejects. [refinement_violated]
+
+`Tally` requires  _ >= 0 (field `count`)
+but tally_migrate_state({ count: -1 }) returns { count: -1, hist: [] }
+
+`tally_migrate_msg` can produce a message the new handler rejects. [refinement_violated]
+
+`Tally.Bump` requires  _ > 0
+but tally_migrate_msg(V1.Bump(0)) returns Some(Tally.Bump(0))
+```
+
+Fix the migration, or say what the old values guarantee. `old : { count : {Int | _ >= 0} }`
+proves the state, and `V1.Bump(n) -> if n > 0 do Some(Tally.Bump(n)) else None end` proves
+the message. When no small input breaks the contract, the obligation stays an ordinary
+"not verified" hint. It is never an error the program can't trigger.
+
+**The deployed build's contracts count.** If the project was hot-deployed before, forge has
+kept the running version's schemas in `.march/<name>_hot.so.schemas.json.prev`, and the
+compiler reads them (pass `--hcr-baseline <path>` to name another file). A state field
+refinement of the running version, and each `@invariant` conjunct that mentions one field,
+is assumed of the matching field of `migrate_state`'s record parameter. So the migration
+above proves against a running version whose `count` was `{Int | _ >= 0}`, even though
+`old : { count : Int }` doesn't say so. Likewise, an old message that the running handler's
+refinement would have refused is not offered as a counterexample. Two things don't use the
+baseline yet: a `migrate_state` parameter of a named record type, and the match binders of a
+`migrate_msg` in the proof (the running handler's refinement only filters the inputs tried).
+
 ---
 
 ## Deploying signature changes

@@ -1409,3 +1409,206 @@ let confirm_post ~(fn_name : string) ~(fn_params : (string * A.ty option) list)
        else
          Option.map (fun ret -> shrink ~run args ret)
            (violates_post ~fn_name ~binder ~ret_pred args))
+
+(* =================================================================
+   §11  Hot-reload migrations (H1/H2 counterexamples)
+
+   A `<actor>_migrate_state` or `<actor>_migrate_msg` function is called by
+   the runtime on whatever the OLD build left behind: a live state, or a
+   message still queued.  Its parameter is therefore every value of its
+   declared old type (minus what that type's own refinements exclude), not
+   whatever a caller in this program happens to pass.  So an obligation inside
+   it that the checker cannot discharge is not "a caller might be relying on
+   this"; it is a question with a definite answer, and the answer is found by
+   running the migration.
+
+   [confirm_migration] enumerates small old values, runs the migration on
+   each, and looks at the RESULT where the new build will consume it: the
+   field [field] of the returned state, or argument [idx] of the message
+   `Some(<ctor>(…))` it returns.  A value there that fails [pred] is a
+   counterexample: an input the deploy could really meet, and an output the
+   new code really rejects.  Nothing is taken from the SMT model, so an
+   obligation whose subject was not even translatable (`old.count` on an
+   unrefined record field) is decided the same way.
+
+   Declines (returns [None]) unless the migration has one clause, no guard
+   and one annotated parameter. *)
+
+let migration_cap = 64
+
+let last_segment (s : string) : string =
+  match String.rindex_opt s '.' with
+  | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+  | None -> s
+
+(* The declared payload of a named type, tried at its spelling, then at its
+   last segment (`V1.Msg` is registered as `Msg`).  A bare name that more than
+   one declaration registered is not resolved here: [register_types] keeps the
+   last, which may be the wrong one, so the caller's admissibility check
+   (which re-reads the same tables) is what keeps a wrong guess harmless — a
+   value the migration cannot match fails to run and counts for nothing. *)
+let lookup_named name tbl =
+  match Hashtbl.find_opt tbl name with
+  | Some x -> Some x
+  | None -> Hashtbl.find_opt tbl (last_segment name)
+
+(* Small values of [ty], smallest first, at most [migration_cap]. *)
+let rec migration_values ~(depth : int) (ty : A.ty) : V.value list =
+  let cap l = List.filteri (fun i _ -> i < migration_cap) l in
+  let product (tys : A.ty list) : V.value list list =
+    List.fold_right
+      (fun t acc ->
+        let vs = migration_values ~depth:(depth - 1) t in
+        cap (List.concat_map (fun v -> List.map (fun rest -> v :: rest) acc) vs))
+      tys [ [] ]
+  in
+  if depth <= 0 then Option.to_list (zero_value ~depth:3 ty)
+  else
+    match strip_refine ty with
+    | A.TyCon ({ A.txt = "Option"; _ }, [ t ]) ->
+      cap (V.VCon ("None", []) :: List.map (fun v -> V.VCon ("Some", [ v ])) (migration_values ~depth:(depth - 1) t))
+    | A.TyCon ({ A.txt = ("Int" | "Float" | "Bool" | "String" | "List"); _ }, _) as t -> battery_values t
+    | A.TyTuple ts -> List.map (fun vs -> V.VTuple vs) (product ts)
+    | A.TyRecord fs ->
+      let names = List.map (fun (f, _) -> f.A.txt) fs in
+      List.map (fun vs -> V.VRecord (List.combine names vs)) (product (List.map snd fs))
+    | A.TyCon ({ A.txt = name; _ }, _) as t ->
+      (match lookup_named name type_ctors with
+       | Some ctors ->
+         cap (List.concat_map (fun (c, args) -> List.map (fun vs -> V.VCon (c, vs)) (product args)) ctors)
+       | None ->
+         (match lookup_named name record_fields with
+          | Some fs ->
+            let names = List.map fst fs in
+            List.map (fun vs -> V.VRecord (List.combine names vs)) (product (List.map snd fs))
+          | None -> Option.to_list (zero_value ~depth:3 t)))
+    | t -> Option.to_list (zero_value ~depth:3 t)
+
+(* Does [v] meet every refinement [ty] states, at any depth?  [Some false] is
+   an input the old type itself excludes; [None] is "cannot tell", which the
+   caller treats as excluded too. *)
+let rec satisfies (ty : A.ty) (v : V.value) : bool option =
+  let all = List.fold_left (fun acc r -> match acc, r with
+      | Some false, _ | _, Some false -> Some false
+      | None, _ | _, None -> None
+      | Some true, Some true -> Some true) (Some true) in
+  match ty, v with
+  | A.TyRefine (base, binder, pred), _ ->
+    let b = match binder with Some b -> b.A.txt | None -> "_" in
+    (match satisfies base v with
+     | Some true -> eval_pred ~lookup:(fun n -> if n = b || n = "_" then Some v else None) pred
+     | r -> r)
+  | A.TyLinear (_, t), _ -> satisfies t v
+  | A.TyTuple ts, V.VTuple vs when List.length ts = List.length vs -> all (List.map2 satisfies ts vs)
+  | A.TyRecord fs, V.VRecord vs ->
+    all (List.map (fun (f, t) -> match List.assoc_opt f.A.txt vs with
+        | Some x -> satisfies t x | None -> None) fs)
+  | A.TyCon ({ A.txt = "Option"; _ }, [ t ]), V.VCon ("Some", [ x ]) -> satisfies t x
+  | A.TyCon ({ A.txt = "List"; _ }, [ t ]), V.VCon ("Cons", [ h; tl ]) ->
+    all [ satisfies t h; satisfies ty tl ]
+  | A.TyCon ({ A.txt = ("Int" | "Float" | "Bool" | "String" | "Unit" | "Option" | "List"); _ }, _), _ ->
+    Some true
+  | A.TyCon ({ A.txt = name; _ }, _), V.VCon (c, xs) ->
+    (match lookup_named name type_ctors with
+     | Some ctors ->
+       (match List.assoc_opt (last_segment c) ctors with
+        | Some tys when List.length tys = List.length xs -> all (List.map2 satisfies tys xs)
+        | _ -> None)
+     | None -> None)
+  | A.TyCon ({ A.txt = name; _ }, _), V.VRecord vs ->
+    (match lookup_named name record_fields with
+     | Some fs ->
+       all (List.map (fun (f, t) -> match List.assoc_opt f vs with
+           | Some x -> satisfies t x | None -> None) fs)
+     | None -> None)
+  | _ -> None
+
+(* Where the new build consumes a migration's result. *)
+type migration_site =
+  | State_field of string                 (* the returned state's field *)
+  | Msg_arg of { ctor : string; idx : int; names : string list }
+      (* argument [idx] of the returned `Some(<ctor>(…))`; [names] are the
+         constructor's parameter names, for a predicate mentioning a sibling *)
+
+let is_migration_fn (fn : A.fn_def) : [ `State | `Msg ] option =
+  let n = fn.A.fn_name.A.txt in
+  let ends sfx =
+    let nl = String.length n and sl = String.length sfx in
+    nl > sl && String.sub n (nl - sl) sl = sfx
+  in
+  if ends "_migrate_state" then Some `State
+  else if ends "_migrate_msg" then Some `Msg
+  else None
+
+let confirm_migration ~(fn : A.fn_def) ~(site : migration_site) ~(pred : A.expr)
+    ~(binder : string) : (string * string * string) option =
+  match fn.A.fn_clauses, qualified_fn_name fn with
+  | [ clause ], Some fname when clause.A.fc_guard = None ->
+    (match annotated_params (List.map clause_param clause.A.fc_params) with
+     | Some [ (pname, pty) ] ->
+       (* The value the new code consumes, and how the predicate reads the
+          names around it. *)
+       let consumed (ret : V.value) : (V.value * (string -> V.value option)) option =
+         match site, ret with
+         | State_field f, V.VRecord fs ->
+           Option.map (fun x -> (x, fun n -> List.assoc_opt n fs)) (List.assoc_opt f fs)
+         | Msg_arg { ctor; idx; names }, V.VCon ("Some", [ V.VCon (c, xs) ])
+           when last_segment c = last_segment ctor && List.length xs = List.length names ->
+           Option.map
+             (fun x -> (x, fun n -> List.assoc_opt n (List.combine names xs)))
+             (List.nth_opt xs idx)
+         | _ -> None
+       in
+       (* A message the deployed build's handler would have refused never
+          reached its queue, so it is not an input either. *)
+       let deployed_ok (old : V.value) =
+         match site, old with
+         | Msg_arg _, V.VCon (c, xs) ->
+           (match Hcr_baseline.handler_refines ~fn_name:fname ~ctor:c with
+            | Some rs when List.length rs = List.length xs ->
+              let env = List.mapi (fun i x -> (Printf.sprintf "p%d" i, x)) xs in
+              List.for_all
+                (function
+                  | None -> true
+                  | Some p -> eval_pred ~lookup:(fun n -> List.assoc_opt n env) p = Some true)
+                rs
+            | _ -> true)
+         | _ -> true
+       in
+       let violates (old : V.value) : V.value option =
+         if satisfies pty old <> Some true || not (deployed_ok old) then None
+         else
+           match call_fn ~name:fname ~args:[ old ] with
+           | Ret ret ->
+             (match consumed ret with
+              | Some (x, around) ->
+                let lookup n = if n = binder || n = "_" then Some x else around n in
+                if eval_pred ~lookup pred = Some false then Some ret else None
+              | None -> None)
+           | Panicked _ | Unconfirmable -> None
+       in
+       (* Rendered with the datatype's module path on a constructor, so the
+          old message and the new one read apart (`V1.Bump(0)` becomes
+          `Some(Tally.Bump(0))`), as the user has to write them. *)
+       let qualify path v =
+         match path, v with
+         | Some p, V.VCon (c, xs) when not (String.contains c '.') -> V.VCon (p ^ "." ^ c, xs)
+         | _ -> v
+       in
+       let path_of name = match String.rindex_opt name '.' with
+         | Some i -> Some (String.sub name 0 i) | None -> None in
+       let old_path = match strip_refine pty with
+         | A.TyCon (n, _) -> path_of n.A.txt | _ -> None in
+       let ret_view ret = match site, ret with
+         | Msg_arg { ctor; _ }, V.VCon ("Some", [ m ]) -> V.VCon ("Some", [ qualify (path_of ctor) m ])
+         | _ -> ret
+       in
+       let show v = Option.value ~default:"…" (render_value v) in
+       List.find_map
+         (fun old -> Option.map (fun ret -> (old, ret)) (violates old))
+         (migration_values ~depth:3 pty)
+       |> Option.map (fun (old, ret) ->
+              (fname, show (qualify old_path old), show (ret_view ret)))
+       |> fun r -> ignore pname; r
+     | _ -> None)
+  | _ -> None

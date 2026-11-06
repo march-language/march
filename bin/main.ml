@@ -2978,6 +2978,7 @@ let run_test_cmd args =
        --refine-infer; a plain --check never infers. *)
     March_refinecheck.Refine_term.infer :=
       !termination_report || !refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff;
+    Schema_migration.load_baseline ~filename;
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
       ~stdlib_files:(stdlib_span_files stdlib_decls)
       ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
@@ -4291,6 +4292,7 @@ let compile filename =
      --refine-infer; a plain --check never infers. *)
   March_refinecheck.Refine_term.infer :=
     !termination_report || !refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff;
+  Schema_migration.load_baseline ~filename;
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
     ~stdlib_files:(stdlib_span_files stdlib_decls)
     ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
@@ -7872,6 +7874,8 @@ let () =
      "<path>  Prior .schemas.json for --check-migration");
     ("--new-schema", Arg.Set_string new_schema_path,
      "<path>  New .schemas.json for --check-migration");
+    ("--hcr-baseline", Arg.Set_string hcr_baseline_path,
+     "<path>  The deployed build's .schemas.json: its contracts are hypotheses for this build's migrate_state/migrate_msg (default: forge's .march/<name>_hot.so.schemas.json.prev)");
     ("--accept-unproved",
      Arg.String (fun s ->
          accept_unproved := !accept_unproved @ List.filter (( <> ) "") (String.split_on_char ',' s)),

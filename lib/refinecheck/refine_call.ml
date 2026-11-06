@@ -860,7 +860,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
      never hold is reported); silent to the LEDGER is what this fixes, so a
      contract that checks nothing is distinguishable from one that passes.
      Recording is observation-only — it must never alter control flow. *)
-  let note verdict =
+  let note_plain verdict =
     (* Re-attribute BEFORE recording, not just in the error text: the ledger is
        what `--refine-report` prints, and a ledger that disagrees with the
        diagnostic is a second thing to be confused by. *)
@@ -1091,6 +1091,73 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       in
       Err.hint ~code:Err.Code.refinement_unverified errctx ~span (display_measures body)
     | _ -> ()
+  in
+  (* A skip inside a hot-reload migration is decided by running it (see
+     [Witness.confirm_migration]): its parameter is every old value the
+     runtime can hand it, so an input whose result the new build rejects is a
+     definite failure, reported as one, with the input. *)
+  let migration_counterexample () =
+    if subject <> Argument || is_stdlib_source_file span.A.file then None
+    else
+      match !enclosing_fn with
+      | None -> None
+      | Some fd ->
+        let fname = fd.A.fn_name.A.txt in
+        let actor =
+          Witness.last_segment
+            (match String.index_opt fname '_' with
+             | Some _ ->
+               let suffix = match Witness.is_migration_fn fd with
+                 | Some `State -> "_migrate_state" | Some `Msg -> "_migrate_msg" | None -> "" in
+               String.sub fname 0 (String.length fname - String.length suffix)
+             | None -> fname)
+        in
+        (* The obligation must be on the new build's own state or message:
+           `Tally`'s record literal, or a `Tally` message constructor.  A
+           helper record built along the way is not what the runtime hands
+           the new code, and its field need not share a name with a state
+           field by accident. *)
+        let owner_is_actor q = String.lowercase_ascii (Witness.last_segment q) = actor in
+        let site =
+          match Witness.is_migration_fn fd with
+          | Some `State when owner_is_actor callee ->
+            Option.map (fun f -> Witness.State_field f) (List.nth_opt sg.param_names rp.idx)
+          | Some `Msg ->
+            let qual = match String.rindex_opt callee '.' with
+              | Some i -> Some (String.sub callee 0 i) | None -> None in
+            if (match qual with Some q -> owner_is_actor q | None -> true) then
+              Some (Witness.Msg_arg { ctor = callee; idx = rp.idx; names = sg.param_names })
+            else None
+          | _ -> None
+        in
+        Option.bind site (fun site ->
+            Witness.confirm_migration ~fn:fd ~site ~pred:rp.pred ~binder:rp.binder)
+  in
+  let note verdict =
+    match verdict with
+    | Obligation.Skipped _ when not !trusted_fn -> (
+      match migration_counterexample () with
+      | None -> note_plain verdict
+      | Some (fname, old, ret) ->
+        note_plain Obligation.Violated;
+        let what, where =
+          match Witness.is_migration_fn (Option.get !enclosing_fn) with
+          | Some `State ->
+            ( "a state the new actor rejects",
+              match List.nth_opt sg.param_names rp.idx with
+              | Some f -> Printf.sprintf " (field `%s`)" f
+              | None -> "" )
+          | _ -> ("a message the new handler rejects", "")
+        in
+        Err.error ~code:Err.Code.refinement_violated errctx ~span
+          (display_measures
+             (Printf.sprintf
+                "`%s` can produce %s.\n\n\
+                 `%s` requires  %s%s\n\
+                 but %s(%s) returns %s"
+                (Witness.last_segment fname) what callee (pred_str rp.pred) where
+                (Witness.last_segment fname) old ret)))
+    | _ -> note_plain verdict
   in
   match List.nth_opt args rp.idx with
   | None -> ()
