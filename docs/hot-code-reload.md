@@ -50,6 +50,7 @@ need to drain traffic before a routine code push. Some edge cases are still open
 - [Actor state migration](#actor-state-migration): [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
 - [Compatibility annotations](#compatibility-annotations)
 - [Verifying migration soundness with `@invariant`](#verifying-migration-soundness-with-invariant) and [what `@invariant` accepts](#what-expressions-are-allowed-in-invariant)
+- [What a build guarantees: `forge hot-reload check`](#what-a-build-guarantees-forge-hot-reload-check)
 - [Contracts across versions](#contracts-across-versions): a deploy may loosen a refinement, never tighten it unproved
 - [Deploying signature changes](#deploying-signature-changes)
 - [Independent deploy pace (epoch-tagged dispatch)](#independent-deploy-pace-epoch-tagged-dispatch)
@@ -750,6 +751,41 @@ build stops with an error at the part it can't read
 server's audit log records it (see below). A state-field or handler-parameter refinement
 the schema can't record (a call with more than one argument, for example) is not an error,
 but a deploy of that actor is **refused** unless the same override names it.
+
+## What a build guarantees: `forge hot-reload check`
+
+`forge hot-reload check` (or `march --check --guarantees FILE`) prints one block per actor
+and protocol, saying what this build established and what it rests on. It runs the same
+check as `forge check`, against the last deploy's schema when there is one
+(`.march/<name>_hot.so.schemas.json.prev`), and changes no verdict: an error is still an
+error, with the same exit code.
+
+```
+actor Counter: not checked
+  state refinements        proved: 3 sites in init and handlers
+  @invariant               not checked: init and handler results are not checked against it; a hot deploy checks it on the migrated state
+  handler contracts        proved: 1 site where a message is built
+  migrate_state (derived)  proved: 1 site against the deployed build
+protocol Relay (2 roles): not checked
+  projection        checked (compiler): the two roles' projections are dual
+  deadlock freedom  not checked: no proof covers this protocol yet
+runtime: assumed
+  mailbox order, Actor.call replies, DOWN delivery  assumed: the runtime is trusted; nothing here proves it
+```
+
+| Label | Meaning |
+|---|---|
+| `proved` | The refinement checker proved every obligation of that kind in the code that runs. |
+| `violated` | It found a counterexample; the build reports it as an error too. |
+| `not proved` | Some obligation was neither proved nor refuted; the line gives the checker's reason. |
+| `not checked` | The program states a guarantee nothing checks yet. This line is the only place it is said. |
+| `checked (compiler)` | A compile-time check that is not a proof about a model (protocol projection). |
+| `assumed` | The trust boundary: the runtime, and messages from other nodes to an `@[remote]` actor. |
+
+A block's header is its weakest line, `assumed` aside. Two gaps are reported as
+`not checked` today: `@invariant` is used only across a hot deploy (as the migration's goal
+and, from the deployed build, as a hypothesis), and nothing yet proves a protocol free of
+deadlock.
 
 ## Contracts across versions
 

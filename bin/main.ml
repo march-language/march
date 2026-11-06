@@ -3003,6 +3003,9 @@ let run_test_cmd args =
     if !refine_report then print_refine_report ~filename ~user_files ();
     if !refine_report_sites && not !refine_report_sites_all then
       print_refine_report_sites ~filename ~user_files ();
+    if !guarantees then
+      Guarantees.print ~filename ~user_files ~surface:module_ast.March_ast.Ast.mod_decls
+        desugared.March_ast.Ast.mod_decls;
     if !termination_report then
       print_termination_report ~filename ~user_files ~type_map desugared;
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
@@ -3753,7 +3756,7 @@ let compile filename =
        --refine-report came to look broken.  Correctness of a diagnostic flag
        beats a cache hit on the run that asked for the diagnostic. *)
     if
-      refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
+      refine_suggest_active () || !refine_report || !guarantees || !refine_report_sites || !refine_audit
       || !termination_report || !reflect_report || !refine_report_sites_all
       || !reflect_deps || !reflect_parity || !emit_lemma_manifest || !lemma_test || !law_coverage
       || !report_contracts || !why_copies || !why_copies_json
@@ -4382,6 +4385,9 @@ let compile filename =
   if !refine_report then print_refine_report ~filename ~user_files ();
   if !refine_report_sites && not !refine_report_sites_all then
     print_refine_report_sites ~filename ~user_files ();
+  if !guarantees then
+    Guarantees.print ~filename ~user_files ~surface:module_ast.March_ast.Ast.mod_decls
+      desugared.March_ast.Ast.mod_decls;
   if !termination_report then
     print_termination_report ~filename ~user_files ~type_map desugared;
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
@@ -8062,6 +8068,8 @@ let () =
      " With --compile: emit one --check-json-shaped line per function verified allocation-free that should carry @[no_alloc] (consumed by `forge fix --contracts`). Stops before code generation, so no binary is written");
     ("--contract-scope", Arg.Set_string contract_scope,
      "<globs>  Comma-separated module/function globs (e.g. 'Dsp.*,Audio.mix') that --report-contracts considers in scope even without in-place reuse");
+    ("--guarantees", Arg.Unit (fun () -> guarantees := true; do_check := true),
+     " Typecheck and refinement-check the file, then print one labelled line per actor and protocol (proved, violated, not proved, not checked, checked (compiler), assumed) with what it rests on; changes no verdict");
     ("--refine-report", Arg.Set refine_report,
      " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
     ("--termination-report", Arg.Set termination_report,

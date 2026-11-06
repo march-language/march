@@ -31,7 +31,10 @@ Phases (design §7):
   fields in one deploy is designed (todo `2026-11-06-hcr-derive-field-rename`).
 - **B.** `march --check --guarantees` / `forge hot-reload check`: one labelled line per actor
   and protocol (`proved`, `proved (model) · tested (runtime)`,
-  `proved (spec) · validated (compiler)`, `assumed`).
+  `proved (spec) · validated (compiler)`, `assumed`). Done with today's labels (`proved`, `violated`, `not proved`,
+  `not checked`, `checked (compiler)`, `assumed`; progress `2026-11-06-hcr-guarantees-report`);
+  the model labels arrive with C and D. It found that `@invariant` is never checked on `init`
+  or handler results (todo `2026-11-06-invariant-unchecked-on-init-and-handlers`).
 - **C.** `stdlib/session_theory.march` with duality, projection, pairwise duality,
   composition and deadlock freedom for the synchronous, crash-free, informed-bystander
   fragment. Translation validation of both OCaml projectors (`typecheck_session.ml`,
