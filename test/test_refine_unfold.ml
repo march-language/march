@@ -1249,6 +1249,25 @@ let queries_of_log (path : string) : string list =
       parts;
     List.sort_uniq compare !blocks
 
+(* [on] is [off] with only facts added: every line of [off], in order, plus
+   extra `declare-const` and `assert` lines.  A stdlib result type that only
+   reflection proves (`List.length : {Int | _ == len(xs)}`, sweep S2) is a fact
+   at its callers in the reflection-on run and not in the off run, so the on
+   run's query for the same obligation carries one more assumption.  That is
+   knowing more, not a changed query; rewritten or dropped text still fails. *)
+let only_adds_facts ~(off : string) ~(on : string) : bool =
+  let ls q = List.filter (fun l -> l <> "") (String.split_on_char '\n' q) in
+  let extra l =
+    String.starts_with ~prefix:"(declare-const " l || String.starts_with ~prefix:"(assert " l
+  in
+  let rec go a b =
+    match a, b with
+    | [], rest -> List.for_all extra rest
+    | _ :: _, [] -> false
+    | x :: a', y :: b' -> if x = y then go a' b' else extra y && go a b'
+  in
+  go (ls off) (ls on)
+
 let identical =
   [ gated "two_stage_identical: every a1-c4 fixture's stage-1 queries are today's" (fun () ->
         match fixtures_dir () with
@@ -1276,8 +1295,13 @@ let identical =
               (* A stage-2 rerun may also send queries with no reflected term
                  left in them (its sorts can differ); those are new, not
                  changed.  What must hold is that every query of today's run
-                 is still sent, with the same text. *)
-              let missing = List.filter (fun q -> not (List.mem q on1)) off in
+                 is still sent, with the same text, or with only facts added
+                 ([only_adds_facts]). *)
+              let missing =
+                List.filter
+                  (fun q -> not (List.mem q on1 || List.exists (fun o -> only_adds_facts ~off:q ~on:o) on1))
+                  off
+              in
               if off = [] then Alcotest.failf "%s: the reflection-off run sent no query (vacuous)" f;
               if missing <> [] then
                 Alcotest.failf "%s: %d of today's %d queries are no longer sent byte for byte:\n%s" f
