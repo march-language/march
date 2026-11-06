@@ -38,6 +38,14 @@ git log is authoritative for exact commits.
 
   In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
   have a machine-applicable one.
+- **`forge hot-reload check` / `march --check --guarantees` say what a build guarantees.**
+  One block per actor and protocol, each line labelled `proved`, `violated`, `not proved`,
+  `not checked`, `checked (compiler)` or `assumed`, with what it rests on: state refinements,
+  `@invariant`, handler contracts, `migrate_state` (derived or written, against the deployed
+  build when there is one), `migrate_msg`, protocol projection and deadlock freedom, and the
+  runtime. It changes no verdict. Two gaps are labelled `not checked` rather than left
+  silent: `@invariant` is not checked on `init` or handler results, and no proof covers a
+  protocol's deadlock freedom. See docs/hot-code-reload.md, "What a build guarantees".
 - **`--refine-infer` proposes a relation a function keeps from its argument to its result.**
   For `bump(a : Assoc(Int, Int)) : Assoc(Int, Int)`, which adds 1 to each value, a caller
   that needs `Assoc({x : Int | true}, {y : Int | y > x})` gets the type proposed on both the
@@ -46,6 +54,16 @@ git log is authoritative for exact commits.
   with progress lines on stderr. `scripts/refine-infer-stdlib-sweep.sh` uses it to run
   inference over the whole standard library one module at a time, in parallel: 98 seconds
   instead of 48 minutes.
+- **Adding a field to an actor's state no longer needs a `migrate_state`.** When a build
+  knows the running version's schema (forge's `.schemas.json.prev`, or `--hcr-baseline`) and
+  an actor's state only gained fields whose `init` values are constants, the compiler writes
+  the migration: kept fields are copied, new ones take their `init` value. It is checked like
+  a written one, including on the live state before `ACTIVATE`, and `forge deploy hot` says
+  `migrate_state derived from the running version's state (adds history from init)`. A
+  removed or retyped field, or an `init` value that reads an `init` parameter, still needs a
+  written migration, and the refusal now says which. If a kept field's refinement was also
+  tightened, the error points at that field with the running state that breaks it. See
+  docs/hot-code-reload.md, "Derived migrations".
 - **A failing test reads like a compile error.** A failed `assert`, `Check.all` property or
   panicking test body now prints a `-- TEST FAILURE --` report with the line under a caret,
   the same under `march test` and `forge test` (compiled). For `assert (a == b)` it labels
@@ -581,6 +599,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
+  operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
+  is known by its byte length, and distinct literals are distinct values; record field access,
+  literals, updates and patterns, and tuple construction and patterns, all translate.
 - **`--refine-infer` no longer skips programs that `--check` accepts.** A record named like a
   standard-library one (`type NodeInfo`, `type Member`) left a type error inside the
   standard library that `--check` never shows, and inference then printed only "skipped,
@@ -593,6 +615,10 @@ git log is authoritative for exact commits.
 - **Less `--refine-infer` noise.** A recursive group with nothing to infer near it is no longer
   noted `scc-unsupported`, and a field test such as `_.step != 0` is no longer tried on an
   `Int` or `List` value.
+- **Two compiles of one project no longer risk a torn refinement verdict.** The verdict cache
+  under `.march/cas/vc` wrote each entry in place, so a `march --check` reading an entry
+  while another process wrote it could see half a counterexample. Entries are now written
+  to a temporary file and renamed into place.
 - **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
   (what `forge test` runs) treated a property that returned `false` as passing. Only a
   property that panicked or failed an `assert` was caught. Under `march test` it already

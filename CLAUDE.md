@@ -110,7 +110,7 @@ scripts/run-tests.sh -q stdlib         # quick subset
 scripts/run-tests.sh stdlib_march      # the .march test files under test/stdlib/
 scripts/run-tests.sh test_jit          # REPL-JIT / --jit alcotest suite
 scripts/run-tests.sh lsp               # the LSP analysis suite (lsp/test/)
-scripts/run-tests.sh refinecheck       # z3-backed refinement-check suite (full-run only, ~4min)
+scripts/run-tests.sh refinecheck       # z3-backed refinement-check suite (full-run only; groups run 4-way, MARCH_TEST_PROCS)
 
 # Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit, lsp, utf16,
 # jsonrpc, incremental, query_cli, refinecheck, errors, test_reports. The five
@@ -134,6 +134,8 @@ MARCH_BIN="$PWD/_build/default/bin/main.exe" ./_build/default/test/test_jit.exe 
 # checks for z3 and fails loudly if it's missing; direct invocation does not,
 # so check `command -v z3` yourself first.
 ./_build/default/test/test_refinecheck.exe -e
+# One process unless MARCH_TEST_PROCS=N (groups in N children); one group:
+# MARCH_TEST_GROUP=<group> ./_build/default/test/test_refinecheck.exe -e
 # The LSP suites live under lsp/test/. test_jsonrpc drives a real march-lsp
 # process over stdio, so lsp/bin/main.exe must be built or all 22 of its cases
 # die with Unix.ENOENT; and they are cwd-sensitive -- run them from the repo

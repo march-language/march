@@ -2774,6 +2774,7 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
         (* --protocol-baseline: the previous protocol versions decide the
            generated `<P>_Msg.compat()` table, so they are part of the binary. *)
         @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+        @ Schema_migration.baseline_cas_tag ()
         @ (match !shell_ident_tag with Some t -> ["sident:" ^ t] | None -> [])
         @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
             (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
@@ -2942,6 +2943,7 @@ let run_test_cmd args =
         exit 1
     in
     let desugar_errors = March_errors.Errors.create () in
+    Schema_migration.load_derive_baseline ~filename;
     let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
     if March_errors.Errors.has_errors desugar_errors then begin
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
@@ -3001,6 +3003,9 @@ let run_test_cmd args =
     if !refine_report then print_refine_report ~filename ~user_files ();
     if !refine_report_sites && not !refine_report_sites_all then
       print_refine_report_sites ~filename ~user_files ();
+    if !guarantees then
+      Guarantees.print ~filename ~user_files ~surface:module_ast.March_ast.Ast.mod_decls
+        desugared.March_ast.Ast.mod_decls;
     if !termination_report then
       print_termination_report ~filename ~user_files ~type_map desugared;
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
@@ -3720,6 +3725,7 @@ let depend_store : (user_files:string list -> artifact:string -> diag:string -> 
   ref None
 
 let compile filename =
+  Schema_migration.cas_entry := filename;
   (* Enable backtraces so an internal-error report (below) is actionable
      even without OCAMLRUNPARAM=b. *)
   Printexc.record_backtrace true;
@@ -3750,7 +3756,7 @@ let compile filename =
        --refine-report came to look broken.  Correctness of a diagnostic flag
        beats a cache hit on the run that asked for the diagnostic. *)
     if
-      refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
+      refine_suggest_active () || !refine_report || !guarantees || !refine_report_sites || !refine_audit
       || !termination_report || !reflect_report || !refine_report_sites_all
       || !reflect_deps || !reflect_parity || !emit_lemma_manifest || !lemma_test || !law_coverage
       || !report_contracts || !why_copies || !why_copies_json
@@ -3908,6 +3914,7 @@ let compile filename =
           @ z3_cas_tag ()
           @ (if !cap_strict then ["capstrict"] else [])
           @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+          @ Schema_migration.baseline_cas_tag ()
           @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
               (List.sort compare !March_desugar.Desugar_endpoints.expand_labels) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags in
@@ -4075,6 +4082,9 @@ let compile filename =
   (* A hot-reload build carries the live-data check for each state
      migration (M10, Desugar_migrate_check). *)
   March_desugar.Desugar_migrate_check.enabled := Option.is_some !hot_reload_prefix;
+  (* A state that only gained fields since the deployed build gets its
+     migration derived (M11, Desugar_migrate_derive). *)
+  Schema_migration.load_derive_baseline ~filename;
   let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
   (* Desugar's diagnostics are not printed here: they join the typechecker's
      below (before cascade suppression), so they are rendered, sorted, put
@@ -4375,6 +4385,9 @@ let compile filename =
   if !refine_report then print_refine_report ~filename ~user_files ();
   if !refine_report_sites && not !refine_report_sites_all then
     print_refine_report_sites ~filename ~user_files ();
+  if !guarantees then
+    Guarantees.print ~filename ~user_files ~surface:module_ast.March_ast.Ast.mod_decls
+      desugared.March_ast.Ast.mod_decls;
   if !termination_report then
     print_termination_report ~filename ~user_files ~type_map desugared;
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
@@ -5766,9 +5779,20 @@ let compile filename =
                 let mm_line = match List.assoc_opt actor_name actor_migrate_msg_from with
                   | None -> ""
                   | Some c -> Printf.sprintf "    \"migrate_msg_from\": %s,\n" (ctor_list c) in
+                (* M11: whether this build's migrate_state was derived from the
+                   deployed schema, or why it could not be, for the deploy gate. *)
+                let derive_line =
+                  match List.assoc_opt actor_name
+                          !March_desugar.Desugar_migrate_derive.report with
+                  | Some (March_desugar.Desugar_migrate_derive.Derived added) ->
+                    Printf.sprintf "    \"migrate_derived\": [%s],\n"
+                      (String.concat ", " (List.map (Printf.sprintf "%S") added))
+                  | Some (March_desugar.Desugar_migrate_derive.Not_derived why) ->
+                    Printf.sprintf "    \"migrate_not_derived\": %S,\n" why
+                  | None -> "" in
                 Printf.bprintf oc
-                  "  %S: {\n    \"compat\": %S,\n%s%s%s%s    \"state_fields\": %s\n  }%s\n"
-                  actor_name compat contracts_line invariant_line handlers_line mm_line field_lines
+                  "  %S: {\n    \"compat\": %S,\n%s%s%s%s%s    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat contracts_line invariant_line handlers_line mm_line derive_line field_lines
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.bprintf oc "}\n";
@@ -8046,6 +8070,8 @@ let () =
      " With --compile: emit one --check-json-shaped line per function verified allocation-free that should carry @[no_alloc] (consumed by `forge fix --contracts`). Stops before code generation, so no binary is written");
     ("--contract-scope", Arg.Set_string contract_scope,
      "<globs>  Comma-separated module/function globs (e.g. 'Dsp.*,Audio.mix') that --report-contracts considers in scope even without in-place reuse");
+    ("--guarantees", Arg.Unit (fun () -> guarantees := true; do_check := true),
+     " Typecheck and refinement-check the file, then print one labelled line per actor and protocol (proved, violated, not proved, not checked, checked (compiler), assumed) with what it rests on; changes no verdict");
     ("--refine-report", Arg.Set refine_report,
      " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
     ("--termination-report", Arg.Set termination_report,

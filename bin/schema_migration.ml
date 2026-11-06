@@ -472,6 +472,7 @@ let find_baseline ~(filename : string) : string option =
 let load_baseline ~(filename : string) : unit =
   let module Sd = March_forge.Schema_diff in
   let module B = March_refinecheck.Hcr_baseline in
+  B.derived := !March_desugar.Desugar_migrate_derive.origins;
   B.baseline :=
     (match find_baseline ~filename with
      | None -> []
@@ -505,3 +506,39 @@ let load_baseline ~(filename : string) : unit =
               let field_names = List.map (fun (f : Sd.field) -> f.Sd.name) s.Sd.state_fields in
               (name, { B.field_names; fields; handlers }))
             schemas))
+
+(** The deployed state layouts, for the derived migrations
+    (Desugar_migrate_derive, M11).  Called before desugar; an unreadable
+    baseline derives nothing, and the deploy gate then asks for a written
+    migration as it always did. *)
+let load_derive_baseline ~(filename : string) : unit =
+  let module Sd = March_forge.Schema_diff in
+  let module D = March_desugar.Desugar_migrate_derive in
+  D.report := [];
+  D.origins := [];
+  D.baseline :=
+    (match find_baseline ~filename with
+     | None -> []
+     | Some path ->
+       (match Sd.parse_schemas_file path with
+        | exception _ -> []
+        | schemas ->
+          List.map
+            (fun (name, (s : Sd.actor_schema)) ->
+              (name, List.map (fun (f : Sd.field) -> (f.Sd.name, f.Sd.ty)) s.Sd.state_fields))
+            schemas))
+
+(** The entry file of this compile, set by the driver before any cache
+    lookup; [baseline_cas_tag] finds the baseline from it. *)
+let cas_entry : string ref = ref ""
+
+(** CAS flag for the deployed baseline: it decides the derived migrations
+    (code) and the migration hypotheses (diagnostics), so a build or check
+    cached under another baseline must not be served. *)
+let baseline_cas_tag () : string list =
+  if !cas_entry = "" then []
+  else
+    match find_baseline ~filename:!cas_entry with
+    | None -> []
+    | Some path ->
+      (try [ "hbase:" ^ Digest.to_hex (Digest.file path) ] with Sys_error _ -> [])

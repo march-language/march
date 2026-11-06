@@ -15241,6 +15241,199 @@ let hcr_migration_suite =
             Alcotest.(check bool) "state" true (contains text "tally_migrate_state({ count: -1 })");
             Alcotest.(check bool) "msg" true (contains text "tally_migrate_msg(V1.Bump(0))"))) ]
 
+(* ── Derived state migrations (M11) ───────────────────────────────────────
+   When an actor's state only gained fields since the deployed build, desugar
+   writes its `<actor>_migrate_state` (Desugar_migrate_derive).  The two
+   derivation rules are proved here once, so a user never proves them:
+
+   - KEEP: a kept field is copied.  The deployed refinement is a hypothesis
+     (Hcr_baseline), so the same or a weaker refinement proves.
+   - ADD: an added field takes its `init` value, checked against the field's
+     refinement.
+
+   A derivation is trusted no further than that: a kept field whose
+   refinement was tightened, or an added field whose `init` value breaks its
+   own refinement, is still an error.  And nothing is derived for a change
+   that needs judgement. *)
+let hcr_derived_migration_suite =
+  let module B = March_refinecheck.Hcr_baseline in
+  let module D = March_desugar.Desugar_migrate_derive in
+  let module O = March_refinecheck.Obligation in
+  let pred s = March_parser.Parse.expr_of_lexbuf (Lexing.from_string s) in
+  let actor ?(init_params = "") ~state ~init () =
+    "mod DM do\n\
+    \  actor Tally do\n\
+    \    state { " ^ state ^ " }\n\
+    \    init" ^ init_params ^ " { " ^ init ^ " }\n\
+    \    on Bump() do state end\n\
+    \  end\n\
+    end\n"
+  in
+  (* The deployed build: `state { count : {Int | _ >= 0} }`. *)
+  let deployed f =
+    D.baseline := [ ("Tally", [ ("count", "Int") ]) ];
+    D.report := [];
+    B.baseline :=
+      [ ("Tally", { B.field_names = [ "count" ]; fields = [ ("count", pred "count >= 0") ]; handlers = [] }) ];
+    D.origins := [];
+    Fun.protect
+      ~finally:(fun () ->
+        D.baseline := []; D.report := []; D.origins := []; B.baseline := []; B.derived := [])
+      f
+  in
+  (* (derived function present, error text, verdicts of every obligation) *)
+  let run src =
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let rec has_fn = function
+      | March_ast.Ast.DFn (d, _) :: _ when d.March_ast.Ast.fn_name.March_ast.Ast.txt = "tally_migrate_state" -> true
+      | March_ast.Ast.DMod (_, _, inner, _) :: rest -> has_fn inner || has_fn rest
+      | _ :: rest -> has_fn rest
+      | [] -> false
+    in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    O.reset ();
+    (* As the driver does between desugar and the check. *)
+    B.derived := !D.origins;
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    (* Message, the line it is reported on, and its notes. *)
+    let errors =
+      String.concat "\n"
+        (List.filter_map
+           (fun (d : March_errors.Errors.diagnostic) ->
+             if d.March_errors.Errors.severity = March_errors.Errors.Error then
+               Some
+                 (Printf.sprintf "%s\n@line %d\n%s" d.March_errors.Errors.message
+                    d.March_errors.Errors.span.March_ast.Ast.start_line
+                    (String.concat "\n" d.March_errors.Errors.notes))
+             else None)
+           ctx.March_errors.Errors.diagnostics)
+    in
+    (has_fn desugared.March_ast.Ast.mod_decls, errors, O.all ())
+  in
+  (* How many obligations with this predicate were proved.  `init` and the
+     handlers carry the same ones, so a rule's proof is the EXTRA one the
+     derived function adds over the same program with no deploy known. *)
+  let proved pred_text obs =
+    List.length
+      (List.filter (fun (o : O.t) -> o.O.verdict = O.Proved && o.O.predicate = pred_text) obs)
+  in
+  let none_skipped obs =
+    not (List.exists (fun (o : O.t) -> match o.O.verdict with O.Skipped _ -> true | _ -> false) obs)
+  in
+  let outcome () = List.assoc_opt "Tally" !D.report in
+  [ gated "KEEP + ADD: the derived migration proves, with nothing left to the user" (fun () ->
+        deployed (fun () ->
+            let src =
+              actor ~state:"count : {Int | _ >= 0}, hist : List(Int), limit : {Int | _ > 0}"
+                ~init:"count: 0, hist: Nil, limit: 10" ()
+            in
+            let derived, errors, obs = run src in
+            Alcotest.(check bool) "derived" true derived;
+            Alcotest.(check bool) "reported with the added fields" true
+              (outcome () = Some (D.Derived [ "hist"; "limit" ]));
+            Alcotest.(check string) "no errors" "" errors;
+            Alcotest.(check bool) "no obligation skipped" true (none_skipped obs);
+            D.baseline := [];
+            let _, _, plain = run src in
+            Alcotest.(check int) "KEEP: one more proof of count's refinement"
+              (proved "_ >= 0" plain + 1) (proved "_ >= 0" obs);
+            Alcotest.(check int) "ADD: one more proof of limit's refinement"
+              (proved "_ > 0" plain + 1) (proved "_ > 0" obs)));
+
+    gated "KEEP is not trusted: a tightened refinement is refuted with the old state" (fun () ->
+        deployed (fun () ->
+            let derived, errors, _ =
+              run (actor ~state:"count : {Int | _ > 0}, hist : List(Int)" ~init:"count: 1, hist: Nil" ())
+            in
+            Alcotest.(check bool) "derived" true derived;
+            Alcotest.(check bool) "the deployed count 0 is the counterexample" true
+              (contains errors "but the running state { count: 0 } would become { count: 0, hist: [] }");
+            Alcotest.(check bool) "reported at the state field the user wrote" true
+              (contains errors "@line 3\n");
+            Alcotest.(check bool) "says the migration was derived, and the way out" true
+              (contains errors "the compiler derived `tally_migrate_state`"
+               && contains errors "write `tally_migrate_state` yourself")));
+
+    gated "ADD is not trusted: an init value that breaks its refinement is an error" (fun () ->
+        deployed (fun () ->
+            let derived, errors, _ =
+              run
+                (actor ~state:"count : {Int | _ >= 0}, limit : {Int | _ > 0}"
+                   ~init:"count: 0, limit: 0" ())
+            in
+            Alcotest.(check bool) "derived" true derived;
+            Alcotest.(check bool) "limit's refinement is violated" true (contains errors "limit")));
+
+    gated "the control: without the KEEP hypothesis the same migration does not prove" (fun () ->
+        deployed (fun () ->
+            B.baseline := [];
+            let _, errors, _ =
+              run (actor ~state:"count : {Int | _ >= 0}, hist : List(Int)" ~init:"count: 0, hist: Nil" ())
+            in
+            Alcotest.(check bool) "a negative old count is a counterexample" true
+              (contains errors "but the running state { count: -1 } would become")));
+
+    gated "a removed field is not derived" (fun () ->
+        deployed (fun () ->
+            let derived, _, _ = run (actor ~state:"total : Int" ~init:"total: 0" ()) in
+            Alcotest.(check bool) "not derived" false derived;
+            Alcotest.(check bool) "says why" true
+              (outcome () = Some (D.Not_derived "it removes count"))));
+
+    gated "a field whose type changed is not derived" (fun () ->
+        deployed (fun () ->
+            let derived, _, _ = run (actor ~state:"count : String" ~init:"count: \"\"" ()) in
+            Alcotest.(check bool) "not derived" false derived;
+            Alcotest.(check bool) "says why" true
+              (outcome () = Some (D.Not_derived "it changes the type of count"))));
+
+    gated "an added field whose init value reads an init parameter is not derived" (fun () ->
+        deployed (fun () ->
+            let derived, _, _ =
+              run
+                (actor ~init_params:"(start : Int)" ~state:"count : {Int | _ >= 0}, base : Int"
+                   ~init:"count: 0, base: start" ())
+            in
+            Alcotest.(check bool) "not derived" false derived;
+            Alcotest.(check bool) "says why" true
+              (outcome () = Some (D.Not_derived "the `init` value of base is not a constant"))));
+
+    gated "a written migrate_state is left alone" (fun () ->
+        deployed (fun () ->
+            let src =
+              "mod DM do\n\
+              \  actor Tally do\n\
+              \    state { count : {Int | _ >= 0}, hist : List(Int) }\n\
+              \    init { count: 0, hist: Nil }\n\
+              \    on Bump() do state end\n\
+              \  end\n\
+              \  fn tally_migrate_state(old : { count : Int }) do\n\
+              \    { count: old.count, hist: Cons(old.count, Nil) }\n\
+              \  end\n\
+              end\n"
+            in
+            let _, errors, _ = run src in
+            Alcotest.(check string) "the written one proves" "" errors;
+            Alcotest.(check bool) "nothing reported" true (outcome () = None)));
+
+    gated "an unchanged state, or no known deploy, derives nothing" (fun () ->
+        let src = actor ~state:"count : {Int | _ >= 0}" ~init:"count: 0" () in
+        deployed (fun () ->
+            let derived, _, _ = run src in
+            Alcotest.(check bool) "unchanged" false derived;
+            Alcotest.(check bool) "nothing reported" true (outcome () = None));
+        (* The schema lists fields by name; the declaration order is free. *)
+        deployed (fun () ->
+            D.baseline := [ ("Tally", [ ("a", "Int"); ("z", "Int") ]) ];
+            let derived, _, _ = run (actor ~state:"z : Int, a : Int" ~init:"z: 0, a: 0" ()) in
+            Alcotest.(check bool) "unchanged, declared in another order" false derived;
+            Alcotest.(check bool) "nothing reported" true (outcome () = None));
+        let derived, _, _ =
+          run (actor ~state:"count : {Int | _ >= 0}, hist : List(Int)" ~init:"count: 0, hist: Nil" ())
+        in
+        Alcotest.(check bool) "no baseline" false derived) ]
+
 (* ── Actor handler contracts (plan phase 3) ───────────────────────────────
    `on Inc(n : {Int | n > 0})` obliges every CONSTRUCTION of `Inc(...)` in the
    module (send, call, or a message bound first), and the handler body
@@ -24615,6 +24808,7 @@ type infer_fixture = { fx_root : string; fx_m : March_ast.Ast.module_ }
 
 let with_infer_fixture ?(stdlib = false) (src : string) (f : infer_fixture -> 'a) : 'a =
   with_temp_root "infer" (fun root ->
+      Test_helpers.seed_vc_cache root;
       let m = March_desugar.Desugar.desugar_module (parse src) in
       (* [~stdlib]: `list.march` as a sibling module, the shape the driver
          produces, so `List.filter`'s signature is in the checker's defs. *)
@@ -25196,6 +25390,7 @@ let march_exe_rel () = Filename.concat (Filename.dirname Sys.executable_name) ".
 
 let run_cli args src =
   with_temp_root "infercli" (fun dir ->
+      Test_helpers.seed_vc_cache dir;
       let f = Filename.concat dir "m.march" in
       Out_channel.with_open_bin f (fun oc -> output_string oc src);
       let out = Filename.concat dir "out.txt" in
@@ -25217,9 +25412,110 @@ let run_cli_in ?(env = "") dir args =
 
 let with_src_dir src f =
   with_temp_root "inferapply" (fun dir ->
+      Test_helpers.seed_vc_cache dir;
       let file = Filename.concat dir "m.march" in
       Out_channel.with_open_bin file (fun oc -> output_string oc src);
       f dir (fun () -> In_channel.with_open_bin file In_channel.input_all))
+
+(* `--guarantees` (lemmas phase B, bin/guarantees.ml): one labelled block per
+   actor and protocol, read off the ledger after the check; it changes no
+   verdict. *)
+let guarantees_suite =
+  let actor ?(inv = "") ~init () =
+    "mod G do\n" ^ inv
+    ^ "  actor Counter do\n\
+      \    state { count : {Int | _ >= 0}, limit : Int }\n\
+      \    init { count: " ^ init ^ ", limit: 10 }\n\
+      \    on Inc(n : {Int | _ > 0}) do { state with count: state.count + n } end\n\
+      \  end\n\
+      end\n"
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  let first_line out = List.hd (String.split_on_char '\n' out) in
+  [ Alcotest.test_case "proved state, unchecked @invariant, assumed runtime" `Quick (fun () ->
+        let code, out = run_cli "--check --guarantees" (actor ~inv:"  @invariant(count <= limit)\n" ~init:"0" ()) in
+        Alcotest.(check int) "accepted" 0 code;
+        Alcotest.(check string) "the invariant decides the summary" "actor Counter: not checked" (first_line out);
+        has out "state refinements  proved: ";
+        has out "@invariant         not checked: init and handler results are not checked against it";
+        has out "handler contracts";
+        has out "runtime: assumed\n";
+        has out "assumed: the runtime is trusted");
+    Alcotest.test_case "no @invariant: proved" `Quick (fun () ->
+        let _, out = run_cli "--check --guarantees" (actor ~init:"0" ()) in
+        Alcotest.(check string) "summary" "actor Counter: proved" (first_line out));
+    Alcotest.test_case "a violated init is violated, and the verdict is unchanged" `Quick (fun () ->
+        let src = actor ~init:"0 - 1" () in
+        let code, out = run_cli "--check --guarantees" src in
+        let plain, _ = run_cli "--check" src in
+        Alcotest.(check int) "same exit code as --check" plain code;
+        Alcotest.(check bool) "rejected" true (code <> 0);
+        Alcotest.(check string) "summary" "actor Counter: violated" (first_line out);
+        has out "with a counterexample");
+    Alcotest.test_case "written migrate_state with no deployed build" `Quick (fun () ->
+        let src =
+          "mod G do\n\
+          \  actor Counter do\n\
+          \    state { count : {Int | _ >= 0} }\n\
+          \    init { count: 0 }\n\
+          \    on Inc() do state end\n\
+          \  end\n\
+          \  fn counter_migrate_state(old : { n : Int }) : { count : Int } do\n\
+          \    { count: if old.n >= 0 do old.n else 0 end }\n\
+          \  end\n\
+          end\n"
+        in
+        let _, out = run_cli "--check --guarantees" src in
+        has out "migrate_state";
+        has out "against its parameter type (no deployed build known)");
+    Alcotest.test_case "protocols: projection checked, deadlock freedom not" `Quick (fun () ->
+        let src =
+          "mod G do\n\
+          \  protocol Relay do\n\
+          \    Client -> Server : String\n\
+          \    Server -> Client : String\n\
+          \  end\n\
+          \  protocol Ring do\n\
+          \    X -> Y : String\n\
+          \    Y -> Z : String\n\
+          \    Z -> X : String\n\
+          \  end\n\
+          end\n"
+        in
+        let code, out = run_cli "--check --guarantees" src in
+        Alcotest.(check int) "accepted" 0 code;
+        has out "protocol Relay (2 roles): not checked\n";
+        has out "checked (compiler): the two roles' projections are dual";
+        has out "protocol Ring (3 roles): not checked\n";
+        has out "checked (compiler): every send has the matching receive at its peer";
+        has out "deadlock freedom  not checked";
+        Alcotest.(check bool) "no runtime block without actors" false (contains out "runtime:"));
+    Alcotest.test_case "a derived migrate_state is told apart from the actor's own sites" `Quick (fun () ->
+        (* The derived function sits under the actor's span with synthetic
+           inner spans; its obligations must not be counted as the actor's,
+           nor the actor's as the migration's. *)
+        let src =
+          "mod G do\n\
+          \  actor Counter do\n\
+          \    state { count : {Int | _ >= 0}, label : String }\n\
+          \    init { count: 0, label: \"v2\" }\n\
+          \    on Tick() do { state with count: state.count + 1 } end\n\
+          \  end\n\
+          end\n"
+        in
+        with_src_dir src (fun dir _ ->
+            Out_channel.with_open_bin (Filename.concat dir "base.schemas.json") (fun oc ->
+                output_string oc
+                  "{\"Counter\": {\"compat\": \"full\", \"contracts\": 1, \"handlers\": [{\"name\": \"Tick\", \"params\": []}], \
+                   \"state_fields\": [{\"name\": \"count\", \"ty\": \"Int\", \"refine\": \"(count >= 0)\"}]}}\n");
+            let code, out = run_cli_in dir "--check --guarantees --hcr-baseline base.schemas.json" in
+            Alcotest.(check int) "accepted" 0 code;
+            Alcotest.(check string) "summary" "actor Counter: proved" (first_line out);
+            has out "state refinements        proved: 3 sites in init and handlers";
+            has out "migrate_state (derived)  proved: 1 site against the deployed build"));
+    Alcotest.test_case "nothing to report" `Quick (fun () ->
+        let _, out = run_cli "--check --guarantees" "mod G do\n  fn f(x : Int) : Int do x end\nend\n" in
+        has out "no actors or protocols in m.march") ]
 
 let count_sub hay needle =
   let n = String.length needle in
@@ -29414,7 +29710,7 @@ end
           (hcr_check ~src:(src "{ count: old.count, history: Nil }") prior next)) ]
 
 let () =
-  Alcotest.run "march-refinecheck"
+  Test_helpers.run_groups "march-refinecheck"
     [ ("refinecheck", suite);
       ("hcr-variance", hcr_variance_suite);
       ("bounds-a2", a2_suite);
@@ -29511,6 +29807,8 @@ let () =
       ("lambda-contract", lambda_contract_suite);
       ("actor-handler-contract", actor_handler_suite);
       ("hcr-migration", hcr_migration_suite);
+      ("hcr-derived-migration", hcr_derived_migration_suite);
+      ("guarantees", guarantees_suite);
       ("stored-field-contract", stored_field_suite);
       ("impl-dispatch", impl_dispatch_suite);
       ("silent-holes", silent_holes_suite);
@@ -29561,7 +29859,7 @@ let () =
       ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
-      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call);
+      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);
