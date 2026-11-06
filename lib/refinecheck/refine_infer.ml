@@ -34,6 +34,9 @@ type proposal = {
   closes : LD.key list;
   new_skipped : LD.key list;
   external_callers : bool;
+  joint_param : string option;
+      (** A joint relational proposal (`bump`): this parameter takes the same
+          annotation as the return, written as a second edit. *)
 }
 
 (** A metric inferred for one function of an uncertified recursive SCC
@@ -568,8 +571,30 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
     ?(applicable : proposal -> accepted:proposal list -> string option = fun _ ~accepted:_ -> None)
     ?(applicable_decreases : dproposal -> string option = fun _ -> None)
     ?(lemmas = true) ?(applicable_lemmas : lproposal -> string option = fun _ -> None)
+    ?(modules : string list = []) ?(progress = false)
     ~(is_user : A.span -> bool) (m : A.module_) : result =
-  let is_target sp = stdlib || is_user sp in
+  (* [modules] (`--refine-infer-module`): only the functions of the files that
+     declare one of these modules are targets, stdlib or not.  The per-module
+     unit of a stdlib sweep: the whole-stdlib run spent its global budget in
+     its first modules (2026-10-21 todo, 48 minutes). *)
+  let module_files =
+    if modules = [] then []
+    else
+      List.sort_uniq compare
+        (List.filter_map
+           (fun ((path, (fd : A.fn_def)) as pf) ->
+             ignore path;
+             let q = PI.qualified_of pf in
+             if List.exists (fun md -> String.length q > String.length md
+                                       && String.sub q 0 (String.length md + 1) = md ^ ".") modules
+             then Some fd.A.fn_name.A.span.A.file
+             else None)
+           (PI.enum_fns [] m.A.mod_decls))
+  in
+  let is_target sp =
+    if modules <> [] then List.mem sp.A.file module_files else stdlib || is_user sp
+  in
+  let started = Unix.gettimeofday () in
   (* Lemma calls are searched only when the caller's check skipped something
      at reflection's frontier (phase 7, ruling 1): no other program pays. *)
   let lemmas = lemmas && List.exists (Infer_lemma.is_target ~is_user) (Ob.all ()) in
@@ -631,7 +656,7 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
      --apply-public, an edit that must be made by hand — BEFORE it is
      installed, so no later probe and no prediction counts on it.  A withheld
      proposal is reported as refused with that reason. *)
-  let proposal_of ~round ~(s : IS.slot) ~pred ~annotation ~source ~depends ~(v : IO.verdict) =
+  let proposal_of ~(joint_param : string option) ~round ~(s : IS.slot) ~pred ~annotation ~source ~depends ~(v : IO.verdict) =
     let id = Printf.sprintf "P%d" (!next_id + 1) in
     let closes, new_skipped = match v with IO.Accept { closes; new_skipped } -> (closes, new_skipped) | _ -> ([], []) in
     let path, name = IO.split_qualified s.IS.fn in
@@ -640,7 +665,7 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
       && s.IS.fd.A.fn_vis = A.Public
       && not (PI.has_in_unit_callers path name !decls)
     in
-    { id; round; slot = s; pred; annotation; source; depends_on = depends; closes; new_skipped; external_callers }
+    { id; round; slot = s; pred; annotation; source; depends_on = depends; closes; new_skipped; external_callers; joint_param }
   in
   let withheld (p : proposal) =
     match applicable p ~accepted:(List.rev !proposals) with
@@ -693,7 +718,7 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
       match best with
       | Some (c, v) ->
         let p =
-          proposal_of ~round ~s ~pred:c.IV.c.PI.c_text ~annotation:(annotation_of s c.IV.c.PI.c_text)
+          proposal_of ~joint_param:None ~round ~s ~pred:c.IV.c.PI.c_text ~annotation:(annotation_of s c.IV.c.PI.c_text)
             ~source:c.IV.source ~depends:[] ~v
         in
         if withheld p then false
@@ -742,14 +767,14 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
                             match IO.best_for_slot ~root ~decls:!decls s [ c ] ~budget:b2 with
                             | Some (_, v2), _
                               when (let dp =
-                                      proposal_of ~round ~s:csf ~pred
+                                      proposal_of ~joint_param:None ~round ~s:csf ~pred
                                         ~annotation:(Option.value (IS.respell csf ~pred) ~default:pred)
                                         ~source:c.IV.source ~depends:[] ~v:(IO.Accept { closes = []; new_skipped = [] })
                                     in
                                     not (withheld dp)
                                     && (let dep = commit dp in
                                         let mp =
-                                          proposal_of ~round ~s ~pred
+                                          proposal_of ~joint_param:None ~round ~s ~pred
                                             ~annotation:(Option.value (IS.respell s ~pred) ~default:pred)
                                             ~source:c.IV.source ~depends:[ dep ] ~v:v2
                                         in
@@ -793,7 +818,7 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
         match IS.graft s shape with
         | Some hyp ->
           let p =
-            proposal_of ~round ~s ~pred:"p" ~annotation:(shape.IS.k6_callback ^ " / " ^ shape.IS.k6_return)
+            proposal_of ~joint_param:None ~round ~s ~pred:"p" ~annotation:(shape.IS.k6_callback ^ " / " ^ shape.IS.k6_return)
               ~source:IV.House ~depends:[] ~v
           in
           if withheld p then false
@@ -824,7 +849,7 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
         match best with
         | Some (t, v) ->
           let ann = text t in
-          let p = proposal_of ~round ~s ~pred:ann ~annotation:ann ~source:IV.Demand ~depends:[] ~v in
+          let p = proposal_of ~joint_param:None ~round ~s ~pred:ann ~annotation:ann ~source:IV.Demand ~depends:[] ~v in
           if withheld p then false
           else begin
             install s (IS.install_ty s t);
@@ -832,9 +857,34 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
             ignore (commit p);
             true
           end
-        | None ->
-          note_verdicts s (List.map (fun (t, v) -> (text t, v)) verdicts);
-          false))
+        | None -> (
+          (* Neither half alone: the relation kept from a parameter to the
+             return, one joint probe (`bump`). *)
+          let jbudget = ref (min !budget 12) in
+          let j0 = !jbudget in
+          let joint, jverdicts =
+            if IO.is_return s then IO.best_joint ~allow_caller_violations ~root ~decls:!decls s tys ~budget:jbudget
+            else (None, [])
+          in
+          budget := !budget - (j0 - !jbudget);
+          match joint with
+          | Some (t, x, v) ->
+            let ann = text t in
+            let p = proposal_of ~joint_param:(Some x) ~round ~s ~pred:ann ~annotation:ann ~source:IV.Demand ~depends:[] ~v in
+            if withheld p then false
+            else begin
+              install s (IS.install_ty { s with IS.fd = IS.install_ty s t; path = IS.Param x } t);
+              Hashtbl.replace Refine_param.elem_ret_proved s.IS.fn ();
+              ignore (commit p);
+              true
+            end
+          | None ->
+            note_verdicts s (List.map (fun (t, v) -> (text t, v)) verdicts);
+            (* A joint refusal (a caller breaks the relation) says why. *)
+            List.iter
+              (fun (t, v) -> match v with IO.Refuse rf -> refused := (s, text t, rf) :: !refused | _ -> ())
+              jverdicts;
+            false)))
   in
   let rec loop round =
     if round > rounds || !budget <= 0 then round - 1
@@ -881,13 +931,42 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
       go (try_slot ~round ~ledger ~depth:0) demands;
       go (try_rel ~round) (List.filter (fun s -> not (IO.is_return s)) rels);
       go (try_slot ~round ~ledger ~depth:0) accs;
-      (* An SCC of size > 1 whose members got nothing. *)
+      (* An SCC of size > 1 whose members got nothing, and that had something
+         to infer: an unsettled site inside a member, or inside a function
+         that calls a member (a demand on a member's return sits in its
+         caller).  An SCC with no open site near it is not "unsupported",
+         there was nothing to do (depot: 966 notes on a project with zero
+         open sites, 2026-10-21 todo). *)
+      let open_fns =
+        List.filter
+          (fun (_, (fd : A.fn_def)) ->
+            List.exists
+              (fun (o : Ob.t) ->
+                is_user o.Ob.span
+                && (not (LD.settled o.Ob.verdict))
+                && List.exists (fun (c : A.fn_clause) -> IV.within c.A.fc_span o.Ob.span) fd.A.fn_clauses)
+              ledger)
+          user_fns
+      in
+      let defined = PI.defined_fns !decls in
+      let path_of q = match List.rev (String.split_on_char '.' q) with _ :: tl -> List.rev tl | [] -> [] in
+      let near_open m =
+        List.exists
+          (fun (g, gfd) -> g = m || PI.fn_calls_target ~defined ~caller:(path_of g) ~target:m gfd)
+          open_fns
+      in
       List.iter
         (fun comp ->
           if List.length comp > 1
              && not (List.exists (fun (p : proposal) -> List.mem p.slot.IS.fn comp) !proposals)
+             && List.exists near_open comp
           then List.iter (fun f -> note f "scc-unsupported") comp)
         order;
+      (* A long run (stdlib or module targets) says where it is, on stderr so
+         the JSON and the report on stdout are unchanged. *)
+      if progress then
+        Printf.eprintf "--refine-infer: round %d done, %d slot(s), %d probe(s) used, %d left, %.0fs\n%!"
+          round (List.length slots) (start_budget - !budget) !budget (Unix.gettimeofday () -. started);
       if !accepted then loop (round + 1) else round
     end
   in

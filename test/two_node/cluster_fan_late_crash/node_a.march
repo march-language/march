@@ -55,7 +55,7 @@ mod ClusterFanLateCrashA do
     end
     joined(h)
     println("node-a: up")
-    match Fan_Run.cluster_A(c, h, "fan-1", fn (s, st) -> role_a(s, st)) do
+    match Fan_Run.cluster_A(h, "fan-1", fn (s, st) -> role_a(s, st)) do
       Ok(_) -> println("A: closed")
       Err(SessionNode.Cancelled(role, cause)) ->
         println("A: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)

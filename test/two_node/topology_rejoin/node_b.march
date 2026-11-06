@@ -75,7 +75,7 @@ mod TopologyRejoinB do
       Ok(h) ->
         println(me ++ ": up, creation " ++ int_to_string(creation))
         let place = fn () -> Topology.place(h, [ Topology.role("Ledger.Server", Topology.count(1),
-                              fn () -> Ledger_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st))) ])
+                              fn () -> Ledger_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st))) ])
         if creation == 1 do
           if ClusterNode.await_members(h, 1, 120000) do () else panic(me ++ ": never joined") end
           place()

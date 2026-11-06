@@ -57,7 +57,7 @@ mod UpgradeApp do
       None -> -1000
     end
     let got = Vault.new("upgrade_nested_" ++ int_to_string(n))
-    let own = match Echo_Run.initiate_Client(env.io, env.node, fn (s, st) ->
+    let own = match Echo_Run.initiate_Client(env.node, fn (s, st) ->
         Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, 7), fn (a, st2) ->
           Echo_Client.recv_Answer2(s, Echo_Client.send_Ask2(s, st2, a), fn (b, st3) ->
             Vault.set(got, "v", b)

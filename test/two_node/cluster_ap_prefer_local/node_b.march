@@ -34,7 +34,7 @@ mod PreferLocalB do
   end
 
   fn session(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : () do
-    match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
+    match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, n)) do
       Ok(_) -> println("Client: session " ++ int_to_string(n) ++ " done")
       Err(e) -> println("Client: " ++ SessionNode.run_error_message(e))
     end
@@ -63,7 +63,7 @@ mod PreferLocalB do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
-        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+        match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st)) do
           Err(e) -> panic(Echo_Run.error_message(e))
           Ok(o) ->
             if wait_offers(h, 60000) do println("node-b: sees both offers")

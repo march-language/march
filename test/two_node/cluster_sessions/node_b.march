@@ -24,7 +24,7 @@ mod ClusterSessionsB do
   end
 
   pfn session(c : Cap(IO), h : Cap(ClusterNode.Live), sid : String) : Int do
-    match Echo_Run.cluster_B(c, h, sid, fn (s, st) -> role_b(s, st)) do
+    match Echo_Run.cluster_B(h, sid, fn (s, st) -> role_b(s, st)) do
       Ok(_) -> 1
       Err(_) -> 0
     end

@@ -57,7 +57,7 @@ mod ClusterCrashBranchA do
     end
     joined(h)
     println("node-a: up")
-    match Logging_Run.cluster_L(c, h, "logging-1", fn (s, st) -> role_l(s, st)) do
+    match Logging_Run.cluster_L(h, "logging-1", fn (s, st) -> role_l(s, st)) do
       Ok(_) -> println("L: closed")
       Err(SessionNode.Cancelled(role, cause)) ->
         println("L: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)

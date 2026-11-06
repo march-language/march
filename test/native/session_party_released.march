@@ -31,7 +31,7 @@ mod Main do
 
   pfn rounds(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Int do
     if n <= 0 do 0 else
-      let bad = match Ping_Run.initiate_Client(io, node, fn (s, st) -> client(s, st)) do
+      let bad = match Ping_Run.initiate_Client(node, fn (s, st) -> client(s, st)) do
         Ok(_) -> 0
         Err(_) -> 1
       end
@@ -44,7 +44,7 @@ mod Main do
       Ok(h) -> h
       Err(e) -> panic(e)
     end
-    match Ping_Run.offer_Server(io, node, 64, fn (s, st) -> server(s, st)) do
+    match Ping_Run.offer_Server(node, 64, fn (s, st) -> server(s, st)) do
       Ok(_) -> ()
       Err(e) -> panic(SessionNode.run_error_message(e))
     end

@@ -61,7 +61,7 @@ mod CertOrderA do
   -- hang.md -- and since that party now cancels the session rather than
   -- leaving it to hang, retrying it here would hide a regression.
   pfn attempt(c : Cap(IO), h : Cap(ClusterNode.Live), left : Int) : () do
-    match Order_Run.initiate_Shop(c, h, fn (s, st) -> shop(s, st, 1)) do
+    match Order_Run.initiate_Shop(h, fn (s, st) -> shop(s, st, 1)) do
       Ok(_) -> ()
       Err(e) ->
         let msg = Order_Run.error_message(e)

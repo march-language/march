@@ -43,7 +43,7 @@ mod DrainTrafficB do
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
         println("node-b: up")
         Topology.place(h, [ Topology.offer_role("Order.Ledger", Topology.everywhere(), 32,
-                              fn cap -> Order_Run.offer_Ledger(c, h, cap, fn (s, st) -> ledger(s, st))) ])
+                              fn cap -> Order_Run.offer_Ledger(h, cap, fn (s, st) -> ledger(s, st))) ])
         Topology.drain_on_signal(h, 1000, 4000)
         Topology.supervise_offers(h)
     end
