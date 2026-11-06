@@ -2,13 +2,13 @@ exit: 1
 -- REFINEMENT ------------------ errors/cap_grant_9.march
 
 refinement violation: argument `k` of `takepos` does not satisfy precondition `_ >= 0` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `below(0)` can never satisfy `k >= 0`; pass a value that does
 
 14 |     println(int_to_string(takepos(below(0))))
                                ^^^^^^^^^^^^^^^^^
 
 
-    this argument must satisfy `_ >= 0`:
+    this argument must satisfy `below(0) >= 0`:
 
 14 |     println(int_to_string(takepos(below(0))))
                                        ^^^^^^^^

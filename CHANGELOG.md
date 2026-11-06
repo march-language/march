@@ -21,6 +21,18 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinement errors show the failing case and what it does.** A `refinement_violated`
+  call now prints the solver's values (``for example, when `d` is `0` ``), labels where the
+  failing value came from (the parameter or `let`, and the `if` condition the call sits
+  behind), and words the guard over the call itself: `if d != 0 do safe_div(10, d) else …
+  end`, with every parameter the precondition names read at the call (`i < len(items)`,
+  not `_ < len(xs)`). A literal gets "`0` can never satisfy `b != 0`" instead of a generic
+  note, and a pass-site error no longer prints the internal `(cb_x)`. When every argument
+  is concrete and the callee needs no I/O, the call is run once in the interpreter, step
+  limited, and a failure is reported in one line: ``running `safe_div(10, 0)` panics:
+  division by zero``. A definite `return_refinement_violated` shows the run too (`but
+  bad(-1) returns -1.`). None of this changes which programs are accepted.
+
 - **Hot-reload migrations are checked on every build, with a counterexample.** When an
   obligation in an `<actor>_migrate_state` or `<actor>_migrate_msg` can't be proved, the
   compiler runs the migration on small old values. An input whose result the new actor

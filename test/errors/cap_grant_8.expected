@@ -2,13 +2,13 @@ exit: 1
 -- REFINEMENT ------------------ errors/cap_grant_8.march
 
 refinement violation: argument `c` of `serve` does not satisfy precondition `v.port >= 1` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `{ port: 0 }` can never satisfy `c.port >= 1`; pass a value that does
 
 12 |     println(int_to_string(serve({ port: 0 })))
                                ^^^^^^^^^^^^^^^^^^
 
 
-    this argument must satisfy `v.port >= 1`:
+    this argument must satisfy `c.port >= 1`:
 
 12 |     println(int_to_string(serve({ port: 0 })))
                                      ^^^^^^^^^^^

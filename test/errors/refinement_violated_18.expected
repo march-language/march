@@ -1,0 +1,29 @@
+exit: 1
+-- REFINEMENT ------- errors/refinement_violated_18.march
+
+refinement violation: argument `b` of `safe_div` does not satisfy precondition `_ != 0` [refinement_violated]
+for example, when `d` is `0`
+note: guard the call (e.g. `if d != 0 do safe_div(10, d) else … end`) or pass a value known to satisfy it
+
+9 |     if d == 0 do safe_div(10, d) else 1 end
+                     ^^^^^^^^^^^^^^^
+
+    running `safe_div(10, 0)` panics: division by zero
+
+    this argument must satisfy `d != 0`:
+
+9 |     if d == 0 do safe_div(10, d) else 1 end
+                                  ^
+
+    `d` comes from here:
+
+8 |   fn ratio(d : Int) : Int do
+               ^
+
+    the call is reached only when this is true:
+
+9 |     if d == 0 do safe_div(10, d) else 1 end
+           ^^^^^^
+    run `march --explain refinement_violated`
+
+

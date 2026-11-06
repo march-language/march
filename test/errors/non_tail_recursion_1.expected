@@ -29,13 +29,13 @@ Function `ins` is structurally recursive but not tail-recursive. If the recursiv
 -- REFINEMENT --------- errors/non_tail_recursion_1.march
 
 refinement violation: argument `t` of `needEmpty` does not satisfy precondition `size(t) < 1` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `ins(Leaf, 5)` can never satisfy `size(t) < 1`; pass a value that does
 
 44 |     println(int_to_string(needEmpty(ins(Leaf, 5))))
                                ^^^^^^^^^^^^^^^^^^^^^^^
 
 
-    this argument must satisfy `size(t) < 1`:
+    this argument must satisfy `size(ins(Leaf, 5)) < 1`:
 
 44 |     println(int_to_string(needEmpty(ins(Leaf, 5))))
                                          ^^^^^^^^^^^^

@@ -2,13 +2,13 @@ exit: 1
 -- REFINEMENT ----------------- errors/cap_grant_29.march
 
 refinement violation: argument `n` of `take_n` does not satisfy precondition `_ >= 0` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `-3` can never satisfy `n >= 0`; pass a value that does
 
 13 |     println(int_to_string(take_n(-3)))
                                ^^^^^^^^^^
 
 
-    this argument must satisfy `_ >= 0`:
+    `n` is `-3` here:
 
 13 |     println(int_to_string(take_n(-3)))
                                       ^^

@@ -1,0 +1,28 @@
+exit: 1
+-- REFINEMENT ------- errors/refinement_violated_21.march
+
+refinement violation: the argument passed to `f` does not satisfy precondition `_ >= 0` [refinement_violated]
+for example, when `k` is `-1`
+note: guard the call (e.g. `if k >= 0 do f(k) else … end`) or pass a value known to satisfy it
+
+7 |     if k < 0 do f(k) else 0 end
+                    ^^^^
+
+
+    this argument must satisfy `k >= 0`:
+
+7 |     if k < 0 do f(k) else 0 end
+                      ^
+
+    `k` comes from here:
+
+6 |   fn ap(f : ({Int | _ >= 0}) -> Int, k : Int) : Int do
+                                         ^
+
+    the call is reached only when this is true:
+
+7 |     if k < 0 do f(k) else 0 end
+           ^^^^^
+    run `march --explain refinement_violated`
+
+
