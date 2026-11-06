@@ -36,6 +36,14 @@ body translator: the analysis already admitted these functions, but no logic sym
   existing cases used a Float function as "no logic definition"; one now uses a parametric
   record, which still declines.
 
+- **A shadowed stdlib alias is not reflected.** Making String functions reflectable made the
+  stdlib's `String.byte_size` reflected; a program whose entry module is `String` and defines
+  its own `byte_size` (accept/t127) then got a false violation, because the termination graph
+  resolved its `String.byte_size(t)` to the stdlib unit. When the encoder's alias gate has
+  withdrawn the spelling (`string_byte_size_is_stdlib`, `list_length_is_stdlib`,
+  `array_length_is_stdlib`), the stdlib unit is blocked (R6), so no such call gains a
+  definition.
+
 Tests: `float_body`, `string_body`, `record_body`, `tuple_body` in `test/test_refine_lemma.ml`,
 each with a red case (an opaque Float comparison and IEEE `==`, a false string literal claim, an
 update that drops a field, a false tuple claim).

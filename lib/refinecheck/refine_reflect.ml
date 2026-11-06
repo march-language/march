@@ -740,6 +740,22 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
      | O_default -> add 1 "is an interface default method" sp
      | O_let -> add 1 "is a top-level `let`" sp
      | O_fn -> if u.RT.u_name = "main" then add 1 "is `main`" sp);
+    (* A stdlib member whose qualified spelling this program re-defines
+       (`mod String do … byte_size …`): the encoder's alias gate withdrew
+       the spelling ([Refine_encode.string_byte_size_is_stdlib] &c), and a
+       call the termination graph resolved to the stdlib's unit may be the
+       program's own member.  Not reflected, so no such call gains a
+       definition (accept/t127). *)
+    (if March_typecheck.Typecheck_builtins.file_is_stdlib sp.A.file then
+       let file = Filename.basename sp.A.file in
+       let withdrawn =
+         match bare_name, file with
+         | "length", "list.march" -> not !Refine_encode.list_length_is_stdlib
+         | "byte_size", "string.march" -> not !Refine_encode.string_byte_size_is_stdlib
+         | "length", "array.march" -> not !Refine_encode.array_length_is_stdlib
+         | _ -> false
+       in
+       if withdrawn then add 6 "is a stdlib member this program's own module re-defines" sp);
     (* R2 *)
     if RT.is_recursive g u.RT.u_id then begin
       match cert_of u with
