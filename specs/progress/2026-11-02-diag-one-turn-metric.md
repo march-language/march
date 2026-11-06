@@ -20,3 +20,16 @@ A large share of the `rejected` verdicts are cascade suppression working as desi
 turn: the suppressed `cap_grant` (main does IO with no grant) is the next error once the shown one is
 fixed. Every `missing_impl` case fails that way. Candidate follow-up: keep a suppressed `cap_grant` as
 a one-line note on the shown error, so the one turn can fix both.
+
+2026-11-05: re-measured on main after F2, F3, F5, F6 and X1/X4/X8 (391 cases, Haiku 5.5 subagents
+through `--prepare`/`--score`, same as the baseline): **286/391 fixed (73.1%)**, 9 intent, 96
+rejected. On the cases that existed at the baseline's commit (323 there, against the 307 the
+baseline counted): 221/323 (68.4%); the 68 added since: 65/68. `cap_grant` had fallen to 7/34, and
+27 of the 105 failures were the suppressed `cap_grant` showing up after the shown error was fixed.
+
+Then `cap_grant` stopped being suppressed beside other errors and sorts after them
+(`specs/progress/2026-11-05-diag-cap-grant-shown.md`). Re-answering the 67 cases whose output
+changed: 64/67 fixed (was 4/67), `cap_grant` 31/31. Combined with the unchanged cases' answers:
+**346/391 (88.5%)**; on the baseline's cases 281/323 (87.0%), against 66.4% on 2026-11-03. Still at
+zero: `protocol_same_participants` 0/5, `division_by_zero` 0/4, `protocol_invalid` 0/4,
+`overlapping_impl` 0/3, `role_grant_exceeded` 0/2.

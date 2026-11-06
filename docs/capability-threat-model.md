@@ -24,8 +24,7 @@ assumes, and what it does not do. Three older pages each describe a part of it, 
 
 Where this page and one of those disagree, this page is the one checked against the code,
 and the other is a bug to fix. Every behaviour below was checked against the compiler
-on 2026-10-30. The [capabilities claim]({{ site.baseurl }}/docs/claim-capabilities/) is the
-short version of this page.
+on 2026-10-30.
 
 ## Who the attacker is
 
