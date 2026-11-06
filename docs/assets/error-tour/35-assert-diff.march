@@ -1,0 +1,16 @@
+mod Main do
+  type Role = Admin | Guest | Owner(Int)
+  type User = { name : String, tags : List(Role) }
+  derive Eq, Show for Role
+  derive Eq, Show for User
+
+  pfn load_user() : User do
+    { name: "ann", tags: [Admin, Owner(1), Guest] }
+  end
+
+  test "the loaded user" do
+    let user = load_user()
+    let expected = { name: "ann", tags: [Admin, Owner(2), Guest] }
+    assert (user == expected)
+  end
+end

@@ -111,7 +111,7 @@ mod TestCheck do
     )
     match r do
     Ok(_)  -> Test.fail("expected property to fail")
-    Err(m) -> assert (string_contains(m, "counterexample: 50"))
+    Err(m) -> assert (string_contains(m, "        n = 50\n"))
     end
   end
 

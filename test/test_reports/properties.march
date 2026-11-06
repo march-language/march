@@ -1,0 +1,29 @@
+-- Golden failure reports for `Check.all` properties (test/run_test_reports.ml).
+-- Every test here FAILS on purpose.  The suite runs with MARCH_PROP_SEED=42.
+mod Properties do
+  needs IO.Process, IO.Clock
+
+  describe "properties" do
+    test "a property returning false" do
+      Check.all_with(Gen.list(Gen.int(-100, 100)), fn xs ->
+        List.reverse(xs) == xs
+      , { Check.default_config() with seed: Some(42) })
+    end
+
+    test "an assertion inside a property, tuple names" do
+      Check.all_with(Gen.tuple2(Gen.int(0, 100), Gen.int(0, 100)), fn pair ->
+        match pair do
+        (a, b) ->
+          assert (a + b < 50)
+          true
+        end
+      , { Check.default_config() with seed: Some(42) })
+    end
+
+    test "a property that panics, seed from the environment" do
+      Check.all(Gen.int(-10, 10), fn n ->
+        int_div(100, n) > -1000
+      )
+    end
+  end
+end

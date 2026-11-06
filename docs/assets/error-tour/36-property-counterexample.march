@@ -1,0 +1,17 @@
+mod Main do
+  needs IO.Process, IO.Clock
+
+  pfn total(a : Int, b : Int) : Int do
+    a + b
+  end
+
+  test "sums stay under 50" do
+    Check.all(Gen.tuple2(Gen.int(0, 100), Gen.int(0, 100)), fn pair ->
+      match pair do
+      (a, b) ->
+        assert (total(a, b) < 50)
+        true
+      end
+    )
+  end
+end

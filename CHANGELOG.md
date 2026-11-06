@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A failing test reads like a compile error.** A failed `assert`, `Check.all` property or
+  panicking test body now prints a `-- TEST FAILURE --` report with the line under a caret,
+  the same under `march test` and `forge test` (compiled). For `assert (a == b)` it labels
+  both sides by their source text and marks the first difference: the element, field or
+  argument, a list length mismatch, or a string's first differing character. A long value
+  is elided to the path to the difference (`[…, 170, …]`). A failing property shows the run,
+  the shrunk input by the property's parameter name (`xs = [0, 1]`; `a = 39`, `b = 11` for
+  a `match`ed tuple), why it failed (with the inner assertion's report) and the seed to
+  replay. Before, compiled tests printed only `assertion failed`. The `FAIL: "name"` lines,
+  the summary lines and exit codes are unchanged.
 - **Hot-reload migrations are checked on every build, with a counterexample.** When an
   obligation in an `<actor>_migrate_state` or `<actor>_migrate_msg` can't be proved, the
   compiler runs the migration on small old values. An input whose result the new actor
@@ -198,6 +208,9 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- `Gen.one_of` shrinks toward its earlier alternatives (list the simplest generator first).
+  The generated values are unchanged; only a failing property's shrunk counterexample can
+  differ.
 - Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
   of the wrong type names the step and points at its line in the protocol. A body calling another
   role's functions says "`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B`"

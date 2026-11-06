@@ -1,0 +1,17 @@
+FAIL: "panics division by zero"
+-- TEST FAILURE --------------- test_reports/panics.march
+
+This test panicked: division by zero [test_panicked]
+
+9 |     test "division by zero" do
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+FAIL: "panics an explicit panic"
+-- TEST FAILURE --------------- test_reports/panics.march
+
+This test panicked: the widget is broken [test_panicked]
+
+14 |     test "an explicit panic" do
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+exit 1
