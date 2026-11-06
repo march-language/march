@@ -1,0 +1,18 @@
+-- Golden failure reports for a test body that panics
+-- (test/run_test_reports.ml).  Every test here FAILS on purpose.
+mod Panics do
+  pfn helper(n : Int) : Int do
+    10 / (n - 2)
+  end
+
+  describe "panics" do
+    test "division by zero" do
+      let n = helper(2)
+      assert (n > 0)
+    end
+
+    test "an explicit panic" do
+      panic("the widget is broken")
+    end
+  end
+end

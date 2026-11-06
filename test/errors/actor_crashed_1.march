@@ -1,0 +1,24 @@
+-- MARCH-MODE: run
+-- EXPECT-ERROR: Actor `Counter` crashed while handling `Bump(-5)`
+-- An actor nobody supervises panics in a handler. The interpreter used to
+-- drop this without a word; the report names the message and the state.
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do
+      if k < 0 do panic("negative bump") else { state with n: state.n + k } end
+    end
+  end
+
+  fn main(c : Cap(IO.Console), s : Cap(IO.Spawn)) do
+    let pid = spawn(Counter)
+    send(pid, Bump(1))
+    send(pid, Bump(-5))
+    run_until_idle()
+    println("done")
+  end
+end

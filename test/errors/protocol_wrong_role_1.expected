@@ -8,6 +8,10 @@ exit: 1
 
     At this point `B` must send an `Int` to `C`: take that step with `Fan_B.send_Second`.
     If this body is meant to play `A`, give it a `Fan_A` state instead.
+    The conversation so far, in protocol `Fan`:
+
+      number: A -> C : Int   <- `B` tried this, but it is `A`'s step
+      second: B -> C : Int   <- `B` must do this next
 
     `B` is here: it must send an `Int` to `C`:
 

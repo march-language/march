@@ -1,0 +1,17 @@
+exit: 0
+-- WARNING: COPY ------------- errors/copy_shared_3.march
+
+`bump` builds a new copy instead of reusing `t` in place, because `t` is used again afterwards. [copy_shared]
+A function can update a value in place only when it holds the only reference to it; make this call the last use of `t` and `bump` reuses its memory instead of allocating.
+
+29 |     let u = bump(t)
+                      ^
+
+
+    `t` is used again here, so it is still shared when `bump` runs:
+
+30 |     let a = size(t)
+                      ^
+    run `march --explain copy_shared`
+
+

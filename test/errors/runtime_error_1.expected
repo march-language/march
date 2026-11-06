@@ -1,0 +1,15 @@
+exit: 1
+-- RUNTIME ----------------- errors/runtime_error_1.march
+
+The program stopped with a run-time error: division by zero [runtime_error]
+
+8 |   fn avg(sum : Int, n : Int) : Int do sum / n end
+                                          ^^^^^^^
+
+
+    `avg` was called here:
+
+11 |     println(int_to_string(avg(10, List.length([]))))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+

@@ -796,6 +796,61 @@ let rec desugar_ty (t : ty) : ty =
 
 (** Desugar [EPipe (l, r, sp)] → [EApp (r, [l], sp)].
     Works recursively; all other nodes are walked to catch nested pipes. *)
+(* ---- Property-test reports ────────────────────────────────────────────
+
+   `Check.all(g, fn xs -> ...)` and `Check.all_with(g, fn xs -> ..., cfg)`
+   become `Check.all_reported(g, prop, cfg, header, names)`: [header] is the
+   rendered `-- TEST FAILURE --` header with the call under a caret
+   (lib/errors/test_report.ml), [names] the property's parameter name, or
+   the names a single-arm `match` on it binds when it takes a tuple apart
+   (`fn pair -> match pair do (a, b) -> ... end`).  Check prints the shrunk
+   input by those names.  A plain rewrite to a March call, so the
+   interpreter and compiled tests print the same report.
+
+   Not done in a module that declares its own `Check` (the stdlib's own
+   file, or a user's), where the name may not be the stdlib's. *)
+let own_check_module = ref false
+
+let property_names (prop : expr) : string list =
+  match prop with
+  | ELam ([ p ], body, _) ->
+    let pname = p.param_name.txt in
+    let rec strip = function
+      | EBlock ([ e ], _) -> strip e
+      | e -> e in
+    let pat_name = function
+      | PatVar n -> Some n.txt
+      | PatWild _ -> Some "_"
+      | _ -> None in
+    (match strip body with
+     | EMatch (EVar { txt; _ }, [ { branch_pat = PatTuple (ps, _); branch_guard = None; _ } ], _)
+       when txt = pname ->
+       let names = List.filter_map pat_name ps in
+       if List.length names = List.length ps then names else [ pname ]
+     | _ -> if pname = "_" then [] else [ pname ])
+  | _ -> []
+
+let rewrite_property_call (f : expr) (args : expr list) (sp : span) : expr option =
+  if !own_check_module then None
+  else
+    let reported fsp g prop cfg =
+      let header =
+        March_errors.Test_report.header ~code:Err.Code.property_failed ~span:sp
+          "This property does not hold." in
+      let names =
+        List.fold_right (fun n acc ->
+          ECon ({ txt = "Cons"; span = sp }, [ ELit (LitString n, sp); acc ], sp))
+          (property_names prop) (ECon ({ txt = "Nil"; span = sp }, [], sp)) in
+      Some (EApp (EVar { txt = "Check.all_reported"; span = fsp },
+                  [ g; prop; cfg; ELit (LitString header, sp); names ], sp))
+    in
+    match f, args with
+    | EVar { txt = "Check.all"; span = fsp }, [ g; (ELam _ as prop) ] ->
+      reported fsp g prop (EApp (EVar { txt = "Check.default_config"; span = fsp }, [], sp))
+    | EVar { txt = "Check.all_with"; span = fsp }, [ g; (ELam _ as prop); cfg ] ->
+      reported fsp g prop cfg
+    | _ -> None
+
 let rec desugar_expr (e : expr) : expr =
   match e with
   (* --- Pipe: x |> f(a,b)  ⟶  f(x,a,b) --- *)
@@ -887,7 +942,9 @@ let rec desugar_expr (e : expr) : expr =
      | ECon (name, [], _) when String.contains name.txt '.' ->
        ECon (name, args', sp)
      | _ ->
-       EApp (f', args', sp))
+       match rewrite_property_call f' args' sp with
+       | Some e -> e
+       | None -> EApp (f', args', sp))
 
   | ECon (name, args, sp) ->
     ECon (name, List.map desugar_expr args, sp)
@@ -2252,6 +2309,11 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
   Desugar_derive.reset_salt_counts ();
   March_ast.Refine_msg.begin_pass ();
   Desugar_derive.with_salt_scope m.mod_name.txt @@ fun () ->
+  let saved_own_check = !own_check_module in
+  own_check_module :=
+    m.mod_name.txt = "Check"
+    || List.exists (function DMod (n, _, _, _) -> n.txt = "Check" | _ -> false) m.mod_decls;
+  Fun.protect ~finally:(fun () -> own_check_module := saved_own_check) @@ fun () ->
   check_app_main_exclusivity errors m.mod_decls;
   check_main_signature errors m.mod_decls;
   (* `@[endpoints]` protocols expand into generated nested modules here, ahead

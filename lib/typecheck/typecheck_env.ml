@@ -171,6 +171,10 @@ type proto_info = {
   pi_def         : Ast.protocol_def;
   pi_projections : (string * session_ty) list;  (** role → local session type *)
   pi_span        : Ast.span;
+  pi_positions   : (string * (session_ty * March_ast.Protocol_states.pos) list) list;
+      (** role → each state of its projection with its place in the protocol's
+          steps, for the diagram ([March_ast.Protocol_states.diagram]); a state
+          whose place is not certain is absent. *)
 }
 
 module StrMap = Map.Make(String)

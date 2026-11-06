@@ -37,3 +37,10 @@ a compiler-emitted function table (no dladdr, so Linux too).
    Pre-existing; the crash observers inherit it. Move them onto `march_proc`.
 7. **wasm / js backends.** The `diag_*` builtins exist in the native runtime
    and the interpreter only.
+
+Done since (`progress/2026-11-05-runtime-failure-reports.md`): the interpreter renders an
+unhandled failure and an unsupervised actor crash as a diagnostic with source excerpts (frames
+carry their call's span). Still open from that work, on the compiled side: item 4 above (a
+compiled panic prints `panic: <msg>` and nothing else: no location, no excerpt, no calls), and
+the same actor report compiled (message and state at the crash; a compiled unsupervised actor
+panic exits the process, where the interpreter carries on, itself a divergence to settle).

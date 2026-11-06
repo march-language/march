@@ -245,14 +245,11 @@ end
 
 ### Reproducible seeds
 
-When a property fails, the output includes the seed:
+When a property fails, the report ends with the seed (or says the property's
+config fixes it):
 
 ```
-property failed after 23 run(s)
-  counterexample: 50
-  returned false
-  shrunk 3 step(s) from: 94
-  reproduce with seed: 1234567890
+    Seed 1234567890: replay it with `forge test --seed=1234567890`.
 ```
 
 Re-run with the same seed:
@@ -277,40 +274,60 @@ All `Check.all` calls return immediately without running.
 
 ## Failure output
 
-A failing property produces a report like:
+A failing property is reported like a compile error: a `-- TEST FAILURE --`
+header, the `Check.all` call under a caret, the run that failed, the shrunk
+input bound to the property's own parameter name, why it failed, and the seed.
+The interpreter (`march test`) and a compiled test binary (`forge test`) print
+the same report.
 
 ```
-FAIL: "list is always non-empty"
-  error: panic: property failed after 1 run(s)
-    counterexample: []
-    returned false
-    shrunk 0 step(s) from: []
-    reproduce with seed: 1776290875
+FAIL: "list reverse is the identity"
+  -- TEST FAILURE ----------------------------- test/test_lists.march
+
+  This property does not hold. [property_failed]
+
+  8 |       Check.all(Gen.list(Gen.int(-100, 100)), fn xs ->
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      It failed on run 4 of 100.
+
+      Smallest failing input (shrunk in 7 steps from `[-47, 83]`):
+
+          xs = [0, 1]
+
+      The property returned `false`.
+
+      Seed 42: replay it with `forge test --seed=42`.
 ```
 
-For assertion failures, the assertion diagnostic is included:
+A property that takes a tuple apart with a single-arm `match` gets one line per
+name, and an `assert` that fails inside it is shown with its own report (both
+sides by their source text, and for `==` the first difference marked):
 
 ```
-FAIL: "values are bounded"
-  error: panic: property failed after 5 run(s)
-    counterexample: 10
-    raised: assert 10 < 10
-      left:  10
-      right: 10
-    shrunk 2 step(s) from: 13
-    reproduce with seed: 42
+      Smallest failing input (shrunk in 3 steps from `(98, 11)`):
+
+          a = 39
+          b = 11
+
+      It failed this assertion:
+
+      This `<` comparison is false. [assert_failed]
+
+      17 |           assert (a + b < 50)
+                             ^^^^^^^^^^
+
+          left `a + b`
+              50
+          right
+              50
 ```
 
-For crashes:
+A property that crashes says so: `It panicked: int_div: division by zero`.
 
-```
-FAIL: "no division by zero"
-  error: panic: property failed after 21 run(s)
-    counterexample: 0
-    raised: int_div: division by zero
-    shrunk 0 step(s) from: 0
-    reproduce with seed: 99
-```
+The names come from the compiler, which passes the property lambda's parameter
+name to `Check`: a property given as a named function (`Check.all(g, my_prop)`)
+is reported as `input = ...`.
 
 ---
 

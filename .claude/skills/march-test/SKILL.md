@@ -46,6 +46,8 @@ Conventions:
 - File name: `test_foo.march` (snake_case)
 - `describe` groups related tests; `test` is a single case
 - `assert expr` — parentheses around comparisons: `assert (a == b)` not `assert a == b`
+- Prefer `assert (got == expected)` over `assert f(got)`: a failing comparison shows both values
+  and where they differ; a plain `assert cond` can only say it was false
 - Multiple asserts per test are fine
 - Use `pfn` for test-file-private helpers
 
@@ -151,9 +153,40 @@ A single file also runs on its own with `march test test/stdlib/test_FOO.march`.
 
 ## When tests fail
 
-1. For unit tests: read the assertion, figure out what invariant was violated.
-2. For property tests: the report includes the shrunk counterexample and seed. Replay with `forge test --seed=<N>` to reproduce deterministically while debugging.
+A failure prints a report in the compiler's diagnostic style (`-- TEST FAILURE --` header, the
+line under a caret), the same interpreted and compiled. For `assert (a == b)` it shows both sides
+by their source text and marks the first difference:
+
+```
+FAIL: "users match"
+  -- TEST FAILURE ---------------------------- test/test_users.march
+
+  The two sides of this `==` are not equal. [assert_failed]
+
+  18 |       assert (user == expected)
+                     ^^^^^^^^^^^^^^^^
+
+      left `user`
+          User { name = ann, tags = [Admin, Owner(1), Guest] }
+                                                  ^
+      right `expected`
+          User { name = ann, tags = [Admin, Owner(2), Guest] }
+                                                  ^
+
+      They first differ at `.tags[1]`.
+```
+
+Lists report a length mismatch, strings the first differing character, and long values show only
+the path to the difference (`[…, 170, …]`). A test body that panics points at its `test "..."`
+line (`[test_panicked]`). Golden examples of every case: `test/test_reports/*.expected`.
+
+1. For unit tests: read the marked difference, figure out what invariant was violated.
+2. For property tests: the report shows the shrunk input by the property's parameter name
+   (`xs = [0, 1]`, or `a = 39` / `b = 11` for a `match`ed tuple), why it failed (a nested
+   assertion report, `false`, or a panic) and the seed. Replay with `forge test --seed=<N>` to
+   reproduce deterministically while debugging.
 3. If a property shrinks to something surprising (e.g. empty list), that's often a missing base-case in the implementation.
+4. `Gen.one_of` shrinks toward its earlier alternatives: list the simplest generator first.
 
 ## Lemma tests
 

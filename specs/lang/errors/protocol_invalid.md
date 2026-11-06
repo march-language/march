@@ -59,6 +59,21 @@ mod Main do
 end
 ```
 
+The same holds inside a `choose`. The steps written after a `choose` run at
+the end of EVERY branch, so when one branch ends in a `loop` (or `stop`), they
+can never run in that branch. The message names the branches that can reach
+them; move the steps there, after each one's last step. A branch with several
+steps lists them on the lines after its label, indented, with no `do`/`end`:
+
+```
+  choose by S:
+    more -> loop do S -> C : Int end
+    done ->
+      S -> C : Bool
+      C -> S : Bool
+  end
+```
+
 ## Why the rule exists
 
 A protocol is a contract both sides are checked against. A step that can

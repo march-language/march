@@ -2,13 +2,14 @@ exit: 1
 -- REFINEMENT -------- errors/refinement_violated_4.march
 
 refinement violation: argument `xs` of `head` does not satisfy precondition `len(_) > 0` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `[]` can never satisfy `len(xs) > 0`; pass a value that does
 
 20 |     head([])
          ^^^^^^^^
 
+    running `head([])` panics: "empty"
 
-    this argument must satisfy `len(_) > 0`:
+    `xs` is `[]` here:
 
 20 |     head([])
               ^^

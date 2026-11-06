@@ -505,9 +505,12 @@ mod Gen do
   end
 
   doc """
-  Uniform choice among a non-empty list of generators; the chosen
-  generator's own shrinking applies (it does not shrink toward another
-  alternative).
+  Uniform choice among a non-empty list of generators.  Shrinks toward the
+  EARLIER alternatives first (each re-run with the same RNG), then within
+  the chosen generator, so list the simplest alternative first.  The choice
+  is `bind(int(0, n - 1), ...)`, which draws exactly what a plain
+  `Random.range` pick would: the generated values are the same as before
+  this shrank across alternatives (2026-11-05).
 
       Gen.one_of([Gen.constant(0), Gen.int(1, 9)])
   """
@@ -516,11 +519,7 @@ mod Gen do
     Nil -> panic("Gen.one_of: empty list")
     _ -> do
       let n = List.length(gens)
-      Generator(fn (rng, size) ->
-        let (idx, rng2) = Random.range(rng, 0, n - 1)
-        let picked = List.nth(gens, idx)
-        run(picked, rng2, size)
-      )
+      bind(int(0, n - 1), fn idx -> List.nth(gens, idx))
     end
     end
   end

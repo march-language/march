@@ -1,0 +1,22 @@
+-- EXPECT-ERROR: <- `A` tried this
+-- REJECT (sequence diagram): a straight-line protocol; `A` sends its third step before it has
+-- received `C`'s reply. The error draws the conversation so far, marking the step `A` is at and
+-- the one it tried.
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Relay do
+    first:  A -> B : Int
+    second: B -> C : Int
+    reply:  C -> A : Bool
+    third:  A -> B : String
+    fourth: B -> A : Bool
+  end
+  pfn role_a(s : Cap(Session.Live), st : Relay_A.Entry) : Relay_A.Yield do
+    let st1 = Relay_A.send_First(s, st, 1)
+    let st2 = Relay_A.send_Third(s, st1, "skipped the reply")
+    Relay_A.recv_Fourth(s, st2, fn (_ok, st3) -> Relay_A.close(s, st3))
+  end
+  fn main(c : Cap(IO)) do () end
+end

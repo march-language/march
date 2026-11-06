@@ -1954,7 +1954,11 @@ let cli_role_grant_cluster_fronts =
             let rc, out = check_cli (with_call call) in
             Alcotest.(check int) (front ^ ": exit code (output: " ^ out ^ ")") 1 rc;
             Alcotest.(check bool) (front ^ ": names the grant (output: " ^ out ^ ")") true
-              (contains_text out "the role is granted only `Cap(IO.Console)`"))
+              (contains_text out "the role is granted only `Cap(IO.Console)`");
+            (* widening the grant here is three edits, not two: the call
+               takes the grant as arguments, and the help says so *)
+            Alcotest.(check bool) (front ^ ": the help names the call's new argument (output: " ^ out ^ ")") true
+              (contains_text out "so it gains an argument: a `Cap(IO.FileWrite)`"))
          [ ("cluster_", "Stream_Run.cluster_Cons(node, cap_narrow(c), \"sid\", " ^ body ^ ")");
            ("offer_", "Stream_Run.offer_Cons(node, cap_narrow(c), 4, " ^ body ^ ")");
            ("initiate_", "Stream_Run.initiate_Cons(node, cap_narrow(c), " ^ body ^ ")");

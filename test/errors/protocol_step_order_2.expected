@@ -1,0 +1,23 @@
+exit: 1
+-- PROTOCOL ---------- errors/protocol_step_order_2.march
+
+Role `A` tries to send a `String` to `B` here, but at this point protocol `Relay` says it must receive a `Bool` from `C`. [protocol_step_order]
+
+18 |     let st2 = Relay_A.send_Third(s, st1, "skipped the reply")
+                                         ^^^
+
+    Take that step with `Relay_A.recv_Reply` first.
+    The conversation so far, in protocol `Relay`:
+
+      first:  A -> B : Int      done
+      second: B -> C : Int
+      reply:  C -> A : Bool     <- `A` must do this next
+      third:  A -> B : String   <- `A` tried this
+
+    `A` is here: it must receive a `Bool` from `C`:
+
+12 |     reply:  C -> A : Bool
+                 ^
+    run `march --explain protocol_step_order`
+
+

@@ -113,8 +113,8 @@ scripts/run-tests.sh lsp               # the LSP analysis suite (lsp/test/)
 scripts/run-tests.sh refinecheck       # z3-backed refinement-check suite (full-run only, ~4min)
 
 # Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit, lsp, utf16,
-# jsonrpc, incremental, query_cli, refinecheck. The five before refinecheck are
-# the LSP suites and live under lsp/test/, not test/. An unknown
+# jsonrpc, incremental, query_cli, refinecheck, errors, test_reports. The five
+# before refinecheck are the LSP suites and live under lsp/test/, not test/. An unknown
 # name is a hard error listing the known suites, not a confusing dune build
 # failure.
 
@@ -209,6 +209,17 @@ lints each message for compiler-generated names the program never wrote (`$cb_ar
 `…_Msg`, `Cons`); known leaks are listed in `test/errors/internals-allowlist.txt`, which may only
 shrink. New reject programs and `--explain` pages are added by
 `scripts/seed-error-corpus.sh` (idempotent; never renames an existing case).
+
+### Golden test-failure reports
+
+`test/run_test_reports.exe` (suite `test_reports`) runs every `test/test_reports/<name>.march`
+(test modules whose tests all fail on purpose) with `march test` AND compiled with
+`--compile --test`, and requires both runs' failure blocks to equal `<name>.expected`. It pins
+the report text (`lib/errors/test_report.ml`) and that the interpreter (OCaml) and a compiled
+binary (`march_assert_fail` in `runtime/march_runtime.c`, `stdlib/check.march`) print it byte
+for byte the same: the value differ exists twice, so change both. After an intentional change:
+`UPDATE_TEST_REPORTS=1 ./_build/default/test/run_test_reports.exe -e`, then review
+`git diff test/test_reports/`.
 
 ### Refactor oracles: prove a change moved no behaviour
 

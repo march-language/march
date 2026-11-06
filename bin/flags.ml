@@ -170,6 +170,10 @@ let refine_audit   = ref false
    allocation-free and that is in the generation scope.  Consumed by
    `forge fix --contracts`.  See lib/tir/alloc_contract.ml. *)
 let report_contracts = ref false
+(* --why-copies / --why-copies-json: report where an update copies instead of
+    reusing in place (specs/2026-11-05-why-copies-design.md). *)
+let why_copies = ref false
+let why_copies_json = ref false
 let contract_scope   = ref ""    (* comma-separated globs, e.g. "Dsp.*,Audio.mix" *)
 
 (* --refine-suggest <FN> / --refine-suggest-all: propose the parameter

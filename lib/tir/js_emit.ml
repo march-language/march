@@ -719,6 +719,16 @@ and emit_val_impl ctx expr =
         emit ctx "console.error("; emit_atom ctx a; emit ctx ")"
       (* The Diagnostics panic-site record: nothing to record in JS. *)
       | "__panic_site", _ -> emit ctx "undefined"
+      (* A test's panic header (compiled test runner only): nothing in JS. *)
+      | "__test_header", _ -> emit ctx "undefined"
+      (* A failed assert: throw the report's header (its first \x1f field);
+         the value diff is the native runtime's. *)
+      | "__assert_fail", meta :: _ ->
+        let b = Buffer.create 16 in
+        emit_atom { ctx with buf = b } meta;
+        emit ctx (Printf.sprintf
+                    "(() => { throw new Error(%s.split(\"\\x1f\")[0]); })()"
+                    (Buffer.contents b))
       | ("panic" | "panic_" | "todo_" | "unreachable_"), _ ->
         let msg = if args = [] then "\"panic\""
                   else (let b = Buffer.create 16 in

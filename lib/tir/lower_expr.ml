@@ -1230,21 +1230,76 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     in
     lower_expr env flat_map_call
 
-  (* --- Assert: lower to a runtime panic call on failure (for compiled path) --- *)
+  (* --- Assert: a failed assertion panics with a rendered report --- *)
   | Ast.EAssert (inner, _) ->
-    (* Lower assert to: if inner then () else panic("assertion failed")
-       Uses same CPS-based bool dispatch as EIf. *)
-    lower_to_atom_k env inner (fun cond_atom ->
-      let unit_v = Tir.EAtom (Tir.ALit (Ast.LitAtom "unit")) in
-      let panic_var : Tir.var = {
-        v_name = "panic";
-        v_ty = Tir.TFn ([Tir.TCon ("String", [])], Tir.TCon ("Unit", []));
-        v_lin = Tir.Unr
-      } in
-      let panic_v = Tir.EApp (panic_var, [Tir.ALit (Ast.LitString "assertion failed")]) in
+    (* The report (lib/errors/test_report.ml) is the interpreter's, byte for
+       byte: its header (the source line and caret) is rendered here, at
+       compile time, and passed to `__assert_fail` (march_assert_fail in
+       runtime/march_runtime.c) as a string constant together with the
+       operator, both sides' source text and whether each side is a String
+       (which the runtime quotes).  For a comparison the two operands are
+       bound once, compared with the same operator (same dispatch, same
+       spans), and only on failure printed with `to_string`.
+         meta = header \x1f op \x1f left source \x1f right source \x1f flags *)
+    let module R = March_errors.Test_report in
+    let inner_sp = Typecheck.span_of_expr inner in
+    let fail_var : Tir.var = {
+      v_name = "__assert_fail";
+      v_ty = Tir.TFn ([Tir.TString; Tir.TString; Tir.TString], Tir.TUnit);
+      v_lin = Tir.Unr } in
+    let unit_v = Tir.EAtom (Tir.ALit (Ast.LitAtom "unit")) in
+    let src e = R.operand_source ~span:(Typecheck.span_of_expr e) e in
+    let check cond_atom on_fail =
       Tir.ECase (cond_atom,
         [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = unit_v }],
-        Some panic_v))
+        Some on_fail) in
+    (match inner with
+     | Ast.EApp (Ast.EVar op, [lhs; rhs], app_sp)
+       when List.mem op.txt R.comparison_ops
+            && not (Lower_state.is_local_binding op.txt) ->
+       let ty_l = ty_of_expr env lhs and ty_r = ty_of_expr env rhs in
+       let vl = fresh_var ty_l and vr = fresh_var ty_r in
+       let is_str = function
+         | Tir.TString | Tir.TCon ("String", []) -> true | _ -> false in
+       let meta = String.concat "\x1f"
+           [ R.assert_header ~span:inner_sp ~op:op.txt; op.txt; src lhs; src rhs;
+             (if is_str ty_l then "q" else "-") ^ (if is_str ty_r then "q" else "-") ] in
+       let operand (v : Tir.var) e =
+         Ast.EVar { txt = v.Tir.v_name; span = Typecheck.span_of_expr e } in
+       let cond = Ast.EApp (Ast.EVar op, [operand vl lhs; operand vr rhs], app_sp) in
+       let rhs_l = lower_expr env lhs in
+       let rhs_r = lower_expr env rhs in
+       (* The two temps are locals while the comparison is lowered, so it
+          reads them with their operands' types (the [EBlock] let rule's
+          registration, the same table). *)
+       Hashtbl.replace _fn_param_types vl.Tir.v_name ty_l;
+       Hashtbl.replace _fn_param_types vr.Tir.v_name ty_r;
+       let body =
+         Fun.protect ~finally:(fun () ->
+             Hashtbl.remove _fn_param_types vl.Tir.v_name;
+             Hashtbl.remove _fn_param_types vr.Tir.v_name)
+           (fun () ->
+              lower_to_atom_k env cond (fun c ->
+                let show (v : Tir.var) =
+                  if is_str v.Tir.v_ty then Tir.EAtom (Tir.AVar v)
+                  else
+                    Tir.EApp ({ Tir.v_name = "to_string";
+                                v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TString);
+                                v_lin = Tir.Unr }, [Tir.AVar v]) in
+                let sl = fresh_var Tir.TString and sr = fresh_var Tir.TString in
+                check c
+                  (Tir.ELet (sl, show vl,
+                   Tir.ELet (sr, show vr,
+                     Tir.EApp (fail_var, [Tir.ALit (Ast.LitString meta);
+                                          Tir.AVar sl; Tir.AVar sr]))))))
+       in
+       Tir.ELet (vl, rhs_l, Tir.ELet (vr, rhs_r, body))
+     | _ ->
+       let meta = String.concat "\x1f" [ R.assert_header ~span:inner_sp ~op:""; "" ] in
+       lower_to_atom_k env inner (fun c ->
+         check c (Tir.EApp (fail_var, [Tir.ALit (Ast.LitString meta);
+                                       Tir.ALit (Ast.LitString "");
+                                       Tir.ALit (Ast.LitString "")]))))
 
   | Ast.ESigil _ ->
     failwith "lower_expr: ESigil should be desugared before lowering"

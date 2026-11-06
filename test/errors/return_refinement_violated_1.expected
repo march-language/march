@@ -7,9 +7,7 @@ The return type requires:
 
     _ >= 0
 
-A counterexample was found:
-
-    n = -1
+but bad(-1) returns -1.
 
 11 |   fn bad(n : Int) : {Int | _ >= 0} do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

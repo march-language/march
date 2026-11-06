@@ -279,9 +279,13 @@ val debug_ctx : debug_ctx option ref
 exception Eval_error of string
 val interface_method_hint : March_ast.Ast.module_ -> string -> string option
 exception Yield
-type march_frame = { mf_name : string; mf_file : string; mf_line : int; }
+type march_frame = { mf_name : string; mf_file : string; mf_line : int;
+                     mf_span : March_ast.Ast.span; }
 val get_march_stack : unit -> march_frame list
 val clear_march_stack : unit -> unit
+val actor_crash_hook :
+  (actor:string -> tag:string -> args:Eval_types.value list -> state:Eval_types.value
+   -> frames:march_frame list -> exn -> unit) ref
 
 (** Report a crash caught at a runtime boundary to the Diagnostics crash
     observers (kind 0 Panic, 1 ActorCrashed); [outer] names the outermost
@@ -351,6 +355,7 @@ val typed_messages : bool ref
 
 val run_module : March_ast.Ast.module_ -> unit
 type test_result = TestPass | TestFail of string | TestError of string
+val indent_lines : string -> string -> string
 val run_tests :
   ?verbose:bool ->
   ?quiet:bool ->
