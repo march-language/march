@@ -3990,6 +3990,52 @@ let compile filename =
     match March_parser.Parse.module_ ~filename src with
     | Ok m -> m
     | Error diags ->
+      (* A syntax error stops the compiler before it can check capabilities,
+         so the commonest second error (a `main` that prints with no grant)
+         only showed up after the syntax was fixed.  Say it now, from the
+         text alone: a zero-argument `main` whose body calls `println` /
+         `print`, in a file with no `needs IO...` line. *)
+      let diags =
+        let lines = String.split_on_char '\n' src in
+        let indent l =
+          let n = String.length l in
+          let rec go i = if i < n && l.[i] = ' ' then go (i + 1) else i in go 0 in
+        let trimmed l = String.trim l in
+        (* [sub] as a call, not the tail of a longer name. *)
+        let calls l sub =
+          let n = String.length l and m = String.length sub in
+          let ident c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                        || (c >= '0' && c <= '9') || c = '_' || c = '.' in
+          let rec go i =
+            i + m <= n
+            && ((String.sub l i m = sub && (i = 0 || not (ident l.[i - 1]))) || go (i + 1)) in
+          go 0 in
+        let code_of l = match String.index_opt l '-' with
+          | Some i when i + 1 < String.length l && l.[i + 1] = '-' -> String.sub l 0 i
+          | _ -> l in
+        let lines = List.map code_of lines in
+        let no_needs = not (List.exists (fun l ->
+            String.starts_with ~prefix:"needs IO" (trimmed l)) lines) in
+        let rec main_body = function
+          | [] -> None
+          | l :: rest when String.starts_with ~prefix:"fn main()" (trimmed l) ->
+            let ind = indent l in
+            let rec take acc = function
+              | [] -> List.rev acc
+              | x :: _ when trimmed x = "end" && indent x <= ind -> List.rev acc
+              | x :: xs -> take (x :: acc) xs in
+            Some (l :: take [] rest)
+          | _ :: rest -> main_body rest in
+        let prints = match main_body lines with
+          | Some body -> List.exists (fun l -> calls l "println(" || calls l "print(") body
+          | None -> false in
+        match diags with
+        | d :: rest when no_needs && prints ->
+          { d with March_errors.Errors.notes = d.March_errors.Errors.notes @ [
+                "After this is fixed, `main` will also need permission to print: add \
+                 `needs IO.Console` to the module, and give `main` the grant, \
+                 `fn main(_console : Cap(IO.Console))`." ] } :: rest
+        | _ -> diags in
       List.iter (fun d ->
         Printf.eprintf "%s\n"
           (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;

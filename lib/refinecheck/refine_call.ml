@@ -3697,10 +3697,30 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                            | Some t when t <> "" && not (String.contains t '\n') -> t
                            | _ -> "…"
                          in
+                         (* The guard is code to paste: the measure `len`
+                            is not a function, so for a `List.` call spell
+                            it as the function that is. *)
+                         let code_guard g =
+                           if not (String.starts_with ~prefix:"List." call_text) then g
+                           else begin
+                             let n = String.length g in
+                             let buf = Buffer.create (n + 16) in
+                             let ident c = match c with
+                               | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '.' -> true
+                               | _ -> false in
+                             let i = ref 0 in
+                             while !i < n do
+                               if !i + 4 <= n && String.sub g !i 4 = "len("
+                                  && (!i = 0 || not (ident g.[!i - 1]))
+                               then (Buffer.add_string buf "List.length("; i := !i + 4)
+                               else (Buffer.add_char buf g.[!i]; incr i)
+                             done;
+                             Buffer.contents buf
+                           end in
                          Printf.sprintf
                            "note: guard the call (e.g. `if %s do %s else … end`) or pass a value \
                             known to satisfy it"
-                           (pred_str (over_args arg rp.pred)) call_text
+                           (code_guard (pred_str (over_args arg rp.pred))) call_text
                        | None ->
                          "note: guard the call or pass a value known to satisfy it")
                     | Bound_expr ->

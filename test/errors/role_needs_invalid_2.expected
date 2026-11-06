@@ -1,7 +1,7 @@
 exit: 1
 -- PROTOCOL ----------- errors/role_needs_invalid_2.march
 
-Protocol `Logging`: `L` is not declared `may crash`, so `L -> I : ...` cannot have a crash branch. [role_needs_invalid]
+Protocol `Logging`: `L` is not declared `may crash`, so `L -> I : ...` cannot have a crash branch. Remove the `or crash do ... end` after it. Declaring `may crash L` instead asks for more: every other role must then be told about the crash. [role_needs_invalid]
 
 12 |     L -> I : Int
          ^^^^^^^^^^^^
