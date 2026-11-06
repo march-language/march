@@ -7,17 +7,75 @@ permalink: /docs/ffi/
 
 # Foreign Function Interface (FFI)
 
-March binds to native libraries through a stable C ABI, the same idea as BEAM's
-`erl_nif.h`. You declare an `extern` block in March, write (or generate) a thin C
-shim against `runtime/march_ffi.h`, and link it through `forge.toml`. Rust crates
-bind through the ergonomic `march` crate, which goes through the same C ABI.
+The FFI lets March call native code. You declare the foreign functions in an `extern`
+block with their March types, write or generate a thin C shim against
+`runtime/march_ffi.h`, and list the shim in `forge.toml`. Rust crates bind through the
+`march` crate, which goes through the same C ABI. The design follows BEAM's
+`erl_nif.h`.
 
-The payoff over a hand-written FFI is that ownership crosses the boundary
-*checked*: each heap argument is either `borrow`ed (March keeps it and frees it
-after the call) or `consume`d (ownership transfers into the binding), and the
-compiler threads the reference counts for you, so the common case needs no
-manual `march_dup`/`march_drop` and can't leak or double-free. The marshalling
-mechanics below are what make that ownership contract concrete for each type.
+Ownership crosses the boundary checked. Each heap argument is either borrowed (March
+keeps it and frees it after the call) or consumed (ownership moves into the binding),
+and the compiler adjusts the reference counts for you. The common case needs no manual
+`march_dup` or `march_drop`, so it cannot leak or double-free.
+
+C code is outside everything the compiler checks, so calling it is a capability: a
+module with an `extern` block declares `needs IO.Foreign`, and `main` has to grant it.
+This page covers writing a binding first, then generating the glue, building and
+linking, and running under the interpreter.
+
+## On this page
+
+**Start here**
+
+- [Which form do I need?](#which-form-do-i-need)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+
+**Writing a binding**
+
+- [Declaring externs](#declaring-externs)
+- [Marshalling tiers](#marshalling-tiers): how each March type crosses
+- [Ownership: `borrow` vs `consume`](#ownership-borrow-vs-consume)
+- [Returning errors: `raises`](#returning-errors-raises)
+- [`blocking`](#blocking)
+- [Native→March callbacks (upcalls)](#nativemarch-callbacks-upcalls)
+
+**Generating and building**
+
+- [Generating the C glue](#generating-the-c-glue)
+- [Binding a Rust crate](#binding-a-rust-crate)
+- [Building & linking](#building--linking)
+- [Interpreter mode](#interpreter-mode)
+
+**Reference**
+
+- [Remaining limitations](#remaining-limitations)
+- [Errors you'll see](#errors-youll-see)
+- [See also](#see-also)
+
+## Which form do I need?
+
+| You want | Write |
+|---|---|
+| To call a C function | An `extern "lib" : Cap(Ffi) do ... end` block in a module that `needs IO.Foreign` |
+| A March name that differs from the C symbol | `fn name(...) : T = "c_symbol"` |
+| The binding to keep a heap argument | `consume` before the parameter |
+| A C function that can fail | Return `Result(T, E)`, and mark it `raises` to fail with `march_raise` |
+| A long C call that must not stall other green threads | `blocking fn ...`, plus `needs IO.Foreign.Blocking` |
+| A native handle March frees for you | A `resource` type; `ResourceArc<T>` from Rust |
+| The C shim written for you | `forge ffi gen-c file.march` |
+| A Rust crate | `#[march]` functions and `march::init!`; `forge ffi add-rust name` to start one |
+| The shim compiled and linked by `forge build` | `[ffi]` (or `[ffi.rust]`) in `forge.toml` |
+
+## How it fits with the rest of March
+
+| Concept | Where the FFI meets it | Chapter |
+|---|---|---|
+| **Capabilities** | An `extern` block needs `IO.Foreign`, a `blocking` one `IO.Foreign.Blocking`; `cap no_extern` forbids both in a module. | [Capabilities]({{ site.baseurl }}/docs/capabilities/#ioforeign--calling-unverified-c) |
+| **Linear types** | `resource` and `consume` make ownership moving across the C boundary explicit, so a handle cannot be freed twice. | [Linear Types]({{ site.baseurl }}/docs/linear-types/#ffi-and-native-resources) |
+| **Memory model** | Arguments are borrowed or consumed under Perceus reference counting; naming a small scalar aggregate in an `extern` signature puts it back on the heap. | [Memory Model]({{ site.baseurl }}/docs/memory-model/) |
+| **Type system** | Values cross by their static type: `Option`, `Result`, records and variants each have a C form. | [Type System]({{ site.baseurl }}/docs/types/) |
+| **Threat model** | C code reached through `extern` is not analysed; the threat model says what that leaves open. | [Capability Threat Model]({{ site.baseurl }}/docs/capability-threat-model/#foreign-code-ioforeign) |
+| **Tooling** | `forge ffi gen-c` and `forge ffi add-rust` write the glue; `forge build` compiles and links it. | [Tooling]({{ site.baseurl }}/docs/tooling/) |
 
 ---
 
@@ -37,7 +95,7 @@ mod Demo do
     fn shout(s: String): String = "demo_shout"
   end
 
-  fn main() : Unit do
+  fn main(_console : Cap(IO.Console), _foreign : Cap(IO.Foreign)) : Unit do
     println(int_to_string(add(2, 3)))    -- 5
     println(shout("hi"))                  -- HI
   end
@@ -46,8 +104,10 @@ end
 
 The `= "symbol"` gives the exact C symbol; omit it and the default is
 `<lib>_<fn>`. Any module with an `extern` block needs the `IO.Foreign`
-[capability](capabilities.md) (and `IO.Foreign.Blocking` if any function is
-`blocking`).
+[capability]({{ site.baseurl }}/docs/capabilities/#ioforeign--calling-unverified-c)
+(and `IO.Foreign.Blocking` if any function is `blocking`), and `main` grants it like
+any other capability: here `Cap(IO.Foreign)` beside `Cap(IO.Console)`. Leaving out
+`needs IO.Foreign` is a warning; leaving out the grant on `main` is an error.
 
 ---
 
@@ -104,7 +164,7 @@ correct with no manual `march_dup`/`march_drop` in the common case.
 
 ---
 
-## Errors
+## Returning errors: `raises`
 
 A `Result`-returning binding can build the result itself with `march_ok` /
 `march_err`. Or mark it `raises` to use the **env-routed** protocol: the binding
@@ -138,6 +198,16 @@ extern "io" : Cap(Ffi) do
   blocking fn read_file(consume path: String): Bytes = "io_read_file"
 end
 ```
+
+---
+
+## Native→March callbacks (upcalls)
+
+C bindings can call back into March closures via `march_call(closure, nargs,
+args)` in `march_ffi.h`. A binding that receives a function-typed argument calls
+it as a plain function pointer. Args use the **native slot representation** (raw
+`int64_t` for `Int`, not `march_make_int`); the return is the generic tagged word
+(`march_get_int` to unpack an `Int`).
 
 ---
 
@@ -274,13 +344,7 @@ takes a function-typed parameter (`fn(Int) -> Int`), the interpreter reports a
 clear error and asks you to run with `--compile`. Compiled mode has no such
 limit.
 
-## Native→March callbacks (upcalls)
-
-C bindings can call back into March closures via `march_call(closure, nargs,
-args)` in `march_ffi.h`. A binding that receives a function-typed argument calls
-it as a plain function pointer. Args use the **native slot representation** (raw
-`int64_t` for `Int`, not `march_make_int`); the return is the generic tagged word
-(`march_get_int` to unpack an `Int`). Verified in `test/native/ffi_upcall`.
+---
 
 ## Remaining limitations
 
@@ -291,6 +355,30 @@ it as a plain function pointer. Args use the **native slot representation** (raw
 - `forge ffi import <header.h>` (C header → draft `extern` block) is not yet
   implemented; it needs a C-header parser (libclang).
 
-The full ABI is documented in `runtime/march_ffi.h`; the design rationale lives
-in `specs/archive/2026-06-19-c-ffi-abi-design.md` and the Rust layer in
-`specs/c-ffi-rust-layer.md`.
+---
+
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) walks through the capability errors an `extern` block can raise, each with a program you can edit and re-check in the browser:
+
+- [`main` with no grant for a capability the program reaches]({{ site.baseurl }}/docs/error-messages/#main-no-grant)
+- [A function that uses a capability its module's `needs` lines leave out]({{ site.baseurl }}/docs/error-messages/#missing-needs)
+
+These codes have their own page, the same text `march --explain` prints:
+
+- [`cap_grant`]({{ site.baseurl }}/docs/errors/cap_grant/): `main` reaches `IO.Foreign` but declares no grant
+- [`cap_needs`]({{ site.baseurl }}/docs/errors/cap_needs/): a module uses `Cap(Ffi)` without `needs Ffi`
+
+A function-typed argument under the interpreter is a run-time error that asks you to
+compile instead; see [Interpreter mode](#interpreter-mode).
+
+---
+
+## See also
+
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/#ioforeign--calling-unverified-c): `IO.Foreign`, `IO.Foreign.Blocking` and `cap no_extern`
+- [Linear Types]({{ site.baseurl }}/docs/linear-types/#ffi-and-native-resources): `resource` and `consume` for native handles
+- [Memory Model]({{ site.baseurl }}/docs/memory-model/): the reference counting the ownership rules plug into
+- [Capability Threat Model]({{ site.baseurl }}/docs/capability-threat-model/#foreign-code-ioforeign): what C code can still do
+- `runtime/march_ffi.h`: the full C ABI
+- `specs/archive/2026-06-19-c-ffi-abi-design.md` and `specs/c-ffi-rust-layer.md`: the design rationale for the C ABI and the Rust layer

@@ -75,12 +75,12 @@ mod CertRoleDeniedA do
         let render_name = "ap:Thumbs/" ++ int_to_string(Thumbs_Msg.role_Render()) ++ "/" ++ Thumbs_Msg.fingerprint() ++ "/" ++ b
         if wait_name(h, ledger_name, 60000) && wait_name(h, render_name, 60000) do () else panic("node-a: node-b's offers never appeared") end
         println(me() ++ ": sees node-b's Checkout.Ledger and Thumbs.Render offers")
-        match Checkout_Run.initiate_Client(c, h, fn (s, st) -> checkout(s, st)) do
+        match Checkout_Run.initiate_Client(h, fn (s, st) -> checkout(s, st)) do
           Ok(_) -> println(me() ++ ": Checkout session formed (wrong)")
           Err(e) -> println(me() ++ ": Checkout: " ++ Checkout_Run.error_message(e))
         end
         let got = Vault.new("cert_role_denied_got")
-        match Thumbs_Run.initiate_Client(c, h, fn (s, st) -> thumbs(s, st, got)) do
+        match Thumbs_Run.initiate_Client(h, fn (s, st) -> thumbs(s, st, got)) do
           Ok(_) -> println(me() ++ ": Thumbs session got " ++ int_to_string(Vault.get_or(got, "n", 0)))
           Err(e) -> println(me() ++ ": Thumbs: " ++ Thumbs_Run.error_message(e))
         end

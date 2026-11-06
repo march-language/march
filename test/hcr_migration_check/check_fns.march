@@ -1,0 +1,62 @@
+-- The functions a --hot-reload build generates for the live-data migration
+-- check (M10, lib/desugar/desugar_migrate_check.ml), called directly:
+-- `<actor>_migrate_state__check` runs the migration and returns the
+-- verdict ("" holds, "!<conjunct>" fails, "?<conjuncts>" the ones it could
+-- not evaluate); `<actor>_migrate_msg__hcr` returns its `none` argument (the
+-- runtime's "dropped") for a converted message that fails the new handler's
+-- refinements.  Not under test/native: without --hot-reload these functions
+-- do not exist, and the corpus sweeps there build without it.  Built with
+-- --accept-unproved Counter.state: the two-argument `lo` is outside the
+-- deploy gate's grammar (and so outside the check's: the "?" verdict).
+mod CheckFns do
+  needs IO.Console
+
+  fn not_137(n : Int) : Bool do n != 137 end
+  fn not_200(n : Int) : Bool do n != 200 end
+  fn lo(a : Int, b : Int) : Int do if a < b do a else b end end
+
+  mod V1 do
+    type Msg = OldBump(Int) | OldReset
+  end
+
+  -- A field refinement (named binder), an @invariant conjunct over a
+  -- declared function, and one the check cannot evaluate (two arguments).
+  -- Every predicate calls a function the prover does not reflect, so the
+  -- build compiles and only the check can decide them.
+  @invariant(not_200(count) && lo(count, limit) >= 0)
+  actor Counter do
+    state { count : {c : Int | not_137(c)}, limit : Int }
+    init { count: 0, limit: 10 }
+    on Bump(k : {Int | not_137(_)}) do { count: state.count + 1, limit: state.limit } end
+    on Reset() do { count: 0, limit: state.limit } end
+  end
+
+  fn counter_migrate_state(old : { count : Int }) : { count : Int, limit : Int } do
+    { count: old.count, limit: 10 }
+  end
+
+  fn counter_migrate_msg(m : V1.Msg) : Option(Counter.Msg) do
+    match m do
+      V1.OldBump(k) -> Some(Counter.Bump(k))
+      V1.OldReset -> Some(Counter.Reset)
+    end
+  end
+
+  fn show(m : Counter.Msg) : String do
+    match m do
+      Counter.Bump(k) -> "Bump(" ++ int_to_string(k) ++ ")"
+      Counter.Reset -> "Reset"
+    end
+  end
+
+  fn verdict(s : String) : String do if s == "" do "holds" else s end end
+
+  fn main(_c : Cap(IO.Console)) do
+    println("count 5: " ++ verdict(counter_migrate_state__check({ count: 5 })))
+    println("count 137: " ++ verdict(counter_migrate_state__check({ count: 137 })))
+    println("count 200: " ++ verdict(counter_migrate_state__check({ count: 200 })))
+    println("Bump(9): " ++ show(counter_migrate_msg__hcr(V1.OldBump(9), Counter.Reset)))
+    println("Bump(137): " ++ show(counter_migrate_msg__hcr(V1.OldBump(137), Counter.Reset)))
+    println("Reset: " ++ show(counter_migrate_msg__hcr(V1.OldReset, Counter.Bump(1))))
+  end
+end

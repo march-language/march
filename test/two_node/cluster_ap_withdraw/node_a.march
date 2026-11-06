@@ -26,7 +26,7 @@ mod ClusterApWithdrawA do
   end
 
   pfn attempt(c : Cap(IO), h : Cap(ClusterNode.Live)) : Bool do
-    match Ring_Run.initiate_A(c, h, fn (s, st) -> role_a(s, st)) do
+    match Ring_Run.initiate_A(h, fn (s, st) -> role_a(s, st)) do
       Ok(_) -> true
       Err(_) -> false
     end

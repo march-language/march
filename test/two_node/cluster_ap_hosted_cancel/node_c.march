@@ -40,7 +40,7 @@ mod ClusterApHostedCancelC do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-c: never joined") end
-        match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, 1)) do
+        match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, 1)) do
           Ok(_) -> println("Client: session 1 done")
           Err(e) -> println("Client: " ++ SessionNode.run_error_message(e))
         end

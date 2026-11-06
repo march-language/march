@@ -91,7 +91,7 @@ mod CertRotateB do
           end)
         println(me() ++ ": up")
         offered(h, 60000)
-        match Order_Run.initiate_Buyer(c, h, fn (s, st) -> buyer(s, st, 1)) do
+        match Order_Run.initiate_Buyer(h, fn (s, st) -> buyer(s, st, 1)) do
           Ok(_) -> println(me() ++ ": session finished")
           Err(e) -> println(me() ++ ": session failed: " ++ Order_Run.error_message(e))
         end

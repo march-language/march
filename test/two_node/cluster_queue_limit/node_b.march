@@ -43,7 +43,7 @@ mod ClusterQueueLimitB do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
-        let _ = Bulk_Run.cluster_Server(c, h, "q1", fn (s, st) -> role_server(s, st))
+        let _ = Bulk_Run.cluster_Server(h, "q1", fn (s, st) -> role_server(s, st))
         ClusterNode.stop(h)
     end
   end

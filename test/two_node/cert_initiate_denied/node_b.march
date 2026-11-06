@@ -49,7 +49,7 @@ mod CertInitiateDeniedB do
       Err(e) -> panic(e)
       Ok(h) ->
         let served = Vault.new("cert_initiate_denied_served")
-        match Checkout_Run.offer_Ledger(c, h, 4, fn (s, st) -> ledger(s, st, served)) do
+        match Checkout_Run.offer_Ledger(h, 4, fn (s, st) -> ledger(s, st, served)) do
           Ok(_) -> println(me() ++ ": offering Checkout.Ledger")
           Err(e) -> panic(Checkout_Run.error_message(e))
         end

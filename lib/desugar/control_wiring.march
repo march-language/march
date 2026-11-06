@@ -566,7 +566,8 @@ end
 -- actor that has passed the deploy's marker, and the loop it spawns runs the
 -- new code.
 pfn ctl_agent_loop(io : Cap(IO), node : Cap(ClusterNode.Live), backoff : Int) : Int do
-  match Ctl_Run.initiate_Agent(io, node, fn (s, nc, fr, mu, ck, st) -> ctl_agent_body(node, s, nc, fr, mu, ck, st)) do
+  match Ctl_Run.initiate_Agent(node, cap_narrow(io), cap_narrow(io), cap_narrow(io), cap_narrow(io),
+                               fn (s, nc, fr, mu, ck, st) -> ctl_agent_body(node, s, nc, fr, mu, ck, st)) do
     Result.Ok(Session.Drained(_)) ->
       sleep_ms(200)
       match Vault.get(ctl_respawners(), "r") do

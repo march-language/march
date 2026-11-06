@@ -15,14 +15,14 @@
     {1 Shape}
 
     - A role bound to a function ([body = "M.f"]) becomes
-      [Topology.offer_role(name, place, capacity, fn cap -> <P>_Run.offer_<R>(io,
-      node, cap, fn (s, caps..., st) -> M.f(env, s, caps..., st)))]: the body's
+      [Topology.offer_role(name, place, capacity, fn cap -> <P>_Run.offer_<R>(node,
+      caps..., cap, fn (s, caps..., st) -> M.f(env, s, caps..., st)))]: the body's
       type is the role's granted body type with the pool's [Env] in front (4.1,
       D34). The capacity is an argument so that a topology re-read on SIGHUP
       can change it without a rebuild (build step 8).
     - A role bound to an actor ([actor = "M.A"], D23) becomes
       [Topology.offer_actor_role(name, place, capacity, fn () -> spawn(A, env),
-      fn (a, cap) -> <P>_Run.offer_hosted_<R>(io, node, cap, a, start, deliver,
+      fn (a, cap) -> <P>_Run.offer_hosted_<R>(node, caps..., cap, a, start, deliver,
       cancel))],
       one actor per offer, whose three callbacks forward to the actor's
       [Start(sid, s, caps...)], [Deliver(sid, s, from, msg, ep)] and
@@ -454,13 +454,23 @@ let main_source ?pools (f : facts) (t : t) : string =
     let encoded = String.concat "" (List.init (String.length key)
         (fun i -> Printf.sprintf "%02x" (Char.code key.[i]))) in
     "__topology_entry_" ^ encoded in
+  let grant_args k = String.concat "" (List.init k (fun _ -> "cap_narrow(topology_io), ")) in
   let work_factory key run role body ps =
     let name = work_name key in
     Printf.bprintf adapters "fn %s_body(topology_env, %s) do %s(%s) end\n"
       name (String.concat ", " ps) body (String.concat ", " ("topology_env" :: ps));
+    (* [ps] is the session, one name per granted capability, the entry state:
+       the front takes the grant as arguments, and `main` holds the root
+       capability to narrow each from.  [topology_io] is annotated because
+       nothing else pins it: `cap_narrow` takes any capability, and a role
+       with no grant does not use it at all.  Unpinned, the adapter is
+       generic, monomorphisation names it after its argument types (the
+       pool's Env among them), and a hot deploy that changes Env meets a new
+       symbol where the ABI guard expects the old one with a new hash. *)
     Printf.bprintf adapters
-      "fn %s_open(topology_env, topology_io, topology_node, topology_cap) do\n  %s.offer_work_%s(topology_io, topology_node, topology_cap, fn (%s) -> %s_body(%s))\nend\n"
-      name run role (String.concat ", " ps) name (String.concat ", " ("topology_env" :: ps));
+      "fn %s_open(topology_env, topology_io : Cap(IO), topology_node, topology_cap) do\n  %s.offer_work_%s(topology_node, %stopology_cap, fn (%s) -> %s_body(%s))\nend\n"
+      name run role (grant_args (List.length ps - 2))
+      (String.concat ", " ps) name (String.concat ", " ("topology_env" :: ps));
     name ^ "_open" in
   let pools = selected_pools ?pools t in
   add "fn main(topology_io : Cap(IO)) do\n";
@@ -525,8 +535,8 @@ let main_source ?pools (f : facts) (t : t) : string =
                     Printf.bprintf adapters "fn %s_spawn(topology_env) do %s(topology_env) end\n"
                       name (h "spawn");
                     Printf.bprintf adapters
-                      "fn %s_open(topology_a, topology_io, topology_node, topology_cap) do\n  %s.offer_work_hosted_%s(topology_io, topology_node, topology_cap, topology_a,\n    %s,\n    %s,\n    %s)\nend\n"
-                      name run r.r_role start deliver cancel;
+                      "fn %s_open(topology_a, topology_io : Cap(IO), topology_node, topology_cap) do\n  %s.offer_work_hosted_%s(topology_node, %stopology_cap, topology_a,\n    %s,\n    %s,\n    %s)\nend\n"
+                      name run r.r_role (grant_args (List.length caps)) start deliver cancel;
                     Some (Printf.sprintf
                             "      Topology.offer_actor_role(%S, %s, %d, fn () -> %s_spawn(%s),\n        fn (topology_a, topology_cap) -> %s_open(topology_a, topology_io, topology_node, topology_cap))"
                             r.r_name (place_src r.r_place) cap name env name))

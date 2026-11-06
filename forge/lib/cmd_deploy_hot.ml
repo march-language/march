@@ -2197,6 +2197,12 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
               in
               if not commit_ok then begin
                 Printf.eprintf "  COMMIT_BATCH failed: %s\n%!" commit_resp;
+                (match String.split_on_char ' ' commit_resp with
+                 | "ERR" :: "migration_check" :: actor :: rest ->
+                   Printf.eprintf
+                     "  refused: %s's new migrate_state fails on its live state (%s); \
+                      nothing was activated\n%!" actor (String.concat " " rest)
+                 | _ -> ());
                 failed := !activated  (* mark all as failed *)
               end
             end else begin

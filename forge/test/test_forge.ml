@@ -3236,6 +3236,52 @@ let test_refine_infer_falls_back_per_file () =
       | Ok sk -> Alcotest.(check (list string)) "each file tried on its own" [ a; b ] (List.map fst sk)
       | Error e -> Alcotest.failf "unexpected error: %s" e)
 
+(* The fallback used to run every file as its own entry, but each run loads
+   the modules its entry names, so every run inferred over (most of) the
+   project and printed the same proposals: depot printed each of its 3 metric
+   proposals 30 times.  Each proposal is printed once. *)
+let test_refine_infer_fallback_prints_each_proposal_once () =
+  if not (z3_on_path ()) then Alcotest.skip ();
+  with_dev_march_on_path (fun () ->
+      let root = Filename.temp_dir "forge_infer_once_" "" in
+      let lib = Filename.concat root "lib" in
+      Unix.mkdir lib 0o755;
+      let write n s = let f = Filename.concat lib n in Out_channel.with_open_bin f (fun oc -> output_string oc s); f in
+      let good =
+        write "good.march"
+          "mod Good do\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn run() : Int do go([1]) end\nend\n" in
+      let other = write "other.march" "mod Other do\n  fn twice() : Int do Good.run() + Good.run() end\nend\n" in
+      let third = write "third.march" "mod Third do\n  fn thrice() : Int do Good.run() + Other.twice() end\nend\n" in
+      let bad = write "bad.march" "mod Bad do\n  fn oops() : Int do \"no\" end\nend\n" in
+      let env = Printf.sprintf "HOME=%s MARCH_LIB_PATH=%s " (Filename.quote root) (Filename.quote lib) in
+      flush stdout;
+      let capture = Filename.temp_file "forge_infer_once_" ".out" in
+      let saved = Unix.dup Unix.stdout in
+      let fd = Unix.openfile capture [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+      Unix.dup2 fd Unix.stdout;
+      Unix.close fd;
+      let r =
+        Fun.protect
+          ~finally:(fun () -> flush stdout; Unix.dup2 saved Unix.stdout; Unix.close saved)
+          (fun () -> March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ good; other; third; bad ] ~apply:false ~diff:true ())
+      in
+      let out = read_all capture in
+      (try Sys.remove capture with Sys_error _ -> ());
+      let count needle =
+        let n = String.length needle in
+        let rec go i acc =
+          match Str.search_forward (Str.regexp_string needle) out i with
+          | exception Not_found -> acc
+          | j -> go (j + n) (acc + 1)
+        in
+        ignore n; go 0 0
+      in
+      (match r with
+       | Ok sk ->
+         Alcotest.(check (list string)) ("only bad.march skipped: " ^ out) [ bad ] (List.map fst sk)
+       | Error e -> Alcotest.failf "error: %s" e);
+      Alcotest.(check int) ("the proposal printed once: " ^ out) 1 (count "+  fn pos_only(xs : List(Int)) : List({Int | _ > 0})"))
+
 let test_refine_infer_apply_whole_project () =
   if not (z3_on_path ()) then Alcotest.skip ();
   with_dev_march_on_path (fun () ->
@@ -3274,6 +3320,7 @@ let () =
       Alcotest.test_case "a clean run skips nothing" `Quick test_refine_infer_clean_run_skips_nothing;
       Alcotest.test_case "a reverted apply is an error" `Quick test_refine_infer_mismatch_is_an_error;
       Alcotest.test_case "a project that does not check as a unit falls back per file" `Quick test_refine_infer_falls_back_per_file;
+      Alcotest.test_case "the per-file fallback prints each proposal once" `Slow test_refine_infer_fallback_prints_each_proposal_once;
       Alcotest.test_case "--apply checks the project as one unit" `Slow test_refine_infer_apply_whole_project;
       Alcotest.test_case "--apply-public is passed through" `Slow test_refine_infer_apply_public;
     ];

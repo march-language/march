@@ -1,0 +1,6 @@
+-- gauge 1.0: formats a node's health reading.
+mod Gauge do
+  fn line(live : Int, at : Int) : String do
+    IOList.to_string(~H"live ${live}\nat ${at}\n")
+  end
+end

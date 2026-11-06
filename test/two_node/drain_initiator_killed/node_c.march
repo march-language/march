@@ -39,7 +39,7 @@ mod DrainInitKilledC do
   -- One initiator: sessions back to back. The first 20 finished sessions
   -- across all initiators print "node-c: traffic flowing" once.
   pfn traffic(c : Cap(IO), h : Cap(ClusterNode.Live), done : Vault(Int)) : Int do
-    match Order_Run.initiate_Shop(c, h, fn (s, st) -> shop(s, st, 101)) do
+    match Order_Run.initiate_Shop(h, fn (s, st) -> shop(s, st, 101)) do
       Ok(_) ->
         if Vault.incr(done, "sessions", 1) == 20 do println("node-c: traffic flowing") else () end
       Err(_) -> sleep_ms(10)

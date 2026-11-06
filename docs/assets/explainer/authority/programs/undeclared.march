@@ -1,0 +1,13 @@
+-- A module that reaches for the network without saying so. Modelled on the lab app's
+-- Probe, which writes each node's health reading to a file.
+mod Probe do
+  needs IO.FileWrite
+  needs IO.Clock
+
+  fn report(home : String) : () do
+    let line = "at " ++ int_to_string(unix_time_ms()) ++ "\n"
+    let _ = tcp_connect("collector.example", 4317)
+    let _ = File.write(home ++ "/lab-probe", line)
+    ()
+  end
+end

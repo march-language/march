@@ -31,7 +31,7 @@ mod ClusterApRetryC do
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-c: never joined") end
         println("node-c: offering")
-        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+        match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st)) do
           Err(e) -> panic(Echo_Run.error_message(e))
           Ok(_) -> sleep_ms(600000)
         end

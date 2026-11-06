@@ -16,8 +16,7 @@ Phases (design §7):
   `2026-11-04-invariant-unsupported-expression-silently-dropped`). Field refinements of an
   anonymous-record `migrate_state` parameter reach `old.f` (done: progress
   `2026-11-04-anon-record-param-field-refinements`). Actor message constructors are
-  resolved by datatype (todo `2026-10-15-actor-message-ctor-cannot-be-qualified`). HCR
-  counterexamples for the migration obligations. G4 done (progress
+  resolved by datatype. HCR counterexamples for the migration obligations. G4 done (progress
   `2026-10-15-actor-message-ctor-cannot-be-qualified`,
   `2026-11-04-interp-actor-dispatch-by-name`): `<Actor>.<Msg>` resolves, a shared name is
   obliged per actor, and both backends drop a same-named foreign message, so the handler
@@ -25,8 +24,10 @@ Phases (design §7):
   build against the deployed baseline: done (progress
   `2026-11-05-hcr-migration-counterexamples`); its residuals (named-record parameters,
   binder hypotheses for `migrate_msg`, multi-field invariants) carry into phase F.
-- **A2.** Dry-run `migrate_state` on copies of the live states before `ACTIVATE`; derive
-  mechanical migrations from the schema diff, each derivation rule proved once.
+- **A2.** Dry-run `migrate_state` on copies of the live states before `ACTIVATE`: done
+  (progress `2026-11-05-hcr-live-data-migration-check`, M10, with the converted-message
+  contract check). Derive mechanical migrations from the schema diff, each derivation rule
+  proved once (M11): open.
 - **B.** `march --check --guarantees` / `forge hot-reload check`: one labelled line per actor
   and protocol (`proved`, `proved (model) · tested (runtime)`,
   `proved (spec) · validated (compiler)`, `assumed`).
