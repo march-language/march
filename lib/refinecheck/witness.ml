@@ -77,8 +77,20 @@ let with_lambda (name : string) (lam : A.expr) (f : unit -> 'a) : 'a =
   active_lambda := Some (name, lam);
   Fun.protect ~finally:(fun () -> active_lambda := saved) f
 
+(* Confirmed counterexample assignments for call-site precondition
+   violations, keyed by the call's span ([record_example]), so the caller of
+   [check_call] can run that call ([run_call]).  Display only: nothing here
+   is read by a verdict. *)
+let examples : (A.span, (string * V.value) list) Hashtbl.t = Hashtbl.create 16
+
+let record_example (span : A.span) (entries : (string * V.value) list) : unit =
+  let prior = Option.value ~default:[] (Hashtbl.find_opt examples span) in
+  Hashtbl.replace examples span
+    (prior @ List.filter (fun (n, _) -> not (List.mem_assoc n prior)) entries)
+
 let set_module (m : A.module_) : unit =
   active_lambda := None;
+  Hashtbl.reset examples;
   (match !current_module with
    | Some m' when m' == m -> ()   (* same run (check_module then division_safety) *)
    | _ ->
@@ -1612,3 +1624,66 @@ let confirm_migration ~(fn : A.fn_def) ~(site : migration_site) ~(pred : A.expr)
        |> fun r -> ignore pname; r
      | _ -> None)
   | _ -> None
+
+(* =================================================================
+   §11  Running a violating call (plan 2026-11-02 §F4, "what happens")
+
+   A call-site violation whose arguments are all concrete (closed, or built
+   only from a confirmed counterexample's names) is run once, through the
+   same uncharged, fuel-bounded, effect-vetoed harness as the parity net
+   ([call_fn_classified]), and the outcome is reported in one line when it
+   is a failure: a user panic, a failed `assert`, a `match` with no arm for
+   the value, an Int overflow or a division by zero.  A return, the fuel
+   running out, a blocked effect or any other evaluator error says nothing
+   and is [None].  Display only: never read by a verdict, never charged to
+   [wall_budget] (a promotion elsewhere must see the same budget it always
+   did), deterministic because the fuel counts reductions, not time.
+   ================================================================= *)
+
+(* Run [f] without charging [wall_budget]: a display-only execution must not
+   leave a later promotion less budget than it would have had.  The module
+   environment is built (and charged) first, exactly as the first charged
+   execution would build it, so skipping the charge here never hands a
+   later one MORE budget than it had either. *)
+let uncharged (f : unit -> 'a) : 'a =
+  ignore (module_env ());
+  let saved = !wall_budget in
+  Fun.protect ~finally:(fun () -> wall_budget := saved) f
+
+let run_call ~(fn_name : string) ~(shown_as : string) ~(bindings : (string * V.value) list)
+    (args : A.expr list) : string option =
+  uncharged @@ fun () ->
+  let bound = List.map fst bindings in
+  if not (List.for_all (fun a -> List.for_all (fun x -> List.mem x bound) (free_vars a)) args) then None
+  else
+    let vals =
+      List.map
+        (fun a ->
+          match eval_operand ~lookup:(fun n -> List.assoc_opt n bindings) a with
+          | Some v -> Some v
+          | None ->
+            (match eval_classified ~bindings a with C_ret v -> Some v | _ -> None))
+        args
+    in
+    if not (List.for_all Option.is_some vals) then None
+    else
+      let vals = List.map Option.get vals in
+      match render_call shown_as (List.map (fun v -> ("", v)) vals) with
+      | None -> None
+      | Some call ->
+        let first_line m =
+          match String.index_opt m '\n' with Some i -> String.sub m 0 i | None -> m
+        in
+        let tidy m =
+          let m = String.trim (first_line m) in
+          if String.length m > 120 then String.sub m 0 117 ^ "..." else m
+        in
+        let says what = Some (Printf.sprintf "running `%s` %s" call what) in
+        (match call_fn_classified ~name:fn_name ~args:vals with
+         | C_panic m when String.length m > 7 && String.sub m 0 7 = "assert:" ->
+           says ("fails an `assert`:" ^ String.sub m 7 (String.length m - 7) |> tidy)
+         | C_panic m -> says (Printf.sprintf "panics: %S" (tidy m))
+         | C_match_failure m -> says ("fails: " ^ tidy m)
+         | C_overflow m -> says ("panics: " ^ tidy m)
+         | C_not_run m when m = "division by zero" -> says "panics: division by zero"
+         | C_not_run _ | C_ret _ | C_fuel -> None)

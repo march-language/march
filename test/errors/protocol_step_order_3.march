@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: other branch: `no`
+-- REJECT (sequence diagram): a step out of order inside a `choose` branch; the diagram shows the
+-- branch taken and names the other one.
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Shop do
+    req: C -> S : Int
+    choose by S:
+      ok -> S -> C : String
+            ack:   C -> S : Bool
+            total: S -> C : Int
+      no -> S -> C : Bool
+    end
+  end
+  pfn role_c(s : Cap(Session.Live), st : Shop_C.Entry) : Shop_C.Yield do
+    let st1 = Shop_C.send_Req(s, st, 3)
+    Shop_C.offer_ok_no(s, st1,
+      fn (_item, st2) -> Shop_C.recv_Total(s, st2, fn (_n, st3) -> Shop_C.close(s, st3)),
+      fn (_sorry, st2) -> Shop_C.close(s, st2))
+  end
+  fn main(c : Cap(IO)) do () end
+end

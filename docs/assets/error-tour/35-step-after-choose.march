@@ -1,0 +1,16 @@
+mod Main do
+  type A = A
+  type B = B
+
+  protocol Batch do
+    choose by A:
+      more -> loop do A -> B : Int end
+      done -> A -> B : Bool
+    end
+    B -> A : Bool
+  end
+
+  fn main() do
+    ()
+  end
+end

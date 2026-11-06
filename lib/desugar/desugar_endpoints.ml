@@ -57,7 +57,7 @@ let attr = "endpoints"
 
 (* ── the local session type, over surface types ───────────────────────── *)
 
-(** A role's projection, mirroring [Typecheck_session.project_steps] but over
+(** A role's projection, mirroring [Typecheck_session.project_steps_at] but over
     [Ast.ty] (so payload types survive verbatim) and carrying the message
     CONSTRUCTOR each step encodes to.  [LOffer]/[LChoose] fuse the label with
     the branch-head message that carries it. *)
@@ -372,62 +372,108 @@ let merge ~multiparty ~strict ~chooser (arms : (string * lty) list) : lty =
           cannot run) so the fault is reported there. *)
        LOffer (chooser, List.map (fun (lbl, arm) -> (lbl, capitalize lbl, TyTuple [], arm)) arms))
 
-(** Project onto [role].  Same rules as [project_steps]: a loop is a binder
+(** Where each state of a projection sits in the protocol
+    ([March_ast.Protocol_states.pos], for the diagram): the nodes [project]
+    builds, tagged as it builds them, and the positions of its `LEnd`s
+    ([None] for one whose place is not tracked, as in a crash branch).
+    `LEnd` is one node however many times it is reached, so its position is
+    known only when the role's conversation ends in exactly one place. *)
+type tags = {
+  mutable nodes : (lty * int list) list;
+  mutable ends  : int list option list;
+}
+
+let untag (tags : tags) prefix =
+  let rec has_prefix p q = match p, q with
+    | [], _ -> true
+    | x :: xs, y :: ys -> x = y && has_prefix xs ys
+    | _, [] -> false in
+  tags.nodes <- List.filter (fun (_, p) -> not (has_prefix prefix p)) tags.nodes;
+  tags.ends <- List.map (function Some p when has_prefix prefix p -> None | e -> e) tags.ends
+
+let pos_of (tags : tags) (t : lty) : int list option =
+  match t with
+  | LEnd -> (match tags.ends with [ Some p ] -> Some p | _ -> None)
+  | _ -> List.assq_opt t tags.nodes
+
+(** Project onto [role].  Same rules as [project_steps_at]: a loop is a binder
     whose back-edge is the loop's own variable, `stop` is [LEnd] outright, and
     a non-chooser merges a choice only in a multiparty protocol and only when
     every branch projects identically.  A crash branch ends the protocol (or
-    the loop): its continuation is [LEnd], never the enclosing one. *)
-let rec project ~proto ~multiparty (steps : astep list) (role : string) (cont : lty) : lty =
+    the loop): its continuation is [LEnd], never the enclosing one.
+
+    [at] is the path to the step list being projected, innermost index first,
+    or [None] below a step whose position is not tracked; [i] the index of
+    [steps]'s head in that list.  Only the end of the top-level list is the
+    conversation's end: a branch's or a loop body's `[]` is its continuation. *)
+let rec project ~proto ~multiparty ~(tags : tags) ~(at : int list option) ~(i : int)
+    (steps : astep list) (role : string) (cont : lty) : lty =
+  let here () = Option.map (fun p -> List.rev (i :: p)) at in
+  let tag node = (match here () with Some p -> tags.nodes <- (node, p) :: tags.nodes | None -> ()); node in
+  let inside ~branch = match at with
+    | Some p -> Some (match branch with Some b -> b :: i :: p | None -> i :: p)
+    | None -> None in
   match steps with
-  | [] -> cont
+  | [] -> (if at = Some [] then tags.ends <- Some [ i ] :: tags.ends); cont
   | step :: rest ->
-    let rest_ty () = project ~proto ~multiparty rest role cont in
+    let rest_ty () = project ~proto ~multiparty ~tags ~at ~i:(i + 1) rest role cont in
     (match step with
      | AMsg (s, r, t, ctor) ->
-       if s = role then LSend (r, ctor, t, rest_ty ())
-       else if r = role then LRecv (s, ctor, t, rest_ty ())
+       if s = role then tag (LSend (r, ctor, t, rest_ty ()))
+       else if r = role then tag (LRecv (s, ctor, t, rest_ty ()))
        else rest_ty ()
      | ACrashOr (AMsg (s, r, t, ctor), crash) ->
-       let crash_ty () = project ~proto ~multiparty crash role LEnd in
+       let crash_ty () = project ~proto ~multiparty ~tags ~at:None ~i:0 crash role LEnd in
        if s = role then
          (* A crashed role does nothing: the crash branch does not exist for it. *)
-         LSend (r, ctor, t, rest_ty ())
-       else if r = role then LRecvCrash (s, [ (ctor, ctor, t, rest_ty ()) ], crash_ty ())
+         tag (LSend (r, ctor, t, rest_ty ()))
+       else if r = role then tag (LRecvCrash (s, [ (ctor, ctor, t, rest_ty ()) ], crash_ty ()))
        else
          (* A third party: told by the detector [r] which way it went. *)
          merge ~multiparty ~strict:false ~chooser:r [ (ctor, rest_ty ()); ("crash", crash_ty ()) ]
      | ACrashOr (other, crash) ->
        (* Not a message (cannot be built by [annotate]); project what is there. *)
-       project ~proto ~multiparty (other :: crash @ rest) role cont
+       project ~proto ~multiparty ~tags ~at:None ~i:0 (other :: crash @ rest) role cont
      | ALoop (atomic, inner) ->
        let x = proto ^ "_loop" in
-       (match project ~proto ~multiparty inner role (LVar x) with
+       (match project ~proto ~multiparty ~tags ~at:(inside ~branch:None) ~i:0 inner role (LVar x) with
         | LVar _ -> rest_ty ()
         | body -> LRec (x, atomic, body))
-     | AStop -> LEnd
+     | AStop -> tags.ends <- here () :: tags.ends; LEnd
      | AChoice (chooser, branches) ->
        let after = rest_ty () in
        let crash_arm = List.find_opt (fun (lbl, _) -> lbl = "crash") branches in
        let normal = List.filter (fun (lbl, _) -> lbl <> "crash") branches in
        let arms =
-         List.map (fun (lbl, arm) -> (lbl, project ~proto ~multiparty arm role after)) normal
+         List.mapi (fun b (lbl, arm) ->
+             (lbl, project ~proto ~multiparty ~tags ~at:(inside ~branch:(Some b)) ~i:0 arm role after)) normal
        in
-       let crash_ty = Option.map (fun (_, arm) -> project ~proto ~multiparty arm role LEnd) crash_arm in
+       let crash_ty = Option.map (fun (_, arm) -> project ~proto ~multiparty ~tags ~at:None ~i:0 arm role LEnd) crash_arm in
+       (* A bystander whose branches all project alike never learns which
+          was taken: the states inside have no one place in the conversation. *)
+       (match arms with
+        | (_, first) :: more when chooser <> role && multiparty
+                                  && List.for_all (fun (_, a) -> lty_equal a first) more ->
+          (match here () with Some p -> untag tags p | None -> ())
+        | _ -> ());
        if chooser = role then
          (* The branch head is this role's own send (checked in [annotate]), so
             its receiver is the branch's destination -- per branch, since a
             multiparty choice may tell a different role on each label.  The
             crash branch, if any, is not this role's: it has crashed. *)
-         LChoose
+         tag (LChoose
            (List.map
               (fun (lbl, arm) ->
                  match arm with
                  | LSend (to_, ctor, t, next) -> (lbl, to_, ctor, t, next)
                  | _ -> (lbl, chooser, capitalize lbl, TyTuple [], arm))
-              arms)
+              arms))
        else
          (match crash_ty with
-          | None -> merge ~multiparty ~strict:true ~chooser arms
+          | None ->
+            (match merge ~multiparty ~strict:true ~chooser arms with
+             | LOffer _ as offer -> tag offer
+             | merged -> merged)
           | Some crash ->
             (* Every branch head is a message from the chooser (checked in
                [annotate]); the role that RECEIVES all of them is the
@@ -817,7 +863,7 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) ?(hel
 (** Record, for each generated state of [role], the step it stands for
     ([March_ast.Protocol_states], §F3): what the role does there, the function
     that does it, and where the protocol says so. *)
-let record_states ~proto ~role ~mname (names : (lty * string) list) =
+let record_states ~proto ~role ~mname ~(pos_of : lty -> int list option) (names : (lty * string) list) =
   let a_ty t =
     let s = show_ty t in
     let art = match s.[0] with 'A' | 'E' | 'I' | 'O' | 'U' -> "an" | _ -> "a" | exception _ -> "a" in
@@ -853,7 +899,8 @@ let record_states ~proto ~role ~mname (names : (lty * string) list) =
         | LOffer (_, brs) -> List.map (fun (l, _, _, nx) -> (l, match nx with LEnd -> true | _ -> false)) brs
         | _ -> [] in
       let info = { March_ast.Protocol_states.ps_proto = proto; ps_role = role; ps_doing = doing;
-                   ps_call = mname ^ "." ^ call; ps_span = span; ps_branches = branches } in
+                   ps_call = mname ^ "." ^ call; ps_span = span; ps_branches = branches;
+                   ps_pos = pos_of node } in
       if doing <> "" then begin
         March_ast.Protocol_states.record ~state:(mname ^ "." ^ this) info;
         (match node with
@@ -876,12 +923,12 @@ let record_states ~proto ~role ~mname (names : (lty * string) list) =
     role's body by. *)
 let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors : int)
     ~(grants : string list) ~(crash_points : string list) ?(held_labels : string list = [])
-    (role : string) (root : lty)
+    (role : string) ((root : lty), (tags : tags))
     : decl * string =
   let mname = proto ^ "_" ^ role in
   let msg = proto ^ "_Msg" in
   let names = state_names root in
-  record_states ~proto ~role ~mname names;
+  record_states ~proto ~role ~mname ~pos_of:(pos_of tags) names;
   let binders = binders_of root [] in
   (* D27 drain points: the state at the head of every loop that is not
      `loop atomic`.  A receive there is where an iteration BEGINS for this
@@ -2581,6 +2628,7 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
     (function
       | DProtocol (name, pdef, span) when List.mem attr pdef.proto_attrs ->
         let proto = name.txt in
+        March_ast.Protocol_states.record_protocol ~proto pdef.proto_steps;
         (match annotate errors ~proto ~span pdef.proto_steps with
          | None -> []
          | Some steps ->
@@ -2659,7 +2707,8 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                        ~crash_points:(crash_ctors_of steps role)
                        ~held_labels:(match held with Some (c, l, _) when c = role -> [ l ] | _ -> [])
                        role
-                       (project ~proto ~multiparty steps role LEnd))
+                       (let tags = { nodes = []; ends = [] } in
+                        (project ~proto ~multiparty ~tags ~at:(Some []) ~i:0 steps role LEnd, tags)))
                   roles
               in
               let run =

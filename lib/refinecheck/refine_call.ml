@@ -761,6 +761,52 @@ type call_ctx = {
          unshadowed one.  [`Na] leaves the obligation's skip as it was. *)
 }
 
+(* ── Counterexample wording (plan 2026-11-02 §F4 point 3) ──────────────
+   "for example, when `k` is `-1` and `n` is `3`": the values the solver
+   found, in source syntax, each named as the program names it. *)
+let join_when (parts : string list) : string option =
+  match List.rev parts with
+  | [] -> None
+  | [ x ] -> Some ("for example, when " ^ x)
+  | last :: rest -> Some ("for example, when " ^ String.concat ", " (List.rev rest) ^ " and " ^ last)
+
+(* A witness-confirmed assignment ([Witness.confirm_precond]). *)
+let example_of_entries (entries : (string * March_eval.Eval_types.value) list) : string option =
+  let rs =
+    List.map
+      (fun (n, v) -> Option.map (fun s -> Printf.sprintf "`%s` is `%s`" n s) (Witness.render_value v))
+      entries
+  in
+  if List.for_all Option.is_some rs then join_when (List.map Option.get rs) else None
+
+(* The raw model, when no witness confirmed it.  A pass-site obligation's
+   subject is the synthetic `$cb_x` ([Refine_check.fresh_cb_arg]): the value
+   the passed function would be given.  Other synthetic names (`$`) are
+   rendered by [render_model_entry], whose phrasing never names one. *)
+let example_of_model ~(callee : string) ~(subject : check_subject) (model : (string * string) list) : string =
+  let plain k =
+    k <> "" && (match k.[0] with 'a' .. 'z' | '_' -> true | _ -> false)
+    && String.for_all (fun c -> match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false) k
+  in
+  let parts =
+    List.map
+      (fun (k, v) ->
+        if k = "$cb_x" && subject = Callback_domain then
+          Printf.sprintf "`%s` is given `%s`" callee (pretty_smt_value v)
+        (* An element obligation's subject ([Refine_check.check_elements]). *)
+        else if k = "$elem" then Printf.sprintf "an element is `%s`" (pretty_smt_value v)
+        else if plain k then Printf.sprintf "`%s` is `%s`" k (pretty_smt_value v)
+        else Printf.sprintf "`%s`" (render_model_entry (k, v)))
+      (visible_model model)
+  in
+  Option.value ~default:"" (join_when parts)
+
+(* [inner] lies inside [outer] (same file). *)
+let span_within (inner : A.span) (outer : A.span) : bool =
+  inner.A.file = outer.A.file
+  && (inner.A.start_line, inner.A.start_col) >= (outer.A.start_line, outer.A.start_col)
+  && (inner.A.end_line, inner.A.end_col) <= (outer.A.end_line, outer.A.end_col)
+
 let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     ?(kind = Obligation.Precondition)
     ?(goal_scope_facts = false) ?(entry_label : string option)
@@ -3413,31 +3459,107 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              (* Point at the offending argument itself. The call span covers the
                 whole expression, which on a multi-argument call underlines
                 everything and singles out nothing. *)
-             let labels =
-               match subject, List.nth_opt args rp.idx with
-               | Argument, Some a ->
-                 let sp = arg_span span a in
-                 if sp = span then []
-                 else
-                   [{ Err.lbl_span = sp;
-                      Err.lbl_message =
-                        display_measures
-                          (Printf.sprintf "this argument must satisfy `%s`"
-                             (pred_str rp.pred)) }]
-               | _ -> []
+             (* The author's words for the conjunct(s) this call breaks lead
+                the message, and the line under them names the argument and
+                exactly those conjuncts.  Without a message the whole
+                predicate is quoted, as it always was. *)
+             let broken =
+               refuted_messages
+                 ~refuted:(fun g ->
+                   Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not g }
+                   = Refine.Verified)
+                 ~goal rp.pred
              in
-             (* The inline example: prefer a witness-validated, shrunk,
-                source-syntax assignment over the raw model rendering —
-                fall back to the raw one whenever anything in the pipeline
-                (an undecodable sort, an unevaluable path fact) refuses. *)
-             let cx_str =
-               let fallback () = format_cx (model_of first) in
-               match subject, List.nth_opt args rp.idx with
+             (* What the rest of the diagnostic says, in the reader's names
+                (plan 2026-11-02 §F4).  The predicate's binder (`_`, or a
+                named `v`) stands for the argument; the reader wrote neither
+                at the call.  [failing] is the part of the predicate this call
+                breaks; [over_args] reads a predicate at the call's own
+                actuals, the other parameters it names (`_ < len(xs)`)
+                included, so `if i < len(items)` and never `if _ < len(xs)`. *)
+             let arg_opt = match subject with Argument -> List.nth_opt args rp.idx | _ -> None in
+             let real_param =
+               match List.nth_opt sg.param_names rp.idx with
+               | Some p when p <> "" && p.[0] <> '$' && entry_label = None -> Some p
+               | _ -> None
+             in
+             let failing =
+               match broken with
+               | [] -> rp.pred
+               | (p, _) :: rest ->
+                 List.fold_left
+                   (fun acc (q, _) ->
+                     A.EApp (A.EVar { A.txt = "&&"; A.span = A.dummy_span }, [ acc; q ], A.dummy_span))
+                   p rest
+             in
+             let binder_names =
+               rp.binder :: "_" :: (match real_param with Some p -> [ p ] | None -> [])
+             in
+             let over_args (arg : A.expr) (p : A.expr) : A.expr =
+               let others =
+                 List.concat
+                   (List.mapi
+                      (fun i pn ->
+                        if i = rp.idx || pn = "" || pn.[0] = '$' || List.mem pn binder_names then []
+                        else match List.nth_opt args i with Some a -> [ (pn, a) ] | None -> [])
+                      sg.param_names)
+               in
+               subst_params (List.map (fun b -> (b, arg)) binder_names @ others) p
+             in
+             let over_param (p : A.expr) : A.expr option =
+               Option.map
+                 (fun pn ->
+                   let x = A.EVar { A.txt = pn; A.span = A.dummy_span } in
+                   subst_params (List.map (fun b -> (b, x)) binder_names) p)
+                 real_param
+             in
+             (* [pred_str] prints `<predicate>` for a form it cannot spell
+                (a record literal read into `v.port >= 1`); such a rendering
+                is not shown, the parameter-named or declared one is. *)
+             let printable (p : A.expr) : string option =
+               let t = pred_str p in
+               let ph = "<predicate>" in
+               let n = String.length ph and m = String.length t in
+               let rec has i = i + n <= m && (String.sub t i n = ph || has (i + 1)) in
+               if has 0 then None else Some t
+             in
+             let at_arg_or_named (a : A.expr) (p : A.expr) : string =
+               match printable (over_args a p) with
+               | Some t -> t
+               | None ->
+                 (match Option.bind (over_param p) printable with
+                  | Some t -> t
+                  | None -> pred_str p)
+             in
+             (* The argument as written, for quoting; the printer's spelling
+                only when the source cannot be read. *)
+             let src_text (a : A.expr) : string =
+               match March_typecheck.Typecheck_suggest.text_of (arg_span span a) with
+               | Some t when t <> "" && not (String.contains t '\n') -> t
+               | _ -> pred_str a
+             in
+             (* A closed argument's value (`0 - 5` is `-5`), when it folds. *)
+             let closed_value (a : A.expr) : string option =
+               if Witness.free_vars a <> [] then None
+               else
+                 Witness.uncharged (fun () ->
+                     Option.bind (Witness.eval_operand ~lookup:(fun _ -> None) a) Witness.render_value)
+             in
+             (* The counterexample, as the line "for example, when `k` is
+                `-1`": prefer a witness-validated, shrunk, source-syntax
+                assignment over the raw model — fall back to the raw one
+                whenever anything in the pipeline (an undecodable sort, an
+                unevaluable path fact) refuses.  A confirmed assignment is
+                also kept for [Refine_check]'s run of the call (§F4's
+                "what happens when it runs"). *)
+             let example =
+               let fallback () = example_of_model ~callee ~subject (model_of first) in
+               match arg_opt with
                (* A closed argument (`Array.get(v, -1)`) IS its own example: the
                   message already quotes the call, and the raw model names only
                   solver symbols. *)
-               | Argument, Some arg when Witness.free_vars arg = [] -> ""
-               | Argument, Some arg ->
+               | Some arg when Witness.free_vars arg = [] -> ""
+               | Some arg ->
                  (match
                     Witness.confirm_precond ~sc ~path ~pred:rp.pred
                       ~binder:rp.binder ~arg ~model:(model_of first)
@@ -3446,34 +3568,103 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                     (* The interpreter reproduced this violation: a stage-2
                        proof of it would contradict a real run (I7). *)
                     Reflect_state.confirmed := true;
-                    (match Witness.render_entries entries with
-                     | Some s -> Printf.sprintf " (e.g. %s)" s
+                    Witness.record_example span entries;
+                    (match example_of_entries entries with
+                     | Some s -> s
                      | None -> fallback ())
                   | None -> fallback ())
-               | _ -> fallback ()
+               | None -> fallback ()
              in
-             (* The author's words for the conjunct(s) this call breaks lead
-                the message, and the line under them names the argument and
-                exactly those conjuncts.  Without a message the whole
-                predicate is quoted, as it always was. *)
+             let labels =
+               match arg_opt with
+               | Some a ->
+                 let sp = arg_span span a in
+                 let at_arg =
+                   if sp = span then []
+                   else
+                     let msg =
+                       match closed_value a, real_param with
+                       | Some v, Some pn -> Printf.sprintf "`%s` is `%s` here" pn v
+                       | Some v, None -> Printf.sprintf "the argument is `%s` here" v
+                       | None, _ ->
+                         Printf.sprintf "this argument must satisfy `%s`" (at_arg_or_named a failing)
+                     in
+                     [ { Err.lbl_span = sp; Err.lbl_message = display_measures msg } ]
+                 in
+                 (* Where the failing value came from (§F4 point 4): the
+                    binding of each name the argument is built from.  A
+                    refined one says what it is known to satisfy, which is
+                    the refinement to strengthen. *)
+                 let from_binding =
+                   List.filter_map
+                     (fun x ->
+                       match List.assoc_opt x binds with
+                       | Some bsp
+                         when bsp.A.file = span.A.file && bsp.A.start_line > 0
+                              && not (span_within bsp span) ->
+                         let known =
+                           match List.assoc_opt x sc with
+                           | Some (b, p, _) ->
+                             let xv = A.EVar { A.txt = x; A.span = A.dummy_span } in
+                             Printf.sprintf ", where `%s` is known"
+                               (pred_str (subst_params [ (b, xv); ("_", xv) ] p))
+                           | None -> ""
+                         in
+                         Some
+                           { Err.lbl_span = bsp;
+                             Err.lbl_message =
+                               display_measures (Printf.sprintf "`%s` comes from here%s" x known) }
+                       | _ -> None)
+                     (Witness.free_vars a)
+                 in
+                 (* The branch the call sits on, when its condition names
+                    the argument: the value fails BECAUSE of it (`if
+                    List.length(ys) == 0 do head(ys) …`).  Only a condition
+                    written in the source; a fact the checker derived (a
+                    `match` arm's narrowing) has no text of its own. *)
+                 let fv = Witness.free_vars a in
+                 let from_guard =
+                   List.filter_map
+                     (fun ((c : A.expr), negated) ->
+                       let csp = arg_span A.dummy_span c in
+                       if csp = A.dummy_span || csp.A.file <> span.A.file || span_within span csp
+                          || not (List.exists (fun x -> List.mem x fv) (Witness.free_vars c))
+                       then None
+                       else
+                         match March_typecheck.Typecheck_suggest.text_of csp with
+                         | Some t
+                           when t <> "" && not (String.contains t '\n')
+                                (* the text is the condition, not a scrutinee a
+                                   synthesized `is_None(p)` borrowed its span from *)
+                                && (match c with
+                                    | A.EApp (A.EVar { A.txt = hd; _ }, _, _) ->
+                                      let n = String.length hd and m = String.length t in
+                                      let rec has i = i + n <= m && (String.sub t i n = hd || has (i + 1)) in
+                                      has 0
+                                    | _ -> false) ->
+                           Some
+                             { Err.lbl_span = csp;
+                               Err.lbl_message =
+                                 Printf.sprintf "the call is reached only when this is %s"
+                                   (if negated then "false" else "true") }
+                         | _ -> None)
+                     path
+                 in
+                 at_arg @ from_binding @ from_guard
+               | None -> []
+             in
              let headline =
-               match
-                 refuted_messages
-                   ~refuted:(fun g ->
-                     Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not g }
-                     = Refine.Verified)
-                   ~goal rp.pred
-               with
+               match broken with
                | [] ->
-                 Printf.sprintf "%s does not satisfy %s `%s`%s" param_label obligation_noun
-                   (pred_str rp.pred) cx_str
+                 Printf.sprintf "%s does not satisfy %s `%s`" param_label obligation_noun
+                   (pred_str rp.pred)
                | broken ->
-                 Printf.sprintf "%s\n%s does not satisfy %s `%s`%s"
+                 Printf.sprintf "%s\n%s does not satisfy %s `%s`"
                    (String.concat "; " (List.map snd broken))
                    param_label obligation_noun
                    (String.concat " && " (List.map (fun (p, _) -> pred_str p) broken))
-                   cx_str
              in
+             let headline = if example = "" then headline else headline ^ "\n" ^ example in
              Err.report errctx
                { Err.severity = Err.Error; span;
                  message = display_measures @@ Printf.sprintf
@@ -3483,21 +3674,33 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                     | Argument ->
                       (* The guard is the predicate over the ARGUMENT, not
                          over its binder (`if _ >= 0` is not March); a closed
-                         argument (`f(-3)`) can't be guarded at all. *)
-                      (match List.nth_opt args rp.idx with
+                         argument (`f(-3)`) can't be guarded at all, so the
+                         note says the literal can never satisfy it. *)
+                      (match arg_opt with
                        | Some arg when Witness.free_vars arg = [] ->
-                         "note: this value never satisfies it; pass one that does"
+                         (match over_param failing with
+                          | Some named ->
+                            Printf.sprintf "note: `%s` can never satisfy `%s`; pass a value that does"
+                              (src_text arg) (pred_str named)
+                          | None ->
+                            (match printable (over_args arg failing) with
+                             | Some t -> Printf.sprintf "note: `%s` is never true; pass a value that does" t
+                             | None -> "note: this value never satisfies it; pass one that does"))
+                       | Some arg when printable (over_args arg rp.pred) = None ->
+                         "note: guard the call or pass a value known to satisfy it"
                        | Some arg ->
-                         let binders =
-                           rp.binder :: "_"
-                           :: (match List.nth_opt sg.param_names rp.idx with
-                               | Some p -> [ p ] | None -> []) in
-                         let guard =
-                           subst_params (List.map (fun b -> (b, arg)) binders) rp.pred in
+                         (* The guard around the call itself, as the plan's
+                            `if n >= 0 do f(n) else … end`, when the call is
+                            one line of source. *)
+                         let call_text =
+                           match March_typecheck.Typecheck_suggest.text_of span with
+                           | Some t when t <> "" && not (String.contains t '\n') -> t
+                           | _ -> "…"
+                         in
                          Printf.sprintf
-                           "note: guard the call (e.g. `if %s do …`) or pass a value known to \
-                            satisfy it"
-                           (pred_str guard)
+                           "note: guard the call (e.g. `if %s do %s else … end`) or pass a value \
+                            known to satisfy it"
+                           (pred_str (over_args arg rp.pred)) call_text
                        | None ->
                          "note: guard the call or pass a value known to satisfy it")
                     | Bound_expr ->

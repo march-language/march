@@ -3740,7 +3740,7 @@ let compile filename =
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
       || !termination_report || !reflect_report || !refine_report_sites_all
       || !reflect_deps || !reflect_parity || !emit_lemma_manifest || !lemma_test || !law_coverage
-      || !report_contracts
+      || !report_contracts || !why_copies || !why_copies_json
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
          earlier plain --check of the same source (PR #596). *)
@@ -5159,6 +5159,7 @@ let compile filename =
             then Some n else None)
           tir.March_tir.Tir.tm_fns
     in
+    let why_copies_tir = ref None and why_copies_pre = ref None in
     let pipe =
       try
       March_tir.Contract_pipeline.run
@@ -5168,6 +5169,10 @@ let compile filename =
             if !dump_phases then
               phases := March_dump.Dump.tir_phase m label :: !phases)
         ~after_fusion:policy_audit ~before_opt
+        ~before_perceus:(fun ~k_table:_ m -> if !why_copies || !why_copies_json then
+                            why_copies_pre := Some m)
+        ~after_perceus:(fun m -> if !why_copies || !why_copies_json then
+                           why_copies_tir := Some m)
         ~wasm_island:(parse_target !target_str = March_tir.Llvm_emit.Wasm32Unknown)
         ~is_js:is_js_target ~hot_reload:(hr_config ()) ~iface_methods
         ~decls:contract_decls ~stamp_metrics:!do_timings
@@ -5214,6 +5219,40 @@ let compile filename =
     if List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error) vectorize_diags
     then exit 1;
+    (* --why-copies: the copies Perceus could not avoid, in the user's own
+       code, mapped back to source (lib/tir/copy_report.ml).  A report, like
+       --report-contracts: no code generation, no binary. *)
+    if !why_copies || !why_copies_json then begin
+      let module C = March_tir.Copy_report in
+      let is_user (sp : March_ast.Ast.span) =
+        sp.March_ast.Ast.file = filename || List.mem sp.March_ast.Ast.file user_files in
+      let sites = match !why_copies_tir with Some m -> C.analyze m | None -> [] in
+      let decls = user_only_desugared.March_ast.Ast.mod_decls in
+      let is_pure_call = match !why_copies_pre with
+        | Some m -> C.pure_call_oracle m | None -> (fun _ -> false) in
+      let seen = Hashtbl.create 16 in
+      let diags = List.filter_map (fun (s : C.site) ->
+          match March_tir.Provenance.effective_span s.C.host with
+          | Some host_span when is_user host_span ->
+            (match C.locate ~decls ~source:src ~is_pure_call ~host_span s with
+             | Some l when not (Hashtbl.mem seen (l.C.call_arg, s.C.var)) ->
+               Hashtbl.replace seen (l.C.call_arg, s.C.var) ();
+               Some (C.diagnostic s l)
+             | _ -> None)
+          | _ -> None) sites in
+      let diags = List.sort (fun (a : March_errors.Errors.diagnostic) b ->
+          compare (a.span.March_ast.Ast.start_line, a.span.March_ast.Ast.start_col)
+            (b.span.March_ast.Ast.start_line, b.span.March_ast.Ast.start_col)) diags in
+      if !why_copies_json then
+        List.iter (fun d -> print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")) diags
+      else if diags = [] then
+        print_endline "No copies found: every value passed to a function that reuses it in place is its last use."
+      else
+        List.iter (fun d ->
+            emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)))
+          diags;
+      exit 0
+    end;
     (* --report-contracts: the generation half of the contract feature.  Emits
        the same NDJSON shape --check-json does, with a fix placing @[no_alloc]
        directly before each verified-clean in-scope declaration's `fn` (see
@@ -7085,6 +7124,85 @@ let compile filename =
           Printf.eprintf "\nnote: set MARCH_BACKTRACE=full for all frames including stdlib\n"
       end
     in
+    (* A run-time failure in the compile-error style: what happened, the
+       source line with a caret, then the chain of calls that led there as
+       labelled excerpts.  [frames] is most recent first; each frame's span
+       is a call expression (frame 0's is the failing call itself).  Falls
+       back to [fallback] when no frame points into a file to show.
+       MARCH_BACKTRACE=full shows the standard library's frames too. *)
+    let report_runtime_failure ~code ~headline ?(notes = []) ~fallback
+        (all : March_eval.Eval.march_frame list) =
+      let show_full = Sys.getenv_opt "MARCH_BACKTRACE" = Some "full" in
+      let is_stdlib path =
+        (match find_stdlib_dir () with
+         | Some p when String.starts_with ~prefix:(p ^ "/") path -> true
+         | _ -> false)
+        || Filename.basename (Filename.dirname path) = "stdlib" in
+      let real = List.filter (fun f ->
+          f.March_eval.Eval.mf_file <> "<none>" && f.March_eval.Eval.mf_line > 0) all in
+      let frames = if show_full then real
+        else List.filter (fun f -> not (is_stdlib f.March_eval.Eval.mf_file)) real in
+      match frames with
+      | [] -> fallback ()
+      | top :: callers ->
+        let max_callers = 8 in
+        let rec take n = function
+          | x :: rest when n > 0 -> x :: take (n - 1) rest | _ -> [] in
+        let shown = take max_callers callers in
+        (* Each caller frame's span is a call expression and its name the
+           function called, so the labels read outward from the failure. *)
+        let labels = List.map (fun (f : March_eval.Eval.march_frame) ->
+            { March_errors.Errors.lbl_span = f.March_eval.Eval.mf_span;
+              lbl_message = Printf.sprintf "`%s` was called here" f.March_eval.Eval.mf_name })
+            shown in
+        let more = List.length callers - List.length shown in
+        (* The prelude's `panic` / `todo` wrappers are the failure's own
+           machinery, not calls worth pointing a reader at. *)
+        let hidden = List.length (List.filter (fun (f : March_eval.Eval.march_frame) ->
+            Filename.basename f.March_eval.Eval.mf_file <> "prelude.march") real)
+                     - List.length frames in
+        let notes = notes
+          @ (if more > 0 then
+               [ Printf.sprintf "%d more call%s not shown." more (if more = 1 then "" else "s") ]
+             else [])
+          @ (if hidden > 0 && not show_full then
+               [ "Calls inside the standard library are left out; set MARCH_BACKTRACE=full to see them." ]
+             else []) in
+        let d = { March_errors.Errors.severity = March_errors.Errors.Error;
+                  span = top.March_eval.Eval.mf_span; message = headline;
+                  labels; notes; code; fix = None } in
+        emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
+    in
+    let strip prefix s =
+      if String.starts_with ~prefix s
+      then Some (String.sub s (String.length prefix) (String.length s - String.length prefix))
+      else None in
+    (* The headline and code for an interpreter failure message. *)
+    let classify msg =
+      match strip "panic: " msg, strip "todo: " msg, strip "unreachable: " msg with
+      | Some m, _, _ -> (March_errors.Code.panic, "The program panicked: " ^ m)
+      | _, Some m, _ -> (March_errors.Code.panic, "The program reached a `todo`: " ^ m)
+      | _, _, Some m -> (March_errors.Code.panic, "The program reached code marked `unreachable`: " ^ m)
+      | _ -> (March_errors.Code.runtime_error, "The program stopped with a run-time error: " ^ msg) in
+    March_eval.Eval.actor_crash_hook := (fun ~actor ~tag ~args ~state ~frames exn ->
+        let msg = match exn with
+          | March_eval.Eval.Eval_error m -> m
+          | March_eval.Eval.Match_failure m -> "no pattern matched: " ^ m
+          | March_eval.Eval.Assert_failure m -> m
+          | e -> Printexc.to_string e in
+        let reason = match strip "panic: " msg with Some m -> m | None -> msg in
+        let show v = March_eval.Eval.value_to_string_pretty ~width:100 v in
+        let message = if args = [] then tag
+          else Printf.sprintf "%s(%s)" tag (String.concat ", " (List.map show args)) in
+        let headline = Printf.sprintf
+            "Actor `%s` crashed while handling `%s`: %s" actor message reason in
+        let notes = [
+          Printf.sprintf "Its state when it crashed: %s" (show state);
+          Printf.sprintf "Nothing supervises this `%s`, so it stays dead and later messages \
+                          to it are dropped. The rest of the program keeps running." actor ] in
+        report_runtime_failure ~code:March_errors.Code.actor_crashed ~headline ~notes
+          ~fallback:(fun () -> Printf.eprintf "%s\n%s\n%!" headline (String.concat "\n" notes))
+          frames);
     March_eval.Eval.clear_march_stack ();
     setup_interpreter_ffi ();
     (* Actor message identity: the interpreter tags an actor message by its
@@ -7113,16 +7231,30 @@ let compile filename =
        (* panic_/todo_/unreachable_ builtins already prefix their messages with
           "panic: " / "todo: " / "unreachable: " — print as-is. *)
        let hint = March_eval.Eval.interface_method_hint desugared msg in
-       Printf.eprintf "%s%s\n" msg (Option.value hint ~default:"");
-       print_march_backtrace ();
+       let code, headline = classify msg in
+       report_runtime_failure ~code ~headline
+         ~notes:(match hint with Some h -> [ String.trim h ] | None -> [])
+         ~fallback:(fun () ->
+             Printf.eprintf "%s%s\n" msg (Option.value hint ~default:"");
+             print_march_backtrace ())
+         (March_eval.Eval.get_march_stack ());
        exit 1
      | March_eval.Eval.Match_failure msg ->
-       Printf.eprintf "panic: match failure — %s\n" msg;
-       print_march_backtrace ();
+       (* A panic compiled too ("non-exhaustive pattern match"). *)
+       report_runtime_failure ~code:March_errors.Code.panic
+         ~headline:("The program panicked: no pattern of this `match` matched. " ^ msg)
+         ~fallback:(fun () ->
+             Printf.eprintf "panic: match failure — %s\n" msg;
+             print_march_backtrace ())
+         (March_eval.Eval.get_march_stack ());
        exit 1
      | March_eval.Eval.Assert_failure msg ->
-       Printf.eprintf "panic: %s\n" msg;
-       print_march_backtrace ();
+       report_runtime_failure ~code:March_errors.Code.panic
+         ~headline:("An assertion failed: " ^ msg)
+         ~fallback:(fun () ->
+             Printf.eprintf "panic: %s\n" msg;
+             print_march_backtrace ())
+         (March_eval.Eval.get_march_stack ());
        exit 1
      | Unix.Unix_error (Unix.EINTR, syscall, _) ->
        (* SIGINT interrupted a blocking syscall (accept/select/recv) —
@@ -7802,6 +7934,10 @@ let () =
      "SLUG Print the explanation page for a diagnostic code (the [slug] at the end of an error's first line)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
+    ("--why-copies", Arg.Set why_copies,
+     " Report each place in your code where a function builds a new copy of a value instead of reusing it in place, because the value is used again afterwards; with a fix that reorders when that is safe. Stops before code generation");
+    ("--why-copies-json", Arg.Set why_copies_json,
+     " --why-copies as NDJSON, the --check-json shape (for tooling and forge fix)");
     ("--report-contracts", Arg.Set report_contracts,
      " With --compile: emit one --check-json-shaped line per function verified allocation-free that should carry @[no_alloc] (consumed by `forge fix --contracts`). Stops before code generation, so no binary is written");
     ("--contract-scope", Arg.Set_string contract_scope,
@@ -7946,6 +8082,9 @@ let () =
   March_tir.Llvm_toplevel.debug_info := !debug_info;
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;
+  (* --why-copies runs the compile pipeline through Perceus and stops before
+     code generation (like --report-contracts), so it implies --compile. *)
+  if !why_copies || !why_copies_json then do_compile := true;
   (* --dump-role-authority is a report the typechecker prints; nothing runs. *)
   if !dump_role_authority then do_check := true;
   (* Propagate --pmap-threshold to the interpreter (codegen reads it via

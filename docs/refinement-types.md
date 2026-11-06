@@ -1301,6 +1301,11 @@ comparison. So `len(cat([1], [2])) == 2` is proved:
 - the inner `cat(Nil, [2])` is decided (its first argument is `Nil`), so it
   expands to `[2]`.
 
+A branch whose condition calls another reflected function is decided by taking
+that call's step first. With `fn pos(n : Int) : Bool do n > 0 end` and
+`fn sgn(n : Int) : Int do if pos(n) do 1 else 0 end end`, a step through
+`sgn(x)` where `x > 0` is known goes through `pos(x)`.
+
 `len(cat(xs, ys)) == 2` with `xs` unknown is not proved: no step after the
 first is decided. When a needed step is not taken, the obligation is reported
 as unverified with the reason `reflect-fuel`.
@@ -5257,9 +5262,10 @@ The rules, in the order the report checks them:
   by something other than a non-zero literal divides by a value the function
   itself shows is non-zero: a parameter refined `_ != 0`, `_ > 0` or `_ < 0`,
   or a branch that has ruled zero out (`if b == 0 do 0 else a / b end`,
-  `b != 0 && a / b > 1`). The check reads those facts as written, without the
-  solver, so a refinement like `v * v > 0` does not count here. In a
-  `cap no_panic` module the division obligation the solver proved counts too.
+  `b != 0 && a / b > 1`). Facts it can't read as written, such as a
+  refinement `v * v > 0`, go to the solver, over the `Int` parameters only.
+  In a `cap no_panic` module the division obligation the solver proved counts
+  too.
   An `Int` overflow is allowed: it panics, so it never gives a value the
   checker disagrees with.
 - **R5**: every `match` covers all cases, including a guarded match whose

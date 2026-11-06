@@ -1,0 +1,17 @@
+exit: 0
+-- WARNING: COPY ------------- errors/copy_shared_6.march
+
+`List.map` builds a new copy instead of reusing `xs` in place, because `xs` is used again afterwards. [copy_shared]
+A function can update a value in place only when it holds the only reference to it; `List.append` also holds `xs` until it runs, after `List.map`.
+
+9 |     List.append(xs, List.map(xs, fn x -> x * 10))
+                                 ^^
+
+
+    `xs` is also passed to `List.append` here, which runs after `List.map`:
+
+9 |     List.append(xs, List.map(xs, fn x -> x * 10))
+                    ^^
+    run `march --explain copy_shared`
+
+

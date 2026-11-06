@@ -2,7 +2,7 @@ exit: 1
 -- CAPABILITY -------- errors/role_grant_exceeded_1.march
 
 The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)` (`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
-help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
+help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. The body then takes one `Cap` per granted capability, in the grant's order, between the session capability and the state, so it gains a parameter: `fn (s, cap_console, cap_file_write, st) -> ...`. Pass `cap_file_write` on to any function the body hands its capabilities to. Or remove the use.
 
 26 |     let _ = file_write("/tmp/n", int_to_string(n))
                  ^^^^^^^^^^
@@ -27,5 +27,6 @@ help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remov
 
 14 |     role Cons needs IO.Console
          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain role_grant_exceeded`
 
 

@@ -892,6 +892,8 @@ type march_frame = {
   mf_name : string;
   mf_file : string;
   mf_line : int;
+  mf_span : March_ast.Ast.span;
+      (** the whole call expression, for a source excerpt with a caret *)
 }
 
 (** Per-evaluation March call stack.  Single-threaded (cooperative scheduling
@@ -899,13 +901,24 @@ type march_frame = {
 let march_stack : march_frame list ref = ref []
 
 let march_stack_push (name : string) (sp : span) : unit =
-  march_stack := { mf_name = name; mf_file = sp.file; mf_line = sp.start_line }
+  march_stack := { mf_name = name; mf_file = sp.file; mf_line = sp.start_line; mf_span = sp }
                  :: !march_stack
 
 let march_stack_pop () : unit =
   match !march_stack with _ :: rest -> march_stack := rest | [] -> ()
 
 let get_march_stack () : march_frame list = !march_stack
+
+(** Called when a message handler of an actor nobody supervises raises: the
+    actor's name, the message it was handling, its state at the time, the
+    frames of the handler's own call stack (most recent first) and the
+    exception.  The interpreter otherwise drops such a crash without a word
+    (the actor is dead, the program carries on), so the driver installs a
+    report here.  A no-op by default (the REPL, tests, the LSP). *)
+let actor_crash_hook :
+  (actor:string -> tag:string -> args:Eval_types.value list -> state:Eval_types.value
+   -> frames:march_frame list -> exn -> unit) ref =
+  ref (fun ~actor:_ ~tag:_ ~args:_ ~state:_ ~frames:_ _ -> ())
 
 let clear_march_stack () : unit = march_stack := []
 
@@ -2962,6 +2975,14 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
                     ~kind:(if inst.ai_supervisor <> None then 1 else 0)
                     ~pid ~supervised:(inst.ai_supervisor <> None)
                     ~outer:(strip_msg_qual msg_tag) exn;
+                  (if inst.ai_supervisor = None then
+                     let st = get_march_stack () in
+                     let rec take n = function
+                       | x :: rest when n > 0 -> x :: take (n - 1) rest
+                       | _ -> [] in
+                     !actor_crash_hook ~actor:inst.ai_name ~tag:(strip_msg_qual msg_tag) ~args:msg_args
+                       ~state:inst.ai_state
+                       ~frames:(take (List.length st - stack_base) st) exn);
                   clear_march_stack ();
                   crash_actor pid (Printexc.to_string exn));
                current_pid := prev_pid

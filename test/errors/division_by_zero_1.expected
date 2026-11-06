@@ -3,11 +3,12 @@ exit: 1
 
 division by `n` in `cap no_panic` module may be by zero — no refinement proves `n ≠ 0`. [division_by_zero]
 
-Use `Math.checked_div` or `Math.checked_mod` to return `Option(Int)` instead of panicking, or annotate the divisor parameter with `{v : Int | v != 0}` (or `v > 0`) to prove it is safe.
+`n` is not a function parameter, so no refinement annotation reaches it. Guard the division instead, which the checker reads as proof: `if n == 0 do <fallback> else ... / n end`. Or use `Math.checked_div` or `Math.checked_mod`, which return `Option(Int)` instead of panicking.
 
 34 |         Box(n) -> 100 / n
                        ^^^^^^^
 
+    run `march --explain division_by_zero`
 
 
 -- CAPABILITY ----------- errors/division_by_zero_1.march

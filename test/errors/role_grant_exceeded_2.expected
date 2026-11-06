@@ -2,10 +2,11 @@ exit: 1
 -- CAPABILITY -------- errors/role_grant_exceeded_2.march
 
 Role `Stream.Cons` is granted `Cap(IO.NetConnect)` (`role Cons needs IO.NetConnect`), but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → wipe). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
-help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
+help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.NetConnect, IO.FileWrite`. The body then takes one `Cap` per granted capability, in the grant's order, between the session capability and the state, so it gains a parameter: `fn (s, cap_net_connect, cap_file_write, st) -> ...`. Pass `cap_file_write` on to any function the body hands its capabilities to. Or remove the use.
 
 39 |     let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(), body)
                                                                                        ^^^^
 
+    run `march --explain role_grant_exceeded`
 
 

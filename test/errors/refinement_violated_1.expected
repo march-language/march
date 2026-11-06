@@ -2,13 +2,14 @@ exit: 1
 -- REFINEMENT -------- errors/refinement_violated_1.march
 
 refinement violation: argument `b` of `safe_div` does not satisfy precondition `_ != 0` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `0` can never satisfy `b != 0`; pass a value that does
 
 6 |     println(int_to_string(safe_div(10, 0)))
                               ^^^^^^^^^^^^^^^
 
+    running `safe_div(10, 0)` panics: division by zero
 
-    this argument must satisfy `_ != 0`:
+    `b` is `0` here:
 
 6 |     println(int_to_string(safe_div(10, 0)))
                                            ^

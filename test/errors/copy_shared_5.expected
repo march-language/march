@@ -1,0 +1,17 @@
+exit: 0
+-- WARNING: COPY ------------- errors/copy_shared_5.march
+
+`List.map` builds a new copy instead of reusing `xs` in place, because a closure captured `xs`. [copy_shared]
+A closure keeps its own reference to every value it captures, since it may run more than once, so a call inside it never holds the only reference to `xs`.
+
+9 |     fn () -> List.map(xs, fn x -> x + 1)
+                          ^^
+
+
+    this closure captures `xs`:
+
+9 |     fn () -> List.map(xs, fn x -> x + 1)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain copy_shared`
+
+
