@@ -527,6 +527,10 @@ let extern_borrow_table : (string * bool list) list = [
   (* __panic_site keeps its String literal without a reference (literals are
      immortal) and reads nothing else. *)
   ("__panic_site",              [true; true; true; true]);
+  (* march_assert_fail copies its three Strings into the report it panics
+     with; march_test_header keeps its literal without a reference. *)
+  ("__assert_fail",             [true; true; true]);
+  ("__test_header",             [true]);
   ("march_get_actor_field",     [true; true]);
   ("logger_write",              [true; true; true; true]);
   ("logger_dispatch",           [true; true; true; true]);

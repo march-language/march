@@ -2,13 +2,13 @@ exit: 1
 -- REFINEMENT ----------------- errors/cap_grant_10.march
 
 refinement violation: argument `x` of `sqrtish` does not satisfy precondition `_ >= 0.0` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `0.0 -. 1.0` can never satisfy `x >= 0.0`; pass a value that does
 
 11 |     println(float_to_string(sqrtish(0.0 -. 1.0)))
                                  ^^^^^^^^^^^^^^^^^^^
 
 
-    this argument must satisfy `_ >= 0.0`:
+    `x` is `-1.0` here:
 
 11 |     println(float_to_string(sqrtish(0.0 -. 1.0)))
                                          ^^^^^^^^^^

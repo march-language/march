@@ -2562,35 +2562,34 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     apply flat_map_fn [v; k]
 
-  | EAssert (inner, sp) ->
-    (* Compiler-assisted assertion rewriting:
-       If the inner expression is a binary comparison (==, !=, <, >, <=, >=),
-       we evaluate both sides separately so we can show their values on failure.
-       Otherwise, we just evaluate the expression and check if it's true. *)
-    let comparison_ops = ["=="; "!="; "<"; ">"; "<="; ">="] in
-    let loc = Printf.sprintf "%s:%d" sp.file sp.start_line in
+  | EAssert (inner, _) ->
+    (* A failed assertion raises a rendered report
+       (lib/errors/test_report.ml): the header with the asserted expression
+       under a caret, and for a comparison both sides by their source text,
+       with the first difference of an `==` marked.  A compiled program
+       prints the same report (Lower_expr's EAssert arm, march_assert.c). *)
+    let module R = March_errors.Test_report in
+    let printed = function
+      | VString s -> R.quote s
+      | v -> show_dispatch v
+    in
+    let src e = R.operand_source ~span:(span_of_expr e) e in
     (match inner with
-     | EApp (EVar op_name, [lhs; rhs], _) when List.mem op_name.txt comparison_ops ->
+     | EApp (EVar op_name, [lhs; rhs], _) when List.mem op_name.txt R.comparison_ops ->
        let lv = eval_expr env lhs in
        let rv = eval_expr env rhs in
        let op_fn = lookup op_name.txt env in
        (match apply op_fn [lv; rv] with
         | VBool true -> VUnit
-        | VBool false ->
-          raise (Assert_failure (Printf.sprintf
-            "assert failed at %s\n    left:  %s\n    right: %s"
-            loc (value_to_string lv) (value_to_string rv)))
-        | _ -> raise (Assert_failure (Printf.sprintf
-            "assert: comparison did not return Bool (at %s)" loc)))
+        | _ ->
+          let header = R.assert_header ~span:(span_of_expr inner) ~op:op_name.txt in
+          raise (Assert_failure
+                   (R.compare_report ~header ~op:op_name.txt ~lsrc:(src lhs)
+                      ~rsrc:(src rhs) (printed lv) (printed rv))))
      | _ ->
        (match eval_expr env inner with
-        | VBool true  -> VUnit
-        | VBool false ->
-          raise (Assert_failure (Printf.sprintf
-            "assert: condition was false (at %s)" loc))
-        | v ->
-          raise (Assert_failure (Printf.sprintf
-            "assert: expected Bool, got %s (at %s)" (value_to_string v) loc))))
+        | VBool true -> VUnit
+        | _ -> raise (Assert_failure (R.assert_header ~span:(span_of_expr inner) ~op:""))))
 
 (** Evaluate a match expression: try each branch until one matches.
     [match_span] is the span of the [EMatch] node, used for coverage arm tracking.
@@ -4643,19 +4642,26 @@ type test_result =
   | TestFail of string  (** failure message *)
   | TestError of string (** unexpected exception *)
 
+(** [msg] with every non-empty line indented by [indent] (a failure report
+    has blank lines, which stay blank). *)
+let indent_lines (indent : string) (msg : string) : string =
+  String.concat "\n"
+    (List.map (fun l -> if l = "" then "" else indent ^ l)
+       (String.split_on_char '\n' msg))
+
 (** Collect all [DTest], [DSetup], and [DSetupAll] nodes from the module,
     flattening [DDescribe] groups (prefixing test names with describe label). *)
 let collect_test_decls (m : module_) :
-    expr option * expr option * (string * expr) list =
+    expr option * expr option * (string * expr * span) list =
   let setup_ref     = ref None in
   let setup_all_ref = ref None in
   let tests         = ref [] in
   let rec collect_decl prefix d =
     match d with
-    | DTest (tdef, _) ->
+    | DTest (tdef, sp) ->
       let full_name = if prefix = "" then tdef.test_name
                       else prefix ^ " " ^ tdef.test_name in
-      tests := (full_name, tdef.test_body) :: !tests
+      tests := (full_name, tdef.test_body, sp) :: !tests
     | DDescribe (name, decls, _) ->
       let new_prefix = if prefix = "" then name else prefix ^ " " ^ name in
       List.iter (collect_decl new_prefix) decls
@@ -4687,7 +4693,7 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
   let (setup_all_opt, setup_opt, tests) = collect_test_decls m in
   (* Apply filter *)
   let tests = if filter = "" then tests
-              else List.filter (fun (name, _) ->
+              else List.filter (fun (name, _, _) ->
                      let lname = String.lowercase_ascii name in
                      let lpat  = String.lowercase_ascii filter in
                      let n = String.length lname and p = String.length lpat in
@@ -4706,7 +4712,7 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
   let total = List.length tests in
   let failures = ref [] in
   if not verbose && not quiet then Printf.printf "%!" else ();
-  List.iter (fun (name, body) ->
+  List.iter (fun (name, body, test_span) ->
     (* Run per-test setup *)
     (match setup_opt with
      | Some s -> (try let _ = eval_expr env s in ()
@@ -4719,14 +4725,27 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
     (* When capture_io is enabled, redirect print/log into a per-test buffer. *)
     let cap_buf = if capture_io then Some (Buffer.create 128) else None in
     (match cap_buf with Some b -> test_capture_buf := Some b | None -> ());
+    (* A failure is a rendered report (lib/errors/test_report.ml): an
+       assertion's or a property's as it is, any other panic inside the
+       test's own header (the `test "..."` line under a caret), as the
+       compiled runner (march_test_run) prints it. *)
+    let module R = March_errors.Test_report in
+    let panicked msg =
+      (* `panic(msg)` reaches here as "panic: msg"; the compiled runner gets
+         the bare message, and the header already says it panicked. *)
+      let msg =
+        if String.starts_with ~prefix:"panic: " msg
+        then String.sub msg 7 (String.length msg - 7) else msg in
+      if R.is_report msg then TestFail msg
+      else TestFail (R.fill_panic (R.panic_header ~span:test_span) msg) in
     let result =
       try
         let _ = eval_expr env body in
         TestPass
       with
       | Assert_failure msg -> TestFail msg
-      | Eval_error msg     -> TestError msg
-      | Match_failure msg  -> TestError ("match failure: " ^ msg)
+      | Eval_error msg     -> panicked msg
+      | Match_failure msg  -> panicked ("match failure: " ^ msg)
       | exn                -> TestError (Printexc.to_string exn)
     in
     test_capture_buf := None;
@@ -4751,8 +4770,7 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
         Printf.printf "  ✓ %s\n%!" name
       | TestFail msg ->
         let full = with_output msg in
-        Printf.printf "  ✗ %s\n    %s\n%!" name
-          (String.concat "\n    " (String.split_on_char '\n' full));
+        Printf.printf "  ✗ %s\n%s\n%!" name (indent_lines "    " full);
         failures := (name, full) :: !failures
       | TestError msg ->
         let full = with_output ("error: " ^ msg) in
@@ -4781,8 +4799,7 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
     if not verbose && !failures <> [] then begin
       Printf.printf "\n%d failure(s):\n\n" (List.length !failures);
       List.iter (fun (name, msg) ->
-        Printf.printf "FAIL: \"%s\"\n  %s\n\n" name
-          (String.concat "\n  " (String.split_on_char '\n' msg))
+        Printf.printf "FAIL: \"%s\"\n%s\n\n" name (indent_lines "  " msg)
       ) (List.rev !failures)
     end;
     Printf.printf "Finished: %d test%s, %d failure%s\n%!"
@@ -4923,8 +4940,7 @@ let run_doctests ?(verbose=false) ?(quiet=false) ?(filter="")
     if not verbose && !failures <> [] then begin
       Printf.printf "\n%d failure(s):\n\n" (List.length !failures);
       List.iter (fun (name, msg) ->
-        Printf.printf "FAIL: \"%s\"\n  %s\n\n" name
-          (String.concat "\n  " (String.split_on_char '\n' msg))
+        Printf.printf "FAIL: \"%s\"\n%s\n\n" name (indent_lines "  " msg)
       ) (List.rev !failures)
     end;
     Printf.printf "Finished: %d doctest%s, %d failure%s\n%!"

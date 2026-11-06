@@ -12,7 +12,10 @@ role body moves from state to state by calling the generated functions:
 state it is the next step from. Calling one with a state the role is not in
 yet, or no longer in, is this error. It says what the call tries to do, what
 the protocol says the role must do at that point, and points at that step of
-the protocol.
+the protocol. It also draws the conversation so far: the protocol's steps up to
+that point, the role's own marked `done`, the one it must take next, and the
+one it tried (inside a `loop`, drawn as one round; inside a `choose`, as the
+branch taken).
 
 ## A program that triggers it
 

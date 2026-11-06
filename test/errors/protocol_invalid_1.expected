@@ -1,7 +1,7 @@
 exit: 1
 -- PROTOCOL ------------- errors/protocol_invalid_1.march
 
-Protocol `Q`: this step can never run in the `choose` branch that ends in a `loop` — the steps after a `choose` are projected into EVERY branch. Move it inside the branches that can reach it. [protocol_invalid]
+Protocol `Q`: this step can never run in the `choose` branch that ends in a `loop` — the steps after a `choose` are projected into EVERY branch. Move it into the `done` branch, after its last step. A branch with several steps lists them on the lines after `done ->`, one per line, indented under the label (no `do`/`end`). [protocol_invalid]
 
 28 |     C -> S : Bool
          ^
@@ -35,4 +35,4 @@ fix [cap_grant]:
 +  fn main(_cap_console : Cap(IO.Console)) do
 
 after fix: exit 1
-Protocol `Q`: this step can never run in the `choose` branch that ends in a `loop` — the steps after a `choose` are projected into EVERY branch. Move it inside the branches that can reach it. [protocol_invalid]
+Protocol `Q`: this step can never run in the `choose` branch that ends in a `loop` — the steps after a `choose` are projected into EVERY branch. Move it into the `done` branch, after its last step. A branch with several steps lists them on the lines after `done ->`, one per line, indented under the label (no `do`/`end`). [protocol_invalid]

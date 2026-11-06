@@ -355,6 +355,7 @@ val typed_messages : bool ref
 
 val run_module : March_ast.Ast.module_ -> unit
 type test_result = TestPass | TestFail of string | TestError of string
+val indent_lines : string -> string -> string
 val run_tests :
   ?verbose:bool ->
   ?quiet:bool ->

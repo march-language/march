@@ -403,7 +403,7 @@ let suite =
         Alcotest.(check bool) "reports a violation" true
           (contains text "refinement violation");
         Alcotest.(check bool) "includes a counterexample" true
-          (contains text "e.g. k = "));
+          (contains text "for example, when `k` is "));
 
     (* An undecidable obligation stays non-fatal, but silence is
        indistinguishable from "checked and fine". A hint says so.
@@ -11507,7 +11507,7 @@ end|} in
         Alcotest.(check bool) "violation" true
           (contains text "refinement violation");
         Alcotest.(check bool) "minimal validated example" true
-          (contains text "(e.g. k = -1)"))
+          (contains text "for example, when `k` is `-1`"))
   ; gated "precondition cx renders an empty list in source syntax" (fun () ->
         (* Today this prints the measure fact `len(ys) = 0`; the concrete
            value `ys = []` is what the user can actually paste. *)
@@ -11519,7 +11519,7 @@ end|} in
         Alcotest.(check bool) "violation" true
           (contains text "refinement violation");
         Alcotest.(check bool) "source-syntax value" true
-          (contains text "(e.g. ys = [])"))
+          (contains text "for example, when `ys` is `[]`"))
   ; gated "division: counterexample names the concrete zero divisor" (fun () ->
         (* The witness assignment satisfies the divisor's own refinement
            (_ >= 0 admits 0) and every path fact — a concrete admissible
@@ -12711,7 +12711,7 @@ end|}
         in
         Alcotest.(check bool) "violation reported" true
           (contains text "need_pos" && contains text "_ > 0");
-        Alcotest.(check bool) "with the confirmed counterexample" true (contains text "y = 0"));
+        Alcotest.(check bool) "with the confirmed counterexample" true (contains text "for example, when `y` is `0`"));
 
     (* Unguarded, the same argument is not a DEFINITE failure (an unguarded
        parameter never is), so it stays a skip, and the skip names the
@@ -17349,23 +17349,37 @@ let element_only_ctor_suite =
         let uniq = viol ("mod P4au do\n" ^ st ^ "end\n") in
         Alcotest.(check int) (Printf.sprintf "unique: one violation [%s]" (show uniq)) 1 (List.length uniq));
 
-    gated "an unenforced message's body does not assume its element refinements" (fun () ->
-        (* Two actors both handle `Push`, so the name is withdrawn and no
-           construction is obliged; the bodies must then assume nothing.
-           Unfixed: both `need(h)` obligations proved from the unchecked
-           element facts. *)
+    gated "a shared element-only message is obliged per actor, and each body assumes it" (fun () ->
+        (* Two actors both handle `Push`.  Each construction is obliged
+           against its own actor (`A1.Push`, `A2.Push`), and both backends
+           drop a message built for the other actor (the interpreter since
+           2026-11-05, #1125), so each body assumes its element refinements:
+           both `need(h)` obligations prove.  Before #1125 the shared name
+           was withdrawn, nothing was obliged, and the bodies assumed
+           nothing. *)
         let actor name =
           "  actor " ^ name ^ " do\n    state { n : Int }\n    init { n: 0 }\n\
            \    on Push(xs : List({Int | _ > 0})) do\n\
            \      match xs do\n        Cons(h, _) -> { state with n: need(h) }\n        Nil -> state\n      end\n\
            \    end\n  end\n"
         in
-        let os =
-          List.filter (fun (c, _, _) -> c = "need")
-            (obs ("mod P4hc do\n  fn need(k : {Int | _ > 0}) : Int do k end\n" ^ actor "A1" ^ actor "A2" ^ "end\n"))
+        let src mk =
+          "mod P4hc do\n  fn need(k : {Int | _ > 0}) : Int do k end\n" ^ actor "A1" ^ actor "A2"
+          ^ "  fn mk() do " ^ mk ^ " end\nend\n"
         in
-        Alcotest.(check bool) (Printf.sprintf "need obligations exist, none proved [%s]" (show os)) true
-          (os <> [] && List.for_all (fun (_, v, _) -> v <> "proved") os));
+        let os = List.filter (fun (c, _, _) -> c = "need") (obs (src "A1.Push([3])")) in
+        Alcotest.(check bool) (Printf.sprintf "need obligations exist, all proved [%s]" (show os)) true
+          (os <> [] && List.for_all (fun (_, v, _) -> v = "proved") os);
+        let push v src =
+          List.filter (fun (c, v', _) ->
+              v' = v && String.length c >= 4 && String.sub c (String.length c - 4) 4 = "Push")
+            (obs src) in
+        Alcotest.(check bool) (Printf.sprintf "A1.Push([0 - 1]) violated [%s]" (show (obs (src "A1.Push([0 - 1])")))) true
+          (push "violated" (src "A1.Push([0 - 1])") <> []);
+        Alcotest.(check bool) (Printf.sprintf "A2.Push([0 - 1]) violated [%s]" (show (obs (src "A2.Push([0 - 1])")))) true
+          (push "violated" (src "A2.Push([0 - 1])") <> []);
+        Alcotest.(check bool) "A2.Push([3]) not violated" true
+          (push "violated" (src "A2.Push([3])") = []));
 
     (* --refine-audit agrees: a variant argument's element slot is now an
        enforced site, as a record field's already was.  Unfixed: Unenforced
@@ -23471,8 +23485,9 @@ let array_followups_suite =
   [ gated "violation text spells Array.length, never pvec_length or negate" (fun () ->
         let msgs = array_messages (m "  fn g(v) : Int do Array.get(v, -1) end\n") in
         Alcotest.(check bool) "a violation is reported" true (has_violation msgs);
-        Alcotest.(check bool) "mentions Array.length(v)" true
-          (List.exists (fun s -> contains s "Array.length(v)") msgs);
+        (* The closed index's label names its value (`-1`) and the note the
+           conjunct it breaks (`n >= 0`), so `Array.length` is spelled by the
+           symbolic case's guard below, not here. *)
         Alcotest.(check bool) "never mentions pvec_length" false
           (List.exists (fun s -> contains s "pvec_length") msgs);
         Alcotest.(check bool) "no negate example" false
@@ -23480,14 +23495,20 @@ let array_followups_suite =
         (* The note's own "guard the call (e.g. `if …`)" is not an example;
            a counterexample follows the quoted predicate. *)
         Alcotest.(check bool) "a closed index gets no example" false
-          (List.exists (fun s -> contains s "v)` (e.g.") msgs));
+          (List.exists (fun s -> contains s "for example, when") msgs));
 
     gated "a symbolic index still gets a validated example" (fun () ->
         let msgs =
           array_messages (m "  fn k(v, i : {Int | _ < 0}) : Int do Array.get(v, i) end\n")
         in
-        Alcotest.(check bool) "(e.g. i = -1)" true
-          (List.exists (fun s -> contains s "(e.g. i = -1)") msgs));
+        Alcotest.(check bool) "for example, when `i` is `-1`" true
+          (List.exists (fun s -> contains s "for example, when `i` is `-1`") msgs);
+        (* The guard is the whole precondition read at the call: it spells
+           the array's length as `Array.length(v)`, never `pvec_length`. *)
+        Alcotest.(check bool) "guard mentions Array.length(v)" true
+          (List.exists (fun s -> contains s "Array.length(v)") msgs);
+        Alcotest.(check bool) "never mentions pvec_length" false
+          (List.exists (fun s -> contains s "pvec_length") msgs));
 
     gated "the unverified hint spells Array.length in its held/missing split" (fun () ->
         let msgs =
@@ -23619,7 +23640,7 @@ let measure_definition_suite =
            the timeout).  The verdict alone survives that encoding, because the
            refutation is an UNSAT query; the model does not. *)
         Alcotest.(check bool) "the violation carries a concrete counterexample" true
-          (contains (refine_error_text_d violating) "(e.g. "));
+          (contains (refine_error_text_d violating) "for example, when "));
 
     gated "a non-recursive multi-ctor measure with literal arms: Proved and Violated"
       (fun () ->
@@ -29452,7 +29473,7 @@ let () =
       ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
-      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert);
+      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);

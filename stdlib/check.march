@@ -8,9 +8,11 @@
 -- minimal counterexample, then panics with a report that includes the
 -- shrunk value, the number of runs, and the seed for replay.
 --
--- The existing `test ... do ... end` runner catches the panic and reports
--- the property as a failing test.  No compiler changes required beyond
--- the `__try_call` builtin that catches runtime exceptions.
+-- The `test ... do ... end` runner catches the panic and reports the
+-- property as a failing test.  The report's header (the call under a caret)
+-- and the property's parameter names come from desugar, which rewrites
+-- `Check.all` / `Check.all_with` on a lambda into `all_reported` (see "The
+-- failure report" below).  `__try_call` catches the property's own panics.
 --
 -- Typical use:
 --
@@ -110,14 +112,6 @@ mod Check do
     end
   end
 
-  pfn format_error(r : Result(Bool, String)) : String do
-    match r do
-    Ok(false) -> "returned false"
-    Ok(true)  -> "PASSED"  -- shouldn't happen at the call site
-    Err(msg)  -> "raised: " ++ msg
-    end
-  end
-
   -- ---- Shrinking (greedy DFS through rose tree) ----
 
   pfn find_failing_child(prop, kids) do
@@ -171,20 +165,167 @@ mod Check do
     end
   end
 
-  -- ---- Failure reporting ----
+  -- ---- The failure report ----
+  --
+  -- A failing property panics with a report in the test runners' house style
+  -- (lib/errors/test_report.ml): the `-- TEST FAILURE --` header with the
+  -- `Check.all` call under a caret, the run that failed, the shrunk input
+  -- bound to the property's parameter names, why it failed (an assertion's
+  -- own report nested inside), and the seed.  The header and the names come
+  -- from the compiler: desugar rewrites `Check.all(g, fn xs -> ...)` and
+  -- `Check.all_with(g, fn xs -> ..., cfg)` into `all_reported` calls.  This
+  -- is March, so the interpreter and a compiled test print the same text.
 
-  pfn render_failure(failing_tree, run_idx : Int,
-                     shrunk_tree, shrink_steps : Int,
-                     seed : Int, prop) do
+  pfn plural(n : Int, word : String) : String do
+    if n == 1 do int_to_string(n) ++ " " ++ word
+    else int_to_string(n) ++ " " ++ word ++ "s" end
+  end
+
+  -- [s] cut to at most [max] bytes (never inside a UTF-8 character), with an
+  -- ellipsis when it was cut.
+  pfn clip(s : String, max : Int) : String do
+    if string_byte_length(s) <= max do s
+    else string_slice(s, 0, char_start(s, max - 1)) ++ "…" end
+  end
+
+  pfn char_start(s : String, i : Int) : Int do
+    if i <= 0 do 0
+    else
+      let b = string_byte_at(s, i)
+      if b >= 128 && b < 192 do char_start(s, i - 1) else i end
+    end
+  end
+
+  -- The top-level comma-separated parts of bytes [start, stop) of [s],
+  -- skipping commas inside brackets and string literals.
+  pfn split_top(s : String, i : Int, stop : Int, start : Int, depth : Int,
+                in_str : Bool, esc : Bool, acc : List(String)) : List(String) do
+    if i >= stop do
+      List.reverse(Cons(string_trim(string_slice(s, start, stop - start)), acc))
+    else
+      let c = string_byte_at(s, i)
+      if in_str do
+        if esc do split_top(s, i + 1, stop, start, depth, true, false, acc)
+        else
+          split_top(s, i + 1, stop, start, depth, c != 34, c == 92, acc)
+        end
+      else
+        if c == 34 do split_top(s, i + 1, stop, start, depth, true, false, acc)
+        else
+          if c == 40 || c == 91 || c == 123 do
+            split_top(s, i + 1, stop, start, depth + 1, false, false, acc)
+          else
+            if c == 41 || c == 93 || c == 125 do
+              split_top(s, i + 1, stop, start, depth - 1, false, false, acc)
+            else
+              if c == 44 && depth == 0 do
+                let part = string_trim(string_slice(s, start, i - start))
+                split_top(s, i + 1, stop, i + 1, depth, false, false, Cons(part, acc))
+              else
+                split_top(s, i + 1, stop, start, depth, false, false, acc)
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- A printed n-tuple's parts, or None when [s] does not print one.
+  pfn tuple_parts(s : String, n : Int) : Option(List(String)) do
+    let len = string_byte_length(s)
+    if len < 2 do None
+    else
+      if string_byte_at(s, 0) != 40 || string_byte_at(s, len - 1) != 41 do None
+      else
+        let parts = split_top(s, 1, len - 1, 1, 0, false, false, Nil)
+        if List.length(parts) == n do Some(parts) else None end
+      end
+    end
+  end
+
+  pfn binding_lines(names : List(String), values : List(String), acc : String) : String do
+    match names do
+    Nil -> acc
+    Cons(n, ns) ->
+      match values do
+      Nil -> acc
+      Cons(v, vs) ->
+        binding_lines(ns, vs, acc ++ "        " ++ n ++ " = " ++ clip(v, 200) ++ "\n")
+      end
+    end
+  end
+
+  -- The shrunk input, by the property's parameter name(s): `xs = [0, 1]`,
+  -- or one line per name when the property took a tuple apart.
+  pfn bindings(names : List(String), minimal : String) : String do
+    match names do
+    Nil -> "        input = " ++ clip(minimal, 200) ++ "\n"
+    Cons(n, Nil) -> "        " ++ n ++ " = " ++ clip(minimal, 200) ++ "\n"
+    _ ->
+      match tuple_parts(minimal, List.length(names)) do
+      Some(parts) -> binding_lines(names, parts, "")
+      None ->
+        "        (" ++ string_join(names, ", ") ++ ") = " ++ clip(minimal, 200) ++ "\n"
+      end
+    end
+  end
+
+  pfn indent_lines(lines : List(String)) : List(String) do
+    List.map(lines, fn l -> if l == "" do "" else "    " ++ l end)
+  end
+
+  pfn strip_panic(msg : String) : String do
+    if string_starts_with(msg, "panic: ") do
+      string_slice(msg, 7, string_byte_length(msg) - 7)
+    else msg end
+  end
+
+  -- Why the shrunk input fails: `false`, a nested assertion report (its
+  -- header line dropped: same file, same test), or a panic message.
+  pfn reason_text(r : Result(Bool, String)) : String do
+    match r do
+    Ok(false) -> "    The property returned `false`."
+    Ok(true)  -> "    It passed when run again: the property is not deterministic."
+    Err(raw)  ->
+      let msg = strip_panic(raw)
+      if string_starts_with(msg, "-- TEST FAILURE ") do
+        let body = match string_split_first(msg, "\n\n") do
+          Some(pair) -> match pair do (_, rest) -> rest end
+          None -> msg
+          end
+        "    It failed this assertion:\n\n"
+          ++ string_join(indent_lines(string_split(body, "\n")), "\n")
+      else "    It panicked: " ++ msg end
+    end
+  end
+
+  pfn report_header(header : String) : String do
+    if header == "" do "This property does not hold. [property_failed]" else header end
+  end
+
+  pfn seed_text(seed : Int, fixed : Bool) : String do
+    let s = int_to_string(seed)
+    if fixed do "    Seed " ++ s ++ ", set by the property's config."
+    else "    Seed " ++ s ++ ": replay it with `forge test --seed=" ++ s ++ "`." end
+  end
+
+  pfn property_report(header : String, names : List(String), failing_tree,
+                      run_idx : Int, num_runs : Int, shrunk_tree, steps : Int,
+                      seed : Int, fixed_seed : Bool, prop) : String do
     let original = to_string(Gen.tree_root(failing_tree))
     let minimal  = to_string(Gen.tree_root(shrunk_tree))
     let r        = try_prop(prop, Gen.tree_root(shrunk_tree))
-    let reason   = format_error(r)
-    "property failed after " ++ int_to_string(run_idx + 1) ++ " run(s)\n" ++
-    "  counterexample: " ++ minimal ++ "\n" ++
-    "  " ++ reason ++ "\n" ++
-    "  shrunk " ++ int_to_string(shrink_steps) ++ " step(s) from: " ++ original ++ "\n" ++
-    "  reproduce with seed: " ++ int_to_string(seed)
+    let shrunk =
+      if steps == 0 do ""
+      else " (shrunk in " ++ plural(steps, "step") ++ " from `" ++ clip(original, 60) ++ "`)" end
+    report_header(header) ++ "\n\n"
+      ++ "    It failed on run " ++ int_to_string(run_idx + 1) ++ " of "
+      ++ int_to_string(num_runs) ++ ".\n\n"
+      ++ "    Smallest failing input" ++ shrunk ++ ":\n\n"
+      ++ bindings(names, minimal) ++ "\n"
+      ++ reason_text(r) ++ "\n\n"
+      ++ seed_text(seed, fixed_seed)
   end
 
   -- ---- Public API ----
@@ -219,9 +360,26 @@ mod Check do
       Check.all_with(gen, prop, { Check.default_config() with seed: Some(42) })
   """
   fn all_with(g, prop, config : CheckConfig) do
+    all_reported(g, prop, config, "", Nil)
+  end
+
+  doc """
+  `all_with` with the compiler's report details: [header] is the rendered
+  `-- TEST FAILURE --` header pointing at the call, [names] the property's
+  parameter name(s), which label the shrunk input.  Not meant to be called
+  by hand: desugar rewrites `Check.all` and `Check.all_with` calls whose
+  property is a lambda into this.
+
+      Check.all_reported(gen, fn xs -> prop(xs), Check.default_config(), "", ["xs"])
+  """
+  fn all_reported(g, prop, config : CheckConfig, header : String, names : List(String)) do
     if is_skipped() do ()
     else do
       let seed = resolve_seed(config.seed)
+      let fixed_seed = match config.seed do
+        Some(_) -> true
+        None -> false
+        end
       let rng  = Random.seed(seed)
       match run_loop(g, prop, rng, 0, config) do
       None -> ()
@@ -230,7 +388,9 @@ mod Check do
         (failing_tree, run_idx) ->
           let (shrunk, steps) = shrink_loop(prop, failing_tree,
                                             config.max_shrink_steps, 0)
-          panic(render_failure(failing_tree, run_idx, shrunk, steps, seed, prop))
+          panic(property_report(header, names, failing_tree, run_idx,
+                                config.num_runs, shrunk, steps, seed,
+                                fixed_seed, prop))
         end
       end
     end end

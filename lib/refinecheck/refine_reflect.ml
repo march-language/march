@@ -1460,6 +1460,9 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
   in
   let st = facts_of assumptions in
   let count = ref 0 in
+  (* Guard calls queued so far ([rounds]): bounded by [budget] as unfoldings
+     are, since a chain of guards need never unfold anything. *)
+  let asked = ref 0 in
   let lits = ref [] and facts = ref [] in
   (* Unfold [f(args)] with [cases] (all of them at depth 0, the decided arm
      deeper); returns the reflected calls its equations mention. *)
@@ -1518,6 +1521,9 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
       let out_next = ref [] in
       let rec rounds (todo : (string * Smt.term list) list) =
         let progressed = ref false in
+        (* The reflected calls inside an undecided call's guards: unfolded at
+           this level too, since what they learn may decide it. *)
+        let guard_calls = ref [] in
         let left =
           List.filter
             (fun ((f, args) as k) ->
@@ -1528,7 +1534,19 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
                 let env = List.mapi (fun i a -> (param_const i, a)) args in
                 let inst = List.map (fun (conds, res) -> (List.map (subst env) conds, subst env res)) tp.t_cases in
                 match decided_arm st inst with
-                | None -> true
+                | None ->
+                  List.iter
+                    (fun (conds, _) ->
+                      List.iter
+                        (fun g ->
+                          if !asked < budget && not (List.mem g !seen || List.mem g todo || List.mem g !guard_calls)
+                          then begin
+                            incr asked;
+                            guard_calls := g :: !guard_calls
+                          end)
+                        (List.rev (List.fold_left reflected_apps [] conds)))
+                    inst;
+                  true
                 | Some (conds, res) ->
                   progressed := true;
                   seen := k :: !seen;
@@ -1542,7 +1560,9 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
                   false)
             todo
         in
-        if !progressed && left <> [] then rounds left else left
+        if !guard_calls <> [] then rounds (left @ List.rev !guard_calls)
+        else if !progressed && left <> [] then rounds left
+        else left
       in
       let left = rounds pending in
       (* What stays is over fuel, over budget, or undecided (§3.9). *)
@@ -1674,6 +1694,31 @@ let is_int_ty = function Some t -> (match T.repr t with T.TCon ("Int", []) -> tr
    past it the body is declined, so one function's equations stay few. *)
 let max_let_cases = 16
 
+(* The solver's half of R4: [d] is non-zero under [facts], asked of z3 over
+   the integer parameters alone.  A fact over anything else (a datatype, a
+   call's symbol, a non-literal division) is dropped, which only weakens the
+   assumptions; a divisor over anything else is not asked. *)
+let solver_nonzero ~(int_consts : string list) (facts : Smt.term list) (d : Smt.term) : bool =
+  let open Smt in
+  let rec arith t =
+    match t with
+    | Const k -> List.mem k int_consts
+    | IntLit _ | BoolLit _ -> true
+    | Add _ | Sub _ | Mul _ | MulLit _ | DivLit _ | ModLit _ | Neg _ | Not _ | And _ | Or _ | Implies _ | Ite _
+    | Eq _ | Ne _ | Lt _ | Le _ | Gt _ | Ge _ ->
+      List.for_all arith (children t)
+    | _ -> false
+  in
+  arith d
+  && (let vc =
+        { decls = List.map (fun k -> (k, SInt)) int_consts;
+          assumptions = List.filter arith facts;
+          goal = Ne (d, IntLit 0) }
+      in
+      match March_refine.Refine.discharge ~root:(Sys.getcwd ()) vc with
+      | March_refine.Refine.Verified -> true
+      | _ -> false)
+
 (* R4 for a non-literal divisor, decided on the translated template: every
    [Div]/[Mod] in a case must have a divisor its facts show non-zero.  The
    facts are the parameter refinements ([pre]), the case's earlier guards,
@@ -1682,7 +1727,8 @@ let max_let_cases = 16
    structural, so it needs no solver and gives the same answer every run; a
    divisor it cannot see is non-zero declines the template (sound: the
    symbol stays uninterpreted). *)
-let divisions_defined (pre : Smt.term list) (cases : (Smt.term list * Smt.term) list) : bool =
+let divisions_defined ?(solver = fun (_ : Smt.term list) (_ : Smt.term) -> false) (pre : Smt.term list)
+    (cases : (Smt.term list * Smt.term) list) : bool =
   let open Smt in
   let rec conj = function And (a, b) -> conj a @ conj b | t -> [ t ] in
   let nonzero_fact d f =
@@ -1696,7 +1742,7 @@ let divisions_defined (pre : Smt.term list) (cases : (Smt.term list * Smt.term) 
     | _ -> false
   in
   let nonzero facts d =
-    match d with IntLit k -> k <> 0 | _ -> List.exists (nonzero_fact d) facts
+    match d with IntLit k -> k <> 0 | _ -> List.exists (nonzero_fact d) facts || solver facts d
   in
   let rec ok facts t =
     let with_ f = conj f @ facts in
@@ -1727,6 +1773,12 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
   | A.EBlock (_ :: _, _) | A.EMatch _ -> (
     match tr_case c env e with
     | [ ([], t) ] -> t
+    (* Several cases in value position (an argument, an operand): an
+       if-then-else chain.  Each case's guards already exclude the cases
+       before it, and the cases cover (R5), so the last needs no test. *)
+    | (_ :: _ :: _) as cases when List.length cases <= max_let_cases ->
+      let rev = List.rev cases in
+      List.fold_left (fun acc (g, r) -> Smt.Ite (conj g, r, acc)) (snd (List.hd rev)) (List.tl rev)
     | _ -> raise Decline)
   | A.EIf (cnd, a, b, _) -> Smt.Ite (v cnd, v a, v b)
   | A.ECon (ctor, args, sp) when RE.is_source_ctor ctor.A.txt ->
@@ -2368,7 +2420,10 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
               ~finally:(fun () -> RS.arm_on := saved; RS.active := saved_active)
               (fun () -> pre_of u ptys)
           in
-          if not (divisions_defined pre cases) then begin
+          let int_consts =
+            List.concat (List.mapi (fun i s -> if s = Smt.SInt then [ param_const i ] else []) ptys)
+          in
+          if not (divisions_defined ~solver:(solver_nonzero ~int_consts) pre cases) then begin
             let why = "divides by a value nothing shows is non-zero" in
             Hashtbl.replace encoder_blocked u.RT.u_span ("R4:" ^ why);
             if not (String.contains u.RT.u_name '/') then Hashtbl.replace RS.blocked_by_name u.RT.u_name (why, u.RT.u_span);

@@ -1189,7 +1189,7 @@ void    march_fn_table_register(const void *table, const int64_t *len, void *tex
 /* Test harness — used by --test compiled binaries. */
 extern jmp_buf  march_test_jmp_buf;
 extern int      march_test_in_test;
-extern char     march_test_fail_buf[4096];
+extern char     march_test_fail_buf[16384];
 /* Nonzero while a catcher that HANDLES a panic is active (the test runner,
  * __try_call).  try_finally only intercepts and re-raises, so it leaves this
  * alone: a panic under it still reaches the crash observers. */
@@ -1198,3 +1198,5 @@ void    march_test_init(int32_t argc, char **argv);
 void    march_test_setup_all(void (*fn)(void));
 void    march_test_run(void (*fn)(void), const char *name, void (*setup)(void));
 int32_t march_test_report(void);
+void   *march_test_header(void *header);
+void    march_assert_fail(void *meta, void *left, void *right);

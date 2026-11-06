@@ -628,6 +628,43 @@ let add_total_twin_note (ctx : rctx) (errctx : Err.ctx) (mark : Err.diagnostic l
           if List.memq d reported && not (List.mem note d.Err.notes)
           then { d with Err.notes = d.Err.notes @ [ note ] } else d) errctx.Err.diagnostics
 
+(* Plan 2026-11-02 §F4, one step past it: a `refinement_violated` call whose
+   arguments are all concrete (closed, or built from the confirmed
+   counterexample [Witness.record_example] kept for this call) is RUN, and a
+   failure it shows ("running `safe_div(10, 0)` panics: division by zero")
+   becomes a note.  Only a named, module-level callee is run: a local (an
+   alias `g`, a lambda) may not be what the module environment calls by that
+   name.  [Witness.run_call] declines anything it cannot run soundly (an
+   effect, the fuel running out, a value it cannot build) and anything that
+   does not fail; a declined run adds nothing.  Display only. *)
+let add_run_note (ctx : rctx) (errctx : Err.ctx) (mark : Err.diagnostic list)
+    ~(span : A.span) ~(fname : string) (args : A.expr list) : unit =
+  let rec fresh = function
+    | l when l == mark -> []
+    | [] -> []
+    | d :: r -> d :: fresh r in
+  let is_violation (d : Err.diagnostic) =
+    d.Err.span = span && Err.slug_of_code d.Err.code = Err.Code.refinement_violated in
+  match List.filter is_violation (fresh errctx.Err.diagnostics) with
+  | [] -> ()
+  | reported ->
+    if List.mem fname ctx.locals then ()
+    else
+      let fd =
+        match resolve_key ctx fname with
+        | Some key -> Option.map snd (Hashtbl.find_opt fn_defs_tbl key)
+        | None -> None in
+      match Option.bind fd Witness.qualified_fn_name with
+      | None -> ()
+      | Some qname ->
+        let bindings = Option.value ~default:[] (Hashtbl.find_opt Witness.examples span) in
+        match Witness.run_call ~fn_name:qname ~shown_as:fname ~bindings args with
+        | None -> ()
+        | Some note ->
+          errctx.Err.diagnostics <- List.map (fun (d : Err.diagnostic) ->
+              if List.memq d reported && not (List.mem note d.Err.notes)
+              then { d with Err.notes = note :: d.Err.notes } else d) errctx.Err.diagnostics
+
 let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : A.span)
     ~(callee_name : string)
     (callee_sg : fn_sig) (args : A.expr list) : unit =
@@ -5211,6 +5248,7 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
        let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
        let mark = errctx.Err.diagnostics in
        List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
+       add_run_note ctx errctx mark ~span:sp ~fname args;
        add_total_twin_note ctx errctx mark ~span:sp ~fname args;
        check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp ~callee_name:fname sg args;
        check_arg_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:fname sg args;

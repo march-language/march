@@ -179,6 +179,7 @@ type proto_info = {
   pi_def : Ast.protocol_def;
   pi_projections : (string * session_ty) list;
   pi_span : Ast.span;
+  pi_positions : (string * (session_ty * March_ast.Protocol_states.pos) list) list;
 }
 module StrMap :
   sig

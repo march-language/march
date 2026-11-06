@@ -6,6 +6,7 @@ division by zero literal in `cap no_panic` module. [division_by_zero]
 33 |       10 / d
            ^^^^^^
 
+    run `march --explain division_by_zero`
 
 
 -- CAPABILITY ----------- errors/division_by_zero_3.march

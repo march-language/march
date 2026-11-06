@@ -1,17 +1,29 @@
 exit: 1
 -- REFINEMENT -------- errors/refinement_violated_7.march
 
-refinement violation: argument `xs` of `head_of` does not satisfy precondition `len(_) > 0` (e.g. ys = []) [refinement_violated]
-note: guard the call (e.g. `if len(ys) > 0 do …`) or pass a value known to satisfy it
+refinement violation: argument `xs` of `head_of` does not satisfy precondition `len(_) > 0` [refinement_violated]
+for example, when `ys` is `[]`
+note: guard the call (e.g. `if len(ys) > 0 do head_of(ys) else … end`) or pass a value known to satisfy it
 
 27 |       head_of(ys)
            ^^^^^^^^^^^
 
+    running `head_of([])` panics: "empty"
 
-    this argument must satisfy `len(_) > 0`:
+    this argument must satisfy `len(ys) > 0`:
 
 27 |       head_of(ys)
                    ^^
+
+    `ys` comes from here:
+
+25 |   fn broken(ys : List(Int)) : Int do
+                 ^^
+
+    the call is reached only when this is true:
+
+26 |     if List.length(ys) == 0 do
+            ^^^^^^^^^^^^^^^^^^^^
     run `march --explain refinement_violated`
 
 

@@ -82,6 +82,8 @@ let impure_named = [
   "panic"; "panic_"; "todo_"; "unreachable_";
   (* records the next panic's call site: kept, in order, before that call *)
   "__panic_site";
+  (* a failed assert's report (diverges); a test's panic header (stored) *)
+  "__assert_fail"; "__test_header";
   (* random / time-derived *)
   "uuid_v7"; "uuid_v7_at";
   (* actors, monitors, supervision, capabilities *)

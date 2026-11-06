@@ -2,13 +2,13 @@ exit: 1
 -- REFINEMENT -------- errors/refinement_violated_2.march
 
 refinement violation: the argument passed to `f` does not satisfy precondition `_ >= 0` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `-3 >= 0` is never true; pass a value that does
 
 10 |   fn ap(f : ({Int | _ >= 0}) -> Int) : Int do f(-3) end
                                                    ^^^^^
 
 
-    this argument must satisfy `_ >= 0`:
+    the argument is `-3` here:
 
 10 |   fn ap(f : ({Int | _ >= 0}) -> Int) : Int do f(-3) end
                                                      ^^

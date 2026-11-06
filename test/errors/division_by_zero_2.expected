@@ -8,6 +8,7 @@ Use `Math.checked_div` or `Math.checked_mod` to return `Option(Int)` instead of 
 19 |     10 / d
          ^^^^^^
 
+    run `march --explain division_by_zero`
 
 
 -- CAPABILITY ----------- errors/division_by_zero_2.march
