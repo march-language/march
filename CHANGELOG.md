@@ -505,6 +505,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Two compiles of one project no longer risk a torn refinement verdict.** The verdict cache
+  under `.march/cas/vc` wrote each entry in place, so a `march --check` reading an entry
+  while another process wrote it could see half a counterexample. Entries are now written
+  to a temporary file and renamed into place.
 - **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
   (what `forge test` runs) treated a property that returned `false` as passing. Only a
   property that panicked or failed an `assert` was caught. Under `march test` it already

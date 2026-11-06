@@ -24615,6 +24615,7 @@ type infer_fixture = { fx_root : string; fx_m : March_ast.Ast.module_ }
 
 let with_infer_fixture ?(stdlib = false) (src : string) (f : infer_fixture -> 'a) : 'a =
   with_temp_root "infer" (fun root ->
+      Test_helpers.seed_vc_cache root;
       let m = March_desugar.Desugar.desugar_module (parse src) in
       (* [~stdlib]: `list.march` as a sibling module, the shape the driver
          produces, so `List.filter`'s signature is in the checker's defs. *)
@@ -25187,6 +25188,7 @@ let march_exe_rel () = Filename.concat (Filename.dirname Sys.executable_name) ".
 
 let run_cli args src =
   with_temp_root "infercli" (fun dir ->
+      Test_helpers.seed_vc_cache dir;
       let f = Filename.concat dir "m.march" in
       Out_channel.with_open_bin f (fun oc -> output_string oc src);
       let out = Filename.concat dir "out.txt" in
@@ -25208,6 +25210,7 @@ let run_cli_in ?(env = "") dir args =
 
 let with_src_dir src f =
   with_temp_root "inferapply" (fun dir ->
+      Test_helpers.seed_vc_cache dir;
       let file = Filename.concat dir "m.march" in
       Out_channel.with_open_bin file (fun oc -> output_string oc src);
       f dir (fun () -> In_channel.with_open_bin file In_channel.input_all))
@@ -29326,7 +29329,7 @@ end
           (hcr_check ~src:(src "{ count: old.count, history: Nil }") prior next)) ]
 
 let () =
-  Alcotest.run "march-refinecheck"
+  Test_helpers.run_groups "march-refinecheck"
     [ ("refinecheck", suite);
       ("hcr-variance", hcr_variance_suite);
       ("bounds-a2", a2_suite);

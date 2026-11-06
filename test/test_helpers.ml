@@ -2466,3 +2466,225 @@ let keep_os_sensitive ~groups suites =
        failwith ("keep_os_sensitive: no such group: " ^ String.concat ", " missing));
     List.filter (fun (name, _) -> List.mem name groups) suites
   end
+
+(* ── Stdlib verdict seed for fresh test projects ──────────────────────────
+   Every `march --check` re-proves the stdlib's own refinement obligations
+   (~370 z3 queries) unless the project's verdict cache (.march/cas/vc, keyed
+   by the exact query text, the z3 version, the limits and the platform)
+   already holds them.  A test that checks its program in a fresh directory,
+   which the refinement suites do on purpose so no verdict of ANOTHER test is
+   reused, therefore paid for the whole stdlib every time: in test_refinecheck
+   that was ~200,000 of its ~210,000 queries and most of its wall time
+   (profiled 2026-11-06).
+
+   [seed_vc_cache dir] writes the stdlib's verdicts into [dir]'s cache before
+   the test runs.  They are computed once per process by the compiler under
+   test (a `--check` of an empty module in a private directory and HOME), so
+   a seeded run reaches the same verdicts as a cold one: the key is the query
+   text, and z3 under a step limit is deterministic.  The test's own
+   obligations still start cold.  Tests ABOUT the cache (warm vs cold runs,
+   what gets stored) must not seed; they build their own directories.
+
+   MARCH_TEST_VC_SEED=0 turns it off, for checking that a cold run agrees. *)
+let vc_seed_mu = Mutex.create ()
+let vc_seed : (string * string) list option ref = ref None
+
+let rec test_mkdir_p dir =
+  if dir = "/" || dir = "." || dir = Filename.dirname dir || Stdlib.Sys.file_exists dir then ()
+  else begin
+    test_mkdir_p (Filename.dirname dir);
+    try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+  end
+
+let rec test_remove_tree path =
+  if Stdlib.Sys.is_directory path then begin
+    Array.iter (fun n -> test_remove_tree (Filename.concat path n)) (Stdlib.Sys.readdir path);
+    Unix.rmdir path
+  end
+  else Stdlib.Sys.remove path
+
+(* Every regular file under [root], as (path relative to root, contents). *)
+let read_tree root =
+  let rec go rel acc =
+    let abs = if rel = "" then root else Filename.concat root rel in
+    if Stdlib.Sys.is_directory abs then
+      Array.fold_left
+        (fun acc n -> go (if rel = "" then n else Filename.concat rel n) acc)
+        acc (Stdlib.Sys.readdir abs)
+    else (rel, In_channel.with_open_bin abs In_channel.input_all) :: acc
+  in
+  if Stdlib.Sys.file_exists root then go "" [] else []
+
+let vc_seed_files () =
+  Mutex.protect vc_seed_mu @@ fun () ->
+  match !vc_seed with
+  | Some s -> s
+  | None ->
+    let exe = Filename.concat (Filename.dirname Stdlib.Sys.executable_name) "../bin/main.exe" in
+    let s =
+      if Stdlib.Sys.getenv_opt "MARCH_TEST_VC_SEED" = Some "0" || not (Stdlib.Sys.file_exists exe) then []
+      else begin
+        let dir = Filename.temp_dir "vc_seed" "" in
+        Fun.protect ~finally:(fun () -> try test_remove_tree dir with _ -> ()) @@ fun () ->
+        let home = Filename.concat dir "home" in
+        Unix.mkdir home 0o755;
+        Out_channel.with_open_bin (Filename.concat dir "seed.march") (fun oc ->
+          output_string oc "mod VcSeed do\n  fn main() : Int do 0 end\nend\n");
+        (* The query and rlimit logs are per-test env vars: a test that set
+           one with putenv must not receive the seed's queries. *)
+        ignore (Sys.command (Printf.sprintf
+          "cd %s && env -u MARCH_REFINE_Z3_LOG -u MARCH_REFINE_RLIMIT_LOG -u MARCH_REFINE_Z3_ERRORS \
+           HOME=%s %s --check seed.march > /dev/null 2>&1"
+          (Filename.quote dir) (Filename.quote home) (Filename.quote exe)));
+        read_tree (List.fold_left Filename.concat dir [ ".march"; "cas"; "vc" ])
+      end
+    in
+    vc_seed := Some s;
+    s
+
+let seed_vc_cache dir =
+  let vc = List.fold_left Filename.concat dir [ ".march"; "cas"; "vc" ] in
+  List.iter (fun (rel, data) ->
+    let p = Filename.concat vc rel in
+    test_mkdir_p (Filename.dirname p);
+    Out_channel.with_open_bin p (fun oc -> output_string oc data))
+    (vc_seed_files ())
+
+(* ── Alcotest groups in parallel processes ────────────────────────────────
+   [run_groups name groups] is [Alcotest.run name groups], except that with
+   MARCH_TEST_PROCS=N (N > 1) it runs each group in its own child process
+   (this executable again, with MARCH_TEST_GROUP=<group>), N at a time.
+
+   For suites that are one alcotest process whose cases each wait on a
+   subprocess or a solver: run serially on CI's 4-vCPU runner they kept one
+   core busy (test_refinecheck took 50-77 min there, November 2026).  Groups
+   are handed out in list order to whichever process is free; with the
+   measured group times that is within 5% of the best split, so there is no
+   weight table to go stale.
+
+   Each child's output is printed whole when it finishes, under a
+   `==> group` header, then one summary line: groups, tests run, wall time,
+   the slowest groups, and every group that failed.  Exit status 1 if any
+   child exited non-zero, was killed, or printed no alcotest summary.
+
+   Only plain runs fan out: an argument other than -e/-q/-c (and their long
+   forms), e.g. `test REGEX` or `list`, runs in this one process as before.
+   Unset (every local `dune runtest`), nothing changes.  Groups must not
+   depend on each other's side effects; they already may not, since alcotest
+   can run any one alone. *)
+let parallel_safe_args =
+  [ "-e"; "--show-errors"; "-q"; "--quick-tests"; "-c"; "--compact" ]
+
+let strip_ansi s = Str.global_replace (Str.regexp "\027\\[[0-9;]*m") "" s
+
+(* N from the LAST "N tests run" (or "1 test run") in [output]: alcotest's
+   summary is its final line.  The number must start at a non-digit, and the
+   search resumes after each match, so "12 tests run" never reads as 2. *)
+let tests_run_of output =
+  let s = strip_ansi output in
+  let re = Str.regexp "\\(^\\|[^0-9]\\)\\([0-9]+\\) tests? run" in
+  let rec last pos acc =
+    match Str.search_forward re s pos with
+    | _ ->
+      let n = int_of_string (Str.matched_group 2 s) in
+      last (Str.match_end ()) (Some n)
+    | exception Not_found -> acc
+  in
+  last 0 None
+
+let run_groups name (groups : (string * unit Alcotest.test_case list) list) =
+  match Stdlib.Sys.getenv_opt "MARCH_TEST_GROUP" with
+  | Some g when g <> "" -> (
+    match List.filter (fun (n, _) -> n = g) groups with
+    | [] -> Printf.eprintf "%s: MARCH_TEST_GROUP=%s names no group\n%!" name g; exit 2
+    | sel -> Alcotest.run name sel)
+  | _ ->
+    let procs =
+      match Option.bind (Stdlib.Sys.getenv_opt "MARCH_TEST_PROCS") int_of_string_opt with
+      | Some n when n > 1 -> n
+      | _ -> 1
+    in
+    let args = List.tl (Array.to_list Stdlib.Sys.argv) in
+    let plain = List.for_all (fun a -> List.mem a parallel_safe_args) args in
+    if procs = 1 || not plain then begin
+      if procs > 1 then
+        Printf.eprintf "%s: MARCH_TEST_PROCS ignored for arguments %s; running in one process\n%!"
+          name (String.concat " " args);
+      Alcotest.run name groups
+    end else begin
+      let names = List.fold_left (fun acc (n, _) -> if List.mem n acc then acc else n :: acc) [] groups |> List.rev in
+      let total = List.length names in
+      let exe = Stdlib.Sys.executable_name in
+      let log_root = List.fold_left Filename.concat (Stdlib.Sys.getcwd ()) [ "_build"; "_tests"; name ^ ".groups" ] in
+      test_mkdir_p log_root;
+      let env_base =
+        Unix.environment () |> Array.to_list
+        |> List.filter (fun kv ->
+             not (String.starts_with ~prefix:"MARCH_TEST_PROCS=" kv
+                  || String.starts_with ~prefix:"MARCH_TEST_GROUP=" kv))
+      in
+      let t0 = Unix.gettimeofday () in
+      let start g =
+        let out = Filename.temp_file "group" ".out" in
+        let fd = Unix.openfile out [ Unix.O_WRONLY; Unix.O_TRUNC; Unix.O_CLOEXEC ] 0o600 in
+        let odir = Filename.concat log_root g in
+        test_mkdir_p odir;
+        let argv = Array.of_list ((exe :: args) @ [ "-o"; odir ]) in
+        let env = Array.of_list (("MARCH_TEST_GROUP=" ^ g) :: env_base) in
+        let pid =
+          Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
+            Unix.create_process_env exe argv env Unix.stdin fd fd)
+        in
+        (pid, (g, out, Unix.gettimeofday ()))
+      in
+      let running = Hashtbl.create procs in
+      let queue = ref names and finished = ref 0 in
+      let failed = ref [] and tests = ref 0 and times = ref [] in
+      let rec wait () =
+        try Unix.wait () with Unix.Unix_error (Unix.EINTR, _, _) -> wait ()
+      in
+      while !queue <> [] || Hashtbl.length running > 0 do
+        while !queue <> [] && Hashtbl.length running < procs do
+          let g = List.hd !queue in
+          queue := List.tl !queue;
+          let pid, info = start g in
+          Hashtbl.replace running pid info
+        done;
+        let pid, status = wait () in
+        match Hashtbl.find_opt running pid with
+        | None -> ()
+        | Some (g, out, started) ->
+          Hashtbl.remove running pid;
+          incr finished;
+          let secs = Unix.gettimeofday () -. started in
+          let text = try In_channel.with_open_bin out In_channel.input_all with _ -> "" in
+          (try Stdlib.Sys.remove out with _ -> ());
+          let run = tests_run_of text in
+          let verdict =
+            match status, run with
+            | Unix.WEXITED 0, Some _ -> None
+            | Unix.WEXITED 0, None -> Some "exited 0 without an alcotest summary"
+            | Unix.WEXITED n, _ -> Some (Printf.sprintf "exit %d" n)
+            | (Unix.WSIGNALED n | Unix.WSTOPPED n), _ -> Some (Printf.sprintf "killed by signal %d" n)
+          in
+          Option.iter (fun n -> tests := !tests + n) run;
+          times := (g, secs) :: !times;
+          Option.iter (fun why -> failed := (g, why) :: !failed) verdict;
+          Printf.printf "==> [%d/%d] %s (%.1fs%s)\n%s%s%!" !finished total g secs
+            (match verdict with None -> "" | Some why -> ", FAILED: " ^ why)
+            text (if text = "" || String.ends_with ~suffix:"\n" text then "" else "\n")
+      done;
+      let slowest =
+        List.sort (fun (_, a) (_, b) -> compare b a) !times
+        |> List.filteri (fun i _ -> i < 8)
+        |> List.map (fun (g, s) -> Printf.sprintf "%s %.0fs" g s)
+      in
+      Printf.printf "\n%s: %d groups in %d processes, %d tests run, %.1fs wall.\nslowest: %s\n"
+        name total procs !tests (Unix.gettimeofday () -. t0) (String.concat ", " slowest);
+      (match List.rev !failed with
+       | [] -> Printf.printf "All %d groups passed.\n%!" total
+       | fs ->
+         Printf.printf "%d of %d groups FAILED:\n%s\n%!" (List.length fs) total
+           (String.concat "\n" (List.map (fun (g, why) -> Printf.sprintf "  %s (%s)" g why) fs)));
+      exit (if !failed = [] then 0 else 1)
+    end

@@ -482,6 +482,7 @@ end
 
 let in_dir src f =
   let dir = Filename.temp_dir "lemma_erase" "" in
+  Test_helpers.seed_vc_cache dir;
   Fun.protect ~finally:(fun () -> try U.remove_tree dir with _ -> ()) (fun () ->
       Out_channel.with_open_bin (Filename.concat dir "m.march") (fun oc -> output_string oc src);
       f dir)
