@@ -68,4 +68,51 @@ let parens =
               Alcotest.failf "min_int row lost its parentheses: %s" l)
           rows) ]
 
-let suite : unit Alcotest.test_case list = parens
+(* #20 (closed by 71f112f4a, resolution by call site): a bare predicate call
+   resolves in its own module, in the postcondition pre-pass too; and a
+   qualified call that resolved is not reported as unchecked. *)
+let inner ~post =
+  Printf.sprintf
+    {|  mod Inner do
+    needs IO.Console
+    fn dbl(x : Int) : Int do x + x end
+    fn twice(c : Cap(IO.Console), n : Int) : {Int | _ == %s(n)} do
+      println("hi")
+      dbl(n)
+    end
+  end
+|} post
+
+let resolution =
+  [ gated "a bare predicate call resolves in its own module, also in the postcondition pre-pass" (fun () ->
+        let src =
+          "mod G do\n  needs IO.Console\n  fn dbl(x : Int) : Int do x + 1 end\n" ^ inner ~post:"dbl"
+          ^ "  fn need6(x : {Int | _ == 6}) : Int do x end\n\
+            \  fn need4(x : {Int | _ == 4}) : Int do x end\n\
+            \  fn a(c : Cap(IO.Console)) : Int do need6(Inner.twice(c, 3)) end\n\
+            \  fn b(c : Cap(IO.Console)) : Int do need4(Inner.twice(c, 3)) end\n\
+            \  fn main(c : Cap(IO.Console)) do println(int_to_string(a(c) + b(c))) end\nend\n"
+        in
+        let out = U.run src in
+        U.expect out ~line:7 ~callee:"twice" "proved";
+        U.expect ~uses:"Inner.dbl" out ~line:14 ~callee:"need6" "proved";
+        U.expect out ~line:15 ~callee:"need4" "violated");
+    gated "a qualified predicate call that resolved gets no unchecked warning" (fun () ->
+        let src =
+          "mod G do\n  needs IO.Console\n" ^ inner ~post:"Inner.dbl"
+          ^ "  fn need6(x : {Int | _ == 6}) : Int do x end\n\
+            \  fn a(c : Cap(IO.Console)) : Int do need6(Inner.twice(c, 3)) end\n\
+            \  fn main(c : Cap(IO.Console)) do println(int_to_string(a(c))) end\nend\n"
+        in
+        let out = U.run src in
+        U.expect out ~line:12 ~callee:"need6" "proved";
+        Alcotest.(check int) ("no refinement_unchecked:\n" ^ out) 0 (U.count_code out "refinement_unchecked"));
+    gated "a qualified predicate call that does not resolve still warns" (fun () ->
+        let src =
+          "mod G do\n  needs IO.Console\n" ^ inner ~post:"Nowhere.dbl"
+          ^ "  fn main(c : Cap(IO.Console)) do println(int_to_string(Inner.twice(c, 3))) end\nend\n"
+        in
+        let out = U.run src in
+        Alcotest.(check bool) ("refinement_unchecked:\n" ^ out) true (U.count_code out "refinement_unchecked" >= 1)) ]
+
+let suite : unit Alcotest.test_case list = parens @ resolution

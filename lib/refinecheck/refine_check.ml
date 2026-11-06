@@ -6610,7 +6610,10 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
            f);
       List.iter go args
     | A.EApp (A.EVar { A.txt = f; _ }, args, span) ->
-      if (not (known_predicate_fn f)) && not (List.mem f abstract_refs) then begin
+      (* A call reflection resolved at this site (by span, so a qualified
+         `Inner.dbl` too) is checked: no "unchecked" warning of any kind. *)
+      let resolved = !Reflect_state.active && Reflect_state.resolve_site span <> None in
+      if (not resolved) && (not (known_predicate_fn f)) && not (List.mem f abstract_refs) then begin
         if String.contains f '.' then
           (* [Desugar.desugar_ty] (Task 8) now flattens a MODULE-PATH call head
              (`List.length(_)`) in predicate position into this dotted `EVar`
