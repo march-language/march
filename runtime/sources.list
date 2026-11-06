@@ -45,6 +45,7 @@ march_tls.c                  http            -
 march_tls_session.c          http            -
 march_tls_server.c           http            -
 march_https.c                http            -
+march_https_tls.c            http            -
 march_dispatch.c             hcr             jit
 march_trace.c                hcr             jit
 march_reload.c               hcr             jit

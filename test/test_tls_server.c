@@ -195,6 +195,7 @@ static void t_poll_sequence(void) {
     SSL_CTX_free(c);
 
     unlink(cp); unlink(kp); rmdir(dir);
+    free(C.cert); free(C.key); free(D.cert); free(D.key);
     uint64_t g = mts_slot_generation();
     CHECK(mts_poll_once(err, sizeof err) == MTS_POLL_MISSING, "missing files not MISSING");
     CHECK(mts_slot_generation() == g, "generation moved on missing");

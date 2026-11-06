@@ -25,8 +25,8 @@
 #include "march_http_response.h"
 #include "march_scheduler.h"   /* march_sched_run_on_sched_stack */
 #include "march_https.h"       /* g_march_https: phase timeouts, plain listener */
-#include "march_tls_session.h"  /* per-connection TLS */
-#include "march_tls_server.h"   /* the certificate slot, fd -> session registry */
+#define MARCH_TLS_VIA_OPS       /* TLS through g_march_tls_ops: see march_tls_ops.h */
+#include "march_tls_ops.h"      /* per-connection TLS, the fd -> session registry */
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -310,9 +310,7 @@ static void accept_connections(int listener_fd, int evfd, int is_tls, void *pipe
         if (is_tls) {
             /* The session takes its own reference to the current context;
              * a later certificate swap leaves this connection's alone. */
-            SSL_CTX *ctx = mts_slot_acquire();
-            march_tls_session_t *s = ctx ? mts_new_server(ctx) : NULL;
-            if (ctx) SSL_CTX_free(ctx);
+            march_tls_session_t *s = mts_new_from_slot();
             if (!s) { close(cfd); conn_state_free(c); continue; }
             c->tls = s;
             mts_registry_put(cfd, s);

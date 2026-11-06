@@ -9,7 +9,8 @@
 
 #include "march_http_io.h"
 #include "march_http_parse_simd.h"
-#include "march_tls_session.h"
+#define MARCH_TLS_VIA_OPS     /* TLS through g_march_tls_ops: see march_tls_ops.h */
+#include "march_tls_ops.h"
 
 #include <sys/socket.h>
 #include <sys/uio.h>

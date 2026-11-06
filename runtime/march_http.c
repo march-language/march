@@ -17,8 +17,8 @@
  */
 #include "march_http.h"
 #include "march_https.h"
-#include "march_tls_session.h"
-#include "march_tls_server.h"
+#define MARCH_TLS_VIA_OPS     /* TLS through g_march_tls_ops: see march_tls_ops.h */
+#include "march_tls_ops.h"
 #include "march_http_internal.h"
 #include "march_http_io.h"
 #include "march_preempt.h"
@@ -2238,9 +2238,7 @@ static void *connection_thread(void *arg) {
     int     running = 1;
     int     maybe_buffered = 0;   /* TLS: plaintext may wait in the session */
     if (is_tls) {
-        SSL_CTX *ctx = mts_slot_acquire();
-        pc.tls = ctx ? mts_new_server(ctx) : NULL;
-        if (ctx) SSL_CTX_free(ctx);
+        pc.tls = mts_new_from_slot();
         if (!pc.tls) {
             running = 0;
         } else {

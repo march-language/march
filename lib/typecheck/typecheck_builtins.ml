@@ -296,7 +296,7 @@ let builtin_cap_table : (string * string) list = [
   ("http_server_plain_listener", "IO.NetListen");
   ("http_server_set_timeouts",   "IO.NetListen");
   ("http_server_tls_configure",  "IO.NetListen");
-  ("http_server_reload_tls",     "IO.NetConnect.TLS");
+  ("http_server_reload_tls",     "IO.NetListen");
   (* IO.Process *)
   ("process_env",           "IO.Process");
   ("process_set_env",       "IO.Process");

@@ -93,7 +93,7 @@ let table : (string * string) list = [
   ("march_http_server_plain_listener", "IO.NetListen");
   ("march_http_server_set_timeouts",   "IO.NetListen");
   ("march_http_server_tls_configure",  "IO.NetListen");
-  ("march_http_server_reload_tls",     "IO.NetConnect.TLS");
+  ("march_http_server_reload_tls",     "IO.NetListen");
   (* IO.Process *)
   ("march_process_env",            "IO.Process");
   ("march_process_set_env",        "IO.Process");

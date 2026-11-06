@@ -55,6 +55,7 @@ let stdlib_file_list = [
   "csv.march";
   "websocket.march";
   "http_server.march";
+  "http_acme.march";
   "iterable.march";
   "set.march";
   "hash_map.march";

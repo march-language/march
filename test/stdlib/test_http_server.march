@@ -307,28 +307,28 @@ describe "HttpServer.acme_responder" do
   end
 end
 
-describe "HttpServer.acme_webroot" do
+describe "HttpAcme.webroot" do
   test "serves the challenge file certbot wrote" do
     let dir = "/tmp/march_acme_webroot_test"
     let _ = Dir.mkdir_p(dir ++ "/.well-known/acme-challenge")
     let _ = File.write(dir ++ "/.well-known/acme-challenge/abc_-9", "abc_-9.thumbprint")
-    let c = run(HttpServer.acme_webroot(dir), req(:get, acme_path("abc_-9"), "", host("e.com")))
+    let c = run(HttpAcme.webroot(dir), req(:get, acme_path("abc_-9"), "", host("e.com")))
     assert (HttpServer.status(c) == 200)
     assert (HttpServer.resp_body(c) == "abc_-9.thumbprint")
   end
 
   test "a missing file is 404" do
-    let c = run(HttpServer.acme_webroot("/tmp/march_acme_webroot_test"), req(:get, acme_path("missing"), "", host("e.com")))
+    let c = run(HttpAcme.webroot("/tmp/march_acme_webroot_test"), req(:get, acme_path("missing"), "", host("e.com")))
     assert (HttpServer.status(c) == 404)
   end
 
   test "a traversal token is 404" do
-    let c = run(HttpServer.acme_webroot("/tmp/march_acme_webroot_test"), req(:get, acme_path(".."), "", host("e.com")))
+    let c = run(HttpAcme.webroot("/tmp/march_acme_webroot_test"), req(:get, acme_path(".."), "", host("e.com")))
     assert (HttpServer.status(c) == 404)
   end
 
   test "other paths pass through" do
-    let c = run(HttpServer.acme_webroot("/tmp"), req(:get, "/other", "", host("e.com")))
+    let c = run(HttpAcme.webroot("/tmp"), req(:get, "/other", "", host("e.com")))
     assert (not(HttpServer.halted(c)))
   end
 end

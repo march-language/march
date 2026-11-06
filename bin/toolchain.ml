@@ -899,7 +899,7 @@ let ensure_runtime_so () =
         let tls_c     = Filename.concat runtime_dir "march_tls.c" in
         Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s%s" http_c sha1_c base64_c
           (opt_file simd_c) (opt_file sched_c) (opt_file resp_c)
-          (opt_file io_c) (opt_file evloop_c) (opt_file udp_c) (opt_file tls_c ^ opt_file (Filename.concat runtime_dir "march_tls_session.c") ^ opt_file (Filename.concat runtime_dir "march_tls_server.c") ^ opt_file (Filename.concat runtime_dir "march_https.c")) (opt_file extras_c)
+          (opt_file io_c) (opt_file evloop_c) (opt_file udp_c) (opt_file tls_c ^ opt_file (Filename.concat runtime_dir "march_tls_session.c") ^ opt_file (Filename.concat runtime_dir "march_tls_server.c") ^ opt_file (Filename.concat runtime_dir "march_https.c") ^ opt_file (Filename.concat runtime_dir "march_https_tls.c")) (opt_file extras_c)
           (opt_file compress_c ^ codec_files)
       else
         (* march_extras.c unconditionally references base64_encode (base64.c) and

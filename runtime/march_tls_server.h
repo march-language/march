@@ -45,6 +45,8 @@ mts_poll_rc mts_poll_once(char *err, size_t errlen);     /* reload: refuses an e
 mts_poll_rc mts_poll_initial(char *err, size_t errlen);
 int  mts_poller_start(int poll_secs);     /* detached pthread; 0 ok */
 
+/* The registry is implemented in march_https.c (always linked: it needs no
+ * OpenSSL, and the HTTP runtime uses it on every close). */
 void mts_registry_put(int fd, march_tls_session_t *s);
 march_tls_session_t *mts_registry_get(int fd);
 march_tls_session_t *mts_registry_take(int fd);

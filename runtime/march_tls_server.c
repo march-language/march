@@ -2,6 +2,7 @@
  * poller and fd -> session registry. See march_tls_server.h. */
 
 #include "march_tls_server.h"
+#include "march_tls_ops.h"
 
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -330,40 +331,32 @@ int mts_poller_start(int poll_secs) {
     return r == 0 ? 0 : -1;
 }
 
-/* ── the fd -> session registry ───────────────────────────────────────── */
+/* ── the ops table (march_tls_ops.h) ───────────────────────────────────── */
 
-static pthread_mutex_t g_reg_mu = PTHREAD_MUTEX_INITIALIZER;
-static march_tls_session_t **g_reg;
-static size_t g_reg_cap;
-
-void mts_registry_put(int fd, march_tls_session_t *s) {
-    if (fd < 0) return;
-    pthread_mutex_lock(&g_reg_mu);
-    if ((size_t)fd >= g_reg_cap) {
-        size_t cap = g_reg_cap ? g_reg_cap : 1024;
-        while (cap <= (size_t)fd) cap *= 2;
-        march_tls_session_t **n = realloc(g_reg, cap * sizeof *n);
-        if (!n) { pthread_mutex_unlock(&g_reg_mu); return; }
-        memset(n + g_reg_cap, 0, (cap - g_reg_cap) * sizeof *n);
-        g_reg = n;
-        g_reg_cap = cap;
-    }
-    g_reg[fd] = s;
-    pthread_mutex_unlock(&g_reg_mu);
-}
-
-march_tls_session_t *mts_registry_get(int fd) {
-    march_tls_session_t *s = NULL;
-    pthread_mutex_lock(&g_reg_mu);
-    if (fd >= 0 && (size_t)fd < g_reg_cap) s = g_reg[fd];
-    pthread_mutex_unlock(&g_reg_mu);
+march_tls_session_t *mts_new_from_slot(void) {
+    SSL_CTX *ctx = mts_slot_acquire();
+    if (!ctx) return NULL;
+    march_tls_session_t *s = mts_new_server(ctx);   /* takes its own reference */
+    SSL_CTX_free(ctx);
     return s;
 }
 
-march_tls_session_t *mts_registry_take(int fd) {
-    march_tls_session_t *s = NULL;
-    pthread_mutex_lock(&g_reg_mu);
-    if (fd >= 0 && (size_t)fd < g_reg_cap) { s = g_reg[fd]; g_reg[fd] = NULL; }
-    pthread_mutex_unlock(&g_reg_mu);
-    return s;
-}
+const march_tls_ops_t mts_real_ops = {
+    .new_from_slot   = mts_new_from_slot,
+    .feed            = mts_feed,
+    .handshake       = mts_handshake,
+    .is_established  = mts_is_established,
+    .read            = mts_read,
+    .write           = mts_write,
+    .out_len         = mts_out_len,
+    .take_out        = mts_take_out,
+    .has_input       = mts_has_input,
+    .shutdown        = mts_shutdown,
+    .free_           = mts_free,
+    .lock            = mts_lock,
+    .unlock          = mts_unlock,
+    .send_lock       = mts_send_lock,
+    .send_unlock     = mts_send_unlock,
+    .slot_generation = mts_slot_generation,
+    .poller_start    = mts_poller_start,
+};

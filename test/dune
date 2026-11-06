@@ -1203,9 +1203,13 @@
  (targets test_tls_server_runner)
  (deps    test_tls_server.c
           ../runtime/march_tls_server.c
+          ../runtime/march_tls_session.c
+          ../runtime/march_https.c
+          ../runtime/march_https.h
+          ../runtime/march_tls_ops.h
           ../runtime/march_tls_server.h
           ../runtime/march_tls_session.h)
- (action  (system "%{cc} -std=gnu11 -Wall -Wextra -I../runtime -O1 -o %{targets} test_tls_server.c ../runtime/march_tls_server.c $(pkg-config --cflags --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lpthread")))
+ (action  (system "%{cc} -std=gnu11 -Wall -Wextra -I../runtime -O1 -o %{targets} test_tls_server.c ../runtime/march_tls_server.c ../runtime/march_tls_session.c ../runtime/march_https.c $(pkg-config --cflags --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lpthread")))
 
 (rule
  (alias   runtest)

@@ -112,6 +112,25 @@ let test_config_errors () =
     expect "/nonexistent.pem";
     expect "scheme: http"
 
+(* ── importers keep their needs ────────────────────────────────────────── *)
+
+(* A module that imports HttpServer must declare every module-level `needs`
+   HttpServer declares wherever the checker cannot narrow the import's demand
+   to the names used (import_cap_missing; reproduced with Bastion 0.3.1's
+   modules on MARCH_LIB_PATH, which is how forge builds forgepm). Bastion and
+   forgepm declare only IO.NetListen for it, and the design's anti-goal is
+   that they compile unchanged, so HTTPS adds no module-level `needs` to
+   HttpServer: reload_tls is classified IO.NetListen, and acme_webroot (the
+   one file reader) lives in HttpAcme. *)
+let test_importer_needs_unchanged () =
+  let src = read_file_contents (Filename.concat (march_project_root ()) "stdlib/http_server.march") in
+  let needs =
+    String.split_on_char '\n' src
+    |> List.filter_map (fun l ->
+        let l = String.trim l in
+        if String.length l > 6 && String.sub l 0 6 = "needs " then Some l else None) in
+  Alcotest.(check (list string)) "HttpServer's module-level needs" [ "needs IO.NetListen" ] needs
+
 (* ── listen_bad_cert_exits ─────────────────────────────────────────────── *)
 
 let bad_cert_src = {|mod HttpsBadCert do
@@ -1128,6 +1147,7 @@ let suites =
   [ ( "https server (compiled, end-to-end)",
       [ Alcotest.test_case "config_errors" `Quick test_config_errors;
         Alcotest.test_case "listen_bad_cert_exits" `Quick test_listen_bad_cert_exits;
+        Alcotest.test_case "importer_needs_unchanged" `Quick test_importer_needs_unchanged;
       ]
       @ List.map (fun (mode, evloop, extra_env) ->
           Alcotest.test_case ("deadlines: " ^ mode) `Quick
