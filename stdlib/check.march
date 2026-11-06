@@ -244,13 +244,14 @@ mod Check do
     end
   end
 
-  pfn binding_lines(names : List(String), values : List(String)) : String do
+  pfn binding_lines(names : List(String), values : List(String), acc : String) : String do
     match names do
-    Nil -> ""
+    Nil -> acc
     Cons(n, ns) ->
       match values do
-      Nil -> ""
-      Cons(v, vs) -> "        " ++ n ++ " = " ++ clip(v, 200) ++ "\n" ++ binding_lines(ns, vs)
+      Nil -> acc
+      Cons(v, vs) ->
+        binding_lines(ns, vs, acc ++ "        " ++ n ++ " = " ++ clip(v, 200) ++ "\n")
       end
     end
   end
@@ -263,7 +264,7 @@ mod Check do
     Cons(n, Nil) -> "        " ++ n ++ " = " ++ clip(minimal, 200) ++ "\n"
     _ ->
       match tuple_parts(minimal, List.length(names)) do
-      Some(parts) -> binding_lines(names, parts)
+      Some(parts) -> binding_lines(names, parts, "")
       None ->
         "        (" ++ string_join(names, ", ") ++ ") = " ++ clip(minimal, 200) ++ "\n"
       end
@@ -271,12 +272,7 @@ mod Check do
   end
 
   pfn indent_lines(lines : List(String)) : List(String) do
-    match lines do
-    Nil -> Nil
-    Cons(l, rest) ->
-      let l2 = if l == "" do "" else "    " ++ l end
-      Cons(l2, indent_lines(rest))
-    end
+    List.map(lines, fn l -> if l == "" do "" else "    " ++ l end)
   end
 
   pfn strip_panic(msg : String) : String do
