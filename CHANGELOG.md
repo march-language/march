@@ -553,6 +553,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
+  operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
+  is known by its byte length, and distinct literals are distinct values; record field access,
+  literals, updates and patterns, and tuple construction and patterns, all translate.
 - **`--refine-infer` no longer skips programs that `--check` accepts.** A record named like a
   standard-library one (`type NodeInfo`, `type Member`) left a type error inside the
   standard library that `--check` never shows, and inference then printed only "skipped,
