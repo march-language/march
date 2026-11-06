@@ -7,6 +7,7 @@ Linear values must be consumed exactly once — did you mean to pass it somewher
 20 |     let st = Stream_Prod.register(s, 0)
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+    `st` is role `Prod`'s place in protocol `Stream`: next it must send an `Int` to `Cons`. Take that step with `Stream_Prod.send_Msg_Prod_Cons_1`. This is the top of the protocol's `loop`: to go round again, pass it to a function that takes this state as a parameter.
     run `march --explain linear_never_used`
 
 

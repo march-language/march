@@ -312,6 +312,17 @@ git log is authoritative for exact commits.
   is not there the report gives `file:line`. `MARCH_BACKTRACE=full` adds the standard library's
   functions. The exit code is unchanged. Scripts that matched `panic: ` in a compiled program's
   stderr need the new wording (`The program panicked: ...`).
+- Diagnostics, four messages that cost a second round of fixing:
+  - A syntax error in a program whose `main` prints with no `needs IO.Console` now says so in a
+    note. The compiler cannot check capabilities until the program parses, so that error used
+    to appear only after the syntax was fixed.
+  - A protocol state that is never used says what its role must do next and which function
+    takes that step; closing the conversation at the top of a protocol's `loop` says a
+    repeating branch comes back there and how to go round again.
+  - `may crash D` naming a role that is not in the protocol lists the protocol's roles, and a
+    crash branch on a role not declared `may crash` says to remove the branch.
+  - The guard a refinement error suggests for a `List` call uses `List.length(xs)`; it used
+    to print `len(xs)`, the refinement measure, which is not a function.
 - A failed `assert` outside a test prints its own report (the line and both operands), then
   what it was reached through. Interpreted, it used to print that report inside a second
   report's headline.
