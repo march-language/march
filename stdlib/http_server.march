@@ -23,6 +23,8 @@ mod HttpServer do
   -- IO.NetListen: capabilities are checked by reachability, and listen
   -- reaches the TLS configuration on every server, plain ones included.
   needs IO.NetConnect.TLS
+  -- acme_webroot reads challenge files.
+  needs IO.FileRead
 
   -- Upgrade type for WebSocket connections
   type Upgrade = NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)
@@ -582,6 +584,154 @@ mod HttpServer do
   doc "`\"https\"` when the conn arrived over TLS, else `\"http\"`."
   fn scheme(conn) do
     if http_conn_is_tls(fd(conn)) do "https" else "http" end
+  end
+
+  -- ── Plugs for an HTTPS deployment ────────────────────────────────────
+
+  pfn acme_challenge_prefix() do
+    "/.well-known/acme-challenge/"
+  end
+
+  -- The rest of the path when it is under the ACME challenge prefix.
+  pfn acme_token(conn) do
+    let p = path(conn)
+    let pre = acme_challenge_prefix()
+    if string_starts_with(p, pre) do
+      let n = string_byte_length(pre)
+      Some(string_slice(p, n, string_byte_length(p) - n))
+    else
+      None
+    end
+  end
+
+  -- base64url: [A-Za-z0-9_-], non-empty. Anything else (dots, slashes,
+  -- percent escapes) is refused before any lookup or file access.
+  pfn valid_acme_token(t) do
+    let n = string_byte_length(t)
+    fn ok_from(i) do
+      if i >= n do true
+      else
+        let b = string_byte_at(t, i)
+        let good = (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+                   || (b >= 48 && b <= 57) || b == 95 || b == 45
+        if good do ok_from(i + 1) else false end
+      end
+    end
+    n > 0 && ok_from(0)
+  end
+
+  pfn not_found(conn) do
+    conn
+    |> put_resp_header("content-type", "text/plain")
+    |> send_resp(404, "Not Found")
+  end
+
+  doc """
+  A plug that answers ACME HTTP-01 challenges from memory: for
+  `GET /.well-known/acme-challenge/<token>` it calls `lookup(token)` and
+  responds 200 `text/plain` with `Some(key_authorization)`, or 404 for
+  `None`. Tokens outside the base64url alphabet are 404 without a lookup.
+  Other requests pass through untouched.
+
+  ## Examples
+
+      HttpServer.plain_listener(server, 80, [
+        HttpServer.acme_responder(fn token -> Vault.get(challenges, token)),
+        HttpServer.redirect_to_https(443)
+      ])
+  """
+  fn acme_responder(lookup) do
+    fn conn ->
+      match acme_token(conn) do
+      None -> conn
+      Some(t) ->
+        let m = method(conn)
+        if (m == :get || m == :head) && valid_acme_token(t) do
+          match lookup(t) do
+          Some(body) ->
+            conn
+            |> put_resp_header("content-type", "text/plain")
+            |> send_resp(200, body)
+          None -> not_found(conn)
+          end
+        else
+          not_found(conn)
+        end
+      end
+  end
+
+  doc """
+  A plug that serves ACME HTTP-01 challenges from the directory certbot's
+  `--webroot -w <dir>` writes them to: `GET /.well-known/acme-challenge/<token>`
+  returns `<dir>/.well-known/acme-challenge/<token>` as `text/plain`, or 404.
+  Tokens outside the base64url alphabet are 404, so no request can read
+  outside that directory. Other requests pass through. Needs `IO.FileRead`.
+
+  ## Examples
+
+      HttpServer.plain_listener(server, 80, [
+        HttpServer.acme_webroot("/var/www/acme"),
+        HttpServer.redirect_to_https(443)
+      ])
+  """
+  fn acme_webroot(dir) do
+    acme_responder(fn token ->
+      match File.read(dir ++ acme_challenge_prefix() ++ token) do
+      Ok(body) -> Some(body)
+      Err(_) -> None
+      end)
+  end
+
+  -- "example.com:8080" -> "example.com", "[::1]:80" -> "[::1]".
+  pfn host_without_port(h) do
+    if string_starts_with(h, "[") do
+      match string_index_of(h, "]") do
+      Some(i) -> string_slice(h, 0, i + 1)
+      None -> h
+      end
+    else
+      match string_last_index_of(h, ":") do
+      Some(i) -> string_slice(h, 0, i)
+      None -> h
+      end
+    end
+  end
+
+  doc """
+  A plug that redirects every request to the same URL over HTTPS on `port`:
+  `https://<Host without its port>[:port unless 443]<path>[?query]`. GET and
+  HEAD get 301; other methods get 308 so the method and body are kept. A
+  request without a `Host` header gets 400. ACME challenge paths
+  (`/.well-known/acme-challenge/`) pass through, so it works before or after
+  `acme_webroot` in a `plain_listener`.
+
+  ## Examples
+
+      HttpServer.new(443)
+      |> HttpServer.tls(HttpServer.TlsFiles(cert, key))
+      |> HttpServer.plain_listener(80, [HttpServer.redirect_to_https(443)])
+  """
+  fn redirect_to_https(port) do
+    fn conn ->
+      match acme_token(conn) do
+      Some(_) -> conn
+      None ->
+        match get_req_header(conn, "host") do
+        None ->
+          conn
+          |> put_resp_header("content-type", "text/plain")
+          |> send_resp(400, "Bad Request: no Host header")
+        Some(h) ->
+          let port_part = if port == 443 do "" else ":" ++ int_to_string(port) end
+          let qs = query_string(conn)
+          let q = if qs == "" do "" else "?" ++ qs end
+          let m = method(conn)
+          let code = if m == :get || m == :head do 301 else 308 end
+          conn
+          |> put_resp_header("location", "https://" ++ host_without_port(h) ++ port_part ++ path(conn) ++ q)
+          |> send_resp(code, "")
+        end
+      end
   end
 
   -- Hand the HTTPS, timeout and plain-listener settings to the runtime

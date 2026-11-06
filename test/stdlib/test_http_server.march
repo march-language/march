@@ -6,6 +6,9 @@
 
 mod TestHttpServer do
 
+  needs IO.FileRead
+  needs IO.FileWrite
+
 -- Local mirrors of HttpServer private types (matched structurally at runtime).
 -- Method field is now Atom (:get, :post, etc.) matching HttpServer.Conn.
 ptype Upgrade = NoUpgrade | WebSocketUpgrade(a)
@@ -212,6 +215,121 @@ describe "HttpServer server config" do
       |> HttpServer.progress_timeout(10)
       |> HttpServer.plain_listener(8080, [fn c -> HttpServer.text(c, 200, "plain")])
     ()
+  end
+end
+
+pfn req(meth, path_, qs, hdrs) do
+  make_conn(meth, path_, qs, hdrs, "")
+end
+
+pfn run(plug, conn) do
+  plug(conn)
+end
+
+pfn host(h) do
+  Cons(Header("host", h), Nil)
+end
+
+pfn acme_path(token) do
+  "/.well-known/acme-challenge/" ++ token
+end
+
+pfn refused_token(t) do
+  let c = run(HttpServer.acme_responder(fn _ -> Some("leak")), req(:get, acme_path(t), "", host("e.com")))
+  HttpServer.status(c) == 404 && HttpServer.resp_body(c) != "leak"
+end
+
+pfn lookup_tok(t) do
+  if t == "tok" do Some("tok.key") else None end
+end
+
+describe "HttpServer.redirect_to_https" do
+  test "GET redirects 301 to https on the default port, query kept" do
+    let c = run(HttpServer.redirect_to_https(443), req(:get, "/a", "b=1", host("example.com:8080")))
+    assert (HttpServer.status(c) == 301)
+    assert (HttpServer.get_resp_header(c, "location") == Some("https://example.com/a?b=1"))
+    assert (HttpServer.halted(c))
+  end
+
+  test "a non-default port is kept in the location" do
+    let c = run(HttpServer.redirect_to_https(8443), req(:get, "/a", "", host("example.com")))
+    assert (HttpServer.get_resp_header(c, "location") == Some("https://example.com:8443/a"))
+  end
+
+  test "HEAD is 301 too" do
+    let c = run(HttpServer.redirect_to_https(443), req(:head, "/", "", host("example.com")))
+    assert (HttpServer.status(c) == 301)
+  end
+
+  test "POST is 308" do
+    let c = run(HttpServer.redirect_to_https(443), req(:post, "/form", "", host("example.com")))
+    assert (HttpServer.status(c) == 308)
+    assert (HttpServer.get_resp_header(c, "location") == Some("https://example.com/form"))
+  end
+
+  test "no Host header is 400" do
+    let c = run(HttpServer.redirect_to_https(443), req(:get, "/", "", Nil))
+    assert (HttpServer.status(c) == 400)
+    assert (HttpServer.halted(c))
+  end
+
+  test "ACME challenge paths pass through" do
+    let c = run(HttpServer.redirect_to_https(443), req(:get, acme_path("x"), "", host("example.com")))
+    assert (not(HttpServer.halted(c)))
+    assert (HttpServer.status(c) == 0)
+  end
+end
+
+describe "HttpServer.acme_responder" do
+  test "a known token is answered 200 with its key authorization" do
+    let c = run(HttpServer.acme_responder(lookup_tok), req(:get, acme_path("tok"), "", host("e.com")))
+    assert (HttpServer.status(c) == 200)
+    assert (HttpServer.resp_body(c) == "tok.key")
+    assert (HttpServer.get_resp_header(c, "content-type") == Some("text/plain"))
+  end
+
+  test "an unknown token is 404" do
+    let c = run(HttpServer.acme_responder(lookup_tok), req(:get, acme_path("nope"), "", host("e.com")))
+    assert (HttpServer.status(c) == 404)
+  end
+
+  test "tokens outside the base64url alphabet are 404, never looked up" do
+    assert (refused_token("..%2f"))
+    assert (refused_token("a.b"))
+    assert (refused_token("a/b"))
+    assert (refused_token(".."))
+    assert (refused_token(""))
+  end
+
+  test "other paths pass through" do
+    let c = run(HttpServer.acme_responder(lookup_tok), req(:get, "/other", "", host("e.com")))
+    assert (not(HttpServer.halted(c)))
+  end
+end
+
+describe "HttpServer.acme_webroot" do
+  test "serves the challenge file certbot wrote" do
+    let dir = "/tmp/march_acme_webroot_test"
+    let _ = Dir.mkdir_p(dir ++ "/.well-known/acme-challenge")
+    let _ = File.write(dir ++ "/.well-known/acme-challenge/abc_-9", "abc_-9.thumbprint")
+    let c = run(HttpServer.acme_webroot(dir), req(:get, acme_path("abc_-9"), "", host("e.com")))
+    assert (HttpServer.status(c) == 200)
+    assert (HttpServer.resp_body(c) == "abc_-9.thumbprint")
+  end
+
+  test "a missing file is 404" do
+    let c = run(HttpServer.acme_webroot("/tmp/march_acme_webroot_test"), req(:get, acme_path("missing"), "", host("e.com")))
+    assert (HttpServer.status(c) == 404)
+  end
+
+  test "a traversal token is 404" do
+    let c = run(HttpServer.acme_webroot("/tmp/march_acme_webroot_test"), req(:get, acme_path(".."), "", host("e.com")))
+    assert (HttpServer.status(c) == 404)
+  end
+
+  test "other paths pass through" do
+    let c = run(HttpServer.acme_webroot("/tmp"), req(:get, "/other", "", host("e.com")))
+    assert (not(HttpServer.halted(c)))
   end
 end
 
