@@ -2,13 +2,13 @@ exit: 1
 -- REFINEMENT ----------------- errors/cap_grant_11.march
 
 refinement violation: argument `k` of `run` does not satisfy precondition `k != 0` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `0` can never satisfy `k != 0`; pass a value that does
 
 52 |     println(int_to_string(run(Box(4), 0)))
                                ^^^^^^^^^^^^^^
 
 
-    this argument must satisfy `k != 0`:
+    `k` is `0` here:
 
 52 |     println(int_to_string(run(Box(4), 0)))
                                            ^

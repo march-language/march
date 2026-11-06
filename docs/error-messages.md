@@ -1620,8 +1620,11 @@ widening the grant adds a parameter too.
 A refinement type adds a condition to a type, like `{Int | _ >= 0}` or
 `{List(Int) | len(_) > 0}`, and March proves those conditions at compile time with the z3
 solver (see [Refinement types](refinement-types.md)). When a proof fails, the error gives
-a concrete counterexample. These need z3, so the playground can't run them; install March
-to try them.
+a concrete counterexample, points at where the failing value came from, and writes the
+guard over your own names. When every argument of the failing call is a known value and
+the function does no I/O, the compiler also runs that call once in its interpreter and
+says what happens. These need z3, so the playground can't run them; install March to try
+them.
 
 <a id="index-out-of-range"></a>
 
@@ -1645,18 +1648,19 @@ end
 
 refinement violation: index must be less than the list's length [refinement_violated]
 argument `n` of `List.nth` does not satisfy precondition `_ < len(xs)`
-note: this value never satisfies it; pass one that does
+note: `7` can never satisfy `n < len(xs)`; pass a value that does
 
 3 |     List.nth([1, 2, 3], 7)
         ^^^^^^^^^^^^^^^^^^^^^^
 
+    running `List.nth([1, 2, 3], 7)` panics: "List.nth: index out of bounds"
     `List.nth_opt` is `List.nth` without the requirement: it returns `Option` instead of panicking.
         match List.nth_opt([1, 2, 3], 7) do
           Some(v) -> …
           None -> …
         end
 
-    this argument must satisfy `_ >= 0 && _ < len(xs)`:
+    `n` is `7` here:
 
 3 |     List.nth([1, 2, 3], 7)
                             ^
@@ -1665,7 +1669,9 @@ note: this value never satisfies it; pass one that does
 <!-- /error-tour -->
 
 `List.nth` requires an index below the list's length. The solver knows the literal list
-has three elements, so this call can never succeed, and the note says so.
+has three elements, so this call can never succeed, and the note says so. Every argument is
+a value, so the compiler also runs the call once in its interpreter and reports what
+happens: `List.nth` panics.
 
 <a id="counterexample"></a>
 
@@ -1698,24 +1704,37 @@ end
 ```text
 -- REFINEMENT ---------------------- counterexample.march
 
-refinement violation: argument `xs` of `head_of` does not satisfy precondition `len(_) > 0` (e.g. ys = []) [refinement_violated]
-note: guard the call (e.g. `if len(ys) > 0 do …`) or pass a value known to satisfy it
+refinement violation: argument `xs` of `head_of` does not satisfy precondition `len(_) > 0` [refinement_violated]
+for example, when `ys` is `[]`
+note: guard the call (e.g. `if len(ys) > 0 do head_of(ys) else … end`) or pass a value known to satisfy it
 
 11 |       head_of(ys)
            ^^^^^^^^^^^
 
+    running `head_of([])` panics: "empty"
 
-    this argument must satisfy `len(_) > 0`:
+    this argument must satisfy `len(ys) > 0`:
 
 11 |       head_of(ys)
                    ^^
+
+    `ys` comes from here:
+
+9 |   fn first_or_zero(ys : List(Int)) : Int do
+                       ^^
+
+    the call is reached only when this is true:
+
+10 |     if List.length(ys) == 0 do
+            ^^^^^^^^^^^^^^^^^^^^
     run `march --explain refinement_violated`
 ```
 <!-- /error-tour -->
 
 Inside this branch `ys` is known to be empty, so the call fails whenever it runs. The
-counterexample (`ys = []`) shows when, and the note suggests the guard that would make it
-safe.
+counterexample (`ys` is `[]`) shows when, the labels point at where `ys` comes from and at
+the condition that leads here, and the note suggests the guard that would make the call
+safe. Running `head_of([])` shows the panic the guard prevents.
 
 <a id="return-refinement"></a>
 
@@ -1745,9 +1764,7 @@ The return type requires:
 
     _ >= 0
 
-A counterexample was found:
-
-    n = -1
+but magnitude(-1) returns -1.
 
 4 |   fn magnitude(n : Int) : {Int | _ >= 0} do
       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1756,8 +1773,8 @@ A counterexample was found:
 ```
 <!-- /error-tour -->
 
-The function body is checked against its own return type, and the counterexample
-`n = -1` is an input that returns a negative number.
+The function body is checked against its own return type, and the counterexample is
+run: `magnitude(-1)` returns `-1`, a negative number.
 
 <a id="termination"></a>
 

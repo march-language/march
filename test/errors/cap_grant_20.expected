@@ -3,13 +3,13 @@ exit: 1
 
 refinement violation: lane index must be less than 16 [refinement_violated]
 argument `i` of `Simd.extract_u8x16` does not satisfy precondition `_ < 16`
-note: this value never satisfies it; pass one that does
+note: `16` can never satisfy `i < 16`; pass a value that does
 
 14 |     println(to_string(Simd.extract_u8x16(v, 16)))
                            ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
-    this argument must satisfy `0 <= _ && _ < 16`:
+    `i` is `16` here:
 
 14 |     println(to_string(Simd.extract_u8x16(v, 16)))
                                                  ^^

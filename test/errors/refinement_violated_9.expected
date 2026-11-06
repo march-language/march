@@ -1,17 +1,23 @@
 exit: 1
 -- REFINEMENT -------- errors/refinement_violated_9.march
 
-refinement violation: argument `o` of `inner` does not satisfy precondition `is_Some(_)` (e.g. p = None) [refinement_violated]
-note: guard the call (e.g. `if is_Some(p) do …`) or pass a value known to satisfy it
+refinement violation: argument `o` of `inner` does not satisfy precondition `is_Some(_)` [refinement_violated]
+for example, when `p` is `None`
+note: guard the call (e.g. `if is_Some(p) do inner(p) else … end`) or pass a value known to satisfy it
 
 33 |       None    -> inner(p)
                       ^^^^^^^^
 
 
-    this argument must satisfy `is_Some(_)`:
+    this argument must satisfy `is_Some(p)`:
 
 33 |       None    -> inner(p)
                             ^
+
+    `p` comes from here, where `is_None(p)` is known:
+
+31 |   fn outer(p : {Option(Int) | is_None(_)}) : Int do
+                ^
     run `march --explain refinement_violated`
 
 

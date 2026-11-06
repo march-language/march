@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: for example, when `d` is `0`
+mod Main do
+  -- §F4: a definite failure on a name, not a literal. The message gives the
+  -- solver's value for `d`, a guard over `d` itself, labels where `d` and the
+  -- branch condition come from, and runs the call with that value.
+  fn safe_div(a : Int, b : {Int | _ != 0}) : Int do a / b end
+
+  fn ratio(d : Int) : Int do
+    if d == 0 do safe_div(10, d) else 1 end
+  end
+end

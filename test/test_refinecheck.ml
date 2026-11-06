@@ -403,7 +403,7 @@ let suite =
         Alcotest.(check bool) "reports a violation" true
           (contains text "refinement violation");
         Alcotest.(check bool) "includes a counterexample" true
-          (contains text "e.g. k = "));
+          (contains text "for example, when `k` is "));
 
     (* An undecidable obligation stays non-fatal, but silence is
        indistinguishable from "checked and fine". A hint says so.
@@ -11507,7 +11507,7 @@ end|} in
         Alcotest.(check bool) "violation" true
           (contains text "refinement violation");
         Alcotest.(check bool) "minimal validated example" true
-          (contains text "(e.g. k = -1)"))
+          (contains text "for example, when `k` is `-1`"))
   ; gated "precondition cx renders an empty list in source syntax" (fun () ->
         (* Today this prints the measure fact `len(ys) = 0`; the concrete
            value `ys = []` is what the user can actually paste. *)
@@ -11519,7 +11519,7 @@ end|} in
         Alcotest.(check bool) "violation" true
           (contains text "refinement violation");
         Alcotest.(check bool) "source-syntax value" true
-          (contains text "(e.g. ys = [])"))
+          (contains text "for example, when `ys` is `[]`"))
   ; gated "division: counterexample names the concrete zero divisor" (fun () ->
         (* The witness assignment satisfies the divisor's own refinement
            (_ >= 0 admits 0) and every path fact — a concrete admissible
@@ -12711,7 +12711,7 @@ end|}
         in
         Alcotest.(check bool) "violation reported" true
           (contains text "need_pos" && contains text "_ > 0");
-        Alcotest.(check bool) "with the confirmed counterexample" true (contains text "y = 0"));
+        Alcotest.(check bool) "with the confirmed counterexample" true (contains text "for example, when `y` is `0`"));
 
     (* Unguarded, the same argument is not a DEFINITE failure (an unguarded
        parameter never is), so it stays a skip, and the skip names the
@@ -23485,8 +23485,9 @@ let array_followups_suite =
   [ gated "violation text spells Array.length, never pvec_length or negate" (fun () ->
         let msgs = array_messages (m "  fn g(v) : Int do Array.get(v, -1) end\n") in
         Alcotest.(check bool) "a violation is reported" true (has_violation msgs);
-        Alcotest.(check bool) "mentions Array.length(v)" true
-          (List.exists (fun s -> contains s "Array.length(v)") msgs);
+        (* The closed index's label names its value (`-1`) and the note the
+           conjunct it breaks (`n >= 0`), so `Array.length` is spelled by the
+           symbolic case's guard below, not here. *)
         Alcotest.(check bool) "never mentions pvec_length" false
           (List.exists (fun s -> contains s "pvec_length") msgs);
         Alcotest.(check bool) "no negate example" false
@@ -23494,14 +23495,20 @@ let array_followups_suite =
         (* The note's own "guard the call (e.g. `if …`)" is not an example;
            a counterexample follows the quoted predicate. *)
         Alcotest.(check bool) "a closed index gets no example" false
-          (List.exists (fun s -> contains s "v)` (e.g.") msgs));
+          (List.exists (fun s -> contains s "for example, when") msgs));
 
     gated "a symbolic index still gets a validated example" (fun () ->
         let msgs =
           array_messages (m "  fn k(v, i : {Int | _ < 0}) : Int do Array.get(v, i) end\n")
         in
-        Alcotest.(check bool) "(e.g. i = -1)" true
-          (List.exists (fun s -> contains s "(e.g. i = -1)") msgs));
+        Alcotest.(check bool) "for example, when `i` is `-1`" true
+          (List.exists (fun s -> contains s "for example, when `i` is `-1`") msgs);
+        (* The guard is the whole precondition read at the call: it spells
+           the array's length as `Array.length(v)`, never `pvec_length`. *)
+        Alcotest.(check bool) "guard mentions Array.length(v)" true
+          (List.exists (fun s -> contains s "Array.length(v)") msgs);
+        Alcotest.(check bool) "never mentions pvec_length" false
+          (List.exists (fun s -> contains s "pvec_length") msgs));
 
     gated "the unverified hint spells Array.length in its held/missing split" (fun () ->
         let msgs =
@@ -23633,7 +23640,7 @@ let measure_definition_suite =
            the timeout).  The verdict alone survives that encoding, because the
            refutation is an UNSAT query; the model does not. *)
         Alcotest.(check bool) "the violation carries a concrete counterexample" true
-          (contains (refine_error_text_d violating) "(e.g. "));
+          (contains (refine_error_text_d violating) "for example, when "));
 
     gated "a non-recursive multi-ctor measure with literal arms: Proved and Violated"
       (fun () ->

@@ -3,13 +3,13 @@ exit: 1
 
 refinement violation: a port is at most 65535 [refinement_violated]
 argument `port` of `Udp.open` does not satisfy precondition `_ <= 65535`
-note: this value never satisfies it; pass one that does
+note: `70000` can never satisfy `port <= 65535`; pass a value that does
 
 11 |     match Udp.open("127.0.0.1", 70000) do
                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
-    this argument must satisfy `_ >= 0 && _ <= 65535`:
+    `port` is `70000` here:
 
 11 |     match Udp.open("127.0.0.1", 70000) do
                                      ^^^^^

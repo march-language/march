@@ -1,0 +1,17 @@
+exit: 1
+-- REFINEMENT ------- errors/refinement_violated_20.march
+
+refinement violation: argument `b` of `stamp_div` does not satisfy precondition `_ != 0` [refinement_violated]
+note: `0` can never satisfy `b != 0`; pass a value that does
+
+14 |     stamp_div(10, 0)
+         ^^^^^^^^^^^^^^^^
+
+
+    `b` is `0` here:
+
+14 |     stamp_div(10, 0)
+                       ^
+    run `march --explain refinement_violated`
+
+

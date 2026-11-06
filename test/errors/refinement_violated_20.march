@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: `0` can never satisfy `b != 0`
+mod Main do
+  -- §F4: the call's arguments are all literals, but `stamp_div` reads the
+  -- clock, so it is not run: the effect is refused, and the message has no
+  -- "running" line.
+  needs IO.Clock
+
+  fn stamp_div(a : Int, b : {Int | _ != 0}) : Int do
+    let t = float_to_int(unix_time())
+    a / b + t - t
+  end
+
+  fn go() : Int do
+    stamp_div(10, 0)
+  end
+end
