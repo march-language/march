@@ -2373,6 +2373,13 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
      (Desugar_remote): its dispatch names the actor's message constructors,
      which a nested module sees only once the actor is declared. *)
   let m = { m with mod_decls = Desugar_remote.expand errors m.mod_decls } in
+  (* An actor whose state only gained fields since the deployed build gets
+     the `<actor>_migrate_state` the user would have written
+     (Desugar_migrate_derive).  Before the two passes below, which treat it
+     as a written one.  Never in the stdlib: the baseline names user actors. *)
+  let m =
+    if !Desugar_actor_names.is_stdlib_file m.mod_name.span.file then m
+    else { m with mod_decls = Desugar_migrate_derive.expand m.mod_decls } in
   (* Hot-reload `<actor>_migrate_msg` gets its C-ABI wrapper right after it
      (Desugar_migrate). *)
   let m = { m with mod_decls = Desugar_migrate.expand m.mod_decls } in

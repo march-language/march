@@ -1908,9 +1908,13 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                     d.Schema_diff.actor in
                 let migrate_sym = "__migrate_" ^ actor_mangled in
                 if so_exports_symbol so_path migrate_sym then None
-                else Some (d.Schema_diff.actor, msg)
+                else Some (d.Schema_diff.actor,
+                           msg ^ Schema_diff.not_derived_note new_schemas d.Schema_diff.actor)
             ) actor_diffs
           in
+          List.iter (fun d ->
+              Option.iter (Printf.printf "%s\n%!")
+                (Schema_diff.derived_note new_schemas d.Schema_diff.actor)) actor_diffs;
           if compat_errors <> [] then begin
             List.iter (fun (actor, msg) ->
               Printf.eprintf "forge deploy hot: actor %s — %s\n" actor msg

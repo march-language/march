@@ -606,7 +606,8 @@ let classify (i : input) : plan =
         let blocked =
           List.filter_map (fun ac ->
               match ac.ac_compat_error with
-              | Some m -> Some (Printf.sprintf "actor %s: %s, and no %s_migrate_state" ac.ac_actor m (String.uncapitalize_ascii ac.ac_actor))
+              | Some m -> Some (Printf.sprintf "actor %s: %s, and no %s_migrate_state%s" ac.ac_actor m (String.uncapitalize_ascii ac.ac_actor)
+                                  (Schema_diff.not_derived_note b.b_new_schemas ac.ac_actor))
               | None -> None) acs
           @ List.filter_map (fun ac ->
               if ac.ac_migrate_msg = `Wrong_old_type then

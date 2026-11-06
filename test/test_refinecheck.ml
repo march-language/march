@@ -15241,6 +15241,199 @@ let hcr_migration_suite =
             Alcotest.(check bool) "state" true (contains text "tally_migrate_state({ count: -1 })");
             Alcotest.(check bool) "msg" true (contains text "tally_migrate_msg(V1.Bump(0))"))) ]
 
+(* ── Derived state migrations (M11) ───────────────────────────────────────
+   When an actor's state only gained fields since the deployed build, desugar
+   writes its `<actor>_migrate_state` (Desugar_migrate_derive).  The two
+   derivation rules are proved here once, so a user never proves them:
+
+   - KEEP: a kept field is copied.  The deployed refinement is a hypothesis
+     (Hcr_baseline), so the same or a weaker refinement proves.
+   - ADD: an added field takes its `init` value, checked against the field's
+     refinement.
+
+   A derivation is trusted no further than that: a kept field whose
+   refinement was tightened, or an added field whose `init` value breaks its
+   own refinement, is still an error.  And nothing is derived for a change
+   that needs judgement. *)
+let hcr_derived_migration_suite =
+  let module B = March_refinecheck.Hcr_baseline in
+  let module D = March_desugar.Desugar_migrate_derive in
+  let module O = March_refinecheck.Obligation in
+  let pred s = March_parser.Parse.expr_of_lexbuf (Lexing.from_string s) in
+  let actor ?(init_params = "") ~state ~init () =
+    "mod DM do\n\
+    \  actor Tally do\n\
+    \    state { " ^ state ^ " }\n\
+    \    init" ^ init_params ^ " { " ^ init ^ " }\n\
+    \    on Bump() do state end\n\
+    \  end\n\
+    end\n"
+  in
+  (* The deployed build: `state { count : {Int | _ >= 0} }`. *)
+  let deployed f =
+    D.baseline := [ ("Tally", [ ("count", "Int") ]) ];
+    D.report := [];
+    B.baseline :=
+      [ ("Tally", { B.field_names = [ "count" ]; fields = [ ("count", pred "count >= 0") ]; handlers = [] }) ];
+    D.origins := [];
+    Fun.protect
+      ~finally:(fun () ->
+        D.baseline := []; D.report := []; D.origins := []; B.baseline := []; B.derived := [])
+      f
+  in
+  (* (derived function present, error text, verdicts of every obligation) *)
+  let run src =
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let rec has_fn = function
+      | March_ast.Ast.DFn (d, _) :: _ when d.March_ast.Ast.fn_name.March_ast.Ast.txt = "tally_migrate_state" -> true
+      | March_ast.Ast.DMod (_, _, inner, _) :: rest -> has_fn inner || has_fn rest
+      | _ :: rest -> has_fn rest
+      | [] -> false
+    in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    O.reset ();
+    (* As the driver does between desugar and the check. *)
+    B.derived := !D.origins;
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    (* Message, the line it is reported on, and its notes. *)
+    let errors =
+      String.concat "\n"
+        (List.filter_map
+           (fun (d : March_errors.Errors.diagnostic) ->
+             if d.March_errors.Errors.severity = March_errors.Errors.Error then
+               Some
+                 (Printf.sprintf "%s\n@line %d\n%s" d.March_errors.Errors.message
+                    d.March_errors.Errors.span.March_ast.Ast.start_line
+                    (String.concat "\n" d.March_errors.Errors.notes))
+             else None)
+           ctx.March_errors.Errors.diagnostics)
+    in
+    (has_fn desugared.March_ast.Ast.mod_decls, errors, O.all ())
+  in
+  (* How many obligations with this predicate were proved.  `init` and the
+     handlers carry the same ones, so a rule's proof is the EXTRA one the
+     derived function adds over the same program with no deploy known. *)
+  let proved pred_text obs =
+    List.length
+      (List.filter (fun (o : O.t) -> o.O.verdict = O.Proved && o.O.predicate = pred_text) obs)
+  in
+  let none_skipped obs =
+    not (List.exists (fun (o : O.t) -> match o.O.verdict with O.Skipped _ -> true | _ -> false) obs)
+  in
+  let outcome () = List.assoc_opt "Tally" !D.report in
+  [ gated "KEEP + ADD: the derived migration proves, with nothing left to the user" (fun () ->
+        deployed (fun () ->
+            let src =
+              actor ~state:"count : {Int | _ >= 0}, hist : List(Int), limit : {Int | _ > 0}"
+                ~init:"count: 0, hist: Nil, limit: 10" ()
+            in
+            let derived, errors, obs = run src in
+            Alcotest.(check bool) "derived" true derived;
+            Alcotest.(check bool) "reported with the added fields" true
+              (outcome () = Some (D.Derived [ "hist"; "limit" ]));
+            Alcotest.(check string) "no errors" "" errors;
+            Alcotest.(check bool) "no obligation skipped" true (none_skipped obs);
+            D.baseline := [];
+            let _, _, plain = run src in
+            Alcotest.(check int) "KEEP: one more proof of count's refinement"
+              (proved "_ >= 0" plain + 1) (proved "_ >= 0" obs);
+            Alcotest.(check int) "ADD: one more proof of limit's refinement"
+              (proved "_ > 0" plain + 1) (proved "_ > 0" obs)));
+
+    gated "KEEP is not trusted: a tightened refinement is refuted with the old state" (fun () ->
+        deployed (fun () ->
+            let derived, errors, _ =
+              run (actor ~state:"count : {Int | _ > 0}, hist : List(Int)" ~init:"count: 1, hist: Nil" ())
+            in
+            Alcotest.(check bool) "derived" true derived;
+            Alcotest.(check bool) "the deployed count 0 is the counterexample" true
+              (contains errors "but the running state { count: 0 } would become { count: 0, hist: [] }");
+            Alcotest.(check bool) "reported at the state field the user wrote" true
+              (contains errors "@line 3\n");
+            Alcotest.(check bool) "says the migration was derived, and the way out" true
+              (contains errors "the compiler derived `tally_migrate_state`"
+               && contains errors "write `tally_migrate_state` yourself")));
+
+    gated "ADD is not trusted: an init value that breaks its refinement is an error" (fun () ->
+        deployed (fun () ->
+            let derived, errors, _ =
+              run
+                (actor ~state:"count : {Int | _ >= 0}, limit : {Int | _ > 0}"
+                   ~init:"count: 0, limit: 0" ())
+            in
+            Alcotest.(check bool) "derived" true derived;
+            Alcotest.(check bool) "limit's refinement is violated" true (contains errors "limit")));
+
+    gated "the control: without the KEEP hypothesis the same migration does not prove" (fun () ->
+        deployed (fun () ->
+            B.baseline := [];
+            let _, errors, _ =
+              run (actor ~state:"count : {Int | _ >= 0}, hist : List(Int)" ~init:"count: 0, hist: Nil" ())
+            in
+            Alcotest.(check bool) "a negative old count is a counterexample" true
+              (contains errors "but the running state { count: -1 } would become")));
+
+    gated "a removed field is not derived" (fun () ->
+        deployed (fun () ->
+            let derived, _, _ = run (actor ~state:"total : Int" ~init:"total: 0" ()) in
+            Alcotest.(check bool) "not derived" false derived;
+            Alcotest.(check bool) "says why" true
+              (outcome () = Some (D.Not_derived "it removes count"))));
+
+    gated "a field whose type changed is not derived" (fun () ->
+        deployed (fun () ->
+            let derived, _, _ = run (actor ~state:"count : String" ~init:"count: \"\"" ()) in
+            Alcotest.(check bool) "not derived" false derived;
+            Alcotest.(check bool) "says why" true
+              (outcome () = Some (D.Not_derived "it changes the type of count"))));
+
+    gated "an added field whose init value reads an init parameter is not derived" (fun () ->
+        deployed (fun () ->
+            let derived, _, _ =
+              run
+                (actor ~init_params:"(start : Int)" ~state:"count : {Int | _ >= 0}, base : Int"
+                   ~init:"count: 0, base: start" ())
+            in
+            Alcotest.(check bool) "not derived" false derived;
+            Alcotest.(check bool) "says why" true
+              (outcome () = Some (D.Not_derived "the `init` value of base is not a constant"))));
+
+    gated "a written migrate_state is left alone" (fun () ->
+        deployed (fun () ->
+            let src =
+              "mod DM do\n\
+              \  actor Tally do\n\
+              \    state { count : {Int | _ >= 0}, hist : List(Int) }\n\
+              \    init { count: 0, hist: Nil }\n\
+              \    on Bump() do state end\n\
+              \  end\n\
+              \  fn tally_migrate_state(old : { count : Int }) do\n\
+              \    { count: old.count, hist: Cons(old.count, Nil) }\n\
+              \  end\n\
+              end\n"
+            in
+            let _, errors, _ = run src in
+            Alcotest.(check string) "the written one proves" "" errors;
+            Alcotest.(check bool) "nothing reported" true (outcome () = None)));
+
+    gated "an unchanged state, or no known deploy, derives nothing" (fun () ->
+        let src = actor ~state:"count : {Int | _ >= 0}" ~init:"count: 0" () in
+        deployed (fun () ->
+            let derived, _, _ = run src in
+            Alcotest.(check bool) "unchanged" false derived;
+            Alcotest.(check bool) "nothing reported" true (outcome () = None));
+        (* The schema lists fields by name; the declaration order is free. *)
+        deployed (fun () ->
+            D.baseline := [ ("Tally", [ ("a", "Int"); ("z", "Int") ]) ];
+            let derived, _, _ = run (actor ~state:"z : Int, a : Int" ~init:"z: 0, a: 0" ()) in
+            Alcotest.(check bool) "unchanged, declared in another order" false derived;
+            Alcotest.(check bool) "nothing reported" true (outcome () = None));
+        let derived, _, _ =
+          run (actor ~state:"count : {Int | _ >= 0}, hist : List(Int)" ~init:"count: 0, hist: Nil" ())
+        in
+        Alcotest.(check bool) "no baseline" false derived) ]
+
 (* ── Actor handler contracts (plan phase 3) ───────────────────────────────
    `on Inc(n : {Int | n > 0})` obliges every CONSTRUCTION of `Inc(...)` in the
    module (send, call, or a message bound first), and the handler body
@@ -29514,6 +29707,7 @@ let () =
       ("lambda-contract", lambda_contract_suite);
       ("actor-handler-contract", actor_handler_suite);
       ("hcr-migration", hcr_migration_suite);
+      ("hcr-derived-migration", hcr_derived_migration_suite);
       ("stored-field-contract", stored_field_suite);
       ("impl-dispatch", impl_dispatch_suite);
       ("silent-holes", silent_holes_suite);
