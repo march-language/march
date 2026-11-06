@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge hot-reload check` / `march --check --guarantees` say what a build guarantees.**
+  One block per actor and protocol, each line labelled `proved`, `violated`, `not proved`,
+  `not checked`, `checked (compiler)` or `assumed`, with what it rests on: state refinements,
+  `@invariant`, handler contracts, `migrate_state` (derived or written, against the deployed
+  build when there is one), `migrate_msg`, protocol projection and deadlock freedom, and the
+  runtime. It changes no verdict. Two gaps are labelled `not checked` rather than left
+  silent: `@invariant` is not checked on `init` or handler results, and no proof covers a
+  protocol's deadlock freedom. See docs/hot-code-reload.md, "What a build guarantees".
 - **`--refine-infer` proposes a relation a function keeps from its argument to its result.**
   For `bump(a : Assoc(Int, Int)) : Assoc(Int, Int)`, which adds 1 to each value, a caller
   that needs `Assoc({x : Int | true}, {y : Int | y > x})` gets the type proposed on both the

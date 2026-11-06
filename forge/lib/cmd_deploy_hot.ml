@@ -2991,3 +2991,29 @@ let run_migrate_msg_stub ~actor ?old_path ?new_path () : (string, string) result
       output_string oc (migrate_msg_stub ~actor ~old_h ?new_h ());
       close_out oc;
       Ok out
+
+(** `forge hot-reload check`: what this build establishes for its actors and
+    protocols (lemmas design §1.2, phase B), before a deploy.  Runs
+    `march --check --guarantees` on the project's entry under the project's
+    MARCH_LIB_PATH, against the last deploy's `.schemas.json.prev` when one
+    exists (so a migration is checked against the running version, and a
+    derived one is reported).  Returns march's exit code. *)
+let run_check () : (int, string) result =
+  match Project.load () with
+  | Error m -> Error m
+  | Ok proj ->
+    match Project.entry proj with
+    | Error e -> Error e
+    | Ok entry ->
+      let prev = Filename.concat (Filename.concat proj.Project.root ".march")
+          (proj.Project.name ^ "_hot.so.schemas.json.prev") in
+      let baseline =
+        if Sys.file_exists prev then " --hcr-baseline " ^ Filename.quote prev else "" in
+      let cmd =
+        Printf.sprintf "cd %s && %smarch --check --guarantees%s %s"
+          (Filename.quote proj.Project.root) (Cmd_build.lib_path_env proj) baseline
+          (Filename.quote entry)
+      in
+      (match Unix.system cmd with
+       | Unix.WEXITED n -> Ok n
+       | Unix.WSIGNALED s | Unix.WSTOPPED s -> Error (Printf.sprintf "march killed by signal %d" s))
