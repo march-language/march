@@ -84,6 +84,16 @@ struct conn_state {
     void         *pending_release[EVLOOP_PIPELINE_BATCH];
     int           pending_release_n;
 
+    /* ── Deadline (march_http_evloop.c) ──────────────────────────────── */
+    /* Each connection is in exactly one timed phase (TLS handshake, idle,
+     * headers, body, write) or none (an upgraded WebSocket). deadline_ms is
+     * when that phase gives up; heap_pos is the connection's 1-based slot
+     * in its thread's deadline heap, 0 when it is not in it (so a zeroed
+     * conn_state_t is correctly "not timed"). */
+    int64_t       deadline_ms;
+    int           timed_phase;
+    int           heap_pos;
+
     /* ── Free-list link ─────────────────────────────────────────────── */
     conn_state_t *next_free;
 };

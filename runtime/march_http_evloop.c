@@ -24,6 +24,7 @@
 #include "march_http_parse_simd.h"
 #include "march_http_response.h"
 #include "march_scheduler.h"   /* march_sched_run_on_sched_stack */
+#include "march_https.h"       /* g_march_https: phase timeouts */
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -38,6 +39,7 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <assert.h>
+#include <time.h>
 
 /* ── WebSocket upgrade thread ─────────────────────────────────────────── */
 
@@ -92,9 +94,115 @@ static void *ws_handler_thread(void *arg) {
 /* Max events returned per kevent()/epoll_wait() call. */
 #define EVLOOP_MAX_EVENTS 256
 
-/* Idle timeout for keep-alive connections (seconds).  After this, the
- * connection is closed to reclaim resources. */
-#define EVLOOP_IDLE_TIMEOUT_S 10
+/* ── Per-connection deadlines ─────────────────────────────────────────── */
+/*
+ * Every connection is in one timed phase, each with its own limit from
+ * g_march_https (design: specs/2026-11-05-https-server-design.md, "Timeouts"):
+ *
+ *   PH_HANDSHAKE  TLS handshake not finished              handshake_secs
+ *   PH_IDLE       keep-alive, no request bytes            idle_secs
+ *   PH_HEADERS    request started, headers incomplete     header_secs, from the FIRST byte
+ *   PH_BODY       headers in, body incomplete             progress_secs, reset by each read
+ *   PH_WRITE      response waiting on a full socket       progress_secs, reset by each send
+ *   PH_NONE       upgraded WebSocket: not timed here
+ *
+ * The deadlines live in a per-thread binary min-heap of conn_state_t
+ * pointers (each knows its slot), swept after every kevent/epoll_wait; the
+ * wait itself is bounded by the earliest deadline.
+ */
+enum { PH_NONE = 0, PH_HANDSHAKE, PH_IDLE, PH_HEADERS, PH_BODY, PH_WRITE };
+
+static _Thread_local conn_state_t **tl_heap;
+static _Thread_local int            tl_heap_n;
+static _Thread_local int            tl_heap_cap;
+
+static int64_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void heap_swap(int i, int j) {          /* 0-based slots */
+    conn_state_t *a = tl_heap[i], *b = tl_heap[j];
+    tl_heap[i] = b; b->heap_pos = i + 1;
+    tl_heap[j] = a; a->heap_pos = j + 1;
+}
+
+static void heap_up(int i) {
+    while (i > 0) {
+        int p = (i - 1) / 2;
+        if (tl_heap[p]->deadline_ms <= tl_heap[i]->deadline_ms) break;
+        heap_swap(i, p);
+        i = p;
+    }
+}
+
+static void heap_down(int i) {
+    for (;;) {
+        int l = 2 * i + 1, r = l + 1, m = i;
+        if (l < tl_heap_n && tl_heap[l]->deadline_ms < tl_heap[m]->deadline_ms) m = l;
+        if (r < tl_heap_n && tl_heap[r]->deadline_ms < tl_heap[m]->deadline_ms) m = r;
+        if (m == i) break;
+        heap_swap(i, m);
+        i = m;
+    }
+}
+
+static void heap_remove(conn_state_t *c) {
+    if (c->heap_pos == 0) return;
+    int i = c->heap_pos - 1;
+    c->heap_pos = 0;
+    tl_heap_n--;
+    if (i == tl_heap_n) return;
+    tl_heap[i] = tl_heap[tl_heap_n];
+    tl_heap[i]->heap_pos = i + 1;
+    heap_up(i);
+    heap_down(tl_heap[i]->heap_pos - 1);
+}
+
+static int phase_secs(int phase) {
+    switch (phase) {
+    case PH_HANDSHAKE: return g_march_https.handshake_secs;
+    case PH_IDLE:      return g_march_https.idle_secs;
+    case PH_HEADERS:   return g_march_https.header_secs;
+    case PH_BODY:
+    case PH_WRITE:     return g_march_https.progress_secs;
+    default:           return 0;
+    }
+}
+
+/* Enter [phase] with a fresh deadline (also used to reset a progress
+ * deadline). PH_NONE takes the connection out of the heap. */
+static void conn_set_phase(conn_state_t *c, int phase) {
+    c->timed_phase = phase;
+    int secs = phase_secs(phase);
+    if (phase == PH_NONE || secs <= 0) { heap_remove(c); return; }
+    c->deadline_ms = now_ms() + (int64_t)secs * 1000;
+    if (c->heap_pos) {
+        int i = c->heap_pos - 1;
+        heap_up(i);
+        heap_down(c->heap_pos - 1);
+        return;
+    }
+    if (tl_heap_n == tl_heap_cap) {
+        int ncap = tl_heap_cap ? tl_heap_cap * 2 : 256;
+        conn_state_t **n = realloc(tl_heap, (size_t)ncap * sizeof *n);
+        if (!n) return;                      /* untimed rather than crash */
+        tl_heap = n;
+        tl_heap_cap = ncap;
+    }
+    tl_heap[tl_heap_n] = c;
+    c->heap_pos = ++tl_heap_n;
+    heap_up(tl_heap_n - 1);
+}
+
+/* Milliseconds until the earliest deadline, capped at [cap_ms]. */
+static int heap_wait_ms(int cap_ms) {
+    if (tl_heap_n == 0) return cap_ms;
+    int64_t d = tl_heap[0]->deadline_ms - now_ms();
+    if (d < 0) d = 0;
+    return d < cap_ms ? (int)d : cap_ms;
+}
 
 /* ── Shutdown flag (shared with march_http.c) ─────────────────────────── */
 
@@ -172,6 +280,7 @@ static void accept_connections(int listener_fd, int evfd) {
         if (!c) { close(cfd); continue; }
         c->fd    = cfd;
         c->phase = CONN_PHASE_READING;
+        conn_set_phase(c, PH_IDLE);
 
         /* Register for readability. */
 #if EVLOOP_USE_KQUEUE
@@ -223,6 +332,7 @@ static void arm_read(int evfd, conn_state_t *c) {
 /* ── Close and free a connection ──────────────────────────────────────── */
 
 static void close_conn(int evfd, conn_state_t *c) {
+    heap_remove(c);
 #if EVLOOP_USE_KQUEUE
     /* kqueue automatically removes filters when fd is closed. */
     (void)evfd;
@@ -232,6 +342,48 @@ static void close_conn(int evfd, conn_state_t *c) {
     close(c->fd);
     march_http_release_conns(c->pending_release, &c->pending_release_n);
     conn_state_free(c);
+}
+
+/* Close every connection whose phase deadline has passed. */
+static void sweep_deadlines(int evfd) {
+    int64_t now = now_ms();
+    while (tl_heap_n > 0 && tl_heap[0]->deadline_ms <= now)
+        close_conn(evfd, tl_heap[0]);
+}
+
+/* After a read: which phase is the connection in now? Empty buffer: idle
+ * (a fresh keep-alive deadline). Headers complete but not the body: body,
+ * whose deadline moves with every read that brought bytes. Otherwise the
+ * request's headers are still arriving: the header deadline runs from the
+ * first byte and is NOT moved by later bytes (a slowloris drip). */
+/* Does buf hold a CRLFCRLF (end of a request's headers)? */
+static int has_header_end(const char *buf, size_t len) {
+    const char *p = buf, *end = buf + len;
+    while (end - p >= 4) {
+        const char *r = memchr(p, '\r', (size_t)(end - p - 3));
+        if (!r) return 0;
+        if (r[1] == '\n' && r[2] == '\r' && r[3] == '\n') return 1;
+        p = r + 1;
+    }
+    return 0;
+}
+
+static void update_read_phase(conn_state_t *c, int got_bytes, int dispatched) {
+    if (c->rbuf_len == 0) {
+        if (c->timed_phase != PH_IDLE || got_bytes) conn_set_phase(c, PH_IDLE);
+        return;
+    }
+    /* Still in the body of the request at the front of the buffer (nothing
+     * was dispatched since): its headers are known complete, so skip the
+     * scan; a large upload would otherwise rescan its whole buffer on
+     * every read. */
+    int headers_done = (c->timed_phase == PH_BODY && !dispatched) ||
+                       has_header_end(c->rbuf, c->rbuf_len);
+    if (headers_done) {
+        if (c->timed_phase != PH_BODY || got_bytes) conn_set_phase(c, PH_BODY);
+    } else if (c->timed_phase != PH_HEADERS) {
+        conn_set_phase(c, PH_HEADERS);
+    }
 }
 
 /* Hand a batch's results to the connection until its deferred write drains
@@ -253,6 +405,7 @@ static void park_pending(conn_state_t *c, void **conns, int *n) {
 /* Used for WebSocket upgrades: the fd is handed off to a blocking thread. */
 
 static void detach_conn(int evfd, conn_state_t *c) {
+    heap_remove(c);                          /* a WebSocket is not timed here */
 #if EVLOOP_USE_KQUEUE
     /* Explicitly delete the kqueue read filter.  We are NOT closing the fd,
      * so kqueue won't remove the filter automatically. */
@@ -293,16 +446,21 @@ static void evloop_defer_write(int evfd, conn_state_t *c,
     c->wbuf_pos   = 0;
     c->keep_alive = keep_alive;
     c->phase      = CONN_PHASE_WRITING;
+    conn_set_phase(c, PH_WRITE);
     arm_write(evfd, c);
 }
 
 /* ── Handle a readable connection ─────────────────────────────────────── */
 
 static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
+    size_t      before = c->rbuf_len;
     io_result_t r = march_recv_nonblocking(c);
+    int         got_bytes = c->rbuf_len > before;
 
-    if (r == IO_PARTIAL)
+    if (r == IO_PARTIAL) {
+        update_read_phase(c, got_bytes, 0);
         return;
+    }
 
     if (r == IO_ERROR) {
         close_conn(evfd, c);
@@ -514,6 +672,7 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
             return;
         }
     }
+    update_read_phase(c, got_bytes, 1);
     /* fd stays armed for read (edge-triggered, already registered). */
 }
 
@@ -522,10 +681,18 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
 static void handle_write(int evfd, conn_state_t *c) {
     /* This path is used when we switch to non-blocking writes (Phase 3).
      * For now, responses are sent synchronously in handle_read. */
+    int         pos_before = c->wbuf_pos;
+    size_t      len_before = c->wbuf_pos < c->wbuf_count ? c->wbuf[c->wbuf_pos].iov_len : 0;
     io_result_t r = march_send_nonblocking(c);
 
-    if (r == IO_PARTIAL)
+    if (r == IO_PARTIAL) {
+        /* Progress resets the write deadline; a reader that keeps reading,
+         * however slowly, is never cut. */
+        if (c->wbuf_pos != pos_before ||
+            (c->wbuf_pos < c->wbuf_count && c->wbuf[c->wbuf_pos].iov_len != len_before))
+            conn_set_phase(c, PH_WRITE);
         return;   /* stay armed for write */
+    }
 
     if (r == IO_ERROR || !c->keep_alive) {
         close_conn(evfd, c);
@@ -540,6 +707,7 @@ static void handle_write(int evfd, conn_state_t *c) {
     c->rbuf_len  = 0;
     c->wbuf_count = 0;
     c->wbuf_pos   = 0;
+    conn_set_phase(c, PH_IDLE);
     arm_read(evfd, c);
 }
 
@@ -590,14 +758,16 @@ static void *evloop_run(void *arg) {
     while (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
 
 #if EVLOOP_USE_KQUEUE
-        struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
+        int wait_ms = heap_wait_ms(1000);
+        struct timespec ts = { .tv_sec = wait_ms / 1000,
+                               .tv_nsec = (long)(wait_ms % 1000) * 1000000L };
         int nev = kevent(evfd, NULL, 0, events, EVLOOP_MAX_EVENTS, &ts);
 #elif EVLOOP_USE_EPOLL
-        int nev = epoll_wait(evfd, events, EVLOOP_MAX_EVENTS, 1000);
+        int nev = epoll_wait(evfd, events, EVLOOP_MAX_EVENTS, heap_wait_ms(1000));
 #endif
 
         if (nev < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) { sweep_deadlines(evfd); continue; }
             break;
         }
 
@@ -646,6 +816,7 @@ static void *evloop_run(void *arg) {
             }
 #endif
         }
+        sweep_deadlines(evfd);
     }
 
     close(listener_fd);
