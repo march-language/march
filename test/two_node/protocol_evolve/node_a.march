@@ -58,7 +58,7 @@ mod ProtocolEvolveA do
       Some(o) ->
         if o.fingerprint == fp do ()
         else
-          match Order_Run.offer_Shop(c, h, 64, fn (s, st) -> shop(s, st)) do
+          match Order_Run.offer_Shop(h, 64, fn (s, st) -> shop(s, st)) do
             Ok(o2) ->
               Vault.set(v, "cur", o2)
               SessionNode.close_offer(o)
@@ -67,7 +67,7 @@ mod ProtocolEvolveA do
           end
         end
       None ->
-        match Order_Run.offer_Shop(c, h, 64, fn (s, st) -> shop(s, st)) do
+        match Order_Run.offer_Shop(h, 64, fn (s, st) -> shop(s, st)) do
           Ok(o) -> Vault.set(v, "cur", o)
           Err(e) -> panic(SessionNode.run_error_message(e))
         end
@@ -124,7 +124,7 @@ mod ProtocolEvolveA do
   -- refused at formation, or failed -- the last is a LOST session.
   fn session(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
     count("started", 1)
-    match Order_Run.initiate_Buyer(c, h, fn (s, st) -> buyer(s, st, 1)) do
+    match Order_Run.initiate_Buyer(h, fn (s, st) -> buyer(s, st, 1)) do
       Ok(Session.Finished) -> count("finished", 1)
       Ok(Session.Drained(k)) ->
         count("drained", 1)

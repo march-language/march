@@ -131,14 +131,14 @@ mod CertAuthz do
   end
 
   pfn initiate(io : Cap(IO), c : Cap(ClusterNode.Live)) : String do
-    match Checkout_Run.initiate_Client(io, c, fn (s, st) -> client(s, st)) do
+    match Checkout_Run.initiate_Client(c, fn (s, st) -> client(s, st)) do
       Ok(_) -> "formed"
       Err(e) -> Checkout_Run.error_message(e)
     end
   end
 
   pfn open_ledger(io : Cap(IO), c : Cap(ClusterNode.Live), capacity : Int) : String do
-    match Checkout_Run.offer_Ledger(io, c, capacity, fn (s, st) -> ledger(s, st)) do
+    match Checkout_Run.offer_Ledger(c, capacity, fn (s, st) -> ledger(s, st)) do
       Ok(_) -> "offered"
       Err(e) -> Checkout_Run.error_message(e)
     end

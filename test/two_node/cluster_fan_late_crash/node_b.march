@@ -39,7 +39,7 @@ mod ClusterFanLateCrashB do
     end
     joined(h)
     println("node-b: up")
-    match Fan_Run.cluster_B(c, h, "fan-1", fn (s, st) -> role_b(s, st)) do
+    match Fan_Run.cluster_B(h, "fan-1", fn (s, st) -> role_b(s, st)) do
       Ok(_) -> println("B: closed")
       Err(e) -> println("B: " ++ SessionNode.run_error_message(e))
     end

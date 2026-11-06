@@ -60,9 +60,9 @@ mod TopologyPlace do
       Ok(h) -> h
       Err(e) -> panic(e)
     end
-    let mk = fn (name, p) -> Topology.role(name, p, fn () -> Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)))
+    let mk = fn (name, p) -> Topology.role(name, p, fn () -> Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st)))
     let counted = Topology.role("Echo.Counted", Topology.count(1),
-                                fn () -> Tally_Run.offer_Counter(c, h, 4, fn (s, st) -> serve_tally(s, st)))
+                                fn () -> Tally_Run.offer_Counter(h, 4, fn (s, st) -> serve_tally(s, st)))
     -- No labels on this node: the On("gpu") role is not offered here.
     Topology.place(h, [ mk("Echo.Server", Topology.everywhere()),
                         mk("Echo.Gpu", Topology.on_label("gpu")),

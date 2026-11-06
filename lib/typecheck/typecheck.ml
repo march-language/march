@@ -10344,8 +10344,12 @@ type role_root = {
 
 (* The runner front a called name is, if any: (protocol, role, callback
    positions).  A hosted front's callbacks start at [start]; a body front's
-   is the last argument ([-1]). *)
-let role_front_of (name : string) : (string * string * [ `Body | `Hosted of int ]) option =
+   is the last argument ([-1]).  A CLUSTER hosted front (`offer_hosted_R`,
+   `cluster_hosted_R`) takes the role's grant as parameters after the node,
+   one per path, so its callbacks start that many places later:
+   [`Hosted_after_grant start] is the position with an empty grant. *)
+let role_front_of (name : string)
+  : (string * string * [ `Body | `Hosted of int | `Hosted_after_grant of int ]) option =
   match String.rindex_opt name '.' with
   | None -> None
   | Some i ->
@@ -10370,10 +10374,10 @@ let role_front_of (name : string) : (string * string * [ `Body | `Hosted of int 
       in
       (* longer prefixes first *)
       match strip "offer_hosted_" with
-      | Some r -> Some (proto, r, `Hosted 4)
+      | Some r -> Some (proto, r, `Hosted_after_grant 3)
       | None -> (
         match strip "cluster_hosted_" with
-        | Some r -> Some (proto, r, `Hosted 4)
+        | Some r -> Some (proto, r, `Hosted_after_grant 3)
         | None -> (
           match strip "host_" with
           | Some r -> Some (proto, strip_or r, `Hosted 5)
@@ -10425,7 +10429,11 @@ let find_role_roots (env : env) : role_root list =
                          match List.rev args with
                          | e :: _ -> root "body" None e
                          | [] -> ())
-                       | `Hosted start ->
+                       | (`Hosted _ | `Hosted_after_grant _) as k ->
+                         let start = match k with
+                           | `Hosted start -> start
+                           | `Hosted_after_grant start -> start + List.length grant
+                         in
                          let host = Option.bind (nth (start - 1)) host_of in
                          List.iteri
                            (fun j what -> Option.iter (root what host) (nth (start + j)))
@@ -10759,8 +10767,11 @@ let solve_role_roots (env : env)
    between `Cap(Session.Live)` and the state (D34, [Desugar_endpoints.grants_of]),
    so the new path is also a new parameter.  Saying only "add it to the grant"
    left every one-turn answer rejected by the arity error that edit causes, so
-   the help spells out the grant line and the body's new parameter list. *)
-let role_grant_help ~role ~proto ~(grant : string list) ~cap : string =
+   the help spells out the grant line and the body's new parameter list.
+   A front over a cluster node ([front] is not `run_` or `host_`) takes the
+   grant as arguments too, after the node, so there the call is a third edit
+   and the help names it. *)
+let role_grant_help ~role ~proto ~(grant : string list) ~cap ~front : string =
   let param_name path =
     let last = match String.rindex_opt path '.' with
       | Some i -> String.sub path (i + 1) (String.length path - i - 1)
@@ -10777,13 +10788,25 @@ let role_grant_help ~role ~proto ~(grant : string list) ~cap : string =
     "cap_" ^ Buffer.contents b
   in
   let widened = grant @ [ cap ] in
+  let call_note =
+    let leaf = match String.rindex_opt front '.' with
+      | Some i -> String.sub front (i + 1) (String.length front - i - 1)
+      | None -> front in
+    if List.exists (fun p -> String.starts_with ~prefix:p leaf) [ "run_"; "host_" ] then ""
+    else
+      Printf.sprintf
+        " The call to `%s` takes the grant as well, one `Cap` per granted capability after \
+         the node, so it gains an argument: a `Cap(%s)`, last of them (`cap_narrow(io)` where \
+         the caller holds a wider capability `io`)."
+        front cap
+  in
   Printf.sprintf
     "help: add `%s` to the grant in protocol `%s`: `role %s needs %s`. The body then takes \
      one `Cap` per granted capability, in the grant's order, between the session capability \
-     and the state, so it gains a parameter: `fn (s, %s, st) -> ...`. Pass `%s` on to any \
+     and the state, so it gains a parameter: `fn (s, %s, st) -> ...`.%s Pass `%s` on to any \
      function the body hands its capabilities to. Or remove the use."
     cap proto role (String.concat ", " widened)
-    (String.concat ", " (List.map param_name widened)) (param_name cap)
+    (String.concat ", " (List.map param_name widened)) call_note (param_name cap)
 
 let check_role_grants (env : env) (decls : Ast.decl list) : unit =
   if Hashtbl.length env.role_grants = 0 then ()
@@ -10913,7 +10936,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                              reaches, as `main`'s grant bounds the program.\n%s"
                             r.rr_what r.rr_role (March_caps.Cap_lattice.action c) show_grant
                             r.rr_role (String.concat ", " r.rr_grant)
-                            (role_grant_help ~role:r.rr_role ~proto:r.rr_proto ~grant:r.rr_grant ~cap:c) }
+                            (role_grant_help ~role:r.rr_role ~proto:r.rr_proto ~grant:r.rr_grant ~cap:c ~front:r.rr_front) }
                   | None ->
                   Err.error ~code:Err.Code.role_grant_exceeded env.errors ~span:r.rr_span
                     (Printf.sprintf
@@ -10922,7 +10945,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                         the program.\n%s"
                        r.rr_proto r.rr_role show_grant r.rr_role (String.concat ", " r.rr_grant)
                        (label r) c chain
-                       (role_grant_help ~role:r.rr_role ~proto:r.rr_proto ~grant:r.rr_grant ~cap:c)))
+                       (role_grant_help ~role:r.rr_role ~proto:r.rr_proto ~grant:r.rr_grant ~cap:c ~front:r.rr_front)))
              (List.sort_uniq String.compare (caps_of k));
            (* Not statically known: the callback itself, a local it invokes,
               or (the solver's `unknown`) a value of untraceable origin that

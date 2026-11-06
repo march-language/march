@@ -43,7 +43,7 @@ mod ClusterQueueLimitA do
       Ok(h) ->
         println("node-a: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: nobody joined") end
-        match Bulk_Run.cluster_Client(c, h, "q1", fn (s, st) -> role_client(s, st)) do
+        match Bulk_Run.cluster_Client(h, "q1", fn (s, st) -> role_client(s, st)) do
           Ok(_) -> println("A: closed")
           Err(e) -> println("A: " ++ SessionNode.run_error_message(e))
         end

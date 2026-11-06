@@ -110,10 +110,10 @@ mod CertOrderC do
         let cancel = fn (sid, s, role, cause, ep) ->
           let _ = send(srv, Cancel(sid, s, role, cause, ep))
           ()
-        match Order_Run.offer_hosted_Ledger(c, h, 16, srv, start, deliver, cancel) do
+        match Order_Run.offer_hosted_Ledger(h, 16, srv, start, deliver, cancel) do
           Err(e) -> panic(Order_Run.error_message(e))
           Ok(_) ->
-            match Order_Run.offer_Stock(c, h, 8, fn (s, st) -> stock(s, st)) do
+            match Order_Run.offer_Stock(h, 8, fn (s, st) -> stock(s, st)) do
               Err(e) -> panic(Order_Run.error_message(e))
               Ok(_) ->
                 println("node-c: offering")
