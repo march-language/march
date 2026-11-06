@@ -684,10 +684,15 @@ This module builds. Replace the body of `cat_nil` with `()` and the build fails 
 
 The standard library proves lemmas about `List`: `List.append_nil`, `List.append_assoc`,
 `List.len_append`, `List.reverse_reverse`, `List.reverse_append`, `List.len_reverse`,
-`List.len_take`, `List.len_drop` and `List.take_drop`. You call them like your own lemmas, so
+`List.len_take`, `List.len_drop`, `List.take_drop`, `List.take_append`, `List.drop_append` and
+`List.nth_opt_append`. You call them like your own lemmas, so
 you don't need to re-prove `reverse(reverse(xs)) == xs` in every project. The manifest
 `stdlib/lemmas.verified` lists the ones that are proved; a listed lemma is admitted without
 re-proving it on every build.
+
+`Math.min_int`, `Math.max_int` and `Math.clamp_int` state their laws in their result types
+instead, so you get them without a call: `min_int(a, b)` is at most `a` and `b` and is one of
+them, and `clamp_int(x, low, high)` is within `[low, high]` when `low <= high`.
 
 ## Which lemma to call: `--refine-infer`
 
@@ -801,6 +806,8 @@ lemma-test: RED (1 lemma false on a concrete input)
 - An **admitted** lemma (`cat_nil`) is checked too; see the next section.
 - An `Int` overflow is reported as `overflow?`, not as a counterexample, because the proofs
   treat `Int` as unbounded ([below](#what-lemmas-dont-do-yet)).
+- A theorem may use the logic's `len` (a list's length, a string's length in bytes). The
+  test gives it the same meaning, in the interpreter and in the compiled check.
 - A lemma whose parameter type has no input generator (a `String`, a `Float`, a record) is
   `not-tested`.
 

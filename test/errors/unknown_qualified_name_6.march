@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: List.fold_left(List(a), b, b -> a -> b) : b
+mod Main do
+  -- X8 tier 2: `fodl` is no spelling of anything `List` exports (`fold_left`
+  -- is 5 edits away), but the call's shape (a list, a start value, a
+  -- two-argument function) singles out the two folds.
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) do
+    let xs = [1, 2, 3]
+    let s = List.fodl(xs, 0, fn (a, b) -> a + b)
+    println(int_to_string(s))
+  end
+end

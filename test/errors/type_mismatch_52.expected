@@ -1,0 +1,23 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_52.march
+
+expected `Fahrenheit` but got `Celsius`. [type_mismatch]
+
+24 |     println(show(boiling))
+                      ^^^^^^^
+
+    This is argument #1 of a function call.
+    Use `celsius_to_fahrenheit(x)` to convert a `Celsius` to a `Fahrenheit`.
+
+    the expected type comes from here:
+
+24 |     println(show(boiling))
+                 ^^^^^^^^^^^^^
+
+    `boiling` was bound here as `Celsius`:
+
+23 |     let boiling = Celsius(100.0)
+             ^^^^^^^
+    run `march --explain type_mismatch`
+
+

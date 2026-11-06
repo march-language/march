@@ -1,0 +1,29 @@
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Order do
+    role Stock needs IO.Mut
+    role Ledger needs IO.Console
+    loop do
+      want: Shop -> Stock : Int
+      choose by Stock:
+        have -> Stock -> Shop : String
+                book: Stock -> Ledger : Int
+                booked: Ledger -> Shop : String
+        out  -> Stock -> Shop : String
+                skip: Stock -> Ledger : Int
+                stop
+      end
+    end
+  end
+
+  -- Stock tells Ledger to book before it has chosen `have` or `out`.
+  pfn stock(s : Cap(Session.Live), _m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield do
+    Order_Stock.recv_Want(s, st, fn (n, st1) ->
+      stock(s, _m, Order_Stock.send_Book(s, st1, n)))
+  end
+
+  fn main(_c : Cap(IO)) do () end
+end

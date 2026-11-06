@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+-- REJECT (§X1 slice 3): an `else if` chain reads as one `if`; the caret is on the last expression of the block in the final `else`.
+mod Bucket do
+  fn bucket(n : Int) : Int do
+    if n < 10 do
+      0
+    else if n < 100 do
+      1
+    else
+      let big = "many"
+      big
+    end end
+  end
+  fn main() : Int do bucket(5) end
+end

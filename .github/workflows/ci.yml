@@ -548,6 +548,18 @@ jobs:
           #   `_ == len(xs)` is solver-undecided): see
           #   specs/todos/2026-11-04-refine-result-payload-recursion.md.
           #
+          #   RAISED 2026-11-05, 46 -> 47, deliberately: the stdlib lemma
+          #   sweep S1 added `List.take_append`, whose theorem
+          #   `take(append(xs, ys), len(xs)) == xs` is an unreflectable-
+          #   predicate skip in THIS run only. Checked as user code,
+          #   list.march's `reverse` is ambiguous, so `take_onto` and `take`
+          #   are not reflected; the existing `len_take` and `take_drop`
+          #   skip here for the same reason. In a program the lemma comes
+          #   from stdlib/lemmas.verified as trusted. Attributed by diffing
+          #   the --refine-report-sites=all skip rows of this file against
+          #   main's stdlib: that one row is the only new skip
+          #   (154 proved / 46 skipped -> 167 proved / 47 skipped).
+          #
           #   Lower is better — this bound
           #   may only ever be revised DOWN. This is the check that is
           #   actually sensitive to the pass checking less than it used to:
@@ -567,7 +579,7 @@ jobs:
           #   guard_discharges.march, whose `user code` slice is 1 proved /
           #   0 violated / 0 skipped (measured 2026-07-29). Higher is better
           #   — this bound may only ever be revised UP.
-          baseline=46
+          baseline=47
           proved_floor=1
           floor_fixture=specs/lang/types/accept/t118_refine_length_guard_discharges.march
           dune build bin/main.exe
@@ -741,6 +753,19 @@ jobs:
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             python3 scripts/check-stdlib-doctests.py --check
+
+      # docs/protocol-to-cluster.md shows counts, a protocol fingerprint and compiler
+      # messages that scripts/gen-explainer-data.py measured on examples/lab_app and wrote
+      # to docs/_data/explainer.json. doc-lint's Check H notices an edit to the lab app;
+      # only a compiler can notice a COMPILER change that moves one of those numbers or
+      # rewords a message, so the comparison with a fresh run lives here, where one is
+      # built.
+      - name: Check the distributed explainer's generated data
+        timeout-minutes: 5
+        run: |
+          eval $(opam env)
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+            python3 scripts/gen-explainer-data.py --check
 
       # Compiles every demo/*.march program (the `demo` alias in demo/dune).
       # Nothing else in CI builds demo/: at the 0.5.0 cut seven demos had

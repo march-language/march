@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: Use `celsius_to_fahrenheit(x)` to convert a `Celsius` to a `Fahrenheit`.
+mod Main do
+  -- X8 tier 2: the conversion is the program's own function, found in scope
+  -- by its type (`Celsius -> Fahrenheit`) and its name.
+  needs IO.Console
+
+  type Celsius = Celsius(Float)
+  type Fahrenheit = Fahrenheit(Float)
+
+  fn celsius_to_fahrenheit(c : Celsius) : Fahrenheit do
+    match c do
+      Celsius(v) -> Fahrenheit(v *. 1.8 +. 32.0)
+    end
+  end
+
+  fn show(f : Fahrenheit) : String do
+    match f do
+      Fahrenheit(v) -> float_to_string(v) ++ "F"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let boiling = Celsius(100.0)
+    println(show(boiling))
+  end
+end

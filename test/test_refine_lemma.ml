@@ -1287,3 +1287,88 @@ let let_match =
     gated "let_match_red: a false theorem about it is not proved" (fun () ->
         let out = run (let_match_src ^ "  @[lemma]\n  fn d_bad(x : Int) : {Unit | depth2(Cz(x, Ez)) == x} do () end\nend\n") in
         if not (unproved out "d_bad" || refuted out "d_bad") then Alcotest.failf "d_bad is false:\n%s" out) ]
+
+(* Reflection R4: a body dividing by a non-literal is reflected when the
+   function's own parameter refinements and branch conditions show the
+   divisor non-zero. *)
+let div_src =
+  {|mod DV do
+  fn ratio(a : Int, b : {Int | _ != 0}) : Int do a / b end
+  fn md(a : Int, b : {Int | _ > 0}) : Int do a % b end
+  fn safe_div(a : Int, b : Int) : Int do
+    if b == 0 do 0 else a / b end
+  end
+  fn bare(a : Int, b : Int) : Int do a / b end
+|}
+
+let div_nonliteral =
+  [ gated "div_param: a divisor refined non-zero reflects" (fun () ->
+        let out =
+          run
+            (div_src
+           ^ "  @[lemma]\n  fn r6(u : Int) : {Unit | ratio(6, 2) == 3 && ratio(-7, 2) == -3} do () end\n  @[lemma]\n  fn m7(u : Int) : {Unit | md(-7, 2) == -1} do () end\nend\n")
+        in
+        expect_admitted out "r6";
+        expect_admitted out "m7");
+    gated "div_guard: a divisor guarded by `b == 0` reflects" (fun () ->
+        let out =
+          run
+            (div_src
+           ^ "  @[lemma]\n  fn s0(x : Int) : {Unit | safe_div(x, 0) == 0} do () end\n  @[lemma]\n  fn s7(u : Int) : {Unit | safe_div(7, -2) == -3} do () end\nend\n")
+        in
+        expect_admitted out "s0";
+        expect_admitted out "s7");
+    gated "div_red: an unguarded divisor and a false theorem do not prove" (fun () ->
+        let out =
+          run
+            (div_src
+           ^ "  @[lemma]\n  fn b6(u : Int) : {Unit | bare(6, 2) == 3} do () end\n  @[lemma]\n  fn s_bad(u : Int) : {Unit | safe_div(7, 2) == 4} do () end\nend\n")
+        in
+        if not (unproved out "b6" || refuted out "b6") then Alcotest.failf "bare divides by an unguarded b:\n%s" out;
+        if not (unproved out "s_bad" || refuted out "s_bad") then Alcotest.failf "s_bad is false:\n%s" out) ]
+
+(* `--lemma-test` decides a theorem over the logic's `len`, in the
+   interpreter and in the compiled harness. *)
+let lemma_test_len =
+  [ gated "lemma_test_len: a `len` theorem is decided in both backends" (fun () ->
+        let out =
+          run ~args:"--check --lemma-test"
+            ("mod N do\n" ^ defs4_6
+           ^ "  @[lemma]\n  fn len_nil(ys : List(Int)) : {Unit | len(cat(Nil, ys)) == len(ys)} do () end\n  @[lemma]\n  fn len_cat(xs : List(Int), ys : List(Int)) : {Unit | len(cat(xs, ys)) == len(xs) + len(ys)} do () end\nend\n")
+        in
+        expect_row out "len_nil" ~status:"holds" ~detail:" compiled";
+        (match lemma_test_row out "len_cat" with
+         | Some (("tested" | "holds"), _) -> ()
+         | _ -> Alcotest.failf "len_cat is decided:\n%s" out);
+        if red out then Alcotest.failf "true lemmas are not RED:\n%s" out);
+    gated "lemma_test_len_red: a false `len` theorem gets a counterexample" (fun () ->
+        let out =
+          run ~args:"--check --lemma-test"
+            ("mod N do\n  @[lemma]\n  fn short(xs : List(Int)) : {Unit | len(xs) <= 2} do () end\nend\n")
+        in
+        expect_row out "short" ~status:"COUNTEREXAMPLE" ~detail:"xs = ";
+        if not (red out) then Alcotest.failf "a counterexample makes the run RED:\n%s" out) ]
+
+(* Reflection R2: a function certified by a metric (`@[decreases]`), which
+   the walk decides after the encoder is built, is reflected. *)
+let metric_src =
+  {|mod MT do
+  @[decreases(n)]
+  @[reflect(fuel: 4)]
+  fn down(n : {Int | _ >= 0}) : Int do
+    if n == 0 do 0 else down(n - 1) + 1 end
+  end
+|}
+
+let metric_cert =
+  [ gated "metric_cert: a metric-certified function unfolds" (fun () ->
+        let out = run (metric_src ^ "  @[lemma]\n  fn d3(u : Int) : {Unit | down(3) == 3} do () end\nend\n") in
+        expect_admitted out "d3");
+    gated "metric_cert_red: a false theorem about it, and one with no certificate, do not prove" (fun () ->
+        let out = run (metric_src ^ "  @[lemma]\n  fn d_bad(u : Int) : {Unit | down(3) == 4} do () end\nend\n") in
+        if not (unproved out "d_bad" || refuted out "d_bad") then Alcotest.failf "d_bad is false:\n%s" out;
+        let spin =
+          "mod SP do\n  @[decreases(n)]\n  fn spin(n : Int) : Int do\n    if n == 0 do 0 else spin(n - 1) + 1 end\n  end\n  @[lemma]\n  fn s1(u : Int) : {Unit | spin(1) == 1} do () end\nend\n"
+        in
+        let out = run spin in
+        if not (unproved out "s1" || refuted out "s1") then Alcotest.failf "spin has no proved metric (n may be negative):\n%s" out) ]

@@ -970,7 +970,10 @@ let reflect_rows ~type_map ~(recheck : unit -> unit)
       division =
         (fun sp ->
           match List.filter (fun (o : O.t) -> o.O.kind = O.Division) (O.obligations_at sp) with
-          | [] -> None
+          (* No ledger entry (a module without `cap no_panic`): the encoder
+             decided it on the template; its R4 verdict replaces the row's
+             below. *)
+          | [] -> Some O.Proved
           | os ->
             if List.for_all (fun (o : O.t) -> o.O.verdict = O.Proved) os then Some O.Proved
             else Some (List.hd os).O.verdict);
@@ -978,7 +981,13 @@ let reflect_rows ~type_map ~(recheck : unit -> unit)
       vocab = (fun s -> s = "len" || List.mem s RE.set_vocabulary || RE.ctor_of_tester s <> None);
       pred_fn = (fun s -> s = "len" || RE.known_predicate_fn s) }
   in
-  RR.analyze inputs t m.March_ast.Ast.mod_decls
+  List.map
+    (fun (r : RR.row) ->
+      match r.RR.r_verdict, Hashtbl.find_opt RR.encoder_blocked r.RR.r_span with
+      | RR.Reflected _, Some txt when String.length txt > 3 && String.sub txt 0 3 = "R4:" ->
+        { r with RR.r_verdict = RR.Blocked { RR.b_rule = 4; b_text = String.sub txt 3 (String.length txt - 3); b_span = r.RR.r_span } }
+      | _ -> r)
+    (RR.analyze inputs t m.March_ast.Ast.mod_decls)
 
 let user_span ~filename ~user_files (span : March_ast.Ast.span) =
   let f = span.March_ast.Ast.file in
@@ -2969,6 +2978,7 @@ let run_test_cmd args =
        --refine-infer; a plain --check never infers. *)
     March_refinecheck.Refine_term.infer :=
       !termination_report || !refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff;
+    Schema_migration.load_baseline ~filename;
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
       ~stdlib_files:(stdlib_span_files stdlib_decls)
       ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
@@ -4282,6 +4292,7 @@ let compile filename =
      --refine-infer; a plain --check never infers. *)
   March_refinecheck.Refine_term.infer :=
     !termination_report || !refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff;
+  Schema_migration.load_baseline ~filename;
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
     ~stdlib_files:(stdlib_span_files stdlib_decls)
     ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
@@ -7874,6 +7885,8 @@ let () =
      "<path>  Prior .schemas.json for --check-migration");
     ("--new-schema", Arg.Set_string new_schema_path,
      "<path>  New .schemas.json for --check-migration");
+    ("--hcr-baseline", Arg.Set_string hcr_baseline_path,
+     "<path>  The deployed build's .schemas.json: its contracts are hypotheses for this build's migrate_state/migrate_msg (default: forge's .march/<name>_hot.so.schemas.json.prev)");
     ("--accept-unproved",
      Arg.String (fun s ->
          accept_unproved := !accept_unproved @ List.filter (( <> ) "") (String.split_on_char ',' s)),

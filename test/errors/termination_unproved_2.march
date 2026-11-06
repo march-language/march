@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: an exit such as `k <= 0`
+-- §X4: the guard the note suggests names the program's own metric (`k`), not a
+-- hardcoded `n`. The exit is `k == 1`, so the specific `== 0` note does not fire
+-- and the generic note carries the guard.
+mod Main do
+  @[decreases(k)]
+  fn down(k : Int) : Int do
+    if k == 1 do 0 else down(k - 1) end
+  end
+
+  fn main() do
+    down(3)
+  end
+end

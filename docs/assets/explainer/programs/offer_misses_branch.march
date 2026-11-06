@@ -1,0 +1,30 @@
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Order do
+    role Stock needs IO.Mut
+    role Ledger needs IO.Console
+    loop do
+      want: Shop -> Stock : Int
+      choose by Stock:
+        have -> Stock -> Shop : String
+                book: Stock -> Ledger : Int
+                booked: Ledger -> Shop : String
+        out  -> Stock -> Shop : String
+                skip: Stock -> Ledger : Int
+                stop
+      end
+    end
+  end
+
+  -- Shop handles the `have` answer and has nothing for `out`.
+  pfn shop(s : Cap(Session.Live), st : Order_Shop.Entry) : Order_Shop.Yield do
+    let st1 = Order_Shop.send_Want(s, st, 1)
+    Order_Shop.offer_have_out(s, st1,
+      fn (_v, st2) -> Order_Shop.recv_Booked(s, st2, fn (_b, st3) -> shop(s, st3)))
+  end
+
+  fn main(_c : Cap(IO)) do () end
+end

@@ -549,6 +549,85 @@ let record_skip_obligation errctx ~(span : A.span) ~(callee : string) ~(predicat
          noun predicate callee (Obligation.reason_name reason) (Obligation.reason_detail reason)
          remedy)
 
+(* ── Total twins (diagnostics-depth plan X8, tier 3) ─────────────────────
+   When a call fails its callee's precondition, the same function without
+   the precondition is often right there: `List.head` / `List.head_opt`,
+   `List.nth` / `List.nth_opt`.  A twin is [f ^ "_opt"] where [f] resolves,
+   taking as many parameters as [f], refining none of them, and returning
+   `Option(R)` or `Result(R, _)` for [f]'s own return type [R].  It is a
+   lookup in the definition table (no solver call), made only after the
+   call has been reported. *)
+let total_twin (ctx : rctx) (fname : string) : (string * string) option =
+  let def_of n =
+    match resolve_key ctx n with
+    | Some key -> Option.map snd (Hashtbl.find_opt fn_defs_tbl key)
+    | None -> None in
+  let rec strip (t : A.ty) : A.ty =
+    match t with
+    | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> strip b
+    | A.TyCon (n, ts) -> A.TyCon ({ n with A.span = A.dummy_span }, List.map strip ts)
+    | A.TyVar n -> A.TyVar { n with A.span = A.dummy_span }
+    | A.TyArrow (a, b) -> A.TyArrow (strip a, strip b)
+    | A.TyTuple ts -> A.TyTuple (List.map strip ts)
+    | t -> t in
+  let arity (fd : A.fn_def) =
+    match fd.A.fn_clauses with c :: _ -> Some (List.length c.A.fc_params) | [] -> None in
+  let refines_a_param (fd : A.fn_def) =
+    List.exists (fun (c : A.fn_clause) ->
+        List.exists (function
+            | A.FPNamed { A.param_ty = Some t; _ } | A.FPDefault ({ A.param_ty = Some t; _ }, _) ->
+              let rec refined = function
+                | A.TyRefine _ -> true
+                | A.TyCon (_, ts) | A.TyTuple ts -> List.exists refined ts
+                | A.TyLinear (_, t) -> refined t
+                | _ -> false in
+              refined t
+            | _ -> false) c.A.fc_params) fd.A.fn_clauses in
+  let twin = fname ^ "_opt" in
+  match def_of fname, def_of twin with
+  | Some fd, Some td when arity fd <> None && arity fd = arity td && not (refines_a_param td) ->
+    (match fd.A.fn_ret_ty, td.A.fn_ret_ty with
+     | Some r, Some (A.TyCon ({ A.txt = ("Option" | "Result") as w; _ }, inner :: _))
+       when strip inner = strip r ->
+       Some (twin, w)
+     | _ -> None)
+  | _ -> None
+
+let add_total_twin_note (ctx : rctx) (errctx : Err.ctx) (mark : Err.diagnostic list)
+    ~(span : A.span) ~(fname : string) (args : A.expr list) : unit =
+  let rec fresh = function
+    | l when l == mark -> []
+    | [] -> []
+    | d :: r -> d :: fresh r in
+  let is_precond (d : Err.diagnostic) =
+    d.Err.span = span
+    && (let sl = Err.slug_of_code d.Err.code in
+        sl = Err.Code.refinement_violated || sl = Err.Code.undeclared_requirement) in
+  match List.filter is_precond (fresh errctx.Err.diagnostics) with
+  | [] -> ()
+  | reported ->
+    match total_twin ctx fname with
+    | None -> ()
+    | Some (twin, wrapper) ->
+      (* The arguments as the user wrote them; the printer's spelling
+         (`Nil` for `[]`) only when the source cannot be read. *)
+      let arg_text a =
+        match March_typecheck.Typecheck_suggest.text_of (T.span_of_expr a) with
+        | Some t when not (String.contains t '\n') -> t
+        | _ -> pred_str a in
+      let call = Printf.sprintf "%s(%s)" twin (String.concat ", " (List.map arg_text args)) in
+      let some, none = if wrapper = "Option" then "Some(v)", "None" else "Ok(v)", "Err(e)" in
+      let note = Printf.sprintf
+          "`%s` is `%s` without the requirement: it returns `%s` instead of panicking.\n\
+           \    match %s do\n\
+           \      %s -> …\n\
+           \      %s -> …\n\
+           \    end"
+          twin fname wrapper call some none in
+      errctx.Err.diagnostics <- List.map (fun (d : Err.diagnostic) ->
+          if List.memq d reported && not (List.mem note d.Err.notes)
+          then { d with Err.notes = d.Err.notes @ [ note ] } else d) errctx.Err.diagnostics
+
 let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : A.span)
     ~(callee_name : string)
     (callee_sg : fn_sig) (args : A.expr list) : unit =
@@ -5130,7 +5209,9 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (match callee with
      | Some sg ->
        let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
+       let mark = errctx.Err.diagnostics in
        List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
+       add_total_twin_note ctx errctx mark ~span:sp ~fname args;
        check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp ~callee_name:fname sg args;
        check_arg_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:fname sg args;
        check_pass_site_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp sg args
@@ -8751,16 +8832,24 @@ let unproved_text (t : Refine_term.t) (certs : string array) fails (si : int) : 
   let un = g.Refine_term.units.(match annotated with u :: _ -> u | [] -> List.hd members) in
   let name = un.Refine_term.u_name in
   let cert = certs.(si) in
-  let note =
+  (* [guard] is the exit to suggest, named after the program's own metric;
+     [None] when a more specific note already proposes it (§X4: one cause,
+     not the same advice twice). *)
+  let note ~guard =
     "\nnote: a metric must stay at least 0 and fall at every recursive call (left to \
-     right, for several components). Guard the recursion (an exit such as `n <= 0`), \
-     refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall."
+     right, for several components). "
+    ^ (match guard with
+       | Some g ->
+         Printf.sprintf "Guard the recursion (%s), refine the parameter (`{Int | _ >= 0}`), \
+                         or write a metric that does fall." g
+       | None -> "Otherwise refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall.")
     ^
     (* Phase 5 fills [suggest_metric]; the LSP offers the note as an action. *)
     match !Refine_term.suggest_metric t si with
     | Some es -> Printf.sprintf "\nnote: try `@[decreases(%s)]`." (String.concat ", " (List.map pred_str es))
     | None -> ""
   in
+  let generic_guard = "an exit taken before the metric would go below 0" in
   match fails.(si) with
   | Some ((site : Refine_term.metric_site), v) ->
     let e = site.Refine_term.ms_edge in
@@ -8794,7 +8883,11 @@ let unproved_text (t : Refine_term.t) (certs : string array) fails (si : int) : 
     ( e.Refine_term.e_span,
       Printf.sprintf
         "`%s` is not shown to terminate: the recursive call `%s` is not shown to decrease `%s`%s%s%s"
-        name call (metric_str site.Refine_term.ms_caller_metric) why fix_note note )
+        name call (metric_str site.Refine_term.ms_caller_metric) why fix_note
+        (note ~guard:(match site.Refine_term.ms_caller_metric with
+             | _ when fix_note <> "" -> None
+             | [ A.EVar x ] -> Some (Printf.sprintf "an exit such as `%s <= 0`" x.A.txt)
+             | _ -> Some generic_guard)) )
   | None ->
     let r = if String.length cert > 9 then String.sub cert 9 (String.length cert - 9) else cert in
     let why =
@@ -8828,7 +8921,8 @@ let unproved_text (t : Refine_term.t) (certs : string array) fails (si : int) : 
         | "" -> "its recursion was not checked"
         | r -> r)
     in
-    (un.Refine_term.u_span, Printf.sprintf "`%s` is not shown to terminate: %s%s" name why note)
+    (un.Refine_term.u_span,
+     Printf.sprintf "`%s` is not shown to terminate: %s%s" name why (note ~guard:(Some generic_guard)))
 
 (* `termination_unproved` (§3.4) for each ANNOTATED SCC the certificate did
    not prove (decision D2: never for an unannotated one): a warning, or an
@@ -9244,7 +9338,7 @@ let record_inferred (t : Refine_term.t) res =
         g.RT.sccs.(si))
     res
 
-let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
+let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     ?(stdlib_files : string list = [])
     ?(audit : ((Refine_audit.site * Refine_audit.disposition) list -> unit) option)
     ?(pre_desugar_decls : A.decl list option)
@@ -9261,6 +9355,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   let pre_desugar_decls = Option.map Refine_abstract.expand_markers pre_desugar_decls in
   (* An anonymous-record parameter's field refinements become a refinement
      on the parameter over a synthetic record sort (gap G5). *)
+  (* The deployed build's contracts are facts about a migration's input
+     (H1/H2): strengthen the old-record parameter before G5 lifts it. *)
+  let m = Hcr_baseline.strengthen m in
   let m = Refine_anon.lift m in
   call_type_map := type_map;
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
@@ -10242,3 +10339,33 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     sink
       (List.map (fun s -> (s, Refine_audit.Unenforced dropped_reason)) dropped
       @ List.map (fun s -> (s, Refine_audit.classify s)) post_sites)
+
+(* Reflection R2 for a metric certificate.  The encoder is built before the
+   walk, and a metric certificate is decided after it, so a function whose
+   only blocker was the missing certificate is left out of the logic.  When
+   the walk certifies one, the module is checked again with that certificate
+   known to the encoder ([Refine_reflect.seed_certs]); the first pass's
+   diagnostics are dropped.  The certificate is a proof on its own (the first
+   pass decided it without the function's equation), so the second pass may
+   rely on it.  Only a module whose walk planned metrics (`@[decreases]`,
+   `cap total`, the termination report) can need it. *)
+let check_module ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map (errctx : Err.ctx)
+    (m : A.module_) : unit =
+  Hashtbl.reset Refine_reflect.seed_certs;
+  let before = errctx.Err.diagnostics in
+  check_module_pass ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map errctx m;
+  let late =
+    Hashtbl.fold
+      (fun sp c acc ->
+        match Hashtbl.find_opt Refine_reflect.encoder_blocked sp with
+        | Some txt when c = "metric" && String.starts_with ~prefix:"R2:" txt -> (sp, c) :: acc
+        | _ -> acc)
+      Refine_term.last_certs []
+  in
+  if late <> [] then begin
+    List.iter (fun (sp, c) -> Hashtbl.replace Refine_reflect.seed_certs sp c) late;
+    errctx.Err.diagnostics <- before;
+    Fun.protect
+      ~finally:(fun () -> Hashtbl.reset Refine_reflect.seed_certs)
+      (fun () -> check_module_pass ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map errctx m)
+  end

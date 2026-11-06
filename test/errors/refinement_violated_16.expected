@@ -1,0 +1,22 @@
+exit: 1
+-- REFINEMENT ------- errors/refinement_violated_16.march
+
+refinement violation: argument `xs` of `List.head` does not satisfy precondition `len(_) > 0` (e.g. empty = []) [refinement_violated]
+note: guard the call (e.g. `if len(empty) > 0 do …`) or pass a value known to satisfy it
+
+9 |     println(int_to_string(List.head(empty)))
+                              ^^^^^^^^^^^^^^^^
+
+    `List.head_opt` is `List.head` without the requirement: it returns `Option` instead of panicking.
+        match List.head_opt(empty) do
+          Some(v) -> …
+          None -> …
+        end
+
+    this argument must satisfy `len(_) > 0`:
+
+9 |     println(int_to_string(List.head(empty)))
+                                        ^^^^^
+    run `march --explain refinement_violated`
+
+

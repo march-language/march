@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Hot-reload migrations are checked on every build, with a counterexample.** When an
+  obligation in an `<actor>_migrate_state` or `<actor>_migrate_msg` can't be proved, the
+  compiler runs the migration on small old values. An input whose result the new actor
+  rejects is now an error that names it: `but tally_migrate_msg(V1.Bump(0)) returns
+  Some(Tally.Bump(0))`. Before, this was a "not verified" hint. When the project was
+  hot-deployed before, the running version's state refinements
+  (`.march/<name>_hot.so.schemas.json.prev`, or `--hcr-baseline <path>`) are assumed of
+  `migrate_state`'s record parameter. A migration that is correct for the running version
+  therefore proves, and an old message the running handler refused is never offered as a
+  counterexample.
 - **An actor's message can be qualified by its actor.** When two actors (or an actor and a
   variant) share a message name, `Counter.Tally(1)` (also `Counter_Msg.Tally(1)`, and
   `Outer.Counter.Tally(1)` for a nested actor) selects `Counter`'s message on both backends.
@@ -28,6 +38,14 @@ git log is authoritative for exact commits.
   `ambiguous_constructor` and `send_wrong_actor` diagnostics suggest the qualified spelling
   instead of renaming a handler. A refined handler parameter is now checked at every
   construction of a shared message name, by its qualifier or its type.
+
+- **More stdlib laws: `List.take_append`, `List.drop_append`, `List.nth_opt_append`, and
+  result types on `Math.min_int`, `max_int` and `clamp_int`.** The three lemmas state what
+  `take`, `drop` and `nth_opt` do on `append(xs, ys)` at `len(xs)` or an index inside `xs`;
+  calling one proves what unfolding runs out of fuel on. `min_int(a, b)` now has the type
+  `{Int | _ <= a && _ <= b && (_ == a || _ == b)}` (and dually `max_int`), and
+  `clamp_int(x, low, high)` is within `[low, high]` when `low <= high`; the condition is in the
+  result, so no existing call gains an obligation.
 
 - **A refinement on a field of an anonymous-record parameter is now checked.** In
   `fn f(r : { v : {Int | _ > 0} })` the body may assume `r.v > 0`, and each caller must
@@ -236,6 +254,17 @@ git log is authoritative for exact commits.
   and says `List.map`'s `b` is this function's result; a record or tuple result narrows to its
   wrong field or component.
 
+- Diagnostics: an `if` or `match do` whose type is known (a declared return type, an annotated
+  `let`, a parameter) blames the branch that disagrees with it. `if n >= 0 do "positive" else -1
+  end` in a function returning `Int` now underlines `"positive"` ("In the `if` branch.") instead
+  of the whole `if`, followed by a second error blaming `-1` for not matching it. An `else if`
+  chain reads as one `if`, and a `match do` arm that disagrees with the first arm is underlined
+  itself, with the two types the right way round. An operand of a binary operator is named as
+  one ("This is the left side of `++`, which joins two `String`s.", "This is the right side of
+  `+`, and both sides of `+` must have the same type.") instead of "argument #1 of a function
+  call", with the other operand as the origin, and is reported before a mismatch on the whole
+  expression that starts at the same place.
+
 - Diagnostics: a type mismatch deep inside two types now reports the whole pair, with a note
   that prints the provided type and puts a caret under each part that differs, instead of
   naming only the innermost pair. Passing a `Result(List(Int), String)` for a
@@ -273,6 +302,14 @@ git log is authoritative for exact commits.
   `A`", not `Post` and `Pong` from the HTTP modules. Stdlib constructors are offered only when
   nothing in your own code is in range, compiler-generated names (session states such as
   `S_end`) are never offered, and a misspelled record field gets a suggestion.
+- Diagnostics: when no name is a spelling of an unknown function, the functions in scope that
+  take the call's arguments are listed: `List.fodl(xs, 0, fn (a, b) -> a + b)` offers
+  `List.fold_left` and `List.fold_right` with their signatures. A call whose arguments fit in
+  another order says so, with the reordered call as a fix (`List.map(fn x -> x * 2, xs)`).
+  A mismatch between two plain types with no hand-written hint names an in-scope conversion
+  (`Use bool_to_string(x)…`, or your own `celsius_to_fahrenheit`). A call that fails
+  `List.head`'s or `List.nth`'s precondition suggests `head_opt` / `nth_opt` with the `match`
+  it needs. Suggestions never change type inference.
 - Diagnostics: follow-on errors are dropped when another error already explains them: the type
   mismatch after a callback-arity error, "unused variable `x`" next to a misspelled use of `x`,
   `cap_grant` while the program has other errors, `cap_ceiling` alongside the matching
@@ -323,6 +360,16 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **A scrolling explainer for distributed March**
+  ([From a Protocol to a Cluster](docs/protocol-to-cluster.md)). It follows the lab app's
+  16-line `Order` protocol a few lines at a time, then through the compiler (what the
+  declaration rules out, and the five modules, 15 linear state types and 152 functions
+  generated from it), into the Ledger actor, and onto a four-machine cluster that loses
+  hosts and recovers. Each section has a pinned figure that changes as you scroll; the
+  cluster and the actor are simulations, labelled as such. Every number, excerpt and
+  compiler message on the page is generated by `scripts/gen-explainer-data.py` from the
+  real compiler, and doc-lint fails if the lab app changes without a regeneration. A
+  section on deploying to the running cluster is still to come.
 - A new Error Messages tour (`/docs/error-messages/`): 34 real compiler errors, from syntax
   slips through types, capabilities, linearity, actors, session channels, protocols and
   refinements, each with what `march --check` prints today. An error playground on the page
@@ -372,6 +419,13 @@ git log is authoritative for exact commits.
   `state { count : {Int | _ >= 0} }` and `on Bump(n : {Int | _ > 0})`, the result
   `{ count: state.count + n }` stayed unverified because the check at the handler's tail ran
   without `n > 0`. It now proves.
+- **Lemmas can use functions that divide by a parameter, or that recurse by a metric.** A
+  function with `a / b` or `a % b` is now unfolded in proofs when its own parameter refinements
+  or conditions show `b` non-zero (`b : {Int | _ != 0}`, or `if b == 0 do 0 else a / b end`). A
+  recursive function certified by `@[decreases]` is unfolded too.
+- **`forge test` / `--lemma-test` decide theorems that use `len`.** They were `not-tested`
+  with "unbound variable: len"; `len` now means a list's length or a string's byte length in
+  the interpreter and in the compiled check.
 
 - **A refined `Int` result now uses the facts before it.** `fn grow(n : {Int | _ >= 0}) :
   {Int | _ >= n}` used to stay unverified when its body was `let r = n + n` then `r`, or a
@@ -478,6 +532,11 @@ git log is authoritative for exact commits.
 - Diagnostics: the `List.filter(fn (x, y) -> …)` hint suggests a one-parameter function instead of
   a curried one; an infinite-type error no longer stacks contradictory notes; refinement errors on
   callbacks no longer show `$cb_arg`, and their guard suggestion uses the real argument.
+- Diagnostics: a diagnostic's hints no longer repeat or contradict each other. A "consider
+  narrowing `Cap(IO)`" hint no longer sits on an error at the same place (it contradicted
+  `cap_needs`' "add `needs IO`"). An unproved lemma call is one warning, not a warning plus a hint
+  saying the same thing. `send_wrong_actor` no longer restates its qualify-it advice as a note.
+  `termination_unproved` no longer suggests the same exit twice, and names your own variable, not `n`.
 - A parameter that only its refinement mentions (`fn f(t : {Tree | size(t) < 1})`) is no longer
   reported as unused, with a fix that broke the refinement.
 

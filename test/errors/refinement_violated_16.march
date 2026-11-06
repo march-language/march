@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: `List.head_opt` is `List.head` without the requirement
+mod Main do
+  -- X8 tier 3: the call fails `List.head`'s precondition; its total twin
+  -- `List.head_opt` is suggested with the `match` it needs.
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) do
+    let empty : List(Int) = []
+    println(int_to_string(List.head(empty)))
+  end
+end
