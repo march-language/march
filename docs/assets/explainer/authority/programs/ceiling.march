@@ -1,0 +1,24 @@
+-- Declaring a capability is not being granted it. `main` is handed files and the
+-- clock; a module two calls down declares the network and uses it.
+mod App do
+  needs IO.FileWrite
+  needs IO.Clock
+  needs IO.NetConnect
+
+  mod Probe do
+    needs IO.FileWrite
+    needs IO.Clock
+    needs IO.NetConnect
+
+    fn report(home : String) : () do
+      let line = "at " ++ int_to_string(unix_time_ms()) ++ "\n"
+      let _ = tcp_connect("collector.example", 4317)
+      let _ = File.write(home ++ "/lab-probe", line)
+      ()
+    end
+  end
+
+  fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock)) : () do
+    Probe.report("/tmp")
+  end
+end

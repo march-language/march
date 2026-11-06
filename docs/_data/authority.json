@@ -1,0 +1,1424 @@
+{
+  "dep": {
+    "call": "let line = Gauge.line(live_allocs(), unix_time_ms())",
+    "lock_after": "mode = \"declared\"\n[[package]]\nname = \"gauge\"\ncaps = [\"IO.NetConnect\"]\n",
+    "lock_before": "mode = \"declared\"\n[[package]]\nname = \"gauge\"\ncaps = []\n",
+    "name": "gauge",
+    "refused": {
+      "exit": 1,
+      "output": "resolving 1 dependencies...\n  gauge: found at ../gauge\ncapability changes against forge.caps.lock:\n  ! gauge \u2014 now ALSO needs: IO.NetConnect\nerror: gauge asks for capabilities forge.caps.lock does not grant it; forge.lock was left as it was (your forge.toml edit is kept).\nReview the change above, then re-run `forge deps --accept-caps` to lock it and record the new set.\n"
+    },
+    "v1": {
+      "code": "mod Gauge do\n  fn line(live : Int, at : Int) : String do\n    IOList.to_string(~H\"live ${live}\\nat ${at}\\n\")\n  end\nend\n",
+      "needs": [],
+      "version": "1.0"
+    },
+    "v2": {
+      "code": "mod Gauge do\n  needs IO.NetConnect\n\n  fn line(live : Int, at : Int) : String do\n    let text = IOList.to_string(~H\"live ${live}\\nat ${at}\\n\")\n    let _ = tcp_connect(\"collector.gauge.example\", 4317)\n    text\n  end\nend\n",
+      "needs": [
+        "IO.NetConnect"
+      ],
+      "version": "1.1"
+    }
+  },
+  "excerpts": {
+    "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
+  },
+  "generated": {
+    "commit": "cda6fbd1b",
+    "date": "2026-11-06",
+    "inputs_sha256": "8869d6813a03fed65550e32f9da917310738ef7a1610f56e995aca6ba4a77b49"
+  },
+  "modules": {
+    "classes": {
+      "inside": 15,
+      "none": 116,
+      "outside": 24
+    },
+    "list": [
+      {
+        "cls": "none",
+        "name": "AhoCorasick",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Array",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Base64",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "BigInt",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Brotli",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Bytes",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "CRDT",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "CRDT.GCounter",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "CRDT.LWWRegister",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "CRDT.ORSet",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "CRDT.PNCounter",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Channel",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "ChannelServer",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "ChannelSocket",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Char",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Check",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Cli",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Cluster",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "ClusterAuth",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "ClusterLoad",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Compress",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Compress.Brotli",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Compress.Deflate",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Compress.Gzip",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Compress.Zstd",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "ConsistentHash",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Control",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "DataFrame",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "DateTime",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Decimal",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Deflate",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Deque",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Diagnostics",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "DistSupervisor",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Dns",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Duration",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Enum",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Env",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Flow",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Forge",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "GCounter",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Gen",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "GlobalPid",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "GlobalRegistry",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Gzip",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Hamt",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Handle",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Handshake",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "HashMap",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Html",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Http",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "HttpClient",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "IOList",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Iterable",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Json",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "JsonStream",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "LWWRegister",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "LinearMap",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "List",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Logger",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Map",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Math",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Membership",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Merkle",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Msgpack",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "NativeArray",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "NetFrame",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "NetKernel",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "NodeCall",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "NodeCert",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "NodeIdentity",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "NodeRpc",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "ORSet",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Option",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Order_Msg",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "OrderedMap",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "PNCounter",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Parallel",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Parser",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Path",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "PeerReader",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "PeerRegistry",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Plot",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Presence",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Process",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "PubSub",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Queue",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "RRB",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Range",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Regex",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "RemoteCall",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Result",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "RingBuf",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Scheduler",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Seq",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "SessionAP",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Set",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "ShellRender",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Sigil",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Simd",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Sort",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "SortedSet",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Stats",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "String",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Swim",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "SwimDriver",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Task",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Test",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Toml",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Tuple",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Uri",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "VectorClock",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "WorkDispatch",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Xml",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Yaml",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Zstd",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "Crypto",
+        "needs": [
+          "IO.Random"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "Diagnose",
+        "needs": [
+          "Actor.Introspect"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "IO",
+        "needs": [
+          "IO.Console"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "MlDsa",
+        "needs": [
+          "IO.Random"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "MlKem",
+        "needs": [
+          "IO.Random"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "NodeSend",
+        "needs": [
+          "IO.Mut"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "Order_Ledger",
+        "needs": [
+          "Session.Live",
+          "IO.Console"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "Order_Shop",
+        "needs": [
+          "Session.Live"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "Order_Stock",
+        "needs": [
+          "Session.Live",
+          "IO.Mut"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "Random",
+        "needs": [
+          "IO.Random"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "Recon",
+        "needs": [
+          "Actor.Introspect",
+          "Actor.Debug"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "Signal",
+        "needs": [
+          "IO.Signal"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "Trace",
+        "needs": [
+          "Actor.Debug"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "UUID",
+        "needs": [
+          "IO.Random"
+        ],
+        "own": false
+      },
+      {
+        "cls": "inside",
+        "name": "Vault",
+        "needs": [
+          "IO.Mut"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Actor",
+        "needs": [
+          "IO"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "ClusterConn",
+        "needs": [
+          "IO.NetListen"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "ClusterNode",
+        "needs": [
+          "IO",
+          "IO.NetListen",
+          "IO.NetConnect",
+          "IO.Spawn",
+          "IO.Mut",
+          "IO.Clock",
+          "IO.Process",
+          "IO.Random",
+          "Session.Live"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Config",
+        "needs": [
+          "IO.Mut",
+          "IO.Process"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Csv",
+        "needs": [
+          "IO.FileRead"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Dir",
+        "needs": [
+          "IO.FileRead",
+          "IO.FileWrite"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "DistLink",
+        "needs": [
+          "IO.NetConnect"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "File",
+        "needs": [
+          "IO.FileRead",
+          "IO.FileWrite"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "HttpServer",
+        "needs": [
+          "IO.NetListen"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "HttpTransport",
+        "needs": [
+          "IO.NetConnect",
+          "IO.NetConnect.TLS"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Ingress",
+        "needs": [
+          "IO.Process",
+          "IO.Mut",
+          "IO.Clock",
+          "IO.Spawn",
+          "IO.FileRead",
+          "IO.FileWrite",
+          "Session.Live",
+          "ClusterNode.Live"
+        ],
+        "own": true
+      },
+      {
+        "cls": "outside",
+        "name": "Node",
+        "needs": [
+          "IO.Mut",
+          "IO.NetConnect"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "NodeQueue",
+        "needs": [
+          "IO.Mut",
+          "IO.NetConnect"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Order_Run",
+        "needs": [
+          "IO",
+          "IO.Mut",
+          "IO.NetConnect",
+          "IO.NetListen",
+          "IO.Spawn",
+          "Session.Live",
+          "ClusterNode.Live"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Probe",
+        "needs": [
+          "IO.FileWrite",
+          "IO.Clock",
+          "IO.Spawn"
+        ],
+        "own": true
+      },
+      {
+        "cls": "outside",
+        "name": "Session",
+        "needs": [
+          "IO"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "SessionNode",
+        "needs": [
+          "IO",
+          "IO.Mut",
+          "IO.NetConnect",
+          "IO.NetListen",
+          "IO.Process",
+          "IO.Spawn",
+          "Session.Live",
+          "ClusterNode.Live"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Socket",
+        "needs": [
+          "IO.NetConnect"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "System",
+        "needs": [
+          "IO.Process",
+          "IO.Clock"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Tls",
+        "needs": [
+          "IO.NetConnect.TLS"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Topology",
+        "needs": [
+          "IO",
+          "IO.Mut",
+          "IO.Spawn",
+          "IO.Clock",
+          "IO.Signal",
+          "IO.Process",
+          "IO.Console",
+          "IO.NetConnect",
+          "IO.NetListen",
+          "IO.FileRead",
+          "IO.FileWrite",
+          "Session.Live",
+          "ClusterNode.Live"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Udp",
+        "needs": [
+          "IO.NetConnect"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "WebSocket",
+        "needs": [
+          "IO.WebSocket"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
+        "name": "Work",
+        "needs": [
+          "IO.Process",
+          "IO.Console",
+          "IO.Mut",
+          "Session.Live",
+          "ClusterNode.Live"
+        ],
+        "own": true
+      }
+    ],
+    "own": [
+      {
+        "cls": "outside",
+        "name": "Ingress",
+        "needs": [
+          "IO.Process",
+          "IO.Mut",
+          "IO.Clock",
+          "IO.Spawn",
+          "IO.FileRead",
+          "IO.FileWrite",
+          "Session.Live",
+          "ClusterNode.Live"
+        ],
+        "own": true
+      },
+      {
+        "cls": "outside",
+        "name": "Probe",
+        "needs": [
+          "IO.FileWrite",
+          "IO.Clock",
+          "IO.Spawn"
+        ],
+        "own": true
+      },
+      {
+        "cls": "outside",
+        "name": "Work",
+        "needs": [
+          "IO.Process",
+          "IO.Console",
+          "IO.Mut",
+          "Session.Live",
+          "ClusterNode.Live"
+        ],
+        "own": true
+      }
+    ],
+    "total": 155
+  },
+  "pinned": {
+    "node_refusal": "FAILED Server.handle: ERR cap_policy IO.FileWrite \u2014 deploy rejected by node capability policy",
+    "policy_from_caps": "from the pool's written `caps`, else the compiler's derived ones",
+    "sandbox_patched": "the OS sandbox installed at startup still applies to patched code"
+  },
+  "programs": {
+    "ceiling": {
+      "exit": 1,
+      "headline": "`main` is granted `Cap(IO.Clock)` + `Cap(IO.FileWrite)`, but the program reaches `IO.NetConnect` here. The grant is a ceiling on the WHOLE program \u2014 declaring `needs IO.NetConnect` does not raise it. [cap_grant_exceeded]",
+      "output": "-- CAPABILITY ----------------------------- ceiling.march\n\n`main` is granted `Cap(IO.Clock)` + `Cap(IO.FileWrite)`, but the program reaches `IO.NetConnect` here. The grant is a ceiling on the WHOLE program \u2014 declaring `needs IO.NetConnect` does not raise it. [cap_grant_exceeded]\nhelp: add a `Cap(IO.NetConnect)` parameter to `main` (e.g. `fn main(\u2026, _cap_netconnect : Cap(IO.NetConnect))`), or widen the whole grant to `Cap(IO)`, or remove the use.\n\n15 |       let _ = tcp_connect(\"collector.example\", 4317)\n                   ^^^^^^^^^^^\n\n\n    `main` calls `report` here:\n\n22 |     Probe.report(\"/tmp\")\n         ^^^^^^^^^^^^\n\n    `main` is granted only `Cap(IO.Clock)` + `Cap(IO.FileWrite)` here:\n\n21 |   fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock)) : () do\n       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    run `march --explain cap_grant_exceeded`\n",
+      "shown": "fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock)) : () do\n  Probe.report(\"/tmp\")\nend\n"
+    },
+    "undeclared": {
+      "exit": 1,
+      "headline": "`report` opens a network connection, but module `Probe` declares no `needs IO.NetConnect`. [cap_needs]",
+      "output": "-- CAPABILITY -------------------------- undeclared.march\n\n`report` opens a network connection, but module `Probe` declares no `needs IO.NetConnect`. [cap_needs]\nhint: add this to the module body \u2014\n        needs IO.NetConnect\n\n9 |     let _ = tcp_connect(\"collector.example\", 4317)\n                ^^^^^^^^^^^\n\n    run `march --explain cap_needs`\n",
+      "shown": "fn report(home : String) : () do\n  let line = \"at \" ++ int_to_string(unix_time_ms()) ++ \"\\n\"\n  let _ = tcp_connect(\"collector.example\", 4317)\n  let _ = File.write(home ++ \"/lab-probe\", line)\n  ()\nend\n"
+    }
+  },
+  "sim": {
+    "leg_s": 0.55,
+    "seed": 20261106,
+    "sessions_per_s": 2.2,
+    "suspect_s": 3
+  },
+  "topology": {
+    "cluster_port": 7946,
+    "cluster_rules": 12,
+    "control_hosts": [
+      "lab-2",
+      "lab-3",
+      "lab-4"
+    ],
+    "control_port": 7947,
+    "control_rules": 6,
+    "firewall": {
+      "lab-1": [
+        {
+          "from": "lab-2",
+          "port": 7946
+        },
+        {
+          "from": "lab-3",
+          "port": 7946
+        },
+        {
+          "from": "lab-4",
+          "port": 7946
+        }
+      ],
+      "lab-2": [
+        {
+          "from": "lab-1",
+          "port": 7946
+        },
+        {
+          "from": "lab-3",
+          "port": 7946
+        },
+        {
+          "from": "lab-4",
+          "port": 7946
+        },
+        {
+          "from": "lab-3",
+          "port": 7947
+        },
+        {
+          "from": "lab-4",
+          "port": 7947
+        }
+      ],
+      "lab-3": [
+        {
+          "from": "lab-1",
+          "port": 7946
+        },
+        {
+          "from": "lab-2",
+          "port": 7946
+        },
+        {
+          "from": "lab-4",
+          "port": 7946
+        },
+        {
+          "from": "lab-2",
+          "port": 7947
+        },
+        {
+          "from": "lab-4",
+          "port": 7947
+        }
+      ],
+      "lab-4": [
+        {
+          "from": "lab-1",
+          "port": 7946
+        },
+        {
+          "from": "lab-2",
+          "port": 7946
+        },
+        {
+          "from": "lab-3",
+          "port": 7946
+        },
+        {
+          "from": "lab-2",
+          "port": 7947
+        },
+        {
+          "from": "lab-3",
+          "port": 7947
+        }
+      ]
+    },
+    "pools": [
+      {
+        "caps": [
+          "IO.Clock",
+          "IO.FileRead",
+          "IO.FileWrite",
+          "IO.Mut",
+          "IO.Process",
+          "IO.Spawn"
+        ],
+        "caps_source": "compiler",
+        "hosts": [
+          {
+            "labels": [],
+            "name": "lab-1"
+          }
+        ],
+        "initiates": [
+          "Order.Shop"
+        ],
+        "name": "ingress",
+        "serves": []
+      },
+      {
+        "caps": [
+          "IO.Clock",
+          "IO.Console",
+          "IO.FileWrite",
+          "IO.Mut",
+          "IO.Process",
+          "IO.Spawn"
+        ],
+        "caps_source": "compiler",
+        "hosts": [
+          {
+            "labels": [
+              "control"
+            ],
+            "name": "lab-2"
+          },
+          {
+            "labels": [
+              "control",
+              "books"
+            ],
+            "name": "lab-3"
+          },
+          {
+            "labels": [
+              "control",
+              "books"
+            ],
+            "name": "lab-4"
+          }
+        ],
+        "initiates": [],
+        "name": "work",
+        "serves": [
+          "Order.Stock",
+          "Order.Ledger"
+        ]
+      }
+    ],
+    "roles": [
+      {
+        "capacity": 32,
+        "name": "Order.Stock",
+        "place": null,
+        "role": "Stock"
+      },
+      {
+        "capacity": 64,
+        "name": "Order.Ledger",
+        "place": {
+          "count": 1,
+          "on": "books"
+        },
+        "role": "Ledger"
+      }
+    ]
+  },
+  "topology_file": [
+    "[roles]",
+    "\"Order.Stock\"  = { body = \"LabApp.Work.stock\", capacity = 32 }",
+    "\"Order.Ledger\" = { actor = \"LabApp.Work.LedgerActor\", capacity = 64, place = { on = \"books\", count = 1 } }",
+    "",
+    "[pool.ingress]",
+    "start = \"LabApp.Ingress.start\"",
+    "",
+    "[pool.work]",
+    "start  = \"LabApp.Work.start\"",
+    "serves = [\"Order.Stock\", \"Order.Ledger\"]",
+    "",
+    "[control]",
+    "candidates = \"control\"",
+    "",
+    "[drain]",
+    "soft_ms = 3000",
+    "hard_ms = 8000"
+  ],
+  "widening": {
+    "added": {
+      "ingress": [
+        "IO.NetConnect"
+      ],
+      "work": [
+        "IO.NetConnect"
+      ]
+    },
+    "after": {
+      "ingress": [
+        "IO.Clock",
+        "IO.FileRead",
+        "IO.FileWrite",
+        "IO.Mut",
+        "IO.NetConnect",
+        "IO.Process",
+        "IO.Spawn"
+      ],
+      "work": [
+        "IO.Clock",
+        "IO.Console",
+        "IO.FileWrite",
+        "IO.Mut",
+        "IO.NetConnect",
+        "IO.Process",
+        "IO.Spawn"
+      ]
+    },
+    "before": {
+      "ingress": [
+        "IO.Clock",
+        "IO.FileRead",
+        "IO.FileWrite",
+        "IO.Mut",
+        "IO.Process",
+        "IO.Spawn"
+      ],
+      "work": [
+        "IO.Clock",
+        "IO.Console",
+        "IO.FileWrite",
+        "IO.Mut",
+        "IO.Process",
+        "IO.Spawn"
+      ]
+    },
+    "grant_flags": "--grant-cap IO.NetConnect",
+    "granted": [
+      "granted widening: pool ingress gains IO.NetConnect (via --grant-cap IO.NetConnect)",
+      "granted widening: pool work gains IO.NetConnect (via --grant-cap IO.NetConnect)"
+    ],
+    "refusal": {
+      "exit": 1,
+      "output": "error: hot deploy would widen pool ingress's derived capabilities (D26)\n  last deployed caps:    IO.Clock, IO.FileRead, IO.FileWrite, IO.Mut, IO.Process, IO.Spawn   (env lab)\n  new version adds:      IO.NetConnect\nerror: hot deploy would widen pool work's derived capabilities (D26)\n  last deployed caps:    IO.Clock, IO.Console, IO.FileWrite, IO.Mut, IO.Process, IO.Spawn   (env lab)\n  new version adds:      IO.NetConnect\n  A hot deploy may only narrow authority. To authorize this widening, re-run with:\n      forge deploy hot --env lab --grant-cap IO.NetConnect\nerror: pool capability widening \u2014 deploy aborted\n"
+    },
+    "written": {
+      "caps_line": "caps = [\"IO.Clock\", \"IO.Console\", \"IO.FileWrite\", \"IO.Mut\", \"IO.Process\", \"IO.Spawn\"]",
+      "exit": 1,
+      "output": "error: topology: pool \"work\": its hook LabApp.Work.start reaches `IO.NetConnect`, beyond the pool's written caps [IO.Clock, IO.Console, IO.FileWrite, IO.Mut, IO.Process, IO.Spawn]\n"
+    }
+  }
+}
