@@ -30,6 +30,12 @@ body translator: the analysis already admitted these functions, but no logic sym
 - **Predicates.** A tuple or record literal at a reflected call's tuple or record parameter is
   that constructor (`Refine_scope`'s reflected-call arm).
 
+- **Parity net.** `Reflect_parity` draws record inputs and hands tuples and records to the
+  interpreter as tuples and records (`to_value`), and reads a tuple or record result back
+  (`same`); a new `reflect-parity` case pins `agree` for six tuple and record functions. Two
+  existing cases used a Float function as "no logic definition"; one now uses a parametric
+  record, which still declines.
+
 Tests: `float_body`, `string_body`, `record_body`, `tuple_body` in `test/test_refine_lemma.ml`,
 each with a red case (an opaque Float comparison and IEEE `==`, a false string literal claim, an
 update that drops a field, a false tuple claim).
