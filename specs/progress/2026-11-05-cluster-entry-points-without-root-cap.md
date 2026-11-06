@@ -21,9 +21,23 @@ Two things, both in `lib/desugar/desugar_endpoints.ml` and `stdlib/session_node.
 - **A node can attach a session.** `ClusterNode.ClusterOps` gains `attach_session :
   Session.Ops -> Cap(Session.Live)`. `ClusterNode.attach(io, ops)` (which `start` goes
   through) fills it with `fn sops -> Session.attach(io, sops)`, over whatever the caller's
-  dictionary holds, so a test dictionary cannot supply its own. `ClusterNode.attach_session
-  (node, sops)` is the public operation. No typechecker rule changed: the mint is still in
-  `Session`, still from a `Cap(IO)`; the node holds that one delegated use of it.
+  dictionary holds, so a test dictionary cannot supply its own. The public operation is
+  `ClusterNode.with_session(node, sops, body)`, which calls `body` with the capability.
+  `ClusterNode` declares `needs Session.Live` for naming it. No typechecker rule changed:
+  the mint is still in `Session`, still from a `Cap(IO)`; the node holds that one delegated
+  use of it.
+
+  The first version returned the capability (`attach_session(node, sops) :
+  Cap(Session.Live)`) and was wrong: Check 6 of `check_module_needs` (`proof_cap_return`)
+  forbids a function outside the declaring module from returning a proof capability it was
+  not given, and `cluster_node.march` checked as the entry file reported it. Nothing local
+  showed it, because a diagnostic inside a stdlib file is dropped when a program merely
+  loads the file; CI's `cluster_node_check.out` rule is what caught it. Handing the
+  capability to a callback is what the rule asks for (capabilities flow down as
+  parameters), and the mint is a call to `Session`'s own factory. A `Session.Attacher`
+  type declared in `Session` was tried first and dropped: a module cannot name its own
+  proof capability in one of its type declarations when it is the entry file (the entry
+  module's types are pre-bound before its `proof cap` line is registered).
 - **`SessionNode`'s cluster runners lost their `io` parameter**: `run_cluster`,
   `run_cluster_hosted`, `offer_role`, `start_offered_role`, `offer_hosted`,
   `start_offered_hosted`, `initiate` and the private helpers under them.

@@ -1781,7 +1781,7 @@ let param_names src m f : string list =
   List.filter_map (function FPNamed pr -> Some pr.param_name.txt | _ -> None) (List.hd fd.fn_clauses).fc_params
 
 (* A front over a running cluster node is given the node, and the node can
-   attach a session itself (`ClusterNode.attach_session`), so the front has no
+   attach a session itself (`ClusterNode.with_session`), so the front has no
    use for the root capability.  The role's grant is then the CALLER's to
    hand over: one parameter per `needs` path, after the node, passed on to the
    body unchanged.  A front that took `Cap(IO)` and narrowed it made every

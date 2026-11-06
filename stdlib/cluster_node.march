@@ -67,6 +67,10 @@ mod ClusterNode do
   needs IO.Clock
   needs IO.Process
   needs IO.Random
+  -- Named, never minted here: a node's dictionary holds a closure over
+  -- `Session.attach` (`attach_session`), and `with_session` hands its result
+  -- to a callback.
+  needs Session.Live
 
   -- ── configuration ───────────────────────────────────────────────────────
 
@@ -2747,7 +2751,7 @@ mod ClusterNode do
   fn attach(io : Cap(IO), ops : ClusterOps) : Cap(ClusterNode.Live) do
     -- `attach_session` is filled in here and nowhere else, over whatever the
     -- caller put in the field: it is the one use of the root capability a
-    -- node keeps (see `attach_session` below), so it must come from [io].
+    -- node keeps (see `with_session` below), so it must come from [io].
     cap_impl(mint_cap(io), { ops with attach_session: fn sops -> Session.attach(io, sops) })
   end
 
@@ -3352,19 +3356,21 @@ mod ClusterNode do
   end
 
   doc """
-  Attach a session transport on this node's authority: the `Cap(Session.Live)`
-  that `Session.attach(io, ops)` would give, without the root capability.
+  Run [body] with a session attached on this node's authority: the
+  `Cap(Session.Live)` that `Session.attach(io, sops)` would give, without the
+  root capability.
 
   A node was started (or attached) by a holder of `Cap(IO)`, and it keeps that
   one power: to say a session's transport is attached. The session runners use
   it (`SessionNode.run_cluster`, `offer_role`, `initiate`), so a program that
   holds a running node can play a role without holding the root capability.
-  It grants nothing more: every operation on the result goes through [sops],
-  which the caller built.
+  It grants nothing more: every operation on the session goes through [sops],
+  which the caller built. The capability is handed to [body] and not returned:
+  only `Session` may return one.
   """
-  fn attach_session(c : Cap(ClusterNode.Live), sops : Session.Ops) : Cap(Session.Live) do
+  fn with_session(c : Cap(ClusterNode.Live), sops : Session.Ops, body : Cap(Session.Live) -> Unit) : Unit do
     let d = ops(c)
-    d.attach_session(sops)
+    body(d.attach_session(sops))
   end
 
   doc "This node's id."

@@ -2828,8 +2828,7 @@ mod SessionNode do
                 -- twice is harmless: the first PeerGone wins, LinkEnded is once.)
                 recheck_links(node, p)
                 let o = ops(p)
-                let s = ClusterNode.attach_session(node, o)
-                drive(p, s)
+                ClusterNode.with_session(node, o, fn s -> drive(p, s))
                 -- Only now, with the role driven to its first suspension and
                 -- its first handler installed, are held frames replayed (and
                 -- later ones handled as they come): one handled earlier would

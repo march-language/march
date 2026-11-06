@@ -1864,7 +1864,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
     `Cap(IO)` they hold (`cap_narrow(io)`, which the checker accepts because
     `IO` subsumes every node) and pass them.  The CLUSTER fronts (`cluster_`,
     `offer_`, `offer_work_`, `initiate_` and their hosted forms) hold no root
-    capability -- the node attaches the session, `ClusterNode.attach_session`
+    capability -- the node attaches the session, `ClusterNode.with_session`
     -- so they take the grant as parameters after the node, one per path,
     and pass those on: a caller plays the role with exactly the capabilities
     it was itself given.  The hosted fronts thread them through `start`

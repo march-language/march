@@ -211,8 +211,8 @@ git log is authoritative for exact commits.
   `IO` to six narrow capabilities, none of them network or root. `run_<R>` and `host_<R>`,
   which open their own connections, are unchanged. The `SessionNode` functions under these
   (`run_cluster`, `offer_role`, `initiate`, `offer_hosted`, `start_offered_role` and the
-  hosted forms) lose their `io` parameter the same way, and `ClusterNode.attach_session(node,
-  ops)` is the new operation they use.
+  hosted forms) lose their `io` parameter the same way, and `ClusterNode.with_session(node,
+  ops, body)` is the new operation they use.
 
 - Diagnostics: a `main` that performs IO without declaring a capability is now reported even
   when the program has another error, listed after that error, so both can be fixed in one pass.
