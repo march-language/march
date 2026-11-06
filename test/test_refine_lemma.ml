@@ -917,20 +917,23 @@ let iface_laws =
         expect_status out "twice_def__Sem_Int" "admitted";
         expect_status out "unit_left__Sem_Int" "admitted");
     gated "conflated_type: a parameter type that shares a stdlib type's name is named in the warning" (fun () ->
-        (* `Tree` is also `OrderedMap.Tree`: the logic cannot tell them apart,
-           so `k` cannot be used, and the warning says why (it used to say
-           "not a measure or known predicate"). *)
-        let src ty =
+        (* `Tree(k, v)` is also `OrderedMap.Tree(k, v)`, at the same arity: the
+           typechecker conflates the two, so the logic cannot tell them apart,
+           `k` cannot be used, and the warning says why (it used to say "not a
+           measure or known predicate").  At ANOTHER arity (`type Tree`, no
+           parameter) the two are told apart since 2026-11-06, so it proves. *)
+        let src ~decl ~ty =
           Printf.sprintf
             "mod N do\n  type %s = Leaf | Node(%s, Int, %s)\n  fn k(t : %s) : Int do\n    match t do\n      Leaf -> 0\n      Node(_, _, _) -> 1\n    end\n  end\n  @[lemma]\n  fn l(t : %s) : {Unit | k(t) >= 0} do\n    ()\n  end\nend\n"
-            ty ty ty ty ty
+            decl ty ty ty ty
         in
-        let out = run ~args:"--check --reflect-deps" (src "Tree") in
+        let out = run ~args:"--check --reflect-deps" (src ~decl:"Tree(a, b)" ~ty:"Tree(Int, Int)") in
         if not (contains out "its parameter type `Tree` has the same name as a type declared in" && contains out "`OrderedMap`") then
           Alcotest.failf "expected the name-clash warning:\n%s" out;
         if contains out "is not a measure or known predicate" then Alcotest.failf "not the generic warning:\n%s" out;
-        (* Renamed, the same lemma proves. *)
-        let out = run ~args:"--check --reflect-deps" (src "Bush") in
+        (* Another arity, and renamed: the same lemma proves. *)
+        expect_status (run ~args:"--check --reflect-deps" (src ~decl:"Tree" ~ty:"Tree")) "l" "admitted";
+        let out = run ~args:"--check --reflect-deps" (src ~decl:"Bush" ~ty:"Bush") in
         expect_status out "l" "admitted");
     gated "iface_law_syntax: a body-less interface `fn` must be a `@[lemma]`" (fun () ->
         let out =

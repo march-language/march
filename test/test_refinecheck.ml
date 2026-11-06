@@ -23779,11 +23779,16 @@ let module_qualified_measure_and_sort_suite =
      specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md.
      What still holds, and is pinned: the collision makes neither call a
      proof nor a violation. *)
+  (* Since 2026-11-06 (specs/progress/2026-11-06-predicate-names.md) the
+     first is PROVED again: the user's `Tree` takes no type argument and
+     `OrderedMap.Tree(k, v)` takes two, and the typechecker never unifies
+     types of different arities, so the two are told apart by arity.  A
+     same-arity collision still skips (the `pred-names` suite pins it). *)
   [ gated
-      "a user's own top-level Tree, colliding with the real stdlib OrderedMap.Tree \
-       once its whole stdlib is prepended, is skipped, not proved (short-name conflation)"
+      "a user's own top-level Tree, beside the stdlib's OrderedMap.Tree(k, v) of \
+       another arity, is proved (types told apart by arity)"
       (fun () ->
-        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
+        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
           (ledger_counts3_with_ordered_map (fixture ~pred:"member(3, tree_elts(_))")));
 
     gated "...and a literal that is not a member is skipped too, not proved" (fun () ->

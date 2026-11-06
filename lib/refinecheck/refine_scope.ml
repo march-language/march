@@ -921,9 +921,9 @@ let refined_param_ty : A.ty option -> (string * A.expr * string option) option =
     Some (binder_name binder, pred, Some bool_sort)
   | Some (A.TyRefine (base, binder, pred)) when is_float_base base ->
     Some (binder_name binder, pred, Some float_sort)
-  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, _) as base), binder, pred))
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, targs) as base), binder, pred))
     when is_adt_base base ->
-    Some (binder_name binder, pred, Some (adt_sort_name name))
+    Some (binder_name binder, pred, Some (adt_sort_name ~arity:(List.length targs) name))
   | _ -> None
 
 (* A function's declared RETURN refinement together with the SMT sort of the
@@ -944,9 +944,9 @@ let return_refine_sorted (fd : A.fn_def) : (string * A.expr * string option) opt
     Some (binder_name binder, pred, Some bool_sort)
   | Some (A.TyRefine (base, binder, pred)) when is_float_base base ->
     Some (binder_name binder, pred, Some float_sort)
-  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, _) as base), binder, pred))
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, targs) as base), binder, pred))
     when is_adt_base base ->
-    Some (binder_name binder, pred, Some (adt_sort_name name))
+    Some (binder_name binder, pred, Some (adt_sort_name ~arity:(List.length targs) name))
   (* A lemma's `{Unit | P}` (reflection design §4.1): [P] never mentions the
      unit value (L1), so the result's sort is never read; the declared theorem
      is what a call admits once the lemma is proved. *)
@@ -1175,7 +1175,7 @@ let refined_scope_ty : A.ty option -> (string * A.expr * string option) option =
     Some (binder_name binder, pred, Some float_sort)
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, []) as base), binder, pred))
     when is_record_base base ->
-    Some (binder_name binder, pred, Some (adt_sort_name name))
+    Some (binder_name binder, pred, Some (adt_sort_name ~arity:0 name))
   (* Any OTHER registered ADT — `List(Int)`, `List(a)`, a user `Tree` — at the
      MEASURE-ONLY marker.  The record arm above wins for a record, so this arm
      sees variants and applied type constructors only.
@@ -2170,7 +2170,7 @@ let elem_sig ~(name : string) ((binder, pred, sort) : string * A.expr * string o
    predicate still travels through [scope]; this records only the sort). *)
 let record_sort_of_ty : A.ty option -> string option = function
   | Some (A.TyCon ({ A.txt = name; _ }, []) as t) when is_record_base t ->
-    Some (adt_sort_name name)
+    Some (adt_sort_name ~arity:0 name)
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, []) as b), _, _)) when is_record_base b ->
     Some (adt_sort_name name)
   | _ -> None

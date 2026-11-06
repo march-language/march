@@ -164,4 +164,78 @@ let shadowing =
             Alcotest.(check int) (f ^ ":\n" ^ out) 0 (U.count_code out shadow_code))
           [ "stdlib/map.march"; "stdlib/list.march"; "stdlib/set.march" ]) ]
 
-let suite : unit Alcotest.test_case list = parens @ resolution @ shadowing
+(* #8: a user type that shares its short name with a stdlib type (OrderedMap's
+   `Tree(k, v)`) at ANOTHER arity is a different type to the typechecker, so
+   the logic may use it.  At the SAME arity the typechecker conflates the two
+   (todo 2026-10-13-same-short-name-nested-types-unify): a stdlib value can
+   reach the user's function, so those stay a skip, never a proof. *)
+let tree_prog ?(ty = "Tree") ?(leaf = "Leaf") ?(node = "Node") ~arg () =
+  Printf.sprintf
+    "mod TreeUser do\n\
+    \  type %s = %s | %s(%s, Int, %s)\n\
+    \  fn size(t : %s) : Int do\n\
+    \    match t do\n\
+    \      %s -> 0\n\
+    \      %s(l, _, r) -> size(l) + 1 + size(r)\n\
+    \    end\n\
+    \  end\n\
+    \  fn need_one(t : {%s | size(_) == 1}) : Int do 0 end\n\
+    \  fn main() : Int do need_one(%s) end\n\
+    end\n"
+    ty leaf node ty ty ty leaf node ty arg
+
+let leak3 =
+  "mod TreeUser do\n\
+  \  type Tree(a, b) = Leaf | Node(Tree(a, b), a, Tree(a, b))\n\
+  \  fn size(t : Tree(a, b)) : Int do\n\
+  \    match t do\n\
+  \      Leaf -> 0\n\
+  \      Node(l, _, r) -> size(l) + 1 + size(r)\n\
+  \    end\n\
+  \  end\n\
+  \  fn need_one(t : {Tree(Int, Int) | size(_) == 1}) : Int do 0 end\n\
+  \  fn main() : Int do\n\
+  \    let m = OrderedMap.put(OrderedMap.new(fn (a, b) -> a - b), 1, 2)\n\
+  \    println(int_to_string(size(m.tree)))\n\
+  \    need_one(m.tree)\n\
+  \  end\n\
+  end\n"
+
+let arity =
+  [ gated "a user Tree beside OrderedMap's Tree(k, v) is usable in a predicate" (fun () ->
+        U.expect ~uses:"size" (U.run (tree_prog ~arg:"Node(Leaf, 5, Leaf)" ())) ~line:10 ~callee:"need_one" "proved");
+    gated "the same with constructors no stdlib type declares" (fun () ->
+        U.expect (U.run (tree_prog ~leaf:"Lf" ~node:"Nd" ~arg:"Nd(Lf, 5, Lf)" ())) ~line:10 ~callee:"need_one" "proved");
+    gated "a wrong size of a user Tree is a violation" (fun () ->
+        U.expect (U.run (tree_prog ~arg:"Node(Node(Leaf, 1, Leaf), 5, Leaf)" ())) ~line:10 ~callee:"need_one" "violated");
+    gated "a user type Array (arity 0) beside the built-in Array(a)" (fun () ->
+        U.expect (U.run (tree_prog ~ty:"Array" ~leaf:"Lf" ~node:"Nd" ~arg:"Nd(Lf, 5, Lf)" ())) ~line:10 ~callee:"need_one" "proved");
+    gated "a user type Option (arity 0) beside the built-in Option(a)" (fun () ->
+        U.expect (U.run (tree_prog ~ty:"Option" ~leaf:"Lf" ~node:"Nd" ~arg:"Nd(Lf, 5, Lf)" ())) ~line:10 ~callee:"need_one" "proved");
+    gated "same arity as OrderedMap's Tree: an OrderedMap value is never proved" (fun () ->
+        U.not_proved (U.run leak3) ~line:13 ~callee:"need_one");
+    gated "same arity as the built-in DownReason: never proved" (fun () ->
+        U.not_proved (U.run (tree_prog ~ty:"DownReason" ~leaf:"Lf" ~node:"Nd" ~arg:"Normal" ())) ~line:10 ~callee:"need_one");
+    gated "same arity as the built-in Option(a): never proved" (fun () ->
+        let src =
+          "mod TreeUser do\n  type Option(a) = Nope | Yep(a)\n\
+          \  fn cnt(t : Option(Int)) : Int do\n    match t do\n      Nope -> 0\n      Yep(_) -> 1\n    end\n  end\n\
+          \  fn need_one(t : {Option(Int) | cnt(_) == 1}) : Int do 0 end\n\
+          \  fn main() : Int do need_one(List.head_opt([1])) + need_one(Yep(3)) end\nend\n"
+        in
+        let out = U.run src in
+        if List.exists (fun l -> U.contains l "\tproved\t" && U.contains l "\tneed_one\t" && U.contains l "m.march:10:") (U.lines out)
+        then Alcotest.failf "a same-arity Option row was proved:\n%s" out);
+    gated "a user arity-0 Tree given an OrderedMap tree is still a type error" (fun () ->
+        let src =
+          "mod TreeUser do\n  type Tree = Leaf | Node(Tree, Int, Tree)\n\
+          \  fn size(t : Tree) : Int do 0 end\n\
+          \  fn main() : Int do\n    let m = OrderedMap.put(OrderedMap.new(fn (a, b) -> a - b), 1, 2)\n    size(m.tree)\n  end\nend\n"
+        in
+        let out = U.run ~args:"--check" src in
+        Alcotest.(check bool) ("type error:\n" ^ out) true (U.contains out "expected `Tree`"));
+    gated "the rename message names the user's own function" (fun () ->
+        let out = U.run leak3 in
+        Alcotest.(check bool) ("rename message:\n" ^ out) true (U.contains out "has the same name as a type declared in")) ]
+
+let suite : unit Alcotest.test_case list = parens @ resolution @ shadowing @ arity

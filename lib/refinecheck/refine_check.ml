@@ -4972,17 +4972,28 @@ let read_manifest (path : string) : (string * string) list =
 (* A parameter type of the program function [f] whose short name is
    conflated with another declaration ([Refine_encode.conflated_declarants]):
    the type and the modules declaring it. *)
-let conflated_param_type (f : string) : (string * string list) option =
+let conflated_param_type ?decl_span (f : string) : (string * string list) option =
   match !Witness.current_module with
   | None -> None
   | Some m ->
-    let rec find ds =
+    (* The declaration the predicate's name denotes: the one in scope where
+       the predicate is written ([decl_span]), else a user file's, else any.
+       The first bare-name match was a stdlib `fn size` (`Deque.size`, …),
+       so a user's `size` over a conflated type never got this message. *)
+    let rec find ok ds =
       List.find_map
         (function
-          | A.DFn (fd, _) when fd.A.fn_name.A.txt = f -> Some fd
-          | A.DMod (_, _, inner, _) -> find inner
+          | A.DFn (fd, _) when fd.A.fn_name.A.txt = f && ok fd -> Some fd
+          | A.DMod (_, _, inner, _) -> find ok inner
           | _ -> None)
         ds
+    in
+    let find ds =
+      let user (fd : A.fn_def) = not (March_typecheck.Typecheck_builtins.file_is_stdlib fd.A.fn_name.A.span.A.file) in
+      let in_scope (fd : A.fn_def) = Some fd.A.fn_name.A.span = decl_span in
+      match (if decl_span = None then None else find in_scope ds) with
+      | Some fd -> Some fd
+      | None -> ( match find user ds with Some fd -> Some fd | None -> find (fun _ -> true) ds)
     in
     let rec tys (t : A.ty) : string list =
       match t with
@@ -6649,6 +6660,7 @@ let warn_predicate_expr ?(abstract_refs : string list = []) ?(in_scope : scope_f
       (* A call reflection resolved at this site (by span, so a qualified
          `Inner.dbl` too) is checked: no "unchecked" warning of any kind. *)
       let resolved = !Reflect_state.active && Reflect_state.resolve_site span <> None in
+      let decl_span = Option.map (fun sf -> sf.sf_span) (List.find_opt (fun sf -> sf.sf_name = f) in_scope) in
       if (not resolved) && (not (known_predicate_fn f)) && not (List.mem f abstract_refs) then begin
         if String.contains f '.' then
           (* [Desugar.desugar_ty] (Task 8) now flattens a MODULE-PATH call head
@@ -6687,12 +6699,12 @@ let warn_predicate_expr ?(abstract_refs : string list = []) ?(in_scope : scope_f
                   note: a function is usable in a predicate when it terminates, has no effects, \
                   cannot fail, and calls only such functions."
                  f why at.A.start_line)
-          | _ when conflated_param_type f <> None ->
+          | _ when conflated_param_type ?decl_span f <> None ->
             (* The function is reflectable, but one of its parameter types
                shares its short name with another declaration (often a
                stdlib one): the logic cannot tell the two apart, so it uses
                neither.  Say so, rather than "not a measure". *)
-            let ty, paths = Option.get (conflated_param_type f) in
+            let ty, paths = Option.get (conflated_param_type ?decl_span f) in
             Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
               (Printf.sprintf
                  "`%s` cannot be used in this refinement predicate, so the refinement is not \
