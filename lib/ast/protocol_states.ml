@@ -95,6 +95,26 @@ let record_protocol ~proto (steps : Ast.protocol_step list) =
 let visible (steps : Ast.protocol_step list) =
   List.filter (function Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> false | _ -> true) steps
 
+(** [pos] is the first step of a `loop` body in [proto]: the state every
+    repeating branch comes back to. *)
+let at_loop_start ~proto (pos : pos) : bool =
+  let rec go (steps : Ast.protocol_step list) = function
+    | i :: rest ->
+      (match List.nth_opt (visible steps) i with
+       | Some (Ast.ProtoLoop (body, _)) -> rest = [ 0 ] || go body rest
+       | Some (Ast.ProtoChoice (_, branches)) ->
+         (match rest with
+          | b :: rest' ->
+            (match List.nth_opt branches b with
+             | Some (_, body) -> go body rest'
+             | None -> false)
+          | [] -> false)
+       | _ -> false)
+    | [] -> false in
+  match Hashtbl.find_opt protocols proto with
+  | Some steps -> go steps pos
+  | None -> false
+
 (** [a] comes before [b] in the conversation: lexicographic, a container
     before anything inside it. *)
 let rec pos_before (a : pos) (b : pos) =

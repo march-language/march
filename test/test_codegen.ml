@@ -13617,7 +13617,7 @@ let test_compiled_int_overflow_trap_parity () =
 
 (** An overflow nobody catches ends the program like any panic, with its
     message, on all three backends: the interpreter, compiled code (stderr
-    "panic: ..."), and --target js (an uncaught Error).  The JS operands are
+    "... run-time error: ..."), and --target js (an uncaught Error).  The JS operands are
     powers of two, exact in a double, so the 63-bit boundary is reachable
     there (2^61 + 2^61 = 2^62).  The JS half is skipped when node is absent. *)
 let test_int_overflow_uncaught_panic () =
@@ -13647,7 +13647,7 @@ let test_int_overflow_uncaught_panic () =
      | Some bin ->
        let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
        Alcotest.(check bool) (name ^ ": compiled panics with " ^ msg ^ " (got: " ^ run_out ^ ")")
-         true (ok run_out && ir_contains run_out ("panic: " ^ msg)));
+         true (ok run_out && ir_contains run_out ("run-time error: " ^ msg)));
     if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
       print_endline "  SKIP: node not on PATH (JS Int overflow panic)"
     else begin
@@ -15091,7 +15091,7 @@ declare i64  @march_diag_observe(ptr %cb)
 declare ptr  @march_diag_unobserve(i64 %id)
 declare ptr  @march_diag_context_get()
 declare ptr  @march_diag_context_set(ptr %ctx)
-declare ptr  @march_panic_site(ptr %file, i64 %line)
+declare ptr  @march_panic_site(ptr %file, i64 %line, i64 %col, i64 %end_col)
 declare void @march_assert_fail(ptr %meta, ptr %left, ptr %right)
 declare ptr  @march_test_header(ptr %header)
 ; REPL JIT persistent variable slot table (march_extras.c)

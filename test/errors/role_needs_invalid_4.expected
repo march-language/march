@@ -1,7 +1,7 @@
 exit: 1
 -- PROTOCOL ----------- errors/role_needs_invalid_4.march
 
-Protocol `Logging`: `may crash D` names a role that is not in the protocol. [role_needs_invalid]
+Protocol `Logging`: `may crash D` names a role that is not in the protocol; its roles are `I`, `L`. Remove it unless one of them can crash: a role that may crash needs an `or crash do ... end` branch on each message it sends. [role_needs_invalid]
 
 10 |     may crash D
                    ^

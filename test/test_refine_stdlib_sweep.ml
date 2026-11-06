@@ -20,6 +20,18 @@ let needs =
   fn need_ge(lo : Int, v : {Int | _ >= lo}) : Int do 0 end
 |}
 
+(* Phase S2's programs: [needs] plus two more, so lines 1-6 and a test's first
+   function starts at 7. *)
+let prog2 body =
+  "mod U do\n" ^ needs ^ "  fn need_ieq(a : Int, b : {Int | _ == a}) : Int do 0 end\n"
+  ^ "  fn need_len(a : List(Int), n : {Int | _ == len(a)}) : Int do 0 end\n" ^ body ^ "end\n"
+
+let with_and_without2 ~line ~callee ~lemma body =
+  let out = run (prog2 (body ("    " ^ lemma ^ "\n"))) in
+  expect out ~line:(line + 1) ~callee "proved";
+  let out = run (prog2 (body "")) in
+  U.not_proved out ~line ~callee
+
 (* `mod U do` + [needs] is lines 1-4; a test's first function starts at 5. *)
 let prog body = "mod U do\n" ^ needs ^ body ^ "end\n"
 
@@ -91,3 +103,43 @@ let tests =
     gated "REJECT control: Math.clamp_int with high below low gives no range" (fun () ->
         let out = run (prog "  fn a(x : Int, lo : Int, hi : Int) : Int do\n    need_ge(lo, Math.clamp_int(x, lo, hi))\n  end\n") in
         U.not_proved out ~line:6 ~callee:"need_ge") ]
+
+(* Phase S2: the accumulator loops of `length`, `sum_int` and `product_int`
+   lifted to `pfn`s, so their laws can be stated and proved. *)
+let s2 =
+  let law ~lemma ~lhs ~rhs =
+    with_and_without2 ~line:8 ~callee:"need_ieq" ~lemma (fun call ->
+        "  fn a(xs : List(Int), ys : List(Int)) : Int do\n" ^ call ^ "    need_ieq(" ^ lhs ^ ", " ^ rhs ^ ")\n  end\n")
+  in
+  [ gated "List.length's result type: a caller learns List.length(xs) == len(xs)" (fun () ->
+        let out =
+          run (prog2 "  fn a(xs : List(Int)) : Int do\n    need_len(xs, List.length(xs))\n  end\n")
+        in
+        expect out ~line:8 ~callee:"need_len" "proved");
+    gated "List.sum_int_append: sum_int(append(xs, ys)) == sum_int(xs) + sum_int(ys)" (fun () ->
+        law ~lemma:"List.sum_int_append(xs, ys)" ~lhs:"List.sum_int(xs) + List.sum_int(ys)"
+          ~rhs:"List.sum_int(List.append(xs, ys))");
+    gated "List.sum_int_reverse: sum_int(reverse(xs)) == sum_int(xs)" (fun () ->
+        law ~lemma:"List.sum_int_reverse(xs)" ~lhs:"List.sum_int(xs)" ~rhs:"List.sum_int(List.reverse(xs))");
+    gated "List.product_int_append: product_int(append(xs, ys)) == product_int(xs) * product_int(ys)" (fun () ->
+        law ~lemma:"List.product_int_append(xs, ys)" ~lhs:"List.product_int(xs) * List.product_int(ys)"
+          ~rhs:"List.product_int(List.append(xs, ys))");
+    gated "List.product_int_reverse: product_int(reverse(xs)) == product_int(xs)" (fun () ->
+        law ~lemma:"List.product_int_reverse(xs)" ~lhs:"List.product_int(xs)"
+          ~rhs:"List.product_int(List.reverse(xs))");
+    gated "REJECT control: List.sum_int_append does not give a false sum" (fun () ->
+        let out =
+          run
+            (prog2
+               "  fn a(xs : List(Int), ys : List(Int)) : Int do\n    List.sum_int_append(xs, ys)\n    need_ieq(List.sum_int(xs), List.sum_int(List.append(xs, ys)))\n  end\n")
+        in
+        U.not_proved out ~line:9 ~callee:"need_ieq");
+    gated "stdlib: the S2 List lemmas are admitted from the manifest" (fun () ->
+        let out = run "mod U do\n  fn f(n : Int) : Int do n end\nend\n" in
+        let rows = stdlib_post_rows "list.march" out in
+        List.iter
+          (fun l ->
+            if not (List.mem ("trusted", l) rows) then Alcotest.failf "%s is not admitted from the manifest:\n%s" l out)
+          [ "len_length_onto"; "sum_onto_shift"; "sum_onto_append"; "sum_int_append"; "sum_onto_reverse_onto";
+            "sum_int_reverse"; "product_onto_shift"; "product_onto_append"; "product_int_append";
+            "product_onto_reverse_onto"; "product_int_reverse" ]) ]

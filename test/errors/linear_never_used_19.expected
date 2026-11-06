@@ -7,6 +7,7 @@ Linear values must be consumed exactly once — did you mean to pass it somewher
 24 |     let _st2 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+    `_st2` is role `Prod`'s place in protocol `Stream`: next it must wait for `Cons` to choose `more` or `done`. Take that step with `Stream_Prod.offer_more_done`.
     run `march --explain linear_never_used`
 
 

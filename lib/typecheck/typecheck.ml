@@ -402,11 +402,38 @@ let report_linear_never_used env ~scope_span le =
   if not !(le.le_poisoned) then
   match !(le.le_exit) with
   | [] ->
-    Err.error ~code:Err.Code.linear_never_used env.errors ~span:scope_span
-      (Printf.sprintf
-         "The linear value `%s` was never used.\n\
-          Linear values must be consumed exactly once — did you \
-          mean to pass it somewhere?" (lin_display_name le.le_name))
+    (* A protocol state left unused: say what the role must do with it. *)
+    let notes =
+      let ty = match lookup_var le.le_name env with
+        | Some (Mono t) | Some (Poly (_, _, t)) -> Some (repr t)
+        | None -> None in
+      match ty with
+      | Some (TCon (n, _)) ->
+        (match March_ast.Protocol_states.find_all n with
+         | [ i ] ->
+           let again =
+             match i.March_ast.Protocol_states.ps_pos with
+             | Some p when March_ast.Protocol_states.at_loop_start
+                             ~proto:i.March_ast.Protocol_states.ps_proto p ->
+               " This is the top of the protocol's `loop`: to go round again, pass it \
+                to a function that takes this state as a parameter."
+             | _ -> "" in
+           [ Printf.sprintf
+               "`%s` is role `%s`'s place in protocol `%s`: next it must %s. \
+                Take that step with `%s`.%s"
+               (lin_display_name le.le_name) i.March_ast.Protocol_states.ps_role
+               i.March_ast.Protocol_states.ps_proto i.March_ast.Protocol_states.ps_doing
+               i.March_ast.Protocol_states.ps_call again ]
+         | _ -> [])
+      | _ -> [] in
+    Err.report env.errors
+      { Err.severity = Err.Error; span = scope_span;
+        message =
+          Printf.sprintf
+            "The linear value `%s` was never used.\n\
+             Linear values must be consumed exactly once — did you \
+             mean to pass it somewhere?" (lin_display_name le.le_name);
+        labels = []; notes; code = Err.Code.linear_never_used; fix = None }
   | labels ->
     (* F5: it IS consumed, but only on paths that never return; name the
        path that returns without consuming it ([join_linear_paths]). *)
@@ -7296,7 +7323,13 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
         List.iter
           (fun (r : Ast.name) ->
              if not (List.mem r.txt all_roles) then
-               err ~span:r.span (Printf.sprintf "`may crash %s` names a role that is not in the protocol." r.txt)
+               err ~span:r.span
+                 (Printf.sprintf
+                    "`may crash %s` names a role that is not in the protocol; its roles are %s. \
+                     Remove it unless one of them can crash: a role that may crash needs an \
+                     `or crash do ... end` branch on each message it sends."
+                    r.txt
+                    (String.concat ", " (List.map (fun x -> "`" ^ x ^ "`") all_roles)))
              else if List.mem r.txt !crashers then
                err ~span:r.span (Printf.sprintf "`may crash` lists `%s` twice." r.txt)
              else crashers := r.txt :: !crashers)
@@ -7452,7 +7485,12 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
                 err ~span:x.span (Printf.sprintf "`%s` has crashed, so it cannot take part in its own crash branch (%s)." x.txt (step_text s r)))
            [ s; r ];
          if not (may_crash s.txt) then
-           err ~span:csp (Printf.sprintf "`%s` is not declared `may crash`, so %s cannot have a crash branch." s.txt (step_text s r))
+           err ~span:csp
+             (Printf.sprintf
+                "`%s` is not declared `may crash`, so %s cannot have a crash branch. \
+                 Remove the `or crash do ... end` after it. Declaring `may crash %s` instead \
+                 asks for more: every other role must then be told about the crash."
+                s.txt (step_text s r) s.txt)
          else begin
            if List.mem s.txt (roles_in crash) then
              err ~span:csp

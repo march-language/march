@@ -49,6 +49,7 @@ let run_on args path =
 
 let run ?(args = "--check --reflect-report") src =
   let dir = Filename.temp_dir "reflect" "" in
+  Test_helpers.seed_vc_cache dir;
   Fun.protect ~finally:(fun () -> try remove_tree dir with _ -> ()) (fun () ->
       let f = Filename.concat dir "m.march" in
       Out_channel.with_open_bin f (fun oc -> output_string oc src);
@@ -479,6 +480,7 @@ let fixture_dir () =
 let pinned path =
   let src = In_channel.with_open_bin path In_channel.input_all in
   let dir = Filename.temp_dir "reflect_fx" "" in
+  Test_helpers.seed_vc_cache dir;
   Fun.protect ~finally:(fun () -> try remove_tree dir with _ -> ()) (fun () ->
       let f = Filename.concat dir (Filename.basename path) in
       Out_channel.with_open_bin f (fun oc -> output_string oc src);

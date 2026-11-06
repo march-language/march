@@ -176,7 +176,12 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then ulimit -c unlimited; fi
           case "${{ matrix.shard }}" in
             codegen)     dune build @test/runtest-run_codegen ;;
-            refinecheck) dune build @test/runtest-test_refinecheck ;;
+            # One alcotest process kept one of the runner's 4 cores busy and
+            # took 50-77 min (November 2026). MARCH_TEST_PROCS runs its groups
+            # in that many child processes (Test_helpers.run_groups); the
+            # children print whole, then one summary line with the slowest
+            # groups. Not a new shard: no extra runner from the 20-slot pool.
+            refinecheck) MARCH_TEST_PROCS=$(nproc) dune build @test/runtest-test_refinecheck ;;
             compiler)    dune build @test/runtest-run_compiler ;;
             rest)
               # `dune runtest` minus forge/ (the `forge` shard). A dune file
@@ -560,6 +565,15 @@ jobs:
           #   main's stdlib: that one row is the only new skip
           #   (154 proved / 46 skipped -> 167 proved / 47 skipped).
           #
+          #   RAISED 2026-11-06, 47 -> 49, deliberately: the stdlib lemma
+          #   sweep S2 added `List.sum_int_reverse` and
+          #   `List.product_int_reverse`, whose theorems name `reverse` and
+          #   so are unreflectable-predicate skips in THIS run only, for
+          #   the same ambiguity as `take_append` above (in a program both
+          #   are trusted from stdlib/lemmas.verified). Attributed the same
+          #   way: those two rows are the only new skips
+          #   (167 proved / 47 skipped -> 186 proved / 49 skipped).
+          #
           #   Lower is better — this bound
           #   may only ever be revised DOWN. This is the check that is
           #   actually sensitive to the pass checking less than it used to:
@@ -579,7 +593,7 @@ jobs:
           #   guard_discharges.march, whose `user code` slice is 1 proved /
           #   0 violated / 0 skipped (measured 2026-07-29). Higher is better
           #   — this bound may only ever be revised UP.
-          baseline=47
+          baseline=49
           proved_floor=1
           floor_fixture=specs/lang/types/accept/t118_refine_length_guard_discharges.march
           dune build bin/main.exe
@@ -766,6 +780,19 @@ jobs:
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             python3 scripts/gen-explainer-data.py --check
+
+      # docs/deploy-authority.md, the second explainer: module capabilities, compiler
+      # messages and what forge prints when a dependency, a pool or a deploy asks for
+      # more than it had (scripts/gen-authority-data.py). It runs forge as well as the
+      # compiler, so forge is built here.
+      - name: Check the deploy-authority explainer's generated data
+        timeout-minutes: 15
+        run: |
+          eval $(opam env)
+          dune build forge/bin/main.exe
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+          FORGE_BIN="$PWD/_build/default/forge/bin/main.exe" \
+            python3 scripts/gen-authority-data.py --check
 
       # Compiles every demo/*.march program (the `demo` alias in demo/dune).
       # Nothing else in CI builds demo/: at the 0.5.0 cut seven demos had

@@ -6,4 +6,5 @@ Parse error in declaration [parse_error]
 3 |   pub fn add(a, b) do
       ^^^
 
+    After this is fixed, `main` will also need permission to print: add `needs IO.Console` to the module, and give `main` the grant, `fn main(_console : Cap(IO.Console))`.
     run `march --explain parse_error`
