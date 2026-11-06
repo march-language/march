@@ -31,6 +31,35 @@ git log is authoritative for exact commits.
   a `match`ed tuple), why it failed (with the inner assertion's report) and the seed to
   replay. Before, compiled tests printed only `assertion failed`. The `FAIL: "name"` lines,
   the summary lines and exit codes are unchanged.
+- `march --why-copies FILE` lists each place in your code where a function builds a new copy
+  of a list or tree instead of reusing it in place, because the value is still shared: used
+  again afterwards, also passed to the enclosing call, or captured by a closure. Each is a
+  `copy_shared` warning naming the call, the value and the reason, and when moving the later
+  use above the call is safe (its only later use, no side effects), it carries that move as a
+  fix for `forge fix`. `--why-copies-json` prints the same as NDJSON. Opt-in; stops before code
+  generation. On a 200,000-element list, making the map the last use cut peak memory from 29 MB
+  to 10 MB.
+
+- **Protocol errors draw the conversation so far.** A role body that takes a step out of
+  order (`protocol_step_order`), calls another role's step (`protocol_wrong_role`), uses a
+  `Chan`/`MPST` channel at the wrong step (`session_state_mismatch`), or takes a step on a
+  state it already closed (`linear_used_twice`) now shows the protocol's steps up to that
+  point, with the role's own steps marked `done`, the step it must take next, and the one
+  it tried; a `loop` is drawn as one round and a `choose` as the branch taken, naming the
+  others. Long conversations keep three steps of context each way. `--check-json` carries
+  the diagram as a note.
+- **Refinement errors show the failing case and what it does.** A `refinement_violated`
+  call now prints the solver's values (``for example, when `d` is `0` ``), labels where the
+  failing value came from (the parameter or `let`, and the `if` condition the call sits
+  behind), and words the guard over the call itself: `if d != 0 do safe_div(10, d) else …
+  end`, with every parameter the precondition names read at the call (`i < len(items)`,
+  not `_ < len(xs)`). A literal gets "`0` can never satisfy `b != 0`" instead of a generic
+  note, and a pass-site error no longer prints the internal `(cb_x)`. When every argument
+  is concrete and the callee needs no I/O, the call is run once in the interpreter, step
+  limited, and a failure is reported in one line: ``running `safe_div(10, 0)` panics:
+  division by zero``. A definite `return_refinement_violated` shows the run too (`but
+  bad(-1) returns -1.`). None of this changes which programs are accepted.
+
 - **Hot-reload migrations are checked on every build, with a counterexample.** When an
   obligation in an `<actor>_migrate_state` or `<actor>_migrate_msg` can't be proved, the
   compiler runs the migration on small old values. An input whose result the new actor
@@ -216,6 +245,24 @@ git log is authoritative for exact commits.
   It used to stay hidden until the other error was fixed, then appear as a new error. The error
   corpus's fix check now accepts a program whose fixes clear every error that has one, when the
   errors left are the ones that offer no fix.
+- Diagnostics: three errors now say exactly what to write. `role_grant_exceeded` gives the widened
+  `role R needs ...` line and the body's new parameter list (each granted capability is one more
+  body parameter, so adding to the grant alone left the program rejected). `division_by_zero` on a
+  divisor that is not a parameter (a pattern binder or a `let`) suggests an `if d == 0 do ... else
+  ... end` guard, which the checker accepts, instead of a parameter annotation that cannot apply.
+  A step stranded after a `choose` branch that ends in a `loop` or `stop` (`protocol_invalid`)
+  names the branches it can move into and how a several-step branch is laid out. New
+  `march --explain` pages for `role_grant_exceeded` and `division_by_zero`.
+- A run-time failure in an interpreted program (`march FILE`) is now reported in the
+  compile-error style: what happened, the source line with a caret, then each call that led
+  there as a labelled excerpt, innermost first. It replaces the `panic: ...` line and the
+  numbered stack trace, for panics, `todo`, failed assertions and run-time errors such as
+  division by zero. `MARCH_BACKTRACE=full` still adds the standard library's calls. The exit
+  code is unchanged. Compiled programs still print `panic: ...` alone.
+- An unsupervised actor whose handler fails under the interpreter is now reported: the actor,
+  the message it was handling with its arguments, the failing line, and its state at the time.
+  The interpreter used to drop such a crash without printing anything.
+
 - Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
   of the wrong type names the step and points at its line in the protocol. A body calling another
   role's functions says "`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B`"
@@ -378,6 +425,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- The Error Messages tour shows two more examples: a protocol step stranded after a `choose`
+  branch that loops forever, and a division by a value from a pattern. The role-grant example
+  explains its new help, and the error reference lists `protocol_invalid`,
+  `protocol_same_participants`, `role_grant_exceeded` and `division_by_zero`.
+
 - **The Type System chapter is restructured for first readers** ([Type System](docs/types.md)),
   like Pattern Matching, Interfaces and Capabilities: a plain opener, a which-type-do-I-need
   table, a how-it-fits table, a grouped index, everyday types before the advanced ones, and
@@ -439,6 +491,11 @@ git log is authoritative for exact commits.
   (what `forge test` runs) treated a property that returned `false` as passing. Only a
   property that panicked or failed an `assert` was caught. Under `march test` it already
   failed. A compiled suite with such a property used to pass and now fails.
+- **More function bodies can be used in proofs.** A `match` used as a value (an argument or an
+  operand) is now unfolded. A divisor shown non-zero only by arithmetic, such as
+  `b : {Int | b * b > 0}`, now counts. A step through `if pos(n) do … end`, where `pos` is your
+  own function, is taken when the facts decide `pos(n)`.
+
 - **The interpreter no longer runs another actor's message.** A variant, or another
   actor's message of the same name, sent to an actor ran that actor's handler under
   `march file.march`, while compiled code dropped it. The interpreter now drops it too,

@@ -12,13 +12,13 @@ Use `_` to mark intentionally unused params.
 -- REFINEMENT ------------- errors/unused_binding_1.march
 
 refinement violation: argument `o` of `unwrap` does not satisfy precondition `is_Some(_)` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `None` can never satisfy `is_Some(o)`; pass a value that does
 
 11 |     println(int_to_string(unwrap(None)))
                                ^^^^^^^^^^^^
 
 
-    this argument must satisfy `is_Some(_)`:
+    `o` is `None` here:
 
 11 |     println(int_to_string(unwrap(None)))
                                       ^^^^

@@ -7,6 +7,11 @@ exit: 1
              ^^^^^^^^^^^^^^^
 
     What is left on this channel: send a `String`, then close.
+    The conversation so far, in protocol `Tail`:
+
+      Client -> Server : Int       done
+      choose by Server: ok | err   done
+      Client -> Server : String    <- `Client` must do this next
 
     the channel is `Client`'s end of protocol `Tail`, declared here:
 
@@ -23,6 +28,11 @@ exit: 1
              ^^^^^^^^^^^^^^^
 
     What is left on this channel: send a `String`, then close.
+    The conversation so far, in protocol `Tail`:
+
+      Client -> Server : Int       done
+      choose by Server: ok | err   done
+      Client -> Server : String    <- `Client` must do this next
 
     the channel is `Client`'s end of protocol `Tail`, declared here:
 

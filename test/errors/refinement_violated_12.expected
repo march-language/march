@@ -3,18 +3,19 @@ exit: 1
 
 refinement violation: index must be less than the list's length [refinement_violated]
 argument `n` of `List.nth` does not satisfy precondition `_ < len(xs)`
-note: this value never satisfies it; pass one that does
+note: `7` can never satisfy `n < len(xs)`; pass a value that does
 
 21 |     List.nth([1, 2, 3], 7)
          ^^^^^^^^^^^^^^^^^^^^^^
 
+    running `List.nth([1, 2, 3], 7)` panics: "List.nth: index out of bounds"
     `List.nth_opt` is `List.nth` without the requirement: it returns `Option` instead of panicking.
         match List.nth_opt([1, 2, 3], 7) do
           Some(v) -> …
           None -> …
         end
 
-    this argument must satisfy `_ >= 0 && _ < len(xs)`:
+    `n` is `7` here:
 
 21 |     List.nth([1, 2, 3], 7)
                              ^

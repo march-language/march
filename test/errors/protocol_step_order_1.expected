@@ -7,6 +7,11 @@ Role `Cons` tries to choose `more` or `done` here, but at this point protocol `S
                                                          ^^
 
     Take that step with `Stream_Cons.recv_Msg_Prod_Cons_1` first.
+    The conversation so far, in protocol `Stream`:
+
+      loop do                         (repeats)
+        Prod -> Cons : Int            <- `Cons` must do this next
+        choose by Cons: more | done   <- `Cons` tried this
 
     `Cons` is here: it must receive an `Int` from `Prod`:
 

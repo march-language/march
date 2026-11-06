@@ -1,0 +1,15 @@
+-- MARCH-MODE: why-copies
+-- EXPECT-ERROR: is also passed to `List.append` here
+-- `xs` is also an argument of the enclosing call, which holds it until it
+-- runs, after the map. No fix: nothing to move.
+mod Main do
+  needs IO.Console
+
+  fn twice(xs : List(Int)) : List(Int) do
+    List.append(xs, List.map(xs, fn x -> x * 10))
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(List.length(twice([1, 2, 3]))))
+  end
+end

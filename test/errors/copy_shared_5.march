@@ -1,0 +1,16 @@
+-- MARCH-MODE: why-copies
+-- EXPECT-ERROR: because a closure captured `xs`
+-- The call runs inside a closure that captured `xs`; the closure keeps its own
+-- reference, so `List.map` never holds the only one. No fix.
+mod Main do
+  needs IO.Console
+
+  fn later(xs : List(Int)) : () -> List(Int) do
+    fn () -> List.map(xs, fn x -> x + 1)
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    let f = later([1, 2, 3])
+    println(int_to_string(List.length(f())))
+  end
+end

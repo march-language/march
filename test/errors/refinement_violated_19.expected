@@ -1,0 +1,34 @@
+exit: 1
+-- REFINEMENT ------- errors/refinement_violated_19.march
+
+refinement violation: index must not be negative [refinement_violated]
+argument `n` of `List.nth` does not satisfy precondition `_ >= 0`
+for example, when `i` is `-1`
+note: guard the call (e.g. `if i >= 0 && i < len(items) do List.nth(items, i) else … end`) or pass a value known to satisfy it
+
+7 |     if i < 0 do List.nth(items, i) else 0 end
+                    ^^^^^^^^^^^^^^^^^^
+
+    `List.nth_opt` is `List.nth` without the requirement: it returns `Option` instead of panicking.
+        match List.nth_opt(items, i) do
+          Some(v) -> …
+          None -> …
+        end
+
+    this argument must satisfy `i >= 0`:
+
+7 |     if i < 0 do List.nth(items, i) else 0 end
+                                    ^
+
+    `i` comes from here:
+
+6 |   fn at(items : List(Int), i : Int) : Int do
+                               ^
+
+    the call is reached only when this is true:
+
+7 |     if i < 0 do List.nth(items, i) else 0 end
+           ^^^^^
+    run `march --explain refinement_violated`
+
+

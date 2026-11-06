@@ -62,9 +62,9 @@ affected.sh) runs `test/test_reports/*.march` interpreted and compiled, and both
 `.expected` golden: 13 assertion cases, 3 properties, 2 panics and a plain record.
 `test/stdlib/test_check.march`'s shrink test now looks for `n = 50`.
 
-Docs: docs/error-messages.md has a new section, "10. Test failures", with a failing
+Docs: docs/error-messages.md has a new section, "12. Test failures", with a failing
 `assert ==` and a failing property. Its outputs are generated:
-`<!-- error-tour: <name> run=test -->` makes scripts/gen-error-tour.py run `march test`
+`<!-- error-tour: <name> --test -->` makes scripts/gen-error-tour.py run `march test`
 (MARCH_PROP_SEED=42) and keep the `FAIL:` blocks. scripts/gen-lang-docs.py's marker regex
 accepts the option. The playground only checks programs, so it doesn't list them.
 docs/property-testing.md's failure examples and the march-test skill show the new output.

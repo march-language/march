@@ -10,6 +10,10 @@ page marks each example's place with
     ...
     <!-- /error-tour -->
 
+(or `<!-- error-tour: <name> --why-copies -->` for an example whose output comes from
+that report instead of `--check`, `<!-- error-tour: <name> --run -->` for one that is
+run, showing the run-time failure it prints, or `<!-- error-tour: <name> --test -->` for a
+test module run with `march test` (seed fixed at 42), showing its failing tests' reports)
 and this script rewrites what lies between the two markers: a ```march block with the
 program and a ```text block with what `march --check` prints, so the page shows what
 the compiler says today rather than what someone once pasted. Everything outside the
@@ -18,16 +22,6 @@ markers is hand-written prose and is left alone. That prose includes an
 link to it, and scripts/gen-lang-docs.py reads the `[code]` tags in each example's output
 to list the example on docs/errors/<code>.md. So after this script changes an example's
 output, run scripts/gen-lang-docs.py too (doc-lint Check F fails until you do).
-
-A marker may name another way to run its example, after the name:
-
-    <!-- error-tour: <name> run=test -->
-
-runs `march test` on it (with MARCH_PROP_SEED=42, so a property's report is stable)
-instead of `march --check`, and the ```text block holds the failure reports it prints:
-each `FAIL: "<test>"` line and the report under it, de-indented, without the progress
-dots or the summary line. The program must compile and its tests must fail. Such an
-example is run-time output, so the error playground (which only checks) does not list it.
 
 Each program is checked from its own fresh directory under a private HOME, as
 `<name without its NN- prefix>.march`, so the header line names a file a reader can
@@ -53,7 +47,15 @@ import tempfile
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PAGE = os.path.join(ROOT, "docs", "error-messages.md")
 SRC_DIR = os.path.join(ROOT, "docs", "assets", "error-tour")
-MARKER = re.compile(r"(<!-- error-tour: ([\w-]+)(?: run=(test))? -->\n)(.*?)(<!-- /error-tour -->)", re.S)
+MARKER = re.compile(r"(<!-- error-tour: ([\w-]+)((?: --[\w-]+)*) -->\n)(.*?)(<!-- /error-tour -->)", re.S)
+# Flags an example's marker may name in place of the default `--check`, as in
+# `<!-- error-tour: 35-copy-shared --why-copies -->`: reports that are not part of
+# an ordinary check. The playground only checks, so such an example is not listed in it.
+# `--run` is not a compiler flag: it means run the program (interpreted) and show what
+# it prints on stderr, for the run-time failure reports. `--test` is not one either: it
+# means run the test module with `march test` (MARCH_PROP_SEED=42, so a property's
+# counterexample is fixed) and show its `FAIL:` reports.
+ALLOWED_FLAGS = {"--why-copies", "--run", "--test"}
 
 
 def failure_reports(out):
@@ -77,7 +79,7 @@ def failure_reports(out):
     return "\n\n".join(blocks)
 
 
-def check_output(march_bin, name, home, run=None):
+def check_output(march_bin, name, home, flags=()):
     src = os.path.join(SRC_DIR, name + ".march")
     if not os.path.exists(src):
         sys.exit(f"error: {PAGE} names example `{name}`, but {src} does not exist")
@@ -86,30 +88,35 @@ def check_output(march_bin, name, home, run=None):
     try:
         shutil.copy(src, os.path.join(work, shown))
         env = dict(os.environ, HOME=home)
-        if run == "test":
+        if "--test" in flags:
             env["MARCH_PROP_SEED"] = "42"
-            cmd = [march_bin, "test", shown]
+            proc = subprocess.run([march_bin, "test", shown], cwd=work, env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            proc.stdout = failure_reports(proc.stdout)
         else:
-            cmd = [march_bin, "--check", shown]
-        proc = subprocess.run(cmd, cwd=work, env=env,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            mode = [f for f in flags if f != "--run"] if flags else ["--check"]
+            run = "--run" in flags
+            proc = subprocess.run([march_bin, *mode, shown], cwd=work, env=env,
+                                  stdout=subprocess.DEVNULL if run else subprocess.PIPE,
+                                  stderr=subprocess.PIPE if run else subprocess.STDOUT, text=True)
+            if run:
+                proc.stdout = proc.stderr
     finally:
         shutil.rmtree(work)
     with open(src) as f:
         program = f.read()
-    output = proc.stdout
-    if run == "test":
-        output = failure_reports(output)
-        if not output:
-            sys.exit(f"error: example `{name}` (run=test) printed no failing test:\n{proc.stdout}")
-    return program, output.rstrip() + "\n"
+    return program, proc.stdout.rstrip() + "\n"
 
 
 def render(page, march_bin):
     home = tempfile.mkdtemp(prefix="error-tour-home-")
     try:
         def fill(m):
-            program, output = check_output(march_bin, m.group(2), home, m.group(3))
+            flags = m.group(3).split()
+            bad = [f for f in flags if f not in ALLOWED_FLAGS]
+            if bad:
+                sys.exit(f"error: {PAGE}: example `{m.group(2)}` names unknown flag(s) {bad}")
+            program, output = check_output(march_bin, m.group(2), home, flags)
             return (m.group(1) + "```march\n" + program + "```\n\n"
                     + "```text\n" + output + "```\n" + m.group(5))
         return MARKER.sub(fill, page)

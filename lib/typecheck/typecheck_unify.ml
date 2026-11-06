@@ -232,13 +232,22 @@ let report_protocol_wrong_role env ~span ~provided
     | _ -> [] in
   let module_of call = match String.rindex_opt call '.' with
     | Some i -> String.sub call 0 i | None -> call in
+  let diagram = match here.ps_pos with
+    | Some p ->
+      March_ast.Protocol_states.diagram ~proto:here.ps_proto ~role:here.ps_role
+        ~subject:(Printf.sprintf "`%s`" here.ps_role) ~here:p
+        ?tried:(Option.map (fun q ->
+            (q, Printf.sprintf "`%s` tried this, but it is `%s`'s step" here.ps_role wanted.ps_role))
+            wanted.ps_pos) ()
+    | None -> None in
   Err.report env.errors
     { Err.severity = Error; span; message;
       labels = you_are_here @ binder;
       notes = [ Printf.sprintf "At this point `%s` must %s: take that step with `%s`."
                   here.ps_role here.ps_doing here.ps_call;
                 Printf.sprintf "If this body is meant to play `%s`, give it a `%s` state instead."
-                  wanted.ps_role (module_of wanted.ps_call) ];
+                  wanted.ps_role (module_of wanted.ps_call) ]
+              @ Option.to_list diagram;
       code = Err.Code.protocol_wrong_role; fix = None }
 
 (** A role body taking a step the protocol does not allow at that point,
@@ -268,10 +277,24 @@ let report_protocol_step_order env ~span ~provided
          [ { Err.lbl_span = bsp; lbl_message = Printf.sprintf "`%s` is the state bound here" n } ]
        | _ -> [])
     | _ -> [] in
+  (* The conversation drawn out: the step tried is marked where it sits,
+     after the step due (skipped ahead), or before it (taken again: the
+     loop's next round, or a step on a state already used). *)
+  let diagram = match here.ps_pos with
+    | Some p ->
+      let tried = Option.map (fun q ->
+          let again = March_ast.Protocol_states.pos_before q p in
+          (q, if wanted.ps_doing = "close the conversation"
+              then Printf.sprintf "`%s` tried to close here" here.ps_role
+              else Printf.sprintf "`%s` tried this%s" here.ps_role (if again then " again" else "")))
+          wanted.ps_pos in
+      March_ast.Protocol_states.diagram ~proto:here.ps_proto ~role:here.ps_role
+        ~subject:(Printf.sprintf "`%s`" here.ps_role) ~here:p ?tried ()
+    | None -> None in
   Err.report env.errors
     { Err.severity = Error; span; message;
       labels = you_are_here @ binder;
-      notes = [ Printf.sprintf "Take that step with `%s` first." here.ps_call ];
+      notes = Printf.sprintf "Take that step with `%s` first." here.ps_call :: Option.to_list diagram;
       code = Err.Code.protocol_step_order; fix = None }
 
 (* A capability for another capability: its own message (§F1). *)

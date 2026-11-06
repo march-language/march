@@ -1,6 +1,9 @@
-extern rt:ffi_apply1 — interpreter FFI cannot marshal the argument or return types of this binding (closures/upcalls not yet supported). Run with --compile.
+-- RUNTIME ---------- test/native/ffi_interp_upcall.march
 
-Stack trace (most recent call first):
-  [0] apply1()                 test/native/ffi_interp_upcall.march:16
+The program stopped with a run-time error: extern rt:ffi_apply1 — interpreter FFI cannot marshal the argument or return types of this binding (closures/upcalls not yet supported). Run with --compile. [runtime_error]
 
-note: set MARCH_BACKTRACE=full for all frames including stdlib
+17 |     println(int_to_string(apply1(fn n -> n * 2, 21)))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+

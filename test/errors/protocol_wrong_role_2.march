@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: … 3 earlier steps
+-- REJECT (sequence diagram): a body for role `B` calls role `C`'s step late in a long protocol;
+-- the diagram keeps three steps of context and elides the rest.
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Chain do
+    s1: A -> B : Int
+    s2: B -> C : Int
+    s3: C -> A : Int
+    s4: A -> B : Int
+    s5: B -> C : Int
+    s6: C -> A : Int
+    s7: B -> C : Bool
+    s8: C -> B : Bool
+  end
+  pfn role_b(s : Cap(Session.Live), st : Chain_B.Entry) : Chain_B.Yield do
+    Chain_B.recv_S1(s, st, fn (n, st1) ->
+      let st2 = Chain_B.send_S2(s, st1, n)
+      Chain_B.recv_S4(s, st2, fn (m, st3) ->
+        let st4 = Chain_B.send_S5(s, st3, m)
+        let st5 = Chain_C.send_S8(s, st4, true)
+        Chain_B.close(s, st5)))
+  end
+  fn main(c : Cap(IO)) do () end
+end
