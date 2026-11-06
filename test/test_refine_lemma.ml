@@ -1422,3 +1422,25 @@ let div_solver =
             "mod DS do\n  fn sq(a : Int, b : {Int | b * b >= 0}) : Int do a / b end\n  @[lemma]\n  fn sq6(u : Int) : {Unit | sq(6, 2) == 3} do () end\nend\n"
         in
         if not (unproved out "sq6" || refuted out "sq6") then Alcotest.failf "b may be zero:\n%s" out) ]
+
+(* A guard that calls a reflected function is unfolded so the call it
+   guards can be decided. *)
+let guard_call_src =
+  {|mod GC do
+  fn pos(n : Int) : Bool do n > 0 end
+  fn sgn(n : Int) : Int do if pos(n) do 1 else 0 end end
+  fn wrap(n : Int) : Int do sgn(n) + 1 end
+|}
+
+let guard_call =
+  [ gated "guard_call: a guard's own call is unfolded to decide it" (fun () ->
+        let out =
+          run
+            (guard_call_src
+           ^ "  @[lemma]\n  fn w3(u : Int) : {Unit | wrap(3) == 2} do () end\n  @[lemma]\n  fn wv(x : {Int | _ > 0}) : {Unit | wrap(x) == 2} do () end\nend\n")
+        in
+        expect_admitted out "w3";
+        expect_admitted out "wv");
+    gated "guard_call_red: an undecided guard stays undecided" (fun () ->
+        let out = run (guard_call_src ^ "  @[lemma]\n  fn wn(x : Int) : {Unit | wrap(x) == 2} do () end\nend\n") in
+        if not (unproved out "wn" || refuted out "wn") then Alcotest.failf "wrap(0) is 1:\n%s" out) ]

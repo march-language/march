@@ -1460,6 +1460,9 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
   in
   let st = facts_of assumptions in
   let count = ref 0 in
+  (* Guard calls queued so far ([rounds]): bounded by [budget] as unfoldings
+     are, since a chain of guards need never unfold anything. *)
+  let asked = ref 0 in
   let lits = ref [] and facts = ref [] in
   (* Unfold [f(args)] with [cases] (all of them at depth 0, the decided arm
      deeper); returns the reflected calls its equations mention. *)
@@ -1518,6 +1521,9 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
       let out_next = ref [] in
       let rec rounds (todo : (string * Smt.term list) list) =
         let progressed = ref false in
+        (* The reflected calls inside an undecided call's guards: unfolded at
+           this level too, since what they learn may decide it. *)
+        let guard_calls = ref [] in
         let left =
           List.filter
             (fun ((f, args) as k) ->
@@ -1528,7 +1534,19 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
                 let env = List.mapi (fun i a -> (param_const i, a)) args in
                 let inst = List.map (fun (conds, res) -> (List.map (subst env) conds, subst env res)) tp.t_cases in
                 match decided_arm st inst with
-                | None -> true
+                | None ->
+                  List.iter
+                    (fun (conds, _) ->
+                      List.iter
+                        (fun g ->
+                          if !asked < budget && not (List.mem g !seen || List.mem g todo || List.mem g !guard_calls)
+                          then begin
+                            incr asked;
+                            guard_calls := g :: !guard_calls
+                          end)
+                        (List.rev (List.fold_left reflected_apps [] conds)))
+                    inst;
+                  true
                 | Some (conds, res) ->
                   progressed := true;
                   seen := k :: !seen;
@@ -1542,7 +1560,9 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
                   false)
             todo
         in
-        if !progressed && left <> [] then rounds left else left
+        if !guard_calls <> [] then rounds (left @ List.rev !guard_calls)
+        else if !progressed && left <> [] then rounds left
+        else left
       in
       let left = rounds pending in
       (* What stays is over fuel, over budget, or undecided (§3.9). *)
