@@ -44,9 +44,13 @@ let run_in ?(env = "") ~dir args file =
   Sys.remove out;
   s
 
-(* Check [src] in a fresh directory: stdout and stderr together. *)
+(* Check [src] in a fresh directory: stdout and stderr together.  The
+   directory's verdict cache starts with the stdlib's own verdicts
+   ([Test_helpers.seed_vc_cache]) and nothing else, so this program's
+   obligations are still solved cold. *)
 let run ?(env = "") ?(args = "--check --refine-report-sites=all") src =
   let dir = Filename.temp_dir "unfold" "" in
+  Test_helpers.seed_vc_cache dir;
   Fun.protect ~finally:(fun () -> try remove_tree dir with _ -> ()) (fun () ->
       let f = Filename.concat dir "m.march" in
       Out_channel.with_open_bin f (fun oc -> output_string oc src);
@@ -56,6 +60,7 @@ let run ?(env = "") ?(args = "--check --refine-report-sites=all") src =
    directory passed as MARCH_LIB_PATH. *)
 let run_lib ?(env = "") ?(args = "--check --refine-report-sites=all") ~(lib : (string * string) list) src =
   let dir = Filename.temp_dir "unfold_lib" "" in
+  Test_helpers.seed_vc_cache dir;
   Fun.protect ~finally:(fun () -> try remove_tree dir with _ -> ()) (fun () ->
       let ld = Filename.concat dir "lib" in
       Unix.mkdir ld 0o755;

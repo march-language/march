@@ -62,20 +62,26 @@ let lookup ~root key : Solver.result option =
   if Sys.file_exists p then result_of_string (In_channel.with_open_bin p In_channel.input_all)
   else None
 
-let store ~root key (r : Solver.result) : unit =
-  if r <> Solver.Rejected then
-  let p = path_for ~root key in
+(* Write to a private temp file, then rename over [p]: two processes sharing a
+   project (two compiles, parallel test processes) can store the same key
+   while a third reads it, and an in-place write let that reader see a torn
+   `sat` model, parsed as a counterexample missing some of its bindings. *)
+let tmp_counter = Atomic.make 0
+
+let write_atomic (p : string) (contents : string) : unit =
   mkdir_p (Filename.dirname p);
-  Out_channel.with_open_bin p (fun oc ->
-      Out_channel.output_string oc (string_of_result r))
+  let tmp = Printf.sprintf "%s.%d.%d.tmp" p (Unix.getpid ()) (Atomic.fetch_and_add tmp_counter 1) in
+  Out_channel.with_open_bin tmp (fun oc -> Out_channel.output_string oc contents);
+  Sys.rename tmp p
+
+let store ~root key (r : Solver.result) : unit =
+  if r <> Solver.Rejected then write_atomic (path_for ~root key) (string_of_result r)
 
 (* Reflection stage 2 (I8): the unsat core of a proof, beside its verdict, so
    a warm-cache proof names the same definitions in `uses:` as a cold one.
    One literal per line. *)
 let store_core ~root key (core : string list) : unit =
-  let p = path_for ~root key ^ ".core" in
-  mkdir_p (Filename.dirname p);
-  Out_channel.with_open_bin p (fun oc -> Out_channel.output_string oc (String.concat "\n" core))
+  write_atomic (path_for ~root key ^ ".core") (String.concat "\n" core)
 
 let lookup_core ~root key : string list option =
   let p = path_for ~root key ^ ".core" in
