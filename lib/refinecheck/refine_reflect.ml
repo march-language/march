@@ -1727,6 +1727,12 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
   | A.EBlock (_ :: _, _) | A.EMatch _ -> (
     match tr_case c env e with
     | [ ([], t) ] -> t
+    (* Several cases in value position (an argument, an operand): an
+       if-then-else chain.  Each case's guards already exclude the cases
+       before it, and the cases cover (R5), so the last needs no test. *)
+    | (_ :: _ :: _) as cases when List.length cases <= max_let_cases ->
+      let rev = List.rev cases in
+      List.fold_left (fun acc (g, r) -> Smt.Ite (conj g, r, acc)) (snd (List.hd rev)) (List.tl rev)
     | _ -> raise Decline)
   | A.EIf (cnd, a, b, _) -> Smt.Ite (v cnd, v a, v b)
   | A.ECon (ctor, args, sp) when RE.is_source_ctor ctor.A.txt ->

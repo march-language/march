@@ -1372,3 +1372,37 @@ let metric_cert =
         in
         let out = run spin in
         if not (unproved out "s1" || refuted out "s1") then Alcotest.failf "spin has no proved metric (n may be negative):\n%s" out) ]
+
+(* A `match` in value position (an argument, an operand) unfolds as an
+   if-then-else chain over its cases. *)
+let match_value_src =
+  {|mod MV do
+  type Lq = Ez | Cz(Int, Lq)
+  fn plus1(n : Int) : Int do n + 1 end
+  fn sz(l : Lq) : Int do
+    plus1(match l do
+      Ez -> 0
+      Cz(x, _) -> x
+    end)
+  end
+  fn tw(l : Lq) : Int do
+    2 * (match l do
+      Ez -> 1
+      Cz(_, Ez) -> 2
+      Cz(_, _) -> 3
+    end)
+  end
+|}
+
+let match_value =
+  [ gated "match_value: a `match` as an argument or operand unfolds" (fun () ->
+        let out =
+          run
+            (match_value_src
+           ^ "  @[lemma]\n  fn sz5(u : Int) : {Unit | sz(Cz(5, Ez)) == 6 && sz(Ez) == 1} do () end\n  @[lemma]\n  fn tw3(u : Int) : {Unit | tw(Ez) == 2 && tw(Cz(0, Ez)) == 4 && tw(Cz(0, Cz(1, Ez))) == 6} do () end\nend\n")
+        in
+        expect_admitted out "sz5";
+        expect_admitted out "tw3");
+    gated "match_value_red: a false theorem about it is not proved" (fun () ->
+        let out = run (match_value_src ^ "  @[lemma]\n  fn tw_bad(u : Int) : {Unit | tw(Cz(0, Ez)) == 6} do () end\nend\n") in
+        if not (unproved out "tw_bad" || refuted out "tw_bad") then Alcotest.failf "tw_bad is false:\n%s" out) ]
