@@ -10,3 +10,25 @@ Use `Math.checked_div` or `Math.checked_mod` to return `Option(Int)` instead of 
 
 
 
+-- CAPABILITY ----------- errors/division_by_zero_1.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+39 |   fn main() do
+       ^^^^^^^^^^^^
+
+    run `march --explain cap_grant`
+
+
+
+fix [cap_grant]:
+@@ lines 39-39 @@
+-  fn main() do
++  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+division by `n` in `cap no_panic` module may be by zero — no refinement proves `n ≠ 0`. [division_by_zero]
