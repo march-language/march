@@ -102,6 +102,10 @@ let rec sorted_for (k : PI.kind) (e : A.expr) : bool =
     && (not ((k = PI.KList || k = PI.KString) && (on_hole a || on_hole b)))
     && sorted_for k a && sorted_for k b
   | A.EApp (_, xs, _) -> List.for_all (sorted_for k) xs
+  (* A field of the value itself (`_.step`, from `Range.new`'s
+     `{v : IntRange | v.step != 0}`) exists only on a record: an Int, Float,
+     String or List slot has no fields to project. *)
+  | A.EField (x, _, _) when on_hole x -> k = PI.KOther
   | _ -> true
 
 let admissible_text (s : IS.slot) (c : PI.candidate) : bool =

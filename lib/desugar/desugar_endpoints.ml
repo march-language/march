@@ -1907,9 +1907,14 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
       (Cap(Session.Live), Cap(IO.X), Cap(IO.Y), <P>_R.Entry) -> <P>_R.Yield
 
     one `Cap(P)` per path in declaration order, after the session and before
-    the entry state, and every front narrows them from the `Cap(IO)` it holds
-    (`cap_narrow(io)`, which the checker accepts because `IO` subsumes every
-    node) and passes them.  The hosted fronts thread them through `start`
+    the entry state.  The DIRECT fronts (`run_`, `host_`) narrow them from the
+    `Cap(IO)` they hold (`cap_narrow(io)`, which the checker accepts because
+    `IO` subsumes every node) and pass them.  The CLUSTER fronts (`cluster_`,
+    `offer_`, `offer_work_`, `initiate_` and their hosted forms) hold no root
+    capability -- the node attaches the session, `ClusterNode.with_session`
+    -- so they take the grant as parameters after the node, one per path,
+    and pass those on: a caller plays the role with exactly the capabilities
+    it was itself given.  The hosted fronts thread them through `start`
     the same way, since that is the callback the actor's session code begins
     from.  So the grant is visible in the signature, a body with the wrong
     parameter list is a type error at the runner, and a test can pass any
@@ -1931,16 +1936,25 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
       (t_cap_session :: t_caps role @ [ tycon (rm ^ "." ^ entry) [] ])
       (tycon (rm ^ ".Yield") [])
   in
+  (* Where a front gets the role's grant.  A DIRECT front (`run_`, `host_`)
+     holds `Cap(IO)` and narrows it.  A CLUSTER front holds no root
+     capability, so the grant is its caller's to hand over: one parameter per
+     path ([grant_params], named after the path: `IO.FileWrite` is
+     `io_filewrite`), passed on as given ([granted]). *)
   let narrowed role = List.map (fun _ -> app "cap_narrow" [ var "io" ]) (caps_of role) in
-  (* The body's call from a front: the session, the narrowed grant, the entry
-     state. *)
-  let call_body role =
+  let grant_name p = String.map (fun c -> if c = '.' then '_' else Char.lowercase_ascii c) p in
+  let grant_params role = List.map (fun p -> (grant_name p, tycon "Cap" [ tycon p [] ])) (caps_of role) in
+  let granted role = List.map (fun p -> var (grant_name p)) (caps_of role) in
+  (* The body's call from a front: the session, the grant, the entry state. *)
+  let call_body_with caps role =
     let rm = proto ^ "_" ^ role in
     lam [ "s" ]
       (block
-         [ let_wild (app "body" ((var "s" :: narrowed role) @ [ app (rm ^ ".register") [ var "s"; lit_int 0 ] ]));
+         [ let_wild (app "body" ((var "s" :: caps) @ [ app (rm ^ ".register") [ var "s"; lit_int 0 ] ]));
            unit ])
   in
+  let call_body role = call_body_with (narrowed role) role in
+  let call_body_given role = call_body_with (granted role) role in
   (* A running cluster node is `Cap(ClusterNode.Live)` (D35). *)
   let t_cluster = tycon "Cap" [ tycon "ClusterNode.Live" [] ] in
   let runners =
@@ -1957,7 +1971,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
                 call_body role ]))
       roles
   in
-  (* `cluster_<Role>(io, node, session, body)`: the same role over a running
+  (* `cluster_<Role>(node, caps..., session, body)`: the same role over a running
      cluster node (`ClusterNode.start`) instead of connections of its own --
      `SessionNode.run_cluster`: peers found by name under the session id,
      frames over the node's shared connections, SWIM as the failure
@@ -1968,19 +1982,19 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     List.map
       (fun (role, entry) ->
          fn ("cluster_" ^ role)
-           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
-             ("session", t_string); ("body", t_body role entry) ]
+           ((("node", t_cluster) :: grant_params role)
+            @ [ ("session", t_string); ("body", t_body role entry) ])
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster"
-              [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) [];
+              [ var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) [];
                 var "session"; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
-                lam [ "_ep" ] unit; call_body role ]))
+                lam [ "_ep" ] unit; call_body_given role ]))
       roles
   in
-  (* `offer_<Role>(io, node, capacity, body)`: an ACCESS POINT -- this node
+  (* `offer_<Role>(node, caps..., capacity, body)`: an ACCESS POINT -- this node
      plays [Role] in up to [capacity] sessions at once, each formed when an
      initiator invites it, each run by [body] in its own task.  And
-     `initiate_<Role>(io, node, body)`: start one session in [Role], filling
+     `initiate_<Role>(node, caps..., body)`: start one session in [Role], filling
      every other role from the access points that offer it.  Both are
      `SessionNode.offer_role` / `initiate`; the front supplies the protocol's name,
      fingerprint and role-name table (what node certificates name roles by,
@@ -1990,14 +2004,14 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     List.map
       (fun (role, entry) ->
          fn ("offer_" ^ role)
-           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
-             ("capacity", t_int); ("body", t_body role entry) ]
+           ((("node", t_cluster) :: grant_params role)
+            @ [ ("capacity", t_int); ("body", t_body role entry) ])
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_role"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+              [ var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
                 app (msg ^ ".role_names") []; app (msg ^ ".compat_by_role") [];
                 app (msg ^ ".role_" ^ role) [];
-                app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; call_body role ]))
+                app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; call_body_given role ]))
       roles
   in
   (* Topology alone opts into fresh work. The saved offer callback enters a
@@ -2007,22 +2021,22 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     List.concat_map (fun (role, entry) ->
         let start_name = "__offer_work_start_" ^ role in
         let start = fn start_name
-            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
-              ("session", t_string); ("abandoned", TyArrow (t_int, tycon "Bool" []));
-              ("body", t_body role entry) ]
+            ((("node", t_cluster) :: grant_params role)
+             @ [ ("session", t_string); ("abandoned", TyArrow (t_int, tycon "Bool" []));
+                 ("body", t_body role entry) ])
             (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
             (app "SessionNode.start_offered_role"
-               [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_names") [];
+               [ var "node"; lit_str proto; app (msg ^ ".role_names") [];
                  app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) [];
-                 var "session"; var "abandoned"; lam [ "_ep" ] unit; call_body role ]) in
+                 var "session"; var "abandoned"; lam [ "_ep" ] unit; call_body_given role ]) in
         let start = match start with
           | DFn (f, span) ->
             DFn ({ f with fn_name = { f.fn_name with
               span = { f.fn_name.span with file = "<work-entry>" } } }, span)
           | _ -> assert false in
         let offer = fn ("offer_work_" ^ role)
-            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
-              ("capacity", t_int); ("body", t_body role entry) ]
+            ((("node", t_cluster) :: grant_params role)
+             @ [ ("capacity", t_int); ("body", t_body role entry) ])
             (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
             (app "SessionNode.offer_work_role"
                [ var "node"; lit_str proto;
@@ -2030,21 +2044,21 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
                  app (msg ^ ".role_names") []; app (msg ^ ".compat_by_role") [];
                  app (msg ^ ".role_" ^ role) []; var "capacity";
                  lam [ "session"; "abandoned" ]
-                   (app start_name [ var "io"; var "node"; var "session";
-                                     var "abandoned"; var "body" ]) ]) in
+                   (app start_name ((var "node" :: granted role)
+                                    @ [ var "session"; var "abandoned"; var "body" ])) ]) in
         [ start; offer ]) roles
   in
   let initiators =
     List.map
       (fun (role, entry) ->
          fn ("initiate_" ^ role)
-           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("body", t_body role entry) ]
+           ((("node", t_cluster) :: grant_params role) @ [ ("body", t_body role entry) ])
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.initiate"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+              [ var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
                 app (msg ^ ".role_names") []; app (msg ^ ".compat_by_role") [];
                 app (msg ^ ".role_" ^ role) [];
-                app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit; call_body role ]))
+                app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit; call_body_given role ]))
       roles
   in
   (* `host_<Role>(io, node_id, secret, addrs, host, start, deliver)`: the
@@ -2098,8 +2112,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
                 app "pid_to_int" [ var "host" ]; start_of role; var "deliver"; var "cancel" ]))
       roles
   in
-  (* `offer_hosted_<Role>(io, node, capacity, host, start, deliver, cancel)`
-     and `cluster_hosted_<Role>(io, node, session, host, start, deliver,
+  (* `offer_hosted_<Role>(node, caps..., capacity, host, start, deliver, cancel)`
+     and `cluster_hosted_<Role>(node, caps..., session, host, start, deliver,
      cancel)`: the access point and the one-session cluster runner with the
      role hosted in the actor [host], as `host_<Role>_or` hosts it over the
      runner's own connections.  A hosted offer runs many sessions in ONE
@@ -2112,7 +2126,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     TyArrow (t_string, List.fold_right (fun t acc -> TyArrow (t, acc)) (t_cap_session :: t_caps role) t_unit)
   in
   let start_sid_of role =
-    if caps_of role = [] then var "start" else lam [ "sid"; "s" ] (app "start" (var "sid" :: var "s" :: narrowed role))
+    if caps_of role = [] then var "start" else lam [ "sid"; "s" ] (app "start" (var "sid" :: var "s" :: granted role))
   in
   let t_deliver_sid =
     TyArrow (t_string, TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_bytes, TyArrow (t_int, t_unit)))))
@@ -2127,11 +2141,11 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     List.map
       (fun (role, _entry) ->
          fn ("offer_hosted_" ^ role)
-           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("capacity", t_int) ]
+           ((("node", t_cluster) :: grant_params role) @ [ ("capacity", t_int) ]
             @ hosted_callbacks role)
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_hosted"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+              [ var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
                 app (msg ^ ".role_names") []; app (msg ^ ".compat_by_role") [];
                 app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
@@ -2144,12 +2158,12 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
         let callback_params =
           [ ("start", t_start_sid role); ("deliver", t_deliver_sid); ("cancel", t_cancel_sid) ] in
         let start = fn start_name
-            ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
-               ("session", t_string); ("abandoned", TyArrow (t_int, tycon "Bool" []));
-               ("host", t_int) ] @ callback_params)
+            ((("node", t_cluster) :: grant_params role)
+             @ [ ("session", t_string); ("abandoned", TyArrow (t_int, tycon "Bool" []));
+                 ("host", t_int) ] @ callback_params)
             (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
             (app "SessionNode.start_offered_hosted"
-               [ var "io"; var "node"; lit_str proto;
+               [ var "node"; lit_str proto;
                  app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
                  app (msg ^ ".role_names") []; app (msg ^ ".role_" ^ role) [];
                  app (msg ^ ".peers_" ^ role) []; var "session"; var "abandoned";
@@ -2161,7 +2175,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
               span = { f.fn_name.span with file = "<work-entry>" } } }, span)
           | _ -> assert false in
         let offer = fn ("offer_work_hosted_" ^ role)
-            ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("capacity", t_int) ]
+            ((("node", t_cluster) :: grant_params role) @ [ ("capacity", t_int) ]
              @ hosted_callbacks role)
             (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
             (app "SessionNode.offer_work_role"
@@ -2170,23 +2184,24 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
                  app (msg ^ ".role_names") []; app (msg ^ ".compat_by_role") [];
                  app (msg ^ ".role_" ^ role) []; var "capacity";
                  lam [ "session"; "abandoned" ]
-                   (app start_name [ var "io"; var "node"; var "session"; var "abandoned";
-                                     app "pid_to_int" [ var "host" ]; var "start";
-                                     var "deliver"; var "cancel" ]) ]) in
+                   (app start_name ((var "node" :: granted role)
+                                    @ [ var "session"; var "abandoned";
+                                        app "pid_to_int" [ var "host" ]; var "start";
+                                        var "deliver"; var "cancel" ])) ]) in
         [ start; offer ]) roles
   in
   let clusters_hosted =
     List.map
       (fun (role, _entry) ->
          fn ("cluster_hosted_" ^ role)
-           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("session", t_string) ]
+           ((("node", t_cluster) :: grant_params role) @ [ ("session", t_string) ]
             @ hosted_callbacks role)
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster_hosted"
-              [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "session";
+              [ var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "session";
                 app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
                 lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
-                lam [ "s" ] (app "start" (var "session" :: var "s" :: narrowed role));
+                lam [ "s" ] (app "start" (var "session" :: var "s" :: granted role));
                 lam [ "s"; "from"; "m"; "ep" ] (app "deliver" [ var "session"; var "s"; var "from"; var "m"; var "ep" ]);
                 lam [ "s"; "role"; "cause"; "ep" ] (app "cancel" [ var "session"; var "s"; var "role"; var "cause"; var "ep" ]) ]))
       roles

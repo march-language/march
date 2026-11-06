@@ -262,6 +262,16 @@ A zero-argument operation takes `()`: `members: fn _ -> ...`. This is how member
 reactions are tested with no sockets: `test/session/cluster_placement.march` injects
 `NodeDead` into a placement that moves roles off dead nodes.
 
+**What a node may do with the root capability.** `start` and `attach` both take `Cap(IO)`,
+and the node keeps one power from it: `ClusterNode.with_session(node, ops, body)` runs
+`body` with the `Cap(Session.Live)` that `Session.attach(io, ops)` would give. The session
+runners use it, which is why the generated `<P>_Run` entry points over a cluster node take
+the node and not `Cap(IO)` (see [Choreography]({{ site.baseurl }}/docs/choreography/#running-a-role-every-entry-point)).
+The capability is handed to `body` and never returned: only `Session` may return a
+`Cap(Session.Live)`, and the node's dictionary holds a closure over `Session.attach`, which
+`attach` sets itself, over whatever the dictionary passed in holds, so a test dictionary
+cannot substitute its own.
+
 ---
 
 ## Overview

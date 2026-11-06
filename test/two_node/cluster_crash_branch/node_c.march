@@ -46,7 +46,7 @@ mod ClusterCrashBranchC do
     end
     joined(h)
     println("node-c: up")
-    match Logging_Run.cluster_C(c, h, "logging-1", fn (s, st) -> role_c(s, st)) do
+    match Logging_Run.cluster_C(h, "logging-1", fn (s, st) -> role_c(s, st)) do
       Ok(_) -> println("C: closed")
       Err(e) -> println("C: " ++ SessionNode.run_error_message(e))
     end

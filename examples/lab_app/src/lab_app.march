@@ -12,7 +12,6 @@
 -- session ends). The `ingress` hook counts every session's outcome and writes
 -- the counters to a stats file the lab reads.
 mod LabApp do
-  needs IO
   needs IO.Console
   needs IO.Mut
   needs IO.Clock
@@ -67,7 +66,7 @@ mod LabApp do
   -- ── the work pool: Stock (every node) and Ledger (one "books" node) ──
 
   mod Work do
-    needs IO
+    needs IO.Process
     needs IO.Console
     needs IO.Mut
     needs Session.Live
@@ -75,7 +74,7 @@ mod LabApp do
 
     type Env = { node : String }
 
-    fn start(io : Cap(IO), _node : Cap(ClusterNode.Live)) : Env do
+    fn start(_node : Cap(ClusterNode.Live)) : Env do
       Probe.start(Env.get("HOME", "/tmp"))
       { node: Env.get("MARCH_NODE_NAME", "work") }
     end
@@ -159,7 +158,7 @@ mod LabApp do
   -- ── the ingress pool: initiates Shop sessions and counts them ─────────
 
   mod Ingress do
-    needs IO
+    needs IO.Process
     needs IO.Mut
     needs IO.Clock
     needs IO.Spawn
@@ -174,12 +173,12 @@ mod LabApp do
     -- in a task the Driver actor spawns, so a session started after a hot
     -- deploy runs the new code (a task inherits its spawner's epoch, and the
     -- actor moves to the new epoch at its next message).
-    fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
+    fn start(node : Cap(ClusterNode.Live)) : Env do
       let home = Env.get("HOME", "/tmp")
       let stats = home ++ "/lab-stats"
       Probe.start(home)
       let d = start_driver()
-      let _ = task_spawn(fn _ -> drive(d, io, node, home ++ "/lab-traffic"))
+      let _ = task_spawn(fn _ -> drive(d, node, home ++ "/lab-traffic"))
       let _ = task_spawn(fn _ -> report(stats))
       { stats: stats }
     end
@@ -250,9 +249,9 @@ mod LabApp do
     -- One session, its outcome counted: finished, drained (a hot deploy
     -- ended it at a loop boundary), refused (no offer would take a role), or
     -- failed (anything else: a lost session).
-    fn session(io : Cap(IO), node : Cap(ClusterNode.Live)) : () do
+    fn session(node : Cap(ClusterNode.Live)) : () do
       count("started")
-      match Order_Run.initiate_Shop(io, node, fn (s, st) -> shop(s, st, 1)) do
+      match Order_Run.initiate_Shop(node, fn (s, st) -> shop(s, st, 1)) do
         Ok(Session.Finished) -> count("finished")
         Ok(Session.Drained(_)) -> count("drained")
         Err(SessionNode.NoOffer(_, why)) ->
@@ -269,9 +268,9 @@ mod LabApp do
     actor Driver do
       state { started : Int }
       init  { started: 0 }
-      on Go(io : Cap(IO), node : Cap(ClusterNode.Live)) do
+      on Go(node : Cap(ClusterNode.Live)) do
         let _ = task_spawn(fn _ -> do
-          session(io, node)
+          session(node)
           0
         end)
         { started: state.started + 1 }
@@ -280,8 +279,8 @@ mod LabApp do
 
     fn start_driver() : Pid(DriverState) do spawn(Driver) end
 
-    fn go(d : Pid(DriverState), io : Cap(IO), node : Cap(ClusterNode.Live)) : () do
-      let _ = send(d, Go(io, node))
+    fn go(d : Pid(DriverState), node : Cap(ClusterNode.Live)) : () do
+      let _ = send(d, Go(node))
       ()
     end
 
@@ -314,16 +313,16 @@ mod LabApp do
         - Vault.get_or(t, "refused", 0) - Vault.get_or(t, "failed", 0)
     end
 
-    pfn drive(d : Pid(DriverState), io : Cap(IO), node : Cap(ClusterNode.Live), path : String) : Int do
+    pfn drive(d : Pid(DriverState), node : Cap(ClusterNode.Live), path : String) : Int do
       match traffic(path) do
         (every, limit) ->
           if every <= 0 do sleep_ms(500)
           else
-            if in_flight() < limit do go(d, io, node) else count("skipped") end
+            if in_flight() < limit do go(d, node) else count("skipped") end
             sleep_ms(every)
           end
       end
-      drive(d, io, node, path)
+      drive(d, node, path)
     end
 
     -- The stats file, rewritten every second: `key value` lines, the

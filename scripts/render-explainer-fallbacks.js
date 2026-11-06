@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// render-explainer-fallbacks.js: the static image behind each figure of
-// docs/protocol-to-cluster.md, for a reader without JavaScript or a figure that failed.
+// render-explainer-fallbacks.js: the static image behind each figure of the scrolling
+// explainers (docs/protocol-to-cluster.md, docs/deploy-authority.md), for a reader
+// without JavaScript or a figure that failed.
 //
 //     node scripts/render-explainer-fallbacks.js            write docs/assets/explainer/fallback/*.svg
 //     node scripts/render-explainer-fallbacks.js --check    exit 1 if a fresh render would differ
@@ -17,7 +18,8 @@ const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
 const ASSETS = path.join(ROOT, 'docs/assets/explainer');
-for (const f of ['scroll', 'story', 'rng', 'figures', 'sim-cluster', 'sim-mailbox', 'sim-release', 'draw', 'chapters']) {
+for (const f of ['scroll', 'story', 'rng', 'figures', 'figures-authority', 'sim-cluster', 'sim-mailbox', 'sim-release',
+  'sim-topology', 'draw', 'draw-authority', 'chapters', 'chapters-authority']) {
   require(path.join(ASSETS, f + '.js'));
 }
 const ME = globalThis.MarchExplainer;
@@ -44,17 +46,24 @@ const STYLE = [
   `.mx-off{fill:${PALETTE.dim}}`, `.mx-hl{fill:${PALETTE.ink}}`, `.mx-hlbar{fill:${PALETTE.accent}}`,
 ].join('');
 
+// The module squares of docs/deploy-authority.md (figures-authority.js).
+const SQUARES = [
+  `.mx-sq{fill:${PALETTE.dim};stroke:none}`, `.mx-quiet{fill:none;stroke:${PALETTE.dim};stroke-width:1}`,
+  `.mx-inside{fill:${PALETTE.dim}}`, `.mx-outside{fill:${PALETTE.ink}}`,
+  `.mx-own{stroke:${PALETTE.accent};stroke-width:2}`, `.mx-hot{fill:${PALETTE.accent};stroke:${PALETTE.accent};stroke-width:2}`,
+].join('');
+
 const r = (n) => Math.round(n * 10) / 10;
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 // Put a builder's <svg> on a padded dark panel with its own stylesheet.
-function panel(svg, pad) {
+function panel(svg, pad, moreStyle) {
   const w = Number(svg.match(/ width="([\d.]+)"/)[1]), h = Number(svg.match(/ height="([\d.]+)"/)[1]);
   const inner = svg.replace(/^<svg[^>]*>/, '').replace(/<\/svg>$/, '');
   const label = (svg.match(/aria-label="([^"]*)"/) || [, ''])[1];
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${r(w + 2 * pad)}" height="${r(h + 2 * pad)}" ` +
     `viewBox="0 0 ${r(w + 2 * pad)} ${r(h + 2 * pad)}" role="img" aria-label="${label}">` +
-    `<style>${STYLE}</style><rect width="100%" height="100%" fill="${PALETTE.paper}"/>` +
+    `<style>${STYLE}${moreStyle || ''}</style><rect width="100%" height="100%" fill="${PALETTE.paper}"/>` +
     `<g transform="translate(${pad} ${pad})">${inner}</g></svg>\n`;
 }
 
@@ -83,7 +92,8 @@ function svgContext(width, height) {
     arc(x, y, rad) { arc = [x, y, rad]; },
     fill() { if (arc) out.push(`<circle cx="${r(arc[0])}" cy="${r(arc[1])}" r="${r(arc[2])}" fill="${ctx.fillStyle}"${extra()}/>`); },
     stroke() {
-      if (pathD) out.push(`<path d="${pathD}" fill="none" stroke="${ctx.strokeStyle}" stroke-width="${ctx.lineWidth}"${extra()}/>`);
+      if (pathD) out.push(`<path d="${pathD}" fill="none" stroke="${ctx.strokeStyle}" stroke-width="${ctx.lineWidth}"` +
+        `${dash ? ` stroke-dasharray="${dash}"` : ''}${extra()}/>`);
     },
     fillRect(x, y, w, h) { out.push(`<rect x="${r(x)}" y="${r(y)}" width="${r(w)}" height="${r(h)}" fill="${ctx.fillStyle}"${extra()}/>`); },
     strokeRect(x, y, w, h) {
@@ -133,13 +143,36 @@ function renderAll(data) {
   };
 }
 
-module.exports = { renderAll, svgContext, posterState, PALETTE };
+// The second page's posters (docs/deploy-authority.md): the squares with the app's own
+// modules picked out, the topology with its firewall, and the patch stopped at forge's gate.
+const AUTHORITY_POSTER = { reach: 'own', topology: 'firewall', rollout: 'refused' };
+
+function topologyPoster(figure, data, label) {
+  const pad = 14, design = ME.draw.topologyDesign({ width: WIDTH }), ctx = svgContext(design.width, design.height);
+  const state = ME.buildState(figure, AUTHORITY_POSTER[figure], data);
+  ME.draw.topology(ctx, state, design, { ink: PALETTE.ink, dim: PALETTE.dim, accent: PALETTE.accent });
+  const inner = ctx.toSvg().replace(/^<svg[^>]*>/, '').replace(/<\/svg>$/, '');
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${design.width + 2 * pad}" height="${design.height + 2 * pad}" ` +
+    `viewBox="0 0 ${design.width + 2 * pad} ${design.height + 2 * pad}" role="img" aria-label="${label}">` +
+    `<rect width="100%" height="100%" fill="${PALETTE.paper}"/><g transform="translate(${pad} ${pad})">${inner}</g></svg>\n`;
+}
+
+function renderAuthority(data) {
+  return {
+    reach: panel(ME.figures.reach(data.modules, { width: WIDTH, stage: AUTHORITY_POSTER.reach, dep: data.dep }), 14, SQUARES),
+    topology: topologyPoster('topology', data, 'Four machines in two pools, the roles each holds and the firewall links between them'),
+    rollout: topologyPoster('rollout', data, 'A patch that adds a capability, stopped at a gate on the developer\'s machine'),
+  };
+}
+
+module.exports = { renderAll, renderAuthority, svgContext, posterState, PALETTE };
 
 if (require.main === module) {
-  const data = JSON.parse(fs.readFileSync(path.join(ROOT, 'docs/_data/explainer.json'), 'utf8'));
+  const read = (name) => JSON.parse(fs.readFileSync(path.join(ROOT, 'docs/_data', name), 'utf8'));
   const dir = path.join(ASSETS, 'fallback');
   let stale = 0;
-  for (const [name, svg] of Object.entries(renderAll(data))) {
+  const images = Object.assign({}, renderAll(read('explainer.json')), renderAuthority(read('authority.json')));
+  for (const [name, svg] of Object.entries(images)) {
     const file = path.join(dir, name + '.svg');
     if (process.argv.includes('--check')) {
       if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== svg) { console.log('stale: ' + path.relative(ROOT, file)); stale += 1; }

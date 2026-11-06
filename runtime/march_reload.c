@@ -1164,6 +1164,44 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
             if (init_fn) init_fn(predicted);
         }
     }
+    /* M10: before ACTIVATE, the new build's migration runs on a copy of every
+     * live state of each actor whose state changed, and the new state
+     * contract is evaluated on the result (march_hcr_migrate_check).  Any
+     * failure refuses the deploy, naming the actor; nothing has changed yet.
+     * Not at replay: no actor runs yet. */
+    if (!g_restoring) {
+        int64_t check_ms = 5000;
+        const char *env_ms = getenv("MARCH_HCR_MIGRATE_CHECK_MS");
+        if (env_ms && *env_ms) check_ms = atoll(env_ms);
+        for (int i = 0; i < n; i++) {
+            if (!u[i].state_changed) continue;
+            size_t len = strlen(it[i].name);
+            if (len <= 9 || strcmp(it[i].name + len - 9, "_dispatch") != 0) continue;
+            const char *short_name = it[i].name;
+            for (const char *p = it[i].name; p < it[i].name + len - 9; p++)
+                if (*p == '.') short_name = p + 1;
+            int alen = (int)(it[i].name + len - 9 - short_name);
+            char sym[320];
+            snprintf(sym, sizeof(sym), "__migrate_check_%.*s", alen, short_name);
+            void *raw = dlsym(u[i].handle, sym);
+            if (!raw) continue;
+            void *(*check)(void *) = NULL;
+            memcpy(&check, &raw, sizeof(check));
+            char why[512], unchecked[512];
+            int checked = 0;
+            if (march_hcr_migrate_check(u[i].slot, check, check_ms, why, sizeof(why),
+                                        &checked, unchecked, sizeof(unchecked)) != 0) {
+                write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac,
+                                "err_migration_check");
+                fprintf(stderr, "[hcr] migrate check: %.*s refused: %s\n", alen, short_name, why);
+                snprintf(resp, rsz, "ERR migration_check %.*s %.400s\n", alen, short_name, why);
+                goto fail;
+            }
+            fprintf(stderr, "[hcr] migrate check: %.*s: checked on live data (%d actor%s)%s%s\n",
+                    alen, short_name, checked, checked == 1 ? "" : "s",
+                    unchecked[0] ? "; not evaluable at run time: " : "", unchecked);
+        }
+    }
     march_hcr_wait w;
     /* At replay nothing older runs yet: no drain to arm. */
     int e = march_hcr_activate(u, n, req, g_restoring ? 0 : -1, g_restoring ? 0 : -1, &w);
@@ -3123,6 +3161,10 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
         if (r == 0) {
             int n = snprintf(resp, sizeof(resp), "OK %d\n", committed);
             write_safe(fd, resp, n, sizeof(resp));
+        } else if (strncmp(resp, "ERR migration_check ", 20) == 0) {
+            /* M10: the live-data migration check names the actor and the
+             * failing conjunct; the operator needs that, not a bare code. */
+            wresp(fd, resp);
         } else {
             wresp(fd, "ERR commit_partial_failure\n");
         }

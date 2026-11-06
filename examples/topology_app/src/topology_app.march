@@ -92,7 +92,8 @@ mod TopologyApp do
   -- ── the front pool ───────────────────────────────────────────────────
 
   mod Front do
-    needs IO
+    needs IO.Process
+    needs IO.Mut
     needs IO.Console
     needs IO.Clock
     needs IO.Spawn
@@ -103,15 +104,15 @@ mod TopologyApp do
 
     -- The front hook starts its work in a task and returns at once: offers
     -- open only after every hook has returned.
-    fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
-      let _ = task_spawn(fn _ -> run(io, node))
+    fn start(node : Cap(ClusterNode.Live)) : Env do
+      let _ = task_spawn(fn _ -> run(node))
       { started: true }
     end
 
-    fn run(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
-      let a = retry(fn _ -> echo(io, node, 4), 200)
-      let b = retry(fn _ -> count(io, node, 1), 200)
-      let c = retry(fn _ -> count(io, node, 2), 200)
+    fn run(node : Cap(ClusterNode.Live)) : Int do
+      let a = retry(fn _ -> echo(node, 4), 200)
+      let b = retry(fn _ -> count(node, 1), 200)
+      let c = retry(fn _ -> count(node, 2), 200)
       println("front: echo " ++ int_to_string(a) ++ ", totals " ++ int_to_string(b) ++ " then " ++ int_to_string(c))
       println("front: done")
       0
@@ -130,9 +131,9 @@ mod TopologyApp do
       end
     end
 
-    fn echo(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
+    fn echo(node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
       let got = Vault.new("front_echo")
-      match Echo_Run.initiate_Client(io, node, fn (s, st) ->
+      match Echo_Run.initiate_Client(node, fn (s, st) ->
           Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, n), fn (m, st2) ->
             Vault.set(got, "v", m)
             Echo_Client.close(s, st2))) do
@@ -141,9 +142,9 @@ mod TopologyApp do
       end
     end
 
-    fn count(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
+    fn count(node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
       let got = Vault.new("front_count")
-      match Count_Run.initiate_Client(io, node, fn (s, st) ->
+      match Count_Run.initiate_Client(node, fn (s, st) ->
           Count_Client.recv_Total(s, Count_Client.send_Add(s, st, n), fn (m, st2) ->
             Vault.set(got, "v", m)
             Count_Client.close(s, st2))) do

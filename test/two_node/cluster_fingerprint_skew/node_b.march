@@ -44,7 +44,7 @@ mod ClusterFpSkewB do
       Ok(h) ->
         println("node-b: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
-        let q = Q_Run.cluster_B(c, h, "s1", fn (s, st) ->
+        let q = Q_Run.cluster_B(h, "s1", fn (s, st) ->
           println("B s1: RAN THE BODY")
           Q_B.recv_Msg_A_B_1(s, st, fn (_t, st1) -> Q_B.close(s, Q_B.send_Msg_B_A_1(s, st1, 1))))
         match q do
@@ -53,7 +53,7 @@ mod ClusterFpSkewB do
         end
         -- The old peer: what `R_Run.cluster_B` did before the check, with no
         -- fingerprint registered and none checked.
-        let r = SessionNode.run_cluster(c, h, R_Msg.role_B(), R_Msg.peers_B(), "s2", "", fn _ -> (), fn s ->
+        let r = SessionNode.run_cluster(h, R_Msg.role_B(), R_Msg.peers_B(), "s2", "", fn _ -> (), fn s ->
           let _ = R_B.recv_Msg_A_B_1(s, R_B.register(s, 0), fn (_n, st1) ->
             println("B s2: RAN THE BODY")
             R_B.close(s, R_B.send_Msg_B_A_1(s, st1, 1)))

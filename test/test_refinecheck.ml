@@ -25084,6 +25084,15 @@ let infer_fixpoint_suite =
             Alcotest.(check bool) "noted" true
               (List.exists (fun (fn, n) -> (fn = "ev" || fn = "od") && n = "scc-unsupported") r.RI.notes)))
     ;
+    gated "an SCC with no open site near it is not noted scc-unsupported (notes noise)" (fun () ->
+        (* The same ev/od pair, but nothing demands anything of it: no
+           unsettled site in a member or in a caller of one.  depot printed 966
+           such notes with zero open sites. *)
+        infer_run
+          (m "SN" "  fn ev(xs : List(Int)) : List(Int) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> od(t)\n    end\n  end\n  fn od(xs : List(Int)) : List(Int) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> if h > 0 do Cons(h, ev(t)) else ev(t) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do List.length(ev(ys)) end\n")
+          (fun r ->
+            Alcotest.(check bool) "not noted" false
+              (List.exists (fun (_, n) -> n = "scc-unsupported") r.RI.notes)));
     gated "JSON v1 schema (E2)" (fun () ->
         infer_run ~stdlib:true
           (m "J1" "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  fn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n")
@@ -25321,6 +25330,31 @@ let infer_apply_suite =
             let _, out = run_cli_in dir "--check --refine-infer" in
             Alcotest.(check bool) ("not skipped: " ^ out) false (Astring_contains.contains out "skipped, the program has errors");
             Alcotest.(check bool) ("pos_only proposed: " ^ out) true (Astring_contains.contains out "1 proposed")));
+    gated "a user type named like a stdlib record does not gate inference (hidden stdlib error)" (fun () ->
+        (* `NodeInfo` is also a `ClusterNode` record; the collision leaves a
+           type error located in stdlib/cluster_node.march that `--check`
+           never shows.  Inference must gate on the errors `--check` gates on. *)
+        let src = "mod NI do\n  type NodeInfo = { id : String, last_seen : Int }\n" ^ pre ^ "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn main() : Int do go([1]) end\nend\n" in
+        with_src_dir src (fun dir _ ->
+            let ccode, cout = run_cli_in dir "--check" in
+            Alcotest.(check int) ("--check accepts: " ^ cout) 0 ccode;
+            let _, out = run_cli_in dir "--check --refine-infer" in
+            Alcotest.(check bool) ("not skipped: " ^ out) false (Astring_contains.contains out "skipped, the program has errors");
+            Alcotest.(check bool) ("pos_only proposed: " ^ out) true (Astring_contains.contains out "1 proposed")));
+    gated "a field-projection candidate is never probed on a scalar or list slot (ill-sorted)" (fun () ->
+        (* `Range.new`'s `{v : IntRange | v.step != 0}` enters the vocabulary
+           as `_.step != 0`; offered to `main`'s Int return it was probed and
+           rejected not-true, a probe that can never propose. *)
+        let src = "mod RS do\n  fn total(xs : List(Int)) : Int do\n    List.fold_left(xs, 0, fn (acc, x) -> acc + x)\n  end\n  fn main() : Int do\n    let r = Range.new(1, 6)\n    total(Range.to_list(r))\n  end\nend\n" in
+        with_src_dir src (fun dir _ ->
+            let _, j = run_cli_in dir "--check --refine-infer-json" in
+            Alcotest.(check bool) ("no _.step candidate: " ^ j) false (Astring_contains.contains j "_.step")));
+    gated "a user-file type error still gates inference, and the skip names it" (fun () ->
+        let src = "mod UE do\n" ^ pre ^ "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  fn main() : Int do \"no\" end\nend\n" in
+        with_src_dir src (fun dir _ ->
+            let _, out = run_cli_in dir "--check --refine-infer" in
+            Alcotest.(check bool) ("skipped: " ^ out) true (Astring_contains.contains out "skipped, the program has errors");
+            Alcotest.(check bool) ("names the file: " ^ out) true (Astring_contains.contains out ".march:")));
     gated "a caller's caller makes the requirement concrete: predicted, not a mismatch (evaluation)" (fun () ->
         (* `pop_n(j : {Int | _ == 0})` costs `legs` a skip in a probe that sees
            only direct callers; `main`'s literal call turns it into a
@@ -25367,6 +25401,30 @@ let infer_cli_suite =
         let _, json = run_cli "--check --refine-infer-json" src in
         Alcotest.(check bool) ("JSON reason: " ^ json) true
           (Astring_contains.contains json "\"predicate\": \"_ <= j\", \"reason\": \"vacuous-branch\""));
+    gated "--refine-infer-module targets one stdlib module, and only it (stdlib sweep)" (fun () ->
+        (* The whole-stdlib sweep spent its 3000-probe budget in 48 minutes
+           and never reached most modules; a per-module target makes the
+           sweep one bounded run per module. *)
+        let code, j = run_cli "--check --refine-infer-json --refine-infer-module Option" "mod EvalStd do\n  fn main() : Int do 0 end\nend\n" in
+        Alcotest.(check int) ("exit 0: " ^ j) 0 code;
+        let fns = ref [] in
+        let re = Str.regexp "\"fn\": \"\\([^\"]*\\)\"" in
+        let rec go i = match Str.search_forward re j i with
+          | exception Not_found -> ()
+          | k -> fns := Str.matched_group 1 j :: !fns; go (k + 1) in
+        go 0;
+        Alcotest.(check bool) ("some Option function probed: " ^ j) true (!fns <> []);
+        Alcotest.(check (list string)) ("only Option's functions: " ^ j) []
+          (List.filter (fun f -> not (String.length f > 7 && String.sub f 0 7 = "Option.")) !fns));
+    gated "--refine-infer-module never writes a stdlib module without --refine-infer-stdlib" (fun () ->
+        (* `Decimal` yields a proposal from a trivial entry; a module target
+           may probe the stdlib, but only --refine-infer-stdlib may write it. *)
+        let staged = Filename.concat (Filename.dirname (march_exe_rel ())) "../stdlib/decimal.march" in
+        let before = In_channel.with_open_bin staged In_channel.input_all in
+        with_src_dir "mod EvalStd do\n  fn main() : Int do 0 end\nend\n" (fun dir _ ->
+            let _, out = run_cli_in dir "--check --refine-infer --refine-infer-apply --apply-public --refine-infer-module Decimal" in
+            Alcotest.(check bool) ("stdlib copy unchanged: " ^ out) true
+              (before = In_channel.with_open_bin staged In_channel.input_all)));
     gated "--refine-suggest-all --refine-suggest-json for S1 is byte-identical to the pinned golden" (fun () ->
         let _, out = run_cli "--check --refine-suggest-all --refine-suggest-json" "mod S1 do\n  fn need_nz(n : {Int | _ != 0}) : Int do n end\n  fn safe(a : Int, b : Int) : Int do a + need_nz(b) end\nend\n" in
         let first = List.hd (String.split_on_char '\n' out) in
@@ -27650,6 +27708,36 @@ let infer_vocab_oct_suite =
             Alcotest.(check int) ("exit 0: " ^ out) 0 code;
             Alcotest.(check bool) ("written: " ^ contents ()) true
               (Astring_contains.contains (contents ()) "fn mk(n : Int) : Assoc({x : Int | true}, {y : Int | y > x})")));
+    (* 4. A relation kept from parameter to return (`bump`, 2026-10-25 todo):
+       neither half closes anything alone, so the two are one joint
+       candidate, probed atomically and written as two edits. *)
+    gated "joint relational: bump proposes the relation on its parameter and return together" (fun () ->
+        let bump = "  fn bump(a : Assoc(Int, Int)) : Assoc(Int, Int) do\n    match a do\n      ANil -> ANil\n      ACons(k, v, t) -> ACons(k, v + 1, bump(t))\n    end\n  end\n" in
+        infer_run (m "JB" (rel ^ bump ^ "  fn go(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_arel(bump(a)) end\n"))
+          (fun r ->
+            Alcotest.check sp "bump" [ ("bump", "Assoc({x : Int | true}, {y : Int | y > x})") ] (props r);
+            Alcotest.(check (list (option string))) "joint with parameter a" [ Some "a" ]
+              (List.map (fun (p : RI.proposal) -> p.RI.joint_param) r.RI.proposals)));
+    gated "joint relational control: a body breaking the relation (v - 1) is not proposed" (fun () ->
+        let bump = "  fn bump(a : Assoc(Int, Int)) : Assoc(Int, Int) do\n    match a do\n      ANil -> ANil\n      ACons(k, v, t) -> ACons(k, v - 1, bump(t))\n    end\n  end\n" in
+        infer_run (m "JC" (rel ^ bump ^ "  fn go(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_arel(bump(a)) end\n"))
+          (fun r -> Alcotest.check sp "none" [] (props r)));
+    gated "joint relational control: a caller passing a broken relation refuses it" (fun () ->
+        let bump = "  fn bump(a : Assoc(Int, Int)) : Assoc(Int, Int) do\n    match a do\n      ANil -> ANil\n      ACons(k, v, t) -> ACons(k, v + 1, bump(t))\n    end\n  end\n" in
+        infer_run (m "JR" (rel ^ bump ^ "  fn go(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_arel(bump(a)) end\n  fn other() : Assoc(Int, Int) do bump(ACons(5, 2, ANil)) end\n"))
+          (fun r ->
+            Alcotest.check sp "none" [] (props r);
+            Alcotest.(check bool) "refused" true
+              (List.exists (fun ((s : IS.slot), _, (rf : PI.refusal)) -> s.IS.fn = "bump" && rf.PI.rf_reason = "caller-violation") r.RI.refused)));
+    gated "joint relational apply: both annotations written, re-check as predicted" (fun () ->
+        let bump = "  fn bump(a : Assoc(Int, Int)) : Assoc(Int, Int) do\n    match a do\n      ANil -> ANil\n      ACons(k, v, t) -> ACons(k, v + 1, bump(t))\n    end\n  end\n" in
+        let src = m "JA" (rel ^ bump ^ "  pfn go(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_arel(bump(a)) end\n  fn main() : Int do go(ACons(1, 2, ANil)) end\n") in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("written: " ^ contents ()) true
+              (Astring_contains.contains (contents ())
+                 "fn bump(a : Assoc({x : Int | true}, {y : Int | y > x})) : Assoc({x : Int | true}, {y : Int | y > x})")));
     (* 5. Fold accumulators (K7): the checker's annotated-accumulator rule
        takes any initial value and a fold_right step's second-position
        accumulator; v1's K7 read the base only from an Int literal and only

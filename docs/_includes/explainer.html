@@ -1,11 +1,16 @@
 <!--
-  The scrolling explainer (docs/protocol-to-cluster.md)
-  =====================================================
-  Styles, data and scripts for the page's pinned graphics. Every class this adds starts
-  with `mx-`. The data is docs/_data/explainer.json, written by
-  scripts/gen-explainer-data.py from the real compiler; it is inlined below for the
-  scripts and rendered into the page's prose with Liquid, so no number on the page is
-  typed by hand.
+  The scrolling explainers (docs/protocol-to-cluster.md, docs/deploy-authority.md)
+  ================================================================================
+  Styles, data and scripts for a page's pinned graphics. Every class this adds starts
+  with `mx-`. A page's data is a file under docs/_data/ written by a generator from the
+  real compiler (explainer.json by scripts/gen-explainer-data.py, authority.json by
+  scripts/gen-authority-data.py); it is inlined below for the scripts and rendered into
+  the page's prose with Liquid, so no number on a page is typed by hand.
+
+  Included with no parameters, this is the first page. A page with its own data and
+  figures passes `data=site.data.authority figures="authority"`, which inlines that data
+  and also loads the `-authority.js` scripts. (No Liquid tag is spelled out in this
+  comment: Liquid runs inside HTML comments, and an include of this file here recurses.)
 
   Scripts, in order: scroll.js (which card is active), story.js (figure registry), then
   one file per kind of graphic. All plain scripts under docs/assets/explainer/, no build
@@ -146,9 +151,19 @@
   .mx-seg     { fill: none; stroke: var(--mx-dim); stroke-width: 1; }
   .mx-seg.mx-done { fill: var(--border); }
   .mx-seg.mx-next { stroke: var(--mx-accent); stroke-width: 2; }
+  /* One square per module (figures-authority.js). Plain: not yet sorted. Quiet: reaches
+     nothing. Inside: reaches only the process. Outside: files, the network, processes. */
+  .mx-sq         { fill: var(--mx-dim); stroke: none; }
+  .mx-sq.mx-quiet   { fill: none; stroke: var(--mx-dim); stroke-width: 1; }
+  .mx-sq.mx-inside  { fill: var(--mx-dim); }
+  .mx-sq.mx-outside { fill: var(--mx-ink); }
+  .mx-sq.mx-own  { stroke: var(--mx-accent); stroke-width: 2; }
+  .mx-sq.mx-hot  { fill: var(--mx-accent); stroke: var(--mx-accent); stroke-width: 2; }
+  .mx-out pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; }
 </style>
 
-<script>window.MARCH_EXPLAINER_DATA = {{ site.data.explainer | jsonify | replace: '</', '<\/' }};</script>
+{% assign mx_data = include.data | default: site.data.explainer %}
+<script>window.MARCH_EXPLAINER_DATA = {{ mx_data | jsonify | replace: '</', '<\/' }};</script>
 <script src="{{ site.baseurl }}/assets/explainer/scroll.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/story.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/figures.js?v={{ site.time | date: '%s' }}"></script>
@@ -158,6 +173,12 @@
 <script src="{{ site.baseurl }}/assets/explainer/sim-release.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/draw.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/chapters.js?v={{ site.time | date: '%s' }}"></script>
+{% if include.figures == "authority" %}
+<script src="{{ site.baseurl }}/assets/explainer/figures-authority.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/sim-topology.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/draw-authority.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/chapters-authority.js?v={{ site.time | date: '%s' }}"></script>
+{% endif %}
 <script>
   document.addEventListener('DOMContentLoaded', function () {
     window.MarchExplainer.mountAll(document, window.MARCH_EXPLAINER_DATA);
