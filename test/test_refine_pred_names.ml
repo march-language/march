@@ -115,4 +115,53 @@ let resolution =
         let out = U.run src in
         Alcotest.(check bool) ("refinement_unchecked:\n" ^ out) true (U.count_code out "refinement_unchecked" >= 1)) ]
 
-let suite : unit Alcotest.test_case list = parens @ resolution
+(* #2: a predicate's built-in vocabulary shadows the user's function of the
+   same name (reflection design F21).  The verdict is unchanged (the built-in
+   meaning is kept); the program now says so. *)
+let shadow_code = "predicate_vocabulary_shadowed"
+
+let shadowing =
+  let count src = U.count_code (U.run src) shadow_code in
+  [ gated "r3: a user len shadowed by the predicate's built-in len is warned" (fun () ->
+        let src =
+          "mod Shadow do\n  needs IO\n  fn len(xs : List(Int)) : Int do 7 end\n\n\
+          \  fn need(xs : {List(Int) | len(_) == 1}) : Int do 0 end\n\n\
+          \  fn main(cap : Cap(IO)) : Unit do\n    println(int_to_string(len(Cons(1, Nil))))\n\
+          \    let _ = need(Cons(1, Nil))\n    ()\n  end\nend\n"
+        in
+        let out = U.run src in
+        Alcotest.(check int) ("one warning:\n" ^ out) 1 (U.count_code out shadow_code);
+        List.iter
+          (fun frag -> Alcotest.(check bool) ("mentions " ^ frag ^ ":\n" ^ out) true (U.contains out frag))
+          [ "means the built-in length measure"; "`Shadow.len`"; "(line 3)"; "5 |" ];
+        U.expect out ~line:9 ~callee:"need" "proved");
+    gated "a len declared in an enclosing module warns inside a nested one" (fun () ->
+        Alcotest.(check int) "one" 1
+          (count
+             "mod O do\n  fn len(xs : List(Int)) : Int do 7 end\n  mod Inner do\n\
+             \    fn need(xs : {List(Int) | len(_) == 1}) : Int do 0 end\n  end\nend\n"));
+    gated "a len in a sibling module does not warn" (fun () ->
+        Alcotest.(check int) "none" 0
+          (count
+             "mod O do\n  mod Other do\n    fn len(xs : List(Int)) : Int do 7 end\n  end\n  mod Inner do\n\
+             \    fn need(xs : {List(Int) | len(_) == 1}) : Int do 0 end\n  end\nend\n"));
+    gated "an elts, keys or is_<Ctor> function warns too" (fun () ->
+        List.iter
+          (fun (what, src) -> Alcotest.(check int) what 1 (count src))
+          [ ("elts", "mod E do\n  fn elts(xs : List(Int)) : Int do 0 end\n  fn need(xs : {List(Int) | member(1, elts(_))}) : Int do 0 end\nend\n");
+            ("keys", "mod K do\n  fn keys(m : Map(Int, Int)) : Int do 0 end\n  fn need(m : {Map(Int, Int) | member(1, keys(_))}) : Int do 0 end\nend\n");
+            ("is_A", "mod T do\n  type T = A | B\n  fn is_A(t : T) : Bool do false end\n  fn need(t : {T | is_A(_)}) : Int do 0 end\nend\n") ]);
+    gated "a set operator the user also declares does not warn when well-formed" (fun () ->
+        Alcotest.(check int) "none" 0
+          (count
+             "mod M do\n  fn member(x : Int, xs : List(Int)) : Bool do false end\n\
+             \  fn need(xs : {List(Int) | member(1, elts(_))}) : Int do 0 end\nend\n"));
+    gated "the stdlib's deliberate uses get no warning" (fun () ->
+        let dir = Filename.concat (Filename.dirname Sys.executable_name) ".." in
+        List.iter
+          (fun f ->
+            let out = U.run_in ~dir "--check --stdlib-source" f in
+            Alcotest.(check int) (f ^ ":\n" ^ out) 0 (U.count_code out shadow_code))
+          [ "stdlib/map.march"; "stdlib/list.march"; "stdlib/set.march" ]) ]
+
+let suite : unit Alcotest.test_case list = parens @ resolution @ shadowing

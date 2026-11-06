@@ -6575,8 +6575,35 @@ let warn_qualified_call (errctx : Err.ctx) ~(span : A.span) (qname : string) : u
         never reflected here, so the refinement enforces nothing.%s"
        qname remedy)
 
-let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
-    (e : A.expr) : unit =
+(* A function declared directly in a module enclosing a predicate, innermost
+   module first: what a bare name in that predicate would denote in program
+   code ([warn_predicate_decls] collects them). *)
+type scope_fn = { sf_name : string; sf_qualified : string; sf_span : A.span }
+
+(* Reflection design F21 (todo 2026-10-29-predicate-vocabulary-shadows-user-
+   functions): in a predicate, `len`, `elts`, `keys` and `is_<Ctor>` keep their
+   built-in meaning even where the program's own function of that name is in
+   scope.  The verdict is unchanged; this says which meaning was taken.  Only
+   for a user's function: the stdlib declares `Map.keys` beside predicates
+   that mean the built-in on purpose. *)
+let vocabulary_shadow (in_scope : scope_fn list) (f : string) : (scope_fn * string) option =
+  let meaning =
+    match f with
+    | "len" -> Some "length measure"
+    | "elts" -> Some "set of elements"
+    | "keys" -> Some "set of keys"
+    | _ when ctor_of_tester f <> None -> Some "constructor test"
+    | _ -> None
+  in
+  match meaning with
+  | None -> None
+  | Some what ->
+    let user_file file = not (March_typecheck.Typecheck_builtins.file_is_stdlib file) in
+    List.find_opt (fun sf -> sf.sf_name = f && user_file sf.sf_span.A.file) in_scope
+    |> Option.map (fun sf -> (sf, what))
+
+let warn_predicate_expr ?(abstract_refs : string list = []) ?(in_scope : scope_fn list = [])
+    (errctx : Err.ctx) (e : A.expr) : unit =
   (* A name this signature declares as an abstract refinement
      (specs/2026-09-20-abstract-refinements-design.md §1) is NOT unknown
      vocabulary: it is checked by [Refine_abstract.check], which reports its
@@ -6609,6 +6636,15 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
             not checked. A predicate cannot call a program function of that name."
            f);
       List.iter go args
+    | A.EApp (A.EVar { A.txt = f; _ }, _, span) when vocabulary_shadow in_scope f <> None ->
+      let sf, what = Option.get (vocabulary_shadow in_scope f) in
+      Err.warning ~code:Err.Code.predicate_vocabulary_shadowed errctx ~span
+        (Printf.sprintf
+           "In a refinement predicate `%s` means the built-in %s, not your function `%s` \
+            (line %d): a predicate cannot call a function whose name is predicate vocabulary. \
+            Rename your function to use it in a predicate."
+           f what sf.sf_qualified sf.sf_span.A.start_line);
+      (match e with A.EApp (_, args, _) -> List.iter go args | _ -> ())
     | A.EApp (A.EVar { A.txt = f; _ }, args, span) ->
       (* A call reflection resolved at this site (by span, so a qualified
          `Inner.dbl` too) is checked: no "unchecked" warning of any kind. *)
@@ -6691,13 +6727,13 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
   in
   go e
 
-let rec warn_predicate_ty ?(abstract_refs : string list = []) (errctx : Err.ctx)
-    (t : A.ty) : unit =
-  let go = warn_predicate_ty ~abstract_refs errctx in
+let rec warn_predicate_ty ?(abstract_refs : string list = []) ?(in_scope : scope_fn list = [])
+    (errctx : Err.ctx) (t : A.ty) : unit =
+  let go = warn_predicate_ty ~abstract_refs ~in_scope errctx in
   match t with
   | A.TyRefine (base, binder, pred) ->
     go base;
-    warn_predicate_expr ~abstract_refs errctx pred;
+    warn_predicate_expr ~abstract_refs ~in_scope errctx pred;
     (* Reflection §3.5: `==` in a predicate is structural (logical) equality,
        whatever the type's `Eq` says.  At a type with a hand-written `Eq` that
        differs from what the program's `==` runs, so say so.  No verdict
@@ -7041,7 +7077,18 @@ let decls_declare_verified (decls : A.decl list) : bool =
    and recomputes from its own decls (below); a `describe` block is not a
    module and inherits the flag unchanged, matching [visit_decl]'s own
    [visit_group] treatment of `DDescribe`. *)
-let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl list) : unit =
+let rec warn_predicate_decls ?(path = "") ?(in_scope : scope_fn list = []) (errctx : Err.ctx)
+    ~(strict : bool) (decls : A.decl list) : unit =
+  let in_scope =
+    List.filter_map
+      (function
+        | A.DFn (fd, _) ->
+          let n = fd.A.fn_name.A.txt in
+          Some { sf_name = n; sf_qualified = (if path = "" then n else path ^ "." ^ n); sf_span = fd.A.fn_name.A.span }
+        | _ -> None)
+      decls
+    @ in_scope
+  in
   let set_fns =
     List.filter_map
       (function
@@ -7060,13 +7107,13 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
     Refine_abstract.check ~entry_shaped:(fun ~name_of c s -> entry_shaped ~name_of c s) errctx
       ~is_known:known_predicate_fn fd;
     let abstract_refs = Refine_abstract.names ~is_known:known_predicate_fn fd in
-    Option.iter (warn_predicate_ty ~abstract_refs errctx) fd.A.fn_ret_ty;
+    Option.iter (warn_predicate_ty ~abstract_refs ~in_scope errctx) fd.A.fn_ret_ty;
     List.iter
       (fun (c : A.fn_clause) ->
         List.iter
           (function
             | A.FPNamed p | A.FPDefault (p, _) ->
-              Option.iter (warn_predicate_ty ~abstract_refs errctx) p.A.param_ty
+              Option.iter (warn_predicate_ty ~abstract_refs ~in_scope errctx) p.A.param_ty
             | A.FPPat _ -> ())
           c.A.fc_params;
         warn_predicate_expr_tys errctx c.A.fc_body)
@@ -7076,8 +7123,10 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
   List.iter
     (function
       | A.DFn (fd, _) -> warn_fn fd
-      | A.DMod (_, _, ds, _) -> warn_predicate_decls errctx ~strict:(decls_declare_verified ds) ds
-      | A.DDescribe (_, ds, _) -> warn_predicate_decls errctx ~strict ds
+      | A.DMod (name, _, ds, _) ->
+        let path = if path = "" then name.A.txt else path ^ "." ^ name.A.txt in
+        warn_predicate_decls ~path ~in_scope errctx ~strict:(decls_declare_verified ds) ds
+      | A.DDescribe (_, ds, _) -> warn_predicate_decls ~path ~in_scope errctx ~strict ds
       | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> warn_fn fd) idf.A.impl_methods
       | A.DInterface (idf, _) ->
         List.iter
@@ -10322,7 +10371,7 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   (* Vocabulary warning: runs last so [registered_measures] (set at the top of
      this function) is already populated — otherwise a user `@[measure]`
      would look unrecognized and warn spuriously. *)
-  warn_predicate_decls errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls;
+  warn_predicate_decls ~path:m.A.mod_name.A.txt errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls;
   (* Coverage audit: runs last, only when asked, and touches neither [errctx]
      nor the obligation ledger; it is a read-only classification of every
      declared refinement occurrence against the registration state this
