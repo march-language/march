@@ -1951,6 +1951,119 @@ enclosing call, or a closure captured it. See the
 
 ---
 
+## 11. Run-time failures
+
+Some mistakes only show when the program runs. `march FILE` reports them the way it
+reports a compile error: what happened, the line with a caret, and then each call that
+led there, innermost first. The playground only checks programs, so it can't show these.
+
+<a id="runtime-panic"></a>
+
+### A panic two calls deep
+
+<!-- error-tour: 36-panic --run -->
+```march
+mod Main do
+  needs IO.Console
+
+  fn price(code : String) : Int do
+    match code do
+    "a" -> 1
+    _ -> panic("unknown product code: " ++ code)
+    end
+  end
+
+  fn total(codes : List(String)) : Int do
+    List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(total(["a", "zz"])))
+  end
+end
+```
+
+```text
+-- RUNTIME ---------------------------------- panic.march
+
+The program panicked: unknown product code: zz [panic]
+
+7 |     _ -> panic("unknown product code: " ++ code)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Calls inside the standard library are left out; set MARCH_BACKTRACE=full to see them.
+
+    `price` was called here:
+
+12 |     List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
+                                                       ^^^^^^^^
+
+    `List.fold_left` was called here:
+
+12 |     List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `total` was called here:
+
+16 |     println(int_to_string(total(["a", "zz"])))
+                               ^^^^^^^^^^^^^^^^^^
+```
+<!-- /error-tour -->
+
+The first excerpt is the `panic` itself. Each one after it is a call on the way there:
+`price` was called from the function passed to `List.fold_left`, which `total` called,
+which `main` called. Calls inside the standard library are left out unless you set
+`MARCH_BACKTRACE=full`.
+
+<a id="runtime-actor-crash"></a>
+
+### An actor that crashes
+
+<!-- error-tour: 37-actor-crash --run -->
+```march
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do
+      if k < 0 do panic("negative bump") else { state with n: state.n + k } end
+    end
+  end
+
+  fn main(_console : Cap(IO.Console), _spawn : Cap(IO.Spawn)) do
+    let pid = spawn(Counter)
+    send(pid, Bump(1))
+    send(pid, Bump(-5))
+    run_until_idle()
+    println("done")
+  end
+end
+```
+
+```text
+-- RUNTIME ---------------------------- actor-crash.march
+
+Actor `Counter` crashed while handling `Bump(-5)`: negative bump [actor_crashed]
+
+9 |       if k < 0 do panic("negative bump") else { state with n: state.n + k } end
+                      ^^^^^^^^^^^^^^^^^^^^^^
+
+    Its state when it crashed: { n: 1 }
+    Nothing supervises this `Counter`, so it stays dead and later messages to it are dropped. The rest of the program keeps running.
+```
+<!-- /error-tour -->
+
+An actor's crash doesn't stop the program, so it would be easy to miss. The report names
+the actor, the message it was handling (with its arguments), where the handler failed, and
+the actor's state at the time. It also says what happens next: nobody supervises this
+`Counter`, so it stays dead. A supervised actor is restarted by its supervisor instead, and
+no report is printed.
+
+---
+
 ## Error reference
 
 Every code that has a `march --explain` page also has one on this site:

@@ -1,0 +1,20 @@
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do
+      if k < 0 do panic("negative bump") else { state with n: state.n + k } end
+    end
+  end
+
+  fn main(_console : Cap(IO.Console), _spawn : Cap(IO.Spawn)) do
+    let pid = spawn(Counter)
+    send(pid, Bump(1))
+    send(pid, Bump(-5))
+    run_until_idle()
+    println("done")
+  end
+end

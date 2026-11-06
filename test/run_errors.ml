@@ -92,11 +92,14 @@ type result = { code : int; err : string; json : string;
                 mutable after_json : string
                 (** the [--check-json] of that same fixed program. *) }
 
-(* A program carrying [-- MARCH-MODE: why-copies] is checked with
-   [--why-copies] / [--why-copies-json] instead of [--check] / [--check-json]:
-   its warnings come from the Perceus copy report
-   (specs/2026-11-05-why-copies-design.md), not the typechecker. *)
+(* A program carrying a [-- MARCH-MODE:] line is not checked with [--check]:
+   - [why-copies]: [--why-copies] / [--why-copies-json], the Perceus copy
+     report (specs/2026-11-05-why-copies-design.md);
+   - [run]: the program is RUN (interpreted) and its stderr pinned: a
+     run-time failure report (panic, run-time error, actor crash).  There is
+     no JSON form, so its [.json.expected] is empty. *)
 let why_copies_marker = "-- MARCH-MODE: why-copies"
+let run_marker = "-- MARCH-MODE: run"
 
 let has_sub s sub =
   let n = String.length s and m = String.length sub in
@@ -106,14 +109,19 @@ let has_sub s sub =
 let script ~dir ~rel ~src =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
   let home = Filename.quote (Lazy.force private_home) in
+  let rel = Filename.quote rel in
   let human, json =
-    if has_sub src why_copies_marker then "--why-copies", "--why-copies-json"
-    else "--check", "--check-json" in
+    if has_sub src run_marker then
+      Printf.sprintf "HOME=%s %s %s" home exe rel, "true"
+    else
+      let h, j = if has_sub src why_copies_marker
+        then "--why-copies", "--why-copies-json" else "--check", "--check-json" in
+      Printf.sprintf "HOME=%s %s %s %s" home exe h rel,
+      Printf.sprintf "HOME=%s %s %s %s" home exe j rel in
   Printf.sprintf
-    "cd %s && HOME=%s %s %s %s > check.out 2> check.err; echo $? > check.code; \
-     HOME=%s %s %s %s > json.out 2> /dev/null; true"
-    (Filename.quote dir) home exe human (Filename.quote rel)
-    home exe json (Filename.quote rel)
+    "cd %s && %s > check.out 2> check.err; echo $? > check.code; \
+     %s > json.out 2> /dev/null; true"
+    (Filename.quote dir) human json
 
 (* [run_jobs sources]: every (name, program text) checked in parallel;
    returns name -> result. *)

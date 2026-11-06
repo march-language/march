@@ -7124,6 +7124,85 @@ let compile filename =
           Printf.eprintf "\nnote: set MARCH_BACKTRACE=full for all frames including stdlib\n"
       end
     in
+    (* A run-time failure in the compile-error style: what happened, the
+       source line with a caret, then the chain of calls that led there as
+       labelled excerpts.  [frames] is most recent first; each frame's span
+       is a call expression (frame 0's is the failing call itself).  Falls
+       back to [fallback] when no frame points into a file to show.
+       MARCH_BACKTRACE=full shows the standard library's frames too. *)
+    let report_runtime_failure ~code ~headline ?(notes = []) ~fallback
+        (all : March_eval.Eval.march_frame list) =
+      let show_full = Sys.getenv_opt "MARCH_BACKTRACE" = Some "full" in
+      let is_stdlib path =
+        (match find_stdlib_dir () with
+         | Some p when String.starts_with ~prefix:(p ^ "/") path -> true
+         | _ -> false)
+        || Filename.basename (Filename.dirname path) = "stdlib" in
+      let real = List.filter (fun f ->
+          f.March_eval.Eval.mf_file <> "<none>" && f.March_eval.Eval.mf_line > 0) all in
+      let frames = if show_full then real
+        else List.filter (fun f -> not (is_stdlib f.March_eval.Eval.mf_file)) real in
+      match frames with
+      | [] -> fallback ()
+      | top :: callers ->
+        let max_callers = 8 in
+        let rec take n = function
+          | x :: rest when n > 0 -> x :: take (n - 1) rest | _ -> [] in
+        let shown = take max_callers callers in
+        (* Each caller frame's span is a call expression and its name the
+           function called, so the labels read outward from the failure. *)
+        let labels = List.map (fun (f : March_eval.Eval.march_frame) ->
+            { March_errors.Errors.lbl_span = f.March_eval.Eval.mf_span;
+              lbl_message = Printf.sprintf "`%s` was called here" f.March_eval.Eval.mf_name })
+            shown in
+        let more = List.length callers - List.length shown in
+        (* The prelude's `panic` / `todo` wrappers are the failure's own
+           machinery, not calls worth pointing a reader at. *)
+        let hidden = List.length (List.filter (fun (f : March_eval.Eval.march_frame) ->
+            Filename.basename f.March_eval.Eval.mf_file <> "prelude.march") real)
+                     - List.length frames in
+        let notes = notes
+          @ (if more > 0 then
+               [ Printf.sprintf "%d more call%s not shown." more (if more = 1 then "" else "s") ]
+             else [])
+          @ (if hidden > 0 && not show_full then
+               [ "Calls inside the standard library are left out; set MARCH_BACKTRACE=full to see them." ]
+             else []) in
+        let d = { March_errors.Errors.severity = March_errors.Errors.Error;
+                  span = top.March_eval.Eval.mf_span; message = headline;
+                  labels; notes; code; fix = None } in
+        emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
+    in
+    let strip prefix s =
+      if String.starts_with ~prefix s
+      then Some (String.sub s (String.length prefix) (String.length s - String.length prefix))
+      else None in
+    (* The headline and code for an interpreter failure message. *)
+    let classify msg =
+      match strip "panic: " msg, strip "todo: " msg, strip "unreachable: " msg with
+      | Some m, _, _ -> (March_errors.Code.panic, "The program panicked: " ^ m)
+      | _, Some m, _ -> (March_errors.Code.panic, "The program reached a `todo`: " ^ m)
+      | _, _, Some m -> (March_errors.Code.panic, "The program reached code marked `unreachable`: " ^ m)
+      | _ -> (March_errors.Code.runtime_error, "The program stopped with a run-time error: " ^ msg) in
+    March_eval.Eval.actor_crash_hook := (fun ~actor ~tag ~args ~state ~frames exn ->
+        let msg = match exn with
+          | March_eval.Eval.Eval_error m -> m
+          | March_eval.Eval.Match_failure m -> "no pattern matched: " ^ m
+          | March_eval.Eval.Assert_failure m -> m
+          | e -> Printexc.to_string e in
+        let reason = match strip "panic: " msg with Some m -> m | None -> msg in
+        let show v = March_eval.Eval.value_to_string_pretty ~width:100 v in
+        let message = if args = [] then tag
+          else Printf.sprintf "%s(%s)" tag (String.concat ", " (List.map show args)) in
+        let headline = Printf.sprintf
+            "Actor `%s` crashed while handling `%s`: %s" actor message reason in
+        let notes = [
+          Printf.sprintf "Its state when it crashed: %s" (show state);
+          Printf.sprintf "Nothing supervises this `%s`, so it stays dead and later messages \
+                          to it are dropped. The rest of the program keeps running." actor ] in
+        report_runtime_failure ~code:March_errors.Code.actor_crashed ~headline ~notes
+          ~fallback:(fun () -> Printf.eprintf "%s\n%s\n%!" headline (String.concat "\n" notes))
+          frames);
     March_eval.Eval.clear_march_stack ();
     setup_interpreter_ffi ();
     (* Actor message identity: the interpreter tags an actor message by its
@@ -7152,16 +7231,30 @@ let compile filename =
        (* panic_/todo_/unreachable_ builtins already prefix their messages with
           "panic: " / "todo: " / "unreachable: " — print as-is. *)
        let hint = March_eval.Eval.interface_method_hint desugared msg in
-       Printf.eprintf "%s%s\n" msg (Option.value hint ~default:"");
-       print_march_backtrace ();
+       let code, headline = classify msg in
+       report_runtime_failure ~code ~headline
+         ~notes:(match hint with Some h -> [ String.trim h ] | None -> [])
+         ~fallback:(fun () ->
+             Printf.eprintf "%s%s\n" msg (Option.value hint ~default:"");
+             print_march_backtrace ())
+         (March_eval.Eval.get_march_stack ());
        exit 1
      | March_eval.Eval.Match_failure msg ->
-       Printf.eprintf "panic: match failure — %s\n" msg;
-       print_march_backtrace ();
+       (* A panic compiled too ("non-exhaustive pattern match"). *)
+       report_runtime_failure ~code:March_errors.Code.panic
+         ~headline:("The program panicked: no pattern of this `match` matched. " ^ msg)
+         ~fallback:(fun () ->
+             Printf.eprintf "panic: match failure — %s\n" msg;
+             print_march_backtrace ())
+         (March_eval.Eval.get_march_stack ());
        exit 1
      | March_eval.Eval.Assert_failure msg ->
-       Printf.eprintf "panic: %s\n" msg;
-       print_march_backtrace ();
+       report_runtime_failure ~code:March_errors.Code.panic
+         ~headline:("An assertion failed: " ^ msg)
+         ~fallback:(fun () ->
+             Printf.eprintf "panic: %s\n" msg;
+             print_march_backtrace ())
+         (March_eval.Eval.get_march_stack ());
        exit 1
      | Unix.Unix_error (Unix.EINTR, syscall, _) ->
        (* SIGINT interrupted a blocking syscall (accept/select/recv) —

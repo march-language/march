@@ -1,0 +1,13 @@
+-- MARCH-MODE: run
+-- EXPECT-ERROR: division by zero
+-- A division by zero: the caret is on the division, the label on the call
+-- that passed the zero.
+mod Main do
+  needs IO.Console
+
+  fn avg(sum : Int, n : Int) : Int do sum / n end
+
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(avg(10, List.length([]))))
+  end
+end
