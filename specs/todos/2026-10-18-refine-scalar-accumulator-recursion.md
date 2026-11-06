@@ -23,3 +23,9 @@ return refinement (the same induction Tier 2 runs for ADT returns), gated exactl
 (structural argument, every precondition of the recursive call PROVED). It is the definition
 -side counterpart of the fold rule and unrelated to callers. The stdlib's monomorphic
 `go` loops (`List.sum_int`, `Enum.sum`, `Stats.sum`) are this shape (design §6).
+
+2026-11-06, stdlib lemma sweep S2: still open. `List.length_onto` was meant to carry
+`{Int | _ == len(lst) + acc}` and is `solver-undecided` for this reason, as is a plain
+`fn cnt(lst) : {Int | _ == len(lst)}` with `1 + cnt(t)`. The stdlib works around it with a
+`Unit` lemma (`len_length_onto`), which does get an induction hypothesis
+(`specs/progress/2026-11-06-stdlib-lemma-sweep-s2.md`, ruling 1).
