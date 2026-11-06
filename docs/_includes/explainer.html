@@ -1,16 +1,19 @@
 <!--
-  The scrolling explainers (docs/protocol-to-cluster.md, docs/deploy-authority.md)
+  The scrolling explainers (docs/protocol-to-cluster.md, docs/deploy-authority.md,
+  docs/one-owner.md)
   ================================================================================
   Styles, data and scripts for a page's pinned graphics. Every class this adds starts
   with `mx-`. A page's data is a file under docs/_data/ written by a generator from the
   real compiler (explainer.json by scripts/gen-explainer-data.py, authority.json by
-  scripts/gen-authority-data.py); it is inlined below for the scripts and rendered into
-  the page's prose with Liquid, so no number on a page is typed by hand.
+  scripts/gen-authority-data.py, ownership.json by scripts/gen-ownership-data.py); it is
+  inlined below for the scripts and rendered into the page's prose with Liquid, so no
+  number on a page is typed by hand.
 
   Included with no parameters, this is the first page. A page with its own data and
-  figures passes `data=site.data.authority figures="authority"`, which inlines that data
-  and also loads the `-authority.js` scripts. (No Liquid tag is spelled out in this
-  comment: Liquid runs inside HTML comments, and an include of this file here recurses.)
+  figures passes `data=site.data.authority figures="authority"` (or `site.data.ownership`
+  and "ownership"), which inlines that data and also loads the `-authority.js` (or
+  `-ownership.js`) scripts. (No Liquid tag is spelled out in this comment: Liquid runs
+  inside HTML comments, and an include of this file here recurses.)
 
   Scripts, in order: scroll.js (which card is active), story.js (figure registry), then
   one file per kind of graphic. All plain scripts under docs/assets/explainer/, no build
@@ -160,6 +163,27 @@
   .mx-sq.mx-own  { stroke: var(--mx-accent); stroke-width: 2; }
   .mx-sq.mx-hot  { fill: var(--mx-accent); stroke: var(--mx-accent); stroke-width: 2; }
   .mx-out pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; }
+  /* The token of a linear value (figures-ownership.js). Held: where it is bound. Spent:
+     consumed by a use. Hot: the use too many, or the use that never came. Dim: an
+     affine leftover, dropped. */
+  .mx-token          { fill: var(--mx-ink); stroke: var(--mx-ink); stroke-width: 1.5; }
+  .mx-token.mx-spent { fill: none; }
+  .mx-token.mx-hot   { fill: var(--mx-accent); stroke: var(--mx-accent); }
+  .mx-token.mx-dim   { fill: none; stroke: var(--mx-dim); }
+  .mx-token-text     { fill: var(--mx-paper); font-family: "JetBrains Mono", monospace; font-weight: 700; pointer-events: none; }
+  .mx-token-text.mx-hollow { fill: var(--mx-ink); }
+  .mx-token-note     { fill: var(--text-muted); }
+  /* The allocation ledger. A bar is a function's cells per call; over the contract's
+     line it is the accent. Made: cells a transient contract lets go. Ghost: what a
+     sharing caller sees at run time, which is not the contract's business. */
+  .mx-bar            { fill: var(--mx-ink); }
+  .mx-bar.mx-over    { fill: var(--mx-accent); }
+  .mx-bar.mx-made    { fill: var(--mx-dim); }
+  .mx-bar.mx-ghost   { fill: var(--mx-dim); opacity: 0.45; }
+  .mx-ghost-text     { opacity: 0.7; }
+  .mx-contract       { stroke: var(--mx-ink); stroke-width: 1.5; }
+  .mx-contract.mx-design { stroke: var(--mx-dim); stroke-dasharray: 3 3; }
+  .mx-contract-text  { fill: var(--text); }
 </style>
 
 {% assign mx_data = include.data | default: site.data.explainer %}
@@ -178,6 +202,12 @@
 <script src="{{ site.baseurl }}/assets/explainer/sim-topology.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/draw-authority.js?v={{ site.time | date: '%s' }}"></script>
 <script src="{{ site.baseurl }}/assets/explainer/chapters-authority.js?v={{ site.time | date: '%s' }}"></script>
+{% endif %}
+{% if include.figures == "ownership" %}
+<script src="{{ site.baseurl }}/assets/explainer/figures-ownership.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/sim-heap.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/draw-ownership.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/explainer/chapters-ownership.js?v={{ site.time | date: '%s' }}"></script>
 {% endif %}
 <script>
   document.addEventListener('DOMContentLoaded', function () {

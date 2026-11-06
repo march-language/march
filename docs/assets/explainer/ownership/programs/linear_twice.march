@@ -1,0 +1,24 @@
+-- The linear tree, read again after it was consumed.
+mod Own do
+  type Tree = Leaf(Int) | Node(Tree, Tree)
+
+  fn inc_leaves(linear t : Tree) : Tree do
+    match t do
+    Leaf(n)    -> Leaf(n + 1)
+    Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+    end
+  end
+
+  fn sum_leaves(t : Tree) : Int do
+    match t do
+    Leaf(n)    -> n
+    Node(l, r) -> sum_leaves(l) + sum_leaves(r)
+    end
+  end
+
+  fn main() : Int do
+    linear let t : Tree = Node(Leaf(1), Node(Leaf(2), Leaf(3)))
+    let t2 = inc_leaves(t)
+    sum_leaves(t2) - sum_leaves(t)
+  end
+end

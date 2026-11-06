@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // render-explainer-fallbacks.js: the static image behind each figure of the scrolling
-// explainers (docs/protocol-to-cluster.md, docs/deploy-authority.md), for a reader
-// without JavaScript or a figure that failed.
+// explainers (docs/protocol-to-cluster.md, docs/deploy-authority.md, docs/one-owner.md),
+// for a reader without JavaScript or a figure that failed.
 //
 //     node scripts/render-explainer-fallbacks.js            write docs/assets/explainer/fallback/*.svg
 //     node scripts/render-explainer-fallbacks.js --check    exit 1 if a fresh render would differ
@@ -18,8 +18,9 @@ const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
 const ASSETS = path.join(ROOT, 'docs/assets/explainer');
-for (const f of ['scroll', 'story', 'rng', 'figures', 'figures-authority', 'sim-cluster', 'sim-mailbox', 'sim-release',
-  'sim-topology', 'draw', 'draw-authority', 'chapters', 'chapters-authority']) {
+for (const f of ['scroll', 'story', 'rng', 'figures', 'figures-authority', 'figures-ownership', 'sim-cluster', 'sim-mailbox',
+  'sim-release', 'sim-topology', 'sim-heap', 'draw', 'draw-authority', 'draw-ownership', 'chapters', 'chapters-authority',
+  'chapters-ownership']) {
   require(path.join(ASSETS, f + '.js'));
 }
 const ME = globalThis.MarchExplainer;
@@ -90,7 +91,11 @@ function svgContext(width, height) {
       out.push(`<clipPath id="${clipId}"><rect x="${r(x)}" y="${r(y)}" width="${r(w)}" height="${r(h)}"/></clipPath>`);
     },
     arc(x, y, rad) { arc = [x, y, rad]; },
-    fill() { if (arc) out.push(`<circle cx="${r(arc[0])}" cy="${r(arc[1])}" r="${r(arc[2])}" fill="${ctx.fillStyle}"${extra()}/>`); },
+    // a filled path: a circle when the path was an arc, else the segments drawn so far
+    fill() {
+      if (arc) out.push(`<circle cx="${r(arc[0])}" cy="${r(arc[1])}" r="${r(arc[2])}" fill="${ctx.fillStyle}"${extra()}/>`);
+      else if (pathD) out.push(`<path d="${pathD}Z" fill="${ctx.fillStyle}"${extra()}/>`);
+    },
     stroke() {
       if (pathD) out.push(`<path d="${pathD}" fill="none" stroke="${ctx.strokeStyle}" stroke-width="${ctx.lineWidth}"` +
         `${dash ? ` stroke-dasharray="${dash}"` : ''}${extra()}/>`);
@@ -165,13 +170,57 @@ function renderAuthority(data) {
   };
 }
 
-module.exports = { renderAll, renderAuthority, svgContext, posterState, PALETTE };
+// The third page's posters (docs/one-owner.md): the heap with the copy tree grown beside
+// the shared original, the linear token used a second time, and a contract broken by one
+// cell over the line.
+const OWNERSHIP_POSTER = { heap: 'shared', token: 'linear-twice', contract: 'bare' };
+
+// The token and ledger rules of docs/_includes/explainer.html, with the palette in place
+// of variables.
+const OWNERSHIP = [
+  `.mx-token{fill:${PALETTE.ink};stroke:${PALETTE.ink};stroke-width:1.5}`, `.mx-spent{fill:none}`,
+  `.mx-token.mx-hot{fill:${PALETTE.accent};stroke:${PALETTE.accent}}`, `.mx-token.mx-dim{fill:none;stroke:${PALETTE.dim}}`,
+  `.mx-held{}`,
+  `.mx-token-text{fill:${PALETTE.paper};font-family:ui-monospace,Menlo,monospace;font-weight:700}`,
+  `.mx-token-text.mx-hollow{fill:${PALETTE.ink}}`, `.mx-token-note{fill:${PALETTE.muted}}`,
+  `.mx-bar{fill:${PALETTE.ink}}`, `.mx-bar.mx-over{fill:${PALETTE.accent}}`, `.mx-bar.mx-made{fill:${PALETTE.dim}}`,
+  `.mx-bar.mx-ghost{fill:${PALETTE.dim};opacity:0.45}`, `.mx-ghost-text{opacity:0.7}`,
+  `.mx-contract{stroke:${PALETTE.ink};stroke-width:1.5}`, `.mx-contract.mx-design{stroke:${PALETTE.dim};stroke-dasharray:3 3}`,
+  `.mx-contract-text{fill:${PALETTE.ink}}`,
+].join('');
+
+function heapPoster(data, label) {
+  const pad = 14, design = ME.draw.heapDesign({ width: WIDTH }), ctx = svgContext(design.width, design.height);
+  const state = ME.buildState('heap', OWNERSHIP_POSTER.heap, data);
+  ME.draw.heap(ctx, state, design, { ink: PALETTE.ink, dim: PALETTE.dim, accent: PALETTE.accent });
+  const inner = ctx.toSvg().replace(/^<svg[^>]*>/, '').replace(/<\/svg>$/, '');
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${design.width + 2 * pad}" height="${design.height + 2 * pad}" ` +
+    `viewBox="0 0 ${design.width + 2 * pad} ${design.height + 2 * pad}" role="img" aria-label="${label}">` +
+    `<rect width="100%" height="100%" fill="${PALETTE.paper}"/><g transform="translate(${pad} ${pad})">${inner}</g></svg>\n`;
+}
+
+function renderOwnership(data) {
+  const F = ME.figures;
+  return {
+    heap: heapPoster(data, `${data.tree.cells} heap cells as a tree, each with its reference count, and the copy inc_leaves built beside it because the tree was held twice`),
+    token: panel(F.token(ME.tokenEntry(data, OWNERSHIP_POSTER.token), { width: WIDTH, kind: 'linear' }), 14, OWNERSHIP),
+    contract: panel(F.contract(data.contracts, { width: WIDTH, stage: OWNERSHIP_POSTER.contract }), 14, OWNERSHIP),
+  };
+}
+
+module.exports = { renderAll, renderAuthority, renderOwnership, svgContext, posterState, PALETTE, OWNERSHIP_POSTER };
 
 if (require.main === module) {
   const read = (name) => JSON.parse(fs.readFileSync(path.join(ROOT, 'docs/_data', name), 'utf8'));
   const dir = path.join(ASSETS, 'fallback');
   let stale = 0;
   const images = Object.assign({}, renderAll(read('explainer.json')), renderAuthority(read('authority.json')));
+  // The one-owner posters need the generated data. Until it exists, `--sample-ownership`
+  // draws them from the hand-written sample the script tests use.
+  const sample = path.join(ROOT, 'test/explainer/fixtures/ownership.sample.json');
+  if (fs.existsSync(path.join(ROOT, 'docs/_data/ownership.json'))) Object.assign(images, renderOwnership(read('ownership.json')));
+  else if (process.argv.includes('--sample-ownership')) Object.assign(images, renderOwnership(JSON.parse(fs.readFileSync(sample, 'utf8'))));
+  else console.log('no docs/_data/ownership.json yet (scripts/gen-ownership-data.py writes it): skipping the one-owner posters');
   for (const [name, svg] of Object.entries(images)) {
     const file = path.join(dir, name + '.svg');
     if (process.argv.includes('--check')) {
