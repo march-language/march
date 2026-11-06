@@ -33,3 +33,29 @@ changed: 64/67 fixed (was 4/67), `cap_grant` 31/31. Combined with the unchanged 
 **346/391 (88.5%)**; on the baseline's cases 281/323 (87.0%), against 66.4% on 2026-11-03. Still at
 zero: `protocol_same_participants` 0/5, `division_by_zero` 0/4, `protocol_invalid` 0/4,
 `overlapping_impl` 0/3, `role_grant_exceeded` 0/2.
+
+2026-11-05, later: the five zero-score codes (18 cases), on this branch with the `cap_grant` change
+above merged in (`specs/progress/2026-11-05-diag-zero-score-codes.md`). Haiku 5.5 subagents through
+`--prepare`/`--score`; the "after" column re-answers every case whose prompt changed.
+
+| code | main | + `cap_grant` shown | + this change |
+|---|---|---|---|
+| `protocol_same_participants` | 0/5 | 5/5 | 5/5 |
+| `division_by_zero` | 0/4 | 3/4 | 4/4 |
+| `protocol_invalid` | 0/4 | 3/4 | 4/4 |
+| `overlapping_impl` | 0/3 | 2/3 | 2/3 |
+| `role_grant_exceeded` | 0/2 | 0/2 | 2/2 |
+| total | 0/18 | 13/18 | 17/18 |
+
+On main, 16 of the 18 answers fixed the shown error and were rejected by the hidden `cap_grant`.
+None of the `protocol_same_participants` cases is about that hint: each one's error is
+`session_offer_unrefined`, and the hint sorts first. The middle column's misses: `division_by_zero_1`
+divides by a pattern binder, and the advice to "annotate the divisor parameter" led the answer to
+refine the constructor field; `role_grant_exceeded_1`/`_2` widened the grant, which adds a body
+parameter, so the body's arity broke (that figure is read off the main-run answers, whose only
+remaining error was the arity one; the round with `cap_grant` shown already had the new help); `protocol_invalid_1` moved the stranded step into the branch
+as `done -> do ... end`, which does not parse. The one still failing, `overlapping_impl_1`, is a
+limit of the intent check, not the message: its error is `json_derive_name_collision`, and the
+answer renames the user's `Stream_Message` type as the message says, which the check counts as a
+removed declaration. The other fixes (drop `@[endpoints]`, drop the derive) change what the program
+does. Overall: 346/391 → 363/391 (92.8%), counting the 17 against the 0 the previous run had.

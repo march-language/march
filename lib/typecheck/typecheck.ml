@@ -8436,7 +8436,26 @@ let rec check_decl env (d : Ast.decl) : env =
       Err.report env.errors
         { Err.severity = Error; span = Option.value first ~default:sp; message = msg;
           labels = loop_lbl; notes = []; code = Err.Code.protocol_invalid; fix = None } in
-    let rec check_unreachable_after_loop ~tail steps =
+    (* Where the stranded steps can go: the sibling branches of the nearest
+       enclosing `choose` that do not end in a `loop` or `stop`, and the
+       layout a several-step branch takes.  "Move it inside the branches"
+       alone left a one-turn answer guessing the syntax (`done -> do ... end`,
+       which does not parse), so name the branches and show the shape. *)
+    let move_advice ~live what =
+      let where = match live with
+        | [] -> "Move " ^ what ^ " into the branches that can reach " ^ what
+        | [ l ] -> Printf.sprintf "Move %s into the `%s` branch, after its last step" what l
+        | ls -> Printf.sprintf "Move %s into the %s branches, after each one's last step" what
+                  (String.concat " and " (List.map (Printf.sprintf "`%s`") ls)) in
+      Printf.sprintf
+        "%s. A branch with several steps lists them on the lines after `%s ->`, \
+         one per line, indented under the label (no `do`/`end`)."
+        where (match live with l :: _ -> l | [] -> "label") in
+    let ends_terminal (arm : Ast.protocol_step list) =
+      match List.rev arm with
+      | (Ast.ProtoLoop _ | Ast.ProtoStop _) :: _ -> true
+      | _ -> false in
+    let rec check_unreachable_after_loop ?(live = []) ~tail steps =
       match steps with
       | Ast.ProtoLoop (inner, _) :: rest ->
         check_unreachable_after_loop ~tail:[] inner;
@@ -8451,8 +8470,8 @@ let rec check_decl env (d : Ast.decl) : env =
             (Printf.sprintf
                "Protocol `%s`: this step can never run in the `choose` branch that \
                 ends in a `loop` — the steps after a `choose` are projected into \
-                EVERY branch. Move it inside the branches that can reach it."
-               name.txt)
+                EVERY branch. %s"
+               name.txt (move_advice ~live "it"))
       | Ast.ProtoStop stop_sp :: rest ->
         (* `stop` projects to `SEnd` unconditionally (see [project_steps]),
            discarding both [rest] here and the enclosing [tail] — same
@@ -8470,18 +8489,22 @@ let rec check_decl env (d : Ast.decl) : env =
                "Protocol `%s`: this `choose` branch ends in `stop`, but the \
                 protocol continues after the `choose` — those following steps \
                 are projected into EVERY branch, so they can never run in this \
-                one. Move them inside the branches that can reach them."
-               name.txt)
+                one. %s"
+               name.txt (move_advice ~live "them"))
       | Ast.ProtoChoice (_, branches) :: rest ->
+        let live =
+          List.filter_map
+            (fun ((l : Ast.name), arm) -> if ends_terminal arm then None else Some l.txt)
+            branches in
         List.iter (fun (_, arm) ->
-            check_unreachable_after_loop ~tail:(rest @ tail) arm) branches;
-        check_unreachable_after_loop ~tail rest
+            check_unreachable_after_loop ~live ~tail:(rest @ tail) arm) branches;
+        check_unreachable_after_loop ~live ~tail rest
       | Ast.ProtoCrashOr (_, crash, _) :: rest ->
         (* A crash branch ENDS the protocol (or the loop it is in): it has no
            tail of its own to fall into. *)
         check_unreachable_after_loop ~tail:[] crash;
         check_unreachable_after_loop ~tail rest
-      | _ :: rest -> check_unreachable_after_loop ~tail rest
+      | _ :: rest -> check_unreachable_after_loop ~live ~tail rest
       | [] -> ()
     in
     check_unreachable_after_loop ~tail:[] pdef.proto_steps;
@@ -10716,6 +10739,37 @@ let solve_role_roots (env : env)
     | _ -> solve_role_roots_full env in
   Option.map (fun s -> (s.rs_keyed, s.rs_own, s.rs_refs, s.rs_rows)) solved
 
+(* The `help:` of a [role_grant_exceeded] error.  Widening the grant is not the
+   whole edit: the body takes one `Cap` per granted path, in the grant's order,
+   between `Cap(Session.Live)` and the state (D34, [Desugar_endpoints.grants_of]),
+   so the new path is also a new parameter.  Saying only "add it to the grant"
+   left every one-turn answer rejected by the arity error that edit causes, so
+   the help spells out the grant line and the body's new parameter list. *)
+let role_grant_help ~role ~proto ~(grant : string list) ~cap : string =
+  let param_name path =
+    let last = match String.rindex_opt path '.' with
+      | Some i -> String.sub path (i + 1) (String.length path - i - 1)
+      | None -> path in
+    let b = Buffer.create 16 in
+    String.iteri
+      (fun i ch ->
+         if ch >= 'A' && ch <= 'Z' then begin
+           if i > 0 then Buffer.add_char b '_';
+           Buffer.add_char b (Char.lowercase_ascii ch)
+         end else Buffer.add_char b ch)
+      last;
+    (* `cap_` keeps the name off the builtins (`file_write` is one). *)
+    "cap_" ^ Buffer.contents b
+  in
+  let widened = grant @ [ cap ] in
+  Printf.sprintf
+    "help: add `%s` to the grant in protocol `%s`: `role %s needs %s`. The body then takes \
+     one `Cap` per granted capability, in the grant's order, between the session capability \
+     and the state, so it gains a parameter: `fn (s, %s, st) -> ...`. Pass `%s` on to any \
+     function the body hands its capabilities to. Or remove the use."
+    cap proto role (String.concat ", " widened)
+    (String.concat ", " (List.map param_name widened)) (param_name cap)
+
 let check_role_grants (env : env) (decls : Ast.decl list) : unit =
   if Hashtbl.length env.role_grants = 0 then ()
   else begin
@@ -10841,19 +10895,19 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                           Printf.sprintf
                             "The %s of role `%s` %s, but the role is granted only %s \
                              (`role %s needs %s`). A role's grant bounds everything its code \
-                             reaches, as `main`'s grant bounds the program.\n\
-                             help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
+                             reaches, as `main`'s grant bounds the program.\n%s"
                             r.rr_what r.rr_role (March_caps.Cap_lattice.action c) show_grant
-                            r.rr_role (String.concat ", " r.rr_grant) c r.rr_role r.rr_proto }
+                            r.rr_role (String.concat ", " r.rr_grant)
+                            (role_grant_help ~role:r.rr_role ~proto:r.rr_proto ~grant:r.rr_grant ~cap:c) }
                   | None ->
                   Err.error ~code:Err.Code.role_grant_exceeded env.errors ~span:r.rr_span
                     (Printf.sprintf
                        "Role `%s.%s` is granted %s (`role %s needs %s`), but %s reaches `%s`%s. \
                         A role's grant bounds everything its code reaches, as `main`'s grant bounds \
-                        the program.\n\
-                        help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
+                        the program.\n%s"
                        r.rr_proto r.rr_role show_grant r.rr_role (String.concat ", " r.rr_grant)
-                       (label r) c chain c r.rr_role r.rr_proto))
+                       (label r) c chain
+                       (role_grant_help ~role:r.rr_role ~proto:r.rr_proto ~grant:r.rr_grant ~cap:c)))
              (List.sort_uniq String.compare (caps_of k));
            (* Not statically known: the callback itself, a local it invokes,
               or (the solver's `unknown`) a value of untraceable origin that

@@ -8,6 +8,7 @@ Use `Math.checked_div` or `Math.checked_mod` to return `Option(Int)` instead of 
 15 |   fn safe_div(a : Int, d : {Int | _ >= 0}) : Int do a / d end
                                                          ^^^^^
 
+    run `march --explain division_by_zero`
 
 
 -- CAPABILITY ----------- errors/division_by_zero_4.march

@@ -203,6 +203,14 @@ git log is authoritative for exact commits.
   It used to stay hidden until the other error was fixed, then appear as a new error. The error
   corpus's fix check now accepts a program whose fixes clear every error that has one, when the
   errors left are the ones that offer no fix.
+- Diagnostics: three errors now say exactly what to write. `role_grant_exceeded` gives the widened
+  `role R needs ...` line and the body's new parameter list (each granted capability is one more
+  body parameter, so adding to the grant alone left the program rejected). `division_by_zero` on a
+  divisor that is not a parameter (a pattern binder or a `let`) suggests an `if d == 0 do ... else
+  ... end` guard, which the checker accepts, instead of a parameter annotation that cannot apply.
+  A step stranded after a `choose` branch that ends in a `loop` or `stop` (`protocol_invalid`)
+  names the branches it can move into and how a several-step branch is laid out. New
+  `march --explain` pages for `role_grant_exceeded` and `division_by_zero`.
 - Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
   of the wrong type names the step and points at its line in the protocol. A body calling another
   role's functions says "`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B`"
