@@ -1,0 +1,403 @@
+-- Session.Theory: the logic of March's protocols, and laws about it.
+--
+-- A protocol (`protocol P do ... end`) is a global type: who sends what to
+-- whom, where a role chooses, where it loops.  Each role runs its
+-- projection, a local type.  The compiler projects twice, in OCaml (the
+-- `Chan(Role, Proto)` typechecker and the `@[endpoints]` generator); this
+-- module is the specification both are validated against
+-- (`march --check --guarantees`, lemmas design §5.2, M6), and the laws below
+-- are proved once, here, for every protocol.
+--
+-- Roles, labels and payload types are `Int` ids: the logic treats `String`
+-- contents as opaque, and the compiler maps names to ids when it emits a
+-- protocol as a `Global`.
+--
+-- A loop is `GLoop(body, after)`.  The body's end is `GVar(0)`, the loop's
+-- own back-edge (de Bruijn: the nearest enclosing loop); `after` is what a
+-- role that takes no part in the body does next.  `stop` is `GEnd`.  A
+-- choice's branches each carry the rest of the protocol (the steps after the
+-- choice are appended to every branch).
+mod Session.Theory do
+
+  -- A global protocol over role, label and payload ids.
+  type Global = GEnd
+              | GMsg(Int, Int, Int, Global)
+              | GChoice(Int, GBranches)
+              | GLoop(Global, Global)
+              | GVar(Int)
+
+  -- A choice's labelled branches.
+  type GBranches = GBNil | GBCons(Int, Global, GBranches)
+
+  -- One role's view: send to or receive from a peer, choose or offer a label, loop.
+  type Local = LEnd
+             | LSend(Int, Int, Local)
+             | LRecv(Int, Int, Local)
+             | LChoose(LBranches)
+             | LOffer(LBranches)
+             | LRec(Local)
+             | LVar(Int)
+
+  -- A local choice's labelled branches.
+  type LBranches = LBNil | LBCons(Int, Local, LBranches)
+
+  -- ── duality ──────────────────────────────────────────────────────────
+
+  doc "The other end of a conversation: every send a receive, every choice an offer."
+  fn dual(l : Local) : Local do
+    match l do
+      LEnd -> LEnd
+      LSend(p, t, k) -> LRecv(p, t, dual(k))
+      LRecv(p, t, k) -> LSend(p, t, dual(k))
+      LChoose(bs) -> LOffer(dual_bs(bs))
+      LOffer(bs) -> LChoose(dual_bs(bs))
+      LRec(k) -> LRec(dual(k))
+      LVar(i) -> LVar(i)
+    end
+  end
+
+  doc "`dual` on every branch."
+  fn dual_bs(bs : LBranches) : LBranches do
+    match bs do
+      LBNil -> LBNil
+      LBCons(lab, k, rest) -> LBCons(lab, dual(k), dual_bs(rest))
+    end
+  end
+
+  doc "`l` with every peer replaced by 0: a two-party conversation, where the peer is implied."
+  fn erase(l : Local) : Local do
+    match l do
+      LEnd -> LEnd
+      LSend(_, t, k) -> LSend(0, t, erase(k))
+      LRecv(_, t, k) -> LRecv(0, t, erase(k))
+      LChoose(bs) -> LChoose(erase_bs(bs))
+      LOffer(bs) -> LOffer(erase_bs(bs))
+      LRec(k) -> LRec(erase(k))
+      LVar(i) -> LVar(i)
+    end
+  end
+
+  doc "`erase` on every branch."
+  fn erase_bs(bs : LBranches) : LBranches do
+    match bs do
+      LBNil -> LBNil
+      LBCons(lab, k, rest) -> LBCons(lab, erase(k), erase_bs(rest))
+    end
+  end
+
+  -- ── projection ───────────────────────────────────────────────────────
+
+  doc "Structural equality of local types, written out so the logic can use it (a derived `Eq` on a recursive type is not yet reflected)."
+  fn same(a : Local, b : Local) : Bool do
+    match a do
+      LEnd -> match b do
+        LEnd -> true
+        _ -> false
+      end
+      LSend(p, t, k) -> match b do
+        LSend(q, u, j) -> p == q && t == u && same(k, j)
+        _ -> false
+      end
+      LRecv(p, t, k) -> match b do
+        LRecv(q, u, j) -> p == q && t == u && same(k, j)
+        _ -> false
+      end
+      LChoose(xs) -> match b do
+        LChoose(ys) -> same_bs(xs, ys)
+        _ -> false
+      end
+      LOffer(xs) -> match b do
+        LOffer(ys) -> same_bs(xs, ys)
+        _ -> false
+      end
+      LRec(k) -> match b do
+        LRec(j) -> same(k, j)
+        _ -> false
+      end
+      LVar(i) -> match b do
+        LVar(j) -> i == j
+        _ -> false
+      end
+    end
+  end
+
+  doc "`same` on branch lists."
+  fn same_bs(xs : LBranches, ys : LBranches) : Bool do
+    match xs do
+      LBNil -> match ys do
+        LBNil -> true
+        _ -> false
+      end
+      LBCons(l, k, rest) -> match ys do
+        LBCons(m, j, more) -> l == m && same(k, j) && same_bs(rest, more)
+        _ -> false
+      end
+    end
+  end
+
+  doc "Whether every branch is `l`."
+  fn all_same(bs : LBranches, l : Local) : Bool do
+    match bs do
+      LBNil -> true
+      LBCons(_, k, rest) -> same(k, l) && all_same(rest, l)
+    end
+  end
+
+  doc "A role that does not choose sees the branches merged: in a multiparty protocol, one branch when every branch is the same (it never learns the label), else an offer."
+  fn merge(bs : LBranches, multiparty : Bool) : Local do
+    match bs do
+      LBNil -> LOffer(LBNil)
+      LBCons(_, first, rest) ->
+        if multiparty && all_same(rest, first) do first else LOffer(bs) end
+    end
+  end
+
+  doc "A loop's projection: no loop at all when the role takes no part in the body."
+  fn loop_of(body : Local, after : Local) : Local do
+    match body do
+      LVar(_) -> after
+      LEnd -> LRec(body)
+      LSend(_, _, _) -> LRec(body)
+      LRecv(_, _, _) -> LRec(body)
+      LChoose(_) -> LRec(body)
+      LOffer(_) -> LRec(body)
+      LRec(_) -> LRec(body)
+    end
+  end
+
+  doc "Role `r`'s projection of `g`.  `multiparty` is true for more than two roles: only then may a non-chooser merge a choice's branches."
+  fn project(g : Global, r : Int, multiparty : Bool) : Local do
+    match g do
+      GEnd -> LEnd
+      GVar(i) -> LVar(i)
+      GMsg(from, to, t, k) ->
+        if from == r do LSend(to, t, project(k, r, multiparty))
+        else if to == r do LRecv(from, t, project(k, r, multiparty))
+        else project(k, r, multiparty) end end
+      GChoice(c, bs) ->
+        if c == r do LChoose(project_bs(bs, r, multiparty))
+        else merge(project_bs(bs, r, multiparty), multiparty) end
+      GLoop(body, after) -> loop_of(project(body, r, multiparty), project(after, r, multiparty))
+    end
+  end
+
+  doc "`project` on every branch."
+  fn project_bs(bs : GBranches, r : Int, multiparty : Bool) : LBranches do
+    match bs do
+      GBNil -> LBNil
+      GBCons(lab, k, rest) -> LBCons(lab, project(k, r, multiparty), project_bs(rest, r, multiparty))
+    end
+  end
+
+  doc "Every branch begins with a receive from `c`."
+  fn heads_from(bs : LBranches, c : Int) : Bool do
+    match bs do
+      LBNil -> true
+      LBCons(_, k, rest) ->
+        match k do
+          LRecv(p, _, _) -> p == c && heads_from(rest, c)
+          _ -> false
+        end
+    end
+  end
+
+  doc "A role that does not choose is told the choice: its branches are all the same, or each begins with the chooser's message."
+  fn told(bs : LBranches, c : Int) : Bool do
+    match bs do
+      LBNil -> true
+      LBCons(_, first, rest) -> all_same(rest, first) || heads_from(bs, c)
+    end
+  end
+
+  doc "Role `r` learns every choice it must: in a multiparty protocol, a role whose branches differ receives the chooser's message first (a two-party offer is told by the label)."
+  fn informed(g : Global, r : Int, multiparty : Bool) : Bool do
+    match g do
+      GEnd -> true
+      GVar(_) -> true
+      GMsg(_, _, _, k) -> informed(k, r, multiparty)
+      GChoice(c, bs) ->
+        (c == r || !multiparty || told(project_bs(bs, r, multiparty), c)) && informed_bs(bs, r, multiparty)
+      GLoop(body, after) -> informed(body, r, multiparty) && informed(after, r, multiparty)
+    end
+  end
+
+  doc "`informed` on every branch."
+  fn informed_bs(bs : GBranches, r : Int, multiparty : Bool) : Bool do
+    match bs do
+      GBNil -> true
+      GBCons(_, k, rest) -> informed(k, r, multiparty) && informed_bs(rest, r, multiparty)
+    end
+  end
+
+  -- ── which protocols ──────────────────────────────────────────────────
+
+  doc "Every message and choice of `g` is between roles `a` and `b`."
+  fn binary(g : Global, a : Int, b : Int) : Bool do
+    match g do
+      GEnd -> true
+      GVar(_) -> true
+      GMsg(from, to, _, k) ->
+        ((from == a && to == b) || (from == b && to == a)) && binary(k, a, b)
+      GChoice(c, bs) -> (c == a || c == b) && binary_bs(bs, a, b)
+      GLoop(body, after) -> binary(body, a, b) && binary(after, a, b)
+    end
+  end
+
+  doc "`binary` on every branch."
+  fn binary_bs(bs : GBranches, a : Int, b : Int) : Bool do
+    match bs do
+      GBNil -> true
+      GBCons(_, k, rest) -> binary(k, a, b) && binary_bs(rest, a, b)
+    end
+  end
+
+  -- ── laws ─────────────────────────────────────────────────────────────
+
+  doc "C1. Duality is an involution."
+  @[lemma]
+  fn dual_dual(l : Local) : {Unit | dual(dual(l)) == l} do
+    match l do
+      LEnd -> ()
+      LSend(_, _, k) -> dual_dual(k)
+      LRecv(_, _, k) -> dual_dual(k)
+      LChoose(bs) -> dual_dual_bs(bs)
+      LOffer(bs) -> dual_dual_bs(bs)
+      LRec(k) -> dual_dual(k)
+      LVar(_) -> ()
+    end
+  end
+
+  doc "C1 on every branch."
+  @[lemma]
+  fn dual_dual_bs(bs : LBranches) : {Unit | dual_bs(dual_bs(bs)) == bs} do
+    match bs do
+      LBNil -> ()
+      LBCons(_, k, rest) ->
+        dual_dual(k)
+        dual_dual_bs(rest)
+    end
+  end
+
+  doc "Duality commutes with leaving out a loop no one takes part in."
+  @[lemma]
+  fn dual_loop_of(body : Local, after : Local)
+    : {Unit | dual(loop_of(body, after)) == loop_of(dual(body), dual(after))} do
+    match body do
+      LVar(_) -> ()
+      LEnd -> ()
+      LSend(_, _, _) -> ()
+      LRecv(_, _, _) -> ()
+      LChoose(_) -> ()
+      LOffer(_) -> ()
+      LRec(_) -> ()
+    end
+  end
+
+  doc "`same` is structural equality."
+  @[lemma]
+  fn same_eq(a : Local, b : Local) : {Unit | same(a, b) == (a == b)} do
+    match a do
+      LEnd -> ()
+      LSend(_, _, k) -> match b do
+        LSend(_, _, j) -> same_eq(k, j)
+        _ -> ()
+      end
+      LRecv(_, _, k) -> match b do
+        LRecv(_, _, j) -> same_eq(k, j)
+        _ -> ()
+      end
+      LChoose(xs) -> match b do
+        LChoose(ys) -> same_eq_bs(xs, ys)
+        _ -> ()
+      end
+      LOffer(xs) -> match b do
+        LOffer(ys) -> same_eq_bs(xs, ys)
+        _ -> ()
+      end
+      LRec(k) -> match b do
+        LRec(j) -> same_eq(k, j)
+        _ -> ()
+      end
+      LVar(_) -> ()
+    end
+  end
+
+  doc "`same_bs` is structural equality."
+  @[lemma]
+  fn same_eq_bs(xs : LBranches, ys : LBranches) : {Unit | same_bs(xs, ys) == (xs == ys)} do
+    match xs do
+      LBNil -> ()
+      LBCons(_, k, rest) -> match ys do
+        LBCons(_, j, more) ->
+          same_eq(k, j)
+          same_eq_bs(rest, more)
+        _ -> ()
+      end
+    end
+  end
+
+  doc "Erasing peers commutes with leaving out a loop no one takes part in."
+  @[lemma]
+  fn erase_loop_of(body : Local, after : Local)
+    : {Unit | erase(loop_of(body, after)) == loop_of(erase(body), erase(after))} do
+    match body do
+      LVar(_) -> ()
+      LEnd -> ()
+      LSend(_, _, _) -> ()
+      LRecv(_, _, _) -> ()
+      LChoose(_) -> ()
+      LOffer(_) -> ()
+      LRec(_) -> ()
+    end
+  end
+
+  doc "In a binary protocol a choice is always offered, never merged."
+  @[lemma]
+  fn merge_binary(bs : LBranches) : {Unit | merge(bs, false) == LOffer(bs)} do
+    match bs do
+      LBNil -> ()
+      LBCons(_, _, _) -> ()
+    end
+  end
+
+  doc "C2. A binary protocol's two projections are dual (peers erased: each has one)."
+  @[lemma]
+  fn project_dual(a : Int, b : {Int | _ != a}, g : Global)
+    : {Unit | !binary(g, a, b) || erase(project(g, b, false)) == dual(erase(project(g, a, false)))} do
+    match g do
+      GEnd -> ()
+      GVar(_) -> ()
+      GMsg(_, _, _, k) -> project_dual(a, b, k)
+      GChoice(_, bs) ->
+        project_dual_bs(a, b, bs)
+        let pa = project_bs(bs, a, false)
+        let pb = project_bs(bs, b, false)
+        merge_binary(pa)
+        merge_binary(pb)
+      GLoop(body, after) ->
+        project_dual(a, b, body)
+        project_dual(a, b, after)
+        let ba = project(body, a, false)
+        let aa = project(after, a, false)
+        let bb = project(body, b, false)
+        let ab = project(after, b, false)
+        erase_loop_of(ba, aa)
+        erase_loop_of(bb, ab)
+        let eba = erase(ba)
+        let eaa = erase(aa)
+        dual_loop_of(eba, eaa)
+    end
+  end
+
+  doc "C2 on every branch."
+  @[lemma]
+  fn project_dual_bs(a : Int, b : {Int | _ != a}, bs : GBranches)
+    : {Unit | !binary_bs(bs, a, b) || erase_bs(project_bs(bs, b, false)) == dual_bs(erase_bs(project_bs(bs, a, false)))} do
+    match bs do
+      GBNil -> ()
+      GBCons(_, k, rest) ->
+        project_dual(a, b, k)
+        project_dual_bs(a, b, rest)
+    end
+  end
+end

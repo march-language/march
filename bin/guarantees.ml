@@ -21,7 +21,7 @@
 module A = March_ast.Ast
 module O = March_refinecheck.Obligation
 
-type label = Proved | Violated | Not_proved | Not_checked | Checked_compiler | Assumed
+type label = Proved | Violated | Not_proved | Not_checked | Checked_compiler | Proved_spec | Assumed
 
 let label_text = function
   | Proved -> "proved"
@@ -29,13 +29,14 @@ let label_text = function
   | Not_proved -> "not proved"
   | Not_checked -> "not checked"
   | Checked_compiler -> "checked (compiler)"
+  | Proved_spec -> "proved (spec) · validated (compiler)"
   | Assumed -> "assumed"
 
 (* Worst first, for an actor's one-line summary.  [Assumed] is a boundary,
    not a weakness of this build, so it never decides the summary. *)
 let rank = function
   | Violated -> 0 | Not_checked -> 1 | Not_proved -> 2 | Checked_compiler -> 3
-  | Proved -> 4 | Assumed -> 5
+  | Proved_spec -> 4 | Proved -> 5 | Assumed -> 6
 
 type line = { what : string; label : label; detail : string }
 
@@ -212,7 +213,10 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
   in
   state_line @ invariant_line @ msg_line @ migrate_state_line @ migrate_msg_line @ remote_line
 
-let protocol_lines (pd : A.protocol_def) : int * line list =
+(* The protocol's lines from its translation-validation rows
+   ([Session_validate], M6): a projection that agrees with
+   [Session.Theory.project] inherits what the stdlib proves about it. *)
+let protocol_lines (rows : Session_validate.row list) (pd : A.protocol_def) : int * line list =
   let rec roles acc = function
     | [] -> acc
     | A.ProtoMsg (s, r, _, _) :: rest -> roles (s.A.txt :: r.A.txt :: acc) rest
@@ -223,13 +227,60 @@ let protocol_lines (pd : A.protocol_def) : int * line list =
     | _ :: rest -> roles acc rest
   in
   let n = List.length (List.sort_uniq compare (roles [] pd.A.proto_steps)) in
-  ( n,
-    [ { what = "projection";
-        label = Checked_compiler;
+  let module S = Session_validate in
+  (* The endpoints generator applies to some protocols only; a row saying it
+     does not is no evidence either way. *)
+  let rows =
+    List.filter
+      (fun (r : S.row) ->
+        not (r.S.projector = "endpoints" && r.S.role = "*"
+             && (match r.S.outcome with S.Not_compared _ -> true | _ -> false)))
+      rows
+  in
+  let differs = List.filter (fun (r : S.row) -> match r.S.outcome with S.Differs _ -> true | _ -> false) rows in
+  let not_compared =
+    List.filter_map
+      (fun (r : S.row) ->
+        match r.S.outcome with
+        | S.Not_compared why -> Some (if r.S.role = "*" then why else Printf.sprintf "%s: %s" r.S.role why)
+        | _ -> None)
+      rows
+    |> List.sort_uniq compare
+  in
+  let projectors =
+    List.sort_uniq compare (List.map (fun (r : S.row) -> r.S.projector) rows) |> String.concat " and "
+  in
+  let projection =
+    if differs <> [] then
+      { what = "projection"; label = Violated;
         detail =
-          (if n = 2 then "the two roles' projections are dual"
-           else "every send has the matching receive at its peer") };
-      { what = "deadlock freedom"; label = Not_checked; detail = "no proof covers this protocol yet" } ] )
+          Printf.sprintf
+            "the %s projector disagrees with Session.Theory.project for %s (a compiler bug; \
+             --validate-projections shows both)"
+            (List.hd differs).S.projector
+            (String.concat ", " (List.sort_uniq compare (List.map (fun (r : S.row) -> r.S.role) differs))) }
+    else if not_compared <> [] then
+      { what = "projection"; label = Not_checked;
+        detail = "outside Session.Theory's fragment (" ^ String.concat "; " not_compared ^ ")" }
+    else if rows = [] then
+      { what = "projection"; label = Not_checked; detail = "no projection was compared" }
+    else
+      { what = "projection"; label = Proved_spec;
+        detail =
+          Printf.sprintf "the %s %s agree%s with Session.Theory.project for every role%s"
+            projectors (if String.contains projectors ' ' then "projectors" else "projector")
+            (if String.contains projectors ' ' then "" else "s")
+            (if n = 2 then ", whose two projections are dual (Session.Theory.project_dual)" else "") }
+  in
+  let pairwise =
+    if n = 2 then []
+    else
+      [ { what = "pairwise duality"; label = Checked_compiler;
+          detail = "every send has the matching receive at its peer (not yet proved for more than two roles)" } ]
+  in
+  ( n,
+    (projection :: pairwise)
+    @ [ { what = "deadlock freedom"; label = Not_checked; detail = "no proof covers this protocol yet" } ] )
 
 let pad s w = if String.length s >= w then s else s ^ String.make (w - String.length s) ' '
 
@@ -264,9 +315,10 @@ let print ?(oc = stdout) ~filename ~user_files ~(surface : A.decl list) (desugar
     (fun (name, ad, _) ->
       print_block oc ("actor " ^ name) (actor_lines ~user ~fns ~deploy_known name ad))
     acts;
+  let rows = Session_validate.run surface in
   List.iter
     (fun (name, pd) ->
-      let n, lines = protocol_lines pd in
+      let n, lines = protocol_lines (List.filter (fun (r : Session_validate.row) -> r.Session_validate.proto = name) rows) pd in
       print_block oc (Printf.sprintf "protocol %s (%d roles)" name n) lines)
     (protocols surface);
   if acts <> [] then

@@ -38,7 +38,11 @@ Phases (design §7):
 - **C.** `stdlib/session_theory.march` with duality, projection, pairwise duality,
   composition and deadlock freedom for the synchronous, crash-free, informed-bystander
   fragment. Translation validation of both OCaml projectors (`typecheck_session.ml`,
-  `desugar_endpoints.ml`) against it, by interpreter evaluation.
+  `desugar_endpoints.ml`) against it, by interpreter evaluation. C0 (mutual-SCC lemmas over an n-ary
+  branch list: they prove), M5 with C1 and C2, and M6 for both projectors: done (progress
+  `2026-11-06-session-theory-and-projection-validation`). M6 found the `@[endpoints]` merge
+  bug in todo `2026-11-06-endpoints-merge-compares-synthesised-ctors`. Open: C3 (pairwise
+  duality, replacing `project_protocol`'s existence check), C4 and C5.
 - **D.** `stdlib/actor_theory.march` (per-sender FIFO, `Actor.call` correlation, DOWN
   delivery: proved today on the model, design §2 P2), plus trace conformance against the
   runtime and RC-trace fixtures for each send path.
