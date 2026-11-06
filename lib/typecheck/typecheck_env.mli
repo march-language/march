@@ -356,6 +356,7 @@ val resolve_qualified_type : string -> env -> env * int option
 val resolve_qualified_ctor : string -> env -> env * ctor_info option
 val is_confirmed_private_qualified : string -> env -> bool
 val qualified_error_msg : string -> env -> string
+val qualified_fix : string -> env -> string option
 val all_ctors_named : string -> env -> string list
 val all_ctor_candidates_named : string -> env -> (string * string) list
 
@@ -381,6 +382,8 @@ val suggest_field :
   ?need:Typecheck_types.ty -> string -> (string * Typecheck_types.ty) list -> string option
 val suggest_ctors : ?need:suggest_need -> string -> env -> (string * string) list
 val unknown_ctor_hint : ?need:suggest_need -> string -> env -> string
+val unknown_ctor_fix : ?need:suggest_need -> string -> env -> string option
+val field_guess_tier : string -> (string * 'a) list -> string -> March_errors.Errors.applicability
 (* The stdlib-only builtin table; see [Typecheck_builtins.stdlib_only]. *)
 val stdlib_only : (string * string) list ref
 

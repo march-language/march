@@ -21,7 +21,7 @@ help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_fil
 
 
 
-fix [cap_grant_exceeded]:
+fix [cap_grant_exceeded] (machine-applicable):
 @@ lines 10-10 @@
 -  fn main(_c : Cap(IO.Console)) do
 +  fn main(_c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do

@@ -6,9 +6,10 @@
 
     - [<name>.expected]: the exit code, the full rendered diagnostics on stderr
       (carets, labels, notes, the [[slug]] suffix, the [march --explain]
-      pointer), every machine fix rendered as a before/after diff of the
-      lines it touches, and, when there is a fix, the result of applying
-      every fix the way [forge fix] does and checking the program again
+      pointer), every fix rendered as a before/after diff of the lines it
+      touches under a header naming its tier, and, when there is a
+      machine-applicable fix, the result of applying those fixes the way
+      [forge fix] does and checking the program again
       ([after fix: exit N], plus the first diagnostic line if any): a fix
       the plan calls mechanical must leave a program that compiles (D4);
     - [<name>.json.expected]: the [--check-json] lines, so the machine form
@@ -188,7 +189,15 @@ let fixes_of_json json : Yojson.Safe.t list =
   |> List.filter (fun l -> String.trim l <> "")
   |> List.filter_map (fun l ->
       match Yojson.Safe.from_string l with
-      | j -> (match Yojson.Safe.Util.member "fix" j with `Null -> None | f -> Some f)
+      | j ->
+        (* Only what `forge fix` applies: a machine-applicable fix.  A guess
+           or a fix with a placeholder is shown, not applied, and not held
+           to making the program check. *)
+        (match Yojson.Safe.Util.member "fix" j with
+         | `Null -> None
+         | f when (match Yojson.Safe.Util.member "applicability" f with
+             | `String t -> t <> "machine-applicable" | _ -> false) -> None
+         | f -> Some f)
       | exception _ -> None)
   |> List.concat_map edits_of_fix
 
@@ -264,7 +273,11 @@ let render_fix ~src (j : Yojson.Safe.t) : string option =
     let line n = if n >= 1 && n <= Array.length lines then lines.(n - 1) else "" in
     let buf = Buffer.create 128 in
     let code = member "code" j |> to_string in
-    Printf.bprintf buf "fix [%s]:\n" code;
+    (* The fix's tier ([Errors.applicability]), as `--check-json` printed it
+       after re-checking the fix. *)
+    let tier = match member "applicability" fix with
+      | `String t -> t | _ -> "no tier" in
+    Printf.bprintf buf "fix [%s] (%s):\n" code tier;
     (* A multi-edit fix renders one hunk per edit, in source order. *)
     let pos f = match member "kind" f |> to_string with
       | "insert" -> (member "after_line" f |> to_int, max_int)
@@ -643,9 +656,16 @@ let errors_of_json json : (string * bool) list =
    fix cleared what it was about and broke nothing else. *)
 let fixes_did_their_part (r : result) =
   let before = errors_of_json r.json in
+  let after = errors_of_json r.after_json in
   let unfixed = List.filter_map (fun (s, f) -> if f then None else Some s) before in
-  unfixed <> []
-  && List.for_all (fun (s, _) -> List.mem s unfixed) (errors_of_json r.after_json)
+  (* A syntax error stops the compiler before any later check, so the errors
+     its fix uncovers could not have been reported with it: the fix did its
+     part when the program now parses. *)
+  let parse_phase s = List.mem s [ "parse_error"; "syntax_error"; "lex_error"; "then_keyword";
+                                   "module_keyword"; "semicolon_separator" ] in
+  (before <> [] && List.for_all (fun (s, _) -> parse_phase s) before
+   && not (List.exists (fun (s, _) -> parse_phase s) after))
+  || (unfixed <> [] && List.for_all (fun (s, _) -> List.mem s unfixed) after)
 
 let check_fix_fixes ~src name (r : result) =
   let partial = contains src fix_partial_marker in

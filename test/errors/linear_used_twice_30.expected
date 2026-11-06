@@ -8,3 +8,8 @@ I cannot find `clsoe`. Did you mean `close`? [unbound_variable]
 
 
 
+
+fix [unbound_variable] (maybe-incorrect):
+@@ lines 11-11 @@
+-    let n = clsoe(c)
++    let n = close(c)

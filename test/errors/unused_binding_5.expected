@@ -31,7 +31,7 @@ no fact the checker derived constrains `ys`
 
 
 
-fix [unused_binding]:
+fix [unused_binding] (machine-applicable):
 @@ lines 37-37 @@
 -  fn inner(xs : {List(Int) | len(_) > 0}) : Int do
 +  fn inner(_xs : {List(Int) | len(_) > 0}) : Int do

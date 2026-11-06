@@ -11,7 +11,7 @@ exit: 1
     end
     run `march --explain module_keyword`
 
-fix [module_keyword]:
+fix [module_keyword] (machine-applicable):
 @@ lines 3-3 @@
 -  module Util do
 +  mod Util do

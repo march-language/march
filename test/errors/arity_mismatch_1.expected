@@ -16,7 +16,7 @@ March has no partial application — a call must supply all arguments.
 
 
 
-fix [arity_mismatch]:
+fix [arity_mismatch] (machine-applicable):
 @@ lines 4-4 @@
 -    let cb = fn _ -> 42
 +    let cb = fn -> 42

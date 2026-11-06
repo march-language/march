@@ -11,7 +11,7 @@ Did you mean `worker`?
 
 
 
-fix [supervise_field_missing]:
+fix [supervise_field_missing] (machine-applicable):
 @@ lines 16-16 @@
 -      Worker wroker
 +      Worker worker

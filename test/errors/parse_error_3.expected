@@ -13,7 +13,7 @@ I don't recognize `then` here — March uses do/end blocks instead. [then_keywor
     end
     run `march --explain then_keyword`
 
-fix [then_keyword]:
+fix [then_keyword] (machine-applicable):
 @@ lines 4-4 @@
 -    if true then
 +    if true do

@@ -11,7 +11,7 @@ help: add `needs IO.FileWrite` to the module body.
 
 
 
-fix [cap_needs:IO.FileWrite]:
+fix [cap_needs:IO.FileWrite] (machine-applicable):
 @@ after line 10 @@
  mod Store do
 +  needs IO.FileWrite

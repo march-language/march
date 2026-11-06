@@ -9,7 +9,7 @@ Unexpected `;`: March separates expressions with newlines, not semicolons. [semi
     Put each expression on its own line.
     run `march --explain semicolon_separator`
 
-fix [semicolon_separator]:
+fix [semicolon_separator] (machine-applicable):
 @@ lines 4-4 @@
 -    let x = 1; let y = 2
 +    let x = 1

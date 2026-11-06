@@ -3725,7 +3725,7 @@ let compile filename =
   Printexc.record_backtrace true;
   let is_js_target = parse_target !target_str = March_tir.Llvm_emit.Js in
   let src =
-    try read_file filename
+    try read_file (Option.value !fix_verify_source ~default:filename)
     with Sys_error msg ->
       Printf.eprintf "march: %s\n" msg;
       exit 1
@@ -4060,7 +4060,7 @@ let compile filename =
       if !check_json then
         List.iter (fun d ->
           print_string (March_errors.Errors.render_diagnostic_json d ^ "\n"))
-          diags;
+          (Fix_verify.verify_parse ~filename ~src diags);
       exit 1
   in
   stamp "parse";
@@ -4524,7 +4524,7 @@ let compile filename =
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
         print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")
-    ) diags;
+    ) (Fix_verify.verify ~src ~verifiable:is_user_file diags);
     exit 0
   end;
   let frontend_rejected =
@@ -5367,8 +5367,8 @@ let compile filename =
                   "`%s` is %s; add %s to keep it that way."
                   d.March_tir.Alloc_contract.d_name verdict attr;
               labels = []; notes = []; code = March_errors.Code.no_alloc_candidate;
-              fix = Some (contract_attr_fix ~src ~filename ~read_file
-                            d.March_tir.Alloc_contract.d_decl_span attr) }
+              fix = Some (March_errors.Errors.fix (contract_attr_fix ~src ~filename ~read_file
+                            d.March_tir.Alloc_contract.d_decl_span attr)) }
           in
           print_string (March_errors.Errors.render_diagnostic_json diag ^ "\n"))
         cands;
@@ -8035,6 +8035,8 @@ let () =
          print_string (March_errors.Explain.explain code); exit 0),
      "SLUG Print the explanation page for a diagnostic code (the [slug] at the end of an error's first line)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
+    ("--fix-verify-source", Arg.String (fun p -> fix_verify_source := Some p),
+     "PATH (internal) Read the source text from PATH, keeping the file name given; used to re-check a fix");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--why-copies", Arg.Set why_copies,
      " Report each place in your code where a function builds a new copy of a value instead of reusing it in place, because the value is used again afterwards; with a fix that reorders when that is safe. Stops before code generation");

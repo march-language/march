@@ -32,7 +32,7 @@ exit: 1
 
 
 
-fix [cap_mismatch:IO.FileRead]:
+fix [cap_mismatch:IO.FileRead] (machine-applicable):
 @@ after line 7 @@
  mod Main do
 +  needs IO.FileRead

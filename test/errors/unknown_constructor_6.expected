@@ -10,7 +10,7 @@ Did you mean `Worker`?
 
 
 
-fix [unknown_constructor]:
+fix [unknown_constructor] (machine-applicable):
 @@ lines 21-21 @@
 -      Wroker w
 +      Worker w

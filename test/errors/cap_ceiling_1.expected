@@ -13,7 +13,7 @@ hint: add this to the module body —
 
 
 
-fix [cap_needs:IO.Console]:
+fix [cap_needs:IO.Console] (machine-applicable):
 @@ after line 3 @@
    mod Report do
 +  needs IO.Console

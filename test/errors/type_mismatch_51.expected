@@ -40,7 +40,7 @@ expected `a -> b` but got `List(Int)`. [type_mismatch]
 
 
 
-fix [type_mismatch]:
+fix [type_mismatch] (machine-applicable):
 @@ lines 9-9 @@
 -    let ys = List.map(fn x -> x * 2, xs)
 +    let ys = List.map(xs, fn x -> x * 2)

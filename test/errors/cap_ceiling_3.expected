@@ -11,7 +11,7 @@ help: add `needs IO.FileRead` to the module body.
 
 
 
-fix [cap_ceiling:IO.FileRead]:
+fix [cap_ceiling:IO.FileRead] (machine-applicable):
 @@ after line 9 @@
    needs IO.Console
 +  needs IO.FileRead

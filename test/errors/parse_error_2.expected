@@ -8,3 +8,10 @@ A `let?` binding can't have a type annotation — its type is inferred from the 
 
     let? name = result_expr
     run `march --explain parse_error`
+
+fix [parse_error] (machine-applicable):
+@@ lines 10-10 @@
+-    let? x : Int = f()
++    let? x = f()
+
+after fix: exit 0

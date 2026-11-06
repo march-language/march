@@ -23,7 +23,7 @@ and give `main` a `Cap(IO.FileWrite)` parameter: `fn main(…, _cap_filewrite : 
 
 
 
-fix [cap_needs:IO.FileWrite]:
+fix [cap_needs:IO.FileWrite] (machine-applicable):
 @@ after line 6 @@
  mod Main do
 +  needs IO.FileWrite

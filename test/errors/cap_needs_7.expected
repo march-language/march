@@ -11,7 +11,7 @@ help: add `needs IO` to the module body.
 
 
 
-fix [cap_needs:IO]:
+fix [cap_needs:IO] (machine-applicable):
 @@ after line 11 @@
  mod Server do
 +  needs IO

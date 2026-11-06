@@ -11,7 +11,7 @@ help: add `needs IO.Network` to the module body.
 
 
 
-fix [cap_needs:IO.Network]:
+fix [cap_needs:IO.Network] (machine-applicable):
 @@ after line 6 @@
  mod Server do
 +  needs IO.Network

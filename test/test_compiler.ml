@@ -13729,7 +13729,7 @@ let stage_d_fix_of src =
     (fun acc (d : March_errors.Errors.diagnostic) ->
        match acc, d.fix with
        | Some _, _ -> acc
-       | None, Some (March_errors.Errors.FReplace { text; span }) -> Some (text, span)
+       | None, Some { March_errors.Errors.edit = March_errors.Errors.FReplace { text; span }; _ } -> Some (text, span)
        | None, _ -> None)
     None
     (List.rev ctx.March_errors.Errors.diagnostics)
@@ -14620,7 +14620,7 @@ let test_parse_diag_codes () =
   Alcotest.(check string) "then production" "then_keyword"
     (code "mod T do\n  fn f(x) do\n    if x then 1 end\n  end\nend");
   (match parse_error_diag "mod T do\n  fn f(x) do\n    if x then 1 else 0 end\n  end\nend" with
-   | Some { March_errors.Errors.fix = Some (March_errors.Errors.FReplace { span; text }); _ } ->
+   | Some { March_errors.Errors.fix = Some { edit = March_errors.Errors.FReplace { span; text }; _ }; _ } ->
      Alcotest.(check string) "then fix text" "do" text;
      Alcotest.(check (list int)) "then fix span" [3; 9; 3; 13]
        [span.March_ast.Ast.start_line; span.start_col; span.end_line; span.end_col]

@@ -17,7 +17,7 @@ help: move `let n = List.length(xs)` above the call.
 
 
 
-fix [copy_shared]:
+fix [copy_shared] (machine-applicable):
 @@ after line 8 @@
    fn inc_all(xs : List(Int)) : List(Int) do
 +    let n = List.length(xs)

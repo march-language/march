@@ -31,3 +31,8 @@ expected `String` but got `Int`. [type_mismatch]
     run `march --explain type_mismatch`
 
 
+
+fix [non_exhaustive_match] (has-placeholders):
+@@ after line 8 @@
+       Some(x) -> x
++      None -> todo("handle None")

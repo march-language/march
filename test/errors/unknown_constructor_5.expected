@@ -10,7 +10,7 @@ Did you mean `Counter`?
 
 
 
-fix [unknown_constructor]:
+fix [unknown_constructor] (machine-applicable):
 @@ lines 14-14 @@
 -    let p = spawn(Countr)
 +    let p = spawn(Counter)

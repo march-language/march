@@ -9,7 +9,7 @@ This `fn` (line 10) has no matching `end`. [parse_error]
     I only noticed at the end of the file.
     run `march --explain parse_error`
 
-fix [parse_error]:
+fix [parse_error] (machine-applicable):
 @@ after line 11 @@
      1
 +  end

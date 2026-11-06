@@ -21,7 +21,7 @@ exit: 1
 
 
 
-fix [cap_mismatch:IO.Console]:
+fix [cap_mismatch:IO.Console] (machine-applicable):
 @@ lines 12-12 @@
 -    greet(cap, "march")
 +    greet(cap_narrow(cap), "march")

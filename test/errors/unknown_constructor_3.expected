@@ -9,3 +9,10 @@ Did you mean `Postal` (from type `Mail`)?
 
 
 
+
+fix [unknown_constructor] (machine-applicable):
+@@ lines 11-11 @@
+-    let m : Mail = Posts(1)
++    let m : Mail = Postal(1)
+
+after fix: exit 0

@@ -11,3 +11,10 @@ A remote message crosses the network as JSON, and its type's name is its wire ta
     run `march --explain codec_missing`
 
 
+
+fix [codec_missing] (machine-applicable):
+@@ after line 15 @@
+   type Ping = { n : Int }
++  derive Json for Ping
+
+after fix: exit 0

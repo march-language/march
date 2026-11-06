@@ -12,7 +12,7 @@ A file may have only one top-level `mod`; everything else must live inside it. [
     end
     run `march --explain parse_error`
 
-fix [parse_error]:
+fix [parse_error] (machine-applicable):
 @@ lines 7-7 @@
 -end
 

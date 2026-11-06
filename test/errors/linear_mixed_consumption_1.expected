@@ -45,3 +45,8 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
     run `march --explain linear_used_twice`
 
 
+
+fix [non_exhaustive_match] (has-placeholders):
+@@ after line 28 @@
+           :error -> ()
++          _ -> todo("handle _")

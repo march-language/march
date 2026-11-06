@@ -22,12 +22,12 @@ exit: 1
 
 
 
-fix [missing_impl]:
+fix [missing_impl] (machine-applicable):
 @@ after line 4 @@
    type Priority = Low | Mid | High
 +  derive Ord for Priority
 
-fix [missing_impl]:
+fix [missing_impl] (machine-applicable):
 @@ after line 4 @@
    type Priority = Low | Mid | High
 +  derive Eq for Priority

@@ -21,7 +21,7 @@ help: declare what `first` actually needs —
 
 
 
-fix [undeclared_requirement]:
+fix [undeclared_requirement] (machine-applicable):
 @@ lines 7-7 @@
 -  fn first(xs : List(Int)) : Int do
 +  fn first(xs : {List(Int) | len(_) > 0}) : Int do

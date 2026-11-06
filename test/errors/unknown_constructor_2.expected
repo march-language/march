@@ -9,3 +9,10 @@ Did you mean `Poke` (message of actor `A`)?
 
 
 
+
+fix [unknown_constructor] (machine-applicable):
+@@ lines 28-28 @@
+-    send(a, Pokee(1))
++    send(a, Poke(1))
+
+after fix: exit 0

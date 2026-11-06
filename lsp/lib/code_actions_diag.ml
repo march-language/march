@@ -1145,10 +1145,19 @@ let code_actions_at (a : t) ~line ~character
              let on_any =
                on_range d.range || List.exists (fun (_, r) -> on_range r) edits in
              let title = String.concat "; " (List.map snd parts) in
+             (* Only a machine-applicable fix is preferred, so an
+                apply-preferred editor setting never makes a guess unasked;
+                a fix with no tier (an older compiler) counts as one. *)
+             let tier = match List.assoc_opt "applicability" fix with
+               | Some (`String t) -> t | _ -> "machine-applicable" in
+             let title = match tier with
+               | "machine-applicable" -> title
+               | "has-placeholders" -> title ^ " (fill in the placeholder)"
+               | _ -> title ^ " (a guess: check it)" in
              (match edits with
               | _ :: _ when on_any && List.length edits = List.length parts ->
                 Some (CodeAction.create ~title ~kind:CodeActionKind.QuickFix
-                        ~diagnostics:[d] ~isPreferred:true
+                        ~diagnostics:[d] ~isPreferred:(tier = "machine-applicable")
                         ~edit:(WorkspaceEdit.create ~changes:[(uri, List.map fst edits)] ()) ())
               | _ -> None)
            | _ -> None)
