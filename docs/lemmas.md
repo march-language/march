@@ -683,9 +683,10 @@ This module builds. Replace the body of `cat_nil` with `()` and the build fails 
 
 The standard library proves lemmas about `List`: `List.append_nil`, `List.append_assoc`,
 `List.len_append`, `List.reverse_reverse`, `List.reverse_append`, `List.len_reverse`,
-`List.len_take`, `List.len_drop`, `List.take_drop`, `List.take_append`, `List.drop_append` and
-`List.nth_opt_append`, and about protocols in `Session.Theory` (`dual_dual`, `project_dual`;
-see [What is proved about a protocol]({{ site.baseurl }}/docs/choreography/#what-is-proved-about-a-protocol)).
+`List.len_take`, `List.len_drop`, `List.take_drop`, `List.take_append`, `List.drop_append`,
+`List.nth_opt_append`, `List.sum_int_append`, `List.sum_int_reverse`, `List.product_int_append`
+and `List.product_int_reverse`, and about protocols in `Session.Theory` (`dual_dual`,
+`project_dual`; see [What is proved about a protocol]({{ site.baseurl }}/docs/choreography/#what-is-proved-about-a-protocol)).
 You call them like your own lemmas, so
 you don't need to re-prove `reverse(reverse(xs)) == xs` in every project. The manifest
 `stdlib/lemmas.verified` lists the ones that are proved; a listed lemma is admitted without

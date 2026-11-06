@@ -25531,6 +25531,20 @@ let session_theory_suite =
         Alcotest.(check int) "exit 0" 0 code;
         has out "projection Logging * (typecheck): not compared: a role that may crash";
         has out "projection Logging * (endpoints): not compared: a role that may crash");
+    Alcotest.test_case "a user type named like the theory's common words still typechecks" `Quick (fun () ->
+        (* March has one global type namespace: a stdlib type named `Global` or
+           `Local` made every user record of that name a type_mismatch, so
+           the theory's types carry a `Session` prefix. *)
+        let src =
+          "mod G do\n\
+          \  type Global = { x : Int, y : Option(Local) }\n\
+          \  type Local = { n : Int }\n\
+          \  fn take(g : Global) : Int do g.x end\n\
+          \  fn main() : Int do take({ x: 1, y: Some({ n: 2 }) }) end\n\
+          end\n"
+        in
+        let code, out = run_cli "--check" src in
+        Alcotest.(check int) (Printf.sprintf "accepted\n%s" out) 0 code);
     Alcotest.test_case "--guarantees: a validated projection inherits the theory's laws" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" protocols in
         has out "protocol Relay (2 roles): proved (spec) · validated (compiler)\n";
@@ -30051,7 +30065,7 @@ let () =
       ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
       ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);
-      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests);
+      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
       ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body);

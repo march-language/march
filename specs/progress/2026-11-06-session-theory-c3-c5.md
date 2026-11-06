@@ -14,10 +14,10 @@ theorem is not attempted).
 
 ## Theory (stdlib/session_theory.march)
 
-- Semantics: `Cfg` (role, local) list built by `config(g, rs, mp)`; `Act` is `AMsg(f, t, p)`
+- Semantics: `SessionCfg` (role, local) list built by `config(g, rs, mp)`; `SessionAct` is `AMsg(f, t, p)`
   or `APick(c, t, label, p)` (a choice's label rides on the chooser's first message);
   `step` (both parties present, each takes its part: `send_step`, `recv_step`, `choose_step`,
-  `offer_step` from an offer or a merged receive); `run` over `Acts`; the protocol's own
+  `offer_step` from an offer or a merged receive); `run` over `SessionActs`; the protocol's own
   `trace(g, picks)`; `finished` (every role `LEnd`).
 - C4 `compose`: `!in_fragment(g, rs, mp) || composes(g, rs, mp, picks)`, from subject
   reduction per step (`step_msg`, `step_pick`, built from per-role `act_msg`/`act_pick`), the
@@ -29,7 +29,7 @@ theorem is not attempted).
   whose restricted branches all look alike. The choice case is uniform
   (`restrict_choice`: `collapse(restricted branches, r == chooser)`), with `collapse_dual`,
   `merged_restrict`, `merged_dual`.
-- Own list types (`Roles`, `Acts`, `Picks`) and hand-written `same` (a derived `Eq` on a
+- Own list types (`SessionRoles`, `SessionActs`, `SessionPicks`; every type carries a `Session` prefix, since March has one global type namespace and a stdlib `Cfg` broke user records named `Cfg`) and hand-written `same` (a derived `Eq` on a
   recursive type is not reflected: todo `2026-11-06-derived-eq-recursive-type-unreflected`).
 - 41 lemmas, all in `stdlib/lemmas.verified`.
 

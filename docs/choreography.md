@@ -569,7 +569,7 @@ capability parameter per granted path, straight after the node.
 ## What is proved about a protocol
 
 The standard library's `Session.Theory` (`stdlib/session_theory.march`) states what a
-protocol means as March code: a protocol is a `Global`, a role's part in it is a `Local`, and
+protocol means as March code: a protocol is a `SessionGlobal`, a role's part in it is a `SessionLocal`, and
 `Session.Theory.project(g, role, multiparty)` is the projection. Its laws are lemmas, proved
 once in the standard library:
 
